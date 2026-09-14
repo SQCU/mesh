@@ -1,5 +1,4 @@
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -1025,7 +1024,7 @@ def main():
             while running:
                 time.sleep(0.0001)
             if args.trace:
-                Path(args.trace).write_text(json.dumps(dict(environment=program.environment, plans=program.plan_trace, compute=program.trace, code=program.code_trace, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
+                Path(args.trace).write_text(json.dumps(dict(compute=program.trace, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
             return
         # design/algorithm-sources.md#streaming-overlap-measurement
         def publish(invocation, sections):
@@ -2106,8 +2105,6 @@ def main():
                         result.consume()
         for generation in range(4):
             empty = generation == 2
-            # design/algorithm-sources.md#function-cost-profiles
-            omitted_before = {index: entry for index,entry in enumerate(program.trace) if 'active' in entry} if empty else {}
             routing = np.resize(np.array([0, 2, 0, 3], dtype=np.int64), updates_count).reshape(-1, 1)
             if destinations_count > 4:
                 routing[4:last_start, 0] = 4 + np.arange(max(0, last_start-4)) % (destinations_count-4)
@@ -2154,23 +2151,6 @@ def main():
             for i in observed:
                 if not np.array_equal(scatter_results[i].array, np.broadcast_to(expected[i], (1, 4))):
                     raise ArithmeticError('Early scattered sum or consumer differs')
-            if empty:
-                omitted = []
-                for index,entry in enumerate(program.trace):
-                    if index not in omitted_before:
-                        continue
-                    before = omitted_before[index]
-                    delta = entry['active']['omissions']-before['active']['omissions']
-                    if not delta:
-                        continue
-                    if any(entry['profile'][field] != before['profile'][field] for field in ('successful', 'failed')) or any(
-                            entry['profile'][domain]['count'] != before['profile'][domain]['count']
-                            for domain in ('dispatch_ns', 'execution_ns', 'gpu_ns')):
-                        raise ArithmeticError('Omitted numerical work added a function timing sample')
-                    omitted.append((index, delta))
-                if not omitted:
-                    raise ArithmeticError('Empty scatter supplied no observable omitted functions')
-                print(json.dumps(dict(event='function_profile_omissions', generation=generation, functions=omitted)), flush=True)
             for i in range(last_chunk+1) if empty else (last_chunk,):
                 with program.write(scatter_masks[i, 0]) as destination:
                     destination[...] = scatter_valid[update_tile*i:update_tile*(i+1)]
@@ -2204,101 +2184,9 @@ def main():
             if not generation:
                 for result in fanout_results:
                     result.consume()
-        # design/algorithm-sources.md#function-cost-profiles
-        report_before = program.report
-        compute = program.trace
         report = program.report
-        successes = failures = 0
-        backends = {}
-        for entry in compute:
-            profile = entry['profile']
-            successful, failed = profile['successful'], profile['failed']
-            if successful+failed > entry['submissions']:
-                raise ArithmeticError('Function profile counted more completions than submissions')
-            successes += successful
-            failures += failed
-            backend = profile['backend']
-            if backend not in ('external', 'cpu_sgemm', 'cpu_neon_contract', 'cpu_builtin', 'cpu_compiled',
-                               'metal_compiled', 'metal_mps', 'metal_builtin', 'coreml', 'selected_mixed'):
-                raise ArithmeticError('Function profile lacks a recognized realized backend')
-            backends[backend] = backends.get(backend, 0)+successful
-            for domain in ('dispatch_ns', 'execution_ns', 'gpu_ns'):
-                moment = profile[domain]
-                count, mean, variance = moment['count'], moment['mean'], moment['sample_variance']
-                if (count > successful if domain == 'gpu_ns' else count != successful):
-                    raise ArithmeticError('Function timing sample count differs from successful completions')
-                if (mean is not None if count == 0 else mean is None or not np.isfinite(mean) or mean < 0):
-                    raise ArithmeticError('Function timing mean violates its sample-count contract')
-                if (variance is not None if count < 2 else variance is None or not np.isfinite(variance) or variance < 0):
-                    raise ArithmeticError('Function timing variance violates its sample-count contract')
-            if entry['kind'] == 0 and profile['gpu_ns']['count']:
-                raise ArithmeticError('CPU function reported GPU timing samples')
-        stable = (report_before.submitted, report_before.completed) == (report.submitted, report.completed)
-        if stable and report.submitted == report.completed:
-            if successes+failures != report.completed or (report.code == 0 and successes != report.completed):
-                raise ArithmeticError('Function completion profiles differ from the terminal runtime totals')
-        print(json.dumps(dict(event='function_profiles', successful=successes, failed=failures,
-            backend_successes=backends, stable_snapshot=stable, pending=report.submitted-report.completed)), flush=True)
-        # design/algorithm-sources.md#compiled-specialization-identities
-        code = program.code_trace
-        for identity, source in code['sources'].items():
-            if not source['text'] or hashlib.sha256(source['text'].encode()).hexdigest() != identity:
-                raise ArithmeticError('Compiled source text differs from its retained content identity')
-            if not source['languages'] or any(language not in ('cpu', 'metal') for language in source['languages']):
-                raise ArithmeticError('Compiled source has invalid language metadata')
-        bindings = {binding['function']: binding for binding in code['bindings']}
-        compiled = {index for index,entry in enumerate(compute) if entry['profile']['backend'] in ('cpu_compiled', 'metal_compiled')}
-        if len(bindings) != len(code['bindings']) or set(bindings) != compiled:
-            raise ArithmeticError('Compiled specialization bindings differ from realized function backends')
-        dispatch_count = constant_count = 0
-        for index, binding in bindings.items():
-            backend = compute[index]['profile']['backend']
-            if binding['backend'] != backend:
-                raise ArithmeticError('Compiled specialization backend differs from its execution profile')
-            pair = f"cpu:{binding['sources'].get('cpu', '')}\nmetal:{binding['sources'].get('metal', '')}\n"
-            if hashlib.sha256(pair.encode()).hexdigest() != binding['source_pair']:
-                raise ArithmeticError('Compiled source pair identity differs from its actual sources')
-            language = 'cpu' if backend == 'cpu_compiled' else 'metal'
-            if language not in binding['sources'] or binding['selected_source'] != binding['sources'][language]:
-                raise ArithmeticError('Compiled function selected a source for the wrong backend')
-            for name, identity in binding['sources'].items():
-                if identity not in code['sources'] or name not in code['sources'][identity]['languages'] or name not in binding['compile_options']:
-                    raise ArithmeticError('Compiled source reference or options are missing')
-            if not binding['dispatches'] or not binding['outputs']:
-                raise ArithmeticError('Compiled specialization lost its dispatch or output binding')
-            for dispatch in binding['dispatches']:
-                if not dispatch['name'] or any(len(dispatch[field]) != 3 or any(size <= 0 for size in dispatch[field]) for field in ('grid', 'group')):
-                    raise ArithmeticError('Compiled dispatch geometry is incomplete')
-            for constant in binding['constants']:
-                if constant['slot'] < 1 or constant['length'] < 0 or len(constant['sha256']) != 64 or any(character not in '0123456789abcdef' for character in constant['sha256']):
-                    raise ArithmeticError('Compiled constant identity or binding is incomplete')
-            dispatch_count += len(binding['dispatches'])
-            constant_count += len(binding['constants'])
-        representative = cast_result.ref
-        expected_view = {field: getattr(representative.view, field) for field,_ in representative.view._fields_}
-        expected_view['dtype'] = str(representative.dtype)
-        if not any(expected_view in binding['outputs'] for binding in bindings.values()):
-            raise ArithmeticError('Compiled output metadata lost the actual observed view')
-        print(json.dumps(dict(event='compiled_specializations', bindings=len(bindings), sources=len(code['sources']),
-            source_pairs=len({binding['source_pair'] for binding in bindings.values()}), dispatches=dispatch_count,
-            constants=constant_count, observed_output=expected_view)), flush=True)
-        # design/algorithm-sources.md#bound-plan-identities
-        plan_trace = program.plan_trace
-        planned_functions = set()
-        for plan in plan_trace:
-            if not 0 <= plan['root'] < len(plan['slots']):
-                raise ArithmeticError('Bound plan lost its output storage identity')
-            for operation in plan['operations']:
-                if any(not 0 <= index < len(compute) for index in operation['functions']):
-                    raise ArithmeticError('Bound plan references an absent numerical function')
-                if any(not 0 <= index < len(plan_trace) for index in operation['children']):
-                    raise ArithmeticError('Bound plan references an absent child plan')
-                if any(not 0 <= index < len(plan['slots']) for index in (*operation['inputs'], operation['output'])):
-                    raise ArithmeticError('Bound operation lost an input or output storage identity')
-                planned_functions.update(operation['functions'])
-        print(json.dumps(dict(event='bound_plans', plans=len(plan_trace), functions=len(planned_functions))), flush=True)
         if args.trace:
-            Path(args.trace).write_text(json.dumps(dict(environment=program.environment, plans=plan_trace, compute=compute, code=code, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
+            Path(args.trace).write_text(json.dumps(dict(compute=program.trace, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
         print(json.dumps(dict(event='summary', dtype=args.dtype, depth=args.depth, rows=rows, width=width,
             tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
             invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,

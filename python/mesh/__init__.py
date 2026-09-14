@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ._native import Native, Shape, View, CopyRegion, Writer
+from ._native import Native, Shape, View, CopyRegion
 
 __all__ = ['Program', 'Tensor', 'Ref', 'BlockSpec', 'ShapeDtypeStruct', 'Result']
 _PROGRAMS = set()
@@ -28,7 +28,7 @@ class Ref:
         first, count = C.c_size_t(), C.c_size_t()
         check(program.native.algebra_observe(program.handle, view, C.byref(first), C.byref(count)))
         self._presence_first, self._presence_count = first.value, count.value
-        self._writer = Writer()
+        self._writer = C.c_void_p()
         self._writer_error = program.native.algebra_writer(program.handle, view, C.byref(self._writer))
         address = program.native.tensor_data(view.tensor, view.extent)
         length = view.offset + (view.rows - 1) * view.row_stride + (view.columns - 1) * view.column_stride + 1
@@ -76,7 +76,7 @@ class Ref:
     # design/algorithm-sources.md#view-scoped-host-production
     def writable(self):
         check(self._writer_error)
-        return bool(self.program.native.writer_writable(C.byref(self._writer)))
+        return bool(self.program.native.writer_writable(self._writer))
 
     @property
     # design/algorithm-sources.md#view-scoped-consumption
@@ -231,7 +231,6 @@ class Program:
         self.context = self.native.context()
         self._constant_extents = set()
         self._replicated_extents = {}
-        self._plan_bindings, self._plan_stack = [], []
         create = {'cpu': self.native.algebra_create_cpu, 'metal': self.native.algebra_create}[backend]
         check(self.native.attach(self.context, os.fsencode(region) if region else None))
         self.handle = create(self.context)
@@ -372,10 +371,14 @@ class Program:
         if ref.program is not self:
             raise ValueError("Reference belongs to another program")
         check(ref._writer_error)
-        if not self.native.writer_issue(C.byref(ref._writer)):
+        if not self.native.writer_issue(ref._writer):
             raise BlockingIOError(errno.EAGAIN, 'Producer region still has readers')
-        yield ref.array
-        self.native.writer_complete(C.byref(ref._writer))
+        published = False
+        try:
+            yield ref.array
+            published = True
+        finally:
+            self.native.writer_complete(ref._writer, published)
 
     # design/algorithm-sources.md#indexed-library-functions
     def constant(self, ref, value):
@@ -396,27 +399,6 @@ class Program:
         for index in range(self.native.algebra_trace_count(self.handle)):
             event = self.native.algebra_trace(self.handle, index)
             item = {name: getattr(event, name) for name, _ in event._fields_}
-            # design/algorithm-sources.md#function-cost-profiles
-            profile = self.native.algebra_profile(self.handle, index)
-            backends = ('external', 'cpu_sgemm', 'cpu_neon_contract', 'cpu_builtin', 'cpu_compiled',
-                        'metal_compiled', 'metal_mps', 'metal_builtin', 'coreml', 'selected_mixed')
-            item['profile'] = dict(successful=profile.successful, failed=profile.failed, backend=backends[profile.backend])
-            for domain in ('dispatch', 'execution', 'gpu'):
-                count = profile.gpu_samples if domain == 'gpu' else profile.successful
-                item['profile'][domain + '_ns'] = dict(count=count,
-                    mean=getattr(profile, domain + '_mean_ns') if count else None,
-                    sample_variance=getattr(profile, domain + '_m2_ns2') / (count-1) if count > 1 else None)
-            item['plans'] = []
-            for plan_index in range(self.native.algebra_plan_count(self.handle, index)):
-                plan = self.native.algebra_plan(self.handle, index, plan_index)
-                descriptor = dict(backend=backends[plan.backend],
-                    operation=('affine', 'add', 'multiply', 'tanh', 'exp', 'sum', 'contract', 'rsqrt', 'swish')[plan.operation],
-                    first=plan.first, count=plan.count, alpha=plan.alpha, beta=plan.beta, rectangles=plan.rectangles)
-                for name in ('left', 'right', 'output'):
-                    view = getattr(plan, name)
-                    descriptor[name] = {field: getattr(view, field) for field, _ in view._fields_}
-                    descriptor[name]['dtype'] = ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool')[getattr(plan, name + '_scalar')]
-                item['plans'].append(descriptor)
             active = self.native.algebra_trace_active(self.handle, index)
             if active.function != 0xffffffffffffffff:
                 item['active'] = {name: getattr(active, name) for name, _ in active._fields_}
@@ -448,80 +430,6 @@ class Program:
                                 **{name: getattr(reader, name) for name, _ in reader._fields_}))
             result.append(item)
         return tuple(result)
-
-    # design/algorithm-sources.md#bound-plan-identities
-    @staticmethod
-    def _plan_view(ref):
-        return dict(dtype=ref.dtype.name, **{field: getattr(ref.view, field) for field, _ in ref.view._fields_})
-
-    # design/algorithm-sources.md#bound-plan-identities
-    def _plan_binding(self, kind, slots, root):
-        binding = dict(id=len(self._plan_bindings), kind=kind, root=root,
-            slots=[self._plan_view(ref) for ref in slots], operations=[], uses=[])
-        self._plan_bindings.append(binding)
-        if self._plan_stack:
-            self._plan_stack[-1]['children'].append(binding['id'])
-        return binding
-
-    # design/algorithm-sources.md#bound-plan-identities
-    @contextmanager
-    def _plan_operation(self, binding, operation, inputs, output, **metadata):
-        entry = dict(operation=operation, inputs=tuple(inputs), output=output,
-            functions_inclusive=True, children=[], **metadata)
-        binding['operations'].append(entry)
-        first = self.native.algebra_trace_count(self.handle)
-        self._plan_stack.append(entry)
-        try:
-            yield entry
-        finally:
-            self._plan_stack.pop()
-            entry['functions'] = tuple(range(first, self.native.algebra_trace_count(self.handle)))
-            entry['children'] = tuple(dict.fromkeys(entry['children']))
-
-    # design/algorithm-sources.md#bound-plan-identities
-    def _plan_use(self, identity, result, requested=None):
-        self._plan_bindings[identity]['uses'].append(dict(result=self._plan_view(result),
-            requested=self._plan_view(requested) if requested is not None else None))
-        if self._plan_stack:
-            self._plan_stack[-1]['children'].append(identity)
-
-    @property
-    # design/algorithm-sources.md#bound-plan-identities
-    def plan_trace(self):
-        import json
-        return json.loads(json.dumps(self._plan_bindings))
-
-    @property
-    # design/algorithm-sources.md#cost-environment
-    def environment(self):
-        import json
-        return json.loads(self.native.algebra_environment(self.handle))
-
-    @property
-    # design/algorithm-sources.md#compiled-specialization-identities
-    def code_trace(self):
-        import json
-        bindings, sources = [], {}
-        backends = ('external', 'cpu_sgemm', 'cpu_neon_contract', 'cpu_builtin', 'cpu_compiled',
-                    'metal_compiled', 'metal_mps', 'metal_builtin', 'coreml', 'selected_mixed')
-        for index in range(self.native.algebra_trace_count(self.handle)):
-            encoded = self.native.algebra_specialization(self.handle, index)
-            if encoded is None:
-                continue
-            binding = dict(json.loads(encoded), function=index)
-            binding['backend'] = backends[binding['backend']]
-            for view in (*binding['inputs'], *binding['outputs']):
-                view['dtype'] = str(_DTYPES[view.pop('scalar')])
-            for language, name in enumerate(('cpu', 'metal')):
-                identity = binding['sources'].get(name)
-                if identity is None:
-                    continue
-                if identity not in sources:
-                    sources[identity] = dict(text=self.native.algebra_source_text(self.handle, index, language).decode(), languages=[])
-                if name not in sources[identity]['languages']:
-                    sources[identity]['languages'].append(name)
-            bindings.append(binding)
-        return dict(bindings=bindings, sources=sources)
 
     @property
     # design/algorithm-sources.md#shared-sparse-routing-lowering
@@ -565,8 +473,6 @@ class Program:
             self.handle = None
             self._constant_extents.clear()
             self._replicated_extents.clear()
-            self._plan_bindings.clear()
-            self._plan_stack.clear()
             if not _PROGRAMS:
                 check(self.native.detach(self.context))
 

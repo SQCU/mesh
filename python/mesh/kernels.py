@@ -20,6 +20,9 @@ def affine(alpha=1, beta=0):
 class _StaticTable:
     refs: tuple
     ordinals: tuple
+    geometry: tuple
+    page_map: tuple
+    unit: int
     shape: tuple
     block_shape: tuple
     grid: tuple
@@ -380,8 +383,13 @@ def _static_value(node, inputs, rows, columns, coordinate):
 
 
 # design/algorithm-sources.md#static-indexed-access-specialization
-def _specialize_accesses(expression, inputs, output, coordinate):
+def _specialize_accesses(expression, inputs, output, coordinate, domain):
+    from . import Ref
+    from ._native import View
     domains, widths = {}, {}
+    row_begin, row_count, column_begin, column_count = domain
+    program = output.program
+    page_bytes = program.native.algebra_page_bytes(program.handle)
 
     # design/algorithm-sources.md#static-indexed-access-specialization
     def width(node):
@@ -405,39 +413,41 @@ def _specialize_accesses(expression, inputs, output, coordinate):
         return widths[node]
 
     # design/algorithm-sources.md#static-indexed-access-specialization
-    def visit(node, path=(), extent=output.shape[1]):
+    def visit(node, path=(), extent=output.shape[1], reduced=False):
         if node.operation == 'select':
             condition, yes, no = node.operands
-            visit(condition, path, extent)
-            visit(yes, path + ((condition, True),), extent)
-            visit(no, path + ((condition, False),), extent)
+            visit(condition, path, extent, reduced)
+            visit(yes, path + ((condition, True),), extent, reduced)
+            visit(no, path + ((condition, False),), extent, reduced)
         elif node.operation == 'load':
             row, column, mask, other = node.operands
-            visit(mask, path, extent)
+            visit(mask, path, extent, reduced)
             selected = path + ((mask, True),)
-            visit(row, selected, extent)
-            visit(column, selected, extent)
-            visit(other, path + ((mask, False),), extent)
+            visit(row, selected, extent, reduced)
+            visit(column, selected, extent, reduced)
+            visit(other, path + ((mask, False),), extent, reduced)
             if hasattr(inputs[node.value], 'blocks'):
-                domains.setdefault(node, set()).add((selected, extent))
+                domains.setdefault(node, set()).add((selected, extent, reduced))
         elif node.operation in _REDUCTIONS:
-            visit(node.operands[0], (), width(node.operands[0]))
+            visit(node.operands[0], (), width(node.operands[0]), True)
         else:
             for child in node.operands:
-                visit(child, path, extent)
+                visit(child, path, extent, reduced)
 
     visit(expression)
     selected = {}
     for node, uses in domains.items():
         table = inputs[node.value]
-        blocks, proven = set(), True
-        for path, extent in uses:
+        blocks, proven = {}, True
+        unit = page_bytes // table.dtype.itemsize
+        for path, extent, reduced in uses:
             if extent is None:
                 proven = False
                 break
-            for start in range(0, output.shape[0]*extent, 4096):
-                ordinal = np.arange(start, min(start+4096, output.shape[0]*extent), dtype=np.int64)
-                rows, columns = ordinal // extent, ordinal % extent
+            first_column, width_count = (0, extent) if reduced else (column_begin, column_count)
+            for start in range(0, row_count*width_count, 4096):
+                ordinal = np.arange(start, min(start+4096, row_count*width_count), dtype=np.int64)
+                rows, columns = row_begin + ordinal // width_count, first_column + ordinal % width_count
                 for predicate, polarity in path:
                     value = _static_value(predicate, inputs, rows, columns, coordinate)
                     if value is None:
@@ -459,12 +469,17 @@ def _specialize_accesses(expression, inputs, output, coordinate):
                 if np.any(row < 0) or np.any(column < 0) or np.any(row >= table.shape[0]) or np.any(column >= table.shape[1]):
                     proven = False
                     break
-                blocks.update((int(r), int(c)) for r, c in zip(row // table.block_shape[0], column // table.block_shape[1]))
+                for r, c in zip(row, column):
+                    r, c = int(r), int(c)
+                    block = r // table.block_shape[0], c // table.block_shape[1]
+                    view = table.blocks[block].view
+                    address = view.offset + r % table.block_shape[0] * view.row_stride + c % table.block_shape[1] * view.column_stride
+                    blocks.setdefault(block, set()).add(address // unit)
             if not proven:
                 break
         if proven:
-            selected[node] = tuple(sorted(blocks))
-    bound, positions, replacements = list(inputs), {}, {}
+            selected[node] = tuple((block, tuple(sorted(pages))) for block, pages in sorted(blocks.items()))
+    bound, replacements, origins = list(inputs), {}, {}
 
     # design/algorithm-sources.md#static-indexed-access-specialization
     def rewrite(node):
@@ -472,33 +487,44 @@ def _specialize_accesses(expression, inputs, output, coordinate):
             return replacements[node]
         children = tuple(rewrite(child) for child in node.operands)
         if node not in selected:
-            return _Expression(node.operation, children, node.value)
+            result = _Expression(node.operation, children, node.value)
+            replacements[node] = result
+            origins[result] = node
+            return result
         table = inputs[node.value]
         row, column, mask, other = children
         chosen = selected[node]
-        if len(chosen) > 1:
-            refs = tuple(table.blocks[block] for block in chosen)
-            ordinals = tuple(row*table.grid[1]+column for row, column in chosen)
-            source = _StaticTable(refs, ordinals, table.shape, table.block_shape, table.grid, table.dtype)
+        if chosen:
+            refs, positions, geometry, page_map = [], {}, [], []
+            unit = page_bytes // table.dtype.itemsize
+            for block, pages in chosen:
+                view = table.blocks[block].view
+                full = program.native.tensor_view(view.tensor, view.extent)
+                elements = full.rows * full.columns
+                base = len(page_map)
+                page_map.extend([0xffffffff] * (pages[-1]-pages[0]+1))
+                for page in pages:
+                    key = view.tensor, view.extent, page
+                    if key not in positions:
+                        positions[key] = len(refs)
+                        offset = page * unit
+                        columns = min(unit, elements-offset)
+                        refs.append(Ref(program, View(view.tensor, view.extent, offset, 1, columns, columns, 1), table.dtype))
+                    page_map[base+page-pages[0]] = positions[key]
+                geometry.append((view.offset, view.row_stride, view.column_stride, base, pages[0]))
+            ordinals = tuple(row*table.grid[1]+column for (row, column), _ in chosen)
+            source = _StaticTable(tuple(refs), ordinals, tuple(geometry), tuple(page_map), unit,
+                                  table.shape, table.block_shape, table.grid, table.dtype)
             index = len(bound)
             bound.append(source)
             result = _Expression('load', children, index)
-        elif chosen:
-            block, = chosen
-            ref = table.blocks[block]
-            view = ref.view
-            identity = (view.tensor, view.extent, view.offset, view.rows, view.columns, view.row_stride, view.column_stride, ref.dtype.str)
-            if identity not in positions:
-                positions[identity] = len(bound)
-                bound.append(ref)
-            first_row, first_column = (index*size for index, size in zip(block, table.block_shape))
-            result = _Expression('load', (row-first_row, column-first_column, mask, other), positions[identity])
         else:
             result = other
         replacements[node] = result
         return result
 
-    return rewrite(expression), tuple(bound)
+    result = rewrite(expression)
+    return result, tuple(bound), origins
 
 
 # design/algorithm-sources.md#indexed-expression-lowering
@@ -592,63 +618,74 @@ class _ExpressionKernel:
         if any(ref.dtype.name not in ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool') for ref in (*inputs, *outputs)):
             raise ValueError('Expression regions require supported real, integer or boolean scalars')
         for value, output in zip(self.values, outputs):
-            value = _resolve_logical(value, inputs)
-            value, specialized_inputs = _specialize_accesses(value, inputs, output, coordinate)
-            used = {}
+            resolved = _resolve_logical(value, inputs)
+            original_accesses = _indexed_access_paths(resolved, inputs,
+                {index for index, source in enumerate(inputs) if hasattr(source, 'blocks')})
+            selectors = {}
+            for domain in _source_expression_regions(program, output):
+                specialized, specialized_inputs, origins = _specialize_accesses(resolved, inputs, output, coordinate, domain)
+                used, original_nodes = {}, {}
 
-            # design/algorithm-sources.md#indexed-expression-lowering
-            def remap(node):
-                index = node.value
-                if node.operation == 'program_id':
-                    return _literal(coordinate[index])
-                if node.operation in ('input', 'load'):
-                    index = used.setdefault(index, len(used))
-                return _Expression(node.operation, tuple(remap(child) for child in node.operands), index)
+                # design/algorithm-sources.md#indexed-expression-lowering
+                def remap(node):
+                    index = node.value
+                    if node.operation == 'program_id':
+                        return _literal(coordinate[index])
+                    if node.operation in ('input', 'load'):
+                        index = used.setdefault(index, len(used))
+                    result = _Expression(node.operation, tuple(remap(child) for child in node.operands), index)
+                    if node in origins:
+                        original_nodes[result] = origins[node]
+                    return result
 
-            expression = remap(value)
-            reads = tuple(specialized_inputs[index] for index in used)
-            dynamic = {}
-            access_axes, reduced_accesses = _expression_access_axes(expression, reads)
-            dynamic_inputs = {index for index, source in enumerate(reads)
-                if hasattr(source, 'blocks') and not all((ref.view.tensor, ref.view.extent)
-                    in program._constant_extents for ref in source.blocks.values())}
-            accesses = _indexed_access_paths(expression, reads, dynamic_inputs)
-            for node, paths in accesses.items():
-                table = reads[node.value]
-                row, column, mask, _ = node.operands
-                ordinal, candidates = _page_selector(program, table, row, column)
-                enabled = _literal(False)
-                for path in paths:
-                    condition = _literal(True)
-                    for predicate, polarity in path:
-                        condition = select(condition, predicate if polarity else predicate.equal(False), False)
-                    enabled = select(enabled, True, condition)
-                selector_value = select(enabled, ordinal, 0xffffffff)
-                selector_width = output.shape[1]
+                expression = remap(specialized)
+                reads = tuple(specialized_inputs[index] for index in used)
+                dynamic = {}
+                access_axes, reduced_accesses = _expression_access_axes(expression, reads)
+                dynamic_inputs = {index for index, source in enumerate(reads)
+                    if hasattr(source, 'blocks') and not all((ref.view.tensor, ref.view.extent)
+                        in program._constant_extents for ref in source.blocks.values())}
+                accesses = _indexed_access_paths(expression, reads, dynamic_inputs)
+                for node in accesses:
+                    original = original_nodes[node]
+                    if original not in selectors:
+                        table = inputs[original.value]
+                        row, column, mask, _ = original.operands
+                        ordinal, candidates = _page_selector(program, table, row, column)
+                        enabled = _literal(False)
+                        for path in original_accesses[original]:
+                            condition = _literal(True)
+                            for predicate, polarity in path:
+                                condition = select(condition, predicate if polarity else predicate.equal(False), False)
+                            enabled = select(enabled, True, condition)
+                        selector_value = select(enabled, ordinal, 0xffffffff)
+                        selector_width = output.shape[1]
 
-                # design/algorithm-sources.md#dynamic-indexed-expression-lowering
-                def selector_shape(part):
-                    nonlocal selector_width
-                    if part.operation == 'input':
-                        selector_width = max(selector_width, reads[part.value].shape[1])
-                    elif part.operation == 'index_vector' and part.value[3] == 1:
-                        selector_width = max(selector_width, part.value[0])
-                    for child in part.operands:
-                        selector_shape(child)
+                        # design/algorithm-sources.md#dynamic-indexed-expression-lowering
+                        def selector_shape(part):
+                            nonlocal selector_width
+                            if part.operation == 'input':
+                                selector_width = max(selector_width, inputs[part.value].shape[1])
+                            elif part.operation == 'index_vector' and part.value[3] == 1:
+                                selector_width = max(selector_width, part.value[0])
+                            for child in part.operands:
+                                selector_shape(child)
 
-                selector_shape(selector_value)
-                selected = program.tensor((output.shape[0], selector_width), dtype=np.uint32)[0, 0]
-                _ExpressionKernel((selector_value,)).bind(program, reads, (selected,))
-                dynamic[node] = (selected, node.value, candidates)
+                        selector_shape(selector_value)
+                        selected = program.tensor((output.shape[0], selector_width), dtype=np.uint32)[0, 0]
+                        _ExpressionKernel((selector_value,)).bind(program, inputs, (selected,), coordinate)
+                        selectors[original] = selected, candidates
+                    selected, candidates = selectors[original]
+                    dynamic[node] = (selected, node.value, candidates)
 
-            flattened = tuple(ref for source in reads for ref in
-                (source.refs if isinstance(source, _StaticTable) else tuple(ref for _, ref in sorted(source.blocks.items())) if hasattr(source, 'blocks') else (source,)))
-            sources = tuple(self.source(reads, output, metal, expression).encode() for metal in (False, True))
-            offsets = []
-            for source in reads:
-                offsets.append((offsets[-1][0] + offsets[-1][1] if offsets else 0,
-                    len(source.refs) if isinstance(source, _StaticTable) else len(source.blocks) if hasattr(source, 'blocks') else 1))
-            for begin, rows, column, columns in _source_expression_regions(program, output):
+                flattened = tuple(ref for source in reads for ref in
+                    (source.refs if isinstance(source, _StaticTable) else tuple(ref for _, ref in sorted(source.blocks.items())) if hasattr(source, 'blocks') else (source,)))
+                sources = tuple(self.source(reads, output, metal, expression).encode() for metal in (False, True))
+                offsets = []
+                for source in reads:
+                    offsets.append((offsets[-1][0] + offsets[-1][1] if offsets else 0,
+                        len(source.refs) if isinstance(source, _StaticTable) else len(source.blocks) if hasattr(source, 'blocks') else 1))
+                begin, rows, column, columns = domain
                 function = program.native.algebra_trace_count(program.handle)
                 check(program.native.algebra_source(program.handle, *sources,
                     (View * len(flattened))(*(ref.view for ref in flattened)), len(flattened), output.view,
@@ -976,17 +1013,20 @@ def _static_table_source(table, first, name, metal):
     integer = 'ulong' if metal else 'uint64_t'
     constant = 'constant' if metal else 'static const'
     lines = []
-    for suffix, values in (('ordinal', table.ordinals), ('rs', tuple(ref.view.row_stride for ref in table.refs)),
-                           ('cs', tuple(ref.view.column_stride for ref in table.refs))):
+    for suffix, values in (('ordinal', table.ordinals), ('pages', table.page_map),
+                           *((name, tuple(entry[index] for entry in table.geometry))
+                             for index, name in enumerate(('offset', 'rs', 'cs', 'base', 'first')))):
         lines.append(f'{constant} {integer} {name}_{suffix}[]={{'+','.join(map(str, values))+'};')
-    value = f'p[row%{table.block_shape[0]}*{name}_rs[low]+column%{table.block_shape[1]}*{name}_cs[low]]'
+    value = f'p[address%{table.unit}]'
     result_type = 'float' if dtype.kind == 'f' else scalar
     lines.append(f"""// design/algorithm-sources.md#static-indexed-access-specialization
     {'inline' if metal else 'static inline'} {result_type} {name}({'device const ulong *' if metal else 'const uintptr_t *'} buffers,{integer} row,{integer} column) {{
-      {integer} ordinal=row/{table.block_shape[0]}*{table.grid[1]}+column/{table.block_shape[1]},low=0,high={len(table.refs)-1};
+      {integer} ordinal=row/{table.block_shape[0]}*{table.grid[1]}+column/{table.block_shape[1]},low=0,high={len(table.ordinals)-1};
       while(low<high) {{ {integer} middle=low+(high-low)/2;
         if({name}_ordinal[middle]<ordinal)low=middle+1;else high=middle; }}
-      {'device ' if metal else ''}const {scalar} *p=({'device ' if metal else ''}const {scalar} *)buffers[{first}+low];
+      {integer} address={name}_offset[low]+row%{table.block_shape[0]}*{name}_rs[low]+column%{table.block_shape[1]}*{name}_cs[low];
+      {integer} page={name}_pages[{name}_base[low]+address/{table.unit}-{name}_first[low]];
+      {'device ' if metal else ''}const {scalar} *p=({'device ' if metal else ''}const {scalar} *)buffers[{first}+page];
       return {value};
     }}""")
     return '\n'.join(lines)
@@ -1978,7 +2018,7 @@ class _ExpressionRegions:
         if node.operation == 'transpose':
             return self.panel(node.operands[0], origin[::-1], shape[::-1]).T
         if node.operation in _REDUCTIONS:
-            return self.reduction(node, origin[0], shape[0], _expression_dtype(node, self.sources))[0]
+            return self.reduction(node, origin[0], shape[0], _expression_dtype(node, self.sources))
         if node.operation == 'argsort':
             return self.ordering_panel(node, origin, shape)
         if node.operation == 'indexed_contract':
@@ -2011,20 +2051,12 @@ class _ExpressionRegions:
             product = _Expression('*', tuple(shift(child) for child in node.operands))
             transposed = _Expression('transpose', (_Expression('sum', (product,)),))
             original = _resolve_logical(node.value[0], self.sources)
-            plan = _ReductionPlan.create(self.reduction_regions(original, origin[0], shape[0]))
             if shape[1] != 1:
                 self.emit(original, origin, shape, target)
-                binding = None
-            else:
-                binding = _lower_indexed_product(self, transposed, target.T, plan)
-                if not binding:
-                    target, identity = self.reduction(original, origin[0], shape[0], np.dtype('float32'), target, plan)
-                    binding = self.program._plan_bindings[identity]
-            self.cache[key] = target, binding['id'] if binding is not None else None
-        result, identity = self.cache[key]
-        if identity is not None:
-            self.program._plan_use(identity, result, direct)
-        return result
+            elif not _lower_indexed_product(self, transposed, target.T):
+                target = self.reduction(original, origin[0], shape[0], np.dtype('float32'), target)
+            self.cache[key] = target
+        return self.cache[key]
 
     # design/algorithm-sources.md#stable-indexed-ordering
     def ordering_panel(self, node, origin, shape):
@@ -2068,12 +2100,16 @@ class _ExpressionRegions:
         key = ('ordering_panel', self.key(node, origin, shape))
         if key not in self.cache:
             target = self.temporary(shape, np.uint32)
-            row, column = indices()
-            selected = tuple((first, ref) for first, ref in refs if first < origin[1]+shape[1] and origin[1] < first+ref.shape[1])
-            table = _StaticTable(tuple(ref for _, ref in selected), tuple(first//128 for first, _ in selected),
-                                 (shape[0], width), (shape[0], 128), (1, (width+127)//128), np.dtype('uint32'))
-            symbol, = arguments(1)
-            _ExpressionKernel((symbol.at(row, column+origin[1]),)).bind(self.program, (table,), (target,), self.coordinate)
+            import ctypes as C
+            from . import check
+            from ._native import CopyRegion
+            regions = []
+            for first, ref in refs:
+                lo, hi = max(first, origin[1]), min(first+ref.shape[1], origin[1]+shape[1])
+                if lo < hi:
+                    regions.append(CopyRegion(ref.slice(0, lo-first, shape[0], hi-lo).view, 0, lo-origin[1]))
+            check(self.program.native.algebra_materialize(self.program.handle,
+                (CopyRegion * len(regions))(*regions), len(regions), target.view))
             self.cache[key] = target
         return self.cache[key]
 
@@ -2191,12 +2227,10 @@ class _ExpressionRegions:
         return tuple((first, last-first) for first, last in zip(ordered, ordered[1:]))
 
     # design/algorithm-sources.md#shared-associative-reductions
-    def reduction(self, node, row, rows, dtype, direct=None, plan=None):
+    def reduction(self, node, row, rows, dtype, direct=None):
         key = ('reduction', self.key(node, (row, 0), (rows, 1)), dtype.str)
         if key in self.cache:
-            result, identity = self.cache[key]
-            self.program._plan_use(identity, result, direct)
-            return result, identity
+            return self.cache[key]
         child = node.operands[0]
         layout = self.layout(child)
         width, tile = layout[0][1], layout[2][1]
@@ -2206,39 +2240,29 @@ class _ExpressionRegions:
                 (0 if node.operation == 'max' else 1) if dtype.kind == 'b' else
                 np.iinfo(dtype).min if node.operation == 'max' else np.iinfo(dtype).max)
             target = direct if direct is not None and direct.dtype == dtype else self.temporary((rows, 1), dtype)
-            binding = self.program._plan_binding('reduction', (target,), 0)
-            with self.program._plan_operation(binding, 'identity', (), 0, reduction=node.operation):
-                _ExpressionKernel((_literal(identity),)).bind(self.program, (), (target,))
-            self.program._plan_use(binding['id'], target, direct)
-            self.cache[key] = target, binding['id']
+            _ExpressionKernel((_literal(identity),)).bind(self.program, (), (target,))
+            self.cache[key] = target
             return self.cache[key]
-        plan = plan if plan is not None else _ReductionPlan.create(self.reduction_regions(node, row, rows))
+        plan = _ReductionPlan.create(self.reduction_regions(node, row, rows))
         parts = {}
-        binding = self.program._plan_binding('reduction', (), plan.root)
         for index, (column, length) in enumerate(plan.regions):
             target = direct if direct is not None and index == plan.root and direct.dtype == dtype else self.temporary((rows, 1), dtype)
-            binding['slots'].append(self.program._plan_view(target))
-            with self.program._plan_operation(binding, 'region', (), index,
-                    origin=(row, column), shape=(rows, length), reduction=node.operation):
-                self.emit(child, (row, column), (rows, length), target, reduce=node.operation)
+            self.emit(child, (row, column), (rows, length), target, reduce=node.operation)
             parts[index] = target
         for left_index, right_index, output in plan.merges:
             target = direct if direct is not None and output == plan.root and direct.dtype == dtype else self.temporary((rows, 1), dtype)
             inputs = (parts[left_index], parts[right_index])
-            binding['slots'].append(self.program._plan_view(target))
-            with self.program._plan_operation(binding, 'merge', (left_index, right_index), output, reduction=node.operation):
-                if node.operation == 'sum' and dtype.kind == 'f':
-                    _bind_operation(self.program, 1, inputs, target, beta=1)
-                else:
-                    left, right = arguments(2)
-                    bits = 0xffffffffffffffff
-                    merged = ((left & bits)+(right & bits) if node.operation == 'sum' else
-                        left | right if node.operation == 'any' else left & right if node.operation == 'all' else
-                        _Expression('maximum' if node.operation == 'max' else 'minimum', (left, right)))
-                    _ExpressionKernel((merged,)).bind(self.program, inputs, (target,), self.coordinate)
+            if node.operation == 'sum' and dtype.kind == 'f':
+                _bind_operation(self.program, 1, inputs, target, beta=1)
+            else:
+                left, right = arguments(2)
+                bits = 0xffffffffffffffff
+                merged = ((left & bits)+(right & bits) if node.operation == 'sum' else
+                    left | right if node.operation == 'any' else left & right if node.operation == 'all' else
+                    _Expression('maximum' if node.operation == 'max' else 'minimum', (left, right)))
+                _ExpressionKernel((merged,)).bind(self.program, inputs, (target,), self.coordinate)
             parts[output] = target
-        self.cache[key] = parts[plan.root], binding['id']
-        self.program._plan_use(binding['id'], parts[plan.root], direct)
+        self.cache[key] = parts[plan.root]
         return self.cache[key]
 
     # design/algorithm-sources.md#shared-contraction-lowering
@@ -2351,7 +2375,7 @@ class _ExpressionRegions:
                     child = _Expression('domain', (substitute(node.operands[0]),),
                         (shape, (False, False), shape))
                     return _Expression(node.operation, (child,), dtype.str)
-                return reference(('reduction', node, row, rows, dtype.str), (self.reduction(node, row, rows, dtype)[0],))
+                return reference(('reduction', node, row, rows, dtype.str), (self.reduction(node, row, rows, dtype),))
             if node.operation == 'indexed_contract':
                 if accumulation.kind != 'f':
                     return lower(_resolve_logical(node.value[0], self.sources), accumulation)
@@ -2529,7 +2553,7 @@ class _IndexedProductPlan:
 
 
 # design/algorithm-sources.md#selected-native-contractions
-def _lower_indexed_product(lowering, value, target, compiled_plan):
+def _lower_indexed_product(lowering, value, target):
     import ctypes as C
     from . import Ref, check
     from ._native import View
@@ -2621,141 +2645,117 @@ def _lower_indexed_product(lowering, value, target, compiled_plan):
     check(program.native.algebra_view_pages(program.handle, target.view, None, 0, C.byref(target_pages)))
     reverse = sources[0].dtype == np.dtype('float16') and sources[1].dtype == np.dtype('float32')
     native_plan = _IndexedProductPlan.create(segments, target, target_pages.value, reverse)
-    if selected is None and len(native_plan.operations) > max(1, len(compiled_plan.regions)+len(compiled_plan.merges)):
-        return False
     selector = None
-    selector_functions = ()
     if selected is not None:
         selection_key = ('selected_plan', lowering.key(_resolve_logical(selected, lowering.sources), (0, 0), (1, 1)), choices)
         if selection_key not in lowering.cache:
             selector = program.tensor((1, 1), dtype=np.uint32)[0, 0]
             plan = select((selected >= 0) & (selected < choices), selected, choices)
-            selector_binding = program._plan_binding('selector', (selector,), 0)
-            with program._plan_operation(selector_binding, 'selector', (), 0) as selector_entry:
-                lowering.emit(_resolve_logical(plan, lowering.sources), (0, 0), (1, 1), selector)
-            lowering.cache['selector_binding', selection_key] = selector_binding['id']
+            lowering.emit(_resolve_logical(plan, lowering.sources), (0, 0), (1, 1), selector)
             lowering.cache[selection_key] = selector
         selector = lowering.cache[selection_key]
-        selector_binding = program._plan_bindings[lowering.cache['selector_binding', selection_key]]
-        selector_functions = selector_binding['operations'][0]['functions']
     storage = [target]
     for shape, transposed in native_plan.storage[1:]:
         ref = lowering.temporary(shape)
         storage.append(ref.T if transposed else ref)
-    binding = program._plan_binding('indexed_contraction', storage, 0)
-    if selector is not None:
-        binding['selector'] = dict(view=program._plan_view(selector), functions=selector_functions,
-            binding=selector_binding['id'])
-        program._plan_use(selector_binding['id'], selector)
     for operation, inputs, output, detail in native_plan.operations:
-        with program._plan_operation(binding, operation, inputs, output) as entry:
-            destination = storage[output]
-            if operation == 'add':
-                _bind_operation(program, 1, tuple(storage[index] for index in inputs), destination, beta=1)
-                continue
-            if operation == 'copy':
-                lowering.publish((storage[inputs[0]],), destination)
-                continue
-            if operation == 'assemble':
-                results = tuple(storage[index] for index in inputs)
-                entries = tuple(zip(detail, results))
-                entry['offsets'] = detail
+        destination = storage[output]
+        if operation == 'add':
+            _bind_operation(program, 1, tuple(storage[index] for index in inputs), destination, beta=1)
+            continue
+        if operation == 'copy':
+            lowering.publish((storage[inputs[0]],), destination)
+            continue
+        if operation == 'assemble':
+            results = tuple(storage[index] for index in inputs)
+            entries = tuple(zip(detail, results))
 
-                # design/algorithm-sources.md#indexed-contraction-plans
-                def assemble(metal):
-                    source = _indexed_interval_source('mesh_contraction_part', entries, 0, metal)
-                    return source, f"""for(uint64_t column=lane;column<{destination.shape[1]};column+=lanes)
-                  p{len(results)}[r*{destination.view.row_stride}+column*{destination.view.column_stride}]=mesh_contraction_part(buffers,r,column);"""
+            # design/algorithm-sources.md#indexed-contraction-plans
+            def assemble(metal):
+                source = _indexed_interval_source('mesh_contraction_part', entries, 0, metal)
+                return source, f"""for(uint64_t column=lane;column<{destination.shape[1]};column+=lanes)
+              p{len(results)}[r*{destination.view.row_stride}+column*{destination.view.column_stride}]=mesh_contraction_part(buffers,r,column);"""
 
-                _compiled_region(program, results, destination, assemble, access_axes=(1,) * len(results),
-                                 domains=_source_row_regions(program, destination))
-                continue
-            first, columns, length, prepared = native_plan.segments[detail]
-            entry['segment'] = dict(first=first, columns=columns, inner=length)
-            dependencies, positions, page_sets, left_views, right_views, selected_dependencies = [], {}, {}, [], [], []
+            _compiled_region(program, results, destination, assemble, access_axes=(1,) * len(results),
+                             domains=_source_row_regions(program, destination))
+            continue
+        first, columns, length, prepared = native_plan.segments[detail]
+        dependencies, positions, page_sets, left_views, right_views, selected_dependencies = [], {}, {}, [], [], []
 
-            # design/algorithm-sources.md#selected-native-contractions
-            def retain(geometry, shape, transpose=False):
-                backing, offset, strides, _ = geometry
-                view = View.from_buffer_copy(backing.view)
-                view.offset, view.rows, view.columns = offset, *shape
-                view.row_stride, view.column_stride = strides
-                if view.rows == 1 and view.column_stride == 1:
-                    view.row_stride = view.columns
-                if view.columns == 1 and view.row_stride == 1:
-                    view.column_stride = view.rows
-                ref = Ref(program, view, backing.dtype)
-                ref = ref.T if transpose else ref
-                if selected is None:
-                    return ref, ()
-                identity = tuple(getattr(ref.view, field) for field in
-                    ('tensor', 'extent', 'offset', 'rows', 'columns', 'row_stride', 'column_stride'))
-                if identity not in page_sets:
-                    count = C.c_size_t()
-                    check(program.native.algebra_view_pages(program.handle, ref.view, None, 0, C.byref(count)))
-                    pages = (View * count.value)()
-                    check(program.native.algebra_view_pages(program.handle, ref.view, pages, count.value, C.byref(count)))
-                    selected_pages = []
-                    for page in pages:
-                        key = page.tensor, page.extent, page.offset
-                        if key not in positions:
-                            positions[key] = len(dependencies)
-                            dependencies.append(Ref(program, page, ref.dtype))
-                        selected_pages.append(positions[key])
-                    page_sets[identity] = tuple(selected_pages)
-                return ref, page_sets[identity]
-
-            for a, b in prepared:
-                left, left_position = retain(a, (length, 1), True)
-                right, right_position = retain(b, (length, columns))
-                left_views.append(left)
-                right_views.append(right)
-                selected_dependencies.append(tuple(dict.fromkeys((*left_position, *right_position))))
-            entry['choices'] = tuple(dict(left=program._plan_view(left), right=program._plan_view(right))
-                for left, right in zip(left_views, right_views))
+        # design/algorithm-sources.md#selected-native-contractions
+        def retain(geometry, shape, transpose=False):
+            backing, offset, strides, _ = geometry
+            view = View.from_buffer_copy(backing.view)
+            view.offset, view.rows, view.columns = offset, *shape
+            view.row_stride, view.column_stride = strides
+            if view.rows == 1 and view.column_stride == 1:
+                view.row_stride = view.columns
+            if view.columns == 1 and view.row_stride == 1:
+                view.column_stride = view.rows
+            ref = Ref(program, view, backing.dtype)
+            ref = ref.T if transpose else ref
             if selected is None:
-                _bind_operation(program, 6, (left_views[0], right_views[0]), destination)
-                continue
-            zero_key = ('selected_zero', length, columns, sources[1].dtype.str)
-            if zero_key not in lowering.cache:
-                zero = program.tensor((length, columns), dtype=sources[1].dtype)[0, 0]
-                program.constant(zero, np.zeros(zero.shape, dtype=zero.dtype))
-                lowering.cache[zero_key] = zero
-            zero = lowering.cache[zero_key]
-            zero, zero_pages = retain((zero, zero.view.offset,
-                (zero.view.row_stride, zero.view.column_stride), length), zero.shape)
-            _, left_pages = retain(prepared[0][0], (length, 1), True)
-            left_views.append(left_views[0])
-            right_views.append(zero)
-            selected_dependencies.append(tuple(dict.fromkeys((*left_pages, *zero_pages))))
-            function = C.c_size_t()
-            check(program.native.algebra_contract_select(program.handle, selector.view,
-                (View * len(left_views))(*(ref.view for ref in left_views)),
-                (View * len(right_views))(*(ref.view for ref in right_views)), len(left_views),
-                (View * len(dependencies))(*(ref.view for ref in dependencies)), len(dependencies),
-                destination.view, 1, C.byref(function)))
-            entry['choices'] = tuple(dict(left=program._plan_view(left), right=program._plan_view(right), pages=pages)
-                for left, right, pages in zip(left_views, right_views, selected_dependencies))
-            entry['candidates'] = tuple(program._plan_view(ref) for ref in dependencies)
-            entry['parent'] = function.value
-            entry['invalid_choice'] = choices
-            slots = max(map(len, selected_dependencies))
-            selected_dependencies = tuple(index for pages in selected_dependencies
-                for index in (*pages, *((0xffffffff,) * (slots-len(pages)))))
-            readiness = program.tensor((1, slots), dtype=np.uint32)[0, 0]
+                return ref, ()
+            identity = tuple(getattr(ref.view, field) for field in
+                ('tensor', 'extent', 'offset', 'rows', 'columns', 'row_stride', 'column_stride'))
+            if identity not in page_sets:
+                count = C.c_size_t()
+                check(program.native.algebra_view_pages(program.handle, ref.view, None, 0, C.byref(count)))
+                pages = (View * count.value)()
+                check(program.native.algebra_view_pages(program.handle, ref.view, pages, count.value, C.byref(count)))
+                selected_pages = []
+                for page in pages:
+                    key = page.tensor, page.extent, page.offset
+                    if key not in positions:
+                        positions[key] = len(dependencies)
+                        dependencies.append(Ref(program, page, ref.dtype))
+                    selected_pages.append(positions[key])
+                page_sets[identity] = tuple(selected_pages)
+            return ref, page_sets[identity]
 
-            # design/algorithm-sources.md#selected-native-contractions
-            def readiness_source(metal):
-                array = ('constant' if metal else 'static const') + ' uint32_t selected[]={' + ','.join(map(str, selected_dependencies)) + '};'
-                return array, f'for(uint32_t c=lane;c<{slots};c+=lanes)p1[c]=selected[{slots}*p0[0]+c];'
+        for a, b in prepared:
+            left, left_position = retain(a, (length, 1), True)
+            right, right_position = retain(b, (length, columns))
+            left_views.append(left)
+            right_views.append(right)
+            selected_dependencies.append(tuple(dict.fromkeys((*left_position, *right_position))))
+        if selected is None:
+            _bind_operation(program, 6, (left_views[0], right_views[0]), destination)
+            continue
+        zero_key = ('selected_zero', length, columns, sources[1].dtype.str)
+        if zero_key not in lowering.cache:
+            zero = program.tensor((length, columns), dtype=sources[1].dtype)[0, 0]
+            program.constant(zero, np.zeros(zero.shape, dtype=zero.dtype))
+            lowering.cache[zero_key] = zero
+        zero = lowering.cache[zero_key]
+        zero, zero_pages = retain((zero, zero.view.offset,
+            (zero.view.row_stride, zero.view.column_stride), length), zero.shape)
+        _, left_pages = retain(prepared[0][0], (length, 1), True)
+        left_views.append(left_views[0])
+        right_views.append(zero)
+        selected_dependencies.append(tuple(dict.fromkeys((*left_pages, *zero_pages))))
+        function = C.c_size_t()
+        check(program.native.algebra_contract_select(program.handle, selector.view,
+            (View * len(left_views))(*(ref.view for ref in left_views)),
+            (View * len(right_views))(*(ref.view for ref in right_views)), len(left_views),
+            (View * len(dependencies))(*(ref.view for ref in dependencies)), len(dependencies),
+            destination.view, 1, C.byref(function)))
+        slots = max(map(len, selected_dependencies))
+        selected_dependencies = tuple(index for pages in selected_dependencies
+            for index in (*pages, *((0xffffffff,) * (slots-len(pages)))))
+        readiness = program.tensor((1, slots), dtype=np.uint32)[0, 0]
 
-            readiness_function = _compiled_region(program, (selector,), readiness, readiness_source, access_axes=(0,),
-                                                  domains=((0, readiness.shape[0], 0, readiness.shape[1]),))
-            entry['readiness'] = dict(view=program._plan_view(readiness), function=readiness_function)
-            check(program.native.algebra_indexed(program.handle, function.value, readiness.view,
-                (C.c_size_t * len(dependencies))(*range(1, len(dependencies)+1)), len(dependencies),
-                (View * len(dependencies))(*(ref.view for ref in dependencies)), len(dependencies)))
-    return binding
+        # design/algorithm-sources.md#selected-native-contractions
+        def readiness_source(metal):
+            array = ('constant' if metal else 'static const') + ' uint32_t selected[]={' + ','.join(map(str, selected_dependencies)) + '};'
+            return array, f'for(uint32_t c=lane;c<{slots};c+=lanes)p1[c]=selected[{slots}*p0[0]+c];'
+
+        _compiled_region(program, (selector,), readiness, readiness_source, access_axes=(0,),
+                                              domains=((0, readiness.shape[0], 0, readiness.shape[1]),))
+        check(program.native.algebra_indexed(program.handle, function.value, readiness.view,
+            (C.c_size_t * len(dependencies))(*range(1, len(dependencies)+1)), len(dependencies),
+            (View * len(dependencies))(*(ref.view for ref in dependencies)), len(dependencies)))
+    return True
 
 
 # design/algorithm-sources.md#composable-indexed-contractions
@@ -2848,7 +2848,7 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
             layout = lowering.layout(value)
             row = origin[0] if layout[1][0] else 0
             dtype = _reduction_dtype(value, lowering.sources, target.dtype)
-            result, identity = lowering.reduction(value, row, target.shape[0], dtype, target)
+            result = lowering.reduction(value, row, target.shape[0], dtype, target)
             if result is not target:
                 symbol, = arguments(1)
                 _ExpressionKernel((symbol,)).bind(program, (result,), (target,), coordinate)

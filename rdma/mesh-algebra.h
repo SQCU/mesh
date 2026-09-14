@@ -18,17 +18,12 @@ struct mesh_view {
 };
 struct mesh_copy_region { struct mesh_view source; size_t row,column; };
 /* design/algorithm-sources.md#view-scoped-host-production */
-struct mesh_writer { struct mesh_ctx *context; struct mesh_row_map output; struct mesh_row_function function; };
+struct mesh_writer;
 struct mesh_algebra_event { uint64_t ready_ns,start_ns,complete_ns,gpu_start_ns,gpu_end_ns,submissions; uint32_t first_output,output_maps,kind,input_maps; };
-/* design/algorithm-sources.md#function-cost-profiles */
-enum mesh_algebra_backend { MESH_BACKEND_EXTERNAL, MESH_BACKEND_CPU_SGEMM, MESH_BACKEND_CPU_NEON_CONTRACT, MESH_BACKEND_CPU_BUILTIN, MESH_BACKEND_CPU_COMPILED, MESH_BACKEND_METAL_COMPILED, MESH_BACKEND_METAL_MPS, MESH_BACKEND_METAL_BUILTIN, MESH_BACKEND_COREML, MESH_BACKEND_SELECTED_MIXED };
-struct mesh_algebra_profile { uint64_t successful,failed,gpu_samples; double dispatch_mean_ns,dispatch_m2_ns2,execution_mean_ns,execution_m2_ns2,gpu_mean_ns,gpu_m2_ns2; uint32_t kind,backend; };
-/* design/algorithm-sources.md#function-cost-profiles */
-struct mesh_algebra_plan { struct mesh_view left,right,output; uint64_t first,count; uint32_t backend,operation,left_scalar,right_scalar,output_scalar,rectangles; float alpha,beta; };
 struct mesh_indexed_event { uint64_t input; uint32_t descriptor,role,candidate,first,count,plane,retired,selected,completed,mapped,flags; };
 struct mesh_active_event { uint64_t function,omissions; uint32_t slot,count_first,count_maps,disposition,omitted,retired,inputs,flags; };
 struct mesh_route_event { uint64_t function; uint32_t domain,role,index,first,count,plane,retired,completed,prepared,consumer,flags; };
-struct mesh_algebra_report { uint64_t submitted,completed,native_submitted,native_backings,ne_planned_operations; int64_t code; double gpu_seconds; uint64_t cpu_submitted; };
+struct mesh_algebra_report { uint64_t submitted,completed,native_submitted,native_backings; int64_t code; double gpu_seconds; uint64_t cpu_submitted; };
 
 struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *);
 struct mesh_algebra *mesh_algebra_create_cpu(struct mesh_ctx *);
@@ -45,12 +40,12 @@ struct mesh_view mesh_view_transpose(struct mesh_view);
 struct mesh_view mesh_view_broadcast(struct mesh_view,size_t rows,size_t columns);
 size_t mesh_tensor_publication_bytes(struct mesh_tensor *,uint32_t extent);
 void *mesh_tensor_data(struct mesh_tensor *,uint32_t extent);
-struct mesh_row_map mesh_tensor_rows(struct mesh_tensor *,uint32_t extent);
+struct mesh_row_range mesh_tensor_rows(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_constant(struct mesh_tensor *,uint32_t extent);
-int mesh_algebra_writer(struct mesh_algebra *,struct mesh_view,struct mesh_writer *);
+int mesh_algebra_writer(struct mesh_algebra *,struct mesh_view,struct mesh_writer **);
 int mesh_writer_writable(struct mesh_writer *);
 int mesh_writer_issue(struct mesh_writer *);
-void mesh_writer_complete(struct mesh_writer *);
+void mesh_writer_complete(struct mesh_writer *,int publish);
 int mesh_algebra_source(struct mesh_algebra *,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,const uint8_t *access_axes,size_t row_begin,size_t row_count,size_t column_begin,size_t column_count);
 int mesh_algebra_indexed(struct mesh_algebra *,size_t function,struct mesh_view selector,const size_t *candidate_inputs,size_t input_count,const struct mesh_view *candidates,size_t count);
 int mesh_algebra_indexed_range(struct mesh_algebra *,size_t function,struct mesh_view selector,struct mesh_view range,const size_t *candidate_inputs,size_t input_count,const struct mesh_view *candidates,size_t count);
@@ -73,12 +68,6 @@ int mesh_algebra_available(struct mesh_algebra *,size_t output);
 void mesh_algebra_consume(struct mesh_algebra *,size_t output);
 size_t mesh_algebra_trace_count(struct mesh_algebra *);
 struct mesh_algebra_event mesh_algebra_trace(struct mesh_algebra *,size_t function);
-struct mesh_algebra_profile mesh_algebra_profile(struct mesh_algebra *,size_t function);
-const char *mesh_algebra_environment(struct mesh_algebra *);
-const char *mesh_algebra_specialization(struct mesh_algebra *,size_t function);
-const char *mesh_algebra_source_text(struct mesh_algebra *,size_t function,uint32_t language);
-size_t mesh_algebra_plan_count(struct mesh_algebra *,size_t function);
-struct mesh_algebra_plan mesh_algebra_plan(struct mesh_algebra *,size_t function,size_t plan);
 struct mesh_row_range mesh_algebra_trace_input(struct mesh_algebra *,size_t function,size_t input);
 struct mesh_row_range mesh_algebra_trace_output(struct mesh_algebra *,size_t function,size_t output);
 size_t mesh_algebra_trace_indexed_count(struct mesh_algebra *,size_t function);

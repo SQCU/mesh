@@ -1,5 +1,7 @@
 # Streaming kernel calls
 
+The [asynchronous collective contract](async-collectives.md) is the complete scope.
+
 Install with `python -m pip install .`. The public numerical interface is
 `Program.kernel_call`; composed expressions and realized backend kernels use the same
 configuration. `BlockSpec` describes block shape and an index map independently
@@ -32,16 +34,12 @@ publication must expose usable partial outputs asynchronously while computation
 continues. The numerical caller needs no separate publication scheduler,
 completion callback, or tensor-wide join.
 
-`kernels.matmul`, `add`, `multiply`, `swish`, `tanh`, `exp`, `row_sum`, `rsqrt`,
-and `affine(alpha, beta)` preserve the configured native backend functions.
-CPU, Metal/MPS, and configured Core ML contractions share publication ownership.
-For application arithmetic, compose `kernels.arguments`, indexed operations and
-`kernels.expression`. Arbitrary Python numerical callbacks are not an execution
-form: a callback can hide blocking control flow and prevents the shared lowering
-from seeing its operations. Backend registration and completion remain private
-to the library. Removing the callback interface does not by itself supply
-in-operation publication: extending the shared compiled lowering and publication
-owner to deliver that contract remains required work.
+The current Python entry point accepts expressions built with `kernels.arguments`,
+indexed operations and `kernels.expression`. Setup binds these to CPU, Metal/MPS,
+or configured Core ML contraction implementations. The present expression frontend
+is implementation, not an additional requirement to build a general compiler or
+prohibit other supplied numerical implementations. The contract is asynchronous
+region production and consumption through the supplied configuration.
 
 `program.export(ref)` retains only the pages touched by `ref`, including sliced,
 strided and transposed views. The resulting observation owns its own reader
@@ -52,10 +50,10 @@ calling-context observations; they do not schedule numerical work.
 
 Tensor storage is always canonical shared backing. Transpose, slices, and block
 index maps describe that storage. A region must fit the configured backing block;
-output regions own full publication quanta so a stamp never exposes unwritten
-payload. Setup may allocate separate backing for column tiles. The current host
+The current binder assigns complete publication quanta to output regions.
+Independent outputs need separate presence ownership; memory binding supplies it. The current host
 API supports two dimensions and clips boundary regions instead of padding them.
-This is not a JAX tracing or full Pallas compatibility claim.
+Pallas supplies the calling structure; JAX tracing and full compatibility are outside scope.
 
 `program.copy(source.on(peer), destination.on(peer), queue=...)` configures a
 transfer. Both participants declare corresponding destinations during setup.
@@ -66,62 +64,9 @@ property; numerical kernels contain no synchronization protocol.
 
 Constants are initialized with `program.constant` during setup. External input
 production uses `program.write(ref)`; this attempts issue without waiting and
-publishes on successful exit. `program.export(ref)` binds an output reader;
+publishes on successful exit. An exception leaves the region unpublished and
+releases its write claim so that production can retry. Writer bindings are owned
+by native mesh for the program lifetime. `program.export(ref)` binds an output reader;
 `ready` observes its stamps and `consume()` releases its reference. Returned
 arrays remain valid until consumption. Close the program after pending native
-work completes. Arbitrary supplied NumPy code may itself allocate or copy;
-the library guarantees its own backing and dependencies, not unknown kernel code.
-
-## Streaming FFN
-
-`mesh.nn.ffn` is a DNN composition of kernel calls outside the mesh runtime.
-It accepts input K partitions, up-weight blocks indexed by hidden section and
-K partition, and down-weight blocks indexed by hidden section:
-
-```python
-from mesh.nn import ffn
-
-y = ffn(program, inputs, up_weights, down_weights, tile_rows=128)
-```
-
-For row section r and hidden section h:
-
-    u[r,h] = sum_q x[r,q] @ up[h,q]
-    a[r,h] = swish(u[r,h])
-    p[r,h] = a[r,h] @ down[h]
-    y[r]   = sum_h p[r,h]
-
-Every product contribution has separate output storage. First-layer addition
-finishes only the hidden section needed by swish. That section's second-linear
-product can run while another hidden section is unfinished. Final additions
-combine corresponding row sections. Swish is never applied separately to terms
-of an unfinished sum. An optional setup-time `exchange` maps activated tensors
-to configured receive tensors; it contains no runtime numerical control.
-
-The numerical functions perform arithmetic and return. They contain no readiness
-polls, semaphores, host waits, or completion guards. Mesh still enforces the actual
-operand and storage-lifetime dependencies; absence is not treated as a numerical
-zero and concurrent producers do not race on one accumulator.
-
-Run `examples/streaming-algebra.py RANK --backend cpu` (or `metal`) on both peers
-for the two-K-partition, two-hidden-section composition. Stop the consumer with
-SIGTERM after the producer reports its checked result. The sustained performance
-client remains `examples/streaming-overlap.py`; its archived measurements are in
-[the overlap report](streaming-overlap-2026-09-13.md).
-
-See [caller migration status](caller-migration.md) for the remaining Xonotic
-application ports. They are part of the requested all-callers migration.
-
-FFN operational follow-up on September 13, 2026 used two K partitions, two hidden
-sections and two row sections over the M5 Max/M4 Pro RDMA pair. The CPU run had
-maximum absolute error 1.038887142285061e-7; Metal/MPS had
-1.0853451537506942e-7 against the float64 reference. The measured package source
-was branch main at 760dd5e. These are numerical checks, not new throughput claims.
-Both bridges used 4096 pages of 16384 bytes, with four-page messages and two QPs.
-
-A CPU `row_sum` follow-up at main 31e59ed used an 8×16 input with two
-4×16 input blocks and 4×1 output blocks. Publishing only the first input block
-made the first output ready with four values of 32 while the second output
-remained absent. Publishing the second block then produced four values of 48.
-The 16-byte output sections occupied separate canonical publication extents;
-no complete-operand readiness dependency was needed.
+work completes.

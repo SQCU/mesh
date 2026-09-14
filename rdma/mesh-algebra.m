@@ -13,8 +13,6 @@
 #include <dlfcn.h>
 #include <time.h>
 #include <arm_neon.h>
-#include <sys/sysctl.h>
-#include <mach-o/loader.h>
 
 /* design/algorithm-sources.md#streaming-algebra */
 static NSString *const source = @
@@ -48,6 +46,7 @@ struct mesh_extent {
   struct mesh_shape shape;
 };
 struct mesh_tensor { struct mesh_ctx *context; size_t count; struct mesh_extent *extents; };
+struct mesh_writer { struct mesh_ctx *context; struct mesh_row_map output; struct mesh_row_function function; struct mesh_writer *next; };
 struct geometry_view { uint64_t offset,rows,columns,row_stride,column_stride; };
 struct geometry { struct geometry_view a,b,o; float alpha,beta; uint64_t first,count; };
 
@@ -62,7 +61,7 @@ enum mesh_execution_kind { MESH_EXECUTION_CPU, MESH_EXECUTION_METAL, MESH_EXECUT
 
 typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publication *);
 @interface MeshCode : NSObject
-@property NSString *source,*digest;
+@property NSString *source;
 @end
 @implementation MeshCode
 @end
@@ -86,21 +85,15 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
   struct mesh_row_map output;
   struct mesh_row_function function;
   struct geometry geometry;
-  struct mesh_algebra_plan plan;
   struct mesh_kernel_publication publication;
   uint32_t occurrence;
   enum mesh_execution_kind executionKind;
-  uint32_t backend;
-  _Atomic uint64_t successful,failed,gpuSamples;
-  _Atomic double dispatchMean,dispatchM2,executionMean,executionM2,gpuMean,gpuM2;
   _Atomic uint64_t readyNs,startNs,completeNs,gpuStartNs,gpuEndNs,invocations;
 }
 @property NSArray<MeshFunction *> *plans;
 @property NSArray<MeshExtent *> *operands;
 @property MeshCPUCode *cpuCode;
-@property MeshMetalCode *metalCode;
 @property id<MTLComputePipelineState> metalPipeline;
-@property NSString *specialization;
 @property NSData *cpuArguments;
 @property NSMutableData *publicationSections;
 @property NSMutableData *dependencies,*results;
@@ -128,9 +121,9 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @public
   struct mesh_ctx *context;
   struct mesh_route *routes;
+  struct mesh_writer *writers;
   _Atomic uint64_t submitted;
   _Atomic uint64_t nativeSubmitted,cpuSubmitted;
-  uint64_t nePlannedOperations;
   uint32_t copies;
   _Atomic uint64_t completed,gpuNanoseconds,nativeBackings;
   _Atomic int64_t code;
@@ -150,7 +143,6 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property NSMutableData *bindings;
 @property NSMutableData *returns,*observations;
 @property NSString *coremlPython,*coremlGenerator,*coremlCache;
-@property NSString *environment;
 @property NSMutableDictionary<NSString *,MLModel *> *models;
 @end
 @implementation MeshAlgebra
@@ -165,6 +157,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
       mesh_rows_release(context,d->retired,2*d->candidates+2);
     }
   }
+  while(writers){struct mesh_writer *next=writers->next;free(writers);writers=next;}
   struct mesh_route *route=routes;
   while(route){
     struct mesh_route *next=route->next;
@@ -197,29 +190,9 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 }
 @end
 
-/* design/algorithm-sources.md#function-cost-profiles */
-static void profile_moment(_Atomic double *mean,_Atomic double *m2,uint64_t count,double value) {
-  double previous=atomic_load_explicit(mean,memory_order_relaxed),delta=value-previous,next=previous+delta/(double)count;
-  atomic_store_explicit(mean,next,memory_order_relaxed);
-  atomic_store_explicit(m2,atomic_load_explicit(m2,memory_order_relaxed)+delta*(value-next),memory_order_relaxed);
-}
 /* design/algorithm-sources.md#indexed-library-functions */
 static void complete_part(MeshFunction *f,int64_t error,uint64_t nanoseconds) {
   MeshAlgebra *a=f.owner;uint64_t complete=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-  /* design/algorithm-sources.md#function-cost-profiles */
-  if(error)atomic_store_explicit(&f->failed,atomic_load_explicit(&f->failed,memory_order_relaxed)+1,memory_order_relaxed);
-  else {
-    uint64_t count=atomic_load_explicit(&f->successful,memory_order_relaxed)+1,start=atomic_load_explicit(&f->startNs,memory_order_relaxed);
-    profile_moment(&f->dispatchMean,&f->dispatchM2,count,(double)(start-atomic_load_explicit(&f->readyNs,memory_order_relaxed)));
-    profile_moment(&f->executionMean,&f->executionM2,count,(double)(complete-start));
-    uint64_t gpu_start=atomic_load_explicit(&f->gpuStartNs,memory_order_relaxed),gpu_end=atomic_load_explicit(&f->gpuEndNs,memory_order_relaxed);
-    if(f->executionKind==MESH_EXECUTION_METAL && gpu_start && gpu_end>=gpu_start){
-      uint64_t samples=atomic_load_explicit(&f->gpuSamples,memory_order_relaxed)+1;
-      profile_moment(&f->gpuMean,&f->gpuM2,samples,(double)(gpu_end-gpu_start));
-      atomic_store_explicit(&f->gpuSamples,samples,memory_order_relaxed);
-    }
-    atomic_store_explicit(&f->successful,count,memory_order_relaxed);
-  }
   atomic_store(&f->completeNs,complete);
   if(error)atomic_store(&a->code,error);
   else mesh_complete(a->context,&f->function,&f->occurrence,1);
@@ -227,51 +200,6 @@ static void complete_part(MeshFunction *f,int64_t error,uint64_t nanoseconds) {
 }
 /* design/algorithm-sources.md#streaming-algebra */
 static MeshAlgebra *owner(struct mesh_algebra *a) { return (__bridge MeshAlgebra *)a; }
-/* design/algorithm-sources.md#cost-environment */
-static id environment_sysctl(const char *name,BOOL text) {
-  size_t size=0;if(sysctlbyname(name,NULL,&size,NULL,0))return NSNull.null;
-  NSMutableData *data=[NSMutableData dataWithLength:MAX(size,sizeof(uint64_t))];
-  if(sysctlbyname(name,data.mutableBytes,&size,NULL,0))return NSNull.null;
-  if(text)return [[NSString alloc]initWithBytes:data.bytes length:strnlen(data.bytes,size) encoding:NSUTF8StringEncoding]?:NSNull.null;
-  uint64_t value=0;memcpy(&value,data.bytes,MIN(size,sizeof value));return @(value);
-}
-/* design/algorithm-sources.md#cost-environment */
-static id environment_image(const void *symbol) {
-  Dl_info info;if(!dladdr(symbol,&info))return NSNull.null;
-  NSMutableDictionary *result=[NSMutableDictionary dictionaryWithObject:@(info.dli_fname) forKey:@"path"];
-  const struct mach_header_64 *header=info.dli_fbase;
-  if(header->magic==MH_MAGIC_64){
-    const struct load_command *command=(const struct load_command *)(header+1);
-    for(uint32_t i=0;i<header->ncmds;i++){
-      if(command->cmd==LC_UUID)result[@"uuid"]=[[NSUUID alloc]initWithUUIDBytes:((const struct uuid_command *)command)->uuid].UUIDString;
-      command=(const struct load_command *)((const char *)command+command->cmdsize);
-    }
-  }
-  return result;
-}
-/* design/algorithm-sources.md#cost-environment */
-static id environment_compiler(void) {
-  NSTask *task=[NSTask new];task.executableURL=[NSURL fileURLWithPath:@"/usr/bin/clang"];task.arguments=@[@"--version"];
-  NSPipe *pipe=[NSPipe pipe];task.standardOutput=pipe;task.standardError=pipe;NSError *error=nil;
-  if(![task launchAndReturnError:&error])return @{@"path":@"/usr/bin/clang",@"error":@(error.code)};
-  NSData *output=[pipe.fileHandleForReading readDataToEndOfFile];[task waitUntilExit];
-  return @{@"path":@"/usr/bin/clang",@"version":[[NSString alloc]initWithData:output encoding:NSUTF8StringEncoding]?:@"",@"status":@(task.terminationStatus)};
-}
-/* design/algorithm-sources.md#cost-environment */
-static NSString *environment_snapshot(MeshAlgebra *a) {
-  NSMutableDictionary *hardware=[NSMutableDictionary new];
-  for(NSString *key in @[@"hw.model",@"machdep.cpu.brand_string"])hardware[key]=environment_sysctl(key.UTF8String,YES);
-  for(NSString *key in @[@"hw.cputype",@"hw.cpusubtype",@"hw.physicalcpu",@"hw.logicalcpu",@"hw.memsize"])hardware[key]=environment_sysctl(key.UTF8String,NO);
-  id device=NSNull.null;
-  if(a.device){
-    NSMutableArray *families=[NSMutableArray new];
-    for(NSNumber *family in @[@1001,@1002,@1003,@1004,@1005,@1006,@1007,@1008,@1009,@1010,@2002,@5001,@5002])if([a.device supportsFamily:family.unsignedIntegerValue])[families addObject:family];
-    device=@{@"name":a.device.name,@"architecture":a.device.architecture.name,@"registry_id":@(a.device.registryID),@"unified_memory":@(a.device.hasUnifiedMemory),@"families":families};
-  }
-  NSDictionary *libraries=@{@"mesh_algebra":environment_image((const void *)mesh_algebra_profile),@"mesh":environment_image((const void *)mesh_context),@"accelerate":environment_image((const void *)cblas_sgemm),@"metal":environment_image((const void *)MTLCreateSystemDefaultDevice),@"mps":environment_image((__bridge const void *)[MPSMatrixMultiplication class]),@"coreml":environment_image((__bridge const void *)[MLModel class])};
-  NSDictionary *snapshot=@{@"version":@1,@"complete_cost_key":@NO,@"hardware":hardware,@"os":@{@"build":environment_sysctl("kern.osversion",YES),@"release":environment_sysctl("kern.osrelease",YES)},@"device":device,@"libraries":libraries,@"compiler":a.cpu?environment_compiler():NSNull.null};
-  return [[NSString alloc]initWithData:[NSJSONSerialization dataWithJSONObject:snapshot options:NSJSONWritingSortedKeys error:nil] encoding:NSUTF8StringEncoding];
-}
 /* design/algorithm-sources.md#streaming-algebra */
 static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
   if(!context || !context->M){errno=EINVAL;return NULL;}
@@ -285,7 +213,6 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
   a.libraries=[NSMutableDictionary new];a.cpuCode=[NSMutableDictionary new];
   a.functions=[NSMutableArray new]; a.extents=[NSMutableArray new]; a.lookup=[NSMutableDictionary new];
   a.tensors=[NSMutableData new]; a.bindings=[NSMutableData new]; a.returns=[NSMutableData new]; a.observations=[NSMutableData new];
-  a.environment=environment_snapshot(a);
   return (__bridge_retained struct mesh_algebra *)a;
 }
 /* design/algorithm-sources.md#cpu-indexed-execution */
@@ -385,14 +312,14 @@ size_t mesh_tensor_publication_bytes(struct mesh_tensor *t,uint32_t i) {
 /* design/algorithm-sources.md#streaming-algebra */
 void *mesh_tensor_data(struct mesh_tensor *t,uint32_t i) { return t && i<t->count?t->extents[i].address:NULL; }
 /* design/algorithm-sources.md#streaming-algebra */
-struct mesh_row_map mesh_tensor_rows(struct mesh_tensor *t,uint32_t i) {
-  if(!t || i>=t->count)return (struct mesh_row_map){0};
-  return (struct mesh_row_map){.first=t->extents[i].first,.count=t->extents[i].pages};
+struct mesh_row_range mesh_tensor_rows(struct mesh_tensor *t,uint32_t i) {
+  if(!t || i>=t->count)return (struct mesh_row_range){0};
+  return (struct mesh_row_range){.first=t->extents[i].first,.count=t->extents[i].pages};
 }
 /* design/algorithm-sources.md#streaming-algebra */
 int mesh_tensor_constant(struct mesh_tensor *t,uint32_t i) {
   if(!t || i>=t->count)return EINVAL;
-  struct mesh_row_map m=mesh_tensor_rows(t,i);mesh_constant(t->context,m.first,m.count);return 0;
+  struct mesh_row_range m=mesh_tensor_rows(t,i);mesh_constant(t->context,m.first,m.count);return 0;
 }
 /* design/algorithm-sources.md#view-scoped-host-production */
 int mesh_writer_writable(struct mesh_writer *w) {
@@ -403,8 +330,9 @@ int mesh_writer_issue(struct mesh_writer *w) {
   uint32_t index=0;return mesh_issue(w->context,&w->function,&index,1)!=0;
 }
 /* design/algorithm-sources.md#view-scoped-host-production */
-void mesh_writer_complete(struct mesh_writer *w) {
-  uint32_t index=0;mesh_complete(w->context,&w->function,&index,1);
+void mesh_writer_complete(struct mesh_writer *w,int publish) {
+  if(publish){uint32_t index=0;mesh_complete(w->context,&w->function,&index,1);}
+  else mesh_bits_clear(w->context->M,MESH_PRODUCING,w->output.first,w->output.count);
 }
 /* design/algorithm-sources.md#streaming-algebra */
 static int valid_view(MeshAlgebra *a,struct mesh_view v) {
@@ -478,13 +406,16 @@ static int output_region(MeshAlgebra *a,struct mesh_view v,struct mesh_row_map *
   return 0;
 }
 /* design/algorithm-sources.md#view-scoped-host-production */
-int mesh_algebra_writer(struct mesh_algebra *handle,struct mesh_view view,struct mesh_writer *w) {
-  if(!w)return EINVAL;
+int mesh_algebra_writer(struct mesh_algebra *handle,struct mesh_view view,struct mesh_writer **result) {
+  if(!result)return EINVAL;
+  *result=NULL;
   MeshAlgebra *a=owner(handle);
-  *w=(struct mesh_writer){0};
-  int error=output_region(a,view,&w->output);if(error)return error;
-  w->context=a->context;
+  struct mesh_row_map output;
+  int error=output_region(a,view,&output);if(error)return error;
+  struct mesh_writer *w=calloc(1,sizeof *w);if(!w)return ENOMEM;
+  w->context=a->context;w->output=output;
   w->function=(struct mesh_row_function){.output=&w->output,.outputs=1,.rows=1};
+  w->next=a->writers;a->writers=w;*result=w;
   return 0;
 }
 /* design/algorithm-sources.md#region-streaming-review */
@@ -665,7 +596,7 @@ static void route_dependencies(MeshFunction *f){
     while(first<end){
       uint32_t lo=end,hi=end;
       for(struct mesh_route_use *u=f->function.routes;u;u=u->next)for(uint32_t j=0;j<=u->domain->metadata_count;j++){
-        struct mesh_row_map held=j<u->domain->metadata_count?u->domain->metadata[j]:mesh_tensor_rows(u->domain->table,0);
+        struct mesh_row_range held=j<u->domain->metadata_count?mesh_range(u->domain->metadata[j],0):mesh_tensor_rows(u->domain->table,0);
         if(held.first<end && held.first+held.count>first && held.first<lo){lo=held.first;hi=held.first+held.count;}
       }
       if(lo>first){struct mesh_row_map kept={.first=first,.count=lo-first};[f.dependencies appendBytes:&kept length:sizeof kept];}
@@ -742,49 +673,18 @@ int mesh_algebra_indexed(struct mesh_algebra *handle,size_t index,struct mesh_vi
 }
 
 struct cpu_operand {const void *address;struct geometry_view view;float (*load)(const void *,size_t);};
-/* design/algorithm-sources.md#compiled-specialization-identities */
-static NSString *specialization_digest(const void *bytes,size_t length) {
-  unsigned char digest[CC_SHA256_DIGEST_LENGTH];CC_SHA256_CTX context;CC_SHA256_Init(&context);
-  const unsigned char *at=bytes;
-  for(size_t remaining=length;remaining;){CC_LONG count=(CC_LONG)MIN(remaining,(size_t)UINT_MAX);CC_SHA256_Update(&context,at,count);at+=count;remaining-=count;}
-  CC_SHA256_Final(digest,&context);NSMutableString *text=[NSMutableString new];
-  for(size_t i=0;i<sizeof digest;i++)[text appendFormat:@"%02x",digest[i]];
-  return text;
-}
-/* design/algorithm-sources.md#compiled-specialization-identities */
+/* design/algorithm-sources.md#region-expression-fusion */
 static MeshCode *source_code(MeshAlgebra *a,const char *text,BOOL cpu) {
   NSMutableDictionary *cache=cpu?(NSMutableDictionary *)a.cpuCode:(NSMutableDictionary *)a.libraries;NSString *source=@(text);MeshCode *code=cache[source];
   if(!code){
     code=cpu?[MeshCPUCode new]:[MeshMetalCode new];code.source=source;
-    code.digest=specialization_digest(text,strlen(text));cache[source]=code;
+    cache[source]=code;
   }
   return code;
 }
-/* design/algorithm-sources.md#compiled-specialization-identities */
-static NSArray *specialization_views(const struct mesh_view *views,size_t count) {
-  NSMutableArray *result=[NSMutableArray new];
-  for(size_t i=0;i<count;i++){
-    struct mesh_view v=views[i];
-    [result addObject:@{@"tensor":@((uintptr_t)v.tensor),@"extent":@(v.extent),@"offset":@(v.offset),@"rows":@(v.rows),@"columns":@(v.columns),@"row_stride":@(v.row_stride),@"column_stride":@(v.column_stride),@"scalar":@(v.tensor->extents[v.extent].shape.scalar)}];
-  }
-  return result;
-}
-/* design/algorithm-sources.md#compiled-specialization-identities */
+/* design/algorithm-sources.md#region-expression-fusion */
 static MTLCompileOptions *source_options(void) {
   MTLCompileOptions *options=[MTLCompileOptions new];options.mathMode=MTLMathModeSafe;return options;
-}
-/* design/algorithm-sources.md#compiled-specialization-identities */
-static void specialize_function(MeshFunction *f,MeshCPUCode *cpu,MeshMetalCode *metal,MTLCompileOptions *metal_options,size_t rows,const uint64_t domain[3],const struct mesh_view *inputs,size_t input_count,struct mesh_view output) {
-  f.cpuCode=cpu;f.metalCode=metal;NSMutableDictionary *sources=[NSMutableDictionary dictionaryWithObject:metal.digest forKey:@"metal"];
-  if(cpu)sources[@"cpu"]=cpu.digest;
-  NSString *pair=[NSString stringWithFormat:@"cpu:%@\nmetal:%@\n",cpu?cpu.digest:@"",metal.digest];
-  NSData *identity=[pair dataUsingEncoding:NSUTF8StringEncoding];NSArray *geometry=@[@{@"name":@"mesh_expression",@"grid":@[@(rows),@1,@1],@"group":@[@32,@1,@1]}];
-  NSArray *configured=@[@{@"slot":@1,@"length":@(3*sizeof(uint64_t)),@"sha256":specialization_digest(domain,3*sizeof(uint64_t))}];
-  NSMutableDictionary *options=[NSMutableDictionary dictionaryWithObject:@{@"math_mode":@(metal_options.mathMode),@"floating_point_functions":@(metal_options.mathFloatingPointFunctions)} forKey:@"metal"];
-  if(cpu)options[@"cpu"]=@{@"compiler":@"/usr/bin/clang",@"arguments":@[@"-O3",@"-dynamiclib"],@"entrypoint":@"mesh_expression"};
-  NSDictionary *descriptor=@{@"version":@1,@"backend":@(f->backend),@"sources":sources,@"source_pair":specialization_digest(identity.bytes,identity.length),@"selected_source":f->executionKind==MESH_EXECUTION_CPU?cpu.digest:metal.digest,@"dispatches":geometry,@"constants":configured,@"inputs":specialization_views(inputs,input_count),@"outputs":specialization_views(&output,1),@"compile_options":options};
-  NSData *json=[NSJSONSerialization dataWithJSONObject:descriptor options:NSJSONWritingSortedKeys error:nil];
-  f.specialization=[[NSString alloc]initWithData:json encoding:NSUTF8StringEncoding];
 }
 /* design/algorithm-sources.md#realized-numerical-invocation */
 static void submit_encoded_metal(MeshFunction *f,void (^encode)(id<MTLCommandBuffer>)) {
@@ -799,7 +699,7 @@ static void submit_encoded_metal(MeshFunction *f,void (^encode)(id<MTLCommandBuf
 /* design/algorithm-sources.md#realized-numerical-invocation */
 static void submit_metal(MeshFunction *f) {submit_encoded_metal(f,f.encode);}
 /* design/algorithm-sources.md#recorded-metal-commands */
-static int bind_metal(struct mesh_algebra *handle,const char *text,size_t rows,const uint64_t domain[3],const struct mesh_view *inputs,size_t input_count,struct mesh_view output,MeshCPUCode *paired,const struct mesh_view *reads,struct mesh_view write) {
+static int bind_metal(struct mesh_algebra *handle,const char *text,size_t rows,const uint64_t domain[3],const struct mesh_view *inputs,size_t input_count,struct mesh_view output,const struct mesh_view *reads,struct mesh_view write) {
   MeshAlgebra *a=owner(handle);
   NSError *error=nil;MTLCompileOptions *options=source_options();
   MeshMetalCode *code=(MeshMetalCode *)source_code(a,text,NO);id<MTLLibrary> library=code.library;
@@ -838,8 +738,7 @@ static int bind_metal(struct mesh_algebra *handle,const char *text,size_t rows,c
   [resources addObject:addresses];[resources addObject:bounds];
   int status=bind_function(handle,reads,input_count,&write,1,submit_metal);
   if(status)return status;
-  MeshFunction *f=a.functions.lastObject;f.metalPipeline=pipeline;f->executionKind=MESH_EXECUTION_METAL;f->backend=MESH_BACKEND_METAL_COMPILED;
-  specialize_function(f,paired,code,options,rows,domain,inputs,input_count,output);
+  MeshFunction *f=a.functions.lastObject;f.metalPipeline=pipeline;f->executionKind=MESH_EXECUTION_METAL;
   f.encode=^(id<MTLCommandBuffer> command){
     id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
     for(id<MTLBuffer> buffer in resources)[encoder useResource:buffer usage:MTLResourceUsageRead|MTLResourceUsageWrite];
@@ -895,11 +794,11 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
     int row=(access_axes[i]&1) && inputs[i].rows!=1,column=(access_axes[i]&2) && inputs[i].columns!=1;
     reads[i]=mesh_view_slice(inputs[i],row?row_begin:0,column?column_begin:0,row?row_count:inputs[i].rows,column?column_count:inputs[i].columns);
   }
+  uint64_t domain[]={row_begin,column_begin,column_begin+column_count};
+  if(!a.cpu)return bind_metal(handle,metal_source,row_count,domain,inputs,input_count,output,reads,region);
   NSString *cpu_text=[@MESH_KERNEL_SOURCE stringByAppendingString:@(cpu_source)];
   MeshCPUCode *library=(MeshCPUCode *)source_code(a,cpu_text.UTF8String,YES);
-  uint64_t domain[]={row_begin,column_begin,column_begin+column_count};
-  if(!a.cpu)return bind_metal(handle,metal_source,row_count,domain,inputs,input_count,output,library,reads,region);
-  MeshMetalCode *metal=(MeshMetalCode *)source_code(a,metal_source,NO);NSString *source=library.source;
+  NSString *source=library.source;
   if(!library.handle) {
     NSError *error=nil;NSFileManager *files=NSFileManager.defaultManager;
     NSString *directory=[NSTemporaryDirectory() stringByAppendingPathComponent:[@"mesh-cpu-" stringByAppendingString:NSUUID.UUID.UUIDString]];
@@ -927,11 +826,11 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
   }
   int status=bind_function(handle,reads,input_count,&region,1,submit_cpu);
   if(status)return status;
-  MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_CPU;f->backend=MESH_BACKEND_CPU_COMPILED;
+  MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_CPU;
   bind_publication(f,region);
   struct mesh_kernel_section *sections=f.publicationSections.mutableBytes;
   for(size_t i=0;i<f->publication.count;i++){sections[i].row_begin+=row_begin;sections[i].row_end+=row_begin;sections[i].column_begin=column_begin;sections[i].column_end=column_begin+column_count;}
-  specialize_function(f,library,metal,source_options(),row_count,domain,inputs,input_count,output);f.cpuArguments=addresses;
+  f.cpuCode=library;f.cpuArguments=addresses;
   return 0;
 }
 
@@ -1002,9 +901,9 @@ static void cpu_contract_tile(const struct cpu_contract *g) {
 }
 /* design/algorithm-sources.md#cpu-indexed-execution */
 static void cpu_part(MeshFunction *f,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta,size_t first,size_t count) {
-  f->backend=MESH_BACKEND_CPU_BUILTIN;
+
   if(op==MESH_CONTRACT && x.tensor->extents[x.extent].shape.scalar==MESH_F32 && y.tensor->extents[y.extent].shape.scalar==MESH_F32 && z.tensor->extents[z.extent].shape.scalar==MESH_F32){
-    f->backend=MESH_BACKEND_CPU_SGEMM;
+
     struct gemm {const float *a,*b;float *c;__LAPACK_int m,n,k,lda,ldb,ldc;enum CBLAS_TRANSPOSE tx,ty;};
     NSMutableData *calls=[NSMutableData new];
     for(size_t at=first,left=count;left;){
@@ -1028,7 +927,7 @@ static void cpu_part(MeshFunction *f,enum mesh_algebra_op op,struct mesh_view x,
 
   struct cpu_operand a=cpu_operand(x),b=cpu_operand(y);
   if(op==MESH_CONTRACT){
-    f->backend=MESH_BACKEND_CPU_NEON_CONTRACT;
+
     struct mesh_extent *out=&z.tensor->extents[z.extent];
     struct cpu_contract g={.a=a,.b=b,.output=out->address,.z=geometry(z),.alpha=alpha,
       .left=a.load==cpu_f16?(x.row_stride==1?cpu_f16x4:cpu_f16x4_strided):(x.row_stride==1?cpu_f32x4:cpu_f32x4_strided),
@@ -1104,16 +1003,6 @@ static int native_part(MeshAlgebra *a,MeshFunction *f,NSArray *rectangles,NSDict
     model=[MLModel modelWithContentsOfURL:compiled configuration:configuration error:&error];
     if(!model){fprintf(stderr,"mesh CoreML binding: %s\n",error.description.UTF8String);return (int)error.code;}
     a.models[key]=model;
-    dispatch_semaphore_t ready=dispatch_semaphore_create(0);
-    [MLComputePlan loadContentsOfURL:compiled configuration:configuration completionHandler:^(MLComputePlan *plan,NSError *failure){
-      for(MLModelStructureProgramFunction *function in plan.modelStructure.program.functions.allValues)for(MLModelStructureProgramOperation *operation in function.block.operations) {
-        id<MLComputeDeviceProtocol> device=[plan computeDeviceUsageForMLProgramOperation:operation].preferredComputeDevice;
-        if([device isKindOfClass:MLNeuralEngineComputeDevice.class])a->nePlannedOperations++;
-      }
-      if(failure)fprintf(stderr,"mesh CoreML plan: %s\n",failure.description.UTF8String);
-      dispatch_semaphore_signal(ready);
-    }];
-    dispatch_semaphore_wait(ready,DISPATCH_TIME_FOREVER);
   }
   struct mesh_extent *out=&z.tensor->extents[z.extent];size_t bytes=scalar_bytes(out->shape.scalar);
   MLMultiArray *output=[[MLMultiArray alloc]initWithDataPointer:(char *)out->address+(z.offset+first)*bytes shape:@[@(count)] dataType:bytes==2?MLMultiArrayDataTypeFloat16:MLMultiArrayDataTypeFloat32 strides:@[@1] deallocator:nil error:&error];
@@ -1138,7 +1027,6 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,enum mesh_algebra_op op,s
   size_t scalar=scalar_bytes(out->shape.scalar);
   f->output=(struct mesh_row_map){.first=out->first+(uint32_t)((z.offset+first)*scalar/a->context->M->pgsz),.count=out->quantum};
   f->geometry=(struct geometry){geometry(x),geometry(y),geometry(z),alpha,beta,first,count};
-  f->plan=(struct mesh_algebra_plan){.left=x,.right=y,.output=z,.first=first,.count=count,.operation=op,.left_scalar=x.tensor->extents[x.extent].shape.scalar,.right_scalar=y.tensor->extents[y.extent].shape.scalar,.output_scalar=out->shape.scalar,.alpha=alpha,.beta=beta};
   f.operands=@[a.lookup[[NSValue valueWithPointer:&x.tensor->extents[x.extent]]],a.lookup[[NSValue valueWithPointer:&y.tensor->extents[y.extent]]],a.lookup[[NSValue valueWithPointer:out]]];
   BOOL dense=z.column_stride==1,binary=op==MESH_ADD || op==MESH_MULTIPLY || op==MESH_CONTRACT;
   size_t columns=dense?z.columns:z.rows;
@@ -1146,7 +1034,6 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,enum mesh_algebra_op op,s
   NSMutableArray<NSArray<MPSMatrix *> *> *matrices=[NSMutableArray new];
   NSMutableArray *rectangles=[NSMutableArray new];NSMutableDictionary *features=[NSMutableDictionary new];
   for(size_t at=first,left=count;left;) {
-    f->plan.rectangles++;
     size_t row=at/columns,column=at%columns,nr=1,nc=MIN(left,columns-column);
     if(!column && left>=columns){nr=left/columns;nc=columns;}
     size_t zr=dense?row:column,zc=dense?column:row,rr=dense?nr:nc,cc=dense?nc:nr;
@@ -1174,13 +1061,13 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,enum mesh_algebra_op op,s
     f->executionKind=MESH_EXECUTION_CPU;
     cpu_part(f,op,x,y,z,alpha,beta,first,count);
   } else if(op==MESH_CONTRACT && a.coremlPython) {
-    f->executionKind=MESH_EXECUTION_COREML;f->backend=MESH_BACKEND_COREML;
+    f->executionKind=MESH_EXECUTION_COREML;
     int error=native_part(a,f,rectangles,features,z,first,count,alpha);if(error)return error;
   } else if(op==MESH_CONTRACT) {
-    f->backend=MESH_BACKEND_METAL_MPS;
+
     f.encode=^(id<MTLCommandBuffer> command){for(NSUInteger i=0;i<products.count;i++)[products[i] encodeToCommandBuffer:command leftMatrix:matrices[i][0] rightMatrix:matrices[i][1] resultMatrix:matrices[i][2]];};
   } else {
-    f->backend=MESH_BACKEND_METAL_BUILTIN;
+
     MTLFunctionConstantValues *values=[MTLFunctionConstantValues new];uint32_t operation=(uint32_t)op;
     [values setConstantValue:&operation type:MTLDataTypeUInt atIndex:0];
     for(NSUInteger i=0;i<3;i++){BOOL half=f.operands[i].extent.shape.scalar==MESH_F16;[values setConstantValue:&half type:MTLDataTypeBool atIndex:i+1];}
@@ -1202,7 +1089,6 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,enum mesh_algebra_op op,s
     void (^encode)(id<MTLCommandBuffer>)=f.encode;
     f.execute=^(MeshFunction *function){submit_encoded_metal(function,encode);};
   }
-  f->plan.backend=f->backend;
   return 0;
 }
 /* design/algorithm-sources.md#selected-native-contractions */
@@ -1268,8 +1154,7 @@ int mesh_algebra_contract_select(struct mesh_algebra *handle,struct mesh_view se
   for(size_t i=0;i<reads.length/sizeof *maps;i++)if(overlaps(maps[i],out))return EINVAL;
   MeshFunction *f=[MeshFunction new];f.owner=a;f.dependencies=reads;f.inputViews=views;f.indexedInputs=[NSMutableIndexSet new];
   f->output=out;f->function=(struct mesh_row_function){.output=&f->output,.outputs=1,.rows=1};bind_dependencies(f);
-  f.plans=plans;f->executionKind=plans[0]->executionKind;f->backend=plans[0]->backend;
-  for(MeshFunction *plan in plans)if(plan->backend!=f->backend)f->backend=MESH_BACKEND_SELECTED_MIXED;
+  f.plans=plans;f->executionKind=plans[0]->executionKind;
   const uint32_t *selection=(const uint32_t *)selector.tensor->extents[selector.extent].address+selector.offset;
   f.execute=^(MeshFunction *function){
     uint32_t selected=*selection;
@@ -1360,7 +1245,7 @@ int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_
     }
     f->output=(struct mesh_row_map){.first=output.first+(uint32_t)(first*scalar/a->context->M->pgsz),.count=d->quantum};
     f->function=(struct mesh_row_function){.output=&f->output,.outputs=1,.rows=1};bind_dependencies(f);
-    f->backend=MESH_BACKEND_CPU_BUILTIN;
+
     f.execute=^(MeshFunction *function){
       const struct mesh_copy_segment *parts=segments.bytes;
       for(size_t i=0;i<segments.length/sizeof *parts;i++) {
@@ -1584,7 +1469,7 @@ void mesh_algebra_consume(struct mesh_algebra *handle,size_t index) {
 }
 /* design/algorithm-sources.md#streaming-algebra */
 struct mesh_algebra_report mesh_algebra_report(struct mesh_algebra *handle) {
-  MeshAlgebra *a=owner(handle);return (struct mesh_algebra_report){.submitted=a->submitted,.completed=atomic_load(&a->completed),.native_submitted=atomic_load(&a->nativeSubmitted),.native_backings=atomic_load(&a->nativeBackings),.ne_planned_operations=a->nePlannedOperations,.code=atomic_load(&a->code),.gpu_seconds=atomic_load(&a->gpuNanoseconds)/1e9,.cpu_submitted=atomic_load(&a->cpuSubmitted)};
+  MeshAlgebra *a=owner(handle);return (struct mesh_algebra_report){.submitted=a->submitted,.completed=atomic_load(&a->completed),.native_submitted=atomic_load(&a->nativeSubmitted),.native_backings=atomic_load(&a->nativeBackings),.code=atomic_load(&a->code),.gpu_seconds=atomic_load(&a->gpuNanoseconds)/1e9,.cpu_submitted=atomic_load(&a->cpuSubmitted)};
 }
 
 /* design/algorithm-sources.md#region-execution-timing */
@@ -1595,40 +1480,6 @@ struct mesh_algebra_event mesh_algebra_trace(struct mesh_algebra *handle,size_t 
   MeshFunction *f=a.functions[index];
   return (struct mesh_algebra_event){.ready_ns=atomic_load(&f->readyNs),.start_ns=atomic_load(&f->startNs),.complete_ns=atomic_load(&f->completeNs),.gpu_start_ns=atomic_load(&f->gpuStartNs),.gpu_end_ns=atomic_load(&f->gpuEndNs),.submissions=atomic_load(&f->invocations),.first_output=f->function.output[0].first,.output_maps=f->function.outputs,.kind=f->executionKind,.input_maps=f->function.inputs};
 }
-/* design/algorithm-sources.md#cost-environment */
-const char *mesh_algebra_environment(struct mesh_algebra *handle) {return owner(handle).environment.UTF8String;}
-/* design/algorithm-sources.md#compiled-specialization-identities */
-const char *mesh_algebra_specialization(struct mesh_algebra *handle,size_t index) {
-  MeshAlgebra *a=owner(handle);return index<a.functions.count?a.functions[index].specialization.UTF8String:NULL;
-}
-/* design/algorithm-sources.md#compiled-specialization-identities */
-const char *mesh_algebra_source_text(struct mesh_algebra *handle,size_t index,uint32_t language) {
-  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return NULL;MeshFunction *f=a.functions[index];
-  return language==0?f.cpuCode.source.UTF8String:language==1?f.metalCode.source.UTF8String:NULL;
-}
-/* design/algorithm-sources.md#function-cost-profiles */
-size_t mesh_algebra_plan_count(struct mesh_algebra *handle,size_t index) {
-  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return 0;
-  MeshFunction *f=a.functions[index];return f.plans?f.plans.count:f->plan.output.tensor?1:0;
-}
-/* design/algorithm-sources.md#function-cost-profiles */
-struct mesh_algebra_plan mesh_algebra_plan(struct mesh_algebra *handle,size_t index,size_t plan) {
-  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_algebra_plan){0};
-  MeshFunction *f=a.functions[index];
-  if(f.plans)return plan<f.plans.count?f.plans[plan]->plan:(struct mesh_algebra_plan){0};
-  return plan==0?f->plan:(struct mesh_algebra_plan){0};
-}
-/* design/algorithm-sources.md#function-cost-profiles */
-struct mesh_algebra_profile mesh_algebra_profile(struct mesh_algebra *handle,size_t index) {
-  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_algebra_profile){0};
-  MeshFunction *f=a.functions[index];
-  return (struct mesh_algebra_profile){
-    .successful=atomic_load_explicit(&f->successful,memory_order_relaxed),.failed=atomic_load_explicit(&f->failed,memory_order_relaxed),.gpu_samples=atomic_load_explicit(&f->gpuSamples,memory_order_relaxed),
-    .dispatch_mean_ns=atomic_load_explicit(&f->dispatchMean,memory_order_relaxed),.dispatch_m2_ns2=atomic_load_explicit(&f->dispatchM2,memory_order_relaxed),
-    .execution_mean_ns=atomic_load_explicit(&f->executionMean,memory_order_relaxed),.execution_m2_ns2=atomic_load_explicit(&f->executionM2,memory_order_relaxed),
-    .gpu_mean_ns=atomic_load_explicit(&f->gpuMean,memory_order_relaxed),.gpu_m2_ns2=atomic_load_explicit(&f->gpuM2,memory_order_relaxed),.kind=f->executionKind,.backend=f->backend};
-}
-
 /* design/algorithm-sources.md#region-execution-timing */
 struct mesh_row_range mesh_algebra_trace_input(struct mesh_algebra *handle,size_t index,size_t input) {
   MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_row_range){0};
@@ -1724,7 +1575,7 @@ struct mesh_route_event mesh_algebra_trace_route(struct mesh_algebra *handle,siz
     result.retired+=index;if(mesh_bits_all(a->context->M,MESH_PRESENT,result.retired,1))result.flags|=2;
     if(result.flags&9){struct mesh_route_vector v=d->owners;result.consumer=v.values[(index/v.columns)*v.row_stride+(index%v.columns)*v.column_stride];}
   }else if(role==2){result.consumer=index;result.first=d->completed+index;result.count=1;}
-  else if(role==3){struct mesh_row_map table=mesh_tensor_rows(d->table,0);result.first=table.first;result.count=table.count;}
+  else if(role==3){struct mesh_row_range table=mesh_tensor_rows(d->table,0);result.first=table.first;result.count=table.count;}
   if(result.consumer<d->consumers){result.function=d->functions[result.consumer];result.completed+=result.consumer;if(mesh_bits_all(a->context->M,MESH_PRESENT,result.completed,1))result.flags|=4;}
   return result;
 }

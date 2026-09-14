@@ -21,21 +21,6 @@ class RowRange(C.Structure):
     _fields_ = [("first", U), ("count", U)]
 
 
-class RowMap(C.Structure):
-    _fields_ = [(name, U) for name in ('first', 'count', 'stride', 'plane')] + [
-        ('ranges', C.POINTER(RowRange)), ('members', C.POINTER(U)), ('member_offsets', C.POINTER(Z))]
-
-
-class RowFunction(C.Structure):
-    _fields_ = [('input', C.POINTER(RowMap)), ('output', C.POINTER(RowMap))] + [
-        (name, U) for name in ('inputs', 'outputs', 'rows')] + [
-        (name, P) for name in ('indexed', 'routes', 'active')]
-
-
-class Writer(C.Structure):
-    _fields_ = [('context', P), ('output', RowMap), ('function', RowFunction)]
-
-
 class ReaderEvent(C.Structure):
     _fields_ = [(name, U) for name in ('source', 'member', 'plane', 'completed', 'flags')]
 
@@ -63,22 +48,6 @@ class Event(C.Structure):
     _fields_ += [(name, U) for name in ('first_output', 'output_maps', 'kind', 'input_maps')]
 
 
-# design/algorithm-sources.md#function-cost-profiles
-class Profile(C.Structure):
-    _fields_ = [(name, C.c_uint64) for name in ('successful', 'failed', 'gpu_samples')]
-    _fields_ += [(name, C.c_double) for name in ('dispatch_mean_ns', 'dispatch_m2_ns2',
-        'execution_mean_ns', 'execution_m2_ns2', 'gpu_mean_ns', 'gpu_m2_ns2')]
-    _fields_ += [(name, U) for name in ('kind', 'backend')]
-
-
-# design/algorithm-sources.md#function-cost-profiles
-class Plan(C.Structure):
-    _fields_ = [(name, View) for name in ('left', 'right', 'output')]
-    _fields_ += [(name, C.c_uint64) for name in ('first', 'count')]
-    _fields_ += [(name, U) for name in ('backend', 'operation', 'left_scalar', 'right_scalar', 'output_scalar', 'rectangles')]
-    _fields_ += [(name, C.c_float) for name in ('alpha', 'beta')]
-
-
 class Transfer(C.Structure):
     _fields_ = [(name, U) for name in ('local_row', 'local_page', 'peer_row', 'peer_page',
         'binding', 'offset', 'plane', 'index', 'bytes', 'peer_index')]
@@ -91,7 +60,7 @@ class TransferEvent(C.Structure):
 
 class Report(C.Structure):
     _fields_ = [(k, C.c_uint64) for k in ('submitted', 'completed',
-        'native_submitted', 'native_backings', 'ne_planned_operations')]
+        'native_submitted', 'native_backings')]
     _fields_ += [('code', C.c_int64), ('gpu_seconds', C.c_double),
                  ('cpu_submitted', C.c_uint64)]
 
@@ -107,7 +76,6 @@ class Native:
             'mesh_context': (P, []),
             'mesh_attach': (C.c_int, [P, C.c_char_p]),
             'mesh_detach': (C.c_int, [P]),
-            'mesh_algebra_environment': (C.c_char_p, [P]),
             'mesh_algebra_create': (P, [P]),
             'mesh_algebra_create_cpu': (P, [P]),
             'mesh_algebra_destroy': (None, [P]),
@@ -120,18 +88,16 @@ class Native:
             'mesh_tensor_view': (View, [P, U]),
             'mesh_tensor_data': (P, [P, U]),
             'mesh_tensor_publication_bytes': (Z, [P, U]),
-            'mesh_tensor_rows': (RowMap, [P, U]),
+            'mesh_tensor_rows': (RowRange, [P, U]),
             'mesh_view_slice': (View, [View, Z, Z, Z, Z]),
             'mesh_view_transpose': (View, [View]),
             'mesh_view_broadcast': (View, [View, Z, Z]),
             'mesh_tensor_constant': (C.c_int, [P, U]),
-            'mesh_algebra_writer': (C.c_int, [P, View, C.POINTER(Writer)]),
-            'mesh_writer_writable': (C.c_int, [C.POINTER(Writer)]),
-            'mesh_writer_issue': (C.c_int, [C.POINTER(Writer)]),
-            'mesh_writer_complete': (None, [C.POINTER(Writer)]),
+            'mesh_algebra_writer': (C.c_int, [P, View, C.POINTER(P)]),
+            'mesh_writer_writable': (C.c_int, [P]),
+            'mesh_writer_issue': (C.c_int, [P]),
+            'mesh_writer_complete': (None, [P, C.c_int]),
             'mesh_algebra_source': (C.c_int, [P, C.c_char_p, C.c_char_p, C.POINTER(View), Z, View, C.POINTER(C.c_uint8), Z, Z, Z, Z]),
-            'mesh_algebra_specialization': (C.c_char_p, [P, Z]),
-            'mesh_algebra_source_text': (C.c_char_p, [P, Z, U]),
             'mesh_algebra_indexed': (C.c_int, [P, Z, View, C.POINTER(Z), Z, C.POINTER(View), Z]),
             'mesh_algebra_indexed_range': (C.c_int, [P, Z, View, View, C.POINTER(Z), Z, C.POINTER(View), Z]),
             'mesh_algebra_route_create': (P, [P, View, View, View, C.POINTER(View), Z, Z]),
@@ -159,9 +125,6 @@ class Native:
             'mesh_algebra_consume': (None, [P, Z]),
             'mesh_algebra_trace_count': (Z, [P]),
             'mesh_algebra_trace': (Event, [P, Z]),
-            'mesh_algebra_profile': (Profile, [P, Z]),
-            'mesh_algebra_plan_count': (Z, [P, Z]),
-            'mesh_algebra_plan': (Plan, [P, Z, Z]),
             'mesh_algebra_trace_input': (RowRange, [P, Z, Z]),
             'mesh_algebra_trace_output': (RowRange, [P, Z, Z]),
             'mesh_algebra_trace_indexed_count': (Z, [P, Z]),
