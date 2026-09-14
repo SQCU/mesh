@@ -121,6 +121,21 @@ class Tensor:
         result.blocks = {(j, i): ref.T for (i, j), ref in self.blocks.items()}
         return result
 
+    # design/algorithm-sources.md#streamed-normalization-and-embedding
+    def broadcast_to(self, shape):
+        shape = tuple(shape)
+        if len(shape) != 2 or any(source != target and source != 1 for source, target in zip(self.shape, shape)):
+            raise ValueError('Incompatible tensor broadcast shape')
+        result = object.__new__(Tensor)
+        result.program, result.dtype, result.handle = self.program, self.dtype, self.handle
+        result.shape, result.grid = shape, self.grid
+        result.block_shape = tuple(target if source == 1 else block
+            for source, target, block in zip(self.shape, shape, self.block_shape))
+        result.blocks = {coordinate: ref.broadcast(*(target if source == 1 else size
+            for source, target, size in zip(self.shape, shape, ref.shape)))
+            for coordinate, ref in self.blocks.items()}
+        return result
+
 @dataclass(frozen=True)
 class ShapeDtypeStruct:
     shape: tuple
@@ -201,27 +216,8 @@ class Program:
     def tensor(self, shape, block_shape=None, dtype=np.float32, transferable=True):
         return Tensor(self, shape, block_shape or shape, dtype, transferable)
 
-    # design/algorithm-sources.md#xonotic-state-ownership
-    def alias(self, tensor):
-        result = object.__new__(Tensor)
-        result.program, result.shape, result.block_shape = self, tensor.shape, tensor.block_shape
-        result.dtype, result.grid = tensor.dtype, tensor.grid
-        result.handle = self.native.tensor_alias(self.handle, tensor.handle)
-        if not result.handle:
-            check(C.get_errno() or errno.ENOMEM)
-        result.blocks = {}
-        self.adopt(result, tensor)
-        result.blocks = {coord: Ref(self, self.native.tensor_view(result.handle, i), result.dtype)
-                         for i, coord in enumerate(tensor.blocks)}
-        return result
-
-    # design/algorithm-sources.md#xonotic-state-ownership
-    def adopt(self, target, source):
-        check(self.native.tensor_adopt(self.handle, target.handle, source.program.handle, source.handle))
-        target.backing = source
-
     # design/algorithm-sources.md#pallas-call-ergonomics
-    def kernel_call(self, kernel, *, out_shape, grid, in_specs, out_specs):
+    def kernel_call(self, kernel, *, out_shape, grid, in_specs, out_specs, peer=None):
         single = isinstance(out_shape, ShapeDtypeStruct)
         shapes = (out_shape,) if single else tuple(out_shape)
         specs = (out_specs,) if single else tuple(out_specs)
@@ -233,13 +229,12 @@ class Program:
         def configure(*operands):
             if len(operands) != len(inputs):
                 raise ValueError('Each input requires one BlockSpec')
-            outputs = tuple(self.tensor(shape.shape,
-                block_shape=spec.block_shape if (spec.block_shape[1] != shape.shape[1] or
-                    np.prod(spec.block_shape) * np.dtype(shape.dtype).itemsize % self.native.algebra_publication_bytes(self.handle)) else None,
+            outputs = tuple(self.tensor(shape.shape, block_shape=spec.block_shape,
                 dtype=shape.dtype) for shape, spec in zip(shapes, specs))
-            self._call(kernel, grid=grid,
-                inputs=tuple(spec._bind(tensor) for spec, tensor in zip(inputs, operands)),
-                outputs=tuple(spec._bind(tensor) for spec, tensor in zip(specs, outputs)))
+            if peer is None or peer == self.node:
+                self._call(kernel, grid=grid,
+                    inputs=tuple(spec._bind(tensor) for spec, tensor in zip(inputs, operands)),
+                    outputs=tuple(spec._bind(tensor) for spec, tensor in zip(specs, outputs)))
             return outputs[0] if single else outputs
         return configure
 
@@ -263,7 +258,7 @@ class Program:
             if isinstance(kernel, Metal):
                 dispatches = (MetalDispatch * len(kernel.dispatches))(*(
                     MetalDispatch(d.name.encode(), (C.c_size_t * 3)(*d.grid),
-                        (C.c_size_t * 3)(*d.group), d.argument_offset) for d in kernel.dispatches))
+                        (C.c_size_t * 3)(*d.group), d.argument_buffer, d.argument_offset) for d in kernel.dispatches))
                 buffers = tuple(C.create_string_buffer(bytes(value)) for value in kernel.constants)
                 constants = (MetalConstant * len(buffers))(*(
                     MetalConstant(C.cast(value, C.c_void_p), len(value) - 1) for value in buffers))
@@ -338,13 +333,6 @@ class Program:
         check(self.native.algebra_realize(self.handle))
         return self
 
-    # design/algorithm-sources.md#indexed-library-functions
-    def scan(self):
-        self.native.algebra_scan(self.handle)
-        if self.errors:
-            raise self.errors.pop(0)
-        check(self.report.code)
-
     @property
     # design/algorithm-sources.md#indexed-library-functions
     def report(self):
@@ -353,9 +341,6 @@ class Program:
     # design/algorithm-sources.md#indexed-library-functions
     def close(self):
         if self.handle:
-            report = self.report
-            if report.submitted != report.completed:
-                raise BlockingIOError(errno.EBUSY, 'Numerical submissions are still running')
             self.native.algebra_destroy(self.handle)
             _PROGRAMS.discard(self.handle)
             self.handle = None

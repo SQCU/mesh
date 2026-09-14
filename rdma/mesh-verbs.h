@@ -22,7 +22,7 @@
 #define QD 4095
 struct mesh_verbs {
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_cq *completion_queue;
-  struct ibv_qp *pair,*pairs[MESH_QPS]; int qp_count; struct ibv_mr **regions;
+  struct ibv_qp *pair,*pairs[MESH_QPS+1]; int qp_count; struct ibv_mr **regions;
   int region_count, send_capacity, receive_capacity;
   size_t region_origin, region_extent;
   struct ibv_wc *completions;
@@ -55,7 +55,7 @@ static double monotime(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&
 static void onsig(int s){ (void)s; stop++; }
 
 /* ledger D13: the out-of-band connection record, exchanged once per pairing */
-struct qpi { uint32_t xmagic, xsize; uint32_t qpn,psn,pgsz; uint16_t lid; uint8_t gid[16]; uint16_t node; uint32_t count,qpns[MESH_QPS],psns[MESH_QPS]; };
+struct qpi { uint32_t xmagic, xsize; uint32_t qpn,psn,pgsz; uint16_t lid; uint8_t gid[16]; uint16_t node; uint32_t count,qpns[MESH_QPS+1],psns[MESH_QPS+1]; };
 #define XMAGIC 0x4d595047u
 
 static int dial(struct addrinfo *a){
@@ -129,8 +129,8 @@ static int oob(const char *peer){
 
 static struct ibv_port_attr pa;
 /* ledger D13 (out-of-band metadata), D6 (queue pair limits), TN3205 queue-pair state transitions */
-static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int me, uint32_t message_bytes, int qps, void (*receive)(void *,uint32_t),void *state){
-  if(qps<1 || qps>MESH_QPS){ errno=EINVAL; return -1; }
+static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int me, uint32_t message_bytes, int qps, void (*receive)(void *,uint32_t),int (*configure)(void *,int,double),void *state){
+  if(qps<1 || qps>MESH_QPS+1){ errno=EINVAL; return -1; }
   if(provider->context && (ibv_query_port(provider->context,1,&pa) || pa.state!=IBV_PORT_ACTIVE)){
     return -1; }
   int f=oob(peer); if(f<0) return -1;
@@ -213,9 +213,8 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
     int rc=ibv_modify_qp(provider->pairs[q],&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
     if(rc){ fprintf(stderr,"rtr %d rc %d dlid %u dqpn %u\n",q,rc,you.lid,you.qpns[q]); close(f); return -1; }
   }
+  if(configure(state,f,exchange_deadline)){close(f);return -1;}
   for(uint32_t q=0;q<(uint32_t)qps;q++)receive(state,q);
-  unsigned char ready=1,remote_ready=0;
-  if(exchange(f,&ready,&remote_ready,sizeof ready,exchange_deadline)){ close(f); return -1; }
   for(int q=0;q<qps;q++){
     struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=mine.psns[q]};
     int rc=ibv_modify_qp(provider->pairs[q],&t,IBV_QP_STATE|IBV_QP_SQ_PSN);

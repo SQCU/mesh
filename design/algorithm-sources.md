@@ -651,7 +651,7 @@ A dedicated descriptor queue has preposted buffers and continues progressing
 independently of payload queues. One additional QP is used (at most nine total,
 within TN3205's limit of ten). Descriptor storage is allocated and registered
 with the arena during setup and included in its memory warning calculation.
-Each index message is one 4096-byte frame and holds up to 170 transfer tuples;
+Each index message is one 4096-byte frame and holds up to 127 transfer tuples;
 partially occupied batches have this same frame cost. Payloads retain the
 configured transport block size. Queue counters track outstanding work requests
 and descriptor storage reuse, not the destination of a numerical result.
@@ -742,3 +742,24 @@ Declared output allocations are identical on each participant; the public
 owner. Transposed replica views retain the source orientation. No graph protocol
 or second numerical scheduler is involved. Distributed callers pass the same
 root-peer identity and graph to all participants during setup.
+
+## Declared partition and ownership retention
+
+The JAX authors' BlockSpec and Ref interface, cited above, separates declared
+regions from their numerical implementation. `Tensor.broadcast_to` retains
+backing references and represents singleton-axis broadcasts with zero strides.
+It allocates only view metadata during setup. `Program.kernel_call` now retains
+its declared output block partition even when adjacent blocks would align; it
+does not silently coalesce independently exported blocks into one whole ref.
+The optional `peer` retains configured numerical ownership while realizing
+output storage on participants, allowing compiler-owned graph regions to lower
+through the same public call and copy operations.
+
+The existing `examples/streaming-algebra.py` operational program now composes
+FFN, RMSNorm, two learned indexed embeddings summed with the normalized value,
+a second FFN, and a second RMSNorm. It allocates distinct value instances before
+realization, partitions rows explicitly, and sends both directions on data queue
+zero. Section zero is withheld until section one finishes the entire chain.
+Terminal observation loops do not submit numerical work. Reference evaluation
+and result comparisons happen outside the numerical graph. Per-run times are
+host-observed latencies, not per-kernel timings or a speedup claim.
