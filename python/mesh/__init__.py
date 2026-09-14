@@ -217,6 +217,7 @@ class Program:
         self.context = self.native.context()
         self.callbacks, self.errors = [], []
         self._constant_extents = set()
+        self._replicated_extents = {}
         create = {'cpu': self.native.algebra_create_cpu, 'metal': self.native.algebra_create}[backend]
         check(self.native.attach(self.context, os.fsencode(region) if region else None))
         self.handle = create(self.context)
@@ -334,6 +335,30 @@ class Program:
             Endpoint(src.view.tensor, sender, src.view.extent, 1),
             Endpoint(dst.view.tensor, receiver, dst.view.extent, 1), 1, queue))
 
+    # design/algorithm-sources.md#canonical-view-replication
+    def replicate(self, source, peer):
+        tensor, sender = source
+        if not isinstance(tensor, Tensor) or tensor.program is not self:
+            raise ValueError('Replication requires a tensor belonging to this program')
+        if sender == peer:
+            return tensor
+        result = object.__new__(Tensor)
+        result.program, result.dtype, result.handle = self, tensor.dtype, None
+        result.shape, result.block_shape, result.grid = tensor.shape, tensor.block_shape, tensor.grid
+        result.blocks = {}
+        for coordinate, ref in tensor.blocks.items():
+            key = (sender, peer, ref.view.tensor, ref.view.extent)
+            if key not in self._replicated_extents:
+                original = Ref(self, self.native.tensor_view(ref.view.tensor, ref.view.extent), ref.dtype)
+                backing = self.tensor(original.shape, dtype=original.dtype)[0, 0]
+                self.copy(original.on(sender), backing.on(peer))
+                self._replicated_extents[key] = backing
+            backing = self._replicated_extents[key]
+            view = View(backing.view.tensor, backing.view.extent, ref.view.offset,
+                        ref.view.rows, ref.view.columns, ref.view.row_stride, ref.view.column_stride)
+            result.blocks[coordinate] = Ref(self, view, ref.dtype)
+        return result
+
     # design/algorithm-sources.md#indexed-library-functions
     def export(self, ref):
         return Result(ref)
@@ -440,6 +465,7 @@ class Program:
             self.handle = None
             self.callbacks.clear()
             self._constant_extents.clear()
+            self._replicated_extents.clear()
             if not _PROGRAMS:
                 check(self.native.detach(self.context))
 
