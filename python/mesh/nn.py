@@ -30,19 +30,6 @@ def _pointwise(program, kernel, operands, tile_rows, *, peer=None, output_dtype=
         out_shape=ShapeDtypeStruct(shape, operands[0].dtype if output_dtype is None else output_dtype), peer=peer)(*operands)
 
 
-# design/algorithm-sources.md#pallas-panel-composition
-def _sum(program, values, tile_rows, *, peer=None):
-    values = tuple(values)
-    if not values:
-        raise ValueError('A linear reduction requires contributions')
-    kernel = kernels.add
-    if values[0].dtype.kind in 'iu':
-        left, right = kernels.arguments(2)
-        kernel = kernels.expression((left & 0xffffffffffffffff) + (right & 0xffffffffffffffff))
-    while len(values) > 1:
-        values = tuple(_pointwise(program, kernel, values[i:i+2], tile_rows, peer=peer)
-            if i+1 < len(values) else values[i] for i in range(0, len(values), 2))
-    return values[0]
 
 
 # design/algorithm-sources.md#pallas-panel-composition
@@ -143,13 +130,3 @@ def embedding(program, table, indices, *, tile_rows, tile_columns=128):
                   BlockSpec((mr, 1), lambda i, j: (i, 0))),
         out_specs=BlockSpec((mr, nr), _block),
         out_shape=ShapeDtypeStruct((rows, width), table.dtype))(table, indices)
-
-
-# design/algorithm-sources.md#streamed-normalization-and-embedding
-def summed_embedding(program, x, tables, indices, *, tile_rows):
-    tables, indices = tuple(tables), tuple(indices)
-    if len(tables) != len(indices):
-        raise ValueError('Each embedding table requires its index tensor')
-    values = tuple(embedding(program, table, index, tile_rows=tile_rows, tile_columns=x.block_shape[1])
-                   for table, index in zip(tables, indices))
-    return _sum(program, (x, *values), tile_rows)

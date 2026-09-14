@@ -50,8 +50,6 @@ int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_vie
 /* design/algorithm-sources.md#selected-native-contractions */
 int mesh_algebra_view_pages(struct mesh_algebra *,struct mesh_view,struct mesh_view *pages,size_t capacity,size_t *count);
 int mesh_algebra_copy(struct mesh_algebra *,struct mesh_view source,uint32_t sender,struct mesh_view destination,uint32_t receiver,uint16_t queue);
-int mesh_algebra_observe(struct mesh_algebra *,struct mesh_view,size_t *first,size_t *count);
-int mesh_algebra_present(struct mesh_algebra *,size_t first,size_t count);
 int mesh_algebra_export(struct mesh_algebra *,struct mesh_view,size_t *first,size_t *count);
 int mesh_algebra_realize(struct mesh_algebra *);
 int mesh_algebra_available(struct mesh_algebra *,size_t output);

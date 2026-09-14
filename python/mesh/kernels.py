@@ -180,8 +180,6 @@ class _Expression:
             return self.operands[0]
         if self.operation in ('literal', 'program_id'):
             return self
-        if self.operation == 'index_vector':
-            return _Expression('index_vector', value=(*self.value[:3], 1 - self.value[3]))
         if self.operation in ('row', 'column'):
             return _Expression('column' if self.operation == 'row' else 'row')
         if self.operation == 'domain':
@@ -290,8 +288,6 @@ def _static_value(node, inputs, rows, columns, coordinate):
         return rows
     if node.operation == 'column':
         return columns
-    if node.operation == 'index_vector':
-        return np.full(rows.shape, node.value[2], dtype=np.int64) if node.value[0] == 1 else (rows if node.value[3] == 0 else columns) + node.value[2]
     if node.operation == 'program_id':
         return np.full(rows.shape, coordinate[node.value], dtype=np.int64)
     if node.operation == 'literal':
@@ -365,8 +361,6 @@ def _specialize_accesses(expression, inputs, output, coordinate, domain):
                 value = inputs[node.value].shape[1]
             elif node.operation == 'column':
                 value = output.shape[1]
-            elif node.operation == 'index_vector':
-                value = node.value[0] if node.value[3] == 1 else 1
             elif node.operation == 'row' or node.operation in _REDUCTIONS:
                 value = 1
             else:
@@ -496,14 +490,6 @@ def indices():
     return _Expression('row'), _Expression('column')
 
 
-# design/algorithm-sources.md#explicit-index-vector-domains
-def arange(length, *, tile=None):
-    import operator
-    length = operator.index(length)
-    tile = max(1, length) if tile is None else operator.index(tile)
-    if length < 0 or tile <= 0 or length > np.iinfo(np.int64).max:
-        raise ValueError('Index vector length must be nonnegative and tile positive within the int64 domain')
-    return _Expression('index_vector', value=(length, max(1, min(tile, length)), 0, 1))
 
 
 
@@ -615,8 +601,6 @@ class _ExpressionKernel:
                             nonlocal selector_width
                             if part.operation == 'input':
                                 selector_width = max(selector_width, inputs[part.value].shape[1])
-                            elif part.operation == 'index_vector' and part.value[3] == 1:
-                                selector_width = max(selector_width, part.value[0])
                             for child in part.operands:
                                 selector_shape(child)
 
@@ -696,10 +680,6 @@ class _ExpressionKernel:
                 width = node.value[0][1]
             elif node.operation == 'column':
                 width = output.shape[1]
-            elif node.operation == 'index_vector':
-                if node.value[3] == 0 and node.value[0] not in (1, output.shape[0]):
-                    raise ValueError('Index vector rows must broadcast to the output')
-                width = node.value[0] if node.value[3] == 1 else 1
             elif node.operation == 'row':
                 width = 1
             elif node.operation in _REDUCTIONS:
@@ -725,8 +705,6 @@ class _ExpressionKernel:
                     return '((long)r)' if metal else '((int64_t)r)'
                 if part.operation == 'column':
                     return f'((long)({column}))' if metal else f'((int64_t)({column}))'
-                if part.operation == 'index_vector':
-                    return f'((int64_t)({0 if part.value[0] == 1 else "r" if part.value[3] == 0 else column})+{part.value[2]}ll)'
                 if part.operation in _REDUCTIONS:
                     return f'(({"long" if metal else "int64_t"}){names[part]})' if part.operation == 'sum' and _reduction_dtype(part, inputs, output.dtype).kind in 'ib' else names[part]
                 ref = inputs[part.value]
@@ -999,7 +977,7 @@ def _indexed_load_expression(ref, pointer, layout, args, metal):
 
 # design/algorithm-sources.md#shared-scalar-load-emission
 def _emit_scalar_expression(node, inputs, metal, resolve):
-    if node.operation in ('input', 'row', 'column', 'index_vector') or node.operation in _REDUCTIONS:
+    if node.operation in ('input', 'row', 'column') or node.operation in _REDUCTIONS:
         return resolve(node, ())
     args = tuple(_emit_scalar_expression(child, inputs, metal, resolve) for child in node.operands)
     if node.operation == 'load':
@@ -1032,7 +1010,7 @@ def _expression_dtype(node, inputs):
         return np.dtype('bool')
     if node.operation in ('abs', 'floor', 'domain'):
         return _expression_dtype(node.operands[0], inputs)
-    if node.operation in ('row', 'column', 'program_id', 'index_vector'):
+    if node.operation in ('row', 'column', 'program_id'):
         return np.dtype('int64')
     if node.operation == 'literal':
         return np.dtype('int32' if isinstance(node.value, bool) else 'float32' if isinstance(node.value, float) else 'uint64' if node.value > 2**63-1 else 'int64')
@@ -1168,10 +1146,6 @@ def _expression_layout(node, sources, whole, layouts):
         source = sources[node.value]
         shape = source.shape
         result = shape, (whole[node.value],) * 2, source.block_shape if whole[node.value] else shape
-    elif node.operation == 'index_vector':
-        shape = tuple(node.value[0] if axis == node.value[3] else 1 for axis in range(2))
-        steps = tuple(node.value[1] if axis == node.value[3] else 1 for axis in range(2))
-        result = shape, (False, False), steps
     elif node.operation in ('literal', 'program_id', 'row', 'column'):
         result = (1, 1), (False, False), (1, 1)
     elif node.operation == 'domain':
@@ -1560,9 +1534,6 @@ class _ExpressionRegions:
             if node.operation == 'load':
                 symbol = reference(('load_source', node.value), (self.sources[node.value],))
                 return _Expression('load', tuple(lower(child, _expression_dtype(child, self.sources)) for child in node.operands), symbol.value)
-            if node.operation == 'index_vector':
-                axis = node.value[3]
-                return node if external or node.value[0] == 1 else _Expression('index_vector', value=(shape[axis], shape[axis], node.value[2] + origin[axis], axis))
             if node.operation in ('row', 'column') and not external:
                 axis = 0 if node.operation == 'row' else 1
                 return node + origin[axis]

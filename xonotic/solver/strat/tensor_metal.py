@@ -239,22 +239,6 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 program.constant(tensor[0, 0], data.reshape(storage_shape))
             tensors[value.index] = tensor
             continue
-        # ../../../design/algorithm-sources.md#indexed-range-generation
-        if operation == 'arange':
-            start, step = (attributes[name].resolve(capacity) if isinstance(attributes[name], Dimension) else attributes[name] for name in ('start', 'step'))
-            block = (1, min(tile_columns, shape[0]))
-            _, column = kernels.indices()
-            ordinal = kernels.program_id(1) * block[1] + column
-            if np.dtype(value.dtype).kind in 'iu':
-                mask = 0xffffffffffffffff
-                result = (ordinal & mask) * (int(step) & mask) + (int(start) & mask)
-            else:
-                result = float(start) + ordinal * float(step)
-            tensors[value.index] = program.kernel_call(kernels.expression(result),
-                grid=(1, (shape[0] + block[1] - 1) // block[1]), in_specs=(),
-                out_specs=BlockSpec(block, lambda i, j: (i, j)),
-                out_shape=ShapeDtypeStruct((1, shape[0]), value.dtype), peer=peer)()
-            continue
         local = {}
         for operand in numerical_operands(operation, values, attributes):
             tensor = tensors[operand.index]
@@ -276,37 +260,6 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                     grid=operand.grid, in_specs=(BlockSpec(operand.block_shape, lambda i, j: (i, j)),),
                     out_specs=BlockSpec(operand.block_shape, lambda i, j: (i, j)),
                     out_shape=ShapeDtypeStruct(operand.shape, value.dtype), peer=peer)(operand)
-            continue
-        # ../../../design/algorithm-sources.md#shared-associative-reductions
-        if operation.startswith('reduce_') and len(shapes[values[0].index]) > 2:
-            operand_shape = shapes[values[0].index]
-            axes = tuple(sorted(set(attributes['axes'])))
-            retained = tuple(axis for axis in range(len(operand_shape)) if axis not in axes)
-            matrix_shape = (math.prod(shape[:-1]), shape[-1]) if shape else (1, 1)
-            width = min(tile_columns, matrix_shape[1])
-            output_index = kernels.program_id(0) * matrix_shape[1] + kernels.program_id(1) * width + kernels.arange(width).T
-            count = math.prod(operand_shape[axis] for axis in axes)
-            reduction_index = kernels.arange(count, tile=tile_k)
-            coordinates = [None] * len(operand_shape)
-            for domain, ordinal in ((retained, output_index), (axes, reduction_index)):
-                for position, axis in enumerate(domain):
-                    coordinates[axis] = (ordinal // math.prod(operand_shape[i] for i in domain[position + 1:])) % operand_shape[axis]
-            argument, = kernels.arguments(1)
-            term = argument.reshape(operand_shape).at(*coordinates)
-            if operation in ('reduce_max', 'reduce_min'):
-                term = term.astype(values[0].dtype)
-            if operation in ('reduce_sum', 'reduce_mean') and np.dtype(values[0].dtype).kind in 'iu':
-                term = term & 0xffffffffffffffff
-            result = getattr(term, 'sum' if operation == 'reduce_mean' else operation[7:])().T
-            if operation == 'reduce_mean':
-                if np.dtype(values[0].dtype).kind != 'f':
-                    result = result.astype('uint64' if np.dtype(values[0].dtype).kind == 'u' else 'int64').astype('float32')
-                result = result / float(count)
-            reduced = program.kernel_call(kernels.expression(result),
-                grid=(matrix_shape[0], (matrix_shape[1] + width - 1) // width),
-                in_specs=(BlockSpec(None),), out_specs=BlockSpec((1, width), lambda i, j: (i, j)),
-                out_shape=ShapeDtypeStruct(matrix_shape, value.dtype), peer=peer)(local[values[0].index])
-            tensors[value.index] = reduced
             continue
         # ../../../design/algorithm-sources.md#shared-associative-reductions
         if operation.startswith('reduce_') and 1 <= len(shapes[values[0].index]) <= 2:

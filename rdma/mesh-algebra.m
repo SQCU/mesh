@@ -136,7 +136,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property NSMutableDictionary<NSValue *,MeshExtent *> *lookup;
 @property NSMutableData *tensors;
 @property NSMutableData *bindings;
-@property NSMutableData *returns,*observations;
+@property NSMutableData *returns;
 @property NSString *coremlPython,*coremlGenerator,*coremlCache;
 @property NSMutableDictionary<NSString *,MLModel *> *models;
 @end
@@ -191,7 +191,7 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
   a.executions=dispatch_group_create();
   a.libraries=[NSMutableDictionary new];a.cpuCode=[NSMutableDictionary new];
   a.functions=[NSMutableArray new]; a.extents=[NSMutableArray new]; a.lookup=[NSMutableDictionary new];
-  a.tensors=[NSMutableData new]; a.bindings=[NSMutableData new]; a.returns=[NSMutableData new]; a.observations=[NSMutableData new];
+  a.tensors=[NSMutableData new]; a.bindings=[NSMutableData new]; a.returns=[NSMutableData new];
   return (__bridge_retained struct mesh_algebra *)a;
 }
 /* design/algorithm-sources.md#cpu-indexed-execution */
@@ -1042,22 +1042,6 @@ int mesh_algebra_copy(struct mesh_algebra *handle,struct mesh_view source,uint32
   return 0;
 }
 
-/* design/algorithm-sources.md#view-scoped-consumption */
-int mesh_algebra_observe(struct mesh_algebra *handle,struct mesh_view view,size_t *first,size_t *count) {
-  MeshAlgebra *a=owner(handle);
-  if(a.realized)return EBUSY;
-  if(!first || !count || !valid_view(a,view))return EINVAL;
-  struct mesh_index_candidate coverage=indexed_maps(view);if(!coverage.maps)return ENOMEM;
-  *first=a.observations.length/sizeof(struct mesh_row_map);*count=coverage.count;
-  [a.observations appendBytes:coverage.maps length:coverage.count*sizeof *coverage.maps];free(coverage.maps);return 0;
-}
-/* design/algorithm-sources.md#view-scoped-consumption */
-int mesh_algebra_present(struct mesh_algebra *handle,size_t first,size_t count) {
-  MeshAlgebra *a=owner(handle);const struct mesh_row_map *maps=a.observations.bytes;
-  size_t length=a.observations.length/sizeof *maps;if(first>length || count>length-first)return 0;
-  for(size_t i=0;i<count;i++)if(!mesh_present(a->context,maps[first+i],0))return 0;
-  return 1;
-}
 /* design/algorithm-sources.md#view-scoped-consumption */
 int mesh_algebra_export(struct mesh_algebra *handle,struct mesh_view view,size_t *first,size_t *count) {
   MeshAlgebra *a=owner(handle);
