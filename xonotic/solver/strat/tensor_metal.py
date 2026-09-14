@@ -467,10 +467,17 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
                 program.constant(tensor[0, 0], data.reshape(storage_shape))
             tensors[value.index] = tensor
             continue
+        row_gradient = operation == 'gather_vjp' and len(values) == 3 and len(shapes[values[1].index]) == 1 and (
+            (len(shapes[value.index]) == 1 and tuple(attributes['mapping']) == (('index', 0),)) or
+            (len(shapes[value.index]) == 2 and tuple(attributes['mapping']) == (('index', 0), ('slice', 0, 1)) and
+             shapes[values[-1].index] == (shapes[values[1].index][0], shapes[value.index][1])))
         local = {}
         for operand in values:
             tensor = tensors[operand.index]
             sender = owners[operand.index]
+            if row_gradient and operand.index == values[0].index:
+                local[operand.index] = tensor
+                continue
             if sender != peer:
                 key = (operand.index, peer)
                 if key not in replicas:
@@ -483,6 +490,25 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
                 tensor = replicas[key]
             local[operand.index] = tensor
         shape = shapes[value.index]
+        if row_gradient:
+            vector = len(shape) == 1
+            output_shape = (shape[0], 1) if vector else shape
+            destinations = matrix_view(local[values[1].index], (shapes[values[1].index][0], 1))
+            gradient_shape = (shapes[values[-1].index][0], 1) if vector else shapes[values[-1].index]
+            updates = matrix_view(local[values[-1].index], gradient_shape)
+            block = (min(tile_rows, output_shape[0]), math.gcd(min(tile_columns, output_shape[1]),
+                updates.block_shape[1] if updates.grid[1] > 1 else 0))
+            base = program.tensor(output_shape, block_shape=block, dtype=value.dtype)
+            if program.node == peer:
+                for ref in base.blocks.values():
+                    program.constant(ref, np.zeros(ref.shape, dtype=value.dtype))
+            base_arg, index_arg, update_arg = kernels.arguments(3)
+            result = program.kernel_call(kernels.expression(kernels.indexed_add(base_arg, index_arg, update_arg)),
+                grid=base.grid, in_specs=(BlockSpec(None),) * 3,
+                out_specs=BlockSpec(block, lambda i, j: (i, j)),
+                out_shape=ShapeDtypeStruct(output_shape, value.dtype), peer=peer)(base, destinations, updates)
+            tensors[value.index] = result.T if vector else result
+            continue
         if operation == 'scatter_add' and len(shape) == 1:
             base, destinations, updates = (matrix_view(local[v.index], (math.prod(shapes[v.index]), 1)) for v in values)
             block = (math.gcd(min(tile_rows, shape[0]), base.block_shape[0]), 1)

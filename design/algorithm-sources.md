@@ -1404,3 +1404,13 @@ source/index block, and compare early and complete outputs against precomputed
 float64 references. This exercises the existing indexed-access contract and
 publication interface; no additional numerical execution owner is introduced.
 Derivative validation is not implied by this forward case.
+
+The JAX authors' [gather transpose implementation](https://raw.githubusercontent.com/jax-ml/jax/main/jax/_src/lax/slicing.py)
+forms a cotangent-typed zero operand and scatter-adds cotangents at the gathered
+indices. Xonotic's rank-one and full-feature row-gather VJPs now express that same
+construction using existing indexed_add. Setup supplies canonical zero blocks;
+index and cotangent pages are the only numerical operands. Primal source shape
+is retained, but its values are neither replicated nor read by this derivative.
+Shared segmented reduction and publication remain the sole numerical owner.
+The covered mappings and remaining derivative cases are recorded in
+[xonotic-shared-indexing.md](xonotic-shared-indexing.md#shared-row-gather-transpose).

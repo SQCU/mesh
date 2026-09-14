@@ -141,3 +141,35 @@ the canonical allocation; no row identity is reconstructed from timing or buffer
 addresses. The Python RowMap return type matches all fields of mesh_row_map,
 including its range/member/offset pointers. These bindings allow direct joins to
 native compute and selected-reader trace records.
+
+## Shared row-gather transpose
+
+The next migrated derivative is gather_vjp for `x[index]` on a vector and
+`x[index, :]` on a matrix, with one rank-one index vector and the complete
+feature-axis slice. Its mathematical output is zero plus an indexed sum of the
+cotangent rows. Duplicate indices contribute repeatedly; negative indices use
+the existing normalization. The [JAX gather transpose implementation](https://raw.githubusercontent.com/jax-ml/jax/main/jax/_src/lax/slicing.py)
+uses the same zero-plus-scatter-add construction and derives zero's dtype from
+the cotangent rather than the primal.
+
+Xonotic now supplies a setup-initialized canonical zero base, destination indices
+and cotangent values to the existing indexed_add expression. Matrix cotangents
+retain their direct row/feature block layout; vector values use transposed
+metadata as in forward scatter. Output feature tiles respect actual cotangent
+backing boundaries. The shared lowering owns FP32 real partial accumulation,
+collision reduction, final output conversion and independent publication.
+There is no derivative-specific atomic kernel or device source emitter.
+
+This derivative does not read primal source values. Its migrated binding omits
+source replication and numerical source dependencies; only shape information is
+needed. A separate forward gather in the same graph still has its own legitimate
+source reads. Routing metadata still determines when each destination sum is
+complete; a missing unrelated cotangent region does not create a whole-cotangent
+prerequisite. Zero base blocks are initialized once during setup and are reusable.
+
+Column gathers, feature-subset slices, multiple index arrays, inserted-axis
+variants, take_along_axis derivatives and higher ranks remain migration work.
+Their existing source implementations are preserved. The graph differentiation
+rules themselves are unchanged. Python compilation passes; the existing workflow
+still needs duplicate-index and delayed-cotangent numerical observations for this
+new derivative path. No execution or performance result is claimed here.
