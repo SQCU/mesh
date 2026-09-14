@@ -241,6 +241,7 @@ def main():
         xonotic_case = None
         xonotic_gradients = []
         xonotic_neighborhoods = []
+        xonotic_expert = None
         scatter_bases = {}
         xonotic_take_gradient = None
         if args.xonotic and args.rank == 0:
@@ -441,6 +442,36 @@ def main():
                     expected = tuple(data * 2 + 1 for data in (result, dq, dk, dv, dot_v * affinity))
                     generations.append(((query, keys, vectors, indices, weights, cotangent), expected))
                 xonotic_neighborhoods.append((gram, storage, observations, generations))
+            # design/algorithm-sources.md#xonotic-expert-algebra
+            graph = mx.Graph()
+            with graph:
+                expert_inputs = tuple(graph.input(name, shape, dtype) for name, shape, dtype in (
+                    ('rows', (4, 3), 'float32'), ('weights', (3, 3, 5), 'float32'),
+                    ('selected', (4,), 'int64'), ('cotangent', (4, 5), 'float32')))
+                projected = mx.expert_matmul(*expert_inputs[:3])
+                derivatives = graph.vjp((projected,), (expert_inputs[3],), expert_inputs[:2])
+                consumers = tuple(value * 2 + 1 for value in (projected, *derivatives))
+            expert_storage = tuple(program.tensor(shape, block, dtype=dtype) for shape, block, dtype in (
+                ((4, 3), (1, 2), np.float32), ((9, 5), (1, 2), np.float32),
+                ((4, 1), (1, 1), np.int64), ((4, 5), (1, 2), np.float32)))
+            lowered = kernel_calls(program, graph, (), dict(zip((value.index for value in expert_inputs), expert_storage)),
+                outputs=consumers, root_peer=0, tile_rows=1, tile_k=2, tile_columns=2)
+            observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
+                for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in consumers)
+            generations = []
+            for generation in range(2):
+                rows_values = (np.arange(12, dtype=np.float32).reshape(4, 3) - 5 + generation) / 8
+                weight_values = (np.arange(45, dtype=np.float32).reshape(3, 3, 5) - 20 - generation) / 16
+                selected_values = np.array([generation, generation, 2, generation], dtype=np.int64)
+                cotangent_values = (np.arange(20, dtype=np.float32).reshape(4, 5) + 1 + generation) / 8
+                x, w, g = (value.astype(np.float64) for value in (rows_values, weight_values, cotangent_values))
+                projected = np.einsum('nd,ndh->nh', x, w[selected_values])
+                dx = np.einsum('nh,ndh->nd', g, w[selected_values])
+                dw = np.zeros_like(w)
+                np.add.at(dw, selected_values, x[:, :, None] * g[:, None, :])
+                generations.append(((rows_values, weight_values.reshape(9, 5), selected_values.reshape(4, 1), cotangent_values),
+                                    tuple(value * 2 + 1 for value in (projected, dx, dw.reshape(9, 5)))))
+            xonotic_expert = expert_storage, observations, generations
             take_indices = program.tensor((4, 1), (1, 1), dtype=np.int64)
             take_cotangents = program.tensor((4, 1), (1, 1), dtype=np.float32)
             graph = mx.Graph()
@@ -989,6 +1020,69 @@ def main():
                 print(json.dumps(dict(event='xonotic_neighborhood_complete', gram=gram, generation=generation,
                     elapsed_ms=(time.monotonic_ns() - started) / 1e6,
                     output=[[(i, j, result.array.tolist()) for i, j, result in results] for results in observations])), flush=True)
+                for results in observations:
+                    for i, j, result in results:
+                        result.consume()
+        if xonotic_expert is not None:
+            storage, observations, generations = xonotic_expert
+            for generation, (values, expected) in enumerate(generations):
+                wait_for(tuple(ref for tensor in storage for ref in tensor.blocks.values()), 'writable')
+                started = time.monotonic_ns()
+                for operand, (tensor, data) in enumerate(zip(storage, values)):
+                    for (i, j), ref in tensor.blocks.items():
+                        if operand == 2 or (i < 6 if operand == 1 else i != 2):
+                            row, column = i * tensor.block_shape[0], j * tensor.block_shape[1]
+                            with program.write(ref) as destination:
+                                destination[...] = data[row:row+ref.shape[0], column:column+ref.shape[1]]
+                early = tuple(result for target, results in enumerate(observations) for i, j, result in results
+                              if (i < 6 if target == 2 else i != 2))
+                wait_for(early)
+                for target, results in enumerate(observations):
+                    for i, j, result in results:
+                        if (i < 6 if target == 2 else i != 2) and not np.allclose(
+                                result.array, expected[target][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5):
+                            raise ArithmeticError('Expert early consumer differs')
+                if any(result.ready for target, results in enumerate(observations) for i, j, result in results
+                       if (i >= 6 if target == 2 else i == 2)):
+                    raise ArithmeticError('Expert consumer ignored withheld numerical inputs')
+                print(json.dumps(dict(event='xonotic_expert_early', generation=generation, withheld_row=2,
+                    withheld_expert=2, empty_expert=1-generation, elapsed_ms=(time.monotonic_ns()-started)/1e6)), flush=True)
+                pending_operand = 1 if not generation else 0
+                for operand in (0, 1, 3):
+                    if operand == pending_operand:
+                        continue
+                    tensor, data = storage[operand], values[operand]
+                    for (i, j), ref in tensor.blocks.items():
+                        if (i >= 6 if operand == 1 else i == 2):
+                            column = j * tensor.block_shape[1]
+                            with program.write(ref) as destination:
+                                destination[...] = data[i:i+1, column:column+ref.shape[1]]
+                independent_target = 2 if not generation else 1
+                independent = tuple(result for i, j, result in observations[independent_target]
+                                    if (i >= 6 if independent_target == 2 else i == 2))
+                wait_for(independent)
+                if any(result.ready for i, j, result in observations[0] if i == 2):
+                    raise ArithmeticError('Expert forward result ignored its remaining operand')
+                for i, j, result in observations[independent_target]:
+                    if not np.allclose(result.array, expected[independent_target][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5):
+                        raise ArithmeticError('Expert derivative retained an unused primal dependency')
+                print(json.dumps(dict(event='xonotic_expert_independent_derivative', generation=generation,
+                    target='weights' if independent_target == 2 else 'rows', withheld_operand=pending_operand,
+                    elapsed_ms=(time.monotonic_ns()-started)/1e6)), flush=True)
+                tensor, data = storage[pending_operand], values[pending_operand]
+                for (i, j), ref in tensor.blocks.items():
+                    if (i >= 6 if pending_operand == 1 else i == 2):
+                        column = j * tensor.block_shape[1]
+                        with program.write(ref) as destination:
+                            destination[...] = data[i:i+1, column:column+ref.shape[1]]
+                wait_for(tuple(result for results in observations for i, j, result in results))
+                for target, results in enumerate(observations):
+                    for i, j, result in results:
+                        if not np.allclose(result.array, expected[target][i:i+result.array.shape[0], j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5):
+                            raise ArithmeticError('Expert forward or derivative differs after reuse')
+                print(json.dumps(dict(event='xonotic_expert_complete', generation=generation,
+                    elapsed_ms=(time.monotonic_ns()-started)/1e6,
+                    output=[[(i,j,result.array.tolist()) for i,j,result in results] for results in observations])), flush=True)
                 for results in observations:
                     for i, j, result in results:
                         result.consume()
