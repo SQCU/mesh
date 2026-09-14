@@ -52,10 +52,35 @@ polling-overhead conclusion follows from these runs.
 
 ## Remaining completion requirements
 
-Dynamic selected-page dependencies and lifetime retirement, general indexed
-scatter reductions, general logical-rank lowering, legal fusion/storage planning,
+General indexed scatter reductions, general logical-rank lowering, legal fusion/storage planning,
 collective placement and full caller migration remain unfinished. Xonotic source
 migration is not a substitute for its operational numerical/performance evidence.
 The plan's no-feature-regression and no-overhead acceptance audit remains open.
-Current gold evidence does not establish arbitrary dynamic table streaming or
-complete Pallas-style lowering.
+The dynamic cases below establish their specific selected-source and reuse behavior;
+they do not establish arbitrary dynamic indexing or complete Pallas-style lowering.
+
+
+## Dynamic selected sources and constant specialization
+
+`5175c7e` and `d5c41c0` implement whole-Tensor indexed loads, numerical selectors,
+and canonical selected-source lifetime retirement. `c9c38f8` extends the existing
+gold example: selected source rows produce fours while an unrelated source is
+absent; the selected source then publishes its next occurrence before the old
+unselected source arrives, and the next output is sixes. Both CPU and Metal local
+runs pass. This checks a reuse error that ordinary final FFN accuracy would miss.
+
+`056ebce` retains explicit constant declarations and eliminates dynamic selectors
+only when every candidate belongs to that declared constant storage. Present
+produced tables still require selectors. `228ea96` moves trace export after the
+dynamic example, so numerical submissions from that demonstration are included.
+Latest-occurrence traces still do not reconstruct full historical retirement.
+
+The archived `constant-cpu.json.gz` and `constant-metal.json.gz` observations use
+`228ea96`, FP16 inputs, three measured gold invocations plus warmup and the existing
+side checks. Both pass with maximum gold error 0.001953125; exact cancellation,
+masked integer indexing and both dynamic generations also pass. Both report 1652
+completed numerical submissions. A local CPU run before constant specialization
+reported 1844; this records removed selector work, not a matched throughput claim.
+CPU completion latency has count 3, mean 13.249736333333333 ms and sample variance
+2.097980727796333 ms²; Metal count 3, mean 24.254124666666666 ms and sample variance
+3.5864129249723318 ms². These are local runs, not new distributed scaling evidence.
