@@ -126,7 +126,9 @@ from `mesh_events`. The operator permits additional hardware threads and shared
 global memory wherever needed for independent progress. A single poller is not a
 requirement.
 Check: `grep -rn "scan\|while not .*ready\|sleep" python/mesh rdma/mesh-algebra.m` is
-empty; `rdma/mesh-flow.c` contains no arithmetic on payload bytes.
+empty outside the explicitly requested `collective.sync_on_remote_fill` function;
+`rdma/mesh-flow.c` contains no arithmetic on payload bytes. The completion wait is
+never called by a default collective; its counterexample is caller code.
 
 ### G6. The engine step uses G1 at the two Megatron points and is measured publicly
 

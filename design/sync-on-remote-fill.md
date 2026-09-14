@@ -119,3 +119,33 @@ The root prints its wait cycle and never prints a trial or `DONE`. Interrupt bot
 example clients with SIGTERM or Ctrl-C after inspection. This is an executable
 counterexample, not a watchdog, acceptance harness, default library path, or reason
 to introduce timeouts into tensor dataflow.
+
+## Recorded two-node demonstration
+
+Source `eabd9c5`, local node 0 (M5 Max) and node 1 (M4 Pro), existing Thunderbolt
+RDMA bridges, one configured data queue pair per participant, CPU addition, FP32,
+32 independent blocks of 16,384 elements per trial, five trials, and 42,270,720
+planned arena bytes per participant. Package builds passed on both nodes. Both
+finite modes completed and checked every output against the expected addition.
+
+| Caller order | n | Mean per 32-block batch (ms) | Sample variance (ms²) |
+|---|---:|---:|---:|
+| Streaming submissions, final observation wait | 5 | 0.640367 | 0.0198608914341 |
+| Explicit wait after each submission | 5 | 4.128258 | 0.0126009682811 |
+
+Individual batch times in milliseconds:
+
+- Stream: 0.886084, 0.627625, 0.541042, 0.580875, 0.566208.
+- Sync: 4.308250, 4.060833, 4.154917, 4.019542, 4.097750.
+
+The ratio of measured means is approximately 6.45. Runs were sequential, stream
+then sync, without randomized ordering; this demonstrates this workload and setup,
+not a universal slowdown factor. The arithmetic, payload sizes and graph were the
+same. Only caller ordering changed.
+
+The deadlock mode reached the printed cycle on the root. Both bridges were paired
+with code zero and both client processes remained live; no trial or `DONE` appeared.
+After inspecting that state, both clients received SIGTERM and exited normally.
+Both bridges remained running and returned to idle, client zero, code zero. This
+finite observation is consistent with the source proof above; it is not used as a
+substitute for the proof.
