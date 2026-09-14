@@ -202,11 +202,11 @@ def main():
                         target[...] = value[r:r + ref.shape[0], c:c + ref.shape[1]]
 
         # design/algorithm-sources.md#streaming-overlap-measurement
-        def wait_for(results):
+        def wait_for(results, attribute='ready'):
             deadline = time.monotonic_ns() + 60_000_000_000
-            while running and not all(result.ready for result in results):
+            while running and not all(getattr(result, attribute) for result in results):
                 if time.monotonic_ns() > deadline:
-                    raise TimeoutError(f'Final sections stalled: {program.report}')
+                    raise TimeoutError(f'Observation stalled on {attribute}: {program.report}')
                 time.sleep(0.0001)
             if not running:
                 raise InterruptedError('Gold observation interrupted')
@@ -293,11 +293,7 @@ def main():
             raise ArithmeticError('Independent expression output differs')
         deferred_output.consume()
         for generation in range(2):
-            wait_deadline = time.monotonic() + 60
-            while not streamed_table[1, 0].writable:
-                if time.monotonic() > wait_deadline:
-                    raise TimeoutError('Selected table source was not retired')
-                time.sleep(0.0001)
+            wait_for((streamed_table[1, 0],), 'writable')
             with program.write(streamed_table[1, 0]) as destination:
                 destination[...] = generation + 2
             if generation:
@@ -325,11 +321,8 @@ def main():
             np.add.at(expected, routing[selected, 0], update_values[selected].astype(np.float32)*(2+generation)+1)
             expected = (expected.astype(dtype)*2).astype(dtype)
             scatter_start = time.monotonic_ns()
-            for ref in (*scatter_indices.blocks.values(), *scatter_updates.blocks.values(), *scatter_factors.blocks.values()):
-                while not ref.writable:
-                    if time.monotonic_ns() - scatter_start > 60_000_000_000:
-                        raise TimeoutError('Scatter source lifetime was not retired')
-                    time.sleep(0.0001)
+            wait_for((*scatter_indices.blocks.values(), *scatter_updates.blocks.values(),
+                      *scatter_factors.blocks.values()), 'writable')
             for i in range(last_chunk+1):
                 with program.write(scatter_indices[i, 0]) as destination:
                     destination[...] = routing[update_tile*i:update_tile*(i+1)]
@@ -361,6 +354,7 @@ def main():
                 for result in scatter_results:
                     result.consume()
         for generation in range(2):
+            wait_for((fanout_source[0, 0],), 'writable')
             with program.write(fanout_source[0, 0]) as destination:
                 destination[...] = generation + 2
             wait_for(tuple(fanout_results))
