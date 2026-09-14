@@ -289,6 +289,7 @@ class Program:
         from .kernels import _ExpressionKernel
         if not isinstance(kernel, _ExpressionKernel):
             raise TypeError('Kernel calls require an expression')
+        check(self.native.algebra_kernel(self.handle))
         kernel.bind_grid(self, tuple(grid), inputs, outputs)
 
     # design/algorithm-sources.md#indexed-library-functions

@@ -93,6 +93,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property NSArray<MeshExtent *> *operands;
 @property MeshCPUCode *cpuCode;
 @property id<MTLComputePipelineState> metalPipeline;
+@property id<MTLCommandQueue> queue;
 @property NSData *cpuArguments;
 @property NSMutableData *publicationSections;
 @property NSMutableData *dependencies,*results;
@@ -172,7 +173,8 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
   struct mesh_row_map *returns=self.returns.mutableBytes;
   for(size_t i=0;i<self.returns.length/sizeof *returns;i++)mesh_reader_unbind(context,&returns[i]);
   self.functions=nil;
-  if(self.routeResidency)[self.queue removeResidencySet:self.routeResidency];
+  if(self.routeResidency)for(id<MTLCommandQueue> queue in [NSSet setWithArray:[self.functions valueForKey:@"queue"]])
+    [queue removeResidencySet:self.routeResidency];
   self.routeResidency=nil;
   self.lookup=nil;
   self.extents=nil;
@@ -217,6 +219,12 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
 struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *context) {return create_algebra(context,NO);}
 /* design/algorithm-sources.md#cpu-indexed-execution */
 struct mesh_algebra *mesh_algebra_create_cpu(struct mesh_ctx *context) {return create_algebra(context,YES);}
+/* design/algorithm-sources.md#independent-kernel-submission */
+int mesh_algebra_kernel(struct mesh_algebra *handle) {
+  MeshAlgebra *a=owner(handle);if(a.realized)return EBUSY;
+  if(!a.cpu){a.queue=[a.device newCommandQueue];if(!a.queue)return ENOMEM;}
+  return 0;
+}
 /* design/algorithm-sources.md#application-metal-kernels */
 uint32_t mesh_algebra_node(struct mesh_algebra *handle) {return owner(handle)->context->M->node;}
 /* design/algorithm-sources.md#page-derived-reduction-leaves */
@@ -425,7 +433,7 @@ static int bind_function(struct mesh_algebra *handle,const struct mesh_view *inp
   MeshAlgebra *a=owner(handle);
   if(a.realized)return EBUSY;
   if(!submit || !output_count || output_count>UINT32_MAX || input_count>UINT32_MAX || !outputs || (input_count && !inputs))return EINVAL;
-  MeshFunction *f=[MeshFunction new];f.owner=a;f.dependencies=[NSMutableData new];f.results=[NSMutableData new];
+  MeshFunction *f=[MeshFunction new];f.owner=a;f.queue=a.queue;f.dependencies=[NSMutableData new];f.results=[NSMutableData new];
   f.inputViews=[NSData dataWithBytes:inputs length:input_count*sizeof *inputs];f.indexedInputs=[NSMutableIndexSet new];
   for(size_t i=0;i<input_count;i++){if(!valid_view(a,inputs[i]))return EINVAL;dependencies(f.dependencies,inputs[i]);}
   for(size_t i=0;i<output_count;i++) {
@@ -448,7 +456,6 @@ static int route_residency(MeshAlgebra *a,const struct mesh_view *candidates,siz
     MTLResidencySetDescriptor *descriptor=[MTLResidencySetDescriptor new];descriptor.initialCapacity=count;
     NSError *error=nil;a.routeResidency=[a.device newResidencySetWithDescriptor:descriptor error:&error];
     if(!a.routeResidency){fprintf(stderr,"mesh route residency: %s\n",error.description.UTF8String);return ENOMEM;}
-    [a.queue addResidencySet:a.routeResidency];
   }
   for(size_t i=0;i<count;i++){
     struct mesh_extent *extent=&candidates[i].tensor->extents[candidates[i].extent];
@@ -686,7 +693,7 @@ static MTLCompileOptions *source_options(void) {
 }
 /* design/algorithm-sources.md#realized-numerical-invocation */
 static void submit_encoded_metal(MeshFunction *f,void (^encode)(id<MTLCommandBuffer>)) {
-  id<MTLCommandBuffer> command=[f.owner.queue commandBuffer];encode(command);
+  id<MTLCommandBuffer> command=[f.queue commandBuffer];encode(command);
   [command addCompletedHandler:^(id<MTLCommandBuffer> done){
     atomic_fetch_add(&f.owner->gpuNanoseconds,(uint64_t)((done.GPUEndTime-done.GPUStartTime)*1e9));
     complete_part(f,done.error.code,0);
@@ -985,7 +992,7 @@ static int native_part(MeshAlgebra *a,MeshFunction *f,NSArray *rectangles,NSDict
 }
 /* design/algorithm-sources.md#selected-native-contractions */
 static int prepare_part(MeshAlgebra *a,MeshFunction *f,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta,size_t first,size_t count) {
-  f.owner=a;f.dependencies=[NSMutableData new];
+  f.owner=a;f.queue=a.queue;f.dependencies=[NSMutableData new];
   struct mesh_extent *out=&z.tensor->extents[z.extent];
   size_t scalar=scalar_bytes(out->shape.scalar);
   f->output=(struct mesh_row_map){.first=out->first+(uint32_t)((z.offset+first)*scalar/a->context->M->pgsz),.count=out->quantum};
@@ -1115,7 +1122,7 @@ int mesh_algebra_contract_select(struct mesh_algebra *handle,struct mesh_view se
   dependencies(reads,selector);
   const struct mesh_row_map *maps=reads.bytes;
   for(size_t i=0;i<reads.length/sizeof *maps;i++)if(overlaps(maps[i],out))return EINVAL;
-  MeshFunction *f=[MeshFunction new];f.owner=a;f.dependencies=reads;f.inputViews=views;f.indexedInputs=[NSMutableIndexSet new];
+  MeshFunction *f=[MeshFunction new];f.owner=a;f.queue=a.queue;f.dependencies=reads;f.inputViews=views;f.indexedInputs=[NSMutableIndexSet new];
   f->output=out;f->function=(struct mesh_row_function){.output=&f->output,.outputs=1,.rows=1};bind_dependencies(f);
   f.plans=plans;f->executionKind=plans[0]->executionKind;
   const uint32_t *selection=(const uint32_t *)selector.tensor->extents[selector.extent].address+selector.offset;
@@ -1187,7 +1194,7 @@ int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_
   size_t step=(size_t)d->quantum*a->context->M->pgsz/scalar;
   for(size_t first=0;first<elements;first+=step) {
     size_t end=MIN(elements,first+step);
-    MeshFunction *f=[MeshFunction new];f.owner=a;f.dependencies=[NSMutableData new];
+    MeshFunction *f=[MeshFunction new];f.owner=a;f.queue=a.queue;f.dependencies=[NSMutableData new];
     NSMutableData *segments=[NSMutableData new];
     for(size_t i=0;i<count;i++) {
       struct mesh_copy_region r=regions[i];
@@ -1370,6 +1377,8 @@ static int indexed_active_domain(MeshAlgebra *a,struct mesh_indexed_read *d,stru
 int mesh_algebra_realize(struct mesh_algebra *handle) {
   MeshAlgebra *a=owner(handle);if(a.realized)return 0;size_t count=a.functions.count;
   [a.routeResidency commit];
+  if(a.routeResidency)for(id<MTLCommandQueue> queue in [NSSet setWithArray:[a.functions valueForKey:@"queue"]])
+    [queue addResidencySet:a.routeResidency];
   for(MeshFunction *f in a.functions)for(struct mesh_indexed_read *d=f->function.indexed;d;d=d->next)
     for(uint32_t i=0;i<d->selectors;i++){
       struct mesh_row_map map=d->selector[i];

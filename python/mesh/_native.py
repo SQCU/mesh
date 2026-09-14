@@ -37,6 +37,7 @@ class Native:
             'mesh_detach': (C.c_int, [P]),
             'mesh_algebra_create': (P, [P]),
             'mesh_algebra_create_cpu': (P, [P]),
+            'mesh_algebra_kernel': (C.c_int, [P]),
             'mesh_algebra_destroy': (None, [P]),
             'mesh_algebra_publication_bytes': (Z, [P]),
             'mesh_algebra_page_bytes': (Z, [P]),

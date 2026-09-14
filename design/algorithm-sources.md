@@ -559,3 +559,14 @@ The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/de
 
 - [gather](https://docs.jax.dev/en/latest/_autosummary/jax.lax.gather.html)
 - [Pallas pipelining guide](https://docs.jax.dev/en/latest/pallas/tpu/pipelining.html)
+
+## Independent kernel submission
+
+Apple, Metal `MTLCommandQueue`, and the MLX authors' stream-based execution
+(`mlx/backend/metal/device.cpp`). Commands within one queue execute in submission
+order. `mesh_algebra_kernel` starts a native queue while configuring a public
+kernel call; its bound functions retain that queue. Invocation uses the retained
+queue without selecting or allocating one. Different kernel calls therefore have
+no shared command-queue ordering dependency; canonical operand presence controls
+when their regions become issuable. This permits GPU overlap, not a promise that
+the device concurrently executes every ready command. CPU dispatch is unchanged.
