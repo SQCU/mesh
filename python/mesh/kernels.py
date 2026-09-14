@@ -46,6 +46,17 @@ class Metal:
     constants: tuple = ()
 
 
+# design/algorithm-sources.md#static-indexed-access-specialization
+@dataclass(frozen=True)
+class _StaticTable:
+    refs: tuple
+    ordinals: tuple
+    shape: tuple
+    block_shape: tuple
+    grid: tuple
+    dtype: object
+
+
 @dataclass(frozen=True)
 class _Expression:
     operation: str
@@ -493,8 +504,16 @@ def _specialize_accesses(expression, inputs, output, coordinate):
             return _Expression(node.operation, children, node.value)
         table = inputs[node.value]
         row, column, mask, other = children
-        result = other
-        for block in reversed(selected[node]):
+        chosen = selected[node]
+        if len(chosen) > 1:
+            refs = tuple(table.blocks[block] for block in chosen)
+            ordinals = tuple(row*table.grid[1]+column for row, column in chosen)
+            source = _StaticTable(refs, ordinals, table.shape, table.block_shape, table.grid, table.dtype)
+            index = len(bound)
+            bound.append(source)
+            result = _Expression('load', children, index)
+        elif chosen:
+            block, = chosen
             ref = table.blocks[block]
             view = ref.view
             identity = (view.tensor, view.extent, view.offset, view.rows, view.columns, view.row_stride, view.column_stride, ref.dtype.str)
@@ -502,11 +521,9 @@ def _specialize_accesses(expression, inputs, output, coordinate):
                 positions[identity] = len(bound)
                 bound.append(ref)
             first_row, first_column = (index*size for index, size in zip(block, table.block_shape))
-            local_row, local_column = row-first_row, column-first_column
-            inside = (local_row >= 0) & (local_row < ref.shape[0]) & (local_column >= 0) & (local_column < ref.shape[1])
-            value = _Expression('load', (local_row, local_column, _literal(True), other), positions[identity])
-            result = value if len(selected[node]) == 1 else select(inside, value, result)
-        result = select(mask, result, other) if selected[node] else other
+            result = _Expression('load', (row-first_row, column-first_column, mask, other), positions[identity])
+        else:
+            result = other
         replacements[node] = result
         return result
 
@@ -651,7 +668,7 @@ class _ExpressionKernel:
                 dynamic[node] = (selected, node.value)
 
             flattened = tuple(ref for source in reads for ref in
-                (tuple(ref for _, ref in sorted(source.blocks.items())) if hasattr(source, 'blocks') else (source,)))
+                (source.refs if isinstance(source, _StaticTable) else tuple(ref for _, ref in sorted(source.blocks.items())) if hasattr(source, 'blocks') else (source,)))
             function = program.native.algebra_trace_count(program.handle)
             check(program.native.algebra_source(program.handle,
                 self.source(reads, output, False, expression).encode(),
@@ -660,7 +677,7 @@ class _ExpressionKernel:
             offsets = []
             for source in reads:
                 offsets.append((offsets[-1][0] + offsets[-1][1] if offsets else 0,
-                    len(source.blocks) if hasattr(source, 'blocks') else 1))
+                    len(source.refs) if isinstance(source, _StaticTable) else len(source.blocks) if hasattr(source, 'blocks') else 1))
             for selected, index in dynamic.values():
                 first, count = offsets[index]
                 check(program.native.algebra_indexed(program.handle, function, selected.view,
@@ -671,7 +688,7 @@ class _ExpressionKernel:
         widths, reductions = {}, []
         physical, pointers = [], {}
         for index, ref in enumerate(inputs):
-            refs = tuple(ref for _, ref in sorted(ref.blocks.items())) if hasattr(ref, 'blocks') else (ref,)
+            refs = ref.refs if isinstance(ref, _StaticTable) else tuple(ref for _, ref in sorted(ref.blocks.items())) if hasattr(ref, 'blocks') else (ref,)
             pointers[index] = tuple(range(len(physical), len(physical) + len(refs)))
             physical.extend(refs)
 
@@ -762,6 +779,11 @@ class _ExpressionKernel:
         lines.append(_scalar_helpers(metal))
         layouts = {}
         for index, ref in enumerate(inputs):
+            if isinstance(ref, _StaticTable):
+                name = f'mesh_static_load_{index}'
+                lines.append(_static_table_source(ref, pointers[index][0], name, metal))
+                layouts[index] = name
+                continue
             if not hasattr(ref, 'blocks'):
                 continue
             refs = tuple(ref for _, ref in sorted(ref.blocks.items()))
@@ -779,7 +801,7 @@ class _ExpressionKernel:
                     strides.append(f'{name}{index}[CANDIDATE]')
             layouts[index] = scalar, strides
         lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], uint r [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {' if metal else 'void mesh_expression(const uintptr_t *buffers) {')
-        candidates = {pointer for index, ref in enumerate(inputs) if hasattr(ref, 'blocks') for pointer in pointers[index]}
+        candidates = {pointer for index, ref in enumerate(inputs) if hasattr(ref, 'blocks') or isinstance(ref, _StaticTable) for pointer in pointers[index]}
         for index, ref in enumerate((*physical, output)):
             if index in candidates:
                 continue
@@ -859,9 +881,36 @@ def _indexed_access_paths(expression, inputs, dynamic_inputs):
     return accesses
 
 
+# design/algorithm-sources.md#static-indexed-access-specialization
+def _static_table_source(table, first, name, metal):
+    dtype = table.dtype
+    scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int' if metal else 'int32_t',
+              'u4': 'uint' if metal else 'uint32_t', 'i8': 'long' if metal else 'int64_t',
+              'u8': 'ulong' if metal else 'uint64_t', 'u1': 'uchar' if metal else 'uint8_t', 'b1': 'bool'}[dtype.kind+str(dtype.itemsize)]
+    integer = 'ulong' if metal else 'uint64_t'
+    constant = 'constant' if metal else 'static const'
+    lines = []
+    for suffix, values in (('ordinal', table.ordinals), ('rs', tuple(ref.view.row_stride for ref in table.refs)),
+                           ('cs', tuple(ref.view.column_stride for ref in table.refs))):
+        lines.append(f'{constant} {integer} {name}_{suffix}[]={{'+','.join(map(str, values))+'};')
+    value = f'p[row%{table.block_shape[0]}*{name}_rs[low]+column%{table.block_shape[1]}*{name}_cs[low]]'
+    result_type = 'float' if dtype.kind == 'f' else scalar
+    lines.append(f"""// design/algorithm-sources.md#static-indexed-access-specialization
+    {'inline' if metal else 'static inline'} {result_type} {name}({'device const ulong *' if metal else 'const uintptr_t *'} buffers,{integer} row,{integer} column) {{
+      {integer} ordinal=row/{table.block_shape[0]}*{table.grid[1]}+column/{table.block_shape[1]},low=0,high={len(table.refs)-1};
+      while(low<high) {{ {integer} middle=low+(high-low)/2;
+        if({name}_ordinal[middle]<ordinal)low=middle+1;else high=middle; }}
+      {'device ' if metal else ''}const {scalar} *p=({'device ' if metal else ''}const {scalar} *)buffers[{first}+low];
+      return {value};
+    }}""")
+    return '\n'.join(lines)
+
+
 # design/algorithm-sources.md#shared-scalar-load-emission
 def _indexed_load_expression(ref, pointer, layout, args, metal):
     row, column, mask, other = args
+    if isinstance(ref, _StaticTable):
+        return f'(({mask})?{layout}(buffers,({row}),({column})):({other}))'
     if hasattr(ref, 'blocks'):
         block = f'(({row})/{ref.block_shape[0]}*{ref.grid[1]}+({column})/{ref.block_shape[1]})'
         scalar, strides = layout
@@ -1853,11 +1902,11 @@ class _ExpressionRegions:
         if key not in self.cache:
             target = self.temporary(shape, np.uint32)
             row, column = indices()
-            value = _literal(0)
             selected = tuple((first, ref) for first, ref in refs if first < origin[1]+shape[1] and origin[1] < first+ref.shape[1])
-            for symbol, (first, ref) in reversed(tuple(zip(arguments(len(selected)), selected))):
-                value = select(column+origin[1] < first+ref.shape[1], symbol.at(row, column+origin[1]-first), value)
-            _ExpressionKernel((value,)).bind(self.program, tuple(ref for _, ref in selected), (target,), self.coordinate)
+            table = _StaticTable(tuple(ref for _, ref in selected), tuple(first//128 for first, _ in selected),
+                                 (shape[0], width), (shape[0], 128), (1, (width+127)//128), np.dtype('uint32'))
+            symbol, = arguments(1)
+            _ExpressionKernel((symbol.at(row, column+origin[1]),)).bind(self.program, (table,), (target,), self.coordinate)
             self.cache[key] = target
         return self.cache[key]
 
