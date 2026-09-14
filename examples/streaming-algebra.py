@@ -261,6 +261,7 @@ def main():
                 joined = mx.concatenate((selected, tail), axis=0)
                 means = mx.mean(source, axis=1)
                 total_mean = mx.sum(means)
+                column_means = mx.mean(source, axis=0, keepdims=True)
                 logical_indices = indices.reshape(2, 2, 1)
                 taken = mx.take_along_axis(selected.reshape(2, 2, 4), logical_indices, axis=2)
                 broadcast_taken = mx.take_along_axis(selected[:2].reshape(1, 2, 4), logical_indices, axis=2)
@@ -271,10 +272,12 @@ def main():
                 transpose=transposed, concatenate=rank_joined, reshape_gather=reshaped)
             lowered = kernel_calls(program, graph, (),
                 {source.index: x_source, indices.index: x_indices, tail.index: x_tail},
-                outputs=(joined, means, total_mean, *logical_values.values()), root_peer=0, tile_rows=2, tile_columns=4)
+                outputs=(joined, means, total_mean, column_means, *logical_values.values()), root_peer=0, tile_rows=2, tile_columns=4)
             observations = tuple(program.export(lowered[joined.index][i, 0]) for i in range(3))
             mean_results = tuple(program.export(lowered[means.index][i, 0]) for i in range(2))
             total_result = program.export(lowered[total_mean.index][0, 0])
+            column_mean_results = tuple(program.export(ref)
+                for _, ref in sorted(lowered[column_means.index].blocks.items()))
             logical_results = {name: tuple(program.export(ref) for _, ref in sorted(lowered[value.index].blocks.items()))
                 for name, value in logical_values.items()}
             bindings = {}
@@ -718,7 +721,7 @@ def main():
                 print(json.dumps(dict(event='xonotic_logical_early', generation=generation,
                     withheld_source_block=1-early_source, withheld_index_block=1,
                     output={name: [result.array.tolist() for result in results] for name, results in logical_early.items()})), flush=True)
-                if total_result.ready or not np.array_equal(mean_results[early_source].array, mean_expected[2*early_source:2*early_source+2]):
+                if total_result.ready or any(result.ready for result in column_mean_results) or not np.array_equal(mean_results[early_source].array, mean_expected[2*early_source:2*early_source+2]):
                     raise ArithmeticError('Xonotic row reduction lost independent source progress')
                 if observations[1].ready:
                     raise ArithmeticError(f'Xonotic output consumed an unpublished occurrence: generation={generation}')
@@ -736,11 +739,14 @@ def main():
                     destination[...] = source_values[2*(1-early_source):2*(1-early_source)+2]
                 with program.write(x_indices[0, 1]) as destination:
                     destination[...] = index_values[2:]
-                wait_for((*observations, *mean_results, total_result, *(result for results in logical_results.values() for result in results)))
+                wait_for((*observations, *mean_results, total_result, *column_mean_results, *(result for results in logical_results.values() for result in results)))
                 if not np.array_equal(np.concatenate([result.array for result in mean_results]), mean_expected) or total_result.array.item() != mean_expected.sum():
                     raise ArithmeticError('Xonotic matrix/vector reduction mismatch')
+                if not np.array_equal(np.concatenate([result.array for result in column_mean_results], axis=1), source_values.mean(axis=0, keepdims=True)):
+                    raise ArithmeticError('Xonotic column reduction mismatch')
                 print(json.dumps(dict(event='xonotic_reductions', generation=generation, early_source_block=early_source,
-                    means=[result.array.tolist() for result in mean_results], total=total_result.array.item())), flush=True)
+                    means=[result.array.tolist() for result in mean_results],
+                    column_means=[result.array.tolist() for result in column_mean_results], total=total_result.array.item())), flush=True)
                 for index, result in enumerate(observations):
                     if not np.array_equal(result.array, expected[2*index:2*index+2]):
                         raise ArithmeticError('Xonotic gather/concatenate output differs after reuse')
@@ -751,7 +757,7 @@ def main():
                         raise ArithmeticError(f'Logical indexed output differs after reuse: {name}')
                 print(json.dumps(dict(event='xonotic_logical_complete', generation=generation,
                     output={name: [result.array.tolist() for result in results] for name, results in logical_results.items()})), flush=True)
-                for result in (*observations, *mean_results, total_result, *(result for results in logical_results.values() for result in results)):
+                for result in (*observations, *mean_results, total_result, *column_mean_results, *(result for results in logical_results.values() for result in results)):
                     result.consume()
         if xonotic_gradient is not None:
             gradient_indices, cotangents, gradient_results, generations = xonotic_gradient
