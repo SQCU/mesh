@@ -165,6 +165,13 @@ def expression(value, *outputs):
 class _ExpressionKernel:
     values: tuple
 
+    # design/algorithm-sources.md#dynamic-indexed-expression-lowering
+    def bind_grid(self, program, grid, input_specs, output_specs):
+        import itertools
+        for coordinate in itertools.product(*(range(size) for size in grid)):
+            self.bind(program, tuple(spec.resolve(coordinate) for spec in input_specs),
+                tuple(spec.resolve(coordinate) for spec in output_specs), coordinate)
+
     # design/algorithm-sources.md#region-expression-fusion
     def bind(self, program, inputs, outputs, coordinate=()):
         from . import check
