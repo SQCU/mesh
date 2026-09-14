@@ -9,7 +9,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 28u
+#define MESH_VERSION 29u
 #define MESH_ABSENT UINT32_MAX
 /* ledger D6: "A maximum of 10 unreliable connection (UC) queue pairs" */
 #define MESH_QPS 8
@@ -24,7 +24,7 @@ enum { MESH_PRESENT, MESH_CONSTANT, MESH_PRODUCING, MESH_ROW_OWN, MESH_ROW_HOT, 
 enum { MESH_SEND, MESH_RECEIVE };
 enum { MESH_NOTICE_COMPUTE, MESH_NOTICE_SEND, MESH_NOTICE_QUEUES };
 struct mesh_notice { _Atomic uint32_t queued; uint32_t next; };
-struct mesh_port_info { char device[32]; uint16_t peer; _Atomic uint64_t phase; _Atomic uint64_t when; _Atomic int64_t code; _Atomic uint32_t domain; uint32_t reserved; };
+struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps;
   _Atomic uint32_t configured;

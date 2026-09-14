@@ -29,7 +29,7 @@ struct mesh_link {
 static struct mesh_queue *link_queue(struct mesh_link *link,uint32_t q,int direction){ return &link->queues[2*q+(uint32_t)direction]; }
 /* design/algorithm-sources.md#programcopy */
 static void link_error(struct hdr *M,int64_t code,uint32_t domain){
-  M->port.code=code; M->port.domain=domain; M->port.when=(uint64_t)monotime();
+  M->port.code=code; M->port.domain=domain;
 }
 /* design/algorithm-sources.md#programcopy */
 static size_t link_index_offset(struct mesh_link *link,int direction,uint32_t slot){
@@ -393,8 +393,6 @@ int main(int argc,char**argv){
         link.worker_count++;
       }
       if(error){link_error(M,error,1);link_down(&link);continue;}
-      snprintf(M->port.device,sizeof M->port.device,"%s",ibv_get_device_name(provider->context->device));
-      M->port.peer=(uint16_t)expected_peer;
       atomic_store(&M->port.phase,MESH_PAIRED);
       fprintf(stderr,"bridge node %d paired for client %llu\n",me,(unsigned long long)client);
     }

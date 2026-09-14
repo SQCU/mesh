@@ -12,7 +12,6 @@
 #include <limits.h>
 #include <math.h>
 #include <dlfcn.h>
-#include <time.h>
 
 /* design/algorithm-sources.md#programkernel_call */
 static size_t scalar_bytes(enum mesh_scalar scalar) {

@@ -15,7 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <time.h>
 #include <limits.h>
 
 #define QD 4095
@@ -53,7 +52,6 @@ static int down_verbs(void){
   return 1; }
 static void down(void){ if(shm)shm_unlink(shm); }
 static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
-static double monotime(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t); return t.tv_sec+t.tv_nsec/1e9; }
 static void onsig(int s){ (void)s; stop++; }
 
 /* ledger D13: the out-of-band connection record, exchanged once per pairing */
@@ -132,7 +130,6 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
     return -1; }
   struct hdr *m=(struct hdr *)mem;
   int f=oob(peer,m,client); if(f<0) return !peer && (errno==EAGAIN || errno==EWOULDBLOCK)?1:-1;
-  fprintf(stderr,"pair setup node=%d connected=%.6f\n",me,monotime());
   if(!provider->context){
   struct ibv_device **dl=ibv_get_device_list(NULL);
   for(int i=0;dl&&dl[i];i++){
@@ -207,7 +204,6 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=message_bytes,.node=(uint16_t)me,.count=(uint32_t)qps},you;
   for(int q=0;q<qps;q++){ mine.qpns[q]=provider->pairs[q]->qp_num; mine.psns[q]=(psn+(uint32_t)q)&0xffffff; }
   memcpy(mine.gid,&gid,16);
-  fprintf(stderr,"pair setup node=%d exchange=%.6f regions=%d qpn=%u\n",me,monotime(),provider->region_count,mine.qpn);
   if(exchange(f,&mine,&you,sizeof mine,sizeof you,m,client)){ close(f); fprintf(stderr,"exchange failed\n"); return -1; }
   /* ledger D6: both ends must post messages of the same frame count; D5: the same queue-pair count */
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.count!=mine.count || (expected_peer>=0 && you.node!=expected_peer)){
