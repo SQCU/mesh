@@ -153,13 +153,15 @@ def main():
 
         fanout_source = program.tensor((2, 4), dtype=dtype)
         fanout_received = exchange(fanout_source, 0, 1)
-        fanout_arg, = kernels.arguments(1)
+        fanout_arg, fanout_factor = kernels.arguments(2)
+        fanout_factors = weight(np.arange(1, 66, dtype=dtype).reshape(-1, 1))
         fanout_results = []
         for factor in range(1, 66):
-            branch = program.kernel_call(kernels.expression(fanout_arg * factor), grid=(1,),
-                in_specs=(BlockSpec((2, 4), lambda i: (0, 0)),),
+            branch = program.kernel_call(kernels.expression(fanout_arg * fanout_factor), grid=(1,),
+                in_specs=(BlockSpec((2, 4), lambda i: (0, 0)),
+                          BlockSpec((1, 1), lambda i, factor=factor: (factor-1, 0))),
                 out_specs=BlockSpec((2, 4), lambda i: (0, 0)),
-                out_shape=ShapeDtypeStruct((2, 4), dtype), peer=0 if args.local else 1)(fanout_received)
+                out_shape=ShapeDtypeStruct((2, 4), dtype), peer=0 if args.local else 1)(fanout_received, fanout_factors)
             fanout_results.append(program.export(exchange(branch, 1, 0)[0, 0]))
         for run in range(args.runs + 1):
             data = tuple((rng.standard_normal((rows, width), dtype=np.float32) / 8).astype(dtype) for _ in range(2))
