@@ -2301,3 +2301,21 @@ regions through the shared compiler. Metadata table size can grow to one entry
 per target scalar when the width gcd is one; it is a setup cost, not hidden
 numerical storage. This removes row-scatter's prior partition-crossing base
 reshape restriction without adding another numerical lowering.
+
+## Segment range identity specialization
+
+The JAX authors' Pallas design separates setup specialization from the numerical
+body, as described in [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html).
+The bounded scatter compiler retains segment endpoints [lo, hi) in its existing
+routing directory. Flattening across a feature panel of width one is the identity,
+so `_lower_indexed_add` now passes those original endpoint views directly instead
+of allocating and launching a multiplication-by-one producer. When the expression
+contains no indexed loads, no flattened selector range is consumed at all; that
+case also retains the original bounds without allocating a dead derived value.
+
+Wider panels containing indexed loads retain their existing scaled ranges.
+Direct Ref candidate bindings continue to use the original ordinal range. This
+specialization changes only setup bindings and removes redundant metadata
+producers; it adds no numerical dependency, shared storage reuse constraint or
+runtime scheduling state. The original routing directory already owns the active
+count, and native indexed reader memberships retain its lifetime for these views.

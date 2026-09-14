@@ -1087,9 +1087,11 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             bounds = directory.slice(0, 5 * count + 2 * segment, 1, 2)
             range_key = segment, partial.shape[1]
             if range_key not in flat_ranges:
-                flat_bounds = program.tensor((1, 2), dtype=np.uint32)[0, 0]
-                bound_value, = arguments(1)
-                _ExpressionKernel((bound_value * partial.shape[1],)).bind(program, (bounds,), (flat_bounds,))
+                flat_bounds = bounds
+                if partial.shape[1] != 1 and indexed_inputs:
+                    flat_bounds = program.tensor((1, 2), dtype=np.uint32)[0, 0]
+                    bound_value, = arguments(1)
+                    _ExpressionKernel((bound_value * partial.shape[1],)).bind(program, (bounds,), (flat_bounds,))
                 flat_ranges[range_key] = flat_bounds
             bound_operands, direct = list(operands), {}
             for index in value_inputs:
