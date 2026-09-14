@@ -119,7 +119,7 @@ The source exposes these distinct costs and waits:
 
 | Boundary | Current mechanism | Consequence |
 |---|---|---|
-| Output claim | `mesh_issue_index` checks actual inputs and output reader ownership; `mesh_reset` clears presence and all 64 read planes before setting producing | Work proportional to covered words and reader planes precedes dispatch. An unavailable operand/storage claim returns without spinning for it. |
+| Output claim | `mesh_issue_index` checks actual inputs and output reader ownership; `mesh_reset` clears presence and assigned read planes before setting producing | Work proportional to covered rows and assigned reader planes precedes dispatch. An unavailable operand/storage claim returns without spinning for it. |
 | Publication | `mesh_publish_partial` / `mesh_publish` update atomic planes; `mesh_notify` pushes each affected row onto compute/send lists and calls `sendto(MSG_DONTWAIT)` | Publication does not wait for delivery, but incurs atomic contention, list work and a socket call. CAS retries have no stated per-call time bound. |
 | Consumer discovery | `mesh_events` runs on a serial dispatch queue and traverses affected reader edges | Ready work can incur notification and queueing delay; asynchronous submission alone gives no bound on that delay. |
 | Numerical issue | `submit_ready` enters a dispatch group and invokes the prebound submit function; only synchronous CPU work uses a worker queue | CPU arithmetic executes away from the presence handler. Dispatch internals and worker scheduling are not shown to have zero contention or bounded latency. |

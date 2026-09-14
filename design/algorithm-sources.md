@@ -279,6 +279,14 @@ network computations](https://doi.org/10.1145/3315508.3329973)
 
 - [Monsoon](https://www.cs.cmu.edu/~18742/papers/Papadopoulos1990.pdf)
 
+Papadopoulos and Culler's operand-associated presence supplies the lifetime
+mechanism. `mesh_reads_reset` uses mesh's already-realized reader mask, including
+transport readers, to clear only planes assigned to the overwritten region.
+Both numerical claims and receive completions use this same operation. No reader
+outside that mask is consulted by the realized region's consumers. Adding a
+reader is configuration work; its assigned plane is cleared on the next write.
+The previous unconditional 64-plane atomic sweep is removed from both paths.
+
 ## Xonotic shared indexing
 
 - [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)

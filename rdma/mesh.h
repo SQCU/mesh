@@ -89,10 +89,19 @@ static inline void mesh_receive_posted(struct hdr *m,uint32_t row,uint32_t page)
   mesh_bits_set(m,MESH_PAGE_HOT,page,m->block);
   mesh_bits_clear(m,MESH_PRESENT,row,m->block);
 }
+/* design/algorithm-sources.md#canonical-reader-groups */
+static inline void mesh_reads_reset(struct hdr *m,uint32_t first,uint32_t count){
+  uint64_t readers=0;
+  for(uint32_t row=first;row<first+count;row++)readers|=mesh_mask(m)[row];
+  while(readers){
+    uint32_t plane=(uint32_t)__builtin_ctzll(readers);readers&=readers-1;
+    mesh_bits_clear(m,MESH_READ+plane,first,count);
+  }
+}
 /* ledger D8: presence is the receive completion */
 static inline void mesh_receive_complete(struct hdr *m,uint32_t row,uint32_t page,int landed){
   if(landed){
-    for(int p=0;p<MESH_READERS;p++) mesh_bits_clear(m,MESH_READ+p,row,m->block);
+    mesh_reads_reset(m,row,m->block);
     mesh_bits_set(m,MESH_PRESENT,row,m->block);
   }
   mesh_bits_clear(m,MESH_PAGE_HOT,page,m->block);

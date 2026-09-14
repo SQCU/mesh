@@ -478,10 +478,11 @@ static int mesh_claimable(struct hdr *m,uint32_t first,uint32_t count){
 /* design/algorithm-sources.md#xonotic-frame-migration */
 int mesh_writable(struct mesh_ctx *c,uint32_t first,uint32_t count){return mesh_claimable(c->M,first,count);}
 
+/* design/algorithm-sources.md#canonical-reader-groups */
 static void mesh_reset(struct mesh_ctx *c,uint32_t first,uint32_t count){
   struct hdr *m=c->M;
   mesh_bits_clear(m,MESH_PRESENT,first,count);
-  for(int p=0;p<MESH_READERS;p++) mesh_bits_clear(m,MESH_READ+p,first,count);
+  mesh_reads_reset(m,first,count);
   mesh_index_reset(c,first,count);
 }
 
