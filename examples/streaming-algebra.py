@@ -243,6 +243,7 @@ def main():
         xonotic_neighborhoods = []
         xonotic_expert = None
         xonotic_batched = None
+        xonotic_boolean = None
         scatter_bases = {}
         xonotic_take_gradient = None
         if args.xonotic and args.rank == 0:
@@ -500,6 +501,33 @@ def main():
                                  zip((product, dl, dr), ((6, 7), (10, 3), (7, 5))))
                 generations.append(((left.reshape(10, 3), right.reshape(7, 5), cotangent.reshape(6, 7)), expected))
             xonotic_batched = batch_storage, observations, generations
+            # design/algorithm-sources.md#xonotic-logical-pointwise
+            graph = mx.Graph()
+            with graph:
+                truth_input = graph.input('truth_values', (2, 1, 3), 'float32')
+                expanded = mx.broadcast_to(truth_input, (2, 2, 3))
+                matrix_values = np.array([[0, 1, -2], [3, 0, np.nan]], dtype=np.float32)
+                matrix = mx.broadcast_to(graph.constant(matrix_values), (2, 2, 3))
+                scalar = mx.broadcast_to(graph.constant(np.float32(2)), (2, 2, 3))
+                conjunction = mx.elementwise('logical_and', expanded, matrix)
+                complement = mx.elementwise('logical_and', mx.elementwise('logical_not', expanded), scalar)
+                mask = mx.elementwise('logical_or', conjunction, complement)
+                consumer = mask.astype('float32') * 3 + 1
+            truth_storage = program.tensor((2, 3), (1, 3), dtype=np.float32)
+            lowered = kernel_calls(program, graph, (), {truth_input.index: truth_storage},
+                outputs=(consumer,), root_peer=0, tile_rows=1, tile_columns=2)
+            result = lowered[consumer.index]
+            observations = tuple((i * result.block_shape[0], j * result.block_shape[1], program.export(ref))
+                                 for (i, j), ref in sorted(result.blocks.items()))
+            generations = []
+            for generation in range(2):
+                data = np.array([[np.nan, 0, -2], [-0.0, 5, 0]] if not generation else
+                                [[0, -3, np.nan], [4, 0, -0.0]], dtype=np.float32)
+                expanded = np.broadcast_to(data[:, None, :], (2, 2, 3))
+                expected = (np.logical_or(np.logical_and(expanded, matrix_values),
+                                         np.logical_and(np.logical_not(expanded), 2)).astype(np.float32) * 3 + 1).reshape(4, 3)
+                generations.append((data, expected))
+            xonotic_boolean = truth_storage, observations, generations
             take_indices = program.tensor((4, 1), (1, 1), dtype=np.int64)
             take_cotangents = program.tensor((4, 1), (1, 1), dtype=np.float32)
             graph = mx.Graph()
@@ -1114,6 +1142,32 @@ def main():
                 for results in observations:
                     for i, j, result in results:
                         result.consume()
+        if xonotic_boolean is not None:
+            storage, observations, generations = xonotic_boolean
+            for generation, (values, expected) in enumerate(generations):
+                wait_for(tuple(storage.blocks.values()), 'writable')
+                early_row = generation
+                with program.write(storage[early_row, 0]) as destination:
+                    destination[...] = values[early_row:early_row+1]
+                wait_for(tuple(result for i, j, result in observations if i // 2 == early_row))
+                for i, j, result in observations:
+                    if i // 2 == early_row:
+                        if not np.array_equal(result.array, expected[i:i+result.array.shape[0], j:j+result.array.shape[1]]):
+                            raise ArithmeticError('Boolean broadcast early consumer differs')
+                    elif result.ready:
+                        raise ArithmeticError('Boolean broadcast consumed a withheld source row')
+                print(json.dumps(dict(event='xonotic_boolean_early', generation=generation,
+                    withheld_row=1-early_row, nan_truth=True)), flush=True)
+                with program.write(storage[1-early_row, 0]) as destination:
+                    destination[...] = values[1-early_row:2-early_row]
+                wait_for(tuple(result for i, j, result in observations))
+                for i, j, result in observations:
+                    if not np.array_equal(result.array, expected[i:i+result.array.shape[0], j:j+result.array.shape[1]]):
+                        raise ArithmeticError('Boolean broadcast consumer differs after reuse')
+                print(json.dumps(dict(event='xonotic_boolean_complete', generation=generation,
+                    output=[(i,j,result.array.tolist()) for i,j,result in observations])), flush=True)
+                for i, j, result in observations:
+                    result.consume()
         if xonotic_batched is not None:
             storage, observations, generations = xonotic_batched
             for generation, (values, expected) in enumerate(generations):
