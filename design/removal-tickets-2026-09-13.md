@@ -168,6 +168,49 @@ band.
 - Amend D14, D16 and `streaming-algebra.md:139-141` per R1 and R2.
 - Amend D9 per R4.
 
+### R9. Delete the host scan; fire functions from the events that change presence
+
+Filed 2026-09-13. Line numbers are from the mesh `c6ad5cc` working tree.
+
+> submissions shouldn't be synchronous, so you have identified yet another exrtemely basic problem, as both producers
+> and consumers must always be waitless, guardless, syncless, and totally determined by local node state
+> — operator, 2026-09-13
+
+**Remove:**
+- `mesh_algebra_scan` (`mesh-algebra.m:679-682`). A host thread sweeps every bound function and calls `mesh_issue` on
+  each, so a function starts when some thread polls, not when its operands arrive.
+- Synchronous submission. `emit_part` (`.m:675-677`) runs `f.execute` on the scanning thread, and so does the
+  `mesh_algebra_function` binding (`.m:335`). Python's `Program._call` `submit` (`__init__.py:258-265`) runs the NumPy
+  kernel inline on that thread, so one kernel's arithmetic stalls every other function's start.
+- Caller scan loops: `examples/streaming-algebra.py:55-62`, `Program.scan`, and `while not result.ready: scan()`.
+
+**Replace with the dataflow firing rule, applied where presence changes:**
+- **Local completion.** After `mesh_complete` (`mesh-dataflow.c:336-342`) publishes its rows, the functions that read
+  those rows and now have every operand present are submitted from that completion. Their reader lists are fixed at
+  realize, as reader slots already are.
+- **Receive completion.** `mesh_receive_complete` (`mesh.h:87-94`) sets presence in the bridge on a RECV completion
+  (D8). That presence change is the event that submits the consuming functions. The path from the bridge's
+  completion to the client's submission is the open part of this ticket, and it is not a sweep.
+- **Every submission returns immediately.** Metal submissions already encode, commit and return, with completion in
+  the command buffer's handler. CPU and NumPy kernels run on their own execution context and call completion when done.
+
+**Why.**
+
+> operators may fire as soon as tokens arrive at their inputs
+> — [TTDA] (D8)
+
+> When node A completes, its outputs are sent via the accelerator interconnect directly into node B's input buffers,
+> and then host B starts node B.
+> — [Pathways] §4.5 (D4)
+
+> … but nothing can prevent a process from performing a send on a line.
+> — [Kahn] (D7)
+
+- The bridge's completion-queue poll (D3) is the transport's licensed progress loop. It does not license a numerical
+  scan in the client.
+- A sweep over all functions makes start latency a property of the sweeping thread. It serializes CPU kernels behind
+  one another and ties progress to a host loop instead of to local node state.
+
 ## Caller side (metal-microbench, done by that session)
 
 Deletes the second executor and the collective/ABI duplicates: `mesh_graph`, `mesh_shaders`, `mesh_context`,
