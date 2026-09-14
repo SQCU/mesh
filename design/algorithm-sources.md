@@ -2920,3 +2920,59 @@ normal numerical references, counter high-word cases, ragged pair boundaries,
 withheld producer/consumer inputs and reuse observations. These finite numerical
 checks do not replace a statistical battery or establish matched performance
 parity with the removed whole-output generator.
+
+## Typed integer contractions
+
+The JAX authors' [Pallas tiled matmul](https://docs.jax.dev/en/latest/pallas/tpu/matmul.html)
+provides the panel/accumulator decomposition already used by mesh's shared dot
+region owner. Integer and boolean contractions use that same decomposition,
+canonical source views, setup cache, output regions and publication mechanism.
+Changing arithmetic does not require another execution interface or a model
+specific contraction emitter.
+
+[C11 draft N1570, section 6.2.5 paragraph 9](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf)
+defines unsigned arithmetic modulo one more than the maximum representable value.
+Mesh converts integer operands to unsigned before multiplication and addition,
+then retains the declared integer width. The result is the modular integer
+contraction, with signed results interpreted at the type boundary. There must
+be no signed overflow before the unsigned conversion. Intermediate partials,
+merges, nested dot expressions and output publication preserve this arithmetic;
+converting an operand or partial through FP32 would destroy the contract.
+
+Brock, Buluç, Mattson, McMillan and Moreira's
+[GraphBLAS C API specification](https://graphblas.org/docs/GraphBLAS_API_C_v2.1.0.pdf)
+provides the semiring formulation. Boolean dot uses logical AND for each product
+and logical OR for accumulation, with false as the identity. It never obtains
+truth by narrowing an integer contribution count, which could wrap. This is
+the boolean truth semiring; arbitrary user-selected semirings are not introduced
+by this increment.
+
+Dot's operand types determine its arithmetic. Pure integer operands use the
+shared integer promotion rules; bool/bool retains boolean truth. Floating
+participation retains FP32 accumulation and the existing native floating path.
+An integral operand in a mixed floating contraction is numerically converted
+through the existing cached expression-panel owner before native binding. The
+conversion writes canonical storage and is an explicit numerical operation,
+not hidden operand staging. Existing FP16/FP32 backend selection stays in place.
+An explicitly requested output dtype remains an output conversion boundary.
+
+Typed integral panel kernels use the existing compiled source binding and the
+actual source/output strides. The existing K boundaries and balanced combination
+of partials remain; boolean partials merge by OR and integer partials by modular
+addition. An empty K dimension produces the typed zero/false identity without
+reading nonexistent operand storage. Independently complete output regions can
+publish while unrelated rows or K panels for other regions remain absent.
+A result still depends on all contributions to its own contraction domain.
+
+Xonotic's batched and transposed matmul calls now use the same shared owner for
+integer and boolean values. The graph's declared output dtype is preserved.
+Its custom FP32 contraction source and the associated launch geometry are
+removed; ordering remains a separate pending migration. Empty batch operand
+views carry metadata only.
+
+The existing streaming-algebra workflow supplies exact Python integer/modular
+references, large operands, overflow, boolean truth, ragged K, batch broadcast,
+transposition, composed consumers and reuse with withheld independent regions.
+The typed panel implementation establishes exact arithmetic and streaming;
+these cases do not establish fastest-backend performance or optimal operand
+reuse/vectorization. Those remain requirements of the full lowering plan.
