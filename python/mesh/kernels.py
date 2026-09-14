@@ -156,6 +156,14 @@ class _Expression:
             raise ValueError('Expression casts require a supported scalar dtype')
         return _Expression('cast', (self,), dtype.str)
 
+    # design/algorithm-sources.md#stable-indexed-ordering
+    def argsort(self, axis=1):
+        import operator
+        axis = operator.index(axis)
+        if axis not in (-2, -1, 0, 1):
+            raise ValueError('Ordering axis must refer to the two-dimensional expression domain')
+        return _Expression('argsort', (self,)) if axis % 2 else self.T.argsort().T
+
     # design/algorithm-sources.md#shared-associative-reductions
     def _reduce(self, operation, axis):
         axes = (0, 1) if axis is None else (axis,) if isinstance(axis, int) else tuple(axis)
@@ -860,7 +868,8 @@ def _indexed_load_expression(ref, pointer, layout, args, metal):
         address = f'(({"device " if metal else ""}const {scalar} *)buffers[{pointer}+{block}])'
         value = f'{address}[(({row})%{ref.block_shape[0]})*{strides[0]}+(({column})%{ref.block_shape[1]})*{strides[1]}]'.replace('CANDIDATE', block)
     else:
-        value = f'p{pointer}[({row})*{ref.view.row_stride}+({column})*{ref.view.column_stride}]'
+        strides = (ref.view.row_stride, ref.view.column_stride) if layout is None else layout[1]
+        value = f'p{pointer}[({row})*{strides[0]}+({column})*{strides[1]}]'
     value = f'((float)({value}))' if ref.dtype.kind == 'f' else value
     return f'(({mask})?({value}):({other}))'
 
@@ -894,7 +903,7 @@ def _expression_dtype(node, inputs):
         return np.dtype('bool') if all(dtype.kind == 'b' for dtype in types) else _expression_dtype(_Expression('*', node.operands), inputs)
     if node.operation in _REAL_FUNCTIONS:
         return np.dtype('float32')
-    if node.operation == 'philox':
+    if node.operation in ('philox', 'argsort'):
         return np.dtype('uint32')
     if node.operation in ('<', '<=', '>', '>=', '==', 'isfinite'):
         return np.dtype('bool')
@@ -1531,7 +1540,124 @@ def dot(left, right, *, tile_k=128):
 
 # design/algorithm-sources.md#shared-contraction-lowering
 def _requires_regions(node):
-    return node.operation in ('dot', 'cast', 'transpose') or node.operation in _REDUCTIONS or any(_requires_regions(child) for child in node.operands)
+    return node.operation in ('dot', 'cast', 'transpose', 'argsort') or node.operation in _REDUCTIONS or any(_requires_regions(child) for child in node.operands)
+
+
+# design/algorithm-sources.md#stable-indexed-ordering
+def _ordering_vector(name, entries, first, metal):
+    dtype = entries[0][1].dtype
+    scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t', 'u4': 'uint32_t',
+              'i8': 'int64_t', 'u8': 'uint64_t', 'u1': 'uint8_t', 'b1': 'bool'}[dtype.kind+str(dtype.itemsize)]
+    result = 'float' if dtype.kind == 'f' else scalar
+    address = 'device const ulong *' if metal else 'const uintptr_t *'
+    qualifier, constant = ('inline', 'constant') if metal else ('static inline', 'static const')
+    tables = []
+    for suffix, values in (('begin', (start for start, ref in entries)),
+                           ('end', (start+ref.shape[1] for start, ref in entries)),
+                           ('rs', (ref.view.row_stride for start, ref in entries)),
+                           ('cs', (ref.view.column_stride for start, ref in entries))):
+        tables.append(f'{constant} uint64_t {name}_{suffix}[]={{'+','.join(map(str, values))+'};')
+    load = _indexed_load_expression(entries[0][1], 'key', (scalar, (f'{name}_rs[block]', f'{name}_cs[block]')),
+                                    ('row', f'index-{name}_begin[block]', 'true', '0'), metal)
+    tables.append(f"""// design/algorithm-sources.md#stable-indexed-ordering
+    {qualifier} {result} {name}({address} buffers,uint64_t row,uint32_t index) {{
+      uint32_t low=0,high={len(entries)-1};
+      while(low<high) {{ uint32_t middle=low+(high-low)/2;
+        if(index>={name}_end[middle])low=middle+1;else high=middle; }}
+      uint32_t block=low;
+      {'device ' if metal else ''}const {scalar} *pkey=({'device ' if metal else ''}const {scalar} *)buffers[{first}+block];
+      return {load};
+    }}""")
+    return '\n'.join(tables)
+
+
+# design/algorithm-sources.md#stable-indexed-ordering
+def _ordering_comparator(entries, metal):
+    dtype = entries[0][1].dtype
+    scalar = 'float' if dtype.kind == 'f' else 'uint64_t' if dtype.kind in 'ub' else 'int64_t'
+    address = 'device const ulong *' if metal else 'const uintptr_t *'
+    qualifier = 'inline' if metal else 'static inline'
+    nan = 'if(isnan(x)!=isnan(y))return isnan(y);' if dtype.kind == 'f' else ''
+    return _ordering_vector('mesh_sort_key', entries, 0, metal)+f"""
+    // design/algorithm-sources.md#stable-indexed-ordering
+    {qualifier} bool mesh_sort_before({address} buffers,uint64_t row,uint32_t a,uint32_t b) {{
+      if(a==0xffffffffu)return false;if(b==0xffffffffu)return true;
+      {scalar} x=mesh_sort_key(buffers,row,a),y=mesh_sort_key(buffers,row,b);
+      {nan}
+      if(x<y)return true;if(y<x)return false;return a<b;
+    }}"""
+
+
+# design/algorithm-sources.md#stable-indexed-ordering
+def _ordering_run(program, source, first, target):
+    width = source.shape[1]
+    padded = 1 << (width-1).bit_length()
+
+    # design/algorithm-sources.md#stable-indexed-ordering
+    def body(metal):
+        barrier = 'threadgroup_barrier(mem_flags::mem_threadgroup);' if metal else ''
+        return _ordering_comparator(((first, source),), metal), f"""
+        {'threadgroup ' if metal else ''}uint32_t work[{padded}];
+        for(uint32_t i=lane;i<{padded};i+=lanes)work[i]=i<{width}?{first}u+i:0xffffffffu;
+        {barrier}
+        for(uint32_t span=2;span<={padded};span*=2) {{
+          for(uint32_t step=span/2;step;step/=2) {{
+            for(uint32_t i=lane;i<{padded};i+=lanes) {{ uint32_t j=i^step;
+              if(j>i) {{ uint32_t a=work[i],b=work[j];
+                if((i&span)?mesh_sort_before(buffers,r,a,b):mesh_sort_before(buffers,r,b,a)) {{work[i]=b;work[j]=a;}}
+              }}
+            }}
+            {barrier}
+          }}
+        }}
+        for(uint32_t i=lane;i<{width};i+=lanes)p1[r*{target.view.row_stride}+i*{target.view.column_stride}]=work[i];
+        """
+    _compiled_region(program, (source,), target, body)
+
+
+# design/algorithm-sources.md#stable-indexed-ordering
+def _ordering_merge(program, keys, left, right, diagonal, target):
+    inputs = tuple(ref for _, ref in (*keys, *left, *right))
+    left_width, right_width = sum(ref.shape[1] for _, ref in left), sum(ref.shape[1] for _, ref in right)
+
+    # design/algorithm-sources.md#stable-indexed-ordering
+    def body(metal):
+        address = 'device const ulong *' if metal else 'const uintptr_t *'
+        qualifier = 'inline' if metal else 'static inline'
+        preamble = _ordering_comparator(keys, metal)+_ordering_vector('mesh_sort_left', left, len(keys), metal)+_ordering_vector('mesh_sort_right', right, len(keys)+len(left), metal)
+        preamble += f"""
+        // design/algorithm-sources.md#stable-indexed-ordering
+        {qualifier} uint32_t mesh_sort_partition({address} buffers,uint64_t row,uint32_t diagonal,
+            uint32_t alo,uint32_t ahi,uint32_t blo,uint32_t bhi) {{
+          uint32_t low=diagonal>bhi?diagonal-bhi:0,high=diagonal-blo;
+          if(low<alo)low=alo;if(high>ahi)high=ahi;
+          while(low<high) {{ uint32_t a=low+(high-low)/2,b=diagonal-a;
+            if(a<ahi&&b>blo&&mesh_sort_before(buffers,row,mesh_sort_left(buffers,row,a),mesh_sort_right(buffers,row,b-1)))low=a+1;
+            else high=a;
+          }}
+          return low;
+        }}"""
+        barrier = 'threadgroup_barrier(mem_flags::mem_threadgroup);' if metal else ''
+        return preamble, f"""
+        {'threadgroup ' if metal else ''}uint32_t boundary[4];
+        if(lane==0) {{
+          boundary[0]=mesh_sort_partition(buffers,r,{diagonal}u,0,{left_width}u,0,{right_width}u);
+          boundary[1]={diagonal}u-boundary[0];
+          boundary[2]=mesh_sort_partition(buffers,r,{diagonal+target.shape[1]}u,0,{left_width}u,0,{right_width}u);
+          boundary[3]={diagonal+target.shape[1]}u-boundary[2];
+        }}
+        {barrier}
+        uint32_t chunk=({target.shape[1]}u+lanes-1)/lanes,start=lane*chunk,end=start+chunk;
+        if(end>{target.shape[1]}u)end={target.shape[1]}u;
+        if(start<end) {{
+          uint32_t a=mesh_sort_partition(buffers,r,{diagonal}u+start,boundary[0],boundary[2],boundary[1],boundary[3]),b={diagonal}u+start-a;
+          for(uint32_t i=start;i<end;i++) {{
+            bool take_left=b==boundary[3]||(a<boundary[2]&&mesh_sort_before(buffers,r,mesh_sort_left(buffers,r,a),mesh_sort_right(buffers,r,b)));
+            uint32_t value=take_left?mesh_sort_left(buffers,r,a++):mesh_sort_right(buffers,r,b++);
+            p{len(inputs)}[r*{target.view.row_stride}+i*{target.view.column_stride}]=value;
+          }}
+        }}"""
+    _compiled_region(program, inputs, target, body)
 
 
 # design/algorithm-sources.md#typed-integer-contractions
@@ -1589,7 +1715,7 @@ def _expression_layout(node, sources, whole, layouts):
         result = (1, 1), (False, False), (1, 1)
     elif node.operation == 'domain':
         result = node.value
-    elif node.operation == 'cast':
+    elif node.operation in ('cast', 'argsort'):
         result = layout(node.operands[0])
     elif node.operation == 'transpose':
         result = tuple(value[::-1] for value in layout(node.operands[0]))
@@ -1669,6 +1795,8 @@ class _ExpressionRegions:
             return self.panel(node.operands[0], origin[::-1], shape[::-1]).T
         if node.operation in _REDUCTIONS:
             return self.reduction(node, origin[0], shape[0], _expression_dtype(node, self.sources))
+        if node.operation == 'argsort':
+            return self.ordering_panel(node, origin, shape)
         dtype = _expression_dtype(node, self.sources)
         if node.operation == 'cast' and node.operands[0].operation == 'input' and self.sources[node.operands[0].value].dtype == dtype:
             return self.panel(node.operands[0], origin, shape)
@@ -1679,6 +1807,57 @@ class _ExpressionRegions:
                 self.publish(self.parts(node, origin, shape, target), target)
             else:
                 self.emit(node, origin, shape, target)
+            self.cache[key] = target
+        return self.cache[key]
+
+    # design/algorithm-sources.md#stable-indexed-ordering
+    def ordering_panel(self, node, origin, shape):
+        child = node.operands[0]
+        layout = self.layout(child)
+        width = layout[0][1]
+        if width > 0xffffffff:
+            raise ValueError('Ordering axes must fit the uint32 ordinal domain')
+        key = ('ordering', self.key(node, (origin[0], 0), (shape[0], width)))
+        if key not in self.cache:
+            runs = []
+            step = layout[2][1]
+            for backing in range(0, width, step):
+                for first in range(backing, min(width, backing+step), 128):
+                    columns = min(128, width-first, backing+step-first)
+                    source = self.panel(child, (origin[0], first), (shape[0], columns))
+                    target = self.temporary((shape[0], columns), np.uint32)
+                    _ordering_run(self.program, source, first, target)
+                    runs.append((((first, source),), ((0, target),)))
+            while len(runs) > 1:
+                merged = []
+                for index in range(0, len(runs), 2):
+                    if index+1 == len(runs):
+                        merged.append(runs[index])
+                        continue
+                    (left_keys, left), (right_keys, right) = runs[index:index+2]
+                    keys = left_keys+right_keys
+                    count = sum(ref.shape[1] for _, ref in (*left, *right))
+                    outputs = []
+                    for first in range(0, count, 128):
+                        target = self.temporary((shape[0], min(128, count-first)), np.uint32)
+                        _ordering_merge(self.program, keys, left, right, first, target)
+                        outputs.append((first, target))
+                    merged.append((keys, tuple(outputs)))
+                runs = merged
+            self.cache[key] = runs[0][1]
+        refs = self.cache[key]
+        for first, ref in refs:
+            if first <= origin[1] and origin[1]+shape[1] <= first+ref.shape[1]:
+                return ref.slice(0, origin[1]-first, *shape)
+        key = ('ordering_panel', self.key(node, origin, shape))
+        if key not in self.cache:
+            target = self.temporary(shape, np.uint32)
+            row, column = indices()
+            value = _literal(0)
+            selected = tuple((first, ref) for first, ref in refs if first < origin[1]+shape[1] and origin[1] < first+ref.shape[1])
+            for symbol, (first, ref) in reversed(tuple(zip(arguments(len(selected)), selected))):
+                value = select(column+origin[1] < first+ref.shape[1], symbol.at(row, column+origin[1]-first), value)
+            _ExpressionKernel((value,)).bind(self.program, tuple(ref for _, ref in selected), (target,), self.coordinate)
             self.cache[key] = target
         return self.cache[key]
 
@@ -1825,6 +2004,14 @@ class _ExpressionRegions:
                 rows = 1 if layout[0][0] == 1 else shape[0]
                 dtype = _reduction_dtype(node, self.sources, accumulation)
                 return reference(('reduction', node, row, rows, dtype.str), (self.reduction(node, row, rows, dtype),))
+            if node.operation == 'argsort':
+                layout = self.layout(node)
+                row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
+                rows = 1 if layout[0][0] == 1 else shape[0]
+                columns = 1 if layout[0][1] == 1 else shape[1]
+                column = 0 if layout[0][1] == 1 else origin[1]
+                return reference(('argsort', node, row, column, rows, columns),
+                                 (self.ordering_panel(node, (row, column), (rows, columns)),))
             if node.operation == 'dot':
                 layout = self.layout(node)
                 where = tuple(0 if layout[0][axis] == 1 or (external and not layout[1][axis]) else origin[axis] for axis in range(2))
