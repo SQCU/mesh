@@ -193,3 +193,10 @@ compile the generated CPU/Metal sources and exercise duplicate destinations,
 masked rows, delayed update chunks, repeated changing indices and output
 precision using the existing operational examples before asserting numerical or
 progress results.
+
+Dynamic destination validity is evaluated in the original index dtype before
+conversion into the bounded U32 routing representation. Negative indices are
+normalized against the destination extent; values still outside the extent become
+the absent sentinel. This prevents an out-of-range 64-bit index from wrapping into
+a valid destination during metadata narrowing. The validity mask is numerical
+scatter semantics and does not add a tensor-wide readiness condition.

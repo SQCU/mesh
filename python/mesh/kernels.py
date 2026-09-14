@@ -554,7 +554,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             chunk_rows = math.gcd(chunk_rows, tensor.block_shape[0])
     destination = expression.operands[1]
     normalized = select(destination < 0, destination + base.shape[0], destination)
-    key_expression = select(mask, normalized, 0xffffffff)
+    key_expression = select(mask & (normalized >= 0) & (normalized < base.shape[0]), normalized, 0xffffffff)
     chunks = []
     for begin in range(0, size, chunk_rows):
         length = min(chunk_rows, size - begin)
