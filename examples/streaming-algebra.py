@@ -38,9 +38,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('rank', type=int)
     parser.add_argument('--runs', type=int, default=3)
+    parser.add_argument('--depth', type=int, default=1)
     parser.add_argument('--backend', choices=('cpu', 'metal'), default='cpu')
     parser.add_argument('--local', action='store_true')
     parser.add_argument('--dtype', choices=('float16', 'float32'), default='float32')
+    parser.add_argument('--rows', type=int, default=256)
+    parser.add_argument('--width', type=int, default=128)
+    parser.add_argument('--tile-rows', type=int, default=64)
     parser.add_argument('--tile-k', type=int, default=64)
     parser.add_argument('--tile-columns', type=int, default=64)
     parser.add_argument('--scatter-rows', type=int, default=6)
@@ -50,6 +54,10 @@ def main():
     parser.add_argument('--xonotic', action='store_true')
     parser.add_argument('--coreml', nargs=3, metavar=('PYTHON', 'GENERATOR', 'CACHE'))
     args = parser.parse_args()
+    if min(args.depth, args.runs, args.width, args.tile_rows, args.tile_k, args.tile_columns) < 1:
+        parser.error('Chain depth, runs, width and tile sizes must be positive')
+    if args.rows <= args.tile_rows:
+        parser.error('Streaming chain requires at least two row sections')
     updates_count, update_tile = args.scatter_rows, args.scatter_tile
     destinations_count = args.scatter_destinations
     if destinations_count < 4:
@@ -61,7 +69,7 @@ def main():
     last_start = last_chunk * update_tile
     if last_start < 4:
         parser.error('Scatter demonstration requires four rows before the withheld tile')
-    rows, width, tile = 256, 128, 64
+    rows, width, tile = args.rows, args.width, args.tile_rows
     dtype = np.dtype(args.dtype)
     running = True
 
@@ -83,9 +91,9 @@ def main():
 
         # design/algorithm-sources.md#streamed-normalization-and-embedding
         def weights(partitions):
-            up = tuple(tuple((rng.standard_normal((width, width), dtype=np.float32) / 16).astype(dtype)
+            up = tuple(tuple((rng.standard_normal((width, width), dtype=np.float32) / np.float32(np.sqrt(2 * width))).astype(dtype)
                        for _ in range(partitions)) for _ in range(2))
-            down = tuple((rng.standard_normal((width, width), dtype=np.float32) / 16).astype(dtype) for _ in range(2))
+            down = tuple((rng.standard_normal((width, width), dtype=np.float32) / np.float32(np.sqrt(2 * width))).astype(dtype) for _ in range(2))
             return up, down, tuple(tuple(weight(w) for w in group) for group in up), tuple(weight(w) for w in down)
 
         first_up, first_down, first_u, first_d = weights(2)
@@ -991,28 +999,27 @@ def main():
         for run in range(args.runs + 1):
             data = tuple((rng.standard_normal((rows, width), dtype=np.float32) / 8).astype(dtype) for _ in range(2))
             inputs = tuple(program.tensor(value.shape, (tile, args.tile_k), dtype=dtype) for value in data)
-            a = ffn(program, inputs, first_u, first_d, tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns,
-                    exchange=None if args.local else lambda value: exchange(value, 0, 1))
-            b = rmsnorm(program, a, scale, tile_rows=tile)
-            c = summed_embedding(program, b, table_tensors, index_tensors, tile_rows=tile)
-            d = ffn(program, (c,), second_u, second_d, tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns,
-                    exchange=None if args.local else lambda value: exchange(value, 1, 0))
-            e = rmsnorm(program, d, scale, tile_rows=tile)
-            stages = {'ffn1': a, 'rmsnorm1': b, 'summed_embedding': c} if args.rank == 1 else {'ffn2': d, 'rmsnorm2': e}
+            # design/algorithm-sources.md#deep-composed-performance
+            operands = inputs
+            for depth in range(args.depth):
+                up = first_u if depth == 0 else tuple((group[0],) for group in first_u)
+                a = ffn(program, operands, up, first_d, tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns,
+                        exchange=None if args.local else lambda value: exchange(value, 0, 1))
+                b = rmsnorm(program, a, scale, tile_rows=tile)
+                c = summed_embedding(program, b, table_tensors, index_tensors, tile_rows=tile)
+                d = ffn(program, (c,), second_u, second_d, tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns,
+                        exchange=None if args.local else lambda value: exchange(value, 1, 0))
+                e = rmsnorm(program, d, scale, tile_rows=tile)
+                operands = (e,)
+            stages = {} if args.rank == 1 else {'ffn2': d, 'rmsnorm2': e}
             probes = {name: {coordinate: program.export(ref) for coordinate, ref in value.blocks.items()}
                       for name, value in stages.items()}
             invocations.append((data, inputs, probes))
         program.realize()
-        print(json.dumps(dict(event='realized', pid=os.getpid(), rank=args.rank, runs=args.runs)), flush=True)
+        print(json.dumps(dict(event='realized', pid=os.getpid(), rank=args.rank, runs=args.runs, depth=args.depth,
+            rows=rows, width=width, tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns)), flush=True)
         if args.rank == 1:
-            observed = set()
             while running:
-                for run, (_, _, probes) in enumerate(invocations):
-                    for name, results in probes.items():
-                        if (run, name) not in observed and results[1, 0].ready:
-                            observed.add((run, name))
-                            print(json.dumps(dict(event='section_ready', run=run, stage=name,
-                                local_monotonic_ns=time.monotonic_ns(), section_zero_absent=not results[0, 0].ready)), flush=True)
                 time.sleep(0.0001)
             if args.trace:
                 Path(args.trace).write_text(json.dumps(dict(environment=program.environment, plans=program.plan_trace, compute=program.trace, code=program.code_trace, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
@@ -1053,18 +1060,18 @@ def main():
 
         warm_started = time.monotonic_ns()
         warm = invocations[0]
-        publish(warm, range(1, rows // tile))
+        publish(warm, range(1, (rows + tile - 1) // tile))
         warm_results = warm[2]['rmsnorm2']
         wait_for((warm_results[1, 0],))
         if any(result.ready for coordinate, result in warm_results.items() if coordinate[0] == 0):
             raise ArithmeticError('An unpublished input section produced an output')
         publish(warm, (0,))
         wait_for(tuple(warm_results.values()))
-        print(json.dumps(dict(event='warmup', elapsed_ms=(time.monotonic_ns() - warm_started) / 1e6)), flush=True)
+        print(json.dumps(dict(event='warmup', depth=args.depth, elapsed_ms=(time.monotonic_ns() - warm_started) / 1e6)), flush=True)
 
         batch_started = time.monotonic_ns()
         for run, invocation in enumerate(invocations[1:], 1):
-            publish(invocation, range(1 if run == 1 else 0, rows // tile))
+            publish(invocation, range(1 if run == 1 else 0, (rows + tile - 1) // tile))
         delayed = invocations[1][2]['rmsnorm2']
         wait_for((delayed[1, 0],))
         first_ms = (time.monotonic_ns() - batch_started) / 1e6
@@ -1086,10 +1093,15 @@ def main():
         batch_ms = (time.monotonic_ns() - batch_started) / 1e6
         errors = []
         for run, (data, _, probes) in enumerate(invocations):
-            expected = reference_norm(reference_ffn(data, first_up, first_down), gamma)
-            for table, index in zip(tables, ids):
-                expected = (expected.astype(np.float64) + table[index[:, 0]]).astype(expected.dtype)
-            expected = reference_norm(reference_ffn((expected,), second_up, second_down), gamma)
+            # design/algorithm-sources.md#deep-composed-performance
+            operands = data
+            for depth in range(args.depth):
+                up = first_up if depth == 0 else tuple((group[0],) for group in first_up)
+                expected = reference_norm(reference_ffn(operands, up, first_down), gamma)
+                for table, index in zip(tables, ids):
+                    expected = (expected.astype(np.float64) + table[index[:, 0]]).astype(expected.dtype)
+                expected = reference_norm(reference_ffn((expected,), second_up, second_down), gamma)
+                operands = (expected,)
             error = 0.0
             for (row, column), result in probes['rmsnorm2'].items():
                 r, c = row * tile, column * args.tile_columns
@@ -1098,7 +1110,7 @@ def main():
                 if not np.allclose(result.array, part, atol=3e-3 if dtype == np.float16 else 3e-4, rtol=3e-3 if dtype == np.float16 else 3e-4):
                     raise ArithmeticError(f'Gold chain numerical mismatch: {error}')
             errors.append(error)
-            print(json.dumps(dict(event='gold', run=run, complete_ms=completed.get(run),
+            print(json.dumps(dict(event='gold', run=run, depth=args.depth, complete_ms=completed.get(run),
                 max_absolute_error=error, transport_queue=0, backend=args.backend, local=args.local)), flush=True)
             for stage in probes.values():
                 for result in stage.values():
@@ -2270,7 +2282,8 @@ def main():
         print(json.dumps(dict(event='bound_plans', plans=len(plan_trace), functions=len(planned_functions))), flush=True)
         if args.trace:
             Path(args.trace).write_text(json.dumps(dict(environment=program.environment, plans=plan_trace, compute=compute, code=code, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
-        print(json.dumps(dict(event='summary', dtype=args.dtype, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
+        print(json.dumps(dict(event='summary', dtype=args.dtype, depth=args.depth, rows=rows, width=width,
+            tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
             invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,
             completion_ms=summary(tuple(completed.values())), withheld_invocation=1, withheld_section=0,
             max_absolute_error=max(errors), runtime={name: getattr(report, name) for name, _ in report._fields_})), flush=True)
