@@ -1359,3 +1359,29 @@ logical identity. Concatenation uses the same indexed loads under retained
 source-interval predicates. Existing selected-reader lowering owns dependency
 selection and lifetime; callers neither construct it nor emit backend kernels.
 [Source mapping, derivative scope and validation limits](xonotic-shared-indexing.md).
+
+## Shared sparse routing lowering
+
+Blelloch, Heroux and Zagha's [segmented sparse matrix operations](https://www.cs.cmu.edu/~scandal/papers/CMU-CS-93-173.html)
+provide the grouped sparse representation. The JAX authors' [Pallas reference and
+index-map design](https://docs.jax.dev/en/latest/pallas/design/design.html) provides
+the separation between numerical indexing and physical binding. Mesh's exact
+domain lifetime protocol is specified in [shared routing ownership](shared-routing-ownership.md),
+using Papadopoulos and Culler's [Monsoon](https://www.cs.cmu.edu/~18742/papers/Papadopoulos1990.pdf)
+as prior art for explicit operand identity and presence matching.
+
+`_routing_directory` produces candidate owners and a reverse ordinal directory
+with consumer offsets. Consumer identities follow the actual configured output
+regions, including permuted grids and uncovered rows. A partial in a feature
+stripe has one destination owner; overlapping output ownership is not inferred
+from nominal tile sizes. This specialization does not claim unique ownership for
+arbitrary fanout. Routing is numerical work over canonical operands.
+
+`_routing_domain` binds each candidate once and retains its address and actual
+strides in a shared table. Each numerical consumer uses its directory interval
+and the same table, rather than binding every possible candidate separately.
+Backend address representation is realized during setup. The table describes
+the original registered partial storage; it is not a copied numerical operand.
+Native ownership must retain source occurrences and route lifetimes independently
+of arrival order. Sparse bindings alone do not eliminate potential empty segment
+launches, page allocation overhead, or the directory-production launches.
