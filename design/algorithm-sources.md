@@ -3976,3 +3976,33 @@ strides during setup; its invocation only executes those copies. CoreML's output
 backing conformance check remains validation of the configured destination, not
 inference selecting a shape, dtype or allocation. This audit does not claim that
 opaque backend libraries expose no internal scheduling or allocation.
+
+
+## Recorded Metal commands
+
+Apple's [CPU encoding of indirect command buffers](https://developer.apple.com/documentation/metal/encoding-indirect-command-buffers-on-the-cpu)
+provides reusable native command storage. `bind_metal` now records pipelines,
+buffer bindings, persistent argument offsets and dispatch geometry during setup.
+Pipeline descriptors enable indirect commands. The retained function owns the
+pipelines, command buffer and resource references; the numerical invocation
+only declares resource usage and executes recorded command ranges.
+
+The prior invocation-time dispatch-descriptor interpreter is removed, including
+its argument-buffer branch and reconstruction of grid/threadgroup dimensions.
+A setup-only offsets vector preserves configured binding state across commands.
+No operand data is copied; the commands retain the same canonical operand buffers
+and address tables.
+
+Apple's [indirect compute command documentation](https://developer.apple.com/documentation/metal/mtlindirectcomputecommand/concurrentdispatchthreadgroups(_:threadsperthreadgroup:))
+specifies that commands within one indirect range do not automatically serialize
+resource access, while a serial encoder adds ordering before and after each
+executed range. Setup retains a single-command range for each prior dispatch,
+preserving the existing command boundaries. No explicit barrier is added.
+This change removes repeated command construction; it does not claim to remove
+the existing raw multi-dispatch ordering contract or to publish from within a
+running accelerator dispatch. Both are still relevant to the broader goal.
+
+Source review checked recorded offsets, resource/pipeline lifetime, and range
+ordering against Apple's API documentation and installed SDK headers. Native
+compilation passed. No numerical run or performance claim accompanies this
+change.

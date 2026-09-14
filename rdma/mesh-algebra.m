@@ -99,6 +99,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property NSArray<MeshExtent *> *operands;
 @property MeshCPUCode *cpuCode;
 @property MeshMetalCode *metalCode;
+@property NSArray<id<MTLComputePipelineState>> *metalPipelines;
 @property NSString *specialization;
 @property NSData *cpuArguments;
 @property NSMutableData *publicationSections;
@@ -798,7 +799,7 @@ static void submit_encoded_metal(MeshFunction *f,void (^encode)(id<MTLCommandBuf
 }
 /* design/algorithm-sources.md#realized-numerical-invocation */
 static void submit_metal(MeshFunction *f) {submit_encoded_metal(f,f.encode);}
-/* design/algorithm-sources.md#application-metal-kernels */
+/* design/algorithm-sources.md#recorded-metal-commands */
 static int bind_metal(struct mesh_algebra *handle,const char *text,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,MeshCPUCode *paired,const struct mesh_view *reads,const struct mesh_view *writes) {
   MeshAlgebra *a=owner(handle);
   if(a.realized)return EBUSY;
@@ -813,7 +814,9 @@ static int bind_metal(struct mesh_algebra *handle,const char *text,const struct 
     if(!d->name || !d->grid[0] || !d->grid[1] || !d->grid[2] || !d->group[0] || !d->group[1] || !d->group[2])return EINVAL;
     id<MTLFunction> function=[library newFunctionWithName:@(d->name)];
     if(!function)return ENOENT;
-    id<MTLComputePipelineState> pipeline=[a.device newComputePipelineStateWithFunction:function error:&error];
+    MTLComputePipelineDescriptor *description=[MTLComputePipelineDescriptor new];
+    description.computeFunction=function;description.supportIndirectCommandBuffers=YES;
+    id<MTLComputePipelineState> pipeline=[a.device newComputePipelineStateWithDescriptor:description options:MTLPipelineOptionNone reflection:nil error:&error];
     if(!pipeline){fprintf(stderr,"mesh Metal pipeline: %s\n",error.description.UTF8String);return EINVAL;}
     if(d->group[0]>pipeline.maxTotalThreadsPerThreadgroup/d->group[1]/d->group[2])return EINVAL;
     if(d->argument_buffer>constant_count || (!d->argument_buffer && d->argument_offset) || (d->argument_buffer && d->argument_offset>=constants[d->argument_buffer-1].length))return EINVAL;
@@ -836,22 +839,35 @@ static int bind_metal(struct mesh_algebra *handle,const char *text,const struct 
     id<MTLBuffer> buffer=[a.device newBufferWithBytes:constants[i].bytes length:constants[i].length options:MTLResourceStorageModeShared];
     if(!buffer)return ENOMEM;[buffers addObject:buffer];
   }
-  NSData *geometry=[NSData dataWithBytes:dispatches length:dispatch_count*sizeof *dispatches];
+  MTLIndirectCommandBufferDescriptor *description=[MTLIndirectCommandBufferDescriptor new];
+  description.commandTypes=MTLIndirectCommandTypeConcurrentDispatch;
+  description.inheritBuffers=NO;description.inheritPipelineState=NO;
+  description.maxKernelBufferBindCount=constant_count+1;
+  id<MTLIndirectCommandBuffer> commands=[a.device newIndirectCommandBufferWithDescriptor:description maxCommandCount:dispatch_count options:MTLResourceStorageModeShared];
+  if(!commands)return ENOMEM;
+  NSUInteger offsets[31]={0};
+  NSMutableData *ranges=[NSMutableData dataWithLength:dispatch_count*sizeof(NSRange)];
+  NSRange *configuredRanges=ranges.mutableBytes;
+  for(size_t i=0;i<dispatch_count;i++) {
+    configuredRanges[i]=NSMakeRange(i,1);
+    const struct mesh_metal_dispatch *d=&dispatches[i];
+    if(d->argument_buffer)offsets[d->argument_buffer]=d->argument_offset;
+    id<MTLIndirectComputeCommand> command=[commands indirectComputeCommandAtIndex:i];
+    [command setComputePipelineState:pipelines[i]];
+    [command setKernelBuffer:addresses offset:0 atIndex:0];
+    for(size_t j=0;j<constant_count;j++)[command setKernelBuffer:buffers[j] offset:offsets[j+1] atIndex:j+1];
+    [command concurrentDispatchThreadgroups:MTLSizeMake(d->grid[0],d->grid[1],d->grid[2]) threadsPerThreadgroup:MTLSizeMake(d->group[0],d->group[1],d->group[2])];
+  }
+  [resources addObject:addresses];[resources addObjectsFromArray:buffers];
   int status=bind_function(handle,reads,input_count,writes,output_count,submit_metal);
   if(status)return status;
-  MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_METAL;f->backend=MESH_BACKEND_METAL_COMPILED;
+  MeshFunction *f=a.functions.lastObject;f.metalPipelines=pipelines;f->executionKind=MESH_EXECUTION_METAL;f->backend=MESH_BACKEND_METAL_COMPILED;
   specialize_function(f,paired,code,options,dispatches,dispatch_count,constants,constant_count,inputs,input_count,outputs,output_count);
   f.encode=^(id<MTLCommandBuffer> command){
     id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
-    [encoder setBuffer:addresses offset:0 atIndex:0];
-    for(NSUInteger i=0;i<buffers.count;i++)[encoder setBuffer:buffers[i] offset:0 atIndex:i+1];
     for(id<MTLBuffer> buffer in resources)[encoder useResource:buffer usage:MTLResourceUsageRead|MTLResourceUsageWrite];
-    const struct mesh_metal_dispatch *d=geometry.bytes;
-    for(NSUInteger i=0;i<pipelines.count;i++) {
-      [encoder setComputePipelineState:pipelines[i]];
-      if(d[i].argument_buffer)[encoder setBuffer:buffers[d[i].argument_buffer-1] offset:d[i].argument_offset atIndex:d[i].argument_buffer];
-      [encoder dispatchThreadgroups:MTLSizeMake(d[i].grid[0],d[i].grid[1],d[i].grid[2]) threadsPerThreadgroup:MTLSizeMake(d[i].group[0],d[i].group[1],d[i].group[2])];
-    }
+    const NSRange *commandRanges=ranges.bytes;
+    for(size_t i=0;i<dispatch_count;i++)[encoder executeCommandsInBuffer:commands withRange:commandRanges[i]];
     [encoder endEncoding];
   };
   return 0;
