@@ -26,12 +26,6 @@ struct Block { ulong row_stride, column_stride; };
 ulong coordinate(ulong index, device const View& view, uint axis) {
     return index / view.stride[axis] % view.shape[axis];
 }
-ulong broadcast_index(ulong index, device const View& source, device const View& destination) {
-    ulong result = 0;
-    for (uint axis = 0; axis < source.rank; ++axis)
-        result += (source.shape[axis] == 1 ? 0 : coordinate(index, destination, destination.rank - source.rank + axis)) * source.stride[axis];
-    return result;
-}
 // ../../../design/algorithm-sources.md#xonotic-block-indexed-lowering
  device uchar* page_address(device const ulong* regions, device const Block* blocks, device const View& view, ulong byte) {
     ulong index=byte/view.dtype,row=index/view.matrix_columns,column=index%view.matrix_columns;
@@ -46,21 +40,6 @@ ulong broadcast_index(ulong index, device const View& source, device const View&
 // ../../../design/algorithm-sources.md#xonotic-block-indexed-lowering
  template<typename T> void write_value(device const ulong* regions, device const Block* blocks, device const View& view, ulong index, T value) {
     *(device T*)page_address(regions, blocks, view, view.offset + index * sizeof(T)) = value;
-}
-float tensor_log1p(float x) {
-    float u = 1.0f + x;
-    return u == 1.0f ? x : log(u) * (x / (u - 1.0f));
-}
-float tensor_expm1(float x) {
-    return abs(x) < 0.01f ? x * (1.0f + x * (0.5f + x * (1.0f/6.0f + x * (1.0f/24.0f + x/120.0f)))) : exp(x) - 1.0f;
-}
-float stable_logaddexp(float x, float y) {
-    float high = max(x, y), low = min(x, y);
-    return isinf(high) ? high : high + tensor_log1p(exp(low - high));
-}
-float tensor_asinh(float x) {
-    float a = abs(x);
-    return a < 0.5f ? asinh(x) : copysign(a > 1.0e19f ? log(a) + 0.6931471805599453f : log(a + sqrt(a*a + 1.0f)), x);
 }
 uint4 philox(uint4 counter, uint2 key) {
     for (uint round = 0; round < 10; ++round) {
@@ -95,32 +74,6 @@ def write(value, result, index='t'):
     return f'write_value<{TYPES[value.dtype]}>(regions,blocks,v[{value.index}],{index},{TYPES[value.dtype]}({result}));'
 
 
-def coordinate_code(shape, flat='t', prefix='c'):
-    result = [f'ulong {prefix}_remaining={flat};']
-    for axis in reversed(range(len(shape))):
-        result.append(f'ulong {prefix}{axis}={prefix}_remaining%({expr(shape[axis])}); {prefix}_remaining/=({expr(shape[axis])});')
-    return '\n'.join(result)
-
-
-def element(op, values):
-    a = 'a0'
-    c = 'a1'
-    binary = {'add': '+', 'subtract': '-', 'multiply': '*', 'divide': '/', 'equal': '==', 'not_equal': '!=',
-              'less': '<', 'less_equal': '<=', 'greater': '>', 'greater_equal': '>=',
-              'bitwise_and': '&', 'bitwise_or': '|'}
-    if op in binary: return f'({a}{binary[op]}{c})'
-    unary = {'negative': '-', 'bitwise_invert': '~'}
-    if op in unary: return unary[op] + a
-    functions = {'arcsinh': 'tensor_asinh', 'abs': 'abs', 'minimum': 'min', 'maximum': 'max', 'power': 'pow', 'logaddexp': 'stable_logaddexp', 'expm1': 'tensor_expm1', 'log1p': 'tensor_log1p'}
-    if op == 'where': return 'a0?a1:a2'
-    if op == 'sigmoid': return '(a0>=0?1.0f/(1.0f+exp(-a0)):exp(a0)/(1.0f+exp(a0)))'
-    if op == 'floor_divide': return '(a0/a1)'
-    if op in ('minimum', 'maximum', 'power'):
-        dtype = 'float' if op == 'power' or any(value.dtype == 'float32' for value in values) else 'long' if any(value.dtype in ('int64', 'uint64') for value in values) else 'int'
-        return functions[op] + '(' + ','.join(f'{dtype}(a{i})' for i in range(len(values))) + ')'
-    return functions.get(op, op) + '(' + ','.join('a' + str(i) for i in range(len(values))) + ')'
-
-
 def kernel(node):
     output, op, values, attrs, owner = node
     index = output.index
@@ -130,8 +83,6 @@ def kernel(node):
     if op in ('input', 'constant', 'dimension', 'reshape', 'stop_gradient'):
         if op != 'dimension': return None
         body.append(write(output, expr(attrs['expression'])))
-    elif op in ('reshape', 'stop_gradient', 'cast', 'assign'):
-        body.append(write(output, read(values[0])))
     elif op == 'arange':
         body.append(write(output, f'{expr(attrs["start"])}+t*({expr(attrs["step"])})'))
     elif op == 'argsort':
@@ -147,10 +98,7 @@ def kernel(node):
     elif op == 'matmul':
         body, mode = matmul_body(output, values, attrs), 'matmul'
     else:
-        for i, value in enumerate(values):
-            address = f'broadcast_index(t,v[{value.index}],v[{index}])'
-            body.append(f'auto a{i}={read(value,address)};')
-        body.append(write(output, element(op, values)))
+        raise ValueError(f'No retained generator, ordering or integer contraction for {op}')
     return {'name': name, 'source': f'kernel void {name}({ARGUMENTS}) {{\n' + '\n'.join(body) + '\n}\n',
             'node': index, 'mode': mode, 'clear': clear, 'owner': owner,
             'arguments': list(dict.fromkeys(value.index for value in (*values, output)))}
@@ -824,8 +772,8 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 *(shapes[v.index] for v in values), attributes, tile_rows=tile_rows,
                 tile_k=tile_k, tile_columns=tile_columns, peer=peer, output_dtype=value.dtype)
             continue
-        # ../../../design/algorithm-sources.md#xonotic-logical-pointwise
-        if operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or', 'broadcast', 'logical_not', 'logical_and', 'logical_or'):
+        # ../../../design/algorithm-sources.md#shared-elementary-functions
+        if operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or', 'broadcast', 'logical_not', 'logical_and', 'logical_or', 'arcsinh', 'expm1', 'log', 'log1p', 'sqrt', 'abs', 'power', 'logaddexp', 'isfinite', 'floor_divide', 'bitwise_invert'):
             args = kernels.arguments(len(values))
             direct = shaped and len(shape) <= 2
             if not direct:
@@ -842,6 +790,13 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                     left, right = left & 0xffffffffffffffff, right & 0xffffffffffffffff
                 result = {'add': lambda: left + right, 'subtract': lambda: left - right,
                           'multiply': lambda: left * right, 'divide': lambda: left / right}[operation]()
+            elif operation == 'floor_divide':
+                left, right = args
+                result = left.floor_divide(right) if any(np.dtype(operand.dtype).kind == 'f' for operand in values) else left // right
+            elif operation in ('power', 'logaddexp'):
+                result = getattr(args[0], operation)(args[1])
+            elif operation == 'bitwise_invert':
+                result = 0xffffffffffffffff - (args[0] & 0xffffffffffffffff)
             elif operation in ('cast', 'assign', 'broadcast'):
                 result = args[0].astype(value.dtype) if operation == 'cast' else args[0]
             elif operation in ('maximum', 'minimum'):
