@@ -1094,6 +1094,9 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
   int error=mesh_realize(a->context,functions,count,a.bindings.mutableBytes,a.bindings.length/sizeof(struct mesh_row_binding),a.returns.mutableBytes,a.returns.length/sizeof(struct mesh_row_map));
   free(functions);
   if(!error){
+    size_t arenaBytes=0;
+    for(MeshExtent *extent in a.extents)arenaBytes+=extent.extent.bytes;
+    fprintf(stderr,"mesh realize: participant=%u planned_arena_bytes=%zu\n",a->context->M->node,arenaBytes);
     a.realized=YES;
     for(MeshFunction *f in a.functions)for(struct mesh_indexed_read *d=f->function.indexed;d && !error;d=d->next)
       error=mesh_execution_indexed(a->context,d,handle);

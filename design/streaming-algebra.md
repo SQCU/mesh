@@ -24,58 +24,71 @@ backend details are not a separate implementation requirement here.
 
 ## End-to-end source derivation
 
-Take configured output regions I and J with disjoint storage, and contraction
-partitions Q0 and Q1. Let P[I,Q] = sum(k in Q, A[I,k] B[k]). The following
-sequence follows the existing implementations, without a runtime evaluator.
+The concrete caller is `examples/streaming-chain.py`. Both participants bind
+`linear → swish → linear → reduce_scatter → all_gather`; the root additionally
+binds `swish → linear` on the gathered result. All these functions are realized
+before either participant feeds its input regions.
 
-1. `Program.kernel_call` and `_ExpressionRegions.parts` in
-   `python/mesh/kernels.py` bind the supplied grid and operand regions. Each
-   contraction contribution has its own output and actual operand dependencies.
-   `_ReductionPlan` combines contributions through an addition tree. The tree
-   is numerical dependency, not an enclosing-operation completion condition.
-2. `mesh_issue_index` in `rdma/mesh-dataflow.c` examines those input maps and
-   claims the output storage. `submit_ready` in `rdma/mesh-algebra.m` submits
-   the prebound submission function. Synchronous CPU arithmetic is dispatched to
-   the concurrent worker queue; asynchronous Metal/CoreML submission is direct.
-   No CPU contraction runs on the serial presence handler.
-3. Generated CPU section loops invoke `publish_cpu` after their stores. It calls
-   `mesh_publish_partial`, which sets presence and notifies readers immediately.
-   Later sections can still be executing. Native contractions publish their
-   configured region through `complete_part`; Metal and Core ML reach that path
-   through their device completion callbacks. The numerical call does not wait
-   for a send, an acknowledgement or another output region.
-4. `mesh_notify` puts the changed rows on canonical compute and send work lists.
-   `link_ready` in `rdma/mesh-flow.c` selects only published transfer sources.
-   An absent I therefore does not occupy a ready-list position ahead of J.
-   `link_send_ready` posts the index description and queues its payload through
-   `link_send_announced`, without awaiting a software acknowledgement. Lack of
-   device capacity returns control to bridge progress; it does not stop the
-   producer or the numerical presence handler.
-5. `link_post` constructs the receive SGE from the configured destination page.
-   Successful receive completion calls `mesh_receive_complete`, publishing those
-   pages and notifying their consumers. `mesh_events` follows the affected rows'
-   configured reader edges and attempts the corresponding numerical functions.
-   It does not require an unrelated region to arrive or ask a caller to launch
-   a partial consumer.
-6. If Q1 is absent, P[I,Q0] can still compute, publish and move. Its addition
-   parent waits only if that parent's other term is absent. Other tree branches
-   and output regions remain issuable. A nonlinear consumer of the completed
-   sum reads that sum, never an unfinished contribution substituted for it.
+For an output region I and participant p, let
 
-Thus absence of I does not appear in J's issue predicate unless the configured
-arithmetic actually reads I. Transport completion releases its own source read;
-it is not a prerequisite to publishing the source. `mesh_claimable` prevents
-reuse of storage still being produced or read. Distinct live values have distinct
-backing, so that reuse dependency does not connect independent values.
+    U_p[I] = X[I] W_up[:, J_p]
+    H_p[I] = swish(U_p[I])
+    D_p[I] = H_p[I] W_down[J_p, :]
+    Y[I] = sum_p D_p[I]
+    Z[I] = swish(Y[I]) W_consumer
 
-This uses the canonical changed-row publication list, operand-associated firing,
-configured reduction tree and two-sided SEND/RECV implementation. Sources are
-[publication work lists](algorithm-sources.md#publication-work-lists),
-[presence-driven execution](algorithm-sources.md#presence-driven-execution),
-[contraction accumulation](algorithm-sources.md#contraction-accumulation), and
-[asynchronous index publication](algorithm-sources.md#async-index-push-contract).
-The argument concerns dependency and control flow; it makes no latency or
-throughput claim and introduces no acceptance or rejection criteria.
+The caller supplies J_p and the owner of each Y region. There is no dependency
+between distinct I regions unless the supplied contraction reads across them.
+The following are the publication sites for this chain:
+
+| Stage | Publication in source | Consumers released |
+|---|---|---|
+| Input feed | `Program.write` finishes through `mesh_writer_complete` and `mesh_complete` | Local up-projection contributions reading those input rows |
+| Each local up/down/consumer contraction contribution | Accelerate CPU calls finish through `complete_part`; Metal command-buffer completion calls `complete_part` | Its addition-tree parent, or the next operation if this is the complete result |
+| Addition-tree nodes and both swish stages | Generated CPU stores call `publish_cpu → mesh_publish_partial` per section; final `complete_part → mesh_complete` releases inputs. Metal command-buffer completion calls `complete_part` | Numerical consumers and transfer edges of each published output region |
+| Reduce-scatter transfer | `link_post` sends a published D region; successful `mesh_receive_complete` publishes its configured destination | The owning participant's `kernel_call(add)` tree |
+| Reduce-scatter sum | Each owning participant's add nodes use the generated-source publication paths above | All-gather sends for that region and any local consumers |
+| All-gather transfer | Successful `mesh_receive_complete` publishes the destination Y region | The root's post-collective swish, without requiring other Y regions |
+| Final contraction | The same contraction completion path above | Exported Z regions |
+
+`mesh_complete` calls `mesh_publish` on output rows. `mesh_publish_partial`
+and `mesh_publish` set presence and notify canonical readers. `mesh_notify`
+queues affected compute and send rows; `mesh_events` follows their bound edges.
+`submit_ready` invokes the prebound function. CPU arithmetic runs on a concurrent
+worker queue; Metal/CoreML submission returns to the presence handler after
+submitting device work. None of these publication sites waits for transport or
+for an unrelated region. Device completion precedes publication because writes
+must be visible before a consumer reads them.
+
+`_ExpressionRegions.parts` assigns distinct storage to K contributions.
+Their addition tree completes the sum before nonlinear use. Each public Metal
+kernel call has a queue bound at setup, so producer and consumer calls are not
+placed on one shared command queue. This is a source-level account of eligible
+interleaving, not a measurement of simultaneous device execution or latency.
+
+## Realized storage and the unresolved receive-posting requirement
+
+`mesh_algebra_realize` prints `participant` and `planned_arena_bytes` before
+registering numerical execution callbacks. The byte count sums every allocated
+`MeshExtent.extent.bytes`, including input, weight, intermediate, output and
+receive storage, with page/block rounding already applied. Aliased Refs do not
+add allocations. This is the invocation's operand footprint, not total bridge
+registration, reader metadata or backend workspace.
+
+G4's receive-posting requirement remains unsatisfied. The current bridge first
+receives an index frame and then posts a payload receive on the specified planned
+pages. It does not prepost every payload receive at realization. The upstream
+constraints are recorded in [ledger D1–D5](collective-dependency-ledger.md#d1-the-verb-is-send-into-a-posted-recv-there-is-no-remote-write):
+the substrate supports SEND/RECV, with FIFO receive consumption per queue and
+finite receive capacity. Preposting fixed destination pages in declaration order
+on one queue would mismatch arbitrarily ready sends. Ordering sends to match
+would introduce a dependency between unrelated producers. The present index path
+avoids that ordering dependency but retains an index-message receive-posting hop.
+
+`mesh_issue_index` also retains its output-lifetime check. Deleting it alone would
+allow a repeated firing to overwrite a value whose consumers have not finished.
+G4 requires resolving both transfer destinations and distinct live invocation
+storage; neither condition follows from a successful output or an empty grep.
 
 ## Historical staged execution (superseded)
 
@@ -142,33 +155,21 @@ establish a wait-free guarantee for the complete implementation.
 
 ## Tensor-parallel operation use
 
-The staged example was replaced with the MLX authors' column-sharded followed
-by row-sharded linear decomposition. Caller configuration chooses J_0=[0,256)
-and J_1=[256,512), with replicated X[1024,256]. Both participants own only their
-weight slices in registered storage and compute
+The current example uses the MLX authors' column-sharded then row-sharded
+linear decomposition. The input dataset used for the latest invocation has
+X[4096,256], W_up[256,512], W_down[512,256] and W_consumer[256,128]. The caller
+chooses J_0=[0,256), J_1=[256,512), 128-sized tiles, and assigns Y rows below
+2048 to participant 0 and the remaining rows to participant 1.
 
-    U_p = X W_up[:,J_p]
-    H_p = swish(U_p)
-    D_p = H_p W_down[J_p,:]
-    Y = D_0 + D_1
+Both participants compute their local D contribution. `reduce_scatter` sends
+each contribution to its configured owner and adds it there. `all_gather`
+replicates each completed Y region; participant 0 applies swish and the final
+contraction. This is the chain traced above, including both directions of
+communication and a consumer after the collective.
 
-The root owns Y; the only network edge is peer D_1 to root receive storage.
-Neither participant's U, H or D arithmetic requires an input from the other
-participant. Each down-projection K contribution reads its own H region. Each
-root addition reads one local D region and the matching received region, with
-no dependency on the rest of either D tensor. The caller binds this entire chain
-before publishing X. It launches no intermediate computation.
-
-This chain ran over the two Macs' existing RDMA bridge with 128-sized tiles:
-FP32/MPS at `68319f4`, FP16/BNNS and FP16-input/FP32-weight BNNS at `5c42fe2`.
-All three runs returned sixteen 128×128 reduced regions. Actual output excerpts
-and full-stdout digests are [recorded here](../measurements/tensor-parallel-chain-2026-09-14.txt).
-The peers were closed with SIGTERM after the root consumed its results.
-
-These runs establish use of the distributed decomposition and integrated
-numerical/transport paths. The source above identifies region-local issue and
-publication dependencies. The output record does not measure simultaneous device
-execution, publication-to-consumption latency, or speedup. The implementation
-still has a serial presence handler, socket notifications, and finite hardware
-queues; removing one worker hop and unassigned reader-plane resets does not
-establish zero scheduling overhead.
+The invocation at `45902d8` returned 32 final 128×128 regions using Metal on
+both Macs. It establishes use of the distributed arithmetic and the integrated
+transport path after sparse-routing deletion. It does not measure overlap,
+publication-to-consumption latency or speedup. Earlier root-only reduction runs
+are retained in the historical measurement record; they are not evidence for
+the current collective topology.
