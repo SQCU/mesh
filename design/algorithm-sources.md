@@ -200,9 +200,7 @@ handoff. JAX supplies the block-indexed calling syntax; Accelerate BLAS and MPS
 supply the existing local contractions. This is a composition of those mechanisms,
 not a new numerical or distributed algorithm. The example feeds each completed
 reduced region through swish and a further BLAS/MPS/BNNS contraction, using an
-explicit consumer-weight operand. Its first terminal observation records any
-still-unpublished local producer and received regions through existing Ref
-presence queries. Those observations do not control intermediate work or inputs.
+explicit consumer-weight operand.
 
 MLX/JACCL source inspected in the local `~/mlx` checkout at `d142de6`:
 [`JACCLGroup`](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/jaccl.cpp)

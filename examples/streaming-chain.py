@@ -69,16 +69,9 @@ def main():
         if program.node != args.root:
             signal.pause()
             return
-        observed = False
         while outputs:
             for index, output in tuple(outputs.items()):
                 if output.ready:
-                    if not observed:
-                        local_pending = tuple(index for index, ref in down.blocks.items() if not ref.present)
-                        remote_pending = tuple(index for index, ref in reduced.blocks.items() if not ref.present)
-                        print('first-consumer-result', index, 'local-producer-pending', local_pending,
-                              'collective-input-pending', remote_pending, flush=True)
-                        observed = True
                     print(index, output.array.tolist(), flush=True)
                     output.consume()
                     del outputs[index]

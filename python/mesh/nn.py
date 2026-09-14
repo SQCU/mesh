@@ -74,6 +74,7 @@ def _expression_sum(terms):
 # design/algorithm-sources.md#typed-ffn-expression-composition
 def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
         tile_columns=128, peers, owners):
+    peers = tuple(peers)
     inputs, up_weights, down_weights = tuple(inputs), tuple(map(tuple, up_weights)), tuple(down_weights)
     if not inputs or not up_weights or len(up_weights) != len(down_weights) or any(len(group) != len(inputs) for group in up_weights):
         raise ValueError('Weights must cover every input partition and hidden section')
