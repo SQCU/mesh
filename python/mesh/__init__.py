@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ._native import Native, Shape, View, CopyRegion, Writer, Endpoint
+from ._native import Native, Shape, View, CopyRegion, Writer
 
 __all__ = ['Program', 'Tensor', 'Ref', 'BlockSpec', 'ShapeDtypeStruct', 'Result']
 _PROGRAMS = set()
@@ -312,15 +312,10 @@ class Program:
             for coordinate in src.blocks:
                 self.copy(src[coordinate].on(sender), dst[coordinate].on(receiver), queue=queue)
             return
-        src.whole()
-        dst.whole()
         if src.program is not self or dst.program is not self:
             raise ValueError('References belong to another program')
-        if src.shape != dst.shape or src.array.strides != dst.array.strides:
-            raise ValueError('Transfer views must have identical layouts')
         check(self.native.algebra_copy(self.handle,
-            Endpoint(src.view.tensor, sender, src.view.extent, 1),
-            Endpoint(dst.view.tensor, receiver, dst.view.extent, 1), 1, queue))
+            src.view, sender, dst.view, receiver, queue))
 
     # design/algorithm-sources.md#canonical-view-replication
     def replicate(self, source, peer):

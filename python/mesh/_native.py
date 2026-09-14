@@ -17,10 +17,6 @@ class CopyRegion(C.Structure):
     _fields_ = [('source', View), ('row', Z), ('column', Z)]
 
 
-class Endpoint(C.Structure):
-    _fields_ = [('tensor', P), ('peer', U), ('first', U), ('stride', U)]
-
-
 class RowRange(C.Structure):
     _fields_ = [("first", U), ("count", U)]
 
@@ -154,7 +150,7 @@ class Native:
             'mesh_algebra_bind': (C.c_int, [P, C.c_int, View, View, View, C.c_float, C.c_float]),
             'mesh_algebra_view_pages': (C.c_int, [P, View, C.POINTER(View), Z, C.POINTER(Z)]),
             'mesh_algebra_contract_select': (C.c_int, [P, View, C.POINTER(View), C.POINTER(View), Z, C.POINTER(View), Z, View, C.c_float, C.POINTER(Z)]),
-            'mesh_algebra_copy': (C.c_int, [P, Endpoint, Endpoint, Z, C.c_uint16]),
+            'mesh_algebra_copy': (C.c_int, [P, View, U, View, U, C.c_uint16]),
             'mesh_algebra_present': (C.c_int, [P, View]),
             'mesh_algebra_export': (C.c_int, [P, View, C.POINTER(Z), C.POINTER(Z)]),
             'mesh_algebra_realize': (C.c_int, [P]),

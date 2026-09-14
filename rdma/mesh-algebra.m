@@ -1305,13 +1305,16 @@ int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_
   if(a.realized)return EBUSY;
   if(!regions || !count || !valid_view(a,destination))return EINVAL;
   struct mesh_extent *d=&destination.tensor->extents[destination.extent];
-  size_t elements=d->shape.rows*d->shape.columns,scalar=scalar_bytes(d->shape.scalar),covered=0;
-  if(destination.offset || destination.rows!=d->shape.rows || destination.columns!=d->shape.columns || destination.row_stride!=destination.columns || destination.column_stride!=1)return EINVAL;
-  struct mesh_row_map output={.first=d->first,.count=d->pages};
+  size_t elements=destination.rows*destination.columns,scalar=scalar_bytes(d->shape.scalar),covered=0;
+  if((destination.rows!=1 && destination.row_stride!=destination.columns) || destination.column_stride!=1)return EINVAL;
+  struct mesh_row_map output;int error=output_region(a,destination,&output);if(error)return error;
   if(output_used(a,output))return EINVAL;
   for(size_t i=0;i<count;i++) {
     struct mesh_copy_region r=regions[i];
-    if(!valid_view(a,r.source) || r.source.tensor->extents[r.source.extent].shape.scalar!=d->shape.scalar || &r.source.tensor->extents[r.source.extent]==d)return EINVAL;
+    if(!valid_view(a,r.source) || r.source.tensor->extents[r.source.extent].shape.scalar!=d->shape.scalar)return EINVAL;
+    NSMutableData *reads=[NSMutableData new];dependencies(reads,r.source);
+    const struct mesh_row_map *maps=reads.bytes;
+    for(size_t j=0;j<reads.length/sizeof *maps;j++)if(overlaps(maps[j],output))return EINVAL;
     if(r.row>destination.rows || r.column>destination.columns || r.source.rows>destination.rows-r.row || r.source.columns>destination.columns-r.column)return EINVAL;
     size_t area=r.source.rows*r.source.columns;
     if(area>elements-covered)return EINVAL;
@@ -1337,14 +1340,14 @@ int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_
         dependencies(f.dependencies,source);
         struct mesh_copy_segment segment={
           .source=(const char *)source.tensor->extents[source.extent].address+source.offset*scalar,
-          .destination=(char *)d->address+lo*scalar,.elements=hi-lo,.stride=source.column_stride*scalar,.bytes=scalar};
+          .destination=(char *)d->address+(destination.offset+lo)*scalar,.elements=hi-lo,.stride=source.column_stride*scalar,.bytes=scalar};
         if(segment.stride==scalar){segment.bytes*=segment.elements;segment.elements=1;}
         struct mesh_copy_segment *previous=segments.length?(struct mesh_copy_segment *)segments.mutableBytes+segments.length/sizeof segment-1:NULL;
         if(previous && previous->elements==1 && segment.elements==1 && previous->source+previous->bytes==segment.source && previous->destination+previous->bytes==segment.destination)previous->bytes+=segment.bytes;
         else [segments appendBytes:&segment length:sizeof segment];
       }
     }
-    f->output=(struct mesh_row_map){.first=d->first+(uint32_t)(first*scalar/a->context->M->pgsz),.count=d->quantum};
+    f->output=(struct mesh_row_map){.first=output.first+(uint32_t)(first*scalar/a->context->M->pgsz),.count=d->quantum};
     f->function=(struct mesh_row_function){.output=&f->output,.outputs=1,.rows=1};bind_dependencies(f);
     f->backend=MESH_BACKEND_CPU_BUILTIN;
     f.execute=^(MeshFunction *function){
@@ -1360,36 +1363,34 @@ int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_
   return 0;
 }
 /* design/algorithm-sources.md#pallas-indexed-destinations */
-int mesh_algebra_copy(struct mesh_algebra *handle,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue) {
+int mesh_algebra_copy(struct mesh_algebra *handle,struct mesh_view source,uint32_t sender,struct mesh_view destination,uint32_t receiver,uint16_t queue) {
   MeshAlgebra *a=owner(handle);
   if(a.realized)return EBUSY;
-  if(!source.tensor || !destination.tensor || source.tensor->context!=a->context || destination.tensor->context!=a->context || !count || count>UINT32_MAX-a->copies)return EINVAL;
-  for(size_t i=0;i<count;i++) {
-    uint64_t si=source.first+(uint64_t)i*source.stride,di=destination.first+(uint64_t)i*destination.stride;
-    if(si>=source.tensor->count || di>=destination.tensor->count)return EINVAL;
-    struct mesh_extent *s=&source.tensor->extents[si],*d=&destination.tensor->extents[di];
-    if(s->shape.rows!=d->shape.rows || s->shape.columns!=d->shape.columns || s->shape.scalar!=d->shape.scalar || (source.peer!=destination.peer && s->pages!=d->pages))return EINVAL;
+  struct mesh_row_map src,dst;
+  int error=output_region(a,source,&src);if(error)return error;
+  error=output_region(a,destination,&dst);if(error)return error;
+  struct mesh_extent *s=&source.tensor->extents[source.extent],*d=&destination.tensor->extents[destination.extent];
+  if(source.rows!=destination.rows || source.columns!=destination.columns || s->shape.scalar!=d->shape.scalar ||
+     (source.rows>1 && source.row_stride!=destination.row_stride) || (source.columns>1 && source.column_stride!=destination.column_stride))return EINVAL;
+  size_t elements=source.rows*source.columns,bytes=elements*scalar_bytes(s->shape.scalar);
+  if(sender==receiver) {
+    if(sender!=a->context->M->node)return 0;
+    source.rows=destination.rows=1;source.columns=destination.columns=elements;
+    source.row_stride=destination.row_stride=elements;source.column_stride=destination.column_stride=1;
+    struct mesh_copy_region region={.source=source};
+    return mesh_algebra_materialize(handle,&region,1,destination);
   }
-  uint32_t block=a->context->M->block,maximum=0;uint64_t messages=0;
-  for(size_t i=0;i<count;i++) {
-    struct mesh_extent *s=&source.tensor->extents[source.first+i*source.stride];
-    if(source.peer==destination.peer) {
-      if(source.peer==a->context->M->node) {
-        struct mesh_copy_region region={.source=mesh_tensor_view(source.tensor,source.first+i*source.stride)};
-        int error=mesh_algebra_materialize(handle,&region,1,mesh_tensor_view(destination.tensor,destination.first+i*destination.stride));
-        if(error)return error;
-      }
-    } else {if(s->pages%block)return EINVAL;maximum=MAX(maximum,s->pages);messages+=s->pages/block;}
-  }
-  if(messages>UINT32_MAX-a->copies)return EOVERFLOW;
-  for(uint32_t offset=0;offset<maximum;offset+=block)for(size_t i=0;i<count;i++) {
-    struct mesh_extent *s=&source.tensor->extents[source.first+i*source.stride],*d=&destination.tensor->extents[destination.first+i*destination.stride];
-    if(offset>=s->pages)continue;
+  uint32_t block=a->context->M->block;
+  if(src.count!=dst.count || src.count%block)return EINVAL;
+  if(src.count/block>UINT32_MAX-a->copies)return EOVERFLOW;
+  for(uint32_t offset=0;offset<src.count;offset+=block) {
     uint32_t identity=a->copies++;
-    if(source.peer==a->context->M->node || destination.peer==a->context->M->node) {
-      int receive=destination.peer==a->context->M->node;
-      struct mesh_row_binding b={.first=(receive?d:s)->first+offset,.count=block,.bytes=(uint32_t)MIN((size_t)block*a->context->M->pgsz,s->shape.rows*s->shape.columns*scalar_bytes(s->shape.scalar)-(size_t)offset*a->context->M->pgsz),.binding=identity,.queue=queue,.receive=receive};
-      [a.bindings appendBytes:&b length:sizeof b];
+    if(sender==a->context->M->node || receiver==a->context->M->node) {
+      int receive=receiver==a->context->M->node;
+      struct mesh_row_binding binding={.first=(receive?dst:src).first+offset,.count=block,
+        .bytes=(uint32_t)MIN((size_t)block*a->context->M->pgsz,bytes-(size_t)offset*a->context->M->pgsz),
+        .binding=identity,.queue=queue,.receive=receive};
+      [a.bindings appendBytes:&binding length:sizeof binding];
     }
   }
   return 0;

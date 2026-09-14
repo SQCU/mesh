@@ -440,3 +440,22 @@ Preparation scans are triggered by metadata publication or initial registration;
 unprepared candidate/completion notices cannot repeatedly scan directory pages.
 Partially published multi-page metadata can still cause repeated metadata readiness
 checks, distinct from repeated per-candidate directory scans.
+
+## Source review: retained sorted chunks
+
+The September 14 source review found that each `_lower_indexed_add` chunk already
+retains sorted unique destination keys in its directory and a known candidate-origin
+prefix. `_routing_directory` flattens them and invokes `_group_ordinals` again.
+Replacing that call with the existing argsort lowering would add padded 128-element
+runs and full-run merge dependencies, so it is not an established streaming fix.
+
+A replacement can retain per-chunk spans for each consumer instead of globally
+sorting again. Both native routing membership and numerical consumption must use
+that same descriptor. The current flat ordinal/offset ABI and the finish kernel's
+global binary search cannot be changed independently. Consumer-by-chunk span
+storage must be accounted for against candidate capacity before adopting it;
+a dense cross-product table is not automatically an improvement. Also, replacing
+uncovered keys with ABSENT destroys sorted-run order when coverage has holes.
+Any merge-based alternative must retain original keys with validity or compact
+valid runs. This review records constraints for the remaining implementation,
+not a completed replacement or measured performance result.

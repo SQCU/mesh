@@ -265,6 +265,30 @@ reuses each slot after consuming its own outputs. No extra per-message protocol
 or numerical scheduler implements this buffering. The algebra and FIFO lowering
 proof are in [streaming algebra](streaming-algebra.md).
 
+The copy binding consumes explicit source and destination `mesh_view` values and
+peer indices. The former endpoint descriptor retained only tensor/extent indices,
+discarding Ref offsets and requiring Python to reject every partial view. That
+descriptor and its unused extent-batch/stride parameters are removed. Setup now
+lowers each dense publication-aligned view to its own logical page range. Binding
+identities are enumerated consistently on every participant; each transport block
+retains the appropriate source or destination range and exact payload byte count.
+A final short block copies the view's remaining bytes, not the backing tensor's
+remaining bytes. No tensor completion wait or whole-extent dependency is added.
+
+Local copy uses the same materializer with dense views expressed as physical-order
+spans during setup. Matching transposed layouts keep their physical value order.
+The materializer honors destination offsets, publishes only that span, and accepts
+disjoint source/destination pages in the same extent. It rejects actual page overlap
+rather than rejecting an entire shared allocation. Its coverage validation remains
+relative to the destination view. Invocation only executes configured memcpy
+segments. Shape, layout, dtype, address, and page-range decisions precede invocation.
+
+The remaining direct-transfer constraint is a dense view aligned to its configured
+publication/transport blocks. Arbitrary strided or sub-block transfers are not
+claimed here. Native header and ctypes signatures change together; running bridge
+ABI is unaffected. Verification consists of source review and native/Python
+compilation, without numerical execution.
+
 ## Mandatory partial publication
 
 The JAX authors' [Pallas collective matmul](https://docs.jax.dev/en/latest/pallas/gpu/collective_matmul.html)

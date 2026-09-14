@@ -19,7 +19,6 @@ struct mesh_view {
 struct mesh_copy_region { struct mesh_view source; size_t row,column; };
 /* design/algorithm-sources.md#view-scoped-host-production */
 struct mesh_writer { struct mesh_ctx *context; struct mesh_row_map output; struct mesh_row_function function; };
-struct mesh_endpoint { struct mesh_tensor *tensor; uint32_t peer,first,stride; };
 struct mesh_algebra_event { uint64_t ready_ns,start_ns,complete_ns,gpu_start_ns,gpu_end_ns,submissions; uint32_t first_output,output_maps,kind,input_maps; };
 /* design/algorithm-sources.md#function-cost-profiles */
 enum mesh_algebra_backend { MESH_BACKEND_EXTERNAL, MESH_BACKEND_CPU_SGEMM, MESH_BACKEND_CPU_NEON_CONTRACT, MESH_BACKEND_CPU_BUILTIN, MESH_BACKEND_CPU_COMPILED, MESH_BACKEND_METAL_COMPILED, MESH_BACKEND_METAL_MPS, MESH_BACKEND_METAL_BUILTIN, MESH_BACKEND_COREML, MESH_BACKEND_SELECTED_MIXED };
@@ -65,7 +64,7 @@ int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_vie
 /* design/algorithm-sources.md#selected-native-contractions */
 int mesh_algebra_view_pages(struct mesh_algebra *,struct mesh_view,struct mesh_view *pages,size_t capacity,size_t *count);
 int mesh_algebra_contract_select(struct mesh_algebra *,struct mesh_view selector,const struct mesh_view *left,const struct mesh_view *right,size_t plan_count,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,float alpha,size_t *function_index);
-int mesh_algebra_copy(struct mesh_algebra *,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue);
+int mesh_algebra_copy(struct mesh_algebra *,struct mesh_view source,uint32_t sender,struct mesh_view destination,uint32_t receiver,uint16_t queue);
 int mesh_algebra_present(struct mesh_algebra *,struct mesh_view);
 int mesh_algebra_export(struct mesh_algebra *,struct mesh_view,size_t *first,size_t *count);
 int mesh_algebra_realize(struct mesh_algebra *);
