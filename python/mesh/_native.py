@@ -25,6 +25,12 @@ class MetalConstant(C.Structure):
     _fields_ = [("bytes", P), ("length", Z)]
 
 
+class Event(C.Structure):
+    _fields_ = [(name, C.c_uint64) for name in
+        ('ready_ns', 'start_ns', 'complete_ns', 'gpu_start_ns', 'gpu_end_ns', 'submissions')]
+    _fields_ += [(name, U) for name in ('first_output', 'output_maps', 'kind')]
+
+
 class Report(C.Structure):
     _fields_ = [(k, C.c_uint64) for k in ('submitted', 'completed',
         'native_submitted', 'native_backings', 'ne_planned_operations')]
@@ -68,12 +74,15 @@ class Native:
                 C.POINTER(View), Z, Submission, P]),
             'mesh_algebra_metal': (C.c_int, [P, C.c_char_p, C.POINTER(MetalDispatch), Z,
                 C.POINTER(MetalConstant), Z, C.POINTER(View), Z, C.POINTER(View), Z]),
+            'mesh_algebra_source': (C.c_int, [P, C.c_char_p, C.c_char_p, C.POINTER(View), Z, View]),
             'mesh_algebra_bind': (C.c_int, [P, C.c_int, View, View, View, C.c_float, C.c_float]),
             'mesh_algebra_copy': (C.c_int, [P, Endpoint, Endpoint, Z, C.c_uint16]),
             'mesh_algebra_export': (C.c_int, [P, P, U, C.POINTER(Z)]),
             'mesh_algebra_realize': (C.c_int, [P]),
             'mesh_algebra_available': (C.c_int, [P, Z]),
             'mesh_algebra_consume': (None, [P, Z]),
+            'mesh_algebra_trace_count': (Z, [P]),
+            'mesh_algebra_trace': (Event, [P, Z]),
             'mesh_algebra_report': (Report, [P]),
         }
         for name, (result, arguments) in signatures.items():

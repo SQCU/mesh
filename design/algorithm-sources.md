@@ -765,3 +765,101 @@ zero. Section zero is withheld until section one finishes the entire chain.
 Terminal observation loops do not submit numerical work. Reference evaluation
 and result comparisons happen outside the numerical graph. Per-run times are
 host-observed latencies, not per-kernel timings or a speedup claim.
+
+## Pallas panel composition
+
+The JAX authors' [Pallas matrix multiplication](https://docs.jax.dev/en/latest/pallas/tpu/matmul.html)
+uses separate output-row, output-column and reduction dimensions. Its
+[software-pipelining derivation](https://docs.jax.dev/en/latest/pallas/pipelining.html)
+identifies false dependencies caused by reusing one buffer and removes them with
+multiple buffers. The [collective matmul example](https://docs.jax.dev/en/latest/pallas/gpu/collective_matmul.html)
+composes communication with locally tiled matrix computation.
+
+`nn.linear` realizes explicit M/N output tiles and K input panels. Each K panel
+writes its own canonical output tensor; a pairwise addition tree consumes only
+matching M/N partials. No mutable shared accumulator or launch-order counter
+stands in for a value. `tile_rows`, `tile_k` and `tile_columns` are setup arguments;
+the output Tensor reports its realized `block_shape`. Greatest common divisors
+respect repeated existing backing boundaries; a single dense backing does not
+force its total dimensions into that calculation. Ragged tails use BlockSpec's
+existing bounded region resolution.
+
+The FFN applies swish after the required K contributions for its own hidden tile.
+The down projection consumes each completed hidden feature tile as an independent
+K contribution; it does not require other hidden tiles to begin computing.
+Pointwise functions and their reduction trees retain both row and feature
+partitions. All of these buffers and dependency edges are realized before invocation.
+
+RMSNorm fuses each feature panel's square and row sum into one expression kernel.
+Its row statistic is a sum of those explicit partials. The final output kernel
+fuses mean/epsilon scaling, reciprocal square root, and the two multiplications
+for each output feature panel. It depends only on the necessary row statistic,
+its input panel and its gain panel. Embedding gathers likewise produce separate
+row/feature output regions.
+
+The Xonotic compiler lowers compatible ordinary two-dimensional matmul, arithmetic
+expressions and row sum/mean reductions through these same library calls while
+preserving declared peers. Its specialized expert and neighborhood source still
+has separate mathematical indexing requirements; this change does not claim to
+have generalized those operators' region lowering. No hidden payload coalescing
+is used to cross that remaining boundary.
+
+## Region expression fusion
+
+Tillet et al., [Triton: an intermediate language and compiler for tiled neural
+network computations](https://doi.org/10.1145/3315508.3329973), and the published
+[Triton Layer Normalization implementation](https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html)
+show the forward implementation as a row reduction followed by normalization and
+scaling inside one kernel. Local scalar statistics do not require an intermediate
+tensor and another launch for every arithmetic operator.
+[JAX Pallas BlockSpecs](https://docs.jax.dev/en/latest/pallas/quickstart.html)
+keep the surrounding tile's input and output references explicit. Fusion occurs
+inside that configured region; it does not merge independent region dependencies.
+
+`kernels.arguments` constructs scalar input expressions. Addition, subtraction,
+multiplication, division, exponential, hyperbolic tangent, reciprocal square root,
+and last-axis sum compose through `kernels.expression` passed to the existing
+`kernel_call`. For example, a normalization of a complete feature region is
+`expression(x * ((x*x).sum()/width + epsilon).rsqrt() * gamma)`.
+A feature-partitioned normalization instead publishes each region's
+`expression((x*x).sum())`, combines the required row statistics through the
+configured reduction, and applies
+`expression(x * (statistic/width + epsilon).rsqrt() * gamma)` to each feature
+region. Fusion removes arithmetic intermediates without pretending that a row's
+normalization factor is known before its required contributions arrive.
+
+Setup specializes the expression to retained view strides, scalar types and region
+shapes. CPU lowering emits C, compiles it once per source in the Program, binds
+canonical operand addresses, and executes the loaded function without Python
+callbacks or operand allocation. Temporary compiler artifacts are removed after
+loading. Metal lowering emits one SIMD group per row: lanes accumulate feature
+stripes, `simd_sum` forms each required row statistic, and lanes write output
+stripes directly. No global barrier or additional readiness protocol is introduced.
+Both backends publish through the same configured region completion mechanism.
+The native source binder contains no model definition or normalization-specific
+operation. All compilation and pointer-vector construction occur during setup.
+
+Compilation evidence: the native library builds, the emitted CPU normalization
+source compiles to a dylib, and the emitted Metal source builds a compute pipeline
+through Metal's runtime compiler. These are compilation checks, not claims about
+speedup or numerical results; the ordinary composed example supplies those.
+
+## Region execution timing
+
+Apple's [MTLCommandBuffer GPUStartTime](https://developer.apple.com/documentation/metal/mtlcommandbuffer/gpustarttime)
+and [GPUEndTime](https://developer.apple.com/documentation/metal/mtlcommandbuffer/gpuendtime)
+report the command's device interval. Each configured function owns one fixed trace
+record for its latest invocation: readiness dispatch, worker start, completion
+callback, GPU interval where applicable, and submission count. Host timestamps
+use local uptime nanoseconds. Readiness dispatch means the configured dependencies
+were observed ready and claimed; it is not a remote clock timestamp. CPU timings
+include the actual native numerical call, and completion precedes publishing the
+function's output rows. Reading a trace does not execute or synchronize the graph.
+
+The trace index identifies the configured function. `first_output` identifies its
+first output map and `output_maps` records how many output maps it owns; neither
+field invents a contiguous union for a multi-output function. CPU, Metal and Core
+ML are recorded as execution kinds zero, one and two. Reused functions overwrite
+their latest timestamps and increment a count; finite planned invocations each
+retain their own record. Analysis must not treat this bounded record as an
+unbounded event history or subtract clocks across nodes.

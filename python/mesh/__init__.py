@@ -254,7 +254,10 @@ class Program:
         for coordinate in itertools.product(*(range(n) for n in grid)):
             reads = tuple(spec.resolve(coordinate) for spec in inputs)
             writes = tuple(spec.resolve(coordinate) for spec in outputs)
-            from .kernels import _Operation, Metal
+            from .kernels import _Operation, Metal, _ExpressionKernel
+            if isinstance(kernel, _ExpressionKernel):
+                kernel.bind(self, reads, writes)
+                continue
             if isinstance(kernel, Metal):
                 dispatches = (MetalDispatch * len(kernel.dispatches))(*(
                     MetalDispatch(d.name.encode(), (C.c_size_t * 3)(*d.grid),

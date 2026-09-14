@@ -46,3 +46,156 @@ class Metal:
 def gather(table, indices, output):
     for row in range(output.shape[0]):
         np.copyto(output[row], table[int(indices[row, 0])])
+
+
+@dataclass(frozen=True)
+class _Expression:
+    operation: str
+    operands: tuple = ()
+    value: object = None
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def __add__(self, other):
+        return _Expression('+', (self, _literal(other)))
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def __radd__(self, other):
+        return _literal(other) + self
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def __sub__(self, other):
+        return _Expression('-', (self, _literal(other)))
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def __rsub__(self, other):
+        return _literal(other) - self
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def __mul__(self, other):
+        return _Expression('*', (self, _literal(other)))
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def __rmul__(self, other):
+        return _literal(other) * self
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def __truediv__(self, other):
+        return _Expression('/', (self, _literal(other)))
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def __rtruediv__(self, other):
+        return _literal(other) / self
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def sum(self):
+        return _Expression('sum', (self,))
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def rsqrt(self):
+        return _Expression('rsqrt', (self,))
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def exp(self):
+        return _Expression('exp', (self,))
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def tanh(self):
+        return _Expression('tanh', (self,))
+
+
+# design/algorithm-sources.md#region-expression-fusion
+def _literal(value):
+    return value if isinstance(value, _Expression) else _Expression('literal', value=float(value))
+
+
+# design/algorithm-sources.md#region-expression-fusion
+def arguments(count):
+    return tuple(_Expression('input', value=index) for index in range(count))
+
+
+# design/algorithm-sources.md#region-expression-fusion
+def expression(value):
+    return _ExpressionKernel(_literal(value))
+
+
+@dataclass(frozen=True)
+class _ExpressionKernel:
+    value: _Expression
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def bind(self, program, inputs, outputs):
+        from . import check
+        from ._native import View
+        if len(outputs) != 1:
+            raise ValueError('An expression has one output region')
+        if any(ref.dtype not in (np.dtype('float16'), np.dtype('float32')) for ref in (*inputs, *outputs)):
+            raise ValueError('Scalar expressions require float16 or float32 regions')
+        check(program.native.algebra_source(program.handle,
+            self.source(inputs, outputs[0], False).encode(),
+            self.source(inputs, outputs[0], True).encode(),
+            (View * len(inputs))(*(ref.view for ref in inputs)), len(inputs), outputs[0].view))
+
+    # design/algorithm-sources.md#region-expression-fusion
+    def source(self, inputs, output, metal):
+        widths, reductions = {}, []
+
+        # design/algorithm-sources.md#region-expression-fusion
+        def visit(node):
+            if node in widths:
+                return widths[node]
+            sizes = tuple(visit(child) for child in node.operands)
+            if node.operation == 'input':
+                ref = inputs[node.value]
+                if ref.shape[0] not in (1, output.shape[0]):
+                    raise ValueError('Expression input rows must broadcast to the output')
+                width = ref.shape[1]
+            elif node.operation == 'sum':
+                reductions.append(node)
+                width = 1
+            else:
+                width = max(sizes, default=1)
+                if any(size not in (1, width) for size in sizes):
+                    raise ValueError('Expression columns must broadcast')
+            widths[node] = width
+            return width
+
+        width = visit(self.value)
+        if width not in (1, output.shape[1]):
+            raise ValueError('Expression columns do not match the output')
+        names = {node: f's{index}' for index, node in enumerate(reductions)}
+
+        # design/algorithm-sources.md#region-expression-fusion
+        def emit(node, column):
+            if node.operation == 'input':
+                ref = inputs[node.value]
+                row_stride = ref.view.row_stride if ref.shape[0] != 1 else 0
+                column_stride = ref.view.column_stride if ref.shape[1] != 1 else 0
+                return f'float(p{node.value}[r*{row_stride}+({column})*{column_stride}])' if metal else f'((float)p{node.value}[r*{row_stride}+({column})*{column_stride}])'
+            if node.operation == 'literal':
+                return repr(node.value) + 'f'
+            if node.operation == 'sum':
+                return names[node]
+            args = tuple(emit(child, column) for child in node.operands)
+            if node.operation in ('+', '-', '*', '/'):
+                return f'({args[0]}{node.operation}{args[1]})'
+            if node.operation == 'rsqrt':
+                return f'rsqrt({args[0]})' if metal else f'(1.0f/sqrtf({args[0]}))'
+            return f'{node.operation}{"" if metal else "f"}({args[0]})'
+
+        lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <math.h>']
+        lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], uint r [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {' if metal else 'void mesh_expression(const uintptr_t *buffers) {')
+        for index, ref in enumerate((*inputs, output)):
+            scalar = ('half' if metal else '_Float16') if ref.dtype == np.dtype('float16') else 'float'
+            qualifier = ('device ' if metal else '') + ('const ' if index < len(inputs) else '')
+            lines.append(f'{qualifier}{scalar} *p{index}=({qualifier}{scalar} *)buffers[{index}];')
+        if not metal:
+            lines.append(f'for(uint64_t r=0;r<{output.shape[0]};r++) {{')
+        for node in reductions:
+            name, child = names[node], node.operands[0]
+            lines.append(f'float {name}=0.0f;')
+            lines.append(f'for({"uint" if metal else "uint64_t"} k={"lane" if metal else "0"};k<{widths[child]};k+={32 if metal else 1}) {name}+={emit(child, "k")};')
+            if metal:
+                lines.append(f'{name}=simd_sum({name});')
+        lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(inputs)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(self.value, "c")};')
+        lines.append('}' if metal else '}}')
+        return '\n'.join(lines)

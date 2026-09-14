@@ -9,6 +9,8 @@
 #include "mesh-algebra.h"
 #include <limits.h>
 #include <math.h>
+#include <dlfcn.h>
+#include <time.h>
 
 /* design/algorithm-sources.md#streaming-algebra */
 static NSString *const source = @
@@ -56,6 +58,16 @@ struct geometry { struct geometry_view a,b,o; float alpha,beta; uint64_t first,c
 
 enum mesh_execution_kind { MESH_EXECUTION_CPU, MESH_EXECUTION_METAL, MESH_EXECUTION_COREML };
 
+typedef void (*mesh_cpu_kernel)(const uintptr_t *);
+@interface MeshCPUCode : NSObject
+@property void *handle;
+@property mesh_cpu_kernel kernel;
+@end
+@implementation MeshCPUCode
+/* design/algorithm-sources.md#region-expression-fusion */
+- (void)dealloc {if(self.handle)dlclose(self.handle);}
+@end
+
 @class MeshAlgebra;
 @interface MeshFunction : NSObject {
 @public
@@ -64,8 +76,11 @@ enum mesh_execution_kind { MESH_EXECUTION_CPU, MESH_EXECUTION_METAL, MESH_EXECUT
   struct geometry geometry;
   uint32_t occurrence;
   enum mesh_execution_kind executionKind;
+  _Atomic uint64_t readyNs,startNs,completeNs,gpuStartNs,gpuEndNs,invocations;
 }
 @property NSArray<MeshExtent *> *operands;
+@property MeshCPUCode *cpuCode;
+@property NSData *cpuArguments;
 @property NSMutableData *dependencies,*results;
 @property(nonatomic,assign) MeshAlgebra *owner;
 @property(copy) void (^encode)(id<MTLCommandBuffer>);
@@ -90,6 +105,7 @@ enum mesh_execution_kind { MESH_EXECUTION_CPU, MESH_EXECUTION_METAL, MESH_EXECUT
 @property id<MTLCommandQueue> queue;
 @property id<MTLLibrary> library;
 @property NSMutableDictionary<NSString *,id<MTLLibrary>> *libraries;
+@property NSMutableDictionary<NSString *,MeshCPUCode *> *cpuCode;
 @property NSMutableArray<MeshFunction *> *functions;
 @property NSMutableArray<MeshExtent *> *extents;
 @property NSMutableDictionary<NSValue *,MeshExtent *> *lookup;
@@ -121,7 +137,7 @@ enum mesh_execution_kind { MESH_EXECUTION_CPU, MESH_EXECUTION_METAL, MESH_EXECUT
 
 /* design/algorithm-sources.md#indexed-library-functions */
 static void complete_part(MeshFunction *f,int64_t error,uint64_t nanoseconds) {
-  MeshAlgebra *a=f.owner;
+  MeshAlgebra *a=f.owner;atomic_store(&f->completeNs,clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
   if(error)atomic_store(&a->code,error);
   else mesh_complete(a->context,&f->function,&f->occurrence,1);
   atomic_fetch_add(&a->gpuNanoseconds,nanoseconds);atomic_fetch_add(&a->completed,1);dispatch_group_leave(a.executions);
@@ -368,6 +384,7 @@ static void submit_metal(void *binding,mesh_completion complete,void *context) {
   MeshFunction *f=(__bridge MeshFunction *)context;
   id<MTLCommandBuffer> command=[f.owner.queue commandBuffer];f.encode(command);
   [command addCompletedHandler:^(id<MTLCommandBuffer> done){
+    atomic_store(&f->gpuStartNs,(uint64_t)(done.GPUStartTime*1e9));atomic_store(&f->gpuEndNs,(uint64_t)(done.GPUEndTime*1e9));
     atomic_fetch_add(&f.owner->gpuNanoseconds,(uint64_t)((done.GPUEndTime-done.GPUStartTime)*1e9));
     complete(context,done.error.code);
   }];
@@ -428,6 +445,53 @@ int mesh_algebra_metal(struct mesh_algebra *handle,const char *text,const struct
     }
     [encoder endEncoding];
   };
+  return 0;
+}
+
+/* design/algorithm-sources.md#region-expression-fusion */
+static void submit_cpu(void *binding,mesh_completion complete,void *context) {
+  MeshFunction *f=(__bridge MeshFunction *)context;f.cpuCode.kernel(f.cpuArguments.bytes);complete(context,0);
+}
+/* design/algorithm-sources.md#region-expression-fusion */
+int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output) {
+  MeshAlgebra *a=owner(handle);
+  if(a.realized || !cpu_source || !metal_source || !valid_view(a,output))return EINVAL;
+  if(!a.cpu) {
+    struct mesh_metal_dispatch dispatch={.name="mesh_expression",.grid={output.rows,1,1},.group={32,1,1}};
+    return mesh_algebra_metal(handle,metal_source,&dispatch,1,NULL,0,inputs,input_count,&output,1);
+  }
+  NSString *source=@(cpu_source);if(!a.cpuCode)a.cpuCode=[NSMutableDictionary new];
+  MeshCPUCode *library=a.cpuCode[source];
+  if(!library) {
+    NSError *error=nil;NSFileManager *files=NSFileManager.defaultManager;
+    NSString *directory=[NSTemporaryDirectory() stringByAppendingPathComponent:[@"mesh-cpu-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    if(![files createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:&error])return (int)error.code;
+    NSString *input=[directory stringByAppendingPathComponent:@"kernel.c"],*output=[directory stringByAppendingPathComponent:@"kernel.dylib"];
+    if(![source writeToFile:input atomically:YES encoding:NSUTF8StringEncoding error:&error]){[files removeItemAtPath:directory error:nil];return (int)error.code;}
+    NSTask *task=[NSTask new];task.executableURL=[NSURL fileURLWithPath:@"/usr/bin/clang"];
+    task.arguments=@[@"-O3",@"-dynamiclib",input,@"-o",output];
+    if(![task launchAndReturnError:&error]){[files removeItemAtPath:directory error:nil];return (int)error.code;}
+    [task waitUntilExit];
+    if(task.terminationStatus){[files removeItemAtPath:directory error:nil];return EIO;}
+    library=[MeshCPUCode new];library.handle=dlopen(output.fileSystemRepresentation,RTLD_NOW|RTLD_LOCAL);
+    [files removeItemAtPath:directory error:nil];
+    if(!library.handle){fprintf(stderr,"mesh CPU kernel: %s\n",dlerror());return EIO;}
+    library.kernel=(mesh_cpu_kernel)dlsym(library.handle,"mesh_expression");
+    if(!library.kernel){fprintf(stderr,"mesh CPU symbol: %s\n",dlerror());return EIO;}
+    a.cpuCode[source]=library;
+  }
+  NSMutableData *addresses=[NSMutableData dataWithLength:(input_count+1)*sizeof(uintptr_t)];
+  uintptr_t *pointers=addresses.mutableBytes;
+  for(size_t i=0;i<input_count+1;i++) {
+    struct mesh_view v=i<input_count?inputs[i]:output;
+    if(!valid_view(a,v))return EINVAL;
+    struct mesh_extent *extent=&v.tensor->extents[v.extent];
+    pointers[i]=(uintptr_t)extent->address+v.offset*scalar_bytes(extent->shape.scalar);
+  }
+  int status=mesh_algebra_function(handle,inputs,input_count,&output,1,submit_cpu,NULL);
+  if(status)return status;
+  MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_CPU;
+  f.cpuCode=library;f.cpuArguments=addresses;
   return 0;
 }
 
@@ -619,7 +683,7 @@ static int bind_part(MeshAlgebra *a,enum mesh_algebra_op op,struct mesh_view x,s
     void (^encode)(id<MTLCommandBuffer>)=f.encode;id<MTLCommandQueue> queue=a.queue;
     f.execute=^(MeshFunction *function) {
       id<MTLCommandBuffer> command=[queue commandBuffer];encode(command);
-      [command addCompletedHandler:^(id<MTLCommandBuffer> done){complete_part(function,done.error.code,(uint64_t)((done.GPUEndTime-done.GPUStartTime)*1e9));}];
+      [command addCompletedHandler:^(id<MTLCommandBuffer> done){atomic_store(&function->gpuStartNs,(uint64_t)(done.GPUStartTime*1e9));atomic_store(&function->gpuEndNs,(uint64_t)(done.GPUEndTime*1e9));complete_part(function,done.error.code,(uint64_t)((done.GPUEndTime-done.GPUStartTime)*1e9));}];
       [command commit];
     };
   }
@@ -693,7 +757,7 @@ int mesh_algebra_copy(struct mesh_algebra *handle,struct mesh_endpoint source,st
     uint32_t identity=a->copies++;
     if(source.peer==a->context->M->node || destination.peer==a->context->M->node) {
       int receive=destination.peer==a->context->M->node;
-      struct mesh_row_binding b={.first=(receive?d:s)->first+offset,.count=block,.binding=identity,.queue=queue,.receive=receive};
+      struct mesh_row_binding b={.first=(receive?d:s)->first+offset,.count=block,.bytes=(uint32_t)MIN((size_t)block*a->context->M->pgsz,s->shape.rows*s->shape.columns*scalar_bytes(s->shape.scalar)-(size_t)offset*a->context->M->pgsz),.binding=identity,.queue=queue,.receive=receive};
       [a.bindings appendBytes:&b length:sizeof b];
     }
   }
@@ -717,11 +781,12 @@ int mesh_algebra_export(struct mesh_algebra *handle,struct mesh_tensor *t,uint32
 static void submit_ready(void *argument,uint32_t occurrence) {
   MeshFunction *f=(__bridge MeshFunction *)argument;MeshAlgebra *a=f.owner;
   f->occurrence=occurrence;
+  atomic_store(&f->readyNs,clock_gettime_nsec_np(CLOCK_UPTIME_RAW));atomic_store(&f->startNs,0);atomic_store(&f->completeNs,0);atomic_store(&f->gpuStartNs,0);atomic_store(&f->gpuEndNs,0);atomic_fetch_add(&f->invocations,1);
   atomic_fetch_add(&a->submitted,1);
   if(f->executionKind==MESH_EXECUTION_CPU)atomic_fetch_add(&a->cpuSubmitted,1);
   if(f->executionKind==MESH_EXECUTION_COREML)atomic_fetch_add(&a->nativeSubmitted,1);
   dispatch_group_enter(a.executions);
-  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{f.execute(f);}});
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{atomic_store(&f->startNs,clock_gettime_nsec_np(CLOCK_UPTIME_RAW));f.execute(f);}});
 }
 /* design/algorithm-sources.md#streaming-algebra */
 int mesh_algebra_realize(struct mesh_algebra *handle) {
@@ -753,4 +818,13 @@ void mesh_algebra_consume(struct mesh_algebra *handle,size_t index) {
 /* design/algorithm-sources.md#streaming-algebra */
 struct mesh_algebra_report mesh_algebra_report(struct mesh_algebra *handle) {
   MeshAlgebra *a=owner(handle);return (struct mesh_algebra_report){.submitted=a->submitted,.completed=atomic_load(&a->completed),.native_submitted=atomic_load(&a->nativeSubmitted),.native_backings=atomic_load(&a->nativeBackings),.ne_planned_operations=a->nePlannedOperations,.code=atomic_load(&a->code),.gpu_seconds=atomic_load(&a->gpuNanoseconds)/1e9,.cpu_submitted=atomic_load(&a->cpuSubmitted)};
+}
+
+/* design/algorithm-sources.md#region-execution-timing */
+size_t mesh_algebra_trace_count(struct mesh_algebra *handle) {return owner(handle).functions.count;}
+/* design/algorithm-sources.md#region-execution-timing */
+struct mesh_algebra_event mesh_algebra_trace(struct mesh_algebra *handle,size_t index) {
+  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_algebra_event){0};
+  MeshFunction *f=a.functions[index];
+  return (struct mesh_algebra_event){.ready_ns=atomic_load(&f->readyNs),.start_ns=atomic_load(&f->startNs),.complete_ns=atomic_load(&f->completeNs),.gpu_start_ns=atomic_load(&f->gpuStartNs),.gpu_end_ns=atomic_load(&f->gpuEndNs),.submissions=atomic_load(&f->invocations),.first_output=f->function.output[0].first,.output_maps=f->function.outputs,.kind=f->executionKind};
 }

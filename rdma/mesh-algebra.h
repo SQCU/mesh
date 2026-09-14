@@ -21,6 +21,7 @@ struct mesh_view {
   size_t offset,rows,columns,row_stride,column_stride;
 };
 struct mesh_endpoint { struct mesh_tensor *tensor; uint32_t peer,first,stride; };
+struct mesh_algebra_event { uint64_t ready_ns,start_ns,complete_ns,gpu_start_ns,gpu_end_ns,submissions; uint32_t first_output,output_maps,kind; };
 struct mesh_algebra_report { uint64_t submitted,completed,native_submitted,native_backings,ne_planned_operations; int64_t code; double gpu_seconds; uint64_t cpu_submitted; };
 
 struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *);
@@ -43,6 +44,7 @@ int mesh_tensor_issue(struct mesh_tensor *,uint32_t extent);
 void mesh_tensor_complete(struct mesh_tensor *,uint32_t extent);
 int mesh_algebra_function(struct mesh_algebra *,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,mesh_submission,void *binding);
 int mesh_algebra_metal(struct mesh_algebra *,const char *,const struct mesh_metal_dispatch *,size_t,const struct mesh_metal_constant *,size_t,const struct mesh_view *,size_t,const struct mesh_view *,size_t);
+int mesh_algebra_source(struct mesh_algebra *,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output);
 int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha,float beta);
 int mesh_algebra_copy(struct mesh_algebra *,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue);
 int mesh_algebra_export(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,size_t *index);
@@ -50,6 +52,8 @@ int mesh_algebra_return(struct mesh_algebra *,struct mesh_tensor *,uint32_t exte
 int mesh_algebra_realize(struct mesh_algebra *);
 int mesh_algebra_available(struct mesh_algebra *,size_t output);
 void mesh_algebra_consume(struct mesh_algebra *,size_t output);
+size_t mesh_algebra_trace_count(struct mesh_algebra *);
+struct mesh_algebra_event mesh_algebra_trace(struct mesh_algebra *,size_t function);
 struct mesh_algebra_report mesh_algebra_report(struct mesh_algebra *);
 
 #ifdef __cplusplus
