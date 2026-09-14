@@ -248,6 +248,7 @@ def main():
         xonotic_elementary = None
         xonotic_ranges = None
         xonotic_random = None
+        xonotic_integer_dots = []
         scatter_bases = {}
         xonotic_take_gradient = None
         if args.xonotic and args.rank == 0:
@@ -674,6 +675,68 @@ def main():
             empty_results = tuple(program.export(lowered[value.index][0, 0]) for value in empty_identities)
             mean_result = program.export(lowered[integer_mean.index][0, 0])
             xonotic_ranges = range_storage, observations, references, empty_results, mean_result
+            # design/algorithm-sources.md#typed-integer-contractions
+            for scalar in (np.int32, np.uint32, np.int64, np.uint64, np.bool_):
+                dtype_name = np.dtype(scalar).name
+                boolean = scalar == np.bool_
+                bits = np.dtype(scalar).itemsize*8
+                graph = mx.Graph()
+                with graph:
+                    dot_input = graph.input('integer_dot', (2, 3, 2), dtype_name)
+                    weight_values = np.array([[[1, 0, 0], [0, 1, 0]]] if boolean else [[[2, 4, 6], [3, 5, 7]]], dtype=scalar)
+                    second_values = np.eye(2, dtype=scalar) if boolean else np.array([[2, 1], [1, 3]], dtype=scalar)
+                    product = mx.matmul(dot_input, graph.constant(weight_values, dtype=dtype_name), transpose_left=True, transpose_right=True)
+                    composed = mx.matmul(product, graph.constant(second_values, dtype=dtype_name))
+                    consumer = ~composed if boolean else composed + graph.constant(1, dtype=dtype_name)
+                    empty_product = mx.matmul(graph.constant(np.empty((2, 0), dtype=scalar), dtype=dtype_name),
+                                              graph.constant(np.empty((0, 2), dtype=scalar), dtype=dtype_name))
+                dot_storage = program.tensor((6, 2), (1, 2), dtype=scalar)
+                lowered = kernel_calls(program, graph, (), {dot_input.index: dot_storage},
+                    outputs=(product, consumer, empty_product), root_peer=0, tile_rows=1, tile_k=2, tile_columns=1)
+                observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
+                    for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in (product, consumer))
+                empty_results = tuple(program.export(ref) for _, ref in sorted(lowered[empty_product.index].blocks.items()))
+                rows_per_batch = [2, 2]
+                if scalar == np.int64:
+                    left_arg, right_arg = kernels.arguments(2)
+                    fused_dot = program.kernel_call(kernels.expression(kernels.dot(left_arg, right_arg, tile_k=1)+np.int64(0)),
+                        grid=(6, 2), in_specs=(BlockSpec(None),)*2,
+                        out_specs=BlockSpec((1, 1), lambda i,j: (i,j)), out_shape=ShapeDtypeStruct((6, 2), np.int64), peer=0)(
+                            dot_storage, weight(second_values))
+                    observations += (tuple((i,j,program.export(ref)) for (i,j),ref in sorted(fused_dot.blocks.items())),)
+                    rows_per_batch.append(3)
+                generations = []
+                for generation in range(2):
+                    if boolean:
+                        values = np.array([[[True, False], [False, True], [True, True]],
+                                           [[False, True], [True, False], [False, False]]], dtype=scalar)
+                    else:
+                        limits = np.iinfo(scalar)
+                        large = 2**(24 if bits == 32 else 53)+1
+                        values = np.array([[[limits.max, large], [limits.min, 3], [5, 7]],
+                                           [[large+2, limits.max-1], [11, limits.min], [13, 17]]], dtype=scalar)
+                    if generation:
+                        values = values[::-1, ::-1].copy()
+                    projected = [[[sum(int(values[b, k, i])*int(weight_values[0, j, k]) for k in range(3))
+                                   for j in range(2)] for i in range(2)] for b in range(2)]
+                    chained = [[[sum(projected[b][i][k]*int(second_values[k, j]) for k in range(2)) + (0 if boolean else 1)
+                                 for j in range(2)] for i in range(2)] for b in range(2)]
+                    expected = []
+                    for output_index, output in enumerate((projected, chained)):
+                        flat = [value for batch in output for row in batch for value in row]
+                        if boolean:
+                            flat = [not bool(value) if output_index else bool(value) for value in flat]
+                        else:
+                            flat = [value % (1 << bits) for value in flat]
+                            if np.dtype(scalar).kind == 'i':
+                                flat = [value-(1 << bits) if value >= 1 << (bits-1) else value for value in flat]
+                        expected.append(np.array(flat, dtype=scalar).reshape(4, 2))
+                    if scalar == np.int64:
+                        flat = [sum(int(row[k])*int(second_values[k,j]) for k in range(2)) % (1 << 64)
+                                for row in values.reshape(6, 2) for j in range(2)]
+                        expected.append(np.array([value-(1 << 64) if value >= 1 << 63 else value for value in flat], dtype=scalar).reshape(6, 2))
+                    generations.append((values.reshape(6, 2), expected))
+                xonotic_integer_dots.append((dtype_name, dot_storage, observations, rows_per_batch, empty_results, generations))
             # design/algorithm-sources.md#counter-based-random-generation
             known_answers = []
             for counter, key, expected in (
@@ -1339,6 +1402,36 @@ def main():
                     output=[[(i,j,result.array.tolist()) for i,j,result in results] for results in observations])), flush=True)
                 for results in observations:
                     for i, j, result in results:
+                        result.consume()
+        for dtype_name, storage, observations, rows_per_batch, empty_results, generations in xonotic_integer_dots:
+            wait_for(empty_results)
+            if any(np.any(result.array) or result.array.dtype != np.dtype(dtype_name) for result in empty_results):
+                raise ArithmeticError('Empty integer contraction did not produce its typed zero identity')
+            for result in empty_results:
+                result.consume()
+            for generation, (values, expected) in enumerate(generations):
+                started = time.monotonic_ns()
+                wait_for(tuple(storage.blocks.values()), 'writable')
+                for batch in (generation, 1-generation):
+                    for (i, j), ref in storage.blocks.items():
+                        if i//3 == batch:
+                            column = j*storage.block_shape[1]
+                            with program.write(ref) as destination:
+                                destination[...] = values[i:i+ref.shape[0], column:column+ref.shape[1]]
+                    wait_for(tuple(result for results, batch_rows in zip(observations, rows_per_batch) for i,j,result in results if i//batch_rows == batch))
+                    for results, reference, batch_rows in zip(observations, expected, rows_per_batch):
+                        for i, j, result in results:
+                            if i//batch_rows == batch:
+                                if result.array.dtype != np.dtype(dtype_name) or not np.array_equal(result.array,
+                                        reference[i:i+result.array.shape[0], j:j+result.array.shape[1]]):
+                                    raise ArithmeticError(f'Integer contraction lost typed modular or Boolean semantics: {dtype_name}')
+                            elif batch == generation and result.ready:
+                                raise ArithmeticError('Integer contraction consumed an unpublished batch')
+                    print(json.dumps(dict(event='xonotic_integer_dot_early' if batch == generation else 'xonotic_integer_dot_complete',
+                        dtype=dtype_name, generation=generation, published_batch=batch, elapsed_ms=(time.monotonic_ns()-started)/1e6,
+                        output=[[(i,j,result.array.tolist()) for i,j,result in results if i//batch_rows == batch] for results,batch_rows in zip(observations, rows_per_batch)])), flush=True)
+                for results in observations:
+                    for i,j,result in results:
                         result.consume()
         if xonotic_random is not None:
             known_answers, key_storage, storage, observations, high_keys, high_results, generations = xonotic_random
