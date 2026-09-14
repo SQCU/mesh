@@ -454,7 +454,7 @@ def main():
                 derivatives = graph.vjp((projected,), (expert_inputs[3],), expert_inputs[:2])
                 consumers = tuple(value * 2 + 1 for value in (projected, *derivatives))
             expert_storage = tuple(program.tensor(shape, block, dtype=dtype) for shape, block, dtype in (
-                ((4, 3), (1, 2), np.float32), ((9, 5), (1, 2), np.float32),
+                ((4, 3), (1, 2), np.float32), ((9, 5), (2, 2), np.float32),
                 ((4, 1), (1, 1), np.int64), ((4, 5), (1, 2), np.float32)))
             lowered = kernel_calls(program, graph, (), dict(zip((value.index for value in expert_inputs), expert_storage)),
                 outputs=consumers, root_peer=0, tile_rows=1, tile_k=2, tile_columns=2)
@@ -464,7 +464,7 @@ def main():
             for generation in range(2):
                 rows_values = (np.arange(12, dtype=np.float32).reshape(4, 3) - 5 + generation) / 8
                 weight_values = (np.arange(45, dtype=np.float32).reshape(3, 3, 5) - 20 - generation) / 16
-                selected_values = np.array([generation, generation, 2, generation], dtype=np.int64)
+                selected_values = np.array([generation, generation - 3, 2, generation], dtype=np.int64)
                 cotangent_values = (np.arange(20, dtype=np.float32).reshape(4, 5) + 1 + generation) / 8
                 x, w, g = (value.astype(np.float64) for value in (rows_values, weight_values, cotangent_values))
                 projected = np.einsum('nd,ndh->nh', x, w[selected_values])
@@ -1091,8 +1091,8 @@ def main():
                 started = time.monotonic_ns()
                 for operand, (tensor, data) in enumerate(zip(storage, values)):
                     for (i, j), ref in tensor.blocks.items():
-                        if operand == 2 or (i < 6 if operand == 1 else i != 2):
-                            row, column = i * tensor.block_shape[0], j * tensor.block_shape[1]
+                        row, column = i * tensor.block_shape[0], j * tensor.block_shape[1]
+                        if operand == 2 or (row < 6 if operand == 1 else row != 2):
                             with program.write(ref) as destination:
                                 destination[...] = data[row:row+ref.shape[0], column:column+ref.shape[1]]
                 early = tuple(result for target, results in enumerate(observations) for i, j, result in results
@@ -1114,10 +1114,10 @@ def main():
                         continue
                     tensor, data = storage[operand], values[operand]
                     for (i, j), ref in tensor.blocks.items():
-                        if (i >= 6 if operand == 1 else i == 2):
-                            column = j * tensor.block_shape[1]
+                        row, column = i * tensor.block_shape[0], j * tensor.block_shape[1]
+                        if (row >= 6 if operand == 1 else row == 2):
                             with program.write(ref) as destination:
-                                destination[...] = data[i:i+1, column:column+ref.shape[1]]
+                                destination[...] = data[row:row+ref.shape[0], column:column+ref.shape[1]]
                 independent_target = 2 if not generation else 1
                 independent = tuple(result for i, j, result in observations[independent_target]
                                     if (i >= 6 if independent_target == 2 else i == 2))
@@ -1132,10 +1132,10 @@ def main():
                     elapsed_ms=(time.monotonic_ns()-started)/1e6)), flush=True)
                 tensor, data = storage[pending_operand], values[pending_operand]
                 for (i, j), ref in tensor.blocks.items():
-                    if (i >= 6 if pending_operand == 1 else i == 2):
-                        column = j * tensor.block_shape[1]
+                    row, column = i * tensor.block_shape[0], j * tensor.block_shape[1]
+                    if (row >= 6 if pending_operand == 1 else row == 2):
                         with program.write(ref) as destination:
-                            destination[...] = data[i:i+1, column:column+ref.shape[1]]
+                            destination[...] = data[row:row+ref.shape[0], column:column+ref.shape[1]]
                 wait_for(tuple(result for results in observations for i, j, result in results))
                 for target, results in enumerate(observations):
                     for i, j, result in results:
