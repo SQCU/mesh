@@ -51,23 +51,19 @@ def main():
         from mesh import check
         from mesh._native import View
         library = C.CDLL(args.numerics)
-        for kernel, symbol in ((kernels.add, 'gemma_mesh_add'), (kernels.dot, 'gemma_mesh_mps_dot')):
-            native = getattr(library, symbol)
-            native.argtypes = [C.c_void_p, C.POINTER(View), C.c_int32] + ([C.c_int32] if kernel is kernels.dot else [])
-            native.restype = C.c_int32
+        add_native = library.gemma_mesh_add
+        add_native.argtypes = [C.c_void_p, C.POINTER(View), C.c_int32]
+        add_native.restype = C.c_int32
 
-            # design/algorithm-sources.md#programkernel_call
-            def bind(program, inputs, outputs, native=native, kernel=kernel):
-                refs = (*inputs, *outputs)
-                if len(inputs) != 2 or len(outputs) != 1 or inputs[0].dtype != inputs[1].dtype:
-                    raise TypeError('The supplied numerical function requires two inputs of one dtype and one output')
-                if kernel is kernels.add and outputs[0].dtype != inputs[0].dtype:
-                    raise TypeError('The supplied addition requires matching input and output dtypes')
-                scalar = (np.dtype('float16'), np.dtype('float32')).index(inputs[0].dtype)
-                output_scalar = [(np.dtype('float16'), np.dtype('float32')).index(outputs[0].dtype)] if kernel is kernels.dot else []
-                check(native(program.handle, (View * 3)(*(ref.view for ref in refs)), scalar, *output_scalar))
+        # design/algorithm-sources.md#kernelsadd
+        def bind_add(program, inputs, outputs):
+            refs = (*inputs, *outputs)
+            if len(inputs) != 2 or len(outputs) != 1 or any(ref.dtype != inputs[0].dtype for ref in refs):
+                raise TypeError('The supplied addition requires two inputs and one output of matching dtype')
+            scalar = (np.dtype('float16'), np.dtype('float32')).index(inputs[0].dtype)
+            check(add_native(program.handle, (View * 3)(*(ref.view for ref in refs)), scalar))
 
-            functions[kernel] = bind
+        functions[kernels.add] = bind_add
         if args.gate_weight:
             gelu_native = library.gemma_mesh_gelu_mul
             gelu_native.argtypes = [C.c_void_p, C.POINTER(View)]
