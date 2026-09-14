@@ -8,8 +8,6 @@ extern "C" {
 /* design/streaming-algebra.md */
 enum mesh_scalar { MESH_F16, MESH_F32, MESH_I32, MESH_U32, MESH_I64, MESH_U64, MESH_U8, MESH_BOOL };
 enum mesh_algebra_op { MESH_AFFINE, MESH_ADD, MESH_MULTIPLY, MESH_TANH, MESH_EXP, MESH_SUM, MESH_CONTRACT, MESH_RSQRT, MESH_SWISH };
-typedef void (*mesh_completion)(void *context,int64_t error);
-typedef void (*mesh_submission)(void *binding,mesh_completion complete,void *context);
 struct mesh_metal_dispatch { const char *name; size_t grid[3],group[3],argument_buffer,argument_offset; };
 struct mesh_metal_constant { const void *bytes; size_t length; };
 struct mesh_algebra;
@@ -50,7 +48,6 @@ int mesh_tensor_constant(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_writable(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_issue(struct mesh_tensor *,uint32_t extent);
 void mesh_tensor_complete(struct mesh_tensor *,uint32_t extent);
-int mesh_algebra_function(struct mesh_algebra *,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,mesh_submission,void *binding);
 int mesh_algebra_metal(struct mesh_algebra *,const char *,const struct mesh_metal_dispatch *,size_t,const struct mesh_metal_constant *,size_t,const struct mesh_view *,size_t,const struct mesh_view *,size_t);
 int mesh_algebra_source(struct mesh_algebra *,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output);
 int mesh_algebra_indexed(struct mesh_algebra *,size_t function,struct mesh_view selector,const size_t *candidate_inputs,size_t candidate_count);

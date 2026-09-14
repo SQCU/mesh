@@ -94,10 +94,6 @@ class Report(C.Structure):
                  ('cpu_submitted', C.c_uint64)]
 
 
-Completion = C.CFUNCTYPE(None, P, C.c_int64)
-Submission = C.CFUNCTYPE(None, P, Completion, P)
-
-
 # design/algorithm-sources.md#indexed-library-functions
 class Native:
     # design/algorithm-sources.md#indexed-library-functions
@@ -128,8 +124,6 @@ class Native:
             'mesh_tensor_writable': (C.c_int, [P, U]),
             'mesh_tensor_issue': (C.c_int, [P, U]),
             'mesh_tensor_complete': (None, [P, U]),
-            'mesh_algebra_function': (C.c_int, [P, C.POINTER(View), Z,
-                C.POINTER(View), Z, Submission, P]),
             'mesh_algebra_metal': (C.c_int, [P, C.c_char_p, C.POINTER(MetalDispatch), Z,
                 C.POINTER(MetalConstant), Z, C.POINTER(View), Z, C.POINTER(View), Z]),
             'mesh_algebra_source': (C.c_int, [P, C.c_char_p, C.c_char_p, C.POINTER(View), Z, View]),

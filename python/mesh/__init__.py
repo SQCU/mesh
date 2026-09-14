@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ._native import Native, Shape, View, Endpoint, Submission, MetalDispatch, MetalConstant
+from ._native import Native, Shape, View, Endpoint, MetalDispatch, MetalConstant
 
 __all__ = ['Program', 'Tensor', 'Ref', 'BlockSpec', 'ShapeDtypeStruct', 'Result']
 _PROGRAMS = set()
@@ -215,7 +215,6 @@ class Program:
     def __init__(self, backend='cpu', region=None, coreml=None):
         self.native = Native()
         self.context = self.native.context()
-        self.callbacks, self.errors = [], []
         self._constant_extents = set()
         self._replicated_extents = {}
         self._plan_bindings, self._plan_stack = [], []
@@ -260,19 +259,10 @@ class Program:
         return configure
 
     # design/algorithm-sources.md#indexed-library-functions
-    def _bind_native(self, submission, inputs, outputs, binding=None):
-        inputs, outputs = tuple(inputs), tuple(outputs)
-        if any(r.program is not self for r in inputs + outputs):
-            raise ValueError('References belong to another program')
-        submit = submission if isinstance(submission, Submission) else Submission(submission)
-        check(self.native.algebra_function(self.handle,
-            (View * len(inputs))(*(r.view for r in inputs)), len(inputs),
-            (View * len(outputs))(*(r.view for r in outputs)), len(outputs), submit, binding))
-        self.callbacks.append((submit, inputs, outputs, binding))
-
-    # design/algorithm-sources.md#indexed-library-functions
     def _call(self, kernel, *, grid, inputs=(), outputs=()):
         from .kernels import _Operation, Metal, _ExpressionKernel
+        if not isinstance(kernel, (_Operation, Metal, _ExpressionKernel)):
+            raise TypeError('Kernel calls require an expression, native operation or compiled Metal kernel')
         grid = tuple(grid)
         if 0 in grid or outputs and all(not spec._tensor.blocks for spec in outputs):
             return
@@ -301,20 +291,6 @@ class Program:
                     reads[1].view if len(reads) == 2 else View(), writes[0].view,
                     kernel.alpha, kernel.beta))
                 continue
-            arrays = tuple(r.array.view() for r in reads) + tuple(r.array for r in writes)
-            for array in arrays[:len(reads)]:
-                array.flags.writeable = False
-
-            # design/algorithm-sources.md#indexed-library-functions
-            def submit(binding, complete, context, arrays=arrays):
-                try:
-                    kernel(*arrays)
-                except BaseException as error:
-                    self.errors.append(error)
-                    complete(context, errno.EIO)
-                else:
-                    complete(context, 0)
-            self._bind_native(submit, reads, writes)
 
     # design/algorithm-sources.md#indexed-library-functions
     def copy(self, source, destination, *, queue=0):
@@ -559,7 +535,6 @@ class Program:
             self.native.algebra_destroy(self.handle)
             _PROGRAMS.discard(self.handle)
             self.handle = None
-            self.callbacks.clear()
             self._constant_extents.clear()
             self._replicated_extents.clear()
             self._plan_bindings.clear()

@@ -224,8 +224,6 @@ static void complete_part(MeshFunction *f,int64_t error,uint64_t nanoseconds) {
   else mesh_complete(a->context,&f->function,&f->occurrence,1);
   atomic_fetch_add(&a->gpuNanoseconds,nanoseconds);atomic_fetch_add(&a->completed,1);dispatch_group_leave(a.executions);
 }
-/* design/algorithm-sources.md#indexed-library-functions */
-static void complete_function(void *context,int64_t error) {complete_part((__bridge MeshFunction *)context,error,0);}
 /* design/algorithm-sources.md#streaming-algebra */
 static MeshAlgebra *owner(struct mesh_algebra *a) { return (__bridge MeshAlgebra *)a; }
 /* design/algorithm-sources.md#cost-environment */
@@ -487,7 +485,7 @@ static int overlaps(struct mesh_row_map a,struct mesh_row_map b) {
   return a.first<b.first+b.count && b.first<a.first+a.count;
 }
 /* design/algorithm-sources.md#indexed-library-functions */
-int mesh_algebra_function(struct mesh_algebra *handle,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,mesh_submission submit,void *binding) {
+static int bind_function(struct mesh_algebra *handle,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,void (*submit)(MeshFunction *)) {
   MeshAlgebra *a=owner(handle);
   if(a.realized)return EBUSY;
   if(!submit || !output_count || output_count>UINT32_MAX || input_count>UINT32_MAX || !outputs || (input_count && !inputs))return EINVAL;
@@ -503,7 +501,7 @@ int mesh_algebra_function(struct mesh_algebra *handle,const struct mesh_view *in
     [f.results appendBytes:&m length:sizeof m];
   }
   f->function=(struct mesh_row_function){.output=f.results.mutableBytes,.outputs=(uint32_t)output_count,.rows=1};bind_dependencies(f);
-  f.execute=^(MeshFunction *function){submit(binding,complete_function,(__bridge void *)function);};
+  f.execute=^(MeshFunction *function){submit(function);};
   [a.functions addObject:f];return 0;
 }
 
@@ -781,13 +779,12 @@ static void specialize_function(MeshFunction *f,MeshCPUCode *cpu,MeshMetalCode *
   f.specialization=[[NSString alloc]initWithData:json encoding:NSUTF8StringEncoding];
 }
 /* design/algorithm-sources.md#application-metal-kernels */
-static void submit_metal(void *binding,mesh_completion complete,void *context) {
-  MeshFunction *f=(__bridge MeshFunction *)context;
+static void submit_metal(MeshFunction *f) {
   id<MTLCommandBuffer> command=[f.owner.queue commandBuffer];f.encode(command);
   [command addCompletedHandler:^(id<MTLCommandBuffer> done){
     atomic_store(&f->gpuStartNs,(uint64_t)(done.GPUStartTime*1e9));atomic_store(&f->gpuEndNs,(uint64_t)(done.GPUEndTime*1e9));
     atomic_fetch_add(&f.owner->gpuNanoseconds,(uint64_t)((done.GPUEndTime-done.GPUStartTime)*1e9));
-    complete(context,done.error.code);
+    complete_part(f,done.error.code,0);
   }];
   [command commit];
 }
@@ -830,7 +827,7 @@ static int bind_metal(struct mesh_algebra *handle,const char *text,const struct 
     if(!buffer)return ENOMEM;[buffers addObject:buffer];
   }
   NSData *geometry=[NSData dataWithBytes:dispatches length:dispatch_count*sizeof *dispatches];
-  int status=mesh_algebra_function(handle,inputs,input_count,outputs,output_count,submit_metal,NULL);
+  int status=bind_function(handle,inputs,input_count,outputs,output_count,submit_metal);
   if(status)return status;
   MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_METAL;f->backend=MESH_BACKEND_METAL_COMPILED;
   specialize_function(f,paired,code,options,dispatches,dispatch_count,constants,constant_count,inputs,input_count,outputs,output_count);
@@ -855,8 +852,8 @@ int mesh_algebra_metal(struct mesh_algebra *handle,const char *text,const struct
   return bind_metal(handle,text,dispatches,dispatch_count,constants,constant_count,inputs,input_count,outputs,output_count,nil);
 }
 /* design/algorithm-sources.md#region-expression-fusion */
-static void submit_cpu(void *binding,mesh_completion complete,void *context) {
-  MeshFunction *f=(__bridge MeshFunction *)context;f.cpuCode.kernel(f.cpuArguments.bytes);complete(context,0);
+static void submit_cpu(MeshFunction *f) {
+  f.cpuCode.kernel(f.cpuArguments.bytes);complete_part(f,0,0);
 }
 /* design/algorithm-sources.md#region-expression-fusion */
 int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output) {
@@ -891,7 +888,7 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
     struct mesh_extent *extent=&v.tensor->extents[v.extent];
     pointers[i]=(uintptr_t)extent->address+v.offset*scalar_bytes(extent->shape.scalar);
   }
-  int status=mesh_algebra_function(handle,inputs,input_count,&output,1,submit_cpu,NULL);
+  int status=bind_function(handle,inputs,input_count,&output,1,submit_cpu);
   if(status)return status;
   MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_CPU;f->backend=MESH_BACKEND_CPU_COMPILED;
   specialize_function(f,library,metal,source_options(),&dispatch,1,NULL,0,inputs,input_count,&output,1);f.cpuArguments=addresses;

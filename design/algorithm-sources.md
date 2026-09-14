@@ -403,9 +403,9 @@ supplies the partitioned contraction equation; adjacent-pair addition implements
 its explicit reduction. These are mechanism citations, not claims of API identity
 or measured performance equivalence.
 
-`mesh_algebra_function`, `bind_dependencies`, `output_used`,
-`complete_function`, `complete_part`, and `mesh_algebra_export` bind application
-functions to canonical input/output rows and complete them through the existing
+`bind_function`, `bind_dependencies`, `output_used`,
+`complete_part`, and `mesh_algebra_export` bind library
+backend functions to canonical input/output rows and complete them through the existing
 publication owner. A submission's completion context is its configured function,
 not a newly allocated job or a separately scheduled readiness object. Physical
 completion publishes that function's output regions and retires its input reads.
@@ -415,9 +415,10 @@ methods configure this same mechanism. Tensor arithmetic enumerates independent
 indexed block functions during setup. Contraction enumerates `(i, j, q)`
 contributions before reducing `q`; reductions similarly expose their contributions.
 Transpose and slicing construct strided views of the same mapped pages. Grid
-calls bind user numerical functions with exactly their declared input regions.
-Native grid preparation realizes submission bindings before invocation, while
-synchronous NumPy calls bind their borrowed arrays before invocation. The ctypes
+calls bind composed expressions or realized kernels with their declared input
+regions. Native grid preparation realizes submission bindings before invocation.
+The arbitrary Python callback path and its public native registration ABI are
+removed; native CPU and Metal binding still share one private function binder. The ctypes
 ABI declarations, error translation, and setuptools build methods are the host
 language and packaging adapters for that mechanism, with no independent scheduler.
 
@@ -496,8 +497,8 @@ output allocation happen before execution. Kernel return uses the existing
 completion owner to publish the region. The overlap example's ordinary kernel
 and index maps now use this interface instead of manual ctypes submissions.
 
-This is a two-dimensional host NumPy kernel interface with mesh publication,
-not a JAX tracing backend or full Pallas compatibility. Boundary regions are
+This is a two-dimensional expression and realized-kernel interface with mesh
+publication, not a JAX tracing backend or full Pallas compatibility. Boundary regions are
 clipped instead of padded with masked lanes. A region must fit one configured
 backing block, and writes still own complete publication quanta. No hidden
 operand gather/copy is introduced when a requested region crosses allocations.
@@ -623,7 +624,7 @@ Dennis's dataflow firing rule and the JAX authors' Pallas region pipelines
 (cited above) motivate fixed reader adjacency established during realization.
 `mesh_execution_add` installs those relationships; `mesh_notify` marks changed
 page indices. `mesh_events` visits affected functions and `mesh_fire` submits
-eligible region computations. `submit_ready` executes CPU and Python callbacks
+eligible region computations. `submit_ready` executes realized backend functions
 on worker contexts, so a numerical callback does not occupy the presence
 handler. CPU float32 contractions use Dongarra et al.'s BLAS SGEMM on existing
 canonical buffer addresses; matrix bindings are constructed during setup.

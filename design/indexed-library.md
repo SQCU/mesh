@@ -1,7 +1,7 @@
 # Streaming kernel calls
 
 Install with `python -m pip install .`. The public numerical interface is
-`Program.kernel_call`; backend kernels and ordinary NumPy kernels use the same
+`Program.kernel_call`; composed expressions and realized backend kernels use the same
 configuration. `BlockSpec` describes block shape and an index map independently
 of the operand. `ShapeDtypeStruct` declares output shape and dtype.
 
@@ -35,13 +35,13 @@ completion callback, or tensor-wide join.
 `kernels.matmul`, `add`, `multiply`, `swish`, `tanh`, `exp`, `row_sum`, `rsqrt`,
 and `affine(alpha, beta)` preserve the configured native backend functions.
 CPU, Metal/MPS, and configured Core ML contractions share publication ownership.
-For application arithmetic, pass an ordinary function taking borrowed input
-arrays followed by writable output arrays, e.g. `np.matmul(x, w, out=y)`.
-Input arrays are read-only; returning means that region's physical writes have
-finished. Asynchronous backend implementations belong to the library's backend
-binding path; that path owns automatic nonblocking partial publication, including
-in-operation send submission. This ownership does not prohibit emission from
-inside numerical computation.
+For application arithmetic, compose `kernels.arguments`, indexed operations and
+`kernels.expression`. Arbitrary Python numerical callbacks are not an execution
+form: a callback can hide blocking control flow and prevents the shared lowering
+from seeing its operations. Backend registration and completion remain private
+to the library. Removing the callback interface does not by itself supply
+in-operation publication: extending the shared compiled lowering and publication
+owner to deliver that contract remains required work.
 
 Tensor storage is always canonical shared backing. Transpose, slices, and block
 index maps describe that storage. A region must fit the configured backing block;
