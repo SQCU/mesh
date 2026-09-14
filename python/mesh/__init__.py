@@ -368,6 +368,21 @@ class Program:
         return tuple(result)
 
     @property
+    # design/algorithm-sources.md#shared-sparse-routing-lowering
+    def route_trace(self):
+        result = []
+        for index in range(self.native.algebra_trace_route_count(self.handle)):
+            event = self.native.algebra_trace_route(self.handle, index)
+            item = {name: getattr(event, name) for name, _ in event._fields_}
+            item['reader_groups'] = []
+            for row in range(event.count):
+                reader = self.native.algebra_trace_route_reader(self.handle, index, row)
+                if reader.member != 0xffffffff:
+                    item['reader_groups'].append({name: getattr(reader, name) for name, _ in reader._fields_})
+            result.append(item)
+        return tuple(result)
+
+    @property
     # design/algorithm-sources.md#publication-work-lists
     def transfer_trace(self):
         result = []

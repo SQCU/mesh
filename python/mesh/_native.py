@@ -44,6 +44,12 @@ class IndexedEvent(C.Structure):
          'selected', 'completed', 'mapped', 'flags')]
 
 
+class RouteEvent(C.Structure):
+    _fields_ = [('function', C.c_uint64)] + [(name, U) for name in
+        ('domain', 'role', 'index', 'first', 'count', 'plane', 'retired',
+         'completed', 'prepared', 'consumer', 'flags')]
+
+
 class Event(C.Structure):
     _fields_ = [(name, C.c_uint64) for name in
         ('ready_ns', 'start_ns', 'complete_ns', 'gpu_start_ns', 'gpu_end_ns', 'submissions')]
@@ -107,6 +113,12 @@ class Native:
             'mesh_algebra_source': (C.c_int, [P, C.c_char_p, C.c_char_p, C.POINTER(View), Z, View]),
             'mesh_algebra_indexed': (C.c_int, [P, Z, View, C.POINTER(Z), Z]),
             'mesh_algebra_indexed_range': (C.c_int, [P, Z, View, View, C.POINTER(Z), Z]),
+            'mesh_algebra_route_create': (P, [P, View, View, View, C.POINTER(View), Z, Z]),
+            'mesh_algebra_route_table': (View, [P, P]),
+            'mesh_algebra_route_attach': (C.c_int, [P, Z, P, Z]),
+            'mesh_algebra_trace_route_count': (Z, [P]),
+            'mesh_algebra_trace_route': (RouteEvent, [P, Z]),
+            'mesh_algebra_trace_route_reader': (ReaderEvent, [P, Z, U]),
             'mesh_algebra_bind': (C.c_int, [P, C.c_int, View, View, View, C.c_float, C.c_float]),
             'mesh_algebra_copy': (C.c_int, [P, Endpoint, Endpoint, Z, C.c_uint16]),
             'mesh_algebra_export': (C.c_int, [P, P, U, C.POINTER(Z)]),

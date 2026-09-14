@@ -239,7 +239,7 @@ def main():
                                 local_monotonic_ns=time.monotonic_ns(), section_zero_absent=not results[0, 0].ready)), flush=True)
                 time.sleep(0.0001)
             if args.trace:
-                Path(args.trace).write_text(json.dumps(dict(compute=program.trace, transfers=program.transfer_trace), indent=2) + '\n')
+                Path(args.trace).write_text(json.dumps(dict(compute=program.trace, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
             return
         # design/algorithm-sources.md#streaming-overlap-measurement
         def publish(invocation, sections):
@@ -457,7 +457,7 @@ def main():
                 for result in fanout_results:
                     result.consume()
         if args.trace:
-            Path(args.trace).write_text(json.dumps(dict(compute=program.trace, transfers=program.transfer_trace), indent=2) + '\n')
+            Path(args.trace).write_text(json.dumps(dict(compute=program.trace, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
         report = program.report
         print(json.dumps(dict(event='summary', dtype=args.dtype, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
             invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,
