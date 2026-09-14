@@ -306,14 +306,37 @@ class Program:
     def copy(self, source, destination, *, queue=0):
         src, sender = source
         dst, receiver = destination
+        if src.program is not self or dst.program is not self:
+            raise ValueError('References belong to another program')
         if isinstance(src, Tensor) and isinstance(dst, Tensor):
-            if src.shape != dst.shape or src.blocks and src.block_shape != dst.block_shape:
-                raise ValueError('Transfers must share an indexed partition')
+            if src.shape != dst.shape:
+                raise ValueError('Transfer shapes must match')
+            if sender == receiver:
+                if sender != self.node:
+                    return
+                targets = (((0, 0), dst._span),) if getattr(dst, '_span', None) is not None else tuple(dst.blocks.items())
+                if any(np.shares_memory(ref.array, target.array) for ref in src.blocks.values() for _, target in targets):
+                    raise ValueError('Copy sources overlap destination storage')
+                for (i, j), target in targets:
+                    row, column = i * dst.block_shape[0], j * dst.block_shape[1]
+                    end_row, end_column = row + target.shape[0], column + target.shape[1]
+                    regions = []
+                    for si in range(row // src.block_shape[0], (end_row - 1) // src.block_shape[0] + 1):
+                        for sj in range(column // src.block_shape[1], (end_column - 1) // src.block_shape[1] + 1):
+                            r, c = si * src.block_shape[0], sj * src.block_shape[1]
+                            ref = src[si, sj]
+                            lo_r, lo_c = max(row, r), max(column, c)
+                            hi_r, hi_c = min(end_row, r + ref.shape[0]), min(end_column, c + ref.shape[1])
+                            part = ref.slice(lo_r - r, lo_c - c, hi_r - lo_r, hi_c - lo_c)
+                            regions.append(CopyRegion(part.view, lo_r - row, lo_c - column))
+                    check(self.native.algebra_materialize(self.handle,
+                        (CopyRegion * len(regions))(*regions), len(regions), target.view))
+                return
+            if src.blocks and src.block_shape != dst.block_shape:
+                raise ValueError('Remote transfers must share an indexed partition')
             for coordinate in src.blocks:
                 self.copy(src[coordinate].on(sender), dst[coordinate].on(receiver), queue=queue)
             return
-        if src.program is not self or dst.program is not self:
-            raise ValueError('References belong to another program')
         check(self.native.algebra_copy(self.handle,
             src.view, sender, dst.view, receiver, queue))
 

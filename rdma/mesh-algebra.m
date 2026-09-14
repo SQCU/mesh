@@ -1303,7 +1303,15 @@ struct mesh_copy_segment { const char *source; char *destination; size_t element
 int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_region *regions,size_t count,struct mesh_view destination) {
   MeshAlgebra *a=owner(handle);
   if(a.realized)return EBUSY;
-  if(!regions || !count || !valid_view(a,destination))return EINVAL;
+  if(!regions || !count || count>SIZE_MAX/sizeof *regions || !valid_view(a,destination))return EINVAL;
+  __attribute__((objc_precise_lifetime)) NSMutableData *transposed=nil;
+  if(destination.column_stride!=1) {
+    destination=mesh_view_transpose(destination);
+    transposed=[NSMutableData dataWithLength:count*sizeof *regions];
+    struct mesh_copy_region *mapped=transposed.mutableBytes;
+    for(size_t i=0;i<count;i++)mapped[i]=(struct mesh_copy_region){.source=mesh_view_transpose(regions[i].source),.row=regions[i].column,.column=regions[i].row};
+    regions=transposed.bytes;
+  }
   struct mesh_extent *d=&destination.tensor->extents[destination.extent];
   size_t elements=destination.rows*destination.columns,scalar=scalar_bytes(d->shape.scalar),covered=0;
   if((destination.rows!=1 && destination.row_stride!=destination.columns) || destination.column_stride!=1)return EINVAL;
@@ -1366,20 +1374,19 @@ int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_
 int mesh_algebra_copy(struct mesh_algebra *handle,struct mesh_view source,uint32_t sender,struct mesh_view destination,uint32_t receiver,uint16_t queue) {
   MeshAlgebra *a=owner(handle);
   if(a.realized)return EBUSY;
-  struct mesh_row_map src,dst;
-  int error=output_region(a,source,&src);if(error)return error;
-  error=output_region(a,destination,&dst);if(error)return error;
+  if(!valid_view(a,source) || !valid_view(a,destination))return EINVAL;
   struct mesh_extent *s=&source.tensor->extents[source.extent],*d=&destination.tensor->extents[destination.extent];
-  if(source.rows!=destination.rows || source.columns!=destination.columns || s->shape.scalar!=d->shape.scalar ||
-     (source.rows>1 && source.row_stride!=destination.row_stride) || (source.columns>1 && source.column_stride!=destination.column_stride))return EINVAL;
-  size_t elements=source.rows*source.columns,bytes=elements*scalar_bytes(s->shape.scalar);
+  if(source.rows!=destination.rows || source.columns!=destination.columns || s->shape.scalar!=d->shape.scalar)return EINVAL;
   if(sender==receiver) {
     if(sender!=a->context->M->node)return 0;
-    source.rows=destination.rows=1;source.columns=destination.columns=elements;
-    source.row_stride=destination.row_stride=elements;source.column_stride=destination.column_stride=1;
     struct mesh_copy_region region={.source=source};
     return mesh_algebra_materialize(handle,&region,1,destination);
   }
+  struct mesh_row_map src,dst;
+  int error=output_region(a,source,&src);if(error)return error;
+  error=output_region(a,destination,&dst);if(error)return error;
+  if((source.rows>1 && source.row_stride!=destination.row_stride) || (source.columns>1 && source.column_stride!=destination.column_stride))return EINVAL;
+  size_t bytes=source.rows*source.columns*scalar_bytes(s->shape.scalar);
   uint32_t block=a->context->M->block;
   if(src.count!=dst.count || src.count%block)return EINVAL;
   if(src.count/block>UINT32_MAX-a->copies)return EOVERFLOW;

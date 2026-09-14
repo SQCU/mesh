@@ -275,13 +275,31 @@ retains the appropriate source or destination range and exact payload byte count
 A final short block copies the view's remaining bytes, not the backing tensor's
 remaining bytes. No tensor completion wait or whole-extent dependency is added.
 
-Local copy uses the same materializer with dense views expressed as physical-order
-spans during setup. Matching transposed layouts keep their physical value order.
+Local copy passes the original source and destination views to the materializer,
+so source strides need not match destination strides. For a column-major dense
+destination, setup transposes the destination coordinates, each source view, and
+each region's placement coordinates together. The address equality
+`D[r,c] = D.T[c,r]` preserves the logical assignment while the existing row-major
+segment construction walks contiguous destination storage. Only placement metadata
+is transformed; there is no extra numerical buffer or runtime layout selection.
 The materializer honors destination offsets, publishes only that span, and accepts
 disjoint source/destination pages in the same extent. It rejects actual page overlap
 rather than rejecting an entire shared allocation. Its coverage validation remains
 relative to the destination view. Invocation only executes configured memcpy
 segments. Shape, layout, dtype, address, and page-range decisions precede invocation.
+
+For local Tensor-to-Tensor copy, setup intersects source blocks with each destination
+allocation instead of requiring equal block shapes. These intersections form the
+materializer's existing CopyRegion list with offsets relative to that destination.
+A contiguous destination's `_span` is visited once, even if many logical blocks
+view it, so shared destination pages are not assigned multiple producers. Empty
+tensors create no work. Setup checks aliasing between every source block and the
+complete destination set before registering any functions, preventing cyclic
+in-place block permutations. The NumPy views here address the canonical Ref
+storage; this check neither allocates nor copies numerical operands. Native
+exact-coverage and page-overlap validation also remains in force. Source dependency slices are selected per destination publication page;
+no whole-tensor completion dependency or temporary operand allocation is added.
+Remote tensor repartitioning remains separate unfinished work.
 
 The remaining direct-transfer constraint is a dense view aligned to its configured
 publication/transport blocks. Arbitrary strided or sub-block transfers are not
