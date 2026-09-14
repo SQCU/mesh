@@ -46,8 +46,6 @@ struct mesh_extent {
   size_t bytes;
   void *address;
   struct mesh_shape shape;
-  struct mesh_row_map output;
-  struct mesh_row_function producer;
 };
 struct mesh_tensor { struct mesh_ctx *context; size_t count; struct mesh_extent *extents; };
 struct geometry_view { uint64_t offset,rows,columns,row_stride,column_stride; };
@@ -343,8 +341,6 @@ struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *handle,const struct 
     if(e->first==MESH_ABSENT)return NULL;
     int error=mesh_backing_alloc(a->context,e->first,e->pages,e->quantum,contiguous);
     if(error){errno=error;return NULL;}
-    e->output=(struct mesh_row_map){.first=e->first,.count=e->pages};
-    e->producer=(struct mesh_row_function){.output=&e->output,.outputs=1,.rows=1};
     e->address=mesh_view_create(a->context,e->first,pages);
     if(!e->address)return NULL;
     MeshExtent *storage=[MeshExtent new]; storage.extent=*e;
@@ -391,19 +387,17 @@ int mesh_tensor_constant(struct mesh_tensor *t,uint32_t i) {
   if(!t || i>=t->count)return EINVAL;
   struct mesh_row_map m=mesh_tensor_rows(t,i);mesh_constant(t->context,m.first,m.count);return 0;
 }
-/* design/algorithm-sources.md#streaming-algebra */
-int mesh_tensor_writable(struct mesh_tensor *t,uint32_t i) {
-  if(!t || i>=t->count)return 0;struct mesh_extent *e=&t->extents[i];
-  return mesh_writable(t->context,e->first,e->pages);
+/* design/algorithm-sources.md#view-scoped-host-production */
+int mesh_writer_writable(struct mesh_writer *w) {
+  return mesh_writable(w->context,w->output.first,w->output.count);
 }
-/* design/algorithm-sources.md#streaming-algebra */
-int mesh_tensor_issue(struct mesh_tensor *t,uint32_t i) {
-  if(!t || i>=t->count)return 0;
-  uint32_t index=0;return mesh_issue(t->context,&t->extents[i].producer,&index,1)!=0;
+/* design/algorithm-sources.md#view-scoped-host-production */
+int mesh_writer_issue(struct mesh_writer *w) {
+  uint32_t index=0;return mesh_issue(w->context,&w->function,&index,1)!=0;
 }
-/* design/algorithm-sources.md#streaming-algebra */
-void mesh_tensor_complete(struct mesh_tensor *t,uint32_t i) {
-  uint32_t index=0;mesh_complete(t->context,&t->extents[i].producer,&index,1);
+/* design/algorithm-sources.md#view-scoped-host-production */
+void mesh_writer_complete(struct mesh_writer *w) {
+  uint32_t index=0;mesh_complete(w->context,&w->function,&index,1);
 }
 /* design/algorithm-sources.md#streaming-algebra */
 static int valid_view(MeshAlgebra *a,struct mesh_view v) {
@@ -476,6 +470,16 @@ static int output_region(MeshAlgebra *a,struct mesh_view v,struct mesh_row_map *
   size_t count=v.rows*v.columns,end=v.offset+count;
   if(v.offset%quantum || (end!=elements && end%quantum))return EINVAL;
   *m=(struct mesh_row_map){.first=e->first+(uint32_t)(v.offset/unit),.count=(uint32_t)(((count+quantum-1)/quantum)*e->quantum)};
+  return 0;
+}
+/* design/algorithm-sources.md#view-scoped-host-production */
+int mesh_algebra_writer(struct mesh_algebra *handle,struct mesh_view view,struct mesh_writer *w) {
+  if(!w)return EINVAL;
+  MeshAlgebra *a=owner(handle);
+  *w=(struct mesh_writer){0};
+  int error=output_region(a,view,&w->output);if(error)return error;
+  w->context=a->context;
+  w->function=(struct mesh_row_function){.output=&w->output,.outputs=1,.rows=1};
   return 0;
 }
 /* design/algorithm-sources.md#region-streaming-review */

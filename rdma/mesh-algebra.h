@@ -19,6 +19,8 @@ struct mesh_view {
   size_t offset,rows,columns,row_stride,column_stride;
 };
 struct mesh_copy_region { struct mesh_view source; size_t row,column; };
+/* design/algorithm-sources.md#view-scoped-host-production */
+struct mesh_writer { struct mesh_ctx *context; struct mesh_row_map output; struct mesh_row_function function; };
 struct mesh_endpoint { struct mesh_tensor *tensor; uint32_t peer,first,stride; };
 struct mesh_algebra_event { uint64_t ready_ns,start_ns,complete_ns,gpu_start_ns,gpu_end_ns,submissions; uint32_t first_output,output_maps,kind,input_maps; };
 /* design/algorithm-sources.md#function-cost-profiles */
@@ -46,9 +48,10 @@ struct mesh_view mesh_view_broadcast(struct mesh_view,size_t rows,size_t columns
 void *mesh_tensor_data(struct mesh_tensor *,uint32_t extent);
 struct mesh_row_map mesh_tensor_rows(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_constant(struct mesh_tensor *,uint32_t extent);
-int mesh_tensor_writable(struct mesh_tensor *,uint32_t extent);
-int mesh_tensor_issue(struct mesh_tensor *,uint32_t extent);
-void mesh_tensor_complete(struct mesh_tensor *,uint32_t extent);
+int mesh_algebra_writer(struct mesh_algebra *,struct mesh_view,struct mesh_writer *);
+int mesh_writer_writable(struct mesh_writer *);
+int mesh_writer_issue(struct mesh_writer *);
+void mesh_writer_complete(struct mesh_writer *);
 int mesh_algebra_metal(struct mesh_algebra *,const char *,const struct mesh_metal_dispatch *,size_t,const struct mesh_metal_constant *,size_t,const struct mesh_view *,size_t,const struct mesh_view *,size_t);
 int mesh_algebra_source(struct mesh_algebra *,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output);
 int mesh_algebra_indexed(struct mesh_algebra *,size_t function,struct mesh_view selector,const size_t *candidate_inputs,size_t candidate_count);

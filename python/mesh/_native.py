@@ -38,6 +38,16 @@ class RowMap(C.Structure):
         ('ranges', C.POINTER(RowRange)), ('members', C.POINTER(U)), ('member_offsets', C.POINTER(Z))]
 
 
+class RowFunction(C.Structure):
+    _fields_ = [('input', C.POINTER(RowMap)), ('output', C.POINTER(RowMap))] + [
+        (name, U) for name in ('inputs', 'outputs', 'rows')] + [
+        (name, P) for name in ('indexed', 'routes', 'active')]
+
+
+class Writer(C.Structure):
+    _fields_ = [('context', P), ('output', RowMap), ('function', RowFunction)]
+
+
 class ReaderEvent(C.Structure):
     _fields_ = [(name, U) for name in ('source', 'member', 'plane', 'completed', 'flags')]
 
@@ -125,9 +135,10 @@ class Native:
             'mesh_view_transpose': (View, [View]),
             'mesh_view_broadcast': (View, [View, Z, Z]),
             'mesh_tensor_constant': (C.c_int, [P, U]),
-            'mesh_tensor_writable': (C.c_int, [P, U]),
-            'mesh_tensor_issue': (C.c_int, [P, U]),
-            'mesh_tensor_complete': (None, [P, U]),
+            'mesh_algebra_writer': (C.c_int, [P, View, C.POINTER(Writer)]),
+            'mesh_writer_writable': (C.c_int, [C.POINTER(Writer)]),
+            'mesh_writer_issue': (C.c_int, [C.POINTER(Writer)]),
+            'mesh_writer_complete': (None, [C.POINTER(Writer)]),
             'mesh_algebra_metal': (C.c_int, [P, C.c_char_p, C.POINTER(MetalDispatch), Z,
                 C.POINTER(MetalConstant), Z, C.POINTER(View), Z, C.POINTER(View), Z]),
             'mesh_algebra_source': (C.c_int, [P, C.c_char_p, C.c_char_p, C.POINTER(View), Z, View]),

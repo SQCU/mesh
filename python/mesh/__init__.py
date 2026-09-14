@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ._native import Native, Shape, View, CopyRegion, Endpoint, MetalDispatch, MetalConstant
+from ._native import Native, Shape, View, CopyRegion, Writer, Endpoint, MetalDispatch, MetalConstant
 
 __all__ = ['Program', 'Tensor', 'Ref', 'BlockSpec', 'ShapeDtypeStruct', 'Result']
 _PROGRAMS = set()
@@ -25,6 +25,8 @@ class Ref:
     def __init__(self, program, view, dtype):
         self.program, self.view, self.dtype = program, view, np.dtype(dtype)
         self.shape = (view.rows, view.columns)
+        self._writer = Writer()
+        self._writer_error = program.native.algebra_writer(program.handle, view, C.byref(self._writer))
         address = program.native.tensor_data(view.tensor, view.extent)
         length = view.offset + (view.rows - 1) * view.row_stride + (view.columns - 1) * view.column_stride + 1
         buffer = (C.c_ubyte * (length * self.dtype.itemsize)).from_address(address)
@@ -68,10 +70,10 @@ class Ref:
         return Ref(self.program, view, self.dtype)
 
     @property
-    # design/algorithm-sources.md#xonotic-frame-migration
+    # design/algorithm-sources.md#view-scoped-host-production
     def writable(self):
-        self.whole()
-        return bool(self.program.native.tensor_writable(self.view.tensor, self.view.extent))
+        check(self._writer_error)
+        return bool(self.program.native.writer_writable(C.byref(self._writer)))
 
     @property
     # design/algorithm-sources.md#view-scoped-consumption
@@ -363,13 +365,15 @@ class Program:
         return Result(ref)
 
     @contextmanager
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#view-scoped-host-production
     def write(self, ref):
-        ref.whole()
-        if not self.native.tensor_issue(ref.view.tensor, ref.view.extent):
+        if ref.program is not self:
+            raise ValueError("Reference belongs to another program")
+        check(ref._writer_error)
+        if not self.native.writer_issue(C.byref(ref._writer)):
             raise BlockingIOError(errno.EAGAIN, 'Producer region still has readers')
         yield ref.array
-        self.native.tensor_complete(ref.view.tensor, ref.view.extent)
+        self.native.writer_complete(C.byref(ref._writer))
 
     # design/algorithm-sources.md#indexed-library-functions
     def constant(self, ref, value):

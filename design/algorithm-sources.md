@@ -3751,3 +3751,49 @@ partial = dense.region(0, 0, 64, 256)
 
 Validation is source review, native compilation and Python syntax compilation.
 No numerical or timing claims are made by this change.
+
+## View-scoped host production
+
+Papadopoulos and Culler's *Monsoon: an Explicit Token-Store Architecture* (ISCA
+1990), cited under indexed operand storage, supplies presence and reader ownership
+at the named storage locations. The JAX authors' Pallas references, cited under
+in-operation publication, supply the region-based numerical interface. Mesh's
+operator contract requires publication of usable sections without tying them to
+unrelated sections of an operand.
+
+`mesh_algebra_writer` realizes a `mesh_writer` for the exact output region of a
+Ref. It reuses `output_region`, the same canonical geometry-to-page mapping used
+by numerical outputs. The descriptor owns its row map and a function referring
+to that map. Python `Ref` initializes it directly in retained ctypes storage;
+the descriptor is never copied, so the function's output pointer stays valid.
+Read-only, broadcast and otherwise non-publishable views retain the geometry
+error for a later attempted host write instead of failing view construction.
+
+`mesh_writer_writable`, `mesh_writer_issue` and `mesh_writer_complete` use that
+retained descriptor. `Program.write(ref)` no longer expands a slice to its whole
+extent. No output-map construction or tensor-layout inference occurs in the
+write call. Finishing one view publishes only its page range; the other views of
+the same literal contiguous allocation remain independent. The old extent-only
+writer entry points and duplicated extent producer descriptors are removed.
+
+```python
+storage = program.tensor((256, 256), contiguous=True)
+first = storage.region(0, 0, 64, 256)
+second = storage.region(64, 0, 64, 256)
+# Configure consumers and exports, then realize the program.
+with program.write(first) as values:
+    values[...] = first_chunk
+with program.write(second) as values:
+    values[...] = second_chunk
+```
+
+These example float32 regions each occupy 64 KiB, the configured transfer quantum
+on the current substrate. Publication geometry remains the existing dense,
+quantum-aligned range or final payload tail. This change does not claim independent
+ownership of two overlapping subpage views. Retrying an occupied output still
+uses the existing nonblocking claim result; there is no host wait loop.
+`constant` and remote-copy APIs have not been migrated to view-scoped publication
+by this change. Compiled expression input dependencies also still require further
+work: `bind_function` currently binds every input view supplied by the compiler.
+Source review and native/Python compilation verify this change; no numerical
+execution or performance measurement was performed.
