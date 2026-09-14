@@ -304,6 +304,13 @@ static int valid_view(MeshAlgebra *a,struct mesh_view v) {
   return !v.column_stride || v.columns-1<=(elements-1-last)/v.column_stride;
 }
 
+/* design/algorithm-sources.md#programkernel_call */
+id<MTLBuffer> mesh_algebra_buffer(struct mesh_algebra *handle,struct mesh_view view) {
+  MeshAlgebra *a=owner(handle);
+  if(!valid_view(a,view)){errno=EINVAL;return nil;}
+  return a.lookup[[NSValue valueWithPointer:&view.tensor->extents[view.extent]]].buffer;
+}
+
 /* design/algorithm-sources.md#streaming-algebra */
 static MPSMatrix *matrix(MeshExtent *e,struct mesh_view v,BOOL transpose) {
   size_t bytes=scalar_bytes(e.extent.shape.scalar);

@@ -4,7 +4,7 @@
 #include <stdint.h>
 struct mesh_ctx;
 #ifdef __OBJC__
-@protocol MTLCommandBuffer;
+@protocol MTLCommandBuffer, MTLBuffer;
 #endif
 #ifdef __cplusplus
 extern "C" {
@@ -48,6 +48,8 @@ int mesh_writer_writable(struct mesh_writer *);
 int mesh_writer_issue(struct mesh_writer *);
 void mesh_writer_complete(struct mesh_writer *,int publish);
 #ifdef __OBJC__
+/* design/algorithm-sources.md#programkernel_call */
+id<MTLBuffer> mesh_algebra_buffer(struct mesh_algebra *,struct mesh_view);
 /* design/algorithm-sources.md#programkernel_call */
 int mesh_algebra_encode(struct mesh_algebra *,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,void (^encode)(id<MTLCommandBuffer>));
 #endif
