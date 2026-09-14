@@ -12,7 +12,6 @@ extern "C" {
 
 /* design/streaming-algebra.md */
 enum mesh_scalar { MESH_F16, MESH_F32, MESH_I32, MESH_U32, MESH_I64, MESH_U64, MESH_U8, MESH_BOOL };
-enum mesh_algebra_op { MESH_CONTRACT = 6 };
 struct mesh_algebra;
 struct mesh_tensor;
 struct mesh_shape { size_t rows,columns; enum mesh_scalar scalar; };
@@ -55,7 +54,7 @@ int mesh_algebra_encode(struct mesh_algebra *,const struct mesh_view *inputs,siz
 #endif
 int mesh_algebra_source(struct mesh_algebra *,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,const uint8_t *access_axes,size_t row_begin,size_t row_count,size_t column_begin,size_t column_count);
 int mesh_algebra_indexed(struct mesh_algebra *,size_t function,struct mesh_view selector,const size_t *candidate_inputs,size_t input_count,const struct mesh_view *candidates,size_t count);
-int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha,float beta);
+int mesh_algebra_contract(struct mesh_algebra *,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha);
 /* design/algorithm-sources.md#selected-native-contractions */
 int mesh_algebra_view_pages(struct mesh_algebra *,struct mesh_view,struct mesh_view *pages,size_t capacity,size_t *count);
 int mesh_algebra_copy(struct mesh_algebra *,struct mesh_view source,uint32_t sender,struct mesh_view destination,uint32_t receiver,uint16_t queue);

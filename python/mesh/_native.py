@@ -58,7 +58,7 @@ class Native:
             'mesh_writer_complete': (None, [P, C.c_int]),
             'mesh_algebra_source': (C.c_int, [P, C.c_char_p, C.c_char_p, C.POINTER(View), Z, View, C.POINTER(C.c_uint8), Z, Z, Z, Z]),
             'mesh_algebra_indexed': (C.c_int, [P, Z, View, C.POINTER(Z), Z, C.POINTER(View), Z]),
-            'mesh_algebra_bind': (C.c_int, [P, C.c_int, View, View, View, C.c_float, C.c_float]),
+            'mesh_algebra_contract': (C.c_int, [P, View, View, View, C.c_float]),
             'mesh_algebra_view_pages': (C.c_int, [P, View, C.POINTER(View), Z, C.POINTER(Z)]),
             'mesh_algebra_copy': (C.c_int, [P, View, U, View, U, C.c_uint16]),
             'mesh_algebra_export': (C.c_int, [P, View, C.POINTER(Z), C.POINTER(Z)]),

@@ -1083,14 +1083,13 @@ def _requires_regions(node):
 
 
 
-# design/algorithm-sources.md#shared-contraction-lowering
-def _bind_operation(program, operation, inputs, target, *, alpha=1, beta=0):
+# design/algorithm-sources.md#programkernel_call
+def _bind_contraction(program, inputs, target):
     from . import check, Partial
-    from ._native import View
     binding = program._functions.get(dot)
     if binding is None:
-        check(program.native.algebra_bind(program.handle, operation, inputs[0].view,
-            inputs[1].view if len(inputs) == 2 else View(), target.view, alpha, beta))
+        check(program.native.algebra_contract(program.handle, inputs[0].view,
+            inputs[1].view, target.view, 1))
     else:
         binding(program, inputs, (target,))
     target.partial = Partial.merge(inputs)
@@ -1252,7 +1251,7 @@ class _ExpressionRegions:
                 destination = self.temporary(shape[::-1]).T
             else:
                 destination = direct if direct is not None and len(ordered) == 2 and direct.dtype == dtype else self.temporary(shape, dtype)
-            _bind_operation(self.program, 6, (left_panel, right_panel), destination)
+            _bind_contraction(self.program, (left_panel, right_panel), destination)
             if len(contributions) > 1:
                 destination.partial = Partial(required, frozenset((contributions[len(parts)],)))
             parts.append(destination)
