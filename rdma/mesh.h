@@ -9,7 +9,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 26u
+#define MESH_VERSION 27u
 #define MESH_ABSENT UINT32_MAX
 /* ledger D6: "A maximum of 10 unreliable connection (UC) queue pairs" */
 #define MESH_QPS 8
@@ -32,11 +32,9 @@ struct hdr {
   _Atomic uint64_t client,bridge_pid;
   _Atomic uint32_t order_length[2*MESH_QPS];
   _Atomic uint32_t notice_head[MESH_NOTICE_QUEUES];
-  char event_path[104];
   struct mesh_port_info port;
 };
 void mesh_notify(struct hdr *,uint32_t first,uint32_t count);
-int mesh_signal_init(void);
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
 static inline uint32_t mesh_blocks(const struct hdr *m){ return mesh_rows(m)/m->block; }

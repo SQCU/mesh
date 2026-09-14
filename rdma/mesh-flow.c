@@ -337,7 +337,6 @@ int main(int argc,char**argv){
   if(layout){ printf("%llu\n",(unsigned long long)length); return 0; }
   atexit(down); struct sigaction sa={0}; sa.sa_handler=onsig;
   sigaction(SIGINT,&sa,NULL); sigaction(SIGTERM,&sa,NULL); sigaction(SIGHUP,&sa,NULL); signal(SIGPIPE,SIG_IGN);
-  mesh_signal_init();
   mesh_memory_warning(length,1);
   shm_unlink(name); int fd=shm_open(name,O_CREAT|O_RDWR,MESH_MODE); if(fd<0) die("shm");
   if(ftruncate(fd,(off_t)length)) die("ftruncate"); fchmod(fd,MESH_MODE);

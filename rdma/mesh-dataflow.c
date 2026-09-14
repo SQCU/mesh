@@ -1,7 +1,6 @@
 #include <signal.h>
 #include <dispatch/dispatch.h>
-#include <sys/socket.h>
-#include <sys/un.h>
+#include <pthread.h>
 #include "mesh-memory.h"
 #include "mesh-dataflow.h"
 #include <stdlib.h>
@@ -65,7 +64,6 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
     break;
   }
   *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.fd=file};
-  mesh_signal_init();
   return 0;
 }
 
@@ -595,10 +593,10 @@ struct mesh_edge { struct mesh_watch *watch; struct mesh_edge *next; uint32_t ro
 struct mesh_execution {
   struct mesh_ctx *context;
   dispatch_queue_t queue;
-  dispatch_source_t source;
+  pthread_t thread;
+  _Atomic int stop;
   struct mesh_edge **readers;
   struct mesh_watch *watches;
-  int socket;
 };
 /* design/algorithm-sources.md#canonical-reader-groups */
 static int mesh_reader_release_serial(struct mesh_ctx *c,uint32_t first,uint32_t count){
@@ -677,28 +675,12 @@ static void mesh_index_reset(struct mesh_ctx *c,uint32_t first,uint32_t count){
     if(edge->indexed && edge->candidate==MESH_ABSENT)mesh_bits_clear(c->M,MESH_PRESENT,edge->indexed->retired,2*edge->indexed->candidates+2);
 }
 
-static int mesh_signal_socket=-1;
-
-/* design/algorithm-sources.md#presence-driven-execution */
-int mesh_signal_init(void){
-  if(mesh_signal_socket>=0)return 0;
-  mesh_signal_socket=socket(AF_UNIX,SOCK_DGRAM,0);
-  if(mesh_signal_socket<0)return errno;
-  fcntl(mesh_signal_socket,F_SETFL,O_NONBLOCK);
-  fcntl(mesh_signal_socket,F_SETFD,FD_CLOEXEC);
-  return 0;
-}
-/* design/algorithm-sources.md#presence-driven-execution */
+/* design/algorithm-sources.md#programkernel_call */
 void mesh_notify(struct hdr *m,uint32_t first,uint32_t count){
-  int queued=0;
   for(uint32_t row=first;row<first+count;row++){
-    queued|=mesh_notice_push(m,MESH_NOTICE_COMPUTE,row);
+    mesh_notice_push(m,MESH_NOTICE_COMPUTE,row);
     mesh_notice_push(m,MESH_NOTICE_SEND,row);
   }
-  struct sockaddr_un address={.sun_family=AF_UNIX};
-  memcpy(address.sun_path,m->event_path,sizeof address.sun_path);
-  unsigned char wake=0;
-  if(queued && address.sun_path[0])sendto(mesh_signal_socket,&wake,1,MSG_DONTWAIT,(struct sockaddr *)&address,sizeof address);
 }
 /* design/algorithm-sources.md#presence-driven-execution */
 static void mesh_fire(struct mesh_execution *e,struct mesh_watch *watch){
@@ -706,47 +688,44 @@ static void mesh_fire(struct mesh_execution *e,struct mesh_watch *watch){
 }
 /* design/algorithm-sources.md#presence-driven-execution */
 static void mesh_events(struct mesh_execution *e){
-  unsigned char bytes[256];
   struct hdr *m=e->context->M;
-  do {
-    uint32_t row=mesh_notice_take(m,MESH_NOTICE_COMPUTE);
-    while(row!=MESH_ABSENT){
-      uint32_t next=mesh_notice_next(m,MESH_NOTICE_COMPUTE,row);
-      struct mesh_watch *pending=NULL;
-      mesh_reader_event(e->context,row);
-      for(struct mesh_edge *edge=e->readers[row];edge;edge=edge->next){
-        if(edge->indexed){mesh_index_event(e->context,edge->indexed,edge->candidate);continue;}
-        struct mesh_watch *watch=edge->watch;
-        if(!watch->pending){watch->pending=1;watch->pending_next=pending;pending=watch;}
-      }
-      while(pending){
-        struct mesh_watch *watch=pending;pending=watch->pending_next;
-        watch->pending=0;mesh_fire(e,watch);
-      }
-      row=next;
+  uint32_t row=mesh_notice_take(m,MESH_NOTICE_COMPUTE);
+  while(row!=MESH_ABSENT){
+    uint32_t next=mesh_notice_next(m,MESH_NOTICE_COMPUTE,row);
+    struct mesh_watch *pending=NULL;
+    mesh_reader_event(e->context,row);
+    for(struct mesh_edge *edge=e->readers[row];edge;edge=edge->next){
+      if(edge->indexed){mesh_index_event(e->context,edge->indexed,edge->candidate);continue;}
+      struct mesh_watch *watch=edge->watch;
+      if(!watch->pending){watch->pending=1;watch->pending_next=pending;pending=watch;}
     }
-  } while(recv(e->socket,bytes,sizeof bytes,MSG_DONTWAIT)>0);
+    while(pending){
+      struct mesh_watch *watch=pending;pending=watch->pending_next;
+      watch->pending=0;mesh_fire(e,watch);
+    }
+    row=next;
+  }
 }
-/* design/algorithm-sources.md#presence-driven-execution */
+/* design/algorithm-sources.md#programkernel_call */
+static void *mesh_execution_progress(void *argument){
+  struct mesh_execution *e=argument;
+  pthread_setname_np("mesh.presence");
+  while(!atomic_load_explicit(&e->stop,memory_order_acquire))
+    if(atomic_load_explicit(&e->context->M->notice_head[MESH_NOTICE_COMPUTE],memory_order_acquire)!=MESH_ABSENT)
+      dispatch_sync(e->queue,^{mesh_events(e);});
+  return NULL;
+}
+/* design/algorithm-sources.md#programkernel_call */
 static int mesh_execution_create(struct mesh_ctx *c){
   struct mesh_execution *e=calloc(1,sizeof *e);if(!e)return ENOMEM;
-  e->context=c;e->socket=socket(AF_UNIX,SOCK_DGRAM,0);
-  e->readers=calloc(mesh_rows(c->M),sizeof *e->readers);
-  if(e->socket<0 || !e->readers){int error=errno?errno:ENOMEM;if(e->socket>=0)close(e->socket);free(e->readers);free(e);return error;}
-  fcntl(e->socket,F_SETFL,O_NONBLOCK);fcntl(e->socket,F_SETFD,FD_CLOEXEC);
-  struct sockaddr_un address={.sun_family=AF_UNIX};
-  snprintf(address.sun_path,sizeof address.sun_path,"/tmp/mesh-events.%d",getpid());
-  unlink(address.sun_path);
-  if(bind(e->socket,(struct sockaddr *)&address,sizeof address)){int error=errno;close(e->socket);free(e->readers);free(e);return error;}
-  memcpy(c->M->event_path,address.sun_path,sizeof address.sun_path);
+  e->context=c;e->readers=calloc(mesh_rows(c->M),sizeof *e->readers);
+  if(!e->readers){free(e);return ENOMEM;}
   e->queue=dispatch_queue_create("mesh.presence",DISPATCH_QUEUE_SERIAL);
   dispatch_queue_set_specific(e->queue,e,e,NULL);
-  e->source=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,(uintptr_t)e->socket,0,e->queue);
-  dispatch_source_set_event_handler(e->source,^{mesh_events(e);});
-  c->execution=e;dispatch_resume(e->source);
-  unsigned char wake=0;
-  sendto(mesh_signal_socket,&wake,1,MSG_DONTWAIT,(struct sockaddr *)&address,sizeof address);
-  return 0;
+  c->execution=e;
+  int error=pthread_create(&e->thread,NULL,mesh_execution_progress,e);
+  if(error){c->execution=NULL;dispatch_release(e->queue);free(e->readers);free(e);}
+  return error;
 }
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
 int mesh_execution_indexed(struct mesh_ctx *c,struct mesh_indexed_read *d,void *owner){
@@ -822,15 +801,11 @@ void mesh_execution_remove(struct mesh_ctx *c,void *owner){
 /* design/algorithm-sources.md#presence-driven-execution */
 static void mesh_execution_destroy(struct mesh_ctx *c){
   struct mesh_execution *e=c->execution;if(!e)return;
-  dispatch_semaphore_t stopped=dispatch_semaphore_create(0);
-  dispatch_source_set_cancel_handler(e->source,^{dispatch_semaphore_signal(stopped);});
-  dispatch_source_cancel(e->source);
-  dispatch_semaphore_wait(stopped,DISPATCH_TIME_FOREVER);
-  dispatch_release(stopped);
-  close(e->socket);unlink(c->M->event_path);c->M->event_path[0]=0;
+  atomic_store_explicit(&e->stop,1,memory_order_release);
+  pthread_join(e->thread,NULL);
   for(uint32_t row=0;row<mesh_rows(c->M);row++){
     struct mesh_edge *edge=e->readers[row];while(edge){struct mesh_edge *next=edge->next;free(edge);edge=next;}
   }
   struct mesh_watch *watch=e->watches;while(watch){struct mesh_watch *next=watch->next;free(watch);watch=next;}
-  dispatch_release(e->source);dispatch_release(e->queue);free(e->readers);free(e);c->execution=NULL;
+  dispatch_release(e->queue);free(e->readers);free(e);c->execution=NULL;
 }
