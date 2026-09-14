@@ -1022,3 +1022,12 @@ QP and direction directly; retained work-request identity is checked against
 the queue's posted entry, rather than searching configured QPs.
 
 [Source proof, compilation and remaining evidence](actual-frame-capacity-2026-09-13.md).
+
+An expression kernel can return multiple values. Binding slices each output's
+expression to its actual input references and remaps retained operand indices
+before native compilation. Each output therefore has its own dependency list
+and publication. This implements ordinary output dependency analysis as described
+by the Pallas reference/body model; it does not force unused operands into a
+function's readiness mask. The existing example binds a second output requiring
+a deliberately absent input, observes the independent indexed output first, then
+supplies the second input. Both outputs use the same public kernel_call.

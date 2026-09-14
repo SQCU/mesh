@@ -152,29 +152,41 @@ def arguments(count):
 
 
 # design/algorithm-sources.md#region-expression-fusion
-def expression(value):
-    return _ExpressionKernel(_literal(value))
+def expression(value, *outputs):
+    return _ExpressionKernel(tuple(map(_literal, (value, *outputs))))
 
 
 @dataclass(frozen=True)
 class _ExpressionKernel:
-    value: _Expression
+    values: tuple
 
     # design/algorithm-sources.md#region-expression-fusion
     def bind(self, program, inputs, outputs):
         from . import check
         from ._native import View
-        if len(outputs) != 1:
-            raise ValueError('An expression has one output region')
+        if len(outputs) != len(self.values):
+            raise ValueError('Each expression requires an output region')
         if any(ref.dtype.name not in ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool') for ref in (*inputs, *outputs)):
             raise ValueError('Expression regions require supported real, integer or boolean scalars')
-        check(program.native.algebra_source(program.handle,
-            self.source(inputs, outputs[0], False).encode(),
-            self.source(inputs, outputs[0], True).encode(),
-            (View * len(inputs))(*(ref.view for ref in inputs)), len(inputs), outputs[0].view))
+        for value, output in zip(self.values, outputs):
+            used = {}
+
+            # design/algorithm-sources.md#indexed-expression-lowering
+            def remap(node):
+                index = node.value
+                if node.operation in ('input', 'load'):
+                    index = used.setdefault(index, len(used))
+                return _Expression(node.operation, tuple(remap(child) for child in node.operands), index)
+
+            expression = remap(value)
+            reads = tuple(inputs[index] for index in used)
+            check(program.native.algebra_source(program.handle,
+                self.source(reads, output, False, expression).encode(),
+                self.source(reads, output, True, expression).encode(),
+                (View * len(reads))(*(ref.view for ref in reads)), len(reads), output.view))
 
     # design/algorithm-sources.md#region-expression-fusion
-    def source(self, inputs, output, metal):
+    def source(self, inputs, output, metal, expression):
         widths, reductions = {}, []
 
         # design/algorithm-sources.md#region-expression-fusion
@@ -201,7 +213,7 @@ class _ExpressionKernel:
             widths[node] = width
             return width
 
-        width = visit(self.value)
+        width = visit(expression)
         if width not in (1, output.shape[1]):
             raise ValueError('Expression columns do not match the output')
         names = {node: f's{index}' for index, node in enumerate(reductions)}
@@ -258,6 +270,6 @@ class _ExpressionKernel:
             lines.append(f'for({"uint" if metal else "uint64_t"} k={"lane" if metal else "0"};k<{widths[child]};k+={32 if metal else 1}) {name}+={emit(child, "k")};')
             if metal:
                 lines.append(f'{name}=simd_sum({name});')
-        lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(inputs)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(self.value, "c")};')
+        lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(inputs)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
         lines.append('}' if metal else '}}')
         return '\n'.join(lines)
