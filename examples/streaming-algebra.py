@@ -171,7 +171,7 @@ def main():
             numerator, divisor = kernels.arguments(2)
             shape = (1, len(numerators))
             quotient = program.kernel_call(kernels.expression(numerator // divisor, numerator % divisor),
-                grid=(1,), in_specs=(BlockSpec(None),) * 2,
+                grid=(1,), in_specs=(BlockSpec(shape, lambda i: (0, 0)),) * 2,
                 out_specs=(BlockSpec(shape, lambda i: (0, 0)),) * 2,
                 out_shape=(ShapeDtypeStruct(shape, scalar),) * 2, peer=0)(
                     weight(np.array([numerators], dtype=scalar)), weight(np.array([divisors], dtype=scalar)))
