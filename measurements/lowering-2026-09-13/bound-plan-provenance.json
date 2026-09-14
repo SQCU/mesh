@@ -1,19 +1,26 @@
 {
   "date": "2026-09-14",
-  "source_revision": "09ecd61",
-  "installed_source_revision_both_nodes": "09ecd61",
+  "source_revision": "19dd4a8",
+  "installed_source_revision_both_nodes": "19dd4a8",
   "native_revision": "00d8330",
-  "kernel_revision": "4439422",
-  "example_revision": "09ecd61",
-  "baseline": "compiled-identity-provenance.json",
+  "library_revision": "59b4b58",
+  "example_revision": "19dd4a8",
+  "baseline": "retained-plan-provenance.json",
   "runs": [
     {
-      "prefix": "retained-plan-metal",
+      "prefix": "bound-plan-metal",
       "exit_code": 0,
+      "xonotic": true,
       "configured_functions": 8424,
-      "submissions": 16716,
       "successful": 16716,
       "failed": 0,
+      "plans": {
+        "reduction": 167,
+        "selector": 36,
+        "indexed_contraction": 57
+      },
+      "selected_parents": 180,
+      "nested_edges": 12,
       "environment": {
         "compiler": null,
         "complete_cost_key": false,
@@ -100,7 +107,7 @@
           "dispatches": 6498,
           "constants": 0,
           "observed_output": {
-            "tensor": 40322820896,
+            "tensor": 38835541280,
             "extent": 0,
             "offset": 0,
             "rows": 1,
@@ -111,17 +118,22 @@
           }
         },
         {
+          "event": "bound_plans",
+          "plans": 260,
+          "functions": 1104
+        },
+        {
           "event": "summary",
           "dtype": "float32",
           "coreml": false,
           "invocations": 3,
-          "batch_ms": 16.215041,
-          "invocations_per_second": 185.01340823005012,
-          "first_section_ms": 13.897958,
+          "batch_ms": 15.49975,
+          "invocations_per_second": 193.55150889530475,
+          "first_section_ms": 13.146334,
           "completion_ms": {
             "count": 3,
-            "mean": 14.946124666666668,
-            "sample_variance": 1.2050796302083344
+            "mean": 14.041209,
+            "sample_variance": 1.597686999999999
           },
           "withheld_invocation": 1,
           "withheld_section": 0,
@@ -133,23 +145,30 @@
             "native_backings": 0,
             "ne_planned_operations": 0,
             "code": 0,
-            "gpu_seconds": 0.053561623,
+            "gpu_seconds": 0.053955169,
             "cpu_submitted": 0
           }
         }
       ],
       "artifacts": [
-        "retained-plan-metal.jsonl.gz",
-        "retained-plan-metal-trace.json.gz"
+        "bound-plan-metal.jsonl.gz",
+        "bound-plan-metal-trace.json.gz"
       ]
     },
     {
-      "prefix": "retained-plan-paired",
+      "prefix": "bound-plan-paired",
       "exit_code": 0,
+      "xonotic": true,
       "configured_functions": 8356,
-      "submissions": 16023,
       "successful": 16023,
       "failed": 0,
+      "plans": {
+        "reduction": 167,
+        "selector": 36,
+        "indexed_contraction": 57
+      },
+      "selected_parents": 180,
+      "nested_edges": 12,
       "environment": {
         "compiler": null,
         "complete_cost_key": false,
@@ -236,7 +255,7 @@
           "dispatches": 6429,
           "constants": 0,
           "observed_output": {
-            "tensor": 30322303136,
+            "tensor": 30658232416,
             "extent": 0,
             "offset": 0,
             "rows": 1,
@@ -247,17 +266,22 @@
           }
         },
         {
+          "event": "bound_plans",
+          "plans": 260,
+          "functions": 1104
+        },
+        {
           "event": "summary",
           "dtype": "float16",
           "coreml": false,
           "invocations": 3,
-          "batch_ms": 18.323625,
-          "invocations_per_second": 163.72306243988294,
-          "first_section_ms": 14.476,
+          "batch_ms": 16.703083,
+          "invocations_per_second": 179.60756107121063,
+          "first_section_ms": 12.797583,
           "completion_ms": {
             "count": 3,
-            "mean": 16.132722,
-            "sample_variance": 3.623444516226998
+            "mean": 14.844041666666667,
+            "sample_variance": 2.5920648542223343
           },
           "withheld_invocation": 1,
           "withheld_section": 0,
@@ -269,23 +293,28 @@
             "native_backings": 0,
             "ne_planned_operations": 0,
             "code": 0,
-            "gpu_seconds": 0.050908793,
+            "gpu_seconds": 0.058211667,
             "cpu_submitted": 0
           }
         }
       ],
       "artifacts": [
-        "retained-plan-paired.jsonl.gz",
-        "retained-plan-paired-trace.json.gz"
+        "bound-plan-paired.jsonl.gz",
+        "bound-plan-paired-trace.json.gz"
       ]
     },
     {
-      "prefix": "retained-plan-paired-peer",
+      "prefix": "bound-plan-paired-peer",
       "exit_code": 0,
+      "xonotic": true,
       "configured_functions": 1189,
-      "submissions": 762,
       "successful": 762,
       "failed": 0,
+      "plans": {
+        "reduction": 32
+      },
+      "selected_parents": 0,
+      "nested_edges": 0,
       "environment": {
         "compiler": null,
         "complete_cost_key": false,
@@ -352,17 +381,20 @@
       },
       "events": [],
       "artifacts": [
-        "retained-plan-paired-peer.jsonl.gz",
-        "retained-plan-paired-peer-trace.json.gz"
+        "bound-plan-paired-peer.jsonl.gz",
+        "bound-plan-paired-peer-trace.json.gz"
       ]
     },
     {
-      "prefix": "retained-plan-cpu",
+      "prefix": "bound-plan-cpu",
       "exit_code": 0,
-      "configured_functions": 8424,
-      "submissions": 16716,
-      "successful": 16716,
+      "xonotic": false,
+      "configured_functions": 1678,
+      "successful": 2915,
       "failed": 0,
+      "plans": {
+        "reduction": 50
+      },
       "environment": {
         "compiler": {
           "path": "/usr/bin/clang",
@@ -415,26 +447,26 @@
       "events": [
         {
           "event": "function_profiles",
-          "successful": 16716,
+          "successful": 2915,
           "failed": 0,
           "backend_successes": {
-            "cpu_sgemm": 1922,
-            "cpu_builtin": 1110,
-            "cpu_compiled": 13598,
-            "cpu_neon_contract": 86
+            "cpu_sgemm": 714,
+            "cpu_builtin": 162,
+            "cpu_compiled": 2009,
+            "cpu_neon_contract": 30
           },
           "stable_snapshot": true,
           "pending": 0
         },
         {
           "event": "compiled_specializations",
-          "bindings": 6498,
-          "sources": 4115,
-          "source_pairs": 2059,
-          "dispatches": 6498,
+          "bindings": 860,
+          "sources": 163,
+          "source_pairs": 82,
+          "dispatches": 860,
           "constants": 0,
           "observed_output": {
-            "tensor": 35691138272,
+            "tensor": 44002768576,
             "extent": 0,
             "offset": 0,
             "rows": 1,
@@ -445,52 +477,58 @@
           }
         },
         {
+          "event": "bound_plans",
+          "plans": 50,
+          "functions": 152
+        },
+        {
           "event": "summary",
           "dtype": "float32",
           "coreml": false,
           "invocations": 3,
-          "batch_ms": 4.29525,
-          "invocations_per_second": 698.4459577440196,
-          "first_section_ms": 3.510542,
+          "batch_ms": 5.08375,
+          "invocations_per_second": 590.1155642980083,
+          "first_section_ms": 4.212125,
           "completion_ms": {
             "count": 3,
-            "mean": 4.024902999999999,
-            "sample_variance": 0.061143008227000084
+            "mean": 4.679958,
+            "sample_variance": 0.12633833938899994
           },
           "withheld_invocation": 1,
           "withheld_section": 0,
           "max_absolute_error": 1.6537194948984535e-06,
           "runtime": {
-            "submitted": 16716,
-            "completed": 16716,
+            "submitted": 2915,
+            "completed": 2915,
             "native_submitted": 0,
             "native_backings": 0,
             "ne_planned_operations": 0,
             "code": 0,
             "gpu_seconds": 0.0,
-            "cpu_submitted": 16716
+            "cpu_submitted": 2915
           }
         }
       ],
       "artifacts": [
-        "retained-plan-cpu.jsonl.gz",
-        "retained-plan-cpu-trace.json.gz"
+        "bound-plan-cpu.jsonl.gz",
+        "bound-plan-cpu-trace.json.gz"
       ]
     }
   ],
-  "cpu_validation": "completed; exit 0",
+  "cpu_validation": "existing base workflow completed exit0",
+  "source_identity_comparison": "All local Metal source IDs identical to retained-plan-metal baseline.",
   "arena": {
     "abi": 25,
     "registered_bytes_per_node": 1097203712,
     "enlarged": false
   },
-  "peer_shutdown": "SIGTERM after rank zero exit 0; original SSH exit 0",
+  "peer_shutdown": "SIGTERM after rank zero exit0; original SSH exit0",
   "scope": [
-    "Existing streaming-algebra --xonotic workflow, runs3/scatter67/tile33/destinations17; local float32 and paired float16 Metal.",
-    "Balanced merges, direct publication, precision and selected dependencies source-reviewed; existing numerical and withheld-region workflow passes on Metal.",
-    "Only two unique generated source strings differ from previous Metal snapshot; assembly-body indentation changed.",
-    "Complete selected-readiness candidate costs, function-ID associations, measured selection and full nine-point acceptance remain open.",
-    "Timing observations retain count, mean and sample variance; small samples establish neither speedup nor no regression.",
-    "Full local CPU float32 workflow at installed09ecd61 completed16716 submissions without failure."
+    "Binding associations captured during setup; no numerical function or source changes.",
+    "Function intervals are inclusive; nested/cached child and selector IDs require set union, not additive range totals.",
+    "uses records reference edges rather than execution multiplicity.",
+    "Requested-result forwarding beyond recorded core plans remains outside this snapshot; full candidate preparation and measured setup-time selection remain open.",
+    "Small timing samples do not establish speedup or no-overhead acceptance.",
+    "Full prior CPU Xonotic workflow passed on09ecd61; reporting-only change receives existing base CPU workflow coverage."
   ]
 }

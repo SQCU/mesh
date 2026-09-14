@@ -2053,3 +2053,49 @@ also still needs retention for whole-plan measurements. Those are explicit
 remaining work, alongside measured selection and the broader nine-point scope.
 CPU validation was launched against the same installed source; its terminal
 result will be appended after the existing process finishes.
+
+The original CPU process completed with exit zero: 8424 configured functions,
+16716 submissions/completions and no failures. Its snapshot records the CPU
+compiler version and actual loaded libraries. Raw evidence is now included in
+[retained-plan provenance](../measurements/lowering-2026-09-13/retained-plan-provenance.json).
+This CPU run used installed source `09ecd61`, before bound-plan reporting.
+
+
+## Bound plan identities — September 14
+
+`59b4b58` retains setup associations between planned operations and actual native
+function IDs. `Program.plan_trace` exports typed slot views, merge/region edges,
+selected parent/readiness/selector identities and nested or cached child plans.
+Reduction and indexed-contraction caches retain `(Ref, plan ID)` together;
+there is no reverse lookup from a possibly reused result object. Recording and
+snapshot formatting remain outside numerical invocation. The library change is
++200/-114 lines, net +86; no numerical function is added by reporting.
+
+`19dd4a8` exports these records from the existing workflow and checks reference
+integrity. Full local Metal passes 8424 configured functions/16716 completions;
+paired rank zero passes 8356/16023 and the peer 1189/762, without failed numerical
+completions. All local Metal source IDs match the preceding retained-plan run.
+Rank zero records 167 reduction, 36 selector and 57 indexed-contraction plans,
+including 180 selected parent bindings. Those are observations, not a required
+internal topology. The peer records 32 reduction plans. Both participants exit
+zero using the existing SIGTERM teardown for rank one.
+
+The existing base CPU workflow also passes, with 2915 completed submissions and
+50 plans referring to 152 unique functions. The full CPU Xonotic workflow above
+covered `09ecd61`; the reporting change uses this smaller existing CPU workflow
+and full Metal/Xonotic and RDMA coverage. This distinction is preserved in
+[bound-plan provenance](../measurements/lowering-2026-09-13/bound-plan-provenance.json).
+
+Intervals explicitly include nested lowering; cached children can refer to
+functions outside a newly registered interval. Cost consumers must union actual
+function IDs, including selector work. `uses` records references and exact
+requested/result views, not invocation multiplicity. Outer expression forwarding
+is not yet captured as costed operations, so these are core binding associations,
+not a claim of complete output-latency measurement.
+
+The next implementation is complete candidate preparation through the existing
+expression binder: retain specialized reads, emitted source and publication
+work before choosing the existing native or compiled lowering. The current
+hardware/loaded-library metadata suffices for advisory same-install empirical
+cost matching; a universal executable-cache key is not a prerequisite. Measured
+selection, fusion/storage/placement and full nine-point acceptance remain open.
