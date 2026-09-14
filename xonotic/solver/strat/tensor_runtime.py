@@ -6,12 +6,7 @@ import numpy as np
 
 from mesh import ABSENT, WRITING, Metadata, RowMap, RowFunction, RowBinding, Rows, MemorySpan, _lib
 from .tensor import Dimension, Tensor
-from .tensor_metal import source, native_encoder
-
-
-class View(c.Structure):
-    _fields_ = [('offset', c.c_uint64), ('size', c.c_uint64), ('shape', c.c_uint64 * 8),
-        ('stride', c.c_uint64 * 8)] + [(name, c.c_uint32) for name in ('dtype', 'rank', 'first', 'page_bytes')]
+from .tensor_metal import source, native_encoder, View
 
 
 # ../../../design/algorithm-sources.md#literal-row-functions

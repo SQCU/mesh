@@ -7,10 +7,11 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ._native import Native, Shape, View, Endpoint, Submission
+from ._native import Native, Shape, View, Endpoint, Submission, MetalDispatch, MetalConstant
 
 __all__ = ['Program', 'Tensor', 'Ref', 'BlockSpec', 'ShapeDtypeStruct', 'Result']
-_DTYPES = tuple(map(np.dtype, ('float16', 'float32', 'int32', 'uint32')))
+_PROGRAMS = set()
+_DTYPES = tuple(map(np.dtype, ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool')))
 
 
 # design/algorithm-sources.md#indexed-library-functions
@@ -57,6 +58,12 @@ class Ref:
         if not view.tensor:
             raise ValueError('Incompatible broadcast shape')
         return Ref(self.program, view, self.dtype)
+
+    @property
+    # design/algorithm-sources.md#xonotic-frame-migration
+    def writable(self):
+        self.whole()
+        return bool(self.program.native.tensor_writable(self.view.tensor, self.view.extent))
 
     @property
     # design/algorithm-sources.md#streaming-overlap-measurement
@@ -182,14 +189,36 @@ class Program:
         self.handle = create(self.context)
         if not self.handle:
             code = C.get_errno() or errno.ENOMEM
-            self.native.detach(self.context)
+            if not _PROGRAMS:
+                self.native.detach(self.context)
             check(code)
+        _PROGRAMS.add(self.handle)
+        self.node = self.native.algebra_node(self.handle)
         if coreml:
             check(self.native.algebra_coreml(self.handle, *(os.fsencode(p) for p in coreml)))
 
     # design/algorithm-sources.md#indexed-library-functions
     def tensor(self, shape, block_shape=None, dtype=np.float32, transferable=True):
         return Tensor(self, shape, block_shape or shape, dtype, transferable)
+
+    # design/algorithm-sources.md#xonotic-state-ownership
+    def alias(self, tensor):
+        result = object.__new__(Tensor)
+        result.program, result.shape, result.block_shape = self, tensor.shape, tensor.block_shape
+        result.dtype, result.grid = tensor.dtype, tensor.grid
+        result.handle = self.native.tensor_alias(self.handle, tensor.handle)
+        if not result.handle:
+            check(C.get_errno() or errno.ENOMEM)
+        result.blocks = {}
+        self.adopt(result, tensor)
+        result.blocks = {coord: Ref(self, self.native.tensor_view(result.handle, i), result.dtype)
+                         for i, coord in enumerate(tensor.blocks)}
+        return result
+
+    # design/algorithm-sources.md#xonotic-state-ownership
+    def adopt(self, target, source):
+        check(self.native.tensor_adopt(self.handle, target.handle, source.program.handle, source.handle))
+        target.backing = source
 
     # design/algorithm-sources.md#pallas-call-ergonomics
     def kernel_call(self, kernel, *, out_shape, grid, in_specs, out_specs):
@@ -230,7 +259,19 @@ class Program:
         for coordinate in itertools.product(*(range(n) for n in grid)):
             reads = tuple(spec.resolve(coordinate) for spec in inputs)
             writes = tuple(spec.resolve(coordinate) for spec in outputs)
-            from .kernels import _Operation
+            from .kernels import _Operation, Metal
+            if isinstance(kernel, Metal):
+                dispatches = (MetalDispatch * len(kernel.dispatches))(*(
+                    MetalDispatch(d.name.encode(), (C.c_size_t * 3)(*d.grid),
+                        (C.c_size_t * 3)(*d.group), d.argument_offset) for d in kernel.dispatches))
+                buffers = tuple(C.create_string_buffer(bytes(value)) for value in kernel.constants)
+                constants = (MetalConstant * len(buffers))(*(
+                    MetalConstant(C.cast(value, C.c_void_p), len(value) - 1) for value in buffers))
+                check(self.native.algebra_metal(self.handle, kernel.source.encode(),
+                    dispatches, len(dispatches), constants, len(constants),
+                    (View * len(reads))(*(r.view for r in reads)), len(reads),
+                    (View * len(writes))(*(r.view for r in writes)), len(writes)))
+                continue
             if isinstance(kernel, _Operation):
                 if len(reads) != kernel.arity or len(writes) != 1:
                     raise ValueError('Kernel operand count does not match its specifications')
@@ -316,9 +357,11 @@ class Program:
             if report.submitted != report.completed:
                 raise BlockingIOError(errno.EBUSY, 'Numerical submissions are still running')
             self.native.algebra_destroy(self.handle)
+            _PROGRAMS.discard(self.handle)
             self.handle = None
             self.callbacks.clear()
-            check(self.native.detach(self.context))
+            if not _PROGRAMS:
+                check(self.native.detach(self.context))
 
     # design/algorithm-sources.md#indexed-library-functions
     def __enter__(self):

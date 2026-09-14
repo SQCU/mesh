@@ -288,6 +288,9 @@ static int mesh_claimable(struct hdr *m,uint32_t first,uint32_t count){
   return 1;
 }
 
+/* design/algorithm-sources.md#xonotic-frame-migration */
+int mesh_writable(struct mesh_ctx *c,uint32_t first,uint32_t count){return mesh_claimable(c->M,first,count);}
+
 static void mesh_reset(struct hdr *m,uint32_t first,uint32_t count){
   mesh_bits_clear(m,MESH_PRESENT,first,count);
   for(int p=0;p<MESH_READERS;p++) mesh_bits_clear(m,MESH_READ+p,first,count);

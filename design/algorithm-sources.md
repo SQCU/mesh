@@ -545,3 +545,67 @@ it allocates separate padded canonical extents for column tiles and short or
 unaligned row stripes. A small `row_sum` output can therefore publish independently
 without sharing a publication quantum with its neighbor. No copy is introduced,
 and no layout choice occurs during a numerical invocation.
+
+## Application Metal kernels
+
+The JAX authors' Pallas call/BlockSpec split (cited above) separates numerical
+source from storage realization and completion. Apple's Metal argument buffers
+and `useResource:usage:` declarations bind GPU addresses to resident buffers
+(https://developer.apple.com/documentation/metal/mtlcomputecommandencoder/useresource(_:usage:)).
+`kernels.Metal` and `MetalDispatch` describe compiled application kernels through
+the same `kernel_call` as built-in operations. Buffer zero contains GPU addresses
+of the bound input refs followed by output refs, already adjusted for ref offsets.
+Constants occupy buffers one onward; each dispatch can select an offset within
+buffer four. The descriptor owns no scheduler.
+
+`mesh_algebra_metal` realizes pipelines, constants, address tables, resources, and
+dispatch geometry during setup. Its addresses reference the existing canonical
+Metal buffers over registered shared pages. Only descriptors are copied.
+`submit_metal` uses the native function's physical completion callback to publish
+exactly its configured output regions. Multiple dispatches within one region may
+initialize and accumulate a reduction; independently published regions are
+separate kernel calls. No command completion wait is introduced.
+
+## Xonotic planner migration
+
+Dongarra et al.'s partitioned matrix products and the JAX authors' Pallas region
+pipelines, cited above, implement the original Xonotic routed-expert planner.
+`model`, `solve`, and `main` in `xonotic/planner/plan.py` preserve routing by maximum
+score, selected-expert ReLU FFNs, objective projection, and the position update.
+`kernel_calls` lowers the existing application operator source through `kernels.Metal`
+and `kernel_call`. Each bot chunk has independent input and return allocations.
+Width is now explicit (`--width`, default 256), rather than inferred from frame
+transport capacity. `--tile-rows` controls the independently processed bot chunks.
+This is a numerical migration, not a claim of equal or improved throughput.
+
+A four-row, width-32 local evaluation selected experts [4,1,4,6] and had maximum
+absolute projection error 1.6695066860222818e-7 against the original algebra.
+Review uncovered an integer reduction identity bug: converting floating infinity
+to an integer could corrupt expert selection. Integer min/max now initialize with
+their representable extrema. The undefined `rows` shader argument was also removed.
+The new custom Metal binding independently published an int64 input region plus
+seven while the second region remained absent, preserving values above 2^40.
+
+## Xonotic frame migration
+
+The JAX authors' region ownership and the canonical configured SEND/RECV ring
+(cited above) underlie the application-local `Frames` adapter and `Batch` views.
+It handles game/configuration framing, not numerical scheduling. `reserve` borrows
+canonical output regions, `send` ends their producer writes, and `read` yields
+canonical result regions and consumes them after the caller returns. Scatter
+`recvmsg_into` fills these output arrays directly, including across ring wrap.
+`mesh_writable`, `mesh_tensor_writable`, and `Ref.writable` expose the existing
+producer ownership predicate for host I/O; they add no numerical readiness state.
+Multiple Program owners share the process's attachment until the last closes.
+
+## Xonotic state ownership
+
+The JAX authors' Ref ownership and buffer aliasing (Pallas documentation cited
+above) motivate `Program.alias` and `Program.adopt`. An alias allocates logical rows
+without another payload allocation. Its backing retains the physical storage.
+Adoption updates canonical row mappings and the prebound address cells/resources
+of custom Metal kernels; it does not copy parameter or optimizer payloads.
+`mesh_tensor_alias`, `mesh_tensor_adopt`, and `MeshExtent` destruction implement
+that ownership. Adoption requires the old alias readers to have completed.
+The application runtime wiring and full state-lifetime validation are still in
+progress; this checkpoint does not claim that persistent training is migrated.

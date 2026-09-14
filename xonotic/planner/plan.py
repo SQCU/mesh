@@ -1,109 +1,109 @@
-import sys, time
+import argparse
+from pathlib import Path
+import sys
+import time
+
 import numpy as np
-import mlx.core as mx
-sys.path.insert(0, "../../rdma")
-from mesh import Mesh
 
-ROLE = sys.argv[1]
-PEER = int(sys.argv[2])
-SECS = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
-BOTS = int(sys.argv[4]) if len(sys.argv) > 4 else 480
+from mesh import Program
 
-TEAMS   = 5
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from solver.strat import tensor as mx
+from solver.strat.tensor_metal import kernel_calls
+
+TEAMS = 5
 EXPERTS = 8
-FF      = 2048
-
-m = Mesh(1.0e9)
-D = m.usable // 4
+FF = 2048
 SEED = 20260828
 
-def model(d):
-    g = np.random.default_rng(SEED)
-    f = lambda *s: mx.array(g.standard_normal(s).astype(np.float32) * (1.0 / np.sqrt(s[-2])))
-    return (f(d, EXPERTS), f(EXPERTS, d, FF), f(EXPERTS, FF, d), f(d, TEAMS))
 
-def solve(Xn, R, W1, W2, O):
-    n = Xn.shape[0]
-    X = mx.array(Xn)
-    e = mx.argmax(X @ R, axis=1)
-    mx.eval(e)
-    en = np.asarray(memoryview(e))
-    Y = np.zeros((n, D), dtype=np.float32)
-    for i in range(EXPERTS):
-        sel = np.nonzero(en == i)[0]
-        if sel.size == 0:
-            continue
-        Yi = mx.maximum(mx.array(Xn[sel]) @ W1[i], 0.0) @ W2[i]
-        mx.eval(Yi)
-        Y[sel] = np.asarray(memoryview(Yi))
-    G = mx.array(Y) @ O
-    pick = mx.argmax(G, axis=1)
-    mx.eval(pick, G)
-    return pick, G
+# ../../design/algorithm-sources.md#xonotic-planner-migration
+def model(width):
+    rng = np.random.default_rng(SEED)
+    return tuple(rng.standard_normal(shape).astype(np.float32) / np.sqrt(shape[-2])
+                 for shape in ((width, EXPERTS), (EXPERTS, width, FF), (EXPERTS, FF, width), (width, TEAMS)))
 
-R, W1, W2, O = model(D)
-mx.eval(R, W1, W2, O)
-print(f"{ROLE}: D={D} bots={BOTS} teams={TEAMS} experts={EXPERTS}", flush=True)
 
-if ROLE == "solve":
-    stage = np.empty((BOTS, D), dtype=np.float32)
-    ring, cur, served, t0 = (m.slots // BOTS) * BOTS, 0, 0, time.time()
-    while time.time() - t0 < SECS:
-        n, src = 0, None
-        for buf, s in m.read():
-            stage[n] = buf[:D]; src = s; n += 1
-            if n >= BOTS: break
-        if n == 0: continue
-        pick, G = solve(stage[:n], R, W1, W2, O)
-        out = np.zeros((n, D), dtype=np.float32)
-        out[:, 0] = stage[:n, 0]
-        out[:, 1] = np.asarray(memoryview(pick)).astype(np.float32)
-        out[:, 2:2+TEAMS] = np.asarray(memoryview(G))
-        if cur + n > ring: cur = 0
-        m.block(cur, n)[:, :D*4] = out.view(np.uint8).reshape(n, D*4)
-        sent = 0
-        while sent < n:
-            sent += m.write(cur + sent, n - sent, src if src is not None else PEER)
-        cur += n; served += n
-    dt = time.time() - t0
-    flops = 2.0 * served * D * FF * 2
-    print(f"solve: {served} bots planned, {flops/dt/1e9:.1f} GFLOP/s", flush=True)
+# ../../design/algorithm-sources.md#xonotic-planner-migration
+def solve(program, source, weights):
+    graph = mx.Graph()
+    with graph:
+        x = graph.input('position', source.shape)
+        r, w1, w2, o = (graph.input(name, shape) for name, shape in
+            zip(('route', 'up', 'down', 'objective'),
+                ((source.shape[1], EXPERTS), (EXPERTS, source.shape[1], FF),
+                 (EXPERTS, FF, source.shape[1]), (source.shape[1], TEAMS))))
+        logits = mx.matmul(x, r)
+        selected = mx.min(mx.where(logits == mx.max(logits, axis=1, keepdims=True), mx.arange(EXPERTS), EXPERTS), axis=1)
+        hidden = mx.maximum(mx.expert_matmul(x, w1, selected), 0)
+        y = mx.matmul(mx.expert_matmul(hidden, w2, selected), o)
+    inputs = {value.index: tensor for value, tensor in zip((x, r, w1, w2, o), (source, *weights))}
+    return kernel_calls(program, graph, (), inputs)[y.index]
 
-else:
-    rng = np.random.default_rng(7)
-    pos = rng.standard_normal((BOTS, D)).astype(np.float32) * 0.1
-    pos[:, 0] = np.arange(BOTS)
-    m.block(0, BOTS)[:, :D*4] = pos.view(np.uint8).reshape(BOTS, D*4)
-    On = np.asarray(memoryview(O))
-    objective = np.full(BOTS, -1, dtype=np.int32)
-    ticks = planned = switched = 0
-    t0 = time.time()
-    while time.time() - t0 < SECS:
-        n = 0
-        while n < BOTS:
-            k = m.write(n, BOTS - n, PEER)
-            if k == 0: break
-            n += k
-        got = 0
-        for buf, _ in m.read():
-            b = int(buf[0])
-            if 0 <= b < BOTS:
-                pick = int(buf[1])
-                if objective[b] != pick:
-                    switched += 1
-                objective[b] = pick
 
-                pos[b, 1:] += 0.35 * On[1:, pick]
-                pos[b, 1:] *= 0.98
-            got += 1; planned += 1
-        if got:
-            m.block(0, BOTS)[:, :D*4] = pos.view(np.uint8).reshape(BOTS, D*4)
-            ticks += 1
-            if ticks % 2000 == 0:
-                hist = np.bincount(objective[objective >= 0], minlength=TEAMS)
-                print(f"  tick {ticks:5d}  bots per objective {hist.tolist()}"
-                      f"  switches {switched}", flush=True)
-    dt = time.time() - t0
-    hist = np.bincount(objective[objective >= 0], minlength=TEAMS)
-    print(f"play: {planned} plans in {ticks} ticks, {planned/dt:.0f} bot-plans/s, "
-          f"final objective split {hist.tolist()}, unplanned {(objective<0).sum()}", flush=True)
+# ../../design/algorithm-sources.md#xonotic-planner-migration
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('role', choices=('play', 'solve'))
+    parser.add_argument('peer', type=int)
+    parser.add_argument('seconds', type=float, nargs='?', default=15)
+    parser.add_argument('bots', type=int, nargs='?', default=480)
+    parser.add_argument('--width', type=int, default=256)
+    parser.add_argument('--tile-rows', type=int, default=64)
+    args = parser.parse_args()
+    data = model(args.width)
+    with Program(backend='metal') as program:
+        player, solver = (program.node, args.peer) if args.role == 'play' else (args.peer, program.node)
+        weights = []
+        if args.role == 'solve':
+            for value in data:
+                tensor = program.tensor((int(np.prod(value.shape[:-1])), value.shape[-1]))
+                program.constant(tensor[0, 0], value.reshape(tensor.shape))
+                weights.append(tensor)
+        sources, returned = [], []
+        for first in range(0, args.bots, args.tile_rows):
+            rows = min(args.tile_rows, args.bots - first)
+            tx, rx = (program.tensor((rows, args.width)) for _ in range(2))
+            program.copy(tx.on(player), rx.on(solver))
+            y = solve(program, rx, weights) if args.role == 'solve' else program.tensor((rows, TEAMS))
+            result = program.tensor((rows, TEAMS))
+            program.copy(y.on(solver), result.on(player))
+            sources.append((first, tx[0, 0]))
+            if args.role == 'play':
+                returned.append((first, program.export(result[0, 0])))
+        program.realize()
+        positions = np.random.default_rng(7).standard_normal((args.bots, args.width)).astype(np.float32) * .1
+        positions[:, 0] = np.arange(args.bots)
+        objectives = np.full(args.bots, -1, np.int32)
+        planned = switches = 0
+        start = time.monotonic()
+        print(f'{args.role}: D={args.width} bots={args.bots} teams={TEAMS} experts={EXPERTS}', flush=True)
+        while time.monotonic() - start < args.seconds:
+            program.scan()
+            for first, result in returned:
+                if not result.ready:
+                    continue
+                picks = np.argmax(result.array, axis=1)
+                last = first + len(picks)
+                switches += int(np.count_nonzero(objectives[first:last] != picks))
+                objectives[first:last] = picks
+                positions[first:last, 1:] += .35 * data[3][1:, picks].T
+                positions[first:last, 1:] *= .98
+                planned += len(picks)
+                result.consume()
+            if args.role == 'play':
+                for first, ref in sources:
+                    try:
+                        with program.write(ref) as output:
+                            output[:] = positions[first:first + ref.shape[0]]
+                    except BlockingIOError:
+                        pass
+        while program.report.submitted != program.report.completed:
+            program.scan()
+        elapsed = time.monotonic() - start
+        print(f'{args.role}: {planned} returned plans in {elapsed:.3f}s; switches={switches}; '
+              f'objective split={np.bincount(objectives[objectives >= 0], minlength=TEAMS).tolist()}', flush=True)
+
+
+if __name__ == '__main__':
+    main()

@@ -6,7 +6,7 @@ from collections import defaultdict, deque
 
 import numpy as np
 
-from mesh import Mesh
+from solver.frames import Frames
 from solver.xonwire import (
     LOCAL_HDR, LOCAL_STATUS, WIRE, HDRSZ,
     Reassembler, frame_count, frame_waves, parse_hdr, recv_datagram_frames,
@@ -22,7 +22,7 @@ def report(event, **values):
 class RuntimeTransport:
     def __init__(self, service, numerical):
         self.service, self.numerical = service, numerical
-        self.mesh = Mesh()
+        self.mesh = Frames()
         self.instance = uuid.uuid4().int & ((1 << 64) - 1)
         self.messages = deque()
         self.local = defaultdict(deque)

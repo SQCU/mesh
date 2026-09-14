@@ -14,9 +14,9 @@ not a second installed public interface.
 | Public `Program.bind`, `contract`, `reduce_sum`, `call`, `call_native`, `bind_native` | Removed. Region binding and completion are private implementation details. |
 | Tensor-bound legacy BlockSpec form | Removed; specs describe shapes and index maps. |
 | Installed raw C headers/module map | Removed from package installation. Native backend source remains canonical. |
-| `xonotic/planner/plan.py` | Outstanding: imports the removed `Mesh` message/slot interface. |
-| `xonotic/solver/strat/runtime_transport.py` | Outstanding: old framed messaging, shared by worker/responder. |
-| `xonotic/solver/strat/strat_responder.py` | Outstanding: owns another old `Mesh` endpoint. |
+| `xonotic/planner/plan.py` | Ported to chunked `kernel_call` using the existing expert operator compiler; local algebra checked, paired run pending. |
+| `xonotic/solver/strat/runtime_transport.py` | Uses application-local canonical `Frames`; paired framing validation pending. |
+| `xonotic/solver/strat/strat_responder.py` | Uses canonical `Frames`; persistent-policy runtime migration remains. |
 | `xonotic/solver/strat/tensor_runtime.py` and generated encoder in `tensor_metal.py` | Outstanding: require the removed `mesh_rows_*`, `mesh-metal.h`, and `mesh-metal.m` interfaces. |
 
 The Xonotic entries remain in scope. Import scans must include them; finishing

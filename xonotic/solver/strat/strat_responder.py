@@ -37,7 +37,7 @@ from solver.strat.scale_config import (
     strategy_widths,
 )
 from workload import WorkloadMeter
-from mesh import Mesh
+from solver.frames import Frames
 
 from payload.tools.strategy_io_schema import (
     STRATEGY_DEADLINE_S,
@@ -159,7 +159,7 @@ def main():
     for value in args.arm_checkpoint:
         arm, separator, path = value.partition('=')
         checkpoint_sources[arm if separator else args.policy_arm] = path if separator else value
-    mesh = Mesh()
+    mesh = Frames(peer=args.peer_node)
     tx = FrameStream(mesh)
     backlog = deque()
     inbox = RuntimeFrames(mesh.usable)

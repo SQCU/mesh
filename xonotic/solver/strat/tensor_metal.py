@@ -4,8 +4,14 @@ import ctypes as c
 import json
 from pathlib import Path
 import subprocess
+import numpy as np
 
 from .tensor import Dimension
+
+class View(c.Structure):
+    _fields_ = [('offset', c.c_uint64), ('size', c.c_uint64), ('shape', c.c_uint64 * 8),
+        ('stride', c.c_uint64 * 8)] + [(name, c.c_uint32) for name in ('dtype', 'rank', 'first', 'page_bytes')]
+
 
 TYPES = {'float32': 'float', 'int32': 'int', 'uint32': 'uint', 'int64': 'long', 'uint64': 'ulong', 'bool': 'uchar'}
 PREFIX = r'''
@@ -30,11 +36,11 @@ ulong broadcast_index(ulong index, device const View& source, device const View&
 }
 // ../../../design/algorithm-sources.md#literal-row-functions
  template<typename T> T read_value(device const ulong* regions, device const View& view, ulong index) {
-    return *(device const T*)page_address(regions, rows, view, view.offset + index * sizeof(T));
+    return *(device const T*)page_address(regions, view, view.offset + index * sizeof(T));
 }
 // ../../../design/algorithm-sources.md#literal-row-functions
  template<typename T> void write_value(device const ulong* regions, device const View& view, ulong index, T value) {
-    *(device T*)page_address(regions, rows, view, view.offset + index * sizeof(T)) = value;
+    *(device T*)page_address(regions, view, view.offset + index * sizeof(T)) = value;
 }
 float tensor_log1p(float x) {
     float u = 1.0f + x;
@@ -190,7 +196,10 @@ def kernel(node):
         axes = attrs['axes']
         reduced = math_product(tuple(source.shape[i] for i in axes))
         dtype = TYPES[source.dtype] if source.dtype != 'bool' else 'int'
-        identity = '-INFINITY' if op == 'reduce_max' else 'INFINITY' if op == 'reduce_min' else '1' if op == 'reduce_all' else '0'
+        low, high = {'float32': ('-INFINITY', 'INFINITY'), 'int32': ('(-2147483647-1)', '2147483647'),
+                     'uint32': ('0u', '0xffffffffu'), 'int64': ('(-9223372036854775807L-1L)', '9223372036854775807L'),
+                     'uint64': ('0ul', '0xfffffffffffffffful'), 'bool': ('0', '1')}[source.dtype]
+        identity = low if op == 'reduce_max' else high if op == 'reduce_min' else '1' if op == 'reduce_all' else '0'
         body = [f'ulong t=group.x; if(t>=v[{index}].size) return;', f'{dtype} result={identity};']
         base, target_axis = [], 0
         for i in range(source.ndim):
@@ -498,3 +507,74 @@ void *graph_memory(void *handle) {{ return (__bridge void*)((__bridge Graph*)han
         encoder.argtypes, encoder.restype = [c.c_void_p, c.c_uint64], None
         encoders[index] = encoder
     return result, handle, encoders
+
+
+# ../../../design/algorithm-sources.md#application-metal-kernels
+def kernel_calls(program, graph, capacity, inputs):
+    from mesh import BlockSpec, ShapeDtypeStruct
+    from mesh.kernels import Metal, MetalDispatch
+    import math
+
+    shapes = {value.index: tuple(size.resolve(capacity) if isinstance(size, Dimension) else size for size in value.shape)
+              for value, _, _, _, _ in graph.nodes}
+    text, operations = source(graph)
+    constants = {value.index: data for value, data in graph.constants.values()}
+    by_node = {item['node']: item for item in operations}
+    tensors = dict(inputs)
+    for value, operation, values, _, _ in graph.nodes:
+        if value.index in tensors:
+            continue
+        if operation in ('reshape', 'stop_gradient'):
+            tensors[value.index] = tensors[values[0].index]
+            continue
+        if operation == 'constant':
+            shape = shapes[value.index]
+            storage_shape = (max(1, math.prod(shape[:-1])), max(1, shape[-1])) if shape else (1, 1)
+            tensor = program.tensor(storage_shape, dtype=value.dtype)
+            data = constants[value.index]
+            program.constant(tensor[0, 0], data.reshape(storage_shape))
+            tensors[value.index] = tensor
+            continue
+        item = by_node[value.index]
+        views = []
+        positions = {operand.index: i for i, operand in enumerate(values)}
+        positions[value.index] = len(values)
+        for operand, _, _, _, _ in graph.nodes:
+            shape = shapes[operand.index]
+            size = math.prod(shape)
+            view = View(size=size, dtype=np.dtype(operand.dtype).itemsize, rank=len(shape),
+                        first=positions.get(operand.index, 0), page_bytes=max(1, size * np.dtype(operand.dtype).itemsize))
+            stride = 1
+            for axis in reversed(range(len(shape))):
+                view.shape[axis], view.stride[axis] = shape[axis], stride
+                stride *= shape[axis]
+            views.append(view)
+        shape = shapes[value.index]
+        size = math.prod(shape)
+        storage_shape = (max(1, math.prod(shape[:-1])), max(1, shape[-1])) if shape else (1, 1)
+        mode, threads = item['mode'], 256
+        if mode == 'matmul':
+            grid = ((shape[-1] + 31) // 32, (shape[-2] + 63) // 64, math.prod(shape[:-2]))
+        elif isinstance(mode, tuple) and mode[0] == 'expert':
+            grid = ((shape[-1] + 31) // 32, (shape[-2] + 63) // 64, shapes[mode[1]][0])
+        elif mode == 'reduce':
+            grid = (size, 1, 1)
+        elif isinstance(mode, tuple) and mode[0] in ('neighborhood', 'edges'):
+            threads = 32
+            grid = (shapes[mode[1]][0] if mode[0] == 'neighborhood' else math.prod(shapes[mode[1]]), 1, 1)
+        else:
+            grid = (((math.prod(shapes[mode[1]]) if isinstance(mode, tuple) else size) + 255) // 256, 1, 1)
+        arguments = item['arguments'] + [value.index]
+        dispatches = []
+        if item['clear']:
+            dispatches.append(MetalDispatch('mesh_tensor_zero', (max(1, (size * np.dtype(value.dtype).itemsize + 255) // 256), 1, 1),
+                                           argument_offset=len(item['arguments']) * 4))
+        dispatches.append(MetalDispatch(item['name'], tuple(max(1, v) for v in grid), (threads, 1, 1)))
+        kernel = Metal(text, tuple(dispatches), (bytes((View * len(views))(*views)),
+            bytes((c.c_uint64 * max(1, len(capacity)))(*capacity)), b'\0', bytes((c.c_uint32 * len(arguments))(*arguments))))
+        operands = tuple(tensors[v.index] for v in values)
+        tensors[value.index] = program.kernel_call(kernel, grid=(1,),
+            in_specs=tuple(BlockSpec(t.shape, lambda i: (0, 0)) for t in operands),
+            out_specs=BlockSpec(storage_shape, lambda i: (0, 0)),
+            out_shape=ShapeDtypeStruct(storage_shape, value.dtype))(*operands)
+    return tensors

@@ -98,7 +98,7 @@ def recv_datagram_frames(service, mesh, flags=0):
     if frames is None:
         raise BlockingIOError('literal receive pages are occupied')
     envelope = bytearray(LOCAL_HDR.size)
-    received, _, _, address = service.recvmsg_into((envelope, frames), 0, flags)
+    received, _, _, address = service.recvmsg_into((envelope, *frames), 0, flags)
     if received != LOCAL_HDR.size + frames.nbytes or LOCAL_HDR.unpack(envelope) != (node, framebytes, count):
         raise ValueError('incomplete game ingress page values')
     return node, address, frames

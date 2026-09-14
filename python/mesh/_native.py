@@ -17,6 +17,14 @@ class Endpoint(C.Structure):
     _fields_ = [('tensor', P), ('peer', U), ('first', U), ('stride', U)]
 
 
+class MetalDispatch(C.Structure):
+    _fields_ = [("name", C.c_char_p), ("grid", Z * 3), ("group", Z * 3), ("argument_offset", Z)]
+
+
+class MetalConstant(C.Structure):
+    _fields_ = [("bytes", P), ("length", Z)]
+
+
 class Report(C.Structure):
     _fields_ = [(k, C.c_uint64) for k in ('submitted', 'completed',
         'native_submitted', 'native_backings', 'ne_planned_operations')]
@@ -43,8 +51,11 @@ class Native:
             'mesh_algebra_create_cpu': (P, [P]),
             'mesh_algebra_destroy': (None, [P]),
             'mesh_algebra_publication_bytes': (Z, [P]),
+            'mesh_algebra_node': (U, [P]),
             'mesh_algebra_coreml': (C.c_int, [P, C.c_char_p, C.c_char_p, C.c_char_p]),
             'mesh_tensor_create': (P, [P, C.POINTER(Shape), Z, C.c_int]),
+            'mesh_tensor_alias': (P, [P, P]),
+            'mesh_tensor_adopt': (C.c_int, [P, P, P, P]),
             'mesh_tensor_view': (View, [P, U]),
             'mesh_tensor_data': (P, [P, U]),
             'mesh_view_slice': (View, [View, Z, Z, Z, Z]),
@@ -52,10 +63,13 @@ class Native:
             'mesh_view_broadcast': (View, [View, Z, Z]),
             'mesh_tensor_present': (C.c_int, [P, U]),
             'mesh_tensor_constant': (C.c_int, [P, U]),
+            'mesh_tensor_writable': (C.c_int, [P, U]),
             'mesh_tensor_issue': (C.c_int, [P, U]),
             'mesh_tensor_complete': (None, [P, U]),
             'mesh_algebra_function': (C.c_int, [P, C.POINTER(View), Z,
                 C.POINTER(View), Z, Submission, P]),
+            'mesh_algebra_metal': (C.c_int, [P, C.c_char_p, C.POINTER(MetalDispatch), Z,
+                C.POINTER(MetalConstant), Z, C.POINTER(View), Z, C.POINTER(View), Z]),
             'mesh_algebra_bind': (C.c_int, [P, C.c_int, View, View, View, C.c_float, C.c_float]),
             'mesh_algebra_copy': (C.c_int, [P, Endpoint, Endpoint, Z, C.c_uint16]),
             'mesh_algebra_export': (C.c_int, [P, P, U, C.POINTER(Z)]),

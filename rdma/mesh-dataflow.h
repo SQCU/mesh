@@ -38,6 +38,7 @@ int mesh_realize(struct mesh_ctx *,struct mesh_row_function *functions,size_t co
 void *mesh_row_data(struct mesh_ctx *,uint32_t row);
 int mesh_present(struct mesh_ctx *,struct mesh_row_map,uint32_t index);
 int mesh_available(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index);
+int mesh_writable(struct mesh_ctx *,uint32_t first,uint32_t count);
 int mesh_republish(struct mesh_ctx *,uint32_t first,uint32_t count);
 size_t mesh_issue(struct mesh_ctx *,const struct mesh_row_function *,uint32_t *indices,size_t capacity);
 void mesh_complete(struct mesh_ctx *,const struct mesh_row_function *,const uint32_t *indices,size_t count);

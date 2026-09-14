@@ -25,6 +25,12 @@ static NSString *const source = @
 " ulong j=g.o.offset+r*g.o.row_stride+c*g.o.column_stride; if(o16)((device half*)o)[j]=half(y);else ((device float*)o)[j]=y;\n"
 "}\n";
 
+/* design/algorithm-sources.md#application-metal-kernels */
+static size_t scalar_bytes(enum mesh_scalar scalar) {
+  static const size_t bytes[]={2,4,4,4,8,8,1,1};
+  return (unsigned)scalar<sizeof bytes/sizeof *bytes?bytes[scalar]:0;
+}
+
 struct mesh_extent {
   uint32_t first,page,pages,quantum;
   size_t bytes;
@@ -37,11 +43,31 @@ struct mesh_tensor { struct mesh_ctx *context; size_t count; struct mesh_extent 
 struct geometry_view { uint64_t offset,rows,columns,row_stride,column_stride; };
 struct geometry { struct geometry_view a,b,o; float alpha,beta; uint64_t first,count; };
 
+@interface MeshAddress : NSObject
+@property id<MTLBuffer> addresses;
+@property NSMutableArray<id<MTLBuffer>> *resources;
+@property NSUInteger index;
+@property size_t offset;
+@end
+@implementation MeshAddress
+@end
+
 @interface MeshExtent : NSObject
 @property struct mesh_extent extent;
 @property id<MTLBuffer> buffer;
+@property NSMutableArray<MeshAddress *> *addresses;
+@property MeshExtent *backing;
+@property struct mesh_ctx *context;
+@property BOOL owns;
 @end
 @implementation MeshExtent
+/* design/algorithm-sources.md#xonotic-state-ownership */
+- (void)dealloc {
+  if(self.owns){
+    if(_extent.address)mesh_view_destroy(_extent.address,_extent.bytes);
+    if(_extent.page!=MESH_ABSENT)mesh_arena_release(self.context,_extent.page,_extent.pages);
+  }
+}
 @end
 
 @class MeshAlgebra;
@@ -72,6 +98,7 @@ struct geometry { struct geometry_view a,b,o; float alpha,beta; uint64_t first,c
 @property id<MTLDevice> device;
 @property id<MTLCommandQueue> queue;
 @property id<MTLLibrary> library;
+@property NSMutableDictionary<NSString *,id<MTLLibrary>> *libraries;
 @property NSMutableArray<MeshFunction *> *functions;
 @property NSMutableArray<MeshExtent *> *extents;
 @property NSMutableDictionary<NSValue *,MeshExtent *> *lookup;
@@ -92,9 +119,7 @@ struct geometry { struct geometry_view a,b,o; float alpha,beta; uint64_t first,c
     struct mesh_tensor *t=tensors[i];
     for(size_t j=0;j<t->count;j++) {
       struct mesh_extent *e=&t->extents[j];
-      if(e->address) mesh_view_destroy(e->address,e->bytes);
       if(e->first!=MESH_ABSENT)mesh_rows_release(context,e->first,e->pages);
-      if(e->page!=MESH_ABSENT)mesh_arena_release(context,e->page,e->pages);
     }
     free(t->extents); free(t);
   }
@@ -121,6 +146,7 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
     NSError *error=nil; a.library=[a.device newLibraryWithSource:source options:nil error:&error];
     if(!a.queue || !a.library){fprintf(stderr,"mesh algebra: %s\n",error.description.UTF8String);errno=ENODEV;return NULL;}
   }
+  a.libraries=[NSMutableDictionary new];
   a.functions=[NSMutableArray new]; a.extents=[NSMutableArray new]; a.lookup=[NSMutableDictionary new];
   a.tensors=[NSMutableData new]; a.bindings=[NSMutableData new]; a.returns=[NSMutableData new];
   return (__bridge_retained struct mesh_algebra *)a;
@@ -129,6 +155,8 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
 struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *context) {return create_algebra(context,NO);}
 /* design/algorithm-sources.md#cpu-indexed-execution */
 struct mesh_algebra *mesh_algebra_create_cpu(struct mesh_ctx *context) {return create_algebra(context,YES);}
+/* design/algorithm-sources.md#application-metal-kernels */
+uint32_t mesh_algebra_node(struct mesh_algebra *handle) {return owner(handle)->context->M->node;}
 /* design/algorithm-sources.md#publication-layout */
 size_t mesh_algebra_publication_bytes(struct mesh_algebra *handle) {
   struct hdr *m=owner(handle)->context->M; return (size_t)m->block*m->pgsz;
@@ -150,8 +178,8 @@ struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *handle,const struct 
   size_t limit=a.cpu?SIZE_MAX:a.device.maxBufferLength;
   if(!count || !shapes || count>UINT32_MAX){errno=EINVAL;return NULL;}
   for(size_t i=0;i<count;i++) {
-    size_t bytes=shapes[i].scalar==MESH_F16?2:4;
-    if(shapes[i].scalar>MESH_U32 || !shapes[i].rows || !shapes[i].columns || shapes[i].rows>SIZE_MAX/shapes[i].columns/bytes){errno=EINVAL;return NULL;}
+    size_t bytes=scalar_bytes(shapes[i].scalar);
+    if(!bytes || !shapes[i].rows || !shapes[i].columns || shapes[i].rows>SIZE_MAX/shapes[i].columns/bytes){errno=EINVAL;return NULL;}
     if(shapes[i].rows*shapes[i].columns*bytes>limit){errno=EOVERFLOW;return NULL;}
   }
   struct mesh_tensor *t=calloc(1,sizeof *t);
@@ -164,7 +192,7 @@ struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *handle,const struct 
   size_t pg=a->context->M->pgsz,align=transferable?a->context->M->block:1;
   for(size_t i=0;i<count;i++) {
     struct mesh_extent *e=&t->extents[i]; e->shape=shapes[i];
-    size_t bytes=shapes[i].rows*shapes[i].columns*(shapes[i].scalar==MESH_F16?2:4);
+    size_t bytes=shapes[i].rows*shapes[i].columns*(scalar_bytes(shapes[i].scalar));
     size_t pages=(bytes+pg-1)/pg; pages=(pages+align-1)/align*align;
     if(pages>UINT32_MAX || pages*pg>limit){errno=EOVERFLOW;return NULL;}
     e->pages=(uint32_t)pages; e->bytes=pages*pg; e->quantum=(uint32_t)align;
@@ -179,7 +207,7 @@ struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *handle,const struct 
     for(size_t j=0;j<pages;j++)indices[j]=e->page+(uint32_t)j;
     e->address=mesh_view_create(a->context,indices,pages); free(indices);
     if(!e->address)return NULL;
-    MeshExtent *storage=[MeshExtent new]; storage.extent=*e;
+    MeshExtent *storage=[MeshExtent new]; storage.extent=*e;storage.context=a->context;storage.owns=YES;storage.addresses=[NSMutableArray new];
     if(!a.cpu) {
       storage.buffer=[a.device newBufferWithBytesNoCopy:e->address length:e->bytes options:MTLResourceStorageModeShared|MTLResourceHazardTrackingModeUntracked deallocator:nil];
       if(!storage.buffer){errno=ENOMEM;return NULL;}
@@ -211,6 +239,49 @@ struct mesh_view mesh_view_broadcast(struct mesh_view v,size_t rows,size_t colum
   if(v.columns!=columns)v.column_stride=0;
   v.rows=rows;v.columns=columns;return v;
 }
+/* design/algorithm-sources.md#xonotic-state-ownership */
+struct mesh_tensor *mesh_tensor_alias(struct mesh_algebra *handle,struct mesh_tensor *source) {
+  MeshAlgebra *a=owner(handle);
+  if(a.realized || !source || source->context!=a->context){errno=EINVAL;return NULL;}
+  struct mesh_tensor *t=calloc(1,sizeof *t);if(!t){errno=ENOMEM;return NULL;}
+  t->context=a->context;t->count=source->count;t->extents=calloc(t->count,sizeof *t->extents);
+  if(!t->extents){free(t);errno=ENOMEM;return NULL;}
+  [a.tensors appendBytes:&t length:sizeof t];
+  for(size_t i=0;i<t->count;i++)t->extents[i].first=MESH_ABSENT;
+  for(size_t i=0;i<t->count;i++){
+    struct mesh_extent *e=&t->extents[i];*e=source->extents[i];
+    e->first=mesh_rows_alloc(a->context,e->pages);if(e->first==MESH_ABSENT)return NULL;
+    e->output=(struct mesh_row_map){.first=e->first,.count=e->pages};
+    e->producer=(struct mesh_row_function){.output=&e->output,.outputs=1,.rows=1};
+    mesh_map(a->context,e->first,e->pages,e->page);
+    MeshExtent *storage=[MeshExtent new];storage.extent=*e;storage.context=a->context;
+    storage.addresses=[NSMutableArray new];
+    [a.extents addObject:storage];a.lookup[[NSValue valueWithPointer:e]]=storage;
+  }
+  return t;
+}
+/* design/algorithm-sources.md#xonotic-state-ownership */
+int mesh_tensor_adopt(struct mesh_algebra *handle,struct mesh_tensor *target,struct mesh_algebra *source_handle,struct mesh_tensor *source) {
+  MeshAlgebra *a=owner(handle),*b=owner(source_handle);
+  if(!target || !source || target->context!=a->context || source->context!=a->context || target->count!=source->count)return EINVAL;
+  for(size_t i=0;i<target->count;i++){
+    struct mesh_extent *x=&target->extents[i],*y=&source->extents[i];
+    MeshExtent *storage=a.lookup[[NSValue valueWithPointer:x]];
+    if(storage.owns || x->pages!=y->pages || x->shape.rows!=y->shape.rows || x->shape.columns!=y->shape.columns || x->shape.scalar!=y->shape.scalar)return EINVAL;
+    if(!mesh_writable(a->context,x->first,x->pages))return EBUSY;
+  }
+  for(size_t i=0;i<target->count;i++){
+    struct mesh_extent *x=&target->extents[i],*y=&source->extents[i];
+    MeshExtent *storage=a.lookup[[NSValue valueWithPointer:x]],*backing=b.lookup[[NSValue valueWithPointer:y]];
+    x->page=y->page;x->address=y->address;storage.buffer=backing.buffer;storage.backing=backing;
+    mesh_map(a->context,x->first,x->pages,x->page);
+    for(MeshAddress *address in storage.addresses){
+      ((uint64_t *)address.addresses.contents)[address.index]=backing.buffer.gpuAddress+address.offset;
+      address.resources[address.index]=backing.buffer;
+    }
+  }
+  return 0;
+}
 /* design/algorithm-sources.md#streaming-algebra */
 void *mesh_tensor_data(struct mesh_tensor *t,uint32_t i) { return t && i<t->count?t->extents[i].address:NULL; }
 /* design/algorithm-sources.md#streaming-algebra */
@@ -226,6 +297,11 @@ int mesh_tensor_present(struct mesh_tensor *t,uint32_t extent) {
 int mesh_tensor_constant(struct mesh_tensor *t,uint32_t i) {
   if(!t || i>=t->count)return EINVAL;
   struct mesh_row_map m=mesh_tensor_rows(t,i);mesh_constant(t->context,m.first,m.count);return 0;
+}
+/* design/algorithm-sources.md#streaming-algebra */
+int mesh_tensor_writable(struct mesh_tensor *t,uint32_t i) {
+  if(!t || i>=t->count)return 0;struct mesh_extent *e=&t->extents[i];
+  return mesh_writable(t->context,e->first,e->pages);
 }
 /* design/algorithm-sources.md#streaming-algebra */
 int mesh_tensor_issue(struct mesh_tensor *t,uint32_t i) {
@@ -250,7 +326,7 @@ static struct geometry_view geometry(struct mesh_view v) {
 }
 /* design/algorithm-sources.md#streaming-algebra */
 static MPSMatrix *matrix(MeshExtent *e,struct mesh_view v,BOOL transpose) {
-  size_t bytes=e.extent.shape.scalar==MESH_F16?2:4;
+  size_t bytes=scalar_bytes(e.extent.shape.scalar);
   MPSMatrixDescriptor *d=[MPSMatrixDescriptor matrixDescriptorWithRows:transpose?v.columns:v.rows columns:transpose?v.rows:v.columns rowBytes:(transpose?v.column_stride:v.row_stride)*bytes dataType:bytes==2?MPSDataTypeFloat16:MPSDataTypeFloat32];
   return [[MPSMatrix alloc]initWithBuffer:e.buffer offset:v.offset*bytes descriptor:d];
 }
@@ -258,7 +334,7 @@ static MPSMatrix *matrix(MeshExtent *e,struct mesh_view v,BOOL transpose) {
 /* design/algorithm-sources.md#mandatory-partial-publication */
 static void dependencies(NSMutableData *maps,struct mesh_view v) {
   struct mesh_extent *e=&v.tensor->extents[v.extent];
-  size_t unit=v.tensor->context->M->pgsz/(e->shape.scalar==MESH_F16?2:4);
+  size_t unit=v.tensor->context->M->pgsz/(scalar_bytes(e->shape.scalar));
   if(v.row_stride<v.column_stride)v=mesh_view_transpose(v);
   for(size_t r=0;r<v.rows;r++) {
     size_t first=v.offset+r*v.row_stride;
@@ -297,7 +373,7 @@ static int output_used(MeshAlgebra *a,struct mesh_row_map m) {
 static int output_region(MeshAlgebra *a,struct mesh_view v,struct mesh_row_map *m) {
   if(!valid_view(a,v))return EINVAL;
   struct mesh_extent *e=&v.tensor->extents[v.extent];
-  size_t scalar=e->shape.scalar==MESH_F16?2:4,unit=a->context->M->pgsz/scalar;
+  size_t scalar=scalar_bytes(e->shape.scalar),unit=a->context->M->pgsz/scalar;
   size_t quantum=(size_t)e->quantum*unit,elements=e->shape.rows*e->shape.columns;
   if(!((v.column_stride==1 && v.row_stride==v.columns) || (v.row_stride==1 && v.column_stride==v.rows)))return EINVAL;
   if(v.rows>SIZE_MAX/v.columns)return EOVERFLOW;
@@ -331,6 +407,76 @@ int mesh_algebra_function(struct mesh_algebra *handle,const struct mesh_view *in
 }
 
 struct cpu_operand {const void *address;struct geometry_view view;float (*load)(const void *,size_t);};
+/* design/algorithm-sources.md#application-metal-kernels */
+static void submit_metal(void *binding,mesh_completion complete,void *context) {
+  MeshFunction *f=(__bridge MeshFunction *)context;
+  id<MTLCommandBuffer> command=[f.owner.queue commandBuffer];f.encode(command);
+  [command addCompletedHandler:^(id<MTLCommandBuffer> done){
+    atomic_fetch_add(&f.owner->gpuNanoseconds,(uint64_t)((done.GPUEndTime-done.GPUStartTime)*1e9));
+    complete(context,done.error.code);
+  }];
+  [command commit];
+}
+/* design/algorithm-sources.md#application-metal-kernels */
+int mesh_algebra_metal(struct mesh_algebra *handle,const char *text,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count) {
+  MeshAlgebra *a=owner(handle);
+  if(a.realized)return EBUSY;
+  if(a.cpu || !text || !dispatch_count || !dispatches || constant_count>30 || (constant_count && !constants))return EINVAL;
+  NSError *error=nil;MTLCompileOptions *options=[MTLCompileOptions new];options.mathMode=MTLMathModeSafe;
+  NSString *key=@(text);id<MTLLibrary> library=a.libraries[key];
+  if(!library){library=[a.device newLibraryWithSource:key options:options error:&error];if(library)a.libraries[key]=library;}
+  if(!library){fprintf(stderr,"mesh Metal kernel: %s\n",error.description.UTF8String);return EINVAL;}
+  NSMutableArray<id<MTLComputePipelineState>> *pipelines=[NSMutableArray new];
+  for(size_t i=0;i<dispatch_count;i++) {
+    const struct mesh_metal_dispatch *d=&dispatches[i];
+    if(!d->name || !d->grid[0] || !d->grid[1] || !d->grid[2] || !d->group[0] || !d->group[1] || !d->group[2])return EINVAL;
+    id<MTLFunction> function=[library newFunctionWithName:@(d->name)];
+    if(!function)return ENOENT;
+    id<MTLComputePipelineState> pipeline=[a.device newComputePipelineStateWithFunction:function error:&error];
+    if(!pipeline){fprintf(stderr,"mesh Metal pipeline: %s\n",error.description.UTF8String);return EINVAL;}
+    if(d->group[0]>pipeline.maxTotalThreadsPerThreadgroup/d->group[1]/d->group[2])return EINVAL;
+    if(d->argument_offset && (constant_count<4 || d->argument_offset>=constants[3].length))return EINVAL;
+    [pipelines addObject:pipeline];
+  }
+  NSMutableArray<id<MTLBuffer>> *buffers=[NSMutableArray new],*resources=[NSMutableArray new];
+  id<MTLBuffer> addresses=[a.device newBufferWithLength:(input_count+output_count)*sizeof(uint64_t) options:MTLResourceStorageModeShared];
+  if(!addresses)return ENOMEM;
+  for(size_t i=0;i<input_count+output_count;i++) {
+    struct mesh_view v=i<input_count?inputs[i]:outputs[i-input_count];
+    if(!valid_view(a,v))return EINVAL;
+    struct mesh_extent *extent=&v.tensor->extents[v.extent];
+    id<MTLBuffer> buffer=a.lookup[[NSValue valueWithPointer:extent]].buffer;
+    ((uint64_t *)addresses.contents)[i]=buffer.gpuAddress+v.offset*(scalar_bytes(extent->shape.scalar));
+    [resources addObject:buffer];
+    MeshAddress *address=[MeshAddress new];address.addresses=addresses;address.resources=resources;
+    address.index=i;address.offset=v.offset*scalar_bytes(extent->shape.scalar);
+    [a.lookup[[NSValue valueWithPointer:extent]].addresses addObject:address];
+  }
+  for(size_t i=0;i<constant_count;i++) {
+    if(!constants[i].bytes || !constants[i].length)return EINVAL;
+    id<MTLBuffer> buffer=[a.device newBufferWithBytes:constants[i].bytes length:constants[i].length options:MTLResourceStorageModeShared];
+    if(!buffer)return ENOMEM;[buffers addObject:buffer];
+  }
+  NSData *geometry=[NSData dataWithBytes:dispatches length:dispatch_count*sizeof *dispatches];
+  int status=mesh_algebra_function(handle,inputs,input_count,outputs,output_count,submit_metal,NULL);
+  if(status)return status;
+  MeshFunction *f=a.functions.lastObject;
+  f.encode=^(id<MTLCommandBuffer> command){
+    id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
+    [encoder setBuffer:addresses offset:0 atIndex:0];
+    for(NSUInteger i=0;i<buffers.count;i++)[encoder setBuffer:buffers[i] offset:0 atIndex:i+1];
+    for(id<MTLBuffer> buffer in resources)[encoder useResource:buffer usage:MTLResourceUsageRead|MTLResourceUsageWrite];
+    const struct mesh_metal_dispatch *d=geometry.bytes;
+    for(NSUInteger i=0;i<pipelines.count;i++) {
+      [encoder setComputePipelineState:pipelines[i]];
+      if(buffers.count>=4)[encoder setBuffer:buffers[3] offset:d[i].argument_offset atIndex:4];
+      [encoder dispatchThreadgroups:MTLSizeMake(d[i].grid[0],d[i].grid[1],d[i].grid[2]) threadsPerThreadgroup:MTLSizeMake(d[i].group[0],d[i].group[1],d[i].group[2])];
+    }
+    [encoder endEncoding];
+  };
+  return 0;
+}
+
 /* design/algorithm-sources.md#cpu-indexed-execution */
 static float cpu_f32(const void *p,size_t i) {return ((const float *)p)[i];}
 /* design/algorithm-sources.md#cpu-indexed-execution */
@@ -371,7 +517,7 @@ static void cpu_part(MeshFunction *f,enum mesh_algebra_op op,struct mesh_view x,
 }
 /* design/algorithm-sources.md#coreml-partial-execution */
 static MLMultiArray *native_array(struct mesh_view v,NSError **error) {
-  struct mesh_extent *e=&v.tensor->extents[v.extent];size_t bytes=e->shape.scalar==MESH_F16?2:4;
+  struct mesh_extent *e=&v.tensor->extents[v.extent];size_t bytes=scalar_bytes(e->shape.scalar);
   return [[MLMultiArray alloc]initWithDataPointer:(char *)e->address+v.offset*bytes shape:@[@(v.rows),@(v.columns)] dataType:bytes==2?MLMultiArrayDataTypeFloat16:MLMultiArrayDataTypeFloat32 strides:@[@(v.row_stride),@(v.column_stride)] deallocator:nil error:error];
 }
 /* design/algorithm-sources.md#coreml-partial-execution */
@@ -406,7 +552,7 @@ static int native_part(MeshAlgebra *a,MeshFunction *f,NSArray *rectangles,NSDict
     }];
     dispatch_semaphore_wait(ready,DISPATCH_TIME_FOREVER);
   }
-  struct mesh_extent *out=&z.tensor->extents[z.extent];size_t bytes=out->shape.scalar==MESH_F16?2:4;
+  struct mesh_extent *out=&z.tensor->extents[z.extent];size_t bytes=scalar_bytes(out->shape.scalar);
   MLMultiArray *output=[[MLMultiArray alloc]initWithDataPointer:(char *)out->address+(z.offset+first)*bytes shape:@[@(count)] dataType:bytes==2?MLMultiArrayDataTypeFloat16:MLMultiArrayDataTypeFloat32 strides:@[@1] deallocator:nil error:&error];
   MLDictionaryFeatureProvider *inputs=[[MLDictionaryFeatureProvider alloc]initWithDictionary:features error:&error];
   if(!output || !inputs)return (int)error.code;
@@ -426,7 +572,7 @@ static int native_part(MeshAlgebra *a,MeshFunction *f,NSArray *rectangles,NSDict
 static int bind_part(MeshAlgebra *a,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta,size_t first,size_t count) {
   MeshFunction *f=[MeshFunction new];f.owner=a;f.dependencies=[NSMutableData new];
   struct mesh_extent *out=&z.tensor->extents[z.extent];
-  size_t scalar=out->shape.scalar==MESH_F16?2:4;
+  size_t scalar=scalar_bytes(out->shape.scalar);
   f->output=(struct mesh_row_map){.first=out->first+(uint32_t)((z.offset+first)*scalar/a->context->M->pgsz),.count=out->quantum};
   f->geometry=(struct geometry){geometry(x),geometry(y),geometry(z),alpha,beta,first,count};
   f.operands=@[a.lookup[[NSValue valueWithPointer:&x.tensor->extents[x.extent]]],a.lookup[[NSValue valueWithPointer:&y.tensor->extents[y.extent]]],a.lookup[[NSValue valueWithPointer:out]]];
@@ -508,7 +654,7 @@ int mesh_algebra_bind(struct mesh_algebra *handle,enum mesh_algebra_op op,struct
   NSMutableData *reads=[NSMutableData new];dependencies(reads,x);if(binary)dependencies(reads,y);
   struct mesh_row_map *maps=reads.mutableBytes;
   for(size_t i=0;i<reads.length/sizeof *maps;i++)if(overlaps(maps[i],output))return EINVAL;
-  size_t step=(size_t)out->quantum*a->context->M->pgsz/(out->shape.scalar==MESH_F16?2:4);
+  size_t step=(size_t)out->quantum*a->context->M->pgsz/(scalar_bytes(out->shape.scalar));
   for(size_t first=0;first<elements;first+=step){int error=bind_part(a,op,x,y,z,alpha,beta,first,MIN(step,elements-first));if(error)return error;}
   return 0;
 }
@@ -517,7 +663,7 @@ int mesh_algebra_bind(struct mesh_algebra *handle,enum mesh_algebra_op op,struct
 static int bind_copy(MeshAlgebra *a,struct mesh_extent *s,struct mesh_extent *d) {
   struct mesh_row_map output={.first=d->first,.count=d->pages};
   if(output_used(a,output) || s==d)return EINVAL;
-  size_t bytes=s->shape.rows*s->shape.columns*(s->shape.scalar==MESH_F16?2:4);
+  size_t bytes=s->shape.rows*s->shape.columns*(scalar_bytes(s->shape.scalar));
   size_t step=(size_t)d->quantum*a->context->M->pgsz;
   for(size_t offset=0;offset<bytes;offset+=step) {
     MeshFunction *f=[MeshFunction new];f.owner=a;f.dependencies=[NSMutableData new];
