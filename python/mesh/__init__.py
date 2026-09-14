@@ -284,23 +284,10 @@ class Program:
 
     # design/algorithm-sources.md#indexed-library-functions
     def _call(self, kernel, *, grid, inputs=(), outputs=()):
-        from .kernels import _Operation, _ExpressionKernel
-        if not isinstance(kernel, (_Operation, _ExpressionKernel)):
-            raise TypeError('Kernel calls require an expression or native operation')
-        grid = tuple(grid)
-        if 0 in grid or outputs and all(not spec._tensor.blocks for spec in outputs):
-            return
-        if isinstance(kernel, _ExpressionKernel):
-            kernel.bind_grid(self, grid, inputs, outputs)
-            return
-        for coordinate in itertools.product(*(range(n) for n in grid)):
-            reads = tuple(spec.resolve(coordinate) for spec in inputs)
-            writes = tuple(spec.resolve(coordinate) for spec in outputs)
-            if len(reads) != kernel.arity or len(writes) != 1:
-                raise ValueError('Kernel operand count does not match its specifications')
-            check(self.native.algebra_bind(self.handle, kernel.op, reads[0].view,
-                reads[1].view if len(reads) == 2 else View(), writes[0].view,
-                kernel.alpha, kernel.beta))
+        from .kernels import _ExpressionKernel
+        if not isinstance(kernel, _ExpressionKernel):
+            raise TypeError('Kernel calls require an expression')
+        kernel.bind_grid(self, tuple(grid), inputs, outputs)
 
     # design/algorithm-sources.md#indexed-library-functions
     def copy(self, source, destination, *, queue=0):

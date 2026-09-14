@@ -9,27 +9,10 @@ _POINTWISE_OPERATIONS = ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|
     'maximum', 'minimum', *_POINTWISE_FUNCTIONS)
 
 
-@dataclass(frozen=True)
-class _Operation:
-    op: int
-    arity: int
-    alpha: float = 1
-    beta: float = 0
-
-
-matmul = _Operation(6, 2)
-add = _Operation(1, 2, beta=1)
-multiply = _Operation(2, 2)
-tanh = _Operation(3, 1)
-exp = _Operation(4, 1)
-row_sum = _Operation(5, 1)
-rsqrt = _Operation(7, 1)
-swish = _Operation(8, 1)
-
-
 # design/algorithm-sources.md#single-kernel-interface
 def affine(alpha=1, beta=0):
-    return _Operation(0, 1, alpha, beta)
+    value, = arguments(1)
+    return expression(value * alpha + beta)
 
 
 # design/algorithm-sources.md#static-indexed-access-specialization
@@ -574,6 +557,8 @@ class _ExpressionKernel:
     # design/algorithm-sources.md#dynamic-indexed-expression-lowering
     def bind_grid(self, program, grid, input_specs, output_specs):
         import itertools
+        if len(output_specs) != len(self.values):
+            raise ValueError('Each expression requires an output region')
         grid = tuple(grid)
         if 0 in grid:
             return
@@ -1824,11 +1809,11 @@ def _integral_contraction(program, left, right, target):
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
-def _bind_operation(program, operation, inputs, target):
+def _bind_operation(program, operation, inputs, target, *, alpha=1, beta=0):
     from . import check
     from ._native import View
-    check(program.native.algebra_bind(program.handle, operation.op, inputs[0].view,
-        inputs[1].view if len(inputs) == 2 else View(), target.view, operation.alpha, operation.beta))
+    check(program.native.algebra_bind(program.handle, operation, inputs[0].view,
+        inputs[1].view if len(inputs) == 2 else View(), target.view, alpha, beta))
 
 
 # design/algorithm-sources.md#indexed-range-generation
@@ -2076,7 +2061,7 @@ class _ExpressionRegions:
             if dtype.kind in 'iub':
                 _integral_contraction(self.program, left_panel, right_panel, destination)
             else:
-                _bind_operation(self.program, matmul, (left_panel, right_panel), destination)
+                _bind_operation(self.program, 6, (left_panel, right_panel), destination)
             parts.append(destination)
         while len(parts) > 2:
             reduced = []
@@ -2187,7 +2172,7 @@ class _ExpressionRegions:
             binding['slots'].append(self.program._plan_view(target))
             with self.program._plan_operation(binding, 'merge', (left_index, right_index), output, reduction=node.operation):
                 if node.operation == 'sum' and dtype.kind == 'f':
-                    _bind_operation(self.program, add, inputs, target)
+                    _bind_operation(self.program, 1, inputs, target, beta=1)
                 else:
                     left, right = arguments(2)
                     bits = 0xffffffffffffffff
@@ -2212,14 +2197,14 @@ class _ExpressionRegions:
             return
         if len(parts) == 2:
             destination = target if target.dtype == np.dtype('float32') else self.temporary(target.shape)
-            _bind_operation(self.program, add, parts, destination)
+            _bind_operation(self.program, 1, parts, destination, beta=1)
             parts = (destination,)
         if parts[0] is not target:
             if target.dtype.kind in 'iub':
                 symbol, = arguments(1)
                 _ExpressionKernel((symbol,)).bind(self.program, parts, (target,), self.coordinate)
             else:
-                _bind_operation(self.program, affine(), parts, target)
+                _bind_operation(self.program, 0, parts, target)
 
     # design/algorithm-sources.md#in-operation-publication
     def inline_reduction(self, node, expression, origin, shape, dtype, external):
@@ -2610,7 +2595,7 @@ def _lower_indexed_product(lowering, value, target, compiled_plan):
         with program._plan_operation(binding, operation, inputs, output) as entry:
             destination = storage[output]
             if operation == 'add':
-                _bind_operation(program, add, tuple(storage[index] for index in inputs), destination)
+                _bind_operation(program, 1, tuple(storage[index] for index in inputs), destination, beta=1)
                 continue
             if operation == 'copy':
                 lowering.publish((storage[inputs[0]],), destination)
@@ -2673,7 +2658,7 @@ def _lower_indexed_product(lowering, value, target, compiled_plan):
             entry['choices'] = tuple(dict(left=program._plan_view(left), right=program._plan_view(right))
                 for left, right in zip(left_views, right_views))
             if selected is None:
-                _bind_operation(program, matmul, (left_views[0], right_views[0]), destination)
+                _bind_operation(program, 6, (left_views[0], right_views[0]), destination)
                 continue
             zero_key = ('selected_zero', length, columns, sources[1].dtype.str)
             if zero_key not in lowering.cache:
@@ -2812,3 +2797,16 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
                 _ExpressionKernel((symbol,)).bind(program, (result,), (target,), coordinate)
         else:
             lowering.emit(value, origin, target.shape, target, external=True)
+
+
+# design/algorithm-sources.md#single-kernel-interface
+_left, _right = arguments(2)
+matmul = expression(dot(_left, _right))
+add = expression(_left + _right)
+multiply = expression(_left * _right)
+tanh = expression(_left.tanh())
+exp = expression(_left.exp())
+row_sum = expression(_left.sum())
+rsqrt = expression(_left.rsqrt())
+swish = expression(_left / (1 + (0 - _left).exp()))
+del _left, _right

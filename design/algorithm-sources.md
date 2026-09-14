@@ -565,12 +565,25 @@ operand gather/copy is introduced when a requested region crosses allocations.
 ## Single kernel interface
 
 The JAX authors' Pallas call/BlockSpec decomposition, cited above, is the single
-public numerical submission interface. `mesh.kernels` supplies backend-realized
-numerical kernel descriptors for that call, preserving the existing CPU, Metal,
-MPS, and configured Core ML implementations. `affine` supplies scalar constants
-at configuration. These descriptors do not introduce another graph or invocation
-interface. Tensor arithmetic overloads and public per-operation bind/contract
-methods are removed; ctypes submission remains private runtime machinery.
+public numerical submission interface. `mesh.kernels` supplies expressions for
+that call: named `matmul`, `row_sum`, and pointwise operations enter the same
+region planner as composed expressions. `affine` supplies scalar constants at
+configuration. The alternate native-operation descriptor and public dispatch
+branch are removed. Native numerical bindings remain private lowering machinery;
+contraction lowering retains the configured CPU, Metal, MPS, and Core ML paths.
+Output-count validation belongs to the shared expression entry point.
+
+`kernel_call` and its returned configurator construct the program before
+`realize()`. Shape and type inference, page-region selection, operand allocation,
+backend selection, and compilation belong to that setup. Numerical invocation
+consumes the realized functions, addresses, indices, and publication sections;
+it must not infer shapes, types, or storage requirements from arriving values.
+Runtime vector indices remain numerical inputs to configured gathers and scatters.
+
+Source review, Python compilation, and import-only checks cover this interface
+removal. No numerical or performance run validates the change. Named contractions
+now inherit the expression planner's partial-product partition and association;
+this is not a claim of unchanged floating-point association or measured speedup.
 
 ## Streaming FFN
 
