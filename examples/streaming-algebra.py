@@ -294,14 +294,14 @@ def main():
                     destination[...] = routing[2*i:2*i+2]
             for i in range(2):
                 with program.write(scatter_factors[i, 0]) as destination:
-                    destination[...] = 2
+                    destination[...] = 2 + generation
                 with program.write(scatter_updates[i, 0]) as destination:
                     destination[...] = np.arange(2*i+1+generation, 2*i+3+generation, dtype=dtype)[:, None]
             wait_for(tuple(scatter_results[i] for i in (0, 1, 3)))
             if scatter_results[2].ready or not scatter_updates[2, 0].writable:
                 raise ArithmeticError('Delayed scatter contribution was not independent')
             first_scatter_ns = time.monotonic_ns() - scatter_start
-            for i, expected in ((0, 22 if generation else 20), (1, 0), (3, 28 if generation else 18)):
+            for i, expected in ((0, 32 if generation else 20), (1, 0), (3, 40 if generation else 18)):
                 if not np.array_equal(scatter_results[i].array, np.full((1, 4), expected, dtype=dtype)):
                     raise ArithmeticError('Early scattered sum or consumer differs')
             with program.write(scatter_updates[2, 0]) as destination:
@@ -309,9 +309,9 @@ def main():
             if scatter_results[2].ready or not scatter_factors[2, 0].writable:
                 raise ArithmeticError('Fused update ignored its missing coefficient operand')
             with program.write(scatter_factors[2, 0]) as destination:
-                destination[...] = 2
+                destination[...] = 2 + generation
             wait_for((scatter_results[2],))
-            if not np.array_equal(scatter_results[2].array, np.full((1, 4), 26 if generation else 32, dtype=dtype)):
+            if not np.array_equal(scatter_results[2].array, np.full((1, 4), 38 if generation else 32, dtype=dtype)):
                 raise ArithmeticError('Duplicate or masked scatter contribution differs')
             print(json.dumps(dict(event='indexed_add', generation=generation, first_consumer_ns=first_scatter_ns,
                 complete_ns=time.monotonic_ns()-scatter_start,
