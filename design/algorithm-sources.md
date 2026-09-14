@@ -3020,6 +3020,11 @@ page stamps, and gathers consume their ordinal regions through the existing
 indexed-load owner. Axis transposition and higher-rank coordinate maps preserve
 that dependency domain. Setup caches the full axis ordering across output tiles.
 
+Xonotic rank-two transpose now uses the existing matrix view and transposed
+Refs, retaining source ownership and page boundaries. Identity transpose also
+aliases its source. Downstream canonical replication performs any required peer
+transfer; transpose itself launches no copy and joins no independent rows.
+
 Xonotic now describes ordering with shared expressions and logical views. Its
 last private Metal numerical emitter, metadata structs and dispatch binding are
 removed. The existing streaming-algebra workflow covers stable ties, NaNs,
@@ -3027,3 +3032,37 @@ signed zeros, exact large integers, ragged runs, source-dependent partial work,
 independent rows, gathers and reuse. These finite observations establish only
 the recorded numerical/progress behavior; matched throughput, optimal selection
 and full-plan performance parity remain separate requirements.
+
+## Canonical view replication
+
+The JAX authors' [Pallas indexing design](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs)
+separates reference indexing from storage. Apple's [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
+describes the SEND/RECV transport used by this substrate. A logical view may
+name part of a registered extent; its metadata must survive transport even
+though the transfer/publication unit remains the whole canonical extent.
+
+`Program.replicate(tensor.on(sender), receiver)` realizes this mapping during
+setup. For every distinct source peer, receiver, tensor identity and extent it
+retains one destination backing and one ordinary `Program.copy` route. The source
+of that route is the native full extent view, not an inferred orientation or a
+fragment treated as a full allocation. Destination physical shape and dtype
+match that source. Every logical block then receives the retained destination
+identity plus its original offset, rows, columns and two strides. Shared source
+fragments share their destination backing and route. Same-peer replication is
+a metadata identity; empty tensors have no routes or operand allocation.
+
+This uses the existing canonical SEND/RECV readiness, send publication, reader
+retirement and repeated invocation mechanisms. There is no numerical gather,
+host array copy, extra scheduler or inferred first-block layout. Transposes,
+fragmented reshapes and broadcast strides remain ordinary numerical views over
+the actual registered destination pages. A partial view still cannot publish
+before its original physical extent arrives. Setup retains the extent map until
+the program closes; invocations neither rebuild it nor allocate replicas.
+
+Xonotic delegates peer operand replication to this owner and removes its own
+replica cache and orientation guess. The existing streaming-algebra workflow
+uses a fragmented reshape/transpose, remote arithmetic, return publication and
+repeated reuse to observe one source extent's consumers completing while the
+other source extent is absent. Local runs exercise alias indexing; paired runs
+exercise actual link transfer. This does not by itself establish transfer
+throughput or optimal storage placement.
