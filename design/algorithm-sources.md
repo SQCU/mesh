@@ -2271,3 +2271,29 @@ compilation and diff review cover this increment. The existing operational
 scatter workflow adds matrix and higher-rank row updates, multidimensional
 indices, feature broadcasts, delayed producer blocks, repeated invocations and
 a downstream numerical consumer.
+
+## Xonotic partitioned reshape
+
+The JAX authors' [Pallas indexing design](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs)
+and the NumPy authors' [reshape contract](https://numpy.org/doc/stable/reference/generated/numpy.reshape.html)
+separate logical index order from backing strides. Xonotic `matrix_view` maps
+row-major logical ordinals to existing canonical references at setup. It validates
+positive two-dimensional target shape and unchanged element count.
+
+Existing equal-shape, singleton transpose and aligned flat-column row-reframe
+cases remain metadata-only fast paths. Otherwise the target tile is
+(1, gcd(target columns, source columns, source block columns)). Every tile start
+and end aligns with source row and column-block boundaries, so its flat ordinal
+identifies exactly one source row fragment. `Tensor.region` and `Ref.slice`
+preserve that fragment's tensor, extent, offset and actual strides, including
+transposed or broadcast input storage. Native view metadata describes the target
+shape without copying numerical operands or launching a reshape operation.
+
+This representation can contain several fragments of the same original page.
+Their readiness and retirement remain tied to that page; creating aliases does
+not create finer publication granularity or permit fragment sends. Existing
+`Ref.whole` enforces that boundary. Consumers produce separate canonical output
+regions through the shared compiler. Metadata table size can grow to one entry
+per target scalar when the width gcd is one; it is a setup cost, not hidden
+numerical storage. This removes row-scatter's prior partition-crossing base
+reshape restriction without adding another numerical lowering.

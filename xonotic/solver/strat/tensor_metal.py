@@ -317,11 +317,14 @@ def source(nodes):
     return PREFIX + '\n'.join(sources.values()), kernels
 
 
-# ../../../design/algorithm-sources.md#xonotic-take-transpose
+# ../../../design/algorithm-sources.md#xonotic-partitioned-reshape
 def matrix_view(tensor, shape):
+    import math
     from mesh import Tensor, Ref
     from mesh._native import View as NativeView
     shape = tuple(shape)
+    if len(shape) != 2 or min(shape) <= 0 or math.prod(shape) != math.prod(tensor.shape):
+        raise ValueError('Matrix view must preserve element count with two positive dimensions')
     if tensor.shape == shape:
         return tensor
     if tensor.shape[::-1] == shape and 1 in shape:
@@ -331,8 +334,13 @@ def matrix_view(tensor, shape):
         grid = (tensor.grid[0], 1)
         regions = tuple((coordinate, ref, (ref.shape[0] // shape[1], shape[1])) for coordinate, ref in tensor.blocks.items())
     else:
-        block_shape, grid = shape, (1, 1)
-        regions = (((0, 0), tensor.region(0, 0, *tensor.shape), shape),)
+        width = math.gcd(shape[1], tensor.shape[1], tensor.block_shape[1])
+        block_shape, grid = (1, width), (shape[0], shape[1] // width)
+        regions = []
+        for i in range(grid[0]):
+            for j in range(grid[1]):
+                row, column = divmod(i * shape[1] + j * width, tensor.shape[1])
+                regions.append(((i, j), tensor.region(row, column, 1, width), (1, width)))
     result = object.__new__(Tensor)
     result.program, result.dtype, result.handle = tensor.program, tensor.dtype, tensor.handle
     result.shape, result.block_shape, result.grid = shape, block_shape, grid
