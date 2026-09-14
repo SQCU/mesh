@@ -167,6 +167,21 @@ def main():
                 {source.index: x_source, indices.index: x_indices, tail.index: x_tail},
                 root_peer=0, tile_rows=2, tile_columns=4)
             observations = tuple(program.export(lowered[joined.index][i, 0]) for i in range(3))
+            bindings = {}
+            for name, references in (
+                    ('source', tuple(sorted(x_source.blocks.items()))),
+                    ('indices', tuple(sorted(x_indices.blocks.items()))),
+                    ('tail', tuple(sorted(x_tail.blocks.items()))),
+                    ('gathered', tuple(sorted(lowered[selected.index].blocks.items()))),
+                    ('output', tuple(((i, 0), result.ref) for i, result in enumerate(observations)))):
+                entries = []
+                for coordinate, ref in references:
+                    mapping = program.native.tensor_rows(ref.view.tensor, ref.view.extent)
+                    entries.append(dict(coordinate=coordinate, first=mapping.first, count=mapping.count,
+                        extent=ref.view.extent, offset=ref.view.offset, shape=ref.shape,
+                        strides=(ref.view.row_stride, ref.view.column_stride), dtype=str(ref.dtype)))
+                bindings[name] = entries
+            print(json.dumps(dict(event='xonotic_indexed_bindings', rank=program.node, bindings=bindings)), flush=True)
             generations = []
             for generation in range(2):
                 source_values = np.arange(16, dtype=np.float32).reshape(4, 4) + 32 * generation

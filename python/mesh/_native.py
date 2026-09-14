@@ -29,6 +29,11 @@ class RowRange(C.Structure):
     _fields_ = [("first", U), ("count", U)]
 
 
+class RowMap(C.Structure):
+    _fields_ = [(name, U) for name in ('first', 'count', 'stride', 'plane')] + [
+        ('ranges', C.POINTER(RowRange)), ('members', C.POINTER(U)), ('member_offsets', C.POINTER(Z))]
+
+
 class ReaderEvent(C.Structure):
     _fields_ = [(name, U) for name in ('source', 'member', 'plane', 'completed', 'flags')]
 
@@ -86,6 +91,7 @@ class Native:
             'mesh_tensor_create': (P, [P, C.POINTER(Shape), Z, C.c_int]),
             'mesh_tensor_view': (View, [P, U]),
             'mesh_tensor_data': (P, [P, U]),
+            'mesh_tensor_rows': (RowMap, [P, U]),
             'mesh_view_slice': (View, [View, Z, Z, Z, Z]),
             'mesh_view_transpose': (View, [View]),
             'mesh_view_broadcast': (View, [View, Z, Z]),

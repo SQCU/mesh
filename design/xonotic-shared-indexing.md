@@ -120,3 +120,11 @@ withheld writable states; premature dependent output readiness has its own error
 The first operational CPU attempt completed generation zero exactly, then exposed
 this observer mistake in generation one. The corrected source has not yet been
 rerun in this record.
+
+The `xonotic_indexed_bindings` setup record retains each source, index, tail,
+gathered intermediate and exported output block's actual native row range,
+extent, offset, shape and strides. `mesh_tensor_rows` supplies first/count from
+the canonical allocation; no row identity is reconstructed from timing or buffer
+addresses. The Python RowMap return type matches all fields of mesh_row_map,
+including its range/member/offset pointers. These bindings allow direct joins to
+native compute and selected-reader trace records.
