@@ -97,9 +97,8 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
   struct mesh_ctx *context;
   struct mesh_writer *writers;
   _Atomic uint64_t submitted;
-  _Atomic uint64_t nativeSubmitted,cpuSubmitted;
   uint32_t copies;
-  _Atomic uint64_t completed,gpuNanoseconds,nativeBackings;
+  _Atomic uint64_t completed;
   _Atomic int64_t code;
 }
 @property BOOL realized,cpu;
@@ -148,11 +147,11 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @end
 
 /* design/algorithm-sources.md#indexed-library-functions */
-static void complete_part(MeshFunction *f,int64_t error,uint64_t nanoseconds) {
+static void complete_part(MeshFunction *f,int64_t error) {
   MeshAlgebra *a=f.owner;
   if(error)atomic_store(&a->code,error);
   else mesh_complete(a->context,&f->function,&f->occurrence,1);
-  atomic_fetch_add(&a->gpuNanoseconds,nanoseconds);atomic_fetch_add(&a->completed,1);dispatch_group_leave(a.executions);
+  atomic_fetch_add(&a->completed,1);dispatch_group_leave(a.executions);
 }
 /* design/algorithm-sources.md#streaming-algebra */
 static MeshAlgebra *owner(struct mesh_algebra *a) { return (__bridge MeshAlgebra *)a; }
@@ -489,8 +488,7 @@ static MTLCompileOptions *source_options(void) {
 static void submit_encoded_metal(MeshFunction *f,void (^encode)(id<MTLCommandBuffer>)) {
   id<MTLCommandBuffer> command=[f.queue commandBuffer];encode(command);
   [command addCompletedHandler:^(id<MTLCommandBuffer> done){
-    atomic_fetch_add(&f.owner->gpuNanoseconds,(uint64_t)((done.GPUEndTime-done.GPUStartTime)*1e9));
-    complete_part(f,done.error.code,0);
+    complete_part(f,done.error.code);
   }];
   [command commit];
 }
@@ -555,7 +553,7 @@ static int bind_metal(struct mesh_algebra *handle,const char *text,size_t rows,c
 
 /* design/algorithm-sources.md#region-expression-fusion */
 static void submit_cpu(MeshFunction *f) {
-  f.cpuCode.kernel(f.cpuArguments.bytes,&f->publication);complete_part(f,0,0);
+  f.cpuCode.kernel(f.cpuArguments.bytes,&f->publication);complete_part(f,0);
 }
 /* design/algorithm-sources.md#in-operation-publication */
 static void publish_cpu(void *context,uint32_t first,uint32_t count) {
@@ -670,7 +668,7 @@ static int cpu_part(MeshFunction *f,struct mesh_view x,struct mesh_view y,struct
     f.execute=^(MeshFunction *function){
       const struct gemm *g=calls.bytes;
       for(size_t i=0;i<calls.length/sizeof *g;i++)cblas_sgemm(CblasRowMajor,g[i].tx,g[i].ty,g[i].m,g[i].n,g[i].k,alpha,g[i].a,g[i].lda,g[i].b,g[i].ldb,0,g[i].c,g[i].ldc);
-      complete_part(function,0,0);
+      complete_part(function,0);
     };
     return 0;
   }
@@ -697,7 +695,7 @@ static int cpu_part(MeshFunction *f,struct mesh_view x,struct mesh_view y,struct
     const struct gemm *g=calls.bytes;int error=0;
     for(size_t i=0;i<calls.length/sizeof *g && !error;i++)
       error=BNNSMatMul(tx,ty,alpha,&g[i].a,&g[i].b,&g[i].c,scratch,NULL);
-    complete_part(function,error,0);
+    complete_part(function,error);
   };
   return 0;
 }
@@ -742,13 +740,11 @@ static int native_part(MeshAlgebra *a,MeshFunction *f,NSArray *rectangles,NSDict
   MLDictionaryFeatureProvider *inputs=[[MLDictionaryFeatureProvider alloc]initWithDictionary:features error:&error];
   if(!output || !inputs)return (int)error.code;
   MLPredictionOptions *options=[MLPredictionOptions new];options.outputBackings=@{@"z":output};
-  __unsafe_unretained MeshAlgebra *context=a;
   f.execute=^(MeshFunction *function) {
     [model predictionFromFeatures:inputs options:options completionHandler:^(id<MLFeatureProvider> prediction,NSError *failure){
       MLMultiArray *actual=[prediction featureValueForName:@"z"].multiArrayValue;
       BOOL backing=actual && actual.dataPointer==output.dataPointer && actual.dataType==output.dataType && [actual.shape isEqualToArray:output.shape] && [actual.strides isEqualToArray:output.strides];
-      if(backing)atomic_fetch_add(&context->nativeBackings,1);
-      complete_part(function,failure?failure.code:backing?0:EPROTO,0);
+      complete_part(function,failure?failure.code:backing?0:EPROTO);
     }];
   };
   return 0;
@@ -911,7 +907,7 @@ int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_
         struct mesh_copy_segment p=parts[i];
         for(size_t j=0;j<p.elements;j++)memcpy(p.destination+j*p.bytes,p.source+j*p.stride,p.bytes);
       }
-      complete_part(function,0,0);
+      complete_part(function,0);
     };
     [a.functions addObject:f];
   }
@@ -982,8 +978,6 @@ static void submit_ready(void *argument,uint32_t occurrence) {
   MeshFunction *f=(__bridge MeshFunction *)argument;MeshAlgebra *a=f.owner;
   f->occurrence=occurrence;
   atomic_fetch_add(&a->submitted,1);
-  if(f->executionKind==MESH_EXECUTION_CPU)atomic_fetch_add(&a->cpuSubmitted,1);
-  if(f->executionKind==MESH_EXECUTION_COREML)atomic_fetch_add(&a->nativeSubmitted,1);
   dispatch_group_enter(a.executions);
   @autoreleasepool{f.execute(f);}
 }
@@ -1036,7 +1030,7 @@ void mesh_algebra_consume(struct mesh_algebra *handle,size_t index) {
 }
 /* design/algorithm-sources.md#streaming-algebra */
 struct mesh_algebra_report mesh_algebra_report(struct mesh_algebra *handle) {
-  MeshAlgebra *a=owner(handle);return (struct mesh_algebra_report){.submitted=a->submitted,.completed=atomic_load(&a->completed),.native_submitted=atomic_load(&a->nativeSubmitted),.native_backings=atomic_load(&a->nativeBackings),.code=atomic_load(&a->code),.gpu_seconds=atomic_load(&a->gpuNanoseconds)/1e9,.cpu_submitted=atomic_load(&a->cpuSubmitted)};
+  MeshAlgebra *a=owner(handle);return (struct mesh_algebra_report){.submitted=atomic_load(&a->submitted),.completed=atomic_load(&a->completed),.code=atomic_load(&a->code)};
 }
 
 /* design/algorithm-sources.md#indexed-library-functions */
