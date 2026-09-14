@@ -690,13 +690,14 @@ int mesh_algebra_route_attach(struct mesh_algebra *handle,size_t index,struct me
 }
 
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
-int mesh_algebra_indexed_range(struct mesh_algebra *handle,size_t index,struct mesh_view selector,struct mesh_view range,const size_t *candidate_inputs,size_t count){
+int mesh_algebra_indexed_range(struct mesh_algebra *handle,size_t index,struct mesh_view selector,struct mesh_view range,const size_t *candidate_inputs,size_t input_count,const struct mesh_view *candidates,size_t count){
   MeshAlgebra *a=owner(handle);
-  if(a.realized || index>=a.functions.count || !count || count>(UINT32_MAX-2)/2 || !candidate_inputs || !valid_view(a,selector))return EINVAL;
+  if(a.realized || index>=a.functions.count || !count || count>(UINT32_MAX-2)/2 || (input_count && !candidate_inputs) || !candidates || !valid_view(a,selector))return EINVAL;
   if(selector.tensor->extents[selector.extent].shape.scalar!=MESH_U32)return EINVAL;
   if(range.tensor && (!valid_view(a,range) || range.rows*range.columns!=2 || range.tensor->extents[range.extent].shape.scalar!=MESH_U32))return EINVAL;
-  MeshFunction *f=a.functions[index];const struct mesh_view *inputs=f.inputViews.bytes;size_t input_count=f.inputViews.length/sizeof *inputs;
-  for(size_t i=0;i<count;i++)if(candidate_inputs[i]>=input_count || !valid_view(a,inputs[candidate_inputs[i]]))return EINVAL;
+  MeshFunction *f=a.functions[index];const struct mesh_view *inputs=f.inputViews.bytes;size_t available_inputs=f.inputViews.length/sizeof *inputs;
+  for(size_t i=0;i<input_count;i++)if(candidate_inputs[i]>=available_inputs || !valid_view(a,inputs[candidate_inputs[i]]))return EINVAL;
+  for(size_t i=0;i<count;i++)if(!valid_view(a,candidates[i]))return EINVAL;
   struct mesh_indexed_read *d=calloc(1,sizeof *d);if(!d)return ENOMEM;
   d->candidate=calloc(count,sizeof *d->candidate);if(!d->candidate){free(d);return ENOMEM;}
   d->candidates=(uint32_t)count;
@@ -709,7 +710,11 @@ int mesh_algebra_indexed_range(struct mesh_algebra *handle,size_t index,struct m
     else{d->selector=maps;memcpy(maps+d->selectors,bounds.maps,bounds.count*sizeof *maps);d->selectors+=bounds.count;}
     free(bounds.maps);
   }
-  for(size_t i=0;i<count && !error;i++){d->candidate[i]=indexed_maps(inputs[candidate_inputs[i]]);d->candidate[i].input=candidate_inputs[i];if(!d->candidate[i].maps)error=ENOMEM;}
+  for(size_t i=0;i<count && !error;i++){
+    struct mesh_view candidate=candidates[i];
+    d->candidate[i]=indexed_maps(candidate);d->candidate[i].input=SIZE_MAX;
+    if(!d->candidate[i].maps){error=ENOMEM;break;}
+  }
   for(size_t i=0;i<count && !error;i++)for(uint32_t j=0;j<d->candidate[i].count;j++){
     struct mesh_row_map map=d->candidate[i].maps[j];
     for(uint32_t k=0;k<d->selectors;k++)if(overlaps(map,d->selector[k]))error=EINVAL;
@@ -722,9 +727,9 @@ int mesh_algebra_indexed_range(struct mesh_algebra *handle,size_t index,struct m
   d->indices=(const uint32_t *)selector.tensor->extents[selector.extent].address+selector.offset;
   d->rows=selector.rows;d->columns=selector.columns;d->row_stride=selector.row_stride;d->column_stride=selector.column_stride;
   d->selected=d->retired+d->candidates;d->completed=d->selected+d->candidates;d->mapped=d->completed+1;
-  for(size_t i=0;i<count;i++)[f.indexedInputs addIndex:candidate_inputs[i]];
+  for(size_t i=0;i<input_count;i++)[f.indexedInputs addIndex:candidate_inputs[i]];
   d->next=f->function.indexed;f->function.indexed=d;f.dependencies=[NSMutableData new];
-  for(size_t i=0;i<input_count;i++)if(![f.indexedInputs containsIndex:i])dependencies(f.dependencies,inputs[i]);
+  for(size_t i=0;i<available_inputs;i++)if(![f.indexedInputs containsIndex:i])dependencies(f.dependencies,inputs[i]);
   for(struct mesh_indexed_read *part=f->function.indexed;part;part=part->next)
     [f.dependencies appendBytes:part->selector length:part->selectors*sizeof *part->selector];
   if(f->function.routes)route_dependencies(f);else bind_dependencies(f);
@@ -732,8 +737,8 @@ int mesh_algebra_indexed_range(struct mesh_algebra *handle,size_t index,struct m
 }
 
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
-int mesh_algebra_indexed(struct mesh_algebra *handle,size_t index,struct mesh_view selector,const size_t *candidate_inputs,size_t count){
-  return mesh_algebra_indexed_range(handle,index,selector,(struct mesh_view){0},candidate_inputs,count);
+int mesh_algebra_indexed(struct mesh_algebra *handle,size_t index,struct mesh_view selector,const size_t *candidate_inputs,size_t input_count,const struct mesh_view *candidates,size_t count){
+  return mesh_algebra_indexed_range(handle,index,selector,(struct mesh_view){0},candidate_inputs,input_count,candidates,count);
 }
 
 struct cpu_operand {const void *address;struct geometry_view view;float (*load)(const void *,size_t);};

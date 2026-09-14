@@ -4218,3 +4218,60 @@ Source review checks setup-only realization and resource/pipeline lifetime.
 Compilation is the validation used here; no numerical run or performance claim
 accompanies this change. Publication from within a running accelerator dispatch
 remains unresolved by this simplification.
+
+
+## Page-indexed gather dependencies
+
+The JAX authors' [gather](https://docs.jax.dev/en/latest/_autosummary/jax.lax.gather.html)
+defines indexed slices through index values and configured slice geometry.
+Their [Pallas pipelining guide](https://docs.jax.dev/en/latest/pallas/tpu/pipelining.html)
+separates transfers and computation over configured blocks. Mesh applies that
+indexed representation to its existing canonical page dependencies; it does not
+claim JAX implements this page-table protocol or has no internal waits.
+
+Previously, dynamic gather selectors produced a backing-block ordinal. Native
+indexed binding reused that numerical input view as the readiness candidate,
+so selecting one element required every touched page of that backing block.
+`_page_selector` now enumerates each source view's actual pages during setup,
+deduplicates `(tensor, extent, page offset)`, and retains the corresponding
+candidate views explicitly. It constructs immutable offset, row-stride,
+column-stride, and page-map-base vectors indexed by the logical block ordinal.
+`_lookup_name` names immutable vectors by their contents; `_lookup_declarations`
+emits their definitions once per generated source. Lookup nodes lower to array
+indexing in both CPU and Metal source, with no runtime geometry inference.
+
+For a selected block, let `q` be scalar elements per physical page, `p` its first
+touched page offset in elements, `o` the original view offset, and `r,c` its local
+logical coordinates. The emitted selector is
+`map[base + floor((o - p + r*row_stride + c*column_stride)/q)]`.
+The map retains a candidate ordinal for each touched page and ABSENT for holes.
+The original mask encloses this expression, so masked coordinates do not evaluate
+its lookups. Transpose, broadcast strides, nonzero offsets, and clipped edge
+blocks use their configured view geometry. Different views of one page share one
+candidate. Numerical loads retain the original canonical buffer pointers and
+strides; no payload copy or alternate operand allocation is introduced.
+
+`mesh_algebra_indexed` and `mesh_algebra_indexed_range` now take the numerical
+input slots to remove from unconditional dependencies separately from explicit
+candidate views. Ordinary and segmented dynamic gathers both pass page candidates.
+Selected native contractions and direct segment inputs pass their existing
+explicit views through the same signature. Reader selection, retirement, and
+page-stamp publication retain their existing owner. A candidate can serve several
+numerical slots, so its trace input field is SIZE_MAX; its explicit page maps are
+the authoritative dependency identity. No view-matching reconstruction is used.
+
+For a gather whose configured output region selects only page zero of a
+four-page source block, the selected payload dependency is now page zero. The
+other three pages are not selected prerequisites of that function. A function
+selecting several pages still needs those selected pages; dividing output domains
+further remains a separate requirement. Static-access specialization still
+retains its selected backing views, and selector/output publication-domain
+coarsening remains unresolved. This change does not establish complete streaming.
+
+Setup metadata scales with source-block geometry, each block's physical page
+span, and unique touched candidates. Sparse strides can leave holes in lookup
+vectors. Each indexed consumer retains page-granular reader metadata, which can
+cost more than its former block-granular metadata. No runtime measurements were
+performed. Evidence is source review, native/Python compilation, and import-only
+checks; compilation of the library alone does not validate generated Metal
+execution or establish a speedup.

@@ -616,7 +616,7 @@ class _ExpressionKernel:
             for node, paths in accesses.items():
                 table = reads[node.value]
                 row, column, mask, _ = node.operands
-                ordinal = _Expression('block_ordinal', (row, column), (*table.block_shape, table.grid[1]))
+                ordinal, candidates = _page_selector(program, table, row, column)
                 enabled = _literal(False)
                 for path in paths:
                     condition = _literal(True)
@@ -639,7 +639,7 @@ class _ExpressionKernel:
                 selector_shape(selector_value)
                 selected = program.tensor((output.shape[0], selector_width), dtype=np.uint32)[0, 0]
                 _ExpressionKernel((selector_value,)).bind(program, reads, (selected,))
-                dynamic[node] = (selected, node.value)
+                dynamic[node] = (selected, node.value, candidates)
 
             flattened = tuple(ref for source in reads for ref in
                 (source.refs if isinstance(source, _StaticTable) else tuple(ref for _, ref in sorted(source.blocks.items())) if hasattr(source, 'blocks') else (source,)))
@@ -653,12 +653,13 @@ class _ExpressionKernel:
                 check(program.native.algebra_source(program.handle, *sources,
                     (View * len(flattened))(*(ref.view for ref in flattened)), len(flattened), output.view,
                     (C.c_uint8 * len(access_axes))(*access_axes), begin, rows, column, columns))
-                for node, (selected, index) in dynamic.items():
+                for node, (selected, index, candidates) in dynamic.items():
                     first, count = offsets[index]
                     selection = selected.slice(begin, 0 if node in reduced_accesses else column, rows,
                                                selected.shape[1] if node in reduced_accesses else columns)
                     check(program.native.algebra_indexed(program.handle, function, selection.view,
-                        (C.c_size_t * count)(*range(first, first + count)), count))
+                        (C.c_size_t * count)(*range(first, first + count)), count,
+                        (View * len(candidates))(*candidates), len(candidates)))
 
     # design/algorithm-sources.md#shared-associative-reductions
     def source(self, inputs, output, metal, expression):
@@ -681,7 +682,7 @@ class _ExpressionKernel:
                 return np.dtype(node.value).kind != 'f'
             if node.operation == 'literal':
                 return isinstance(node.value, (int, bool))
-            if node.operation in ('<', '<=', '>', '>=', '==', 'row', 'column', 'block_ordinal'):
+            if node.operation in ('<', '<=', '>', '>=', '==', 'row', 'column', 'block_ordinal', 'lookup'):
                 return True
             if node.operation in _REAL_FUNCTIONS:
                 return False
@@ -754,6 +755,7 @@ class _ExpressionKernel:
 
         lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
         lines.append(_scalar_helpers(metal))
+        lines.append(_lookup_declarations(expression, metal))
         layouts = {}
         for index, ref in enumerate(inputs):
             if isinstance(ref, _StaticTable):
@@ -918,6 +920,53 @@ def _indexed_access_paths(expression, inputs, dynamic_inputs):
     return accesses
 
 
+# design/algorithm-sources.md#page-indexed-gather-dependencies
+def _lookup_name(values):
+    import hashlib
+    return 'mesh_lookup_' + hashlib.sha256(repr(values).encode()).hexdigest()
+
+
+# design/algorithm-sources.md#page-indexed-gather-dependencies
+def _lookup_declarations(expression, metal):
+    tables, pending = {}, [expression]
+    while pending:
+        node = pending.pop()
+        if node.operation == 'lookup':
+            tables[_lookup_name(node.value)] = node.value
+        pending.extend(node.operands)
+    return '\n'.join(f'{"constant" if metal else "static const"} uint64_t {name}[]={{' +
+        ','.join(f'{value}ull' for value in values) + '};' for name, values in sorted(tables.items()))
+
+
+# design/algorithm-sources.md#page-indexed-gather-dependencies
+def _page_selector(program, table, row, column):
+    import ctypes as C
+    from . import check
+    from ._native import View
+    unit = program.native.algebra_page_bytes(program.handle) // table.dtype.itemsize
+    candidates, positions, maps, geometry = [], {}, [], []
+    for _, ref in sorted(table.blocks.items()):
+        count = C.c_size_t()
+        check(program.native.algebra_view_pages(program.handle, ref.view, None, 0, C.byref(count)))
+        pages = (View * count.value)()
+        check(program.native.algebra_view_pages(program.handle, ref.view, pages, count.value, C.byref(count)))
+        first, last = pages[0].offset // unit, pages[-1].offset // unit
+        base = len(maps)
+        maps.extend([0xffffffff] * (last-first+1))
+        for page in pages:
+            key = page.tensor, page.extent, page.offset
+            if key not in positions:
+                positions[key] = len(candidates)
+                candidates.append(page)
+            maps[base+page.offset//unit-first] = positions[key]
+        geometry.append((ref.view.offset-first*unit, ref.view.row_stride, ref.view.column_stride, base))
+    block = _Expression('block_ordinal', (row, column), (*table.block_shape, table.grid[1]))
+    offset, row_stride, column_stride, base = (
+        _Expression('lookup', (block,), tuple(entry[index] for entry in geometry)) for index in range(4))
+    address = offset + row % table.block_shape[0] * row_stride + column % table.block_shape[1] * column_stride
+    return _Expression('lookup', (base + address // unit,), tuple(maps)), tuple(candidates)
+
+
 # design/algorithm-sources.md#static-indexed-access-specialization
 def _static_table_source(table, first, name, metal):
     dtype = table.dtype
@@ -969,6 +1018,8 @@ def _emit_scalar_expression(node, inputs, metal, resolve):
     args = tuple(_emit_scalar_expression(child, inputs, metal, resolve) for child in node.operands)
     if node.operation == 'load':
         return resolve(node, args)
+    if node.operation == 'lookup':
+        return f'{_lookup_name(node.value)}[{args[0]}]'
     if node.operation == 'block_ordinal':
         row, column = args
         rows, columns, grid_columns = node.value
@@ -989,6 +1040,8 @@ def _expression_dtype(node, inputs):
         return np.dtype('bool') if all(dtype.kind == 'b' for dtype in types) else _expression_dtype(_Expression('*', node.operands), inputs)
     if node.operation == 'indexed_contract' or node.operation in _REAL_FUNCTIONS:
         return np.dtype('float32')
+    if node.operation == 'lookup':
+        return np.dtype('uint64')
     if node.operation in ('philox', 'argsort'):
         return np.dtype('uint32')
     if node.operation in ('<', '<=', '>', '>=', '==', 'isfinite'):
@@ -1294,6 +1347,7 @@ def _bind_segment_expression(program, expression, operands, ordinals, bounds, fl
                              count, width, target, active_count, segment, reduction, cache=None):
     import ctypes as C
     from . import check
+    from ._native import View
     if count * width > 0xffffffff:
         raise ValueError('Flattened segment selector bounds exceed the uint32 domain')
     inputs = (*operands, ordinals)
@@ -1313,7 +1367,7 @@ def _bind_segment_expression(program, expression, operands, ordinals, bounds, fl
     selectors = []
     for node, paths in _indexed_access_paths(expression, inputs, dynamic).items():
         table = inputs[node.value]
-        ordinal = _Expression('block_ordinal', node.operands[:2], (*table.block_shape, table.grid[1]))
+        ordinal, candidates = _page_selector(program, table, *node.operands[:2])
         enabled = _literal(False)
         for path in paths:
             condition = _literal(True)
@@ -1328,7 +1382,7 @@ def _bind_segment_expression(program, expression, operands, ordinals, bounds, fl
             _bind_segment_expression(program, selector_value, operands,
                 ordinals, bounds, flat_bounds, direct_selector, count, width, selected, active_count, segment, False, cache)
             cache[selector_key] = selected
-        selectors.append((cache[selector_key], node.value))
+        selectors.append((cache[selector_key], node.value, candidates))
     physical, pointers = [ordinals, bounds], {len(operands): (0,)}
     for index in sorted(used - {len(operands)}):
         source = inputs[index]
@@ -1338,7 +1392,7 @@ def _bind_segment_expression(program, expression, operands, ordinals, bounds, fl
 
     # design/algorithm-sources.md#bounded-indexed-segment-loads
     def body(metal):
-        declarations, locals, layouts = [], [], {}
+        declarations, locals, layouts = [_lookup_declarations(expression, metal)], [], {}
         for index in sorted(used - {len(operands)}):
             source = inputs[index]
             refs = tuple(ref for _, ref in sorted(source.blocks.items())) if hasattr(source, 'blocks') else (source,)
@@ -1387,10 +1441,11 @@ def _bind_segment_expression(program, expression, operands, ordinals, bounds, fl
 
     function = _compiled_region(program, tuple(physical), target, body, 2, access_axes=(0,) * len(physical),
                                 domains=((0, target.shape[0], 0, target.shape[1]),))
-    for selected, index in selectors:
+    for selected, index, candidates in selectors:
         positions = pointers[index]
         check(program.native.algebra_indexed_range(program.handle, function, selected.view, flat_bounds.view,
-            (C.c_size_t * len(positions))(*positions), len(positions)))
+            (C.c_size_t * len(positions))(*positions), len(positions),
+            (View * len(candidates))(*candidates), len(candidates)))
     if reduction:
         check(program.native.algebra_active(program.handle, function, active_count.view, segment))
     else:
@@ -1399,7 +1454,8 @@ def _bind_segment_expression(program, expression, operands, ordinals, bounds, fl
             if not hasattr(ref, 'blocks') and (ref.view.tensor, ref.view.extent) not in program._constant_extents:
                 positions = pointers[index]
                 check(program.native.algebra_indexed_range(program.handle, function, direct_selector.view, bounds.view,
-                    (C.c_size_t * len(positions))(*positions), len(positions)))
+                    (C.c_size_t * len(positions))(*positions), len(positions),
+                    (View * len(positions))(*(physical[position].view for position in positions)), len(positions)))
     return function
 
 
@@ -2697,7 +2753,8 @@ def _lower_indexed_product(lowering, value, target, compiled_plan):
                                                   domains=((0, readiness.shape[0], 0, readiness.shape[1]),))
             entry['readiness'] = dict(view=program._plan_view(readiness), function=readiness_function)
             check(program.native.algebra_indexed(program.handle, function.value, readiness.view,
-                (C.c_size_t * len(dependencies))(*range(1, len(dependencies)+1)), len(dependencies)))
+                (C.c_size_t * len(dependencies))(*range(1, len(dependencies)+1)), len(dependencies),
+                (View * len(dependencies))(*(ref.view for ref in dependencies)), len(dependencies)))
     return binding
 
 
