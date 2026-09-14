@@ -529,7 +529,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             axes = tuple(sorted(set(attributes['axes']))) if len(operand_shape) == 2 else (1,)
             reduced_shape = tuple(1 if axis in axes else size for axis, size in enumerate(operand.shape))
             block = tuple(math.gcd(min(tile, size), operand.block_shape[axis] if operand.grid[axis] > 1 else 0)
-                          for axis, (tile, size) in enumerate(zip((tile_rows, tile_columns), reduced_shape)))
+                          for axis, (tile, size) in enumerate(zip((tile_rows, tile_rows), reduced_shape)))
             argument, = kernels.arguments(1)
             term = argument & 0xffffffffffffffff if operand.dtype.kind in 'iu' else argument
             result = term.sum(axis=axes)
