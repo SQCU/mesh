@@ -118,10 +118,13 @@ firing ⇒ static bound).
 Check: `mesh_issue` has no claimability branch; `grep -n "claim\|EBUSY\|writable" rdma/mesh-dataflow.c`
 returns only the host-writer path of `program.write`.
 
-### G5. One poller, and it never computes
+### G5. Transport drains and refills immediately, independently of numerical work
 
-Artifact: unchanged `mesh_progress` in the bridge (NCCL proxy; MSCCL++ PortChannel);
-the algebra fires only from `mesh_events`.
+Artifact: `mesh_progress` in the bridge (NCCL proxy; MSCCL++ PortChannel) drains
+completions and refills available queues without software waits; the algebra fires
+from `mesh_events`. The operator permits additional hardware threads and shared
+global memory wherever needed for independent progress. A single poller is not a
+requirement.
 Check: `grep -rn "scan\|while not .*ready\|sleep" python/mesh rdma/mesh-algebra.m` is
 empty; `rdma/mesh-flow.c` contains no arithmetic on payload bytes.
 
