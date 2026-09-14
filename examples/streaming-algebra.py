@@ -282,7 +282,7 @@ def main():
         for generation in range(2):
             scatter_start = time.monotonic_ns()
             routing = np.array([[0], [2], [0], [3], [2], [2]] if not generation else
-                               [[3], [2], [3], [0], [2], [2]], dtype=np.int64)
+                               [[3], [2**32 + 2], [3], [0], [2], [2]], dtype=np.int64)
             for ref in (*scatter_indices.blocks.values(), *scatter_updates.blocks.values()):
                 while not ref.writable:
                     if time.monotonic_ns() - scatter_start > 60_000_000_000:
@@ -304,7 +304,7 @@ def main():
             with program.write(scatter_updates[2, 0]) as destination:
                 destination[...] = np.array([[5+generation], [6+generation]], dtype=dtype)
             wait_for((scatter_results[2],))
-            if not np.array_equal(scatter_results[2].array, np.full((1, 4), 18 if generation else 14, dtype=dtype)):
+            if not np.array_equal(scatter_results[2].array, np.full((1, 4), 12 if generation else 14, dtype=dtype)):
                 raise ArithmeticError('Duplicate or masked scatter contribution differs')
             print(json.dumps(dict(event='indexed_add', generation=generation, first_consumer_ns=first_scatter_ns,
                 complete_ns=time.monotonic_ns()-scatter_start,
