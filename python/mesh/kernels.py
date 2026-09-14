@@ -2,11 +2,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-_REDUCTIONS = ('sum', 'max', 'min', 'any', 'all')
+_REDUCTIONS = ('sum',)
 _REAL_FUNCTIONS = ('exp', 'rsqrt')
 _POINTWISE_FUNCTIONS = _REAL_FUNCTIONS
 _POINTWISE_OPERATIONS = ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'cast', '//', '%',
-    'maximum', 'minimum', *_POINTWISE_FUNCTIONS)
+    *_POINTWISE_FUNCTIONS)
 
 
 
@@ -137,37 +137,17 @@ class _Expression:
 
 
     # design/algorithm-sources.md#shared-associative-reductions
-    def _reduce(self, operation, axis):
+    def sum(self, axis=1):
         axes = (0, 1) if axis is None else (axis,) if isinstance(axis, int) else tuple(axis)
         if any(value not in (-2, -1, 0, 1) for value in axes):
             raise ValueError('Expression reduction axes refer to its two-dimensional domain')
         axes = tuple(sorted(set(value % 2 for value in axes)))
         if not axes:
-            return self.equal(0).equal(False) if operation in ('any', 'all') else self
+            return self
         if axes == (0,):
-            return self.T._reduce(operation, 1).T
-        reduced = _Expression(operation, (self,))
-        return reduced.T._reduce(operation, 1) if axes == (0, 1) else reduced
-
-    # design/algorithm-sources.md#shared-associative-reductions
-    def sum(self, axis=1):
-        return self._reduce('sum', axis)
-
-    # design/algorithm-sources.md#shared-associative-reductions
-    def max(self, axis=1):
-        return self._reduce('max', axis)
-
-    # design/algorithm-sources.md#shared-associative-reductions
-    def min(self, axis=1):
-        return self._reduce('min', axis)
-
-    # design/algorithm-sources.md#shared-associative-reductions
-    def any(self, axis=1):
-        return self._reduce('any', axis)
-
-    # design/algorithm-sources.md#shared-associative-reductions
-    def all(self, axis=1):
-        return self._reduce('all', axis)
+            return self.T.sum(1).T
+        reduced = _Expression('sum', (self,))
+        return reduced.T.sum(1) if axes == (0, 1) else reduced
 
     @property
     # design/algorithm-sources.md#shared-contraction-lowering
@@ -730,34 +710,18 @@ class _ExpressionKernel:
         for node in reductions:
             name, child = names[node], node.operands[0]
             dtype = _reduction_dtype(node, inputs, output.dtype)
-            unsigned = dtype.kind == 'u' or (node.operation == 'sum' and dtype.kind in 'ib' and integral(child))
+            unsigned = dtype.kind == 'u' or (dtype.kind in 'ib' and integral(child))
             accumulator = (('ulong' if metal else 'uint64_t') if unsigned else ('long' if metal else 'int64_t')) if dtype.itemsize == 8 else (
                 'float' if dtype.kind == 'f' else ('uint' if metal else 'uint32_t') if dtype.kind in 'ub' else ('int' if metal else 'int32_t'))
-            if node.operation in ('max', 'min'):
-                identity = ('-INFINITY' if node.operation == 'max' else 'INFINITY') if dtype.kind == 'f' else _scalar_expression(_literal(
-                    (0 if node.operation == 'max' else 1) if dtype.kind == 'b' else
-                    (np.iinfo(dtype).min if node.operation == 'max' else np.iinfo(dtype).max)), (), metal)
-            else:
-                identity = '1' if node.operation == 'all' else '0'
-            lines.append(f'{accumulator} {name}={identity};')
+            lines.append(f'{accumulator} {name}=0;')
             operand = emit(child, 'k')
-            combine = (f'{name}+={operand}' if node.operation == 'sum' else
-                f'{name}{"|" if node.operation == "any" else "&"}=(({operand})!=0)' if node.operation in ('any', 'all') else
-                f'{name}=' + _scalar_expression(_Expression('maximum' if node.operation == 'max' else 'minimum'), (name, operand), metal, dtype))
+            combine = f'{name}+={operand}'
             lines.append(f'for({"uint" if metal else "uint64_t"} k={"lane" if metal else "0"};k<{widths[child]};k+={32 if metal else 1}) {combine};')
-            if metal and node.operation == 'sum' and dtype.kind in 'iub':
+            if metal and dtype.kind in 'iub':
                 lines.append(f'uint {name}_lo=simd_sum(uint(ulong({name})&65535ul)), {name}_mid=simd_sum(uint((ulong({name})>>16)&65535ul)), {name}_hi=simd_sum(uint(ulong({name})>>32));')
                 lines.append(f'{name}_mid+={name}_lo>>16; {name}_hi+={name}_mid>>16; {name}=(ulong({name}_hi)<<32)|(ulong({name}_mid&65535u)<<16)|ulong({name}_lo&65535u);')
-            elif metal and node.operation in ('max', 'min') and dtype.itemsize == 8:
-                high_type = 'int' if dtype.kind == 'i' else 'uint'
-                operation = 'max' if node.operation == 'max' else 'min'
-                low_identity = '0u' if node.operation == 'max' else '0xffffffffu'
-                lines.append(f'{high_type} {name}_hi={high_type}(ulong({name})>>32), {name}_best=simd_{operation}({name}_hi);')
-                lines.append(f'uint {name}_lo=simd_{operation}({name}_hi=={name}_best?uint(ulong({name})):{low_identity});')
-                lines.append(f'{name}={accumulator}((ulong(uint({name}_best))<<32)|ulong({name}_lo));')
             elif metal:
-                operation = 'max' if node.operation in ('max', 'any') else 'min' if node.operation in ('min', 'all') else 'sum'
-                lines.append(f'{name}=simd_{operation}({name});')
+                lines.append(f'{name}=simd_sum({name});')
         lines.append(f'for({"ulong" if metal else "uint64_t"} c={"column_begin+lane" if metal else "part.column_begin"};c<{"column_end" if metal else "part.column_end"};c+={32 if metal else 1}) p{len(physical)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
         lines.append('}' if metal else _CPU_PUBLICATION_END)
         return '\n'.join(lines)
@@ -962,7 +926,7 @@ def _emit_scalar_expression(node, inputs, metal, resolve):
         rows, columns, grid_columns = node.value
         return f'(({row})/{rows}*{grid_columns}+({column})/{columns})'
     return _scalar_expression(node, args, metal,
-        _expression_dtype(node, inputs) if node.operation in ('//', '%', 'maximum', 'minimum') else None)
+        _expression_dtype(node, inputs) if node.operation in ('//', '%') else None)
 
 
 # design/algorithm-sources.md#logical-indexed-views
@@ -990,7 +954,7 @@ def _expression_dtype(node, inputs):
         if node.value is not None:
             return np.dtype(node.value)
         child = _expression_dtype(node.operands[0], inputs)
-        return np.dtype('bool') if node.operation in ('any', 'all') else child if node.operation != 'sum' else np.dtype('float32' if child.kind == 'f' else 'uint64' if child.kind == 'u' else 'int64')
+        return np.dtype('float32' if child.kind == 'f' else 'uint64' if child.kind == 'u' else 'int64')
     if node.operation == 'load':
         types = (inputs[node.value].dtype, _expression_dtype(node.operands[3], inputs))
     else:
@@ -1006,8 +970,6 @@ def _expression_dtype(node, inputs):
 def _reduction_dtype(node, inputs, output):
     if node.value is not None:
         return np.dtype(node.value)
-    if node.operation != 'sum':
-        return _expression_dtype(node, inputs)
     return np.dtype(np.int64 if output.kind in 'ib' else np.uint64 if output.kind == 'u' else np.float32)
 
 
@@ -1020,10 +982,6 @@ def _scalar_expression(node, args, metal, dtype=None):
     if node.operation in _REAL_FUNCTIONS and node.operation != 'rsqrt':
         name = node.operation + ('' if metal else 'f')
         return name + '(' + ','.join(f'((float)({value}))' for value in args) + ')'
-    if node.operation in ('maximum', 'minimum'):
-        if dtype.kind == 'f':
-            return f'{"fmax" if node.operation == "maximum" else "fmin"}{"" if metal else "f"}({args[0]},{args[1]})'
-        return f'(({args[0]}){">" if node.operation == "maximum" else "<"}({args[1]})?({args[0]}):({args[1]}))'
     if node.operation == 'cast':
         dtype = np.dtype(node.value)
         scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t',
@@ -1333,10 +1291,7 @@ class _ExpressionRegions:
         layout = self.layout(child)
         width, tile = layout[0][1], layout[2][1]
         if width == 0:
-            identity = (1 if node.operation == 'all' else 0) if node.operation in ('sum', 'any', 'all') else (
-                (-np.inf if node.operation == 'max' else np.inf) if dtype.kind == 'f' else
-                (0 if node.operation == 'max' else 1) if dtype.kind == 'b' else
-                np.iinfo(dtype).min if node.operation == 'max' else np.iinfo(dtype).max)
+            identity = 0
             target = direct if direct is not None and direct.dtype == dtype else self.temporary((rows, 1), dtype)
             _ExpressionKernel((_literal(identity),)).bind(self.program, (), (target,))
             self.cache[key] = target
@@ -1350,14 +1305,12 @@ class _ExpressionRegions:
         for left_index, right_index, output in plan.merges:
             target = direct if direct is not None and output == plan.root and direct.dtype == dtype else self.temporary((rows, 1), dtype)
             inputs = (parts[left_index], parts[right_index])
-            if node.operation == 'sum' and dtype.kind == 'f':
+            if dtype.kind == 'f':
                 add.bind(self.program, inputs, (target,))
             else:
                 left, right = arguments(2)
                 bits = 0xffffffffffffffff
-                merged = ((left & bits)+(right & bits) if node.operation == 'sum' else
-                    left | right if node.operation == 'any' else left & right if node.operation == 'all' else
-                    _Expression('maximum' if node.operation == 'max' else 'minimum', (left, right)))
+                merged = (left & bits)+(right & bits)
                 _ExpressionKernel((merged,)).bind(self.program, inputs, (target,), self.coordinate)
             parts[output] = target
         self.cache[key] = parts[plan.root]
