@@ -206,11 +206,14 @@ def main():
         streamed_table = program.tensor((4, 4), (2, 4), dtype=dtype)
         streamed_indices = weight(np.array([[2], [3]], dtype=np.int64))
         source_arg, selected_arg = kernels.arguments(2)
-        streamed_result = program.export(program.kernel_call(
-            kernels.expression(2 * source_arg.at(selected_arg, column_arg)), grid=(1,),
+        streamed_outputs = program.kernel_call(
+            kernels.expression(kernels.select(selected_arg >= 2,
+                2 * source_arg.at(selected_arg, column_arg), source_arg.at(0, column_arg)),
+                source_arg.at(2, column_arg) + source_arg.at(selected_arg, column_arg)), grid=(1,),
             in_specs=(BlockSpec(None), BlockSpec((2, 1), lambda i: (0, 0))),
-            out_specs=BlockSpec((2, 4), lambda i: (0, 0)),
-            out_shape=ShapeDtypeStruct((2, 4), dtype), peer=0)(streamed_table, streamed_indices)[0, 0])
+            out_specs=(BlockSpec((2, 4), lambda i: (0, 0)),) * 2,
+            out_shape=(ShapeDtypeStruct((2, 4), dtype),) * 2, peer=0)(streamed_table, streamed_indices)
+        streamed_results = tuple(program.export(tensor[0, 0]) for tensor in streamed_outputs)
         scatter_indices = program.tensor((updates_count, 1), (update_tile, 1), dtype=np.int64)
         scatter_updates = program.tensor((updates_count, 4), (update_tile, 4), dtype=dtype)
         scatter_factors = program.tensor((updates_count, 1), (update_tile, 1), dtype=np.float32)
@@ -656,16 +659,17 @@ def main():
             if generation:
                 with program.write(streamed_table[0, 0]) as destination:
                     destination[...] = 0
-            wait_for((streamed_result,))
-            if not np.array_equal(streamed_result.array, np.full((2, 4), 2 * (generation + 2), dtype=dtype)):
+            wait_for(streamed_results)
+            if any(not np.array_equal(result.array, np.full((2, 4), 2 * (generation + 2), dtype=dtype)) for result in streamed_results):
                 raise ArithmeticError('Selected source occurrence was lost during indexed reuse')
             if not generation and streamed_table[0, 0].present:
                 raise ArithmeticError('Unrelated table source was unexpectedly published')
             print(json.dumps(dict(event='dynamic_indexed', generation=generation,
                 unrelated_source_present=streamed_table[0, 0].present,
-                result=streamed_result.array.tolist())), flush=True)
+                result=[result.array.tolist() for result in streamed_results])), flush=True)
             if not generation:
-                streamed_result.consume()
+                for result in streamed_results:
+                    result.consume()
         if xonotic_case is not None:
             x_source, x_indices, x_tail, observations, generations = xonotic_case
             for generation, (source_values, index_values, tail_values, expected) in enumerate(generations):
