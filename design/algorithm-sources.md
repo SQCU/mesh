@@ -1127,3 +1127,10 @@ specifies local selector production, duplicate-index and fanout semantics, bound
 repeated occurrences, metadata costs and ABI implications. No source tensor copies,
 additional participant scheduler or per-candidate numerical launches implement
 these transitions.
+
+The streaming-algebra operational example also binds a produced two-block table
+through BlockSpec(None). It publishes only the selected block, consumes the
+result while the unrelated block remains absent, then republishes the selected
+block before supplying the late unselected block. The next selector occurrence
+must consume the new selected value. This checks both independent readiness and
+retirement identity across reuse; constant table examples cannot establish them.

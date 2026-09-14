@@ -96,6 +96,14 @@ def main():
             out_shape=(ShapeDtypeStruct((2, 4), dtype), ShapeDtypeStruct((2, 4), dtype)), peer=0)(
                 weight(table_data), weight(index_data), deferred_input)
         indexed, deferred_output = (program.export(value[0, 0]) for value in indexed_outputs)
+        streamed_table = program.tensor((4, 4), (2, 4), dtype=dtype)
+        streamed_indices = weight(np.array([[2], [3]], dtype=np.int64))
+        source_arg, selected_arg = kernels.arguments(2)
+        streamed_result = program.export(program.kernel_call(
+            kernels.expression(2 * source_arg.at(selected_arg, column_arg)), grid=(1,),
+            in_specs=(BlockSpec(None), BlockSpec((2, 1), lambda i: (0, 0))),
+            out_specs=BlockSpec((2, 4), lambda i: (0, 0)),
+            out_shape=ShapeDtypeStruct((2, 4), dtype), peer=0)(streamed_table, streamed_indices)[0, 0])
         invocations = []
 
         # design/algorithm-sources.md#async-index-push-contract
@@ -227,6 +235,27 @@ def main():
         if not np.array_equal(deferred_output.array, np.full((2, 4), 6, dtype=dtype)):
             raise ArithmeticError('Independent expression output differs')
         deferred_output.consume()
+        for generation in range(2):
+            wait_deadline = time.monotonic() + 60
+            while not streamed_table[1, 0].writable:
+                if time.monotonic() > wait_deadline:
+                    raise TimeoutError('Selected table source was not retired')
+                time.sleep(0.0001)
+            with program.write(streamed_table[1, 0]) as destination:
+                destination[...] = generation + 2
+            if generation:
+                with program.write(streamed_table[0, 0]) as destination:
+                    destination[...] = 0
+            wait_for((streamed_result,))
+            if not np.array_equal(streamed_result.array, np.full((2, 4), 2 * (generation + 2), dtype=dtype)):
+                raise ArithmeticError('Selected source occurrence was lost during indexed reuse')
+            if not generation and streamed_table[0, 0].present:
+                raise ArithmeticError('Unrelated table source was unexpectedly published')
+            print(json.dumps(dict(event='dynamic_indexed', generation=generation,
+                unrelated_source_present=streamed_table[0, 0].present,
+                result=streamed_result.array.tolist())), flush=True)
+            if not generation:
+                streamed_result.consume()
         report = program.report
         print(json.dumps(dict(event='summary', dtype=args.dtype, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
             invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,
