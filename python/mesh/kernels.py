@@ -663,12 +663,14 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             initial = base.region(row, column, *target.shape)
 
             # design/algorithm-sources.md#shared-sparse-routing-lowering
-            def finish(metal, target=target, initial=initial, row=row, consumer=consumer):
-                scalar = 'float' if base.dtype.kind == 'f' else {
+            def finish(metal, target=target, initial=initial, row=row, consumer=consumer, table=table, partial_dtype=candidates[0].dtype):
+                scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float',
                     'i4': 'int32_t', 'i8': 'int64_t', 'u4': 'uint32_t',
-                    'u8': 'uint64_t', 'u1': 'uint8_t'}[base.dtype.kind + str(base.dtype.itemsize)]
-                address = f'(({"device " if metal else ""}const {scalar} *)p4[3*ordinal])'
-                load = f'{address}[c*p4[3*ordinal+2]]'
+                    'u8': 'uint64_t', 'u1': 'uint8_t'}[partial_dtype.kind + str(partial_dtype.itemsize)]
+                address_slot = f'ordinal*{table.view.row_stride}'
+                stride_slot = f'{address_slot}+{2*table.view.column_stride}'
+                address = f'(({"device " if metal else ""}const {scalar} *)p4[{address_slot}])'
+                load = f'{address}[c*p4[{stride_slot}]]'
                 accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t'
                 return f'''uint32_t lo=p2[{consumer}],end=p2[{consumer+1}],hi=end,key={row}+r;
                 while(lo<hi) {{ uint32_t mid=lo+(hi-lo)/2; if(p0[mid]<key)lo=mid+1; else hi=mid; }}
@@ -716,7 +718,7 @@ def _routing_directory(program, chunks, coverage):
 
     # design/algorithm-sources.md#shared-sparse-routing-lowering
     def offset_source(metal):
-        boundaries = tuple(row for row, _ in coverage) + (sum(coverage[-1]),)
+        boundaries = tuple(row for row, _ in coverage) + (coverage[-1][0] + coverage[-1][1],)
         array = f'{"constant" if metal else "static const"} uint32_t boundaries[]={{'+','.join(map(str, boundaries))+'};'
         return array, f'''for(uint32_t c=lane;c<{len(boundaries)};c+=lanes) {{
           uint32_t key=boundaries[c],lo=0,hi={total};
