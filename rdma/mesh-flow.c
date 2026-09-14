@@ -377,7 +377,9 @@ int main(int argc,char**argv){
     if(link.client && client!=link.client && link_down(&link)) continue;
     if(!link.client && client && atomic_load_explicit(&M->configured,memory_order_acquire)==client){
       /* D13 */
-      if(verbs_up(peer,(char*)M,length,M->data_off,me,(uint32_t)(block_pages*pg),link.qps+1,link_configure,&link)){
+      int setup=verbs_up(peer,(char*)M,length,M->data_off,me,(uint32_t)(block_pages*pg),link.qps+1,link_configure,&link);
+      if(setup>0)continue;
+      if(setup<0){
         link_error(M,errno?errno:EIO,1);
         link_down(&link);
         continue;

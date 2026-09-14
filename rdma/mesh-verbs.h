@@ -110,12 +110,6 @@ static int exchange(int f, const void *mine, void *you, size_t bytes, double dea
   return stop?-1:0; }
 
 static int oob(const char *peer){
-  if(!peer){
-    /* ledger D14: a bounded wait, so the bridge sees its client leave while pairing */
-    fd_set reads; FD_ZERO(&reads); FD_SET(lsock,&reads);
-    struct timeval wait={1,0};
-    if(select(lsock+1,&reads,NULL,NULL,&wait)<1) return -1;
-  }
   int f=accept(lsock,NULL,NULL);
   if(f>=0){ struct timeval rt={10,0}; setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
     return f; }
@@ -136,7 +130,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   if(qps<1 || qps>MESH_QPS+1){ errno=EINVAL; return -1; }
   if(provider->context && (ibv_query_port(provider->context,1,&pa) || pa.state!=IBV_PORT_ACTIVE)){
     return -1; }
-  int f=oob(peer); if(f<0) return -1;
+  int f=oob(peer); if(f<0) return !peer && (errno==EAGAIN || errno==EWOULDBLOCK)?1:-1;
   fprintf(stderr,"pair setup node=%d connected=%.6f\n",me,monotime());
   if(!provider->context){
   struct ibv_device **dl=ibv_get_device_list(NULL);
