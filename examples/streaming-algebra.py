@@ -96,6 +96,12 @@ def main():
         strided_right = (np.arange(35, dtype=np.float32).reshape(7, 5) / 16 - 1).astype(dtype)
         strided = program.export(linear(program, weight(strided_left).T, weight(strided_right).T,
             tile_rows=3, tile_k=5, tile_columns=7, peer=0, output_dtype="float32")[0, 0])
+        mapped_left, mapped_right = kernels.arguments(2)
+        mapped = program.kernel_call(kernels.expression(kernels.dot(mapped_left, mapped_right, tile_k=3)),
+            grid=(3,), in_specs=(BlockSpec((1, 5), lambda i: (2-i, 0)), BlockSpec((5, 7), lambda i: (0, 0))),
+            out_specs=BlockSpec((1, 7), lambda i: (i, 0)),
+            out_shape=ShapeDtypeStruct((3, 7), np.float32), peer=0)(weight(strided_left).T, weight(strided_right).T)
+        mapped_results = tuple(program.export(mapped[i, 0]) for i in range(3))
         table_arg, index_arg, deferred_arg = kernels.arguments(3)
         _, column_arg = kernels.indices()
         index_data = np.array([[2], [2**53 + 1]], dtype=np.int64)
@@ -247,7 +253,7 @@ def main():
             for stage in probes.values():
                 for result in stage.values():
                     result.consume()
-        wait_for((precision, strided, indexed))
+        wait_for((precision, strided, indexed, *mapped_results))
         if not precision.ready or not np.array_equal(precision.array, np.array([[2], [0]], dtype=dtype)):
             raise ArithmeticError('Contraction lost cancellation across K panels')
         print(json.dumps(dict(event='precision', dtype=args.dtype, result=precision.array.tolist())), flush=True)
@@ -257,6 +263,12 @@ def main():
             raise ArithmeticError(f'Strided contraction mismatch: ready={strided.ready}, actual={strided.array.tolist() if strided.ready else None}, expected={strided_expected.tolist()}')
         print(json.dumps(dict(event='strided_contraction', result=strided.array.tolist())), flush=True)
         strided.consume()
+        for i, result in enumerate(mapped_results):
+            if not np.array_equal(result.array, strided_expected[2-i:3-i]):
+                raise ArithmeticError('Contraction ignored its input index map')
+        print(json.dumps(dict(event='mapped_contraction', result=[result.array.tolist() for result in mapped_results])), flush=True)
+        for result in mapped_results:
+            result.consume()
         indexed_expected = np.stack((2 * table_data[2], np.ones(4, dtype=dtype)))
         if not indexed.ready or not np.array_equal(indexed.array, indexed_expected):
             raise ArithmeticError('Indexed expression lost integer identity or masked access semantics')
@@ -292,7 +304,6 @@ def main():
             if not generation:
                 streamed_result.consume()
         for generation in range(2):
-            scatter_start = time.monotonic_ns()
             routing = np.resize(np.array([0, 2, 0, 3], dtype=np.int64), updates_count).reshape(-1, 1)
             routing[last_start:] = 2
             if generation:
@@ -303,6 +314,7 @@ def main():
             selected = scatter_valid[:, 0] & (routing[:, 0] < 4)
             np.add.at(expected, routing[selected, 0], update_values[selected].astype(np.float32)*(2+generation)+1)
             expected = (expected.astype(dtype)*2).astype(dtype)
+            scatter_start = time.monotonic_ns()
             for ref in (*scatter_indices.blocks.values(), *scatter_updates.blocks.values(), *scatter_factors.blocks.values()):
                 while not ref.writable:
                     if time.monotonic_ns() - scatter_start > 60_000_000_000:
