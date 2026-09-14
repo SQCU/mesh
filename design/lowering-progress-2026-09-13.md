@@ -1207,3 +1207,39 @@ example is not a replacement for the optimized matmul backend used by serving
 or the gold chain. Expert routing, forward/input/weight derivative caller
 migration and performance acceptance remain open; the matrix-shaped index
 representation needed to express that work is now available and exercised.
+
+
+## Expert indexed contractions and independent derivatives
+
+`30e690b` migrates expert forward, input derivative and weight derivative to
+shared indexed products, reductions and indexed_add. It deletes the custom
+expert route and numerical emitter. Input derivatives do not bind input values;
+weight derivatives do not bind weights. Registered source views and canonical
+indexed-reader lifetimes remain the execution operands.
+
+The existing operational example (`cbee5db`) covers ragged feature/contraction
+tiles, duplicate selections, an empty expert and changed selections over two
+generations. Independent experts and their downstream pointwise consumers finish
+while expert 2 payloads are withheld. In generation zero, expert 2's weight
+derivative finishes before its weights arrive. In generation one, its input
+derivative finishes before its input arrives. Every completed forward and
+derivative consumer matches the numerical reference.
+
+CPU, Metal and paired Metal runs pass. Expert cases are float32 on rank zero;
+the paired float16 gold chain and fanout traverse RDMA. Local traces configure
+4064 functions and complete 8050 submissions; paired rank zero configures 4000
+and completes 7365. Raw logs, traces, revisions and timing count/mean/sample
+variance are in measurements/lowering-2026-09-13/expert-provenance.json.
+
+The initial run exhausted the fixed 32768-page arena during setup. The failure
+log is retained. Healthy idle bridges were gracefully resized through the
+existing bridge command to 65536 pages, four pages per block and one QP on both
+nodes: 1097203712 registered bytes per node. The existing visible memory
+preflight remains in place. This is configured arena capacity, not a claim of
+live operand bytes or system memory exhaustion.
+
+These runs establish numerical behavior and independent publication, not a
+speedup. Scalar indexed expert reductions still require comparison with a tuned
+grouped contraction implementation. Batched contractions, higher-rank reductions,
+shared contraction optimization and matched end-to-end performance acceptance
+remain open under the nine-step plan.

@@ -2548,7 +2548,7 @@ zero. Setup checks integer selection and matching numerical dimensions.
 The existing `numerical_operands` liveness/replication owner omits X from dX
 and W from dW; primal shapes remain setup metadata. Removed implementation
 includes expert_body and its custom emitter and launch mode. The scalar fused
-indexed reductions have not matched a tuned grouped matrix-multiply backend
+indexed reductions have not been validated against a tuned grouped matrix-multiply backend
 and are not a validated fast tensor-parallel baseline. Regaining that grouped
 performance belongs in the shared contraction lowering while preserving these
 indexed dependencies, rather than restoring a separate expert compiler.
