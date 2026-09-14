@@ -1014,35 +1014,3 @@ static void mesh_execution_destroy(struct mesh_ctx *c){
   struct mesh_watch *watch=e->watches;while(watch){struct mesh_watch *next=watch->next;free(watch);watch=next;}
   dispatch_release(e->source);dispatch_release(e->queue);free(e->readers);free(e);c->execution=NULL;
 }
-
-/* design/algorithm-sources.md#performance-evidence */
-size_t mesh_transfer_trace_count(struct mesh_ctx *c){
-  size_t count=0;
-  for(uint32_t q=0;q<c->M->qps;q++)for(int d=0;d<2;d++)count+=atomic_load_explicit(mesh_order_length(c->M,q,d),memory_order_acquire);
-  return count;
-}
-/* design/algorithm-sources.md#performance-evidence */
-struct mesh_transfer_event mesh_transfer_trace(struct mesh_ctx *c,size_t index){
-  for(uint32_t q=0;q<c->M->qps;q++)for(int d=0;d<2;d++){
-    size_t count=atomic_load_explicit(mesh_order_length(c->M,q,d),memory_order_acquire);
-    if(index>=count){index-=count;continue;}
-    struct mesh_transfer_times *t=mesh_transfer_times(c->M,q,d,(uint32_t)index);
-    return (struct mesh_transfer_event){.queue=q,.direction=(uint32_t)d,.transfer=mesh_transfers(c->M,q,d)[index],
-      .ready_ns=atomic_load(&t->ready_ns),.post_ns=atomic_load(&t->post_ns),.cq_ns=atomic_load(&t->cq_ns),.occurrences=atomic_load(&t->occurrences)};
-  }
-  return (struct mesh_transfer_event){0};
-}
-
-/* design/algorithm-sources.md#canonical-reader-groups */
-struct mesh_reader_event mesh_reader_trace(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index,uint32_t row){
-  struct mesh_row_range range=mesh_range(map,index);
-  if(row>=range.count)return (struct mesh_reader_event){.source=MESH_ABSENT,.member=MESH_ABSENT,.plane=MESH_ABSENT,.completed=MESH_ABSENT};
-  uint32_t source=range.first+row,member=map.members?map.members[map.member_offsets[index]+row]:MESH_ABSENT;
-  struct mesh_readers *readers=c->readers;
-  struct mesh_reader_group *group=member!=MESH_ABSENT && readers?readers->groups[source]:NULL;
-  uint32_t plane=group?group->plane:map.plane,flags=mesh_is(c->M,MESH_PRESENT,source)?1:0;
-  if(member!=MESH_ABSENT && mesh_is(c->M,MESH_PRESENT,member))flags|=2;
-  if(plane<MESH_READERS && mesh_is(c->M,MESH_READ+plane,source))flags|=group?4:6;
-  if(group && mesh_is(c->M,MESH_PRESENT,group->completed))flags|=8;
-  return (struct mesh_reader_event){.source=source,.member=member,.plane=plane,.completed=group?group->completed:MESH_ABSENT,.flags=flags};
-}

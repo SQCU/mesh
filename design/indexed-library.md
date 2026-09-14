@@ -70,3 +70,8 @@ by native mesh for the program lifetime. `program.export(ref)` binds an output r
 `ready` observes its stamps and `consume()` releases its reference. Returned
 arrays remain valid until consumption. Close the program after pending native
 work completes.
+
+Native function, reader, route and transfer trace reconstruction is removed.
+The private lowering boundary retains the function count needed to attach indexed
+operands. Numerical callers receive tensor references and output observations;
+page maps and row-function layouts remain inside canonical mesh.

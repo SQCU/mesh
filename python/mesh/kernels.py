@@ -686,7 +686,7 @@ class _ExpressionKernel:
                     offsets.append((offsets[-1][0] + offsets[-1][1] if offsets else 0,
                         len(source.refs) if isinstance(source, _StaticTable) else len(source.blocks) if hasattr(source, 'blocks') else 1))
                 begin, rows, column, columns = domain
-                function = program.native.algebra_trace_count(program.handle)
+                function = program.native.algebra_function_count(program.handle)
                 check(program.native.algebra_source(program.handle, *sources,
                     (View * len(flattened))(*(ref.view for ref in flattened)), len(flattened), output.view,
                     (C.c_uint8 * len(access_axes))(*access_axes), begin, rows, column, columns))
@@ -1278,7 +1278,7 @@ def _compiled_region(program, inputs, output, body, dynamic_first=None, *, acces
         lines.append(statements)
         lines.append('}' if metal else _CPU_PUBLICATION_END)
         sources.append('\n'.join(lines))
-    function = program.native.algebra_trace_count(program.handle)
+    function = program.native.algebra_function_count(program.handle)
     if len(access_axes) != len(inputs):
         raise ValueError('Each compiled input requires its access relation')
     for begin, rows, column, columns in domains:

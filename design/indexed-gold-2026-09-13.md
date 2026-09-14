@@ -3,7 +3,7 @@
 Source measured: `602f3cd`, on Apple M5 Max and M4 Pro over Thunderbolt RDMA.
 Raw observations: [indexed-gold-2026-09-13.json](../measurements/indexed-gold-2026-09-13.json).
 
-The CPU program in `examples/streaming-algebra.py` composes
+The historical CPU harness `examples/streaming-algebra.py` composed
 FFN → RMSNorm → summed learned embeddings → FFN → RMSNorm.
 The first FFN's hidden sections move from node zero to node one; the second
 FFN's hidden sections move back. Both directions use data queue zero. One

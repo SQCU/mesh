@@ -34,12 +34,6 @@ static size_t link_index_offset(struct mesh_link *link,int direction,uint32_t sl
 static struct mesh_index_frame *link_indices(struct mesh_link *link,int direction,uint32_t slot){
   return (struct mesh_index_frame *)((char *)link->M+link_index_offset(link,direction,slot));
 }
-/* design/algorithm-sources.md#performance-evidence */
-static void link_trace_begin(struct mesh_link *link,uint32_t q,int direction,uint32_t index,uint64_t ready_ns){
-  struct mesh_transfer_times *trace=mesh_transfer_times(link->M,q,direction,index);
-  atomic_store(&trace->ready_ns,ready_ns);
-  atomic_store(&trace->post_ns,0);atomic_store(&trace->cq_ns,0);atomic_fetch_add(&trace->occurrences,1);
-}
 /* design/algorithm-sources.md#async-index-push-contract */
 static int link_post(struct mesh_link *link,uint32_t q,int direction,struct mesh_posted entry){
   struct hdr *M=link->M; struct mesh_verbs *v=&link->provider;
@@ -48,7 +42,6 @@ static int link_post(struct mesh_link *link,uint32_t q,int direction,struct mesh
   struct ibv_sge span=region_sge((char*)M,offset,indices?MESH_INDEX_BYTES:entry.bytes);
   entry.frames=span.length/4096;
   int error;
-  uint64_t ready_ns=!indices && direction==MESH_RECEIVE?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
   if(direction==MESH_SEND){
     struct ibv_send_wr request={.wr_id=entry.row,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad=NULL;
     error=ibv_post_send(v->pairs[q],&request,&bad);
@@ -59,10 +52,6 @@ static int link_post(struct mesh_link *link,uint32_t q,int direction,struct mesh
   if(error){ link_error(M,error,1); return error; }
   struct mesh_queue *queue=link_queue(link,q,direction);
   queue->posted[queue->tail++%QD]=entry;queue->frames+=entry.frames;
-  if(!indices){
-    if(direction==MESH_RECEIVE)link_trace_begin(link,q,direction,entry.index,ready_ns);
-    atomic_store(&mesh_transfer_times(M,q,direction,entry.index)->post_ns,clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
-  }
   return 0;
 }
 /* design/algorithm-sources.md#publication-work-lists */
@@ -70,8 +59,6 @@ static int link_ready(struct mesh_link *link,uint32_t q,uint32_t index){
   size_t key=(size_t)q*mesh_blocks(link->M)+index;
   struct mesh_transfer *transfer=&mesh_transfers(link->M,q,MESH_SEND)[index];
   if(link->active[key] || link->queued[key] || !mesh_send_postable(link->M,transfer))return 0;
-  struct mesh_transfer_times *trace=mesh_transfer_times(link->M,q,MESH_SEND,index);
-  if(!atomic_load(&trace->ready_ns) || atomic_load(&trace->cq_ns))link_trace_begin(link,q,MESH_SEND,index,clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
   struct mesh_ready *ready=&link->ready[q];
   link->queued[key]=1;link->ready_next[key]=MESH_ABSENT;
   if(ready->tail==MESH_ABSENT)ready->head=index;
@@ -111,8 +98,6 @@ static int link_configure(void *state,int socket,double deadline){
         fprintf(stderr,"transfer queue=%u direction=%d index=%u requires=%u frames available=%u\n",q,d,i,frames,link->provider.capacity[q][d]);
         errno=EMSGSIZE;return -1;
       }
-      struct mesh_transfer_times *trace=mesh_transfer_times(m,q,d,i);
-      atomic_store(&trace->ready_ns,0);atomic_store(&trace->post_ns,0);atomic_store(&trace->cq_ns,0);atomic_store(&trace->occurrences,0);
     }
   }
   size_t count=0;
@@ -260,7 +245,6 @@ static void mesh_progress(struct mesh_link *link){
     struct mesh_queue *queue=link_queue(link,q,direction);
     if(queue->head==queue->tail || queue->posted[queue->head%QD].row!=row){link_error(M,EPROTO,4);continue;}
     struct mesh_posted entry=queue->posted[queue->head++%QD];queue->frames-=entry.frames;
-    if(q<iq)atomic_store(&mesh_transfer_times(M,q,direction,entry.index)->cq_ns,clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
     if(q==iq){
       if(direction==MESH_RECEIVE && !wc->status){
         struct mesh_index_frame *frame=link_indices(link,MESH_RECEIVE,row);

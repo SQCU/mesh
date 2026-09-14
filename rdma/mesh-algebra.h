@@ -1,6 +1,9 @@
 #ifndef MESH_ALGEBRA_H
 #define MESH_ALGEBRA_H
-#include "mesh-dataflow.h"
+#include <stddef.h>
+#include <stdint.h>
+struct mesh_ctx;
+struct mesh_route;
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -19,10 +22,6 @@ struct mesh_view {
 struct mesh_copy_region { struct mesh_view source; size_t row,column; };
 /* design/algorithm-sources.md#view-scoped-host-production */
 struct mesh_writer;
-struct mesh_algebra_event { uint64_t ready_ns,start_ns,complete_ns,gpu_start_ns,gpu_end_ns,submissions; uint32_t first_output,output_maps,kind,input_maps; };
-struct mesh_indexed_event { uint64_t input; uint32_t descriptor,role,candidate,first,count,plane,retired,selected,completed,mapped,flags; };
-struct mesh_active_event { uint64_t function,omissions; uint32_t slot,count_first,count_maps,disposition,omitted,retired,inputs,flags; };
-struct mesh_route_event { uint64_t function; uint32_t domain,role,index,first,count,plane,retired,completed,prepared,consumer,flags; };
 struct mesh_algebra_report { uint64_t submitted,completed,native_submitted,native_backings; int64_t code; double gpu_seconds; uint64_t cpu_submitted; };
 
 struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *);
@@ -40,7 +39,6 @@ struct mesh_view mesh_view_transpose(struct mesh_view);
 struct mesh_view mesh_view_broadcast(struct mesh_view,size_t rows,size_t columns);
 size_t mesh_tensor_publication_bytes(struct mesh_tensor *,uint32_t extent);
 void *mesh_tensor_data(struct mesh_tensor *,uint32_t extent);
-struct mesh_row_range mesh_tensor_rows(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_constant(struct mesh_tensor *,uint32_t extent);
 int mesh_algebra_writer(struct mesh_algebra *,struct mesh_view,struct mesh_writer **);
 int mesh_writer_writable(struct mesh_writer *);
@@ -66,21 +64,7 @@ int mesh_algebra_export(struct mesh_algebra *,struct mesh_view,size_t *first,siz
 int mesh_algebra_realize(struct mesh_algebra *);
 int mesh_algebra_available(struct mesh_algebra *,size_t output);
 void mesh_algebra_consume(struct mesh_algebra *,size_t output);
-size_t mesh_algebra_trace_count(struct mesh_algebra *);
-struct mesh_algebra_event mesh_algebra_trace(struct mesh_algebra *,size_t function);
-struct mesh_row_range mesh_algebra_trace_input(struct mesh_algebra *,size_t function,size_t input);
-struct mesh_row_range mesh_algebra_trace_output(struct mesh_algebra *,size_t function,size_t output);
-size_t mesh_algebra_trace_indexed_count(struct mesh_algebra *,size_t function);
-struct mesh_indexed_event mesh_algebra_trace_indexed(struct mesh_algebra *,size_t function,size_t entry);
-struct mesh_reader_event mesh_algebra_trace_input_reader(struct mesh_algebra *,size_t function,size_t input,uint32_t row);
-struct mesh_reader_event mesh_algebra_trace_indexed_reader(struct mesh_algebra *,size_t function,size_t entry,uint32_t row);
-struct mesh_active_event mesh_algebra_trace_active(struct mesh_algebra *,size_t function);
-struct mesh_row_range mesh_algebra_trace_active_count(struct mesh_algebra *,size_t function,size_t map);
-struct mesh_reader_event mesh_algebra_trace_active_reader(struct mesh_algebra *,size_t function,size_t map,uint32_t row);
-struct mesh_active_event mesh_algebra_trace_route_producer(struct mesh_algebra *,size_t entry);
-size_t mesh_algebra_trace_route_count(struct mesh_algebra *);
-struct mesh_route_event mesh_algebra_trace_route(struct mesh_algebra *,size_t entry);
-struct mesh_reader_event mesh_algebra_trace_route_reader(struct mesh_algebra *,size_t entry,uint32_t row);
+size_t mesh_algebra_function_count(struct mesh_algebra *);
 struct mesh_algebra_report mesh_algebra_report(struct mesh_algebra *);
 
 #ifdef __cplusplus

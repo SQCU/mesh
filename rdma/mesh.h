@@ -9,13 +9,12 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 25u
+#define MESH_VERSION 26u
 #define MESH_ABSENT UINT32_MAX
 /* ledger D6: "A maximum of 10 unreliable connection (UC) queue pairs" */
 #define MESH_QPS 8
 #define MESH_INDEX_BYTES 4096
 struct mesh_transfer { uint32_t local_row,local_page,peer_row,peer_page,binding,offset,plane,index,bytes,peer_index; };
-struct mesh_transfer_times { _Atomic uint64_t ready_ns,post_ns,cq_ns,occurrences; };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* ROW_HOT: a produced send block the bridge has not completed, or a posted receive block not yet completed.
    PAGE_HOT: pages held by an outstanding work request. */
@@ -29,7 +28,7 @@ struct mesh_port_info { char device[32]; uint16_t peer; _Atomic uint64_t phase; 
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps;
   _Atomic uint32_t configured;
-  uint64_t planes_off,page_off,mask_off,order_off,index_off,trace_off,notice_off,data_off,length;
+  uint64_t planes_off,page_off,mask_off,order_off,index_off,notice_off,data_off,length;
   _Atomic uint64_t client,bridge_pid;
   _Atomic uint32_t order_length[2*MESH_QPS];
   _Atomic uint32_t notice_head[MESH_NOTICE_QUEUES];
@@ -47,10 +46,6 @@ static inline uint64_t *mesh_mask(struct hdr *m){ return (uint64_t*)((unsigned c
 /* ledger D5 */
 static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+(size_t)(2*queue+(uint32_t)direction)*mesh_blocks(m); }
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint32_t queue,int direction){ return &m->order_length[2*queue+(uint32_t)direction]; }
-/* design/algorithm-sources.md#performance-evidence */
-static inline struct mesh_transfer_times *mesh_transfer_times(struct hdr *m,uint32_t queue,int direction,uint32_t index){
-  return (struct mesh_transfer_times *)((char *)m+m->trace_off)+(size_t)(2*queue+(uint32_t)direction)*mesh_blocks(m)+index;
-}
 /* ledger D6: "A maximum of 4095 work requests at a time", queues sized in 4 KB frames */
 static inline uint32_t mesh_window_blocks(const struct hdr *m){ return 4095u/(m->block*m->pgsz/4096u); }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
@@ -150,7 +145,6 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->page_off=at; at+=(uint64_t)rows*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->mask_off=at; at+=(uint64_t)rows*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->order_off=at; at+=(uint64_t)2*MESH_QPS*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->trace_off=at; at+=(uint64_t)2*MESH_QPS*blocks*sizeof(struct mesh_transfer_times); at=(at+pgsz-1)/pgsz*pgsz;
   h->index_off=at; at+=(uint64_t)2*(4095u/(block*pgsz/4096u))*MESH_INDEX_BYTES; at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->notice_off=at; at+=(uint64_t)MESH_NOTICE_QUEUES*rows*sizeof(struct mesh_notice); at=(at+bytes-1)/bytes*bytes;

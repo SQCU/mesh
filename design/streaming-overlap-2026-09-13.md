@@ -1,7 +1,7 @@
 # Measured producer/link/consumer overlap
 
 Source revision `fb7828b`, September 13, 2026. The public API demonstration is
-[`examples/streaming-overlap.py`](../examples/streaming-overlap.py). The
+the now-removed `examples/streaming-overlap.py` harness. The
 [raw samples and summaries](../measurements/streaming-overlap-2026-09-13.json)
 include every measured latency and all four paired runs, including the slower
 fourth pair.
@@ -92,22 +92,16 @@ numerical checks passed. The report does not infer a cause from those warnings.
 
 On each participant, install the current main checkout with the local Python:
 
-```sh
-python -m pip install . --no-deps --target .build/overlap-package --upgrade
-```
+
 
 Use the Python environment with NumPy/Accelerate on that participant. With the
 canonical bridge running, start the consumer on the M4:
 
-```sh
-PYTHONPATH=.build/overlap-package python -u examples/streaming-overlap.py 1 streamed --rows 4096 --depth 2
-```
+
 
 Run the producer on the M5:
 
-```sh
-PYTHONPATH=.build/overlap-package python -u examples/streaming-overlap.py 0 streamed --rows 4096 --depth 2
-```
+
 
 The consumer prints its PID and stays available while the producer runs. Once
 the producer exits successfully, send SIGTERM to that consumer PID; it prints

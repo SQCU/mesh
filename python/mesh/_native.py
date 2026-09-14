@@ -17,47 +17,6 @@ class CopyRegion(C.Structure):
     _fields_ = [('source', View), ('row', Z), ('column', Z)]
 
 
-class RowRange(C.Structure):
-    _fields_ = [("first", U), ("count", U)]
-
-
-class ReaderEvent(C.Structure):
-    _fields_ = [(name, U) for name in ('source', 'member', 'plane', 'completed', 'flags')]
-
-
-class IndexedEvent(C.Structure):
-    _fields_ = [('input', C.c_uint64)] + [(name, U) for name in
-        ('descriptor', 'role', 'candidate', 'first', 'count', 'plane', 'retired',
-         'selected', 'completed', 'mapped', 'flags')]
-
-
-class RouteEvent(C.Structure):
-    _fields_ = [('function', C.c_uint64)] + [(name, U) for name in
-        ('domain', 'role', 'index', 'first', 'count', 'plane', 'retired',
-         'completed', 'prepared', 'consumer', 'flags')]
-
-
-class ActiveEvent(C.Structure):
-    _fields_ = [('function', C.c_uint64), ('omissions', C.c_uint64)] + [(name, U) for name in
-        ('slot', 'count_first', 'count_maps', 'disposition', 'omitted', 'retired', 'inputs', 'flags')]
-
-
-class Event(C.Structure):
-    _fields_ = [(name, C.c_uint64) for name in
-        ('ready_ns', 'start_ns', 'complete_ns', 'gpu_start_ns', 'gpu_end_ns', 'submissions')]
-    _fields_ += [(name, U) for name in ('first_output', 'output_maps', 'kind', 'input_maps')]
-
-
-class Transfer(C.Structure):
-    _fields_ = [(name, U) for name in ('local_row', 'local_page', 'peer_row', 'peer_page',
-        'binding', 'offset', 'plane', 'index', 'bytes', 'peer_index')]
-
-
-class TransferEvent(C.Structure):
-    _fields_ = [('queue', U), ('direction', U), ('transfer', Transfer)]
-    _fields_ += [(name, C.c_uint64) for name in ('ready_ns', 'post_ns', 'cq_ns', 'occurrences')]
-
-
 class Report(C.Structure):
     _fields_ = [(k, C.c_uint64) for k in ('submitted', 'completed',
         'native_submitted', 'native_backings')]
@@ -88,7 +47,6 @@ class Native:
             'mesh_tensor_view': (View, [P, U]),
             'mesh_tensor_data': (P, [P, U]),
             'mesh_tensor_publication_bytes': (Z, [P, U]),
-            'mesh_tensor_rows': (RowRange, [P, U]),
             'mesh_view_slice': (View, [View, Z, Z, Z, Z]),
             'mesh_view_transpose': (View, [View]),
             'mesh_view_broadcast': (View, [View, Z, Z]),
@@ -106,13 +64,6 @@ class Native:
             'mesh_algebra_route_hold': (C.c_int, [P, P, C.POINTER(View), Z]),
             'mesh_algebra_active': (C.c_int, [P, Z, View, Z]),
             'mesh_algebra_route_producers': (C.c_int, [P, P, C.POINTER(Z), Z]),
-            'mesh_algebra_trace_active': (ActiveEvent, [P, Z]),
-            'mesh_algebra_trace_active_count': (RowRange, [P, Z, Z]),
-            'mesh_algebra_trace_active_reader': (ReaderEvent, [P, Z, Z, U]),
-            'mesh_algebra_trace_route_producer': (ActiveEvent, [P, Z]),
-            'mesh_algebra_trace_route_count': (Z, [P]),
-            'mesh_algebra_trace_route': (RouteEvent, [P, Z]),
-            'mesh_algebra_trace_route_reader': (ReaderEvent, [P, Z, U]),
             'mesh_algebra_bind': (C.c_int, [P, C.c_int, View, View, View, C.c_float, C.c_float]),
             'mesh_algebra_view_pages': (C.c_int, [P, View, C.POINTER(View), Z, C.POINTER(Z)]),
             'mesh_algebra_contract_select': (C.c_int, [P, View, C.POINTER(View), C.POINTER(View), Z, C.POINTER(View), Z, View, C.c_float, C.POINTER(Z)]),
@@ -123,20 +74,10 @@ class Native:
             'mesh_algebra_realize': (C.c_int, [P]),
             'mesh_algebra_available': (C.c_int, [P, Z]),
             'mesh_algebra_consume': (None, [P, Z]),
-            'mesh_algebra_trace_count': (Z, [P]),
-            'mesh_algebra_trace': (Event, [P, Z]),
-            'mesh_algebra_trace_input': (RowRange, [P, Z, Z]),
-            'mesh_algebra_trace_output': (RowRange, [P, Z, Z]),
-            'mesh_algebra_trace_indexed_count': (Z, [P, Z]),
-            'mesh_algebra_trace_indexed': (IndexedEvent, [P, Z, Z]),
-            'mesh_algebra_trace_input_reader': (ReaderEvent, [P, Z, Z, U]),
-            'mesh_algebra_trace_indexed_reader': (ReaderEvent, [P, Z, Z, U]),
+            'mesh_algebra_function_count': (Z, [P]),
             'mesh_algebra_report': (Report, [P]),
-            'mesh_transfer_trace_count': (Z, [P]),
-            'mesh_transfer_trace': (TransferEvent, [P, Z]),
         }
         for name, (result, arguments) in signatures.items():
-            library = self.runtime if name in ('mesh_context', 'mesh_attach', 'mesh_detach', 'mesh_transfer_trace_count', 'mesh_transfer_trace') else self.algebra
             function = getattr(library, name)
             function.restype, function.argtypes = result, arguments
             setattr(self, name.removeprefix('mesh_'), function)

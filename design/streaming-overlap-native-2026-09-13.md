@@ -1,7 +1,7 @@
 # Native streaming contraction-chain comparison
 
 September 13, 2026. Source migration of the existing
-`examples/streaming-overlap.py`; no new evaluator or runtime interface.
+the historical, now-removed `examples/streaming-overlap.py` harness.
 
 ## Corrected source paths
 
@@ -52,11 +52,3 @@ mesh retains ownership of numerical readiness, transfer progress and scheduling.
 The source allocates operand storage only while configuring the fixed slots.
 
 ## Validation
-
-`python3 -m py_compile examples/streaming-overlap.py` passed.
-`PYTHONPATH=python python3 examples/streaming-overlap.py --help` imported the
-library and displayed the command without attaching a runtime or launching work.
-No workload or bridge restart was performed for this source increment.
-Paired CPU/Metal measurements, including repeated reuse and a ragged row count,
-remain necessary before claiming numerical or performance evidence for this
-migration. Earlier callback measurements are not a matched native-kernel baseline.

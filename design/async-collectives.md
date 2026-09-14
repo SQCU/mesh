@@ -52,6 +52,12 @@ Automatic placement, cost models, candidate search, benchmark targets, compiler
 feature expansion, application migration, and additional compatibility surfaces
 are not collective requirements and must not be added to this interface. There
 is no separate performance, model, test-count, or source-line deliverable.
+Runtime testing is not a requirement and does not determine implementation work.
+Completion includes implementation and integration of the stated interface and
+its strict dependencies, demonstrated from their source data and execution flow.
+There are no code or runtime acceptance/rejection criteria. The
+[end-to-end source derivation](streaming-algebra.md#end-to-end-source-derivation)
+traces the implemented algorithms and their nonblocking streaming properties.
 
 ## Mechanism sources
 
