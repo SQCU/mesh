@@ -982,14 +982,30 @@ exchange clears membership, acquiring publications from coalescing producers
 before evaluating dependents. Later producers can immediately relink the node.
 No numerical caller waits for a missing ring position or a transport completion.
 
-The compute handler visits only detached row notices and their setup-established
-reader lists. A per-handler intrusive list deduplicates affected occurrences
-before checking their canonical masks once per batch. Transport `link_publications`
-visits the corresponding fixed row-to-transfer adjacency and `link_ready` queues
-eligible explicit transfer indices. Ready queues preserve source/target tuples
-without searching the configured transfer table. Setup alone constructs adjacency
-and admits already-present sources. An unsuccessful index post restores selected
-indices; announced payloads retain their exact continuation as before.
+The compute handler visits detached row notices and their setup-established
+reader lists, deduplicating affected occurrences within each row before issuing
+eligible functions. Transport `link_publications` visits the corresponding fixed
+row-to-transfer adjacency and `link_ready` queues eligible explicit transfer
+indices. It retains the affected queue indices in a per-row bitmask, then calls
+`link_send_ready` before advancing to unrelated notices. The same send routine
+serves ordinary progress retries, so there is one owner for index announcement,
+payload posting, capacity accounting, and recovery from failed index posts.
+
+Ready queues preserve source/target tuples without searching the configured
+transfer table. Setup alone constructs adjacency and admits already-present
+sources. An unsuccessful index post restores selected indices; announced payloads
+retain their exact continuation. Already queued or active transfers do not create
+duplicate work on later row notices. An affected queue posts the transfers that
+fit its current capacity without waiting for the rest of the notice batch or for
+an index frame to fill. Earlier posting can leave index frames less full; no
+throughput improvement is claimed from source inspection alone.
+
+The ready-drain body is extracted from the existing progress loop, including its
+first-fit scan past payloads that do not fit remaining provider capacity. Pending
+payloads retain announcement order on their QP. No protocol field, memory layout,
+operand copy, acknowledgement, or numerical wait is added. Source review and
+compilation cover this change; bridges are not restarted and numerical programs
+are not executed. CQ polling still occurs in the surrounding progress loop.
 
 These lists describe pending notifications/work, not additional tensor readiness.
 Canonical presence and reader masks continue to describe values and ownership.
