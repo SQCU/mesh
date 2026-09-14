@@ -1834,3 +1834,32 @@ in its expression; assignment remains identity. No separate cast emitter is
 introduced. The unused `nn._cast` launch helper is removed. Source compilation
 passed; existing local/paired gold and the typed nested-expression case supply
 the operational numerical evidence.
+
+## Xonotic logical indexing
+
+The JAX authors' [Pallas BlockSpec indexing](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)
+and NumPy authors' [advanced indexing](https://numpy.org/doc/stable/user/basics.indexing.html#advanced-indexing)
+and [take_along_axis](https://numpy.org/doc/stable/reference/generated/numpy.take_along_axis.html)
+define the block-coordinate and logical-index operations composed here. Xonotic
+`gather_expression` supplies the existing graph's slice, inserted-axis and
+broadcast advanced-index mapping through shared `reshape(logical_shape).at(...)`
+expressions. `kernel_calls` uses that same shared view for arbitrary-rank gather,
+take-along-axis, concatenate and transpose. Output physical rows encode prefix
+logical dimensions with exact quotient/remainder; physical columns encode the
+last logical dimension. Input storage and its actual per-block strides remain
+unchanged, even when a graph reshape aliases a differently shaped Tensor.
+
+Take-along-axis realizes its non-axis broadcast shape at graph construction.
+Forward indexed expressions and the retained take VJP use zero coordinates for
+source singleton dimensions; index singleton dimensions likewise broadcast.
+Signed user indices normalize once. Concatenation retains branch-specific
+selected-reader dependencies, and transpose inverts its declared permutation.
+The replaced custom forward emitters are removed; general gather/take VJP
+scatter implementations remain pending migration, not alternate forward paths.
+
+[Caller contract and validation scope](xonotic-shared-indexing.md#logical-rank-indexing-on-physical-pages)
+describes these mappings and the existing optional streaming-algebra workflow.
+This caller increment compiles with the shared logical-view implementation. The
+graph broadcast-shape correction and rank-3 delayed-output observations are
+coordinated integration edits committed next by the parent agent; numerical
+coverage is not inferred from source compilation.

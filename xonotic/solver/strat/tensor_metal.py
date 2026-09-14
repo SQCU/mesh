@@ -167,35 +167,22 @@ def kernel(node):
         body.append(write(output, expr(attrs['expression'])))
     elif op in ('reshape', 'stop_gradient', 'cast', 'assign'):
         body.append(write(output, read(values[0])))
-    elif op in ('gather', 'gather_vjp'):
-        backward = op.endswith('_vjp')
-        source, indices = values[0], values[1:-1] if backward else values[1:]
-        shape = values[-1].shape if backward else output.shape
+    elif op == 'gather_vjp':
+        source, indices = values[0], values[1:-1]
+        shape = values[-1].shape
         body = [f'ulong t=position.x; if(t>={expr(math_product(shape))}) return;', gather_address(source, indices, shape, attrs)]
-        body.append(atomic(output, read(values[-1]), 'address') if backward else write(output, read(source, 'address')))
-        clear, mode = backward, ('gradient', values[-1].index) if backward else 'linear'
-    elif op in ('take_along_axis', 'take_along_axis_vjp'):
-        backward = op.endswith('_vjp')
+        body.append(atomic(output, read(values[-1]), 'address'))
+        clear, mode = True, ('gradient', values[-1].index)
+    elif op == 'take_along_axis_vjp':
         source, indices = values[:2]
-        shape = values[-1].shape if backward else output.shape
+        shape = values[-1].shape
         axis = attrs['axis']
         body = [f'ulong t=position.x; if(t>={expr(math_product(shape))}) return;', coordinate_code(shape)]
         offset = '+'.join(f'c{i}*v[{indices.index}].stride[{i}]' for i, size in enumerate(indices.shape) if size != 1) or '0'
         body.append(f'long selected=long({read(indices,offset)}); if(selected<0) selected+=v[{source.index}].shape[{axis}];')
-        address = '+'.join(f'{"selected" if i == axis else "c"+str(i)}*v[{source.index}].stride[{i}]' for i in range(source.ndim)) or '0'
-        body.append(atomic(output, read(values[-1]), address) if backward else write(output, read(source,address)))
-        clear, mode = backward, ('gradient', values[-1].index) if backward else 'linear'
-    elif op == 'transpose':
-        source = values[0]
-        address = '+'.join(f'coordinate(t,v[{index}],{i})*v[{source.index}].stride[{axis}]' for i, axis in enumerate(attrs['axes']))
-        body.append(write(output, read(source, address or '0')))
-    elif op == 'concatenate':
-        axis, offset = attrs['axis'], 0
-        body.append(f'ulong c=coordinate(t,v[{index}],{axis});')
-        for value in values:
-            address = '+'.join((f'(c-({expr(offset)}))' if i == axis else f'coordinate(t,v[{index}],{i})') + f'*v[{value.index}].stride[{i}]' for i in range(value.ndim))
-            body.append(f'if(c>={expr(offset)} && c<{expr(offset + value.shape[axis])}) {{ {write(output,read(value,address))} }}')
-            offset += value.shape[axis]
+        address = '+'.join(f'{"selected" if i == axis else "0" if size == 1 else "c"+str(i)}*v[{source.index}].stride[{i}]' for i, size in enumerate(source.shape)) or '0'
+        body.append(atomic(output, read(values[-1]), address))
+        clear, mode = True, ('gradient', values[-1].index)
     elif op.startswith('reduce_'):
         source = values[0]
         axes = attrs['axes']
@@ -403,7 +390,7 @@ def matrix_view(tensor, shape):
     return result
 
 
-# ../../../design/algorithm-sources.md#xonotic-shared-indexing
+# ../../../design/algorithm-sources.md#xonotic-logical-indexing
 def gather_expression(kernels, arguments, values, shapes, attributes, coordinates):
     mapping, advanced, adjacent = (attributes[key] for key in ('mapping', 'advanced', 'adjacent'))
     axis = 0 if adjacent else len(advanced)
@@ -421,9 +408,8 @@ def gather_expression(kernels, arguments, values, shapes, attributes, coordinate
             selected_shape = shapes[selected.index]
             at = tuple(0 if size == 1 else coordinates[advanced_axis + len(advanced) - len(selected_shape) + i]
                        for i, size in enumerate(selected_shape))
-            row, column = at if len(at) == 2 else (0, at[0] if at else 0)
-            selected_value = arguments[1 + item[1]].at(row, column)
-            coordinate = kernels.select(selected_value < 0, selected_value + shapes[values[0].index][source_axis], selected_value)
+            selected_value = arguments[1 + item[1]].at(*at)
+            coordinate = kernels.select(selected_value < 0, selected_value + shapes[values[0].index][source_axis], selected_value) if selected.dtype.startswith('int') else selected_value
         elif item[0] == 'fixed':
             coordinate = item[1]
         else:
@@ -431,8 +417,7 @@ def gather_expression(kernels, arguments, values, shapes, attributes, coordinate
             axis += 1
         source_coordinates.append(coordinate)
         source_axis += 1
-    row, column = source_coordinates if len(source_coordinates) == 2 else (0, source_coordinates[0])
-    return arguments[0].at(row, column)
+    return arguments[0].at(*source_coordinates)
 
 
 # ../../../design/algorithm-sources.md#xonotic-output-liveness
@@ -557,41 +542,58 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             tensors[value.index] = nn._pointwise(program, kernels.expression(argument / operand.shape[1]),
                 (reduced,), rows, peer=peer, output_dtype=value.dtype) if operation == 'reduce_mean' and operand.dtype.kind != 'f' else reduced
             continue
-        numerical = value.dtype in ('float16', 'float32')
-        matrix_shapes = {v.index: shapes[v.index] if len(shapes[v.index]) == 2 else (1, math.prod(shapes[v.index])) for v in values}
-        shaped = all(local[v.index].shape == matrix_shapes[v.index] or
-            (1 in matrix_shapes[v.index] and local[v.index].shape[::-1] == matrix_shapes[v.index]) or
-            local[v.index].grid == (1, 1) for v in values)
-        if shaped and operation in ('gather', 'concatenate') and len(shape) <= 2 and 1 <= len(shapes[values[0].index]) <= 2 and all(len(shapes[v.index]) <= 2 for v in values):
-            matrix_shape = shape if len(shape) == 2 else (1, math.prod(shape))
+        # ../../../design/algorithm-sources.md#xonotic-logical-indexing
+        if operation in ('gather', 'take_along_axis', 'concatenate', 'transpose'):
+            matrix_shape = (math.prod(shape[:-1]), shape[-1]) if shape else (1, 1)
             block = (min(tile_rows, matrix_shape[0]), min(tile_columns, matrix_shape[1]))
             row, column = kernels.indices()
-            coordinates = (kernels.program_id(0) * block[0] + row, kernels.program_id(1) * block[1] + column)
-            logical_coordinates = coordinates if len(shape) == 2 else coordinates[1:] if shape else ()
-            arguments = kernels.arguments(len(values))
+            row = kernels.program_id(0) * block[0] + row
+            column = kernels.program_id(1) * block[1] + column
+            logical_coordinates = tuple((row // math.prod(shape[axis + 1:-1])) % size
+                                        for axis, size in enumerate(shape[:-1])) + ((column,) if shape else ())
+            arguments = tuple(argument.reshape(shapes[value.index])
+                              for argument, value in zip(kernels.arguments(len(values)), values))
             if operation == 'gather':
                 resolved = dict(attributes)
                 resolved['mapping'] = tuple(tuple(part.resolve(capacity) if isinstance(part, Dimension) else part for part in item)
                                             for item in attributes['mapping'])
                 result = gather_expression(kernels, arguments, values, shapes, resolved, logical_coordinates)
+            elif operation == 'take_along_axis':
+                axis = attributes['axis']
+                index_at = tuple(0 if size == 1 else coordinate for size, coordinate in zip(shapes[values[1].index], logical_coordinates))
+                selected = arguments[1].at(*index_at)
+                if values[1].dtype.startswith('int'):
+                    selected = kernels.select(selected < 0, selected + shapes[values[0].index][axis], selected)
+                source_at = tuple(selected if i == axis else 0 if size == 1 else logical_coordinates[i]
+                                  for i, size in enumerate(shapes[values[0].index]))
+                result = arguments[0].at(*source_at)
+            elif operation == 'transpose':
+                source_at = [0] * len(shape)
+                for coordinate, axis in zip(logical_coordinates, attributes['axes']):
+                    source_at[axis] = coordinate
+                result = arguments[0].at(*source_at)
             else:
                 axis, offset, terms = attributes['axis'], 0, []
                 for argument, operand in zip(arguments, values):
                     at = list(logical_coordinates)
                     at[axis] = at[axis] - offset
-                    selected_row, selected_column = at if len(at) == 2 else (0, at[0])
                     offset += shapes[operand.index][axis]
-                    terms.append((logical_coordinates[axis] < offset, argument.at(selected_row, selected_column)))
+                    terms.append((logical_coordinates[axis] < offset, argument.at(*at)))
                 result = terms[-1][1]
                 for condition, value_expression in reversed(terms[:-1]):
                     result = kernels.select(condition, value_expression, result)
-            operands = tuple(matrix_view(local[v.index], matrix_shapes[v.index]) for v in values)
+            operands = tuple(local[v.index] for v in values)
             tensors[value.index] = program.kernel_call(kernels.expression(result),
                 grid=tuple((size + extent - 1) // extent for size, extent in zip(matrix_shape, block)),
                 in_specs=(BlockSpec(None),) * len(operands),
                 out_specs=BlockSpec(block, lambda i, j: (i, j)),
                 out_shape=ShapeDtypeStruct(matrix_shape, value.dtype), peer=peer)(*operands)
             continue
+        numerical = value.dtype in ('float16', 'float32')
+        matrix_shapes = {v.index: shapes[v.index] if len(shapes[v.index]) == 2 else (1, math.prod(shapes[v.index])) for v in values}
+        shaped = all(local[v.index].shape == matrix_shapes[v.index] or
+            (1 in matrix_shapes[v.index] and local[v.index].shape[::-1] == matrix_shapes[v.index]) or
+            local[v.index].grid == (1, 1) for v in values)
         if numerical and operation == 'matmul' and len(shape) == 2 and all(len(shapes[v.index]) == 2 and local[v.index].shape == shapes[v.index] for v in values):
             left, right = (local[v.index] for v in values)
             left = left.T if attributes['transpose_left'] else left

@@ -252,3 +252,43 @@ path: matrix row means can complete for one source row block while another row
 block remains unpublished, and their vector total depends on both. Source
 compilation passed for this migration; operational results are recorded by the
 parent integration run rather than assumed from compilation.
+
+## Logical-rank indexing on physical pages
+
+Forward gather, take-along-axis, concatenate, and transpose now lower exclusively
+through shared logical indexed views: `argument.reshape(logical_shape).at(*at)`.
+The [canonical indexing sources](algorithm-sources.md#xonotic-shared-indexing)
+and shared expression lowering own addressing and selected-reader dependencies.
+The Xonotic caller supplies each input's actual Tensor, including its existing
+physical shape, partition grid and per-block strides. It does not reshape or
+coalesce physical storage with `matrix_view` to enable these operations.
+
+Output storage is `(product(logical_shape[:-1]), logical_shape[-1])`, or `(1,1)`
+for a scalar. The configured output row and column identify logical coordinates
+using exact integer quotient and remainder. Shared logical views flatten those
+coordinates against declared logical shapes and map the resulting linear index
+onto the actual physical input shape and blocks. Thus graph reshape aliases can
+retain their original pages, and rank does not impose another numerical emitter.
+
+Gather preserves inserted axes, fixed indices, positive and negative slices,
+adjacent or separated advanced-index axes, and broadcast advanced indices. Signed
+dynamic indices are normalized once before constructing the source coordinates.
+Take-along-axis similarly normalizes its selected axis and uses zero coordinates
+for singleton non-axis dimensions of both source and indices. Transpose inverts
+the declared axis permutation for its source coordinates. Concatenation selects
+the source interval and subtracts that interval's offset; its existing predicate
+path prevents readers for unselected sources.
+
+The old custom forward gather/take/transpose/concatenate branches are deleted.
+General gather and take VJPs still use their retained scatter algorithms; this
+change does not claim their migration. The retained take VJP now maps broadcast
+source singleton dimensions to zero so the expanded forward shape does not
+produce invalid derivative addresses. The previously migrated row-gather VJP
+continues to use shared indexed_add.
+
+The existing optional Xonotic graph supplies rank-3 gather, reshape aliases,
+take, transpose, and concatenation outputs with independently delayed source
+regions. Source compilation and static addressing review are complete; numerical
+validation belongs to that existing integrated workflow, without a parallel
+evaluator. Empty logical dimensions remain subject to the Program's existing
+positive-extent storage contract.
