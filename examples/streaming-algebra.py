@@ -38,6 +38,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('rank', type=int)
     parser.add_argument('--runs', type=int, default=3)
+    parser.add_argument('--samples', type=int, default=1)
     parser.add_argument('--depth', type=int, default=1)
     parser.add_argument('--backend', choices=('cpu', 'metal'), default='cpu')
     parser.add_argument('--local', action='store_true')
@@ -58,6 +59,8 @@ def main():
         parser.error('Chain depth, runs, width and tile sizes must be positive')
     if args.rows <= args.tile_rows:
         parser.error('Streaming chain requires at least two row sections')
+    if args.runs < 1 or args.samples < 1:
+        parser.error('Runs and samples must be positive')
     updates_count, update_tile = args.scatter_rows, args.scatter_tile
     destinations_count = args.scatter_destinations
     if destinations_count < 4:
@@ -996,7 +999,7 @@ def main():
                 out_specs=BlockSpec((2, 4), lambda i: (0, 0)),
                 out_shape=ShapeDtypeStruct((2, 4), dtype), peer=0 if args.local else 1)(fanout_received, fanout_factors)
             fanout_results.append(program.export(exchange(branch, 1, 0)[0, 0]))
-        for run in range(args.runs + 1):
+        for run in range(args.runs):
             data = tuple((rng.standard_normal((rows, width), dtype=np.float32) / 8).astype(dtype) for _ in range(2))
             inputs = tuple(program.tensor(value.shape, (tile, args.tile_k), dtype=dtype) for value in data)
             # design/algorithm-sources.md#deep-composed-performance
@@ -1058,6 +1061,19 @@ def main():
                 time.sleep(0.0001)
             raise InterruptedError('Partial consumer observation interrupted')
 
+        expected_by_run = {}
+        for run, (data, _, _) in enumerate(invocations, 1):
+            # design/algorithm-sources.md#deep-composed-performance
+            operands = data
+            for depth in range(args.depth):
+                up = first_up if depth == 0 else tuple((group[0],) for group in first_up)
+                expected = reference_norm(reference_ffn(operands, up, first_down), gamma)
+                for table, index in zip(tables, ids):
+                    expected = (expected.astype(np.float64) + table[index[:, 0]]).astype(expected.dtype)
+                expected = reference_norm(reference_ffn((expected,), second_up, second_down), gamma)
+                operands = (expected,)
+            expected_by_run[run] = expected
+
         warm_started = time.monotonic_ns()
         warm = invocations[0]
         publish(warm, range(1, (rows + tile - 1) // tile))
@@ -1069,52 +1085,54 @@ def main():
         wait_for(tuple(warm_results.values()))
         print(json.dumps(dict(event='warmup', depth=args.depth, elapsed_ms=(time.monotonic_ns() - warm_started) / 1e6)), flush=True)
 
-        batch_started = time.monotonic_ns()
-        for run, invocation in enumerate(invocations[1:], 1):
-            publish(invocation, range(1 if run == 1 else 0, (rows + tile - 1) // tile))
-        delayed = invocations[1][2]['rmsnorm2']
-        wait_for((delayed[1, 0],))
-        first_ms = (time.monotonic_ns() - batch_started) / 1e6
-        if any(result.ready for coordinate, result in delayed.items() if coordinate[0] == 0):
-            raise ArithmeticError('An unpublished input section produced an output')
-        publish(invocations[1], (0,))
-        completed = {}
-        deadline = time.monotonic_ns() + 60_000_000_000
-        while running and len(completed) < args.runs:
-            for run, (_, _, probes) in enumerate(invocations[1:], 1):
-                if run not in completed and all(result.ready for result in probes['rmsnorm2'].values()):
-                    completed[run] = (time.monotonic_ns() - batch_started) / 1e6
-            if time.monotonic_ns() > deadline:
-                raise TimeoutError(f'Batch stalled: {program.report}')
-            if len(completed) < args.runs:
-                time.sleep(0.0001)
-        if not running:
-            return
-        batch_ms = (time.monotonic_ns() - batch_started) / 1e6
-        errors = []
-        for run, (data, _, probes) in enumerate(invocations):
-            # design/algorithm-sources.md#deep-composed-performance
-            operands = data
-            for depth in range(args.depth):
-                up = first_up if depth == 0 else tuple((group[0],) for group in first_up)
-                expected = reference_norm(reference_ffn(operands, up, first_down), gamma)
-                for table, index in zip(tables, ids):
-                    expected = (expected.astype(np.float64) + table[index[:, 0]]).astype(expected.dtype)
-                expected = reference_norm(reference_ffn((expected,), second_up, second_down), gamma)
-                operands = (expected,)
-            error = 0.0
-            for (row, column), result in probes['rmsnorm2'].items():
-                r, c = row * tile, column * args.tile_columns
-                part = expected[r:r + result.ref.shape[0], c:c + result.ref.shape[1]]
-                error = max(error, float(np.max(np.abs(result.array - part))))
-                if not np.allclose(result.array, part, atol=3e-3 if dtype == np.float16 else 3e-4, rtol=3e-3 if dtype == np.float16 else 3e-4):
-                    raise ArithmeticError(f'Gold chain numerical mismatch: {error}')
-            errors.append(error)
-            print(json.dumps(dict(event='gold', run=run, depth=args.depth, complete_ms=completed.get(run),
-                max_absolute_error=error, transport_queue=0, backend=args.backend, local=args.local)), flush=True)
-            for stage in probes.values():
-                for result in stage.values():
-                    result.consume()
+        for stage in warm[2].values():
+            for result in stage.values():
+                result.consume()
+        errors, sample_batches, sample_first, completion_observations = [], [], [], []
+        for sample in range(args.samples):
+            wait_for(tuple(ref for _, inputs, _ in invocations for tensor in inputs for ref in tensor.blocks.values()), 'writable')
+            batch_started = time.monotonic_ns()
+            for run, invocation in enumerate(invocations, 1):
+                publish(invocation, range(1 if run == 1 else 0, (rows + tile - 1) // tile))
+            delayed = invocations[0][2]['rmsnorm2']
+            wait_for((delayed[1, 0],))
+            first_ms = (time.monotonic_ns() - batch_started) / 1e6
+            if any(result.ready for coordinate, result in delayed.items() if coordinate[0] == 0):
+                raise ArithmeticError('An unpublished input section produced an output')
+            publish(invocations[0], (0,))
+            completed = {}
+            deadline = time.monotonic_ns() + 60_000_000_000
+            while running and len(completed) < args.runs:
+                for run, (_, _, probes) in enumerate(invocations, 1):
+                    if run not in completed and all(result.ready for result in probes['rmsnorm2'].values()):
+                        completed[run] = (time.monotonic_ns() - batch_started) / 1e6
+                if time.monotonic_ns() > deadline:
+                    raise TimeoutError(f'Batch stalled: {program.report}')
+                if len(completed) < args.runs:
+                    time.sleep(0.0001)
+            if not running:
+                return
+            batch_ms = (time.monotonic_ns() - batch_started) / 1e6
+            for run, (data, _, probes) in enumerate(invocations, 1):
+                expected = expected_by_run[run]
+                error = 0.0
+                for (row, column), result in probes['rmsnorm2'].items():
+                    r, c = row * tile, column * args.tile_columns
+                    part = expected[r:r + result.ref.shape[0], c:c + result.ref.shape[1]]
+                    error = max(error, float(np.max(np.abs(result.array - part))))
+                    if not np.allclose(result.array, part, atol=3e-3 if dtype == np.float16 else 3e-4, rtol=3e-3 if dtype == np.float16 else 3e-4):
+                        raise ArithmeticError(f'Gold chain numerical mismatch: {error}')
+                errors.append(error)
+                print(json.dumps(dict(event='gold', sample=sample, run=run, depth=args.depth, complete_ms=completed.get(run),
+                    max_absolute_error=error, transport_queue=0, backend=args.backend, local=args.local)), flush=True)
+                for stage in probes.values():
+                    for result in stage.values():
+                        result.consume()
+            sample_batches.append(batch_ms)
+            sample_first.append(first_ms)
+            completion_observations.extend(completed.values())
+            print(json.dumps(dict(event='performance_sample', sample=sample, depth=args.depth,
+                batch_ms=batch_ms, first_section_ms=first_ms, completion_ms=summary(tuple(completed.values())))), flush=True)
         wait_for((precision, strided, indexed, *mapped_results))
         if not precision.ready or not np.array_equal(precision.array, np.array([[2], [0]], dtype=dtype)):
             raise ArithmeticError('Contraction lost cancellation across K panels')
@@ -2285,7 +2303,8 @@ def main():
         print(json.dumps(dict(event='summary', dtype=args.dtype, depth=args.depth, rows=rows, width=width,
             tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
             invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,
-            completion_ms=summary(tuple(completed.values())), withheld_invocation=1, withheld_section=0,
+            completion_ms=summary(completion_observations), samples=args.samples,
+            sample_batch_ms=summary(sample_batches), sample_first_section_ms=summary(sample_first), withheld_invocation=1, withheld_section=0,
             max_absolute_error=max(errors), runtime={name: getattr(report, name) for name, _ in report._fields_})), flush=True)
 
 

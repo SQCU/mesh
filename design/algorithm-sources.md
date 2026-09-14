@@ -3436,3 +3436,42 @@ and requested/result view identities, not execution multiplicity. A requested
 view different from the cached result does not itself prove a copy occurred;
 outer expression forwarding remains outside this core plan snapshot until its
 actual binding is retained by the same preparation owner.
+
+
+## Deep composed performance
+
+The Pallas authors' [collective matrix multiplication](https://docs.jax.dev/en/latest/pallas/gpu/collective_matmul.html)
+composes efficient local calculation with communication overlap. Amdahl's 1967
+analysis, cited under streaming-overlap measurement above, requires including the
+remaining serial and communication costs when judging the resulting application.
+The operator's September 14 priority is repeated composed numerical chains,
+with Xonotic followup set aside after caller migration.
+
+The existing streaming-algebra gold supports `--depth 20` and `--depth 40`:
+FFN, RMS normalization, summed learned embeddings, FFN, RMS normalization repeat
+in sequence. Subsequent units consume the preceding result; they are not
+independent replicas counted as a deep network. The initial two-input projection
+retains its existing weights; subsequent first projections use each group's
+first weight with the single preceding output. Both hidden-output peer exchanges
+remain inside the same FFN composition. Depth one preserves the previous algebra.
+
+`--runs` configures simultaneous invocation slots; `--samples` reuses those
+slots, including warmup, through existing writes, writable pages and consumed
+outputs. There is no graph construction, allocation or compilation per sample.
+Only final-unit rank-zero outputs are exported. Peer diagnostic export holds are
+removed; canonical trace records still retain its work. Every sample withholds
+one original input row region until another region traverses the entire chain.
+Reference results are calculated before timing, and numerical error is checked
+at every sample. First-output, complete-output and batch timings retain count,
+mean and sample variance. Input publication is included; setup/reference time is
+excluded. Shape and tiling are explicit measurement parameters.
+
+At the default shape, one depth-40 graph's produced/input storage is about
+624 MiB locally or 704 MiB per paired participant, before side cases and metadata.
+The existing 1 GiB arena can therefore be used with one invocation slot rather
+than allocating a graph per timing sample. No arena enlargement is assumed.
+Measured comparison starts with local CPU/Accelerate because existing measurements
+at this shape outperform Metal. A favorable individual layer or transport-overlap
+interval does not establish positive complete-chain gain. Depth/shape/precision
+comparisons must retain the strongest validated local baseline and expose any
+loss of advantage under repetition; no universal positive speedup is presumed.
