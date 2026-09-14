@@ -403,7 +403,10 @@ class _ExpressionKernel:
             accumulator = ('ulong' if metal else 'uint64_t') if unsigned else ('long' if metal else 'int64_t') if output.dtype.kind in 'ib' else 'float'
             lines.append(f'{accumulator} {name}=0;')
             lines.append(f'for({"uint" if metal else "uint64_t"} k={"lane" if metal else "0"};k<{widths[child]};k+={32 if metal else 1}) {name}+={emit(child, "k")};')
-            if metal:
+            if metal and output.dtype.kind in 'iub':
+                lines.append(f'uint {name}_lo=simd_sum(uint(ulong({name})&65535ul)), {name}_mid=simd_sum(uint((ulong({name})>>16)&65535ul)), {name}_hi=simd_sum(uint(ulong({name})>>32));')
+                lines.append(f'{name}_mid+={name}_lo>>16; {name}_hi+={name}_mid>>16; {name}=(ulong({name}_hi)<<32)|(ulong({name}_mid&65535u)<<16)|ulong({name}_lo&65535u);')
+            elif metal:
                 lines.append(f'{name}=simd_sum({name});')
         lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(physical)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
         lines.append('}' if metal else '}}')

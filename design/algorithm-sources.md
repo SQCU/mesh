@@ -1489,6 +1489,29 @@ regions for their output panels. Gamma does not become a dependency of the sum.
 All grid maps, allocation, specialization and bindings are realized before
 numerical invocation; the existing gold examples provide runtime validation.
 
+
+### Metal modular 64-bit SIMD sums
+
+Apple's [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
+and installed `metal_simdgroup` header define the supported SIMD reduction types.
+The installed compiler rejects `simd_sum(ulong)`; integer row sums therefore use
+three supported UInt32 reductions, with no alternate execution path or operand
+copy. Floating `simd_sum(float)` remains unchanged.
+
+For the configured 32-lane group, write each lane's 64-bit accumulator as
+`a_i = l_i + 2**16*m_i + 2**32*h_i`, where the low and middle limbs are 16 bits
+and the high limb 32 bits. Compute `L=sum(l_i)`, `M=sum(m_i)+(L>>16)`, and
+`H=(sum(h_i)+(M>>16)) mod 2**32` using UInt32 SIMD sums and local carry addition.
+Reconstruct `(H<<32) | ((M&65535)<<16) | (L&65535)` as UInt64. This is exactly
+`sum(a_i) mod 2**64`: the two low carries account for every bit crossing the
+16-bit and 32-bit boundaries, while overflow from the high limb is discarded.
+`L <= 32*65535 < 2**21`, and `M <= 32*65535+31 < 2**21`, so neither low carry
+calculation can overflow UInt32. High-limb overflow is the intended modular sum.
+Signed results use the same bit representation and signed interpretation after
+reconstruction. The shared scalar emitter generates these operations for integer
+reductions; CPU UInt64 accumulation and the canonical partial tree retain their
+existing modular semantics.
+
 ## Canonical reader groups
 
 Papadopoulos and Culler's [Monsoon](https://www.cs.cmu.edu/~18742/papers/Papadopoulos1990.pdf)
