@@ -72,3 +72,12 @@ Operational checks must include mixed operand types, strided/transposed operands
 ragged sizes, alpha, output precision, and the distributed gold chain before a
 performance or complete numerical-validation claim is made. Preserve the fastest
 validated local baseline when comparing subsequent CPU or distributed gains.
+
+## Existing example coverage
+
+The streaming-algebra example also contracts transposed 5×3 and 7×5 canonical
+inputs into a 3×7 FP32 output. Its dyadic inputs have an exact reference result.
+This exercises both strided operands and incomplete four-lane output tiles;
+the gold chain's aligned square panels would not detect those addressing errors.
+It uses the same library linear operation and existing example, with no separate
+evaluator or numerical callback.

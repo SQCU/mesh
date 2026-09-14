@@ -83,6 +83,10 @@ def main():
         precision = program.export(linear(program,
             weight(np.array([[4096, 1, -4096, 1], [60000, 60000, -60000, -60000]], dtype=dtype)),
             weight(np.ones((4, 1), dtype=dtype)), tile_rows=2, tile_k=2, tile_columns=1, peer=0)[0, 0])
+        strided_left = (np.arange(15, dtype=np.float32).reshape(5, 3) / 8 - 1).astype(dtype)
+        strided_right = (np.arange(35, dtype=np.float32).reshape(7, 5) / 16 - 1).astype(dtype)
+        strided = program.export(linear(program, weight(strided_left).T, weight(strided_right).T,
+            tile_rows=3, tile_k=5, tile_columns=7, peer=0, output_dtype="float32")[0, 0])
         table_arg, index_arg, deferred_arg = kernels.arguments(3)
         _, column_arg = kernels.indices()
         index_data = np.array([[2], [2**53 + 1]], dtype=np.int64)
@@ -220,6 +224,11 @@ def main():
             raise ArithmeticError('Contraction lost cancellation across K panels')
         print(json.dumps(dict(event='precision', dtype=args.dtype, result=precision.array.tolist())), flush=True)
         precision.consume()
+        strided_expected = strided_left.astype(np.float32).T @ strided_right.astype(np.float32).T
+        if not strided.ready or not np.array_equal(strided.array, strided_expected):
+            raise ArithmeticError('Strided contraction lost a tail or accumulator value')
+        print(json.dumps(dict(event='strided_contraction', result=strided.array.tolist())), flush=True)
+        strided.consume()
         indexed_expected = np.stack((2 * table_data[2], np.ones(4, dtype=dtype)))
         if not indexed.ready or not np.array_equal(indexed.array, indexed_expected):
             raise ArithmeticError('Indexed expression lost integer identity or masked access semantics')
