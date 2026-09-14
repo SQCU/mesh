@@ -891,6 +891,7 @@ def _scalar_helpers(metal):
     suffix = '' if metal else 'f'
     log1p = 'mesh_log1p' if metal else 'log1pf'
     exponential = 'precise::exp' if metal else 'expf'
+    remainder_function = 'precise::fmod' if metal else 'fmodf'
     helpers = []
     if metal:
         helpers.append("""inline float mesh_log1p(float x) {
@@ -910,7 +911,7 @@ def _scalar_helpers(metal):
       return d>0.0f ? x+{log1p}({exponential}(-d)) : d<=0.0f ? y+{log1p}({exponential}(d)) : d;
     }}
     {qualifier} float mesh_floor_divide(float x,float y) {{
-      float remainder=fmod{suffix}(x,y);
+      float remainder={remainder_function}(x,y);
       if(y==0.0f)return x/y;
       float quotient=(x-remainder)/y;
       if(remainder!=0.0f && ((y<0.0f)!=(remainder<0.0f)))quotient-=1.0f;
