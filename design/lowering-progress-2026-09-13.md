@@ -1953,3 +1953,56 @@ plan selection including merges/assembly, and instrumentation-overhead acceptanc
 remain work to do. Grouped matrix-engine reuse, broader numerical geometry,
 integer optimization, empty-domain coverage, fusion/storage/placement and the
 nine-step end-to-end acceptance also remain open. The goal is not complete.
+
+
+## Compiled specialization identities — September 14
+
+`d132e24` and `9bc84cb` retain compiled source entries in the existing CPU and
+Metal caches. Entries carry immutable source and SHA-256 identity; inactive
+paired sources are retained without compilation. Actual code handles remain
+the compilation criterion. Each compiled function retains selected-source and
+ordered source-pair identity, exact typed input/output views, dispatch names and
+geometry, argument offsets, constant lengths/digests and compiler options.
+Names are copied while source strings are valid, and no tensor payload is hashed.
+The native build passed without warnings.
+
+`b498a84` exposes `Program.code_trace`, a separate immutable-code snapshot rather
+than adding source parsing to every live progress read. Its bindings reference
+source IDs, and each raw source appears once. `12f28e5` extends the existing
+workflow to verify content IDs, pair IDs, selected backend, source/options
+references, dispatch fields and an actual observed output's full view identity.
+Both rank-zero and rank-one trace archives include the code snapshot.
+
+Local Metal passed with 8424 configured functions and 16716 completed
+submissions, unchanged from the preceding implementation. It reports 6498
+compiled bindings, 2059 source pairs and 4115 unique source texts. The unique
+source payload is 110265774 bytes in this workflow; it is a setup/reporting cost,
+not a steady-state numerical buffer. Constants are empty for these generated
+bindings. Nonempty external Metal constants and multiple custom dispatches were
+source-reviewed, not numerically exercised here.
+
+Compiler/SDK/OS provenance is recorded separately. The local machine uses Apple
+clang 21.0.0 (clang-2100.0.123.102), SDK 26.4.1 and macOS 26.3.2 (25D2150); the
+peer uses Apple clang 21.0.0 (clang-2100.1.1.101), SDK 26.5 and macOS 26.5.1
+(25F80). Identical source IDs therefore do not justify pooling these machines'
+performance measurements without retaining that distinction.
+
+Local CPU also passed: 8424 configured functions and 16716 completed submissions,
+with no failures. Its 2059 source-pair identities and all 4115 unique source IDs
+match the Metal snapshot exactly. This connects observations of the same generated
+lowering across backends without inferring equivalence from buffer addresses.
+
+Paired Metal passed with 8356 configured functions and 16023 completed submissions
+on rank zero. The peer retained 1189 functions and 453 compiled bindings. Rank zero
+exited zero; the peer then handled SIGTERM and its original SSH process exited
+zero. Both bridges remain ready with no attached client. Registered storage and
+the bridge ABI remain unchanged.
+
+[Compiled identity provenance](../measurements/lowering-2026-09-13/compiled-identity-provenance.json)
+records the baseline, CPU, Metal and both RDMA participants, with compressed raw
+logs and traces. Timing summaries retain count, mean and sample variance. These
+small samples establish neither a speedup nor acceptable instrumentation overhead.
+The next implementation remains setup-time measured plan selection using complete
+candidate costs and preserving partial-output publication; source IDs alone do
+not implement that selection. Fusion, storage/placement and the full nine-point
+performance acceptance remain open.
