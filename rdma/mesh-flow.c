@@ -76,7 +76,7 @@ static int link_configure(void *state,int socket,double deadline){
   for(uint32_t q=0;q<(uint32_t)link->qps;q++){
     uint32_t sends=atomic_load(mesh_order_length(m,q,MESH_SEND)),receives=atomic_load(mesh_order_length(m,q,MESH_RECEIVE)),peer_receives=0;
     if(exchange(socket,&receives,&peer_receives,sizeof receives,deadline))return -1;
-    if(peer_receives!=sends){errno=EPROTO;return -1;}
+    if(peer_receives!=sends){fprintf(stderr,"transfer count mismatch queue=%u sends=%u peer_receives=%u\n",q,sends,peer_receives);errno=EPROTO;return -1;}
     uint32_t count=sends>receives?sends:receives;
     struct mesh_transfer *mine=calloc(count?count:1,sizeof *mine),*peer=calloc(count?count:1,sizeof *peer);
     if(!mine || !peer){free(mine);free(peer);errno=ENOMEM;return -1;}
@@ -84,7 +84,7 @@ static int link_configure(void *state,int socket,double deadline){
     int error=exchange(socket,mine,peer,count*sizeof *mine,deadline);
     struct mesh_transfer *out=mesh_transfers(m,q,MESH_SEND);
     for(uint32_t i=0;i<sends && !error;i++){
-      if(out[i].binding!=peer[i].binding || out[i].offset!=peer[i].offset || out[i].bytes!=peer[i].bytes){errno=EPROTO;error=-1;break;}
+      if(out[i].binding!=peer[i].binding || out[i].offset!=peer[i].offset || out[i].bytes!=peer[i].bytes){fprintf(stderr,"send plan mismatch queue=%u index=%u local=%llu,%u,%u peer=%llu,%u,%u\n",q,i,(unsigned long long)out[i].binding,out[i].offset,out[i].bytes,(unsigned long long)peer[i].binding,peer[i].offset,peer[i].bytes);errno=EPROTO;error=-1;break;}
       out[i].peer_row=peer[i].local_row;out[i].peer_page=peer[i].local_page;out[i].peer_index=peer[i].index;
     }
     if(!error){
@@ -92,7 +92,7 @@ static int link_configure(void *state,int socket,double deadline){
       error=exchange(socket,mine,peer,count*sizeof *mine,deadline);
       struct mesh_transfer *in=mesh_transfers(m,q,MESH_RECEIVE);
       for(uint32_t i=0;i<receives && !error;i++){
-        if(in[i].binding!=peer[i].binding || in[i].offset!=peer[i].offset || in[i].bytes!=peer[i].bytes){errno=EPROTO;error=-1;break;}
+        if(in[i].binding!=peer[i].binding || in[i].offset!=peer[i].offset || in[i].bytes!=peer[i].bytes){fprintf(stderr,"receive plan mismatch queue=%u index=%u local=%llu,%u,%u peer=%llu,%u,%u\n",q,i,(unsigned long long)in[i].binding,in[i].offset,in[i].bytes,(unsigned long long)peer[i].binding,peer[i].offset,peer[i].bytes);errno=EPROTO;error=-1;break;}
         in[i].peer_row=peer[i].local_row;in[i].peer_page=peer[i].local_page;in[i].peer_index=peer[i].index;
       }
     }
