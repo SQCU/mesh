@@ -3,6 +3,8 @@ from dataclasses import dataclass
 import numpy as np
 
 _REDUCTIONS = ('sum', 'max', 'min', 'any', 'all')
+_REAL_FUNCTIONS = ('exp', 'rsqrt', 'tanh', 'asinh', 'expm1', 'log1p', 'log', 'sqrt', 'power', 'logaddexp')
+_POINTWISE_FUNCTIONS = _REAL_FUNCTIONS + ('isfinite', 'abs', 'floor', 'floor_divide')
 
 
 @dataclass(frozen=True)
@@ -200,7 +202,7 @@ class _Expression:
             return _Expression('column' if self.operation == 'row' else 'row')
         if self.operation == 'dot':
             return _Expression('dot', tuple(child.T for child in self.operands[::-1]), self.value)
-        if self.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'cast', '//', '%', 'maximum', 'minimum'):
+        if self.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'cast', '//', '%', 'maximum', 'minimum') or self.operation in _POINTWISE_FUNCTIONS:
             return _Expression(self.operation, tuple(child.T for child in self.operands), self.value)
         return _Expression('transpose', (self,))
 
@@ -215,6 +217,66 @@ class _Expression:
     # design/algorithm-sources.md#region-expression-fusion
     def tanh(self):
         return _Expression('tanh', (self,))
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def asinh(self):
+        return _Expression('asinh', (self,))
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def expm1(self):
+        return _Expression('expm1', (self,))
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def log1p(self):
+        return _Expression('log1p', (self,))
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def log(self):
+        return _Expression('log', (self,))
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def sqrt(self):
+        return _Expression('sqrt', (self,))
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def abs(self):
+        return _Expression('abs', (self,))
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def isfinite(self):
+        return _Expression('isfinite', (self,))
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def floor(self):
+        return _Expression('floor', (self,))
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def power(self, other):
+        return _Expression('power', (self, _literal(other)))
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def logaddexp(self, other):
+        return _Expression('logaddexp', (self, _literal(other)))
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def floor_divide(self, other):
+        return _Expression('floor_divide', (self, _literal(other)))
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def arcsinh(self):
+        return self.asinh()
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def __abs__(self):
+        return self.abs()
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def __pow__(self, other):
+        return self.power(other)
+
+    # design/algorithm-sources.md#shared-elementary-functions
+    def __rpow__(self, other):
+        return _literal(other).power(self)
 
 
 # design/algorithm-sources.md#region-expression-fusion
@@ -590,8 +652,10 @@ class _ExpressionKernel:
                 return isinstance(node.value, (int, bool))
             if node.operation in ('<', '<=', '>', '>=', '==', 'row', 'column', 'block_ordinal'):
                 return True
-            if node.operation in ('exp', 'rsqrt', 'tanh'):
+            if node.operation in _REAL_FUNCTIONS:
                 return False
+            if node.operation == 'isfinite':
+                return True
             if node.operation in _REDUCTIONS:
                 return _reduction_dtype(node, inputs, output.dtype).kind in 'iub'
             return all(integral(child) for child in node.operands)
@@ -654,6 +718,7 @@ class _ExpressionKernel:
             return _emit_scalar_expression(node, inputs, metal, resolve)
 
         lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
+        lines.append(_scalar_helpers(metal))
         layouts = {}
         for index, ref in enumerate(inputs):
             if not hasattr(ref, 'blocks'):
@@ -779,7 +844,8 @@ def _emit_scalar_expression(node, inputs, metal, resolve):
         rows, columns, grid_columns = node.value
         return f'(({row})/{rows}*{grid_columns}+({column})/{columns})'
     return _scalar_expression(node, args, metal,
-        _expression_dtype(node, inputs) if node.operation in ('//', '%', 'maximum', 'minimum') else None)
+        _expression_dtype(node.operands[0], inputs) if node.operation in ('abs', 'floor', 'isfinite') else
+        _expression_dtype(node, inputs) if node.operation in ('//', '%', 'maximum', 'minimum', 'floor_divide') else None)
 
 
 # design/algorithm-sources.md#logical-indexed-views
@@ -788,10 +854,12 @@ def _expression_dtype(node, inputs):
         return inputs[node.value].dtype
     if node.operation == 'cast':
         return np.dtype(node.value)
-    if node.operation in ('dot', 'exp', 'rsqrt', 'tanh'):
+    if node.operation == 'dot' or node.operation in _REAL_FUNCTIONS:
         return np.dtype('float32')
-    if node.operation in ('<', '<=', '>', '>=', '=='):
+    if node.operation in ('<', '<=', '>', '>=', '==', 'isfinite'):
         return np.dtype('bool')
+    if node.operation in ('abs', 'floor'):
+        return _expression_dtype(node.operands[0], inputs)
     if node.operation in ('row', 'column', 'program_id', 'index_vector'):
         return np.dtype('int64')
     if node.operation == 'literal':
@@ -817,8 +885,63 @@ def _reduction_dtype(node, inputs, output):
     return np.dtype(np.int64 if output.kind in 'ib' else np.uint64 if output.kind == 'u' else np.float32)
 
 
+# design/algorithm-sources.md#shared-elementary-functions
+def _scalar_helpers(metal):
+    qualifier = 'inline' if metal else 'static inline'
+    suffix = '' if metal else 'f'
+    log1p = 'mesh_log1p' if metal else 'log1pf'
+    exponential = 'precise::exp' if metal else 'expf'
+    helpers = []
+    if metal:
+        helpers.append("""inline float mesh_log1p(float x) {
+          float u=1.0f+x;
+          return u==1.0f || x==INFINITY ? x : precise::log(u)*(x/(u-1.0f));
+        }
+        inline float mesh_expm1(float x) {
+          return fabs(x)<0.5f ? x*(1.0f+x*(0.5f+x*(1.0f/6.0f+x*(1.0f/24.0f+x*(1.0f/120.0f+x*(1.0f/720.0f+x*(1.0f/5040.0f+x*(1.0f/40320.0f+x/362880.0f)))))))) : precise::exp(x)-1.0f;
+        }
+        inline float mesh_asinh(float x) {
+          float a=fabs(x);
+          return a<0.000244140625f ? x : copysign(a>4096.0f ? precise::log(a)+0.6931471805599453f : mesh_log1p(a+a*a/(1.0f+precise::sqrt(1.0f+a*a))),x);
+        }""")
+    helpers.append(f"""{qualifier} float mesh_logaddexp(float x,float y) {{
+      if(x==y)return x+0.6931471805599453f;
+      float d=x-y;
+      return d>0.0f ? x+{log1p}({exponential}(-d)) : d<=0.0f ? y+{log1p}({exponential}(d)) : d;
+    }}
+    {qualifier} float mesh_floor_divide(float x,float y) {{
+      float remainder=fmod{suffix}(x,y);
+      if(y==0.0f)return x/y;
+      float quotient=(x-remainder)/y;
+      if(remainder!=0.0f && ((y<0.0f)!=(remainder<0.0f)))quotient-=1.0f;
+      if(quotient==0.0f)return copysign{suffix}(0.0f,x/y);
+      float result=floor{suffix}(quotient);
+      return result+(quotient-result>0.5f ? 1.0f : 0.0f);
+    }}""")
+    return '\n'.join(helpers)
+
+
 # design/algorithm-sources.md#fused-indexed-update-values
 def _scalar_expression(node, args, metal, dtype=None):
+    if node.operation == 'isfinite':
+        return f'isfinite((float)({args[0]}))' if dtype.kind == 'f' else '1'
+    if node.operation == 'abs':
+        if dtype.kind == 'f':
+            return f'fabs{"" if metal else "f"}((float)({args[0]}))'
+        if dtype.kind in 'ub':
+            return args[0]
+        bits = max(32, dtype.itemsize*8)
+        return f'((int{bits}_t)(({args[0]})<0 ? ((uint{bits}_t)0-(uint{bits}_t)({args[0]})) : (uint{bits}_t)({args[0]})))'
+    if node.operation == 'floor':
+        return f'floor{"" if metal else "f"}((float)({args[0]}))' if dtype.kind == 'f' else args[0]
+    if node.operation == 'floor_divide':
+        return f'mesh_floor_divide((float)({args[0]}),(float)({args[1]}))' if dtype.kind == 'f' else _scalar_expression(_Expression('//'), args, metal, dtype)
+    if node.operation in _REAL_FUNCTIONS and node.operation != 'rsqrt':
+        name = ('mesh_' + node.operation if node.operation == 'logaddexp' or metal and node.operation in ('asinh', 'expm1', 'log1p') else
+            ('pow' if node.operation == 'power' else node.operation) + ('' if metal else 'f'))
+        if metal and node.operation in ('power', 'log', 'sqrt'):
+            name = 'precise::' + name
+        return name + '(' + ','.join(f'((float)({value}))' for value in args) + ')'
     if node.operation in ('maximum', 'minimum'):
         if dtype.kind == 'f':
             return f'{"fmax" if node.operation == "maximum" else "fmin"}{"" if metal else "f"}({args[0]},{args[1]})'
@@ -870,6 +993,7 @@ def _compiled_region(program, inputs, output, body, dynamic_first=None):
                   'u4': 'uint32_t', 'i8': 'int64_t', 'u8': 'uint64_t', 'u1': 'uint8_t', 'b1': 'bool'}
         lines = ['#include <metal_stdlib>\nusing namespace metal;\ntypedef uint uint32_t; typedef ulong uint64_t; typedef long int64_t; typedef int int32_t; typedef uchar uint8_t;' if metal else
                  '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
+        lines.append(_scalar_helpers(metal))
         emitted = body(metal)
         preamble, statements = emitted if isinstance(emitted, tuple) else ('', emitted)
         lines.append(preamble)
@@ -1129,7 +1253,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             value_inputs.add(node.value)
         elif node.operation == 'load':
             indexed_inputs.add(node.value)
-        elif node.operation not in ('literal', 'row', 'column', '+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'cast', '//', '%', 'maximum', 'minimum'):
+        elif node.operation not in ('literal', 'row', 'column', '+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'cast', '//', '%', 'maximum', 'minimum') and node.operation not in _POINTWISE_FUNCTIONS:
             raise ValueError('Indexed update values require pointwise expressions; reduce or index their producer explicitly')
         for child in node.operands:
             value_dependencies(child)
@@ -1378,7 +1502,7 @@ class _ExpressionRegions:
         elif node.operation in _REDUCTIONS:
             child = self.layout(node.operands[0])
             result = (child[0][0], 1), (child[1][0], False), (child[2][0], 1)
-        elif node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'load', '//', '%', 'maximum', 'minimum'):
+        elif node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'load', '//', '%', 'maximum', 'minimum') or node.operation in _POINTWISE_FUNCTIONS:
             children = tuple(map(self.layout, node.operands))
             shape = tuple(max(child[0][axis] for child in children) for axis in range(2))
             if any(child[0][axis] not in (1, shape[axis]) for child in children for axis in range(2)):
