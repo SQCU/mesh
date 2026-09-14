@@ -644,7 +644,8 @@ def main():
             range_cases = ((-7, 23, 3, 'int64'), (23, -7, -3, 'int64'),
                            (-2**53-21, -2**53+9, 3, 'int64'),
                            (2**63+5, 2**63+35, 3, 'uint64'),
-                           (dimension-10, dimension, 1, 'int64'))
+                           (dimension-10, dimension, 1, 'int64'),
+                           (1024.25, 1025.5, .125, 'float16'))
             with graph:
                 range_inputs = tuple(graph.input(f'range_input_{i}', (2, 5), dtype)
                                      for i, (_, _, _, dtype) in enumerate(range_cases))
@@ -655,19 +656,23 @@ def main():
                 empty_outputs = tuple(mx.arange(start, stop, step, dtype='float32') + np.float32(2)
                                       for start, stop, step in ((0, 0, 1), (5, 0, 1), (0, 5, -1)))
                 empty_identities = tuple(mx.reduce(operation, value) for value in empty_outputs
-                                         for operation in ('sum', 'any', 'all', 'max', 'min'))
+                                         for operation in ('sum', 'any', 'all', 'max', 'min', 'mean'))
+                integer_mean = mx.mean(range_inputs[0]) + np.float32(.25)
             range_storage = tuple(program.tensor((2, 5), (1, 3), dtype=value.dtype) for value in range_inputs)
             lowered = kernel_calls(program, graph, (10,), dict(zip((value.index for value in range_inputs), range_storage)),
-                outputs=(*generated, *consumers, *empty_outputs, *empty_identities), root_peer=0, tile_rows=1, tile_columns=3)
+                outputs=(*generated, *consumers, *empty_outputs, *empty_identities, integer_mean), root_peer=0, tile_rows=1, tile_columns=3)
             observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
                 for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in (*generated, *consumers))
-            references = tuple(np.array([start.resolve((10,)) + i*step if isinstance(start, mx.Dimension) else start+i*step
-                                        for i in range(10)], dtype=dtype).reshape(2, 5)
+            references = tuple(((np.float32(start) + np.float32(step) * np.arange(10, dtype=np.float32)).astype(dtype)
+                                if np.dtype(dtype).kind == 'f' else
+                                np.array([start.resolve((10,)) + i*step if isinstance(start, mx.Dimension) else start+i*step
+                                          for i in range(10)], dtype=dtype)).reshape(2, 5)
                                for start, stop, step, dtype in range_cases)
             if any(np.prod(lowered[value.index].shape) or lowered[value.index].blocks for value in empty_outputs):
                 raise ArithmeticError('Empty range composition allocated a numerical output')
             empty_results = tuple(program.export(lowered[value.index][0, 0]) for value in empty_identities)
-            xonotic_ranges = range_storage, observations, references, empty_results
+            mean_result = program.export(lowered[integer_mean.index][0, 0])
+            xonotic_ranges = range_storage, observations, references, empty_results, mean_result
             take_indices = program.tensor((4, 1), (1, 1), dtype=np.int64)
             take_cotangents = program.tensor((4, 1), (1, 1), dtype=np.float32)
             graph = mx.Graph()
@@ -1283,10 +1288,11 @@ def main():
                     for i, j, result in results:
                         result.consume()
         if xonotic_ranges is not None:
-            storage, observations, references, empty_results = xonotic_ranges
+            storage, observations, references, empty_results, mean_result = xonotic_ranges
             wait_for(empty_results)
-            empty_expected = (0, False, True, -np.inf, np.inf) * 3
-            if any(result.array.item() != expected for result, expected in zip(empty_results, empty_expected)):
+            empty_expected = (0, False, True, -np.inf, np.inf, np.nan) * 3
+            if any(not np.array_equal(result.array, np.full(result.array.shape, expected), equal_nan=True)
+                   for result, expected in zip(empty_results, empty_expected)):
                 raise ArithmeticError('Empty range reduction identity differs')
             print(json.dumps(dict(event='xonotic_empty_ranges', shapes=[[0]]*3, identities=[result.array.item() for result in empty_results])), flush=True)
             for result in empty_results:
@@ -1304,7 +1310,8 @@ def main():
                 if any(result.ready for results in consumer_results for i, j, result in results):
                     raise ArithmeticError('Range consumer read an unpublished input')
                 values = tuple((np.arange(10).reshape(2, 5) + generation).astype(tensor.dtype) for tensor in storage)
-                expected = tuple(reference + value + np.array(14, dtype=value.dtype) for reference, value in zip(references, values))
+                expected = tuple(reference.astype(np.float32) + value.astype(np.float32) + np.float32(14) if value.dtype.kind == 'f' else
+                                 reference + value + np.array(14, dtype=value.dtype) for reference, value in zip(references, values))
                 for row in (generation, 1-generation):
                     for tensor, value in zip(storage, values):
                         for (i, j), ref in tensor.blocks.items():
@@ -1320,9 +1327,18 @@ def main():
                                     raise ArithmeticError('Range consumer differs after symbolic dimension composition')
                             elif row == generation and result.ready:
                                 raise ArithmeticError('Range consumer lost independent row progress')
+                    if row == generation:
+                        if mean_result.ready:
+                            raise ArithmeticError('Integer mean consumed a withheld range input row')
+                    else:
+                        wait_for((mean_result,))
+                        if mean_result.array.dtype != np.dtype('float32') or mean_result.array.item() != 4.75 + generation:
+                            raise ArithmeticError('Integer mean lost its fractional float32 result')
                     print(json.dumps(dict(event='xonotic_range_early' if row == generation else 'xonotic_range_complete',
                         generation=generation, published_row=row, elapsed_ms=(time.monotonic_ns()-started)/1e6,
+                        integer_mean=None if row == generation else mean_result.array.item(),
                         output=[[(i, j, result.array.tolist()) for i, j, result in results if i == row] for results in consumer_results])), flush=True)
+                mean_result.consume()
                 for results in observations:
                     for i, j, result in results:
                         result.consume()
