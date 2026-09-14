@@ -25,7 +25,7 @@ Apple, [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-l
 
 ## Program.write
 
-Papadopoulos and Culler, *Monsoon* (1990): host writes publish operand presence after their writes are visible. The existing host-writer reuse path retains previous-reader lifetime checks; distinct configured instances use distinct storage.
+Papadopoulos and Culler, *Monsoon* (1990): host writes publish operand presence after their writes are visible. The host-writer check belongs to `Program.write`; the separate `Ref.writable` polling property and its native query wrappers are removed. The existing host-writer reuse path retains previous-reader lifetime checks; distinct configured instances use distinct storage. The unused program-wide publication-size query is also removed; setup still derives regions from each tensor’s actual publication geometry.
 
 ## Program.export
 

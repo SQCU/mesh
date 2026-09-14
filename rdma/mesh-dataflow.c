@@ -443,9 +443,6 @@ static int mesh_claimable(struct hdr *m,uint32_t first,uint32_t count){
   return 1;
 }
 
-/* design/algorithm-sources.md#programwrite */
-int mesh_writable(struct mesh_ctx *c,uint32_t first,uint32_t count){return mesh_claimable(c->M,first,count);}
-
 /* design/algorithm-sources.md#programkernel_call */
 static void mesh_reset(struct mesh_ctx *c,uint32_t first,uint32_t count){
   struct hdr *m=c->M;

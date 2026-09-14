@@ -199,10 +199,6 @@ int mesh_algebra_kernel(struct mesh_algebra *handle) {
 uint32_t mesh_algebra_node(struct mesh_algebra *handle) {return owner(handle)->context->M->node;}
 /* design/algorithm-sources.md#kernelsexpression */
 size_t mesh_algebra_page_bytes(struct mesh_algebra *handle) {return owner(handle)->context->M->pgsz;}
-/* design/algorithm-sources.md#programtensor */
-size_t mesh_algebra_publication_bytes(struct mesh_algebra *handle) {
-  struct hdr *m=owner(handle)->context->M; return (size_t)m->block*m->pgsz;
-}
 /* design/algorithm-sources.md#kernelsdot */
 int mesh_algebra_coreml(struct mesh_algebra *handle,const char *python,const char *generator,const char *cache) {
   MeshAlgebra *a=owner(handle);
@@ -296,10 +292,6 @@ static struct mesh_row_range mesh_tensor_rows(struct mesh_tensor *t,uint32_t i) 
 int mesh_tensor_constant(struct mesh_tensor *t,uint32_t i) {
   if(!t || i>=t->count)return EINVAL;
   struct mesh_row_range m=mesh_tensor_rows(t,i);mesh_constant(t->context,m.first,m.count);return 0;
-}
-/* design/algorithm-sources.md#programwrite */
-int mesh_writer_writable(struct mesh_writer *w) {
-  return mesh_writable(w->context,w->output.first,w->output.count);
 }
 /* design/algorithm-sources.md#programwrite */
 int mesh_writer_issue(struct mesh_writer *w) {

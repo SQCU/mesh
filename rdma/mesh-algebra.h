@@ -31,7 +31,6 @@ int mesh_algebra_kernel(struct mesh_algebra *);
 int mesh_algebra_coreml(struct mesh_algebra *,const char *python,const char *generator,const char *cache);
 void mesh_algebra_destroy(struct mesh_algebra *);
 size_t mesh_algebra_page_bytes(struct mesh_algebra *);
-size_t mesh_algebra_publication_bytes(struct mesh_algebra *);
 uint32_t mesh_algebra_node(struct mesh_algebra *);
 struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *,const struct mesh_shape *,size_t extents,int transferable,int contiguous);
 int mesh_algebra_materialize(struct mesh_algebra *,const struct mesh_copy_region *,size_t,struct mesh_view);
@@ -43,7 +42,6 @@ size_t mesh_tensor_publication_bytes(struct mesh_tensor *,uint32_t extent);
 void *mesh_tensor_data(struct mesh_tensor *,uint32_t extent);
 int mesh_tensor_constant(struct mesh_tensor *,uint32_t extent);
 int mesh_algebra_writer(struct mesh_algebra *,struct mesh_view,struct mesh_writer **);
-int mesh_writer_writable(struct mesh_writer *);
 int mesh_writer_issue(struct mesh_writer *);
 void mesh_writer_complete(struct mesh_writer *,int publish);
 #ifdef __OBJC__

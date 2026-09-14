@@ -96,12 +96,6 @@ class Ref:
         result.partial = self.partial
         return result
 
-    @property
-    # design/algorithm-sources.md#programwrite
-    def writable(self):
-        check(self._writer_error)
-        return bool(self.program.native.writer_writable(self._writer))
-
     # design/algorithm-sources.md#program
     def on(self, peer):
         return (self, peer)
