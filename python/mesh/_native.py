@@ -132,6 +132,7 @@ class Native:
             'mesh_algebra_trace_route': (RouteEvent, [P, Z]),
             'mesh_algebra_trace_route_reader': (ReaderEvent, [P, Z, U]),
             'mesh_algebra_bind': (C.c_int, [P, C.c_int, View, View, View, C.c_float, C.c_float]),
+            'mesh_algebra_contract_select': (C.c_int, [P, View, C.POINTER(View), C.POINTER(View), Z, C.POINTER(View), Z, View, C.c_float, C.POINTER(Z)]),
             'mesh_algebra_copy': (C.c_int, [P, Endpoint, Endpoint, Z, C.c_uint16]),
             'mesh_algebra_export': (C.c_int, [P, P, U, C.POINTER(Z)]),
             'mesh_algebra_realize': (C.c_int, [P]),

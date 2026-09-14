@@ -935,9 +935,9 @@ static int native_part(MeshAlgebra *a,MeshFunction *f,NSArray *rectangles,NSDict
   };
   return 0;
 }
-/* design/algorithm-sources.md#mandatory-partial-publication */
-static int bind_part(MeshAlgebra *a,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta,size_t first,size_t count) {
-  MeshFunction *f=[MeshFunction new];f.owner=a;f.dependencies=[NSMutableData new];
+/* design/algorithm-sources.md#selected-native-contractions */
+static int prepare_part(MeshAlgebra *a,MeshFunction *f,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta,size_t first,size_t count) {
+  f.owner=a;f.dependencies=[NSMutableData new];
   struct mesh_extent *out=&z.tensor->extents[z.extent];
   size_t scalar=scalar_bytes(out->shape.scalar);
   f->output=(struct mesh_row_map){.first=out->first+(uint32_t)((z.offset+first)*scalar/a->context->M->pgsz),.count=out->quantum};
@@ -1005,7 +1005,79 @@ static int bind_part(MeshAlgebra *a,enum mesh_algebra_op op,struct mesh_view x,s
       [command commit];
     };
   }
+  return 0;
+}
+/* design/algorithm-sources.md#selected-native-contractions */
+static int bind_part(MeshAlgebra *a,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta,size_t first,size_t count) {
+  MeshFunction *f=[MeshFunction new];
+  int error=prepare_part(a,f,op,x,y,z,alpha,beta,first,count);if(error)return error;
   [a.functions addObject:f];return 0;
+}
+/* design/algorithm-sources.md#selected-native-contractions */
+static int contraction_views(MeshAlgebra *a,struct mesh_view *left,struct mesh_view *right,struct mesh_view *output) {
+  struct mesh_view x=*left,y=*right,z=*output;
+  if(!valid_view(a,x) || !valid_view(a,y) || !valid_view(a,z))return EINVAL;
+  enum mesh_scalar xs=x.tensor->extents[x.extent].shape.scalar,ys=y.tensor->extents[y.extent].shape.scalar,zs=z.tensor->extents[z.extent].shape.scalar;
+  if(xs>MESH_F32 || ys>MESH_F32 || zs>MESH_F32)return EINVAL;
+  if(x.columns!=y.rows || z.rows!=x.rows || z.columns!=y.columns || (z.column_stride!=1 && z.row_stride!=1) || !x.row_stride || !x.column_stride || !y.row_stride || !y.column_stride || (x.column_stride!=1 && x.row_stride!=1) || (y.column_stride!=1 && y.row_stride!=1))return EINVAL;
+  BOOL reverse=xs==MESH_F16 && ys==MESH_F32;
+  if(z.row_stride==1 && (z.column_stride!=1 || reverse)){
+    struct mesh_view swap=mesh_view_transpose(y);y=mesh_view_transpose(x);x=swap;z=mesh_view_transpose(z);
+  }
+  if(!a.cpu && !a.coremlPython && x.tensor->extents[x.extent].shape.scalar!=y.tensor->extents[y.extent].shape.scalar && (x.tensor->extents[x.extent].shape.scalar!=MESH_F32 || zs!=MESH_F32))return EINVAL;
+  *left=x;*right=y;*output=z;return 0;
+}
+/* design/algorithm-sources.md#selected-native-contractions */
+static int maps_cover(NSMutableData *available,NSMutableData *required) {
+  const struct mesh_row_map *supplied=available.bytes,*needed=required.bytes;
+  for(size_t i=0;i<required.length/sizeof *needed;i++){
+    uint64_t first=needed[i].first,end=first+needed[i].count;
+    while(first<end){
+      uint64_t next=first;
+      for(size_t j=0;j<available.length/sizeof *supplied;j++)
+        if(supplied[j].first<=first && (uint64_t)supplied[j].first+supplied[j].count>next)next=(uint64_t)supplied[j].first+supplied[j].count;
+      if(next==first)return 0;
+      first=next;
+    }
+  }
+  return 1;
+}
+/* design/algorithm-sources.md#selected-native-contractions */
+int mesh_algebra_contract_select(struct mesh_algebra *handle,struct mesh_view selector,const struct mesh_view *left,const struct mesh_view *right,size_t plan_count,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,float alpha,size_t *function_index) {
+  MeshAlgebra *a=owner(handle);
+  if(a.realized)return EBUSY;
+  if(!left || !right || !plan_count || plan_count>=UINT32_MAX || !inputs || !input_count || input_count>SIZE_MAX/sizeof *inputs-1 || !function_index || !valid_view(a,selector) || selector.rows!=1 || selector.columns!=1 || selector.tensor->extents[selector.extent].shape.scalar!=MESH_U32)return EINVAL;
+  struct mesh_row_map out;int error=output_region(a,output,&out);if(error)return error;
+  if(out.count!=output.tensor->extents[output.extent].quantum || output_used(a,out))return EINVAL;
+  NSMutableData *reads=[NSMutableData new],*views=[NSMutableData dataWithBytes:&selector length:sizeof selector];
+  for(size_t i=0;i<input_count;i++){
+    if(!valid_view(a,inputs[i]))return EINVAL;
+    dependencies(reads,inputs[i]);
+  }
+  [views appendBytes:inputs length:input_count*sizeof *inputs];
+  NSMutableArray<MeshFunction *> *plans=[NSMutableArray new];
+  for(size_t i=0;i<plan_count;i++){
+    struct mesh_view x=left[i],y=right[i],z=output;
+    error=contraction_views(a,&x,&y,&z);if(error)return error;
+    NSMutableData *needed=[NSMutableData new];dependencies(needed,x);dependencies(needed,y);
+    if(!maps_cover(reads,needed))return EINVAL;
+    MeshFunction *plan=[MeshFunction new];
+    error=prepare_part(a,plan,MESH_CONTRACT,x,y,z,alpha,0,0,z.rows*z.columns);if(error)return error;
+    [plans addObject:plan];
+  }
+  dependencies(reads,selector);
+  const struct mesh_row_map *maps=reads.bytes;
+  for(size_t i=0;i<reads.length/sizeof *maps;i++)if(overlaps(maps[i],out))return EINVAL;
+  MeshFunction *f=[MeshFunction new];f.owner=a;f.dependencies=reads;f.inputViews=views;f.indexedInputs=[NSMutableIndexSet new];
+  f->output=out;f->function=(struct mesh_row_function){.output=&f->output,.outputs=1,.rows=1};bind_dependencies(f);
+  f->executionKind=plans[0]->executionKind;
+  const uint32_t *selection=(const uint32_t *)selector.tensor->extents[selector.extent].address+selector.offset;
+  f.execute=^(MeshFunction *function){
+    uint32_t selected=*selection;
+    if(selected>=plans.count){complete_part(function,EINVAL,0);return;}
+    plans[selected].execute(function);
+  };
+  *function_index=a.functions.count;[a.functions addObject:f];return 0;
 }
 /* design/algorithm-sources.md#mandatory-partial-publication */
 int mesh_algebra_bind(struct mesh_algebra *handle,enum mesh_algebra_op op,struct mesh_view x,struct mesh_view y,struct mesh_view z,float alpha,float beta) {
@@ -1018,13 +1090,7 @@ int mesh_algebra_bind(struct mesh_algebra *handle,enum mesh_algebra_op op,struct
   if(x.tensor->extents[x.extent].shape.scalar>MESH_F32 || out->shape.scalar>MESH_F32 || (binary && y.tensor->extents[y.extent].shape.scalar>MESH_F32))return EINVAL;
   if(!binary)y=x;
   if(op==MESH_CONTRACT) {
-    if(x.columns!=y.rows || z.rows!=x.rows || z.columns!=y.columns || (z.column_stride!=1 && z.row_stride!=1) || !x.row_stride || !x.column_stride || !y.row_stride || !y.column_stride || (x.column_stride!=1 && x.row_stride!=1) || (y.column_stride!=1 && y.row_stride!=1))return EINVAL;
-    /* design/algorithm-sources.md#mixed-contraction-orientation */
-    BOOL reverse=x.tensor->extents[x.extent].shape.scalar==MESH_F16 && y.tensor->extents[y.extent].shape.scalar==MESH_F32;
-    if(z.row_stride==1 && (z.column_stride!=1 || reverse)){
-      struct mesh_view left=mesh_view_transpose(y);y=mesh_view_transpose(x);x=left;z=mesh_view_transpose(z);
-    }
-    if(!a.cpu && !a.coremlPython && x.tensor->extents[x.extent].shape.scalar!=y.tensor->extents[y.extent].shape.scalar && (x.tensor->extents[x.extent].shape.scalar!=MESH_F32 || out->shape.scalar!=MESH_F32))return EINVAL;
+    int error=contraction_views(a,&x,&y,&z);if(error)return error;
   } else if(z.rows!=x.rows || z.columns!=(op==MESH_SUM?1:x.columns) || (binary && (x.rows!=y.rows || x.columns!=y.columns)))return EINVAL;
   NSMutableData *reads=[NSMutableData new];dependencies(reads,x);if(binary)dependencies(reads,y);
   struct mesh_row_map *maps=reads.mutableBytes;
