@@ -331,14 +331,14 @@ static int compare_maps(const void *a,const void *b) {
   return (x>y)-(x<y);
 }
 /* design/algorithm-sources.md#program */
-static void bind_dependencies(MeshFunction *f) {
-  struct mesh_row_map *maps=f.dependencies.mutableBytes;size_t length=f.dependencies.length/sizeof *maps,used=0;
+static size_t merge_maps(NSMutableData *storage,size_t first) {
+  struct mesh_row_map *maps=(struct mesh_row_map *)storage.mutableBytes+first;size_t length=storage.length/sizeof *maps-first,used=0;
   qsort(maps,length,sizeof *maps,compare_maps);
   for(size_t i=0;i<length;i++) {
     if(used && maps[i].first<=maps[used-1].first+maps[used-1].count)maps[used-1].count=MAX(maps[used-1].first+maps[used-1].count,maps[i].first+maps[i].count)-maps[used-1].first;
     else maps[used++]=maps[i];
   }
-  f->function.input=maps;f->function.inputs=(uint32_t)used;
+  storage.length=(first+used)*sizeof *maps;return used;
 }
 /* design/algorithm-sources.md#program */
 static int output_used(MeshAlgebra *a,struct mesh_row_map m) {
@@ -393,7 +393,7 @@ static int bind_function(struct mesh_algebra *handle,const struct mesh_view *inp
     for(size_t j=0;j<f.dependencies.length/sizeof *reads;j++)if(overlaps(reads[j],m))return EINVAL;
     [f.results appendBytes:&m length:sizeof m];
   }
-  f->function=(struct mesh_row_function){.output=f.results.mutableBytes,.outputs=(uint32_t)output_count,.rows=1};bind_dependencies(f);
+  f->function=(struct mesh_row_function){.output=f.results.mutableBytes,.outputs=(uint32_t)output_count,.rows=1};f->function.inputs=(uint32_t)merge_maps(f.dependencies,0);f->function.input=f.dependencies.mutableBytes;
   f.execute=^(MeshFunction *function){submit(function);};
   [a.functions addObject:f];return 0;
 }
@@ -402,7 +402,7 @@ static int bind_function(struct mesh_algebra *handle,const struct mesh_view *inp
 int mesh_algebra_view_pages(struct mesh_algebra *handle,struct mesh_view view,struct mesh_view *pages,size_t capacity,size_t *count) {
   MeshAlgebra *a=owner(handle);
   if(!count || !valid_view(a,view) || (!pages && capacity))return EINVAL;
-  NSMutableData *coverage=[NSMutableData new];dependencies(coverage,view);
+  NSMutableData *coverage=[NSMutableData new];dependencies(coverage,view);merge_maps(coverage,0);
   const struct mesh_row_map *maps=coverage.bytes;size_t ranges=coverage.length/sizeof *maps;
   size_t needed=0;
   for(uint32_t i=0;i<ranges;i++)needed+=maps[i].count;
@@ -742,7 +742,7 @@ static int prepare_part(MeshAlgebra *a,MeshFunction *f,struct mesh_view x,struct
     at+=nr*nc;left-=nr*nc;
   }
   f->function=(struct mesh_row_function){.output=&f->output,.outputs=1,.rows=1};
-  bind_dependencies(f);
+  f->function.inputs=(uint32_t)merge_maps(f.dependencies,0);f->function.input=f.dependencies.mutableBytes;
   if(a.cpu) {
     f->executionKind=MESH_EXECUTION_CPU;
     int error=cpu_part(f,parts.bytes,parts.length/sizeof(struct mesh_matrix_part),alpha);if(error)return error;
@@ -866,7 +866,7 @@ int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_
       }
     }
     f->output=(struct mesh_row_map){.first=output.first+(uint32_t)(first*scalar/a->context->M->pgsz),.count=d->quantum};
-    f->function=(struct mesh_row_function){.output=&f->output,.outputs=1,.rows=1};bind_dependencies(f);
+    f->function=(struct mesh_row_function){.output=&f->output,.outputs=1,.rows=1};f->function.inputs=(uint32_t)merge_maps(f.dependencies,0);f->function.input=f.dependencies.mutableBytes;
 
     f.execute=^(MeshFunction *function){
       const struct mesh_copy_segment *parts=segments.bytes;
@@ -941,7 +941,7 @@ int mesh_algebra_export(struct mesh_algebra *handle,struct mesh_view view,size_t
   if(!first || !count || !valid_view(a,view))return EINVAL;
   *first=a.returns.length/sizeof(struct mesh_row_map);
   dependencies(a.returns,view);
-  *count=a.returns.length/sizeof(struct mesh_row_map)-*first;return 0;
+  *count=merge_maps(a.returns,*first);return 0;
 }
 /* design/algorithm-sources.md#programkernel_call */
 static void submit_ready(void *argument,uint32_t occurrence) {
