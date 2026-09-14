@@ -1341,7 +1341,7 @@ releasing the source. No extra numerical function or per-reader dispatch is used
 A group-completed result is published before the aggregate READ bit. It survives
 remote source reuse until the source's next notification resets member results;
 that distinguishes the new source value from the preceding completed group.
-Local producer preparation resets the same results directly. Export readiness and
+Local producer publication uses that same event owner for member reset. Export readiness and
 consume follow the same member contract. Hardware SEND readers retain their
 existing exact direct planes. [Shared routing ownership](shared-routing-ownership.md#implemented-reader-group-specialization)
 records source disposition, the fast-path boundary, lifetime ordering and remaining

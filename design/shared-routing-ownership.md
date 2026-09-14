@@ -233,9 +233,9 @@ releases a source only when all that source's group members are present. Normal
 selector numerical membership remains distinct from selector lifetime membership;
 empty selection cannot release selector storage before the numerical call ends.
 
-Local producer issue resets only the member results owned by its source rows.
-For a remote receive, the bridge resets the source's aggregate READ bit but has
-no process-local member list. The group-completed result retains the preceding
+Local producer issue and remote receive preparation reset the source's aggregate
+READ bit, while member reset belongs only to the existing metadata event owner.
+The bridge has no process-local member list. The group-completed result retains the preceding
 completion: when the source publication arrives with this result present and its
 aggregate READ bit clear, the existing metadata owner clears the old members and
 then the group-completed result before firing new consumers. The group-completed
@@ -245,8 +245,13 @@ this pending metadata transition; it does not clear or guess group state itself.
 
 Group storage is configured once and reused. Source-row release removes its group
 and logical result ranges; teardown synchronizes with the existing metadata queue
-to avoid freeing an in-use group. Map member-index arrays remain owned by the
-attached context and are freed at detach. No allocation, teardown synchronization
+to avoid freeing an in-use group. Program teardown unbinds its normal, dynamic and export map memberships before
+freeing their maps. Each storage allocation retains exact source/member pairs;
+unbinding removes its pending setup assignments or satisfies its live members.
+A member-result allocation is released when its final owning map is unbound.
+These ownership counts apply only to setup/teardown memory resources, never to
+numerical readiness. Member-index and offset arrays are freed at Program.close,
+even when other Programs keep the context attached. No allocation, teardown synchronization
 or numerical no-op is added to the invocation path.
 
 `mesh_reader_trace`, `mesh_algebra_trace_input_reader` and
@@ -265,3 +270,22 @@ new grouped domains. Shared sparse routing domains, compact binding tables,
 active-grid lowering and finer physical partial storage remain separate work;
 reader groups remove the 64-plane numerical ceiling but do not remove O(D*C)
 candidate metadata in the current scatter lowering.
+
+
+### One owner for member reset
+
+Member reset is performed only by the existing metadata event owner, for local and
+remote sources alike. A source producer clears ordinary PRESENT/READ state; the
+preceding group-completed result stays present until the event owner clears every
+member and then that result last. Grouped numerical readiness and export polling
+reject the intervening closed group. An event that began before source reuse can
+therefore perform the reset for the newly published source without racing a second
+host reset or clearing a newly consumed member. No blocking invocation dispatch or
+new epoch field implements this ordering.
+
+Program.close already removes its watches and waits for its numerical executions.
+Map unbinding runs under the existing metadata queue before freeing membership
+arrays, and no released array remains in a pending setup assignment. Group member
+ranges shared by several maps remain until their last owning map is removed;
+removed members are marked satisfied while that storage remains. Numerical source
+lifetimes continue to use presence bits, not the teardown resource-owner count.

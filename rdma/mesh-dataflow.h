@@ -55,6 +55,7 @@ int mesh_republish(struct mesh_ctx *,uint32_t first,uint32_t count);
 size_t mesh_issue(struct mesh_ctx *,const struct mesh_row_function *,uint32_t *indices,size_t capacity);
 void mesh_complete(struct mesh_ctx *,const struct mesh_row_function *,const uint32_t *indices,size_t count);
 void mesh_consume(struct mesh_ctx *,struct mesh_row_map,uint32_t index);
+void mesh_reader_unbind(struct mesh_ctx *,struct mesh_row_map *);
 struct mesh_reader_event mesh_reader_trace(struct mesh_ctx *,struct mesh_row_map,uint32_t index,uint32_t row);
 size_t mesh_transfer_trace_count(struct mesh_ctx *);
 struct mesh_transfer_event mesh_transfer_trace(struct mesh_ctx *,size_t index);

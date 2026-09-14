@@ -18,6 +18,7 @@ static int mesh_execution_create(struct mesh_ctx *);
 static void mesh_reader_destroy(struct mesh_ctx *);
 static void mesh_reader_release(struct mesh_ctx *,uint32_t,uint32_t);
 static int mesh_reader_release_serial(struct mesh_ctx *,uint32_t,uint32_t);
+static int mesh_reader_unbind_serial(struct mesh_ctx *,struct mesh_row_map *);
 static void mesh_reader_reset(struct mesh_ctx *,uint32_t,uint32_t);
 static void mesh_reader_event(struct mesh_ctx *,uint32_t);
 static int mesh_map_ready(struct mesh_ctx *,struct mesh_row_map,uint32_t);
@@ -173,9 +174,9 @@ static int mesh_free_plane(uint64_t busy,int *plane){
   return ENOSPC;
 }
 struct mesh_reader_pending {uint32_t *member;struct mesh_reader_pending *next;};
-struct mesh_reader_chunk {uint32_t first,count;struct mesh_reader_chunk *next;};
+struct mesh_reader_chunk {uint32_t first,count,owners;struct mesh_reader_chunk *next;};
 struct mesh_reader_group {uint32_t plane,completed,pending_count;struct mesh_reader_pending *pending;struct mesh_reader_chunk *chunks;};
-struct mesh_reader_storage {uint32_t *members;size_t *offsets;struct mesh_reader_storage *next;};
+struct mesh_reader_storage {uint32_t *members,*sources;size_t *offsets,count;struct mesh_reader_storage *next;};
 struct mesh_readers {struct mesh_reader_group **groups;struct mesh_reader_storage *storage;};
 /* design/algorithm-sources.md#canonical-reader-groups */
 static int mesh_reader_bind(struct mesh_ctx *c,uint64_t *used,const uint32_t *fanout,struct mesh_row_map *map,uint32_t occurrences){
@@ -212,14 +213,15 @@ static int mesh_reader_bind(struct mesh_ctx *c,uint64_t *used,const uint32_t *fa
     if(!range.count || (uint64_t)range.first+range.count>mesh_rows(c->M)){free(storage->offsets);free(storage);return EINVAL;}
     total+=range.count;
   }
-  storage->members=malloc(total*sizeof *storage->members);
-  if(!storage->members){free(storage->offsets);free(storage);return ENOMEM;}
+  storage->members=malloc(total*sizeof *storage->members);storage->sources=malloc(total*sizeof *storage->sources);storage->count=total;
+  if(!storage->members || !storage->sources){free(storage->members);free(storage->sources);free(storage->offsets);free(storage);return ENOMEM;}
+  for(size_t i=0;i<total;i++){storage->members[i]=MESH_ABSENT;storage->sources[i]=MESH_ABSENT;}
   storage->next=readers->storage;readers->storage=storage;
   map->members=storage->members;map->member_offsets=storage->offsets;map->plane=MESH_ABSENT;
   for(uint32_t i=0;i<occurrences;i++){
     struct mesh_row_range range=mesh_range(*map,i);
     for(uint32_t j=0;j<range.count;j++){
-      uint32_t row=range.first+j,*member=&storage->members[storage->offsets[i]+j];*member=MESH_ABSENT;
+      uint32_t row=range.first+j,*member=&storage->members[storage->offsets[i]+j];storage->sources[storage->offsets[i]+j]=row;
       if(mesh_is(c->M,MESH_CONSTANT,row))continue;
       struct mesh_reader_group *group=readers->groups[row];
       if(!group){
@@ -241,7 +243,7 @@ static int mesh_reader_realize(struct mesh_ctx *c){
     struct mesh_reader_group *group=readers->groups[row];if(!group || !group->pending_count)continue;
     struct mesh_reader_chunk *chunk=malloc(sizeof *chunk);if(!chunk)return ENOMEM;
     chunk->first=mesh_rows_alloc(c,group->pending_count);if(chunk->first==MESH_ABSENT){free(chunk);return errno;}
-    chunk->count=group->pending_count;chunk->next=group->chunks;group->chunks=chunk;
+    chunk->count=chunk->owners=group->pending_count;chunk->next=group->chunks;group->chunks=chunk;
     uint32_t index=chunk->first;
     while(group->pending){struct mesh_reader_pending *pending=group->pending;*pending->member=index++;group->pending=pending->next;free(pending);}
     group->pending_count=0;
@@ -263,8 +265,35 @@ static void mesh_reader_release(struct mesh_ctx *c,uint32_t first,uint32_t count
 static void mesh_reader_destroy(struct mesh_ctx *c){
   struct mesh_readers *readers=c->readers;if(!readers)return;
   mesh_reader_release(c,0,mesh_rows(c->M));
-  while(readers->storage){struct mesh_reader_storage *next=readers->storage->next;free(readers->storage->members);free(readers->storage->offsets);free(readers->storage);readers->storage=next;}
+  while(readers->storage){struct mesh_reader_storage *next=readers->storage->next;free(readers->storage->members);free(readers->storage->sources);free(readers->storage->offsets);free(readers->storage);readers->storage=next;}
   free(readers->groups);free(readers);c->readers=NULL;
+}
+
+/* design/algorithm-sources.md#canonical-reader-groups */
+void mesh_reader_unbind(struct mesh_ctx *c,struct mesh_row_map *map){
+  if(!map->members || mesh_reader_unbind_serial(c,map))return;
+  struct mesh_readers *readers=c->readers;struct mesh_reader_storage **at=&readers->storage;
+  while(*at && (*at)->members!=map->members)at=&(*at)->next;
+  if(!*at)return;
+  struct mesh_reader_storage *storage=*at;*at=storage->next;
+  for(size_t i=0;i<storage->count;i++){
+    uint32_t row=storage->sources[i];if(row==MESH_ABSENT)continue;
+    struct mesh_reader_group *group=readers->groups[row];if(!group)continue;
+    struct mesh_reader_pending **pending=&group->pending;
+    while(*pending){
+      if((*pending)->member==&storage->members[i]){struct mesh_reader_pending *old=*pending;*pending=old->next;free(old);group->pending_count--;}
+      else pending=&(*pending)->next;
+    }
+    uint32_t member=storage->members[i];if(member==MESH_ABSENT)continue;
+    struct mesh_reader_chunk **chunk=&group->chunks;
+    while(*chunk && !(member>=(*chunk)->first && member<(*chunk)->first+(*chunk)->count))chunk=&(*chunk)->next;
+    if(!*chunk)continue;
+    mesh_bits_set(c->M,MESH_PRESENT,member,1);
+    if(!--(*chunk)->owners){struct mesh_reader_chunk *old=*chunk;*chunk=old->next;mesh_rows_release(c,old->first,old->count);free(old);}
+    mesh_reader_event(c,row);mesh_notify(c->M,row,1);
+  }
+  free(storage->members);free(storage->sources);free(storage->offsets);free(storage);
+  map->members=NULL;map->member_offsets=NULL;
 }
 
 /* design/algorithm-sources.md#canonical-reader-groups */
@@ -414,7 +443,6 @@ static void mesh_reset(struct mesh_ctx *c,uint32_t first,uint32_t count){
   struct hdr *m=c->M;
   mesh_bits_clear(m,MESH_PRESENT,first,count);
   for(int p=0;p<MESH_READERS;p++) mesh_bits_clear(m,MESH_READ+p,first,count);
-  mesh_reader_reset(c,first,count);
   mesh_index_reset(c,first,count);
 }
 
@@ -545,6 +573,11 @@ struct mesh_execution {
 static int mesh_reader_release_serial(struct mesh_ctx *c,uint32_t first,uint32_t count){
   struct mesh_execution *e=c->execution;if(!e || !c->readers || dispatch_get_specific(e)==e)return 0;
   dispatch_sync(e->queue,^{mesh_reader_release(c,first,count);});return 1;
+}
+/* design/algorithm-sources.md#canonical-reader-groups */
+static int mesh_reader_unbind_serial(struct mesh_ctx *c,struct mesh_row_map *map){
+  struct mesh_execution *e=c->execution;if(!e || dispatch_get_specific(e)==e)return 0;
+  dispatch_sync(e->queue,^{mesh_reader_unbind(c,map);});return 1;
 }
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
 static int mesh_index_active(struct mesh_ctx *c,const struct mesh_indexed_read *d){

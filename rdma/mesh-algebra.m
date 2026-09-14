@@ -130,8 +130,16 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *);
 @implementation MeshAlgebra
 /* design/algorithm-sources.md#streaming-algebra */
 - (void)dealloc {
-  for(MeshFunction *f in self.functions)for(struct mesh_indexed_read *d=f->function.indexed;d;d=d->next)
-    mesh_rows_release(context,d->retired,2*d->candidates+2);
+  for(MeshFunction *f in self.functions){
+    for(uint32_t i=0;i<f->function.inputs;i++)mesh_reader_unbind(context,&f->function.input[i]);
+    for(struct mesh_indexed_read *d=f->function.indexed;d;d=d->next){
+      for(uint32_t i=0;i<d->selectors;i++)mesh_reader_unbind(context,&d->selector[i]);
+      for(uint32_t i=0;i<d->candidates;i++)for(uint32_t j=0;j<d->candidate[i].count;j++)mesh_reader_unbind(context,&d->candidate[i].maps[j]);
+      mesh_rows_release(context,d->retired,2*d->candidates+2);
+    }
+  }
+  struct mesh_row_map *returns=self.returns.mutableBytes;
+  for(size_t i=0;i<self.returns.length/sizeof *returns;i++)mesh_reader_unbind(context,&returns[i]);
   self.functions=nil;
   self.lookup=nil;
   self.extents=nil;
