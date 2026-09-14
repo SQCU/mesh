@@ -156,3 +156,28 @@ General rank, wider radix tiles, production-scale memory/launch costs, fused
 update expressions and the actual Xonotic migration remain open. Partial storage
 is bounded by maximum segment count, but separately allocated canonical quanta
 and per-reader candidate metadata still require storage/lowering optimization.
+
+
+## Xonotic consumer migration and destination validity
+
+`9b4ea55` migrates rank-one Xonotic scatter, scalar/vector pointwise expressions
+and sum consumers. Remaining custom kernels retain explicit block pointers and
+strides rather than demanding a single whole-region view. No dense operand copy
+is introduced. [Xonotic source mapping](xonotic-indexed-add.md) records remaining
+nonstreamed operations and axis coverage. This is an incremental migration, not
+completion of the expert/neighborhood and derivative inventory.
+
+The existing two-node planner completed normally at source `9b4ea55`: width 16,
+eight bots, eight-row tiles, five-second duration, 3384 returned plans and 559
+objective switches. `xonotic-planner.json` retains both outputs and configuration.
+This validates the actual planner's compilation, transport and repeated execution;
+it does not exercise every newly migrated scatter consumer or establish numerical
+residuals, a throughput gain, or full Xonotic coverage. The peer Xonotic environment
+uses Python 3.12 and the repository's declared MLX/NumPy dependency versions.
+
+`e4d18c0` evaluates scatter destination validity before narrowing indices to U32.
+`9a96306` extends the second existing scatter occurrence with index 2**32+2;
+it must not wrap into destination 2. Both CPU and Metal pass, producing second
+consumer rows [10, 0, 12, 12], rather than the earlier case's [10, 0, 18, 12].
+`scatter-valid-cpu.json.gz` and `scatter-valid-metal.json.gz` retain these runs.
+The earlier reuse artifacts remain evidence for their separately recorded inputs.
