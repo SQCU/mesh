@@ -223,7 +223,7 @@ def main():
         scatter_valid = np.ones((updates_count, 1), dtype=bool)
         scatter_valid[-1 if updates_count-last_start > 1 else -2, 0] = False
         base_arg, destination_arg, update_arg, mask_arg, factor_arg, lookup_arg = kernels.arguments(6)
-        update_row, _ = kernels.indices()
+        update_row = kernels.arange(updates_count).T
         update_column = kernels.arange(4)
         scatter = program.kernel_call(kernels.expression(kernels.indexed_add(
             base_arg, destination_arg, update_arg.at(lookup_arg.at(update_row, 0), update_column) * factor_arg + 1,
