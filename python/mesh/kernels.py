@@ -3,8 +3,8 @@ from dataclasses import dataclass
 import numpy as np
 
 _REDUCTIONS = ('sum', 'max', 'min', 'any', 'all')
-_REAL_FUNCTIONS = ('exp', 'rsqrt', 'tanh', 'asinh', 'expm1', 'log1p', 'log', 'sqrt', 'power', 'logaddexp')
-_POINTWISE_FUNCTIONS = _REAL_FUNCTIONS + ('isfinite', 'abs', 'floor', 'floor_divide')
+_REAL_FUNCTIONS = ('exp', 'rsqrt', 'tanh', 'asinh', 'expm1', 'log1p', 'log', 'sqrt', 'power', 'logaddexp', 'random_normal')
+_POINTWISE_FUNCTIONS = _REAL_FUNCTIONS + ('isfinite', 'abs', 'floor', 'floor_divide', 'philox')
 
 
 @dataclass(frozen=True)
@@ -520,6 +520,20 @@ def arange(length, *, tile=None):
     return _Expression('index_vector', value=(length, max(1, min(tile, length)), 0, 1))
 
 
+# design/algorithm-sources.md#counter-based-random-generation
+def philox4x32(counter_words, key0, key1):
+    counter_words = tuple(counter_words)
+    if len(counter_words) != 4:
+        raise ValueError('Philox4x32 requires four counter words')
+    operands = tuple(map(_literal, (*counter_words, key0, key1)))
+    return tuple(_Expression('philox', operands, word) for word in range(4))
+
+
+# design/algorithm-sources.md#counter-based-random-generation
+def random_normal(key0, key1, ordinal):
+    return _Expression('random_normal', tuple(map(_literal, (key0, key1, ordinal))))
+
+
 # design/algorithm-sources.md#dynamic-indexed-expression-lowering
 def program_id(axis):
     return _Expression('program_id', value=axis)
@@ -669,7 +683,7 @@ class _ExpressionKernel:
                 return True
             if node.operation in _REAL_FUNCTIONS:
                 return False
-            if node.operation == 'isfinite':
+            if node.operation in ('isfinite', 'philox'):
                 return True
             if node.operation in _REDUCTIONS:
                 return _reduction_dtype(node, inputs, output.dtype).kind in 'iub'
@@ -853,6 +867,8 @@ def _indexed_load_expression(ref, pointer, layout, args, metal):
 
 # design/algorithm-sources.md#shared-scalar-load-emission
 def _emit_scalar_expression(node, inputs, metal, resolve):
+    if node.operation in ('philox', 'random_normal') and any(_expression_dtype(child, inputs).kind not in 'iub' for child in node.operands):
+        raise ValueError('Counter-based random functions require integral keys, counters and ordinals')
     if node.operation in ('input', 'row', 'column', 'index_vector') or node.operation in _REDUCTIONS:
         return resolve(node, ())
     args = tuple(_emit_scalar_expression(child, inputs, metal, resolve) for child in node.operands)
@@ -875,6 +891,8 @@ def _expression_dtype(node, inputs):
         return np.dtype(node.value)
     if node.operation == 'dot' or node.operation in _REAL_FUNCTIONS:
         return np.dtype('float32')
+    if node.operation == 'philox':
+        return np.dtype('uint32')
     if node.operation in ('<', '<=', '>', '>=', '==', 'isfinite'):
         return np.dtype('bool')
     if node.operation in ('abs', 'floor', 'domain'):
@@ -904,6 +922,30 @@ def _reduction_dtype(node, inputs, output):
     return np.dtype(np.int64 if output.kind in 'ib' else np.uint64 if output.kind == 'u' else np.float32)
 
 
+# design/algorithm-sources.md#counter-based-random-generation
+def _random_helpers(metal):
+    qualifier = 'inline' if metal else 'static inline'
+    u32, u64 = ('uint', 'ulong') if metal else ('uint32_t', 'uint64_t')
+    log, sqrt, sin, cos = tuple('precise::'+name if metal else name+'f' for name in ('log', 'sqrt', 'sin', 'cos'))
+    return f"""typedef struct {{ {u32} word[4]; }} mesh_philox_words;
+    {qualifier} mesh_philox_words mesh_philox({u32} c0,{u32} c1,{u32} c2,{u32} c3,{u32} k0,{u32} k1) {{
+      mesh_philox_words result={{{{c0,c1,c2,c3}}}};
+      for({u32} round=0;round<10;round++) {{
+        {u64} a=({u64})result.word[0]*0xD2511F53u,b=({u64})result.word[2]*0xCD9E8D57u;
+        mesh_philox_words next={{{{({u32})(b>>32)^result.word[1]^k0,({u32})b,({u32})(a>>32)^result.word[3]^k1,({u32})a}}}};
+        result=next;k0+=0x9E3779B9u;k1+=0xBB67AE85u;
+      }}
+      return result;
+    }}
+    {qualifier} float mesh_random_normal({u32} k0,{u32} k1,{u64} ordinal) {{
+      {u64} counter=ordinal>>1;
+      mesh_philox_words bits=mesh_philox(({u32})counter,({u32})(counter>>32),0u,0u,k0,k1);
+      float radius={sqrt}(-2.0f*{log}(((float)(bits.word[0]>>9)+0.5f)*0x1p-23f));
+      float angle=6.283185307179586f*((float)(bits.word[1]>>9)*0x1p-23f);
+      return radius*((ordinal&1u)?{sin}(angle):{cos}(angle));
+    }}"""
+
+
 # design/algorithm-sources.md#shared-elementary-functions
 def _scalar_helpers(metal):
     qualifier = 'inline' if metal else 'static inline'
@@ -911,7 +953,7 @@ def _scalar_helpers(metal):
     log1p = 'mesh_log1p' if metal else 'log1pf'
     exponential = 'precise::exp' if metal else 'expf'
     remainder_function = 'precise::fmod' if metal else 'fmodf'
-    helpers = []
+    helpers = [_random_helpers(metal)]
     if metal:
         helpers.append("""inline float mesh_log1p(float x) {
           float u=1.0f+x;
@@ -943,6 +985,12 @@ def _scalar_helpers(metal):
 
 # design/algorithm-sources.md#fused-indexed-update-values
 def _scalar_expression(node, args, metal, dtype=None):
+    if node.operation in ('philox', 'random_normal'):
+        u32, u64 = ('uint', 'ulong') if metal else ('uint32_t', 'uint64_t')
+        types = (u32,)*6 if node.operation == 'philox' else (u32, u32, u64)
+        call = ('mesh_philox' if node.operation == 'philox' else 'mesh_random_normal') + '(' + ','.join(
+            f'(({scalar})({value}))' for scalar, value in zip(types, args)) + ')'
+        return call + f'.word[{node.value}]' if node.operation == 'philox' else call
     if node.operation == 'isfinite':
         return f'isfinite((float)({args[0]}))' if dtype.kind == 'f' else '1'
     if node.operation == 'abs':
