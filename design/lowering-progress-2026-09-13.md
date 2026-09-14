@@ -669,3 +669,29 @@ configured functions do not alone establish recovered performance. Broader
 contraction/reduction axes, general indexed scatter values and derivatives,
 remaining caller migration, storage/launch optimization, collective placement,
 and matched performance acceptance remain open.
+
+## Xonotic integer matrix row reductions
+
+`4f0beba` removes the real-dtype-only condition on Xonotic's matrix last-axis
+sum/mean dispatch. These operations now share the existing vector and real-row
+reduction owner. Source inspection establishes that the original matrix blocks
+are retained and each row requests its own feature partials; integer matrices
+no longer fall through to the custom whole-operand reduction emitter. Existing
+integer-vector mean division behavior is retained. General axis reductions and
+other reduction families still require migration.
+
+The existing integer cancellation example now supplies one row at a time through
+canonical writes and observes its direct sum and Xonotic sum before supplying
+the next row. Local CPU and Metal runs both return exactly 65536, 4294967298,
+INT64_MIN and INT64_MAX through both callers, including values above 2**53 and
+modular overflow. Both local runs complete 2087 submissions. The paired Metal
+float16 gold workflow also passes; its integer side observation still uses int64
+on rank zero. The paired peer terminates normally after SIGTERM.
+
+`integer-rows-provenance.json` retains raw logs/traces, exact installed library
+and caller revisions, and timing count/mean/sample variance. The source and these
+observations establish the migrated sum's numerical and independent-row behavior.
+Integer means, boolean matrices and unsigned matrix rows have source-path coverage
+only in this increment. No matched pre-migration matrix timing baseline was
+collected, and no latency or throughput improvement is claimed. The remaining
+nine-step plan stays open.
