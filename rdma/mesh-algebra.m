@@ -60,7 +60,17 @@ struct geometry { struct geometry_view a,b,o; float alpha,beta; uint64_t first,c
 enum mesh_execution_kind { MESH_EXECUTION_CPU, MESH_EXECUTION_METAL, MESH_EXECUTION_COREML };
 
 typedef void (*mesh_cpu_kernel)(const uintptr_t *);
-@interface MeshCPUCode : NSObject
+@interface MeshCode : NSObject
+@property NSString *source,*digest;
+@end
+@implementation MeshCode
+@end
+@interface MeshMetalCode : MeshCode
+@property id<MTLLibrary> library;
+@end
+@implementation MeshMetalCode
+@end
+@interface MeshCPUCode : MeshCode
 @property void *handle;
 @property mesh_cpu_kernel kernel;
 @end
@@ -86,6 +96,8 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *);
 @property NSArray<MeshFunction *> *plans;
 @property NSArray<MeshExtent *> *operands;
 @property MeshCPUCode *cpuCode;
+@property MeshMetalCode *metalCode;
+@property NSString *specialization;
 @property NSData *cpuArguments;
 @property NSMutableData *dependencies,*results;
 @property NSData *inputViews;
@@ -125,7 +137,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *);
 @property id<MTLCommandQueue> queue;
 @property id<MTLResidencySet> routeResidency;
 @property id<MTLLibrary> library;
-@property NSMutableDictionary<NSString *,id<MTLLibrary>> *libraries;
+@property NSMutableDictionary<NSString *,MeshMetalCode *> *libraries;
 @property NSMutableDictionary<NSString *,MeshCPUCode *> *cpuCode;
 @property NSMutableArray<MeshFunction *> *functions;
 @property NSMutableArray<MeshExtent *> *extents;
@@ -223,7 +235,7 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
     if(!a.queue || !a.library){fprintf(stderr,"mesh algebra: %s\n",error.description.UTF8String);errno=ENODEV;return NULL;}
   }
   a.executions=dispatch_group_create();
-  a.libraries=[NSMutableDictionary new];
+  a.libraries=[NSMutableDictionary new];a.cpuCode=[NSMutableDictionary new];
   a.functions=[NSMutableArray new]; a.extents=[NSMutableArray new]; a.lookup=[NSMutableDictionary new];
   a.tensors=[NSMutableData new]; a.bindings=[NSMutableData new]; a.returns=[NSMutableData new];
   return (__bridge_retained struct mesh_algebra *)a;
@@ -671,6 +683,54 @@ int mesh_algebra_indexed(struct mesh_algebra *handle,size_t index,struct mesh_vi
 }
 
 struct cpu_operand {const void *address;struct geometry_view view;float (*load)(const void *,size_t);};
+/* design/algorithm-sources.md#compiled-specialization-identities */
+static NSString *specialization_digest(const void *bytes,size_t length) {
+  unsigned char digest[CC_SHA256_DIGEST_LENGTH];CC_SHA256_CTX context;CC_SHA256_Init(&context);
+  const unsigned char *at=bytes;
+  for(size_t remaining=length;remaining;){CC_LONG count=(CC_LONG)MIN(remaining,(size_t)UINT_MAX);CC_SHA256_Update(&context,at,count);at+=count;remaining-=count;}
+  CC_SHA256_Final(digest,&context);NSMutableString *text=[NSMutableString new];
+  for(size_t i=0;i<sizeof digest;i++)[text appendFormat:@"%02x",digest[i]];
+  return text;
+}
+/* design/algorithm-sources.md#compiled-specialization-identities */
+static MeshCode *source_code(MeshAlgebra *a,const char *text,BOOL cpu) {
+  NSMutableDictionary *cache=cpu?a.cpuCode:a.libraries;NSString *source=@(text);MeshCode *code=cache[source];
+  if(!code){
+    code=cpu?[MeshCPUCode new]:[MeshMetalCode new];code.source=source;
+    code.digest=specialization_digest(text,strlen(text));cache[source]=code;
+  }
+  return code;
+}
+/* design/algorithm-sources.md#compiled-specialization-identities */
+static NSArray *specialization_views(const struct mesh_view *views,size_t count) {
+  NSMutableArray *result=[NSMutableArray new];
+  for(size_t i=0;i<count;i++){
+    struct mesh_view v=views[i];
+    [result addObject:@{@"tensor":@((uintptr_t)v.tensor),@"extent":@(v.extent),@"offset":@(v.offset),@"rows":@(v.rows),@"columns":@(v.columns),@"row_stride":@(v.row_stride),@"column_stride":@(v.column_stride),@"scalar":@(v.tensor->extents[v.extent].shape.scalar)}];
+  }
+  return result;
+}
+/* design/algorithm-sources.md#compiled-specialization-identities */
+static MTLCompileOptions *source_options(void) {
+  MTLCompileOptions *options=[MTLCompileOptions new];options.mathMode=MTLMathModeSafe;return options;
+}
+/* design/algorithm-sources.md#compiled-specialization-identities */
+static void specialize_function(MeshFunction *f,MeshCPUCode *cpu,MeshMetalCode *metal,MTLCompileOptions *metal_options,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count) {
+  f.cpuCode=cpu;f.metalCode=metal;NSMutableDictionary *sources=[NSMutableDictionary dictionaryWithObject:metal.digest forKey:@"metal"];
+  if(cpu)sources[@"cpu"]=cpu.digest;
+  NSString *pair=[NSString stringWithFormat:@"cpu:%@\nmetal:%@\n",cpu?cpu.digest:@"",metal.digest];
+  NSData *identity=[pair dataUsingEncoding:NSUTF8StringEncoding];NSMutableArray *geometry=[NSMutableArray new],*configured=[NSMutableArray new];
+  for(size_t i=0;i<dispatch_count;i++){
+    const struct mesh_metal_dispatch *d=&dispatches[i];
+    [geometry addObject:@{@"name":@(d->name),@"grid":@[@(d->grid[0]),@(d->grid[1]),@(d->grid[2])],@"group":@[@(d->group[0]),@(d->group[1]),@(d->group[2])],@"argument_buffer":@(d->argument_buffer),@"argument_offset":@(d->argument_offset)}];
+  }
+  for(size_t i=0;i<constant_count;i++)[configured addObject:@{@"slot":@(i+1),@"length":@(constants[i].length),@"sha256":specialization_digest(constants[i].bytes,constants[i].length)}];
+  NSMutableDictionary *options=[NSMutableDictionary dictionaryWithObject:@{@"math_mode":@(metal_options.mathMode),@"floating_point_functions":@(metal_options.mathFloatingPointFunctions)} forKey:@"metal"];
+  if(cpu)options[@"cpu"]=@{@"compiler":@"/usr/bin/clang",@"arguments":@[@"-O3",@"-dynamiclib"],@"entrypoint":@"mesh_expression"};
+  NSDictionary *descriptor=@{@"version":@1,@"backend":@(f->backend),@"sources":sources,@"source_pair":specialization_digest(identity.bytes,identity.length),@"selected_source":f->executionKind==MESH_EXECUTION_CPU?cpu.digest:metal.digest,@"dispatches":geometry,@"constants":configured,@"inputs":specialization_views(inputs,input_count),@"outputs":specialization_views(outputs,output_count),@"compile_options":options};
+  NSData *json=[NSJSONSerialization dataWithJSONObject:descriptor options:NSJSONWritingSortedKeys error:nil];
+  f.specialization=[[NSString alloc]initWithData:json encoding:NSUTF8StringEncoding];
+}
 /* design/algorithm-sources.md#application-metal-kernels */
 static void submit_metal(void *binding,mesh_completion complete,void *context) {
   MeshFunction *f=(__bridge MeshFunction *)context;
@@ -683,13 +743,13 @@ static void submit_metal(void *binding,mesh_completion complete,void *context) {
   [command commit];
 }
 /* design/algorithm-sources.md#application-metal-kernels */
-int mesh_algebra_metal(struct mesh_algebra *handle,const char *text,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count) {
+static int bind_metal(struct mesh_algebra *handle,const char *text,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,MeshCPUCode *paired) {
   MeshAlgebra *a=owner(handle);
   if(a.realized)return EBUSY;
   if(a.cpu || !text || !dispatch_count || !dispatches || constant_count>30 || (constant_count && !constants))return EINVAL;
-  NSError *error=nil;MTLCompileOptions *options=[MTLCompileOptions new];options.mathMode=MTLMathModeSafe;
-  NSString *key=@(text);id<MTLLibrary> library=a.libraries[key];
-  if(!library){library=[a.device newLibraryWithSource:key options:options error:&error];if(library)a.libraries[key]=library;}
+  NSError *error=nil;MTLCompileOptions *options=source_options();
+  MeshMetalCode *code=(MeshMetalCode *)source_code(a,text,NO);id<MTLLibrary> library=code.library;
+  if(!library){library=[a.device newLibraryWithSource:code.source options:options error:&error];code.library=library;}
   if(!library){fprintf(stderr,"mesh Metal kernel: %s\n",error.description.UTF8String);return EINVAL;}
   NSMutableArray<id<MTLComputePipelineState>> *pipelines=[NSMutableArray new];
   for(size_t i=0;i<dispatch_count;i++) {
@@ -724,6 +784,7 @@ int mesh_algebra_metal(struct mesh_algebra *handle,const char *text,const struct
   int status=mesh_algebra_function(handle,inputs,input_count,outputs,output_count,submit_metal,NULL);
   if(status)return status;
   MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_METAL;f->backend=MESH_BACKEND_METAL_COMPILED;
+  specialize_function(f,paired,code,options,dispatches,dispatch_count,constants,constant_count,inputs,input_count,outputs,output_count);
   f.encode=^(id<MTLCommandBuffer> command){
     id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
     [encoder setBuffer:addresses offset:0 atIndex:0];
@@ -740,6 +801,10 @@ int mesh_algebra_metal(struct mesh_algebra *handle,const char *text,const struct
   return 0;
 }
 
+/* design/algorithm-sources.md#application-metal-kernels */
+int mesh_algebra_metal(struct mesh_algebra *handle,const char *text,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count) {
+  return bind_metal(handle,text,dispatches,dispatch_count,constants,constant_count,inputs,input_count,outputs,output_count,nil);
+}
 /* design/algorithm-sources.md#region-expression-fusion */
 static void submit_cpu(void *binding,mesh_completion complete,void *context) {
   MeshFunction *f=(__bridge MeshFunction *)context;f.cpuCode.kernel(f.cpuArguments.bytes);complete(context,0);
@@ -748,13 +813,11 @@ static void submit_cpu(void *binding,mesh_completion complete,void *context) {
 int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output) {
   MeshAlgebra *a=owner(handle);
   if(a.realized || !cpu_source || !metal_source || !valid_view(a,output))return EINVAL;
-  if(!a.cpu) {
-    struct mesh_metal_dispatch dispatch={.name="mesh_expression",.grid={output.rows,1,1},.group={32,1,1}};
-    return mesh_algebra_metal(handle,metal_source,&dispatch,1,NULL,0,inputs,input_count,&output,1);
-  }
-  NSString *source=@(cpu_source);if(!a.cpuCode)a.cpuCode=[NSMutableDictionary new];
-  MeshCPUCode *library=a.cpuCode[source];
-  if(!library) {
+  MeshCPUCode *library=(MeshCPUCode *)source_code(a,cpu_source,YES);
+  struct mesh_metal_dispatch dispatch={.name="mesh_expression",.grid={output.rows,1,1},.group={32,1,1}};
+  if(!a.cpu)return bind_metal(handle,metal_source,&dispatch,1,NULL,0,inputs,input_count,&output,1,library);
+  MeshMetalCode *metal=(MeshMetalCode *)source_code(a,metal_source,NO);NSString *source=library.source;
+  if(!library.handle) {
     NSError *error=nil;NSFileManager *files=NSFileManager.defaultManager;
     NSString *directory=[NSTemporaryDirectory() stringByAppendingPathComponent:[@"mesh-cpu-" stringByAppendingString:NSUUID.UUID.UUIDString]];
     if(![files createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:&error])return (int)error.code;
@@ -765,12 +828,11 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
     if(![task launchAndReturnError:&error]){[files removeItemAtPath:directory error:nil];return (int)error.code;}
     [task waitUntilExit];
     if(task.terminationStatus){[files removeItemAtPath:directory error:nil];return EIO;}
-    library=[MeshCPUCode new];library.handle=dlopen(output.fileSystemRepresentation,RTLD_NOW|RTLD_LOCAL);
+    library.handle=dlopen(output.fileSystemRepresentation,RTLD_NOW|RTLD_LOCAL);
     [files removeItemAtPath:directory error:nil];
     if(!library.handle){fprintf(stderr,"mesh CPU kernel: %s\n",dlerror());return EIO;}
     library.kernel=(mesh_cpu_kernel)dlsym(library.handle,"mesh_expression");
-    if(!library.kernel){fprintf(stderr,"mesh CPU symbol: %s\n",dlerror());return EIO;}
-    a.cpuCode[source]=library;
+    if(!library.kernel){fprintf(stderr,"mesh CPU symbol: %s\n",dlerror());dlclose(library.handle);library.handle=NULL;return EIO;}
   }
   NSMutableData *addresses=[NSMutableData dataWithLength:(input_count+1)*sizeof(uintptr_t)];
   uintptr_t *pointers=addresses.mutableBytes;
@@ -783,7 +845,7 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
   int status=mesh_algebra_function(handle,inputs,input_count,&output,1,submit_cpu,NULL);
   if(status)return status;
   MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_CPU;f->backend=MESH_BACKEND_CPU_COMPILED;
-  f.cpuCode=library;f.cpuArguments=addresses;
+  specialize_function(f,library,metal,source_options(),&dispatch,1,NULL,0,inputs,input_count,&output,1);f.cpuArguments=addresses;
   return 0;
 }
 
@@ -1366,6 +1428,15 @@ struct mesh_algebra_event mesh_algebra_trace(struct mesh_algebra *handle,size_t 
   MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_algebra_event){0};
   MeshFunction *f=a.functions[index];
   return (struct mesh_algebra_event){.ready_ns=atomic_load(&f->readyNs),.start_ns=atomic_load(&f->startNs),.complete_ns=atomic_load(&f->completeNs),.gpu_start_ns=atomic_load(&f->gpuStartNs),.gpu_end_ns=atomic_load(&f->gpuEndNs),.submissions=atomic_load(&f->invocations),.first_output=f->function.output[0].first,.output_maps=f->function.outputs,.kind=f->executionKind,.input_maps=f->function.inputs};
+}
+/* design/algorithm-sources.md#compiled-specialization-identities */
+const char *mesh_algebra_specialization(struct mesh_algebra *handle,size_t index) {
+  MeshAlgebra *a=owner(handle);return index<a.functions.count?a.functions[index].specialization.UTF8String:NULL;
+}
+/* design/algorithm-sources.md#compiled-specialization-identities */
+const char *mesh_algebra_source_text(struct mesh_algebra *handle,size_t index,uint32_t language) {
+  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return NULL;MeshFunction *f=a.functions[index];
+  return language==0?f.cpuCode.source.UTF8String:language==1?f.metalCode.source.UTF8String:NULL;
 }
 /* design/algorithm-sources.md#function-cost-profiles */
 size_t mesh_algebra_plan_count(struct mesh_algebra *handle,size_t index) {
