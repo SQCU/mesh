@@ -80,6 +80,22 @@ class _Expression:
     def __rtruediv__(self, other):
         return _literal(other) / self
 
+    # design/algorithm-sources.md#logical-indexed-views
+    def __floordiv__(self, other):
+        return _Expression('//', (self, _literal(other)))
+
+    # design/algorithm-sources.md#logical-indexed-views
+    def __rfloordiv__(self, other):
+        return _literal(other) // self
+
+    # design/algorithm-sources.md#logical-indexed-views
+    def __mod__(self, other):
+        return _Expression('%', (self, _literal(other)))
+
+    # design/algorithm-sources.md#logical-indexed-views
+    def __rmod__(self, other):
+        return _literal(other) % self
+
     # design/algorithm-sources.md#indexed-expression-lowering
     def __lt__(self, other):
         return _Expression('<', (self, _literal(other)))
@@ -108,11 +124,26 @@ class _Expression:
     def __or__(self, other):
         return _Expression('|', (self, _literal(other)))
 
-    # design/algorithm-sources.md#indexed-expression-lowering
-    def at(self, row, column, *, mask=True, other=0):
+    # design/algorithm-sources.md#logical-indexed-views
+    def reshape(self, shape):
+        import operator
         if self.operation != 'input':
-            raise ValueError('Indexed loads require an input reference')
-        return _Expression('load', tuple(map(_literal, (row, column, mask, other))), self.value)
+            raise ValueError('Logical indexed views require an input reference')
+        shape = tuple(operator.index(dimension) for dimension in shape)
+        if any(dimension < -1 or dimension == 0 for dimension in shape) or shape.count(-1) > 1:
+            raise ValueError('Logical indexed dimensions must be positive with at most one inferred axis')
+        return _Expression('reshape', (self,), shape)
+
+    # design/algorithm-sources.md#logical-indexed-views
+    def at(self, row=None, column=None, *coordinates, mask=True, other=0):
+        coordinates = (() if row is None else (row,)) + (() if column is None else (column,)) + coordinates
+        if self.operation == 'reshape':
+            if len(coordinates) != len(self.value):
+                raise ValueError('Logical index rank differs from the declared shape')
+            return _Expression('logical_load', tuple(map(_literal, (*coordinates, mask, other))), (self.operands[0].value, self.value))
+        if self.operation != 'input' or len(coordinates) != 2:
+            raise ValueError('Indexed loads require an input reference and two coordinates')
+        return _Expression('load', tuple(map(_literal, (*coordinates, mask, other))), self.value)
 
     # design/algorithm-sources.md#shared-contraction-lowering
     def astype(self, dtype):
@@ -141,6 +172,40 @@ class _Expression:
 # design/algorithm-sources.md#region-expression-fusion
 def _literal(value):
     return value if isinstance(value, _Expression) else _Expression('literal', value=value.item() if isinstance(value, np.generic) else value)
+
+
+# design/algorithm-sources.md#logical-indexed-views
+def _resolve_logical(node, inputs):
+    import math
+    children = tuple(_resolve_logical(child, inputs) for child in node.operands)
+    if node.operation == 'logical_load':
+        index, shape = node.value
+        source = inputs[index]
+        volume = math.prod(source.shape)
+        if -1 in shape:
+            known = math.prod(dimension for dimension in shape if dimension != -1)
+            if volume % known:
+                raise ValueError('Logical indexed shape cannot infer an integral dimension')
+            shape = tuple(volume // known if dimension == -1 else dimension for dimension in shape)
+        if math.prod(shape) != volume:
+            raise ValueError('Logical indexed shape volume differs from its bound input')
+        ordinal, enabled = _literal(0), children[-2]
+        for dimension, coordinate in zip(shape, children[:-2]):
+            ordinal = ordinal * dimension + coordinate
+            enabled = select(enabled, (coordinate >= 0) & (coordinate < dimension), False)
+        return _Expression('load', (ordinal // source.shape[1], ordinal % source.shape[1], enabled, children[-1]), index)
+    if node.operation == 'reshape':
+        raise ValueError('Logical reshapes require indexed access')
+    if node.operation in ('//', '%') and all(child.operation == 'literal' for child in children):
+        left, right = (child.value for child in children)
+        if not isinstance(left, int) or not isinstance(right, int):
+            raise ValueError('Integer quotient and remainder require integral operands')
+        dtype = _expression_dtype(_Expression(node.operation, children), inputs)
+        if dtype.kind == 'u':
+            left, right = left % (1 << (8*dtype.itemsize)), right % (1 << (8*dtype.itemsize))
+        value = _literal(left // right if node.operation == '//' else left % right)
+        return value.astype(dtype) if dtype.kind == 'u' else value
+    return _Expression(node.operation, children, node.value)
 
 
 # design/algorithm-sources.md#indexed-expression-lowering
@@ -178,7 +243,8 @@ class _ExpressionKernel:
         if any(value.operation == 'indexed_add' for value in self.values):
             for value, spec in zip(self.values, output_specs):
                 if value.operation == 'indexed_add':
-                    _lower_indexed_add(program, value, grid, input_specs, spec)
+                    resolved = _resolve_logical(value, tuple(source._tensor for source in input_specs))
+                    _lower_indexed_add(program, resolved, grid, input_specs, spec)
                 else:
                     _ExpressionKernel((value,)).bind_grid(program, grid, input_specs, (spec,))
             return
@@ -199,6 +265,7 @@ class _ExpressionKernel:
         if any(ref.dtype.name not in ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool') for ref in (*inputs, *outputs)):
             raise ValueError('Expression regions require supported real, integer or boolean scalars')
         for value, output in zip(self.values, outputs):
+            value = _resolve_logical(value, inputs)
             used = {}
 
             # design/algorithm-sources.md#indexed-expression-lowering
@@ -319,6 +386,8 @@ class _ExpressionKernel:
             if node in widths:
                 return widths[node]
             sizes = tuple(visit(child) for child in node.operands)
+            if node.operation in ('//', '%') and not all(integral(child) for child in node.operands):
+                raise ValueError('Integer quotient and remainder require integral operands')
             if node.operation == 'input':
                 ref = inputs[node.value]
                 if ref.shape[0] not in (1, output.shape[0]):
@@ -373,7 +442,8 @@ class _ExpressionKernel:
                 return f'((float)({value}))' if ref.dtype.kind == 'f' else value
             if node.operation == 'sum':
                 return f'(({"long" if metal else "int64_t"}){names[node]})' if output.dtype.kind in 'ib' else names[node]
-            return _scalar_expression(node, tuple(emit(child, column) for child in node.operands), metal)
+            return _scalar_expression(node, tuple(emit(child, column) for child in node.operands), metal,
+                _expression_dtype(node, inputs) if node.operation in ('//', '%') else None)
 
         lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
         layouts = {}
@@ -422,8 +492,36 @@ class _ExpressionKernel:
         return '\n'.join(lines)
 
 
+# design/algorithm-sources.md#logical-indexed-views
+def _expression_dtype(node, inputs):
+    if node.operation == 'input':
+        return inputs[node.value].dtype
+    if node.operation == 'cast':
+        return np.dtype(node.value)
+    if node.operation in ('dot', 'exp', 'rsqrt', 'tanh'):
+        return np.dtype('float32')
+    if node.operation in ('<', '<=', '>', '>=', '=='):
+        return np.dtype('bool')
+    if node.operation in ('row', 'column', 'program_id'):
+        return np.dtype('int64')
+    if node.operation == 'literal':
+        return np.dtype('float32' if isinstance(node.value, float) else 'uint64' if node.value > 2**63-1 else 'int64')
+    if node.operation == 'sum':
+        child = _expression_dtype(node.operands[0], inputs)
+        return np.dtype('float32' if child.kind == 'f' else 'uint64' if child.kind == 'u' else 'int64')
+    if node.operation == 'load':
+        types = (inputs[node.value].dtype, _expression_dtype(node.operands[3], inputs))
+    else:
+        types = tuple(_expression_dtype(child, inputs) for child in (node.operands[1:] if node.operation == 'select' else node.operands))
+    if any(dtype.kind == 'f' for dtype in types):
+        return np.dtype('float32')
+    bits = max(max(32, dtype.itemsize*8) for dtype in types)
+    unsigned = any(dtype.kind == 'u' and dtype.itemsize*8 == bits for dtype in types)
+    return np.dtype(('uint' if unsigned else 'int') + str(bits))
+
+
 # design/algorithm-sources.md#fused-indexed-update-values
-def _scalar_expression(node, args, metal):
+def _scalar_expression(node, args, metal, dtype=None):
     if node.operation == 'cast':
         dtype = np.dtype(node.value)
         scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int32_t',
@@ -434,10 +532,20 @@ def _scalar_expression(node, args, metal):
         if isinstance(node.value, bool):
             return '1' if node.value else '0'
         if isinstance(node.value, int):
+            if node.value == -(1 << 63):
+                return '(-9223372036854775807ll-1ll)'
             return str(node.value) + ('ull' if node.value > 2**63 - 1 else 'll')
         return repr(float(node.value)) + 'f'
     if node.operation == 'select':
         return f'(({args[0]})?({args[1]}):({args[2]}))'
+    if node.operation in ('//', '%'):
+        scalar = ('uint' if dtype.kind == 'u' else 'int') + str(dtype.itemsize*8) + '_t'
+        left, right = (f'(({scalar})({arg}))' for arg in args)
+        if dtype.kind == 'u':
+            return f'(({left}){"/" if node.operation == "//" else "%"}({right}))'
+        remainder = f'(({left})%({right}))'
+        correction = f'(({remainder}!=0)&&((({left})<0)!=(({right})<0)))'
+        return f'((({left})/({right}))-{correction})' if node.operation == '//' else f'({remainder}+({correction}?({right}):0))'
     if node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|'):
         return f'({args[0]}{node.operation}{args[1]})'
     if node.operation == 'rsqrt':
@@ -582,9 +690,11 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
 
     # design/algorithm-sources.md#fused-indexed-update-values
     def value_dependencies(node):
+        if node.operation in ('//', '%') and any(_expression_dtype(child, operands).kind not in 'iub' for child in node.operands):
+            raise ValueError('Integer quotient and remainder require integral operands')
         if node.operation == 'input':
             value_inputs.add(node.value)
-        elif node.operation not in ('literal', 'row', 'column', '+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'cast'):
+        elif node.operation not in ('literal', 'row', 'column', '+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'cast', '//', '%'):
             raise ValueError('Indexed update values require pointwise expressions; reduce or index their producer explicitly')
         for child in node.operands:
             value_dependencies(child)
@@ -669,7 +779,8 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
                         return '((int64_t)ordinal)'
                     if node.operation == 'column':
                         return f'((int64_t)({column}+c))'
-                    return _scalar_expression(node, tuple(emit_value(child) for child in node.operands), metal)
+                    return _scalar_expression(node, tuple(emit_value(child) for child in node.operands), metal,
+                        _expression_dtype(node, operands) if node.operation in ('//', '%') else None)
 
                 load = emit_value(update_value)
                 accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t'
@@ -838,7 +949,7 @@ class _ExpressionRegions:
         elif node.operation == 'sum':
             child = self.layout(node.operands[0])
             result = (child[0][0], 1), (child[1][0], False), (child[2][0], 1)
-        elif node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'load'):
+        elif node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'load', '//', '%'):
             children = tuple(map(self.layout, node.operands))
             shape = tuple(max(child[0][axis] for child in children) for axis in range(2))
             if any(child[0][axis] not in (1, shape[axis]) for child in children for axis in range(2)):
@@ -857,33 +968,6 @@ class _ExpressionRegions:
             raise ValueError('Computed contraction operands require pointwise expressions or contractions')
         self.layouts[node] = result
         return result
-
-    # design/algorithm-sources.md#shared-contraction-lowering
-    def dtype(self, node):
-        if node.operation == 'input':
-            return self.sources[node.value].dtype
-        if node.operation == 'cast':
-            return np.dtype(node.value)
-        if node.operation in ('dot', 'exp', 'rsqrt', 'tanh'):
-            return np.dtype('float32')
-        if node.operation in ('<', '<=', '>', '>=', '=='):
-            return np.dtype('bool')
-        if node.operation in ('row', 'column', 'program_id'):
-            return np.dtype('int64')
-        if node.operation == 'literal':
-            return np.dtype('float32' if isinstance(node.value, float) else 'uint64' if node.value > 2**63-1 else 'int64')
-        if node.operation == 'sum':
-            child = self.dtype(node.operands[0])
-            return np.dtype('float32' if child.kind == 'f' else 'uint64' if child.kind == 'u' else 'int64')
-        if node.operation == 'load':
-            types = (self.sources[node.value].dtype, self.dtype(node.operands[3]))
-        else:
-            types = tuple(self.dtype(child) for child in (node.operands[1:] if node.operation == 'select' else node.operands))
-        if any(dtype.kind == 'f' for dtype in types):
-            return np.dtype('float32')
-        bits = max(max(32, dtype.itemsize*8) for dtype in types)
-        unsigned = any(dtype.kind == 'u' and dtype.itemsize*8 == bits for dtype in types)
-        return np.dtype(('uint' if unsigned else 'int') + str(bits))
 
     # design/algorithm-sources.md#shared-contraction-lowering
     def key(self, node, origin, shape):
@@ -1028,7 +1112,7 @@ class _ExpressionRegions:
         def lower(node, accumulation=target.dtype):
             if node.operation == 'cast':
                 child = node.operands[0]
-                return _Expression('cast', (lower(child, self.dtype(child)),), node.value)
+                return _Expression('cast', (lower(child, _expression_dtype(child, self.sources)),), node.value)
             if node.operation == 'sum':
                 layout = self.layout(node)
                 row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
@@ -1079,7 +1163,7 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
             return _Expression(node.operation, tuple(specialize(child) for child in node.operands), node.value)
 
         for expression, spec in zip(expressions, output_specs):
-            value = specialize(expression)
+            value = _resolve_logical(specialize(expression), lowering.sources)
             target = spec.resolve(coordinate)
             origin = tuple(index * block for index, block in zip(spec.index_map(*coordinate), spec.block_shape))
             if value.operation == 'dot':

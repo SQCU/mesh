@@ -1540,7 +1540,7 @@ A same-type cast of a direct input reuses its actual requested Ref without a cop
 The normalized cast dtype is part of expression identity and therefore of the
 shared region cache key.
 
-`_ExpressionRegions.dtype` infers value types at conversion boundaries. It keeps
+`_expression_dtype` infers value types at conversion boundaries. It keeps
 a nested reduction's pre-cast accumulator type rather than propagating the final
 output dtype backward through the conversion. `x.sum().astype(np.int64)` for
 floating `x=[0.75,0.75]` therefore produces 1, while
@@ -1583,6 +1583,51 @@ expression owner chooses the appropriate orientation automatically; routing ever
 raw `kernels.matmul` caller through that owner remains separate migration work.
 The native dylib builds and Python compiles. Existing multi-row rectangular and
 streamed typed-panel examples provide CPU/Metal operational validation.
+
+
+### Logical indexed views
+
+The JAX authors' [Pallas BlockSpec documentation](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)
+separates logical indexing from the storage region bound to a program.
+`argument.reshape(logical_shape).at(*coordinates, mask=True, other=0)` retains
+logical shape metadata on an indexed input without reshaping or copying storage.
+The ordinary `.at(row, column)` form remains available. Scalar shape `()` accepts
+`.at()`; one `-1` dimension may be inferred at setup. `_resolve_logical` validates
+rank and volume against the actual bound Tensor or mapped Ref shape.
+
+For logical shape `(d0,...,dn)`, setup emits the row-major logical ordinal by
+Horner recurrence `o = o*di + coordinate_i`, then maps that ordinal to
+`(o // source.shape[1], o % source.shape[1])`. It retains the original physical
+input object, candidate vector, transpose/offset metadata and strides. Per-axis
+bounds join the original load mask before flattening can select a source:
+`reshape((2,2)).at(0,3)` returns `other`, rather than aliasing flat element 3.
+Negative coordinates are masked unless the caller explicitly normalizes them.
+Mask composition is conditional, so a false caller mask does not introduce
+read dependencies on otherwise unused coordinate loads.
+
+Logical loads become existing `load` nodes before direct binding and region
+shape/dependency analysis. They use the same dynamic selector, native candidate
+maps and completion/lifetime machinery; there is no rank-specific execution path,
+new allocation or dense matrix view. Root indexed-add expressions are normalized
+before their existing classifier as well. General indexed-load update values and
+arbitrary indexed scatter masks remain unfinished composition work; this rewrite
+does not claim that separate capability is implemented.
+
+`//` and `%` are integer expression operations using the shared dtype inference
+and scalar emitter, including fused pointwise scatter values. Operands use their
+common integral type. Unsigned division/remainder stays integer and retains values
+above 2**53. For signed values, let `q=trunc(a/b)` and `r=a%b` from native integer
+arithmetic. If `r!=0` and operand signs differ, emit `q-1` and `r+b`; otherwise
+emit `q` and `r`. These are floor quotient and divisor-signed remainder without
+converting through floating point. The domain requires a nonzero divisor and a
+representable quotient, excluding signed `INT_MIN/-1`. No numerical wait or
+runtime division guard is introduced. Mixed signed/unsigned operands follow the
+same common-type conversion before division. Literal-only folding follows that
+same typed rule and retains unsigned result identity; floating operands fail the
+integer operation's setup validation. The minimum signed-64 literal is emitted
+without an unsigned intermediate token. Python compilation and source review
+cover construction; existing arbitrary-rank and wide-integer gold cases supply
+native CPU/Metal evidence.
 
 ## Canonical reader groups
 
