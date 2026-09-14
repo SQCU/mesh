@@ -168,7 +168,17 @@ class _Expression:
     @property
     # design/algorithm-sources.md#shared-contraction-lowering
     def T(self):
-        return self.operands[0] if self.operation == 'transpose' else _Expression('transpose', (self,))
+        if self.operation == 'transpose':
+            return self.operands[0]
+        if self.operation in ('literal', 'program_id'):
+            return self
+        if self.operation in ('row', 'column'):
+            return _Expression('column' if self.operation == 'row' else 'row')
+        if self.operation == 'dot':
+            return _Expression('dot', tuple(child.T for child in self.operands[::-1]), self.value)
+        if self.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'rsqrt', 'exp', 'tanh', 'cast', '//', '%'):
+            return _Expression(self.operation, tuple(child.T for child in self.operands), self.value)
+        return _Expression('transpose', (self,))
 
     # design/algorithm-sources.md#region-expression-fusion
     def rsqrt(self):

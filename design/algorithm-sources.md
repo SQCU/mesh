@@ -1458,7 +1458,10 @@ Transposition exchanges layout dimensions, backing cuts and origin coordinates.
 Input panels retain original pages through transposed Ref views. Computed panels
 use the existing region owner; a transposed output root swaps the destination
 view so its producer writes directly into the requested output pages. Double
-transposition cancels during expression construction. Full sums reduce independent
+transposition cancels during expression construction. Transposition distributes
+through pointwise expressions and reverses contraction operands, preserving
+fusion over their transposed source views. Computed panel storage follows the
+expression dtype rather than an unconditional FP32 default. Full sums reduce independent
 row partials before reducing their transposed statistics. Those intermediate
 statistics use the expression's accumulator dtype, preserving FP32 and exact
 integer accumulation across both axes instead of inserting an FP16 or float
