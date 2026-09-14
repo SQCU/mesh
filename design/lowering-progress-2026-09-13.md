@@ -842,3 +842,36 @@ per segment/panel at its configured worst-case range, so storage packing and
 launch reduction remain work. Load-valued outer routing masks, broader scatter
 and derivative caller migration, and the remaining nine-step acceptance criteria
 are not established by these examples.
+
+## Runtime scatter masks stay within segments
+
+`937ba01` moves masks containing indexed loads or nonconstant direct inputs out
+of routing and into the bounded numerical expression as `select(mask, value, 0)`.
+Only declared-constant/static masks retain early routing elimination. This reuses
+the shared predicate-aware access collector, so a false mask suppresses dynamic
+value loads and nested coordinate loads. Direct mask operands keep their known
+Ref readiness granularity. There is no new runtime scheduling interface, native
+state, numerical staging buffer or bridge ABI change.
+
+`6d53f11` extends the existing scatter example with runtime mask pages. An earlier
+false-masked update points at the delayed final value page; unrelated destinations
+still complete with both that value page and the final mask block unpublished.
+The empty destination-routing generation finishes while all masks and values
+are withheld, then accepts those pages for retirement. The following generation
+reuses the same storage successfully. A separately delayed coefficient remains
+part of the example.
+
+Final installed library and caller revision `1d3c6fb` passes local CPU and Metal
+float32 workflows with 3150 completed submissions each, and paired Metal float16
+with 2465 rank-zero completions. The four scatter generations pass exact endpoint
+comparisons. Existing gold, contraction, logical-indexing, integer reduction and
+fanout cases pass. Only gold/fanout cross actual RDMA; scatter remains a rank-zero
+side case. The peer exits zero after SIGTERM. Raw compressed logs/traces, exact
+configuration and timing count/mean/sample variance are recorded in
+`bounded-mask-provenance.json`.
+
+These dynamic mask selectors add work relative to the preceding constant-mask
+fixture; the submission counts are not an equal-work speed comparison. Worst-case
+metadata allocation and launch packing remain unresolved performance work.
+Broader scatter/derivative caller migration, remaining rank/axis operations and
+the full nine-step performance acceptance remain open.

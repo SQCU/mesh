@@ -1247,8 +1247,9 @@ operand, including row and column broadcasts. Logical row expressions evaluate
 to the retained original update ordinal, and logical columns to the feature
 stripe's retained global column plus its local index.
 
-`reduce_segment` uses `_candidate_load` for each exact canonical buffer and emits
-that scalar value expression inside its ordinal accumulation loop. Half/float
+`_bind_segment_expression` uses the shared indexed-load emitter for each exact
+canonical buffer and emits the scalar expression inside its bounded ordinal
+accumulation loop. Half/float
 loads are explicitly converted to float before arithmetic; real segment totals
 and partial storage remain FP32, with the existing final output cast. Mixed
 half/float operands therefore do not introduce an implicit half intermediate.
