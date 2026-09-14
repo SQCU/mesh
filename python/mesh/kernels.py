@@ -1535,6 +1535,248 @@ class _ExpressionRegions:
         _ExpressionKernel((lowered,)).bind(self.program, tuple(inputs), (target,), self.coordinate)
 
 
+# design/algorithm-sources.md#selected-native-contractions
+def _panel_affine(node, selected, choice):
+    if node == selected:
+        return choice, 0, 0
+    if node.operation == 'literal' and isinstance(node.value, (int, bool)):
+        return int(node.value), 0, 0
+    if node.operation == 'index_vector':
+        return node.value[2], int(node.value[3] == 0 and node.value[0] > 1), int(node.value[3] == 1 and node.value[0] > 1)
+    if node.operation not in ('+', '-', '*'):
+        return None
+    left, right = (_panel_affine(child, selected, choice) for child in node.operands)
+    if left is None or right is None:
+        return None
+    if node.operation == '*':
+        if left[1:] == (0, 0):
+            return tuple(left[0] * value for value in right)
+        if right[1:] == (0, 0):
+            return tuple(right[0] * value for value in left)
+        return None
+    return tuple(a + (b if node.operation == '+' else -b) for a, b in zip(left, right))
+
+
+# design/algorithm-sources.md#selected-native-contractions
+def _panel_geometry(source, ordinal, row_step, column_step, rows, columns):
+    row, column = divmod(ordinal, source.shape[1])
+    if min(row, column, row_step, column_step) < 0 or row >= source.shape[0]:
+        return None
+    if hasattr(source, 'blocks'):
+        block_row, block_column = row // source.block_shape[0], column // source.block_shape[1]
+        backing = source[block_row, block_column]
+        row, column = row % source.block_shape[0], column % source.block_shape[1]
+    else:
+        backing = source
+    dr, dc = divmod(row_step, source.shape[1]), divmod(column_step, source.shape[1])
+    remaining = tuple(size - 1 - origin - (columns - 1) * step
+                      for size, origin, step in zip(backing.shape, (row, column), dc))
+    if min(remaining) < 0:
+        return None
+    capacity = min((space // step + 1 for space, step in zip(remaining, dr) if step), default=rows)
+    if capacity < rows:
+        return None
+    strides = tuple(sum(step * stride for step, stride in zip(delta,
+        (backing.view.row_stride, backing.view.column_stride))) or 1 for delta in (dr, dc))
+    if 1 not in strides:
+        return None
+    offset = backing.view.offset + row * backing.view.row_stride + column * backing.view.column_stride
+    return backing, offset, strides, capacity
+
+
+# design/algorithm-sources.md#selected-native-contractions
+def _lower_selected_product(lowering, value, target):
+    import ctypes as C
+    from . import Ref, check
+    from ._native import View
+    if value.operation != 'transpose' or value.operands[0].operation != 'sum' or target.shape[0] != 1 or target.dtype.kind != 'f':
+        return False
+    product = value.operands[0].operands[0]
+    if product.operation != '*' or any(node.operation != 'logical_load' for node in product.operands):
+        return False
+    operands = product.operands
+    selected, choices, vectors = None, None, set()
+    for node in operands:
+        source = lowering.sources[node.value[0]]
+        if source.dtype.kind != 'f' or node.operands[-2] != _literal(True) or node.operands[-1] != _literal(0):
+            return False
+        _resolve_logical(node, lowering.sources)
+        if -1 in node.value[1]:
+            return False
+        for coordinate, size in zip(node.operands[:-2], node.value[1]):
+            pending = [coordinate]
+            has_vector = False
+            while pending:
+                part = pending.pop()
+                if part.operation == 'index_vector':
+                    has_vector = True
+                    if part.value[3] == 1:
+                        vectors.add(part.value[:2])
+                pending.extend(part.operands)
+            if _panel_affine(coordinate, None, 0) is None:
+                if has_vector or selected is not None and selected != coordinate:
+                    return False
+                pending = [coordinate]
+                while pending:
+                    part = pending.pop()
+                    if part.operation in ('row', 'column') or part.operation == 'input' and lowering.sources[part.value].shape != (1, 1):
+                        return False
+                    pending.extend(part.operands)
+                selected, choices = coordinate, size if choices is None else min(choices, size)
+    if selected is None or len(vectors) != 1 or _expression_dtype(_resolve_logical(selected, lowering.sources), lowering.sources).kind not in 'iub':
+        return False
+    inner, tile = next(iter(vectors))
+    feature = target.shape[1]
+    flattened = []
+    for node in operands:
+        plans = []
+        for choice in range(choices):
+            flat = (0, 0, 0)
+            for coordinate, size in zip(node.operands[:-2], node.value[1]):
+                affine = _panel_affine(coordinate, selected, choice)
+                if affine is None or min(affine) < 0 or affine[0] + affine[1]*(feature-1) + affine[2]*(inner-1) >= size:
+                    return False
+                flat = tuple(value * size + addition for value, addition in zip(flat, affine))
+            plans.append(flat)
+        flattened.append(plans)
+    if any(plan[1] for plan in flattened[0]):
+        operands, flattened = operands[::-1], flattened[::-1]
+    if any(plan[1] for plan in flattened[0]) or len(set(flattened[0])) != 1 or selected in operands[0].operands[:-2]:
+        return False
+    sources = tuple(lowering.sources[node.value[0]] for node in operands)
+    program = lowering.program
+    quantum = program.native.algebra_publication_bytes(program.handle)
+    if target.shape[1] * target.dtype.itemsize > quantum:
+        return False
+    segments, first = [], 0
+    while first < feature:
+        columns = min(feature-first, quantum // 4)
+        for right in flattened[1]:
+            geometry = _panel_geometry(sources[1], right[0]+first*right[1], right[1], 0, 1, 1)
+            if geometry is None:
+                return False
+            columns = min(columns, geometry[3])
+        start = 0
+        while start < inner:
+            length = min(tile, inner-start)
+            prepared = []
+            for left, right in zip(*flattened):
+                a = _panel_geometry(sources[0], left[0]+start*left[2], left[2], 0, 1, 1)
+                b = _panel_geometry(sources[1], right[0]+start*right[2]+first*right[1], right[2], right[1], 1, columns)
+                if a is None or b is None:
+                    return False
+                length = min(length, a[3], b[3])
+                prepared.append((a, b))
+            segments.append((first, columns, length, prepared))
+            start += length
+        first += columns
+    selection_key = ('selected_plan', lowering.key(_resolve_logical(selected, lowering.sources), (0, 0), (1, 1)), choices)
+    if selection_key not in lowering.cache:
+        selector = program.tensor((1, 1), dtype=np.uint32)[0, 0]
+        plan = select((selected >= 0) & (selected < choices), selected, choices)
+        _ExpressionKernel((plan,)).bind(program, lowering.sources, (selector,), lowering.coordinate)
+        lowering.cache[selection_key] = selector
+    selector = lowering.cache[selection_key]
+    target_pages = C.c_size_t()
+    check(program.native.algebra_view_pages(program.handle, target.view, None, 0, C.byref(target_pages)))
+    groups = {}
+    for first, columns, length, prepared in segments:
+        dependencies, positions, page_sets, left_views, right_views, selected_dependencies = [], {}, {}, [], [], []
+
+        # design/algorithm-sources.md#selected-native-contractions
+        def retain(geometry, shape, transpose=False):
+            backing, offset, strides, _ = geometry
+            view = View.from_buffer_copy(backing.view)
+            view.offset, view.rows, view.columns = offset, *shape
+            view.row_stride, view.column_stride = strides
+            if view.rows == 1 and view.column_stride == 1:
+                view.row_stride = view.columns
+            if view.columns == 1 and view.row_stride == 1:
+                view.column_stride = view.rows
+            ref = Ref(program, view, backing.dtype)
+            ref = ref.T if transpose else ref
+            identity = tuple(getattr(ref.view, field) for field in
+                ('tensor', 'extent', 'offset', 'rows', 'columns', 'row_stride', 'column_stride'))
+            if identity not in page_sets:
+                count = C.c_size_t()
+                check(program.native.algebra_view_pages(program.handle, ref.view, None, 0, C.byref(count)))
+                pages = (View * count.value)()
+                check(program.native.algebra_view_pages(program.handle, ref.view, pages, count.value, C.byref(count)))
+                selected_pages = []
+                for page in pages:
+                    key = page.tensor, page.extent, page.offset
+                    if key not in positions:
+                        positions[key] = len(dependencies)
+                        dependencies.append(Ref(program, page, ref.dtype))
+                    selected_pages.append(positions[key])
+                page_sets[identity] = tuple(selected_pages)
+            return ref, page_sets[identity]
+
+        for a, b in prepared:
+            left, left_position = retain(a, (length, 1), True)
+            right, right_position = retain(b, (length, columns))
+            left_views.append(left)
+            right_views.append(right)
+            selected_dependencies.append(tuple(dict.fromkeys((*left_position, *right_position))))
+        zero_key = ('selected_zero', length, columns, sources[1].dtype.str)
+        if zero_key not in lowering.cache:
+            zero = program.tensor((length, columns), dtype=sources[1].dtype)[0, 0]
+            program.constant(zero, np.zeros(zero.shape, dtype=zero.dtype))
+            lowering.cache[zero_key] = zero
+        zero = lowering.cache[zero_key]
+        zero, zero_pages = retain((zero, zero.view.offset,
+            (zero.view.row_stride, zero.view.column_stride), length), zero.shape)
+        _, left_pages = retain(prepared[0][0], (length, 1), True)
+        left_views.append(left_views[0])
+        right_views.append(zero)
+        selected_dependencies.append(tuple(dict.fromkeys((*left_pages, *zero_pages))))
+        reverse = sources[0].dtype == np.dtype('float16') and sources[1].dtype == np.dtype('float32')
+        destination = (lowering.temporary((columns, 1)).T if reverse else target
+            if len(segments) == 1 and target_pages.value == 1 and target.dtype == np.dtype('float32') else lowering.temporary((1, columns)))
+        function = C.c_size_t()
+        check(program.native.algebra_contract_select(program.handle, selector.view,
+            (View * len(left_views))(*(ref.view for ref in left_views)),
+            (View * len(right_views))(*(ref.view for ref in right_views)), len(left_views),
+            (View * len(dependencies))(*(ref.view for ref in dependencies)), len(dependencies),
+            destination.view, 1, C.byref(function)))
+        slots = max(map(len, selected_dependencies))
+        selected_dependencies = tuple(index for pages in selected_dependencies
+            for index in (*pages, *((0xffffffff,) * (slots-len(pages)))))
+        readiness = program.tensor((1, slots), dtype=np.uint32)[0, 0]
+
+        # design/algorithm-sources.md#selected-native-contractions
+        def readiness_source(metal):
+            array = ('constant' if metal else 'static const') + ' uint32_t selected[]={' + ','.join(map(str, selected_dependencies)) + '};'
+            return array, f'for(uint32_t c=lane;c<{slots};c+=lanes)p1[c]=selected[{slots}*p0[0]+c];'
+
+        _compiled_region(program, (selector,), readiness, readiness_source)
+        check(program.native.algebra_indexed(program.handle, function.value, readiness.view,
+            (C.c_size_t * len(dependencies))(*range(1, len(dependencies)+1)), len(dependencies)))
+        groups.setdefault((first, columns), []).append(destination)
+    results = []
+    for (first, columns), parts in groups.items():
+        while len(parts) > 2:
+            merged = []
+            for index in range(0, len(parts), 2):
+                if index+1 == len(parts):
+                    merged.append(parts[index])
+                else:
+                    destination = lowering.temporary((1, columns))
+                    _bind_operation(program, add, parts[index:index+2], destination)
+                    merged.append(destination)
+            parts = merged
+        destination = target if len(groups) == 1 else parts[0] if len(parts) == 1 else lowering.temporary((1, columns))
+        lowering.publish(parts, destination)
+        results.append(destination)
+    if len(groups) > 1:
+        _, column = indices()
+        result = _literal(0)
+        for symbol, (first, columns) in reversed(tuple(zip(arguments(len(results)), groups))):
+            result = select(column < first+columns, symbol.at(0, column-first), result)
+        _ExpressionKernel((result,)).bind(program, tuple(results), (target,))
+    return True
+
+
 # design/algorithm-sources.md#shared-contraction-lowering
 def _lower_region_expressions(program, expressions, grid, input_specs, output_specs):
     import itertools
@@ -1549,8 +1791,11 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
             return _Expression(node.operation, tuple(specialize(child) for child in node.operands), node.value)
 
         for expression, spec in zip(expressions, output_specs):
-            value = _resolve_logical(specialize(expression), lowering.sources)
+            value = specialize(expression)
             target = spec.resolve(coordinate)
+            if _lower_selected_product(lowering, value, target):
+                continue
+            value = _resolve_logical(value, lowering.sources)
             origin = tuple(index * block for index, block in zip(spec.index_map(*coordinate), spec.block_shape))
             domain_shape = spec._tensor.shape
             if value.operation == 'transpose':
