@@ -134,10 +134,10 @@ The source exposes these distinct costs and waits:
 | Boundary | Current mechanism | Consequence |
 |---|---|---|
 | Output claim | `mesh_issue_index` checks actual inputs and output reader ownership; `mesh_reset` clears presence and assigned read planes before setting producing | Work proportional to covered rows and assigned reader planes precedes dispatch. An unavailable operand/storage claim returns without spinning for it. |
-| Publication | `mesh_publish_partial` / `mesh_publish` update atomic planes; `mesh_notify` pushes each affected row onto compute/send lists and calls `sendto(MSG_DONTWAIT)` | Publication does not wait for delivery, but incurs atomic contention, list work and a socket call. CAS retries have no stated per-call time bound. |
-| Consumer discovery | `mesh_events` runs on a serial dispatch queue and traverses affected reader edges | Ready work can incur notification and queueing delay; asynchronous submission alone gives no bound on that delay. |
+| Publication | `mesh_publish_partial` / `mesh_publish` update atomic planes; `mesh_notify` pushes each affected row onto compute/send lists using shared memory | Publication does not wait for delivery, but incurs atomic contention, and list work. CAS retries have no stated per-call time bound. |
+| Consumer discovery | A dedicated `mesh.presence` thread spins on shared publication notices and invokes `mesh_events` on the numerical dispatch queue to traverse affected reader edges | Ready work can incur notification and queueing delay; asynchronous submission alone gives no bound on that delay. |
 | Numerical issue | `submit_ready` enters a dispatch group and invokes the prebound submit function; only synchronous CPU work uses a worker queue | CPU arithmetic executes away from the presence handler. Dispatch internals and worker scheduling are not shown to have zero contention or bounded latency. |
-| Transfer | Registered SEND/RECV with index descriptions and finite queue capacity | Capacity shortages defer posting. Reusing a receive destination depends on its actual readers. These are distinct from waiting for an unrelated tensor to finish. |
+| Transfer | Dedicated spinning send and receive threads post registered SEND/RECV and drain their respective completion queues; initial receives are posted by the receive thread too | Capacity shortages defer posting. Reusing a receive destination depends on its actual readers. These are distinct from waiting for an unrelated tensor to finish. |
 | Terminal application | The example supplies every input block before entering a busy-poll output loop; formatting/printing occurs in that loop | Observed output order omits intermediate timing and includes application observation delay. |
 | Setup and destruction | Compiler process waits, synchronous registration/removal on the presence queue, and dispatch-group/semaphore waits during destruction | These boundaries explicitly wait; a claim about numerical publication must not be generalized to the complete program lifecycle. |
 
@@ -173,3 +173,12 @@ transport path after sparse-routing deletion. It does not measure overlap,
 publication-to-consumption latency or speedup. Earlier root-only reduction runs
 are retained in the historical measurement record; they are not evidence for
 the current collective topology.
+
+RDMA posting and completion draining belong exclusively to `mesh.rdma.send`
+and `mesh.rdma.receive`. Neither worker executes numerical functions, application
+callbacks, connection setup, sleeps or a general-purpose dispatch queue. The
+control thread establishes and tears down connections; it never posts receives,
+including the initial receive fill. Each receive completion immediately attempts
+to replenish its queue, and each send completion immediately attempts further
+posting. These ownership rules do not imply zero hardware latency or remove
+existing dependencies on receive descriptions and reusable destination storage.

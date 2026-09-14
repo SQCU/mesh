@@ -287,6 +287,8 @@ static void mesh_progress(struct mesh_link *link,uint32_t direction){
 static void *link_progress(void *argument){
   struct mesh_worker *worker=argument;
   pthread_setname_np(worker->direction==MESH_SEND?"mesh.rdma.send":"mesh.rdma.receive");
+  if(worker->direction==MESH_RECEIVE)
+    for(uint32_t q=0;q<=(uint32_t)worker->link->qps;q++)link_receive(worker->link,q);
   while(atomic_load_explicit(&worker->link->progressing,memory_order_acquire))
     mesh_progress(worker->link,worker->direction);
   return NULL;
@@ -400,7 +402,7 @@ int main(int argc,char**argv){
     if(link.client && client!=link.client && link_down(&link)) continue;
     if(!link.client && client && atomic_load_explicit(&M->configured,memory_order_acquire)==client){
       /* D13 */
-      if(verbs_up(peer,(char*)M,length,M->data_off,me,(uint32_t)(block_pages*pg),link.qps+1,link_receive,link_configure,&link)){
+      if(verbs_up(peer,(char*)M,length,M->data_off,me,(uint32_t)(block_pages*pg),link.qps+1,link_configure,&link)){
         link_error(M,errno?errno:EIO,1);
         link_down(&link);
         continue;

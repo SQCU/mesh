@@ -132,7 +132,7 @@ static int oob(const char *peer){
 
 static struct ibv_port_attr pa;
 /* ledger D13 (out-of-band metadata), D6 (queue pair limits), TN3205 queue-pair state transitions */
-static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int me, uint32_t message_bytes, int qps, void (*receive)(void *,uint32_t),int (*configure)(void *,int,double),void *state){
+static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int me, uint32_t message_bytes, int qps, int (*configure)(void *,int,double),void *state){
   if(qps<1 || qps>MESH_QPS+1){ errno=EINVAL; return -1; }
   if(provider->context && (ibv_query_port(provider->context,1,&pa) || pa.state!=IBV_PORT_ACTIVE)){
     return -1; }
@@ -228,7 +228,6 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
     if(rc){ fprintf(stderr,"rtr %d rc %d dlid %u dqpn %u\n",q,rc,you.lid,you.qpns[q]); close(f); return -1; }
   }
   if(configure(state,f,exchange_deadline)){close(f);return -1;}
-  for(uint32_t q=0;q<(uint32_t)qps;q++)receive(state,q);
   for(int q=0;q<qps;q++){
     struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=mine.psns[q]};
     int rc=ibv_modify_qp(provider->pairs[q],&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
