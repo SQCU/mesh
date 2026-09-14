@@ -2744,3 +2744,48 @@ NaN/truth behavior, an independently withheld row, downstream consumers and
 repeated storage reuse. Operational evidence measures these contracts; it does
 not establish universal performance parity or eliminate genuine dependencies
 within a reduction domain.
+
+## Shared elementary functions
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+provides the separation between scalar numerical expressions and backend lowering.
+Elementary functions belong to mesh's existing typed expression emitter. Xonotic
+supplies ordinary expressions through the same direct or logical indexed region
+binding used by arithmetic; its scalar source emitter and helper implementations
+are removed. Compilation, helper selection and original registered-page bindings
+remain setup work. Numerical cases select scalar values, not whether a participant
+or an unrelated output region can execute.
+
+Numerical sources are distinct from that dataflow prior art:
+
+- SunSoft's [fdlibm log1p discussion](https://www.netlib.org/fdlibm/s_log1p.c)
+  explains correction for rounding in `1+x` and cites the HP-15C Advanced
+  Functions Handbook, page 193, for the compact corrected-log formula. Handle
+  positive infinity separately so its correction factor cannot produce NaN.
+- The [NIST DLMF exponential series, equation 4.2.19](https://dlmf.nist.gov/4.2.E19)
+  supplies the near-zero polynomial for expm1. Subtracting one from a rounded
+  exponential loses small arguments; evaluate the series without that subtraction.
+- SunSoft's [fdlibm asinh discussion](https://www.netlib.org/fdlibm/s_asinh.c)
+  gives small-argument identity, stable log1p evaluation and large-argument
+  `log(abs(x))+log(2)` evaluation, avoiding intermediate square overflow.
+- The NumPy authors' [elementary math implementation](https://github.com/numpy/numpy/blob/main/numpy/_core/src/npymath/npy_math_internal.h.src)
+  supplies the logaddexp shift and floating floor-division quotient correction.
+  Equal logaddexp operands handle equal infinities, and unordered differences
+  propagate NaNs. Floating floor division corrects a quotient derived from the
+  remainder; simply taking floor of a rounded division is insufficient.
+- Apple's [Metal Shading Language Specification](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf),
+  sections 6.5, 6.6 and 8.4, defines the available mathematical functions and their
+  precision contracts. CPU emission uses the platform scalar math library.
+
+Integer classification and bit operations retain integer operands. Signed integer
+floor division uses the existing quotient/remainder sign correction; it does not
+inherit the removed caller's truncating division. Integer finite predicates do
+not convert through floating point. Floating operations use FP32 numerical
+values with explicit output casts. NaNs, infinities, domain endpoints and signed
+zeros are part of each operation's numerical contract, not readiness conditions.
+
+The existing streaming-algebra Xonotic workflow records near-zero and large-input
+values, exceptional values, exact integer results, ragged output regions,
+downstream composition, independent withheld rows and storage reuse. These finite
+measurements do not establish a uniform ULP bound, fastest-kernel equivalence,
+or a matched performance result for the removed whole-region emitter.
