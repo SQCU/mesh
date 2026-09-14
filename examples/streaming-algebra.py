@@ -1015,7 +1015,7 @@ def main():
                                 local_monotonic_ns=time.monotonic_ns(), section_zero_absent=not results[0, 0].ready)), flush=True)
                 time.sleep(0.0001)
             if args.trace:
-                Path(args.trace).write_text(json.dumps(dict(environment=program.environment, compute=program.trace, code=program.code_trace, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
+                Path(args.trace).write_text(json.dumps(dict(environment=program.environment, plans=program.plan_trace, compute=program.trace, code=program.code_trace, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
             return
         # design/algorithm-sources.md#streaming-overlap-measurement
         def publish(invocation, sections):
@@ -2253,8 +2253,23 @@ def main():
         print(json.dumps(dict(event='compiled_specializations', bindings=len(bindings), sources=len(code['sources']),
             source_pairs=len({binding['source_pair'] for binding in bindings.values()}), dispatches=dispatch_count,
             constants=constant_count, observed_output=expected_view)), flush=True)
+        # design/algorithm-sources.md#bound-plan-identities
+        plan_trace = program.plan_trace
+        planned_functions = set()
+        for plan in plan_trace:
+            if not 0 <= plan['root'] < len(plan['slots']):
+                raise ArithmeticError('Bound plan lost its output storage identity')
+            for operation in plan['operations']:
+                if any(not 0 <= index < len(compute) for index in operation['functions']):
+                    raise ArithmeticError('Bound plan references an absent numerical function')
+                if any(not 0 <= index < len(plan_trace) for index in operation['children']):
+                    raise ArithmeticError('Bound plan references an absent child plan')
+                if any(not 0 <= index < len(plan['slots']) for index in (*operation['inputs'], operation['output'])):
+                    raise ArithmeticError('Bound operation lost an input or output storage identity')
+                planned_functions.update(operation['functions'])
+        print(json.dumps(dict(event='bound_plans', plans=len(plan_trace), functions=len(planned_functions))), flush=True)
         if args.trace:
-            Path(args.trace).write_text(json.dumps(dict(environment=program.environment, compute=compute, code=code, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
+            Path(args.trace).write_text(json.dumps(dict(environment=program.environment, plans=plan_trace, compute=compute, code=code, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
         print(json.dumps(dict(event='summary', dtype=args.dtype, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
             invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,
             completion_ms=summary(tuple(completed.values())), withheld_invocation=1, withheld_section=0,

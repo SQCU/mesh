@@ -3384,3 +3384,55 @@ loaded Mach-O library UUIDs obtained through `dladdr`. CPU creation records one
 facts remain null or carry the returned error/status. The descriptor explicitly
 states `complete_cost_key: false`. `Program.environment` decodes this snapshot
 on request. No per-function provenance cache or tensor-payload hash is added.
+
+
+## Bound plan identities
+
+The JAX authors' [manual profile-guided latency estimation](https://docs.jax.dev/en/latest/gpu_performance_tips.html#manual-pgle)
+feeds observed instruction costs into later compilation. To apply that mechanism,
+mesh must retain which executable functions implement each planned operation.
+The association belongs to setup, where both the plan and each registration's
+actual function identity exist. Reconstructing it later from output addresses
+would discard information and confuse aliases, shared subexpressions and native
+bindings that register multiple functions.
+
+`Program.plan_trace` exposes the retained association alongside the existing
+function profiles, native plans and compiled-source descriptors. Views describe
+actual canonical storage; retaining references or copying view metadata does not
+copy operands. Plan and operation identity are reporting/compiler data, never
+readiness, completion tokens or invocation state. Cache reuse must point to the
+original producer association rather than adding fictitious producers.
+
+Selected contractions retain their actual parent and readiness registrations,
+including shared selector work. Empty reductions retain the identity producer.
+A bound plan's function associations are not by themselves a latency estimate:
+shared or nested functions must not be counted twice, and an execution mean
+cannot substitute for observed partial-publication latency or a complete model
+of overlap. Complete candidate preparation and measured selection remain work.
+
+The existing workflow checks reporting referential integrity: operation function
+IDs resolve to the actual compute trace, child IDs resolve to retained plans,
+and slot references resolve to actual view metadata. Numerical output metrics
+would not detect a broken reporting association. This check imposes no fixed
+number of internal operations or preferred execution topology.
+
+Cost reuse on the same installed stack does not require a universal executable
+cache key. A versioned advisory profile can use the observed participant, loaded
+library UUIDs, OS/device facts and exact implementation/geometry descriptors
+already available. `complete_cost_key: false` forbids overclaiming portable
+compiler equivalence; it does not prevent that empirical comparison. Retain
+workload composition and indexing distributions where they affect actual work.
+Selected-parent moments combine the choices that actually ran and cannot be
+assigned to individual choices without corresponding observations. Dispatch,
+host execution and GPU duration remain separate measurements. Runtime load,
+thermal state and cache effects are measurement conditions, not reasons to keep
+adding configuration probes instead of measuring complete candidates.
+
+Association intervals are explicitly inclusive of any nested lowering. Child
+plan references also identify cached producers outside a newly registered
+interval. Cost accounting must take a union of actual function IDs, including
+selector work, rather than sum overlapping intervals. `uses` records references
+and requested/result view identities, not execution multiplicity. A requested
+view different from the cached result does not itself prove a copy occurred;
+outer expression forwarding remains outside this core plan snapshot until its
+actual binding is retained by the same preparation owner.
