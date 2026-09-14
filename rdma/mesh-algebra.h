@@ -23,7 +23,7 @@ struct mesh_view {
 struct mesh_copy_region { struct mesh_view source; size_t row,column; };
 /* design/algorithm-sources.md#view-scoped-host-production */
 struct mesh_writer;
-struct mesh_algebra_report { uint64_t submitted,completed; int64_t code; };
+struct mesh_algebra_report { int64_t code; };
 
 struct mesh_algebra *mesh_algebra_create(struct mesh_ctx *);
 struct mesh_algebra *mesh_algebra_create_cpu(struct mesh_ctx *);

@@ -96,9 +96,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @public
   struct mesh_ctx *context;
   struct mesh_writer *writers;
-  _Atomic uint64_t submitted;
   uint32_t copies;
-  _Atomic uint64_t completed;
   _Atomic int64_t code;
 }
 @property BOOL realized,cpu;
@@ -151,7 +149,7 @@ static void complete_part(MeshFunction *f,int64_t error) {
   MeshAlgebra *a=f.owner;
   if(error)atomic_store(&a->code,error);
   else mesh_complete(a->context,&f->function,&f->occurrence,1);
-  atomic_fetch_add(&a->completed,1);dispatch_group_leave(a.executions);
+  dispatch_group_leave(a.executions);
 }
 /* design/algorithm-sources.md#streaming-algebra */
 static MeshAlgebra *owner(struct mesh_algebra *a) { return (__bridge MeshAlgebra *)a; }
@@ -977,7 +975,6 @@ int mesh_algebra_export(struct mesh_algebra *handle,struct mesh_view view,size_t
 static void submit_ready(void *argument,uint32_t occurrence) {
   MeshFunction *f=(__bridge MeshFunction *)argument;MeshAlgebra *a=f.owner;
   f->occurrence=occurrence;
-  atomic_fetch_add(&a->submitted,1);
   dispatch_group_enter(a.executions);
   @autoreleasepool{f.execute(f);}
 }
@@ -1030,7 +1027,7 @@ void mesh_algebra_consume(struct mesh_algebra *handle,size_t index) {
 }
 /* design/algorithm-sources.md#streaming-algebra */
 struct mesh_algebra_report mesh_algebra_report(struct mesh_algebra *handle) {
-  MeshAlgebra *a=owner(handle);return (struct mesh_algebra_report){.submitted=atomic_load(&a->submitted),.completed=atomic_load(&a->completed),.code=atomic_load(&a->code)};
+  MeshAlgebra *a=owner(handle);return (struct mesh_algebra_report){.code=atomic_load(&a->code)};
 }
 
 /* design/algorithm-sources.md#indexed-library-functions */

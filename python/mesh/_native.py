@@ -18,7 +18,7 @@ class CopyRegion(C.Structure):
 
 
 class Report(C.Structure):
-    _fields_ = [('submitted', C.c_uint64), ('completed', C.c_uint64), ('code', C.c_int64)]
+    _fields_ = [('code', C.c_int64)]
 
 
 # design/algorithm-sources.md#indexed-library-functions
