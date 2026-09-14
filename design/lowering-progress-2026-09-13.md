@@ -392,3 +392,49 @@ Computed indexed loads, shape-changing reductions and mismatched non-singleton
 mapped/global operand domains still require broader lowering. Native M/N panels
 still need to fit their actual backing blocks. These limitations remain explicit;
 there is no whole-operand copy or wait fallback for them.
+
+## FFN caller composition and mixed operand types
+
+`fab4ada` moves FFN hidden projections, their balanced partition sum and swish
+into one shared expression call. It preserves the prior row/column partition
+cuts, the activation's declared input dtype (including FP16 rounding), the
+existing exchange boundary, and FP32 down-projection accumulation. The caller
+no longer constructs separate completed hidden contractions and hidden sums.
+An explicitly nested expression instead retains computed panels in FP32;
+adding an expression-level cast remains necessary to spell the former FP16
+rounding boundary inside an entirely nested FFN expression.
+
+`1448f0e` removes the native contraction operand-dtype equality restriction.
+The existing CPU implementation already has independent typed loaders and FP32
+accumulators; MPS retains each original matrix buffer, offset, strides and dtype.
+No conversion buffer or alternative numerical backend implements the change.
+Core ML rectangle metadata and its generator now retain each operand's dtype
+separately instead of reconstructing the right type from the left. Its existing
+FP32 arithmetic conversion remains unchanged. Native libraries and the generator
+compile; Core ML runtime/placement/internal-copy claims are not established by
+that source evidence.
+
+Installed source and example `1448f0e` pass the integrated CPU and Metal local
+runs in both float32 and float16, plus the float16 two-node gold and remote
+fanout workflow. The float16 nested expression specifically exercises
+FP16×FP16→FP32, FP32 swish, then FP32×FP16→FP32 through native MPS on the Metal
+backend. It observes the second contraction completing a partial before two
+hidden panels arrive in each occurrence. This is evidence for the covered
+heterogeneous MPS input combination, not a universal undocumented type guarantee.
+
+The unchanged 4097-update float32 configuration completes 1919 submissions on
+each backend, compared with 2175 before the FFN migration: 256 removed numerical
+submissions. Float32 gold maximum errors are approximately 1.65e-6 on CPU and
+1.58e-6 on Metal. Local float16 runs complete 2035 submissions, and paired rank
+zero completes 1249; all four float16 runs have gold maximum error 0.001953125
+under the unchanged tolerance. The paired gold still streams across the real
+link and its 65 remote fanout branches reuse their inputs correctly. Nested
+and indexed side operations remain local to rank zero. Both peer workloads
+terminate normally after recording their traces.
+
+`nested-integrated-provenance.json` and compressed `nested-integrated`,
+`nested-mixed` and `nested-paired` observations/traces preserve configurations,
+source and both participants where applicable. No matched throughput improvement
+is inferred from the submission reduction or these short timings. General rank,
+indexed/reduction composition, remaining derivatives and callers, storage/launch
+optimization, collective placement and full performance acceptance remain open.
