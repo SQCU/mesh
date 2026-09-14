@@ -2,7 +2,7 @@
 #define MESH_KERNEL_H
 #include <stdint.h>
 
-/* design/algorithm-sources.md#in-operation-publication */
+/* design/algorithm-sources.md#programkernel_call */
 #define MESH_KERNEL_DECLARATIONS \
 struct mesh_kernel_section { \
   uint64_t row_begin,row_end,column_begin,column_end; \

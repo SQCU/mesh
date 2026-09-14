@@ -155,7 +155,7 @@ class Tensor:
         dtype = dtype_name(dtype)
         return self if dtype == self.dtype else self.graph.node('cast', (self,), self.shape, dtype)
 
-    # ../../../design/algorithm-sources.md#indexed-range-generation
+    # ../../../design/algorithm-sources.md#programtensor
     def reshape(self, *shape):
         shape = tuple(shape[0]) if len(shape) == 1 and isinstance(shape[0], (list, tuple)) else shape
         known = product(tuple(value for value in shape if value != -1))
@@ -381,7 +381,7 @@ def stack(values, axis=0):
     return concatenate(tuple(value.reshape(*value.shape[:axis], 1, *value.shape[axis:]) for value in values), axis)
 
 
-# ../../../design/algorithm-sources.md#indexed-range-generation
+# ../../../design/algorithm-sources.md#programtensor
 def reduce(op, value, axis=None, keepdims=False):
     if not isinstance(value, Tensor): return getattr(mlx, op)(value, axis=axis, keepdims=keepdims)
     axes = tuple(range(value.ndim)) if axis is None else tuple(i % value.ndim for i in ((axis,) if isinstance(axis, int) else axis))
@@ -403,7 +403,7 @@ def sum_to(value, shape):
     return sum(value, axis=axes, keepdims=True).reshape(shape) if axes or len(shape) != value.ndim else value
 
 
-# ../../../design/algorithm-sources.md#indexed-range-generation
+# ../../../design/algorithm-sources.md#programtensor
 def range_length(start, stop, step):
     if step == 0:
         raise ValueError('arange step must not be zero')
@@ -411,7 +411,7 @@ def range_length(start, stop, step):
     return b.max(0, -((int(start) - int(stop)) // int(step)) if integral else math.ceil((stop - start) / step))
 
 
-# ../../../design/algorithm-sources.md#indexed-range-generation
+# ../../../design/algorithm-sources.md#programtensor
 def arange(start, stop=None, step=1, dtype=None):
     start, stop = (0, start) if stop is None else (start, stop)
     if not isinstance(step, Dimension) and step == 0:
@@ -433,7 +433,7 @@ def take(value, indices, axis=None):
     return value[(slice(None),) * (axis % value.ndim) + (indices,)]
 
 
-# ../../../design/algorithm-sources.md#xonotic-logical-indexing
+# https://docs.jax.dev/en/latest/pallas/grid_blockspec.html
 def take_along_axis(value, indices, axis):
     if not isinstance(value, Tensor): return mlx.take_along_axis(value, indices, axis=axis)
     indices = value.graph.constant(indices)
@@ -448,7 +448,7 @@ def take_along_axis(value, indices, axis):
     return value.graph.node('take_along_axis', (value, indices), tuple(shape), value.dtype, axis=axis)
 
 
-# ../../../design/algorithm-sources.md#stable-indexed-ordering
+# https://www.cs.kent.edu/~batcher/sort.pdf
 def ordering(value, operation, axis, kth=None):
     if not isinstance(value, Tensor):
         return getattr(mlx, operation)(value, kth, axis=axis) if operation == 'argpartition' else mlx.argsort(value, axis=axis)
@@ -464,12 +464,12 @@ def ordering(value, operation, axis, kth=None):
     return value.graph.node(operation, (value,), value.shape, 'uint32', **attributes)
 
 
-# ../../../design/algorithm-sources.md#stable-indexed-ordering
+# https://www.cs.kent.edu/~batcher/sort.pdf
 def argsort(value, axis=-1):
     return ordering(value, 'argsort', axis)
 
 
-# ../../../design/algorithm-sources.md#stable-indexed-ordering
+# https://www.cs.kent.edu/~batcher/sort.pdf
 def argpartition(value, kth, axis=-1):
     return ordering(value, 'argpartition', axis, kth)
 
@@ -481,7 +481,7 @@ def matmul(left, right, transpose_left=False, transpose_right=False):
     return left.graph.node('matmul', (left, right), shape, left.dtype, transpose_left=transpose_left, transpose_right=transpose_right)
 
 
-# ../../../design/algorithm-sources.md#xonotic-expert-indexed-contractions
+# https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs
 def expert_matmul(rows, weights, selected):
     return rows.graph.node('expert_matmul', (rows, weights, selected), (rows.shape[0], weights.shape[2]), rows.dtype)
 

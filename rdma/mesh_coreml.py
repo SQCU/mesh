@@ -12,7 +12,7 @@ from coremltools.converters.mil import Builder as mb, Function, Program
 from coremltools.converters.mil.mil import types
 
 
-# design/algorithm-sources.md#coreml-partial-execution
+# design/algorithm-sources.md#kernelsdot
 def compile_part(request, destination):
     specification = json.loads(Path(request).read_text())
     arguments = OrderedDict()

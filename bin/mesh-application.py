@@ -13,13 +13,13 @@ SSH = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8']
 ROOT = Path(__file__).resolve().parents[1]
 
 
-# ../design/algorithm-sources.md#configuration-storage-layout
+# ../design/algorithm-sources.md#programtensor
 def command(values, host=None, **kwargs):
     values = list(map(str, values))
     return subprocess.run(SSH + [host, shlex.join(values)] if host else values, check=True, **kwargs)
 
 
-# ../design/algorithm-sources.md#configuration-storage-layout
+# ../design/algorithm-sources.md#programtensor
 def checkout(root, host=None):
     dirty = command(['git', '-C', root, 'status', '--porcelain'], host, capture_output=True, text=True).stdout.strip()
     if dirty:
@@ -28,7 +28,7 @@ def checkout(root, host=None):
     return command(['git', '-C', root, 'rev-parse', 'HEAD'], host, capture_output=True, text=True).stdout.strip()
 
 
-# ../design/algorithm-sources.md#configuration-storage-layout
+# ../design/algorithm-sources.md#programtensor
 def activate(root, target):
     root = Path(root).resolve()
     revision = checkout(root)
@@ -41,7 +41,7 @@ def activate(root, target):
     print(json.dumps({'event': 'application_activated', 'root': str(root), 'id': revision}), file=sys.stderr)
 
 
-# ../design/algorithm-sources.md#configuration-storage-layout
+# ../design/algorithm-sources.md#programtensor
 def deploy(args):
     source = Path(args.source).resolve()
     revision = checkout(source)
@@ -65,7 +65,7 @@ def deploy(args):
         activate(source, args.target)
 
 
-# ../design/algorithm-sources.md#configuration-storage-layout
+# ../design/algorithm-sources.md#programtensor
 def run(args):
     root = (Path(args.target) / 'current').resolve()
     revision = checkout(root)
@@ -88,7 +88,7 @@ def run(args):
         os.execvpe(values[0], values, environment)
 
 
-# ../design/algorithm-sources.md#configuration-storage-layout
+# ../design/algorithm-sources.md#programtensor
 def main():
     global SSH
     parser = argparse.ArgumentParser()

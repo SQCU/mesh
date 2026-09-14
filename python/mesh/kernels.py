@@ -11,7 +11,7 @@ _POINTWISE_OPERATIONS = ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|
 
 
 
-# design/algorithm-sources.md#static-indexed-access-specialization
+# design/algorithm-sources.md#kernelsexpression
 @dataclass(frozen=True)
 class _StaticTable:
     refs: tuple
@@ -31,89 +31,89 @@ class _Expression:
     operands: tuple = ()
     value: object = None
 
-    # design/algorithm-sources.md#region-expression-fusion
+    # design/algorithm-sources.md#kernelsexpression
     def __add__(self, other):
         return _Expression('+', (self, _literal(other)))
 
-    # design/algorithm-sources.md#region-expression-fusion
+    # design/algorithm-sources.md#kernelsexpression
     def __radd__(self, other):
         return _literal(other) + self
 
-    # design/algorithm-sources.md#region-expression-fusion
+    # design/algorithm-sources.md#kernelsexpression
     def __sub__(self, other):
         return _Expression('-', (self, _literal(other)))
 
-    # design/algorithm-sources.md#region-expression-fusion
+    # design/algorithm-sources.md#kernelsexpression
     def __rsub__(self, other):
         return _literal(other) - self
 
-    # design/algorithm-sources.md#region-expression-fusion
+    # design/algorithm-sources.md#kernelsexpression
     def __mul__(self, other):
         return _Expression('*', (self, _literal(other)))
 
-    # design/algorithm-sources.md#region-expression-fusion
+    # design/algorithm-sources.md#kernelsexpression
     def __rmul__(self, other):
         return _literal(other) * self
 
-    # design/algorithm-sources.md#region-expression-fusion
+    # design/algorithm-sources.md#kernelsexpression
     def __truediv__(self, other):
         return _Expression('/', (self, _literal(other)))
 
-    # design/algorithm-sources.md#region-expression-fusion
+    # design/algorithm-sources.md#kernelsexpression
     def __rtruediv__(self, other):
         return _literal(other) / self
 
-    # design/algorithm-sources.md#logical-indexed-views
+    # design/algorithm-sources.md#kernelsexpression
     def __floordiv__(self, other):
         return _Expression('//', (self, _literal(other)))
 
-    # design/algorithm-sources.md#logical-indexed-views
+    # design/algorithm-sources.md#kernelsexpression
     def __rfloordiv__(self, other):
         return _literal(other) // self
 
-    # design/algorithm-sources.md#logical-indexed-views
+    # design/algorithm-sources.md#kernelsexpression
     def __mod__(self, other):
         return _Expression('%', (self, _literal(other)))
 
-    # design/algorithm-sources.md#logical-indexed-views
+    # design/algorithm-sources.md#kernelsexpression
     def __rmod__(self, other):
         return _literal(other) % self
 
-    # design/algorithm-sources.md#indexed-expression-lowering
+    # design/algorithm-sources.md#kernelsexpression
     def __lt__(self, other):
         return _Expression('<', (self, _literal(other)))
 
-    # design/algorithm-sources.md#indexed-expression-lowering
+    # design/algorithm-sources.md#kernelsexpression
     def __le__(self, other):
         return _Expression('<=', (self, _literal(other)))
 
-    # design/algorithm-sources.md#indexed-expression-lowering
+    # design/algorithm-sources.md#kernelsexpression
     def __gt__(self, other):
         return _Expression('>', (self, _literal(other)))
 
-    # design/algorithm-sources.md#indexed-expression-lowering
+    # design/algorithm-sources.md#kernelsexpression
     def __ge__(self, other):
         return _Expression('>=', (self, _literal(other)))
 
-    # design/algorithm-sources.md#indexed-expression-lowering
+    # design/algorithm-sources.md#kernelsexpression
     def equal(self, other):
         return _Expression('==', (self, _literal(other)))
 
-    # design/algorithm-sources.md#indexed-expression-lowering
+    # design/algorithm-sources.md#kernelsexpression
     def __and__(self, other):
         return _Expression('&', (self, _literal(other)))
 
-    # design/algorithm-sources.md#indexed-expression-lowering
+    # design/algorithm-sources.md#kernelsexpression
     def __or__(self, other):
         return _Expression('|', (self, _literal(other)))
 
-    # design/algorithm-sources.md#indexed-expression-lowering
+    # design/algorithm-sources.md#kernelsexpression
     def at(self, row, column, *, mask=True, other=0):
         if self.operation != 'input':
             raise ValueError('Indexed loads require an input reference')
         return _Expression('load', tuple(map(_literal, (row, column, mask, other))), self.value)
 
-    # design/algorithm-sources.md#shared-contraction-lowering
+    # design/algorithm-sources.md#kernelsdot
     def astype(self, dtype):
         dtype = np.dtype(dtype)
         if dtype.name not in ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool'):
@@ -121,7 +121,7 @@ class _Expression:
         return _Expression('cast', (self,), dtype.str)
 
 
-    # design/algorithm-sources.md#shared-associative-reductions
+    # design/algorithm-sources.md#kernelsadd
     def sum(self, axis=1):
         axes = (0, 1) if axis is None else (axis,) if isinstance(axis, int) else tuple(axis)
         if any(value not in (-2, -1, 0, 1) for value in axes):
@@ -135,7 +135,7 @@ class _Expression:
         return reduced.T.sum(1) if axes == (0, 1) else reduced
 
     @property
-    # design/algorithm-sources.md#shared-contraction-lowering
+    # design/algorithm-sources.md#kernelsdot
     def T(self):
         if self.operation == 'transpose':
             return self.operands[0]
@@ -151,11 +151,11 @@ class _Expression:
             return _Expression(self.operation, tuple(child.T for child in self.operands), self.value)
         return _Expression('transpose', (self,))
 
-    # design/algorithm-sources.md#region-expression-fusion
+    # design/algorithm-sources.md#kernelsexpression
     def rsqrt(self):
         return _Expression('rsqrt', (self,))
 
-    # design/algorithm-sources.md#region-expression-fusion
+    # design/algorithm-sources.md#kernelsexpression
     def exp(self):
         return _Expression('exp', (self,))
 
@@ -176,12 +176,12 @@ class _Expression:
 
 
 
-# design/algorithm-sources.md#region-expression-fusion
+# design/algorithm-sources.md#kernelsexpression
 def _literal(value):
     return value if isinstance(value, _Expression) else _Expression('literal', value=value.item() if isinstance(value, np.generic) else value)
 
 
-# design/algorithm-sources.md#static-indexed-access-specialization
+# design/algorithm-sources.md#kernelsexpression
 def _static_value(node, inputs, rows, columns, coordinate):
     if node.operation in ('input', 'load'):
         return None
@@ -243,7 +243,7 @@ def _static_value(node, inputs, rows, columns, coordinate):
         return operation(left, right).astype(dtype)
 
 
-# design/algorithm-sources.md#static-indexed-access-specialization
+# design/algorithm-sources.md#kernelsexpression
 def _specialize_accesses(expression, inputs, output, coordinate, domain):
     from . import Ref
     from ._native import View
@@ -252,7 +252,7 @@ def _specialize_accesses(expression, inputs, output, coordinate, domain):
     program = output.program
     page_bytes = program.native.algebra_page_bytes(program.handle)
 
-    # design/algorithm-sources.md#static-indexed-access-specialization
+    # design/algorithm-sources.md#kernelsexpression
     def width(node):
         if node not in widths:
             children = tuple(width(child) for child in node.operands)
@@ -271,7 +271,7 @@ def _specialize_accesses(expression, inputs, output, coordinate, domain):
             widths[node] = value
         return widths[node]
 
-    # design/algorithm-sources.md#static-indexed-access-specialization
+    # design/algorithm-sources.md#kernelsexpression
     def visit(node, path=(), extent=output.shape[1], reduced=False):
         if node.operation == 'select':
             condition, yes, no = node.operands
@@ -340,7 +340,7 @@ def _specialize_accesses(expression, inputs, output, coordinate, domain):
             selected[node] = tuple((block, tuple(sorted(pages))) for block, pages in sorted(blocks.items()))
     bound, replacements, origins = list(inputs), {}, {}
 
-    # design/algorithm-sources.md#static-indexed-access-specialization
+    # design/algorithm-sources.md#kernelsexpression
     def rewrite(node):
         if node in replacements:
             return replacements[node]
@@ -386,7 +386,7 @@ def _specialize_accesses(expression, inputs, output, coordinate, domain):
     return result, tuple(bound), origins
 
 
-# design/algorithm-sources.md#indexed-expression-lowering
+# design/algorithm-sources.md#kernelsexpression
 def indices():
     return _Expression('row'), _Expression('column')
 
@@ -397,22 +397,22 @@ def indices():
 
 
 
-# design/algorithm-sources.md#dynamic-indexed-expression-lowering
+# design/algorithm-sources.md#kernelsexpression
 def program_id(axis):
     return _Expression('program_id', value=axis)
 
 
-# design/algorithm-sources.md#indexed-expression-lowering
+# design/algorithm-sources.md#kernelsexpression
 def select(mask, yes, no):
     return _Expression('select', tuple(map(_literal, (mask, yes, no))))
 
 
-# design/algorithm-sources.md#region-expression-fusion
+# design/algorithm-sources.md#kernelsexpression
 def arguments(count):
     return tuple(_Expression('input', value=index) for index in range(count))
 
 
-# design/algorithm-sources.md#region-expression-fusion
+# design/algorithm-sources.md#kernelsexpression
 def expression(value, *outputs):
     return _ExpressionKernel(tuple(map(_literal, (value, *outputs))))
 
@@ -421,7 +421,7 @@ def expression(value, *outputs):
 class _ExpressionKernel:
     values: tuple
 
-    # design/algorithm-sources.md#dynamic-indexed-expression-lowering
+    # design/algorithm-sources.md#kernelsexpression
     def bind_grid(self, program, grid, input_specs, output_specs):
         import itertools
         if len(output_specs) != len(self.values):
@@ -441,7 +441,7 @@ class _ExpressionKernel:
             self.bind(program, tuple(spec.resolve(coordinate) for spec in input_specs),
                 tuple(spec.resolve(coordinate) for spec in output_specs), coordinate)
 
-    # design/algorithm-sources.md#region-expression-fusion
+    # design/algorithm-sources.md#kernelsexpression
     def bind(self, program, inputs, outputs, coordinate=()):
         from . import check, Partial
         from ._native import View
@@ -468,7 +468,7 @@ class _ExpressionKernel:
                 specialized, specialized_inputs, origins = _specialize_accesses(value, inputs, output, coordinate, domain)
                 used, original_nodes = {}, {}
 
-                # design/algorithm-sources.md#indexed-expression-lowering
+                # design/algorithm-sources.md#kernelsexpression
                 def remap(node):
                     index = node.value
                     if node.operation == 'program_id':
@@ -503,7 +503,7 @@ class _ExpressionKernel:
                         selector_value = select(enabled, ordinal, 0xffffffff)
                         selector_width = output.shape[1]
 
-                        # design/algorithm-sources.md#dynamic-indexed-expression-lowering
+                        # design/algorithm-sources.md#kernelsexpression
                         def selector_shape(part):
                             nonlocal selector_width
                             if part.operation == 'input':
@@ -538,7 +538,7 @@ class _ExpressionKernel:
                         (C.c_size_t * count)(*range(first, first + count)), count,
                         (View * len(candidates))(*candidates), len(candidates)))
 
-    # design/algorithm-sources.md#shared-associative-reductions
+    # design/algorithm-sources.md#kernelsadd
     def source(self, inputs, output, metal, expression):
         widths, reductions = {}, []
         physical, pointers = [], {}
@@ -547,7 +547,7 @@ class _ExpressionKernel:
             pointers[index] = tuple(range(len(physical), len(physical) + len(refs)))
             physical.extend(refs)
 
-        # design/algorithm-sources.md#shared-contraction-lowering
+        # design/algorithm-sources.md#kernelsdot
         def integral(node):
             if node.operation == 'input':
                 return inputs[node.value].dtype.kind != 'f'
@@ -567,7 +567,7 @@ class _ExpressionKernel:
                 return _reduction_dtype(node, inputs, output.dtype).kind in 'iub'
             return all(integral(child) for child in node.operands)
 
-        # design/algorithm-sources.md#region-expression-fusion
+        # design/algorithm-sources.md#kernelsexpression
         def visit(node):
             if node in widths:
                 return widths[node]
@@ -602,9 +602,9 @@ class _ExpressionKernel:
             raise ValueError('Expression columns do not match the output')
         names = {node: f's{index}' for index, node in enumerate(reductions)}
 
-        # design/algorithm-sources.md#shared-scalar-load-emission
+        # design/algorithm-sources.md#kernelsexpression
         def emit(node, column):
-            # design/algorithm-sources.md#shared-scalar-load-emission
+            # design/algorithm-sources.md#kernelsexpression
             def resolve(part, args):
                 if part.operation == 'row':
                     return '((long)r)' if metal else '((int64_t)r)'
@@ -679,12 +679,12 @@ class _ExpressionKernel:
         return '\n'.join(lines)
 
 
-# design/algorithm-sources.md#compiled-column-access-domains
+# design/algorithm-sources.md#kernelsexpression
 def _expression_access_axes(expression, inputs):
     axes = [3] * len(inputs)
     reduced_accesses = set()
 
-    # design/algorithm-sources.md#compiled-column-access-domains
+    # design/algorithm-sources.md#kernelsexpression
     def visit(node, reduced=False):
         if node.operation == 'load':
             axes[node.value] = 0
@@ -701,7 +701,7 @@ def _expression_access_axes(expression, inputs):
                  for _ in (source.refs if isinstance(source, _StaticTable) else source.blocks.values() if hasattr(source, 'blocks') else (source,))), frozenset(reduced_accesses)
 
 
-# design/algorithm-sources.md#compiled-column-access-domains
+# design/algorithm-sources.md#kernelsexpression
 def _source_expression_regions(program, output):
     import math
     quantum = program.native.tensor_publication_bytes(output.view.tensor, output.view.extent) // output.dtype.itemsize
@@ -719,7 +719,7 @@ def _source_expression_regions(program, output):
                  for rectangle in rectangles)
 
 
-# design/algorithm-sources.md#compiled-row-access-domains
+# design/algorithm-sources.md#kernelsexpression
 def _source_row_regions(program, output):
     import math
     if output._writer_error or output.view.column_stride != 1:
@@ -730,20 +730,20 @@ def _source_row_regions(program, output):
     return tuple((first, min(rows, output.shape[0]-first), 0, output.shape[1]) for first in range(0, output.shape[0], rows))
 
 
-# design/algorithm-sources.md#compiled-column-access-domains
+# design/algorithm-sources.md#kernelsexpression
 _METAL_EXPRESSION_HEAD = 'kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], constant ulong *domain [[buffer(1)]], uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { const ulong r=domain[0]+row, column_begin=domain[1], column_end=domain[2];'
 
 
-# design/algorithm-sources.md#in-operation-publication
+# design/algorithm-sources.md#programkernel_call
 _CPU_PUBLICATION_LOOP = 'for(uint64_t section=0;section<publication->count;section++) { const struct mesh_kernel_section part=publication->sections[section]; for(uint64_t r=part.row_begin;r<part.row_end;r++) {'
 _CPU_PUBLICATION_END = '} publication->publish(publication->context,part.first,part.count); }}'
 
 
-# design/algorithm-sources.md#bounded-indexed-segment-loads
+# design/algorithm-sources.md#kernelsexpression
 def _indexed_access_paths(expression, inputs, dynamic_inputs):
     accesses = {}
 
-    # design/algorithm-sources.md#bounded-indexed-segment-loads
+    # design/algorithm-sources.md#kernelsexpression
     def visit(node, path=()):
         if node.operation == 'input' and hasattr(inputs[node.value], 'blocks'):
             raise ValueError('Whole-tensor inputs require indexed loads')
@@ -772,13 +772,13 @@ def _indexed_access_paths(expression, inputs, dynamic_inputs):
     return accesses
 
 
-# design/algorithm-sources.md#page-indexed-gather-dependencies
+# design/algorithm-sources.md#kernelsexpression
 def _lookup_name(values):
     import hashlib
     return 'mesh_lookup_' + hashlib.sha256(repr(values).encode()).hexdigest()
 
 
-# design/algorithm-sources.md#page-indexed-gather-dependencies
+# design/algorithm-sources.md#kernelsexpression
 def _lookup_declarations(expression, metal):
     tables, pending = {}, [expression]
     while pending:
@@ -790,7 +790,7 @@ def _lookup_declarations(expression, metal):
         ','.join(f'{value}ull' for value in values) + '};' for name, values in sorted(tables.items()))
 
 
-# design/algorithm-sources.md#page-indexed-gather-dependencies
+# design/algorithm-sources.md#kernelsexpression
 def _page_selector(program, table, row, column):
     import ctypes as C
     from . import check
@@ -819,7 +819,7 @@ def _page_selector(program, table, row, column):
     return _Expression('lookup', (base + address // unit,), tuple(maps)), tuple(candidates)
 
 
-# design/algorithm-sources.md#static-indexed-access-specialization
+# design/algorithm-sources.md#kernelsexpression
 def _static_table_source(table, first, name, metal):
     dtype = table.dtype
     scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int' if metal else 'int32_t',
@@ -834,7 +834,7 @@ def _static_table_source(table, first, name, metal):
         lines.append(f'{constant} {integer} {name}_{suffix}[]={{'+','.join(map(str, values))+'};')
     value = f'p[address%{table.unit}]'
     result_type = 'float' if dtype.kind == 'f' else scalar
-    lines.append(f"""// design/algorithm-sources.md#static-indexed-access-specialization
+    lines.append(f"""// design/algorithm-sources.md#kernelsexpression
     {'inline' if metal else 'static inline'} {result_type} {name}({'device const ulong *' if metal else 'const uintptr_t *'} buffers,{integer} row,{integer} column) {{
       {integer} ordinal=row/{table.block_shape[0]}*{table.grid[1]}+column/{table.block_shape[1]},low=0,high={len(table.ordinals)-1};
       while(low<high) {{ {integer} middle=low+(high-low)/2;
@@ -847,7 +847,7 @@ def _static_table_source(table, first, name, metal):
     return '\n'.join(lines)
 
 
-# design/algorithm-sources.md#shared-scalar-load-emission
+# design/algorithm-sources.md#kernelsexpression
 def _indexed_load_expression(ref, pointer, layout, args, metal):
     row, column, mask, other = args
     if isinstance(ref, _StaticTable):
@@ -864,7 +864,7 @@ def _indexed_load_expression(ref, pointer, layout, args, metal):
     return f'(({mask})?({value}):({other}))'
 
 
-# design/algorithm-sources.md#shared-scalar-load-emission
+# design/algorithm-sources.md#kernelsexpression
 def _emit_scalar_expression(node, inputs, metal, resolve):
     if node.operation in ('input', 'row', 'column') or node.operation in _REDUCTIONS:
         return resolve(node, ())
@@ -881,7 +881,7 @@ def _emit_scalar_expression(node, inputs, metal, resolve):
         _expression_dtype(node, inputs) if node.operation in ('//', '%') else None)
 
 
-# design/algorithm-sources.md#logical-indexed-views
+# design/algorithm-sources.md#kernelsexpression
 def _expression_dtype(node, inputs):
     if node.operation == 'input':
         return inputs[node.value].dtype
@@ -918,7 +918,7 @@ def _expression_dtype(node, inputs):
     return np.dtype(('uint' if unsigned else 'int') + str(bits))
 
 
-# design/algorithm-sources.md#shared-associative-reductions
+# design/algorithm-sources.md#kernelsadd
 def _reduction_dtype(node, inputs, output):
     if node.value is not None:
         return np.dtype(node.value)
@@ -929,7 +929,7 @@ def _reduction_dtype(node, inputs, output):
 
 
 
-# design/algorithm-sources.md#fused-indexed-update-values
+# design/algorithm-sources.md#kernelsexpression
 def _scalar_expression(node, args, metal, dtype=None):
     if node.operation in _REAL_FUNCTIONS and node.operation != 'rsqrt':
         name = node.operation + ('' if metal else 'f')
@@ -969,14 +969,14 @@ def _scalar_expression(node, args, metal, dtype=None):
     return f'{node.operation}{"" if metal else "f"}({args[0]})'
 
 
-# design/algorithm-sources.md#shared-contraction-lowering
+# design/algorithm-sources.md#kernelsdot
 def dot(left, right, *, tile_k=128):
     if tile_k < 1:
         raise ValueError('Contraction K tiles must be positive')
     return _Expression('dot', tuple(map(_literal, (left, right))), tile_k)
 
 
-# design/algorithm-sources.md#shared-contraction-lowering
+# design/algorithm-sources.md#kernelsdot
 def _requires_regions(node):
     return node.operation in ('dot', 'cast', 'transpose') or node.operation in _REDUCTIONS or any(_requires_regions(child) for child in node.operands)
 
@@ -1005,10 +1005,10 @@ def _bind_contraction(program, inputs, target):
     target.partial = Partial.merge(inputs)
 
 
-# design/algorithm-sources.md#indexed-range-generation
+# design/algorithm-sources.md#programtensor
 def _expression_layout(node, sources, whole, layouts):
     from math import gcd
-    # design/algorithm-sources.md#indexed-range-generation
+    # design/algorithm-sources.md#programtensor
     def layout(child):
         return _expression_layout(child, sources, whole, layouts)
 
@@ -1056,7 +1056,7 @@ def _expression_layout(node, sources, whole, layouts):
 
 
 class _ExpressionRegions:
-    # design/algorithm-sources.md#shared-contraction-lowering
+    # design/algorithm-sources.md#kernelsdot
     def __init__(self, program, specs, coordinate, cache):
         self.program, self.coordinate, self.cache = program, coordinate, cache
         self.sources = tuple(spec.resolve(coordinate) for spec in specs)
@@ -1065,15 +1065,15 @@ class _ExpressionRegions:
         self.reduction_uses = {}
         self.page_bytes = program.native.algebra_page_bytes(program.handle)
 
-    # design/algorithm-sources.md#indexed-range-generation
+    # design/algorithm-sources.md#programtensor
     def layout(self, node):
         return _expression_layout(node, self.sources, self.whole, self.layouts)
 
-    # design/algorithm-sources.md#shared-contraction-lowering
+    # design/algorithm-sources.md#kernelsdot
     def key(self, node, origin, shape):
         used = set()
 
-        # design/algorithm-sources.md#shared-contraction-lowering
+        # design/algorithm-sources.md#kernelsdot
         def visit(value):
             if value.operation in ('input', 'load'):
                 used.add(value.value)
@@ -1091,11 +1091,11 @@ class _ExpressionRegions:
                 identities.append((index, view.tensor, view.extent, view.offset, view.rows, view.columns, view.row_stride, view.column_stride))
         return node, tuple(identities), origin, shape
 
-    # design/algorithm-sources.md#shared-contraction-lowering
+    # design/algorithm-sources.md#kernelsdot
     def temporary(self, shape, dtype=np.float32):
         return self.program.tensor(shape, dtype=dtype)[0, 0]
 
-    # design/algorithm-sources.md#shared-contraction-lowering
+    # design/algorithm-sources.md#kernelsdot
     def panel(self, node, origin, shape):
         if node.operation == 'input':
             source = self.sources[node.value]
@@ -1119,7 +1119,7 @@ class _ExpressionRegions:
 
 
 
-    # design/algorithm-sources.md#shared-contraction-lowering
+    # design/algorithm-sources.md#kernelsdot
     def parts(self, node, origin, shape, direct=None):
         from . import Partial
         from math import gcd
@@ -1176,7 +1176,7 @@ class _ExpressionRegions:
         self.cache[key] = tuple(parts)
         return self.cache[key]
 
-    # design/algorithm-sources.md#page-derived-reduction-leaves
+    # design/algorithm-sources.md#kernelsexpression
     def page_cuts(self, value, axis, origin, count):
         shape = self.layout(value)[0]
         if shape[axis] == 1:
@@ -1221,7 +1221,7 @@ class _ExpressionRegions:
                 result.update(self.page_cuts(operand, axis, origin, count))
         return result
 
-    # design/algorithm-sources.md#page-derived-reduction-leaves
+    # design/algorithm-sources.md#kernelsexpression
     def reduction_regions(self, node, row, rows):
         child = node.operands[0]
         layout = self.layout(child)
@@ -1232,7 +1232,7 @@ class _ExpressionRegions:
         ordered = sorted(boundaries)
         return tuple((first, last-first) for first, last in zip(ordered, ordered[1:]))
 
-    # design/algorithm-sources.md#shared-associative-reductions
+    # design/algorithm-sources.md#kernelsadd
     def reduction(self, node, row, rows, dtype, direct=None):
         key = ('reduction', self.key(node, (row, 0), (rows, 1)), dtype.str)
         if key in self.cache:
@@ -1266,7 +1266,7 @@ class _ExpressionRegions:
         self.cache[key] = parts[plan.root]
         return self.cache[key]
 
-    # design/algorithm-sources.md#shared-contraction-lowering
+    # design/algorithm-sources.md#kernelsdot
     def publish(self, parts, target):
         dtype = parts[0].dtype
         if dtype.kind in 'iub':
@@ -1287,7 +1287,7 @@ class _ExpressionRegions:
             else:
                 expression(arguments(1)[0]).bind(self.program, parts, (target,))
 
-    # design/algorithm-sources.md#in-operation-publication
+    # design/algorithm-sources.md#programkernel_call
     def inline_reduction(self, node, expression, origin, shape, dtype, external):
         import ctypes as C
         from . import check
@@ -1300,7 +1300,7 @@ class _ExpressionRegions:
                 layout[0][1] != shape[1] or len(self.reduction_regions(node, row, rows)) != 1 or rows != shape[0]):
             return None
 
-        # design/algorithm-sources.md#in-operation-publication
+        # design/algorithm-sources.md#programkernel_call
         def references(value, refs, where_origin, mapped):
             if value == node:
                 return references(node.operands[0], refs, (row, 0), False)
@@ -1318,7 +1318,7 @@ class _ExpressionRegions:
                         return False
             return all(references(child, refs, where_origin, mapped) for child in value.operands)
 
-        # design/algorithm-sources.md#in-operation-publication
+        # design/algorithm-sources.md#programkernel_call
         def pages(refs):
             result = set()
             for ref in refs.values():
@@ -1337,11 +1337,11 @@ class _ExpressionRegions:
             return None
         return {identity[0]: ref for identity, ref in reduced.items()}
 
-    # design/algorithm-sources.md#shared-associative-reductions
+    # design/algorithm-sources.md#kernelsadd
     def emit(self, value, origin, shape, target, external=False, reduce=False):
         inputs, replacements = [], {}
 
-        # design/algorithm-sources.md#shared-contraction-lowering
+        # design/algorithm-sources.md#kernelsdot
         def reference(key, refs):
             if key not in replacements:
                 terms = tuple(_Expression('input', value=len(inputs) + index) for index in range(len(refs)))
@@ -1349,7 +1349,7 @@ class _ExpressionRegions:
                 replacements[key] = terms[0] if len(terms) == 1 else (terms[0] + terms[1])
             return replacements[key]
 
-        # design/algorithm-sources.md#shared-contraction-lowering
+        # design/algorithm-sources.md#kernelsdot
         def lower(node, accumulation=target.dtype):
             if node.operation == 'domain':
                 if 0 in node.value[0]:
@@ -1365,7 +1365,7 @@ class _ExpressionRegions:
                 dtype = _reduction_dtype(node, self.sources, accumulation)
                 inline = self.inline_reduction(node, value, origin, shape, dtype, external)
                 if inline is not None:
-                    # design/algorithm-sources.md#in-operation-publication
+                    # design/algorithm-sources.md#programkernel_call
                     def substitute(part):
                         if part.operation == 'input':
                             return reference(('inline_reduction', node, part.value), (inline[part.value],))
@@ -1414,14 +1414,14 @@ class _ExpressionRegions:
 
 
 
-# design/algorithm-sources.md#indexed-contraction-plans
+# design/algorithm-sources.md#kernelsdot
 @dataclass(frozen=True)
 class _ReductionPlan:
     regions: tuple
     merges: tuple
     root: int
 
-    # design/algorithm-sources.md#indexed-contraction-plans
+    # design/algorithm-sources.md#kernelsdot
     @classmethod
     def create(cls, regions):
         regions = tuple(regions)
@@ -1445,14 +1445,14 @@ class _ReductionPlan:
 
 
 
-# design/algorithm-sources.md#shared-contraction-lowering
+# design/algorithm-sources.md#kernelsdot
 def _lower_region_expressions(program, expressions, grid, input_specs, output_specs):
     import itertools
     cache, requests, consumers = {}, [], {}
     for coordinate in itertools.product(*(range(length) for length in grid)):
         lowering = _ExpressionRegions(program, input_specs, coordinate, cache)
 
-        # design/algorithm-sources.md#shared-contraction-lowering
+        # design/algorithm-sources.md#kernelsdot
         def specialize(node):
             if node.operation == 'program_id':
                 return _literal(coordinate[node.value])
@@ -1467,7 +1467,7 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
                 value, target, origin, domain_shape = value.operands[0], target.T, origin[::-1], domain_shape[::-1]
             requests.append((lowering, value, target, origin, domain_shape))
 
-            # design/algorithm-sources.md#in-operation-publication
+            # design/algorithm-sources.md#programkernel_call
             def demand(node, accumulation):
                 if node.operation in _REDUCTIONS:
                     layout = lowering.layout(node)
@@ -1504,7 +1504,7 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
             lowering.emit(value, origin, target.shape, target, external=True)
 
 
-# design/algorithm-sources.md#single-kernel-interface
+# design/algorithm-sources.md#programkernel_call
 _left, _right = arguments(2)
 add = expression(_left + _right)
 swish = expression(_left / (1 + (0 - _left).exp()))

@@ -80,7 +80,7 @@ int mesh_detach(struct mesh_ctx *c){
   return error;
 }
 
-/* design/algorithm-sources.md#page-table-backing-assignment */
+/* design/algorithm-sources.md#programtensor */
 void *mesh_view_create(struct mesh_ctx *c,uint32_t row,size_t count){
   size_t page_bytes=c->M->pgsz;
   if(!count || count>SIZE_MAX/page_bytes || row>mesh_rows(c->M) || count>mesh_rows(c->M)-row){ errno=EINVAL; return NULL; }
@@ -102,10 +102,10 @@ void *mesh_view_create(struct mesh_ctx *c,uint32_t row,size_t count){
   return address;
 }
 
-/* design/algorithm-sources.md#registered-memory-views */
+/* design/algorithm-sources.md#programtensor */
 int mesh_view_destroy(void *address,size_t length){ return munmap(address,length)?errno:0; }
 
-/* design/algorithm-sources.md#nonblocking-table-ownership */
+/* design/algorithm-sources.md#programkernel_call */
 static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t begin,uint32_t end,int own,int hot){
   for(uint32_t first=(begin+align-1)/align*align;first<=end && count<=end-first;){
     uint32_t next=first;
@@ -140,7 +140,7 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   return first;
 }
 
-/* design/algorithm-sources.md#page-table-backing-assignment */
+/* design/algorithm-sources.md#programtensor */
 int mesh_backing_alloc(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t quantum,int contiguous){
   if(!quantum || !count || count%quantum || first>mesh_rows(c->M) || count>mesh_rows(c->M)-first)return EINVAL;
   uint32_t span=contiguous?count:quantum;
@@ -152,7 +152,7 @@ int mesh_backing_alloc(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t
   return 0;
 }
 
-/* design/algorithm-sources.md#page-table-backing-assignment */
+/* design/algorithm-sources.md#programtensor */
 void mesh_backing_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   _Atomic uint32_t *pages=mesh_page(c->M);
   for(uint32_t offset=0;offset<count;offset++){
@@ -161,13 +161,13 @@ void mesh_backing_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   }
 }
 
-/* design/algorithm-sources.md#independent-configured-programs */
+/* design/algorithm-sources.md#program */
 void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_reader_release(c,first,count);
   mesh_bits_clear(c->M,MESH_ROW_OWN,first,count);
 }
 
-/* design/algorithm-sources.md#independent-configured-programs */
+/* design/algorithm-sources.md#program */
 void mesh_arena_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_clear(c->M,MESH_PAGE_OWN,first,count);
 }
@@ -192,7 +192,7 @@ struct mesh_reader_chunk {uint32_t first,count,owners;struct mesh_reader_chunk *
 struct mesh_reader_group {uint32_t plane,completed,pending_count;struct mesh_reader_pending *pending;struct mesh_reader_chunk *chunks;};
 struct mesh_reader_storage {uint32_t *members,*sources;size_t *offsets,count;struct mesh_reader_storage *next;};
 struct mesh_readers {struct mesh_reader_group **groups;struct mesh_reader_storage *storage;};
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static int mesh_reader_bind(struct mesh_ctx *c,uint64_t *used,const uint32_t *fanout,struct mesh_row_map *map,uint32_t occurrences){
   uint64_t busy=0;int grouped=0,plane=0;
   for(uint32_t i=0;i<occurrences;i++){
@@ -250,7 +250,7 @@ static int mesh_reader_bind(struct mesh_ctx *c,uint64_t *used,const uint32_t *fa
   }
   return 0;
 }
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static int mesh_reader_realize(struct mesh_ctx *c){
   struct mesh_readers *readers=c->readers;if(!readers)return 0;
   for(uint32_t row=0;row<mesh_rows(c->M);row++){
@@ -264,7 +264,7 @@ static int mesh_reader_realize(struct mesh_ctx *c){
   }
   return c->execution?0:mesh_execution_create(c);
 }
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_reader_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   if(mesh_reader_release_serial(c,first,count))return;
   struct mesh_readers *readers=c->readers;if(!readers)return;
@@ -275,7 +275,7 @@ static void mesh_reader_release(struct mesh_ctx *c,uint32_t first,uint32_t count
     mesh_rows_release(c,group->completed,1);free(group);
   }
 }
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_reader_destroy(struct mesh_ctx *c){
   struct mesh_readers *readers=c->readers;if(!readers)return;
   mesh_reader_release(c,0,mesh_rows(c->M));
@@ -283,7 +283,7 @@ static void mesh_reader_destroy(struct mesh_ctx *c){
   free(readers->groups);free(readers);c->readers=NULL;
 }
 
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 void mesh_reader_unbind(struct mesh_ctx *c,struct mesh_row_map *map){
   if(!map->members || mesh_reader_unbind_serial(c,map))return;
   struct mesh_readers *readers=c->readers;struct mesh_reader_storage **at=&readers->storage;
@@ -310,7 +310,7 @@ void mesh_reader_unbind(struct mesh_ctx *c,struct mesh_row_map *map){
   map->members=NULL;map->member_offsets=NULL;
 }
 
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static int mesh_reader_survey(struct mesh_ctx *c,uint32_t *fanout,struct mesh_row_map map,uint32_t occurrences){
   for(uint32_t i=0;i<occurrences;i++){
     struct mesh_row_range range=mesh_range(map,i);
@@ -450,10 +450,10 @@ static int mesh_claimable(struct hdr *m,uint32_t first,uint32_t count){
   return 1;
 }
 
-/* design/algorithm-sources.md#xonotic-frame-migration */
+/* design/algorithm-sources.md#programwrite */
 int mesh_writable(struct mesh_ctx *c,uint32_t first,uint32_t count){return mesh_claimable(c->M,first,count);}
 
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_reset(struct mesh_ctx *c,uint32_t first,uint32_t count){
   struct hdr *m=c->M;
   mesh_bits_clear(m,MESH_PRESENT,first,count);
@@ -469,7 +469,7 @@ int mesh_republish(struct mesh_ctx *c,uint32_t first,uint32_t count){
   return 1;
 }
 
-/* design/algorithm-sources.md#presence-driven-execution */
+/* design/algorithm-sources.md#programkernel_call */
 static int mesh_issue_index(struct mesh_ctx *c,const struct mesh_row_function *f,uint32_t index){
   struct hdr *m=c->M;
   for(uint32_t j=0;j<f->inputs;j++){
@@ -494,13 +494,13 @@ size_t mesh_issue(struct mesh_ctx *c,const struct mesh_row_function *f,uint32_t 
   return selected;
 }
 
-/* design/algorithm-sources.md#in-operation-publication */
+/* design/algorithm-sources.md#programkernel_call */
 void mesh_publish_partial(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_set(c->M,MESH_PRESENT,first,count);
   mesh_notify(c->M,first,count);
 }
 
-/* design/algorithm-sources.md#in-operation-publication */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_publish(struct hdr *m,uint32_t first,uint32_t count){
   mesh_bits_set(m,MESH_PRESENT,first,count);
   mesh_bits_clear(m,MESH_PRODUCING,first,count);
@@ -516,7 +516,7 @@ static void mesh_read(struct hdr *m,uint32_t first,uint32_t count,uint32_t plane
   mesh_notify(m,first,count);
 }
 
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static int mesh_map_ready(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
   struct mesh_row_range range=mesh_range(map,index);
   if(!map.members)return mesh_ready(c->M,range.first,range.count,map.plane);
@@ -530,7 +530,7 @@ static int mesh_map_ready(struct mesh_ctx *c,struct mesh_row_map map,uint32_t in
   }
   return 1;
 }
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_map_read(struct mesh_ctx *c,struct mesh_row_map map,uint32_t index){
   struct mesh_row_range range=mesh_range(map,index);
   if(!map.members){mesh_read(c->M,range.first,range.count,map.plane);return;}
@@ -538,7 +538,7 @@ static void mesh_map_read(struct mesh_ctx *c,struct mesh_row_map map,uint32_t in
   for(uint32_t i=0;i<range.count;i++)if(members[i]!=MESH_ABSENT)mesh_bits_set(c->M,MESH_PRESENT,members[i],1);
   mesh_notify(c->M,range.first,range.count);
 }
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_reader_reset(struct mesh_ctx *c,uint32_t first,uint32_t count){
   struct mesh_readers *readers=c->readers;if(!readers)return;
   for(uint32_t row=first;row<first+count;row++){
@@ -547,7 +547,7 @@ static void mesh_reader_reset(struct mesh_ctx *c,uint32_t first,uint32_t count){
     mesh_bits_clear(c->M,MESH_PRESENT,group->completed,1);
   }
 }
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_reader_event(struct mesh_ctx *c,uint32_t row){
   struct mesh_readers *readers=c->readers;if(!readers)return;
   struct mesh_reader_group *group=readers->groups[row];if(!group || !mesh_is(c->M,MESH_PRESENT,row))return;
@@ -560,7 +560,7 @@ static void mesh_reader_event(struct mesh_ctx *c,uint32_t row){
   mesh_read(c->M,row,1,group->plane);
 }
 
-/* design/algorithm-sources.md#in-operation-publication */
+/* design/algorithm-sources.md#programkernel_call */
 void mesh_complete(struct mesh_ctx *c,const struct mesh_row_function *f,const uint32_t *indices,size_t count){
   for(size_t n=0;n<count;n++){
     uint32_t i=indices[n];
@@ -591,22 +591,22 @@ struct mesh_execution {
   struct mesh_edge **readers;
   struct mesh_watch *watches;
 };
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static int mesh_reader_release_serial(struct mesh_ctx *c,uint32_t first,uint32_t count){
   struct mesh_execution *e=c->execution;if(!e || !c->readers || dispatch_get_specific(e)==e)return 0;
   dispatch_sync(e->queue,^{mesh_reader_release(c,first,count);});return 1;
 }
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static int mesh_reader_unbind_serial(struct mesh_ctx *c,struct mesh_row_map *map){
   struct mesh_execution *e=c->execution;if(!e || dispatch_get_specific(e)==e)return 0;
   dispatch_sync(e->queue,^{mesh_reader_unbind(c,map);});return 1;
 }
-/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+/* design/algorithm-sources.md#programkernel_call */
 static int mesh_index_active(struct mesh_ctx *c,const struct mesh_indexed_read *d){
   for(uint32_t i=0;i<d->selectors;i++)if(!mesh_map_ready(c,d->selector[i],0))return 0;
   return 1;
 }
-/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_index_prepare(struct mesh_ctx *c,const struct mesh_indexed_read *d){
   if(mesh_is(c->M,MESH_PRESENT,d->mapped))return;
   for(size_t i=0;i<d->rows*d->columns;i++){
@@ -615,12 +615,12 @@ static void mesh_index_prepare(struct mesh_ctx *c,const struct mesh_indexed_read
   }
   mesh_bits_set(c->M,MESH_PRESENT,d->mapped,1);
 }
-/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_index_finish(struct mesh_ctx *c,const struct mesh_indexed_read *d){
   if(!mesh_bits_all(c->M,MESH_PRESENT,d->retired,d->candidates))return;
   for(uint32_t i=0;i<d->selectors;i++)mesh_map_read(c,d->selector[i],0);
 }
-/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+/* design/algorithm-sources.md#programkernel_call */
 static int mesh_index_retire(struct mesh_ctx *c,const struct mesh_indexed_read *d,uint32_t index){
   uint32_t row=d->retired+index,word=row/64;uint64_t bit=UINT64_C(1)<<(row%64);
   uint64_t before=atomic_fetch_or_explicit(&mesh_plane(c->M,MESH_PRESENT)[word],bit,memory_order_acq_rel);
@@ -629,7 +629,7 @@ static int mesh_index_retire(struct mesh_ctx *c,const struct mesh_indexed_read *
   for(uint32_t j=0;j<candidate.count;j++)mesh_map_read(c,candidate.maps[j],0);
   uint64_t mask=mesh_word_mask(d->retired,d->candidates,word);return ((before|bit)&mask)==mask;
 }
-/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_index_event(struct mesh_ctx *c,const struct mesh_indexed_read *d,uint32_t index){
   if(!mesh_index_active(c,d))return;
   mesh_index_prepare(c,d);
@@ -644,7 +644,7 @@ static void mesh_index_event(struct mesh_ctx *c,const struct mesh_indexed_read *
   }
   if(finish)mesh_index_finish(c,d);
 }
-/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+/* design/algorithm-sources.md#programkernel_call */
 static int mesh_index_ready(struct mesh_ctx *c,const struct mesh_indexed_read *d){
   for(uint32_t i=0;i<d->selectors;i++)if(!mesh_bits_all(c->M,MESH_PRESENT,d->selector[i].first,d->selector[i].count))return 0;
   for(size_t i=0;i<d->rows*d->columns;i++){
@@ -656,12 +656,12 @@ static int mesh_index_ready(struct mesh_ctx *c,const struct mesh_indexed_read *d
   }
   return 1;
 }
-/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_index_complete(struct mesh_ctx *c,const struct mesh_indexed_read *d){
   mesh_bits_set(c->M,MESH_PRESENT,d->completed,1);
   for(uint32_t i=0;i<d->selectors;i++)mesh_notify(c->M,d->selector[i].first,d->selector[i].count);
 }
-/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_index_reset(struct mesh_ctx *c,uint32_t first,uint32_t count){
   struct mesh_execution *e=c->execution;if(!e)return;
   for(uint32_t r=first;r<first+count;r++)for(struct mesh_edge *edge=e->readers[r];edge;edge=edge->next)
@@ -675,11 +675,11 @@ void mesh_notify(struct hdr *m,uint32_t first,uint32_t count){
     mesh_notice_push(m,MESH_NOTICE_SEND,row);
   }
 }
-/* design/algorithm-sources.md#presence-driven-execution */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_fire(struct mesh_execution *e,struct mesh_watch *watch){
   if(mesh_issue_index(e->context,watch->function,watch->index))watch->submit(watch->argument,watch->index);
 }
-/* design/algorithm-sources.md#presence-driven-execution */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_events(struct mesh_execution *e){
   struct hdr *m=e->context->M;
   uint32_t row=mesh_notice_take(m,MESH_NOTICE_COMPUTE);
@@ -720,7 +720,7 @@ static int mesh_execution_create(struct mesh_ctx *c){
   if(error){c->execution=NULL;dispatch_release(e->queue);free(e->readers);free(e);}
   return error;
 }
-/* design/algorithm-sources.md#dynamic-reader-lifetimes */
+/* design/algorithm-sources.md#programkernel_call */
 int mesh_execution_indexed(struct mesh_ctx *c,struct mesh_indexed_read *d,void *owner){
   if(!c->execution){int error=mesh_execution_create(c);if(error)return error;}
   struct mesh_execution *e=c->execution;struct mesh_edge *edges=NULL;
@@ -737,7 +737,7 @@ int mesh_execution_indexed(struct mesh_ctx *c,struct mesh_indexed_read *d,void *
   return 0;
 }
 
-/* design/algorithm-sources.md#presence-driven-execution */
+/* design/algorithm-sources.md#programkernel_call */
 int mesh_execution_add(struct mesh_ctx *c,struct mesh_row_function *function,void *owner,void (*submit)(void *,uint32_t),void *argument){
   if(!c->execution){int error=mesh_execution_create(c);if(error)return error;}
   struct mesh_execution *e=c->execution;
@@ -779,7 +779,7 @@ int mesh_execution_add(struct mesh_ctx *c,struct mesh_row_function *function,voi
   });
   return 0;
 }
-/* design/algorithm-sources.md#presence-driven-execution */
+/* design/algorithm-sources.md#programkernel_call */
 void mesh_execution_remove(struct mesh_ctx *c,void *owner){
   struct mesh_execution *e=c->execution;if(!e)return;
   dispatch_sync(e->queue,^{
@@ -791,7 +791,7 @@ void mesh_execution_remove(struct mesh_ctx *c,void *owner){
     while(*at){struct mesh_watch *watch=*at;if(watch->owner==owner){*at=watch->next;free(watch);}else at=&watch->next;}
   });
 }
-/* design/algorithm-sources.md#presence-driven-execution */
+/* design/algorithm-sources.md#programkernel_call */
 static void mesh_execution_destroy(struct mesh_ctx *c){
   struct mesh_execution *e=c->execution;if(!e)return;
   atomic_store_explicit(&e->stop,1,memory_order_release);

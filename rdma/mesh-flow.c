@@ -3,7 +3,7 @@
 #include "mesh-memory.h"
 #include <pthread.h>
 
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 struct mesh_posted { uint32_t row,page,plane,index,bytes,frames; };
 struct mesh_send_edge {uint32_t queue,index,next;};
 struct mesh_ready {uint32_t head,tail;};
@@ -25,21 +25,21 @@ struct mesh_link {
   struct mesh_send_edge *send_edges;
   struct mesh_ready ready[MESH_QPS];
 };
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 static struct mesh_queue *link_queue(struct mesh_link *link,uint32_t q,int direction){ return &link->queues[2*q+(uint32_t)direction]; }
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 static void link_error(struct hdr *M,int64_t code,uint32_t domain){
   M->port.code=code; M->port.domain=domain; M->port.when=(uint64_t)monotime();
 }
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 static size_t link_index_offset(struct mesh_link *link,int direction,uint32_t slot){
   return link->M->index_off+((size_t)direction*link->budget+slot)*MESH_INDEX_BYTES;
 }
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 static struct mesh_index_frame *link_indices(struct mesh_link *link,int direction,uint32_t slot){
   return (struct mesh_index_frame *)((char *)link->M+link_index_offset(link,direction,slot));
 }
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 static int link_post(struct mesh_link *link,uint32_t q,int direction,struct mesh_posted entry){
   struct hdr *M=link->M; struct mesh_verbs *v=&link->provider;
   int indices=q==(uint32_t)link->qps;
@@ -59,7 +59,7 @@ static int link_post(struct mesh_link *link,uint32_t q,int direction,struct mesh
   queue->posted[queue->tail++%QD]=entry;queue->frames+=entry.frames;
   return 0;
 }
-/* design/algorithm-sources.md#publication-work-lists */
+/* design/algorithm-sources.md#programkernel_call */
 static int link_ready(struct mesh_link *link,uint32_t q,uint32_t index){
   size_t key=(size_t)q*mesh_blocks(link->M)+index;
   struct mesh_transfer *transfer=&mesh_transfers(link->M,q,MESH_SEND)[index];
@@ -70,7 +70,7 @@ static int link_ready(struct mesh_link *link,uint32_t q,uint32_t index){
   else link->ready_next[(size_t)q*mesh_blocks(link->M)+ready->tail]=index;
   ready->tail=index;return 1;
 }
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 static int link_configure(void *state,int socket,double deadline){
   struct mesh_link *link=state;struct hdr *m=link->M;
   for(uint32_t q=0;q<(uint32_t)link->qps;q++){
@@ -124,7 +124,7 @@ static int link_configure(void *state,int socket,double deadline){
   }
   return 0;
 }
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 static void link_receive(void *state,uint32_t q){
   struct mesh_link *link=state;
   struct hdr *M=link->M;struct mesh_queue *in=link_queue(link,q,MESH_RECEIVE);
@@ -146,7 +146,7 @@ static void link_receive(void *state,uint32_t q){
     }
   }
 }
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 static void link_hold(struct mesh_link *link,uint32_t q,const struct mesh_transfer *transfer){
   struct hdr *m=link->M;
   link->active[(size_t)q*mesh_blocks(m)+transfer->index]=1;
@@ -157,7 +157,7 @@ static void link_hold(struct mesh_link *link,uint32_t q,const struct mesh_transf
   mesh_bits_set(m,MESH_ROW_HOT,transfer->local_row,m->block);
   mesh_bits_set(m,MESH_PAGE_HOT,transfer->local_page,m->block);
 }
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 static void link_release(struct mesh_link *link,uint32_t q,struct mesh_posted entry){
   struct hdr *m=link->M;
   for(uint32_t i=0;i<m->block;i++){
@@ -166,7 +166,7 @@ static void link_release(struct mesh_link *link,uint32_t q,struct mesh_posted en
   }
   link->active[(size_t)q*mesh_blocks(m)+entry.index]=0;
 }
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 static int link_send_announced(struct mesh_link *link,uint32_t q){
   struct mesh_pending *pending=&link->announced[q];
   struct mesh_queue *out=link_queue(link,q,MESH_SEND);
@@ -180,7 +180,7 @@ static int link_send_announced(struct mesh_link *link,uint32_t q){
   }
   return 0;
 }
-/* design/algorithm-sources.md#publication-work-lists */
+/* design/algorithm-sources.md#programkernel_call */
 static void link_send_ready(struct mesh_link *link,uint32_t q){
   struct hdr *M=link->M;struct mesh_verbs *v=&link->provider;
   uint32_t iq=(uint32_t)link->qps;
@@ -220,7 +220,7 @@ static void link_send_ready(struct mesh_link *link,uint32_t q){
     if(link_send_announced(link,q))break;
   }
 }
-/* design/algorithm-sources.md#publication-work-lists */
+/* design/algorithm-sources.md#programkernel_call */
 static void link_publications(struct mesh_link *link){
   uint32_t row=mesh_notice_take(link->M,MESH_NOTICE_SEND);
   while(row!=MESH_ABSENT){
@@ -234,7 +234,7 @@ static void link_publications(struct mesh_link *link){
     row=next;
   }
 }
-/* design/algorithm-sources.md#actual-frame-capacity */
+/* design/algorithm-sources.md#programcopy */
 static void mesh_progress(struct mesh_link *link,uint32_t direction){
   struct hdr *M=link->M;struct mesh_verbs *v=&link->provider;
   uint32_t iq=(uint32_t)link->qps;

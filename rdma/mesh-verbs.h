@@ -28,7 +28,7 @@ struct mesh_verbs {
   struct ibv_wc *completions;
 };
 static struct mesh_verbs *provider;
-/* design/algorithm-sources.md#regions-follow-blocks */
+/* design/algorithm-sources.md#programtensor */
 static struct ibv_sge region_sge(const char *base, size_t offset, uint32_t bytes){
   size_t index=offset<provider->region_origin?0:(provider->region_origin?1:0)+(offset-provider->region_origin)/provider->region_extent;
   return (struct ibv_sge){(uintptr_t)base+offset,bytes,provider->regions[index]->lkey}; }
@@ -156,7 +156,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   if(!provider->domain) provider->domain=ibv_alloc_pd(provider->context);
   if(!provider->domain){ close(f); return -1; }
   if(capabilities.max_mr<1){ close(f); errno=EOPNOTSUPP; return -1; }
-  /* design/algorithm-sources.md#regions-follow-blocks */
+  /* design/algorithm-sources.md#programtensor */
   if(!provider->regions){
     size_t bank=(size_t)1<<32, extent;
     if(!(message_bytes&(message_bytes-1))){ origin=0; extent=(size_t)1<<30; }
@@ -180,7 +180,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
     provider->regions[provider->region_count]=ibv_reg_mr(provider->domain,mem+o,n,IBV_ACCESS_LOCAL_WRITE);
     if(!provider->regions[provider->region_count]){ close(f); return -1; } provider->region_count++; }
   if(ibv_query_port(provider->context,1,&pa)){ close(f); return -1; }
-  /* design/algorithm-sources.md#actual-frame-capacity */
+  /* design/algorithm-sources.md#programcopy */
   uint32_t frame_capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !frame_capacity){close(f);errno=EOPNOTSUPP;return -1;}
   if(frame_capacity>=(uint32_t)capabilities.max_cqe)frame_capacity=(uint32_t)capabilities.max_cqe-1;

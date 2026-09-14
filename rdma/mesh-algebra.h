@@ -21,7 +21,7 @@ struct mesh_view {
   size_t offset,rows,columns,row_stride,column_stride;
 };
 struct mesh_copy_region { struct mesh_view source; size_t row,column; };
-/* design/algorithm-sources.md#view-scoped-host-production */
+/* design/algorithm-sources.md#programwrite */
 struct mesh_writer;
 struct mesh_algebra_report { int64_t code; };
 
@@ -55,7 +55,7 @@ int mesh_algebra_encode(struct mesh_algebra *,const struct mesh_view *inputs,siz
 int mesh_algebra_source(struct mesh_algebra *,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,const uint8_t *access_axes,size_t row_begin,size_t row_count,size_t column_begin,size_t column_count);
 int mesh_algebra_indexed(struct mesh_algebra *,size_t function,struct mesh_view selector,const size_t *candidate_inputs,size_t input_count,const struct mesh_view *candidates,size_t count);
 int mesh_algebra_contract(struct mesh_algebra *,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha);
-/* design/algorithm-sources.md#selected-native-contractions */
+/* design/algorithm-sources.md#kernelsdot */
 int mesh_algebra_view_pages(struct mesh_algebra *,struct mesh_view,struct mesh_view *pages,size_t capacity,size_t *count);
 int mesh_algebra_copy(struct mesh_algebra *,struct mesh_view source,uint32_t sender,struct mesh_view destination,uint32_t receiver,uint16_t queue);
 int mesh_algebra_export(struct mesh_algebra *,struct mesh_view,size_t *first,size_t *count);

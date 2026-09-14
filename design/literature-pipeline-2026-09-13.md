@@ -43,8 +43,8 @@ a software acknowledgement before payload posting. Correct ownership and hardwar
 credits remain necessary; unrelated unpublished values do not stop ready sends.
 
 The detailed mechanisms and source citations are in
-[algorithm sources](algorithm-sources.md#publication-work-lists),
-[region expression fusion](algorithm-sources.md#region-expression-fusion), and
+[algorithm sources](algorithm-sources.md#programkernel_call),
+[region expression fusion](algorithm-sources.md#kernelsexpression), and
 [transfer lengths](transfer-length-and-shape-curves-2026-09-13.md).
 
 ## Gold computation and measurement boundary

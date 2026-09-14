@@ -10,13 +10,13 @@
 
 struct mesh_process_memory { pid_t pid; uint64_t bytes; };
 
-/* design/algorithm-sources.md#memory-warning */
+/* design/algorithm-sources.md#program */
 static int mesh_memory_order(const void *a,const void *b){
   uint64_t x=((const struct mesh_process_memory *)a)->bytes,y=((const struct mesh_process_memory *)b)->bytes;
   return (x<y)-(x>y);
 }
 
-/* design/algorithm-sources.md#memory-warning */
+/* design/algorithm-sources.md#program */
 static void mesh_memory_warning(uint64_t bytes,int creating){
   uint64_t ram=0; size_t size=sizeof ram;
   vm_statistics64_data_t vm={0}; mach_msg_type_number_t count=HOST_VM_INFO64_COUNT;

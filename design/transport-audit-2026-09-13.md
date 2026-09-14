@@ -4,7 +4,7 @@ The September 13 review of asynchronous index push identified two instances
 where known transfer metadata was discarded. The implementation now keeps it
 through the complete send lifetime. Prior art is the asynchronous communication
 agent and two-sided verbs mechanism documented in
-[algorithm sources](algorithm-sources.md#async-index-push-contract), including
+[algorithm sources](algorithm-sources.md#programcopy), including
 Apple TN3205's receive-credit guarantee.
 
 ## Fanout retains every reader

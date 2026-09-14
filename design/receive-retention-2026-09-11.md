@@ -2,7 +2,7 @@
 
 Implementation: `8c047bf`, built from matching committed main on M5 Max and
 M4 Pro. The caller build also passed on both. Mechanism and API contract:
-[receive storage before consumer binding](algorithm-sources.md#receive-storage-before-consumer-binding).
+[receive storage before consumer binding](algorithm-sources.md#programcopy).
 
 ## Actual numerical run
 

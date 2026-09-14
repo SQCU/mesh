@@ -112,7 +112,7 @@ The consumer weight has shape (columns, consumer_columns). The root prints
 consumed regions as they become available. The peer remains
 attached after publishing input, until terminated. File supply and terminal
 observation are application I/O outside numerical functions. This uses the
-[MLX tensor-parallel decomposition](algorithm-sources.md#pallas-panel-composition)
+[MLX tensor-parallel decomposition](algorithm-sources.md#nnffn)
 with explicitly owned, region-wise reduction followed by all-gather.
 
 `collective.reduce_scatter(program, value, peers=peers, owners=owners)` takes a

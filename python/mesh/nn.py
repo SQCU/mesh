@@ -5,19 +5,19 @@ from . import kernels
 from .collective import reduce_scatter, all_gather
 
 
-# design/algorithm-sources.md#pallas-panel-composition
+# design/algorithm-sources.md#nnffn
 def _tile(size, *boundaries):
     for boundary in boundaries:
         size = gcd(size, boundary)
     return size
 
 
-# design/algorithm-sources.md#pallas-panel-composition
+# design/algorithm-sources.md#nnffn
 def _block(i, j):
     return (i, j)
 
 
-# design/algorithm-sources.md#pallas-panel-composition
+# design/algorithm-sources.md#nnffn
 def _pointwise(program, kernel, operands, tile_rows, *, peer=None, output_dtype=None):
     shape = operands[0].shape
     block = (_tile(min(tile_rows, shape[0]), *(value.block_shape[0] if value.grid[0] > 1 else 0 for value in operands)),
@@ -32,7 +32,7 @@ def _pointwise(program, kernel, operands, tile_rows, *, peer=None, output_dtype=
 
 
 
-# design/algorithm-sources.md#pallas-panel-composition
+# design/algorithm-sources.md#nnffn
 def linear(program, x, w, *, tile_rows, tile_k=128, tile_columns=128, peer=None, output_dtype=None):
     rows, inner = x.shape
     if inner != w.shape[0]:
@@ -49,7 +49,7 @@ def linear(program, x, w, *, tile_rows, tile_k=128, tile_columns=128, peer=None,
 
 
 
-# design/algorithm-sources.md#typed-ffn-expression-composition
+# design/algorithm-sources.md#nnffn
 def _expression_sum(terms):
     terms = tuple(terms)
     while len(terms) > 1:
@@ -58,7 +58,7 @@ def _expression_sum(terms):
     return terms[0]
 
 
-# design/algorithm-sources.md#typed-ffn-expression-composition
+# design/algorithm-sources.md#nnffn
 def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
         tile_columns=128, peers, owners):
     peers = tuple(peers)
@@ -100,7 +100,7 @@ def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
                       peers=peers, owners=owners)
 
 
-# design/algorithm-sources.md#rmsnorm-shared-expression-composition
+# design/algorithm-sources.md#nnrmsnorm
 def rmsnorm(program, x, gamma, *, tile_rows, epsilon=1e-6):
     gamma = gamma.broadcast_to(x.shape)
     value, weight = kernels.arguments(2)
@@ -116,7 +116,7 @@ def rmsnorm(program, x, gamma, *, tile_rows, epsilon=1e-6):
         out_shape=ShapeDtypeStruct(x.shape, x.dtype))(x, gamma)
 
 
-# design/algorithm-sources.md#streamed-normalization-and-embedding
+# design/algorithm-sources.md#nnembedding
 def embedding(program, table, indices, *, tile_rows, tile_columns=128):
     rows, width = indices.shape[0], table.shape[1]
     mr = _tile(min(tile_rows, rows), indices.block_shape[0] if indices.grid[0] > 1 else 0)

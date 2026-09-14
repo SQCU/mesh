@@ -14,7 +14,7 @@ _PROGRAMS = set()
 _DTYPES = tuple(map(np.dtype, ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool')))
 
 
-# design/algorithm-sources.md#indexed-library-functions
+# design/algorithm-sources.md#program
 def check(code):
     if code:
         raise OSError(code, os.strerror(code))
@@ -26,7 +26,7 @@ class Partial:
     terms: frozenset
 
     @classmethod
-    # design/algorithm-sources.md#partial
+    # design/algorithm-sources.md#kernelsdot
     def merge(cls, refs):
         values = tuple(ref.partial for ref in refs if ref.partial is not None)
         if not values:
@@ -40,7 +40,7 @@ class Partial:
 
 class Ref:
     partial = None
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def __init__(self, program, view, dtype):
         self.program, self.view, self.dtype = program, view, np.dtype(dtype)
         self.shape = (view.rows, view.columns)
@@ -53,7 +53,7 @@ class Ref:
             offset=view.offset * self.dtype.itemsize,
             strides=(view.row_stride * self.dtype.itemsize, view.column_stride * self.dtype.itemsize))
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def whole(self):
         full = self.program.native.tensor_view(self.view.tensor, self.view.extent)
         dense = (self.view.column_stride == 1 and self.view.row_stride == self.view.columns) or (self.view.row_stride == 1 and self.view.column_stride == self.view.rows)
@@ -62,13 +62,13 @@ class Ref:
         return self
 
     @property
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def T(self):
         result = Ref(self.program, self.program.native.view_transpose(self.view), self.dtype)
         result.partial = self.partial
         return result
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def slice(self, row, column, rows, columns):
         if min(row, column, rows, columns) < 0 or row + rows > self.shape[0] or column + columns > self.shape[1]:
             raise ValueError('Slice is outside the reference')
@@ -83,7 +83,7 @@ class Ref:
         result.partial = self.partial
         return result
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def broadcast(self, rows, columns):
         if min(rows, columns) < 0 or any(source != target and source != 1 for source, target in zip(self.shape, (rows, columns))):
             raise ValueError('Incompatible broadcast shape')
@@ -97,24 +97,24 @@ class Ref:
         return result
 
     @property
-    # design/algorithm-sources.md#view-scoped-host-production
+    # design/algorithm-sources.md#programwrite
     def writable(self):
         check(self._writer_error)
         return bool(self.program.native.writer_writable(self._writer))
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def on(self, peer):
         return (self, peer)
 
 
 class Tensor:
-    # design/algorithm-sources.md#collective
+    # design/algorithm-sources.md#collectivereduce_scatter
     def _with_blocks(self, blocks):
         result = object.__new__(Tensor)
         result.__dict__ = self.__dict__ | {'blocks': blocks, 'handle': None, '_span': None}
         return result
 
-    # design/algorithm-sources.md#indexed-range-generation
+    # design/algorithm-sources.md#programtensor
     def __init__(self, program, shape, block_shape, dtype, transferable, contiguous=False):
         import operator
         self.program, self.shape, self.block_shape = program, tuple(map(operator.index, shape)), tuple(map(operator.index, block_shape))
@@ -137,7 +137,7 @@ class Tensor:
                        if self._span is not None else Ref(program, program.native.tensor_view(self.handle, i), self.dtype)
                        for i, coord in enumerate(coordinates)}
 
-    # design/algorithm-sources.md#pallas-call-ergonomics
+    # design/algorithm-sources.md#programkernel_call
     def region(self, row, column, rows, columns):
         if min(row, column, rows, columns) < 0 or row + rows > self.shape[0] or column + columns > self.shape[1]:
             raise ValueError('Region is outside the tensor')
@@ -152,16 +152,16 @@ class Tensor:
             raise ValueError('Region crosses backing blocks; realize storage with blocks containing the requested region')
         return ref.slice(r, c, rows, columns)
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def __getitem__(self, coordinate):
         return self.blocks[coordinate]
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def on(self, peer):
         return (self, peer)
 
     @property
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def T(self):
         result = object.__new__(Tensor)
         result.program, result.dtype, result.handle = self.program, self.dtype, self.handle
@@ -170,7 +170,7 @@ class Tensor:
         result.blocks = {(j, i): ref.T for (i, j), ref in self.blocks.items()}
         return result
 
-    # design/algorithm-sources.md#streamed-normalization-and-embedding
+    # design/algorithm-sources.md#nnembedding
     def broadcast_to(self, shape):
         shape = tuple(shape)
         if len(shape) != 2 or min(shape) < 0 or any(source != target and source != 1 for source, target in zip(self.shape, shape)):
@@ -201,11 +201,11 @@ class BlockSpec:
     index_map: object = None
     _tensor: object = None
 
-    # design/algorithm-sources.md#pallas-call-ergonomics
+    # design/algorithm-sources.md#programkernel_call
     def _bind(self, tensor):
         return replace(self, _tensor=tensor)
 
-    # design/algorithm-sources.md#pallas-call-ergonomics
+    # design/algorithm-sources.md#programkernel_call
     def resolve(self, coordinate):
         if self._tensor is None:
             raise ValueError('BlockSpec is bound by kernel_call')
@@ -226,7 +226,7 @@ class BlockSpec:
 
 
 class Result:
-    # design/algorithm-sources.md#view-scoped-consumption
+    # design/algorithm-sources.md#programexport
     def __init__(self, ref):
         self.ref = ref
         self._array = ref.array.view()
@@ -236,25 +236,25 @@ class Result:
         self.indices = tuple(range(first.value, first.value + count.value))
 
     @property
-    # design/algorithm-sources.md#view-scoped-consumption
+    # design/algorithm-sources.md#programexport
     def ready(self):
         return all(self.ref.program.native.algebra_available(self.ref.program.handle, index) for index in self.indices)
 
     @property
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def array(self):
         if not self.ready:
             raise BlockingIOError(errno.EAGAIN, 'Result region is not published')
         return self._array
 
-    # design/algorithm-sources.md#view-scoped-consumption
+    # design/algorithm-sources.md#programexport
     def consume(self):
         for index in self.indices:
             self.ref.program.native.algebra_consume(self.ref.program.handle, index)
 
 
 class Program:
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def __init__(self, backend='cpu', region=None, coreml=None, *, functions=None):
         self.native = Native()
         self.context = self.native.context()
@@ -274,12 +274,12 @@ class Program:
         if coreml:
             check(self.native.algebra_coreml(self.handle, *(os.fsencode(p) for p in coreml)))
 
-    # design/algorithm-sources.md#indexed-range-generation
+    # design/algorithm-sources.md#programtensor
     def tensor(self, shape, block_shape=None, dtype=np.float32, transferable=True, *, contiguous=False):
         shape = tuple(shape)
         return Tensor(self, shape, tuple(max(1, size) for size in shape) if block_shape is None else block_shape, dtype, transferable, contiguous)
 
-    # design/algorithm-sources.md#pallas-call-ergonomics
+    # design/algorithm-sources.md#programkernel_call
     def kernel_call(self, kernel, *, out_shape, grid, in_specs, out_specs, peer=None):
         single = isinstance(out_shape, ShapeDtypeStruct)
         shapes = (out_shape,) if single else tuple(out_shape)
@@ -288,7 +288,7 @@ class Program:
         if not shapes or len(shapes) != len(specs):
             raise ValueError('Each output requires one shape and one BlockSpec')
 
-        # design/algorithm-sources.md#pallas-call-ergonomics
+        # design/algorithm-sources.md#programkernel_call
         def configure(*operands):
             from . import kernels
             if len(operands) != len(inputs):
@@ -307,7 +307,7 @@ class Program:
             return outputs[0] if single else outputs
         return configure
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def _call(self, kernel, *, grid, inputs=(), outputs=()):
         from .kernels import _ExpressionKernel
         import itertools
@@ -323,7 +323,7 @@ class Program:
                 for target in targets:
                     target.partial = Partial.merge(sources)
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def copy(self, source, destination, *, queue=0):
         src, sender = source
         dst, receiver = destination
@@ -370,7 +370,7 @@ class Program:
             src.view, sender, dst.view, receiver, queue))
         dst.partial = src.partial
 
-    # design/algorithm-sources.md#canonical-view-replication
+    # design/algorithm-sources.md#programcopy
     def replicate(self, source, peer):
         tensor, sender = source
         if not isinstance(tensor, Tensor) or tensor.program is not self:
@@ -394,12 +394,12 @@ class Program:
             result.blocks[coordinate] = Ref(self, view, ref.dtype)
         return result
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def export(self, ref):
         return Result(ref)
 
     @contextmanager
-    # design/algorithm-sources.md#view-scoped-host-production
+    # design/algorithm-sources.md#programwrite
     def write(self, ref):
         if ref.program is not self:
             raise ValueError("Reference belongs to another program")
@@ -413,24 +413,24 @@ class Program:
         finally:
             self.native.writer_complete(ref._writer, published)
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def constant(self, ref, value):
         ref.whole()
         ref.array[...] = value
         check(self.native.tensor_constant(ref.view.tensor, ref.view.extent))
         self._constant_extents.add((ref.view.tensor, ref.view.extent))
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def realize(self):
         check(self.native.algebra_realize(self.handle))
         return self
 
     @property
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def report(self):
         return self.native.algebra_report(self.handle)
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def close(self):
         if self.handle:
             self.native.algebra_destroy(self.handle)
@@ -441,10 +441,10 @@ class Program:
             if not _PROGRAMS:
                 check(self.native.detach(self.context))
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def __enter__(self):
         return self
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def __exit__(self, *error):
         self.close()

@@ -29,7 +29,7 @@ Core ML generator. Core ML now promotes operands before matmul and removes its
 internal fixed-32-K half-product splitting. Its FLOAT32 conversion setting alone
 had not promoted operations that were already typed FP16.
 
-The [algorithm-source contract](algorithm-sources.md#contraction-accumulation)
+The [algorithm-source contract](algorithm-sources.md#kernelsdot)
 records the publications, rounding boundaries, implementation mechanisms and
 limits of backend claims. FP32 tree summation need not be bitwise identical to a
 serial FP32 accumulator; both avoid intervening FP16 storage rounding.

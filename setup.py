@@ -7,13 +7,13 @@ from setuptools.command.build_py import build_py
 
 
 class NativeDistribution(Distribution):
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def has_ext_modules(self):
         return True
 
 
 class Build(build_py):
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def run(self):
         subprocess.run(['make', '-C', 'rdma', 'libmesh.dylib', 'libmesh-algebra.dylib'], check=True)
         super().run()

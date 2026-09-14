@@ -9,7 +9,7 @@ from mesh.nn import linear
 from mesh.collective import reduce_scatter, all_gather
 
 
-# design/algorithm-sources.md#pallas-panel-composition
+# design/algorithm-sources.md#nnffn
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('input')

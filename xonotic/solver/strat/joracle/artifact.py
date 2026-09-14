@@ -31,7 +31,7 @@ def write_report(path, report):
     atomic_save(path, pack_state(report, '__report__'))
 
 
-# ../../../../../design/algorithm-sources.md#bounded-observation-artifacts
+# ../../../../../design/algorithm-sources.md#program
 def read_report(path, view=False):
     with np.load(path, allow_pickle=False) as archive:
         if '__report__meta' in archive:

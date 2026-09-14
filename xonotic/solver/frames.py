@@ -4,7 +4,7 @@ from mesh import Program
 
 
 class Batch(list):
-    # ../../design/algorithm-sources.md#xonotic-frame-migration
+    # ../../design/algorithm-sources.md#programwrite
     def __getitem__(self, index):
         if isinstance(index, tuple):
             row, column = index
@@ -12,13 +12,13 @@ class Batch(list):
         return super().__getitem__(index)
 
     @property
-    # ../../design/algorithm-sources.md#xonotic-frame-migration
+    # ../../design/algorithm-sources.md#programwrite
     def nbytes(self):
         return sum(value.nbytes for value in self)
 
 
 class Frames:
-    # ../../design/algorithm-sources.md#xonotic-frame-migration
+    # ../../design/algorithm-sources.md#programwrite
     def __init__(self, peer=None, slots=64, usable=16384):
         self.program = Program()
         self.node = self.program.node
@@ -37,7 +37,7 @@ class Frames:
                     self.inputs.append(self.program.export(destination[0, 0]))
         self.program.realize()
 
-    # ../../design/algorithm-sources.md#xonotic-frame-migration
+    # ../../design/algorithm-sources.md#programwrite
     def reserve(self, node, count):
         if node != self.peer or count < 0 or count > self.slots:
             raise ValueError('Frame reservation must fit the configured peer ring')
@@ -52,7 +52,7 @@ class Frames:
             result.append(array)
         return result
 
-    # ../../design/algorithm-sources.md#xonotic-frame-migration
+    # ../../design/algorithm-sources.md#programwrite
     def send(self, frames, node):
         if node != self.peer:
             raise ValueError('Frames target a different configured peer')
@@ -61,7 +61,7 @@ class Frames:
             writer.__exit__(None, None, None)
         return len(frames)
 
-    # ../../design/algorithm-sources.md#xonotic-frame-migration
+    # ../../design/algorithm-sources.md#programwrite
     def read(self, dtype=np.uint8, max_batches=1):
         for result in self.inputs[:max_batches * self.slots]:
             if not result.ready:
@@ -71,7 +71,7 @@ class Frames:
             finally:
                 result.consume()
 
-    # ../../design/algorithm-sources.md#xonotic-frame-migration
+    # ../../design/algorithm-sources.md#programwrite
     def close(self):
         self.program.close()
         return 0

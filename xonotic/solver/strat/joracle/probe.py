@@ -1114,7 +1114,7 @@ class LiteralJWindow:
         }
 
 class LiteralJReporter:
-    # ../../../../../design/algorithm-sources.md#bounded-observation-artifacts
+    # ../../../../../design/algorithm-sources.md#program
     def __init__(self, max_rows=4000, interval=20.0, artifact_path=None):
         self.artifact_path = os.path.abspath(artifact_path or "j-measures")
         self.max_rows = max(1, int(max_rows))
@@ -1200,7 +1200,7 @@ class LiteralJReporter:
                 },
             }
 
-    # ../../../../../design/algorithm-sources.md#bounded-observation-artifacts
+    # ../../../../../design/algorithm-sources.md#program
     def run(self):
         window = LiteralJWindow(self.max_rows)
         generation = 0

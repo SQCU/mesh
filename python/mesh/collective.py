@@ -5,7 +5,7 @@ __all__ = ['send', 'reduce_scatter', 'all_gather', 'all_reduce']
 send = Program.copy
 
 
-# design/algorithm-sources.md#collective
+# design/algorithm-sources.md#collectivereduce_scatter
 def reduce_scatter(program, value, *, peers, owners):
     peers = tuple(peers)
     blocks = {}
@@ -29,7 +29,7 @@ def reduce_scatter(program, value, *, peers, owners):
     return value._with_blocks(blocks)
 
 
-# design/algorithm-sources.md#collective
+# design/algorithm-sources.md#collectivereduce_scatter
 def all_gather(program, value, *, peers, owners):
     peers = tuple(peers)
     blocks = {}
@@ -44,7 +44,7 @@ def all_gather(program, value, *, peers, owners):
     return value._with_blocks(blocks)
 
 
-# design/algorithm-sources.md#collective
+# design/algorithm-sources.md#collectivereduce_scatter
 def all_reduce(program, value, *, peers, owners):
     peers = tuple(peers)
     return all_gather(program, reduce_scatter(program, value, peers=peers, owners=owners),

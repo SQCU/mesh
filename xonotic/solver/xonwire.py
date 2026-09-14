@@ -59,7 +59,7 @@ def frame_count(rows, usable):
     vps = values_per_slot(usable)
     return (values + vps - 1) // vps
 
-# ../../design/algorithm-sources.md#complete-page-ownership
+# ../../design/algorithm-sources.md#programtensor
 def frame_waves(kind, req_id, tick, rows, usable, wave_slots, session, mesh, node):
     rows = np.asarray(rows, dtype=np.float32)
     width = rows.shape[1]
@@ -80,7 +80,7 @@ def frame_waves(kind, req_id, tick, rows, usable, wave_slots, session, mesh, nod
         yield frames
 
 
-# ../../design/algorithm-sources.md#complete-page-ownership
+# ../../design/algorithm-sources.md#programtensor
 def recv_datagram_frames(service, mesh, flags=0):
     header, address = service.recvfrom(LOCAL_HDR.size, socket.MSG_PEEK | flags)
     if len(header) != LOCAL_HDR.size:
@@ -311,7 +311,7 @@ class FrameStream:
         self.mesh = mesh
         self.session = int.from_bytes(os.urandom(8), "little")
 
-    # ../../design/algorithm-sources.md#complete-page-ownership
+    # ../../design/algorithm-sources.md#programtensor
     def exchange(self, kind, req_id, tick, rows, node, receivers, *, cancel, backlog, retry_s, timeout_s):
         received = {}
         pending = iter(frame_waves(kind, req_id, tick, rows, self.mesh.usable, self.mesh.slots, self.session, self.mesh, node))

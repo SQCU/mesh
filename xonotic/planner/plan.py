@@ -17,14 +17,14 @@ FF = 2048
 SEED = 20260828
 
 
-# ../../design/algorithm-sources.md#xonotic-planner-migration
+# https://docs.jax.dev/en/latest/pallas/design/design.html
 def model(width):
     rng = np.random.default_rng(SEED)
     return tuple(rng.standard_normal(shape).astype(np.float32) / np.sqrt(shape[-2])
                  for shape in ((width, EXPERTS), (EXPERTS, width, FF), (EXPERTS, FF, width), (width, TEAMS)))
 
 
-# ../../design/algorithm-sources.md#xonotic-planner-migration
+# https://docs.jax.dev/en/latest/pallas/design/design.html
 def solve(program, source, weights):
     graph = mx.Graph()
     with graph:
@@ -41,7 +41,7 @@ def solve(program, source, weights):
     return kernel_calls(program, graph, (), inputs, outputs=(y,))[y.index]
 
 
-# ../../design/algorithm-sources.md#xonotic-planner-migration
+# https://docs.jax.dev/en/latest/pallas/design/design.html
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('role', choices=('play', 'solve'))

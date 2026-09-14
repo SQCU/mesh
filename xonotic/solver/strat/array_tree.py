@@ -13,7 +13,7 @@ def write_payload(target, payload):
             with archive.open(name + ".npy", "w", force_zip64=True) as member:
                 np.lib.format.write_array(member, np.asarray(value), allow_pickle=False)
 
-# ../../../../design/algorithm-sources.md#bounded-observation-artifacts
+# ../../../../design/algorithm-sources.md#program
 def atomic_save(path, payload):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     temporary = path + ".new"
@@ -70,7 +70,7 @@ def pack_state(state, prefix="__runtime__"):
     payload[prefix + 'meta'] = np.frombuffer(metadata, dtype=np.uint8)
     return payload
 
-# ../../../../design/algorithm-sources.md#bounded-observation-artifacts
+# ../../../../design/algorithm-sources.md#program
 def unpack_state(payload, prefix="__runtime__", types=None, root_key=None):
     types = {value.__name__: value for value in (tuple, list, set)} | dict(types or {})
     encoded = np.asarray(payload[prefix + 'meta'])

@@ -3,7 +3,7 @@ import numpy as np
 from .tensor import Dimension, broadcast_shape
 
 
-# ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
+# https://docs.jax.dev/en/latest/_autosummary/jax.ops.segment_sum.html
 def numerical_operands(operation, values, attributes):
     if operation in ('gather_vjp', 'take_along_axis_vjp'):
         return values[1:]
@@ -25,7 +25,7 @@ def numerical_operands(operation, values, attributes):
 
 
 
-# ../../../design/algorithm-sources.md#xonotic-batched-contractions
+# https://docs.jax.dev/en/latest/_autosummary/jax.numpy.matmul.html
 def matrix_batch(tensor, shape, batch):
     import math
     from mesh import Tensor
@@ -46,7 +46,7 @@ def matrix_batch(tensor, shape, batch):
     return result
 
 
-# ../../../design/algorithm-sources.md#typed-integer-contractions
+# ../../../design/algorithm-sources.md#kernelsdot
 def batched_matmul(program, left, right, left_shape, right_shape, attributes, *,
                    tile_rows, tile_k, tile_columns, peer, output_dtype):
     import itertools
@@ -84,7 +84,7 @@ def batched_matmul(program, left, right, left_shape, right_shape, attributes, *,
     return result
 
 
-# ../../../design/algorithm-sources.md#xonotic-partitioned-reshape
+# https://numpy.org/doc/stable/reference/generated/numpy.reshape.html
 def matrix_view(tensor, shape):
     import math
     from mesh import Tensor, Ref
@@ -128,7 +128,7 @@ def matrix_view(tensor, shape):
     return result
 
 
-# ../../../design/algorithm-sources.md#xonotic-logical-indexing
+# https://docs.jax.dev/en/latest/pallas/grid_blockspec.html
 def logical_coordinates(kernels, shape, block):
     import math
     row, column = kernels.indices()
@@ -138,7 +138,7 @@ def logical_coordinates(kernels, shape, block):
                  for axis, size in enumerate(shape[:-1])) + ((column,) if shape else ())
 
 
-# ../../../design/algorithm-sources.md#xonotic-gather-transpose
+# https://github.com/jax-ml/jax/blob/main/jax/_src/lax/slicing.py
 def gather_coordinates(kernels, arguments, values, shapes, attributes, coordinates, capacity):
     mapping = tuple(tuple(part.resolve(capacity) if isinstance(part, Dimension) else part for part in item)
                     for item in attributes['mapping'])
@@ -170,7 +170,7 @@ def gather_coordinates(kernels, arguments, values, shapes, attributes, coordinat
     return tuple(source_coordinates)
 
 
-# ../../../design/algorithm-sources.md#xonotic-take-transpose
+# https://github.com/jax-ml/jax/blob/main/jax/_src/lax/slicing.py
 def take_coordinates(kernels, source_shape, index_shape, index_dtype, index_value, axis, coordinates):
     index_at = tuple(0 if size == 1 else coordinate for size, coordinate in zip(index_shape, coordinates))
     selected = index_value.at(*index_at)
@@ -182,7 +182,7 @@ def take_coordinates(kernels, source_shape, index_shape, index_dtype, index_valu
 
 
 
-# ../../../design/algorithm-sources.md#xonotic-output-liveness
+# https://mlir.llvm.org/docs/Canonicalization/#globally-applied-rules
 def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                  tile_rows=64, tile_k=128, tile_columns=128):
     from mesh import BlockSpec, ShapeDtypeStruct, kernels, nn
@@ -215,7 +215,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         peer = peers[owner]
         if value.index in tensors:
             continue
-        # ../../../design/algorithm-sources.md#indexed-range-generation
+        # ../../../design/algorithm-sources.md#programtensor
         shape = shapes[value.index]
         storage_shape = (math.prod(shape[:-1]), shape[-1]) if shape else (1, 1)
         if not math.prod(shape):
@@ -225,7 +225,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             tensors[value.index] = tensors[values[0].index]
             owners[value.index] = owners[values[0].index]
             continue
-        # ../../../design/algorithm-sources.md#xonotic-partitioned-reshape
+        # https://numpy.org/doc/stable/reference/generated/numpy.reshape.html
         if operation == 'transpose' and (attributes['axes'] == tuple(range(len(shape))) or
                 (len(shape) == 2 and attributes['axes'] == (1, 0))):
             source = tensors[values[0].index]
@@ -243,12 +243,12 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         for operand in numerical_operands(operation, values, attributes):
             tensor = tensors[operand.index]
             sender = owners[operand.index]
-            # ../../../design/algorithm-sources.md#canonical-view-replication
+            # ../../../design/algorithm-sources.md#programcopy
             if sender != peer:
                 tensor = program.replicate(tensor.on(sender), peer)
             local[operand.index] = tensor
         shape = shapes[value.index]
-        # ../../../design/algorithm-sources.md#shared-associative-reductions
+        # ../../../design/algorithm-sources.md#kernelsadd
         if operation.startswith('reduce_') and not attributes['axes']:
             operand = local[values[0].index]
             if operand.dtype == np.dtype(value.dtype):
@@ -261,7 +261,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                     out_specs=BlockSpec(operand.block_shape, lambda i, j: (i, j)),
                     out_shape=ShapeDtypeStruct(operand.shape, value.dtype), peer=peer)(operand)
             continue
-        # ../../../design/algorithm-sources.md#shared-associative-reductions
+        # ../../../design/algorithm-sources.md#kernelsadd
         if operation.startswith('reduce_') and 1 <= len(shapes[values[0].index]) <= 2:
             operand_shape = shapes[values[0].index]
             operand = matrix_view(local[values[0].index], operand_shape if len(operand_shape) == 2 else (1, math.prod(operand_shape)))
@@ -284,7 +284,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 out_shape=ShapeDtypeStruct(reduced_shape, value.dtype), peer=peer)(operand)
             tensors[value.index] = reduced
             continue
-        # ../../../design/algorithm-sources.md#xonotic-logical-indexing
+        # https://docs.jax.dev/en/latest/pallas/grid_blockspec.html
         if operation in ('gather', 'take_along_axis', 'concatenate', 'transpose'):
             matrix_shape = (math.prod(shape[:-1]), shape[-1]) if shape else (1, 1)
             block = (min(tile_rows, matrix_shape[0]), min(tile_columns, matrix_shape[1]))
@@ -323,13 +323,13 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         matrix_shapes = {v.index: shapes[v.index] if len(shapes[v.index]) == 2 else (1, math.prod(shapes[v.index])) for v in values}
         shaped = all(local[v.index].shape == matrix_shapes[v.index] or
             (1 in matrix_shapes[v.index] and local[v.index].shape[::-1] == matrix_shapes[v.index]) for v in values)
-        # ../../../design/algorithm-sources.md#typed-integer-contractions
+        # ../../../design/algorithm-sources.md#kernelsdot
         if operation == 'matmul' and all(len(shapes[v.index]) >= 2 for v in values):
             tensors[value.index] = batched_matmul(program, *(local[v.index] for v in values),
                 *(shapes[v.index] for v in values), attributes, tile_rows=tile_rows,
                 tile_k=tile_k, tile_columns=tile_columns, peer=peer, output_dtype=value.dtype)
             continue
-        # ../../../design/algorithm-sources.md#shared-elementary-functions
+        # ../../../design/algorithm-sources.md#kernelsexpression
         if operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or', 'broadcast', 'logical_not', 'logical_and', 'logical_or', 'bitwise_invert'):
             args = kernels.arguments(len(values))
             direct = shaped and len(shape) <= 2

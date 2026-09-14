@@ -21,9 +21,9 @@ class Report(C.Structure):
     _fields_ = [('code', C.c_int64)]
 
 
-# design/algorithm-sources.md#indexed-library-functions
+# design/algorithm-sources.md#program
 class Native:
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#program
     def __init__(self):
         directory = Path(__file__).parent / 'lib'
         self.runtime = C.CDLL(str(directory / 'libmesh.dylib'), use_errno=True)

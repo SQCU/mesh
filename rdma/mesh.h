@@ -87,7 +87,7 @@ static inline void mesh_receive_posted(struct hdr *m,uint32_t row,uint32_t page)
   mesh_bits_set(m,MESH_PAGE_HOT,page,m->block);
   mesh_bits_clear(m,MESH_PRESENT,row,m->block);
 }
-/* design/algorithm-sources.md#canonical-reader-groups */
+/* design/algorithm-sources.md#programkernel_call */
 static inline void mesh_reads_reset(struct hdr *m,uint32_t first,uint32_t count){
   uint64_t readers=0;
   for(uint32_t row=first;row<first+count;row++)readers|=mesh_mask(m)[row];
@@ -106,7 +106,7 @@ static inline void mesh_receive_complete(struct hdr *m,uint32_t row,uint32_t pag
   }
   mesh_notify(m,row,m->block);
 }
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 static inline int mesh_send_postable(struct hdr *m,const struct mesh_transfer *transfer){
   if(!mesh_bits_all(m,MESH_PRESENT,transfer->local_row,m->block))return 0;
   _Atomic uint64_t *read=mesh_plane(m,MESH_READ+(int)transfer->plane);
@@ -115,17 +115,17 @@ static inline int mesh_send_postable(struct hdr *m,const struct mesh_transfer *t
     if(atomic_load_explicit(&read[word],memory_order_acquire)&mesh_word_mask(first,count,word))return 0;
   return 1;
 }
-/* design/algorithm-sources.md#async-index-push-contract */
+/* design/algorithm-sources.md#programcopy */
 static inline void mesh_send_complete(struct hdr *m,uint32_t row,uint32_t plane){
   mesh_bits_set(m,MESH_READ+(int)plane,row,m->block);
   mesh_notify(m,row,m->block);
 }
 
-/* design/algorithm-sources.md#publication-work-lists */
+/* design/algorithm-sources.md#programkernel_call */
 static inline struct mesh_notice *mesh_notices(struct hdr *m,uint32_t queue){
   return (struct mesh_notice *)((char *)m+m->notice_off)+(size_t)queue*mesh_rows(m);
 }
-/* design/algorithm-sources.md#publication-work-lists */
+/* design/algorithm-sources.md#programkernel_call */
 static inline int mesh_notice_push(struct hdr *m,uint32_t queue,uint32_t index){
   struct mesh_notice *entry=&mesh_notices(m,queue)[index];
   if(atomic_exchange_explicit(&entry->queued,1,memory_order_acq_rel))return 0;
@@ -134,11 +134,11 @@ static inline int mesh_notice_push(struct hdr *m,uint32_t queue,uint32_t index){
   while(!atomic_compare_exchange_weak_explicit(&m->notice_head[queue],&head,index,memory_order_release,memory_order_relaxed));
   return 1;
 }
-/* design/algorithm-sources.md#publication-work-lists */
+/* design/algorithm-sources.md#programkernel_call */
 static inline uint32_t mesh_notice_take(struct hdr *m,uint32_t queue){
   return atomic_exchange_explicit(&m->notice_head[queue],MESH_ABSENT,memory_order_acquire);
 }
-/* design/algorithm-sources.md#publication-work-lists */
+/* design/algorithm-sources.md#programkernel_call */
 static inline uint32_t mesh_notice_next(struct hdr *m,uint32_t queue,uint32_t index){
   struct mesh_notice *entry=&mesh_notices(m,queue)[index];
   uint32_t next=entry->next;

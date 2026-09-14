@@ -6,7 +6,7 @@ lost and then reconstructed incorrectly.
 ## Occurrence-directed execution
 
 The tagged-token firing mechanism cited in
-[algorithm sources](algorithm-sources.md#presence-driven-execution) requires
+[algorithm sources](algorithm-sources.md#programkernel_call) requires
 both function identity and occurrence identity. A configured function already
 provides its occurrence count and explicit or strided input/output ranges.
 Registration now creates a watch for every occurrence and records that index.
@@ -37,7 +37,7 @@ identity reporter now retains that object directly. It no longer tries to infer
 an active deployment from the removed bundle's `application.json`. An invocation
 without a launcher identity reports its root and unbundled state explicitly.
 This follows the configuration ownership described in
-[algorithm sources](algorithm-sources.md#configuration-storage-layout).
+[algorithm sources](algorithm-sources.md#programtensor).
 
 ## Source-review boundaries
 

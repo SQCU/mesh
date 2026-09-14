@@ -9,7 +9,7 @@ queue capacity is measured in 4096-byte frames, and the configured queue's
 actual capacity must be queried. Receive credits permit posting a payload
 before its matching receive is posted. These facts support the asynchronous
 index-push mechanism cited in
-[algorithm sources](algorithm-sources.md#async-index-push-contract).
+[algorithm sources](algorithm-sources.md#programcopy).
 
 The numerical copy binding already knows the logical shape, scalar size, and
 block offset. It now retains that useful byte length in `mesh_row_binding.bytes`.

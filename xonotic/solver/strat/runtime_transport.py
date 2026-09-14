@@ -125,7 +125,7 @@ class RuntimeTransport:
             report('runtime_transport_error', operation=operation, error=message)
             self.errors[operation] = message
 
-    # ../../../design/algorithm-sources.md#context-lifetime
+    # ../../../design/algorithm-sources.md#program
     def close(self):
         self.messages.clear()
         self.local.clear()
