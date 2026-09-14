@@ -683,7 +683,7 @@ def main():
                 graph = mx.Graph()
                 with graph:
                     dot_input = graph.input('integer_dot', (2, 3, 2), dtype_name)
-                    weight_values = np.array([[[1, 0, 0], [0, 1, 0]]] if boolean else [[[2, 4, 6], [3, 5, 7]]], dtype=scalar)
+                    weight_values = np.array([[[1, 1, 0], [1, 0, 1]]] if boolean else [[[2, 4, 6], [3, 5, 7]]], dtype=scalar)
                     second_values = np.eye(2, dtype=scalar) if boolean else np.array([[2, 1], [1, 3]], dtype=scalar)
                     product = mx.matmul(dot_input, graph.constant(weight_values, dtype=dtype_name), transpose_left=True, transpose_right=True)
                     composed = mx.matmul(product, graph.constant(second_values, dtype=dtype_name))
