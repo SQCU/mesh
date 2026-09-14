@@ -92,6 +92,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *);
 @implementation MeshFunction
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
 - (void)dealloc {
+  if(function.active){free(function.active->count_maps);free(function.active);}
   struct mesh_route_use *u=function.routes;while(u){struct mesh_route_use *next=u->next;free(u);u=next;}
   struct mesh_indexed_read *d=function.indexed;
   while(d){
@@ -135,6 +136,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *);
 - (void)dealloc {
   for(MeshFunction *f in self.functions){
     for(uint32_t i=0;i<f->function.inputs;i++)mesh_reader_unbind(context,&f->function.input[i]);
+    if(f->function.active){struct mesh_active *active=f->function.active;for(uint32_t i=0;i<active->maps;i++)mesh_reader_unbind(context,&active->count_maps[i]);mesh_rows_release(context,active->disposition,2);if(active->retired!=MESH_ABSENT)mesh_rows_release(context,active->retired,active->inputs);}
     for(struct mesh_indexed_read *d=f->function.indexed;d;d=d->next){
       for(uint32_t i=0;i<d->selectors;i++)mesh_reader_unbind(context,&d->selector[i]);
       for(uint32_t i=0;i<d->candidates;i++)for(uint32_t j=0;j<d->candidate[i].count;j++)mesh_reader_unbind(context,&d->candidate[i].maps[j]);
@@ -147,6 +149,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *);
     for(uint32_t i=0;i<route->metadata_count;i++)mesh_reader_unbind(context,&route->metadata[i]);
     for(uint32_t i=0;i<route->candidates;i++){
       for(uint32_t j=0;j<route->candidate[i].count;j++)mesh_reader_unbind(context,&route->candidate[i].maps[j]);
+      if(route->candidate[i].producer)mesh_reader_unbind(context,&route->candidate[i].disposition);
       free(route->candidate[i].maps);
     }
     mesh_rows_release(context,route->retired,route->candidates+route->consumers+1);
@@ -496,6 +499,40 @@ struct mesh_view mesh_algebra_route_table(struct mesh_algebra *handle,struct mes
   if(!d || d->authority!=handle){errno=EINVAL;return (struct mesh_view){0};}
   return mesh_tensor_view(d->table,0);
 }
+/* design/algorithm-sources.md#active-segment-domains */
+int mesh_algebra_active(struct mesh_algebra *handle,size_t index,struct mesh_view count,size_t slot){
+  MeshAlgebra *a=owner(handle);
+  if(a.realized || index>=a.functions.count || slot>UINT32_MAX || !valid_view(a,count) || count.rows*count.columns!=1 || count.tensor->extents[count.extent].shape.scalar!=MESH_U32)return EINVAL;
+  MeshFunction *f=a.functions[index];if(f->function.active || f->function.rows!=1 || f->function.routes)return EINVAL;
+  struct mesh_index_candidate maps=indexed_maps(count);if(!maps.maps)return ENOMEM;
+  struct mesh_active *active=calloc(1,sizeof *active);if(!active){free(maps.maps);return ENOMEM;}
+  active->disposition=mesh_rows_alloc(a->context,2);
+  if(active->disposition==MESH_ABSENT){free(maps.maps);free(active);return errno;}
+  active->count_maps=maps.maps;active->maps=maps.count;active->slot=(uint32_t)slot;active->omitted=active->disposition+1;active->retired=MESH_ABSENT;
+  active->count=(const uint32_t *)count.tensor->extents[count.extent].address+count.offset;active->function=&f->function;
+  f->function.active=active;return 0;
+}
+/* design/algorithm-sources.md#active-segment-domains */
+int mesh_algebra_route_producers(struct mesh_algebra *handle,struct mesh_route *d,const size_t *indices,size_t count){
+  MeshAlgebra *a=owner(handle);
+  if(a.realized || !d || d->authority!=handle || !indices || count!=d->candidates)return EINVAL;
+  for(uint32_t i=0;i<d->consumers;i++)if(d->functions[i]!=SIZE_MAX)return EBUSY;
+  for(size_t i=0;i<count;i++){
+    if(indices[i]>=a.functions.count)return EINVAL;MeshFunction *f=a.functions[indices[i]];
+    if(!f->function.active)return EINVAL;
+    for(uint32_t j=0;j<d->candidate[i].count;j++){
+      struct mesh_row_map source=d->candidate[i].maps[j];int covered=0;
+      for(uint32_t k=0;k<f->function.outputs;k++){struct mesh_row_map out=f->function.output[k];covered|=out.first<=source.first && out.first+out.count>=source.first+source.count;}
+      if(!covered)return EINVAL;
+    }
+  }
+  for(size_t i=0;i<count;i++){
+    struct mesh_index_candidate *v=&d->candidate[i];v->producer=a.functions[indices[i]]->function.active;v->function=indices[i];
+    v->disposition=(struct mesh_row_map){.first=v->producer->disposition,.count=1};
+  }
+  return 0;
+}
+
 /* design/algorithm-sources.md#shared-sparse-routing-lowering */
 int mesh_algebra_route_hold(struct mesh_algebra *handle,struct mesh_route *d,const struct mesh_view *views,size_t count){
   MeshAlgebra *a=owner(handle);
@@ -530,7 +567,7 @@ static void route_dependencies(MeshFunction *f){
 int mesh_algebra_route_attach(struct mesh_algebra *handle,size_t index,struct mesh_route *d,size_t consumer){
   MeshAlgebra *a=owner(handle);
   if(a.realized || !d || d->authority!=handle || index>=a.functions.count || consumer>=d->consumers || d->functions[consumer]!=SIZE_MAX)return EINVAL;
-  MeshFunction *f=a.functions[index];if(f->function.rows!=1)return EINVAL;
+  MeshFunction *f=a.functions[index];if(f->function.rows!=1 || f->function.active)return EINVAL;
   for(uint32_t i=0;i<f->function.outputs;i++){
     for(uint32_t j=0;j<d->metadata_count;j++)if(overlaps(f->function.output[i],d->metadata[j]))return EINVAL;
     for(uint32_t j=0;j<d->candidates;j++)for(uint32_t k=0;k<d->candidate[j].count;k++)if(overlaps(f->function.output[i],d->candidate[j].maps[k]))return EINVAL;
@@ -1090,6 +1127,20 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
       for(size_t j=0;j<a.bindings.length/sizeof *bindings;j++)if(bindings[j].receive && overlaps(map,(struct mesh_row_map){.first=bindings[j].first,.count=bindings[j].count}))return EINVAL;
     }
   }
+  for(MeshFunction *f in a.functions)if(f->function.active){
+    struct mesh_active *active=f->function.active;struct mesh_row_map produced={0};
+    for(MeshFunction *source in a.functions)for(uint32_t i=0;i<source->function.outputs;i++){
+      struct mesh_row_map out=source->function.output[i];int covers=1;
+      for(uint32_t j=0;j<active->maps;j++){struct mesh_row_map map=active->count_maps[j];covers&=out.first<=map.first && out.first+out.count>=map.first+map.count;}
+      if(covers)produced=out;
+    }
+    if(!produced.count)return EINVAL;
+    for(struct mesh_indexed_read *d=f->function.indexed;d;d=d->next)for(uint32_t i=0;i<d->selectors;i++)
+      if(d->selector[i].first<produced.first || d->selector[i].first+d->selector[i].count>produced.first+produced.count)return EINVAL;
+    if(active->retired!=MESH_ABSENT && active->inputs!=f->function.inputs){mesh_rows_release(a->context,active->retired,active->inputs);active->retired=MESH_ABSENT;}
+    active->inputs=f->function.inputs;
+    if(active->inputs && active->retired==MESH_ABSENT){active->retired=mesh_rows_alloc(a->context,active->inputs);if(active->retired==MESH_ABSENT)return errno;}
+  }
   struct mesh_row_function *functions=calloc(count?count:1,sizeof *functions);
   if(!functions)return ENOMEM;
   for(size_t i=0;i<count;i++)functions[i]=a.functions[i]->function;
@@ -1099,6 +1150,7 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
     a.realized=YES;
     for(MeshFunction *f in a.functions)for(struct mesh_indexed_read *d=f->function.indexed;d && !error;d=d->next)
       error=mesh_execution_indexed(a->context,d,handle);
+    for(MeshFunction *f in a.functions)if(f->function.active && !error)error=mesh_execution_active(a->context,f->function.active,handle);
     for(struct mesh_route *d=a->routes;d && !error;d=d->next)error=mesh_execution_route(a->context,d,handle);
     if(error)return error;
     for(MeshFunction *f in a.functions){
@@ -1150,7 +1202,7 @@ size_t mesh_algebra_trace_indexed_count(struct mesh_algebra *handle,size_t index
   MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return 0;size_t count=0;
   for(struct mesh_indexed_read *d=a.functions[index]->function.indexed;d;d=d->next){
     count+=d->selectors;
-    for(uint32_t i=0;i<d->candidates;i++)count+=d->candidate[i].count;
+    for(uint32_t i=0;i<d->candidates;i++)count+=d->candidate[i].count+(d->candidate[i].producer?1:0);
   }
   return count;
 }
@@ -1201,6 +1253,7 @@ static const struct mesh_row_map *route_trace_entry(MeshAlgebra *a,size_t entry,
     if(entry<d->metadata_count){*role=0;*index=(uint32_t)entry;return &d->metadata[entry];}entry-=d->metadata_count;
     for(uint32_t i=0;i<d->candidates;i++){
       if(entry<d->candidate[i].count){*role=1;*index=i;return &d->candidate[i].maps[entry];}entry-=d->candidate[i].count;
+      if(d->candidate[i].producer){if(!entry){*role=4;*index=i;return &d->candidate[i].disposition;}entry--;}
     }
     if(entry<d->consumers){*role=2;*index=(uint32_t)entry;return NULL;}entry-=d->consumers;
     if(!entry){*role=3;*index=0;return NULL;}entry--;
@@ -1210,7 +1263,7 @@ static const struct mesh_row_map *route_trace_entry(MeshAlgebra *a,size_t entry,
 /* design/algorithm-sources.md#shared-sparse-routing-lowering */
 size_t mesh_algebra_trace_route_count(struct mesh_algebra *handle){
   size_t count=0;
-  for(struct mesh_route *d=owner(handle)->routes;d;d=d->next){count+=d->metadata_count+d->consumers+1;for(uint32_t i=0;i<d->candidates;i++)count+=d->candidate[i].count;}
+  for(struct mesh_route *d=owner(handle)->routes;d;d=d->next){count+=d->metadata_count+d->consumers+1;for(uint32_t i=0;i<d->candidates;i++)count+=d->candidate[i].count+(d->candidate[i].producer?1:0);}
   return count;
 }
 /* design/algorithm-sources.md#shared-sparse-routing-lowering */
@@ -1222,7 +1275,7 @@ struct mesh_route_event mesh_algebra_trace_route(struct mesh_algebra *handle,siz
   if(mesh_bits_all(a->context->M,MESH_PRESENT,d->prepared,1))result.flags|=1;
   if(mesh_bits_all(a->context->M,MESH_PRESENT,d->retired,d->candidates) && mesh_bits_all(a->context->M,MESH_PRESENT,d->completed,d->consumers))result.flags|=8;
   if(map){result.first=map->first;result.count=map->count;result.plane=map->plane;}
-  if(role==1){
+  if(role==1 || role==4){
     result.retired+=index;if(mesh_bits_all(a->context->M,MESH_PRESENT,result.retired,1))result.flags|=2;
     if(result.flags&9){struct mesh_route_vector v=d->owners;result.consumer=v.values[(index/v.columns)*v.row_stride+(index%v.columns)*v.column_stride];}
   }else if(role==2){result.consumer=index;result.first=d->completed+index;result.count=1;}
@@ -1235,4 +1288,35 @@ struct mesh_reader_event mesh_algebra_trace_route_reader(struct mesh_algebra *ha
   MeshAlgebra *a=owner(handle);struct mesh_route *d;uint32_t domain=0,role=0,index=0;
   const struct mesh_row_map *map=route_trace_entry(a,entry,&d,&domain,&role,&index);
   return map?mesh_reader_trace(a->context,*map,0,row):(struct mesh_reader_event){.source=MESH_ABSENT,.member=MESH_ABSENT,.plane=MESH_ABSENT,.completed=MESH_ABSENT};
+}
+
+
+/* design/algorithm-sources.md#active-segment-domains */
+struct mesh_active_event mesh_algebra_trace_active(struct mesh_algebra *handle,size_t index){
+  MeshAlgebra *a=owner(handle);struct mesh_active_event event={.function=UINT64_MAX,.disposition=MESH_ABSENT,.omitted=MESH_ABSENT,.retired=MESH_ABSENT,.count_first=MESH_ABSENT};
+  if(index>=a.functions.count || !a.functions[index]->function.active)return event;
+  struct mesh_active *active=a.functions[index]->function.active;
+  event=(struct mesh_active_event){.function=index,.omissions=atomic_load_explicit(&active->omissions,memory_order_relaxed),.slot=active->slot,.count_first=active->count_maps[0].first,.count_maps=active->maps,.disposition=active->disposition,.omitted=active->omitted,.retired=active->retired,.inputs=active->inputs};
+  if(mesh_bits_all(a->context->M,MESH_PRESENT,active->disposition,1))event.flags|=1;
+  if(mesh_bits_all(a->context->M,MESH_PRESENT,active->omitted,1))event.flags|=2;
+  if(!active->inputs || mesh_bits_all(a->context->M,MESH_PRESENT,active->retired,active->inputs))event.flags|=4;
+  return event;
+}
+/* design/algorithm-sources.md#active-segment-domains */
+struct mesh_row_range mesh_algebra_trace_active_count(struct mesh_algebra *handle,size_t index,size_t map){
+  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_row_range){0};
+  struct mesh_active *active=a.functions[index]->function.active;
+  return active && map<active->maps?mesh_range(active->count_maps[map],0):(struct mesh_row_range){0};
+}
+/* design/algorithm-sources.md#active-segment-domains */
+struct mesh_reader_event mesh_algebra_trace_active_reader(struct mesh_algebra *handle,size_t index,size_t map,uint32_t row){
+  MeshAlgebra *a=owner(handle);if(index>=a.functions.count)return (struct mesh_reader_event){0};
+  struct mesh_active *active=a.functions[index]->function.active;
+  return active && map<active->maps?mesh_reader_trace(a->context,active->count_maps[map],0,row):(struct mesh_reader_event){0};
+}
+/* design/algorithm-sources.md#active-segment-domains */
+struct mesh_active_event mesh_algebra_trace_route_producer(struct mesh_algebra *handle,size_t entry){
+  MeshAlgebra *a=owner(handle);struct mesh_route *d;uint32_t domain=0,role=0,index=0;
+  route_trace_entry(a,entry,&d,&domain,&role,&index);
+  return mesh_algebra_trace_active(handle,d && (role==1 || role==4) && d->candidate[index].producer?d->candidate[index].function:SIZE_MAX);
 }

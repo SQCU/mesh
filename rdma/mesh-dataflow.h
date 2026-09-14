@@ -6,7 +6,8 @@
 struct mesh_ctx { struct hdr *M; size_t len; uint32_t rows,arena; int fd; void *execution,*readers; };
 struct mesh_row_range { uint32_t first,count; };
 struct mesh_row_map { uint32_t first,count,stride,plane; const struct mesh_row_range *ranges; const uint32_t *members; const size_t *member_offsets; };
-struct mesh_index_candidate { struct mesh_row_map *maps; uint32_t count; size_t input; };
+struct mesh_active;
+struct mesh_index_candidate { struct mesh_row_map *maps; uint32_t count; size_t input; struct mesh_active *producer; struct mesh_row_map disposition; size_t function; };
 struct mesh_indexed_read {
   struct mesh_row_map *selector; uint32_t selectors,vector_maps;
   const uint32_t *indices,*bounds; size_t rows,columns,row_stride,column_stride,bounds_stride;
@@ -22,7 +23,11 @@ struct mesh_route {
   struct mesh_route *next;
 };
 struct mesh_route_use { struct mesh_route *domain; uint32_t consumer; struct mesh_route_use *next; };
-struct mesh_row_function { struct mesh_row_map *input,*output; uint32_t inputs,outputs,rows; struct mesh_indexed_read *indexed; struct mesh_route_use *routes; };
+struct mesh_active {
+  struct mesh_row_map *count_maps; uint32_t maps,slot,disposition,omitted,retired,inputs;
+  const uint32_t *count; struct mesh_row_function *function; _Atomic uint64_t omissions;
+};
+struct mesh_row_function { struct mesh_row_map *input,*output; uint32_t inputs,outputs,rows; struct mesh_indexed_read *indexed; struct mesh_route_use *routes; struct mesh_active *active; };
 /* ledger D5: `binding` orders blocks within `queue`; both participants declare the same identities and queues */
 struct mesh_row_binding { uint32_t first,count,binding,plane; uint16_t queue,receive; uint64_t bytes; };
 struct mesh_transfer_event { uint32_t queue,direction; struct mesh_transfer transfer; uint64_t ready_ns,post_ns,cq_ns,occurrences; };
@@ -40,6 +45,7 @@ struct mesh_ctx *mesh_context(void);
 struct hdr *mesh_region(struct mesh_ctx *);
 int mesh_execution_add(struct mesh_ctx *,struct mesh_row_function *,void *owner,void (*submit)(void *,uint32_t),void *argument);
 void mesh_execution_remove(struct mesh_ctx *,void *owner);
+int mesh_execution_active(struct mesh_ctx *,struct mesh_active *,void *owner);
 int mesh_execution_route(struct mesh_ctx *,struct mesh_route *,void *owner);
 int mesh_execution_indexed(struct mesh_ctx *,struct mesh_indexed_read *,void *owner);
 int mesh_attach(struct mesh_ctx *,const char *name);
