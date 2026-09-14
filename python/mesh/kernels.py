@@ -526,6 +526,7 @@ def _candidate_load(refs, first, ordinal, row, column, metal):
 def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
     import itertools
     import math
+    from . import check
     if any(value.operation != 'input' for value in expression.operands[:2]):
         raise ValueError('Indexed addition takes base and destination references')
     operands = tuple(spec._tensor for spec in input_specs)
@@ -584,6 +585,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
     normalized = select(destination < 0, destination + base.shape[0], destination)
     key_expression = select(mask & (normalized >= 0) & (normalized < base.shape[0]), normalized, 0xffffffff)
     chunks = []
+    producers = {}
     for begin in range(0, size, chunk_rows):
         length = min(chunk_rows, size - begin)
         keys = program.tensor((length, 1), dtype=np.uint32)[0, 0]
@@ -597,6 +599,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
         chunks.append((directory, count, partials))
         ordinal_view = directory.slice(0, count, 1, count)
         selector_view = directory.slice(0, 7 * count, 1, count)
+        active_count = directory.slice(0, 8 * count, 1, 1)
         for (segment, panel), partial in partials.blocks.items():
             column = panel * partials.block_shape[1]
             candidates = []
@@ -642,6 +645,8 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             for position, ref in enumerate(candidates):
                 if (ref.view.tensor, ref.view.extent) not in program._constant_extents:
                     _indexed_range(program, function, selector_view, bounds, 2 + position, 1)
+            check(program.native.algebra_active(program.handle, function, active_count.view, segment))
+            producers[(partial.view.tensor, partial.view.extent)] = function
     stripes = {}
     for coordinate in itertools.product(*(range(length) for length in grid)):
         target = output_spec.resolve(coordinate)
@@ -659,7 +664,8 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
         owners, reverse_keys, reverse_ordinals, offsets = directories[coverage]
         candidates = tuple(partials.region(segment, column, 1, width)
             for _, _, partials in chunks for segment in range(partials.shape[0]))
-        route, table = _routing_domain(program, owners, reverse_keys, reverse_ordinals, offsets, candidates, len(regions))
+        producer_functions = tuple(producers[(ref.view.tensor, ref.view.extent)] for ref in candidates)
+        route, table = _routing_domain(program, owners, reverse_keys, reverse_ordinals, offsets, candidates, producer_functions, len(regions))
         for consumer, (row, target) in enumerate(regions):
             initial = base.region(row, column, *target.shape)
 
@@ -682,7 +688,6 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
                 }}'''
 
             function = _compiled_region(program, (reverse_keys, reverse_ordinals, offsets, initial, table), target, finish)
-            from . import check
             check(program.native.algebra_route_attach(program.handle, function, route, consumer))
 
 
@@ -732,7 +737,7 @@ def _routing_directory(program, chunks, coverage):
 
 
 # design/algorithm-sources.md#shared-sparse-routing-lowering
-def _routing_domain(program, owners, keys, ordinals, offsets, candidates, consumers):
+def _routing_domain(program, owners, keys, ordinals, offsets, candidates, producers, consumers):
     import ctypes as C
     from . import Ref, check
     from ._native import View
@@ -741,6 +746,8 @@ def _routing_domain(program, owners, keys, ordinals, offsets, candidates, consum
     if not route:
         check(C.get_errno() or 12)
     check(program.native.algebra_route_hold(program.handle, route, (View * 1)(keys.view), 1))
+    check(program.native.algebra_route_producers(program.handle, route,
+        (C.c_size_t * len(producers))(*producers), len(producers)))
     return route, Ref(program, program.native.algebra_route_table(program.handle, route), np.uint64)
 
 
