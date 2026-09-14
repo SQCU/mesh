@@ -2074,6 +2074,8 @@ def main():
                         result.consume()
         for generation in range(4):
             empty = generation == 2
+            # design/algorithm-sources.md#function-cost-profiles
+            omitted_before = {index: entry for index,entry in enumerate(program.trace) if 'active' in entry} if empty else {}
             routing = np.resize(np.array([0, 2, 0, 3], dtype=np.int64), updates_count).reshape(-1, 1)
             if destinations_count > 4:
                 routing[4:last_start, 0] = 4 + np.arange(max(0, last_start-4)) % (destinations_count-4)
@@ -2120,6 +2122,23 @@ def main():
             for i in observed:
                 if not np.array_equal(scatter_results[i].array, np.broadcast_to(expected[i], (1, 4))):
                     raise ArithmeticError('Early scattered sum or consumer differs')
+            if empty:
+                omitted = []
+                for index,entry in enumerate(program.trace):
+                    if index not in omitted_before:
+                        continue
+                    before = omitted_before[index]
+                    delta = entry['active']['omissions']-before['active']['omissions']
+                    if not delta:
+                        continue
+                    if any(entry['profile'][field] != before['profile'][field] for field in ('successful', 'failed')) or any(
+                            entry['profile'][domain]['count'] != before['profile'][domain]['count']
+                            for domain in ('dispatch_ns', 'execution_ns', 'gpu_ns')):
+                        raise ArithmeticError('Omitted numerical work added a function timing sample')
+                    omitted.append((index, delta))
+                if not omitted:
+                    raise ArithmeticError('Empty scatter supplied no observable omitted functions')
+                print(json.dumps(dict(event='function_profile_omissions', generation=generation, functions=omitted)), flush=True)
             for i in range(last_chunk+1) if empty else (last_chunk,):
                 with program.write(scatter_masks[i, 0]) as destination:
                     destination[...] = scatter_valid[update_tile*i:update_tile*(i+1)]
@@ -2153,9 +2172,43 @@ def main():
             if not generation:
                 for result in fanout_results:
                     result.consume()
-        if args.trace:
-            Path(args.trace).write_text(json.dumps(dict(compute=program.trace, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
+        # design/algorithm-sources.md#function-cost-profiles
+        report_before = program.report
+        compute = program.trace
         report = program.report
+        successes = failures = 0
+        backends = {}
+        for entry in compute:
+            profile = entry['profile']
+            successful, failed = profile['successful'], profile['failed']
+            if successful+failed > entry['submissions']:
+                raise ArithmeticError('Function profile counted more completions than submissions')
+            successes += successful
+            failures += failed
+            backend = profile['backend']
+            if backend not in ('external', 'cpu_sgemm', 'cpu_neon_contract', 'cpu_builtin', 'cpu_compiled',
+                               'metal_compiled', 'metal_mps', 'metal_builtin', 'coreml', 'selected_mixed'):
+                raise ArithmeticError('Function profile lacks a recognized realized backend')
+            backends[backend] = backends.get(backend, 0)+successful
+            for domain in ('dispatch_ns', 'execution_ns', 'gpu_ns'):
+                moment = profile[domain]
+                count, mean, variance = moment['count'], moment['mean'], moment['sample_variance']
+                if (count > successful if domain == 'gpu_ns' else count != successful):
+                    raise ArithmeticError('Function timing sample count differs from successful completions')
+                if (mean is not None if count == 0 else mean is None or not np.isfinite(mean) or mean < 0):
+                    raise ArithmeticError('Function timing mean violates its sample-count contract')
+                if (variance is not None if count < 2 else variance is None or not np.isfinite(variance) or variance < 0):
+                    raise ArithmeticError('Function timing variance violates its sample-count contract')
+            if entry['kind'] == 0 and profile['gpu_ns']['count']:
+                raise ArithmeticError('CPU function reported GPU timing samples')
+        stable = (report_before.submitted, report_before.completed) == (report.submitted, report.completed)
+        if stable and report.submitted == report.completed:
+            if successes+failures != report.completed or (report.code == 0 and successes != report.completed):
+                raise ArithmeticError('Function completion profiles differ from the terminal runtime totals')
+        print(json.dumps(dict(event='function_profiles', successful=successes, failed=failures,
+            backend_successes=backends, stable_snapshot=stable, pending=report.submitted-report.completed)), flush=True)
+        if args.trace:
+            Path(args.trace).write_text(json.dumps(dict(compute=compute, routes=program.route_trace, transfers=program.transfer_trace), indent=2) + '\n')
         print(json.dumps(dict(event='summary', dtype=args.dtype, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
             invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,
             completion_ms=summary(tuple(completed.values())), withheld_invocation=1, withheld_section=0,
