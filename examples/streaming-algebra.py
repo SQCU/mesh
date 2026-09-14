@@ -654,13 +654,15 @@ def main():
         deferred_output.consume()
         for generation in range(2):
             wait_for((streamed_table[1, 0],), 'writable')
+            streamed_values = np.arange(8, dtype=dtype).reshape(2, 4) + generation + 2
             with program.write(streamed_table[1, 0]) as destination:
-                destination[...] = generation + 2
+                destination[...] = streamed_values
             if generation:
                 with program.write(streamed_table[0, 0]) as destination:
                     destination[...] = 0
             wait_for(streamed_results)
-            if any(not np.array_equal(result.array, np.full((2, 4), 2 * (generation + 2), dtype=dtype)) for result in streamed_results):
+            if any(not np.array_equal(result.array, expected) for result, expected in
+                    zip(streamed_results, (2 * streamed_values, streamed_values[:1] + streamed_values))):
                 raise ArithmeticError('Selected source occurrence was lost during indexed reuse')
             if not generation and streamed_table[0, 0].present:
                 raise ArithmeticError('Unrelated table source was unexpectedly published')
