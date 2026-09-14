@@ -1892,11 +1892,11 @@ class _ExpressionRegions:
             product = _Expression('*', tuple(shift(child) for child in node.operands))
             transposed = _Expression('transpose', (_Expression('sum', (product,)),))
             original = _resolve_logical(node.value[0], self.sources)
-            regions = self.reduction_regions(original)
+            plan = _ReductionPlan.create(self.reduction_regions(original))
             if shape[1] != 1:
                 self.emit(original, origin, shape, target)
-            elif not _lower_indexed_product(self, transposed, target.T, regions):
-                target = self.reduction(original, origin[0], shape[0], np.dtype('float32'), target, regions)
+            elif not _lower_indexed_product(self, transposed, target.T, plan):
+                target = self.reduction(original, origin[0], shape[0], np.dtype('float32'), target, plan)
             self.cache[key] = target
         return self.cache[key]
 
@@ -2009,7 +2009,7 @@ class _ExpressionRegions:
         return tuple((column, min(tile, width-column)) for column in range(0, width, tile))
 
     # design/algorithm-sources.md#shared-associative-reductions
-    def reduction(self, node, row, rows, dtype, direct=None, regions=None):
+    def reduction(self, node, row, rows, dtype, direct=None, plan=None):
         key = ('reduction', self.key(node, (row, 0), (rows, 1)), dtype.str)
         if key in self.cache:
             return self.cache[key]
@@ -2025,32 +2025,27 @@ class _ExpressionRegions:
             _ExpressionKernel((_literal(identity),)).bind(self.program, (), (target,))
             self.cache[key] = target
             return target
-        parts = []
-        regions = self.reduction_regions(node) if regions is None else regions
-        for column, length in regions:
-            target = direct if direct is not None and tile >= width and direct.dtype == dtype else self.temporary((rows, 1), dtype)
+        plan = plan if plan is not None else _ReductionPlan.create(self.reduction_regions(node))
+        parts = {}
+        for index, (column, length) in enumerate(plan.regions):
+            target = direct if direct is not None and index == plan.root and direct.dtype == dtype else self.temporary((rows, 1), dtype)
             self.emit(child, (row, column), (rows, length), target, reduce=node.operation)
-            parts.append(target)
-        while len(parts) > 1:
-            reduced = []
-            for index in range(0, len(parts), 2):
-                if index + 1 == len(parts):
-                    reduced.append(parts[index])
-                    continue
-                target = direct if direct is not None and len(parts) == 2 and direct.dtype == dtype else self.temporary((rows, 1), dtype)
-                if node.operation == 'sum' and dtype.kind == 'f':
-                    _bind_operation(self.program, add, parts[index:index+2], target)
-                else:
-                    left, right = arguments(2)
-                    bits = 0xffffffffffffffff
-                    merged = ((left & bits)+(right & bits) if node.operation == 'sum' else
-                        left | right if node.operation == 'any' else left & right if node.operation == 'all' else
-                        _Expression('maximum' if node.operation == 'max' else 'minimum', (left, right)))
-                    _ExpressionKernel((merged,)).bind(self.program, parts[index:index+2], (target,), self.coordinate)
-                reduced.append(target)
-            parts = reduced
-        self.cache[key] = parts[0]
-        return parts[0]
+            parts[index] = target
+        for left_index, right_index, output in plan.merges:
+            target = direct if direct is not None and output == plan.root and direct.dtype == dtype else self.temporary((rows, 1), dtype)
+            inputs = (parts[left_index], parts[right_index])
+            if node.operation == 'sum' and dtype.kind == 'f':
+                _bind_operation(self.program, add, inputs, target)
+            else:
+                left, right = arguments(2)
+                bits = 0xffffffffffffffff
+                merged = ((left & bits)+(right & bits) if node.operation == 'sum' else
+                    left | right if node.operation == 'any' else left & right if node.operation == 'all' else
+                    _Expression('maximum' if node.operation == 'max' else 'minimum', (left, right)))
+                _ExpressionKernel((merged,)).bind(self.program, inputs, (target,), self.coordinate)
+            parts[output] = target
+        self.cache[key] = parts[plan.root]
+        return self.cache[key]
 
     # design/algorithm-sources.md#shared-contraction-lowering
     def publish(self, parts, target):
@@ -2207,8 +2202,77 @@ def _panel_geometry(source, ordinal, row_step, column_step, rows, columns):
     return backing, offset, strides, capacity
 
 
+# design/algorithm-sources.md#indexed-contraction-plans
+@dataclass(frozen=True)
+class _ReductionPlan:
+    regions: tuple
+    merges: tuple
+    root: int
+
+    # design/algorithm-sources.md#indexed-contraction-plans
+    @classmethod
+    def create(cls, regions):
+        regions = tuple(regions)
+        parts, merges = list(range(len(regions))), []
+        while len(parts) > 1:
+            following = []
+            for index in range(0, len(parts), 2):
+                if index+1 == len(parts):
+                    following.append(parts[index])
+                else:
+                    output = len(regions)+len(merges)
+                    merges.append((parts[index], parts[index+1], output))
+                    following.append(output)
+            parts = following
+        return cls(regions, tuple(merges), parts[0] if parts else -1)
+
+
+# design/algorithm-sources.md#indexed-contraction-plans
+@dataclass(frozen=True)
+class _IndexedProductPlan:
+    segments: tuple
+    storage: tuple
+    operations: tuple
+
+    # design/algorithm-sources.md#indexed-contraction-plans
+    @classmethod
+    def create(cls, segments, target, target_pages, reverse):
+        segments = tuple((first, columns, length, tuple(prepared))
+            for first, columns, length, prepared in segments)
+        storage, operations, groups = [None], [], {}
+
+        # design/algorithm-sources.md#indexed-contraction-plans
+        def temporary(columns, transposed=False):
+            storage.append(((columns, 1) if transposed else (1, columns), transposed))
+            return len(storage)-1
+
+        for index, (first, columns, _, _) in enumerate(segments):
+            output = (0 if len(segments) == 1 and target_pages == 1 and
+                target.dtype == np.dtype('float32') and not reverse else temporary(columns, reverse))
+            operations.append(('contract', (), output, index))
+            groups.setdefault((first, columns), []).append(output)
+        results = []
+        for (first, columns), parts in groups.items():
+            tree = _ReductionPlan.create(parts)
+            slots = dict(enumerate(parts))
+            for left, right, output in tree.merges:
+                destination = (0 if len(groups) == 1 and output == tree.root and
+                    target.dtype == np.dtype('float32') else temporary(columns))
+                operations.append(('add', (slots[left], slots[right]), destination, None))
+                slots[output] = destination
+            result = slots[tree.root]
+            if len(groups) == 1 and result != 0:
+                operations.append(('copy', (result,), 0, None))
+                result = 0
+            results.append((first, result))
+        if len(groups) > 1:
+            operations.append(('assemble', tuple(slot for _, slot in results), 0,
+                tuple(first for first, _ in results)))
+        return cls(segments, tuple(storage), tuple(operations))
+
+
 # design/algorithm-sources.md#selected-native-contractions
-def _lower_indexed_product(lowering, value, target, reduction_regions):
+def _lower_indexed_product(lowering, value, target, compiled_plan):
     import ctypes as C
     from . import Ref, check
     from ._native import View
@@ -2296,6 +2360,12 @@ def _lower_indexed_product(lowering, value, target, reduction_regions):
             segments.append((first, columns, length, prepared))
             start += length
         first += columns
+    target_pages = C.c_size_t()
+    check(program.native.algebra_view_pages(program.handle, target.view, None, 0, C.byref(target_pages)))
+    reverse = sources[0].dtype == np.dtype('float16') and sources[1].dtype == np.dtype('float32')
+    native_plan = _IndexedProductPlan.create(segments, target, target_pages.value, reverse)
+    if selected is None and len(native_plan.operations) > max(1, len(compiled_plan.regions)+len(compiled_plan.merges)):
+        return False
     selector = None
     if selected is not None:
         selection_key = ('selected_plan', lowering.key(_resolve_logical(selected, lowering.sources), (0, 0), (1, 1)), choices)
@@ -2305,21 +2375,31 @@ def _lower_indexed_product(lowering, value, target, reduction_regions):
             lowering.emit(_resolve_logical(plan, lowering.sources), (0, 0), (1, 1), selector)
             lowering.cache[selection_key] = selector
         selector = lowering.cache[selection_key]
-    target_pages = C.c_size_t()
-    check(program.native.algebra_view_pages(program.handle, target.view, None, 0, C.byref(target_pages)))
-    if selected is None:
-        counts = {}
-        for first, columns, _, _ in segments:
-            counts[first, columns] = counts.get((first, columns), 0)+1
-        native_launches = len(segments)+sum(count-1 for count in counts.values())+int(len(counts)>1)
-        if len(segments) == 1 and (target_pages.value != 1 or
-                sources[0].dtype == np.dtype('float16') and sources[1].dtype == np.dtype('float32')):
-            native_launches += 1
-        compiled_launches = max(1, 2*len(reduction_regions)-1)
-        if native_launches > compiled_launches:
-            return False
-    groups = {}
-    for first, columns, length, prepared in segments:
+    storage = [target]
+    for shape, transposed in native_plan.storage[1:]:
+        ref = lowering.temporary(shape)
+        storage.append(ref.T if transposed else ref)
+    for operation, inputs, output, detail in native_plan.operations:
+        destination = storage[output]
+        if operation == 'add':
+            _bind_operation(program, add, tuple(storage[index] for index in inputs), destination)
+            continue
+        if operation == 'copy':
+            lowering.publish((storage[inputs[0]],), destination)
+            continue
+        if operation == 'assemble':
+            results = tuple(storage[index] for index in inputs)
+            entries = tuple(zip(detail, results))
+
+            # design/algorithm-sources.md#indexed-contraction-plans
+            def assemble(metal):
+                source = _indexed_interval_source('mesh_contraction_part', entries, 0, metal)
+                return source, f"""for(uint64_t column=lane;column<{destination.shape[1]};column+=lanes)
+                  p{len(results)}[r*{destination.view.row_stride}+column*{destination.view.column_stride}]=mesh_contraction_part(buffers,r,column);"""
+
+            _compiled_region(program, results, destination, assemble)
+            continue
+        first, columns, length, prepared = native_plan.segments[detail]
         dependencies, positions, page_sets, left_views, right_views, selected_dependencies = [], {}, {}, [], [], []
 
         # design/algorithm-sources.md#selected-native-contractions
@@ -2359,12 +2439,8 @@ def _lower_indexed_product(lowering, value, target, reduction_regions):
             left_views.append(left)
             right_views.append(right)
             selected_dependencies.append(tuple(dict.fromkeys((*left_position, *right_position))))
-        reverse = sources[0].dtype == np.dtype('float16') and sources[1].dtype == np.dtype('float32')
-        destination = (lowering.temporary((columns, 1)).T if reverse else target
-            if len(segments) == 1 and target_pages.value == 1 and target.dtype == np.dtype('float32') else lowering.temporary((1, columns)))
         if selected is None:
             _bind_operation(program, matmul, (left_views[0], right_views[0]), destination)
-            groups.setdefault((first, columns), []).append(destination)
             continue
         zero_key = ('selected_zero', length, columns, sources[1].dtype.str)
         if zero_key not in lowering.cache:
@@ -2397,31 +2473,6 @@ def _lower_indexed_product(lowering, value, target, reduction_regions):
         _compiled_region(program, (selector,), readiness, readiness_source)
         check(program.native.algebra_indexed(program.handle, function.value, readiness.view,
             (C.c_size_t * len(dependencies))(*range(1, len(dependencies)+1)), len(dependencies)))
-        groups.setdefault((first, columns), []).append(destination)
-    results = []
-    for (first, columns), parts in groups.items():
-        while len(parts) > 2:
-            merged = []
-            for index in range(0, len(parts), 2):
-                if index+1 == len(parts):
-                    merged.append(parts[index])
-                else:
-                    destination = lowering.temporary((1, columns))
-                    _bind_operation(program, add, parts[index:index+2], destination)
-                    merged.append(destination)
-            parts = merged
-        destination = target if len(groups) == 1 else parts[0] if len(parts) == 1 else lowering.temporary((1, columns))
-        lowering.publish(parts, destination)
-        results.append(destination)
-    if len(groups) > 1:
-        entries = tuple((first, ref) for (first, _), ref in zip(groups, results))
-
-        # design/algorithm-sources.md#selected-native-contractions
-        def assemble(metal):
-            source = _indexed_interval_source('mesh_contraction_part', entries, 0, metal)
-            return source, f"""for(uint64_t column=lane;column<{target.shape[1]};column+=lanes)
-              p{len(results)}[r*{target.view.row_stride}+column*{target.view.column_stride}]=mesh_contraction_part(buffers,r,column);"""
-        _compiled_region(program, tuple(results), target, assemble)
     return True
 
 
