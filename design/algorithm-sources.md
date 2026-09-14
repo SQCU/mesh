@@ -43,7 +43,7 @@ PyTorch DTensor authors, `Partial` placement, and the Legion authors, reduction 
 
 ## kernels.add
 
-The JAX authors, [Pallas reductions and accumulation](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation): additions combine independently available contributions. Caller-supplied addition bindings are also used inside contraction and normalization reduction trees.
+The JAX authors, [Pallas reductions and accumulation](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation): additions combine independently available contributions. Caller-supplied addition bindings are also used inside contraction and normalization reduction trees. The engine addition binding partitions dense equal-shaped operands at the output tensor’s publication boundaries during setup. Each slice registers its own input dependencies and uses the existing addition encoder on the original registered buffers. An available slice no longer waits for every other slice of a received Ref. No remote-fill completion wait is inserted.
 
 ## collective.reduce_scatter
 
