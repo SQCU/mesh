@@ -3,7 +3,7 @@ import re
 import ctypes as c
 import numpy as np
 
-from .tensor import Dimension
+from .tensor import Dimension, broadcast_shape
 
 class View(c.Structure):
     _fields_ = [('offset', c.c_uint64), ('size', c.c_uint64), ('shape', c.c_uint64 * 8),
@@ -170,10 +170,6 @@ def kernel(node):
         body.append(f'ulong at=coordinate(t,v[{source.index}],{axis}), stride=v[{source.index}].stride[{axis}]; ulong base=t-at*stride;')
         body.append(f'auto value={read(source)}; ulong rank=0; for(ulong i=0;i<v[{source.index}].shape[{axis}];++i) {{ auto other={read(source,"base+i*stride")}; rank+=(other<value || (other==value && i<at)); }}')
         body.append(write(output, 'at', 'base+rank*stride'))
-    elif op == 'scatter_add':
-        source, indices, updates = values
-        body.append(f'float result=float({read(source)}); for(ulong i=0;i<v[{indices.index}].size;++i) if(ulong({read(indices,"i")})==t) result+=float({read(updates,"i")});')
-        body.append(write(output, 'result'))
     elif op == 'random_normal':
         key = values[0]
         body.append(f'uint2 key=uint2({read(key,"0")},{read(key,"1")}); uint4 bits=philox(uint4(uint(t/2),uint((t/2)>>32),0,0),key);')
@@ -534,16 +530,65 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 out_shape=ShapeDtypeStruct(base.shape, value.dtype), peer=peer)(base, destinations, cotangent)
             tensors[value.index] = matrix_view(result, storage_shape)
             continue
-        if operation == 'scatter_add' and len(shape) == 1:
-            base, destinations, updates = (matrix_view(local[v.index], (math.prod(shapes[v.index]), 1)) for v in values)
-            block = (math.gcd(min(tile_rows, shape[0]), base.block_shape[0]), 1)
-            args = kernels.arguments(3)
-            result = program.kernel_call(kernels.expression(kernels.indexed_add(*args)),
-                grid=((shape[0] + block[0] - 1) // block[0], 1),
-                in_specs=(BlockSpec(None),) * 3,
-                out_specs=BlockSpec(block, lambda i, j: (i, j)),
+        # ../../../design/algorithm-sources.md#xonotic-row-scatter
+        if operation == 'scatter_add':
+            if np.dtype(values[1].dtype).kind not in 'iu':
+                raise TypeError('Scatter indices must have integer dtype')
+            index_shape, update_shape = (shapes[v.index] for v in values[1:])
+            selected_shape = index_shape + shape[1:]
+            if broadcast_shape(update_shape, selected_shape) != selected_shape:
+                raise ValueError('Scatter updates must broadcast to the selected rows')
+            storage_shape = (shape[0], 1) if len(shape) == 1 else (math.prod(shape[:-1]), shape[-1])
+            base = matrix_view(local[values[0].index], storage_shape)
+            indices, updates = (local[v.index] for v in values[1:])
+            row_expansion = math.prod(shape[1:-1]) if len(shape) > 1 else 1
+            update_rows = math.prod(index_shape) * row_expansion
+            if row_expansion == 1 and len(index_shape) <= 1 and indices.shape in ((update_rows, 1), (1, update_rows)):
+                destinations = matrix_view(indices, (update_rows, 1))
+            else:
+                key_block = (min(tile_rows, update_rows), 1)
+                row, _ = kernels.indices()
+                ordinal = kernels.program_id(0) * key_block[0] + row
+                selected_ordinal = ordinal // row_expansion
+                index_at = tuple((selected_ordinal // math.prod(index_shape[i + 1:])) % size
+                                 for i, size in enumerate(index_shape))
+                index_value, = kernels.arguments(1)
+                selected = index_value.reshape(index_shape).at(*index_at)
+                if values[1].dtype.startswith('int'):
+                    selected = kernels.select(selected < 0, selected + shape[0], selected)
+                destination = kernels.select((selected >= 0) & (selected < shape[0]),
+                    selected * row_expansion + ordinal % row_expansion, 0xffffffff)
+                destinations = program.kernel_call(kernels.expression(destination),
+                    grid=((update_rows + key_block[0] - 1) // key_block[0], 1),
+                    in_specs=(BlockSpec(None),), out_specs=BlockSpec(key_block, lambda i, j: (i, j)),
+                    out_shape=ShapeDtypeStruct((update_rows, 1), 'int64'), peer=peer)(indices)
+            base_value, index_value, update_value = kernels.arguments(3)
+            update_matrix = (math.prod(update_shape), 1) if len(shape) == 1 else update_shape if len(update_shape) == 2 else (1, math.prod(update_shape))
+            direct = len(index_shape) <= 1 and len(shape) <= 2 and len(update_shape) <= 2 and (
+                updates.shape == update_matrix or (updates.shape[::-1] == update_matrix and 1 in update_matrix))
+            if direct:
+                updates = matrix_view(updates, update_matrix).broadcast_to((update_rows, storage_shape[1]))
+            else:
+                row, column = kernels.indices()
+                selected_ordinal, trailing_ordinal = row // row_expansion, row % row_expansion
+                coordinates = tuple((selected_ordinal // math.prod(index_shape[i + 1:])) % size
+                                    for i, size in enumerate(index_shape))
+                coordinates += tuple((trailing_ordinal // math.prod(shape[i + 2:-1])) % size
+                                     for i, size in enumerate(shape[1:-1]))
+                if len(shape) > 1:
+                    coordinates += (column,)
+                update_at = tuple(0 if size == 1 else coordinate for size, coordinate in
+                                  zip(update_shape, coordinates[len(selected_shape) - len(update_shape):]))
+                update_value = update_value.reshape(update_shape).at(*update_at)
+            block = (math.gcd(min(tile_rows, base.shape[0]), base.block_shape[0] if base.grid[0] > 1 or len(shape) == 1 else 0),
+                     math.gcd(min(tile_columns, base.shape[1]), base.block_shape[1] if base.grid[1] > 1 else 0))
+            if direct and updates.grid[1] > 1:
+                block = (block[0], math.gcd(block[1], updates.block_shape[1]))
+            result = program.kernel_call(kernels.expression(kernels.indexed_add(base_value, index_value, update_value)),
+                grid=tuple((size + tile - 1) // tile for size, tile in zip(base.shape, block)),
+                in_specs=(BlockSpec(None),) * 3, out_specs=BlockSpec(block, lambda i, j: (i, j)),
                 out_shape=ShapeDtypeStruct(base.shape, value.dtype), peer=peer)(base, destinations, updates)
-            tensors[value.index] = result.T
+            tensors[value.index] = result.T if len(shape) == 1 else result
             continue
         # ../../../design/algorithm-sources.md#streamed-row-reductions-in-the-shared-region-owner
         if operation in ('reduce_sum', 'reduce_mean') and 1 <= len(shapes[values[0].index]) <= 2 and attributes['axes']:

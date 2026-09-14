@@ -2235,3 +2235,39 @@ Python compilation and source diff review passed. The existing Xonotic gradient
 workflow adds nonadjacent advanced indices, reversed slices, duplicates, invalid
 indices, delayed cotangent blocks and a downstream numerical consumer without
 allocating a numerical primal or introducing another evaluator.
+
+## Xonotic row scatter
+
+The JAX authors' [scatter-add and gather/scatter transpose implementation](https://github.com/jax-ml/jax/blob/main/jax/_src/lax/slicing.py)
+expresses indexed updates by a destination mapping and additive collision
+reduction. Xonotic `At.add` selects leading rows: an integer index tensor of
+shape I selects logical shape I + base.shape[1:]. Its update derivative gathers
+those rows and the graph's existing `sum_to` reduces broadcast dimensions.
+
+`tensor_metal.kernel_calls` lowers this operation to the shared `indexed_add`.
+A canonical higher-rank base retains physical storage
+(prod(base.shape[:-1]), base.shape[-1]). For each index ordinal, destination
+metadata expands only the intermediate trailing row axes; the final feature
+axis remains a vector. Signed indices normalize once against the leading base
+axis; invalid rows become absent before flattening. Noninteger indices and
+incompatible update broadcasting are rejected at setup. Multidimensional index
+operands are addressed through their original logical view and physical block
+table rather than being flattened into a whole-input dependency.
+
+Updates broadcast to the selected logical shape. Existing matrix and vector
+views bind directly when their shape or singleton transpose matches; other
+updates use logical indexed loads over their original storage. Neither case
+allocates expanded numerical updates. One-block storage alone is not proof
+that a reshape is directly bindable. The shared bounded segmented reduction
+retains collisions, duplicate and negative indices, nonzero base values, and
+independently published output regions. Setup selectors and segmented partial
+capacity remain allocation costs; this change does not claim compact scratch.
+
+The incorrect custom emitter that scanned all indices for every flattened
+output scalar is removed. Base layouts must be representable by the existing
+metadata-only `matrix_view`; arbitrary partition-crossing reshape aliases are
+not silently copied or assigned a competing numerical implementation. Source
+compilation and diff review cover this increment. The existing operational
+scatter workflow adds matrix and higher-rank row updates, multidimensional
+indices, feature broadcasts, delayed producer blocks, repeated invocations and
+a downstream numerical consumer.
