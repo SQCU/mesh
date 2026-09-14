@@ -1471,6 +1471,16 @@ division semantics. The operational example publishes one integer row at a time
 and observes both the direct expression and Xonotic sum before publishing the
 next row, including cancellation beyond 2**53 and modulo-2**64 overflow.
 
+Matrix axis-zero sums and means use the same reduction after swapping the
+operand view axes during setup. `Tensor.T` preserves the tensor handle and maps
+each original block to `Ref.T`, which swaps shape and strides in the native view.
+The completed statistic is exposed through the inverse output view. This is
+index-map transformation, with no transpose kernel, operand copy or extra
+publication. Each original column owns its contributing row partials; other
+columns are independent. Keepdims retains the requested logical singleton axis.
+The integer observation also binds the same pages as a transposed matrix and
+reduces axis zero, so every direct row sum has a column-reduction counterpart.
+
 Real statistics and their combination use FP32. Signed integer and boolean
 outputs select int64 accumulators, unsigned outputs uint64, matching the existing
 scalar emitter's accumulator selection. Integer partials and their tree remain

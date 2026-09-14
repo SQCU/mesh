@@ -525,9 +525,11 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         # ../../../design/algorithm-sources.md#streamed-row-reductions-in-the-shared-region-owner
         if operation in ('reduce_sum', 'reduce_mean') and (
                 (len(shapes[values[0].index]) == 1 and tuple(attributes['axes']) == (0,)) or
-                (len(shapes[values[0].index]) == 2 and tuple(attributes['axes']) == (1,))):
+                (len(shapes[values[0].index]) == 2 and tuple(attributes['axes']) in ((0,), (1,)))):
             operand_shape = shapes[values[0].index]
             operand = matrix_view(local[values[0].index], operand_shape if len(operand_shape) == 2 else (1, math.prod(operand_shape)))
+            transpose = len(operand_shape) == 2 and tuple(attributes['axes']) == (0,)
+            operand = operand.T if transpose else operand
             argument, = kernels.arguments(1)
             term = argument & 0xffffffffffffffff if operand.dtype.kind in 'iu' else argument
             result = term.sum()
@@ -539,8 +541,9 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 in_specs=(BlockSpec(None),),
                 out_specs=BlockSpec((rows, 1), lambda i, j: (i, j)),
                 out_shape=ShapeDtypeStruct((operand.shape[0], 1), value.dtype), peer=peer)(operand)
-            tensors[value.index] = nn._pointwise(program, kernels.expression(argument / operand.shape[1]),
+            reduced = nn._pointwise(program, kernels.expression(argument / operand.shape[1]),
                 (reduced,), rows, peer=peer, output_dtype=value.dtype) if operation == 'reduce_mean' and operand.dtype.kind != 'f' else reduced
+            tensors[value.index] = reduced.T if transpose else reduced
             continue
         # ../../../design/algorithm-sources.md#xonotic-logical-indexing
         if operation in ('gather', 'take_along_axis', 'concatenate', 'transpose'):

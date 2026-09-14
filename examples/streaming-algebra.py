@@ -243,11 +243,15 @@ def main():
             with integer_graph:
                 integer_source = integer_graph.input('integer_rows', (4, 6), 'int64')
                 integer_rows = mx.sum(integer_source, axis=1)
+                integer_transposed = integer_graph.input('integer_columns', (6, 4), 'int64')
+                integer_columns = mx.sum(integer_transposed, axis=0, keepdims=True)
             integer_lowered = kernel_calls(program, integer_graph, (),
-                {integer_source.index: integer_input}, outputs=(integer_rows,),
+                {integer_source.index: integer_input, integer_transposed.index: integer_input.T},
+                outputs=(integer_rows, integer_columns),
                 root_peer=0, tile_rows=1, tile_columns=3)
             integer_results += tuple(program.export(ref)
-                for _, ref in sorted(integer_lowered[integer_rows.index].blocks.items()))
+                for value in (integer_rows, integer_columns)
+                for _, ref in sorted(integer_lowered[value.index].blocks.items()))
             graph = mx.Graph()
             with graph:
                 source = graph.input('source', (4, 4))
