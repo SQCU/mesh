@@ -75,3 +75,35 @@ configured reduction tree and two-sided SEND/RECV implementation. Sources are
 [asynchronous index publication](algorithm-sources.md#async-index-push-contract).
 The argument concerns dependency and control flow; it makes no latency or
 throughput claim and introduces no acceptance or rejection criteria.
+
+## Used operation chain
+
+On September 14, 2026, `examples/streaming-chain.py` at commit `2bc27de`
+executed on the MacBook (producer 0) and Mac mini (consumer 1) through the
+canonical Thunderbolt SEND/RECV bridge. Both used shared-region ABI 26,
+65,536 pages, four pages per block and one payload queue.
+
+The supplied FP32 tensors were X[32,32], W_up[32,32] and W_down[32,16],
+with tile rows, K and columns all 16. Input values were generated in X, W_up,
+W_down order with NumPy `default_rng(73).standard_normal(shape)`, cast to FP32
+and divided by 8. The actual calls were:
+
+    producer 0: X → linear(X, W_up) → swish → copy to consumer 1
+    consumer 1: received H → linear(H, W_down) → copy to producer 0
+
+Both contractions bind two K contributions per output region. Each hidden
+region becomes a transfer source after its numerical completion and an operand
+of the consumer's corresponding contraction contribution after arrival. The
+caller's terminal loop only reads returned results; it issues no intermediate
+numerical work. These are the functions traced in the source derivation above.
+
+The terminal received region (1,0) followed by (0,0). Their actual values are
+[recorded here](../measurements/streaming-chain-2026-09-14.txt). The first entries
+were -0.02199353650212288 and -0.012772580608725548 respectively. The returned
+order is the observed execution result, not a required schedule. It does not
+by itself establish the timing of every internal contribution; the source
+bindings establish their partial-input dependencies.
+
+The producer exited after consuming both regions. The consumer was then closed
+with SIGTERM. No reference evaluator, timing comparison, pass/fail threshold or
+runtime acceptance criterion was introduced.

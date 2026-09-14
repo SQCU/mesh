@@ -306,121 +306,17 @@ Deletion and source-review evidence: [whole-program review](../measurements/poli
 
 ## 25. Asynchronous concurrent publication, current mesh session
 
-Provenance: operator messages supplied in the current conversation, in their
-relative order. These excerpts retain the original spelling. They are not
-assistant proposals or inferred requirements. No external transcript timestamp
-or line number is asserted.
+Operator instruction, September 14, 2026:
 
-The initial scope explicitly requires partial consumption:
+> requires asynchronous publication and consumption without introducing synchronization around them.
 
-> streaming producers and streaming consumers we want, which explicitly take chunks of a tensor which can be partially processed elementwise, and begin that partial processing without waiting for a big operand
+> pallas is to provide an api header style and calling syntax which expose these qualities and nothing else. no features outside of htis narrow and tangible scope are required or *allowed*.
 
-The operator then rejects additional synchronization and insists on emission
-inside numerical computation:
+> strict dependencies of this featureset are *required* and are to be written with *urgency* instead of procrastination and hand-wringing. use established literautre or canonical implementatinos of this sort of code instead of inlining or inventing algorithmic code.
 
-> lets do this the pallas way instead of choosing tricky unjustified algorithms which add more syncing and guarding and waiting requirements.
-
-> it's time to add this inner 'mesh send function use' inside of the linear algebra kernels we use for our collectives so we never give users the impression they have the *option* to make or use mesh implementaitons which inline collective behavior and 'forget' to push sends during a linear algebra kernel.
-
-Backend selection does not remove either obligation:
-
-> three palpable examples of how incremental producer streaming and consumer streaming work, and no implied counterexamples of backends which don't have or 'do'nt need to use' the producer streaming and consumer streaing alike
-
-> demonstrating compute i/o overlap by making both producers and consumers streaming and nonblocking
-
-The transcript explicitly discusses the scope of completion waits and the
-independently concluding alternative:
-
-> we can use completion waits for sections of code which are waiting on the rest of the operand to be streamed in and finished by other kernel launches... or we can have partial tensor kernels that write to a buffer for scattered-sums into different sections of a fully sized output buffer which allow different kernel launches from the 'same function's operand' to conclude independently, incl. publishing their partial work through in-linear-algebra-op send api use, just like the pallas style implementation says to use
-
-The next requirement rules out a stalled distributed demonstration:
-
-> if the two contractions are on different devices you'll need to use a pipelined demonstration which deosn't stall
-
-The caller migration and composed FFN requirement says:
-
-> streaming input, streaming output, and syncless/guardless/waitless operations
-
-The repository also preserves this directly attributed operator quotation in
-[removal ticket R9](removal-tickets-2026-09-13.md#r9-delete-the-host-scan-fire-functions-from-the-events-that-change-presence):
-
-> submissions shouldn't be synchronous, so you have identified yet another exrtemely basic problem, as both producers
-> and consumers must always be waitless, guardless, syncless, and totally determined by local node state
-
-That quotation's September 13 attribution is from the existing record, rather
-than newly reconstructed transcript metadata.
-
-The async push mechanism is explicit:
-
-> if we need an async push op, you'll never believe how we're going to do that: a busywaiting hardware thread loop that repeatedly hits that mfing send call for all page `(table indices, target indices)` corresponding to a queue of indices (not copies or literal rows) submitted by any kernel which says they watn to stream something to a remote mesh node.
-
-The head-of-line obstruction and retained metadata requirement follow:
-
-> "already busy-polls, but it walks
->   a predetermined send order and stops at the first unpublished entry." consider fixing this lowblockinguinely
-
-> consider explicitly preserving both (local_pages_for_send, peer_pages_for_receive) chunks of that tuple mentioned earlier instead of trying to avoid carrying a tiny vector in memory by using control flow as a counter instead.
-
-The repeated-chain performance target and latest corrections are explicit:
-
-> focus on composed chained operations always delivering net amdahl speedup even if we repeat a layerwise or functionwise advantageous calculation 20-40 times per calling site
-
-> this is not going to be related to tilesize, but instead related to syncing, guarding, waiting, or overhead introduced by not actually using the pallas-like semanticsa nd syntax alike
-
-> none of the syntax or semantics of our apis tell us we should have any waits anywhere in our pallas-ified api.
-
-> okay then get rid of ontological 'rules' which are turning 'publications' into blocking waits; find all of the evidence in the transcript arguing for and explaining asynchronous concurrent publication (nonblocking) and whether this ever allows for any publication-sync-wait-guards.
-
-Implementation consequence: publication makes a completed partial value available
-to its configured local and remote readers, with correct memory visibility. It
-does not require ending the enclosing computation, a distinct producer launch,
-waiting for a send completion or acknowledgement, or waiting for a consumer.
-Sending and consuming one available region proceed alongside computation of
-others. Preserve the actual source and target indices, and retain source storage
-until its readers and transport are finished without blocking the publisher.
-
-The earlier completion-wait passage acknowledges a section's missing numerical
-inputs; it does not authorize publication barriers or unrelated serialization.
-The requested partial-kernel approach and subsequent explicit waitless instruction
-govern the implementation. A consumer cannot use an unwritten value, but that
-fact does not turn available partial contributions into a whole-operand wait.
-Likewise, the dedicated push thread's polling is not a wait by the numerical
-publisher. Memory visibility and storage lifetime remain correctness obligations,
-not permission to introduce an application-level publication rendezvous.
-
-The separate operator request for an immediately visible allocation warning above
-80% of substrate memory concerns allocation/setup. It supplies no exception for
-publication guards in the numerical call graph. No excerpt above authorizes a
-publication-sync-wait-guard.
-
-The operator subsequently specifies the method of the current implementation work:
-
-> you do not need to measure any code., this is a problem of pure syntax. the code will be faster as soon as you remove all fake syntactic limitations. the idea that you have to measure code to understand what it is doing is the pathology of 'tradeoff' and happens exactly when you know you should not be making the 'tradeoff' at all
-
-The active objective is clarified as:
-
-> it is time to secure the (9-pointed) bag. this means totally syncless totally streaming producers and consumers which never block on each other and always totally consume all available data which is locally available for the calculations they have been assigned, implicitly, by sharding a linear algebraic object across a collective.
-
-Current work therefore uses source review and compilation, without launching
-numerical workloads or benchmarks. Existing measurements are historical evidence,
-not a prerequisite for removing a source-level violation of this contract.
-
-The operator locates memory-layout fixes in the page table:
-
-> pages are a zero copy interface for using literal memory. if there is an incorrect ring buffer esque implementatino which avoids understanding contiguity or allocation or assignment, fix that in the page table instead of inlining a 'fix' that affects control flow, async production and consumptoin, etc. the central requirement is async producers and async consumers across the mesh, not any other algorithmic or library features. this is a no excuses regime.
-
-> "but tensor allocation insists on one
->   contiguous physical run for the whole tensor" then make a virtual memory indexing system (why do you think it's CALLED a page table???) which allows memory to be remapped, by copy if it must, if it must become contiguous, just like any other array programming library. even pytorch has this.
-
-The operator corrected the interpretation of contiguity explicitly:
-
-> "The existing mapper can already give a tensor one contiguous virtual address range backed by scattered shared pages," no, retard, you need to copy pages into a literal contiguous span and expose views to that contiguous view if an allocator or user says 'this one has to be contiguous'. stop lying and stop ignoring the requirements.
-
-Contiguity and assignment belong to memory realization. An explicit contiguous
-request requires one literal registered-arena span. Shared virtual aliases over
-scattered backing do not satisfy that request. Materialization copies source
-sections into the allocated destination span and exposes views into it. A layout
-limitation does not authorize whole-operand publication barriers.
+The complete collective contract is [asynchronous collectives](async-collectives.md).
+The application-specific sections elsewhere in this file add no requirements to
+that interface.
 
 ## Provenance law (carried from the agentfile / vine-polycompiler stratagem)
 

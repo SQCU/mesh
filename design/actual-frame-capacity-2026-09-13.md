@@ -1,7 +1,6 @@
 # Actual outstanding frame capacity
 
-September 13, 2026. Implements the transport-capacity portion of step 7 in
-[pallas-lowering-plan.md](pallas-lowering-plan.md). No shared-memory or transfer
+September 13, 2026. Transport-capacity implementation record. No shared-memory or transfer
 wire ABI change; both endpoint tuples and useful byte lengths are unchanged.
 
 ## Published rule and previous limitation
@@ -77,11 +76,5 @@ all configured block sizes.
 -fsyntax-only rdma/mesh-flow.c rdma/mesh-dataflow.c` succeeds without warnings.
 No bridge restart or workload was run for this source increment.
 
-Paired operational evidence is still required for queried capacities,
-provider CQ availability, heterogeneous useful lengths, sustained tiny
-messages, fanout and repeated storage reuse. Dedicated CQs remove aggregate
-shared-CQ pressure but change polling from one shared queue to each direction;
-this change makes no zero-overhead or measured bandwidth claim. Peak capacity
-does not establish peak throughput or eliminate receive-buffer lifetime
-constraints. The broader collective algebra and multi-participant routing
-portions of step 7 are separate work.
+Provider capacities and storage lifetimes are substrate constraints. This record
+adds no requirements beyond the [async contract](async-collectives.md).

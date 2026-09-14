@@ -49,7 +49,7 @@ The detailed mechanisms and source citations are in
 
 ## Gold computation and measurement boundary
 
-The existing `examples/streaming-algebra.py` runs:
+The historical `examples/streaming-algebra.py` harness ran:
 
 `FFN → RMSNorm → summed learned embedding → FFN → RMSNorm`.
 
@@ -128,29 +128,3 @@ declared outputs there, and SGEs use the same registered pages. K partials and
 reduction outputs are mathematical values with distinct storage, not transport
 staging. An embedding gather necessarily writes selected elements to its declared
 output. These conclusions come from source, not elapsed-time inference.
-
-## Remaining boundaries
-
-- FP16 contraction panels and their addition tree still round to FP16 between
-  partials. RMSNorm statistics are FP32. A retained FP32 contraction accumulator
-  through the entire K reduction requires a supported backend implementation;
-  this FP32 gold does not settle that requirement.
-- Specialized Xonotic expert/neighborhood operators still have whole-region
-  lowering. Ordinary 2D contractions, pointwise arithmetic and row reductions use
-  the shared tiled library path; universal operator lowering is unfinished.
-- Shorter messages retain conservative maximum-block queue capacity. Recovering
-  additional outstanding messages requires retaining actual per-request frame
-  costs and sizing completion storage accordingly.
-- Many small CPU jobs and MPS command buffers still incur dispatch costs. Fusion
-  is available through the common expression interface, but not every numerical
-  composition is fused. Setup-selected larger efficient regions must preserve
-  independent publication where the algebra permits it.
-- Larger shapes and heterogeneous CPU/ANE/MPS placement need matching local curves.
-  Existing large FP16 curves are documented separately; they do not justify a
-  backend choice for this small FP32 program.
-
-No whole-tensor readiness barrier or alternate compatibility API was added to
-address these boundaries. All measurement clients exited; both bridges remained
-ready with zero attached clients. Each bridge registered 549,650,432 bytes for
-this setup, including the metadata and traces, within the visible allocation
-preflight already installed.

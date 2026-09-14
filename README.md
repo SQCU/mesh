@@ -1,16 +1,11 @@
 # mesh
 
-[Streaming tensor algebra](design/streaming-algebra.md) adds independently
-produced extents, strided views, elementwise operations and MPS contractions
-over canonical registered pages. Its producer → peer sum → transform →
-contraction example measures partial progress across the RDMA link, including
-delayed inputs, repeated attachments and extents spanning transport blocks.
-
-[Compiled indexed communication functions](design/compiled-functions.md) expose
-canonical stream views to numerical callers through reusable native closures.
-[Compiled reductions](design/compiled-reductions.md) add ordered contribution
-coverage and local readiness. The [requirement ledger](design/distributed-requirements.md)
-records the remaining topology, recovery and hardware work.
+The [asynchronous collective interface](design/async-collectives.md) supports
+publication and consumption of available tensor regions. The caller supplies mesh
+and tensor placement. [Pallas-style kernel calls](design/indexed-library.md)
+express numerical work; canonical mesh owns registered storage, presence and
+transport. These requirements and their strict dependencies are the entire
+collective scope.
 
 Provisioning for a fabric of Apple Silicon Macs wired together with Thunderbolt and
 talking RDMA. The invariant: **a node may never become unreachable, and may never
@@ -528,76 +523,20 @@ Runs as root at boot with no login session. `KeepAlive` restarts it forever.
 
 ## Using the mesh
 
-The page API and its one shared submission scheduler live in `rdma/mesh-client.c` and are
-declared in `rdma/mesh.h`. Changing this surface is a design event, not an edit.
+The [asynchronous collective contract](design/async-collectives.md) defines the
+numerical interface. The caller supplies mesh and tensor placement; setup binds
+registered storage and numerical functions. Producers publish finished regions
+while independent production continues. Consumers execute the partial numerical
+work whose operands are available.
 
-```c
-void  *mesh_open(size_t *nslots, size_t *stride, size_t *usable);
-size_t mesh_write(const void *p, size_t nbytes, int node);
-size_t mesh_write_copy(const void *p, size_t stride, size_t bytes, size_t nslots, int node);
-size_t mesh_queue_copy(const void *p, size_t stride, size_t bytes, size_t nslots, int node);
-size_t mesh_pump(void);
-size_t mesh_read(void **p, int *from);
-```
+Use [`Program.kernel_call`, `BlockSpec`, and `ShapeDtypeStruct`](design/indexed-library.md)
+to configure numerical calls. `Program.copy` binds peer transfers during setup.
+Canonical mesh handles presence, transport completion and storage lifetimes;
+numerical callers do not pump transfers or manage page-table state.
 
-`mesh_open` maps this node's application arena and returns the first slot; slots are `stride`
-apart and `usable` bytes of each are yours. `mesh_write` is the zero-copy operation for
-slot-aligned arena pages. `mesh_write_copy` copies and submits as many strided frames as live
-credits permit. `mesh_queue_copy` accepts any number of strided frames into the same scheduler's
-dynamic pending store and continues across as many arena revolutions as they require.
-`mesh_pump` reclaims send completions and feeds that store; its return value is queued plus
-in-flight frames. `mesh_read` returns one arrived slot, recycles the previous one, and pumps
-outgoing work.
-
-What the transport promises, exactly: bytes that arrive are intact and whole pages; bytes
-that do not arrive are gone, and the application, which knows what it asked for, is the layer
-that asks again. Direct writers rotate through the arena. Queued writers do not manage arena
-positions: the shared scheduler marks a page busy at submission and makes it reusable only
-after the bridge returns that page's completion descriptor. The bridge accepts only arena
-slots from a client; anything else is counted as `bad` and dropped.
-
-On top of the pages sit the two streaming verbs, for callers who want bytes moved and nothing
-else:
-
-```c
-size_t mesh_yell(const void *p, size_t n, int node);
-size_t mesh_lissen(void *p, size_t n);
-```
-
-`mesh_yell` streams n bytes from any memory to a node and returns when the receiver has
-confirmed all of it; `mesh_lissen` fills n bytes and returns when they have all landed. The
-caller knows nothing about arenas, pools, pages, or the far side. Loss is repaired between
-these two functions — lissen names the first hole, yell restreams from it — which is the
-application layer doing exactly what the transport promise assigns it. Measured: 20 GB in
-2.84 s, 7.04 GB/s, verified by offset with zero wrong, including the repair of 63,150 slots
-dropped by a receiver underrun.
-
-This is the second loss-repair mechanism this repo has had, so the risk trade is stated
-rather than assumed. The first lived inside the transport, shared state with the page table,
-and ran loops sized by numbers the peer sent; it mended a recoverable 1.3% loss and
-introduced phantom-loss storms, page-table corruption, three bridge segfaults and a kernel
-panic. This one lives in two client functions, holds only private state — a bitmap and two
-counters — never touches a verbs object, and every loop is bounded by the caller's own
-request. Its worst failure is a stuck or lying client process, and both are handled: a client
-holds no device, so killing it is always safe and the bridge reclaims its pages within a
-second; and `mesh_yell` returns n only when the receiver has confirmed every byte, 0 when it
-cannot confirm, so it never reports delivery it did not see.
-
-No tensor extent is enclosed by the resident page count. All client state lives in a
-`mesh_ctx` the caller owns — page ownership is explicit in the arena bitmap — and a
-stream is plain data: `off` is bytes offered, `done` is bytes proven, `hole` is the first
-unproven page offset. `mesh_turn(ctx, streams, k)` is one dependency-ordered pass — harvest acks,
-dispatch arrivals by stream id, emit under credit — that advances every stream the caller
-hands it, any number of yells and lissens concurrently, which is what a node with several
-cables needs; a second context is a second bridge. `mesh_scatter` and `mesh_gather` start k
-streams over k shards of one buffer, which with a map on the far side is map-reduce.
-`mesh_yell` and `mesh_lissen` remain as three-line wrappers turning a single stream to
-completion. While streams are being turned the inbound ring carries stream-formatted pages;
-page-level `mesh_read` and streams do not interleave in one context.
-
-From Python, `rdma/mesh.py` binds the page-level functions. `Mesh.send` submits under currently
-available credits, `Mesh.queue` transfers an arbitrary pending extent, and both use the one C
-scheduler that owns page selection and completion. Reads return numpy arrays of received pages.
+The implementation lives in `python/mesh`, `rdma/mesh-algebra.m`, and
+`rdma/mesh-dataflow.c`. The bridge owns the registered region and verbs resources.
+See [bridge ownership](design/bridge-and-ipc.md).
 
 ### Running it
 
@@ -768,8 +707,7 @@ runtime.
 The deprecated `mesh_coproc.py` demonstration and its copied NumPy/MLX operand
 path have been deleted. Its historical 54,337-row result at 0.12 Gbit/s does not
 validate the replacement. Numerical callers now use configured canonical page
-functions; the connected tensor-parallel demo is in
-`~/metal-microbench/tools/mesh/nfe.sh`.
+functions through [the indexed library](design/indexed-library.md).
 
 The census closes exactly on both nodes, including after an application dies holding pages.
 The bridge marks delivered pages in a bitmap and, on the once-a-second census tick, reclaims
@@ -781,8 +719,7 @@ is derived from the configured region rather than capped at that historical valu
 
 The numerical path uses RDMA SEND/RECV of literal registered pages. TCP/UDP
 payload alternatives and `bin/mesh-loopback.sh` have been deleted. Configuration
-establishes the links before numerical invocation; timing and result acceptance
-belong to the calling context. The current rewrite and outstanding evidence are
-recorded in [the completion requirements](design/completion-requirements.md).
+establishes the links before numerical invocation. The
+[asynchronous contract](design/async-collectives.md) defines the scope.
 
 The importable [streaming numerical library](design/indexed-library.md) composes indexed tensor functions, partial contractions, and peer transfers over canonical mesh pages.

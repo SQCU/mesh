@@ -1,168 +1,28 @@
 # Pages and functions
 
-Plain statements of the algorithm, in the operator's words: mesh, peers, pages,
-page table, rows, stamps, use count, buffers as function returns, functions,
-release, reduce, index page, NFE, metadata. Every other word that has appeared
-in code ("stage", "chunk", "version", "gate", "token", "group", "consumer",
-"scheduler", "header", "record", "claim") named a control-flow object standing
-in for something the page table already holds, and is not part of the algorithm.
+The [asynchronous collective contract](async-collectives.md) is the complete scope.
+The caller supplies the mesh and tensor placement. Mesh realizes their storage,
+indexed dependencies and numerical function bindings before invocation.
 
-On the Thunderbolt substrate, pages travel by SEND/RECV as documented by Apple
-TN3205: a receive lands in whichever posted buffer is next, the hardware holds a
-send until the peer has posted a receive, and completion of a send means the
-NIC has finished reading the source. Nothing below requires more than that.
+Pages back values; they do not define tensor dimensions or numerical call extents.
+Configured views name the actual registered storage. Presence denotes available
+values, and reader ownership retains their storage through actual use. Transport
+completion and numerical availability are different facts.
 
-## Backing memory and logical values
+Functions consume available indexed input regions and publish their output regions
+after the corresponding writes are visible. A publication does not finish or pause
+the enclosing operation. Other producer work and consumers with available inputs
+continue independently. Missing inputs constrain only the work that reads them.
 
-Operator clarification, September 10, 2026: a page is a memory backing and
-indirection unit, not a semantic object for numerical functions. Mapping makes
-literal byte extents available to views; it does not give those extents tensor
-shape, validity or dataflow identity. A metadata struct can occupy any configured
-extent within registered backing, just as operand data can. Headers are not
-mandatory prefixes on every backing page. Numerical functions operate on values,
-indices and strides; memory binding owns physical translation. Dataflow owns
-logical presence and use counts. Transport completes registered memory accesses;
-it neither interprets numerical stamps nor changes them on storage retirement.
+Distinct simultaneously live values have distinct storage. Source storage remains
+valid until numerical readers and the transport device finish accessing it. That
+lifetime does not impose a dependency on independent production.
 
-## What the page table is
+The substrate is Thunderbolt SEND/RECV, as specified by Apple TN3205. Mesh binds
+send and receive endpoints to registered storage and uses the existing completion
+mechanisms. Numerical callers do not implement transport or page-table operations.
 
-A row is memory. Nothing describing a page is stored in the page or beside it;
-anything per page is a bit in a page-indexed bitmap inside the page table
-struct. The table's operations are OR a bit, AND-compare a range against a
-static mask, push and pop the free index. No other operation exists, no
-per-page struct exists, and no state is created after configuration.
-
-Concretely, one region of registered memory per node holds, in this order:
-
-- the free index and the submission index: two fixed rings of page numbers;
-- bit planes over logical rows: PRESENT, CONSTANT, FREED, and one READ plane
-  per reader ordinal. A plane is one bit per row, sixty-four rows per word;
-- `page[row]`: which backing page a logical row currently names;
-- `mask[row]`: which READ planes must be set before the row's value is done;
-- `base[binding % 4096]`: the configured identity and first logical row of each receive binding, atomically addressed together;
-- the pages.
-
-The table gives every actor — bridge, client threads, GPU, peer — enough
-information to know what it may touch. A page in the free index may be written
-by the NIC. A row with PRESENT set and a READ bit clear holds a value some
-reader still needs. A row whose READ bits cover its mask is finished. Nothing
-in the table prevents a write; an actor that acts on stale information is a
-configuration error, found by the numerical comparison, not a runtime
-condition to be handled.
-
-Every transition is an atomic OR, so it is idempotent: a duplicate sets a bit
-that is already set and nothing happens. There is nothing to claim, count,
-lock, retry, sweep, or acknowledge. A function is issued when its inputs' rows
-are PRESENT (or CONSTANT) and unread by it, and its outputs' rows are either
-never produced or read by every reader in their mask; issue clears the outputs'
-bits. Completion ORs PRESENT on the outputs and the reader's bit on the inputs.
-A landing block whose rows are all read is pushed on the free index by whichever
-reader observed that first — decided by one OR whose old value it inspects.
-
-## Page transfers and numerical extents
-
-Transport enumerates registered memory pages. Its configured message length
-and the provider's frame limits do not define a tensor shape, a numerical call
-shape, or a consumer's partial problem. A numerical value is described by its
-own indices and strides. A function's call and output extents belong to dataflow.
-Peers may implement the same algebra with different local numerical extents.
-
-The current SEND binding includes configured tag storage beside its payload
-pages so an anonymous receive can be associated with the dataflow binding.
-This is dataflow metadata, not a numerical header on every memory page.
-Dense producer views may alias payload pages across several such transfers;
-receiving numerical functions gather the pages named by the table. Neither
-requires copying a tensor into a separate transport buffer.
-
-The provider on these machines advertises one SGE per WR. Canonical shared-page
-aliases allow a producer to use dense views without changing the registered
-addresses or inserting transport metadata into its numerical view. Message
-capacity remains a configured transport property. Function boundaries describe
-actual arithmetic dependencies: a completed projection extent is available
-independently of unrelated projections, and a reduction names the corresponding
-local and remote result extents.
-
-Timing models and utilization measurements belong to the calling context.
-They do not authorize additional data dependencies or a shared tensor tiler in
-transport.
-
-## One NFE on two peers
-
-In the steps below, completion of the writes needed by a published region does
-not mean completion of its enclosing tensor operation. The operator's
-[asynchronous publication contract](SPECIFICATION.md#25-asynchronous-concurrent-publication-current-mesh-session)
-requires publication while the rest of that operation can continue. A publisher
-does not wait for delivery, acknowledgement or consumption. Readers of available
-partials proceed independently; only work requiring absent values remains
-unissued. A publication is not a required kernel or command-buffer boundary.
-
-1. A function runs on the GPU. It writes its output straight into pages. When
-   it completes, its output rows get PRESENT. Nothing else is said.
-2. Rows the peer needs go over the mesh as blocks. On the peer they land in
-   free pages; the peer's rows for that output get `page[]` and PRESENT.
-3. A reduce is a function. Its inputs are my partial rows and the peer's
-   landed partial rows. When both are PRESENT and unread by it, it runs: it
-   adds in high precision, normalizes, and writes the result into its output
-   rows, which are then PRESENT. Its output rows go to the peer.
-4. The next function reads my reduce output and the peer's. When all its
-   input rows are PRESENT, it runs, reading the pages where they are. There
-   is no copy.
-5. The GPU is given a function only after its inputs are present, so it never
-   waits.
-6. When every reader in a row's mask has ORed its bit, the row is done. An
-   arena row is rewritten by its producer's next issue. A landing block goes
-   back to the free index, and the bridge posts it as the next receive.
-7. Two NFEs can be in flight because their rows are different rows.
-8. A link or device error is written to the port record or the function's
-   metadata record. No function reads it. The calling context decides whether
-   to rerun the whole NFE.
-
-## The same NFE on infinitely many Mac Minis
-
-Each Mini holds its share of the weights, one page table, and links to at most
-three neighbours. A function's input rows all PRESENT means it runs. Output
-rows a neighbour needs go one hop as blocks and land in that neighbour's rows.
-Partials are combined as they pass, so the load on any link is bounded no
-matter how many Minis lie beyond it. Latency is hops times hop time plus the
-service time on the longest dependency chain; utilization is the roofline
-fraction reached while inputs are present. Neither number changes with the
-number of Minis. A presentation that changes them — a stage, a chunk, a gate, a
-group, a copy into a hidden buffer, a wait on anything but bits — is not this
-algorithm.
-
-## Waiting for messages about data
-
-Suppose a Mini waits for a message that says the data is coming, or is done,
-or may be used — a token, a gate, a ready flag, a scheduler's decision, a
-completion callback standing in for the pages — and acts on the message.
-
-1. The message is a second thing on the link; every dependency now costs a hop
-   for the pages and a hop for the message, and on a deep chain the extra wait
-   is unbounded.
-2. The message can be true and the data absent; making that safe needs
-   acknowledgements, retries, and ordering — a protocol on top of delivery.
-3. The message can be false and the data present; the Mini sits idle with
-   everything it needs.
-4. The wait binds this Mini to another's control flow; there is always a
-   slowest scheduler somewhere.
-5. Work handed to the GPU while it waits for a message is killed by the
-   watchdog, and every buffer behind it dies with it (measured 2026-09-08).
-6. Messages need their own storage and their own freeing, unbounded on an
-   unbounded mesh; bits are bounded by the rows, which were needed anyway.
-7. A speculative message lets a function run before its data and write a wrong
-   output with a good bit.
-8. Fan-in multiplies all of the above; the bits give one check for all inputs.
-
-A Mini acts on data, and only on data, the moment it is present. The bit is the
-only signal.
-
-## Where this comes from
-
-The firing principle is tagged-token dataflow; operand slots and presence bits
-have hardware prior art in Papadopoulos and Culler's Monsoon (ISCA 1990), where
-presence bits are a small structure beside the data words, not a header on
-them. Reduce-scatter followed by all-gather is Rabenseifner (ICCS 2004) and
-Patarasuk–Yuan (JPDC 2009). Numerical acceptance at the endpoints is Saltzer,
-Reed and Clark (TOCS 1984). None of these certifies this implementation's
-latency; that is what `transport-one-gib-2026-09-10.md` and the numerical
-comparison in `metal-microbench` are for.
+Papadopoulos and Culler, *Monsoon: an Explicit Token-Store Architecture* (1990),
+supplies operand-associated presence prior art. The JAX authors' Pallas collective
+matmul supplies indexed forwarding and distinct live receive buffers. Links are in
+the [contract](async-collectives.md#mechanism-sources).

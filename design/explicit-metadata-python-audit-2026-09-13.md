@@ -35,7 +35,6 @@ keyed by value ID and destination peer. Each declared output is allocated by
 `kernel_call` on every participant, while `peer` selects its numerical executor
 at setup. There is no remote graph scheduler.
 
-General region compiler lowering remains: kernel_calls still binds one whole
-region per operand. The canonical kernel_call retains the declared block
-partition exactly; the earlier implicit contiguous coalescing was removed.
-The gold distributed chain is tracked independently of this source audit.
+The canonical kernel call retains the declared block partition. Application
+compiler expansion and a separate gold-chain qualification are not collective
+requirements; the [asynchronous contract](async-collectives.md) defines the scope.

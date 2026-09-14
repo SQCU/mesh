@@ -4,7 +4,8 @@ The retained compiler is `tensor.py` plus `tensor_metal.py`. It lowers retained
 graph ownership into canonical `Program.copy` edges and owner-configured
 `Program.kernel_call` operations. The old tensor runtime and remote graph
 protocol were deleted. [Caller migration](caller-migration.md) records the
-current boundary and outstanding general region lowering.
+current boundary. Collective scope is limited to the
+[asynchronous contract](async-collectives.md).
 
 ## Historical MLX paging implementation
 

@@ -1,4 +1,8 @@
-# Transport guarantees belong at their supplying layer
+# Historical transport ownership and checksum removal
+
+This records the September 2026 implementation at the time of the measurements.
+The stream protocols and caller ABI described below have since been removed.
+The current specification is the [asynchronous collective contract](async-collectives.md).
 
 ## Indexed retention under queue pressure, September 8, 2026
 
@@ -110,19 +114,6 @@ marker is not accepted as a new scoped frame; no legacy checksum implementation
 is retained. Legacy unscoped framing is unchanged. The internal C frame remains
 40 bytes because of alignment; the deletion removes payload work, not eight wire
 bytes.
-
-## Next broad simplification
-
-One verbs work request per 4-KiB page is a mesh implementation choice. The API
-supports multi-frame messages. Realization can choose matching receive/send
-extents per edge and tile shape while retaining canonical ownership until
-completion. This is the next submission/layout intervention; it needs neither
-another allocator nor a software model of hardware CRC.
-
-Deleting repeated payload scans removes an O(bytes) CPU cost per numerical
-transfer. It does not change mesh diameter or establish an infinite-cluster
-failure rate. Degree-three routing, finite outstanding work and measured
-capability still bound useful recruitment.
 
 ## Evaluation
 

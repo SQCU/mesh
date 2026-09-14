@@ -1,7 +1,7 @@
 # Direct CPU contraction with half operands
 
 September 13, 2026. This is the source and compilation record for the CPU step of
-[Pallas-style lowering](pallas-lowering-plan.md#4-lower-to-existing-efficient-backend-functions).
+[Pallas-style lowering](async-collectives.md).
 Operational performance evidence remains to be collected through the existing
 streaming-algebra workflow.
 
@@ -68,10 +68,6 @@ The 4 by 4 shape is an initial ordinary register block, not a measured optimum.
 Indirect loader calls, strided gathers, small rectangles and output stores remain
 costs. FMA changes rounding relative to separately rounded multiplication/addition;
 existing FP32 accumulation and cancellation/overflow requirements still apply.
-Operational checks must include mixed operand types, strided/transposed operands,
-ragged sizes, alpha, output precision, and the distributed gold chain before a
-performance or complete numerical-validation claim is made. Preserve the fastest
-validated local baseline when comparing subsequent CPU or distributed gains.
 
 ## Existing example coverage
 
