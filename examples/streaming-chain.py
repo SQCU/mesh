@@ -50,16 +50,19 @@ def main():
         library = C.CDLL(args.numerics)
         for kernel, symbol in ((kernels.add, 'gemma_mesh_add'), (kernels.dot, 'gemma_mesh_mps_dot')):
             native = getattr(library, symbol)
-            native.argtypes = [C.c_void_p, C.POINTER(View), C.c_int32]
+            native.argtypes = [C.c_void_p, C.POINTER(View), C.c_int32] + ([C.c_int32] if kernel is kernels.dot else [])
             native.restype = C.c_int32
 
             # design/algorithm-sources.md#programkernel_call
-            def bind(program, inputs, outputs, native=native):
+            def bind(program, inputs, outputs, native=native, kernel=kernel):
                 refs = (*inputs, *outputs)
-                if len(inputs) != 2 or len(outputs) != 1 or any(ref.dtype != inputs[0].dtype for ref in refs):
-                    raise TypeError('The supplied numerical function requires two inputs and one output of one dtype')
+                if len(inputs) != 2 or len(outputs) != 1 or inputs[0].dtype != inputs[1].dtype:
+                    raise TypeError('The supplied numerical function requires two inputs of one dtype and one output')
+                if kernel is kernels.add and outputs[0].dtype != inputs[0].dtype:
+                    raise TypeError('The supplied addition requires matching input and output dtypes')
                 scalar = (np.dtype('float16'), np.dtype('float32')).index(inputs[0].dtype)
-                check(native(program.handle, (View * 3)(*(ref.view for ref in refs)), scalar))
+                output_scalar = [(np.dtype('float16'), np.dtype('float32')).index(outputs[0].dtype)] if kernel is kernels.dot else []
+                check(native(program.handle, (View * 3)(*(ref.view for ref in refs)), scalar, *output_scalar))
 
             functions[kernel] = bind
         if args.gate_weight:
