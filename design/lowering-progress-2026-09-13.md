@@ -944,3 +944,36 @@ The general transpose path retains scalar scatter's worst-case metadata and
 partial capacity. Nonvector scatter's row-indexing correction is the next caller
 migration. Storage/launch optimization, remaining operator coverage and the full
 nine-step performance acceptance remain open.
+
+## Row-scatter caller correction and migration
+
+`a80b48f` removes the custom flat-address scatter scan. Xonotic row selection now
+uses shared indexed_add for vectors, matrices and canonical higher-rank bases.
+Multidimensional index tensors select leading rows; intermediate trailing row
+axes expand destination metadata, while the final feature axis remains a vector.
+Updates broadcast to the selected logical shape through direct compatible Refs
+or logical indexed loads over their actual block table. No expanded numerical
+update tensor is created. Noninteger indices and incompatible broadcasting fail
+at setup; direct binding no longer assumes any single block can be reshaped.
+
+The existing indexed-sum runner exercises both a matrix base and a rank-three
+base with multidimensional indices. Each composes pointwise update production,
+row scatter and a pointwise consumer. Nonzero bases, duplicate/negative rows,
+feature and higher-rank broadcasting pass exact endpoint comparisons. Rows 0,
+1 and 3 finish while the last update block for row 2 remains unpublished, in
+both generations. Earlier gather/take gradient cases use the same runner and
+continue to pass alongside the other streaming-algebra cases.
+
+Final installed library/caller revision `a80b48f` passes CPU and Metal float32
+with 3660 completed submissions each. Paired Metal float16 completes 2975
+rank-zero submissions. The scatter side cases are float32 on rank zero;
+only gold/fanout cross RDMA. The peer exits zero after SIGTERM.
+`row-scatter-provenance.json` records revisions, raw compressed logs/traces,
+configuration and timing count/mean/sample variance. This is no matched speedup
+claim, and the old nonvector scan was not a correct baseline for these cases.
+
+Base layouts still must admit the existing metadata-only matrix view. Arbitrary
+reshape aliases crossing backing partitions remain a logical-layout gap; they
+are not copied into alternative dense storage. Broader operator coverage,
+shared metadata/partial storage and launch optimization, and full nine-step
+performance acceptance remain unfinished.

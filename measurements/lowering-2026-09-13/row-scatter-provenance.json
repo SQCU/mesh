@@ -1,0 +1,1204 @@
+{
+  "runs": [
+    {
+      "prefix": "row-scatter-cpu",
+      "library_revision": "a80b48f",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "a80b48f",
+      "backend": "cpu",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "row-scatter-cpu.jsonl.gz",
+        "row-scatter-cpu-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.375792,
+        "invocations_per_second": 685.590174304446,
+        "first_section_ms": 3.602,
+        "completion_ms": {
+          "count": 3,
+          "mean": 4.160777666666667,
+          "sample_variance": 0.03443518856033326
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 3660,
+          "completed": 3660,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 3660
+        }
+      },
+      "row_scatter": [
+        {
+          "event": "xonotic_indexed_sum_early",
+          "case": "matrix_scatter",
+          "generation": 0,
+          "shape_only_primal": false,
+          "withheld_contribution_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                24.0,
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                12.0,
+                15.0,
+                18.0,
+                21.0
+              ]
+            ],
+            [
+              [
+                84.0,
+                87.0,
+                90.0,
+                93.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_complete",
+          "case": "matrix_scatter",
+          "generation": 0,
+          "output": [
+            [
+              [
+                24.0,
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                12.0,
+                15.0,
+                18.0,
+                21.0
+              ]
+            ],
+            [
+              [
+                96.0,
+                99.0,
+                102.0,
+                105.0
+              ]
+            ],
+            [
+              [
+                84.0,
+                87.0,
+                90.0,
+                93.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_early",
+          "case": "matrix_scatter",
+          "generation": 1,
+          "shape_only_primal": false,
+          "withheld_contribution_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                60.0,
+                63.0,
+                66.0,
+                69.0
+              ]
+            ],
+            [
+              [
+                12.0,
+                15.0,
+                18.0,
+                21.0
+              ]
+            ],
+            [
+              [
+                72.0,
+                75.0,
+                78.0,
+                81.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_complete",
+          "case": "matrix_scatter",
+          "generation": 1,
+          "output": [
+            [
+              [
+                60.0,
+                63.0,
+                66.0,
+                69.0
+              ]
+            ],
+            [
+              [
+                12.0,
+                15.0,
+                18.0,
+                21.0
+              ]
+            ],
+            [
+              [
+                108.0,
+                111.0,
+                114.0,
+                117.0
+              ]
+            ],
+            [
+              [
+                72.0,
+                75.0,
+                78.0,
+                81.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_early",
+          "case": "rank_scatter",
+          "generation": 0,
+          "shape_only_primal": false,
+          "withheld_contribution_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                24.0,
+                27.0,
+                30.0
+              ],
+              [
+                33.0,
+                36.0,
+                39.0
+              ]
+            ],
+            [
+              [
+                18.0,
+                21.0,
+                24.0
+              ],
+              [
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                102.0,
+                105.0,
+                108.0
+              ],
+              [
+                111.0,
+                114.0,
+                117.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_complete",
+          "case": "rank_scatter",
+          "generation": 0,
+          "output": [
+            [
+              [
+                24.0,
+                27.0,
+                30.0
+              ],
+              [
+                33.0,
+                36.0,
+                39.0
+              ]
+            ],
+            [
+              [
+                18.0,
+                21.0,
+                24.0
+              ],
+              [
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                108.0,
+                111.0,
+                114.0
+              ],
+              [
+                117.0,
+                120.0,
+                123.0
+              ]
+            ],
+            [
+              [
+                102.0,
+                105.0,
+                108.0
+              ],
+              [
+                111.0,
+                114.0,
+                117.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_early",
+          "case": "rank_scatter",
+          "generation": 1,
+          "shape_only_primal": false,
+          "withheld_contribution_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                60.0,
+                63.0,
+                66.0
+              ],
+              [
+                69.0,
+                72.0,
+                75.0
+              ]
+            ],
+            [
+              [
+                18.0,
+                21.0,
+                24.0
+              ],
+              [
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                90.0,
+                93.0,
+                96.0
+              ],
+              [
+                99.0,
+                102.0,
+                105.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_complete",
+          "case": "rank_scatter",
+          "generation": 1,
+          "output": [
+            [
+              [
+                60.0,
+                63.0,
+                66.0
+              ],
+              [
+                69.0,
+                72.0,
+                75.0
+              ]
+            ],
+            [
+              [
+                18.0,
+                21.0,
+                24.0
+              ],
+              [
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                120.0,
+                123.0,
+                126.0
+              ],
+              [
+                129.0,
+                132.0,
+                135.0
+              ]
+            ],
+            [
+              [
+                90.0,
+                93.0,
+                96.0
+              ],
+              [
+                99.0,
+                102.0,
+                105.0
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "prefix": "row-scatter-metal",
+      "library_revision": "a80b48f",
+      "peer_library_revision": null,
+      "example_and_xonotic_revision": "a80b48f",
+      "backend": "metal",
+      "dtype": "float32",
+      "paired": false,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "row-scatter-metal.jsonl.gz",
+        "row-scatter-metal-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 18.434125,
+        "invocations_per_second": 162.74165440453504,
+        "first_section_ms": 15.650542,
+        "completion_ms": {
+          "count": 3,
+          "mean": 16.844264,
+          "sample_variance": 1.892868194726999
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 3660,
+          "completed": 3660,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.013150068,
+          "cpu_submitted": 0
+        }
+      },
+      "row_scatter": [
+        {
+          "event": "xonotic_indexed_sum_early",
+          "case": "matrix_scatter",
+          "generation": 0,
+          "shape_only_primal": false,
+          "withheld_contribution_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                24.0,
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                12.0,
+                15.0,
+                18.0,
+                21.0
+              ]
+            ],
+            [
+              [
+                84.0,
+                87.0,
+                90.0,
+                93.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_complete",
+          "case": "matrix_scatter",
+          "generation": 0,
+          "output": [
+            [
+              [
+                24.0,
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                12.0,
+                15.0,
+                18.0,
+                21.0
+              ]
+            ],
+            [
+              [
+                96.0,
+                99.0,
+                102.0,
+                105.0
+              ]
+            ],
+            [
+              [
+                84.0,
+                87.0,
+                90.0,
+                93.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_early",
+          "case": "matrix_scatter",
+          "generation": 1,
+          "shape_only_primal": false,
+          "withheld_contribution_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                60.0,
+                63.0,
+                66.0,
+                69.0
+              ]
+            ],
+            [
+              [
+                12.0,
+                15.0,
+                18.0,
+                21.0
+              ]
+            ],
+            [
+              [
+                72.0,
+                75.0,
+                78.0,
+                81.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_complete",
+          "case": "matrix_scatter",
+          "generation": 1,
+          "output": [
+            [
+              [
+                60.0,
+                63.0,
+                66.0,
+                69.0
+              ]
+            ],
+            [
+              [
+                12.0,
+                15.0,
+                18.0,
+                21.0
+              ]
+            ],
+            [
+              [
+                108.0,
+                111.0,
+                114.0,
+                117.0
+              ]
+            ],
+            [
+              [
+                72.0,
+                75.0,
+                78.0,
+                81.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_early",
+          "case": "rank_scatter",
+          "generation": 0,
+          "shape_only_primal": false,
+          "withheld_contribution_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                24.0,
+                27.0,
+                30.0
+              ],
+              [
+                33.0,
+                36.0,
+                39.0
+              ]
+            ],
+            [
+              [
+                18.0,
+                21.0,
+                24.0
+              ],
+              [
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                102.0,
+                105.0,
+                108.0
+              ],
+              [
+                111.0,
+                114.0,
+                117.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_complete",
+          "case": "rank_scatter",
+          "generation": 0,
+          "output": [
+            [
+              [
+                24.0,
+                27.0,
+                30.0
+              ],
+              [
+                33.0,
+                36.0,
+                39.0
+              ]
+            ],
+            [
+              [
+                18.0,
+                21.0,
+                24.0
+              ],
+              [
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                108.0,
+                111.0,
+                114.0
+              ],
+              [
+                117.0,
+                120.0,
+                123.0
+              ]
+            ],
+            [
+              [
+                102.0,
+                105.0,
+                108.0
+              ],
+              [
+                111.0,
+                114.0,
+                117.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_early",
+          "case": "rank_scatter",
+          "generation": 1,
+          "shape_only_primal": false,
+          "withheld_contribution_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                60.0,
+                63.0,
+                66.0
+              ],
+              [
+                69.0,
+                72.0,
+                75.0
+              ]
+            ],
+            [
+              [
+                18.0,
+                21.0,
+                24.0
+              ],
+              [
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                90.0,
+                93.0,
+                96.0
+              ],
+              [
+                99.0,
+                102.0,
+                105.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_complete",
+          "case": "rank_scatter",
+          "generation": 1,
+          "output": [
+            [
+              [
+                60.0,
+                63.0,
+                66.0
+              ],
+              [
+                69.0,
+                72.0,
+                75.0
+              ]
+            ],
+            [
+              [
+                18.0,
+                21.0,
+                24.0
+              ],
+              [
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                120.0,
+                123.0,
+                126.0
+              ],
+              [
+                129.0,
+                132.0,
+                135.0
+              ]
+            ],
+            [
+              [
+                90.0,
+                93.0,
+                96.0
+              ],
+              [
+                99.0,
+                102.0,
+                105.0
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "prefix": "row-scatter-paired-metal",
+      "library_revision": "a80b48f",
+      "peer_library_revision": "a80b48f",
+      "example_and_xonotic_revision": "a80b48f",
+      "backend": "metal",
+      "dtype": "float16",
+      "paired": true,
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "artifacts": [
+        "row-scatter-paired-metal.jsonl.gz",
+        "row-scatter-paired-metal-trace.json.gz",
+        "row-scatter-paired-metal-peer.jsonl.gz",
+        "row-scatter-paired-metal-peer-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 14.562417,
+        "invocations_per_second": 206.0097578581907,
+        "first_section_ms": 9.782959,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.399236333333334,
+          "sample_variance": 0.026563689546333327
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 2975,
+          "completed": 2975,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.010269975,
+          "cpu_submitted": 0
+        }
+      },
+      "row_scatter": [
+        {
+          "event": "xonotic_indexed_sum_early",
+          "case": "matrix_scatter",
+          "generation": 0,
+          "shape_only_primal": false,
+          "withheld_contribution_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                24.0,
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                12.0,
+                15.0,
+                18.0,
+                21.0
+              ]
+            ],
+            [
+              [
+                84.0,
+                87.0,
+                90.0,
+                93.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_complete",
+          "case": "matrix_scatter",
+          "generation": 0,
+          "output": [
+            [
+              [
+                24.0,
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                12.0,
+                15.0,
+                18.0,
+                21.0
+              ]
+            ],
+            [
+              [
+                96.0,
+                99.0,
+                102.0,
+                105.0
+              ]
+            ],
+            [
+              [
+                84.0,
+                87.0,
+                90.0,
+                93.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_early",
+          "case": "matrix_scatter",
+          "generation": 1,
+          "shape_only_primal": false,
+          "withheld_contribution_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                60.0,
+                63.0,
+                66.0,
+                69.0
+              ]
+            ],
+            [
+              [
+                12.0,
+                15.0,
+                18.0,
+                21.0
+              ]
+            ],
+            [
+              [
+                72.0,
+                75.0,
+                78.0,
+                81.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_complete",
+          "case": "matrix_scatter",
+          "generation": 1,
+          "output": [
+            [
+              [
+                60.0,
+                63.0,
+                66.0,
+                69.0
+              ]
+            ],
+            [
+              [
+                12.0,
+                15.0,
+                18.0,
+                21.0
+              ]
+            ],
+            [
+              [
+                108.0,
+                111.0,
+                114.0,
+                117.0
+              ]
+            ],
+            [
+              [
+                72.0,
+                75.0,
+                78.0,
+                81.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_early",
+          "case": "rank_scatter",
+          "generation": 0,
+          "shape_only_primal": false,
+          "withheld_contribution_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                24.0,
+                27.0,
+                30.0
+              ],
+              [
+                33.0,
+                36.0,
+                39.0
+              ]
+            ],
+            [
+              [
+                18.0,
+                21.0,
+                24.0
+              ],
+              [
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                102.0,
+                105.0,
+                108.0
+              ],
+              [
+                111.0,
+                114.0,
+                117.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_complete",
+          "case": "rank_scatter",
+          "generation": 0,
+          "output": [
+            [
+              [
+                24.0,
+                27.0,
+                30.0
+              ],
+              [
+                33.0,
+                36.0,
+                39.0
+              ]
+            ],
+            [
+              [
+                18.0,
+                21.0,
+                24.0
+              ],
+              [
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                108.0,
+                111.0,
+                114.0
+              ],
+              [
+                117.0,
+                120.0,
+                123.0
+              ]
+            ],
+            [
+              [
+                102.0,
+                105.0,
+                108.0
+              ],
+              [
+                111.0,
+                114.0,
+                117.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_early",
+          "case": "rank_scatter",
+          "generation": 1,
+          "shape_only_primal": false,
+          "withheld_contribution_blocks": [
+            2
+          ],
+          "output": [
+            [
+              [
+                60.0,
+                63.0,
+                66.0
+              ],
+              [
+                69.0,
+                72.0,
+                75.0
+              ]
+            ],
+            [
+              [
+                18.0,
+                21.0,
+                24.0
+              ],
+              [
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                90.0,
+                93.0,
+                96.0
+              ],
+              [
+                99.0,
+                102.0,
+                105.0
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_indexed_sum_complete",
+          "case": "rank_scatter",
+          "generation": 1,
+          "output": [
+            [
+              [
+                60.0,
+                63.0,
+                66.0
+              ],
+              [
+                69.0,
+                72.0,
+                75.0
+              ]
+            ],
+            [
+              [
+                18.0,
+                21.0,
+                24.0
+              ],
+              [
+                27.0,
+                30.0,
+                33.0
+              ]
+            ],
+            [
+              [
+                120.0,
+                123.0,
+                126.0
+              ],
+              [
+                129.0,
+                132.0,
+                135.0
+              ]
+            ],
+            [
+              [
+                90.0,
+                93.0,
+                96.0
+              ],
+              [
+                99.0,
+                102.0,
+                105.0
+              ]
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "scope": "Matrix and rank-three row scatter with multidimensional integer index tensors, duplicate/negative rows, nonzero bases, broadcast updates, streamed pointwise producers and consumers, withheld last contribution block and repeated reuse. Side cases execute on rank zero; paired gold/fanout traverse RDMA. Peer exited zero after SIGTERM. No matched speedup or arbitrary base-layout coverage claim."
+}
