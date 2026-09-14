@@ -131,11 +131,12 @@ def main():
         norm_gamma = np.ones((1, 6), dtype=dtype)
         norm_output = rmsnorm(program, norm_input, weight(norm_gamma), tile_rows=1) if args.rank == 0 else program.tensor((3, 6), (1, 2), dtype=dtype)
         norm_results = {coordinate: program.export(ref) for coordinate, ref in norm_output.blocks.items()}
-        integer_values = np.array([[2**53, 1, -(2**53)], [2**53, 3, -(2**53)],
-            [2**63-1, 1, 0], [-(2**63), -1, 0]], dtype=np.int64)
-        integer_input = program.tensor(integer_values.shape, (1, 1), dtype=np.int64)
+        integer_values = np.array([[2**53+65535, 1, -(2**53), 0, 0, 0],
+            [2**53+2**32-1, 3, -(2**53), 0, 0, 0],
+            [2**63-1, 1, 0, 0, 0, 0], [-(2**63), 0, 0, -1, 0, 0]], dtype=np.int64)
+        integer_input = program.tensor(integer_values.shape, (1, 3), dtype=np.int64)
         for (i, j), ref in integer_input.blocks.items():
-            program.constant(ref, integer_values[i:i+1, j:j+1])
+            program.constant(ref, integer_values[i:i+1, 3*j:3*j+3])
         integer_arg, = kernels.arguments(1)
         integer_sum = program.kernel_call(kernels.expression(integer_arg.sum()), grid=(4,),
             in_specs=(BlockSpec(None),), out_specs=BlockSpec((1, 1), lambda i: (i, 0)),
@@ -532,7 +533,7 @@ def main():
                     raise ArithmeticError('Streamed normalization numerical mismatch')
                 result.consume()
         wait_for(integer_results)
-        for result, expected in zip(integer_results, (1, 3, -(2**63), 2**63-1)):
+        for result, expected in zip(integer_results, (65536, 2**32+2, -(2**63), 2**63-1)):
             if result.array.item() != expected:
                 raise ArithmeticError('Integer reduction lost exact cancellation beyond floating-point precision')
         print(json.dumps(dict(event='integer_reduction', output=[result.array.tolist() for result in integer_results])), flush=True)
