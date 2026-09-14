@@ -215,15 +215,17 @@ def main():
         scatter_indices = program.tensor((updates_count, 1), (update_tile, 1), dtype=np.int64)
         scatter_updates = program.tensor((updates_count, 4), (update_tile, 4), dtype=dtype)
         scatter_factors = program.tensor((updates_count, 1), (update_tile, 1), dtype=np.float32)
+        scatter_lookup = program.tensor((updates_count, 1), (update_tile, 1), dtype=np.int64)
         scatter_valid = np.ones((updates_count, 1), dtype=bool)
         scatter_valid[-1 if updates_count-last_start > 1 else -2, 0] = False
-        base_arg, destination_arg, update_arg, mask_arg, factor_arg = kernels.arguments(5)
+        base_arg, destination_arg, update_arg, mask_arg, factor_arg, lookup_arg = kernels.arguments(6)
+        update_row, update_column = kernels.indices()
         scatter = program.kernel_call(kernels.expression(kernels.indexed_add(
-            base_arg, destination_arg, update_arg * factor_arg + 1, mask=mask_arg)), grid=(destinations_count,),
-            in_specs=(BlockSpec(None),) * 5, out_specs=BlockSpec((1, 4), lambda i: (i, 0)),
+            base_arg, destination_arg, update_arg.at(lookup_arg.at(update_row, 0), update_column) * factor_arg + 1, mask=mask_arg)), grid=(destinations_count,),
+            in_specs=(BlockSpec(None),) * 6, out_specs=BlockSpec((1, 4), lambda i: (i, 0)),
             out_shape=ShapeDtypeStruct((destinations_count, 4), dtype), peer=0)(
                 weight(np.zeros((destinations_count, 4), dtype=dtype)), scatter_indices, scatter_updates,
-                weight(scatter_valid), scatter_factors)
+                weight(scatter_valid), scatter_factors, scatter_lookup)
         consumer_arg, = kernels.arguments(1)
         scatter_consumed = program.kernel_call(kernels.expression(consumer_arg * 2), grid=(destinations_count,),
             in_specs=(BlockSpec((1, 4), lambda i: (i, 0)),),
@@ -810,16 +812,25 @@ def main():
             if empty:
                 routing.fill(2**32 + 2)
             update_values = (1 + generation + np.arange(updates_count) % 31).astype(dtype)[:, None]
+            lookup_values = np.arange(updates_count, dtype=np.int64)
+            for start in range(0, updates_count, update_tile):
+                length = min(update_tile, updates_count-start)
+                lookup_values[start:start+length] = start + (length-1-np.arange(length)+generation) % length
+            delayed = routing[:, 0] == 2
+            lookup_values[delayed] = last_start + np.arange(np.count_nonzero(delayed)) % (updates_count-last_start)
+            lookup_values = lookup_values[:, None]
             expected = np.zeros((destinations_count, 1), dtype=np.float32)
             selected = scatter_valid[:, 0] & (routing[:, 0] < destinations_count)
-            np.add.at(expected, routing[selected, 0], update_values[selected].astype(np.float32)*(2+generation)+1)
+            np.add.at(expected, routing[selected, 0], update_values[lookup_values[selected, 0]].astype(np.float32)*(2+generation)+1)
             expected = (expected.astype(dtype)*2).astype(dtype)
             scatter_start = time.monotonic_ns()
             wait_for((*scatter_indices.blocks.values(), *scatter_updates.blocks.values(),
-                      *scatter_factors.blocks.values()), 'writable')
+                      *scatter_factors.blocks.values(), *scatter_lookup.blocks.values()), 'writable')
             for i in range(last_chunk+1):
                 with program.write(scatter_indices[i, 0]) as destination:
                     destination[...] = routing[update_tile*i:update_tile*(i+1)]
+                with program.write(scatter_lookup[i, 0]) as destination:
+                    destination[...] = lookup_values[update_tile*i:update_tile*(i+1)]
             for i in range(0 if empty else last_chunk):
                 with program.write(scatter_factors[i, 0]) as destination:
                     destination[...] = 2 + generation
@@ -843,7 +854,7 @@ def main():
             wait_for((scatter_results[2],))
             if not np.array_equal(scatter_results[2].array, np.broadcast_to(expected[2], (1, 4))):
                 raise ArithmeticError('Duplicate or masked scatter contribution differs')
-            print(json.dumps(dict(event='indexed_add', generation=generation, rows=updates_count, tile=update_tile, destinations=destinations_count, first_consumer_ns=first_scatter_ns,
+            print(json.dumps(dict(event='indexed_add', generation=generation, lookup_indices=lookup_values[:, 0].tolist(), rows=updates_count, tile=update_tile, destinations=destinations_count, first_consumer_ns=first_scatter_ns,
                 complete_ns=time.monotonic_ns()-scatter_start,
                 empty=empty, delayed_destination=None if empty else 2,
                 result=[result.array.tolist() for result in scatter_results])), flush=True)
