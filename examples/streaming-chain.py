@@ -26,6 +26,7 @@ def main():
     parser.add_argument('--numerics')
     parser.add_argument('--model')
     parser.add_argument('--gate-weight')
+    parser.add_argument('--residual', action='store_true')
     parser.add_argument('--normalize', nargs='?', const='', metavar='MODEL_TENSOR')
     parser.add_argument('--backend', choices=('cpu', 'metal'), default='cpu')
     parser.add_argument('--tile-rows', type=int, default=128)
@@ -38,6 +39,8 @@ def main():
         parser.error('--normalize and --model require the engine numerical library')
     if args.normalize and not args.model:
         parser.error('A normalization tensor name requires --model')
+    if args.residual and args.normalize is None:
+        parser.error('--residual requires --normalize')
     values = np.load(args.input)
     weight_names = (args.up_weight, args.down_weight) + ((args.gate_weight,) if args.gate_weight else ())
     weights = None if args.model else tuple(np.load(name, mmap_mode='r') for name in weight_names)
@@ -78,15 +81,17 @@ def main():
                 check(gelu_native(program.handle, (View * 3)(*(ref.view for ref in refs))))
 
         if args.normalize is not None:
-            normalize_native = library.gemma_mesh_rmsnorm
-            normalize_native.argtypes = [C.c_void_p, C.POINTER(View), C.c_int32]
+            normalize_native = library.gemma_mesh_rmsnorm_add if args.residual else library.gemma_mesh_rmsnorm
+            normalize_native.argtypes = [C.c_void_p, C.POINTER(View)] + ([] if args.residual else [C.c_int32])
             normalize_native.restype = C.c_int32
 
             # design/algorithm-sources.md#programkernel_call
             def normalize(program, inputs, outputs):
-                scalar = (np.dtype('float16'), np.dtype('float32')).index(inputs[0].dtype)
-                check(normalize_native(program.handle,
-                    (View * 3)(*(ref.view for ref in (*inputs, *outputs))), scalar))
+                refs = (*inputs, *outputs)
+                if args.residual and any(ref.dtype != np.dtype('float16') for ref in refs):
+                    raise TypeError('The engine fused normalization/residual requires FP16 operands')
+                scalar = [] if args.residual else [(np.dtype('float16'), np.dtype('float32')).index(inputs[0].dtype)]
+                check(normalize_native(program.handle, (View * len(refs))(*(ref.view for ref in refs)), *scalar))
 
     with ExitStack() as resources, Program(backend=args.backend, region=args.region, functions=functions) as program:
         if args.model:
@@ -143,7 +148,7 @@ def main():
                     program.constant(gamma[0, 0], np.ones(gamma.shape, dtype=np.float16))
         inputs, outputs = [], {}
         for instance in range(args.instances):
-            x = program.tensor(values.shape, (args.tile_rows, args.tile_k), dtype=values.dtype)
+            x = program.tensor(values.shape, (args.tile_rows, values.shape[1] if args.residual else args.tile_k), dtype=values.dtype)
             inputs.append(x)
             up = linear(program, x, up_weight, tile_rows=args.tile_rows,
                         tile_k=args.tile_k, tile_columns=args.tile_columns)
@@ -170,9 +175,12 @@ def main():
                     if reduced.grid[1] != 1:
                         raise ValueError('--normalize requires --tile-columns to cover the full output width')
                     spec = BlockSpec(reduced.block_shape, lambda i, j: (i, j))
+                    if args.residual and x.shape != reduced.shape:
+                        raise ValueError('Residual input and reduced projection must have the same shape')
                     reduced = program.kernel_call(normalize, grid=reduced.grid,
-                        in_specs=(spec, BlockSpec(gamma.shape, lambda i, j: (0, 0))),
-                        out_specs=spec, out_shape=ShapeDtypeStruct(reduced.shape, reduced.dtype))(reduced, gamma)
+                        in_specs=(spec, BlockSpec(gamma.shape, lambda i, j: (0, 0))) + ((spec,) if args.residual else ()),
+                        out_specs=spec, out_shape=ShapeDtypeStruct(reduced.shape, reduced.dtype))(
+                            reduced, gamma, *((x,) if args.residual else ()))
                 spec = BlockSpec(down.block_shape, lambda i, j: (i, j))
                 activated = program.kernel_call(kernels.swish,
                     grid=reduced.grid, in_specs=(spec,), out_specs=spec,

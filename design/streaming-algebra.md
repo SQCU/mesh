@@ -207,3 +207,10 @@ feed `gemma_mesh_gelu_mul`, whose output Ref has separate storage. Down projecti
 reduce-scatter, all-gather and the downstream consumer use the same graph paths.
 For this option the example's input and consumer weight files must use FP16;
 model weights load into the configured FP16 projection Refs during setup.
+
+`--residual` with FP16 inputs and `--normalize` uses the existing fused engine
+normalization/residual kernel after all-gather. Each row block reads its original
+input Ref and the completed reduced projection, then publishes a separate output
+Ref. Input blocks cover the full feature width required by this row-wise operation;
+other row blocks and other configured instances remain independent. The encoder
+accepts independent operand offsets and a pipeline captured during setup.
