@@ -1,0 +1,16 @@
+{
+  "source_revision": "f585744",
+  "local_library_revision": "e8ebac1",
+  "peer_library_revision": "88cba6a",
+  "configuration": {
+    "seconds": 5,
+    "bots": 8,
+    "width": 16,
+    "tile_rows": 8,
+    "player": 0,
+    "solver": 1
+  },
+  "play": "play: D=16 bots=8 teams=5 experts=8\nplay: 7888 returned plans in 5.000s; switches=1284; objective split=[0, 0, 4, 0, 4]\n",
+  "solve": "solve: D=16 bots=8 teams=5 experts=8\nsolve: 0 returned plans in 5.000s; switches=0; objective split=[0, 0, 0, 0, 0]\n",
+  "scope": "Actual planner execution and output-root liveness integration, not matched throughput or complete expert-derivative coverage."
+}
