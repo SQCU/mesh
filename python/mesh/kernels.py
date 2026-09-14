@@ -1601,26 +1601,35 @@ def _routing_directory(program, chunks, coverage):
     metadata = program.tensor((1, 2 * total), dtype=np.uint32)[0, 0]
     keys = tuple(directory.slice(0, 4 * count, 1, partials.shape[0]) for directory, count, partials in chunks)
 
-    # design/algorithm-sources.md#shared-sparse-routing-lowering
-    def owner_source(metal):
-        qualifier = 'constant' if metal else 'static const'
-        arrays = f'{qualifier} uint32_t starts[]={{'+','.join(str(row) for row, _ in coverage)+'};\n'
-        arrays += f'{qualifier} uint32_t ends[]={{'+','.join(str(row + height) for row, height in coverage)+'};'
-        lines, origin = [], 0
-        for index, ref in enumerate(keys):
-            count = ref.shape[1]
-            lines.append(f'''for(uint32_t i=lane;i<{count};i+=lanes) {{
-              uint32_t key=p{index}[i],lo=0,hi={len(coverage)},owner=0xffffffffu;
-              while(lo<hi) {{ uint32_t mid=lo+(hi-lo)/2; if(starts[mid]<=key)lo=mid+1; else hi=mid; }}
-              if(lo && key<ends[lo-1])owner=lo-1;
-              p{len(keys)}[{origin}+i]=owner;
-              p{len(keys)}[{total+origin}+i]=owner==0xffffffffu?0xffffffffu:key;
-            }}''')
-            origin += count
-        return arrays, '\n'.join(lines)
+    for _, _, first, columns in _source_expression_regions(program, metadata):
+        target = metadata.slice(0, first, 1, columns)
+        entries, origin = [], 0
+        for ref in keys:
+            for field in range(2):
+                start = field * total + origin
+                lo, hi = max(first, start), min(first + columns, start + ref.shape[1])
+                if lo < hi:
+                    entries.append((ref.slice(0, lo - start, 1, hi - lo), lo - first, field))
+            origin += ref.shape[1]
 
-    _compiled_region(program, keys, metadata, owner_source, access_axes=(0,) * len(keys),
-                     domains=((0, metadata.shape[0], 0, metadata.shape[1]),))
+        # design/algorithm-sources.md#shared-sparse-routing-lowering
+        def owner_source(metal):
+            qualifier = 'constant' if metal else 'static const'
+            arrays = f'{qualifier} uint32_t starts[]={{'+','.join(str(row) for row, _ in coverage)+'};\n'
+            arrays += f'{qualifier} uint32_t ends[]={{'+','.join(str(row + height) for row, height in coverage)+'};'
+            lines = []
+            for index, (ref, offset, field) in enumerate(entries):
+                value = 'owner==0xffffffffu?0xffffffffu:key' if field else 'owner'
+                lines.append(f'''for(uint32_t i=lane;i<{ref.shape[1]};i+=lanes) {{
+                  uint32_t key=p{index}[i*{ref.view.column_stride}],lo=0,hi={len(coverage)},owner=0xffffffffu;
+                  while(lo<hi) {{ uint32_t mid=lo+(hi-lo)/2; if(starts[mid]<=key)lo=mid+1; else hi=mid; }}
+                  if(lo && key<ends[lo-1])owner=lo-1;
+                  p{len(entries)}[{offset}+i]={value};
+                }}''')
+            return arrays, '\n'.join(lines)
+
+        _compiled_region(program, tuple(ref for ref, _, _ in entries), target, owner_source,
+                         access_axes=(0,) * len(entries), domains=((0, 1, 0, columns),))
     owners = metadata.slice(0, 0, 1, total)
     reverse, _ = _group_ordinals(program, (metadata.slice(0, total, 1, total),), 1)
     reverse_keys = reverse.slice(0, 0, 1, total)

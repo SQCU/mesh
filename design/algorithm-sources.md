@@ -1794,7 +1794,26 @@ using Papadopoulos and Culler's [Monsoon](https://www.cs.cmu.edu/~18742/papers/P
 as prior art for explicit operand identity and presence matching.
 
 `_routing_directory` produces candidate owners and a reverse ordinal directory
-with consumer offsets. Consumer identities follow the actual configured output
+with consumer offsets. Owner and filtered-key generation is bound per metadata
+publication region. Setup intersects each region with each chunk's two destination
+intervals (owner and filtered key), retaining only the corresponding key slices
+and literal output offsets. The generated CPU and Metal functions read those
+slices and write the original metadata allocation. A metadata page crossing a
+chunk or field boundary contains all of its required intersections in one function;
+no two functions publish the same page. The two fields may compute ownership
+separately when placed in separate publication regions.
+
+The input intervals partition each field, and the output intervals partition the
+allocation, so every word is written exactly once. Ref offsets select original
+key addresses; emitted indexing retains each source's actual column stride. All
+intersection, type and address work happens in setup. Native `bind_function`
+receives only these sliced dependencies, allowing owner generation to begin before
+unrelated chunk keys arrive. The allocation size and directory representation stay
+the same. The downstream radix grouping still requires the filtered-key vector;
+this edit does not eliminate that global directory dependency. Source review and
+Python/native compilation are the verification; no numerical run is reported.
+
+Consumer identities follow the actual configured output
 regions, including permuted grids and uncovered rows. A partial in a feature
 stripe has one destination owner; overlapping output ownership is not inferred
 from nominal tile sizes. This specialization does not claim unique ownership for
