@@ -1,0 +1,203 @@
+{
+  "date": "2026-09-14",
+  "source_revision": "2e4c7ec",
+  "installed_source_revision_both_nodes": "2e4c7ec",
+  "library_revision": "2e4c7ec",
+  "caller_revision": "43ca4c4",
+  "example_revision": "43c0fcd",
+  "native_revision": "243b947",
+  "runs": [
+    {
+      "prefix": "range-generation-metal",
+      "backend": "metal",
+      "paired": false,
+      "gold_dtype": "float32",
+      "range_cases": 6,
+      "empty_ranges": 3,
+      "generations": 2,
+      "exit_code": 0,
+      "peer_exit_code": null,
+      "peer_shutdown": null,
+      "configured_functions": 5934,
+      "completed_submissions": 11717,
+      "range_timings_ms": {
+        "early": {
+          "count": 2,
+          "mean": 0.7203539999999999,
+          "sample_variance": 0.004929450631999999
+        },
+        "complete": {
+          "count": 2,
+          "mean": 1.8751039999999999,
+          "sample_variance": 0.05484936963200002
+        }
+      },
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 16.427083,
+        "invocations_per_second": 182.62524149905374,
+        "first_section_ms": 14.102708,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.929708333333332,
+          "sample_variance": 1.6787131964723347
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 11717,
+          "completed": 11717,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.038555736,
+          "cpu_submitted": 0
+        }
+      },
+      "artifacts": [
+        "range-generation-metal.jsonl.gz",
+        "range-generation-metal-trace.json.gz"
+      ],
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --local --backend metal --dtype float32 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/range-generation-metal-trace.json"
+    },
+    {
+      "prefix": "range-generation-cpu",
+      "backend": "cpu",
+      "paired": false,
+      "gold_dtype": "float32",
+      "range_cases": 6,
+      "empty_ranges": 3,
+      "generations": 2,
+      "exit_code": 0,
+      "peer_exit_code": null,
+      "peer_shutdown": null,
+      "configured_functions": 5934,
+      "completed_submissions": 11717,
+      "range_timings_ms": {
+        "early": {
+          "count": 2,
+          "mean": 0.36735450000000003,
+          "sample_variance": 0.001888604340500001
+        },
+        "complete": {
+          "count": 2,
+          "mean": 0.6515,
+          "sample_variance": 0.0047775312500000005
+        }
+      },
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.498416,
+        "invocations_per_second": 666.9014159650864,
+        "first_section_ms": 3.791041,
+        "completion_ms": {
+          "count": 3,
+          "mean": 4.128610666666667,
+          "sample_variance": 0.10877485429633318
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 11717,
+          "completed": 11717,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 11717
+        }
+      },
+      "artifacts": [
+        "range-generation-cpu.jsonl.gz",
+        "range-generation-cpu-trace.json.gz"
+      ],
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --local --backend cpu --dtype float32 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/range-generation-cpu-trace.json"
+    },
+    {
+      "prefix": "range-generation-paired",
+      "backend": "metal",
+      "paired": true,
+      "gold_dtype": "float16",
+      "range_cases": 6,
+      "empty_ranges": 3,
+      "generations": 2,
+      "exit_code": 0,
+      "peer_exit_code": 0,
+      "peer_shutdown": "SIGTERM",
+      "configured_functions": 5870,
+      "completed_submissions": 11032,
+      "range_timings_ms": {
+        "early": {
+          "count": 2,
+          "mean": 0.8839790000000001,
+          "sample_variance": 0.022693446882000003
+        },
+        "complete": {
+          "count": 2,
+          "mean": 1.6696244999999998,
+          "sample_variance": 0.023094658444500028
+        }
+      },
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 16.499416,
+        "invocations_per_second": 181.82461730766713,
+        "first_section_ms": 12.643125,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.785305,
+          "sample_variance": 2.2072287122129985
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 11032,
+          "completed": 11032,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.035499414,
+          "cpu_submitted": 0
+        }
+      },
+      "artifacts": [
+        "range-generation-paired.jsonl.gz",
+        "range-generation-paired-trace.json.gz",
+        "range-generation-paired-peer.jsonl.gz",
+        "range-generation-paired-peer-trace.json.gz"
+      ],
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --backend metal --dtype float16 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/range-generation-paired-trace.json"
+    }
+  ],
+  "geometry": {
+    "abi": 25,
+    "arena_pages": 65536,
+    "block_pages": 4,
+    "page_bytes": 16384,
+    "qps": 1,
+    "registered_bytes_per_node": 1097203712
+  },
+  "peer_command": "PYTHONPATH=.build/gold-package .build/xonotic-env/bin/python examples/streaming-algebra.py 1 --backend metal --dtype float16 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/range-generation-paired-peer-trace.json",
+  "scope": [
+    "Range side cases execute on rank zero; paired gold/fanout crosses actual RDMA.",
+    "Timing is host-observed elapsed time across existing example publication/observation, not physical GPU/wire occupancy.",
+    "No matched old-emitter or fastest-backend baseline; no speedup or no-regression claim.",
+    "Custom native empty bindings, empty indexed-add routing, random/order/integer custom numerical paths remain outside these new range cases.",
+    "Source proves no native allocation for zero-volume Tensor metadata; zero-inner-dimension dot not separately measured."
+  ]
+}

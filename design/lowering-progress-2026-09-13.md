@@ -1487,3 +1487,64 @@ negative-step lengths and empty-range representation require explicit graph work
 After that, shared counter-based Philox/Box–Muller, typed stable sorting and integer
 contraction semantics still need implementation. Static folding, fusion, placement
 and matched performance acceptance remain part of the original nine-step goal.
+
+## Realize symbolic dimensions and stream typed ranges
+
+`43ca4c4` moves Xonotic dimensions to existing setup constants and ranges to
+shared tiled expressions. Signed/unsigned integer arithmetic retains all 64 bits;
+exact signed ceiling division resolves range length before numerical execution.
+The separate dimension/range source paths, runtime dimension renderer and
+duplicate dimension argument buffer are removed. Remaining custom operations
+are normal generation, ordering and integer contractions.
+
+`2e4c7ec` gives empty tensors metadata without allocating native operand storage.
+Broadcasting retains zero dimensions, expression output pruning removes absent
+work, and logical empty domains retain shape/type while avoiding meaningless
+zero-divisor indexing. Shared reductions with nonempty outputs emit identities;
+zero-inner-dimension contractions emit zeros. Integer/bool means now return FP32
+rather than truncating back to their source type; empty means use floating NaN.
+The [mechanism and primary sources](algorithm-sources.md#indexed-range-generation)
+describe these setup decisions and numerical contracts.
+
+`464659a` and `43c0fcd` extend the existing Xonotic workflow with five exact integer
+ranges, one FP16 range computed with FP32 arithmetic, symbolic dimension
+composition, three empty ranges, six empty reductions apiece, and a fractional
+integer mean. Each of two generations publishes one input row, observes its
+consumer while the other row remains absent, then releases the other row. The
+mean correctly retains its dependency on both rows. No new evaluator is added.
+
+Custom native/Metal kernels with empty operand bindings, mixed empty custom
+outputs and positive-base indexed-add with zero updates remain unfinished. The
+source-level zero-inner-dimension contraction handling is not separately exercised
+by these new range cases. General indexed native contractions, generator/order
+migration, legal fusion/storage/placement and matched full performance acceptance
+remain part of the active nine-point plan.
+
+Source review also traces the retained custom binding after dimension-buffer
+removal: addresses occupy slot 0, Views 1, Blocks 2 and argument IDs 3; native
+constant binding preserves that order. Concrete fallback shapes preserve tensor
+indices/dtypes and supply integer batch-stride products. Those remaining paths
+are not numerically covered by the range example. Their pre-existing limitations
+remain work: integer contractions convert through FP32 tiles, and argsort's
+comparison-based ranks do not define collision-free NaN ordering.
+
+Operational evidence in
+[`range-generation-provenance.json`](../measurements/lowering-2026-09-13/range-generation-provenance.json)
+records installed/source `2e4c7ec` on both nodes. CPU and Metal each configured
+5934 functions and completed 11717 submissions; the paired Metal workflow
+configured 5870 functions and completed 11032 rank-zero submissions. All terminal
+runtime codes are zero. The peer exited zero after SIGTERM, and both bridges
+returned to ready, unpaired, zero-client state with their existing registered
+arena geometry. The range side cases execute on rank zero; paired gold/fanout
+uses the actual RDMA link.
+
+Empty range reductions returned zero, false, true, negative infinity, positive
+infinity and NaN as specified. Nonempty integer means preserved 4.75 and 5.75
+after the downstream quarter addition, while remaining absent until both source
+rows were published. All six ranges and their independent row consumers passed
+across both reuse generations. Early-consumer elapsed times have count 2 each:
+CPU mean 0.3673545 ms, sample variance 0.0018886043405 ms²; Metal mean
+0.720354 ms, variance 0.004929450632 ms²; paired-workflow rank-zero mean
+0.883979 ms, variance 0.022693446882 ms². These are host observation intervals,
+not physical compute/wire overlap durations or a matched speedup measurement.
+Raw logs/traces and full commands are retained with the provenance.
