@@ -189,7 +189,7 @@ def main():
                 (activated, activated.astype(np.float16).astype(np.float64)))
             nested_generations.append((values, expected))
         table_arg, index_arg, deferred_arg = kernels.arguments(3)
-        _, column_arg = kernels.indices()
+        column_arg = kernels.arange(4)
         index_data = np.array([[2], [2**53 + 1]], dtype=np.int64)
         table_data = np.arange(12, dtype=dtype).reshape(3, 4)
         indexed_body = 2 * table_arg.at(index_arg, column_arg, mask=(index_arg >= 0) & (index_arg < 3)) + kernels.select(index_arg.equal(2**53 + 1), 1, 0)
@@ -220,7 +220,8 @@ def main():
         scatter_valid = np.ones((updates_count, 1), dtype=bool)
         scatter_valid[-1 if updates_count-last_start > 1 else -2, 0] = False
         base_arg, destination_arg, update_arg, mask_arg, factor_arg, lookup_arg = kernels.arguments(6)
-        update_row, update_column = kernels.indices()
+        update_row, _ = kernels.indices()
+        update_column = kernels.arange(4)
         scatter = program.kernel_call(kernels.expression(kernels.indexed_add(
             base_arg, destination_arg, update_arg.at(lookup_arg.at(update_row, 0), update_column) * factor_arg + 1,
             mask=mask_arg.at(update_row, 0))), grid=(destinations_count,),
