@@ -287,6 +287,24 @@ class _ExpressionKernel:
             pointers[index] = tuple(range(len(physical), len(physical) + len(refs)))
             physical.extend(refs)
 
+        # design/algorithm-sources.md#shared-contraction-lowering
+        def integral(node):
+            if node.operation == 'input':
+                return inputs[node.value].dtype.kind != 'f'
+            if node.operation == 'load':
+                return inputs[node.value].dtype.kind != 'f' and integral(node.operands[3])
+            if node.operation == 'select':
+                return all(integral(child) for child in node.operands[1:])
+            if node.operation == 'literal':
+                return isinstance(node.value, (int, bool))
+            if node.operation in ('<', '<=', '>', '>=', '==', 'row', 'column', 'block_ordinal'):
+                return True
+            if node.operation in ('exp', 'rsqrt', 'tanh'):
+                return False
+            if node.operation == 'sum':
+                return output.dtype.kind in 'iub'
+            return all(integral(child) for child in node.operands)
+
         # design/algorithm-sources.md#region-expression-fusion
         def visit(node):
             if node in widths:
@@ -345,7 +363,7 @@ class _ExpressionKernel:
                 value = f'p{pointers[node.value][0]}[r*{row_stride}+({column})*{column_stride}]'
                 return f'((float)({value}))' if ref.dtype.kind == 'f' else value
             if node.operation == 'sum':
-                return names[node]
+                return f'(({"long" if metal else "int64_t"}){names[node]})' if output.dtype.kind in 'ib' else names[node]
             return _scalar_expression(node, tuple(emit(child, column) for child in node.operands), metal)
 
         lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
@@ -381,7 +399,8 @@ class _ExpressionKernel:
             lines.append(f'for(uint64_t r=0;r<{output.shape[0]};r++) {{')
         for node in reductions:
             name, child = names[node], node.operands[0]
-            accumulator = ('long' if metal else 'int64_t') if output.dtype.kind in 'ib' else ('ulong' if metal else 'uint64_t') if output.dtype.kind == 'u' else 'float'
+            unsigned = output.dtype.kind == 'u' or (output.dtype.kind in 'ib' and integral(child))
+            accumulator = ('ulong' if metal else 'uint64_t') if unsigned else ('long' if metal else 'int64_t') if output.dtype.kind in 'ib' else 'float'
             lines.append(f'{accumulator} {name}=0;')
             lines.append(f'for({"uint" if metal else "uint64_t"} k={"lane" if metal else "0"};k<{widths[child]};k+={32 if metal else 1}) {name}+={emit(child, "k")};')
             if metal:
@@ -923,7 +942,8 @@ class _ExpressionRegions:
                     _bind_operation(self.program, add, parts[index:index+2], target)
                 else:
                     left, right = arguments(2)
-                    _ExpressionKernel((left+right,)).bind(self.program, parts[index:index+2], (target,), self.coordinate)
+                    bits = 0xffffffffffffffff
+                    _ExpressionKernel(((left & bits)+(right & bits),)).bind(self.program, parts[index:index+2], (target,), self.coordinate)
                 reduced.append(target)
             parts = reduced
         self.cache[key] = parts[0]

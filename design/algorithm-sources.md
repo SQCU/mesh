@@ -1467,8 +1467,15 @@ Real statistics and their combination use FP32. Signed integer and boolean
 outputs select int64 accumulators, unsigned outputs uint64, matching the existing
 scalar emitter's accumulator selection. Integer partials and their tree remain
 integer expressions, avoiding a float conversion that would lose values above
-2**24. Conversion to a declared narrower output occurs after the completed
-statistic. Floating accumulation is reassociated by the feature partial tree;
+2**24. Integer-valued signed reductions accumulate unsigned 64-bit bits in both
+the local loop/SIMD reduction and the partial merge tree. The final expression
+interprets those bits as the signed statistic before subsequent arithmetic;
+merge operands explicitly use the existing uint64-mask convention. Thus addition
+is modulo 2**64 without signed C overflow, including intermediate cancellation.
+The scalar emitter's `integral` setup classification retains the existing signed
+accumulator path when a signed-output reduction actually consumes floating terms,
+so this integer fix does not introduce negative-float-to-uint conversions.
+Conversion to a declared narrower output occurs after the completed statistic. Floating accumulation is reassociated by the feature partial tree;
 this is not a promise of bitwise equality with a serial sum.
 
 The cache includes the child expression, actual used input identities, row origin,
