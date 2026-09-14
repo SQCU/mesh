@@ -1209,3 +1209,21 @@ This stage necessarily consumes all routing chunks when any chunk can name any
 destination, but it never adds all update payloads as ordinary dependencies.
 The structural and performance limits are recorded in
 [scatter-lowering.md](scatter-lowering.md#first-executable-vector-lowering).
+
+## Xonotic block indexed lowering
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+separates logical indexing from physical reference binding. Xonotic's matrix_view
+retains direct strides for rank-one transpose and single-backing reshapes;
+rank-one scatter_add invokes the shared segmented indexed-add representation.
+Its scalar/vector pointwise and sum consumers use the same expression compiler.
+Integer reduction trees retain the existing owner and use unsigned bit-pattern
+addition before storage in the declared dtype.
+
+Remaining custom kernels bind an explicit block-pointer sequence and per-block
+stride table. Their page_address maps logical flat indices through retained
+matrix/block geometry to that exact pointer and stride entry. It never assembles
+a dense input or guesses ragged strides. These remaining whole-region source
+algorithms are migration backlog; this metadata change preserves access to the
+canonical pages while their numerical lowering is replaced.
+[Source mapping and compilation limits](xonotic-indexed-add.md).

@@ -7,7 +7,11 @@ from .tensor import Dimension
 
 class View(c.Structure):
     _fields_ = [('offset', c.c_uint64), ('size', c.c_uint64), ('shape', c.c_uint64 * 8),
-        ('stride', c.c_uint64 * 8), ('physical_stride', c.c_uint64 * 8)] + [(name, c.c_uint32) for name in ('dtype', 'rank', 'first')]
+        ('stride', c.c_uint64 * 8), ('matrix_columns', c.c_uint64), ('block_rows', c.c_uint64), ('block_columns', c.c_uint64), ('grid_columns', c.c_uint64)] + [(name, c.c_uint32) for name in ('dtype', 'rank', 'first')]
+
+
+class Block(c.Structure):
+    _fields_ = [('row_stride', c.c_uint64), ('column_stride', c.c_uint64)]
 
 
 TYPES = {'float32': 'float', 'int32': 'int', 'uint32': 'uint', 'int64': 'long', 'uint64': 'ulong', 'bool': 'uchar'}
@@ -15,9 +19,10 @@ PREFIX = r'''
 #include <metal_stdlib>
 using namespace metal;
 struct View {
-    ulong offset, size, shape[8], stride[8], physical_stride[8];
+    ulong offset, size, shape[8], stride[8], matrix_columns, block_rows, block_columns, grid_columns;
     uint dtype, rank, first;
 };
+struct Block { ulong row_stride, column_stride; };
 ulong coordinate(ulong index, device const View& view, uint axis) {
     return index / view.stride[axis] % view.shape[axis];
 }
@@ -27,24 +32,20 @@ ulong broadcast_index(ulong index, device const View& source, device const View&
         result += (source.shape[axis] == 1 ? 0 : coordinate(index, destination, destination.rank - source.rank + axis)) * source.stride[axis];
     return result;
 }
-// ../../../design/algorithm-sources.md#literal-row-functions
- device uchar* page_address(device const ulong* regions, device const View& view, ulong byte) {
-    return (device uchar*)regions[view.first] + byte;
+// ../../../design/algorithm-sources.md#xonotic-block-indexed-lowering
+ device uchar* page_address(device const ulong* regions, device const Block* blocks, device const View& view, ulong byte) {
+    ulong index=byte/view.dtype,row=index/view.matrix_columns,column=index%view.matrix_columns;
+    ulong block=view.first+row/view.block_rows*view.grid_columns+column/view.block_columns;
+    ulong offset=(row%view.block_rows)*blocks[block].row_stride+(column%view.block_columns)*blocks[block].column_stride;
+    return (device uchar*)regions[block]+offset*view.dtype+byte%view.dtype;
 }
-// ../../../design/algorithm-sources.md#explicit-operand-metadata
-ulong physical_index(ulong index, device const View& view) {
-    ulong result = 0;
-    for (uint axis = 0; axis < view.rank; ++axis)
-        result += coordinate(index, view, axis) * view.physical_stride[axis];
-    return result;
+// ../../../design/algorithm-sources.md#xonotic-block-indexed-lowering
+ template<typename T> T read_value(device const ulong* regions, device const Block* blocks, device const View& view, ulong index) {
+    return *(device const T*)page_address(regions, blocks, view, view.offset + index * sizeof(T));
 }
-// ../../../design/algorithm-sources.md#literal-row-functions
- template<typename T> T read_value(device const ulong* regions, device const View& view, ulong index) {
-    return *(device const T*)page_address(regions, view, view.offset + physical_index(index, view) * sizeof(T));
-}
-// ../../../design/algorithm-sources.md#literal-row-functions
- template<typename T> void write_value(device const ulong* regions, device const View& view, ulong index, T value) {
-    *(device T*)page_address(regions, view, view.offset + physical_index(index, view) * sizeof(T)) = value;
+// ../../../design/algorithm-sources.md#xonotic-block-indexed-lowering
+ template<typename T> void write_value(device const ulong* regions, device const Block* blocks, device const View& view, ulong index, T value) {
+    *(device T*)page_address(regions, blocks, view, view.offset + index * sizeof(T)) = value;
 }
 float tensor_log1p(float x) {
     float u = 1.0f + x;
@@ -71,7 +72,7 @@ uint4 philox(uint4 counter, uint2 key) {
 }
 '''
 ARGUMENTS = '''device const ulong* regions [[buffer(0)]], device const View* v [[buffer(1)]],
-    constant ulong* dimensions [[buffer(2)]],
+    constant ulong* dimensions [[buffer(2)]], device const Block* blocks [[buffer(3)]],
     uint3 position [[thread_position_in_grid]], uint3 group [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]], uint simd [[simdgroup_index_in_threadgroup]],
     uint tid [[thread_index_in_threadgroup]], constant uint* arguments [[buffer(4)]]'''
@@ -87,15 +88,15 @@ def expr(value):
 
 
 def read(value, index='t'):
-    return f'read_value<{TYPES[value.dtype]}>(regions,v[{value.index}],{index})'
+    return f'read_value<{TYPES[value.dtype]}>(regions,blocks,v[{value.index}],{index})'
 
 
 def write(value, result, index='t'):
-    return f'write_value<{TYPES[value.dtype]}>(regions,v[{value.index}],{index},{TYPES[value.dtype]}({result}));'
+    return f'write_value<{TYPES[value.dtype]}>(regions,blocks,v[{value.index}],{index},{TYPES[value.dtype]}({result}));'
 
 
 def atomic(value, result, index):
-    return f'atomic_fetch_add_explicit((device atomic_float*)page_address(regions,v[{value.index}],v[{value.index}].offset+physical_index(({index}),v[{value.index}])*sizeof(float)),float({result}),memory_order_relaxed);'
+    return f'atomic_fetch_add_explicit((device atomic_float*)page_address(regions,blocks,v[{value.index}],v[{value.index}].offset+({index})*sizeof(float)),float({result}),memory_order_relaxed);'
 
 
 def coordinate_code(shape, flat='t', prefix='c'):
@@ -244,7 +245,7 @@ def kernel(node):
         selected = values[0]
         body = [f'ulong t=position.x; if(t>=v[{selected.index}].size) return;',
                 f'ulong expert=ulong({read(selected)}),stride=v[{output.index}].shape[1];',
-                f'uint slot=atomic_fetch_add_explicit((device atomic_uint*)page_address(regions,v[{output.index}],v[{output.index}].offset+expert*stride*sizeof(uint)),1u,memory_order_relaxed);',
+                f'uint slot=atomic_fetch_add_explicit((device atomic_uint*)page_address(regions,blocks,v[{output.index}],v[{output.index}].offset+expert*stride*sizeof(uint)),1u,memory_order_relaxed);',
                 write(output, 't', 'expert*stride+1+slot')]
         mode, clear = ('gradient', selected.index), True
     elif op in ('expert_matmul', 'expert_input_vjp', 'expert_weight_vjp'):
@@ -376,8 +377,30 @@ def source(nodes):
         name = 'mesh_tensor_' + hashlib.sha256(text.encode()).hexdigest()[:16]
         sources[name] = '// ../../../design/algorithm-sources.md#literal-row-functions\n' + text.replace('FUNCTION', name)
         item.update(name=name, arguments=nodes)
-    sources['mesh_tensor_zero'] = f'// ../../../design/algorithm-sources.md#literal-row-functions\nkernel void mesh_tensor_zero({ARGUMENTS}) {{ ulong t=position.x; if(t<v[arguments[0]].size*v[arguments[0]].dtype) *page_address(regions,v[arguments[0]],v[arguments[0]].offset+t)=0; }}'
+    sources['mesh_tensor_zero'] = f'// ../../../design/algorithm-sources.md#literal-row-functions\nkernel void mesh_tensor_zero({ARGUMENTS}) {{ ulong t=position.x; if(t<v[arguments[0]].size*v[arguments[0]].dtype) *page_address(regions,blocks,v[arguments[0]],v[arguments[0]].offset+t)=0; }}'
     return PREFIX + '\n'.join(sources.values()), kernels
+
+
+# ../../../design/algorithm-sources.md#xonotic-block-indexed-lowering
+def matrix_view(tensor, shape):
+    from mesh import Tensor, Ref
+    from mesh._native import View as NativeView
+    shape = tuple(shape)
+    if tensor.shape == shape:
+        return tensor
+    if tensor.shape[::-1] == shape and 1 in shape:
+        return tensor.T
+    ref = tensor.region(0, 0, *tensor.shape)
+    array = ref.array.view()
+    array.shape = shape
+    view = NativeView.from_buffer_copy(ref.view)
+    view.rows, view.columns = shape
+    view.row_stride, view.column_stride = (stride // tensor.dtype.itemsize for stride in array.strides)
+    result = object.__new__(Tensor)
+    result.program, result.dtype, result.handle = tensor.program, tensor.dtype, tensor.handle
+    result.shape, result.block_shape, result.grid = shape, shape, (1, 1)
+    result.blocks = {(0, 0): Ref(tensor.program, view, tensor.dtype)}
+    return result
 
 
 # ../../../design/algorithm-sources.md#application-metal-kernels
@@ -428,7 +451,31 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
                 tensor = replicas[key]
             local[operand.index] = tensor
         shape = shapes[value.index]
+        if operation == 'scatter_add' and len(shape) == 1:
+            base, destinations, updates = (matrix_view(local[v.index], (math.prod(shapes[v.index]), 1)) for v in values)
+            block = (math.gcd(min(tile_rows, shape[0]), base.block_shape[0]), 1)
+            args = kernels.arguments(3)
+            result = program.kernel_call(kernels.expression(kernels.indexed_add(*args)),
+                grid=((shape[0] + block[0] - 1) // block[0], 1),
+                in_specs=(BlockSpec(None),) * 3,
+                out_specs=BlockSpec(block, lambda i, j: (i, j)),
+                out_shape=ShapeDtypeStruct(base.shape, value.dtype), peer=peer)(base, destinations, updates)
+            tensors[value.index] = result.T
+            continue
+        if operation in ('reduce_sum', 'reduce_mean') and len(shapes[values[0].index]) == 1 and tuple(attributes['axes']) == (0,):
+            operand = matrix_view(local[values[0].index], (1, math.prod(shapes[values[0].index])))
+            argument, = kernels.arguments(1)
+            term = argument & 0xffffffffffffffff if operand.dtype.kind in 'iu' else argument
+            reduced = nn._row_reduce(program, kernels.expression(term.sum()), operand,
+                tile_rows=1, peer=peer, output_dtype=value.dtype)
+            tensors[value.index] = nn._pointwise(program, kernels.expression(argument / operand.shape[1]),
+                (reduced,), 1, peer=peer, output_dtype=value.dtype) if operation == 'reduce_mean' else reduced
+            continue
         numerical = value.dtype in ('float16', 'float32')
+        matrix_shapes = {v.index: shapes[v.index] if len(shapes[v.index]) == 2 else (1, math.prod(shapes[v.index])) for v in values}
+        shaped = all(local[v.index].shape == matrix_shapes[v.index] or
+            (1 in matrix_shapes[v.index] and local[v.index].shape[::-1] == matrix_shapes[v.index]) or
+            local[v.index].grid == (1, 1) for v in values)
         if numerical and operation == 'matmul' and len(shape) == 2 and all(len(shapes[v.index]) == 2 and local[v.index].shape == shapes[v.index] for v in values):
             left, right = (local[v.index] for v in values)
             left = left.T if attributes['transpose_left'] else left
@@ -442,12 +489,19 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
             tensors[value.index] = nn._pointwise(program, kernels.affine(1 / operand.shape[1]),
                 (reduced,), tile_rows, peer=peer) if operation == 'reduce_mean' else reduced
             continue
-        if (numerical or operation in ('where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or')) and len(shape) == 2 and operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or'):
+        if shaped and len(shape) <= 2 and operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or'):
             args = kernels.arguments(len(values))
             if operation in ('add', 'subtract', 'multiply', 'divide'):
                 left, right = args
+                if value.dtype in ('int32', 'uint32', 'int64', 'uint64') and operation != 'divide':
+                    left, right = left & 0xffffffffffffffff, right & 0xffffffffffffffff
                 result = {'add': lambda: left + right, 'subtract': lambda: left - right,
                           'multiply': lambda: left * right, 'divide': lambda: left / right}[operation]()
+            elif operation in ('cast', 'assign'):
+                result = args[0]
+            elif operation in ('maximum', 'minimum'):
+                left, right = args
+                result = kernels.select(left > right if operation == 'maximum' else left < right, left, right)
             elif operation == 'where':
                 result = kernels.select(*args)
             elif operation in ('equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or'):
@@ -457,12 +511,13 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
                           'greater': lambda: left > right, 'greater_equal': lambda: left >= right,
                           'bitwise_and': lambda: left & right, 'bitwise_or': lambda: left | right}[operation]()
             elif operation == 'negative':
-                result = -1 * args[0]
+                result = (0 - (args[0] & 0xffffffffffffffff)) if value.dtype in ('int32', 'uint32', 'int64', 'uint64') else -1 * args[0]
             elif operation == 'sigmoid':
                 result = 1 / (1 + (-1 * args[0]).exp())
             else:
                 result = getattr(args[0], operation)()
-            operands = tuple(local[v.index].broadcast_to(shape) for v in values)
+            matrix_shape = shape if len(shape) == 2 else (1, math.prod(shape))
+            operands = tuple(matrix_view(local[v.index], matrix_shapes[v.index]).broadcast_to(matrix_shape) for v in values)
             tensors[value.index] = nn._pointwise(program, kernels.expression(result),
                 operands, tile_rows, peer=peer, output_dtype=value.dtype)
             continue
@@ -473,22 +528,27 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
         storage_shape = (max(1, math.prod(shape[:-1])), max(1, shape[-1])) if shape else (1, 1)
         bound = tuple(dict.fromkeys((*values, value)))
         positions = {operand.index: i for i, operand in enumerate(bound)}
-        views = []
+        views, blocks, operands, specs = [], [], [], []
         for operand in bound:
             operand_shape = shapes[operand.index]
+            tensor = None if operand.index == value.index else local[operand.index]
+            matrix_shape = storage_shape if tensor is None else tensor.shape
+            block_shape = storage_shape if tensor is None else tensor.block_shape
+            grid_columns = 1 if tensor is None else tensor.grid[1]
             view = View(size=math.prod(operand_shape), dtype=np.dtype(operand.dtype).itemsize,
-                        rank=len(operand_shape), first=positions[operand.index])
-            if operand.index == value.index:
-                physical = None
-            else:
-                tensor = local[operand.index]
-                physical = tensor.region(0, 0, *tensor.shape).array.view()
-                physical.shape = operand_shape
+                rank=len(operand_shape), first=len(blocks), matrix_columns=matrix_shape[1],
+                block_rows=block_shape[0], block_columns=block_shape[1], grid_columns=grid_columns)
             stride = 1
             for axis in reversed(range(len(operand_shape))):
                 view.shape[axis], view.stride[axis] = operand_shape[axis], stride
-                view.physical_stride[axis] = physical.strides[axis] // view.dtype if physical is not None else stride
                 stride *= operand_shape[axis]
+            if tensor is None:
+                blocks.append(Block(storage_shape[1], 1))
+            else:
+                for coordinate, ref in sorted(tensor.blocks.items()):
+                    blocks.append(Block(ref.view.row_stride, ref.view.column_stride))
+                    operands.append(tensor)
+                    specs.append(BlockSpec(tensor.block_shape, lambda i, coordinate=coordinate: coordinate))
             views.append(view)
         mode, threads = item['mode'], 256
         if mode == 'matmul':
@@ -509,10 +569,9 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
                                            argument_buffer=4, argument_offset=len(item['arguments']) * 4))
         dispatches.append(MetalDispatch(item['name'], tuple(max(1, v) for v in grid), (threads, 1, 1), argument_buffer=4))
         kernel = Metal(text, tuple(dispatches), (bytes((View * len(views))(*views)),
-            bytes((c.c_uint64 * max(1, len(capacity)))(*capacity)), b'\0', bytes((c.c_uint32 * len(arguments))(*arguments))))
-        operands = tuple(local[v.index] for v in bound[:-1])
+            bytes((c.c_uint64 * max(1, len(capacity)))(*capacity)), bytes((Block * len(blocks))(*blocks)), bytes((c.c_uint32 * len(arguments))(*arguments))))
         tensors[value.index] = program.kernel_call(kernel, grid=(1,), peer=peer,
-            in_specs=tuple(BlockSpec(t.shape, lambda i: (0, 0)) for t in operands),
+            in_specs=tuple(specs),
             out_specs=BlockSpec(storage_shape, lambda i: (0, 0)),
             out_shape=ShapeDtypeStruct(storage_shape, value.dtype))(*operands)
     return tensors

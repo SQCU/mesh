@@ -41,8 +41,12 @@ def _sum(program, values, tile_rows, *, peer=None):
     values = tuple(values)
     if not values:
         raise ValueError('A linear reduction requires contributions')
+    kernel = kernels.add
+    if values[0].dtype.kind in 'iu':
+        left, right = kernels.arguments(2)
+        kernel = kernels.expression((left & 0xffffffffffffffff) + (right & 0xffffffffffffffff))
     while len(values) > 1:
-        values = tuple(_pointwise(program, kernels.add, values[i:i+2], tile_rows, peer=peer)
+        values = tuple(_pointwise(program, kernel, values[i:i+2], tile_rows, peer=peer)
             if i+1 < len(values) else values[i] for i in range(0, len(values), 2))
     return values[0]
 
