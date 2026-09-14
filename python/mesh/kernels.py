@@ -1326,7 +1326,17 @@ def _bind_segment_expression(program, expression, operands, ordinals, bounds, fl
         low, high = 'p1[0]', f'p1[{bounds.view.column_stride}]'
         if reduction:
             accumulator = 'float' if target.dtype.kind == 'f' else 'uint64_t'
-            statements = f'for(uint32_t c=lane;c<{width};c+=lanes) {{ {accumulator} total=0; for(uint32_t k={low};k<{high};k++) total+={value}; {output}[c*{target.view.column_stride}]=total; }}'
+            # design/algorithm-sources.md#grouped-segment-reductions
+            if metal and count > 1 and width < 32:
+                features = max(1 << (width-1).bit_length(), 32 // (1 << (min(count, 32)-1).bit_length()))
+                combine = ('total+=as_type<float>(simd_shuffle_xor(as_type<uint>(total),step));' if target.dtype.kind == 'f' else
+                    'uint32_t lo=simd_shuffle_xor(uint32_t(total),step),hi=simd_shuffle_xor(uint32_t(total>>32),step); total+=(uint64_t(hi)<<32)|uint64_t(lo);')
+                statements = f"""uint32_t c=lane%{features},part=lane/{features}; {accumulator} total=0;
+                  if(c<{width})for(uint64_t k=(uint64_t){low}+part;k<{high};k+={32//features})total+={value};
+                  for(uint32_t step={features};step<32;step*=2) {{{combine}}}
+                  if(part==0&&c<{width}){output}[c*{target.view.column_stride}]=total;"""
+            else:
+                statements = f'for(uint32_t c=lane;c<{width};c+=lanes) {{ {accumulator} total=0; for(uint32_t k={low};k<{high};k++) total+={value}; {output}[c*{target.view.column_stride}]=total; }}'
         else:
             statements = f'for(uint64_t t=(uint64_t){low}*{width}+lane;t<(uint64_t){high}*{width};t+=lanes) {{ uint64_t k=t/{width},c=t%{width}; {output}[t*{target.view.column_stride}]={value}; }}'
         return '\n'.join(declarations), '\n'.join((*locals, statements))
