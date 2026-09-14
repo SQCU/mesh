@@ -694,7 +694,7 @@ static NSString *specialization_digest(const void *bytes,size_t length) {
 }
 /* design/algorithm-sources.md#compiled-specialization-identities */
 static MeshCode *source_code(MeshAlgebra *a,const char *text,BOOL cpu) {
-  NSMutableDictionary *cache=cpu?a.cpuCode:a.libraries;NSString *source=@(text);MeshCode *code=cache[source];
+  NSMutableDictionary *cache=cpu?(NSMutableDictionary *)a.cpuCode:(NSMutableDictionary *)a.libraries;NSString *source=@(text);MeshCode *code=cache[source];
   if(!code){
     code=cpu?[MeshCPUCode new]:[MeshMetalCode new];code.source=source;
     code.digest=specialization_digest(text,strlen(text));cache[source]=code;
