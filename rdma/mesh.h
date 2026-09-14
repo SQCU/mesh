@@ -9,7 +9,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 29u
+#define MESH_VERSION 30u
 #define MESH_ABSENT UINT32_MAX
 /* ledger D6: "A maximum of 10 unreliable connection (UC) queue pairs" */
 #define MESH_QPS 8
@@ -18,7 +18,7 @@ struct mesh_transfer { uint32_t local_row,binding,offset,plane,bytes; };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* ROW_HOT: a produced send block the bridge has not completed, or a posted receive block not yet completed.
    PAGE_HOT: pages held by an outstanding work request. */
-enum { MESH_PRESENT, MESH_CONSTANT, MESH_PRODUCING, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PAGE_HOT, MESH_READ, MESH_PLANES=MESH_READ+64 };
+enum { MESH_PRESENT, MESH_CONSTANT, MESH_PRODUCING, MESH_SEND_SOURCE, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PAGE_HOT, MESH_READ, MESH_PLANES=MESH_READ+64 };
 #define MESH_READERS 64
 /* ledger D5: one posting order per queue pair and direction */
 enum { MESH_SEND, MESH_RECEIVE };

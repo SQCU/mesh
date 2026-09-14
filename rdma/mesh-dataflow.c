@@ -39,6 +39,7 @@ static void mesh_retire(struct hdr *m){
   for(uint32_t i=0;i<2*MESH_QPS;i++) atomic_store_explicit(&m->order_length[i],0,memory_order_release);
   for(uint32_t w=0;w<mesh_words(m);w++) atomic_store_explicit(&mesh_plane(m,MESH_ROW_OWN)[w],0,memory_order_release);
   mesh_bits_clear(m,MESH_PAGE_OWN,0,mesh_rows(m));
+  mesh_bits_clear(m,MESH_SEND_SOURCE,0,mesh_rows(m));
 }
 
 int mesh_attach(struct mesh_ctx *c,const char *name){
@@ -374,6 +375,7 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
   }
   if(!error){
     for(uint32_t r=0;r<rows;r++) if(mesh_is(m,MESH_ROW_OWN,r)) mesh_mask(m)[r]=used[r];
+    for(size_t i=0;i<binding_count;i++)if(!bindings[i].receive)mesh_bits_set(m,MESH_SEND_SOURCE,bindings[i].first,bindings[i].count);
     /* ledger D5: both participants append each queue's blocks in (identity, block index) order */
     for(size_t i=0;i<binding_count;i++){
       size_t j=i;
@@ -673,9 +675,13 @@ static void mesh_index_reset(struct mesh_ctx *c,uint32_t first,uint32_t count){
 
 /* design/algorithm-sources.md#programkernel_call */
 void mesh_notify(struct hdr *m,uint32_t first,uint32_t count){
-  for(uint32_t row=first;row<first+count;row++){
-    mesh_notice_push(m,MESH_NOTICE_COMPUTE,row);
-    mesh_notice_push(m,MESH_NOTICE_SEND,row);
+  for(uint32_t row=first;row<first+count;row++)mesh_notice_push(m,MESH_NOTICE_COMPUTE,row);
+  for(uint32_t word=first/64;count && word<=(first+count-1)/64;word++){
+    uint64_t sources=atomic_load_explicit(&mesh_plane(m,MESH_SEND_SOURCE)[word],memory_order_acquire)&mesh_word_mask(first,count,word);
+    while(sources){
+      uint32_t row=word*64+(uint32_t)__builtin_ctzll(sources);sources&=sources-1;
+      mesh_notice_push(m,MESH_NOTICE_SEND,row);
+    }
   }
 }
 /* design/algorithm-sources.md#programkernel_call */
