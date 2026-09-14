@@ -58,6 +58,7 @@ int mesh_algebra_route_hold(struct mesh_algebra *,struct mesh_route *,const stru
 int mesh_algebra_route_attach(struct mesh_algebra *,size_t function,struct mesh_route *,size_t consumer);
 int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha,float beta);
 /* design/algorithm-sources.md#selected-native-contractions */
+int mesh_algebra_view_pages(struct mesh_algebra *,struct mesh_view,struct mesh_view *pages,size_t capacity,size_t *count);
 int mesh_algebra_contract_select(struct mesh_algebra *,struct mesh_view selector,const struct mesh_view *left,const struct mesh_view *right,size_t plan_count,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,float alpha,size_t *function_index);
 int mesh_algebra_copy(struct mesh_algebra *,struct mesh_endpoint source,struct mesh_endpoint destination,size_t count,uint16_t queue);
 int mesh_algebra_export(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,size_t *index);

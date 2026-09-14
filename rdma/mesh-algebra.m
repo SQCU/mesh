@@ -443,6 +443,25 @@ static struct mesh_index_candidate indexed_maps(struct mesh_view view){
   struct mesh_row_map *maps=malloc(bytes);if(maps)memcpy(maps,f->function.input,bytes);
   return (struct mesh_index_candidate){.maps=maps,.count=f->function.inputs};
 }
+/* design/algorithm-sources.md#selected-native-contractions */
+int mesh_algebra_view_pages(struct mesh_algebra *handle,struct mesh_view view,struct mesh_view *pages,size_t capacity,size_t *count) {
+  MeshAlgebra *a=owner(handle);
+  if(!count || !valid_view(a,view) || (!pages && capacity))return EINVAL;
+  struct mesh_index_candidate coverage=indexed_maps(view);
+  if(!coverage.maps)return ENOMEM;
+  size_t needed=0;
+  for(uint32_t i=0;i<coverage.count;i++)needed+=coverage.maps[i].count;
+  *count=needed;
+  if(!pages){free(coverage.maps);return 0;}
+  if(capacity<needed){free(coverage.maps);return ENOSPC;}
+  struct mesh_extent *extent=&view.tensor->extents[view.extent];
+  size_t unit=a->context->M->pgsz/scalar_bytes(extent->shape.scalar),elements=extent->shape.rows*extent->shape.columns,position=0;
+  for(uint32_t i=0;i<coverage.count;i++)for(uint32_t j=0;j<coverage.maps[i].count;j++){
+    size_t offset=((size_t)coverage.maps[i].first+j-extent->first)*unit,columns=MIN(unit,elements-offset);
+    pages[position++]=(struct mesh_view){.tensor=view.tensor,.extent=view.extent,.offset=offset,.rows=1,.columns=columns,.row_stride=columns,.column_stride=1};
+  }
+  free(coverage.maps);return 0;
+}
 /* design/algorithm-sources.md#shared-sparse-routing-lowering */
 static struct mesh_route_vector route_vector(struct mesh_view view){
   return (struct mesh_route_vector){.values=(const uint32_t *)view.tensor->extents[view.extent].address+view.offset,.columns=view.columns,.row_stride=view.row_stride,.column_stride=view.column_stride,.length=view.rows*view.columns};
