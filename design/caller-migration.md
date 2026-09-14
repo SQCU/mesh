@@ -16,11 +16,12 @@ not a second installed public interface.
 | Installed raw C headers/module map | Removed from package installation. Native backend source remains canonical. |
 | `xonotic/planner/plan.py` | Ported to chunked `kernel_call` using the existing expert operator compiler; local algebra checked, paired run pending. |
 | `xonotic/solver/strat/runtime_transport.py` | Uses application-local canonical `Frames`; paired framing validation pending. |
-| `xonotic/solver/strat/strat_responder.py` | Uses canonical `Frames`; persistent-policy runtime migration remains. |
-| `xonotic/solver/strat/tensor_runtime.py` and generated encoder in `tensor_metal.py` | Outstanding: require the removed `mesh_rows_*`, `mesh-metal.h`, and `mesh-metal.m` interfaces. |
+| Persistent policy runtime, strategy execution/learner/responder and their curriculum/demo launchers | Deleted; no compatibility path. |
+| `xonotic/solver/strat/tensor_metal.py` | Retained numerical source compiler, explicit operand layouts and owner-to-peer copy edges; general region lowering remains. |
 
-The Xonotic entries remain in scope. Import scans must include them; finishing
-the algebra examples does not establish an all-callers migration. Their callers
-include persistent policy execution, optimizer storage adoption, remote graph
-configuration, and application frame transport. Those application behaviors must
-be preserved while moving storage and numerical submission to the single owner.
+The operator explicitly removed legacy maintenance obligations. Deleted binding
+consumers and their launchers are not supported alternatives. The retained
+planner, Frames, numerical model/compiler and live J-oracle viewer use their
+existing canonical owners. General compiler BlockSpec lowering and the paired
+gold chain are separate remaining validation work; historical training records
+do not establish either.

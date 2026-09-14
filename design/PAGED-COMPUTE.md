@@ -1,18 +1,10 @@
 # Paged matrix execution and remote placement
 
-The live policy uses `tensor.py`, `tensor_metal.py` and `tensor_runtime.py` for
-symbolic capacity dimensions, fixed shader variants, lifetime-planned persistent
-storage and recorded numerical phases. Routed expert forward and reverse products
-reuse the generic 64-by-32-by-32 SIMD matrix implementation. Sparse neighborhood
-integration consumes its complete indexed support. Full-axis reductions preserve
-the model's mathematical contractions.
-
-`tensor_mesh.py` partitions this same graph by declared ownership, including VJPs
-and parameter updates. Numerical spans use native receive/transmit pages and GPU
-copies; complete input bundles can be consumed directly through page tables.
-Remote results are staged before publication. The current flow and local evidence
-are in [POLICY-PROGRAM.md](POLICY-PROGRAM.md#persistent-execution-and-transport) and
-[POLICY-IMPLEMENTATION-20260907.md](POLICY-IMPLEMENTATION-20260907.md).
+The retained compiler is `tensor.py` plus `tensor_metal.py`. It lowers retained
+graph ownership into canonical `Program.copy` edges and owner-configured
+`Program.kernel_call` operations. The old tensor runtime and remote graph
+protocol were deleted. [Caller migration](caller-migration.md) records the
+current boundary and outstanding general region lowering.
 
 ## Historical MLX paging implementation
 

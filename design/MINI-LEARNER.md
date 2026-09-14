@@ -1,5 +1,12 @@
 # Tethered learner placement
 
+**Historical execution record.** The persistent runtime, learner/responder and
+curriculum described here were removed on September 13, 2026. Numerical model
+source and mathematical contracts remain; the deployment and execution
+instructions below are historical, not available launch alternatives.
+[Caller migration](caller-migration.md) describes the retained interfaces.
+
+
 The September 5 runtime places training on the Mini and the dedicated game server
 and renderer on the laptop. The Mini holds both policies, optimizer moments,
 replay, and fixed-page Metal kernels. The model and objective remain unchanged.

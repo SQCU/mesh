@@ -23,7 +23,9 @@ runs independently; terminal-result observation remains a host concern.
 The obsolete tensor runtime's persistent policy, remote graph protocol, worker,
 strategy execution, learner, and responder entry points were deleted. No
 replacement runtime or compatibility shim was introduced. Their numerical
-model/compiler source and the canonical planner/Frames callers remain.
+model/compiler source and the canonical planner/Frames callers remain. Their
+obsolete curriculum, demo, distributed evaluation and responder-liveness launch
+flows were also removed. The live J-oracle server and game engine remain.
 
 The compiler preserves graph owner-to-peer mappings. Distributed realization
 passes the same `root_peer` on each participant; root owner zero maps to that

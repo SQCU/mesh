@@ -13,5 +13,5 @@ restating them locally.
 | `xonotic/qcsrc/`, `xonotic/darkplaces-work/bot_batch*` | [`ENGINE-SCALE.md`](ENGINE-SCALE.md) | `xonotic-bot-compute.md`, `rl-training-spec.md`, `ALGORITHM-CONTRACTS.md` |
 | `rdma/`, `user/mesh-telemetry.py`, `bin/mesh-observe.py` | [`MESH-TELEMETRY.md`](MESH-TELEMETRY.md) | `mesh-coprocessor-demo.md`, `rl-training-spec.md`, `ALGORITHM-CONTRACTS.md` |
 | `viz/`, `xonotic/render/`, `xonotic/payload/runtime-package.py` | [`RUNTIME.md`](RUNTIME.md) | `mesh-coprocessor-demo.md`, `FUSION-SPEC.md`, `NAV-SPEC.md`, `ALGORITHM-CONTRACTS.md` |
-| `xonotic/solver/strat/joracle/demo.sh`, `xonotic/solver/strat/joracle/evaluate-distributed.sh`, `xonotic/solver/strat/joracle/client-keep.sh` | [`RUNTIME.md`](RUNTIME.md) | `mesh-coprocessor-demo.md`, `FUSION-SPEC.md`, `ALGORITHM-CONTRACTS.md` |
+| `xonotic/solver/strat/joracle/client-keep.sh` | [`RUNTIME.md`](RUNTIME.md) | `mesh-coprocessor-demo.md`, `FUSION-SPEC.md`, `ALGORITHM-CONTRACTS.md` |
 | `install*.sh`, `enable-autologin.sh`, `serve.sh`, `bin/mesh-bridge.sh`, `bin/mesh-kill-guard.sh`, `bin/mesh-networks.sh` | [`ACCESSIBILITY.md`](ACCESSIBILITY.md) | `THREAT-MODEL.md`, `AGENTS.md`, `RDMA-RULES.md`, `ACCESS-TOPOLOGY-SPEC.md` |

@@ -1,135 +1,29 @@
-# xonotic on the sealed mesh
+# Xonotic on mesh
 
-A Xonotic payload-mode dedicated server publishes native observations, cart/team
-state, events and addressed Havocbot view pages. The responder returns continuous
-rates for those view pages. The [policy program](../design/POLICY-PROGRAM.md) is the
-canonical description of source layouts, shared representation, learned outputs,
-exact exponential integration, training and execution boundaries.
+The retained numerical caller is `planner/plan.py`, which uses canonical
+`mesh.Program.kernel_call` and the existing symbolic Metal operator compiler.
+Application framing uses `solver/frames.py` and `solver/xonwire.py`.
+The old persistent-policy runtime, learner/responder, curriculum and distributed
+launcher scripts were removed; they are not alternative entry points.
+See [caller migration](../design/caller-migration.md) for current scope.
 
-## Online policy training
+The game engine, payload, rendering and telemetry/viewer source remain.
+Build the payload from this directory with `payload/build.sh`.
 
-The mixed-team training entry point is `solver.strat.curriculum --joint-training`.
-It assigns teams randomly between stratCGT-PPO (`matrix_fusion`) and `terminal_win`,
-and carries both full policy/optimizer/replay checkpoints across matches. The two use
-the same architecture and learner implementation. Current per-policy learning measures
-are in each match's `learning.json`; actual round outcomes are in `outcome.json`.
-See [the objective, replay and evaluation contract](../design/JOINT-POLICY-LEARNING.md)
-for what these measures establish, and what they do not.
+## Telemetry and retained viewer
 
-The real training environment is the dedicated server. Run the server with a sampled
-map/roster/cart/controller configuration and run the strategy responder with training
-enabled on the mesh peer:
+The node telemetry service publishes infrastructure activity on port 8788 and
+its whole-mesh observer on port 8787. The retained `solver.strat.joracle.server`
+serves recorded J-space and policy observations. From this directory:
 
-```
-cd ~/mesh/xonotic
-mesh-python -m solver.strat.strat_responder --train --off-policy-players 2
+```sh
+../bin/mesh-python -m solver.strat.joracle.server --run-dir /path/to/recorded/run
 ```
 
-The responder is a service and runs until `SIGINT`, `SIGTERM`, or `SIGHUP`, then drains
-the pending transition and writes its checkpoint and runstate before exiting. The
-curriculum owns match duration and sends `SIGTERM` at the match boundary.
-
-Training consumes live server transitions through the common policy and W/L value
-program. Native application acknowledgments determine actor credit; human observations
-can contribute value-learning data. The [policy program](../design/POLICY-PROGRAM.md)
-defines the complete loss and continuous view interface, and
-[joint policy learning](../design/JOINT-POLICY-LEARNING.md) defines controller ownership
-and exploratory rows.
-
-The match curriculum is a distribution over actual server launches: map, team count,
-players per team, controller mixture, cart-bearing entity overlay, skill, seed,
-perturbation regime, and off-policy participant count. `solver.strat.curriculum`
-extracts each BSP, generates that match's exact team/cart entity overlay, launches the
-dedicated server and training responder, asks the server to `quit` over stdin, and
-continues after a failed match. Every match directory contains the commands, UTC
-timestamps, return codes, entity hashes, logs, telemetry summary, and checkpoint
-lineage in `match.json`; the run-wide record is `matches.jsonl`.
-
-The curriculum runs this build automatically before its first match; it is also
-available directly:
-
-```
-payload/build.sh
-```
-
-Generate a reproducible mixed-count schedule and execute it:
-
-```
-cd ~/dox/mesh/xonotic
-mesh-python -m solver.strat.curriculum --generate 96 --seed 20260830 \
-  --server-host game-node --remote-engine /opt/xonotic/darkplaces-dedicated \
-  --remote-basedir /opt/xonotic/Xonotic \
-  --maps runningmanctf,dance --team-counts 2,3,4,5 \
-  --players-per-team 2,4,8 --cart-counts 1,2,3,4 \
-  --skills 2,5,8 --perturbations baseline,fast,slow,volatile \
-  --off-policy-counts 0,1,2,4 --human-counts 0 --heldout-fraction 0.2 \
-  --duration 600 --run-dir solver/strat/runs/curriculum-20260830
-```
-
-The listed team and cart axes seed the first outer game configurations. Later cycles
-sample half/center/double neighborhoods around the observed whole-mesh operating point
-from preceding cycles. Within every match the server opens its compiled player capacity
-and the profiler grows and brackets bot count in whole-team quanta. The 8787 whole-mesh
-stream records memory-bandwidth fraction, FLOP/s bounds, per-node deadline load, and the
-disclosed numerical operating loss at every point. The minimum-loss observation is the
-center of the next sample neighborhood; no feasibility or player-count filter admits or
-rejects a point. The initial `players-per-team` value is a launch seed, not a capacity
-claim.
-
-The same command with `--dry-run` resolves and records the complete schedule and
-commands without requiring Xonotic, MLX, or RDMA. JSON and JSONL manifests are also
-accepted with `--manifest`. A JSON manifest may contain `defaults`, `matches`, and
-`heldout`; each match accepts `map`, `bsp` or `entity_file`, `teams`, scalar or list
-`players_per_team`, `carts`, `controllers`, `skill`, `duration`, `seed`,
-`perturbation`, `server_cvars`, `server_args`, `client_commands`, and
-`off_policy_players`. Held-out matches load the realized checkpoints through the same
-policy inference path without `--train` and never advance the training lineage. Optional
-`client_commands` are launched as argv without a shell for externally controlled participants; the
-telemetry record reports the bot/human counts actually observed rather than treating
-the requested controller mixture as evidence. Generated schedules can vary human
-counts with `--human-counts`; `--human-client-command` launches one command per such
-participant and expands `{port}`, `{map}`, `{seed}`, `{match}`, and `{client}` tokens.
-
-Study cycles atomically replace `study.json` with cumulative match outcomes,
-checkpoint-realization Elo estimates, observed application and native game measures,
-optimization records, and fabric measurements. Missing telemetry remains `null`;
-retained historical fields do not establish coverage for the current policy.
-
-Summarize one or more realized telemetry streams with:
-
-```
-mesh-python -m solver.strat.joracle.metrics solver/strat/runs/curriculum-20260830/*/telemetry.jsonl
-```
-
-The summary records available application acknowledgments, native outcomes, cart and
-resource measurements. The policy viewer reports the current optimization measures
-described in the [policy program](../design/POLICY-PROGRAM.md).
-
-## Live mesh measurements
-
-The strategy responder publishes FLOP, byte, row, deadline, J-lens, and J-oracle
-coordinates through the generic workload interface. The node telemetry service retains
-them in memory on port 8788. The existing whole-mesh observer on port 8787 combines the
-laptop and Mini without importing a Xonotic schema. `joracle/demo.sh` checks or
-kickstarts that observer; it does not launch another HTTP service or browser pane.
-
-Open `http://127.0.0.1:8787` for both nodes' infrastructure activity.
-`http://127.0.0.1:8787/latest.json` exposes scalar/array-length projections of nested
-`workload.producers[].measures` objects, not the full numerical arrays. Start the two
-application views from this directory with:
-
-```
-../bin/mesh-python -m solver.strat.joracle.server --run-dir solver/strat/runs/joint-live-20260904
-```
-
-Open `http://127.0.0.1:8795/j` for J-space and `http://127.0.0.1:8795/policy` for
-policy optimization. Both use one cached reader, following new match directories.
-The J views consume the complete source feature vector and actual intermediate/output
-arrays from the [policy program](../design/POLICY-PROGRAM.md). Native response identities
-connect issued view rates with later application acknowledgments and observed game
-outcomes. Array serialization cadence is controlled by `--model-sample-every`.
-Runtime process multiplicity, host identity, bridge state, telemetry age and reconnect
-epochs remain separately reported coordinates.
+The default application views are `/j` and `/policy` on port 8795. Existing
+viewer processes and game services are independent of the deleted launchers.
+The records below describe historical applications; their successful operation
+is not a claim that the deleted training entry points remain available.
 
 The following August 30 observations describe an earlier model and transport revision;
 they are historical evidence, not current architecture or training claims.
@@ -158,7 +52,7 @@ and began consuming immediately.
 
 - engine bridge: `darkplaces-work/mesh_ipc.c`
 - game code: `qcsrc/common/gamemodes/gamemode/payload/sv_payload_strategy_io.{qc,qh}`
-- solver: `solver/strat/strat_responder.py`, `solver/xonwire.py`
+- historical solver: removed responder plus retained `solver/xonwire.py`
 - build tree (not in this repo): `~/dox/xonotic/build-engine`, `~/dox/xonotic/build-qc`
 
 ## Historical transport validation
@@ -248,95 +142,3 @@ core. This historical run had no strategy responder attached and no `[PLCBARRIER
 commit, so it cannot support
 the matrix-fusion/Elo or two-host planning claims.
 
-Post-training release evaluation can run the release-rank matrix-fusion/MoE operator across both hosts without replacing the game or reporter services:
-
-```sh
-xonotic/solver/strat/joracle/evaluate-distributed.sh
-```
-
-For one real match at the previously exercised 128/341/8/top-2 shape, launch
-the existing curriculum from the M5 checkout after synchronizing and building
-committed `main` on both participants:
-
-```sh
-cd /Users/mdot/dox/mesh/xonotic
-../bin/mesh-python -m solver.strat.curriculum \
-  --server-host ms-mac-mini.local \
-  --ssh-command 'ssh -o BatchMode=yes -o ConnectTimeout=8' \
-  --remote-mesh-root /Users/mdot/mesh \
-  --remote-python /Users/mdot/mesh/bin/mesh-python \
-  --run-dir solver/strat/runs/encoder-migration-20260910 \
-  --remote-run-root /tmp/mesh-encoder-migration-20260910 \
-  --generate 1 --cycles 1 --study-repetitions 0 --heldout-fraction 0 \
-  --maps dance --team-counts 2 --players-per-team 2 --cart-counts 1 \
-  --skills 5 --perturbations baseline --off-policy-counts 0 --human-counts 0 \
-  --policy-arms matrix_fusion --scale-rank 128 --scale-hidden 341 \
-  --scale-experts 8 --scale-topk 2 --replay-batch 1 \
-  --score-limit 30 --checkpoint-score-rate 1 \
-  --peer-node 1 --strategy-node 0 \
-  --distributed-scale --distributed-scale-operation block
-```
-
-The responder and its navigation/telemetry paths remain local to the M5;
-the dedicated server and matrix worker run on the M4. Application modules load
-directly from the respective committed checkouts, with matching revisions
-recorded in the run metadata. Explicit `--responder-command` and
-`--expert-command` override those local and remote commands respectively;
-neither invokes an application snapshot deployment. Transfers performed by
-this curriculum contain engine binaries, map assets, generated entity files,
-and result artifacts, not application source.
-
-The launcher needs the existing Python environment, the `dance` map assets,
-the dedicated engine and payload build tools, and both existing RDMA bridges.
-Each realized match's user directory contains its actual map BSP and
-`gamemodes-payload.cfg`, including when entity measurements are reused or an
-entity overlay was supplied. The existing artifact transfer therefore supplies
-the peer with the exact map used for entity generation.
-It runs one match, ending on its observed score outcome; `--duration` does not
-impose a wall-clock timeout. This exercises actual policy inputs and generated
-encoders. `measure.py matrix` measures a different numerical path and is not a
-substitute for this application run.
-
-The command resolves the Mini address and uses the curriculum's single lifecycle
-owner. The [policy program](../design/POLICY-PROGRAM.md) defines the shared local/remote
-mathematics, tensor exchange and parameter ownership. Whole-game deadlines, resume
-continuity and behavioral benefit require actual operational measurements.
-
-The [joint-learning runtime](../design/JOINT-POLICY-LEARNING.md) now runs both objective-defined
-policies and honors `--human-counts` / `--human-client-command` in joint schedules.
-Client templates substitute `{port}`, `{map}`, `{seed}`, `{match}`, `{directory}` and
-`{client}`; use the game host's reachable address with `{port}` to follow each match.
-Server-observed human rows remain value-learning data but are excluded from direct
-PPO actor credit. The policy dashboard at `http://127.0.0.1:8795/policy` exposes
-per-policy learning and observed-outcome measures. Full J matrices remain in the node's
-latest record and the match's current `j-measures.<telemetry-basename>.npz` artifact; they are not
-repeated in the interactive polling payload.
-
-The remote game base defaults to `/Users/mdot/mesh-workloads/cartlane/Xonotic`;
-`--remote-basedir` selects another existing installation. The remote engine comes
-from `--remote-mesh-root`'s `xonotic/darkplaces-work/darkplaces-dedicated`, or
-`--remote-engine`. Each participant builds its own committed checkout. Curriculum
-never copies engine binaries, source trees, Python environments or base archives.
-Only the selected map, generated entity data and payload configuration enter the
-replaceable match userdir; synchronizing it removes obsolete prior match assets.
-
-After recording result hashes and metrics, curriculum removes per-match BSP and
-gamecode copies. It retains small logs, metadata, entities and measurements, plus
-initial and current generated checkpoints per policy arm and the continuation
-bundles they reference. Superseded checkpoint payloads, continuation bundles,
-action archives and journals are deleted after their successor is recorded. Externally supplied
-checkpoints remain owned by their source. The live userdir is deleted after the
-game process exits. Interrupted runs may retain their final artifacts for the
-operator to inspect; no cleanup touches the configured base installation.
-
-`bin/mesh-application.py` activates a canonical Git checkout through a lightweight
-`current` symlink. Remote deployment transfers committed Git objects, verifies
-the revision, and builds both checkouts concurrently. It creates no snapshot
-source generations or per-application Python runtime. The canonical checkout uses
-the installed shared Python runtime through `bin/mesh-python`.
-
-Curriculum retains the latest completed full J observation archive from its own
-matches and removes its superseded full archive after the successor exists and
-match results are recorded. Scalar telemetry, logs and match metrics remain.
-A match that produces no new observation leaves the last usable archive intact;
-archives belonging to another run or an externally configured viewer are untouched.

@@ -1,5 +1,12 @@
 # Policy program: native inputs, common IR, learning and outputs
 
+**Historical execution record.** The persistent runtime, learner/responder and
+curriculum described here were removed on September 13, 2026. Numerical model
+source and mathematical contracts remain; the deployment and execution
+instructions below are historical, not available launch alternatives.
+[Caller migration](caller-migration.md) describes the retained interfaces.
+
+
 The controlling requirements are the user quotes in [SPECIFICATION.md](SPECIFICATION.md),
 including the September 6 common-IR and whole-program review instructions. This
 page describes the implemented program; neither tests nor historical successful

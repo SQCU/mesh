@@ -14,9 +14,8 @@ Implementation surfaces:
 - `xonotic/darkplaces-work/` owns the runtime renderer, client protocol, and engine
   execution surfaces.
 - `xonotic/payload/runtime-package.py` owns release artifact assembly.
-- `xonotic/solver/strat/joracle/demo.sh`, `evaluate-distributed.sh`, and
-  `client-keep.sh` own generation staging, cardinality-derived engine capacity, and client
-  supervision.
+- `xonotic/solver/strat/joracle/client-keep.sh` owns retained client supervision.
+  The old strategy demo and distributed evaluation launchers were deleted.
 
 The 8787 process is a replaceable presentation subscriber. It does not own telemetry
 truth, persist a filesystem cache, open duplicate browser panes, or establish node
