@@ -491,3 +491,75 @@ added integer and Xonotic cases account for additional work, so total counts and
 short timings do not establish a throughput comparison. General logical rank,
 remaining indexed/derivative composition, physical storage/launch optimization,
 collective placement and matched performance acceptance remain unfinished.
+
+## Explicit casts and nested local FFNs
+
+`7d6b8b4` adds explicit expression conversion boundaries and typed canonical
+contraction panels. `0c441b5` composes the local FFN through its hidden activation
+into its down projection, preserving the deliberate hidden FP16 conversion.
+The exchange configuration still publishes the hidden panels and substitutes the
+returned references into the same down-projection formula. Xonotic cast nodes
+use the shared expression conversion. No second numerical executor is introduced.
+
+`1bd8c82` updates the existing operational example to exercise the actual local
+configuration with `exchange=None`. It adds a rounded and unrounded nested
+projection, scalar half rounding, and the difference between converting before
+and after summation. CPU float32 completed 1942 submissions with gold maximum
+absolute error 1.654e-6; the scalar results are `[0,0,1]` and the two sums are
+`1,0`. These observations are archived as `typed-initial-cpu*` with both library
+and example at `1bd8c82`.
+
+The corresponding Metal run exposed an MPS restriction, retained verbatim in
+`typed-metal-mixed-failure.log.gz`: mixed multiplication requires FP32 left and
+output matrices and an FP16 right matrix. The earlier opposite-order coverage
+was insufficient. The explicit rounded hidden operand followed by FP32 weights
+exercises the unsupported order. This is a native layout-lowering issue, not a
+reason to remove the expression's typed conversion.
+
+`4c87c68` strengthens early-progress observation by tracing each nested output's
+actual row ancestors separately and requiring a completed projection consumer
+for each branch while the other hidden panels remain absent. `2c7928f` adds a
+rectangular 3-by-5 times 5-by-7 mixed contraction in both operand orders with a
+ragged K panel. These additions belong to the existing operational example;
+they distinguish incorrect layout lowering from vector-only numerical agreement.
+
+`192ff70` fixes reverse mixed contraction layout using
+`AB = (BᵀAᵀ)ᵀ`. Setup allocates its FP32 partial as a transposed view of canonical
+storage; native binding normalizes operand and output views before deriving
+geometry and dependencies. MPS receives its supported type order. Source retains
+the original operand pointers, byte offsets and strides: there is no operand
+conversion copy, scalar fallback, or per-row multiplication workaround. The
+existing sum/epilogue consumes the logical view. The raw native row-major
+reverse-mixed binding remains constrained by MPS; the shared expression owner
+provides the required layout. Core ML internal-copy and device-placement claims
+remain outside this evidence.
+
+The next logical-indexing migration is concrete: `cast_header.scale_route` uses
+`take_along_axis`, and `strategy.row_gram_context` produces rank-three gathers
+and slices. Shared lowering needs logical shape separate from physical matrix
+shape and exact integer quotient/remainder for coordinate mapping. Nonnegative
+flat ordinals decode using positive dimensions; negative user indices normalize
+in signed arithmetic before address conversion. General gather derivatives also
+need scalar-address collision reduction and must depend on cotangents and indices,
+not unused primal data. A forward-only migration will not discharge that work.
+
+Final library/example source `192ff70` passes both CPU and Metal locally in
+float32 (1974 completed submissions) and float16 (2026), and paired over RDMA in
+float16 (1336 rank-zero completions). Local float32 gold maximum absolute error
+is 1.654e-6 CPU and 1.576e-6 Metal; all float16 gold runs report 0.001953125.
+Both mixed rectangular results exactly match their representable numerical
+reference. Both explicit cast-order results match, and both nested projection
+branches complete useful work with hidden panels 1 and 2 withheld in both
+successive generations. In the final Metal float32 trace, functions 50 and 62
+read the first projection rows and separate unrounded/rounded hidden rows;
+neither includes the withheld panels. Their native completions are observed
+separately through the corresponding output's actual ancestry.
+
+`typed-provenance.json` records each configuration and its compressed logs and
+traces. Paired CPU and Metal peer applications exit cleanly after SIGTERM. Only
+gold and fanout traverse RDMA; nested/indexed/reduction side cases remain local
+to rank zero. These short observations and differing example scopes establish
+neither matched throughput parity nor physical wire/GPU utilization. General
+logical rank, remaining caller/derivative migrations, direct matmul binding
+unification, launch/storage optimization, collective placement and matched
+performance acceptance remain open.

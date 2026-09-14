@@ -1,0 +1,96 @@
+{
+  "initial": {
+    "library_revision": "1bd8c82",
+    "example_revision": "1bd8c82",
+    "cpu": "typed-initial-cpu",
+    "metal_failure": "typed-metal-mixed-failure.log.gz"
+  },
+  "runs": [
+    {
+      "prefix": "typed-final-cpu",
+      "library_revision": "192ff70",
+      "example_revision": "192ff70",
+      "dtype": "float32",
+      "scatter_rows": 4097,
+      "scatter_tile": 2049,
+      "scatter_destinations": 17,
+      "paired": false,
+      "xonotic": true,
+      "runs": 3,
+      "completed": 1974,
+      "gold_max_absolute_error": 1.6537194948984535e-06
+    },
+    {
+      "prefix": "typed-final-metal",
+      "library_revision": "192ff70",
+      "example_revision": "192ff70",
+      "dtype": "float32",
+      "scatter_rows": 4097,
+      "scatter_tile": 2049,
+      "scatter_destinations": 17,
+      "paired": false,
+      "xonotic": true,
+      "runs": 3,
+      "completed": 1974,
+      "gold_max_absolute_error": 1.575691461974671e-06
+    },
+    {
+      "prefix": "typed-local-half-cpu",
+      "library_revision": "192ff70",
+      "example_revision": "192ff70",
+      "dtype": "float16",
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "paired": false,
+      "xonotic": true,
+      "runs": 3,
+      "completed": 2026,
+      "gold_max_absolute_error": 0.001953125
+    },
+    {
+      "prefix": "typed-local-half-metal",
+      "library_revision": "192ff70",
+      "example_revision": "192ff70",
+      "dtype": "float16",
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "paired": false,
+      "xonotic": true,
+      "runs": 3,
+      "completed": 2026,
+      "gold_max_absolute_error": 0.001953125
+    },
+    {
+      "prefix": "typed-paired-cpu",
+      "library_revision": "192ff70",
+      "example_revision": "192ff70",
+      "dtype": "float16",
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "paired": true,
+      "xonotic": true,
+      "runs": 3,
+      "completed": 1336,
+      "gold_max_absolute_error": 0.001953125
+    },
+    {
+      "prefix": "typed-paired-metal",
+      "library_revision": "192ff70",
+      "example_revision": "192ff70",
+      "dtype": "float16",
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "paired": true,
+      "xonotic": true,
+      "runs": 3,
+      "completed": 1336,
+      "gold_max_absolute_error": 0.001953125
+    }
+  ],
+  "peer_termination": "SIGTERM; both ssh sessions exited zero",
+  "scope": "Paired gold and fanout use actual RDMA. Nested, cast, rectangular mixed, reduction and indexed side cases execute on rank zero. No matched throughput or physical wire/GPU overlap claim."
+}
