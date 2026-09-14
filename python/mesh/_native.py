@@ -116,6 +116,7 @@ class Native:
             'mesh_algebra_route_create': (P, [P, View, View, View, C.POINTER(View), Z, Z]),
             'mesh_algebra_route_table': (View, [P, P]),
             'mesh_algebra_route_attach': (C.c_int, [P, Z, P, Z]),
+            'mesh_algebra_route_hold': (C.c_int, [P, P, C.POINTER(View), Z]),
             'mesh_algebra_trace_route_count': (Z, [P]),
             'mesh_algebra_trace_route': (RouteEvent, [P, Z]),
             'mesh_algebra_trace_route_reader': (ReaderEvent, [P, Z, U]),
