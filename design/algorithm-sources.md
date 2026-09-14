@@ -2087,9 +2087,13 @@ directory selector and original segment bounds, so an empty range does not wait
 for a missing direct operand. Numerical partials alone retain active omission.
 
 `metadata_local` verifies local metadata ownership against receive bindings.
-`metadata_descends` follows immutable configured function dependencies to the
-known count-producing output, rejects omittable metadata producers, and excludes
-cycles from the ancestry proof. `indexed_active_domain` requires each derived
+`metadata_descends` checks every ordinary dependency page of immutable configured
+metadata producers. Each page must belong to the known count-producing output,
+be declared constant, or have an always-producing local ancestor rooted in that
+same output. At least one count-rooted path is required; an unrelated ordinary
+input cannot be hidden by another direct count input. A setup proof cache rejects
+cycles and avoids repeated traversal of shared producers. Omittable producers
+cannot establish this ancestry. `indexed_active_domain` requires each derived
 selector/bound producer to have that ancestry before replacing containment. It
 retains an explicit pointer to the existing active domain and adds its count maps
 to indexed lifetime metadata, rejecting candidate overlap. No scheduler or

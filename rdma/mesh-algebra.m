@@ -1119,21 +1119,30 @@ static int metadata_local(MeshAlgebra *a,struct mesh_row_map map) {
   return 1;
 }
 /* design/algorithm-sources.md#derived-selector-active-domains */
-static int metadata_descends(MeshAlgebra *a,MeshFunction *source,struct mesh_row_map root,NSMutableSet<NSValue *> *visiting) {
+static int metadata_descends(MeshAlgebra *a,MeshFunction *source,struct mesh_row_map root,NSMutableDictionary<NSValue *,NSNumber *> *proof) {
+  NSValue *identity=[NSValue valueWithPointer:(__bridge const void *)source];
+  NSNumber *known=proof[identity];if(known)return known.intValue;
+  proof[identity]=@0;
   if(source->function.active)return 0;
   for(uint32_t i=0;i<source->function.outputs;i++)if(!metadata_local(a,source->function.output[i]))return 0;
-  NSValue *identity=[NSValue valueWithPointer:(__bridge const void *)source];
-  if([visiting containsObject:identity])return 0;
-  [visiting addObject:identity];int found=0;
-  for(uint32_t i=0;i<source->function.inputs && !found;i++){
+  int rooted=0;
+  for(uint32_t i=0;i<source->function.inputs;i++){
     struct mesh_row_map input=source->function.input[i];
-    if(overlaps(input,root)){found=1;break;}
-    for(MeshFunction *producer in a.functions){
-      int contributes=0;for(uint32_t j=0;j<producer->function.outputs;j++)contributes|=overlaps(input,producer->function.output[j]);
-      if(contributes && metadata_descends(a,producer,root,visiting)){found=1;break;}
+    for(uint32_t row=input.first;row<input.first+input.count;row++){
+      if(root.first<=row && row<root.first+root.count){rooted=1;continue;}
+      if(mesh_bits_all(a->context->M,MESH_CONSTANT,row,1))continue;
+      int covered=0;
+      for(MeshFunction *producer in a.functions){
+        int contributes=0;for(uint32_t j=0;j<producer->function.outputs;j++){
+          struct mesh_row_map out=producer->function.output[j];contributes|=out.first<=row && row<out.first+out.count;
+        }
+        if(contributes && metadata_descends(a,producer,root,proof)){covered=1;break;}
+      }
+      if(!covered)return 0;
+      rooted=1;
     }
   }
-  [visiting removeObject:identity];return found;
+  proof[identity]=@(rooted);return rooted;
 }
 /* design/algorithm-sources.md#derived-selector-active-domains */
 static int indexed_active_domain(MeshAlgebra *a,struct mesh_indexed_read *d,struct mesh_active *active,struct mesh_row_map root) {
@@ -1145,7 +1154,7 @@ static int indexed_active_domain(MeshAlgebra *a,struct mesh_indexed_read *d,stru
       int covers=0;for(uint32_t j=0;j<source->function.outputs;j++){
         struct mesh_row_map out=source->function.output[j];covers|=out.first<=map.first && out.first+out.count>=map.first+map.count;
       }
-      if(covers && metadata_descends(a,source,root,[NSMutableSet new])){rooted=1;break;}
+      if(covers && metadata_descends(a,source,root,[NSMutableDictionary new])){rooted=1;break;}
     }
     if(!rooted)return EINVAL;
   }
