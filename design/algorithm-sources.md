@@ -4088,6 +4088,26 @@ this change. `_ExpressionRegions.reduction_regions(node, row, rows)` is setup-ti
 compiler analysis, called before native function registration. Its explicit row
 domain comes from the caller; it is not inferred during numerical invocation.
 
+The page traversal is shared as `_ExpressionRegions.page_cuts` by ordinary
+reductions and contractions. `parts` unions its existing K-tile boundaries with
+left-operand column cuts over the requested output rows and right-operand row
+cuts over the requested output columns. Each resulting interval binds the existing
+CPU or accelerator contraction implementation on those two operand sections.
+A source page outside that K interval is not pulled in by a larger logical tile.
+Constants contribute no arrival boundaries. Direct output binding requires one
+interval after all cuts have been applied; otherwise each partial keeps its own
+canonical output and joins the existing merge graph. Empty K retains its existing
+identity path.
+
+This removes the separate contraction policy that ignored source-page transitions.
+There is no new runtime shape/type inference, numerical kernel, or partial-result
+scheduler. More boundaries can increase partial allocations and merge launches,
+particularly for large input strides; floating-point association may change.
+Dynamic indexed-load payloads still need their own exact page-footprint lowering,
+and nested contractions can produce conservative cuts. Source review checked
+axis/origin mapping, transpose, singleton broadcasts, constants and direct-output
+ownership; Python compilation passes. No numerical run or speedup is claimed.
+
 The compiler obtains canonical page size once through `mesh_algebra_page_bytes`.
 It unions existing block boundaries with page transitions from each participating
 direct Ref's retained offset, row stride, column stride and dtype. For stride s>0,

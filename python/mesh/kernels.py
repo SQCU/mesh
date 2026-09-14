@@ -2059,16 +2059,20 @@ class _ExpressionRegions:
                 tile = gcd(tile, layout[2][axis])
         operands = tuple(child.astype('float32') if dtype.kind == 'f' and _expression_dtype(child, self.sources).kind in 'iub' else child
                          for child in (left, right))
+        boundaries = {0, inner, *range(0, inner, tile)}
+        boundaries.update(cut for cut in self.page_cuts(left, 1, origin[0], shape[0]) if 0 < cut < inner)
+        boundaries.update(cut for cut in self.page_cuts(right, 0, origin[1], shape[1]) if 0 < cut < inner)
+        ordered = sorted(boundaries)
         parts = []
-        for start in range(0, inner, tile):
-            length = min(tile, inner - start)
+        for start, end in zip(ordered, ordered[1:]):
+            length = end - start
             left_panel = self.panel(operands[0], (origin[0], start), (shape[0], length))
             right_panel = self.panel(operands[1], (start, origin[1]), (length, shape[1]))
             reverse = left_panel.dtype == np.dtype('float16') and right_panel.dtype == np.dtype('float32')
             if reverse:
                 destination = self.temporary(shape[::-1]).T
             else:
-                destination = direct if direct is not None and tile == inner and direct.dtype == dtype else self.temporary(shape, dtype)
+                destination = direct if direct is not None and len(ordered) == 2 and direct.dtype == dtype else self.temporary(shape, dtype)
             if dtype.kind in 'iub':
                 _integral_contraction(self.program, left_panel, right_panel, destination)
             else:
@@ -2088,60 +2092,60 @@ class _ExpressionRegions:
         return self.cache[key]
 
     # design/algorithm-sources.md#page-derived-reduction-leaves
+    def page_cuts(self, value, axis, origin, count):
+        shape = self.layout(value)[0]
+        if shape[axis] == 1:
+            return set()
+        if shape[1-axis] == 1:
+            origin, count = 0, 1
+        if value.operation == 'input':
+            source = self.sources[value.value]
+            refs = ((tuple(i*b for i, b in zip(coordinate, source.block_shape)), ref)
+                    for coordinate, ref in source.blocks.items()) if self.whole[value.value] else (((0, 0), source),)
+            result = set()
+            for base, ref in refs:
+                if (ref.view.tensor, ref.view.extent) in self.program._constant_extents:
+                    continue
+                start = max(origin, base[1-axis])
+                stop = min(origin+count, base[1-axis]+ref.shape[1-axis])
+                if start >= stop:
+                    continue
+                result.update((base[axis], base[axis]+ref.shape[axis]))
+                strides = ref.view.row_stride, ref.view.column_stride
+                stride, unit = strides[axis], self.page_bytes // ref.dtype.itemsize
+                if stride == 0:
+                    continue
+                for other in range(start-base[1-axis], stop-base[1-axis]):
+                    address = ref.view.offset + other*strides[1-axis]
+                    position = 0
+                    while position < ref.shape[axis]:
+                        remaining = unit - (address+position*stride) % unit
+                        position = min(ref.shape[axis], position + (remaining+stride-1)//stride)
+                        result.add(base[axis]+position)
+            return result
+        if value.operation == 'indexed_contract':
+            return self.page_cuts(_resolve_logical(value.value[0], self.sources), axis, origin, count)
+        if value.operation == 'transpose':
+            return self.page_cuts(value.operands[0], 1-axis, origin, count)
+        if value.operation == 'dot':
+            operand = value.operands[1 if axis == 1 else 0]
+            return self.page_cuts(operand, axis, 0, self.layout(operand)[0][1-axis])
+        if value.operation in _REDUCTIONS or value.operation == 'argsort':
+            return self.page_cuts(value.operands[0], axis, 0, self.layout(value.operands[0])[0][1-axis]) if axis == 0 else set()
+        result = set()
+        for operand in value.operands:
+            if self.layout(operand)[0][axis] == shape[axis]:
+                result.update(self.page_cuts(operand, axis, origin, count))
+        return result
+
+    # design/algorithm-sources.md#page-derived-reduction-leaves
     def reduction_regions(self, node, row, rows):
         child = node.operands[0]
         layout = self.layout(child)
         width, tile = layout[0][1], layout[2][1]
         boundaries = {0, width, *range(0, width, tile)}
 
-        # design/algorithm-sources.md#page-derived-reduction-leaves
-        def cuts(value, axis, origin, count):
-            shape = self.layout(value)[0]
-            if shape[axis] == 1:
-                return set()
-            if shape[1-axis] == 1:
-                origin, count = 0, 1
-            if value.operation == 'input':
-                source = self.sources[value.value]
-                refs = ((tuple(i*b for i, b in zip(coordinate, source.block_shape)), ref)
-                        for coordinate, ref in source.blocks.items()) if self.whole[value.value] else (((0, 0), source),)
-                result = set()
-                for base, ref in refs:
-                    if (ref.view.tensor, ref.view.extent) in self.program._constant_extents:
-                        continue
-                    start = max(origin, base[1-axis])
-                    stop = min(origin+count, base[1-axis]+ref.shape[1-axis])
-                    if start >= stop:
-                        continue
-                    result.update((base[axis], base[axis]+ref.shape[axis]))
-                    strides = ref.view.row_stride, ref.view.column_stride
-                    stride, unit = strides[axis], self.page_bytes // ref.dtype.itemsize
-                    if stride == 0:
-                        continue
-                    for other in range(start-base[1-axis], stop-base[1-axis]):
-                        address = ref.view.offset + other*strides[1-axis]
-                        position = 0
-                        while position < ref.shape[axis]:
-                            remaining = unit - (address+position*stride) % unit
-                            position = min(ref.shape[axis], position + (remaining+stride-1)//stride)
-                            result.add(base[axis]+position)
-                return result
-            if value.operation == 'indexed_contract':
-                return cuts(_resolve_logical(value.value[0], self.sources), axis, origin, count)
-            if value.operation == 'transpose':
-                return cuts(value.operands[0], 1-axis, origin, count)
-            if value.operation == 'dot':
-                operand = value.operands[1 if axis == 1 else 0]
-                return cuts(operand, axis, 0, self.layout(operand)[0][1-axis])
-            if value.operation in _REDUCTIONS or value.operation == 'argsort':
-                return cuts(value.operands[0], axis, 0, self.layout(value.operands[0])[0][1-axis]) if axis == 0 else set()
-            result = set()
-            for operand in value.operands:
-                if self.layout(operand)[0][axis] == shape[axis]:
-                    result.update(cuts(operand, axis, origin, count))
-            return result
-
-        boundaries.update(cut for cut in cuts(child, 1, row, rows) if 0 < cut < width)
+        boundaries.update(cut for cut in self.page_cuts(child, 1, row, rows) if 0 < cut < width)
         ordered = sorted(boundaries)
         return tuple((first, last-first) for first, last in zip(ordered, ordered[1:]))
 
