@@ -620,3 +620,52 @@ launches, broader axis/contraction/reduction composition, general indexed scatte
 values and derivatives, remaining caller migration, storage/launch optimization,
 collective placement and matched performance acceptance. No end-to-end performance
 parity is inferred from these finite numerical and progress observations.
+
+## Setup specialization of vector addresses
+
+`0d6115d` realizes setup-known indexed addresses as ordinary Ref bindings in the
+shared expression owner. `604082e` preserves source order when assembling access
+masks, removing hash-order-dependent specialization. The numerical graph stays
+fixed: gathers operate on vectors of indices; masks express numerical validity.
+`c1103f8` keeps the operational example straight-line, with static and indexed
+reads of the same tensor composed in one expression. Its distinct row values
+expose incorrect alias selection across repeated publication.
+
+Source review establishes that specialization reads setup expressions, not
+operand contents, resolves selected entries in the existing Tensor block table,
+and binds their existing offsets, strides and storage. Purely static accesses
+need neither selector-producing functions nor selector storage. Index-vector
+accesses retain the shared indexed representation. Evaluation uses bounded
+4096-point chunks and documented fixed-width integer semantics; expressions
+outside its proven domain retain indexed lowering. Reduction access analysis
+uses the reduced domain rather than just the output width. No new numerical
+scheduler or alternate operand store is introduced. The mechanism and prior art
+are documented in [Static indexed access specialization](algorithm-sources.md#static-indexed-access-specialization).
+
+The final `604082e` local CPU and Metal float32 runs each configure 1503 functions,
+55 with indexed descriptors, and complete 2095 submissions. The same example
+with the pre-specialization library configures 1545 functions, 89 indexed, and
+completes 2216 submissions on each backend. Native trace inspection confirms that
+the first transpose, concatenate and reshape/gather outputs now use ordinary
+source-page inputs with zero indexed descriptors. Take retains indexed accesses
+because it consumes index vectors. Initial `f1feeaa` measurements had different
+CPU/Metal specialization counts; they are retained with provenance and superseded
+by the mask-order fix and final runs.
+
+Both final paired float16 runs configure 1439 rank-zero functions, 55 indexed,
+and complete 1410 submissions. Numerical comparisons, early outputs with unrelated
+source/index regions absent, static/indexed alias reuse, and the existing gold
+chain and fanout pass on CPU and Metal. Local gold maximum absolute errors are
+1.654e-6 CPU and 1.576e-6 Metal; paired gold error is 0.001953125 on both. Peer
+applications terminate normally after SIGTERM. Gold and fanout traverse actual
+RDMA; the indexed side operations execute on rank zero.
+
+`measurements/lowering-2026-09-13/static-provenance.json` records installed library
+and example revisions, counts, and compressed raw logs/traces. Each timing
+summary includes count, mean and sample variance. These three-invocation samples
+establish no end-to-end speedup: final local CPU mean completion is 3.968 ms
+versus 4.395 ms before, while Metal is 18.896 ms versus 16.606 ms before. Fewer
+configured functions do not alone establish recovered performance. Broader
+contraction/reduction axes, general indexed scatter values and derivatives,
+remaining caller migration, storage/launch optimization, collective placement,
+and matched performance acceptance remain open.
