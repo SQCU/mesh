@@ -116,3 +116,13 @@ and transpose flags correct; no backend fallback or extra numerical dependency
 was introduced. The first failure did not record the result values, so it alone
 cannot distinguish unpublished output from numerical mismatch; the corrected
 observer and three subsequent passing runs are the retained evidence.
+
+
+The subsequent two-node CPU gold also passes with maximum error 0.001953125,
+including cancellation, strided tails and dynamic indexed reuse. Raw observations
+and both participants' traces are in `neon-paired-cpu.json.gz`, with each installed
+library revision retained explicitly (`bf6128d` local, `4be627c` peer). The local
+completion count is 3, mean 6.897945 ms, sample variance 0.000019781713 ms², and
+batch time 6.90275 ms. These unmatched observations do not establish a distributed
+speedup over the improved local baseline. The peer exited normally via SIGTERM
+after the local numerical validation completed.
