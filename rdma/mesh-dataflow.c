@@ -205,6 +205,7 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
   for(size_t i=0;i<binding_count && !error;i++){
     struct mesh_row_binding *b=&bindings[i];
     if(!m->qps || !b->count || b->count%block || (uint64_t)b->first+b->count>rows){ error=EINVAL; break; }
+    if(b->bytes>(uint64_t)b->count*m->pgsz || b->bytes<=(uint64_t)(b->count-block)*m->pgsz){error=EINVAL;break;}
     /* ledger D4, D6: each block is one message on one contiguous, block-aligned page run inside one region */
     for(uint32_t k=0;k<b->count && !error;k+=block){
       uint32_t page=atomic_load_explicit(&table[b->first+k],memory_order_acquire);
@@ -236,7 +237,9 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
       for(uint32_t k=0;k<b->count;k+=block){
         uint32_t at=atomic_load_explicit(length,memory_order_acquire);
         if(at>=mesh_blocks(m)){ error=ENOSPC; break; }
-        mesh_transfers(m,queue,direction)[at]=(struct mesh_transfer){.local_row=b->first+k,.local_page=atomic_load_explicit(&table[b->first+k],memory_order_acquire),.peer_row=MESH_ABSENT,.peer_page=MESH_ABSENT,.binding=b->binding,.offset=k,.plane=b->plane,.index=at};
+        uint64_t remaining=b->bytes-(uint64_t)k*m->pgsz,maximum=(uint64_t)block*m->pgsz;
+        uint32_t bytes=(uint32_t)(((remaining<maximum?remaining:maximum)+4095)/4096*4096);
+        mesh_transfers(m,queue,direction)[at]=(struct mesh_transfer){.local_row=b->first+k,.local_page=atomic_load_explicit(&table[b->first+k],memory_order_acquire),.peer_row=MESH_ABSENT,.peer_page=MESH_ABSENT,.binding=b->binding,.offset=k,.plane=b->plane,.index=at,.bytes=bytes};
         atomic_store_explicit(length,at+1,memory_order_release);
       }
     }
@@ -362,7 +365,8 @@ struct mesh_watch {
   void *owner,*argument;
   void (*submit)(void *,uint32_t);
   uint32_t index;
-  struct mesh_watch *next;
+  struct mesh_watch *next,*pending_next;
+  int pending;
 };
 struct mesh_edge { struct mesh_watch *watch; struct mesh_edge *next; uint32_t row; };
 struct mesh_execution {
@@ -386,7 +390,10 @@ int mesh_signal_init(void){
 }
 /* design/algorithm-sources.md#presence-driven-execution */
 void mesh_notify(struct hdr *m,uint32_t first,uint32_t count){
-  mesh_bits_set(m,MESH_EVENT,first,count);
+  for(uint32_t row=first;row<first+count;row++){
+    mesh_notice_push(m,MESH_NOTICE_COMPUTE,row);
+    mesh_notice_push(m,MESH_NOTICE_SEND,row);
+  }
   struct sockaddr_un address={.sun_family=AF_UNIX};
   memcpy(address.sun_path,m->event_path,sizeof address.sun_path);
   unsigned char wake=0;
@@ -401,12 +408,19 @@ static void mesh_events(struct mesh_execution *e){
   unsigned char bytes[256];
   while(recv(e->socket,bytes,sizeof bytes,MSG_DONTWAIT)>0){}
   struct hdr *m=e->context->M;
-  for(uint32_t word=0;word<mesh_words(m);word++){
-    uint64_t bits=atomic_exchange_explicit(&mesh_plane(m,MESH_EVENT)[word],0,memory_order_acq_rel);
-    while(bits){
-      uint32_t row=word*64+(uint32_t)__builtin_ctzll(bits);bits&=bits-1;
-      for(struct mesh_edge *edge=e->readers[row];edge;edge=edge->next)mesh_fire(e,edge->watch);
+  struct mesh_watch *pending=NULL;
+  uint32_t row=mesh_notice_take(m,MESH_NOTICE_COMPUTE);
+  while(row!=MESH_ABSENT){
+    uint32_t next=mesh_notice_next(m,MESH_NOTICE_COMPUTE,row);
+    for(struct mesh_edge *edge=e->readers[row];edge;edge=edge->next){
+      struct mesh_watch *watch=edge->watch;
+      if(!watch->pending){watch->pending=1;watch->pending_next=pending;pending=watch;}
     }
+    row=next;
+  }
+  while(pending){
+    struct mesh_watch *watch=pending;pending=watch->pending_next;
+    watch->pending=0;mesh_fire(e,watch);
   }
 }
 /* design/algorithm-sources.md#presence-driven-execution */

@@ -9,26 +9,29 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 23u
+#define MESH_VERSION 24u
 #define MESH_ABSENT UINT32_MAX
 /* ledger D6: "A maximum of 10 unreliable connection (UC) queue pairs" */
 #define MESH_QPS 8
 #define MESH_INDEX_BYTES 4096
-struct mesh_transfer { uint32_t local_row,local_page,peer_row,peer_page,binding,offset,plane,index; };
+struct mesh_transfer { uint32_t local_row,local_page,peer_row,peer_page,binding,offset,plane,index,bytes; };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* ROW_HOT: a produced send block the bridge has not completed, or a posted receive block not yet completed.
    PAGE_HOT: pages held by an outstanding work request. */
-enum { MESH_PRESENT, MESH_CONSTANT, MESH_PRODUCING, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PAGE_HOT, MESH_READ, MESH_EVENT=MESH_READ+64, MESH_PLANES };
+enum { MESH_PRESENT, MESH_CONSTANT, MESH_PRODUCING, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PAGE_HOT, MESH_READ, MESH_PLANES=MESH_READ+64 };
 #define MESH_READERS 64
 /* ledger D5: one posting order per queue pair and direction */
 enum { MESH_SEND, MESH_RECEIVE };
+enum { MESH_NOTICE_COMPUTE, MESH_NOTICE_SEND, MESH_NOTICE_QUEUES };
+struct mesh_notice { _Atomic uint32_t queued; uint32_t next; };
 struct mesh_port_info { char device[32]; uint16_t peer; _Atomic uint64_t phase; uint64_t when; int64_t code; uint32_t domain,reserved; };
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps;
   _Atomic uint32_t configured;
-  uint64_t planes_off,page_off,mask_off,order_off,index_off,data_off,length;
+  uint64_t planes_off,page_off,mask_off,order_off,index_off,notice_off,data_off,length;
   _Atomic uint64_t client,bridge_pid;
   _Atomic uint32_t order_length[2*MESH_QPS];
+  _Atomic uint32_t notice_head[MESH_NOTICE_QUEUES];
   char event_path[104];
   struct mesh_port_info port;
 };
@@ -108,6 +111,30 @@ static inline void mesh_send_complete(struct hdr *m,uint32_t row,uint32_t plane)
   mesh_notify(m,row,m->block);
 }
 
+/* design/algorithm-sources.md#publication-work-lists */
+static inline struct mesh_notice *mesh_notices(struct hdr *m,uint32_t queue){
+  return (struct mesh_notice *)((char *)m+m->notice_off)+(size_t)queue*mesh_rows(m);
+}
+/* design/algorithm-sources.md#publication-work-lists */
+static inline void mesh_notice_push(struct hdr *m,uint32_t queue,uint32_t index){
+  struct mesh_notice *entry=&mesh_notices(m,queue)[index];
+  if(atomic_exchange_explicit(&entry->queued,1,memory_order_acq_rel))return;
+  uint32_t head=atomic_load_explicit(&m->notice_head[queue],memory_order_relaxed);
+  do {entry->next=head;}
+  while(!atomic_compare_exchange_weak_explicit(&m->notice_head[queue],&head,index,memory_order_release,memory_order_relaxed));
+}
+/* design/algorithm-sources.md#publication-work-lists */
+static inline uint32_t mesh_notice_take(struct hdr *m,uint32_t queue){
+  return atomic_exchange_explicit(&m->notice_head[queue],MESH_ABSENT,memory_order_acquire);
+}
+/* design/algorithm-sources.md#publication-work-lists */
+static inline uint32_t mesh_notice_next(struct hdr *m,uint32_t queue,uint32_t index){
+  struct mesh_notice *entry=&mesh_notices(m,queue)[index];
+  uint32_t next=entry->next;
+  atomic_store_explicit(&entry->queued,0,memory_order_release);
+  return next;
+}
+
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t rows){
   uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz,words=((uint64_t)rows+63)/64,blocks=rows/block;
   h->pgsz=pgsz; h->block=block; h->rows=rows;
@@ -117,6 +144,8 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->order_off=at; at+=(uint64_t)2*MESH_QPS*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
   h->index_off=at; at+=(uint64_t)2*(4095u/(block*pgsz/4096u))*MESH_INDEX_BYTES; at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
+  h->notice_off=at; at+=(uint64_t)MESH_NOTICE_QUEUES*rows*sizeof(struct mesh_notice); at=(at+bytes-1)/bytes*bytes;
+  for(uint32_t queue=0;queue<MESH_NOTICE_QUEUES;queue++)atomic_store_explicit(&h->notice_head[queue],MESH_ABSENT,memory_order_relaxed);
   h->data_off=at; at+=(uint64_t)rows*pgsz;
   h->length=at; return at;
 }
