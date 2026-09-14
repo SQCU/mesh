@@ -1530,7 +1530,7 @@ class _ExpressionRegions:
         if parts[0] is not target:
             _bind_operation(self.program, affine(), parts, target)
 
-    # design/algorithm-sources.md#shared-contraction-lowering
+    # design/algorithm-sources.md#shared-associative-reductions
     def emit(self, value, origin, shape, target, external=False, reduce=False):
         inputs, replacements = [], {}
 
@@ -1574,7 +1574,7 @@ class _ExpressionRegions:
                 return reference(('transpose', node, where, extent), (self.panel(node, where, extent),))
             if node.operation == 'load':
                 symbol = reference(('load_source', node.value), (self.sources[node.value],))
-                return _Expression('load', tuple(lower(child, accumulation) for child in node.operands), symbol.value)
+                return _Expression('load', tuple(lower(child, _expression_dtype(child, self.sources)) for child in node.operands), symbol.value)
             if node.operation == 'index_vector':
                 axis = node.value[3]
                 return node if external or node.value[0] == 1 else _Expression('index_vector', value=(shape[axis], shape[axis], node.value[2] + origin[axis], axis))
@@ -1583,9 +1583,9 @@ class _ExpressionRegions:
                 return node + origin[axis]
             if node.operation == 'indexed_add':
                 raise ValueError('Indexed addition requires an output root')
-            return _Expression(node.operation, tuple(lower(child, accumulation) for child in node.operands), node.value)
+            return _Expression(node.operation, tuple(lower(child, _expression_dtype(child, self.sources)) for child in node.operands), node.value)
 
-        lowered = lower(value, _expression_dtype(value, self.sources) if reduce in ('max', 'min', 'any', 'all') else target.dtype)
+        lowered = lower(value, _expression_dtype(value, self.sources) if reduce else target.dtype)
         if reduce:
             lowered = _Expression(reduce, (lowered,))
         _ExpressionKernel((lowered,)).bind(self.program, tuple(inputs), (target,), self.coordinate)
