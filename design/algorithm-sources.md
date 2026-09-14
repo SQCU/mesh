@@ -1463,6 +1463,14 @@ feature panels from the contraction and reduces their completed values. The
 final row statistic necessarily depends on all features of that row; its partial
 producers and unrelated rows remain independently usable.
 
+Xonotic last-axis matrix sums and means use this same owner for integer and
+boolean inputs as well as real inputs. Matrix rows retain their original backing
+blocks; the row-dispatch selection no longer sends integer matrices to the custom
+whole-operand emitter. Integer means retain the existing vector path’s final
+division semantics. The operational example publishes one integer row at a time
+and observes both the direct expression and Xonotic sum before publishing the
+next row, including cancellation beyond 2**53 and modulo-2**64 overflow.
+
 Real statistics and their combination use FP32. Signed integer and boolean
 outputs select int64 accumulators, unsigned outputs uint64, matching the existing
 scalar emitter's accumulator selection. Integer partials and their tree remain

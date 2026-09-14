@@ -525,7 +525,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         # ../../../design/algorithm-sources.md#streamed-row-reductions-in-the-shared-region-owner
         if operation in ('reduce_sum', 'reduce_mean') and (
                 (len(shapes[values[0].index]) == 1 and tuple(attributes['axes']) == (0,)) or
-                (len(shapes[values[0].index]) == 2 and tuple(attributes['axes']) == (1,) and value.dtype in ('float16', 'float32'))):
+                (len(shapes[values[0].index]) == 2 and tuple(attributes['axes']) == (1,))):
             operand_shape = shapes[values[0].index]
             operand = matrix_view(local[values[0].index], operand_shape if len(operand_shape) == 2 else (1, math.prod(operand_shape)))
             argument, = kernels.arguments(1)

@@ -157,8 +157,6 @@ def main():
             [2**53+2**32-1, 3, -(2**53), 0, 0, 0],
             [2**63-1, 1, 0, 0, 0, 0], [-(2**63), 0, 0, -1, 0, 0]], dtype=np.int64)
         integer_input = program.tensor(integer_values.shape, (1, 3), dtype=np.int64)
-        for (i, j), ref in integer_input.blocks.items():
-            program.constant(ref, integer_values[i:i+1, 3*j:3*j+3])
         integer_arg, = kernels.arguments(1)
         integer_sum = program.kernel_call(kernels.expression(integer_arg.sum()), grid=(4,),
             in_specs=(BlockSpec(None),), out_specs=BlockSpec((1, 1), lambda i: (i, 0)),
@@ -241,6 +239,15 @@ def main():
             x_source = program.tensor((4, 4), (2, 4), dtype=np.float32)
             x_indices = program.tensor((1, 4), (1, 2), dtype=np.int64)
             x_tail = program.tensor((2, 4), dtype=np.float32)
+            integer_graph = mx.Graph()
+            with integer_graph:
+                integer_source = integer_graph.input('integer_rows', (4, 6), 'int64')
+                integer_rows = mx.sum(integer_source, axis=1)
+            integer_lowered = kernel_calls(program, integer_graph, (),
+                {integer_source.index: integer_input}, outputs=(integer_rows,),
+                root_peer=0, tile_rows=1, tile_columns=3)
+            integer_results += tuple(program.export(ref)
+                for _, ref in sorted(integer_lowered[integer_rows.index].blocks.items()))
             graph = mx.Graph()
             with graph:
                 source = graph.input('source', (4, 4))
@@ -618,8 +625,15 @@ def main():
                         atol=3e-3 if dtype == np.float16 else 3e-4, rtol=3e-3 if dtype == np.float16 else 3e-4):
                     raise ArithmeticError('Streamed normalization numerical mismatch')
                 result.consume()
+        for i in range(4):
+            for j in range(2):
+                with program.write(integer_input[i, j]) as target:
+                    target[...] = integer_values[i:i+1, 3*j:3*j+3]
+            wait_for(integer_results[i::4])
+            if any(result.ready for result in integer_results[i+1:4]):
+                raise ArithmeticError('Integer reduction published an absent row')
         wait_for(integer_results)
-        for result, expected in zip(integer_results, (65536, 2**32+2, -(2**63), 2**63-1)):
+        for result, expected in zip(integer_results, (65536, 2**32+2, -(2**63), 2**63-1) * (len(integer_results)//4)):
             if result.array.item() != expected:
                 raise ArithmeticError('Integer reduction lost exact cancellation beyond floating-point precision')
         print(json.dumps(dict(event='integer_reduction', output=[result.array.tolist() for result in integer_results])), flush=True)
