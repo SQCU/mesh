@@ -2811,3 +2811,57 @@ replaces a stride-zero exponent of one half with sqrt, yielding NaN at that
 input instead. The operational example uses an explicit exponent array to
 exercise generic power. This avoids changing a correct library operation to
 match an unrelated reference optimization.
+
+## Indexed range generation
+
+The JAX authors' [arange implementation](https://github.com/jax-ml/jax/blob/main/jax/_src/numpy/lax_numpy.py)
+constructs a range from a typed start, typed step and an iota. Its symbolic range
+length is resolved from the signed distance and step before execution. Mesh uses
+that construction through the existing expression kernel and program index;
+Xonotic no longer emits a separate range kernel or passes symbolic dimensions
+into numerical source. Integer lengths use exact host integer ceiling division,
+including negative steps and endpoints beyond the exact FP64 integer domain.
+Zero step is an invalid range, not an execution readiness condition.
+
+Each output tile evaluates start + step * global ordinal directly into canonical
+registered output pages. Integer generation uses unsigned 64-bit modular arithmetic
+and the requested output cast; signed negative steps retain their bit pattern.
+Floating generation uses FP32 arithmetic, including FP16 outputs. This follows
+the JAX indexed construction, not NumPy's documented effective-step rounding
+quirk. Real-valued parameters default to FP32; integer parameters default to I32.
+Symbolic dimension scalars use the existing setup constant binding. Residual
+custom kernels receive resolved shape metadata, eliminating the old dimension
+buffer and runtime symbolic renderer.
+
+The same index-domain algebra includes empty domains. A zero-volume Tensor has
+shape and positive block geometry metadata, no blocks and no native allocation.
+Transpose, slices and compatible broadcasts preserve that property. Broadcast
+resolution chooses the non-singleton dimension, so zero broadcast with one stays
+zero. Setup prunes empty outputs and their unused producer graph; no fake operand
+or completion page is allocated to represent absence. A logical empty load
+retains its expression domain and numerical type without flattening an impossible
+coordinate through a zero divisor. Domain inference shares the existing expression
+layout owner. Mixed expression outputs retain the nonempty outputs.
+
+Blelloch's [prefix sums and their applications](https://www.cs.cmu.edu/~guyb/papers/Ble93.pdf)
+provides the associative-operator/identity formulation used for empty reductions.
+A reduction with nonempty output and zero contributions writes its true identity:
+zero for sum and any, one for all, and dtype extrema for max/min. Floating extrema
+use infinities. A zero-inner-dimension contraction similarly writes zero through
+the shared expression owner. Empty result domains issue no numerical work.
+
+The MLX authors' [mean implementation](https://github.com/ml-explore/mlx/blob/main/mlx/ops.cpp)
+uses at-least-floating normalization. The caller graph therefore promotes integer
+and boolean means to FP32, correcting its historical integer output truncation.
+Empty means produce NaN through floating normalization; they have no invented
+integer identity. Indexed reductions retain explicit input dtype at the load
+boundary so an integer fallback literal cannot widen an empty extrema identity.
+
+All decisions above are configuration realization. Execution retains the existing
+page-stamp dependencies and publication; a range tile can feed its consumer while
+an unrelated input region remains absent. The existing streaming-algebra Xonotic
+workflow covers exact ranges, symbolic dimensions, empty composition, numerical
+identities and repeated independent consumer progress. General empty bindings for
+externally supplied native/Metal kernels and empty indexed-add routing are not
+established by this slice. No matched throughput or universal Pallas performance
+claim follows from source migration alone.
