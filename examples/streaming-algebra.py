@@ -46,6 +46,7 @@ def main():
     parser.add_argument('--scatter-tile', type=int, default=2)
     parser.add_argument('--scatter-destinations', type=int, default=4)
     parser.add_argument('--trace')
+    parser.add_argument('--xonotic', action='store_true')
     parser.add_argument('--coreml', nargs=3, metavar=('PYTHON', 'GENERATOR', 'CACHE'))
     args = parser.parse_args()
     updates_count, update_tile = args.scatter_rows, args.scatter_tile
@@ -146,6 +147,34 @@ def main():
             out_specs=BlockSpec((1, 4), lambda i: (i, 0)),
             out_shape=ShapeDtypeStruct((destinations_count, 4), dtype), peer=0)(scatter)
         scatter_results = tuple(program.export(scatter_consumed[i, 0]) for i in range(destinations_count))
+        xonotic_case = None
+        if args.xonotic and args.rank == 0:
+            import sys
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'xonotic'))
+            from solver.strat import tensor as mx
+            from solver.strat.tensor_metal import kernel_calls
+            x_source = program.tensor((4, 4), (2, 4), dtype=np.float32)
+            x_indices = program.tensor((1, 4), (1, 2), dtype=np.int64)
+            x_tail = program.tensor((2, 4), dtype=np.float32)
+            graph = mx.Graph()
+            with graph:
+                source = graph.input('source', (4, 4))
+                indices = graph.input('indices', (4,), 'int64')
+                tail = graph.input('tail', (2, 4))
+                selected = source[indices, ::-1]
+                joined = mx.concatenate((selected, tail), axis=0)
+            lowered = kernel_calls(program, graph, (),
+                {source.index: x_source, indices.index: x_indices, tail.index: x_tail},
+                root_peer=0, tile_rows=2, tile_columns=4)
+            observations = tuple(program.export(lowered[joined.index][i, 0]) for i in range(3))
+            generations = []
+            for generation in range(2):
+                source_values = np.arange(16, dtype=np.float32).reshape(4, 4) + 32 * generation
+                index_values = np.array([2, -1, 0, 1] if generation == 0 else [1, 0, -1, 2], dtype=np.int64)
+                tail_values = np.arange(8, dtype=np.float32).reshape(2, 4) - 16 * (generation + 1)
+                expected = np.concatenate((source_values.astype(np.float64)[index_values, ::-1], tail_values.astype(np.float64)))
+                generations.append((source_values, index_values, tail_values, expected))
+            xonotic_case = (x_source, x_indices, x_tail, observations, generations)
         invocations = []
 
         # design/algorithm-sources.md#async-index-push-contract
@@ -316,6 +345,38 @@ def main():
                 result=streamed_result.array.tolist())), flush=True)
             if not generation:
                 streamed_result.consume()
+        if xonotic_case is not None:
+            x_source, x_indices, x_tail, observations, generations = xonotic_case
+            for generation, (source_values, index_values, tail_values, expected) in enumerate(generations):
+                wait_for((*x_source.blocks.values(), *x_indices.blocks.values(), x_tail[0, 0]), 'writable')
+                early_source = 1 - generation
+                with program.write(x_source[early_source, 0]) as destination:
+                    destination[...] = source_values[2*early_source:2*early_source+2]
+                with program.write(x_indices[0, 0]) as destination:
+                    destination[...] = index_values[:2]
+                with program.write(x_tail[0, 0]) as destination:
+                    destination[...] = tail_values
+                wait_for((observations[0], observations[2]))
+                if observations[1].ready or x_source[1-early_source, 0].present or x_indices[0, 1].present:
+                    raise ArithmeticError('Xonotic indexed composition waited for or published an unrelated region')
+                for index in (0, 2):
+                    if not np.array_equal(observations[index].array, expected[2*index:2*index+2]):
+                        raise ArithmeticError('Xonotic early gather/concatenate output differs')
+                print(json.dumps(dict(event='xonotic_indexed_early', generation=generation,
+                    withheld_source_block=1-early_source, withheld_index_block=1,
+                    output=[observations[index].array.tolist() for index in (0, 2)])), flush=True)
+                with program.write(x_source[1-early_source, 0]) as destination:
+                    destination[...] = source_values[2*(1-early_source):2*(1-early_source)+2]
+                with program.write(x_indices[0, 1]) as destination:
+                    destination[...] = index_values[2:]
+                wait_for(observations)
+                for index, result in enumerate(observations):
+                    if not np.array_equal(result.array, expected[2*index:2*index+2]):
+                        raise ArithmeticError('Xonotic gather/concatenate output differs after reuse')
+                print(json.dumps(dict(event='xonotic_indexed_complete', generation=generation,
+                    output=[result.array.tolist() for result in observations])), flush=True)
+                for result in observations:
+                    result.consume()
         for generation in range(2):
             routing = np.resize(np.array([0, 2, 0, 3], dtype=np.int64), updates_count).reshape(-1, 1)
             if destinations_count > 4:

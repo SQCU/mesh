@@ -77,6 +77,35 @@ role. Its current solve graph contains matmul, expert_matmul, comparisons and
 reductions, but no gather or concatenate. It checks general integration, not
 this migration's numerical results. `solver.strat.measure matrix` uses the MLX
 numerical path and likewise does not validate the shared expression branch.
-Explicit gather/concatenation observations therefore need to be added to the
-existing streaming-algebra workflow or an actual existing application composition;
-there is no retained command whose current coverage alone proves this increment.
+The optional existing streaming-algebra invocation below now supplies explicit
+gather/concatenation observations; planner coverage remains separate.
+
+
+## Existing gold workflow extension
+
+Run the current installed mesh package through the Xonotic Python environment:
+
+```sh
+bin/mesh-python examples/streaming-algebra.py 0 --local --backend cpu --runs 1 --xonotic
+bin/mesh-python examples/streaming-algebra.py 0 --local --backend metal --runs 1 --xonotic
+```
+
+`--xonotic` imports the actual symbolic graph and kernel_calls only when requested,
+so the usual NumPy-only examples do not acquire an MLX dependency. The side graph
+uses `source[indices, ::-1]` followed by concatenation with an independently
+produced tail. Source and index operands each have two canonical blocks. It first
+publishes one index block and its selected source block plus the tail. Output
+blocks zero and two must become usable while the other index/source blocks remain
+absent. It then publishes the missing blocks and compares every result with a
+float64 NumPy reference prepared before the timed gold computation.
+
+The same buffers execute twice, changing which source block is selected first and
+including a negative advanced index. Both generations are observed through the
+existing result/readiness interface. The case emits xonotic_indexed_early and
+xonotic_indexed_complete records. It runs outside the timed FFN batch, in the same
+Program; it creates no second scheduler, benchmark driver or evaluator.
+
+This extension does not evaluate derivatives. Existing derivative graph rules and
+backend code remain unchanged; numerical derivative evidence is still outstanding.
+Python compilation passes for this extension. The commands above are instructions
+for operational validation, not a claim that this increment has already run them.

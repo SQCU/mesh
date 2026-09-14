@@ -1385,3 +1385,12 @@ the original registered partial storage; it is not a copied numerical operand.
 Native ownership must retain source occurrences and route lifetimes independently
 of arrival order. Sparse bindings alone do not eliminate potential empty segment
 launches, page allocation overhead, or the directory-production launches.
+
+
+The existing streaming-algebra workflow's optional `--xonotic` case constructs
+an actual Xonotic gather/concatenate graph and observes its canonical result blocks.
+Two executions change routing on reused source/index buffers, withhold an unrelated
+source/index block, and compare early and complete outputs against precomputed
+float64 references. This exercises the existing indexed-access contract and
+publication interface; no additional numerical execution owner is introduced.
+Derivative validation is not implied by this forward case.
