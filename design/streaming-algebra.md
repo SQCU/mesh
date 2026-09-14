@@ -35,8 +35,9 @@ sequence follows the existing implementations, without a runtime evaluator.
    is numerical dependency, not an enclosing-operation completion condition.
 2. `mesh_issue_index` in `rdma/mesh-dataflow.c` examines those input maps and
    claims the output storage. `submit_ready` in `rdma/mesh-algebra.m` submits
-   the bound numerical function to the existing concurrent dispatch queue and
-   returns. No CPU contraction runs on the serial presence handler.
+   the prebound submission function. Synchronous CPU arithmetic is dispatched to
+   the concurrent worker queue; asynchronous Metal/CoreML submission is direct.
+   No CPU contraction runs on the serial presence handler.
 3. Generated CPU section loops invoke `publish_cpu` after their stores. It calls
    `mesh_publish_partial`, which sets presence and notifies readers immediately.
    Later sections can still be executing. Native contractions publish their
@@ -138,3 +139,36 @@ execution duration and contention cost have not been separated by the recorded
 run. No numerical latency or overhead claim follows from it. The source shows
 which mathematical dependencies are local to a region; it does not by itself
 establish a wait-free guarantee for the complete implementation.
+
+## Tensor-parallel operation use
+
+The staged example was replaced with the MLX authors' column-sharded followed
+by row-sharded linear decomposition. Caller configuration chooses J_0=[0,256)
+and J_1=[256,512), with replicated X[1024,256]. Both participants own only their
+weight slices in registered storage and compute
+
+    U_p = X W_up[:,J_p]
+    H_p = swish(U_p)
+    D_p = H_p W_down[J_p,:]
+    Y = D_0 + D_1
+
+The root owns Y; the only network edge is peer D_1 to root receive storage.
+Neither participant's U, H or D arithmetic requires an input from the other
+participant. Each down-projection K contribution reads its own H region. Each
+root addition reads one local D region and the matching received region, with
+no dependency on the rest of either D tensor. The caller binds this entire chain
+before publishing X. It launches no intermediate computation.
+
+This chain ran over the two Macs' existing RDMA bridge with 128-sized tiles:
+FP32/MPS at `68319f4`, FP16/BNNS and FP16-input/FP32-weight BNNS at `5c42fe2`.
+All three runs returned sixteen 128×128 reduced regions. Actual output excerpts
+and full-stdout digests are [recorded here](../measurements/tensor-parallel-chain-2026-09-14.txt).
+The peers were closed with SIGTERM after the root consumed its results.
+
+These runs establish use of the distributed decomposition and integrated
+numerical/transport paths. The source above identifies region-local issue and
+publication dependencies. The output record does not measure simultaneous device
+execution, publication-to-consumption latency, or speedup. The implementation
+still has a serial presence handler, socket notifications, and finite hardware
+queues; removing one worker hop and unassigned reader-plane resets does not
+establish zero scheduling overhead.
