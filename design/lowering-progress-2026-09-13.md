@@ -1739,3 +1739,77 @@ The last Xonotic private numerical emitter is now removed. General indexed
 native contraction coverage, optimal integer kernels, fusion/storage/placement,
 empty-domain gaps and the nine-step plan's matched performance acceptance remain
 open. This increment does not redefine those requirements as completed.
+
+
+## Composable indexed contractions — September 14
+
+`7990090` retains indexed product sums before logical loads are flattened, so
+native contraction recognition survives untransposed statistics and pointwise
+composition. The shared region cache retains source identities, origins and
+arithmetic context. An explicitly returned contraction and its epilogue consume
+the same result pages. Existing neighborhood Q/K and G/V statistics benefit
+without a caller-specific emitter or new runtime interface.
+
+`ad4dd02` corrects a launch regression found in the new static case. Backing cuts
+split its K=5 contraction into more native panels than the existing compiled
+reduction required. Setup now compares complete native launch counts with the
+retained compiled region plan and retains compiled lowering when the new static
+plan adds launches. The fallback writes the requested result directly instead
+of adding an identity copy. This conservative policy is not the measured
+operation/shape/backend selector still required by the nine-step plan.
+
+The matched Metal fixture uses example `14ad407` in both runs: the baseline
+installed library was `f53538a`; the corrected library is `ad4dd02`, installed
+from `d6528f6`. Exact function intervals retained by the existing workflow show:
+
+| Indexed case | Baseline functions / submissions | Corrected functions / submissions |
+| --- | ---: | ---: |
+| Selected F32 weights | 124 / 262 | 94 / 190 |
+| Static F32 weights | 24 / 48 | 24 / 48 |
+| Selected F16 weights | 124 / 262 | 94 / 190 |
+
+The first native static implementation used 48 functions and 96 submissions;
+its log and trace are retained alongside the correction. Two earlier fixture
+errors are also retained: a fixed-width index vector did not match a ragged
+output extent, and the expected integer-context result incorrectly treated a
+nested floating sum like a bare sum into an integer destination. The corrected
+fixture observes the existing outputs `(0, 1, 1)` for bare integer reduction,
+nested floating reduction and explicit post-reduction conversion.
+
+Each new case uses canonical source, weight and bias pages, ragged K and feature
+panels, and two reuse generations. A contraction result completes while its bias
+is absent; after that row's bias is published, its epilogue completes while the
+other source row remains unpublished. The next generation reverses the early
+row. Existing neighborhood, selected contraction and gold cases retain their
+own partial-input and distributed progress observations.
+
+[`composable-indexed-provenance.json`](../measurements/lowering-2026-09-13/composable-indexed-provenance.json)
+records exact commands, installed and source revisions, raw logs/traces, failed
+fixtures, function intervals and online count/mean/sample variance. Corrected
+CPU and Metal runs each configured 8214 functions and completed 16296
+submissions. Paired Metal configured 8146 rank-zero functions and completed
+15603 submissions; the peer configured 1189 and completed 762. All runtime
+codes and process exits were zero. The peer exited zero after SIGTERM, and
+both bridges returned to ready, unpaired, zero-client state with the unchanged
+registered arena.
+
+For the corrected local Metal run, early contraction observation intervals have
+count 2 each: selected F32 mean 1.0932915 ms, sample variance 0.0148493314445 ms²;
+static F32 mean 0.360625 ms, variance 0.000000587528 ms²; selected F16 mean
+1.119375 ms, variance 0.021355417778 ms². These small samples do not establish a
+speedup. New contraction cases run on rank zero; existing paired gold, fanout
+and fragmented-alias operations exercise the actual RDMA substrate and M4 Pro.
+No separate rank-one timing claim is made for the new contraction cases.
+
+The next concrete caller gap is expert weight gradients:
+`dW[e,d,h] = sum_{n: selected[n]=e} X[n,d] * G[n,h]` currently reaches the
+bounded scalar indexed-add segment owner. Its group ordinal intervals and
+outer-product indexing maps should remain explicit for native contiguous-run
+or indirect grouped-contraction lowering. Arbitrary group ordinals cannot be
+passed to ordinary BLAS/MPS by pretending their backing is contiguous. The
+existing [active segment domains](algorithm-sources.md#active-segment-domains)
+and [composable contraction sources](algorithm-sources.md#composable-indexed-contractions)
+provide the relevant representation and grouped-multiplication prior art.
+Measured backend shape selection, broader geometry, integer optimization,
+empty-domain gaps, fusion/storage/placement and the full matched performance
+acceptance remain open; the nine-step goal remains active.

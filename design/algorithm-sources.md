@@ -3163,3 +3163,10 @@ not establish that a backend is fastest. Previously validated selected plans
 retain their existing binding. The compiled fallback reuses the same region plan
 and publishes directly into the requested output or returns its cached Ref;
 it does not append an identity copy to an already materialized reduction.
+
+The JAX authors' [manual profile-guided latency estimation](https://docs.jax.dev/en/latest/gpu_performance_tips.html#manual-pgle)
+collects operation timings and feeds them into a subsequent compilation. That
+separation is relevant to the remaining measured-profile work: mesh can consume
+measured operation/shape/backend costs during realization. The launch-count
+default above is not such a profile, and adopting this measurement principle
+does not require importing XLA's scheduler into mesh's invocation path.
