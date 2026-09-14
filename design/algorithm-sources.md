@@ -948,3 +948,45 @@ ordinary linear expression gives exact outputs 2 and 0 from rows
 `[4096, 1, -4096, 1]` and `[60000, 60000, -60000, -60000]` times ones with K panels
 of two. This detects lost residuals and premature partial overflow that the
 random gold chain alone would miss. It runs through the same library path.
+
+## Indexed expression lowering
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+uses references, indexed accesses and numerical primitives in compiled kernel
+bodies. Mesh extends its existing expression tree with integer-preserving loads,
+row/column indices, comparisons, bitwise mask composition and selection.
+`indices()` denotes coordinates inside the bound output region. `input.at(row,
+column, mask=..., other=...)` loads from the bound input region only when the
+mask is true; a false mask evaluates the alternate value. CPU and Metal emit
+conditional expressions so an invalid masked address is never dereferenced.
+Indices must be valid when the mask is true. Shape/stride translation is retained
+from the canonical native view, including transposed views.
+
+Integer inputs remain integer expressions rather than passing through float.
+Integer literals retain their exact values, including values above 2**53.
+Floating inputs load into float arithmetic, preserving the established half
+precision accumulation rule. Output reference dtype controls storage; reductions
+use float for real outputs and signed/unsigned 64-bit sums for integer outputs.
+This is not yet a full dtype-promotion implementation for arbitrary mixed types.
+`equal` constructs a numerical comparison; structural Python equality continues
+to identify common expression nodes. Comparisons and bitwise mask operations
+construct expression nodes through the same kernel-call path.
+
+`nn.embedding` now compiles its indexed load with these operations instead of a
+Python/NumPy callback. It retains per-output row/feature bindings and normalizes
+negative table indices. The old callback gather has no callers and is removed.
+Xonotic's two-dimensional comparison, bitwise and selection nodes use this same
+lowering with explicit output dtype. Other operation coverage remains recorded in
+`lowering-coverage.md` and the nine-step plan.
+
+The current binding still requires the entire declared source region to be
+present. An indexed load inside a compiled kernel does not establish dynamic
+selected-page readiness. That remaining dependency lowering is an explicit next
+implementation step; this change makes no claim that unrelated missing table
+regions can already be bypassed. The existing gold's constant embedding tables
+and streamed output regions exercise the compiled numerical path.
+
+The existing streaming-algebra example adds a masked gather/transform over an
+int64 index equal to 2**53+1. It must retain exact integer identity and must not
+load its masked-out table address. Its numerical output checks failures that
+ordinary small embedding indices and random FFN errors would miss.

@@ -443,12 +443,20 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
             tensors[value.index] = nn._pointwise(program, kernels.affine(1 / operand.shape[1]),
                 (reduced,), tile_rows, peer=peer) if operation == 'reduce_mean' else reduced
             continue
-        if numerical and len(shape) == 2 and operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid'):
+        if (numerical or operation in ('where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or')) and len(shape) == 2 and operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or'):
             args = kernels.arguments(len(values))
             if operation in ('add', 'subtract', 'multiply', 'divide'):
                 left, right = args
                 result = {'add': lambda: left + right, 'subtract': lambda: left - right,
                           'multiply': lambda: left * right, 'divide': lambda: left / right}[operation]()
+            elif operation == 'where':
+                result = kernels.select(*args)
+            elif operation in ('equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or'):
+                left, right = args
+                result = {'equal': lambda: left.equal(right), 'not_equal': lambda: kernels.select(left.equal(right), False, True),
+                          'less': lambda: left < right, 'less_equal': lambda: left <= right,
+                          'greater': lambda: left > right, 'greater_equal': lambda: left >= right,
+                          'bitwise_and': lambda: left & right, 'bitwise_or': lambda: left | right}[operation]()
             elif operation == 'negative':
                 result = -1 * args[0]
             elif operation == 'sigmoid':
@@ -457,7 +465,7 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
                 result = getattr(args[0], operation)()
             operands = tuple(local[v.index].broadcast_to(shape) for v in values)
             tensors[value.index] = nn._pointwise(program, kernels.expression(result),
-                operands, tile_rows, peer=peer)
+                operands, tile_rows, peer=peer, output_dtype=value.dtype)
             continue
         item = by_node[value.index]
         shape = shapes[value.index]

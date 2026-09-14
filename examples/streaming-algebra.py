@@ -6,7 +6,7 @@ import signal
 import time
 
 import numpy as np
-from mesh import Program
+from mesh import Program, BlockSpec, ShapeDtypeStruct, kernels
 from mesh.nn import ffn, linear, rmsnorm, summed_embedding
 
 
@@ -83,6 +83,15 @@ def main():
         precision = program.export(linear(program,
             weight(np.array([[4096, 1, -4096, 1], [60000, 60000, -60000, -60000]], dtype=dtype)),
             weight(np.ones((4, 1), dtype=dtype)), tile_rows=2, tile_k=2, tile_columns=1, peer=0)[0, 0])
+        table_arg, index_arg = kernels.arguments(2)
+        _, column_arg = kernels.indices()
+        index_data = np.array([[2], [2**53 + 1]], dtype=np.int64)
+        table_data = np.arange(12, dtype=dtype).reshape(3, 4)
+        indexed_body = 2 * table_arg.at(index_arg, column_arg, mask=(index_arg >= 0) & (index_arg < 3)) + kernels.select(index_arg.equal(2**53 + 1), 1, 0)
+        indexed = program.export(program.kernel_call(kernels.expression(indexed_body), grid=(1,),
+            in_specs=(BlockSpec((3, 4), lambda i: (0, 0)), BlockSpec((2, 1), lambda i: (0, 0))),
+            out_specs=BlockSpec((2, 4), lambda i: (0, 0)),
+            out_shape=ShapeDtypeStruct((2, 4), dtype), peer=0)(weight(table_data), weight(index_data))[0, 0])
         invocations = []
 
         # design/algorithm-sources.md#async-index-push-contract
@@ -201,6 +210,11 @@ def main():
             raise ArithmeticError('Contraction lost cancellation across K panels')
         print(json.dumps(dict(event='precision', dtype=args.dtype, result=precision.array.tolist())), flush=True)
         precision.consume()
+        indexed_expected = np.stack((2 * table_data[2], np.ones(4, dtype=dtype)))
+        if not indexed.ready or not np.array_equal(indexed.array, indexed_expected):
+            raise ArithmeticError('Indexed expression lost integer identity or masked access semantics')
+        print(json.dumps(dict(event='indexed', result=indexed.array.tolist())), flush=True)
+        indexed.consume()
         report = program.report
         print(json.dumps(dict(event='summary', dtype=args.dtype, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
             invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,

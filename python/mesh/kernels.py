@@ -42,12 +42,6 @@ class Metal:
     constants: tuple = ()
 
 
-# design/algorithm-sources.md#direct-indexed-gather
-def gather(table, indices, output):
-    for row in range(output.shape[0]):
-        np.copyto(output[row], table[int(indices[row, 0])])
-
-
 @dataclass(frozen=True)
 class _Expression:
     operation: str
@@ -86,6 +80,40 @@ class _Expression:
     def __rtruediv__(self, other):
         return _literal(other) / self
 
+    # design/algorithm-sources.md#indexed-expression-lowering
+    def __lt__(self, other):
+        return _Expression('<', (self, _literal(other)))
+
+    # design/algorithm-sources.md#indexed-expression-lowering
+    def __le__(self, other):
+        return _Expression('<=', (self, _literal(other)))
+
+    # design/algorithm-sources.md#indexed-expression-lowering
+    def __gt__(self, other):
+        return _Expression('>', (self, _literal(other)))
+
+    # design/algorithm-sources.md#indexed-expression-lowering
+    def __ge__(self, other):
+        return _Expression('>=', (self, _literal(other)))
+
+    # design/algorithm-sources.md#indexed-expression-lowering
+    def equal(self, other):
+        return _Expression('==', (self, _literal(other)))
+
+    # design/algorithm-sources.md#indexed-expression-lowering
+    def __and__(self, other):
+        return _Expression('&', (self, _literal(other)))
+
+    # design/algorithm-sources.md#indexed-expression-lowering
+    def __or__(self, other):
+        return _Expression('|', (self, _literal(other)))
+
+    # design/algorithm-sources.md#indexed-expression-lowering
+    def at(self, row, column, *, mask=True, other=0):
+        if self.operation != 'input':
+            raise ValueError('Indexed loads require an input reference')
+        return _Expression('load', tuple(map(_literal, (row, column, mask, other))), self.value)
+
     # design/algorithm-sources.md#region-expression-fusion
     def sum(self):
         return _Expression('sum', (self,))
@@ -105,7 +133,17 @@ class _Expression:
 
 # design/algorithm-sources.md#region-expression-fusion
 def _literal(value):
-    return value if isinstance(value, _Expression) else _Expression('literal', value=float(value))
+    return value if isinstance(value, _Expression) else _Expression('literal', value=value.item() if isinstance(value, np.generic) else value)
+
+
+# design/algorithm-sources.md#indexed-expression-lowering
+def indices():
+    return _Expression('row'), _Expression('column')
+
+
+# design/algorithm-sources.md#indexed-expression-lowering
+def select(mask, yes, no):
+    return _Expression('select', tuple(map(_literal, (mask, yes, no))))
 
 
 # design/algorithm-sources.md#region-expression-fusion
@@ -128,8 +166,8 @@ class _ExpressionKernel:
         from ._native import View
         if len(outputs) != 1:
             raise ValueError('An expression has one output region')
-        if any(ref.dtype not in (np.dtype('float16'), np.dtype('float32')) for ref in (*inputs, *outputs)):
-            raise ValueError('Scalar expressions require float16 or float32 regions')
+        if any(ref.dtype.name not in ('float16', 'float32', 'int32', 'uint32', 'int64', 'uint64', 'uint8', 'bool') for ref in (*inputs, *outputs)):
+            raise ValueError('Expression regions require supported real, integer or boolean scalars')
         check(program.native.algebra_source(program.handle,
             self.source(inputs, outputs[0], False).encode(),
             self.source(inputs, outputs[0], True).encode(),
@@ -149,6 +187,10 @@ class _ExpressionKernel:
                 if ref.shape[0] not in (1, output.shape[0]):
                     raise ValueError('Expression input rows must broadcast to the output')
                 width = ref.shape[1]
+            elif node.operation == 'column':
+                width = output.shape[1]
+            elif node.operation == 'row':
+                width = 1
             elif node.operation == 'sum':
                 reductions.append(node)
                 width = 1
@@ -166,33 +208,53 @@ class _ExpressionKernel:
 
         # design/algorithm-sources.md#region-expression-fusion
         def emit(node, column):
+            if node.operation == 'row':
+                return '((long)r)' if metal else '((int64_t)r)'
+            if node.operation == 'column':
+                return f'((long)({column}))' if metal else f'((int64_t)({column}))'
+            if node.operation == 'load':
+                ref = inputs[node.value]
+                row, col, mask, other = (emit(child, column) for child in node.operands)
+                value = f'p{node.value}[({row})*{ref.view.row_stride}+({col})*{ref.view.column_stride}]'
+                value = f'((float)({value}))' if ref.dtype.kind == 'f' else value
+                return f'(({mask})?({value}):({other}))'
             if node.operation == 'input':
                 ref = inputs[node.value]
                 row_stride = ref.view.row_stride if ref.shape[0] != 1 else 0
                 column_stride = ref.view.column_stride if ref.shape[1] != 1 else 0
-                return f'float(p{node.value}[r*{row_stride}+({column})*{column_stride}])' if metal else f'((float)p{node.value}[r*{row_stride}+({column})*{column_stride}])'
+                value = f'p{node.value}[r*{row_stride}+({column})*{column_stride}]'
+                return f'((float)({value}))' if ref.dtype.kind == 'f' else value
             if node.operation == 'literal':
-                return repr(node.value) + 'f'
+                if isinstance(node.value, bool):
+                    return '1' if node.value else '0'
+                if isinstance(node.value, int):
+                    return str(node.value) + ('ull' if node.value > 2**63 - 1 else 'll')
+                return repr(float(node.value)) + 'f'
             if node.operation == 'sum':
                 return names[node]
             args = tuple(emit(child, column) for child in node.operands)
-            if node.operation in ('+', '-', '*', '/'):
+            if node.operation == 'select':
+                return f'(({args[0]})?({args[1]}):({args[2]}))'
+            if node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|'):
                 return f'({args[0]}{node.operation}{args[1]})'
             if node.operation == 'rsqrt':
                 return f'rsqrt({args[0]})' if metal else f'(1.0f/sqrtf({args[0]}))'
             return f'{node.operation}{"" if metal else "f"}({args[0]})'
 
-        lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <math.h>']
+        lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
         lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], uint r [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {' if metal else 'void mesh_expression(const uintptr_t *buffers) {')
         for index, ref in enumerate((*inputs, output)):
-            scalar = ('half' if metal else '_Float16') if ref.dtype == np.dtype('float16') else 'float'
+            scalar = ({'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int' if metal else 'int32_t',
+                       'u4': 'uint' if metal else 'uint32_t', 'i8': 'long' if metal else 'int64_t',
+                       'u8': 'ulong' if metal else 'uint64_t', 'u1': 'uchar' if metal else 'uint8_t', 'b1': 'bool'}[ref.dtype.kind + str(ref.dtype.itemsize)])
             qualifier = ('device ' if metal else '') + ('const ' if index < len(inputs) else '')
             lines.append(f'{qualifier}{scalar} *p{index}=({qualifier}{scalar} *)buffers[{index}];')
         if not metal:
             lines.append(f'for(uint64_t r=0;r<{output.shape[0]};r++) {{')
         for node in reductions:
             name, child = names[node], node.operands[0]
-            lines.append(f'float {name}=0.0f;')
+            accumulator = ('long' if metal else 'int64_t') if output.dtype.kind in 'ib' else ('ulong' if metal else 'uint64_t') if output.dtype.kind == 'u' else 'float'
+            lines.append(f'{accumulator} {name}=0;')
             lines.append(f'for({"uint" if metal else "uint64_t"} k={"lane" if metal else "0"};k<{widths[child]};k+={32 if metal else 1}) {name}+={emit(child, "k")};')
             if metal:
                 lines.append(f'{name}=simd_sum({name});')

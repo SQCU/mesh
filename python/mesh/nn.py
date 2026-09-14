@@ -121,7 +121,10 @@ def embedding(program, table, indices, *, tile_rows, tile_columns=128):
     rows, width = indices.shape[0], table.shape[1]
     mr = _tile(min(tile_rows, rows), indices.block_shape[0] if indices.grid[0] > 1 else 0)
     nr = _tile(min(tile_columns, width), table.block_shape[1] if table.grid[1] > 1 else 0)
-    return program.kernel_call(kernels.gather,
+    table_value, selected = kernels.arguments(2)
+    _, column = kernels.indices()
+    selected = kernels.select(selected < 0, selected + table.shape[0], selected)
+    return program.kernel_call(kernels.expression(table_value.at(selected, column)),
         grid=((rows + mr - 1) // mr, (width + nr - 1) // nr),
         in_specs=(BlockSpec((table.shape[0], nr), lambda i, j: (0, j)),
                   BlockSpec((mr, 1), lambda i, j: (i, 0))),
