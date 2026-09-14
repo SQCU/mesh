@@ -1194,6 +1194,7 @@ def main():
             storage, cases, observations, generations = xonotic_reductions
             for generation, (values, expected) in enumerate(generations):
                 wait_for(tuple(ref for tensor in storage for ref in tensor.blocks.values()), 'writable')
+                started = time.monotonic_ns()
                 early_row = generation
                 for tensor, data in zip(storage, values):
                     for (i, j), ref in tensor.blocks.items():
@@ -1211,7 +1212,7 @@ def main():
                         elif case[0] > 1 and result.ready:
                             raise ArithmeticError('Typed reduction consumed a withheld row')
                 print(json.dumps(dict(event='xonotic_typed_reductions_early', generation=generation,
-                    withheld_row=1-early_row, ranks=[1,2,3])), flush=True)
+                    withheld_row=1-early_row, ranks=[1,2,3], elapsed_ms=(time.monotonic_ns()-started)/1e6)), flush=True)
                 for tensor, data in zip(storage, values):
                     for (i, j), ref in tensor.blocks.items():
                         if i != early_row:
@@ -1224,6 +1225,7 @@ def main():
                         if not np.array_equal(result.array, reference[i:i+result.array.shape[0], j:j+result.array.shape[1]]):
                             raise ArithmeticError('Typed reduction consumer differs after reuse')
                 print(json.dumps(dict(event='xonotic_typed_reductions_complete', generation=generation,
+                    elapsed_ms=(time.monotonic_ns()-started)/1e6,
                     output=[dict(rank=case[0], operand=case[3], operation=case[4], values=[result.array.tolist() for i,j,result in results])
                             for case, results in zip(cases, observations)])), flush=True)
                 for results in observations:
