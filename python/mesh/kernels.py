@@ -1881,9 +1881,12 @@ class _ExpressionRegions:
 
             product = _Expression('*', tuple(shift(child) for child in node.operands))
             transposed = _Expression('transpose', (_Expression('sum', (product,)),))
-            if shape[1] != 1 or not _lower_indexed_product(self, transposed, target.T):
-                original = _resolve_logical(node.value[0], self.sources)
+            original = _resolve_logical(node.value[0], self.sources)
+            regions = self.reduction_regions(original)
+            if shape[1] != 1:
                 self.emit(original, origin, shape, target)
+            elif not _lower_indexed_product(self, transposed, target.T, regions):
+                target = self.reduction(original, origin[0], shape[0], np.dtype('float32'), target, regions)
             self.cache[key] = target
         return self.cache[key]
 
@@ -1989,8 +1992,14 @@ class _ExpressionRegions:
         self.cache[key] = tuple(parts)
         return self.cache[key]
 
+    # design/algorithm-sources.md#composable-indexed-contractions
+    def reduction_regions(self, node):
+        layout = self.layout(node.operands[0])
+        width, tile = layout[0][1], layout[2][1]
+        return tuple((column, min(tile, width-column)) for column in range(0, width, tile))
+
     # design/algorithm-sources.md#shared-associative-reductions
-    def reduction(self, node, row, rows, dtype, direct=None):
+    def reduction(self, node, row, rows, dtype, direct=None, regions=None):
         key = ('reduction', self.key(node, (row, 0), (rows, 1)), dtype.str)
         if key in self.cache:
             return self.cache[key]
@@ -2007,8 +2016,8 @@ class _ExpressionRegions:
             self.cache[key] = target
             return target
         parts = []
-        for column in range(0, width, tile):
-            length = min(tile, width-column)
+        regions = self.reduction_regions(node) if regions is None else regions
+        for column, length in regions:
             target = direct if direct is not None and tile >= width and direct.dtype == dtype else self.temporary((rows, 1), dtype)
             self.emit(child, (row, column), (rows, length), target, reduce=node.operation)
             parts.append(target)
@@ -2189,7 +2198,7 @@ def _panel_geometry(source, ordinal, row_step, column_step, rows, columns):
 
 
 # design/algorithm-sources.md#selected-native-contractions
-def _lower_indexed_product(lowering, value, target):
+def _lower_indexed_product(lowering, value, target, reduction_regions):
     import ctypes as C
     from . import Ref, check
     from ._native import View
@@ -2288,6 +2297,17 @@ def _lower_indexed_product(lowering, value, target):
         selector = lowering.cache[selection_key]
     target_pages = C.c_size_t()
     check(program.native.algebra_view_pages(program.handle, target.view, None, 0, C.byref(target_pages)))
+    if selected is None:
+        counts = {}
+        for first, columns, _, _ in segments:
+            counts[first, columns] = counts.get((first, columns), 0)+1
+        native_launches = len(segments)+sum(count-1 for count in counts.values())+int(len(counts)>1)
+        if len(segments) == 1 and (target_pages.value != 1 or
+                sources[0].dtype == np.dtype('float16') and sources[1].dtype == np.dtype('float32')):
+            native_launches += 1
+        compiled_launches = max(1, 2*len(reduction_regions)-1)
+        if native_launches > compiled_launches:
+            return False
     groups = {}
     for first, columns, length, prepared in segments:
         dependencies, positions, page_sets, left_views, right_views, selected_dependencies = [], {}, {}, [], [], []
@@ -2449,7 +2469,7 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
                 value, target, origin, domain_shape = value.operands[0], target.T, origin[::-1], domain_shape[::-1]
             if value.operation == 'indexed_contract' and target.dtype.kind != 'f':
                 value = _resolve_logical(value.value[0], lowering.sources)
-            if value.operation == 'indexed_contract':
+            if value.operation == 'indexed_contract' and target.shape[1] == 1:
                 layout = lowering.layout(value)
                 row = origin[0] if layout[1][0] else 0
                 result = lowering.indexed_contraction_panel(value, (row, 0), target.shape, target)
