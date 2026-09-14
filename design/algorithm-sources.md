@@ -2459,3 +2459,29 @@ Feature-vector outer masks remain in the bounded numerical contribution rather
 than being folded into scalar destination routing. Scatter's existing output
 regions determine its feature panels; the vector does not allocate storage or
 introduce a second tiling owner.
+
+An indexed row energy is an ordinary library expression (source and indices are
+already configured canonical tensors):
+
+```python
+from mesh import BlockSpec, ShapeDtypeStruct, kernels
+
+rows, ids = kernels.arguments(2)
+feature = kernels.arange(source.shape[1], tile=128)
+selected = rows.at(ids.at(kernels.program_id(0), 0), feature)
+energy = program.kernel_call(
+    kernels.expression((selected * selected).sum()),
+    grid=(indices.shape[0], 1),
+    in_specs=(BlockSpec(None), BlockSpec(None)),
+    out_specs=BlockSpec((1, 1), lambda i, j: (i, j)),
+    out_shape=ShapeDtypeStruct((indices.shape[0], 1), 'float32'),
+)(source, indices)
+```
+
+The expression specifies its reduction width through the feature vector; it does
+not allocate a gathered-row or squared-row tensor. Each selected source region
+feeds the existing indexed partial-sum producer and scalar reduction. Program
+construction and bindings remain setup work. `neighborhood_call` now uses this
+same form for its shared Q·K/G·V statistics instead of producing an E×D product
+operand. The earlier description of that product operand records the replaced
+implementation; scalar partials, selectors and their registered storage remain.

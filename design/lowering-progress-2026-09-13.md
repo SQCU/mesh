@@ -1136,3 +1136,40 @@ fusing edge products into reductions without temporary E×D product tensors.
 That fusion, expert migration and full nine-step performance acceptance remain
 open. No application-specific fused kernel was added to bypass the missing
 representation.
+
+## Retain index-vector domains and fuse indexed reductions
+
+`8352bb4`, `3cb621a` and `0e4244a` add `kernels.arange(length, tile=...)` as an
+integer expression carrying its length, tile and offset. It allocates no index
+operand. Reduction lowering retains that domain through loads and arithmetic,
+then emits bounded indexed partial sums. Static access pruning, runtime selector
+lengths and scalar emission use the same retained extent. Singleton broadcasting
+preserves the offset, including a length-one ragged tail. Scatter expressions
+resolve feature vectors through the existing feature-domain lowering; vector
+masks apply to numerical contributions rather than scalar routing.
+
+`4bce209` replaces neighborhood's materialized E×D product tensors with one
+indexed product-and-sum expression. Existing FP32 scalar partials and their
+reduction remain. `9abf63c` first changes the existing neighborhood fixture to
+width3/tile2 and records a passing Metal baseline. `8a65cdf` also uses explicit
+vectors in its existing gather and scatter expressions, preserving their numeric
+work. Independent source review checked tile offsets, selector domains, static
+pruning, dtype, cache identities and singleton behavior.
+
+CPU and Metal local workflows pass, as does paired Metal. The neighborhood
+cases still run float32 on rank zero and cover all derivatives, duplicate indices,
+withheld source/cotangent row progress and reuse. Existing gather/scatter cases
+exercise ordinary vector use, nested dynamic loads, masks and empty/reused
+occurrences. Paired float16 gold/fanout use actual RDMA. Local traces contain
+3449 configured functions and 6712 submissions; paired rank zero has3385 and
+6027. The comparable ragged Metal baseline contains3497 and6808: fusion removes
+48 configured functions and96 submissions. This is removed-work evidence, not
+a matched wall-time speedup claim.
+
+Raw baseline/current logs and traces, revisions and timing count/mean/sample
+variance are in measurements/lowering-2026-09-13/index-domain-provenance.json.
+The source proves removal of full edge-product storage; scalar partials,
+selectors and launches remain. The public API has a complete indexed-reduction
+example in algorithm-sources.md. Broader vector-axis/shape coverage, expert
+migration, cross-peer neighborhood acceptance and matched end-to-end performance
+remain part of the full nine-step objective.
