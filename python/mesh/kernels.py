@@ -617,12 +617,13 @@ class _ExpressionKernel:
                     return _indexed_load_expression(ref, pointers[part.value][0], layouts.get(part.value), args, metal)
                 row_stride = ref.view.row_stride if ref.shape[0] != 1 else 0
                 column_stride = ref.view.column_stride if ref.shape[1] != 1 else 0
-                value = f'p{pointers[part.value][0]}[r*{row_stride}+({column})*{column_stride}]'
+                value = _memory_expression(ref.dtype, pointers[part.value][0], f'r*{row_stride}+({column})*{column_stride}', metal)
                 return f'((float)({value}))' if ref.dtype.kind == 'f' else value
 
             return _emit_scalar_expression(node, inputs, metal, resolve)
 
-        lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>']
+        lines = ['#include <metal_stdlib>\nusing namespace metal;' if metal else '#include <stdint.h>\n#include <stdbool.h>\n#include <math.h>\n#include <stdatomic.h>']
+        lines.append(_address_source(metal))
         lines.append(_lookup_declarations(expression, metal))
         layouts = {}
         for index, ref in enumerate(inputs):
@@ -634,10 +635,6 @@ class _ExpressionKernel:
             if not hasattr(ref, 'blocks'):
                 continue
             refs = tuple(ref for _, ref in sorted(ref.blocks.items()))
-            scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float',
-                      'i4': 'int' if metal else 'int32_t', 'u4': 'uint' if metal else 'uint32_t',
-                      'i8': 'long' if metal else 'int64_t', 'u8': 'ulong' if metal else 'uint64_t',
-                      'u1': 'uchar' if metal else 'uint8_t', 'b1': 'bool'}[ref.dtype.kind + str(ref.dtype.itemsize)]
             strides = []
             for name, attr in (('rs', 'row_stride'), ('cs', 'column_stride')):
                 values = tuple(getattr(r.view, attr) for r in refs)
@@ -646,17 +643,8 @@ class _ExpressionKernel:
                 else:
                     lines.append(f'{"constant ulong" if metal else "static const uint64_t"} {name}{index}[]={{'+','.join(map(str, values))+'};')
                     strides.append(f'{name}{index}[CANDIDATE]')
-            layouts[index] = scalar, strides
+            layouts[index] = strides
         lines.append(_METAL_EXPRESSION_HEAD if metal else 'void mesh_expression(const uintptr_t *buffers, const struct mesh_kernel_publication *publication) {')
-        candidates = {pointer for index, ref in enumerate(inputs) if hasattr(ref, 'blocks') or isinstance(ref, _StaticTable) for pointer in pointers[index]}
-        for index, ref in enumerate((*physical, output)):
-            if index in candidates:
-                continue
-            scalar = ({'f2': 'half' if metal else '_Float16', 'f4': 'float', 'i4': 'int' if metal else 'int32_t',
-                       'u4': 'uint' if metal else 'uint32_t', 'i8': 'long' if metal else 'int64_t',
-                       'u8': 'ulong' if metal else 'uint64_t', 'u1': 'uchar' if metal else 'uint8_t', 'b1': 'bool'}[ref.dtype.kind + str(ref.dtype.itemsize)])
-            qualifier = ('device ' if metal else '') + ('const ' if index < len(physical) else '')
-            lines.append(f'{qualifier}{scalar} *p{index}=({qualifier}{scalar} *)buffers[{index}];')
         if not metal:
             lines.append(_CPU_PUBLICATION_LOOP)
         for node in reductions:
@@ -674,7 +662,8 @@ class _ExpressionKernel:
                 lines.append(f'{name}_mid+={name}_lo>>16; {name}_hi+={name}_mid>>16; {name}=(ulong({name}_hi)<<32)|(ulong({name}_mid&65535u)<<16)|ulong({name}_lo&65535u);')
             elif metal:
                 lines.append(f'{name}=simd_sum({name});')
-        lines.append(f'for({"ulong" if metal else "uint64_t"} c={"column_begin+lane" if metal else "part.column_begin"};c<{"column_end" if metal else "part.column_end"};c+={32 if metal else 1}) p{len(physical)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
+        destination = _memory_expression(output.dtype, len(physical), f'r*{output.view.row_stride}+c*{output.view.column_stride}', metal)
+        lines.append(f'for({"ulong" if metal else "uint64_t"} c={"column_begin+lane" if metal else "part.column_begin"};c<{"column_end" if metal else "part.column_end"};c+={32 if metal else 1}) {destination}={emit(expression, "c")};')
         lines.append('}' if metal else _CPU_PUBLICATION_END)
         return '\n'.join(lines)
 
@@ -808,6 +797,28 @@ def _page_selector(program, table, row, column):
     return _Expression('lookup', (base + address // unit,), tuple(maps)), tuple(candidates)
 
 
+# design/algorithm-sources.md#programtensor
+def _memory_expression(dtype, pointer, index, metal):
+    scalar = {'f2': 'half' if metal else '_Float16', 'f4': 'float',
+              'i4': 'int' if metal else 'int32_t', 'u4': 'uint' if metal else 'uint32_t',
+              'i8': 'long' if metal else 'int64_t', 'u8': 'ulong' if metal else 'uint64_t',
+              'u1': 'uchar' if metal else 'uint8_t', 'b1': 'bool'}[dtype.kind + str(dtype.itemsize)]
+    return f'(*(({"device " if metal else ""}{scalar} *)mesh_address(buffers,({pointer}),({index})*{dtype.itemsize})))'
+
+
+# design/algorithm-sources.md#programtensor
+def _address_source(metal):
+    integer = 'ulong' if metal else 'uintptr_t'
+    device = 'device ' if metal else ''
+    page = '((device const uint *)d[1])[byte/d[3]]' if metal else 'atomic_load_explicit(&((const _Atomic uint32_t *)d[1])[byte/d[3]],memory_order_acquire)'
+    return f"""// design/algorithm-sources.md#programtensor
+    {'inline' if metal else 'static inline'} {device}{'uchar' if metal else 'unsigned char'} *mesh_address({device}const {integer} *buffers,{integer} operand,{integer} offset) {{
+      {device}const {integer} *d=({device}const {integer} *)buffers[operand];
+      {integer} byte=d[2]+offset,physical=({integer})({page})*d[3]+byte%d[3];
+      return ({device}{'uchar' if metal else 'unsigned char'} *)((({device}const {integer} *)d[0])[physical/d[4]]+physical%d[4]);
+    }}"""
+
+
 # design/algorithm-sources.md#kernelsexpression
 def _static_table_source(table, first, name, metal):
     dtype = table.dtype
@@ -821,7 +832,7 @@ def _static_table_source(table, first, name, metal):
                            *((name, tuple(entry[index] for entry in table.geometry))
                              for index, name in enumerate(('offset', 'rs', 'cs', 'base', 'first')))):
         lines.append(f'{constant} {integer} {name}_{suffix}[]={{'+','.join(map(str, values))+'};')
-    value = f'p[address%{table.unit}]'
+    value = _memory_expression(dtype, f'{first}+page', f'address%{table.unit}', metal)
     result_type = 'float' if dtype.kind == 'f' else scalar
     lines.append(f"""// design/algorithm-sources.md#kernelsexpression
     {'inline' if metal else 'static inline'} {result_type} {name}({'device const ulong *' if metal else 'const uintptr_t *'} buffers,{integer} row,{integer} column) {{
@@ -830,7 +841,6 @@ def _static_table_source(table, first, name, metal):
         if({name}_ordinal[middle]<ordinal)low=middle+1;else high=middle; }}
       {integer} address={name}_offset[low]+row%{table.block_shape[0]}*{name}_rs[low]+column%{table.block_shape[1]}*{name}_cs[low];
       {integer} page={name}_pages[{name}_base[low]+address/{table.unit}-{name}_first[low]];
-      {'device ' if metal else ''}const {scalar} *p=({'device ' if metal else ''}const {scalar} *)buffers[{first}+page];
       return {value};
     }}""")
     return '\n'.join(lines)
@@ -843,12 +853,12 @@ def _indexed_load_expression(ref, pointer, layout, args, metal):
         return f'(({mask})?{layout}(buffers,({row}),({column})):({other}))'
     if hasattr(ref, 'blocks'):
         block = f'(({row})/{ref.block_shape[0]}*{ref.grid[1]}+({column})/{ref.block_shape[1]})'
-        scalar, strides = layout
-        address = f'(({"device " if metal else ""}const {scalar} *)buffers[{pointer}+{block}])'
-        value = f'{address}[(({row})%{ref.block_shape[0]})*{strides[0]}+(({column})%{ref.block_shape[1]})*{strides[1]}]'.replace('CANDIDATE', block)
+        strides = layout
+        index = f'(({row})%{ref.block_shape[0]})*{strides[0]}+(({column})%{ref.block_shape[1]})*{strides[1]}'.replace('CANDIDATE', block)
+        value = _memory_expression(ref.dtype, f'{pointer}+{block}', index, metal)
     else:
-        strides = (ref.view.row_stride, ref.view.column_stride) if layout is None else layout[1]
-        value = f'p{pointer}[({row})*{strides[0]}+({column})*{strides[1]}]'
+        strides = (ref.view.row_stride, ref.view.column_stride) if layout is None else layout
+        value = _memory_expression(ref.dtype, pointer, f'({row})*{strides[0]}+({column})*{strides[1]}', metal)
     value = f'((float)({value}))' if ref.dtype.kind == 'f' else value
     return f'(({mask})?({value}):({other}))'
 

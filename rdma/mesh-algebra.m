@@ -107,6 +107,9 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property NSMutableDictionary<NSString *,MeshCPUCode *> *cpuCode;
 @property NSMutableArray<MeshFunction *> *functions;
 @property NSMutableArray<MeshExtent *> *extents;
+@property NSArray<id<MTLBuffer>> *banks;
+@property id<MTLBuffer> pageTable,bankAddresses;
+@property size_t bankBytes;
 @property NSMutableDictionary<NSValue *,MeshExtent *> *lookup;
 @property NSMutableData *tensors;
 @property NSMutableData *bindings;
@@ -160,6 +163,22 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
   if(!cpu) {
     a.device=MTLCreateSystemDefaultDevice(); a.queue=[a.device newCommandQueue];
     if(!a.queue){errno=ENODEV;return NULL;}
+    struct hdr *m=context->M;
+    a.bankBytes=a.device.maxBufferLength/m->pgsz*m->pgsz;
+    NSMutableArray<id<MTLBuffer>> *banks=[NSMutableArray new];
+    size_t bytes=(size_t)mesh_rows(m)*m->pgsz;
+    for(size_t offset=0;offset<bytes;offset+=a.bankBytes){
+      size_t length=bytes-offset<a.bankBytes?bytes-offset:a.bankBytes;
+      id<MTLBuffer> bank=[a.device newBufferWithBytesNoCopy:mesh_at(m,0)+offset length:length options:MTLResourceStorageModeShared deallocator:nil];
+      if(!bank){errno=ENOMEM;return NULL;}[banks addObject:bank];
+    }
+    a.banks=banks;
+    a.bankAddresses=[a.device newBufferWithLength:banks.count*sizeof(uint64_t) options:MTLResourceStorageModeShared];
+    size_t start=m->page_off/m->pgsz*m->pgsz,end=(m->page_off+mesh_rows(m)*sizeof(uint32_t)+m->pgsz-1)/m->pgsz*m->pgsz;
+    a.pageTable=[a.device newBufferWithBytesNoCopy:(char *)m+start length:end-start options:MTLResourceStorageModeShared deallocator:nil];
+    if(!a.bankAddresses || !a.pageTable){errno=ENOMEM;return NULL;}
+    for(size_t i=0;i<banks.count;i++)((uint64_t *)a.bankAddresses.contents)[i]=banks[i].gpuAddress;
+
   }
   a.executions=dispatch_group_create();
   a.libraries=[NSMutableDictionary new];a.cpuCode=[NSMutableDictionary new];
@@ -515,15 +534,21 @@ static int bind_metal(struct mesh_algebra *handle,const char *text,size_t rows,c
   id<MTLComputePipelineState> pipeline=[a.device newComputePipelineStateWithDescriptor:pipelineDescription options:MTLPipelineOptionNone reflection:nil error:&error];
   if(!pipeline){fprintf(stderr,"mesh Metal pipeline: %s\n",error.description.UTF8String);return EINVAL;}
   if(pipeline.maxTotalThreadsPerThreadgroup<32)return EINVAL;
-  NSMutableArray<id<MTLBuffer>> *resources=[NSMutableArray new];
-  id<MTLBuffer> addresses=[a.device newBufferWithLength:(input_count+1)*sizeof(uint64_t) options:MTLResourceStorageModeShared];
+  NSMutableArray<id<MTLBuffer>> *resources=[a.banks mutableCopy];
+  [resources addObject:a.pageTable];[resources addObject:a.bankAddresses];
+  size_t count=input_count+1;
+  id<MTLBuffer> addresses=[a.device newBufferWithLength:count*6*sizeof(uint64_t) options:MTLResourceStorageModeShared];
   if(!addresses)return ENOMEM;
-  for(size_t i=0;i<input_count+1;i++) {
+  uint64_t *pointers=addresses.contents,*descriptors=pointers+count;
+  struct hdr *m=a->context->M;
+  for(size_t i=0;i<count;i++) {
     struct mesh_view v=i<input_count?inputs[i]:output;
     struct mesh_extent *extent=&v.tensor->extents[v.extent];
-    id<MTLBuffer> buffer=a.lookup[[NSValue valueWithPointer:extent]].buffer;
-    ((uint64_t *)addresses.contents)[i]=buffer.gpuAddress+v.offset*scalar_bytes(extent->shape.scalar);
-    [resources addObject:buffer];
+    pointers[i]=addresses.gpuAddress+(count+5*i)*sizeof(uint64_t);
+    uint64_t *d=descriptors+5*i;
+    d[0]=a.bankAddresses.gpuAddress;d[1]=a.pageTable.gpuAddress+m->page_off%m->pgsz;
+    d[2]=(uint64_t)extent->first*m->pgsz+v.offset*scalar_bytes(extent->shape.scalar);
+    d[3]=m->pgsz;d[4]=a.bankBytes;
   }
   id<MTLBuffer> bounds=[a.device newBufferWithBytes:domain length:3*sizeof(uint64_t) options:MTLResourceStorageModeShared];
   if(!bounds)return ENOMEM;
@@ -617,13 +642,18 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
     library.kernel=(mesh_cpu_kernel)dlsym(library.handle,"mesh_expression");
     if(!library.kernel){fprintf(stderr,"mesh CPU symbol: %s\n",dlerror());dlclose(library.handle);library.handle=NULL;return EIO;}
   }
-  NSMutableData *addresses=[NSMutableData dataWithLength:(input_count+1)*sizeof(uintptr_t)];
-  uintptr_t *pointers=addresses.mutableBytes;
-  for(size_t i=0;i<input_count+1;i++) {
+  size_t count=input_count+1;
+  NSMutableData *addresses=[NSMutableData dataWithLength:(count*6+1)*sizeof(uintptr_t)];
+  uintptr_t *pointers=addresses.mutableBytes,*descriptors=pointers+count,*banks=pointers+count*6;
+  struct hdr *m=a->context->M;*banks=(uintptr_t)mesh_at(m,0);
+  for(size_t i=0;i<count;i++) {
     struct mesh_view v=i<input_count?inputs[i]:output;
     if(!valid_view(a,v))return EINVAL;
     struct mesh_extent *extent=&v.tensor->extents[v.extent];
-    pointers[i]=(uintptr_t)extent->address+v.offset*scalar_bytes(extent->shape.scalar);
+    uintptr_t *d=descriptors+5*i;pointers[i]=(uintptr_t)d;
+    d[0]=(uintptr_t)banks;d[1]=(uintptr_t)mesh_page(m);
+    d[2]=(uintptr_t)extent->first*m->pgsz+v.offset*scalar_bytes(extent->shape.scalar);
+    d[3]=m->pgsz;d[4]=(size_t)mesh_rows(m)*m->pgsz;
   }
   int status=bind_function(handle,reads,input_count,&region,1,submit_cpu);
   if(status)return status;

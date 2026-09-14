@@ -9,7 +9,7 @@ The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/de
 
 ## Program.tensor
 
-The JAX authors, [Refs and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html), and Apple, [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt): tensor blocks name actual registered pages. Ref slices, transposes and broadcasts describe those same operands; they do not create a copied transport store.
+The JAX authors, [Refs and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html), and Apple, [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt): tensor blocks name actual registered pages. Ref slices, transposes and broadcasts describe those same operands; they do not create a copied transport store. Generated CPU and Metal expression loads/stores resolve logical byte indices through the canonical page table. Setup binds the actual arena in Metal-sized banks, its page table, and per-operand geometry; invocation allocates no address tables and copies no operands. MPS and supplied encoders still bind fixed extent views and require a corresponding indexed-address integration before transport can relocate all operands.
 
 The llama.cpp authors, [GGUF format](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md): the engine's existing `ModelFile` loader reads configured weight slices directly into registered `MatrixView`s. `Program.constant(ref)` marks a region initialized by such a setup loader; passing a value also fills the region.
 
