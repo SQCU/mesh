@@ -403,6 +403,38 @@ def matrix_view(tensor, shape):
     return result
 
 
+# ../../../design/algorithm-sources.md#xonotic-shared-indexing
+def gather_expression(kernels, arguments, values, shapes, attributes, coordinates):
+    mapping, advanced, adjacent = (attributes[key] for key in ('mapping', 'advanced', 'adjacent'))
+    axis = 0 if adjacent else len(advanced)
+    advanced_axis = None if adjacent else 0
+    source_axis, source_coordinates = 0, []
+    for item in mapping:
+        if item[0] == 'new':
+            axis += 1
+            continue
+        if item[0] == 'index':
+            if advanced_axis is None:
+                advanced_axis = axis
+                axis += len(advanced)
+            selected = values[1 + item[1]]
+            selected_shape = shapes[selected.index]
+            at = tuple(0 if size == 1 else coordinates[advanced_axis + len(advanced) - len(selected_shape) + i]
+                       for i, size in enumerate(selected_shape))
+            row, column = at if len(at) == 2 else (0, at[0] if at else 0)
+            selected_value = arguments[1 + item[1]].at(row, column)
+            coordinate = kernels.select(selected_value < 0, selected_value + shapes[values[0].index][source_axis], selected_value)
+        elif item[0] == 'fixed':
+            coordinate = item[1]
+        else:
+            coordinate = item[1] + coordinates[axis] * item[2]
+            axis += 1
+        source_coordinates.append(coordinate)
+        source_axis += 1
+    row, column = source_coordinates if len(source_coordinates) == 2 else (0, source_coordinates[0])
+    return arguments[0].at(row, column)
+
+
 # ../../../design/algorithm-sources.md#application-metal-kernels
 def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
                  tile_rows=64, tile_k=128, tile_columns=128):
@@ -476,6 +508,36 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
         shaped = all(local[v.index].shape == matrix_shapes[v.index] or
             (1 in matrix_shapes[v.index] and local[v.index].shape[::-1] == matrix_shapes[v.index]) or
             local[v.index].grid == (1, 1) for v in values)
+        if shaped and operation in ('gather', 'concatenate') and len(shape) <= 2 and 1 <= len(shapes[values[0].index]) <= 2 and all(len(shapes[v.index]) <= 2 for v in values):
+            matrix_shape = shape if len(shape) == 2 else (1, math.prod(shape))
+            block = (min(tile_rows, matrix_shape[0]), min(tile_columns, matrix_shape[1]))
+            row, column = kernels.indices()
+            coordinates = (kernels.program_id(0) * block[0] + row, kernels.program_id(1) * block[1] + column)
+            logical_coordinates = coordinates if len(shape) == 2 else coordinates[1:] if shape else ()
+            arguments = kernels.arguments(len(values))
+            if operation == 'gather':
+                resolved = dict(attributes)
+                resolved['mapping'] = tuple(tuple(part.resolve(capacity) if isinstance(part, Dimension) else part for part in item)
+                                            for item in attributes['mapping'])
+                result = gather_expression(kernels, arguments, values, shapes, resolved, logical_coordinates)
+            else:
+                axis, offset, terms = attributes['axis'], 0, []
+                for argument, operand in zip(arguments, values):
+                    at = list(logical_coordinates)
+                    at[axis] = at[axis] - offset
+                    selected_row, selected_column = at if len(at) == 2 else (0, at[0])
+                    offset += shapes[operand.index][axis]
+                    terms.append((logical_coordinates[axis] < offset, argument.at(selected_row, selected_column)))
+                result = terms[-1][1]
+                for condition, value_expression in reversed(terms[:-1]):
+                    result = kernels.select(condition, value_expression, result)
+            operands = tuple(matrix_view(local[v.index], matrix_shapes[v.index]) for v in values)
+            tensors[value.index] = program.kernel_call(kernels.expression(result),
+                grid=tuple((size + extent - 1) // extent for size, extent in zip(matrix_shape, block)),
+                in_specs=(BlockSpec(None),) * len(operands),
+                out_specs=BlockSpec(block, lambda i, j: (i, j)),
+                out_shape=ShapeDtypeStruct(matrix_shape, value.dtype), peer=peer)(*operands)
+            continue
         if numerical and operation == 'matmul' and len(shape) == 2 and all(len(shapes[v.index]) == 2 and local[v.index].shape == shapes[v.index] for v in values):
             left, right = (local[v.index] for v in values)
             left = left.T if attributes['transpose_left'] else left

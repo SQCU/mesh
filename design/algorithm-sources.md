@@ -1346,3 +1346,16 @@ consume follow the same member contract. Hardware SEND readers retain their
 existing exact direct planes. [Shared routing ownership](shared-routing-ownership.md#implemented-reader-group-specialization)
 records source disposition, the fast-path boundary, lifetime ordering and remaining
 sparse-routing work.
+
+## Xonotic shared indexing
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+expresses numerical accesses through references and grid-relative index maps.
+`tensor_metal.gather_expression` translates Xonotic's retained slice/fixed/advanced
+index mapping into the existing `.at` expression representation. Global output
+coordinates include program_id offsets; singleton index dimensions broadcast,
+negative indices normalize against the source axis, and inserted axes retain
+logical identity. Concatenation uses the same indexed loads under retained
+source-interval predicates. Existing selected-reader lowering owns dependency
+selection and lifetime; callers neither construct it nor emit backend kernels.
+[Source mapping, derivative scope and validation limits](xonotic-shared-indexing.md).
