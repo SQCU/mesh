@@ -1000,6 +1000,15 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
         raise ValueError('Indexed addition requires matching real or integer base/output dtypes')
     if destinations.dtype.kind not in 'iu' or max(size, base.shape[0]) >= 0xffffffff:
         raise ValueError('Indexed addition requires integer destinations within the uint32 domain')
+    # design/algorithm-sources.md#bounded-indexed-validity
+    def runtime_mask(node):
+        if node.operation == 'input' and any((ref.view.tensor, ref.view.extent) not in program._constant_extents
+                                            for ref in operands[node.value].blocks.values()):
+            return True
+        return node.operation == 'load' or any(runtime_mask(child) for child in node.operands)
+
+    late_mask = runtime_mask(mask)
+    routing_mask = _literal(True) if late_mask else mask
     value_inputs, indexed_inputs = set(), set()
 
     # design/algorithm-sources.md#fused-indexed-update-values
@@ -1016,12 +1025,17 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             value_dependencies(child)
 
     value_dependencies(update_value)
+    update_inputs = set(value_inputs)
+    if late_mask:
+        value_dependencies(mask)
+        update_value = select(mask, update_value, 0)
     value_inputs = tuple(sorted(value_inputs))
     for index in value_inputs:
         tensor = operands[index]
         if tensor.shape[0] not in (1, size) or tensor.shape[1] not in (1, features):
             raise ValueError('Indexed update operands must broadcast to U×F')
-        if tensor.dtype.kind not in ('fiu' if base.dtype.kind == 'f' else 'iu'):
+        allowed = ('fiu' if base.dtype.kind == 'f' else 'iu') if index in update_inputs else 'fiub'
+        if tensor.dtype.kind not in allowed:
             raise ValueError('Indexed update operand dtype is incompatible with accumulation')
     for index in indexed_inputs:
         if operands[index].dtype.kind not in 'fiub':
@@ -1036,7 +1050,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             key_dependencies(child)
 
     key_dependencies(expression.operands[1])
-    key_dependencies(mask)
+    key_dependencies(routing_mask)
     chunk_rows = destinations.block_shape[0]
     for index in value_inputs:
         tensor = operands[index]
@@ -1050,7 +1064,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             chunk_rows = math.gcd(chunk_rows, tensor.block_shape[0])
     destination = expression.operands[1]
     normalized = select(destination < 0, destination + base.shape[0], destination)
-    key_expression = select(mask & (normalized >= 0) & (normalized < base.shape[0]), normalized, 0xffffffff)
+    key_expression = select(routing_mask & (normalized >= 0) & (normalized < base.shape[0]), normalized, 0xffffffff)
     chunks = []
     producers = {}
     for begin in range(0, size, chunk_rows):

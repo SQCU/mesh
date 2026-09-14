@@ -231,3 +231,21 @@ and paired workflow evidence is recorded in
 [the progress log](lowering-progress-2026-09-13.md#bounded-nested-scatter-loads).
 Load-valued outer routing masks and compact aggregate selector storage remain
 separate unfinished parts of the direction above.
+
+## Runtime validity after routing
+
+Outer masks with indexed loads or nonconstant inputs now execute within each
+bounded destination segment as `select(mask, value, 0)`. Their masks do not hold
+routing-directory publication. Shared predicate-aware load selection excludes
+false-masked nested value and coordinate accesses from numerical readiness.
+See [bounded indexed validity](algorithm-sources.md#bounded-indexed-validity)
+for the canonical implementation and Pallas source.
+
+Direct runtime mask operands retain the actual chunk/panel Ref and its readiness
+granularity; indexed masks select the actual pages for their bounded ordinals.
+Neither promises readiness within an unpublished canonical block. Only declared
+constant masks stay in routing for early elimination. Unknown runtime masks over
+valid destination indices still represent possible contributions; an empty-route
+observation must use destinations that actually establish no contributions.
+The existing integrated scatter example, rather than another evaluator, checks
+delayed mask/value pages, masked nested loads and subsequent reuse.

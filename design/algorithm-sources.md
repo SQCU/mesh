@@ -2054,11 +2054,10 @@ cost; compact capacity packing remains unfinished work.
 Original pointwise update expressions retain their direct Ref bindings, scalar
 precision, exact segment loops and output partials. Indexed updates can load
 values through nested dynamic indices directly from canonical pages, including
-conditional load predicates and masked fallback values. The outer indexed-add
-validity mask still participates in its existing routing-key expression; this
-increment does not claim per-destination independence for a load-valued outer
-routing mask. That requires moving such numerical validity into the bounded
-segment computation without weakening destination closure.
+conditional load predicates and masked fallback values. The bounded
+indexed-validity lowering below moves runtime outer masks into segment
+computation without weakening destination closure; constant masks can still
+eliminate entries during routing.
 
 Source compilation and diff review are complete. Operational validation uses the
 existing streaming-algebra scatter case extended with a lookup tensor, mixed
@@ -2120,3 +2119,41 @@ must be rebuilt together, but bridge ABI 25 and running bridges remain unchanged
 Native library builds, Python compilation and source diff review passed. The
 existing nested-load scatter workflow supplies subsequent runtime evidence,
 including empty routing, delayed candidate pages and reuse.
+
+## Bounded indexed validity
+
+The JAX authors' [Pallas Ref indexing](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs)
+composes indexed reads with masks; masked values must not introduce the selected
+source access when their predicate is false. Indexed-add setup now separates
+runtime numerical validity from destination routing. `runtime_mask` identifies
+any indexed load or nonconstant direct input in the mask expression, using the
+existing constant-extent identities. Those masks become
+`select(mask, update_value, 0)` inside the existing bounded segment expression.
+Routing keys depend only on normalized destination indices.
+
+The same shared access-path collector propagates mask polarity into nested value
+loads and their coordinate loads. A false mask therefore prevents those dynamic
+value candidates from becoming readiness requirements. A mask load selects only
+the original pages used by that destination's ordinal range and feature panel.
+Other destinations can finish while an unrelated mask page remains unpublished.
+The exact segment iteration ranges, FP32 real accumulation, integer arithmetic,
+and final output casts remain unchanged.
+
+Direct runtime masks also move out of routing, so using a plain mask input does
+not introduce a chunk-level routing barrier absent from equivalent indexed
+syntax. Such direct masks retain their known chunk/panel Ref bindings and whole
+Ref readiness; this does not promise progress within an unpublished mask block.
+Boolean direct inputs are allowed in mask expressions. A boolean input also used
+as a numerical update operand remains subject to the existing update dtype
+contract. This distinction is realized during setup.
+
+Only masks composed entirely from declared constants and static coordinates stay
+in routing, where early elimination can avoid allocating active value work. An
+empty routing domain can finish without runtime masks or values. In contrast,
+valid destination indices with unknown runtime masks do not establish an empty
+domain: their affected destinations must await the relevant mask regions.
+
+The existing scatter workflow supplies delayed mask pages, a false-masked update
+whose value lookup points to a delayed page, empty destination routing and
+repeated storage reuse. Python compilation and source diff review passed for
+this change; operational results are supplied by the parent integration run.
