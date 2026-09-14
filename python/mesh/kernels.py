@@ -892,6 +892,8 @@ def _segment_expression(node, operands, column, direct):
     feature = _Expression('column') + column
     if node.operation == 'row':
         return row
+    if node.operation == 'index_vector':
+        return _literal(node.value[2]) if node.value[0] == 1 else feature + node.value[2]
     if node.operation == 'column':
         return feature
     if node.operation == 'input':
@@ -1053,7 +1055,7 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
         if node.operation == 'input' and any((ref.view.tensor, ref.view.extent) not in program._constant_extents
                                             for ref in operands[node.value].blocks.values()):
             return True
-        return node.operation == 'load' or any(runtime_mask(child) for child in node.operands)
+        return node.operation == 'load' or (node.operation == 'index_vector' and node.value[0] != 1) or any(runtime_mask(child) for child in node.operands)
 
     late_mask = runtime_mask(mask)
     routing_mask = _literal(True) if late_mask else mask
@@ -1063,7 +1065,10 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
     def value_dependencies(node):
         if node.operation in ('//', '%') and any(_expression_dtype(child, operands).kind not in 'iub' for child in node.operands):
             raise ValueError('Integer quotient and remainder require integral operands')
-        if node.operation == 'input':
+        if node.operation == 'index_vector':
+            if node.value[0] not in (1, features):
+                raise ValueError('Indexed update vectors must broadcast to the feature width')
+        elif node.operation == 'input':
             value_inputs.add(node.value)
         elif node.operation == 'load':
             indexed_inputs.add(node.value)

@@ -2451,3 +2451,11 @@ specialization. The retained neighborhood workflow's width-three, tile-two
 case exercises multiple partials and a ragged tail using the same caller and
 operational observer. Source compilation and diff checks cover this increment;
 operational validation remains in that existing workflow.
+
+Bounded indexed-add updates also accept these vectors when length is one or the
+full feature width. `_segment_expression` substitutes the retained scalar
+offset or the existing feature coordinate plus offset before scalar emission.
+Feature-vector outer masks remain in the bounded numerical contribution rather
+than being folded into scalar destination routing. Scatter's existing output
+regions determine its feature panels; the vector does not allocate storage or
+introduce a second tiling owner.
