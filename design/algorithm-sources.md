@@ -1671,7 +1671,8 @@ native CPU/Metal evidence.
 
 ### Logical-rank pointwise callers
 
-Xonotic's pointwise arithmetic, comparisons, selection, casts and supported unary
+`logical_coordinates` supplies the common physical-to-logical output index map
+for indexed and pointwise callers. Xonotic's pointwise arithmetic, comparisons, selection, casts and supported unary
 operations use the shared expression compiler across logical ranks. Their
 broadcast coordinates follow the JAX authors' index-map design: flatten output
 leading axes into physical rows, recover each logical coordinate with integer

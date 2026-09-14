@@ -391,6 +391,16 @@ def matrix_view(tensor, shape):
 
 
 # ../../../design/algorithm-sources.md#xonotic-logical-indexing
+def logical_coordinates(kernels, shape, block):
+    import math
+    row, column = kernels.indices()
+    row = kernels.program_id(0) * block[0] + row
+    column = kernels.program_id(1) * block[1] + column
+    return tuple((row // math.prod(shape[axis + 1:-1])) % size
+                 for axis, size in enumerate(shape[:-1])) + ((column,) if shape else ())
+
+
+# ../../../design/algorithm-sources.md#xonotic-logical-indexing
 def gather_expression(kernels, arguments, values, shapes, attributes, coordinates):
     mapping, advanced, adjacent = (attributes[key] for key in ('mapping', 'advanced', 'adjacent'))
     axis = 0 if adjacent else len(advanced)
@@ -548,39 +558,35 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         if operation in ('gather', 'take_along_axis', 'concatenate', 'transpose'):
             matrix_shape = (math.prod(shape[:-1]), shape[-1]) if shape else (1, 1)
             block = (min(tile_rows, matrix_shape[0]), min(tile_columns, matrix_shape[1]))
-            row, column = kernels.indices()
-            row = kernels.program_id(0) * block[0] + row
-            column = kernels.program_id(1) * block[1] + column
-            logical_coordinates = tuple((row // math.prod(shape[axis + 1:-1])) % size
-                                        for axis, size in enumerate(shape[:-1])) + ((column,) if shape else ())
+            coordinates = logical_coordinates(kernels, shape, block)
             arguments = tuple(argument.reshape(shapes[value.index])
                               for argument, value in zip(kernels.arguments(len(values)), values))
             if operation == 'gather':
                 resolved = dict(attributes)
                 resolved['mapping'] = tuple(tuple(part.resolve(capacity) if isinstance(part, Dimension) else part for part in item)
                                             for item in attributes['mapping'])
-                result = gather_expression(kernels, arguments, values, shapes, resolved, logical_coordinates)
+                result = gather_expression(kernels, arguments, values, shapes, resolved, coordinates)
             elif operation == 'take_along_axis':
                 axis = attributes['axis']
-                index_at = tuple(0 if size == 1 else coordinate for size, coordinate in zip(shapes[values[1].index], logical_coordinates))
+                index_at = tuple(0 if size == 1 else coordinate for size, coordinate in zip(shapes[values[1].index], coordinates))
                 selected = arguments[1].at(*index_at)
                 if values[1].dtype.startswith('int'):
                     selected = kernels.select(selected < 0, selected + shapes[values[0].index][axis], selected)
-                source_at = tuple(selected if i == axis else 0 if size == 1 else logical_coordinates[i]
+                source_at = tuple(selected if i == axis else 0 if size == 1 else coordinates[i]
                                   for i, size in enumerate(shapes[values[0].index]))
                 result = arguments[0].at(*source_at)
             elif operation == 'transpose':
                 source_at = [0] * len(shape)
-                for coordinate, axis in zip(logical_coordinates, attributes['axes']):
+                for coordinate, axis in zip(coordinates, attributes['axes']):
                     source_at[axis] = coordinate
                 result = arguments[0].at(*source_at)
             else:
                 axis, offset, terms = attributes['axis'], 0, []
                 for argument, operand in zip(arguments, values):
-                    at = list(logical_coordinates)
+                    at = list(coordinates)
                     at[axis] = at[axis] - offset
                     offset += shapes[operand.index][axis]
-                    terms.append((logical_coordinates[axis] < offset, argument.at(*at)))
+                    terms.append((coordinates[axis] < offset, argument.at(*at)))
                 result = terms[-1][1]
                 for condition, value_expression in reversed(terms[:-1]):
                     result = kernels.select(condition, value_expression, result)
@@ -609,11 +615,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             if not direct:
                 matrix_shape = (math.prod(shape[:-1]), shape[-1]) if shape else (1, 1)
                 block = (min(tile_rows, matrix_shape[0]), min(tile_columns, matrix_shape[1]))
-                row, column = kernels.indices()
-                row = kernels.program_id(0) * block[0] + row
-                column = kernels.program_id(1) * block[1] + column
-                coordinates = tuple((row // math.prod(shape[axis + 1:-1])) % size
-                                    for axis, size in enumerate(shape[:-1])) + ((column,) if shape else ())
+                coordinates = logical_coordinates(kernels, shape, block)
                 args = tuple(argument.reshape(shapes[operand.index]).at(*(
                     0 if size == 1 else coordinate for size, coordinate in
                     zip(shapes[operand.index], coordinates[len(shape)-len(shapes[operand.index]):])))
