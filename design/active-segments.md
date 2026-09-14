@@ -67,3 +67,20 @@ return the required base values without fictitious partial transmissions.
 
 This document records the capacity implementation and the active-disposition
 contract. It does not claim native omission is implemented or measured yet.
+
+## Exact large-shape observations
+
+The original demonstration used increasing positive update values. At 4097
+updates those produce integer sums beyond float32's consecutive-integer range.
+The reference's sequential `np.add.at` and the implementation's independently
+rounded partial sums can then differ despite the intended FP32 contract. The
+existing exact-equality observation is unsuitable for that input magnitude.
+
+The example now cycles update magnitudes through 1 through 31, shifted by the
+occurrence index. At 4097 updates the maximum possible four-occurrence example
+term is 171, and twice the sum is bounded by 1401174, below 2**24. Every positive
+integer partial, final sum and pointwise doubling is therefore exactly
+representable in float32. Exact equality remains unchanged. This changes the
+demonstration inputs; it does not change kernel precision, cast placement,
+reduction order or comparison tolerance. Earlier archives retain their original
+inputs and are not matched throughput baselines for the new data.

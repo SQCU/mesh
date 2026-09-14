@@ -458,7 +458,7 @@ def main():
                 routing[1, 0] = 2**32 + 2
             if empty:
                 routing.fill(2**32 + 2)
-            update_values = np.arange(1+generation, updates_count+1+generation, dtype=dtype)[:, None]
+            update_values = (1 + generation + np.arange(updates_count) % 31).astype(dtype)[:, None]
             expected = np.zeros((destinations_count, 1), dtype=np.float32)
             selected = scatter_valid[:, 0] & (routing[:, 0] < destinations_count)
             np.add.at(expected, routing[selected, 0], update_values[selected].astype(np.float32)*(2+generation)+1)
