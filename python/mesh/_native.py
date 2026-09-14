@@ -29,6 +29,10 @@ class RowRange(C.Structure):
     _fields_ = [("first", U), ("count", U)]
 
 
+class ReaderEvent(C.Structure):
+    _fields_ = [(name, U) for name in ('source', 'member', 'plane', 'completed', 'flags')]
+
+
 class IndexedEvent(C.Structure):
     _fields_ = [('input', C.c_uint64)] + [(name, U) for name in
         ('descriptor', 'role', 'candidate', 'first', 'count', 'plane', 'retired',
@@ -109,6 +113,8 @@ class Native:
             'mesh_algebra_trace_output': (RowRange, [P, Z, Z]),
             'mesh_algebra_trace_indexed_count': (Z, [P, Z]),
             'mesh_algebra_trace_indexed': (IndexedEvent, [P, Z, Z]),
+            'mesh_algebra_trace_input_reader': (ReaderEvent, [P, Z, Z, U]),
+            'mesh_algebra_trace_indexed_reader': (ReaderEvent, [P, Z, Z, U]),
             'mesh_algebra_report': (Report, [P]),
             'mesh_transfer_trace_count': (Z, [P]),
             'mesh_transfer_trace': (TransferEvent, [P, Z]),

@@ -355,6 +355,15 @@ class Program:
                 for i in range(self.native.algebra_trace_indexed_count(self.handle, index)))
             item['indexed'] = tuple({name: getattr(entry, name) for name, _ in entry._fields_}
                 for entry in indexed)
+            item['reader_groups'] = []
+            for label, regions, read in (('inputs', item['inputs'], self.native.algebra_trace_input_reader),
+                                         ('indexed', item['indexed'], self.native.algebra_trace_indexed_reader)):
+                for map_index, region in enumerate(regions):
+                    for row in range(region['count']):
+                        reader = read(self.handle, index, map_index, row)
+                        if reader.member != 0xffffffff:
+                            item['reader_groups'].append(dict(binding=label, map=map_index,
+                                **{name: getattr(reader, name) for name, _ in reader._fields_}))
             result.append(item)
         return tuple(result)
 
