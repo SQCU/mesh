@@ -79,7 +79,6 @@ def main():
         start = time.monotonic()
         print(f'{args.role}: D={args.width} bots={args.bots} teams={TEAMS} experts={EXPERTS}', flush=True)
         while time.monotonic() - start < args.seconds:
-            program.scan()
             for first, result in returned:
                 if not result.ready:
                     continue
@@ -98,8 +97,6 @@ def main():
                             output[:] = positions[first:first + ref.shape[0]]
                     except BlockingIOError:
                         pass
-        while program.report.submitted != program.report.completed:
-            program.scan()
         elapsed = time.monotonic() - start
         print(f'{args.role}: {planned} returned plans in {elapsed:.3f}s; switches={switches}; '
               f'objective split={np.bincount(objectives[objectives >= 0], minlength=TEAMS).tolist()}', flush=True)

@@ -24,7 +24,6 @@ class Frames:
         self.node = self.program.node
         self.peer = 1 - self.node if peer is None else peer
         self.slots, self.usable, self.stride = slots, usable, usable
-        self.sent = self.received = 0
         self.pending = {}
         self.outputs, self.inputs = [], []
         for sender, receiver in ((min(self.node, self.peer), max(self.node, self.peer)),
@@ -42,8 +41,8 @@ class Frames:
     def reserve(self, node, count):
         if node != self.peer or count < 0 or count > self.slots:
             raise ValueError('Frame reservation must fit the configured peer ring')
-        refs = tuple(self.outputs[(self.sent + i) % self.slots] for i in range(count))
-        if any(not ref.writable for ref in refs):
+        refs = tuple(ref for ref in self.outputs if ref.writable)[:count]
+        if len(refs) != count:
             return None
         result = Batch()
         for ref in refs:
@@ -51,7 +50,6 @@ class Frames:
             array = writer.__enter__().view(np.uint8).reshape(-1)
             self.pending[array.ctypes.data] = writer
             result.append(array)
-        self.sent += count
         return result
 
     # ../../design/algorithm-sources.md#xonotic-frame-migration
@@ -65,16 +63,13 @@ class Frames:
 
     # ../../design/algorithm-sources.md#xonotic-frame-migration
     def read(self, dtype=np.uint8, max_batches=1):
-        self.program.scan()
-        for _ in range(max_batches * self.slots):
-            result = self.inputs[self.received % self.slots]
+        for result in self.inputs[:max_batches * self.slots]:
             if not result.ready:
-                break
+                continue
             try:
                 yield result.array.view(dtype).reshape(-1), self.peer
             finally:
                 result.consume()
-                self.received += 1
 
     # ../../design/algorithm-sources.md#xonotic-frame-migration
     def close(self):

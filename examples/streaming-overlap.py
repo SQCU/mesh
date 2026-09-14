@@ -95,7 +95,7 @@ def main():
         program.realize()
         if args.rank == 1:
             while running:
-                program.scan()
+                signal.pause()
             print(json.dumps(dict(rank=1, mode=args.mode, calls=calls,
                 consumers_before_full_receive=early)), flush=True)
             return
@@ -118,7 +118,6 @@ def main():
                         began = time.perf_counter()
                     outstanding[slot] = (submitted, began)
                     submitted += 1
-            program.scan()
             for slot, (input_ref, result) in enumerate(slots):
                 if slot not in outstanding or not result.ready:
                     continue

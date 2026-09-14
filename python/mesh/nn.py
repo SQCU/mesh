@@ -19,7 +19,7 @@ def _pointwise(program, kernel, operands, tile_rows):
     return program.kernel_call(kernel, grid=((shape[0] + tile_rows - 1) // tile_rows,),
         in_specs=tuple(BlockSpec(block, _rows) for _ in operands),
         out_specs=BlockSpec(block, _rows),
-        out_shape=ShapeDtypeStruct(shape))(*operands)
+        out_shape=ShapeDtypeStruct(shape, operands[0].dtype))(*operands)
 
 
 # design/algorithm-sources.md#streaming-ffn
@@ -40,7 +40,7 @@ def _linear(program, x, w, tile_rows):
         grid=((rows + tile_rows - 1) // tile_rows,),
         in_specs=(BlockSpec((tile_rows, k), _rows), BlockSpec(w.shape, _weight)),
         out_specs=BlockSpec((tile_rows, w.shape[1]), _rows),
-        out_shape=ShapeDtypeStruct((rows, w.shape[1])))(x, w)
+        out_shape=ShapeDtypeStruct((rows, w.shape[1]), x.dtype))(x, w)
 
 
 # design/algorithm-sources.md#streaming-ffn
