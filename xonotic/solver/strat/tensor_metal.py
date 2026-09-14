@@ -21,140 +21,8 @@ def numerical_operands(operation, values, attributes):
     return tuple(values[index] for index in positions)
 
 
-# ../../../design/algorithm-sources.md#xonotic-expert-indexed-contractions
-def expert_call(program, value, operation, values, shapes, local, peer, tile_k, tile_columns):
-    import math
-    from mesh import BlockSpec, ShapeDtypeStruct, kernels
-    rows, inner = shapes[values[0].index]
-    experts, weight_inner, hidden = shapes[values[1].index]
-    if inner != weight_inner or math.prod(shapes[values[2].index]) != rows or (
-            operation != 'expert_matmul' and shapes[values[3].index] != (rows, hidden)):
-        raise ValueError('Expert operands require matching input, output and selected row dimensions')
-    if np.dtype(values[2].dtype).kind not in 'iu':
-        raise TypeError('Expert selection requires integer indices')
-    if operation == 'expert_weight_vjp':
-        block = (1, math.gcd(hidden, min(tile_columns, hidden)))
-        base = program.tensor((experts, inner * hidden), block, value.dtype)
-        if program.node == peer:
-            for ref in base.blocks.values():
-                program.constant(ref, np.zeros(ref.shape, dtype=value.dtype))
-        destinations = matrix_view(local[values[2].index], (rows, 1))
-        base_arg, selected_arg, input_arg, gradient_arg = kernels.arguments(4)
-        row, column = kernels.indices()
-        update = input_arg.reshape((rows, inner)).at(row, column // hidden) * gradient_arg.reshape((rows, hidden)).at(row, column % hidden)
-        result = program.kernel_call(kernels.expression(kernels.indexed_add(base_arg, selected_arg, update)),
-            grid=base.grid, in_specs=(BlockSpec(None),) * 4,
-            out_specs=BlockSpec(block, lambda i, j: (i, j)),
-            out_shape=ShapeDtypeStruct(base.shape, value.dtype), peer=peer)(
-                base, destinations, local[values[0].index], local[values[3].index])
-        return matrix_view(result, (experts * inner, hidden))
-    backward = operation == 'expert_input_vjp'
-    operand = values[3] if backward else values[0]
-    output_width, contraction = (inner, hidden) if backward else (hidden, inner)
-    feature_tile = min(tile_columns, output_width)
-    operand_arg, weight_arg, selected_arg = kernels.arguments(3)
-    row = kernels.program_id(0)
-    selected = selected_arg.reshape((rows,)).at(row)
-    if values[2].dtype.startswith('int'):
-        selected = kernels.select(selected < 0, selected + experts, selected)
-    feature = kernels.arange(feature_tile).T + kernels.program_id(1) * feature_tile
-    k = kernels.arange(contraction, tile=tile_k)
-    weight_at = (selected, feature, k) if backward else (selected, k, feature)
-    product = operand_arg.reshape((rows, contraction)).at(row, k) * weight_arg.reshape((experts, inner, hidden)).at(*weight_at)
-    block = (1, feature_tile)
-    return program.kernel_call(kernels.expression(product.sum().T),
-        grid=(rows, (output_width + feature_tile - 1) // feature_tile),
-        in_specs=(BlockSpec(None),) * 3, out_specs=BlockSpec(block, lambda i, j: (i, j)),
-        out_shape=ShapeDtypeStruct((rows, output_width), value.dtype), peer=peer)(
-            local[operand.index], local[values[1].index], local[values[2].index])
 
 
-# ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
-def neighborhood_call(program, value, operation, values, attributes, shapes, local, peer, tile_columns, statistics):
-    import math
-    from mesh import BlockSpec, ShapeDtypeStruct, kernels
-    gram, target = attributes['gram'], attributes.get('target')
-    observers, width = shapes[values[0].index]
-    neighbors = shapes[values[4].index][1]
-    if np.dtype(values[3].dtype).kind not in 'iu':
-        raise TypeError('Neighborhood indices must have integer dtype')
-    if (shapes[values[3].index] != (observers, neighbors) or
-            shapes[values[4].index] != (observers, neighbors) or
-            shapes[values[1].index] != shapes[values[2].index] or
-            shapes[values[2].index][1] != width or
-            (target is not None and shapes[values[5].index] != (observers, width))):
-        raise ValueError('Neighborhood operands require matching observer, source and feature dimensions')
-    edges, feature_tile = observers * neighbors, min(tile_columns, width)
-    output_shape = shapes[value.index]
-    if target in (0, 1) and not gram:
-        result = program.tensor(output_shape, (1, min(tile_columns, output_shape[1])), value.dtype)
-        if program.node == peer:
-            for ref in result.blocks.values():
-                program.constant(ref, np.zeros(ref.shape, dtype=value.dtype))
-        return result
-    operands = numerical_operands(operation, values, attributes)
-    inputs = [local[operand.index] for operand in operands]
-    arguments = dict(zip((operand.index for operand in operands), kernels.arguments(len(inputs))))
-
-    # ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
-    def call(expression, bound, shape, block, dtype):
-        return program.kernel_call(kernels.expression(expression),
-            grid=tuple((size + tile - 1) // tile for size, tile in zip(shape, block)),
-            in_specs=(BlockSpec(None),) * len(bound), out_specs=BlockSpec(block, lambda i, j: (i, j)),
-            out_shape=ShapeDtypeStruct(shape, dtype), peer=peer)(*bound)
-
-    # ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
-    def source(edge):
-        index = arguments[values[3].index].reshape(shapes[values[3].index]).at(edge // neighbors, edge % neighbors)
-        return kernels.select(index < 0, index + shapes[values[2].index][0], index) if values[3].dtype.startswith('int') else index
-
-    # ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
-    def load(position, edge, feature):
-        coordinates = (edge // neighbors, edge % neighbors) if position == 4 else (
-            edge // neighbors if position in (0, 5) else source(edge), feature)
-        return 1.0 * arguments[values[position].index].reshape(shapes[values[position].index]).at(*coordinates)
-
-    # ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
-    def statistic(left, right):
-        key = (peer, values[left].index, values[right].index, values[3].index,
-               observers, neighbors, width, feature_tile)
-        if key not in statistics:
-            edge, feature = kernels.program_id(0), kernels.arange(width, tile=feature_tile)
-            statistic_value = (load(left, edge, feature) * load(right, edge, feature)).sum()
-            statistics[key] = call(statistic_value, inputs, (edges, 1), (1, 1), np.float32)
-        argument = kernels.arguments(len(inputs) + 1)[-1]
-        inputs.append(statistics[key])
-        return argument
-
-    affinity = statistic(0, 1) if gram and target in (None, 2, 4) else None
-    response = statistic(5, 2) if target in (0, 1, 4) else None
-    row, column = kernels.indices()
-    edge = kernels.program_id(0) + row if target == 4 else row
-    selected = source(edge)
-    valid = (selected >= 0) & (selected < shapes[values[2].index][0])
-    coefficient = affinity.at(edge, 0) / math.sqrt(width) if affinity is not None else 1
-    if target == 4:
-        result = call(kernels.select(valid, response.at(edge, 0) * coefficient, 0), inputs,
-                      (edges, 1), (1, 1), value.dtype)
-        return matrix_view(result, output_shape)
-    weight = load(4, edge, column)
-    if target in (0, 1):
-        contribution = weight * response.at(edge, 0) / math.sqrt(width) * load(1 if target == 0 else 0, edge, column)
-    else:
-        contribution = weight * coefficient * load(2 if target is None else 5, edge, column)
-    key_edge = kernels.program_id(0) + row
-    key_source = source(key_edge)
-    destination = key_edge // neighbors if target in (None, 0) else key_source
-    destination = kernels.select((key_source >= 0) & (key_source < shapes[values[2].index][0]), destination, 0xffffffff)
-    destinations = call(destination, inputs, (edges, 1), (1, 1), np.int64)
-    block = (1, min(tile_columns, output_shape[1]))
-    base = program.tensor(output_shape, block, value.dtype)
-    if program.node == peer:
-        for ref in base.blocks.values():
-            program.constant(ref, np.zeros(ref.shape, dtype=value.dtype))
-    base_arg, destination_arg = kernels.arguments(len(inputs) + 2)[-2:]
-    return call(kernels.indexed_add(base_arg, destination_arg, contribution), (*inputs, base, destinations),
-                output_shape, block, value.dtype)
 
 
 # ../../../design/algorithm-sources.md#xonotic-batched-contractions
@@ -312,12 +180,6 @@ def take_coordinates(kernels, source_shape, index_shape, index_dtype, index_valu
                  for i, size in enumerate(source_shape))
 
 
-# ../../../design/algorithm-sources.md#xonotic-output-liveness
-def row_gather_gradient(value, operation, values, attributes, shapes):
-    return operation == 'gather_vjp' and len(values) == 3 and len(shapes[values[1].index]) == 1 and (
-        (len(shapes[value.index]) == 1 and tuple(attributes['mapping']) == (('index', 0),)) or
-        (len(shapes[value.index]) == 2 and tuple(attributes['mapping']) == (('index', 0), ('slice', 0, 1)) and
-         shapes[values[-1].index] == (shapes[values[1].index][0], shapes[value.index][1])))
 
 
 # ../../../design/algorithm-sources.md#xonotic-output-liveness
@@ -349,7 +211,6 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
     peers = {0: program.node if root_peer is None else root_peer}
     peers.update({region['owner']: region['peer'] for region in graph.regions.values()})
     owners = {value.index: peers[owner] for value, _, _, _, owner in graph.nodes}
-    statistics = {}
     for value, operation, values, attributes, owner in nodes:
         peer = peers[owner]
         if value.index in tensors:
@@ -394,7 +255,6 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 out_specs=BlockSpec(block, lambda i, j: (i, j)),
                 out_shape=ShapeDtypeStruct((1, shape[0]), value.dtype), peer=peer)()
             continue
-        row_gradient = row_gather_gradient(value, operation, values, attributes, shapes)
         local = {}
         for operand in numerical_operands(operation, values, attributes):
             tensor = tensors[operand.index]
@@ -404,131 +264,6 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 tensor = program.replicate(tensor.on(sender), peer)
             local[operand.index] = tensor
         shape = shapes[value.index]
-        if operation in ('expert_matmul', 'expert_input_vjp', 'expert_weight_vjp'):
-            tensors[value.index] = expert_call(program, value, operation, values, shapes, local, peer, tile_k, tile_columns)
-            continue
-        if operation in ('neighborhood', 'neighborhood_vjp'):
-            tensors[value.index] = neighborhood_call(program, value, operation, values, attributes, shapes, local, peer, tile_columns, statistics)
-            continue
-        if row_gradient:
-            vector = len(shape) == 1
-            output_shape = (shape[0], 1) if vector else shape
-            destinations = matrix_view(local[values[1].index], (shapes[values[1].index][0], 1))
-            gradient_shape = (shapes[values[-1].index][0], 1) if vector else shapes[values[-1].index]
-            updates = matrix_view(local[values[-1].index], gradient_shape)
-            block = (min(tile_rows, output_shape[0]), math.gcd(min(tile_columns, output_shape[1]),
-                updates.block_shape[1] if updates.grid[1] > 1 else 0))
-            base = program.tensor(output_shape, block_shape=block, dtype=value.dtype)
-            if program.node == peer:
-                for ref in base.blocks.values():
-                    program.constant(ref, np.zeros(ref.shape, dtype=value.dtype))
-            base_arg, index_arg, update_arg = kernels.arguments(3)
-            result = program.kernel_call(kernels.expression(kernels.indexed_add(base_arg, index_arg, update_arg)),
-                grid=base.grid, in_specs=(BlockSpec(None),) * 3,
-                out_specs=BlockSpec(block, lambda i, j: (i, j)),
-                out_shape=ShapeDtypeStruct(output_shape, value.dtype), peer=peer)(base, destinations, updates)
-            tensors[value.index] = result.T if vector else result
-            continue
-        # ../../../design/algorithm-sources.md#xonotic-gather-transpose
-        if operation in ('gather_vjp', 'take_along_axis_vjp'):
-            indices = tuple(local[v.index] for v in values[1:-1])
-            cotangent = local[values[-1].index]
-            cotangent_shape = shapes[values[-1].index]
-            updates = math.prod(cotangent_shape)
-            key_block = (min(tile_rows, updates), 1)
-            row, _ = kernels.indices()
-            ordinal = kernels.program_id(0) * key_block[0] + row
-            coordinates = tuple((ordinal // math.prod(cotangent_shape[i + 1:])) % size
-                                for i, size in enumerate(cotangent_shape))
-            index_values = tuple(argument.reshape(shapes[value.index])
-                                 for argument, value in zip(kernels.arguments(len(indices)), values[1:-1]))
-            source_at = (gather_coordinates(kernels, index_values, values, shapes, attributes, coordinates, capacity)
-                if operation == 'gather_vjp' else take_coordinates(kernels, shape, shapes[values[1].index],
-                    values[1].dtype, index_values[0], attributes['axis'], coordinates))
-            destination = sum(coordinate * math.prod(shape[i + 1:]) for i, coordinate in enumerate(source_at))
-            valid = True
-            for coordinate, size in zip(source_at, shape):
-                valid = kernels.select(valid, (coordinate >= 0) & (coordinate < size), False)
-            destination = kernels.select(valid, destination, 0xffffffff)
-            destinations = program.kernel_call(kernels.expression(destination),
-                grid=((updates + key_block[0] - 1) // key_block[0], 1),
-                in_specs=(BlockSpec(None),) * len(indices), out_specs=BlockSpec(key_block, lambda i, j: (i, j)),
-                out_shape=ShapeDtypeStruct((updates, 1), 'int64'), peer=peer)(*indices)
-            storage_shape = (math.prod(shape[:-1]), shape[-1]) if shape else (1, 1)
-            block = (min(tile_rows, storage_shape[0]) * storage_shape[1], 1)
-            base = program.tensor((math.prod(shape), 1), block_shape=block, dtype=value.dtype)
-            if program.node == peer:
-                for ref in base.blocks.values():
-                    program.constant(ref, np.zeros(ref.shape, dtype=value.dtype))
-            base_value, index_value, cotangent_value = kernels.arguments(3)
-            row, _ = kernels.indices()
-            result = program.kernel_call(kernels.expression(kernels.indexed_add(base_value, index_value,
-                cotangent_value.reshape((updates,)).at(row))),
-                grid=base.grid, in_specs=(BlockSpec(None),) * 3,
-                out_specs=BlockSpec(block, lambda i, j: (i, j)),
-                out_shape=ShapeDtypeStruct(base.shape, value.dtype), peer=peer)(base, destinations, cotangent)
-            tensors[value.index] = matrix_view(result, storage_shape)
-            continue
-        # ../../../design/algorithm-sources.md#xonotic-row-scatter
-        if operation == 'scatter_add':
-            if np.dtype(values[1].dtype).kind not in 'iu':
-                raise TypeError('Scatter indices must have integer dtype')
-            index_shape, update_shape = (shapes[v.index] for v in values[1:])
-            selected_shape = index_shape + shape[1:]
-            if broadcast_shape(update_shape, selected_shape) != selected_shape:
-                raise ValueError('Scatter updates must broadcast to the selected rows')
-            storage_shape = (shape[0], 1) if len(shape) == 1 else (math.prod(shape[:-1]), shape[-1])
-            base = matrix_view(local[values[0].index], storage_shape)
-            indices, updates = (local[v.index] for v in values[1:])
-            row_expansion = math.prod(shape[1:-1]) if len(shape) > 1 else 1
-            update_rows = math.prod(index_shape) * row_expansion
-            if row_expansion == 1 and len(index_shape) <= 1 and indices.shape in ((update_rows, 1), (1, update_rows)):
-                destinations = matrix_view(indices, (update_rows, 1))
-            else:
-                key_block = (min(tile_rows, update_rows), 1)
-                row, _ = kernels.indices()
-                ordinal = kernels.program_id(0) * key_block[0] + row
-                selected_ordinal = ordinal // row_expansion
-                index_at = tuple((selected_ordinal // math.prod(index_shape[i + 1:])) % size
-                                 for i, size in enumerate(index_shape))
-                index_value, = kernels.arguments(1)
-                selected = index_value.reshape(index_shape).at(*index_at)
-                if values[1].dtype.startswith('int'):
-                    selected = kernels.select(selected < 0, selected + shape[0], selected)
-                destination = kernels.select((selected >= 0) & (selected < shape[0]),
-                    selected * row_expansion + ordinal % row_expansion, 0xffffffff)
-                destinations = program.kernel_call(kernels.expression(destination),
-                    grid=((update_rows + key_block[0] - 1) // key_block[0], 1),
-                    in_specs=(BlockSpec(None),), out_specs=BlockSpec(key_block, lambda i, j: (i, j)),
-                    out_shape=ShapeDtypeStruct((update_rows, 1), 'int64'), peer=peer)(indices)
-            base_value, index_value, update_value = kernels.arguments(3)
-            update_matrix = (math.prod(update_shape), 1) if len(shape) == 1 else update_shape if len(update_shape) == 2 else (1, math.prod(update_shape))
-            direct = len(index_shape) <= 1 and len(shape) <= 2 and len(update_shape) <= 2 and (
-                updates.shape == update_matrix or (updates.shape[::-1] == update_matrix and 1 in update_matrix))
-            if direct:
-                updates = matrix_view(updates, update_matrix).broadcast_to((update_rows, storage_shape[1]))
-            else:
-                row, column = kernels.indices()
-                selected_ordinal, trailing_ordinal = row // row_expansion, row % row_expansion
-                coordinates = tuple((selected_ordinal // math.prod(index_shape[i + 1:])) % size
-                                    for i, size in enumerate(index_shape))
-                coordinates += tuple((trailing_ordinal // math.prod(shape[i + 2:-1])) % size
-                                     for i, size in enumerate(shape[1:-1]))
-                if len(shape) > 1:
-                    coordinates += (column,)
-                update_at = tuple(0 if size == 1 else coordinate for size, coordinate in
-                                  zip(update_shape, coordinates[len(selected_shape) - len(update_shape):]))
-                update_value = update_value.reshape(update_shape).at(*update_at)
-            block = (math.gcd(min(tile_rows, base.shape[0]), base.block_shape[0] if base.grid[0] > 1 or len(shape) == 1 else 0),
-                     math.gcd(min(tile_columns, base.shape[1]), base.block_shape[1] if base.grid[1] > 1 else 0))
-            if direct and updates.grid[1] > 1:
-                block = (block[0], math.gcd(block[1], updates.block_shape[1]))
-            result = program.kernel_call(kernels.expression(kernels.indexed_add(base_value, index_value, update_value)),
-                grid=tuple((size + tile - 1) // tile for size, tile in zip(base.shape, block)),
-                in_specs=(BlockSpec(None),) * 3, out_specs=BlockSpec(block, lambda i, j: (i, j)),
-                out_shape=ShapeDtypeStruct(base.shape, value.dtype), peer=peer)(base, destinations, updates)
-            tensors[value.index] = result.T if len(shape) == 1 else result
-            continue
         # ../../../design/algorithm-sources.md#shared-associative-reductions
         if operation.startswith('reduce_') and not attributes['axes']:
             operand = local[values[0].index]

@@ -105,8 +105,6 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @implementation MeshFunction
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
 - (void)dealloc {
-  if(function.active){free(function.active->count_maps);free(function.active);}
-  struct mesh_route_use *u=function.routes;while(u){struct mesh_route_use *next=u->next;free(u);u=next;}
   struct mesh_indexed_read *d=function.indexed;
   while(d){
     struct mesh_indexed_read *next=d->next;
@@ -119,7 +117,6 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @interface MeshAlgebra : NSObject {
 @public
   struct mesh_ctx *context;
-  struct mesh_route *routes;
   struct mesh_writer *writers;
   _Atomic uint64_t submitted;
   _Atomic uint64_t nativeSubmitted,cpuSubmitted;
@@ -131,7 +128,6 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property dispatch_group_t executions;
 @property id<MTLDevice> device;
 @property id<MTLCommandQueue> queue;
-@property id<MTLResidencySet> routeResidency;
 @property id<MTLLibrary> library;
 @property NSMutableDictionary<NSString *,MeshMetalCode *> *libraries;
 @property NSMutableDictionary<NSString *,MeshCPUCode *> *cpuCode;
@@ -149,7 +145,6 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 - (void)dealloc {
   for(MeshFunction *f in self.functions){
     for(uint32_t i=0;i<f->function.inputs;i++)mesh_reader_unbind(context,&f->function.input[i]);
-    if(f->function.active){struct mesh_active *active=f->function.active;for(uint32_t i=0;i<active->maps;i++)mesh_reader_unbind(context,&active->count_maps[i]);mesh_rows_release(context,active->disposition,2);if(active->retired!=MESH_ABSENT)mesh_rows_release(context,active->retired,active->inputs);}
     for(struct mesh_indexed_read *d=f->function.indexed;d;d=d->next){
       for(uint32_t i=0;i<d->selectors;i++)mesh_reader_unbind(context,&d->selector[i]);
       for(uint32_t i=0;i<d->candidates;i++)for(uint32_t j=0;j<d->candidate[i].count;j++)mesh_reader_unbind(context,&d->candidate[i].maps[j]);
@@ -157,24 +152,9 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
     }
   }
   while(writers){struct mesh_writer *next=writers->next;free(writers);writers=next;}
-  struct mesh_route *route=routes;
-  while(route){
-    struct mesh_route *next=route->next;
-    for(uint32_t i=0;i<route->metadata_count;i++)mesh_reader_unbind(context,&route->metadata[i]);
-    for(uint32_t i=0;i<route->candidates;i++){
-      for(uint32_t j=0;j<route->candidate[i].count;j++)mesh_reader_unbind(context,&route->candidate[i].maps[j]);
-      if(route->candidate[i].producer)mesh_reader_unbind(context,&route->candidate[i].disposition);
-      free(route->candidate[i].maps);
-    }
-    mesh_rows_release(context,route->retired,route->candidates+route->consumers+1);
-    free(route->metadata);free(route->candidate);free(route->watches);free(route->functions);free(route);route=next;
-  }
   struct mesh_row_map *returns=self.returns.mutableBytes;
   for(size_t i=0;i<self.returns.length/sizeof *returns;i++)mesh_reader_unbind(context,&returns[i]);
-  if(self.routeResidency)for(id<MTLCommandQueue> queue in [NSSet setWithArray:[self.functions valueForKey:@"queue"]])
-    [queue removeResidencySet:self.routeResidency];
   self.functions=nil;
-  self.routeResidency=nil;
   self.lookup=nil;
   self.extents=nil;
   struct mesh_tensor **tensors=self.tensors.mutableBytes;
@@ -448,21 +428,6 @@ static int bind_function(struct mesh_algebra *handle,const struct mesh_view *inp
   [a.functions addObject:f];return 0;
 }
 
-/* design/algorithm-sources.md#shared-sparse-routing-lowering */
-static int route_residency(MeshAlgebra *a,const struct mesh_view *candidates,size_t count){
-  if(a.cpu)return 0;
-  if(!a.routeResidency){
-    MTLResidencySetDescriptor *descriptor=[MTLResidencySetDescriptor new];descriptor.initialCapacity=count;
-    NSError *error=nil;a.routeResidency=[a.device newResidencySetWithDescriptor:descriptor error:&error];
-    if(!a.routeResidency){fprintf(stderr,"mesh route residency: %s\n",error.description.UTF8String);return ENOMEM;}
-  }
-  for(size_t i=0;i<count;i++){
-    struct mesh_extent *extent=&candidates[i].tensor->extents[candidates[i].extent];
-    [a.routeResidency addAllocation:a.lookup[[NSValue valueWithPointer:extent]].buffer];
-  }
-  return 0;
-}
-
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
 static struct mesh_index_candidate indexed_maps(struct mesh_view view){
   MeshFunction *f=[MeshFunction new];f.dependencies=[NSMutableData new];dependencies(f.dependencies,view);bind_dependencies(f);
@@ -489,165 +454,22 @@ int mesh_algebra_view_pages(struct mesh_algebra *handle,struct mesh_view view,st
   }
   free(coverage.maps);return 0;
 }
-/* design/algorithm-sources.md#shared-sparse-routing-lowering */
-static struct mesh_route_vector route_vector(struct mesh_view view){
-  return (struct mesh_route_vector){.values=(const uint32_t *)view.tensor->extents[view.extent].address+view.offset,.columns=view.columns,.row_stride=view.row_stride,.column_stride=view.column_stride,.length=view.rows*view.columns};
-}
-/* design/algorithm-sources.md#shared-sparse-routing-lowering */
-struct mesh_route *mesh_algebra_route_create(struct mesh_algebra *handle,struct mesh_view owners,struct mesh_view ordinals,struct mesh_view offsets,const struct mesh_view *candidates,size_t count,size_t consumers){
-  MeshAlgebra *a=owner(handle);int error=0;
-  if(a.realized || !candidates || !count || !consumers || count>=UINT32_MAX || consumers>=UINT32_MAX-count){errno=EINVAL;return NULL;}
-  struct mesh_view metadata[]={owners,ordinals,offsets};
-  for(size_t i=0;i<3;i++)if(!valid_view(a,metadata[i]) || metadata[i].tensor->extents[metadata[i].extent].shape.scalar!=MESH_U32){errno=EINVAL;return NULL;}
-  if(owners.rows*owners.columns!=count || ordinals.rows*ordinals.columns!=count || offsets.rows*offsets.columns!=consumers+1){errno=EINVAL;return NULL;}
-  for(size_t i=0;i<count;i++)if(!valid_view(a,candidates[i])){errno=EINVAL;return NULL;}
-  struct mesh_route *d=calloc(1,sizeof *d);if(!d)return NULL;
-  d->retired=MESH_ABSENT;d->candidates=(uint32_t)count;d->consumers=(uint32_t)consumers;d->authority=handle;
-  d->candidate=calloc(count,sizeof *d->candidate);d->watches=calloc(consumers,sizeof *d->watches);d->functions=malloc(consumers*sizeof *d->functions);
-  if(!d->candidate || !d->watches || !d->functions)error=ENOMEM;
-  if(!error)for(size_t i=0;i<consumers;i++)d->functions[i]=SIZE_MAX;
-  MeshFunction *holder=[MeshFunction new];holder.dependencies=[NSMutableData new];
-  for(size_t i=0;i<3;i++)dependencies(holder.dependencies,metadata[i]);bind_dependencies(holder);
-  d->metadata_count=holder->function.inputs;d->metadata=malloc(d->metadata_count*sizeof *d->metadata);
-  if(!d->metadata)error=ENOMEM;else memcpy(d->metadata,holder->function.input,d->metadata_count*sizeof *d->metadata);
-  for(size_t i=0;i<count && !error;i++){d->candidate[i]=indexed_maps(candidates[i]);d->candidate[i].input=i;if(!d->candidate[i].maps)error=ENOMEM;}
-  for(size_t i=0;i<count && !error;i++)for(uint32_t j=0;j<d->candidate[i].count;j++){
-    struct mesh_row_map map=d->candidate[i].maps[j];
-    for(uint32_t k=0;k<d->metadata_count;k++)if(overlaps(map,d->metadata[k]))error=EINVAL;
-    for(size_t k=0;k<i;k++)for(uint32_t q=0;q<d->candidate[k].count;q++)if(overlaps(map,d->candidate[k].maps[q]))error=EINVAL;
-  }
-  if(!error){d->retired=mesh_rows_alloc(a->context,(uint32_t)(count+consumers+1));if(d->retired==MESH_ABSENT)error=errno;}
-  if(!error)error=route_residency(a,candidates,count);
-  if(!error){
-    struct mesh_shape shape={.rows=count,.columns=3,.scalar=MESH_U64};
-    d->table=mesh_tensor_create(handle,&shape,1,0,1);if(!d->table)error=errno;
-  }
-  if(error){
-    if(d->retired!=MESH_ABSENT)mesh_rows_release(a->context,d->retired,(uint32_t)(count+consumers+1));
-    if(d->candidate)for(size_t i=0;i<count;i++)free(d->candidate[i].maps);
-    free(d->metadata);free(d->candidate);free(d->watches);free(d->functions);free(d);errno=error;return NULL;
-  }
-  uint64_t *table=mesh_tensor_data(d->table,0);
-  for(size_t i=0;i<count;i++){
-    struct mesh_view v=candidates[i];struct mesh_extent *extent=&v.tensor->extents[v.extent];
-    MeshExtent *storage=a.lookup[[NSValue valueWithPointer:extent]];
-    table[3*i]=(a.cpu?(uint64_t)(uintptr_t)extent->address:storage.buffer.gpuAddress)+v.offset*scalar_bytes(extent->shape.scalar);
-    table[3*i+1]=v.row_stride;table[3*i+2]=v.column_stride;
-  }
-  mesh_tensor_constant(d->table,0);
-  d->owners=route_vector(owners);d->ordinals=route_vector(ordinals);d->offsets=route_vector(offsets);
-  d->completed=d->retired+d->candidates;d->prepared=d->completed+d->consumers;
-  struct mesh_route **tail=&a->routes;while(*tail)tail=&(*tail)->next;*tail=d;
-  return d;
-}
-/* design/algorithm-sources.md#shared-sparse-routing-lowering */
-struct mesh_view mesh_algebra_route_table(struct mesh_algebra *handle,struct mesh_route *d){
-  if(!d || d->authority!=handle){errno=EINVAL;return (struct mesh_view){0};}
-  return mesh_tensor_view(d->table,0);
-}
-/* design/algorithm-sources.md#active-segment-domains */
-int mesh_algebra_active(struct mesh_algebra *handle,size_t index,struct mesh_view count,size_t slot){
-  MeshAlgebra *a=owner(handle);
-  if(a.realized || index>=a.functions.count || slot>UINT32_MAX || !valid_view(a,count) || count.rows*count.columns!=1 || count.tensor->extents[count.extent].shape.scalar!=MESH_U32)return EINVAL;
-  MeshFunction *f=a.functions[index];if(f->function.active || f->function.rows!=1 || f->function.routes)return EINVAL;
-  struct mesh_index_candidate maps=indexed_maps(count);if(!maps.maps)return ENOMEM;
-  struct mesh_active *active=calloc(1,sizeof *active);if(!active){free(maps.maps);return ENOMEM;}
-  active->disposition=mesh_rows_alloc(a->context,2);
-  if(active->disposition==MESH_ABSENT){free(maps.maps);free(active);return errno;}
-  active->count_maps=maps.maps;active->maps=maps.count;active->slot=(uint32_t)slot;active->omitted=active->disposition+1;active->retired=MESH_ABSENT;
-  active->count=(const uint32_t *)count.tensor->extents[count.extent].address+count.offset;active->function=&f->function;
-  f->function.active=active;return 0;
-}
-/* design/algorithm-sources.md#active-segment-domains */
-int mesh_algebra_route_producers(struct mesh_algebra *handle,struct mesh_route *d,const size_t *indices,size_t count){
-  MeshAlgebra *a=owner(handle);
-  if(a.realized || !d || d->authority!=handle || !indices || count!=d->candidates)return EINVAL;
-  for(uint32_t i=0;i<d->consumers;i++)if(d->functions[i]!=SIZE_MAX)return EBUSY;
-  for(size_t i=0;i<count;i++){
-    if(indices[i]>=a.functions.count)return EINVAL;MeshFunction *f=a.functions[indices[i]];
-    if(!f->function.active)return EINVAL;
-    for(uint32_t j=0;j<d->candidate[i].count;j++){
-      struct mesh_row_map source=d->candidate[i].maps[j];int covered=0;
-      for(uint32_t k=0;k<f->function.outputs;k++){struct mesh_row_map out=f->function.output[k];covered|=out.first<=source.first && out.first+out.count>=source.first+source.count;}
-      if(!covered)return EINVAL;
-    }
-  }
-  for(size_t i=0;i<count;i++){
-    struct mesh_index_candidate *v=&d->candidate[i];v->producer=a.functions[indices[i]]->function.active;v->function=indices[i];
-    v->disposition=(struct mesh_row_map){.first=v->producer->disposition,.count=1};
-  }
-  return 0;
-}
-
-/* design/algorithm-sources.md#shared-sparse-routing-lowering */
-int mesh_algebra_route_hold(struct mesh_algebra *handle,struct mesh_route *d,const struct mesh_view *views,size_t count){
-  MeshAlgebra *a=owner(handle);
-  if(a.realized || !d || d->authority!=handle || (count && !views))return EINVAL;
-  for(uint32_t i=0;i<d->consumers;i++)if(d->functions[i]!=SIZE_MAX)return EBUSY;
-  MeshFunction *holder=[MeshFunction new];holder.dependencies=[NSMutableData dataWithBytes:d->metadata length:d->metadata_count*sizeof *d->metadata];
-  for(size_t i=0;i<count;i++){if(!valid_view(a,views[i]))return EINVAL;dependencies(holder.dependencies,views[i]);}bind_dependencies(holder);
-  for(uint32_t i=0;i<holder->function.inputs;i++)for(uint32_t j=0;j<d->candidates;j++)for(uint32_t k=0;k<d->candidate[j].count;k++)
-    if(overlaps(holder->function.input[i],d->candidate[j].maps[k]))return EINVAL;
-  size_t bytes=holder->function.inputs*sizeof *d->metadata;struct mesh_row_map *maps=malloc(bytes);if(!maps)return ENOMEM;
-  memcpy(maps,holder->function.input,bytes);free(d->metadata);d->metadata=maps;d->metadata_count=holder->function.inputs;return 0;
-}
-/* design/algorithm-sources.md#shared-sparse-routing-lowering */
-static void route_dependencies(MeshFunction *f){
-  NSData *source=[f.dependencies copy];const struct mesh_row_map *maps=source.bytes;
-  f.dependencies=[NSMutableData new];
-  for(size_t i=0;i<source.length/sizeof *maps;i++){
-    uint32_t first=maps[i].first,end=first+maps[i].count;
-    while(first<end){
-      uint32_t lo=end,hi=end;
-      for(struct mesh_route_use *u=f->function.routes;u;u=u->next)for(uint32_t j=0;j<=u->domain->metadata_count;j++){
-        struct mesh_row_range held=j<u->domain->metadata_count?mesh_range(u->domain->metadata[j],0):mesh_tensor_rows(u->domain->table,0);
-        if(held.first<end && held.first+held.count>first && held.first<lo){lo=held.first;hi=held.first+held.count;}
-      }
-      if(lo>first){struct mesh_row_map kept={.first=first,.count=lo-first};[f.dependencies appendBytes:&kept length:sizeof kept];}
-      first=hi;
-    }
-  }
-  bind_dependencies(f);
-}
-/* design/algorithm-sources.md#shared-sparse-routing-lowering */
-int mesh_algebra_route_attach(struct mesh_algebra *handle,size_t index,struct mesh_route *d,size_t consumer){
-  MeshAlgebra *a=owner(handle);
-  if(a.realized || !d || d->authority!=handle || index>=a.functions.count || consumer>=d->consumers || d->functions[consumer]!=SIZE_MAX)return EINVAL;
-  MeshFunction *f=a.functions[index];if(f->function.rows!=1 || f->function.active)return EINVAL;
-  for(uint32_t i=0;i<f->function.outputs;i++){
-    for(uint32_t j=0;j<d->metadata_count;j++)if(overlaps(f->function.output[i],d->metadata[j]))return EINVAL;
-    for(uint32_t j=0;j<d->candidates;j++)for(uint32_t k=0;k<d->candidate[j].count;k++)if(overlaps(f->function.output[i],d->candidate[j].maps[k]))return EINVAL;
-  }
-  struct mesh_route_use *u=calloc(1,sizeof *u);if(!u)return ENOMEM;
-  *u=(struct mesh_route_use){.domain=d,.consumer=(uint32_t)consumer,.next=f->function.routes};f->function.routes=u;d->functions[consumer]=index;
-  route_dependencies(f);
-  return 0;
-}
-
 /* design/algorithm-sources.md#dynamic-reader-lifetimes */
-int mesh_algebra_indexed_range(struct mesh_algebra *handle,size_t index,struct mesh_view selector,struct mesh_view range,const size_t *candidate_inputs,size_t input_count,const struct mesh_view *candidates,size_t count){
+int mesh_algebra_indexed(struct mesh_algebra *handle,size_t index,struct mesh_view selector,const size_t *candidate_inputs,size_t input_count,const struct mesh_view *candidates,size_t count){
   MeshAlgebra *a=owner(handle);
   if(a.realized || index>=a.functions.count || !count || count>(UINT32_MAX-2)/2 || (input_count && !candidate_inputs) || !candidates || !valid_view(a,selector))return EINVAL;
   if(selector.tensor->extents[selector.extent].shape.scalar!=MESH_U32)return EINVAL;
-  if(range.tensor && (!valid_view(a,range) || range.rows*range.columns!=2 || range.tensor->extents[range.extent].shape.scalar!=MESH_U32))return EINVAL;
   MeshFunction *f=a.functions[index];const struct mesh_view *inputs=f.inputViews.bytes;size_t available_inputs=f.inputViews.length/sizeof *inputs;
   for(size_t i=0;i<input_count;i++)if(candidate_inputs[i]>=available_inputs || !valid_view(a,inputs[candidate_inputs[i]]))return EINVAL;
   for(size_t i=0;i<count;i++)if(!valid_view(a,candidates[i]))return EINVAL;
   struct mesh_indexed_read *d=calloc(1,sizeof *d);if(!d)return ENOMEM;
   d->candidate=calloc(count,sizeof *d->candidate);if(!d->candidate){free(d);return ENOMEM;}
   d->candidates=(uint32_t)count;
-  struct mesh_index_candidate selection=indexed_maps(selector);d->selector=selection.maps;d->selectors=d->vector_maps=selection.count;
+  struct mesh_index_candidate selection=indexed_maps(selector);d->selector=selection.maps;d->selectors=selection.count;
   int error=d->selector?0:ENOMEM;
-  if(range.tensor && !error){
-    struct mesh_index_candidate bounds=indexed_maps(range);
-    struct mesh_row_map *maps=bounds.maps?realloc(d->selector,(d->selectors+bounds.count)*sizeof *maps):NULL;
-    if(!maps)error=ENOMEM;
-    else{d->selector=maps;memcpy(maps+d->selectors,bounds.maps,bounds.count*sizeof *maps);d->selectors+=bounds.count;}
-    free(bounds.maps);
-  }
   for(size_t i=0;i<count && !error;i++){
     struct mesh_view candidate=candidates[i];
-    d->candidate[i]=indexed_maps(candidate);d->candidate[i].input=SIZE_MAX;
+    d->candidate[i]=indexed_maps(candidate);
     if(!d->candidate[i].maps){error=ENOMEM;break;}
   }
   for(size_t i=0;i<count && !error;i++)for(uint32_t j=0;j<d->candidate[i].count;j++){
@@ -658,7 +480,6 @@ int mesh_algebra_indexed_range(struct mesh_algebra *handle,size_t index,struct m
   if(error){for(size_t i=0;i<count;i++)free(d->candidate[i].maps);free(d->candidate);free(d->selector);free(d);return error;}
   d->retired=mesh_rows_alloc(a->context,2*(uint32_t)count+2);
   if(d->retired==MESH_ABSENT){for(size_t i=0;i<count;i++)free(d->candidate[i].maps);free(d->candidate);free(d->selector);free(d);return errno;}
-  if(range.tensor){d->bounds=(const uint32_t *)range.tensor->extents[range.extent].address+range.offset;d->bounds_stride=range.columns==2?range.column_stride:range.row_stride;}
   d->indices=(const uint32_t *)selector.tensor->extents[selector.extent].address+selector.offset;
   d->rows=selector.rows;d->columns=selector.columns;d->row_stride=selector.row_stride;d->column_stride=selector.column_stride;
   d->selected=d->retired+d->candidates;d->completed=d->selected+d->candidates;d->mapped=d->completed+1;
@@ -667,13 +488,8 @@ int mesh_algebra_indexed_range(struct mesh_algebra *handle,size_t index,struct m
   for(size_t i=0;i<available_inputs;i++)if(![f.indexedInputs containsIndex:i])dependencies(f.dependencies,inputs[i]);
   for(struct mesh_indexed_read *part=f->function.indexed;part;part=part->next)
     [f.dependencies appendBytes:part->selector length:part->selectors*sizeof *part->selector];
-  if(f->function.routes)route_dependencies(f);else bind_dependencies(f);
+  bind_dependencies(f);
   return 0;
-}
-
-/* design/algorithm-sources.md#dynamic-reader-lifetimes */
-int mesh_algebra_indexed(struct mesh_algebra *handle,size_t index,struct mesh_view selector,const size_t *candidate_inputs,size_t input_count,const struct mesh_view *candidates,size_t count){
-  return mesh_algebra_indexed_range(handle,index,selector,(struct mesh_view){0},candidate_inputs,input_count,candidates,count);
 }
 
 struct cpu_operand {const void *address;struct geometry_view view;float (*load)(const void *,size_t);};
@@ -1261,71 +1077,9 @@ static void submit_ready(void *argument,uint32_t occurrence) {
   dispatch_group_enter(a.executions);
   @autoreleasepool{f.execute(f);}
 }
-/* design/algorithm-sources.md#derived-selector-active-domains */
-static int metadata_local(MeshAlgebra *a,struct mesh_row_map map) {
-  const struct mesh_row_binding *bindings=a.bindings.bytes;
-  for(size_t i=0;i<a.bindings.length/sizeof *bindings;i++)
-    if(bindings[i].receive && overlaps(map,(struct mesh_row_map){.first=bindings[i].first,.count=bindings[i].count}))return 0;
-  return 1;
-}
-/* design/algorithm-sources.md#derived-selector-active-domains */
-static int metadata_descends(MeshAlgebra *a,MeshFunction *source,struct mesh_row_map root,NSMutableDictionary<NSValue *,NSNumber *> *proof) {
-  NSValue *identity=[NSValue valueWithPointer:(__bridge const void *)source];
-  NSNumber *known=proof[identity];if(known)return known.intValue;
-  proof[identity]=@0;
-  if(source->function.active)return 0;
-  for(uint32_t i=0;i<source->function.outputs;i++)if(!metadata_local(a,source->function.output[i]))return 0;
-  int rooted=0;
-  for(uint32_t i=0;i<source->function.inputs;i++){
-    struct mesh_row_map input=source->function.input[i];
-    for(uint32_t row=input.first;row<input.first+input.count;row++){
-      if(root.first<=row && row<root.first+root.count){rooted=1;continue;}
-      if(mesh_bits_all(a->context->M,MESH_CONSTANT,row,1))continue;
-      int covered=0;
-      for(MeshFunction *producer in a.functions){
-        int contributes=0;for(uint32_t j=0;j<producer->function.outputs;j++){
-          struct mesh_row_map out=producer->function.output[j];contributes|=out.first<=row && row<out.first+out.count;
-        }
-        if(contributes && metadata_descends(a,producer,root,proof)){covered=1;break;}
-      }
-      if(!covered)return 0;
-      rooted=1;
-    }
-  }
-  proof[identity]=@(rooted);return rooted;
-}
-/* design/algorithm-sources.md#derived-selector-active-domains */
-static int indexed_active_domain(MeshAlgebra *a,struct mesh_indexed_read *d,struct mesh_active *active,struct mesh_row_map root) {
-  for(uint32_t i=0;i<d->selectors;i++){
-    struct mesh_row_map map=d->selector[i];
-    if(root.first<=map.first && root.first+root.count>=map.first+map.count)continue;
-    int rooted=0;
-    for(MeshFunction *source in a.functions){
-      int covers=0;for(uint32_t j=0;j<source->function.outputs;j++){
-        struct mesh_row_map out=source->function.output[j];covers|=out.first<=map.first && out.first+out.count>=map.first+map.count;
-      }
-      if(covers && metadata_descends(a,source,root,[NSMutableDictionary new])){rooted=1;break;}
-    }
-    if(!rooted)return EINVAL;
-  }
-  if(d->domain)return d->domain==active?0:EINVAL;
-  for(uint32_t i=0;i<active->maps;i++)for(uint32_t j=0;j<d->candidates;j++)for(uint32_t k=0;k<d->candidate[j].count;k++)
-    if(overlaps(active->count_maps[i],d->candidate[j].maps[k]))return EINVAL;
-  struct mesh_row_map *maps=realloc(d->selector,(d->selectors+active->maps)*sizeof *maps);if(!maps)return ENOMEM;
-  d->selector=maps;
-  for(uint32_t i=0;i<active->maps;i++){
-    struct mesh_row_map map=active->count_maps[i];int covered=0;
-    for(uint32_t j=0;j<d->selectors;j++)covered|=d->selector[j].first<=map.first && d->selector[j].first+d->selector[j].count>=map.first+map.count;
-    if(!covered)d->selector[d->selectors++]=map;
-  }
-  d->domain=active;return 0;
-}
 /* design/algorithm-sources.md#streaming-algebra */
 int mesh_algebra_realize(struct mesh_algebra *handle) {
   MeshAlgebra *a=owner(handle);if(a.realized)return 0;size_t count=a.functions.count;
-  [a.routeResidency commit];
-  if(a.routeResidency)for(id<MTLCommandQueue> queue in [NSSet setWithArray:[a.functions valueForKey:@"queue"]])
-    [queue addResidencySet:a.routeResidency];
   for(MeshFunction *f in a.functions)for(struct mesh_indexed_read *d=f->function.indexed;d;d=d->next)
     for(uint32_t i=0;i<d->selectors;i++){
       struct mesh_row_map map=d->selector[i];
@@ -1334,28 +1088,6 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
       for(size_t j=0;j<a.bindings.length/sizeof *bindings;j++)
         if(bindings[j].receive && overlaps(map,(struct mesh_row_map){.first=bindings[j].first,.count=bindings[j].count}))return EINVAL;
     }
-  for(struct mesh_route *d=a->routes;d;d=d->next){
-    for(uint32_t i=0;i<d->consumers;i++)if(d->functions[i]==SIZE_MAX)return EINVAL;
-    for(uint32_t i=0;i<d->metadata_count;i++){
-      struct mesh_row_map map=d->metadata[i];
-      for(uint32_t r=map.first;r<map.first+map.count;r++)if(!output_used(a,(struct mesh_row_map){.first=r,.count=1}))return EINVAL;
-      const struct mesh_row_binding *bindings=a.bindings.bytes;
-      for(size_t j=0;j<a.bindings.length/sizeof *bindings;j++)if(bindings[j].receive && overlaps(map,(struct mesh_row_map){.first=bindings[j].first,.count=bindings[j].count}))return EINVAL;
-    }
-  }
-  for(MeshFunction *f in a.functions)if(f->function.active){
-    struct mesh_active *active=f->function.active;struct mesh_row_map produced={0};
-    for(MeshFunction *source in a.functions)for(uint32_t i=0;i<source->function.outputs;i++){
-      struct mesh_row_map out=source->function.output[i];int covers=1;
-      for(uint32_t j=0;j<active->maps;j++){struct mesh_row_map map=active->count_maps[j];covers&=out.first<=map.first && out.first+out.count>=map.first+map.count;}
-      if(covers)produced=out;
-    }
-    if(!produced.count || !metadata_local(a,produced))return EINVAL;
-    for(struct mesh_indexed_read *d=f->function.indexed;d;d=d->next){int error=indexed_active_domain(a,d,active,produced);if(error)return error;}
-    if(active->retired!=MESH_ABSENT && active->inputs!=f->function.inputs){mesh_rows_release(a->context,active->retired,active->inputs);active->retired=MESH_ABSENT;}
-    active->inputs=f->function.inputs;
-    if(active->inputs && active->retired==MESH_ABSENT){active->retired=mesh_rows_alloc(a->context,active->inputs);if(active->retired==MESH_ABSENT)return errno;}
-  }
   struct mesh_row_function *functions=calloc(count?count:1,sizeof *functions);
   if(!functions)return ENOMEM;
   for(size_t i=0;i<count;i++)functions[i]=a.functions[i]->function;
@@ -1365,8 +1097,6 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
     a.realized=YES;
     for(MeshFunction *f in a.functions)for(struct mesh_indexed_read *d=f->function.indexed;d && !error;d=d->next)
       error=mesh_execution_indexed(a->context,d,handle);
-    for(MeshFunction *f in a.functions)if(f->function.active && !error)error=mesh_execution_active(a->context,f->function.active,handle);
-    for(struct mesh_route *d=a->routes;d && !error;d=d->next)error=mesh_execution_route(a->context,d,handle);
     if(error)return error;
     for(MeshFunction *f in a.functions){
       if(f->executionKind==MESH_EXECUTION_CPU){

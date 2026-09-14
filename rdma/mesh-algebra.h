@@ -3,7 +3,6 @@
 #include <stddef.h>
 #include <stdint.h>
 struct mesh_ctx;
-struct mesh_route;
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -47,13 +46,6 @@ int mesh_writer_issue(struct mesh_writer *);
 void mesh_writer_complete(struct mesh_writer *,int publish);
 int mesh_algebra_source(struct mesh_algebra *,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,const uint8_t *access_axes,size_t row_begin,size_t row_count,size_t column_begin,size_t column_count);
 int mesh_algebra_indexed(struct mesh_algebra *,size_t function,struct mesh_view selector,const size_t *candidate_inputs,size_t input_count,const struct mesh_view *candidates,size_t count);
-int mesh_algebra_indexed_range(struct mesh_algebra *,size_t function,struct mesh_view selector,struct mesh_view range,const size_t *candidate_inputs,size_t input_count,const struct mesh_view *candidates,size_t count);
-struct mesh_route *mesh_algebra_route_create(struct mesh_algebra *,struct mesh_view owners,struct mesh_view ordinals,struct mesh_view offsets,const struct mesh_view *candidates,size_t candidate_count,size_t consumer_count);
-struct mesh_view mesh_algebra_route_table(struct mesh_algebra *,struct mesh_route *);
-int mesh_algebra_active(struct mesh_algebra *,size_t function,struct mesh_view count,size_t slot);
-int mesh_algebra_route_producers(struct mesh_algebra *,struct mesh_route *,const size_t *functions,size_t count);
-int mesh_algebra_route_hold(struct mesh_algebra *,struct mesh_route *,const struct mesh_view *,size_t count);
-int mesh_algebra_route_attach(struct mesh_algebra *,size_t function,struct mesh_route *,size_t consumer);
 int mesh_algebra_bind(struct mesh_algebra *,enum mesh_algebra_op,struct mesh_view a,struct mesh_view b,struct mesh_view output,float alpha,float beta);
 /* design/algorithm-sources.md#selected-native-contractions */
 int mesh_algebra_view_pages(struct mesh_algebra *,struct mesh_view,struct mesh_view *pages,size_t capacity,size_t *count);
