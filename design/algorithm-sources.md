@@ -3332,3 +3332,55 @@ Its compiled functions use the shared generated-source path. Nonempty external
 Metal constants and multiple custom dispatches are supported by the retained
 setup fields but are not numerically exercised by that workflow; source review
 must not be reported as measured coverage of those cases.
+
+
+## Indexed contraction plans
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+separates numerical bodies and their configured physical lowering. Their
+[manual profile-guided latency estimation](https://docs.jax.dev/en/latest/gpu_performance_tips.html#manual-pgle)
+feeds measurements from an earlier execution into compilation. Mesh applies this
+separation to indexed contractions: setup must retain the complete physical work
+being compared before registering the chosen functions. A contraction's cost
+includes its partial outputs, merge tree and final publication, not just the
+matrix calls. The plan is compiler data, never a second readiness scheduler.
+
+The native plan retains actual canonical source geometries for every candidate.
+Intermediate result indices name the outputs that merge and publication
+operations consume. Realization consumes those same records; the static launch
+comparison counts recorded work rather than a second formula. Selected-input
+page memberships, invalid-selection zero operands and readiness producers are
+still materialized by the existing selected binder after the choice. They are
+not yet complete costed nodes of the immutable plan. Numerical kernels,
+page-stamp readiness, source holds and publication remain runtime-owned.
+
+An explicit plan is a prerequisite for a measured choice, not evidence of one.
+The existing static default remains until complete comparable measured costs are
+available. A sum of individual execution means is not automatically end-to-end
+latency: parallelism, missing inputs, contention and publication boundaries must
+remain represented when comparing complete candidates.
+
+## Cost environment
+
+The JAX authors' [persistent compilation cache](https://docs.jax.dev/en/latest/persistent_compilation_cache.html#how-it-works)
+includes compiler/library configuration and device information alongside the
+computation identity. Mesh timing observations likewise need the actual installed
+implementation and executing hardware, rather than the working directory's Git
+revision. Native environment reporting records available machine, OS, device and
+loaded-library facts once and exposes them outside numerical execution.
+
+The existing streaming-algebra trace includes the environment beside function
+profiles and compiled code identities. Paths and device registry identifiers
+are observations, not portable equivalence keys. OS/library identity scopes the
+Apple framework implementation; it does not independently identify an opaque
+Metal compiler service. Compiler version alone does not capture every inherited
+driver environment option. These facts improve provenance without asserting that
+a complete portable cost cache or measured plan selector already exists.
+
+`mesh_algebra_environment` returns cached immutable JSON. Creation reads hardware
+sysctls, OS build/release, the configured Metal device's reported properties and
+loaded Mach-O library UUIDs obtained through `dladdr`. CPU creation records one
+`clang --version` result; Metal creation does not invoke the CPU driver. Missing
+facts remain null or carry the returned error/status. The descriptor explicitly
+states `complete_cost_key: false`. `Program.environment` decodes this snapshot
+on request. No per-function provenance cache or tensor-payload hash is added.

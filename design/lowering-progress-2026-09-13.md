@@ -2006,3 +2006,20 @@ The next implementation remains setup-time measured plan selection using complet
 candidate costs and preserving partial-output publication; source IDs alone do
 not implement that selection. Fusion, storage/placement and the full nine-point
 performance acceptance remain open.
+
+
+## Complete contraction plan ownership and cost environment — September 14
+
+The preceding turn committed and measured compiled-source identity (`9512aea`).
+This intervention traced `_lower_indexed_product` from affine logical coordinates
+through retained source geometries, selector realization, partial contraction
+bindings, merge reduction and output assembly. Its static launch estimate used a
+separate formula while binding reconstructed the merge work. That is incomplete
+input for comparing complete measured candidate costs. The current change makes
+that work explicit during setup and makes realization consume the plan itself.
+
+Cost provenance also needs the executing installation. The local and peer
+compiler/OS differences in the preceding evidence make identical source pairs
+insufficient as a cross-machine timing key. Environment facts are exported once
+alongside the existing function/code traces; they do not enter the page scan or
+numerical launch path. These changes do not yet establish measured plan selection.
