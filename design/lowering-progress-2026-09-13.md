@@ -1336,7 +1336,7 @@ generations of the existing numerical/progress workflow. Local traces configure
 5266 functions and complete 10472 submissions; paired rank zero configures 5202
 and completes 9787. Rank-zero boolean cases use float32 numeric inputs, and the
 paired gold/fanout use float16 over RDMA. Raw events and compute traces are in
-measurements/lowering-2026-09-13/logical-provenance.json, alongside full workflow
+measurements/lowering-2026-09-13/boolean-provenance.json, alongside full workflow
 timing count/mean/sample variance. No boolean-specific host timing or matched
 speedup claim is made. Both participant processes exit zero and registered arena
 geometry remains unchanged. The nine-step goal remains active.

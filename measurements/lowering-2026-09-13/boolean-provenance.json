@@ -1,0 +1,703 @@
+{
+  "runs": [
+    {
+      "prefix": "boolean-cpu",
+      "source_revision": "f74b265",
+      "library_revision": "4a31ee6",
+      "caller_revision": "edf7d4b",
+      "example_revision": "f74b265",
+      "backend": "cpu",
+      "paired": false,
+      "gold_dtype": "float32",
+      "boolean_input_dtype": "float32",
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "arena_pages": 65536,
+      "block_pages": 4,
+      "qps": 1,
+      "registered_bytes_per_node": 1097203712,
+      "artifacts": [
+        "boolean-cpu.jsonl.gz",
+        "boolean-cpu-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.381792,
+        "invocations_per_second": 684.651393767664,
+        "first_section_ms": 3.785417,
+        "completion_ms": {
+          "count": 3,
+          "mean": 4.104708666666666,
+          "sample_variance": 0.0636841614583332
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 10472,
+          "completed": 10472,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 10472
+        }
+      },
+      "boolean_events": [
+        {
+          "event": "xonotic_boolean_early",
+          "generation": 0,
+          "withheld_row": 1,
+          "nan_truth": true
+        },
+        {
+          "event": "xonotic_boolean_complete",
+          "generation": 0,
+          "output": [
+            [
+              0,
+              0,
+              [
+                [
+                  1.0,
+                  5.0
+                ]
+              ]
+            ],
+            [
+              0,
+              2,
+              [
+                [
+                  4.0
+                ]
+              ]
+            ],
+            [
+              1,
+              0,
+              [
+                [
+                  4.0,
+                  5.0
+                ]
+              ]
+            ],
+            [
+              1,
+              2,
+              [
+                [
+                  4.0
+                ]
+              ]
+            ],
+            [
+              2,
+              0,
+              [
+                [
+                  5.0,
+                  4.0
+                ]
+              ]
+            ],
+            [
+              2,
+              2,
+              [
+                [
+                  5.0
+                ]
+              ]
+            ],
+            [
+              3,
+              0,
+              [
+                [
+                  5.0,
+                  1.0
+                ]
+              ]
+            ],
+            [
+              3,
+              2,
+              [
+                [
+                  5.0
+                ]
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_boolean_early",
+          "generation": 1,
+          "withheld_row": 0,
+          "nan_truth": true
+        },
+        {
+          "event": "xonotic_boolean_complete",
+          "generation": 1,
+          "output": [
+            [
+              0,
+              0,
+              [
+                [
+                  5.0,
+                  4.0
+                ]
+              ]
+            ],
+            [
+              0,
+              2,
+              [
+                [
+                  4.0
+                ]
+              ]
+            ],
+            [
+              1,
+              0,
+              [
+                [
+                  5.0,
+                  1.0
+                ]
+              ]
+            ],
+            [
+              1,
+              2,
+              [
+                [
+                  4.0
+                ]
+              ]
+            ],
+            [
+              2,
+              0,
+              [
+                [
+                  1.0,
+                  5.0
+                ]
+              ]
+            ],
+            [
+              2,
+              2,
+              [
+                [
+                  5.0
+                ]
+              ]
+            ],
+            [
+              3,
+              0,
+              [
+                [
+                  4.0,
+                  5.0
+                ]
+              ]
+            ],
+            [
+              3,
+              2,
+              [
+                [
+                  5.0
+                ]
+              ]
+            ]
+          ]
+        }
+      ],
+      "configured_functions": 5266,
+      "completed_submissions": 10472,
+      "raw_capture_prefix": "logical-cpu"
+    },
+    {
+      "prefix": "boolean-metal",
+      "source_revision": "f74b265",
+      "library_revision": "4a31ee6",
+      "caller_revision": "edf7d4b",
+      "example_revision": "f74b265",
+      "backend": "metal",
+      "paired": false,
+      "gold_dtype": "float32",
+      "boolean_input_dtype": "float32",
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "arena_pages": 65536,
+      "block_pages": 4,
+      "qps": 1,
+      "registered_bytes_per_node": 1097203712,
+      "artifacts": [
+        "boolean-metal.jsonl.gz",
+        "boolean-metal-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 17.313459,
+        "invocations_per_second": 173.27560021368345,
+        "first_section_ms": 14.484542,
+        "completion_ms": {
+          "count": 3,
+          "mean": 15.754334,
+          "sample_variance": 1.8266408906249985
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 10472,
+          "completed": 10472,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.035401536,
+          "cpu_submitted": 0
+        }
+      },
+      "boolean_events": [
+        {
+          "event": "xonotic_boolean_early",
+          "generation": 0,
+          "withheld_row": 1,
+          "nan_truth": true
+        },
+        {
+          "event": "xonotic_boolean_complete",
+          "generation": 0,
+          "output": [
+            [
+              0,
+              0,
+              [
+                [
+                  1.0,
+                  5.0
+                ]
+              ]
+            ],
+            [
+              0,
+              2,
+              [
+                [
+                  4.0
+                ]
+              ]
+            ],
+            [
+              1,
+              0,
+              [
+                [
+                  4.0,
+                  5.0
+                ]
+              ]
+            ],
+            [
+              1,
+              2,
+              [
+                [
+                  4.0
+                ]
+              ]
+            ],
+            [
+              2,
+              0,
+              [
+                [
+                  5.0,
+                  4.0
+                ]
+              ]
+            ],
+            [
+              2,
+              2,
+              [
+                [
+                  5.0
+                ]
+              ]
+            ],
+            [
+              3,
+              0,
+              [
+                [
+                  5.0,
+                  1.0
+                ]
+              ]
+            ],
+            [
+              3,
+              2,
+              [
+                [
+                  5.0
+                ]
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_boolean_early",
+          "generation": 1,
+          "withheld_row": 0,
+          "nan_truth": true
+        },
+        {
+          "event": "xonotic_boolean_complete",
+          "generation": 1,
+          "output": [
+            [
+              0,
+              0,
+              [
+                [
+                  5.0,
+                  4.0
+                ]
+              ]
+            ],
+            [
+              0,
+              2,
+              [
+                [
+                  4.0
+                ]
+              ]
+            ],
+            [
+              1,
+              0,
+              [
+                [
+                  5.0,
+                  1.0
+                ]
+              ]
+            ],
+            [
+              1,
+              2,
+              [
+                [
+                  4.0
+                ]
+              ]
+            ],
+            [
+              2,
+              0,
+              [
+                [
+                  1.0,
+                  5.0
+                ]
+              ]
+            ],
+            [
+              2,
+              2,
+              [
+                [
+                  5.0
+                ]
+              ]
+            ],
+            [
+              3,
+              0,
+              [
+                [
+                  4.0,
+                  5.0
+                ]
+              ]
+            ],
+            [
+              3,
+              2,
+              [
+                [
+                  5.0
+                ]
+              ]
+            ]
+          ]
+        }
+      ],
+      "configured_functions": 5266,
+      "completed_submissions": 10472,
+      "raw_capture_prefix": "logical-metal"
+    },
+    {
+      "prefix": "boolean-paired-metal",
+      "source_revision": "f74b265",
+      "library_revision": "4a31ee6",
+      "caller_revision": "edf7d4b",
+      "example_revision": "f74b265",
+      "backend": "metal",
+      "paired": true,
+      "gold_dtype": "float16",
+      "boolean_input_dtype": "float32",
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "arena_pages": 65536,
+      "block_pages": 4,
+      "qps": 1,
+      "registered_bytes_per_node": 1097203712,
+      "artifacts": [
+        "boolean-paired-metal.jsonl.gz",
+        "boolean-paired-metal-trace.json.gz",
+        "boolean-paired-metal-peer.jsonl.gz",
+        "boolean-paired-metal-peer-trace.json.gz"
+      ],
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 14.981167,
+        "invocations_per_second": 200.25142233579,
+        "first_section_ms": 10.626625,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.402416666666667,
+          "sample_variance": 0.2573067584723332
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 9787,
+          "completed": 9787,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.03233563,
+          "cpu_submitted": 0
+        }
+      },
+      "boolean_events": [
+        {
+          "event": "xonotic_boolean_early",
+          "generation": 0,
+          "withheld_row": 1,
+          "nan_truth": true
+        },
+        {
+          "event": "xonotic_boolean_complete",
+          "generation": 0,
+          "output": [
+            [
+              0,
+              0,
+              [
+                [
+                  1.0,
+                  5.0
+                ]
+              ]
+            ],
+            [
+              0,
+              2,
+              [
+                [
+                  4.0
+                ]
+              ]
+            ],
+            [
+              1,
+              0,
+              [
+                [
+                  4.0,
+                  5.0
+                ]
+              ]
+            ],
+            [
+              1,
+              2,
+              [
+                [
+                  4.0
+                ]
+              ]
+            ],
+            [
+              2,
+              0,
+              [
+                [
+                  5.0,
+                  4.0
+                ]
+              ]
+            ],
+            [
+              2,
+              2,
+              [
+                [
+                  5.0
+                ]
+              ]
+            ],
+            [
+              3,
+              0,
+              [
+                [
+                  5.0,
+                  1.0
+                ]
+              ]
+            ],
+            [
+              3,
+              2,
+              [
+                [
+                  5.0
+                ]
+              ]
+            ]
+          ]
+        },
+        {
+          "event": "xonotic_boolean_early",
+          "generation": 1,
+          "withheld_row": 0,
+          "nan_truth": true
+        },
+        {
+          "event": "xonotic_boolean_complete",
+          "generation": 1,
+          "output": [
+            [
+              0,
+              0,
+              [
+                [
+                  5.0,
+                  4.0
+                ]
+              ]
+            ],
+            [
+              0,
+              2,
+              [
+                [
+                  4.0
+                ]
+              ]
+            ],
+            [
+              1,
+              0,
+              [
+                [
+                  5.0,
+                  1.0
+                ]
+              ]
+            ],
+            [
+              1,
+              2,
+              [
+                [
+                  4.0
+                ]
+              ]
+            ],
+            [
+              2,
+              0,
+              [
+                [
+                  1.0,
+                  5.0
+                ]
+              ]
+            ],
+            [
+              2,
+              2,
+              [
+                [
+                  5.0
+                ]
+              ]
+            ],
+            [
+              3,
+              0,
+              [
+                [
+                  4.0,
+                  5.0
+                ]
+              ]
+            ],
+            [
+              3,
+              2,
+              [
+                [
+                  5.0
+                ]
+              ]
+            ]
+          ]
+        }
+      ],
+      "configured_functions": 5202,
+      "completed_submissions": 9787,
+      "raw_capture_prefix": "logical-paired-metal"
+    }
+  ],
+  "scope": "Logical not/and/or and explicit broadcast through shared direct rank2 and indexed rank3 paths. Numeric truth includes NaN, negative zero, zero and nonzero values. Two generations alternate withheld source row, with ready downstream consumers matching NumPy before unrelated publication. Cases run on rank zero; paired float16 gold/fanout traverse RDMA. All runs exit zero; peer uses SIGTERM teardown. No matched speedup claim. Boolean-specific host timings are not collected; raw compute traces and full gold timing summaries are retained."
+}

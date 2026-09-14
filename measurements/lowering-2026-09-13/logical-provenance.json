@@ -2,699 +2,169 @@
   "runs": [
     {
       "prefix": "logical-cpu",
-      "source_revision": "f74b265",
-      "library_revision": "4a31ee6",
-      "caller_revision": "edf7d4b",
-      "example_revision": "f74b265",
-      "backend": "cpu",
-      "paired": false,
-      "gold_dtype": "float32",
-      "boolean_input_dtype": "float32",
-      "runs": 3,
-      "scatter_rows": 67,
-      "scatter_tile": 33,
+      "library_revision": "ff54af8",
+      "peer_library_revision": null,
+      "example_revision": "2d75409",
+      "xonotic_revision": "2d75409",
+      "dtype": "float32",
+      "scatter_rows": 4097,
+      "scatter_tile": 2049,
       "scatter_destinations": 17,
       "xonotic": true,
-      "arena_pages": 65536,
-      "block_pages": 4,
-      "qps": 1,
-      "registered_bytes_per_node": 1097203712,
-      "artifacts": [
-        "logical-cpu.jsonl.gz",
-        "logical-cpu-trace.json.gz"
-      ],
+      "runs": 3,
+      "paired": false,
       "summary": {
         "event": "summary",
         "dtype": "float32",
         "coreml": false,
         "invocations": 3,
-        "batch_ms": 4.381792,
-        "invocations_per_second": 684.651393767664,
-        "first_section_ms": 3.785417,
+        "batch_ms": 5.360125,
+        "invocations_per_second": 559.6884401016767,
+        "first_section_ms": 4.139417,
         "completion_ms": {
           "count": 3,
-          "mean": 4.104708666666666,
-          "sample_variance": 0.0636841614583332
+          "mean": 4.648638666666667,
+          "sample_variance": 0.3854398449213331
         },
         "withheld_invocation": 1,
         "withheld_section": 0,
         "max_absolute_error": 1.6537194948984535e-06,
         "runtime": {
-          "submitted": 10472,
-          "completed": 10472,
+          "submitted": 2160,
+          "completed": 2160,
           "native_submitted": 0,
           "native_backings": 0,
           "ne_planned_operations": 0,
           "code": 0,
           "gpu_seconds": 0.0,
-          "cpu_submitted": 10472
+          "cpu_submitted": 2160
         }
-      },
-      "boolean_events": [
-        {
-          "event": "xonotic_boolean_early",
-          "generation": 0,
-          "withheld_row": 1,
-          "nan_truth": true
-        },
-        {
-          "event": "xonotic_boolean_complete",
-          "generation": 0,
-          "output": [
-            [
-              0,
-              0,
-              [
-                [
-                  1.0,
-                  5.0
-                ]
-              ]
-            ],
-            [
-              0,
-              2,
-              [
-                [
-                  4.0
-                ]
-              ]
-            ],
-            [
-              1,
-              0,
-              [
-                [
-                  4.0,
-                  5.0
-                ]
-              ]
-            ],
-            [
-              1,
-              2,
-              [
-                [
-                  4.0
-                ]
-              ]
-            ],
-            [
-              2,
-              0,
-              [
-                [
-                  5.0,
-                  4.0
-                ]
-              ]
-            ],
-            [
-              2,
-              2,
-              [
-                [
-                  5.0
-                ]
-              ]
-            ],
-            [
-              3,
-              0,
-              [
-                [
-                  5.0,
-                  1.0
-                ]
-              ]
-            ],
-            [
-              3,
-              2,
-              [
-                [
-                  5.0
-                ]
-              ]
-            ]
-          ]
-        },
-        {
-          "event": "xonotic_boolean_early",
-          "generation": 1,
-          "withheld_row": 0,
-          "nan_truth": true
-        },
-        {
-          "event": "xonotic_boolean_complete",
-          "generation": 1,
-          "output": [
-            [
-              0,
-              0,
-              [
-                [
-                  5.0,
-                  4.0
-                ]
-              ]
-            ],
-            [
-              0,
-              2,
-              [
-                [
-                  4.0
-                ]
-              ]
-            ],
-            [
-              1,
-              0,
-              [
-                [
-                  5.0,
-                  1.0
-                ]
-              ]
-            ],
-            [
-              1,
-              2,
-              [
-                [
-                  4.0
-                ]
-              ]
-            ],
-            [
-              2,
-              0,
-              [
-                [
-                  1.0,
-                  5.0
-                ]
-              ]
-            ],
-            [
-              2,
-              2,
-              [
-                [
-                  5.0
-                ]
-              ]
-            ],
-            [
-              3,
-              0,
-              [
-                [
-                  4.0,
-                  5.0
-                ]
-              ]
-            ],
-            [
-              3,
-              2,
-              [
-                [
-                  5.0
-                ]
-              ]
-            ]
-          ]
-        }
-      ],
-      "configured_functions": 5266,
-      "completed_submissions": 10472
+      }
     },
     {
       "prefix": "logical-metal",
-      "source_revision": "f74b265",
-      "library_revision": "4a31ee6",
-      "caller_revision": "edf7d4b",
-      "example_revision": "f74b265",
-      "backend": "metal",
-      "paired": false,
-      "gold_dtype": "float32",
-      "boolean_input_dtype": "float32",
-      "runs": 3,
-      "scatter_rows": 67,
-      "scatter_tile": 33,
+      "library_revision": "ff54af8",
+      "peer_library_revision": null,
+      "example_revision": "2d75409",
+      "xonotic_revision": "2d75409",
+      "dtype": "float32",
+      "scatter_rows": 4097,
+      "scatter_tile": 2049,
       "scatter_destinations": 17,
       "xonotic": true,
-      "arena_pages": 65536,
-      "block_pages": 4,
-      "qps": 1,
-      "registered_bytes_per_node": 1097203712,
-      "artifacts": [
-        "logical-metal.jsonl.gz",
-        "logical-metal-trace.json.gz"
-      ],
+      "runs": 3,
+      "paired": false,
       "summary": {
         "event": "summary",
         "dtype": "float32",
         "coreml": false,
         "invocations": 3,
-        "batch_ms": 17.313459,
-        "invocations_per_second": 173.27560021368345,
-        "first_section_ms": 14.484542,
+        "batch_ms": 19.739,
+        "invocations_per_second": 151.98338315010892,
+        "first_section_ms": 16.9345,
         "completion_ms": {
           "count": 3,
-          "mean": 15.754334,
-          "sample_variance": 1.8266408906249985
+          "mean": 18.203652333333334,
+          "sample_variance": 1.77170346081033
         },
         "withheld_invocation": 1,
         "withheld_section": 0,
         "max_absolute_error": 1.575691461974671e-06,
         "runtime": {
-          "submitted": 10472,
-          "completed": 10472,
+          "submitted": 2162,
+          "completed": 2162,
           "native_submitted": 0,
           "native_backings": 0,
           "ne_planned_operations": 0,
           "code": 0,
-          "gpu_seconds": 0.035401536,
+          "gpu_seconds": 0.014347657,
           "cpu_submitted": 0
         }
-      },
-      "boolean_events": [
-        {
-          "event": "xonotic_boolean_early",
-          "generation": 0,
-          "withheld_row": 1,
-          "nan_truth": true
-        },
-        {
-          "event": "xonotic_boolean_complete",
-          "generation": 0,
-          "output": [
-            [
-              0,
-              0,
-              [
-                [
-                  1.0,
-                  5.0
-                ]
-              ]
-            ],
-            [
-              0,
-              2,
-              [
-                [
-                  4.0
-                ]
-              ]
-            ],
-            [
-              1,
-              0,
-              [
-                [
-                  4.0,
-                  5.0
-                ]
-              ]
-            ],
-            [
-              1,
-              2,
-              [
-                [
-                  4.0
-                ]
-              ]
-            ],
-            [
-              2,
-              0,
-              [
-                [
-                  5.0,
-                  4.0
-                ]
-              ]
-            ],
-            [
-              2,
-              2,
-              [
-                [
-                  5.0
-                ]
-              ]
-            ],
-            [
-              3,
-              0,
-              [
-                [
-                  5.0,
-                  1.0
-                ]
-              ]
-            ],
-            [
-              3,
-              2,
-              [
-                [
-                  5.0
-                ]
-              ]
-            ]
-          ]
-        },
-        {
-          "event": "xonotic_boolean_early",
-          "generation": 1,
-          "withheld_row": 0,
-          "nan_truth": true
-        },
-        {
-          "event": "xonotic_boolean_complete",
-          "generation": 1,
-          "output": [
-            [
-              0,
-              0,
-              [
-                [
-                  5.0,
-                  4.0
-                ]
-              ]
-            ],
-            [
-              0,
-              2,
-              [
-                [
-                  4.0
-                ]
-              ]
-            ],
-            [
-              1,
-              0,
-              [
-                [
-                  5.0,
-                  1.0
-                ]
-              ]
-            ],
-            [
-              1,
-              2,
-              [
-                [
-                  4.0
-                ]
-              ]
-            ],
-            [
-              2,
-              0,
-              [
-                [
-                  1.0,
-                  5.0
-                ]
-              ]
-            ],
-            [
-              2,
-              2,
-              [
-                [
-                  5.0
-                ]
-              ]
-            ],
-            [
-              3,
-              0,
-              [
-                [
-                  4.0,
-                  5.0
-                ]
-              ]
-            ],
-            [
-              3,
-              2,
-              [
-                [
-                  5.0
-                ]
-              ]
-            ]
-          ]
-        }
-      ],
-      "configured_functions": 5266,
-      "completed_submissions": 10472
+      }
     },
     {
-      "prefix": "logical-paired-metal",
-      "source_revision": "f74b265",
-      "library_revision": "4a31ee6",
-      "caller_revision": "edf7d4b",
-      "example_revision": "f74b265",
-      "backend": "metal",
-      "paired": true,
-      "gold_dtype": "float16",
-      "boolean_input_dtype": "float32",
-      "runs": 3,
+      "prefix": "logical-paired-cpu",
+      "library_revision": "ff54af8",
+      "peer_library_revision": "2d75409",
+      "example_revision": "2d75409",
+      "xonotic_revision": "2d75409",
+      "dtype": "float16",
       "scatter_rows": 67,
       "scatter_tile": 33,
       "scatter_destinations": 17,
       "xonotic": true,
-      "arena_pages": 65536,
-      "block_pages": 4,
-      "qps": 1,
-      "registered_bytes_per_node": 1097203712,
-      "artifacts": [
-        "logical-paired-metal.jsonl.gz",
-        "logical-paired-metal-trace.json.gz",
-        "logical-paired-metal-peer.jsonl.gz",
-        "logical-paired-metal-peer-trace.json.gz"
-      ],
+      "runs": 3,
+      "paired": true,
       "summary": {
         "event": "summary",
         "dtype": "float16",
         "coreml": false,
         "invocations": 3,
-        "batch_ms": 14.981167,
-        "invocations_per_second": 200.25142233579,
-        "first_section_ms": 10.626625,
+        "batch_ms": 5.050959,
+        "invocations_per_second": 593.9466148903605,
+        "first_section_ms": 1.955792,
         "completion_ms": {
           "count": 3,
-          "mean": 14.402416666666667,
-          "sample_variance": 0.2573067584723332
+          "mean": 5.045792333333334,
+          "sample_variance": 2.444270833333368e-05
         },
         "withheld_invocation": 1,
         "withheld_section": 0,
         "max_absolute_error": 0.001953125,
         "runtime": {
-          "submitted": 9787,
-          "completed": 9787,
+          "submitted": 1524,
+          "completed": 1524,
           "native_submitted": 0,
           "native_backings": 0,
           "ne_planned_operations": 0,
           "code": 0,
-          "gpu_seconds": 0.03233563,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 1524
+        }
+      }
+    },
+    {
+      "prefix": "logical-paired-metal",
+      "library_revision": "ff54af8",
+      "peer_library_revision": "2d75409",
+      "example_revision": "57e38fe",
+      "xonotic_revision": "57e38fe",
+      "dtype": "float16",
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "runs": 3,
+      "paired": true,
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 15.910542,
+        "invocations_per_second": 188.5542302707224,
+        "first_section_ms": 12.236667,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.259361666666669,
+          "sample_variance": 2.0607629405463346
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 1525,
+          "completed": 1525,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0057512,
           "cpu_submitted": 0
         }
-      },
-      "boolean_events": [
-        {
-          "event": "xonotic_boolean_early",
-          "generation": 0,
-          "withheld_row": 1,
-          "nan_truth": true
-        },
-        {
-          "event": "xonotic_boolean_complete",
-          "generation": 0,
-          "output": [
-            [
-              0,
-              0,
-              [
-                [
-                  1.0,
-                  5.0
-                ]
-              ]
-            ],
-            [
-              0,
-              2,
-              [
-                [
-                  4.0
-                ]
-              ]
-            ],
-            [
-              1,
-              0,
-              [
-                [
-                  4.0,
-                  5.0
-                ]
-              ]
-            ],
-            [
-              1,
-              2,
-              [
-                [
-                  4.0
-                ]
-              ]
-            ],
-            [
-              2,
-              0,
-              [
-                [
-                  5.0,
-                  4.0
-                ]
-              ]
-            ],
-            [
-              2,
-              2,
-              [
-                [
-                  5.0
-                ]
-              ]
-            ],
-            [
-              3,
-              0,
-              [
-                [
-                  5.0,
-                  1.0
-                ]
-              ]
-            ],
-            [
-              3,
-              2,
-              [
-                [
-                  5.0
-                ]
-              ]
-            ]
-          ]
-        },
-        {
-          "event": "xonotic_boolean_early",
-          "generation": 1,
-          "withheld_row": 0,
-          "nan_truth": true
-        },
-        {
-          "event": "xonotic_boolean_complete",
-          "generation": 1,
-          "output": [
-            [
-              0,
-              0,
-              [
-                [
-                  5.0,
-                  4.0
-                ]
-              ]
-            ],
-            [
-              0,
-              2,
-              [
-                [
-                  4.0
-                ]
-              ]
-            ],
-            [
-              1,
-              0,
-              [
-                [
-                  5.0,
-                  1.0
-                ]
-              ]
-            ],
-            [
-              1,
-              2,
-              [
-                [
-                  4.0
-                ]
-              ]
-            ],
-            [
-              2,
-              0,
-              [
-                [
-                  1.0,
-                  5.0
-                ]
-              ]
-            ],
-            [
-              2,
-              2,
-              [
-                [
-                  5.0
-                ]
-              ]
-            ],
-            [
-              3,
-              0,
-              [
-                [
-                  4.0,
-                  5.0
-                ]
-              ]
-            ],
-            [
-              3,
-              2,
-              [
-                [
-                  5.0
-                ]
-              ]
-            ]
-          ]
-        }
-      ],
-      "configured_functions": 5202,
-      "completed_submissions": 9787
+      }
     }
   ],
-  "scope": "Logical not/and/or and explicit broadcast through shared direct rank2 and indexed rank3 paths. Numeric truth includes NaN, negative zero, zero and nonzero values. Two generations alternate withheld source row, with ready downstream consumers matching NumPy before unrelated publication. Cases run on rank zero; paired float16 gold/fanout traverse RDMA. All runs exit zero; peer uses SIGTERM teardown. No matched speedup claim. Boolean-specific host timings are not collected; raw compute traces and full gold timing summaries are retained."
+  "peer_termination": "SIGTERM, both ssh sessions exit zero",
+  "scope": "Gold and fanout cross actual RDMA in paired runs. Logical indexing, arithmetic and other side cases execute on rank zero. The added Xonotic cases use float32 operands in every run. No matched throughput or physical GPU/wire overlap claim."
 }
