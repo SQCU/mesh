@@ -365,8 +365,9 @@ def neighborhood_body(output, values, attrs, op):
     return body, ('edges', weights.index), target != 4
 
 
-def source(graph):
-    kernels = [value for node in graph.nodes if (value := kernel(node)) is not None]
+# ../../../design/algorithm-sources.md#indexed-expression-lowering
+def source(nodes):
+    kernels = [value for node in nodes if (value := kernel(node)) is not None]
     sources = {}
     for item in kernels:
         nodes = item['arguments']
@@ -388,9 +389,7 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
 
     shapes = {value.index: tuple(size.resolve(capacity) if isinstance(size, Dimension) else size for size in value.shape)
               for value, _, _, _, _ in graph.nodes}
-    text, operations = source(graph)
     constants = {value.index: data for value, data in graph.constants.values()}
-    by_node = {item['node']: item for item in operations}
     tensors = dict(inputs)
     peers = {0: program.node if root_peer is None else root_peer}
     peers.update({region['owner']: region['peer'] for region in graph.regions.values()})
@@ -467,7 +466,8 @@ def kernel_calls(program, graph, capacity, inputs, *, root_peer=None,
             tensors[value.index] = nn._pointwise(program, kernels.expression(result),
                 operands, tile_rows, peer=peer, output_dtype=value.dtype)
             continue
-        item = by_node[value.index]
+        text, operations = source(((value, operation, values, attributes, owner),))
+        item = operations[0]
         shape = shapes[value.index]
         size = math.prod(shape)
         storage_shape = (max(1, math.prod(shape[:-1])), max(1, shape[-1])) if shape else (1, 1)

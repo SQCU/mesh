@@ -1031,3 +1031,11 @@ by the Pallas reference/body model; it does not force unused operands into a
 function's readiness mask. The existing example binds a second output requiring
 a deliberately absent input, observes the independent indexed output first, then
 supplies the second input. Both outputs use the same public kernel_call.
+
+Xonotic selects shared numerical lowering before requesting custom Metal source
+for a remaining operation. Its source emitter receives only those remaining
+nodes. Eagerly generating every custom kernel used to reject even expressions
+that the shared FP16 backend could execute, because the custom emitter did not
+support their dtype. Setup now preserves backend choice and emits only code that
+will be used. This does not add unsupported half atomic kernels or claim that
+all remaining custom operations support half precision.
