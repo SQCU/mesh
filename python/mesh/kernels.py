@@ -639,6 +639,7 @@ class _ExpressionKernel:
             expression = remap(value)
             reads = tuple(specialized_inputs[index] for index in used)
             dynamic = {}
+            access_axes, reduced_accesses = _expression_access_axes(expression, reads)
             dynamic_inputs = {index for index, source in enumerate(reads)
                 if hasattr(source, 'blocks') and not all((ref.view.tensor, ref.view.extent)
                     in program._constant_extents for ref in source.blocks.values())}
@@ -673,20 +674,20 @@ class _ExpressionKernel:
 
             flattened = tuple(ref for source in reads for ref in
                 (source.refs if isinstance(source, _StaticTable) else tuple(ref for _, ref in sorted(source.blocks.items())) if hasattr(source, 'blocks') else (source,)))
-            row_inputs = _expression_row_inputs(expression, reads)
             sources = tuple(self.source(reads, output, metal, expression).encode() for metal in (False, True))
             offsets = []
             for source in reads:
                 offsets.append((offsets[-1][0] + offsets[-1][1] if offsets else 0,
                     len(source.refs) if isinstance(source, _StaticTable) else len(source.blocks) if hasattr(source, 'blocks') else 1))
-            for begin, rows in _source_row_regions(program, output):
+            for begin, rows, column, columns in _source_expression_regions(program, output):
                 function = program.native.algebra_trace_count(program.handle)
                 check(program.native.algebra_source(program.handle, *sources,
                     (View * len(flattened))(*(ref.view for ref in flattened)), len(flattened), output.view,
-                    (C.c_uint8 * len(row_inputs))(*row_inputs), begin, rows))
-                for selected, index in dynamic.values():
+                    (C.c_uint8 * len(access_axes))(*access_axes), begin, rows, column, columns))
+                for node, (selected, index) in dynamic.items():
                     first, count = offsets[index]
-                    selection = selected.slice(begin, 0, rows, selected.shape[1])
+                    selection = selected.slice(begin, 0 if node in reduced_accesses else column, rows,
+                                               selected.shape[1] if node in reduced_accesses else columns)
                     check(program.native.algebra_indexed(program.handle, function, selection.view,
                         (C.c_size_t * count)(*range(first, first + count)), count))
 
@@ -807,7 +808,7 @@ class _ExpressionKernel:
                     lines.append(f'{"constant ulong" if metal else "static const uint64_t"} {name}{index}[]={{'+','.join(map(str, values))+'};')
                     strides.append(f'{name}{index}[CANDIDATE]')
             layouts[index] = scalar, strides
-        lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], constant ulong &row_begin [[buffer(1)]], uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { const ulong r=row_begin+row;' if metal else 'void mesh_expression(const uintptr_t *buffers, const struct mesh_kernel_publication *publication) {')
+        lines.append(_METAL_EXPRESSION_HEAD if metal else 'void mesh_expression(const uintptr_t *buffers, const struct mesh_kernel_publication *publication) {')
         candidates = {pointer for index, ref in enumerate(inputs) if hasattr(ref, 'blocks') or isinstance(ref, _StaticTable) for pointer in pointers[index]}
         for index, ref in enumerate((*physical, output)):
             if index in candidates:
@@ -850,26 +851,49 @@ class _ExpressionKernel:
             elif metal:
                 operation = 'max' if node.operation in ('max', 'any') else 'min' if node.operation in ('min', 'all') else 'sum'
                 lines.append(f'{name}=simd_{operation}({name});')
-        lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(physical)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
+        lines.append(f'for({"ulong" if metal else "uint64_t"} c={"column_begin+lane" if metal else "part.column_begin"};c<{"column_end" if metal else "part.column_end"};c+={32 if metal else 1}) p{len(physical)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
         lines.append('}' if metal else _CPU_PUBLICATION_END)
         return '\n'.join(lines)
 
 
-# design/algorithm-sources.md#compiled-row-access-domains
-def _expression_row_inputs(expression, inputs):
-    indexed = set()
+# design/algorithm-sources.md#compiled-column-access-domains
+def _expression_access_axes(expression, inputs):
+    axes = [3] * len(inputs)
+    reduced_accesses = set()
 
-    # design/algorithm-sources.md#compiled-row-access-domains
-    def visit(node):
+    # design/algorithm-sources.md#compiled-column-access-domains
+    def visit(node, reduced=False):
         if node.operation == 'load':
-            indexed.add(node.value)
+            axes[node.value] = 0
+            if reduced:
+                reduced_accesses.add(node)
+        if node.operation == 'input' and reduced:
+            axes[node.value] &= 1
         for child in node.operands:
-            visit(child)
+            visit(child, reduced or node.operation in _REDUCTIONS)
 
     visit(expression)
-    return tuple(int(index not in indexed and not hasattr(source, 'blocks') and not isinstance(source, _StaticTable))
+    return tuple(0 if hasattr(source, 'blocks') or isinstance(source, _StaticTable) else axes[index]
                  for index, source in enumerate(inputs)
-                 for _ in (source.refs if isinstance(source, _StaticTable) else source.blocks.values() if hasattr(source, 'blocks') else (source,)))
+                 for _ in (source.refs if isinstance(source, _StaticTable) else source.blocks.values() if hasattr(source, 'blocks') else (source,))), frozenset(reduced_accesses)
+
+
+# design/algorithm-sources.md#compiled-column-access-domains
+def _source_expression_regions(program, output):
+    import math
+    quantum = program.native.tensor_publication_bytes(output.view.tensor, output.view.extent) // output.dtype.itemsize
+    rows, columns = output.shape
+    if output._writer_error:
+        return ((0, rows, 0, columns),)
+    row_major = output.view.column_stride == 1
+    inner, outer = (columns, rows) if row_major else (rows, columns)
+    if inner > quantum and (outer == 1 or inner % quantum == 0):
+        rectangles = ((i, 1, j, min(quantum, inner-j)) for i in range(outer) for j in range(0, inner, quantum))
+    else:
+        step = quantum // math.gcd(quantum, inner)
+        rectangles = ((i, min(step, outer-i), 0, inner) for i in range(0, outer, step))
+    return tuple(rectangle if row_major else (rectangle[2], rectangle[3], rectangle[0], rectangle[1])
+                 for rectangle in rectangles)
 
 
 # design/algorithm-sources.md#compiled-row-access-domains
@@ -881,6 +905,10 @@ def _source_row_regions(program, output):
     row_bytes = output.shape[1] * output.dtype.itemsize
     rows = page_bytes // math.gcd(page_bytes, row_bytes)
     return tuple((first, min(rows, output.shape[0]-first)) for first in range(0, output.shape[0], rows))
+
+
+# design/algorithm-sources.md#compiled-column-access-domains
+_METAL_EXPRESSION_HEAD = 'kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], constant ulong *domain [[buffer(1)]], uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { const ulong r=domain[0]+row, column_begin=domain[1], column_end=domain[2];'
 
 
 # design/algorithm-sources.md#in-operation-publication
@@ -1176,7 +1204,7 @@ def _compiled_region(program, inputs, output, body, dynamic_first=None, *, row_i
         lines.append(preamble)
         lines.append('#define PREFIX(x) simd_prefix_exclusive_sum(x)\n#define SUM(x) simd_sum(x)\n#define BARRIER threadgroup_barrier(mem_flags::mem_device)' if metal else
                      '#define PREFIX(x) 0u\n#define SUM(x) (x)\n#define BARRIER ((void)0)')
-        lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], constant ulong &row_begin [[buffer(1)]], uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { const ulong r=row_begin+row;' if metal else
+        lines.append(_METAL_EXPRESSION_HEAD if metal else
                      'void mesh_expression(const uintptr_t *buffers, const struct mesh_kernel_publication *publication) { const uint32_t lane=0; ' + _CPU_PUBLICATION_LOOP)
         lines.append(f'const uint32_t lanes={32 if metal else 1};')
         for index, ref in enumerate((*inputs, output)):
@@ -1196,7 +1224,7 @@ def _compiled_region(program, inputs, output, body, dynamic_first=None, *, row_i
     for begin, rows in domains:
         check(program.native.algebra_source(program.handle, *(source.encode() for source in sources),
             (View * len(inputs))(*(ref.view for ref in inputs)), len(inputs), output.view,
-            (C.c_uint8 * len(inputs))(*row_inputs), begin, rows))
+            (C.c_uint8 * len(inputs))(*row_inputs), begin, rows, 0, output.shape[1]))
     return function
 
 

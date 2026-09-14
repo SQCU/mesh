@@ -5,7 +5,7 @@
 /* design/algorithm-sources.md#in-operation-publication */
 #define MESH_KERNEL_DECLARATIONS \
 struct mesh_kernel_section { \
-  uint64_t row_begin,row_end; \
+  uint64_t row_begin,row_end,column_begin,column_end; \
   uint32_t first,count; \
 }; \
 struct mesh_kernel_publication { \

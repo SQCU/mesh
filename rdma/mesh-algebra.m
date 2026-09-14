@@ -469,7 +469,7 @@ static int output_region(MeshAlgebra *a,struct mesh_view v,struct mesh_row_map *
   struct mesh_extent *e=&v.tensor->extents[v.extent];
   size_t scalar=scalar_bytes(e->shape.scalar),unit=a->context->M->pgsz/scalar;
   size_t quantum=(size_t)e->quantum*unit,elements=e->shape.rows*e->shape.columns;
-  if(!((v.column_stride==1 && v.row_stride==v.columns) || (v.row_stride==1 && v.column_stride==v.rows)))return EINVAL;
+  if(!((v.column_stride==1 && (v.rows==1 || v.row_stride==v.columns)) || (v.row_stride==1 && (v.columns==1 || v.column_stride==v.rows))))return EINVAL;
   if(v.rows>SIZE_MAX/v.columns)return EOVERFLOW;
   size_t count=v.rows*v.columns,end=v.offset+count;
   if(v.offset%quantum || (end!=elements && end%quantum))return EINVAL;
@@ -891,21 +891,22 @@ static void bind_publication(MeshFunction *f,struct mesh_view output) {
     .count=sections.length/sizeof(struct mesh_kernel_section),.context=f.owner->context,.publish=publish_cpu};
 }
 /* design/algorithm-sources.md#region-expression-fusion */
-int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,const uint8_t *row_inputs,size_t row_begin,size_t row_count) {
+int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,const uint8_t *access_axes,size_t row_begin,size_t row_count,size_t column_begin,size_t column_count) {
   MeshAlgebra *a=owner(handle);
   if(a.realized || !cpu_source || !metal_source || !valid_view(a,output))return EINVAL;
-  if(!row_count || row_begin>output.rows || row_count>output.rows-row_begin || (input_count && (!inputs || !row_inputs)))return EINVAL;
-  struct mesh_view region=mesh_view_slice(output,row_begin,0,row_count,output.columns);
+  if(!row_count || row_begin>output.rows || row_count>output.rows-row_begin || !column_count || column_begin>output.columns || column_count>output.columns-column_begin || (input_count && (!inputs || !access_axes)))return EINVAL;
+  struct mesh_view region=mesh_view_slice(output,row_begin,column_begin,row_count,column_count);
   NSMutableData *domains=[NSMutableData dataWithLength:input_count*sizeof(struct mesh_view)];
   struct mesh_view *reads=domains.mutableBytes;
   for(size_t i=0;i<input_count;i++) {
-    if(!valid_view(a,inputs[i]) || (row_inputs[i] && inputs[i].rows!=1 && inputs[i].rows!=output.rows))return EINVAL;
-    reads[i]=row_inputs[i] && inputs[i].rows!=1?mesh_view_slice(inputs[i],row_begin,0,row_count,inputs[i].columns):inputs[i];
+    if(!valid_view(a,inputs[i]) || ((access_axes[i]&1) && inputs[i].rows!=1 && inputs[i].rows!=output.rows) || ((access_axes[i]&2) && inputs[i].columns!=1 && inputs[i].columns!=output.columns))return EINVAL;
+    int row=(access_axes[i]&1) && inputs[i].rows!=1,column=(access_axes[i]&2) && inputs[i].columns!=1;
+    reads[i]=mesh_view_slice(inputs[i],row?row_begin:0,column?column_begin:0,row?row_count:inputs[i].rows,column?column_count:inputs[i].columns);
   }
   NSString *cpu_text=[@MESH_KERNEL_SOURCE stringByAppendingString:@(cpu_source)];
   MeshCPUCode *library=(MeshCPUCode *)source_code(a,cpu_text.UTF8String,YES);
   struct mesh_metal_dispatch dispatch={.name="mesh_expression",.grid={row_count,1,1},.group={32,1,1}};
-  uint64_t origin=row_begin;struct mesh_metal_constant constant={.bytes=&origin,.length=sizeof origin};
+  uint64_t domain[]={row_begin,column_begin,column_begin+column_count};struct mesh_metal_constant constant={.bytes=domain,.length=sizeof domain};
   if(!a.cpu)return bind_metal(handle,metal_source,&dispatch,1,&constant,1,inputs,input_count,&output,1,library,reads,&region);
   MeshMetalCode *metal=(MeshMetalCode *)source_code(a,metal_source,NO);NSString *source=library.source;
   if(!library.handle) {
@@ -938,7 +939,7 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
   MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_CPU;f->backend=MESH_BACKEND_CPU_COMPILED;
   bind_publication(f,region);
   struct mesh_kernel_section *sections=f.publicationSections.mutableBytes;
-  for(size_t i=0;i<f->publication.count;i++){sections[i].row_begin+=row_begin;sections[i].row_end+=row_begin;}
+  for(size_t i=0;i<f->publication.count;i++){sections[i].row_begin+=row_begin;sections[i].row_end+=row_begin;sections[i].column_begin=column_begin;sections[i].column_end=column_begin+column_count;}
   specialize_function(f,library,metal,source_options(),&dispatch,1,&constant,1,inputs,input_count,&output,1);f.cpuArguments=addresses;
   return 0;
 }

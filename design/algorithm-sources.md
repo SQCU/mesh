@@ -3807,7 +3807,7 @@ binding, rather than treating the size of an argument buffer as its read domain.
 This is a binding change; the numerical expressions and their original addresses
 remain the same.
 
-`_expression_row_inputs` walks the expression and identifies direct row-indexed
+`_expression_access_axes` walks the expression and identifies direct row-indexed
 inputs. An input also used by an indexed load retains its original domain until
 that access has a more precise indexed footprint. Broadcast inputs retain their
 single source row. The flattened flags preserve the same ordering as the actual
@@ -3831,7 +3831,7 @@ selector rows to its own function.
 
 The CPU publication descriptor carries the original row indices, shifted once
 from the interval-relative publication sections. Metal receives the same origin
-as a configured 64-bit constant in buffer 1 and dispatches the interval's row
+in its configured domain constants in buffer 1 and dispatches the interval's row
 count. Both source generators define r in the original argument coordinate
 system. Original pointer offsets, broadcast strides, row/index expressions,
 reduction arithmetic and output addressing remain unchanged. CPU sections publish
@@ -3860,3 +3860,48 @@ Validation: source review of the C/ctypes ABI, original address versus dependenc
 views, all ten `_compiled_region` call sites, native compilation and Python syntax
 compilation. No numerical run or performance measurement was performed; generated
 Metal source was reviewed, not executed.
+
+## Compiled column access domains
+
+The JAX authors' [Grids and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html),
+cited above, associates iteration coordinates with operand regions. The column
+extension preserves that mechanism in the existing source binding rather than
+expanding a pointwise read to an entire row.
+
+`_expression_access_axes` retains row and column access bits per argument. Direct
+pointwise input reads use both bits; reduction operands retain the row bit and
+all contributing columns. An input used both directly and under a reduction
+retains the union of its reads. Indexed operands retain their indexed mechanism.
+The same walk retains which indexed accesses occur under reductions. Pointwise
+selector attachments use only the output rectangle's selector columns; accesses
+also used under reductions retain the full feature domain.
+
+`_source_expression_regions` constructs publication-aligned rectangles in the
+output's existing row-major or column-major storage. Wide rows and tall columns
+split along their contiguous dimension when the resulting boundaries own whole
+publication quanta. A single physical row/column can include a final partial
+quantum. Short contiguous dimensions use aligned groups along the outer dimension.
+For nondivisible multirow/multicolumn strides, grouping remains broader than a
+quantum; nonrectangular iteration domains still need implementation.
+
+The `mesh_algebra_source` ABI now carries both coordinate intervals and access
+bits. Its read views narrow the corresponding input axes while preserving
+singleton broadcasts. Original pointers and original numerical r/c coordinates
+remain unchanged. CPU publication sections carry column bounds; the expression
+store loop visits precisely those columns. `_METAL_EXPRESSION_HEAD`, shared by
+both source owners, decodes the configured row origin and column bounds. Metal
+uses the same expression interval. Row-only compiled helpers pass their full
+column interval through this single ABI.
+
+`output_region` now ignores the row stride of a one-row view and the column stride
+of a one-column view when checking density. Those strides do not appear in any
+address difference within such a view. This fixes the memory-layout predicate
+centrally instead of rejecting contiguous sections of larger arrays.
+
+This removes full-row input dependencies for supported pointwise column domains.
+It does not implement incremental partial reduction across a feature dimension,
+precise within-candidate indexed footprints, or accelerator publication from
+inside a running dispatch. Those remain obligations of the active goal.
+Validation was source review of expression uses, selector domains, both storage
+orders, CPU/Metal source ABI, native compilation and Python syntax compilation.
+No numerical or performance runs were performed.

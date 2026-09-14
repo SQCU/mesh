@@ -142,7 +142,7 @@ class Native:
             'mesh_writer_complete': (None, [C.POINTER(Writer)]),
             'mesh_algebra_metal': (C.c_int, [P, C.c_char_p, C.POINTER(MetalDispatch), Z,
                 C.POINTER(MetalConstant), Z, C.POINTER(View), Z, C.POINTER(View), Z]),
-            'mesh_algebra_source': (C.c_int, [P, C.c_char_p, C.c_char_p, C.POINTER(View), Z, View, C.POINTER(C.c_uint8), Z, Z]),
+            'mesh_algebra_source': (C.c_int, [P, C.c_char_p, C.c_char_p, C.POINTER(View), Z, View, C.POINTER(C.c_uint8), Z, Z, Z, Z]),
             'mesh_algebra_specialization': (C.c_char_p, [P, Z]),
             'mesh_algebra_source_text': (C.c_char_p, [P, Z, U]),
             'mesh_algebra_indexed': (C.c_int, [P, Z, View, C.POINTER(Z), Z]),
