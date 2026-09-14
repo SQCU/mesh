@@ -1,0 +1,374 @@
+{
+  "date": "2026-09-14",
+  "source_revision": "09ecd61",
+  "installed_source_revision_both_nodes": "09ecd61",
+  "native_revision": "00d8330",
+  "kernel_revision": "4439422",
+  "example_revision": "09ecd61",
+  "baseline": "compiled-identity-provenance.json",
+  "runs": [
+    {
+      "prefix": "retained-plan-metal",
+      "exit_code": 0,
+      "configured_functions": 8424,
+      "submissions": 16716,
+      "successful": 16716,
+      "failed": 0,
+      "environment": {
+        "compiler": null,
+        "complete_cost_key": false,
+        "device": {
+          "architecture": "applegpu_g17s",
+          "families": [
+            1001,
+            1002,
+            1003,
+            1004,
+            1005,
+            1006,
+            1007,
+            1008,
+            1009,
+            1010,
+            2002,
+            5001,
+            5002
+          ],
+          "name": "Apple M5 Max",
+          "registry_id": 4294968607,
+          "unified_memory": true
+        },
+        "hardware": {
+          "hw.cpusubtype": 2,
+          "hw.cputype": 16777228,
+          "hw.logicalcpu": 18,
+          "hw.memsize": 137438953472,
+          "hw.model": "Mac17,6",
+          "hw.physicalcpu": 18,
+          "machdep.cpu.brand_string": "Apple M5 Max"
+        },
+        "libraries": {
+          "accelerate": {
+            "path": "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib",
+            "uuid": "564BF0A2-5703-303C-8C04-C7192B02F86D"
+          },
+          "coreml": {
+            "path": "/System/Library/Frameworks/CoreML.framework/Versions/A/CoreML",
+            "uuid": "7DCD3F5C-A5FA-3D6C-BE7A-8E0A0C6DD703"
+          },
+          "mesh": {
+            "path": "/Users/mdot/dox/mesh/.build/overlap-package/mesh/lib/libmesh.dylib",
+            "uuid": "81D43090-DDDF-35F1-A9A3-77435EB6ACE3"
+          },
+          "mesh_algebra": {
+            "path": "/Users/mdot/dox/mesh/.build/overlap-package/mesh/lib/libmesh-algebra.dylib",
+            "uuid": "412393AA-8869-3B12-9835-7D5763F9F1FA"
+          },
+          "metal": {
+            "path": "/System/Library/Frameworks/Metal.framework/Versions/A/Metal",
+            "uuid": "295341EE-1E42-3550-BD7E-D6B108112BCD"
+          },
+          "mps": {
+            "path": "/System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSMatrix.framework/Versions/A/MPSMatrix",
+            "uuid": "B4837302-DC97-3D70-96E0-221AC7CE39F0"
+          }
+        },
+        "os": {
+          "build": "25D2150",
+          "release": "25.3.0"
+        },
+        "version": 1
+      },
+      "events": [
+        {
+          "event": "function_profiles",
+          "successful": 16716,
+          "failed": 0,
+          "backend_successes": {
+            "metal_mps": 2008,
+            "metal_builtin": 1110,
+            "metal_compiled": 13598
+          },
+          "stable_snapshot": true,
+          "pending": 0
+        },
+        {
+          "event": "compiled_specializations",
+          "bindings": 6498,
+          "sources": 4115,
+          "source_pairs": 2059,
+          "dispatches": 6498,
+          "constants": 0,
+          "observed_output": {
+            "tensor": 40322820896,
+            "extent": 0,
+            "offset": 0,
+            "rows": 1,
+            "columns": 3,
+            "row_stride": 3,
+            "column_stride": 1,
+            "dtype": "float32"
+          }
+        },
+        {
+          "event": "summary",
+          "dtype": "float32",
+          "coreml": false,
+          "invocations": 3,
+          "batch_ms": 16.215041,
+          "invocations_per_second": 185.01340823005012,
+          "first_section_ms": 13.897958,
+          "completion_ms": {
+            "count": 3,
+            "mean": 14.946124666666668,
+            "sample_variance": 1.2050796302083344
+          },
+          "withheld_invocation": 1,
+          "withheld_section": 0,
+          "max_absolute_error": 1.575691461974671e-06,
+          "runtime": {
+            "submitted": 16716,
+            "completed": 16716,
+            "native_submitted": 0,
+            "native_backings": 0,
+            "ne_planned_operations": 0,
+            "code": 0,
+            "gpu_seconds": 0.053561623,
+            "cpu_submitted": 0
+          }
+        }
+      ],
+      "artifacts": [
+        "retained-plan-metal.jsonl.gz",
+        "retained-plan-metal-trace.json.gz"
+      ]
+    },
+    {
+      "prefix": "retained-plan-paired",
+      "exit_code": 0,
+      "configured_functions": 8356,
+      "submissions": 16023,
+      "successful": 16023,
+      "failed": 0,
+      "environment": {
+        "compiler": null,
+        "complete_cost_key": false,
+        "device": {
+          "architecture": "applegpu_g17s",
+          "families": [
+            1001,
+            1002,
+            1003,
+            1004,
+            1005,
+            1006,
+            1007,
+            1008,
+            1009,
+            1010,
+            2002,
+            5001,
+            5002
+          ],
+          "name": "Apple M5 Max",
+          "registry_id": 4294968607,
+          "unified_memory": true
+        },
+        "hardware": {
+          "hw.cpusubtype": 2,
+          "hw.cputype": 16777228,
+          "hw.logicalcpu": 18,
+          "hw.memsize": 137438953472,
+          "hw.model": "Mac17,6",
+          "hw.physicalcpu": 18,
+          "machdep.cpu.brand_string": "Apple M5 Max"
+        },
+        "libraries": {
+          "accelerate": {
+            "path": "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib",
+            "uuid": "564BF0A2-5703-303C-8C04-C7192B02F86D"
+          },
+          "coreml": {
+            "path": "/System/Library/Frameworks/CoreML.framework/Versions/A/CoreML",
+            "uuid": "7DCD3F5C-A5FA-3D6C-BE7A-8E0A0C6DD703"
+          },
+          "mesh": {
+            "path": "/Users/mdot/dox/mesh/.build/overlap-package/mesh/lib/libmesh.dylib",
+            "uuid": "81D43090-DDDF-35F1-A9A3-77435EB6ACE3"
+          },
+          "mesh_algebra": {
+            "path": "/Users/mdot/dox/mesh/.build/overlap-package/mesh/lib/libmesh-algebra.dylib",
+            "uuid": "412393AA-8869-3B12-9835-7D5763F9F1FA"
+          },
+          "metal": {
+            "path": "/System/Library/Frameworks/Metal.framework/Versions/A/Metal",
+            "uuid": "295341EE-1E42-3550-BD7E-D6B108112BCD"
+          },
+          "mps": {
+            "path": "/System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSMatrix.framework/Versions/A/MPSMatrix",
+            "uuid": "B4837302-DC97-3D70-96E0-221AC7CE39F0"
+          }
+        },
+        "os": {
+          "build": "25D2150",
+          "release": "25.3.0"
+        },
+        "version": 1
+      },
+      "events": [
+        {
+          "event": "function_profiles",
+          "successful": 16023,
+          "failed": 0,
+          "backend_successes": {
+            "metal_mps": 1754,
+            "metal_builtin": 1033,
+            "metal_compiled": 13236
+          },
+          "stable_snapshot": true,
+          "pending": 0
+        },
+        {
+          "event": "compiled_specializations",
+          "bindings": 6429,
+          "sources": 4119,
+          "source_pairs": 2061,
+          "dispatches": 6429,
+          "constants": 0,
+          "observed_output": {
+            "tensor": 30322303136,
+            "extent": 0,
+            "offset": 0,
+            "rows": 1,
+            "columns": 3,
+            "row_stride": 3,
+            "column_stride": 1,
+            "dtype": "float32"
+          }
+        },
+        {
+          "event": "summary",
+          "dtype": "float16",
+          "coreml": false,
+          "invocations": 3,
+          "batch_ms": 18.323625,
+          "invocations_per_second": 163.72306243988294,
+          "first_section_ms": 14.476,
+          "completion_ms": {
+            "count": 3,
+            "mean": 16.132722,
+            "sample_variance": 3.623444516226998
+          },
+          "withheld_invocation": 1,
+          "withheld_section": 0,
+          "max_absolute_error": 0.001953125,
+          "runtime": {
+            "submitted": 16023,
+            "completed": 16023,
+            "native_submitted": 0,
+            "native_backings": 0,
+            "ne_planned_operations": 0,
+            "code": 0,
+            "gpu_seconds": 0.050908793,
+            "cpu_submitted": 0
+          }
+        }
+      ],
+      "artifacts": [
+        "retained-plan-paired.jsonl.gz",
+        "retained-plan-paired-trace.json.gz"
+      ]
+    },
+    {
+      "prefix": "retained-plan-paired-peer",
+      "exit_code": 0,
+      "configured_functions": 1189,
+      "submissions": 762,
+      "successful": 762,
+      "failed": 0,
+      "environment": {
+        "compiler": null,
+        "complete_cost_key": false,
+        "device": {
+          "architecture": "applegpu_g16s",
+          "families": [
+            1001,
+            1002,
+            1003,
+            1004,
+            1005,
+            1006,
+            1007,
+            1008,
+            1009,
+            2002,
+            5001,
+            5002
+          ],
+          "name": "Apple M4 Pro",
+          "registry_id": 4294968281,
+          "unified_memory": true
+        },
+        "hardware": {
+          "hw.cpusubtype": 2,
+          "hw.cputype": 16777228,
+          "hw.logicalcpu": 12,
+          "hw.memsize": 25769803776,
+          "hw.model": "Mac16,11",
+          "hw.physicalcpu": 12,
+          "machdep.cpu.brand_string": "Apple M4 Pro"
+        },
+        "libraries": {
+          "accelerate": {
+            "path": "/System/Library/Frameworks/Accelerate.framework/Versions/A/Frameworks/vecLib.framework/Versions/A/libBLAS.dylib",
+            "uuid": "F078C775-D8DC-3C4D-879F-A9BB228DBE06"
+          },
+          "coreml": {
+            "path": "/System/Library/Frameworks/CoreML.framework/Versions/A/CoreML",
+            "uuid": "00F01374-D6EA-3445-9598-42F360C651B4"
+          },
+          "mesh": {
+            "path": "/Users/mdot/mesh/.build/gold-package/mesh/lib/libmesh.dylib",
+            "uuid": "5D6FAA88-33F0-34AD-9C10-3AC2744D1521"
+          },
+          "mesh_algebra": {
+            "path": "/Users/mdot/mesh/.build/gold-package/mesh/lib/libmesh-algebra.dylib",
+            "uuid": "8FFB5958-4842-37BD-AB22-37D0D17B430E"
+          },
+          "metal": {
+            "path": "/System/Library/Frameworks/Metal.framework/Versions/A/Metal",
+            "uuid": "A5124C88-37B2-3F0D-94AC-B9A984420F0C"
+          },
+          "mps": {
+            "path": "/System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSMatrix.framework/Versions/A/MPSMatrix",
+            "uuid": "21591139-CD3C-36AB-8191-28193ACD17A7"
+          }
+        },
+        "os": {
+          "build": "25F80",
+          "release": "25.5.0"
+        },
+        "version": 1
+      },
+      "events": [],
+      "artifacts": [
+        "retained-plan-paired-peer.jsonl.gz",
+        "retained-plan-paired-peer-trace.json.gz"
+      ]
+    }
+  ],
+  "cpu_validation": "running; not yet terminal",
+  "arena": {
+    "abi": 25,
+    "registered_bytes_per_node": 1097203712,
+    "enlarged": false
+  },
+  "peer_shutdown": "SIGTERM after rank zero exit 0; original SSH exit 0",
+  "scope": [
+    "Existing streaming-algebra --xonotic workflow, runs3/scatter67/tile33/destinations17; local float32 and paired float16 Metal.",
+    "Balanced merges, direct publication, precision and selected dependencies source-reviewed; existing numerical and withheld-region workflow passes on Metal.",
+    "Only two unique generated source strings differ from previous Metal snapshot; assembly-body indentation changed.",
+    "Complete selected-readiness candidate costs, function-ID associations, measured selection and full nine-point acceptance remain open.",
+    "Timing observations retain count, mean and sample variance; small samples establish neither speedup nor no regression."
+  ]
+}

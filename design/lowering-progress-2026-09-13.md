@@ -2023,3 +2023,33 @@ compiler/OS differences in the preceding evidence make identical source pairs
 insufficient as a cross-machine timing key. Environment facts are exported once
 alongside the existing function/code traces; they do not enter the page scan or
 numerical launch path. These changes do not yet establish measured plan selection.
+
+`4439422` replaces the native reconstruction loops with `_IndexedProductPlan`:
+retained segment geometry, FP32 storage slots and orientations, and ordered
+contract/add/copy/assembly operations referencing explicit output slots.
+`_ReductionPlan` retains the adjacent balanced merge tree and odd carries. The
+same compiled plan object enters the static comparison and fallback binder.
+Direct-target aliases avoid copies; mixed F16/F32 orientation and FP32-before-cast
+publication remain explicit. Empty typed reductions retain their existing
+identity path. The source change is +125/-74 lines, a net increase of 51; this is
+ownership consolidation, not a source-size reduction claim.
+
+`00d8330` adds cached environment reporting and passes the native build without
+warnings. `09ecd61` exports it from both participants' existing trace path.
+Measured code and installed packages are `09ecd61` on both nodes. Local Metal
+passes 8424 configured functions/16716 completions; paired rank zero passes
+8356/16023 and the peer 1189/762, all with zero failed numerical completions.
+The peer exits zero after SIGTERM, following rank zero's exit zero.
+
+Only two unique source texts differ from the preceding local Metal snapshot:
+indentation in the relocated assembly emitter changes their byte identities.
+No numerical emitter algorithm was changed. Source review and the unchanged
+numerical/withheld-region cases support preservation of the covered behavior;
+small timing samples do not prove no performance regression.
+
+The immutable native plan does not yet include selected-input readiness shader
+materialization as costed nodes. The operation-to-bound-function-ID association
+also still needs retention for whole-plan measurements. Those are explicit
+remaining work, alongside measured selection and the broader nine-point scope.
+CPU validation was launched against the same installed source; its terminal
+result will be appended after the existing process finishes.
