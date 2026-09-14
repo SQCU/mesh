@@ -889,7 +889,10 @@ def _expression_dtype(node, inputs):
         return inputs[node.value].dtype
     if node.operation == 'cast':
         return np.dtype(node.value)
-    if node.operation == 'dot' or node.operation in _REAL_FUNCTIONS:
+    if node.operation == 'dot':
+        types = tuple(_expression_dtype(child, inputs) for child in node.operands)
+        return np.dtype('bool') if all(dtype.kind == 'b' for dtype in types) else _expression_dtype(_Expression('*', node.operands), inputs)
+    if node.operation in _REAL_FUNCTIONS:
         return np.dtype('float32')
     if node.operation == 'philox':
         return np.dtype('uint32')
@@ -1531,6 +1534,32 @@ def _requires_regions(node):
     return node.operation in ('dot', 'cast', 'transpose') or node.operation in _REDUCTIONS or any(_requires_regions(child) for child in node.operands)
 
 
+# design/algorithm-sources.md#typed-integer-contractions
+def _contraction_merge(left, right, dtype):
+    if dtype.kind == 'b':
+        return (left | right).astype(dtype)
+    if dtype.kind in 'iu':
+        return ((left & 0xffffffffffffffff) + (right & 0xffffffffffffffff)).astype(dtype)
+    return left + right
+
+
+# design/algorithm-sources.md#typed-integer-contractions
+def _integral_contraction(program, left, right, target):
+    # design/algorithm-sources.md#typed-integer-contractions
+    def body(metal):
+        a = f'p0[r*{left.view.row_stride}+k*{left.view.column_stride}]'
+        b = f'p1[k*{right.view.row_stride}+c*{right.view.column_stride}]'
+        scalar = 'uint64_t' if target.dtype.itemsize == 8 else 'uint32_t'
+        term = f'(({a})&&({b}))' if target.dtype.kind == 'b' else f'(({scalar})({a}))*(({scalar})({b}))'
+        operation = '|=' if target.dtype.kind == 'b' else '+='
+        return f"""for(uint64_t c=lane;c<{target.shape[1]};c+=lanes) {{
+          {scalar} total=0;
+          for(uint64_t k=0;k<{left.shape[1]};k++) total{operation}{term};
+          p2[r*{target.view.row_stride}+c*{target.view.column_stride}]=total;
+        }}"""
+    _compiled_region(program, (left, right), target, body)
+
+
 # design/algorithm-sources.md#shared-contraction-lowering
 def _bind_operation(program, operation, inputs, target):
     from . import check
@@ -1659,13 +1688,14 @@ class _ExpressionRegions:
         key = ('parts', self.key(node, origin, shape))
         if key in self.cache:
             return self.cache[key]
+        dtype = _expression_dtype(node, self.sources)
         left, right = node.operands
         left_layout, right_layout = self.layout(left), self.layout(right)
         inner = left_layout[0][1]
         if inner != right_layout[0][0]:
             raise ValueError('Contraction inner dimensions differ')
         if inner == 0:
-            target = direct if direct is not None and direct.dtype == np.dtype('float32') else self.temporary(shape)
+            target = direct if direct is not None and direct.dtype == dtype else self.temporary(shape, dtype)
             _ExpressionKernel((_literal(0),)).bind(self.program, (), (target,))
             self.cache[key] = (target,)
             return (target,)
@@ -1673,17 +1703,22 @@ class _ExpressionRegions:
         for layout, axis in ((left_layout, 1), (right_layout, 0)):
             if layout[2][axis] < layout[0][axis]:
                 tile = gcd(tile, layout[2][axis])
+        operands = tuple(child.astype('float32') if dtype.kind == 'f' and _expression_dtype(child, self.sources).kind in 'iub' else child
+                         for child in (left, right))
         parts = []
         for start in range(0, inner, tile):
             length = min(tile, inner - start)
-            left_panel = self.panel(left, (origin[0], start), (shape[0], length))
-            right_panel = self.panel(right, (start, origin[1]), (length, shape[1]))
+            left_panel = self.panel(operands[0], (origin[0], start), (shape[0], length))
+            right_panel = self.panel(operands[1], (start, origin[1]), (length, shape[1]))
             reverse = left_panel.dtype == np.dtype('float16') and right_panel.dtype == np.dtype('float32')
             if reverse:
                 destination = self.temporary(shape[::-1]).T
             else:
-                destination = direct if direct is not None and tile == inner and direct.dtype == np.dtype('float32') else self.temporary(shape)
-            _bind_operation(self.program, matmul, (left_panel, right_panel), destination)
+                destination = direct if direct is not None and tile == inner and direct.dtype == dtype else self.temporary(shape, dtype)
+            if dtype.kind in 'iub':
+                _integral_contraction(self.program, left_panel, right_panel, destination)
+            else:
+                _bind_operation(self.program, matmul, (left_panel, right_panel), destination)
             parts.append(destination)
         while len(parts) > 2:
             reduced = []
@@ -1691,8 +1726,8 @@ class _ExpressionRegions:
                 if index + 1 == len(parts):
                     reduced.append(parts[index])
                 else:
-                    destination = self.temporary(shape)
-                    _bind_operation(self.program, add, parts[index:index + 2], destination)
+                    destination = self.temporary(shape, dtype)
+                    self.publish(parts[index:index + 2], destination)
                     reduced.append(destination)
             parts = reduced
         self.cache[key] = tuple(parts)
@@ -1744,12 +1779,24 @@ class _ExpressionRegions:
 
     # design/algorithm-sources.md#shared-contraction-lowering
     def publish(self, parts, target):
+        dtype = parts[0].dtype
+        if dtype.kind in 'iub':
+            if len(parts) == 1 and parts[0] is target:
+                return
+            terms = arguments(len(parts))
+            value = terms[0] if len(parts) == 1 else _contraction_merge(*terms, dtype)
+            _ExpressionKernel((value,)).bind(self.program, parts, (target,), self.coordinate)
+            return
         if len(parts) == 2:
             destination = target if target.dtype == np.dtype('float32') else self.temporary(target.shape)
             _bind_operation(self.program, add, parts, destination)
             parts = (destination,)
         if parts[0] is not target:
-            _bind_operation(self.program, affine(), parts, target)
+            if target.dtype.kind in 'iub':
+                symbol, = arguments(1)
+                _ExpressionKernel((symbol,)).bind(self.program, parts, (target,), self.coordinate)
+            else:
+                _bind_operation(self.program, affine(), parts, target)
 
     # design/algorithm-sources.md#shared-associative-reductions
     def emit(self, value, origin, shape, target, external=False, reduce=False):
@@ -1760,7 +1807,7 @@ class _ExpressionRegions:
             if key not in replacements:
                 terms = tuple(_Expression('input', value=len(inputs) + index) for index in range(len(refs)))
                 inputs.extend(refs)
-                replacements[key] = terms[0] if len(terms) == 1 else terms[0] + terms[1]
+                replacements[key] = terms[0] if len(terms) == 1 else _contraction_merge(*terms, refs[0].dtype)
             return replacements[key]
 
         # design/algorithm-sources.md#shared-contraction-lowering
