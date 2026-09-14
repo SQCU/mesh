@@ -127,6 +127,13 @@ def main():
             in_specs=(BlockSpec(None),) * 3, out_specs=BlockSpec((1, 3), lambda i: (i, 0)),
             out_shape=ShapeDtypeStruct((3, 3), np.float32), peer=0)(*nested_inputs)
         nested_results = tuple(program.export(nested[i, 0]) for i in range(3))
+        norm_input = program.tensor((3, 6), (1, 2), dtype=dtype)
+        norm_gamma = np.ones((1, 6), dtype=dtype)
+        norm_output = rmsnorm(program, norm_input, weight(norm_gamma), tile_rows=1) if args.rank == 0 else program.tensor((3, 6), (1, 2), dtype=dtype)
+        norm_results = {coordinate: program.export(ref) for coordinate, ref in norm_output.blocks.items()}
+        norm_generations = tuple((values, reference_norm(values, norm_gamma)) for values in
+            ((np.arange(1, 19, dtype=np.float32).reshape(3, 6) / 16 + generation / 8).astype(dtype)
+             for generation in range(2)))
         nested_generations = []
         for generation in range(2):
             values = tuple(((np.arange(np.prod(tensor.shape), dtype=np.float32).reshape(tensor.shape)
@@ -310,6 +317,19 @@ def main():
             if not running:
                 raise InterruptedError('Gold observation interrupted')
 
+        # design/algorithm-sources.md#streaming-overlap-measurement
+        def wait_completed(indices, after):
+            deadline = time.monotonic_ns() + 60_000_000_000
+            while running:
+                completed_functions = tuple(index for index in indices
+                    if program.native.algebra_trace(program.handle, index).complete_ns >= after)
+                if completed_functions:
+                    return completed_functions
+                if time.monotonic_ns() > deadline:
+                    raise TimeoutError('No numerical consumer completed from the published partial operands')
+                time.sleep(0.0001)
+            raise InterruptedError('Partial consumer observation interrupted')
+
         warm_started = time.monotonic_ns()
         warm = invocations[0]
         publish(warm, range(1, rows // tile))
@@ -425,17 +445,7 @@ def main():
                     (nested_inputs[2], (0, 0), values[2][:2])):
                 with program.write(tensor[coordinate]) as target:
                     target[...] = value
-            deadline = time.monotonic_ns() + 60_000_000_000
-            while running:
-                consumer_completed = tuple(index for index in nested_consumers
-                    if program.native.algebra_trace(program.handle, index).complete_ns >= started)
-                if consumer_completed:
-                    break
-                if time.monotonic_ns() > deadline:
-                    raise TimeoutError('Nested contraction did not consume an independently produced hidden panel')
-                time.sleep(0.0001)
-            if not running:
-                raise InterruptedError('Nested contraction observation interrupted')
+            consumer_completed = wait_completed(nested_consumers, started)
             if any(result.ready for result in nested_results) or any(
                     not nested_inputs[1][0, i].writable for i in (1, 2)):
                 raise ArithmeticError('Nested contraction crossed a withheld hidden-panel boundary')
@@ -459,6 +469,53 @@ def main():
             for i, result in enumerate(nested_results):
                 if not np.allclose(result.array, expected[i:i+1], atol=3e-4, rtol=3e-4):
                     raise ArithmeticError('Nested contraction numerical mismatch')
+                result.consume()
+        norm_trace = program.trace
+        norm_source_rows = set()
+        for j in (0, 1):
+            ref = norm_input[1, j]
+            region = program.native.tensor_rows(ref.view.tensor, ref.view.extent)
+            norm_source_rows.update(range(region.first, region.first + region.count))
+        norm_final_rows = set()
+        for result in norm_results.values():
+            ref = result.ref
+            region = program.native.tensor_rows(ref.view.tensor, ref.view.extent)
+            norm_final_rows.update(range(region.first, region.first + region.count))
+        norm_partial_rows = {row for entry in norm_trace
+            if any(row in norm_source_rows for region in entry['inputs'] for row in range(region['first'], region['first'] + region['count']))
+            for region in entry['outputs'] for row in range(region['first'], region['first'] + region['count'])
+            if row not in norm_final_rows}
+        norm_consumers = tuple(index for index, entry in enumerate(norm_trace)
+            if any(row in norm_partial_rows for region in entry['inputs'] for row in range(region['first'], region['first'] + region['count'])))
+        if not norm_consumers:
+            raise ArithmeticError('Normalization has no independently consumable feature partials')
+        for generation, (values, expected) in enumerate(norm_generations):
+            wait_for(tuple(norm_input.blocks.values()), 'writable')
+            started = time.monotonic_ns()
+            for j in (0, 1):
+                with program.write(norm_input[1, j]) as target:
+                    target[...] = values[1:2, 2*j:2*j+2]
+            consumed = wait_completed(norm_consumers, started)
+            if any(result.ready for result in norm_results.values()) or not norm_input[1, 2].writable:
+                raise ArithmeticError('Normalization crossed an unpublished feature boundary')
+            print(json.dumps(dict(event='reduction_partial', generation=generation,
+                consumer_functions=consumed, partial_rows=sorted(norm_partial_rows), withheld_feature_panel=2)), flush=True)
+            with program.write(norm_input[1, 2]) as target:
+                target[...] = values[1:2, 4:6]
+            wait_for(tuple(norm_results[1, j] for j in range(3)))
+            if any(result.ready for (i, j), result in norm_results.items() if i != 1):
+                raise ArithmeticError('Normalization consumed an unpublished row')
+            print(json.dumps(dict(event='reduction_row', generation=generation,
+                withheld_input_rows=[0, 2], output=[norm_results[1, j].array.tolist() for j in range(3)])), flush=True)
+            for i in (0, 2):
+                for j in range(3):
+                    with program.write(norm_input[i, j]) as target:
+                        target[...] = values[i:i+1, 2*j:2*j+2]
+            wait_for(tuple(norm_results.values()))
+            for (i, j), result in norm_results.items():
+                if not np.allclose(result.array, expected[i:i+1, 2*j:2*j+2],
+                        atol=3e-3 if dtype == np.float16 else 3e-4, rtol=3e-3 if dtype == np.float16 else 3e-4):
+                    raise ArithmeticError('Streamed normalization numerical mismatch')
                 result.consume()
         indexed_expected = np.stack((2 * table_data[2], np.ones(4, dtype=dtype)))
         if not indexed.ready or not np.array_equal(indexed.array, indexed_expected):
