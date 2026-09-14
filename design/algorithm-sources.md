@@ -299,10 +299,27 @@ in-place block permutations. The NumPy views here address the canonical Ref
 storage; this check neither allocates nor copies numerical operands. Native
 exact-coverage and page-overlap validation also remains in force. Source dependency slices are selected per destination publication page;
 no whole-tensor completion dependency or temporary operand allocation is added.
-Remote tensor repartitioning remains separate unfinished work.
+Remote Tensor-to-Tensor copy takes the sorted union of source and destination
+backing boundaries in each axis. An existing contiguous `_span` contributes no
+interior boundaries, regardless of its logical block shape. Each resulting
+rectangle lies within both backing regions; setup passes the original views to
+the canonical copy binding. Equal logical block shapes are no longer required.
 
-The remaining direct-transfer constraint is a dense view aligned to its configured
-publication/transport blocks. Arbitrary strided or sub-block transfers are not
+For row-major rectangles with gaps between rows, native setup decomposes the
+assignment into corresponding contiguous rows. Column-major rectangles analogously
+use columns. Recursion terminates at a single row/column; message identities and
+source/destination page indices are then assigned by the existing binding path.
+Destination spans must be disjoint: setup rejects broadcast or overlapping
+row/column destinations before decomposition, while repeated source spans can
+serve separate destinations. Every participant enumerates the same sorted
+intersections and spans. No payload
+copy, staging allocation, or runtime layout selection is introduced. Only spans
+that satisfy the existing publication and transport alignment are direct transfers;
+sub-block pieces and opposite memory orientations still need further lowering.
+
+The remaining direct-transfer constraint is a dense span aligned to its configured
+publication/transport blocks. Matching-orientation strided rectangles can contain
+multiple such spans; arbitrary element strides and sub-block transfers are not
 claimed here. Native header and ctypes signatures change together; running bridge
 ABI is unaffected. Verification consists of source review and native/Python
 compilation, without numerical execution.

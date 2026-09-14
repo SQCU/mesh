@@ -1382,6 +1382,24 @@ int mesh_algebra_copy(struct mesh_algebra *handle,struct mesh_view source,uint32
     struct mesh_copy_region region={.source=source};
     return mesh_algebra_materialize(handle,&region,1,destination);
   }
+  if(source.rows>1 && source.column_stride==1 && destination.column_stride==1 &&
+     (source.row_stride!=source.columns || destination.row_stride!=destination.columns)) {
+    if(destination.row_stride<destination.columns)return EINVAL;
+    for(size_t row=0;row<source.rows;row++) {
+      int error=mesh_algebra_copy(handle,mesh_view_slice(source,row,0,1,source.columns),sender,
+        mesh_view_slice(destination,row,0,1,destination.columns),receiver,queue);if(error)return error;
+    }
+    return 0;
+  }
+  if(source.columns>1 && source.row_stride==1 && destination.row_stride==1 &&
+     (source.column_stride!=source.rows || destination.column_stride!=destination.rows)) {
+    if(destination.column_stride<destination.rows)return EINVAL;
+    for(size_t column=0;column<source.columns;column++) {
+      int error=mesh_algebra_copy(handle,mesh_view_slice(source,0,column,source.rows,1),sender,
+        mesh_view_slice(destination,0,column,destination.rows,1),receiver,queue);if(error)return error;
+    }
+    return 0;
+  }
   struct mesh_row_map src,dst;
   int error=output_region(a,source,&src);if(error)return error;
   error=output_region(a,destination,&dst);if(error)return error;

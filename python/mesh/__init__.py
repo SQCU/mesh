@@ -332,10 +332,18 @@ class Program:
                     check(self.native.algebra_materialize(self.handle,
                         (CopyRegion * len(regions))(*regions), len(regions), target.view))
                 return
-            if src.blocks and src.block_shape != dst.block_shape:
-                raise ValueError('Remote transfers must share an indexed partition')
-            for coordinate in src.blocks:
-                self.copy(src[coordinate].on(sender), dst[coordinate].on(receiver), queue=queue)
+            cuts = []
+            for axis, size in enumerate(src.shape):
+                boundaries = {0, size}
+                for tensor in (src, dst):
+                    if getattr(tensor, '_span', None) is None:
+                        boundaries.update(range(0, size, tensor.block_shape[axis]))
+                cuts.append(sorted(boundaries))
+            for row, end_row in zip(cuts[0], cuts[0][1:]):
+                for column, end_column in zip(cuts[1], cuts[1][1:]):
+                    shape = end_row - row, end_column - column
+                    self.copy(src.region(row, column, *shape).on(sender),
+                              dst.region(row, column, *shape).on(receiver), queue=queue)
             return
         check(self.native.algebra_copy(self.handle,
             src.view, sender, dst.view, receiver, queue))
