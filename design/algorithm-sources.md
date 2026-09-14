@@ -2485,3 +2485,31 @@ construction and bindings remain setup work. `neighborhood_call` now uses this
 same form for its shared Q·K/G·V statistics instead of producing an E×D product
 operand. The earlier description of that product operand records the replaced
 implementation; scalar partials, selectors and their registered storage remain.
+
+## Column index vector domains
+
+The JAX authors' [Pallas Ref indexing design](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs)
+forms a matrix indexing domain by broadcasting row and column index vectors.
+`kernels.arange(N).T` implements the column vector without a coordinate tensor
+or transpose kernel. The existing index leaf now retains its axis alongside
+length, tile and offset; transpose flips that axis and a second transpose
+restores it. Expression keys already contain this immutable leaf metadata.
+
+Shared region layout and narrowing use the retained axis. Row-vector lengths
+determine column reduction widths; column-vector lengths must broadcast to the
+local output row count. Static indexing and scalar emission select the same
+row or column coordinate, while singleton leaves retain their scalar offset.
+Dynamic selectors inherit the output row count and expand their width only for
+row-vector domains. This permits independent output-feature and contraction-K
+vectors in an indexed product reduction without allocating either coordinate
+vector. Ragged reduction tiles keep their actual length and offset.
+
+In bounded indexed-add, column vectors must have length one or the full update
+row count; they lower to the original update ordinal, not its sorted segment
+position. Row vectors still require length one or feature width and lower to
+the retained panel feature coordinate. Both become ordinary scalar expressions
+before segment emission, preserving mask predicates and selector dependencies.
+The existing mapped-contraction and streamed-gather examples exercise matrix
+vector broadcasting, a tiled K reduction with a ragged tail, and selected-reader
+progress. Source compilation and diff checks precede operational validation of
+those existing examples.

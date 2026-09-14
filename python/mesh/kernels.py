@@ -172,6 +172,8 @@ class _Expression:
             return self.operands[0]
         if self.operation in ('literal', 'program_id'):
             return self
+        if self.operation == 'index_vector':
+            return _Expression('index_vector', value=(*self.value[:3], 1 - self.value[3]))
         if self.operation in ('row', 'column'):
             return _Expression('column' if self.operation == 'row' else 'row')
         if self.operation == 'dot':
@@ -241,7 +243,7 @@ def _static_value(node, inputs, rows, columns, coordinate):
     if node.operation == 'column':
         return columns
     if node.operation == 'index_vector':
-        return np.full(columns.shape, node.value[2], dtype=np.int64) if node.value[0] == 1 else columns + node.value[2]
+        return np.full(rows.shape, node.value[2], dtype=np.int64) if node.value[0] == 1 else (rows if node.value[3] == 0 else columns) + node.value[2]
     if node.operation == 'program_id':
         return np.full(rows.shape, coordinate[node.value], dtype=np.int64)
     if node.operation == 'literal':
@@ -311,7 +313,7 @@ def _specialize_accesses(expression, inputs, output, coordinate):
             elif node.operation == 'column':
                 value = output.shape[1]
             elif node.operation == 'index_vector':
-                value = node.value[0]
+                value = node.value[0] if node.value[3] == 1 else 1
             elif node.operation in ('row', 'sum'):
                 value = 1
             else:
@@ -424,7 +426,7 @@ def arange(length, *, tile=None):
     tile = length if tile is None else operator.index(tile)
     if length <= 0 or tile <= 0 or length > np.iinfo(np.int64).max:
         raise ValueError('Index vector length and tile must be positive within the int64 domain')
-    return _Expression('index_vector', value=(length, min(tile, length), 0))
+    return _Expression('index_vector', value=(length, min(tile, length), 0, 1))
 
 
 # design/algorithm-sources.md#dynamic-indexed-expression-lowering
@@ -517,7 +519,7 @@ class _ExpressionKernel:
                     nonlocal selector_width
                     if part.operation == 'input':
                         selector_width = max(selector_width, reads[part.value].shape[1])
-                    elif part.operation == 'index_vector':
+                    elif part.operation == 'index_vector' and part.value[3] == 1:
                         selector_width = max(selector_width, part.value[0])
                     for child in part.operands:
                         selector_shape(child)
@@ -587,7 +589,9 @@ class _ExpressionKernel:
             elif node.operation == 'column':
                 width = output.shape[1]
             elif node.operation == 'index_vector':
-                width = node.value[0]
+                if node.value[3] == 0 and node.value[0] not in (1, output.shape[0]):
+                    raise ValueError('Index vector rows must broadcast to the output')
+                width = node.value[0] if node.value[3] == 1 else 1
             elif node.operation == 'row':
                 width = 1
             elif node.operation == 'sum':
@@ -614,7 +618,7 @@ class _ExpressionKernel:
                 if part.operation == 'column':
                     return f'((long)({column}))' if metal else f'((int64_t)({column}))'
                 if part.operation == 'index_vector':
-                    return f'((int64_t)({0 if part.value[0] == 1 else column})+{part.value[2]}ll)'
+                    return f'((int64_t)({0 if part.value[0] == 1 else "r" if part.value[3] == 0 else column})+{part.value[2]}ll)'
                 if part.operation == 'sum':
                     return f'(({"long" if metal else "int64_t"}){names[part]})' if output.dtype.kind in 'ib' else names[part]
                 ref = inputs[part.value]
@@ -893,7 +897,7 @@ def _segment_expression(node, operands, column, direct):
     if node.operation == 'row':
         return row
     if node.operation == 'index_vector':
-        return _literal(node.value[2]) if node.value[0] == 1 else feature + node.value[2]
+        return _literal(node.value[2]) if node.value[0] == 1 else (row if node.value[3] == 0 else feature) + node.value[2]
     if node.operation == 'column':
         return feature
     if node.operation == 'input':
@@ -1066,8 +1070,8 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
         if node.operation in ('//', '%') and any(_expression_dtype(child, operands).kind not in 'iub' for child in node.operands):
             raise ValueError('Integer quotient and remainder require integral operands')
         if node.operation == 'index_vector':
-            if node.value[0] not in (1, features):
-                raise ValueError('Indexed update vectors must broadcast to the feature width')
+            if node.value[0] not in (1, size if node.value[3] == 0 else features):
+                raise ValueError('Indexed update vectors must broadcast to the update row and feature domain')
         elif node.operation == 'input':
             value_inputs.add(node.value)
         elif node.operation == 'load':
@@ -1304,7 +1308,9 @@ class _ExpressionRegions:
             shape = source.shape
             result = shape, (self.whole[node.value],) * 2, source.block_shape if self.whole[node.value] else shape
         elif node.operation == 'index_vector':
-            result = (1, node.value[0]), (False, False), (1, node.value[1])
+            shape = tuple(node.value[0] if axis == node.value[3] else 1 for axis in range(2))
+            steps = tuple(node.value[1] if axis == node.value[3] else 1 for axis in range(2))
+            result = shape, (False, False), steps
         elif node.operation in ('literal', 'program_id', 'row', 'column'):
             result = (1, 1), (False, False), (1, 1)
         elif node.operation == 'cast':
@@ -1514,7 +1520,8 @@ class _ExpressionRegions:
                 symbol = reference(('load_source', node.value), (self.sources[node.value],))
                 return _Expression('load', tuple(lower(child, accumulation) for child in node.operands), symbol.value)
             if node.operation == 'index_vector':
-                return node if external or node.value[0] == 1 else _Expression('index_vector', value=(shape[1], shape[1], node.value[2] + origin[1]))
+                axis = node.value[3]
+                return node if external or node.value[0] == 1 else _Expression('index_vector', value=(shape[axis], shape[axis], node.value[2] + origin[axis], axis))
             if node.operation in ('row', 'column') and not external:
                 axis = 0 if node.operation == 'row' else 1
                 return node + origin[axis]
