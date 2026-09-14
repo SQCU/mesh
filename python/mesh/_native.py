@@ -18,7 +18,7 @@ class Endpoint(C.Structure):
 
 
 class MetalDispatch(C.Structure):
-    _fields_ = [("name", C.c_char_p), ("grid", Z * 3), ("group", Z * 3), ("argument_offset", Z)]
+    _fields_ = [("name", C.c_char_p), ("grid", Z * 3), ("group", Z * 3), ("argument_buffer", Z), ("argument_offset", Z)]
 
 
 class MetalConstant(C.Structure):
@@ -54,8 +54,6 @@ class Native:
             'mesh_algebra_node': (U, [P]),
             'mesh_algebra_coreml': (C.c_int, [P, C.c_char_p, C.c_char_p, C.c_char_p]),
             'mesh_tensor_create': (P, [P, C.POINTER(Shape), Z, C.c_int]),
-            'mesh_tensor_alias': (P, [P, P]),
-            'mesh_tensor_adopt': (C.c_int, [P, P, P, P]),
             'mesh_tensor_view': (View, [P, U]),
             'mesh_tensor_data': (P, [P, U]),
             'mesh_view_slice': (View, [View, Z, Z, Z, Z]),
@@ -74,7 +72,6 @@ class Native:
             'mesh_algebra_copy': (C.c_int, [P, Endpoint, Endpoint, Z, C.c_uint16]),
             'mesh_algebra_export': (C.c_int, [P, P, U, C.POINTER(Z)]),
             'mesh_algebra_realize': (C.c_int, [P]),
-            'mesh_algebra_scan': (None, [P]),
             'mesh_algebra_available': (C.c_int, [P, Z]),
             'mesh_algebra_consume': (None, [P, Z]),
             'mesh_algebra_report': (Report, [P]),

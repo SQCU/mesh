@@ -10,7 +10,7 @@ enum mesh_scalar { MESH_F16, MESH_F32, MESH_I32, MESH_U32, MESH_I64, MESH_U64, M
 enum mesh_algebra_op { MESH_AFFINE, MESH_ADD, MESH_MULTIPLY, MESH_TANH, MESH_EXP, MESH_SUM, MESH_CONTRACT, MESH_RSQRT, MESH_SWISH };
 typedef void (*mesh_completion)(void *context,int64_t error);
 typedef void (*mesh_submission)(void *binding,mesh_completion complete,void *context);
-struct mesh_metal_dispatch { const char *name; size_t grid[3],group[3],argument_offset; };
+struct mesh_metal_dispatch { const char *name; size_t grid[3],group[3],argument_buffer,argument_offset; };
 struct mesh_metal_constant { const void *bytes; size_t length; };
 struct mesh_algebra;
 struct mesh_tensor;
@@ -30,8 +30,6 @@ void mesh_algebra_destroy(struct mesh_algebra *);
 size_t mesh_algebra_publication_bytes(struct mesh_algebra *);
 uint32_t mesh_algebra_node(struct mesh_algebra *);
 struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *,const struct mesh_shape *,size_t extents,int transferable);
-struct mesh_tensor *mesh_tensor_alias(struct mesh_algebra *,struct mesh_tensor *);
-int mesh_tensor_adopt(struct mesh_algebra *,struct mesh_tensor *,struct mesh_algebra *,struct mesh_tensor *);
 struct mesh_view mesh_tensor_view(struct mesh_tensor *,uint32_t extent);
 struct mesh_view mesh_view_slice(struct mesh_view,size_t row,size_t column,size_t rows,size_t columns);
 struct mesh_view mesh_view_transpose(struct mesh_view);
@@ -50,7 +48,6 @@ int mesh_algebra_copy(struct mesh_algebra *,struct mesh_endpoint source,struct m
 int mesh_algebra_export(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent,size_t *index);
 int mesh_algebra_return(struct mesh_algebra *,struct mesh_tensor *,uint32_t extent);
 int mesh_algebra_realize(struct mesh_algebra *);
-void mesh_algebra_scan(struct mesh_algebra *);
 int mesh_algebra_available(struct mesh_algebra *,size_t output);
 void mesh_algebra_consume(struct mesh_algebra *,size_t output);
 struct mesh_algebra_report mesh_algebra_report(struct mesh_algebra *);

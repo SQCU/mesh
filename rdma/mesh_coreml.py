@@ -1,8 +1,10 @@
 import json
+import errno
 from collections import OrderedDict
 from pathlib import Path
 import shutil
 import sys
+import tempfile
 
 import coremltools as ct
 import numpy as np
@@ -42,9 +44,14 @@ def compile_part(request, destination):
     model = ct.convert(program, minimum_deployment_target=ct.target.macOS15,
                        compute_precision=ct.precision.FLOAT32)
     destination = Path(destination).with_suffix('.mlmodelc')
-    if destination.exists():
-        shutil.rmtree(destination)
-    shutil.copytree(model.get_compiled_model_path(), destination)
+    with tempfile.TemporaryDirectory(prefix=destination.name + '.', dir=destination.parent) as directory:
+        staged = Path(directory) / destination.name
+        shutil.copytree(model.get_compiled_model_path(), staged)
+        try:
+            staged.rename(destination)
+        except OSError as error:
+            if error.errno not in (errno.EEXIST, errno.ENOTEMPTY) or not destination.is_dir():
+                raise
 
 
 if __name__ == '__main__':

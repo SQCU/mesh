@@ -29,6 +29,7 @@ class MetalDispatch:
     name: str
     grid: tuple
     group: tuple = (256, 1, 1)
+    argument_buffer: int = 0
     argument_offset: int = 0
 
 

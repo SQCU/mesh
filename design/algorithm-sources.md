@@ -598,14 +598,94 @@ canonical result regions and consumes them after the caller returns. Scatter
 producer ownership predicate for host I/O; they add no numerical readiness state.
 Multiple Program owners share the process's attachment until the last closes.
 
-## Xonotic state ownership
+## Presence-driven execution
 
-The JAX authors' Ref ownership and buffer aliasing (Pallas documentation cited
-above) motivate `Program.alias` and `Program.adopt`. An alias allocates logical rows
-without another payload allocation. Its backing retains the physical storage.
-Adoption updates canonical row mappings and the prebound address cells/resources
-of custom Metal kernels; it does not copy parameter or optimizer payloads.
-`mesh_tensor_alias`, `mesh_tensor_adopt`, and `MeshExtent` destruction implement
-that ownership. Adoption requires the old alias readers to have completed.
-The application runtime wiring and full state-lifetime validation are still in
-progress; this checkpoint does not claim that persistent training is migrated.
+Dennis's dataflow firing rule and the JAX authors' Pallas region pipelines
+(cited above) motivate fixed reader adjacency established during realization.
+`mesh_execution_add` installs those relationships; `mesh_notify` marks changed
+page indices. `mesh_events` visits affected functions and `mesh_fire` submits
+eligible region computations. `submit_ready` executes CPU and Python callbacks
+on worker contexts, so a numerical callback does not occupy the presence
+handler. CPU float32 contractions use Dongarra et al.'s BLAS SGEMM on existing
+canonical buffer addresses; matrix bindings are constructed during setup.
+
+This implementation checkpoint uses a shared dirty bitmap and a nonblocking
+Unix datagram wake for the consumer handler. It has not yet established its
+operational wake-loss and teardown behavior through distributed execution.
+The cancellation completion wait is confined to destruction, after numerical
+owners have drained; it is not a tensor dependency.
+
+The obsolete Xonotic row-table binding and its generated native encoder are
+removed. Alias/adoption compatibility machinery is also removed. Canonical
+extent resources have one owner, including partially constructed allocations.
+Old application imports and scan callers still require removal or rewriting;
+this checkpoint is not the completed caller migration or gold demonstration.
+
+## Async index push contract
+
+The operator's September 13 clarification distinguishes publication ordering
+from computational barriers. Producers publish independently usable sections
+and submit page-table/target index pairs. A dedicated polling transport thread
+pushes those indices while producers and consumers continue numerical work.
+Queue entries describe canonical registered pages; they do not copy operands.
+Consumers depend on the sections used by their particular operation, not the
+arrival of unrelated sections or completion of the whole tensor.
+
+`mesh_transfer` retains local row/page, peer row/page, and the binding's explicit
+identity/offset. Setup exchanges receive descriptors, checks binding identity,
+and stores the peer's actual row/page alongside the local source. Differing
+local allocation addresses are therefore retained rather than reconstructed
+from send completion count. Payload arrays remain in their registered pages.
+
+`mesh_progress` visits ready descriptors, skipping unpublished entries rather
+than ending the queue walk. It batches these small index tuples into a separate
+RDMA SEND/RECV queue. `link_receive` uses received target row/page indices to post
+payload receives directly into canonical consumer buffers. Payload SENDs are
+posted immediately after their descriptor batch, with no software acknowledgement
+or receiver-ready message. The descriptor path transfers indices only, never
+operand data. This replaces the former static target inference in ledger D5.
+
+Apple TN3205 states that SEND processing uses receive credits. This permits
+posting payload SENDs before the peer has handled their index descriptors.
+A dedicated descriptor queue has preposted buffers and continues progressing
+independently of payload queues. One additional QP is used (at most nine total,
+within TN3205's limit of ten). Descriptor storage is allocated and registered
+with the arena during setup and included in its memory warning calculation.
+Each index message is one 4096-byte frame and holds up to 170 transfer tuples;
+partially occupied batches have this same frame cost. Payloads retain the
+configured transport block size. Queue counters track outstanding work requests
+and descriptor storage reuse, not the destination of a numerical result.
+
+`link_configure`, `link_index_offset`, `link_indices`, `link_post`, `link_receive`,
+`link_queue`, `link_error`, and `mesh_progress` implement this software push
+mechanism using the MPI asynchronous communication agent and NCCL proxy principle
+cited in ledger D2, and the two-sided SEND mechanics of TN3205. Reuse still
+requires a target's existing readers to finish before it can be overwritten;
+finite pipelines should allocate distinct buffers for independent value instances.
+
+The exact FFN → RMSNorm → summed learned embedding → FFN → RMSNorm distributed
+operational demonstration remains outstanding. Compilation alone does not
+establish overlap or a throughput improvement.
+
+The generator publishes a completed compiled-model directory using an atomic
+rename from a temporary sibling directory. An already published content-key
+artifact is reused, never removed while another Program may be loading it.
+Concurrent identical configurations can compile independently during setup and
+converge on the same completed artifact without introducing a numerical lock.
+
+
+## Explicit operand metadata
+
+NumPy's ndarray shape/stride representation and the Pallas `BlockSpec` programming
+model retain tensor identity and layout as data. The Xonotic numerical compiler
+keeps each kernel's graph operand IDs while generating its source, binds only
+those operands and its output, and carries actual canonical-buffer strides in
+the dispatch view. Logical flat indexing remains separate from physical strides;
+read/write address lowering applies the latter explicitly. Setup creates an
+ndarray view and assigns its symbolic shape without copying any operand payload.
+A shape that cannot be represented by strides fails at setup rather than silently
+copying the tensor. One registered buffer pointer names each bound region, so
+addressing never infers another operand pointer by dividing a byte offset.
+
+Sources: [NumPy ndarray strides](https://numpy.org/doc/stable/reference/generated/numpy.ndarray.strides.html),
+[Pallas BlockSpec](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html).
