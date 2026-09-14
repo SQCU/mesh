@@ -1331,7 +1331,7 @@ output grid. All forms reuse the same FP32 native panel/reduction bindings.
 FP32 region partials. The same Pallas numerical-expression and tiled-accumulation
 sources above motivate this composition. For example, with
 `z = kernels.dot(a, b, tile_k=128)`, both `kernels.expression(z*scale+bias)`
-and `kernels.expression(z/(1+(-z).exp()))` use the ordinary kernel-call interface.
+and `kernels.expression(z/(1+(0-z).exp()))` use the ordinary kernel-call interface.
 Additional numerical inputs retain their explicit BlockSpecs, including mapped
 broadcast regions and indexed loads through the existing expression lowering.
 
