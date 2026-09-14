@@ -1636,8 +1636,11 @@ The JAX authors' [Pallas grids and BlockSpecs](https://docs.jax.dev/en/latest/pa
 use setup-known index maps to identify a program's storage region. The shared
 expression compiler applies that specialization before creating dynamic indexed
 reader descriptors. `_specialize_accesses` collects every occurrence of a load,
-its complete select/mask path, and its actual output or enclosing reduction
+its complete vector access mask, and its actual output or enclosing reduction
 domain. A reduction uses its child's iteration width, not its one-column result.
+The configured function graph is fixed. Gathers consume vectors of indices;
+`select` and load masks describe numerical values and address validity. These
+operations introduce no data-dependent program branching or mesh scheduler.
 
 `_static_value` evaluates only setup expressions: literals, original program IDs,
 row/column indices, scalar casts and integer arithmetic. It never reads input
@@ -1650,10 +1653,10 @@ conversions, floating arithmetic predicates and unknown domains also remain on
 the existing path. Boolean literals retain the emitted C integer literal type.
 This evaluator runs only during binding; it is not a numerical invocation backend.
 
-A load specializes only when every reachable access path is setup-known. A
-constant address under a data-dependent branch therefore keeps its dynamic
-selector. Repeated occurrences union their proven block sets; one dynamic use
-prevents node-wide specialization. The compiler obtains only selected entries
+A load specializes when its address and validity vectors are setup-known over
+all of its uses. Numerically produced index or validity vectors retain the
+existing indexed dependency representation. Repeated occurrences union their
+proven block sets; an unresolved use prevents node-wide specialization. The compiler obtains only selected entries
 from the original Tensor's block dictionary, preserving their exact Ref offsets,
 ragged dimensions, transpose strides and dtypes. It does not scan the table's
 candidate blocks to discover the selected set.
@@ -1897,7 +1900,7 @@ unchanged, even when a graph reshape aliases a differently shaped Tensor.
 Take-along-axis realizes its non-axis broadcast shape at graph construction.
 Forward indexed expressions and the retained take VJP use zero coordinates for
 source singleton dimensions; index singleton dimensions likewise broadcast.
-Signed user indices normalize once. Concatenation retains branch-specific
+Signed user indices normalize once. Concatenation retains source-interval
 selected-reader dependencies, and transpose inverts its declared permutation.
 The replaced custom forward emitters are removed; general gather/take VJP
 scatter implementations remain pending migration, not alternate forward paths.
