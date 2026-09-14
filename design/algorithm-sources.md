@@ -823,6 +823,12 @@ is used to cross that remaining boundary.
 
 ## Region expression fusion
 
+The region-demand reduction path currently defeats the single-region fusion
+described here: it materializes every nested reduction before invoking the scalar
+emitter. The emitter supports this composition, but that does not establish that
+the public call reaches it intact. See the source diagnosis under
+[compulsory reduction boundaries](#compulsory-reduction-boundaries).
+
 Tillet et al., [Triton: an intermediate language and compiler for tiled neural
 network computations](https://doi.org/10.1145/3315508.3329973), and the published
 [Triton Layer Normalization implementation](https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html)
@@ -3476,3 +3482,56 @@ at this shape outperform Metal. A favorable individual layer or transport-overla
 interval does not establish positive complete-chain gain. Depth/shape/precision
 comparisons must retain the strongest validated local baseline and expose any
 loss of advantage under repetition; no universal positive speedup is presumed.
+
+### Compulsory reduction boundaries
+
+Source review at `66c6673`, September 14, 2026: the existing region fusion and
+presence-driven execution mechanisms above do not imply barrier-free lowering.
+`nn.rmsnorm` supplies one composed expression. `_ExpressionRegions.emit.lower`
+replaces every nested reduction with an input reference from `self.reduction`.
+That binder allocates a canonical statistic and registers its producer even when
+there is one contributing region and the statistic has no independent consumer.
+`_ExpressionKernel.source` already emits a local reduction accumulator followed
+by its pointwise consumer in one CPU or Metal function; the region lowering
+removes the nested expression before it reaches that emitter.
+
+The root cause is treating an expression operation boundary as a compulsory
+publication boundary. Commit `70b6511d` introduced this unconditional substitution
+while extending streamed row statistics. `_lower_region_expressions` binds each
+output request as it visits it; it does not first retain the complete consumer
+demands needed to distinguish an internal statistic from an independently
+observable one. Subsequent reduction plans and bound-plan reporting retained this
+decision. Reporting the resulting functions does not repair their partition.
+
+The proximate execution chain is statistic execution, `complete_part`,
+`mesh_complete`, `mesh_publish`, `mesh_notify`, socket-driven `mesh_events`,
+`mesh_fire`, and `submit_ready`'s asynchronous worker dispatch. Publication and
+input retirement generate notices; the serial presence handler discovers ready
+consumers, which are then enqueued on the global worker queue. This creates a
+completion-dependent scheduling round trip for an internal value. Neither a
+literal blocking wait in the expression nor a whole-tensor barrier is necessary
+for that cost to exist. Repeating the composition repeats these boundaries.
+Function dispatch profiles begin at `submit_ready`, after readiness discovery;
+they omit the preceding notification/discovery delay. Source establishes the
+extra work, not its fraction of end-to-end latency.
+
+The required correction is setup-time retention of reduction domains, accumulator
+types and consumer demands, followed by legal composition through the existing
+emitter. Internal single-region statistics need no separate publication. Partial
+statistics with independent consumers or remote readers must still publish;
+fusion must not make a ready producer depend on an unrelated missing operand.
+For multi-region reductions, retain independent partial production and eliminate
+unnecessary internal boundaries where the same dependency proof permits it.
+This is a lowering obligation, not new user syntax or an invocation-time guard.
+
+Explicit synchronization is a separate audit: `mesh_algebra_destroy` waits for
+executions during teardown; reader release/unbind can synchronously enter the
+presence queue. The ordinary `mesh_complete` input-retirement/output-publication
+path above does not call those release/unbind wrappers. Those waits therefore
+must not be cited as the cause of this particular statistic-to-epilogue round
+trip. Removing all worker dispatch by executing numerical functions on the
+serial presence queue would obstruct other ready regions and is not the fix.
+
+This diagnosis corrects the earlier inference that absence of a blocking wait
+proved adequate composition. No performance fix or recovered distributed speedup
+is claimed by this documentation change.
