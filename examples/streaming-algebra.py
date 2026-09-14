@@ -427,9 +427,9 @@ def main():
                     target[...] = value
             deadline = time.monotonic_ns() + 60_000_000_000
             while running:
-                completed = tuple(index for index in nested_consumers
+                consumer_completed = tuple(index for index in nested_consumers
                     if program.native.algebra_trace(program.handle, index).complete_ns >= started)
-                if completed:
+                if consumer_completed:
                     break
                 if time.monotonic_ns() > deadline:
                     raise TimeoutError('Nested contraction did not consume an independently produced hidden panel')
@@ -440,7 +440,7 @@ def main():
                     not nested_inputs[1][0, i].writable for i in (1, 2)):
                 raise ArithmeticError('Nested contraction crossed a withheld hidden-panel boundary')
             print(json.dumps(dict(event='nested_dot_partial', generation=generation,
-                consumer_functions=completed, withheld_hidden_panels=[1, 2],
+                consumer_functions=consumer_completed, withheld_hidden_panels=[1, 2],
                 projection_rows=dict(first=projection_rows.first, count=projection_rows.count))), flush=True)
             for i in (1, 2):
                 with program.write(nested_inputs[1][0, i]) as target:
