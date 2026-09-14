@@ -84,7 +84,7 @@ def main():
             program.copy(value.on(sender), received.on(receiver), queue=0)
             return received
 
-        for run in range(args.runs):
+        for run in range(args.runs + 1):
             data = tuple(rng.standard_normal((rows, width), dtype=np.float32) / 8 for _ in range(2))
             inputs = tuple(program.tensor(value.shape, (tile, args.tile_k)) for value in data)
             a = ffn(program, inputs, first_u, first_d, tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns,
@@ -113,57 +113,74 @@ def main():
             if args.trace:
                 Path(args.trace).write_text(json.dumps(dict(compute=program.trace, transfers=program.transfer_trace), indent=2) + '\n')
             return
-        first_times, complete_times, errors = [], [], []
-        for run, (data, inputs, probes) in enumerate(invocations):
-            started = time.monotonic_ns()
+        # design/algorithm-sources.md#streaming-overlap-measurement
+        def publish(invocation, sections):
+            data, inputs, _ = invocation
             for tensor, value in zip(inputs, data):
                 for (section, panel), ref in tensor.blocks.items():
-                    if section == 0:
+                    if section not in sections:
                         continue
                     with program.write(ref) as target:
                         r, c = section * tensor.block_shape[0], panel * tensor.block_shape[1]
                         target[...] = value[r:r + ref.shape[0], c:c + ref.shape[1]]
-            results = probes['rmsnorm2']
-            seen = {}
-            while running and not results[1, 0].ready:
-                for name, stage in probes.items():
-                    if name not in seen and stage[1, 0].ready:
-                        seen[name] = (time.monotonic_ns() - started) / 1e6
-                if time.monotonic_ns() - started > 60_000_000_000:
-                    raise TimeoutError(f'Independent section stalled: {program.report}')
-                time.sleep(0.0001)
-            if not running:
-                return
-            first_ms = (time.monotonic_ns() - started) / 1e6
-            if results[0, 0].ready:
-                raise ArithmeticError('An unpublished input section produced an output')
-            for tensor, value in zip(inputs, data):
-                for (section, panel), ref in tensor.blocks.items():
-                    if section != 0:
-                        continue
-                    with program.write(ref) as target:
-                        c = panel * tensor.block_shape[1]
-                        target[...] = value[:ref.shape[0], c:c + ref.shape[1]]
-            while running and not all(result.ready for result in results.values()):
-                if time.monotonic_ns() - started > 60_000_000_000:
+
+        # design/algorithm-sources.md#streaming-overlap-measurement
+        def wait_for(results):
+            deadline = time.monotonic_ns() + 60_000_000_000
+            while running and not all(result.ready for result in results):
+                if time.monotonic_ns() > deadline:
                     raise TimeoutError(f'Final sections stalled: {program.report}')
                 time.sleep(0.0001)
             if not running:
-                return
-            complete_ms = (time.monotonic_ns() - started) / 1e6
+                raise InterruptedError('Gold observation interrupted')
+
+        warm_started = time.monotonic_ns()
+        warm = invocations[0]
+        publish(warm, range(1, rows // tile))
+        warm_results = warm[2]['rmsnorm2']
+        wait_for((warm_results[1, 0],))
+        if any(result.ready for coordinate, result in warm_results.items() if coordinate[0] == 0):
+            raise ArithmeticError('An unpublished input section produced an output')
+        publish(warm, (0,))
+        wait_for(tuple(warm_results.values()))
+        print(json.dumps(dict(event='warmup', elapsed_ms=(time.monotonic_ns() - warm_started) / 1e6)), flush=True)
+
+        batch_started = time.monotonic_ns()
+        for run, invocation in enumerate(invocations[1:], 1):
+            publish(invocation, range(1 if run == 1 else 0, rows // tile))
+        delayed = invocations[1][2]['rmsnorm2']
+        wait_for((delayed[1, 0],))
+        first_ms = (time.monotonic_ns() - batch_started) / 1e6
+        if any(result.ready for coordinate, result in delayed.items() if coordinate[0] == 0):
+            raise ArithmeticError('An unpublished input section produced an output')
+        publish(invocations[1], (0,))
+        completed = {}
+        deadline = time.monotonic_ns() + 60_000_000_000
+        while running and len(completed) < args.runs:
+            for run, (_, _, probes) in enumerate(invocations[1:], 1):
+                if run not in completed and all(result.ready for result in probes['rmsnorm2'].values()):
+                    completed[run] = (time.monotonic_ns() - batch_started) / 1e6
+            if time.monotonic_ns() > deadline:
+                raise TimeoutError(f'Batch stalled: {program.report}')
+            if len(completed) < args.runs:
+                time.sleep(0.0001)
+        if not running:
+            return
+        batch_ms = (time.monotonic_ns() - batch_started) / 1e6
+        errors = []
+        for run, (data, _, probes) in enumerate(invocations):
             expected = reference_norm(reference_ffn(data, first_up, first_down), gamma)
             expected += sum(table[index[:, 0]] for table, index in zip(tables, ids))
             expected = reference_norm(reference_ffn((expected,), second_up, second_down), gamma)
             error = 0.0
-            for (row, column), result in results.items():
+            for (row, column), result in probes['rmsnorm2'].items():
                 r, c = row * tile, column * args.tile_columns
                 part = expected[r:r + result.ref.shape[0], c:c + result.ref.shape[1]]
                 error = max(error, float(np.max(np.abs(result.array - part))))
                 if not np.allclose(result.array, part, atol=3e-4, rtol=3e-4):
                     raise ArithmeticError(f'Gold chain numerical mismatch: {error}')
-            first_times.append(first_ms); complete_times.append(complete_ms); errors.append(error)
-            print(json.dumps(dict(event='gold', run=run, first_section_ms=first_ms, complete_ms=complete_ms,
-                observed_stage_ms=seen, withheld_section=0, progressed_section=1,
+            errors.append(error)
+            print(json.dumps(dict(event='gold', run=run, complete_ms=completed.get(run),
                 max_absolute_error=error, transport_queue=0, backend=args.backend, local=args.local)), flush=True)
             for stage in probes.values():
                 for result in stage.values():
@@ -171,8 +188,11 @@ def main():
         if args.trace:
             Path(args.trace).write_text(json.dumps(dict(compute=program.trace, transfers=program.transfer_trace), indent=2) + '\n')
         report = program.report
-        print(json.dumps(dict(event='summary', first_section_ms=summary(first_times), complete_ms=summary(complete_times),
+        print(json.dumps(dict(event='summary', invocations=args.runs, batch_ms=batch_ms,
+            invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,
+            completion_ms=summary(tuple(completed.values())), withheld_invocation=1, withheld_section=0,
             max_absolute_error=max(errors), runtime={name: getattr(report, name) for name, _ in report._fields_})), flush=True)
+
 
 
 if __name__ == '__main__':
