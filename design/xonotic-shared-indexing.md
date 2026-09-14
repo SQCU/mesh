@@ -198,3 +198,26 @@ The planner declares its `y` output explicitly. The existing Xonotic gold graph
 declares its joined output; a derivative case declares its gradient roots.
 Python source compilation validates the modified compiler and planner. Runtime
 reuse evidence remains the responsibility of the existing gold workflow.
+
+
+## Active-domain and derivative operational follow-up
+
+Installed numerical source `dc4c80a` passes the existing CPU and Metal local
+streaming-algebra workflow with the derivative and explicit output roots. Both
+occurrences publish gradient rows 0, 1 and 3 before the final cotangent chunk
+arrives; row 2 completes afterward. Duplicate and normalized negative indices
+match the independently prepared reference. No primal operand is allocated or
+supplied. Reuse succeeds after consuming the first outputs, including the index
+reader lifetimes that previously would have included an unused forward graph.
+These observations supersede the pending-runtime statements above for this
+specific row-gather transpose and forward gather/concatenate scope.
+
+The bounded large-directory follow-up uses example `e0ecb91` with 4097 updates,
+2049-row input chunks and 17 scatter destinations on both CPU and Metal. Its
+Xonotic observations again include both derivative occurrences. The shared scatter
+case includes an entirely empty occurrence whose outputs complete before update
+and factor inputs are supplied, followed by a populated occurrence using the same
+storage. See [active segment evidence](active-segments.md) for raw archives and
+the native disposition contract. These remain local indexed operations; neither
+paired gold nor remote fanout establishes remote indexed-derivative coverage.
+Matched throughput evidence and the remaining derivative forms are still open.
