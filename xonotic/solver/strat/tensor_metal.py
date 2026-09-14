@@ -397,6 +397,63 @@ def neighborhood_call(program, value, operation, values, attributes, shapes, loc
                 output_shape, block, value.dtype)
 
 
+# ../../../design/algorithm-sources.md#xonotic-batched-contractions
+def matrix_batch(tensor, shape, batch):
+    import math
+    from mesh import Tensor
+    if tensor.shape == shape and batch == 0:
+        return tensor
+    rows, columns = shape
+    block = (math.gcd(rows, tensor.block_shape[0]) if tensor.grid[0] > 1 else rows,
+             min(columns, tensor.block_shape[1]))
+    result = object.__new__(Tensor)
+    result.program, result.dtype, result.handle = tensor.program, tensor.dtype, tensor.handle
+    result.shape, result.block_shape = shape, block
+    result.grid = tuple((size + tile - 1) // tile for size, tile in zip(shape, block))
+    result.blocks = {(i, j): tensor.region(batch * rows + i * block[0], j * block[1],
+                                         min(block[0], rows - i * block[0]), min(block[1], columns - j * block[1]))
+                     for i in range(result.grid[0]) for j in range(result.grid[1])}
+    return result
+
+
+# ../../../design/algorithm-sources.md#xonotic-batched-contractions
+def batched_matmul(program, left, right, left_shape, right_shape, attributes, *,
+                   tile_rows, tile_k, tile_columns, peer, output_dtype):
+    import itertools
+    import math
+    from mesh import Tensor, nn
+    batch_shape = broadcast_shape(left_shape[:-2], right_shape[:-2])
+    sources = (matrix_view(left, (math.prod(left_shape[:-1]), left_shape[-1])),
+               matrix_view(right, (math.prod(right_shape[:-1]), right_shape[-1])))
+    shapes, transposes = (left_shape, right_shape), (attributes['transpose_left'], attributes['transpose_right'])
+    caches, batches = ({}, {}), []
+    for coordinate in itertools.product(*(range(size) for size in batch_shape)):
+        operands = []
+        for source, shape, transpose, cache in zip(sources, shapes, transposes, caches):
+            ordinal = 0
+            for size, index in zip(shape[:-2], coordinate[len(batch_shape) - len(shape) + 2:]):
+                ordinal = ordinal * size + (0 if size == 1 else index)
+            if ordinal not in cache:
+                view = matrix_batch(source, shape[-2:], ordinal)
+                cache[ordinal] = view.T if transpose else view
+            operands.append(cache[ordinal])
+        row_tile = math.gcd(tile_rows, operands[0].shape[0]) if math.prod(batch_shape) > 1 else tile_rows
+        batches.append(nn.linear(program, *operands, tile_rows=row_tile, tile_k=tile_k,
+                                 tile_columns=tile_columns, peer=peer, output_dtype=output_dtype))
+    first = batches[0]
+    if len(batches) == 1:
+        return first
+    if any(batch.shape != first.shape or batch.block_shape != first.block_shape for batch in batches):
+        raise ValueError('Batched contractions require a common realized output layout')
+    result = object.__new__(Tensor)
+    result.program, result.dtype, result.handle = first.program, first.dtype, first.handle
+    result.shape = (len(batches) * first.shape[0], first.shape[1])
+    result.block_shape, result.grid = first.block_shape, (len(batches) * first.grid[0], first.grid[1])
+    result.blocks = {(batch * first.grid[0] + i, j): ref
+                     for batch, tensor in enumerate(batches) for (i, j), ref in tensor.blocks.items()}
+    return result
+
+
 # ../../../design/algorithm-sources.md#xonotic-partitioned-reshape
 def matrix_view(tensor, shape):
     import math
@@ -686,6 +743,34 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 out_shape=ShapeDtypeStruct(base.shape, value.dtype), peer=peer)(base, destinations, updates)
             tensors[value.index] = result.T if len(shape) == 1 else result
             continue
+        # ../../../design/algorithm-sources.md#xonotic-ranked-indexed-reductions
+        if operation in ('reduce_sum', 'reduce_mean') and len(shapes[values[0].index]) > 2 and attributes['axes']:
+            operand_shape = shapes[values[0].index]
+            axes = tuple(sorted(set(attributes['axes'])))
+            retained = tuple(axis for axis in range(len(operand_shape)) if axis not in axes)
+            matrix_shape = (math.prod(shape[:-1]), shape[-1]) if shape else (1, 1)
+            width = min(tile_columns, matrix_shape[1])
+            output_index = kernels.program_id(0) * matrix_shape[1] + kernels.program_id(1) * width + kernels.arange(width).T
+            count = math.prod(operand_shape[axis] for axis in axes)
+            reduction_index = kernels.arange(count, tile=tile_k)
+            coordinates = [None] * len(operand_shape)
+            for domain, ordinal in ((retained, output_index), (axes, reduction_index)):
+                for position, axis in enumerate(domain):
+                    coordinates[axis] = (ordinal // math.prod(operand_shape[i] for i in domain[position + 1:])) % operand_shape[axis]
+            argument, = kernels.arguments(1)
+            term = argument.reshape(operand_shape).at(*coordinates)
+            if np.dtype(values[0].dtype).kind in 'iu':
+                term = term & 0xffffffffffffffff
+            result = term.sum().T
+            if operation == 'reduce_mean' and np.dtype(values[0].dtype).kind == 'f':
+                result = result / count
+            reduced = program.kernel_call(kernels.expression(result),
+                grid=(matrix_shape[0], (matrix_shape[1] + width - 1) // width),
+                in_specs=(BlockSpec(None),), out_specs=BlockSpec((1, width), lambda i, j: (i, j)),
+                out_shape=ShapeDtypeStruct(matrix_shape, value.dtype), peer=peer)(local[values[0].index])
+            tensors[value.index] = nn._pointwise(program, kernels.expression(argument / count),
+                (reduced,), 1, peer=peer, output_dtype=value.dtype) if operation == 'reduce_mean' and np.dtype(values[0].dtype).kind != 'f' else reduced
+            continue
         # ../../../design/algorithm-sources.md#streamed-row-reductions-in-the-shared-region-owner
         if operation in ('reduce_sum', 'reduce_mean') and 1 <= len(shapes[values[0].index]) <= 2 and attributes['axes']:
             operand_shape = shapes[values[0].index]
@@ -748,12 +833,10 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         matrix_shapes = {v.index: shapes[v.index] if len(shapes[v.index]) == 2 else (1, math.prod(shapes[v.index])) for v in values}
         shaped = all(local[v.index].shape == matrix_shapes[v.index] or
             (1 in matrix_shapes[v.index] and local[v.index].shape[::-1] == matrix_shapes[v.index]) for v in values)
-        if numerical and operation == 'matmul' and len(shape) == 2 and all(len(shapes[v.index]) == 2 and local[v.index].shape == shapes[v.index] for v in values):
-            left, right = (local[v.index] for v in values)
-            left = left.T if attributes['transpose_left'] else left
-            right = right.T if attributes['transpose_right'] else right
-            tensors[value.index] = nn.linear(program, left, right, tile_rows=tile_rows,
-                tile_k=tile_k, tile_columns=tile_columns, peer=peer)
+        if numerical and operation == 'matmul' and all(len(shapes[v.index]) >= 2 for v in values):
+            tensors[value.index] = batched_matmul(program, *(local[v.index] for v in values),
+                *(shapes[v.index] for v in values), attributes, tile_rows=tile_rows,
+                tile_k=tile_k, tile_columns=tile_columns, peer=peer, output_dtype=value.dtype)
             continue
         if operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or'):
             args = kernels.arguments(len(values))

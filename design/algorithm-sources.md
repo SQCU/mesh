@@ -2556,3 +2556,58 @@ Canonical selector/partial allocation and launch costs remain visible setup
 costs. Existing streaming-algebra examples cover selected experts, all VJPs,
 empty experts, delayed operands, downstream consumers and repeated invocations.
 Source compilation and diff checks precede operational validation there.
+
+
+## Xonotic ranked indexed reductions
+
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+uses broadcast index vectors to express multidimensional accesses. Xonotic sum
+and mean over logical rank greater than two retain their reduced and unreduced
+axis lists at setup. A column vector names output elements; a tiled row vector
+names reduction contributions. Mixed-radix division and remainder map those two
+ordinals to the original logical axes, including singleton axes retained by
+keepdims. Shared indexed loads and sum lower these expressions against the
+original registered references. No coordinate tensor or dense operand copy is
+allocated. Different outputs have only their selected contribution dependencies;
+a broadcast weight gradient necessarily includes all batches contributing to that
+weight, without imposing that dependency on other gradients or forward outputs.
+Floating reductions retain shared FP32 partials; means divide the completed sum.
+Integer reductions retain the existing modular sum and final division behavior.
+
+## Xonotic batched contractions
+
+The JAX authors' [matmul contract](https://docs.jax.dev/en/latest/_autosummary/jax.numpy.matmul.html)
+broadcasts leading batch dimensions while contracting the trailing matrix axes.
+Xonotic `batched_matmul` realizes that mapping at setup and invokes the existing
+`nn.linear` / shared dot lowering for every batch. Both transpose attributes are
+applied to metadata views before that call. Real rank-two and higher-rank inputs,
+including graph reshape aliases and broadcast batches, use this one numerical
+contraction owner rather than the custom batched emitter.
+
+`matrix_batch` slices a batch's logical matrix from the canonical flattened
+row layout. Its regular row step divides both the matrix row count and original
+backing row boundaries; column steps retain backing partitions. Each resulting
+Ref preserves its original tensor, extent, offset and strides. Broadcast batch
+coordinates reuse those metadata views, not copied numerical operands.
+Contraction K tiles, mixed input precision, FP32 partial accumulation and backend
+selection remain in the existing shared dot implementation.
+
+When several output batches are composed into one canonical Tensor view, the
+configured row tile divides the matrix row count. Every batch therefore begins
+on a regular output block boundary; no ragged end block is misinterpreted as a
+full-width step into the next batch. The output table retains each separately
+allocated result Ref with its actual native tensor identity. Its convenience
+handle names the first backing allocation, while all numerical, transfer and
+publication bindings consume the retained Ref table. No output data is copied
+or republished merely to concatenate the batch metadata. A single output batch
+keeps the ordinary linear output layout.
+
+Existing autodiff matmuls use the same lowering, and singleton batch gradient
+accumulation remains an ordinary graph reduction. Batch independence cannot
+exceed original input publication granularity, but distinct batch/feature/K
+regions add no whole-operand readiness requirement. Source compilation and diff
+checks cover this increment; the existing batched-transpose workflow checks
+broadcast inputs, both derivatives, delayed independent batches, ragged tails
+and repeated invocations through its existing operational observer. This change
+retains the optimized native local contraction rather than substituting scalar
+indexed products for matrix multiplication.
