@@ -16,7 +16,6 @@ struct mesh_indexed_read {
 struct mesh_row_function { struct mesh_row_map *input,*output; uint32_t inputs,outputs,rows; struct mesh_indexed_read *indexed; };
 /* ledger D5: `binding` orders blocks within `queue`; both participants declare the same identities and queues */
 struct mesh_row_binding { uint32_t first,count,binding,plane; uint16_t queue,receive; uint64_t bytes; };
-struct mesh_row_metadata { uint64_t stamp,when; uint32_t function,index,peer; int64_t code; uint32_t domain,reserved; };
 static inline struct mesh_row_range mesh_range(struct mesh_row_map m,uint32_t index){ return m.ranges?m.ranges[index]:(struct mesh_row_range){m.first+index*m.stride,m.count}; }
 static inline uint64_t mesh_length(const struct mesh_ctx *c){ return c->M->length; }
 static inline uint64_t mesh_data_offset(const struct mesh_ctx *c){ return c->M->data_off; }
@@ -34,7 +33,6 @@ int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 void *mesh_view_create(struct mesh_ctx *,uint32_t first,size_t count);
 int mesh_view_destroy(void *address,size_t length);
-struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *,size_t);
 
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);

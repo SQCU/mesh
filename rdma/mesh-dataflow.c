@@ -105,13 +105,6 @@ void *mesh_view_create(struct mesh_ctx *c,uint32_t row,size_t count){
 /* design/algorithm-sources.md#registered-memory-views */
 int mesh_view_destroy(void *address,size_t length){ return munmap(address,length)?errno:0; }
 
-/* ledger D12: work-completion status is read out of band */
-struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *c,size_t index){
-  const struct mesh_port_info *port=&c->M->port;
-  return (struct mesh_row_metadata){.when=port->when,.function=UINT32_MAX,.index=(uint32_t)index,
-    .peer=port->peer,.code=port->code,.domain=port->domain};
-}
-
 /* design/algorithm-sources.md#nonblocking-table-ownership */
 static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t begin,uint32_t end,int own,int hot){
   for(uint32_t first=(begin+align-1)/align*align;first<=end && count<=end-first;){
