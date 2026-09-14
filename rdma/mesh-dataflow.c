@@ -497,7 +497,13 @@ size_t mesh_issue(struct mesh_ctx *c,const struct mesh_row_function *f,uint32_t 
   return selected;
 }
 
-/* ledger D7: publication marks produced send blocks for the bridge and returns */
+/* design/algorithm-sources.md#in-operation-publication */
+void mesh_publish_partial(struct mesh_ctx *c,uint32_t first,uint32_t count){
+  mesh_bits_set(c->M,MESH_PRESENT,first,count);
+  mesh_notify(c->M,first,count);
+}
+
+/* design/algorithm-sources.md#in-operation-publication */
 static void mesh_publish(struct hdr *m,uint32_t first,uint32_t count){
   mesh_bits_set(m,MESH_PRESENT,first,count);
   mesh_bits_clear(m,MESH_PRODUCING,first,count);
@@ -557,6 +563,7 @@ static void mesh_reader_event(struct mesh_ctx *c,uint32_t row){
   mesh_read(c->M,row,1,group->plane);
 }
 
+/* design/algorithm-sources.md#in-operation-publication */
 void mesh_complete(struct mesh_ctx *c,const struct mesh_row_function *f,const uint32_t *indices,size_t count){
   for(size_t n=0;n<count;n++){
     uint32_t i=indices[n];

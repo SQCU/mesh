@@ -13,5 +13,5 @@ clean:
 	rm -f $(BINS)
 .PHONY: all clean
 
-libmesh-algebra.dylib: mesh-algebra.m mesh-algebra.h mesh-dataflow.h libmesh.dylib
+libmesh-algebra.dylib: mesh-algebra.m mesh-algebra.h mesh-kernel.h mesh-dataflow.h libmesh.dylib
 	clang -O2 -fobjc-arc -dynamiclib -Wl,-install_name,@rpath/libmesh-algebra.dylib -Wl,-rpath,@loader_path -o $@ mesh-algebra.m -L. -lmesh -framework Accelerate -framework Foundation -framework Metal -framework MetalPerformanceShaders -framework CoreML

@@ -7,6 +7,7 @@
 #import <CoreML/CoreML.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #include "mesh-algebra.h"
+#include "mesh-kernel.h"
 #include <limits.h>
 #include <math.h>
 #include <dlfcn.h>
@@ -61,7 +62,7 @@ struct geometry { struct geometry_view a,b,o; float alpha,beta; uint64_t first,c
 
 enum mesh_execution_kind { MESH_EXECUTION_CPU, MESH_EXECUTION_METAL, MESH_EXECUTION_COREML };
 
-typedef void (*mesh_cpu_kernel)(const uintptr_t *);
+typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publication *);
 @interface MeshCode : NSObject
 @property NSString *source,*digest;
 @end
@@ -88,6 +89,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *);
   struct mesh_row_function function;
   struct geometry geometry;
   struct mesh_algebra_plan plan;
+  struct mesh_kernel_publication publication;
   uint32_t occurrence;
   enum mesh_execution_kind executionKind;
   uint32_t backend;
@@ -101,6 +103,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *);
 @property MeshMetalCode *metalCode;
 @property NSString *specialization;
 @property NSData *cpuArguments;
+@property NSData *publicationSections;
 @property NSMutableData *dependencies,*results;
 @property NSData *inputViews;
 @property NSMutableIndexSet *indexedInputs;
@@ -853,13 +856,43 @@ int mesh_algebra_metal(struct mesh_algebra *handle,const char *text,const struct
 }
 /* design/algorithm-sources.md#region-expression-fusion */
 static void submit_cpu(MeshFunction *f) {
-  f.cpuCode.kernel(f.cpuArguments.bytes);complete_part(f,0,0);
+  f.cpuCode.kernel(f.cpuArguments.bytes,&f->publication);complete_part(f,0,0);
+}
+/* design/algorithm-sources.md#in-operation-publication */
+static void publish_cpu(void *context,uint32_t first,uint32_t count) {
+  mesh_publish_partial(context,first,count);
+}
+/* design/algorithm-sources.md#in-operation-publication */
+static void bind_publication(MeshFunction *f,struct mesh_view output) {
+  struct mesh_extent *extent=&output.tensor->extents[output.extent];
+  struct mesh_row_map map=f->function.output[0];
+  size_t unit=f.owner->context->M->pgsz/scalar_bytes(extent->shape.scalar);
+  size_t quantum=(size_t)extent->quantum*unit,elements=output.rows*output.columns;
+  NSMutableData *sections=[NSMutableData new];uint64_t previous=0;
+  for(uint32_t page=0;page<map.count;page+=extent->quantum){
+    size_t begin=(size_t)page*unit,end=MIN(begin+quantum,elements);
+    uint64_t row_end=output.column_stride==1?(end+output.columns-1)/output.columns:
+      (begin/output.rows==(end-1)/output.rows?(end-1)%output.rows+1:output.rows);
+    row_end=MAX(previous,row_end);
+    size_t count=sections.length/sizeof(struct mesh_kernel_section);
+    if(count && row_end==previous){
+      struct mesh_kernel_section *parts=sections.mutableBytes;parts[count-1].count+=extent->quantum;
+    }else{
+      struct mesh_kernel_section part={.row_begin=previous,.row_end=row_end,.first=map.first+page,.count=extent->quantum};
+      [sections appendBytes:&part length:sizeof part];
+    }
+    previous=row_end;
+  }
+  f.publicationSections=sections;
+  f->publication=(struct mesh_kernel_publication){.sections=sections.bytes,
+    .count=sections.length/sizeof(struct mesh_kernel_section),.context=f.owner->context,.publish=publish_cpu};
 }
 /* design/algorithm-sources.md#region-expression-fusion */
 int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output) {
   MeshAlgebra *a=owner(handle);
   if(a.realized || !cpu_source || !metal_source || !valid_view(a,output))return EINVAL;
-  MeshCPUCode *library=(MeshCPUCode *)source_code(a,cpu_source,YES);
+  NSString *cpu_text=[@MESH_KERNEL_SOURCE stringByAppendingString:@(cpu_source)];
+  MeshCPUCode *library=(MeshCPUCode *)source_code(a,cpu_text.UTF8String,YES);
   struct mesh_metal_dispatch dispatch={.name="mesh_expression",.grid={output.rows,1,1},.group={32,1,1}};
   if(!a.cpu)return bind_metal(handle,metal_source,&dispatch,1,NULL,0,inputs,input_count,&output,1,library);
   MeshMetalCode *metal=(MeshMetalCode *)source_code(a,metal_source,NO);NSString *source=library.source;
@@ -891,6 +924,7 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
   int status=bind_function(handle,inputs,input_count,&output,1,submit_cpu);
   if(status)return status;
   MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_CPU;f->backend=MESH_BACKEND_CPU_COMPILED;
+  bind_publication(f,output);
   specialize_function(f,library,metal,source_options(),&dispatch,1,NULL,0,inputs,input_count,&output,1);f.cpuArguments=addresses;
   return 0;
 }

@@ -826,11 +826,11 @@ is used to cross that remaining boundary.
 
 ## Region expression fusion
 
-The region-demand reduction path currently defeats the single-region fusion
-described here: it materializes every nested reduction before invoking the scalar
-emitter. The emitter supports this composition, but that does not establish that
-the public call reaches it intact. See the source diagnosis under
-[compulsory reduction boundaries](#compulsory-reduction-boundaries).
+The region-demand reduction path formerly defeated this single-region fusion by
+materializing every nested reduction before invoking the scalar emitter. The
+[in-operation publication change](#in-operation-publication) retains eligible
+internal reductions in the composed expression. The original source diagnosis
+is under [compulsory reduction boundaries](#compulsory-reduction-boundaries).
 
 Tillet et al., [Triton: an intermediate language and compiler for tiled neural
 network computations](https://doi.org/10.1145/3315508.3329973), and the published
@@ -3542,3 +3542,65 @@ serial presence queue would obstruct other ready regions and is not the fix.
 This diagnosis corrects the earlier inference that absence of a blocking wait
 proved adequate composition. No performance fix or recovered distributed speedup
 is claimed by this documentation change.
+
+## In-operation publication
+
+The operator's [verbatim concurrent publication contract](SPECIFICATION.md#25-asynchronous-concurrent-publication-current-mesh-session)
+requires exposing usable partial results while the producing computation
+continues. Dennis's dataflow firing and Papadopoulos and Culler's presence-bit
+mechanism, cited above, supply the separation of data availability from execution
+ownership. The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html)
+supplies composed numerical expressions and explicit references. These are
+mechanism sources; the operator's contract governs mesh's nonblocking API.
+
+`mesh_publish_partial` ORs PRESENT and notifies the existing compute/send owners.
+It does not clear PRODUCING, retire an input reader, or wait for a reader or
+transport completion. Consumers and `mesh_send_postable` use PRESENT and their
+own read stamps, so they can act while the producer still owns its storage.
+The existing send adjacency retains exact local/peer page indices; numerical
+publication does not reconstruct destinations or walk a predetermined send order.
+Only final `mesh_complete` releases producer ownership and retires the invocation's
+ordinary, indexed and route input uses. Its repeated PRESENT OR does not clear
+already-consumed READ stamps. Keeping PRODUCING prevents the same producer from
+being reissued while its later arithmetic is still running.
+
+`mesh-kernel.h` is the single native/generated-C publication ABI definition.
+`bind_publication` retains a setup-owned vector of exact numerical row intervals
+and canonical output first/count pairs. It derives physical coverage from the
+validated output view and its actual publication quantum. Consecutive quanta
+completed by the same row iteration share a descriptor. A transposed view's
+physical pages may require all logical rows; the descriptor records that coverage
+instead of falsely publishing unwritten bytes. No operand copy, numerical-time
+allocation, destination inference or second scheduler is introduced.
+
+Both generated CPU source owners, `_ExpressionKernel.source` and
+`_compiled_region`, use the same section-loop emission. They execute the retained
+row interval, call the library-owned publication primitive with its exact row
+map, then continue the next interval in the same invocation. `submit_cpu` calls
+final completion after the generated function returns. Native source assembly
+prepends the canonical ABI declaration before source caching, hashing and
+compilation, so the actual compiled declaration is part of source identity.
+Source review of every `_compiled_region` body establishes either row-local
+output writes or a single-row scratch computation; none writes an earlier output
+row after moving to the next row.
+
+Reduction lowering first retains specialized output demands and their actual
+consumer associations. For a private single-region pointwise statistic, it can
+keep the reduction inside its consumer expression when the consumer adds no
+nonconstant canonical-page dependency. The reduced domain and accumulator dtype
+are retained explicitly, including signed sum interpretation; final output dtype
+does not silently change the reduction. This removes the temporary statistic and
+its compulsory completion/dispatch round trip on that path for CPU and Metal.
+Shared statistics, multi-region partials and more general expression domains
+continue through the existing region lowering. Preserving those current producers
+is an implementation scope statement, not a rule that publication requires a
+separate launch. Extending composition must retain their independent availability.
+
+The common partial-publication primitive is backend-independent. Wiring generated
+CPU row loops does not satisfy the remaining Metal/MPS/Core ML in-operation
+emission obligation, nor remove enclosing consumer dependencies automatically.
+Those backend owners must expose their completed regions with established memory
+visibility while preserving concurrent work. Existing command-completion paths
+are not exempt from that requirement. No runtime or performance measurements
+are used for this change, following the operator's latest instruction; validation
+is source review and compilation.

@@ -5,6 +5,8 @@ import numpy as np
 _REDUCTIONS = ('sum', 'max', 'min', 'any', 'all')
 _REAL_FUNCTIONS = ('exp', 'rsqrt', 'tanh', 'asinh', 'expm1', 'log1p', 'log', 'sqrt', 'power', 'logaddexp', 'random_normal')
 _POINTWISE_FUNCTIONS = _REAL_FUNCTIONS + ('isfinite', 'abs', 'floor', 'floor_divide', 'philox')
+_POINTWISE_OPERATIONS = ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'cast', '//', '%',
+    'maximum', 'minimum', *_POINTWISE_FUNCTIONS)
 
 
 @dataclass(frozen=True)
@@ -223,7 +225,7 @@ class _Expression:
             return _Expression('domain', (self.operands[0].T,), tuple(value[::-1] for value in self.value))
         if self.operation == 'dot':
             return _Expression('dot', tuple(child.T for child in self.operands[::-1]), self.value)
-        if self.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'cast', '//', '%', 'maximum', 'minimum') or self.operation in _POINTWISE_FUNCTIONS:
+        if self.operation in _POINTWISE_OPERATIONS:
             return _Expression(self.operation, tuple(child.T for child in self.operands), self.value)
         return _Expression('transpose', (self,))
 
@@ -766,7 +768,7 @@ class _ExpressionKernel:
                 if part.operation == 'index_vector':
                     return f'((int64_t)({0 if part.value[0] == 1 else "r" if part.value[3] == 0 else column})+{part.value[2]}ll)'
                 if part.operation in _REDUCTIONS:
-                    return f'(({"long" if metal else "int64_t"}){names[part]})' if part.operation == 'sum' and output.dtype.kind in 'ib' else names[part]
+                    return f'(({"long" if metal else "int64_t"}){names[part]})' if part.operation == 'sum' and _reduction_dtype(part, inputs, output.dtype).kind in 'ib' else names[part]
                 ref = inputs[part.value]
                 if part.operation == 'load':
                     return _indexed_load_expression(ref, pointers[part.value][0], layouts.get(part.value), args, metal)
@@ -802,7 +804,7 @@ class _ExpressionKernel:
                     lines.append(f'{"constant ulong" if metal else "static const uint64_t"} {name}{index}[]={{'+','.join(map(str, values))+'};')
                     strides.append(f'{name}{index}[CANDIDATE]')
             layouts[index] = scalar, strides
-        lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], uint r [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {' if metal else 'void mesh_expression(const uintptr_t *buffers) {')
+        lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], uint r [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {' if metal else 'void mesh_expression(const uintptr_t *buffers, const struct mesh_kernel_publication *publication) {')
         candidates = {pointer for index, ref in enumerate(inputs) if hasattr(ref, 'blocks') or isinstance(ref, _StaticTable) for pointer in pointers[index]}
         for index, ref in enumerate((*physical, output)):
             if index in candidates:
@@ -813,7 +815,7 @@ class _ExpressionKernel:
             qualifier = ('device ' if metal else '') + ('const ' if index < len(physical) else '')
             lines.append(f'{qualifier}{scalar} *p{index}=({qualifier}{scalar} *)buffers[{index}];')
         if not metal:
-            lines.append(f'for(uint64_t r=0;r<{output.shape[0]};r++) {{')
+            lines.append(_CPU_PUBLICATION_LOOP)
         for node in reductions:
             name, child = names[node], node.operands[0]
             dtype = _reduction_dtype(node, inputs, output.dtype)
@@ -846,8 +848,13 @@ class _ExpressionKernel:
                 operation = 'max' if node.operation in ('max', 'any') else 'min' if node.operation in ('min', 'all') else 'sum'
                 lines.append(f'{name}=simd_{operation}({name});')
         lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(physical)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
-        lines.append('}' if metal else '}}')
+        lines.append('}' if metal else _CPU_PUBLICATION_END)
         return '\n'.join(lines)
+
+
+# design/algorithm-sources.md#in-operation-publication
+_CPU_PUBLICATION_LOOP = 'for(uint64_t section=0;section<publication->count;section++) { const struct mesh_kernel_section part=publication->sections[section]; for(uint64_t r=part.row_begin;r<part.row_end;r++) {'
+_CPU_PUBLICATION_END = '} publication->publish(publication->context,part.first,part.count); }}'
 
 
 # design/algorithm-sources.md#bounded-indexed-segment-loads
@@ -965,6 +972,8 @@ def _expression_dtype(node, inputs):
     if node.operation == 'literal':
         return np.dtype('int32' if isinstance(node.value, bool) else 'float32' if isinstance(node.value, float) else 'uint64' if node.value > 2**63-1 else 'int64')
     if node.operation in _REDUCTIONS:
+        if node.value is not None:
+            return np.dtype(node.value)
         child = _expression_dtype(node.operands[0], inputs)
         return np.dtype('bool') if node.operation in ('any', 'all') else child if node.operation != 'sum' else np.dtype('float32' if child.kind == 'f' else 'uint64' if child.kind == 'u' else 'int64')
     if node.operation == 'load':
@@ -980,6 +989,8 @@ def _expression_dtype(node, inputs):
 
 # design/algorithm-sources.md#shared-associative-reductions
 def _reduction_dtype(node, inputs, output):
+    if node.value is not None:
+        return np.dtype(node.value)
     if node.operation != 'sum':
         return _expression_dtype(node, inputs)
     return np.dtype(np.int64 if output.kind in 'ib' else np.uint64 if output.kind == 'u' else np.float32)
@@ -1135,7 +1146,7 @@ def _compiled_region(program, inputs, output, body, dynamic_first=None):
         lines.append('#define PREFIX(x) simd_prefix_exclusive_sum(x)\n#define SUM(x) simd_sum(x)\n#define BARRIER threadgroup_barrier(mem_flags::mem_device)' if metal else
                      '#define PREFIX(x) 0u\n#define SUM(x) (x)\n#define BARRIER ((void)0)')
         lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], uint r [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {' if metal else
-                     f'void mesh_expression(const uintptr_t *buffers) {{ const uint32_t lane=0; for(uint64_t r=0;r<{output.shape[0]};r++) {{')
+                     'void mesh_expression(const uintptr_t *buffers, const struct mesh_kernel_publication *publication) { const uint32_t lane=0; ' + _CPU_PUBLICATION_LOOP)
         lines.append(f'const uint32_t lanes={32 if metal else 1};')
         for index, ref in enumerate((*inputs, output)):
             if dynamic_first is not None and dynamic_first <= index < len(inputs):
@@ -1144,7 +1155,7 @@ def _compiled_region(program, inputs, output, body, dynamic_first=None):
             dtype = scalar[ref.dtype.kind + str(ref.dtype.itemsize)]
             lines.append(f'{qualifier}{dtype} *p{index}=({qualifier}{dtype} *)buffers[{index}];')
         lines.append(statements)
-        lines.append('}' if metal else '}}')
+        lines.append('}' if metal else _CPU_PUBLICATION_END)
         sources.append('\n'.join(lines))
     function = program.native.algebra_trace_count(program.handle)
     check(program.native.algebra_source(program.handle, *(source.encode() for source in sources),
@@ -1790,7 +1801,7 @@ def _expression_layout(node, sources, whole, layouts):
     elif node.operation in _REDUCTIONS:
         child = layout(node.operands[0])
         result = (child[0][0], 1), (child[1][0], False), (child[2][0], 1)
-    elif node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'load', '//', '%', 'maximum', 'minimum') or node.operation in _POINTWISE_FUNCTIONS:
+    elif node.operation in _POINTWISE_OPERATIONS or node.operation == 'load':
         children = tuple(map(layout, node.operands))
         shape = tuple(next((child[0][axis] for child in children if child[0][axis] != 1), 1) for axis in range(2))
         if any(child[0][axis] not in (1, shape[axis]) for child in children for axis in range(2)):
@@ -1818,6 +1829,7 @@ class _ExpressionRegions:
         self.sources = tuple(spec.resolve(coordinate) for spec in specs)
         self.whole = tuple(spec.block_shape is None for spec in specs)
         self.layouts = {}
+        self.reduction_uses = {}
 
     # design/algorithm-sources.md#indexed-range-generation
     def layout(self, node):
@@ -2087,6 +2099,56 @@ class _ExpressionRegions:
             else:
                 _bind_operation(self.program, affine(), parts, target)
 
+    # design/algorithm-sources.md#in-operation-publication
+    def inline_reduction(self, node, expression, origin, shape, dtype, external):
+        import ctypes as C
+        from . import check
+        from ._native import View
+        layout = self.layout(node.operands[0])
+        row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
+        rows = 1 if layout[0][0] == 1 else shape[0]
+        key = ('reduction', self.key(node, (row, 0), (rows, 1)), dtype.str)
+        if (self.reduction_uses.get(key) != 1 or key in self.cache or
+                layout[0][1] != shape[1] or layout[2][1] < layout[0][1] or rows != shape[0]):
+            return None
+
+        # design/algorithm-sources.md#in-operation-publication
+        def references(value, refs, where_origin, mapped):
+            if value == node:
+                return references(node.operands[0], refs, (row, 0), False)
+            if value.operation not in ('input', 'literal', 'domain', *_POINTWISE_OPERATIONS):
+                return False
+            if value.operation == 'input':
+                identity = value.value, where_origin, mapped
+                if identity not in refs:
+                    source = self.sources[value.value]
+                    where = tuple(0 if source.shape[axis] == 1 else where_origin[axis] for axis in range(2))
+                    extent = tuple(1 if source.shape[axis] == 1 else shape[axis] for axis in range(2))
+                    try:
+                        refs[identity] = source if mapped and not self.whole[value.value] else self.panel(value, where, extent)
+                    except ValueError:
+                        return False
+            return all(references(child, refs, where_origin, mapped) for child in value.operands)
+
+        # design/algorithm-sources.md#in-operation-publication
+        def pages(refs):
+            result = set()
+            for ref in refs.values():
+                if (ref.view.tensor, ref.view.extent) in self.program._constant_extents:
+                    continue
+                count = C.c_size_t()
+                check(self.program.native.algebra_view_pages(self.program.handle, ref.view, None, 0, C.byref(count)))
+                views = (View * count.value)()
+                check(self.program.native.algebra_view_pages(self.program.handle, ref.view, views, count.value, C.byref(count)))
+                result.update((view.tensor, view.extent, view.offset) for view in views)
+            return result
+
+        reduced, consumed = {}, {}
+        if (not references(node.operands[0], reduced, (row, 0), False) or
+                not references(expression, consumed, origin, external) or not pages(consumed) <= pages(reduced)):
+            return None
+        return {identity[0]: ref for identity, ref in reduced.items()}
+
     # design/algorithm-sources.md#shared-associative-reductions
     def emit(self, value, origin, shape, target, external=False, reduce=False):
         inputs, replacements = [], {}
@@ -2113,6 +2175,19 @@ class _ExpressionRegions:
                 row = 0 if layout[0][0] == 1 or (external and not layout[1][0]) else origin[0]
                 rows = 1 if layout[0][0] == 1 else shape[0]
                 dtype = _reduction_dtype(node, self.sources, accumulation)
+                inline = self.inline_reduction(node, value, origin, shape, dtype, external)
+                if inline is not None:
+                    # design/algorithm-sources.md#in-operation-publication
+                    def substitute(part):
+                        if part.operation == 'input':
+                            return reference(('inline_reduction', node, part.value), (inline[part.value],))
+                        if part.operation == 'domain':
+                            return substitute(part.operands[0])
+                        return _Expression(part.operation, tuple(substitute(child) for child in part.operands), part.value)
+
+                    child = _Expression('domain', (substitute(node.operands[0]),),
+                        (shape, (False, False), shape))
+                    return _Expression(node.operation, (child,), dtype.str)
                 return reference(('reduction', node, row, rows, dtype.str), (self.reduction(node, row, rows, dtype)[0],))
             if node.operation == 'indexed_contract':
                 if accumulation.kind != 'f':
@@ -2551,7 +2626,7 @@ def _preserve_indexed_contractions(node, lowering):
 # design/algorithm-sources.md#shared-contraction-lowering
 def _lower_region_expressions(program, expressions, grid, input_specs, output_specs):
     import itertools
-    cache = {}
+    cache, requests, consumers = {}, [], {}
     for coordinate in itertools.product(*(range(length) for length in grid)):
         lowering = _ExpressionRegions(program, input_specs, coordinate, cache)
 
@@ -2571,26 +2646,45 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
                 value, target, origin, domain_shape = value.operands[0], target.T, origin[::-1], domain_shape[::-1]
             if value.operation == 'indexed_contract' and target.dtype.kind != 'f':
                 value = _resolve_logical(value.value[0], lowering.sources)
-            if value.operation == 'indexed_contract' and target.shape[1] == 1:
-                layout = lowering.layout(value)
-                row = origin[0] if layout[1][0] else 0
-                result = lowering.indexed_contraction_panel(value, (row, 0), target.shape, target)
-                lowering.publish((result,), target)
-            elif value.operation == 'dot':
-                layout = lowering.layout(value)
-                for axis in range(2):
-                    expected = domain_shape[axis] if layout[1][axis] else target.shape[axis]
-                    if layout[0][axis] != expected:
-                        raise ValueError('Contraction output shape differs from its operand domains')
-                where = tuple(origin[axis] if layout[1][axis] else 0 for axis in range(2))
-                lowering.publish(lowering.parts(value, where, target.shape, target), target)
-            elif value.operation in _REDUCTIONS and target.shape[1] == 1:
-                layout = lowering.layout(value)
-                row = origin[0] if layout[1][0] else 0
-                dtype = _reduction_dtype(value, lowering.sources, target.dtype)
-                result, identity = lowering.reduction(value, row, target.shape[0], dtype, target)
-                if result is not target:
-                    symbol, = arguments(1)
-                    _ExpressionKernel((symbol,)).bind(program, (result,), (target,), coordinate)
-            else:
-                lowering.emit(value, origin, target.shape, target, external=True)
+            requests.append((lowering, value, target, origin, domain_shape))
+
+            # design/algorithm-sources.md#in-operation-publication
+            def demand(node, accumulation):
+                if node.operation in _REDUCTIONS:
+                    layout = lowering.layout(node)
+                    row = 0 if layout[0][0] == 1 or not layout[1][0] else origin[0]
+                    rows = 1 if layout[0][0] == 1 else target.shape[0]
+                    dtype = _reduction_dtype(node, lowering.sources, accumulation)
+                    key = ('reduction', lowering.key(node, (row, 0), (rows, 1)), dtype.str)
+                    consumers.setdefault(key, set()).add(len(requests)-1)
+                for child in node.operands:
+                    demand(child, _expression_dtype(child, lowering.sources))
+
+            demand(value, target.dtype)
+    uses = {key: len(requests) for key, requests in consumers.items()}
+    for lowering, value, target, origin, domain_shape in requests:
+        lowering.reduction_uses = uses
+        coordinate = lowering.coordinate
+        if value.operation == 'indexed_contract' and target.shape[1] == 1:
+            layout = lowering.layout(value)
+            row = origin[0] if layout[1][0] else 0
+            result = lowering.indexed_contraction_panel(value, (row, 0), target.shape, target)
+            lowering.publish((result,), target)
+        elif value.operation == 'dot':
+            layout = lowering.layout(value)
+            for axis in range(2):
+                expected = domain_shape[axis] if layout[1][axis] else target.shape[axis]
+                if layout[0][axis] != expected:
+                    raise ValueError('Contraction output shape differs from its operand domains')
+            where = tuple(origin[axis] if layout[1][axis] else 0 for axis in range(2))
+            lowering.publish(lowering.parts(value, where, target.shape, target), target)
+        elif value.operation in _REDUCTIONS and target.shape[1] == 1:
+            layout = lowering.layout(value)
+            row = origin[0] if layout[1][0] else 0
+            dtype = _reduction_dtype(value, lowering.sources, target.dtype)
+            result, identity = lowering.reduction(value, row, target.shape[0], dtype, target)
+            if result is not target:
+                symbol, = arguments(1)
+                _ExpressionKernel((symbol,)).bind(program, (result,), (target,), coordinate)
+        else:
+            lowering.emit(value, origin, target.shape, target, external=True)
