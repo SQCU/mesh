@@ -1,91 +1,6 @@
-import hashlib
-import re
-import ctypes as c
 import numpy as np
 
 from .tensor import Dimension, broadcast_shape
-
-class View(c.Structure):
-    _fields_ = [('offset', c.c_uint64), ('size', c.c_uint64), ('shape', c.c_uint64 * 8),
-        ('stride', c.c_uint64 * 8), ('matrix_columns', c.c_uint64), ('block_rows', c.c_uint64), ('block_columns', c.c_uint64), ('grid_columns', c.c_uint64)] + [(name, c.c_uint32) for name in ('dtype', 'rank', 'first')]
-
-
-class Block(c.Structure):
-    _fields_ = [('row_stride', c.c_uint64), ('column_stride', c.c_uint64)]
-
-
-TYPES = {'float32': 'float', 'int32': 'int', 'uint32': 'uint', 'int64': 'long', 'uint64': 'ulong', 'bool': 'uchar'}
-PREFIX = r'''
-#include <metal_stdlib>
-using namespace metal;
-struct View {
-    ulong offset, size, shape[8], stride[8], matrix_columns, block_rows, block_columns, grid_columns;
-    uint dtype, rank, first;
-};
-struct Block { ulong row_stride, column_stride; };
-ulong coordinate(ulong index, device const View& view, uint axis) {
-    return index / view.stride[axis] % view.shape[axis];
-}
-// ../../../design/algorithm-sources.md#xonotic-block-indexed-lowering
- device uchar* page_address(device const ulong* regions, device const Block* blocks, device const View& view, ulong byte) {
-    ulong index=byte/view.dtype,row=index/view.matrix_columns,column=index%view.matrix_columns;
-    ulong block=view.first+row/view.block_rows*view.grid_columns+column/view.block_columns;
-    ulong offset=(row%view.block_rows)*blocks[block].row_stride+(column%view.block_columns)*blocks[block].column_stride;
-    return (device uchar*)regions[block]+offset*view.dtype+byte%view.dtype;
-}
-// ../../../design/algorithm-sources.md#xonotic-block-indexed-lowering
- template<typename T> T read_value(device const ulong* regions, device const Block* blocks, device const View& view, ulong index) {
-    return *(device const T*)page_address(regions, blocks, view, view.offset + index * sizeof(T));
-}
-// ../../../design/algorithm-sources.md#xonotic-block-indexed-lowering
- template<typename T> void write_value(device const ulong* regions, device const Block* blocks, device const View& view, ulong index, T value) {
-    *(device T*)page_address(regions, blocks, view, view.offset + index * sizeof(T)) = value;
-}
-'''
-ARGUMENTS = '''device const ulong* regions [[buffer(0)]], device const View* v [[buffer(1)]],
-    device const Block* blocks [[buffer(2)]],
-    uint3 position [[thread_position_in_grid]], constant uint* arguments [[buffer(3)]]'''
-
-
-def read(value, index='t'):
-    return f'read_value<{TYPES[value.dtype]}>(regions,blocks,v[{value.index}],{index})'
-
-
-def write(value, result, index='t'):
-    return f'write_value<{TYPES[value.dtype]}>(regions,blocks,v[{value.index}],{index},{TYPES[value.dtype]}({result}));'
-
-
-def kernel(node):
-    output, op, values, attrs, owner = node
-    index = output.index
-    name = f'mesh_tensor_{index}'
-    body = [f'ulong t=position.x; if(t>=v[{index}].size) return;']
-    if op in ('input', 'constant', 'reshape', 'stop_gradient'):
-        return None
-    elif op == 'argsort':
-        source, axis = values[0], attrs['axis']
-        body.append(f'ulong at=coordinate(t,v[{source.index}],{axis}), stride=v[{source.index}].stride[{axis}]; ulong base=t-at*stride;')
-        body.append(f'auto value={read(source)}; ulong rank=0; for(ulong i=0;i<v[{source.index}].shape[{axis}];++i) {{ auto other={read(source,"base+i*stride")}; rank+=(other<value || (other==value && i<at)); }}')
-        body.append(write(output, 'at', 'base+rank*stride'))
-    else:
-        raise ValueError(f'No retained ordering operation for {op}')
-    return {'name': name, 'source': f'kernel void {name}({ARGUMENTS}) {{\n' + '\n'.join(body) + '\n}\n',
-            'node': index, 'owner': owner,
-            'arguments': list(dict.fromkeys(value.index for value in (*values, output)))}
-
-
-# ../../../design/algorithm-sources.md#indexed-expression-lowering
-def source(nodes):
-    kernels = [value for node in nodes if (value := kernel(node)) is not None]
-    sources = {}
-    for item in kernels:
-        nodes = item['arguments']
-        text = re.sub(r'v\[(\d+)\]', lambda match: f'v[arguments[{nodes.index(int(match[1]))}]]', item['source'])
-        text = text.replace(item['name'], 'FUNCTION')
-        name = 'mesh_tensor_' + hashlib.sha256(text.encode()).hexdigest()[:16]
-        sources[name] = '// ../../../design/algorithm-sources.md#literal-row-functions\n' + text.replace('FUNCTION', name)
-        item.update(name=name, arguments=nodes)
-    return PREFIX + '\n'.join(sources.values()), kernels
 
 
 # ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
@@ -405,11 +320,10 @@ def row_gather_gradient(value, operation, values, attributes, shapes):
          shapes[values[-1].index] == (shapes[values[1].index][0], shapes[value.index][1])))
 
 
-# ../../../design/algorithm-sources.md#application-metal-kernels
+# ../../../design/algorithm-sources.md#xonotic-output-liveness
 def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                  tile_rows=64, tile_k=128, tile_columns=128):
     from mesh import BlockSpec, ShapeDtypeStruct, kernels, nn
-    from mesh.kernels import Metal, MetalDispatch
     import math
 
     shapes = {value.index: tuple(size.resolve(capacity) if isinstance(size, Dimension) else size for size in value.shape)
@@ -426,6 +340,16 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         value, operation, values, attributes, owner = node
         if value.index not in live or value.index in inputs:
             continue
+        # ../../../design/algorithm-sources.md#stable-indexed-ordering
+        if operation == 'argpartition':
+            width = shapes[values[0].index][attributes['axis']]
+            kth = attributes['kth'].resolve(capacity) if isinstance(attributes['kth'], Dimension) else int(attributes['kth'])
+            if not isinstance(kth, (int, np.integer)):
+                raise TypeError('Resolved partition position must be an integer')
+            if not -width <= kth < width:
+                raise ValueError('Partition position is outside the sorted axis')
+            attributes = dict(attributes, kth=kth + width if kth < 0 else kth)
+            node = value, operation, values, attributes, owner
         nodes.append(node)
         dependencies = numerical_operands(operation, values, attributes) if math.prod(shapes[value.index]) else ()
         live.update(operand.index for operand in dependencies)
@@ -507,6 +431,46 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 grid=tuple((size + tile - 1) // tile for size, tile in zip(storage_shape, block)),
                 in_specs=(BlockSpec(None),), out_specs=BlockSpec(block, lambda i, j: (i, j)),
                 out_shape=ShapeDtypeStruct(storage_shape, value.dtype), peer=peer)(local[values[0].index])
+            continue
+        # ../../../design/algorithm-sources.md#stable-indexed-ordering
+        if operation in ('argsort', 'argpartition'):
+            axis = attributes['axis']
+            operand = local[values[0].index]
+            argument, = kernels.arguments(1)
+            if len(shape) <= 2 or axis == len(shape) - 1:
+                matrix_shape = (math.prod(shape[:-1]), shape[-1])
+                operand = matrix_view(operand, matrix_shape)
+                sorted_axis = axis if len(shape) == 2 else 1
+                block = tuple(math.gcd(min(tile, size), operand.block_shape[i] if operand.grid[i] > 1 else 0)
+                              for i, (tile, size) in enumerate(zip((tile_rows, tile_columns), matrix_shape)))
+                tensors[value.index] = program.kernel_call(kernels.expression(argument.argsort(axis=sorted_axis)),
+                    grid=tuple((size + tile - 1) // tile for size, tile in zip(matrix_shape, block)),
+                    in_specs=(BlockSpec(None),), out_specs=BlockSpec(block, lambda i, j: (i, j)),
+                    out_shape=ShapeDtypeStruct(matrix_shape, value.dtype), peer=peer)(operand)
+            else:
+                width = shape[axis]
+                retained = tuple(i for i in range(len(shape)) if i != axis)
+                segments = math.prod(shape[i] for i in retained)
+                segment = kernels.program_id(0)
+                at = [None] * len(shape)
+                for position, i in enumerate(retained):
+                    at[i] = (segment // math.prod(shape[j] for j in retained[position + 1:])) % shape[i]
+                at[axis] = kernels.arange(width, tile=tile_columns)
+                key = argument.reshape(shape).at(*at).astype(values[0].dtype)
+                block = (1, min(tile_columns, width))
+                ordered = program.kernel_call(kernels.expression(key.argsort()),
+                    grid=(segments, (width + block[1] - 1) // block[1]), in_specs=(BlockSpec(None),),
+                    out_specs=BlockSpec(block, lambda i, j: (i, j)),
+                    out_shape=ShapeDtypeStruct((segments, width), value.dtype), peer=peer)(operand)
+                block = (min(tile_rows, storage_shape[0]), min(tile_columns, storage_shape[1]))
+                coordinates = logical_coordinates(kernels, shape, block)
+                segment = sum(coordinates[i] * math.prod(shape[j] for j in retained[position + 1:])
+                              for position, i in enumerate(retained))
+                result = argument.at(segment, coordinates[axis])
+                tensors[value.index] = program.kernel_call(kernels.expression(result),
+                    grid=tuple((size + tile - 1) // tile for size, tile in zip(storage_shape, block)),
+                    in_specs=(BlockSpec(None),), out_specs=BlockSpec(block, lambda i, j: (i, j)),
+                    out_shape=ShapeDtypeStruct(storage_shape, value.dtype), peer=peer)(ordered)
             continue
         if operation in ('expert_matmul', 'expert_input_vjp', 'expert_weight_vjp'):
             tensors[value.index] = expert_call(program, value, operation, values, shapes, local, peer, tile_k, tile_columns)
@@ -806,42 +770,5 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                     out_specs=BlockSpec(block, lambda i, j: (i, j)),
                     out_shape=ShapeDtypeStruct(matrix_shape, value.dtype), peer=peer)(*(local[v.index] for v in values))
             continue
-        resolved = tuple(type(operand)(operand.graph, operand.index, shapes[operand.index], operand.dtype) for operand in (value, *values))
-        text, operations = source(((resolved[0], operation, resolved[1:], attributes, owner),))
-        item = operations[0]
-        shape = shapes[value.index]
-        size = math.prod(shape)
-        storage_shape = (max(1, math.prod(shape[:-1])), max(1, shape[-1])) if shape else (1, 1)
-        bound = tuple(dict.fromkeys((*values, value)))
-        positions = {operand.index: i for i, operand in enumerate(bound)}
-        views, blocks, operands, specs = [], [], [], []
-        for operand in bound:
-            operand_shape = shapes[operand.index]
-            tensor = None if operand.index == value.index else local[operand.index]
-            matrix_shape = storage_shape if tensor is None else tensor.shape
-            block_shape = storage_shape if tensor is None else tensor.block_shape
-            grid_columns = 1 if tensor is None else tensor.grid[1]
-            view = View(size=math.prod(operand_shape), dtype=np.dtype(operand.dtype).itemsize,
-                rank=len(operand_shape), first=len(blocks), matrix_columns=matrix_shape[1],
-                block_rows=block_shape[0], block_columns=block_shape[1], grid_columns=grid_columns)
-            stride = 1
-            for axis in reversed(range(len(operand_shape))):
-                view.shape[axis], view.stride[axis] = operand_shape[axis], stride
-                stride *= operand_shape[axis]
-            if tensor is None:
-                blocks.append(Block(storage_shape[1], 1))
-            else:
-                for coordinate, ref in sorted(tensor.blocks.items()):
-                    blocks.append(Block(ref.view.row_stride, ref.view.column_stride))
-                    operands.append(tensor)
-                    specs.append(BlockSpec(tensor.block_shape, lambda i, coordinate=coordinate: coordinate))
-            views.append(view)
-        arguments = [positions[index] for index in item['arguments']]
-        dispatches = (MetalDispatch(item['name'], ((size + 255) // 256, 1, 1), (256, 1, 1), argument_buffer=3),)
-        kernel = Metal(text, tuple(dispatches), (bytes((View * len(views))(*views)),
-            bytes((Block * len(blocks))(*blocks)), bytes((c.c_uint32 * len(arguments))(*arguments))))
-        tensors[value.index] = program.kernel_call(kernel, grid=(1,), peer=peer,
-            in_specs=tuple(specs),
-            out_specs=BlockSpec(storage_shape, lambda i: (0, 0)),
-            out_shape=ShapeDtypeStruct(storage_shape, value.dtype))(*operands)
+        raise ValueError(f'No shared lowering for tensor operation {operation}')
     return tensors

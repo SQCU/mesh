@@ -448,9 +448,30 @@ def take_along_axis(value, indices, axis):
     return value.graph.node('take_along_axis', (value, indices), tuple(shape), value.dtype, axis=axis)
 
 
+# ../../../design/algorithm-sources.md#stable-indexed-ordering
+def ordering(value, operation, axis, kth=None):
+    if not isinstance(value, Tensor):
+        return getattr(mlx, operation)(value, kth, axis=axis) if operation == 'argpartition' else mlx.argsort(value, axis=axis)
+    if axis is None:
+        value, axis = value.reshape(-1), 0
+    if not isinstance(axis, (int, np.integer)) or not -value.ndim <= axis < value.ndim:
+        raise ValueError('Ordering axis is outside the logical rank')
+    attributes = {'axis': int(axis) % value.ndim}
+    if operation == 'argpartition':
+        if not isinstance(kth, (int, np.integer, Dimension)):
+            raise TypeError('Partition position must be an integer or setup dimension')
+        attributes['kth'] = kth
+    return value.graph.node(operation, (value,), value.shape, 'uint32', **attributes)
+
+
+# ../../../design/algorithm-sources.md#stable-indexed-ordering
+def argsort(value, axis=-1):
+    return ordering(value, 'argsort', axis)
+
+
+# ../../../design/algorithm-sources.md#stable-indexed-ordering
 def argpartition(value, kth, axis=-1):
-    if not isinstance(value, Tensor): return mlx.argpartition(value, kth, axis=axis)
-    return value.graph.node('argsort', (value,), value.shape, 'int32', axis=axis % value.ndim)
+    return ordering(value, 'argpartition', axis, kth)
 
 
 def matmul(left, right, transpose_left=False, transpose_right=False):
@@ -532,7 +553,7 @@ def derivative(op, values, output, gradient, attrs):
     if op == 'neighborhood':
         return tuple(None if i == 3 else x.graph.node('neighborhood_vjp', (*values, gradient), value.shape, value.dtype,
                                                      target=i, gram=attrs['gram']) for i, value in enumerate(values))
-    if op in ('argsort', 'arange', 'random_normal', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'logical_not', 'logical_and', 'logical_or', 'isfinite', 'bitwise_and', 'bitwise_or', 'floor_divide'):
+    if op in ('argsort', 'argpartition', 'arange', 'random_normal', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'logical_not', 'logical_and', 'logical_or', 'isfinite', 'bitwise_and', 'bitwise_or', 'floor_divide'):
         return (None,) * len(values)
     raise ValueError(f'no derivative lowering for {op}')
 
