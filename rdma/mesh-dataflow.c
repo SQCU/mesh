@@ -26,13 +26,6 @@ static int mesh_is(struct hdr *m,int plane,uint32_t row){
 static void mesh_retire(struct hdr *m){
   atomic_store_explicit(&m->configured,0,memory_order_release);
   for(uint32_t i=0;i<2*MESH_QPS;i++) atomic_store_explicit(&m->order_length[i],0,memory_order_release);
-  uint8_t *send=mesh_send(m);
-  for(uint32_t r=0;r<mesh_rows(m);r++){
-    if(!send[r]) continue;
-    uint32_t page=atomic_load_explicit(&mesh_page(m)[r],memory_order_acquire);
-    if(page==MESH_ABSENT || !mesh_is(m,MESH_PAGE_HOT,page)) mesh_bits_clear(m,MESH_ROW_HOT,r,m->block);
-    send[r]=0;
-  }
   for(uint32_t w=0;w<mesh_words(m);w++) atomic_store_explicit(&mesh_plane(m,MESH_ROW_OWN)[w],0,memory_order_release);
   mesh_bits_clear(m,MESH_PAGE_OWN,0,mesh_rows(m));
 }
@@ -128,7 +121,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   for(int plane=MESH_READ;plane<MESH_PLANES;plane++) mesh_bits_clear(c->M,plane,first,count);
   for(uint32_t r=first;r<first+count;r++){
     atomic_store_explicit(&mesh_page(c->M)[r],MESH_ABSENT,memory_order_release);
-    mesh_mask(c->M)[r]=0; mesh_send(c->M)[r]=0;
+    mesh_mask(c->M)[r]=0;
   }
   c->rows+=count;
   return first;
@@ -220,10 +213,10 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
     }
     if(error || b->receive) continue;
     uint64_t busy=0; int plane=0;
-    error=mesh_survey(c,used,b->first,b->count,&busy);
-    if(!error) error=mesh_free_plane(busy,&plane);
+    for(uint32_t r=b->first;r<b->first+b->count;r++)busy|=used[r];
+    error=mesh_free_plane(busy,&plane);
     if(error) break;
-    mesh_take(c,used,b->first,b->count,plane);
+    for(uint32_t r=b->first;r<b->first+b->count;r++)used[r]|=UINT64_C(1)<<plane;
     b->plane=(uint32_t)plane;
   }
   if(!error){
@@ -243,8 +236,7 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
       for(uint32_t k=0;k<b->count;k+=block){
         uint32_t at=atomic_load_explicit(length,memory_order_acquire);
         if(at>=mesh_blocks(m)){ error=ENOSPC; break; }
-        if(!b->receive) mesh_send(m)[b->first+k]=(uint8_t)(b->plane+1);
-        mesh_transfers(m,queue,direction)[at]=(struct mesh_transfer){.local_row=b->first+k,.local_page=atomic_load_explicit(&table[b->first+k],memory_order_acquire),.peer_row=MESH_ABSENT,.peer_page=MESH_ABSENT,.binding=b->binding,.offset=k};
+        mesh_transfers(m,queue,direction)[at]=(struct mesh_transfer){.local_row=b->first+k,.local_page=atomic_load_explicit(&table[b->first+k],memory_order_acquire),.peer_row=MESH_ABSENT,.peer_page=MESH_ABSENT,.binding=b->binding,.offset=k,.plane=b->plane,.index=at};
         atomic_store_explicit(length,at+1,memory_order_release);
       }
     }
@@ -339,8 +331,6 @@ size_t mesh_issue(struct mesh_ctx *c,const struct mesh_row_function *f,uint32_t 
 /* ledger D7: publication marks produced send blocks for the bridge and returns */
 static void mesh_publish(struct hdr *m,uint32_t first,uint32_t count){
   mesh_bits_set(m,MESH_PRESENT,first,count);
-  uint8_t *send=mesh_send(m);
-  for(uint32_t r=first;r<first+count;r++) if(send[r]) mesh_bits_set(m,MESH_ROW_HOT,r,m->block);
   mesh_bits_clear(m,MESH_PRODUCING,first,count);
   mesh_notify(m,first,count);
 }

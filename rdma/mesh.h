@@ -9,14 +9,16 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 20u
+#define MESH_VERSION 23u
 #define MESH_ABSENT UINT32_MAX
 /* ledger D6: "A maximum of 10 unreliable connection (UC) queue pairs" */
 #define MESH_QPS 8
+#define MESH_INDEX_BYTES 4096
+struct mesh_transfer { uint32_t local_row,local_page,peer_row,peer_page,binding,offset,plane,index; };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* ROW_HOT: a produced send block the bridge has not completed, or a posted receive block not yet completed.
    PAGE_HOT: pages held by an outstanding work request. */
-enum { MESH_PRESENT, MESH_CONSTANT, MESH_PRODUCING, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PAGE_HOT, MESH_READ, MESH_PLANES=MESH_READ+64 };
+enum { MESH_PRESENT, MESH_CONSTANT, MESH_PRODUCING, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PAGE_HOT, MESH_READ, MESH_EVENT=MESH_READ+64, MESH_PLANES };
 #define MESH_READERS 64
 /* ledger D5: one posting order per queue pair and direction */
 enum { MESH_SEND, MESH_RECEIVE };
@@ -24,21 +26,22 @@ struct mesh_port_info { char device[32]; uint16_t peer; _Atomic uint64_t phase; 
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps;
   _Atomic uint32_t configured;
-  uint64_t planes_off,page_off,mask_off,send_off,order_off,data_off,length;
+  uint64_t planes_off,page_off,mask_off,order_off,index_off,data_off,length;
   _Atomic uint64_t client,bridge_pid;
   _Atomic uint32_t order_length[2*MESH_QPS];
+  char event_path[104];
   struct mesh_port_info port;
 };
+void mesh_notify(struct hdr *,uint32_t first,uint32_t count);
+int mesh_signal_init(void);
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
 static inline uint32_t mesh_blocks(const struct hdr *m){ return mesh_rows(m)/m->block; }
 static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_Atomic uint64_t*)((unsigned char*)m+m->planes_off)+(size_t)plane*mesh_words(m); }
 static inline _Atomic uint32_t *mesh_page(struct hdr *m){ return (_Atomic uint32_t*)((unsigned char*)m+m->page_off); }
 static inline uint64_t *mesh_mask(struct hdr *m){ return (uint64_t*)((unsigned char*)m+m->mask_off); }
-/* Nonzero at a send block's first row: its reader plane plus one. */
-static inline uint8_t *mesh_send(struct hdr *m){ return (uint8_t*)m+m->send_off; }
 /* ledger D5 */
-static inline uint32_t *mesh_order(struct hdr *m,uint32_t queue,int direction){ return (uint32_t*)((unsigned char*)m+m->order_off)+(size_t)(2*queue+(uint32_t)direction)*mesh_blocks(m); }
+static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+(size_t)(2*queue+(uint32_t)direction)*mesh_blocks(m); }
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint32_t queue,int direction){ return &m->order_length[2*queue+(uint32_t)direction]; }
 /* ledger D6: "A maximum of 4095 work requests at a time", queues sized in 4 KB frames */
 static inline uint32_t mesh_window_blocks(const struct hdr *m){ return 4095u/(m->block*m->pgsz/4096u); }
@@ -91,16 +94,18 @@ static inline void mesh_receive_complete(struct hdr *m,uint32_t row,uint32_t pag
   }
   mesh_bits_clear(m,MESH_PAGE_HOT,page,m->block);
   mesh_bits_clear(m,MESH_ROW_HOT,row,m->block);
+  mesh_notify(m,row,m->block);
 }
-/* ledger D7: a produced block waits only for its queue position */
-static inline int mesh_send_postable(struct hdr *m,uint32_t row,uint32_t page){
-  return mesh_bit(m,MESH_ROW_HOT,row) && !mesh_bit(m,MESH_PAGE_HOT,page);
+/* design/algorithm-sources.md#async-index-push-contract */
+static inline int mesh_send_postable(struct hdr *m,const struct mesh_transfer *transfer){
+  if(!mesh_bits_all(m,MESH_PRESENT,transfer->local_row,m->block))return 0;
+  for(uint32_t i=0;i<m->block;i++)if(mesh_bit(m,MESH_READ+(int)transfer->plane,transfer->local_row+i))return 0;
+  return 1;
 }
-/* ledger D12: completion releases the block to its producer whatever its status */
-static inline void mesh_send_complete(struct hdr *m,uint32_t row,uint32_t page,uint32_t plane){
+/* design/algorithm-sources.md#async-index-push-contract */
+static inline void mesh_send_complete(struct hdr *m,uint32_t row,uint32_t plane){
   mesh_bits_set(m,MESH_READ+(int)plane,row,m->block);
-  mesh_bits_clear(m,MESH_PAGE_HOT,page,m->block);
-  mesh_bits_clear(m,MESH_ROW_HOT,row,m->block);
+  mesh_notify(m,row,m->block);
 }
 
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t rows){
@@ -109,8 +114,8 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->planes_off=at; at+=(uint64_t)MESH_PLANES*words*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->page_off=at; at+=(uint64_t)rows*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->mask_off=at; at+=(uint64_t)rows*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
-  h->send_off=at; at+=rows; at=(at+pgsz-1)/pgsz*pgsz;
-  h->order_off=at; at+=(uint64_t)2*MESH_QPS*blocks*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
+  h->order_off=at; at+=(uint64_t)2*MESH_QPS*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
+  h->index_off=at; at+=(uint64_t)2*(4095u/(block*pgsz/4096u))*MESH_INDEX_BYTES; at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)rows*pgsz;
   h->length=at; return at;
