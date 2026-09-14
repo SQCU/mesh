@@ -22,11 +22,14 @@ def main():
     parser.add_argument('--output-split', type=int, required=True)
     parser.add_argument('--region')
     parser.add_argument('--numerics')
+    parser.add_argument('--normalize', action='store_true')
     parser.add_argument('--backend', choices=('cpu', 'metal'), default='cpu')
     parser.add_argument('--tile-rows', type=int, default=128)
     parser.add_argument('--tile-k', type=int, default=128)
     parser.add_argument('--tile-columns', type=int, default=128)
     args = parser.parse_args()
+    if args.normalize and not args.numerics:
+        parser.error('--normalize requires the engine numerical library')
     values = np.load(args.input)
     weights = (np.load(args.up_weight, mmap_mode='r'), np.load(args.down_weight, mmap_mode='r'))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -50,6 +53,17 @@ def main():
                 check(native(program.handle, (View * 3)(*(ref.view for ref in refs)), scalar))
 
             functions[kernel] = bind
+        if args.normalize:
+            normalize_native = library.gemma_mesh_rmsnorm
+            normalize_native.argtypes = [C.c_void_p, C.POINTER(View), C.c_int32]
+            normalize_native.restype = C.c_int32
+
+            # design/algorithm-sources.md#programkernel_call
+            def normalize(program, inputs, outputs):
+                scalar = (np.dtype('float16'), np.dtype('float32')).index(inputs[0].dtype)
+                check(normalize_native(program.handle,
+                    (View * 3)(*(ref.view for ref in (*inputs, *outputs))), scalar))
+
     with Program(backend=args.backend, region=args.region, functions=functions) as program:
         shard = slice(0, args.split) if program.node == args.root else slice(args.split, weights[0].shape[1])
         weights = (weights[0][:, shard], weights[1][shard, :])
@@ -72,6 +86,15 @@ def main():
         reduced = all_gather(program, scattered, peers=peers, owners=owners)
         outputs = {}
         if program.node == args.root:
+            if args.normalize:
+                if reduced.grid[1] != 1:
+                    raise ValueError('--normalize requires --tile-columns to cover the full output width')
+                gamma = program.tensor((1, reduced.shape[1]), dtype=np.float16)
+                program.constant(gamma[0, 0], np.ones(gamma.shape, dtype=np.float16))
+                spec = BlockSpec(reduced.block_shape, lambda i, j: (i, j))
+                reduced = program.kernel_call(normalize, grid=reduced.grid,
+                    in_specs=(spec, BlockSpec(gamma.shape, lambda i, j: (0, 0))),
+                    out_specs=spec, out_shape=ShapeDtypeStruct(reduced.shape, reduced.dtype))(reduced, gamma)
             spec = BlockSpec(down.block_shape, lambda i, j: (i, j))
             activated = program.kernel_call(kernels.swish,
                 grid=reduced.grid, in_specs=(spec,), out_specs=spec,
