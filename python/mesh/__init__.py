@@ -47,6 +47,10 @@ class Ref:
 
     # design/algorithm-sources.md#indexed-library-functions
     def slice(self, row, column, rows, columns):
+        if min(row, column, rows, columns) < 0 or row + rows > self.shape[0] or column + columns > self.shape[1]:
+            raise ValueError('Slice is outside the reference')
+        if rows == 0 or columns == 0:
+            return self.program.tensor((rows, columns), dtype=self.dtype)
         view = self.program.native.view_slice(self.view, row, column, rows, columns)
         if not view.tensor:
             raise ValueError('Slice is outside the reference')
@@ -54,6 +58,10 @@ class Ref:
 
     # design/algorithm-sources.md#indexed-library-functions
     def broadcast(self, rows, columns):
+        if min(rows, columns) < 0 or any(source != target and source != 1 for source, target in zip(self.shape, (rows, columns))):
+            raise ValueError('Incompatible broadcast shape')
+        if rows == 0 or columns == 0:
+            return self.program.tensor((rows, columns), dtype=self.dtype)
         view = self.program.native.view_broadcast(self.view, rows, columns)
         if not view.tensor:
             raise ValueError('Incompatible broadcast shape')
@@ -77,26 +85,30 @@ class Ref:
 
 
 class Tensor:
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#indexed-range-generation
     def __init__(self, program, shape, block_shape, dtype, transferable):
-        self.program, self.shape, self.block_shape = program, tuple(shape), tuple(block_shape)
+        import operator
+        self.program, self.shape, self.block_shape = program, tuple(map(operator.index, shape)), tuple(map(operator.index, block_shape))
         self.dtype = np.dtype(dtype)
-        if len(self.shape) != 2 or len(self.block_shape) != 2 or min(*self.shape, *self.block_shape) <= 0:
-            raise ValueError('Tensor and block shapes must have two positive dimensions')
+        if len(self.shape) != 2 or len(self.block_shape) != 2 or min(self.shape) < 0 or min(self.block_shape) <= 0:
+            raise ValueError('Tensor shapes require two nonnegative dimensions and positive block dimensions')
+        scalar = _DTYPES.index(self.dtype)
         self.grid = tuple((s + b - 1) // b for s, b in zip(self.shape, self.block_shape))
-        coordinates = tuple(itertools.product(*(range(n) for n in self.grid)))
+        coordinates = tuple(itertools.product(*(range(n) for n in self.grid))) if all(self.grid) else ()
         shapes = [Shape(*(min(b, s - i*b) for s, b, i in zip(self.shape, self.block_shape, coord)),
-                        _DTYPES.index(self.dtype)) for coord in coordinates]
-        self.handle = program.native.tensor_create(program.handle, (Shape * len(shapes))(*shapes), len(shapes), transferable)
-        if not self.handle:
+                        scalar) for coord in coordinates]
+        self.handle = program.native.tensor_create(program.handle, (Shape * len(shapes))(*shapes), len(shapes), transferable) if shapes else None
+        if shapes and not self.handle:
             check(C.get_errno() or errno.ENOMEM)
         self.blocks = {coord: Ref(program, program.native.tensor_view(self.handle, i), self.dtype)
                        for i, coord in enumerate(coordinates)}
 
     # design/algorithm-sources.md#pallas-call-ergonomics
     def region(self, row, column, rows, columns):
-        if min(row, column) < 0 or min(rows, columns) <= 0 or row + rows > self.shape[0] or column + columns > self.shape[1]:
+        if min(row, column, rows, columns) < 0 or row + rows > self.shape[0] or column + columns > self.shape[1]:
             raise ValueError('Region is outside the tensor')
+        if rows == 0 or columns == 0:
+            return self.program.tensor((rows, columns), dtype=self.dtype)
         i, j = row // self.block_shape[0], column // self.block_shape[1]
         ref = self[i, j]
         r, c = row % self.block_shape[0], column % self.block_shape[1]
@@ -124,8 +136,11 @@ class Tensor:
     # design/algorithm-sources.md#streamed-normalization-and-embedding
     def broadcast_to(self, shape):
         shape = tuple(shape)
-        if len(shape) != 2 or any(source != target and source != 1 for source, target in zip(self.shape, shape)):
+        if len(shape) != 2 or min(shape) < 0 or any(source != target and source != 1 for source, target in zip(self.shape, shape)):
             raise ValueError('Incompatible tensor broadcast shape')
+        if 0 in shape:
+            return self.program.tensor(shape, tuple(max(1, target) if source == 1 else block
+                for source, target, block in zip(self.shape, shape, self.block_shape)), self.dtype)
         result = object.__new__(Tensor)
         result.program, result.dtype, result.handle = self.program, self.dtype, self.handle
         result.shape, result.grid = shape, self.grid
@@ -215,9 +230,10 @@ class Program:
         if coreml:
             check(self.native.algebra_coreml(self.handle, *(os.fsencode(p) for p in coreml)))
 
-    # design/algorithm-sources.md#indexed-library-functions
+    # design/algorithm-sources.md#indexed-range-generation
     def tensor(self, shape, block_shape=None, dtype=np.float32, transferable=True):
-        return Tensor(self, shape, block_shape or shape, dtype, transferable)
+        shape = tuple(shape)
+        return Tensor(self, shape, tuple(max(1, size) for size in shape) if block_shape is None else block_shape, dtype, transferable)
 
     # design/algorithm-sources.md#pallas-call-ergonomics
     def kernel_call(self, kernel, *, out_shape, grid, in_specs, out_specs, peer=None):
@@ -255,6 +271,9 @@ class Program:
     # design/algorithm-sources.md#indexed-library-functions
     def _call(self, kernel, *, grid, inputs=(), outputs=()):
         from .kernels import _Operation, Metal, _ExpressionKernel
+        grid = tuple(grid)
+        if 0 in grid or outputs and all(not spec._tensor.blocks for spec in outputs):
+            return
         if isinstance(kernel, _ExpressionKernel):
             kernel.bind_grid(self, grid, inputs, outputs)
             return
@@ -300,7 +319,7 @@ class Program:
         src, sender = source
         dst, receiver = destination
         if isinstance(src, Tensor) and isinstance(dst, Tensor):
-            if src.shape != dst.shape or src.block_shape != dst.block_shape:
+            if src.shape != dst.shape or src.blocks and src.block_shape != dst.block_shape:
                 raise ValueError('Transfers must share an indexed partition')
             for coordinate in src.blocks:
                 self.copy(src[coordinate].on(sender), dst[coordinate].on(receiver), queue=queue)

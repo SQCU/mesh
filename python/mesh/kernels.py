@@ -134,8 +134,8 @@ class _Expression:
         if self.operation != 'input':
             raise ValueError('Logical indexed views require an input reference')
         shape = tuple(operator.index(dimension) for dimension in shape)
-        if any(dimension < -1 or dimension == 0 for dimension in shape) or shape.count(-1) > 1:
-            raise ValueError('Logical indexed dimensions must be positive with at most one inferred axis')
+        if any(dimension < -1 for dimension in shape) or shape.count(-1) > 1:
+            raise ValueError('Logical indexed dimensions must be nonnegative with at most one inferred axis')
         return _Expression('reshape', (self,), shape)
 
     # design/algorithm-sources.md#logical-indexed-views
@@ -200,6 +200,8 @@ class _Expression:
             return _Expression('index_vector', value=(*self.value[:3], 1 - self.value[3]))
         if self.operation in ('row', 'column'):
             return _Expression('column' if self.operation == 'row' else 'row')
+        if self.operation == 'domain':
+            return _Expression('domain', (self.operands[0].T,), tuple(value[::-1] for value in self.value))
         if self.operation == 'dot':
             return _Expression('dot', tuple(child.T for child in self.operands[::-1]), self.value)
         if self.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'cast', '//', '%', 'maximum', 'minimum') or self.operation in _POINTWISE_FUNCTIONS:
@@ -285,20 +287,25 @@ def _literal(value):
 
 
 # design/algorithm-sources.md#logical-indexed-views
-def _resolve_logical(node, inputs):
+def _resolve_logical(node, inputs, evaluate=True):
     import math
-    children = tuple(_resolve_logical(child, inputs) for child in node.operands)
+    active = evaluate and not (node.operation == 'logical_load' and 0 in inputs[node.value[0]].shape)
+    children = tuple(_resolve_logical(child, inputs, active) for child in node.operands)
     if node.operation == 'logical_load':
         index, shape = node.value
         source = inputs[index]
         volume = math.prod(source.shape)
         if -1 in shape:
             known = math.prod(dimension for dimension in shape if dimension != -1)
-            if volume % known:
+            if known == 0 or volume % known:
                 raise ValueError('Logical indexed shape cannot infer an integral dimension')
             shape = tuple(volume // known if dimension == -1 else dimension for dimension in shape)
         if math.prod(shape) != volume:
             raise ValueError('Logical indexed shape volume differs from its bound input')
+        if volume == 0:
+            layout = _expression_layout(_Expression('+', children), inputs, tuple(hasattr(source, 'blocks') for source in inputs), {})
+            dtype = _expression_dtype(_Expression('load', (_literal(0), _literal(0), _literal(False), children[-1]), index), inputs)
+            return _Expression('domain', (children[-1].astype(dtype),), layout)
         ordinal, enabled = _literal(0), children[-2]
         for dimension, coordinate in zip(shape, children[:-2]):
             ordinal = ordinal * dimension + coordinate
@@ -306,7 +313,7 @@ def _resolve_logical(node, inputs):
         return _Expression('load', (ordinal // source.shape[1], ordinal % source.shape[1], enabled, children[-1]), index)
     if node.operation == 'reshape':
         raise ValueError('Logical reshapes require indexed access')
-    if node.operation in ('//', '%') and all(child.operation == 'literal' for child in children):
+    if evaluate and node.operation in ('//', '%') and all(child.operation == 'literal' for child in children):
         left, right = (child.value for child in children)
         if not isinstance(left, int) or not isinstance(right, int):
             raise ValueError('Integer quotient and remainder require integral operands')
@@ -507,10 +514,10 @@ def indices():
 def arange(length, *, tile=None):
     import operator
     length = operator.index(length)
-    tile = length if tile is None else operator.index(tile)
-    if length <= 0 or tile <= 0 or length > np.iinfo(np.int64).max:
-        raise ValueError('Index vector length and tile must be positive within the int64 domain')
-    return _Expression('index_vector', value=(length, min(tile, length), 0, 1))
+    tile = max(1, length) if tile is None else operator.index(tile)
+    if length < 0 or tile <= 0 or length > np.iinfo(np.int64).max:
+        raise ValueError('Index vector length must be nonnegative and tile positive within the int64 domain')
+    return _Expression('index_vector', value=(length, max(1, min(tile, length)), 0, 1))
 
 
 # design/algorithm-sources.md#dynamic-indexed-expression-lowering
@@ -540,6 +547,14 @@ class _ExpressionKernel:
     # design/algorithm-sources.md#dynamic-indexed-expression-lowering
     def bind_grid(self, program, grid, input_specs, output_specs):
         import itertools
+        grid = tuple(grid)
+        if 0 in grid:
+            return
+        active = tuple((value, spec) for value, spec in zip(self.values, output_specs) if spec._tensor.blocks)
+        if len(active) != len(self.values):
+            if active:
+                _ExpressionKernel(tuple(value for value, _ in active)).bind_grid(program, grid, input_specs, tuple(spec for _, spec in active))
+            return
         if any(value.operation == 'indexed_add' for value in self.values):
             for value, spec in zip(self.values, output_specs):
                 if value.operation == 'indexed_add':
@@ -548,7 +563,7 @@ class _ExpressionKernel:
                 else:
                     _ExpressionKernel((value,)).bind_grid(program, grid, input_specs, (spec,))
             return
-        if any(_requires_regions(value) for value in self.values):
+        if any(_requires_regions(value) for value in self.values) or any(not spec._tensor.blocks for spec in input_specs):
             _lower_region_expressions(program, self.values, grid, input_specs, output_specs)
             return
         for coordinate in itertools.product(*(range(size) for size in grid)):
@@ -672,6 +687,10 @@ class _ExpressionKernel:
                 if ref.shape[0] not in (1, output.shape[0]):
                     raise ValueError('Expression input rows must broadcast to the output')
                 width = ref.shape[1]
+            elif node.operation == 'domain':
+                if node.value[0][0] not in (1, output.shape[0]):
+                    raise ValueError('Expression domain rows must broadcast to the output')
+                width = node.value[0][1]
             elif node.operation == 'column':
                 width = output.shape[1]
             elif node.operation == 'index_vector':
@@ -858,7 +877,7 @@ def _expression_dtype(node, inputs):
         return np.dtype('float32')
     if node.operation in ('<', '<=', '>', '>=', '==', 'isfinite'):
         return np.dtype('bool')
-    if node.operation in ('abs', 'floor'):
+    if node.operation in ('abs', 'floor', 'domain'):
         return _expression_dtype(node.operands[0], inputs)
     if node.operation in ('row', 'column', 'program_id', 'index_vector'):
         return np.dtype('int64')
@@ -960,7 +979,11 @@ def _scalar_expression(node, args, metal, dtype=None):
             if node.value == -(1 << 63):
                 return '(-9223372036854775807ll-1ll)'
             return str(node.value) + ('ull' if node.value > 2**63 - 1 else 'll')
+        if not np.isfinite(node.value):
+            return 'NAN' if np.isnan(node.value) else 'INFINITY' if node.value > 0 else '(-INFINITY)'
         return repr(float(node.value)) + 'f'
+    if node.operation == 'domain':
+        return args[0]
     if node.operation == 'select':
         return f'(({args[0]})?({args[1]}):({args[2]}))'
     if node.operation in ('//', '%'):
@@ -1468,6 +1491,60 @@ def _bind_operation(program, operation, inputs, target):
         inputs[1].view if len(inputs) == 2 else View(), target.view, operation.alpha, operation.beta))
 
 
+# design/algorithm-sources.md#indexed-range-generation
+def _expression_layout(node, sources, whole, layouts):
+    from math import gcd
+    # design/algorithm-sources.md#indexed-range-generation
+    def layout(child):
+        return _expression_layout(child, sources, whole, layouts)
+
+    if node in layouts:
+        return layouts[node]
+    if node.operation == 'input':
+        source = sources[node.value]
+        shape = source.shape
+        result = shape, (whole[node.value],) * 2, source.block_shape if whole[node.value] else shape
+    elif node.operation == 'index_vector':
+        shape = tuple(node.value[0] if axis == node.value[3] else 1 for axis in range(2))
+        steps = tuple(node.value[1] if axis == node.value[3] else 1 for axis in range(2))
+        result = shape, (False, False), steps
+    elif node.operation in ('literal', 'program_id', 'row', 'column'):
+        result = (1, 1), (False, False), (1, 1)
+    elif node.operation == 'domain':
+        result = node.value
+    elif node.operation == 'cast':
+        result = layout(node.operands[0])
+    elif node.operation == 'transpose':
+        result = tuple(value[::-1] for value in layout(node.operands[0]))
+    elif node.operation == 'dot':
+        left, right = map(layout, node.operands)
+        if left[0][1] != right[0][0]:
+            raise ValueError('Contraction inner dimensions differ')
+        result = (left[0][0], right[0][1]), (left[1][0], right[1][1]), (left[2][0], right[2][1])
+    elif node.operation in _REDUCTIONS:
+        child = layout(node.operands[0])
+        result = (child[0][0], 1), (child[1][0], False), (child[2][0], 1)
+    elif node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'load', '//', '%', 'maximum', 'minimum') or node.operation in _POINTWISE_FUNCTIONS:
+        children = tuple(map(layout, node.operands))
+        shape = tuple(next((child[0][axis] for child in children if child[0][axis] != 1), 1) for axis in range(2))
+        if any(child[0][axis] not in (1, shape[axis]) for child in children for axis in range(2)):
+            raise ValueError('Computed contraction operand shapes must broadcast')
+        global_axes, steps = [], []
+        for axis in range(2):
+            participating = tuple(child for child in children if child[0][axis] == shape[axis])
+            global_axes.append(all(child[1][axis] for child in participating))
+            cuts = tuple(child[2][axis] for child in participating if child[2][axis] < child[0][axis])
+            step = cuts[0] if cuts else shape[axis]
+            for cut in cuts[1:]:
+                step = gcd(step, cut)
+            steps.append(max(1, step))
+        result = shape, tuple(global_axes), tuple(steps)
+    else:
+        raise ValueError('Computed contraction operands require pointwise expressions or contractions')
+    layouts[node] = result
+    return result
+
+
 class _ExpressionRegions:
     # design/algorithm-sources.md#shared-contraction-lowering
     def __init__(self, program, specs, coordinate, cache):
@@ -1476,52 +1553,9 @@ class _ExpressionRegions:
         self.whole = tuple(spec.block_shape is None for spec in specs)
         self.layouts = {}
 
-    # design/algorithm-sources.md#shared-contraction-lowering
+    # design/algorithm-sources.md#indexed-range-generation
     def layout(self, node):
-        from math import gcd
-        if node in self.layouts:
-            return self.layouts[node]
-        if node.operation == 'input':
-            source = self.sources[node.value]
-            shape = source.shape
-            result = shape, (self.whole[node.value],) * 2, source.block_shape if self.whole[node.value] else shape
-        elif node.operation == 'index_vector':
-            shape = tuple(node.value[0] if axis == node.value[3] else 1 for axis in range(2))
-            steps = tuple(node.value[1] if axis == node.value[3] else 1 for axis in range(2))
-            result = shape, (False, False), steps
-        elif node.operation in ('literal', 'program_id', 'row', 'column'):
-            result = (1, 1), (False, False), (1, 1)
-        elif node.operation == 'cast':
-            result = self.layout(node.operands[0])
-        elif node.operation == 'transpose':
-            result = tuple(value[::-1] for value in self.layout(node.operands[0]))
-        elif node.operation == 'dot':
-            left, right = map(self.layout, node.operands)
-            if left[0][1] != right[0][0]:
-                raise ValueError('Contraction inner dimensions differ')
-            result = (left[0][0], right[0][1]), (left[1][0], right[1][1]), (left[2][0], right[2][1])
-        elif node.operation in _REDUCTIONS:
-            child = self.layout(node.operands[0])
-            result = (child[0][0], 1), (child[1][0], False), (child[2][0], 1)
-        elif node.operation in ('+', '-', '*', '/', '<', '<=', '>', '>=', '==', '&', '|', 'select', 'load', '//', '%', 'maximum', 'minimum') or node.operation in _POINTWISE_FUNCTIONS:
-            children = tuple(map(self.layout, node.operands))
-            shape = tuple(max(child[0][axis] for child in children) for axis in range(2))
-            if any(child[0][axis] not in (1, shape[axis]) for child in children for axis in range(2)):
-                raise ValueError('Computed contraction operand shapes must broadcast')
-            global_axes, steps = [], []
-            for axis in range(2):
-                participating = tuple(child for child in children if child[0][axis] == shape[axis])
-                global_axes.append(all(child[1][axis] for child in participating))
-                cuts = tuple(child[2][axis] for child in participating if child[2][axis] < child[0][axis])
-                step = cuts[0] if cuts else shape[axis]
-                for cut in cuts[1:]:
-                    step = gcd(step, cut)
-                steps.append(step)
-            result = shape, tuple(global_axes), tuple(steps)
-        else:
-            raise ValueError('Computed contraction operands require pointwise expressions or contractions')
-        self.layouts[node] = result
-        return result
+        return _expression_layout(node, self.sources, self.whole, self.layouts)
 
     # design/algorithm-sources.md#shared-contraction-lowering
     def key(self, node, origin, shape):
@@ -1582,6 +1616,11 @@ class _ExpressionRegions:
         inner = left_layout[0][1]
         if inner != right_layout[0][0]:
             raise ValueError('Contraction inner dimensions differ')
+        if inner == 0:
+            target = direct if direct is not None and direct.dtype == np.dtype('float32') else self.temporary(shape)
+            _ExpressionKernel((_literal(0),)).bind(self.program, (), (target,))
+            self.cache[key] = (target,)
+            return (target,)
         tile = min(node.value, inner)
         for layout, axis in ((left_layout, 1), (right_layout, 0)):
             if layout[2][axis] < layout[0][axis]:
@@ -1619,6 +1658,15 @@ class _ExpressionRegions:
         child = node.operands[0]
         layout = self.layout(child)
         width, tile = layout[0][1], layout[2][1]
+        if width == 0:
+            identity = (1 if node.operation == 'all' else 0) if node.operation in ('sum', 'any', 'all') else (
+                (-np.inf if node.operation == 'max' else np.inf) if dtype.kind == 'f' else
+                (0 if node.operation == 'max' else 1) if dtype.kind == 'b' else
+                np.iinfo(dtype).min if node.operation == 'max' else np.iinfo(dtype).max)
+            target = direct if direct is not None and direct.dtype == dtype else self.temporary((rows, 1), dtype)
+            _ExpressionKernel((_literal(identity),)).bind(self.program, (), (target,))
+            self.cache[key] = target
+            return target
         parts = []
         for column in range(0, width, tile):
             length = min(tile, width-column)
@@ -1669,6 +1717,10 @@ class _ExpressionRegions:
 
         # design/algorithm-sources.md#shared-contraction-lowering
         def lower(node, accumulation=target.dtype):
+            if node.operation == 'domain':
+                if 0 in node.value[0]:
+                    raise ValueError('Empty expression domains cannot produce a nonempty region')
+                return lower(node.operands[0], _expression_dtype(node.operands[0], self.sources))
             if node.operation == 'cast':
                 child = node.operands[0]
                 return _Expression('cast', (lower(child, _expression_dtype(child, self.sources)),), node.value)
