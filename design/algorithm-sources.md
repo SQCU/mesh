@@ -990,3 +990,35 @@ The existing streaming-algebra example adds a masked gather/transform over an
 int64 index equal to 2**53+1. It must retain exact integer identity and must not
 load its masked-out table address. Its numerical output checks failures that
 ordinary small embedding indices and random FFN errors would miss.
+
+## Actual frame capacity
+
+Apple's [TN3205, queue-pair allocation and completion polling](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
+specifies that Thunderbolt queue depths count 4 KiB frames, that applications
+must query assigned QP capabilities, and that completion releases a posted
+request. One 8 KiB message costs two queue spaces, exactly as two 4 KiB
+messages do. Matching SEND and RECV messages must have equal frame lengths.
+
+`verbs_up` queries each QP's send and receive frame capacities separately.
+Each direction has its own completion queue, large enough for its maximum
+number of one-frame messages, with the extra CQ entry used by Apple's
+allocation example. Device `max_qp_wr` and `max_cqe` constrain the setup request.
+`down_pair` destroys these CQs only after destroying every QP.
+
+`link_post` retains the actual frame cost with the posted row/page/index/byte
+identity; `mesh_progress` subtracts that cost on that request's completion.
+Announced-but-not-yet-posted transfers reserve their actual frame costs until
+`link_send_announced` moves them into the posted queue. `link_receive` admits
+the next announced receive only when its exact cost fits; announced ordering
+must match the UC SEND order. The ready list has no such hardware ordering
+obligation before announcement: entries fitting the remaining capacity can
+be selected past a larger entry. This is byte-capacity accounting, not another
+numerical readiness or acknowledgement protocol.
+
+The index QP uses one-frame messages and its existing setup-allocated shared
+buffer slots. That independent storage limit remains explicit. No index
+buffer can be reused while its request is posted. CQ identity supplies the
+QP and direction directly; retained work-request identity is checked against
+the queue's posted entry, rather than searching configured QPs.
+
+[Source proof, compilation and remaining evidence](actual-frame-capacity-2026-09-13.md).

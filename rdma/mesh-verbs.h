@@ -21,9 +21,9 @@
 
 #define QD 4095
 struct mesh_verbs {
-  struct ibv_context *context; struct ibv_pd *domain; struct ibv_cq *completion_queue;
+  struct ibv_context *context; struct ibv_pd *domain; struct ibv_cq *completion_queues[2*(MESH_QPS+1)];
   struct ibv_qp *pair,*pairs[MESH_QPS+1]; int qp_count; struct ibv_mr **regions;
-  int region_count, send_capacity, receive_capacity;
+  int region_count; uint32_t capacity[MESH_QPS+1][2];
   size_t region_origin, region_extent;
   struct ibv_wc *completions;
 };
@@ -38,7 +38,10 @@ static int expected_peer=-1;
 static const char *listen_address, *selected_device;
 static int down_pair(void){
   while(provider->qp_count){ struct ibv_qp *q=provider->pairs[provider->qp_count-1]; if(q && ibv_destroy_qp(q)) return 0; provider->pairs[--provider->qp_count]=0; provider->pair=0; }
-  if(provider->completion_queue){ if(ibv_destroy_cq(provider->completion_queue)) return 0; provider->completion_queue=0; }
+  for(int i=0;i<2*(MESH_QPS+1);i++)if(provider->completion_queues[i]){
+    if(ibv_destroy_cq(provider->completion_queues[i]))return 0;
+    provider->completion_queues[i]=0;
+  }
   return 1; }
 static int down_verbs(void){
   if(!down_pair()) return 0;
@@ -177,20 +180,31 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
     provider->regions[provider->region_count]=ibv_reg_mr(provider->domain,mem+o,n,IBV_ACCESS_LOCAL_WRITE);
     if(!provider->regions[provider->region_count]){ close(f); return -1; } provider->region_count++; }
   if(ibv_query_port(provider->context,1,&pa)){ close(f); return -1; }
-  size_t frames=(message_bytes+4095)/4096;
-  int frame_capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
-  int completions=4*(frame_capacity/(int)frames)*qps;
-  if(!completions || capabilities.max_cqe<completions){ close(f); errno=EOPNOTSUPP; return -1; }
-  provider->completion_queue=ibv_create_cq(provider->context,completions,NULL,NULL,0); if(!provider->completion_queue){ close(f); return -1; }
-  struct ibv_qp_init_attr qi={.send_cq=provider->completion_queue,.recv_cq=provider->completion_queue,.qp_type=IBV_QPT_UC,
-    .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
-  for(int q=0;q<qps;q++){ provider->pairs[q]=ibv_create_qp(provider->domain,&qi); if(!provider->pairs[q]){ close(f); return -1; } provider->qp_count=q+1; }
+  /* design/algorithm-sources.md#actual-frame-capacity */
+  uint32_t frame_capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
+  if(capabilities.max_cqe<=1 || !frame_capacity){close(f);errno=EOPNOTSUPP;return -1;}
+  if(frame_capacity>=(uint32_t)capabilities.max_cqe)frame_capacity=(uint32_t)capabilities.max_cqe-1;
+  for(int q=0;q<qps;q++){
+    for(int d=0;d<2;d++){
+      provider->completion_queues[2*q+d]=ibv_create_cq(provider->context,(int)frame_capacity+1,NULL,NULL,0);
+      if(!provider->completion_queues[2*q+d]){close(f);return -1;}
+    }
+    struct ibv_qp_init_attr qi={.send_cq=provider->completion_queues[2*q+MESH_SEND],
+      .recv_cq=provider->completion_queues[2*q+MESH_RECEIVE],.qp_type=IBV_QPT_UC,
+      .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
+    provider->pairs[q]=ibv_create_qp(provider->domain,&qi);
+    if(!provider->pairs[q]){close(f);return -1;}
+    provider->qp_count=q+1;
+    struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
+    if(ibv_query_qp(provider->pairs[q],&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
+    provider->capacity[q][MESH_SEND]=actual.cap.max_send_wr<frame_capacity?actual.cap.max_send_wr:frame_capacity;
+    provider->capacity[q][MESH_RECEIVE]=actual.cap.max_recv_wr<frame_capacity?actual.cap.max_recv_wr:frame_capacity;
+    if(!provider->capacity[q][MESH_SEND] || !provider->capacity[q][MESH_RECEIVE]){close(f);errno=EOPNOTSUPP;return -1;}
+    fprintf(stderr,"pair capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d,%d\n",q,
+      provider->capacity[q][MESH_SEND],provider->capacity[q][MESH_RECEIVE],
+      provider->completion_queues[2*q+MESH_SEND]->cqe,provider->completion_queues[2*q+MESH_RECEIVE]->cqe);
+  }
   provider->pair=provider->pairs[0];
-  struct ibv_qp_attr queried; struct ibv_qp_init_attr actual;
-  if(ibv_query_qp(provider->pair,&queried,IBV_QP_CAP,&actual)){ close(f); return -1; }
-  provider->send_capacity=(int)((actual.cap.max_send_wr<(uint32_t)frame_capacity?actual.cap.max_send_wr:(uint32_t)frame_capacity)/frames);
-  provider->receive_capacity=(int)((actual.cap.max_recv_wr<(uint32_t)frame_capacity?actual.cap.max_recv_wr:(uint32_t)frame_capacity)/frames);
-  if(!provider->send_capacity || !provider->receive_capacity){ close(f); errno=EOPNOTSUPP; return -1; }
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
   for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->pairs[q],&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
   union ibv_gid gid; if(ibv_query_gid(provider->context,1,0,&gid)){ close(f); return -1; }
