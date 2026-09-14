@@ -108,6 +108,21 @@ def main():
             in_specs=(BlockSpec(None), BlockSpec((2, 1), lambda i: (0, 0))),
             out_specs=BlockSpec((2, 4), lambda i: (0, 0)),
             out_shape=ShapeDtypeStruct((2, 4), dtype), peer=0)(streamed_table, streamed_indices)[0, 0])
+        scatter_indices = program.tensor((6, 1), (2, 1), dtype=np.int64)
+        scatter_updates = program.tensor((6, 4), (2, 4), dtype=dtype)
+        base_arg, destination_arg, update_arg, mask_arg = kernels.arguments(4)
+        scatter = program.kernel_call(kernels.expression(kernels.indexed_add(
+            base_arg, destination_arg, update_arg, mask=mask_arg)), grid=(4,),
+            in_specs=(BlockSpec(None),) * 4, out_specs=BlockSpec((1, 4), lambda i: (i, 0)),
+            out_shape=ShapeDtypeStruct((4, 4), dtype), peer=0)(
+                weight(np.zeros((4, 4), dtype=dtype)), scatter_indices, scatter_updates,
+                weight(np.array([[True], [True], [True], [True], [True], [False]])))
+        consumer_arg, = kernels.arguments(1)
+        scatter_consumed = program.kernel_call(kernels.expression(consumer_arg * 2), grid=(4,),
+            in_specs=(BlockSpec((1, 4), lambda i: (i, 0)),),
+            out_specs=BlockSpec((1, 4), lambda i: (i, 0)),
+            out_shape=ShapeDtypeStruct((4, 4), dtype), peer=0)(scatter)
+        scatter_results = tuple(program.export(scatter_consumed[i, 0]) for i in range(4))
         invocations = []
 
         # design/algorithm-sources.md#async-index-push-contract
@@ -264,6 +279,29 @@ def main():
                 result=streamed_result.array.tolist())), flush=True)
             if not generation:
                 streamed_result.consume()
+        scatter_start = time.monotonic_ns()
+        routing = np.array([[0], [2], [0], [3], [2], [2]], dtype=np.int64)
+        for i in range(3):
+            with program.write(scatter_indices[i, 0]) as destination:
+                destination[...] = routing[2*i:2*i+2]
+        for i in range(2):
+            with program.write(scatter_updates[i, 0]) as destination:
+                destination[...] = np.arange(2*i+1, 2*i+3, dtype=dtype)[:, None]
+        wait_for(tuple(scatter_results[i] for i in (0, 1, 3)))
+        if scatter_results[2].ready or scatter_updates[2, 0].present:
+            raise ArithmeticError('Delayed scatter contribution was not independent')
+        first_scatter_ns = time.monotonic_ns() - scatter_start
+        for i, expected in ((0, 8), (1, 0), (3, 8)):
+            if not np.array_equal(scatter_results[i].array, np.full((1, 4), expected, dtype=dtype)):
+                raise ArithmeticError('Early scattered sum or consumer differs')
+        with program.write(scatter_updates[2, 0]) as destination:
+            destination[...] = np.array([[5], [6]], dtype=dtype)
+        wait_for((scatter_results[2],))
+        if not np.array_equal(scatter_results[2].array, np.full((1, 4), 14, dtype=dtype)):
+            raise ArithmeticError('Duplicate or masked scatter contribution differs')
+        print(json.dumps(dict(event='indexed_add', first_consumer_ns=first_scatter_ns,
+            complete_ns=time.monotonic_ns()-scatter_start,
+            delayed_destination=2, result=[result.array.tolist() for result in scatter_results])), flush=True)
         if args.trace:
             Path(args.trace).write_text(json.dumps(dict(compute=program.trace, transfers=program.transfer_trace), indent=2) + '\n')
         report = program.report
