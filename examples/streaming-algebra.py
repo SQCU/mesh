@@ -220,13 +220,14 @@ def main():
             for stage in probes.values():
                 for result in stage.values():
                     result.consume()
+        wait_for((precision, strided, indexed))
         if not precision.ready or not np.array_equal(precision.array, np.array([[2], [0]], dtype=dtype)):
             raise ArithmeticError('Contraction lost cancellation across K panels')
         print(json.dumps(dict(event='precision', dtype=args.dtype, result=precision.array.tolist())), flush=True)
         precision.consume()
         strided_expected = strided_left.astype(np.float32).T @ strided_right.astype(np.float32).T
         if not strided.ready or not np.array_equal(strided.array, strided_expected):
-            raise ArithmeticError('Strided contraction lost a tail or accumulator value')
+            raise ArithmeticError(f'Strided contraction mismatch: ready={strided.ready}, actual={strided.array.tolist() if strided.ready else None}, expected={strided_expected.tolist()}')
         print(json.dumps(dict(event='strided_contraction', result=strided.array.tolist())), flush=True)
         strided.consume()
         indexed_expected = np.stack((2 * table_data[2], np.ones(4, dtype=dtype)))
