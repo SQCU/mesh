@@ -1,8 +1,9 @@
 # Shared routing ownership and reader groups
 
-Source/literature proposal, September 13, 2026. This is the next storage and
-lifetime lowering after [segmented scatter](scatter-lowering.md), not an
-implementation or performance claim. No native source changes accompany it.
+Source/literature design, September 13, 2026. Reader groups and the unique-owner
+shared routing domain below are implemented. The initial source audit is preserved
+to explain the replaced representation; implementation and remaining limits follow
+at the end. Compilation is distinct from numerical and performance evidence.
 
 ## Two different multiplication problems in current source
 
@@ -289,3 +290,104 @@ arrays, and no released array remains in a pending setup assignment. Group membe
 ranges shared by several maps remain until their last owning map is removed;
 removed members are marked satisfied while that storage remains. Numerical source
 lifetimes continue to use presence bits, not the teardown resource-owner count.
+
+
+## Implemented shared unique-owner domain
+
+`mesh_algebra_route_create` retains one domain for a feature stripe: the exact
+candidate maps, produced owner/ordinal/offset views and strides, configured
+consumer function indices, and one constant C-by-3 U64 address/stride table.
+`mesh_algebra_route_table` returns that canonical tensor. The CPU address is the
+registered extent address plus the view's scalar offset; Metal uses its buffer's
+GPU address plus that same offset. Each table entry retains both row and column
+strides. No candidate payload is copied.
+
+`mesh_algebra_route_attach` attaches the domain and exact consumer ID to an
+existing numerical function. The consumer binds the table once. It retains actual
+ordinary metadata reads, including when another indexed descriptor is added to
+the function later. Every configured consumer must attach exactly once. Producer
+and consumer output aliases with the domain's source or metadata maps are rejected
+at setup. This API currently requires one function occurrence per consumer; it
+does not infer a consumer from the function's output buffer.
+
+The produced relation has a precise numerical contract: `owners[c]` is the unique
+consumer ID, or UINT32_MAX for an unconsumed but still-produced candidate;
+`offsets[d]:offsets[d+1]` names exactly that consumer's candidate ordinals. Each
+owned candidate occurs exactly once in this inverse relation. Ordinals outside
+these intervals are unused capacity. Native preparation checks interval bounds,
+ordinal bounds and owner agreement. The compiler supplies the unique partition
+and complete inverse relation; this API does not claim arbitrary sparse fanout or
+inactive producers. Different domains can retain separate actual reads of the
+same source, using canonical reader groups when needed.
+
+`mesh_realize` surveys and binds candidate and domain-metadata lifetime maps once,
+through consumer zero's retained domain reference. It does not clone those maps
+into other consumers. Per-consumer ordinary metadata reads remain real reader
+identities. A domain allocates C retired result rows, D numerical-completed result
+rows and one prepared result row, without operand payload allocation for these
+logical results. `mesh_execution_route` installs one candidate-to-domain edge per
+source row, metadata edges, and one completion-result edge per consumer.
+`mesh_execution_add` stores each exact consumer watch only inside its successful
+serial installation, so failed allocations cannot leave a dangling watch.
+
+Metadata publication prepares the relation once and makes configured consumers
+eligible for normal canonical readiness checks. Already-present unowned sources
+retire then; owned consumers read only their CSR-selected maps. A later candidate
+publication first checks its retained retirement row, then indexes its actual
+owner and revisits that configured consumer. It never walks D possible readers.
+Consumer completion publishes its own result, whose event retires only that
+consumer's CSR interval. Retirement precedes source READ release. Completion
+notices are only wake-ups: the current completed result must be present before
+retiring anything. A stale notice after metadata reset therefore cannot retire a
+new candidate occurrence. Registration also replays current canonical state so
+already-published metadata need not generate another notification.
+
+The shared domain lifetime reader releases only after every candidate has retired
+and every consumer has completed, including consumers with empty intervals. An
+unowned late source remains an unresolved occurrence until it arrives. An already
+retired source may publish a new occurrence while another candidate remains late;
+the old retirement fact makes that new arrival irrelevant to the old directory.
+Local metadata producer issue resets the C+D+1 result rows, and all domain
+metadata maps must be available for the new occurrence before preparation.
+Metadata storage consequently cannot be recycled while any old candidate or
+numerical consumer still depends on it. Ordinary grouped/direct reader planes
+supply this ordering; no phase number or remaining-work counter is introduced.
+
+Metal setup places candidate allocations in the algebra's single queue residency
+set. Realization commits that set once. Indirect GPU table loads therefore do not
+require walking C resources on each consumer encoder. Numerical source readiness
+and lifetime still belong to canonical mesh maps; residency alone is not a
+producer/consumer synchronization mechanism. Program teardown removes execution
+edges, waits for numerical completion, unbinds each domain map, and frees domain
+metadata before releasing its source tensors. The queue residency set is removed
+before its allocations are released.
+
+`mesh_algebra_trace_route_count` and `mesh_algebra_trace_route` expose each domain
+once, using its creation-order numeric ID. Role 0 is a metadata map, role 1 a
+candidate map with its exact ordinal and retirement row, role 2 a configured
+consumer with its function index and completed row, and role 3 the shared table's
+logical rows. Candidate entries expose the current produced owner/function when
+the prepared bit is present. Flags 1, 2 and 4 indicate prepared, candidate retired,
+and named consumer completed. `mesh_algebra_trace_route_reader` exposes ordinary
+source/group member identity for roles 0 and 1, and absent identities otherwise.
+The trace contains actual candidates rather than making their apparent count
+shrink by omitting the shared table.
+
+The retained domain storage and fixed adjacency are O(C+D+E), with E<=C for this
+partition. Initial relation processing is O(C+D+E); a source notification selects
+one consumer, and consumer retirement visits its own interval. Ordinary canonical
+readiness still checks that interval when revisited: successive arrivals can
+repeat readiness checks for a long interval. This commit does not claim linear
+total readiness work or measured latency parity with Pallas. Source-row count and
+ordinary graph edges also remain in the accounting. Setup overlap validation can
+compare candidate maps quadratically; it is outside invocation and does not
+allocate a dense candidate/consumer structure.
+
+Both native libraries compile together. The `mesh_row_function` source ABI gains
+route uses; the shared bridge header remains unchanged. Existing bridge processes
+need no shared-header restart, while Python/native processes must load the rebuilt
+pair. Operational CPU/Metal, repeated-occurrence and delayed-source evidence is
+owned by the existing streaming-algebra workflow. Remaining independent work
+includes active-grid ownership, repeated readiness traversal and independently
+published byte extents; sparse domains do not eliminate per-capacity partial
+launches or publication allocation padding.
