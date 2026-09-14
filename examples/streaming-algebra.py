@@ -139,6 +139,16 @@ def main():
             grid=(1,), in_specs=(BlockSpec(None),), out_specs=(BlockSpec((1, 1), lambda i: (0, 0)),) * 2,
             out_shape=(ShapeDtypeStruct((1, 1), np.int64),) * 2, peer=0)(weight(np.array([[0.75, 0.75]], dtype=np.float32)))
         cast_sum_results = tuple(program.export(tensor[0, 0]) for tensor in cast_sums)
+        mixed_values = tuple((np.arange(size, dtype=np.float32).reshape(shape) / 128 - 0.125)
+            for size, shape in ((15, (3, 5)), (35, (5, 7))))
+        mixed_left, mixed_right = kernels.arguments(2)
+        mixed_output = program.kernel_call(kernels.expression(
+            kernels.dot(mixed_left.astype(np.float16), mixed_right, tile_k=3),
+            kernels.dot(mixed_left, mixed_right.astype(np.float16), tile_k=3)),
+            grid=(1,), in_specs=(BlockSpec(None),) * 2,
+            out_specs=(BlockSpec((3, 7), lambda i: (0, 0)),) * 2,
+            out_shape=(ShapeDtypeStruct((3, 7), np.float32),) * 2, peer=0)(*(weight(value) for value in mixed_values))
+        mixed_results = tuple(program.export(tensor[0, 0]) for tensor in mixed_output)
         norm_input = program.tensor((3, 6), (1, 2), dtype=dtype)
         norm_gamma = np.ones((1, 6), dtype=dtype)
         norm_output = rmsnorm(program, norm_input, weight(norm_gamma), tile_rows=1) if args.rank == 0 else program.tensor((3, 6), (1, 2), dtype=dtype)
@@ -525,6 +535,14 @@ def main():
         print(json.dumps(dict(event='cast_boundaries', rounded=cast_result.array.tolist(),
             sum_then_cast=cast_sum_results[0].array.item(), cast_then_sum=cast_sum_results[1].array.item())), flush=True)
         for result in (cast_result, *cast_sum_results):
+            result.consume()
+        wait_for(mixed_results)
+        mixed_expected = mixed_values[0].astype(np.float64) @ mixed_values[1].astype(np.float64)
+        if any(not np.array_equal(result.array, mixed_expected) for result in mixed_results):
+            raise ArithmeticError('Mixed contraction matrix orientation mismatch')
+        print(json.dumps(dict(event='mixed_contraction', shape=list(mixed_expected.shape),
+            output=[result.array.tolist() for result in mixed_results])), flush=True)
+        for result in mixed_results:
             result.consume()
         norm_trace = program.trace
         norm_source_rows = set()
