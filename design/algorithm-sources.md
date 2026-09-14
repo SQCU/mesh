@@ -2632,3 +2632,43 @@ remain their registered source pages; there is no host operand staging or
 numerical callback. The explicit broadcast result currently remains a canonical
 output allocation; eliminating unobserved intermediate results belongs to shared
 expression fusion, not an application-specific alternate binding.
+
+
+## Selected native contractions
+
+The JAX authors' [Pallas scalar-prefetch and sparse computation](https://docs.jax.dev/en/latest/pallas/tpu/sparse.html)
+uses index metadata to choose blocks without changing the numerical kernel.
+Mesh applies that separation to affine matrix panels selected by an indexed
+product-and-sum expression. Compilation retains logical coordinates long enough
+to establish a contraction, its K/output regions, and exact candidate views.
+The ordinary expression remains the program; recognition is shared compiler
+work and does not interpret expert or DNN operation names.
+
+A selected native binding separates setup preparation from registration.
+Candidate CPU/MPS/Core ML numerical bindings are prepared once, with their
+original registered operand views and one common output region. One canonical
+function owns that output. Its published uint32 selector indexes the prepared
+bindings; numerical invocation constructs no operand storage or matrix binding.
+Backend execution and completion still use the existing numerical launch paths.
+This is a selection of numerical data, not a participant scheduler.
+
+Numerical plans retain exact subview offsets and strides. Readiness candidates
+retain original page identities and are deduplicated independently: several
+plans can name distinct subviews of one backing page. Compiler-produced indices
+map plans to those readiness candidates, and the existing indexed reader
+mechanism owns selector/source lifetime. A plan is never reconstructed from a
+page ordinal, nor is a separate output producer registered per candidate.
+
+Out-of-range logical loads retain their specified zero replacement. A prepared
+zero-operand candidate combines a canonical constant-zero panel with the other
+actual operand, preserving zero-times-NaN/Inf semantics and that operand's true
+dependencies. The compiler maps invalid logical selections to this ordinary
+plan index. An invalid native plan index is an error in metadata, rather than
+permission to access outside the prepared table.
+
+Recognition requires affine, native-representable panels and preserves existing
+scalar expression semantics for forms not yet recognized. It must not stage
+arbitrarily gathered rows to force them through BLAS/MPS. Recovering efficient
+general indexed/grouped contractions remains separate shared backend work.
+Numerical coverage, setup costs, prepared-plan storage, and matched performance
+are measured rather than inferred from this representation.

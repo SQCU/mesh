@@ -1,0 +1,143 @@
+{
+  "runs": [
+    {
+      "prefix": "selected-baseline-metal",
+      "source_revision": "95cbf19",
+      "example_revision": "95cbf19",
+      "caller_revision": "edf7d4b",
+      "library_revision": "4a31ee6",
+      "backend": "metal",
+      "local": true,
+      "dtype": "float32",
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "arena_pages": 65536,
+      "block_pages": 4,
+      "qps": 1,
+      "registered_bytes": 1097203712,
+      "artifacts": [
+        "selected-baseline-metal.jsonl.gz",
+        "selected-baseline-metal-trace.json.gz"
+      ],
+      "expert_timings": {
+        "early": {
+          "count": 2,
+          "mean": 6.364563,
+          "sample_variance": 0.10813203088199977
+        },
+        "independent_derivative": {
+          "count": 2,
+          "mean": 8.0689165,
+          "sample_variance": 0.28665093294449995
+        },
+        "complete": {
+          "count": 2,
+          "mean": 9.6583335,
+          "sample_variance": 0.18488246744450038
+        }
+      },
+      "configured_functions": 5266,
+      "completed_submissions": 10472,
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 16.257083,
+        "invocations_per_second": 184.53495008913958,
+        "first_section_ms": 14.069167,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.850833333333332,
+          "sample_variance": 1.480083802472331
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 10472,
+          "completed": 10472,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.035653025,
+          "cpu_submitted": 0
+        }
+      }
+    },
+    {
+      "prefix": "selected-masked-baseline-metal",
+      "source_revision": "8e7d0c7",
+      "example_revision": "8e7d0c7",
+      "caller_revision": "edf7d4b",
+      "library_revision": "4a31ee6",
+      "backend": "metal",
+      "local": true,
+      "dtype": "float32",
+      "runs": 3,
+      "scatter_rows": 67,
+      "scatter_tile": 33,
+      "scatter_destinations": 17,
+      "xonotic": true,
+      "arena_pages": 65536,
+      "block_pages": 4,
+      "qps": 1,
+      "registered_bytes": 1097203712,
+      "artifacts": [
+        "selected-masked-baseline-metal.jsonl.gz",
+        "selected-masked-baseline-metal-trace.json.gz"
+      ],
+      "expert_timings": {
+        "early": {
+          "count": 2,
+          "mean": 6.0730835,
+          "sample_variance": 0.005356021500499932
+        },
+        "independent_derivative": {
+          "count": 2,
+          "mean": 7.721145999999999,
+          "sample_variance": 0.004151973938000004
+        },
+        "complete": {
+          "count": 2,
+          "mean": 9.6213335,
+          "sample_variance": 0.11765275844449975
+        }
+      },
+      "configured_functions": 5266,
+      "completed_submissions": 10442,
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 16.7445,
+        "invocations_per_second": 179.1633073546538,
+        "first_section_ms": 14.539417,
+        "completion_ms": {
+          "count": 3,
+          "mean": 15.332667,
+          "sample_variance": 1.4921383281249991
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 10442,
+          "completed": 10442,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.035442286,
+          "cpu_submitted": 0
+        }
+      }
+    }
+  ],
+  "scope": "Scalar indexed product-and-sum baseline with shared weight backing blocks, negative selection, and second run invalid selection with NaN input. Both complete successfully. Two expert generations are progress/semantic evidence, not a statistically matched tuned performance baseline."
+}
