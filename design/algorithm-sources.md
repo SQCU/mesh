@@ -1669,6 +1669,25 @@ cover construction; existing arbitrary-rank and wide-integer gold cases supply
 native CPU/Metal evidence.
 
 
+### Logical-rank pointwise callers
+
+Xonotic's pointwise arithmetic, comparisons, selection, casts and supported unary
+operations use the shared expression compiler across logical ranks. Their
+broadcast coordinates follow the JAX authors' index-map design: flatten output
+leading axes into physical rows, recover each logical coordinate with integer
+quotient/remainder, align operand axes from the right, and substitute zero on
+singleton operand axes. Logical `.reshape(...).at(...)` resolves those coordinates
+against the actual original operand pages. Scalars use the empty coordinate tuple.
+
+Already-aligned matrix operands retain their mapped Ref bindings and existing
+backing cuts. Other logical layouts use whole-table index bindings with tiled
+output regions; static address specialization resolves their source dependencies.
+They do not call `matrix_view` to assemble operands or use the custom whole-output
+Metal emitter. These are configuration choices around the same scalar expression,
+not separate CPU and Metal numerical bodies. The operational indexed example now
+composes rank-three concatenation, broadcast multiplication and scalar addition,
+and observes an early half while unrelated source/index regions remain absent.
+
 ### Static indexed access specialization
 
 The JAX authors' [Pallas grids and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)

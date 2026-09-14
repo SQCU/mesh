@@ -603,8 +603,21 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             tensors[value.index] = nn.linear(program, left, right, tile_rows=tile_rows,
                 tile_k=tile_k, tile_columns=tile_columns, peer=peer)
             continue
-        if shaped and len(shape) <= 2 and operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or'):
+        if operation in ('add', 'subtract', 'multiply', 'divide', 'negative', 'exp', 'tanh', 'rsqrt', 'sigmoid', 'maximum', 'minimum', 'cast', 'assign', 'where', 'equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal', 'bitwise_and', 'bitwise_or'):
             args = kernels.arguments(len(values))
+            direct = shaped and len(shape) <= 2
+            if not direct:
+                matrix_shape = (math.prod(shape[:-1]), shape[-1]) if shape else (1, 1)
+                block = (min(tile_rows, matrix_shape[0]), min(tile_columns, matrix_shape[1]))
+                row, column = kernels.indices()
+                row = kernels.program_id(0) * block[0] + row
+                column = kernels.program_id(1) * block[1] + column
+                coordinates = tuple((row // math.prod(shape[axis + 1:-1])) % size
+                                    for axis, size in enumerate(shape[:-1])) + ((column,) if shape else ())
+                args = tuple(argument.reshape(shapes[operand.index]).at(*(
+                    0 if size == 1 else coordinate for size, coordinate in
+                    zip(shapes[operand.index], coordinates[len(shape)-len(shapes[operand.index]):])))
+                    for argument, operand in zip(args, values))
             if operation in ('add', 'subtract', 'multiply', 'divide'):
                 left, right = args
                 if value.dtype in ('int32', 'uint32', 'int64', 'uint64') and operation != 'divide':
@@ -630,10 +643,17 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 result = 1 / (1 + (-1 * args[0]).exp())
             else:
                 result = getattr(args[0], operation)()
-            matrix_shape = shape if len(shape) == 2 else (1, math.prod(shape))
-            operands = tuple(matrix_view(local[v.index], matrix_shapes[v.index]).broadcast_to(matrix_shape) for v in values)
-            tensors[value.index] = nn._pointwise(program, kernels.expression(result),
-                operands, tile_rows, peer=peer, output_dtype=value.dtype)
+            if direct:
+                matrix_shape = shape if len(shape) == 2 else (1, math.prod(shape))
+                operands = tuple(matrix_view(local[v.index], matrix_shapes[v.index]).broadcast_to(matrix_shape) for v in values)
+                tensors[value.index] = nn._pointwise(program, kernels.expression(result),
+                    operands, tile_rows, peer=peer, output_dtype=value.dtype)
+            else:
+                tensors[value.index] = program.kernel_call(kernels.expression(result),
+                    grid=tuple((size + extent - 1) // extent for size, extent in zip(matrix_shape, block)),
+                    in_specs=(BlockSpec(None),) * len(values),
+                    out_specs=BlockSpec(block, lambda i, j: (i, j)),
+                    out_shape=ShapeDtypeStruct(matrix_shape, value.dtype), peer=peer)(*(local[v.index] for v in values))
             continue
         text, operations = source(((value, operation, values, attributes, owner),))
         item = operations[0]

@@ -270,6 +270,7 @@ def main():
                 broadcast_taken = mx.take_along_axis(selected[:2].reshape(1, 2, 4), logical_indices, axis=2)
                 transposed = selected[:, :, None].transpose(0, 2, 1)
                 rank_joined = mx.concatenate((transposed, transposed), axis=1)
+                rank_joined = rank_joined * graph.constant(np.arange(1, 5, dtype=np.float32).reshape(1, 1, 4)) + 1
                 reshaped = selected.reshape(2, 4, 2)[:, :, ::-1]
             logical_values = dict(take=taken, broadcast_take=broadcast_taken,
                 transpose=transposed, concatenate=rank_joined, reshape_gather=reshaped)
@@ -718,7 +719,7 @@ def main():
                 logical_expected = dict(
                     take=np.take_along_axis(selected_expected.reshape(2, 2, 4), index_values.reshape(2, 2, 1), axis=2).reshape(4, 1),
                     broadcast_take=np.take_along_axis(selected_expected[:2].reshape(1, 2, 4), index_values.reshape(2, 2, 1), axis=2).reshape(4, 1),
-                    transpose=selected_expected, concatenate=np.repeat(selected_expected, 2, axis=0),
+                    transpose=selected_expected, concatenate=np.repeat(selected_expected, 2, axis=0) * np.arange(1, 5) + 1,
                     reshape_gather=selected_expected.reshape(2, 4, 2)[:, :, ::-1].reshape(8, 2))
                 logical_early = {name: results[:len(results)//2] for name, results in logical_results.items()}
                 wait_for(tuple(result for results in logical_early.values() for result in results))
