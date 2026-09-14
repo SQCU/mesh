@@ -1,0 +1,371 @@
+{
+  "date": "2026-09-14",
+  "source_revision": "d6ac83a",
+  "installed_source_revision_both_nodes": "245f4dc",
+  "library_revision": "a64c782",
+  "caller_revision": "103e4d0",
+  "example_revision": "d6ac83a",
+  "native_revision": "243b947",
+  "runs": [
+    {
+      "prefix": "integer-dot-metal",
+      "backend": "metal",
+      "paired": false,
+      "gold_dtype": "float32",
+      "integer_dtypes": [
+        "int32",
+        "uint32",
+        "int64",
+        "uint64",
+        "bool"
+      ],
+      "generations": 2,
+      "mixed_cases": 2,
+      "exit_code": 0,
+      "peer_exit_code": null,
+      "peer_shutdown": null,
+      "configured_functions": 6383,
+      "completed_submissions": 12609,
+      "integer_dot_timings_ms": {
+        "int32": {
+          "early": {
+            "count": 2,
+            "mean": 0.7734165,
+            "sample_variance": 0.009000391944500013
+          },
+          "complete": {
+            "count": 2,
+            "mean": 1.6258955,
+            "sample_variance": 0.006426945312500001
+          }
+        },
+        "uint32": {
+          "early": {
+            "count": 2,
+            "mean": 0.763917,
+            "sample_variance": 0.016714135778
+          },
+          "complete": {
+            "count": 2,
+            "mean": 1.6061665,
+            "sample_variance": 0.020033413944499995
+          }
+        },
+        "int64": {
+          "early": {
+            "count": 2,
+            "mean": 0.948313,
+            "sample_variance": 0.019363545631999973
+          },
+          "complete": {
+            "count": 2,
+            "mean": 1.9054375,
+            "sample_variance": 0.07609875781249993
+          }
+        },
+        "uint64": {
+          "early": {
+            "count": 2,
+            "mean": 0.8431875,
+            "sample_variance": 0.00017813281249999953
+          },
+          "complete": {
+            "count": 2,
+            "mean": 1.6051045,
+            "sample_variance": 0.018696945312500015
+          }
+        },
+        "bool": {
+          "early": {
+            "count": 2,
+            "mean": 0.763896,
+            "sample_variance": 0.007786521632000002
+          },
+          "complete": {
+            "count": 2,
+            "mean": 1.531438,
+            "sample_variance": 0.0013412056320000088
+          }
+        }
+      },
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 17.108292,
+        "invocations_per_second": 175.35356539390375,
+        "first_section_ms": 14.61625,
+        "completion_ms": {
+          "count": 3,
+          "mean": 15.687916666666666,
+          "sample_variance": 1.5180642645973355
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 12609,
+          "completed": 12609,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.040601729,
+          "cpu_submitted": 0
+        }
+      },
+      "artifacts": [
+        "integer-dot-metal.jsonl.gz",
+        "integer-dot-metal-trace.json.gz"
+      ],
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --local --backend metal --dtype float32 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/integer-dot-metal-trace.json"
+    },
+    {
+      "prefix": "integer-dot-cpu",
+      "backend": "cpu",
+      "paired": false,
+      "gold_dtype": "float32",
+      "integer_dtypes": [
+        "int32",
+        "uint32",
+        "int64",
+        "uint64",
+        "bool"
+      ],
+      "generations": 2,
+      "mixed_cases": 2,
+      "exit_code": 0,
+      "peer_exit_code": null,
+      "peer_shutdown": null,
+      "configured_functions": 6383,
+      "completed_submissions": 12609,
+      "integer_dot_timings_ms": {
+        "int32": {
+          "early": {
+            "count": 2,
+            "mean": 0.2973335,
+            "sample_variance": 0.0104521219445
+          },
+          "complete": {
+            "count": 2,
+            "mean": 0.667667,
+            "sample_variance": 0.00970698177800001
+          }
+        },
+        "uint32": {
+          "early": {
+            "count": 2,
+            "mean": 0.20625,
+            "sample_variance": 8.778124999999997e-05
+          },
+          "complete": {
+            "count": 2,
+            "mean": 0.4088335,
+            "sample_variance": 0.00018530050050000034
+          }
+        },
+        "int64": {
+          "early": {
+            "count": 2,
+            "mean": 0.3914165,
+            "sample_variance": 2.1667944500000035e-05
+          },
+          "complete": {
+            "count": 2,
+            "mean": 0.7848955,
+            "sample_variance": 5.382031250000024e-05
+          }
+        },
+        "uint64": {
+          "early": {
+            "count": 2,
+            "mean": 0.2869165,
+            "sample_variance": 0.015254280444500003
+          },
+          "complete": {
+            "count": 2,
+            "mean": 0.4901045,
+            "sample_variance": 0.017695507812499997
+          }
+        },
+        "bool": {
+          "early": {
+            "count": 2,
+            "mean": 0.20356200000000002,
+            "sample_variance": 0.00011187088200000019
+          },
+          "complete": {
+            "count": 2,
+            "mean": 0.48627050000000005,
+            "sample_variance": 0.01533438281250001
+          }
+        }
+      },
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.713375,
+        "invocations_per_second": 636.4865940011139,
+        "first_section_ms": 3.734708,
+        "completion_ms": {
+          "count": 3,
+          "mean": 4.499847,
+          "sample_variance": 0.033909913962999964
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 12609,
+          "completed": 12609,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 12609
+        }
+      },
+      "artifacts": [
+        "integer-dot-cpu.jsonl.gz",
+        "integer-dot-cpu-trace.json.gz"
+      ],
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --local --backend cpu --dtype float32 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/integer-dot-cpu-trace.json"
+    },
+    {
+      "prefix": "integer-dot-paired",
+      "backend": "metal",
+      "paired": true,
+      "gold_dtype": "float16",
+      "integer_dtypes": [
+        "int32",
+        "uint32",
+        "int64",
+        "uint64",
+        "bool"
+      ],
+      "generations": 2,
+      "mixed_cases": 2,
+      "exit_code": 0,
+      "peer_exit_code": 0,
+      "peer_shutdown": "SIGTERM",
+      "configured_functions": 6319,
+      "completed_submissions": 11924,
+      "integer_dot_timings_ms": {
+        "int32": {
+          "early": {
+            "count": 2,
+            "mean": 0.8534999999999999,
+            "sample_variance": 0.0010313973620000006
+          },
+          "complete": {
+            "count": 2,
+            "mean": 1.6440625,
+            "sample_variance": 0.03176283692450001
+          }
+        },
+        "uint32": {
+          "early": {
+            "count": 2,
+            "mean": 0.931146,
+            "sample_variance": 0.006908060882000004
+          },
+          "complete": {
+            "count": 2,
+            "mean": 1.851979,
+            "sample_variance": 0.03076241688199997
+          }
+        },
+        "int64": {
+          "early": {
+            "count": 2,
+            "mean": 1.3204375,
+            "sample_variance": 0.0009772178404999976
+          },
+          "complete": {
+            "count": 2,
+            "mean": 2.574729,
+            "sample_variance": 0.025604034631999985
+          }
+        },
+        "uint64": {
+          "early": {
+            "count": 2,
+            "mean": 0.9955624999999999,
+            "sample_variance": 0.0001925703124999968
+          },
+          "complete": {
+            "count": 2,
+            "mean": 1.9926244999999998,
+            "sample_variance": 0.0004702324444999966
+          }
+        },
+        "bool": {
+          "early": {
+            "count": 2,
+            "mean": 0.9812080000000001,
+            "sample_variance": 0.04950734577800002
+          },
+          "complete": {
+            "count": 2,
+            "mean": 1.9767915,
+            "sample_variance": 0.0565041259445
+          }
+        }
+      },
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 15.1495,
+        "invocations_per_second": 198.02633750288788,
+        "first_section_ms": 10.616709,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.353250333333335,
+          "sample_variance": 0.4803881429723342
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 11924,
+          "completed": 11924,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0376613,
+          "cpu_submitted": 0
+        }
+      },
+      "artifacts": [
+        "integer-dot-paired.jsonl.gz",
+        "integer-dot-paired-trace.json.gz",
+        "integer-dot-paired-peer.jsonl.gz",
+        "integer-dot-paired-peer-trace.json.gz"
+      ],
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --backend metal --dtype float16 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/integer-dot-paired-trace.json"
+    }
+  ],
+  "geometry": {
+    "abi": 25,
+    "arena_pages": 65536,
+    "block_pages": 4,
+    "page_bytes": 16384,
+    "qps": 1,
+    "registered_bytes_per_node": 1097203712
+  },
+  "peer_command": "PYTHONPATH=.build/gold-package .build/xonotic-env/bin/python examples/streaming-algebra.py 1 --backend metal --dtype float16 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/integer-dot-paired-peer-trace.json",
+  "scope": [
+    "Integer side cases execute on rank zero; paired gold/fanout crosses actual RDMA. New integer numerical kernels are not separately measured on rank one.",
+    "Timing is host-observed elapsed time across existing example publication/observation, not physical GPU/wire occupancy.",
+    "No matched old-emitter or fastest-backend baseline; no speedup or no-regression claim.",
+    "Exact modular/boolean checks cover same-dtype contractions, empty K, both transpose flags, singleton batch broadcast, ragged panels, direct I64 composed dot and two in-range mixed conversions.",
+    "The typed kernel has a serial local K loop and lanes across output columns; integer microtiling/vectorization and full performance acceptance remain unfinished."
+  ]
+}

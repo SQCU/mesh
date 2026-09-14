@@ -1606,3 +1606,55 @@ Early observation times have count 2 each: CPU mean 0.4298125 ms, sample varianc
 workflow rank-zero mean 0.7445 ms, variance 0.00114003125 ms². Full observations,
 commands and traces are retained. These host intervals are neither a physical
 compute/wire occupancy measurement nor a matched speedup comparison.
+
+## Share exact integer and boolean contractions
+
+`a64c782` extends the existing dot region owner with typed integer panels and
+boolean truth accumulation. Unsigned arithmetic precedes every modular product
+and sum; typed partial merges also apply inside a composed expression. Empty K
+produces the correct zero/false identity. Integral operands in a floating dot
+use cached numerical cast panels, and output conversion uses a typed expression
+when native floating affine cannot represent the requested type. Existing
+floating native contractions retain their implementation.
+
+`103e4d0` sends every represented Xonotic rank>=2 matmul through shared batched
+views and `nn.linear`, retaining the graph's declared output dtype. It deletes
+the custom FP32 integer contraction, its threadgroup tile source, launch
+geometry and dead clear machinery. Ordering is the sole remaining custom
+numerical source path. The [mechanism](algorithm-sources.md#typed-integer-contractions)
+links the arithmetic and panel decomposition to their primary sources.
+
+`1608fd9`, `5ca7d30` and `d6ac83a` extend the existing workflow with I32/U32/I64/U64
+and boolean contractions. Values cross FP32/FP64 exact-integer limits and
+exercise modular overflow. Both transpose flags, singleton batch broadcasting,
+ragged K panels, a second contraction, pointwise consumers and repeated reuse
+are included. The direct I64 expression checks a dot epilogue with two partials.
+Empty K identities and in-range mixed arithmetic/output conversions are checked;
+boolean weights admit multiple true contributions across separate K panels.
+An absent batch remains independent of a ready batch's full composed chain.
+
+The integer panel kernel currently maps output columns across lanes and uses
+a serial local K loop over actual source strides. This preserves panel/row
+parallelism and exact arithmetic, but is not optimized integer microtiling or
+a fastest-backend performance result. General indexing, storage/fusion/placement
+and matched full-plan performance acceptance remain open.
+
+[`integer-dot-provenance.json`](../measurements/lowering-2026-09-13/integer-dot-provenance.json)
+records source `d6ac83a`, installed source `245f4dc` and library `a64c782` on both
+nodes. CPU and Metal each configured 6383 functions and completed 12609
+submissions. The paired Metal workflow configured 6319 functions and completed
+11924 rank-zero submissions. Every runtime/process terminal code is zero; the
+peer exited zero after SIGTERM. Both bridges returned to ready, unpaired,
+zero-client state with their existing registered arena geometry.
+
+All five typed contraction chains match their exact references across both
+reuse generations, including empty K, boolean multiple contributions and the
+direct I64 dot epilogue. Mixed I32→FP32 arithmetic→I32 publication returns one;
+the floating-output case returns 1.25. A complete early batch's contraction
+chain is observed while the other batch remains unpublished. Raw observations,
+traces and per-dtype timing count/mean/sample variance are retained.
+
+The integer side cases execute on rank zero; paired gold/fanout crosses actual
+RDMA. New integer numerical kernels are not separately measured on rank one.
+These host observation intervals establish the covered progress/correctness
+behavior, not physical wire/GPU overlap duration or a matched speedup.
