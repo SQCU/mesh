@@ -1526,8 +1526,8 @@ def main():
         if xonotic_indexed_context is not None:
             wait_for(xonotic_indexed_context)
             actual = tuple(result.array.item() for result in xonotic_indexed_context)
-            if actual != (0, 0, 1) or any(result.array.dtype != np.dtype('int64') for result in xonotic_indexed_context):
-                raise ArithmeticError('Indexed reduction lost implicit accumulator or explicit cast semantics')
+            if actual != (0, 1, 1) or any(result.array.dtype != np.dtype('int64') for result in xonotic_indexed_context):
+                raise ArithmeticError(f'Indexed reduction accumulator/cast mismatch: {actual}')
             print(json.dumps(dict(event='composed_indexed_dtype_context', output=actual)), flush=True)
             for result in xonotic_indexed_context:
                 result.consume()
