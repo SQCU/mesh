@@ -173,16 +173,6 @@ def kernel(node):
         body = [f'ulong t=position.x; if(t>={expr(math_product(shape))}) return;', gather_address(source, indices, shape, attrs)]
         body.append(atomic(output, read(values[-1]), 'address'))
         clear, mode = True, ('gradient', values[-1].index)
-    elif op == 'take_along_axis_vjp':
-        source, indices = values[:2]
-        shape = values[-1].shape
-        axis = attrs['axis']
-        body = [f'ulong t=position.x; if(t>={expr(math_product(shape))}) return;', coordinate_code(shape)]
-        offset = '+'.join(f'c{i}*v[{indices.index}].stride[{i}]' for i, size in enumerate(indices.shape) if size != 1) or '0'
-        body.append(f'long selected=long({read(indices,offset)}); if(selected<0) selected+=v[{source.index}].shape[{axis}];')
-        address = '+'.join(f'{"selected" if i == axis else "0" if size == 1 else "c"+str(i)}*v[{source.index}].stride[{i}]' for i, size in enumerate(source.shape)) or '0'
-        body.append(atomic(output, read(values[-1]), address))
-        clear, mode = True, ('gradient', values[-1].index)
     elif op.startswith('reduce_'):
         source = values[0]
         axes = attrs['axes']
@@ -368,7 +358,7 @@ def source(nodes):
     return PREFIX + '\n'.join(sources.values()), kernels
 
 
-# ../../../design/algorithm-sources.md#xonotic-block-indexed-lowering
+# ../../../design/algorithm-sources.md#xonotic-take-transpose
 def matrix_view(tensor, shape):
     from mesh import Tensor, Ref
     from mesh._native import View as NativeView
@@ -377,16 +367,24 @@ def matrix_view(tensor, shape):
         return tensor
     if tensor.shape[::-1] == shape and 1 in shape:
         return tensor.T
-    ref = tensor.region(0, 0, *tensor.shape)
-    array = ref.array.view()
-    array.shape = shape
-    view = NativeView.from_buffer_copy(ref.view)
-    view.rows, view.columns = shape
-    view.row_stride, view.column_stride = (stride // tensor.dtype.itemsize for stride in array.strides)
+    if tensor.shape[1] == 1 and tensor.shape[0] == shape[0] * shape[1] and tensor.block_shape[0] % shape[1] == 0:
+        block_shape = (tensor.block_shape[0] // shape[1], shape[1])
+        grid = (tensor.grid[0], 1)
+        regions = tuple((coordinate, ref, (ref.shape[0] // shape[1], shape[1])) for coordinate, ref in tensor.blocks.items())
+    else:
+        block_shape, grid = shape, (1, 1)
+        regions = (((0, 0), tensor.region(0, 0, *tensor.shape), shape),)
     result = object.__new__(Tensor)
     result.program, result.dtype, result.handle = tensor.program, tensor.dtype, tensor.handle
-    result.shape, result.block_shape, result.grid = shape, shape, (1, 1)
-    result.blocks = {(0, 0): Ref(tensor.program, view, tensor.dtype)}
+    result.shape, result.block_shape, result.grid = shape, block_shape, grid
+    result.blocks = {}
+    for coordinate, ref, extent_shape in regions:
+        array = ref.array.view()
+        array.shape = extent_shape
+        view = NativeView.from_buffer_copy(ref.view)
+        view.rows, view.columns = extent_shape
+        view.row_stride, view.column_stride = (stride // tensor.dtype.itemsize for stride in array.strides)
+        result.blocks[coordinate] = Ref(tensor.program, view, tensor.dtype)
     return result
 
 
@@ -430,6 +428,16 @@ def gather_expression(kernels, arguments, values, shapes, attributes, coordinate
     return arguments[0].at(*source_coordinates)
 
 
+# ../../../design/algorithm-sources.md#xonotic-take-transpose
+def take_coordinates(kernels, source_shape, index_shape, index_dtype, index_value, axis, coordinates):
+    index_at = tuple(0 if size == 1 else coordinate for size, coordinate in zip(index_shape, coordinates))
+    selected = index_value.at(*index_at)
+    if index_dtype.startswith('int'):
+        selected = kernels.select(selected < 0, selected + source_shape[axis], selected)
+    return tuple(selected if i == axis else 0 if size == 1 else coordinates[i]
+                 for i, size in enumerate(source_shape))
+
+
 # ../../../design/algorithm-sources.md#xonotic-output-liveness
 def row_gather_gradient(value, operation, values, attributes, shapes):
     return operation == 'gather_vjp' and len(values) == 3 and len(shapes[values[1].index]) == 1 and (
@@ -457,7 +465,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         if value.index not in live or value.index in inputs:
             continue
         nodes.append(node)
-        dependencies = values[1:] if row_gather_gradient(value, operation, values, attributes, shapes) else values
+        dependencies = values[1:] if operation == 'take_along_axis_vjp' or row_gather_gradient(value, operation, values, attributes, shapes) else values
         live.update(operand.index for operand in dependencies)
     nodes.reverse()
     constants = {value.index: data for value, data in graph.constants.values()}
@@ -486,7 +494,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         row_gradient = row_gather_gradient(value, operation, values, attributes, shapes)
         local = {}
         for operand in values:
-            if row_gradient and operand.index == values[0].index:
+            if (row_gradient or operation == 'take_along_axis_vjp') and operand.index == values[0].index:
                 continue
             tensor = tensors[operand.index]
             sender = owners[operand.index]
@@ -520,6 +528,43 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                 out_specs=BlockSpec(block, lambda i, j: (i, j)),
                 out_shape=ShapeDtypeStruct(output_shape, value.dtype), peer=peer)(base, destinations, updates)
             tensors[value.index] = result.T if vector else result
+            continue
+        # ../../../design/algorithm-sources.md#xonotic-take-transpose
+        if operation == 'take_along_axis_vjp':
+            indices, cotangent = (local[v.index] for v in values[1:])
+            cotangent_shape = shapes[values[-1].index]
+            updates = math.prod(cotangent_shape)
+            key_block = (min(tile_rows, updates), 1)
+            row, _ = kernels.indices()
+            ordinal = kernels.program_id(0) * key_block[0] + row
+            coordinates = tuple((ordinal // math.prod(cotangent_shape[i + 1:])) % size
+                                for i, size in enumerate(cotangent_shape))
+            index_value, = kernels.arguments(1)
+            source_at = take_coordinates(kernels, shape, shapes[values[1].index], values[1].dtype,
+                index_value.reshape(shapes[values[1].index]), attributes['axis'], coordinates)
+            destination = sum(coordinate * math.prod(shape[i + 1:]) for i, coordinate in enumerate(source_at))
+            valid = True
+            for coordinate, size in zip(source_at, shape):
+                valid = kernels.select(valid, (coordinate >= 0) & (coordinate < size), False)
+            destination = kernels.select(valid, destination, 0xffffffff)
+            destinations = program.kernel_call(kernels.expression(destination),
+                grid=((updates + key_block[0] - 1) // key_block[0], 1),
+                in_specs=(BlockSpec(None),), out_specs=BlockSpec(key_block, lambda i, j: (i, j)),
+                out_shape=ShapeDtypeStruct((updates, 1), 'int64'), peer=peer)(indices)
+            storage_shape = (math.prod(shape[:-1]), shape[-1])
+            block = (min(tile_rows, storage_shape[0]) * storage_shape[1], 1)
+            base = program.tensor((math.prod(shape), 1), block_shape=block, dtype=value.dtype)
+            if program.node == peer:
+                for ref in base.blocks.values():
+                    program.constant(ref, np.zeros(ref.shape, dtype=value.dtype))
+            base_value, index_value, cotangent_value = kernels.arguments(3)
+            row, _ = kernels.indices()
+            result = program.kernel_call(kernels.expression(kernels.indexed_add(base_value, index_value,
+                cotangent_value.reshape((updates,)).at(row))),
+                grid=base.grid, in_specs=(BlockSpec(None),) * 3,
+                out_specs=BlockSpec(block, lambda i, j: (i, j)),
+                out_shape=ShapeDtypeStruct(base.shape, value.dtype), peer=peer)(base, destinations, cotangent)
+            tensors[value.index] = matrix_view(result, storage_shape)
             continue
         if operation == 'scatter_add' and len(shape) == 1:
             base, destinations, updates = (matrix_view(local[v.index], (math.prod(shapes[v.index]), 1)) for v in values)
@@ -567,13 +612,8 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
                                             for item in attributes['mapping'])
                 result = gather_expression(kernels, arguments, values, shapes, resolved, coordinates)
             elif operation == 'take_along_axis':
-                axis = attributes['axis']
-                index_at = tuple(0 if size == 1 else coordinate for size, coordinate in zip(shapes[values[1].index], coordinates))
-                selected = arguments[1].at(*index_at)
-                if values[1].dtype.startswith('int'):
-                    selected = kernels.select(selected < 0, selected + shapes[values[0].index][axis], selected)
-                source_at = tuple(selected if i == axis else 0 if size == 1 else coordinates[i]
-                                  for i, size in enumerate(shapes[values[0].index]))
+                source_at = take_coordinates(kernels, shapes[values[0].index], shapes[values[1].index],
+                    values[1].dtype, arguments[1], attributes['axis'], coordinates)
                 result = arguments[0].at(*source_at)
             elif operation == 'transpose':
                 source_at = [0] * len(shape)

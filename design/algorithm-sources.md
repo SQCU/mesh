@@ -2159,3 +2159,44 @@ The existing scatter workflow supplies delayed mask pages, a false-masked update
 whose value lookup points to a delayed page, empty destination routing and
 repeated storage reuse. Python compilation and source diff review passed for
 this change; operational results are supplied by the parent integration run.
+
+## Xonotic take transpose
+
+The JAX authors implement [gather transposition as scatter addition](https://github.com/jax-ml/jax/blob/main/jax/_src/lax/slicing.py),
+with ScatterDimensionNumbers mirroring the gather dimensions. Xonotic
+`take_along_axis_vjp` now follows that construction through the existing shared
+indexed_add rather than its former custom atomic/clear kernel.
+
+`take_coordinates` supplies the same normalized source-coordinate tuple for
+forward take and its transpose. It broadcasts index singleton dimensions, maps
+source singleton dimensions to zero, and normalizes signed negative indices
+once along the selected axis. The derivative decodes each cotangent ordinal,
+uses that tuple to construct a scalar destination, and discards out-of-domain
+coordinates before linearizing them into a usable destination. The configured
+key function reads indices only. Shared indexed_add reads original cotangent
+pages through logical indexed loads within each destination's segment; it does
+not stage cotangent values into a second tensor.
+
+The primal contributes only shape metadata. Output-root liveness and peer
+replication exclude its numerical input for every take transpose, just as for
+the existing row-gather transpose. Arbitrary source rank, selected axis and
+non-axis broadcast dimensions use the same coordinate formula. Duplicates reduce
+through shared segmented sums with the existing FP32 real accumulation and final
+output dtype.
+
+Zero/output storage is a scalar column with chunks aligned to complete rows of
+the desired physical `(product(prefix_shape), last_dimension)` matrix.
+`matrix_view` reframes those chunks individually using their actual View
+identities and NumPy stride metadata; it never requests a whole multi-block
+region or copies payloads. Tensor/extent/offset identities and the publication
+partition remain intact. This retains a normal matrix view for downstream native
+contractions and existing host exports.
+
+The custom take-along-axis VJP emitter is removed. General gather transposes
+outside the existing efficient row-gather case, and nonvector scatter_add caller
+semantics, remain separate migration work. Scalar destination routing also
+retains the shared scatter allocator's current worst-case capacity cost; this
+change does not claim compact scratch packing. Python compilation and source
+diff review passed. The existing optional Xonotic graph supplies repeated
+broadcast take gradients, delayed cotangent rows and an absent numerical primal;
+operational evidence is recorded by the parent integration run.
