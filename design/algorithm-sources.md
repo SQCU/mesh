@@ -966,6 +966,18 @@ unbounded event history or subtract clocks across nodes.
 
 ## Publication work lists
 
+The direct send predicate does not inspect PRODUCING or wait for its parent
+function to complete: it requires PRESENT over the transfer's source range and
+no READ bit for that send occurrence. A partial CPU publication therefore already
+qualifies while the producer computes other output sections. The reader check
+uses one acquire load per intersecting bitmap word, masked to the exact source
+range, rather than reloading the same word for each page. Algebraically it tests
+`OR_w (READ[w] AND range_mask[w]) == 0`; this is the same condition as the former
+per-page test, including ranges crossing word boundaries. This changes neither
+ownership nor publication semantics. Source review and native compilation are
+the verification; no performance measurement is claimed.
+
+
 The Linux kernel authors' [lockless list API](https://raw.githubusercontent.com/torvalds/linux/master/include/linux/llist.h)
 and [implementation](https://raw.githubusercontent.com/torvalds/linux/master/lib/llist.c)
 provide concurrent insertion with batch detachment (`llist_add` / `llist_del_all`).

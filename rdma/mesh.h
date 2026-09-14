@@ -107,7 +107,10 @@ static inline void mesh_receive_complete(struct hdr *m,uint32_t row,uint32_t pag
 /* design/algorithm-sources.md#async-index-push-contract */
 static inline int mesh_send_postable(struct hdr *m,const struct mesh_transfer *transfer){
   if(!mesh_bits_all(m,MESH_PRESENT,transfer->local_row,m->block))return 0;
-  for(uint32_t i=0;i<m->block;i++)if(mesh_bit(m,MESH_READ+(int)transfer->plane,transfer->local_row+i))return 0;
+  _Atomic uint64_t *read=mesh_plane(m,MESH_READ+(int)transfer->plane);
+  uint32_t first=transfer->local_row,count=m->block;
+  for(uint32_t word=first/64;count && word<=(first+count-1)/64;word++)
+    if(atomic_load_explicit(&read[word],memory_order_acquire)&mesh_word_mask(first,count,word))return 0;
   return 1;
 }
 /* design/algorithm-sources.md#async-index-push-contract */
