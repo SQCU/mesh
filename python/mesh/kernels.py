@@ -641,43 +641,103 @@ def _lower_indexed_add(program, expression, grid, input_specs, output_spec):
             for position, ref in enumerate(candidates):
                 if (ref.view.tensor, ref.view.extent) not in program._constant_extents:
                     _indexed_range(program, function, selector_view, bounds, 2 + position, 1)
-    reverse, total = _group_ordinals(program,
-        tuple(directory.slice(0, 4 * count, 1, count) for directory, count, _ in chunks), 1)
-    reverse_keys = reverse.slice(0, 0, 1, total)
-    reverse_ordinals = reverse.slice(0, total, 1, total)
+    stripes = {}
     for coordinate in itertools.product(*(range(length) for length in grid)):
         target = output_spec.resolve(coordinate)
         index = tuple(output_spec.index_map(*coordinate))
         row, column = (i * block for i, block in zip(index, output_spec.block_shape))
-        initial = base.region(row, column, *target.shape)
-        bounds = program.tensor((1, 2), dtype=np.uint32)[0, 0]
-
-        # design/algorithm-sources.md#segmented-indexed-add
-        def locate(metal, row=row, height=target.shape[0]):
-            return f'''for(uint32_t c=lane;c<2;c+=lanes) {{
-              uint32_t key={row}+c*{height},lo=0,hi={total};
-              while(lo<hi) {{ uint32_t mid=lo+(hi-lo)/2; if(p0[mid]<key)lo=mid+1; else hi=mid; }}
-              p1[c]=lo;
-            }}'''
-
-        _compiled_region(program, (reverse_keys,), bounds, locate)
-        candidates = tuple(partials.region(segment, column, 1, target.shape[1])
+        stripes.setdefault((column, target.shape[1]), []).append((row, target))
+    directories = {}
+    for (column, width), regions in stripes.items():
+        regions.sort(key=lambda region: region[0])
+        coverage = tuple((row, target.shape[0]) for row, target in regions)
+        if any(row + height > next_row for (row, height), (next_row, _) in zip(coverage, coverage[1:])):
+            raise ValueError('Unique-owner indexed sums require disjoint output regions')
+        if coverage not in directories:
+            directories[coverage] = _routing_directory(program, chunks, coverage)
+        owners, reverse_keys, reverse_ordinals, offsets = directories[coverage]
+        candidates = tuple(partials.region(segment, column, 1, width)
             for _, count, partials in chunks for segment in range(count))
+        route, table = _routing_domain(program, owners, reverse_ordinals, offsets, candidates, len(regions))
+        for consumer, (row, target) in enumerate(regions):
+            initial = base.region(row, column, *target.shape)
 
-        # design/algorithm-sources.md#segmented-indexed-add
-        def finish(metal, candidates=candidates, target=target, initial=initial, row=row):
-            declarations, load = _candidate_load(candidates, 4, 'ordinal', '0', 'c', metal)
-            accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t'
-            return declarations, f'''uint32_t lo=p2[0],hi=p2[1],key={row}+r;
-            while(lo<hi) {{ uint32_t mid=lo+(hi-lo)/2; if(p0[mid]<key)lo=mid+1; else hi=mid; }}
-            for(uint32_t c=lane;c<{target.shape[1]};c+=lanes) {{
-              {accumulator} total=p3[r*{initial.view.row_stride}+c*{initial.view.column_stride}];
-              for(uint32_t k=lo;k<p2[1] && p0[k]==key;k++) {{ uint32_t ordinal=p1[k]; total+={load}; }}
-              p{4+len(candidates)}[r*{target.view.row_stride}+c*{target.view.column_stride}]=total;
-            }}'''
+            # design/algorithm-sources.md#shared-sparse-routing-lowering
+            def finish(metal, target=target, initial=initial, row=row, consumer=consumer):
+                scalar = 'float' if base.dtype.kind == 'f' else {
+                    'i4': 'int32_t', 'i8': 'int64_t', 'u4': 'uint32_t',
+                    'u8': 'uint64_t', 'u1': 'uint8_t'}[base.dtype.kind + str(base.dtype.itemsize)]
+                address = f'(({"device " if metal else ""}const {scalar} *)p4[3*ordinal])'
+                load = f'{address}[c*p4[3*ordinal+2]]'
+                accumulator = 'float' if base.dtype.kind == 'f' else 'uint64_t'
+                return f'''uint32_t lo=p2[{consumer}],end=p2[{consumer+1}],hi=end,key={row}+r;
+                while(lo<hi) {{ uint32_t mid=lo+(hi-lo)/2; if(p0[mid]<key)lo=mid+1; else hi=mid; }}
+                for(uint32_t c=lane;c<{target.shape[1]};c+=lanes) {{
+                  {accumulator} total=p3[r*{initial.view.row_stride}+c*{initial.view.column_stride}];
+                  for(uint32_t k=lo;k<end && p0[k]==key;k++) {{ uint32_t ordinal=p1[k]; total+={load}; }}
+                  p5[r*{target.view.row_stride}+c*{target.view.column_stride}]=total;
+                }}'''
 
-        function = _compiled_region(program, (reverse_keys, reverse_ordinals, bounds, initial, *candidates), target, finish, 4)
-        _indexed_range(program, function, reverse_ordinals, bounds, 4, len(candidates))
+            function = _compiled_region(program, (reverse_keys, reverse_ordinals, offsets, initial, table), target, finish)
+            from . import check
+            check(program.native.algebra_route_attach(program.handle, function, route, consumer))
+
+
+# design/algorithm-sources.md#shared-sparse-routing-lowering
+def _routing_directory(program, chunks, coverage):
+    total = sum(count for _, count, _ in chunks)
+    metadata = program.tensor((1, 2 * total), dtype=np.uint32)[0, 0]
+    keys = tuple(directory.slice(0, 4 * count, 1, count) for directory, count, _ in chunks)
+
+    # design/algorithm-sources.md#shared-sparse-routing-lowering
+    def owner_source(metal):
+        qualifier = 'constant' if metal else 'static const'
+        arrays = f'{qualifier} uint32_t starts[]={{'+','.join(str(row) for row, _ in coverage)+'};\n'
+        arrays += f'{qualifier} uint32_t ends[]={{'+','.join(str(row + height) for row, height in coverage)+'};'
+        lines, origin = [], 0
+        for index, ref in enumerate(keys):
+            count = ref.shape[1]
+            lines.append(f'''for(uint32_t i=lane;i<{count};i+=lanes) {{
+              uint32_t key=p{index}[i],lo=0,hi={len(coverage)},owner=0xffffffffu;
+              while(lo<hi) {{ uint32_t mid=lo+(hi-lo)/2; if(starts[mid]<=key)lo=mid+1; else hi=mid; }}
+              if(lo && key<ends[lo-1])owner=lo-1;
+              p{len(keys)}[{origin}+i]=owner;
+              p{len(keys)}[{total+origin}+i]=owner==0xffffffffu?0xffffffffu:key;
+            }}''')
+            origin += count
+        return arrays, '\n'.join(lines)
+
+    _compiled_region(program, keys, metadata, owner_source)
+    owners = metadata.slice(0, 0, 1, total)
+    reverse, _ = _group_ordinals(program, (metadata.slice(0, total, 1, total),), 1)
+    reverse_keys = reverse.slice(0, 0, 1, total)
+    reverse_ordinals = reverse.slice(0, total, 1, total)
+    offsets = program.tensor((1, len(coverage) + 1), dtype=np.uint32)[0, 0]
+
+    # design/algorithm-sources.md#shared-sparse-routing-lowering
+    def offset_source(metal):
+        boundaries = tuple(row for row, _ in coverage) + (sum(coverage[-1]),)
+        array = f'{"constant" if metal else "static const"} uint32_t boundaries[]={{'+','.join(map(str, boundaries))+'};'
+        return array, f'''for(uint32_t c=lane;c<{len(boundaries)};c+=lanes) {{
+          uint32_t key=boundaries[c],lo=0,hi={total};
+          while(lo<hi) {{ uint32_t mid=lo+(hi-lo)/2; if(p0[mid]<key)lo=mid+1; else hi=mid; }}
+          p1[c]=lo;
+        }}'''
+
+    _compiled_region(program, (reverse_keys,), offsets, offset_source)
+    return owners, reverse_keys, reverse_ordinals, offsets
+
+
+# design/algorithm-sources.md#shared-sparse-routing-lowering
+def _routing_domain(program, owners, ordinals, offsets, candidates, consumers):
+    import ctypes as C
+    from . import Ref, check
+    from ._native import View
+    route = program.native.algebra_route_create(program.handle, owners.view, ordinals.view, offsets.view,
+        (View * len(candidates))(*(ref.view for ref in candidates)), len(candidates), consumers)
+    if not route:
+        check(C.get_errno() or 12)
+    return route, Ref(program, program.native.algebra_route_table(program.handle, route), np.uint64)
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
