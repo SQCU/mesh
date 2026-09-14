@@ -2286,9 +2286,9 @@ single target view when row-major flat traversal is affine: either source axis
 is singleton, or row_stride equals source_columns * column_stride. This includes
 uniformly strided storage without treating arbitrary one-block transposes as
 reshape-compatible. Otherwise the target tile is
-(1, gcd(target columns, source columns, source block columns)). Every tile start
-and end aligns with source row and column-block boundaries, so its flat ordinal
-identifies exactly one source row fragment. `Tensor.region` and `Ref.slice`
+(1, gcd(target columns, source columns, source block columns)). Source row and
+column-block boundaries fall on this fragment grid, so no tile crosses them;
+its flat ordinal identifies exactly one source row fragment. `Tensor.region` and `Ref.slice`
 preserve that fragment's tensor, extent, offset and actual strides, including
 transposed or broadcast input storage. Native view metadata describes the target
 shape without copying numerical operands or launching a reshape operation.

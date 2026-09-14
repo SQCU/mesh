@@ -977,3 +977,37 @@ reshape aliases crossing backing partitions remain a logical-layout gap; they
 are not copied into alternative dense storage. Broader operator coverage,
 shared metadata/partial storage and launch optimization, and full nine-step
 performance acceptance remain unfinished.
+
+## Partitioned scatter base views
+
+`b642e24` generalizes matrix_view with regular metadata fragments whose width is
+an exact common divisor of target columns, source columns and source column-block
+width. Every fragment lies within one source row/backing region; its logical flat
+ordinal determines the original Tensor.region slice. Tensor/extent/offset and
+strides remain unchanged. `a64eb23` retains a single view where row-major flat
+traversal is provably affine, alongside existing equal-shape, vector-transpose
+and aligned-column cases. This closes the previous partition-crossing reshape
+restriction without a numerical copy or reshape kernel. Aliases retain original
+page readiness and cannot be independently published as whole extents.
+
+`4b3d3f7` makes the existing rank-scatter base a runtime 4×6 tensor with 1×2
+backing blocks, reshaped logically to 4×2×3. The new mapping therefore crosses
+original column partitions. Original base row 2 remains unpublished alongside
+the last update block while consumers of rows 0, 1 and 3 complete. Publishing
+base row 2 alone does not complete its consumer; the required updates still must
+arrive. Final values and the second reuse generation pass exact comparisons.
+
+Final library/caller revision `a64eb23` passes CPU and Metal float32 workflows
+with 3796 completed submissions each, and paired Metal float16 with 3111
+rank-zero completions. Existing gather/take gradients, matrix scatter, masked
+scatter, contractions, reductions and fanout continue to pass. The reshape side
+case runs in float32 on rank zero; only gold/fanout cross RDMA. The peer exits
+zero after SIGTERM. `scatter-base-view-provenance.json` records compressed raw
+logs/traces, revisions, configuration and timing count/mean/sample variance.
+
+The no-copy conclusion comes from the source's metadata slice/view construction,
+not from timings. A width gcd of one can require one metadata entry per scalar
+and can shrink scatter's numerical output regions. This explicit setup/launch
+cost remains optimization work; these examples do not establish exhaustive layout
+coverage or a matched speedup. The full nine-step performance and operator
+coverage requirements remain open.
