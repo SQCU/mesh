@@ -723,3 +723,42 @@ pre-migration column-reduction timing baseline was collected; no speedup follows
 from this evidence. Multi-axis and broader logical-rank reductions, other
 reduction families, general scatter composition, remaining callers and the
 nine-step plan's performance acceptance remain open.
+
+## Composable transpose and complete matrix sum axes
+
+`fd74955` adds `.T` and `.sum(axis=...)` to the shared expression owner, with the
+existing default of axis one. Axis zero and both-axis reductions compose through
+transposition and the existing tiled sums. Xonotic now routes all nonempty vector
+and matrix sum/mean axis sets through this owner, including full matrix sums and
+means. Logical rank above two and other reduction families remain separate work.
+A transposed output root writes through the destination's transposed view, avoiding
+an extra output-copy function. `ea0b245` preserves the previous independently
+published reduction output sizes after this caller migration.
+
+Initial numerical evaluation exposed a computed-panel dtype defect: the old
+unconditional FP32 temporary lost exact integer values before reduction.
+`96033b5` makes computed panel storage follow expression dtype. `f361533`
+distributes transpose through pointwise expressions and reverses contraction
+operands at setup, preserving fusion over existing transposed source views.
+Double transpose cancels. Intermediate full-sum statistics preserve accumulator
+precision across both axes. This is a setup representation change, with the
+same native page-stamp invocation and registered operand storage.
+
+The final local CPU and Metal float32 examples each complete 2142 submissions.
+Direct and Xonotic row/column integer sums preserve exact cancellation and modular
+overflow; the full matrix sum returns 4295032833. The floating full-matrix mean
+composition returns 30 and 158 after its scalar multiplier in two generations.
+Existing independently ready row outputs, column means, delayed indexed inputs,
+scatter, mixed contractions and fanout continue to pass. The paired Metal
+float16 gold workflow also passes. The new integer and mean side cases execute
+on rank zero, while gold and fanout cross actual RDMA. The peer exits normally
+after SIGTERM.
+
+`axes-provenance.json` records final installed library and caller revisions,
+configuration, compressed logs/traces, and timing count/mean/sample variance.
+These examples do not establish a matched latency/throughput improvement or
+complete coverage of arbitrary transposed contractions. Load-valued scatter
+integration was reviewed with the scatter agent; the bounded-loop and dependency
+requirements are recorded in `scatter-lowering.md`. That integration, broader
+rank/axis operations and derivatives, remaining caller migration, storage/launch
+optimization, collective placement and matched performance acceptance remain open.

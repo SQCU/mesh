@@ -201,3 +201,24 @@ normalized against the destination extent; values still outside the extent becom
 the absent sentinel. This prevents an out-of-range 64-bit index from wrapping into
 a valid destination during metadata narrowing. The validity mask is numerical
 scatter semantics and does not add a tensor-wide readiness condition.
+
+## Next shared-load integration
+
+Source review on September 13 after `ea0b245` identifies the next replacement:
+retain the segment reducer's exact `[bounds.lo,bounds.hi)` loop and share the
+expression owner's scalar load emission and predicate-aware access binding with
+it. A full-width `.sum()` over the directory would scan every ordinal for every
+segment and would therefore change the algorithm's work. Materializing a whole
+chunk of indexed update values could also add dependencies on source regions
+belonging to other destinations. Neither is the intended integration.
+
+The internal iteration domain must retain ordinal and bounds Refs, feature
+origin/width, active-count Ref and segment slot, actual candidate pointer positions
+and page maps/strides, selector ranges, and producer function IDs returned by
+binding. Nested coordinate loads require the same per-segment dependency scope.
+Load-valued masks belong in that bounded numerical predicate; putting them in
+chunk key production could prevent unrelated destinations from closing their
+routing domains. Masked contributions then produce zero in the corresponding
+segment. Selector capacity still needs explicit setup sizing or packing: bounded
+writes alone do not prove bounded aggregate metadata. This is a source-derived
+implementation direction, not completed load-valued scatter support.
