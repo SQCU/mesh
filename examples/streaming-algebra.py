@@ -252,11 +252,13 @@ def main():
         xonotic_ordering = []
         scatter_bases = {}
         xonotic_take_gradient = None
-        if args.xonotic and args.rank == 0:
+        xonotic_alias = None
+        if args.xonotic:
             import sys
             sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'xonotic'))
             from solver.strat import tensor as mx
             from solver.strat.tensor_metal import kernel_calls
+        if args.xonotic and args.rank == 0:
             x_source = program.tensor((4, 4), (2, 4), dtype=np.float32)
             x_indices = program.tensor((1, 4), (1, 2), dtype=np.int64)
             x_tail = program.tensor((2, 4), dtype=np.float32)
@@ -873,6 +875,25 @@ def main():
             program.copy(value.on(sender), received.on(receiver), queue=0)
             return received
 
+        # design/algorithm-sources.md#canonical-view-replication
+        if args.xonotic:
+            alias_source = program.tensor((2, 4), (1, 4), dtype=np.float32)
+            graph = mx.Graph()
+            with graph:
+                alias_input = graph.input('alias_source', (2, 4))
+                alias_output = alias_input.reshape(4, 2).transpose(1, 0)
+            lowered = kernel_calls(program, graph, (), {alias_input.index: alias_source},
+                outputs=(alias_output,), root_peer=0, tile_rows=2, tile_columns=1)
+            receiver = 0 if args.local else 1
+            alias = program.replicate(lowered[alias_output.index].on(0), receiver)
+            alias_arg, = kernels.arguments(1)
+            alias_consumer = program.kernel_call(kernels.expression(alias_arg*2+1), grid=(1, 4),
+                in_specs=(BlockSpec(None),), out_specs=BlockSpec((2, 1), lambda i,j: (i,j)),
+                out_shape=ShapeDtypeStruct((2, 4), np.float32), peer=receiver)(alias)
+            returned = program.replicate(alias_consumer.on(receiver), 0)
+            alias_results = tuple((i*returned.block_shape[0], j*returned.block_shape[1], program.export(ref))
+                                  for (i,j),ref in sorted(returned.blocks.items()))
+            xonotic_alias = alias_source, alias_results
         fanout_source = program.tensor((2, 4), dtype=dtype)
         fanout_received = exchange(fanout_source, 0, 1)
         fanout_arg, fanout_factor = kernels.arguments(2)
@@ -1453,6 +1474,29 @@ def main():
                 for results in observations:
                     for i, j, result in results:
                         result.consume()
+        if xonotic_alias is not None:
+            storage, observations = xonotic_alias
+            for generation in range(2):
+                wait_for(tuple(storage.blocks.values()), 'writable')
+                values = np.arange(8, dtype=np.float32).reshape(2, 4) + np.float32(generation*10)
+                expected = values.reshape(4, 2).T*np.float32(2)+np.float32(1)
+                started = time.monotonic_ns()
+                for row in (generation, 1-generation):
+                    with program.write(storage[row, 0]) as destination:
+                        destination[...] = values[row:row+1]
+                    wait_for(tuple(result for i,j,result in observations if j//2 == row))
+                    for i,j,result in observations:
+                        if j//2 == row:
+                            if not np.array_equal(result.array, expected[i:i+result.array.shape[0], j:j+result.array.shape[1]]):
+                                raise ArithmeticError('Replicated fragmented alias lost its offsets or strides')
+                        elif row == generation and result.ready:
+                            raise ArithmeticError('Replicated alias consumed an unpublished source extent')
+                    print(json.dumps(dict(event='xonotic_alias_early' if row == generation else 'xonotic_alias_complete',
+                        generation=generation, published_row=row, remote=not args.local,
+                        elapsed_ms=(time.monotonic_ns()-started)/1e6,
+                        output=[(i,j,result.array.tolist()) for i,j,result in observations if j//2 == row])), flush=True)
+                for i,j,result in observations:
+                    result.consume()
         for dtype_name, storage, observations, first_function, last_function, generations in xonotic_ordering:
             ordering_trace = program.trace
             for generation, (values, expected) in enumerate(generations):
