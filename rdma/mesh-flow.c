@@ -220,7 +220,6 @@ static void link_publications(struct mesh_link *link){
 static void mesh_progress(struct mesh_link *link,uint32_t direction){
   struct hdr *M=link->M;struct mesh_verbs *v=&link->provider;
   uint32_t iq=(uint32_t)link->qps;
-  if(direction==MESH_SEND)link_publications(link);
   struct ibv_wc *completions=v->completions+direction*QD;
   for(uint32_t cq=direction;cq<2*(iq+1);cq+=2){
   int count=ibv_poll_cq(v->completion_queues[cq],QD,completions);
@@ -254,7 +253,6 @@ static void mesh_progress(struct mesh_link *link,uint32_t direction){
       link_release(link,q,entry);mesh_send_complete(M,entry.row,entry.plane);
       link_send_ready(link,q);
     }
-    if(direction==MESH_SEND)link_publications(link);
   }
   }
   if(direction==MESH_RECEIVE){
