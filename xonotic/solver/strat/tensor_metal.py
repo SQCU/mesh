@@ -374,6 +374,13 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             tensors[value.index] = tensors[values[0].index]
             owners[value.index] = owners[values[0].index]
             continue
+        # ../../../design/algorithm-sources.md#xonotic-partitioned-reshape
+        if operation == 'transpose' and (attributes['axes'] == tuple(range(len(shape))) or
+                (len(shape) == 2 and attributes['axes'] == (1, 0))):
+            source = tensors[values[0].index]
+            tensors[value.index] = matrix_view(source, shapes[values[0].index]).T if attributes['axes'] == (1, 0) else source
+            owners[value.index] = owners[values[0].index]
+            continue
         if operation in ('constant', 'dimension'):
             tensor = program.tensor(storage_shape, dtype=value.dtype)
             data = constants[value.index] if operation == 'constant' else np.asarray(attributes['expression'].resolve(capacity), dtype=value.dtype)
