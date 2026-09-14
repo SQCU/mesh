@@ -84,7 +84,7 @@ def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
 
 
 # design/algorithm-sources.md#pallas-panel-composition
-def _row_reduce(program, kernel, x, *, tile_rows, peer=None):
+def _row_reduce(program, kernel, x, *, tile_rows, peer=None, output_dtype=None):
     rows = x.shape[0]
     mr = _tile(min(tile_rows, rows), x.block_shape[0] if x.grid[0] > 1 else 0)
     nr = x.block_shape[1]
@@ -92,7 +92,7 @@ def _row_reduce(program, kernel, x, *, tile_rows, peer=None):
         grid=((rows + mr - 1) // mr,),
         in_specs=(BlockSpec((mr, nr), lambda i, panel=panel: (i, panel)),),
         out_specs=BlockSpec((mr, 1), _rows),
-        out_shape=ShapeDtypeStruct((rows, 1), x.dtype), peer=peer)(x)
+        out_shape=ShapeDtypeStruct((rows, 1), x.dtype if output_dtype is None else output_dtype), peer=peer)(x)
         for panel in range(x.grid[1]))
     return _sum(program, parts, mr, peer=peer)
 
@@ -100,7 +100,8 @@ def _row_reduce(program, kernel, x, *, tile_rows, peer=None):
 # design/algorithm-sources.md#pallas-panel-composition
 def rmsnorm(program, x, gamma, *, tile_rows, epsilon=1e-6):
     value, statistic, weight = kernels.arguments(3)
-    total = _row_reduce(program, kernels.expression((value * value).sum()), x, tile_rows=tile_rows)
+    total = _row_reduce(program, kernels.expression((value * value).sum()), x,
+                        tile_rows=tile_rows, output_dtype="float32")
     normalize = kernels.expression(value * (statistic / x.shape[1] + epsilon).rsqrt() * weight)
     return _pointwise(program, normalize,
         (x, total.broadcast_to(x.shape), gamma.broadcast_to(x.shape)), tile_rows)

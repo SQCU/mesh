@@ -863,3 +863,55 @@ ML are recorded as execution kinds zero, one and two. Reused functions overwrite
 their latest timestamps and increment a count; finite planned invocations each
 retain their own record. Analysis must not treat this bounded record as an
 unbounded event history or subtract clocks across nodes.
+
+## Publication work lists
+
+The Linux kernel authors' [lockless list API](https://raw.githubusercontent.com/torvalds/linux/master/include/linux/llist.h)
+and [implementation](https://raw.githubusercontent.com/torvalds/linux/master/lib/llist.c)
+provide concurrent insertion with batch detachment (`llist_add` / `llist_del_all`).
+NVIDIA's [NCCL proxy](https://raw.githubusercontent.com/NVIDIA/nccl/master/src/proxy.cc)
+progresses submitted communication independently of numerical callers. Mesh uses
+stable shared-memory indices in this established list pattern, rather than pointers
+whose virtual addresses differ between processes.
+
+`mesh_notice_push`, `mesh_notice_take`, `mesh_notice_next`, and `mesh_notices`
+implement separate compute and transport notification lists. Each row has a
+preallocated node per consumer. Repeated notifications coalesce while that node
+is linked. The consumer captures the next index before an acquire-release
+exchange clears membership, acquiring publications from coalescing producers
+before evaluating dependents. Later producers can immediately relink the node.
+No numerical caller waits for a missing ring position or a transport completion.
+
+The compute handler visits only detached row notices and their setup-established
+reader lists. A per-handler intrusive list deduplicates affected occurrences
+before checking their canonical masks once per batch. Transport `link_publications`
+visits the corresponding fixed row-to-transfer adjacency and `link_ready` queues
+eligible explicit transfer indices. Ready queues preserve source/target tuples
+without searching the configured transfer table. Setup alone constructs adjacency
+and admits already-present sources. An unsuccessful index post restores selected
+indices; announced payloads retain their exact continuation as before.
+
+These lists describe pending notifications/work, not additional tensor readiness.
+Canonical presence and reader masks continue to describe values and ownership.
+All nodes, links, and ready-index storage are realized before numerical invocation.
+
+### Reduction precision
+
+The [Triton normalization tutorial](https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html)
+promotes loaded values to float32 before computing normalization statistics.
+Mesh RMSNorm now stores each panel statistic and its reduction tree in float32,
+including for float16 inputs. The expression kernel loads half inputs into float
+arithmetic; the final normalization writes the original input dtype. The
+`_row_reduce(output_dtype=...)` setup parameter names that storage choice explicitly.
+
+The current linear composition has a different, narrower precision contract:
+its K-panel outputs and pairwise reduction buffers use the input dtype. For
+float16, the CPU kernel accumulates a panel in float32 but rounds when storing
+each panel and each subsequent reduction result. The Metal path gives MPS
+float16 input and output matrix descriptors; this source does not establish
+MPS's internal accumulation precision. It does establish float16 storage at
+those panel/reduction boundaries. Therefore it does not yet provide the
+float32-across-K behavior in the [Pallas mixed-precision matmul](https://docs.jax.dev/en/latest/pallas/tpu/matmul.html#bfloat16-matrix-multiplication)
+and [Triton matmul](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html)
+examples, which retain a float32 accumulator and convert after the reduction.
+No claim of supported MPS mixed-precision output was inferred to hide that gap.
