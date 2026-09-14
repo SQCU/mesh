@@ -103,13 +103,13 @@ def main():
         strided = program.export(linear(program, weight(strided_left).T, weight(strided_right).T,
             tile_rows=3, tile_k=5, tile_columns=7, peer=0, output_dtype="float32")[0, 0])
         mapped_left, mapped_right = kernels.arguments(2)
-        mapped_feature, mapped_inner = kernels.arange(7).T, kernels.arange(5, tile=3)
+        mapped_feature, mapped_inner = kernels.program_id(1) * 3 + kernels.arange(3).T, kernels.arange(5, tile=3)
         mapped_product = (mapped_left.at(0, mapped_inner) * mapped_right.at(mapped_inner, mapped_feature)).sum().T
         mapped = program.kernel_call(kernels.expression(mapped_product),
-            grid=(3,), in_specs=(BlockSpec((1, 5), lambda i: (2-i, 0)), BlockSpec((5, 7), lambda i: (0, 0))),
-            out_specs=BlockSpec((1, 7), lambda i: (i, 0)),
+            grid=(3, 3), in_specs=(BlockSpec((1, 5), lambda i, j: (2-i, 0)), BlockSpec((5, 7), lambda i, j: (0, 0))),
+            out_specs=BlockSpec((1, 3), lambda i, j: (i, j)),
             out_shape=ShapeDtypeStruct((3, 7), np.float32), peer=0)(weight(strided_left).T, weight(strided_right).T)
-        mapped_results = tuple(program.export(mapped[i, 0]) for i in range(3))
+        mapped_results = tuple(program.export(ref) for _, ref in sorted(mapped.blocks.items()))
         composed_input = program.tensor((3, 5), block_shape=(1, 5), dtype=dtype)
         composed_bias = program.tensor((3, 7), block_shape=(1, 7), dtype=np.float32)
         composed_left, composed_right, bias = kernels.arguments(3)
@@ -612,8 +612,9 @@ def main():
             raise ArithmeticError(f'Strided contraction mismatch: ready={strided.ready}, actual={strided.array.tolist() if strided.ready else None}, expected={strided_expected.tolist()}')
         print(json.dumps(dict(event='strided_contraction', result=strided.array.tolist())), flush=True)
         strided.consume()
-        for i, result in enumerate(mapped_results):
-            if not np.array_equal(result.array, strided_expected[2-i:3-i]):
+        for ordinal, result in enumerate(mapped_results):
+            i, j = divmod(ordinal, mapped.grid[1])
+            if not np.array_equal(result.array, strided_expected[2-i:3-i, 3*j:3*j+result.array.shape[1]]):
                 raise ArithmeticError('Contraction ignored its input index map')
         print(json.dumps(dict(event='mapped_contraction', result=[result.array.tolist() for result in mapped_results])), flush=True)
         for result in mapped_results:
