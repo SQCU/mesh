@@ -239,13 +239,13 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *functions,size_t c
         if(at>=mesh_blocks(m)){ error=ENOSPC; break; }
         uint64_t remaining=b->bytes-(uint64_t)k*m->pgsz,maximum=(uint64_t)block*m->pgsz;
         uint32_t bytes=(uint32_t)(((remaining<maximum?remaining:maximum)+4095)/4096*4096);
-        mesh_transfers(m,queue,direction)[at]=(struct mesh_transfer){.local_row=b->first+k,.local_page=atomic_load_explicit(&table[b->first+k],memory_order_acquire),.peer_row=MESH_ABSENT,.peer_page=MESH_ABSENT,.binding=b->binding,.offset=k,.plane=b->plane,.index=at,.bytes=bytes};
+        mesh_transfers(m,queue,direction)[at]=(struct mesh_transfer){.local_row=b->first+k,.local_page=atomic_load_explicit(&table[b->first+k],memory_order_acquire),.peer_row=MESH_ABSENT,.peer_page=MESH_ABSENT,.peer_index=MESH_ABSENT,.binding=b->binding,.offset=k,.plane=b->plane,.index=at,.bytes=bytes};
         atomic_store_explicit(length,at+1,memory_order_release);
       }
     }
   }
   free(order); free(used);
-  if(!error)atomic_store_explicit(&m->configured,(uint32_t)getpid(),memory_order_release);
+  if(!error && binding_count)atomic_store_explicit(&m->configured,(uint32_t)getpid(),memory_order_release);
   return error;
 }
 
@@ -499,4 +499,22 @@ static void mesh_execution_destroy(struct mesh_ctx *c){
   }
   struct mesh_watch *watch=e->watches;while(watch){struct mesh_watch *next=watch->next;free(watch);watch=next;}
   dispatch_release(e->source);dispatch_release(e->queue);free(e->readers);free(e);c->execution=NULL;
+}
+
+/* design/algorithm-sources.md#performance-evidence */
+size_t mesh_transfer_trace_count(struct mesh_ctx *c){
+  size_t count=0;
+  for(uint32_t q=0;q<c->M->qps;q++)for(int d=0;d<2;d++)count+=atomic_load_explicit(mesh_order_length(c->M,q,d),memory_order_acquire);
+  return count;
+}
+/* design/algorithm-sources.md#performance-evidence */
+struct mesh_transfer_event mesh_transfer_trace(struct mesh_ctx *c,size_t index){
+  for(uint32_t q=0;q<c->M->qps;q++)for(int d=0;d<2;d++){
+    size_t count=atomic_load_explicit(mesh_order_length(c->M,q,d),memory_order_acquire);
+    if(index>=count){index-=count;continue;}
+    struct mesh_transfer_times *t=mesh_transfer_times(c->M,q,d,(uint32_t)index);
+    return (struct mesh_transfer_event){.queue=q,.direction=(uint32_t)d,.transfer=mesh_transfers(c->M,q,d)[index],
+      .ready_ns=atomic_load(&t->ready_ns),.post_ns=atomic_load(&t->post_ns),.cq_ns=atomic_load(&t->cq_ns),.occurrences=atomic_load(&t->occurrences)};
+  }
+  return (struct mesh_transfer_event){0};
 }

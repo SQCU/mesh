@@ -9,6 +9,7 @@ struct mesh_row_map { uint32_t first,count,stride,plane; const struct mesh_row_r
 struct mesh_row_function { struct mesh_row_map *input,*output; uint32_t inputs,outputs,rows; };
 /* ledger D5: `binding` orders blocks within `queue`; both participants declare the same identities and queues */
 struct mesh_row_binding { uint32_t first,count,binding,plane; uint16_t queue,receive; uint64_t bytes; };
+struct mesh_transfer_event { uint32_t queue,direction; struct mesh_transfer transfer; uint64_t ready_ns,post_ns,cq_ns,occurrences; };
 struct mesh_row_metadata { uint64_t stamp,when; uint32_t function,index,peer; int64_t code; uint32_t domain,reserved; };
 static inline struct mesh_row_range mesh_range(struct mesh_row_map m,uint32_t index){ return m.ranges?m.ranges[index]:(struct mesh_row_range){m.first+index*m.stride,m.count}; }
 static inline uint64_t mesh_length(const struct mesh_ctx *c){ return c->M->length; }
@@ -45,4 +46,6 @@ int mesh_republish(struct mesh_ctx *,uint32_t first,uint32_t count);
 size_t mesh_issue(struct mesh_ctx *,const struct mesh_row_function *,uint32_t *indices,size_t capacity);
 void mesh_complete(struct mesh_ctx *,const struct mesh_row_function *,const uint32_t *indices,size_t count);
 void mesh_consume(struct mesh_ctx *,struct mesh_row_map,uint32_t index);
+size_t mesh_transfer_trace_count(struct mesh_ctx *);
+struct mesh_transfer_event mesh_transfer_trace(struct mesh_ctx *,size_t index);
 #endif
