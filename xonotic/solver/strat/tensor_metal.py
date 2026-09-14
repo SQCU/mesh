@@ -359,7 +359,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
     peers = {0: program.node if root_peer is None else root_peer}
     peers.update({region['owner']: region['peer'] for region in graph.regions.values()})
     owners = {value.index: peers[owner] for value, _, _, _, owner in graph.nodes}
-    replicas, statistics = {}, {}
+    statistics = {}
     for value, operation, values, attributes, owner in nodes:
         peer = peers[owner]
         if value.index in tensors:
@@ -409,16 +409,9 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
         for operand in numerical_operands(operation, values, attributes):
             tensor = tensors[operand.index]
             sender = owners[operand.index]
-            if sender != peer and tensor.blocks:
-                key = (operand.index, peer)
-                if key not in replicas:
-                    transposed = tensor[0, 0].view.row_stride == 1 and tensor[0, 0].view.column_stride != 1
-                    backing = tensor.T if transposed else tensor
-                    replica = program.tensor(backing.shape, block_shape=backing.block_shape, dtype=backing.dtype)
-                    replica = replica.T if transposed else replica
-                    program.copy(tensor.on(sender), replica.on(peer))
-                    replicas[key] = replica
-                tensor = replicas[key]
+            # ../../../design/algorithm-sources.md#canonical-view-replication
+            if sender != peer:
+                tensor = program.replicate(tensor.on(sender), peer)
             local[operand.index] = tensor
         shape = shapes[value.index]
         # ../../../design/algorithm-sources.md#counter-based-random-generation
