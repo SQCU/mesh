@@ -2434,7 +2434,9 @@ The `index_vector` expression leaf retains length, tile and offset. Shared
 `_ExpressionRegions.layout` propagates its domain through indexed loads and
 pointwise arithmetic. Row reduction splits that domain by the retained tile,
 lowers each vector to its actual region length and offset, and emits a direct
-indexed partial sum. The final ragged tile therefore retains its exact width.
+indexed partial sum. The final ragged tile therefore retains its exact width. Singleton vectors
+retain their scalar offset when broadcast, including a final length-one tile
+whose coordinate is the retained nonzero offset.
 The scalar emitter uses the leaf's length to size reduction loops and its offset
 to emit coordinates. Dynamic selector generation uses that same width, while
 static indexed-access specialization evaluates the same integer coordinates.

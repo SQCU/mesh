@@ -241,7 +241,7 @@ def _static_value(node, inputs, rows, columns, coordinate):
     if node.operation == 'column':
         return columns
     if node.operation == 'index_vector':
-        return columns + node.value[2]
+        return np.full(columns.shape, node.value[2], dtype=np.int64) if node.value[0] == 1 else columns + node.value[2]
     if node.operation == 'program_id':
         return np.full(rows.shape, coordinate[node.value], dtype=np.int64)
     if node.operation == 'literal':
@@ -614,7 +614,7 @@ class _ExpressionKernel:
                 if part.operation == 'column':
                     return f'((long)({column}))' if metal else f'((int64_t)({column}))'
                 if part.operation == 'index_vector':
-                    return f'((int64_t)({column})+{part.value[2]}ll)'
+                    return f'((int64_t)({0 if part.value[0] == 1 else column})+{part.value[2]}ll)'
                 if part.operation == 'sum':
                     return f'(({"long" if metal else "int64_t"}){names[part]})' if output.dtype.kind in 'ib' else names[part]
                 ref = inputs[part.value]
@@ -1509,7 +1509,7 @@ class _ExpressionRegions:
                 symbol = reference(('load_source', node.value), (self.sources[node.value],))
                 return _Expression('load', tuple(lower(child, accumulation) for child in node.operands), symbol.value)
             if node.operation == 'index_vector':
-                return node if external else _Expression('index_vector', value=(shape[1], shape[1], node.value[2] + origin[1]))
+                return node if external or node.value[0] == 1 else _Expression('index_vector', value=(shape[1], shape[1], node.value[2] + origin[1]))
             if node.operation in ('row', 'column') and not external:
                 axis = 0 if node.operation == 'row' else 1
                 return node + origin[axis]
