@@ -690,12 +690,19 @@ def main():
                     consumer = ~composed if boolean else composed + graph.constant(1, dtype=dtype_name)
                     empty_product = mx.matmul(graph.constant(np.empty((2, 0), dtype=scalar), dtype=dtype_name),
                                               graph.constant(np.empty((0, 2), dtype=scalar), dtype=dtype_name))
+                    mixed_products = ()
+                    if scalar == np.int32:
+                        mixed_products = (mx.matmul(graph.constant([[2, 1]], dtype='int32'),
+                                                    graph.constant([[.5], [.25]], dtype='float32')),
+                                          mx.matmul(graph.constant([[.5, .25]], dtype='float32'),
+                                                    graph.constant([[2], [1]], dtype='int32')))
                 dot_storage = program.tensor((6, 2), (1, 2), dtype=scalar)
                 lowered = kernel_calls(program, graph, (), {dot_input.index: dot_storage},
-                    outputs=(product, consumer, empty_product), root_peer=0, tile_rows=1, tile_k=2, tile_columns=1)
+                    outputs=(product, consumer, empty_product, *mixed_products), root_peer=0, tile_rows=1, tile_k=2, tile_columns=1)
                 observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
                     for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in (product, consumer))
                 empty_results = tuple(program.export(ref) for _, ref in sorted(lowered[empty_product.index].blocks.items()))
+                mixed_results = tuple(program.export(lowered[value.index][0, 0]) for value in mixed_products)
                 rows_per_batch = [2, 2]
                 if scalar == np.int64:
                     left_arg, right_arg = kernels.arguments(2)
@@ -736,7 +743,7 @@ def main():
                                 for row in values.reshape(6, 2) for j in range(2)]
                         expected.append(np.array([value-(1 << 64) if value >= 1 << 63 else value for value in flat], dtype=scalar).reshape(6, 2))
                     generations.append((values.reshape(6, 2), expected))
-                xonotic_integer_dots.append((dtype_name, dot_storage, observations, rows_per_batch, empty_results, generations))
+                xonotic_integer_dots.append((dtype_name, dot_storage, observations, rows_per_batch, empty_results, mixed_results, generations))
             # design/algorithm-sources.md#counter-based-random-generation
             known_answers = []
             for counter, key, expected in (
@@ -1403,11 +1410,17 @@ def main():
                 for results in observations:
                     for i, j, result in results:
                         result.consume()
-        for dtype_name, storage, observations, rows_per_batch, empty_results, generations in xonotic_integer_dots:
+        for dtype_name, storage, observations, rows_per_batch, empty_results, mixed_results, generations in xonotic_integer_dots:
             wait_for(empty_results)
             if any(np.any(result.array) or result.array.dtype != np.dtype(dtype_name) for result in empty_results):
                 raise ArithmeticError('Empty integer contraction did not produce its typed zero identity')
             for result in empty_results:
+                result.consume()
+            wait_for(mixed_results)
+            for result, expected, scalar in zip(mixed_results, (1, 1.25), ('int32', 'float32')):
+                if result.array.dtype != np.dtype(scalar) or result.array.item() != expected:
+                    raise ArithmeticError('Mixed contraction lost numerical conversion or output dtype')
+                print(json.dumps(dict(event='xonotic_mixed_integer_dot', dtype=scalar, output=result.array.tolist())), flush=True)
                 result.consume()
             for generation, (values, expected) in enumerate(generations):
                 started = time.monotonic_ns()
