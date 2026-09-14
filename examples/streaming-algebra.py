@@ -2269,8 +2269,6 @@ def main():
             for dispatch in binding['dispatches']:
                 if not dispatch['name'] or any(len(dispatch[field]) != 3 or any(size <= 0 for size in dispatch[field]) for field in ('grid', 'group')):
                     raise ArithmeticError('Compiled dispatch geometry is incomplete')
-                if dispatch['argument_buffer'] < 0 or dispatch['argument_offset'] < 0:
-                    raise ArithmeticError('Compiled dispatch argument location is invalid')
             for constant in binding['constants']:
                 if constant['slot'] < 1 or constant['length'] < 0 or len(constant['sha256']) != 64 or any(character not in '0123456789abcdef' for character in constant['sha256']):
                     raise ArithmeticError('Compiled constant identity or binding is incomplete')

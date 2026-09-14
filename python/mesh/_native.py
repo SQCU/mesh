@@ -21,14 +21,6 @@ class Endpoint(C.Structure):
     _fields_ = [('tensor', P), ('peer', U), ('first', U), ('stride', U)]
 
 
-class MetalDispatch(C.Structure):
-    _fields_ = [("name", C.c_char_p), ("grid", Z * 3), ("group", Z * 3), ("argument_buffer", Z), ("argument_offset", Z)]
-
-
-class MetalConstant(C.Structure):
-    _fields_ = [("bytes", P), ("length", Z)]
-
-
 class RowRange(C.Structure):
     _fields_ = [("first", U), ("count", U)]
 
@@ -141,8 +133,6 @@ class Native:
             'mesh_writer_writable': (C.c_int, [C.POINTER(Writer)]),
             'mesh_writer_issue': (C.c_int, [C.POINTER(Writer)]),
             'mesh_writer_complete': (None, [C.POINTER(Writer)]),
-            'mesh_algebra_metal': (C.c_int, [P, C.c_char_p, C.POINTER(MetalDispatch), Z,
-                C.POINTER(MetalConstant), Z, C.POINTER(View), Z, C.POINTER(View), Z]),
             'mesh_algebra_source': (C.c_int, [P, C.c_char_p, C.c_char_p, C.POINTER(View), Z, View, C.POINTER(C.c_uint8), Z, Z, Z, Z]),
             'mesh_algebra_specialization': (C.c_char_p, [P, Z]),
             'mesh_algebra_source_text': (C.c_char_p, [P, Z, U]),

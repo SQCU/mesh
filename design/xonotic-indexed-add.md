@@ -36,7 +36,8 @@ and block-grid geometry. The existing custom source's logical flat address selec
 the correct block and then the scalar within it. Ragged block strides come from
 each actual Ref; they are not guessed from nominal block dimensions.
 
-Every bound pointer already includes its Ref offset through mesh_algebra_metal.
+Historically, the raw Metal binding included each Ref offset in its bound pointer.
+That binding has since been removed; the Xonotic subproblem remains parked.
 The custom descriptor therefore keeps no second data offset. Input blocks are
 bound in the same order as the explicit descriptor list; the output occupies its
 own final pointer slot. Clear operations address the same output scalar bytes.

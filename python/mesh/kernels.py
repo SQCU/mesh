@@ -32,22 +32,6 @@ def affine(alpha=1, beta=0):
     return _Operation(0, 1, alpha, beta)
 
 
-@dataclass(frozen=True)
-class MetalDispatch:
-    name: str
-    grid: tuple
-    group: tuple = (256, 1, 1)
-    argument_buffer: int = 0
-    argument_offset: int = 0
-
-
-@dataclass(frozen=True)
-class Metal:
-    source: str
-    dispatches: tuple
-    constants: tuple = ()
-
-
 # design/algorithm-sources.md#static-indexed-access-specialization
 @dataclass(frozen=True)
 class _StaticTable:

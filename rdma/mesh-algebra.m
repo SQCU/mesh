@@ -99,7 +99,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property NSArray<MeshExtent *> *operands;
 @property MeshCPUCode *cpuCode;
 @property MeshMetalCode *metalCode;
-@property NSArray<id<MTLComputePipelineState>> *metalPipelines;
+@property id<MTLComputePipelineState> metalPipeline;
 @property NSString *specialization;
 @property NSData *cpuArguments;
 @property NSMutableData *publicationSections;
@@ -771,19 +771,15 @@ static MTLCompileOptions *source_options(void) {
   MTLCompileOptions *options=[MTLCompileOptions new];options.mathMode=MTLMathModeSafe;return options;
 }
 /* design/algorithm-sources.md#compiled-specialization-identities */
-static void specialize_function(MeshFunction *f,MeshCPUCode *cpu,MeshMetalCode *metal,MTLCompileOptions *metal_options,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count) {
+static void specialize_function(MeshFunction *f,MeshCPUCode *cpu,MeshMetalCode *metal,MTLCompileOptions *metal_options,size_t rows,const uint64_t domain[3],const struct mesh_view *inputs,size_t input_count,struct mesh_view output) {
   f.cpuCode=cpu;f.metalCode=metal;NSMutableDictionary *sources=[NSMutableDictionary dictionaryWithObject:metal.digest forKey:@"metal"];
   if(cpu)sources[@"cpu"]=cpu.digest;
   NSString *pair=[NSString stringWithFormat:@"cpu:%@\nmetal:%@\n",cpu?cpu.digest:@"",metal.digest];
-  NSData *identity=[pair dataUsingEncoding:NSUTF8StringEncoding];NSMutableArray *geometry=[NSMutableArray new],*configured=[NSMutableArray new];
-  for(size_t i=0;i<dispatch_count;i++){
-    const struct mesh_metal_dispatch *d=&dispatches[i];
-    [geometry addObject:@{@"name":@(d->name),@"grid":@[@(d->grid[0]),@(d->grid[1]),@(d->grid[2])],@"group":@[@(d->group[0]),@(d->group[1]),@(d->group[2])],@"argument_buffer":@(d->argument_buffer),@"argument_offset":@(d->argument_offset)}];
-  }
-  for(size_t i=0;i<constant_count;i++)[configured addObject:@{@"slot":@(i+1),@"length":@(constants[i].length),@"sha256":specialization_digest(constants[i].bytes,constants[i].length)}];
+  NSData *identity=[pair dataUsingEncoding:NSUTF8StringEncoding];NSArray *geometry=@[@{@"name":@"mesh_expression",@"grid":@[@(rows),@1,@1],@"group":@[@32,@1,@1]}];
+  NSArray *configured=@[@{@"slot":@1,@"length":@(3*sizeof(uint64_t)),@"sha256":specialization_digest(domain,3*sizeof(uint64_t))}];
   NSMutableDictionary *options=[NSMutableDictionary dictionaryWithObject:@{@"math_mode":@(metal_options.mathMode),@"floating_point_functions":@(metal_options.mathFloatingPointFunctions)} forKey:@"metal"];
   if(cpu)options[@"cpu"]=@{@"compiler":@"/usr/bin/clang",@"arguments":@[@"-O3",@"-dynamiclib"],@"entrypoint":@"mesh_expression"};
-  NSDictionary *descriptor=@{@"version":@1,@"backend":@(f->backend),@"sources":sources,@"source_pair":specialization_digest(identity.bytes,identity.length),@"selected_source":f->executionKind==MESH_EXECUTION_CPU?cpu.digest:metal.digest,@"dispatches":geometry,@"constants":configured,@"inputs":specialization_views(inputs,input_count),@"outputs":specialization_views(outputs,output_count),@"compile_options":options};
+  NSDictionary *descriptor=@{@"version":@1,@"backend":@(f->backend),@"sources":sources,@"source_pair":specialization_digest(identity.bytes,identity.length),@"selected_source":f->executionKind==MESH_EXECUTION_CPU?cpu.digest:metal.digest,@"dispatches":geometry,@"constants":configured,@"inputs":specialization_views(inputs,input_count),@"outputs":specialization_views(&output,1),@"compile_options":options};
   NSData *json=[NSJSONSerialization dataWithJSONObject:descriptor options:NSJSONWritingSortedKeys error:nil];
   f.specialization=[[NSString alloc]initWithData:json encoding:NSUTF8StringEncoding];
 }
@@ -800,83 +796,56 @@ static void submit_encoded_metal(MeshFunction *f,void (^encode)(id<MTLCommandBuf
 /* design/algorithm-sources.md#realized-numerical-invocation */
 static void submit_metal(MeshFunction *f) {submit_encoded_metal(f,f.encode);}
 /* design/algorithm-sources.md#recorded-metal-commands */
-static int bind_metal(struct mesh_algebra *handle,const char *text,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,MeshCPUCode *paired,const struct mesh_view *reads,const struct mesh_view *writes) {
+static int bind_metal(struct mesh_algebra *handle,const char *text,size_t rows,const uint64_t domain[3],const struct mesh_view *inputs,size_t input_count,struct mesh_view output,MeshCPUCode *paired,const struct mesh_view *reads,struct mesh_view write) {
   MeshAlgebra *a=owner(handle);
-  if(a.realized)return EBUSY;
-  if(a.cpu || !text || !dispatch_count || !dispatches || constant_count>30 || (constant_count && !constants))return EINVAL;
   NSError *error=nil;MTLCompileOptions *options=source_options();
   MeshMetalCode *code=(MeshMetalCode *)source_code(a,text,NO);id<MTLLibrary> library=code.library;
   if(!library){library=[a.device newLibraryWithSource:code.source options:options error:&error];code.library=library;}
   if(!library){fprintf(stderr,"mesh Metal kernel: %s\n",error.description.UTF8String);return EINVAL;}
-  NSMutableArray<id<MTLComputePipelineState>> *pipelines=[NSMutableArray new];
-  for(size_t i=0;i<dispatch_count;i++) {
-    const struct mesh_metal_dispatch *d=&dispatches[i];
-    if(!d->name || !d->grid[0] || !d->grid[1] || !d->grid[2] || !d->group[0] || !d->group[1] || !d->group[2])return EINVAL;
-    id<MTLFunction> function=[library newFunctionWithName:@(d->name)];
-    if(!function)return ENOENT;
-    MTLComputePipelineDescriptor *description=[MTLComputePipelineDescriptor new];
-    description.computeFunction=function;description.supportIndirectCommandBuffers=YES;
-    id<MTLComputePipelineState> pipeline=[a.device newComputePipelineStateWithDescriptor:description options:MTLPipelineOptionNone reflection:nil error:&error];
-    if(!pipeline){fprintf(stderr,"mesh Metal pipeline: %s\n",error.description.UTF8String);return EINVAL;}
-    if(d->group[0]>pipeline.maxTotalThreadsPerThreadgroup/d->group[1]/d->group[2])return EINVAL;
-    if(d->argument_buffer>constant_count || (!d->argument_buffer && d->argument_offset) || (d->argument_buffer && d->argument_offset>=constants[d->argument_buffer-1].length))return EINVAL;
-    [pipelines addObject:pipeline];
-  }
-  NSMutableArray<id<MTLBuffer>> *buffers=[NSMutableArray new],*resources=[NSMutableArray new];
-  id<MTLBuffer> addresses=[a.device newBufferWithLength:(input_count+output_count)*sizeof(uint64_t) options:MTLResourceStorageModeShared];
+  id<MTLFunction> function=[library newFunctionWithName:@"mesh_expression"];
+  if(!function)return ENOENT;
+  MTLComputePipelineDescriptor *pipelineDescription=[MTLComputePipelineDescriptor new];
+  pipelineDescription.computeFunction=function;pipelineDescription.supportIndirectCommandBuffers=YES;
+  id<MTLComputePipelineState> pipeline=[a.device newComputePipelineStateWithDescriptor:pipelineDescription options:MTLPipelineOptionNone reflection:nil error:&error];
+  if(!pipeline){fprintf(stderr,"mesh Metal pipeline: %s\n",error.description.UTF8String);return EINVAL;}
+  if(pipeline.maxTotalThreadsPerThreadgroup<32)return EINVAL;
+  NSMutableArray<id<MTLBuffer>> *resources=[NSMutableArray new];
+  id<MTLBuffer> addresses=[a.device newBufferWithLength:(input_count+1)*sizeof(uint64_t) options:MTLResourceStorageModeShared];
   if(!addresses)return ENOMEM;
-  for(size_t i=0;i<input_count+output_count;i++) {
-    struct mesh_view v=i<input_count?inputs[i]:outputs[i-input_count];
-    if(!valid_view(a,v))return EINVAL;
+  for(size_t i=0;i<input_count+1;i++) {
+    struct mesh_view v=i<input_count?inputs[i]:output;
     struct mesh_extent *extent=&v.tensor->extents[v.extent];
     id<MTLBuffer> buffer=a.lookup[[NSValue valueWithPointer:extent]].buffer;
-    ((uint64_t *)addresses.contents)[i]=buffer.gpuAddress+v.offset*(scalar_bytes(extent->shape.scalar));
+    ((uint64_t *)addresses.contents)[i]=buffer.gpuAddress+v.offset*scalar_bytes(extent->shape.scalar);
     [resources addObject:buffer];
-
   }
-  for(size_t i=0;i<constant_count;i++) {
-    if(!constants[i].bytes || !constants[i].length)return EINVAL;
-    id<MTLBuffer> buffer=[a.device newBufferWithBytes:constants[i].bytes length:constants[i].length options:MTLResourceStorageModeShared];
-    if(!buffer)return ENOMEM;[buffers addObject:buffer];
-  }
+  id<MTLBuffer> bounds=[a.device newBufferWithBytes:domain length:3*sizeof(uint64_t) options:MTLResourceStorageModeShared];
+  if(!bounds)return ENOMEM;
   MTLIndirectCommandBufferDescriptor *description=[MTLIndirectCommandBufferDescriptor new];
   description.commandTypes=MTLIndirectCommandTypeConcurrentDispatch;
   description.inheritBuffers=NO;description.inheritPipelineState=NO;
-  description.maxKernelBufferBindCount=constant_count+1;
-  id<MTLIndirectCommandBuffer> commands=[a.device newIndirectCommandBufferWithDescriptor:description maxCommandCount:dispatch_count options:MTLResourceStorageModeShared];
+  description.maxKernelBufferBindCount=2;
+  id<MTLIndirectCommandBuffer> commands=[a.device newIndirectCommandBufferWithDescriptor:description maxCommandCount:1 options:MTLResourceStorageModeShared];
   if(!commands)return ENOMEM;
-  NSUInteger offsets[31]={0};
-  NSMutableData *ranges=[NSMutableData dataWithLength:dispatch_count*sizeof(NSRange)];
-  NSRange *configuredRanges=ranges.mutableBytes;
-  for(size_t i=0;i<dispatch_count;i++) {
-    configuredRanges[i]=NSMakeRange(i,1);
-    const struct mesh_metal_dispatch *d=&dispatches[i];
-    if(d->argument_buffer)offsets[d->argument_buffer]=d->argument_offset;
-    id<MTLIndirectComputeCommand> command=[commands indirectComputeCommandAtIndex:i];
-    [command setComputePipelineState:pipelines[i]];
-    [command setKernelBuffer:addresses offset:0 atIndex:0];
-    for(size_t j=0;j<constant_count;j++)[command setKernelBuffer:buffers[j] offset:offsets[j+1] atIndex:j+1];
-    [command concurrentDispatchThreadgroups:MTLSizeMake(d->grid[0],d->grid[1],d->grid[2]) threadsPerThreadgroup:MTLSizeMake(d->group[0],d->group[1],d->group[2])];
-  }
-  [resources addObject:addresses];[resources addObjectsFromArray:buffers];
-  int status=bind_function(handle,reads,input_count,writes,output_count,submit_metal);
+  id<MTLIndirectComputeCommand> recorded=[commands indirectComputeCommandAtIndex:0];
+  [recorded setComputePipelineState:pipeline];
+  [recorded setKernelBuffer:addresses offset:0 atIndex:0];
+  [recorded setKernelBuffer:bounds offset:0 atIndex:1];
+  [recorded concurrentDispatchThreadgroups:MTLSizeMake(rows,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+  [resources addObject:addresses];[resources addObject:bounds];
+  int status=bind_function(handle,reads,input_count,&write,1,submit_metal);
   if(status)return status;
-  MeshFunction *f=a.functions.lastObject;f.metalPipelines=pipelines;f->executionKind=MESH_EXECUTION_METAL;f->backend=MESH_BACKEND_METAL_COMPILED;
-  specialize_function(f,paired,code,options,dispatches,dispatch_count,constants,constant_count,inputs,input_count,outputs,output_count);
+  MeshFunction *f=a.functions.lastObject;f.metalPipeline=pipeline;f->executionKind=MESH_EXECUTION_METAL;f->backend=MESH_BACKEND_METAL_COMPILED;
+  specialize_function(f,paired,code,options,rows,domain,inputs,input_count,output);
   f.encode=^(id<MTLCommandBuffer> command){
     id<MTLComputeCommandEncoder> encoder=[command computeCommandEncoder];
     for(id<MTLBuffer> buffer in resources)[encoder useResource:buffer usage:MTLResourceUsageRead|MTLResourceUsageWrite];
-    const NSRange *commandRanges=ranges.bytes;
-    for(size_t i=0;i<dispatch_count;i++)[encoder executeCommandsInBuffer:commands withRange:commandRanges[i]];
+    [encoder executeCommandsInBuffer:commands withRange:NSMakeRange(0,1)];
     [encoder endEncoding];
   };
   return 0;
 }
 
-/* design/algorithm-sources.md#application-metal-kernels */
-int mesh_algebra_metal(struct mesh_algebra *handle,const char *text,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count) {
-  return bind_metal(handle,text,dispatches,dispatch_count,constants,constant_count,inputs,input_count,outputs,output_count,nil,inputs,outputs);
-}
 /* design/algorithm-sources.md#region-expression-fusion */
 static void submit_cpu(MeshFunction *f) {
   f.cpuCode.kernel(f.cpuArguments.bytes,&f->publication);complete_part(f,0,0);
@@ -925,9 +894,8 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
   }
   NSString *cpu_text=[@MESH_KERNEL_SOURCE stringByAppendingString:@(cpu_source)];
   MeshCPUCode *library=(MeshCPUCode *)source_code(a,cpu_text.UTF8String,YES);
-  struct mesh_metal_dispatch dispatch={.name="mesh_expression",.grid={row_count,1,1},.group={32,1,1}};
-  uint64_t domain[]={row_begin,column_begin,column_begin+column_count};struct mesh_metal_constant constant={.bytes=domain,.length=sizeof domain};
-  if(!a.cpu)return bind_metal(handle,metal_source,&dispatch,1,&constant,1,inputs,input_count,&output,1,library,reads,&region);
+  uint64_t domain[]={row_begin,column_begin,column_begin+column_count};
+  if(!a.cpu)return bind_metal(handle,metal_source,row_count,domain,inputs,input_count,output,library,reads,region);
   MeshMetalCode *metal=(MeshMetalCode *)source_code(a,metal_source,NO);NSString *source=library.source;
   if(!library.handle) {
     NSError *error=nil;NSFileManager *files=NSFileManager.defaultManager;
@@ -960,7 +928,7 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
   bind_publication(f,region);
   struct mesh_kernel_section *sections=f.publicationSections.mutableBytes;
   for(size_t i=0;i<f->publication.count;i++){sections[i].row_begin+=row_begin;sections[i].row_end+=row_begin;sections[i].column_begin=column_begin;sections[i].column_end=column_begin+column_count;}
-  specialize_function(f,library,metal,source_options(),&dispatch,1,&constant,1,inputs,input_count,&output,1);f.cpuArguments=addresses;
+  specialize_function(f,library,metal,source_options(),row_count,domain,inputs,input_count,output);f.cpuArguments=addresses;
   return 0;
 }
 

@@ -572,19 +572,16 @@ The JAX authors' Pallas call/BlockSpec split (cited above) separates numerical
 source from storage realization and completion. Apple's Metal argument buffers
 and `useResource:usage:` declarations bind GPU addresses to resident buffers
 (https://developer.apple.com/documentation/metal/mtlcomputecommandencoder/useresource(_:usage:)).
-`kernels.Metal` and `MetalDispatch` describe compiled application kernels through
-the same `kernel_call` as built-in operations. Buffer zero contains GPU addresses
-of the bound input refs followed by output refs, already adjusted for ref offsets.
-Constants occupy buffers one onward; each dispatch can select an offset within
-buffer four. The descriptor owns no scheduler.
+Compiled expression domains use `mesh_algebra_source`, with one output region,
+its compiler-derived read regions, and paired CPU/Metal numerical source. Buffer
+zero contains canonical input addresses followed by the output address; buffer
+one holds the fixed row and column bounds. Setup realizes the pipeline, addresses,
+resources and command. Physical completion publishes the configured output region.
 
-`mesh_algebra_metal` realizes pipelines, constants, address tables, resources, and
-dispatch geometry during setup. Its addresses reference the existing canonical
-Metal buffers over registered shared pages. Only descriptors are copied.
-`submit_metal` uses the native function's physical completion callback to publish
-exactly its configured output regions. Multiple dispatches within one region may
-initialize and accumulate a reduction; independently published regions are
-separate kernel calls. No command completion wait is introduced.
+The former public raw Metal dispatch-list binding is removed. It had no tracked
+callers and allowed whole-view dependencies and opaque dispatch sequences to
+bypass the compiler's domain lowering. Its Python descriptors, ctypes signatures,
+C entry point, argument-offset state, and command-range loop are also removed.
 
 ## Xonotic planner migration
 
@@ -592,7 +589,7 @@ Dongarra et al.'s partitioned matrix products and the JAX authors' Pallas region
 pipelines, cited above, implement the original Xonotic routed-expert planner.
 `model`, `solve`, and `main` in `xonotic/planner/plan.py` preserve routing by maximum
 score, selected-expert ReLU FFNs, objective projection, and the position update.
-`kernel_calls` lowers the existing application operator source through `kernels.Metal`
+The historical `kernel_calls` migration lowered application source through the now-removed raw Metal binding
 and `kernel_call`. Each bot chunk has independent input and return allocations.
 Width is now explicit (`--width`, default 256), rather than inferred from frame
 transport capacity. `--tile-rows` controls the independently processed bot chunks.
@@ -3981,28 +3978,19 @@ opaque backend libraries expose no internal scheduling or allocation.
 ## Recorded Metal commands
 
 Apple's [CPU encoding of indirect command buffers](https://developer.apple.com/documentation/metal/encoding-indirect-command-buffers-on-the-cpu)
-provides reusable native command storage. `bind_metal` now records pipelines,
-buffer bindings, persistent argument offsets and dispatch geometry during setup.
-Pipeline descriptors enable indirect commands. The retained function owns the
-pipelines, command buffer and resource references; the numerical invocation
-only declares resource usage and executes recorded command ranges.
+provides reusable native command storage. `bind_metal` records one compiler domain's
+pipeline, canonical buffer addresses, bounds and dispatch geometry during setup.
+The retained function owns the pipeline, command buffer and resource references.
+Numerical invocation declares resource usage and executes that recorded command;
+it does not infer shapes, scalar types, layouts, addresses or dispatch geometry.
 
-The prior invocation-time dispatch-descriptor interpreter is removed, including
-its argument-buffer branch and reconstruction of grid/threadgroup dimensions.
-A setup-only offsets vector preserves configured binding state across commands.
-No operand data is copied; the commands retain the same canonical operand buffers
-and address tables.
+The JAX authors' Pallas call/BlockSpec separation (cited above) supplies the
+configuration/invocation boundary. Removing the raw dispatch-list interface also
+removes its offset vector, multiple-pipeline container, range storage and ordering
+loop. The specialization record describes the single expression domain and its
+bounds, without obsolete argument-offset fields. No operand data is copied.
 
-Apple's [indirect compute command documentation](https://developer.apple.com/documentation/metal/mtlindirectcomputecommand/concurrentdispatchthreadgroups(_:threadsperthreadgroup:))
-specifies that commands within one indirect range do not automatically serialize
-resource access, while a serial encoder adds ordering before and after each
-executed range. Setup retains a single-command range for each prior dispatch,
-preserving the existing command boundaries. No explicit barrier is added.
-This change removes repeated command construction; it does not claim to remove
-the existing raw multi-dispatch ordering contract or to publish from within a
-running accelerator dispatch. Both are still relevant to the broader goal.
-
-Source review checked recorded offsets, resource/pipeline lifetime, and range
-ordering against Apple's API documentation and installed SDK headers. Native
-compilation passed. No numerical run or performance claim accompanies this
-change.
+Source review checks setup-only realization and resource/pipeline lifetime.
+Compilation is the validation used here; no numerical run or performance claim
+accompanies this change. Publication from within a running accelerator dispatch
+remains unresolved by this simplification.

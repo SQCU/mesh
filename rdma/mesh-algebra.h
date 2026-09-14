@@ -8,8 +8,6 @@ extern "C" {
 /* design/streaming-algebra.md */
 enum mesh_scalar { MESH_F16, MESH_F32, MESH_I32, MESH_U32, MESH_I64, MESH_U64, MESH_U8, MESH_BOOL };
 enum mesh_algebra_op { MESH_AFFINE, MESH_ADD, MESH_MULTIPLY, MESH_TANH, MESH_EXP, MESH_SUM, MESH_CONTRACT, MESH_RSQRT, MESH_SWISH };
-struct mesh_metal_dispatch { const char *name; size_t grid[3],group[3],argument_buffer,argument_offset; };
-struct mesh_metal_constant { const void *bytes; size_t length; };
 struct mesh_algebra;
 struct mesh_tensor;
 struct mesh_shape { size_t rows,columns; enum mesh_scalar scalar; };
@@ -54,7 +52,6 @@ int mesh_algebra_writer(struct mesh_algebra *,struct mesh_view,struct mesh_write
 int mesh_writer_writable(struct mesh_writer *);
 int mesh_writer_issue(struct mesh_writer *);
 void mesh_writer_complete(struct mesh_writer *);
-int mesh_algebra_metal(struct mesh_algebra *,const char *,const struct mesh_metal_dispatch *,size_t,const struct mesh_metal_constant *,size_t,const struct mesh_view *,size_t,const struct mesh_view *,size_t);
 int mesh_algebra_source(struct mesh_algebra *,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,const uint8_t *access_axes,size_t row_begin,size_t row_count,size_t column_begin,size_t column_count);
 int mesh_algebra_indexed(struct mesh_algebra *,size_t function,struct mesh_view selector,const size_t *candidate_inputs,size_t candidate_count);
 int mesh_algebra_indexed_range(struct mesh_algebra *,size_t function,struct mesh_view selector,struct mesh_view range,const size_t *candidate_inputs,size_t candidate_count);

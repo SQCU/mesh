@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ._native import Native, Shape, View, CopyRegion, Writer, Endpoint, MetalDispatch, MetalConstant
+from ._native import Native, Shape, View, CopyRegion, Writer, Endpoint
 
 __all__ = ['Program', 'Tensor', 'Ref', 'BlockSpec', 'ShapeDtypeStruct', 'Result']
 _PROGRAMS = set()
@@ -284,9 +284,9 @@ class Program:
 
     # design/algorithm-sources.md#indexed-library-functions
     def _call(self, kernel, *, grid, inputs=(), outputs=()):
-        from .kernels import _Operation, Metal, _ExpressionKernel
-        if not isinstance(kernel, (_Operation, Metal, _ExpressionKernel)):
-            raise TypeError('Kernel calls require an expression, native operation or compiled Metal kernel')
+        from .kernels import _Operation, _ExpressionKernel
+        if not isinstance(kernel, (_Operation, _ExpressionKernel)):
+            raise TypeError('Kernel calls require an expression or native operation')
         grid = tuple(grid)
         if 0 in grid or outputs and all(not spec._tensor.blocks for spec in outputs):
             return
@@ -296,25 +296,11 @@ class Program:
         for coordinate in itertools.product(*(range(n) for n in grid)):
             reads = tuple(spec.resolve(coordinate) for spec in inputs)
             writes = tuple(spec.resolve(coordinate) for spec in outputs)
-            if isinstance(kernel, Metal):
-                dispatches = (MetalDispatch * len(kernel.dispatches))(*(
-                    MetalDispatch(d.name.encode(), (C.c_size_t * 3)(*d.grid),
-                        (C.c_size_t * 3)(*d.group), d.argument_buffer, d.argument_offset) for d in kernel.dispatches))
-                buffers = tuple(C.create_string_buffer(bytes(value)) for value in kernel.constants)
-                constants = (MetalConstant * len(buffers))(*(
-                    MetalConstant(C.cast(value, C.c_void_p), len(value) - 1) for value in buffers))
-                check(self.native.algebra_metal(self.handle, kernel.source.encode(),
-                    dispatches, len(dispatches), constants, len(constants),
-                    (View * len(reads))(*(r.view for r in reads)), len(reads),
-                    (View * len(writes))(*(r.view for r in writes)), len(writes)))
-                continue
-            if isinstance(kernel, _Operation):
-                if len(reads) != kernel.arity or len(writes) != 1:
-                    raise ValueError('Kernel operand count does not match its specifications')
-                check(self.native.algebra_bind(self.handle, kernel.op, reads[0].view,
-                    reads[1].view if len(reads) == 2 else View(), writes[0].view,
-                    kernel.alpha, kernel.beta))
-                continue
+            if len(reads) != kernel.arity or len(writes) != 1:
+                raise ValueError('Kernel operand count does not match its specifications')
+            check(self.native.algebra_bind(self.handle, kernel.op, reads[0].view,
+                reads[1].view if len(reads) == 2 else View(), writes[0].view,
+                kernel.alpha, kernel.beta))
 
     # design/algorithm-sources.md#indexed-library-functions
     def copy(self, source, destination, *, queue=0):
