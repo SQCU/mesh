@@ -341,12 +341,9 @@ def neighborhood_call(program, value, operation, values, attributes, shapes, loc
         key = (peer, values[left].index, values[right].index, values[3].index,
                observers, neighbors, width, feature_tile)
         if key not in statistics:
-            row, column = kernels.indices()
-            edge, feature = kernels.program_id(0) + row, kernels.program_id(1) * feature_tile + column
-            product = call(load(left, edge, feature) * load(right, edge, feature), inputs,
-                           (edges, width), (1, feature_tile), np.float32)
-            argument, = kernels.arguments(1)
-            statistics[key] = call(argument.sum(), (product,), (edges, 1), (1, 1), np.float32)
+            edge, feature = kernels.program_id(0), kernels.arange(width, tile=feature_tile)
+            statistic_value = (load(left, edge, feature) * load(right, edge, feature)).sum()
+            statistics[key] = call(statistic_value, inputs, (edges, 1), (1, 1), np.float32)
         argument = kernels.arguments(len(inputs) + 1)[-1]
         inputs.append(statistics[key])
         return argument
