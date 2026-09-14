@@ -53,6 +53,8 @@ Rabenseifner, *Optimization of Collective Reduction Operations* (2004), and Pata
 
 Shoeybi et al., [Megatron-LM](https://arxiv.org/abs/1909.08053), and the MLX authors, [tensor-parallel layers](https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/distributed.py): column-partitioned expansion followed by row-partitioned projection. `nn.linear` uses the existing contraction; FFN down-projection contributions pass through reduce-scatter and all-gather. The caller supplies partitions and owners.
 
+Hendrycks and Gimpel, [Gaussian Error Linear Units](https://arxiv.org/abs/1606.08415) (2016): the engine's existing gated activation computes GELU(gate) times up. Its encoder now binds a separate output operand; existing in-place calls use the same buffer explicitly.
+
 ## nn.rmsnorm
 
 Zhang and Sennrich, *Root Mean Square Layer Normalization* (2019): sum squared features, normalize by the reciprocal root mean square and apply the scale. The expression composition reduces feature contributions before normalization. The engine binding uses its existing FP16 or FP32 numerical kernel on canonical regions.

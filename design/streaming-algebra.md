@@ -200,3 +200,10 @@ vector directly into the configured FP16 scale Ref; bare `--normalize` uses
 the example's all-ones scale. It adds no quantized decoder. The file handle is closed when the
 example leaves its setup/program scope; numerical invocation uses only the
 registered weight pages and previously bound numerical functions.
+
+`--gate-weight TENSOR_NAME` selects the engine's existing FP16 gated GELU
+activation. Gate and up projections bind independently; their complete regions
+feed `gemma_mesh_gelu_mul`, whose output Ref has separate storage. Down projection,
+reduce-scatter, all-gather and the downstream consumer use the same graph paths.
+For this option the example's input and consumer weight files must use FP16;
+model weights load into the configured FP16 projection Refs during setup.

@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--region')
     parser.add_argument('--numerics')
     parser.add_argument('--model')
+    parser.add_argument('--gate-weight')
     parser.add_argument('--normalize', nargs='?', const='', metavar='MODEL_TENSOR')
     parser.add_argument('--backend', choices=('cpu', 'metal'), default='cpu')
     parser.add_argument('--tile-rows', type=int, default=128)
@@ -33,12 +34,13 @@ def main():
     args = parser.parse_args()
     if args.instances < 1:
         parser.error('--instances must be positive')
-    if (args.normalize is not None or args.model) and not args.numerics:
+    if (args.normalize is not None or args.model or args.gate_weight) and not args.numerics:
         parser.error('--normalize and --model require the engine numerical library')
     if args.normalize and not args.model:
         parser.error('A normalization tensor name requires --model')
     values = np.load(args.input)
-    weights = None if args.model else (np.load(args.up_weight, mmap_mode='r'), np.load(args.down_weight, mmap_mode='r'))
+    weight_names = (args.up_weight, args.down_weight) + ((args.gate_weight,) if args.gate_weight else ())
+    weights = None if args.model else tuple(np.load(name, mmap_mode='r') for name in weight_names)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     functions = {}
     if args.numerics:
@@ -60,6 +62,18 @@ def main():
                 check(native(program.handle, (View * 3)(*(ref.view for ref in refs)), scalar))
 
             functions[kernel] = bind
+        if args.gate_weight:
+            gelu_native = library.gemma_mesh_gelu_mul
+            gelu_native.argtypes = [C.c_void_p, C.POINTER(View)]
+            gelu_native.restype = C.c_int32
+
+            # design/algorithm-sources.md#nnffn
+            def gated_activation(program, inputs, outputs):
+                refs = (*inputs, *outputs)
+                if any(ref.dtype != np.dtype('float16') for ref in refs):
+                    raise TypeError('The engine gated activation requires FP16 operands')
+                check(gelu_native(program.handle, (View * 3)(*(ref.view for ref in refs))))
+
         if args.normalize is not None:
             normalize_native = library.gemma_mesh_rmsnorm
             normalize_native.argtypes = [C.c_void_p, C.POINTER(View), C.c_int32]
@@ -86,25 +100,31 @@ def main():
                 raise OSError(f'Could not open model file {args.model}')
             resources.callback(library.gemma_mesh_model_close, model)
             shapes = []
-            for name in (args.up_weight, args.down_weight):
+            for name in weight_names:
                 shape = (C.c_size_t * 2)()
                 check(library.gemma_mesh_model_shape(model, name.encode(), shape))
                 shapes.append(tuple(reversed(shape)))
-            dtypes = (values.dtype, values.dtype)
+            dtypes = (values.dtype,) * len(weight_names)
         else:
             shapes, dtypes = tuple(w.shape for w in weights), tuple(w.dtype for w in weights)
         start, end = (0, args.split) if program.node == args.root else (args.split, shapes[0][1])
         up_weight = program.tensor((shapes[0][0], end - start), dtype=dtypes[0])
         down_weight = program.tensor((end - start, shapes[1][1]), dtype=dtypes[1])
-        for index, tensor in enumerate((up_weight, down_weight)):
+        tensors = (up_weight, down_weight)
+        if args.gate_weight:
+            if shapes[2] != shapes[0]:
+                raise ValueError('Gate and up projection weights must have the same shape')
+            gate_weight = program.tensor(up_weight.shape, dtype=dtypes[2])
+            tensors += (gate_weight,)
+        for index, tensor in enumerate(tensors):
             if args.model:
                 ref = tensor[0, 0].T
                 scalar = (np.dtype('float16'), np.dtype('float32')).index(ref.dtype)
-                check(library.gemma_mesh_model_load(model, (args.up_weight, args.down_weight)[index].encode(),
-                    program.handle, C.byref(ref.view), scalar, start if index else 0, 0 if index else start))
+                check(library.gemma_mesh_model_load(model, weight_names[index].encode(),
+                    program.handle, C.byref(ref.view), scalar, start if index == 1 else 0, 0 if index == 1 else start))
                 program.constant(tensor[0, 0])
             else:
-                program.constant(tensor[0, 0], weights[index][:, start:end] if index == 0 else weights[index][start:end, :])
+                program.constant(tensor[0, 0], weights[index][:, start:end] if index != 1 else weights[index][start:end, :])
         if program.node == args.root:
             weight = np.load(args.consumer_weight, mmap_mode='r')
             consumer_weight = program.tensor(weight.shape, dtype=weight.dtype)
@@ -125,9 +145,16 @@ def main():
             up = linear(program, x, up_weight, tile_rows=args.tile_rows,
                         tile_k=args.tile_k, tile_columns=args.tile_columns)
             spec = BlockSpec(up.block_shape, lambda i, j: (i, j))
-            hidden = program.kernel_call(kernels.swish,
-                grid=up.grid, in_specs=(spec,), out_specs=spec,
-                out_shape=ShapeDtypeStruct(up.shape, up.dtype))(up)
+            if args.gate_weight:
+                gate = linear(program, x, gate_weight, tile_rows=args.tile_rows,
+                              tile_k=args.tile_k, tile_columns=args.tile_columns)
+                hidden = program.kernel_call(gated_activation,
+                    grid=up.grid, in_specs=(spec, spec), out_specs=spec,
+                    out_shape=ShapeDtypeStruct(up.shape, up.dtype))(gate, up)
+            else:
+                hidden = program.kernel_call(kernels.swish,
+                    grid=up.grid, in_specs=(spec,), out_specs=spec,
+                    out_shape=ShapeDtypeStruct(up.shape, up.dtype))(up)
             down = linear(program, hidden, down_weight, tile_rows=args.tile_rows,
                           tile_k=args.tile_k, tile_columns=args.tile_columns)
             peers = (args.root, args.peer)
