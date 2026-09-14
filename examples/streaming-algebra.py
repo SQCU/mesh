@@ -108,6 +108,16 @@ def main():
             out_specs=BlockSpec((1, 7), lambda i: (i, 0)),
             out_shape=ShapeDtypeStruct((3, 7), np.float32), peer=0)(weight(strided_left).T, weight(strided_right).T)
         mapped_results = tuple(program.export(mapped[i, 0]) for i in range(3))
+        composed_input = program.tensor((3, 5), block_shape=(1, 5), dtype=dtype)
+        composed_bias = program.tensor((3, 7), block_shape=(1, 7), dtype=np.float32)
+        composed_left, composed_right, bias = kernels.arguments(3)
+        contraction = kernels.dot(composed_left, composed_right, tile_k=3)
+        composed = program.kernel_call(kernels.expression(contraction * 2 + bias, contraction),
+            grid=(3,), in_specs=(BlockSpec(None), BlockSpec(None), BlockSpec((1, 7), lambda i: (i, 0))),
+            out_specs=(BlockSpec((1, 7), lambda i: (i, 0)), BlockSpec((1, 7), lambda i: (i, 0))),
+            out_shape=(ShapeDtypeStruct((3, 7), np.float32), ShapeDtypeStruct((3, 7), np.float32)),
+            peer=0)(composed_input, weight(strided_right).T, composed_bias)
+        composed_results = tuple(tuple(program.export(tensor[i, 0]) for i in range(3)) for tensor in composed)
         table_arg, index_arg, deferred_arg = kernels.arguments(3)
         _, column_arg = kernels.indices()
         index_data = np.array([[2], [2**53 + 1]], dtype=np.int64)
@@ -352,6 +362,37 @@ def main():
         print(json.dumps(dict(event='mapped_contraction', result=[result.array.tolist() for result in mapped_results])), flush=True)
         for result in mapped_results:
             result.consume()
+        for generation in range(2):
+            wait_for((*composed_input.blocks.values(), *composed_bias.blocks.values()), 'writable')
+            composed_values = (strided_left.T + generation).astype(dtype)
+            composed_expected = composed_values.astype(np.float32) @ strided_right.astype(np.float32).T
+            bias_values = np.full((3, 7), generation + 1, dtype=np.float32)
+            with program.write(composed_input[1, 0]) as target:
+                target[...] = composed_values[1:2]
+            wait_for((composed_results[1][1],))
+            if composed_results[0][1].ready or any(composed_results[1][i].ready for i in (0, 2)):
+                raise ArithmeticError('Composed contraction crossed an unpublished operand boundary')
+            if not np.array_equal(composed_results[1][1].array, composed_expected[1:2]):
+                raise ArithmeticError('Composed contraction numerical mismatch')
+            with program.write(composed_bias[1, 0]) as target:
+                target[...] = bias_values[1:2]
+            wait_for((composed_results[0][1],))
+            if not np.array_equal(composed_results[0][1].array, 2 * composed_expected[1:2] + bias_values[1:2]):
+                raise ArithmeticError('Composed contraction epilogue mismatch')
+            print(json.dumps(dict(event='composed_dot_early', generation=generation,
+                withheld_rows=[0, 2], contraction=composed_results[1][1].array.tolist(),
+                epilogue=composed_results[0][1].array.tolist())), flush=True)
+            for i in (0, 2):
+                with program.write(composed_input[i, 0]) as target:
+                    target[...] = composed_values[i:i+1]
+                with program.write(composed_bias[i, 0]) as target:
+                    target[...] = bias_values[i:i+1]
+            wait_for(tuple(result for output in composed_results for result in output))
+            for output, expected in zip(composed_results, (2 * composed_expected + bias_values, composed_expected)):
+                for i, result in enumerate(output):
+                    if not np.array_equal(result.array, expected[i:i+1]):
+                        raise ArithmeticError('Composed contraction repeated output mismatch')
+                    result.consume()
         indexed_expected = np.stack((2 * table_data[2], np.ones(4, dtype=dtype)))
         if not indexed.ready or not np.array_equal(indexed.array, indexed_expected):
             raise ArithmeticError('Indexed expression lost integer identity or masked access semantics')
