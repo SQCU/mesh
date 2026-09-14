@@ -1246,24 +1246,30 @@ class _ExpressionRegions:
             _ExpressionKernel((_literal(identity),)).bind(self.program, (), (target,))
             self.cache[key] = target
             return self.cache[key]
-        plan = _ReductionPlan.create(self.reduction_regions(node, row, rows))
-        parts = {}
-        for index, (column, length) in enumerate(plan.regions):
-            target = direct if direct is not None and index == plan.root and direct.dtype == dtype else self.temporary((rows, 1), dtype)
+        regions = self.reduction_regions(node, row, rows)
+        parts = []
+        for column, length in regions:
+            target = direct if direct is not None and len(regions) == 1 and direct.dtype == dtype else self.temporary((rows, 1), dtype)
             self.emit(child, (row, column), (rows, length), target, reduce=node.operation)
-            parts[index] = target
-        for left_index, right_index, output in plan.merges:
-            target = direct if direct is not None and output == plan.root and direct.dtype == dtype else self.temporary((rows, 1), dtype)
-            inputs = (parts[left_index], parts[right_index])
-            if dtype.kind == 'f':
-                add.bind(self.program, inputs, (target,))
-            else:
-                left, right = arguments(2)
-                bits = 0xffffffffffffffff
-                merged = (left & bits)+(right & bits)
-                _ExpressionKernel((merged,)).bind(self.program, inputs, (target,), self.coordinate)
-            parts[output] = target
-        self.cache[key] = parts[plan.root]
+            parts.append(target)
+        while len(parts) > 1:
+            following = []
+            for index in range(0, len(parts), 2):
+                if index + 1 == len(parts):
+                    following.append(parts[index])
+                    continue
+                target = direct if direct is not None and len(parts) == 2 and direct.dtype == dtype else self.temporary((rows, 1), dtype)
+                inputs = (parts[index], parts[index + 1])
+                if dtype.kind == 'f':
+                    add.bind(self.program, inputs, (target,))
+                else:
+                    left, right = arguments(2)
+                    bits = 0xffffffffffffffff
+                    merged = (left & bits)+(right & bits)
+                    _ExpressionKernel((merged,)).bind(self.program, inputs, (target,), self.coordinate)
+                following.append(target)
+            parts = following
+        self.cache[key] = parts[0]
         return self.cache[key]
 
     # design/algorithm-sources.md#kernelsdot
@@ -1408,37 +1414,6 @@ class _ExpressionRegions:
         if reduce:
             lowered = _Expression(reduce, (lowered,))
         _ExpressionKernel((lowered,)).bind(self.program, tuple(inputs), (target,), self.coordinate)
-
-
-
-
-
-
-# design/algorithm-sources.md#kernelsdot
-@dataclass(frozen=True)
-class _ReductionPlan:
-    regions: tuple
-    merges: tuple
-    root: int
-
-    # design/algorithm-sources.md#kernelsdot
-    @classmethod
-    def create(cls, regions):
-        regions = tuple(regions)
-        parts, merges = list(range(len(regions))), []
-        while len(parts) > 1:
-            following = []
-            for index in range(0, len(parts), 2):
-                if index+1 == len(parts):
-                    following.append(parts[index])
-                else:
-                    output = len(regions)+len(merges)
-                    merges.append((parts[index], parts[index+1], output))
-                    following.append(output)
-            parts = following
-        return cls(regions, tuple(merges), parts[0] if parts else -1)
-
-
 
 
 
