@@ -110,13 +110,14 @@ def main():
             out_shape=ShapeDtypeStruct((2, 4), dtype), peer=0)(streamed_table, streamed_indices)[0, 0])
         scatter_indices = program.tensor((6, 1), (2, 1), dtype=np.int64)
         scatter_updates = program.tensor((6, 4), (2, 4), dtype=dtype)
-        base_arg, destination_arg, update_arg, mask_arg = kernels.arguments(4)
+        scatter_factors = program.tensor((6, 1), (2, 1), dtype=np.float32)
+        base_arg, destination_arg, update_arg, mask_arg, factor_arg = kernels.arguments(5)
         scatter = program.kernel_call(kernels.expression(kernels.indexed_add(
-            base_arg, destination_arg, update_arg, mask=mask_arg)), grid=(4,),
-            in_specs=(BlockSpec(None),) * 4, out_specs=BlockSpec((1, 4), lambda i: (i, 0)),
+            base_arg, destination_arg, update_arg * factor_arg + 1, mask=mask_arg)), grid=(4,),
+            in_specs=(BlockSpec(None),) * 5, out_specs=BlockSpec((1, 4), lambda i: (i, 0)),
             out_shape=ShapeDtypeStruct((4, 4), dtype), peer=0)(
                 weight(np.zeros((4, 4), dtype=dtype)), scatter_indices, scatter_updates,
-                weight(np.array([[True], [True], [True], [True], [True], [False]])))
+                weight(np.array([[True], [True], [True], [True], [True], [False]])), scatter_factors)
         consumer_arg, = kernels.arguments(1)
         scatter_consumed = program.kernel_call(kernels.expression(consumer_arg * 2), grid=(4,),
             in_specs=(BlockSpec((1, 4), lambda i: (i, 0)),),
@@ -283,7 +284,7 @@ def main():
             scatter_start = time.monotonic_ns()
             routing = np.array([[0], [2], [0], [3], [2], [2]] if not generation else
                                [[3], [2**32 + 2], [3], [0], [2], [2]], dtype=np.int64)
-            for ref in (*scatter_indices.blocks.values(), *scatter_updates.blocks.values()):
+            for ref in (*scatter_indices.blocks.values(), *scatter_updates.blocks.values(), *scatter_factors.blocks.values()):
                 while not ref.writable:
                     if time.monotonic_ns() - scatter_start > 60_000_000_000:
                         raise TimeoutError('Scatter source lifetime was not retired')
@@ -292,19 +293,25 @@ def main():
                 with program.write(scatter_indices[i, 0]) as destination:
                     destination[...] = routing[2*i:2*i+2]
             for i in range(2):
+                with program.write(scatter_factors[i, 0]) as destination:
+                    destination[...] = 2
                 with program.write(scatter_updates[i, 0]) as destination:
                     destination[...] = np.arange(2*i+1+generation, 2*i+3+generation, dtype=dtype)[:, None]
             wait_for(tuple(scatter_results[i] for i in (0, 1, 3)))
             if scatter_results[2].ready or not scatter_updates[2, 0].writable:
                 raise ArithmeticError('Delayed scatter contribution was not independent')
             first_scatter_ns = time.monotonic_ns() - scatter_start
-            for i, expected in ((0, 10 if generation else 8), (1, 0), (3, 12 if generation else 8)):
+            for i, expected in ((0, 22 if generation else 20), (1, 0), (3, 28 if generation else 18)):
                 if not np.array_equal(scatter_results[i].array, np.full((1, 4), expected, dtype=dtype)):
                     raise ArithmeticError('Early scattered sum or consumer differs')
             with program.write(scatter_updates[2, 0]) as destination:
                 destination[...] = np.array([[5+generation], [6+generation]], dtype=dtype)
+            if scatter_results[2].ready or not scatter_factors[2, 0].writable:
+                raise ArithmeticError('Fused update ignored its missing coefficient operand')
+            with program.write(scatter_factors[2, 0]) as destination:
+                destination[...] = 2
             wait_for((scatter_results[2],))
-            if not np.array_equal(scatter_results[2].array, np.full((1, 4), 12 if generation else 14, dtype=dtype)):
+            if not np.array_equal(scatter_results[2].array, np.full((1, 4), 26 if generation else 32, dtype=dtype)):
                 raise ArithmeticError('Duplicate or masked scatter contribution differs')
             print(json.dumps(dict(event='indexed_add', generation=generation, first_consumer_ns=first_scatter_ns,
                 complete_ns=time.monotonic_ns()-scatter_start,
