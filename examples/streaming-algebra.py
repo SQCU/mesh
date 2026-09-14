@@ -361,28 +361,34 @@ def main():
                 np.add.at(expected, (rows_values[valid, None], np.array([1, 0])[None, :], normalized[valid, None]), cotangent_values[valid])
                 generations.append(((rows_values, column_values), cotangent_values, expected * 3 + 1))
             xonotic_gradients.append(('advanced', (row_indices, column_indices), gather_cotangents, gather_results, generations))
-            matrix_indices = program.tensor((1, 6), (1, 2), dtype=np.int64)
-            matrix_updates = program.tensor((6, 1), (2, 1), dtype=np.float32)
-            matrix_base = np.arange(16, dtype=np.float32).reshape(4, 4)
-            graph = mx.Graph()
-            with graph:
-                base_value = graph.constant(matrix_base)
-                indices = graph.input('indices', (6,), 'int64')
-                updates = graph.input('updates', (6, 1))
-                scattered = base_value.at[indices].add(updates * 2 + 1)
-                transformed = scattered * 3
-            lowered = kernel_calls(program, graph, (),
-                {indices.index: matrix_indices, updates.index: matrix_updates},
-                outputs=(transformed,), root_peer=0, tile_rows=1, tile_columns=4)
-            matrix_results = tuple(program.export(ref) for _, ref in sorted(lowered[transformed.index].blocks.items()))
-            generations = []
-            for generation in range(2):
-                index_values = np.array([0, 0, 3, 3, 2, -2] if not generation else [3, 3, 0, 0, 2, -2], dtype=np.int64)
-                update_values = np.arange(1 + generation, 7 + generation, dtype=np.float32).reshape(6, 1)
-                expected = matrix_base.astype(np.float64)
-                np.add.at(expected, index_values % 4, np.broadcast_to(update_values * 2 + 1, (6, 4)))
-                generations.append(((index_values,), update_values, (expected * 3).reshape(4, 1, 4)))
-            xonotic_gradients.append(('matrix_scatter', (matrix_indices,), matrix_updates, matrix_results, generations))
+            for name, base_shape, index_shape, update_shape, row_tile in (
+                    ('matrix_scatter', (4, 4), (6,), (6, 1), 1),
+                    ('rank_scatter', (4, 2, 3), (2, 3), (2, 3, 1, 1), 2)):
+                index_storage = (1, 6) if len(index_shape) == 1 else index_shape
+                index_block = (1, 2) if len(index_shape) == 1 else (1, 3)
+                matrix_indices = program.tensor(index_storage, index_block, dtype=np.int64)
+                matrix_updates = program.tensor((6, 1), (2, 1), dtype=np.float32)
+                matrix_base = np.arange(np.prod(base_shape), dtype=np.float32).reshape(base_shape)
+                graph = mx.Graph()
+                with graph:
+                    base_value = graph.constant(matrix_base)
+                    indices = graph.input('indices', index_shape, 'int64')
+                    updates = graph.input('updates', update_shape)
+                    scattered = base_value.at[indices].add(updates * 2 + 1)
+                    transformed = scattered * 3
+                lowered = kernel_calls(program, graph, (),
+                    {indices.index: matrix_indices, updates.index: matrix_updates},
+                    outputs=(transformed,), root_peer=0, tile_rows=row_tile, tile_columns=base_shape[-1])
+                matrix_results = tuple(program.export(ref) for _, ref in sorted(lowered[transformed.index].blocks.items()))
+                generations = []
+                for generation in range(2):
+                    index_values = np.array([0, 0, 3, 3, 2, -2] if not generation else [3, 3, 0, 0, 2, -2], dtype=np.int64)
+                    update_values = np.arange(1 + generation, 7 + generation, dtype=np.float32).reshape(6, 1)
+                    expected = matrix_base.astype(np.float64)
+                    expanded = np.broadcast_to((update_values * 2 + 1).reshape((6,) + (1,) * (len(base_shape)-1)), (6, *base_shape[1:]))
+                    np.add.at(expected, index_values % 4, expanded)
+                    generations.append(((index_values,), update_values, (expected * 3).reshape(4, -1, base_shape[-1])))
+                xonotic_gradients.append((name, (matrix_indices,), matrix_updates, matrix_results, generations))
             take_indices = program.tensor((4, 1), (1, 1), dtype=np.int64)
             take_cotangents = program.tensor((4, 1), (1, 1), dtype=np.float32)
             graph = mx.Graph()
@@ -867,7 +873,7 @@ def main():
                     if not np.array_equal(gradient_results[i].array, expected[i]):
                         raise ArithmeticError('Early indexed sum consumer differs')
                 print(json.dumps(dict(event='xonotic_indexed_sum_early', case=name, generation=generation,
-                    shape_only_primal=name != 'matrix_scatter', withheld_contribution_blocks=delayed,
+                    shape_only_primal=not name.endswith('scatter'), withheld_contribution_blocks=delayed,
                     output=[gradient_results[i].array.tolist() for i in (0, 1, 3)])), flush=True)
                 for i in delayed:
                     row = i * cotangents.block_shape[0]
