@@ -208,6 +208,182 @@ def _resolve_logical(node, inputs):
     return _Expression(node.operation, children, node.value)
 
 
+# design/algorithm-sources.md#static-indexed-access-specialization
+def _static_value(node, inputs, rows, columns, coordinate):
+    if node.operation in ('input', 'load'):
+        return None
+    if node.operation == 'row':
+        return rows
+    if node.operation == 'column':
+        return columns
+    if node.operation == 'program_id':
+        return np.full(rows.shape, coordinate[node.value], dtype=np.int64)
+    if node.operation == 'literal':
+        return np.full(rows.shape, node.value, dtype=_expression_dtype(node, inputs))
+    if node.operation == 'select':
+        condition = _static_value(node.operands[0], inputs, rows, columns, coordinate)
+        if condition is None:
+            return None
+        result = np.empty(rows.shape, dtype=_expression_dtype(node, inputs))
+        for branch, enabled in ((node.operands[1], condition != 0), (node.operands[2], condition == 0)):
+            if np.any(enabled):
+                value = _static_value(branch, inputs, rows[enabled], columns[enabled], coordinate)
+                if value is None:
+                    return None
+                result[enabled] = value
+        return result
+    if node.operation not in ('cast', '+', '-', '*', '/', '//', '%', '<', '<=', '>', '>=', '==', '&', '|'):
+        return None
+    values = tuple(_static_value(child, inputs, rows, columns, coordinate) for child in node.operands)
+    if any(value is None for value in values):
+        return None
+    dtype = _expression_dtype(node, inputs)
+    if node.operation == 'cast':
+        value = values[0]
+        if dtype.kind in 'iu' and value.dtype.kind == 'f':
+            bits = dtype.itemsize*8
+            lower, upper = (0, 2**bits) if dtype.kind == 'u' else (-2**(bits-1), 2**(bits-1))
+            if np.any(~np.isfinite(value)) or np.any(value < lower) or np.any(value >= upper):
+                return None
+        with np.errstate(over='ignore', invalid='ignore'):
+            return value.astype(dtype)
+    promoted = _expression_dtype(_Expression('+', node.operands), inputs)
+    if promoted.kind == 'f':
+        return None
+    left, right = (value.astype(promoted) for value in values)
+    with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
+        if node.operation in ('/', '//', '%'):
+            if np.any(right == 0) or (promoted.kind == 'i' and np.any((left == np.iinfo(promoted).min) & (right == -1))):
+                return None
+            quotient, remainder = np.floor_divide(left, right), np.remainder(left, right)
+            if node.operation == '/':
+                quotient = quotient + (((left < 0) != (right < 0)) & (remainder != 0)).astype(promoted)
+            return (remainder if node.operation == '%' else quotient).astype(dtype)
+        if promoted.kind == 'i' and node.operation in ('+', '-', '*'):
+            exact = {'+': np.add, '-': np.subtract, '*': np.multiply}[node.operation](left.astype(object), right.astype(object))
+            bounds = np.iinfo(promoted)
+            if np.any(exact < bounds.min) or np.any(exact > bounds.max):
+                return None
+        operation = {'+': np.add, '-': np.subtract, '*': np.multiply, '<': np.less,
+                     '<=': np.less_equal, '>': np.greater, '>=': np.greater_equal,
+                     '==': np.equal, '&': np.bitwise_and, '|': np.bitwise_or}[node.operation]
+        return operation(left, right).astype(dtype)
+
+
+# design/algorithm-sources.md#static-indexed-access-specialization
+def _specialize_accesses(expression, inputs, output, coordinate):
+    domains, widths = {}, {}
+
+    # design/algorithm-sources.md#static-indexed-access-specialization
+    def width(node):
+        if node not in widths:
+            children = tuple(width(child) for child in node.operands)
+            if any(child is None for child in children):
+                return None
+            if node.operation == 'input':
+                value = inputs[node.value].shape[1]
+            elif node.operation == 'column':
+                value = output.shape[1]
+            elif node.operation in ('row', 'sum'):
+                value = 1
+            else:
+                value = max(children, default=1)
+                if any(child not in (1, value) for child in children):
+                    return None
+            widths[node] = value
+        return widths[node]
+
+    # design/algorithm-sources.md#static-indexed-access-specialization
+    def visit(node, path=(), extent=output.shape[1]):
+        if node.operation == 'select':
+            condition, yes, no = node.operands
+            visit(condition, path, extent)
+            visit(yes, path + ((condition, True),), extent)
+            visit(no, path + ((condition, False),), extent)
+        elif node.operation == 'load':
+            row, column, mask, other = node.operands
+            visit(mask, path, extent)
+            selected = path + ((mask, True),)
+            visit(row, selected, extent)
+            visit(column, selected, extent)
+            visit(other, path + ((mask, False),), extent)
+            if hasattr(inputs[node.value], 'blocks'):
+                domains.setdefault(node, set()).add((selected, extent))
+        elif node.operation == 'sum':
+            visit(node.operands[0], (), width(node.operands[0]))
+        else:
+            for child in node.operands:
+                visit(child, path, extent)
+
+    visit(expression)
+    selected = {}
+    for node, uses in domains.items():
+        table = inputs[node.value]
+        blocks, proven = set(), True
+        for path, extent in uses:
+            if extent is None:
+                proven = False
+                break
+            for start in range(0, output.shape[0]*extent, 4096):
+                ordinal = np.arange(start, min(start+4096, output.shape[0]*extent), dtype=np.int64)
+                rows, columns = ordinal // extent, ordinal % extent
+                for predicate, polarity in path:
+                    value = _static_value(predicate, inputs, rows, columns, coordinate)
+                    if value is None:
+                        proven = False
+                        break
+                    enabled = (value != 0) if polarity else (value == 0)
+                    rows, columns = rows[enabled], columns[enabled]
+                    if not rows.size:
+                        break
+                if not proven:
+                    break
+                if not rows.size:
+                    continue
+                row = _static_value(node.operands[0], inputs, rows, columns, coordinate)
+                column = _static_value(node.operands[1], inputs, rows, columns, coordinate)
+                if row is None or column is None or row.dtype.kind not in 'iub' or column.dtype.kind not in 'iub':
+                    proven = False
+                    break
+                if np.any(row < 0) or np.any(column < 0) or np.any(row >= table.shape[0]) or np.any(column >= table.shape[1]):
+                    proven = False
+                    break
+                blocks.update((int(r), int(c)) for r, c in zip(row // table.block_shape[0], column // table.block_shape[1]))
+            if not proven:
+                break
+        if proven:
+            selected[node] = tuple(sorted(blocks))
+    bound, positions, replacements = list(inputs), {}, {}
+
+    # design/algorithm-sources.md#static-indexed-access-specialization
+    def rewrite(node):
+        if node in replacements:
+            return replacements[node]
+        children = tuple(rewrite(child) for child in node.operands)
+        if node not in selected:
+            return _Expression(node.operation, children, node.value)
+        table = inputs[node.value]
+        row, column, mask, other = children
+        result = other
+        for block in reversed(selected[node]):
+            ref = table.blocks[block]
+            view = ref.view
+            identity = (view.tensor, view.extent, view.offset, view.rows, view.columns, view.row_stride, view.column_stride, ref.dtype.str)
+            if identity not in positions:
+                positions[identity] = len(bound)
+                bound.append(ref)
+            first_row, first_column = (index*size for index, size in zip(block, table.block_shape))
+            local_row, local_column = row-first_row, column-first_column
+            inside = (local_row >= 0) & (local_row < ref.shape[0]) & (local_column >= 0) & (local_column < ref.shape[1])
+            value = _Expression('load', (local_row, local_column, _literal(True), other), positions[identity])
+            result = value if len(selected[node]) == 1 else select(inside, value, result)
+        result = select(mask, result, other) if selected[node] else other
+        replacements[node] = result
+        return result
+
+    return rewrite(expression), tuple(bound)
+
+
 # design/algorithm-sources.md#indexed-expression-lowering
 def indices():
     return _Expression('row'), _Expression('column')
@@ -266,6 +442,7 @@ class _ExpressionKernel:
             raise ValueError('Expression regions require supported real, integer or boolean scalars')
         for value, output in zip(self.values, outputs):
             value = _resolve_logical(value, inputs)
+            value, specialized_inputs = _specialize_accesses(value, inputs, output, coordinate)
             used = {}
 
             # design/algorithm-sources.md#indexed-expression-lowering
@@ -278,7 +455,7 @@ class _ExpressionKernel:
                 return _Expression(node.operation, tuple(remap(child) for child in node.operands), index)
 
             expression = remap(value)
-            reads = tuple(inputs[index] for index in used)
+            reads = tuple(specialized_inputs[index] for index in used)
             dynamic, accesses = {}, {}
             dynamic_inputs = {index for index, source in enumerate(reads)
                 if hasattr(source, 'blocks') and not all((ref.view.tensor, ref.view.extent)
@@ -505,7 +682,7 @@ def _expression_dtype(node, inputs):
     if node.operation in ('row', 'column', 'program_id'):
         return np.dtype('int64')
     if node.operation == 'literal':
-        return np.dtype('float32' if isinstance(node.value, float) else 'uint64' if node.value > 2**63-1 else 'int64')
+        return np.dtype('int32' if isinstance(node.value, bool) else 'float32' if isinstance(node.value, float) else 'uint64' if node.value > 2**63-1 else 'int64')
     if node.operation == 'sum':
         child = _expression_dtype(node.operands[0], inputs)
         return np.dtype('float32' if child.kind == 'f' else 'uint64' if child.kind == 'u' else 'int64')

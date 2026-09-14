@@ -1629,6 +1629,51 @@ without an unsigned intermediate token. Python compilation and source review
 cover construction; existing arbitrary-rank and wide-integer gold cases supply
 native CPU/Metal evidence.
 
+
+### Static indexed access specialization
+
+The JAX authors' [Pallas grids and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)
+use setup-known index maps to identify a program's storage region. The shared
+expression compiler applies that specialization before creating dynamic indexed
+reader descriptors. `_specialize_accesses` collects every occurrence of a load,
+its complete select/mask path, and its actual output or enclosing reduction
+domain. A reduction uses its child's iteration width, not its one-column result.
+
+`_static_value` evaluates only setup expressions: literals, original program IDs,
+row/column indices, scalar casts and integer arithmetic. It never reads input
+array contents, including declared constants. Enumeration uses bounded chunks of
+4096 output points. Operand dtype promotion, casts and modular unsigned arithmetic
+match emitted scalar operations; signed addition/subtraction/multiplication are
+checked with bounded exact integer arithmetic and remain dynamic on overflow.
+Division by zero, unrepresentable signed quotients, nonrepresentable floating
+conversions, floating arithmetic predicates and unknown domains also remain on
+the existing path. Boolean literals retain the emitted C integer literal type.
+This evaluator runs only during binding; it is not a numerical invocation backend.
+
+A load specializes only when every reachable access path is setup-known. A
+constant address under a data-dependent branch therefore keeps its dynamic
+selector. Repeated occurrences union their proven block sets; one dynamic use
+prevents node-wide specialization. The compiler obtains only selected entries
+from the original Tensor's block dictionary, preserving their exact Ref offsets,
+ragged dimensions, transpose strides and dtypes. It does not scan the table's
+candidate blocks to discover the selected set.
+
+The rewrite uses the existing block-local `.at` and numeric `select`. One selected
+block needs no extra block-membership condition; multiple selected blocks use
+ordinary coordinate selection, retaining the original load mask. Each exact static
+Ref gets an explicit appended input position. Original whole-table positions
+remain available for dynamic loads of the same table; unused positions disappear
+in the existing remap pass. Native indexed attachment consequently cannot remove
+a static ordinary dependency that aliases one of its dynamic candidates.
+
+Purely static indexed accesses bind ordinary Ref inputs through `algebra_source`,
+with no selector numerical function or dynamic reader descriptor. Mixed and dynamic
+accesses use the existing selector machinery and canonical lifetimes. The same
+specialization runs for direct expression binding and region-generated numerical
+functions. Python compilation and source review validate construction; unchanged
+streaming gold examples compare configured functions, indexed descriptors and
+repeated CPU/Metal results before and after specialization.
+
 ## Canonical reader groups
 
 Papadopoulos and Culler's [Monsoon](https://www.cs.cmu.edu/~18742/papers/Papadopoulos1990.pdf)
