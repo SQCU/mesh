@@ -2396,3 +2396,25 @@ streaming-algebra workflow covers both gram modes, every derivative, duplicates,
 withheld source/cotangent rows, independent zero gradients, downstream consumers
 and repeated invocations. Source compilation and diff checks precede operational
 validation of that same workflow.
+
+### Share neighborhood edge statistics
+
+The LLVM authors' [common-subexpression elimination](https://mlir.llvm.org/docs/Passes/#-cse)
+provides the setup transformation: one equivalent computation feeds multiple
+users. Within one `kernel_calls` realization, `statistic` caches the raw FP32
+edge dot product by participant, left/right/index graph value identities,
+observer and neighbor dimensions, feature width and tile width. Graph values
+identify immutable supplied bindings or the single replica already keyed by
+(value, participant) in that realization. The cache never spans programs or
+separate realizations. The left operand always supplies observer rows and the
+right operand always supplies indexed source rows, including when graph values
+alias. Each caller appends the shared statistic at its own expression input slot.
+
+Forward, value-gradient and weight-gradient calls can therefore share Q·K;
+query-, key- and weight-gradient calls can share G·V. The stored statistic remains
+unscaled; each consumer applies its formula's scale. Native reader memberships
+retain all consumers before storage reuse. No barrier, extra operand staging or
+invocation cache lookup is introduced. Sharing does not fuse the E×D product
+with its row reduction; that requires a shared expression representation that
+retains an explicit indexed iteration domain instead of inferring it from scalar
+load coordinates. Operational comparisons use the unchanged neighborhood fixture.

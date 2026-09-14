@@ -292,7 +292,7 @@ def numerical_operands(operation, values, attributes):
 
 
 # ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
-def neighborhood_call(program, value, operation, values, attributes, shapes, local, peer, tile_columns):
+def neighborhood_call(program, value, operation, values, attributes, shapes, local, peer, tile_columns, statistics):
     import math
     from mesh import BlockSpec, ShapeDtypeStruct, kernels
     gram, target = attributes['gram'], attributes.get('target')
@@ -338,14 +338,17 @@ def neighborhood_call(program, value, operation, values, attributes, shapes, loc
 
     # ../../../design/algorithm-sources.md#xonotic-neighborhood-algebra
     def statistic(left, right):
-        row, column = kernels.indices()
-        edge, feature = kernels.program_id(0) + row, kernels.program_id(1) * feature_tile + column
-        product = call(load(left, edge, feature) * load(right, edge, feature), inputs,
-                       (edges, width), (1, feature_tile), np.float32)
-        argument, = kernels.arguments(1)
-        reduced = call(argument.sum(), (product,), (edges, 1), (1, 1), np.float32)
+        key = (peer, values[left].index, values[right].index, values[3].index,
+               observers, neighbors, width, feature_tile)
+        if key not in statistics:
+            row, column = kernels.indices()
+            edge, feature = kernels.program_id(0) + row, kernels.program_id(1) * feature_tile + column
+            product = call(load(left, edge, feature) * load(right, edge, feature), inputs,
+                           (edges, width), (1, feature_tile), np.float32)
+            argument, = kernels.arguments(1)
+            statistics[key] = call(argument.sum(), (product,), (edges, 1), (1, 1), np.float32)
         argument = kernels.arguments(len(inputs) + 1)[-1]
-        inputs.append(reduced)
+        inputs.append(statistics[key])
         return argument
 
     affinity = statistic(0, 1) if gram and target in (None, 2, 4) else None
@@ -508,7 +511,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
     peers = {0: program.node if root_peer is None else root_peer}
     peers.update({region['owner']: region['peer'] for region in graph.regions.values()})
     owners = {value.index: peers[owner] for value, _, _, _, owner in graph.nodes}
-    replicas = {}
+    replicas, statistics = {}, {}
     for value, operation, values, attributes, owner in nodes:
         peer = peers[owner]
         if value.index in tensors:
@@ -544,7 +547,7 @@ def kernel_calls(program, graph, capacity, inputs, *, outputs, root_peer=None,
             local[operand.index] = tensor
         shape = shapes[value.index]
         if operation in ('neighborhood', 'neighborhood_vjp'):
-            tensors[value.index] = neighborhood_call(program, value, operation, values, attributes, shapes, local, peer, tile_columns)
+            tensors[value.index] = neighborhood_call(program, value, operation, values, attributes, shapes, local, peer, tile_columns, statistics)
             continue
         if row_gradient:
             vector = len(shape) == 1
