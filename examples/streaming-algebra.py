@@ -207,8 +207,7 @@ def main():
         streamed_indices = weight(np.array([[2], [3]], dtype=np.int64))
         source_arg, selected_arg = kernels.arguments(2)
         streamed_outputs = program.kernel_call(
-            kernels.expression(kernels.select(selected_arg >= 2,
-                2 * source_arg.at(selected_arg, column_arg), source_arg.at(0, column_arg)),
+            kernels.expression(2 * source_arg.at(selected_arg, column_arg),
                 source_arg.at(2, column_arg) + source_arg.at(selected_arg, column_arg)), grid=(1,),
             in_specs=(BlockSpec(None), BlockSpec((2, 1), lambda i: (0, 0))),
             out_specs=(BlockSpec((2, 4), lambda i: (0, 0)),) * 2,
