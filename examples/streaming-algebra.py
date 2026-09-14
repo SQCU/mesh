@@ -42,9 +42,18 @@ def main():
     parser.add_argument('--dtype', choices=('float16', 'float32'), default='float32')
     parser.add_argument('--tile-k', type=int, default=64)
     parser.add_argument('--tile-columns', type=int, default=64)
+    parser.add_argument('--scatter-rows', type=int, default=6)
+    parser.add_argument('--scatter-tile', type=int, default=2)
     parser.add_argument('--trace')
     parser.add_argument('--coreml', nargs=3, metavar=('PYTHON', 'GENERATOR', 'CACHE'))
     args = parser.parse_args()
+    updates_count, update_tile = args.scatter_rows, args.scatter_tile
+    if updates_count < 6 or not 1 <= update_tile < updates_count:
+        parser.error('Scatter demonstration requires at least six rows and a smaller positive tile')
+    last_chunk = (updates_count - 1) // update_tile
+    last_start = last_chunk * update_tile
+    if last_start < 4:
+        parser.error('Scatter demonstration requires four rows before the withheld tile')
     rows, width, tile = 256, 128, 64
     dtype = np.dtype(args.dtype)
     running = True
@@ -108,16 +117,18 @@ def main():
             in_specs=(BlockSpec(None), BlockSpec((2, 1), lambda i: (0, 0))),
             out_specs=BlockSpec((2, 4), lambda i: (0, 0)),
             out_shape=ShapeDtypeStruct((2, 4), dtype), peer=0)(streamed_table, streamed_indices)[0, 0])
-        scatter_indices = program.tensor((6, 1), (2, 1), dtype=np.int64)
-        scatter_updates = program.tensor((6, 4), (2, 4), dtype=dtype)
-        scatter_factors = program.tensor((6, 1), (2, 1), dtype=np.float32)
+        scatter_indices = program.tensor((updates_count, 1), (update_tile, 1), dtype=np.int64)
+        scatter_updates = program.tensor((updates_count, 4), (update_tile, 4), dtype=dtype)
+        scatter_factors = program.tensor((updates_count, 1), (update_tile, 1), dtype=np.float32)
+        scatter_valid = np.ones((updates_count, 1), dtype=bool)
+        scatter_valid[-1 if updates_count-last_start > 1 else -2, 0] = False
         base_arg, destination_arg, update_arg, mask_arg, factor_arg = kernels.arguments(5)
         scatter = program.kernel_call(kernels.expression(kernels.indexed_add(
             base_arg, destination_arg, update_arg * factor_arg + 1, mask=mask_arg)), grid=(4,),
             in_specs=(BlockSpec(None),) * 5, out_specs=BlockSpec((1, 4), lambda i: (i, 0)),
             out_shape=ShapeDtypeStruct((4, 4), dtype), peer=0)(
                 weight(np.zeros((4, 4), dtype=dtype)), scatter_indices, scatter_updates,
-                weight(np.array([[True], [True], [True], [True], [True], [False]])), scatter_factors)
+                weight(scatter_valid), scatter_factors)
         consumer_arg, = kernels.arguments(1)
         scatter_consumed = program.kernel_call(kernels.expression(consumer_arg * 2), grid=(4,),
             in_specs=(BlockSpec((1, 4), lambda i: (i, 0)),),
@@ -282,38 +293,46 @@ def main():
                 streamed_result.consume()
         for generation in range(2):
             scatter_start = time.monotonic_ns()
-            routing = np.array([[0], [2], [0], [3], [2], [2]] if not generation else
-                               [[3], [2**32 + 2], [3], [0], [2], [2]], dtype=np.int64)
+            routing = np.resize(np.array([0, 2, 0, 3], dtype=np.int64), updates_count).reshape(-1, 1)
+            routing[last_start:] = 2
+            if generation:
+                routing = np.where(routing == 0, 3, np.where(routing == 3, 0, routing))
+                routing[1, 0] = 2**32 + 2
+            update_values = np.arange(1+generation, updates_count+1+generation, dtype=dtype)[:, None]
+            expected = np.zeros((4, 1), dtype=np.float32)
+            selected = scatter_valid[:, 0] & (routing[:, 0] < 4)
+            np.add.at(expected, routing[selected, 0], update_values[selected].astype(np.float32)*(2+generation)+1)
+            expected = (expected.astype(dtype)*2).astype(dtype)
             for ref in (*scatter_indices.blocks.values(), *scatter_updates.blocks.values(), *scatter_factors.blocks.values()):
                 while not ref.writable:
                     if time.monotonic_ns() - scatter_start > 60_000_000_000:
                         raise TimeoutError('Scatter source lifetime was not retired')
                     time.sleep(0.0001)
-            for i in range(3):
+            for i in range(last_chunk+1):
                 with program.write(scatter_indices[i, 0]) as destination:
-                    destination[...] = routing[2*i:2*i+2]
-            for i in range(2):
+                    destination[...] = routing[update_tile*i:update_tile*(i+1)]
+            for i in range(last_chunk):
                 with program.write(scatter_factors[i, 0]) as destination:
                     destination[...] = 2 + generation
                 with program.write(scatter_updates[i, 0]) as destination:
-                    destination[...] = np.arange(2*i+1+generation, 2*i+3+generation, dtype=dtype)[:, None]
+                    destination[...] = update_values[update_tile*i:update_tile*(i+1)]
             wait_for(tuple(scatter_results[i] for i in (0, 1, 3)))
-            if scatter_results[2].ready or not scatter_updates[2, 0].writable:
+            if scatter_results[2].ready or not scatter_updates[last_chunk, 0].writable:
                 raise ArithmeticError('Delayed scatter contribution was not independent')
             first_scatter_ns = time.monotonic_ns() - scatter_start
-            for i, expected in ((0, 32 if generation else 20), (1, 0), (3, 40 if generation else 18)):
-                if not np.array_equal(scatter_results[i].array, np.full((1, 4), expected, dtype=dtype)):
+            for i in (0, 1, 3):
+                if not np.array_equal(scatter_results[i].array, np.broadcast_to(expected[i], (1, 4))):
                     raise ArithmeticError('Early scattered sum or consumer differs')
-            with program.write(scatter_updates[2, 0]) as destination:
-                destination[...] = np.array([[5+generation], [6+generation]], dtype=dtype)
-            if scatter_results[2].ready or not scatter_factors[2, 0].writable:
+            with program.write(scatter_updates[last_chunk, 0]) as destination:
+                destination[...] = update_values[last_start:]
+            if scatter_results[2].ready or not scatter_factors[last_chunk, 0].writable:
                 raise ArithmeticError('Fused update ignored its missing coefficient operand')
-            with program.write(scatter_factors[2, 0]) as destination:
+            with program.write(scatter_factors[last_chunk, 0]) as destination:
                 destination[...] = 2 + generation
             wait_for((scatter_results[2],))
-            if not np.array_equal(scatter_results[2].array, np.full((1, 4), 38 if generation else 32, dtype=dtype)):
+            if not np.array_equal(scatter_results[2].array, np.broadcast_to(expected[2], (1, 4))):
                 raise ArithmeticError('Duplicate or masked scatter contribution differs')
-            print(json.dumps(dict(event='indexed_add', generation=generation, first_consumer_ns=first_scatter_ns,
+            print(json.dumps(dict(event='indexed_add', generation=generation, rows=updates_count, tile=update_tile, first_consumer_ns=first_scatter_ns,
                 complete_ns=time.monotonic_ns()-scatter_start,
                 delayed_destination=2, result=[result.array.tolist() for result in scatter_results])), flush=True)
             if not generation:
