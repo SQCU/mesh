@@ -1197,7 +1197,7 @@ class _ExpressionRegions:
             return self.panel(node.operands[0], origin[::-1], shape[::-1]).T
         if node.operation == 'sum':
             return self.reduction(node, origin[0], shape[0], _expression_dtype(node, self.sources))
-        dtype = np.dtype(node.value) if node.operation == 'cast' else np.dtype('float32')
+        dtype = _expression_dtype(node, self.sources)
         if node.operation == 'cast' and node.operands[0].operation == 'input' and self.sources[node.operands[0].value].dtype == dtype:
             return self.panel(node.operands[0], origin, shape)
         key = ('panel', self.key(node, origin, shape))
