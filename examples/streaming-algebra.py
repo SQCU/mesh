@@ -683,11 +683,12 @@ def main():
                     ordering_input = graph.input('ordering_input', (2, 1, length), np.dtype(scalar).name)
                     indices = mx.argsort(ordering_input, axis=2)
                     ordered = mx.take_along_axis(ordering_input, indices, axis=2)
-                    top_indices = mx.argpartition(ordering_input, 2, axis=-1)[:, :, :3]
+                    top_indices = mx.argpartition(ordering_input, -length+2, axis=-1)[:, :, :3]
                     top_values = mx.take_along_axis(ordering_input, top_indices, axis=2)
                     axis_indices = mx.argsort(ordering_input.reshape(2, length).transpose(1, 0), axis=0)
-                    vector_indices = mx.argsort(ordering_input[0, 0, :], axis=0)
-                    ordering_outputs = (indices, ordered, top_indices, top_values, axis_indices, vector_indices)
+                    vector_indices = mx.argsort(ordering_input[0, 0, :], axis=None)
+                    nonlast_indices = mx.argsort(ordering_input.transpose(0, 2, 1), axis=1)
+                    ordering_outputs = (indices, ordered, top_indices, top_values, axis_indices, vector_indices, nonlast_indices)
                 ordering_storage = program.tensor((2, length), (1, 129 if length > 128 else 3), dtype=scalar)
                 first_function = program.native.algebra_trace_count(program.handle)
                 lowered = kernel_calls(program, graph, (), {ordering_input.index: ordering_storage},
@@ -715,7 +716,7 @@ def main():
                         values = values[::-1, ::-1].copy()
                     order = np.argsort(values, axis=1, kind='stable').astype(np.uint32)
                     ordered_values = np.take_along_axis(values, order, axis=1)
-                    generations.append((values, (order, ordered_values, order[:, :3], ordered_values[:, :3], order.T, order[:1])))
+                    generations.append((values, (order, ordered_values, order[:, :3], ordered_values[:, :3], order.T, order[:1], order.reshape(2*length, 1))))
                 xonotic_ordering.append((np.dtype(scalar).name, ordering_storage, observations, first_function, last_function, generations))
             # design/algorithm-sources.md#typed-integer-contractions
             for scalar in (np.int32, np.uint32, np.int64, np.uint64, np.bool_):
@@ -1477,10 +1478,10 @@ def main():
                             with program.write(ref) as destination:
                                 destination[...] = values[i:i+1, column:column+ref.shape[1]]
                     wait_for(tuple(result for output_index, results in enumerate(observations) for i,j,result in results
-                                   if (0 if output_index == 5 else j if output_index == 4 else i) == row))
+                                   if (i//storage.shape[1] if output_index == 6 else 0 if output_index == 5 else j if output_index == 4 else i) == row))
                     for output_index, (results, reference) in enumerate(zip(observations, expected)):
                         for i,j,result in results:
-                            source_row = 0 if output_index == 5 else j if output_index == 4 else i
+                            source_row = i//storage.shape[1] if output_index == 6 else 0 if output_index == 5 else j if output_index == 4 else i
                             if source_row == row:
                                 target = reference[i:i+result.array.shape[0], j:j+result.array.shape[1]]
                                 if result.array.dtype != target.dtype or not np.array_equal(result.array, target, equal_nan=True):
@@ -1492,7 +1493,7 @@ def main():
                     print(json.dumps(dict(event='xonotic_ordering_early' if row == generation else 'xonotic_ordering_complete',
                         dtype=dtype_name, length=storage.shape[1], generation=generation, published_row=row, elapsed_ms=(time.monotonic_ns()-started)/1e6,
                         output=[[(i,j,result.array.tolist()) for i,j,result in results
-                                 if (0 if output_index == 5 else j if output_index == 4 else i) == row]
+                                 if (i//storage.shape[1] if output_index == 6 else 0 if output_index == 5 else j if output_index == 4 else i) == row]
                                 for output_index,results in enumerate(observations)])), flush=True)
                 for results in observations:
                     for i,j,result in results:
