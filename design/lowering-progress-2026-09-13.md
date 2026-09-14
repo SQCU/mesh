@@ -1548,3 +1548,61 @@ CPU mean 0.3673545 ms, sample variance 0.0018886043405 ms²; Metal mean
 0.883979 ms, variance 0.022693446882 ms². These are host observation intervals,
 not physical compute/wire overlap durations or a matched speedup measurement.
 Raw logs/traces and full commands are retained with the provenance.
+
+## Share counter-based random generation
+
+`e48bbaf` adds Philox4x32-10 word expressions and indexed normal expressions to
+the shared numerical library. One compact integer helper implements the fixed
+rounds for CPU and Metal; the normal transform uses the prior ordinal/key
+mapping and precise Metal scalar functions. `ce7a508` replaces Xonotic's
+whole-output random binding with ordinary tiled expressions and deletes its
+private Philox source. Output region ordinals retain the global flattened
+index, including pairs split across row/tile boundaries. No sequence cursor,
+host-generated random operand, extra scheduler or runtime allocation is added.
+
+`df8bd3e` extends the existing workflow with three published Philox vectors,
+two normal key generations and independent downstream consumers. A second
+producer→consumer chain starts at ordinal 2^33 and consumes separate per-row
+key pages; one chain completes while the other key remains unpublished. The
+normal reference retains exact integer rounds and FP32 uniform conversion;
+backend transcendental results use a finite numerical tolerance.
+[Mechanism and primary sources](algorithm-sources.md#counter-based-random-generation)
+separate exact integer output guarantees from normal floating precision.
+
+Ordering and integer contractions remain in the caller's custom emitter.
+Independent Philox word outputs can repeat integer helper work; cross-output
+fusion, broad statistical evaluation and a matched fastest-backend performance
+comparison remain open. This migration is progress within the nine-point plan,
+not completion of its performance acceptance.
+
+The next source disposition is explicit. Integer dot currently hardcodes FP32
+accumulation in the shared region owner, while the caller's remaining integer
+matmul casts inputs into FP32 tiles. Extend the shared dot owner with typed
+modular panel arithmetic, typed merges and publication, preserving the existing
+floating native path. Boolean contraction needs its truth-semiring contract.
+Sorting should use typed stable runs and configured merges in the library,
+retaining original ordinals and NaN ordering. Final ranks depend on their entire
+sorted axis; partial runs and unrelated rows can progress independently. These
+are implementation tasks, not capabilities supplied by the random migration.
+
+[`random-generation-provenance.json`](../measurements/lowering-2026-09-13/random-generation-provenance.json)
+records source and installed library `e48bbaf` on both nodes. CPU and Metal
+each configured 5962 functions and completed 11773 submissions. The paired
+Metal workflow configured 5898 functions and completed 11088 rank-zero
+submissions. All terminal runtime codes and process exit codes are zero; the
+peer exited after SIGTERM. Both bridges returned to ready, unpaired, zero-client
+state with the existing arena geometry. Random side cases execute on rank zero;
+paired gold/fanout uses the actual RDMA link.
+
+All three integer vectors match exactly. Normal values and downstream arithmetic
+pass the recorded tolerances across ragged pair boundaries and reuse, including
+ordinals whose counter has a nonzero high word. An available per-row key drives
+its separate normal producer and pointwise consumer to completion before the
+other key arrives. The Xonotic chain separately demonstrates consumers progressing
+with the other consumer input row absent.
+
+Early observation times have count 2 each: CPU mean 0.4298125 ms, sample variance
+0.0008802788405 ms²; Metal mean 0.820188 ms, variance 0.015745670882 ms²; paired
+workflow rank-zero mean 0.7445 ms, variance 0.00114003125 ms². Full observations,
+commands and traces are retained. These host intervals are neither a physical
+compute/wire occupancy measurement nor a matched speedup comparison.

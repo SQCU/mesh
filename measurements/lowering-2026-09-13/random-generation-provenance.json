@@ -1,0 +1,203 @@
+{
+  "date": "2026-09-14",
+  "source_revision": "e48bbaf",
+  "installed_source_revision_both_nodes": "e48bbaf",
+  "library_revision": "e48bbaf",
+  "caller_revision": "ce7a508",
+  "example_revision": "df8bd3e",
+  "native_revision": "243b947",
+  "runs": [
+    {
+      "prefix": "random-generation-metal",
+      "backend": "metal",
+      "paired": false,
+      "gold_dtype": "float32",
+      "random_dtype": "float32",
+      "known_answer_vectors": 3,
+      "generations": 2,
+      "exit_code": 0,
+      "peer_exit_code": null,
+      "peer_shutdown": null,
+      "configured_functions": 5962,
+      "completed_submissions": 11773,
+      "random_timings_ms": {
+        "early": {
+          "count": 2,
+          "mean": 0.8201879999999999,
+          "sample_variance": 0.01574567088199999
+        },
+        "complete": {
+          "count": 2,
+          "mean": 1.520188,
+          "sample_variance": 0.016418169632000025
+        }
+      },
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 17.704208,
+        "invocations_per_second": 169.4512400667683,
+        "first_section_ms": 14.9305,
+        "completion_ms": {
+          "count": 3,
+          "mean": 16.078888666666668,
+          "sample_variance": 1.9860174120463336
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.575691461974671e-06,
+        "runtime": {
+          "submitted": 11773,
+          "completed": 11773,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.03877334,
+          "cpu_submitted": 0
+        }
+      },
+      "artifacts": [
+        "random-generation-metal.jsonl.gz",
+        "random-generation-metal-trace.json.gz"
+      ],
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --local --backend metal --dtype float32 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/random-generation-metal-trace.json"
+    },
+    {
+      "prefix": "random-generation-cpu",
+      "backend": "cpu",
+      "paired": false,
+      "gold_dtype": "float32",
+      "random_dtype": "float32",
+      "known_answer_vectors": 3,
+      "generations": 2,
+      "exit_code": 0,
+      "peer_exit_code": null,
+      "peer_shutdown": null,
+      "configured_functions": 5962,
+      "completed_submissions": 11773,
+      "random_timings_ms": {
+        "early": {
+          "count": 2,
+          "mean": 0.42981250000000004,
+          "sample_variance": 0.0008802788405000021
+        },
+        "complete": {
+          "count": 2,
+          "mean": 0.8111875,
+          "sample_variance": 0.0011821953124999988
+        }
+      },
+      "summary": {
+        "event": "summary",
+        "dtype": "float32",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 4.665291,
+        "invocations_per_second": 643.0467038390532,
+        "first_section_ms": 3.539833,
+        "completion_ms": {
+          "count": 3,
+          "mean": 4.187902666666667,
+          "sample_variance": 0.1769452155463335
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 1.6537194948984535e-06,
+        "runtime": {
+          "submitted": 11773,
+          "completed": 11773,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.0,
+          "cpu_submitted": 11773
+        }
+      },
+      "artifacts": [
+        "random-generation-cpu.jsonl.gz",
+        "random-generation-cpu-trace.json.gz"
+      ],
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --local --backend cpu --dtype float32 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/random-generation-cpu-trace.json"
+    },
+    {
+      "prefix": "random-generation-paired",
+      "backend": "metal",
+      "paired": true,
+      "gold_dtype": "float16",
+      "random_dtype": "float32",
+      "known_answer_vectors": 3,
+      "generations": 2,
+      "exit_code": 0,
+      "peer_exit_code": 0,
+      "peer_shutdown": "SIGTERM",
+      "configured_functions": 5898,
+      "completed_submissions": 11088,
+      "random_timings_ms": {
+        "early": {
+          "count": 2,
+          "mean": 0.7444999999999999,
+          "sample_variance": 0.0011400312500000006
+        },
+        "complete": {
+          "count": 2,
+          "mean": 1.367833,
+          "sample_variance": 0.01991688652800002
+        }
+      },
+      "summary": {
+        "event": "summary",
+        "dtype": "float16",
+        "coreml": false,
+        "invocations": 3,
+        "batch_ms": 16.032708,
+        "invocations_per_second": 187.1174850811229,
+        "first_section_ms": 11.227375,
+        "completion_ms": {
+          "count": 3,
+          "mean": 14.670124999999999,
+          "sample_variance": 1.4159807541389988
+        },
+        "withheld_invocation": 1,
+        "withheld_section": 0,
+        "max_absolute_error": 0.001953125,
+        "runtime": {
+          "submitted": 11088,
+          "completed": 11088,
+          "native_submitted": 0,
+          "native_backings": 0,
+          "ne_planned_operations": 0,
+          "code": 0,
+          "gpu_seconds": 0.035580827,
+          "cpu_submitted": 0
+        }
+      },
+      "artifacts": [
+        "random-generation-paired.jsonl.gz",
+        "random-generation-paired-trace.json.gz",
+        "random-generation-paired-peer.jsonl.gz",
+        "random-generation-paired-peer-trace.json.gz"
+      ],
+      "command": "PYTHONPATH=.build/overlap-package .build/xonotic-env/bin/python examples/streaming-algebra.py 0 --backend metal --dtype float16 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/random-generation-paired-trace.json"
+    }
+  ],
+  "geometry": {
+    "abi": 25,
+    "arena_pages": 65536,
+    "block_pages": 4,
+    "page_bytes": 16384,
+    "qps": 1,
+    "registered_bytes_per_node": 1097203712
+  },
+  "peer_command": "PYTHONPATH=.build/gold-package .build/xonotic-env/bin/python examples/streaming-algebra.py 1 --backend metal --dtype float16 --runs 3 --scatter-rows 67 --scatter-tile 33 --scatter-destinations 17 --xonotic --trace .build/random-generation-paired-peer-trace.json",
+  "scope": [
+    "Random side cases execute on rank zero; paired gold/fanout crosses actual RDMA.",
+    "Timing is host-observed elapsed time across existing example publication/observation, not physical GPU/wire occupancy.",
+    "No matched old-emitter or fastest-backend baseline; no speedup or no-regression claim.",
+    "Three exact Philox vectors plus two keys at ordinals0..9 and2**33..2**33+7 do not establish broad statistical quality or uniform normal ULP bounds.",
+    "The direct high-ordinal producer feeds a separate pointwise consumer while the other producer key remains absent; Xonotic consumers separately withhold one input row."
+  ]
+}
