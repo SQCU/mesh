@@ -204,3 +204,53 @@ and traces retain exact library/example revisions. Both report 1704 completed
 numerical submissions, the same count as the prior unfused expression case;
 this establishes absence of an added transform launch in the covered program,
 not a matched throughput improvement.
+
+
+## Shared contraction ownership and reader fanout
+
+`89fec3f` moves K partitioning, FP32 partial contractions, pairwise reduction and
+final casts into the shared `kernels.dot` expression lowering. `nn.linear` now
+supplies output layout and placement. Existing CPU/MPS/Core ML operation owners
+remain unchanged. `55eddbd` fixes direct mapped BlockSpecs by resolving their index
+maps per coordinate, including mixed mapped/whole operands. The existing example
+adds reversed output rows from transposed input views with a ragged K tail. Both
+CPU and Metal pass that numerical check, the original cancellation case and gold.
+This migration preserves the numerical launch formula for each output tile;
+matched hardware nonregression remains a separate acceptance requirement.
+
+`d0a12e2` documents [shared routing ownership](shared-routing-ownership.md).
+`d8386f5` and `4ca4369` implement canonical reader groups for fanout that cannot fit
+the direct reader-plane representation, with one actual member identity per
+source row and reader occurrence. Direct planes remain the setup-selected path
+when they suffice. `e5a7cd6` exposes those retained identities in Python traces.
+`449ab9e` releases member storage with its owning program/maps and makes the
+existing metadata owner the sole member-reset owner for both host and remote
+publications. No new numerical launch, source copy, epoch guess or invocation
+rendezvous implements group completion. Program teardown remains outside numerical
+invocation. This source ownership fix is not a claim of a measured graph-churn
+memory curve.
+
+The configurable existing scatter case passes on both backends with 67 updates
+in 33-row tiles, including a ragged final tile, SIMD radix work beyond one group,
+FP32 fused factors, invalid/masked indices and two changing occurrences. Earlier
+traces before the added fanout case show zero grouped readers for the six-update
+program and two grouped source rows for the wider program, each with 166 distinct
+retained member identities. Source grouping removes the reader-plane capacity
+failure; it does not remove worst-case destination-by-candidate metadata or the
+per-potential-segment physical allocation and launch costs.
+
+The same example also sends a source through RDMA to 65 independent numerical
+consumers and returns their results. Both CPU and Metal complete two source
+occurrences: first/last branch outputs 2/130, then 3/195, with every branch checked.
+The peer trace joins the grouped source row directly to a receive transfer with
+two occurrences and 65 distinct member identities. This exercises remote receive
+reset, not merely local directory reuse. Both peer workloads terminated normally.
+
+Raw `reader-lifecycle-local-*` and `reader-lifecycle-paired-*` archives retain each
+installed library revision, example revision, observations and both participants'
+traces where applicable. The paired CPU gold maximum error is 0.001953125; Metal
+is 0.00390625 under the unchanged absolute-plus-relative tolerance. These runs
+establish covered execution and reuse, not matched throughput improvements or
+physical GPU/wire overlap percentages. Nested dot epilogues, arbitrary-rank
+lowering, sparse routing ownership, production storage/launch optimization, full
+caller/derivative migration and the final performance audit remain unfinished.
