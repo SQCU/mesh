@@ -692,7 +692,7 @@ def main():
                     program.constant(ref, weight_values[row:row+ref.shape[0], column:column+ref.shape[1]])
                 source_arg, weights_arg, selected_arg, bias_arg = kernels.arguments(4)
                 row = kernels.program_id(0)
-                column = kernels.program_id(1)*3 + kernels.arange(3)
+                column = kernels.program_id(1)*3 + kernels.indices()[1]
                 feature = kernels.program_id(1)*3 + kernels.arange(3).T
                 inner = kernels.arange(5, tile=3)
                 chosen = selected_arg.reshape((2,)).at(row)
