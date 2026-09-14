@@ -51,12 +51,14 @@ int mesh_execution_route(struct mesh_ctx *,struct mesh_route *,void *owner);
 int mesh_execution_indexed(struct mesh_ctx *,struct mesh_indexed_read *,void *owner);
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
-void *mesh_view_create(struct mesh_ctx *,const uint32_t *pages,size_t count);
+void *mesh_view_create(struct mesh_ctx *,uint32_t first,size_t count);
 int mesh_view_destroy(void *address,size_t length);
 struct mesh_row_metadata mesh_link_metadata(struct mesh_ctx *,size_t);
 
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
+int mesh_backing_alloc(struct mesh_ctx *,uint32_t first,uint32_t count,uint32_t quantum,int contiguous);
+void mesh_backing_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 void mesh_arena_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 void mesh_map(struct mesh_ctx *,uint32_t first,uint32_t count,uint32_t page);

@@ -42,7 +42,7 @@ static size_t scalar_bytes(enum mesh_scalar scalar) {
 }
 
 struct mesh_extent {
-  uint32_t first,page,pages,quantum;
+  uint32_t first,pages,quantum;
   size_t bytes;
   void *address;
   struct mesh_shape shape;
@@ -191,8 +191,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
     for(size_t j=0;j<t->count;j++) {
       struct mesh_extent *e=&t->extents[j];
       if(e->address)mesh_view_destroy(e->address,e->bytes);
-      if(e->page!=MESH_ABSENT)mesh_arena_release(context,e->page,e->pages);
-      if(e->first!=MESH_ABSENT)mesh_rows_release(context,e->first,e->pages);
+      if(e->first!=MESH_ABSENT){mesh_backing_release(context,e->first,e->pages);mesh_rows_release(context,e->first,e->pages);}
     }
     free(t->extents); free(t);
   }
@@ -316,7 +315,7 @@ void mesh_algebra_destroy(struct mesh_algebra *handle) {
 }
 
 /* design/algorithm-sources.md#streaming-algebra */
-struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *handle,const struct mesh_shape *shapes,size_t count,int transferable) {
+struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *handle,const struct mesh_shape *shapes,size_t count,int transferable,int contiguous) {
   MeshAlgebra *a=owner(handle);
   if(a.realized){errno=EBUSY;return NULL;}
   size_t limit=a.cpu?SIZE_MAX:a.device.maxBufferLength;
@@ -331,7 +330,7 @@ struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *handle,const struct 
   t->extents=calloc(count,sizeof *t->extents);
   if(!t->extents){free(t);errno=ENOMEM;return NULL;}
   t->context=a->context; t->count=count;
-  for(size_t i=0;i<count;i++)t->extents[i].first=t->extents[i].page=MESH_ABSENT;
+  for(size_t i=0;i<count;i++)t->extents[i].first=MESH_ABSENT;
   [a.tensors appendBytes:&t length:sizeof t];
   size_t pg=a->context->M->pgsz,align=transferable?a->context->M->block:1;
   for(size_t i=0;i<count;i++) {
@@ -341,15 +340,12 @@ struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *handle,const struct 
     if(pages>UINT32_MAX || pages*pg>limit){errno=EOVERFLOW;return NULL;}
     e->pages=(uint32_t)pages; e->bytes=pages*pg; e->quantum=(uint32_t)align;
     e->first=mesh_rows_alloc(a->context,e->pages);
-    e->page=mesh_arena_alloc(a->context,e->pages,(uint32_t)align);
-    if(e->first==MESH_ABSENT || e->page==MESH_ABSENT)return NULL;
-    mesh_map(a->context,e->first,e->pages,e->page);
+    if(e->first==MESH_ABSENT)return NULL;
+    int error=mesh_backing_alloc(a->context,e->first,e->pages,e->quantum,contiguous);
+    if(error){errno=error;return NULL;}
     e->output=(struct mesh_row_map){.first=e->first,.count=e->pages};
     e->producer=(struct mesh_row_function){.output=&e->output,.outputs=1,.rows=1};
-    uint32_t *indices=malloc(pages*sizeof *indices);
-    if(!indices){errno=ENOMEM;return NULL;}
-    for(size_t j=0;j<pages;j++)indices[j]=e->page+(uint32_t)j;
-    e->address=mesh_view_create(a->context,indices,pages); free(indices);
+    e->address=mesh_view_create(a->context,e->first,pages);
     if(!e->address)return NULL;
     MeshExtent *storage=[MeshExtent new]; storage.extent=*e;
     if(!a.cpu) {
@@ -580,7 +576,7 @@ struct mesh_route *mesh_algebra_route_create(struct mesh_algebra *handle,struct 
   if(!error)error=route_residency(a,candidates,count);
   if(!error){
     struct mesh_shape shape={.rows=count,.columns=3,.scalar=MESH_U64};
-    d->table=mesh_tensor_create(handle,&shape,1,0);if(!d->table)error=errno;
+    d->table=mesh_tensor_create(handle,&shape,1,0,1);if(!d->table)error=errno;
   }
   if(error){
     if(d->retired!=MESH_ABSENT)mesh_rows_release(a->context,d->retired,(uint32_t)(count+consumers+1));
@@ -1295,21 +1291,65 @@ int mesh_algebra_bind(struct mesh_algebra *handle,enum mesh_algebra_op op,struct
   return 0;
 }
 
-/* design/algorithm-sources.md#indexed-library-functions */
-static int bind_copy(MeshAlgebra *a,struct mesh_extent *s,struct mesh_extent *d) {
+/* design/algorithm-sources.md#literal-contiguous-materialization */
+struct mesh_copy_segment { const char *source; char *destination; size_t elements,stride,bytes; };
+
+/* design/algorithm-sources.md#literal-contiguous-materialization */
+int mesh_algebra_materialize(struct mesh_algebra *handle,const struct mesh_copy_region *regions,size_t count,struct mesh_view destination) {
+  MeshAlgebra *a=owner(handle);
+  if(a.realized)return EBUSY;
+  if(!regions || !count || !valid_view(a,destination))return EINVAL;
+  struct mesh_extent *d=&destination.tensor->extents[destination.extent];
+  size_t elements=d->shape.rows*d->shape.columns,scalar=scalar_bytes(d->shape.scalar),covered=0;
+  if(destination.offset || destination.rows!=d->shape.rows || destination.columns!=d->shape.columns || destination.row_stride!=destination.columns || destination.column_stride!=1)return EINVAL;
   struct mesh_row_map output={.first=d->first,.count=d->pages};
-  if(output_used(a,output) || s==d)return EINVAL;
-  size_t bytes=s->shape.rows*s->shape.columns*(scalar_bytes(s->shape.scalar));
-  size_t step=(size_t)d->quantum*a->context->M->pgsz;
-  for(size_t offset=0;offset<bytes;offset+=step) {
+  if(output_used(a,output))return EINVAL;
+  for(size_t i=0;i<count;i++) {
+    struct mesh_copy_region r=regions[i];
+    if(!valid_view(a,r.source) || r.source.tensor->extents[r.source.extent].shape.scalar!=d->shape.scalar || &r.source.tensor->extents[r.source.extent]==d)return EINVAL;
+    if(r.row>destination.rows || r.column>destination.columns || r.source.rows>destination.rows-r.row || r.source.columns>destination.columns-r.column)return EINVAL;
+    size_t area=r.source.rows*r.source.columns;
+    if(area>elements-covered)return EINVAL;
+    covered+=area;
+    for(size_t j=0;j<i;j++) {
+      struct mesh_copy_region q=regions[j];
+      if(r.row<q.row+q.source.rows && q.row<r.row+r.source.rows && r.column<q.column+q.source.columns && q.column<r.column+r.source.columns)return EINVAL;
+    }
+  }
+  if(covered!=elements)return EINVAL;
+  size_t step=(size_t)d->quantum*a->context->M->pgsz/scalar;
+  for(size_t first=0;first<elements;first+=step) {
+    size_t end=MIN(elements,first+step);
     MeshFunction *f=[MeshFunction new];f.owner=a;f.dependencies=[NSMutableData new];
-    size_t count=MIN(step,bytes-offset);
-    struct mesh_row_map input={.first=s->first+(uint32_t)(offset/a->context->M->pgsz),.count=(uint32_t)((count+a->context->M->pgsz-1)/a->context->M->pgsz)};
-    [f.dependencies appendBytes:&input length:sizeof input];
-    f->output=(struct mesh_row_map){.first=d->first+(uint32_t)(offset/a->context->M->pgsz),.count=d->quantum};
+    NSMutableData *segments=[NSMutableData new];
+    for(size_t i=0;i<count;i++) {
+      struct mesh_copy_region r=regions[i];
+      size_t row_end=MIN(r.row+r.source.rows,(end-1)/destination.columns+1);
+      for(size_t row=MAX(r.row,first/destination.columns);row<row_end;row++) {
+        size_t base=row*destination.columns,lo=MAX(first,base+r.column),hi=MIN(end,base+r.column+r.source.columns);
+        if(lo>=hi)continue;
+        struct mesh_view source=mesh_view_slice(r.source,row-r.row,lo-base-r.column,1,hi-lo);
+        dependencies(f.dependencies,source);
+        struct mesh_copy_segment segment={
+          .source=(const char *)source.tensor->extents[source.extent].address+source.offset*scalar,
+          .destination=(char *)d->address+lo*scalar,.elements=hi-lo,.stride=source.column_stride*scalar,.bytes=scalar};
+        if(segment.stride==scalar){segment.bytes*=segment.elements;segment.elements=1;}
+        struct mesh_copy_segment *previous=segments.length?(struct mesh_copy_segment *)segments.mutableBytes+segments.length/sizeof segment-1:NULL;
+        if(previous && previous->elements==1 && segment.elements==1 && previous->source+previous->bytes==segment.source && previous->destination+previous->bytes==segment.destination)previous->bytes+=segment.bytes;
+        else [segments appendBytes:&segment length:sizeof segment];
+      }
+    }
+    f->output=(struct mesh_row_map){.first=d->first+(uint32_t)(first*scalar/a->context->M->pgsz),.count=d->quantum};
     f->function=(struct mesh_row_function){.output=&f->output,.outputs=1,.rows=1};bind_dependencies(f);
     f->backend=MESH_BACKEND_CPU_BUILTIN;
-    f.execute=^(MeshFunction *function){memcpy((char *)d->address+offset,(char *)s->address+offset,count);complete_part(function,0,0);};
+    f.execute=^(MeshFunction *function){
+      const struct mesh_copy_segment *parts=segments.bytes;
+      for(size_t i=0;i<segments.length/sizeof *parts;i++) {
+        struct mesh_copy_segment p=parts[i];
+        for(size_t j=0;j<p.elements;j++)memcpy(p.destination+j*p.bytes,p.source+j*p.stride,p.bytes);
+      }
+      complete_part(function,0,0);
+    };
     [a.functions addObject:f];
   }
   return 0;
@@ -1330,7 +1370,8 @@ int mesh_algebra_copy(struct mesh_algebra *handle,struct mesh_endpoint source,st
     struct mesh_extent *s=&source.tensor->extents[source.first+i*source.stride];
     if(source.peer==destination.peer) {
       if(source.peer==a->context->M->node) {
-        int error=bind_copy(a,s,&destination.tensor->extents[destination.first+i*destination.stride]);
+        struct mesh_copy_region region={.source=mesh_tensor_view(source.tensor,source.first+i*source.stride)};
+        int error=mesh_algebra_materialize(handle,&region,1,mesh_tensor_view(destination.tensor,destination.first+i*destination.stride));
         if(error)return error;
       }
     } else {if(s->pages%block)return EINVAL;maximum=MAX(maximum,s->pages);messages+=s->pages/block;}

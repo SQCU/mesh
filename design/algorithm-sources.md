@@ -3647,3 +3647,107 @@ input projections for compiled consumers. This is outstanding source work, not
 permission to leave consumers waiting or to introduce an alternative scheduler.
 
 This change is reviewed and compiled without numerical or benchmark runs.
+
+## Page-table backing assignment
+
+The operator's virtual-memory clarification is preserved in
+[SPECIFICATION §25](SPECIFICATION.md#25-asynchronous-concurrent-publication-current-mesh-session).
+Apple's shared-file mapping mechanism described under
+[registered memory views](#registered-memory-views) supply address translation
+without changing numerical control flow. Here a backing page index names an
+offset in the registered shared arena, not a claim about contiguous physical
+DRAM frames.
+
+`mesh_backing_alloc` assigns backing runs to canonical logical page-table rows.
+Without an explicit contiguous request, it requests the aligned run needed by
+one configured memory quantum, records that run in `page[]`, and proceeds with
+the next assignment. An explicit contiguous request instead reserves the entire
+backing span in one allocation; its table assignments are consecutive. Each transfer
+still addresses its own assigned contiguous registered span; transfers retain
+their actual source and target page indices. No ready/send ordering is changed.
+
+`mesh_view_create` reads those canonical assignments directly. It reserves one
+contiguous virtual interval and maps each consecutive backing run into its
+corresponding virtual positions with shared file mappings. For page size P,
+virtual page i aliases registered backing page `page[first+i]`:
+
+```
+V + i*P  aliases  M + data_off + page[first+i]*P
+```
+
+Both addresses refer to the same bytes. CPU and accelerator views keep ordinary
+contiguous numerical addresses; RDMA keeps the registered addresses already named
+by the table. This path needs no operand copy. It does not manufacture contiguity
+by delaying a producer, collecting an entire operand, or adding a consumer gate.
+
+`mesh_extent` no longer retains a fictitious single base page or reconstructs
+all assignments by adding offsets to it. The table is the assignment owner.
+`mesh_backing_release` releases the actual assigned pages, including the mapped
+prefix after a partial allocation failure. Unassigned rows remain MESH_ABSENT.
+Existing page/row HOT ownership continues to prevent reuse of memory referenced
+by outstanding transport; no new lifetime protocol is added. Virtual aliases are
+unmapped before backing ownership is released. Receive posting/completion does
+not rewrite these assignments during numerical execution.
+
+This implements setup-time virtual contiguity over scattered backing. It does
+not claim live relocation of an in-flight allocation. Publication, issue,
+consumer dependencies and numerical kernels are unchanged by this memory-layer
+change. Source review and native compilation are the validation performed.
+
+## Literal contiguous materialization
+
+The NumPy developers' [ascontiguousarray documentation](https://numpy.org/doc/stable/reference/generated/numpy.ascontiguousarray.html)
+describes materializing array contents into contiguous storage. Mesh applies that
+copy-and-view mechanism to the actual registered arena: its explicit contiguous
+requirement is stronger than an address alias over scattered arena pages.
+The JAX authors' [Pallas collective matmul](https://docs.jax.dev/en/latest/pallas/gpu/collective_matmul.html)
+provides the surrounding incremental producer/consumer composition cited above.
+
+`mesh_backing_alloc(..., contiguous=1)` allocates one aligned arena run for the
+entire extent. `mesh_tensor_create` exposes views of those assigned pages.
+`Program.tensor(..., contiguous=True)` creates one extent for the whole tensor;
+`block_shape` describes slices of that same span, rather than separate backing
+allocations. `Tensor.region` can expose regions crossing those view boundaries.
+The native multi-extent constructor's contiguous argument applies to each extent;
+the Python whole-tensor request supplies one extent. No scattered-allocation
+fallback silently weakens the explicit requirement.
+
+`Program.contiguous(source)` realizes a new contiguous destination and registers
+its copy from a Tensor or Ref, including transposed, sliced and broadcast source
+views. It returns a Tensor whose blocks and regions expose the destination.
+The source remains valid; materialization does not relocate live views or
+transport registrations. Copy execution follows source publication, so the
+returned destination is an incremental mesh result, not a synchronous host copy.
+Storage and copy descriptors are allocated before numerical invocation.
+
+`mesh_copy_region` retains each source view and its destination row/column origin.
+`mesh_algebra_materialize` lowers these indices into `mesh_copy_segment` entries
+holding source/destination addresses, byte counts and strides. Source regions
+must cover the destination exactly once. Each destination memory quantum gets
+its own copy function and only the input page dependencies intersecting that
+quantum. Ordinary local `Program.copy` uses this same implementation. Contiguous
+adjacent segments are joined during setup. Runtime performs configured byte
+copies and publishes that quantum through the existing completion path; there
+is no whole-source readiness check, new rendezvous or allocation during copying.
+
+For source region i at destination origin (ri, ci), the assignment is:
+
+```
+D[(ri+r)*columns + ci+c] = S_i[offset_i + r*row_stride_i + c*column_stride_i]
+```
+
+The destination address is backed by consecutive registered arena pages, even
+when source pages are scattered. This claims arena-span contiguity, not physical
+DRAM-frame adjacency. Slices alias the copied destination bytes. Calling the
+materializer always creates a new destination; it does not infer that NumPy's
+C-contiguous flag proves registered-arena contiguity.
+
+```python
+storage = program.tensor((256, 256), block_shape=(64, 256), contiguous=True)
+section = storage.region(32, 0, 96, 256)
+dense = program.contiguous(scattered_or_strided_source)
+partial = dense.region(0, 0, 64, 256)
+```
+
+Validation is source review, native compilation and Python syntax compilation.
+No numerical or timing claims are made by this change.

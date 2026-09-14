@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ._native import Native, Shape, View, Endpoint, MetalDispatch, MetalConstant
+from ._native import Native, Shape, View, CopyRegion, Endpoint, MetalDispatch, MetalConstant
 
 __all__ = ['Program', 'Tensor', 'Ref', 'BlockSpec', 'ShapeDtypeStruct', 'Result']
 _PROGRAMS = set()
@@ -85,7 +85,7 @@ class Ref:
 
 class Tensor:
     # design/algorithm-sources.md#indexed-range-generation
-    def __init__(self, program, shape, block_shape, dtype, transferable):
+    def __init__(self, program, shape, block_shape, dtype, transferable, contiguous=False):
         import operator
         self.program, self.shape, self.block_shape = program, tuple(map(operator.index, shape)), tuple(map(operator.index, block_shape))
         self.dtype = np.dtype(dtype)
@@ -96,10 +96,15 @@ class Tensor:
         coordinates = tuple(itertools.product(*(range(n) for n in self.grid))) if all(self.grid) else ()
         shapes = [Shape(*(min(b, s - i*b) for s, b, i in zip(self.shape, self.block_shape, coord)),
                         scalar) for coord in coordinates]
-        self.handle = program.native.tensor_create(program.handle, (Shape * len(shapes))(*shapes), len(shapes), transferable) if shapes else None
+        if contiguous and shapes:
+            shapes = [Shape(*self.shape, scalar)]
+        self.handle = program.native.tensor_create(program.handle, (Shape * len(shapes))(*shapes), len(shapes), transferable, contiguous) if shapes else None
         if shapes and not self.handle:
             check(C.get_errno() or errno.ENOMEM)
-        self.blocks = {coord: Ref(program, program.native.tensor_view(self.handle, i), self.dtype)
+        self._span = Ref(program, program.native.tensor_view(self.handle, 0), self.dtype) if contiguous and shapes else None
+        self.blocks = {coord: self._span.slice(*(i*b for i, b in zip(coord, self.block_shape)),
+                           *(min(b, s-i*b) for s, b, i in zip(self.shape, self.block_shape, coord)))
+                       if self._span is not None else Ref(program, program.native.tensor_view(self.handle, i), self.dtype)
                        for i, coord in enumerate(coordinates)}
 
     # design/algorithm-sources.md#pallas-call-ergonomics
@@ -108,6 +113,8 @@ class Tensor:
             raise ValueError('Region is outside the tensor')
         if rows == 0 or columns == 0:
             return self.program.tensor((rows, columns), dtype=self.dtype)
+        if getattr(self, "_span", None) is not None:
+            return self._span.slice(row, column, rows, columns)
         i, j = row // self.block_shape[0], column // self.block_shape[1]
         ref = self[i, j]
         r, c = row % self.block_shape[0], column % self.block_shape[1]
@@ -129,6 +136,7 @@ class Tensor:
         result = object.__new__(Tensor)
         result.program, result.dtype, result.handle = self.program, self.dtype, self.handle
         result.shape, result.block_shape, result.grid = self.shape[::-1], self.block_shape[::-1], self.grid[::-1]
+        result._span = self._span.T if getattr(self, "_span", None) is not None else None
         result.blocks = {(j, i): ref.T for (i, j), ref in self.blocks.items()}
         return result
 
@@ -143,6 +151,7 @@ class Tensor:
         result = object.__new__(Tensor)
         result.program, result.dtype, result.handle = self.program, self.dtype, self.handle
         result.shape, result.grid = shape, self.grid
+        result._span = self._span.broadcast(*shape) if getattr(self, "_span", None) is not None else None
         result.block_shape = tuple(target if source == 1 else block
             for source, target, block in zip(self.shape, shape, self.block_shape))
         result.blocks = {coordinate: ref.broadcast(*(target if source == 1 else size
@@ -232,9 +241,22 @@ class Program:
             check(self.native.algebra_coreml(self.handle, *(os.fsencode(p) for p in coreml)))
 
     # design/algorithm-sources.md#indexed-range-generation
-    def tensor(self, shape, block_shape=None, dtype=np.float32, transferable=True):
+    def tensor(self, shape, block_shape=None, dtype=np.float32, transferable=True, *, contiguous=False):
         shape = tuple(shape)
-        return Tensor(self, shape, tuple(max(1, size) for size in shape) if block_shape is None else block_shape, dtype, transferable)
+        return Tensor(self, shape, tuple(max(1, size) for size in shape) if block_shape is None else block_shape, dtype, transferable, contiguous)
+
+    # design/algorithm-sources.md#literal-contiguous-materialization
+    def contiguous(self, source, *, transferable=True):
+        if source.program is not self:
+            raise ValueError('Source belongs to another program')
+        result = self.tensor(source.shape, dtype=source.dtype, transferable=transferable, contiguous=True)
+        if not result.blocks:
+            return result
+        regions = [CopyRegion(ref.view, i*source.block_shape[0], j*source.block_shape[1])
+                   for (i, j), ref in source.blocks.items()] if isinstance(source, Tensor) else [CopyRegion(source.view, 0, 0)]
+        check(self.native.algebra_materialize(self.handle, (CopyRegion * len(regions))(*regions),
+                                             len(regions), result[0, 0].view))
+        return result
 
     # design/algorithm-sources.md#pallas-call-ergonomics
     def kernel_call(self, kernel, *, out_shape, grid, in_specs, out_specs, peer=None):

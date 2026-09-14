@@ -18,6 +18,7 @@ struct mesh_view {
   uint32_t extent;
   size_t offset,rows,columns,row_stride,column_stride;
 };
+struct mesh_copy_region { struct mesh_view source; size_t row,column; };
 struct mesh_endpoint { struct mesh_tensor *tensor; uint32_t peer,first,stride; };
 struct mesh_algebra_event { uint64_t ready_ns,start_ns,complete_ns,gpu_start_ns,gpu_end_ns,submissions; uint32_t first_output,output_maps,kind,input_maps; };
 /* design/algorithm-sources.md#function-cost-profiles */
@@ -36,7 +37,8 @@ int mesh_algebra_coreml(struct mesh_algebra *,const char *python,const char *gen
 void mesh_algebra_destroy(struct mesh_algebra *);
 size_t mesh_algebra_publication_bytes(struct mesh_algebra *);
 uint32_t mesh_algebra_node(struct mesh_algebra *);
-struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *,const struct mesh_shape *,size_t extents,int transferable);
+struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *,const struct mesh_shape *,size_t extents,int transferable,int contiguous);
+int mesh_algebra_materialize(struct mesh_algebra *,const struct mesh_copy_region *,size_t,struct mesh_view);
 struct mesh_view mesh_tensor_view(struct mesh_tensor *,uint32_t extent);
 struct mesh_view mesh_view_slice(struct mesh_view,size_t row,size_t column,size_t rows,size_t columns);
 struct mesh_view mesh_view_transpose(struct mesh_view);

@@ -405,6 +405,23 @@ Current work therefore uses source review and compilation, without launching
 numerical workloads or benchmarks. Existing measurements are historical evidence,
 not a prerequisite for removing a source-level violation of this contract.
 
+The operator locates memory-layout fixes in the page table:
+
+> pages are a zero copy interface for using literal memory. if there is an incorrect ring buffer esque implementatino which avoids understanding contiguity or allocation or assignment, fix that in the page table instead of inlining a 'fix' that affects control flow, async production and consumptoin, etc. the central requirement is async producers and async consumers across the mesh, not any other algorithmic or library features. this is a no excuses regime.
+
+> "but tensor allocation insists on one
+>   contiguous physical run for the whole tensor" then make a virtual memory indexing system (why do you think it's CALLED a page table???) which allows memory to be remapped, by copy if it must, if it must become contiguous, just like any other array programming library. even pytorch has this.
+
+The operator corrected the interpretation of contiguity explicitly:
+
+> "The existing mapper can already give a tensor one contiguous virtual address range backed by scattered shared pages," no, retard, you need to copy pages into a literal contiguous span and expose views to that contiguous view if an allocator or user says 'this one has to be contiguous'. stop lying and stop ignoring the requirements.
+
+Contiguity and assignment belong to memory realization. An explicit contiguous
+request requires one literal registered-arena span. Shared virtual aliases over
+scattered backing do not satisfy that request. Materialization copies source
+sections into the allocated destination span and exposes views into it. A layout
+limitation does not authorize whole-operand publication barriers.
+
 ## Provenance law (carried from the agentfile / vine-polycompiler stratagem)
 
 > here is a heirarchy of epistemic certainty:

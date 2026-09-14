@@ -86,18 +86,20 @@ int mesh_detach(struct mesh_ctx *c){
   return error;
 }
 
-/* design/algorithm-sources.md#registered-memory-views */
-void *mesh_view_create(struct mesh_ctx *c,const uint32_t *pages,size_t count){
+/* design/algorithm-sources.md#page-table-backing-assignment */
+void *mesh_view_create(struct mesh_ctx *c,uint32_t row,size_t count){
   size_t page_bytes=c->M->pgsz;
-  if(!count || count>SIZE_MAX/page_bytes){ errno=EINVAL; return NULL; }
-  for(size_t i=0;i<count;i++) if(pages[i]>=mesh_rows(c->M)){ errno=EINVAL; return NULL; }
+  if(!count || count>SIZE_MAX/page_bytes || row>mesh_rows(c->M) || count>mesh_rows(c->M)-row){ errno=EINVAL; return NULL; }
+  _Atomic uint32_t *pages=mesh_page(c->M)+row;
+  for(size_t i=0;i<count;i++) if(atomic_load_explicit(&pages[i],memory_order_acquire)>=mesh_rows(c->M)){ errno=EINVAL; return NULL; }
   size_t length=count*page_bytes;
   unsigned char *address=mmap(NULL,length,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
   if(address==MAP_FAILED) return NULL;
   for(size_t first=0;first<count;){
+    uint32_t page=atomic_load_explicit(&pages[first],memory_order_acquire);
     size_t end=first+1;
-    while(end<count && pages[end]==pages[end-1]+1) end++;
-    off_t offset=(off_t)(c->M->data_off+(uint64_t)pages[first]*page_bytes);
+    while(end<count && atomic_load_explicit(&pages[end],memory_order_acquire)==page+end-first) end++;
+    off_t offset=(off_t)(c->M->data_off+(uint64_t)page*page_bytes);
     if(mmap(address+first*page_bytes,(end-first)*page_bytes,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,c->fd,offset)==MAP_FAILED){
       int error=errno; munmap(address,length); errno=error; return NULL;
     }
@@ -149,6 +151,27 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   uint32_t first=mesh_allocate(c,pages,align,0,mesh_rows(c->M),MESH_PAGE_OWN,MESH_PAGE_HOT);
   if(first!=MESH_ABSENT) c->arena+=pages;
   return first;
+}
+
+/* design/algorithm-sources.md#page-table-backing-assignment */
+int mesh_backing_alloc(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t quantum,int contiguous){
+  if(!quantum || !count || count%quantum || first>mesh_rows(c->M) || count>mesh_rows(c->M)-first)return EINVAL;
+  uint32_t span=contiguous?count:quantum;
+  for(uint32_t offset=0;offset<count;offset+=span){
+    uint32_t page=mesh_arena_alloc(c,span,quantum);
+    if(page==MESH_ABSENT)return errno;
+    mesh_map(c,first+offset,span,page);
+  }
+  return 0;
+}
+
+/* design/algorithm-sources.md#page-table-backing-assignment */
+void mesh_backing_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
+  _Atomic uint32_t *pages=mesh_page(c->M);
+  for(uint32_t offset=0;offset<count;offset++){
+    uint32_t page=atomic_exchange_explicit(&pages[first+offset],MESH_ABSENT,memory_order_acq_rel);
+    if(page!=MESH_ABSENT)mesh_arena_release(c,page,1);
+  }
 }
 
 /* design/algorithm-sources.md#independent-configured-programs */
