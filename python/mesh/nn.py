@@ -1,5 +1,7 @@
 from math import gcd
 
+import numpy as np
+
 from . import BlockSpec, ShapeDtypeStruct
 from . import kernels
 
@@ -22,7 +24,7 @@ def _block(i, j):
 
 
 # design/algorithm-sources.md#pallas-panel-composition
-def _pointwise(program, kernel, operands, tile_rows, *, peer=None):
+def _pointwise(program, kernel, operands, tile_rows, *, peer=None, output_dtype=None):
     shape = operands[0].shape
     block = (_tile(min(tile_rows, shape[0]), *(value.block_shape[0] if value.grid[0] > 1 else 0 for value in operands)),
              _tile(min(value.block_shape[1] for value in operands),
@@ -31,7 +33,7 @@ def _pointwise(program, kernel, operands, tile_rows, *, peer=None):
         grid=tuple((size + tile - 1) // tile for size, tile in zip(shape, block)),
         in_specs=tuple(BlockSpec(block, _block) for _ in operands),
         out_specs=BlockSpec(block, _block),
-        out_shape=ShapeDtypeStruct(shape, operands[0].dtype), peer=peer)(*operands)
+        out_shape=ShapeDtypeStruct(shape, operands[0].dtype if output_dtype is None else output_dtype), peer=peer)(*operands)
 
 
 # design/algorithm-sources.md#pallas-panel-composition
@@ -45,8 +47,14 @@ def _sum(program, values, tile_rows, *, peer=None):
     return values[0]
 
 
+# design/algorithm-sources.md#contraction-accumulation
+def _cast(program, x, dtype, tile_rows, *, peer=None):
+    return x if x.dtype == np.dtype(dtype) else _pointwise(
+        program, kernels.affine(), (x,), tile_rows, peer=peer, output_dtype=dtype)
+
+
 # design/algorithm-sources.md#pallas-panel-composition
-def linear(program, x, w, *, tile_rows, tile_k=128, tile_columns=128, peer=None):
+def linear(program, x, w, *, tile_rows, tile_k=128, tile_columns=128, peer=None, output_dtype=None):
     rows, inner = x.shape
     if inner != w.shape[0]:
         raise ValueError('Contraction dimensions differ')
@@ -61,8 +69,9 @@ def linear(program, x, w, *, tile_rows, tile_k=128, tile_columns=128, peer=None)
             in_specs=(BlockSpec((mr, kr), lambda i, j, panel=panel: (i, panel)),
                       BlockSpec((kr, nr), lambda i, j, panel=panel: (panel, j))),
             out_specs=BlockSpec((mr, nr), _block),
-            out_shape=ShapeDtypeStruct((rows, w.shape[1]), x.dtype), peer=peer)(x, w))
-    return _sum(program, parts, mr, peer=peer)
+            out_shape=ShapeDtypeStruct((rows, w.shape[1]), "float32"), peer=peer)(x, w))
+    return _cast(program, _sum(program, parts, mr, peer=peer),
+                 x.dtype if output_dtype is None else output_dtype, mr, peer=peer)
 
 
 # design/algorithm-sources.md#pallas-panel-composition
@@ -74,13 +83,13 @@ def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
     outputs = []
     for up, down in zip(up_weights, down_weights):
         terms = tuple(linear(program, x, w, tile_rows=tile_rows, tile_k=tile_k,
-                             tile_columns=tile_columns, peer=peer) for x, w in zip(inputs, up))
+                             tile_columns=tile_columns, peer=peer, output_dtype="float32") for x, w in zip(inputs, up))
         hidden = _sum(program, terms, tile_rows, peer=peer)
-        activated = _pointwise(program, kernels.swish, (hidden,), tile_rows, peer=peer)
+        activated = _pointwise(program, kernels.swish, (hidden,), tile_rows, peer=peer, output_dtype=inputs[0].dtype)
         operand = exchange(activated) if exchange is not None else activated
         outputs.append(linear(program, operand, down, tile_rows=tile_rows, tile_k=tile_k,
-                              tile_columns=tile_columns, peer=peer))
-    return _sum(program, outputs, tile_rows, peer=peer)
+                              tile_columns=tile_columns, peer=peer, output_dtype="float32"))
+    return _cast(program, _sum(program, outputs, tile_rows, peer=peer), inputs[0].dtype, tile_rows, peer=peer)
 
 
 # design/algorithm-sources.md#pallas-panel-composition

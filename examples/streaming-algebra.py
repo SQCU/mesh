@@ -7,21 +7,24 @@ import time
 
 import numpy as np
 from mesh import Program
-from mesh.nn import ffn, rmsnorm, summed_embedding
+from mesh.nn import ffn, linear, rmsnorm, summed_embedding
 
 
 # design/algorithm-sources.md#streamed-normalization-and-embedding
 def reference_ffn(inputs, up, down):
+    dtype = np.float16 if inputs[0].dtype == np.float16 else np.float64
     result = np.zeros((inputs[0].shape[0], down[0].shape[1]), np.float64)
     for weights, projection in zip(up, down):
         hidden = sum(value.astype(np.float64) @ weight for value, weight in zip(inputs, weights))
-        result += (hidden / (1 + np.exp(-hidden))) @ projection
-    return result
+        result += (hidden / (1 + np.exp(-hidden))).astype(dtype).astype(np.float64) @ projection
+    return result.astype(dtype)
 
 
 # design/algorithm-sources.md#streamed-normalization-and-embedding
 def reference_norm(value, gamma):
-    return value / np.sqrt(np.mean(value * value, axis=1, keepdims=True) + 1e-6) * gamma
+    dtype = value.dtype
+    value = value.astype(np.float64)
+    return (value / np.sqrt(np.mean(value * value, axis=1, keepdims=True) + 1e-6) * gamma).astype(dtype)
 
 
 # design/algorithm-sources.md#streamed-normalization-and-embedding
@@ -36,11 +39,14 @@ def main():
     parser.add_argument('--runs', type=int, default=3)
     parser.add_argument('--backend', choices=('cpu', 'metal'), default='cpu')
     parser.add_argument('--local', action='store_true')
+    parser.add_argument('--dtype', choices=('float16', 'float32'), default='float32')
     parser.add_argument('--tile-k', type=int, default=64)
     parser.add_argument('--tile-columns', type=int, default=64)
     parser.add_argument('--trace')
+    parser.add_argument('--coreml', nargs=3, metavar=('PYTHON', 'GENERATOR', 'CACHE'))
     args = parser.parse_args()
     rows, width, tile = 256, 128, 64
+    dtype = np.dtype(args.dtype)
     running = True
 
     # design/algorithm-sources.md#streamed-normalization-and-embedding
@@ -50,7 +56,7 @@ def main():
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    with Program(backend=args.backend) as program:
+    with Program(backend=args.backend, coreml=args.coreml) as program:
         rng = np.random.default_rng(701)
 
         # design/algorithm-sources.md#streamed-normalization-and-embedding
@@ -61,19 +67,22 @@ def main():
 
         # design/algorithm-sources.md#streamed-normalization-and-embedding
         def weights(partitions):
-            up = tuple(tuple(rng.standard_normal((width, width), dtype=np.float32) / 16
+            up = tuple(tuple((rng.standard_normal((width, width), dtype=np.float32) / 16).astype(dtype)
                        for _ in range(partitions)) for _ in range(2))
-            down = tuple(rng.standard_normal((width, width), dtype=np.float32) / 16 for _ in range(2))
+            down = tuple((rng.standard_normal((width, width), dtype=np.float32) / 16).astype(dtype) for _ in range(2))
             return up, down, tuple(tuple(weight(w) for w in group) for group in up), tuple(weight(w) for w in down)
 
         first_up, first_down, first_u, first_d = weights(2)
         second_up, second_down, second_u, second_d = weights(1)
-        gamma = np.ones((1, width), np.float32)
+        gamma = np.ones((1, width), dtype)
         scale = weight(gamma)
-        tables = tuple(rng.standard_normal((32, width), dtype=np.float32) / 32 for _ in range(2))
+        tables = tuple((rng.standard_normal((32, width), dtype=np.float32) / 32).astype(dtype) for _ in range(2))
         table_tensors = tuple(weight(value) for value in tables)
         ids = tuple(rng.integers(0, 32, (rows, 1), dtype=np.int64) for _ in range(2))
         index_tensors = tuple(weight(value) for value in ids)
+        precision = program.export(linear(program,
+            weight(np.array([[4096, 1, -4096, 1], [60000, 60000, -60000, -60000]], dtype=dtype)),
+            weight(np.ones((4, 1), dtype=dtype)), tile_rows=2, tile_k=2, tile_columns=1, peer=0)[0, 0])
         invocations = []
 
         # design/algorithm-sources.md#async-index-push-contract
@@ -85,8 +94,8 @@ def main():
             return received
 
         for run in range(args.runs + 1):
-            data = tuple(rng.standard_normal((rows, width), dtype=np.float32) / 8 for _ in range(2))
-            inputs = tuple(program.tensor(value.shape, (tile, args.tile_k)) for value in data)
+            data = tuple((rng.standard_normal((rows, width), dtype=np.float32) / 8).astype(dtype) for _ in range(2))
+            inputs = tuple(program.tensor(value.shape, (tile, args.tile_k), dtype=dtype) for value in data)
             a = ffn(program, inputs, first_u, first_d, tile_rows=tile, tile_k=args.tile_k, tile_columns=args.tile_columns,
                     exchange=lambda value: exchange(value, 0, 1))
             b = rmsnorm(program, a, scale, tile_rows=tile)
@@ -170,14 +179,15 @@ def main():
         errors = []
         for run, (data, _, probes) in enumerate(invocations):
             expected = reference_norm(reference_ffn(data, first_up, first_down), gamma)
-            expected += sum(table[index[:, 0]] for table, index in zip(tables, ids))
+            for table, index in zip(tables, ids):
+                expected = (expected.astype(np.float64) + table[index[:, 0]]).astype(expected.dtype)
             expected = reference_norm(reference_ffn((expected,), second_up, second_down), gamma)
             error = 0.0
             for (row, column), result in probes['rmsnorm2'].items():
                 r, c = row * tile, column * args.tile_columns
                 part = expected[r:r + result.ref.shape[0], c:c + result.ref.shape[1]]
                 error = max(error, float(np.max(np.abs(result.array - part))))
-                if not np.allclose(result.array, part, atol=3e-4, rtol=3e-4):
+                if not np.allclose(result.array, part, atol=3e-3 if dtype == np.float16 else 3e-4, rtol=3e-3 if dtype == np.float16 else 3e-4):
                     raise ArithmeticError(f'Gold chain numerical mismatch: {error}')
             errors.append(error)
             print(json.dumps(dict(event='gold', run=run, complete_ms=completed.get(run),
@@ -187,8 +197,12 @@ def main():
                     result.consume()
         if args.trace:
             Path(args.trace).write_text(json.dumps(dict(compute=program.trace, transfers=program.transfer_trace), indent=2) + '\n')
+        if not precision.ready or not np.array_equal(precision.array, np.array([[2], [0]], dtype=dtype)):
+            raise ArithmeticError('Contraction lost cancellation across K panels')
+        print(json.dumps(dict(event='precision', dtype=args.dtype, result=precision.array.tolist())), flush=True)
+        precision.consume()
         report = program.report
-        print(json.dumps(dict(event='summary', invocations=args.runs, batch_ms=batch_ms,
+        print(json.dumps(dict(event='summary', dtype=args.dtype, coreml=bool(args.coreml), invocations=args.runs, batch_ms=batch_ms,
             invocations_per_second=args.runs * 1000 / batch_ms, first_section_ms=first_ms,
             completion_ms=summary(tuple(completed.values())), withheld_invocation=1, withheld_section=0,
             max_absolute_error=max(errors), runtime={name: getattr(report, name) for name, _ in report._fields_})), flush=True)

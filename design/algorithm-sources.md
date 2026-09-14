@@ -904,14 +904,47 @@ including for float16 inputs. The expression kernel loads half inputs into float
 arithmetic; the final normalization writes the original input dtype. The
 `_row_reduce(output_dtype=...)` setup parameter names that storage choice explicitly.
 
-The current linear composition has a different, narrower precision contract:
-its K-panel outputs and pairwise reduction buffers use the input dtype. For
-float16, the CPU kernel accumulates a panel in float32 but rounds when storing
-each panel and each subsequent reduction result. The Metal path gives MPS
-float16 input and output matrix descriptors; this source does not establish
-MPS's internal accumulation precision. It does establish float16 storage at
-those panel/reduction boundaries. Therefore it does not yet provide the
-float32-across-K behavior in the [Pallas mixed-precision matmul](https://docs.jax.dev/en/latest/pallas/tpu/matmul.html#bfloat16-matrix-multiplication)
-and [Triton matmul](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html)
-examples, which retain a float32 accumulator and convert after the reduction.
-No claim of supported MPS mixed-precision output was inferred to hide that gap.
+## Contraction accumulation
+
+The JAX authors' [Pallas mixed-precision matmul](https://docs.jax.dev/en/latest/pallas/tpu/matmul.html#bfloat16-matrix-multiplication)
+and Tillet et al.'s [Triton matmul](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html)
+retain FP32 accumulators and convert after contraction. `nn.linear` now gives all
+K-panel products and their pairwise sum tree FP32 output storage. Its default
+result dtype remains the input dtype; `output_dtype` permits retaining the FP32
+result for a surrounding sum. `_cast` uses the existing affine operation on each
+completed output tile, or returns an already matching tensor during setup.
+
+`nn.ffn` retains FP32 across input-partition sums and down-projection sums.
+Swish reads the complete FP32 hidden tile and stores the activation dtype in the
+same launch. Down-projection contributions remain FP32 until their final sum,
+then convert once per output tile. No cast waits for other output tiles. This
+changes numerical rounding boundaries, not dependency or transport mechanisms.
+
+CPU native contraction already loads half values into float and accumulates in
+float; FP32 output storage removes the former premature half store. Apple's
+[MPSMatrixMultiplication](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication)
+receives the existing FP16 operand descriptors and an FP32 result descriptor.
+The operational gold and exact cancellation cases confirm this combination on
+M5 Max and are recorded separately for the peer. No alternate Metal contraction,
+operand conversion array or hidden host staging is introduced. The public MPS
+header does not specify every internal arithmetic instruction; the claim here
+is retained FP32 output and reduction storage, supported by numerical evidence.
+
+Apple's [typed execution](https://apple.github.io/coremltools/docs-guides/source/typed-execution.html)
+and [conversion source](https://github.com/apple/coremltools/blob/main/coremltools/converters/_converters_entry.py)
+explain that FLOAT32 conversion preserves declared FP32 operations, rather than
+promoting existing FP16 products. `mesh_coreml.compile_part` now casts operands
+before matmul and removes the former internal 32-K FP16-product subdivision.
+The compiled function still represents one externally publishable region. Public
+inputs and output backings remain canonical mesh pages; Core ML's internal cast
+storage and device placement remain compiler-owned and are not established as
+copy-free or ANE-resident by this source change.
+
+The existing streaming-algebra example accepts float16 inputs and retains its
+float64 reference for float32 inputs. The half reference rounds at activation,
+FFN output, normalization and embedding-add boundaries. Its half tolerance is
+3e-3 absolute/relative; the existing float32 tolerance is unchanged. An additional
+ordinary linear expression gives exact outputs 2 and 0 from rows
+`[4096, 1, -4096, 1]` and `[60000, 60000, -60000, -60000]` times ones with K panels
+of two. This detects lost residuals and premature partial overflow that the
+random gold chain alone would miss. It runs through the same library path.

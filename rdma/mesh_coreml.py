@@ -23,19 +23,10 @@ def compile_part(request, destination):
     program = Program()
     with Function(arguments, opset_version=ct.target.macOS15) as function:
         parts = []
-        for i, (_, _, depth, half) in enumerate(specification['rectangles']):
+        for i in range(len(specification['rectangles'])):
             x, w = function.inputs[f'x{i}'], function.inputs[f'w{i}']
-            pieces = []
-            for first in range(0, depth, 32 if half else depth):
-                last = min(first + (32 if half else depth), depth)
-                left = mb.slice_by_index(x=x, begin=(0, first), end=(x.shape[0], last))
-                right = mb.slice_by_index(x=w, begin=(first, 0), end=(last, w.shape[1]))
-                product = mb.matmul(x=left, y=right)
-                pieces.append(mb.cast(x=product, dtype='fp32'))
-            while len(pieces) > 1:
-                pieces = [mb.add(x=pieces[j], y=pieces[j+1]) if j+1 < len(pieces) else pieces[j]
-                          for j in range(0, len(pieces), 2)]
-            scaled = mb.mul(x=pieces[0], y=np.float32(specification['alpha']))
+            product = mb.matmul(x=mb.cast(x=x, dtype='fp32'), y=mb.cast(x=w, dtype='fp32'))
+            scaled = mb.mul(x=product, y=np.float32(specification['alpha']))
             parts.append(mb.reshape(x=scaled, shape=(-1,)))
         joined = parts[0] if len(parts) == 1 else mb.concat(values=parts, axis=0)
         output = mb.cast(x=joined, dtype='fp16' if specification['output_half'] else 'fp32', name='z')
