@@ -255,13 +255,13 @@ lives in `bin/` for the same reason.
 
 ## Asynchronous collectives
 
-The complete scope is [asynchronous publication and consumption](design/async-collectives.md).
+The required end state is [collective goals](design/collective-goals.md), including
+engine integration and public endpoint measurements.
 The caller supplies mesh and tensor placement configuration. Realization binds
 actual storage, indexed dependencies and numerical functions before invocation.
 Implement strict dependencies through canonical mesh and established numerical
-implementations. Do not add cost models, automatic placement, a general compiler
-project, application migration requirements or performance targets. Application
-and fleet instructions elsewhere do not enlarge the collective interface.
+implementations. Do not add cost models, automatic placement or a general compiler
+project.
 
 ## Tests and specification
 
