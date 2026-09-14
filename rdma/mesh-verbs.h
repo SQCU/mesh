@@ -4,10 +4,9 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
-#include <sys/time.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <sys/select.h>
+#include <poll.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -59,20 +58,26 @@ static void onsig(int s){ (void)s; stop++; }
 
 /* ledger D13: the out-of-band connection record, exchanged once per pairing */
 struct qpi { uint32_t xmagic, xsize; uint32_t qpn,psn,pgsz; uint16_t lid; uint8_t gid[16]; uint16_t node; uint32_t count,qpns[MESH_QPS+1],psns[MESH_QPS+1]; };
-#define XMAGIC 0x4d595047u
+#define XMAGIC 0x4d595048u
 
-static int dial(struct addrinfo *a){
+static int dial(struct addrinfo *a,struct hdr *m,uint64_t client){
   int f=socket(a->ai_family,SOCK_STREAM,0); if(f<0) return -1;
   fcntl(f,F_SETFL,O_NONBLOCK);
-  if(connect(f,a->ai_addr,a->ai_addrlen) && errno!=EINPROGRESS){ close(f); return -1; }
-  fd_set w; FD_ZERO(&w); FD_SET(f,&w); struct timeval tv={1,0};
-  int e=0; socklen_t el=sizeof e;
-  if(select(f+1,NULL,&w,NULL,&tv)<1 || getsockopt(f,SOL_SOCKET,SO_ERROR,&e,&el) || e){
-    close(f); return -1; }
-  fcntl(f,F_SETFL,0);
-  struct timeval rt={3,0};
-  setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
-  return f; }
+  if(connect(f,a->ai_addr,a->ai_addrlen)==0)return f;
+  if(errno!=EINPROGRESS){int error=errno;close(f);errno=error;return -1;}
+  struct pollfd ready={.fd=f,.events=POLLOUT};
+  while(!stop && atomic_load_explicit(&m->client,memory_order_acquire)==client){
+    int status=poll(&ready,1,0);
+    if(status<0 && errno==EINTR)continue;
+    if(status<0){int error=errno;close(f);errno=error;return -1;}
+    if(!status)continue;
+    int error=0;socklen_t length=sizeof error;
+    if(getsockopt(f,SOL_SOCKET,SO_ERROR,&error,&length))error=errno;
+    if(!error)return f;
+    close(f);errno=error;return -1;
+  }
+  close(f);errno=ECANCELED;return -1;
+}
 
 static int listener_up(void){
   struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_INET6,.ai_flags=AI_PASSIVE},*r;
@@ -86,51 +91,47 @@ static int listener_up(void){
   if(error){ close(lsock); lsock=-1; return -1; }
   fcntl(lsock,F_SETFL,O_NONBLOCK); return 0; }
 
-static int exchange(int f, const void *mine, void *you, size_t bytes, double deadline){
-  size_t sent=0,got=0,send_bytes=mine?bytes:0,receive_bytes=you?bytes:0;
+static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t receive_bytes,struct hdr *m,uint64_t client){
+  size_t sent=0,got=0;
   fcntl(f,F_SETFL,O_NONBLOCK);
-  while(!stop && (sent<send_bytes || got<receive_bytes)){
-    double left=deadline-monotime(); if(left<=0) return -1;
-    fd_set r,w; FD_ZERO(&r); FD_ZERO(&w);
-    if(got<receive_bytes) FD_SET(f,&r);
-    if(sent<send_bytes) FD_SET(f,&w);
-    struct timeval tv={.tv_sec=(int)left,.tv_usec=(int)((left-(int)left)*1e6)};
-    int ready=select(f+1,&r,&w,0,&tv);
-    if(ready<0 && errno==EINTR) continue;
-    if(ready<=0) return -1;
-    if(FD_ISSET(f,&w)){
+  while(!stop && atomic_load_explicit(&m->client,memory_order_acquire)==client){
+    if(sent==send_bytes && got==receive_bytes)return 0;
+    if(sent<send_bytes){
       ssize_t n=write(f,(const char*)mine+sent,send_bytes-sent);
-      if(n>0) sent+=(size_t)n;
-      else if(!n || (errno!=EAGAIN && errno!=EINTR)) return -1; }
-    if(FD_ISSET(f,&r)){
+      if(n>0)sent+=(size_t)n;
+      else if(!n){errno=ECONNRESET;return -1;}
+      else if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
+    }
+    if(got<receive_bytes){
       ssize_t n=read(f,(char*)you+got,receive_bytes-got);
-      if(n>0) got+=(size_t)n;
-      else if(!n || (errno!=EAGAIN && errno!=EINTR)) return -1; }
+      if(n>0)got+=(size_t)n;
+      else if(!n){errno=ECONNRESET;return -1;}
+      else if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
+    }
   }
-  return stop?-1:0; }
+  errno=ECANCELED;return -1;
+}
 
-static int oob(const char *peer){
-  int f=accept(lsock,NULL,NULL);
-  if(f>=0){ struct timeval rt={10,0}; setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
-    return f; }
-  if(!peer) return -1;
-  struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC},*r;
-  if(getaddrinfo(peer,MESH_PORT,&hint,&r)) return -1;
-  for(int pass=0; pass<2; pass++)
-    for(struct addrinfo *a=r; a; a=a->ai_next){
-      if((pass==0) != (a->ai_family==AF_INET)) continue;
-      if((f=dial(a))>=0){ freeaddrinfo(r);
-        struct timeval rt={10,0}; setsockopt(f,SOL_SOCKET,SO_RCVTIMEO,&rt,sizeof rt);
-        return f; } }
-  freeaddrinfo(r); return -1; }
+static int oob(const char *peer,struct hdr *m,uint64_t client){
+  if(!peer)return accept(lsock,NULL,NULL);
+  struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC},*addresses;
+  if(getaddrinfo(peer,MESH_PORT,&hint,&addresses)){errno=EHOSTUNREACH;return -1;}
+  int socket=-1,error=EHOSTUNREACH;
+  for(struct addrinfo *a=addresses;a && !stop;a=a->ai_next){
+    socket=dial(a,m,client);error=errno;
+    if(socket>=0 || error==ECANCELED)break;
+  }
+  freeaddrinfo(addresses);errno=error;return socket;
+}
 
 static struct ibv_port_attr pa;
 /* ledger D13 (out-of-band metadata), D6 (queue pair limits), TN3205 queue-pair state transitions */
-static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int me, uint32_t message_bytes, int qps, int (*configure)(void *,int,double),void *state){
+static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int me, uint32_t message_bytes, int qps, int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
   if(qps<1 || qps>MESH_QPS+1){ errno=EINVAL; return -1; }
   if(provider->context && (ibv_query_port(provider->context,1,&pa) || pa.state!=IBV_PORT_ACTIVE)){
     return -1; }
-  int f=oob(peer); if(f<0) return !peer && (errno==EAGAIN || errno==EWOULDBLOCK)?1:-1;
+  struct hdr *m=(struct hdr *)mem;
+  int f=oob(peer,m,client); if(f<0) return !peer && (errno==EAGAIN || errno==EWOULDBLOCK)?1:-1;
   fprintf(stderr,"pair setup node=%d connected=%.6f\n",me,monotime());
   if(!provider->context){
   struct ibv_device **dl=ibv_get_device_list(NULL);
@@ -207,11 +208,10 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   for(int q=0;q<qps;q++){ mine.qpns[q]=provider->pairs[q]->qp_num; mine.psns[q]=(psn+(uint32_t)q)&0xffffff; }
   memcpy(mine.gid,&gid,16);
   fprintf(stderr,"pair setup node=%d exchange=%.6f regions=%d qpn=%u\n",me,monotime(),provider->region_count,mine.qpn);
-  double exchange_deadline=monotime()+10;
-  if(exchange(f,&mine,&you,sizeof mine,exchange_deadline)){ close(f); fprintf(stderr,"exchange failed\n"); return -1; }
+  if(exchange(f,&mine,&you,sizeof mine,sizeof you,m,client)){ close(f); fprintf(stderr,"exchange failed\n"); return -1; }
   /* ledger D6: both ends must post messages of the same frame count; D5: the same queue-pair count */
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.count!=mine.count || (expected_peer>=0 && you.node!=expected_peer)){
-    fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,expected_peer); close(f); return -1; }
+    fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,expected_peer); close(f);errno=EPROTO;return -1; }
   expected_peer=you.node;
   for(int q=0;q<qps;q++){
     struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psns[q],
@@ -221,7 +221,7 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
     int rc=ibv_modify_qp(provider->pairs[q],&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
     if(rc){ fprintf(stderr,"rtr %d rc %d dlid %u dqpn %u\n",q,rc,you.lid,you.qpns[q]); close(f); return -1; }
   }
-  if(configure(state,f,exchange_deadline)){close(f);return -1;}
+  if(configure(state,f,client)){close(f);return -1;}
   for(int q=0;q<qps;q++){
     struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=mine.psns[q]};
     int rc=ibv_modify_qp(provider->pairs[q],&t,IBV_QP_STATE|IBV_QP_SQ_PSN);

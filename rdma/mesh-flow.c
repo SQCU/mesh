@@ -71,32 +71,29 @@ static int link_ready(struct mesh_link *link,uint32_t q,uint32_t index){
   ready->tail=index;return 1;
 }
 /* design/algorithm-sources.md#programcopy */
-static int link_configure(void *state,int socket,double deadline){
+static int link_configure(void *state,int socket,uint64_t client){
   struct mesh_link *link=state;struct hdr *m=link->M;
   for(uint32_t q=0;q<(uint32_t)link->qps;q++){
-    uint32_t sends=atomic_load(mesh_order_length(m,q,MESH_SEND)),receives=atomic_load(mesh_order_length(m,q,MESH_RECEIVE)),peer_receives=0;
-    if(exchange(socket,&receives,&peer_receives,sizeof receives,deadline))return -1;
-    if(peer_receives!=sends){fprintf(stderr,"transfer count mismatch queue=%u sends=%u peer_receives=%u\n",q,sends,peer_receives);errno=EPROTO;return -1;}
-    uint32_t count=sends>receives?sends:receives;
-    struct mesh_transfer *mine=calloc(count?count:1,sizeof *mine),*peer=calloc(count?count:1,sizeof *peer);
-    if(!mine || !peer){free(mine);free(peer);errno=ENOMEM;return -1;}
-    memcpy(mine,mesh_transfers(m,q,MESH_RECEIVE),receives*sizeof *mine);
-    int error=exchange(socket,mine,peer,count*sizeof *mine,deadline);
-    struct mesh_transfer *out=mesh_transfers(m,q,MESH_SEND);
+    uint32_t counts[2]={atomic_load(mesh_order_length(m,q,MESH_SEND)),atomic_load(mesh_order_length(m,q,MESH_RECEIVE))},peer_counts[2];
+    if(exchange(socket,counts,peer_counts,sizeof counts,sizeof peer_counts,m,client))return -1;
+    uint32_t sends=counts[MESH_SEND],receives=counts[MESH_RECEIVE];
+    if(sends!=peer_counts[MESH_RECEIVE] || receives!=peer_counts[MESH_SEND]){
+      fprintf(stderr,"transfer count mismatch queue=%u local=%u,%u peer=%u,%u\n",q,sends,receives,peer_counts[MESH_SEND],peer_counts[MESH_RECEIVE]);
+      errno=EPROTO;return -1;
+    }
+    struct mesh_transfer *destinations=calloc(sends?sends:1,sizeof *destinations);
+    if(!destinations)return -1;
+    struct mesh_transfer *out=mesh_transfers(m,q,MESH_SEND),*in=mesh_transfers(m,q,MESH_RECEIVE);
+    int error=exchange(socket,in,destinations,receives*sizeof *in,sends*sizeof *destinations,m,client);
     for(uint32_t i=0;i<sends && !error;i++){
-      if(out[i].binding!=peer[i].binding || out[i].offset!=peer[i].offset || out[i].bytes!=peer[i].bytes){fprintf(stderr,"send plan mismatch queue=%u index=%u local=%llu,%u,%u peer=%llu,%u,%u\n",q,i,(unsigned long long)out[i].binding,out[i].offset,out[i].bytes,(unsigned long long)peer[i].binding,peer[i].offset,peer[i].bytes);errno=EPROTO;error=-1;break;}
-      out[i].peer_row=peer[i].local_row;out[i].peer_page=peer[i].local_page;out[i].peer_index=peer[i].index;
-    }
-    if(!error){
-      memset(mine,0,count*sizeof *mine);memcpy(mine,out,sends*sizeof *mine);
-      error=exchange(socket,mine,peer,count*sizeof *mine,deadline);
-      struct mesh_transfer *in=mesh_transfers(m,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<receives && !error;i++){
-        if(in[i].binding!=peer[i].binding || in[i].offset!=peer[i].offset || in[i].bytes!=peer[i].bytes){fprintf(stderr,"receive plan mismatch queue=%u index=%u local=%llu,%u,%u peer=%llu,%u,%u\n",q,i,(unsigned long long)in[i].binding,in[i].offset,in[i].bytes,(unsigned long long)peer[i].binding,peer[i].offset,peer[i].bytes);errno=EPROTO;error=-1;break;}
-        in[i].peer_row=peer[i].local_row;in[i].peer_page=peer[i].local_page;in[i].peer_index=peer[i].index;
+      struct mesh_transfer target=destinations[i];
+      if(out[i].binding!=target.binding || out[i].offset!=target.offset || out[i].bytes!=target.bytes){
+        fprintf(stderr,"transfer mismatch queue=%u index=%u local=%u,%u,%u peer=%u,%u,%u\n",q,i,out[i].binding,out[i].offset,out[i].bytes,target.binding,target.offset,target.bytes);
+        errno=EPROTO;error=-1;break;
       }
+      out[i].peer_row=target.local_row;out[i].peer_page=target.local_page;out[i].peer_index=target.index;
     }
-    free(mine);free(peer);if(error)return error;
+    free(destinations);if(error)return error;
     for(int d=0;d<2;d++)for(uint32_t i=0;i<atomic_load(mesh_order_length(m,q,d));i++){
       uint32_t frames=mesh_transfers(m,q,d)[i].bytes/4096;
       if(frames>link->provider.capacity[q][d]){
@@ -369,21 +366,21 @@ int main(int argc,char**argv){
   fprintf(stderr,"bridge node %d: %d queue pair(s), %d maximum frames per block, %d index slots per direction\n",me,link.qps,link.frames,link.budget);
 
   while(!stop){
-    struct timespec idle={0,1000000};
     /* D14: a listener failure is recorded and retried in process, never an exit */
-    if(lsock<0 && listener_up()){ link_error(M,errno?errno:EIO,1); nanosleep(&idle,NULL); continue; }
+    if(lsock<0 && listener_up()){ link_error(M,errno?errno:EIO,1); continue; }
     uint64_t client=atomic_load_explicit(&M->client,memory_order_acquire);
     /* D14: the connection follows the attached client */
     if(link.client && client!=link.client && link_down(&link)) continue;
     if(!link.client && client && atomic_load_explicit(&M->configured,memory_order_acquire)==client){
       /* D13 */
-      int setup=verbs_up(peer,(char*)M,length,M->data_off,me,(uint32_t)(block_pages*pg),link.qps+1,link_configure,&link);
+      int setup=verbs_up(peer,(char*)M,length,M->data_off,me,(uint32_t)(block_pages*pg),link.qps+1,link_configure,&link,client);
       if(setup>0)continue;
       if(setup<0){
-        link_error(M,errno?errno:EIO,1);
+        if(errno!=ECANCELED)link_error(M,errno?errno:EIO,1);
         link_down(&link);
         continue;
       }
+      if(stop || atomic_load_explicit(&M->client,memory_order_acquire)!=client){link_down(&link);continue;}
       link.client=client;
       atomic_store_explicit(&link.progressing,1,memory_order_release);
       int error=0;
@@ -399,7 +396,6 @@ int main(int argc,char**argv){
       atomic_store(&M->port.phase,MESH_PAIRED);
       fprintf(stderr,"bridge node %d paired for client %llu\n",me,(unsigned long long)client);
     }
-    nanosleep(&idle,NULL);
   }
 teardown:
   link_stop(&link);
