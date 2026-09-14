@@ -1396,6 +1396,18 @@ still comes from mesh's exact row dependencies; residency does not establish
 numerical readiness or authorize overwriting a live source. Program teardown
 waits for its existing executions, removes the set, then releases its buffers.
 
+## Active segment domains
+
+The JAX authors' [Megablox grouped multiplication](https://raw.githubusercontent.com/AI-Hypercomputer/maxtext/main/src/maxtext/kernels/megablox/backend.py)
+retains actual tile counts and explicit tile identities in a bounded domain,
+including empty groups only when output initialization requires them. Mesh's
+[active segment contract](active-segments.md) applies that distinction to private
+scatter partials while preserving final destination initialization. The number
+of distinct validated destinations in U updates is at most min(U, D), permitting
+that static partial-capacity bound without storage reuse or added dependencies.
+The exact producer disposition and late-source lifetime mechanism is mesh's
+realization, using the existing canonical presence-based execution owner.
+
 
 The existing streaming-algebra workflow's optional `--xonotic` case constructs
 an actual Xonotic gather/concatenate graph and observes its canonical result blocks.
