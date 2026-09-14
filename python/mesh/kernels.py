@@ -1276,5 +1276,7 @@ def _lower_region_expressions(program, expressions, grid, input_specs, output_sp
 # design/algorithm-sources.md#programkernel_call
 _left, _right = arguments(2)
 add = expression(_left + _right)
+maximum = expression(select(_left.equal(_left), select(_right.equal(_right), select(_left >= _right, _left, _right), _right), _left))
+minimum = expression(select(_left.equal(_left), select(_right.equal(_right), select(_left <= _right, _left, _right), _right), _left))
 swish = expression(_left / (1 + (0 - _left).exp()))
 del _left, _right

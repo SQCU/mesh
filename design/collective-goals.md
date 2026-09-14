@@ -83,15 +83,16 @@ run. A goal is done when its check holds; there is no further work under it.
 
 ### G1. Collectives are library functions on Refs
 
-Artifact: `python/mesh/collective.py` exporting `send`, `reduce_scatter`, `all_gather`,
-`all_reduce`, each a composition of `program.copy` and `kernel_call(add)` over blocks,
-nothing else. `all_reduce = all_gather ∘ reduce_scatter` (Rabenseifner 2004;
-Patarasuk & Yuan 2009). `send` is `program.copy`. Every block of every instance moves as
-its own transfer edge on its own pages (memory mapping, D4–D6).
-Check: `nn.ffn` has no `exchange=` parameter; its down-projection partials go through
-`reduce_scatter` and its output through `all_gather`; `grep -n "exchange" python/mesh`
-is empty. `examples/streaming-chain.py` calls `reduce_scatter`/`all_gather` by name.
-Status 2026-09-14 11:13 (`0c5a4a3`): done.
+Artifact: `python/mesh/collective.py` implements the [collective verbs](collective-verbs.md)
+through indexed transfers and numerical kernels. The operator's September 14
+clarification requires each verb's actual semantics, rather than treating every
+collective as a reduction, gather or scatter. Reduction trees process available
+contributions without a preceding whole-tensor gather. The caller supplies placement.
+
+Check: `nn.ffn` supplies local numerical contributions; the streaming example
+selects `reduce` because its downstream consumer is on the root. Other callers
+select their appropriate movement or reduction verb. There is no mandatory
+reduce-scatter/all-gather pair or required count of collective names.
 
 ### G2. Partial sums are a type, not a convention
 
@@ -130,14 +131,15 @@ empty outside the explicitly requested `collective.sync_on_remote_fill` function
 `rdma/mesh-flow.c` contains no arithmetic on payload bytes. The completion wait is
 never called by a default collective; its counterexample is caller code.
 
-### G6. The engine step uses G1 at the two Megatron points and is measured publicly
+### G6. The engine step uses the collective required by its consumers
 
-Artifact: in metal-microbench, the gemma-4 decode/prefill step calls existing kernels
-and exactly `reduce_scatter` + `all_gather` per layer (Megatron g, ledger D11); solo
-and two-node times are taken through the public server endpoint; the report states
-Karp–Flatt e per run alongside the Amdahl bound from measured r and crossing cost.
-Check: `grep -c "reduce_scatter\|all_gather" <caller>` equals 2 × layers; no benchmark
-imports engine internals.
+Artifact: in metal-microbench, the gemma-4 decode/prefill step calls existing
+numerical kernels and the collective required by each distributed layer's
+consumer placement. The caller supplies that placement; the collective library
+contains no model interpretation or automatic choice of communication pattern.
+Check: trace the actual distributed layer inputs and outputs through the canonical
+streaming library. Runtime measurements are not a requirement or implementation
+authority, as explicitly directed by the operator and the async contract.
 
 ## Symbol allowlist
 
@@ -146,8 +148,11 @@ The library's public surface is exactly:
 `Program, Program.tensor, Program.kernel_call, Program.copy, Program.replicate,
 Program.export, Program.write, Program.constant, Program.realize, Program.close,
 Tensor, Ref, BlockSpec, ShapeDtypeStruct, Result, kernels.arguments,
-kernels.expression, kernels.dot, kernels.add, collective.send,
-collective.reduce_scatter, collective.all_gather, collective.all_reduce,
+kernels.expression, kernels.dot, kernels.add, kernels.maximum, kernels.minimum,
+collective.send, collective.recv, collective.recv_like, collective.broadcast,
+collective.scatter, collective.gather, collective.all_gather, collective.all_to_all,
+collective.reduce, collective.reduce_scatter, collective.sum_scatter,
+collective.all_reduce, collective.all_sum, collective.all_max, collective.all_min,
 collective.sync_on_remote_fill, nn.linear,
 nn.ffn, nn.rmsnorm, nn.embedding`
 

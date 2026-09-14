@@ -7,7 +7,7 @@ import numpy as np
 
 from mesh import BlockSpec, Program, ShapeDtypeStruct, kernels
 from mesh.nn import linear, ffn
-from mesh.collective import reduce_scatter, all_gather
+from mesh.collective import reduce
 
 
 # design/algorithm-sources.md#nnffn
@@ -20,7 +20,6 @@ def main():
     parser.add_argument('--root', type=int, required=True)
     parser.add_argument('--peer', type=int, required=True)
     parser.add_argument('--split', type=int, required=True)
-    parser.add_argument('--output-split', type=int, required=True)
     parser.add_argument('--instances', type=int, default=2)
     parser.add_argument('--region')
     parser.add_argument('--numerics')
@@ -147,9 +146,6 @@ def main():
             x = program.tensor(values.shape, (args.tile_rows, values.shape[1] if args.residual else args.tile_k), dtype=values.dtype)
             inputs.append(x)
             peers = (args.root, args.peer)
-            owners = {(i, j): args.root if i * args.tile_rows < args.output_split else args.peer
-                      for i in range(x.grid[0])
-                      for j in range((down_weight.shape[1] + args.tile_columns - 1) // args.tile_columns)}
             if args.gate_weight:
                 up = linear(program, x, up_weight, tile_rows=args.tile_rows,
                             tile_k=args.tile_k, tile_columns=args.tile_columns)
@@ -161,12 +157,11 @@ def main():
                     out_shape=ShapeDtypeStruct(up.shape, up.dtype))(gate, up)
                 down = linear(program, hidden, down_weight, tile_rows=args.tile_rows,
                               tile_k=args.tile_k, tile_columns=args.tile_columns)
-                scattered = reduce_scatter(program, down, peers=peers, owners=owners)
-                reduced = all_gather(program, scattered, peers=peers, owners=owners)
             else:
-                reduced = ffn(program, (x,), ((up_weight,),), (down_weight,),
-                              tile_rows=args.tile_rows, tile_k=args.tile_k,
-                              tile_columns=args.tile_columns, peers=peers, owners=owners)
+                down = ffn(program, (x,), ((up_weight,),), (down_weight,),
+                           tile_rows=args.tile_rows, tile_k=args.tile_k,
+                           tile_columns=args.tile_columns)
+            reduced = reduce(program, down, root=args.root, peers=peers)
             if program.node == args.root:
                 if args.normalize is not None:
                     if reduced.grid[1] != 1:

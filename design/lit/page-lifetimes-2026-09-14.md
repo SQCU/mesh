@@ -114,8 +114,9 @@ The direct-binding refactor removes the following competing representations and 
   Metal submission relay, execution-kind tags and realization-time CPU closure wrapping.
   Setup binds the native submission callback directly.
 - The `prepare_part`/`bind_part` relay and mutable occurrence field. Algebra functions
-  already have exactly one configured occurrence. General mesh row functions retain
-  their existing indexed interface.
+  already have exactly one configured occurrence. The subsequent
+  [MLX/JACCL review](mlx-jaccl-structure.md) removes the unused native occurrence
+  interface and separate function-watch allocation as well.
 
 The remaining implementation must change backing and uses together:
 

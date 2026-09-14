@@ -75,6 +75,20 @@ Apple [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-la
 defines the actual Thunderbolt SEND/RECV substrate and device ownership obligations.
 These sources supply mechanisms, not additional project objectives.
 
+The [MLX/JACCL source review](lit/mlx-jaccl-structure.md) applies the same boundary:
+callers compose local numerical functions with collectives; transport owns
+registered regions, posting and completion. Our implementation follows this
+existing transport structure while exposing partial results. Avoid added work
+over JACCL's path; account explicitly for the presence handling required by the
+partial interface and remove duplicate scheduling, staging and implicit waits.
+
+Implement and select each collective according to its tensor algebra and caller
+placement: broadcast, scatter, gather, all-gather, all-to-all, reduce,
+reduce-scatter and all-reduce are distinct operations. Movement need not reduce;
+reduction consumes available contributions without a preceding whole-tensor
+gather. Push transfers and incremental publication implement these operations
+without turning their names into implicit synchronization points.
+
 ## Explicit synchronization counterexample
 
 Operator instruction, September 14, 2026: supply an explicit `sync_on_remote_fill`

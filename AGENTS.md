@@ -255,8 +255,8 @@ lives in `bin/` for the same reason.
 
 ## Asynchronous collectives
 
-The required end state is [collective goals](design/collective-goals.md), including
-engine integration and public endpoint measurements.
+The required end state is [collective goals](design/collective-goals.md), governed
+by the [asynchronous collective contract](design/async-collectives.md).
 The caller supplies mesh and tensor placement configuration. Realization binds
 actual storage, indexed dependencies and numerical functions before invocation.
 Implement strict dependencies through canonical mesh and established numerical

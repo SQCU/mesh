@@ -88,9 +88,9 @@ The caller supplies two participants and a split of the hidden dimension.
 Participant p owns J_p and computes U_p = X W_up[:, J_p], H_p = swish(U_p),
 and D_p = H_p W_down[J_p, :]. Both participants receive replicated X and can
 start local arithmetic independently. The peer publishes D regions to the root;
-the block owner computes Y = D_root + D_peer with the existing add kernel.
-`reduce_scatter` places each sum at its configured owner; `all_gather` distributes
-those completed blocks to both participants. Only the
+the root computes Y = D_root + D_peer with the existing add kernel.
+The caller uses `reduce` because the following consumer runs only on the root.
+The other collective verbs remain available for their corresponding dataflows. Only the
 local weight shard occupies canonical operand storage. Each reduced region feeds
 swish and a further contraction Z = swish(Y) W_consumer at the root.
 
@@ -105,7 +105,7 @@ local mesh storage. For an input (rows, inner), weights (inner, hidden) and
 
 ```sh
 python examples/streaming-chain.py input.npy up.npy down.npy consumer.npy \
-  --root 0 --peer 1 --split 256 --output-split 2048 --tile-rows 128 --tile-k 128 --tile-columns 128
+  --root 0 --peer 1 --split 256 --tile-rows 128 --tile-k 128 --tile-columns 128
 ```
 
 The consumer weight has shape (columns, consumer_columns). The root prints

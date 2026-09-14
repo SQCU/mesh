@@ -2,7 +2,6 @@ from math import gcd
 
 from . import BlockSpec, ShapeDtypeStruct
 from . import kernels
-from .collective import reduce_scatter, all_gather
 
 
 # design/algorithm-sources.md#nnffn
@@ -60,8 +59,7 @@ def _sum(program, terms, tile_rows):
 
 # design/algorithm-sources.md#nnffn
 def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
-        tile_columns=128, peers, owners):
-    peers = tuple(peers)
+        tile_columns=128):
     inputs, up_weights, down_weights = tuple(inputs), tuple(map(tuple, up_weights)), tuple(down_weights)
     if not inputs or not up_weights or len(up_weights) != len(down_weights) or any(len(group) != len(inputs) for group in up_weights):
         raise ValueError('Weights must cover every input partition and hidden section')
@@ -82,8 +80,7 @@ def ffn(program, inputs, up_weights, down_weights, *, tile_rows, tile_k=128,
     value, = kernels.arguments(1)
     partials = _pointwise(program, kernels.expression(value.astype(inputs[0].dtype)),
                          (partials,), tile_rows, output_dtype=inputs[0].dtype)
-    return all_gather(program, reduce_scatter(program, partials, peers=peers, owners=owners),
-                      peers=peers, owners=owners)
+    return partials
 
 
 # design/algorithm-sources.md#nnrmsnorm

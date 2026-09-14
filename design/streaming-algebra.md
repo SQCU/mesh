@@ -25,9 +25,14 @@ backend details are not a separate implementation requirement here.
 ## End-to-end source derivation
 
 The concrete caller is `examples/streaming-chain.py`. Both participants bind
-`linear → swish → linear → reduce_scatter → all_gather`; the root additionally
-binds `swish → linear` on the gathered result. All these functions are realized
+`linear → swish → linear → reduce`; the root additionally
+binds `swish → linear` on the reduced result. All these functions are realized
 before either participant feeds its input regions.
+
+The [MLX/JACCL structure review](lit/mlx-jaccl-structure.md) documents the applied
+native simplification: each realized function owns its dependency index entries
+directly, with no second grid or per-occurrence watch. The caller selects the verb
+matching its numerical dependency and placement; no verb is the universal path.
 
 For an output region I and participant p, let
 
@@ -46,15 +51,14 @@ The following are the publication sites for this chain:
 | Input feed | `Program.write` finishes through `mesh_writer_complete` and `mesh_complete` | Local up-projection contributions reading those input rows |
 | Each local up/down/consumer contraction contribution | Accelerate CPU calls finish through `complete_part`; Metal command-buffer completion calls `complete_part` | Its addition-tree parent, or the next operation if this is the complete result |
 | Addition-tree nodes and both swish stages | Generated CPU stores call `publish_cpu → mesh_publish_partial` per section; final `complete_part → mesh_complete` releases inputs. Metal command-buffer completion calls `complete_part` | Numerical consumers and transfer edges of each published output region |
-| Reduce-scatter transfer | `link_post` sends a published D region; successful `mesh_receive_complete` publishes its configured destination | The owning participant's `kernel_call(add)` tree |
-| Reduce-scatter sum | Each owning participant's add nodes use the generated-source publication paths above | All-gather sends for that region and any local consumers |
-| All-gather transfer | Successful `mesh_receive_complete` publishes the destination Y region | The root's post-collective swish, without requiring other Y regions |
+| Reduction transfer | `link_post` sends a published D region; successful `mesh_receive_complete` publishes its configured destination | The root's `kernel_call(add)` tree |
+| Reduction sum | The root's add nodes use the generated-source publication paths above | The root's post-collective swish, without requiring other Y regions |
 | Final contraction | The same contraction completion path above | Exported Z regions |
 
 `mesh_complete` calls `mesh_publish` on output rows. `mesh_publish_partial`
 and `mesh_publish` set presence and notify canonical readers. `mesh_notify`
 queues affected compute and send rows; `mesh_events` follows their bound edges.
-`submit_ready` invokes the prebound function. CPU arithmetic runs on a concurrent
+`mesh_fire` invokes the bound function's submission callback directly. CPU arithmetic runs on a concurrent
 worker queue; Metal/CoreML submission returns to the presence handler after
 submitting device work. None of these publication sites waits for transport or
 for an unrelated region. Device completion precedes publication because writes
@@ -133,10 +137,10 @@ The source exposes these distinct costs and waits:
 
 | Boundary | Current mechanism | Consequence |
 |---|---|---|
-| Output claim | `mesh_issue_index` checks actual inputs and output reader ownership; `mesh_reset` clears presence and assigned read planes before setting producing | Work proportional to covered rows and assigned reader planes precedes dispatch. An unavailable operand/storage claim returns without spinning for it. |
+| Output claim | `mesh_issue` checks actual inputs and output reader ownership; `mesh_reset` clears presence and assigned read planes before setting producing | Work proportional to covered rows and assigned reader planes precedes dispatch. An unavailable operand/storage claim returns without spinning for it. |
 | Publication | `mesh_publish_partial` / `mesh_publish` update atomic planes; `mesh_notify` pushes each affected row onto compute/send lists using shared memory | Publication does not wait for delivery, but incurs atomic contention, and list work. CAS retries have no stated per-call time bound. |
 | Consumer discovery | A dedicated `mesh.presence` thread spins on shared publication notices and invokes `mesh_events` on the numerical dispatch queue to traverse affected reader edges | Ready work can incur notification and queueing delay; asynchronous submission alone gives no bound on that delay. |
-| Numerical issue | `submit_ready` enters a dispatch group and invokes the prebound submit function; only synchronous CPU work uses a worker queue | CPU arithmetic executes away from the presence handler. Dispatch internals and worker scheduling are not shown to have zero contention or bounded latency. |
+| Numerical issue | The bound CPU, Metal or Core ML submission callback enters a dispatch group and submits its numerical body; only synchronous CPU work uses a worker queue | CPU arithmetic executes away from the presence handler. Dispatch internals and worker scheduling are not shown to have zero contention or bounded latency. |
 | Transfer | Dedicated spinning send and receive threads post registered SEND/RECV and drain their respective completion queues; initial receives are posted by the receive thread too | Capacity shortages defer posting. Reusing a receive destination depends on its actual readers. These are distinct from waiting for an unrelated tensor to finish. |
 | Terminal application | The example supplies every input block before entering a busy-poll output loop; formatting/printing occurs in that loop | Observed output order omits intermediate timing and includes application observation delay. |
 | Setup and destruction | Compiler process waits, synchronous registration/removal on the presence queue, and dispatch-group/semaphore waits during destruction | These boundaries explicitly wait; a claim about numerical publication must not be generalized to the complete program lifecycle. |
