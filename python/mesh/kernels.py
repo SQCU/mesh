@@ -673,19 +673,22 @@ class _ExpressionKernel:
 
             flattened = tuple(ref for source in reads for ref in
                 (source.refs if isinstance(source, _StaticTable) else tuple(ref for _, ref in sorted(source.blocks.items())) if hasattr(source, 'blocks') else (source,)))
-            function = program.native.algebra_trace_count(program.handle)
-            check(program.native.algebra_source(program.handle,
-                self.source(reads, output, False, expression).encode(),
-                self.source(reads, output, True, expression).encode(),
-                (View * len(flattened))(*(ref.view for ref in flattened)), len(flattened), output.view))
+            row_inputs = _expression_row_inputs(expression, reads)
+            sources = tuple(self.source(reads, output, metal, expression).encode() for metal in (False, True))
             offsets = []
             for source in reads:
                 offsets.append((offsets[-1][0] + offsets[-1][1] if offsets else 0,
                     len(source.refs) if isinstance(source, _StaticTable) else len(source.blocks) if hasattr(source, 'blocks') else 1))
-            for selected, index in dynamic.values():
-                first, count = offsets[index]
-                check(program.native.algebra_indexed(program.handle, function, selected.view,
-                    (C.c_size_t * count)(*range(first, first + count)), count))
+            for begin, rows in _source_row_regions(program, output):
+                function = program.native.algebra_trace_count(program.handle)
+                check(program.native.algebra_source(program.handle, *sources,
+                    (View * len(flattened))(*(ref.view for ref in flattened)), len(flattened), output.view,
+                    (C.c_uint8 * len(row_inputs))(*row_inputs), begin, rows))
+                for selected, index in dynamic.values():
+                    first, count = offsets[index]
+                    selection = selected.slice(begin, 0, rows, selected.shape[1])
+                    check(program.native.algebra_indexed(program.handle, function, selection.view,
+                        (C.c_size_t * count)(*range(first, first + count)), count))
 
     # design/algorithm-sources.md#shared-associative-reductions
     def source(self, inputs, output, metal, expression):
@@ -804,7 +807,7 @@ class _ExpressionKernel:
                     lines.append(f'{"constant ulong" if metal else "static const uint64_t"} {name}{index}[]={{'+','.join(map(str, values))+'};')
                     strides.append(f'{name}{index}[CANDIDATE]')
             layouts[index] = scalar, strides
-        lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], uint r [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {' if metal else 'void mesh_expression(const uintptr_t *buffers, const struct mesh_kernel_publication *publication) {')
+        lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], constant ulong &row_begin [[buffer(1)]], uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { const ulong r=row_begin+row;' if metal else 'void mesh_expression(const uintptr_t *buffers, const struct mesh_kernel_publication *publication) {')
         candidates = {pointer for index, ref in enumerate(inputs) if hasattr(ref, 'blocks') or isinstance(ref, _StaticTable) for pointer in pointers[index]}
         for index, ref in enumerate((*physical, output)):
             if index in candidates:
@@ -850,6 +853,34 @@ class _ExpressionKernel:
         lines.append(f'for({"uint" if metal else "uint64_t"} c={"lane" if metal else "0"};c<{output.shape[1]};c+={32 if metal else 1}) p{len(physical)}[r*{output.view.row_stride}+c*{output.view.column_stride}]={emit(expression, "c")};')
         lines.append('}' if metal else _CPU_PUBLICATION_END)
         return '\n'.join(lines)
+
+
+# design/algorithm-sources.md#compiled-row-access-domains
+def _expression_row_inputs(expression, inputs):
+    indexed = set()
+
+    # design/algorithm-sources.md#compiled-row-access-domains
+    def visit(node):
+        if node.operation == 'load':
+            indexed.add(node.value)
+        for child in node.operands:
+            visit(child)
+
+    visit(expression)
+    return tuple(int(index not in indexed and not hasattr(source, 'blocks') and not isinstance(source, _StaticTable))
+                 for index, source in enumerate(inputs)
+                 for _ in (source.refs if isinstance(source, _StaticTable) else source.blocks.values() if hasattr(source, 'blocks') else (source,)))
+
+
+# design/algorithm-sources.md#compiled-row-access-domains
+def _source_row_regions(program, output):
+    import math
+    if output._writer_error or output.view.column_stride != 1:
+        return ((0, output.shape[0]),)
+    page_bytes = program.native.tensor_publication_bytes(output.view.tensor, output.view.extent)
+    row_bytes = output.shape[1] * output.dtype.itemsize
+    rows = page_bytes // math.gcd(page_bytes, row_bytes)
+    return tuple((first, min(rows, output.shape[0]-first)) for first in range(0, output.shape[0], rows))
 
 
 # design/algorithm-sources.md#in-operation-publication
@@ -1129,7 +1160,7 @@ def indexed_add(base, destinations, updates, *, mask=True):
 
 
 # design/algorithm-sources.md#segmented-indexed-add
-def _compiled_region(program, inputs, output, body, dynamic_first=None):
+def _compiled_region(program, inputs, output, body, dynamic_first=None, *, row_inputs=None):
     import ctypes as C
     from . import check
     from ._native import View
@@ -1145,7 +1176,7 @@ def _compiled_region(program, inputs, output, body, dynamic_first=None):
         lines.append(preamble)
         lines.append('#define PREFIX(x) simd_prefix_exclusive_sum(x)\n#define SUM(x) simd_sum(x)\n#define BARRIER threadgroup_barrier(mem_flags::mem_device)' if metal else
                      '#define PREFIX(x) 0u\n#define SUM(x) (x)\n#define BARRIER ((void)0)')
-        lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], uint r [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {' if metal else
+        lines.append('kernel void mesh_expression(device const ulong *buffers [[buffer(0)]], constant ulong &row_begin [[buffer(1)]], uint row [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { const ulong r=row_begin+row;' if metal else
                      'void mesh_expression(const uintptr_t *buffers, const struct mesh_kernel_publication *publication) { const uint32_t lane=0; ' + _CPU_PUBLICATION_LOOP)
         lines.append(f'const uint32_t lanes={32 if metal else 1};')
         for index, ref in enumerate((*inputs, output)):
@@ -1158,8 +1189,14 @@ def _compiled_region(program, inputs, output, body, dynamic_first=None):
         lines.append('}' if metal else _CPU_PUBLICATION_END)
         sources.append('\n'.join(lines))
     function = program.native.algebra_trace_count(program.handle)
-    check(program.native.algebra_source(program.handle, *(source.encode() for source in sources),
-        (View * len(inputs))(*(ref.view for ref in inputs)), len(inputs), output.view))
+    domains = ((0, output.shape[0]),) if row_inputs is None else _source_row_regions(program, output)
+    row_inputs = (0,) * len(inputs) if row_inputs is None else tuple(row_inputs)
+    if len(row_inputs) != len(inputs):
+        raise ValueError('Each compiled input requires its row access relation')
+    for begin, rows in domains:
+        check(program.native.algebra_source(program.handle, *(source.encode() for source in sources),
+            (View * len(inputs))(*(ref.view for ref in inputs)), len(inputs), output.view,
+            (C.c_uint8 * len(inputs))(*row_inputs), begin, rows))
     return function
 
 
@@ -1684,7 +1721,7 @@ def _ordering_run(program, source, first, target):
         }}
         for(uint32_t i=lane;i<{width};i+=lanes)p1[r*{target.view.row_stride}+i*{target.view.column_stride}]=work[i];
         """
-    _compiled_region(program, (source,), target, body)
+    _compiled_region(program, (source,), target, body, row_inputs=(1,))
 
 
 # design/algorithm-sources.md#stable-indexed-ordering
@@ -1729,7 +1766,7 @@ def _ordering_merge(program, keys, left, right, diagonal, target):
             p{len(inputs)}[r*{target.view.row_stride}+i*{target.view.column_stride}]=value;
           }}
         }}"""
-    _compiled_region(program, inputs, target, body)
+    _compiled_region(program, inputs, target, body, row_inputs=(1,) * len(inputs))
 
 
 # design/algorithm-sources.md#typed-integer-contractions
@@ -1755,7 +1792,7 @@ def _integral_contraction(program, left, right, target):
           for(uint64_t k=0;k<{left.shape[1]};k++) total{operation}{term};
           p2[r*{target.view.row_stride}+c*{target.view.column_stride}]=total;
         }}"""
-    _compiled_region(program, (left, right), target, body)
+    _compiled_region(program, (left, right), target, body, row_inputs=(1, 0))
 
 
 # design/algorithm-sources.md#shared-contraction-lowering
@@ -2504,7 +2541,7 @@ def _lower_indexed_product(lowering, value, target, compiled_plan):
                     return source, f"""for(uint64_t column=lane;column<{destination.shape[1]};column+=lanes)
                   p{len(results)}[r*{destination.view.row_stride}+column*{destination.view.column_stride}]=mesh_contraction_part(buffers,r,column);"""
 
-                _compiled_region(program, results, destination, assemble)
+                _compiled_region(program, results, destination, assemble, row_inputs=(1,) * len(results))
                 continue
             first, columns, length, prepared = native_plan.segments[detail]
             entry['segment'] = dict(first=first, columns=columns, inner=length)

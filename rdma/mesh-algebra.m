@@ -101,7 +101,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property MeshMetalCode *metalCode;
 @property NSString *specialization;
 @property NSData *cpuArguments;
-@property NSData *publicationSections;
+@property NSMutableData *publicationSections;
 @property NSMutableData *dependencies,*results;
 @property NSData *inputViews;
 @property NSMutableIndexSet *indexedInputs;
@@ -374,6 +374,10 @@ struct mesh_view mesh_view_broadcast(struct mesh_view v,size_t rows,size_t colum
   if(v.rows!=rows)v.row_stride=0;
   if(v.columns!=columns)v.column_stride=0;
   v.rows=rows;v.columns=columns;return v;
+}
+/* design/algorithm-sources.md#compiled-row-access-domains */
+size_t mesh_tensor_publication_bytes(struct mesh_tensor *t,uint32_t i) {
+  return t && i<t->count?(size_t)t->extents[i].quantum*t->context->M->pgsz:0;
 }
 /* design/algorithm-sources.md#streaming-algebra */
 void *mesh_tensor_data(struct mesh_tensor *t,uint32_t i) { return t && i<t->count?t->extents[i].address:NULL; }
@@ -791,7 +795,7 @@ static void submit_metal(MeshFunction *f) {
   [command commit];
 }
 /* design/algorithm-sources.md#application-metal-kernels */
-static int bind_metal(struct mesh_algebra *handle,const char *text,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,MeshCPUCode *paired) {
+static int bind_metal(struct mesh_algebra *handle,const char *text,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count,MeshCPUCode *paired,const struct mesh_view *reads,const struct mesh_view *writes) {
   MeshAlgebra *a=owner(handle);
   if(a.realized)return EBUSY;
   if(a.cpu || !text || !dispatch_count || !dispatches || constant_count>30 || (constant_count && !constants))return EINVAL;
@@ -829,7 +833,7 @@ static int bind_metal(struct mesh_algebra *handle,const char *text,const struct 
     if(!buffer)return ENOMEM;[buffers addObject:buffer];
   }
   NSData *geometry=[NSData dataWithBytes:dispatches length:dispatch_count*sizeof *dispatches];
-  int status=bind_function(handle,inputs,input_count,outputs,output_count,submit_metal);
+  int status=bind_function(handle,reads,input_count,writes,output_count,submit_metal);
   if(status)return status;
   MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_METAL;f->backend=MESH_BACKEND_METAL_COMPILED;
   specialize_function(f,paired,code,options,dispatches,dispatch_count,constants,constant_count,inputs,input_count,outputs,output_count);
@@ -851,7 +855,7 @@ static int bind_metal(struct mesh_algebra *handle,const char *text,const struct 
 
 /* design/algorithm-sources.md#application-metal-kernels */
 int mesh_algebra_metal(struct mesh_algebra *handle,const char *text,const struct mesh_metal_dispatch *dispatches,size_t dispatch_count,const struct mesh_metal_constant *constants,size_t constant_count,const struct mesh_view *inputs,size_t input_count,const struct mesh_view *outputs,size_t output_count) {
-  return bind_metal(handle,text,dispatches,dispatch_count,constants,constant_count,inputs,input_count,outputs,output_count,nil);
+  return bind_metal(handle,text,dispatches,dispatch_count,constants,constant_count,inputs,input_count,outputs,output_count,nil,inputs,outputs);
 }
 /* design/algorithm-sources.md#region-expression-fusion */
 static void submit_cpu(MeshFunction *f) {
@@ -887,13 +891,22 @@ static void bind_publication(MeshFunction *f,struct mesh_view output) {
     .count=sections.length/sizeof(struct mesh_kernel_section),.context=f.owner->context,.publish=publish_cpu};
 }
 /* design/algorithm-sources.md#region-expression-fusion */
-int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output) {
+int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const char *metal_source,const struct mesh_view *inputs,size_t input_count,struct mesh_view output,const uint8_t *row_inputs,size_t row_begin,size_t row_count) {
   MeshAlgebra *a=owner(handle);
   if(a.realized || !cpu_source || !metal_source || !valid_view(a,output))return EINVAL;
+  if(!row_count || row_begin>output.rows || row_count>output.rows-row_begin || (input_count && (!inputs || !row_inputs)))return EINVAL;
+  struct mesh_view region=mesh_view_slice(output,row_begin,0,row_count,output.columns);
+  NSMutableData *domains=[NSMutableData dataWithLength:input_count*sizeof(struct mesh_view)];
+  struct mesh_view *reads=domains.mutableBytes;
+  for(size_t i=0;i<input_count;i++) {
+    if(!valid_view(a,inputs[i]) || (row_inputs[i] && inputs[i].rows!=1 && inputs[i].rows!=output.rows))return EINVAL;
+    reads[i]=row_inputs[i] && inputs[i].rows!=1?mesh_view_slice(inputs[i],row_begin,0,row_count,inputs[i].columns):inputs[i];
+  }
   NSString *cpu_text=[@MESH_KERNEL_SOURCE stringByAppendingString:@(cpu_source)];
   MeshCPUCode *library=(MeshCPUCode *)source_code(a,cpu_text.UTF8String,YES);
-  struct mesh_metal_dispatch dispatch={.name="mesh_expression",.grid={output.rows,1,1},.group={32,1,1}};
-  if(!a.cpu)return bind_metal(handle,metal_source,&dispatch,1,NULL,0,inputs,input_count,&output,1,library);
+  struct mesh_metal_dispatch dispatch={.name="mesh_expression",.grid={row_count,1,1},.group={32,1,1}};
+  uint64_t origin=row_begin;struct mesh_metal_constant constant={.bytes=&origin,.length=sizeof origin};
+  if(!a.cpu)return bind_metal(handle,metal_source,&dispatch,1,&constant,1,inputs,input_count,&output,1,library,reads,&region);
   MeshMetalCode *metal=(MeshMetalCode *)source_code(a,metal_source,NO);NSString *source=library.source;
   if(!library.handle) {
     NSError *error=nil;NSFileManager *files=NSFileManager.defaultManager;
@@ -920,11 +933,13 @@ int mesh_algebra_source(struct mesh_algebra *handle,const char *cpu_source,const
     struct mesh_extent *extent=&v.tensor->extents[v.extent];
     pointers[i]=(uintptr_t)extent->address+v.offset*scalar_bytes(extent->shape.scalar);
   }
-  int status=bind_function(handle,inputs,input_count,&output,1,submit_cpu);
+  int status=bind_function(handle,reads,input_count,&region,1,submit_cpu);
   if(status)return status;
   MeshFunction *f=a.functions.lastObject;f->executionKind=MESH_EXECUTION_CPU;f->backend=MESH_BACKEND_CPU_COMPILED;
-  bind_publication(f,output);
-  specialize_function(f,library,metal,source_options(),&dispatch,1,NULL,0,inputs,input_count,&output,1);f.cpuArguments=addresses;
+  bind_publication(f,region);
+  struct mesh_kernel_section *sections=f.publicationSections.mutableBytes;
+  for(size_t i=0;i<f->publication.count;i++){sections[i].row_begin+=row_begin;sections[i].row_end+=row_begin;}
+  specialize_function(f,library,metal,source_options(),&dispatch,1,&constant,1,inputs,input_count,&output,1);f.cpuArguments=addresses;
   return 0;
 }
 

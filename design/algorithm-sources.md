@@ -3797,3 +3797,66 @@ by this change. Compiled expression input dependencies also still require furthe
 work: `bind_function` currently binds every input view supplied by the compiler.
 Source review and native/Python compilation verify this change; no numerical
 execution or performance measurement was performed.
+
+## Compiled row access domains
+
+The JAX authors' [Grids and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html)
+describes index maps selecting operand blocks for grid invocations. Mesh carries
+its expression compiler's corresponding access information into the canonical
+binding, rather than treating the size of an argument buffer as its read domain.
+This is a binding change; the numerical expressions and their original addresses
+remain the same.
+
+`_expression_row_inputs` walks the expression and identifies direct row-indexed
+inputs. An input also used by an indexed load retains its original domain until
+that access has a more precise indexed footprint. Broadcast inputs retain their
+single source row. The flattened flags preserve the same ordering as the actual
+argument pointers, including static tables and multi-block indexed operands.
+
+`_source_row_regions` divides row-major output iteration domains at existing
+publication-aligned row boundaries. `mesh_tensor_publication_bytes` supplies the
+extent's actual configured quantum, including nontransferable extents; it is not
+inferred from a global transport setting. For row byte width B and quantum Q,
+the minimum aligned complete-row interval has Q/gcd(Q,B) rows. The final interval
+may include the payload tail. Column-major output ownership and within-row
+iteration remain incomplete below.
+
+`mesh_algebra_source` retains original argument views for buffer addresses and
+source specialization, and derives separate input read views from the compiler's
+row access flags and the invocation's row interval. `bind_function` receives
+those read views and the output interval. Its retained `inputViews` therefore
+also preserve the narrowed reads when indexed-reader attachment rebuilds the
+ordinary dependencies. Each expression interval attaches the corresponding
+selector rows to its own function.
+
+The CPU publication descriptor carries the original row indices, shifted once
+from the interval-relative publication sections. Metal receives the same origin
+as a configured 64-bit constant in buffer 1 and dispatches the interval's row
+count. Both source generators define r in the original argument coordinate
+system. Original pointer offsets, broadcast strides, row/index expressions,
+reduction arithmetic and output addressing remain unchanged. CPU sections publish
+inside the existing kernel loop; Metal publishes the independently submitted
+interval at its existing completion handler. No source-dependent host rendezvous
+or runtime binding allocation is introduced.
+
+The `_compiled_region` source audit identifies row access relations explicitly
+for ordering runs, ordering merges, integer contractions and contraction assembly.
+These use the same interval binding: all ordering/assembly operands are row-local;
+integer contraction's left operand is row-local and its right operand retains
+its contraction-index domain. Existing whole-interval helpers with indexed/route
+attachments still return one function; splitting those without migrating their
+reader ownership would be incorrect and remains unfinished work.
+
+Remaining implementation gaps are not exceptions to the operator requirement:
+within-row partial pointwise/reduction consumption, column-major output domains,
+arbitrary indexed-load footprints, and route-attached multirow consumers need
+further lowering. A reduction still reads its contributing columns within each
+row. A complete row interval can exceed one page when its byte width does not
+divide the publication quantum. This change does not establish that all available
+partial tensor data can yet be consumed, or that accelerator publication occurs
+inside a running dispatch.
+
+Validation: source review of the C/ctypes ABI, original address versus dependency
+views, all ten `_compiled_region` call sites, native compilation and Python syntax
+compilation. No numerical run or performance measurement was performed; generated
+Metal source was reviewed, not executed.
