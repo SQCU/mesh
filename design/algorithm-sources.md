@@ -1306,6 +1306,37 @@ cast behavior; Python compilation is complete, while the existing gold workflow
 supplies operational CPU/Metal/Core ML validation. Scratch lifetime packing
 remains distinct lowering work.
 
+### Independently typed contraction operands
+
+Computed FP32 panels can contract with original FP16 weight views without a
+separate operand conversion or a backend change. `mesh_algebra_bind` accepts
+FP16 or FP32 independently for each contraction input; its dimension, physical
+stride, output-layout and alias checks remain. CPU `cpu_part` retains the SGEMM
+path for all-FP32 operands/output. Its other contraction specializations select
+each input's scalar and vector loader independently and accumulate in FP32
+registers before the requested output store, as described in
+[CPU register contraction](#cpu-register-contraction).
+
+`matrix` already retains each extent's own scalar type, offset and strides in
+its MPS descriptor. The existing MPSMatrixMultiplication encode path receives
+these original buffer views unchanged. Apple's
+[encode contract](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication/encode(commandbuffer:leftmatrix:rightmatrix:resultmatrix:))
+specifies dimension constraints but does not enumerate all supported input dtype
+combinations. Consequently source review establishes independent typed bindings,
+not a universal heterogeneous-MPS guarantee; operational mixed-input coverage
+belongs to the existing numerical workflow. No alternate kernel or silent cast
+is selected if a combination fails.
+
+Core ML rectangle metadata now retains both input types. `compile_part` declares
+separate typed placeholders matching `native_array`'s original typed pointer and
+stride views, then keeps the existing FP32 casts, contraction and final output
+cast. Apple's [typed execution](https://apple.github.io/coremltools/docs-guides/source/typed-execution.html)
+describes this explicit graph precision. The specialization key includes both
+type flags and the generator source, so an old single-type model cannot alias a
+mixed specialization. Internal Core ML cast storage remains compiler-owned; this
+does not establish copy-free execution inside Core ML. This increment changes
+no public C ABI and reports no speedup.
+
 ### Mapped and whole-reference dot operands
 
 `_ContractionRegions.parts` resolves each non-None input BlockSpec at every configured grid

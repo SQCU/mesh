@@ -16,10 +16,9 @@ from coremltools.converters.mil.mil import types
 def compile_part(request, destination):
     specification = json.loads(Path(request).read_text())
     arguments = OrderedDict()
-    for i, (rows, columns, depth, half) in enumerate(specification['rectangles']):
-        dtype = types.fp16 if half else types.fp32
-        arguments[f'x{i}'] = mb.placeholder(shape=(rows, depth), dtype=dtype)
-        arguments[f'w{i}'] = mb.placeholder(shape=(depth, columns), dtype=dtype)
+    for i, (rows, columns, depth, left_half, right_half) in enumerate(specification['rectangles']):
+        arguments[f'x{i}'] = mb.placeholder(shape=(rows, depth), dtype=types.fp16 if left_half else types.fp32)
+        arguments[f'w{i}'] = mb.placeholder(shape=(depth, columns), dtype=types.fp16 if right_half else types.fp32)
     program = Program()
     with Function(arguments, opset_version=ct.target.macOS15) as function:
         parts = []

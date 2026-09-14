@@ -961,7 +961,7 @@ static int bind_part(MeshAlgebra *a,enum mesh_algebra_op op,struct mesh_view x,s
       NSUInteger i=rectangles.count;
       features[[NSString stringWithFormat:@"x%lu",(unsigned long)i]]=left;
       features[[NSString stringWithFormat:@"w%lu",(unsigned long)i]]=right;
-      [rectangles addObject:@[@(rr),@(cc),@(x.columns),@(xv.tensor->extents[xv.extent].shape.scalar==MESH_F16)]];
+      [rectangles addObject:@[@(rr),@(cc),@(x.columns),@(xv.tensor->extents[xv.extent].shape.scalar==MESH_F16),@(yv.tensor->extents[yv.extent].shape.scalar==MESH_F16)]];
     } else if(op==MESH_CONTRACT && !a.cpu) {
       BOOL tx=xv.column_stride!=1,ty=yv.column_stride!=1;
       struct mesh_view zv=mesh_view_slice(z,zr,zc,rr,cc);
@@ -1019,7 +1019,6 @@ int mesh_algebra_bind(struct mesh_algebra *handle,enum mesh_algebra_op op,struct
   if(!binary)y=x;
   if(op==MESH_CONTRACT) {
     if(x.columns!=y.rows || z.rows!=x.rows || z.columns!=y.columns || z.column_stride!=1 || !x.row_stride || !x.column_stride || !y.row_stride || !y.column_stride || (x.column_stride!=1 && x.row_stride!=1) || (y.column_stride!=1 && y.row_stride!=1))return EINVAL;
-    if(x.tensor->extents[x.extent].shape.scalar!=y.tensor->extents[y.extent].shape.scalar)return EINVAL;
   } else if(z.rows!=x.rows || z.columns!=(op==MESH_SUM?1:x.columns) || (binary && (x.rows!=y.rows || x.columns!=y.columns)))return EINVAL;
   NSMutableData *reads=[NSMutableData new];dependencies(reads,x);if(binary)dependencies(reads,y);
   struct mesh_row_map *maps=reads.mutableBytes;
