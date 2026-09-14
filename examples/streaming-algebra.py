@@ -460,11 +460,30 @@ def main():
                     result.consume()
         nested_projection = nested_inputs[2][0, 0]
         projection_rows = program.native.tensor_rows(nested_projection.view.tensor, nested_projection.view.extent)
-        nested_consumers = tuple(index for index, entry in enumerate(program.trace)
+        nested_trace = program.trace
+        nested_consumers = tuple(index for index, entry in enumerate(nested_trace)
             if any(region['first'] < projection_rows.first + projection_rows.count and
                 projection_rows.first < region['first'] + region['count'] for region in entry['inputs']))
         if not nested_consumers:
             raise ArithmeticError('Nested contraction omitted its projection operand')
+        row_producers = {row: index for index, entry in enumerate(nested_trace)
+            for region in entry['outputs'] for row in range(region['first'], region['first'] + region['count'])}
+        nested_branches = []
+        for tensor in nested:
+            ref = tensor[1, 0]
+            region = program.native.tensor_rows(ref.view.tensor, ref.view.extent)
+            pending = set(range(region.first, region.first + region.count))
+            ancestors = set()
+            while pending:
+                index = row_producers.get(pending.pop())
+                if index is None or index in ancestors:
+                    continue
+                ancestors.add(index)
+                pending.update(row for region in nested_trace[index]['inputs']
+                    for row in range(region['first'], region['first'] + region['count']))
+            nested_branches.append(tuple(index for index in nested_consumers if index in ancestors))
+        if not all(nested_branches):
+            raise ArithmeticError('Nested outputs must retain projection consumers')
         for generation, (values, expected) in enumerate(nested_generations):
             wait_for(tuple(ref for tensor in nested_inputs for ref in tensor.blocks.values()), 'writable')
             started = time.monotonic_ns()
@@ -474,7 +493,7 @@ def main():
                     (nested_inputs[2], (0, 0), values[2][:2])):
                 with program.write(tensor[coordinate]) as target:
                     target[...] = value
-            consumer_completed = wait_completed(nested_consumers, started)
+            consumer_completed = tuple(wait_completed(branch, started) for branch in nested_branches)
             if any(result.ready for output in nested_results for result in output) or any(
                     not nested_inputs[1][0, i].writable for i in (1, 2)):
                 raise ArithmeticError('Nested contraction crossed a withheld hidden-panel boundary')
