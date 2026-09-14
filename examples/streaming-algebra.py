@@ -236,6 +236,7 @@ def main():
         scatter_results = tuple(program.export(scatter_consumed[i, 0]) for i in range(destinations_count))
         xonotic_case = None
         xonotic_gradients = []
+        xonotic_neighborhoods = []
         scatter_bases = {}
         xonotic_take_gradient = None
         if args.xonotic and args.rank == 0:
@@ -399,6 +400,43 @@ def main():
                     np.add.at(expected, index_values % 4, expanded)
                     generations.append(((index_values,), update_values, (expected * 3).reshape(4, -1, base_shape[-1])))
                 xonotic_gradients.append((name, (matrix_indices,), matrix_updates, matrix_results, generations))
+            # design/algorithm-sources.md#xonotic-neighborhood-algebra
+            for gram in (False, True):
+                graph = mx.Graph()
+                with graph:
+                    operands = tuple(graph.input(name, shape, dtype) for name, shape, dtype in (
+                        ('query', (4, 3), 'float32'), ('keys', (4, 3), 'float32'),
+                        ('vectors', (4, 3), 'float32'), ('indices', (4, 2), 'int64'),
+                        ('weights', (4, 2), 'float32'), ('cotangent', (4, 3), 'float32')))
+                    neighborhood = mx.neighborhood(*operands[:5], gram=gram)
+                    derivatives = graph.vjp((neighborhood,), (operands[5],), tuple(operands[i] for i in (0, 1, 2, 4)))
+                    consumers = tuple(result * 2 + 1 for result in (neighborhood, *derivatives))
+                storage = tuple(program.tensor(value.shape, (1, value.shape[1]), dtype=value.dtype) for value in operands)
+                lowered = kernel_calls(program, graph, (), dict(zip((value.index for value in operands), storage)),
+                    outputs=consumers, root_peer=0, tile_rows=1, tile_columns=3)
+                observations = tuple(tuple((i * lowered[value.index].block_shape[0], j * lowered[value.index].block_shape[1], program.export(ref))
+                    for (i, j), ref in sorted(lowered[value.index].blocks.items())) for value in consumers)
+                generations = []
+                for generation in range(2):
+                    query = (np.arange(12, dtype=np.float32).reshape(4, 3) - 4 + generation) / 8
+                    keys = (np.arange(12, dtype=np.float32).reshape(4, 3)[::-1] + 1 - generation) / 16
+                    vectors = (np.arange(12, dtype=np.float32).reshape(4, 3) - 6 - generation) / 4
+                    indices = np.array([[0, 0], [3, 1], [2, 2], [1, 3]] if not generation else
+                                       [[1, 1], [0, 3], [2, 2], [3, 0]], dtype=np.int64)
+                    weights = (np.arange(8, dtype=np.float32).reshape(4, 2) - 2 + generation) / 8
+                    cotangent = (np.arange(12, dtype=np.float32).reshape(4, 3) + 2 + generation) / 16
+                    q, k, v, w, g = (data.astype(np.float64) for data in (query, keys, vectors, weights, cotangent))
+                    affinity = np.sum(q[:, None, :] * k[indices], axis=-1) / np.sqrt(3) if gram else np.ones((4, 2))
+                    dot_v = np.sum(g[:, None, :] * v[indices], axis=-1)
+                    result = np.sum((w * affinity)[..., None] * v[indices], axis=1)
+                    dq, dk, dv = (np.zeros((4, 3), dtype=np.float64) for _ in range(3))
+                    np.add.at(dv, indices, (w * affinity)[..., None] * g[:, None, :])
+                    if gram:
+                        dq = np.sum((w * dot_v / np.sqrt(3))[..., None] * k[indices], axis=1)
+                        np.add.at(dk, indices, (w * dot_v / np.sqrt(3))[..., None] * q[:, None, :])
+                    expected = tuple(data * 2 + 1 for data in (result, dq, dk, dv, dot_v * affinity))
+                    generations.append(((query, keys, vectors, indices, weights, cotangent), expected))
+                xonotic_neighborhoods.append((gram, storage, observations, generations))
             take_indices = program.tensor((4, 1), (1, 1), dtype=np.int64)
             take_cotangents = program.tensor((4, 1), (1, 1), dtype=np.float32)
             graph = mx.Graph()
@@ -913,6 +951,41 @@ def main():
                     output=[result.array.tolist() for result in gradient_results])), flush=True)
                 if not generation:
                     for result in gradient_results:
+                        result.consume()
+        for gram, storage, observations, generations in xonotic_neighborhoods:
+            for generation, (values, expected) in enumerate(generations):
+                wait_for(tuple(ref for tensor in storage for ref in tensor.blocks.values()), 'writable')
+                started = time.monotonic_ns()
+                for operand, (tensor, data) in enumerate(zip(storage, values)):
+                    for (i, j), ref in tensor.blocks.items():
+                        if i != 2 or operand in (3, 4):
+                            with program.write(ref) as destination:
+                                destination[...] = data[i:i+1]
+                early = tuple(result for target, results in enumerate(observations) for i, j, result in results
+                              if i != 2 or (not gram and target in (1, 2)))
+                wait_for(early)
+                early_ms = (time.monotonic_ns() - started) / 1e6
+                for target, (results, reference) in enumerate(zip(observations, expected)):
+                    for i, j, result in results:
+                        if (i != 2 or (not gram and target in (1, 2))) and not np.allclose(result.array, reference[i:i+1, j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5):
+                            raise ArithmeticError('Neighborhood early consumer differs')
+                if any(result.ready for target in (0, 3) for i, j, result in observations[target] if i == 2) or any(not storage[i][2, 0].writable for i in (0, 1, 2, 5)):
+                    raise ArithmeticError('Neighborhood consumed a withheld source or cotangent row')
+                print(json.dumps(dict(event='xonotic_neighborhood_early', gram=gram, generation=generation,
+                    withheld_row=2, consumers=len(observations), elapsed_ms=early_ms)), flush=True)
+                for operand in (0, 1, 2, 5):
+                    with program.write(storage[operand][2, 0]) as destination:
+                        destination[...] = values[operand][2:3]
+                wait_for(tuple(result for results in observations for i, j, result in results))
+                for results, reference in zip(observations, expected):
+                    for i, j, result in results:
+                        if not np.allclose(result.array, reference[i:i+1, j:j+result.array.shape[1]], rtol=2e-5, atol=2e-5):
+                            raise ArithmeticError('Neighborhood forward or derivative consumer differs after reuse')
+                print(json.dumps(dict(event='xonotic_neighborhood_complete', gram=gram, generation=generation,
+                    elapsed_ms=(time.monotonic_ns() - started) / 1e6,
+                    output=[[(i, j, result.array.tolist()) for i, j, result in results] for results in observations])), flush=True)
+                for results in observations:
+                    for i, j, result in results:
                         result.consume()
         if xonotic_take_gradient is not None:
             take_indices, take_cotangents, take_results, generations = xonotic_take_gradient
