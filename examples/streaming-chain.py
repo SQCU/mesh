@@ -21,6 +21,7 @@ def main():
     parser.add_argument('--split', type=int, required=True)
     parser.add_argument('--output-split', type=int, required=True)
     parser.add_argument('--region')
+    parser.add_argument('--numerics')
     parser.add_argument('--backend', choices=('cpu', 'metal'), default='cpu')
     parser.add_argument('--tile-rows', type=int, default=128)
     parser.add_argument('--tile-k', type=int, default=128)
@@ -29,7 +30,26 @@ def main():
     values = np.load(args.input)
     weights = (np.load(args.up_weight, mmap_mode='r'), np.load(args.down_weight, mmap_mode='r'))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    with Program(backend=args.backend, region=args.region) as program:
+    functions = {}
+    if args.numerics:
+        import ctypes as C
+        from mesh import check
+        from mesh._native import View
+        library = C.CDLL(args.numerics)
+        native_add = library.gemma_mesh_add
+        native_add.argtypes = [C.c_void_p, C.POINTER(View), C.c_int32]
+        native_add.restype = C.c_int32
+
+        # design/algorithm-sources.md#programkernel_call
+        def bind_add(program, inputs, outputs):
+            refs = (*inputs, *outputs)
+            if len(inputs) != 2 or len(outputs) != 1 or any(ref.dtype != inputs[0].dtype for ref in refs):
+                raise TypeError('The supplied addition requires two inputs and one output of one dtype')
+            scalar = (np.dtype('float16'), np.dtype('float32')).index(inputs[0].dtype)
+            check(native_add(program.handle, (View * 3)(*(ref.view for ref in refs)), scalar))
+
+        functions[kernels.add] = bind_add
+    with Program(backend=args.backend, region=args.region, functions=functions) as program:
         shard = slice(0, args.split) if program.node == args.root else slice(args.split, weights[0].shape[1])
         weights = (weights[0][:, shard], weights[1][shard, :])
         x = program.tensor(values.shape, (args.tile_rows, args.tile_k), dtype=values.dtype)

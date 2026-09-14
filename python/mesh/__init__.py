@@ -255,9 +255,10 @@ class Result:
 
 class Program:
     # design/algorithm-sources.md#indexed-library-functions
-    def __init__(self, backend='cpu', region=None, coreml=None):
+    def __init__(self, backend='cpu', region=None, coreml=None, *, functions=None):
         self.native = Native()
         self.context = self.native.context()
+        self._functions = dict(functions or {})
         self._constant_extents = set()
         self._replicated_extents = {}
         create = {'cpu': self.native.algebra_create_cpu, 'metal': self.native.algebra_create}[backend]
@@ -322,10 +323,18 @@ class Program:
     # design/algorithm-sources.md#indexed-library-functions
     def _call(self, kernel, *, grid, inputs=(), outputs=()):
         from .kernels import _ExpressionKernel
-        if not isinstance(kernel, _ExpressionKernel):
-            raise TypeError('Kernel calls require an expression')
+        import itertools
+        binding = self._functions.get(kernel, kernel)
         check(self.native.algebra_kernel(self.handle))
-        kernel.bind_grid(self, tuple(grid), inputs, outputs)
+        if isinstance(binding, _ExpressionKernel):
+            binding.bind_grid(self, tuple(grid), inputs, outputs)
+        else:
+            for coordinate in itertools.product(*(range(size) for size in grid)):
+                sources = tuple(spec.resolve(coordinate) for spec in inputs)
+                targets = tuple(spec.resolve(coordinate) for spec in outputs)
+                binding(self, sources, targets)
+                for target in targets:
+                    target.partial = Partial.merge(sources)
 
     # design/algorithm-sources.md#indexed-library-functions
     def copy(self, source, destination, *, queue=0):
