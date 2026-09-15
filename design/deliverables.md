@@ -218,6 +218,24 @@ are disjoint may be worked in parallel worktrees: {14,15,16} share `Mesh.swift`/
 {23,24} share `mesh-flow.c`; {17},{18},{26} are independent; {13},{19} need the link
 and run one at a time (`RDMA-RULES.md`: one experiment at a time).
 
+## 5a. Lane assignments (live; edit when a lane finishes)
+
+Rows below are being worked in parallel worktrees by steering agents driving `codex exec`.
+An agent picking "the first ✗/◐ row" skips assigned rows and takes the next unassigned one.
+
+| Rows | Lane | Worktree / branch |
+|---|---|---|
+| 14, 15, 16 | A | `mesh-wt/L5-N1-N2` → `row/L5-N1-N2` |
+| 26 | B | `mesh-wt/T4` → `row/T4` |
+| 23, 24 | C | `mesh-wt/T1-T3` → `row/T1-T3` |
+| 17 | D | `mmb-wt/E1` → `row/E1` (metal-microbench) |
+| 18 | E | `mmb-wt/E2` → `row/E2` (metal-microbench) |
+| 13 (Core ML chain) | G | main checkouts + both nodes; the only lane on the link |
+
+Unassigned and open: 19 (needs 17, 18), 20, 21, 22, 25, 27, 28, 29. Note: the laptop
+bridge binary currently runs from `mesh-wt/P1/rdma/mesh-flow`; do not prune that worktree
+while the bridge is up.
+
 ## 6. Forbidden substitutions (revert on sight)
 
 - A bibliography section, JSON record, trace field, evidence file, or "source
