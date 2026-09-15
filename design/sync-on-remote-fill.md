@@ -64,6 +64,29 @@ configured blocks. The output reports each elapsed time and online count, mean a
 sample variance; numerical values are checked outside the timed interval. No sleeps,
 artificial delays, mocked transport, or clock rendezvous are used.
 
+## Independent progress with an absent input and retained results
+
+`--mode independent` realizes the same graph, leaves `source[0]` unpublished,
+and publishes every other source. The root observes available replies without
+calling `sync_on_remote_fill`. It retains every returned value through the end of
+the example: no `consume()` releases an earlier result to permit a later result.
+Only the root's observation loop checks readiness; numerical and RDMA progress
+remain on their own threads. There is no sleep, deadline, forced timing order,
+or peer rendezvous in the numerical flow.
+
+The source therefore makes two unwanted dependencies reviewable:
+`source[0] -> reply[i]` for `i > 0`, and `consume(reply[i]) -> reply[j]` for
+distinct configured values. Neither edge exists in the addition/transfer algebra.
+The missing reply remains exported and is reported at the end, rather than being
+removed from the graph. A newly introduced whole-input barrier prevents the
+independent outputs from appearing; a result-retirement barrier prevents them
+from coexisting. No timeout converts those failures into apparent completion.
+
+This mode does not prove receive preposting, overlapping reuse of the same Ref,
+or absence of every possible guard. The current announcement and output-claim
+branches still fail G4. Those defects require source changes; this demonstration
+is not a substitute for them. The mode has been added in source, not executed.
+
 ## The permanent wait
 
 `--mode deadlock` moves the explicit wait for `reply[0]` before the only write that

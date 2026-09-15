@@ -10,10 +10,7 @@ struct mesh_row_function {
   struct mesh_row_map *input,*output;
   uint32_t inputs,outputs;
   void (*submit)(void *);
-  void *owner,*argument;
-  struct mesh_row_function *next,*pending_next;
-  struct mesh_edge *edges;
-  int pending;
+  void *argument;
 };
 /* ledger D5: `binding` orders blocks within `queue`; both participants declare the same identities and queues */
 struct mesh_row_binding { uint32_t first,count,binding,plane; uint16_t queue,receive; uint64_t bytes; };
@@ -26,7 +23,7 @@ static inline uint32_t mesh_window(const struct mesh_ctx *c){ return mesh_window
 static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return mesh_at(c->M,page); }
 struct mesh_ctx *mesh_context(void);
 struct hdr *mesh_region(struct mesh_ctx *);
-int mesh_execution_add(struct mesh_ctx *,struct mesh_row_function *,void *owner,void *argument);
+int mesh_execution_start(struct mesh_ctx *,struct mesh_row_function **,size_t count,void *owner);
 void mesh_execution_remove(struct mesh_ctx *,void *owner);
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);

@@ -1043,9 +1043,11 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
   MeshAlgebra *a=owner(handle);if(a.realized)return 0;size_t count=a.functions.count;
   struct mesh_row_function **functions=calloc(count?count:1,sizeof *functions);
   if(!functions)return ENOMEM;
-  for(size_t i=0;i<count;i++)functions[i]=&a.functions[i]->function;
+  for(size_t i=0;i<count;i++){
+    functions[i]=&a.functions[i]->function;
+    functions[i]->argument=(__bridge void *)a.functions[i];
+  }
   int error=mesh_realize(a->context,functions,count,a.bindings.mutableBytes,a.bindings.length/sizeof(struct mesh_row_binding),a.returns.mutableBytes,a.returns.length/sizeof(struct mesh_row_map));
-  free(functions);
   if(!error){
     size_t arenaBytes=0;
     struct mesh_tensor **tensors=a.tensors.mutableBytes;
@@ -1053,11 +1055,9 @@ int mesh_algebra_realize(struct mesh_algebra *handle) {
       for(size_t j=0;j<tensors[i]->count;j++)arenaBytes+=tensors[i]->extents[j].bytes;
     fprintf(stderr,"mesh realize: participant=%u planned_arena_bytes=%zu\n",a->context->M->node,arenaBytes);
     a.realized=YES;
-    for(MeshFunction *f in a.functions){
-      error=mesh_execution_add(a->context,&f->function,handle,(__bridge void *)f);
-      if(error)break;
-    }
+    error=mesh_execution_start(a->context,functions,count,handle);
   }
+  if(error)free(functions);
   return error;
 }
 

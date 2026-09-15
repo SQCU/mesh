@@ -30,8 +30,8 @@ binds `swish → linear` on the reduced result. All these functions are realized
 before either participant feeds its input regions.
 
 The [MLX/JACCL structure review](lit/mlx-jaccl-structure.md) documents the applied
-native simplification: each realized function owns its dependency index entries
-directly, with no second grid or per-occurrence watch. The caller selects the verb
+native simplification: each realized function owns its input/output rows and
+submission callback, with no second grid or per-occurrence watch. The caller selects the verb
 matching its numerical dependency and placement; no verb is the universal path.
 
 For an output region I and participant p, let
@@ -56,10 +56,12 @@ The following are the publication sites for this chain:
 | Final contraction | The same contraction completion path above | Exported Z regions |
 
 `mesh_complete` calls `mesh_publish` on output rows. `mesh_publish_partial`
-and `mesh_publish` set presence and notify canonical readers. `mesh_notify`
-queues affected compute and send rows; `mesh_events` follows their bound edges.
-`mesh_fire` invokes the bound function's submission callback directly. CPU arithmetic runs on a concurrent
-worker queue; Metal/CoreML submission returns to the presence handler after
+and `mesh_publish` set presence. `mesh_notify` queues only configured send rows.
+Each program's `mesh_execution_progress` scans its immutable function array,
+reads canonical presence and invokes the bound submission callback directly.
+There is no compute notification queue, mutable dependency index, pending list
+or synchronous dispatch handoff. CPU arithmetic runs on a concurrent worker
+queue; Metal/CoreML submission returns to the presence thread after
 submitting device work. None of these publication sites waits for transport or
 for an unrelated region. Device completion precedes publication because writes
 must be visible before a consumer reads them.
@@ -209,12 +211,24 @@ The source exposes these distinct costs and waits:
 | Boundary | Current mechanism | Consequence |
 |---|---|---|
 | Output claim | `mesh_issue` checks actual inputs and output reader ownership; `mesh_reset` clears presence and assigned read planes before setting producing | Work proportional to covered rows and assigned reader planes precedes dispatch. An unavailable operand/storage claim returns without spinning for it. |
-| Publication | `mesh_publish_partial` / `mesh_publish` update atomic planes; `mesh_notify` pushes each affected row onto compute/send lists using shared memory | Publication does not wait for delivery, but incurs atomic contention, and list work. CAS retries have no stated per-call time bound. |
-| Consumer discovery | A dedicated `mesh.presence` thread spins on shared publication notices and invokes `mesh_events` on the numerical dispatch queue to traverse affected reader edges | Ready work can incur notification and queueing delay; asynchronous submission alone gives no bound on that delay. |
+| Publication | `mesh_publish_partial` / `mesh_publish` update atomic planes; `mesh_notify` pushes affected send rows onto its transport list using shared memory | Publication does not wait for delivery, but incurs atomic contention, and list work. CAS retries have no stated per-call time bound. |
+| Consumer discovery | Each program's dedicated `mesh.presence` thread scans its immutable configured functions and directly submits available work | No dispatch handoff or compute notification wait. Scan cost depends on the number of configured functions and input rows. |
 | Numerical issue | The bound CPU, Metal or Core ML submission callback enters a dispatch group and submits its numerical body; only synchronous CPU work uses a worker queue | CPU arithmetic executes away from the presence handler. Dispatch internals and worker scheduling are not shown to have zero contention or bounded latency. |
 | Transfer | Dedicated spinning send and receive threads post registered SEND/RECV and drain their respective completion queues; initial receives are posted by the receive thread too | Capacity shortages defer posting. Reusing a receive destination depends on its actual readers. These are distinct from waiting for an unrelated tensor to finish. |
 | Terminal application | The example supplies every input block before entering a busy-poll output loop; formatting/printing occurs in that loop | Observed output order omits intermediate timing and includes application observation delay. |
-| Setup and destruction | Compiler process waits, synchronous registration/removal on the presence queue, and dispatch-group/semaphore waits during destruction | These boundaries explicitly wait; a claim about numerical publication must not be generalized to the complete program lifecycle. |
+| Setup and destruction | Setup waits for compiler processes; explicit destruction joins the program's presence thread and drains its numerical dispatch group before releasing storage | These explicit lifecycle boundaries remain separate from collective invocation. No presence dispatch queue remains. |
+
+The authorization boundary is the actual tensor algebra. A function may read a
+region only after that region's writes are visible; an unissued function leaves
+other functions and both transport workers running. An optional caller-written
+`sync_on_remote_fill` is explicitly authorized as the documented counterexample.
+Neither condition authorizes an automatic whole-tensor barrier, an index-arrival
+prerequisite for posting receives, or an output-storage occupancy prerequisite
+for producing another distinct live value. The latter two branches remain
+implementation defects. They must be removed together with the single-backing
+reuse assumption; moving the checks into a differently named callback would not
+satisfy the requirement. Setup compilation and explicit destruction are lifecycle
+operations, not authorization for waits during numerical or transport progress.
 
 For this particular call configuration a 16×16 FP32 tile contains 1,024 useful
 bytes. Its transferable backing block has four 16,384-byte pages. `mesh_realize`

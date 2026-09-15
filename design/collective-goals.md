@@ -122,8 +122,8 @@ returns only the host-writer path of `program.write`.
 ### G5. Transport drains and refills immediately, independently of numerical work
 
 Artifact: `mesh_progress` in the bridge (NCCL proxy; MSCCL++ PortChannel) drains
-completions and refills available queues without software waits; the algebra fires
-from `mesh_events`. The operator permits additional hardware threads and shared
+completions and refills available queues without software waits; the algebra
+scans its immutable configured function list directly in `mesh_execution_progress`. The operator permits additional hardware threads and shared
 global memory wherever needed for independent progress. A single poller is not a
 requirement.
 Check: `grep -rn "scan\|while not .*ready\|sleep" python/mesh rdma/mesh-algebra.m` is

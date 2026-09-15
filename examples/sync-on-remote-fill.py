@@ -13,7 +13,7 @@ from mesh.collective import send, sync_on_remote_fill
 # design/algorithm-sources.md#collectivesync_on_remote_fill
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=('stream', 'sync', 'deadlock'), default='stream')
+    parser.add_argument('--mode', choices=('stream', 'sync', 'deadlock', 'independent'), default='stream')
     parser.add_argument('--root', type=int, required=True)
     parser.add_argument('--peer', type=int, required=True)
     parser.add_argument('--blocks', type=int, default=32)
@@ -42,6 +42,20 @@ def main():
         print(f'participant={program.node} pid={os.getpid()} mode={args.mode}', flush=True)
         if program.node == args.peer:
             signal.pause()
+            return
+        if args.mode == 'independent':
+            for index in range(1, count):
+                with program.write(source[index, 0]) as target:
+                    target[...] = index
+            pending = set(range(1, count))
+            while pending:
+                for index in tuple(pending):
+                    if outputs[index].ready:
+                        print(f'published={index} retained={outputs[index].array[0, :4].tolist()}', flush=True)
+                        pending.remove(index)
+                if program.report.code:
+                    raise RuntimeError(f'Mesh execution error: {program.report.code}')
+            print(f'unpublished_source=0 reply_ready={outputs[0].ready} retained_results={count - 1}', flush=True)
             return
         if args.mode == 'deadlock':
             print('WAIT reply[0] -> peer add -> source[0] -> write after this wait', flush=True)

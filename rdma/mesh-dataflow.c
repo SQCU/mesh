@@ -1,5 +1,4 @@
 #include <signal.h>
-#include <dispatch/dispatch.h>
 #include <pthread.h>
 #include "mesh-memory.h"
 #include "mesh-dataflow.h"
@@ -12,9 +11,7 @@
 /* design/pages-and-functions.md#what-the-page-table-is */
 
 static void mesh_execution_destroy(struct mesh_ctx *);
-static int mesh_execution_create(struct mesh_ctx *);
 static void mesh_reader_destroy(struct mesh_ctx *);
-static int mesh_reader_unbind_serial(struct mesh_ctx *,struct mesh_row_map *);
 static struct mesh_ctx CTX0;
 struct mesh_ctx *mesh_context(void){ return &CTX0; }
 struct hdr *mesh_region(struct mesh_ctx *c){ return c->M; }
@@ -193,7 +190,6 @@ static int mesh_reader_bind(struct mesh_ctx *c,uint64_t *used,struct mesh_row_ma
   int mutable=0;
   for(uint32_t row=map->first;row<map->first+map->count;row++)mutable|=!mesh_bit(c->M,MESH_CONSTANT,row);
   if(!mutable)return 0;
-  if(map->count>(SIZE_MAX-sizeof(struct mesh_reader_storage))/sizeof(struct mesh_reader_member))return EOVERFLOW;
   struct mesh_reader_storage *storage=calloc(1,sizeof *storage+map->count*sizeof *storage->members);
   if(!storage)return ENOMEM;
   storage->count=map->count;
@@ -225,7 +221,7 @@ static void mesh_reader_destroy(struct mesh_ctx *c){
 }
 /* design/algorithm-sources.md#programkernel_call */
 void mesh_reader_unbind(struct mesh_ctx *c,struct mesh_row_map *map){
-  if(!map->members || mesh_reader_unbind_serial(c,map))return;
+  if(!map->members)return;
   struct mesh_reader_storage **at=(struct mesh_reader_storage **)&c->readers;
   while(*at && (*at)->members!=map->members)at=&(*at)->next;
   if(!*at)return;
@@ -264,7 +260,6 @@ int mesh_realize(struct mesh_ctx *c,struct mesh_row_function *const *functions,s
     }
   }
   for(size_t i=0;i<return_count && !error;i++)error=mesh_reader_bind(c,used,&returns[i]);
-  if(!error && c->readers && !c->execution)error=mesh_execution_create(c);
   _Atomic uint32_t *table=mesh_page(m);
   for(size_t i=0;i<binding_count && !error;i++){
     struct mesh_row_binding *b=&bindings[i];
@@ -411,37 +406,17 @@ void mesh_complete(struct mesh_ctx *c,const struct mesh_row_function *f){
   for(uint32_t j=0;j<f->outputs;j++){struct mesh_row_map r=f->output[j];mesh_publish(c->M,r.first,r.count);}
 }
 
-struct mesh_edge { struct mesh_row_function *function; struct mesh_edge *next,**previous,*owned_next; uint32_t row; };
 struct mesh_execution {
   struct mesh_ctx *context;
-  dispatch_queue_t queue;
   pthread_t thread;
   _Atomic int stop;
-  struct mesh_edge **readers;
-  struct mesh_row_function *functions;
+  void *owner;
+  size_t count;
+  struct mesh_row_function **functions;
+  struct mesh_execution *next;
 };
 /* design/algorithm-sources.md#programkernel_call */
-static void mesh_edge_bind(struct mesh_execution *e,struct mesh_edge *edge){
-  edge->previous=&e->readers[edge->row];edge->next=*edge->previous;
-  if(edge->next)edge->next->previous=&edge->next;
-  *edge->previous=edge;
-  struct mesh_edge **owned=&edge->function->edges;
-  edge->owned_next=*owned;*owned=edge;
-}
-/* design/algorithm-sources.md#programkernel_call */
-static void mesh_edge_remove(struct mesh_edge *edge){
-  *edge->previous=edge->next;
-  if(edge->next)edge->next->previous=edge->previous;
-  free(edge);
-}
-/* design/algorithm-sources.md#programkernel_call */
-static int mesh_reader_unbind_serial(struct mesh_ctx *c,struct mesh_row_map *map){
-  struct mesh_execution *e=c->execution;if(!e || dispatch_get_specific(e)==e)return 0;
-  dispatch_sync(e->queue,^{mesh_reader_unbind(c,map);});return 1;
-}
-/* design/algorithm-sources.md#programkernel_call */
 void mesh_notify(struct hdr *m,uint32_t first,uint32_t count){
-  for(uint32_t row=first;row<first+count;row++)mesh_notice_push(m,MESH_NOTICE_COMPUTE,row);
   for(uint32_t word=first/64;count && word<=(first+count-1)/64;word++){
     uint64_t sources=atomic_load_explicit(&mesh_plane(m,MESH_SEND_SOURCE)[word],memory_order_acquire)&mesh_word_mask(first,count,word);
     while(sources){
@@ -451,95 +426,37 @@ void mesh_notify(struct hdr *m,uint32_t first,uint32_t count){
   }
 }
 /* design/algorithm-sources.md#programkernel_call */
-static void mesh_fire(struct mesh_execution *e,struct mesh_row_function *function){
-  if(mesh_issue(e->context,function))function->submit(function->argument);
-}
-/* design/algorithm-sources.md#programkernel_call */
-static void mesh_events(struct mesh_execution *e){
-  struct hdr *m=e->context->M;
-  uint32_t row=mesh_notice_take(m,MESH_NOTICE_COMPUTE);
-  while(row!=MESH_ABSENT){
-    uint32_t next=mesh_notice_next(m,MESH_NOTICE_COMPUTE,row);
-    struct mesh_row_function *pending=NULL;
-    for(struct mesh_edge *edge=e->readers[row];edge;edge=edge->next){
-      struct mesh_row_function *function=edge->function;
-      if(!function->pending){function->pending=1;function->pending_next=pending;pending=function;}
-    }
-    while(pending){
-      struct mesh_row_function *function=pending;pending=function->pending_next;
-      function->pending=0;mesh_fire(e,function);
-    }
-    row=next;
-  }
-}
-/* design/algorithm-sources.md#programkernel_call */
 static void *mesh_execution_progress(void *argument){
   struct mesh_execution *e=argument;
   pthread_setname_np("mesh.presence");
   while(!atomic_load_explicit(&e->stop,memory_order_acquire))
-    if(atomic_load_explicit(&e->context->M->notice_head[MESH_NOTICE_COMPUTE],memory_order_acquire)!=MESH_ABSENT)
-      dispatch_sync(e->queue,^{mesh_events(e);});
+    for(size_t i=0;i<e->count;i++){
+      struct mesh_row_function *function=e->functions[i];
+      if(mesh_issue(e->context,function))function->submit(function->argument);
+    }
   return NULL;
 }
 /* design/algorithm-sources.md#programkernel_call */
-static int mesh_execution_create(struct mesh_ctx *c){
+int mesh_execution_start(struct mesh_ctx *c,struct mesh_row_function **functions,size_t count,void *owner){
+  if(!count){free(functions);return 0;}
   struct mesh_execution *e=calloc(1,sizeof *e);if(!e)return ENOMEM;
-  e->context=c;e->readers=calloc(mesh_rows(c->M),sizeof *e->readers);
-  if(!e->readers){free(e);return ENOMEM;}
-  e->queue=dispatch_queue_create("mesh.presence",DISPATCH_QUEUE_SERIAL);
-  dispatch_queue_set_specific(e->queue,e,e,NULL);
-  c->execution=e;
+  e->context=c;e->owner=owner;e->functions=functions;e->count=count;
   int error=pthread_create(&e->thread,NULL,mesh_execution_progress,e);
-  if(error){c->execution=NULL;dispatch_release(e->queue);free(e->readers);free(e);}
+  if(error)free(e);
+  else {e->next=c->execution;c->execution=e;}
   return error;
 }
 /* design/algorithm-sources.md#programkernel_call */
-int mesh_execution_add(struct mesh_ctx *c,struct mesh_row_function *function,void *owner,void *argument){
-  if(!c->execution){int error=mesh_execution_create(c);if(error)return error;}
-  struct mesh_execution *e=c->execution;
-  struct mesh_edge *edges=NULL;
-  int error=0;
-  for(uint32_t i=0;i<function->inputs+function->outputs && !error;i++){
-    struct mesh_row_map map=i<function->inputs?function->input[i]:function->output[i-function->inputs];
-    for(uint32_t row=map.first;row<map.first+map.count;row++){
-      struct mesh_edge *edge=malloc(sizeof *edge);if(!edge){error=ENOMEM;break;}
-      *edge=(struct mesh_edge){.function=function,.next=edges,.row=row};edges=edge;
-    }
-  }
-  if(error){
-    while(edges){struct mesh_edge *next=edges->next;free(edges);edges=next;}
-    return error;
-  }
-  function->owner=owner;function->argument=argument;
-  dispatch_sync(e->queue,^{
-    struct mesh_edge *edge=edges;
-    while(edge){struct mesh_edge *next=edge->next;mesh_edge_bind(e,edge);edge=next;}
-    function->next=e->functions;e->functions=function;mesh_fire(e,function);
-  });
-  return 0;
-}
-/* design/algorithm-sources.md#programkernel_call */
 void mesh_execution_remove(struct mesh_ctx *c,void *owner){
-  struct mesh_execution *e=c->execution;if(!e)return;
-  dispatch_sync(e->queue,^{
-    struct mesh_row_function **at=&e->functions;
-    while(*at){
-      struct mesh_row_function *function=*at;
-      if(function->owner==owner){
-        *at=function->next;
-        while(function->edges){struct mesh_edge *edge=function->edges;function->edges=edge->owned_next;mesh_edge_remove(edge);}
-      }else at=&function->next;
-    }
-  });
+  struct mesh_execution **at=(struct mesh_execution **)&c->execution;
+  while(*at && (*at)->owner!=owner)at=&(*at)->next;
+  if(!*at)return;
+  struct mesh_execution *e=*at;*at=e->next;
+  atomic_store_explicit(&e->stop,1,memory_order_release);
+  pthread_join(e->thread,NULL);
+  free(e->functions);free(e);
 }
 /* design/algorithm-sources.md#programkernel_call */
 static void mesh_execution_destroy(struct mesh_ctx *c){
-  struct mesh_execution *e=c->execution;if(!e)return;
-  atomic_store_explicit(&e->stop,1,memory_order_release);
-  pthread_join(e->thread,NULL);
-  while(e->functions){
-    struct mesh_row_function *function=e->functions;e->functions=function->next;
-    while(function->edges){struct mesh_edge *edge=function->edges;function->edges=edge->owned_next;mesh_edge_remove(edge);}
-  }
-  dispatch_release(e->queue);free(e->readers);free(e);c->execution=NULL;
+  while(c->execution)mesh_execution_remove(c,((struct mesh_execution *)c->execution)->owner);
 }
