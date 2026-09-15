@@ -34,6 +34,15 @@ Apple [pointer-backed MLMultiArray](https://developer.apple.com/documentation/co
 and [outputBackings](https://developer.apple.com/documentation/coreml/mlpredictionoptions/outputbackings):
 Core ML operand interfaces. Their contracts govern the selected backend's actual
 operands; they do not require a mesh-owned executor or function scan.
+Apple [MPSMatrixMultiplication](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication)
+accepts independently prepared input and result matrices. The SDK's `MPSKernel.h`
+describes reuse after encoding and separate kernel instances for concurrent host
+encoders. Each mesh call already has one numerical worker. The existing matrix
+implementation now binds input/output arrays separately and encodes their indices
+through one operation; Core ML selects its prepared feature provider and output
+options independently. `MeshBindings` contains the corresponding operand views
+and index function. This removes the Cartesian product of address-bound calls,
+without changing the numerical algorithm or requiring additional synchronization.
 
 ## Program.copy
 

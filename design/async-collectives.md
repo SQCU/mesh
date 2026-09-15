@@ -139,11 +139,28 @@ It posts one SEND and one matching RECV per communicated partial.
 ## Native contiguous operands
 
 The direct `TensorFunction` form takes already resolved operand spans. The
-higher-order `map` overload takes a function from two `MeshSpan` values to a
-native call. During setup it binds the actual possible receive positions and
-each indexed output position. A local-input call selects its binding directly
-by value index. A received-input call uses one physical-page-to-slot table and a
-dense array of the configured input-position/output-index bindings.
+higher-order `map` overload takes independent `inputView` and `outputView`
+functions, plus the function that prepares numerical submission. Each view
+function receives a `MeshSpan` during realization. Its `MeshBindings` holds the
+prepared values and their operand-to-index function. The supplied submission
+function is constructed once from the two binding collections.
+
+A local operand selects a binding by value index; a shared constant selects
+index zero. A received operand selects its binding through a physical-page slot
+map. The numerical caller can select a prepared value by operand, or pass its
+index to an existing indexed numerical function. This keeps the selection in
+ordinary operand indexing. The former table of input/output pairs and its
+additional `MeshInvocation` dispatch layer have been deleted.
+
+The matrix caller uses `MatrixOperations.multiply` with independent input and
+output view arrays. One specialized operation accepts their indices at encoding.
+MPS matrices are prepared independently; its multiplication object is reused by
+that call's numerical worker. Metal/tensor paths select their existing pipeline
+at setup and pass the indexed buffers and offsets to the existing encoder. The
+ordinary fixed-operand `multiply` is the index-zero partial application of that
+same implementation, so local serving and mesh use one numerical implementation.
+Core ML prepares feature providers and output options separately, then passes
+the selected pair to native asynchronous prediction.
 No virtual address is remapped while a native call uses it. No matrix binding,
 MLMultiArray, feature provider or operand allocation is constructed during the
 numerical invocation.
@@ -214,10 +231,13 @@ numerical code; it is not a completed language-model serving integration.
 Transport sends each queue direction's realized frame length. Frame rounding,
 padding between unequal partials sharing a queue, source-tag handling, publication
 and reference-count atomics remain actual costs.
-For N indices and R possible receive positions, a native received-input factory
-constructs N*R fixed native bindings at setup, plus one slot map over arena blocks.
-Local-input factories construct N bindings with no page lookup map. This avoids
-N sparse arena-sized tables, but the N*R native combinations remain setup work.
+For N indices and R possible receive positions, native input/output preparation
+now constructs R input bindings and N output bindings, plus one input slot map
+over arena blocks. It creates one numerical submission function per declared
+call. The previous N*R product represented paired addresses, which was unnecessary
+for APIs that take independently bound input and output operands. Local inputs
+also need only N bindings; shared local constants need one. These are source
+allocation counts, not performance measurements.
 Shared function metadata is constant in N; per-value operands, uses, pending
 counts and backing grow with the finite extent. Submission touches the root
 workers only; publication visits the published row's uses, not all functions.
@@ -226,7 +246,8 @@ over world size 1 follows from this source change.
 
 There is no runtime testing gate here. The bridge, C and Swift libraries, literal
 chain, Core ML chain, synchronization counterexample, and existing-matrix chain
-were built. They have not been run or deployed by this change. Both participants
+were built, along with the existing serving library after the matrix refactor.
+They have not been run or deployed by this change. Both participants
 need the source's ABI 39 bridge before these callers can attach.
 
 Build the native libraries and examples with
@@ -246,7 +267,7 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 | All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,787 lines / 994 files |
 | Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,464 lines / 15 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 27 lines |
-| Engine's deleted mesh_matrix.swift and tools/mesh/sync.sh; replacement matrix example | 203 lines | 60 lines |
+| Engine's deleted mesh_matrix.swift and tools/mesh/sync.sh; replacement matrix example | 203 lines | 61 lines |
 
 The replacement-path set is `rdma/`, `python/`, `swift/`, `examples/`,
 `xonotic/solver/`, `xonotic/planner/`, and the old root `setup.py`. Source extensions
@@ -254,7 +275,7 @@ are `.c .h .m .mm .swift .py .metal .sh .zsh .js .ts .jsx .tsx .qc`. The whole-r
 row includes the large unchanged Xonotic sources. It has not been halved.
 Makefiles, module maps and pyproject.toml are reported separately above. Shared
 engine dependencies `parameter_configuration.swift`, `matrix_shaders.swift`, and
-`matrix_operations.swift` remain 480 maintained lines in the working tree; the
+`matrix_operations.swift` now total 505 maintained lines in the working tree; the
 new caller reuses them. This change does not attribute their existing working-tree
 edits to the mesh refactor.
 

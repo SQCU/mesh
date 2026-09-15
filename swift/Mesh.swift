@@ -8,7 +8,15 @@ public typealias MeshOperands = UnsafeBufferPointer<mesh_operand>
 public enum TensorFunction {
     case cpu((MeshOperands, MeshOperands) -> Void)
     case metal(MTLCommandQueue, (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void)
-    case prediction(MLModel, MLFeatureProvider, MLPredictionOptions)
+    case prediction(MLModel, (MeshOperands, MeshOperands) -> (MLFeatureProvider, MLPredictionOptions))
+}
+
+public struct MeshBindings<Value> {
+    public let values: [Value]
+    public let index: (mesh_operand) -> Int
+
+    // design/algorithm-sources.md#programtensor
+    public subscript(_ operand: mesh_operand) -> Value { values[index(operand)] }
 }
 
 public struct MetalOperand {
@@ -120,8 +128,9 @@ private final class MeshInvocation {
                 }
                 command.commit()
             }
-        case .prediction(let model, let features, let options):
-            submit = { call, _, _ in
+        case .prediction(let model, let function):
+            submit = { call, inputs, outputs in
+                let (features, options) = function(inputs, outputs)
                 model.__prediction(fromFeatures: features, options: options) { _, error in
                     if let error { mesh_call_fail(call, Int32((error as NSError).code)) }
                     else { mesh_call_complete(call) }
@@ -130,11 +139,6 @@ private final class MeshInvocation {
         }
     }
 
-    // design/algorithm-sources.md#programkernel_call
-    init(memory: MeshMemory, inputs: Int, outputs: Int,
-         submit: @escaping (OpaquePointer, MeshOperands, MeshOperands) -> Void) {
-        self.memory = memory; inputCount = inputs; outputCount = outputs; self.submit = submit
-    }
 }
 
 public final class Mesh {
@@ -197,50 +201,41 @@ public final class Mesh {
         }
     }
 
+    // design/algorithm-sources.md#programtensor
+    private func bindings<Value>(_ part: TensorPart, using make: (MeshSpan) throws -> Value) throws -> MeshBindings<Value> {
+        let source = part.storage!, context = memory.context
+        let pages: [UInt32], index: (mesh_operand) -> Int
+        if let queue = source.receiveQueue {
+            var received = [UInt32](repeating: 0, count: mesh_receive_pages(context, queue, nil))
+            mesh_receive_pages(context, queue, &received)
+            pages = received
+            let quantum = Int(mesh_block_pages(context))
+            var slots = [Int](repeating: 0, count: Int(mesh_arena_pages(context)) / quantum)
+            for (slot, page) in pages.enumerated() { slots[Int(page) / quantum] = slot }
+            index = { slots[Int($0.page) / quantum] }
+        } else {
+            pages = (0..<source.section.count).map { mesh_section_page(context, source.section, $0) }
+            let stride = part.shared ? 0 : 1
+            index = { Int($0.index) * stride }
+        }
+        let values = try pages.map { page in
+            try make(MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page),
+                                                                 count: source.section.bytes), memory: memory))
+        }
+        return MeshBindings(values: values, index: index)
+    }
+
     // design/algorithm-sources.md#program
-    public func map(_ function: @escaping (MeshSpan, MeshSpan) throws -> TensorFunction,
-                    input: TensorPart, output: TensorPart, constants: [TensorPart] = [], worker: Int) {
-        precondition(input.rank == output.rank && constants.allSatisfy { $0.rank == input.rank })
+    public func map<Input, Output>(_ function: @escaping (MeshBindings<Input>, MeshBindings<Output>) throws -> TensorFunction,
+                    input: TensorPart, output: TensorPart,
+                    inputView: @escaping (MeshSpan) throws -> Input, outputView: @escaping (MeshSpan) throws -> Output,
+                    constants: [TensorPart] = [], worker: Int) {
+        precondition(input.rank == output.rank && !output.shared && constants.allSatisfy { $0.rank == input.rank })
         if input.rank != rank { return }
         preparations.append { [unowned self] in
-            let source = input.storage!, destination = output.storage!
-            precondition(destination.receiveQueue == nil)
-            let context = memory.context
-            let quantum = Int(mesh_block_pages(context))
-            var receivePages: [UInt32] = []
-            if let queue = source.receiveQueue {
-                receivePages = [UInt32](repeating: 0, count: mesh_receive_pages(context, queue, nil))
-                mesh_receive_pages(context, queue, &receivePages)
-            }
-            var functions: [MeshInvocation] = []
-            var slots = [Int](repeating: 0, count: receivePages.isEmpty ? 0 : Int(mesh_arena_pages(context)) / quantum)
-            for (slot, page) in receivePages.enumerated() { slots[Int(page) / quantum] = slot }
-            for index in 0..<count {
-                let pages: [UInt32]
-                if source.receiveQueue != nil { pages = receivePages }
-                else {
-                    pages = [mesh_section_page(context, source.section, UInt32(index))]
-                }
-                let target = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_section_address(context, destination.section, UInt32(index)),
-                                                                          count: destination.section.bytes), memory: memory)
-                for page in pages {
-                    let operand = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page),
-                                                                               count: source.section.bytes), memory: memory)
-                    functions.append(MeshInvocation(try function(operand, target), memory: memory,
-                                                    inputs: 1 + constants.count, outputs: 1))
-                }
-            }
-            let invocation: MeshInvocation
-            if receivePages.isEmpty {
-                invocation = MeshInvocation(memory: memory, inputs: 1 + constants.count, outputs: 1) { call, inputs, outputs in
-                    functions[Int(outputs[0].index)].submit(call, inputs, outputs)
-                }
-            } else {
-                let columns = receivePages.count
-                invocation = MeshInvocation(memory: memory, inputs: 1 + constants.count, outputs: 1) { call, inputs, outputs in
-                    functions[Int(outputs[0].index) * columns + slots[Int(inputs[0].page) / quantum]].submit(call, inputs, outputs)
-                }
-            }
+            precondition(output.storage!.receiveQueue == nil)
+            let inputs = try bindings(input, using: inputView), outputs = try bindings(output, using: outputView)
+            let invocation = MeshInvocation(try function(inputs, outputs), memory: memory, inputs: 1 + constants.count, outputs: 1)
             try bind(invocation, inputs: [input] + constants, outputs: [output], worker: worker)
         }
     }
