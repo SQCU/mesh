@@ -113,7 +113,7 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   function->consumed=function->outputs+output_count;
   function->remote=(uint32_t *)(function->consumed+input_count);
   for(size_t i=0;i<input_count;i++){
-    if(inputs[i].receive)function->remote[function->remote_count++]=(uint32_t)i;
+    if(inputs[i].channel!=MESH_ABSENT)function->remote[function->remote_count++]=(uint32_t)i;
     if(inputs[i].stride)function->consumed[function->consumed_count++]=inputs[i];
   }
   memcpy(function->inputs,inputs,input_count*sizeof *inputs);
@@ -121,16 +121,8 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   function->calls=calls;function->worker=worker;function->input_count=input_count;function->output_count=output_count;
   function->submit=submit;function->argument=argument;function->dispose=dispose;
   struct hdr *m=calls->context->M;
-  size_t retained=0;
-  for(size_t i=0;i<input_count;i++)for(uint32_t index=0;index<(inputs[i].stride?extent:1);index++){
-    int error=mesh_buffer_retain(m,mesh_section_row(inputs[i],index),inputs[i].pages);
-    if(error){
-      for(size_t j=0;j<input_count;j++)for(uint32_t value=0;value<(inputs[j].stride?extent:1) && retained;value++,retained--)
-        mesh_buffer_release(m,mesh_section_row(inputs[j],value),inputs[j].pages);
-      errno=error;goto failed;
-    }
-    retained++;
-  }
+  for(size_t i=0;i<input_count;i++)for(uint32_t index=0;index<(inputs[i].stride?extent:1);index++)
+    mesh_buffer_retain(m,mesh_section_row(inputs[i],index),inputs[i].pages);
   for(uint32_t index=0;index<extent;index++){
     struct mesh_call *call=&function->values[index];
     *call=(struct mesh_call){.function=function,.index=index,.operands=function->operands+index*count};
@@ -310,7 +302,7 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
   if(index==mesh_blocks(m))return ENOSPC;
   if(!receive)for(uint32_t value=0;value<section.count;value++){
     uint32_t row=mesh_section_row(section,value);
-    int error=mesh_buffer_retain(m,row,section.pages);if(error)return error;
+    mesh_buffer_retain(m,row,section.pages);
     uint32_t link=queue/m->qps;
     uint64_t bit=UINT64_C(1)<<(link%64),uses=atomic_fetch_or_explicit(&mesh_send_uses(m,row)[link/64],bit,memory_order_relaxed);
     if(!(uses&bit) && mesh_bit(m,MESH_PRESENT,row))
@@ -350,7 +342,7 @@ void mesh_transfers_start(struct mesh_ctx *context){
 }
 
 /* design/algorithm-sources.md#programtensor */
-int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int receive,struct mesh_section *section){
+int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uint32_t channel,struct mesh_section *section){
   struct hdr *m=context->M;
   if(!bytes || !count)return EINVAL;
   size_t quantum=(size_t)m->block*m->pgsz;
@@ -360,16 +352,16 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int
   uint32_t pages=count*(uint32_t)span,first=mesh_rows_alloc(context,pages);
   if(first==MESH_ABSENT)return errno;
   for(uint32_t row=first;row<first+pages;row+=(uint32_t)span)
-    mesh_buffers(m)[row]=(struct mesh_buffer){.ownership=2|MESH_BUFFER_FLAG(MESH_BUFFER_SEALED),.first=row,.pages=(uint32_t)span,.owner=context->client};
+    mesh_buffers(m)[row]=(struct mesh_buffer){.ownership=2,.first=row,.pages=(uint32_t)span,.owner=context->client};
   mesh_bits_set(m,MESH_ROW_HOT,first,pages);
-  if(!receive)for(uint32_t row=first;row<first+pages;row+=(uint32_t)span){
+  if(channel==MESH_ABSENT)for(uint32_t row=first;row<first+pages;row+=(uint32_t)span){
     uint32_t page=mesh_arena_alloc(context,(uint32_t)span,m->block);
     if(page==MESH_ABSENT){
       int error=errno;mesh_backing_release(context,first,pages);mesh_rows_release(context,first,pages);return error;
     }
     mesh_backing_bind(context,row,(uint32_t)span,page);
   }
-  *section=(struct mesh_section){first,(uint32_t)span,bytes,count,(uint32_t)span,(uint32_t)receive};
+  *section=(struct mesh_section){first,(uint32_t)span,bytes,count,(uint32_t)span,channel};
   return 0;
 }
 /* design/algorithm-sources.md#programtensor */

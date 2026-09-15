@@ -31,6 +31,21 @@ ownership from an unissued record to its native call without changing the total.
 The [lifetime derivation](pages-and-functions.md#what-the-page-table-is) describes
 completion, cancellation and destruction. This is an application of counted
 ownership to known lifetimes, not a new collection algorithm attributed to Collins.
+`TensorPart` contains primitive values and an optional C `mesh_section`, with no
+`MeshSection` object. The descriptor carries its receive channel, with
+`MESH_ABSENT` for local storage; the separate Swift receive-channel field and C
+receive boolean are removed. Setup owns one reference per allocated section in
+`MeshMemory.sections`. `releaseSections` drops those references after binding and
+empties the array; the same method returns outstanding setup ownership during
+destruction. There is no per-part ARC release on the numerical path and no
+descriptor-retention reference outside the declared dataflow. This changes
+ownership representation, not the numerical operand ABI or transport framing.
+Every retain occurs while setup still owns the section, so it is one relaxed
+increment; there is no attempt to resurrect a zero-reference value. Execution
+only releases declared uses. The retain CAS loop, rollback path, sealed flag and
+seal operation are deleted. Refzero enters the existing reclamation queue; its
+claim check and retry stack remain the unfinished X5 mechanism. ABI 47 separates
+this ownership protocol from bridges that require the deleted sealed flag.
 Contiguous sections use chunk-indexed backing and relative numerical byte offsets,
 with one presence bit and ownership record per numerical value. The
 [address and ownership derivation](pages-and-functions.md#block-addressing)

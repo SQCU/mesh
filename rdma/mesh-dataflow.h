@@ -26,7 +26,6 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page);
 void mesh_backing_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
-int mesh_buffer_retain(struct hdr *,uint32_t first,uint32_t count);
-void mesh_buffer_seal(struct hdr *,uint32_t first,uint32_t count);
+void mesh_buffer_retain(struct hdr *,uint32_t first,uint32_t count);
 uint32_t mesh_collect(struct hdr *,uint32_t pending);
 #endif

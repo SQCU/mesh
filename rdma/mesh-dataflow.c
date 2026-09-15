@@ -136,17 +136,6 @@ void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t
 }
 
 /* design/algorithm-sources.md#programtensor */
-void mesh_backing_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
-  for(uint32_t row=first;row<first+count;){
-    struct mesh_buffer *buffer=&mesh_buffers(c->M)[row];
-    if(!buffer->pages){row++;continue;}
-    row=buffer->first+buffer->pages;
-    uint64_t ownership=atomic_fetch_or_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_CLOSED|MESH_BUFFER_SEALED),memory_order_acq_rel);
-    if(!(ownership&MESH_BUFFER_FLAG(MESH_BUFFER_RECLAIMED)))mesh_buffer_seal(c->M,buffer->first,buffer->pages);
-  }
-}
-
-/* design/algorithm-sources.md#programtensor */
 static void mesh_buffer_enqueue(struct hdr *m,struct mesh_buffer *buffer){
   if(atomic_fetch_or_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_QUEUED),memory_order_acq_rel)&MESH_BUFFER_FLAG(MESH_BUFFER_QUEUED|MESH_BUFFER_RECLAIMED))return;
   uint32_t head=atomic_load_explicit(&m->reclaim_head,memory_order_relaxed);
@@ -155,18 +144,23 @@ static void mesh_buffer_enqueue(struct hdr *m,struct mesh_buffer *buffer){
 }
 
 /* design/algorithm-sources.md#programtensor */
-int mesh_buffer_retain(struct hdr *m,uint32_t first,uint32_t count){
+void mesh_backing_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
+  for(uint32_t row=first;row<first+count;){
+    struct mesh_buffer *buffer=&mesh_buffers(c->M)[row];
+    if(!buffer->pages){row++;continue;}
+    row=buffer->first+buffer->pages;
+    uint64_t ownership=atomic_fetch_or_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_CLOSED),memory_order_acq_rel);
+    if(!(ownership&MESH_BUFFER_FLAG(MESH_BUFFER_RECLAIMED)))mesh_buffer_enqueue(c->M,buffer);
+  }
+}
+
+/* design/algorithm-sources.md#programtensor */
+void mesh_buffer_retain(struct hdr *m,uint32_t first,uint32_t count){
   for(uint32_t row=first;row<first+count;){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    uint64_t ownership=atomic_load_explicit(&buffer->ownership,memory_order_acquire);
-    do {
-      if((!(uint32_t)ownership && (ownership&MESH_BUFFER_FLAG(MESH_BUFFER_SEALED))) || (uint32_t)ownership==UINT32_MAX){
-        mesh_buffer_release(m,first,row-first);return ESTALE;
-      }
-    } while(!atomic_compare_exchange_weak_explicit(&buffer->ownership,&ownership,ownership+1,memory_order_acq_rel,memory_order_acquire));
+    atomic_fetch_add_explicit(&buffer->ownership,1,memory_order_relaxed);
     row=buffer->first+buffer->pages;
   }
-  return 0;
 }
 
 /* design/algorithm-sources.md#programtensor */
@@ -175,17 +169,7 @@ void mesh_buffer_release(struct hdr *m,uint32_t first,uint32_t count){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     row=buffer->first+buffer->pages;
     uint64_t ownership=atomic_fetch_sub_explicit(&buffer->ownership,1,memory_order_acq_rel);
-    if((uint32_t)ownership==1 && (ownership&MESH_BUFFER_FLAG(MESH_BUFFER_SEALED)))mesh_buffer_enqueue(m,buffer);
-  }
-}
-
-/* design/algorithm-sources.md#programtensor */
-void mesh_buffer_seal(struct hdr *m,uint32_t first,uint32_t count){
-  for(uint32_t row=first;row<first+count;){
-    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    row=buffer->first+buffer->pages;
-    uint64_t ownership=atomic_fetch_or_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_SEALED),memory_order_acq_rel);
-    if((ownership&MESH_BUFFER_FLAG(MESH_BUFFER_CLOSED)) || !(uint32_t)ownership)mesh_buffer_enqueue(m,buffer);
+    if((uint32_t)ownership==1)mesh_buffer_enqueue(m,buffer);
   }
 }
 
@@ -203,7 +187,7 @@ uint32_t mesh_collect(struct hdr *m,uint32_t pending){
       uint32_t page=atomic_load_explicit(&mesh_page(m)[first+offset],memory_order_acquire);
       if(page!=MESH_ABSENT)mesh_bits_clear(m,MESH_PAGE_OWN,page,m->block);
     }
-    atomic_store_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_RECLAIMED|MESH_BUFFER_SEALED),memory_order_release);
+    atomic_store_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_RECLAIMED),memory_order_release);
     mesh_bits_clear(m,MESH_ROW_HOT,first,pages);
   }
   return deferred;

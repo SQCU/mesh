@@ -36,13 +36,30 @@ entries name actual registered backing. A view alone does not establish contigui
 setup decomposes the operand into the contiguous sections required by the chosen
 numerical calls, preserving contraction contributions and output coordinates.
 
-For section s, outstanding ownership is R(s) = P(s) + C(s) + T(s) + E(s): unfinished
-production, configured numerical owners, transport uses, and external observations.
-Setup derives known uses from the feed-forward graph. Existing completions and
-automatic object lifetimes discharge them. Early publication does not release an
+For section s, outstanding ownership is R(s) = S(s) + P(s) + C(s) + T(s): the
+temporary setup owner, unfinished production, configured numerical owners and
+transport uses. Setup derives known uses from the feed-forward graph and drops
+S after all bindings are realized. Observations are declared consumers and count
+in C. Existing completions discharge those uses. Early publication does not release an
 unfinished producer. A background collector returns zero-reference backing to the
 writable pool without clearing payload bytes. Independent work already has its
 configured sections and never awaits that collection.
+
+`TensorPart` contains rank, byte extent, a C section descriptor and value flags;
+it has no heap-object reference or destructor. Copying or retaining the descriptor
+does not add a reader or delay reclamation. `MeshMemory.sections` holds S during
+configuration. `Mesh.start` releases it after binding all functions and transfers,
+before starting numerical workers; failed configuration returns any setup
+references still held by that array. The array is then empty. Backend views keep
+the memory mapping alive; their actual reads are owned by the declared calls.
+
+All retains occur before S is dropped, when R is necessarily positive. They need
+one increment, with no resurrection check, retry or rollback. After setup, the
+count only decreases. Its transition from one to zero is sufficient to enqueue
+reclamation; there is no separate sealed state. Forced teardown still closes
+buffers and preserves pages while the bridge owns their queue pairs. The current
+reclamation queue still has a duplicate-enqueue check and CAS retry; replacing
+that queue with the X5 free-list event remains required.
 
 For a transient input, each indexed use is a numerical owner and its native
 completion releases that reference. For an immutable shared input, the prepared

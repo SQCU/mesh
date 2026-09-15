@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 46u
+#define MESH_VERSION 47u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -17,7 +17,7 @@ enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_PRESENT, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
-enum { MESH_BUFFER_SEALED=1, MESH_BUFFER_QUEUED=2, MESH_BUFFER_CLOSED=4, MESH_BUFFER_RECLAIMED=8 };
+enum { MESH_BUFFER_QUEUED=2, MESH_BUFFER_CLOSED=4, MESH_BUFFER_RECLAIMED=8 };
 #define MESH_BUFFER_FLAG(flag) ((uint64_t)(flag)<<32)
 struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages,next; _Atomic uint32_t uses; uint64_t owner; };
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */

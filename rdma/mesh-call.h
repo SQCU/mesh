@@ -5,7 +5,7 @@
 struct mesh_calls;
 struct mesh_call;
 struct mesh_function;
-struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride,receive; };
+struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride,channel; };
 struct mesh_operand { void *data; size_t bytes; uint32_t page,index; };
 typedef void (*mesh_submit)(struct mesh_call *,uint32_t,void *,const struct mesh_operand *,struct mesh_operand *);
 typedef void (*mesh_dispose)(void *);
@@ -29,7 +29,7 @@ int mesh_transfers_prepare(struct mesh_ctx *);
 void mesh_transfers_start(struct mesh_ctx *);
 
 /* design/algorithm-sources.md#programtensor */
-int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,int receive,struct mesh_section *);
+int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,uint32_t channel,struct mesh_section *);
 uint32_t mesh_section_page(struct mesh_ctx *,struct mesh_section,uint32_t index);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
 void mesh_section_constant(struct mesh_ctx *,struct mesh_section);
