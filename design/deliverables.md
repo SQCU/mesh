@@ -208,7 +208,7 @@ subset, never as "done".
 | 23 | T1 topology observed | ◐ | links only |
 | 24 | T3 multi-link striping | ✗ | — |
 | 25 | T2 routes/forwarding | ✗ | — |
-| 26 | T4 bounds() | ✗ | — |
+| 26 | T4 bounds() | ✓ | `67b46e5`+`8f6316f` `swift/Bounds.swift` pure; `rdma/bounds-table` prints 199.34/229.01, 44.81/53.67, 359.28/389.61 |
 | 27 | T5 retopology Result | ✗ | — |
 | 28 | T6 replicas | ✗ | — |
 | 29 | T7 lease / multi-tenant | ✗ | — |
