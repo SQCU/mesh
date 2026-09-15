@@ -50,6 +50,19 @@ The whole-arena Metal buffer and transport-capacity query have been removed.
 
 ## Program.kernel_call
 
+Robert A. van de Geijn and Jerrell Watts,
+[SUMMA: Scalable Universal Matrix Multiplication Algorithm](https://www.cs.utexas.edu/~rvdg/abstracts/SUMMA.html)
+(1997), supplies the contraction decomposition into products of operand panels.
+The caller's `contract` in `examples/gram-chain.swift` declares each two-input
+product independently and combines K-panel contributions with `reduceScatter`.
+This uses SUMMA's panel algebra; it does not copy its MPI broadcast schedule.
+The supplied numerical function calls Accelerate's Level-3 BLAS `cblas_sgemm`;
+the supplied combine calls `vDSP_vadd`. The same composition implements the
+rectangular projections and both products of `R(RᵀH)`, with dimensions and
+transpose flags captured at declaration. Mesh contains none of that arithmetic.
+The [G1 derivation](function-chain.md#g1-gram-and-projection-chain) gives the
+operand identities, placements and repeated residual composition.
+
 Apple's [Core ML Tools MIL builder](https://apple.github.io/coremltools/docs-guides/source/model-intermediate-language.html)
 and compiler create the supplied model artifacts in `examples/coreml-models.py`.
 The exporter composes existing `matmul`, `gelu` and `add` operations for the

@@ -19,6 +19,8 @@ coreml-chain: ../examples/coreml-chain.swift libmesh_swift.dylib
 	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
 indexed-gather: ../examples/indexed-gather.swift libmesh_swift.dylib
 	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+gram-chain: ../examples/gram-chain.swift libmesh_swift.dylib
+	swiftc -O -parse-as-library -Xcc -DACCELERATE_NEW_LAPACK -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
 clean:
-	rm -f $(BINS) sync-on-remote-fill bounds-table coreml-chain indexed-gather Mesh.swiftmodule Mesh.swiftdoc Mesh.swiftsourceinfo Mesh.abi.json
+	rm -f $(BINS) sync-on-remote-fill bounds-table coreml-chain indexed-gather gram-chain Mesh.swiftmodule Mesh.swiftdoc Mesh.swiftsourceinfo Mesh.abi.json
 .PHONY: all clean

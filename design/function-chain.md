@@ -213,3 +213,77 @@ After both complete result sets arrived, the demonstration clients received
 SIGTERM. Ordinary bridge restarts completed their verbs-owner cleanup and returned
 both nodes to ABI 43 with `client:0`. This is P1's operational evidence, not an
 E2/E3 public-path performance measurement; output order does not prove speedup.
+
+## G1 Gram and projection chain
+
+[`examples/gram-chain.swift`](../examples/gram-chain.swift) imports Mesh and
+supplies Accelerate functions. Its one `contract` composition takes execution
+owners, output owners and byte counts, workers, a combine function, and a setup
+factory for each product's function and operands. It declares two-operand calls
+and passes their contributions to `reduceScatter`. It contains no matrix shape,
+transpose convention, tensor arithmetic, or distinction between a Gram product
+and a projection. The [canonical citation](algorithm-sources.md#programkernel_call)
+identifies the panel decomposition being used.
+
+The configuration supplies `owners`, `rows`, `latent`, `hidden`, `width`, `blocks`,
+`count` and `workers`. Each dimensions list has the same length as `owners`, but
+its entries need not match. Multiple partitions may share an owner; world size
+does not determine an operation or partition count. The included configuration
+uses eight blocks, four independent instances and unequal rectangular tiles.
+Changing all owners to zero gives the same algebra and functions on one rank.
+
+For block b, let `Z[i,l]` have shape `rows[i] × width[l]`, and let the registered
+constant tiles be `A[l,h]`, `R[i,j]`, and `W[h,l]`, with the corresponding width,
+hidden and latent dimensions. The source declares:
+
+\[
+\begin{aligned}
+H_{ih} &= \sum_l Z_{il} A_{lh},\\
+U_{jh} &= \sum_i R_{ij}^{\mathsf T} H_{ih},\\
+Y_{ih} &= \sum_j R_{ij} U_{jh},\\
+D_{il} &= \sum_h Y_{ih} W_{hl},\\
+Z^{\mathrm{next}}_{il} &= Z_{il} + D_{il}.
+\end{aligned}
+\]
+
+Thus each block is `Znext = Z + R(Rᵀ(ZA))W`. The loop constructs the entire
+configured block sequence before `start()`. It is not a host loop that launches
+one block and waits for its outputs before declaring the next.
+
+| Value | Owner | Direct consumer |
+|---|---|---|
+| `Z[i,l]` | `owners[l]` | up projection and residual addition |
+| `H[i,h]` | `owners[h]` | two-input `RᵀH` product |
+| `U[j,h]` | `owners[j]` | two-input `RU` product |
+| `Y[i,h]` | `owners[h]` | two-input down projection with `W[h,l]` |
+| `D[i,l]` | `owners[l]` | residual addition with the original `Z[i,l]` |
+| `Znext[i,l]` | `owners[l]` | next block's up projection |
+
+For each product, `contract` gathers exactly its declared operands to that term's
+execution owner, calls the supplied function, and declares a reduce-scatter to
+the output owners. The gather is a list of sends of those operands; there is no
+gather of the complete matrix. Every reduction result is a `TensorPart` passed
+directly to the next product. In particular, `y[...]` is the down projection's
+first operand, with no flattening, host staging, tensor reconstruction or copy.
+Mesh's ordinary remote edges handle the placements that differ.
+
+The bound numerical closures contain a BLAS call, a vDSP addition, or a vDSP
+input ramp. They contain no allocation, presence read, completion query, wait,
+or backend selection. Transposition and leading dimensions are fixed when
+`product` is constructed. Weight initialization, shape/index expressions,
+function factories and graph construction all execute before `start()`.
+The driver submits the finite configured instances and retains the final parts;
+it does not install a reporting callback or poll their contents.
+
+Build with `make -C rdma gram-chain`. With a bridge matching the built module,
+the caller commands for the included placement are:
+
+```sh
+rdma/gram-chain 0 2 /mesh0 examples/gram-chain.json
+rdma/gram-chain 1 2 /mesh0 examples/gram-chain.json
+```
+
+The caller builds and satisfies G1's source composition check. It has not been
+run or measured. W1–W6 remain failed in the shared runtime audit, so G1 remains
+partial under I18; this caller does not establish waitless execution, reusable
+instances, overlap, or E3 performance superiority.
