@@ -143,6 +143,24 @@ indices or restricting tensor size to a transport request. The concrete shapes
 shown partition a [32, 10648] tensor into two 681,472-byte operands; transport
 chunk count remains internal.
 
+[`examples/coreml-models.py`](../examples/coreml-models.py) prepares a concrete
+instance using Apple's Core ML Tools builder and compiler. The caller supplies
+owners, per-section input and hidden widths, row count, block count and invocation
+count. Each block has distinct dense weight blocks drawn from the specified NumPy
+seed. The exported functions are matmul, GELU after the up-projection reduction,
+and addition of the down-projection result to the earlier input. This is the
+FFN residual algebra above, with no arithmetic or model interpretation added to
+Mesh. The [README commands](../README.md#collective-implementation) instantiate
+four blocks, eight projection stages and four independent invocation indices.
+Its [128, 512] and [128, 1024] sections span four and eight 64-KiB transport chunks.
+
+The chain binds one terminal consumer per final section through the existing
+`TensorFunction.cpu` interface. That consumer reads two scalar samples and
+submits their report to the process's main queue. Formatting and output occur
+there, outside numerical execution. These terminal reports are not dependencies
+of any projection, reduction or subsequent stage; there is no stage barrier or
+result polling. They expose actual final outputs, not timing or a speedup claim.
+
 A world-size-one placement assigns all operand owners to rank 0 and uses the
 same functions and arithmetic graph. The distributed placement above divides
 that work and communicates only the off-diagonal contributions. This describes

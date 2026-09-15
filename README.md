@@ -507,3 +507,39 @@ ownership. Ordinary bridge lifecycle commands are in `bin/mesh-bridge.sh`.
 [source data flow, examples and current limits](design/async-collectives.md).
 No deleted Python API, numerical executor, solver or demonstration is a current
 implementation dependency.
+
+Build and import the module from an external target with the macOS SDK:
+
+```sh
+git clone --branch main --single-branch https://github.com/SQCU/mesh.git /tmp/mesh-import-p1
+make -C /tmp/mesh-import-p1/rdma all
+swiftc -O -parse-as-library -I /tmp/mesh-import-p1/rdma -L /tmp/mesh-import-p1/rdma \
+  -lmesh_swift -Xlinker -rpath -Xlinker /tmp/mesh-import-p1/rdma \
+  /tmp/mesh-import-p1/examples/coreml-chain.swift -o /tmp/mesh-coreml-chain
+```
+
+The configured bridge is started with `bin/mesh-bridge.sh start`. The caller needs
+no loader environment variables. Supply compiled Core ML functions and their
+explicit placement through the [chain configuration](design/function-chain.md).
+For a reproducible four-block FFN residual chain, generate those artifacts once:
+
+```sh
+uv venv --python 3.12 /tmp/mesh-coreml-env
+uv pip install --python /tmp/mesh-coreml-env/bin/python coremltools==9.0
+/tmp/mesh-coreml-env/bin/python /tmp/mesh-import-p1/examples/coreml-models.py \
+  /tmp/mesh-coreml-p1 --owners 0 1 --widths 512 512 --hidden 1024 1024 \
+  --rows 128 --blocks 4 --count 4
+```
+
+Place the generated model directories and `chain.json` at the same path on each
+participant, then launch its configured rank:
+
+```sh
+/tmp/mesh-coreml-chain 0 2 /mesh0 /tmp/mesh-coreml-p1/chain.json
+/tmp/mesh-coreml-chain 1 2 /mesh0 /tmp/mesh-coreml-p1/chain.json
+```
+
+Each command runs on its corresponding participant. Final consumers report the
+first and last element for every local output and invocation index; the process
+retains the graph until terminated. This is an operational chain demonstration.
+Performance measurements and their public serving path are separate deliverables.

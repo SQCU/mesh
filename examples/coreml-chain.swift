@@ -119,6 +119,16 @@ struct CoreMLChain {
             parts = history.last!.map { $0.0 }; layout = history.last!.map { $0.1 }
         }
         history.removeAll()
+        for i in parts.indices {
+            try mesh.call(.cpu { inputs, _ in
+                let input = inputs[0], data = input.data!.assumingMemoryBound(to: Float.self)
+                let first = data[0], last = data[Int(input.bytes) / 4 - 1], index = input.index
+                DispatchQueue.main.async {
+                    print("rank=\(rank) part=\(i) index=\(index) first=\(first) last=\(last)")
+                    fflush(stdout)
+                }
+            }, inputs: [parts[i]], outputs: [], on: layout[i].owner, worker: i % plan.workers)
+        }
         try mesh.start()
         for index in 0..<mesh.count { mesh.submit(index) }
         withExtendedLifetime((mesh, parts)) { dispatchMain() }

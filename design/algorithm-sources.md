@@ -50,6 +50,12 @@ The whole-arena Metal buffer and transport-capacity query have been removed.
 
 ## Program.kernel_call
 
+Apple's [Core ML Tools MIL builder](https://apple.github.io/coremltools/docs-guides/source/model-intermediate-language.html)
+and compiler create the supplied model artifacts in `examples/coreml-models.py`.
+The exporter composes existing `matmul`, `gelu` and `add` operations for the
+[documented FFN residual chain](function-chain.md), with caller-supplied dimensions
+and owners. It does not generate numerical kernels or add model semantics to Mesh.
+
 Yousef Saad, [Iterative Methods for Sparse Linear Systems, second edition](https://www-users.cse.umn.edu/~saad/IterMethBook_2ndEd.pdf),
 SIAM (2003), section 3.4: compressed row storage uses row offsets to index contiguous
 entries. Mesh applies that representation to declared consumer references, not
