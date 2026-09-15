@@ -105,9 +105,21 @@ public struct MeshSpan {
 public struct TensorPart {
     public let rank: Int
     public let bytes: Int
+    // design/algorithm-sources.md#tensorpartpartial
+    public let partial: Bool
     fileprivate let storage: MeshSection?
     fileprivate let shared: Bool
     fileprivate let identity: Int
+
+    // design/algorithm-sources.md#tensorpartpartial
+    fileprivate func withPartial(_ partial: Bool) -> TensorPart {
+        TensorPart(rank: rank, bytes: bytes, partial: partial, storage: storage, shared: shared, identity: identity)
+    }
+}
+
+// design/algorithm-sources.md#mesherror
+public enum MeshError: Error {
+    case partialOperand(TensorPart)
 }
 
 private struct MeshDelivery: Hashable {
@@ -233,9 +245,9 @@ public final class Mesh {
     deinit { mesh_calls_destroy(calls) }
 
     // design/algorithm-sources.md#programtensor
-    private func part(on owner: Int, bytes: Int, shared: Bool = false, queue: UInt32? = nil) throws -> TensorPart {
+    private func part(on owner: Int, bytes: Int, partial: Bool = false, shared: Bool = false, queue: UInt32? = nil) throws -> TensorPart {
         let identity = value; value += 1
-        return TensorPart(rank: owner, bytes: bytes,
+        return TensorPart(rank: owner, bytes: bytes, partial: partial,
                           storage: owner == rank ? try MeshSection(memory, bytes: bytes, count: shared ? 1 : count,
                                                                   shared: shared, receiveQueue: queue) : nil,
                           shared: shared, identity: identity)
@@ -250,6 +262,13 @@ public final class Mesh {
     // design/algorithm-sources.md#programkernel_call
     public func call(_ function: TensorFunction, inputs: [TensorPart], outputs: [TensorPart],
                      on owner: Int, worker: Int) throws {
+        if let part = inputs.first(where: \.partial) { throw MeshError.partialOperand(part) }
+        try bind(function, inputs: inputs, outputs: outputs, on: owner, worker: worker)
+    }
+
+    // design/algorithm-sources.md#programkernel_call
+    private func bind(_ function: TensorFunction, inputs: [TensorPart], outputs: [TensorPart],
+                      on owner: Int, worker: Int) throws {
         precondition(inputs.allSatisfy { $0.rank == owner } && outputs.allSatisfy { $0.rank == owner && !$0.shared })
         if owner != rank { return }
         preparations.append { [unowned self] in
@@ -325,12 +344,12 @@ public final class Mesh {
         if part.rank == destination { return part }
         precondition((0..<size).contains(destination))
         let delivery = MeshDelivery(value: part.identity, destination: destination, queue: queue)
-        if let existing = deliveries[delivery] { return existing }
+        if let existing = deliveries[delivery] { return existing.withPartial(part.partial) }
         let identity = transfer; transfer += 1
         let participating = rank == part.rank || rank == destination
         let channel = participating ? mesh_peer_channel(memory.context, UInt32(rank == destination ? part.rank : destination), UInt32(queue)) : 0
         if channel == MESH_ABSENT { throw POSIXError(.ENETUNREACH) }
-        let output = try self.part(on: destination, bytes: part.bytes, shared: part.shared, queue: channel)
+        let output = try self.part(on: destination, bytes: part.bytes, partial: part.partial, shared: part.shared, queue: channel)
         if participating {
             let local = rank == destination ? output : part
             let error = mesh_transfer_bind(memory.context, channel, rank == destination ? 1 : 0,
@@ -377,20 +396,20 @@ public final class Mesh {
     public func reduce(_ parts: [TensorPart], to destination: Int, using combine: TensorFunction,
                        worker: Int, queue: Int = 0) throws -> TensorPart {
         precondition(!parts.isEmpty && parts.allSatisfy { $0.bytes == parts[0].bytes })
-        var level = parts
+        var level = parts.map { $0.withPartial(true) }
         while level.count > 1 {
             var next: [TensorPart] = []
             for i in stride(from: 0, to: level.count, by: 2) {
                 if i + 1 == level.count { next.append(level[i]); continue }
                 let owner = level.count == 2 ? destination : level[i].rank
                 let pair = try gather([level[i], level[i + 1]], to: owner, queue: queue)
-                let output = try tensor(on: owner, sections: [pair[0].bytes])
-                try call(combine, inputs: pair, outputs: output, on: owner, worker: worker)
+                let output = [try part(on: owner, bytes: pair[0].bytes, partial: level.count != 2)]
+                try bind(combine, inputs: pair, outputs: output, on: owner, worker: worker)
                 next.append(output[0])
             }
             level = next
         }
-        return try send(level[0], to: destination, queue: queue)
+        return try send(level[0].withPartial(false), to: destination, queue: queue)
     }
 
     // design/algorithm-sources.md#collectivereduce_scatter

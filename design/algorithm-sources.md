@@ -48,6 +48,14 @@ Metal buffers cover each operand's page-aligned window, using Apple's
 [no-copy buffer API](https://developer.apple.com/documentation/metal/mtldevice/makebuffer(bytesnocopy:length:options:deallocator:)).
 The whole-arena Metal buffer and transport-capacity query have been removed.
 
+## TensorPart.partial
+
+The PyTorch authors, [DTensor Partial](https://docs.pytorch.org/docs/stable/distributed.tensor.html#torch.distributed.tensor.placement_types.Partial): pending reduction is a declared value property; Mesh marks immutable contribution and intermediate views, preserves it through sends, and clears it on the final reduction view without changing earlier copies or adding runtime bookkeeping.
+
+## MeshError
+
+The Legion authors, [reduction privileges](https://legion.stanford.edu/tutorial/privileges.html): reduction operands have restricted uses; Mesh reports `partialOperand` when public `call` binds a partial during setup, while the reduction's supplied combine uses the same private binding path without that check.
+
 ## Program.kernel_call
 
 Robert A. van de Geijn and Jerrell Watts,
