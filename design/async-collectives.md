@@ -38,13 +38,20 @@ bindings are not rebuilt between submissions. Each index has distinct value
 storage; all four can be in flight without an edge between their computations.
 
 [`metal-microbench/examples/mesh-matrix.swift`](../../../metal-microbench/examples/mesh-matrix.swift)
-uses the engine's existing `MatrixOperations.multiply` for both stages. Row
-sections of sizes 1, 8, 16 and 4 go through scatter, `X_i W`, gather, and a
-consumer computing `(X_i W) W`. The gather returns indexed sections; it does
-not assemble a copied dense tensor. The backend argument goes directly to the
-existing operation constructor. The fixture weights are canonical shared
-operands declared as constant inputs to the calls. Four submitted indices reuse
-the same chain and weights; index-dependent input data reaches both matrix stages.
+uses the engine's existing `MatrixOperations.multiply` for both stages and its
+existing addition encoder for all-reduce. Each row section j is split across
+contraction coordinates K_r. Scatter places `X[j,r]` beside `W[K_r,:]`;
+the supplied matrix function produces contributions to
+`Y[j] = sum_r X[j,r] W[K_r,:]`. All-reduce supplies Y[j] to each consumer,
+which computes distinct output columns `Z[j,r] = Y[j] W[:,K_r]`.
+Gather returns their indexed sections, reconstructing `(X[j] W) W` without
+assembling a copied dense tensor. The consumer uses the complete reduced input;
+there is no redundant second reduction. The algebra and actual operand layouts
+are detailed in [the caller documentation](../../../metal-microbench/docs/async_collectives.md).
+Row sizes 1, 8, 16 and 4 use separate numerical workers and have no cross-row
+dependency. Their payloads fit one wire frame and share transport queue zero.
+The caller supplies the backend and weight ownership. Four submitted
+indices reuse the same chain and canonical shared weight shards.
 
 [`examples/coreml-chain.swift`](../examples/coreml-chain.swift) takes an existing
 compiled model, input/output feature names and width as arguments. It sends three
@@ -224,9 +231,11 @@ declarations. The configured count reserves all value backing ahead of execution
 Shared function and route metadata are reused, while value storage remains
 distinct. Freed backing returns to the pool through the existing collector;
 this change does not feed it back into an unbounded receive cycle or reuse an
-already submitted index. Serving integration for continued prefill and speculative verifier
-invocations remains unfinished. The matrix executable uses existing engine
-numerical code; it is not a completed language-model serving integration.
+already submitted index. The matrix executable integrates existing engine
+numerical functions into a contraction-partitioned producer, all-reduce and
+column-partitioned consumer. It is not a language-model serving implementation.
+Unbounded replay and full serving integration are not requirements added by this
+document to the finite partial-tensor interface.
 
 Transport sends each queue direction's realized frame length. Frame rounding,
 padding between unequal partials sharing a queue, source-tag handling, publication
@@ -267,7 +276,7 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 | All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,787 lines / 994 files |
 | Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,464 lines / 15 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 27 lines |
-| Engine's deleted mesh_matrix.swift and tools/mesh/sync.sh; replacement matrix example | 203 lines | 61 lines |
+| Engine's deleted mesh_matrix.swift and tools/mesh/sync.sh; replacement matrix example | 203 lines | 96 lines |
 
 The replacement-path set is `rdma/`, `python/`, `swift/`, `examples/`,
 `xonotic/solver/`, `xonotic/planner/`, and the old root `setup.py`. Source extensions
@@ -275,9 +284,11 @@ are `.c .h .m .mm .swift .py .metal .sh .zsh .js .ts .jsx .tsx .qc`. The whole-r
 row includes the large unchanged Xonotic sources. It has not been halved.
 Makefiles, module maps and pyproject.toml are reported separately above. Shared
 engine dependencies `parameter_configuration.swift`, `matrix_shaders.swift`, and
-`matrix_operations.swift` now total 505 maintained lines in the working tree; the
-new caller reuses them. This change does not attribute their existing working-tree
-edits to the mesh refactor.
+`matrix_operations.swift` now total 540 maintained lines in the working tree; the
+new caller reuses them. That includes the existing addition encoder and shader
+moved from `bootstrap.swift` and `kernels.swift`, where their 26 lines were
+removed. This change does not attribute pre-existing working-tree edits to the
+mesh refactor.
 
 Markdown is excluded from these source counts. Earlier documentary deletion and
 scope correction were committed separately as mesh `a07d7f6` and engine `14d1057`.

@@ -50,5 +50,9 @@ The old executor, frontend and callers were deleted in mesh `5762898` and
 metal-microbench `e108f4b`. The replacement higher-order interface, collective
 relations and source operation chains are described in [the implementation](async-collectives.md).
 Finite indexed submissions now reuse the realized functions and routes.
-Serving integration, unbounded receive cycles and the listed transport costs
-remain unfinished. Deletion, documentation and successful builds are not completion.
+The source chains use existing numerical implementations, including a contraction-
+partitioned matrix producer, all-reduce and a column-partitioned numerical consumer.
+Unbounded receive cycles and full language-model serving are not prerequisites
+added by this document. The implementation description records actual source
+limits and transport costs; deletion, documentation and successful builds alone
+are not completion.

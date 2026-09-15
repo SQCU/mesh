@@ -92,6 +92,11 @@ contributions without prescribing intermediate-buffer or launch counts.
 
 The JAX authors' [Pallas accumulation](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation):
 reference for combining numerical contributions.
+The engine's existing `encAdd` encoder and `add_inplace` shader now live in its
+shared matrix source files, retaining their existing arithmetic and launch
+geometry. `MatrixOperations.add` prepares the pipeline and dimensions and accepts
+operand offsets into the existing registered Metal buffer. The matrix caller
+supplies this numerical function to all-reduce; mesh implements no addition kernel.
 
 ## collective.reduce_scatter
 
@@ -112,6 +117,11 @@ Shoeybi et al., [Megatron-LM](https://arxiv.org/abs/1909.08053), and MLX's
 [tensor-parallel layers](https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/distributed.py):
 local numerical functions composed with collectives. Hendrycks and Gimpel,
 [GELU](https://arxiv.org/abs/1606.08415): the activation already supplied by the engine.
+The matrix source chain uses the contraction identity
+`Y = sum_r X[:,K_r] W[K_r,:]`, followed by independent column products
+`Z[:,K_r] = Y W[:,K_r]`. All-reduce supplies the full Y used by each second-stage
+consumer; gather returns their distinct Z sections. The two stages reuse the
+same existing multiplication implementation with different caller-bound operands.
 
 ## nn.rmsnorm
 
