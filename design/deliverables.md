@@ -230,26 +230,26 @@ subset, never as "done".
 | 10 | L7 lifetime | ✓ | `mesh_buffer_retain`/`mesh_collect`; used by P1 |
 | 11 | L8 explicit sync + counterexample | ✓ | `examples/sync-on-remote-fill.swift` |
 | 12 | P2 push both repos | ✓ | `29bb74f` mesh / `e2f99d1` engine; both remote `main` heads verified, `git log @{u}..HEAD` empty |
-| 13 | P1 importable; Core ML chain run on the pair at ABI 43 | ✓ | `f253955`; fresh Mini clone, external caller, four FFN residual blocks and four indices on both nodes; [returned outputs](function-chain.md#p1-paired-core-ml-run) |
+| 13 | P1 importable; Core ML chain run on the pair at ABI 43 | ✓ | Core ML chain (F=linear 64×64 seed 73, G=ReLU, [32,64], count 8, 2 stages) ran on the pair 2026-09-15 15:06:54–15:08:54 at ABI 43, laptop `rdma_en6` ↔ Mini `rdma_en3`, `paired_links:1` within 3 s of attach; region scans on both nodes show all 8 indices' reduced sections, G outputs and received contributions matching numpy (176/176); evidence `metal-microbench/output_data/mesh_p1/` (`run_coreml.sh`, `scan_rank{0,1}_after_coreml.log`, `verify_coreml.txt`); earlier the no-model example round-tripped (lane F) |
 | 14 | L5 Partial type | ✗ | — |
 | 15 | N1 unbounded instances | ◐ | `count` finite |
 | 16 | N2 Result surface | ◐ | — |
 | 17 | E1 engine layer via Mesh | ✓ (unrun) | engine `6507370` `mesh_layer.swift` 229 lines, 2 collective points, 12 existing encoders bound, no kernel file changed; target `.build/libgemma_mesh.dylib` builds; not yet run on the pair (row 19) |
 | 18 | E2 public measurement + Karp–Flatt | ◐ | script `metal-microbench/tools/mesh/report.py` (engine `feda6a6`): public endpoint only, memory-state guard, S/e/capability-sum/bounds/verdict; dry-run reproduces 1.42x, 1.08x and the ten-minute table; **no measured run yet** (needs E1) |
 | 19 | E3 depthwise chain not slower | ✗ | — |
-| W1 | publish path waitless/guardless | ◐ audit | — |
-| W2 | receive path | ◐ audit | — |
-| W3 | send path | ◐ audit ("available posts" capacity logic) | — |
-| W4 | submit path | ◐ audit | — |
-| W5 | result/collect path | ◐ audit | — |
-| W6 | invocation path | ◐ audit (invocation-time page resolve) | — |
-| W7 | collective compositions declaration-only | ✓ (verify) | `Mesh.swift:279-365` |
-| W8 | caller bindings encode-and-return | ✓ (verify) | `mesh_layer.swift` 1c2b5d4: no waits |
-| 19a | X1 dense presence stamps | ◐ | stamps exist; verify no map/list on the publish path |
-| 19b | X2 countdown firing | ◐ | pending counts exist (`mesh-call.c`); verify no presence predicate at runtime |
-| 19c | X3 addresses fixed at realize; RECV on the planned page; permutation deleted | ✗ | `mesh_receive_assign` page-index exchange still present |
-| 19d | X4 hardware-only capacity gate | ◐ | "available posts" logic to audit in `mesh-flow.c` |
-| 19e | X5 reclamation as free-list event; arena bound at start() | ✗ | — |
+| W1 | publish path waitless/guardless | ✗ | `mesh_publish` fixed bitmask walk ✓ but enqueues via `mesh_notice_push` CAS-retry Treiber stack (mesh.h:97-102) and `mesh_buffer_release`→`mesh_buffer_enqueue` claim check + list push (mesh-dataflow.c:125-130); [audit](w-audit-2026-09-15.md#w1) |
+| W2 | receive path | ✗ | RECVs posted at `receive->first+in->next*block` not the planned page; in-band tag read `source=*mesh_tag(m,page)`; per-source cursor `receive->next[source]++`; `mesh_receive_assign` permutation (mesh.h:83-90); software gate `in->pending<in->capacity` (mesh-flow.c:140); sticky `failed` latch; [audit](w-audit-2026-09-15.md#w2) |
+| W3 | send path | ✗ | `send_ready` ring + `out->pending<out->capacity` software throttle (mesh-flow.c:151) although `ibv_post_send`'s return is already checked at :44; per-chunk `mesh_page[]` load (:153); `->next` notice walk (:194); [audit](w-audit-2026-09-15.md#w3) |
+| W4 | submit path | ✗ (push primitive only) | `mesh_calls_submit` is a fixed bitmask walk + `mesh_notice_push` CAS retry; no bound on `index` (N1 ◐); [audit](w-audit-2026-09-15.md#w4) |
+| W5 | result/collect path | ✗ | `Mesh.result` absent; reclaim is a polled linked-list stack (`link_collect` thread spins on `mesh_collect`, deferral = retry, page-table lookup per block, frees into bitmap first-fit allocator) — no free-list pop exists; [audit](w-audit-2026-09-15.md#w5) |
+| W6 | invocation path | ✗ | `mesh_call_submit` resolves remote operands through `mesh_page[]` at invocation (mesh-call.c:141-142); `MeshBindings.index` for received parts is arithmetic on the runtime (permuted) page (Mesh.swift:288); `MeshFeatures.featureValue` is a String-keyed Dictionary lookup during Core ML prediction (:26-28); `->next` notice walk (:157); [audit](w-audit-2026-09-15.md#w6) |
+| W7 | collective compositions declaration-only | ✓ | audited f1ae04a: all conditionals in `send…allReduce` (Mesh.swift:324-409) run before `start()`; no runtime code; [audit](w-audit-2026-09-15.md#w7) |
+| W8 | caller bindings encode-and-return | ✓ (contingent on W6 fix of Mesh.swift:288) | audited 1c2b5d4: every bound closure encodes and returns; `for j in owners`/`if writeKV` are start()-time constants; [audit](w-audit-2026-09-15.md#w8) |
+| 19a | X1 dense presence stamps | ◐ | presence store is one `atomic_fetch_or` ✓; the notice queues behind it are a CAS Treiber stack (audit item 5) — replace with start()-sized per-(producer,consumer) rings |
+| 19b | X2 countdown firing | ✓ | `mesh_call_progress` mesh-call.c:160: `if(!--call->pending) mesh_call_submit(call)`; no runtime presence predicate except `mesh_sync_on_remote_fill` (I11) |
+| 19c | X3 addresses fixed at realize; RECV on the planned page; permutation deleted | ✗ | fix = W2 + W3 + W6 deletions in the audit summary (items 1-3): `mesh_transfers_prepare` already binds every receive row to a planned page (mesh-call.c:304) — post the RECV there, delete `mesh_receive_assign`, the tag read, the cursor tables, the `send_ready` ring, both `pending<capacity` gates, the invocation-time resolve, and Mesh.swift:288 |
+| 19d | X4 hardware-only capacity gate | ✗ | audit: `in->pending<in->capacity` (mesh-flow.c:140) and `out->pending<out->capacity` (:151) are software throttles; `queue->pending` counters (:45,:170) to delete; verbs return at :44 is the only gate |
+| 19e | X5 reclamation as free-list event; arena bound at start() | ✗ | fix = audit item 4: delete `mesh_buffer_enqueue`/`reclaim_head`/`mesh_collect`/`link_collect` + collector thread; refcount→0 pushes `(first,pages)` on a per-worker SPSC ring; `Mesh.result` one-load status word (N2) |
 | 19f | X6 TensorPart is POD | ◐ | Swift `TensorPart` holds a `storage` reference |
 | 19g | X7 functions get contiguous operand arrays | ✓ (verify) | `MeshOperands` |
 | 20 | G1 contraction/Gram as the same calls | ◐ (FFN shown, Gram not) | `examples/coreml-chain.swift` |
@@ -281,11 +281,9 @@ An agent picking "the first ✗/◐ row" skips assigned rows and takes the next 
 | 23, 24 | C | `mesh-wt/T1-T3` → `row/T1-T3` |
 | 17 | D | `mmb-wt/E1` → `row/E1` (metal-microbench) |
 | 18 | E | `mmb-wt/E2` → `row/E2` (metal-microbench) |
-| 13 (Core ML chain) | G | main checkouts + both nodes; the only lane on the link |
+| — | hardware lanes F, G finished; the link is free for row 19 |
 
-Unassigned and open: 19 (needs 17, 18), W1–W6 (audit, one lane, read-only until findings), 19a–19g (X typings; 19c and 19e first), 20, 21, 22, 25, 27, 28, 29. Note: the laptop
-bridge binary currently runs from `mesh-wt/P1/rdma/mesh-flow`; do not prune that worktree
-while the bridge is up.
+Unassigned and open: 19 (needs 17, 18); W1–W6 fixes = one lane (X3/X5/X4 together: rows 19c, 19d, 19e, 19a) starting after lanes A and C release `mesh-call.c`/`mesh-flow.c`/`Mesh.swift`; 19f (X typings; 19c and 19e first), 20, 21, 22, 25, 27, 28, 29. Note: both bridges were restarted at 14:57 from the main checkouts (`/Users/mdot/dox/mesh/rdma/mesh-flow`, `~/mesh/rdma/mesh-flow` on the Mini, ABI 43, same config); the `mesh-wt/P1` worktree is no longer load-bearing.
 
 ## 6. Forbidden substitutions (revert on sight)
 
