@@ -175,7 +175,13 @@ void mesh_buffer_release(struct hdr *m,uint32_t first,uint32_t count){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     row=buffer->first+buffer->pages;
     uint64_t ownership=atomic_fetch_sub_explicit(&buffer->ownership,1,memory_order_acq_rel);
-    if((uint32_t)ownership==1 && (ownership&MESH_BUFFER_FLAG(MESH_BUFFER_SEALED)))mesh_buffer_enqueue(m,buffer);
+    if((uint32_t)ownership==1 && (ownership&MESH_BUFFER_FLAG(MESH_BUFFER_SEALED))){
+      if(buffer->slot){
+        struct mesh_buffer *slot=&mesh_buffers(m)[buffer->slot-1];
+        if(atomic_fetch_sub_explicit(&slot->ownership,1,memory_order_acq_rel)==1)
+          atomic_store_explicit(&slot->uses,2,memory_order_release);
+      } else mesh_buffer_enqueue(m,buffer);
+    }
   }
 }
 

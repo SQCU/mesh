@@ -37,6 +37,7 @@ private struct Call: Decodable {
 
 private struct Chain: Decodable {
     let count: Int
+    let inFlight: Int
     let workers: Int
     let inputName: String
     let outputName: String
@@ -67,7 +68,7 @@ struct CoreMLChain {
         let args = CommandLine.arguments
         let rank = Int(args[1])!, size = Int(args[2])!
         let plan = try JSONDecoder().decode(Chain.self, from: Data(contentsOf: URL(fileURLWithPath: args[4])))
-        let mesh = try Mesh(region: args[3], rank: rank, size: size, workers: plan.workers, count: plan.count)
+        let mesh = try Mesh(region: args[3], rank: rank, size: size, workers: plan.workers, inFlight: plan.inFlight)
         var models: [String: MLModel] = [:]
         var layout = plan.inputs
         var parts = try layout.map { try mesh.tensor(on: $0.owner, sections: [$0.elements * 4])[0] }
@@ -130,7 +131,12 @@ struct CoreMLChain {
             }, inputs: [parts[i]], outputs: [], on: layout[i].owner, worker: i % plan.workers)
         }
         try mesh.start()
-        for index in 0..<mesh.count { mesh.submit(index) }
+        for index in 0..<plan.count {
+            if case .failure(.busy) = mesh.submit(index) {
+                FileHandle.standardError.write(Data("mesh: submit(\(index)) busy\n".utf8))
+                break
+            }
+        }
         withExtendedLifetime((mesh, parts)) { dispatchMain() }
     }
 }

@@ -53,9 +53,9 @@ public struct TensorFunction {
                 (inputs[i].0, (i, try mesh.bindings(parts[i]) { MLFeatureValue(multiArray: try inputs[i].1($0)) }))
             })
             let names = Set(bindings.keys)
-            let features = (0..<mesh.count).map { _ in MeshFeatures(names: names, bindings: bindings) }
+            let features = (0..<mesh.inFlight).map { _ in MeshFeatures(names: names, bindings: bindings) }
             let arrays = try outputs.indices.map { try mesh.bindings(results[$0], using: outputs[$0].1) }
-            let options = (0..<mesh.count).map { index in
+            let options = (0..<mesh.inFlight).map { index in
                 let option = MLPredictionOptions()
                 option.outputBackings = Dictionary(uniqueKeysWithValues: outputs.indices.map { (outputs[$0].0, arrays[$0].values[index]) })
                 return option
@@ -120,6 +120,7 @@ public struct TensorPart {
 // design/algorithm-sources.md#mesherror
 public enum MeshError: Error {
     case partialOperand(TensorPart)
+    case busy
 }
 
 private struct MeshDelivery: Hashable {
@@ -168,7 +169,7 @@ private final class MeshSection {
     // design/algorithm-sources.md#programtensor
     init(_ memory: MeshMemory, bytes: Int, count: Int, shared: Bool = false, receiveQueue: UInt32? = nil) throws {
         var section = mesh_section()
-        let error = mesh_section_create(memory.context, bytes, UInt32(count), receiveQueue == nil ? 0 : 1, &section)
+        let error = mesh_section_create(memory.context, bytes, UInt32(count), receiveQueue == nil ? 0 : 1, shared ? 1 : 0, &section)
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
         if shared { section.stride = 0 }
         self.memory = memory; self.section = section
@@ -183,6 +184,7 @@ private final class MeshInvocation {
     let inputCount: Int, outputCount: Int
     let memory: MeshMemory
     let submit: (OpaquePointer, UInt32, MeshOperands, MeshOperands) -> Void
+    private var commands = UnsafeMutableBufferPointer<MTLCommandBuffer>(start: nil, count: 0)
 
     // design/algorithm-sources.md#programkernel_call
     init(_ function: MeshSubmission, memory: MeshMemory, inputs: Int, outputs: Int, count: Int) {
@@ -194,12 +196,15 @@ private final class MeshInvocation {
                 mesh_call_complete(call)
             }
         case .metal(let device, let function):
-            let queue = device.makeCommandQueue(maxCommandBufferCount: count)!
-            let commands = (0..<count).map { _ in queue.makeCommandBuffer()! }
+            let queue = device.makeCommandQueue(maxCommandBufferCount: 2 * count)!
+            let commands = UnsafeMutableBufferPointer<MTLCommandBuffer>.allocate(capacity: count)
+            _ = commands.initialize(from: (0..<count).map { _ in queue.makeCommandBuffer()! })
+            self.commands = commands
             submit = { call, index, inputs, outputs in
                 let command = commands[Int(index)]
                 function(command, inputs, outputs)
                 command.addCompletedHandler { command in
+                    commands[Int(index)] = queue.makeCommandBuffer()!
                     if command.status == .completed { mesh_call_complete(call) }
                     else { mesh_call_fail(call, Int32((command.error as NSError?)?.code ?? -1)) }
                 }
@@ -217,29 +222,32 @@ private final class MeshInvocation {
         }
     }
 
+    // design/algorithm-sources.md#programkernel_call
+    deinit { commands.deinitialize(); commands.deallocate() }
 }
 
 public final class Mesh {
-    public let rank: Int, size: Int, count: Int
+    public let rank: Int, size: Int, inFlight: Int
     private let memory: MeshMemory
     private let calls: OpaquePointer
     private var transfer: UInt32 = 0
     private var value = 0
     private var deliveries: [MeshDelivery: TensorPart] = [:]
     private var preparations: [() throws -> Void] = []
+    private var sections: [MeshSection] = []
     private var partialContributions: Set<Int> = []
 
     // design/algorithm-sources.md#program
-    public init(region: String, rank: Int, size: Int, workers: Int, count: Int = 1) throws {
-        precondition(size > 0 && (0..<size).contains(rank) && count > 0)
+    public init(region: String, rank: Int, size: Int, workers: Int, inFlight: Int = 1) throws {
+        precondition(size > 0 && (0..<size).contains(rank) && inFlight > 0)
         let memory = try MeshMemory(region)
         let owner = Unmanaged.passRetained(memory).toOpaque()
-        guard let calls = mesh_calls_create(memory.context, UInt32(workers), UInt32(count), owner,
+        guard let calls = mesh_calls_create(memory.context, UInt32(workers), UInt32(inFlight), owner,
             { owner in Unmanaged<MeshMemory>.fromOpaque(owner!).release() }) else {
             Unmanaged<MeshMemory>.fromOpaque(owner).release()
             throw POSIXError(POSIXErrorCode(rawValue: errno)!)
         }
-        self.memory = memory; self.calls = calls; self.rank = rank; self.size = size; self.count = count
+        self.memory = memory; self.calls = calls; self.rank = rank; self.size = size; self.inFlight = inFlight
     }
 
     // design/algorithm-sources.md#programtensor
@@ -248,10 +256,10 @@ public final class Mesh {
     // design/algorithm-sources.md#programtensor
     private func part(on owner: Int, bytes: Int, partial: Bool = false, shared: Bool = false, queue: UInt32? = nil) throws -> TensorPart {
         let identity = value; value += 1
-        return TensorPart(rank: owner, bytes: bytes, partial: partial,
-                          storage: owner == rank ? try MeshSection(memory, bytes: bytes, count: shared ? 1 : count,
-                                                                  shared: shared, receiveQueue: queue) : nil,
-                          shared: shared, identity: identity)
+        let storage = owner == rank ? try MeshSection(memory, bytes: bytes, count: shared ? 1 : inFlight,
+                                                      shared: shared, receiveQueue: queue) : nil
+        if let storage, !shared { sections.append(storage) }
+        return TensorPart(rank: owner, bytes: bytes, partial: partial, storage: storage, shared: shared, identity: identity)
     }
 
     // design/algorithm-sources.md#programtensor
@@ -279,7 +287,7 @@ public final class Mesh {
         preparations.append { [unowned self] in
             precondition(outputs.allSatisfy { $0.storage!.receiveQueue == nil })
             let invocation = MeshInvocation(try function.prepare(self, inputs, outputs), memory: memory,
-                                            inputs: inputs.count, outputs: outputs.count, count: count)
+                                            inputs: inputs.count, outputs: outputs.count, count: inFlight)
             try bind(invocation, inputs: inputs, outputs: outputs, worker: worker)
         }
     }
@@ -438,25 +446,32 @@ public final class Mesh {
 
     // design/algorithm-sources.md#programkernel_call
     public func start() throws {
-        let storageError = mesh_transfers_prepare(memory.context)
+        let region = memory.context.pointee.M!
+        let bytes = sections.reduce(0) { $0 + Int($1.section.pages) * Int(region.pointee.pgsz) }
+        let total = bytes.multipliedReportingOverflow(by: inFlight)
+        if total.overflow { throw POSIXError(.ENOMEM) }
+        FileHandle.standardError.write(Data("mesh: \(bytes) bytes per in-flight instance, \(inFlight) in flight, \(total.partialValue) total\n".utf8))
+        if total.partialValue > Int(mesh_rows(region)) * Int(region.pointee.pgsz) { throw POSIXError(.ENOMEM) }
+        let rows = sections.map { $0.section }
+        let storageError = mesh_transfers_prepare(memory.context, rows, rows.count)
         if storageError != 0 { throw POSIXError(POSIXErrorCode(rawValue: storageError)!) }
         for prepare in preparations { try prepare() }
         preparations.removeAll()
         deliveries.removeAll()
         partialContributions.removeAll()
-        let error = mesh_calls_start(calls)
+        let error = mesh_calls_start(calls, rows, rows.count)
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
         mesh_transfers_start(memory.context)
     }
 
     // design/algorithm-sources.md#program
-    public func submit(_ index: Int) {
-        mesh_calls_submit(calls, UInt32(index))
+    public func submit(_ index: Int) -> Result<Void, MeshError> {
+        mesh_calls_submit(calls, UInt32(truncatingIfNeeded: index)) != 0 ? .success(()) : .failure(.busy)
     }
 
     // design/algorithm-sources.md#collectivesync_on_remote_fill
     public func syncOnRemoteFill(_ parts: [TensorPart], index: Int = 0) {
         let sections = parts.map { $0.storage!.section }
-        mesh_sync_on_remote_fill(memory.context, sections, sections.count, UInt32(index))
+        mesh_sync_on_remote_fill(calls, sections, sections.count, UInt32(truncatingIfNeeded: index))
     }
 }

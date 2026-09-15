@@ -9,7 +9,7 @@ The deleted implementation is not an implementation template.
 
 The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html):
 reference for higher-order numerical calls over indexed tensor operands.
-The implementation realizes a finite value-index extent once. A section's
+The MPI Forum's [persistent requests](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node83.htm) separate realization from repeated starts: `inFlight` bounds storage, `mesh_slot` maps the index's low 32 bits to `index % inFlight`, and contiguous slot records restore saved pending/use counts; reference-zero events decrement a shared countdown with acquire-release ordering and release-store its free stamp, keeping varying pages out of collection until arena destruction; transport reuse requires N1t. A section's
 `first + index * stride` selects its logical row; shared constants have zero
 stride. Submission publishes root indices into existing numerical-worker queues,
 while consumers are indexed by operand publication. No function scan or repeated
@@ -56,7 +56,7 @@ Movement preserves the logical identity, so a contribution's setup restriction f
 
 ## MeshError
 
-The Legion authors, [reduction privileges](https://legion.stanford.edu/tutorial/privileges.html): reduction operands have restricted uses. Mesh's public `call` records one validation closure, executed by `start()` after all reductions have been declared. Its sole throw reports `partialOperand` with a partial view of the offending operand. The reduction's supplied combine uses the same private binding path without that validation. This is a declaration-time restriction, independent of backend and numerical completion order.
+The Legion authors, [reduction privileges](https://legion.stanford.edu/tutorial/privileges.html): reduction operands have restricted uses. Mesh's public `call` records one validation closure, executed by `start()` after all reductions have been declared. Its sole throw reports `partialOperand` with a partial view of the offending operand. The reduction's supplied combine uses the same private binding path without that validation. This is a declaration-time restriction, independent of backend and numerical completion order. The LMAX authors' [Disruptor](https://lmax-exchange.github.io/disruptor/user-guide/) supplies preallocated event storage and sequences: `busy` reports an unset slot-free stamp immediately, without a consumer query or wait.
 
 ## Program.kernel_call
 

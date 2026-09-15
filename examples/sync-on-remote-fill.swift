@@ -6,7 +6,7 @@ struct SyncOnRemoteFill {
     // design/algorithm-sources.md#collectivesync_on_remote_fill
     static func main() throws {
         let rank = Int(CommandLine.arguments[1])!
-        let mesh = try Mesh(region: CommandLine.arguments[2], rank: rank, size: 2, workers: 4)
+        let mesh = try Mesh(region: CommandLine.arguments[2], rank: rank, size: 2, workers: 4, inFlight: 1)
         let mode = CommandLine.arguments[3]
         let source = try mesh.tensor(on: 0, sections: [4, 4, 4, 4])
         let remote = try mesh.gather(source, to: 1)
@@ -37,7 +37,7 @@ struct SyncOnRemoteFill {
             }, inputs: [remote[i]], outputs: [answer[i]], on: 1, worker: i)
         }
         try mesh.start()
-        mesh.submit(0)
+        _ = mesh.submit(0)
         withExtendedLifetime((mesh, returned)) { dispatchMain() }
     }
 }

@@ -19,7 +19,7 @@ enum { MESH_PRESENT, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_BUFFER_SEALED=1, MESH_BUFFER_QUEUED=2, MESH_BUFFER_CLOSED=4, MESH_BUFFER_RECLAIMED=8 };
 #define MESH_BUFFER_FLAG(flag) ((uint64_t)(flag)<<32)
-struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages,next; _Atomic uint32_t uses; uint64_t owner; };
+struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages,next; _Atomic uint32_t uses; uint64_t owner; uint32_t slot; };
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_COMPUTE_THREADS 8

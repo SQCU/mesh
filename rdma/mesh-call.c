@@ -6,7 +6,7 @@
 struct mesh_call {
   struct mesh_function *function;
   struct mesh_operand *operands;
-  uint32_t pending,index;
+  uint32_t pending,initial,index;
   int completed;
 };
 struct mesh_function {
@@ -31,6 +31,9 @@ struct mesh_call_worker {
 struct mesh_calls {
   struct mesh_ctx *context;
   struct mesh_function *functions;
+  struct mesh_call *values;
+  uint32_t *rows,*declared,roots[MESH_COMPUTE_THREADS];
+  size_t row_count,function_count;
   struct mesh_call_worker workers[MESH_COMPUTE_THREADS];
   uint32_t count,extent,first,root_workers;
   _Atomic uint32_t references;
@@ -38,6 +41,9 @@ struct mesh_calls {
   void *owner;
   mesh_dispose dispose;
 };
+
+/* design/algorithm-sources.md#program */
+static inline uint32_t mesh_slot(const struct mesh_calls *calls,uint32_t index){return index%calls->extent;}
 
 /* design/algorithm-sources.md#programtensor */
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
@@ -53,28 +59,29 @@ static void mesh_calls_release(struct mesh_calls *calls,uint32_t references){
       struct mesh_section section=function->inputs[i];
       uint32_t row=mesh_section_row(section,index);
       mesh_buffers(m)[row].uses&=~(UINT32_C(1)<<function->worker);
-      if(!section.stride || !function->values[index].completed)mesh_buffer_release(m,row,section.pages);
+      if(!section.stride || !calls->values || !function->values[index*calls->function_count].completed)mesh_buffer_release(m,row,section.pages);
     }
     if(function->dispose)function->dispose(function->argument);
-    free(function->operands);free(function->values);free(function->inputs);free(function);
+    free(function->operands);free(function->inputs);free(function);
     function=next;
   }
   if(calls->first!=MESH_ABSENT)mesh_rows_release(calls->context,calls->first,calls->extent);
   if(calls->dispose)calls->dispose(calls->owner);
+  free(calls->values);free(calls->rows);free(calls->declared);
   free(calls);
 }
 
 /* design/algorithm-sources.md#programkernel_call */
-struct mesh_calls *mesh_calls_create(struct mesh_ctx *context,uint32_t workers,uint32_t count,void *owner,mesh_dispose dispose){
-  if(!context || !context->M || !workers || workers>MESH_COMPUTE_THREADS || !count){errno=EINVAL;return NULL;}
+struct mesh_calls *mesh_calls_create(struct mesh_ctx *context,uint32_t workers,uint32_t inFlight,void *owner,mesh_dispose dispose){
+  if(!context || !context->M || !workers || workers>MESH_COMPUTE_THREADS || !inFlight){errno=EINVAL;return NULL;}
   struct mesh_calls *calls=calloc(1,sizeof *calls);
   if(!calls)return NULL;
-  calls->context=context;calls->count=workers;calls->extent=count;calls->first=MESH_ABSENT;atomic_init(&calls->references,1);
+  calls->context=context;calls->count=workers;calls->extent=inFlight;calls->first=MESH_ABSENT;atomic_init(&calls->references,1);
   for(uint32_t i=0;i<workers;i++){
     calls->workers[i]=(struct mesh_call_worker){.calls=calls,.index=i,.offsets=calloc((size_t)mesh_rows(context->M)+1,sizeof(size_t))};
     if(!calls->workers[i].offsets){mesh_calls_release(calls,1);return NULL;}
   }
-  calls->first=mesh_rows_alloc(context,count);
+  calls->first=mesh_rows_alloc(context,inFlight);
   if(calls->first==MESH_ABSENT){mesh_calls_release(calls,1);return NULL;}
   calls->owner=owner;calls->dispose=dispose;
   return calls;
@@ -90,8 +97,7 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   size_t count=input_count+output_count,extent=calls->extent;
   function->inputs=calloc(1,(count+input_count?count+input_count:1)*sizeof *inputs+input_count*sizeof *function->remote);
   function->operands=calloc(extent*(count?count:1),sizeof *function->operands);
-  function->values=calloc(extent,sizeof *function->values);
-  if(!function->inputs || !function->operands || !function->values){errno=ENOMEM;goto failed;}
+  if(!function->inputs || !function->operands){errno=ENOMEM;goto failed;}
   function->outputs=function->inputs+input_count;
   function->consumed=function->outputs+output_count;
   function->remote=(uint32_t *)(function->consumed+input_count);
@@ -114,20 +120,12 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
     }
     retained++;
   }
-  for(uint32_t index=0;index<extent;index++){
-    struct mesh_call *call=&function->values[index];
-    *call=(struct mesh_call){.function=function,.index=index,.operands=function->operands+index*count};
-    for(size_t i=0;i<count;i++){
-      struct mesh_section section=function->inputs[i];
-      uint32_t page=atomic_load_explicit(&mesh_page(m)[mesh_section_row(section,index)],memory_order_acquire);
-      call->operands[i]=(struct mesh_operand){mesh_at(m,page),section.bytes,page,index};
-    }
-  }
+  calls->function_count++;
   calls->workers[worker].references+=calls->extent;
   function->next=calls->functions;calls->functions=function;
   return function;
 failed:
-  free(function->inputs);free(function->operands);free(function->values);free(function);
+  free(function->inputs);free(function->operands);free(function);
   return NULL;
 }
 
@@ -164,29 +162,58 @@ static void *mesh_call_progress(void *argument){
   }
   uint32_t unused=1;
   for(struct mesh_function *function=calls->functions;function;function=function->next)
-    if(function->worker==worker->index)for(uint32_t index=0;index<calls->extent;index++)unused+=function->values[index].pending!=0;
+    if(function->worker==worker->index)for(uint32_t index=0;index<calls->extent;index++)unused+=function->values[index*calls->function_count].pending!=0;
   mesh_calls_release(calls,unused);
   return NULL;
 }
 
 /* design/algorithm-sources.md#programkernel_call */
-int mesh_calls_start(struct mesh_calls *calls){
+int mesh_calls_start(struct mesh_calls *calls,const struct mesh_section *sections,size_t count){
   struct hdr *m=calls->context->M;
   uint32_t rows=mesh_rows(m);
+  calls->values=calloc(calls->extent*(calls->function_count?calls->function_count:1),sizeof *calls->values);
+  calls->rows=calloc(calls->extent*(count?count:1),sizeof *calls->rows);
+  calls->declared=calloc(rows,sizeof *calls->declared);
+  if(!calls->values || !calls->rows || !calls->declared){free(calls->values);calls->values=NULL;return ENOMEM;}
+  calls->row_count=count;
+  for(uint32_t index=0;index<calls->extent;index++){
+    uint32_t slot=mesh_slot(calls,index),root=calls->first+slot;
+    mesh_buffers(m)[root]=(struct mesh_buffer){.ownership=count,.first=root,.pages=1,.uses=1,.owner=calls->context->client};
+    for(size_t i=0;i<count;i++){
+      uint32_t row=mesh_section_row(sections[i],slot);
+      struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+      calls->rows[slot*count+i]=row;buffer->slot=root+1;
+      calls->declared[row]=(uint32_t)atomic_load_explicit(&buffer->ownership,memory_order_relaxed)-1;
+      atomic_store_explicit(&buffer->ownership,calls->declared[row]|MESH_BUFFER_FLAG(MESH_BUFFER_SEALED),memory_order_relaxed);
+    }
+  }
+  mesh_bits_set(m,MESH_ROW_HOT,calls->first,calls->extent);
+  size_t ordinal=0;
   for(int pass=0;pass<2;pass++){
     for(struct mesh_function *function=calls->functions;function;function=function->next){
+      if(!pass)function->values=calls->values+ordinal++;
       struct mesh_call_worker *worker=&calls->workers[function->worker];
       for(uint32_t index=0;index<calls->extent;index++){
-        struct mesh_call *call=&function->values[index];
+        uint32_t slot=mesh_slot(calls,index);
+        struct mesh_call *call=&function->values[slot*calls->function_count];
+        if(!pass){
+          size_t operands=function->input_count+function->output_count;
+          *call=(struct mesh_call){.function=function,.index=slot,.operands=function->operands+slot*operands};
+          for(size_t i=0;i<operands;i++){
+            struct mesh_section section=function->inputs[i];
+            uint32_t page=atomic_load_explicit(&mesh_page(m)[mesh_section_row(section,slot)],memory_order_acquire);
+            call->operands[i]=(struct mesh_operand){mesh_at(m,page),section.bytes,page,slot};
+          }
+        }
         int varying=0;
         for(size_t i=0;i<=function->input_count;i++){
           uint32_t row;
           if(i==function->input_count){
             if(varying)continue;
-            row=calls->first+index;calls->root_workers|=UINT32_C(1)<<function->worker;
+            row=calls->first+slot;calls->root_workers|=UINT32_C(1)<<function->worker;
           } else {
             struct mesh_section section=function->inputs[i];
-            row=mesh_section_row(section,index);
+            row=mesh_section_row(section,slot);
             if(mesh_bit(m,MESH_PRESENT,row))continue;
             varying|=section.stride!=0;
             mesh_buffers(m)[row].uses|=UINT32_C(1)<<function->worker;
@@ -206,6 +233,10 @@ int mesh_calls_start(struct mesh_calls *calls){
       }
     }
   }
+  uint32_t roots=calls->root_workers;calls->root_workers=0;
+  for(uint32_t i=0;i<calls->count;i++)if(roots&(UINT32_C(1)<<i))
+    calls->roots[calls->root_workers++]=mesh_notice_queue(m,calls->context->client,m->links+i);
+  for(size_t i=0;i<calls->extent*calls->function_count;i++)calls->values[i].initial=calls->values[i].pending;
   atomic_store_explicit(&calls->running,1,memory_order_release);
   for(uint32_t i=0;i<calls->count;i++){
     pthread_t thread;
@@ -219,12 +250,26 @@ int mesh_calls_start(struct mesh_calls *calls){
 }
 
 /* design/algorithm-sources.md#program */
-void mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
-  uint32_t workers=calls->root_workers;
-  while(workers){
-    uint32_t worker=(uint32_t)__builtin_ctz(workers);workers&=workers-1;
-    mesh_notice_push(calls->context->M,mesh_notice_queue(calls->context->M,calls->context->client,calls->context->M->links+worker),calls->first+index);
+int mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
+  struct hdr *m=calls->context->M;
+  uint32_t slot=mesh_slot(calls,index),root=calls->first+slot;
+  struct mesh_buffer *event=&mesh_buffers(m)[root];
+  uint32_t stamp=atomic_load_explicit(&event->uses,memory_order_acquire);
+  if(!stamp)return 0;
+  atomic_store_explicit(&event->uses,0,memory_order_relaxed);
+  atomic_store_explicit(&event->ownership,calls->row_count,memory_order_relaxed);
+  for(size_t i=0;i<calls->function_count;i++){
+    struct mesh_call *call=&calls->values[slot*calls->function_count+i];
+    call->pending=call->initial;call->completed=0;
   }
+  atomic_fetch_add_explicit(&calls->references,(stamp>>1)*calls->function_count,memory_order_relaxed);
+  for(size_t i=0;i<calls->row_count;i++){
+    uint32_t row=calls->rows[slot*calls->row_count+i];
+    atomic_store_explicit(&mesh_buffers(m)[row].ownership,calls->declared[row]|MESH_BUFFER_FLAG(MESH_BUFFER_SEALED),memory_order_relaxed);
+    atomic_fetch_and_explicit(&mesh_plane(m,MESH_PRESENT)[row/64],~(UINT64_C(1)<<(row%64)),memory_order_relaxed);
+  }
+  for(uint32_t i=0;i<calls->root_workers;i++)mesh_notice_push(m,calls->roots[i],root);
+  return 1;
 }
 
 /* design/algorithm-sources.md#programkernel_call */
@@ -232,12 +277,13 @@ void mesh_call_fail(struct mesh_call *call,int error){
   struct mesh_function *function=call->function;
   struct mesh_calls *calls=function->calls;
   struct mesh_ctx *context=calls->context;
+  uint32_t index=call->index;
+  call->completed=1;
   context->M->port.code=error;context->M->port.domain=4;
   for(size_t i=0;i<function->consumed_count;i++){
     struct mesh_section section=function->consumed[i];
-    mesh_buffer_release(context->M,mesh_section_row(section,call->index),section.pages);
+    mesh_buffer_release(context->M,mesh_section_row(section,index),section.pages);
   }
-  call->completed=1;
   mesh_calls_release(calls,1);
 }
 
@@ -246,16 +292,17 @@ void mesh_call_complete(struct mesh_call *call){
   struct mesh_function *function=call->function;
   struct mesh_calls *calls=function->calls;
   struct mesh_ctx *context=calls->context;
+  uint32_t index=call->index;
+  call->completed=1;
   for(size_t i=0;i<function->output_count;i++){
     struct mesh_section section=function->outputs[i];
-    uint32_t row=mesh_section_row(section,call->index);
+    uint32_t row=mesh_section_row(section,index);
     mesh_publish(context->M,row);
   }
   for(size_t i=0;i<function->consumed_count;i++){
     struct mesh_section section=function->consumed[i];
-    mesh_buffer_release(context->M,mesh_section_row(section,call->index),section.pages);
+    mesh_buffer_release(context->M,mesh_section_row(section,index),section.pages);
   }
-  call->completed=1;
   mesh_calls_release(calls,1);
 }
 
@@ -287,8 +334,14 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
 }
 
 /* design/algorithm-sources.md#programcopy */
-int mesh_transfers_prepare(struct mesh_ctx *context){
+int mesh_transfers_prepare(struct mesh_ctx *context,const struct mesh_section *sections,size_t count){
   struct hdr *m=context->M;
+  for(size_t i=0;i<count;i++)if(!sections[i].receive)for(uint32_t index=0;index<sections[i].count;index++){
+    struct mesh_section section=sections[i];
+    uint32_t page=mesh_arena_alloc(context,section.pages,m->block);
+    if(page==MESH_ABSENT)return errno;
+    mesh_backing_bind(context,mesh_section_row(section,index),section.pages,page);
+  }
   context->receives=calloc(m->links?m->links*m->qps:1,sizeof *context->receives);
   if(!context->receives)return ENOMEM;
   for(uint32_t q=0;q<m->links*m->qps;q++){
@@ -315,7 +368,7 @@ void mesh_transfers_start(struct mesh_ctx *context){
 }
 
 /* design/algorithm-sources.md#programtensor */
-int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int receive,struct mesh_section *section){
+int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int receive,int shared,struct mesh_section *section){
   struct hdr *m=context->M;
   if(!bytes || !count)return EINVAL;
   size_t quantum=(size_t)m->block*m->pgsz;
@@ -327,7 +380,7 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int
   for(uint32_t row=first;row<first+pages;row+=(uint32_t)span)
     mesh_buffers(m)[row]=(struct mesh_buffer){.ownership=2|MESH_BUFFER_FLAG(MESH_BUFFER_SEALED),.first=row,.pages=(uint32_t)span,.owner=context->client};
   mesh_bits_set(m,MESH_ROW_HOT,first,pages);
-  if(!receive)for(uint32_t row=first;row<first+pages;row+=(uint32_t)span){
+  if(!receive && shared)for(uint32_t row=first;row<first+pages;row+=(uint32_t)span){
     uint32_t page=mesh_arena_alloc(context,(uint32_t)span,m->block);
     if(page==MESH_ABSENT){
       int error=errno;mesh_backing_release(context,first,pages);mesh_rows_release(context,first,pages);return error;
@@ -347,10 +400,12 @@ void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,
 void mesh_section_constant(struct mesh_ctx *context,struct mesh_section section){mesh_publish(context->M,section.first);}
 /* design/algorithm-sources.md#programtensor */
 void mesh_section_release(struct mesh_ctx *context,struct mesh_section section){
-  mesh_buffer_release(context->M,section.first,section.count*section.pages);
+  if(!section.stride || !mesh_buffers(context->M)[section.first].slot)
+    mesh_buffer_release(context->M,section.first,section.count*section.pages);
   mesh_rows_release(context,section.first,section.count*section.pages);
 }
 /* design/algorithm-sources.md#collectivesync_on_remote_fill */
-void mesh_sync_on_remote_fill(struct mesh_ctx *context,const struct mesh_section *sections,size_t count,uint32_t index){
-  for(size_t i=0;i<count;i++)while(!mesh_bit(context->M,MESH_PRESENT,mesh_section_row(sections[i],index))){}
+void mesh_sync_on_remote_fill(struct mesh_calls *calls,const struct mesh_section *sections,size_t count,uint32_t index){
+  uint32_t slot=mesh_slot(calls,index);
+  for(size_t i=0;i<count;i++)while(!mesh_bit(calls->context->M,MESH_PRESENT,mesh_section_row(sections[i],slot))){}
 }
