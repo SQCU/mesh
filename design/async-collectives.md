@@ -5,8 +5,8 @@ explains the source; it does not add requirements.
 
 The previous claim of full completion is withdrawn. The source demonstrates
 finite producer/collective/consumer chains, but a single-use value extent, one-peer
-transport and an example-local command-pool bound do not establish the reusable
-deployment interface. The disposition table below records implemented mechanisms;
+transport and example-only integration do not establish the reusable deployment
+interface. The disposition table below records implemented mechanisms;
 it is not proof that those narrower mechanisms satisfy the deployment target.
 
 `swift/Mesh.swift` accepts tensor functions. It contains no implementations of
@@ -58,11 +58,14 @@ Row sizes 1, 8, 16 and 4 use separate numerical workers and have no cross-row
 dependency. Their payloads fit one wire frame and share transport queue zero.
 The caller supplies the backend and weight ownership. Four submitted
 indices reuse the same chain and canonical shared weight shards.
-The caller sizes each Metal queue for `3 * count` command buffers, covering its
-entire finite set of local multiplication and combining calls. Thus native
-command-buffer creation cannot exhaust that queue's configured pool. Generic
-supplied numerical functions remain responsible for their native API contracts;
-mesh adds no completion wait to their launch paths.
+The caller supplies a Metal device and encoder. Mesh realizes a private command
+queue for each declared Metal call, sized for its count of invocations. Direct
+calls, combining functions and native-view factories use the same constructor.
+All command buffers are constructed during realization; submission selects the
+prepared buffer by its existing invocation index, encodes and commits it.
+The example-specific command-pool formula and caller-owned queue are removed.
+This prevents command-pool exhaustion within the declared extent without imposing
+queue order between different numerical call definitions.
 
 [`examples/coreml-chain.swift`](../examples/coreml-chain.swift) takes an existing
 compiled model, input/output feature names and width as arguments. It sends three
@@ -301,8 +304,8 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 
 | Counted set | Before | Current |
 |---|---:|---:|
-| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,669 lines / 993 files |
-| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,347 lines / 14 files |
+| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,671 lines / 993 files |
+| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,349 lines / 14 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 27 lines |
 | Engine's deleted mesh_matrix.swift and tools/mesh/sync.sh; replacement matrix example | 203 lines | 96 lines |
 
@@ -349,10 +352,14 @@ one-peer transport and native API contracts above remain explicit limits. Builds
 establish integration consistency; no runtime measurements or speedup claims are
 used as evidence for these source properties.
 
-In particular, the generic Metal invocation still creates command buffers at
-submission; only the matrix example supplies the derived pool capacity. Native
-view preparation supports one varying input and one output, while the raw callback
+The generic Metal invocation selects command buffers prepared during realization,
+with pool capacity owned by Mesh for every declared call. Native view
+preparation supports one varying input and one output, while the raw callback
 form supports multiple operands. The transport supports one peer, and its TX
 worker walks the whole detached publication list before returning to CQ polling.
 Those concrete restrictions and scheduling costs need disposition against the
 user's requirements; accepting a convenient example does not settle them.
+The user's four-residual-FFN-layer case further requires useful numerical work on
+both participants at each depth; added global guards, waits or synchronization
+that make this chain slower than local execution invalidate the implementation.
+The current example has two linear matrix stages and does not establish this case.

@@ -7,7 +7,7 @@ public typealias MeshOperands = UnsafeBufferPointer<mesh_operand>
 
 public enum TensorFunction {
     case cpu((MeshOperands, MeshOperands) -> Void)
-    case metal(MTLCommandQueue, (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void)
+    case metal(MTLDevice, (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void)
     case prediction(MLModel, (MeshOperands, MeshOperands) -> (MLFeatureProvider, MLPredictionOptions))
 }
 
@@ -107,20 +107,22 @@ private final class MeshSection {
 private final class MeshInvocation {
     let inputCount: Int, outputCount: Int
     let memory: MeshMemory
-    let submit: (OpaquePointer, MeshOperands, MeshOperands) -> Void
+    let submit: (OpaquePointer, UInt32, MeshOperands, MeshOperands) -> Void
 
     // design/algorithm-sources.md#programkernel_call
-    init(_ function: TensorFunction, memory: MeshMemory, inputs: Int, outputs: Int) {
+    init(_ function: TensorFunction, memory: MeshMemory, inputs: Int, outputs: Int, count: Int) {
         self.memory = memory; inputCount = inputs; outputCount = outputs
         switch function {
         case .cpu(let function):
-            submit = { call, inputs, outputs in
+            submit = { call, _, inputs, outputs in
                 function(inputs, outputs)
                 mesh_call_complete(call)
             }
-        case .metal(let queue, let function):
-            submit = { call, inputs, outputs in
-                let command = queue.makeCommandBuffer()!
+        case .metal(let device, let function):
+            let queue = device.makeCommandQueue(maxCommandBufferCount: count)!
+            let commands = (0..<count).map { _ in queue.makeCommandBuffer()! }
+            submit = { call, index, inputs, outputs in
+                let command = commands[Int(index)]
                 function(command, inputs, outputs)
                 command.addCompletedHandler { command in
                     if command.status == .completed { mesh_call_complete(call) }
@@ -129,7 +131,7 @@ private final class MeshInvocation {
                 command.commit()
             }
         case .prediction(let model, let function):
-            submit = { call, inputs, outputs in
+            submit = { call, _, inputs, outputs in
                 let (features, options) = function(inputs, outputs)
                 model.__prediction(fromFeatures: features, options: options) { _, error in
                     if let error { mesh_call_fail(call, Int32((error as NSError).code)) }
@@ -180,7 +182,7 @@ public final class Mesh {
                      on owner: Int, worker: Int) throws {
         precondition(inputs.allSatisfy { $0.rank == owner } && outputs.allSatisfy { $0.rank == owner && !$0.shared })
         if owner != rank { return }
-        let invocation = MeshInvocation(function, memory: memory, inputs: inputs.count, outputs: outputs.count)
+        let invocation = MeshInvocation(function, memory: memory, inputs: inputs.count, outputs: outputs.count, count: count)
         try bind(invocation, inputs: inputs, outputs: outputs, worker: worker)
     }
 
@@ -189,9 +191,9 @@ public final class Mesh {
         let argument = Unmanaged.passRetained(invocation).toOpaque()
         let inputRows = inputs.map { $0.storage!.section }, outputRows = outputs.map { $0.storage!.section }
         let call = mesh_call_bind(calls, UInt32(worker), inputRows, inputRows.count, outputRows, outputRows.count,
-            { call, argument, inputs, outputs in
+            { call, index, argument, inputs, outputs in
                 let invocation = Unmanaged<MeshInvocation>.fromOpaque(argument!).takeUnretainedValue()
-                invocation.submit(call!, MeshOperands(start: inputs, count: invocation.inputCount),
+                invocation.submit(call!, index, MeshOperands(start: inputs, count: invocation.inputCount),
                                   MeshOperands(start: outputs, count: invocation.outputCount))
             }, argument,
             { argument in Unmanaged<MeshInvocation>.fromOpaque(argument!).release() })
@@ -235,7 +237,7 @@ public final class Mesh {
         preparations.append { [unowned self] in
             precondition(output.storage!.receiveQueue == nil)
             let inputs = try bindings(input, using: inputView), outputs = try bindings(output, using: outputView)
-            let invocation = MeshInvocation(try function(inputs, outputs), memory: memory, inputs: 1 + constants.count, outputs: 1)
+            let invocation = MeshInvocation(try function(inputs, outputs), memory: memory, inputs: 1 + constants.count, outputs: 1, count: count)
             try bind(invocation, inputs: [input] + constants, outputs: [output], worker: worker)
         }
     }

@@ -155,7 +155,7 @@ static void mesh_call_submit(struct mesh_call *call){
     call->operands[i]=(struct mesh_operand){mesh_at(context->M,page),section.bytes,page,call->index};
   }
   atomic_fetch_add_explicit(&function->calls->references,1,memory_order_relaxed);
-  function->submit(call,function->argument,call->operands,call->operands+function->input_count);
+  function->submit(call,call->index,function->argument,call->operands,call->operands+function->input_count);
 }
 
 /* design/algorithm-sources.md#programkernel_call */

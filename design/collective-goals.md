@@ -42,6 +42,10 @@ agent plans, inventories and old specifications do not add requirements.
 
 > delete. the fucking. 'inherited'. implementation. delete it immediately and commit the deletion.
 
+The subsequent deployment clarification is also authoritative:
+
+> we should note that writing something which sounds like it satisfies all contraints but is slow and doesn't utilize flops on two computers concurrently would be 'fake'. so would anything which is depthwise recurrent, like a resnet with 4 ffn-residual-layers, running slower with the mesh collectives than without them, because some asshole decided to add a global sync or global guard or global wait again
+
 The user-selected continuation objective is the attachment
 `5701aa94-8d2a-4238-851b-7ad3af7e91bc/pasted-text-1.txt`. It reiterates these
 requirements and actual integration through existing numerical implementations.
@@ -53,7 +57,7 @@ Finite indexed submissions now reuse the realized functions and routes.
 The source chains use existing numerical implementations, including a contraction-
 partitioned matrix producer, all-reduce and a column-partitioned numerical consumer.
 The earlier completion claim was too broad: the single-use value extent, one-peer
-transport, example-only integration and example-local native queue sizing remain
+transport and example-only integration remain
 implementation restrictions, not user-authorized definitions of the deployment
 target. The implementation description records these gaps and actual transport
 costs. Deletion, documentation and successful builds alone are not completion.

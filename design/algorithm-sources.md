@@ -52,10 +52,18 @@ without changing the numerical algorithm or requiring additional synchronization
 Apple's [makeCommandBuffer](https://developer.apple.com/documentation/metal/mtlcommandqueue/makecommandbuffer())
 documents blocking when a queue has no free command buffers. The SDK's
 `MTLDevice.h` exposes `newCommandQueueWithMaxCommandBufferCount` and specifies
-64 as the ordinary queue's default capacity. The matrix caller instead reserves
-`3 * count` command buffers per row section during realization: its entire
-finite local set of producer multiplication, combining call and consumer
-multiplication. No invocation needs an earlier completion to provide a free slot.
+64 as the ordinary queue's default capacity. `TensorFunction.metal` takes a
+device and encoder; `MeshInvocation` owns a private queue for that declared call,
+with capacity for its `count` invocation records. Both direct calls and native
+view factories use this constructor. Setup creates all `count` command buffers;
+submission indexes that array using the existing C call index. At the k-th
+construction, k-1 buffers occupy a pool of count slots, with k <= count. No
+completion is needed to provide a free slot, and unrelated callers cannot occupy
+this pool. Creation does not enqueue a buffer; encoding and commit occur on
+submission, so an earlier unused index does not hold a queue position.
+The former caller-provided queue and example-specific `3 * count` workaround are
+removed. This establishes the bound for the current declared extent, not a
+completed reusable-stream lifecycle or a claim about all native launch costs.
 
 ## Program.copy
 

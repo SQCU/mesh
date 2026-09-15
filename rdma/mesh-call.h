@@ -7,7 +7,7 @@ struct mesh_call;
 struct mesh_function;
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
 struct mesh_operand { void *data; size_t bytes; uint32_t page,index; };
-typedef void (*mesh_submit)(struct mesh_call *,void *,const struct mesh_operand *,struct mesh_operand *);
+typedef void (*mesh_submit)(struct mesh_call *,uint32_t,void *,const struct mesh_operand *,struct mesh_operand *);
 typedef void (*mesh_dispose)(void *);
 
 /* design/algorithm-sources.md#programkernel_call */
