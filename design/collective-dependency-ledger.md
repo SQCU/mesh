@@ -94,6 +94,12 @@ It adds no remote consumer-retirement acknowledgement.
 TN3205 exchanges endpoint metadata out of band. Mesh realizes endpoint and transfer
 configuration before transport execution; numerical functions do not perform pairing.
 
+Configured links own independent connections and progress threads. Links sharing
+a named device reuse its protection domain and registration. A connection's setup
+exchange does not wait for every other link. None of these facts selects a
+collective verb: the calling program defines its scatters and gathers explicitly.
+See [configured peers](async-collectives.md#configured-peers).
+
 ## D14. Teardown retains outstanding device storage
 
 JACCL's transport owns connection resources and registered memory. Mesh realizes

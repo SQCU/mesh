@@ -4,8 +4,8 @@ The [user's requirements](collective-goals.md) define scope. This document
 explains the source; it does not add requirements.
 
 The previous claim of full completion is withdrawn. The source demonstrates
-finite producer/collective/consumer chains, but a single-use value extent, one-peer
-transport and example-only integration do not establish the reusable deployment
+finite producer/collective/consumer chains, but a single-use value extent and
+example-only integration do not establish the reusable deployment
 interface. The disposition table below records implemented mechanisms;
 it is not proof that those narrower mechanisms satisfy the deployment target.
 
@@ -162,6 +162,63 @@ The mechanisms use [Apple TN3205](https://developer.apple.com/documentation/tech
 and [shared page mappings](algorithm-sources.md#programtensor). The alias layout
 and chunk-to-publication relation are Mesh's implementation, not upstream code.
 
+## Configured peers
+
+One bridge owns one canonical page arena and a configured list of links. There is
+no two-rank bound in `Mesh`, no global verbs provider or listener, and no inferred
+other rank. Each link has its own connection, send queue notices, work-request
+state, receive assignment metadata, TX thread and RX thread. Links using the same
+named device share its context, protection domain and registered memory. The wire
+alias map is common to all devices; each device contributes its own registration
+keys. Device initialization is serialized only at setup, before that device's
+links start; no numerical publication or work-request completion takes that lock.
+
+During realization, `send(part, to: rank)` resolves the configured peer and queue
+to a channel. Its two endpoints bind the transfer; other participants retain only
+the placement descriptor. The receive allocator and native views use that exact
+channel. Publication scatters notices to the predeclared send links and numerical
+workers. No peer lookup, collective inference or whole-mesh completion check runs
+between publication and posting. Each link posts receives and completes its own
+connection exchange before enabling its sends; a different link can already be
+progressing. Setup does not join every peer before allowing one link to run.
+
+The collective declarations still determine the communication relation. For
+example, `scatter([a, b], to: [2, 0])` sends a to rank 2 and b to rank 0;
+`gather([c, d], to: 1)` places those two sections at rank 1 in that order. Neither
+becomes a broadcast or all-gather because a third rank exists. Broadcast and
+all-collectives remain explicit calls. The source's reduction tree combines only
+the contributions named for each output; it does not wait for unrelated outputs.
+
+Transfer metadata, like notices, uses separate banks for the active and retiring
+client. A new client's setup cannot overwrite the transfer descriptors still read
+by an old link controller. The existing device-ownership record is cleared only
+after every old connection has destroyed its QPs. This protects teardown storage;
+it is not a completion barrier between tensor functions.
+
+`bin/mesh-bridge.sh` reads `links` from the bridge configuration. Each entry is
+`device,peer-rank,local-control-address,remote-control-address[,service]`; the
+optional TCP service defaults to 18519. Addresses and device names are supplied by
+the operator's mesh configuration. Distinct links sharing a local control address
+use distinct services. For example, a rank's configuration can contain:
+
+```sh
+node=0
+links=(
+  'rdma_en4,1,fe80::a%en4,fe80::b%en4'
+  'rdma_en5,2,fe80::c%en5,fe80::d%en5'
+)
+```
+
+These addresses illustrate the fields, not observed hardware. Keep the configured
+arena, block and queue geometry alongside this list. Each peer supplies the
+matching endpoint description with its own local interface names. The lower
+configured node number dials that link's control endpoint. No node number is
+reserved as the single server. The transport uses the explicitly configured RDMA
+links; it does not invent routes or placement. `rdma/peers.py` now emits the
+supported link arguments without the obsolete detour and hop-limit flags.
+The old `peer=` setting and machine-specific one-peer example profiles are gone.
+Status reports each link's phase and error separately.
+
 ## Native contiguous operands
 
 `TensorFunction` owns its preparation function. Its native constructor takes
@@ -249,8 +306,10 @@ workers alive; it does not gate tensor issuance.
 
 ## Current extent and remaining work
 
-The native bridge has one peer. This source exposes world sizes 1 and 2, up to
-8 numerical workers, and the configured transport queues. Numerical sections can span arbitrarily many transport chunks within the
+The one-peer restriction has been removed. World size and operand owners come
+from the caller. The bridge realizes a list of explicitly configured peer links,
+up to 8 numerical workers, and configured transport queues per link. Numerical
+sections can span arbitrarily many transport chunks within the
 configured arena. The transport count is internal; larger tensors do not require
 caller-side repartitioning.
 The programs are finite AOT data flows. One `start()` realizes the configuration;
@@ -284,8 +343,8 @@ over world size 1 follows from this source change.
 
 There is no runtime testing gate here. The bridge, C and Swift libraries, configured Core ML chain and synchronization
 counterexample are build targets.
-They have not been run or deployed by this change. Both participants
-need the source's ABI 41 bridge before these callers can attach.
+They have not been run or deployed by this change. Participants
+need the source's ABI 42 bridge and explicit link configuration before these callers can attach.
 
 Client attachment and bridge startup no longer run a process-memory ranking scan.
 The unrelated `mesh-memory.h`, its `--memory-check` command and launch-script hook
@@ -304,8 +363,8 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 
 | Counted set | Before | Current |
 |---|---:|---:|
-| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,715 lines / 992 files |
-| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,393 lines / 13 files |
+| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,774 lines / 992 files |
+| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,450 lines / 13 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 25 lines |
 | Engine's deleted mesh_matrix.swift, tools/mesh/sync.sh and replacement matrix example | 203 lines | 0 lines |
 
@@ -348,14 +407,15 @@ Configuration loops, capacity checks while posting native work requests, indexed
 operand dependencies, reference updates and native launch operations remain.
 There is no whole-function readiness scan, caller release protocol, remote
 consumer acknowledgement or default remote-fill wait. The finite storage extent,
-one-peer transport and native API contracts above remain explicit limits. Builds
+and native API contracts above remain explicit limits. Builds
 establish integration consistency; no runtime measurements or speedup claims are
 used as evidence for these source properties.
 
 The generic Metal invocation selects command buffers prepared during realization,
 with pool capacity owned by Mesh for every declared call. Native view
 preparation and raw callbacks both support multiple input and output operands.
-The transport supports one peer. TX polls completions after each edge's available chunk posts instead of delaying
+Each configured link has independent TX and RX workers. TX polls completions
+after each edge's available chunk posts instead of delaying
 polling until the entire publication list is processed.
 The remaining transport and lifetime restrictions need disposition against the
 user's requirements; accepting a convenient example does not settle them.
@@ -371,9 +431,16 @@ including the operand allocation and native-view changes; removing the unused
 engine addition wrapper removes 8 more source lines. Eight existing prose comments were replaced with documentation citations;
 those equal-line replacements are not counted as structural reduction. Documentation changes are
 reported separately from that structural count. The bridge, native libraries
-and retained callers compile at ABI 41. Compilation does not establish RDMA
+and retained callers now compile at ABI 42. Compilation does not establish RDMA
 execution or end-to-end integration.
 
 The shared function-preparation path and configured Core ML caller add 28 source
 lines net relative to `98742c8`, including deletion of the fixed scalar caller.
 This is implementation growth, not documentation migration or claimed reduction.
+
+The multi-peer replacement adds 59 maintained source lines net relative to
+`bd0b779`: 57 in the replacement paths and 2 in the launch script. That net
+count includes replacing a two-line source comment with one documentation
+citation; the implementation change excluding that migration is +60 lines. Deleting the
+15 lines of obsolete machine-specific configuration is reported separately;
+configuration files and these documentation edits are outside the source count.

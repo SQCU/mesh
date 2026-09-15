@@ -77,8 +77,20 @@ The fixed scalar chain has also been deleted. Its replacement is the
 functions, reduce-scatter and supplied consumers at each declared depth. The
 function representation is shared by calls, maps and reductions; model stages
 remain caller code.
-The earlier completion claim was too broad: the single-use value extent, one-peer
-transport and example-only integration remain
+The earlier completion claim was too broad: the single-use value extent and
+example-only integration remain
 implementation restrictions, not user-authorized definitions of the deployment
 target. The implementation description records these gaps and actual transport
 costs. Deletion, documentation and successful builds alone are not completion.
+
+The subsequent peer-count clarification is authoritative:
+
+> special casing one peer is an error in library design for the same reason as special casing exactly one tensor function ever and no guardless continuation of work between multiple tensor functions.
+
+> note that peer>1 prohibits the use of type inference of broadcasts or alls rather than defined scatters and defined gathers
+
+The one-peer restriction has now been removed from the Swift rank bound, endpoint
+binding, bridge configuration, connection ownership and send notification layout.
+The [configured links](async-collectives.md#configured-peers) share canonical
+storage and device registrations, with independent TX/RX progress. Collective
+verbs remain explicit and are not inferred from rank count or tensor types.

@@ -178,7 +178,7 @@ public final class Mesh {
 
     // design/algorithm-sources.md#program
     public init(region: String, rank: Int, size: Int, workers: Int, count: Int = 1) throws {
-        precondition((1...2).contains(size) && (0..<size).contains(rank) && count > 0)
+        precondition(size > 0 && (0..<size).contains(rank) && count > 0)
         let memory = try MeshMemory(region)
         let owner = Unmanaged.passRetained(memory).toOpaque()
         guard let calls = mesh_calls_create(memory.context, UInt32(workers), UInt32(count), owner,
@@ -281,14 +281,20 @@ public final class Mesh {
     // design/algorithm-sources.md#programcopy
     public func send(_ part: TensorPart, to destination: Int, queue: Int = 0) throws -> TensorPart {
         if part.rank == destination { return part }
+        precondition((0..<size).contains(destination))
+        let identity = transfer; transfer += 1
+        let participating = rank == part.rank || rank == destination
+        let channel = participating ? mesh_peer_channel(memory.context, UInt32(rank == destination ? part.rank : destination), UInt32(queue)) : 0
+        if channel == MESH_ABSENT { throw POSIXError(.ENETUNREACH) }
         let output = TensorPart(rank: destination, bytes: part.bytes,
                                 storage: destination == rank ? try MeshSection(memory, bytes: part.bytes, count: part.shared ? 1 : count,
-                                                                               shared: part.shared, receiveQueue: UInt32(queue)) : nil, shared: part.shared)
-        let identity = transfer; transfer += 1
-        let local = rank == destination ? output : part
-        let error = mesh_transfer_bind(memory.context, UInt32(queue), rank == destination ? 1 : 0,
-                                       identity, local.storage!.section)
-        if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
+                                                                               shared: part.shared, receiveQueue: channel) : nil, shared: part.shared)
+        if participating {
+            let local = rank == destination ? output : part
+            let error = mesh_transfer_bind(memory.context, channel, rank == destination ? 1 : 0,
+                                           identity, local.storage!.section)
+            if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
+        }
         return output
     }
 
@@ -365,7 +371,7 @@ public final class Mesh {
         if storageError != 0 { throw POSIXError(POSIXErrorCode(rawValue: storageError)!) }
         for prepare in preparations { try prepare() }
         preparations.removeAll()
-        if size > 1 { mesh_transfers_start(memory.context) }
+        mesh_transfers_start(memory.context)
         let error = mesh_calls_start(calls)
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
     }

@@ -19,7 +19,10 @@ full input, or gathered intermediate is needed. G may implement a supplied
 nonlinear local consumer. The caller is responsible for a mathematically valid
 partition and useful placement; a transport fragment never changes that partition.
 
-With two sections owned by ranks 0 and 1:
+The source iterates the configured input and output lists independently; neither
+list nor world size has a two-participant restriction. Every remote contribution
+uses its two declared endpoints and configured peer channel. With two sections
+owned by ranks 0 and 1, one instance of this general relation is:
 
 | Rank | Local numerical work | Outgoing contribution | Reduction consumed locally |
 |---|---|---|---|

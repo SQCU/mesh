@@ -110,6 +110,18 @@ posting the first. Completion processing refills
 available send slots directly. RX independently refills receives before publishing
 the received section. No completion wait or new scheduler is introduced.
 
+The rdma-core authors' [queue-pair creation](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_create_qp.3)
+and [memory registration](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_reg_mr.3)
+associate QPs and registered memory with a protection domain. Mesh now keeps
+those device resources once per named device while realizing a separate connection
+and TX/RX progress pair for every configured link. Configured peer identities,
+channels and operand row ranges are resolved at setup. Publication scatters its
+row index to those links' queues through a precomputed membership bitset, independent
+of collective verb and peer count. Multiple links register the same canonical
+payload backing through their selected devices; they do not create operand copies.
+The [configured-peer description](async-collectives.md#configured-peers) records
+setup, per-link preposting, shared registration, retirement and configuration.
+
 ## Program.write
 
 The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html):

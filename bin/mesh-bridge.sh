@@ -9,7 +9,7 @@ LABEL=io.mesh.bridge
 BIN="$ROOT/rdma/mesh-flow"
 STAT="$ROOT/rdma/mesh-stat"
 
-scope=gui; mesh_pct=; node=0; peer=""; region=/mesh0
+scope=gui; mesh_pct=; node=0; links=(); region=/mesh0
 mesh_arena_pages=; mesh_block_pages=; mesh_qps=1
 
 if [ -f "$CONF" ]; then . "$CONF"; fi
@@ -17,6 +17,8 @@ mesh_qps="${MESH_QPS:-$mesh_qps}"
 mesh_arena_pages="${MESH_ARENA_PAGES:-$mesh_arena_pages}"
 mesh_block_pages="${MESH_BLOCK_PAGES:-$mesh_block_pages}"
 geometry=(-A "$mesh_arena_pages" -B "$mesh_block_pages")
+link_args=()
+for link in "${links[@]}"; do link_args+=(--link "$link"); done
 [ -n "$mesh_pct" ] && geometry+=(-M "$mesh_pct")
 
 case "$scope" in
@@ -31,7 +33,7 @@ gui)
 esac
 
 wire_check() {
-  want=$("$BIN" --layout "${geometry[@]}") || return $?
+  want=$("$BIN" --layout -I "$node" "${geometry[@]}" "${link_args[@]}") || return $?
   if [ "$want" -gt "$(sysctl -n vm.global_user_wire_limit)" ]; then
     if [ "$(id -u)" = 0 ]; then sysctl -w vm.global_user_wire_limit="$want"
     else sudo -n sysctl -w vm.global_user_wire_limit="$want"; fi
@@ -49,7 +51,7 @@ write_plist() {
 <string>$BIN</string><string>-I</string><string>$node</string>
 $( printf '<string>%s</string>' "${geometry[@]}" )
 <string>-s</string><string>$region</string>
-$( [ -n "$peer" ] && printf '<string>%s</string>' "$peer" )
+$( for arg in "${link_args[@]}"; do printf '<string>%s</string>' "$arg"; done )
 </array>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
@@ -80,9 +82,9 @@ do_stop() {
 
 do_start() {
   if launchctl print "$DOM/$LABEL" >/dev/null 2>&1; then
-    have=$("$STAT" "$region" 2>/dev/null | tr ',' '\n' | grep -E '"(rows|block|qps)"' | tr -d '" ' | tr '\n' ' ')
-    want="rows:$mesh_arena_pages block:$mesh_block_pages qps:$mesh_qps"
-    if [ -n "$(pid_of)" ] && echo "$have" | grep -q "rows:$mesh_arena_pages " && echo "$have" | grep -q "block:$mesh_block_pages " && echo "$have" | grep -q "qps:$mesh_qps "; then
+    have=$("$STAT" "$region" 2>/dev/null | tr ',' '\n' | grep -E '"(rows|block|qps|links)"' | tr -d '" ' | tr '\n' ' ')
+    want="rows:$mesh_arena_pages block:$mesh_block_pages qps:$mesh_qps links:${#links[@]}"
+    if [ -n "$(pid_of)" ] && echo "$have" | grep -q "rows:$mesh_arena_pages " && echo "$have" | grep -q "block:$mesh_block_pages " && echo "$have" | grep -q "qps:$mesh_qps " && echo "$have" | grep -q "links:${#links[@]} "; then
       echo "mesh-bridge: already running as $(pid_of) with $want"; return 0
     fi
     if "$STAT" "$region" 2>/dev/null | grep -qE '"client":[1-9]'; then

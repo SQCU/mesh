@@ -163,7 +163,7 @@ static void *mesh_call_progress(void *argument){
   struct mesh_call_worker *worker=argument;
   struct mesh_calls *calls=worker->calls;
   struct hdr *m=calls->context->M;
-  uint32_t queue=mesh_notice_queue(calls->context->client,MESH_NOTICE_COMPUTE+worker->index);
+  uint32_t queue=mesh_notice_queue(m,calls->context->client,m->links+worker->index);
   pthread_setname_np("mesh.numerical");
   while(atomic_load_explicit(&calls->running,memory_order_acquire)){
     uint32_t row=mesh_notice_take(m,queue);
@@ -196,7 +196,7 @@ void mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
   uint32_t workers=calls->root_workers;
   while(workers){
     uint32_t worker=(uint32_t)__builtin_ctz(workers);workers&=workers-1;
-    mesh_notice_push(calls->context->M,mesh_notice_queue(calls->context->client,MESH_NOTICE_COMPUTE+worker),calls->first+index);
+    mesh_notice_push(calls->context->M,mesh_notice_queue(calls->context->M,calls->context->client,calls->context->M->links+worker),calls->first+index);
   }
 }
 
@@ -238,18 +238,19 @@ void mesh_calls_destroy(struct mesh_calls *calls){
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint32_t identity,struct mesh_section section){
   struct hdr *m=context->M;
-  if(queue>=m->qps)return EINVAL;
-  _Atomic uint32_t *length=mesh_order_length(m,queue,receive);
+  if(queue>=m->links*m->qps)return EINVAL;
+  _Atomic uint32_t *length=mesh_order_length(m,context->client,queue,receive);
   uint32_t index=atomic_load_explicit(length,memory_order_relaxed);
   if(index==mesh_blocks(m))return ENOSPC;
   if(!receive)for(uint32_t value=0;value<section.count;value++){
     uint32_t row=mesh_section_row(section,value);
     int error=mesh_buffer_retain(m,row,section.pages);if(error)return error;
-    uint32_t uses=atomic_fetch_or_explicit(&mesh_buffers(m)[row].uses,UINT32_C(1)<<(MESH_COMPUTE_THREADS+queue),memory_order_relaxed);
-    if(!(uses>>MESH_COMPUTE_THREADS) && mesh_bit(m,MESH_PRESENT,row))
-      mesh_notice_push(m,mesh_notice_queue(context->client,MESH_NOTICE_SEND),row);
+    uint32_t link=queue/m->qps;
+    uint64_t bit=UINT64_C(1)<<(link%64),uses=atomic_fetch_or_explicit(&mesh_send_uses(m,row)[link/64],bit,memory_order_relaxed);
+    if(!(uses&bit) && mesh_bit(m,MESH_PRESENT,row))
+      mesh_notice_push(m,mesh_notice_queue(m,context->client,link),row);
   }
-  mesh_transfers(m,queue,receive)[index]=(struct mesh_transfer){section.first,identity,section.count,section.stride,m->block,section.bytes};
+  mesh_transfers(m,context->client,queue,receive)[index]=(struct mesh_transfer){section.first,identity,section.count,section.stride,m->block,section.bytes};
   atomic_store_explicit(length,index+1,memory_order_release);
   return 0;
 }
@@ -257,9 +258,9 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfers_prepare(struct mesh_ctx *context){
   struct hdr *m=context->M;
-  for(uint32_t q=0;q<m->qps;q++){
-    uint32_t count=atomic_load(mesh_order_length(m,q,MESH_RECEIVE)),pages=0;
-    struct mesh_transfer *transfers=mesh_transfers(m,q,MESH_RECEIVE);
+  for(uint32_t q=0;q<m->links*m->qps;q++){
+    uint32_t count=atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE)),pages=0;
+    struct mesh_transfer *transfers=mesh_transfers(m,context->client,q,MESH_RECEIVE);
     for(uint32_t i=0;i<count;i++)pages+=transfers[i].count*mesh_buffers(m)[transfers[i].local_row].pages;
     if(!pages)continue;
     uint32_t page=mesh_arena_alloc(context,pages,m->block);
@@ -318,10 +319,10 @@ void mesh_section_release(struct mesh_ctx *context,struct mesh_section section){
 /* design/algorithm-sources.md#programtensor */
 size_t mesh_receive_pages(struct mesh_ctx *context,uint32_t queue,uint32_t span,uint32_t *pages){
   struct hdr *m=context->M;
-  uint32_t count=atomic_load_explicit(mesh_order_length(m,queue,MESH_RECEIVE),memory_order_acquire);
+  uint32_t count=atomic_load_explicit(mesh_order_length(m,context->client,queue,MESH_RECEIVE),memory_order_acquire);
   uint32_t first=MESH_ABSENT,total=0;
   for(uint32_t i=0;i<count;i++){
-    struct mesh_transfer transfer=mesh_transfers(m,queue,MESH_RECEIVE)[i];
+    struct mesh_transfer transfer=mesh_transfers(m,context->client,queue,MESH_RECEIVE)[i];
     for(uint32_t index=0;index<transfer.count;index++){
       uint32_t row=transfer.local_row+index*transfer.stride;
       if(first==MESH_ABSENT)first=atomic_load_explicit(&mesh_page(m)[row],memory_order_acquire);

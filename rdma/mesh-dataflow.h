@@ -7,6 +7,14 @@ struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; uint32_t rows,aren
 static inline uint32_t mesh_block_pages(const struct mesh_ctx *c){ return c->M->block; }
 static inline uint32_t mesh_arena_pages(const struct mesh_ctx *c){ return c->M->rows; }
 static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return mesh_at(c->M,page); }
+/* design/algorithm-sources.md#programcopy */
+static inline uint32_t mesh_peer_channel(struct mesh_ctx *c,uint32_t peer,uint32_t queue){
+  for(uint32_t i=0;i<c->M->links;i++)if(mesh_links(c->M)[i].peer==peer){
+    if(queue<c->M->qps)return i*c->M->qps+queue;
+    queue-=c->M->qps;
+  }
+  return MESH_ABSENT;
+}
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
 

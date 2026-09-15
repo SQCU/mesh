@@ -256,26 +256,10 @@ def bridge_arguments(realized: dict) -> dict:
     for identity, number in identities.items():
         links = sorted((tuple(a), tuple(b)) if a[0] == identity else (tuple(b), tuple(a))
                        for a, b in graph["edges"] if identity in (a[0], b[0]))
-        ports = {a[1]: i for i, (a, b) in enumerate(links)}
-        arguments = ["-I", str(number), "--hop-limit", str(min(65535, len(identities) + 1))]
+        arguments = ["-I", str(number)]
         for a, b in links:
             local, remote = endpoints[a], endpoints[b]
             arguments += ["--link", f"rdma_{a[1]},{identities[b[0]]},{local['address']}%{a[1]},{remote['address']}%{a[1]}"]
-        for route in realized["routes"]:
-            if route["source"] == identity:
-                arguments += ["--route", f"{identities[route['target']]}:{ports[route['port']]}"]
-                adjacency = {n: [] for n in identities if n != identity}
-                for a, b in graph["edges"]:
-                    if identity not in (a[0], b[0]):
-                        adjacency[a[0]].append(b[0]); adjacency[b[0]].append(a[0])
-                reachable, queue = {route["target"]}, deque([route["target"]])
-                while queue:
-                    for neighbor in adjacency[queue.popleft()]:
-                        if neighbor not in reachable:
-                            reachable.add(neighbor); queue.append(neighbor)
-                for a, b in links:
-                    if a[1] != route["port"] and b[0] in reachable:
-                        arguments += ["--route", f"{identities[route['target']]}:{ports[a[1]]}"]
         commands[identity] = dict(node=number, arguments=arguments)
     return commands
 
