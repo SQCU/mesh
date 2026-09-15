@@ -67,7 +67,9 @@ function object stores the supplied function and section descriptors once. Each
 value index has an operand array, pending-operand count and completion record
 allocated during realization. For descriptor `(first, stride)`, its logical row
 is `first + index * stride`. A shared constant has stride zero. Setup retains
-each indexed input use. Before activating transport, setup stores consumer
+each transient indexed input use and each shared input binding. Shared inputs
+remain retained until the prepared function is destroyed, rather than being
+retained and released separately for every value index. Before activating transport, setup stores consumer
 references in contiguous row ranges, indexed by an offset array. Constants already
 published at setup have no pending arrival edge. A runtime publication visits
 only that section's range, without following linked use records. A consumer with multiple operands becomes
@@ -95,8 +97,20 @@ worker resolves only received inputs through the canonical page table and invoke
 the supplied function. Input references keep local backing fixed through completion;
 received addresses reflect the actual placement of incoming bytes. CPU completion is its return; Metal and Core ML
 use their native asynchronous completion. Successful completion publishes the
-outputs and releases input references. Failures are recorded and do not publish
+outputs and releases transient input references. Completion traverses a contiguous
+list of transient input descriptors prepared at setup; it does not test each
+input's storage kind or touch shared-constant reference counts. Failures are recorded and do not publish
 failed output as valid data.
+
+The lifetime references for native call records are also known at setup. Before
+starting a numerical worker, `mesh_calls_start` acquires its worker reference and
+all of its declared call references together. Launch performs no reference-count
+increment. Each native completion releases its existing call reference. On exit,
+that worker cancels the references for its unissued records and releases its own
+reference in one update. It identifies those records from the pending counts it
+alone owns; this traversal occurs after numerical progress stops, not during
+dispatch. A failed thread creation returns that worker's entire reserved count.
+The ordinary Mesh owner reference keeps startup alive throughout these steps.
 
 For N operand bytes and internal payload capacity C, setup represents
 K = ceil(N / C) transport chunks. A value has K page-table entries and one
@@ -390,8 +404,8 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 
 | Counted set | Before | Current |
 |---|---:|---:|
-| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,772 lines / 992 files |
-| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,448 lines / 13 files |
+| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,782 lines / 992 files |
+| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,458 lines / 13 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 25 lines |
 | Engine's deleted mesh_matrix.swift, tools/mesh/sync.sh and replacement matrix example | 203 lines | 0 lines |
 
@@ -486,3 +500,13 @@ arrays add one 32-bit sentinel each. These are representation sizes, not timing
 measurements. The changes preserve distinct copies of a source and the declared
 peer/queue mapping; they neither infer a collective verb nor change the finite
 invocation extent. Documentation changes are separate from the source reduction.
+
+The scoped-reference change adds 10 maintained source lines relative to `e798fe7`.
+For N value indices, S shared input bindings and V transient input bindings, input
+retains change from N*(S+V) to S+N*V. Numerical completion releases only the N*V
+transient references; function destruction releases S shared references. The
+per-call global retain is replaced by one acquisition per worker at startup.
+One additional descriptor slot per input is reserved within the existing function
+metadata allocation for the contiguous transient-input list. There is no extra
+per-value allocation or runtime input-kind branch. These are source operation and
+storage counts, not measured latency gains; the finite invocation extent remains.

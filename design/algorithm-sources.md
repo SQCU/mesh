@@ -24,6 +24,13 @@ references for indexed sections and virtual mappings of actual shared backing.
 George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
 (1960): reference counting. The user explicitly requested automatic ownership
 release and background pool return, without caller free/done calls.
+The implementation now groups shared-input ownership by prepared function binding,
+while transient inputs retain one reference per indexed use. Native call-record
+references are acquired together before their worker starts; dispatch transfers
+ownership from an unissued record to its native call without changing the total.
+The [lifetime derivation](pages-and-functions.md#what-the-page-table-is) describes
+completion, cancellation and destruction. This is an application of counted
+ownership to known lifetimes, not a new collection algorithm attributed to Collins.
 Contiguous sections use chunk-indexed backing and relative numerical byte offsets,
 with one presence bit and ownership record per numerical value. The
 [address and ownership derivation](pages-and-functions.md#block-addressing)

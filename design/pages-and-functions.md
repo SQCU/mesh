@@ -37,12 +37,30 @@ setup decomposes the operand into the contiguous sections required by the chosen
 numerical calls, preserving contraction contributions and output coordinates.
 
 For section s, outstanding ownership is R(s) = P(s) + C(s) + T(s) + E(s): unfinished
-production, configured numerical uses, transport uses, and external observations.
+production, configured numerical owners, transport uses, and external observations.
 Setup derives known uses from the feed-forward graph. Existing completions and
 automatic object lifetimes discharge them. Early publication does not release an
 unfinished producer. A background collector returns zero-reference backing to the
 writable pool without clearing payload bytes. Independent work already has its
 configured sections and never awaits that collection.
+
+For a transient input, each indexed use is a numerical owner and its native
+completion releases that reference. For an immutable shared input, the prepared
+function holds one reference per binding across all its value indices. Destruction
+of that function follows completion or cancellation of all its call records and
+releases the shared reference. Thus the constant remains live throughout every
+native read without per-invocation reference updates. This groups equal storage
+lifetimes; it does not remove input-arrival dependencies or alter tensor values.
+
+For the call storage itself, let O be the Mesh owner reference, W the active
+worker references, U the references reserved for unissued records, and A the
+references for issued calls whose native callbacks have not finished. Its count
+is O+W+U+A. Worker startup acquires its contribution to W+U in one update.
+Issuing a call transfers one reference from U to A without changing the count.
+Native completion removes one from A. Worker exit removes its remaining U and
+its W reference; only that worker reads and changes its records' pending counts.
+This keeps callback operands and memory alive without a launch-time atomic retain,
+a join in submission, or a caller completion/free protocol.
 
 The implementation trusts caller configuration and backend completion contracts.
 Its ownership records describe actual accesses; they do not police arbitrary
@@ -111,8 +129,9 @@ costs one OS page of storage per chunk; framing costs are recorded in
 Each value has exactly one producer: setup for a constant, one numerical call,
 or one receive. Its initial reference represents that write. `mesh_publish`
 releases this reference once after publishing the declared uses. There is no
-producer flag or duplicate-publication check. Numerical and transport references
-were retained during realization and end through their own native completions;
+producer flag or duplicate-publication check. Transient numerical and transport
+references were retained during realization and end through their own native completions;
+shared numerical references end with their prepared function's lifetime;
 external handles have ordinary automatic lifetimes. This preserves
 `R = P + C + T + E` while removing a redundant atomic producer-flag operation.
 The writable pool is still returned by the existing background collector.
