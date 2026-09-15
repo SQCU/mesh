@@ -59,6 +59,7 @@ operator's other normative sentences are collected verbatim in
 | I15 | No tests, gold harnesses, evidence JSON, provenance records, or trace exports. Verification is source reading plus §5 checks plus public measurements. | `measurements/` gains only public-endpoint runs |
 | I16 | Size is evidence. A library larger than the §5 rows need, while any of rows 13–19 is ✗, is deleted and rewritten from §2–§3, not revised: revision cost scales with what exists, deletion cost does not. Reference size class: MLX distributed (8 functions), JACCL (~1.5k lines). | `wc -l swift/Mesh.swift rdma/*.c rdma/*.h` ≤ 3,000 while rows 13–19 are open; a commit that grows the library without flipping a row is reverted |
 | I17 | No pointer chase on the hot path. Every runtime structure touched between a publication and the next numerical submission is a contiguous array indexed by an integer fixed at `start()`: presence stamps, consumer ranges, pending counts, operand addresses, free lists. No linked list, hash map, tree, page-table lookup, page permutation, or software capacity counter is consulted after `start()`. The only runtime conditionals are: a pending count reaching zero, a reference count reaching zero, and the verbs call refusing a post. | `grep -n "->next\|hash\|dict\|tree\|permut\|assign" rdma/mesh-call.c rdma/mesh-dataflow.c rdma/mesh-flow.c` empty on the publish/receive/submit paths; the three conditionals above are the only `if` in those functions |
+| I18 | Guardless and waitless everywhere, as a shared feature of every row. After `start()`, no function in the library — on any path, in any backend binding, in any collective composition — waits, spins, sleeps, retries, polls, or branches on data other than the three conditionals of I17. A row that introduces one anywhere fails, whatever else it delivers; a row is ✓ only if every W row (§4 group W) for the paths it touches is still ✓ after the change. | group W audit table below; each W row lists the function and its complete set of conditionals |
 
 ## 2. Public surface (closed)
 
@@ -162,6 +163,23 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 **T7. Multi-tenant fabric by lease.** bridge serves N clients; `Mesh(…, lease: Lease(qpsPerLink:, arenaBytes:))`; setup returns errno when the lease exceeds `max_qp`/arena. Ref: NCCL communicator per job; PMIx. Check: two users' programs run on disjoint QPs/arena; `kill -TERM` of one leaves the other untouched; no `SIGKILL` path.
 
+### W — waitless/guardless audit, one row per runtime path (shared by every other row)
+
+Each W row names the functions on one path and is ✓ only when their bodies contain no
+wait/spin/sleep/retry/poll and no data-dependent branch beyond: pending count → 0,
+reference count → 0, verbs post refused. The check is the function body itself, quoted
+in the Evidence column with its conditionals enumerated. Any later commit touching a
+path re-audits its W row before its own row can flip.
+
+**W1. Publish path** — numerical completion → `mesh_publish` → consumer range walk → enqueue. Files: `rdma/mesh-call.c` (`mesh_call_complete`, `mesh_publish`), `rdma/mesh-dataflow.c`.
+**W2. Receive path** — CQ completion → presence store → publish. Files: `rdma/mesh-flow.c` (`rx_thread`, receive completion handler).
+**W3. Send path** — publication notice → post chunks → completion → reference release. Files: `rdma/mesh-flow.c` (`tx_thread`, post loop, send completion).
+**W4. Submit path** — `Mesh.submit` → `mesh_calls_submit` → root workers. Files: `swift/Mesh.swift`, `rdma/mesh-call.c`.
+**W5. Result/collect path** — `Mesh.result`, refcount → free list, `mesh_collect`. Files: `rdma/mesh-call.c`, `rdma/mesh-dataflow.c`.
+**W6. Invocation path** — worker dequeue → operand array → supplied function → native completion handler. Files: `rdma/mesh-call.c` (`mesh_call_progress`, `mesh_call_submit`), `swift/Mesh.swift` (`MeshInvocation`, `TensorFunction.prepare`).
+**W7. Collective compositions** — `send/broadcast/scatter/gather/all*/reduce*` in `swift/Mesh.swift`: declaration-time only; no runtime code at all.
+**W8. Caller bindings** — engine `mesh_layer.swift` and any example: the bound closures encode and return; no `waitUntilCompleted`, no presence read, no allocation.
+
 ### X — execution-shape typings (what "streaming" means at the cache line)
 
 **X1. Presence is a dense stamp array.** `presence[instance][section]`: one word each, indexed by integers fixed at `start()`; `mesh_publish` is one store plus the L3 range walk. Ref: Monsoon presence bits; I-structures; Lamport single-writer. Check: no map/list/hash on the publish path (I17); the stamp array's address is computed once.
@@ -219,6 +237,14 @@ subset, never as "done".
 | 17 | E1 engine layer via Mesh | ✓ (unrun) | engine `6507370` `mesh_layer.swift` 229 lines, 2 collective points, 12 existing encoders bound, no kernel file changed; target `.build/libgemma_mesh.dylib` builds; not yet run on the pair (row 19) |
 | 18 | E2 public measurement + Karp–Flatt | ◐ | script `metal-microbench/tools/mesh/report.py` (engine `feda6a6`): public endpoint only, memory-state guard, S/e/capability-sum/bounds/verdict; dry-run reproduces 1.42x, 1.08x and the ten-minute table; **no measured run yet** (needs E1) |
 | 19 | E3 depthwise chain not slower | ✗ | — |
+| W1 | publish path waitless/guardless | ◐ audit | — |
+| W2 | receive path | ◐ audit | — |
+| W3 | send path | ◐ audit ("available posts" capacity logic) | — |
+| W4 | submit path | ◐ audit | — |
+| W5 | result/collect path | ◐ audit | — |
+| W6 | invocation path | ◐ audit (invocation-time page resolve) | — |
+| W7 | collective compositions declaration-only | ✓ (verify) | `Mesh.swift:279-365` |
+| W8 | caller bindings encode-and-return | ✓ (verify) | `mesh_layer.swift` 1c2b5d4: no waits |
 | 19a | X1 dense presence stamps | ◐ | stamps exist; verify no map/list on the publish path |
 | 19b | X2 countdown firing | ◐ | pending counts exist (`mesh-call.c`); verify no presence predicate at runtime |
 | 19c | X3 addresses fixed at realize; RECV on the planned page; permutation deleted | ✗ | `mesh_receive_assign` page-index exchange still present |
@@ -237,7 +263,7 @@ subset, never as "done".
 | 28 | T6 replicas | ✗ | — |
 | 29 | T7 lease / multi-tenant | ✗ | — |
 
-Rows 19a–19g are the typings that make rows 13–19 mean streaming at the cache line rather than in prose; they are assigned before row 20. Rows 20–29 are required for the 4× M5 Ultra + 4× M4 Pro deployment and for the solver
+Rows W1–W8 are the shared waitless/guardless feature: every other row's ✓ depends on them staying ✓ (I18). Rows 19a–19g are the typings that make rows 13–19 mean streaming at the cache line rather than in prose; they are assigned before row 20. Rows 20–29 are required for the 4× M5 Ultra + 4× M4 Pro deployment and for the solver
 caller; they are not optional and not "later" — they are after row 19. Rows whose files
 are disjoint may be worked in parallel worktrees: {14,15,16} share `Mesh.swift`/`mesh-call.c`;
 {23,24} share `mesh-flow.c`; {17},{18},{26} are independent; {13},{19} need the link
@@ -257,7 +283,7 @@ An agent picking "the first ✗/◐ row" skips assigned rows and takes the next 
 | 18 | E | `mmb-wt/E2` → `row/E2` (metal-microbench) |
 | 13 (Core ML chain) | G | main checkouts + both nodes; the only lane on the link |
 
-Unassigned and open: 19 (needs 17, 18), 19a–19g (X typings; 19c and 19e first), 20, 21, 22, 25, 27, 28, 29. Note: the laptop
+Unassigned and open: 19 (needs 17, 18), W1–W6 (audit, one lane, read-only until findings), 19a–19g (X typings; 19c and 19e first), 20, 21, 22, 25, 27, 28, 29. Note: the laptop
 bridge binary currently runs from `mesh-wt/P1/rdma/mesh-flow`; do not prune that worktree
 while the bridge is up.
 
