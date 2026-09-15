@@ -20,8 +20,8 @@ struct CoreMLChain {
             options.outputBackings = [args[7]: y]
             return options
         }
-        let transform: (MeshBindings<MLFeatureProvider>, MeshBindings<MLPredictionOptions>) -> TensorFunction = { inputs, outputs in
-            .prediction(model) { x, y in (inputs[x[0]], outputs[y[0]]) }
+        let transform: ([MeshBindings<MLFeatureProvider>], [MeshBindings<MLPredictionOptions>]) -> TensorFunction = { inputs, outputs in
+            .prediction(model) { x, y in (inputs[0][x[0]], outputs[0][y[0]]) }
         }
         let input = try mesh.tensor(on: 0, sections: [width * 4, width * 4, width * 4])
         let sectionCount = input.count
@@ -33,10 +33,14 @@ struct CoreMLChain {
         }
         let placed = try mesh.gather(input, to: size - 1)
         let partials = try mesh.tensor(on: size - 1, sections: input.map(\.bytes))
-        for i in partials.indices { mesh.map(transform, input: placed[i], output: partials[i], inputView: features, outputView: options, worker: i) }
+        for i in partials.indices {
+            mesh.map(transform, inputs: [placed[i]], outputs: [partials[i]], inputViews: [features], outputViews: [options], on: size - 1, worker: i)
+        }
         let collected = try mesh.gather(partials, to: 0)
         let result = try mesh.tensor(on: 0, sections: input.map(\.bytes))
-        for i in result.indices { mesh.map(transform, input: collected[i], output: result[i], inputView: features, outputView: options, worker: i) }
+        for i in result.indices {
+            mesh.map(transform, inputs: [collected[i]], outputs: [result[i]], inputViews: [features], outputViews: [options], on: 0, worker: i)
+        }
         try mesh.start()
         for index in 0..<mesh.count { mesh.submit(index) }
         withExtendedLifetime((mesh, result)) { dispatchMain() }

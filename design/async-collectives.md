@@ -43,29 +43,15 @@ using `outputs[0].index`. The function objects, collective routes and operand
 bindings are not rebuilt between submissions. Each index has distinct value
 storage; all four can be in flight without an edge between their computations.
 
-[`metal-microbench/examples/mesh-matrix.swift`](../../../metal-microbench/examples/mesh-matrix.swift)
-uses the engine's existing `MatrixOperations.multiply` for both stages and its
-existing addition encoder for all-reduce. Each row section j is split across
-contraction coordinates K_r. Scatter places `X[j,r]` beside `W[K_r,:]`;
-the supplied matrix function produces contributions to
-`Y[j] = sum_r X[j,r] W[K_r,:]`. All-reduce supplies Y[j] to each consumer,
-which computes distinct output columns `Z[j,r] = Y[j] W[:,K_r]`.
-Gather returns their indexed sections, reconstructing `(X[j] W) W` without
-assembling a copied dense tensor. The consumer uses the complete reduced input;
-there is no redundant second reduction. The algebra and actual operand layouts
-are detailed in [the caller documentation](../../../metal-microbench/docs/async_collectives.md).
-Row sizes 1, 8, 16 and 4 use separate numerical workers and have no cross-row
-dependency. Their payloads fit one wire frame and share transport queue zero.
-The caller supplies the backend and weight ownership. Four submitted
-indices reuse the same chain and canonical shared weight shards.
-The caller supplies a Metal device and encoder. Mesh realizes a private command
-queue for each declared Metal call, sized for its count of invocations. Direct
-calls, combining functions and native-view factories use the same constructor.
-All command buffers are constructed during realization; submission selects the
-prepared buffer by its existing invocation index, encodes and commits it.
-The example-specific command-pool formula and caller-owned queue are removed.
-This prevents command-pool exhaustion within the declared extent without imposing
-queue order between different numerical call definitions.
+The small matrix executable, generated weights and fixed shapes were deleted.
+They are not evidence for the deployment target. Mesh accepts functions as
+arguments; it does not implement or recognize a matrix algorithm, model, block,
+or layer. Caller composition supplies the repeated numerical dataflow.
+
+For Metal functions, Mesh realizes a private command queue and all command
+buffers during setup. Submission selects a prepared command buffer by invocation
+index, encodes and commits it. Direct calls and native-view factories use this
+same path.
 
 [`examples/coreml-chain.swift`](../examples/coreml-chain.swift) takes an existing
 compiled model, input/output feature names and width as arguments. It sends three
@@ -120,6 +106,9 @@ in RTR and exchanges setup completion before enabling sends. Runtime refill
 remains on the dedicated RX thread, before delivering the completed section.
 Publication directly indexes configured sends. Its buffer use mask names
 numerical workers and transport queues, replacing the separate send-source plane.
+After posting each published section's sends, TX drains its completion queues
+before processing the next published section. It does not postpone draining
+until the end of a detached publication list. RX progresses on its own thread.
 One transfer descriptor covers its extent and row stride. Local source tags are
 written during realization. Receive forwarding sets its local source tags before
 publication; each tag stays immutable through all sends of that value.
@@ -170,11 +159,13 @@ It posts one SEND and one matching RECV per communicated partial.
 ## Native contiguous operands
 
 The direct `TensorFunction` form takes already resolved operand spans. The
-higher-order `map` overload takes independent `inputView` and `outputView`
-functions, plus the function that prepares numerical submission. Each view
-function receives a `MeshSpan` during realization. Its `MeshBindings` holds the
+higher-order `map` overload takes input and output partial arrays, a view factory
+for each operand, and a function that prepares numerical submission. Each view
+factory receives a `MeshSpan` during realization. Its `MeshBindings` holds the
 prepared values and their operand-to-index function. The supplied submission
-function is constructed once from the two binding collections.
+function is constructed once from the two arrays of binding collections.
+The native form supports multiple varying inputs, shared constants, and multiple
+outputs. Constants are ordinary inputs; no separate constant-operand API is needed.
 
 A local operand selects a binding by value index; a shared constant selects
 index zero. A received operand selects its binding through a physical-page slot
@@ -183,13 +174,13 @@ index to an existing indexed numerical function. This keeps the selection in
 ordinary operand indexing. The former table of input/output pairs and its
 additional `MeshInvocation` dispatch layer have been deleted.
 
-The matrix caller uses `MatrixOperations.multiply` with independent input and
-output view arrays. One specialized operation accepts their indices at encoding.
+The existing `MatrixOperations.multiply` accepts independent input and output
+view arrays. One specialized operation accepts their indices at encoding.
 MPS matrices are prepared independently; its multiplication object is reused by
 that call's numerical worker. Metal/tensor paths select their existing pipeline
 at setup and pass the indexed buffers and offsets to the existing encoder. The
 ordinary fixed-operand `multiply` is the index-zero partial application of that
-same implementation, so local serving and mesh use one numerical implementation.
+same implementation. Mesh does not provide a competing numerical implementation.
 Core ML prepares feature providers and output options separately, then passes
 the selected pair to native asynchronous prediction.
 No virtual address is remapped while a native call uses it. No matrix binding,
@@ -255,9 +246,8 @@ declarations. The configured count reserves all value backing ahead of execution
 Shared function and route metadata are reused, while value storage remains
 distinct. Freed backing returns to the pool through the existing collector;
 this change does not feed it back into an unbounded receive cycle or reuse an
-already submitted index. The matrix executable integrates existing engine
-numerical functions into a contraction-partitioned producer, all-reduce and
-column-partitioned consumer. It is not a language-model serving implementation.
+already submitted index. The deleted matrix executable no longer constitutes
+integration evidence.
 Static graph structure does not imply a single-use execution budget. Neither this
 finite extent nor the absence of a serving caller is an authorized scope decision.
 The source has not integrated returned pages into continued use of the configured
@@ -280,8 +270,7 @@ These are explicit remaining costs; no claim of zero total overhead, JACCL cost 
 over world size 1 follows from this source change.
 
 There is no runtime testing gate here. The bridge, C and Swift libraries, literal
-chain, Core ML chain, synchronization counterexample, and existing-matrix chain
-were built, along with the existing serving library after the matrix refactor.
+chain, Core ML chain and synchronization counterexample are build targets.
 They have not been run or deployed by this change. Both participants
 need the source's ABI 40 bridge before these callers can attach.
 
@@ -292,9 +281,8 @@ still determine storage realization.
 
 Build the native libraries and examples with
 `make -C rdma all linear-chain coreml-chain sync-on-remote-fill`.
-Build the existing-matrix caller with `make mesh-matrix` in metal-microbench.
-The ordinary examples take `rank world-size region`; the matrix caller adds its
-backend argument. The Core ML caller adds `model.mlmodelc width input-name
+The ordinary examples take `rank world-size region`. The Core ML caller adds
+`model.mlmodelc width input-name
 output-name`. The counterexample takes `rank region parallel|serial|deadlock`.
 
 ## Source inventory
@@ -304,10 +292,10 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 
 | Counted set | Before | Current |
 |---|---:|---:|
-| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,671 lines / 993 files |
-| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,349 lines / 14 files |
+| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,680 lines / 993 files |
+| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,358 lines / 14 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 27 lines |
-| Engine's deleted mesh_matrix.swift and tools/mesh/sync.sh; replacement matrix example | 203 lines | 96 lines |
+| Engine's deleted mesh_matrix.swift, tools/mesh/sync.sh and replacement matrix example | 203 lines | 0 lines |
 
 The replacement-path set is `rdma/`, `python/`, `swift/`, `examples/`,
 `xonotic/solver/`, `xonotic/planner/`, and the old root `setup.py`. Source extensions
@@ -316,7 +304,7 @@ row includes the large unchanged Xonotic sources. It has not been halved.
 Makefiles, module maps and pyproject.toml are reported separately above. Shared
 engine dependencies `parameter_configuration.swift`, `matrix_shaders.swift`, and
 `matrix_operations.swift` now total 540 maintained lines in the working tree; the
-new caller reuses them. That includes the existing addition encoder and shader
+deleted matrix caller used them. That includes the existing addition encoder and shader
 moved from `bootstrap.swift` and `kernels.swift`, where their 26 lines were
 removed. This change does not attribute pre-existing working-tree edits to the
 mesh refactor.
@@ -337,11 +325,11 @@ current source and example callers. It does not close the deployment gaps above.
 
 | Requirement | Source evidence |
 |---|---|
-| Higher-order partial tensor functions using existing numerics | `Mesh.call` and both `Mesh.map` forms accept supplied functions. `MeshInvocation` selects CPU, Metal or Core ML submission during realization. The matrix caller passes existing multiplication and addition implementations; the Core ML caller passes an existing compiled model. |
+| Higher-order partial tensor functions using existing numerics | `Mesh.call` and both `Mesh.map` forms accept supplied functions. `MeshInvocation` selects CPU, Metal or Core ML submission during realization. The native form prepares multiple input/output bindings independently. The Core ML caller passes an existing compiled model. |
 | Distinct collective semantics | `Mesh.swift` defines send/receive endpoints, broadcast, scatter, gather, all-scatter, all-gather, all-to-all, reduce, reduce-scatter and all-reduce. Movement returns indexed sections; only the supplied combining function performs reduction arithmetic. |
 | AOT bindings, zero-copy asynchronous use | `mesh_call_bind` realizes indexed uses and operand storage. Swift prepares native views before `mesh_calls_start`. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_complete` changes block-head mappings over registered operands without copying. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
 | Delete incompatible implementation and callers | The former executor/frontend and engine adapters are absent from the current tree. The source inventory includes their replacements. The index transport channel, paired native-binding Cartesian product, per-page receive metadata and process-memory ranking scan are also absent. |
-| Actual producer/collective/numerical-consumer integration | `linear-chain.swift` applies the supplied T to produced and transported partials before reconstruction. `mesh-matrix.swift` composes contraction-partitioned multiplication, supplied addition through all-reduce, column-partitioned multiplication and gather. `coreml-chain.swift` composes two native predictions through transferred sections. Each declares once and submits four distinct indices. |
+| Actual producer/collective/numerical-consumer integration | `linear-chain.swift` applies the supplied T to produced and transported partials before reconstruction. `coreml-chain.swift` composes two native predictions through transferred sections. Each declares once and submits four distinct indices. |
 | Automatic lifetime; explicit synchronization only | `mesh_buffer_retain` accounts for declared uses. `mesh_publish`, native numerical completion, TX completion and ordinary object destruction discharge their references; `mesh_collect` returns backing without clearing payload. Runtime presence polling occurs only in the explicitly called `mesh_sync_on_remote_fill`; its source counterexample includes a self-dependent permanent wait. |
 
 Configuration loops, capacity checks while posting native work requests, indexed
@@ -354,12 +342,14 @@ used as evidence for these source properties.
 
 The generic Metal invocation selects command buffers prepared during realization,
 with pool capacity owned by Mesh for every declared call. Native view
-preparation supports one varying input and one output, while the raw callback
-form supports multiple operands. The transport supports one peer, and its TX
-worker walks the whole detached publication list before returning to CQ polling.
-Those concrete restrictions and scheduling costs need disposition against the
+preparation and raw callbacks both support multiple input and output operands.
+The transport supports one peer. TX now polls completions after each publication's
+sends instead of delaying polling until the entire publication list is processed.
+The remaining transport and lifetime restrictions need disposition against the
 user's requirements; accepting a convenient example does not settle them.
 The user's four-residual-FFN-layer case further requires useful numerical work on
 both participants at each depth; added global guards, waits or synchronization
 that make this chain slower than local execution invalidate the implementation.
-The current example has two linear matrix stages and does not establish this case.
+The deleted matrix example did not establish this case. The user's 8–100-block
+workloads must use the same tensor-function-invariant interface; they do not
+justify an architecture-specific library path.

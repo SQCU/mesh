@@ -228,17 +228,19 @@ public final class Mesh {
     }
 
     // design/algorithm-sources.md#program
-    public func map<Input, Output>(_ function: @escaping (MeshBindings<Input>, MeshBindings<Output>) throws -> TensorFunction,
-                    input: TensorPart, output: TensorPart,
-                    inputView: @escaping (MeshSpan) throws -> Input, outputView: @escaping (MeshSpan) throws -> Output,
-                    constants: [TensorPart] = [], worker: Int) {
-        precondition(input.rank == output.rank && !output.shared && constants.allSatisfy { $0.rank == input.rank })
-        if input.rank != rank { return }
+    public func map<Input, Output>(_ function: @escaping ([MeshBindings<Input>], [MeshBindings<Output>]) throws -> TensorFunction,
+                    inputs: [TensorPart], outputs: [TensorPart],
+                    inputViews: [(MeshSpan) throws -> Input], outputViews: [(MeshSpan) throws -> Output],
+                    on owner: Int, worker: Int) {
+        precondition(inputs.count == inputViews.count && outputs.count == outputViews.count)
+        precondition(inputs.allSatisfy { $0.rank == owner } && outputs.allSatisfy { $0.rank == owner && !$0.shared })
+        if owner != rank { return }
         preparations.append { [unowned self] in
-            precondition(output.storage!.receiveQueue == nil)
-            let inputs = try bindings(input, using: inputView), outputs = try bindings(output, using: outputView)
-            let invocation = MeshInvocation(try function(inputs, outputs), memory: memory, inputs: 1 + constants.count, outputs: 1, count: count)
-            try bind(invocation, inputs: [input] + constants, outputs: [output], worker: worker)
+            precondition(outputs.allSatisfy { $0.storage!.receiveQueue == nil })
+            let x = try zip(inputs, inputViews).map { try bindings($0.0, using: $0.1) }
+            let y = try zip(outputs, outputViews).map { try bindings($0.0, using: $0.1) }
+            let invocation = MeshInvocation(try function(x, y), memory: memory, inputs: inputs.count, outputs: outputs.count, count: count)
+            try bind(invocation, inputs: inputs, outputs: outputs, worker: worker)
         }
     }
 

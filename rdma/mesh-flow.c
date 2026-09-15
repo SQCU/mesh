@@ -150,20 +150,6 @@ static void link_send_ready(struct mesh_link *link,uint32_t q){
   }
   if(ready->head==MESH_ABSENT)ready->tail=MESH_ABSENT;
 }
-/* design/algorithm-sources.md#programkernel_call */
-static void link_publications(struct mesh_link *link){
-  uint32_t queue=mesh_notice_queue(link->client,MESH_NOTICE_SEND);
-  uint32_t row=mesh_notice_take(link->M,queue);
-  while(row!=MESH_ABSENT){
-    uint32_t next=mesh_notice_next(link->M,queue,row),queues=0;
-    for(uint32_t at=link->send_heads[row];at!=MESH_ABSENT;at=link->send_edges[at].next){
-      struct mesh_send_edge edge=link->send_edges[at];
-      link_ready(link,edge.queue,at);queues|=UINT32_C(1)<<edge.queue;
-    }
-    while(queues){uint32_t q=(uint32_t)__builtin_ctz(queues);queues&=queues-1;link_send_ready(link,q);}
-    row=next;
-  }
-}
 /* design/algorithm-sources.md#programcopy */
 static void mesh_progress(struct mesh_link *link,uint32_t direction){
   struct hdr *m=link->M;struct mesh_verbs *v=&link->provider;
@@ -191,15 +177,32 @@ static void mesh_progress(struct mesh_link *link,uint32_t direction){
       }
     }
   }
-  if(direction==MESH_SEND)link_publications(link);
+}
+
+/* design/algorithm-sources.md#programkernel_call */
+static void link_publications(struct mesh_link *link){
+  uint32_t queue=mesh_notice_queue(link->client,MESH_NOTICE_SEND);
+  uint32_t row=mesh_notice_take(link->M,queue);
+  while(row!=MESH_ABSENT){
+    uint32_t next=mesh_notice_next(link->M,queue,row),queues=0;
+    for(uint32_t at=link->send_heads[row];at!=MESH_ABSENT;at=link->send_edges[at].next){
+      struct mesh_send_edge edge=link->send_edges[at];
+      link_ready(link,edge.queue,at);queues|=UINT32_C(1)<<edge.queue;
+    }
+    while(queues){uint32_t q=(uint32_t)__builtin_ctz(queues);queues&=queues-1;link_send_ready(link,q);}
+    mesh_progress(link,MESH_SEND);
+    row=next;
+  }
 }
 
 /* design/algorithm-sources.md#programkernel_call */
 static void *link_progress(void *argument){
   struct mesh_worker *worker=argument;
   pthread_setname_np(worker->direction==MESH_SEND?"mesh.rdma.send":"mesh.rdma.receive");
-  while(atomic_load_explicit(&worker->link->progressing,memory_order_acquire))
+  while(atomic_load_explicit(&worker->link->progressing,memory_order_acquire)){
     mesh_progress(worker->link,worker->direction);
+    if(worker->direction==MESH_SEND)link_publications(worker->link);
+  }
   return NULL;
 }
 /* design/algorithm-sources.md#programkernel_call */

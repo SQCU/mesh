@@ -46,6 +46,12 @@ The subsequent deployment clarification is also authoritative:
 
 > we should note that writing something which sounds like it satisfies all contraints but is slow and doesn't utilize flops on two computers concurrently would be 'fake'. so would anything which is depthwise recurrent, like a resnet with 4 ffn-residual-layers, running slower with the mesh collectives than without them, because some asshole decided to add a global sync or global guard or global wait again
 
+> the importable path is that oyu are writing a tensor function invariant streaming partial function library. what do you think the linear algebra notes earlier meant?
+
+The user's repeated-block workloads motivate actual use of this invariant
+library. They do not authorize a model-specific API or numerical implementation
+inside Mesh. Block counts and function compositions belong to the caller.
+
 The user-selected continuation objective is the attachment
 `5701aa94-8d2a-4238-851b-7ad3af7e91bc/pasted-text-1.txt`. It reiterates these
 requirements and actual integration through existing numerical implementations.
@@ -54,8 +60,8 @@ The old executor, frontend and callers were deleted in mesh `5762898` and
 metal-microbench `e108f4b`. The replacement higher-order interface, collective
 relations and source operation chains are described in [the implementation](async-collectives.md).
 Finite indexed submissions now reuse the realized functions and routes.
-The source chains use existing numerical implementations, including a contraction-
-partitioned matrix producer, all-reduce and a column-partitioned numerical consumer.
+The small matrix example and its build target have been deleted at the user's
+instruction. They no longer serve as evidence of integration.
 The earlier completion claim was too broad: the single-use value extent, one-peer
 transport and example-only integration remain
 implementation restrictions, not user-authorized definitions of the deployment

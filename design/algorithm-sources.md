@@ -49,6 +49,11 @@ through one operation; Core ML selects its prepared feature provider and output
 options independently. `MeshBindings` contains the corresponding operand views
 and index function. This removes the Cartesian product of address-bound calls,
 without changing the numerical algorithm or requiring additional synchronization.
+The native `map` form accepts an array of bindings on each side, with one view
+factory per operand. Each input and output is prepared independently; no unary
+function assumption or product of operand address combinations is introduced.
+Shared constants are inputs with zero index stride. Runtime numerical submission
+still receives the already realized operand arrays through `MeshInvocation`.
 Apple's [makeCommandBuffer](https://developer.apple.com/documentation/metal/mtlcommandqueue/makecommandbuffer())
 documents blocking when a queue has no free command buffers. The SDK's
 `MTLDevice.h` exposes `newCommandQueueWithMaxCommandBufferCount` and specifies
@@ -84,6 +89,10 @@ the previous index QP, index messages and cross-QP join are deleted. The
 describe this mesh-specific representation. Receive storage is preallocated
 across the finite extent; refill does not depend on consumer completion or page
 reclamation.
+The dedicated TX worker polls completion queues after posting each publication's
+sends, before advancing to the next published row. Completion processing refills
+available send slots directly. RX independently refills receives before publishing
+the received section. No completion wait or new scheduler is introduced.
 
 ## Program.write
 
@@ -116,8 +125,8 @@ reference for combining numerical contributions.
 The engine's existing `encAdd` encoder and `add_inplace` shader now live in its
 shared matrix source files, retaining their existing arithmetic and launch
 geometry. `MatrixOperations.add` prepares the pipeline and dimensions and accepts
-operand offsets into the existing registered Metal buffer. The matrix caller
-supplies this numerical function to all-reduce; mesh implements no addition kernel.
+operand offsets into the existing registered Metal buffer. Callers can supply
+this function to reductions; mesh implements no addition kernel.
 
 ## collective.reduce_scatter
 
