@@ -9,6 +9,12 @@ The deleted implementation is not an implementation template.
 
 The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html):
 reference for higher-order numerical calls over indexed tensor operands.
+The implementation realizes a finite value-index extent once. A section's
+`first + index * stride` selects its logical row; shared constants have zero
+stride. Submission publishes root indices into existing numerical-worker queues,
+while consumers are indexed by operand publication. No function scan or repeated
+realization is required. The [execution description](async-collectives.md#execution-and-ownership)
+separates shared function metadata from each value's operands and uses.
 
 ## Program.tensor
 
@@ -36,6 +42,11 @@ MLX authors' [JACCL transport](https://github.com/ml-explore/mlx/blob/main/mlx/d
 and rdma-core's [ibv_post_recv](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_recv.3):
 registered SEND/RECV and work completion. The [hardware notes](collective-dependency-ledger.md)
 distinguish substrate facts from the retained bridge's protocol decisions.
+Transfer setup exchanges logical destination rows and expands each route's extent
+into indexed send uses. The existing index frames carry those precomputed logical
+rows, so RX publication directly names the canonical page table. Receive storage
+is preallocated across the finite extent; refill does not depend on consumer
+completion or page reclamation.
 
 ## Program.write
 

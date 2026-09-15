@@ -8,7 +8,8 @@ matmul, activation, attention, normalization, sum, maximum or minimum. The
 numerical operation is a `TensorFunction` supplied to `call`, `map` or `reduce`.
 `TensorPart` names a contiguous section and its caller-selected rank. A tensor
 is a list of these sections. Mesh allocates their actual shared, registered
-backing and binds their uses before `start()`.
+backing and binds their uses before `start()`. `count` is the AOT extent of the
+value index; `submit(index)` starts that value through the realized functions.
 
 ## Algebra and callers
 
@@ -30,9 +31,11 @@ literal `T(x,y,z)=(x+y,y+z,z+x)` from the conversation. Its data flow is:
    Linearity makes the second result `T(T(X))`. For `(1,2,3)`, the results are
    `(3,5,4)` and `(8,9,7)`.
 
-The program instantiates four independent chains before launch. Each value has
-its own section. Repeated function use does not reset a live value or reuse an
-occupied receive destination.
+The program declares the chain once with `count: 4`, then submits indices
+`3, 0, 2, 1` through that configuration. The producer reads its coordinate data
+using `outputs[0].index`. The function objects, collective routes and operand
+bindings are not rebuilt between submissions. Each index has distinct value
+storage; all four can be in flight without an edge between their computations.
 
 [`metal-microbench/examples/mesh-matrix.swift`](../../../metal-microbench/examples/mesh-matrix.swift)
 uses the engine's existing `MatrixOperations.multiply` for both stages. Row
@@ -40,21 +43,36 @@ sections of sizes 1, 8, 16 and 4 go through scatter, `X_i W`, gather, and a
 consumer computing `(X_i W) W`. The gather returns indexed sections; it does
 not assemble a copied dense tensor. The backend argument goes directly to the
 existing operation constructor. The fixture weights are canonical shared
-operands declared as constant inputs to the calls.
+operands declared as constant inputs to the calls. Four submitted indices reuse
+the same chain and weights; index-dependent input data reaches both matrix stages.
 
 [`examples/coreml-chain.swift`](../examples/coreml-chain.swift) takes an existing
 compiled model, input/output feature names and width as arguments. It sends three
 sections through that supplied model and then through the same model on the
-receiving participant. It creates no model, operation implementation or compiler.
+receiving participant, for four submitted indices through the same configuration.
+It creates no model, operation implementation or compiler.
 
 ## Execution and ownership
 
-A call declares its input and output sections and a numerical worker. Setup
-retains each input use and installs section-to-use adjacency. Constants already
+A call declares its input and output sections and a numerical worker. Its
+function object stores the supplied function and section descriptors once. Each
+value index has an operand array, pending-operand count and completion record
+allocated during realization. For descriptor `(first, stride)`, its logical row
+is `first + index * stride`. A shared constant has stride zero. Setup retains
+each indexed input use and installs section-to-use adjacency. Constants already
 published at setup have no pending arrival edge. A runtime publication indexes
 only the uses of that section. A consumer with multiple operands becomes
 callable when those specific operands exist; unrelated sections and collective
 participants are not a barrier. The runtime does not scan all functions.
+
+`start()` completes bindings and starts the numerical workers once. Each
+`submit(index)` publishes the index's root row to its configured root workers
+using their existing notice queues. The caller supplies each index in
+`0..<count` once; there is no occupancy check, replay guard, configuration change
+or operand allocation in submission. A call depending only on constants also
+consumes that root publication. A shared received constant contributes its actual
+arrival dependency; it does not bypass submission. Other consumers have only
+their declared operand dependencies, with no per-index global completion barrier.
 
 The numerical worker resolves operand addresses through the canonical page
 table and invokes the supplied function. CPU completion is its return. Metal
@@ -78,14 +96,23 @@ RDMA completion queue. Setup preposts the receive window while queue pairs are
 in RTR and exchanges setup completion before enabling sends. Runtime refill
 remains on the dedicated RX thread, before delivering the completed section.
 The sender's repeated PRESENT checks and duplicate queued-state array have been
-deleted; publication directly indexes configured sends.
+deleted; publication directly indexes configured sends. One transfer descriptor
+covers its extent and row stride. Setup exchanges the receiver's logical rows and
+precomputes the target row on each send edge. The one-word message index names
+that logical row directly; reception performs no route/value lookup. These are
+page-table indices, not exchanged virtual addresses. Receive posting traverses
+all preallocated values and refills the hardware window before delivery until
+the configured receive extent is exhausted. No numerical completion releases a
+credit that reception must wait for.
 
 ## Native contiguous operands
 
 The direct `TensorFunction` form takes already resolved operand spans. The
 higher-order `map` overload takes a function from two `MeshSpan` values to a
 native call. During setup it binds the actual possible receive positions and
-its output position. At invocation a physical-page index selects that binding.
+each indexed output position. A local-input call selects its binding directly
+by value index. A received-input call uses one physical-page-to-slot table and a
+dense array of the configured input-position/output-index bindings.
 No virtual address is remapped while a native call uses it. No matrix binding,
 MLMultiArray, feature provider or operand allocation is constructed during the
 numerical invocation.
@@ -142,25 +169,34 @@ workers alive; it does not gate tensor issuance.
 The native bridge has one peer. This source exposes world sizes 1 and 2, up to
 8 numerical workers, and the configured transport queues. Each contiguous
 section fits one configured transport block; larger tensors use several sections.
-The programs are finite AOT data flows. `start()` launches their values once;
-replaying an already published logical row is not implemented. Four independently
-allocated invocations demonstrate function reuse, not an unbounded reusable
-receive cycle. Serving integration for continued prefill and speculative verifier
+The programs are finite AOT data flows. One `start()` realizes the configuration;
+`submit(index)` uses it for successive values, without making separate chain
+declarations. The configured count reserves all value backing ahead of execution.
+Shared function and route metadata are reused, while value storage remains
+distinct. Freed backing returns to the pool through the existing collector;
+this change does not feed it back into an unbounded receive cycle or reuse an
+already submitted index. Serving integration for continued prefill and speculative verifier
 invocations remains unfinished. The matrix executable uses existing engine
 numerical code; it is not a completed language-model serving integration.
 
 The retained bridge still sends full blocks and separate 4096-byte index frames
 for out-of-order publications. Those bytes and the join between identity and
 payload remain real work. Publication and reference counting use atomics.
-Native binding tables occupy one pointer slot per arena block per bound call,
-with native objects for the possible receive positions. These are explicit
+For N indices and R possible receive positions, a native received-input factory
+constructs N*R fixed native bindings at setup, plus one slot map over arena blocks.
+Local-input factories construct N bindings with no page lookup map. This avoids
+N sparse arena-sized tables, but the N*R native combinations remain setup work.
+Shared function metadata is constant in N; per-value operands, uses, pending
+counts and backing grow with the finite extent. Submission touches the root
+workers only; publication visits the published row's uses, not all functions.
+These are explicit
 remaining costs; no claim of zero total overhead, JACCL cost parity, or speedup
 over world size 1 follows from this source change.
 
 There is no runtime testing gate here. The bridge, C and Swift libraries, literal
 chain, Core ML chain, synchronization counterexample, and existing-matrix chain
 were built. They have not been run or deployed by this change. Both participants
-need the source's ABI 37 bridge before these callers can attach.
+need the source's ABI 38 bridge before these callers can attach.
 
 Build the native libraries and examples with
 `make -C rdma all linear-chain coreml-chain sync-on-remote-fill`.
@@ -176,10 +212,10 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 
 | Counted set | Before | Current |
 |---|---:|---:|
-| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,754 lines / 994 files |
-| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,431 lines / 15 files |
+| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,830 lines / 994 files |
+| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,507 lines / 15 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 27 lines |
-| Engine's deleted mesh_matrix.swift and tools/mesh/sync.sh; replacement matrix example | 203 lines | 59 lines |
+| Engine's deleted mesh_matrix.swift and tools/mesh/sync.sh; replacement matrix example | 203 lines | 60 lines |
 
 The replacement-path set is `rdma/`, `python/`, `swift/`, `examples/`,
 `xonotic/solver/`, `xonotic/planner/`, and the old root `setup.py`. Source extensions

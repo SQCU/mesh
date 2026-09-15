@@ -37,6 +37,7 @@ struct SyncOnRemoteFill {
             }, inputs: [remote[i]], outputs: [answer[i]], on: 1, worker: i)
         }
         try mesh.start()
+        mesh.submit(0)
         withExtendedLifetime((mesh, returned)) { dispatchMain() }
     }
 }

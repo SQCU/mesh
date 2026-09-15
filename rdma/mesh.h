@@ -9,12 +9,12 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 37u
+#define MESH_VERSION 38u
 #define MESH_ABSENT UINT32_MAX
 /* ledger D6: "A maximum of 10 unreliable connection (UC) queue pairs" */
 #define MESH_QPS 8
 #define MESH_INDEX_BYTES 4096
-struct mesh_transfer { uint32_t local_row,binding,offset,bytes; };
+struct mesh_transfer { uint32_t local_row,binding,bytes,count,stride; };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_PRESENT, MESH_CONSTANT, MESH_ASSIGNED, MESH_SEND_SOURCE, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PLANES };

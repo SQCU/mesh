@@ -41,6 +41,7 @@ public struct TensorPart {
     public let rank: Int
     public let bytes: Int
     fileprivate let storage: MeshSection?
+    fileprivate let shared: Bool
 }
 
 private final class MeshMemory {
@@ -83,10 +84,11 @@ private final class MeshSection {
     var receiveQueue: UInt32?
 
     // design/algorithm-sources.md#programtensor
-    init(_ memory: MeshMemory, bytes: Int) throws {
+    init(_ memory: MeshMemory, bytes: Int, count: Int, shared: Bool = false) throws {
         var section = mesh_section()
-        let error = mesh_section_create(memory.context, bytes, &section)
+        let error = mesh_section_create(memory.context, bytes, UInt32(count), &section)
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
+        if shared { section.stride = 0 }
         self.memory = memory; self.section = section
     }
 
@@ -136,7 +138,7 @@ private final class MeshInvocation {
 }
 
 public final class Mesh {
-    public let rank: Int, size: Int
+    public let rank: Int, size: Int, count: Int
     private let memory: MeshMemory
     private let calls: OpaquePointer
     private var transfer: UInt32 = 0
@@ -145,16 +147,16 @@ public final class Mesh {
     public var sectionCapacity: Int { mesh_section_capacity(memory.context) }
 
     // design/algorithm-sources.md#program
-    public init(region: String, rank: Int, size: Int, workers: Int) throws {
-        precondition((1...2).contains(size) && (0..<size).contains(rank))
+    public init(region: String, rank: Int, size: Int, workers: Int, count: Int = 1) throws {
+        precondition((1...2).contains(size) && (0..<size).contains(rank) && count > 0)
         let memory = try MeshMemory(region)
         let owner = Unmanaged.passRetained(memory).toOpaque()
-        guard let calls = mesh_calls_create(memory.context, UInt32(workers), owner,
+        guard let calls = mesh_calls_create(memory.context, UInt32(workers), UInt32(count), owner,
             { owner in Unmanaged<MeshMemory>.fromOpaque(owner!).release() }) else {
             Unmanaged<MeshMemory>.fromOpaque(owner).release()
             throw POSIXError(POSIXErrorCode(rawValue: errno)!)
         }
-        self.memory = memory; self.calls = calls; self.rank = rank; self.size = size
+        self.memory = memory; self.calls = calls; self.rank = rank; self.size = size; self.count = count
     }
 
     // design/algorithm-sources.md#programtensor
@@ -165,14 +167,14 @@ public final class Mesh {
         precondition((0..<size).contains(owner))
         return try sections.map { bytes in
             TensorPart(rank: owner, bytes: bytes,
-                       storage: owner == rank ? try MeshSection(memory, bytes: bytes) : nil)
+                       storage: owner == rank ? try MeshSection(memory, bytes: bytes, count: count) : nil, shared: false)
         }
     }
 
     // design/algorithm-sources.md#programkernel_call
     public func call(_ function: TensorFunction, inputs: [TensorPart], outputs: [TensorPart],
                      on owner: Int, worker: Int) throws {
-        precondition(inputs.allSatisfy { $0.rank == owner } && outputs.allSatisfy { $0.rank == owner })
+        precondition(inputs.allSatisfy { $0.rank == owner } && outputs.allSatisfy { $0.rank == owner && !$0.shared })
         if owner != rank { return }
         let invocation = MeshInvocation(function, memory: memory, inputs: inputs.count, outputs: outputs.count)
         try bind(invocation, inputs: inputs, outputs: outputs, worker: worker)
@@ -206,24 +208,40 @@ public final class Mesh {
             let context = memory.context
             let quantum = Int(mesh_block_pages(context))
             let pageBytes = sectionCapacity / quantum
-            var pages: [UInt32]
+            var receivePages: [UInt32] = []
             if let queue = source.receiveQueue {
-                pages = [UInt32](repeating: 0, count: mesh_receive_pages(context, queue, nil))
-                mesh_receive_pages(context, queue, &pages)
+                receivePages = [UInt32](repeating: 0, count: mesh_receive_pages(context, queue, nil))
+                mesh_receive_pages(context, queue, &receivePages)
+            }
+            var functions: [MeshInvocation] = []
+            var slots = [Int](repeating: 0, count: receivePages.isEmpty ? 0 : Int(mesh_arena_pages(context)) / quantum)
+            for (slot, page) in receivePages.enumerated() { slots[Int(page) / quantum] = slot }
+            for index in 0..<count {
+                let pages: [UInt32]
+                if source.receiveQueue != nil { pages = receivePages }
+                else {
+                    let offset = mesh_page_address(context, 0)!.distance(to: mesh_section_address(context, source.section, UInt32(index))!)
+                    pages = [UInt32(offset / pageBytes)]
+                }
+                let target = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_section_address(context, destination.section, UInt32(index)),
+                                                                          count: destination.section.bytes), memory: memory)
+                for page in pages {
+                    let operand = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page),
+                                                                               count: source.section.bytes), memory: memory)
+                    functions.append(MeshInvocation(try function(operand, target), memory: memory,
+                                                    inputs: 1 + constants.count, outputs: 1))
+                }
+            }
+            let invocation: MeshInvocation
+            if receivePages.isEmpty {
+                invocation = MeshInvocation(memory: memory, inputs: 1 + constants.count, outputs: 1) { call, inputs, outputs in
+                    functions[Int(outputs[0].index)].submit(call, inputs, outputs)
+                }
             } else {
-                let offset = mesh_page_address(context, 0)!.distance(to: mesh_section_address(context, source.section)!)
-                pages = [UInt32(offset / pageBytes)]
-            }
-            let target = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_section_address(context, destination.section),
-                                                                      count: destination.section.bytes), memory: memory)
-            var functions = [MeshInvocation?](repeating: nil, count: Int(mesh_arena_pages(context)) / quantum)
-            for page in pages {
-                let operand = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page),
-                                                                           count: source.section.bytes), memory: memory)
-                functions[Int(page) / quantum] = MeshInvocation(try function(operand, target), memory: memory, inputs: 1 + constants.count, outputs: 1)
-            }
-            let invocation = MeshInvocation(memory: memory, inputs: 1 + constants.count, outputs: 1) { call, inputs, outputs in
-                functions[Int(inputs[0].page) / quantum]!.submit(call, inputs, outputs)
+                let columns = receivePages.count
+                invocation = MeshInvocation(memory: memory, inputs: 1 + constants.count, outputs: 1) { call, inputs, outputs in
+                    functions[Int(outputs[0].index) * columns + slots[Int(inputs[0].page) / quantum]].submit(call, inputs, outputs)
+                }
             }
             try bind(invocation, inputs: [input] + constants, outputs: [output], worker: worker)
         }
@@ -231,9 +249,10 @@ public final class Mesh {
 
     // design/algorithm-sources.md#programtensor
     public func constant(on owner: Int, bytes: Int, initialize: (MeshSpan) throws -> Void) throws -> TensorPart {
-        let part = try tensor(on: owner, sections: [bytes])[0]
+        let part = TensorPart(rank: owner, bytes: bytes,
+                              storage: owner == rank ? try MeshSection(memory, bytes: bytes, count: 1, shared: true) : nil, shared: true)
         if let storage = part.storage {
-            let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_section_address(memory.context, storage.section),
+            let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_section_address(memory.context, storage.section, 0),
                                                                    count: bytes), memory: memory)
             try initialize(span)
             mesh_section_constant(memory.context, storage.section)
@@ -254,7 +273,9 @@ public final class Mesh {
     // design/algorithm-sources.md#programcopy
     public func send(_ part: TensorPart, to destination: Int, queue: Int = 0) throws -> TensorPart {
         if part.rank == destination { return part }
-        let output = try tensor(on: destination, sections: [part.bytes])[0]
+        let output = TensorPart(rank: destination, bytes: part.bytes,
+                                storage: destination == rank ? try MeshSection(memory, bytes: part.bytes, count: part.shared ? 1 : count,
+                                                                               shared: part.shared) : nil, shared: part.shared)
         output.storage?.receiveQueue = UInt32(queue)
         let identity = transfer; transfer += 1
         let local = rank == destination ? output : part
@@ -345,9 +366,14 @@ public final class Mesh {
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
     }
 
+    // design/algorithm-sources.md#program
+    public func submit(_ index: Int) {
+        mesh_calls_submit(calls, UInt32(index))
+    }
+
     // design/algorithm-sources.md#collectivesync_on_remote_fill
-    public func syncOnRemoteFill(_ parts: [TensorPart]) {
+    public func syncOnRemoteFill(_ parts: [TensorPart], index: Int = 0) {
         let sections = parts.map { $0.storage!.section }
-        mesh_sync_on_remote_fill(memory.context, sections, sections.count)
+        mesh_sync_on_remote_fill(memory.context, sections, sections.count, UInt32(index))
     }
 }

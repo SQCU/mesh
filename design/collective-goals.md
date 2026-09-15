@@ -49,5 +49,6 @@ requirements and actual integration through existing numerical implementations.
 The old executor, frontend and callers were deleted in mesh `5762898` and
 metal-microbench `e108f4b`. The replacement higher-order interface, collective
 relations and source operation chains are described in [the implementation](async-collectives.md).
-Serving integration, reusable receive cycles and the listed transport costs
+Finite indexed submissions now reuse the realized functions and routes.
+Serving integration, unbounded receive cycles and the listed transport costs
 remain unfinished. Deletion, documentation and successful builds are not completion.
