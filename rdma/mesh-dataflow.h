@@ -9,7 +9,6 @@ static inline uint64_t mesh_data_offset(const struct mesh_ctx *c){ return c->M->
 static inline uint64_t mesh_page_offset(const struct mesh_ctx *c){ return c->M->page_off; }
 static inline uint32_t mesh_block_pages(const struct mesh_ctx *c){ return c->M->block; }
 static inline uint32_t mesh_arena_pages(const struct mesh_ctx *c){ return c->M->rows; }
-static inline uint32_t mesh_window(const struct mesh_ctx *c){ return mesh_window_blocks(c->M); }
 static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return mesh_at(c->M,page); }
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);

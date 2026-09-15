@@ -19,9 +19,9 @@
 
 #define QD 4095
 struct mesh_verbs {
-  struct ibv_context *context; struct ibv_pd *domain; struct ibv_cq *completion_queues[2*(MESH_QPS+1)];
-  struct ibv_qp *pair,*pairs[MESH_QPS+1]; int qp_count; struct ibv_mr **regions;
-  int region_count; uint32_t capacity[MESH_QPS+1][2];
+  struct ibv_context *context; struct ibv_pd *domain; struct ibv_cq *completion_queues[2*(MESH_QPS)];
+  struct ibv_qp *pair,*pairs[MESH_QPS]; int qp_count; struct ibv_mr **regions;
+  int region_count; uint32_t capacity[MESH_QPS][2];
   size_t region_origin, region_extent;
   struct ibv_wc *completions;
 };
@@ -36,7 +36,7 @@ static int expected_peer=-1;
 static const char *listen_address, *selected_device;
 static int down_pair(void){
   while(provider->qp_count){ struct ibv_qp *q=provider->pairs[provider->qp_count-1]; if(q && ibv_destroy_qp(q)) return 0; provider->pairs[--provider->qp_count]=0; provider->pair=0; }
-  for(int i=0;i<2*(MESH_QPS+1);i++)if(provider->completion_queues[i]){
+  for(int i=0;i<2*(MESH_QPS);i++)if(provider->completion_queues[i]){
     if(ibv_destroy_cq(provider->completion_queues[i]))return 0;
     provider->completion_queues[i]=0;
   }
@@ -55,7 +55,7 @@ static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 static void onsig(int s){ (void)s; stop++; }
 
 /* ledger D13: the out-of-band connection record, exchanged once per pairing */
-struct qpi { uint32_t xmagic, xsize; uint32_t qpn,psn,pgsz; uint16_t lid; uint8_t gid[16]; uint16_t node; uint32_t count,qpns[MESH_QPS+1],psns[MESH_QPS+1]; };
+struct qpi { uint32_t xmagic, xsize; uint32_t qpn,psn,pgsz; uint16_t lid; uint8_t gid[16]; uint16_t node; uint32_t count,qpns[MESH_QPS],psns[MESH_QPS]; };
 #define XMAGIC 0x4d595048u
 
 static int dial(struct addrinfo *a,struct hdr *m,uint64_t client){
@@ -125,7 +125,7 @@ static int oob(const char *peer,struct hdr *m,uint64_t client){
 static struct ibv_port_attr pa;
 /* ledger D13 (out-of-band metadata), D6 (queue pair limits), TN3205 queue-pair state transitions */
 static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int me, uint32_t message_bytes, int qps, int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
-  if(qps<1 || qps>MESH_QPS+1){ errno=EINVAL; return -1; }
+  if(qps<1 || qps>MESH_QPS){ errno=EINVAL; return -1; }
   if(provider->context && (ibv_query_port(provider->context,1,&pa) || pa.state!=IBV_PORT_ACTIVE)){
     return -1; }
   struct hdr *m=(struct hdr *)mem;

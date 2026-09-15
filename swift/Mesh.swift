@@ -207,7 +207,6 @@ public final class Mesh {
             precondition(destination.receiveQueue == nil)
             let context = memory.context
             let quantum = Int(mesh_block_pages(context))
-            let pageBytes = sectionCapacity / quantum
             var receivePages: [UInt32] = []
             if let queue = source.receiveQueue {
                 receivePages = [UInt32](repeating: 0, count: mesh_receive_pages(context, queue, nil))
@@ -220,8 +219,7 @@ public final class Mesh {
                 let pages: [UInt32]
                 if source.receiveQueue != nil { pages = receivePages }
                 else {
-                    let offset = mesh_page_address(context, 0)!.distance(to: mesh_section_address(context, source.section, UInt32(index))!)
-                    pages = [UInt32(offset / pageBytes)]
+                    pages = [mesh_section_page(context, source.section, UInt32(index))]
                 }
                 let target = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_section_address(context, destination.section, UInt32(index)),
                                                                           count: destination.section.bytes), memory: memory)

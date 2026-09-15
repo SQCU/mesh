@@ -42,11 +42,18 @@ MLX authors' [JACCL transport](https://github.com/ml-explore/mlx/blob/main/mlx/d
 and rdma-core's [ibv_post_recv](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_recv.3):
 registered SEND/RECV and work completion. The [hardware notes](collective-dependency-ledger.md)
 distinguish substrate facts from the retained bridge's protocol decisions.
-Transfer setup exchanges logical destination rows and expands each route's extent
-into indexed send uses. The existing index frames carry those precomputed logical
-rows, so RX publication directly names the canonical page table. Receive storage
-is preallocated across the finite extent; refill does not depend on consumer
-completion or page reclamation.
+TN3205 explicitly limits this transport to `IBV_WR_SEND`; its SDK enum for
+`IBV_WR_SEND_WITH_IMM` does not establish hardware support. Both TN3205 and JACCL
+show local `wr_id` values returned with completions. Mesh uses these identifiers
+for buffer lifetime and removes its duplicate completion FIFO. Its registered
+record reserves four bytes for an immutable source-row tag, and setup maps peer
+source rows to local receive uses. Per-queue frame counts are realized from the
+configured payload sizes. The tag arrives in the payload's own work request, so
+the previous index QP, index messages and cross-QP join are deleted. The
+[record layout and execution path](async-collectives.md#execution-and-ownership)
+describe this mesh-specific representation. Receive storage is preallocated
+across the finite extent; refill does not depend on consumer completion or page
+reclamation.
 
 ## Program.write
 

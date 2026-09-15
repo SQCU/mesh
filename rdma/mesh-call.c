@@ -239,16 +239,18 @@ void mesh_calls_destroy(struct mesh_calls *calls){
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint32_t identity,struct mesh_section section){
   struct hdr *m=context->M;
-  if(queue>=m->qps || section.pages!=m->block || section.bytes>(size_t)m->block*m->pgsz)return EINVAL;
+  if(queue>=m->qps || section.pages!=m->block || section.bytes>mesh_section_capacity(context))return EINVAL;
   _Atomic uint32_t *length=mesh_order_length(m,queue,receive);
   uint32_t index=atomic_load_explicit(length,memory_order_relaxed);
   if(index==mesh_blocks(m))return ENOSPC;
+  uint32_t bytes=mesh_message_bytes((uint32_t)section.bytes);
+  if(!receive && bytes>m->send_bytes[context->client>>63][queue])m->send_bytes[context->client>>63][queue]=bytes;
   if(!receive)for(uint32_t value=0;value<section.count;value++){
     uint32_t row=mesh_section_row(section,value);
     int error=mesh_buffer_retain(m,row,section.pages);if(error)return error;
-    if(!mesh_bit(m,MESH_SEND_SOURCE,row) && mesh_bit(m,MESH_PRESENT,row))
+    uint32_t uses=atomic_fetch_or_explicit(&mesh_buffers(m)[row].uses,UINT32_C(1)<<(MESH_COMPUTE_THREADS+queue),memory_order_relaxed);
+    if(!(uses>>MESH_COMPUTE_THREADS) && mesh_bit(m,MESH_PRESENT,row))
       mesh_notice_push(m,mesh_notice_queue(context->client,MESH_NOTICE_SEND),row);
-    mesh_bits_set(m,MESH_SEND_SOURCE,row,1);
   }
   mesh_transfers(m,queue,receive)[index]=(struct mesh_transfer){section.first,identity,(uint32_t)section.bytes,section.count,section.stride};
   atomic_store_explicit(length,index+1,memory_order_release);
@@ -256,12 +258,22 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
 }
 
 /* design/algorithm-sources.md#programcopy */
-void mesh_transfers_start(struct mesh_ctx *context){atomic_store_explicit(&context->M->configured,context->client,memory_order_release);}
+void mesh_transfers_start(struct mesh_ctx *context){
+  struct hdr *m=context->M;
+  for(uint32_t q=0;q<m->qps;q++)for(uint32_t i=0;i<atomic_load(mesh_order_length(m,q,MESH_SEND));i++){
+    struct mesh_transfer transfer=mesh_transfers(m,q,MESH_SEND)[i];
+    for(uint32_t value=0;value<transfer.count;value++){
+      uint32_t row=transfer.local_row+value*transfer.stride;
+      *mesh_tag(m,atomic_load_explicit(&mesh_page(m)[row],memory_order_acquire),m->send_bytes[context->client>>63][q])=row;
+    }
+  }
+  atomic_store_explicit(&m->configured,context->client,memory_order_release);
+}
 
 /* design/algorithm-sources.md#programtensor */
 int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){
   struct hdr *m=context->M;
-  if(!bytes || bytes>(size_t)m->block*m->pgsz || !count || count>mesh_blocks(m))return EINVAL;
+  if(!bytes || bytes>mesh_section_capacity(context) || !count || count>mesh_blocks(m))return EINVAL;
   uint32_t pages=count*m->block,first=mesh_rows_alloc(context,pages);
   if(first==MESH_ABSENT)return errno;
   int error=mesh_backing_alloc(context,first,pages,m->block,0);
@@ -270,6 +282,10 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,str
   mesh_buffer_retain(m,first,pages);
   mesh_buffer_seal(m,first,pages);
   return 0;
+}
+/* design/algorithm-sources.md#programtensor */
+uint32_t mesh_section_page(struct mesh_ctx *context,struct mesh_section section,uint32_t index){
+  return atomic_load_explicit(&mesh_page(context->M)[mesh_section_row(section,index)],memory_order_acquire);
 }
 /* design/algorithm-sources.md#programtensor */
 void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return mesh_row_data(context,mesh_section_row(section,index));}
@@ -281,7 +297,7 @@ void mesh_section_release(struct mesh_ctx *context,struct mesh_section section){
   mesh_rows_release(context,section.first,section.count*section.pages);
 }
 /* design/algorithm-sources.md#programtensor */
-size_t mesh_section_capacity(struct mesh_ctx *context){return (size_t)context->M->block*context->M->pgsz;}
+size_t mesh_section_capacity(struct mesh_ctx *context){return (size_t)context->M->block*context->M->pgsz-sizeof(uint32_t);}
 
 /* design/algorithm-sources.md#programtensor */
 size_t mesh_receive_pages(struct mesh_ctx *context,uint32_t queue,uint32_t *pages){

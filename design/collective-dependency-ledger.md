@@ -31,16 +31,18 @@ not copy payload from a transport-only staging store.
 ## D5. Receive consumption has per-queue FIFO order
 
 The MLX authors' [JACCL transport](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/lib/jaccl/rdma.h)
-uses ordered work requests and completions. Mesh preposts physical slots, then joins
-completed slots with their configured transfer identities. Sender readiness order
-need not match logical declaration order.
+uses work-request identifiers and CQ polling. Mesh preposts physical slots;
+`wr_id` identifies the completed page and an immutable tag in that same block
+identifies the source value. Setup maps source rows to local uses. Sender
+publication order need not match logical declaration order.
 
 ## D6. Paired send and receive frame counts match
 
 TN3205 requires matching frame counts and specifies finite queue capacity. It does
-not require every message on a queue to have one size. Mesh's current protocol uses
-full-block messages to prepost before receiving transfer identities; tail padding
-is a mesh cost, not an upstream requirement.
+not require every message on a queue to have one size. Mesh realizes one frame
+count per queue direction from its largest configured partial plus a four-byte
+tag. This permits preposting with independently arriving producers. Frame rounding
+and padding smaller partials to that size remain mesh costs.
 
 ## D7. Publication does not await delivery
 
@@ -91,8 +93,9 @@ configuration before transport execution; numerical functions do not perform pai
 
 ## D14. Teardown retains outstanding device storage
 
-JACCL's transport owns connection resources and registered memory. Mesh snapshots
-transfer descriptions and retains abandoned section backing through QP teardown.
+JACCL's transport owns connection resources and registered memory. Mesh realizes
+send and receive use tables from setup descriptions and retains abandoned section
+backing through QP teardown.
 This controls resource lifetime; it is not a default collective completion barrier.
 
 ## D16. Application-specific output communication stays in the caller

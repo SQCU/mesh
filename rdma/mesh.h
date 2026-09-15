@@ -9,15 +9,14 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 38u
+#define MESH_VERSION 39u
 #define MESH_ABSENT UINT32_MAX
 /* ledger D6: "A maximum of 10 unreliable connection (UC) queue pairs" */
 #define MESH_QPS 8
-#define MESH_INDEX_BYTES 4096
 struct mesh_transfer { uint32_t local_row,binding,bytes,count,stride; };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
-enum { MESH_PRESENT, MESH_CONSTANT, MESH_ASSIGNED, MESH_SEND_SOURCE, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PLANES };
+enum { MESH_PRESENT, MESH_CONSTANT, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_BUFFER_PRODUCER=1, MESH_BUFFER_SEALED=2, MESH_BUFFER_QUEUED=4, MESH_BUFFER_CLOSED=8, MESH_BUFFER_RECLAIMED=16 };
 #define MESH_BUFFER_FLAG(flag) ((uint64_t)(flag)<<32)
@@ -25,6 +24,7 @@ struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages,next; _Ato
 /* ledger D5: one posting order per queue pair and direction */
 enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_COMPUTE_THREADS 8
+#define MESH_COMPUTE_MASK ((UINT32_C(1)<<MESH_COMPUTE_THREADS)-1)
 enum { MESH_NOTICE_SEND, MESH_NOTICE_COMPUTE, MESH_NOTICE_QUEUES=MESH_NOTICE_COMPUTE+MESH_COMPUTE_THREADS };
 #define MESH_NOTICE_BANKS 2
 struct mesh_notice { uint32_t next; };
@@ -32,11 +32,12 @@ struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps;
   _Atomic uint64_t configured;
-  uint64_t planes_off,page_off,buffer_off,backing_off,order_off,index_off,notice_off,data_off,length;
+  uint64_t planes_off,page_off,buffer_off,backing_off,order_off,notice_off,data_off,length;
   _Atomic uint64_t client,bridge_pid,device_client,serial;
   _Atomic uint32_t reclaim_head;
   _Atomic uint32_t order_length[2*MESH_QPS];
   _Atomic uint32_t notice_head[MESH_NOTICE_BANKS*MESH_NOTICE_QUEUES];
+  uint32_t send_bytes[MESH_NOTICE_BANKS][MESH_QPS];
   struct mesh_port_info port;
 };
 void mesh_notify(struct hdr *,uint32_t first,uint32_t count);
@@ -56,9 +57,11 @@ void mesh_buffer_produced(struct hdr *,uint32_t first,uint32_t count);
 /* ledger D5 */
 static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+(size_t)(2*queue+(uint32_t)direction)*mesh_blocks(m); }
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint32_t queue,int direction){ return &m->order_length[2*queue+(uint32_t)direction]; }
-/* ledger D6: "A maximum of 4095 work requests at a time", queues sized in 4 KB frames */
-static inline uint32_t mesh_window_blocks(const struct hdr *m){ return 4095u/(m->block*m->pgsz/4096u); }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
+/* design/algorithm-sources.md#programcopy */
+static inline uint32_t *mesh_tag(struct hdr *m,uint32_t page,uint32_t bytes){ return (uint32_t *)(mesh_at(m,page)+bytes-sizeof(uint32_t)); }
+/* design/algorithm-sources.md#programcopy */
+static inline uint32_t mesh_message_bytes(uint32_t bytes){return (bytes+sizeof(uint32_t)+4095u)/4096u*4096u;}
 
 static inline uint64_t mesh_word_mask(uint32_t first,uint32_t count,uint32_t word){
   uint32_t lo=word*64,hi=lo+64,a=first>lo?first:lo,b=first+count<hi?first+count:hi;
@@ -92,6 +95,12 @@ static inline void mesh_receive_complete(struct hdr *m,uint32_t row,uint32_t pag
     mesh_backing(m)[page+i]=row;
   }
   for(uint32_t i=0;i<m->block;i++)atomic_store_explicit(&mesh_page(m)[row+i],page+i,memory_order_relaxed);
+  struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+  uint32_t queues=atomic_load_explicit(&buffer->uses,memory_order_relaxed)>>MESH_COMPUTE_THREADS;
+  while(queues){
+    uint32_t q=(uint32_t)__builtin_ctz(queues);queues&=queues-1;
+    *mesh_tag(m,page,m->send_bytes[buffer->owner>>63][q])=row;
+  }
   mesh_bits_set(m,MESH_PRESENT,row,m->block);
   mesh_notify(m,row,m->block);
   mesh_buffer_produced(m,row,m->block);
@@ -127,7 +136,6 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->buffer_off=at; at+=(uint64_t)rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->backing_off=at; at+=(uint64_t)rows*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->order_off=at; at+=(uint64_t)2*MESH_QPS*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->index_off=at; at+=(uint64_t)2*(4095u/(block*pgsz/4096u))*MESH_INDEX_BYTES; at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*MESH_NOTICE_QUEUES*rows*sizeof(struct mesh_notice); at=(at+bytes-1)/bytes*bytes;
   for(uint32_t queue=0;queue<MESH_NOTICE_BANKS*MESH_NOTICE_QUEUES;queue++)atomic_store_explicit(&h->notice_head[queue],MESH_ABSENT,memory_order_relaxed);

@@ -95,15 +95,46 @@ TX, RX and collection have separate threads. Numerical workers never poll an
 RDMA completion queue. Setup preposts the receive window while queue pairs are
 in RTR and exchanges setup completion before enabling sends. Runtime refill
 remains on the dedicated RX thread, before delivering the completed section.
-The sender's repeated PRESENT checks and duplicate queued-state array have been
-deleted; publication directly indexes configured sends. One transfer descriptor
-covers its extent and row stride. Setup exchanges the receiver's logical rows and
-precomputes the target row on each send edge. The one-word message index names
-that logical row directly; reception performs no route/value lookup. These are
-page-table indices, not exchanged virtual addresses. Receive posting traverses
-all preallocated values and refills the hardware window before delivery until
-the configured receive extent is exhausted. No numerical completion releases a
-credit that reception must wait for.
+Publication directly indexes configured sends. Its buffer use mask names
+numerical workers and transport queues, replacing the separate send-source plane.
+One transfer descriptor covers its extent and row stride. Local source tags are
+written during realization. Receive forwarding sets its local source tags before
+publication; each tag stays immutable through all sends of that value.
+
+A message contains the operand bytes and a four-byte source-row tag in the same
+registered block. Setup maps peer source rows to local receive uses. Repeated
+sends of one source have identical tags and payloads; a precomputed per-source
+use list supplies their distinct destination rows. These lists follow the
+sender's configured per-source edge order. Other sources can arrive in any order.
+The receiver reads the tag from the completed block and indexes its local use
+list. No separate identity arrival, data copy or identity/payload join remains.
+
+Verbs' `wr_id` carries the send's retained logical row or receive's physical page.
+The native completion identifies that storage directly, replacing the software
+posted-request FIFOs. The dedicated RX worker refills before assigning and
+publishing the completed partial. Receive posting traverses all preallocated
+values until the configured extent is exhausted. It never requires a numerical
+consumer to return a credit before it can post the next planned buffer.
+
+For queue direction q, setup chooses
+`wire_bytes[q] = 4096 * ceil((max_payload_bytes[q] + 4) / 4096)`.
+All requests in that direction use this known length, so receivers prepost the
+correct frame count before knowing which source will publish next. A queue
+mixing large and small partials pads to its largest configured size. The caller
+can assign separate queues to different partial sizes. Storage still reserves a
+whole block per live value; `sectionCapacity` is block bytes minus four. Operand
+starts remain page-aligned, and only declared tensor bytes belong to numerical
+functions. Tags for different outgoing queue lengths all lie beyond those bytes.
+Queue lengths use the same client banks as publications, so an old device's
+forwarding reads its own realized lengths during client handoff.
+
+These mechanisms use the plain SEND/RECV and local work-request identifiers
+specified by [Apple TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
+and used by [JACCL](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/lib/jaccl/rdma.h).
+The record layout and source-to-use relation are mesh's implementation. Compared
+with the previous source, the runtime removes the index queue pair, its two CQs,
+index-frame storage, index copies, and the three identity/payload join counters.
+It posts one SEND and one matching RECV per communicated partial.
 
 ## Native contiguous operands
 
@@ -168,7 +199,8 @@ workers alive; it does not gate tensor issuance.
 
 The native bridge has one peer. This source exposes world sizes 1 and 2, up to
 8 numerical workers, and the configured transport queues. Each contiguous
-section fits one configured transport block; larger tensors use several sections.
+section fits one configured transport block with four bytes reserved for its tag;
+larger tensors use several sections.
 The programs are finite AOT data flows. One `start()` realizes the configuration;
 `submit(index)` uses it for successive values, without making separate chain
 declarations. The configured count reserves all value backing ahead of execution.
@@ -179,9 +211,9 @@ already submitted index. Serving integration for continued prefill and speculati
 invocations remains unfinished. The matrix executable uses existing engine
 numerical code; it is not a completed language-model serving integration.
 
-The retained bridge still sends full blocks and separate 4096-byte index frames
-for out-of-order publications. Those bytes and the join between identity and
-payload remain real work. Publication and reference counting use atomics.
+Transport sends each queue direction's realized frame length. Frame rounding,
+padding between unequal partials sharing a queue, source-tag handling, publication
+and reference-count atomics remain actual costs.
 For N indices and R possible receive positions, a native received-input factory
 constructs N*R fixed native bindings at setup, plus one slot map over arena blocks.
 Local-input factories construct N bindings with no page lookup map. This avoids
@@ -189,14 +221,13 @@ N sparse arena-sized tables, but the N*R native combinations remain setup work.
 Shared function metadata is constant in N; per-value operands, uses, pending
 counts and backing grow with the finite extent. Submission touches the root
 workers only; publication visits the published row's uses, not all functions.
-These are explicit
-remaining costs; no claim of zero total overhead, JACCL cost parity, or speedup
+These are explicit remaining costs; no claim of zero total overhead, JACCL cost parity, or speedup
 over world size 1 follows from this source change.
 
 There is no runtime testing gate here. The bridge, C and Swift libraries, literal
 chain, Core ML chain, synchronization counterexample, and existing-matrix chain
 were built. They have not been run or deployed by this change. Both participants
-need the source's ABI 38 bridge before these callers can attach.
+need the source's ABI 39 bridge before these callers can attach.
 
 Build the native libraries and examples with
 `make -C rdma all linear-chain coreml-chain sync-on-remote-fill`.
@@ -212,8 +243,8 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 
 | Counted set | Before | Current |
 |---|---:|---:|
-| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,830 lines / 994 files |
-| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,507 lines / 15 files |
+| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,787 lines / 994 files |
+| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,464 lines / 15 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 27 lines |
 | Engine's deleted mesh_matrix.swift and tools/mesh/sync.sh; replacement matrix example | 203 lines | 60 lines |
 

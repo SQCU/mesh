@@ -27,6 +27,7 @@ void mesh_transfers_start(struct mesh_ctx *);
 
 /* design/algorithm-sources.md#programtensor */
 int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,struct mesh_section *);
+uint32_t mesh_section_page(struct mesh_ctx *,struct mesh_section,uint32_t index);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
 void mesh_section_constant(struct mesh_ctx *,struct mesh_section);
 void mesh_section_release(struct mesh_ctx *,struct mesh_section);

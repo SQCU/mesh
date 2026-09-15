@@ -49,6 +49,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   }
   uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
   client|=(~device)&(UINT64_C(1)<<63);
+  memset(memory->send_bytes[client>>63],0,sizeof memory->send_bytes[0]);
   for(uint32_t queue=0;queue<MESH_NOTICE_QUEUES;queue++)
     atomic_store_explicit(&memory->notice_head[mesh_notice_queue(client,queue)],MESH_ABSENT,memory_order_relaxed);
   atomic_store_explicit(&memory->client,client,memory_order_release);
@@ -232,16 +233,12 @@ void mesh_publish_partial(struct mesh_ctx *c,uint32_t first,uint32_t count){
 
 /* design/algorithm-sources.md#programkernel_call */
 void mesh_notify(struct hdr *m,uint32_t first,uint32_t count){
-  for(uint32_t word=first/64;count && word<=(first+count-1)/64;word++){
-    uint64_t sources=atomic_load_explicit(&mesh_plane(m,MESH_SEND_SOURCE)[word],memory_order_acquire)&mesh_word_mask(first,count,word);
-    while(sources){
-      uint32_t row=word*64+(uint32_t)__builtin_ctzll(sources);sources&=sources-1;
-      mesh_notice_push(m,mesh_notice_queue(mesh_buffers(m)[row].owner,MESH_NOTICE_SEND),row);
-    }
-  }
   for(uint32_t row=first;row<first+count;){
     struct mesh_buffer *buffer=&mesh_buffers(m)[mesh_buffers(m)[row].first];
-    uint32_t uses=buffer->uses;
+    uint32_t uses=atomic_load_explicit(&buffer->uses,memory_order_relaxed);
+    if(uses>>MESH_COMPUTE_THREADS)
+      mesh_notice_push(m,mesh_notice_queue(buffer->owner,MESH_NOTICE_SEND),buffer->first);
+    uses&=MESH_COMPUTE_MASK;
     while(uses){
       uint32_t worker=(uint32_t)__builtin_ctz(uses);uses&=uses-1;
       mesh_notice_push(m,mesh_notice_queue(buffer->owner,MESH_NOTICE_COMPUTE+worker),buffer->first);
