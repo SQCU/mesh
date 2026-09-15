@@ -23,16 +23,16 @@ void mesh_calls_destroy(struct mesh_calls *);
 
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfer_bind(struct mesh_ctx *,uint32_t queue,int receive,uint32_t identity,struct mesh_section);
+int mesh_transfers_prepare(struct mesh_ctx *);
 void mesh_transfers_start(struct mesh_ctx *);
 
 /* design/algorithm-sources.md#programtensor */
-int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,struct mesh_section *);
+int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,int receive,struct mesh_section *);
 uint32_t mesh_section_page(struct mesh_ctx *,struct mesh_section,uint32_t index);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
 void mesh_section_constant(struct mesh_ctx *,struct mesh_section);
 void mesh_section_release(struct mesh_ctx *,struct mesh_section);
-size_t mesh_section_capacity(struct mesh_ctx *);
-size_t mesh_receive_pages(struct mesh_ctx *,uint32_t queue,uint32_t *pages);
+size_t mesh_receive_pages(struct mesh_ctx *,uint32_t queue,uint32_t span,uint32_t *pages);
 
 /* design/algorithm-sources.md#collectivesync_on_remote_fill */
 void mesh_sync_on_remote_fill(struct mesh_ctx *,const struct mesh_section *,size_t count,uint32_t index);

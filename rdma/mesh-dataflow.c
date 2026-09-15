@@ -46,7 +46,6 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   }
   uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
   client|=(~device)&(UINT64_C(1)<<63);
-  memset(memory->send_bytes[client>>63],0,sizeof memory->send_bytes[0]);
   for(uint32_t queue=0;queue<MESH_NOTICE_QUEUES;queue++)
     atomic_store_explicit(&memory->notice_head[mesh_notice_queue(client,queue)],MESH_ABSENT,memory_order_relaxed);
   atomic_store_explicit(&memory->client,client,memory_order_release);
@@ -100,21 +99,12 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
 }
 
 /* design/algorithm-sources.md#programtensor */
-int mesh_backing_alloc(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t quantum,int contiguous){
-  if(!quantum || !count || count%quantum || first>mesh_rows(c->M) || count>mesh_rows(c->M)-first)return EINVAL;
-  uint32_t span=contiguous?count:quantum;
-  for(uint32_t offset=0;offset<count;offset+=span){
-    uint32_t page=mesh_arena_alloc(c,span,quantum);
-    if(page==MESH_ABSENT)return errno;
-    for(uint32_t index=0;index<span;index+=quantum){
-      uint32_t row=first+offset+index;
-      atomic_store_explicit(&mesh_page(c->M)[row],page+index,memory_order_relaxed);
-      mesh_buffers(c->M)[row]=(struct mesh_buffer){.ownership=1,.first=row,.pages=quantum,.owner=c->client};
-      mesh_backing(c->M)[page+index]=row;
-      mesh_bits_set(c->M,MESH_ROW_HOT,row,quantum);
-    }
+void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t page){
+  for(uint32_t offset=0;offset<pages;offset+=c->M->block){
+    atomic_store_explicit(&mesh_page(c->M)[first+offset],page+offset,memory_order_relaxed);
+    mesh_backing(c->M)[page+offset]=first+offset;
+    *mesh_tag(c->M,page+offset)=first+offset;
   }
-  return 0;
 }
 
 /* design/algorithm-sources.md#programtensor */
@@ -181,8 +171,10 @@ uint32_t mesh_collect(struct hdr *m,uint32_t pending){
       buffer->next=deferred;deferred=buffer->first;continue;
     }
     uint32_t first=buffer->first,pages=buffer->pages;
-    uint32_t page=atomic_load_explicit(&mesh_page(m)[first],memory_order_acquire);
-    mesh_bits_clear(m,MESH_PAGE_OWN,page,pages);
+    for(uint32_t offset=0;offset<pages;offset+=m->block){
+      uint32_t page=atomic_load_explicit(&mesh_page(m)[first+offset],memory_order_acquire);
+      if(page!=MESH_ABSENT)mesh_bits_clear(m,MESH_PAGE_OWN,page,m->block);
+    }
     atomic_store_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_RECLAIMED|MESH_BUFFER_SEALED),memory_order_release);
     mesh_bits_clear(m,MESH_ROW_HOT,first,pages);
   }

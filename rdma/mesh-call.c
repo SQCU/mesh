@@ -238,12 +238,10 @@ void mesh_calls_destroy(struct mesh_calls *calls){
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint32_t identity,struct mesh_section section){
   struct hdr *m=context->M;
-  if(queue>=m->qps || section.pages!=m->block || section.bytes>mesh_section_capacity(context))return EINVAL;
+  if(queue>=m->qps)return EINVAL;
   _Atomic uint32_t *length=mesh_order_length(m,queue,receive);
   uint32_t index=atomic_load_explicit(length,memory_order_relaxed);
   if(index==mesh_blocks(m))return ENOSPC;
-  uint32_t bytes=mesh_message_bytes((uint32_t)section.bytes);
-  if(!receive && bytes>m->send_bytes[context->client>>63][queue])m->send_bytes[context->client>>63][queue]=bytes;
   if(!receive)for(uint32_t value=0;value<section.count;value++){
     uint32_t row=mesh_section_row(section,value);
     int error=mesh_buffer_retain(m,row,section.pages);if(error)return error;
@@ -251,35 +249,57 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
     if(!(uses>>MESH_COMPUTE_THREADS) && mesh_bit(m,MESH_PRESENT,row))
       mesh_notice_push(m,mesh_notice_queue(context->client,MESH_NOTICE_SEND),row);
   }
-  mesh_transfers(m,queue,receive)[index]=(struct mesh_transfer){section.first,identity,(uint32_t)section.bytes,section.count,section.stride};
+  mesh_transfers(m,queue,receive)[index]=(struct mesh_transfer){section.first,identity,section.count,section.stride,m->block,section.bytes};
   atomic_store_explicit(length,index+1,memory_order_release);
+  return 0;
+}
+
+/* design/algorithm-sources.md#programcopy */
+int mesh_transfers_prepare(struct mesh_ctx *context){
+  struct hdr *m=context->M;
+  for(uint32_t q=0;q<m->qps;q++){
+    uint32_t count=atomic_load(mesh_order_length(m,q,MESH_RECEIVE)),pages=0;
+    struct mesh_transfer *transfers=mesh_transfers(m,q,MESH_RECEIVE);
+    for(uint32_t i=0;i<count;i++)pages+=transfers[i].count*mesh_buffers(m)[transfers[i].local_row].pages;
+    if(!pages)continue;
+    uint32_t page=mesh_arena_alloc(context,pages,m->block);
+    if(page==MESH_ABSENT)return errno;
+    for(uint32_t i=0;i<count;i++)for(uint32_t value=0;value<transfers[i].count;value++){
+      uint32_t row=transfers[i].local_row+value*transfers[i].stride,span=mesh_buffers(m)[row].pages;
+      mesh_backing_bind(context,row,span,page);
+      page+=span;
+    }
+  }
   return 0;
 }
 
 /* design/algorithm-sources.md#programcopy */
 void mesh_transfers_start(struct mesh_ctx *context){
   struct hdr *m=context->M;
-  for(uint32_t q=0;q<m->qps;q++)for(uint32_t i=0;i<atomic_load(mesh_order_length(m,q,MESH_SEND));i++){
-    struct mesh_transfer transfer=mesh_transfers(m,q,MESH_SEND)[i];
-    for(uint32_t value=0;value<transfer.count;value++){
-      uint32_t row=transfer.local_row+value*transfer.stride;
-      *mesh_tag(m,atomic_load_explicit(&mesh_page(m)[row],memory_order_acquire),m->send_bytes[context->client>>63][q])=row;
-    }
-  }
   atomic_store_explicit(&m->configured,context->client,memory_order_release);
 }
 
 /* design/algorithm-sources.md#programtensor */
-int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){
+int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int receive,struct mesh_section *section){
   struct hdr *m=context->M;
-  if(!bytes || bytes>mesh_section_capacity(context) || !count || count>mesh_blocks(m))return EINVAL;
-  uint32_t pages=count*m->block,first=mesh_rows_alloc(context,pages);
+  if(!bytes || !count)return EINVAL;
+  size_t quantum=(size_t)m->block*m->pgsz;
+  if(bytes>(size_t)mesh_rows(m)*m->pgsz)return ENOMEM;
+  size_t span=(bytes+quantum-1)/quantum*m->block;
+  if(span>mesh_rows(m)/count)return ENOMEM;
+  uint32_t pages=count*(uint32_t)span,first=mesh_rows_alloc(context,pages);
   if(first==MESH_ABSENT)return errno;
-  int error=mesh_backing_alloc(context,first,pages,m->block,0);
-  if(error){mesh_backing_release(context,first,pages);mesh_rows_release(context,first,pages);return error;}
-  *section=(struct mesh_section){first,m->block,bytes,count,m->block};
-  mesh_buffer_retain(m,first,pages);
-  mesh_buffer_seal(m,first,pages);
+  for(uint32_t row=first;row<first+pages;row+=(uint32_t)span)
+    mesh_buffers(m)[row]=(struct mesh_buffer){.ownership=2|MESH_BUFFER_FLAG(MESH_BUFFER_SEALED),.first=row,.pages=(uint32_t)span,.owner=context->client};
+  mesh_bits_set(m,MESH_ROW_HOT,first,pages);
+  if(!receive)for(uint32_t row=first;row<first+pages;row+=(uint32_t)span){
+    uint32_t page=mesh_arena_alloc(context,(uint32_t)span,m->block);
+    if(page==MESH_ABSENT){
+      int error=errno;mesh_backing_release(context,first,pages);mesh_rows_release(context,first,pages);return error;
+    }
+    mesh_backing_bind(context,row,(uint32_t)span,page);
+  }
+  *section=(struct mesh_section){first,(uint32_t)span,bytes,count,(uint32_t)span};
   return 0;
 }
 /* design/algorithm-sources.md#programtensor */
@@ -296,20 +316,20 @@ void mesh_section_release(struct mesh_ctx *context,struct mesh_section section){
   mesh_rows_release(context,section.first,section.count*section.pages);
 }
 /* design/algorithm-sources.md#programtensor */
-size_t mesh_section_capacity(struct mesh_ctx *context){return (size_t)context->M->block*context->M->pgsz-sizeof(uint32_t);}
-
-/* design/algorithm-sources.md#programtensor */
-size_t mesh_receive_pages(struct mesh_ctx *context,uint32_t queue,uint32_t *pages){
+size_t mesh_receive_pages(struct mesh_ctx *context,uint32_t queue,uint32_t span,uint32_t *pages){
   struct hdr *m=context->M;
   uint32_t count=atomic_load_explicit(mesh_order_length(m,queue,MESH_RECEIVE),memory_order_acquire);
-  size_t length=0;
+  uint32_t first=MESH_ABSENT,total=0;
   for(uint32_t i=0;i<count;i++){
     struct mesh_transfer transfer=mesh_transfers(m,queue,MESH_RECEIVE)[i];
     for(uint32_t index=0;index<transfer.count;index++){
-      if(pages)pages[length]=atomic_load_explicit(&mesh_page(m)[transfer.local_row+index*transfer.stride],memory_order_acquire);
-      length++;
+      uint32_t row=transfer.local_row+index*transfer.stride;
+      if(first==MESH_ABSENT)first=atomic_load_explicit(&mesh_page(m)[row],memory_order_acquire);
+      total+=mesh_buffers(m)[row].pages;
     }
   }
+  size_t length=total<span?0:(total-span)/m->block+1;
+  if(pages)for(size_t i=0;i<length;i++)pages[i]=first+(uint32_t)i*m->block;
   return length;
 }
 

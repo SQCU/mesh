@@ -8,11 +8,11 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 40u
+#define MESH_VERSION 41u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
-struct mesh_transfer { uint32_t local_row,binding,bytes,count,stride; };
+struct mesh_transfer { uint32_t local_row,binding,count,stride,chunk_stride; uint64_t bytes; };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_PRESENT, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PLANES };
@@ -31,12 +31,11 @@ struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps;
   _Atomic uint64_t configured;
-  uint64_t planes_off,page_off,buffer_off,backing_off,order_off,notice_off,data_off,length;
+  uint64_t planes_off,page_off,buffer_off,backing_off,order_off,notice_off,tags_off,data_off,length;
   _Atomic uint64_t client,bridge_pid,device_client,serial;
   _Atomic uint32_t reclaim_head;
   _Atomic uint32_t order_length[2*MESH_QPS];
   _Atomic uint32_t notice_head[MESH_NOTICE_BANKS*MESH_NOTICE_QUEUES];
-  uint32_t send_bytes[MESH_NOTICE_BANKS][MESH_QPS];
   struct mesh_port_info port;
 };
 void mesh_publish(struct hdr *,uint32_t row);
@@ -57,9 +56,7 @@ static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint32_t queue,
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint32_t queue,int direction){ return &m->order_length[2*queue+(uint32_t)direction]; }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
 /* design/algorithm-sources.md#programcopy */
-static inline uint32_t *mesh_tag(struct hdr *m,uint32_t page,uint32_t bytes){ return (uint32_t *)(mesh_at(m,page)+bytes-sizeof(uint32_t)); }
-/* design/algorithm-sources.md#programcopy */
-static inline uint32_t mesh_message_bytes(uint32_t bytes){return (bytes+sizeof(uint32_t)+4095u)/4096u*4096u;}
+static inline uint32_t *mesh_tag(struct hdr *m,uint32_t page){ return (uint32_t *)((char *)m+m->tags_off+(size_t)(page/m->block+1)*m->pgsz-sizeof(uint32_t)); }
 
 static inline uint64_t mesh_word_mask(uint32_t first,uint32_t count,uint32_t word){
   uint32_t lo=word*64,hi=lo+64,a=first>lo?first:lo,b=first+count<hi?first+count:hi;
@@ -80,19 +77,13 @@ static inline int mesh_bit(struct hdr *m,int plane,uint32_t index){
 }
 
 /* design/algorithm-sources.md#programcopy */
-static inline void mesh_receive_complete(struct hdr *m,uint32_t row,uint32_t page){
+static inline void mesh_receive_assign(struct hdr *m,uint32_t row,uint32_t page){
   uint32_t previous=atomic_load_explicit(&mesh_page(m)[row],memory_order_relaxed),displaced=mesh_backing(m)[page];
   atomic_store_explicit(&mesh_page(m)[displaced],previous,memory_order_relaxed);
   mesh_backing(m)[previous]=displaced;
   mesh_backing(m)[page]=row;
   atomic_store_explicit(&mesh_page(m)[row],page,memory_order_relaxed);
-  struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-  uint32_t queues=atomic_load_explicit(&buffer->uses,memory_order_relaxed)>>MESH_COMPUTE_THREADS;
-  while(queues){
-    uint32_t q=(uint32_t)__builtin_ctz(queues);queues&=queues-1;
-    *mesh_tag(m,page,m->send_bytes[buffer->owner>>63][q])=row;
-  }
-  mesh_publish(m,row);
+  *mesh_tag(m,page)=row;
 }
 
 /* design/algorithm-sources.md#programkernel_call */
@@ -129,6 +120,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*MESH_NOTICE_QUEUES*rows*sizeof(struct mesh_notice); at=(at+bytes-1)/bytes*bytes;
   for(uint32_t queue=0;queue<MESH_NOTICE_BANKS*MESH_NOTICE_QUEUES;queue++)atomic_store_explicit(&h->notice_head[queue],MESH_ABSENT,memory_order_relaxed);
   atomic_store_explicit(&h->reclaim_head,MESH_ABSENT,memory_order_relaxed);
+  h->tags_off=at; at+=blocks*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)rows*pgsz;
   h->length=at; return at;
 }

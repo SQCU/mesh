@@ -52,6 +52,16 @@ The user's repeated-block workloads motivate actual use of this invariant
 library. They do not authorize a model-specific API or numerical implementation
 inside Mesh. Block counts and function compositions belong to the caller.
 
+The subsequent transport clarification distinguishes two abstraction levels:
+
+> there's no relationship between the transport level idea of streaming and our idea of partial tensors to have early emit by producers and asynchronous concurrent placement for consumption btw; tehse are two harmonious and different notions of streamedness which affect two different elvels of abstraction.
+
+> remember that a streaming transportmessagesize transport layer implementation should be totally transparent to all users of a send or receive api call exposed through our mesh api; this is something which is purely internal and have no effect on any caller or user of this api at any point in the future.
+
+The numerical partial is not a transport request. A tensor's byte count must not
+be limited by one request, and internal fragmentation must not change its shape,
+partition, numerical function or public send/receive declaration.
+
 The user-selected continuation objective is the attachment
 `5701aa94-8d2a-4238-851b-7ad3af7e91bc/pasted-text-1.txt`. It reiterates these
 requirements and actual integration through existing numerical implementations.

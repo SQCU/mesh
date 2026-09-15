@@ -81,80 +81,85 @@ consumes that root publication. A shared received constant contributes its actua
 arrival dependency; it does not bypass submission. Other consumers have only
 their declared operand dependencies, with no per-index global completion barrier.
 
-The numerical worker resolves operand addresses through the canonical page
-table and invokes the supplied function. Each contiguous section has one
-block-head entry; interior addresses follow from the configured relative offsets.
-CPU completion is its return. Metal
-completion is the command buffer's native completion handler. Core ML uses its
-native asynchronous prediction completion. Successful completion publishes each
-output and releases the input references. Provider failures are recorded in the
-shared port error fields and do not publish failed output as valid data.
+There are two independent streaming levels. Numerical streaming publishes the
+partials declared by supplied tensor functions. Transport streaming carries each
+send through internally sized requests. Transport fragmentation does not change
+the tensor partition, numerical function, shape, or send/receive API.
 
-Send completion releases the transport's input reference. Receive completion
-publishes the new section and ends producer ownership. When its last declared
-use and external value handle are gone, the existing collector returns backing
-to the page pool without clearing it. Callers do not publish consumer stamps,
-free pages, or signal completion. The library retains its context through actual
-native completion, including when its Swift owner leaves scope.
-The configuring client uses a different notice bank from the client's still-open
-device work. Old publications cannot be consumed as new values during handoff;
-this is an address distinction, without a handoff wait in numerical execution.
+The numerical worker resolves operands through the canonical page table and
+invokes the supplied function. CPU completion is its return; Metal and Core ML
+use their native asynchronous completion. Successful completion publishes the
+outputs and releases input references. Failures are recorded and do not publish
+failed output as valid data.
 
-TX, RX and collection have separate threads. Numerical workers never poll an
-RDMA completion queue. Setup preposts the receive window while queue pairs are
-in RTR and exchanges setup completion before enabling sends. Runtime refill
-remains on the dedicated RX thread, before delivering the completed section.
-Publication directly indexes configured sends. Its buffer use mask names
-numerical workers and transport queues, replacing the separate send-source plane.
-After posting each published section's sends, TX drains its completion queues
-before processing the next published section. It does not postpone draining
-until the end of a detached publication list. RX progresses on its own thread.
-One transfer descriptor covers its extent and row stride. Local source tags are
-written during realization. Receive forwarding sets its local source tags before
-publication; each tag stays immutable through all sends of that value.
+For N operand bytes and internal payload capacity C, setup represents
+K = ceil(N / C) transport chunks. A value has K page-table entries and one
+numerical presence bit and ownership record. A 10,648-element float32 operand
+has 42,592 bytes: with C = 16,384, it uses three transport chunks but remains
+one operand with the same 10,648 elements. Changing C changes none of the
+caller's numerical declarations.
 
-A message contains the operand bytes and a four-byte source-row tag in the same
-registered block. Setup maps peer source rows to local receive uses. Repeated
-sends of one source have identical tags and payloads; a precomputed per-source
-use list supplies their distinct destination rows. These lists follow the
-sender's configured per-source edge order. Other sources can arrive in any order.
-The receiver reads the tag from the completed block and indexes its local use
-list. No separate identity arrival, data copy or identity/payload join remains.
+`mesh_section_create` allocates local operands according to N. Received operands
+reserve logical rows; `mesh_transfers_prepare` allocates their actual backing as
+one contiguous page run per receive queue before native views are constructed.
+There is no temporary operand allocation replaced during setup. All simultaneously
+live receives have writable backing without consumer credits or reclamation waits.
 
-Verbs' `wr_id` carries the send's retained logical row or receive's physical page.
-The native completion identifies that storage directly, replacing the software
-posted-request FIFOs. The dedicated RX worker refills before assigning and
-publishing the completed partial. Receive posting traverses all preallocated
-values until the configured extent is exhausted. It never requires a numerical
-consumer to return a credit before it can post the next planned buffer.
+The bridge prepares two virtual representations of the same shared-memory
+payload pages. Numerical functions see dense operands. Registered transport
+spans alias a tag page followed by each C-byte chunk. A request starts at
+the tag page's final four bytes and continues into the payload. This uses one SGE, as exposed
+by the local device. It adds no payload copy, runtime mmap, or second identity
+channel. Registration spans are whole alias slots, placed in separate virtual
+address banks; no request crosses a memory-registration boundary. Numerical
+operands may cross those boundaries transparently.
 
-Assignment exchanges two block-head entries and their inverse mappings, using
-four stores independent of the configured number of pages per block. Publication
-writes one presence bit for the complete section and releases the producer's
-initial reference. The unused constant bitmap, interior-page mapping accessors,
-per-page alias metadata and duplicate producer-flag operation are removed. The
-[address and lifetime derivation](pages-and-functions.md#block-addressing)
-explains why published native operands remain fixed through out-of-order arrivals.
+TX receives a numerical publication, directly indexes its configured send edges,
+and starts posting chunks immediately. One cursor per send advances through its
+realized page indices; there is no runtime construction or traversal of the
+whole chunk list before the first post. Chunks of one send remain consecutive
+on their queue. Sends can publish in any order and have different byte lengths.
+The sender polls completions after each edge's available posts. RX runs on its
+own hardware thread, refilling before delivering each completion. Numerical
+workers and the collector have separate threads.
 
-For queue direction q, setup chooses
-`wire_bytes[q] = 4096 * ceil((max_payload_bytes[q] + 4) / 4096)`.
-All requests in that direction use this known length, so receivers prepost the
-correct frame count before knowing which source will publish next. A queue
-mixing large and small partials pads to its largest configured size. The caller
-can assign separate queues to different partial sizes. Storage still reserves a
-whole block per live value; `sectionCapacity` is block bytes minus four. Operand
-starts remain page-aligned, and only declared tensor bytes belong to numerical
-functions. Tags for different outgoing queue lengths all lie beyond those bytes.
-Queue lengths use the same client banks as publications, so an old device's
-forwarding reads its own realized lengths during client handoff.
+Every RX completion identifies its physical chunk through `wr_id`. Its tag indexes
+the precomputed destination chunk. Assignment exchanges forward and inverse
+page-table entries, preserving ownership of the displaced unfilled backing.
+The page-index list therefore fills incrementally. The final chunk's target
+also names the numerical head to publish; earlier chunks do not publish a
+replacement numerical partial. The queue's FIFO order establishes that this
+partial's earlier chunks are already placed. No thread waits for another
+partial or a whole operation to finish. A failed receive suppresses subsequent
+numerical publication on that queue and reports the provider error.
 
-These mechanisms use the plain SEND/RECV and local work-request identifiers
-specified by [Apple TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
-and used by [JACCL](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/lib/jaccl/rdma.h).
-The record layout and source-to-use relation are mesh's implementation. Compared
-with the previous source, the runtime removes the index queue pair, its two CQs,
-index-frame storage, index copies, and the three identity/payload join counters.
-It posts one SEND and one matching RECV per communicated partial.
+Because each send's chunks consume consecutive positions in a preallocated
+receive run, the complete operand is also contiguous in the numerical address
+space. Native bindings cover possible start positions at which that operand
+fits. Publication never remaps a native view. The page-table permutation and
+lifetime relationship are derived in [pages and functions](pages-and-functions.md#block-addressing).
+
+One transport reference retains the source through all its chunks. Only its
+final ordered send completion releases that reference; there is no fragment
+completion counter. Numerical completion, publication and ordinary object
+lifetime discharge the other known references. The collector returns each
+chunk's actual backing without clearing it. The client notice banks keep old
+device publications distinct during handoff.
+
+Setup chooses L = min(C, max operand bytes on that queue direction). The wire
+request carries L + 4 bytes and occupies ceil((L + 4) / 4096) native frames.
+Queue capacity counts those frames. This preserves short requests when every
+operand is smaller than C; a large operand never enlarges a request beyond C.
+Tail chunks and smaller operands on a mixed queue include padding up to L. Each physical
+chunk additionally has one OS page for its tag in the registered alias layout.
+Those framing, padding and metadata costs are real; zero-copy does not mean
+zero cost. The obsolete rule that every operand fit one message, the public
+capacity query, and unbounded largest-operand message sizing are deleted.
+
+The mechanisms use [Apple TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt),
+[JACCL's SEND/RECV interfaces](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/lib/jaccl/rdma.h),
+and [shared page mappings](algorithm-sources.md#programtensor). The alias layout
+and chunk-to-publication relation are Mesh's implementation, not upstream code.
 
 ## Native contiguous operands
 
@@ -187,8 +192,8 @@ No virtual address is remapped while a native call uses it. No matrix binding,
 MLMultiArray, feature provider or operand allocation is constructed during the
 numerical invocation.
 
-`MeshSpan.metal` presents registered storage as a no-copy Metal buffer and
-byte offset. `MeshSpan.multiArray` presents it through the pointer-backed Core ML
+`MeshSpan.metal` presents each registered operand window as a no-copy Metal
+buffer. It does not wrap the whole arena in one Metal allocation. `MeshSpan.multiArray` presents it through the pointer-backed Core ML
 API. The Core ML example supplies its actual output section through
 `MLPredictionOptions.outputBackings`. Core ML's model feature and backing
 contracts still apply; unknown output names are ignored by Core ML, so the
@@ -237,9 +242,9 @@ workers alive; it does not gate tensor issuance.
 ## Current extent and remaining work
 
 The native bridge has one peer. This source exposes world sizes 1 and 2, up to
-8 numerical workers, and the configured transport queues. Each contiguous
-section fits one configured transport block with four bytes reserved for its tag;
-larger tensors use several sections.
+8 numerical workers, and the configured transport queues. Numerical sections can span arbitrarily many transport chunks within the
+configured arena. The transport count is internal; larger tensors do not require
+caller-side repartitioning.
 The programs are finite AOT data flows. One `start()` realizes the configuration;
 `submit(index)` uses it for successive values, without making separate chain
 declarations. The configured count reserves all value backing ahead of execution.
@@ -253,9 +258,9 @@ finite extent nor the absence of a serving caller is an authorized scope decisio
 The source has not integrated returned pages into continued use of the configured
 stream, or integrated collective invocation into the serving path.
 
-Transport sends each queue direction's realized frame length. Frame rounding,
-padding between unequal partials sharing a queue, source-tag handling, publication
-and reference-count atomics remain actual costs.
+Transport chunk padding, source-tag handling, publication and reference-count
+atomics remain actual costs. The alias mechanism has not been deployed or exercised
+on the RDMA link by this change.
 For N indices and R possible receive positions, native input/output preparation
 now constructs R input bindings and N output bindings, plus one input slot map
 over arena blocks. It creates one numerical submission function per declared
@@ -272,7 +277,7 @@ over world size 1 follows from this source change.
 There is no runtime testing gate here. The bridge, C and Swift libraries, literal
 chain, Core ML chain and synchronization counterexample are build targets.
 They have not been run or deployed by this change. Both participants
-need the source's ABI 40 bridge before these callers can attach.
+need the source's ABI 41 bridge before these callers can attach.
 
 Client attachment and bridge startup no longer run a process-memory ranking scan.
 The unrelated `mesh-memory.h`, its `--memory-check` command and launch-script hook
@@ -292,8 +297,8 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 
 | Counted set | Before | Current |
 |---|---:|---:|
-| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,680 lines / 993 files |
-| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,358 lines / 14 files |
+| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,687 lines / 993 files |
+| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,365 lines / 14 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 27 lines |
 | Engine's deleted mesh_matrix.swift, tools/mesh/sync.sh and replacement matrix example | 203 lines | 0 lines |
 
@@ -303,7 +308,7 @@ are `.c .h .m .mm .swift .py .metal .sh .zsh .js .ts .jsx .tsx .qc`. The whole-r
 row includes the large unchanged Xonotic sources. It has not been halved.
 Makefiles, module maps and pyproject.toml are reported separately above. Shared
 engine dependencies `parameter_configuration.swift`, `matrix_shaders.swift`, and
-`matrix_operations.swift` now total 540 maintained lines in the working tree; the
+`matrix_operations.swift` now total 532 maintained lines in the working tree; the
 deleted matrix caller used them. That includes the existing addition encoder and shader
 moved from `bootstrap.swift` and `kernels.swift`, where their 26 lines were
 removed. This change does not attribute pre-existing working-tree edits to the
@@ -327,7 +332,7 @@ current source and example callers. It does not close the deployment gaps above.
 |---|---|
 | Higher-order partial tensor functions using existing numerics | `Mesh.call` and both `Mesh.map` forms accept supplied functions. `MeshInvocation` selects CPU, Metal or Core ML submission during realization. The native form prepares multiple input/output bindings independently. The Core ML caller passes an existing compiled model. |
 | Distinct collective semantics | `Mesh.swift` defines send/receive endpoints, broadcast, scatter, gather, all-scatter, all-gather, all-to-all, reduce, reduce-scatter and all-reduce. Movement returns indexed sections; only the supplied combining function performs reduction arithmetic. |
-| AOT bindings, zero-copy asynchronous use | `mesh_call_bind` realizes indexed uses and operand storage. Swift prepares native views before `mesh_calls_start`. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_complete` changes block-head mappings over registered operands without copying. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
+| AOT bindings, zero-copy asynchronous use | `mesh_call_bind` realizes indexed uses and operand storage. Swift prepares native views before `mesh_calls_start`. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_assign` places each chunk through page-index assignment over registered aliases without copying. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
 | Delete incompatible implementation and callers | The former executor/frontend and engine adapters are absent from the current tree. The source inventory includes their replacements. The index transport channel, paired native-binding Cartesian product, per-page receive metadata and process-memory ranking scan are also absent. |
 | Actual producer/collective/numerical-consumer integration | `linear-chain.swift` applies the supplied T to produced and transported partials before reconstruction. `coreml-chain.swift` composes two native predictions through transferred sections. Each declares once and submits four distinct indices. |
 | Automatic lifetime; explicit synchronization only | `mesh_buffer_retain` accounts for declared uses. `mesh_publish`, native numerical completion, TX completion and ordinary object destruction discharge their references; `mesh_collect` returns backing without clearing payload. Runtime presence polling occurs only in the explicitly called `mesh_sync_on_remote_fill`; its source counterexample includes a self-dependent permanent wait. |
@@ -343,8 +348,8 @@ used as evidence for these source properties.
 The generic Metal invocation selects command buffers prepared during realization,
 with pool capacity owned by Mesh for every declared call. Native view
 preparation and raw callbacks both support multiple input and output operands.
-The transport supports one peer. TX now polls completions after each publication's
-sends instead of delaying polling until the entire publication list is processed.
+The transport supports one peer. TX polls completions after each edge's available chunk posts instead of delaying
+polling until the entire publication list is processed.
 The remaining transport and lifetime restrictions need disposition against the
 user's requirements; accepting a convenient example does not settle them.
 The user's four-residual-FFN-layer case further requires useful numerical work on
@@ -353,3 +358,11 @@ that make this chain slower than local execution invalidate the implementation.
 The deleted matrix example did not establish this case. The user's 8–100-block
 workloads must use the same tensor-function-invariant interface; they do not
 justify an architecture-specific library path.
+
+The transport-size replacement changes maintained Mesh source by +7 lines net,
+including the operand allocation and native-view changes; removing the unused
+engine addition wrapper removes 8 more source lines. Eight existing prose comments were replaced with documentation citations;
+those equal-line replacements are not counted as structural reduction. Documentation changes are
+reported separately from that structural count. The bridge, native libraries
+and retained callers compile at ABI 41. Compilation does not establish RDMA
+execution or end-to-end integration.

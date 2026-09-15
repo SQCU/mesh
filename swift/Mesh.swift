@@ -19,20 +19,12 @@ public struct MeshBindings<Value> {
     public subscript(_ operand: mesh_operand) -> Value { values[index(operand)] }
 }
 
-public struct MetalOperand {
-    public let buffer: MTLBuffer
-    public let offset: Int, bytes: Int
-}
-
 public struct MeshSpan {
     public let data: UnsafeMutableRawBufferPointer
     fileprivate let memory: MeshMemory
 
     // design/algorithm-sources.md#programtensor
-    public func metal(device: MTLDevice) -> MetalOperand {
-        let base = mesh_page_address(memory.context, 0)!
-        return MetalOperand(buffer: memory.metal(device), offset: base.distance(to: data.baseAddress!), bytes: data.count)
-    }
+    public func metal(device: MTLDevice) -> MTLBuffer { memory.metal(device, data: data) }
 
     // design/algorithm-sources.md#programkernel_call
     public func multiArray(shape: [Int], strides: [Int], type: MLMultiArrayDataType) throws -> MLMultiArray {
@@ -54,7 +46,7 @@ public struct TensorPart {
 
 private final class MeshMemory {
     let context: UnsafeMutablePointer<mesh_ctx>
-    private let buffers = NSMapTable<NSNumber, AnyObject>(keyOptions: .strongMemory, valueOptions: .weakMemory)
+    private let buffers = NSMapTable<NSString, AnyObject>(keyOptions: .strongMemory, valueOptions: .weakMemory)
 
     // design/algorithm-sources.md#programtensor
     init(_ name: String) throws {
@@ -74,11 +66,11 @@ private final class MeshMemory {
     }
 
     // design/algorithm-sources.md#programtensor
-    func metal(_ device: MTLDevice) -> MTLBuffer {
-        let key = NSNumber(value: device.registryID)
+    func metal(_ device: MTLDevice, data: UnsafeMutableRawBufferPointer) -> MTLBuffer {
+        let pageSize = Int(context.pointee.M.pointee.pgsz)
+        let address = data.baseAddress!, bytes = (data.count + pageSize - 1) / pageSize * pageSize
+        let key = "\(device.registryID):\(UInt(bitPattern: address)):\(bytes)" as NSString
         if let buffer = buffers.object(forKey: key) as? MTLBuffer { return buffer }
-        let address = mesh_page_address(context, 0)!
-        let bytes = Int(mesh_length(context) - mesh_data_offset(context))
         let buffer = device.makeBuffer(bytesNoCopy: address, length: bytes, options: .storageModeShared,
                                        deallocator: { [self] _, _ in _ = self })!
         buffers.setObject(buffer, forKey: key)
@@ -89,15 +81,16 @@ private final class MeshMemory {
 private final class MeshSection {
     let memory: MeshMemory
     let section: mesh_section
-    var receiveQueue: UInt32?
+    let receiveQueue: UInt32?
 
     // design/algorithm-sources.md#programtensor
-    init(_ memory: MeshMemory, bytes: Int, count: Int, shared: Bool = false) throws {
+    init(_ memory: MeshMemory, bytes: Int, count: Int, shared: Bool = false, receiveQueue: UInt32? = nil) throws {
         var section = mesh_section()
-        let error = mesh_section_create(memory.context, bytes, UInt32(count), &section)
+        let error = mesh_section_create(memory.context, bytes, UInt32(count), receiveQueue == nil ? 0 : 1, &section)
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
         if shared { section.stride = 0 }
         self.memory = memory; self.section = section
+        self.receiveQueue = receiveQueue
     }
 
     // design/algorithm-sources.md#programtensor
@@ -149,8 +142,6 @@ public final class Mesh {
     private let calls: OpaquePointer
     private var transfer: UInt32 = 0
     private var preparations: [() throws -> Void] = []
-
-    public var sectionCapacity: Int { mesh_section_capacity(memory.context) }
 
     // design/algorithm-sources.md#program
     public init(region: String, rank: Int, size: Int, workers: Int, count: Int = 1) throws {
@@ -208,8 +199,8 @@ public final class Mesh {
         let source = part.storage!, context = memory.context
         let pages: [UInt32], index: (mesh_operand) -> Int
         if let queue = source.receiveQueue {
-            var received = [UInt32](repeating: 0, count: mesh_receive_pages(context, queue, nil))
-            mesh_receive_pages(context, queue, &received)
+            var received = [UInt32](repeating: 0, count: mesh_receive_pages(context, queue, source.section.pages, nil))
+            mesh_receive_pages(context, queue, source.section.pages, &received)
             pages = received
             let quantum = Int(mesh_block_pages(context))
             var slots = [Int](repeating: 0, count: Int(mesh_arena_pages(context)) / quantum)
@@ -272,8 +263,7 @@ public final class Mesh {
         if part.rank == destination { return part }
         let output = TensorPart(rank: destination, bytes: part.bytes,
                                 storage: destination == rank ? try MeshSection(memory, bytes: part.bytes, count: part.shared ? 1 : count,
-                                                                               shared: part.shared) : nil, shared: part.shared)
-        output.storage?.receiveQueue = UInt32(queue)
+                                                                               shared: part.shared, receiveQueue: UInt32(queue)) : nil, shared: part.shared)
         let identity = transfer; transfer += 1
         let local = rank == destination ? output : part
         let error = mesh_transfer_bind(memory.context, UInt32(queue), rank == destination ? 1 : 0,
@@ -349,13 +339,10 @@ public final class Mesh {
         try allGather(reduceScatter(contributions, to: owners, using: combine, workers: workers, queue: queue), queue: queue)
     }
 
-    // design/algorithm-sources.md#programtensor
-    public func metalStorage(device: MTLDevice) -> MTLBuffer {
-        memory.metal(device)
-    }
-
     // design/algorithm-sources.md#programkernel_call
     public func start() throws {
+        let storageError = mesh_transfers_prepare(memory.context)
+        if storageError != 0 { throw POSIXError(POSIXErrorCode(rawValue: storageError)!) }
         for prepare in preparations { try prepare() }
         preparations.removeAll()
         if size > 1 { mesh_transfers_start(memory.context) }

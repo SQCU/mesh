@@ -24,12 +24,22 @@ references for indexed sections and virtual mappings of actual shared backing.
 George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
 (1960): reference counting. The user explicitly requested automatic ownership
 release and background pool return, without caller free/done calls.
-Contiguous sections now use a single block-head address and relative byte offsets,
-with one presence bit and ownership record per value. The
+Contiguous sections use chunk-indexed backing and relative numerical byte offsets,
+with one presence bit and ownership record per numerical value. The
 [address and ownership derivation](pages-and-functions.md#block-addressing)
 shows the receive permutation and the producer's single initial reference.
 These are mesh's representation choices, not new algorithms attributed to Pallas
-or Collins. They remove interior-page mapping updates and the producer-flag check.
+or Collins. Transport chunk counts do not define tensor partitions.
+The Berkeley/Apple [mmap specification](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2)
+provides shared mappings of file-backed pages. Apple's
+[pshm_mmap implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/posix_shm.c)
+maps the selected object offsets with copy-on-write disabled. `wire_map` uses those mappings to
+give the device a payload-plus-tag address sequence and the numerical function
+a dense address sequence over the same payload pages. Aliases are fixed at bridge
+setup. Runtime receive assignment changes page indices, not virtual mappings.
+Metal buffers cover each operand's page-aligned window, using Apple's
+[no-copy buffer API](https://developer.apple.com/documentation/metal/mtldevice/makebuffer(bytesnocopy:length:options:deallocator:)).
+The whole-arena Metal buffer and transport-capacity query have been removed.
 
 ## Program.kernel_call
 
@@ -80,17 +90,19 @@ distinguish substrate facts from the retained bridge's protocol decisions.
 TN3205 explicitly limits this transport to `IBV_WR_SEND`; its SDK enum for
 `IBV_WR_SEND_WITH_IMM` does not establish hardware support. Both TN3205 and JACCL
 show local `wr_id` values returned with completions. Mesh uses these identifiers
-for buffer lifetime and removes its duplicate completion FIFO. Its registered
-record reserves four bytes for an immutable source-row tag, and setup maps peer
-source rows to local receive uses. Per-queue frame counts are realized from the
-configured payload sizes. The tag arrives in the payload's own work request, so
-the previous index QP, index messages and cross-QP join are deleted. The
+for buffer lifetime. Every chunk carries a source-chunk row tag; setup maps that
+row to a destination chunk and, for the final chunk, the numerical publication.
+The tag arrives in the payload's own work request. There is no index QP or
+cross-QP identity join. On September 15, `ibv_devinfo -v` reported `max_sge: 1`
+on the local Thunderbolt devices. The alias representation uses one SGE and
+does not infer two-entry support from the general verbs API. The
 [record layout and execution path](async-collectives.md#execution-and-ownership)
 describe this mesh-specific representation. Receive storage is preallocated
 across the finite extent; refill does not depend on consumer completion or page
 reclamation.
-The dedicated TX worker polls completion queues after posting each publication's
-sends, before advancing to the next published row. Completion processing refills
+The dedicated TX worker starts posting as each send edge is enqueued, then polls
+completion queues. It does not construct a runtime list of all chunks before
+posting the first. Completion processing refills
 available send slots directly. RX independently refills receives before publishing
 the received section. No completion wait or new scheduler is introduced.
 
@@ -124,9 +136,9 @@ The JAX authors' [Pallas accumulation](https://docs.jax.dev/en/latest/pallas/pip
 reference for combining numerical contributions.
 The engine's existing `encAdd` encoder and `add_inplace` shader now live in its
 shared matrix source files, retaining their existing arithmetic and launch
-geometry. `MatrixOperations.add` prepares the pipeline and dimensions and accepts
-operand offsets into the existing registered Metal buffer. Callers can supply
-this function to reductions; mesh implements no addition kernel.
+geometry. Callers prepare their pipeline and dimensions and supply `encAdd` with
+the actual operand buffers and offsets. Mesh implements no addition kernel;
+the unused `MatrixOperations.add` convenience wrapper has been removed.
 
 ## collective.reduce_scatter
 

@@ -32,17 +32,20 @@ not copy payload from a transport-only staging store.
 
 The MLX authors' [JACCL transport](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/lib/jaccl/rdma.h)
 uses work-request identifiers and CQ polling. Mesh preposts physical slots;
-`wr_id` identifies the completed page and an immutable tag in that same block
-identifies the source value. Setup maps source rows to local uses. Sender
-publication order need not match logical declaration order.
+`wr_id` identifies the completed physical chunk. A tag in the same request
+identifies its source chunk. Setup maps source rows to destination chunks;
+the final chunk also names the numerical publication. Sender publication order
+need not match declaration order. Consecutive chunks of one send occupy
+consecutive payload pages in the preposted receive run.
 
 ## D6. Paired send and receive frame counts match
 
 TN3205 requires matching frame counts and specifies finite queue capacity. It does
-not require every message on a queue to have one size. Mesh realizes one frame
-count per queue direction from its largest configured partial plus a four-byte
-tag. This permits preposting with independently arriving producers. Frame rounding
-and padding smaller partials to that size remain mesh costs.
+not require one request per numerical partial. Mesh uses internally sized chunks
+with a four-byte tag. The fixed chunk framing permits preposting independently
+of producer order; operand size determines only the number of chunks. Tail
+padding and the tag's additional frame remain explicit transport costs, without
+a caller capacity query or a requirement to reshape numerical operands.
 
 ## D7. Publication does not await delivery
 

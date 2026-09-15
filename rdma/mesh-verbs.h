@@ -22,14 +22,34 @@ struct mesh_verbs {
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_cq *completion_queues[2*(MESH_QPS)];
   struct ibv_qp *pair,*pairs[MESH_QPS]; int qp_count; struct ibv_mr **regions;
   int region_count; uint32_t capacity[MESH_QPS][2];
-  size_t region_origin, region_extent;
+  char *wire; size_t wire_length,region_extent;
+  struct ibv_sge *spans;
   struct ibv_wc *completions;
 };
 static struct mesh_verbs *provider;
 /* design/algorithm-sources.md#programtensor */
-static struct ibv_sge region_sge(const char *base, size_t offset, uint32_t bytes){
-  size_t index=offset<provider->region_origin?0:(provider->region_origin?1:0)+(offset-provider->region_origin)/provider->region_extent;
-  return (struct ibv_sge){(uintptr_t)base+offset,bytes,provider->regions[index]->lkey}; }
+static int wire_map(struct hdr *m,int file){
+  size_t bank=(size_t)1<<32,stride=(size_t)(m->block+1)*m->pgsz,blocks=mesh_blocks(m);
+  provider->region_extent=((size_t)1<<30)/stride*stride;
+  size_t regions=(blocks*stride+provider->region_extent-1)/provider->region_extent,length=regions*bank;
+  char *reserved=mmap(NULL,length+bank,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
+  if(reserved==MAP_FAILED)return -1;
+  char *base=(char *)(((uintptr_t)reserved+bank-1)&~(uintptr_t)(bank-1));
+  if(base>reserved)munmap(reserved,(size_t)(base-reserved));
+  munmap(base+length,(size_t)(reserved+length+bank-(base+length)));
+  provider->wire=base;provider->wire_length=length;
+  provider->spans=calloc(blocks,sizeof *provider->spans);
+  if(!provider->spans)return -1;
+  size_t payload=(size_t)m->block*m->pgsz;
+  for(size_t i=0;i<blocks;i++){
+    size_t offset=i*stride;
+    char *address=base+offset/provider->region_extent*bank+offset%provider->region_extent;
+    if(mmap(address,m->pgsz,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,file,(off_t)(m->tags_off+i*m->pgsz))==MAP_FAILED)return -1;
+    if(mmap(address+m->pgsz,payload,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,file,(off_t)(m->data_off+i*payload))==MAP_FAILED)return -1;
+    provider->spans[i]=(struct ibv_sge){.addr=(uintptr_t)address+m->pgsz-sizeof(uint32_t),.length=(uint32_t)(payload+sizeof(uint32_t))};
+  }
+  return 0;
+}
 static const char *shm; static _Atomic sig_atomic_t stop;
 static int lsock=-1;
 static int expected_peer=-1;
@@ -54,7 +74,7 @@ static void down(void){ if(shm)shm_unlink(shm); }
 static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 static void onsig(int s){ (void)s; stop++; }
 
-/* ledger D13: the out-of-band connection record, exchanged once per pairing */
+/* design/collective-dependency-ledger.md#d13-connection-metadata-is-setup-work */
 struct qpi { uint32_t xmagic, xsize; uint32_t qpn,psn,pgsz; uint16_t lid; uint8_t gid[16]; uint16_t node; uint32_t count,qpns[MESH_QPS],psns[MESH_QPS]; };
 #define XMAGIC 0x4d595048u
 
@@ -123,12 +143,11 @@ static int oob(const char *peer,struct hdr *m,uint64_t client){
 }
 
 static struct ibv_port_attr pa;
-/* ledger D13 (out-of-band metadata), D6 (queue pair limits), TN3205 queue-pair state transitions */
-static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int me, uint32_t message_bytes, int qps, int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
+/* design/algorithm-sources.md#programcopy */
+static int verbs_up(const char *peer, struct hdr *m, int me, int qps, int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
   if(qps<1 || qps>MESH_QPS){ errno=EINVAL; return -1; }
   if(provider->context && (ibv_query_port(provider->context,1,&pa) || pa.state!=IBV_PORT_ACTIVE)){
     return -1; }
-  struct hdr *m=(struct hdr *)mem;
   int f=oob(peer,m,client); if(f<0) return !peer && (errno==EAGAIN || errno==EWOULDBLOCK)?1:-1;
   if(!provider->context){
   struct ibv_device **dl=ibv_get_device_list(NULL);
@@ -149,28 +168,18 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   if(!provider->domain){ close(f); return -1; }
   if(capabilities.max_mr<1){ close(f); errno=EOPNOTSUPP; return -1; }
   /* design/algorithm-sources.md#programtensor */
-  if(!provider->regions){
-    size_t bank=(size_t)1<<32, extent;
-    if(!(message_bytes&(message_bytes-1))){ origin=0; extent=(size_t)1<<30; }
-    else {
-      extent=((size_t)1<<30)/message_bytes*message_bytes;
-      if(((uintptr_t)mem&(bank-1)) || span>bank){ fprintf(stderr,"a %u-byte block is not a power of two: the mapping must be bank-aligned and within one 4 GiB bank\n",message_bytes); errno=EINVAL; close(f); return -1; }
-    }
-    while((origin?1:0)+(span-origin+extent-1)/extent>(size_t)capabilities.max_mr){ errno=ENOMEM; close(f); return -1; }
-    provider->region_origin=origin; provider->region_extent=extent;
-  }
-  origin=provider->region_origin;
-  size_t regions=(origin?1:0)+(span-origin+provider->region_extent-1)/provider->region_extent;
+  size_t bank=(size_t)1<<32,stride=(size_t)(m->block+1)*m->pgsz,span=(size_t)mesh_blocks(m)*stride;
+  size_t regions=(span+provider->region_extent-1)/provider->region_extent;
+  if(regions>(size_t)capabilities.max_mr){errno=ENOMEM;close(f);return -1;}
   if(!provider->regions) provider->regions=calloc(regions,sizeof *provider->regions);
   if(!provider->regions){ close(f); fprintf(stderr,"alloc regions: failed\n"); return -1; }
   while((size_t)provider->region_count<regions){
-    int data=provider->region_count>=(origin?1:0);
-    size_t o=data?origin+((size_t)provider->region_count-(origin?1:0))*provider->region_extent:0;
-    size_t end=data?o+provider->region_extent:origin;
+    size_t o=(size_t)provider->region_count*provider->region_extent,end=o+provider->region_extent;
     size_t n=(end<span?end:span)-o;
-    /* ledger D1: "applications should only register memory as IBV_ACCESS_LOCAL_WRITE" */
-    provider->regions[provider->region_count]=ibv_reg_mr(provider->domain,mem+o,n,IBV_ACCESS_LOCAL_WRITE);
+    /* design/collective-dependency-ledger.md#d1-the-verb-is-send-into-a-posted-recv-there-is-no-remote-write */
+    provider->regions[provider->region_count]=ibv_reg_mr(provider->domain,provider->wire+(size_t)provider->region_count*bank,n,IBV_ACCESS_LOCAL_WRITE);
     if(!provider->regions[provider->region_count]){ close(f); return -1; } provider->region_count++; }
+  for(size_t i=0;i<mesh_blocks(m);i++)provider->spans[i].lkey=provider->regions[i*stride/provider->region_extent]->lkey;
   if(ibv_query_port(provider->context,1,&pa)){ close(f); return -1; }
   /* design/algorithm-sources.md#programcopy */
   uint32_t frame_capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
@@ -201,11 +210,11 @@ static int verbs_up(const char *peer, char *mem, size_t span, size_t origin, int
   for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->pairs[q],&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
   union ibv_gid gid; if(ibv_query_gid(provider->context,1,0,&gid)){ close(f); return -1; }
   uint32_t psn=arc4random()&0xffffff;
-  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=message_bytes,.node=(uint16_t)me,.count=(uint32_t)qps},you;
+  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.qpn=provider->pair->qp_num,.psn=psn,.lid=pa.lid,.pgsz=m->block*m->pgsz,.node=(uint16_t)me,.count=(uint32_t)qps},you;
   for(int q=0;q<qps;q++){ mine.qpns[q]=provider->pairs[q]->qp_num; mine.psns[q]=(psn+(uint32_t)q)&0xffffff; }
   memcpy(mine.gid,&gid,16);
   if(exchange(f,&mine,&you,sizeof mine,sizeof you,m,client)){ close(f); fprintf(stderr,"exchange failed\n"); return -1; }
-  /* ledger D6: both ends must post messages of the same frame count; D5: the same queue-pair count */
+  /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.count!=mine.count || (expected_peer>=0 && you.node!=expected_peer)){
     fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,expected_peer); close(f);errno=EPROTO;return -1; }
   expected_peer=you.node;

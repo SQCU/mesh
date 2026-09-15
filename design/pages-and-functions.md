@@ -50,12 +50,21 @@ external code. No caller free/done call or consumer-stamp protocol is required.
 
 ## Block addressing
 
-Each contiguous value has one logical block head s and a block of B physical
-pages beginning at page p(s). Byte offset d in that value has address
-`arena + page_size * p(s) + d`. Shape and stride indexing stay in the numerical
-operand binding. No page-table entry for an interior page is needed: the relative
-offset determines its address. Value i uses the head `first + i * stride`;
-a shared constant has stride zero. Ownership and presence also belong to that head.
+Each numerical partial has a logical head s, a byte length N, and
+K = ceil(N / C) transport chunks, where C is Mesh's internal chunk capacity.
+The page table contains K chunk addresses. Ownership and numerical presence
+belong to s, independently of K. Value i uses `first + i * stride`; a shared
+constant has stride zero. Numerical indexing continues to use its declared
+shape and strides, without a transport-chunk dimension.
+
+Local operands occupy contiguous payload pages. Setup allocates one contiguous
+receive page run per queue, covering the sum of its declared transfers' chunk
+counts. TX posts each send's chunks consecutively in that queue. Receives consume
+the posted run in that same order, so every send lands in a contiguous subrange,
+even when differently sized sends publish out of declaration order. If its first
+page is p(s), byte offset d has address `arena + page_size * p(s) + d`.
+Native bindings are prepared for the possible starts at which the whole operand
+fits. There is no remapping of a live numerical view.
 
 Before publication, receive blocks form a bijection between unfilled logical
 destinations and reserved physical blocks. If the next completion fills physical
@@ -66,11 +75,38 @@ uses the same writes. Every physical receive slot appears once in the finite
 posting list, so a previously published block cannot be displaced by a later
 completion. No payload is copied and no published operand changes address.
 
-Only after assignment and outgoing-tag preparation does `mesh_publish` publish
-the head's presence bit with release ordering and enqueue its configured uses.
-A numerical consumer resolves that head to the arrived physical block. Prepared
-Metal/MPS and Core ML bindings select that same block. There is no loop over the
-block's interior pages on the receive or publication path.
+For example, let A occupy three chunks and B one chunk. Their receive run
+contains physical positions p0, p1, p2, p3. If B publishes first, the completions
+produce this assignment:
+
+| Completion | Updated destination | Numerical publication |
+|---|---|---|
+| B0 into p0 | B0 → p0 | B |
+| A0 into p1 | A0 → p1 | — |
+| A1 into p2 | A1 → p2 | — |
+| A2 into p3 | A2 → p3 | A |
+
+B's consumer can run while A is transferring. A's native operand starts at p1
+and spans p1–p3 contiguously. Its setup bindings need only the possible fitting
+starts p0 and p1; B's bindings cover p0–p3. Neither function sees the transport
+chunk count. B's published p0 is never displaced while A's rows are assigned.
+
+Each chunk completion performs that assignment independently, updating one
+forward entry and preparing the chunk's local source tag for forwarding. The
+last chunk's precomputed target also names the numerical head to publish.
+FIFO completion puts that publication after all the partial's bytes are placed.
+It does not publish a different tensor partition or wait for any other partial.
+Numerical consumers and their prepared Metal/MPS or Core ML bindings resolve
+the numerical head. Collection releases each chunk's actual backing through
+the page table, including the displaced mappings of unfinished receives.
+
+The registered transport address space aliases these payload pages and a
+separate tag page before each chunk. Its one-entry SEND/RECV span starts at
+that page's final four bytes and continues into the payload; the dense numerical address space excludes
+tag pages. Both address spaces map the same shared-memory payload, not two
+copies. All aliases and registrations are made before execution. The tag page
+costs one OS page of storage per chunk; framing costs are recorded in
+[the execution description](async-collectives.md#execution-and-ownership).
 
 Each value has exactly one producer: setup for a constant, one numerical call,
 or one receive. Its initial reference represents that write. `mesh_publish`
