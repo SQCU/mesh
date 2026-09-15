@@ -92,7 +92,14 @@ public struct Bounds {
     public let max: Double
 }
 
+/// Seconds to move `amount` at `rate`: nothing takes no time; anything at rate 0 never finishes.
+private func seconds(_ amount: Double, at rate: Double) -> Double {
+    amount == 0 ? 0 : amount / rate
+}
+
 /// Their maximum is a lower bound, not an exact execution-time formula.
+/// Total over its inputs: a node or link the placement names but the topology lacks has
+/// rate 0, so the bound through it is `+inf` (losing a link changes `bounds()`, not correctness).
 public func bounds(_ program: Program, _ placement: Placement, _ topology: Topology) -> Bounds {
     var rate = 0.0
     var bandwidth = 0.0
@@ -100,30 +107,29 @@ public func bounds(_ program: Program, _ placement: Placement, _ topology: Topol
         rate += node.rate
         bandwidth += node.bandwidth
     }
-    var compute = program.work == 0 ? 0 : program.work / rate
-    var memory = program.bytes == 0 ? 0 : program.bytes / bandwidth
+    var compute = seconds(program.work, at: rate)
+    var memory = seconds(program.bytes, at: bandwidth)
     for (node, work) in placement.work {
-        compute = Swift.max(compute, work / topology.nodes[node]!.rate)
+        compute = Swift.max(compute, seconds(work, at: topology.nodes[node]?.rate ?? 0))
     }
     for (node, bytes) in placement.bytes {
-        memory = Swift.max(memory, bytes / topology.nodes[node]!.bandwidth)
+        memory = Swift.max(memory, seconds(bytes, at: topology.nodes[node]?.bandwidth ?? 0))
     }
     var cut: [CutKey: Double] = [:]
-    cut.reserveCapacity(placement.cuts.count)
     var maximum = Swift.max(compute, memory)
     for (key, crossing) in placement.cuts {
         var capacity = 0.0
         for link in crossing.links {
-            capacity += topology.links[link]!.bandwidth
+            capacity += topology.links[link]?.bandwidth ?? 0
         }
-        let seconds = crossing.bytes == 0 ? 0 : crossing.bytes / capacity
-        cut[key] = seconds
-        maximum = Swift.max(maximum, seconds)
+        let crossingSeconds = seconds(crossing.bytes, at: capacity)
+        cut[key] = crossingSeconds
+        maximum = Swift.max(maximum, crossingSeconds)
     }
     var path = 0.0
     for hop in placement.path {
-        let link = topology.links[hop.link]!
-        path += link.latency + hop.bytes / link.bandwidth
+        let link = topology.links[hop.link] ?? Topology.Link(bandwidth: 0, latency: 0)
+        path += link.latency + seconds(hop.bytes, at: link.bandwidth)
     }
     return Bounds(compute: compute, memory: memory, cut: cut, path: path, max: Swift.max(maximum, path))
 }

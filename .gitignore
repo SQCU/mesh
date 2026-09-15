@@ -9,6 +9,7 @@ rdma/Mesh.swiftdoc
 rdma/Mesh.swiftsourceinfo
 rdma/Mesh.abi.json
 rdma/sync-on-remote-fill
+rdma/bounds-table
 rdma/coreml-chain
 rdma/mesh-hop
 rdma/qcaps

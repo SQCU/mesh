@@ -282,18 +282,13 @@ no default collective may invoke it.
 
 ## bounds
 
-`bounds`, its plain value types and constructors (`LinkKey`, `CutKey`, `Topology`,
-`Program`, `Placement`, `Bounds`, including nested node, link, cut and hop values),
-and `BoundsTable.main` follow Hockney (1994, `t0 + n/r∞`), Culler et al.'s LogP as
-extended by Alexandrov et al., [LogGP](https://doi.org/10.1145/215399.215427)
-(1995, startup and message spacing), Kwasniewski et al.,
-[COSMA](https://arxiv.org/abs/1908.09606) (2019, I/O lower bound), and the
-four-lower-bounds paragraph of `metal-microbench/docs/amdahl_superiority.md` quoted
-in the T4 assignment.
-For nonnegative work and traffic, positive sustained rates, and placement keys
-present in the supplied topology, the arithmetic returns the larger of aggregate
-and per-node compute and memory bounds, bytes divided by summed cut bandwidth,
-the supplied path's summed startup and transfer time, and their maximum as a lower
-bound rather than an exact duration; the example alone supplies proportional
-placement for the ten-minute table, with no runtime execution or placement search
-inside `bounds`.
+`bounds` and its plain value types (`Topology`, `Program`, `Placement`, `Bounds`) follow
+Hockney (1994, `t0 + n/r∞`), Alexandrov et al., [LogGP](https://doi.org/10.1145/215399.215427)
+(1995, startup and per-byte gap), Kwasniewski et al., [COSMA](https://arxiv.org/abs/1908.09606)
+(2019, I/O lower bound), and the four-lower-bounds paragraph of
+`metal-microbench/docs/amdahl_superiority.md`: aggregate and per-node work over
+sustained rate, aggregate and per-node traffic over bandwidth, bytes across each cut
+over that cut's summed bandwidth, and the dependency path's summed startup and
+transfer time; "their maximum is a lower bound, not an exact execution-time formula".
+The caller supplies the placement; `bounds` evaluates it and never chooses one
+(`examples/bounds-table.swift` supplies the proportional placement of the ten-minute table).
