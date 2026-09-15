@@ -34,13 +34,16 @@ At stage d it declares the block-function relation
 
 `C[d,i,j] = F[d,i,j](X[d,i])`,
 `Y[d,j] = sum_i C[d,i,j]`,
-`X[d+1,j] = G[d,j](Y[d,j])` when a finishing function is supplied, otherwise Y.
+`X[d+1] = G(selected earlier partials, selected Y[d])` when finishing calls are supplied, otherwise Y.
 
 F and G are existing Core ML functions supplied by the caller. The sum invokes
 Accelerate's existing `vDSP_vadd`; initial producers invoke `vDSP_vramp`. Mesh
 implements none of that arithmetic. The caller's `functions` array gives the
 input-to-output block relation, and `reduceScatter` places each sum at its declared
-owner. Shapes can differ between input sections, output sections and stages.
+owner. Finishing calls name their inputs, outputs, owner and worker. They can
+read an earlier partial for a skip connection, take multiple reduced inputs,
+or return several sections. Their input gather and output scatter are explicit
+caller operations. Shapes can differ between input sections, output sections and stages.
 The stage list can contain the requested 8–100 blocks; there is no depth limit or
 separate block/layer API. The [caller configuration](function-chain.md) describes
 this actual source path and its inputs.
@@ -57,6 +60,8 @@ Configuration parsing, model loading, native views, routes and calls are realize
 before submission. Repeated model paths reuse the loaded model locally. Each
 index in the caller's configured count traverses the declared chain using distinct
 backing; the model list and graph are not interpreted during numerical execution.
+The caller discards its construction history before starting; declared input
+references retain earlier values through their later readers.
 This establishes a source composition, not measured throughput or a completed
 unbounded-stream lifecycle.
 
@@ -279,8 +284,13 @@ that call's numerical worker. Metal/tensor paths select their existing pipeline
 at setup and pass the indexed buffers and offsets to the existing encoder. The
 ordinary fixed-operand `multiply` is the index-zero partial application of that
 same implementation. Mesh does not provide a competing numerical implementation.
-Core ML prepares feature providers and output options separately, then passes
-the selected pair to native asynchronous prediction.
+`TensorFunction.prediction` takes a model and named input/output view factories.
+It prepares a feature provider and output options for each value index. The
+provider points to that call's realized operand array and selects each named
+input's prepared feature value independently. Output options bind the local
+results at setup. Submission assigns the operand-array pointer and calls native
+asynchronous prediction directly. The previous provider-building callback is
+removed; multiple inputs do not require a product of possible addresses.
 No virtual address is remapped while a native call uses it. No matrix binding,
 MLMultiArray, feature provider or operand allocation is constructed during the
 numerical invocation.
@@ -304,6 +314,12 @@ They are operand representations, not numerical backends implemented by mesh.
 ## Collective relations
 
 `send(part,to:)` declares both endpoints and returns the receive operand.
+At setup, repeated requests for the same immutable part, destination and queue
+reuse that receive operand. A private part identity distinguishes values without
+reading payload or inferring a collective. The delivery map is discarded after
+binding; it is absent from publication and transport execution. Different
+destinations or queues remain distinct, and numerical input uses are still counted
+separately: combining a part with itself still combines two contributions.
 Broadcast replicates sections. Scatter assigns sections to destinations.
 Gather returns the source sections at its destination. All-gather does that for
 each participant. All-scatter distributes each source's sections to the supplied
@@ -404,8 +420,8 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 
 | Counted set | Before | Current |
 |---|---:|---:|
-| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,782 lines / 992 files |
-| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,458 lines / 13 files |
+| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,848 lines / 992 files |
+| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,524 lines / 13 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 25 lines |
 | Engine's deleted mesh_matrix.swift, tools/mesh/sync.sh and replacement matrix example | 203 lines | 0 lines |
 
@@ -510,3 +526,14 @@ One additional descriptor slot per input is reserved within the existing functio
 metadata allocation for the contiguous transient-input list. There is no extra
 per-value allocation or runtime input-kind branch. These are source operation and
 storage counts, not measured latency gains; the finite invocation extent remains.
+
+Named Core ML operand preparation and the caller's explicit earlier-value inputs
+add 52 maintained source lines relative to `8a42213`. They replace the raw
+prediction-provider callback and unary finishing-call format. The construction
+history and named-call configuration belong only to the example, outside Mesh.
+The removed competing deliverables checklist is a separate documentation deletion,
+committed as `0a8eb26`; it is not part of the source reduction.
+The delivery map and consolidated part construction add another 14 source lines,
+bringing this implementation change to +66. The map removes repeated sends and
+receive allocations for the same value/destination/queue; it does not merge
+distinct numerical uses or add a runtime lookup.

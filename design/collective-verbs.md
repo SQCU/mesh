@@ -27,5 +27,11 @@ are selected by calling those verbs; additional peers do not promote a movement
 into an "all" operation. A rank outside a transfer's two endpoints does not bind
 that transfer or allocate a received copy.
 
+Repeated delivery of the same immutable part to the same destination and queue
+shares the receive operand during setup. This does not merge input positions in
+a numerical call: `reduce([x, x], using: combine)` still combines x with x.
+Changing a destination or queue declares a different transfer. No collective is
+inferred from this value sharing.
+
 References: MPI Forum's [collective communication](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm)
 and MLX's [distributed operations](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/ops.cpp).

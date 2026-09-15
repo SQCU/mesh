@@ -8,28 +8,60 @@ public typealias MeshOperands = UnsafeBufferPointer<mesh_operand>
 fileprivate enum MeshSubmission {
     case cpu((MeshOperands, MeshOperands) -> Void)
     case metal(MTLDevice, (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void)
-    case prediction(MLModel, (MeshOperands, MeshOperands) -> (MLFeatureProvider, MLPredictionOptions))
+    case prediction(MLModel, [MeshFeatures], [MLPredictionOptions])
+}
+
+fileprivate final class MeshFeatures: NSObject, MLFeatureProvider {
+    let featureNames: Set<String>
+    let bindings: [String: (Int, MeshBindings<MLFeatureValue>)]
+    var operands = MeshOperands(start: nil, count: 0)
+
+    // design/algorithm-sources.md#programkernel_call
+    init(names: Set<String>, bindings: [String: (Int, MeshBindings<MLFeatureValue>)]) {
+        featureNames = names; self.bindings = bindings
+        super.init()
+    }
+
+    // design/algorithm-sources.md#programkernel_call
+    func featureValue(for featureName: String) -> MLFeatureValue? {
+        bindings[featureName].map { index, values in values[operands[index]] }
+    }
 }
 
 public struct TensorFunction {
     fileprivate let prepare: (Mesh, [TensorPart], [TensorPart]) throws -> MeshSubmission
 
     // design/algorithm-sources.md#programkernel_call
-    private init(_ submission: MeshSubmission) { prepare = { _, _, _ in submission } }
+    private init(_ prepare: @escaping (Mesh, [TensorPart], [TensorPart]) throws -> MeshSubmission) { self.prepare = prepare }
 
     // design/algorithm-sources.md#programkernel_call
     public static func cpu(_ function: @escaping (MeshOperands, MeshOperands) -> Void) -> Self {
-        Self(.cpu(function))
+        Self { _, _, _ in .cpu(function) }
     }
 
     // design/algorithm-sources.md#programkernel_call
     public static func metal(_ device: MTLDevice, _ function: @escaping (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void) -> Self {
-        Self(.metal(device, function))
+        Self { _, _, _ in .metal(device, function) }
     }
 
     // design/algorithm-sources.md#programkernel_call
-    public static func prediction(_ model: MLModel, _ function: @escaping (MeshOperands, MeshOperands) -> (MLFeatureProvider, MLPredictionOptions)) -> Self {
-        Self(.prediction(model, function))
+    public static func prediction(_ model: MLModel, inputs: [(String, (MeshSpan) throws -> MLMultiArray)],
+                                  outputs: [(String, (MeshSpan) throws -> MLMultiArray)]) -> Self {
+        Self { mesh, parts, results in
+            precondition(parts.count == inputs.count && results.count == outputs.count)
+            let bindings = try Dictionary(uniqueKeysWithValues: inputs.indices.map { i in
+                (inputs[i].0, (i, try mesh.bindings(parts[i]) { MLFeatureValue(multiArray: try inputs[i].1($0)) }))
+            })
+            let names = Set(bindings.keys)
+            let features = (0..<mesh.count).map { _ in MeshFeatures(names: names, bindings: bindings) }
+            let arrays = try outputs.indices.map { try mesh.bindings(results[$0], using: outputs[$0].1) }
+            let options = (0..<mesh.count).map { index in
+                let option = MLPredictionOptions()
+                option.outputBackings = Dictionary(uniqueKeysWithValues: outputs.indices.map { (outputs[$0].0, arrays[$0].values[index]) })
+                return option
+            }
+            return .prediction(model, features, options)
+        }
     }
 
     // design/algorithm-sources.md#programkernel_call
@@ -75,6 +107,11 @@ public struct TensorPart {
     public let bytes: Int
     fileprivate let storage: MeshSection?
     fileprivate let shared: Bool
+    fileprivate let identity: Int
+}
+
+private struct MeshDelivery: Hashable {
+    let value, destination, queue: Int
 }
 
 private final class MeshMemory {
@@ -156,10 +193,11 @@ private final class MeshInvocation {
                 }
                 command.commit()
             }
-        case .prediction(let model, let function):
-            submit = { call, _, inputs, outputs in
-                let (features, options) = function(inputs, outputs)
-                model.__prediction(fromFeatures: features, options: options) { _, error in
+        case .prediction(let model, let features, let options):
+            submit = { call, index, inputs, _ in
+                let provider = features[Int(index)]
+                provider.operands = inputs
+                model.__prediction(fromFeatures: provider, options: options[Int(index)]) { _, error in
                     if let error { mesh_call_fail(call, Int32((error as NSError).code)) }
                     else { mesh_call_complete(call) }
                 }
@@ -174,6 +212,8 @@ public final class Mesh {
     private let memory: MeshMemory
     private let calls: OpaquePointer
     private var transfer: UInt32 = 0
+    private var value = 0
+    private var deliveries: [MeshDelivery: TensorPart] = [:]
     private var preparations: [() throws -> Void] = []
 
     // design/algorithm-sources.md#program
@@ -193,12 +233,18 @@ public final class Mesh {
     deinit { mesh_calls_destroy(calls) }
 
     // design/algorithm-sources.md#programtensor
+    private func part(on owner: Int, bytes: Int, shared: Bool = false, queue: UInt32? = nil) throws -> TensorPart {
+        let identity = value; value += 1
+        return TensorPart(rank: owner, bytes: bytes,
+                          storage: owner == rank ? try MeshSection(memory, bytes: bytes, count: shared ? 1 : count,
+                                                                  shared: shared, receiveQueue: queue) : nil,
+                          shared: shared, identity: identity)
+    }
+
+    // design/algorithm-sources.md#programtensor
     public func tensor(on owner: Int, sections: [Int]) throws -> [TensorPart] {
         precondition((0..<size).contains(owner))
-        return try sections.map { bytes in
-            TensorPart(rank: owner, bytes: bytes,
-                       storage: owner == rank ? try MeshSection(memory, bytes: bytes, count: count) : nil, shared: false)
-        }
+        return try sections.map { try part(on: owner, bytes: $0) }
     }
 
     // design/algorithm-sources.md#programkernel_call
@@ -254,8 +300,7 @@ public final class Mesh {
 
     // design/algorithm-sources.md#programtensor
     public func constant(on owner: Int, bytes: Int, initialize: (MeshSpan) throws -> Void) throws -> TensorPart {
-        let part = TensorPart(rank: owner, bytes: bytes,
-                              storage: owner == rank ? try MeshSection(memory, bytes: bytes, count: 1, shared: true) : nil, shared: true)
+        let part = try part(on: owner, bytes: bytes, shared: true)
         if let storage = part.storage {
             let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_section_address(memory.context, storage.section, 0),
                                                                    count: bytes), memory: memory)
@@ -279,19 +324,20 @@ public final class Mesh {
     public func send(_ part: TensorPart, to destination: Int, queue: Int = 0) throws -> TensorPart {
         if part.rank == destination { return part }
         precondition((0..<size).contains(destination))
+        let delivery = MeshDelivery(value: part.identity, destination: destination, queue: queue)
+        if let existing = deliveries[delivery] { return existing }
         let identity = transfer; transfer += 1
         let participating = rank == part.rank || rank == destination
         let channel = participating ? mesh_peer_channel(memory.context, UInt32(rank == destination ? part.rank : destination), UInt32(queue)) : 0
         if channel == MESH_ABSENT { throw POSIXError(.ENETUNREACH) }
-        let output = TensorPart(rank: destination, bytes: part.bytes,
-                                storage: destination == rank ? try MeshSection(memory, bytes: part.bytes, count: part.shared ? 1 : count,
-                                                                               shared: part.shared, receiveQueue: channel) : nil, shared: part.shared)
+        let output = try self.part(on: destination, bytes: part.bytes, shared: part.shared, queue: channel)
         if participating {
             let local = rank == destination ? output : part
             let error = mesh_transfer_bind(memory.context, channel, rank == destination ? 1 : 0,
                                            identity, local.storage!.section)
             if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
         }
+        deliveries[delivery] = output
         return output
     }
 
@@ -368,6 +414,7 @@ public final class Mesh {
         if storageError != 0 { throw POSIXError(POSIXErrorCode(rawValue: storageError)!) }
         for prepare in preparations { try prepare() }
         preparations.removeAll()
+        deliveries.removeAll()
         let error = mesh_calls_start(calls)
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
         mesh_transfers_start(memory.context)

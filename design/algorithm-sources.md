@@ -73,6 +73,15 @@ allocated output. The supplied function's actual output-storage contract governs
 Core ML use. The current path publishes the declared Mesh output after native
 completion; it does not turn separately allocated model output into a registered
 operand.
+Apple's [MLFeatureProvider](https://developer.apple.com/documentation/coreml/mlfeatureprovider)
+protocol supplies named feature lookup. `TensorFunction.prediction` prepares named
+input/output views, feature values, providers and output-backing dictionaries once.
+Each provider reads its call's realized operand array and selects each input view
+independently. The protocol returns nil for an unknown feature name; that lookup
+is native operand access, not a readiness or synchronization mechanism. Native
+completion ends the provider's access to the call's operands. The example uses
+this path for supplied calls with earlier-value inputs, including skip connections,
+and scatters their outputs according to the caller's explicit destinations.
 Apple [MPSMatrixMultiplication](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication)
 accepts independently prepared input and result matrices. The SDK's `MPSKernel.h`
 describes reuse after encoding and separate kernel instances for concurrent host
@@ -140,6 +149,13 @@ Receive targets are grouped by source-chunk row with one advancing cursor per
 group, retaining a target for each declared copy. The contiguous receive page run
 is addressed arithmetically. These replace linked send/target records and the
 receive-address array without changing SEND/RECV ordering or collective semantics.
+
+At the higher-order call interface, each part has an identity assigned at setup.
+Repeated deliveries with the same identity, destination and queue share one
+receive operand. This is Mesh's setup-level sharing of a declared immutable value;
+numerical input positions and their ownership remain distinct.
+Different destinations or queues are not coalesced. The delivery map is discarded
+before execution, so its lookup is not transport or numerical work.
 
 The rdma-core authors' [queue-pair creation](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_create_qp.3)
 and [memory registration](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_reg_mr.3)

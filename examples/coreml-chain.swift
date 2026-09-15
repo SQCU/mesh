@@ -15,7 +15,24 @@ private struct Operand: Decodable {
 private struct Stage: Decodable {
     let outputs: [Operand]
     let functions: [[String]]
-    let finish: [String?]
+    let finish: [Call]
+}
+
+private struct Input: Decodable {
+    let name: String
+    let group, part: Int
+}
+
+private struct Output: Decodable {
+    let name: String
+    let operand: Operand
+}
+
+private struct Call: Decodable {
+    let model: String
+    let owner, worker: Int
+    let inputs: [Input]
+    let outputs: [Output]
 }
 
 private struct Chain: Decodable {
@@ -28,23 +45,19 @@ private struct Chain: Decodable {
 }
 
 // design/algorithm-sources.md#programkernel_call
-private func prediction(_ path: String, models: inout [String: MLModel], input: Operand, output: Operand,
-                        inputName: String, outputName: String) throws -> TensorFunction {
+private func prediction(_ path: String, models: inout [String: MLModel],
+                        inputs: [(String, Operand)], outputs: [(String, Operand)]) throws -> TensorFunction {
     let model: MLModel
     if let existing = models[path] { model = existing }
     else { model = try MLModel(contentsOf: URL(fileURLWithPath: path)); models[path] = model }
-    let inputStrides = input.strides, outputStrides = output.strides
-    return TensorFunction(inputViews: [{ span -> MLFeatureProvider in
-        let value = try span.multiArray(shape: input.shape, strides: inputStrides, type: .float32)
-        return try MLDictionaryFeatureProvider(dictionary: [inputName: value])
-    }], outputViews: [{ span -> MLPredictionOptions in
-        let value = try span.multiArray(shape: output.shape, strides: outputStrides, type: .float32)
-        let options = MLPredictionOptions()
-        options.outputBackings = [outputName: value]
-        return options
-    }]) { inputs, outputs in
-        .prediction(model) { x, y in (inputs[0][x[0]], outputs[0][y[0]]) }
+    // design/algorithm-sources.md#programkernel_call
+    func views(_ fields: [(String, Operand)]) -> [(String, (MeshSpan) throws -> MLMultiArray)] {
+        fields.map { name, operand in
+            let strides = operand.strides
+            return (name, { try $0.multiArray(shape: operand.shape, strides: strides, type: .float32) })
+        }
     }
+    return .prediction(model, inputs: views(inputs), outputs: views(outputs))
 }
 
 @main
@@ -58,6 +71,7 @@ struct CoreMLChain {
         var models: [String: MLModel] = [:]
         var layout = plan.inputs
         var parts = try layout.map { try mesh.tensor(on: $0.owner, sections: [$0.elements * 4])[0] }
+        var history = [Array(zip(parts, layout))]
         for i in parts.indices {
             let elements = layout[i].elements
             try mesh.call(.cpu { _, outputs in
@@ -72,14 +86,13 @@ struct CoreMLChain {
         }
         for stage in plan.stages {
             precondition(stage.functions.count == parts.count && stage.functions.allSatisfy { $0.count == stage.outputs.count })
-            precondition(stage.finish.count == stage.outputs.count)
             var contributions: [[TensorPart]] = []
             for i in parts.indices {
                 let output = try mesh.tensor(on: layout[i].owner, sections: stage.outputs.map { $0.elements * 4 })
                 if layout[i].owner == rank {
                     for j in output.indices {
-                        let function = try prediction(stage.functions[i][j], models: &models, input: layout[i], output: stage.outputs[j],
-                                                      inputName: plan.inputName, outputName: plan.outputName)
+                        let function = try prediction(stage.functions[i][j], models: &models,
+                                                      inputs: [(plan.inputName, layout[i])], outputs: [(plan.outputName, stage.outputs[j])])
                         try mesh.call(function, inputs: [parts[i]], outputs: [output[j]], on: rank, worker: j % plan.workers)
                     }
                 }
@@ -87,19 +100,25 @@ struct CoreMLChain {
             }
             parts = try mesh.reduceScatter(contributions, to: stage.outputs.map(\.owner), using: sum,
                                            workers: stage.outputs.indices.map { $0 % plan.workers })
-            for j in parts.indices {
-                if let path = stage.finish[j] {
-                    let output = try mesh.tensor(on: stage.outputs[j].owner, sections: [stage.outputs[j].elements * 4])
-                    if stage.outputs[j].owner == rank {
-                        let function = try prediction(path, models: &models, input: stage.outputs[j], output: stage.outputs[j],
-                                                      inputName: plan.inputName, outputName: plan.outputName)
-                        try mesh.call(function, inputs: [parts[j]], outputs: output, on: rank, worker: j % plan.workers)
-                    }
-                    parts[j] = output[0]
+            let reduced = Array(zip(parts, stage.outputs))
+            history.append(reduced)
+            history.append(stage.finish.isEmpty ? reduced : [])
+            for call in stage.finish {
+                let selected = call.inputs.map { history[$0.group][$0.part] }
+                let inputs = try mesh.gather(selected.map { $0.0 }, to: call.owner)
+                let outputs = try mesh.tensor(on: call.owner, sections: call.outputs.map { $0.operand.elements * 4 })
+                if call.owner == rank {
+                    let function = try prediction(call.model, models: &models,
+                                                  inputs: zip(call.inputs, selected).map { ($0.0.name, $0.1.1) },
+                                                  outputs: call.outputs.map { ($0.name, $0.operand) })
+                    try mesh.call(function, inputs: inputs, outputs: outputs, on: call.owner, worker: call.worker)
                 }
+                let placed = try mesh.scatter(outputs, to: call.outputs.map { $0.operand.owner })
+                history[history.count - 1].append(contentsOf: zip(placed, call.outputs.map(\.operand)))
             }
-            layout = stage.outputs
+            parts = history.last!.map { $0.0 }; layout = history.last!.map { $0.1 }
         }
+        history.removeAll()
         try mesh.start()
         for index in 0..<mesh.count { mesh.submit(index) }
         withExtendedLifetime((mesh, parts)) { dispatchMain() }
