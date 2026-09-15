@@ -3,6 +3,12 @@
 The [user's requirements](collective-goals.md) define scope. This document
 explains the source; it does not add requirements.
 
+The previous claim of full completion is withdrawn. The source demonstrates
+finite producer/collective/consumer chains, but a single-use value extent, one-peer
+transport and an example-local command-pool bound do not establish the reusable
+deployment interface. The disposition table below records implemented mechanisms;
+it is not proof that those narrower mechanisms satisfy the deployment target.
+
 `swift/Mesh.swift` accepts tensor functions. It contains no implementations of
 matmul, activation, attention, normalization, sum, maximum or minimum. The
 numerical operation is a `TensorFunction` supplied to `call`, `map` or `reduce`.
@@ -249,8 +255,10 @@ this change does not feed it back into an unbounded receive cycle or reuse an
 already submitted index. The matrix executable integrates existing engine
 numerical functions into a contraction-partitioned producer, all-reduce and
 column-partitioned consumer. It is not a language-model serving implementation.
-Unbounded replay and full serving integration are not requirements added by this
-document to the finite partial-tensor interface.
+Static graph structure does not imply a single-use execution budget. Neither this
+finite extent nor the absence of a serving caller is an authorized scope decision.
+The source has not integrated returned pages into continued use of the configured
+stream, or integrated collective invocation into the serving path.
 
 Transport sends each queue direction's realized frame length. Frame rounding,
 padding between unequal partials sharing a queue, source-tag handling, publication
@@ -321,8 +329,8 @@ is no replacement source generator.
 ## Source disposition against the objective
 
 The objective is the five requirements in the user-selected attachment named in
-[collective-goals.md](collective-goals.md). The following evidence concerns the
-source implementation and its actual callers, as requested.
+[collective-goals.md](collective-goals.md). The following evidence describes the
+current source and example callers. It does not close the deployment gaps above.
 
 | Requirement | Source evidence |
 |---|---|
@@ -340,3 +348,11 @@ consumer acknowledgement or default remote-fill wait. The finite storage extent,
 one-peer transport and native API contracts above remain explicit limits. Builds
 establish integration consistency; no runtime measurements or speedup claims are
 used as evidence for these source properties.
+
+In particular, the generic Metal invocation still creates command buffers at
+submission; only the matrix example supplies the derived pool capacity. Native
+view preparation supports one varying input and one output, while the raw callback
+form supports multiple operands. The transport supports one peer, and its TX
+worker walks the whole detached publication list before returning to CQ polling.
+Those concrete restrictions and scheduling costs need disposition against the
+user's requirements; accepting a convenient example does not settle them.

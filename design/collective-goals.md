@@ -52,7 +52,8 @@ relations and source operation chains are described in [the implementation](asyn
 Finite indexed submissions now reuse the realized functions and routes.
 The source chains use existing numerical implementations, including a contraction-
 partitioned matrix producer, all-reduce and a column-partitioned numerical consumer.
-Unbounded receive cycles and full language-model serving are not prerequisites
-added by this document. The implementation description records actual source
-limits and transport costs; deletion, documentation and successful builds alone
-are not completion.
+The earlier completion claim was too broad: the single-use value extent, one-peer
+transport, example-only integration and example-local native queue sizing remain
+implementation restrictions, not user-authorized definitions of the deployment
+target. The implementation description records these gaps and actual transport
+costs. Deletion, documentation and successful builds alone are not completion.
