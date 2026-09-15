@@ -24,6 +24,12 @@ references for indexed sections and virtual mappings of actual shared backing.
 George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
 (1960): reference counting. The user explicitly requested automatic ownership
 release and background pool return, without caller free/done calls.
+Contiguous sections now use a single block-head address and relative byte offsets,
+with one presence bit and ownership record per value. The
+[address and ownership derivation](pages-and-functions.md#block-addressing)
+shows the receive permutation and the producer's single initial reference.
+These are mesh's representation choices, not new algorithms attributed to Pallas
+or Collins. They remove interior-page mapping updates and the producer-flag check.
 
 ## Program.kernel_call
 
@@ -43,6 +49,13 @@ through one operation; Core ML selects its prepared feature provider and output
 options independently. `MeshBindings` contains the corresponding operand views
 and index function. This removes the Cartesian product of address-bound calls,
 without changing the numerical algorithm or requiring additional synchronization.
+Apple's [makeCommandBuffer](https://developer.apple.com/documentation/metal/mtlcommandqueue/makecommandbuffer())
+documents blocking when a queue has no free command buffers. The SDK's
+`MTLDevice.h` exposes `newCommandQueueWithMaxCommandBufferCount` and specifies
+64 as the ordinary queue's default capacity. The matrix caller instead reserves
+`3 * count` command buffers per row section during realization: its entire
+finite local set of producer multiplication, combining call and consumer
+multiplication. No invocation needs an earlier completion to provide a free slot.
 
 ## Program.copy
 

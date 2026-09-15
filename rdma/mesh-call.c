@@ -220,8 +220,7 @@ void mesh_call_complete(struct mesh_call *call){
   for(size_t i=0;i<function->output_count;i++){
     struct mesh_section section=function->outputs[i];
     uint32_t row=mesh_section_row(section,call->index);
-    mesh_publish_partial(context,row,section.pages);
-    mesh_buffer_produced(context->M,row,section.pages);
+    mesh_publish(context->M,row);
   }
   for(size_t i=0;i<function->input_count;i++)
     mesh_buffer_release(context->M,mesh_section_row(function->inputs[i],call->index),function->inputs[i].pages);
@@ -288,9 +287,9 @@ uint32_t mesh_section_page(struct mesh_ctx *context,struct mesh_section section,
   return atomic_load_explicit(&mesh_page(context->M)[mesh_section_row(section,index)],memory_order_acquire);
 }
 /* design/algorithm-sources.md#programtensor */
-void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return mesh_row_data(context,mesh_section_row(section,index));}
+void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return mesh_at(context->M,mesh_section_page(context,section,index));}
 /* design/algorithm-sources.md#programwrite */
-void mesh_section_constant(struct mesh_ctx *context,struct mesh_section section){mesh_constant(context,section.first,section.pages);}
+void mesh_section_constant(struct mesh_ctx *context,struct mesh_section section){mesh_publish(context->M,section.first);}
 /* design/algorithm-sources.md#programtensor */
 void mesh_section_release(struct mesh_ctx *context,struct mesh_section section){
   mesh_buffer_release(context->M,section.first,section.count*section.pages);
@@ -316,5 +315,5 @@ size_t mesh_receive_pages(struct mesh_ctx *context,uint32_t queue,uint32_t *page
 
 /* design/algorithm-sources.md#collectivesync_on_remote_fill */
 void mesh_sync_on_remote_fill(struct mesh_ctx *context,const struct mesh_section *sections,size_t count,uint32_t index){
-  for(size_t i=0;i<count;i++)while(!mesh_bits_all(context->M,MESH_PRESENT,mesh_section_row(sections[i],index),sections[i].pages)){}
+  for(size_t i=0;i<count;i++)while(!mesh_bit(context->M,MESH_PRESENT,mesh_section_row(sections[i],index))){}
 }

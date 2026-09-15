@@ -47,3 +47,36 @@ configured sections and never awaits that collection.
 The implementation trusts caller configuration and backend completion contracts.
 Its ownership records describe actual accesses; they do not police arbitrary
 external code. No caller free/done call or consumer-stamp protocol is required.
+
+## Block addressing
+
+Each contiguous value has one logical block head s and a block of B physical
+pages beginning at page p(s). Byte offset d in that value has address
+`arena + page_size * p(s) + d`. Shape and stride indexing stay in the numerical
+operand binding. No page-table entry for an interior page is needed: the relative
+offset determines its address. Value i uses the head `first + i * stride`;
+a shared constant has stride zero. Ownership and presence also belong to that head.
+
+Before publication, receive blocks form a bijection between unfilled logical
+destinations and reserved physical blocks. If the next completion fills physical
+block p for destination s, let d be p's current logical owner and q = p(s).
+Assignment exchanges `(s,q), (d,p)` for `(s,p), (d,q)`. Two forward-table stores
+and two inverse-table stores maintain that bijection. The identity case d = s
+uses the same writes. Every physical receive slot appears once in the finite
+posting list, so a previously published block cannot be displaced by a later
+completion. No payload is copied and no published operand changes address.
+
+Only after assignment and outgoing-tag preparation does `mesh_publish` publish
+the head's presence bit with release ordering and enqueue its configured uses.
+A numerical consumer resolves that head to the arrived physical block. Prepared
+Metal/MPS and Core ML bindings select that same block. There is no loop over the
+block's interior pages on the receive or publication path.
+
+Each value has exactly one producer: setup for a constant, one numerical call,
+or one receive. Its initial reference represents that write. `mesh_publish`
+releases this reference once after publishing the declared uses. There is no
+producer flag or duplicate-publication check. Numerical and transport references
+were retained during realization and end through their own native completions;
+external handles have ordinary automatic lifetimes. This preserves
+`R = P + C + T + E` while removing a redundant atomic producer-flag operation.
+The writable pool is still returned by the existing background collector.

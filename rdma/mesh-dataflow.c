@@ -1,5 +1,4 @@
 #include <signal.h>
-#include "mesh-memory.h"
 #include "mesh-dataflow.h"
 #include <stdlib.h>
 #include <string.h>
@@ -9,8 +8,7 @@
 #include <unistd.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
 
-/* ledger D14: a leaving client's queue orders, unsent productions and ownership end with it. Work requests
-   the bridge already posted keep their occupancy until the bridge destroys their queue pairs. */
+/* design/collective-dependency-ledger.md#d14-teardown-retains-outstanding-device-storage */
 static void mesh_retire(struct hdr *m,uint64_t client){
   atomic_store_explicit(&m->configured,0,memory_order_release);
   for(uint32_t i=0;i<2*MESH_QPS;i++) atomic_store_explicit(&m->order_length[i],0,memory_order_release);
@@ -32,7 +30,6 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   if(file<0) return errno;
   struct stat info;
   if(fstat(file,&info)){ int error=errno; close(file); return error; }
-  mesh_memory_warning((uint64_t)info.st_size,0);
   struct hdr *memory=mmap(NULL,(size_t)info.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,file,0);
   int error=errno;
   if(memory==MAP_FAILED){ close(file); return error; }
@@ -109,12 +106,11 @@ int mesh_backing_alloc(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t
   for(uint32_t offset=0;offset<count;offset+=span){
     uint32_t page=mesh_arena_alloc(c,span,quantum);
     if(page==MESH_ABSENT)return errno;
-    mesh_map(c,first+offset,span,page);
     for(uint32_t index=0;index<span;index+=quantum){
       uint32_t row=first+offset+index;
-      for(uint32_t i=0;i<quantum;i++)mesh_buffers(c->M)[row+i]=(struct mesh_buffer){.first=row};
-      mesh_buffers(c->M)[row]=(struct mesh_buffer){.ownership=1|MESH_BUFFER_FLAG(MESH_BUFFER_PRODUCER),.first=row,.pages=quantum,.owner=c->client};
-      for(uint32_t i=0;i<quantum;i++)mesh_backing(c->M)[page+index+i]=row;
+      atomic_store_explicit(&mesh_page(c->M)[row],page+index,memory_order_relaxed);
+      mesh_buffers(c->M)[row]=(struct mesh_buffer){.ownership=1,.first=row,.pages=quantum,.owner=c->client};
+      mesh_backing(c->M)[page+index]=row;
       mesh_bits_set(c->M,MESH_ROW_HOT,row,quantum);
     }
   }
@@ -124,7 +120,7 @@ int mesh_backing_alloc(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t
 /* design/algorithm-sources.md#programtensor */
 void mesh_backing_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   for(uint32_t row=first;row<first+count;){
-    struct mesh_buffer *buffer=&mesh_buffers(c->M)[mesh_buffers(c->M)[row].first];
+    struct mesh_buffer *buffer=&mesh_buffers(c->M)[row];
     if(!buffer->pages){row++;continue;}
     row=buffer->first+buffer->pages;
     uint64_t ownership=atomic_fetch_or_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_CLOSED|MESH_BUFFER_SEALED),memory_order_acq_rel);
@@ -143,7 +139,7 @@ static void mesh_buffer_enqueue(struct hdr *m,struct mesh_buffer *buffer){
 /* design/algorithm-sources.md#programtensor */
 int mesh_buffer_retain(struct hdr *m,uint32_t first,uint32_t count){
   for(uint32_t row=first;row<first+count;){
-    struct mesh_buffer *buffer=&mesh_buffers(m)[mesh_buffers(m)[row].first];
+    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     uint64_t ownership=atomic_load_explicit(&buffer->ownership,memory_order_acquire);
     do {
       if((!(uint32_t)ownership && (ownership&MESH_BUFFER_FLAG(MESH_BUFFER_SEALED))) || (uint32_t)ownership==UINT32_MAX){
@@ -158,7 +154,7 @@ int mesh_buffer_retain(struct hdr *m,uint32_t first,uint32_t count){
 /* design/algorithm-sources.md#programtensor */
 void mesh_buffer_release(struct hdr *m,uint32_t first,uint32_t count){
   for(uint32_t row=first;row<first+count;){
-    struct mesh_buffer *buffer=&mesh_buffers(m)[mesh_buffers(m)[row].first];
+    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     row=buffer->first+buffer->pages;
     uint64_t ownership=atomic_fetch_sub_explicit(&buffer->ownership,1,memory_order_acq_rel);
     if((uint32_t)ownership==1 && (ownership&MESH_BUFFER_FLAG(MESH_BUFFER_SEALED)))mesh_buffer_enqueue(m,buffer);
@@ -166,19 +162,9 @@ void mesh_buffer_release(struct hdr *m,uint32_t first,uint32_t count){
 }
 
 /* design/algorithm-sources.md#programtensor */
-void mesh_buffer_produced(struct hdr *m,uint32_t first,uint32_t count){
-  for(uint32_t row=first;row<first+count;){
-    struct mesh_buffer *buffer=&mesh_buffers(m)[mesh_buffers(m)[row].first];
-    row=buffer->first+buffer->pages;
-    if(atomic_fetch_and_explicit(&buffer->ownership,~MESH_BUFFER_FLAG(MESH_BUFFER_PRODUCER),memory_order_acq_rel)&MESH_BUFFER_FLAG(MESH_BUFFER_PRODUCER))
-      mesh_buffer_release(m,buffer->first,buffer->pages);
-  }
-}
-
-/* design/algorithm-sources.md#programtensor */
 void mesh_buffer_seal(struct hdr *m,uint32_t first,uint32_t count){
   for(uint32_t row=first;row<first+count;){
-    struct mesh_buffer *buffer=&mesh_buffers(m)[mesh_buffers(m)[row].first];
+    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     row=buffer->first+buffer->pages;
     uint64_t ownership=atomic_fetch_or_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_SEALED),memory_order_acq_rel);
     if((ownership&MESH_BUFFER_FLAG(MESH_BUFFER_CLOSED)) || !(uint32_t)ownership)mesh_buffer_enqueue(m,buffer);
@@ -208,41 +194,17 @@ void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_clear(c->M,MESH_ROW_OWN,first,count);
 }
 
-void mesh_map(struct mesh_ctx *c,uint32_t first,uint32_t count,uint32_t page){
-  _Atomic uint32_t *table=mesh_page(c->M);
-  for(uint32_t i=0;i<count;i++) atomic_store_explicit(&table[first+i],page+i,memory_order_release);
-}
-
-void mesh_constant(struct mesh_ctx *c,uint32_t first,uint32_t count){
-  mesh_bits_set(c->M,MESH_CONSTANT,first,count);
-  mesh_bits_set(c->M,MESH_PRESENT,first,count);
-  mesh_notify(c->M,first,count);
-  mesh_buffer_produced(c->M,first,count);
-}
-
-void *mesh_row_data(struct mesh_ctx *c,uint32_t row){
-  uint32_t page=atomic_load_explicit(&mesh_page(c->M)[row],memory_order_acquire);
-  return page==MESH_ABSENT?NULL:mesh_at(c->M,page);
-}
-
 /* design/algorithm-sources.md#programkernel_call */
-void mesh_publish_partial(struct mesh_ctx *c,uint32_t first,uint32_t count){
-  mesh_bits_set(c->M,MESH_PRESENT,first,count);
-  mesh_notify(c->M,first,count);
-}
-
-/* design/algorithm-sources.md#programkernel_call */
-void mesh_notify(struct hdr *m,uint32_t first,uint32_t count){
-  for(uint32_t row=first;row<first+count;){
-    struct mesh_buffer *buffer=&mesh_buffers(m)[mesh_buffers(m)[row].first];
-    uint32_t uses=atomic_load_explicit(&buffer->uses,memory_order_relaxed);
-    if(uses>>MESH_COMPUTE_THREADS)
-      mesh_notice_push(m,mesh_notice_queue(buffer->owner,MESH_NOTICE_SEND),buffer->first);
-    uses&=MESH_COMPUTE_MASK;
-    while(uses){
-      uint32_t worker=(uint32_t)__builtin_ctz(uses);uses&=uses-1;
-      mesh_notice_push(m,mesh_notice_queue(buffer->owner,MESH_NOTICE_COMPUTE+worker),buffer->first);
-    }
-    row=buffer->first+buffer->pages;
+void mesh_publish(struct hdr *m,uint32_t row){
+  struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+  atomic_fetch_or_explicit(&mesh_plane(m,MESH_PRESENT)[row/64],UINT64_C(1)<<(row%64),memory_order_release);
+  uint32_t uses=atomic_load_explicit(&buffer->uses,memory_order_relaxed);
+  if(uses>>MESH_COMPUTE_THREADS)
+    mesh_notice_push(m,mesh_notice_queue(buffer->owner,MESH_NOTICE_SEND),row);
+  uses&=MESH_COMPUTE_MASK;
+  while(uses){
+    uint32_t worker=(uint32_t)__builtin_ctz(uses);uses&=uses-1;
+    mesh_notice_push(m,mesh_notice_queue(buffer->owner,MESH_NOTICE_COMPUTE+worker),row);
   }
+  mesh_buffer_release(m,row,buffer->pages);
 }

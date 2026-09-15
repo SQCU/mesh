@@ -52,6 +52,11 @@ Row sizes 1, 8, 16 and 4 use separate numerical workers and have no cross-row
 dependency. Their payloads fit one wire frame and share transport queue zero.
 The caller supplies the backend and weight ownership. Four submitted
 indices reuse the same chain and canonical shared weight shards.
+The caller sizes each Metal queue for `3 * count` command buffers, covering its
+entire finite set of local multiplication and combining calls. Thus native
+command-buffer creation cannot exhaust that queue's configured pool. Generic
+supplied numerical functions remain responsible for their native API contracts;
+mesh adds no completion wait to their launch paths.
 
 [`examples/coreml-chain.swift`](../examples/coreml-chain.swift) takes an existing
 compiled model, input/output feature names and width as arguments. It sends three
@@ -82,7 +87,9 @@ arrival dependency; it does not bypass submission. Other consumers have only
 their declared operand dependencies, with no per-index global completion barrier.
 
 The numerical worker resolves operand addresses through the canonical page
-table and invokes the supplied function. CPU completion is its return. Metal
+table and invokes the supplied function. Each contiguous section has one
+block-head entry; interior addresses follow from the configured relative offsets.
+CPU completion is its return. Metal
 completion is the command buffer's native completion handler. Core ML uses its
 native asynchronous prediction completion. Successful completion publishes each
 output and releases the input references. Provider failures are recorded in the
@@ -122,6 +129,14 @@ posted-request FIFOs. The dedicated RX worker refills before assigning and
 publishing the completed partial. Receive posting traverses all preallocated
 values until the configured extent is exhausted. It never requires a numerical
 consumer to return a credit before it can post the next planned buffer.
+
+Assignment exchanges two block-head entries and their inverse mappings, using
+four stores independent of the configured number of pages per block. Publication
+writes one presence bit for the complete section and releases the producer's
+initial reference. The unused constant bitmap, interior-page mapping accessors,
+per-page alias metadata and duplicate producer-flag operation are removed. The
+[address and lifetime derivation](pages-and-functions.md#block-addressing)
+explains why published native operands remain fixed through out-of-order arrivals.
 
 For queue direction q, setup chooses
 `wire_bytes[q] = 4096 * ceil((max_payload_bytes[q] + 4) / 4096)`.
@@ -257,7 +272,12 @@ There is no runtime testing gate here. The bridge, C and Swift libraries, litera
 chain, Core ML chain, synchronization counterexample, and existing-matrix chain
 were built, along with the existing serving library after the matrix refactor.
 They have not been run or deployed by this change. Both participants
-need the source's ABI 39 bridge before these callers can attach.
+need the source's ABI 40 bridge before these callers can attach.
+
+Client attachment and bridge startup no longer run a process-memory ranking scan.
+The unrelated `mesh-memory.h`, its `--memory-check` command and launch-script hook
+were deleted. Configured arena geometry and the caller's explicit memory cap
+still determine storage realization.
 
 Build the native libraries and examples with
 `make -C rdma all linear-chain coreml-chain sync-on-remote-fill`.
@@ -273,8 +293,8 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 
 | Counted set | Before | Current |
 |---|---:|---:|
-| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,787 lines / 994 files |
-| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,464 lines / 15 files |
+| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,669 lines / 993 files |
+| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,347 lines / 14 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 27 lines |
 | Engine's deleted mesh_matrix.swift and tools/mesh/sync.sh; replacement matrix example | 203 lines | 96 lines |
 
@@ -293,3 +313,30 @@ mesh refactor.
 Markdown is excluded from these source counts. Earlier documentary deletion and
 scope correction were committed separately as mesh `a07d7f6` and engine `14d1057`.
 This implementation explanation is documentation, not structural source reduction.
+The block-addressing refactor reduces maintained source by 51 lines; source-comment
+migration removes two further lines. Removing the process-memory scan and its
+callers removes another 65 source lines, including its launch-script hook. There
+is no replacement source generator.
+
+## Source disposition against the objective
+
+The objective is the five requirements in the user-selected attachment named in
+[collective-goals.md](collective-goals.md). The following evidence concerns the
+source implementation and its actual callers, as requested.
+
+| Requirement | Source evidence |
+|---|---|
+| Higher-order partial tensor functions using existing numerics | `Mesh.call` and both `Mesh.map` forms accept supplied functions. `MeshInvocation` selects CPU, Metal or Core ML submission during realization. The matrix caller passes existing multiplication and addition implementations; the Core ML caller passes an existing compiled model. |
+| Distinct collective semantics | `Mesh.swift` defines send/receive endpoints, broadcast, scatter, gather, all-scatter, all-gather, all-to-all, reduce, reduce-scatter and all-reduce. Movement returns indexed sections; only the supplied combining function performs reduction arithmetic. |
+| AOT bindings, zero-copy asynchronous use | `mesh_call_bind` realizes indexed uses and operand storage. Swift prepares native views before `mesh_calls_start`. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_complete` changes block-head mappings over registered operands without copying. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
+| Delete incompatible implementation and callers | The former executor/frontend and engine adapters are absent from the current tree. The source inventory includes their replacements. The index transport channel, paired native-binding Cartesian product, per-page receive metadata and process-memory ranking scan are also absent. |
+| Actual producer/collective/numerical-consumer integration | `linear-chain.swift` applies the supplied T to produced and transported partials before reconstruction. `mesh-matrix.swift` composes contraction-partitioned multiplication, supplied addition through all-reduce, column-partitioned multiplication and gather. `coreml-chain.swift` composes two native predictions through transferred sections. Each declares once and submits four distinct indices. |
+| Automatic lifetime; explicit synchronization only | `mesh_buffer_retain` accounts for declared uses. `mesh_publish`, native numerical completion, TX completion and ordinary object destruction discharge their references; `mesh_collect` returns backing without clearing payload. Runtime presence polling occurs only in the explicitly called `mesh_sync_on_remote_fill`; its source counterexample includes a self-dependent permanent wait. |
+
+Configuration loops, capacity checks while posting native work requests, indexed
+operand dependencies, reference updates and native launch operations remain.
+There is no whole-function readiness scan, caller release protocol, remote
+consumer acknowledgement or default remote-fill wait. The finite storage extent,
+one-peer transport and native API contracts above remain explicit limits. Builds
+establish integration consistency; no runtime measurements or speedup claims are
+used as evidence for these source properties.

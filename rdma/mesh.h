@@ -3,25 +3,24 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdatomic.h>
-/* design/pages-and-functions.md#what-the-page-table-is
-   Transport: design/collective-dependency-ledger.md, dependencies D1-D14. */
+/* design/pages-and-functions.md#block-addressing */
 #define MESH_MAGIC 0x4d455348u
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 39u
+#define MESH_VERSION 40u
 #define MESH_ABSENT UINT32_MAX
-/* ledger D6: "A maximum of 10 unreliable connection (UC) queue pairs" */
+/* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
 struct mesh_transfer { uint32_t local_row,binding,bytes,count,stride; };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
-enum { MESH_PRESENT, MESH_CONSTANT, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PLANES };
+enum { MESH_PRESENT, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
-enum { MESH_BUFFER_PRODUCER=1, MESH_BUFFER_SEALED=2, MESH_BUFFER_QUEUED=4, MESH_BUFFER_CLOSED=8, MESH_BUFFER_RECLAIMED=16 };
+enum { MESH_BUFFER_SEALED=1, MESH_BUFFER_QUEUED=2, MESH_BUFFER_CLOSED=4, MESH_BUFFER_RECLAIMED=8 };
 #define MESH_BUFFER_FLAG(flag) ((uint64_t)(flag)<<32)
 struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages,next; _Atomic uint32_t uses; uint64_t owner; };
-/* ledger D5: one posting order per queue pair and direction */
+/* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_COMPUTE_THREADS 8
 #define MESH_COMPUTE_MASK ((UINT32_C(1)<<MESH_COMPUTE_THREADS)-1)
@@ -40,7 +39,7 @@ struct hdr {
   uint32_t send_bytes[MESH_NOTICE_BANKS][MESH_QPS];
   struct mesh_port_info port;
 };
-void mesh_notify(struct hdr *,uint32_t first,uint32_t count);
+void mesh_publish(struct hdr *,uint32_t row);
 /* design/algorithm-sources.md#programtensor */
 static inline uint32_t mesh_notice_queue(uint64_t owner,uint32_t queue){return (uint32_t)(owner>>63)*MESH_NOTICE_QUEUES+queue;}
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
@@ -53,7 +52,6 @@ static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct me
 /* design/algorithm-sources.md#programtensor */
 static inline uint32_t *mesh_backing(struct hdr *m){ return (uint32_t *)((char *)m+m->backing_off); }
 void mesh_buffer_release(struct hdr *,uint32_t first,uint32_t count);
-void mesh_buffer_produced(struct hdr *,uint32_t first,uint32_t count);
 /* ledger D5 */
 static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+(size_t)(2*queue+(uint32_t)direction)*mesh_blocks(m); }
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint32_t queue,int direction){ return &m->order_length[2*queue+(uint32_t)direction]; }
@@ -77,11 +75,6 @@ static inline void mesh_bits_clear(struct hdr *m,int plane,uint32_t first,uint32
   _Atomic uint64_t *p=mesh_plane(m,plane);
   for(uint32_t w=first/64;count && w<=(first+count-1)/64;w++) atomic_fetch_and_explicit(&p[w],~mesh_word_mask(first,count,w),memory_order_acq_rel);
 }
-static inline int mesh_bits_all(struct hdr *m,int plane,uint32_t first,uint32_t count){
-  _Atomic uint64_t *p=mesh_plane(m,plane);
-  for(uint32_t w=first/64;count && w<=(first+count-1)/64;w++){ uint64_t k=mesh_word_mask(first,count,w); if((atomic_load_explicit(&p[w],memory_order_acquire)&k)!=k) return 0; }
-  return 1;
-}
 static inline int mesh_bit(struct hdr *m,int plane,uint32_t index){
   return (int)((atomic_load_explicit(&mesh_plane(m,plane)[index/64],memory_order_acquire)>>(index%64))&1);
 }
@@ -89,21 +82,17 @@ static inline int mesh_bit(struct hdr *m,int plane,uint32_t index){
 /* design/algorithm-sources.md#programcopy */
 static inline void mesh_receive_complete(struct hdr *m,uint32_t row,uint32_t page){
   uint32_t previous=atomic_load_explicit(&mesh_page(m)[row],memory_order_relaxed),displaced=mesh_backing(m)[page];
-  for(uint32_t i=0;i<m->block;i++){
-    atomic_store_explicit(&mesh_page(m)[displaced+i],previous+i,memory_order_relaxed);
-    mesh_backing(m)[previous+i]=displaced;
-    mesh_backing(m)[page+i]=row;
-  }
-  for(uint32_t i=0;i<m->block;i++)atomic_store_explicit(&mesh_page(m)[row+i],page+i,memory_order_relaxed);
+  atomic_store_explicit(&mesh_page(m)[displaced],previous,memory_order_relaxed);
+  mesh_backing(m)[previous]=displaced;
+  mesh_backing(m)[page]=row;
+  atomic_store_explicit(&mesh_page(m)[row],page,memory_order_relaxed);
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
   uint32_t queues=atomic_load_explicit(&buffer->uses,memory_order_relaxed)>>MESH_COMPUTE_THREADS;
   while(queues){
     uint32_t q=(uint32_t)__builtin_ctz(queues);queues&=queues-1;
     *mesh_tag(m,page,m->send_bytes[buffer->owner>>63][q])=row;
   }
-  mesh_bits_set(m,MESH_PRESENT,row,m->block);
-  mesh_notify(m,row,m->block);
-  mesh_buffer_produced(m,row,m->block);
+  mesh_publish(m,row);
 }
 
 /* design/algorithm-sources.md#programkernel_call */
