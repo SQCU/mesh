@@ -122,6 +122,16 @@ The former caller-provided queue and example-specific `3 * count` workaround are
 removed. This establishes the bound for the current declared extent, not a
 completed reusable-stream lifecycle or a claim about all native launch costs.
 
+## Program.map
+
+The JAX authors' [Pallas scalar prefetch](https://docs.jax.dev/en/latest/pallas/tpu/sparse.html)
+and [jax.lax.gather](https://docs.jax.dev/en/latest/_autosummary/jax.lax.gather.html),
+and Gale et al., [MegaBlocks: Efficient Sparse Training with Mixture-of-Experts](https://arxiv.org/abs/2211.15841)
+(2022), supply references for block indices as data, indexed reads, and block-sparse routed experts.
+Indices are ordinary operands of `Mesh.map`; the supplied function performs the indexed
+read and any expert selection or neighbourhood sum inside the caller.
+Mesh implements no indexed gather/scatter or application routing.
+
 ## Program.copy
 
 Apple [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt),
