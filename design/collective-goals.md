@@ -1,5 +1,8 @@
 # Collective goal
 
+The completion matrix, invariants, assignment order and forbidden substitutions are in
+[deliverables.md](deliverables.md); an agent takes the first ✗/◐ row there.
+
 The current user instructions define the work. The excerpts below are verbatim
 from the September 14 conversation. Papers describe mechanisms; existing code,
 agent plans, inventories and old specifications do not add requirements.
