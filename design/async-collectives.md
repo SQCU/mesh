@@ -107,15 +107,21 @@ list of transient input descriptors prepared at setup; it does not test each
 input's storage kind or touch shared-constant reference counts. Failures are recorded and do not publish
 failed output as valid data.
 
-The lifetime references for native call records are also known at setup. Before
-starting a numerical worker, `mesh_calls_start` acquires its worker reference and
-all of its declared call references together. Launch performs no reference-count
-increment. Each native completion releases its existing call reference. On exit,
-that worker cancels the references for its unissued records and releases its own
-reference in one update. It identifies those records from the pending counts it
-alone owns; this traversal occurs after numerical progress stops, not during
-dispatch. A failed thread creation returns that worker's entire reserved count.
-The ordinary Mesh owner reference keeps startup alive throughout these steps.
+The lifetime references for native call records are known at setup. Before any
+numerical worker starts, `mesh_calls_start` acquires all worker references and one
+program reference per instance containing calls. Each instance counts its own
+unissued and issued records. Native completion retires one; the last releases
+that instance's program reference. Worker exit cancels its unissued records and
+releases its worker reference. Cancellation traverses pending counts only after
+that worker stops. Failed startup cancels the unstarted workers' records. The
+Mesh owner reference keeps startup alive throughout these steps.
+
+`Mesh.result(index)` reads one status word. Success accounts for all declared
+local calls, transfers and submission; errors record the failing function or
+peer before unfinished descendants complete. These observations do not gate
+publication or dispatch. The [status and lifetime contract](algorithm-sources.md#meshresult)
+describes the two reference counts, shared constants and remaining failure-
+detection and reuse work. Indices still belong to the finite configured extent.
 
 For N operand bytes and internal payload capacity C, setup represents
 K = ceil(N / C) transport chunks. A value has K page-table entries and one

@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 44u
+#define MESH_VERSION 45u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -26,16 +26,35 @@ enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_NOTICE_BANKS 2
 struct mesh_notice { uint32_t next; };
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
+/* design/algorithm-sources.md#meshresult */
+enum { MESH_RESULT_SUCCESS, MESH_RESULT_LINK, MESH_RESULT_FUNCTION, MESH_RESULT_BUSY };
+#define MESH_RESULT(kind,id,code) ((uint64_t)(kind)<<62|(uint64_t)(id)<<32|(uint32_t)(code))
+struct mesh_instance { _Atomic uint64_t status,references; };
+#define MESH_TRANSFER_REFERENCE (UINT64_C(1)<<32)
 struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; struct mesh_port_info port; _Atomic uint32_t order_length[2*MESH_NOTICE_BANKS*MESH_QPS]; };
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps,links;
   _Atomic uint64_t configured;
-  uint64_t planes_off,page_off,buffer_off,backing_off,link_off,send_off,order_off,notice_head_off,notice_off,tags_off,data_off,length;
+  uint64_t planes_off,page_off,buffer_off,backing_off,link_off,send_off,order_off,notice_head_off,notice_off,instance_off,tags_off,data_off,length;
+  uint32_t instance_count[MESH_NOTICE_BANKS];
   _Atomic uint64_t client,bridge_pid,device_client,serial;
   _Atomic uint32_t reclaim_head;
   struct mesh_port_info port;
 };
 void mesh_publish(struct hdr *,uint32_t row);
+/* design/algorithm-sources.md#meshresult */
+static inline struct mesh_instance *mesh_instances(struct hdr *m,uint64_t owner){return (struct mesh_instance *)((char *)m+m->instance_off)+(owner>>63)*m->rows;}
+/* design/algorithm-sources.md#meshresult */
+static inline void mesh_instance_conclude(struct mesh_instance *instance,uint64_t status){
+  uint64_t pending=MESH_RESULT(MESH_RESULT_BUSY,0,0);
+  atomic_compare_exchange_strong_explicit(&instance->status,&pending,status,memory_order_release,memory_order_relaxed);
+}
+/* design/algorithm-sources.md#meshresult */
+static inline uint64_t mesh_instance_release(struct mesh_instance *instance,uint64_t references){
+  uint64_t previous=atomic_fetch_sub_explicit(&instance->references,references,memory_order_acq_rel);
+  if(previous==references)mesh_instance_conclude(instance,0);
+  return previous;
+}
 /* design/algorithm-sources.md#programtensor */
 static inline uint32_t mesh_notice_queue(struct hdr *m,uint64_t owner,uint32_t queue){return (uint32_t)(owner>>63)*(m->links+MESH_COMPUTE_THREADS)+queue;}
 /* design/algorithm-sources.md#programcopy */
@@ -124,6 +143,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->notice_head_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links+MESH_COMPUTE_THREADS)*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links+MESH_COMPUTE_THREADS)*rows*sizeof(struct mesh_notice); at=(at+bytes-1)/bytes*bytes;
+  h->instance_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*rows*sizeof(struct mesh_instance); at=(at+bytes-1)/bytes*bytes;
   atomic_store_explicit(&h->reclaim_head,MESH_ABSENT,memory_order_relaxed);
   h->tags_off=at; at+=blocks*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)rows*pgsz;

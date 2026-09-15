@@ -120,6 +120,9 @@ public struct TensorPart {
 // design/algorithm-sources.md#mesherror
 public enum MeshError: Error {
     case partialOperand(TensorPart)
+    case busy
+    case link(peer: Int, code: Int32)
+    case function(call: Int, code: Int32)
 }
 
 private struct MeshDelivery: Hashable {
@@ -223,6 +226,7 @@ public final class Mesh {
     public let rank: Int, size: Int, count: Int
     private let memory: MeshMemory
     private let calls: OpaquePointer
+    private let peers: [Int]
     private var transfer: UInt32 = 0
     private var value = 0
     private var deliveries: [MeshDelivery: TensorPart] = [:]
@@ -240,6 +244,7 @@ public final class Mesh {
             throw POSIXError(POSIXErrorCode(rawValue: errno)!)
         }
         self.memory = memory; self.calls = calls; self.rank = rank; self.size = size; self.count = count
+        peers = (0..<Int(memory.context.pointee.M.pointee.links)).map { Int(mesh_links(memory.context.pointee.M)[$0].peer) }
     }
 
     // design/algorithm-sources.md#programtensor
@@ -452,6 +457,18 @@ public final class Mesh {
     // design/algorithm-sources.md#program
     public func submit(_ index: Int) {
         mesh_calls_submit(calls, UInt32(index))
+    }
+
+    // design/algorithm-sources.md#meshresult
+    public func result(_ index: Int) -> Result<Void, MeshError> {
+        let status = mesh_calls_result(calls, UInt32(index))
+        let identity = Int((status >> 32) & 0x3fffffff), code = Int32(truncatingIfNeeded: status)
+        switch status >> 62 {
+        case 0: return .success(())
+        case 1: return .failure(.link(peer: peers[identity], code: code))
+        case 2: return .failure(.function(call: identity, code: code))
+        default: return .failure(.busy)
+        }
     }
 
     // design/algorithm-sources.md#collectivesync_on_remote_fill

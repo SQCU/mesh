@@ -53,12 +53,12 @@ native read without per-invocation reference updates. This groups equal storage
 lifetimes; it does not remove input-arrival dependencies or alter tensor values.
 
 For the call storage itself, let O be the Mesh owner reference, W the active
-worker references, U the references reserved for unissued records, and A the
-references for issued calls whose native callbacks have not finished. Its count
-is O+W+U+A. Worker startup acquires its contribution to W+U in one update.
-Issuing a call transfers one reference from U to A without changing the count.
-Native completion removes one from A. Worker exit removes its remaining U and
-its W reference; only that worker reads and changes its records' pending counts.
+worker references, and I the instances with outstanding numerical call records.
+Its count is O+W+I. Startup acquires W+I before any worker starts. Each instance
+counts its unissued and issued records together; issuance changes neither count.
+Native completion retires one record. Its instance's final record releases one
+program reference. Worker exit cancels its unissued records and releases its W
+reference; only that worker reads and changes its records' pending counts.
 This keeps callback operands and memory alive without a launch-time atomic retain,
 a join in submission, or a caller completion/free protocol.
 

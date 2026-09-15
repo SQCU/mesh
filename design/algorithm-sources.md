@@ -24,9 +24,9 @@ references for indexed sections and virtual mappings of actual shared backing.
 George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
 (1960): reference counting. The user explicitly requested automatic ownership
 release and background pool return, without caller free/done calls.
-The implementation now groups shared-input ownership by prepared function binding,
+The implementation groups shared-input ownership by prepared function binding,
 while transient inputs retain one reference per indexed use. Native call-record
-references are acquired together before their worker starts; dispatch transfers
+references are counted per instance before workers start; dispatch transfers
 ownership from an unissued record to its native call without changing the total.
 The [lifetime derivation](pages-and-functions.md#what-the-page-table-is) describes
 completion, cancellation and destruction. This is an application of counted
@@ -57,6 +57,40 @@ Movement preserves the logical identity, so a contribution's setup restriction f
 ## MeshError
 
 The Legion authors, [reduction privileges](https://legion.stanford.edu/tutorial/privileges.html): reduction operands have restricted uses. Mesh's public `call` records one validation closure, executed by `start()` after all reductions have been declared. Its sole throw reports `partialOperand` with a partial view of the offending operand. The reduction's supplied combine uses the same private binding path without that validation. This is a declaration-time restriction, independent of backend and numerical completion order.
+
+## Mesh.result
+
+Saltzer, Reed and Clark, [End-to-End Arguments in System Design](https://web.mit.edu/Saltzer/www/publications/endtoend/endtoend.pdf)
+(1984), motivates keeping recovery with the caller. Mesh records native errors;
+it does not retransmit an operation or make its consumers wait for recovery.
+`mesh_calls_result` performs one acquire load. Swift decodes success, busy,
+`link(peer:code:)` or `function(call:code:)` from that word. Identities are local
+function or link ordinals; a setup-captured peer array maps link ordinals to the
+configured ranks. The encoding uses two kind bits, thirty ordinal bits and
+thirty-two code bits.
+
+The counted ownership mechanism is Collins's reference counting cited above.
+Each instance has a separate reference word: low thirty-two bits count numerical
+calls, high thirty-two bits count transfers and one submission reference. Setup
+counts all declared uses, including shared-constant transfers for every instance.
+Native numerical completion decrements the low count; the final ordered SEND or
+RECV chunk decrements the high count. Transport chunk count introduces no extra
+result references. A zero total attempts one strong compare-exchange from busy to
+success. Native failure attempts one strong compare-exchange from busy to its
+error. Neither operation retries, and neither replaces an already concluded result.
+
+`mesh_call_retire` replaces the old per-call whole-program reference update.
+Only the last numerical call of an instance drops that instance's program
+reference. `mesh_call_finish` shares input retirement between success and failure.
+`mesh_calls_cancel` retires unissued records after their workers stop; it does not
+invoke numerical completion or publish their outputs. Setup reserves owner,
+worker and instance references before launching any worker. Operand ownership and
+the existing page collector remain separate: a result is not a free-page claim.
+
+This implements status publication for the current finite extent. N1 reuse,
+detecting a remote caller's death, driver recovery and the existing W failures
+remain open. The bridge currently owns the QPs beyond a caller's death and closes
+its pairing socket after setup. This status word alone cannot detect that death.
 
 ## Program.kernel_call
 
