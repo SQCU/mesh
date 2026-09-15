@@ -5,7 +5,7 @@
 struct mesh_calls;
 struct mesh_call;
 struct mesh_function;
-struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
+struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride,receive; };
 struct mesh_operand { void *data; size_t bytes; uint32_t page,index; };
 typedef void (*mesh_submit)(struct mesh_call *,uint32_t,void *,const struct mesh_operand *,struct mesh_operand *);
 typedef void (*mesh_dispose)(void *);
@@ -32,7 +32,6 @@ uint32_t mesh_section_page(struct mesh_ctx *,struct mesh_section,uint32_t index)
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
 void mesh_section_constant(struct mesh_ctx *,struct mesh_section);
 void mesh_section_release(struct mesh_ctx *,struct mesh_section);
-size_t mesh_receive_pages(struct mesh_ctx *,uint32_t queue,uint32_t span,uint32_t *pages);
 
 /* design/algorithm-sources.md#collectivesync_on_remote_fill */
 void mesh_sync_on_remote_fill(struct mesh_ctx *,const struct mesh_section *,size_t count,uint32_t index);

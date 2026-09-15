@@ -43,6 +43,16 @@ The whole-arena Metal buffer and transport-capacity query have been removed.
 
 ## Program.kernel_call
 
+Yousef Saad, [Iterative Methods for Sparse Linear Systems, second edition](https://www-users.cse.umn.edu/~saad/IterMethBook_2ndEd.pdf),
+SIAM (2003), section 3.4: compressed row storage uses row offsets to index contiguous
+entries. Mesh applies that representation to declared consumer references, not
+numerical sparse-matrix computation. `mesh_calls_start` counts references, forms
+prefix offsets and scatters call pointers into those ranges before transport
+activation. Publication traverses only its row's range. Setup also prepares local
+operand addresses and records received-input positions; invocation resolves only
+those positions. A receive channel's contiguous backing makes native-view selection
+an offset divided by the transport block size, eliminating a second index table.
+
 Apple [Metal command buffers](https://developer.apple.com/documentation/metal/mtlcommandbuffer)
 and [Core ML prediction](https://developer.apple.com/documentation/coreml/mlmodel):
 existing numerical submission and completion interfaces.

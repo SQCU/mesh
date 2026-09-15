@@ -3,9 +3,9 @@
 #include "mesh.h"
 #include <errno.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
-struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; uint32_t rows,arena; int fd; };
+struct mesh_range { uint32_t first,count; };
+struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; uint32_t rows,arena; int fd; struct mesh_range *receives; };
 static inline uint32_t mesh_block_pages(const struct mesh_ctx *c){ return c->M->block; }
-static inline uint32_t mesh_arena_pages(const struct mesh_ctx *c){ return c->M->rows; }
 static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return mesh_at(c->M,page); }
 /* design/algorithm-sources.md#programcopy */
 static inline uint32_t mesh_peer_channel(struct mesh_ctx *c,uint32_t peer,uint32_t queue){

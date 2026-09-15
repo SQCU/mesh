@@ -67,13 +67,16 @@ function object stores the supplied function and section descriptors once. Each
 value index has an operand array, pending-operand count and completion record
 allocated during realization. For descriptor `(first, stride)`, its logical row
 is `first + index * stride`. A shared constant has stride zero. Setup retains
-each indexed input use and installs section-to-use adjacency. Constants already
-published at setup have no pending arrival edge. A runtime publication indexes
-only the uses of that section. A consumer with multiple operands becomes
+each indexed input use. Before activating transport, setup stores consumer
+references in contiguous row ranges, indexed by an offset array. Constants already
+published at setup have no pending arrival edge. A runtime publication visits
+only that section's range, without following linked use records. A consumer with multiple operands becomes
 callable when those specific operands exist; unrelated sections and collective
 participants are not a barrier. The runtime does not scan all functions.
 
-`start()` completes bindings and starts the numerical workers once. Each
+`start()` realizes receive storage, completes bindings and consumer ranges, starts
+the numerical workers, then activates transport. An early receive therefore cannot
+race construction of its consumers. Each
 `submit(index)` publishes the index's root row to its configured root workers
 using their existing notice queues. The caller supplies each index in
 `0..<count` once; there is no occupancy check, replay guard, configuration change
@@ -87,8 +90,10 @@ partials declared by supplied tensor functions. Transport streaming carries each
 send through internally sized requests. Transport fragmentation does not change
 the tensor partition, numerical function, shape, or send/receive API.
 
-The numerical worker resolves operands through the canonical page table and
-invokes the supplied function. CPU completion is its return; Metal and Core ML
+Setup prepares local input and output addresses once. At invocation, the numerical
+worker resolves only received inputs through the canonical page table and invokes
+the supplied function. Input references keep local backing fixed through completion;
+received addresses reflect the actual placement of incoming bytes. CPU completion is its return; Metal and Core ML
 use their native asynchronous completion. Successful completion publishes the
 outputs and releases input references. Failures are recorded and do not publish
 failed output as valid data.
@@ -238,8 +243,10 @@ The internal `MeshSubmission` enum selects the backend during realization;
 are not traversed during numerical execution.
 
 A local operand selects a binding by value index; a shared constant selects
-index zero. A received operand selects its binding through a physical-page slot
-map. The numerical caller can select a prepared value by operand, or pass its
+index zero. Each receive channel has a contiguous preallocated page range.
+Its operand selects a prepared binding by `(page - firstPage) / blockPages`.
+The range is recorded once when allocated; neither a per-operand slot table nor
+a rescan of transfer descriptors is needed. The numerical caller can select a prepared value by operand, or pass its
 index to an existing indexed numerical function. This keeps the selection in
 ordinary operand indexing. The former table of input/output pairs and its
 additional `MeshInvocation` dispatch layer have been deleted.
@@ -329,14 +336,20 @@ Transport chunk padding, source-tag handling, publication and reference-count
 atomics remain actual costs. The alias mechanism has not been deployed or exercised
 on the RDMA link by this change.
 For N indices and R possible receive positions, native input/output preparation
-now constructs R input bindings and N output bindings, plus one input slot map
-over arena blocks. It creates one numerical submission function per declared
+constructs R input bindings and N output bindings. Received-view selection keeps
+the channel's first page and block size, with no slot map over arena blocks.
+It creates one numerical submission function per declared
 call. The previous N*R product represented paired addresses, which was unnecessary
 for APIs that take independently bound input and output operands. Local inputs
 also need only N bindings; shared local constants need one. These are source
 allocation counts, not performance measurements.
-Shared function metadata is constant in N; per-value operands, uses, pending
-counts and backing grow with the finite extent. Submission touches the root
+Shared function metadata is constant in N; per-value operands, consumer references,
+pending counts and backing grow with the finite extent. For W numerical workers,
+L logical rows and E declared arrival dependencies, adjacency contains W*(L+1)
+offsets and E call pointers. This replaces list heads and two-pointer use
+records, including records previously allocated for inputs already present at setup.
+Repeated uses of one operand retain repeated references and dependencies;
+compaction does not deduplicate the dataflow itself. Submission touches the root
 workers only; publication visits the published row's uses, not all functions.
 These are explicit remaining costs; no claim of zero total overhead, JACCL cost parity, or speedup
 over world size 1 follows from this source change.
@@ -344,7 +357,7 @@ over world size 1 follows from this source change.
 There is no runtime testing gate here. The bridge, C and Swift libraries, configured Core ML chain and synchronization
 counterexample are build targets.
 They have not been run or deployed by this change. Participants
-need the source's ABI 42 bridge and explicit link configuration before these callers can attach.
+need the source's ABI 43 bridge and explicit link configuration before these callers can attach.
 
 Client attachment and bridge startup no longer run a process-memory ranking scan.
 The unrelated `mesh-memory.h`, its `--memory-check` command and launch-script hook
@@ -363,8 +376,8 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 
 | Counted set | Before | Current |
 |---|---:|---:|
-| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,774 lines / 992 files |
-| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,450 lines / 13 files |
+| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,777 lines / 992 files |
+| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,453 lines / 13 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 25 lines |
 | Engine's deleted mesh_matrix.swift, tools/mesh/sync.sh and replacement matrix example | 203 lines | 0 lines |
 
@@ -398,7 +411,7 @@ current source and example callers. It does not close the deployment gaps above.
 |---|---|
 | Higher-order partial tensor functions using existing numerics | `TensorFunction` owns raw or native operand preparation. Calls, maps and reductions accept the same function value. Backend selection and view construction finish before invocation. The configured caller supplies existing Core ML functions. |
 | Distinct collective semantics | `Mesh.swift` defines send/receive endpoints, broadcast, scatter, gather, all-scatter, all-gather, all-to-all, reduce, reduce-scatter and all-reduce. Movement returns indexed sections; only the supplied combining function performs reduction arithmetic. |
-| AOT bindings, zero-copy asynchronous use | `mesh_call_bind` realizes indexed uses and operand storage. Swift prepares native views before `mesh_calls_start`. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_assign` places each chunk through page-index assignment over registered aliases without copying. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
+| AOT bindings, zero-copy asynchronous use | `mesh_call_bind` prepares operands and retains inputs. `mesh_calls_start` realizes contiguous consumer ranges before transfer activation. Swift prepares native views once; only received input addresses resolve at invocation. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_assign` places each chunk through page-index assignment over registered aliases without copying. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
 | Delete incompatible implementation and callers | The former executor/frontend and engine adapters are absent from the current tree. The source inventory includes their replacements. The index transport channel, paired native-binding Cartesian product, per-page receive metadata and process-memory ranking scan are also absent. |
 | Actual producer/collective/numerical-consumer integration | `coreml-chain.swift` composes caller-supplied block functions, reduce-scatter and supplied consumers across a configurable stage list. Both participants compute contributions at each depth under the described placement. Accelerate performs the supplied float32 sum. This is source integration, without a throughput claim. |
 | Automatic lifetime; explicit synchronization only | `mesh_buffer_retain` accounts for declared uses. `mesh_publish`, native numerical completion, TX completion and ordinary object destruction discharge their references; `mesh_collect` returns backing without clearing payload. Runtime presence polling occurs only in the explicitly called `mesh_sync_on_remote_fill`; its source counterexample includes a self-dependent permanent wait. |
@@ -431,7 +444,7 @@ including the operand allocation and native-view changes; removing the unused
 engine addition wrapper removes 8 more source lines. Eight existing prose comments were replaced with documentation citations;
 those equal-line replacements are not counted as structural reduction. Documentation changes are
 reported separately from that structural count. The bridge, native libraries
-and retained callers now compile at ABI 42. Compilation does not establish RDMA
+and retained callers now compile at ABI 43. Compilation does not establish RDMA
 execution or end-to-end integration.
 
 The shared function-preparation path and configured Core ML caller add 28 source
@@ -444,3 +457,9 @@ count includes replacing a two-line source comment with one documentation
 citation; the implementation change excluding that migration is +60 lines. Deleting the
 15 lines of obsolete machine-specific configuration is reported separately;
 configuration files and these documentation edits are outside the source count.
+
+The contiguous consumer ranges, prepared local operands and arithmetic receive-view
+selection change maintained source by +3 lines net relative to `c9d9e18`.
+This removes runtime pointer chasing and repeated local-address resolution;
+the source count is not a claim of measured latency reduction. Documentation is
+reported separately, and no numerical function or collective verb was added.

@@ -236,13 +236,10 @@ public final class Mesh {
         let source = part.storage!, context = memory.context
         let pages: [UInt32], index: (mesh_operand) -> Int
         if let queue = source.receiveQueue {
-            var received = [UInt32](repeating: 0, count: mesh_receive_pages(context, queue, source.section.pages, nil))
-            mesh_receive_pages(context, queue, source.section.pages, &received)
-            pages = received
-            let quantum = Int(mesh_block_pages(context))
-            var slots = [Int](repeating: 0, count: Int(mesh_arena_pages(context)) / quantum)
-            for (slot, page) in pages.enumerated() { slots[Int(page) / quantum] = slot }
-            index = { slots[Int($0.page) / quantum] }
+            let range = context.pointee.receives[Int(queue)]
+            let first = Int(range.first), quantum = Int(mesh_block_pages(context))
+            pages = stride(from: first, through: first + Int(range.count - source.section.pages), by: quantum).map(UInt32.init)
+            index = { (Int($0.page) - first) / quantum }
         } else {
             pages = (0..<source.section.count).map { mesh_section_page(context, source.section, $0) }
             let stride = part.shared ? 0 : 1
@@ -371,9 +368,9 @@ public final class Mesh {
         if storageError != 0 { throw POSIXError(POSIXErrorCode(rawValue: storageError)!) }
         for prepare in preparations { try prepare() }
         preparations.removeAll()
-        mesh_transfers_start(memory.context)
         let error = mesh_calls_start(calls)
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
+        mesh_transfers_start(memory.context)
     }
 
     // design/algorithm-sources.md#program

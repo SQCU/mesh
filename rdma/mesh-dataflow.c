@@ -61,6 +61,7 @@ int mesh_detach(struct mesh_ctx *c){
   int status=munmap(c->M,c->len);
   int error=status?errno:0;
   if(close(c->fd) && !error) error=errno;
+  free(c->receives);
   *c=(struct mesh_ctx){0};
   return error;
 }
