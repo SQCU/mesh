@@ -46,11 +46,17 @@ class Ref:
         self.shape = (view.rows, view.columns)
         self._writer = C.c_void_p()
         self._writer_error = program.native.algebra_writer(program.handle, view, C.byref(self._writer))
-        address = program.native.tensor_data(view.tensor, view.extent)
-        length = view.offset + (view.rows - 1) * view.row_stride + (view.columns - 1) * view.column_stride + 1
+
+    @property
+    # design/algorithm-sources.md#programtensor
+    def array(self):
+        view = self.view
+        address = self.program.native.view_data(view)
+        if not address:
+            check(C.get_errno() or errno.EIO)
+        length = (view.rows - 1) * view.row_stride + (view.columns - 1) * view.column_stride + 1
         buffer = (C.c_ubyte * (length * self.dtype.itemsize)).from_address(address)
-        self.array = np.ndarray(self.shape, self.dtype, buffer,
-            offset=view.offset * self.dtype.itemsize,
+        return np.ndarray(self.shape, self.dtype, buffer,
             strides=(view.row_stride * self.dtype.itemsize, view.column_stride * self.dtype.itemsize))
 
     # design/algorithm-sources.md#program
@@ -99,6 +105,27 @@ class Ref:
     # design/algorithm-sources.md#program
     def on(self, peer):
         return (self, peer)
+
+    # design/algorithm-sources.md#programcopy
+    def _overlaps(self, other):
+        a, b = self.view, other.view
+        if (a.tensor, a.extent) != (b.tensor, b.extent):
+            return False
+        if a.row_stride < a.column_stride:
+            a = self.program.native.view_transpose(a)
+        if b.row_stride < b.column_stride:
+            b = self.program.native.view_transpose(b)
+        widths = (a.columns - 1) * a.column_stride + 1, (b.columns - 1) * b.column_stride + 1
+        i = j = 0
+        while i < a.rows and j < b.rows:
+            left, right = a.offset + i * a.row_stride, b.offset + j * b.row_stride
+            if left < right + widths[1] and right < left + widths[0]:
+                return True
+            if left + widths[0] <= right:
+                i += 1
+            else:
+                j += 1
+        return False
 
 
 class Tensor:
@@ -223,8 +250,6 @@ class Result:
     # design/algorithm-sources.md#programexport
     def __init__(self, ref):
         self.ref = ref
-        self._array = ref.array.view()
-        self._array.flags.writeable = False
         first, count = C.c_size_t(), C.c_size_t()
         check(ref.program.native.algebra_export(ref.program.handle, ref.view, C.byref(first), C.byref(count)))
         self.indices = tuple(range(first.value, first.value + count.value))
@@ -239,7 +264,9 @@ class Result:
     def array(self):
         if not self.ready:
             raise BlockingIOError(errno.EAGAIN, 'Result region is not published')
-        return self._array
+        result = self.ref.array
+        result.flags.writeable = False
+        return result
 
     # design/algorithm-sources.md#programexport
     def consume(self):
@@ -330,7 +357,7 @@ class Program:
                 if sender != self.node:
                     return
                 targets = (((0, 0), dst._span),) if getattr(dst, '_span', None) is not None else tuple(dst.blocks.items())
-                if any(np.shares_memory(ref.array, target.array) for ref in src.blocks.values() for _, target in targets):
+                if any(ref._overlaps(target) for ref in src.blocks.values() for _, target in targets):
                     raise ValueError('Copy sources overlap destination storage')
                 for (i, j), target in targets:
                     row, column = i * dst.block_shape[0], j * dst.block_shape[1]

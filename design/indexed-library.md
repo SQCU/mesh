@@ -71,6 +71,10 @@ by native mesh for the program lifetime. `program.export(ref)` binds an output r
 arrays remain valid until consumption. Close the program after pending native
 work completes.
 
+Refs hold logical geometry. Host array access resolves that geometry through the
+canonical page table, refreshing changed CPU mappings without copying tensor data.
+Export binds reader ownership at setup; it does not capture a physical array view.
+
 Native function, reader, route and transfer trace reconstruction is removed.
 The private lowering boundary retains the function count needed to attach indexed
 operands. Numerical callers receive tensor references and output observations;

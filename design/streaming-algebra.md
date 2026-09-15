@@ -112,10 +112,23 @@ These buffer objects alias registered pages and allocate no copied operand store
 This follows Apple's [hazard-tracking scope](https://developer.apple.com/documentation/metal/mtlhazardtrackingmode)
 and [MPS matrix storage](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrix).
 
-Core ML arrays, supplied engine encoders and persistent NumPy views still retain
-fixed extent addresses. Their integration, receive preposting and backing reuse
+Core ML arrays and supplied engine encoders still retain fixed extent addresses.
+Their integration, receive preposting and backing reuse
 remain necessary before claiming G4. This address change establishes no latency
 parity or coverage of those unfinished paths.
+
+Host Refs retain logical geometry without an eager NumPy view. `Ref.array` passes
+that geometry to `mesh_view_data`, which refreshes the corresponding CPU virtual
+mapping from the canonical page table and returns the view's offset address.
+`Result.array` performs this resolution after its existing availability check,
+then returns a read-only view. Initial mapping and changed mapping use the same
+`mesh_view_bind` implementation. Its atomic cache records only the physical pages
+already installed in the CPU mapping; it does not choose backing, publish values,
+or govern recycling. Dense views coalesce their entire span, and unchanged pages
+cause no mapping syscall. Refresh is host access work and performs no payload copy;
+it is not on the numerical or RDMA worker path. The returned array retains the
+existing lifetime ending at `consume()`. This also does not establish G4's reuse
+policy or claim that OS virtual-memory operations have zero cost.
 
 The existing two-participant `examples/streaming-chain.py` ran on September 14
 with these bindings at `2a5b041`, Metal numerics, the FP32 inputs in

@@ -30,7 +30,8 @@ int mesh_execution_add(struct mesh_ctx *,struct mesh_row_function *,void *owner,
 void mesh_execution_remove(struct mesh_ctx *,void *owner);
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
-void *mesh_view_create(struct mesh_ctx *,uint32_t first,size_t count);
+void *mesh_view_create(struct mesh_ctx *,uint32_t first,size_t count,_Atomic uint32_t *mapped);
+int mesh_view_bind(struct mesh_ctx *,uint32_t first,size_t count,void *address,_Atomic uint32_t *mapped);
 int mesh_view_destroy(void *address,size_t length);
 
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);

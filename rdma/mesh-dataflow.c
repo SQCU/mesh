@@ -69,7 +69,7 @@ int mesh_detach(struct mesh_ctx *c){
 }
 
 /* design/algorithm-sources.md#programtensor */
-void *mesh_view_create(struct mesh_ctx *c,uint32_t row,size_t count){
+void *mesh_view_create(struct mesh_ctx *c,uint32_t row,size_t count,_Atomic uint32_t *mapped){
   size_t page_bytes=c->M->pgsz;
   if(!count || count>SIZE_MAX/page_bytes || row>mesh_rows(c->M) || count>mesh_rows(c->M)-row){ errno=EINVAL; return NULL; }
   _Atomic uint32_t *pages=mesh_page(c->M)+row;
@@ -77,17 +77,27 @@ void *mesh_view_create(struct mesh_ctx *c,uint32_t row,size_t count){
   size_t length=count*page_bytes;
   unsigned char *address=mmap(NULL,length,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
   if(address==MAP_FAILED) return NULL;
+  for(size_t i=0;i<count;i++)atomic_init(&mapped[i],MESH_ABSENT);
+  int error=mesh_view_bind(c,row,count,address,mapped);
+  if(error){munmap(address,length);errno=error;return NULL;}
+  return address;
+}
+
+/* design/algorithm-sources.md#programtensor */
+int mesh_view_bind(struct mesh_ctx *c,uint32_t row,size_t count,void *address,_Atomic uint32_t *mapped){
+  size_t page_bytes=c->M->pgsz;
+  _Atomic uint32_t *pages=mesh_page(c->M)+row;
   for(size_t first=0;first<count;){
     uint32_t page=atomic_load_explicit(&pages[first],memory_order_acquire);
+    if(atomic_load_explicit(&mapped[first],memory_order_acquire)==page){first++;continue;}
     size_t end=first+1;
-    while(end<count && atomic_load_explicit(&pages[end],memory_order_acquire)==page+end-first) end++;
+    while(end<count && atomic_load_explicit(&mapped[end],memory_order_acquire)!=page+end-first && atomic_load_explicit(&pages[end],memory_order_acquire)==page+end-first) end++;
     off_t offset=(off_t)(c->M->data_off+(uint64_t)page*page_bytes);
-    if(mmap(address+first*page_bytes,(end-first)*page_bytes,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,c->fd,offset)==MAP_FAILED){
-      int error=errno; munmap(address,length); errno=error; return NULL;
-    }
+    if(mmap((char *)address+first*page_bytes,(end-first)*page_bytes,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,c->fd,offset)==MAP_FAILED)return errno;
+    for(size_t i=first;i<end;i++)atomic_store_explicit(&mapped[i],page+(uint32_t)(i-first),memory_order_release);
     first=end;
   }
-  return address;
+  return 0;
 }
 
 /* design/algorithm-sources.md#programtensor */

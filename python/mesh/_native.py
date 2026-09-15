@@ -42,7 +42,7 @@ class Native:
             'mesh_tensor_create': (P, [P, C.POINTER(Shape), Z, C.c_int, C.c_int]),
             'mesh_algebra_materialize': (C.c_int, [P, C.POINTER(CopyRegion), Z, View]),
             'mesh_tensor_view': (View, [P, U]),
-            'mesh_tensor_data': (P, [P, U]),
+            'mesh_view_data': (P, [View]),
             'mesh_tensor_publication_bytes': (Z, [P, U]),
             'mesh_view_slice': (View, [View, Z, Z, Z, Z]),
             'mesh_view_transpose': (View, [View]),

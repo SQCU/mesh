@@ -23,6 +23,7 @@ struct mesh_extent {
   uint32_t first,pages,quantum;
   size_t bytes;
   void *address;
+  _Atomic uint32_t *host_pages;
   CFTypeRef buffer;
   struct mesh_shape shape;
 };
@@ -107,6 +108,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
       struct mesh_extent *e=&t->extents[j];
       if(e->buffer)CFRelease(e->buffer);
       if(e->address)mesh_view_destroy(e->address,e->bytes);
+      free(e->host_pages);
       if(e->first!=MESH_ABSENT){mesh_backing_release(context,e->first,e->pages);mesh_rows_release(context,e->first,e->pages);}
     }
     free(t->extents); free(t);
@@ -213,7 +215,9 @@ struct mesh_tensor *mesh_tensor_create(struct mesh_algebra *handle,const struct 
     if(e->first==MESH_ABSENT)return NULL;
     int error=mesh_backing_alloc(a->context,e->first,e->pages,e->quantum,contiguous);
     if(error){errno=error;return NULL;}
-    e->address=mesh_view_create(a->context,e->first,pages);
+    e->host_pages=malloc(pages*sizeof *e->host_pages);
+    if(!e->host_pages){errno=ENOMEM;return NULL;}
+    e->address=mesh_view_create(a->context,e->first,pages,e->host_pages);
     if(!e->address)return NULL;
     if(!a.cpu) {
       e->buffer=CFBridgingRetain([a.device newBufferWithBytesNoCopy:e->address length:e->bytes options:MTLResourceStorageModeShared|MTLResourceHazardTrackingModeUntracked deallocator:nil]);
@@ -249,8 +253,21 @@ struct mesh_view mesh_view_broadcast(struct mesh_view v,size_t rows,size_t colum
 size_t mesh_tensor_publication_bytes(struct mesh_tensor *t,uint32_t i) {
   return t && i<t->count?(size_t)t->extents[i].quantum*t->context->M->pgsz:0;
 }
-/* design/algorithm-sources.md#programkernel_call */
-void *mesh_tensor_data(struct mesh_tensor *t,uint32_t i) { return t && i<t->count?t->extents[i].address:NULL; }
+/* design/algorithm-sources.md#programtensor */
+void *mesh_view_data(struct mesh_view v) {
+  if(!v.tensor || v.extent>=v.tensor->count){errno=EINVAL;return NULL;}
+  struct mesh_extent *e=&v.tensor->extents[v.extent];struct mesh_ctx *c=v.tensor->context;
+  size_t scalar=scalar_bytes(e->shape.scalar),page=c->M->pgsz;
+  if(v.row_stride<v.column_stride)v=mesh_view_transpose(v);
+  if(v.column_stride==1 && v.row_stride==v.columns){v.columns*=v.rows;v.rows=1;}
+  for(size_t r=0;r<v.rows;r++) {
+    size_t first=(v.offset+r*v.row_stride)*scalar/page;
+    size_t end=((v.offset+r*v.row_stride+(v.columns-1)*v.column_stride)*scalar)/page+1;
+    int error=mesh_view_bind(c,e->first+(uint32_t)first,end-first,(char *)e->address+first*page,e->host_pages+first);
+    if(error){errno=error;return NULL;}
+  }
+  return (char *)e->address+v.offset*scalar;
+}
 /* design/algorithm-sources.md#programkernel_call */
 int mesh_tensor_constant(struct mesh_tensor *t,uint32_t i) {
   if(!t || i>=t->count)return EINVAL;

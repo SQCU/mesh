@@ -39,7 +39,7 @@ struct mesh_view mesh_view_slice(struct mesh_view,size_t row,size_t column,size_
 struct mesh_view mesh_view_transpose(struct mesh_view);
 struct mesh_view mesh_view_broadcast(struct mesh_view,size_t rows,size_t columns);
 size_t mesh_tensor_publication_bytes(struct mesh_tensor *,uint32_t extent);
-void *mesh_tensor_data(struct mesh_tensor *,uint32_t extent);
+void *mesh_view_data(struct mesh_view);
 int mesh_tensor_constant(struct mesh_tensor *,uint32_t extent);
 int mesh_algebra_writer(struct mesh_algebra *,struct mesh_view,struct mesh_writer **);
 int mesh_writer_issue(struct mesh_writer *);
