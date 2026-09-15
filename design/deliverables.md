@@ -77,6 +77,7 @@ Mesh.reduce(parts, to:, using:) / reduceScatter(contributions, to:, using:) / al
 Mesh.start()                                              // realize storage, bindings, receives, links
 Mesh.submit(index)                                        // one value instance through the realized graph
 Mesh.syncOnRemoteFill(parts, index:)                      // explicit, diegetic, never default
+bounds(program, placement, topology) -> Bounds            // pure lower bounds; never picks a placement
 ```
 
 Adding a symbol is a change to this section first (a ✗ row in §5), then code. A symbol

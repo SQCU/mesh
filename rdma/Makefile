@@ -9,12 +9,14 @@ mesh-stat: mesh-stat.c mesh.h
 	cc -O2 -o $@ mesh-stat.c
 libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh.h
 	cc -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c
-libmesh_swift.dylib: ../swift/Mesh.swift libmesh.dylib module.modulemap
-	swiftc -O -emit-library -emit-module -module-name Mesh -I . -L . -lmesh -Xlinker -rpath -Xlinker @loader_path -Xlinker -install_name -Xlinker @rpath/libmesh_swift.dylib ../swift/Mesh.swift -o $@
+libmesh_swift.dylib: ../swift/Mesh.swift ../swift/Bounds.swift libmesh.dylib module.modulemap
+	swiftc -O -emit-library -emit-module -module-name Mesh -I . -L . -lmesh -Xlinker -rpath -Xlinker @loader_path -Xlinker -install_name -Xlinker @rpath/libmesh_swift.dylib ../swift/Mesh.swift ../swift/Bounds.swift -o $@
 sync-on-remote-fill: ../examples/sync-on-remote-fill.swift libmesh_swift.dylib
+	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
+bounds-table: ../examples/bounds-table.swift libmesh_swift.dylib
 	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
 coreml-chain: ../examples/coreml-chain.swift libmesh_swift.dylib
 	swiftc -O -parse-as-library -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
 clean:
-	rm -f $(BINS) sync-on-remote-fill coreml-chain Mesh.swiftmodule Mesh.swiftdoc Mesh.swiftsourceinfo Mesh.abi.json
+	rm -f $(BINS) sync-on-remote-fill bounds-table coreml-chain Mesh.swiftmodule Mesh.swiftdoc Mesh.swiftsourceinfo Mesh.abi.json
 .PHONY: all clean
