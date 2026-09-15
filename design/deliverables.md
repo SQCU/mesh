@@ -58,6 +58,7 @@ operator's other normative sentences are collected verbatim in
 | I14 | Every public construct cites one published mechanism, once, in `algorithm-sources.md`. Bibliography growth is not progress. | one section per symbol in §2; no per-commit sections |
 | I15 | No tests, gold harnesses, evidence JSON, provenance records, or trace exports. Verification is source reading plus §5 checks plus public measurements. | `measurements/` gains only public-endpoint runs |
 | I16 | Size is evidence. A library larger than the §5 rows need, while any of rows 13–19 is ✗, is deleted and rewritten from §2–§3, not revised: revision cost scales with what exists, deletion cost does not. Reference size class: MLX distributed (8 functions), JACCL (~1.5k lines). | `wc -l swift/Mesh.swift rdma/*.c rdma/*.h` ≤ 3,000 while rows 13–19 are open; a commit that grows the library without flipping a row is reverted |
+| I17 | No pointer chase on the hot path. Every runtime structure touched between a publication and the next numerical submission is a contiguous array indexed by an integer fixed at `start()`: presence stamps, consumer ranges, pending counts, operand addresses, free lists. No linked list, hash map, tree, page-table lookup, page permutation, or software capacity counter is consulted after `start()`. The only runtime conditionals are: a pending count reaching zero, a reference count reaching zero, and the verbs call refusing a post. | `grep -n "->next\|hash\|dict\|tree\|permut\|assign" rdma/mesh-call.c rdma/mesh-dataflow.c rdma/mesh-flow.c` empty on the publish/receive/submit paths; the three conditionals above are the only `if` in those functions |
 
 ## 2. Public surface (closed)
 
@@ -119,7 +120,7 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 **L2. Supplied function over sections.** `TensorFunction.cpu/.metal/.prediction`; `Mesh.call/map`. Ref: Pallas `pallas_call`; StarPU codelets. Check: I7; a CPU, a Metal and a Core ML function each bound through the same `call`. Not it: an expression compiler; a kernel zoo.
 
-**L3. Publish on visibility, fire on presence.** completion → `mesh_publish(row)` → consumers whose operands are all present are submitted. Ref: Monsoon; Realm; TensorFlow Send/Recv. Check: I2, I3; `mesh_publish` visits only that row's declared uses.
+**L3. Publish on visibility, fire on presence.** completion → `mesh_publish(row)` → for each consumer in the row's contiguous use range: decrement its pending count; zero enqueues it on its worker. No consumer evaluates "are my inputs present". Ref: Monsoon; Realm; TensorFlow Send/Recv; Naiad occurrence counts. Check: I2, I3, I17; `mesh_publish` walks one contiguous range and performs one decrement per use.
 
 **L4. Ten collective verbs as movement + supplied combine.** §2 list; `reduce*` take `using: TensorFunction`. Ref: MPI-4.1 ch. 5; Rabenseifner/Patarasuk–Yuan; Gloo. Check: every verb is `send` + `call(combine)`; movement does no arithmetic; explicit destinations at every world size. Not it: gather-everything-then-sum; any verb inferred from `size`.
 
@@ -141,9 +142,9 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 ### N — instances and lifecycle
 
-**N1. Realize once, submit per instance, unbounded.** `Mesh(…, count:)` → `Mesh(…, inFlight:)`; `submit(index)` accepts any index; instance storage is reclaimed by L7 and reused only after its last reader, with no caller-side guard. Ref: MPI-4 persistent collectives; Pathways; CUDA graphs. Check: `submit(count + 1)` is legal; `start()` prints bytes per in-flight instance; no allocation inside `submit`.
+**N1. Realize once, submit per instance, unbounded.** `Mesh(…, inFlight:)`; `submit(index) -> Result<Void, MeshError>`; the arena is sized at `start()` as inFlight × bytes-per-instance (SDF balance); an instance's pages return to a per-worker free list when its reference count reaches zero (an event, X5), and `submit` when no instance slot is free returns `MeshError.busy` immediately — never waits, never checks readers. Ref: MPI-4 persistent collectives; Pathways; CUDA graphs. Check: `submit(inFlight + k)` is legal and returns a value; `start()` prints bytes per in-flight instance; no allocation, no reader query, no wait inside `submit`.
 
-**N2. Early conclusion as a value.** `Mesh.result(index) -> Result<Void, MeshError>`; `MeshError.link(peer, code)`, `.function(call, code)`, `.partialOperand(part)`. Ref: fail-stop; end-to-end argument. Check: I12; the Core ML chain concludes early on a killed peer and the driver re-realizes.
+**N2. Early conclusion as a value.** `Mesh.result(index) -> Result<Void, MeshError>` is one load of the instance's status word (no scan, no poll loop); `MeshError.link(peer, code)`, `.function(call, code)`, `.partialOperand(part)`. Ref: fail-stop; end-to-end argument. Check: I12; the Core ML chain concludes early on a killed peer and the driver re-realizes.
 
 ### T — topology and fleet
 
@@ -157,9 +158,25 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 **T5. Retopology is a `Result`; the driver re-realizes.** `MeshError.topology(lost:, gained:)`; driver: `observe(); Mesh(topology, placement.restrict(topology)).start()`. Ref: fail-stop; Dean–Ghemawat; `RDMA-RULES.md`. Check: pull one cable mid-run on a ring: early conclusion names the link; re-realized program completes on the spanning tree; re-plug is visible to the next `observe()`.
 
-**T6. Replicas are placement, not protocol.** `Placement(…, replicas: [section: [rank, rank]])`; readers take the first present. Ref: Legion physical instances; end-to-end. Check: no ack/retry/health code; losing a link changes `bounds()` not correctness.
+**T6. Replicas are placement, not protocol.** `Placement(…, replicas: [section: [rank, rank]])`: a replicated section is produced on every listed rank as an ordinary extra output edge; each consumer is bound at `start()` to ONE replica (the placement's primary for that consumer); loss of the primary's link is a T5 retopology event whose re-realization binds the next replica. No read-time choice, no "first present" branch. Ref: Legion physical instances; end-to-end. Check: no runtime conditional selects among replicas; losing a link changes `bounds()` and triggers T5, not a branch.
 
 **T7. Multi-tenant fabric by lease.** bridge serves N clients; `Mesh(…, lease: Lease(qpsPerLink:, arenaBytes:))`; setup returns errno when the lease exceeds `max_qp`/arena. Ref: NCCL communicator per job; PMIx. Check: two users' programs run on disjoint QPs/arena; `kill -TERM` of one leaves the other untouched; no `SIGKILL` path.
+
+### X — execution-shape typings (what "streaming" means at the cache line)
+
+**X1. Presence is a dense stamp array.** `presence[instance][section]`: one word each, indexed by integers fixed at `start()`; `mesh_publish` is one store plus the L3 range walk. Ref: Monsoon presence bits; I-structures; Lamport single-writer. Check: no map/list/hash on the publish path (I17); the stamp array's address is computed once.
+
+**X2. Firing is a countdown, not a predicate.** each `(consumer, instance)` has `pending` initialized at `start()` to its operand count; publication decrements; zero → enqueue. Ref: Naiad occurrence/precursor counts; Realm event triggers. Check: `mesh_present`/any presence scan is absent from the runtime path; the only reader of presence at runtime is `syncOnRemoteFill` (I11).
+
+**X3. Addresses are fixed at realize; receives land where they are planned.** every operand address for every in-flight instance is computed at `start()` into a contiguous operand array; each transport chunk's RECV is posted on its planned destination page, so the page-table permutation (`mesh_receive_assign` forward/inverse exchange) and the invocation-time page resolve are deleted. The supplied function is invoked with the prebuilt operand array. Ref: ledger D4 (RECV on the consumer's pages); TensorFlow Send/Recv; Pathways "outputs sent directly into node B's input buffers". Check: `grep -n "mesh_section_page\|assign\|permut" rdma/mesh-call.c rdma/mesh-flow.c` empty on the receive and invoke paths; `mesh_transfers_prepare` allocates each chunk's page and posts its RECV there.
+
+**X4. Capacity gates are hardware only.** the only conditional on a TX post is the verbs return value; no software counter of outstanding frames, credits, or window decides whether to post (RDMA-FIRST: "an implementation that gates on a computed target rather than on the hardware refusing the work has invented a throttle"). Ref: TN3205 credit flow control; NCCL proxy "if we have ops to progress, no need to block". Check: `grep -n "frames\s*[<>]=\?\|outstanding\|window" rdma/mesh-flow.c` returns only the capacity query at setup.
+
+**X5. Reclamation is an event, not a query.** a reference count reaching zero pushes the pages onto a per-worker free list (single-producer/single-consumer ring, Disruptor); allocation for a new instance pops; an empty list means the arena was mis-sized at `start()` and is reported there by the SDF bound, never discovered by waiting. Ref: RCU grace period; Disruptor; Lee & Messerschmitt balance equations. Check: no `while`/`sleep`/`yield` around allocation; `start()` refuses an arena smaller than inFlight × bytes.
+
+**X6. The partial tensor is plain data.** `TensorPart` and its C descriptor are POD: `(rank, address, bytes, stampIndex)` per instance, no reference to a mutable runtime object, no method that consults runtime state except `present` (one load). A reduction contribution is the same type with `partial = true` (L5). Ref: DaCe memlet; ScaLAPACK descriptor. Check: `TensorPart` has no `class` reference field; `sizeof(struct mesh_section)` is a few words; equality is bitwise.
+
+**X7. Supplied functions receive contiguous operand arrays and return.** `TensorFunction` is invoked with `(inputs: contiguous [operand], outputs: contiguous [operand], instance)` and must not read presence, wait, or allocate; its completion (return / Metal handler / Core ML handler) is the only thing that publishes. Ref: Pallas kernel refs; Active Messages handlers ("copies the data and increments the flag"). Check: I2; no mesh symbol other than the operand array is visible to the function body.
 
 ### E — engine integration and measurement
 
@@ -202,6 +219,13 @@ subset, never as "done".
 | 17 | E1 engine layer via Mesh | ✗ | — |
 | 18 | E2 public measurement + Karp–Flatt | ◐ | script `metal-microbench/tools/mesh/report.py` (engine `feda6a6`): public endpoint only, memory-state guard, S/e/capability-sum/bounds/verdict; dry-run reproduces 1.42x, 1.08x and the ten-minute table; **no measured run yet** (needs E1) |
 | 19 | E3 depthwise chain not slower | ✗ | — |
+| 19a | X1 dense presence stamps | ◐ | stamps exist; verify no map/list on the publish path |
+| 19b | X2 countdown firing | ◐ | pending counts exist (`mesh-call.c`); verify no presence predicate at runtime |
+| 19c | X3 addresses fixed at realize; RECV on the planned page; permutation deleted | ✗ | `mesh_receive_assign` page-index exchange still present |
+| 19d | X4 hardware-only capacity gate | ◐ | "available posts" logic to audit in `mesh-flow.c` |
+| 19e | X5 reclamation as free-list event; arena bound at start() | ✗ | — |
+| 19f | X6 TensorPart is POD | ◐ | Swift `TensorPart` holds a `storage` reference |
+| 19g | X7 functions get contiguous operand arrays | ✓ (verify) | `MeshOperands` |
 | 20 | G1 contraction/Gram as the same calls | ◐ (FFN shown, Gram not) | `examples/coreml-chain.swift` |
 | 21 | G2 indices as data (caller pattern) | ✗ | — |
 | 22 | G3 two callers | ✗ | — |
@@ -213,7 +237,7 @@ subset, never as "done".
 | 28 | T6 replicas | ✗ | — |
 | 29 | T7 lease / multi-tenant | ✗ | — |
 
-Rows 20–29 are required for the 4× M5 Ultra + 4× M4 Pro deployment and for the solver
+Rows 19a–19g are the typings that make rows 13–19 mean streaming at the cache line rather than in prose; they are assigned before row 20. Rows 20–29 are required for the 4× M5 Ultra + 4× M4 Pro deployment and for the solver
 caller; they are not optional and not "later" — they are after row 19. Rows whose files
 are disjoint may be worked in parallel worktrees: {14,15,16} share `Mesh.swift`/`mesh-call.c`;
 {23,24} share `mesh-flow.c`; {17},{18},{26} are independent; {13},{19} need the link
@@ -233,7 +257,7 @@ An agent picking "the first ✗/◐ row" skips assigned rows and takes the next 
 | 18 | E | `mmb-wt/E2` → `row/E2` (metal-microbench) |
 | 13 (Core ML chain) | G | main checkouts + both nodes; the only lane on the link |
 
-Unassigned and open: 19 (needs 17, 18), 20, 21, 22, 25, 27, 28, 29. Note: the laptop
+Unassigned and open: 19 (needs 17, 18), 19a–19g (X typings; 19c and 19e first), 20, 21, 22, 25, 27, 28, 29. Note: the laptop
 bridge binary currently runs from `mesh-wt/P1/rdma/mesh-flow`; do not prune that worktree
 while the bridge is up.
 
