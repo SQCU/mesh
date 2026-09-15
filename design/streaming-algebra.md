@@ -70,11 +70,58 @@ kernel call has a queue bound at setup, so producer and consumer calls are not
 placed on one shared command queue. This is a source-level account of eligible
 interleaving, not a measurement of simultaneous device execution or latency.
 
+## Contraction addresses
+
+`matrix_parts` partitions each mutable BLAS/BNNS/MPS operand footprint so that
+its first and last indexed elements lie in one registered backing block. Strides
+are nonnegative, so all intervening accesses lie in that block. Partitioning a
+row or column splits the corresponding output coordinates; partitioning K keeps
+the output coordinates and uses the library's beta=0, then beta=1 accumulation.
+This is setup work. It does not wait for an input or select a numerical backend.
+Immutable constants retain their setup mappings for the program's lifetime.
+
+For logical element offset `e`, scalar bytes `s` and page bytes `P`, the bound
+address contains the canonical table entry for `extent.first + floor(e*s/P)`
+and remainder `(e*s) mod P`. Invocation loads that entry and forms
+`physical_page*P + remainder`. The block partition is essential: resolving only
+the first page of an arbitrary multi-block matrix would not describe its other
+rows after relocation. Each block's pages must remain a contiguous physical run,
+as already required by the transport binding. The mapping must remain stable for
+the value's active readers; this change does not implement that lifecycle.
+
+BLAS receives resolved pointers with its setup dimensions and strides. BNNS
+receives them through its two-input filter apply call; its descriptors retain no
+mutable operand pointer. Filters live with the bound function and are destroyed
+after its existing execution lifetime. Mesh creates no operand buffers or filters
+during invocation. Internal BNNS scratch behavior is library-owned; the previous
+explicit `BNNSMatMul` workspace is no longer used by this beta-capable API.
+
+MPS receives setup-created matrix views selected by the resolved address. For
+row stride `R`, setup enumerates possible address residues modulo `R`, spaced by
+`gcd(P,R)`, and shares identical view tables. The quotient selects the matrix row
+origin; the residue selects the view's buffer offset. Apple's matrix origin uses
+`x` for rows and `y` for columns (also specified in the SDK's
+`MPSMatrixFullyConnected.h`). No MPS matrix is constructed at invocation.
+
+The arena buffers used for indexed kernels and MPS inputs are untracked Metal
+resources. Actual producer completion supplies cross-function visibility. MPS
+result buffers cover individual backing blocks, with tracking limited to that
+block so the library can order its own accumulation passes. Tracking a whole
+arena bank would serialize independent output blocks; it is not used for results.
+These buffer objects alias registered pages and allocate no copied operand store.
+This follows Apple's [hazard-tracking scope](https://developer.apple.com/documentation/metal/mtlhazardtrackingmode)
+and [MPS matrix storage](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrix).
+
+Core ML arrays, supplied engine encoders and persistent NumPy views still retain
+fixed extent addresses. Their integration, receive preposting and backing reuse
+remain necessary before claiming G4. This address change establishes no latency
+parity or coverage of those unfinished paths.
+
 ## Realized storage and the unresolved receive-posting requirement
 
 `mesh_algebra_realize` prints `participant` and `planned_arena_bytes` before
 registering numerical execution callbacks. The byte count sums every allocated
-`MeshExtent.extent.bytes`, including input, weight, intermediate, output and
+`mesh_extent.bytes`, including input, weight, intermediate, output and
 receive storage, with page/block rounding already applied. Aliased Refs do not
 add allocations. This is the invocation's operand footprint, not total bridge
 registration, reader metadata or backend workspace.
@@ -89,7 +136,7 @@ on one queue would mismatch arbitrarily ready sends. Ordering sends to match
 would introduce a dependency between unrelated producers. The present index path
 avoids that ordering dependency but retains an index-message receive-posting hop.
 
-`mesh_issue_index` also retains its output-lifetime check. Deleting it alone would
+`mesh_issue` also retains its output-lifetime check. Deleting it alone would
 allow a repeated firing to overwrite a value whose consumers have not finished.
 G4 requires resolving both transfer destinations and distinct live invocation
 storage; neither condition follows from a successful output or an empty grep.

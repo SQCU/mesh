@@ -50,6 +50,7 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property id<MTLComputePipelineState> metalPipeline;
 @property id<MTLCommandQueue> queue;
 @property NSData *cpuArguments;
+@property NSMutableData *bnnsFilters;
 @property NSMutableData *publicationSections;
 @property NSMutableData *dependencies,*results;
 @property(nonatomic,assign) MeshAlgebra *owner;
@@ -57,6 +58,11 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property(copy) void (^execute)(MeshFunction *);
 @end
 @implementation MeshFunction
+/* design/algorithm-sources.md#kernelsdot */
+- (void)dealloc {
+  const BNNSFilter *filters=self.bnnsFilters.bytes;
+  for(size_t i=0;i<self.bnnsFilters.length/sizeof *filters;i++)BNNSFilterDestroy(filters[i]);
+}
 @end
 
 @interface MeshAlgebra : NSObject {
@@ -72,6 +78,8 @@ typedef void (*mesh_cpu_kernel)(const uintptr_t *,const struct mesh_kernel_publi
 @property id<MTLCommandQueue> queue;
 @property NSMutableDictionary<NSString *,id<MTLLibrary>> *libraries;
 @property NSMutableDictionary<NSString *,MeshCPUCode *> *cpuCode;
+@property NSMutableDictionary<NSArray *,NSArray<MPSMatrix *> *> *matrixViews;
+@property NSMutableDictionary<NSNumber *,NSArray<id<MTLBuffer>> *> *matrixBuffers;
 @property NSMutableArray<MeshFunction *> *functions;
 @property NSArray<id<MTLBuffer>> *banks;
 @property id<MTLBuffer> pageTable,bankAddresses;
@@ -123,12 +131,13 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
     a.device=MTLCreateSystemDefaultDevice(); a.queue=[a.device newCommandQueue];
     if(!a.queue){errno=ENODEV;return NULL;}
     struct hdr *m=context->M;
-    a.bankBytes=a.device.maxBufferLength/m->pgsz*m->pgsz;
+    size_t block_bytes=(size_t)m->block*m->pgsz;
+    a.bankBytes=a.device.maxBufferLength/block_bytes*block_bytes;
     NSMutableArray<id<MTLBuffer>> *banks=[NSMutableArray new];
     size_t bytes=(size_t)mesh_rows(m)*m->pgsz;
     for(size_t offset=0;offset<bytes;offset+=a.bankBytes){
       size_t length=bytes-offset<a.bankBytes?bytes-offset:a.bankBytes;
-      id<MTLBuffer> bank=[a.device newBufferWithBytesNoCopy:mesh_at(m,0)+offset length:length options:MTLResourceStorageModeShared deallocator:nil];
+      id<MTLBuffer> bank=[a.device newBufferWithBytesNoCopy:mesh_at(m,0)+offset length:length options:MTLResourceStorageModeShared|MTLResourceHazardTrackingModeUntracked deallocator:nil];
       if(!bank){errno=ENOMEM;return NULL;}[banks addObject:bank];
     }
     a.banks=banks;
@@ -141,6 +150,7 @@ static struct mesh_algebra *create_algebra(struct mesh_ctx *context,BOOL cpu) {
   }
   a.executions=dispatch_group_create();
   a.libraries=[NSMutableDictionary new];a.cpuCode=[NSMutableDictionary new];
+  a.matrixViews=[NSMutableDictionary new];a.matrixBuffers=[NSMutableDictionary new];
   a.functions=[NSMutableArray new];
   a.tensors=[NSMutableData new]; a.bindings=[NSMutableData new]; a.returns=[NSMutableData new];
   return (__bridge_retained struct mesh_algebra *)a;
@@ -272,11 +282,73 @@ id<MTLBuffer> mesh_algebra_buffer(struct mesh_algebra *handle,struct mesh_view v
 }
 
 /* design/algorithm-sources.md#programkernel_call */
-static MPSMatrix *matrix(struct mesh_view v,BOOL transpose) {
+struct mesh_matrix_address {
+  _Atomic uint32_t *page;
+  size_t offset,page_bytes;
+  void *base;
+};
+/* design/algorithm-sources.md#kernelsdot */
+static struct mesh_matrix_address matrix_address(struct mesh_view v) {
+  static _Atomic uint32_t pinned_page;
   struct mesh_extent *e=&v.tensor->extents[v.extent];
-  size_t bytes=scalar_bytes(e->shape.scalar);
-  MPSMatrixDescriptor *d=[MPSMatrixDescriptor matrixDescriptorWithRows:transpose?v.columns:v.rows columns:transpose?v.rows:v.columns rowBytes:(transpose?v.column_stride:v.row_stride)*bytes dataType:bytes==2?MPSDataTypeFloat16:MPSDataTypeFloat32];
-  return [[MPSMatrix alloc]initWithBuffer:(__bridge id<MTLBuffer>)e->buffer offset:v.offset*bytes descriptor:d];
+  struct hdr *m=v.tensor->context->M;
+  size_t offset=v.offset*scalar_bytes(e->shape.scalar);
+  if(mesh_bits_all(m,MESH_CONSTANT,e->first,e->pages))
+    return (struct mesh_matrix_address){&pinned_page,offset,m->pgsz,e->address};
+  return (struct mesh_matrix_address){mesh_page(m)+e->first+offset/m->pgsz,offset%m->pgsz,m->pgsz,mesh_at(m,0)};
+}
+/* design/algorithm-sources.md#kernelsdot */
+static size_t matrix_offset(struct mesh_matrix_address address) {
+  return (size_t)atomic_load_explicit(address.page,memory_order_acquire)*address.page_bytes+address.offset;
+}
+/* design/algorithm-sources.md#kernelsdot */
+struct mesh_mps_address {struct mesh_matrix_address storage;size_t row_bytes,residue_step,variants,bank_bytes;};
+/* design/algorithm-sources.md#kernelsdot */
+static NSArray<MPSMatrix *> *matrix(MeshAlgebra *a,struct mesh_view v,BOOL transpose,BOOL result,struct mesh_mps_address *address) {
+  struct mesh_extent *e=&v.tensor->extents[v.extent];
+  size_t bytes=scalar_bytes(e->shape.scalar),rows=transpose?v.columns:v.rows,columns=transpose?v.rows:v.columns;
+  size_t stride=(transpose?v.column_stride:v.row_stride)*bytes;
+  MPSDataType type=bytes==2?MPSDataTypeFloat16:MPSDataTypeFloat32;
+  address->storage=matrix_address(v);
+  if(address->storage.base==e->address) {
+    MPSMatrixDescriptor *d=[MPSMatrixDescriptor matrixDescriptorWithRows:rows columns:columns rowBytes:stride dataType:type];
+    MPSMatrix *view=[[MPSMatrix alloc]initWithBuffer:(__bridge id<MTLBuffer>)e->buffer offset:v.offset*bytes descriptor:d];
+    address->storage.offset=0;address->row_bytes=MAX(stride,bytes);address->residue_step=1;address->variants=1;address->bank_bytes=SIZE_MAX;
+    return @[view];
+  }
+  size_t pg=a->context->M->pgsz;
+  size_t quantum=result?e->quantum:0,bank_bytes=quantum?quantum*pg:a.bankBytes;
+  NSArray<id<MTLBuffer>> *buffers=a.banks;
+  if(quantum) {
+    buffers=a.matrixBuffers[@(quantum)];
+    if(!buffers) {
+      NSMutableArray<id<MTLBuffer>> *blocks=[NSMutableArray new];
+      for(size_t offset=0;offset<(size_t)mesh_rows(a->context->M)*pg;offset+=bank_bytes)
+        [blocks addObject:[a.device newBufferWithBytesNoCopy:mesh_at(a->context->M,0)+offset length:bank_bytes options:MTLResourceStorageModeShared deallocator:nil]];
+      a.matrixBuffers[@(quantum)]=blocks;buffers=blocks;
+    }
+  }
+  if(rows==1)stride=(columns*bytes+pg-1)/pg*pg;
+  size_t divisor=stride,remainder=pg;
+  while(remainder){size_t next=divisor%remainder;divisor=remainder;remainder=next;}
+  size_t residue=address->storage.offset%divisor;
+  *address=(struct mesh_mps_address){address->storage,stride,divisor,stride/divisor,bank_bytes};
+  NSArray *key=@[@(stride),@(columns),@(type),@(residue),@(quantum)];
+  NSArray<MPSMatrix *> *cached=a.matrixViews[key];if(cached)return cached;
+  NSMutableArray<MPSMatrix *> *views=[NSMutableArray new];
+  for(id<MTLBuffer> bank in buffers)for(size_t offset=residue;offset<stride;offset+=divisor) {
+    if(offset+columns*bytes>bank.length){[views addObject:(id)NSNull.null];continue;}
+    size_t count=(bank.length-offset-columns*bytes)/stride+1;
+    MPSMatrixDescriptor *d=[MPSMatrixDescriptor matrixDescriptorWithRows:count columns:columns rowBytes:stride dataType:type];
+    [views addObject:[[MPSMatrix alloc]initWithBuffer:bank offset:offset descriptor:d]];
+  }
+  a.matrixViews[key]=views;return views;
+}
+/* design/algorithm-sources.md#kernelsdot */
+static MPSMatrix *matrix_resolve(NSArray<MPSMatrix *> *views,struct mesh_mps_address address,MTLOrigin *origin) {
+  size_t byte=matrix_offset(address.storage),offset=byte%address.bank_bytes;
+  *origin=MTLOriginMake(offset/address.row_bytes,0,0);
+  return views[byte/address.bank_bytes*address.variants+(offset%address.row_bytes)/address.residue_step];
 }
 
 /* design/algorithm-sources.md#programkernel_call */
@@ -577,55 +649,82 @@ static BNNSNDArrayDescriptor bnns_operand(struct mesh_view v) {
   return (BNNSNDArrayDescriptor){.layout=BNNSDataLayoutRowMajorMatrix,
     .size={transpose?v.rows:v.columns,transpose?v.columns:v.rows},
     .stride={1,transpose?v.column_stride:v.row_stride},
-    .data=(char *)e->address+v.offset*scalar_bytes(e->shape.scalar),
-    .data_type=e->shape.scalar==MESH_F16?BNNSDataTypeFloat16:BNNSDataTypeFloat32};
+    .data_type=e->shape.scalar==MESH_F16?BNNSDataTypeFloat16:BNNSDataTypeFloat32,.data_scale=1};
 }
 /* design/algorithm-sources.md#kernelsdot */
-struct mesh_matrix_part { struct mesh_view x,y,z; };
+struct mesh_matrix_part { struct mesh_view x,y,z;float beta; };
+/* design/algorithm-sources.md#kernelsdot */
+static void matrix_parts(NSMutableData *parts,struct mesh_view x,struct mesh_view y,struct mesh_view z,size_t k) {
+  struct mesh_view operands[]={x,y,z};
+  for(size_t i=0;i<3;i++) {
+    struct mesh_view v=operands[i];struct mesh_extent *e=&v.tensor->extents[v.extent];struct hdr *m=v.tensor->context->M;
+    if(mesh_bits_all(m,MESH_CONSTANT,e->first,e->pages))continue;
+    size_t unit=(size_t)e->quantum*m->pgsz/scalar_bytes(e->shape.scalar);
+    size_t sizes[]={v.rows,v.columns},strides[]={v.row_stride,v.column_stride};
+    size_t end=v.offset+(v.rows-1)*v.row_stride+(v.columns-1)*v.column_stride;
+    if(v.offset/unit==end/unit)continue;
+    size_t fast=v.row_stride<v.column_stride?0:1,slow=1-fast;
+    size_t available=unit-v.offset%unit,span=(sizes[fast]-1)*strides[fast];
+    size_t axis=span>=available?fast:slow;
+    size_t cut=(available-1-(axis==slow?span:0))/strides[axis]+1;
+    size_t dimension=i==0?(axis==0?0:2):i==1?(axis==0?2:1):(axis==0?0:1);
+    if(dimension==0) {
+      matrix_parts(parts,mesh_view_slice(x,0,0,cut,x.columns),y,mesh_view_slice(z,0,0,cut,z.columns),k);
+      matrix_parts(parts,mesh_view_slice(x,cut,0,x.rows-cut,x.columns),y,mesh_view_slice(z,cut,0,z.rows-cut,z.columns),k);
+    } else if(dimension==1) {
+      matrix_parts(parts,x,mesh_view_slice(y,0,0,y.rows,cut),mesh_view_slice(z,0,0,z.rows,cut),k);
+      matrix_parts(parts,x,mesh_view_slice(y,0,cut,y.rows,y.columns-cut),mesh_view_slice(z,0,cut,z.rows,z.columns-cut),k);
+    } else {
+      matrix_parts(parts,mesh_view_slice(x,0,0,x.rows,cut),mesh_view_slice(y,0,0,cut,y.columns),z,k);
+      matrix_parts(parts,mesh_view_slice(x,0,cut,x.rows,x.columns-cut),mesh_view_slice(y,cut,0,y.rows-cut,y.columns),z,k+cut);
+    }
+    return;
+  }
+  struct mesh_matrix_part part={x,y,z,k?1:0};[parts appendBytes:&part length:sizeof part];
+}
 /* design/algorithm-sources.md#kernelsdot */
 static int cpu_part(MeshFunction *f,const struct mesh_matrix_part *parts,size_t count,float alpha) {
   struct mesh_view x=parts[0].x,y=parts[0].y,z=parts[0].z;
 
   if(x.tensor->extents[x.extent].shape.scalar==MESH_F32 && y.tensor->extents[y.extent].shape.scalar==MESH_F32 && z.tensor->extents[z.extent].shape.scalar==MESH_F32){
 
-    struct gemm {const float *a,*b;float *c;__LAPACK_int m,n,k,lda,ldb,ldc;enum CBLAS_TRANSPOSE tx,ty;};
+    struct gemm {struct mesh_matrix_address a,b,c;__LAPACK_int m,n,k,lda,ldb,ldc;enum CBLAS_TRANSPOSE tx,ty;float beta;};
     NSMutableData *calls=[NSMutableData new];
     for(size_t i=0;i<count;i++){
       struct mesh_view x=parts[i].x,y=parts[i].y,z=parts[i].z;
       BOOL tx=x.column_stride!=1,ty=y.column_stride!=1;
-      struct gemm g={.a=(float *)x.tensor->extents[x.extent].address+x.offset,
-        .b=(float *)y.tensor->extents[y.extent].address+y.offset,
-        .c=(float *)z.tensor->extents[z.extent].address+z.offset,
+      struct gemm g={.a=matrix_address(x),.b=matrix_address(y),.c=matrix_address(z),
         .m=(__LAPACK_int)z.rows,.n=(__LAPACK_int)z.columns,.k=(__LAPACK_int)x.columns,.lda=(__LAPACK_int)(tx?x.column_stride:x.row_stride),
-        .ldb=(__LAPACK_int)(ty?y.column_stride:y.row_stride),.ldc=(__LAPACK_int)z.row_stride,.tx=tx?CblasTrans:CblasNoTrans,.ty=ty?CblasTrans:CblasNoTrans};
+        .ldb=(__LAPACK_int)(ty?y.column_stride:y.row_stride),.ldc=(__LAPACK_int)z.row_stride,.tx=tx?CblasTrans:CblasNoTrans,.ty=ty?CblasTrans:CblasNoTrans,.beta=parts[i].beta};
       [calls appendBytes:&g length:sizeof g];
     }
     f.execute=^(MeshFunction *function){
       const struct gemm *g=calls.bytes;
-      for(size_t i=0;i<calls.length/sizeof *g;i++)cblas_sgemm(CblasRowMajor,g[i].tx,g[i].ty,g[i].m,g[i].n,g[i].k,alpha,g[i].a,g[i].lda,g[i].b,g[i].ldb,0,g[i].c,g[i].ldc);
+      for(size_t i=0;i<calls.length/sizeof *g;i++)
+        cblas_sgemm(CblasRowMajor,g[i].tx,g[i].ty,g[i].m,g[i].n,g[i].k,alpha,
+          g[i].a.base+matrix_offset(g[i].a),g[i].lda,g[i].b.base+matrix_offset(g[i].b),g[i].ldb,
+          g[i].beta,g[i].c.base+matrix_offset(g[i].c),g[i].ldc);
       complete_part(function,0);
     };
     return 0;
   }
 
-  struct gemm {BNNSNDArrayDescriptor a,b,c;};
-  NSMutableData *calls=[NSMutableData new];size_t workspaceSize=1;
+  struct gemm {BNNSFilter filter;struct mesh_matrix_address x,y,z;};
+  NSMutableData *calls=[NSMutableData new];f.bnnsFilters=[NSMutableData new];
   BOOL tx=x.column_stride!=1,ty=y.column_stride!=1;
   for(size_t i=0;i<count;i++){
-    struct gemm g={bnns_operand(parts[i].x),bnns_operand(parts[i].y),bnns_operand(parts[i].z)};
-    ssize_t bytes=BNNSMatMulWorkspaceSize(tx,ty,alpha,&g.a,&g.b,&g.c,NULL);
-    if(bytes<0)return EINVAL;
-    workspaceSize=MAX(workspaceSize,(size_t)bytes);
+    BNNSLayerParametersBroadcastMatMul parameters={.alpha=alpha,.beta=parts[i].beta,.transA=tx,.transB=ty,
+      .iA_desc=bnns_operand(parts[i].x),.iB_desc=bnns_operand(parts[i].y),.o_desc=bnns_operand(parts[i].z)};
+    BNNSFilter filter=BNNSFilterCreateLayerBroadcastMatMul(&parameters,NULL);if(!filter)return EINVAL;
+    [f.bnnsFilters appendBytes:&filter length:sizeof filter];
+    struct gemm g={filter,matrix_address(parts[i].x),matrix_address(parts[i].y),matrix_address(parts[i].z)};
     [calls appendBytes:&g length:sizeof g];
   }
-  NSMutableData *workspace=[NSMutableData dataWithLength:workspaceSize];
-  if(!workspace)return ENOMEM;
-  f.cpuArguments=workspace;
-  void *scratch=workspace.mutableBytes;
   f.execute=^(MeshFunction *function){
     const struct gemm *g=calls.bytes;int error=0;
     for(size_t i=0;i<calls.length/sizeof *g && !error;i++)
-      error=BNNSMatMul(tx,ty,alpha,&g[i].a,&g[i].b,&g[i].c,scratch,NULL);
+      error=BNNSFilterApplyTwoInput(g[i].filter,g[i].x.base+matrix_offset(g[i].x),
+        g[i].y.base+matrix_offset(g[i].y),g[i].z.base+matrix_offset(g[i].z));
     complete_part(function,error);
   };
   return 0;
@@ -689,8 +788,6 @@ static int bind_part(MeshAlgebra *a,struct mesh_view x,struct mesh_view y,struct
   BOOL dense=z.column_stride==1;
   size_t columns=dense?z.columns:z.rows;
   NSMutableData *parts=[NSMutableData new];
-  NSMutableArray<MPSMatrixMultiplication *> *products=[NSMutableArray new];
-  NSMutableArray<NSArray<MPSMatrix *> *> *matrices=[NSMutableArray new];
   NSMutableArray *rectangles=[NSMutableArray new];NSMutableDictionary *features=[NSMutableDictionary new];
   for(size_t at=first,left=count;left;) {
     size_t row=at/columns,column=at%columns,nr=1,nc=MIN(left,columns-column);
@@ -699,8 +796,6 @@ static int bind_part(MeshAlgebra *a,struct mesh_view x,struct mesh_view y,struct
     struct mesh_view xv=mesh_view_slice(x,zr,0,rr,x.columns);
     struct mesh_view yv=mesh_view_slice(y,0,zc,y.rows,cc);
     struct mesh_view zv=mesh_view_slice(z,zr,zc,rr,cc);
-    struct mesh_matrix_part part={xv,yv,zv};
-    [parts appendBytes:&part length:sizeof part];
     dependencies(f.dependencies,xv);dependencies(f.dependencies,yv);
     if(!a.cpu && a.coremlPython) {
       NSError *error=nil;MLMultiArray *left=native_array(xv,&error),*right=native_array(yv,&error);
@@ -709,11 +804,7 @@ static int bind_part(MeshAlgebra *a,struct mesh_view x,struct mesh_view y,struct
       features[[NSString stringWithFormat:@"x%lu",(unsigned long)i]]=left;
       features[[NSString stringWithFormat:@"w%lu",(unsigned long)i]]=right;
       [rectangles addObject:@[@(rr),@(cc),@(x.columns),@(xv.tensor->extents[xv.extent].shape.scalar==MESH_F16),@(yv.tensor->extents[yv.extent].shape.scalar==MESH_F16)]];
-    } else if(!a.cpu) {
-      BOOL tx=xv.column_stride!=1,ty=yv.column_stride!=1;
-      [matrices addObject:@[matrix(xv,tx),matrix(yv,ty),matrix(zv,NO)]];
-      [products addObject:[[MPSMatrixMultiplication alloc]initWithDevice:a.device transposeLeft:tx transposeRight:ty resultRows:rr resultColumns:cc interiorColumns:x.columns alpha:alpha beta:0]];
-    }
+    } else matrix_parts(parts,xv,yv,zv,0);
     at+=nr*nc;left-=nr*nc;
   }
   f->function=(struct mesh_row_function){.output=&f->output,.outputs=1};
@@ -726,7 +817,28 @@ static int bind_part(MeshAlgebra *a,struct mesh_view x,struct mesh_view y,struct
     int error=native_part(a,f,rectangles,features,z,first,count,alpha);if(error)return error;
   } else {
     f->function.submit=submit_metal;
-    f.encode=^(id<MTLCommandBuffer> command){for(NSUInteger i=0;i<products.count;i++)[products[i] encodeToCommandBuffer:command leftMatrix:matrices[i][0] rightMatrix:matrices[i][1] resultMatrix:matrices[i][2]];};
+    NSMutableArray<MPSMatrixMultiplication *> *products=[NSMutableArray new];
+    NSMutableArray<NSArray<MPSMatrix *> *> *matrices=[NSMutableArray new];
+    NSMutableData *addresses=[NSMutableData new];
+    const struct mesh_matrix_part *values=parts.bytes;
+    for(size_t i=0;i<parts.length/sizeof *values;i++) {
+      struct mesh_matrix_part p=values[i];BOOL tx=p.x.column_stride!=1,ty=p.y.column_stride!=1;
+      struct mesh_mps_address bindings[3];
+      [matrices addObject:matrix(a,p.x,tx,NO,&bindings[0])];
+      [matrices addObject:matrix(a,p.y,ty,NO,&bindings[1])];
+      [matrices addObject:matrix(a,p.z,NO,YES,&bindings[2])];
+      [addresses appendBytes:bindings length:sizeof bindings];
+      [products addObject:[[MPSMatrixMultiplication alloc]initWithDevice:a.device transposeLeft:tx transposeRight:ty resultRows:p.z.rows resultColumns:p.z.columns interiorColumns:p.x.columns alpha:alpha beta:p.beta]];
+    }
+    f.encode=^(id<MTLCommandBuffer> command){
+      const struct mesh_mps_address *bindings=addresses.bytes;
+      for(NSUInteger i=0;i<products.count;i++) {
+        MTLOrigin origins[3];MPSMatrix *operands[3];
+        for(size_t j=0;j<3;j++)operands[j]=matrix_resolve(matrices[3*i+j],bindings[3*i+j],&origins[j]);
+        products[i].leftMatrixOrigin=origins[0];products[i].rightMatrixOrigin=origins[1];products[i].resultMatrixOrigin=origins[2];
+        [products[i] encodeToCommandBuffer:command leftMatrix:operands[0] rightMatrix:operands[1] resultMatrix:operands[2]];
+      }
+    };
   }
   [a.functions addObject:f];return 0;
 }
