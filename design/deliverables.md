@@ -184,23 +184,23 @@ subset, never as "done".
 | # | Row | Status | Evidence |
 |---|---|---|---|
 | 1 | S1 links list | ✓ | `c9d9e18` |
-| 2 | S2 TX/RX threads per link | ✓ (unrun on RDMA) | `c9d9e18` |
-| 3 | S3 chunked transport invisible | ✓ (unrun) | `98742c8` |
+| 2 | S2 TX/RX threads per link | ✓ | `c9d9e18`; used by P1's paired Core ML run |
+| 3 | S3 chunked transport invisible | ✓ | `98742c8`; P1 transported four/eight-chunk sections |
 | 4 | S4 bounded pairing | ✓ | `06dcdb3`; checked nonblocking sockets, one deadline across all pairing exchanges |
 | 5 | L1 partial tensor | ✓ | `swift/Mesh.swift` `TensorPart` |
 | 6 | L2 supplied function | ✓ | `TensorFunction.cpu/.metal/.prediction` |
-| 7 | L3 publish/fire | ✓ (unrun) | `mesh-call.c` `mesh_publish` |
+| 7 | L3 publish/fire | ✓ | `mesh-call.c` `mesh_publish`; P1 reached all eight final consumers |
 | 8 | L4 ten verbs | ✓ | `Mesh.swift:279-365` |
 | 9 | L6 any combine | ✓ | by construction |
-| 10 | L7 lifetime | ✓ (unrun) | `mesh_buffer_retain`/`mesh_collect` |
+| 10 | L7 lifetime | ✓ | `mesh_buffer_retain`/`mesh_collect`; used by P1 |
 | 11 | L8 explicit sync + counterexample | ✓ | `examples/sync-on-remote-fill.swift` |
 | 12 | P2 push both repos | ✓ | `29bb74f` mesh / `e2f99d1` engine; both remote `main` heads verified, `git log @{u}..HEAD` empty |
-| 13 | P1 importable; Core ML chain run on the pair at ABI 43 | ◐ | ABI-43 bridges paired on both nodes (laptop `rdma_en6`↔Mini `rdma_en3`, `paired_links:1 phase:2`, config on branch `p1/bridge-links` `4aa0823`); `sync-on-remote-fill parallel` round-tripped all four values over the link (evidence `metal-microbench/output_data/mesh_p1/`); remaining: the Core ML chain — `coremltools` absent on both nodes, models not built |
+| 13 | P1 importable; Core ML chain run on the pair at ABI 43 | ✓ | `f253955`; fresh Mini clone, external caller, four FFN residual blocks and four indices on both nodes; [returned outputs](function-chain.md#p1-paired-core-ml-run) |
 | 14 | L5 Partial type | ✗ | — |
 | 15 | N1 unbounded instances | ◐ | `count` finite |
 | 16 | N2 Result surface | ◐ | — |
 | 17 | E1 engine layer via Mesh | ✗ | — |
-| 18 | E2 public measurement + Karp–Flatt | ✗ | — |
+| 18 | E2 public measurement + Karp–Flatt | ◐ | script `metal-microbench/tools/mesh/report.py` (engine `feda6a6`): public endpoint only, memory-state guard, S/e/capability-sum/bounds/verdict; dry-run reproduces 1.42x, 1.08x and the ten-minute table; **no measured run yet** (needs E1) |
 | 19 | E3 depthwise chain not slower | ✗ | — |
 | 20 | G1 contraction/Gram as the same calls | ◐ (FFN shown, Gram not) | `examples/coreml-chain.swift` |
 | 21 | G2 indices as data (caller pattern) | ✗ | — |
