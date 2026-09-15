@@ -6,7 +6,32 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <limits.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
+
+/* design/algorithm-sources.md#meshobserve */
+int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,uint32_t *node){
+  int file=shm_open(name?name:MESH_NAME,O_RDONLY,0);
+  if(file<0)return -errno;
+  struct stat info;
+  if(fstat(file,&info)){int error=errno;close(file);return -error;}
+  if(info.st_size<(off_t)sizeof(struct hdr)){close(file);return -EINVAL;}
+  struct hdr *m=mmap(NULL,(size_t)info.st_size,PROT_READ,MAP_SHARED,file,0);
+  int error=errno;close(file);
+  if(m==MAP_FAILED)return -error;
+  int result=-EINVAL;
+  if(m->magic==MESH_MAGIC && m->version==MESH_VERSION && m->length<=(uint64_t)info.st_size &&
+     m->link_off>=sizeof *m && m->link_off<=m->length && m->links<=INT_MAX && m->links<=(m->length-m->link_off)/sizeof(struct mesh_link_info)){
+    *node=m->node;result=(int)m->links;
+    for(uint32_t i=0;i<m->links && i<capacity;i++){
+      struct mesh_link_info *link=&mesh_links(m)[i];
+      out[i]=(struct mesh_link_view){.peer=link->peer,.phase=atomic_load_explicit(&link->port.phase,memory_order_acquire)};
+      out[i].bandwidth=__atomic_load_n(&link->bandwidth,__ATOMIC_RELAXED);
+      memcpy(out[i].device,link->device,sizeof out[i].device);out[i].device[sizeof out[i].device-1]=0;
+    }
+  }
+  munmap(m,(size_t)info.st_size);return result;
+}
 
 /* design/collective-dependency-ledger.md#d14-teardown-retains-outstanding-device-storage */
 static void mesh_retire(struct hdr *m,uint64_t client){

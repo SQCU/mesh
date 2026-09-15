@@ -251,6 +251,7 @@ static void *link_run(void *argument){
     }
     if(error){link_error(link,error,1);link_stop(link);}
     else {
+      __atomic_store_n(&mesh_links(m)[link->index].bandwidth,link->provider.bandwidth,__ATOMIC_RELAXED);
       atomic_store_explicit(&port->phase,MESH_PAIRED,memory_order_release);
       while(link->worker_count)pthread_join(link->workers[--link->worker_count].thread,NULL);
     }
@@ -319,6 +320,7 @@ int main(int argc,char **argv){
     link->provider.completions=calloc(2*QD,sizeof *link->provider.completions);
     if(!link->send_offsets || !link->provider.completions)die("link allocation");
     mesh_links(m)[i].peer=link->provider.peer;
+    snprintf(mesh_links(m)[i].device,sizeof mesh_links(m)[i].device,"%s",link->provider.device->name);
     atomic_store(&mesh_links(m)[i].port.phase,MESH_PAIRING);
   }
   struct mesh_collector collector={.memory=m,.running=1};

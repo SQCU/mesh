@@ -33,7 +33,7 @@ int main(int argc,char **argv){
     h->version,h->node,h->pgsz,h->block,h->rows,h->qps,h->links,paired,(long long)h->port.code,h->port.domain);
   for(uint32_t i=0;i<h->links;i++){
     struct mesh_link_info *link=&mesh_links(h)[i];
-    printf("%s{\"node\":%u,\"phase\":%u,\"code\":%lld,\"domain\":%u}",i?",":"",link->peer,atomic_load(&link->port.phase),(long long)link->port.code,link->port.domain);
+    printf("%s{\"node\":%u,\"phase\":%u,\"code\":%lld,\"domain\":%u,\"device\":\"%s\",\"bandwidth\":%llu}",i?",":"",link->peer,atomic_load(&link->port.phase),(long long)link->port.code,link->port.domain,link->device,(unsigned long long)__atomic_load_n(&link->bandwidth,__ATOMIC_RELAXED));
   }
   printf("]}\n");
   munmap(h,bytes); close(f); return readiness && !alive;

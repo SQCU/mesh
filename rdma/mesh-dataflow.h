@@ -5,6 +5,9 @@
 /* design/pages-and-functions.md#what-the-page-table-is */
 struct mesh_range { uint32_t first,count; };
 struct mesh_ctx { struct hdr *M; size_t len; uint64_t client; uint32_t rows,arena; int fd; struct mesh_range *receives; };
+struct mesh_link_view { uint32_t peer,phase; char device[32]; uint64_t bandwidth; };
+/* design/algorithm-sources.md#meshobserve */
+int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
 static inline uint32_t mesh_block_pages(const struct mesh_ctx *c){ return c->M->block; }
 static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return mesh_at(c->M,page); }
 /* design/algorithm-sources.md#programcopy */

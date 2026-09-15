@@ -33,6 +33,7 @@ struct mesh_verbs {
   struct ibv_cq *completion_queues[2*MESH_QPS];
   struct ibv_qp *pairs[MESH_QPS]; int qp_count,listener;
   uint32_t capacity[MESH_QPS][2],peer;
+  uint64_t bandwidth;
   const char *local_address,*remote_address,*service;
   uint64_t deadline;
   struct ibv_wc *completions;
@@ -274,5 +275,9 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
     if(rc){ fprintf(stderr,"rts %d rc %d, failed\n",q,rc); close(f); return -1; }
   }
   close(f);
+  /* design/algorithm-sources.md#link */
+  static const uint64_t speeds[256]={[1]=2500000000,[2]=5000000000,[4]=10000000000,[8]=10000000000,[16]=14000000000,[32]=25000000000,[64]=50000000000,[128]=100000000000};
+  static const uint8_t widths[256]={[1]=1,[2]=4,[4]=8,[8]=12};
+  provider->bandwidth=speeds[pa.active_speed]*widths[pa.active_width];
   fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(provider->device->context->device),m->node);
   return 0; }

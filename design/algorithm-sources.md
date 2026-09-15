@@ -196,6 +196,51 @@ The deadline is setup state only: TX, RX, numerical publication and consumer
 completion contain no clock check. As [RDMA-RULES.md](../RDMA-RULES.md) explains,
 userspace deadlines cannot unwind a driver call already blocked in kernel sleep.
 
+## Topology
+
+`Topology`: MLX authors' [JACCL hostfile](https://github.com/ml-explore/mlx/blob/main/docs/src/usage/distributed.rst#defining-a-mesh) supplies the full-mesh special case; Patarasuk–Yuan, [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf) (2009), supplies tree-connectivity sufficiency.
+The value stores a node set and lists of parallel links on unordered pairs. Trees,
+rings with spurs, tori and full meshes use the same representation. The paper's
+tree algorithm motivates admitting sparse connected graphs; it does not establish
+that this runtime already forwards between non-adjacent nodes or achieves its bound.
+
+### Topology.Pair
+
+`Topology.Pair`: the [graph representation above](#topology), with the smaller endpoint first, gives both endpoint orders the same dictionary key.
+
+### Topology.links
+
+`Topology.links(between:_:)`: the [graph representation above](#topology) represents a missing edge by an empty list; dictionary subscripts remain optional.
+
+### Topology.merging
+
+`Topology.merging`: the [graph representation above](#topology) uses node-set union and per-pair list concatenation; the caller supplies observations and mesh exchanges none.
+Concatenation preserves repeated observations, including both endpoint descriptions
+of the same physical link; this operation does not deduplicate them.
+
+### Link
+
+`Link`: Dotan Barak, rdma-core's [ibv_query_port manual](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_query_port.3), supplies observed port speed and width.
+Bandwidth is bits per second: speed codes 1/2/4/8/16/32/64/128 mean
+2.5/5/10/10/14/25/50/100 Gb/s per lane; width codes 1/2/4/8 mean 1/4/8/12 lanes.
+Unrecognized codes yield zero (unavailable), without withholding the link.
+The bridge publishes bandwidth before the paired phase; atomic scalar access also
+covers re-pairing. Device names come from the configured link. Latency is optional
+seconds and remains nil in observations until the bridge records a measurement.
+Port bandwidth is an attribute, not measured payload throughput.
+
+### Mesh.observe
+
+`Mesh.observe` and `mesh_observe`: Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of bridge pairing metadata.
+The C function returns the link count or negative errno, copies up to capacity into
+plain `mesh_link_view` records, and closes/unmaps without attaching a client.
+Swift resizes if a replacement region has more links, then includes only paired
+links and their peers alongside the local node. Header/layout validation prevents
+invalid reads; it changes no bridge state. Per-link phase reads are acquired
+individually, not a simultaneous fleet snapshot. Before a client configures
+transfers the current bridge has no paired links. Forwarding, idle pairing and
+latency measurement remain separate deliverables.
+
 ## Program.write
 
 The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html):

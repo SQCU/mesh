@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 43u
+#define MESH_VERSION 44u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -26,7 +26,7 @@ enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_NOTICE_BANKS 2
 struct mesh_notice { uint32_t next; };
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
-struct mesh_link_info { uint32_t peer; struct mesh_port_info port; _Atomic uint32_t order_length[2*MESH_NOTICE_BANKS*MESH_QPS]; };
+struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; struct mesh_port_info port; _Atomic uint32_t order_length[2*MESH_NOTICE_BANKS*MESH_QPS]; };
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps,links;
   _Atomic uint64_t configured;
