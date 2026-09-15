@@ -385,8 +385,8 @@ The source has not integrated returned pages into continued use of the configure
 stream, or integrated collective invocation into the serving path.
 
 Transport chunk padding, source-tag handling, publication and reference-count
-atomics remain actual costs. The alias mechanism has not been deployed or exercised
-on the RDMA link by this change.
+atomics remain actual costs. The [P1 Core ML chain](function-chain.md#p1-paired-core-ml-run)
+exercised the alias mechanism with four/eight-chunk sections on the RDMA pair.
 For N indices and R possible receive positions, native input/output preparation
 constructs R input bindings and N output bindings. Received-view selection keeps
 the channel's first page and block size, with no slot map over arena blocks.
@@ -408,8 +408,10 @@ over world size 1 follows from this source change.
 
 There is no runtime testing gate here. The bridge, C and Swift libraries, configured Core ML chain and synchronization
 counterexample are build targets.
-They have not been run or deployed by this change. Participants
-need the source's ABI 43 bridge and explicit link configuration before these callers can attach.
+P1 deployed ABI 43 with explicit links and ran the Core ML chain on both nodes,
+including a fresh Mini clone and an external caller target. Its returned outputs
+are recorded in the [chain documentation](function-chain.md#p1-paired-core-ml-run).
+Public serving-path measurements remain separate deliverables.
 
 Client attachment and bridge startup no longer run a process-memory ranking scan.
 The unrelated `mesh-memory.h`, its `--memory-check` command and launch-script hook
@@ -465,7 +467,7 @@ current source and example callers. It does not close the deployment gaps above.
 | Distinct collective semantics | `Mesh.swift` defines send/receive endpoints, broadcast, scatter, gather, all-scatter, all-gather, all-to-all, reduce, reduce-scatter and all-reduce. Movement returns indexed sections; only the supplied combining function performs reduction arithmetic. |
 | AOT bindings, zero-copy asynchronous use | `mesh_call_bind` prepares operands and retains inputs. `mesh_calls_start` realizes contiguous consumer ranges before transfer activation. Swift prepares native views once; only received input addresses resolve at invocation. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_assign` places each chunk through page-index assignment over registered aliases without copying. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
 | Delete incompatible implementation and callers | The former executor/frontend and engine adapters are absent from the current tree. The source inventory includes their replacements. The index transport channel, paired native-binding Cartesian product, per-page receive metadata and process-memory ranking scan are also absent. |
-| Actual producer/collective/numerical-consumer integration | `coreml-chain.swift` composes caller-supplied block functions, reduce-scatter and supplied consumers across a configurable stage list. Both participants compute contributions at each depth under the described placement. Accelerate performs the supplied float32 sum. This is source integration, without a throughput claim. |
+| Actual producer/collective/numerical-consumer integration | `coreml-chain.swift` composes caller-supplied block functions, reduce-scatter and supplied consumers across a configurable stage list. P1 ran four FFN residual blocks and four indices on the RDMA pair, reaching all eight final consumers. Accelerate performs the supplied float32 sum. This establishes operation, without a throughput claim. |
 | Automatic lifetime; explicit synchronization only | `mesh_buffer_retain` accounts for declared uses. `mesh_publish`, native numerical completion, TX completion and ordinary object destruction discharge their references; `mesh_collect` returns backing without clearing payload. Runtime presence polling occurs only in the explicitly called `mesh_sync_on_remote_fill`; its source counterexample includes a self-dependent permanent wait. |
 
 Configuration loops, capacity checks while posting native work requests, indexed

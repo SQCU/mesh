@@ -163,10 +163,9 @@ result polling. They expose actual final outputs, not timing or a speedup claim.
 
 A world-size-one placement assigns all operand owners to rank 0 and uses the
 same functions and arithmetic graph. The distributed placement above divides
-that work and communicates only the off-diagonal contributions. This describes
-actual source dependencies and work ownership. No executed model artifacts,
-throughput measurement, speedup claim, or complete reusable-stream lifecycle is
-established by this change. The finite index extent still cannot be rearmed.
+that work and communicates only the off-diagonal contributions. The paired run
+below executes this graph. It does not establish throughput superiority or a
+complete reusable-stream lifecycle. The finite index extent still cannot be rearmed.
 
 Native operand preparation belongs to `TensorFunction`, so that same
 function value is accepted by `call`, `map`, `reduce`, `reduceScatter` and
@@ -179,3 +178,38 @@ and selects each input's prepared feature value independently. Output options us
 the local result bindings prepared for that index. No Cartesian product of input
 addresses, feature-value creation or output-dictionary construction is needed
 at invocation. The previous raw prediction-provider callback is removed.
+
+## P1 paired Core ML run
+
+On September 15, 2026, source `f253955` built and ran with the README commands.
+The Mini used a fresh clone at `/tmp/mesh-import-p1`; its separately linked caller
+was `/tmp/mesh-coreml-chain`, with the module's directory encoded as an rpath.
+No loader environment variables were supplied. The other caller linked the same
+module sources from the canonical laptop checkout. Both bridges used ABI 43,
+65,536 pages of 16 KiB, four pages per transport chunk and one configured link:
+M5 Max `rdma_en6` to M4 Pro `rdma_en3`. The deployed link configuration was
+`p1/bridge-links` at `4aa0823`.
+
+Core ML Tools 9.0 compiled 32 distinct projection models plus the activation and
+residual models. The generator arguments were exactly the README example:
+owners `[0, 1]`, input widths `[512, 512]`, hidden widths `[1024, 1024]`, 128 rows,
+four FFN residual blocks, four invocation indices, two numerical workers and
+seed 73. Both participants applied their supplied projections and consumed
+reduce-scatter results at every stage. The native completion path reached all
+eight final consumers. Their returned samples, in observation order, were:
+
+```text
+rank=0 part=0 index=0 first=-920.8167 last=-166650.17
+rank=0 part=0 index=1 first=-921.58374 last=-166652.75
+rank=0 part=0 index=2 first=-922.3454 last=-166655.39
+rank=0 part=0 index=3 first=-923.0958 last=-166658.1
+rank=1 part=1 index=1 first=878.302 last=32572.629
+rank=1 part=1 index=3 first=883.70654 last=32573.672
+rank=1 part=1 index=2 first=880.97437 last=32573.219
+rank=1 part=1 index=0 first=875.62726 last=32572.254
+```
+
+After both complete result sets arrived, the demonstration clients received
+SIGTERM. Ordinary bridge restarts completed their verbs-owner cleanup and returned
+both nodes to ABI 43 with `client:0`. This is P1's operational evidence, not an
+E2/E3 public-path performance measurement; output order does not prove speedup.
