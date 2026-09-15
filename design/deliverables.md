@@ -69,6 +69,8 @@ runtime (`rdma/mesh-call.c`, `mesh-dataflow.c`, `mesh-flow.c`, `mesh-verbs.h`, `
 ```
 Mesh(region:, rank:, size:, workers:, count:)            // N1 changes `count` to in-flight instances
 Mesh.tensor(on:sections:) -> [TensorPart]                 // partial tensor = contiguous sections, each with a rank
+TensorPart.partial: Bool                                 // contribution view pending reduction
+MeshError.partialOperand(TensorPart)                     // invalid use reported during setup
 Mesh.constant(on:bytes:initialize:) -> TensorPart
 TensorFunction.cpu / .metal(device) / .prediction(model) // supplied numerics; input/output view factories
 Mesh.call(function, inputs:, outputs:, on:, worker:)
@@ -231,7 +233,7 @@ subset, never as "done".
 | 11 | L8 explicit sync + counterexample | ✓ | `examples/sync-on-remote-fill.swift` |
 | 12 | P2 push both repos | ✓ | `29bb74f` mesh / `e2f99d1` engine; both remote `main` heads verified, `git log @{u}..HEAD` empty |
 | 13 | P1 importable; Core ML chain run on the pair at ABI 43 | ✓ | Core ML chain (F=linear 64×64 seed 73, G=ReLU, [32,64], count 8, 2 stages) ran on the pair 2026-09-15 15:06:54–15:08:54 at ABI 43, laptop `rdma_en6` ↔ Mini `rdma_en3`, `paired_links:1` within 3 s of attach; region scans on both nodes show all 8 indices' reduced sections, G outputs and received contributions matching numpy (176/176); evidence `metal-microbench/output_data/mesh_p1/` (`run_coreml.sh`, `scan_rank{0,1}_after_coreml.log`, `verify_coreml.txt`); earlier the no-model example round-tripped (lane F) |
-| 14 | L5 Partial type | ✗ | — |
+| 14 | L5 Partial type | ✓ | `d56e8a2` + `0468d90`, with integrated identity corrections: `TensorPart.partial`; one setup-only throw in `call`; sends preserve contribution identity; every completed reduction gets a distinct identity without copying, including one contribution; [source derivation](distributed-reduce.md#l5-contribution-typing); W7 re-audited; module and three existing callers build |
 | 15 | N1 unbounded instances | ◐ | `count` finite |
 | 16 | N2 Result surface | ◐ | — |
 | 17 | E1 engine layer via Mesh | ✓ (unrun) | engine `6507370` `mesh_layer.swift` 229 lines, 2 collective points, 12 existing encoders bound, no kernel file changed; target `.build/libgemma_mesh.dylib` builds; not yet run on the pair (row 19) |
@@ -278,14 +280,13 @@ An agent picking "the first ✗/◐ row" skips assigned rows and takes the next 
 
 | Rows | Lane | Worktree / branch |
 |---|---|---|
-| 14, 15, 16 | A | `mesh-wt/L5-N1-N2` → `row/L5-N1-N2` |
 | 26 | B | `mesh-wt/T4` → `row/T4` |
 | 24 (redo after 19c) | — | `row/T1-T3` holds the first attempt |
 | 17 | D | `mmb-wt/E1` → `row/E1` (metal-microbench) |
 | 18 | E | `mmb-wt/E2` → `row/E2` (metal-microbench) |
-| — | hardware lanes F, G finished; the link is free for row 19 |
+| 19 | E3 | `mmb-wt/E3` → `row/E3` (active integration process) |
 
-Unassigned and open: 19 (needs 17, 18); W1–W6 fixes = one lane (X3/X5/X4 together: rows 19c, 19d, 19e, 19a) starting after lanes A and C release `mesh-call.c`/`mesh-flow.c`/`Mesh.swift`; 19f (X typings; 19c and 19e first), 20, 21, 22, 25, 27, 28, 29. Note: both bridges were restarted at 14:57 from the main checkouts (`/Users/mdot/dox/mesh/rdma/mesh-flow`, `~/mesh/rdma/mesh-flow` on the Mini, ABI 43, same config); the `mesh-wt/P1` worktree is no longer load-bearing.
+Unassigned and open: 15, 16; W1–W6 fixes = one lane (X3/X5/X4 together: rows 19c, 19d, 19e, 19a); 19f (X typings; 19c and 19e first), 20 (caller implemented; W1–W6 open), 22, 22a, 22b, 25, 27, 28, 29. Lane A's two L5 commits are integrated, its worktree is clean, and its process has finished; N1/N2 were not implemented there. The core files are available for the lifecycle and W/X work. Note: both bridges were restarted at 14:57 from the main checkouts (`/Users/mdot/dox/mesh/rdma/mesh-flow`, `~/mesh/rdma/mesh-flow` on the Mini, ABI 43, same config); the `mesh-wt/P1` worktree is no longer load-bearing.
 
 ## 6. Forbidden substitutions (revert on sight)
 

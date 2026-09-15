@@ -50,11 +50,13 @@ The whole-arena Metal buffer and transport-capacity query have been removed.
 
 ## TensorPart.partial
 
-The PyTorch authors, [DTensor Partial](https://docs.pytorch.org/docs/stable/distributed.tensor.html#torch.distributed.tensor.placement_types.Partial): pending reduction is a declared value property; Mesh marks immutable contribution and intermediate views, preserves it through sends, and clears it on the final reduction view without changing earlier copies or adding runtime bookkeeping.
+The PyTorch authors, [DTensor Partial](https://docs.pytorch.org/docs/stable/distributed.tensor.html#torch.distributed.tensor.placement_types.Partial): pending reduction is a declared value property. Mesh marks contribution and intermediate views and clears the completed reduction view. A completed reduction receives a new logical identity over its existing storage, including when its contribution list has length one. There is no copy or extra numerical call for that identity change.
+
+Movement preserves the logical identity, so a contribution's setup restriction follows sends declared before or after its reduction. The delivery key includes source rank as well as logical identity, destination and queue; explicitly different transport edges remain different. The original value-type snapshots are not mutated. The setup contribution set recognizes those earlier snapshots during validation and is discarded before numerical workers start. No runtime function reads `partial` or the logical identity. See the [L5 source derivation](distributed-reduce.md#l5-contribution-typing).
 
 ## MeshError
 
-The Legion authors, [reduction privileges](https://legion.stanford.edu/tutorial/privileges.html): reduction operands have restricted uses; Mesh reports `partialOperand` when public `call` binds a partial during setup, while the reduction's supplied combine uses the same private binding path without that check.
+The Legion authors, [reduction privileges](https://legion.stanford.edu/tutorial/privileges.html): reduction operands have restricted uses. Mesh's public `call` records one validation closure, executed by `start()` after all reductions have been declared. Its sole throw reports `partialOperand` with a partial view of the offending operand. The reduction's supplied combine uses the same private binding path without that validation. This is a declaration-time restriction, independent of backend and numerical completion order.
 
 ## Program.kernel_call
 
@@ -188,10 +190,10 @@ is addressed arithmetically. These replace linked send/target records and the
 receive-address array without changing SEND/RECV ordering or collective semantics.
 
 At the higher-order call interface, each part has an identity assigned at setup.
-Repeated deliveries with the same identity, destination and queue share one
+Repeated deliveries with the same identity, source rank, destination and queue share one
 receive operand. This is Mesh's setup-level sharing of a declared immutable value;
 numerical input positions and their ownership remain distinct.
-Different destinations or queues are not coalesced. The delivery map is discarded
+Different source ranks, destinations or queues are not coalesced. The delivery map is discarded
 before execution, so its lookup is not transport or numerical work.
 
 The rdma-core authors' [queue-pair creation](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_create_qp.3)

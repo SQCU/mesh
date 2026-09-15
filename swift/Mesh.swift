@@ -109,7 +109,7 @@ public struct TensorPart {
     public let partial: Bool
     fileprivate let storage: MeshSection?
     fileprivate let shared: Bool
-    fileprivate let identity: Int
+    fileprivate var identity: Int
 
     // design/algorithm-sources.md#tensorpartpartial
     fileprivate func withPartial(_ partial: Bool) -> TensorPart {
@@ -123,7 +123,7 @@ public enum MeshError: Error {
 }
 
 private struct MeshDelivery: Hashable {
-    let value, destination, queue: Int
+    let value, source, destination, queue: Int
 }
 
 private final class MeshMemory {
@@ -265,7 +265,7 @@ public final class Mesh {
                      on owner: Int, worker: Int) throws {
         preparations.append { [unowned self] in
             if let part = inputs.first(where: { $0.partial || partialContributions.contains($0.identity) }) {
-                throw MeshError.partialOperand(part)
+                throw MeshError.partialOperand(part.withPartial(true))
             }
         }
         try bind(function, inputs: inputs, outputs: outputs, on: owner, worker: worker)
@@ -348,13 +348,14 @@ public final class Mesh {
     public func send(_ part: TensorPart, to destination: Int, queue: Int = 0) throws -> TensorPart {
         if part.rank == destination { return part }
         precondition((0..<size).contains(destination))
-        let delivery = MeshDelivery(value: part.identity, destination: destination, queue: queue)
+        let delivery = MeshDelivery(value: part.identity, source: part.rank, destination: destination, queue: queue)
         if let existing = deliveries[delivery] { return existing.withPartial(part.partial) }
         let identity = transfer; transfer += 1
         let participating = rank == part.rank || rank == destination
         let channel = participating ? mesh_peer_channel(memory.context, UInt32(rank == destination ? part.rank : destination), UInt32(queue)) : 0
         if channel == MESH_ABSENT { throw POSIXError(.ENETUNREACH) }
-        let output = try self.part(on: destination, bytes: part.bytes, partial: part.partial, shared: part.shared, queue: channel)
+        var output = try self.part(on: destination, bytes: part.bytes, partial: part.partial, shared: part.shared, queue: channel)
+        output.identity = part.identity
         if participating {
             let local = rank == destination ? output : part
             let error = mesh_transfer_bind(memory.context, channel, rank == destination ? 1 : 0,
@@ -415,7 +416,9 @@ public final class Mesh {
             }
             level = next
         }
-        return try send(level[0].withPartial(false), to: destination, queue: queue)
+        var result = try send(level[0].withPartial(false), to: destination, queue: queue)
+        result.identity = value; value += 1
+        return result
     }
 
     // design/algorithm-sources.md#collectivereduce_scatter
