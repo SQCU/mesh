@@ -227,6 +227,7 @@ public final class Mesh {
     private var value = 0
     private var deliveries: [MeshDelivery: TensorPart] = [:]
     private var preparations: [() throws -> Void] = []
+    private var partialContributions: Set<Int> = []
 
     // design/algorithm-sources.md#program
     public init(region: String, rank: Int, size: Int, workers: Int, count: Int = 1) throws {
@@ -262,7 +263,11 @@ public final class Mesh {
     // design/algorithm-sources.md#programkernel_call
     public func call(_ function: TensorFunction, inputs: [TensorPart], outputs: [TensorPart],
                      on owner: Int, worker: Int) throws {
-        if let part = inputs.first(where: \.partial) { throw MeshError.partialOperand(part) }
+        preparations.append { [unowned self] in
+            if let part = inputs.first(where: { $0.partial || partialContributions.contains($0.identity) }) {
+                throw MeshError.partialOperand(part)
+            }
+        }
         try bind(function, inputs: inputs, outputs: outputs, on: owner, worker: worker)
     }
 
@@ -396,6 +401,7 @@ public final class Mesh {
     public func reduce(_ parts: [TensorPart], to destination: Int, using combine: TensorFunction,
                        worker: Int, queue: Int = 0) throws -> TensorPart {
         precondition(!parts.isEmpty && parts.allSatisfy { $0.bytes == parts[0].bytes })
+        partialContributions.formUnion(parts.map(\.identity))
         var level = parts.map { $0.withPartial(true) }
         while level.count > 1 {
             var next: [TensorPart] = []
@@ -434,6 +440,7 @@ public final class Mesh {
         for prepare in preparations { try prepare() }
         preparations.removeAll()
         deliveries.removeAll()
+        partialContributions.removeAll()
         let error = mesh_calls_start(calls)
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
         mesh_transfers_start(memory.context)
