@@ -181,6 +181,18 @@ posting the first. Completion processing refills
 available send slots directly. RX independently refills receives before publishing
 the received section. No completion wait or new scheduler is introduced.
 
+The rdma-core authors' [ibv_post_send contract](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_send.3)
+returns acceptance or a native error for each posted request. X4 removes Mesh's
+software outstanding-request count and its derived request-capacity gates.
+Each TX/RX progress step polls one completion and attempts one available request,
+then continues immediately. A refused request does not advance the cursor.
+`ENOMEM` and `EAGAIN` are deferred to the next step; other post errors retain
+their existing out-of-band reporting. RX attempts its post before publishing the
+completion. A zero-completion poll still permits posting. Initial receive setup
+posts until the declared list ends or the native queue refuses. Actual QP capacity is
+used only at setup to check that an individual framed request fits. This does
+not claim the remaining receive mapping or publication queues satisfy W2/W3.
+
 The compressed-row representation cited under [numerical submission](#programkernel_call)
 also stores each published row's send edges contiguously. Each queue has a
 preallocated FIFO of edge indices; its capacity is the declared send count.

@@ -147,9 +147,12 @@ or linked-list append. One cursor per send advances through its
 realized page indices; there is no runtime construction or traversal of the
 whole chunk list before the first post. Chunks of one send remain consecutive
 on their queue. Sends can publish in any order and have different byte lengths.
-The sender polls completions after each edge's available posts. RX runs on its
-own hardware thread, refilling before delivering each completion. Numerical
-workers and the collector have separate threads.
+Each transport step polls one completion and attempts one available request,
+including when the poll yields no completion. The next step proceeds immediately;
+there is no software outstanding-request count or request-capacity gate. Initial
+receive setup fills the native queue before traffic starts. RX runs on its own
+hardware thread and attempts its replacement receive before publishing the
+completion. Numerical workers and the collector have separate threads.
 
 Receive posting computes `firstPage + chunkIndex * blockPages` over the contiguous
 run allocated at setup; the former table of every receive address is removed.
@@ -470,7 +473,7 @@ current source and example callers. It does not close the deployment gaps above.
 | Actual producer/collective/numerical-consumer integration | `coreml-chain.swift` composes caller-supplied block functions, reduce-scatter and supplied consumers across a configurable stage list. P1 ran four FFN residual blocks and four indices on the RDMA pair, reaching all eight final consumers. Accelerate performs the supplied float32 sum. This establishes operation, without a throughput claim. |
 | Automatic lifetime; explicit synchronization only | `mesh_buffer_retain` accounts for declared uses. `mesh_publish`, native numerical completion, TX completion and ordinary object destruction discharge their references; `mesh_collect` returns backing without clearing payload. Runtime presence polling occurs only in the explicitly called `mesh_sync_on_remote_fill`; its source counterexample includes a self-dependent permanent wait. |
 
-Configuration loops, capacity checks while posting native work requests, indexed
+Configuration loops, native post-result handling, indexed
 operand dependencies, reference updates and native launch operations remain.
 There is no whole-function readiness scan, caller release protocol, remote
 consumer acknowledgement or default remote-fill wait. The finite storage extent,
@@ -481,9 +484,9 @@ used as evidence for these source properties.
 The generic Metal invocation selects command buffers prepared during realization,
 with pool capacity owned by Mesh for every declared call. Native view
 preparation and raw callbacks both support multiple input and output operands.
-Each configured link has independent TX and RX workers. TX polls completions
-after each edge's available chunk posts instead of delaying
-polling until the entire publication list is processed.
+Each configured link has independent TX and RX workers. Each runtime post attempt
+is preceded by a CQ poll; draining never waits for an entire section or publication
+list to be posted.
 The remaining transport and lifetime restrictions need disposition against the
 user's requirements; accepting a convenient example does not settle them.
 The user's four-residual-FFN-layer case further requires useful numerical work on
