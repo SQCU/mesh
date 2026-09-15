@@ -63,7 +63,7 @@ static int link_configure(void *state,int socket,uint64_t client){
   for(uint32_t row=0;row<mesh_rows(m);row++)link->send_offsets[row+1]+=link->send_offsets[row];
   for(uint32_t q=0;q<(uint32_t)link->qps;q++){
     uint32_t counts[2]={atomic_load(mesh_order_length(m,link->client,link->index*m->qps+q,MESH_SEND)),atomic_load(mesh_order_length(m,link->client,link->index*m->qps+q,MESH_RECEIVE))},peer_counts[2];
-    if(exchange(socket,counts,peer_counts,sizeof counts,sizeof peer_counts,m,client))return -1;
+    if(exchange(socket,counts,peer_counts,sizeof counts,sizeof peer_counts,m,client,link->provider.deadline))return -1;
     uint32_t sends=counts[MESH_SEND],receives=counts[MESH_RECEIVE];
     link->ready[q]=(struct mesh_ready){(uint32_t)at,(uint32_t)at};
     if(sends!=peer_counts[MESH_RECEIVE] || receives!=peer_counts[MESH_SEND]){
@@ -84,7 +84,7 @@ static int link_configure(void *state,int socket,uint64_t client){
       queue->capacity=link->provider.capacity[q][direction]/((queue->bytes+4095)/4096);
       if(counts[direction] && !queue->capacity){free(bindings);free(peer);errno=EMSGSIZE;return -1;}
     }
-    int error=exchange(socket,out,peer,sends*sizeof *out,receives*sizeof *peer,m,client);
+    int error=exchange(socket,out,peer,sends*sizeof *out,receives*sizeof *peer,m,client,link->provider.deadline);
     uint32_t values=0,rows=0;
     for(uint32_t i=0;i<receives && !error;i++){
       if(in[i].binding!=peer[i].binding || in[i].count!=peer[i].count || in[i].bytes!=peer[i].bytes){
@@ -131,7 +131,7 @@ static int link_configure(void *state,int socket,uint64_t client){
     if(error){errno=error;return -1;}
   }
   uint32_t posted=1,peer_posted;
-  return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client);
+  return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
 }
 /* design/algorithm-sources.md#programcopy */
 static int link_receive(struct mesh_link *link,uint32_t q){
@@ -237,7 +237,6 @@ static void *link_run(void *argument){
   if(!transfers)return NULL;
   while(atomic_load_explicit(&link->progressing,memory_order_acquire)){
     int setup=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
-    if(setup>0)continue;
     if(setup<0){
       if(errno!=ECANCELED)link_error(link,errno?errno:EIO,1);
       while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);

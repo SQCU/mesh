@@ -228,8 +228,8 @@ it is not a completion barrier between tensor functions.
 
 `bin/mesh-bridge.sh` reads `links` from the bridge configuration. Each entry is
 `device,peer-rank,local-control-address,remote-control-address[,service]`; the
-optional TCP service defaults to 18519. Addresses and device names are supplied by
-the operator's mesh configuration. Distinct links sharing a local control address
+optional numeric TCP port defaults to 18519. Numeric IPv4/IPv6 addresses and
+device names are supplied by the operator's mesh configuration. Distinct links sharing a local control address
 use distinct services. For example, a rank's configuration can contain:
 
 ```sh
@@ -249,6 +249,14 @@ links; it does not invent routes or placement. `rdma/peers.py` now emits the
 supported link arguments without the obsolete detour and hop-limit flags.
 The old `peer=` setting and machine-specific one-peer example profiles are gone.
 Status reports each link's phase and error separately.
+
+Pairing uses one 30-second monotonic deadline across socket connection, endpoint
+metadata, queue descriptors and the initial receive-posting exchange. All socket
+I/O is nonblocking; numeric endpoints require no DNS or service lookup. A timeout
+reports `ETIMEDOUT` and returns through the link's existing cleanup and setup path
+at the configured capacity. The deadline is never consulted by TX/RX progress or
+numerical execution. It bounds socket waiting, not a native driver call stalled
+inside the kernel; see [the socket mechanism](algorithm-sources.md#programcopy).
 
 ## Native contiguous operands
 

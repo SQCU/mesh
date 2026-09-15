@@ -169,6 +169,27 @@ payload backing through their selected devices; they do not create operand copie
 The [configured-peer description](async-collectives.md#configured-peers) records
 setup, per-link preposting, shared registration, retirement and configuration.
 
+One pairing attempt has a single 30-second monotonic deadline, created in
+`verbs_up` after device registration. `pairing_active` checks that deadline and
+the existing cancellation state. The nonblocking `accept`, `connect`, `read` and
+`write` paths share it across endpoint metadata, every queue's descriptors and
+the initial receive-posting exchange; receiving a byte does not renew it.
+Apple's BSD [connect](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/connect.2.html)
+and [accept](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/accept.2.html)
+contracts supply the nonblocking socket mechanism. Every socket's `O_NONBLOCK`
+assignment must succeed before using it. Expiry returns `ETIMEDOUT` through the
+existing link error and QP cleanup owner; it does not terminate the bridge or
+reduce its configured capacity.
+
+The configured control endpoints are numeric IPv4/IPv6 addresses and TCP ports.
+`getaddrinfo` uses `AI_NUMERICHOST | AI_NUMERICSERV`, so pairing performs no host or
+service lookup. Apple's [getaddrinfo](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/getaddrinfo.3.html)
+contract specifies numeric host parsing; the macOS SDK's `netdb.h` specifies the
+corresponding numeric-service flag. Scope-qualified IPv6 addresses remain valid.
+The deadline is setup state only: TX, RX, numerical publication and consumer
+completion contain no clock check. As [RDMA-RULES.md](../RDMA-RULES.md) explains,
+userspace deadlines cannot unwind a driver call already blocked in kernel sleep.
+
 ## Program.write
 
 The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html):
