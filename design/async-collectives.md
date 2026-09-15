@@ -117,7 +117,7 @@ that worker stops. Failed startup cancels the unstarted workers' records. The
 Mesh owner reference keeps startup alive throughout these steps.
 
 `Mesh.result(index)` reads one status word. Success accounts for all declared
-local calls, transfers and submission; errors record the failing function or
+local calls and transfers; errors record the failing function or
 peer before unfinished descendants complete. These observations do not gate
 publication or dispatch. The [status and lifetime contract](algorithm-sources.md#meshresult)
 describes the two reference counts, shared constants and remaining failure-

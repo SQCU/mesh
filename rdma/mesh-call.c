@@ -189,13 +189,15 @@ int mesh_calls_start(struct mesh_calls *calls){
   struct hdr *m=calls->context->M;
   uint32_t rows=mesh_rows(m);
   for(uint32_t index=0;index<calls->extent;index++){
-    uint32_t transfers_count=1;
+    uint32_t transfers_count=0;
     for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++){
       uint32_t count=atomic_load_explicit(mesh_order_length(m,calls->context->client,q,d),memory_order_relaxed);
       struct mesh_transfer *transfers=mesh_transfers(m,calls->context->client,q,d);
       for(uint32_t i=0;i<count;i++)transfers_count+=transfers[i].stride?index<transfers[i].count:transfers[i].count;
     }
-    atomic_store_explicit(&calls->instances[index].references,((uint64_t)transfers_count<<32)|calls->function_count,memory_order_relaxed);
+    uint64_t references=((uint64_t)transfers_count<<32)|calls->function_count;
+    atomic_store_explicit(&calls->instances[index].references,references,memory_order_relaxed);
+    atomic_store_explicit(&calls->instances[index].status,references?MESH_RESULT(MESH_RESULT_BUSY,0,0):0,memory_order_relaxed);
   }
   for(int pass=0;pass<2;pass++){
     for(struct mesh_function *function=calls->functions;function;function=function->next){
@@ -252,7 +254,6 @@ void mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
     uint32_t worker=(uint32_t)__builtin_ctz(workers);workers&=workers-1;
     mesh_notice_push(calls->context->M,mesh_notice_queue(calls->context->M,calls->context->client,calls->context->M->links+worker),calls->first+index);
   }
-  mesh_instance_release(&calls->instances[index],MESH_TRANSFER_REFERENCE);
 }
 
 /* design/algorithm-sources.md#meshresult */

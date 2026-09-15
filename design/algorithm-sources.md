@@ -71,13 +71,18 @@ thirty-two code bits.
 
 The counted ownership mechanism is Collins's reference counting cited above.
 Each instance has a separate reference word: low thirty-two bits count numerical
-calls, high thirty-two bits count transfers and one submission reference. Setup
+calls, high thirty-two bits count transfers. Setup
 counts all declared uses, including shared-constant transfers for every instance.
 Native numerical completion decrements the low count; the final ordered SEND or
 RECV chunk decrements the high count. Transport chunk count introduces no extra
 result references. A zero total attempts one strong compare-exchange from busy to
 success. Native failure attempts one strong compare-exchange from busy to its
 error. Neither operation retries, and neither replaces an already concluded result.
+
+There is no submission reference. An unsubmitted local root already has its
+numerical-call reference; a receive-driven rank has its declared receive and call
+references. Their existing completions account for all work without requiring a
+local `submit`. A rank with no declared work has a successful result at setup.
 
 `mesh_call_retire` replaces the old per-call whole-program reference update.
 Only the last numerical call of an instance drops that instance's program
