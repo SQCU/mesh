@@ -120,8 +120,11 @@ channel. Registration spans are whole alias slots, placed in separate virtual
 address banks; no request crosses a memory-registration boundary. Numerical
 operands may cross those boundaries transparently.
 
-TX receives a numerical publication, directly indexes its configured send edges,
-and starts posting chunks immediately. One cursor per send advances through its
+TX receives a numerical publication, indexes its contiguous range of configured
+send edges, and starts posting chunks immediately. Each queue appends edge indices
+to its preallocated FIFO range. A send edge occurs once in that range, so its
+capacity is exactly the declared send count; there is no runtime queue allocation
+or linked-list append. One cursor per send advances through its
 realized page indices; there is no runtime construction or traversal of the
 whole chunk list before the first post. Chunks of one send remain consecutive
 on their queue. Sends can publish in any order and have different byte lengths.
@@ -129,8 +132,12 @@ The sender polls completions after each edge's available posts. RX runs on its
 own hardware thread, refilling before delivering each completion. Numerical
 workers and the collector have separate threads.
 
+Receive posting computes `firstPage + chunkIndex * blockPages` over the contiguous
+run allocated at setup; the former table of every receive address is removed.
 Every RX completion identifies its physical chunk through `wr_id`. Its tag indexes
-the precomputed destination chunk. Assignment exchanges forward and inverse
+a cursor in the contiguous destination table. Repeated sends of the same source
+have one target per declared copy, in the same order for every chunk; the cursor
+advances through those targets without following a linked record. Assignment exchanges forward and inverse
 page-table entries, preserving ownership of the displaced unfilled backing.
 The page-index list therefore fills incrementally. The final chunk's target
 also names the numerical head to publish; earlier chunks do not publish a
@@ -269,7 +276,14 @@ buffer. It does not wrap the whole arena in one Metal allocation. `MeshSpan.mult
 API. The Core ML example supplies its actual output section through
 `MLPredictionOptions.outputBackings`. Core ML's model feature and backing
 contracts still apply; unknown output names are ignored by Core ML, so the
-example requires the supplied model's actual feature names. These mechanisms
+example requires the supplied model's actual feature names. Apple's SDK also
+states that models which do not support supplied output buffers may return their
+own storage. A valid supplied prediction function must write its declared Mesh
+outputs, just as a valid CPU or Metal function must. The current prediction path
+does not adopt foreign output storage or copy it into the registered operands;
+successful native completion alone does not prove that an arbitrary model honored
+those bindings. Model backing support remains part of selecting that function.
+These mechanisms
 come from the [Apple operand and completion APIs](algorithm-sources.md#programkernel_call).
 They are operand representations, not numerical backends implemented by mesh.
 
@@ -376,8 +390,8 @@ The mesh baseline is `1ed126d`, before deletion commit `5762898`.
 
 | Counted set | Before | Current |
 |---|---:|---:|
-| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,777 lines / 992 files |
-| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,453 lines / 13 files |
+| All mesh repository source files with the extensions below | 665,701 lines / 1,056 files | 651,772 lines / 992 files |
+| Replaced paths, including new Swift code and old root setup.py | 16,378 lines / 77 files | 2,448 lines / 13 files |
 | Build metadata in those paths, including pyproject.toml | 47 lines | 25 lines |
 | Engine's deleted mesh_matrix.swift, tools/mesh/sync.sh and replacement matrix example | 203 lines | 0 lines |
 
@@ -463,3 +477,12 @@ selection change maintained source by +3 lines net relative to `c9d9e18`.
 This removes runtime pointer chasing and repeated local-address resolution;
 the source count is not a claim of measured latency reduction. Documentation is
 reported separately, and no numerical function or collective verb was added.
+
+The transport tables remove 5 maintained source lines relative to `7397d58`.
+For E sends, edge records and FIFO indices occupy 20E bytes instead of 24E bytes
+of linked records. For F received chunks, target records occupy 8F bytes instead
+of 12F bytes, and the separate 4F-byte receive-address table is removed. Offset
+arrays add one 32-bit sentinel each. These are representation sizes, not timing
+measurements. The changes preserve distinct copies of a source and the declared
+peer/queue mapping; they neither infer a collective verb nor change the finite
+invocation extent. Documentation changes are separate from the source reduction.

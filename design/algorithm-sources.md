@@ -60,6 +60,12 @@ Apple [pointer-backed MLMultiArray](https://developer.apple.com/documentation/co
 and [outputBackings](https://developer.apple.com/documentation/coreml/mlpredictionoptions/outputbackings):
 Core ML operand interfaces. Their contracts govern the selected backend's actual
 operands; they do not require a mesh-owned executor or function scan.
+Apple's `MLPredictionOptions.h`, available with the macOS SDK, describes
+`outputBackings` as proposed storage: a model lacking support can return separately
+allocated output. The supplied function's actual output-storage contract governs
+Core ML use. The current path publishes the declared Mesh output after native
+completion; it does not turn separately allocated model output into a registered
+operand.
 Apple [MPSMatrixMultiplication](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication)
 accepts independently prepared input and result matrices. The SDK's `MPSKernel.h`
 describes reuse after encoding and separate kernel instances for concurrent host
@@ -119,6 +125,14 @@ completion queues. It does not construct a runtime list of all chunks before
 posting the first. Completion processing refills
 available send slots directly. RX independently refills receives before publishing
 the received section. No completion wait or new scheduler is introduced.
+
+The compressed-row representation cited under [numerical submission](#programkernel_call)
+also stores each published row's send edges contiguously. Each queue has a
+preallocated FIFO of edge indices; its capacity is the declared send count.
+Receive targets are grouped by source-chunk row with one advancing cursor per
+group, retaining a target for each declared copy. The contiguous receive page run
+is addressed arithmetically. These replace linked send/target records and the
+receive-address array without changing SEND/RECV ordering or collective semantics.
 
 The rdma-core authors' [queue-pair creation](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_create_qp.3)
 and [memory registration](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_reg_mr.3)
