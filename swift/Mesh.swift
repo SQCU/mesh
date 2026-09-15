@@ -5,10 +5,43 @@ import Metal
 
 public typealias MeshOperands = UnsafeBufferPointer<mesh_operand>
 
-public enum TensorFunction {
+fileprivate enum MeshSubmission {
     case cpu((MeshOperands, MeshOperands) -> Void)
     case metal(MTLDevice, (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void)
     case prediction(MLModel, (MeshOperands, MeshOperands) -> (MLFeatureProvider, MLPredictionOptions))
+}
+
+public struct TensorFunction {
+    fileprivate let prepare: (Mesh, [TensorPart], [TensorPart]) throws -> MeshSubmission
+
+    // design/algorithm-sources.md#programkernel_call
+    private init(_ submission: MeshSubmission) { prepare = { _, _, _ in submission } }
+
+    // design/algorithm-sources.md#programkernel_call
+    public static func cpu(_ function: @escaping (MeshOperands, MeshOperands) -> Void) -> Self {
+        Self(.cpu(function))
+    }
+
+    // design/algorithm-sources.md#programkernel_call
+    public static func metal(_ device: MTLDevice, _ function: @escaping (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void) -> Self {
+        Self(.metal(device, function))
+    }
+
+    // design/algorithm-sources.md#programkernel_call
+    public static func prediction(_ model: MLModel, _ function: @escaping (MeshOperands, MeshOperands) -> (MLFeatureProvider, MLPredictionOptions)) -> Self {
+        Self(.prediction(model, function))
+    }
+
+    // design/algorithm-sources.md#programkernel_call
+    public init<Input, Output>(inputViews: [(MeshSpan) throws -> Input], outputViews: [(MeshSpan) throws -> Output],
+                              _ function: @escaping ([MeshBindings<Input>], [MeshBindings<Output>]) throws -> TensorFunction) {
+        prepare = { mesh, inputs, outputs in
+            precondition(inputs.count == inputViews.count && outputs.count == outputViews.count)
+            let x = try zip(inputs, inputViews).map { try mesh.bindings($0.0, using: $0.1) }
+            let y = try zip(outputs, outputViews).map { try mesh.bindings($0.0, using: $0.1) }
+            return try function(x, y).prepare(mesh, inputs, outputs)
+        }
+    }
 }
 
 public struct MeshBindings<Value> {
@@ -103,7 +136,7 @@ private final class MeshInvocation {
     let submit: (OpaquePointer, UInt32, MeshOperands, MeshOperands) -> Void
 
     // design/algorithm-sources.md#programkernel_call
-    init(_ function: TensorFunction, memory: MeshMemory, inputs: Int, outputs: Int, count: Int) {
+    init(_ function: MeshSubmission, memory: MeshMemory, inputs: Int, outputs: Int, count: Int) {
         self.memory = memory; inputCount = inputs; outputCount = outputs
         switch function {
         case .cpu(let function):
@@ -173,8 +206,12 @@ public final class Mesh {
                      on owner: Int, worker: Int) throws {
         precondition(inputs.allSatisfy { $0.rank == owner } && outputs.allSatisfy { $0.rank == owner && !$0.shared })
         if owner != rank { return }
-        let invocation = MeshInvocation(function, memory: memory, inputs: inputs.count, outputs: outputs.count, count: count)
-        try bind(invocation, inputs: inputs, outputs: outputs, worker: worker)
+        preparations.append { [unowned self] in
+            precondition(outputs.allSatisfy { $0.storage!.receiveQueue == nil })
+            let invocation = MeshInvocation(try function.prepare(self, inputs, outputs), memory: memory,
+                                            inputs: inputs.count, outputs: outputs.count, count: count)
+            try bind(invocation, inputs: inputs, outputs: outputs, worker: worker)
+        }
     }
 
     // design/algorithm-sources.md#programkernel_call
@@ -195,7 +232,7 @@ public final class Mesh {
     }
 
     // design/algorithm-sources.md#programtensor
-    private func bindings<Value>(_ part: TensorPart, using make: (MeshSpan) throws -> Value) throws -> MeshBindings<Value> {
+    fileprivate func bindings<Value>(_ part: TensorPart, using make: (MeshSpan) throws -> Value) throws -> MeshBindings<Value> {
         let source = part.storage!, context = memory.context
         let pages: [UInt32], index: (mesh_operand) -> Int
         if let queue = source.receiveQueue {
@@ -216,23 +253,6 @@ public final class Mesh {
                                                                  count: source.section.bytes), memory: memory))
         }
         return MeshBindings(values: values, index: index)
-    }
-
-    // design/algorithm-sources.md#program
-    public func map<Input, Output>(_ function: @escaping ([MeshBindings<Input>], [MeshBindings<Output>]) throws -> TensorFunction,
-                    inputs: [TensorPart], outputs: [TensorPart],
-                    inputViews: [(MeshSpan) throws -> Input], outputViews: [(MeshSpan) throws -> Output],
-                    on owner: Int, worker: Int) {
-        precondition(inputs.count == inputViews.count && outputs.count == outputViews.count)
-        precondition(inputs.allSatisfy { $0.rank == owner } && outputs.allSatisfy { $0.rank == owner && !$0.shared })
-        if owner != rank { return }
-        preparations.append { [unowned self] in
-            precondition(outputs.allSatisfy { $0.storage!.receiveQueue == nil })
-            let x = try zip(inputs, inputViews).map { try bindings($0.0, using: $0.1) }
-            let y = try zip(outputs, outputViews).map { try bindings($0.0, using: $0.1) }
-            let invocation = MeshInvocation(try function(x, y), memory: memory, inputs: inputs.count, outputs: outputs.count, count: count)
-            try bind(invocation, inputs: inputs, outputs: outputs, worker: worker)
-        }
     }
 
     // design/algorithm-sources.md#programtensor

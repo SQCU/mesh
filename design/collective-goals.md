@@ -72,6 +72,11 @@ relations and source operation chains are described in [the implementation](asyn
 Finite indexed submissions now reuse the realized functions and routes.
 The small matrix example and its build target have been deleted at the user's
 instruction. They no longer serve as evidence of integration.
+The fixed scalar chain has also been deleted. Its replacement is the
+[configured function chain](function-chain.md), which uses supplied Core ML
+functions, reduce-scatter and supplied consumers at each declared depth. The
+function representation is shared by calls, maps and reductions; model stages
+remain caller code.
 The earlier completion claim was too broad: the single-use value extent, one-peer
 transport and example-only integration remain
 implementation restrictions, not user-authorized definitions of the deployment

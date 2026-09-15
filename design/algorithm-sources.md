@@ -59,11 +59,15 @@ through one operation; Core ML selects its prepared feature provider and output
 options independently. `MeshBindings` contains the corresponding operand views
 and index function. This removes the Cartesian product of address-bound calls,
 without changing the numerical algorithm or requiring additional synchronization.
-The native `map` form accepts an array of bindings on each side, with one view
-factory per operand. Each input and output is prepared independently; no unary
-function assumption or product of operand address combinations is introduced.
-Shared constants are inputs with zero index stride. Runtime numerical submission
-still receives the already realized operand arrays through `MeshInvocation`.
+`TensorFunction` owns a preparation function with one view factory per operand.
+Each input and output is prepared independently; no unary function assumption
+or product of operand address combinations is introduced. Calls, maps and
+reductions use this same function value, including when the reduction allocates
+its intermediate outputs. The former native-only `Mesh.map` overload is removed.
+Shared constants are inputs with zero index stride. All preparation completes
+in `start()`; runtime submission receives the realized operand arrays through
+the resolved `MeshInvocation.submit` closure. It does not invoke preparation
+factories or choose a backend during numerical execution.
 Apple's [makeCommandBuffer](https://developer.apple.com/documentation/metal/mtlcommandqueue/makecommandbuffer())
 documents blocking when a queue has no free command buffers. The SDK's
 `MTLDevice.h` exposes `newCommandQueueWithMaxCommandBufferCount` and specifies
@@ -110,6 +114,9 @@ the received section. No completion wait or new scheduler is introduced.
 
 The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html):
 operand production. The user's contract requires publication of completed sections.
+Apple's [vDSP_vramp](https://developer.apple.com/documentation/accelerate/vdsp_vramp)
+is the existing numerical generator called by the configured Core ML chain's
+initial producers. It writes directly into each registered operand.
 
 ## Program.export
 
@@ -139,6 +146,10 @@ shared matrix source files, retaining their existing arithmetic and launch
 geometry. Callers prepare their pipeline and dimensions and supply `encAdd` with
 the actual operand buffers and offsets. Mesh implements no addition kernel;
 the unused `MatrixOperations.add` convenience wrapper has been removed.
+Apple's [vDSP_vadd](https://developer.apple.com/documentation/accelerate/vdsp_vadd)
+is the existing float32 vector sum supplied to reduce-scatter by the configured
+Core ML caller. It receives resolved input/output pointers and introduces no
+payload allocation, copy, or replacement sum implementation in Mesh.
 
 ## collective.reduce_scatter
 
@@ -159,11 +170,12 @@ Shoeybi et al., [Megatron-LM](https://arxiv.org/abs/1909.08053), and MLX's
 [tensor-parallel layers](https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/distributed.py):
 local numerical functions composed with collectives. Hendrycks and Gimpel,
 [GELU](https://arxiv.org/abs/1606.08415): the activation already supplied by the engine.
-The matrix source chain uses the contraction identity
-`Y = sum_r X[:,K_r] W[K_r,:]`, followed by independent column products
-`Z[:,K_r] = Y W[:,K_r]`. All-reduce supplies the full Y used by each second-stage
-consumer; gather returns their distinct Z sections. The two stages reuse the
-same existing multiplication implementation with different caller-bound operands.
+The configured function caller uses `Cij = Fij(Xi)` and `Yj = sum_i Cij`, then
+passes each `Yj` to its supplied consumer. For linear T, Fij is its input-i,
+output-j block. Reduce-scatter places each sum at its caller-selected owner;
+there is no assembled whole-tensor intermediate or global stage barrier.
+The [caller description](function-chain.md) distinguishes this source composition
+from model artifacts and runtime performance evidence.
 
 ## nn.rmsnorm
 
