@@ -193,7 +193,7 @@ subset, never as "done".
 | 9 | L6 any combine | ✓ | by construction |
 | 10 | L7 lifetime | ✓ (unrun) | `mesh_buffer_retain`/`mesh_collect` |
 | 11 | L8 explicit sync + counterexample | ✓ | `examples/sync-on-remote-fill.swift` |
-| 12 | P2 push both repos | ✗ | — |
+| 12 | P2 push both repos | ✓ | `29bb74f` mesh / `e2f99d1` engine; both remote `main` heads verified, `git log @{u}..HEAD` empty |
 | 13 | P1 importable; Core ML chain run on the pair at ABI 43 | ◐ | bridges still at the pre-rewrite ABI; `links=()` |
 | 14 | L5 Partial type | ✗ | — |
 | 15 | N1 unbounded instances | ◐ | `count` finite |
