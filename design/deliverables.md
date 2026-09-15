@@ -238,7 +238,7 @@ subset, never as "done".
 | 16 | N2 Result surface | ◐ | — |
 | 17 | E1 engine layer via Mesh | ✓ (unrun) | engine `6507370` `mesh_layer.swift` 229 lines, 2 collective points, 12 existing encoders bound, no kernel file changed; target `.build/libgemma_mesh.dylib` builds; not yet run on the pair (row 19) |
 | 18 | E2 public measurement + Karp–Flatt | ◐ | script `metal-microbench/tools/mesh/report.py` (engine `feda6a6`): public endpoint only, memory-state guard, S/e/capability-sum/bounds/verdict; dry-run reproduces 1.42x, 1.08x and the ten-minute table; **no measured run yet** (needs E1) |
-| 19 | E3 depthwise chain not slower | ✗ | — |
+| 19 | E3 depthwise chain not slower | ◐ source | engine `925dfb3`+`8c1e27b`: serving decode runs the layer stack through Mesh when `LM_MESH_SIZE` is set (`LM_MESH_RANK/REGION/INSTANCES/PLACEMENT`), same binary solo/n-node, no second wait (tail signals the existing `MTLSharedEvent`); unset → identical path. Blockers before a measured run: N2 (`Mesh.result`) so a mid-chain link/function failure surfaces instead of the step's wait never returning; N1 (instances are one-shot; `LM_MESH_INSTANCES` bounds the decode steps); prefill is still solo, so all ranks need the prompt KV (same `LM_KV_POOL_PAGES` geometry); E1 needs `LM_PREFILL_BACKEND=mps\|tensor` + `LM_MATRIX_LAYOUT=nt`. Pre-existing engine defect surfaced: `encAttn→attentionSplits` is a host scan inside the bound closure |
 | W1 | publish path waitless/guardless | ✗ | `mesh_publish` fixed bitmask walk ✓ but enqueues via `mesh_notice_push` CAS-retry Treiber stack (mesh.h:97-102) and `mesh_buffer_release`→`mesh_buffer_enqueue` claim check + list push (mesh-dataflow.c:125-130); [audit](w-audit-2026-09-15.md#w1) |
 | W2 | receive path | ✗ | RECVs posted at `receive->first+in->next*block` not the planned page; in-band tag read `source=*mesh_tag(m,page)`; per-source cursor `receive->next[source]++`; `mesh_receive_assign` permutation (mesh.h:83-90); software gate `in->pending<in->capacity` (mesh-flow.c:140); sticky `failed` latch; [audit](w-audit-2026-09-15.md#w2) |
 | W3 | send path | ✗ | `send_ready` ring + `out->pending<out->capacity` software throttle (mesh-flow.c:151) although `ibv_post_send`'s return is already checked at :44; per-chunk `mesh_page[]` load (:153); `->next` notice walk (:194); [audit](w-audit-2026-09-15.md#w3) |
@@ -280,10 +280,7 @@ An agent picking "the first ✗/◐ row" skips assigned rows and takes the next 
 
 | Rows | Lane | Worktree / branch |
 |---|---|---|
-| 26 | B | `mesh-wt/T4` → `row/T4` |
 | 24 (redo after 19c) | — | `row/T1-T3` holds the first attempt |
-| 17 | D | `mmb-wt/E1` → `row/E1` (metal-microbench) |
-| 18 | E | `mmb-wt/E2` → `row/E2` (metal-microbench) |
 | 19 | E3 | `mmb-wt/E3` → `row/E3` (active integration process) |
 
 Unassigned and open: 15, 16; W1–W6 fixes = one lane (X3/X5/X4 together: rows 19c, 19d, 19e, 19a); 19f (X typings; 19c and 19e first), 20 (caller implemented; W1–W6 open), 22, 22a, 22b, 25, 27, 28, 29. Lane A's two L5 commits are integrated, its worktree is clean, and its process has finished; N1/N2 were not implemented there. The core files are available for the lifecycle and W/X work. Note: both bridges were restarted at 14:57 from the main checkouts (`/Users/mdot/dox/mesh/rdma/mesh-flow`, `~/mesh/rdma/mesh-flow` on the Mini, ABI 43, same config); the `mesh-wt/P1` worktree is no longer load-bearing.
