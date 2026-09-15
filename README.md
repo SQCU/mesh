@@ -1,11 +1,9 @@
 # mesh
 
-The [asynchronous collective interface](design/async-collectives.md) supports
-publication and consumption of available tensor regions. The caller supplies mesh
-and tensor placement. [Pallas-style kernel calls](design/indexed-library.md)
-express numerical work; canonical mesh owns registered storage, presence and
-transport. These requirements and their strict dependencies are the entire
-collective scope.
+The [user's collective goal](design/collective-goals.md) is higher-order
+functions over partial tensors, collective communication, and zero-copy async
+execution after AOT realization. The inherited numerical stack and its callers
+have been deleted. The replacement interface is not yet implemented.
 
 Provisioning for a fabric of Apple Silicon Macs wired together with Thunderbolt and
 talking RDMA. The invariant: **a node may never become unreachable, and may never
@@ -13,12 +11,6 @@ decide on its own to stop executing.**
 
 Nodes are expected to be unplugged, carried to another room, and replugged into a
 different position in the mesh. Nothing here encodes cable position.
-
-The Xonotic runtime already demonstrates mesh computation in high-teamcount strategy
-game variants, with the sealed API reused by project code. That integration milestone
-is distinct from completing the strategy solver or establishing a comparative learning
-result. See the [current release ledger](design/RELEASE-CLOSURE.md) for achievements,
-review repairs, source reconstruction, and the remaining measurement boundaries.
 
 **The threat is the false negative** — a node that should be working and reachable
 and silently is not, for any reason, however locally sensible. Stock macOS ships in
@@ -237,24 +229,6 @@ code. It needs a list, and a list of one is a venue change away from needing a
 keyboard. `networks.conf` (gitignored — it holds live credentials) seeds every node,
 `install.sh` copies it to `/usr/local/mesh/networks.conf`, and the keeper re-asserts
 it. Entries are only added, never removed. Format is in `networks.conf.example`.
-
-## Workload design studies
-
-`design/` holds design studies for workloads that run on the fabric. They are
-proposals with their reasoning and their adversarial critique attached, not settled
-fact, and each states plainly which of its numbers are measured and which are
-estimates.
-
-- [`design/mesh-coprocessor-demo.md`](design/mesh-coprocessor-demo.md) — **current.**
-  The mini as a tile-streaming matrix coprocessor, demonstrated through a multi-team
-  Xonotic payload match. Measured hardware, three superlinear levers, the ABI, and the
-  attacks each part of the workload survives.
-- [`design/mesh-coprocessor-demo-plain.md`](design/mesh-coprocessor-demo-plain.md) — the
-  same design at reading grade 3.7: what the linear algebra computes, and what the game
-  must show so the solver is visibly present and visibly necessary.
-- [`design/xonotic-bot-compute.md`](design/xonotic-bot-compute.md) — **superseded.** The
-  earlier mean-field study. Kept for its discard table and its adversarial critiques; its
-  throughput figures were estimates and its crossover analysis is void.
 
 ## Adding a machine to the fabric
 
@@ -521,205 +495,10 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/io.mesh.job-<name>.plist
 
 Runs as root at boot with no login session. `KeepAlive` restarts it forever.
 
-## Using the mesh
+## Collective implementation
 
-The [asynchronous collective contract](design/async-collectives.md) defines the
-numerical interface. The caller supplies mesh and tensor placement; setup binds
-registered storage and numerical functions. Producers publish finished regions
-while independent production continues. Consumers execute the partial numerical
-work whose operands are available.
-
-Use [`Program.kernel_call`, `BlockSpec`, and `ShapeDtypeStruct`](design/indexed-library.md)
-to configure numerical calls. `Program.copy` binds peer transfers during setup.
-Canonical mesh handles presence, transport completion and storage lifetimes;
-numerical callers do not pump transfers or manage page-table state.
-
-The implementation lives in `python/mesh`, `rdma/mesh-algebra.m`, and
-`rdma/mesh-dataflow.c`. The bridge owns the registered region and verbs resources.
-See [bridge ownership](design/bridge-and-ipc.md).
-
-### Running it
-
-```
-bin/mesh-bridge.sh start | stop | restart | status
-```
-
-It is a launchd service, like `io.mesh.beacon` and `io.mesh.router`. Settings come from
-`etc/bridge.conf`: how much of the node the mesh holds, and how much your own programs expect
-to use. The wire limit is raised to match the complete requested region. Changing the file
-and restarting is the supported way to change how much of a node the mesh holds; nothing is
-tuned while it runs.
-
-Never reach for `pkill`. A process holding a verbs device does not die from SIGKILL — it sits
-in uninterruptible kernel sleep still holding the device, every other process on the machine
-loses RDMA, the ports drop with the cable attached, `shutdown` hangs, and a human has to walk
-to the machine and pull power. `stop` sends SIGTERM, waits for the teardown that releases the
-device, and reports rather than escalating. The plist sets `ExitTimeOut` to 0, which in launchd
-means infinity, so launchd will not escalate either. `bin/mesh-kill-guard.sh` enforces this;
-`AGENTS.md` describes what it covers and what it cannot.
-
-On a headless node there is no GUI launchd domain, so the script re-execs under `sudo` when it
-can. Running as root there means the region is created world-readable on purpose: a region
-only root can open is a mesh no application can attach to.
-
-The bridge itself takes only what it cannot infer: `-I` node index, `-M` share of the machine,
-`-s` region, and a peer. Page size and registration extent are transport properties, and the
-link is found by looking for the port that is up. Unknown switches are reported and ignored;
-they do not withhold the configured bridge.
-
-### Building, and keeping nodes identical
-
-```
-make -C rdma all
-```
-
-One command, every binary. Converge a node with git — `git fetch && git reset --hard
-origin/main && make -C rdma all` — never by copying a hand-picked list of files. Mismatched
-binaries between two nodes are indistinguishable from a transport regression when the only
-thing you look at is throughput, and that mistake accounted for every wild number measured
-during this bridge's development.
-
-### Measuring
-
-There is one instrument. The bridge publishes a census of the page table and its variance to
-the region once a second; `rdma/mesh-stat` reads it; `mesh-observe` merges that census with
-machine telemetry and generic workload envelopes; `viz/serve.py` starts from the durable
-fleet in `etc/mesh-nodes.json`, augments it with live `mesh-peers` discovery, polls the nodes
-concurrently over their available fabric paths, and serves the viewer. Rates come from
-differencing `sent` and `recvd` against `uptime_ms`. A partitioned node therefore remains a
-dim, named object at its last page-table coordinate instead of disappearing from the mesh.
-
-Applications do not measure hardware counters or fabric traffic. They publish their
-shape-derived compulsory and maximal FLOP/byte counts through `rdma/workload.py` to the node's
-resident telemetry service; the service divides those monotonically defined counts by elapsed
-time and aggregates every fresh producer without inspecting its name or payload. Xonotic and an
-OCR job use the same record: elapsed seconds, rows, deadline, FLOP interval, byte interval, and
-opaque operation dimensions. Bridge and IOReport counters remain the independent physical
-measurement paths.
-
-`io.mesh.telemetry` runs continuously on every node. It owns `powermetrics`, bridge, I/O Registry,
-IOReport, and workload-producer observations and stores versioned samples in a bounded in-memory
-ring. TCP port 8788 exposes `/v1/latest` and `/v1/history?since=SEQUENCE`; workload producers use
-the loopback ingress on the same numeric port. Sequence, monotonic time, oldest retained sample,
-gaps, and service restarts are explicit protocol state. The mesh-wide 8787 observer keeps one
-connection per node, resumes from its last sequence after a partition, and retains the durable
-roster even when no current sample is reachable. Direct addresses and stable SSH aliases are
-equivalent routes to the same 8788 in-memory ring; the SSH route carries one persistent HTTP
-connection over `ssh -W`, including any configured ProxyJump, and is recreated after a
-partition. It does not discover producers through files, poll a cache path, or start an SSH
-process for each healthy sampling interval.
-
-The stream reports CPU-cluster and GPU active residency and frequency, subsystem power, thermal
-pressure, memory-bandwidth intervals, and bridge state without inspecting application data. A
-node whose sampler or stream is unavailable remains in inventory with that source state explicit.
-Files are reserved for static fleet and capacity configuration, release artifacts, checkpoints,
-and deliberately exported study results; they are not the live telemetry bus.
-Large numerical exports travel as binary artifacts, not repeated JSON tensor trees.
-Producer measures carry scalar summaries and registered artifact descriptors; the node's
-`/v1/artifact` streams those bytes on demand. Node-ring JSON records are encoded once per
-projection and reused across polling clients. See
-[application telemetry](design/APPLICATION-TELEMETRY.md#numerical-artifacts-and-polling-cost)
-for the J report's NPZ format and verification command.
-
-The observer also reads AGX device, renderer, tiler, and GPU-memory counters from I/O Registry.
-Those counters need no privilege, so live GPU utilization remains visible while a node is being
-converged or if its root sampler is unhealthy; the missing root-only fields stay visibly missing.
-
-The viewer labels three different kinds of number instead of conflating them:
-
-| kind | values |
-|---|---|
-| measured live | page ownership, page traffic, derived fabric Gbit/s, CPU/GPU residency and frequency, power, thermal pressure, AMCC/AGX bandwidth histograms |
-| characterized capacity | fp32/bf16 throughput, memory bandwidth, and one-link fabric bandwidth from `etc/mesh-capacity.json` |
-| bounded generically | published analytic workload FLOP/byte intervals, or GPU FP32 use as `0 … characterized peak × active fraction` when no producer publishes, with rolling mean, variance, and standard deviation |
-| unavailable directly | an exact achieved workload FLOP/s scalar when operation semantics are absent; exact DRAM byte/s when the version-sensitive IOReport histogram is absent |
-
-GPU active residency is utilization, not achieved FLOP/s. The FP32 interval therefore keeps a
-zero lower bound when no workload producer is present. A producer narrows that interval using
-the operations its actual execution path necessarily and maximally performs; the observer then
-reports achieved-rate bounds and the deadline-slack distribution, while still displaying active residency as
-an independent physical check. Memory uses the private
-IOReport `PMP0 / DCS BW` residency histogram: the previous state edge and named state edge bracket
-each bucket, producing cheap residency-weighted lower and upper GB/s estimates plus variance for
-whole-machine AMCC and GPU-specific AGX reads and writes. If that version-sensitive interface is
-missing, the observer falls back to the wider `0 … characterized ceiling` interval.
-Published byte bounds are displayed separately from the whole-machine histogram, so a semantic
-work estimate cannot impersonate a DRAM counter. Neither the page-table instrument nor its fleet
-reporter depends on any workload-specific schema.
-
-The Three.js phase view is a tetrahedral simplex whose vertices are free, receive-posted,
-send-forwarding, and application-owned pages. A small anchor and its faint trail remain at each
-node's exact four-way allocation mixture. A labeled satellite is tethered to that anchor and
-separates stable node identity from an automatically magnified inter-node phase delta, so nodes
-with nearly equal large pools remain individually visible without falsifying their allocation.
-Discovered fabric adjacency connects the satellites, and directed stream density and motion
-follow measured bridge traffic and link saturation. Head size is allocation variance,
-compute-halo radius is characterized FP32 capacity, halo light is live GPU activity, and halo
-pulse is rolling upper-envelope variance. When a workload publishes an analytic envelope, halo
-light is its upper achieved rate divided by characterized capacity; otherwise it remains live GPU
-activity. The HUD reports both the entire-mesh sum and every node separately.
-The four independently truncated interval means can differ from
-the pool by up to three pages, so the HUD prints that rounding delta beside the census.
-
-Run `mesh-observe` for one node, or run `mesh-python viz/serve.py` and open
-`http://localhost:8787` for the whole currently meshed fleet. Converging with `install.sh`
-installs the observer, capacity table, root sampler, and `io.mesh.telemetry` launch daemon on
-every node. Add fleet members to `etc/mesh-nodes.json`; live discovery can add more, but absence
-from the network never deletes a rostered node.
-
-Every Python service and executable tool enters through `mesh-python`. `install.sh` realizes the
-locked Python 3.12 runtime in an immutable generation under `/usr/local/mesh/runtimes`;
-the rootless installer uses `~/.local/mesh/runtimes`. `runtime-current` selects the available
-environment. Installed packages are checked against the lock before an environment is reused.
-
-Cartlane Python applications deploy through `bin/mesh-application.py launch`. The launcher
-stages the complete application, builds its native client from the staged sources, realizes
-its locked Python environment, and imports its entrypoints before atomically publishing it.
-The demo and curriculum invoke this automatically; both node installers also realize the
-application. Solver, client, wire definitions, payload resources, and viewers travel together.
-Running processes retain their complete generation, and a failed update leaves the last
-complete generation available. `mesh-runtime-id.py`, policy telemetry, and viewer status
-report the application identity as well as Python provenance.
-See [application deployment and its failure contract](design/APPLICATION-DEPLOYMENT.md).
-
-### What runs today
-
-Two bridges over one Thunderbolt link, both started by `bin/mesh-bridge.sh`, both converged to
-the same commit by git. A load generator on each node sending to the other at the same time:
-
-```
-9,828,683 and 9,830,729 slots verified   wrong 0
-mbp   out 20.13  in 20.14 Gbit/s
-mini  out 26.56  in 21.48 Gbit/s
-```
-
-Rates are differenced from the region census, not timed by the applications. The asymmetry is
-real and unexplained: the mini reports sending more than the MacBook reports receiving over
-the same interval, which is either a sampling artefact of two clocks a second apart or
-something worth chasing.
-
-Removing the old unconditional 50 us sleep did **not** change these throughput numbers.
-The bridge now sleeps for that measured interval only when an iteration moved no ring or
-completion work and has no send in flight. Active work therefore runs continuously while an
-idle bridge does not reserve a complete CPU core from the game, audio, renderer, or policy
-runtime.
-
-The deprecated `mesh_coproc.py` demonstration and its copied NumPy/MLX operand
-path have been deleted. Its historical 54,337-row result at 0.12 Gbit/s does not
-validate the replacement. Numerical callers now use configured canonical page
-functions through [the indexed library](design/indexed-library.md).
-
-The census closes exactly on both nodes, including after an application dies holding pages.
-The bridge marks delivered pages in a bitmap and, on the once-a-second census tick, reclaims
-them if the client is gone. The historical capped-pool measurement observed `held=4055` at
-the moment of death and `held=0` with `244140/244140` pages one tick later. Current pool mass
-is derived from the configured region rather than capped at that historical value.
-
-## Current numerical transport
-
-The numerical path uses RDMA SEND/RECV of literal registered pages. TCP/UDP
-payload alternatives and `bin/mesh-loopback.sh` have been deleted. Configuration
-establishes the links before numerical invocation. The
-[asynchronous contract](design/async-collectives.md) defines the scope.
-
-The importable [streaming numerical library](design/indexed-library.md) composes indexed tensor functions, partial contractions, and peer transfers over canonical mesh pages.
+The [user's requirements](design/collective-goals.md) are the scope.
+The retained substrate is `rdma/mesh-flow.c`, canonical page storage and buffer
+ownership. Ordinary bridge lifecycle commands are in `bin/mesh-bridge.sh`.
+No deleted Python API, numerical executor, solver or demonstration is a current
+implementation dependency.

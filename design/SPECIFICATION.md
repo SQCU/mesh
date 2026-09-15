@@ -1,5 +1,11 @@
 # Specification — the quote index (payload strategy)
 
+This is an archive of instructions from several application tasks. The current
+[collective goal](collective-goals.md) contains the relevant user instructions.
+Application requirements below do not expand the collective task. Agent-authored
+consequences, code and papers cannot authorize features absent from that goal.
+
+
 This is the central specification for the RDMA-mesh Xonotic payload-strategy
 project. Its content rule follows the epistemic-provenance law (see the final
 section): **every normative sentence here is a verbatim user-authored transcript
@@ -331,11 +337,7 @@ that interface.
 >    is not only epistemologically certain to not be from the user, it is also
 >    epistemologically certain to be a lie.
 
-Consequence: everything normative in this project's docs must reduce to a §1–§25
-quote above, or to code/algebra/proof. Papers (Abdelraouf–Shamma, Burke–Ferland–
-Teng, Ballester) are **level-3 support**, admissible only as verbatim quotes of
-their text, and are **never** the spec — a doc that cites a paper as the spec (e.g.
-`MULTISCALE.md` §3) violates this law and must be re-grounded to the quotes here.
+
 
 
 ## Havocbot skill parameters remain percepts

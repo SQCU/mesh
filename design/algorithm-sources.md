@@ -1,86 +1,104 @@
-# Algorithm sources
+# Algorithm references
 
-Sources are keyed to the public constructs in [collective goals](collective-goals.md#symbol-allowlist).
-Implementation flow and limitations belong in [streaming algebra](streaming-algebra.md).
-
-The [storage lifetime review](lit/page-lifetimes-2026-09-14.md) distinguishes these existing completions from reader-count bookkeeping and reviews the remaining allocation work. It is research, not an additional interface contract.
-
-The [MLX/JACCL structure review](lit/mlx-jaccl-structure.md) cites the actual upstream operations and transport, identifies the necessary structures, and accounts for remaining mesh work beyond JACCL's posting/completion path. Native setup now binds one operation per realized region: occurrence grids, range indirection, index arrays and `mesh_watch` are removed. The function owns its input/output rows and submission callback. Reader ranges use one allocation, and constant-only consumption emits no notification. MLX supplies the operation/operand composition; Monsoon supplies the operand-presence index. These changes add no transport protocol or numerical algorithm.
+The [user's requirements](collective-goals.md) define scope. These sources supply
+mechanisms, not additional features, architecture, tests or prerequisites. Section
+names retain existing source citation anchors; they do not prescribe public APIs.
+The deleted implementation is not an implementation template.
 
 ## Program
 
-The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html): realize functions, layouts and storage before numerical invocation. POSIX supplies process and thread lifetimes; mesh owns its registered storage through completion and teardown.
+The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html):
+reference for higher-order numerical calls over indexed tensor operands.
 
 ## Program.tensor
 
-The JAX authors, [Refs and BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html), and Apple, [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt): tensor blocks name actual registered pages. Ref slices, transposes and broadcasts describe those same operands; they do not create a copied transport store. Generated CPU and Metal expression loads/stores resolve logical byte indices through the canonical page table. Setup binds the actual arena in Metal-sized banks, its page table, and per-operand geometry; numerical invocation allocates no address tables and copies no operands. BLAS, BNNS and MPS now resolve mutable contraction operands through this table. Core ML and supplied encoders still require corresponding address integration before transport can relocate all operands.
-
-BSD and Apple, [mmap](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/mmap.2.html): CPU host views map the registered shared-memory file at a reserved virtual range. `mesh_view_data` takes a logical view, refreshes changed mappings in its page footprint through `mesh_view_bind`, and returns the view's offset address. One atomic entry per page records the CPU mapping already installed; the canonical page table remains authoritative. Identical mappings require no mapping syscall. `Ref` no longer constructs a NumPy view eagerly, and `Result` no longer captures one at setup. This affects host access, not transport or numerical submission.
-
-The native `mesh_extent` owns its Metal buffer alongside its registered-page mapping and CPU view. `MeshExtent`, its copied extent descriptor, the extent lookup dictionary, the second extent owner array, and the per-function wrapper operand array are removed. MPS descriptors and engine buffer lookup resolve the native extent directly. Buffer ownership still lasts through program teardown; this consolidation does not implement recycling between overlapping invocations.
-
-The llama.cpp authors, [GGUF format](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md): the engine's existing `ModelFile` loader reads configured weight slices directly into registered `MatrixView`s. `Program.constant(ref)` marks a region initialized by such a setup loader; passing a value also fills the region.
+The JAX authors, [BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html),
+and Apple [mmap](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/mmap.2.html):
+references for indexed sections and virtual mappings of actual shared backing.
+George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
+(1960): reference counting. The user explicitly requested automatic ownership
+release and background pool return, without caller free/done calls.
 
 ## Program.kernel_call
 
-Papadopoulos and Culler, [Monsoon: an Explicit Token-Store Architecture](https://www.cs.cmu.edu/~18742/papers/Papadopoulos1990.pdf), ISCA 1990: operand-associated presence drives function issue. The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html): a grid and index maps bind independently usable regions.
-
-Apple, [Metal command submission](https://developer.apple.com/documentation/metal/mtlcommandbuffer/commit()): prebound encoders submit device work; successful completion makes its output visible to mesh consumers. Each realized program retains its setup-built array of numerical functions. Its dedicated presence thread scans that immutable array and calls each eligible function directly. The second dispatch queue, `dispatch_sync` handoff, compute notification list, mutable reader-edge index, pending-function list and per-row scheduler allocations are deleted. Programs have independent presence threads; stopping one program does not stop another program's numerical discovery or either RDMA thread. POSIX thread creation publishes the configured array before the worker reads it. Explicit program destruction stops and joins that worker before releasing its functions, then retains operand storage through outstanding numerical completions. Shared-memory ABI 32 removes the compute notice queue; only send publications use a notice queue. Scanning incurs work proportional to the configured function list; removing the queue handoff does not establish zero overhead.
-
-Each nonconstant input occurrence and export retains its last consumed generation. Each row retains its generation, expected/completed reader counts and aggregate reader plane. Completing a member advances its generation once; the last reader records completion. Reuse clears presence and the completed count before advancing generation. **The output-claim and receive-reuse branches still exist and violate G4.** The static scan does not fix their storage representation or authorize them. CPU submission uses the existing concurrent worker pool; Metal submits a command buffer; Core ML submits its asynchronous prediction. A supplied encoder performs numerical work only: it does not commit, wait, publish or manage readers. `Program(functions=...)` binds those numerical implementations during setup.
+Apple [Metal command buffers](https://developer.apple.com/documentation/metal/mtlcommandbuffer)
+and [Core ML prediction](https://developer.apple.com/documentation/coreml/mlmodel):
+existing numerical submission and completion interfaces.
+Apple [pointer-backed MLMultiArray](https://developer.apple.com/documentation/coreml/mlmultiarray/init(datapointer:shape:datatype:strides:deallocator:))
+and [outputBackings](https://developer.apple.com/documentation/coreml/mlpredictionoptions/outputbackings):
+Core ML operand interfaces. Their contracts govern the selected backend's actual
+operands; they do not require a mesh-owned executor or function scan.
 
 ## Program.copy
 
-Apple, [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt): SEND/RECV posting, registered operands, finite frame queues and completion handling. Dedicated send and receive threads spin independently of numerical execution, including initial receive posting. The send worker drains each polled completion batch and refills from its ready indices without walking the publication list between individual completions. It collects new publications after the CQ sweep. Setup follows the configured connector/listener role. Nonblocking connection and duplex metadata progress have no software deadline, socket timeout or sleep; explicit stop or client detachment cancels setup. An absent peer is incomplete pairing, not a transport failure. Each queue exchanges its configured receive bindings once; each sender validates the corresponding identities, relative offsets and sizes. The shared-memory transfer record contains only local row, binding identity, relative offset, reader plane and byte count. Its array position is the transfer identity within a queue. Runtime announcements carry those indices, and the receiver gathers its own destination from its realized table. Neither participant stores the other participant’s physical page addresses. Posting resolves local rows through the canonical page table; completion retains the exact posted page. Shared-memory ABI 32 retains the indexed transfer layout, reduced port status record and realized send-source mask. Realization marks the source rows of configured transfers. Publication intersects its row range with that mask before emitting send notices; numerical-only regions do not enter the transport notice queue. Initial transport setup still indexes already-present source values, including constants published before realization. Row allocation and client retirement clear routing membership. Port status retains phase, error domain and error code; unused copies of device/peer identity and error timestamps are removed. Transport performs no clock reads or timestamped setup logging. Real socket/provider errors remain reported. The wire signature distinguishes this protocol from the former double exchange. Index descriptions identify configured transfers in ready order. Receive posting still follows these announcements and still checks prior readers; this change does not implement up-front posting or eliminate receive-side reuse checks. The send thread reserves hardware queue capacity while selecting ready transfers and posts their payloads directly after the description, without an intermediate announced-payload queue. `Program.replicate` composes these copies. Local scatter/gather materialization plans logical source/destination byte indices and splits each segment at page boundaries during setup. Invocation resolves those indices through the canonical page table and uses the existing `memcpy` operations; it creates no staging operand and performs no allocation.
-
-Local copy overlap uses logical tensor/extent identity and ordered row intervals from Ref geometry. Slices, transposes and broadcasts preserve these intervals; the comparison uses their indices without consulting host mappings or creating NumPy arrays. Native materialization retains its own page-ownership validation.
+Apple [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt),
+MLX authors' [JACCL transport](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/lib/jaccl/rdma.h),
+and rdma-core's [ibv_post_recv](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_recv.3):
+registered SEND/RECV and work completion. The [hardware notes](collective-dependency-ledger.md)
+distinguish substrate facts from the retained bridge's protocol decisions.
 
 ## Program.write
 
-Papadopoulos and Culler, *Monsoon* (1990): host writes publish operand presence after their writes are visible. The host-writer check belongs to `Program.write`; the separate `Ref.writable` polling property and its native query wrappers are removed. The existing host-writer reuse path retains previous-reader lifetime checks; distinct configured instances use distinct storage. The unused program-wide publication-size query is also removed; setup still derives regions from each tensor’s actual publication geometry.
+The JAX authors' [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html):
+operand production. The user's contract requires publication of completed sections.
 
 ## Program.export
 
-Papadopoulos and Culler, *Monsoon* (1990): `Result` observes output presence and records consumption in the canonical reader state. Export does not insert an intermediate tensor or numerical operation. Host access obtains a read-only NumPy view after resolving the logical region's current CPU mapping. Its backing remains valid until consumption; remapping is not permission to reuse backing still read by any consumer.
+MLX authors' [Metal evaluation](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/eval.cpp):
+reference for retaining operands through actual operation completion.
 
 ## kernels.expression
 
-The JAX authors, [Pallas indexing](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs): arithmetic, casts, indices and masks describe functions over Ref regions. `kernels.arguments` names the inputs; the retained scalar operations support the listed neural-network compositions. Floor-division and remainder expression operators, modular integer reduction trees and the custom multiword integer SIMD sum are removed. Tensor sums accumulate floating-point inputs in FP32 through ordinary addition and Metal’s existing `simd_sum`; integer indices and masks remain available. Reduction lowering no longer carries an enclosing output dtype through its recursive traversal. Setup caches Metal libraries directly by source and CPU libraries by their owning handle and entry point. The source-retaining base class, Metal wrapper and backend-selecting cache helper are removed; only successful compilations enter the caches. Indexed loads use configured pages. Setup specializes statically known access regions and binds their dependencies directly. Function inputs, page enumeration and each export coalesce their page ranges through the same array operation; separate exports retain separate reader identities. A whole-table gather with value-dependent indices binds the table as an input; indices and masks execute only in the numerical kernel. Selector tensors, candidate retirement, payload-index scans in the dependency scheduler, and their native binding API are removed. Constant embedding weights need no runtime reader retirement. This removes selective scheduling of sparse, dynamically produced table candidates; it does not change numerical gather indexing or masks.
+The JAX authors' [Pallas indexing](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs):
+values, indices and masks. This is not a requirement for a general expression compiler.
 
 ## kernels.dot
 
-Dongarra, Du Croz, Hammarling and Duff, *A Set of Level 3 Basic Linear Algebra Subprograms*, ACM TOMS 1990; Apple, [MPSMatrixMultiplication](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication), [BNNS broadcast matmul](https://developer.apple.com/documentation/accelerate/bnnsfiltercreatelayerbroadcastmatmul(_:_:)) and Core ML: existing numerical operations compute configured contraction contributions. Setup derives relative views and dependencies for each publication region. BLAS, BNNS and MPS additionally partition mutable footprints at registered backing-block boundaries; constants retain their immutable extent views. Each invocation resolves logical pages to physical byte offsets. MPS geometry and buffer views, BLAS dimensions and BNNS filters are created at setup. BNNS's existing beta-capable filter API accumulates subdivisions without a copied operand or an authored multiplication/reduction kernel. The [address derivation](streaming-algebra.md#contraction-addresses) specifies the layout and Metal resource scopes. Core ML still binds fixed arrays, and receive-buffer recycling is unfinished. The JAX authors, [Pallas accumulation](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation): independently available K contributions occupy distinct storage and addition combines contributions; subdivisions within one already-ready contribution use the numerical library's accumulation.
-
-PyTorch DTensor authors, `Partial` placement, and the Legion authors, reduction privileges: setup-only `Partial` records required and present contribution sets. Duplicate terms are rejected; addition clears the marker only when all required terms are present. Nonlinear public kernel calls reject unfinished sums.
+Dongarra, Du Croz, Hammarling and Duff, *A Set of Level 3 Basic Linear Algebra
+Subprograms* (1990), Apple [MPSMatrixMultiplication](https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication),
+[BNNS matmul](https://developer.apple.com/documentation/accelerate/bnnsfiltercreatelayerbroadcastmatmul(_:_:))
+and [Core ML MIL operations](https://apple.github.io/coremltools/source/coremltools.converters.mil.mil.ops.defs.html):
+existing contractions. The [reduction algebra](distributed-reduce.md) describes
+contributions without prescribing intermediate-buffer or launch counts.
 
 ## kernels.add
 
-The JAX authors, [Pallas reductions and accumulation](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation): additions combine independently available contributions. Caller-supplied addition bindings are also used inside contraction and normalization reduction trees. The engine addition binding partitions dense equal-shaped operands at the output tensor’s publication boundaries during setup. Each slice registers its own input dependencies and uses the existing addition encoder on the original registered buffers. An available slice no longer waits for every other slice of a received Ref. No remote-fill completion wait is inserted.
+The JAX authors' [Pallas accumulation](https://docs.jax.dev/en/latest/pallas/pipelining.html#reductions-and-accumulation):
+reference for combining numerical contributions.
 
 ## collective.reduce_scatter
 
-Rabenseifner, *Optimization of Collective Reduction Operations* (2004), and Patarasuk and Yuan, *Bandwidth optimal all-reduce algorithms for clusters of workstations* (2009): copies and additions reduce each block at its caller-configured owner. `collective.send` is `Program.copy`; `collective.all_gather` distributes owner blocks; `collective.all_reduce` composes reduce-scatter and all-gather. No placement search or numerical algorithm is added to transport.
+Rabenseifner, *Optimization of Collective Reduction Operations* (2004), and the
+MPI Forum's [collectives](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm):
+reduction semantics and decompositions. A source does not mandate one decomposition
+for every collective or caller placement.
 
-MPI Forum, [global reduction](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm), and MLX authors, [distributed operations](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/ops.cpp): `reduce` places completed values at the caller's root; `reduce_scatter` places them at the supplied owners; `all_reduce` replicates them. The binary `op` is a numerical kernel, defaulting to addition. Its balanced tree binds separate intermediate Refs, so each pair reduces when its own inputs exist; no gather operation precedes that tree. `all_sum` and `sum_scatter` reuse these sum implementations. `all_max` and `all_min` select the existing expression path with pointwise comparison/select kernels that propagate NaNs. A caller-supplied operation must be associative under its intended numerical contract. Mesh adds no reduction arithmetic to the transport loop.
+## Collective movement
 
-## collective movement
-
-MPI Forum, [collective communication](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm), defines distinct broadcast, scatter, gather, all-gather and all-to-all data movements. `_move` realizes their indexed source/destination pairs through `Program.copy`; it performs no arithmetic and inserts no availability barrier. The public functions supply the appropriate route relation, retaining the caller's global block coordinates. `send` and `recv` are two names for the same paired-Ref transfer declaration, used once per edge. `recv_like` reuses `Program.replicate` for receiver allocation from source tensor geometry. These are mesh Ref signatures, not a compatibility layer for MLX's lazy-array signatures. [The collective calling contract](collective-verbs.md) specifies them.
+The MPI Forum's [collectives](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm)
+and MLX's [distributed operations](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/ops.cpp):
+[distinct communication relations](collective-verbs.md).
 
 ## nn.ffn
 
-Shoeybi et al., [Megatron-LM](https://arxiv.org/abs/1909.08053), and the MLX authors, [tensor-parallel layers](https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/distributed.py): column-partitioned expansion followed by row-partitioned projection. `nn.linear` uses the existing contraction. `nn.ffn` composes `linear`, balanced additions, and activation directly, keeping projection accumulation in FP32 and casting at activation/output boundaries; it does not rebuild contraction tiling in an enclosing expression. It returns the local down-projection contribution. The caller chooses the collective and output placement. The streaming chain uses `reduce` because its subsequent consumer is on the root; it does not replicate a result to an unused participant.
-
-Hendrycks and Gimpel, [Gaussian Error Linear Units](https://arxiv.org/abs/1606.08415) (2016): the engine's existing gated activation computes GELU(gate) times up. Its encoder now binds a separate output operand; existing in-place calls use the same buffer explicitly.
+Shoeybi et al., [Megatron-LM](https://arxiv.org/abs/1909.08053), and MLX's
+[tensor-parallel layers](https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/distributed.py):
+local numerical functions composed with collectives. Hendrycks and Gimpel,
+[GELU](https://arxiv.org/abs/1606.08415): the activation already supplied by the engine.
 
 ## nn.rmsnorm
 
-Zhang and Sennrich, *Root Mean Square Layer Normalization* (2019): sum squared features, normalize by the reciprocal root mean square and apply the scale. The expression composition reduces feature contributions before normalization. The engine binding uses its existing FP16 or FP32 numerical kernel on canonical regions.
+Zhang and Sennrich, [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467)
+(2019): normalization used by the existing numerical implementation.
 
 ## nn.embedding
 
-The JAX authors, [Pallas indexed Refs](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs): indices select table rows and masks delimit valid elements; configured output blocks publish independently.
+The JAX authors' Pallas indexing and the llama.cpp authors'
+[GGUF format](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md):
+references for indexed operands and the existing model loader.
 
 ## collective.sync_on_remote_fill
 
-MPI Forum, [MPI-4.1 communication completion](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node74.htm): explicit completion waits are separate from nonblocking initiation. This function polls caller-supplied, already-exported Results until every region is present. It neither initiates transfers nor consumes results. Mesh progress remains on its existing threads. The example uses the existing addition kernel and SEND/RECV paths; Welford (1962), *Note on a Method for Calculating Corrected Sums of Squares*, supplies its online timing mean and sample variance. Its caller-order cycle is derived in [the synchronization counterexample](sync-on-remote-fill.md). No default collective calls this function. The same example's `independent` mode leaves one source absent and retains all other results; it observes ready values without calling the wait. It demonstrates the absence of those two artificial edges, not completion of the outstanding preposting/storage work.
+The MPI Forum's [communication completion](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node74.htm):
+explicit completion operations. The user requested an explicit counterexample;
+no default collective may invoke it.

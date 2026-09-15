@@ -255,13 +255,11 @@ lives in `bin/` for the same reason.
 
 ## Asynchronous collectives
 
-The required end state is [collective goals](design/collective-goals.md), governed
-by the [asynchronous collective contract](design/async-collectives.md).
-The caller supplies mesh and tensor placement configuration. Realization binds
-actual storage, indexed dependencies and numerical functions before invocation.
-Implement strict dependencies through canonical mesh and established numerical
-implementations. Do not add cost models, automatic placement or a general compiler
-project.
+The [user's collective requirements](design/collective-goals.md) define this task.
+The implementation is higher-order functions over partial tensors, collective
+communication, and zero-copy asynchronous execution after AOT realization.
+Existing code, prior plans and other application specifications do not authorize
+additional features or restoration of the deleted executor and callers.
 
 ## Tests and specification
 
@@ -278,8 +276,8 @@ measurements provide evidence about implementation, not authority over the speci
 Operator instruction, September 9, 2026: use commits and checkouts, and use
 `main` when it suffices. Preserve overwritten source only in commit history;
 no resets, cleans, stashes, backup copies, or uncommitted source transfers.
-Record the commits used for measurements and run distributed measurements on
-the available RDMA substrate. This governs development synchronization; the
+If measurements are requested, record their commits and use the available RDMA
+substrate. Measurements are not a collective implementation prerequisite. This governs development synchronization; the
 bootstrap continues to follow the latest named branch.
 
 Shared-memory operands have no privacy classification. Their storage must be

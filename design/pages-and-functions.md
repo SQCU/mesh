@@ -1,6 +1,7 @@
 # Pages and functions
 
-The [asynchronous collective contract](async-collectives.md) is the complete scope.
+The [user's requirements](collective-goals.md) define scope. This note describes
+operand and lifetime relationships; it prescribes no executor or scheduling method.
 The caller supplies the mesh and tensor placement. Mesh realizes their storage,
 indexed dependencies and numerical function bindings before invocation.
 
@@ -23,6 +24,26 @@ send and receive endpoints to registered storage and uses the existing completio
 mechanisms. Numerical callers do not implement transport or page-table operations.
 
 Papadopoulos and Culler, *Monsoon: an Explicit Token-Store Architecture* (1990),
-supplies operand-associated presence prior art. The JAX authors' Pallas collective
-matmul supplies indexed forwarding and distinct live receive buffers. Links are in
-the [contract](async-collectives.md#mechanism-sources).
+supplies operand-associated presence prior art, not a requirement for a function
+scan. The JAX authors' Pallas collective matmul supplies indexed forwarding and
+distinct live receive buffers. Sources are [references](algorithm-sources.md),
+not additional requirements.
+
+## What the page table is
+
+A logical tensor section is an index range with a configured layout. Its page-table
+entries name actual registered backing. A view alone does not establish contiguity:
+setup decomposes the operand into the contiguous sections required by the chosen
+numerical calls, preserving contraction contributions and output coordinates.
+
+For section s, outstanding ownership is R(s) = P(s) + C(s) + T(s) + E(s): unfinished
+production, configured numerical uses, transport uses, and external observations.
+Setup derives known uses from the feed-forward graph. Existing completions and
+automatic object lifetimes discharge them. Early publication does not release an
+unfinished producer. A background collector returns zero-reference backing to the
+writable pool without clearing payload bytes. Independent work already has its
+configured sections and never awaits that collection.
+
+The implementation trusts caller configuration and backend completion contracts.
+Its ownership records describe actual accesses; they do not police arbitrary
+external code. No caller free/done call or consumer-stamp protocol is required.
