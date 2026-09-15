@@ -117,6 +117,17 @@ fixed extent addresses. Their integration, receive preposting and backing reuse
 remain necessary before claiming G4. This address change establishes no latency
 parity or coverage of those unfinished paths.
 
+The existing two-participant `examples/streaming-chain.py` ran on September 14
+with these bindings at `2a5b041`, Metal numerics, the FP32 inputs in
+`/tmp/mesh-tp-consumer`, split 256, tiles 128 rows / 128 K / 256 columns and two
+instances. The root returned all 64 output regions and exited successfully.
+Their values matched the prior `931d438` run exactly when keyed by output region;
+arrival order differed. Logs are `/tmp/mesh-indexed-streaming-root.log` and the
+peer's `/tmp/mesh-indexed-streaming-peer.log`. Native, Python-package and engine
+integration builds completed on both participants. This demonstrates use of the
+changed MPS bindings in the producer/reduction/consumer chain, not relocation or
+latency parity. No additional test program was added.
+
 ## Realized storage and the unresolved receive-posting requirement
 
 `mesh_algebra_realize` prints `participant` and `planned_arena_bytes` before

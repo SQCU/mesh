@@ -323,8 +323,9 @@ static NSArray<MPSMatrix *> *matrix(MeshAlgebra *a,struct mesh_view v,BOOL trans
     buffers=a.matrixBuffers[@(quantum)];
     if(!buffers) {
       NSMutableArray<id<MTLBuffer>> *blocks=[NSMutableArray new];
-      for(size_t offset=0;offset<(size_t)mesh_rows(a->context->M)*pg;offset+=bank_bytes)
-        [blocks addObject:[a.device newBufferWithBytesNoCopy:mesh_at(a->context->M,0)+offset length:bank_bytes options:MTLResourceStorageModeShared deallocator:nil]];
+      size_t arena_bytes=(size_t)mesh_rows(a->context->M)*pg;
+      for(size_t offset=0;offset<arena_bytes;offset+=bank_bytes)
+        [blocks addObject:[a.device newBufferWithBytesNoCopy:mesh_at(a->context->M,0)+offset length:MIN(bank_bytes,arena_bytes-offset) options:MTLResourceStorageModeShared deallocator:nil]];
       a.matrixBuffers[@(quantum)]=blocks;buffers=blocks;
     }
   }
