@@ -253,7 +253,7 @@ subset, never as "done".
 | 19f | X6 TensorPart is POD | ◐ | Swift `TensorPart` holds a `storage` reference |
 | 19g | X7 functions get contiguous operand arrays | ✓ (verify) | `MeshOperands` |
 | 20 | G1 contraction/Gram as the same calls | ◐ (FFN shown, Gram not) | `examples/coreml-chain.swift` |
-| 21 | G2 indices as data (caller pattern) | ✗ | — |
+| 21 | G2 indices as data (caller pattern) | ✓ | `e47f669` `examples/indexed-gather.swift` 120 lines: index sections are ordinary `TensorPart`s (produced locally or received by `send`); routed expert = `map` over `[x, w0, w1, expertIdx]`, neighbourhood sum = `map` over `[table, idx]`; selection inside the supplied function; firing by X2 countdown; library delta 0; no new symbol |
 | 22 | G3 two callers | ✗ | — |
 | 23 | T1 topology observed | ◐ | `3e0d603` `swift/Topology.swift` (`Topology{nodes, links: [Pair: [Link]]}`, `Mesh.observe()` via read-only `mesh_observe`, no client slot; bandwidth from `ibv_query_port`; ABI 44); missing: latency (row 22a), idle pairing so `observe()` sees cabled links before a client (row 22b); tree/ring+spur run needs T2 |
 | 24 | T3 multi-link striping | ◐ on branch `row/T1-T3` (`60bf25a`, not merged) | codex striped chunk c → link c mod L at realization but did it with a banked append log walked by per-link cursors, a per-operand `remaining` fan-in counter, padding chunks and hidden `receive_width` state — runtime structures I17 forbids and that W2/W3's deletions remove; re-do on top of row 19c as a start()-time column in the `send_edge` table (chunk → link, planned page per link), then merge |
