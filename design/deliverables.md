@@ -216,7 +216,7 @@ subset, never as "done".
 | 14 | L5 Partial type | ✗ | — |
 | 15 | N1 unbounded instances | ◐ | `count` finite |
 | 16 | N2 Result surface | ◐ | — |
-| 17 | E1 engine layer via Mesh | ✗ | — |
+| 17 | E1 engine layer via Mesh | ✓ (unrun) | engine `6507370` `mesh_layer.swift` 229 lines, 2 collective points, 12 existing encoders bound, no kernel file changed; target `.build/libgemma_mesh.dylib` builds; not yet run on the pair (row 19) |
 | 18 | E2 public measurement + Karp–Flatt | ◐ | script `metal-microbench/tools/mesh/report.py` (engine `feda6a6`): public endpoint only, memory-state guard, S/e/capability-sum/bounds/verdict; dry-run reproduces 1.42x, 1.08x and the ten-minute table; **no measured run yet** (needs E1) |
 | 19 | E3 depthwise chain not slower | ✗ | — |
 | 19a | X1 dense presence stamps | ◐ | stamps exist; verify no map/list on the publish path |
