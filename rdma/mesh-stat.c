@@ -28,7 +28,7 @@ int main(int argc,char **argv){
   int alive=pid && (!kill((pid_t)pid,0) || errno==EPERM);
   int paired=alive && atomic_load(&h->port.phase)==MESH_PAIRED;
   printf("{\"up\":%s,\"ready\":%s,\"paired\":%s,\"bridge_pid\":%llu,\"client\":%llu,\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"rows\":%u,\"qps\":%u,\"code\":%lld,\"domain\":%u}\n",
-    alive?"true":"false",alive?"true":"false",paired?"true":"false",(unsigned long long)pid,(unsigned long long)atomic_load(&h->client),
+    alive?"true":"false",alive?"true":"false",paired?"true":"false",(unsigned long long)pid,(unsigned long long)(uint32_t)atomic_load(&h->client),
     h->version,h->node,h->pgsz,h->block,h->rows,h->qps,(long long)h->port.code,h->port.domain);
   munmap(h,bytes); close(f); return readiness && !alive;
 }

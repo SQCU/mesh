@@ -1,4 +1,4 @@
-BINS = mesh-flow mesh-stat libmesh.dylib libmesh-algebra.dylib
+BINS = mesh-flow mesh-stat libmesh.dylib
 all: $(BINS)
 mesh-flow: mesh-memory.h mesh-flow.c mesh-verbs.h mesh.h mesh-dataflow.h mesh-dataflow.c Makefile
 	mkdir -p .build
@@ -12,6 +12,3 @@ libmesh.dylib: mesh-memory.h mesh-dataflow.c mesh-dataflow.h mesh.h
 clean:
 	rm -f $(BINS)
 .PHONY: all clean
-
-libmesh-algebra.dylib: mesh-algebra.m mesh-algebra.h mesh-kernel.h mesh-dataflow.h libmesh.dylib
-	clang -O2 -fobjc-arc -dynamiclib -Wl,-install_name,@rpath/libmesh-algebra.dylib -Wl,-rpath,@loader_path -o $@ mesh-algebra.m -L. -lmesh -framework Accelerate -framework Foundation -framework Metal -framework MetalPerformanceShaders -framework CoreML
