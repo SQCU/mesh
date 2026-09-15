@@ -121,6 +121,8 @@ public struct TensorPart {
 public enum MeshError: Error {
     case partialOperand(TensorPart)
     case busy
+    case link(peer: Int, code: Int)
+    case function(call: Int, code: Int)
 }
 
 private struct MeshDelivery: Hashable {
@@ -467,6 +469,21 @@ public final class Mesh {
     // design/algorithm-sources.md#program
     public func submit(_ index: Int) -> Result<Void, MeshError> {
         mesh_calls_submit(calls, UInt32(truncatingIfNeeded: index)) != 0 ? .success(()) : .failure(.busy)
+    }
+
+    // design/algorithm-sources.md#meshresult
+    public func result(_ index: Int) -> Result<Void, MeshError> {
+        let status = mesh_calls_status(calls, UInt32(truncatingIfNeeded: index))
+        if status != 0 {
+            return .failure(.function(call: Int(status >> 32) - 1, code: Int(Int32(truncatingIfNeeded: status))))
+        }
+        let region = memory.context.pointee.M!
+        let links = mesh_links(region)!
+        for i in 0..<Int(region.pointee.links) {
+            let code = mesh_link_error(links.advanced(by: i))
+            if code != 0 { return .failure(.link(peer: Int(links[i].peer), code: Int(code))) }
+        }
+        return .success(())
     }
 
     // design/algorithm-sources.md#collectivesync_on_remote_fill

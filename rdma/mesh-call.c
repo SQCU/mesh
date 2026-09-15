@@ -16,7 +16,7 @@ struct mesh_function {
   struct mesh_operand *operands;
   uint32_t *remote;
   size_t input_count,output_count,remote_count,consumed_count;
-  uint32_t worker;
+  uint32_t worker,ordinal;
   mesh_submit submit;
   mesh_dispose dispose;
   void *argument;
@@ -40,6 +40,7 @@ struct mesh_calls {
   _Atomic int running;
   void *owner;
   mesh_dispose dispose;
+  _Atomic uint64_t status[];
 };
 
 /* design/algorithm-sources.md#program */
@@ -74,9 +75,10 @@ static void mesh_calls_release(struct mesh_calls *calls,uint32_t references){
 /* design/algorithm-sources.md#programkernel_call */
 struct mesh_calls *mesh_calls_create(struct mesh_ctx *context,uint32_t workers,uint32_t inFlight,void *owner,mesh_dispose dispose){
   if(!context || !context->M || !workers || workers>MESH_COMPUTE_THREADS || !inFlight){errno=EINVAL;return NULL;}
-  struct mesh_calls *calls=calloc(1,sizeof *calls);
+  struct mesh_calls *calls=calloc(1,sizeof *calls+(size_t)inFlight*sizeof *calls->status);
   if(!calls)return NULL;
   calls->context=context;calls->count=workers;calls->extent=inFlight;calls->first=MESH_ABSENT;atomic_init(&calls->references,1);
+  for(uint32_t i=0;i<inFlight;i++)atomic_init(&calls->status[i],0);
   for(uint32_t i=0;i<workers;i++){
     calls->workers[i]=(struct mesh_call_worker){.calls=calls,.index=i,.offsets=calloc((size_t)mesh_rows(context->M)+1,sizeof(size_t))};
     if(!calls->workers[i].offsets){mesh_calls_release(calls,1);return NULL;}
@@ -120,7 +122,7 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
     }
     retained++;
   }
-  calls->function_count++;
+  function->ordinal=(uint32_t)calls->function_count++;
   calls->workers[worker].references+=calls->extent;
   function->next=calls->functions;calls->functions=function;
   return function;
@@ -256,6 +258,7 @@ int mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
   struct mesh_buffer *event=&mesh_buffers(m)[root];
   uint32_t stamp=atomic_load_explicit(&event->uses,memory_order_acquire);
   if(!stamp)return 0;
+  atomic_store_explicit(&calls->status[slot],0,memory_order_relaxed);
   atomic_store_explicit(&event->uses,0,memory_order_relaxed);
   atomic_store_explicit(&event->ownership,calls->row_count,memory_order_relaxed);
   for(size_t i=0;i<calls->function_count;i++){
@@ -272,6 +275,11 @@ int mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
   return 1;
 }
 
+/* design/algorithm-sources.md#meshresult */
+uint64_t mesh_calls_status(struct mesh_calls *calls,uint32_t index){
+  return atomic_load_explicit(&calls->status[mesh_slot(calls,index)],memory_order_acquire);
+}
+
 /* design/algorithm-sources.md#programkernel_call */
 void mesh_call_fail(struct mesh_call *call,int error){
   struct mesh_function *function=call->function;
@@ -279,6 +287,7 @@ void mesh_call_fail(struct mesh_call *call,int error){
   struct mesh_ctx *context=calls->context;
   uint32_t index=call->index;
   call->completed=1;
+  atomic_store_explicit(&calls->status[index],(((uint64_t)function->ordinal+1)<<32)|(uint32_t)error,memory_order_release);
   context->M->port.code=error;context->M->port.domain=4;
   for(size_t i=0;i<function->consumed_count;i++){
     struct mesh_section section=function->consumed[i];

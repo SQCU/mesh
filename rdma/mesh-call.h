@@ -21,6 +21,11 @@ void mesh_call_complete(struct mesh_call *);
 void mesh_call_fail(struct mesh_call *,int error);
 void mesh_calls_destroy(struct mesh_calls *);
 
+/* design/algorithm-sources.md#meshresult */
+uint64_t mesh_calls_status(struct mesh_calls *,uint32_t index);
+/* design/algorithm-sources.md#meshresult */
+static inline int64_t mesh_link_error(const struct mesh_link_info *link){return atomic_load_explicit(&link->port.code,memory_order_acquire);}
+
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfer_bind(struct mesh_ctx *,uint32_t queue,int receive,uint32_t identity,struct mesh_section);
 int mesh_transfers_prepare(struct mesh_ctx *,const struct mesh_section *,size_t count);

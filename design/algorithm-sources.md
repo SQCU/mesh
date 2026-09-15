@@ -56,7 +56,11 @@ Movement preserves the logical identity, so a contribution's setup restriction f
 
 ## MeshError
 
-The Legion authors, [reduction privileges](https://legion.stanford.edu/tutorial/privileges.html): reduction operands have restricted uses. Mesh's public `call` records one validation closure, executed by `start()` after all reductions have been declared. Its sole throw reports `partialOperand` with a partial view of the offending operand. The reduction's supplied combine uses the same private binding path without that validation. This is a declaration-time restriction, independent of backend and numerical completion order. The LMAX authors' [Disruptor](https://lmax-exchange.github.io/disruptor/user-guide/) supplies preallocated event storage and sequences: `busy` reports an unset slot-free stamp immediately, without a consumer query or wait.
+The Legion authors, [reduction privileges](https://legion.stanford.edu/tutorial/privileges.html): reduction operands have restricted uses. Mesh's public `call` records one validation closure, executed by `start()` after all reductions have been declared. Its sole throw reports `partialOperand` with a partial view of the offending operand. The reduction's supplied combine uses the same private binding path without that validation. This is a declaration-time restriction, independent of backend and numerical completion order. The LMAX authors' [Disruptor](https://lmax-exchange.github.io/disruptor/user-guide/) supplies preallocated event storage and sequences: `busy` reports an unset slot-free stamp immediately, without a consumer query or wait. Following the [end-to-end argument](#meshresult), `function(call:code:)` identifies a zero-based binding ordinal and signed error code; `link(peer:code:)` reports a program-wide transport failure for the driver to re-realize.
+
+## Mesh.result
+
+Saltzer, Reed and Clark, [End-to-End Arguments in System Design](https://web.mit.edu/saltzer/www/publications/endtoend/endtoend.pdf) (1984): recovery belongs to the caller; `Mesh.result` and `mesh_calls_status` read one slot status with acquire ordering, packing binding ordinal plus one in the high 32 bits and signed error bits in the low 32, release-stored by `mesh_call_fail` and cleared only on submission re-arm. The bounded link-record read through `mesh_link_error` reports program-wide failure; success means no recorded failure, not completion, and slot reuse replaces the prior instance's status.
 
 ## Program.kernel_call
 
