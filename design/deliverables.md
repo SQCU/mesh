@@ -284,8 +284,9 @@ An agent picking "the first ✗/◐ row" skips assigned rows and takes the next 
 
 | Rows | Lane | Worktree / branch |
 |---|---|---|
+| 19c, 19d, 19e, 19a, N1t (mesh runtime paths: `mesh-flow.c`, `mesh-call.c`, `mesh.h`, `Mesh.swift`) | live Codex session in `~/dox/mesh` (took 19c/19d itself at `93826c3`) | main — NOTE: N1/N2 (`01f2727`, `083ddbb`, ABI 45) landed on origin/main at 16:4x; rebase local edits before committing |
+| 19 part 2 (prompt reaches every rank; every rank prefills its own KV) | J | `mmb-wt/E3b` → `row/E3b` (metal-microbench: lm_engine, bootstrap, metal_runtime, ffi) |
 | 24 (redo after 19c) | — | `row/T1-T3` holds the first attempt |
-| 19 | E3 | `mmb-wt/E3` → `row/E3` (active integration process) |
 
 Unassigned and open: 15, 16; W1–W6 fixes = one lane (X3a matching at 19c0 precedes X3 at 19c; X4 admission is implemented at 19d; X5 and X1 remain at 19e and 19a); 19f (X typings; 19c and 19e first), 20 (caller implemented; W1–W6 open), 22, 22a, 22b, 25, 27, 28, 29. Lane A's two L5 commits are integrated, its worktree is clean, and its process has finished; N1/N2 were not implemented there. The core files are available for the lifecycle and W/X work. Note: both bridges were restarted at 14:57 from the main checkouts (`/Users/mdot/dox/mesh/rdma/mesh-flow`, `~/mesh/rdma/mesh-flow` on the Mini, ABI 43, same config); the `mesh-wt/P1` worktree is no longer load-bearing.
 
