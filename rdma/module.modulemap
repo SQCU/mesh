@@ -1,0 +1,5 @@
+module CMesh {
+  header "mesh-call.h"
+  link "mesh"
+  export *
+}

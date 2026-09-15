@@ -3,7 +3,9 @@
 The [user's collective goal](design/collective-goals.md) is higher-order
 functions over partial tensors, collective communication, and zero-copy async
 execution after AOT realization. The inherited numerical stack and its callers
-have been deleted. The replacement interface is not yet implemented.
+have been deleted. The [replacement interface and source examples](design/async-collectives.md)
+accept supplied tensor functions; the remaining integration and transport limits
+are listed with the implementation.
 
 Provisioning for a fabric of Apple Silicon Macs wired together with Thunderbolt and
 talking RDMA. The invariant: **a node may never become unreachable, and may never
@@ -500,5 +502,8 @@ Runs as root at boot with no login session. `KeepAlive` restarts it forever.
 The [user's requirements](design/collective-goals.md) are the scope.
 The retained substrate is `rdma/mesh-flow.c`, canonical page storage and buffer
 ownership. Ordinary bridge lifecycle commands are in `bin/mesh-bridge.sh`.
+`swift/Mesh.swift` supplies higher-order partial calls and collective relations;
+`rdma/mesh-call.c` binds their operand uses to native completion. See the
+[source data flow, examples and current limits](design/async-collectives.md).
 No deleted Python API, numerical executor, solver or demonstration is a current
 implementation dependency.

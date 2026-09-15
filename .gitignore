@@ -4,6 +4,13 @@ networks.conf
 rdma/mesh-flow
 rdma/mesh-stat
 rdma/*.dylib
+rdma/Mesh.swiftmodule
+rdma/Mesh.swiftdoc
+rdma/Mesh.swiftsourceinfo
+rdma/Mesh.abi.json
+rdma/linear-chain
+rdma/sync-on-remote-fill
+rdma/coreml-chain
 rdma/mesh-hop
 rdma/qcaps
 rdma/qfill

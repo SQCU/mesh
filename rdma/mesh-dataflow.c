@@ -9,10 +9,6 @@
 #include <unistd.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
 
-static struct mesh_ctx CTX0;
-struct mesh_ctx *mesh_context(void){ return &CTX0; }
-struct hdr *mesh_region(struct mesh_ctx *c){ return c->M; }
-
 /* ledger D14: a leaving client's queue orders, unsent productions and ownership end with it. Work requests
    the bridge already posted keep their occupancy until the bridge destroys their queue pairs. */
 static void mesh_retire(struct hdr *m,uint64_t client){
@@ -43,14 +39,19 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   if((size_t)info.st_size<sizeof *memory || memory->magic!=MESH_MAGIC || memory->version!=MESH_VERSION || memory->length>(uint64_t)info.st_size){
     munmap(memory,(size_t)info.st_size); close(file); return EINVAL;
   }
-  uint64_t client=((atomic_fetch_add_explicit(&memory->serial,1,memory_order_relaxed)+1)<<32)|(uint32_t)getpid(),vacant=0;
-  while(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,client,memory_order_acq_rel,memory_order_acquire)){
+  uint64_t client=(((atomic_fetch_add_explicit(&memory->serial,1,memory_order_relaxed)+1)&UINT64_C(0x7fffffff))<<32)|(uint32_t)getpid(),vacant=0;
+  while(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,client,memory_order_seq_cst,memory_order_acquire)){
     if(!vacant || !kill((pid_t)(uint32_t)vacant,0) || errno!=ESRCH){ munmap(memory,(size_t)info.st_size); close(file); return EADDRINUSE; }
     uint64_t previous=vacant;
-    if(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,client,memory_order_acq_rel,memory_order_acquire)) continue;
+    if(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,client,memory_order_seq_cst,memory_order_acquire)) continue;
     mesh_retire(memory,previous);
     break;
   }
+  uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
+  client|=(~device)&(UINT64_C(1)<<63);
+  for(uint32_t queue=0;queue<MESH_NOTICE_QUEUES;queue++)
+    atomic_store_explicit(&memory->notice_head[mesh_notice_queue(client,queue)],MESH_ABSENT,memory_order_relaxed);
+  atomic_store_explicit(&memory->client,client,memory_order_release);
   *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.client=client,.fd=file};
   return 0;
 }
@@ -65,41 +66,6 @@ int mesh_detach(struct mesh_ctx *c){
   *c=(struct mesh_ctx){0};
   return error;
 }
-
-/* design/algorithm-sources.md#programtensor */
-void *mesh_view_create(struct mesh_ctx *c,uint32_t row,size_t count,_Atomic uint32_t *mapped){
-  size_t page_bytes=c->M->pgsz;
-  if(!count || count>SIZE_MAX/page_bytes || row>mesh_rows(c->M) || count>mesh_rows(c->M)-row){ errno=EINVAL; return NULL; }
-  _Atomic uint32_t *pages=mesh_page(c->M)+row;
-  for(size_t i=0;i<count;i++) if(atomic_load_explicit(&pages[i],memory_order_acquire)>=mesh_rows(c->M)){ errno=EINVAL; return NULL; }
-  size_t length=count*page_bytes;
-  unsigned char *address=mmap(NULL,length,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
-  if(address==MAP_FAILED) return NULL;
-  for(size_t i=0;i<count;i++)atomic_init(&mapped[i],MESH_ABSENT);
-  int error=mesh_view_bind(c,row,count,address,mapped);
-  if(error){munmap(address,length);errno=error;return NULL;}
-  return address;
-}
-
-/* design/algorithm-sources.md#programtensor */
-int mesh_view_bind(struct mesh_ctx *c,uint32_t row,size_t count,void *address,_Atomic uint32_t *mapped){
-  size_t page_bytes=c->M->pgsz;
-  _Atomic uint32_t *pages=mesh_page(c->M)+row;
-  for(size_t first=0;first<count;){
-    uint32_t page=atomic_load_explicit(&pages[first],memory_order_acquire);
-    if(atomic_load_explicit(&mapped[first],memory_order_acquire)==page){first++;continue;}
-    size_t end=first+1;
-    while(end<count && atomic_load_explicit(&mapped[end],memory_order_acquire)!=page+end-first && atomic_load_explicit(&pages[end],memory_order_acquire)==page+end-first) end++;
-    off_t offset=(off_t)(c->M->data_off+(uint64_t)page*page_bytes);
-    if(mmap((char *)address+first*page_bytes,(end-first)*page_bytes,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,c->fd,offset)==MAP_FAILED)return errno;
-    for(size_t i=first;i<end;i++)atomic_store_explicit(&mapped[i],page+(uint32_t)(i-first),memory_order_release);
-    first=end;
-  }
-  return 0;
-}
-
-/* design/algorithm-sources.md#programtensor */
-int mesh_view_destroy(void *address,size_t length){ return munmap(address,length)?errno:0; }
 
 /* design/algorithm-sources.md#programkernel_call */
 static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t begin,uint32_t end,int own,int hot){
@@ -270,7 +236,16 @@ void mesh_notify(struct hdr *m,uint32_t first,uint32_t count){
     uint64_t sources=atomic_load_explicit(&mesh_plane(m,MESH_SEND_SOURCE)[word],memory_order_acquire)&mesh_word_mask(first,count,word);
     while(sources){
       uint32_t row=word*64+(uint32_t)__builtin_ctzll(sources);sources&=sources-1;
-      mesh_notice_push(m,MESH_NOTICE_SEND,row);
+      mesh_notice_push(m,mesh_notice_queue(mesh_buffers(m)[row].owner,MESH_NOTICE_SEND),row);
     }
+  }
+  for(uint32_t row=first;row<first+count;){
+    struct mesh_buffer *buffer=&mesh_buffers(m)[mesh_buffers(m)[row].first];
+    uint32_t uses=buffer->uses;
+    while(uses){
+      uint32_t worker=(uint32_t)__builtin_ctz(uses);uses&=uses-1;
+      mesh_notice_push(m,mesh_notice_queue(buffer->owner,MESH_NOTICE_COMPUTE+worker),buffer->first);
+    }
+    row=buffer->first+buffer->pages;
   }
 }

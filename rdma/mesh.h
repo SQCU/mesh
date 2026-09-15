@@ -9,7 +9,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 34u
+#define MESH_VERSION 37u
 #define MESH_ABSENT UINT32_MAX
 /* ledger D6: "A maximum of 10 unreliable connection (UC) queue pairs" */
 #define MESH_QPS 8
@@ -21,11 +21,13 @@ enum { MESH_PRESENT, MESH_CONSTANT, MESH_ASSIGNED, MESH_SEND_SOURCE, MESH_ROW_OW
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_BUFFER_PRODUCER=1, MESH_BUFFER_SEALED=2, MESH_BUFFER_QUEUED=4, MESH_BUFFER_CLOSED=8, MESH_BUFFER_RECLAIMED=16 };
 #define MESH_BUFFER_FLAG(flag) ((uint64_t)(flag)<<32)
-struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages,next; uint64_t owner; };
+struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages,next; _Atomic uint32_t uses; uint64_t owner; };
 /* ledger D5: one posting order per queue pair and direction */
 enum { MESH_SEND, MESH_RECEIVE };
-enum { MESH_NOTICE_SEND, MESH_NOTICE_QUEUES };
-struct mesh_notice { _Atomic uint32_t queued; uint32_t next; };
+#define MESH_COMPUTE_THREADS 8
+enum { MESH_NOTICE_SEND, MESH_NOTICE_COMPUTE, MESH_NOTICE_QUEUES=MESH_NOTICE_COMPUTE+MESH_COMPUTE_THREADS };
+#define MESH_NOTICE_BANKS 2
+struct mesh_notice { uint32_t next; };
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps;
@@ -34,10 +36,12 @@ struct hdr {
   _Atomic uint64_t client,bridge_pid,device_client,serial;
   _Atomic uint32_t reclaim_head;
   _Atomic uint32_t order_length[2*MESH_QPS];
-  _Atomic uint32_t notice_head[MESH_NOTICE_QUEUES];
+  _Atomic uint32_t notice_head[MESH_NOTICE_BANKS*MESH_NOTICE_QUEUES];
   struct mesh_port_info port;
 };
 void mesh_notify(struct hdr *,uint32_t first,uint32_t count);
+/* design/algorithm-sources.md#programtensor */
+static inline uint32_t mesh_notice_queue(uint64_t owner,uint32_t queue){return (uint32_t)(owner>>63)*MESH_NOTICE_QUEUES+queue;}
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
 static inline uint32_t mesh_blocks(const struct hdr *m){ return mesh_rows(m)/m->block; }
@@ -98,13 +102,11 @@ static inline struct mesh_notice *mesh_notices(struct hdr *m,uint32_t queue){
   return (struct mesh_notice *)((char *)m+m->notice_off)+(size_t)queue*mesh_rows(m);
 }
 /* design/algorithm-sources.md#programkernel_call */
-static inline int mesh_notice_push(struct hdr *m,uint32_t queue,uint32_t index){
+static inline void mesh_notice_push(struct hdr *m,uint32_t queue,uint32_t index){
   struct mesh_notice *entry=&mesh_notices(m,queue)[index];
-  if(atomic_exchange_explicit(&entry->queued,1,memory_order_acq_rel))return 0;
   uint32_t head=atomic_load_explicit(&m->notice_head[queue],memory_order_relaxed);
   do {entry->next=head;}
   while(!atomic_compare_exchange_weak_explicit(&m->notice_head[queue],&head,index,memory_order_release,memory_order_relaxed));
-  return 1;
 }
 /* design/algorithm-sources.md#programkernel_call */
 static inline uint32_t mesh_notice_take(struct hdr *m,uint32_t queue){
@@ -114,7 +116,6 @@ static inline uint32_t mesh_notice_take(struct hdr *m,uint32_t queue){
 static inline uint32_t mesh_notice_next(struct hdr *m,uint32_t queue,uint32_t index){
   struct mesh_notice *entry=&mesh_notices(m,queue)[index];
   uint32_t next=entry->next;
-  atomic_exchange_explicit(&entry->queued,0,memory_order_acq_rel);
   return next;
 }
 
@@ -128,8 +129,8 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->order_off=at; at+=(uint64_t)2*MESH_QPS*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
   h->index_off=at; at+=(uint64_t)2*(4095u/(block*pgsz/4096u))*MESH_INDEX_BYTES; at=(at+pgsz-1)/pgsz*pgsz;
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
-  h->notice_off=at; at+=(uint64_t)MESH_NOTICE_QUEUES*rows*sizeof(struct mesh_notice); at=(at+bytes-1)/bytes*bytes;
-  for(uint32_t queue=0;queue<MESH_NOTICE_QUEUES;queue++)atomic_store_explicit(&h->notice_head[queue],MESH_ABSENT,memory_order_relaxed);
+  h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*MESH_NOTICE_QUEUES*rows*sizeof(struct mesh_notice); at=(at+bytes-1)/bytes*bytes;
+  for(uint32_t queue=0;queue<MESH_NOTICE_BANKS*MESH_NOTICE_QUEUES;queue++)atomic_store_explicit(&h->notice_head[queue],MESH_ABSENT,memory_order_relaxed);
   atomic_store_explicit(&h->reclaim_head,MESH_ABSENT,memory_order_relaxed);
   h->data_off=at; at+=(uint64_t)rows*pgsz;
   h->length=at; return at;
