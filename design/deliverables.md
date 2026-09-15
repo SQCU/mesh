@@ -185,7 +185,7 @@ subset, never as "done".
 | 1 | S1 links list | ✓ | `c9d9e18` |
 | 2 | S2 TX/RX threads per link | ✓ (unrun on RDMA) | `c9d9e18` |
 | 3 | S3 chunked transport invisible | ✓ (unrun) | `98742c8` |
-| 4 | S4 bounded pairing | ◐ verify each syscall deadline | — |
+| 4 | S4 bounded pairing | ✓ | `06dcdb3`; checked nonblocking sockets, one deadline across all pairing exchanges |
 | 5 | L1 partial tensor | ✓ | `swift/Mesh.swift` `TensorPart` |
 | 6 | L2 supplied function | ✓ | `TensorFunction.cpu/.metal/.prediction` |
 | 7 | L3 publish/fire | ✓ (unrun) | `mesh-call.c` `mesh_publish` |
