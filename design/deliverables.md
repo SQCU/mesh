@@ -255,8 +255,10 @@ subset, never as "done".
 | 20 | G1 contraction/Gram as the same calls | ◐ (FFN shown, Gram not) | `examples/coreml-chain.swift` |
 | 21 | G2 indices as data (caller pattern) | ✗ | — |
 | 22 | G3 two callers | ✗ | — |
-| 23 | T1 topology observed | ◐ | links only |
-| 24 | T3 multi-link striping | ✗ | — |
+| 23 | T1 topology observed | ◐ | `3e0d603` `swift/Topology.swift` (`Topology{nodes, links: [Pair: [Link]]}`, `Mesh.observe()` via read-only `mesh_observe`, no client slot; bandwidth from `ibv_query_port`; ABI 44); missing: latency (row 22a), idle pairing so `observe()` sees cabled links before a client (row 22b); tree/ring+spur run needs T2 |
+| 24 | T3 multi-link striping | ◐ on branch `row/T1-T3` (`60bf25a`, not merged) | codex striped chunk c → link c mod L at realization but did it with a banked append log walked by per-link cursors, a per-operand `remaining` fan-in counter, padding chunks and hidden `receive_width` state — runtime structures I17 forbids and that W2/W3's deletions remove; re-do on top of row 19c as a start()-time column in the `send_edge` table (chunk → link, planned page per link), then merge |
+| 22a | T1 latency observation: bridge records per-link `mesh_link_info.latency` with validity; `observe()` exposes seconds or nil; no pairing-RTT substitute | ✗ | — |
+| 22b | T1 idle pairing: the bridge pairs every configured link at startup (no `if(!transfers) return` in `link_run`; controllers start before the client loop) so `observe()` before `Mesh(…)` sees every cabled link | ✗ | — |
 | 25 | T2 routes/forwarding | ✗ | — |
 | 26 | T4 bounds() | ✓ | `67b46e5`+`8f6316f` `swift/Bounds.swift` pure; `rdma/bounds-table` prints 199.34/229.01, 44.81/53.67, 359.28/389.61 |
 | 27 | T5 retopology Result | ✗ | — |
@@ -278,7 +280,7 @@ An agent picking "the first ✗/◐ row" skips assigned rows and takes the next 
 |---|---|---|
 | 14, 15, 16 | A | `mesh-wt/L5-N1-N2` → `row/L5-N1-N2` |
 | 26 | B | `mesh-wt/T4` → `row/T4` |
-| 23, 24 | C | `mesh-wt/T1-T3` → `row/T1-T3` |
+| 24 (redo after 19c) | — | `row/T1-T3` holds the first attempt |
 | 17 | D | `mmb-wt/E1` → `row/E1` (metal-microbench) |
 | 18 | E | `mmb-wt/E2` → `row/E2` (metal-microbench) |
 | — | hardware lanes F, G finished; the link is free for row 19 |
