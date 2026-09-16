@@ -75,8 +75,10 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
   client|=(~device)&(UINT64_C(1)<<63);
   for(uint32_t queue=0;queue<memory->links*(memory->qps+1)+2*MESH_COMPUTE_THREADS;queue++){
-    _Atomic uint64_t *words=mesh_notices(memory,mesh_notice_queue(memory,client,queue));
-    for(uint32_t i=0;i<memory->notice_words;i++)atomic_store_explicit(&words[i],0,memory_order_relaxed);
+    struct mesh_ring *ring=mesh_ring(memory,mesh_notice_queue(memory,client,queue));
+    atomic_store_explicit(&ring->tail,0,memory_order_relaxed);
+    atomic_store_explicit(&ring->head,0,memory_order_relaxed);
+    for(uint64_t i=0;i<(UINT64_C(1)<<memory->notice_shift);i++)atomic_store_explicit(&ring->slots[i],0,memory_order_relaxed);
   }
   for(uint32_t q=0;q<memory->links*memory->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(memory,client,q,d),0,memory_order_relaxed);
   atomic_store_explicit(&memory->client,client,memory_order_release);
@@ -180,7 +182,7 @@ void mesh_buffer_release(struct hdr *m,uint32_t row){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
   if(atomic_fetch_sub_explicit(&buffer->references,1,memory_order_acq_rel)==1){
     if(buffer->channel==MESH_ABSENT)atomic_fetch_or_explicit(&mesh_plane(m,MESH_FREE)[row/64],UINT64_C(1)<<(row%64),memory_order_release);
-    else mesh_notice_push(m,mesh_notice_queue(m,atomic_load_explicit(&buffer->owner,memory_order_relaxed),m->links+buffer->channel),row);
+    else mesh_ring_push(m,mesh_notice_queue(m,atomic_load_explicit(&buffer->owner,memory_order_relaxed),m->links+buffer->channel),row);
   }
 }
 
@@ -223,13 +225,13 @@ void mesh_publish(struct hdr *m,uint32_t row,uint64_t stamp){
     uint64_t links=atomic_load_explicit(&mesh_send_uses(m,row)[w],memory_order_relaxed);
     while(links){
       uint32_t link=w*64+(uint32_t)__builtin_ctzll(links);links&=links-1;
-      mesh_notice_push(m,mesh_notice_queue(m,atomic_load_explicit(&buffer->owner,memory_order_relaxed),link),row);
+      mesh_ring_push(m,mesh_notice_queue(m,atomic_load_explicit(&buffer->owner,memory_order_relaxed),link),row);
     }
   }
   atomic_store_explicit(&mesh_presence(m)[row],stamp,memory_order_release);
   uint32_t uses=atomic_load_explicit(&buffer->uses,memory_order_relaxed);
   while(uses){
     uint32_t worker=(uint32_t)__builtin_ctz(uses);uses&=uses-1;
-    mesh_notice_push(m,mesh_notice_queue(m,atomic_load_explicit(&buffer->owner,memory_order_relaxed),m->links*(m->qps+1)+worker),row);
+    mesh_ring_push(m,mesh_notice_queue(m,atomic_load_explicit(&buffer->owner,memory_order_relaxed),m->links*(m->qps+1)+worker),row);
   }
 }

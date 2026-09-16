@@ -150,8 +150,8 @@ identity is unavailable; no bridge deployment was performed.
 
 ## Publication notifications
 
-ABI 50 stores tensor presence as one atomic 32-bit word per logical row, at a
-fixed offset in the shared mapping. Row allocation initializes the word to zero;
+Tensor presence is one atomic 64-bit word per logical row at a fixed offset in
+the shared mapping; ABI 50 introduced per-row words and ABI 53 widened the stamp. Row allocation initializes the word to zero;
 the row's producer release-stores `invocation + 1` after making the payload visible
 (ABI 53; ABI 50 used the constant one). Shared constants retain stamp one. This
 replaces the packed presence bitmap and its read-modify-write. Constant binding
@@ -164,51 +164,53 @@ invocation stamp; a slot number no longer identifies an invocation. This search
 exists only in the opt-in synchronization path. It does not retain a value beyond
 its declared readers, and can wait forever if asked for an unavailable value.
 
-For each numerical worker or TX link, the pending notification set has one bit
-per logical row. A row's one producer publishes it once for that value instance;
-the reader's prepared range contains all uses of that publication. Repeated
-operands in one call appear as repeated uses in the range, not repeated notices.
-A constant already present at setup needs no numerical arrival notice. Its first
-send binding seeds one notice per TX link before execution.
+ABI 67 replaces the hierarchical notification sets with contiguous index rings.
+The publisher already has the terminal row index; it now stores that index,
+without encoding it into bits for a reader to reconstruct. TX publications,
+numerical input arrivals, root submissions and final-reference returns all use
+the same ring representation. `mesh_notice_reader`, summary levels, bit exchanges,
+and the decoding iterator are deleted.
 
-ABI 48 stores these bits in compact arrays. Level 0 has ceil(rows/64) words;
-each next level has ceil(previousWords/64) words, ending at one root word.
-Each level and reader bank is aligned to 64 bytes. This needs at most six levels
-for the existing 32-bit row namespace. Setup fixes all offsets. Publishing sets
-the row bit and then its ancestor bits with one release OR per level, always
-continuing to the root. There is no CAS loop, reservation, fullness query or
-linked entry. Multiple publishers use different row bits, including when their
-bits share a word.
+A ring slot is one atomic 64-bit word: its low half is the supplied 32-bit index,
+and its high half is the slot's publication generation. Setup chooses capacity
+C = 2^ceil(log2(max(1, rows))). A producer obtains position p with one relaxed
+fetch-add and release-stores `{generation = floor(p/C)+1, index}` at p mod C.
+Generation arithmetic is modulo 2^32. The consumer acquire-loads that single
+word, compares its generation with the next position's generation, and returns
+the low half directly. A matching word advances the private head and stores the
+shared head. An unmatched word returns immediately without changing the head.
+There is no decoder loop, CAS loop, full check, allocator, sleep or remote ACK.
+Release/acquire orders the payload and mapping stores preceding the publication.
 
-Each reader exchanges the root with zero and enumerates its set bits. Indicated
-child words are acquired by the same exchange. Small reader-local arrays retain
-the unprocessed bits and indices between calls. Leaf bits yield logical rows for
-the existing consumer/send ranges. Empty summaries are skipped; an empty root
-returns immediately. No absent row or function is scanned for readiness.
+Head and tail occupy separate 128-byte aligned regions. The consumer never
+loads the producer tail. The shared head preserves consumed progress when a
+reader is recreated; it is not a capacity gate and producers do not read it.
+Client attachment initializes the unused bank before publication. Repeated
+operands remain entries in the prepared consumer range, not duplicate events.
+Constants already present at setup still seed at most one TX event per link.
 
-For adjacent levels, the producer sets child before parent. If a reader exchanges
-the child after that set, it obtains the publication, unless it already obtained
-it in an earlier exchange. If the child set occurs after the exchange, the later
-parent set advertises it for a future traversal. This argument applies at every
-level. Delaying a producer between the two writes can leave a stale parent bit
-after a child was consumed; visiting an empty child is harmless. It cannot erase
-a leaf event, duplicate a consumed leaf, or reserve a place that blocks another
-publisher. Acquire exchanges make the writes preceding each leaf publication
-visible to the reader.
+Capacity relies on each logical row having at most one outstanding event in a
+given ring: reuse follows that row's declared reads, so the preceding event has
+been consumed before republication. With R rows, there are at most R outstanding
+reservations/publications, and C >= R. This is the existing row-lifetime contract,
+not a repair of N1's unfinished cross-participant reuse realization.
 
-This is a set of row events, not a counter of repeated publications to the same
-live row. Reuse must follow the final declared ownership event: every numerical
-use must have consumed its notice before completing, and every TX use must have
-consumed its notice before posting/completing. Thus a properly recycled row has
-no old leaf notice left to coalesce with its next publication. N1/X5 must preserve
-that ownership rule; this queue replacement does not implement instance reuse.
+The H1 multi-producer reservation scheme has an ordering limitation. If publisher
+A reserves position p and is descheduled before its release store, publisher B
+can publish p+1, but this consumer cannot remove B until A publishes. It returns
+to other queues instead of spinning on A. This is head-of-line delay even without
+a wait loop; therefore removal of traversal does not establish the stronger
+requirement that every ready event is drained independently. H1/H3/H4 remain
+incomplete. This limitation is an implementation defect to remove, not a new
+application dependency or an authorized default barrier.
 
-For 229,376 arena rows, one link and eight worker positions, the old two-bank
-notice heads and per-row links use 16,515,144 bytes before region alignment. The
-new padded word arrays use 525,312 bytes. A reader's local iterator is 128 bytes.
-These are layout calculations, not latency measurements. The library source
-grows from 2,179 to 2,201 lines across all Swift and C/header files; the separate
-reusable-instance pool still requires X5/N1 integration.
+For 229,376 rows, one link, eight native queues and eight numerical workers,
+C = 262,144. Each ring uses 256 + 8C bytes; the two banks of 25 rings use
+104,870,400 bytes before region alignment, versus 1,459,200 bytes for the old
+padded bitmap levels. This deliberately spends shared memory to remove the
+metadata walk. The reader shrinks from 128 to 32 bytes. Maintained library source
+is 2,473 -> 2,468 lines across the same eleven Swift/C/header files. These are
+source/layout counts, not latency or speedup measurements.
 
 ## Reusable send queue
 

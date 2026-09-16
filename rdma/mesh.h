@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 66u
+#define MESH_VERSION 67u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -24,12 +24,15 @@ struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
 enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_COMPUTE_THREADS 8
 #define MESH_NOTICE_BANKS 2
-enum { MESH_NOTICE_LEVELS=(32+5)/6 };
-struct mesh_notice_reader {
-  _Atomic uint64_t *words[MESH_NOTICE_LEVELS];
-  uint64_t pending[MESH_NOTICE_LEVELS];
-  uint32_t base[MESH_NOTICE_LEVELS],level,top;
+/* design/algorithm-sources.md#index-hand-off */
+struct mesh_ring {
+  _Alignas(128) _Atomic uint64_t tail;
+  _Alignas(128) _Atomic uint64_t head;
+  _Alignas(128) _Atomic uint64_t slots[];
 };
+_Static_assert(sizeof(struct mesh_ring)==256 && offsetof(struct mesh_ring,slots)==256,"mesh_ring header");
+struct mesh_ring_reader { struct mesh_ring *ring; uint64_t head,mask; uint32_t shift; };
+_Static_assert(sizeof(struct mesh_ring_reader)==32,"mesh_ring_reader");
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
 /* design/algorithm-sources.md#meshresult */
 enum { MESH_RESULT_SUCCESS, MESH_RESULT_LINK, MESH_RESULT_FUNCTION, MESH_RESULT_BUSY };
@@ -45,7 +48,8 @@ struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps,links;
   _Atomic uint64_t configured;
   uint64_t planes_off,presence_off,page_off,buffer_off,pool_off,link_off,send_off,order_off,notice_off,instance_off,tags_off,data_off,length;
-  uint32_t notice_levels,notice_words,notice_offsets[MESH_NOTICE_LEVELS];
+  uint64_t notice_bytes;
+  uint32_t notice_shift;
   uint32_t instance_count[MESH_NOTICE_BANKS];
   _Atomic(struct mesh_status) result[MESH_NOTICE_BANKS];
   _Atomic uint64_t client,bridge_pid,device_client,serial,retired;
@@ -121,38 +125,31 @@ static inline void mesh_bits_clear(struct hdr *m,int plane,uint32_t first,uint32
   for(uint32_t w=first/64;count && w<=(first+count-1)/64;w++) atomic_fetch_and_explicit(&p[w],~mesh_word_mask(first,count,w),memory_order_acq_rel);
 }
 
-/* design/algorithm-sources.md#programkernel_call */
-static inline _Atomic uint64_t *mesh_notices(struct hdr *m,uint32_t queue){
-  return (_Atomic uint64_t *)((char *)m+m->notice_off)+(size_t)queue*m->notice_words;
+/* design/algorithm-sources.md#index-hand-off */
+static inline struct mesh_ring *mesh_ring(struct hdr *m,uint32_t queue){
+  return (struct mesh_ring *)((char *)m+m->notice_off+(uint64_t)queue*m->notice_bytes);
 }
-/* design/algorithm-sources.md#programkernel_call */
-static inline void mesh_notice_push(struct hdr *m,uint32_t queue,uint32_t index){
-  _Atomic uint64_t *words=mesh_notices(m,queue);
-  for(uint32_t level=0;level<m->notice_levels;level++,index>>=6)
-    atomic_fetch_or_explicit(&words[m->notice_offsets[level]+(index>>6)],UINT64_C(1)<<(index&63),memory_order_release);
+/* design/algorithm-sources.md#index-hand-off */
+static inline void mesh_ring_push(struct hdr *m,uint32_t queue,uint32_t index){
+  struct mesh_ring *ring=mesh_ring(m,queue);
+  uint64_t position=atomic_fetch_add_explicit(&ring->tail,1,memory_order_relaxed);
+  uint64_t mask=(UINT64_C(1)<<m->notice_shift)-1;
+  uint32_t sequence=(uint32_t)(position>>m->notice_shift)+1;
+  atomic_store_explicit(&ring->slots[position&mask],(uint64_t)sequence<<32|index,memory_order_release);
 }
-/* design/algorithm-sources.md#programkernel_call */
-static inline struct mesh_notice_reader mesh_notice_reader_init(struct hdr *m,uint32_t queue){
-  struct mesh_notice_reader reader={.level=m->notice_levels-1,.top=m->notice_levels-1};
-  for(uint32_t level=0;level<m->notice_levels;level++)reader.words[level]=mesh_notices(m,queue)+m->notice_offsets[level];
-  return reader;
+/* design/algorithm-sources.md#index-hand-off */
+static inline struct mesh_ring_reader mesh_ring_reader_init(struct hdr *m,uint32_t queue){
+  struct mesh_ring *ring=mesh_ring(m,queue);
+  return (struct mesh_ring_reader){.ring=ring,.head=atomic_load_explicit(&ring->head,memory_order_relaxed),
+    .mask=(UINT64_C(1)<<m->notice_shift)-1,.shift=m->notice_shift};
 }
-/* design/algorithm-sources.md#programkernel_call */
-static inline uint32_t mesh_notice_take(struct mesh_notice_reader *reader){
-  for(;;){
-    uint32_t level=reader->level;
-    if(reader->pending[level]){
-      uint32_t index=reader->base[level]+(uint32_t)__builtin_ctzll(reader->pending[level]);
-      reader->pending[level]&=reader->pending[level]-1;
-      if(!level)return index;
-      reader->level=level-1;reader->base[level-1]=index*64;
-      reader->pending[level-1]=atomic_exchange_explicit(&reader->words[level-1][index],0,memory_order_acquire);
-    } else if(level<reader->top)reader->level=level+1;
-    else {
-      reader->pending[level]=atomic_exchange_explicit(reader->words[level],0,memory_order_acquire);
-      if(!reader->pending[level])return MESH_ABSENT;
-    }
-  }
+/* design/algorithm-sources.md#index-hand-off */
+static inline uint32_t mesh_ring_take(struct mesh_ring_reader *reader){
+  uint64_t value=atomic_load_explicit(&reader->ring->slots[reader->head&reader->mask],memory_order_acquire);
+  uint32_t sequence=(uint32_t)(reader->head>>reader->shift)+1;
+  if((uint32_t)(value>>32)!=sequence)return MESH_ABSENT;
+  atomic_store_explicit(&reader->ring->head,++reader->head,memory_order_relaxed);
+  return (uint32_t)value;
 }
 
 /* design/algorithm-sources.md#programkernel_call */
@@ -167,15 +164,11 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->link_off=at; at+=(uint64_t)links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
   h->send_off=at; at+=(uint64_t)rows*((links+63)/64)*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->order_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*links*qps*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->notice_levels=0;h->notice_words=0;
-  for(uint64_t count=rows;;){
-    count=(count+63)/64;
-    h->notice_offsets[h->notice_levels++]=h->notice_words;
-    h->notice_words+=(uint32_t)((count+7)&~UINT64_C(7));
-    if(count<=1)break;
-  }
+  h->notice_shift=0;
+  while((UINT64_C(1)<<h->notice_shift)<rows)h->notice_shift++;
+  h->notice_bytes=(sizeof(struct mesh_ring)+(UINT64_C(1)<<h->notice_shift)*sizeof(uint64_t)+127)&~UINT64_C(127);
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
-  h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links*(qps+1)+2*MESH_COMPUTE_THREADS)*h->notice_words*sizeof(uint64_t); at=(at+bytes-1)/bytes*bytes;
+  h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links*(qps+1)+2*MESH_COMPUTE_THREADS)*h->notice_bytes; at=(at+bytes-1)/bytes*bytes;
   h->instance_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*rows*sizeof(struct mesh_instance); at=(at+bytes-1)/bytes*bytes;
   h->tags_off=at; at+=blocks*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)rows*pgsz;

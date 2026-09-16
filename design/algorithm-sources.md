@@ -236,6 +236,27 @@ Actual backing retains the existing device-close retirement rule.
 Link error alone still does not cancel unissued numerical uses
 or rearm the same program: those R2/R4 steps remain unfinished.
 
+## Index hand-off
+
+Thompson, Farley, Barker, Gee and Stewart's
+[Disruptor technical paper](https://lmax-exchange.github.io/disruptor/disruptor.html)
+(2011), sections 3.1–3.3, supplies preallocated ring storage and sequence indexing.
+ABI 67 applies that representation to Mesh's inter-thread index hand-offs.
+`mesh_layout` prepares each ring's power-of-two capacity and aligned storage;
+`mesh_ring` resolves its shared address. `mesh_ring_push` reserves a position
+with fetch-add and publishes one packed generation/index word. `mesh_ring_take`
+acquires the word directly and advances its sole reader's position;
+`mesh_ring_reader_init` binds the ring and resumes its consumed position.
+The packed word and capacity derived from Mesh's row-lifetime contract are this
+implementation's choices, not code copied from Disruptor. No upstream wait
+strategy, consumer barrier or producer capacity gate is imported.
+
+The [handoff analysis](pages-and-functions.md#publication-notifications) gives
+the operation count, memory cost, lifetime assumption and reservation-hole
+limitation. In particular, a published entry behind an unpublished reservation
+is delayed by FIFO consumption. This does not satisfy independent immediate
+drainage; H1 remains partial rather than silently accepting that limitation.
+
 ## Program.kernel_call
 
 ABI 59 implements Monsoon's frame-indexed activation directly: the prepared
@@ -265,20 +286,13 @@ distinguishes this local storage fact from unfinished global frame reuse.
 Gregory M. Papadopoulos and David E. Culler,
 [Monsoon: an Explicit Token-Store Architecture](https://people.eecs.berkeley.edu/~kubitron/courses/cs252-F03/handouts/papers/p398-papadopoulos.pdf)
 (ISCA, 1990), supplies the operand-associated state-bit mechanism and statically
-assigned token locations. Mesh applies those ideas to notifications: each reader
-has a bit for each logical row, with compact 64-way summary words to enumerate
-pending rows. The software summary layout is Mesh's implementation, not code or
-a queue algorithm copied from Monsoon. `mesh_notice_push` sets the row bit then
-its summaries using release operations. `mesh_notice_take` exchanges indicated
-words with acquire semantics and enumerates their bits. There is no reservation
-cursor, CAS retry, linked entry or wait for another publisher. `mesh_layout`
-realizes the word offsets; `mesh_notice_reader_init` binds one reader's pointers.
-The [publication proof](pages-and-functions.md#publication-notifications) covers
-concurrent writers, delayed summaries and reuse. This is a pending-event set,
-not a scan of tensor presence or function readiness. The declared consumer ranges
-and countdown continue to implement firing.
-The working ABI 55 implementation keeps invocation-keyed join records separate
-from native call slots. Linear probing matches an arriving logical row; countdown
+assigned token locations. Mesh uses prepared frame/operand locations and declared
+consumer ranges with countdown firing. ABI 67 removes the software notification
+summary hierarchy previously described here; publication now uses the
+[index hand-off](#index-hand-off) directly. The page table retains canonical
+operand mappings, independently of notification storage.
+The historical ABI 55 implementation kept invocation-keyed join records separate
+from native call slots; ABI 59 deleted these join and slot structures. Linear probing matches an arriving logical row; countdown
 zero binds the accumulated row indices to a native slot and removes the match by
 backward shifting indices. Join and native indices have separate owner-managed
 rings. This is Mesh's software representation of operand matching, not an
