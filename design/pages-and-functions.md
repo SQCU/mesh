@@ -237,6 +237,27 @@ the last output return rearms the native object
 when necessary, restores that frame's pending template, and releases one frame reference directly. Zero-output functions emit the same return through their metadata row.
 A native error concludes status separately; complete failure cancellation is R2.
 
+### Prepared numerical uses
+
+The row's consumer range contains 32-byte records with direct call and optional
+input-operand and canonical first-page-entry addresses. Setup records the
+input's source row separately from
+its view storage. This source row is also used for placement reads and reference
+release when an input was already present at setup. The index and page-list
+pointer are fixed then; they are not reconstructed from the function on arrival.
+
+Local storage and prepared contiguous views keep their bindings. An unplaced
+remote operand has a prepared refresh target: arrival loads its canonical first
+page and sets the address. The same record points directly to the call whose
+pending count is decremented. Shared-input arrival applies that binding to every
+resident call and updates the reusable pending template once. No function/frame
+lookup precedes the common varying-input pending decrement; the function is
+read when that decrement reaches zero and launches the supplied numerical work.
+Call records are allocated at setup with 64-byte size and alignment, asserted
+in C; the old 40-byte array stride could split a call across cache lines. This
+uses 24 additional bytes per resident call. The canonical page load for a remote
+operand and the notification hierarchy remain explicit unfinished H work.
+
 ### Input lifetime ends at its own use
 
 For a declared chain `receive(x) → f(x)=y → g(y)=z`, the numerical reference

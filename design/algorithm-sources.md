@@ -252,9 +252,24 @@ functions, target storage changes from 8(E+S) to 32(VE+S) bytes and the separate
 This spends setup memory to remove dependent runtime reads. The supplied stamp
 argument also removes `mesh_publish`'s read of `buffer.invocation`: native completion
 passes its call's stamp, RX passes the tag's stamp, and constants pass one.
-These changes apply Monsoon's prepared activation addresses and Saad's contiguous
-row ranges; they do not complete X10's receive/call/instance records or N1's frame
-replacement.
+The current use record names the prepared `mesh_call` and, when required, the
+input `mesh_operand` and canonical first-page entry directly, retaining its
+32-byte size. Call records occupy 64 aligned bytes with an asserted layout;
+the former 40-byte array elements could cross cache lines. Setup writes the
+source row, logical index and view's page-list address into every operand.
+`mesh_call_input` and the function's separate placement-flag array are deleted.
+A local input or preallocated contiguous view requires no arrival-time rebinding.
+An unplaced remote input refreshes only its current first page and address;
+that choice is represented by the prepared operand pointer. Its numerical use
+still owns the canonical page entries through native completion. A shared remote
+input refreshes the corresponding view in every resident call and decrements
+each call's dependency count; the function's shared-input template is updated
+once, before any of those calls fire. Source identity remains distinct from a
+contiguous view's storage, including when the input was already present at setup.
+The readiness function takes the call directly and reads its function only when
+its pending count reaches zero. These changes apply Monsoon's prepared activation
+addresses and Saad's contiguous row ranges; they do not complete H1's handoffs,
+H2's remaining records or N1's frame replacement.
 ABI 51 separates dependency rows from contiguous operand
 views. A single-chunk input selects a view by its received page offset; multi-chunk
 inputs use the indexed placement described under [transport](#programcopy).
