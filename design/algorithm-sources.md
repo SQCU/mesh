@@ -148,6 +148,11 @@ The [publication proof](pages-and-functions.md#publication-notifications) covers
 concurrent writers, delayed summaries and reuse. This is a pending-event set,
 not a scan of tensor presence or function readiness. The declared consumer ranges
 and countdown continue to implement firing.
+ABI 50 separates lasting presence from the notification set: `mesh_presence`
+addresses one 32-bit word per logical row; `mesh_publish` release-stores one.
+The packed presence bitmap and its read-modify-write are deleted. Setup consumes
+constant presence while realizing dependencies; the host runtime still fires
+through the existing notification ranges and countdowns.
 
 Robert A. van de Geijn and Jerrell Watts,
 [SUMMA: Scalable Universal Matrix Multiplication Algorithm](https://www.cs.utexas.edu/~rvdg/abstracts/SUMMA.html)
@@ -233,6 +238,13 @@ submission, so an earlier unused index does not hold a queue position.
 The former caller-provided queue and example-specific `3 * count` workaround are
 removed. This establishes the bound for the current declared extent, not a
 completed reusable-stream lifecycle or a claim about all native launch costs.
+Apple's [Metal 4 core API](https://developer.apple.com/documentation/metal/understanding-the-metal-4-core-api)
+documents reusable command-buffer objects and separate command allocators.
+The installed SDK's `MTL4CommandAllocator.h` requires the allocator's recorded
+commands to have completed before resetting its storage. This provides a native
+reuse mechanism for N1, but `MTL4CommandBuffer` and its encoders are distinct
+interfaces from the `MTLCommandBuffer` used by current supplied encoders. No
+Metal 4 adapter or unsupported replay of the current command buffers is present.
 
 ## Program.map
 
@@ -292,8 +304,13 @@ reading the received tag or resolving a destination. It does not treat an error
 completion as a filled partial tensor.
 
 The compressed-row representation cited under [numerical submission](#programkernel_call)
-also stores each published row's send edges contiguously. Each queue has a
-preallocated FIFO of edge indices; its capacity is the declared send count.
+also stores each published row's send edges contiguously. Thompson, Farley,
+Barker, Gee and Stewart's [Disruptor technical paper](https://lmax-exchange.github.io/disruptor/disruptor.html)
+(2011), sections 3.1–3.3, describes preallocated ring storage and sequence indexing.
+ABI 50 uses that storage representation for each TX queue, with power-of-two
+capacity covering its configured edge count. One TX thread owns both positions;
+the [edge-lifetime bound](pages-and-functions.md#reusable-send-queue) replaces any
+software fullness gate. No Disruptor wait strategy or sequence barrier is imported.
 Receive targets are grouped by source-chunk row with one advancing cursor per
 group, retaining a target for each declared copy. The contiguous receive page run
 is addressed arithmetically. These replace linked send/target records and the

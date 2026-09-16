@@ -88,6 +88,15 @@ external code. No caller free/done call or consumer-stamp protocol is required.
 
 ## Publication notifications
 
+ABI 50 stores tensor presence as one atomic 32-bit word per logical row, at a
+fixed offset in the shared mapping. Row allocation initializes the word to zero;
+the row's producer release-stores one after making the payload visible. This
+replaces the packed presence bitmap and its read-modify-write. Constant binding
+and dependency realization read the word during setup. Runtime numerical firing
+continues through notifications and countdowns; only the explicit
+`syncOnRemoteFill` implementation reads presence in a host polling loop. The X9
+native stamp binding and resident-consumer demonstration remain unimplemented.
+
 For each numerical worker or TX link, the pending notification set has one bit
 per logical row. A row's one producer publishes it once for that value instance;
 the reader's prepared range contains all uses of that publication. Repeated
@@ -133,6 +142,64 @@ new padded word arrays use 525,312 bytes. A reader's local iterator is 128 bytes
 These are layout calculations, not latency measurements. The library source
 grows from 2,179 to 2,201 lines across all Swift and C/header files; the separate
 reusable-instance pool still requires X5/N1 integration.
+
+## Reusable send queue
+
+ABI 50 gives each native TX queue a circular array of send-edge indices. For
+E configured edges, its capacity is the smallest power of two at least max(1,E).
+The queue uses unsigned 64-bit head/tail positions and a mask for array indexing.
+Only the dedicated TX thread appends and removes entries, so these positions need
+no atomic operations or producer reservations. An empty queue is a head/tail
+equality observation; posting is admitted by the native verbs return value.
+
+At most E different edges can be queued. Each publication contributes its
+declared edge once, and that edge's transport reference survives until its final
+native completion. Its old queue entry is removed when the last chunk is posted;
+the completion resets its chunk cursor before releasing ownership. Legal reuse
+cannot publish the edge again before that release. Therefore a ring sized for E
+needs no fullness guard and cannot overwrite a queued edge. Power-of-two indexing
+continues to work when the unsigned positions wrap. This does not select an
+invocation slot by modulo: it indexes storage for already-selected queue entries.
+
+The receive cursors, call records and native submissions still have a finite
+extent. This ring removes the append-only send representation; it does not by
+itself rearm a complete invocation or authorize a second publication of a live row.
+N1/N1t still require those remaining changes together.
+
+The library is 2,191 → 2,198 maintained lines for the presence and TX changes.
+For 229,376 rows, the presence words use 917,504 bytes, replacing a 28,672-byte
+bitmap (raw sizes before region alignment). TX entry storage is four bytes times
+the sum of the per-queue capacities. These counts are not performance evidence.
+
+## Invocation identity and storage reuse
+
+The remaining N1 change must distinguish the invocation label k, its local
+storage slot s, a logical operand row j, and the physical pages backing that row:
+
+\[
+ (k,j) \longmapsto (s(k),j) \longmapsto \operatorname{pages}(s(k),j).
+\]
+
+The current source identifies k with s throughout `mesh_call`, the status array,
+prepared native objects and transfer targets. It consequently implements a finite
+set of single-use invocations. Returning a slot to a free ring alone cannot fix
+this: later work needs its own identity while native views continue to select the
+chosen storage. Receive matching must carry that identity between peers and keep
+it distinct from the physical slot that a particular rank selected.
+
+Reuse follows final declared ownership, with every worker's call countdowns,
+receive targets and native submission storage prepared for the new invocation.
+It does not follow a caller's numeric index wrapping. A non-submitting rank must
+perform the same transition from received work. Native completion callbacks are
+not documented as a single writer for a Mesh worker's ring; assigning a function
+to a worker does not establish that property. The already implemented TX ring
+has one actual writer because its publisher and drainer are the same TX thread.
+
+Result retention is a separate API lifetime: a live invocation's status must be
+findable independently of the slot chosen for its operands. The pending retention
+clarification concerns completed results after storage reuse, not preservation
+of live work. No invocation-directory or result-retention policy has been added
+to source by these prerequisites.
 
 ## Reclamation events
 

@@ -115,8 +115,8 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   if(!count){ errno=EINVAL; return MESH_ABSENT; }
   uint32_t first=mesh_allocate(c,count,1,0,mesh_rows(c->M),MESH_ROW_OWN,MESH_ROW_HOT);
   if(first==MESH_ABSENT) return first;
-  for(int plane=0;plane<MESH_ROW_OWN;plane++) mesh_bits_clear(c->M,plane,first,count);
   for(uint32_t r=first;r<first+count;r++){
+    atomic_store_explicit(&mesh_presence(c->M)[r],0,memory_order_relaxed);
     atomic_store_explicit(&mesh_page(c->M)[r],MESH_ABSENT,memory_order_release);
     mesh_buffers(c->M)[r]=(struct mesh_buffer){.first=r};
     for(uint32_t w=0;w<(c->M->links+63)/64;w++)atomic_store_explicit(&mesh_send_uses(c->M,r)[w],0,memory_order_relaxed);
@@ -202,7 +202,7 @@ void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
 /* design/algorithm-sources.md#programkernel_call */
 void mesh_publish(struct hdr *m,uint32_t row){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-  atomic_fetch_or_explicit(&mesh_plane(m,MESH_PRESENT)[row/64],UINT64_C(1)<<(row%64),memory_order_release);
+  atomic_store_explicit(&mesh_presence(m)[row],1,memory_order_release);
   uint32_t uses=atomic_load_explicit(&buffer->uses,memory_order_relaxed);
   for(uint32_t w=0;w<(m->links+63)/64;w++){
     uint64_t links=atomic_load_explicit(&mesh_send_uses(m,row)[w],memory_order_relaxed);

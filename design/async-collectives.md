@@ -155,9 +155,9 @@ operands may cross those boundaries transparently.
 
 TX receives a numerical publication, indexes its contiguous range of configured
 send edges, and starts posting chunks immediately. Each queue appends edge indices
-to its preallocated FIFO range. A send edge occurs once in that range, so its
-capacity is exactly the declared send count; there is no runtime queue allocation
-or linked-list append. One cursor per send advances through its
+to its preallocated circular array. Power-of-two capacity covers every declared
+edge, and declared ownership permits one queued occurrence per live edge. There
+is no fullness guard, runtime queue allocation or linked-list append. One cursor per send advances through its
 realized page indices; there is no runtime construction or traversal of the
 whole chunk list before the first post. Chunks of one send remain consecutive
 on their queue. Sends can publish in any order and have different byte lengths.
@@ -172,9 +172,11 @@ ABI 48 replaces publication's CAS/list notices with per-reader row bits and
 compact summary words. Readers enumerate only notified rows, independent of
 arrival order, then use the same prepared numerical or send ranges. A delayed
 publisher reserves no queue position. The [notification derivation](pages-and-functions.md#publication-notifications)
-gives the concurrent-write and reuse conditions. The send-edge append range and
-reusable instance pool remain separate unfinished lifecycle work. ABI 49 removes
-the reclamation stack and collector; final references publish free-pool bits.
+gives the concurrent-write and reuse conditions. ABI 49 removes the reclamation
+stack and collector; final references publish free-pool bits. ABI 50 replaces
+lasting presence with one release-stored word per row and the send-edge append
+range with a circular array. Each send cursor resets at its final native
+completion. Receive and native invocation rearming still remain N1/N1t work.
 
 Receive posting computes `firstPage + chunkIndex * blockPages` over the contiguous
 run allocated at setup; the former table of every receive address is removed.

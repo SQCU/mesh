@@ -205,7 +205,7 @@ int mesh_calls_start(struct mesh_calls *calls){
           } else {
             struct mesh_section section=function->inputs[i];
             row=mesh_section_row(section,index);
-            if(mesh_bit(m,MESH_PRESENT,row))continue;
+            if(atomic_load_explicit(&mesh_presence(m)[row],memory_order_relaxed))continue;
             varying|=section.stride!=0;
             mesh_buffers(m)[row].uses|=UINT32_C(1)<<function->worker;
           }
@@ -307,7 +307,7 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
     mesh_buffer_retain(m,row,section.pages);
     uint32_t link=queue/m->qps;
     uint64_t bit=UINT64_C(1)<<(link%64),uses=atomic_fetch_or_explicit(&mesh_send_uses(m,row)[link/64],bit,memory_order_relaxed);
-    if(!(uses&bit) && mesh_bit(m,MESH_PRESENT,row))
+    if(!(uses&bit) && atomic_load_explicit(&mesh_presence(m)[row],memory_order_relaxed))
       mesh_notice_push(m,mesh_notice_queue(m,context->client,link),row);
   }
   mesh_transfers(m,context->client,queue,receive)[index]=(struct mesh_transfer){section.first,identity,section.count,section.stride,m->block,section.bytes};
@@ -383,5 +383,5 @@ void mesh_section_release(struct mesh_ctx *context,struct mesh_section section){
 }
 /* design/algorithm-sources.md#collectivesync_on_remote_fill */
 void mesh_sync_on_remote_fill(struct mesh_ctx *context,const struct mesh_section *sections,size_t count,uint32_t index){
-  for(size_t i=0;i<count;i++)while(!mesh_bit(context->M,MESH_PRESENT,mesh_section_row(sections[i],index))){}
+  for(size_t i=0;i<count;i++)while(!atomic_load_explicit(&mesh_presence(context->M)[mesh_section_row(sections[i],index)],memory_order_acquire)){}
 }
