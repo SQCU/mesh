@@ -1,120 +1,93 @@
 import Foundation
 import Mesh
 
+private struct Plan: Decodable {
+    let valuesOwner, indicesOwner, rows, columns, neighbours: Int
+    let consumers: [Int]
+    let routes: [[Int]]
+}
+
 @main
 struct IndexedGather {
     // design/algorithm-sources.md#programmap
     static func main() throws {
-        // idx is an ordinary TensorPart, produced by a supplied function or received via send.
-        // map binds idx as one more input operand, so the consumer's pending count (X2)
-        // includes it and the map fires only when idx is present.
-        // Indexed reads, expert selection and neighbour sums live entirely in supplied closures.
-        // Mesh sees operands and never an index.
         let args = CommandLine.arguments
         let rank = Int(args[1])!, size = Int(args[2])!
-        let mesh = try Mesh(region: args[3], rank: rank, size: size, workers: 2)
-        let owner = size == 2 ? 1 : 0
-        let rows = 4, columns = 3, neighbours = 2
-        let values = try mesh.tensor(on: owner, sections: [rows * columns * 4, rows * columns * 4])
-        let x = values[0], table = values[1]
-        // design/algorithm-sources.md#programwrite
+        let p = try JSONDecoder().decode(Plan.self, from: Data(contentsOf: URL(fileURLWithPath: args[4])))
+        let placement = Placement(routes: Dictionary(uniqueKeysWithValues: p.routes.map {
+            (Placement.Edge($0[0], $0.last!), Array($0.dropFirst()))
+        }))
+        let mesh = try Mesh(region: args[3], rank: rank, size: size, workers: 2, placement: placement)
+        let rows = p.rows, columns = p.columns, neighbours = p.neighbours
+        let values = try mesh.tensor(on: p.valuesOwner, sections: [rows * columns * 4, rows * columns * 4])
         let produceValues = TensorFunction.cpu { _, outputs in
             for output in outputs {
                 let data = output.data!.assumingMemoryBound(to: Float.self)
                 for i in 0..<(output.bytes / 4) { data[i] = Float(i + 1) }
             }
         }
-        try mesh.call(produceValues, inputs: [], outputs: [x, table], on: owner, worker: 0)
-
-        var expertIdx = try mesh.tensor(on: 0, sections: [rows * 4])[0]
-        var idx = try mesh.tensor(on: 0, sections: [rows * neighbours * 4])[0]
-        // design/algorithm-sources.md#programmap
-        let produceExperts = TensorFunction.cpu { _, outputs in
-            let indices = outputs[0].data!.assumingMemoryBound(to: Int32.self)
-            for row in 0..<(outputs[0].bytes / 4) { indices[row] = Int32(row % 2) }
-        }
-        // design/algorithm-sources.md#programmap
-        let produceNeighbours = TensorFunction.cpu { _, outputs in
-            let indices = outputs[0].data!.assumingMemoryBound(to: Int32.self)
-            let rows = outputs[0].bytes / 4 / neighbours
-            for row in 0..<rows {
-                for k in 0..<neighbours { indices[row * neighbours + k] = Int32((row + k + 1) % rows) }
-            }
-        }
-        try mesh.call(produceExperts, inputs: [], outputs: [expertIdx], on: 0, worker: 0)
-        try mesh.call(produceNeighbours, inputs: [], outputs: [idx], on: 0, worker: 1)
-        if size == 2 {
-            expertIdx = try mesh.send(expertIdx, to: 1)
-            idx = try mesh.send(idx, to: 1)
-        }
-
-        // design/algorithm-sources.md#programtensor
-        let w0 = try mesh.constant(on: owner, bytes: columns * 4) { span in
-            let weights = span.data.baseAddress!.assumingMemoryBound(to: Float.self)
-            for i in 0..<(span.data.count / 4) { weights[i] = 1 }
-        }
-        // design/algorithm-sources.md#programtensor
-        let w1 = try mesh.constant(on: owner, bytes: columns * 4) { span in
-            let weights = span.data.baseAddress!.assumingMemoryBound(to: Float.self)
-            for i in 0..<(span.data.count / 4) { weights[i] = Float(i + 1) }
-        }
-        let expertOut = try mesh.tensor(on: owner, sections: [rows * 4])[0]
-        // design/algorithm-sources.md#programmap
-        let routedExpert = TensorFunction.cpu { inputs, outputs in
-            let x = inputs[0].data!.assumingMemoryBound(to: Float.self)
-            let w0 = inputs[1].data!.assumingMemoryBound(to: Float.self)
-            let w1 = inputs[2].data!.assumingMemoryBound(to: Float.self)
-            let idx = inputs[3].data!.assumingMemoryBound(to: Int32.self)
-            let out = outputs[0].data!.assumingMemoryBound(to: Float.self)
-            let columns = inputs[1].bytes / 4
+        try mesh.call(produceValues, inputs: [], outputs: values, on: p.valuesOwner, worker: 0)
+        let indices = try mesh.tensor(on: p.indicesOwner, sections: [rows * 4, rows * neighbours * 4])
+        let produceIndices = TensorFunction.cpu { _, outputs in
+            let experts = outputs[0].data!.assumingMemoryBound(to: Int32.self)
+            let neighbours = outputs[1].data!.assumingMemoryBound(to: Int32.self)
+            let count = outputs[1].bytes / outputs[0].bytes
             for row in 0..<(outputs[0].bytes / 4) {
-                let weights = idx[row] == 0 ? w0 : w1
-                var dot: Float = 0
-                for column in 0..<columns { dot += x[row * columns + column] * weights[column] }
-                out[row] = dot
+                experts[row] = Int32(row % 2)
+                for k in 0..<count { neighbours[row * count + k] = Int32((row + k + 1) % rows) }
             }
         }
-        try mesh.map(routedExpert, inputs: [[x], [w0], [w1], [expertIdx]], outputs: [expertOut], workers: [0])
-
-        let out = try mesh.tensor(on: owner, sections: [rows * columns * 4])[0]
-        // design/algorithm-sources.md#programmap
-        let neighbourhoodSum = TensorFunction.cpu { inputs, outputs in
-            let table = inputs[0].data!.assumingMemoryBound(to: Float.self)
-            let idx = inputs[1].data!.assumingMemoryBound(to: Int32.self)
-            let out = outputs[0].data!.assumingMemoryBound(to: Float.self)
-            for row in 0..<(outputs[0].bytes / 4 / columns) {
-                for column in 0..<columns {
-                    var sum: Float = 0
-                    for k in 0..<neighbours { sum += table[Int(idx[row * neighbours + k]) * columns + column] }
-                    out[row * columns + column] = sum
+        try mesh.call(produceIndices, inputs: [], outputs: indices, on: p.indicesOwner, worker: 1)
+        for owner in p.consumers {
+            let inputs = try mesh.gather(values + indices, to: owner)
+            let weights = try (0..<2).map { expert in
+                try mesh.constant(on: owner, bytes: columns * 4) { span in
+                    let values = span.data.baseAddress!.assumingMemoryBound(to: Float.self)
+                    for i in 0..<(span.data.count / 4) { values[i] = Float(1 + expert * i) }
                 }
             }
+            let outputs = try mesh.tensor(on: owner, sections: [rows * 4, rows * columns * 4])
+            let routedExpert = TensorFunction.cpu { inputs, outputs in
+                let out = outputs[0].data!.assumingMemoryBound(to: Float.self)
+                let columns = inputs[1].bytes / 4
+                for row in 0..<(outputs[0].bytes / 4) {
+                    let expert = Int(inputs[3].load(at: row, as: Int32.self))
+                    var dot: Float = 0
+                    for column in 0..<columns {
+                        dot += inputs[0].load(at: row * columns + column, as: Float.self)
+                            * inputs[1 + expert].load(at: column, as: Float.self)
+                    }
+                    out[row] = dot
+                }
+            }
+            try mesh.map(routedExpert, inputs: [[inputs[0]], [weights[0]], [weights[1]], [inputs[2]]],
+                         outputs: [outputs[0]], workers: [0])
+            let neighbourhoodSum = TensorFunction.cpu { inputs, outputs in
+                let out = outputs[0].data!.assumingMemoryBound(to: Float.self)
+                for row in 0..<(outputs[0].bytes / 4 / columns) {
+                    for column in 0..<columns {
+                        var sum: Float = 0
+                        for k in 0..<neighbours {
+                            let index = Int(inputs[1].load(at: row * neighbours + k, as: Int32.self))
+                            sum += inputs[0].load(at: index * columns + column, as: Float.self)
+                        }
+                        out[row * columns + column] = sum
+                    }
+                }
+            }
+            try mesh.map(neighbourhoodSum, inputs: [[inputs[1]], [inputs[3]]], outputs: [outputs[1]], workers: [1])
+            for i in outputs.indices {
+                try mesh.call(.cpu { inputs, _ in
+                    let first: Float = inputs[0].load(at: 0), last: Float = inputs[0].load(at: inputs[0].bytes / 4 - 1)
+                    DispatchQueue.main.async {
+                        print("rank=\(rank) part=\(i) first=\(first) last=\(last)")
+                        fflush(stdout)
+                    }
+                }, inputs: [outputs[i]], outputs: [], on: owner, worker: i)
+            }
         }
-        try mesh.map(neighbourhoodSum, inputs: [[table], [idx]], outputs: [out], workers: [1])
-
-        // design/algorithm-sources.md#programkernel_call
-        try mesh.call(.cpu { inputs, _ in
-            let data = inputs[0].data!.assumingMemoryBound(to: Float.self)
-            let first = data[0], second = data[1], third = data[2]
-            // design/algorithm-sources.md#programkernel_call
-            DispatchQueue.main.async {
-                print("routed experts: \(first), \(second), \(third)")
-                fflush(stdout)
-            }
-        }, inputs: [expertOut], outputs: [], on: owner, worker: 0)
-        // design/algorithm-sources.md#programkernel_call
-        try mesh.call(.cpu { inputs, _ in
-            let data = inputs[0].data!.assumingMemoryBound(to: Float.self)
-            let first = data[0], second = data[1], third = data[2]
-            // design/algorithm-sources.md#programkernel_call
-            DispatchQueue.main.async {
-                print("neighbourhood sum: \(first), \(second), \(third)")
-                fflush(stdout)
-            }
-        }, inputs: [out], outputs: [], on: owner, worker: 1)
         try mesh.start()
         mesh.submit(0)
-        // design/algorithm-sources.md#program
-        withExtendedLifetime((mesh, expertOut, out)) { dispatchMain() }
+        withExtendedLifetime(mesh) { dispatchMain() }
     }
 }

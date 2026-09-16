@@ -5,6 +5,13 @@ import Metal
 
 public typealias MeshOperands = UnsafeBufferPointer<mesh_operand>
 
+extension mesh_operand {
+    // design/algorithm-sources.md#programtensor
+    @inlinable public func load<Value>(at index: Int, as type: Value.Type = Value.self) -> Value {
+        mesh_operand_address(self, index * MemoryLayout<Value>.stride)!.load(as: type)
+    }
+}
+
 fileprivate enum MeshSubmission {
     case cpu((MeshOperands, MeshOperands) -> Void)
     case metal(MTLDevice, (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void)
@@ -30,9 +37,12 @@ fileprivate final class MeshFeatures: NSObject, MLFeatureProvider {
 
 public struct TensorFunction {
     fileprivate let prepare: (Mesh, [TensorPart], [TensorPart]) throws -> MeshSubmission
+    fileprivate let contiguous: Bool
 
     // design/algorithm-sources.md#programkernel_call
-    private init(_ prepare: @escaping (Mesh, [TensorPart], [TensorPart]) throws -> MeshSubmission) { self.prepare = prepare }
+    private init(contiguous: Bool = false, _ prepare: @escaping (Mesh, [TensorPart], [TensorPart]) throws -> MeshSubmission) {
+        self.prepare = prepare; self.contiguous = contiguous
+    }
 
     // design/algorithm-sources.md#programkernel_call
     public static func cpu(_ function: @escaping (MeshOperands, MeshOperands) -> Void) -> Self {
@@ -47,7 +57,7 @@ public struct TensorFunction {
     // design/algorithm-sources.md#programkernel_call
     public static func prediction(_ model: MLModel, inputs: [(String, (MeshSpan) throws -> MLMultiArray)],
                                   outputs: [(String, (MeshSpan) throws -> MLMultiArray)]) -> Self {
-        Self { mesh, parts, results in
+        Self(contiguous: true) { mesh, parts, results in
             precondition(parts.count == inputs.count && results.count == outputs.count)
             let bindings = try Dictionary(uniqueKeysWithValues: inputs.indices.map { i in
                 (inputs[i].0, (i, try mesh.bindings(parts[i]) { MLFeatureValue(multiArray: try inputs[i].1($0)) }))
@@ -67,6 +77,7 @@ public struct TensorFunction {
     // design/algorithm-sources.md#programkernel_call
     public init<Input, Output>(inputViews: [(MeshSpan) throws -> Input], outputViews: [(MeshSpan) throws -> Output],
                               _ function: @escaping ([MeshBindings<Input>], [MeshBindings<Output>]) throws -> TensorFunction) {
+        contiguous = true
         prepare = { mesh, inputs, outputs in
             precondition(inputs.count == inputViews.count && outputs.count == outputViews.count)
             let x = try zip(inputs, inputViews).map { try mesh.bindings($0.0, using: $0.1) }
@@ -346,7 +357,7 @@ public final class Mesh {
             var copies: [(input: Int, source: mesh_section, target: mesh_section)] = []
             for (i, input) in inputs.enumerated() {
                 let section = input.section!
-                if section.channel != MESH_ABSENT && section.pages > mesh_block_pages(memory.context) {
+                if function.contiguous && section.channel != MESH_ABSENT && section.pages > mesh_block_pages(memory.context) {
                     if let existing = copies.first(where: { $0.source.first == section.first }) {
                         views[i] = views[existing.input]
                         continue

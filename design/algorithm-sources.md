@@ -22,6 +22,17 @@ separates shared function metadata from each value's operands and uses.
 The JAX authors, [BlockSpecs](https://docs.jax.dev/en/latest/pallas/grid_blockspec.html),
 and Apple [mmap](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/mmap.2.html):
 references for indexed sections and virtual mappings of actual shared backing.
+`mesh_operand.load(at:as:)` applies that logical indexing to naturally aligned,
+fixed-width tensor scalars. Its C address calculation uses the operand's canonical
+mapping and realized page geometry. For byte offset b and transport
+extent C, it reads entry floor(b/C), then addresses b mod C within that backing.
+It does not allocate, check presence, scan pages or materialize the operand. The
+helper is inlined into supplied Swift numerical functions. Operand metadata grows
+from 40 to 56 bytes: one mapping pointer and two geometry integers. The first-page
+`data` pointer alone does not describe a discontiguous input of `bytes` length.
+Local outputs remain contiguous and retain their direct pointer interface.
+The indexed scalar API describes logical elements; neither its indices nor the
+caller function changes when the bridge's transport extent changes.
 George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
 (1960): reference counting. The user explicitly requested automatic ownership
 release and background pool return, without caller free/done calls.
@@ -210,6 +221,12 @@ finite implementation from unfinished N1 reuse.
 ABI 51 separates dependency rows from contiguous operand
 views. A single-chunk input selects a view by its received page offset; multi-chunk
 inputs use the indexed placement described under [transport](#programcopy).
+Contiguous placement is now requested by the existing `inputViews` factory or
+`prediction` constructor. Raw CPU/Metal callbacks request no such placement.
+This is a setup property of the supplied operand interface, not an inference from
+the numerical operation or a runtime layout branch. The BLAS callers and engine
+host-input parsers explicitly bind native contiguous views. This change exposes
+host indexed scalar reads; device-resident indexed consumption is still X9 work.
 
 Apple [Metal command buffers](https://developer.apple.com/documentation/metal/mtlcommandbuffer)
 and [Core ML prediction](https://developer.apple.com/documentation/coreml/mlmodel):
@@ -279,6 +296,19 @@ and Gale et al., [MegaBlocks: Efficient Sparse Training with Mixture-of-Experts]
 Indices are ordinary operands of `Mesh.map`; the supplied function performs the indexed
 read and any expert selection or neighbourhood sum inside the caller.
 Mesh implements no indexed gather/scatter or application routing.
+The existing `indexed-gather` caller uses `load(at:as:)` for both table values and
+index operands. Owners, consumers, routes and dimensions come from its JSON plan.
+`examples/indexed-gather-ring.json` sends values from rank 0 and indices from
+rank 2 to consumers on ranks 1 and 3. Each numerical table is 8192 × 513 × 4 =
+16,809,984 bytes, larger than the substrate's maximum single request. Every
+consumer uses the same supplied functions without a transport-size argument,
+contiguous placement section or one-peer branch. This is source usage, not a run
+or a performance claim. With the ring links configured, build with
+`make -C rdma indexed-gather`, then invoke on each rank:
+
+```
+rdma/indexed-gather RANK 4 /mesh0 examples/indexed-gather-ring.json
+```
 
 ## Program.copy
 

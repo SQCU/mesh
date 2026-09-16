@@ -29,11 +29,12 @@ private func contract(_ mesh: Mesh, terms: [Int], outputs: [(owner: Int, bytes: 
 private func product(rows: Int, columns: Int, inner: Int, transpose: Bool = false) -> TensorFunction {
     let m = Int32(rows), n = Int32(columns), k = Int32(inner)
     let trans = transpose ? CblasTrans : CblasNoTrans, lda = transpose ? m : k
-    return .cpu { inputs, outputs in
-        cblas_sgemm(CblasRowMajor, trans, CblasNoTrans, m, n, k, 1,
-                    inputs[0].data!.assumingMemoryBound(to: Float.self), lda,
-                    inputs[1].data!.assumingMemoryBound(to: Float.self), n, 0,
-                    outputs[0].data!.assumingMemoryBound(to: Float.self), n)
+    let view: (MeshSpan) -> UnsafeMutablePointer<Float> = { $0.data.baseAddress!.assumingMemoryBound(to: Float.self) }
+    return TensorFunction(inputViews: [view, view], outputViews: [view]) { inputs, outputs in
+        .cpu { ins, outs in
+            cblas_sgemm(CblasRowMajor, trans, CblasNoTrans, m, n, k, 1,
+                        inputs[0][ins[0]], lda, inputs[1][ins[1]], n, 0, outputs[0][outs[0]], n)
+        }
     }
 }
 
@@ -59,10 +60,11 @@ struct GramChain {
         let uBytes = tiles.map { p.latent[$0 / n] * p.hidden[$0 % n] * 4 }
         let zLayout = Array(zip(columnOwners, zBytes)), hLayout = Array(zip(columnOwners, hBytes))
         let uLayout = Array(zip(rowOwners, uBytes))
-        let add = TensorFunction.cpu { inputs, outputs in
-            vDSP_vadd(inputs[0].data!.assumingMemoryBound(to: Float.self), 1,
-                      inputs[1].data!.assumingMemoryBound(to: Float.self), 1,
-                      outputs[0].data!.assumingMemoryBound(to: Float.self), 1, vDSP_Length(outputs[0].bytes / 4))
+        let view: (MeshSpan) -> UnsafeMutablePointer<Float> = { $0.data.baseAddress!.assumingMemoryBound(to: Float.self) }
+        let add = TensorFunction(inputViews: [view, view], outputViews: [view]) { inputs, outputs in
+            .cpu { ins, outs in
+                vDSP_vadd(inputs[0][ins[0]], 1, inputs[1][ins[1]], 1, outputs[0][outs[0]], 1, vDSP_Length(outs[0].bytes / 4))
+            }
         }
         var z = try tiles.map { try mesh.tensor(on: columnOwners[$0], sections: [zBytes[$0]])[0] }
         let produce = TensorFunction.cpu { _, outputs in

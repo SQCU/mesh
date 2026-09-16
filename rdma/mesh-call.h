@@ -6,7 +6,16 @@ struct mesh_calls;
 struct mesh_call;
 struct mesh_function;
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride,channel; };
-struct mesh_operand { void *data; size_t bytes; uint32_t page,index,row; uint64_t invocation; };
+struct mesh_operand {
+  void *data; size_t bytes; uint32_t page,index,row; uint64_t invocation;
+  _Atomic uint32_t *pages; uint32_t page_size,block_pages;
+};
+/* design/algorithm-sources.md#programtensor */
+static inline void *mesh_operand_address(struct mesh_operand operand,size_t offset){
+  size_t quantum=(size_t)operand.page_size*operand.block_pages,block=offset/quantum;
+  uint32_t page=atomic_load_explicit(operand.pages+block*operand.block_pages,memory_order_relaxed);
+  return (char *)operand.data+((ptrdiff_t)page-operand.page)*(ptrdiff_t)operand.page_size+(offset-block*quantum);
+}
 typedef void (*mesh_submit)(struct mesh_call *,uint32_t,void *,const struct mesh_operand *,struct mesh_operand *);
 typedef void (*mesh_dispose)(void *);
 typedef void (*mesh_rearm)(uint32_t,void *);

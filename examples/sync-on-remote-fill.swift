@@ -33,7 +33,7 @@ struct SyncOnRemoteFill {
             }
             try mesh.call(function, inputs: [], outputs: [source[i]], on: 0, worker: i)
             try mesh.call(.cpu { inputs, outputs in
-                outputs[0].data!.storeBytes(of: inputs[0].data!.load(as: Float.self) + 1, as: Float.self)
+                outputs[0].data!.storeBytes(of: inputs[0].load(at: 0, as: Float.self) + 1, as: Float.self)
             }, inputs: [remote[i]], outputs: [answer[i]], on: 1, worker: i)
         }
         try mesh.start()

@@ -236,12 +236,21 @@ Power-of-two capacity covers this bound without fullness checks. A live reader's
 reference prevents its physical page from being reposted. There is no return-cursor
 allocation or queue in the working ABI 55 implementation.
 
-For a binding with V configured rows, the finite API produces at most V values.
-Before first chunk n arrives, its stack has V-(n-1)+R rows, where R is the number
-of completed returns. Since n<=V, a row is always available, even while other
-returns are pending. This permits different peer and invocation orders.
-N1's unbounded admission must preserve the bound on live and returning values;
-this change does not claim that an unlimited caller can overrun a finite pool.
+For a binding with V configured rows and L assigned values whose rows have not
+returned, its free-row count is V-L. The original finite API admitted at most V
+values in total, which established this bound. ABI 55 permits more than V labels
+over time, so that historical argument does not establish its receive capacity.
+Physical backing and logical rows currently have different allocation domains:
+backing is pooled per queue, while rows are reserved per binding. Other bindings'
+unused backing can receive another value even when this binding has L=V. The
+unchecked first-chunk row pop then has no valid row. Returning a complete section
+before reposting its pages does not resolve this cross-binding case.
+
+This is N1's unfinished allocation contract, independent of arrival order or peer
+count. Realization must provide logical descriptors and backing for the declared
+live dataflow together. Local SEND completion alone does not establish remote
+last use. A receive-side occupancy check, acknowledgement or wait would withhold
+work without repairing the allocation model and is not the proposed remedy.
 
 Setup captures the binding's declared reference count and removes those counts
 from its initially unused rows. The pool owns their storage while no value occupies
@@ -513,6 +522,20 @@ function sees the contiguous section. The placement section is an auxiliary outp
 owned through that invocation's native completion. It has no independent consumer,
 extra publication dependency, runtime allocation, or caller-visible parameter.
 
+Contiguity is requested by `TensorFunction(inputViews:outputViews:)` and
+`TensorFunction.prediction`. Raw CPU/Metal functions do not allocate these
+placement sections. A raw host function reads logical scalar indices with
+`operand.load(at:as:)`; a native view factory receives its requested contiguous
+`MeshSpan`. For an indexed operand, the prepared descriptor holds the canonical
+page-list pointer and geometry, and the actual input binding selects that list
+alongside the first-page pointer. A placed operand instead retains the mapping
+of its placement section. Thus the original dependency row and the presented
+operand mapping remain distinct without reconstructing either on each read.
+The scalar address calculation is one mapping load and index arithmetic; it has
+no readiness read or loop. It is host indexing, not an implementation of X9's
+resident GPU path. Aligned scalar reads use the same indices at every internal
+transport extent. The helper does not promise contiguity for a whole tensor.
+
 The placement and supplied operation form one launch. Metal records indexed blit
 copies before the supplied encoder in the same command buffer. Native views are
 created at setup through the existing shared-buffer cache. CPU and Core ML paths
@@ -538,8 +561,9 @@ ABI 53 keeps unfilled logical rows unmapped. A completion assigns its actual
 physical page directly to the selected row and chunk offset. Return removes that
 mapping before reposting the page; the logical head returns to its binding only
 after all its chunks are detached. There is no inverse-table permutation and no
-payload copy. The [return proof](#receive-storage-return) covers both capacity
-and preservation of live operands.
+payload copy. The [return proof](#receive-storage-return) covers the physical
+page-ring bound and preservation of live operands; it identifies the separate
+unresolved logical-row bound under repeated admissions.
 
 For example, let A and B each have three chunks and receive positions p0–p5:
 

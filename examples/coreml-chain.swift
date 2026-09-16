@@ -79,10 +79,11 @@ struct CoreMLChain {
                 vDSP_vramp(&start, &step, outputs[0].data!.assumingMemoryBound(to: Float.self), 1, vDSP_Length(elements))
             }, inputs: [], outputs: [parts[i]], on: layout[i].owner, worker: i % plan.workers)
         }
-        let sum = TensorFunction.cpu { inputs, outputs in
-            vDSP_vadd(inputs[0].data!.assumingMemoryBound(to: Float.self), 1,
-                      inputs[1].data!.assumingMemoryBound(to: Float.self), 1,
-                      outputs[0].data!.assumingMemoryBound(to: Float.self), 1, vDSP_Length(outputs[0].bytes / 4))
+        let view: (MeshSpan) -> UnsafeMutablePointer<Float> = { $0.data.baseAddress!.assumingMemoryBound(to: Float.self) }
+        let sum = TensorFunction(inputViews: [view, view], outputViews: [view]) { inputs, outputs in
+            .cpu { ins, outs in
+                vDSP_vadd(inputs[0][ins[0]], 1, inputs[1][ins[1]], 1, outputs[0][outs[0]], 1, vDSP_Length(outs[0].bytes / 4))
+            }
         }
         for stage in plan.stages {
             precondition(stage.functions.count == parts.count && stage.functions.allSatisfy { $0.count == stage.outputs.count })
@@ -121,8 +122,8 @@ struct CoreMLChain {
         history.removeAll()
         for i in parts.indices {
             try mesh.call(.cpu { inputs, _ in
-                let input = inputs[0], data = input.data!.assumingMemoryBound(to: Float.self)
-                let first = data[0], last = data[Int(input.bytes) / 4 - 1], index = input.invocation
+                let input = inputs[0]
+                let first: Float = input.load(at: 0), last: Float = input.load(at: input.bytes / 4 - 1), index = input.invocation
                 DispatchQueue.main.async {
                     print("rank=\(rank) part=\(i) index=\(index) first=\(first) last=\(last)")
                     fflush(stdout)

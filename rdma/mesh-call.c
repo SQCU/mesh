@@ -142,7 +142,9 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
     for(size_t i=0;i<count;i++){
       struct mesh_section section=i<input_count?views[i]:outputs[i-input_count];
       uint32_t page=atomic_load_explicit(&mesh_page(m)[mesh_section_row(section,index)],memory_order_acquire);
-      function->operands[index*count+i]=(struct mesh_operand){.data=page==MESH_ABSENT?NULL:mesh_at(m,page),.bytes=section.bytes,.page=page,.index=section.stride?index:0,.row=mesh_section_row(section,index)};
+      function->operands[index*count+i]=(struct mesh_operand){.data=page==MESH_ABSENT?NULL:mesh_at(m,page),.bytes=section.bytes,
+        .page=page,.index=section.stride?index:0,.row=mesh_section_row(section,index),
+        .pages=mesh_page(m)+mesh_section_row(section,index),.page_size=m->pgsz,.block_pages=m->block};
     }
   }
   function->identity=calls->function_count++;
@@ -160,6 +162,7 @@ static void mesh_call_input(struct mesh_function *function,struct mesh_operand *
     struct hdr *m=function->calls->context->M;
     struct mesh_section section=function->inputs[input];
     operand->page=atomic_load_explicit(&mesh_page(m)[row],memory_order_acquire);
+    operand->pages=mesh_page(m)+row;
     operand->data=mesh_at(m,operand->page);operand->index=section.stride?(row-section.first)/section.stride:0;
   }
 }
