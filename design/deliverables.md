@@ -408,7 +408,7 @@ subset, never as "done".
 | 29e | R5 port moves configuration-free (peers, not devices) | ✗ | config names `rdma_enN`; no device selection by neighbour table |
 | 29f | R6 partition = T5 topology change | ✗ | needs T5 |
 | 29g | R7 cable-pull/replug demonstration with time-to-repair | ✗ | — |
-| 29h | one client per region is a library defect for any caller with more than one program (E5 needs decode + prefill graphs; T7 needs N users): the bridge serves N attached clients, each with its own program, notice banks and lease; `mesh_attach` stops CAS-ing a single `client` word | ✗ | E5 finding; today's workaround = a second bridge/region per node |
+| 29h | one client per region is a library defect for any caller with more than one program (E5 needs decode + prefill graphs; T7 needs N users): the bridge serves N attached clients, each with its own program, notice banks and lease; `mesh_attach` stops CAS-ing a single `client` word | ✗ | E5 finding; today's workaround = a second bridge per node on a second region: `MESH_CONF=<conf with region=/mesh1> bin/mesh-bridge.sh start` (launchd label derives from the region, `io.mesh.bridge.mesh1`; QP budget: +qps per link per bridge) |
 
 Rows W1–W8 are the shared waitless/guardless feature: every other row's ✓ depends on them staying ✓ (I18). Rows 19a–19g are the typings that make rows 13–19 mean streaming at the cache line rather than in prose; they are assigned before row 20. Rows 20–29 are required for the 4× M5 Ultra + 4× M4 Pro deployment and for the solver
 caller; they are not optional and not "later" — they are after row 19. Rows whose files
