@@ -244,7 +244,8 @@ static void *mesh_call_progress(void *argument){
     if(!atomic_load_explicit(&calls->running,memory_order_acquire))continue;
     row=mesh_notice_take(&reader);
     if(row==MESH_ABSENT)continue;
-    for(size_t i=worker->offsets[row];i<worker->offsets[row+1];i++){
+    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+    for(size_t i=worker->offsets[buffer->definition];i<worker->offsets[buffer->definition+1];i++){
       struct mesh_use use=worker->targets[i];
       struct mesh_function *function=calls->program[use.function];
       if(use.input!=MESH_ABSENT && !function->inputs[use.input].stride){
@@ -255,7 +256,7 @@ static void *mesh_call_progress(void *argument){
         }
         for(uint32_t index=0;index<=function->mask;index++)if(function->joins[index].pending)mesh_call_ready(function,index);
       } else {
-        uint32_t index=mesh_call_join(function,mesh_buffers(m)[row].invocation);
+        uint32_t index=mesh_call_join(function,buffer->invocation);
         if(use.input!=MESH_ABSENT)function->join_rows[index*function->input_count+use.input]=row;
         mesh_call_ready(function,index);
       }
@@ -431,11 +432,10 @@ int mesh_calls_start(struct mesh_calls *calls){
           if(atomic_load_explicit(&mesh_presence(m)[section.first],memory_order_relaxed))continue;
         }
         pending++;
-        for(uint32_t index=0;index<section.count;index++){
-          uint32_t row=mesh_section_row(section,index);
-          mesh_buffers(m)[row].uses|=UINT32_C(1)<<function->worker;
-          if(pass)worker->targets[worker->offsets[row]++]=(struct mesh_use){function->identity,input};
-          else worker->offsets[row+1]++;
+        if(pass)worker->targets[worker->offsets[section.first]++]=(struct mesh_use){function->identity,input};
+        else {
+          worker->offsets[section.first+1]++;
+          for(uint32_t index=0;index<section.count;index++)mesh_buffers(m)[mesh_section_row(section,index)].uses|=UINT32_C(1)<<function->worker;
         }
       }
       if(!pass)function->pending=pending;
@@ -556,7 +556,7 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
     if(!(uses&bit) && atomic_load_explicit(&mesh_presence(m)[row],memory_order_relaxed))
       mesh_notice_push(m,mesh_notice_queue(m,context->client,link),row);
   }
-  mesh_transfers(m,context->client,queue,receive)[index]=(struct mesh_transfer){section.first,identity,section.count,section.stride,m->block,MESH_ABSENT,section.bytes};
+  mesh_transfers(m,context->client,queue,receive)[index]=(struct mesh_transfer){section.first,identity,section.count,section.stride,MESH_ABSENT,section.bytes};
   atomic_store_explicit(length,index+1,memory_order_release);
   return 0;
 }
@@ -595,7 +595,7 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uin
   uint32_t pages=count*(uint32_t)span,first=mesh_rows_alloc(context,pages);
   if(first==MESH_ABSENT)return errno;
   for(uint32_t row=first;row<first+pages;row+=(uint32_t)span)
-    mesh_buffers(m)[row]=(struct mesh_buffer){.ownership=2,.first=row,.pages=(uint32_t)span,.channel=channel,.owner=context->client};
+    mesh_buffers(m)[row]=(struct mesh_buffer){.ownership=2,.first=row,.pages=(uint32_t)span,.channel=channel,.definition=first,.owner=context->client};
   mesh_bits_set(m,MESH_ROW_HOT,first,pages);
   if(channel==MESH_ABSENT)for(uint32_t row=first;row<first+pages;row+=(uint32_t)span){
     uint32_t page=mesh_arena_alloc(context,(uint32_t)span,m->block);

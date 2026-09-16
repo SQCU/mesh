@@ -218,6 +218,17 @@ client/device retirement event after native callbacks, without caller release.
 the redundant section-to-page wrapper is removed. The [identity derivation and
 costs](pages-and-functions.md#invocation-identity-and-storage-reuse) separate this
 finite implementation from unfinished N1 reuse.
+The numerical consumer relation now has one entry per declared function/input
+use, independent of resident slot count. A buffer's `definition` indexes that
+immutable relation; its row and invocation continue to identify the actual value.
+The field occupies the existing alignment gap in the 48-byte buffer descriptor.
+For E varying/root uses, S shared uses and V resident slots, target storage drops
+from 8(VE+S) to 8(E+S) bytes. Per-worker row-offset arrays remain unchanged.
+Publication still uses the descriptor's worker bitmask; numerical dispatch loads
+its definition and traverses only that section's consumer range. No predicate,
+wait or scan is introduced. This removes numerical matching's dependency on a
+private range of storage rows; receive row allocation and forwarding state are
+still separate N1 work.
 ABI 51 separates dependency rows from contiguous operand
 views. A single-chunk input selects a view by its received page offset; multi-chunk
 inputs use the indexed placement described under [transport](#programcopy).
@@ -312,6 +323,16 @@ rdma/indexed-gather RANK 4 /mesh0 examples/indexed-gather-ring.json
 
 ## Program.copy
 
+Protocol 57 makes the section definition, source head and chunk ordinal explicit
+beside the invocation label in the existing request tag. Queue setup translates
+the peer's definition once; receive progress uses direct definition/active-head
+array indexing and a canonical page assignment. The former per-source-chunk
+target table, source-value records and cycling occurrence cursors are deleted.
+The [wire derivation](pages-and-functions.md#explicit-section-identity-on-the-wire)
+accounts for the 24-byte tag, lookup storage, shared-tag writers and the remaining
+destination-row allocation work. This is a representation change to the existing
+SEND/RECV transport, not a new collective algorithm or credit protocol.
+
 Apple [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt),
 MLX authors' [JACCL transport](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/lib/jaccl/rdma.h),
 and rdma-core's [ibv_post_recv](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_recv.3):
@@ -320,9 +341,9 @@ distinguish substrate facts from the retained bridge's protocol decisions.
 TN3205 explicitly limits this transport to `IBV_WR_SEND`; its SDK enum for
 `IBV_WR_SEND_WITH_IMM` does not establish hardware support. Both TN3205 and JACCL
 show local `wr_id` values returned with completions. Mesh uses these identifiers
-for buffer lifetime. Every chunk carries an eight-byte invocation/source-chunk
-row tag; setup maps that row to a destination chunk and, for the final chunk, the
-numerical publication. The invocation follows the value across peers separately
+for buffer lifetime. Protocol 57 carries a 24-byte invocation/source-head/
+definition/chunk tag; setup maps the definition to the local binding, and the
+chunk ordinal identifies its relative placement and final publication. The invocation follows the value across peers separately
 from any producer or consumer storage ordinal.
 The tag arrives in the payload's own work request. There is no index QP or
 cross-QP identity join. On September 15, `ibv_devinfo -v` reported `max_sge: 1`
@@ -332,9 +353,9 @@ does not infer two-entry support from the general verbs API. The
 describe this mesh-specific representation. Receive storage is preallocated
 and reused by the owning RX thread at final reference release. The existing
 notification mechanism carries the return event; only RX writes its page and
-return rings and per-binding row stacks. Each queue poll returns one chunk,
+return rings and per-binding row stacks. Each queue poll returns one completed section's backing,
 rotates unfinished sections and attempts an available post. It reposts actual pages without clearing them and
-cycles the source-chunk occurrence relation. The [receive-storage proof](pages-and-functions.md#receive-storage-return)
+indexes the explicit definition and active head. The [receive-storage proof](pages-and-functions.md#receive-storage-return)
 accounts for receive ownership, bounded metadata, teardown, repeated forwarding,
 and the finite caller namespace still awaiting N1. `link_receive_destroy`
 disposes this setup-owned metadata after its link worker stops. This is an

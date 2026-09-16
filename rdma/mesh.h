@@ -8,18 +8,18 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 55u
+#define MESH_VERSION 57u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
-struct mesh_transfer { uint32_t local_row,binding,count,stride,chunk_stride,pool; uint64_t bytes; };
+struct mesh_transfer { uint32_t local_row,binding,count,stride,pool; uint64_t bytes; };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_BUFFER_CLOSED=4 };
 #define MESH_BUFFER_FLAG(flag) ((uint64_t)(flag)<<32)
-struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages; _Atomic uint32_t uses; uint32_t channel,binding; uint64_t owner,invocation; };
+struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages; _Atomic uint32_t uses; uint32_t channel,binding,definition; uint64_t owner,invocation; };
 struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
@@ -37,7 +37,7 @@ enum { MESH_RESULT_SUCCESS, MESH_RESULT_LINK, MESH_RESULT_FUNCTION, MESH_RESULT_
 #define MESH_RESULT(kind,id,code) ((uint64_t)(kind)<<62|(uint64_t)(id)<<32|(uint32_t)(code))
 struct mesh_instance { _Atomic uint64_t status,invocation; };
 struct mesh_event { uint64_t status,invocation; uint32_t kind; };
-struct mesh_wire_tag { _Atomic uint64_t invocation; _Atomic uint32_t row; };
+struct mesh_wire_tag { _Atomic uint64_t invocation; _Atomic uint32_t row,definition,chunk; };
 struct mesh_event_queue { _Atomic uint64_t tail; uint32_t first,mask; unsigned char padding[48]; };
 enum { MESH_EVENT_RETURN, MESH_EVENT_SHARED, MESH_EVENT_ERROR, MESH_EVENT_SUBMIT };
 struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; struct mesh_port_info port; _Atomic uint32_t order_length[2*MESH_NOTICE_BANKS*MESH_QPS]; };

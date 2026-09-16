@@ -220,8 +220,9 @@ The inverse page table, placeholder assignments and four-store permutation are
 removed. A returned row is already unmapped, and a posted page has no live reader,
 so there is no displaced mapping to repair or payload to move.
 
-The source-chunk relation names a binding/value record and relative chunk offset.
-Its occurrence cursor cycles through the declared copies of each source chunk.
+Protocol 57 replaces the source-chunk occurrence cursors with explicit definition,
+source-head and chunk fields. The first chunk records the actual local head for
+that source head; later chunks directly select the same head and their offset.
 SEND ordering and final ownership keep a sender slot's next value behind its
 previous value on that queue. The final chunk publishes the selected head.
 This also serves forwarding: a received row can carry k=0, be forwarded, return
@@ -251,6 +252,16 @@ count. Realization must provide logical descriptors and backing for the declared
 live dataflow together. Local SEND completion alone does not establish remote
 last use. A receive-side occupancy check, acknowledgement or wait would withhold
 work without repairing the allocation model and is not the proposed remedy.
+
+Numerical consumer ranges are now indexed by the buffer's immutable section
+`definition`, rather than duplicated for each resident row. All root rows name
+the same root definition; all slots of a tensor section name its section
+definition. A publication still supplies its actual row and invocation, so input
+binding, page mapping and ownership continue to refer to the actual value. This
+is the prerequisite for assigning a received descriptor independently of its
+section's old private row range. The current RX allocator and TX forwarding
+arrays have not yet made that transition, and no receive-capacity completion is
+claimed from this dependency-table change.
 
 Setup captures the binding's declared reference count and removes those counts
 from its initially unused rows. The pool owns their storage while no value occupies
@@ -468,6 +479,37 @@ alignment. These are source/storage counts, not latency measurements.
 
 ## Block addressing
 
+### Explicit section identity on the wire
+
+Protocol 57 carries `(invocation, sourceHead, definition, chunk)` in a 24-byte
+tag, replacing the 16-byte invocation/source-chunk tag. `definition` names the
+sender's logical section; `sourceHead` names its current live descriptor; `chunk`
+is an ordinal independent of either peer's OS-page units. A queue's setup table
+maps the peer's definition to its local binding. The first chunk assigns the
+local head, and an array indexed by source head names it for subsequent chunks.
+Publication occurs at the binding's final chunk. No arrival cursor reconstructs
+the section identity, and no particular value can hold up another queue.
+
+The receive target records, source-value records, prefix offsets, cyclic cursors
+and transport `chunk_stride` field are removed. The two new lookup arrays use
+eight bytes per row in the peer's advertised row namespace per receiving queue;
+queues with no receives allocate only empty placeholders. They may exceed the
+old prefix arrays when the old source-row high-water mark was small. Setup no
+longer generates target records for every chunk of every source slot.
+
+All TX links forwarding the same backing write identical tag fields, as they
+did for the old tag; no destination-specific field is stored in shared payload
+backing. The same-QP ordering contract ensures a source head's old final chunk is
+drained before its next first chunk replaces the active-head entry. Other source
+heads and other peer queues may interleave freely. The versioned pairing rejects
+the old wire layout before data posts. The extra eight tag bytes do not add a
+4096-byte transport frame for page-multiple payloads. No latency result is claimed.
+
+This removes receive matching's dependency on pre-enumerated sender storage
+slots. Per-binding destination row stacks, TX edge storage and native/lifecycle
+capacity still need the remaining N1 allocation work; this change does not
+establish an unlimited-admission bound.
+
 ### Logical order and interleaved arrivals
 
 The page table is the indirection between logical tensor coordinates and physical
@@ -585,16 +627,16 @@ uses that path through ordinary gathers, supplied functions and reduce-scatters.
 It is source usage, not a measured four-node run.
 
 Each chunk completion performs that assignment independently. TX prepares the
-forwarded chunk's local row and invocation tag when it posts that chunk. The
-last chunk's precomputed target also names the numerical head to publish.
+forwarded chunk's local head, section definition, invocation and ordinal when it
+posts that chunk. The binding's chunk count identifies the publication boundary.
 FIFO completion puts that publication after all the partial's bytes are placed.
 It does not publish a different tensor partition or wait for any other partial.
 Numerical consumers use the direct or materialized operand bindings described above. Collection releases each chunk's actual backing through
-the page table, including the displaced mappings of unfinished receives.
+the page table.
 
 The registered transport address space aliases these payload pages and a
 separate tag page before each chunk. Its one-entry SEND/RECV span starts at
-that page's final eight bytes and continues into the payload; the dense numerical address space excludes
+that page's final 24 bytes and continues into the payload; the dense numerical address space excludes
 tag pages. Both address spaces map the same shared-memory payload, not two
 copies. All aliases and registrations are made before execution. The tag page
 costs one OS page of storage per chunk; framing costs are recorded in

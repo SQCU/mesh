@@ -117,7 +117,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   for(uint32_t r=first;r<first+count;r++){
     atomic_store_explicit(&mesh_presence(c->M)[r],0,memory_order_relaxed);
     atomic_store_explicit(&mesh_page(c->M)[r],MESH_ABSENT,memory_order_release);
-    mesh_buffers(c->M)[r]=(struct mesh_buffer){.first=r,.channel=MESH_ABSENT};
+    mesh_buffers(c->M)[r]=(struct mesh_buffer){.first=r,.channel=MESH_ABSENT,.definition=first};
     for(uint32_t w=0;w<(c->M->links+63)/64;w++)atomic_store_explicit(&mesh_send_uses(c->M,r)[w],0,memory_order_relaxed);
   }
   c->rows+=count;
