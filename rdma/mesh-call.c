@@ -7,7 +7,8 @@
 struct mesh_call {
   _Alignas(64) struct mesh_function *function;
   struct mesh_operand *operands;
-  uint32_t index,remaining,pending,invocation;
+  uint64_t return_slot;
+  uint32_t index,remaining,pending,invocation,return_row;
   int error;
 };
 _Static_assert(sizeof(struct mesh_call)==64 && _Alignof(struct mesh_call)==64,"mesh_call record");
@@ -47,7 +48,7 @@ struct mesh_calls {
   struct mesh_ctx *context;
   struct mesh_function *functions;
   struct mesh_call_worker workers[MESH_COMPUTE_THREADS];
-  uint32_t count,extent,first,return_first,root_workers,function_count;
+  uint32_t count,extent,first,return_first,return_count,root_workers,function_count;
   struct mesh_call **slots;
   struct mesh_instance *instances;
   _Atomic uint32_t references;
@@ -70,7 +71,7 @@ static void mesh_calls_release(struct mesh_calls *calls,uint32_t references){
     function=next;
   }
   if(calls->first!=MESH_ABSENT)mesh_rows_release(calls->context,calls->first,calls->extent);
-  if(calls->return_first!=MESH_ABSENT)mesh_rows_release(calls->context,calls->return_first,calls->function_count*calls->extent);
+  if(calls->return_first!=MESH_ABSENT)mesh_rows_release(calls->context,calls->return_first,calls->return_count);
   if(calls->dispose)calls->dispose(calls->owner);
   free(calls->slots);free(calls);
 }
@@ -148,12 +149,12 @@ static void *mesh_call_progress(void *argument){
   struct hdr *m=calls->context->M;
   struct mesh_buffer *buffers=mesh_buffers(m);
   uint32_t queue=mesh_notice_queue(m,calls->context->client,m->links*(m->qps+1)+worker->index);
-  struct mesh_ring_reader reader=mesh_ring_reader_init(m,queue),returns=mesh_ring_reader_init(m,queue+MESH_COMPUTE_THREADS);
+  struct mesh_event_reader reader=mesh_event_reader_init(m,queue),returns=mesh_event_reader_init(m,queue+MESH_COMPUTE_THREADS);
   pthread_setname_np("mesh.numerical");
   while(atomic_load_explicit(&calls->running,memory_order_acquire) || atomic_load_explicit(&worker->active,memory_order_acquire)){
     uint32_t row;
     if(atomic_load_explicit(&calls->running,memory_order_acquire)){
-      while((row=mesh_ring_take(&reader))!=MESH_ABSENT){
+      while((row=mesh_event_take(&reader))!=MESH_ABSENT){
         for(size_t i=worker->offsets[row];i<worker->offsets[row+1];i++){
           struct mesh_use use=worker->targets[i];
           if(use.operand){
@@ -169,7 +170,7 @@ static void *mesh_call_progress(void *argument){
         }
       }
     }
-    while((row=mesh_ring_take(&returns))!=MESH_ABSENT){
+    while((row=mesh_event_take(&returns))!=MESH_ABSENT){
       struct mesh_call *call=calls->slots[buffers[row].binding];
       if(!call->error && --call->remaining)continue;
       struct mesh_function *function=call->function;
@@ -199,20 +200,29 @@ int mesh_calls_start(struct mesh_calls *calls){
   if(calls->function_count>rows/calls->extent)return ENOMEM;
   calls->slots=calloc(calls->function_count?calls->function_count*calls->extent:1,sizeof *calls->slots);
   if(!calls->slots)return ENOMEM;
-  if(calls->function_count){
-    calls->return_first=mesh_rows_alloc(calls->context,calls->function_count*calls->extent);
+  for(struct mesh_function *function=calls->functions;function;function=function->next)
+    if(!function->output_count)calls->return_count+=calls->extent;
+  if(calls->return_count){
+    calls->return_first=mesh_rows_alloc(calls->context,calls->return_count);
     if(calls->return_first==MESH_ABSENT)return errno;
   }
+  uint32_t returned=0;
   for(struct mesh_function *function=calls->functions;function;function=function->next){
     size_t count=function->input_count+function->output_count;
     for(uint32_t index=0;index<calls->extent;index++){
       uint32_t slot=function->identity*calls->extent+index;
-      mesh_buffers(m)[calls->return_first+slot].binding=slot;calls->slots[slot]=&function->values[index];
+      uint32_t queue=mesh_notice_queue(m,calls->context->client,m->links*(m->qps+1)+MESH_COMPUTE_THREADS+function->worker);
+      struct mesh_call *call=&function->values[index];
+      calls->slots[slot]=call;
       for(size_t j=0;j<function->output_count;j++){
         uint32_t row=function->operands[index*count+function->input_count+j].row;
         struct mesh_buffer *buffer=&mesh_buffers(m)[row];
         buffer->channel=m->links*m->qps+MESH_COMPUTE_THREADS+function->worker;buffer->binding=slot;
+        buffer->return_slot=mesh_event_bind(m,queue);
       }
+      call->return_row=function->output_count?call->operands[function->input_count].row:calls->return_first+returned++;
+      struct mesh_buffer *buffer=&mesh_buffers(m)[call->return_row];buffer->binding=slot;
+      call->return_slot=function->output_count?buffer->return_slot:mesh_event_bind(m,queue);
     }
   }
   for(int pass=0;pass<2;pass++){
@@ -243,7 +253,10 @@ int mesh_calls_start(struct mesh_calls *calls){
               function->submit,function->argument,call,call->operands,operand,operand?operand->pages:NULL,
               section.stride?&mesh_buffers(m)[row].invocation:&call->invocation,
               (uint32_t)function->input_count,(uint32_t)(function->input_count+function->output_count)};
-          } else {worker->offsets[row+1]++;mesh_buffers(m)[row].uses|=UINT32_C(1)<<function->worker;}
+          } else {
+            worker->offsets[row+1]++;
+            mesh_publish_bind(calls->context,row,m->links*(m->qps+1)+function->worker,0);
+          }
         }
       }
       if(!pass){
@@ -307,11 +320,7 @@ uint64_t mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
   status=atomic_load_explicit(&m->result[calls->context->client>>63],memory_order_acquire).value;
   if(status>>62!=MESH_RESULT_BUSY){mesh_result_conclude(&instance->status,status);return status;}
   mesh_buffers(m)[calls->first+frame].invocation=index;
-  uint32_t workers=calls->root_workers;
-  while(workers){
-    uint32_t worker=(uint32_t)__builtin_ctz(workers);workers&=workers-1;
-    mesh_ring_push(m,mesh_notice_queue(m,calls->context->client,m->links*(m->qps+1)+worker),calls->first+frame);
-  }
+  mesh_publish(m,calls->first+frame,(uint64_t)index+1);
   return 0;
 }
 
@@ -337,8 +346,7 @@ void mesh_call_complete(struct mesh_call *call,int error){
     mesh_buffer_release(m,call->operands[input].row);
   }
   if(error || !output_count)
-    mesh_ring_push(m,mesh_notice_queue(m,calls->context->client,m->links*(m->qps+1)+MESH_COMPUTE_THREADS+function->worker),
-      calls->return_first+function->identity*calls->extent+call->index);
+    mesh_event_push(m,call->return_slot,call->return_row);
   else for(size_t i=0;i<output_count;i++)mesh_buffer_release(m,outputs[i].row);
   atomic_fetch_sub_explicit(active,1,memory_order_release);
 }
@@ -364,9 +372,8 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
     uint32_t row=mesh_section_row(section,value);
     mesh_buffer_retain(m,row);
     uint32_t link=queue/m->qps;
-    uint64_t bit=UINT64_C(1)<<(link%64),uses=atomic_fetch_or_explicit(&mesh_send_uses(m,row)[link/64],bit,memory_order_relaxed);
-    if(!(uses&bit) && atomic_load_explicit(&mesh_presence(m)[row],memory_order_relaxed))
-      mesh_ring_push(m,mesh_notice_queue(m,context->client,link),row);
+    uint64_t target=mesh_publish_bind(context,row,link,1);
+    if(atomic_load_explicit(&mesh_presence(m)[row],memory_order_relaxed))mesh_event_push(m,target,row);
   }
   mesh_transfers(m,context->client,queue,receive)[index]=(struct mesh_transfer){section.first,identity,section.count,section.stride,MESH_ABSENT,section.bytes};
   atomic_store_explicit(length,index+1,memory_order_release);
@@ -409,6 +416,7 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uin
   for(uint32_t row=first;row<first+rows;row+=stride){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     atomic_store_explicit(&buffer->references,2,memory_order_relaxed);buffer->pages=(uint32_t)span;buffer->channel=channel;
+    if(channel!=MESH_ABSENT)buffer->return_slot=mesh_event_bind(m,mesh_notice_queue(m,context->client,m->links+channel));
     atomic_store_explicit(&buffer->owner,context->client,memory_order_release);
   }
   mesh_bits_set(m,MESH_ROW_HOT,first,rows);

@@ -23,7 +23,7 @@ struct mesh_receive {
   struct mesh_receive_request *requests;
   struct mesh_receive_record *records;
   struct mesh_ready ready;
-  struct mesh_ring_reader returns;
+  struct mesh_event_reader returns;
 };
 struct mesh_worker {struct mesh_link *link;pthread_t thread;uint32_t direction;};
 struct mesh_link {
@@ -38,7 +38,7 @@ struct mesh_link {
   uint32_t *send_offsets,*send_ready;
   struct mesh_send_edge *send_edges;
   struct mesh_ready ready[MESH_QPS];
-  struct mesh_ring_reader notices;
+  struct mesh_event_reader notices;
   struct mesh_instance *instances;
   uint32_t instance_count;
 };
@@ -64,7 +64,7 @@ static void link_error(struct mesh_link *link,int64_t code,uint32_t domain){
 /* design/algorithm-sources.md#programcopy */
 static int link_configure(void *state,int socket,uint64_t client){
   struct mesh_link *link=state;struct hdr *m=link->M;
-  link->notices=mesh_ring_reader_init(m,mesh_notice_queue(m,client,link->index));
+  link->notices=mesh_event_reader_init(m,mesh_notice_queue(m,client,link->index));
   uint64_t payload=(uint64_t)m->block*m->pgsz;
   uint32_t bytes[2*MESH_QPS]={0};
   size_t count=0,ready_count=0,queue_counts[MESH_QPS]={0};
@@ -120,7 +120,7 @@ static int link_configure(void *state,int socket,uint64_t client){
     size_t capacity=1;
     while(capacity<chunks_count)capacity*=2;
     *receive=(struct mesh_receive){.first=receives?in[0].pool:0,.ready={.tail=chunks_count,.mask=capacity-1},
-      .returns=mesh_ring_reader_init(m,mesh_notice_queue(m,client,m->links+link->index*m->qps+q))};
+      .returns=mesh_event_reader_init(m,mesh_notice_queue(m,client,m->links+link->index*m->qps+q))};
     receive->pages=calloc(capacity,sizeof *receive->pages);
     receive->requests=aligned_alloc(_Alignof(struct mesh_receive_request),(chunks_count?chunks_count:1)*sizeof *receive->requests);
     receive->records=aligned_alloc(_Alignof(struct mesh_receive_record),(receives?peer_counts[2]:1)*sizeof *receive->records);
@@ -175,7 +175,7 @@ static int link_receive(struct mesh_link *link,uint32_t q){
     }
     if(error<0)error=-error;
     if(error && error!=ENOMEM && error!=EAGAIN)return error;
-    uint32_t row=mesh_ring_take(&receive->returns);
+    uint32_t row=mesh_event_take(&receive->returns);
     if(row==MESH_ABSENT)return error;
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     for(uint32_t offset=0;offset<buffer->pages;offset+=m->block){
@@ -257,7 +257,7 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
 /* design/algorithm-sources.md#programkernel_call */
 static void link_publications(struct mesh_link *link){
   uint32_t row;
-  while((row=mesh_ring_take(&link->notices))!=MESH_ABSENT){
+  while((row=mesh_event_take(&link->notices))!=MESH_ABSENT){
     for(uint32_t at=link->send_offsets[row];at<link->send_offsets[row+1];at++){
       uint32_t q=link->send_edges[at].queue;
       struct mesh_ready *ready=&link->ready[q];

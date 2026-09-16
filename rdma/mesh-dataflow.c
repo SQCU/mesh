@@ -75,10 +75,9 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
   client|=(~device)&(UINT64_C(1)<<63);
   for(uint32_t queue=0;queue<memory->links*(memory->qps+1)+2*MESH_COMPUTE_THREADS;queue++){
-    struct mesh_ring *ring=mesh_ring(memory,mesh_notice_queue(memory,client,queue));
-    atomic_store_explicit(&ring->tail,0,memory_order_relaxed);
-    atomic_store_explicit(&ring->head,0,memory_order_relaxed);
-    for(uint64_t i=0;i<(UINT64_C(1)<<memory->notice_shift);i++)atomic_store_explicit(&ring->slots[i],0,memory_order_relaxed);
+    struct mesh_events *events=mesh_events(memory,mesh_notice_queue(memory,client,queue));
+    events->count=events->cursor=0;
+    for(uint32_t i=0;i<memory->rows;i++)atomic_store_explicit(&events->slots[i],0,memory_order_relaxed);
   }
   for(uint32_t q=0;q<memory->links*memory->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(memory,client,q,d),0,memory_order_relaxed);
   atomic_store_explicit(&memory->client,client,memory_order_release);
@@ -123,10 +122,9 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
     struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
     atomic_store_explicit(&buffer->references,0,memory_order_relaxed);
     atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-    atomic_store_explicit(&buffer->uses,0,memory_order_relaxed);
+    buffer->uses=buffer->sends=0;buffer->return_slot=0;
     buffer->initial=buffer->pages=buffer->binding=buffer->invocation=buffer->completions=0;buffer->channel=MESH_ABSENT;
     atomic_store_explicit(&buffer->owner,c->client,memory_order_release);
-    for(uint32_t w=0;w<(c->M->links+63)/64;w++)atomic_store_explicit(&mesh_send_uses(c->M,r)[w],0,memory_order_relaxed);
   }
   c->rows+=count;
   return first;
@@ -182,7 +180,7 @@ void mesh_buffer_release(struct hdr *m,uint32_t row){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
   if(atomic_fetch_sub_explicit(&buffer->references,1,memory_order_acq_rel)==1){
     if(buffer->channel==MESH_ABSENT)atomic_fetch_or_explicit(&mesh_plane(m,MESH_FREE)[row/64],UINT64_C(1)<<(row%64),memory_order_release);
-    else mesh_ring_push(m,mesh_notice_queue(m,atomic_load_explicit(&buffer->owner,memory_order_relaxed),m->links+buffer->channel),row);
+    else mesh_event_push(m,buffer->return_slot,row);
   }
 }
 
@@ -218,20 +216,27 @@ void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_clear(c->M,MESH_ROW_OWN,first,count);
 }
 
+/* design/algorithm-sources.md#index-hand-off */
+uint64_t mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t queue,int send){
+  struct hdr *m=c->M;
+  struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+  uint32_t *count=send?&buffer->sends:&buffer->uses;
+  uint64_t *targets=mesh_targets(m,row)+(send?0:buffer->sends);
+  uint32_t destination=mesh_notice_queue(m,c->client,queue);
+  uint64_t first=m->notice_off+(uint64_t)destination*m->notice_bytes;
+  for(uint32_t i=0;i<*count;i++)if(targets[i]>=first && targets[i]<first+m->notice_bytes)return targets[i];
+  uint64_t slot=mesh_event_bind(m,destination);
+  targets[(*count)++]=slot;
+  return slot;
+}
+
 /* design/algorithm-sources.md#programkernel_call */
 void mesh_publish(struct hdr *m,uint32_t row,uint64_t stamp){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-  for(uint32_t w=0;w<(m->links+63)/64;w++){
-    uint64_t links=atomic_load_explicit(&mesh_send_uses(m,row)[w],memory_order_relaxed);
-    while(links){
-      uint32_t link=w*64+(uint32_t)__builtin_ctzll(links);links&=links-1;
-      mesh_ring_push(m,mesh_notice_queue(m,atomic_load_explicit(&buffer->owner,memory_order_relaxed),link),row);
-    }
-  }
+  uint64_t *targets=mesh_targets(m,row);
+  uint32_t sends=buffer->sends;
+  for(uint32_t i=0;i<sends;i++)mesh_event_push(m,targets[i],row);
   atomic_store_explicit(&mesh_presence(m)[row],stamp,memory_order_release);
-  uint32_t uses=atomic_load_explicit(&buffer->uses,memory_order_relaxed);
-  while(uses){
-    uint32_t worker=(uint32_t)__builtin_ctz(uses);uses&=uses-1;
-    mesh_ring_push(m,mesh_notice_queue(m,atomic_load_explicit(&buffer->owner,memory_order_relaxed),m->links*(m->qps+1)+worker),row);
-  }
+  uint32_t end=sends+buffer->uses;
+  for(uint32_t i=sends;i<end;i++)mesh_event_push(m,targets[i],row);
 }

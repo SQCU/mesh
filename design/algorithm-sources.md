@@ -238,24 +238,30 @@ or rearm the same program: those R2/R4 steps remain unfinished.
 
 ## Index hand-off
 
-Thompson, Farley, Barker, Gee and Stewart's
-[Disruptor technical paper](https://lmax-exchange.github.io/disruptor/disruptor.html)
-(2011), sections 3.1–3.3, supplies preallocated ring storage and sequence indexing.
-ABI 67 applies that representation to Mesh's inter-thread index hand-offs.
-`mesh_layout` prepares each ring's power-of-two capacity and aligned storage;
-`mesh_ring` resolves its shared address. `mesh_ring_push` reserves a position
-with fetch-add and publishes one packed generation/index word. `mesh_ring_take`
-acquires the word directly and advances its sole reader's position;
-`mesh_ring_reader_init` binds the ring and resumes its consumed position.
-The packed word and capacity derived from Mesh's row-lifetime contract are this
-implementation's choices, not code copied from Disruptor. No upstream wait
-strategy, consumer barrier or producer capacity gate is imported.
+Papadopoulos and Culler's
+[Monsoon: an Explicit Token-Store Architecture](https://people.eecs.berkeley.edu/~kubitron/courses/cs252-F03/handouts/papers/p398-papadopoulos.pdf)
+(ISCA, 1990), section 2, assigns graph arcs to explicit frame locations rather
+than discovering matches dynamically. ABI 68 uses prepared locations for index
+hand-offs. `mesh_events` resolves an event array; `mesh_event_bind` assigns a
+slot before execution; `mesh_publish_bind` deduplicates destinations and records
+their shared-memory offsets in the row's contiguous target range. Runtime
+`mesh_event_push` release-stores the supplied index. `mesh_event_reader_init`
+binds the consumer's range; `mesh_event_take` reads slots directly, clears each
+consumed event, and continues past empty locations. This software polling loop
+is Mesh's implementation, not Monsoon hardware or a copied queue algorithm.
 
-The [handoff analysis](pages-and-functions.md#publication-notifications) gives
-the operation count, memory cost, lifetime assumption and reservation-hole
-limitation. In particular, a published entry behind an unpublished reservation
-is delayed by FIFO consumption. This does not satisfy independent immediate
-drainage; H1 remains partial rather than silently accepting that limitation.
+The [Disruptor paper](https://lmax-exchange.github.io/disruptor/disruptor.html)
+(Thompson, Farley, Barker, Gee and Stewart, 2011), section 2.2, distinguishes
+visibility from contended updates and favors a single writer per resource.
+The row lifetime gives each event slot one publication at a time; distinct rows
+write distinct slots. Acquire/release makes preceding data visible. Refcounts
+supply reuse ordering without a runtime slot-occupancy query.
+
+ABI 67's shared-ticket FIFO implementation is deleted: a publisher paused after
+reservation could delay unrelated published entries. The
+[handoff analysis](pages-and-functions.md#publication-notifications) records the
+replacement's operation counts and its remaining O(E) polling cost. Direct
+publication and independent drainage do not prove the latency target.
 
 ## Program.kernel_call
 
@@ -287,8 +293,8 @@ Gregory M. Papadopoulos and David E. Culler,
 [Monsoon: an Explicit Token-Store Architecture](https://people.eecs.berkeley.edu/~kubitron/courses/cs252-F03/handouts/papers/p398-papadopoulos.pdf)
 (ISCA, 1990), supplies the operand-associated state-bit mechanism and statically
 assigned token locations. Mesh uses prepared frame/operand locations and declared
-consumer ranges with countdown firing. ABI 67 removes the software notification
-summary hierarchy previously described here; publication now uses the
+consumer ranges with countdown firing. ABI 68 retains the deletion of the software notification
+summary hierarchy; publication now uses the
 [index hand-off](#index-hand-off) directly. The page table retains canonical
 operand mappings, independently of notification storage.
 The historical ABI 55 implementation kept invocation-keyed join records separate

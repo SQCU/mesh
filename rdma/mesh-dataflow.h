@@ -32,6 +32,8 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
+/* design/algorithm-sources.md#index-hand-off */
+uint64_t mesh_publish_bind(struct mesh_ctx *,uint32_t row,uint32_t queue,int send);
 void mesh_buffer_retain(struct hdr *,uint32_t row);
 void mesh_retired_release(struct hdr *);
 #endif

@@ -164,53 +164,62 @@ invocation stamp; a slot number no longer identifies an invocation. This search
 exists only in the opt-in synchronization path. It does not retain a value beyond
 its declared readers, and can wait forever if asked for an unavailable value.
 
-ABI 67 replaces the hierarchical notification sets with contiguous index rings.
-The publisher already has the terminal row index; it now stores that index,
-without encoding it into bits for a reader to reconstruct. TX publications,
-numerical input arrivals, root submissions and final-reference returns all use
-the same ring representation. `mesh_notice_reader`, summary levels, bit exchanges,
-and the decoding iterator are deleted.
+ABI 68 gives each declared publication/destination pair a prepared 32-bit event
+slot. These slots form a dense array for each TX link, numerical worker and
+return consumer. Attachment reserves the arena; binding assigns positions only
+for actual subscribers. A publisher release-stores `row + 1` directly at its
+prepared shared-memory offset. Zero represents no event. It does not reserve a
+position, read another publisher's cursor, compare a sequence, or test capacity.
 
-A ring slot is one atomic 64-bit word: its low half is the supplied 32-bit index,
-and its high half is the slot's publication generation. Setup chooses capacity
-C = 2^ceil(log2(max(1, rows))). A producer obtains position p with one relaxed
-fetch-add and release-stores `{generation = floor(p/C)+1, index}` at p mod C.
-Generation arithmetic is modulo 2^32. The consumer acquire-loads that single
-word, compares its generation with the next position's generation, and returns
-the low half directly. A matching word advances the private head and stores the
-shared head. An unmatched word returns immediately without changing the head.
-There is no decoder loop, CAS loop, full check, allocator, sleep or remote ACK.
-Release/acquire orders the payload and mapping stores preceding the publication.
+`mesh_publish_bind` deduplicates destinations during setup and prepares one
+contiguous list of slot offsets per row. TX destinations precede numerical
+consumers. `mesh_publish` walks the TX range first, stores presence, then walks
+the numerical range. Link bitsets, worker bitsets, runtime bit decoding and
+per-destination queue-address reconstruction are deleted. Root submissions use
+this same prepared publication. Buffer returns carry their slot offset directly;
+function errors and no-output completions carry prepared slot/row values in the
+existing call record. A failed call with outputs uses its first output's existing
+return slot: failure publishes no successful output, so there is no competing
+success-return event. Only outputless calls allocate a metadata return row.
+The former per-call error-only slot and row are deleted. No caller API or
+numerical function changes.
 
-Head and tail occupy separate 128-byte aligned regions. The consumer never
-loads the producer tail. The shared head preserves consumed progress when a
-reader is recreated; it is not a capacity gate and producers do not read it.
-Client attachment initializes the unused bank before publication. Repeated
-operands remain entries in the prepared consumer range, not duplicate events.
-Constants already present at setup still seed at most one TX event per link.
+A consumer acquire-loads an event slot, clears a nonzero slot, and uses the
+already supplied row index. Its cursor advances past empty slots; after one
+complete empty pass it returns to its other work. No producer owns that cursor.
+For example, if A has not published and B has, observing A's zero continues to
+B's slot and consumes B. This is the source-level counterexample that the
+ABI-67 FIFO ring failed: its reserved head stopped at A even after B published.
+That ring, its tail/head reservations, packed generations and sequence check
+are deleted. The hierarchy removed by ABI 67 remains deleted.
 
-Capacity relies on each logical row having at most one outstanding event in a
-given ring: reuse follows that row's declared reads, so the preceding event has
-been consumed before republication. With R rows, there are at most R outstanding
-reservations/publications, and C >= R. This is the existing row-lifetime contract,
-not a repair of N1's unfinished cross-participant reuse realization.
+Slot reuse follows the same declared row lifetime as operand reuse. Each
+publication has one event per destination, regardless of the number of consumer
+uses in its prepared range. The consumer clears the event before executing those
+uses. Their reference releases occur later, so a legal republication follows the
+clear; the publisher needs no occupancy read or consumer acknowledgment.
+Constants can seed the same immutable event repeatedly during setup; execution
+starts only after declarations finish. This argument assumes the declared
+lifetime has been realized; it does not close N1's cross-participant reuse gap.
 
-The H1 multi-producer reservation scheme has an ordering limitation. If publisher
-A reserves position p and is descheduled before its release store, publisher B
-can publish p+1, but this consumer cannot remove B until A publishes. It returns
-to other queues instead of spinning on A. This is head-of-line delay even without
-a wait loop; therefore removal of traversal does not establish the stronger
-requirement that every ready event is drained independently. H1/H3/H4 remain
-incomplete. This limitation is an implementation defect to remove, not a new
-application dependency or an authorized default barrier.
+The remaining cost is explicit: with E subscribed slots, an empty pass performs
+E acquire loads. A ready event can require up to E probes according to the
+cursor position; polling order need not follow dataflow order. Each probe reads
+one contiguous four-byte slot, with no index-decoding hierarchy or dependent
+address lookup. This removes cross-publisher blocking, but **does not establish
+the one-line end-to-end latency or repeated-layer speedup requirements**.
+H1/H3/H7 remain incomplete. Polling cannot be described as free or hidden behind
+other work; no performance conclusion follows from these source changes.
 
-For 229,376 rows, one link, eight native queues and eight numerical workers,
-C = 262,144. Each ring uses 256 + 8C bytes; the two banks of 25 rings use
-104,870,400 bytes before region alignment, versus 1,459,200 bytes for the old
-padded bitmap levels. This deliberately spends shared memory to remove the
-metadata walk. The reader shrinks from 128 to 32 bytes. Maintained library source
-is 2,473 -> 2,468 lines across the same eleven Swift/C/header files. These are
-source/layout counts, not latency or speedup measurements.
+For 229,376 rows, one link and eight native queues, the two banks of 25 event
+arrays reserve 45,881,600 bytes before region alignment, versus ABI 67's
+104,870,400 bytes. Prepared destination offsets replace the send-use bitset:
+16,515,072 versus 1,835,008 bytes. Buffer records grow from 48 to 64 aligned bytes
+(3,670,016 additional bytes), keeping return destinations beside lifetime data.
+The net reduction of these regions is 40,638,720 bytes. Only bound slots are
+polled. A reader is 16 bytes, down from 32. Maintained source is 2,468 -> 2,491
+lines across the same eleven Swift/C/header files. These are layout/source
+counts, not measurements.
 
 ## Reusable send queue
 
