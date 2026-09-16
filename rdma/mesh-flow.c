@@ -6,7 +6,7 @@
 /* design/algorithm-sources.md#programcopy */
 struct mesh_send_edge {
   _Alignas(128) struct ibv_sge span;
-  struct mesh_instance *instance; uint32_t queue,row,chunks,offset,remaining;
+  struct mesh_instance *instances; uint32_t completions,queue,row,chunks,offset,remaining;
   struct ibv_send_wr request;
 };
 _Static_assert(sizeof(struct mesh_send_edge)==256 && offsetof(struct mesh_send_edge,request)+offsetof(struct ibv_send_wr,wr)<=128,"mesh_send_edge native request");
@@ -15,7 +15,7 @@ _Static_assert(sizeof(struct mesh_receive_request)==64 && _Alignof(struct mesh_r
 struct mesh_ready {uint64_t head,tail;size_t first,mask;};
 struct mesh_receive_record {
   _Alignas(32) struct mesh_buffer *buffer;
-  _Atomic uint32_t *entry; uint32_t row,flags,frame;
+  _Atomic uint32_t *entry; uint32_t row,last,completions;
 };
 _Static_assert(sizeof(struct mesh_receive_record)==32 && _Alignof(struct mesh_receive_record)==32,"mesh_receive_record");
 struct mesh_receive {
@@ -135,17 +135,19 @@ static int link_configure(void *state,int socket,uint64_t client){
       uint32_t chunks=(uint32_t)((in[i].bytes+payload-1)/payload);
       for(uint32_t value=0;value<in[i].count;value++){
         uint32_t row=in[i].local_row+value*in[i].stride;
+        struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+        buffer->binding=value;buffer->completions=in[i].stride!=0;
         for(uint32_t chunk=0;chunk<chunks;chunk++)
           receive->records[peer[i].local_row+value*peer[i].stride+chunk]=(struct mesh_receive_record){
-            .buffer=&mesh_buffers(m)[row],.entry=mesh_page(m)+row+chunk,.row=row,
-            .flags=(chunk+1==chunks)|((!in[i].stride)<<1),.frame=value};
+            .buffer=buffer,.entry=mesh_page(m)+row+chunk,.row=row,
+            .last=chunk+1==chunks,.completions=in[i].stride?0:link->instance_count};
       }
     }
     for(uint32_t i=0;i<sends;i++)for(uint32_t value=0;value<out[i].count;value++){
       uint32_t row=out[i].local_row+value*out[i].stride;
       uint32_t chunks=(uint32_t)((out[i].bytes+payload-1)/payload);
       uint32_t edge=link->send_offsets[row]++;struct mesh_send_edge *source=&link->send_edges[edge];
-      *source=(struct mesh_send_edge){.span={.length=bytes[2*q+MESH_SEND]},.instance=out[i].stride?&link->instances[value]:NULL,.queue=q,.row=row,.chunks=chunks,.remaining=chunks,
+      *source=(struct mesh_send_edge){.span={.length=bytes[2*q+MESH_SEND]},.instances=&link->instances[value],.completions=out[i].stride?1:link->instance_count,.queue=q,.row=row,.chunks=chunks,.remaining=chunks,
         .request={.wr_id=edge,.sg_list=&source->span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED}};
     }
     free(bindings);free(peer);
@@ -181,7 +183,11 @@ static int link_receive(struct mesh_link *link,uint32_t q){
       atomic_store_explicit(&mesh_page(m)[row+offset/m->block],MESH_ABSENT,memory_order_relaxed);
     }
     mesh_buffer_reset(m,row);
-    mesh_instance_release(&link->instances[buffer->binding]);
+    for(uint32_t i=0;i<buffer->completions;i++){
+      struct mesh_instance *instance=&link->instances[buffer->binding+i];
+      atomic_store_explicit(&instance->invocation,buffer->invocation,memory_order_relaxed);
+      mesh_instance_release(instance,1);
+    }
   }
 }
 /* design/algorithm-sources.md#programkernel_call */
@@ -225,20 +231,18 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
         uint32_t invocation=(uint32_t)(tag_value>>32);
         struct mesh_receive_record record=receive->records[(uint32_t)tag_value];
         atomic_store_explicit(record.entry,page,memory_order_relaxed);
-        if(record.flags&1){
+        if(record.last){
           record.buffer->invocation=invocation;
           mesh_publish(m,record.row,(uint64_t)invocation+1);
-          if(record.flags&2)mesh_shared_release(link->instances,link->instance_count);
-          else atomic_store_explicit(&link->instances[record.frame].invocation,invocation,memory_order_relaxed);
           mesh_buffer_release(m,record.row);
+          mesh_instance_release(link->instances,record.completions);
         }
       } else {
         struct mesh_send_edge *source=&link->send_edges[(uint32_t)wc->wr_id];
         if(!--source->remaining){
           source->offset=0;source->remaining=source->chunks;
           mesh_buffer_release(m,source->row);
-          if(source->instance)mesh_instance_release(source->instance);
-          else mesh_shared_release(link->instances,link->instance_count);
+          mesh_instance_release(source->instances,source->completions);
         }
       }
     }

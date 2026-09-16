@@ -189,10 +189,11 @@ the sum of the per-queue capacities. These counts are not performance evidence.
 ABI 59 removes the per-binding logical-row stacks, the definition-to-binding
 lookup, and the active-source-head array. Setup expands each peer-qualified
 source chunk into an aligned 32-byte receive record. ABI 60 stores the exact
-destination row, its buffer address and canonical page-entry address, and
-final/shared flags. ABI 64 removes its duplicate reference count and first-chunk
-flag. RX indexes
-that record using the source chunk in the received tag. It does not allocate, search for a row or
+destination row, its buffer address and canonical page-entry address. ABI 64
+removes its duplicate reference count and first-chunk flag; ABI 65 replaces the
+shared flag and frame index with a prepared completion count, retaining only
+the final-chunk marker. RX indexes that record using the source chunk in the
+received tag. It does not allocate, search for a row or
 reconstruct the page-list address from a buffer descriptor.
 
 For transfer t, resident frame f and chunk k, setup binds
@@ -208,7 +209,8 @@ logical coordinates; it does not make the physical pages contiguous.
 A queue still owns one ring of physical receive blocks. Final-reference notices
 return all of a section's actual blocks to that ring, clear its mappings, restore
 its prepared ownership and clear presence through `mesh_buffer_reset`, and
-release the transfer's frame reference directly. RX posts available blocks until native
+release its declared completion range. A long-lived buffer has an empty range;
+its return releases no frame reference. RX posts available blocks until native
 refusal, without a software window or a destination-reuse check. The former
 logical-row stack return and first-chunk pop are deleted. Payload is not zeroed.
 
@@ -307,10 +309,9 @@ unissued uses after native users and the QPs have ended.
 
 This change does not make the buffer's logical row a safe reusable identity.
 The row and operand page list can still be rebound while an earlier remote use
-is live (N1). Receive-buffer return also still decrements a frame counter even
-for a long-lived value whose transfer was already counted at publication (L7/R2).
-These are separate unfinished lifecycle defects. Adding a reference-category
-branch or resetting the count cannot repair either ownership relationship.
+is live (N1). The separate receive/frame accounting defect discovered here is
+corrected by ABI 65's declared completion ranges below. Cross-participant
+allocation identity and cancellation remain unfinished.
 
 Source effects: first-chunk receipt loses one atomic ownership addition and one
 presence store; reset uses stores on final return. Sequence is stored at
@@ -319,6 +320,44 @@ Retain/release use 32-bit atomics without packed flag extraction. There is no ex
 payload copy, allocation on launch, or measured latency claim. Maintained source
 changes from 2,456 to 2,451 lines across the same eleven Swift/C/header files;
 documentation changes are separate.
+
+### Completion references are declared at setup
+
+ABI 65 removes the assumption that every returned buffer owns the frame named
+by its default binding index. Allocation now assigns no completion binding.
+Numerical and transport realization assign the actual owners and release ranges.
+The ranges are immutable program metadata; runtime neither chooses a reference
+category nor asks whether a destination is occupied.
+
+| Event | First frame | References released |
+|---|---|---|
+| Numerical return | Call's frame | 1 |
+| Per-invocation SEND completion | Transfer's frame | 1 |
+| Long-lived SEND completion | 0 | `inFlight` |
+| Per-invocation receive publication | 0 | 0 |
+| Long-lived receive publication | 0 | `inFlight` |
+| Per-invocation receive storage return | Transfer's frame | 1 |
+| Long-lived receive storage return | 0 | 0 |
+
+Every range uses `mesh_instance_release`; the separate `mesh_shared_release`
+helper and the TX reference-category branch are deleted. An empty range changes
+no counter. Thus receiving and later returning a constant cannot decrement
+frame 0 twice. The receive record contains a completion count instead of a
+shared flag; buffer return has its own declared count. Neither controls posting.
+
+Received invocation identity is recorded in the buffer at publication and in
+the owning frame when its receive storage returns, before releasing that frame
+reference. The retained reference prevents successful conclusion before this
+store. Buffer mappings, counts and presence are reset before frame availability,
+preserving the previous local reuse order. This does not establish remote reuse
+safety or conclude failure cancellation.
+
+The buffer record grows from 40 to 48 bytes (8 bytes per arena row). RX records
+remain aligned 32-byte records; the SEND count occupies existing padding in the
+256-byte native request record. No queue, notification, payload copy or live
+counter is added. Maintained source changes from 2,451 to 2,454 lines across the
+same eleven files. Source and build checks establish this accounting change;
+there is no new runtime or latency result.
 
 ### Input lifetime ends at its own use
 
@@ -400,9 +439,10 @@ A function's final output return or transfer completion/storage return directly
 decrements that frame's atomic count. Zero restores its recurring count,
 concludes status, and marks it available. Shared-transfer completion releases one
 initial reference from every frame. The last release is not enqueued elsewhere.
-ABI 60's send record contains the exact frame-refcount address; received sections
-have their frame index installed in `buffer.binding` during allocation. Transfer
-return therefore does not derive frame ownership from the invocation label.
+ABI 65's send record contains the exact start and length of its frame-reference
+range. Receive setup assigns the buffer's completion binding and count; allocation
+does not infer a frame relationship. Transfer return therefore does not derive
+frame ownership from the invocation label.
 
 The lifecycle thread, producer event rings and their arena storage are deleted,
 along with the keyed status directory, tombstones, frame-to-label array and

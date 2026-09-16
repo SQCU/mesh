@@ -128,10 +128,10 @@ on this ARM64 compiler the acquire read is `ldp` plus `dmb ishld`, with register
 comparisons and no polling loop. This replaces ABI 61's single 64-bit code word,
 which could lose the prior success on link failure and therefore violated F10.
 
-Submission records the invocation before publishing roots. RX records it after
-`mesh_publish` and before dropping the buffer's existing producer reference;
-the 32-byte receive record supplies the frame index from setup. That ownership
-event cannot release the frame's final reference before the invocation store.
+Submission records the invocation before publishing roots. RX records it in the
+buffer before publication, then copies it to the owning frame on storage return,
+before releasing the frame reference declared at setup. That ownership event
+cannot release the frame's final reference before the invocation store.
 The last reference publishes success with that invocation. No passive-arrival
 busy store, extra notification or transport permission check is added.
 
@@ -157,15 +157,20 @@ composition. No runtime or killed-peer result is claimed.
 Collins's reference counting, cited above, supplies the ownership mechanism.
 Setup counts numerical and transfer references per frame. Final function/transfer
 release decrements the frame's atomic count directly; zero restores its recurring
-template, concludes status and marks it available. Shared-transfer completion
-releases one initial reference from every frame. The lifecycle thread and its
+template, concludes status and marks it available. ABI 65 represents completion
+ownership as a prepared start and count. The same `mesh_instance_release` walks
+every range; the separate shared-release helper is deleted. A long-lived
+transfer releases its initial frame references at completion and has no frame
+reference to release when its buffer is eventually returned. No receiving-data
+predicate selects the reference category. The lifecycle thread and its
 event rings/arena storage are deleted: reference release needs no handoff to a
-second poller. ABI 60 prepares the frame-reference pointer in each aligned
-32-byte send record and the frame index in each receive descriptor. These are
+second poller. The native SEND record contains its frame-reference pointer and
+count; receive setup assigns the publication and storage-return ranges. These are
 applications of the same direct-address mechanism: completion does not reload
 an invocation label and divide it to reconstruct ownership. There is no hash,
 tombstone, label-to-frame search or
-submission-association event. The current selected-frame admission and missing
+submission-association event. [Completion ranges](pages-and-functions.md#completion-references-are-declared-at-setup)
+record the exact events, storage cost and remaining limitations. The current selected-frame admission and missing
 whole-plan reuse proof are specified explicitly in
 [frame identity and reuse](pages-and-functions.md#invocation-identity-and-storage-reuse).
 Neither the one-load result nor deleting a stack establishes safe unbounded reuse.

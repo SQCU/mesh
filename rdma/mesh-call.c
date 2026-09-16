@@ -191,7 +191,7 @@ static void *mesh_call_progress(void *argument){
         for(size_t i=0;i<function->output_count;i++)mesh_buffer_reset(m,call->operands[function->input_count+i].row);
         call->remaining=(uint32_t)(function->output_count?function->output_count:1);
         call->pending=function->pending;
-        mesh_instance_release(&calls->instances[call->index]);
+        mesh_instance_release(&calls->instances[call->index],1);
       }
     }
   }
@@ -415,7 +415,7 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uin
   uint32_t stride=(uint32_t)span/m->block,rows=count*stride,first=mesh_rows_alloc(context,rows);
   if(first==MESH_ABSENT)return errno;
   for(uint32_t row=first;row<first+rows;row+=stride)
-    mesh_buffers(m)[row]=(struct mesh_buffer){.references=2,.pages=(uint32_t)span,.channel=channel,.binding=(row-first)/stride,.owner=context->client};
+    mesh_buffers(m)[row]=(struct mesh_buffer){.references=2,.pages=(uint32_t)span,.channel=channel,.owner=context->client};
   mesh_bits_set(m,MESH_ROW_HOT,first,rows);
   if(channel==MESH_ABSENT)for(uint32_t row=first;row<first+rows;row+=stride){
     uint32_t page=mesh_arena_alloc(context,(uint32_t)span,m->block);

@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 64u
+#define MESH_VERSION 65u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -17,8 +17,8 @@ enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
-struct mesh_buffer { _Atomic uint32_t references,closed; uint32_t initial,pages; _Atomic uint32_t uses; uint32_t channel,binding,invocation; uint64_t owner; };
-_Static_assert(sizeof(struct mesh_buffer)==40,"mesh_buffer");
+struct mesh_buffer { _Atomic uint32_t references,closed; uint32_t initial,pages; _Atomic uint32_t uses; uint32_t channel,binding,invocation; uint64_t owner; uint32_t completions; };
+_Static_assert(sizeof(struct mesh_buffer)==48,"mesh_buffer");
 struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
@@ -65,15 +65,14 @@ static inline void mesh_result_conclude(_Atomic(struct mesh_status) *destination
   } while(status>>62!=MESH_RESULT_SUCCESS);
 }
 /* design/algorithm-sources.md#meshresult */
-static inline void mesh_instance_release(struct mesh_instance *instance){
-  if(atomic_fetch_sub_explicit(&instance->remaining,1,memory_order_acq_rel)!=1)return;
-  atomic_store_explicit(&instance->remaining,instance->count,memory_order_relaxed);
-  mesh_result_conclude(&instance->status,MESH_RESULT(MESH_RESULT_SUCCESS,!instance->count,atomic_load_explicit(&instance->invocation,memory_order_relaxed)));
-  atomic_store_explicit(&instance->available,1,memory_order_release);
-}
-/* design/algorithm-sources.md#meshresult */
-static inline void mesh_shared_release(struct mesh_instance *instances,uint32_t count){
-  for(uint32_t frame=0;frame<count;frame++)mesh_instance_release(&instances[frame]);
+static inline void mesh_instance_release(struct mesh_instance *instances,uint32_t count){
+  for(uint32_t i=0;i<count;i++){
+    struct mesh_instance *instance=&instances[i];
+    if(atomic_fetch_sub_explicit(&instance->remaining,1,memory_order_acq_rel)!=1)continue;
+    atomic_store_explicit(&instance->remaining,instance->count,memory_order_relaxed);
+    mesh_result_conclude(&instance->status,MESH_RESULT(MESH_RESULT_SUCCESS,!instance->count,atomic_load_explicit(&instance->invocation,memory_order_relaxed)));
+    atomic_store_explicit(&instance->available,1,memory_order_release);
+  }
 }
 
 /* design/algorithm-sources.md#programtensor */
