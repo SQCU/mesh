@@ -27,8 +27,9 @@ fixed-width tensor scalars. Its C address calculation uses the operand's canonic
 mapping and realized page geometry. For byte offset b and transport
 extent C, it reads entry floor(b/C), then addresses b mod C within that backing.
 It does not allocate, check presence, scan pages or materialize the operand. The
-helper is inlined into supplied Swift numerical functions. Operand metadata grows
-from 40 to 56 bytes: one mapping pointer and two geometry integers. The first-page
+helper is inlined into supplied Swift numerical functions. Indexed operands carry
+one mapping pointer and two geometry integers; the current operand is 48 bytes.
+The first-page
 `data` pointer alone does not describe a discontiguous input of `bytes` length.
 Local outputs remain contiguous and retain their direct pointer interface.
 The indexed scalar API describes logical elements; neither its indices nor the
@@ -326,6 +327,13 @@ input refreshes the corresponding view in every resident call and decrements
 each call's dependency count; the function's shared-input template is updated
 once, before any of those calls fire. Source identity remains distinct from a
 contiguous view's storage, including when the input was already present at setup.
+The call's prepared submit function, argument and operand counts now occupy the
+unused space in its existing 64-byte record. Launch reads no function/program
+object. Collins's counted ownership applies to the complete declared use set:
+startup preserves the compiled output counts, and final output return restores
+them before releasing the frame. This removes refcount increments and presence
+clearing from launch, as derived in
+[output ownership](pages-and-functions.md#output-ownership-is-prepared-before-launch).
 The readiness function takes the call directly and reads its function only when
 its pending count reaches zero. These changes apply Monsoon's prepared activation
 addresses and Saad's contiguous row ranges; they do not complete H1's handoffs,

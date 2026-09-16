@@ -251,12 +251,39 @@ remote operand has a prepared refresh target: arrival loads its canonical first
 page and sets the address. The same record points directly to the call whose
 pending count is decremented. Shared-input arrival applies that binding to every
 resident call and updates the reusable pending template once. No function/frame
-lookup precedes the common varying-input pending decrement; the function is
-read when that decrement reaches zero and launches the supplied numerical work.
+lookup precedes the common varying-input pending decrement. The call record
+itself holds the prepared submit function, argument and operand counts; launch
+does not read the function object or follow function → program → context.
 Call records are allocated at setup with 64-byte size and alignment, asserted
 in C; the old 40-byte array stride could split a call across cache lines. This
 uses 24 additional bytes per resident call. The canonical page load for a remote
 operand and the notification hierarchy remain explicit unfinished H work.
+
+### Output ownership is prepared before launch
+
+For each output y, setup determines R(y) = 1 + C(y) + T(y), where one reference
+owns production and the others own declared numerical and transport reads.
+Startup preserves those references. It no longer subtracts R merely to add it
+back when the function becomes ready. Setup also initializes the call's number
+of outstanding output returns, using one terminal return for a zero-output call.
+
+Successful completion publishes outputs and releases its consumed inputs and
+producer references. Every reader releases its reference through its existing
+completion. Only after every output has returned does the owning numerical
+worker rearm native storage, restore each output's R with an atomic store,
+clear its old presence, and restore the return and pending counts. All old uses
+have ended, so no concurrent reader can decrement the newly stored count.
+The worker releases the call's frame reference after this preparation. There
+is no occupancy query, reader scan, additional return event or caller free.
+
+`mesh_call_ready` now only decrements pending, propagates invocation indices,
+increments the existing active-call count and calls the prepared submit function.
+It does no output reference-count arithmetic or presence clearing. The submit
+function, argument and two operand counts fit unused space in the existing
+64-byte call record; its size and alignment remain asserted. The duplicate
+submit pointer in the function object is deleted. Error cancellation and safe
+cross-participant frame reuse remain R2/N1 work; this ordering proves local
+rearming only.
 
 ### Input lifetime ends at its own use
 
@@ -515,7 +542,7 @@ already retain prepared entry addresses; they gain no additional runtime-load
 reduction from this deletion. No payload moves and no page-table entries disappear.
 
 Buffer metadata shrinks from 48 to 40 bytes, saving eight bytes per arena row
-before region alignment. Operands remain 56 bytes. The shared-memory layout
+before region alignment. Operands remain 48 bytes. The shared-memory layout
 changes, so both participants and their clients require ABI 63. Runtime page
 loads, wire tags, hierarchical notices and contiguous-input copies remain;
 this deletion does not establish H1–H7 or a measured latency result.
