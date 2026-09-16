@@ -344,29 +344,33 @@ functions, target storage changes from 8(E+S) to 32(VE+S) bytes and the separate
 This spends setup memory to remove dependent runtime reads. The supplied stamp
 argument also removes `mesh_publish`'s read of `buffer.invocation`: native completion
 passes its call's stamp, RX passes the tag's stamp, and constants pass one.
-The current use record names the prepared `mesh_call` and, when required, the
-input `mesh_operand` and canonical first-page entry directly, retaining its
-32-byte size. Call records occupy 64 aligned bytes with an asserted layout;
+The current use record packs the submit target, argument, operands/counts,
+completion handle, invocation source and optional remote binding into 64 aligned
+bytes. Setup expands shared-input fan-out into this same contiguous range and
+computes initial and recurring pending counts separately. Arrival has no
+shared-input dispatch branch or function/call-array lookup. Call records occupy
+64 aligned bytes with an asserted layout;
 the former 40-byte array elements could cross cache lines. Setup writes the
 source row, logical index and view's page-list address into every operand.
 `mesh_call_input` and the function's separate placement-flag array are deleted.
 A local input or preallocated contiguous view requires no arrival-time rebinding.
 An unplaced remote input refreshes only its current first page and address;
 that choice is represented by the prepared operand pointer. Its numerical use
-still owns the canonical page entries through native completion. A shared remote
-input refreshes the corresponding view in every resident call and decrements
-each call's dependency count; the function's shared-input template is updated
-once, before any of those calls fire. Source identity remains distinct from a
+retains the canonical page entries through native completion. A shared remote
+input refreshes each resident call through its prepared use record and decrements
+its dependency count. The recurring template is immutable after setup.
+Source identity remains distinct from a
 contiguous view's storage, including when the input was already present at setup.
-The call's prepared submit function, argument and operand counts now occupy the
-unused space in its existing 64-byte record. Launch reads no function/program
-object. Collins's counted ownership applies to the complete declared use set:
+The event record supplies the actual C submit target and arguments without a
+call-record lookup for those fields. Mutable call state and operand binding
+remain separate data accesses; the full one-line path is not claimed.
+Collins's counted ownership applies to the complete declared use set:
 startup preserves the compiled output counts, and final output return restores
 them through the buffer's common reset before releasing the frame. This removes
 refcount increments and presence clearing from launch, as derived in
 [output ownership](pages-and-functions.md#output-ownership-is-prepared-before-launch).
-The readiness function takes the call directly and reads its function only when
-its pending count reaches zero. These changes apply Monsoon's prepared activation
+The former `mesh_call_ready` and shared-input fan-out interpreter are deleted.
+These changes apply Monsoon's prepared activation
 addresses and Saad's contiguous row ranges; they do not complete H1's handoffs,
 H2's remaining records or N1's frame replacement.
 ABI 51 separates dependency rows from contiguous operand

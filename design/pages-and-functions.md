@@ -7,8 +7,13 @@ indexed dependencies and numerical function bindings before invocation.
 
 Pages back values; they do not define tensor dimensions or numerical call extents.
 Configured views name the actual registered storage. Presence denotes available
-values, and reader ownership retains their storage through actual use. Transport
+values, and declared reads retain their storage through native completion. Transport
 completion and numerical availability are different facts.
+
+The page table exists to minimize address-resolution latency. Setup resolves
+fixed destinations, offsets, fan-out and invocation targets. Runtime page indices
+represent incoming storage; they do not authorize walking descriptors to discover
+an already-known destination or interpreting the declared call graph again.
 
 Functions consume available indexed input regions and publish their output regions
 after the corresponding writes are visible. A publication does not finish or pause
@@ -276,9 +281,9 @@ N1 and unrestricted cross-participant frame reuse remain unfinished.
 
 ## Native slot return
 
-Every function now has one prepared call and operand array per frame. Its
-row-indexed consumer records contain the function pointer, input position,
-shared-input flag and frame. A dynamic publication fills that frame's input and
+Every function has one prepared call state and operand array per frame. Its
+row-indexed consumer records contain the launch target and arguments.
+A dynamic publication fills that frame's input and
 decrements its pending count; zero invokes the supplied function using the same
 frame's prepared output/native bindings. No hash probe, join record acquisition,
 backshift deletion, or per-function native-slot ring remains.
@@ -294,25 +299,38 @@ A native error concludes status separately; complete failure cancellation is R2.
 
 ### Prepared numerical uses
 
-The row's consumer range contains 32-byte records with direct call and optional
-input-operand and canonical first-page-entry addresses. Setup records the
-input's source row separately from
-its view storage. This source row is also used for placement reads and reference
-release when an input was already present at setup. The index and page-list
-pointer are fixed then; they are not reconstructed from the function on arrival.
+The row's consumer range contains aligned 64-byte records. Each contains the
+submit target, argument, completion handle, operand array/counts, invocation
+source and optional remote-input binding addresses. Setup copies these from the
+declaration. Dispatch calls that target directly; it does not load a call or
+function descriptor to discover the target or arguments. The completion handle
+still addresses mutable pending/invocation state and the frame index.
 
-Local storage and prepared contiguous views keep their bindings. An unplaced
-remote operand has a prepared refresh target: arrival loads its canonical first
-page and sets the address. The same record points directly to the call whose
-pending count is decremented. Shared-input arrival applies that binding to every
-resident call and updates the reusable pending template once. No function/frame
-lookup precedes the common varying-input pending decrement. The call record
-itself holds the prepared submit function, argument and operand counts; launch
-does not read the function object or follow function → program → context.
-Call records are allocated at setup with 64-byte size and alignment, asserted
-in C; the old 40-byte array stride could split a call across cache lines. This
-uses 24 additional bytes per resident call. The canonical page load for a remote
-operand and the notification hierarchy remain explicit unfinished H work.
+Setup expands a shared input into one record per resident call in the same
+contiguous range. Arrival no longer classifies the input, loads its function,
+finds the call array or reconstructs fan-out. Setup computes initially missing
+inputs separately from the varying/root count used on reuse. Shared arrival
+does not mutate the recurring template. Its invocation source points to the
+call's current invocation, preserving the index established by a varying input
+or root regardless of arrival order.
+
+Local inputs and contiguous views retain their prepared bindings. An unplaced
+remote input has its operand and canonical first-page-entry addresses in the
+event record. Its source row remains distinct from the view's storage, including
+for inputs already present at setup. No row, view index or page-list address is
+reconstructed from a function on arrival.
+
+For V frames, E varying/root bindings and S missing shared bindings, use storage
+changes from 32(VE+S) to 64V(E+S) bytes. This spends setup memory to remove runtime
+discovery. Both use records and call state have asserted 64-byte size/alignment.
+Optimized Arm assembly loads the target and argument together with `ldp` from
+the event record, then invokes that target with `blr`. No queue, callback,
+runtime allocation or guard is added.
+
+This removes descriptor dependencies, not every critical-path load. Notification
+traversal, row ranges, mutable dependency state, optional remote-page binding and
+invocation propagation still precede execution. The whole one-cache-line target
+remains open; source length and successful builds are not latency evidence.
 
 ### Output ownership is prepared before launch
 
@@ -331,12 +349,11 @@ have ended. The reset uses an atomic store; the retirement flag is a separate wo
 The worker releases the call's frame reference after this preparation. There
 is no occupancy query, reader scan, additional return event or caller free.
 
-`mesh_call_ready` now only decrements pending, propagates invocation indices,
-increments the existing active-call count and calls the prepared submit function.
-It does no output reference-count arithmetic or presence clearing. The submit
-function, argument and two operand counts fit unused space in the existing
-64-byte call record; its size and alignment remain asserted. The duplicate
-submit pointer in the function object is deleted. Error cancellation and safe
+Dispatch decrements pending, propagates invocation indices, increments the
+existing active-call count and calls the target packed in its use record. It
+does no output reference arithmetic or presence clearing. `mesh_call_ready` and
+the call-record launch-field lookup are deleted. The function's submit pointer
+is read at setup, when preparing the use records. Error cancellation and safe
 cross-participant frame reuse remain R2/N1 work; this ordering proves local
 rearming only.
 
