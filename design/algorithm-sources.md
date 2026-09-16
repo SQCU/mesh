@@ -531,3 +531,15 @@ The caller supplies the placement; `bounds` evaluates it and never chooses one
 Zero work or traffic takes zero time; positive work or traffic at zero capacity
 yields infinity. Missing nodes and links contribute zero capacity. These rules
 come from the existing `seconds` function; its prose comments now live here.
+
+## report statistics
+
+B. P. Welford, [Note on a Method for Calculating Corrected Sums of Squares and
+Products](https://doi.org/10.1080/00401706.1962.10490022), *Technometrics* 4(3),
+419–420 (1962). The existing engine public-path report uses the online recurrence
+`n += 1; delta = x - mean; mean += delta/n; M2 += delta*(x - mean)` and reports
+sample variance `M2/(n-1)`. The inputs are observed request completion periods and
+TTFT, outside every tensor function and mesh progress thread. Completion periods
+include the interval from batch submission to the first completion, so their mean
+is total batch time divided by request count. The [report contract](../../../metal-microbench/docs/amdahl_superiority.md#public-prefill-report)
+distinguishes concurrent throughput, request latency, and the units of mesh bounds.
