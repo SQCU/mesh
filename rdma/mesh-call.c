@@ -418,7 +418,7 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uin
   uint32_t stride=(uint32_t)span/m->block,rows=count*stride,first=mesh_rows_alloc(context,rows);
   if(first==MESH_ABSENT)return errno;
   for(uint32_t row=first;row<first+rows;row+=stride)
-    mesh_buffers(m)[row]=(struct mesh_buffer){.ownership=2,.rows=stride,.pages=(uint32_t)span,.channel=channel,.owner=context->client,.mapping=m->page_off+(uint64_t)row*sizeof(uint32_t)};
+    mesh_buffers(m)[row]=(struct mesh_buffer){.ownership=2,.rows=stride,.pages=(uint32_t)span,.channel=channel,.binding=(row-first)/stride,.owner=context->client,.mapping=m->page_off+(uint64_t)row*sizeof(uint32_t)};
   mesh_bits_set(m,MESH_ROW_HOT,first,rows);
   if(channel==MESH_ABSENT)for(uint32_t row=first;row<first+rows;row+=stride){
     uint32_t page=mesh_arena_alloc(context,(uint32_t)span,m->block);

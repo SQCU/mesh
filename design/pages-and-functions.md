@@ -188,15 +188,19 @@ the sum of the per-queue capacities. These counts are not performance evidence.
 
 ABI 59 removes the per-binding logical-row stacks, the definition-to-binding
 lookup, and the active-source-head array. Setup expands each peer-qualified
-source chunk into an aligned 32-byte receive record. It contains the destination
-section's first row, frame stride and count, the chunk ordinal, the declared
-reference count, and first/final/shared flags. RX indexes that record using the
-source chunk in the received tag. It does not allocate or search for a row.
+source chunk into an aligned 32-byte receive record. ABI 60 stores the exact
+destination row, its buffer address and canonical page-entry address, the declared
+reference count and first/final/shared flags. RX indexes that record using the
+source chunk in the received tag. It does not allocate, search for a row or
+reconstruct the page-list address from a buffer descriptor.
 
-For sequence q and a section with V resident frames, the compiled destination is
-`first + (q % V) * stride`; the page-list entry is the record's chunk ordinal.
-The first chunk installs the declared references and sequence, each chunk stores
-its actual received page, and the final chunk publishes. The section's physical
+For transfer t, resident frame f and chunk k, setup binds
+`sourceFirst[t] + f * sourceStride[t] + k` to destination row
+`localFirst[t] + f * localStride[t]` and its k-th canonical page entry. The
+source chunk already includes f; receiving a sequence number does not require
+another modulo calculation to recover it. The first chunk installs the declared
+references and sequence, each chunk stores its actual received page, and the
+final chunk publishes. The section's physical
 pages may be interleaved with other sections or peers. The formula determines
 logical coordinates; it does not make the physical pages contiguous.
 
@@ -257,6 +261,9 @@ A function's final output return or transfer completion/storage return directly
 decrements that frame's atomic count. Zero restores its recurring count,
 concludes status, and marks it available. Shared-transfer completion releases one
 initial reference from every frame. The last release is not enqueued elsewhere.
+ABI 60's send record contains the exact frame-refcount address; received sections
+have their frame index installed in `buffer.binding` during allocation. Transfer
+return therefore does not derive frame ownership from the invocation label.
 
 The lifecycle thread, producer event rings and their arena storage are deleted,
 along with the keyed status directory, tombstones, frame-to-label array and
@@ -276,7 +283,20 @@ These edits reduce maintained Swift/C/header source from 2,612 to 2,415 lines,
 including `Bounds.swift` and `Topology.swift` and excluding the separately pending
 control-event work. Documentation replacement is separate. The source compiles
 with existing callers; no runtime, deployment, safe-unbounded-reuse or latency
-claim accompanies this intermediate replacement.
+claim accompanies this intermediate replacement. ABI 60's prepared transport
+addresses preserve that source count. Send records grow from 20 to 32 bytes
+per resident send edge and use a 32-byte-aligned allocation; receive records
+remain 32 bytes. The ABI changes because the receive buffer's `binding` field
+now supplies its setup-assigned frame index to the bridge.
+
+The send record also stores the exact final request length. For N payload bytes
+and capacity C, K = ceil(N/C) requests carry N + 8K bytes, including their tags.
+Setup computes the final payload `(N - 1) % C + 1`; every preceding request
+carries C bytes. Previously every request used the queue's maximum length,
+transmitting padding for small sections and final chunks. Receives retain their
+prepared maximum capacity. Shapes, partial publication and consumer layouts do
+not change; transport fragmentation remains separate from tensor partials. This
+is byte accounting from the post path, not a measured bandwidth or latency claim.
 
 ## Reclamation events
 
@@ -359,7 +379,8 @@ before posting data.
 At setup, each receiving queue prepares a source-chunk-indexed table. Each entry
 is 32 bytes and aligned to 32 bytes; compilation asserts both properties. Source
 rows are qualified by their peer/queue, so equal row integers on two peers do not
-alias. RX loads one entry and computes the frame's destination and chunk address.
+alias. RX loads one entry containing the destination row, buffer address and exact
+canonical page-entry address. ABI 60 moves that address arithmetic to setup.
 No definition lookup, binding pointer, active-head array or free-row pop intervenes.
 The table uses 32 times the peer's advertised row count per receiving queue.
 This is a setup-memory cost; the eight-byte wire tag replaces 24 bytes.

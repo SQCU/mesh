@@ -120,7 +120,11 @@ release decrements the frame's atomic count directly; zero restores its recurrin
 template, concludes status and marks it available. Shared-transfer completion
 releases one initial reference from every frame. The lifecycle thread and its
 event rings/arena storage are deleted: reference release needs no handoff to a
-second poller. There is no hash, tombstone, label-to-frame search or
+second poller. ABI 60 prepares the frame-reference pointer in each aligned
+32-byte send record and the frame index in each receive descriptor. These are
+applications of the same direct-address mechanism: completion does not reload
+an invocation label and divide it to reconstruct ownership. There is no hash,
+tombstone, label-to-frame search or
 submission-association event. The current selected-frame admission and missing
 whole-plan reuse proof are specified explicitly in
 [frame identity and reuse](pages-and-functions.md#invocation-identity-and-storage-reuse).
@@ -330,8 +334,9 @@ rdma/indexed-gather RANK 4 /mesh0 examples/indexed-gather-ring.json
 
 ABI 59 realizes a peer-qualified, source-chunk-indexed table of aligned 32-byte
 receive records. The eight-byte tag names the 32-bit sequence and source chunk.
-The record supplies frame-relative destination arithmetic, reference count and
-chunk flags. This is direct addressing of the known transfer relation, applying
+ABI 60's record supplies the destination row, buffer address, exact canonical
+page-entry address, reference count and chunk flags. This is direct addressing
+of the known transfer relation, applying
 the existing compressed-row/direct-index mechanisms; it introduces no collective
 algorithm or credit protocol. The [wire layout](pages-and-functions.md#explicit-section-identity-on-the-wire)
 accounts for table storage, shared-tag writers and the unfinished N1 lifetime proof.
@@ -344,8 +349,12 @@ distinguish substrate facts from the retained bridge's protocol decisions.
 TN3205 explicitly limits this transport to `IBV_WR_SEND`; its SDK enum for
 `IBV_WR_SEND_WITH_IMM` does not establish hardware support. Both TN3205 and JACCL
 show local `wr_id` values returned with completions. Mesh uses these identifiers
-for buffer lifetime. ABI 59 carries one `(sequence, sourceChunkRow)` word. Setup determines the
-chunk's local row formula and final-publication flag.
+for buffer lifetime. ABI 59 carries one `(sequence, sourceChunkRow)` word. ABI 60 resolves the
+chunk's local row and page-entry address at setup, alongside its publication flag.
+The native SGE length is the declared payload length plus its tag. ABI 60 stores
+the final chunk's exact length in the send record at setup, so neither small
+sections nor tails are sent at an unrelated queue maximum. RX buffers keep their
+prepared capacity; the known transfer relation still determines publication.
 The tag arrives in the payload's own work request. There is no index QP or
 cross-QP identity join. On September 15, `ibv_devinfo -v` reported `max_sge: 1`
 on the local Thunderbolt devices. The alias representation uses one SGE and
