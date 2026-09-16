@@ -148,13 +148,8 @@ static int link_configure(void *state,int socket,uint64_t client){
   }
   memmove(link->send_offsets+1,link->send_offsets,(size_t)mesh_rows(m)*sizeof *link->send_offsets);link->send_offsets[0]=0;
   for(uint32_t q=0;q<(uint32_t)link->qps;q++){
-    while(link->receive[q].ready.head!=link->receive[q].ready.tail){
-      int error=link_receive(link,q);
-      if(error){
-        if(error!=ENOMEM && error!=EAGAIN){errno=error;return -1;}
-        break;
-      }
-    }
+    int error=link_receive(link,q);
+    if(error && error!=ENOMEM && error!=EAGAIN){errno=error;return -1;}
   }
   uint32_t posted=1,peer_posted;
   return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
@@ -163,7 +158,7 @@ static int link_configure(void *state,int socket,uint64_t client){
 static int link_receive(struct mesh_link *link,uint32_t q){
   struct mesh_receive *receive=&link->receive[q];
   struct mesh_ready *ready=&receive->ready;
-  if(ready->head!=ready->tail){
+  while(ready->head!=ready->tail){
     int error=link_post(link,q,MESH_RECEIVE,0,receive->pages[ready->head&ready->mask]);
     if(error)return error;
     ready->head++;
@@ -173,7 +168,7 @@ static int link_receive(struct mesh_link *link,uint32_t q){
 /* design/algorithm-sources.md#programkernel_call */
 static int link_send_ready(struct mesh_link *link,uint32_t q){
   struct mesh_ready *ready=&link->ready[q];
-  if(ready->head!=ready->tail){
+  while(ready->head!=ready->tail){
     uint32_t edge=link->send_ready[ready->first+(ready->head&ready->mask)];
     struct mesh_send_edge *source=&link->send_edges[edge];
     uint32_t page=atomic_load_explicit(&mesh_buffer_pages(link->M,source->row)[source->offset],memory_order_acquire);
