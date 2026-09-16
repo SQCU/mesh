@@ -21,6 +21,7 @@ struct mesh_link {
   uint32_t *send_offsets,*send_ready;
   struct mesh_send_edge *send_edges;
   struct mesh_ready ready[MESH_QPS];
+  struct mesh_notice_reader notices;
   struct mesh_instance *instances;
   uint32_t instance_count;
 };
@@ -52,6 +53,7 @@ static int link_post(struct mesh_link *link,uint32_t q,int direction,uint32_t ro
 /* design/algorithm-sources.md#programcopy */
 static int link_configure(void *state,int socket,uint64_t client){
   struct mesh_link *link=state;struct hdr *m=link->M;
+  link->notices=mesh_notice_reader_init(m,mesh_notice_queue(m,client,link->index));
   memset(link->queues,0,sizeof link->queues);
   uint64_t payload=(uint64_t)m->block*m->pgsz;
   size_t count=0,at=0;
@@ -201,16 +203,13 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
 
 /* design/algorithm-sources.md#programkernel_call */
 static void link_publications(struct mesh_link *link){
-  uint32_t queue=mesh_notice_queue(link->M,link->client,link->index);
-  uint32_t row=mesh_notice_take(link->M,queue);
-  while(row!=MESH_ABSENT){
-    uint32_t next=mesh_notice_next(link->M,queue,row);
+  uint32_t row;
+  while((row=mesh_notice_take(&link->notices))!=MESH_ABSENT){
     for(uint32_t at=link->send_offsets[row];at<link->send_offsets[row+1];at++){
       uint32_t q=link->send_edges[at].queue;
       link->send_ready[link->ready[q].tail++]=at;
       if(mesh_progress(link,MESH_SEND))return;
     }
-    row=next;
   }
 }
 
@@ -312,7 +311,6 @@ int main(int argc,char **argv){
   struct hdr *m=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
   if(m==MAP_FAILED)die("mmap");shm=name;
   *m=geometry;m->node=(uint32_t)me;m->version=MESH_VERSION;
-  for(uint32_t queue=0;queue<MESH_NOTICE_BANKS*(link_count+MESH_COMPUTE_THREADS);queue++)atomic_store_explicit(&mesh_notice_heads(m)[queue],MESH_ABSENT,memory_order_relaxed);
   for(uint32_t r=0;r<mesh_rows(m);r++)atomic_store_explicit(&mesh_page(m)[r],MESH_ABSENT,memory_order_relaxed);
   struct mesh_wire wire={0};
   if(wire_map(&wire,m,fd))die("transport page aliases");

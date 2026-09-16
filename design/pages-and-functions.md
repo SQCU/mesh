@@ -87,6 +87,54 @@ The implementation trusts caller configuration and backend completion contracts.
 Its ownership records describe actual accesses; they do not police arbitrary
 external code. No caller free/done call or consumer-stamp protocol is required.
 
+## Publication notifications
+
+For each numerical worker or TX link, the pending notification set has one bit
+per logical row. A row's one producer publishes it once for that value instance;
+the reader's prepared range contains all uses of that publication. Repeated
+operands in one call appear as repeated uses in the range, not repeated notices.
+A constant already present at setup needs no numerical arrival notice. Its first
+send binding seeds one notice per TX link before execution.
+
+ABI 48 stores these bits in compact arrays. Level 0 has ceil(rows/64) words;
+each next level has ceil(previousWords/64) words, ending at one root word.
+Each level and reader bank is aligned to 64 bytes. This needs at most six levels
+for the existing 32-bit row namespace. Setup fixes all offsets. Publishing sets
+the row bit and then its ancestor bits with one release OR per level, always
+continuing to the root. There is no CAS loop, reservation, fullness query or
+linked entry. Multiple publishers use different row bits, including when their
+bits share a word.
+
+Each reader exchanges the root with zero and enumerates its set bits. Indicated
+child words are acquired by the same exchange. Small reader-local arrays retain
+the unprocessed bits and indices between calls. Leaf bits yield logical rows for
+the existing consumer/send ranges. Empty summaries are skipped; an empty root
+returns immediately. No absent row or function is scanned for readiness.
+
+For adjacent levels, the producer sets child before parent. If a reader exchanges
+the child after that set, it obtains the publication, unless it already obtained
+it in an earlier exchange. If the child set occurs after the exchange, the later
+parent set advertises it for a future traversal. This argument applies at every
+level. Delaying a producer between the two writes can leave a stale parent bit
+after a child was consumed; visiting an empty child is harmless. It cannot erase
+a leaf event, duplicate a consumed leaf, or reserve a place that blocks another
+publisher. Acquire exchanges make the writes preceding each leaf publication
+visible to the reader.
+
+This is a set of row events, not a counter of repeated publications to the same
+live row. Reuse must follow the final declared ownership event: every numerical
+use must have consumed its notice before completing, and every TX use must have
+consumed its notice before posting/completing. Thus a properly recycled row has
+no old leaf notice left to coalesce with its next publication. N1/X5 must preserve
+that ownership rule; this queue replacement does not implement instance reuse.
+
+For 229,376 arena rows, one link and eight worker positions, the old two-bank
+notice heads and per-row links use 16,515,144 bytes before region alignment. The
+new padded word arrays use 525,312 bytes. A reader's local iterator is 128 bytes.
+These are layout calculations, not latency measurements. The library source
+grows from 2,179 to 2,201 lines across all Swift and C/header files; the separate
+reclamation stack still requires X5 replacement.
+
 ## Block addressing
 
 ### Logical order and interleaved arrivals

@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 47u
+#define MESH_VERSION 48u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -24,7 +24,12 @@ struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages,next; _Ato
 enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_COMPUTE_THREADS 8
 #define MESH_NOTICE_BANKS 2
-struct mesh_notice { uint32_t next; };
+enum { MESH_NOTICE_LEVELS=(32+5)/6 };
+struct mesh_notice_reader {
+  _Atomic uint64_t *words[MESH_NOTICE_LEVELS];
+  uint64_t pending[MESH_NOTICE_LEVELS];
+  uint32_t base[MESH_NOTICE_LEVELS],level,top;
+};
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
 /* design/algorithm-sources.md#meshresult */
 enum { MESH_RESULT_SUCCESS, MESH_RESULT_LINK, MESH_RESULT_FUNCTION, MESH_RESULT_BUSY };
@@ -35,7 +40,8 @@ struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; stru
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps,links;
   _Atomic uint64_t configured;
-  uint64_t planes_off,page_off,buffer_off,backing_off,link_off,send_off,order_off,notice_head_off,notice_off,instance_off,tags_off,data_off,length;
+  uint64_t planes_off,page_off,buffer_off,backing_off,link_off,send_off,order_off,notice_off,instance_off,tags_off,data_off,length;
+  uint32_t notice_levels,notice_words,notice_offsets[MESH_NOTICE_LEVELS];
   uint32_t instance_count[MESH_NOTICE_BANKS];
   _Atomic uint64_t client,bridge_pid,device_client,serial;
   _Atomic uint32_t reclaim_head;
@@ -61,8 +67,6 @@ static inline uint32_t mesh_notice_queue(struct hdr *m,uint64_t owner,uint32_t q
 static inline struct mesh_link_info *mesh_links(struct hdr *m){return (struct mesh_link_info *)((char *)m+m->link_off);}
 /* design/algorithm-sources.md#programcopy */
 static inline _Atomic uint64_t *mesh_send_uses(struct hdr *m,uint32_t row){return (_Atomic uint64_t *)((char *)m+m->send_off)+(size_t)row*((m->links+63)/64);}
-/* design/algorithm-sources.md#programkernel_call */
-static inline _Atomic uint32_t *mesh_notice_heads(struct hdr *m){return (_Atomic uint32_t *)((char *)m+m->notice_head_off);}
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
 static inline uint32_t mesh_blocks(const struct hdr *m){ return mesh_rows(m)/m->block; }
@@ -109,27 +113,40 @@ static inline void mesh_receive_assign(struct hdr *m,uint32_t row,uint32_t page)
 }
 
 /* design/algorithm-sources.md#programkernel_call */
-static inline struct mesh_notice *mesh_notices(struct hdr *m,uint32_t queue){
-  return (struct mesh_notice *)((char *)m+m->notice_off)+(size_t)queue*mesh_rows(m);
+static inline _Atomic uint64_t *mesh_notices(struct hdr *m,uint32_t queue){
+  return (_Atomic uint64_t *)((char *)m+m->notice_off)+(size_t)queue*m->notice_words;
 }
 /* design/algorithm-sources.md#programkernel_call */
 static inline void mesh_notice_push(struct hdr *m,uint32_t queue,uint32_t index){
-  struct mesh_notice *entry=&mesh_notices(m,queue)[index];
-  uint32_t head=atomic_load_explicit(&mesh_notice_heads(m)[queue],memory_order_relaxed);
-  do {entry->next=head;}
-  while(!atomic_compare_exchange_weak_explicit(&mesh_notice_heads(m)[queue],&head,index,memory_order_release,memory_order_relaxed));
+  _Atomic uint64_t *words=mesh_notices(m,queue);
+  for(uint32_t level=0;level<m->notice_levels;level++,index>>=6)
+    atomic_fetch_or_explicit(&words[m->notice_offsets[level]+(index>>6)],UINT64_C(1)<<(index&63),memory_order_release);
 }
 /* design/algorithm-sources.md#programkernel_call */
-static inline uint32_t mesh_notice_take(struct hdr *m,uint32_t queue){
-  return atomic_exchange_explicit(&mesh_notice_heads(m)[queue],MESH_ABSENT,memory_order_acquire);
+static inline struct mesh_notice_reader mesh_notice_reader_init(struct hdr *m,uint32_t queue){
+  struct mesh_notice_reader reader={.level=m->notice_levels-1,.top=m->notice_levels-1};
+  for(uint32_t level=0;level<m->notice_levels;level++)reader.words[level]=mesh_notices(m,queue)+m->notice_offsets[level];
+  return reader;
 }
 /* design/algorithm-sources.md#programkernel_call */
-static inline uint32_t mesh_notice_next(struct hdr *m,uint32_t queue,uint32_t index){
-  struct mesh_notice *entry=&mesh_notices(m,queue)[index];
-  uint32_t next=entry->next;
-  return next;
+static inline uint32_t mesh_notice_take(struct mesh_notice_reader *reader){
+  for(;;){
+    uint32_t level=reader->level;
+    if(reader->pending[level]){
+      uint32_t index=reader->base[level]+(uint32_t)__builtin_ctzll(reader->pending[level]);
+      reader->pending[level]&=reader->pending[level]-1;
+      if(!level)return index;
+      reader->level=level-1;reader->base[level-1]=index*64;
+      reader->pending[level-1]=atomic_exchange_explicit(&reader->words[level-1][index],0,memory_order_acquire);
+    } else if(level<reader->top)reader->level=level+1;
+    else {
+      reader->pending[level]=atomic_exchange_explicit(reader->words[level],0,memory_order_acquire);
+      if(!reader->pending[level])return MESH_ABSENT;
+    }
+  }
 }
 
+/* design/algorithm-sources.md#programkernel_call */
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t rows,uint32_t links,uint32_t qps){
   uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz,words=((uint64_t)rows+63)/64,blocks=rows/block;
   h->pgsz=pgsz; h->block=block; h->rows=rows; h->links=links; h->qps=qps;
@@ -140,9 +157,15 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->link_off=at; at+=(uint64_t)links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
   h->send_off=at; at+=(uint64_t)rows*((links+63)/64)*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->order_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*links*qps*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->notice_head_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links+MESH_COMPUTE_THREADS)*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
+  h->notice_levels=0;h->notice_words=0;
+  for(uint64_t count=rows;;){
+    count=(count+63)/64;
+    h->notice_offsets[h->notice_levels++]=h->notice_words;
+    h->notice_words+=(uint32_t)((count+7)&~UINT64_C(7));
+    if(count<=1)break;
+  }
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
-  h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links+MESH_COMPUTE_THREADS)*rows*sizeof(struct mesh_notice); at=(at+bytes-1)/bytes*bytes;
+  h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links+MESH_COMPUTE_THREADS)*h->notice_words*sizeof(uint64_t); at=(at+bytes-1)/bytes*bytes;
   h->instance_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*rows*sizeof(struct mesh_instance); at=(at+bytes-1)/bytes*bytes;
   atomic_store_explicit(&h->reclaim_head,MESH_ABSENT,memory_order_relaxed);
   h->tags_off=at; at+=blocks*pgsz; at=(at+bytes-1)/bytes*bytes;

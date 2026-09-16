@@ -168,6 +168,13 @@ receive setup fills the native queue before traffic starts. RX runs on its own
 hardware thread and attempts its replacement receive before publishing the
 completion. Numerical workers and the collector have separate threads.
 
+ABI 48 replaces publication's CAS/list notices with per-reader row bits and
+compact summary words. Readers enumerate only notified rows, independent of
+arrival order, then use the same prepared numerical or send ranges. A delayed
+publisher reserves no queue position. The [notification derivation](pages-and-functions.md#publication-notifications)
+gives the concurrent-write and reuse conditions. The send-edge append range and
+the reclamation stack remain separate unfinished lifecycle work.
+
 Receive posting computes `firstPage + chunkIndex * blockPages` over the contiguous
 run allocated at setup; the former table of every receive address is removed.
 Every RX completion identifies its physical chunk through `wr_id`. Its tag indexes

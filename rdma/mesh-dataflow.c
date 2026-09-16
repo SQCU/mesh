@@ -71,8 +71,10 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   }
   uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
   client|=(~device)&(UINT64_C(1)<<63);
-  for(uint32_t queue=0;queue<memory->links+MESH_COMPUTE_THREADS;queue++)
-    atomic_store_explicit(&mesh_notice_heads(memory)[mesh_notice_queue(memory,client,queue)],MESH_ABSENT,memory_order_relaxed);
+  for(uint32_t queue=0;queue<memory->links+MESH_COMPUTE_THREADS;queue++){
+    _Atomic uint64_t *words=mesh_notices(memory,mesh_notice_queue(memory,client,queue));
+    for(uint32_t i=0;i<memory->notice_words;i++)atomic_store_explicit(&words[i],0,memory_order_relaxed);
+  }
   for(uint32_t q=0;q<memory->links*memory->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(memory,client,q,d),0,memory_order_relaxed);
   atomic_store_explicit(&memory->client,client,memory_order_release);
   *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.client=client,.fd=file};

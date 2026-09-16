@@ -159,16 +159,15 @@ static void *mesh_call_progress(void *argument){
   struct mesh_calls *calls=worker->calls;
   struct hdr *m=calls->context->M;
   uint32_t queue=mesh_notice_queue(m,calls->context->client,m->links+worker->index);
+  struct mesh_notice_reader reader=mesh_notice_reader_init(m,queue);
   pthread_setname_np("mesh.numerical");
   while(atomic_load_explicit(&calls->running,memory_order_acquire)){
-    uint32_t row=mesh_notice_take(m,queue);
-    while(row!=MESH_ABSENT){
-      uint32_t next=mesh_notice_next(m,queue,row);
+    uint32_t row;
+    while((row=mesh_notice_take(&reader))!=MESH_ABSENT){
       for(size_t i=worker->offsets[row];i<worker->offsets[row+1];i++){
         struct mesh_call *call=worker->targets[i];
         if(!--call->pending)mesh_call_submit(call);
       }
-      row=next;
     }
   }
   mesh_calls_cancel(calls,worker->index,1);

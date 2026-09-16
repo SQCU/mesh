@@ -128,6 +128,22 @@ its pairing socket after setup. This status word alone cannot detect that death.
 
 ## Program.kernel_call
 
+Gregory M. Papadopoulos and David E. Culler,
+[Monsoon: an Explicit Token-Store Architecture](https://people.eecs.berkeley.edu/~kubitron/courses/cs252-F03/handouts/papers/p398-papadopoulos.pdf)
+(ISCA, 1990), supplies the operand-associated state-bit mechanism and statically
+assigned token locations. Mesh applies those ideas to notifications: each reader
+has a bit for each logical row, with compact 64-way summary words to enumerate
+pending rows. The software summary layout is Mesh's implementation, not code or
+a queue algorithm copied from Monsoon. `mesh_notice_push` sets the row bit then
+its summaries using release operations. `mesh_notice_take` exchanges indicated
+words with acquire semantics and enumerates their bits. There is no reservation
+cursor, CAS retry, linked entry or wait for another publisher. `mesh_layout`
+realizes the word offsets; `mesh_notice_reader_init` binds one reader's pointers.
+The [publication proof](pages-and-functions.md#publication-notifications) covers
+concurrent writers, delayed summaries and reuse. This is a pending-event set,
+not a scan of tensor presence or function readiness. The declared consumer ranges
+and countdown continue to implement firing.
+
 Robert A. van de Geijn and Jerrell Watts,
 [SUMMA: Scalable Universal Matrix Multiplication Algorithm](https://www.cs.utexas.edu/~rvdg/abstracts/SUMMA.html)
 (1997), supplies the contraction decomposition into products of operand panels.
