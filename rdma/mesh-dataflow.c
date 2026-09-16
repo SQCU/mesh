@@ -72,7 +72,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   }
   uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
   client|=(~device)&(UINT64_C(1)<<63);
-  for(uint32_t queue=0;queue<memory->links*(memory->qps+1)+MESH_COMPUTE_THREADS;queue++){
+  for(uint32_t queue=0;queue<memory->links*(memory->qps+1)+2*MESH_COMPUTE_THREADS;queue++){
     _Atomic uint64_t *words=mesh_notices(memory,mesh_notice_queue(memory,client,queue));
     for(uint32_t i=0;i<memory->notice_words;i++)atomic_store_explicit(&words[i],0,memory_order_relaxed);
   }
@@ -187,7 +187,7 @@ void mesh_retired_release(struct hdr *m){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     uint64_t ownership=atomic_load_explicit(&buffer->ownership,memory_order_acquire);
     if((ownership&MESH_BUFFER_FLAG(MESH_BUFFER_CLOSED)) && ((uint32_t)ownership || buffer->channel!=MESH_ABSENT)){
-      if(buffer->channel!=MESH_ABSENT)for(uint32_t offset=0;offset<buffer->pages;offset+=m->block)
+      if(buffer->channel<m->links*m->qps)for(uint32_t offset=0;offset<buffer->pages;offset+=m->block)
         atomic_store_explicit(&mesh_page(m)[row+offset],MESH_ABSENT,memory_order_relaxed);
       atomic_store_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_CLOSED),memory_order_relaxed);
       buffer->channel=MESH_ABSENT;

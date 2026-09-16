@@ -180,8 +180,9 @@ gives the concurrent-write and reuse conditions. ABI 49 removes the reclamation
 stack and collector; final references publish free-pool bits. ABI 50 replaces
 lasting presence with one release-stored word per row and the send-edge append
 range with a circular array. Each send cursor resets at its final native
-completion. ABI 53 implements receive-storage rearming; native invocation
-rearming and the unbounded N1 API remain unfinished.
+completion. ABI 53 implements receive-storage rearming; ABI 54 adds native-slot
+return and Metal command-buffer replenishment on the owning numerical worker.
+The unbounded N1 call/status namespace and instance admission remain unfinished.
 
 Receive posting pops actual pages from the RX-owned ring, initially filled from
 the contiguous run allocated at setup. Final-reference events return the value's

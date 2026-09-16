@@ -245,27 +245,23 @@ in `start()`; runtime submission receives the realized operand arrays through
 the resolved `MeshInvocation.submit` closure. It does not invoke preparation
 factories or choose a backend during numerical execution.
 Apple's [makeCommandBuffer](https://developer.apple.com/documentation/metal/mtlcommandqueue/makecommandbuffer())
-documents blocking when a queue has no free command buffers. The SDK's
-`MTLDevice.h` exposes `newCommandQueueWithMaxCommandBufferCount` and specifies
-64 as the ordinary queue's default capacity. `TensorFunction.metal` takes a
-device and encoder; `MeshInvocation` owns a private queue for that declared call,
-with capacity for its `count` invocation records. Both direct calls and native
-view factories use this constructor. Setup creates all `count` command buffers;
-submission indexes that array using the existing C call index. At the k-th
-construction, k-1 buffers occupy a pool of count slots, with k <= count. No
-completion is needed to provide a free slot, and unrelated callers cannot occupy
-this pool. Creation does not enqueue a buffer; encoding and commit occur on
-submission, so an earlier unused index does not hold a queue position.
-The former caller-provided queue and example-specific `3 * count` workaround are
-removed. This establishes the bound for the current declared extent, not a
-completed reusable-stream lifecycle or a claim about all native launch costs.
-Apple's [Metal 4 core API](https://developer.apple.com/documentation/metal/understanding-the-metal-4-core-api)
-documents reusable command-buffer objects and separate command allocators.
-The installed SDK's `MTL4CommandAllocator.h` requires the allocator's recorded
-commands to have completed before resetting its storage. This provides a native
-reuse mechanism for N1, but `MTL4CommandBuffer` and its encoders are distinct
-interfaces from the `MTLCommandBuffer` used by current supplied encoders. No
-Metal 4 adapter or unsupported replay of the current command buffers is present.
+documents waiting only when the queue has no free command buffers; its
+[completion handler](https://developer.apple.com/documentation/metal/mtlcommandbuffer/addcompletedhandler(_:))
+runs after GPU execution. The installed `MTLCommandQueueDescriptor` describes
+`maxCommandBufferCount` as the bound on uncompleted command buffers. Mesh owns a
+private queue of V positions for each declared Metal function, prepares V objects,
+and replenishes a slot on its numerical worker after native completion and final
+output ownership. At replenishment, at most V-1 other objects are unfinished.
+No other caller can occupy that queue, no command buffer is recommitted, and no
+callback mutates the command array. This is a capacity argument for the native
+factory, not a claim that command creation or encoding costs nothing.
+CPU functions have no rearm callback; Core ML retains and reuses its prepared
+feature providers and output options. The [native slot-return derivation](pages-and-functions.md#native-slot-return)
+accounts for return events, output lifetimes, non-submitting ranks, metadata cost,
+and the still-finite call/status namespace. Collins's counted ownership and the
+existing row-notification mechanism supply the return events; one numerical
+worker owns each free-index array. This supplies ordinary native storage reuse,
+not X5's unfinished instance-admission rings or R2 failure cancellation.
 
 ## Program.map
 

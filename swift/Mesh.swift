@@ -175,6 +175,7 @@ private final class MeshInvocation {
     let inputCount: Int, outputCount: Int
     let memory: MeshMemory
     let submit: (OpaquePointer, UInt32, MeshOperands, MeshOperands) -> Void
+    let rearm: ((UInt32) -> Void)?
 
     // design/algorithm-sources.md#programkernel_call
     init(_ function: MeshSubmission, memory: MeshMemory, inputs: Int, outputs: Int, count: Int,
@@ -189,6 +190,7 @@ private final class MeshInvocation {
         let copyOnCPU: Bool
         switch function {
         case .cpu(let function):
+            rearm = nil
             copyOnCPU = true
             launch = { call, _, inputs, outputs in
                 function(inputs, outputs)
@@ -227,7 +229,8 @@ private final class MeshInvocation {
                 }
             }
             let queue = device.makeCommandQueue(maxCommandBufferCount: count)!
-            let commands = (0..<count).map { _ in queue.makeCommandBuffer()! }
+            var commands = (0..<count).map { _ in queue.makeCommandBuffer()! }
+            rearm = { index in commands[Int(index)] = queue.makeCommandBuffer()! }
             launch = { call, index, inputs, outputs in
                 let command = commands[Int(index)]
                 encode(command, inputs, outputs)
@@ -238,6 +241,7 @@ private final class MeshInvocation {
                 command.commit()
             }
         case .prediction(let model, let features, let options):
+            rearm = nil
             copyOnCPU = true
             launch = { call, index, inputs, _ in
                 let provider = features[Int(index)]
@@ -363,6 +367,8 @@ public final class Mesh {
                 let invocation = Unmanaged<MeshInvocation>.fromOpaque(argument!).takeUnretainedValue()
                 invocation.submit(call!, index, MeshOperands(start: inputs, count: invocation.inputCount),
                                   MeshOperands(start: outputs, count: invocation.outputCount))
+            }, invocation.rearm == nil ? nil : { index, argument in
+                Unmanaged<MeshInvocation>.fromOpaque(argument!).takeUnretainedValue().rearm!(index)
             }, argument,
             { argument in Unmanaged<MeshInvocation>.fromOpaque(argument!).release() })
         if call == nil {

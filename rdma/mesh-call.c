@@ -8,16 +8,18 @@ struct mesh_call {
   struct mesh_operand *operands;
   uint32_t pending,index,invocation;
 };
+struct mesh_slot { struct mesh_call *call; uint32_t remaining; };
 struct mesh_function {
   struct mesh_calls *calls;
   struct mesh_section *inputs;
   struct mesh_call *values;
   struct mesh_operand *operands;
-  uint32_t *consumed;
+  uint32_t *consumed,*available,*references;
   unsigned char *placed;
   size_t input_count,output_count,consumed_count;
-  uint32_t worker,identity,used;
+  uint32_t worker,identity,free_count;
   mesh_submit submit;
+  mesh_rearm rearm;
   mesh_dispose dispose;
   void *argument;
   struct mesh_function *next;
@@ -33,7 +35,8 @@ struct mesh_calls {
   struct mesh_ctx *context;
   struct mesh_function *functions,**program;
   struct mesh_call_worker workers[MESH_COMPUTE_THREADS];
-  uint32_t count,extent,first,root_workers,function_count;
+  uint32_t count,extent,first,return_first,root_workers,function_count;
+  struct mesh_slot *slots;
   struct mesh_instance *instances;
   _Atomic uint32_t references;
   _Atomic int running;
@@ -51,12 +54,13 @@ static void mesh_calls_release(struct mesh_calls *calls,uint32_t references){
   for(struct mesh_function *function=calls->functions;function;){
     struct mesh_function *next=function->next;
     if(function->dispose)function->dispose(function->argument);
-    free(function->operands);free(function->values);free(function->inputs);free(function);
+    free(function->available);free(function->operands);free(function->values);free(function->inputs);free(function);
     function=next;
   }
   if(calls->first!=MESH_ABSENT)mesh_rows_release(calls->context,calls->first,calls->extent);
+  if(calls->return_first!=MESH_ABSENT)mesh_rows_release(calls->context,calls->return_first,calls->function_count*calls->extent);
   if(calls->dispose)calls->dispose(calls->owner);
-  free(calls->program);free(calls);
+  free(calls->slots);free(calls->program);free(calls);
 }
 
 /* design/algorithm-sources.md#meshresult */
@@ -72,7 +76,7 @@ struct mesh_calls *mesh_calls_create(struct mesh_ctx *context,uint32_t workers,u
   if(!context || !context->M || !workers || workers>MESH_COMPUTE_THREADS || !count){errno=EINVAL;return NULL;}
   struct mesh_calls *calls=calloc(1,sizeof *calls);
   if(!calls)return NULL;
-  calls->context=context;calls->count=workers;calls->extent=count;calls->first=MESH_ABSENT;atomic_init(&calls->references,1);
+  calls->context=context;calls->count=workers;calls->extent=count;calls->first=calls->return_first=MESH_ABSENT;atomic_init(&calls->references,1);
   for(uint32_t i=0;i<workers;i++){
     calls->workers[i]=(struct mesh_call_worker){.calls=calls,.index=i,.offsets=calloc((size_t)mesh_rows(context->M)+1,sizeof(size_t))};
     if(!calls->workers[i].offsets){mesh_calls_release(calls,1);return NULL;}
@@ -89,7 +93,7 @@ struct mesh_calls *mesh_calls_create(struct mesh_ctx *context,uint32_t workers,u
 /* design/algorithm-sources.md#programkernel_call */
 struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   const struct mesh_section *inputs,const struct mesh_section *views,size_t input_count,
-  const struct mesh_section *outputs,size_t output_count,mesh_submit submit,void *argument,mesh_dispose dispose){
+  const struct mesh_section *outputs,size_t output_count,mesh_submit submit,mesh_rearm rearm,void *argument,mesh_dispose dispose){
   if(worker>=calls->count || !submit || atomic_load(&calls->running)){errno=EINVAL;return NULL;}
   struct mesh_function *function=calloc(1,sizeof *function);
   if(!function)return NULL;
@@ -97,7 +101,10 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   function->inputs=calloc(1,(input_count?input_count:1)*sizeof *inputs+input_count*(sizeof *function->consumed+sizeof *function->placed));
   function->operands=calloc(extent*(count?count:1),sizeof *function->operands);
   function->values=calloc(extent,sizeof *function->values);
-  if(!function->inputs || !function->operands || !function->values){errno=ENOMEM;goto failed;}
+  function->available=calloc(extent+output_count,sizeof *function->available);
+  if(!function->inputs || !function->operands || !function->values || !function->available){errno=ENOMEM;goto failed;}
+  function->references=function->available+extent;function->free_count=(uint32_t)extent;
+  for(uint32_t i=0;i<extent;i++)function->available[i]=(uint32_t)extent-i-1;
   function->consumed=(uint32_t *)(function->inputs+input_count);
   function->placed=(unsigned char *)(function->consumed+input_count);
   for(size_t i=0;i<input_count;i++){
@@ -106,7 +113,7 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   }
   memcpy(function->inputs,inputs,input_count*sizeof *inputs);
   function->calls=calls;function->worker=worker;function->input_count=input_count;function->output_count=output_count;
-  function->submit=submit;function->argument=argument;function->dispose=dispose;
+  function->submit=submit;function->rearm=rearm;function->argument=argument;function->dispose=dispose;
   struct hdr *m=calls->context->M;
   for(size_t i=0;i<input_count;i++)for(uint32_t index=0;index<(inputs[i].stride?extent:1);index++)
     mesh_buffer_retain(m,mesh_section_row(inputs[i],index),inputs[i].pages);
@@ -123,7 +130,7 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   function->next=calls->functions;calls->functions=function;
   return function;
 failed:
-  free(function->inputs);free(function->operands);free(function->values);free(function);
+  free(function->available);free(function->inputs);free(function->operands);free(function->values);free(function);
   return NULL;
 }
 
@@ -144,11 +151,23 @@ static void *mesh_call_progress(void *argument){
   struct mesh_calls *calls=worker->calls;
   struct hdr *m=calls->context->M;
   uint32_t queue=mesh_notice_queue(m,calls->context->client,m->links*(m->qps+1)+worker->index);
-  struct mesh_notice_reader reader=mesh_notice_reader_init(m,queue);
+  struct mesh_notice_reader reader=mesh_notice_reader_init(m,queue),returns=mesh_notice_reader_init(m,queue+MESH_COMPUTE_THREADS);
   pthread_setname_np("mesh.numerical");
   while(atomic_load_explicit(&calls->running,memory_order_acquire)){
     uint32_t row;
-    while((row=mesh_notice_take(&reader))!=MESH_ABSENT){
+    for(;;){
+      row=mesh_notice_take(&returns);
+      if(row!=MESH_ABSENT){
+        struct mesh_slot *slot=&calls->slots[mesh_buffers(m)[row].binding];
+        if(!--slot->remaining){
+          struct mesh_call *call=slot->call;
+          struct mesh_function *function=call->function;
+          if(function->rearm)function->rearm(call->index,function->argument);
+          function->available[function->free_count++]=call->index;
+        }
+      }
+      row=mesh_notice_take(&reader);
+      if(row==MESH_ABSENT)break;
       for(size_t i=worker->offsets[row];i<worker->offsets[row+1];i++){
         struct mesh_use use=worker->targets[i];
         struct mesh_function *function=calls->program[use.function];
@@ -161,10 +180,16 @@ static void *mesh_call_progress(void *argument){
           struct mesh_call *call=&function->values[index];
           if(!shared){
             if(!call->operands){
-              call->index=function->used++;
+              call->index=function->available[--function->free_count];
+              calls->slots[function->identity*calls->extent+call->index]=(struct mesh_slot){call,(uint32_t)function->output_count+1};
               call->operands=function->operands+call->index*count;
               for(size_t j=0;j<count;j++)call->operands[j].invocation=call->invocation;
-              for(size_t j=0;j<function->output_count;j++)mesh_buffers(m)[call->operands[function->input_count+j].row].invocation=call->invocation;
+              for(size_t j=0;j<function->output_count;j++){
+                uint32_t output=call->operands[function->input_count+j].row;
+                atomic_fetch_add_explicit(&mesh_buffers(m)[output].ownership,function->references[j],memory_order_relaxed);
+                atomic_store_explicit(&mesh_presence(m)[output],0,memory_order_relaxed);
+                mesh_buffers(m)[output].invocation=call->invocation;
+              }
             }
             if(use.input!=MESH_ABSENT)mesh_call_input(function,&call->operands[use.input],use.input,row);
           }
@@ -182,8 +207,29 @@ static void *mesh_call_progress(void *argument){
 int mesh_calls_start(struct mesh_calls *calls){
   struct hdr *m=calls->context->M;
   uint32_t rows=mesh_rows(m),workers=0;
+  if(calls->function_count>rows/calls->extent)return ENOMEM;
   calls->program=calloc(calls->function_count?calls->function_count:1,sizeof *calls->program);
-  if(!calls->program)return ENOMEM;
+  calls->slots=calloc(calls->function_count?calls->function_count*calls->extent:1,sizeof *calls->slots);
+  if(!calls->program || !calls->slots)return ENOMEM;
+  if(calls->function_count){
+    calls->return_first=mesh_rows_alloc(calls->context,calls->function_count*calls->extent);
+    if(calls->return_first==MESH_ABSENT)return errno;
+  }
+  for(struct mesh_function *function=calls->functions;function;function=function->next){
+    size_t count=function->input_count+function->output_count;
+    for(uint32_t index=0;index<calls->extent;index++){
+      uint32_t slot=function->identity*calls->extent+index;
+      mesh_buffers(m)[calls->return_first+slot].binding=slot;
+      for(size_t j=0;j<function->output_count;j++){
+        uint32_t row=function->operands[index*count+function->input_count+j].row;
+        struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+        uint32_t references=(uint32_t)atomic_load_explicit(&buffer->ownership,memory_order_relaxed);
+        function->references[j]=references;
+        buffer->channel=m->links*m->qps+MESH_COMPUTE_THREADS+function->worker;buffer->binding=slot;
+        atomic_fetch_sub_explicit(&buffer->ownership,references,memory_order_relaxed);
+      }
+    }
+  }
   for(uint32_t index=0;index<calls->extent;index++){
     uint32_t transfers_count=0;
     for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++){
@@ -273,7 +319,11 @@ static void mesh_call_finish(struct mesh_call *call){
     uint32_t input=function->consumed[i];
     mesh_buffer_release(calls->context->M,call->operands[input].row,function->inputs[input].pages);
   }
-  if((uint32_t)mesh_instance_release(&calls->instances[call->invocation],1)==1)mesh_calls_release(calls,1);
+  uint32_t invocation=call->invocation;
+  mesh_notice_push(calls->context->M,mesh_notice_queue(calls->context->M,calls->context->client,
+    calls->context->M->links*(calls->context->M->qps+1)+MESH_COMPUTE_THREADS+function->worker),
+    calls->return_first+function->identity*calls->extent+call->index);
+  if((uint32_t)mesh_instance_release(&calls->instances[invocation],1)==1)mesh_calls_release(calls,1);
 }
 
 /* design/algorithm-sources.md#meshresult */

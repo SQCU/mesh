@@ -260,7 +260,67 @@ replace the inverse table's four bytes per OS page. The private receive-range
 array, `mesh_queue` and its indexing wrapper are removed. The library is
 2,272 → 2,349 maintained Swift/C/header lines. This implements N1t's transport
 storage cycle in source; call/status namespaces, native rearm, per-worker
-instance pools, and the unbounded N1 API remain unfinished. No run is claimed.
+instance pools, and the unbounded N1 API remain unfinished at ABI 53. Native slot
+return is implemented by ABI 54 below. No run is claimed.
+
+## Native slot return
+
+ABI 54 returns native operand storage to the function's numerical worker on
+ordinary completion. A slot owns its output sections, including canonical input
+placement storage, and one native invocation. Setup captures each output's
+reference-count template, removes the unused references, and records the owning
+slot and return channel in its existing buffer head. Unassigned local backing
+stays allocated to the realized function. The existing bitmap allocator remains
+responsible for its eventual program retirement.
+
+The numerical worker owns a compact free-index array for each of its functions.
+A first operand or root event pops an index. Assignment restores the output
+reference counts and invocation stamps and binds the already prepared operands.
+It does not choose a slot by invocation modulo or query an occupied slot.
+
+For a slot with Q outputs, its return count starts at Q+1. Each output's final
+reference publishes its row to that worker's return-notice bank. Native
+completion publishes one separate notice after input references have been
+released. The last of these Q+1 events replenishes the native launch object, if
+required, and pushes the index back into the same free array. Only the numerical
+worker decrements this return count or changes the array. Core ML and Metal
+callbacks and TX completions only publish the existing atomic row notices; they
+are not incorrectly treated as a single SPSC writer.
+
+The native event has its own realized notification row, so it cannot coalesce
+with an output-return event. Each output emits once at refzero. No event from a
+previous use can remain when its slot returns: every event was consumed to make
+the count zero. The worker handles a return alongside each publication dequeue.
+Callbacks still publish completed outputs directly, before retirement bookkeeping;
+there is no extra completion hop in producer-to-consumer dataflow.
+
+Metal's private queue has V command-buffer positions. Initially V objects are
+prepared. A return event proves this slot's GPU execution has finished, so at
+most V-1 other objects are unfinished when its replacement is made. Creation
+therefore requires no completion from another slot. The numerical worker alone
+reads or changes the command array, and the completed object is never recommitted.
+This uses Apple's existing command-buffer API; object creation and encoding still
+have their native costs. No operand allocation, view factory, pipeline compilation
+or queue-capacity polling is added to numerical invocation. CPU functions need no
+rearm callback. Core ML reuses its prepared feature provider and output options
+only when that slot returns.
+
+The same mechanism applies on a rank whose calls are all driven by received
+operands. Neither assignment nor output/native retirement depends on a local
+`submit`. This completes N1r's ordinary slot-return path. For the current finite
+V-value namespace, the free-index count before assignment n is V-(n-1)+R, where
+R is the number of returned slots. It is positive for n<=V. The unbounded N1 API
+must establish its live-invocation bound and replace the remaining direct k-indexed
+call/status arrays; this finite proof does not establish arbitrary admission.
+Failure cancellation remains R2 work: a failed native call does not publish its
+outputs, and abandoned references are reclaimed during program/device retirement.
+
+Storage adds a 16-byte return record and four-byte free index per native slot,
+four bytes per output reference template, one metadata-only notification row per
+slot, and one return-notice bank per numerical worker per client bank. Buffer heads
+retain their ABI 53 size. Source is 2,349 → 2,406 maintained Swift/C/header lines;
+documentation is counted separately. Existing producer/consumer callers exercise
+the same importable binding paths; no new evaluator or runtime claim is introduced.
 
 ## Invocation identity and storage reuse
 
@@ -305,11 +365,11 @@ Core ML feature inputs and Metal matrix inputs therefore select their own views;
 native command buffers and prediction output options use the consumer slot.
 
 This is still a finite extent: call/status arrays are indexed by k in `0..<count`,
-each function advances through its prepared slots once. ABI 53 recycles receive
+ABI 54 recycles each function's prepared storage slots, and ABI 53 recycles receive
 targets and backing within that namespace. It does not implement
 `submit(inFlight + k)`. The wire identity and
-independent storage selection remove the prior coupling; the free-pool and
-native rearm work below remains required.
+independent storage selection remove the prior coupling. ABI 54 supplies native
+slot return; unbounded invocation matching and instance admission remain required.
 
 The maintained Swift/C/header total remains 2,272 lines. The operand is now 32
 bytes instead of 24; the invocation field fills existing padding in the 32-byte
@@ -368,8 +428,8 @@ device-ownership query on ordinary release. Partial allocation failure drops its
 two known setup/producer references directly; it never acquires device ownership.
 
 This is the existing section allocator's event pool, **not** N1's reusable
-instance pool. Per-worker SPSC instance rings, the in-flight arena bound, native
-launch reuse, unbounded invocation matching, and complete R2 failure cancellation remain
+instance pool. Per-worker SPSC instance rings, the in-flight arena bound,
+unbounded invocation matching, and complete R2 failure cancellation remain
 required. In particular, recovery of interrupted reference/event publication on
 abrupt caller death is not proved by this ordinary-completion protocol.
 
