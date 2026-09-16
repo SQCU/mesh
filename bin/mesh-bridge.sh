@@ -6,8 +6,9 @@ CONF="${MESH_CONF:-/usr/local/mesh/bridge.conf}"
 [ -f "$CONF" ] || CONF="$HOME/.mesh-bridge.conf"
 [ -f "$CONF" ] || CONF="$ROOT/etc/bridge.conf"
 LABEL=io.mesh.bridge
-BIN="$ROOT/rdma/mesh-flow"
-STAT="$ROOT/rdma/mesh-stat"
+BIN="${MESH_BIN:-/usr/local/mesh/bin/mesh-flow}"; [ -x "$BIN" ] || BIN="$ROOT/rdma/mesh-flow"
+STAT="$(dirname "$BIN")/mesh-stat"; [ -x "$STAT" ] || STAT="$ROOT/rdma/mesh-stat"
+case "$BIN" in *-wt/*|*/.build/*|/tmp/*|/private/tmp/*) echo "mesh-bridge: refusing to launch the bridge from a worktree, build or scratch path ($BIN); run make install-bridge" >&2; exit 65 ;; esac
 
 scope=gui; mesh_pct=; node=0; links=(); region=/mesh0
 mesh_arena_pages=; mesh_block_pages=; mesh_qps=1

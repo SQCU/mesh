@@ -1,9 +1,11 @@
 BINS = mesh-flow mesh-stat libmesh.dylib libmesh_swift.dylib
+MESH_CODESIGN_IDENTITY ?= Mesh Bridge
+MESH_PREFIX ?= /usr/local/mesh
 all: $(BINS)
 mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-dataflow.h mesh-dataflow.c Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -o .build/$@ mesh-flow.c mesh-dataflow.c -lrdma
-	codesign --force --sign - .build/$@
+	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
 	mv -f .build/$@ $@
 mesh-stat: mesh-stat.c mesh.h
 	cc -O2 -o $@ mesh-stat.c
@@ -24,3 +26,7 @@ gram-chain: ../examples/gram-chain.swift libmesh_swift.dylib
 clean:
 	rm -f $(BINS) sync-on-remote-fill bounds-table coreml-chain indexed-gather gram-chain Mesh.swiftmodule Mesh.swiftdoc Mesh.swiftsourceinfo Mesh.abi.json
 .PHONY: all clean
+install-bridge: mesh-flow mesh-stat
+	install -d $(MESH_PREFIX)/bin
+	install -m 755 mesh-flow mesh-stat $(MESH_PREFIX)/bin/
+	codesign -dv $(MESH_PREFIX)/bin/mesh-flow 2>&1 | grep -E "^Identifier=io.mesh.bridge$$"
