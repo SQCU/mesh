@@ -179,14 +179,20 @@ The page-index list therefore fills incrementally. The final chunk's target
 also names the numerical head to publish; earlier chunks do not publish a
 replacement numerical partial. The queue's FIFO order establishes that this
 partial's earlier chunks are already placed. No thread waits for another
-partial or a whole operation to finish. A failed receive suppresses subsequent
-numerical publication on that queue and reports the provider error.
+partial or a whole operation to finish. A failed receive reports the provider
+error and ends the affected link invocation before interpreting failed payload;
+there is no sticky per-receive publication guard.
 
 Because each send's chunks consume consecutive positions in a preallocated
 receive run, the complete operand is also contiguous in the numerical address
 space. Native bindings cover possible start positions at which that operand
 fits. Publication never remaps a native view. The page-table permutation and
 lifetime relationship are derived in [pages and functions](pages-and-functions.md#block-addressing).
+This consecutive-chunk arrangement is the current implementation, not the tensor
+API contract. The page table also represents fragmented logical order; a consumer
+requiring contiguity needs the asynchronous layout path described there. Multiple
+peers keep independent receive runs and transfer identities. Their completions
+may interleave without a global ordering step.
 
 One transport reference retains the source through all its chunks. Only its
 final ordered send completion releases that reference; there is no fragment

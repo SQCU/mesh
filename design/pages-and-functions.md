@@ -89,6 +89,37 @@ external code. No caller free/done call or consumer-stamp protocol is required.
 
 ## Block addressing
 
+### Logical order and interleaved arrivals
+
+The page table is the indirection between logical tensor coordinates and physical
+registered backing. A receive relation identifies `(peer, edge, instance, chunk)`;
+its completion installs the actual backing page in the corresponding logical row.
+The peer qualification is realized in each link/queue's transfer table. Identical
+source row integers arriving from two neighbors of a ring do not alias one another.
+
+For a logical value X with chunks X0, X1 and X2, a mapping `[p7, p2, p8]` means
+those chunks occupy those pages in that logical order. The order in which their
+completions were drained is irrelevant to X's coordinates. Indexed consumers use
+the mapping; forwarding reads the same registered backing. Each value's declared
+ownership keeps those pages alive. No acknowledgement or global arrival order is
+needed to establish this relation.
+
+A page list does not itself make a base-pointer/length operand contiguous.
+Contiguous-typed operations consume appropriate contiguous sections, a supported
+contiguous alias of the same backing, or an asynchronously produced layout in
+canonical operand storage. Reordering metadata or installing aliases moves no
+payload. An actual scatter/gather materialization moves bytes and must be counted
+as such. The layout operation publishes its own outputs; only their consumers
+depend on that publication. RX and TX continue draining other work throughout.
+
+The implementation below already handles interleaving between peer queues and
+out-of-order complete sends within a queue. Its consecutive-chunk assumption is
+a current implementation limit, not a requirement on tensor functions or the
+page-table abstraction. General chunk interleaving and multi-link striping still
+need the X3 layout path; no native queue per logical value is required.
+
+### Current contiguous receive runs
+
 Each numerical partial has a logical head s, a byte length N, and
 K = ceil(N / C) transport chunks, where C is Mesh's internal chunk capacity.
 The page table contains K chunk addresses. Ownership and numerical presence
