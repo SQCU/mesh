@@ -136,7 +136,7 @@ reusable-instance pool still requires X5/N1 integration.
 
 ## Reclamation events
 
-ABI 49 removes the reclamation stack, linked entries, duplicate-enqueue claim,
+`82b9b98` (ABI 49) removes the reclamation stack, linked entries, duplicate-enqueue claim,
 deferred list and collector thread. A section's final `mesh_buffer_release`
 publishes its first logical row in `MESH_FREE`: one atomic OR after the existing
 reference decrement. Its descriptor supplies the page count. TX/RX and native
