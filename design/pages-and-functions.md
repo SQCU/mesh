@@ -154,8 +154,10 @@ equality observation; posting is admitted by the native verbs return value.
 
 At most E different edges can be queued. Each publication contributes its
 declared edge once, and that edge's transport reference survives until its final
-native completion. Its old queue entry is removed when the last chunk is posted;
-the completion resets its chunk cursor before releasing ownership. Legal reuse
+native completion. ABI 51 removes the head entry after each accepted chunk and appends the same
+edge at the tail when more chunks remain. This rotates among ready sections
+without changing chunk order within an edge. The final chunk leaves no queued
+entry; its completion resets the chunk cursor before releasing ownership. Legal reuse
 cannot publish the edge again before that release. Therefore a ring sized for E
 needs no fullness guard and cannot overwrite a queued edge. Power-of-two indexing
 continues to work when the unsigned positions wrap. This does not select an
@@ -268,13 +270,13 @@ payload. An actual scatter/gather materialization moves bytes and must be counte
 as such. The layout operation publishes its own outputs; only their consumers
 depend on that publication. RX and TX continue draining other work throughout.
 
-The implementation below already handles interleaving between peer queues and
-out-of-order complete sends within a queue. Its consecutive-chunk assumption is
-a current implementation limit, not a requirement on tensor functions or the
-page-table abstraction. General chunk interleaving and multi-link striping still
-need the X3 layout path; no native queue per logical value is required.
+ABI 51 permits chunk interleaving within each queue as well as independent arrival
+from multiple peers. Each accepted chunk rotates its unfinished send to the tail.
+A logical section therefore need not occupy consecutive physical receive blocks.
+No QP per value, whole-section posting order, or receive-side reorder wait is used.
+Multi-link striping of a single section remains T3 work; invocation reuse remains N1.
 
-### Current contiguous receive runs
+### Indexed receive runs and contiguous consumers
 
 Each numerical partial has a logical head s, a byte length N, and
 K = ceil(N / C) transport chunks, where C is Mesh's internal chunk capacity.
@@ -283,14 +285,42 @@ belong to s, independently of K. Value i uses `first + i * stride`; a shared
 constant has stride zero. Numerical indexing continues to use its declared
 shape and strides, without a transport-chunk dimension.
 
-Local operands occupy contiguous payload pages. Setup allocates one contiguous
-receive page run per queue, covering the sum of its declared transfers' chunk
-counts. TX posts each send's chunks consecutively in that queue. Receives consume
-the posted run in that same order, so every send lands in a contiguous subrange,
-even when differently sized sends publish out of declaration order. If its first
-page is p(s), byte offset d has address `arena + page_size * p(s) + d`.
-Native bindings are prepared for the possible starts at which the whole operand
-fits. There is no remapping of a live numerical view.
+Local operands occupy contiguous payload pages. Setup allocates one receive run
+per queue covering its finite declared transfers. These are writable posted
+blocks, not a promise that consecutive positions belong to the same tensor.
+A single-chunk input selects its native view directly from its received page.
+Forwarding follows each logical chunk's page entry without copying it.
+
+For a multi-chunk received input of a contiguous function, setup allocates a
+contiguous canonical section per consumer invocation. Repeated uses of the same
+input within that function share this section. These are actual registered arena
+pages with ordinary descriptors and ownership, not a separate operand store.
+C binding now distinguishes dependency inputs from their prepared operand views:
+the original received rows fire the function and retain the source; the supplied
+function sees the contiguous section. The placement section is an auxiliary output
+owned through that invocation's native completion. It has no independent consumer,
+extra publication dependency, runtime allocation, or caller-visible parameter.
+
+The placement and supplied operation form one launch. Metal records indexed blit
+copies before the supplied encoder in the same command buffer. Native views are
+created at setup through the existing shared-buffer cache. CPU and Core ML paths
+perform indexed `memcpy` on their numerical worker before the supplied function or
+prediction. They add no GPU-to-host completion round trip and execute no layout
+work on an RDMA thread. Unaffected inputs retain their existing direct bindings.
+The backend choice, chunk rows, byte extents and native views are all realized
+before invocation. No runtime predicate asks whether an entire receive happened
+to land contiguously.
+
+This materialization copies N bytes per distinct multi-chunk input per consumer
+invocation (Metal rounds the final copy to four-byte alignment inside allocated
+padding). It is not zero-copy. Its temporary arena cost is
+`count * ceil(N/C) * C` for that binding, including a received shared constant;
+there is no implicit shared-copy completion guard. Transport placement and
+forwarding remain zero-copy. CPU bandwidth, GPU copy cost and this additional
+storage must be included in subsequent performance and reusable-arena work.
+The library grows from 2,198 to 2,272 maintained Swift/C/header lines (+74);
+the ring configuration is 12 lines of caller data. No source generator or new
+numerical implementation is introduced. Documentation changes are separate.
 
 Before publication, receive blocks form a bijection between unfilled logical
 destinations and reserved physical blocks. If the next completion fills physical
@@ -301,29 +331,31 @@ uses the same writes. Every physical receive slot appears once in the finite
 posting list, so a previously published block cannot be displaced by a later
 completion. No payload is copied and no published operand changes address.
 
-For example, let A occupy three chunks and B one chunk. Their receive run
-contains physical positions p0, p1, p2, p3. If B publishes first, the completions
-produce this assignment:
+For example, let A and B each have three chunks and receive positions p0–p5:
 
 | Completion | Updated destination | Numerical publication |
 |---|---|---|
-| B0 into p0 | B0 → p0 | B |
-| A0 into p1 | A0 → p1 | — |
+| A0 into p0 | A0 → p0 | — |
+| B0 into p1 | B0 → p1 | — |
 | A1 into p2 | A1 → p2 | — |
-| A2 into p3 | A2 → p3 | A |
+| B1 into p3 | B1 → p3 | — |
+| A2 into p4 | A2 → p4 | A |
+| B2 into p5 | B2 → p5 | B |
 
-B's consumer can run while A is transferring. A's native operand starts at p1
-and spans p1–p3 contiguously. Its setup bindings need only the possible fitting
-starts p0 and p1; B's bindings cover p0–p3. Neither function sees the transport
-chunk count. B's published p0 is never displaced while A's rows are assigned.
+A's placement reads `[p0,p2,p4]` and B's reads `[p1,p3,p5]`. A's consumer does
+not depend on B2. At another peer the same source row integers index a different
+link's transfer relation and disjoint receive backing. This is the same mapping
+for both directions of a ring and for an intermediate node forwarding a value.
+The existing [Gram chain ring configuration](../examples/gram-chain-ring.json)
+uses that path through ordinary gathers, supplied functions and reduce-scatters.
+It is source usage, not a measured four-node run.
 
 Each chunk completion performs that assignment independently, updating one
 forward entry and preparing the chunk's local source tag for forwarding. The
 last chunk's precomputed target also names the numerical head to publish.
 FIFO completion puts that publication after all the partial's bytes are placed.
 It does not publish a different tensor partition or wait for any other partial.
-Numerical consumers and their prepared Metal/MPS or Core ML bindings resolve
-the numerical head. Collection releases each chunk's actual backing through
+Numerical consumers use the direct or materialized operand bindings described above. Collection releases each chunk's actual backing through
 the page table, including the displaced mappings of unfinished receives.
 
 The registered transport address space aliases these payload pages and a

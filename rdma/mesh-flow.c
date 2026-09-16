@@ -169,7 +169,8 @@ static int link_send_ready(struct mesh_link *link,uint32_t q){
     int error=link_post(link,q,MESH_SEND,end==source->pages?edge:MESH_ABSENT,page);
     if(error)return error;
     source->offset=end;
-    if(end==source->pages)ready->head++;
+    ready->head++;
+    if(end!=source->pages)link->send_ready[ready->first+(ready->tail++&ready->mask)]=edge;
   }
   return 0;
 }

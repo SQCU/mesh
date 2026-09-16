@@ -133,7 +133,7 @@ detection and reuse work. Indices still belong to the finite configured extent.
 
 For N operand bytes and internal payload capacity C, setup represents
 K = ceil(N / C) transport chunks. A value has K page-table entries and one
-numerical presence bit and ownership record. A 10,648-element float32 operand
+numerical presence word and ownership record. A 10,648-element float32 operand
 has 42,592 bytes: with C = 16,384, it uses three transport chunks but remains
 one operand with the same 10,648 elements. Changing C changes none of the
 caller's numerical declarations.
@@ -159,8 +159,9 @@ to its preallocated circular array. Power-of-two capacity covers every declared
 edge, and declared ownership permits one queued occurrence per live edge. There
 is no fullness guard, runtime queue allocation or linked-list append. One cursor per send advances through its
 realized page indices; there is no runtime construction or traversal of the
-whole chunk list before the first post. Chunks of one send remain consecutive
-on their queue. Sends can publish in any order and have different byte lengths.
+whole chunk list before the first post. ABI 51 rotates to the next ready edge
+after each accepted chunk; unfinished edges return to the tail. Sends can publish
+in any order and have different byte lengths.
 Each transport step polls one completion and attempts one available request,
 including when the poll yields no completion. The next step proceeds immediately;
 there is no software outstanding-request count or request-capacity gate. Initial
@@ -193,16 +194,16 @@ partial or a whole operation to finish. A failed receive reports the provider
 error and ends the affected link invocation before interpreting failed payload;
 there is no sticky per-receive publication guard.
 
-Because each send's chunks consume consecutive positions in a preallocated
-receive run, the complete operand is also contiguous in the numerical address
-space. Native bindings cover possible start positions at which that operand
-fits. Publication never remaps a native view. The page-table permutation and
-lifetime relationship are derived in [pages and functions](pages-and-functions.md#block-addressing).
-This consecutive-chunk arrangement is the current implementation, not the tensor
-API contract. The page table also represents fragmented logical order; a consumer
-requiring contiguity needs the asynchronous layout path described there. Multiple
-peers keep independent receive runs and transfer identities. Their completions
-may interleave without a global ordering step.
+ABI 51 no longer assumes consecutive chunks form a contiguous native operand.
+The canonical page table records each actual chunk. Single-chunk inputs bind
+that backing directly; multi-chunk inputs for contiguous functions use the
+[indexed placement path](pages-and-functions.md#indexed-receive-runs-and-contiguous-consumers)
+in their existing launch. Metal uses blits in the consumer command buffer;
+CPU and Core ML use copies on the numerical worker. All destination storage and
+native views are realized ahead of execution. These copies have actual byte and
+arena costs; only mapping and transport forwarding are zero-copy. Multiple peers
+keep independent receive runs and transfer identities. Their completions may
+interleave without a global ordering step.
 
 One transport reference retains the source through all its chunks. Only its
 final ordered send completion releases that reference; there is no fragment
@@ -310,8 +311,9 @@ The internal `MeshSubmission` enum selects the backend during realization;
 are not traversed during numerical execution.
 
 A local operand selects a binding by value index; a shared constant selects
-index zero. Each receive channel has a contiguous preallocated page range.
-Its operand selects a prepared binding by `(page - firstPage) / blockPages`.
+index zero. A materialized input selects its invocation index. Each receive
+channel has a contiguous preallocated page range; a direct single-chunk input
+selects a prepared binding by `(page - firstPage) / blockPages`.
 The range is recorded once when allocated; neither a per-operand slot table nor
 a rescan of transfer descriptors is needed. The numerical caller can select a prepared value by operand, or pass its
 index to an existing indexed numerical function. This keeps the selection in
@@ -498,7 +500,7 @@ current source and example callers. It does not close the deployment gaps above.
 |---|---|
 | Higher-order partial tensor functions using existing numerics | `TensorFunction` owns raw or native operand preparation. Calls, maps and reductions accept the same function value. Backend selection and view construction finish before invocation. The configured caller supplies existing Core ML functions. |
 | Distinct collective semantics | `Mesh.swift` defines send/receive endpoints, broadcast, scatter, gather, all-scatter, all-gather, all-to-all, reduce, reduce-scatter and all-reduce. Movement returns indexed sections; only the supplied combining function performs reduction arithmetic. |
-| AOT bindings, zero-copy asynchronous use | `mesh_call_bind` prepares operands and retains inputs. `mesh_calls_start` realizes contiguous consumer ranges before transfer activation. Swift prepares native views once; only received input addresses resolve at invocation. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_assign` places each chunk through page-index assignment over registered aliases without copying. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
+| AOT bindings, zero-copy asynchronous use | `mesh_call_bind` prepares operands and retains inputs. `mesh_calls_start` realizes contiguous consumer ranges before transfer activation. Swift prepares native views once; only received input addresses resolve at invocation. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_assign` places each chunk through page-index assignment over registered aliases without copying. ABI 51 adds per-consumer canonical materialization for fragmented contiguous operands, with its copy/storage cost stated in the layout section; transport and forwarding still copy no payload. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
 | Delete incompatible implementation and callers | The former executor/frontend and engine adapters are absent from the current tree. The source inventory includes their replacements. The index transport channel, paired native-binding Cartesian product, per-page receive metadata and process-memory ranking scan are also absent. |
 | Actual producer/collective/numerical-consumer integration | `coreml-chain.swift` composes caller-supplied block functions, reduce-scatter and supplied consumers across a configurable stage list. P1 ran four FFN residual blocks and four indices on the RDMA pair, reaching all eight final consumers. Accelerate performs the supplied float32 sum. This establishes operation, without a throughput claim. |
 | Automatic lifetime; explicit synchronization only | `mesh_buffer_retain` accounts for declared uses. `mesh_publish`, native numerical completion, TX completion and ordinary object destruction discharge their references; final references publish free-pool bits and setup returns backing without clearing payload. Runtime presence polling occurs only in the explicitly called `mesh_sync_on_remote_fill`; its source counterexample includes a self-dependent permanent wait. |

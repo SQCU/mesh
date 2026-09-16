@@ -179,9 +179,10 @@ entries. Mesh applies that representation to declared consumer references, not
 numerical sparse-matrix computation. `mesh_calls_start` counts references, forms
 prefix offsets and scatters call pointers into those ranges before transport
 activation. Publication traverses only its row's range. Setup also prepares local
-operand addresses and records received-input positions; invocation resolves only
-those positions. A receive channel's contiguous backing makes native-view selection
-an offset divided by the transport block size, eliminating a second index table.
+operand addresses and records direct received-input positions; invocation resolves
+only those positions. ABI 51 separates dependency rows from contiguous operand
+views. A single-chunk input selects a view by its received page offset; multi-chunk
+inputs use the indexed placement described under [transport](#programcopy).
 
 Apple [Metal command buffers](https://developer.apple.com/documentation/metal/mtlcommandbuffer)
 and [Core ML prediction](https://developer.apple.com/documentation/coreml/mlmodel):
@@ -276,8 +277,19 @@ does not infer two-entry support from the general verbs API. The
 describe this mesh-specific representation. Receive storage is preallocated
 across the finite extent; refill does not depend on consumer completion or page
 reclamation.
+Apple's [Metal buffer copy](https://developer.apple.com/documentation/metal/mtlblitcommandencoder/copy(from:sourceoffset:to:destinationoffset:size:))
+encodes a copy between existing buffers. ABI 51 uses it to place logical chunks
+into canonical contiguous storage before the supplied encoder in that same
+command buffer. The documented macOS four-byte alignment is satisfied using
+reserved tail padding. CPU and Core ML inputs use the system `memcpy` on their
+numerical worker. Setup resolves both dependency operands and their native input
+views, allocates the canonical placement outputs, and prepares chunk rows and
+views. This changes representation only, performs no tensor arithmetic, and
+adds no queue wait or native completion hop. The [data-flow and cost account](pages-and-functions.md#indexed-receive-runs-and-contiguous-consumers)
+covers ownership, finite-instance storage, and copies per consumer invocation.
+
 The dedicated TX worker consumes publication events and advances the associated
-send edges. RX independently refills receives before publishing each received
+send edges, rotating unfinished edges after each accepted chunk. RX independently refills receives before publishing each received
 section. Neither constructs a runtime list of all chunks before posting the first.
 
 The rdma-core authors' [ibv_post_send contract](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_send.3)

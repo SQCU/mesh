@@ -177,20 +177,65 @@ private final class MeshInvocation {
     let submit: (OpaquePointer, UInt32, MeshOperands, MeshOperands) -> Void
 
     // design/algorithm-sources.md#programkernel_call
-    init(_ function: MeshSubmission, memory: MeshMemory, inputs: Int, outputs: Int, count: Int) {
+    init(_ function: MeshSubmission, memory: MeshMemory, inputs: Int, outputs: Int, count: Int,
+         copies: [(input: Int, source: mesh_section, target: mesh_section)]) {
         self.memory = memory; inputCount = inputs; outputCount = outputs
+        let context = memory.context, block = mesh_block_pages(context)
+        let quantum = Int(block * context.pointee.M.pointee.pgsz)
+        let chunks = copies.map { copy in
+            stride(from: 0, to: copy.source.bytes, by: quantum).map { offset in
+                var section = copy.source
+                section.first += UInt32(offset / quantum) * block
+                section.bytes = min(quantum, copy.source.bytes - offset)
+                return section
+            }
+        }
+        let launch: (OpaquePointer, UInt32, MeshOperands, MeshOperands) -> Void
+        let copyOnCPU: Bool
         switch function {
         case .cpu(let function):
-            submit = { call, _, inputs, outputs in
+            copyOnCPU = true
+            launch = { call, _, inputs, outputs in
                 function(inputs, outputs)
                 mesh_call_complete(call)
             }
         case .metal(let device, let function):
+            copyOnCPU = false
+            let encode: (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void
+            if copies.isEmpty {
+                encode = function
+            } else {
+                let sources = copies.map { copy -> (UInt32, [MTLBuffer]) in
+                    let range = context.pointee.receives[Int(copy.source.channel)]
+                    let buffers = stride(from: range.first, to: range.first + range.count, by: Int(block)).map { page in
+                        memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page), count: quantum))
+                    }
+                    return (range.first, buffers)
+                }
+                let targets = copies.map { copy in
+                    (0..<copy.target.count).map { index in
+                        memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_section_address(context, copy.target, index), count: copy.target.bytes))
+                    }
+                }
+                encode = { command, inputs, outputs in
+                    let index = inputs[0].index
+                    let blit = command.makeBlitCommandEncoder()!
+                    for i in copies.indices {
+                        for (chunk, section) in chunks[i].enumerated() {
+                            let page = mesh_section_page(context, section, index)
+                            blit.copy(from: sources[i].1[Int((page - sources[i].0) / block)], sourceOffset: 0,
+                                      to: targets[i][Int(index)], destinationOffset: chunk * quantum, size: (section.bytes + 3) / 4 * 4)
+                        }
+                    }
+                    blit.endEncoding()
+                    function(command, inputs, outputs)
+                }
+            }
             let queue = device.makeCommandQueue(maxCommandBufferCount: count)!
             let commands = (0..<count).map { _ in queue.makeCommandBuffer()! }
-            submit = { call, index, inputs, outputs in
+            launch = { call, index, inputs, outputs in
                 let command = commands[Int(index)]
-                function(command, inputs, outputs)
+                encode(command, inputs, outputs)
                 command.addCompletedHandler { command in
                     if command.status == .completed { mesh_call_complete(call) }
                     else { mesh_call_fail(call, Int32((command.error as NSError?)?.code ?? -1)) }
@@ -198,7 +243,8 @@ private final class MeshInvocation {
                 command.commit()
             }
         case .prediction(let model, let features, let options):
-            submit = { call, index, inputs, _ in
+            copyOnCPU = true
+            launch = { call, index, inputs, _ in
                 let provider = features[Int(index)]
                 provider.operands = inputs
                 model.__prediction(fromFeatures: provider, options: options[Int(index)]) { _, error in
@@ -206,6 +252,19 @@ private final class MeshInvocation {
                     else { mesh_call_complete(call) }
                 }
             }
+        }
+        if copyOnCPU && !copies.isEmpty {
+            submit = { call, index, inputs, outputs in
+                for i in copies.indices {
+                    for (chunk, section) in chunks[i].enumerated() {
+                        memcpy(inputs[copies[i].input].data!.advanced(by: chunk * quantum),
+                               mesh_section_address(context, section, index), section.bytes)
+                    }
+                }
+                launch(call, index, inputs, outputs)
+            }
+        } else {
+            submit = launch
         }
     }
 
@@ -279,17 +338,31 @@ public final class Mesh {
         if owner != rank { return }
         preparations.append { [unowned self] in
             precondition(outputs.allSatisfy { $0.section!.channel == MESH_ABSENT })
-            let invocation = MeshInvocation(try function.prepare(self, inputs, outputs), memory: memory,
-                                            inputs: inputs.count, outputs: outputs.count, count: count)
-            try bind(invocation, inputs: inputs, outputs: outputs, worker: worker)
+            var views = inputs, storage: [TensorPart] = []
+            var copies: [(input: Int, source: mesh_section, target: mesh_section)] = []
+            for (i, input) in inputs.enumerated() {
+                let section = input.section!
+                if section.channel != MESH_ABSENT && section.pages > mesh_block_pages(memory.context) {
+                    if let existing = copies.first(where: { $0.source.first == section.first }) {
+                        views[i] = views[existing.input]
+                        continue
+                    }
+                    let target = try part(on: owner, bytes: input.bytes, partial: input.partial)
+                    views[i] = target; storage.append(target)
+                    copies.append((i, section, target.section!))
+                }
+            }
+            let invocation = MeshInvocation(try function.prepare(self, views, outputs), memory: memory,
+                                            inputs: inputs.count, outputs: outputs.count, count: count, copies: copies)
+            try bind(invocation, inputs: inputs, views: views, outputs: outputs + storage, worker: worker)
         }
     }
 
     // design/algorithm-sources.md#programkernel_call
-    private func bind(_ invocation: MeshInvocation, inputs: [TensorPart], outputs: [TensorPart], worker: Int) throws {
+    private func bind(_ invocation: MeshInvocation, inputs: [TensorPart], views: [TensorPart], outputs: [TensorPart], worker: Int) throws {
         let argument = Unmanaged.passRetained(invocation).toOpaque()
-        let inputRows = inputs.map { $0.section! }, outputRows = outputs.map { $0.section! }
-        let call = mesh_call_bind(calls, UInt32(worker), inputRows, inputRows.count, outputRows, outputRows.count,
+        let inputRows = inputs.map { $0.section! }, viewRows = views.map { $0.section! }, outputRows = outputs.map { $0.section! }
+        let call = mesh_call_bind(calls, UInt32(worker), inputRows, viewRows, inputRows.count, outputRows, outputRows.count,
             { call, index, argument, inputs, outputs in
                 let invocation = Unmanaged<MeshInvocation>.fromOpaque(argument!).takeUnretainedValue()
                 invocation.submit(call!, index, MeshOperands(start: inputs, count: invocation.inputCount),

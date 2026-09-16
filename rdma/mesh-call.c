@@ -99,7 +99,7 @@ struct mesh_calls *mesh_calls_create(struct mesh_ctx *context,uint32_t workers,u
 
 /* design/algorithm-sources.md#programkernel_call */
 struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
-  const struct mesh_section *inputs,size_t input_count,
+  const struct mesh_section *inputs,const struct mesh_section *views,size_t input_count,
   const struct mesh_section *outputs,size_t output_count,mesh_submit submit,void *argument,mesh_dispose dispose){
   if(worker>=calls->count || !submit || atomic_load(&calls->running)){errno=EINVAL;return NULL;}
   struct mesh_function *function=calloc(1,sizeof *function);
@@ -113,7 +113,7 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   function->consumed=function->outputs+output_count;
   function->remote=(uint32_t *)(function->consumed+input_count);
   for(size_t i=0;i<input_count;i++){
-    if(inputs[i].channel!=MESH_ABSENT)function->remote[function->remote_count++]=(uint32_t)i;
+    if(views[i].channel!=MESH_ABSENT)function->remote[function->remote_count++]=(uint32_t)i;
     if(inputs[i].stride)function->consumed[function->consumed_count++]=inputs[i];
   }
   memcpy(function->inputs,inputs,input_count*sizeof *inputs);
@@ -127,7 +127,7 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
     struct mesh_call *call=&function->values[index];
     *call=(struct mesh_call){.function=function,.index=index,.operands=function->operands+index*count};
     for(size_t i=0;i<count;i++){
-      struct mesh_section section=function->inputs[i];
+      struct mesh_section section=i<input_count?views[i]:outputs[i-input_count];
       uint32_t page=atomic_load_explicit(&mesh_page(m)[mesh_section_row(section,index)],memory_order_acquire);
       call->operands[i]=(struct mesh_operand){mesh_at(m,page),section.bytes,page,index};
     }

@@ -264,8 +264,10 @@ execution owner, calls the supplied function, and declares a reduce-scatter to
 the output owners. The gather is a list of sends of those operands; there is no
 gather of the complete matrix. Every reduction result is a `TensorPart` passed
 directly to the next product. In particular, `y[...]` is the down projection's
-first operand, with no flattening, host staging, tensor reconstruction or copy.
-Mesh's ordinary remote edges handle the placements that differ.
+first operand without caller-side flattening, staging or tensor reconstruction.
+Mesh's ordinary remote edges handle placements that differ; ABI 51 materializes
+fragmented multi-chunk inputs in canonical storage for contiguous BLAS operands,
+on the numerical worker. That copy is accounted for as layout work.
 
 The bound numerical closures contain a BLAS call, a vDSP addition, or a vDSP
 input ramp. They contain no allocation, presence read, completion query, wait,
@@ -301,7 +303,26 @@ relay never calls `submit`. Its received section is bound directly as the onward
 source. This configuration is source usage of T2, not a three-node run or a
 performance measurement.
 
+`examples/gram-chain-ring.json` uses four numerical owners with explicit directed
+routes over `0 ↔ 1 ↔ 2 ↔ 3 ↔ 0`. Each node has two peers; opposite-rank traffic
+forwards through a configured neighbor. It retains eight blocks and uses two
+instances, four workers and unequal rectangular tiles with 512–896 rows. Several
+inputs span multiple transport chunks at the current 64 KiB payload geometry.
+The ordinary `contract` calls exercise received constants, contractions,
+reduce-scatter, residual reuse and continued consumption across blocks. No
+ring-specific numerical function, transport call, or result-handling path is added:
+
+```sh
+rdma/gram-chain 0 4 /mesh0 examples/gram-chain-ring.json
+rdma/gram-chain 1 4 /mesh0 examples/gram-chain-ring.json
+rdma/gram-chain 2 4 /mesh0 examples/gram-chain-ring.json
+rdma/gram-chain 3 4 /mesh0 examples/gram-chain-ring.json
+```
+
+These commands describe source integration with matching bridges and configured
+links; the four-node execution has not been run or measured.
+
 The caller builds and satisfies G1's source composition check. It has not been
-run or measured. W1–W6 remain failed in the shared runtime audit, so G1 remains
+run or measured. W2–W6 retain unfinished requirements in the shared runtime audit, so G1 remains
 partial under I18; this caller does not establish waitless execution, reusable
 instances, overlap, or E3 performance superiority.
