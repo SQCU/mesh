@@ -150,7 +150,7 @@ static void mesh_call_input(struct mesh_function *function,struct mesh_operand *
 static void mesh_call_ready(struct mesh_function *function,uint32_t frame){
   struct mesh_call *call=&function->values[frame];
   if(--call->pending)return;
-  call->error=0;call->remaining=(uint32_t)function->output_count+1;
+  call->error=0;call->remaining=(uint32_t)(function->output_count?function->output_count:1);
   struct hdr *m=function->calls->context->M;
   for(size_t i=0;i<function->input_count+function->output_count;i++)call->operands[i].invocation=call->invocation;
   for(size_t i=0;i<function->output_count;i++){
@@ -334,7 +334,7 @@ uint64_t mesh_calls_result(struct mesh_calls *calls,uint32_t index){
 }
 
 /* design/algorithm-sources.md#programkernel_call */
-static void mesh_call_finish(struct mesh_call *call,int error){
+void mesh_call_complete(struct mesh_call *call,int error){
   struct mesh_function *function=call->function;
   struct mesh_calls *calls=function->calls;
   struct hdr *m=calls->context->M;
@@ -347,15 +347,15 @@ static void mesh_call_finish(struct mesh_call *call,int error){
     uint32_t input=function->consumed[i];
     mesh_buffer_release(m,call->operands[input].row);
   }
-  mesh_notice_push(m,mesh_notice_queue(m,calls->context->client,m->links*(m->qps+1)+MESH_COMPUTE_THREADS+function->worker),
-    calls->return_first+function->identity*calls->extent+call->index);
+  if(error || !output_count)
+    mesh_notice_push(m,mesh_notice_queue(m,calls->context->client,m->links*(m->qps+1)+MESH_COMPUTE_THREADS+function->worker),
+      calls->return_first+function->identity*calls->extent+call->index);
+  else for(size_t i=0;i<output_count;i++)mesh_buffer_release(m,outputs[i].row);
   atomic_fetch_sub_explicit(active,1,memory_order_release);
 }
 
 /* design/algorithm-sources.md#meshresult */
-void mesh_call_fail(struct mesh_call *call,int error){mesh_call_finish(call,error?error:EIO);}
-/* design/algorithm-sources.md#programkernel_call */
-void mesh_call_complete(struct mesh_call *call){mesh_call_finish(call,0);}
+void mesh_call_fail(struct mesh_call *call,int error){mesh_call_complete(call,error?error:EIO);}
 
 /* design/algorithm-sources.md#programkernel_call */
 void mesh_calls_destroy(struct mesh_calls *calls){
@@ -437,7 +437,7 @@ uint32_t mesh_row_page(struct mesh_ctx *context,uint32_t row,uint32_t chunk){ret
 /* design/algorithm-sources.md#programtensor */
 void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return mesh_at(context->M,mesh_row_page(context,mesh_section_row(section,index),0));}
 /* design/algorithm-sources.md#programwrite */
-void mesh_section_constant(struct mesh_ctx *context,struct mesh_section section){mesh_publish(context->M,section.first,1);}
+void mesh_section_constant(struct mesh_ctx *context,struct mesh_section section){mesh_publish(context->M,section.first,1);mesh_buffer_release(context->M,section.first);}
 /* design/algorithm-sources.md#programtensor */
 void mesh_section_release(struct mesh_ctx *context,struct mesh_section section){
   for(uint32_t index=0;index<section.count;index++)mesh_buffer_release(context->M,mesh_section_row(section,index));

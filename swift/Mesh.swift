@@ -205,7 +205,7 @@ private final class MeshInvocation {
             copyOnCPU = true
             launch = { call, _, inputs, outputs in
                 function(inputs, outputs)
-                mesh_call_complete(call)
+                mesh_call_complete(call, 0)
             }
         case .metal(let device, let function):
             copyOnCPU = false
@@ -247,7 +247,7 @@ private final class MeshInvocation {
                 encode(command, inputs, outputs)
                 command.addCompletedHandler { [memory] command in
                     withExtendedLifetime(memory) {
-                        if command.status == .completed { mesh_call_complete(call) }
+                        if command.status == .completed { mesh_call_complete(call, 0) }
                         else { mesh_call_fail(call, Int32((command.error as NSError?)?.code ?? -1)) }
                     }
                 }
@@ -262,7 +262,7 @@ private final class MeshInvocation {
                 model.__prediction(fromFeatures: provider, options: options[Int(index)]) { [memory] _, error in
                     withExtendedLifetime(memory) {
                         if let error { mesh_call_fail(call, Int32((error as NSError).code)) }
-                        else { mesh_call_complete(call) }
+                        else { mesh_call_complete(call, 0) }
                     }
                 }
             }

@@ -206,9 +206,7 @@ void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
 
 /* design/algorithm-sources.md#programkernel_call */
 void mesh_publish(struct hdr *m,uint32_t row,uint64_t stamp){
-  atomic_store_explicit(&mesh_presence(m)[row],stamp,memory_order_release);
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-  uint32_t uses=atomic_load_explicit(&buffer->uses,memory_order_relaxed);
   for(uint32_t w=0;w<(m->links+63)/64;w++){
     uint64_t links=atomic_load_explicit(&mesh_send_uses(m,row)[w],memory_order_relaxed);
     while(links){
@@ -216,9 +214,10 @@ void mesh_publish(struct hdr *m,uint32_t row,uint64_t stamp){
       mesh_notice_push(m,mesh_notice_queue(m,buffer->owner,link),row);
     }
   }
+  atomic_store_explicit(&mesh_presence(m)[row],stamp,memory_order_release);
+  uint32_t uses=atomic_load_explicit(&buffer->uses,memory_order_relaxed);
   while(uses){
     uint32_t worker=(uint32_t)__builtin_ctz(uses);uses&=uses-1;
     mesh_notice_push(m,mesh_notice_queue(m,buffer->owner,m->links*(m->qps+1)+worker),row);
   }
-  mesh_buffer_release(m,row);
 }

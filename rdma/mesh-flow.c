@@ -222,6 +222,7 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
         if(record.flags&2){
           mesh_publish(m,record.row,(uint64_t)frame+1);
           if(record.flags&4)mesh_shared_release(link->instances,link->instance_count);
+          mesh_buffer_release(m,record.row);
         }
       } else {
         if((uint32_t)wc->wr_id!=MESH_ABSENT){

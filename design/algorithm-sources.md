@@ -154,15 +154,19 @@ The [current lifetime contract](pages-and-functions.md#native-slot-return) super
 the older slot-assignment descriptions below. N1 remains incomplete.
 
 Collins's reference counting releases a numerical input at the completion of its
-own declared use. `mesh_call_finish` now performs those decrements directly for
-CPU, Metal and Core ML, after publishing outputs. The former output-return path
-retained inputs through downstream readers; it no longer releases inputs.
-Output references still determine output storage. A native-completion reference
-keeps the call's operands live through input cleanup; its prepared return row
-releases that reference afterward, completing native-slot return independently
-of the order in which the output readers finish.
-The worker drains publication notices before return cleanup and rearming;
-both use their existing indexed notification queues.
+own declared use. `mesh_call_complete` performs those decrements directly for
+CPU, Metal and Core ML, after publishing outputs. Publication retains each
+output's existing producer reference through this cleanup, then completion
+releases those references. Final output return therefore implies that the
+callback has finished using its operand metadata, without an additional native
+completion notice or counter. The success-only completion wrapper is deleted;
+Swift passes zero to the implementation on success. Constants and RX publication
+also release their producer reference explicitly after publication. The worker
+drains publication notices before return cleanup and rearming; both use their
+existing indexed notification queues.
+Within publication, all declared TX notices precede the presence store and local
+consumer-mask load/notifications. Forwarded receives follow the same ordering;
+the wire-facing notification does not depend on local-consumer bookkeeping.
 The [chain and fan-out derivation](pages-and-functions.md#input-lifetime-ends-at-its-own-use)
 distinguishes this local storage fact from unfinished global frame reuse.
 

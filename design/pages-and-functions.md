@@ -231,9 +231,9 @@ backshift deletion, or per-function native-slot ring remains.
 Shared inputs update every prepared frame once and decrement each countdown.
 Setup initializes all countdowns, including the root dependency for a function
 with no varying inputs. Successful native completion publishes outputs, releases
-that call's consumed input references, then returns its native-completion reference.
+that call's consumed input references, then releases its outputs' producer references.
 Their final references return through the existing numerical-worker notices;
-the last output/native-completion return rearms the native object
+the last output return rearms the native object
 when necessary, restores that frame's pending template, and releases one frame reference directly. Zero-output functions emit the same return through their metadata row.
 A native error concludes status separately; complete failure cancellation is R2.
 
@@ -251,17 +251,27 @@ The last of those events returns the backing. No caller reports that it is done.
 The consumed-input index list and initial reference counts are already compiled
 from bindings. CPU, Metal and Core ML use the same completion entry point,
 including native failure. Output publication comes first; input reference
-decrements follow. The call's remaining count is `output_count + 1`, including
-its native-completion reference. The existing prepared return row publishes that
-last reference after input cleanup, so another worker cannot recycle the call's
-operand metadata while completion still reads it. This adds one cold return
-notice to successful calls with outputs; zero-output and failed calls already
-used that return row. There is no new queue, allocation, reader query or wait.
+decrements follow. Publication no longer drops the output's producer reference.
+Within publication, TX notices precede the presence store and local-use mask
+load/notifications. Received sections use the same ordering for onward sends.
+For each output y, that reference keeps R(y) ≥ 1 while completion reads its input
+metadata, even if every consumer finishes immediately. After input cleanup,
+completion releases each producer reference. Therefore final output return
+implies that the callback has finished reading its operands; the numerical worker
+can rearm its native slot. No additional reference, notice, queue, allocation,
+reader query or wait is required. Zero-output and failed calls retain their
+existing terminal return row.
+
+The C completion entry point takes the native error directly; the success-only
+forwarding wrapper is deleted and all three Swift backend bindings supply zero
+on success. The existing failure entry point normalizes a zero error code before
+calling that implementation. The public Swift interface is unchanged.
+
 Native output storage and command-buffer rearming retain their separate existing
 lifetimes. This local lifetime fact does not establish cross-participant frame
 reuse; that remains N1.
 
-The numerical worker drains ready publications before processing output/native
+The numerical worker drains ready publications before processing output/terminal
 return notices. Cleanup and command-buffer rearming therefore follow launches
 already represented in its publication queue, rather than preceding them.
 
@@ -278,10 +288,9 @@ post-before-completion-cleanup order. Full hot/cold separation, native request
 preparation and the notice-ring replacement remain group H work; no H row is
 completed by this change.
 
-This change reduces maintained Swift/C/header source from 2,415 to 2,413 lines.
-It adds no runtime storage. The native-completion reference uses the existing
-count and return row; successful output-producing calls gain one cold return
-notice. Documentation changes are explanatory additions, not source migration.
+These changes reduce maintained Swift/C/header source from 2,415 to 2,413 lines.
+They add no runtime storage or completion notices. Documentation changes are
+explanatory additions, not source migration.
 
 Core ML's feature provider and output options use the frame's prepared bindings.
 Indexed CPU/Metal operands keep the canonical page-list address. A contiguous

@@ -29,7 +29,7 @@ int mesh_calls_start(struct mesh_calls *);
 uint64_t mesh_calls_submit(struct mesh_calls *,uint32_t index);
 /* design/algorithm-sources.md#meshresult */
 uint64_t mesh_calls_result(struct mesh_calls *,uint32_t index);
-void mesh_call_complete(struct mesh_call *);
+void mesh_call_complete(struct mesh_call *,int error);
 void mesh_call_fail(struct mesh_call *,int error);
 void mesh_calls_destroy(struct mesh_calls *);
 
