@@ -50,6 +50,8 @@ Operator, 2026-09-15, verbatim:
 > ever produces *any* situation where there is more than one shm->l1 of latency, *ever*.
 > do not forget what we are programming.
 
+> *what* [we are programming] is a kind of computer, not *how*, or *why*
+
 This document is the goal. It is handed verbatim to a Codex session, a Claude session,
 or a Claude that launches `codex` as a subagent. Every row is a deliverable with a
 signature, a reference to cross-implement from, and a check readable from source; the
@@ -89,6 +91,44 @@ acknowledgment, or destination-reuse wait. A private binding's exhausted row sta
 while other receive backing remains writable is an allocation defect. N1 must
 remove that artificial restriction and account for operand and lifecycle storage;
 it must not turn an unproved capacity assumption into a gate on ready transfers.
+
+## The machine
+
+Mesh is a computer. Its description is the only vocabulary the runtime may use; a
+concept absent from this list is not implemented (it is an ontology, and ontologies are
+pointer chases).
+
+- **Memory.** One registered arena per node, addressed by page index; pages are the
+  operands. A 32-byte record array per event kind, addressed by the event integer,
+  is the metadata. Nothing else is memory: no heaps, no lists, no maps, no trees.
+- **Word.** 32 bytes, aligned, loaded once. A record holds every field its event needs.
+- **Registers.** Per row: a presence word and a reference count. Per (call, instance):
+  a pending count. Per instance: a status word. Each is one machine word at a fixed
+  address computed at `start()`.
+- **Instruction set (runtime).** `POST(record)` — hand a pre-built work request to the
+  NIC; `COMPLETE(wr_id)` — the NIC returns an integer; `PUBLISH(row)` — store 1 to the
+  presence word, walk one contiguous use range, decrement each pending count;
+  `FIRE(call, instance)` — a pending count reached 0: enqueue on its worker;
+  `RELEASE(row)` — a reference count reached 0: the row's pages return to the pool;
+  `SUBMIT(instance)` — publish the root rows; `RESULT(instance)` — load the status word.
+  Every instruction is one record load plus its stores; none branches on anything but
+  the three counts and the NIC's return value.
+- **Program.** Fixed at `start()`: the record arrays, the use ranges, the transfer
+  plan (which page goes on which queue in which order), the placement. The program
+  does not change while it runs. Instances are the only runtime variable, and they
+  are integers.
+- **Clock.** The NIC's completion queue and the GPU's completion handler. There is no
+  other clock in the runtime; time is not read.
+- **I/O.** SEND into a posted RECV (TN3205); nothing else exists on the wire.
+- **Faults.** A non-zero NIC status or native completion status writes the instance's
+  status word; the program continues for other instances; the driver reads the word.
+- **Latency model.** One shm→L1 per instruction for metadata, plus the payload; one
+  wire latency per hop; nothing else is permitted to appear in a trace.
+
+This is Monsoon's explicit token store (presence next to the operand; an operator fires
+when its tokens arrive) on a NIC that only does SEND/RECV, with the program compiled
+ahead of time. The Swift and C in this repository are that machine's microcode and its
+assembler; they are not a software framework.
 
 ## 0. How to use this document as a goal
 
