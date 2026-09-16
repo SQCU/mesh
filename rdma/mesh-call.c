@@ -359,7 +359,9 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uin
   if(channel==MESH_ABSENT)for(uint32_t row=first;row<first+pages;row+=(uint32_t)span){
     uint32_t page=mesh_arena_alloc(context,(uint32_t)span,m->block);
     if(page==MESH_ABSENT){
-      int error=errno;mesh_backing_release(context,first,pages);mesh_rows_release(context,first,pages);return error;
+      int error=errno;
+      mesh_buffer_release(context->M,first,pages);mesh_buffer_release(context->M,first,pages);
+      mesh_rows_release(context,first,pages);return error;
     }
     mesh_backing_bind(context,row,(uint32_t)span,page);
   }

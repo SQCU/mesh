@@ -43,9 +43,14 @@ ownership representation, not the numerical operand ABI or transport framing.
 Every retain occurs while setup still owns the section, so it is one relaxed
 increment; there is no attempt to resurrect a zero-reference value. Execution
 only releases declared uses. The retain CAS loop, rollback path, sealed flag and
-seal operation are deleted. Refzero enters the existing reclamation queue; its
-claim check and retry stack remain the unfinished X5 mechanism. ABI 47 separates
-this ownership protocol from bridges that require the deleted sealed flag.
+seal operation are deleted. ABI 49 also removes the reclamation claim, retry stack
+and collector thread. Refzero sets one row bit in the section free pool; setup
+consumes those entries without reading refcounts or zeroing payload. The bridge
+discharges abandoned positive counts at the device-close retirement event.
+The [event derivation and limits](pages-and-functions.md#reclamation-events)
+distinguish this bitmap pool from the still-required X5/N1 per-worker instance
+rings. Counted ownership follows Collins; the bitmap and teardown epoch are Mesh's
+representation, not a new algorithm attributed to that paper.
 Contiguous sections use chunk-indexed backing and relative numerical byte offsets,
 with one presence bit and ownership record per numerical value. The
 [address and ownership derivation](pages-and-functions.md#block-addressing)

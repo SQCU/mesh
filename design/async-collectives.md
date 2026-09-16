@@ -166,14 +166,15 @@ including when the poll yields no completion. The next step proceeds immediately
 there is no software outstanding-request count or request-capacity gate. Initial
 receive setup fills the native queue before traffic starts. RX runs on its own
 hardware thread and attempts its replacement receive before publishing the
-completion. Numerical workers and the collector have separate threads.
+completion. Numerical workers have separate threads.
 
 ABI 48 replaces publication's CAS/list notices with per-reader row bits and
 compact summary words. Readers enumerate only notified rows, independent of
 arrival order, then use the same prepared numerical or send ranges. A delayed
 publisher reserves no queue position. The [notification derivation](pages-and-functions.md#publication-notifications)
 gives the concurrent-write and reuse conditions. The send-edge append range and
-the reclamation stack remain separate unfinished lifecycle work.
+reusable instance pool remain separate unfinished lifecycle work. ABI 49 removes
+the reclamation stack and collector; final references publish free-pool bits.
 
 Receive posting computes `firstPage + chunkIndex * blockPages` over the contiguous
 run allocated at setup; the former table of every receive address is removed.
@@ -204,8 +205,8 @@ may interleave without a global ordering step.
 One transport reference retains the source through all its chunks. Only its
 final ordered send completion releases that reference; there is no fragment
 completion counter. Numerical completion, publication and ordinary object
-lifetime discharge the other known references. The collector returns each
-chunk's actual backing without clearing it. The client notice banks keep old
+lifetime discharge the other known references. Setup consumes the section free
+pool and returns actual backing without clearing it. The client notice banks keep old
 device publications distinct during handoff.
 
 Setup chooses L = min(C, max operand bytes on that queue direction). The wire
@@ -405,7 +406,7 @@ The programs are finite AOT data flows. One `start()` realizes the configuration
 `submit(index)` uses it for successive values, without making separate chain
 declarations. The configured count reserves all value backing ahead of execution.
 Shared function and route metadata are reused, while value storage remains
-distinct. Freed backing returns to the pool through the existing collector;
+distinct. Final references publish sections into the indexed free pool;
 this change does not feed it back into an unbounded receive cycle or reuse an
 already submitted index. The deleted matrix executable no longer constitutes
 integration evidence.
@@ -498,7 +499,7 @@ current source and example callers. It does not close the deployment gaps above.
 | AOT bindings, zero-copy asynchronous use | `mesh_call_bind` prepares operands and retains inputs. `mesh_calls_start` realizes contiguous consumer ranges before transfer activation. Swift prepares native views once; only received input addresses resolve at invocation. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_assign` places each chunk through page-index assignment over registered aliases without copying. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
 | Delete incompatible implementation and callers | The former executor/frontend and engine adapters are absent from the current tree. The source inventory includes their replacements. The index transport channel, paired native-binding Cartesian product, per-page receive metadata and process-memory ranking scan are also absent. |
 | Actual producer/collective/numerical-consumer integration | `coreml-chain.swift` composes caller-supplied block functions, reduce-scatter and supplied consumers across a configurable stage list. P1 ran four FFN residual blocks and four indices on the RDMA pair, reaching all eight final consumers. Accelerate performs the supplied float32 sum. This establishes operation, without a throughput claim. |
-| Automatic lifetime; explicit synchronization only | `mesh_buffer_retain` accounts for declared uses. `mesh_publish`, native numerical completion, TX completion and ordinary object destruction discharge their references; `mesh_collect` returns backing without clearing payload. Runtime presence polling occurs only in the explicitly called `mesh_sync_on_remote_fill`; its source counterexample includes a self-dependent permanent wait. |
+| Automatic lifetime; explicit synchronization only | `mesh_buffer_retain` accounts for declared uses. `mesh_publish`, native numerical completion, TX completion and ordinary object destruction discharge their references; final references publish free-pool bits and setup returns backing without clearing payload. Runtime presence polling occurs only in the explicitly called `mesh_sync_on_remote_fill`; its source counterexample includes a self-dependent permanent wait. |
 
 Configuration loops, native post-result handling, indexed
 operand dependencies, reference updates and native launch operations remain.

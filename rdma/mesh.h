@@ -8,18 +8,18 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 48u
+#define MESH_VERSION 49u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
 struct mesh_transfer { uint32_t local_row,binding,count,stride,chunk_stride; uint64_t bytes; };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
-enum { MESH_PRESENT, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_PLANES };
+enum { MESH_PRESENT, MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
-enum { MESH_BUFFER_QUEUED=2, MESH_BUFFER_CLOSED=4, MESH_BUFFER_RECLAIMED=8 };
+enum { MESH_BUFFER_CLOSED=4 };
 #define MESH_BUFFER_FLAG(flag) ((uint64_t)(flag)<<32)
-struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages,next; _Atomic uint32_t uses; uint64_t owner; };
+struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages; _Atomic uint32_t uses; uint64_t owner; };
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_COMPUTE_THREADS 8
@@ -43,8 +43,7 @@ struct hdr {
   uint64_t planes_off,page_off,buffer_off,backing_off,link_off,send_off,order_off,notice_off,instance_off,tags_off,data_off,length;
   uint32_t notice_levels,notice_words,notice_offsets[MESH_NOTICE_LEVELS];
   uint32_t instance_count[MESH_NOTICE_BANKS];
-  _Atomic uint64_t client,bridge_pid,device_client,serial;
-  _Atomic uint32_t reclaim_head;
+  _Atomic uint64_t client,bridge_pid,device_client,serial,retired;
   struct mesh_port_info port;
 };
 void mesh_publish(struct hdr *,uint32_t row);
@@ -167,7 +166,6 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links+MESH_COMPUTE_THREADS)*h->notice_words*sizeof(uint64_t); at=(at+bytes-1)/bytes*bytes;
   h->instance_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*rows*sizeof(struct mesh_instance); at=(at+bytes-1)/bytes*bytes;
-  atomic_store_explicit(&h->reclaim_head,MESH_ABSENT,memory_order_relaxed);
   h->tags_off=at; at+=blocks*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)rows*pgsz;
   h->length=at; return at;

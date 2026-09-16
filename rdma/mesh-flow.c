@@ -223,15 +223,6 @@ static void *link_progress(void *argument){
   }
   return NULL;
 }
-struct mesh_collector { struct hdr *memory; _Atomic int running; pthread_t thread; };
-/* design/algorithm-sources.md#programtensor */
-static void *link_collect(void *argument){
-  struct mesh_collector *collector=argument;uint32_t pending=MESH_ABSENT;
-  pthread_setname_np("mesh.reclaim");
-  while(atomic_load_explicit(&collector->running,memory_order_acquire))pending=mesh_collect(collector->memory,pending);
-  mesh_collect(collector->memory,pending);
-  return NULL;
-}
 
 /* design/algorithm-sources.md#programcopy */
 static void *link_run(void *argument){
@@ -325,13 +316,14 @@ int main(int argc,char **argv){
     snprintf(mesh_links(m)[i].device,sizeof mesh_links(m)[i].device,"%s",link->provider.device->name);
     atomic_store(&mesh_links(m)[i].port.phase,MESH_PAIRING);
   }
-  struct mesh_collector collector={.memory=m,.running=1};
-  int status=pthread_create(&collector.thread,NULL,link_collect,&collector);
-  if(status)die("collector thread");
+  int status=0;
+  uint64_t retired=0;
   atomic_store(&m->bridge_pid,(uint64_t)getpid());atomic_store(&m->port.phase,MESH_PAIRING);
   __sync_synchronize();m->magic=MESH_MAGIC;
   fprintf(stderr,"bridge node %d: %u links, %u queue pairs per link\n",me,link_count,qps);
   while(!stop){
+    uint64_t retirement=atomic_load_explicit(&m->retired,memory_order_acquire);
+    if(retired!=retirement){mesh_retired_release(m);retired=retirement;}
     uint64_t client=atomic_load_explicit(&m->client,memory_order_acquire);
     if(!client || atomic_load_explicit(&m->configured,memory_order_acquire)!=client)continue;
     atomic_store_explicit(&m->device_client,client,memory_order_seq_cst);
@@ -351,7 +343,7 @@ int main(int argc,char **argv){
   }
   for(uint32_t i=0;i<device_count;i++)if(!down_device(&devices[i])){fprintf(stderr,"verbs teardown failed: %s\n",strerror(errno));return 1;}
   atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);
-  atomic_store_explicit(&collector.running,0,memory_order_release);pthread_join(collector.thread,NULL);
+  mesh_retired_release(m);
   for(uint32_t i=0;i<link_count;i++){
     struct mesh_link *link=&links[i];
     atomic_store(&mesh_links(m)[i].port.phase,MESH_STOPPED);

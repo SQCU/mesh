@@ -41,9 +41,9 @@ temporary setup owner, unfinished production, configured numerical owners and
 transport uses. Setup derives known uses from the feed-forward graph and drops
 S after all bindings are realized. Observations are declared consumers and count
 in C. Existing completions discharge those uses. Early publication does not release an
-unfinished producer. A background collector returns zero-reference backing to the
-writable pool without clearing payload bytes. Independent work already has its
-configured sections and never awaits that collection.
+unfinished producer. The final reference publishes a free-pool entry without
+clearing payload bytes. Independent work already has its configured sections and
+never awaits reclamation.
 
 `TensorPart` contains rank, byte extent, a C section descriptor and value flags;
 it has no heap-object reference or destructor. Copying or retaining the descriptor
@@ -55,11 +55,10 @@ the memory mapping alive; their actual reads are owned by the declared calls.
 
 All retains occur before S is dropped, when R is necessarily positive. They need
 one increment, with no resurrection check, retry or rollback. After setup, the
-count only decreases. Its transition from one to zero is sufficient to enqueue
-reclamation; there is no separate sealed state. Forced teardown still closes
-buffers and preserves pages while the bridge owns their queue pairs. The current
-reclamation queue still has a duplicate-enqueue check and CAS retry; replacing
-that queue with the X5 free-list event remains required.
+count only decreases. Its transition from one to zero publishes one indexed
+free-pool bit; there is no sealed state, queue claim or retry. Forced teardown
+preserves unfinished device ownership until the bridge closes the queue pairs.
+The [reclamation events](#reclamation-events) below replace the former collector.
 
 For a transient input, each indexed use is a numerical owner and its native
 completion releases that reference. For an immutable shared input, the prepared
@@ -133,7 +132,49 @@ notice heads and per-row links use 16,515,144 bytes before region alignment. The
 new padded word arrays use 525,312 bytes. A reader's local iterator is 128 bytes.
 These are layout calculations, not latency measurements. The library source
 grows from 2,179 to 2,201 lines across all Swift and C/header files; the separate
-reclamation stack still requires X5 replacement.
+reusable-instance pool still requires X5/N1 integration.
+
+## Reclamation events
+
+ABI 49 removes the reclamation stack, linked entries, duplicate-enqueue claim,
+deferred list and collector thread. A section's final `mesh_buffer_release`
+publishes its first logical row in `MESH_FREE`: one atomic OR after the existing
+reference decrement. Its descriptor supplies the page count. TX/RX and native
+callbacks do not walk the section's backing, clear allocation bits or query readers.
+
+The free bitmap is an unordered pool of section descriptors, with at most one
+entry per live section. Setup's sole allocator first uses available arena ranges.
+If none fits, it drains the existing free bits once and makes one further range
+pass. Draining exchanges each word, enumerates its set bits, and returns each
+section's actual canonical backing to `MESH_PAGE_OWN`; `MESH_ROW_HOT` is cleared
+last. Payload bytes remain untouched. These finite passes occur during
+configuration, never in a numerical invocation or `submit`.
+
+Only the decrement observing one publishes the ordinary free event. A set bit
+keeps the logical row hot until its descriptor has been consumed; that row cannot
+be reassigned while its event is pending. Concurrent releases of different rows
+combine in the atomic word. An OR preceding the exchange is consumed in that
+batch; an OR following it remains for a later allocation. No publisher reserves
+a position or waits for another publisher. The allocator reads no refcounts.
+
+Program destruction marks its sections closed and advances a retirement epoch.
+The bridge processes that event outside active link execution, after joining the
+link controllers and their QP teardown. It discharges still-positive abandoned
+counts into the same pool. Zero counts already have their ordinary free event,
+or have already been consumed. There is no repeatedly deferred buffer and no
+device-ownership query on ordinary release. Partial allocation failure drops its
+two known setup/producer references directly; it never acquires device ownership.
+
+This is the existing section allocator's event pool, **not** N1's reusable
+instance pool. Per-worker SPSC instance rings, the in-flight arena bound, native
+launch reuse, transport rearming, and complete R2 failure cancellation remain
+required. In particular, recovery of interrupted reference/event publication on
+abrupt caller death is not proved by this ordinary-completion protocol.
+
+Maintained library source is 2,201 → 2,191 lines across `swift/*.swift` and
+`rdma/*.{c,h}`. The extra bitmap costs ceil(rows/64) × 8 bytes: 28,672 bytes for
+229,376 rows. Removing `next` does not shrink the 32-byte buffer record because of
+alignment. These are source/storage counts, not latency measurements.
 
 ## Block addressing
 
@@ -234,4 +275,4 @@ references were retained during realization and end through their own native com
 shared numerical references end with their prepared function's lifetime;
 external handles have ordinary automatic lifetimes. This preserves
 `R = P + C + T + E` while removing a redundant atomic producer-flag operation.
-The writable pool is still returned by the existing background collector.
+The final reference publishes the section to the [free pool](#reclamation-events).
