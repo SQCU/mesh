@@ -6,7 +6,7 @@ struct mesh_calls;
 struct mesh_call;
 struct mesh_function;
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride,channel; };
-struct mesh_operand { void *data; size_t bytes; uint32_t page,index,row,invocation; };
+struct mesh_operand { void *data; size_t bytes; uint32_t page,index,row; uint64_t invocation; };
 typedef void (*mesh_submit)(struct mesh_call *,uint32_t,void *,const struct mesh_operand *,struct mesh_operand *);
 typedef void (*mesh_dispose)(void *);
 typedef void (*mesh_rearm)(uint32_t,void *);
@@ -17,9 +17,9 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *,uint32_t worker,
   const struct mesh_section *inputs,const struct mesh_section *views,size_t input_count,
   const struct mesh_section *outputs,size_t output_count,mesh_submit,mesh_rearm,void *,mesh_dispose);
 int mesh_calls_start(struct mesh_calls *);
-void mesh_calls_submit(struct mesh_calls *,uint32_t index);
+uint64_t mesh_calls_submit(struct mesh_calls *,uint64_t index);
 /* design/algorithm-sources.md#meshresult */
-uint64_t mesh_calls_result(struct mesh_calls *,uint32_t index);
+uint64_t mesh_calls_result(struct mesh_calls *,uint64_t index);
 void mesh_call_complete(struct mesh_call *);
 void mesh_call_fail(struct mesh_call *,int error);
 void mesh_calls_destroy(struct mesh_calls *);
@@ -37,5 +37,5 @@ void mesh_section_constant(struct mesh_ctx *,struct mesh_section);
 void mesh_section_release(struct mesh_ctx *,struct mesh_section);
 
 /* design/algorithm-sources.md#collectivesync_on_remote_fill */
-void mesh_sync_on_remote_fill(struct mesh_ctx *,const struct mesh_section *,size_t count,uint32_t index);
+void mesh_sync_on_remote_fill(struct mesh_ctx *,const struct mesh_section *,size_t count,uint64_t index);
 #endif

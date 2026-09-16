@@ -53,9 +53,9 @@ public struct TensorFunction {
                 (inputs[i].0, (i, try mesh.bindings(parts[i]) { MLFeatureValue(multiArray: try inputs[i].1($0)) }))
             })
             let names = Set(bindings.keys)
-            let features = (0..<mesh.count).map { _ in MeshFeatures(names: names, bindings: bindings) }
+            let features = (0..<mesh.inFlight).map { _ in MeshFeatures(names: names, bindings: bindings) }
             let arrays = try outputs.indices.map { try mesh.bindings(results[$0], using: outputs[$0].1) }
-            let options = (0..<mesh.count).map { index in
+            let options = (0..<mesh.inFlight).map { index in
                 let option = MLPredictionOptions()
                 option.outputBackings = Dictionary(uniqueKeysWithValues: outputs.indices.map { (outputs[$0].0, arrays[$0].values[index]) })
                 return option
@@ -234,9 +234,11 @@ private final class MeshInvocation {
             launch = { call, index, inputs, outputs in
                 let command = commands[Int(index)]
                 encode(command, inputs, outputs)
-                command.addCompletedHandler { command in
-                    if command.status == .completed { mesh_call_complete(call) }
-                    else { mesh_call_fail(call, Int32((command.error as NSError?)?.code ?? -1)) }
+                command.addCompletedHandler { [memory] command in
+                    withExtendedLifetime(memory) {
+                        if command.status == .completed { mesh_call_complete(call) }
+                        else { mesh_call_fail(call, Int32((command.error as NSError?)?.code ?? -1)) }
+                    }
                 }
                 command.commit()
             }
@@ -246,9 +248,11 @@ private final class MeshInvocation {
             launch = { call, index, inputs, _ in
                 let provider = features[Int(index)]
                 provider.operands = inputs
-                model.__prediction(fromFeatures: provider, options: options[Int(index)]) { _, error in
-                    if let error { mesh_call_fail(call, Int32((error as NSError).code)) }
-                    else { mesh_call_complete(call) }
+                model.__prediction(fromFeatures: provider, options: options[Int(index)]) { [memory] _, error in
+                    withExtendedLifetime(memory) {
+                        if let error { mesh_call_fail(call, Int32((error as NSError).code)) }
+                        else { mesh_call_complete(call) }
+                    }
                 }
             }
         }
@@ -271,7 +275,7 @@ private final class MeshInvocation {
 }
 
 public final class Mesh {
-    public let rank: Int, size: Int, count: Int
+    public let rank: Int, size: Int, inFlight: Int
     private let memory: MeshMemory
     private let calls: OpaquePointer
     private let peers: [Int]
@@ -283,16 +287,16 @@ public final class Mesh {
     private var routes: [Placement.Edge: [Int]]
 
     // design/algorithm-sources.md#program
-    public init(region: String, rank: Int, size: Int, workers: Int, count: Int = 1, placement: Placement = Placement()) throws {
-        precondition(size > 0 && (0..<size).contains(rank) && count > 0)
+    public init(region: String, rank: Int, size: Int, workers: Int, inFlight: Int = 1, placement: Placement = Placement()) throws {
+        precondition(size > 0 && (0..<size).contains(rank) && inFlight > 0)
         let memory = try MeshMemory(region)
         let owner = Unmanaged.passRetained(memory).toOpaque()
-        guard let calls = mesh_calls_create(memory.context, UInt32(workers), UInt32(count), owner,
+        guard let calls = mesh_calls_create(memory.context, UInt32(workers), UInt32(inFlight), owner,
             { owner in Unmanaged<MeshMemory>.fromOpaque(owner!).release() }) else {
             Unmanaged<MeshMemory>.fromOpaque(owner).release()
             throw POSIXError(POSIXErrorCode(rawValue: errno)!)
         }
-        self.memory = memory; self.calls = calls; self.rank = rank; self.size = size; self.count = count
+        self.memory = memory; self.calls = calls; self.rank = rank; self.size = size; self.inFlight = inFlight
         routes = placement.routes
         peers = (0..<Int(memory.context.pointee.M.pointee.links)).map { Int(mesh_links(memory.context.pointee.M)[$0].peer) }
     }
@@ -306,9 +310,9 @@ public final class Mesh {
         var section: mesh_section?
         if owner == rank {
             var local = mesh_section()
-            let error = mesh_section_create(memory.context, bytes, UInt32(shared ? 1 : count), queue ?? MESH_ABSENT, &local)
+            let error = mesh_section_create(memory.context, bytes, UInt32(shared ? 1 : inFlight), queue ?? MESH_ABSENT, &local)
             if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
-            if shared { local.stride = 0 }
+            if shared { local.stride = 0; memory.context.pointee.shared_pages += local.pages }
             memory.sections.append(local); section = local
         }
         return TensorPart(rank: owner, bytes: bytes, partial: partial, section: section, shared: shared, identity: identity)
@@ -353,7 +357,7 @@ public final class Mesh {
                 }
             }
             let invocation = MeshInvocation(try function.prepare(self, views, outputs), memory: memory,
-                                            inputs: inputs.count, outputs: outputs.count, count: count, copies: copies)
+                                            inputs: inputs.count, outputs: outputs.count, count: inFlight, copies: copies)
             try bind(invocation, inputs: inputs, views: views, outputs: outputs + storage, worker: worker)
         }
     }
@@ -534,13 +538,14 @@ public final class Mesh {
     }
 
     // design/algorithm-sources.md#program
-    public func submit(_ index: Int) {
-        mesh_calls_submit(calls, UInt32(index))
-    }
+    @discardableResult
+    public func submit(_ index: Int) -> Result<Void, MeshError> { outcome(mesh_calls_submit(calls, UInt64(index))) }
 
     // design/algorithm-sources.md#meshresult
-    public func result(_ index: Int) -> Result<Void, MeshError> {
-        let status = mesh_calls_result(calls, UInt32(index))
+    public func result(_ index: Int) -> Result<Void, MeshError> { outcome(mesh_calls_result(calls, UInt64(index))) }
+
+    // design/algorithm-sources.md#meshresult
+    private func outcome(_ status: UInt64) -> Result<Void, MeshError> {
         let identity = Int((status >> 32) & 0x3fffffff), code = Int32(truncatingIfNeeded: status)
         switch status >> 62 {
         case 0: return .success(())
@@ -553,6 +558,6 @@ public final class Mesh {
     // design/algorithm-sources.md#collectivesync_on_remote_fill
     public func syncOnRemoteFill(_ parts: [TensorPart], index: Int = 0) {
         let sections = parts.map { $0.section! }
-        mesh_sync_on_remote_fill(memory.context, sections, sections.count, UInt32(index))
+        mesh_sync_on_remote_fill(memory.context, sections, sections.count, UInt64(index))
     }
 }

@@ -57,7 +57,7 @@ static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
     char *address=base+offset/wire->region_extent*bank+offset%wire->region_extent;
     if(mmap(address,m->pgsz,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,file,(off_t)(m->tags_off+i*m->pgsz))==MAP_FAILED)return -1;
     if(mmap(address+m->pgsz,payload,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,file,(off_t)(m->data_off+i*payload))==MAP_FAILED)return -1;
-    wire->spans[i]=(struct ibv_sge){.addr=(uintptr_t)address+m->pgsz-sizeof(uint64_t),.length=(uint32_t)(payload+sizeof(uint64_t))};
+    wire->spans[i]=(struct ibv_sge){.addr=(uintptr_t)address+m->pgsz-sizeof(struct mesh_wire_tag),.length=(uint32_t)(payload+sizeof(struct mesh_wire_tag))};
   }
   return 0;
 }

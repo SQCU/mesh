@@ -7,5 +7,6 @@
   "width": [128, 256],
   "blocks": 8,
   "count": 4,
+  "inFlight": 2,
   "workers": 2
 }

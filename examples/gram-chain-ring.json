@@ -7,6 +7,7 @@
   "hidden": [96, 112, 128, 144],
   "width": [48, 64, 80, 96],
   "blocks": 8,
-  "count": 2,
+  "count": 8,
+  "inFlight": 2,
   "workers": 4
 }

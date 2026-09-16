@@ -99,6 +99,7 @@ This is one stage entry illustrating the configuration fields:
 ```json
 {
   "count": 8,
+  "inFlight": 2,
   "workers": 2,
   "inputName": "x",
   "outputName": "y",
@@ -322,7 +323,16 @@ rdma/gram-chain 3 4 /mesh0 examples/gram-chain-ring.json
 These commands describe source integration with matching bridges and configured
 links; the four-node execution has not been run or measured.
 
-The caller builds and satisfies G1's source composition check. It has not been
-run or measured. W2–W6 retain unfinished requirements in the shared runtime audit, so G1 remains
-partial under I18; this caller does not establish waitless execution, reusable
-instances, overlap, or E3 performance superiority.
+The current configurations separate total `count` from resident `inFlight`.
+The ring requests eight invocations over two resident slots; the other Gram
+configurations request four over two. The Core ML configuration above does the
+same eight-over-two submission. Their ordinary main driver retries immediate
+busy admission and advances the label only on success. This is explicit caller
+admission policy, outside tensor functions and dedicated transport threads; it
+does not wait for a particular tensor or introduce a batch barrier.
+
+The callers build and satisfy G1's source composition check. They have not been
+run or measured. W6's native invocation path has a source ownership derivation;
+the remaining receive/admission and result/recovery requirements leave G1 and N1
+partial. These declarations do not establish repeated-execution correctness,
+overlap, or E3 performance superiority.

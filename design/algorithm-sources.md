@@ -9,9 +9,10 @@ The deleted implementation is not an implementation template.
 
 The JAX authors, [Pallas design](https://docs.jax.dev/en/latest/pallas/design/design.html):
 reference for higher-order numerical calls over indexed tensor operands.
-The implementation realizes a finite value-index extent once. A section's
-`first + index * stride` selects its logical row; shared constants have zero
-stride. Submission publishes root indices into existing numerical-worker queues,
+The implementation realizes a finite storage capacity once. A section's
+`first + slot * stride` selects its logical row; shared constants have zero
+stride. Working ABI 55 carries invocation labels separately from reusable slots.
+Submission publishes root indices into existing numerical-worker queues,
 while consumers are indexed by operand publication. No function scan or repeated
 realization is required. The [execution description](async-collectives.md#execution-and-ownership)
 separates shared function metadata from each value's operands and uses.
@@ -25,9 +26,10 @@ George E. Collins, [A method for overlapping and erasure of lists](https://doi.o
 (1960): reference counting. The user explicitly requested automatic ownership
 release and background pool return, without caller free/done calls.
 The implementation groups shared-input ownership by prepared function binding,
-while transient inputs retain one reference per indexed use. Native call-record
-references are counted per instance before workers start; dispatch transfers
-ownership from an unissued record to its native call without changing the total.
+while transient inputs retain one reference per indexed use. The native slot keeps
+these input references through final output ownership, and its numerical worker
+returns them with the slot. Pending input matches have separate indexed records;
+they do not reserve native output storage.
 The [lifetime derivation](pages-and-functions.md#what-the-page-table-is) describes
 completion, cancellation and destruction. This is an application of counted
 ownership to known lifetimes, not a new collection algorithm attributed to Collins.
@@ -88,21 +90,25 @@ The Legion authors, [reduction privileges](https://legion.stanford.edu/tutorial/
 Saltzer, Reed and Clark, [End-to-End Arguments in System Design](https://web.mit.edu/Saltzer/www/publications/endtoend/endtoend.pdf)
 (1984), motivates keeping recovery with the caller. Mesh records native errors;
 it does not retransmit an operation or make its consumers wait for recovery.
-`mesh_calls_result` performs one acquire load. Swift decodes success, busy,
+Working ABI 55 resolves a resident invocation through a keyed directory, then
+loads its status and validates the frame's invocation. It performs no link scan
+or readiness polling, but this is not yet N2's literal one-load implementation.
+Swift decodes success, busy,
 `link(peer:code:)` or `function(call:code:)` from that word. Identities are local
 function or link ordinals; a setup-captured peer array maps link ordinals to the
 configured ranks. The encoding uses two kind bits, thirty ordinal bits and
 thirty-two code bits.
 
 The counted ownership mechanism is Collins's reference counting cited above.
-Each instance has a separate reference word: low thirty-two bits count numerical
-calls, high thirty-two bits count transfers. Setup
-counts all declared uses, including shared-constant transfers for every instance.
-Native numerical completion decrements the low count; the final ordered SEND or
-RECV chunk decrements the high count. Transport chunk count introduces no extra
-result references. A zero total attempts one strong compare-exchange from busy to
-success. Native failure attempts one strong compare-exchange from busy to its
-error. Neither operation retries, and neither replaces an already concluded result.
+Setup counts declared native slot returns and transfer lifetimes. Numerical
+workers and each link's TX/RX thread report through separate single-writer event
+rings. A lifecycle thread associates these events with invocation labels; it
+neither schedules tensor functions nor authorizes communication. The final SEND
+completion and complete RX storage return supply varying-transfer events. Shared
+transfers decrement both the initial template and already resident records. Zero
+remaining ownership concludes the instance and returns its admission frame. Each
+conclusion attempts one strong compare-exchange from busy to its outcome, without
+retrying or replacing an already concluded result.
 
 Native post errors other than capacity refusal, CQ poll errors and unsuccessful
 work completions end that link's invocation after publishing its error result.
@@ -113,28 +119,20 @@ publication guard are deleted; successful completions do not consult a software
 health flag. Outstanding references remain owned until normal completion or
 teardown, so publishing an error does not release device storage early.
 
-There is no submission reference. An unsubmitted local root already has its
-numerical-call reference; a receive-driven rank has its declared receive and call
-references. Their existing completions account for all work without requiring a
-local `submit`. A rank with no declared work has a successful result at setup.
+Submission associates a free frame with a label and publishes roots; immediate
+busy consumes nothing. Receive-driven ranks associate frames from their existing
+ownership events without a local submission. Owner and worker references keep
+program metadata alive; each numerical worker additionally counts active native
+callbacks before it can exit. Finite per-invocation program references and
+`mesh_calls_cancel` are removed. A rank with only forwarding edges needs no
+numerical thread.
 
-`mesh_call_finish` replaces the old per-call whole-program reference update.
-Only the last numerical call of an instance drops that instance's program
-reference. `mesh_call_finish` shares input retirement between success and failure.
-`mesh_calls_cancel` retires unissued records after their workers stop; it does not
-invoke numerical completion or publish their outputs. Setup reserves owner,
-worker and instance references before launching any worker. Operand ownership and
-the existing page collector remain separate: a result is not a free-page claim.
-The worker mask is derived from declared function bindings during setup. Only
-those workers acquire references and start threads; unused indices retain no
-worker reference. Startup failure cancels the unstarted function range and
-releases the remaining mask's worker references. A rank with only forwarding
-edges starts no numerical thread, while its transfers still count toward Result.
-
-This implements status publication for the current finite extent. N1 reuse,
-detecting a remote caller's death, driver recovery and the existing W failures
-remain open. The bridge currently owns the QPs beyond a caller's death and closes
-its pairing socket after setup. This status word alone cannot detect that death.
+Resident result identities expire when their frames are reused; callers can keep
+returned Result values. Labels identify distinct admissions. N1's receive/event
+capacity proof, N2's lookup contract, failure cancellation, remote caller death
+detection and driver recovery remain unfinished. The bridge currently owns the
+QPs beyond a caller's death and closes its pairing socket after setup; status
+publication alone cannot detect that death.
 
 ## Program.kernel_call
 
@@ -153,6 +151,15 @@ The [publication proof](pages-and-functions.md#publication-notifications) covers
 concurrent writers, delayed summaries and reuse. This is a pending-event set,
 not a scan of tensor presence or function readiness. The declared consumer ranges
 and countdown continue to implement firing.
+The working ABI 55 implementation keeps invocation-keyed join records separate
+from native call slots. Linear probing matches an arriving logical row; countdown
+zero binds the accumulated row indices to a native slot and removes the match by
+backward shifting indices. Join and native indices have separate owner-managed
+rings. This is Mesh's software representation of operand matching, not an
+algorithm claimed to have been copied from Monsoon. Input ownership follows
+Collins's counted-lifetime mechanism through final output ownership. The
+[native-slot derivation](pages-and-functions.md#native-slot-return) proves the
+join and native bounds and identifies the still-unfinished receive bound.
 ABI 50 separates lasting presence from the notification set: `mesh_presence`
 addresses one 32-bit word per logical row; `mesh_publish` release-stores one.
 The packed presence bitmap and its read-modify-write are deleted. Setup consumes

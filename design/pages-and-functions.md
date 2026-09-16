@@ -201,13 +201,15 @@ records the physical extent and client owner. `mesh_receive_range` reads that
 descriptor through the transfer's pool index, replacing the private range array.
 
 Every queue progress step polls its CQ, consumes one available return notice,
-returns one chunk, and attempts one available RECV before handling the completion.
-Returned sections rotate through a bounded ring after each chunk. A large section
-therefore cannot occupy the entire return pass or hold up other queue polls.
-The handler reads the chunk's actual page and clears that row's mapping before
-putting the page at the physical ring's head. This gives returned pages priority
-over unused initial pages. Native refusal leaves the page queued; no software
-outstanding-frame limit or retry wait exists.
+and attempts one available RECV before handling the completion. The working ABI 55
+return path appends all K backing indices of that returned section to the physical
+ring and clears their mappings. It returns the logical row before posting from
+that ring. This removes the partially detached return queue: replenishing only
+part of a section could admit another value before its logical row returned.
+Reclamation costs K metadata loads and stores in one RX pass, without payload
+copying. This cost grows with section size; it is not a constant-time latency
+claim. Native refusal leaves the page queued; no software outstanding-frame limit
+or retry wait exists.
 
 After its final chunk is detached, the logical row returns to its binding's
 stack. The first chunk of a new value pops a row, installs the binding's realized
@@ -230,14 +232,14 @@ acknowledgement, epoch barrier or inferred collective is involved.
 For P physical blocks, every block is in one of: the post ring, a posted
 receive/completion, a live value, or a pending return. A block moves to the ring
 only after its value's final reference. Hence queued blocks never exceed P.
-Each returned section similarly contributes at most one cursor until all its
-chunks are detached. Power-of-two capacities cover these bounds without fullness
-checks. A live reader's reference prevents its physical page from being reposted.
+Power-of-two capacity covers this bound without fullness checks. A live reader's
+reference prevents its physical page from being reposted. There is no return-cursor
+allocation or queue in the working ABI 55 implementation.
 
 For a binding with V configured rows, the finite API produces at most V values.
 Before first chunk n arrives, its stack has V-(n-1)+R rows, where R is the number
 of completed returns. Since n<=V, a row is always available, even while other
-returns are partly processed. This permits different peer and invocation orders.
+returns are pending. This permits different peer and invocation orders.
 N1's unbounded admission must preserve the bound on live and returning values;
 this change does not claim that an unlimited caller can overrun a finite pool.
 
@@ -265,7 +267,7 @@ return is implemented by ABI 54 below. No run is claimed.
 
 ## Native slot return
 
-ABI 54 returns native operand storage to the function's numerical worker on
+The native return path returns operand storage to the function's numerical worker on
 ordinary completion. A slot owns its output sections, including canonical input
 placement storage, and one native invocation. Setup captures each output's
 reference-count template, removes the unused references, and records the owning
@@ -273,26 +275,31 @@ slot and return channel in its existing buffer head. Unassigned local backing
 stays allocated to the realized function. The existing bitmap allocator remains
 responsible for its eventual program retirement.
 
-The numerical worker owns a compact free-index array for each of its functions.
-A first operand or root event pops an index. Assignment restores the output
-reference counts and invocation stamps and binds the already prepared operands.
-It does not choose a slot by invocation modulo or query an occupied slot.
+The numerical worker owns a compact free-index ring for each of its functions.
+A first operand or root event acquires an indexed join record, separate from the
+native slots. It records the invocation and arriving logical input rows. The
+operand countdown reaching zero pops a native slot, transfers those row indices
+to its prepared operands, and returns the join record. Assignment restores output
+reference counts and invocation stamps. No slot is chosen by invocation modulo
+and no occupied slot is queried.
 
-For a slot with Q outputs, its return count starts at Q+1. Each output's final
-reference publishes its row to that worker's return-notice bank. Native
-completion publishes one separate notice after input references have been
-released. The last of these Q+1 events replenishes the native launch object, if
-required, and pushes the index back into the same free array. Only the numerical
-worker decrements this return count or changes the array. Core ML and Metal
+In the working ABI 55 source, a slot with Q outputs has Q return events. Native
+completion publishes outputs directly, so an output's final ownership also
+proves its native execution has finished. The slot retains its input references
+through final output ownership. Its numerical worker releases those references
+when returning the slot, including on the failure notification. A successful call
+with no outputs publishes one synthetic return event. The final event replenishes
+the native launch object, if required, and pushes the index back into the ring.
+Only the numerical worker decrements this return count or changes the ring. Core ML and Metal
 callbacks and TX completions only publish the existing atomic row notices; they
 are not incorrectly treated as a single SPSC writer.
 
-The native event has its own realized notification row, so it cannot coalesce
-with an output-return event. Each output emits once at refzero. No event from a
-previous use can remain when its slot returns: every event was consumed to make
-the count zero. The worker handles a return alongside each publication dequeue.
-Callbacks still publish completed outputs directly, before retirement bookkeeping;
-there is no extra completion hop in producer-to-consumer dataflow.
+Each output emits once at refzero. No event from a previous use can remain when
+its slot returns: every event was consumed to make the count zero. The worker
+drains available returns before the next publication dequeue; it never waits for
+a missing return. Callbacks publish completed outputs directly, with no extra
+completion hop. A per-worker active-callback count keeps program metadata alive
+through the callback's final action. It does not authorize publication or transfer.
 
 Metal's private queue has V command-buffer positions. Initially V objects are
 prepared. A return event proves this slot's GPU execution has finished, so at
@@ -307,20 +314,32 @@ only when that slot returns.
 
 The same mechanism applies on a rank whose calls are all driven by received
 operands. Neither assignment nor output/native retirement depends on a local
-`submit`. This completes N1r's ordinary slot-return path. For the current finite
-V-value namespace, the free-index count before assignment n is V-(n-1)+R, where
-R is the number of returned slots. It is positive for n<=V. The unbounded N1 API
-must establish its live-invocation bound and replace the remaining direct k-indexed
-call/status arrays; this finite proof does not establish arbitrary admission.
+`submit`. For a function with a varying input, choose any one of its input
+sections with V rows. Every occupied native slot retains a distinct row of that
+section. A newly complete input set owns another distinct row, so at most V-1
+native slots are occupied. Returning input references and the native index on the
+same numerical worker precedes its next publication dequeue. Thus native admission
+needs no availability guard. Functions with only shared inputs consume local
+root admissions, also bounded by V.
+
+For E varying operands, at most E*V pending joins can exist: each owns at least
+one input occurrence, and no occurrence belongs to two invocations. Shared-only
+functions instead have at most V pending root admissions. The match table has
+power-of-two capacity at least twice this bound, preserving an empty probe entry.
+These proofs depend on valid input-row ownership. The receive-binding bound across
+unbounded submissions and shared physical pools remains unfinished N1 work.
+Local send completion alone does not establish that remote bound.
 Failure cancellation remains R2 work: a failed native call does not publish its
 outputs, and abandoned references are reclaimed during program/device retirement.
 
-Storage adds a 16-byte return record and four-byte free index per native slot,
-four bytes per output reference template, one metadata-only notification row per
-slot, and one return-notice bank per numerical worker per client bank. Buffer heads
-retain their ABI 53 size. Source is 2,349 → 2,406 maintained Swift/C/header lines;
-documentation is counted separately. Existing producer/consumer callers exercise
-the same importable binding paths; no new evaluator or runtime claim is introduced.
+The free-index ring has power-of-two capacity at least 2*max(E,1)*V, shared with the
+invocation-match table's mask, and four bytes per entry. It uses the preallocated
+ring representation cited under [Program.copy](algorithm-sources.md#programcopy),
+with one numerical worker owning both positions and no fullness or reader query.
+Output reference templates use four bytes per output; each native slot has one
+metadata-only return-notification row. Working ABI 55 also changes invocation tags,
+matching and result/event storage; its complete capacity accounting and caller
+integration remain N1 work. No runtime or speedup claim follows from these edits.
 
 ## Invocation identity and storage reuse
 

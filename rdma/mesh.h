@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 54u
+#define MESH_VERSION 55u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -19,7 +19,7 @@ enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_BUFFER_CLOSED=4 };
 #define MESH_BUFFER_FLAG(flag) ((uint64_t)(flag)<<32)
-struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages; _Atomic uint32_t uses; uint32_t invocation,channel,binding; uint64_t owner; };
+struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages; _Atomic uint32_t uses; uint32_t channel,binding; uint64_t owner,invocation; };
 struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
@@ -35,15 +35,19 @@ struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
 /* design/algorithm-sources.md#meshresult */
 enum { MESH_RESULT_SUCCESS, MESH_RESULT_LINK, MESH_RESULT_FUNCTION, MESH_RESULT_BUSY };
 #define MESH_RESULT(kind,id,code) ((uint64_t)(kind)<<62|(uint64_t)(id)<<32|(uint32_t)(code))
-struct mesh_instance { _Atomic uint64_t status,references; };
-#define MESH_TRANSFER_REFERENCE (UINT64_C(1)<<32)
+struct mesh_instance { _Atomic uint64_t status,invocation; };
+struct mesh_event { uint64_t status,invocation; uint32_t kind; };
+struct mesh_wire_tag { _Atomic uint64_t invocation; _Atomic uint32_t row; };
+struct mesh_event_queue { _Atomic uint64_t tail; uint32_t first,mask; unsigned char padding[48]; };
+enum { MESH_EVENT_RETURN, MESH_EVENT_SHARED, MESH_EVENT_ERROR, MESH_EVENT_SUBMIT };
 struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; struct mesh_port_info port; _Atomic uint32_t order_length[2*MESH_NOTICE_BANKS*MESH_QPS]; };
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps,links;
   _Atomic uint64_t configured;
-  uint64_t planes_off,presence_off,page_off,buffer_off,pool_off,link_off,send_off,order_off,notice_off,instance_off,tags_off,data_off,length;
+  uint64_t planes_off,presence_off,page_off,buffer_off,pool_off,link_off,send_off,order_off,notice_off,instance_off,event_queue_off,event_off,tags_off,data_off,length;
   uint32_t notice_levels,notice_words,notice_offsets[MESH_NOTICE_LEVELS];
   uint32_t instance_count[MESH_NOTICE_BANKS];
+  _Atomic uint64_t result[MESH_NOTICE_BANKS];
   _Atomic uint64_t client,bridge_pid,device_client,serial,retired;
   struct mesh_port_info port;
 };
@@ -51,16 +55,28 @@ void mesh_publish(struct hdr *,uint32_t row);
 /* design/algorithm-sources.md#meshresult */
 static inline struct mesh_instance *mesh_instances(struct hdr *m,uint64_t owner){return (struct mesh_instance *)((char *)m+m->instance_off)+(owner>>63)*m->rows;}
 /* design/algorithm-sources.md#meshresult */
-static inline void mesh_instance_conclude(struct mesh_instance *instance,uint64_t status){
+static inline void mesh_result_conclude(_Atomic uint64_t *destination,uint64_t status){
   uint64_t pending=MESH_RESULT(MESH_RESULT_BUSY,0,0);
-  atomic_compare_exchange_strong_explicit(&instance->status,&pending,status,memory_order_release,memory_order_relaxed);
+  atomic_compare_exchange_strong_explicit(destination,&pending,status,memory_order_release,memory_order_relaxed);
 }
 /* design/algorithm-sources.md#meshresult */
-static inline uint64_t mesh_instance_release(struct mesh_instance *instance,uint64_t references){
-  uint64_t previous=atomic_fetch_sub_explicit(&instance->references,references,memory_order_acq_rel);
-  if(previous==references)mesh_instance_conclude(instance,0);
-  return previous;
+static inline uint32_t mesh_hash(uint64_t key){return (uint32_t)(key^(key>>32))*UINT32_C(2654435761);}
+/* design/algorithm-sources.md#meshresult */
+static inline uint32_t mesh_event_queues(struct hdr *m){return 1+MESH_COMPUTE_THREADS+2*m->links;}
+/* design/algorithm-sources.md#meshresult */
+static inline struct mesh_event_queue *mesh_event_queue(struct hdr *m,uint64_t owner,uint32_t producer){
+  return (struct mesh_event_queue *)((char *)m+m->event_queue_off)+(owner>>63)*mesh_event_queues(m)+producer;
 }
+/* design/algorithm-sources.md#meshresult */
+static inline struct mesh_event *mesh_events(struct hdr *m,uint64_t owner){return (struct mesh_event *)((char *)m+m->event_off)+(owner>>63)*m->rows;}
+/* design/algorithm-sources.md#meshresult */
+static inline void mesh_event_push(struct hdr *m,uint64_t owner,uint32_t producer,struct mesh_event event){
+  struct mesh_event_queue *queue=mesh_event_queue(m,owner,producer);
+  uint64_t tail=atomic_load_explicit(&queue->tail,memory_order_relaxed);
+  mesh_events(m,owner)[queue->first+(tail&queue->mask)]=event;
+  atomic_store_explicit(&queue->tail,tail+1,memory_order_release);
+}
+
 /* design/algorithm-sources.md#programtensor */
 static inline uint32_t mesh_notice_queue(struct hdr *m,uint64_t owner,uint32_t queue){return (uint32_t)(owner>>63)*(m->links*(m->qps+1)+2*MESH_COMPUTE_THREADS)+queue;}
 /* design/algorithm-sources.md#programcopy */
@@ -72,7 +88,7 @@ static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)
 static inline uint32_t mesh_blocks(const struct hdr *m){ return mesh_rows(m)/m->block; }
 static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_Atomic uint64_t*)((unsigned char*)m+m->planes_off)+(size_t)plane*mesh_words(m); }
 /* design/algorithm-sources.md#programkernel_call */
-static inline _Atomic uint32_t *mesh_presence(struct hdr *m){return (_Atomic uint32_t *)((char *)m+m->presence_off);}
+static inline _Atomic uint64_t *mesh_presence(struct hdr *m){return (_Atomic uint64_t *)((char *)m+m->presence_off);}
 static inline _Atomic uint32_t *mesh_page(struct hdr *m){ return (_Atomic uint32_t*)((unsigned char*)m+m->page_off); }
 /* design/algorithm-sources.md#programtensor */
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }
@@ -84,7 +100,7 @@ static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return &mesh_links(m)[queue/m->qps].order_length[(owner>>63)*2*MESH_QPS+2*(queue%m->qps)+(uint32_t)direction]; }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
 /* design/algorithm-sources.md#programcopy */
-static inline _Atomic uint64_t *mesh_tag(struct hdr *m,uint32_t page){ return (_Atomic uint64_t *)((char *)m+m->tags_off+(size_t)(page/m->block+1)*m->pgsz-sizeof(uint64_t)); }
+static inline struct mesh_wire_tag *mesh_tag(struct hdr *m,uint32_t page){ return (struct mesh_wire_tag *)((char *)m+m->tags_off+(size_t)(page/m->block+1)*m->pgsz-sizeof(struct mesh_wire_tag)); }
 
 static inline uint64_t mesh_word_mask(uint32_t first,uint32_t count,uint32_t word){
   uint32_t lo=word*64,hi=lo+64,a=first>lo?first:lo,b=first+count<hi?first+count:hi;
@@ -140,7 +156,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz,words=((uint64_t)rows+63)/64,blocks=rows/block;
   h->pgsz=pgsz; h->block=block; h->rows=rows; h->links=links; h->qps=qps;
   h->planes_off=at; at+=(uint64_t)MESH_PLANES*words*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
-  h->presence_off=at;at+=(uint64_t)rows*sizeof(uint32_t);at=(at+pgsz-1)/pgsz*pgsz;
+  h->presence_off=at;at+=(uint64_t)rows*sizeof(uint64_t);at=(at+pgsz-1)/pgsz*pgsz;
   h->page_off=at; at+=(uint64_t)rows*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->buffer_off=at; at+=(uint64_t)rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->pool_off=at; at+=blocks*sizeof(struct mesh_pool); at=(at+pgsz-1)/pgsz*pgsz;
@@ -157,6 +173,8 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links*(qps+1)+2*MESH_COMPUTE_THREADS)*h->notice_words*sizeof(uint64_t); at=(at+bytes-1)/bytes*bytes;
   h->instance_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*rows*sizeof(struct mesh_instance); at=(at+bytes-1)/bytes*bytes;
+  h->event_queue_off=at;at+=(uint64_t)MESH_NOTICE_BANKS*mesh_event_queues(h)*sizeof(struct mesh_event_queue);at=(at+bytes-1)/bytes*bytes;
+  h->event_off=at;at+=(uint64_t)MESH_NOTICE_BANKS*rows*sizeof(struct mesh_event);at=(at+bytes-1)/bytes*bytes;
   h->tags_off=at; at+=blocks*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)rows*pgsz;
   h->length=at; return at;

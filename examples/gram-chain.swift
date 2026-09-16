@@ -4,7 +4,7 @@ import Mesh
 
 private struct Plan: Decodable {
     let owners, rows, latent, hidden, width: [Int]
-    let blocks, count, workers: Int
+    let blocks, count, inFlight, workers: Int
     let routes: [[Int]]?
 }
 
@@ -51,7 +51,7 @@ struct GramChain {
         let placement = Placement(owners: p.owners, routes: Dictionary(uniqueKeysWithValues: (p.routes ?? []).map {
             (Placement.Edge($0[0], $0.last!), Array($0.dropFirst()))
         }))
-        let mesh = try Mesh(region: args[3], rank: rank, size: size, workers: p.workers, count: p.count, placement: placement)
+        let mesh = try Mesh(region: args[3], rank: rank, size: size, workers: p.workers, inFlight: p.inFlight, placement: placement)
         let tiles = Array(0..<n * n), workers = tiles.map { $0 % p.workers }
         let rowOwners = tiles.map { p.owners[$0 / n] }, columnOwners = tiles.map { p.owners[$0 % n] }
         let zBytes = tiles.map { p.rows[$0 / n] * p.width[$0 % n] * 4 }
@@ -107,7 +107,16 @@ struct GramChain {
             z = next
         }
         try mesh.start()
-        if p.owners.contains(rank) { for index in 0..<p.count { mesh.submit(index) } }
+        if p.owners.contains(rank) {
+            var index = 0
+            while index < p.count {
+                switch mesh.submit(index) {
+                case .success: index += 1
+                case .failure(.busy): break
+                case .failure(let error): throw error
+                }
+            }
+        }
         withExtendedLifetime((mesh, z)) { dispatchMain() }
     }
 }
