@@ -14,6 +14,7 @@ scope=gui; mesh_pct=; node=0; links=(); region=/mesh0
 mesh_arena_pages=; mesh_block_pages=; mesh_qps=1
 
 if [ -f "$CONF" ]; then . "$CONF"; fi
+case "$region" in /mesh0) ;; *) LABEL="io.mesh.bridge.${region#/}" ;; esac
 mesh_qps="${MESH_QPS:-$mesh_qps}"
 mesh_arena_pages="${MESH_ARENA_PAGES:-$mesh_arena_pages}"
 mesh_block_pages="${MESH_BLOCK_PAGES:-$mesh_block_pages}"
