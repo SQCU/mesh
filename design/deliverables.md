@@ -58,6 +58,21 @@ Operator, 2026-09-15, verbatim:
 > for a deliverable has to be; the signature has to *concretely be the requirement* for
 > the project, not a surrogate, and not a name-based linting rule.
 
+> the only way to *fix* this unilaterally is to review the document describing
+> deliverables and deduce how each deliverable could be interpreted charitably as
+> allowing or even requiring a new layer of indirection or latency. then deducing the
+> data structure and data flow involved in completing rdma transfers without any
+> dependent loads 'merely to give permission' for data-for-the-wire to be passed to the
+> rdma link or taken in receipt. […] rdma reads and writes simply happen at instant
+> speed by writing to a buffer consumed by a spinwaiter telling them the indexes to
+> transfer. […] updating metadata or other records about what we just transferred can
+> happen *later*, dependent loads axiomatically cannot sync or guard or induce waits for
+> transfers […] they always have to be last in line after hot data flows. […] 1 cache
+> line read per event maximum […] we aren't adding 100ns of delay between transactions
+> that should be *finished* in 8ns. […] the 'deliverables list' is actually a regression
+> test suite in a codebase which, dan luu style, *prohibits* unit tests and hand-written
+> tests.
+
 This document is the goal. It is handed verbatim to a Codex session, a Claude session,
 or a Claude that launches `codex` as a subagent. Every row is a deliverable with a
 signature, a reference to cross-implement from, and a check readable from source; the
@@ -298,12 +313,15 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 ### W — waitless/guardless audit, one row per runtime path (shared by every other row)
 
-Each W row traces the functions on one path and checks that ready work is drained,
-published and transacted without an implicit operation wait or reuse guard. The
-audit distinguishes queue progress, indexed placement and declared operand
-dependencies from control flow that withholds independent work. Source and dataflow
-are the evidence; counting conditional statements is not the check. Any later
-commit touching a path re-audits its W row before its own row can flip.
+Each W row is a regression test on one runtime path. The check is a count and a time,
+both properties of the machine: (a) dependent loads per event on the hot path (H1–H3
+define the hot path) — the number of loads whose address depends on a previous load,
+excluding the ring index → record load; (b) metadata cache lines touched per event;
+(c) in a two-node trace, the time from the producing store to the NIC doorbell (TX) and
+from the CQ completion to the consumer ring store (RX). The pass values are in H7.
+Prose about what a mechanism "is" (indexed placement, matching, resolution) does not
+change the count; if the count went up, the row regressed. Any later commit touching a
+path re-audits its W row before its own row can flip.
 
 **W1. Publish path** — numerical completion → `mesh_publish` → consumer range walk → enqueue. Files: `rdma/mesh-call.c` (`mesh_call_complete`, `mesh_publish`), `rdma/mesh-dataflow.c`.
 **W2. Receive path** — CQ completion → presence store → publish. Files: `rdma/mesh-flow.c` (`rx_thread`, receive completion handler).
@@ -314,23 +332,124 @@ commit touching a path re-audits its W row before its own row can flip.
 **W7. Collective compositions** — `send/broadcast/scatter/gather/all*/reduce*` in `swift/Mesh.swift`: declaration-time only; no runtime code at all.
 **W8. Caller bindings** — engine `mesh_layer.swift` and any example: the bound closures encode and return; no `waitUntilCompleted`, no presence read, no allocation.
 
-### X — execution-shape typings (what "streaming" means at the cache line)
+### X — execution-shape typings (supplanted 2026-09-16 by group H; rows X1–X7, X3a, X10 are retained only as history in §5)
 
-**X1. Presence is a dense stamp array.** `presence[instance][section]`: one word each, indexed by integers fixed at `start()`; `mesh_publish` is one store plus the L3 range walk. Ref: Monsoon presence bits; I-structures; Lamport single-writer. Check: direct row-indexed arrays on the publish path, without graph search or linked queues (I17); the stamp array's address is computed once.
+The X rows were read charitably: "indexed receive matching", "completion supplies the
+indexed mapping used by consumers", "an asynchronous placement operation using canonical
+operand storage", "Mesh resolves backing through the canonical page table", "dense stamp
+array … plus the range walk", "a per-worker free list … allocation pops" — each of these
+sentences licensed one more dependent load between a completion and a post or a read
+(measured: publish→post 8 → 10, completion→first byte 14 → 21). Group H replaces them
+with the data structure and the data flow, and with counts.
 
-**X2. Firing is a countdown, not a predicate.** each `(consumer, instance)` has `pending` initialized at `start()` to its operand count; publication decrements; zero → enqueue. Ref: Naiad occurrence/precursor counts; Realm event triggers. Check: `mesh_present`/any presence scan is absent from the runtime path; the only reader of presence at runtime is `syncOnRemoteFill` (I11).
+### H — hot and cold data flow (the transport, as the machine executes it)
 
-**X3a. Indexed receive matching preserves independent producers.** `mesh_transfers_prepare` / `link_configure` realize peer-qualified transfer identities, writable receive backing and chunk-to-logical-row relationships. Each completion associates its actual registered page with the logical chunk through the canonical page table. Ref: TN3205; ledger D4/D5; JACCL SEND/RECV. Check: A-then-B and B-then-A, including interleaving from two peers at each node of a ring, produce the same logical values while all available queues continue draining. No QP per independent value, declaration-order SEND, payload staging copy or fixed logical-to-physical address is required. The relation applies to all declared edges and instances.
+The hot path is the set of stores and loads between "a value became ready" and "the NIC
+was told", and between "the NIC returned a completion" and "the consumer was told". It
+contains no load whose address depends on a previous load except one: the record named by
+the integer read from a ring. Everything else — presence stamps, pending counts, reference
+counts, lifecycle, status, results — is the cold path: it runs after the hot stores, on
+whichever thread reaches it, and nothing on the hot path waits for it.
 
-**X3. Preallocated operands resolve through canonical page mappings.** realize logical operand arrays, layouts, lifetimes and storage at `start()`. Receives land in posted registered backing; completion supplies the indexed mapping used by consumers and forwarding. A contiguous-typed backend consumes suitable contiguous sections, supported aliases of the same pages, or the output of an asynchronous placement operation using canonical operand storage. Ref: ledger D4/D5; Pallas BlockSpec; Pathways. Check: interleaved logical chunks reach the correct indexed and contiguous consumers; layout work introduces no global wait and is complete only for the operands it produces. Metadata reassignment and aliasing move no payload. If a backend requires materialization, account for its actual data movement; do not label that operation zero-copy or introduce a hidden operand store.
+**H1. Index rings are the only inter-thread interface on the hot path.** A ring is a
+contiguous array of 32-bit integers, 8 per 32-byte line, with a producer tail and a
+consumer head, each a single word on its own line; the producer writes the integer and
+advances the tail with one release store; the consumer reads the head line and advances
+with one store. Rings: per link per direction `tx_ring` (producers: any thread completing
+a value; consumer: the TX spinner), per worker `fire_ring` (producers: RX spinner and any
+publisher; consumer: the worker), per link `free_ring` (producer: TX completion; consumer:
+the cold pass). Multi-producer rings use one `fetch_add` on the tail and a per-slot
+sequence word (Disruptor); no CAS loop, no list, no level. Check: the number of ring
+kinds is three; every hot-path hand-off is a ring store; no other shared structure is
+written on the hot path (source audit lists the stores).
 
-**X4. Capacity gates are hardware only.** the only conditional on a TX post is the verbs return value; no software counter of outstanding frames, credits, or window decides whether to post (RDMA-FIRST: "an implementation that gates on a computed target rather than on the hardware refusing the work has invented a throttle"). Ref: TN3205 credit flow control; NCCL proxy "if we have ops to progress, no need to block". Check: the source audit enumerates every conditional on the post paths and finds only the verbs return; a trace under load shows posts continuing until the NIC refuses, never stopping at a software count.
+**H2. Records are 32-byte lines indexed by the integer in the ring.**
+`send_record[i]` `{ibv_send_wr wr; ibv_sge sge; release_row}` prebuilt at `start()` (the
+WR and SGE are the record: the post is `ibv_post_send(qp, &send_record[i].wr, &bad)`);
+`receive_record[wr_id]` `{ibv_recv_wr wr; ibv_sge sge; row; stamp_index; use_first;
+use_count}` prebuilt at `start()`, page planned per chunk (`row = first[t] + k·block`, in
+posting order, so a transfer's chunks are contiguous and a consumer reads `.data`);
+`use_record[u]` `{call; pending_address}` contiguous per row; `call_record[c]`
+`{operand_array; worker; output_rows; pending}`; `instance_record[f]` `{status; first_row;
+row_count}` with `f` the frame integer `submit` hands out. Each `_Alignas(32)`,
+`_Static_assert(sizeof ≤ 32)` (a WR+SGE record may be ≤ 64 with the assert saying so).
+No record contains a pointer to another record; no record is mutated after `start()`
+except the counters it names. Check: the asserts compile; the audit lists, per event,
+exactly one record load after the ring read.
 
-**X5. Reclamation is an event, not a query.** a reference count reaching zero pushes the pages onto a per-worker free list (single-producer/single-consumer ring, Disruptor); allocation for a new instance pops. Realization verifies the inFlight × bytes arena bound; when all realized instances are in use, N1 returns busy immediately. Neither allocation nor reclamation waits for readers. Ref: RCU grace period; Disruptor; Lee & Messerschmitt balance equations. Check: no `while`/`sleep`/`yield` around allocation; `start()` refuses an arena smaller than inFlight × bytes.
+**H3. The hot flows, written out.**
+- Value ready (numerical completion, any thread): `tx_ring[link].push(send_index)` for
+  each declared send of the row (the indices are a start()-time contiguous range in
+  `send_record`, so this is `for i in first..<first+n: push(i)`) — then, and only then,
+  `presence[stamp_index] = 1` (release) and `fire_ring[w].push(use_range_index)` for the
+  local consumers. The wire is fed before any local bookkeeping.
+- TX spinner: `i = tx_ring.pop()`; `ibv_post_send(&send_record[i].wr)`; if the NIC refuses
+  (`ENOMEM/EAGAIN`, either sign) the index stays at the head and the spinner returns to
+  `ibv_poll_cq`; nothing else is read. On a send completion: `free_ring.push(send_record[wr_id].release_row)`.
+- RX spinner: `ibv_poll_cq`; on completion `fire_ring[w].push(wr_id)` where `w` is in
+  `receive_record[wr_id]` (one line); then `ibv_post_recv(&receive_record[wr_id].wr)` to
+  re-arm the same planned page for the next instance of that chunk (N1: the frame ring
+  guarantees the page's previous reader finished before the instance was resubmitted);
+  nothing else is read. Presence and pending are NOT touched by the RX spinner.
+- Worker: `x = fire_ring.pop()`; `r = receive_record[x]` (or the use range for a local
+  publication); `presence[r.stamp_index] = 1`; for `u in use_record[r.use_first ..< +r.use_count]`:
+  `if (--*u.pending_address == 0) launch(call_record[u.call])`. Three lines before a
+  launch: the record, the use range, the call record. The supplied function runs with
+  `call_record.operand_array` — pointers fixed at `start()`, no page-table resolution.
+- Cold pass (any thread, whenever it runs; typically the worker after its launches, or a
+  dedicated thread): drain `free_ring` → decrement reference counts → when a frame's last
+  reference goes, `frame_ring.push(f)` (N1); write `instance_record[f].status` on
+  completion or failure; lifecycle/event records for observers. None of these is read by
+  H1–H3 hot flows except `frame_ring` at `submit`.
+Check: the source audit produces this exact list per thread with file:line; any extra
+load or store on a hot flow is a regression.
 
-**X6. The partial tensor is plain data.** `TensorPart` and its C descriptor are POD: rank, logical section indices, bytes, layout and value flags. The descriptor holds no mutable runtime object; Mesh resolves backing through the canonical page table. A reduction contribution is the same type with `partial = true` (L5). Ref: DaCe memlet; ScaLAPACK descriptor. Check: `TensorPart` has no `class` reference field; `sizeof(struct mesh_section)` is a few words; descriptor copies neither retain readers nor require fixed backing addresses.
+**H4. Permission never costs a load.** There is no runtime decision "may I post / may I
+publish / may I consume" except the NIC's return value and a pending count reaching zero.
+Capacity is the ring size and the receive plan, fixed at `start()`; a full ring is a
+setup error reported by the plan printer (SDF balance), never a runtime branch. Check: the
+audit's conditional enumeration on the hot flows contains only: ring empty, verbs
+return, pending == 0.
 
-**X7. Supplied functions receive contiguous operand arrays and return.** `TensorFunction` is invoked with `(inputs: contiguous [operand], outputs: contiguous [operand], instance)` and must not read presence, wait, or allocate; its completion (return / Metal handler / Core ML handler) is the only thing that publishes. Ref: Pallas kernel refs; Active Messages handlers ("copies the data and increments the flag"). Check: I2; no mesh symbol other than the operand array is visible to the function body.
+**H5. Dependent loads are last in line.** Any load whose address depends on a prior
+load — reference-count words by row, lifecycle records, status words, observer state,
+Swift-side bindings — occurs after the hot stores of its event have been issued, on the
+cold pass; the hot store is never conditioned on it. Check: in every hot function the
+first store to a ring precedes every dependent load in program order (read the source);
+in a trace the doorbell time is independent of cold-pass backlog.
+
+**H6. Contiguity by construction, not by placement.** A transfer's chunks are posted in
+chunk order on one queue (D5) into `receive_record` pages that are consecutive
+(`first[t] + k·block`); the consumer's operand is therefore contiguous and
+`operand_array` holds its address at `start()`. No page-table lookup, permutation,
+descriptor, compact list, alias slot or asynchronous placement copy exists on any path.
+Interleaving from multiple peers is different queues, not shuffled pages. Check: the
+number of runtime page-table reads on every path is zero; `mesh_page[]` and any
+successor exist only in `start()`.
+
+**H7. Pass values (the regression thresholds).** Per event on the hot path: dependent
+loads ≤ 1 (the record), metadata lines ≤ 1 (TX/RX spinners) and ≤ 3 (worker to launch);
+trace on the pair: producer store → `ibv_post_send` doorbell ≤ 200 ns median (M5) and
+≤ 400 ns (M4) with the ring non-empty; CQ completion → `fire_ring` store ≤ 100 ns; RX
+re-post issued before the fire store's release completes is acceptable either order but
+both within 300 ns; worker `fire_ring` read → supplied-function launch ≤ 500 ns
+(CPU) / ≤ one command-buffer commit (Metal). The transport's own overhead above the wire
+(one-way link ≈ 5–8 µs + serialization) is therefore < 1 µs total per hop. Check: these
+numbers are printed by the trace tool from the same records (timestamps live in a cold
+observer ring, never on the hot path) and compared against the thresholds; a run above
+threshold fails its W row.
+
+**H8. Deletions this group requires** (from the ontology audit; each is a named
+structure whose only function was permission or resolution): `mesh_wire_tag` beyond the
+row/frame word the WR already carries; `buffer.definition`, `buffer.invocation`,
+`buffer.mapping` and `mesh_buffer_pages()`; `receive.definitions[]`, `receive_binding.rows[]`,
+`receive.active[]`; the notice levels (`mesh_notice_reader`, summary words) → `fire_ring`;
+`mesh_use` + `program[]` → `use_record`; `mesh_join`, `matches[]`, `join_free`,
+`join_rows`, `mesh_hash`, `mesh_call_match/join` → `call_record[frame]`; per-function
+`available[]`/`values[slot]` → `slot = frame`; `mesh_operand.{row,invocation,pages,…}` +
+`mesh_operand_address` → a pointer; `rearm` allocation → pre-built command buffers per
+frame; the Swift `copies/chunks/sources/targets` placement copy. Check: none of these
+symbols has a runtime reader; the library shrinks accordingly (I16).
 
 ### R — segmentation recovery (cable pulls, replugs, port moves; between NFEs only)
 
@@ -384,7 +503,7 @@ serialization of one tile's vector; `T_f` the split sublayer's leader-alone time
 
 **F10. Failure is per tile-instance and between NFEs.** Link loss concludes the tile-instances in flight over that link (`Result.link`) and nothing else; the program survives (R4); resumption is the next `submit`. Satisfied when: R7's cable pull shows only the in-flight tiles failing and the bridge pids unchanged.
 
-**X10. Event records: one line per event.** Signature: `struct mesh_send_record` (per transfer chunk, indexed by the TX ring slot / `wr_id`): `{page, bytes, queue, tag[4], release_row}`; `struct mesh_receive_record` (per posted RECV, indexed by `wr_id`): `{row, stamp_index, use_first, use_count, publish_last_chunk}`; `struct mesh_use_record` (per consumer edge, contiguous per row): `{call, pending_address}`; `struct mesh_call_record` (per (call, instance)): `{operand_array_address, worker, pending, output_rows[k]}`; `struct mesh_instance_record`: `{status_word, first_row, row_count}`. Each `_Alignas(32)`, `sizeof ≤ 32` (or ≤ 64 documented), filled at `start()`, read once per event, never mutated except the counters they name. The receive completion is: `rec = receive_records[wr_id]; store presence[rec.stamp_index]; for u in uses[rec.use_first ..< +rec.use_count]: if(!--*u.pending_address) enqueue(u.call)` — one metadata line, one contiguous use range, one countdown. The send is: `rec = send_records[slot]; ibv_post_send(&rec.wr)` with the WR and SGE pre-built inside the record. Ref: LMAX Disruptor (preallocated ring of fixed records), Monsoon token store (presence next to the operand), Kalia ATC'16 (cache-line-sized WQEs, doorbell batching), NCCL LL (flag co-located with data). Check: the ontology audit's dependent-load count per event equals 1 metadata record + payload on every runtime path; `sizeof` and alignment of every runtime record asserted at compile time; a trace shows completion→consume within the wire + one record load.
+**X10 (superseded by H2/H3; kept for the record shapes).** Signature: `struct mesh_send_record` (per transfer chunk, indexed by the TX ring slot / `wr_id`): `{page, bytes, queue, tag[4], release_row}`; `struct mesh_receive_record` (per posted RECV, indexed by `wr_id`): `{row, stamp_index, use_first, use_count, publish_last_chunk}`; `struct mesh_use_record` (per consumer edge, contiguous per row): `{call, pending_address}`; `struct mesh_call_record` (per (call, instance)): `{operand_array_address, worker, pending, output_rows[k]}`; `struct mesh_instance_record`: `{status_word, first_row, row_count}`. Each `_Alignas(32)`, `sizeof ≤ 32` (or ≤ 64 documented), filled at `start()`, read once per event, never mutated except the counters they name. The receive completion is: `rec = receive_records[wr_id]; store presence[rec.stamp_index]; for u in uses[rec.use_first ..< +rec.use_count]: if(!--*u.pending_address) enqueue(u.call)` — one metadata line, one contiguous use range, one countdown. The send is: `rec = send_records[slot]; ibv_post_send(&rec.wr)` with the WR and SGE pre-built inside the record. Ref: LMAX Disruptor (preallocated ring of fixed records), Monsoon token store (presence next to the operand), Kalia ATC'16 (cache-line-sized WQEs, doorbell batching), NCCL LL (flag co-located with data). Check: the ontology audit's dependent-load count per event equals 1 metadata record + payload on every runtime path; `sizeof` and alignment of every runtime record asserted at compile time; a trace shows completion→consume within the wire + one record load.
 
 ### E — engine integration and measurement
 
@@ -440,9 +559,9 @@ subset, never as "done".
 | 19o | one-shot prefill instances ≈ 1.43 GB each at 512 rows (SSA floor: ~41 MB of single-producer sections per layer × 35; cross-layer scratch reuse is UNSOUND in this library because `mesh_publish` presence is sticky and every consumer of a row is decremented on every publish — a shared section would fire layer L+1's reduce on layer L's publish and double-release) → the caller cannot reduce it; **the blocker is N1 in the library (row 15): instance/row re-arm so a process runs more than `count` ticks**; a 512-token request is 2 ticks, 8 requests at concurrency 2 = 8 instances, the 3.5 GiB bank cap holds 2 | ✗ **BLOCKS ROW 19 — assign N1 first** | lane Y `58759a9` (exact accounting printed for both graphs; FFN allGather now f16 hidden; segment C on own rows before the gather: rank 0 1.51 → 1.43 GB, rank 1 0.64 GB); lane X `prefill2/` |
 | 19p | follower realization | ◐ | lane Y `58759a9`: followers load only their FFN column slice (`DenseFFNWeights(neurons:)`), rank 1 FFN 3.34 → 0.49 GB, expected RSS 13.5 → ≈ 10.6 GB; still realized but never computed on rank 1: attention weights 0.80 GB (needs optional `LayerW` and no `DecodeParameters` on followers, `lm_engine.swift:1047`), PLE table 4.70 GB + embed 0.81 GB (each rank embeds itself; shipping per-layer inputs costs 9.2 MB per prefill instance), KV pool 0.68 GB (`LM_KV_POOL_PAGES` operational) |
 | 19q | engine bootstrap prints (`[engine] Mesh … bytes per instance`) go to buffered stdout under `serve.py` and are lost at SIGTERM; they must go to `FileHandle.standardError` (memory `kv_ssd_tier1_works_and_buffered_print_trap`) | ✓ | engine 19q commit: `FileHandle.standardError`; lane X: per-instance bytes had to be recomputed by hand |
-| 19r | post until refused: dedicated TX/RX post ready requests continuously, ending only at queue empty or native refusal | ✓ source | ABI 58 changes both `link_send_ready` and `link_receive` to drain their prepared rings until empty or the verbs return is nonzero. A refused request retains its position; progress continues across the other queues. Setup uses the same receive-post path. No software credit, completion threshold, clock or retry wait is added. This closes the one-post-per-pass defect; X10 event-record layout remains open. |
-| 19s | no allocation on the numerical worker after `start()`: `Mesh.swift` `rearm` creates a new `MTLCommandBuffer` after each native completion (X7/I17); prepare `inFlight` command buffers per binding at `start()` and rotate | ✗ | audit: `Mesh.swift:244` |
-| 19t | remove private RX row-stack allocation; realize frame/chunk destinations and lifetimes at setup | ◐ source indexing replaced; lifetime bound open | ABI 59 deletes `rows[--count]`, bindings/definitions and active heads. One eight-byte sequence/source-chunk tag indexes an aligned 32-byte destination record. ABI 60 stores the exact destination row, buffer pointer and canonical page-entry pointer in that record; completion stores the received page directly, with no row formula, descriptor lookup, allocation or occupancy check. The planned-row formula alone does not prove reuse safety; N1 must still realize disjoint live intervals. Physical pages remain indexed; logical order does not imply contiguity, so X3 materialization remains when required. |
+| 19r | post until refused: dedicated TX/RX post ready requests continuously, ending only at queue empty or native refusal | supplanted by H1–H8 (history: ✓ source) | ABI 58 changes both `link_send_ready` and `link_receive` to drain their prepared rings until empty or the verbs return is nonzero. A refused request retains its position; progress continues across the other queues. Setup uses the same receive-post path. No software credit, completion threshold, clock or retry wait is added. This closes the one-post-per-pass defect; X10 event-record layout remains open. |
+| 19s | no allocation on the numerical worker after `start()`: `Mesh.swift` `rearm` creates a new `MTLCommandBuffer` after each native completion (X7/I17); prepare `inFlight` command buffers per binding at `start()` and rotate | supplanted by H1–H8 (history: ✗) | audit: `Mesh.swift:244` |
+| 19t | remove private RX row-stack allocation; realize frame/chunk destinations and lifetimes at setup | supplanted by H1–H8 (history: ◐ source indexing replaced; lifetime bound open) | ABI 59 deletes `rows[--count]`, bindings/definitions and active heads. One eight-byte sequence/source-chunk tag indexes an aligned 32-byte destination record. ABI 60 stores the exact destination row, buffer pointer and canonical page-entry pointer in that record; completion stores the received page directly, with no row formula, descriptor lookup, allocation or occupancy check. The planned-row formula alone does not prove reuse safety; N1 must still realize disjoint live intervals. Physical pages remain indexed; logical order does not imply contiguity, so X3 materialization remains when required. |
 | E1c | segment granularity: three collective-delimited segments per layer | ✓ (unrun) | engine `da59157`: `segmentA/B/C` + the reduce `add`; command buffers per decode step rank 0 **483 → 168**, rank 1 441 → 161 (28 sliding × 5 + 7 full × 4/3); intermediates one page per instance per section at bind time; closures encode-and-return; 217 lines; re-measure row 19 |
 | E4 | rate-proportional placement generator + refusal | ✓ | engine `84af295` `tools/mesh/placement.py` (reads the model geometry; shares = rate_i/Σ; columns %4, heads %8 full / %2 sliding with the "share×heads ≥ 2" rule; prints f from the model and the Amdahl bound; refuses bound ≤ 1.0 (not Amdahl-positive) unless `--attribution`; refuses decode-class batch < 512 always); `report.py --compare --placement-dir` refuses column shares > 10 points from rate shares. **Finding:** E2B on this pair at r = 0.13 (Metal FFN on the M4) gives f = 0.691 → bound **1.086 → refused**; r ≥ 0.152 needed; the 09-08 M4-on-ANE FFN rate (15.5 vs 62 TFLOP/s, r ≈ 0.25) gives bound 1.16 and is the placement that clears I21 (row E6) |
 | E5 | prefill NFE through the same layer binding (`LM_MESH_PREFILL=1`) | ✓ (unrun) | engine `a966a00`: second Mesh graph at rows = B×MAX_Q_LEN with the same `bindMeshLayer` (+9 lines: prefill RoPE/KV-write/attention selected by `prefillQLen`), per-tile section = tokens + 19l OPEN records (270,512 B at B=8), every rank derives/embeds itself and writes KV only for its own heads (E2B full layers: rank 1 never touches them); tile submit sits in `tick()`'s `.prefill` branch before the single existing wait; solo path byte-identical when unset. **Constraint found:** `mesh_attach` admits ONE client per region (CAS on `memory->client`), and a `Mesh` holds one program, so the prefill graph needs a second region/bridge per node (`LM_MESH_PREFILL_REGION`) — see 29h |
@@ -471,18 +590,26 @@ subset, never as "done".
 | W6 | invocation path | ✓ source within realized input capacity | ABI 55 separates pending input joins from native slots. Countdown zero binds actual input rows; final output ownership returns input references and the native slot on its numerical worker. The retained-input bound guarantees a native slot for a complete input set, and the finite occurrence bound guarantees space in the join table. Metal replenishment follows completed native execution; Core ML reuses prepared providers and output options. No function-presence scan, occupancy query, operation wait or invocation-time operand allocation. Matching has finite metadata-probe cost. W2's cross-rank receive bound and N1 admission remain open; this row does not claim them. Library source: 2,406 → 2,617 lines across all maintained Swift/C/headers; documentation counted separately. [Derivation](pages-and-functions.md#native-slot-return). |
 | W7 | collective compositions declaration-only | ✓ | audited f1ae04a: all conditionals in `send…allReduce` (Mesh.swift:324-409) run before `start()`; no runtime code; [audit](w-audit-2026-09-15.md#w7) |
 | W8 | caller bindings encode-and-return | ◐ | The removed prefill wait remains forbidden; `lm_engine.swift:1909` still inserts `encodeWaitForEvent(graph.meshStepEvent, ...)` before `encodeDecodeOutput`, whose operand dependency must be declared through Mesh. Gram bindings encode or execute supplied numerical functions and return. The engine `encAttn` binding still reaches the host `attentionSplits` scan; prefill must publish declared operands consumed by decode. Indexed `MeshBindings` view selection is permitted. |
-| 19a | X1 dense presence and notifications | ✓ source | `bf01584` (ABI 50) stores presence as one 32-bit word per logical row at a realized shared-memory offset; `mesh_publish` performs one release store. It removes packed presence and its read-modify-write. All numerical/RX/constant paths use it; setup reads constants, and only explicit sync polls it on the host. ABI 48 notification sets/countdowns and ABI 49 free events remain separate. X9's public native binding and resident-consumer demonstration remain open. [Proof](pages-and-functions.md#publication-notifications). |
-| 19b | X2 countdown firing | ✓ | `mesh_call_progress` decrements the published invocation's pending count and directly submits the supplied function at zero; the submission-only wrapper is removed at ABI 52. No runtime presence predicate except `mesh_sync_on_remote_fill` (I11). |
+| H1 | index rings are the only hot-path interface (three kinds; one store per hand-off) | ✗ | notice levels + returns words + summary bitmaps today |
+| H2 | 32-byte records indexed by the ring integer; WR/SGE prebuilt inside; `_Static_assert` | ✗ | no runtime struct aligned or asserted; WRs built per post |
+| H3 | the four hot flows exactly as listed (value ready / TX / RX / worker) and the cold pass | ✗ | current: publish→post 10 dependent loads, completion→first byte 21 |
+| H4 | permission never costs a load (ring empty, verbs return, pending == 0 only) | ◐ | X4 deleted the software gates; the one-post-per-pass `if` remains (19r) |
+| H5 | dependent loads last in line (hot stores precede them in every hot function) | ✗ | refcount `fetch_sub`, invocation loads and tag stores precede the post today |
+| H6 | contiguity by construction; zero runtime page-table reads | ✗ | `mapping` descriptor on every path (ABI 58); arrival-assigned rows |
+| H7 | pass values measured by the trace tool (≤ 200 ns store→doorbell M5, ≤ 100 ns CQ→ring, ≤ 3 lines to launch) | ✗ | no trace tool on the records yet |
+| H8 | the named deletions | ✗ | audit inventory items 1–14, 19 |
+| 19a | X1 dense presence and notifications | supplanted by H1–H8 (history: ✓ source) | `bf01584` (ABI 50) stores presence as one 32-bit word per logical row at a realized shared-memory offset; `mesh_publish` performs one release store. It removes packed presence and its read-modify-write. All numerical/RX/constant paths use it; setup reads constants, and only explicit sync polls it on the host. ABI 48 notification sets/countdowns and ABI 49 free events remain separate. X9's public native binding and resident-consumer demonstration remain open. [Proof](pages-and-functions.md#publication-notifications). |
+| 19b | X2 countdown firing | supplanted by H1–H8 (history: ✓) | `mesh_call_progress` decrements the published invocation's pending count and directly submits the supplied function at zero; the submission-only wrapper is removed at ABI 52. No runtime presence predicate except `mesh_sync_on_remote_fill` (I11). |
 | 19c0 | X3a indexed matching for independent producers | ◐ source | `d477c6d` (ABI 51) removes whole-section posting order: per-link/per-queue targets and canonical page assignment handle interleaved chunks; TX rotates after each accepted chunk. ABI 52 also permits different native slot orders at producer and consumer functions; invocation identity follows the value through the same transport. Protocol 57 replaces source-chunk occurrence cursors with explicit definition/head/chunk tags and per-queue indexed matching. The existing Gram chain has a four-rank ring configuration with two peers per node. [Block addressing](pages-and-functions.md#block-addressing) and [invocation identity](pages-and-functions.md#invocation-identity-and-storage-reuse) give the source derivations. N1 reuse and a multi-peer runtime demonstration remain open. |
-| 19c | X3 canonical page-backed operands and asynchronous layout | ✓ source | `d477c6d` (ABI 51) separates dependency rows from native operand views. Single-chunk inputs and forwarding use received pages directly. Multi-chunk contiguous inputs use AOT-allocated canonical placement outputs retained through native completion; Metal blits share the consuming command buffer, CPU/Core ML copies run on the numerical worker. Repeated operands within a call share placement. No caller shape/verb changes, invocation-time operand allocation, RDMA-thread layout work, extra command buffer or completion hop. Actual copy bytes and per-consumer storage are documented, not labelled zero-copy. Existing callers and engine Mesh integration build; no runtime or performance evidence is claimed. N1 reuse, T3 striping and X9 residency remain separate open requirements. |
+| 19c | X3 canonical page-backed operands and asynchronous layout | supplanted by H1–H8 (history: ✓ source) | `d477c6d` (ABI 51) separates dependency rows from native operand views. Single-chunk inputs and forwarding use received pages directly. Multi-chunk contiguous inputs use AOT-allocated canonical placement outputs retained through native completion; Metal blits share the consuming command buffer, CPU/Core ML copies run on the numerical worker. Repeated operands within a call share placement. No caller shape/verb changes, invocation-time operand allocation, RDMA-thread layout work, extra command buffer or completion hop. Actual copy bytes and per-consumer storage are documented, not labelled zero-copy. Existing callers and engine Mesh integration build; no runtime or performance evidence is claimed. N1 reuse, T3 striping and X9 residency remain separate open requirements. |
 | 19c1 | X3 indexed operands avoid transport-induced materialization: `mesh_operand.load(at:as:)` selects a logical scalar through canonical backing; only `inputViews` and prediction bindings request contiguous input storage | ✓ source | Mesh `80bebdd`, engine `91ddbb6`. Raw functions allocate no placement sections. The existing indexed-gather caller reads remote values and indices through canonical mappings; its configurable four-rank ring sends 16,809,984-byte tables from rank 0 and indices from rank 2 to consumers on ranks 1 and 3. No one-peer branch or transport-size argument. Native BLAS, Metal and Core ML callers retain explicit view factories; engine decode/prefill host parsers use the same factory. Strict C compilation, Mesh module, all four existing callers and engine Mesh integration build. The indexed change adds 23 maintained library lines and 16 bytes per operand; the full working library is 2,668 lines including the separate unfinished R2 work. No runtime, device-resident indexing or speedup claim; N1 and X9 remain open. |
-| 19d | X4 hardware-only capacity gate | ◐ (admission implemented; W2/W3 open) | `38adbe6`: `mesh_queue.pending/capacity` and both software gates deleted; one completion poll and one available post per progress step; native refusal preserves the cursor; initial receives fill before traffic; only per-request fit checked at setup; bridge builds; source bodies and remaining defects in [audit](w-audit-2026-09-15.md#w3) |
-| 19e | X5 reclamation as free-list event; arena bound at start() | ◐ | `82b9b98` (ABI 49) removes `mesh_buffer_enqueue`, `reclaim_head`, linked/deferred entries, `mesh_collect`, `link_collect` and the collector thread. Final reference publishes one section free-pool bit; setup consumes backing, and device-close retirement discharges abandoned positive counts. This is an unordered section bitmap, not the required per-worker SPSC instance rings. Those rings, inFlight × bytes bound, N1 instance reuse and complete R2 cancellation remain open; ABI 53 implements transport return at N1t and ABI 54 native slot return at N1r. `Mesh.result` retains its one-load status (N2). |
-| 19f | X6 TensorPart is POD | ◐ (descriptor and X3 implemented; W open) | `5203b2b`: primitive fields and an optional 32-byte C `mesh_section`; setup ownership ends after binding, declared uses own actual accesses. Logical indices intentionally resolve through the canonical page table. X3 layout is implemented at ABI 51; W5 instance reuse remains open. |
-| 19g | X7 functions get contiguous operand arrays | ✓ (verify) | `MeshOperands` |
-| 19m | X9 device-readable stamps; resident-kernel consumers (the only way condition 1 of FFN-only TP scale-out holds) | ◐ (storage prerequisite only) | ABI 50 supplies shared 32-bit presence words. `TensorPart.stamp`, its native binding, resident-kernel caller, and measured arrival-to-consumption latency remain unimplemented. No GPU visibility or performance claim follows from the CPU word store alone. |
-| 19u | X10 one-line event records on every runtime path (I22) | ✗ **MEASURED REGRESSION** | ontology audit 2026-09-16 (`f1ae04a` → `60efd51`): final audit (through ABI 58 `87358c6`): dependent-load depth publish→`ibv_post_send` **8 → 10**, `ibv_poll_cq`→first byte **14 → 21**, metadata lines per event 8 → 12 and ≈25 → ≈43+; ABI 58's `mesh_buffer.mapping` compact-page-list descriptor added **+1 hop to all four events** (every page lookup is now row → descriptor → list where the baseline read `mesh_page[row+k]` directly); no runtime struct is aligned or size-asserted (`mesh_buffer` 56 B, `mesh_operand` 56 B, `mesh_call` 40 B straddle 128-B lines in arrays; `mesh_function` 208 B spans 2–3 lines on the fire path; `hdr`'s runtime atomics share lines with read-only offsets), plus a full operand copy before the first read for contiguous backends (Mesh.swift:228-240, 271-280). Responsible, by cost: (1) invocation→join open-addressing hash with double probe and backshift deletion (mesh-call.c:171-213, +2–4); (2) RX chain tag `definition` → `definitions[]` → `bindings[]` → `rows[--count]` pop → `active[]` (mesh-flow.c:212-220, +2; = 19t); (3) `buffer->definition` as CSR key + `program[]` behind `mesh_use` (mesh-call.c:248-250, +2); (4) per-function `available[]` slot ring (+1); (5) notice-level exchanges (+1 contended RMW per level per thread); (6) `buffer->invocation` loaded to form the presence stamp (+1 on both publishers). Targets: publish→post ≤ 4 dependent loads (operand line → presence store → use range → send record), completion→first byte ≤ 5 (wr_id → receive record → presence/use range → pending → operand address); records ≤ 32 B, `_Static_assert`ed |
-| 19v | publish-side stamp supplied by completion; row-indexed consumer ranges; consumer records contain prepared function addresses | ✓ source | `8e3edbb`: Native completion and RX pass their existing stamp to `mesh_publish`; constants pass one. Dispatch indexes CSR by row and reads the function address directly from its aligned 32-byte consumer record, also carrying the setup-resolved shared-input classification. The `program` pointer array is deleted. The three specified dependent reads are removed; [source comparison and storage cost](w-audit-2026-09-15.md#w2--receive-path). Hash joins, RX row planning and the remaining X10 records are still open. Strict C diagnostics, Mesh callers and engine integration build; no runtime-latency claim. |
+| 19d | X4 hardware-only capacity gate | supplanted by H1–H8 (history: ◐ (admission implemented; W2/W3 open)) | `38adbe6`: `mesh_queue.pending/capacity` and both software gates deleted; one completion poll and one available post per progress step; native refusal preserves the cursor; initial receives fill before traffic; only per-request fit checked at setup; bridge builds; source bodies and remaining defects in [audit](w-audit-2026-09-15.md#w3) |
+| 19e | X5 reclamation as free-list event; arena bound at start() | supplanted by H1–H8 (history: ◐) | `82b9b98` (ABI 49) removes `mesh_buffer_enqueue`, `reclaim_head`, linked/deferred entries, `mesh_collect`, `link_collect` and the collector thread. Final reference publishes one section free-pool bit; setup consumes backing, and device-close retirement discharges abandoned positive counts. This is an unordered section bitmap, not the required per-worker SPSC instance rings. Those rings, inFlight × bytes bound, N1 instance reuse and complete R2 cancellation remain open; ABI 53 implements transport return at N1t and ABI 54 native slot return at N1r. `Mesh.result` retains its one-load status (N2). |
+| 19f | X6 TensorPart is POD | supplanted by H1–H8 (history: ◐ (descriptor and X3 implemented; W open)) | `5203b2b`: primitive fields and an optional 32-byte C `mesh_section`; setup ownership ends after binding, declared uses own actual accesses. Logical indices intentionally resolve through the canonical page table. X3 layout is implemented at ABI 51; W5 instance reuse remains open. |
+| 19g | X7 functions get contiguous operand arrays | supplanted by H1–H8 (history: ✓ (verify)) | `MeshOperands` |
+| 19m | X9 device-readable stamps; resident-kernel consumers (the only way condition 1 of FFN-only TP scale-out holds) | supplanted by H1–H8 (history: ◐ (storage prerequisite only)) | ABI 50 supplies shared 32-bit presence words. `TensorPart.stamp`, its native binding, resident-kernel caller, and measured arrival-to-consumption latency remain unimplemented. No GPU visibility or performance claim follows from the CPU word store alone. |
+| 19u | X10 one-line event records on every runtime path (I22) | supplanted by H1–H8 (history: ✗ **MEASURED REGRESSION**) | ontology audit 2026-09-16 (`f1ae04a` → `60efd51`): final audit (through ABI 58 `87358c6`): dependent-load depth publish→`ibv_post_send` **8 → 10**, `ibv_poll_cq`→first byte **14 → 21**, metadata lines per event 8 → 12 and ≈25 → ≈43+; ABI 58's `mesh_buffer.mapping` compact-page-list descriptor added **+1 hop to all four events** (every page lookup is now row → descriptor → list where the baseline read `mesh_page[row+k]` directly); no runtime struct is aligned or size-asserted (`mesh_buffer` 56 B, `mesh_operand` 56 B, `mesh_call` 40 B straddle 128-B lines in arrays; `mesh_function` 208 B spans 2–3 lines on the fire path; `hdr`'s runtime atomics share lines with read-only offsets), plus a full operand copy before the first read for contiguous backends (Mesh.swift:228-240, 271-280). Responsible, by cost: (1) invocation→join open-addressing hash with double probe and backshift deletion (mesh-call.c:171-213, +2–4); (2) RX chain tag `definition` → `definitions[]` → `bindings[]` → `rows[--count]` pop → `active[]` (mesh-flow.c:212-220, +2; = 19t); (3) `buffer->definition` as CSR key + `program[]` behind `mesh_use` (mesh-call.c:248-250, +2); (4) per-function `available[]` slot ring (+1); (5) notice-level exchanges (+1 contended RMW per level per thread); (6) `buffer->invocation` loaded to form the presence stamp (+1 on both publishers). Targets: publish→post ≤ 4 dependent loads (operand line → presence store → use range → send record), completion→first byte ≤ 5 (wr_id → receive record → presence/use range → pending → operand address); records ≤ 32 B, `_Static_assert`ed |
+| 19v | publish-side stamp supplied by completion; row-indexed consumer ranges; consumer records contain prepared function addresses | supplanted by H1–H8 (history: ✓ source) | `8e3edbb`: Native completion and RX pass their existing stamp to `mesh_publish`; constants pass one. Dispatch indexes CSR by row and reads the function address directly from its aligned 32-byte consumer record, also carrying the setup-resolved shared-input classification. The `program` pointer array is deleted. The three specified dependent reads are removed; [source comparison and storage cost](w-audit-2026-09-15.md#w2--receive-path). Hash joins, RX row planning and the remaining X10 records are still open. Strict C diagnostics, Mesh callers and engine integration build; no runtime-latency claim. |
 | 20 | G1 contraction/Gram as the same calls | ◐ (source composition complete; W1–W6 open) | `c30fe6f` `examples/gram-chain.swift` (108 lines): one supplied-function composition for `ZA`, `RᵀH`, `RU`, `YW`; direct Gram-to-down and residual-to-next-block operands; unequal rectangular tiles, explicit owners, configured depth; `make -C rdma gram-chain` builds; unrun, no performance claim; [algebra and flow](function-chain.md#g1-gram-and-projection-chain) |
 | 21 | G2 indices as data (caller pattern) | ✓ | `e47f669` `examples/indexed-gather.swift` 120 lines: index sections are ordinary `TensorPart`s (produced locally or received by `send`); routed expert = `map` over `[x, w0, w1, expertIdx]`, neighbourhood sum = `map` over `[table, idx]`; selection inside the supplied function; firing by X2 countdown; library delta 0; no new symbol |
 | 22 | G3 two callers | ✗ | — |
@@ -504,7 +631,7 @@ subset, never as "done".
 | 29g | R7 cable-pull/replug demonstration with time-to-repair | ✗ | — |
 | 29h | one client per region is a library defect for any caller with more than one program (E5 needs decode + prefill graphs; T7 needs N users): the bridge serves N attached clients, each with its own program, notice banks and lease; `mesh_attach` stops CAS-ing a single `client` word | ✗ (workaround deployed) | lane V 2026-09-17 02:44Z: `/mesh1` bridges up on both nodes at ABI 47 (laptop `~/.local/mesh/bin/mesh-flow` pid 67703, Mini `/usr/local/mesh/bin/mesh-flow` pid 15575; arena 131072 pages = 2.7 GB; second link entry with its own control service `18520` — the bridge binds and dials `provider->service`, so a second bridge on one link needs its own port), paired on the first dial, no Local Network event with the stable identifier (P3 confirmed); `/mesh0` pids unchanged; E5 finding; today's workaround = a second bridge per node on a second region: `MESH_CONF=<conf with region=/mesh1> bin/mesh-bridge.sh start` (launchd label derives from the region, `io.mesh.bridge.mesh1`; QP budget: +qps per link per bridge) |
 
-Rows W1–W8 are the shared waitless/guardless feature: every other row's ✓ depends on them staying ✓ (I18). Rows 19a–19g are the typings that make rows 13–19 mean streaming at the cache line rather than in prose; they are assigned before row 20. Rows 20–29 are required for the 4× M5 Ultra + 4× M4 Pro deployment and for the solver
+Rows H1–H8 are the transport as the machine executes it and supplant X1–X7/X10 and 19a–19v; W1–W8 are the shared waitless/guardless feature: every other row's ✓ depends on them staying ✓ (I18). Rows 19a–19g are the typings that make rows 13–19 mean streaming at the cache line rather than in prose; they are assigned before row 20. Rows 20–29 are required for the 4× M5 Ultra + 4× M4 Pro deployment and for the solver
 caller; they are not optional and not "later" — they are after row 19. Rows whose files
 are disjoint may be worked in parallel worktrees: {14,15,16} share `Mesh.swift`/`mesh-call.c`;
 {23,24} share `mesh-flow.c`; {17},{18},{26} are independent; {13},{19} need the link
