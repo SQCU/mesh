@@ -34,6 +34,10 @@ Operator, 2026-09-15, verbatim:
 > so are we allowed to implement useful persistent kernels for linear algebra for this
 > sort of topic to satisfy [the crossing is the wire, not a host hop]?
 
+> okay, so if the problem structure is so straightforward we can describe this as a
+> list of requirements with firm typelike signatures and constraints describing their
+> successful satisfaction
+
 This document is the goal. It is handed verbatim to a Codex session, a Claude session,
 or a Claude that launches `codex` as a subagent. Every row is a deliverable with a
 signature, a reference to cross-implement from, and a check readable from source; the
@@ -271,6 +275,33 @@ re-establish who they are and what they will do; nothing inside an NFE is recove
 
 **X9. Presence stamps are device-readable; consumers may be resident kernels.** Signature: `TensorPart.stamp` — the address (in the same shared mapping the GPU sees via `bytesNoCopy`) of the section's per-instance presence word; the bridge/worker writes it with a release store after the data is visible (X1). A supplied `TensorFunction.metal` may encode one command buffer for a whole local step and wait *inside the kernel* on the stamps of the sections it consumes (device-scope atomic load loop), or use a Metal 4 queue-side `waitForEvent` that the RX thread signals — either way the dependent work is resident before the tile lands and the crossing costs the wire only. The in-kernel wait is the X2 firing rule executed on the device: presence only, no data-dependent branch, no retry; the GPU watchdog is the fail-stop (`Result.function` on timeout, I12/I19). Ref: MLX `fence_wait` (`MLX_METAL_FAST_SYNCH`); NCCL LL flags; MSCCL++ device semaphores; Gupta et al. 2012 persistent threads; Anukari (spin to keep the Apple GPU clocked). Check: `TensorPart.stamp` exists and `mesh_publish` stores it release-ordered after the payload; a caller example encodes one command buffer per step with in-kernel waits and completes with command buffers per step = O(segments), not O(tiles) or O(layers); measured µs-class arrival-to-consume on the pair.
 
+### F — the scale-out structure as types and satisfaction constraints
+
+Notation: `R` replicated, `S(slice)` sliced over coordinates, `P(term)` a partial-sum
+term; `N` nodes with rates `r_i` (leader = 1); `K` row tiles; `c` = wire latency +
+serialization of one tile's vector; `T_f` the split sublayer's leader-alone time;
+`T_rest` the unsplit remainder per layer.
+
+**F1. Layout typing of a chain.** `Op : (domain: Layout) -> (codomain: Layout)`. A linear map's layouts are fixed by its cut: `cut(W, columns) : R -> S`, `cut(W, rows) : S -> P`; a pointwise map is `S -> S` or `R -> R` and has no `P` domain; a norm/softmax/anything reading across coordinates has domain `R`. A program is well-typed iff each op's domain equals its producer's codomain, and the only layout-changing ops are `reduceScatter : P -> S` and `allGather : S -> R`. Satisfied when: the binder rejects, at `start()`, any `P`-typed operand bound to an op whose domain is not `P` (L5 is the `P -> nonlinearity` half; F1 adds `S`/`R` mismatch) — no runtime check exists.
+
+**F2. Crossing count is a static function of the chain.** `crossings(program) = |{ P -> R transitions on the critical path }|`. FFN-only TP: exactly 1 per layer (the norm after the residual); Megatron: 2. Satisfied when: `bounds()` reports `crossings` from the typed chain and the number equals the count of `reduceScatter` calls on the critical path; no crossing is introduced by a mechanism (a host hop is not a crossing, it is a defect).
+
+**F3. Tile pipeline.** `tiles : [Range<Int>]` a ragged partition of the rows; every op instance and every transfer edge is per tile; a dependency edge between tiles `t ≠ t'` exists only where the arithmetic reads across rows (attention over one sequence at prefill; none at decode). Satisfied when: the dependency graph produced at `start()` has no inter-tile edge except those, so layer `L+1` on tile `t` may run while tile `t+1` of layer `L` is in the reduce; exposed crossing per layer is `≤ c/K + one tile's compute` in the trace.
+
+**F4. Bytes per node per layer are constant in N.** `bytes_i = 2·(N−1)/N · |vector| · rows · sizeof(elem)` via reduce-scatter + all-gather (Patarasuk–Yuan); never `(N−1)·|vector|` (send-my-partial-to-all). Satisfied when: the transfer plan at `start()` sums to that per node and the bridge's per-link byte counters agree after a run.
+
+**F5. Command buffers per step per node are constant in N and K.** `cb(step) ≤ segments_per_layer × layers` today (E1c: 3), and `cb(step) = O(1)` with resident consumers (X9: one command buffer per step with in-kernel stamp waits). Satisfied when: the count is printed at `start()` and does not change with `LM_MESH_SIZE` or the tile count; no completion-handler commit sits between a tile's arrival and its consumption.
+
+**F6. Placement is rate-proportional and bound-checked.** `share_i = r_i / Σ r`; `columns_i = round4(share_i · W)`; heads by the grouping rule; `bound(N) = 1 / ((1−f) + f / Σ r)`; run only if `bound ≥ 1.1`. Satisfied when: `placement.py` writes the files and prints the bound, and `report.py --compare` refuses shares off the rates (E4 ✓).
+
+**F7. The exposed crossing has no host term.** `c_exposed = latency_base + tile_bytes / bandwidth + hops · hop_latency`, all wire; the consumer is resident (X9) or already committed; no `waitUntilCompleted`, completion-handler commit, or shared-event wait between arrival and use. Satisfied when: the trace shows arrival-to-first-consuming-kernel-start ≤ 2× the wire estimate.
+
+**F8. Asymptote.** `T(N) = T_rest + T_f / Σ r + c_exposed / K` per layer; `T(N+1) ≤ T(N)` always (diminishing, never negative); `T(∞) = T_rest + c_exposed / K`. Satisfied when: measured `T(2)` and `T(4)` on the fleet are within 15% of the formula with the rates from `report.py`, and no measured `T(N+1) > T(N)`.
+
+**F9. Memory per node is constant in N.** `arena_i = instances × Σ_sections bytes(tile)`; weights: the split sublayer's slice (`share_i`) plus the replicated remainder. Satisfied when: `start()` prints the arena and it is independent of `N`; the registered span fits the 4 GiB bank rule.
+
+**F10. Failure is per tile-instance and between NFEs.** Link loss concludes the tile-instances in flight over that link (`Result.link`) and nothing else; the program survives (R4); resumption is the next `submit`. Satisfied when: R7's cable pull shows only the in-flight tiles failing and the bridge pids unchanged.
+
 ### E — engine integration and measurement
 
 **E1. The serving step calls Mesh at the Megatron points.** in `metal-microbench`, one file ≤ 300 lines: a Gemma-4 layer where `o_proj` and `down_proj` partials go `call(dot) → reduceScatter(using: add) → call(norm+residual) → allGather`; every other op is `call` on the rank's head/column range with existing kernels bound as `TensorFunction.metal`. Ref: Megatron f/g; Korthikanti 2022; MLX `shard_linear`; Pallas collective matmul (reuse the local kernel). Check: `grep -c "reduceScatter\|allGather" <file>` = 2 × layers; no kernel arithmetic rewritten; solo and n-node are the same binary.
@@ -325,6 +356,16 @@ subset, never as "done".
 | E4 | rate-proportional placement generator + refusal | ✓ | engine `84af295` `tools/mesh/placement.py` (reads the model geometry; shares = rate_i/Σ; columns %4, heads %8 full / %2 sliding with the "share×heads ≥ 2" rule; prints f from the model and the Amdahl bound; refuses bound < 1.1 unless `--attribution`; refuses decode-class batch < 512 always); `report.py --compare --placement-dir` refuses column shares > 10 points from rate shares. **Finding:** E2B on this pair at r = 0.13 (Metal FFN on the M4) gives f = 0.691 → bound **1.086 → refused**; r ≥ 0.152 needed; the 09-08 M4-on-ANE FFN rate (15.5 vs 62 TFLOP/s, r ≈ 0.25) gives bound 1.16 and is the placement that clears I21 (row E6) |
 | E5 | prefill NFE through the same layer binding (`LM_MESH_PREFILL`), the legitimate shape for T(2) | ✗ | — |
 | E6 | the M4's FFN share runs on Core ML/ANE (`TensorFunction.prediction`, the binding Mesh already has; the 1×1-conv ML Program compiled from the FFN weight slice as `docs/soc_compute_backends.md` describes, per-layer, row-tiled 128) so r ≈ 0.25 at ≥ 512 rows and the E2B bound is 1.16 ≥ 1.1 — the only placement on this pair that is a legitimacy test; caller side only (I7) | ✗ | `placement.py --ratio 0.25 --batch 512` → shares 0.80/0.20, bound 1.16; needs a per-layer compiled FFN slice for the M4 |
+| F1 | layout typing R/S/P checked at start() (extends L5) | ◐ | L5 covers P→nonlinearity; S/R mismatch unchecked |
+| F2 | crossings as a static function; bounds() reports it | ✗ | — |
+| F3 | ragged row-tile pipeline with per-tile edges only | ◐ | sections are per instance; row tiles within an instance not yet a first-class partition in the engine binding |
+| F4 | RS+AG bytes constant in N (plan + counters agree) | ◐ | `reduceScatter`/`allGather` compose per section; per-link byte counters absent (T3 branch has them) |
+| F5 | command buffers per step constant in N and K; O(1) with X9 | ◐ | E1c: 3 per layer; X9 ✗ |
+| F6 | rate-proportional, bound-checked placement | ✓ | E4 `84af295` |
+| F7 | exposed crossing has no host term | ✗ | needs X9 (19m) |
+| F8 | asymptote T(N) verified at N=2 and N=4 within 15% | ✗ | fleet not yet delivered; N=2 legitimacy run pending E5/E6 |
+| F9 | arena constant in N; printed at start() | ◐ | N1 prints bytes per instance; N-independence not yet demonstrated |
+| F10 | failure per tile-instance, between NFEs | ✗ | R7 |
 | 19k | X8 mesh-side: consecutive `call`s on the same worker whose inputs are all local (no transport edge between them) are encoded into one command buffer at `start()` (Pallas pipelining / MLX ops-per-buffer batching), so caller granularity is not the only lever; presence firing stays per published section | ✗ | Mesh.swift `MeshInvocation` — live session's file |
 | 19l | per-step host staging in E3 (`.cpu` root call memcpy of `input_tokens/positions/k_len/block_table/masks` ≈1.3 MiB + prompt 271 KiB, then `broadcast`) is the engine's own X3 violation (`event_fired_not_scanned` memory: "per-step host staging is the same defect"); step-indexed values are planned constants written once; only the sampled token moves per step | ✓ (unrun) | engine `59f3876`+`5bf5862`: step section 1,311,024 → 1,024 bytes; only `tokens[B]` + `rowIndex[B]` per step; OPEN/GROW records only on session open / page allocation (events); follower derives positions/k_len/num_pages/kv_write_skip/block_table/AR masks from the records with the same host functions rank 0 uses; one 1 KiB root copy + one B·4 token copy per step |
 | 19h | receive-fill refusal is the gate, not a fatal: `rdma/mesh-flow.c:136` (`d61e503`) `if(error!=ENOMEM && error!=EAGAIN){…return -1;}` — `ibv_post_recv` on this stack returns **negative** errno (`-12`), so the initial receive fill of every link ends in `MESH_STOPPED code -12` and ABI 47 bridges cannot pair for any client (ABI 43 paired for the same clients earlier the same day). Fix: treat `±ENOMEM/±EAGAIN` from `link_post` as "stop posting, resume on the next completion" (X4's native refusal), never as `link_error` | ✓ | `link_post` now returns `|errno|` (this stack's `ibv_post_*` return negative errno), so `:136`/`:177` see `ENOMEM`/`EAGAIN` and treat the refusal as the end of the fill / the gate; re-pair verified 2026-09-16 18:1x: bridges `7c7fee4` ABI 47 on both nodes, `paired_links:1 phase:2` under a client (`mesh-stat` laptop pid 87957 / Mini pid 16592); lane K: `output_data/mesh_e3/bridge_laptop.log`, `mini/bridge_mini.log`, `run.sh` attempt ledger |
