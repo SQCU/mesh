@@ -33,6 +33,13 @@ from 40 to 56 bytes: one mapping pointer and two geometry integers. The first-pa
 Local outputs remain contiguous and retain their direct pointer interface.
 The indexed scalar API describes logical elements; neither its indices nor the
 caller function changes when the bridge's transport extent changes.
+ABI 58 stores a setup-realized page-list offset in each buffer descriptor and
+uses consecutive chunk entries. `mesh_buffer_pages` resolves that canonical list;
+`mesh_row_page` selects a chunk for the existing native placement paths. Logical
+metadata extent is independent of payload-page extent, and retain/release acts
+on one buffer identity. The [compact-list derivation](pages-and-functions.md#prepared-compact-page-lists)
+gives the address algebra, allocation counts and descriptor cost. Neither the
+indexed scalar helper nor receive placement performs packing or allocation.
 George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
 (1960): reference counting. The user explicitly requested automatic ownership
 release and background pool return, without caller free/done calls.
@@ -221,7 +228,7 @@ finite implementation from unfinished N1 reuse.
 The numerical consumer relation now has one entry per declared function/input
 use, independent of resident slot count. A buffer's `definition` indexes that
 immutable relation; its row and invocation continue to identify the actual value.
-The field occupies the existing alignment gap in the 48-byte buffer descriptor.
+Protocol 57 placed the field in the existing alignment gap of its 48-byte buffer descriptor; ABI 58 adds the mapping offset described above.
 For E varying/root uses, S shared uses and V resident slots, target storage drops
 from 8(VE+S) to 8(E+S) bytes. Per-worker row-offset arrays remain unchanged.
 Publication still uses the descriptor's worker bitmask; numerical dispatch loads

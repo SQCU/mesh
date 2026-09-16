@@ -176,7 +176,7 @@ static int link_send_ready(struct mesh_link *link,uint32_t q){
   if(ready->head!=ready->tail){
     uint32_t edge=link->send_ready[ready->first+(ready->head&ready->mask)];
     struct mesh_send_edge *source=&link->send_edges[edge];
-    uint32_t page=atomic_load_explicit(&mesh_page(link->M)[source->row+source->offset*link->M->block],memory_order_acquire);
+    uint32_t page=atomic_load_explicit(&mesh_buffer_pages(link->M,source->row)[source->offset],memory_order_acquire);
     struct mesh_wire_tag *tag=mesh_tag(link->M,page);
     struct mesh_buffer *buffer=&mesh_buffers(link->M)[source->row];
     atomic_store_explicit(&tag->invocation,buffer->invocation,memory_order_relaxed);
@@ -214,11 +214,11 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
           receive->active[source]=binding->rows[--binding->count];
           struct mesh_buffer *buffer=&mesh_buffers(m)[receive->active[source]];
           atomic_fetch_add_explicit(&buffer->ownership,binding->references,memory_order_relaxed);
-          atomic_store_explicit(&mesh_presence(m)[buffer->first],0,memory_order_relaxed);
+          atomic_store_explicit(&mesh_presence(m)[receive->active[source]],0,memory_order_relaxed);
           buffer->invocation=atomic_load_explicit(&tag->invocation,memory_order_relaxed);
         }
         uint32_t row=receive->active[source];
-        atomic_store_explicit(&mesh_page(m)[row+chunk*m->block],page,memory_order_relaxed);
+        atomic_store_explicit(&mesh_buffer_pages(m,row)[chunk],page,memory_order_relaxed);
         if(chunk+1==binding->chunks){
           mesh_publish(m,row);
           if(binding->shared)mesh_event_push(m,link->client,1+MESH_COMPUTE_THREADS+2*link->index+MESH_RECEIVE,
@@ -229,7 +229,7 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
           struct mesh_send_edge *source=&link->send_edges[(uint32_t)wc->wr_id];
           uint64_t invocation=mesh_buffers(m)[source->row].invocation;
           source->offset=0;
-          mesh_buffer_release(m,source->row,1);
+          mesh_buffer_release(m,source->row);
           mesh_event_push(m,link->client,1+MESH_COMPUTE_THREADS+2*link->index+MESH_SEND,
             (struct mesh_event){0,invocation,source->shared?MESH_EVENT_SHARED:MESH_EVENT_RETURN});
         }
@@ -261,8 +261,8 @@ static int link_returns(struct mesh_link *link,uint32_t q){
   if(row!=MESH_ABSENT){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     for(uint32_t offset=0;offset<buffer->pages;offset+=m->block){
-      receive->pages[ready->tail++&ready->mask]=atomic_load_explicit(&mesh_page(m)[row+offset],memory_order_relaxed);
-      atomic_store_explicit(&mesh_page(m)[row+offset],MESH_ABSENT,memory_order_relaxed);
+      receive->pages[ready->tail++&ready->mask]=atomic_load_explicit(&mesh_buffer_pages(m,row)[offset/m->block],memory_order_relaxed);
+      atomic_store_explicit(&mesh_buffer_pages(m,row)[offset/m->block],MESH_ABSENT,memory_order_relaxed);
     }
     struct mesh_receive_binding *binding=&receive->bindings[buffer->binding];
     binding->rows[binding->count++]=row;

@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 57u
+#define MESH_VERSION 58u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -19,7 +19,7 @@ enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_BUFFER_CLOSED=4 };
 #define MESH_BUFFER_FLAG(flag) ((uint64_t)(flag)<<32)
-struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages; _Atomic uint32_t uses; uint32_t channel,binding,definition; uint64_t owner,invocation; };
+struct mesh_buffer { _Atomic uint64_t ownership; uint32_t rows,pages; _Atomic uint32_t uses; uint32_t channel,binding,definition; uint64_t owner,invocation,mapping; };
 struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
@@ -94,7 +94,9 @@ static inline _Atomic uint32_t *mesh_page(struct hdr *m){ return (_Atomic uint32
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }
 /* design/algorithm-sources.md#programtensor */
 static inline struct mesh_pool *mesh_pools(struct hdr *m){return (struct mesh_pool *)((char *)m+m->pool_off);}
-void mesh_buffer_release(struct hdr *,uint32_t first,uint32_t count);
+/* design/algorithm-sources.md#programtensor */
+static inline _Atomic uint32_t *mesh_buffer_pages(struct hdr *m,uint32_t row){return (_Atomic uint32_t *)((char *)m+mesh_buffers(m)[row].mapping);}
+void mesh_buffer_release(struct hdr *,uint32_t row);
 /* ledger D5 */
 static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+((size_t)(owner>>63)*2*m->links*m->qps+2*queue+(uint32_t)direction)*mesh_blocks(m); }
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return &mesh_links(m)[queue/m->qps].order_length[(owner>>63)*2*MESH_QPS+2*(queue%m->qps)+(uint32_t)direction]; }

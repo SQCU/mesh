@@ -479,6 +479,32 @@ alignment. These are source/storage counts, not latency measurements.
 
 ## Block addressing
 
+### Prepared compact page lists
+
+ABI 58 separates a buffer descriptor's identity, metadata extent, payload extent
+and page-list address. For an N-byte value, page size P and transport capacity
+C = BP, setup computes K = ceil(N/C). Each resident slot owns K logical entries
+and KB physical pages. Its immutable `mapping` offset names those K entries in
+canonical shared memory; its `rows` count governs metadata reclamation, while
+`pages` governs backing reclamation. Metadata ownership was previously VKB rows
+for V slots; it is now VK. The bridge still reserves its existing metadata arena,
+so this is not a claim that process RSS falls by B.
+
+TX and RX address entry j through that prepared list. An indexed operand caches
+the list pointer; a byte offset b uses entry floor(b/C) and relative offset b mod C.
+The contiguous CPU/Core ML and Metal placement paths read the dependency's same
+list. No allocator, packing solver, mapping syscall or strategy selection runs on
+receipt or scalar consumption. Retain/release addresses one buffer directly;
+setup and destruction enumerate section slots explicitly. The reference-count
+range walks and their assumption that payload extent determines descriptor
+positions are removed.
+
+The buffer descriptor grows from 48 to 56 bytes for the prepared mapping offset;
+the operand remains 56 bytes and the wire tag remains 24 bytes. Existing per-binding
+receive stacks and native/lifecycle capacity still require N1 integration. This
+change establishes the addressing representation, not a new admission bound or
+measured latency claim.
+
 ### Explicit section identity on the wire
 
 Protocol 57 carries `(invocation, sourceHead, definition, chunk)` in a 24-byte

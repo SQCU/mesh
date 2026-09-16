@@ -13,7 +13,7 @@ struct mesh_operand {
 /* design/algorithm-sources.md#programtensor */
 static inline void *mesh_operand_address(struct mesh_operand operand,size_t offset){
   size_t quantum=(size_t)operand.page_size*operand.block_pages,block=offset/quantum;
-  uint32_t page=atomic_load_explicit(operand.pages+block*operand.block_pages,memory_order_relaxed);
+  uint32_t page=atomic_load_explicit(operand.pages+block,memory_order_relaxed);
   return (char *)operand.data+((ptrdiff_t)page-operand.page)*(ptrdiff_t)operand.page_size+(offset-block*quantum);
 }
 typedef void (*mesh_submit)(struct mesh_call *,uint32_t,void *,const struct mesh_operand *,struct mesh_operand *);
@@ -40,7 +40,7 @@ void mesh_transfers_start(struct mesh_ctx *);
 
 /* design/algorithm-sources.md#programtensor */
 int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,uint32_t channel,struct mesh_section *);
-uint32_t mesh_row_page(struct mesh_ctx *,uint32_t row);
+uint32_t mesh_row_page(struct mesh_ctx *,uint32_t row,uint32_t chunk);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
 void mesh_section_constant(struct mesh_ctx *,struct mesh_section);
 void mesh_section_release(struct mesh_ctx *,struct mesh_section);

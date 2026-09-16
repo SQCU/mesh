@@ -40,9 +40,9 @@ static void mesh_retire(struct hdr *m,uint64_t client){
   for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(m,client,q,d),0,memory_order_release);
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    if(buffer->owner==client && buffer->first==row && buffer->pages){
+    if(buffer->owner==client && buffer->pages){
       atomic_fetch_or_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_CLOSED),memory_order_release);
-      mesh_bits_clear(m,MESH_ROW_OWN,row,buffer->pages);
+      mesh_bits_clear(m,MESH_ROW_OWN,row,buffer->rows);
     }
   }
   atomic_fetch_add_explicit(&m->retired,1,memory_order_release);
@@ -117,7 +117,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   for(uint32_t r=first;r<first+count;r++){
     atomic_store_explicit(&mesh_presence(c->M)[r],0,memory_order_relaxed);
     atomic_store_explicit(&mesh_page(c->M)[r],MESH_ABSENT,memory_order_release);
-    mesh_buffers(c->M)[r]=(struct mesh_buffer){.first=r,.channel=MESH_ABSENT,.definition=first};
+    mesh_buffers(c->M)[r]=(struct mesh_buffer){.rows=1,.channel=MESH_ABSENT,.definition=first,.mapping=c->M->page_off+(uint64_t)r*sizeof(uint32_t)};
     for(uint32_t w=0;w<(c->M->links+63)/64;w++)atomic_store_explicit(&mesh_send_uses(c->M,r)[w],0,memory_order_relaxed);
   }
   c->rows+=count;
@@ -134,18 +134,19 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
 /* design/algorithm-sources.md#programtensor */
 void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t page){
   for(uint32_t offset=0;offset<pages;offset+=c->M->block){
-    atomic_store_explicit(&mesh_page(c->M)[first+offset],page+offset,memory_order_relaxed);
+    atomic_store_explicit(&mesh_buffer_pages(c->M,first)[offset/c->M->block],page+offset,memory_order_relaxed);
   }
 }
 
 /* design/algorithm-sources.md#programtensor */
-static void mesh_buffer_reclaim(struct hdr *m,struct mesh_buffer *buffer){
-  uint32_t first=buffer->first,pages=buffer->pages;
+static void mesh_buffer_reclaim(struct hdr *m,uint32_t row){
+  struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+  uint32_t pages=buffer->pages;
   for(uint32_t offset=0;offset<pages;offset+=m->block){
-    uint32_t page=atomic_load_explicit(&mesh_page(m)[first+offset],memory_order_acquire);
+    uint32_t page=atomic_load_explicit(&mesh_buffer_pages(m,row)[offset/m->block],memory_order_acquire);
     if(page!=MESH_ABSENT)mesh_bits_clear(m,MESH_PAGE_OWN,page,m->block);
   }
-  mesh_bits_clear(m,MESH_ROW_HOT,first,pages);
+  mesh_bits_clear(m,MESH_ROW_HOT,row,buffer->rows);
 }
 
 /* design/algorithm-sources.md#programtensor */
@@ -154,30 +155,23 @@ static void mesh_reclaim(struct hdr *m){
     uint64_t available=atomic_exchange_explicit(&mesh_plane(m,MESH_FREE)[word],0,memory_order_acquire);
     while(available){
       uint32_t row=word*64+(uint32_t)__builtin_ctzll(available);available&=available-1;
-      mesh_buffer_reclaim(m,&mesh_buffers(m)[row]);
+      mesh_buffer_reclaim(m,row);
     }
   }
 }
 
 /* design/algorithm-sources.md#programtensor */
-void mesh_buffer_retain(struct hdr *m,uint32_t first,uint32_t count){
-  for(uint32_t row=first;row<first+count;){
-    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    atomic_fetch_add_explicit(&buffer->ownership,1,memory_order_relaxed);
-    row=buffer->first+buffer->pages;
-  }
+void mesh_buffer_retain(struct hdr *m,uint32_t row){
+  atomic_fetch_add_explicit(&mesh_buffers(m)[row].ownership,1,memory_order_relaxed);
 }
 
 /* design/algorithm-sources.md#programtensor */
-void mesh_buffer_release(struct hdr *m,uint32_t first,uint32_t count){
-  for(uint32_t row=first;row<first+count;){
-    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    uint32_t index=buffer->first;row=index+buffer->pages;
-    uint64_t ownership=atomic_fetch_sub_explicit(&buffer->ownership,1,memory_order_acq_rel);
-    if((uint32_t)ownership==1){
-      if(buffer->channel==MESH_ABSENT)atomic_fetch_or_explicit(&mesh_plane(m,MESH_FREE)[index/64],UINT64_C(1)<<(index%64),memory_order_release);
-      else mesh_notice_push(m,mesh_notice_queue(m,buffer->owner,m->links+buffer->channel),index);
-    }
+void mesh_buffer_release(struct hdr *m,uint32_t row){
+  struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+  uint64_t ownership=atomic_fetch_sub_explicit(&buffer->ownership,1,memory_order_acq_rel);
+  if((uint32_t)ownership==1){
+    if(buffer->channel==MESH_ABSENT)atomic_fetch_or_explicit(&mesh_plane(m,MESH_FREE)[row/64],UINT64_C(1)<<(row%64),memory_order_release);
+    else mesh_notice_push(m,mesh_notice_queue(m,buffer->owner,m->links+buffer->channel),row);
   }
 }
 
@@ -188,7 +182,7 @@ void mesh_retired_release(struct hdr *m){
     uint64_t ownership=atomic_load_explicit(&buffer->ownership,memory_order_acquire);
     if((ownership&MESH_BUFFER_FLAG(MESH_BUFFER_CLOSED)) && ((uint32_t)ownership || buffer->channel!=MESH_ABSENT)){
       if(buffer->channel<m->links*m->qps)for(uint32_t offset=0;offset<buffer->pages;offset+=m->block)
-        atomic_store_explicit(&mesh_page(m)[row+offset],MESH_ABSENT,memory_order_relaxed);
+        atomic_store_explicit(&mesh_buffer_pages(m,row)[offset/m->block],MESH_ABSENT,memory_order_relaxed);
       atomic_store_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_CLOSED),memory_order_relaxed);
       buffer->channel=MESH_ABSENT;
       mesh_bits_set(m,MESH_FREE,row,1);
@@ -226,5 +220,5 @@ void mesh_publish(struct hdr *m,uint32_t row){
     uint32_t worker=(uint32_t)__builtin_ctz(uses);uses&=uses-1;
     mesh_notice_push(m,mesh_notice_queue(m,buffer->owner,m->links*(m->qps+1)+worker),row);
   }
-  mesh_buffer_release(m,row,buffer->pages);
+  mesh_buffer_release(m,row);
 }

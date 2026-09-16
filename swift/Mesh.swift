@@ -230,7 +230,7 @@ private final class MeshInvocation {
                     for i in copies.indices {
                         let input = inputs[copies[i].input]
                         for (chunk, bytes) in chunks[i].enumerated() {
-                            let page = mesh_row_page(context, input.row + UInt32(chunk) * block)
+                            let page = mesh_row_page(context, input.row, UInt32(chunk))
                             blit.copy(from: sources[i].1[Int((page - sources[i].0) / block)], sourceOffset: 0,
                                       to: targets[i][Int(input.index)], destinationOffset: chunk * quantum, size: (bytes + 3) / 4 * 4)
                         }
@@ -272,7 +272,7 @@ private final class MeshInvocation {
                 for i in copies.indices {
                     let input = inputs[copies[i].input]
                     for (chunk, bytes) in chunks[i].enumerated() {
-                        let page = mesh_row_page(context, input.row + UInt32(chunk) * block)
+                        let page = mesh_row_page(context, input.row, UInt32(chunk))
                         memcpy(input.data!.advanced(by: chunk * quantum), mesh_page_address(context, page), bytes)
                     }
                 }
@@ -402,7 +402,7 @@ public final class Mesh {
             pages = stride(from: first, through: first + Int(range.count - source.pages), by: quantum).map(UInt32.init)
             index = { (Int($0.page) - first) / quantum }
         } else {
-            pages = (0..<source.count).map { mesh_row_page(context, source.first + $0 * source.stride) }
+            pages = (0..<source.count).map { mesh_row_page(context, source.first + $0 * source.stride, 0) }
             let stride = part.shared ? 0 : 1
             index = { Int($0.index) * stride }
         }

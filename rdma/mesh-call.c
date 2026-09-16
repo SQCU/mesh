@@ -135,16 +135,16 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   function->submit=submit;function->rearm=rearm;function->argument=argument;function->dispose=dispose;
   struct hdr *m=calls->context->M;
   for(size_t i=0;i<input_count;i++)for(uint32_t index=0;index<(inputs[i].stride?extent:1);index++)
-    mesh_buffer_retain(m,mesh_section_row(inputs[i],index),inputs[i].pages);
+    mesh_buffer_retain(m,mesh_section_row(inputs[i],index));
   for(uint32_t index=0;index<extent;index++){
     struct mesh_call *call=&function->values[index];
     *call=(struct mesh_call){.function=function,.operands=function->operands+index*count,.index=index};
     for(size_t i=0;i<count;i++){
       struct mesh_section section=i<input_count?views[i]:outputs[i-input_count];
-      uint32_t page=atomic_load_explicit(&mesh_page(m)[mesh_section_row(section,index)],memory_order_acquire);
+      uint32_t page=atomic_load_explicit(mesh_buffer_pages(m,mesh_section_row(section,index)),memory_order_acquire);
       function->operands[index*count+i]=(struct mesh_operand){.data=page==MESH_ABSENT?NULL:mesh_at(m,page),.bytes=section.bytes,
         .page=page,.index=section.stride?index:0,.row=mesh_section_row(section,index),
-        .pages=mesh_page(m)+mesh_section_row(section,index),.page_size=m->pgsz,.block_pages=m->block};
+        .pages=mesh_buffer_pages(m,mesh_section_row(section,index)),.page_size=m->pgsz,.block_pages=m->block};
     }
   }
   function->identity=calls->function_count++;
@@ -161,8 +161,8 @@ static void mesh_call_input(struct mesh_function *function,struct mesh_operand *
   if(!function->placed[input]){
     struct hdr *m=function->calls->context->M;
     struct mesh_section section=function->inputs[input];
-    operand->page=atomic_load_explicit(&mesh_page(m)[row],memory_order_acquire);
-    operand->pages=mesh_page(m)+row;
+    operand->page=atomic_load_explicit(mesh_buffer_pages(m,row),memory_order_acquire);
+    operand->pages=mesh_buffer_pages(m,row);
     operand->data=mesh_at(m,operand->page);operand->index=section.stride?(row-section.first)/section.stride:0;
   }
 }
@@ -231,7 +231,7 @@ static void *mesh_call_progress(void *argument){
       struct mesh_function *function=call->function;
       for(size_t i=0;i<function->consumed_count;i++){
         uint32_t input=function->consumed[i];
-        mesh_buffer_release(m,call->operands[input].row,function->inputs[input].pages);
+        mesh_buffer_release(m,call->operands[input].row);
       }
       if(call->error)mesh_event_push(m,calls->context->client,1+worker->index,
         (struct mesh_event){MESH_RESULT(MESH_RESULT_FUNCTION,call->function->identity,call->error),call->invocation,MESH_EVENT_ERROR});
@@ -550,7 +550,7 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
   if(index==mesh_blocks(m))return ENOSPC;
   if(!receive)for(uint32_t value=0;value<section.count;value++){
     uint32_t row=mesh_section_row(section,value);
-    mesh_buffer_retain(m,row,section.pages);
+    mesh_buffer_retain(m,row);
     uint32_t link=queue/m->qps;
     uint64_t bit=UINT64_C(1)<<(link%64),uses=atomic_fetch_or_explicit(&mesh_send_uses(m,row)[link/64],bit,memory_order_relaxed);
     if(!(uses&bit) && atomic_load_explicit(&mesh_presence(m)[row],memory_order_relaxed))
@@ -592,33 +592,33 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uin
   if(bytes>(size_t)mesh_rows(m)*m->pgsz)return ENOMEM;
   size_t span=(bytes+quantum-1)/quantum*m->block;
   if(span>mesh_rows(m)/count)return ENOMEM;
-  uint32_t pages=count*(uint32_t)span,first=mesh_rows_alloc(context,pages);
+  uint32_t stride=(uint32_t)span/m->block,rows=count*stride,first=mesh_rows_alloc(context,rows);
   if(first==MESH_ABSENT)return errno;
-  for(uint32_t row=first;row<first+pages;row+=(uint32_t)span)
-    mesh_buffers(m)[row]=(struct mesh_buffer){.ownership=2,.first=row,.pages=(uint32_t)span,.channel=channel,.definition=first,.owner=context->client};
-  mesh_bits_set(m,MESH_ROW_HOT,first,pages);
-  if(channel==MESH_ABSENT)for(uint32_t row=first;row<first+pages;row+=(uint32_t)span){
+  for(uint32_t row=first;row<first+rows;row+=stride)
+    mesh_buffers(m)[row]=(struct mesh_buffer){.ownership=2,.rows=stride,.pages=(uint32_t)span,.channel=channel,.definition=first,.owner=context->client,.mapping=m->page_off+(uint64_t)row*sizeof(uint32_t)};
+  mesh_bits_set(m,MESH_ROW_HOT,first,rows);
+  if(channel==MESH_ABSENT)for(uint32_t row=first;row<first+rows;row+=stride){
     uint32_t page=mesh_arena_alloc(context,(uint32_t)span,m->block);
     if(page==MESH_ABSENT){
       int error=errno;
-      mesh_buffer_release(context->M,first,pages);mesh_buffer_release(context->M,first,pages);
-      mesh_rows_release(context,first,pages);return error;
+      for(uint32_t r=first;r<first+rows;r+=stride){mesh_buffer_release(m,r);mesh_buffer_release(m,r);}
+      mesh_rows_release(context,first,rows);return error;
     }
     mesh_backing_bind(context,row,(uint32_t)span,page);
   }
-  *section=(struct mesh_section){first,(uint32_t)span,bytes,count,(uint32_t)span,channel};
+  *section=(struct mesh_section){first,(uint32_t)span,bytes,count,stride,channel};
   return 0;
 }
 /* design/algorithm-sources.md#programtensor */
-uint32_t mesh_row_page(struct mesh_ctx *context,uint32_t row){return atomic_load_explicit(&mesh_page(context->M)[row],memory_order_acquire);}
+uint32_t mesh_row_page(struct mesh_ctx *context,uint32_t row,uint32_t chunk){return atomic_load_explicit(mesh_buffer_pages(context->M,row)+chunk,memory_order_acquire);}
 /* design/algorithm-sources.md#programtensor */
-void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return mesh_at(context->M,mesh_row_page(context,mesh_section_row(section,index)));}
+void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return mesh_at(context->M,mesh_row_page(context,mesh_section_row(section,index),0));}
 /* design/algorithm-sources.md#programwrite */
 void mesh_section_constant(struct mesh_ctx *context,struct mesh_section section){mesh_publish(context->M,section.first);}
 /* design/algorithm-sources.md#programtensor */
 void mesh_section_release(struct mesh_ctx *context,struct mesh_section section){
-  mesh_buffer_release(context->M,section.first,section.count*section.pages);
-  mesh_rows_release(context,section.first,section.count*section.pages);
+  for(uint32_t index=0;index<section.count;index++)mesh_buffer_release(context->M,mesh_section_row(section,index));
+  mesh_rows_release(context,section.first,section.count*mesh_buffers(context->M)[section.first].rows);
 }
 /* design/algorithm-sources.md#collectivesync_on_remote_fill */
 void mesh_sync_on_remote_fill(struct mesh_ctx *context,const struct mesh_section *sections,size_t count,uint64_t index){
