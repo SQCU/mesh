@@ -189,23 +189,25 @@ the sum of the per-queue capacities. These counts are not performance evidence.
 ABI 59 removes the per-binding logical-row stacks, the definition-to-binding
 lookup, and the active-source-head array. Setup expands each peer-qualified
 source chunk into an aligned 32-byte receive record. ABI 60 stores the exact
-destination row, its buffer address and canonical page-entry address, the declared
-reference count and first/final/shared flags. RX indexes that record using the
-source chunk in the received tag. It does not allocate, search for a row or
+destination row, its buffer address and canonical page-entry address, and
+final/shared flags. ABI 64 removes its duplicate reference count and first-chunk
+flag. RX indexes
+that record using the source chunk in the received tag. It does not allocate, search for a row or
 reconstruct the page-list address from a buffer descriptor.
 
 For transfer t, resident frame f and chunk k, setup binds
 `sourceFirst[t] + f * sourceStride[t] + k` to destination row
 `localFirst[t] + f * localStride[t]` and its k-th canonical page entry. The
 source chunk already includes f; receiving a sequence number does not require
-another modulo calculation to recover it. The first chunk installs the declared
-references and sequence, each chunk stores its actual received page, and the
-final chunk publishes. The section's physical
+another modulo calculation to recover it. Realization preserves the declared
+references; each chunk stores its actual received page. The final chunk stores
+the sequence and publishes. The section's physical
 pages may be interleaved with other sections or peers. The formula determines
 logical coordinates; it does not make the physical pages contiguous.
 
 A queue still owns one ring of physical receive blocks. Final-reference notices
-return all of a section's actual blocks to that ring, clear its mappings, and
+return all of a section's actual blocks to that ring, clear its mappings, restore
+its prepared ownership and clear presence through `mesh_buffer_reset`, and
 release the transfer's frame reference directly. RX posts available blocks until native
 refusal, without a software window or a destination-reuse check. The former
 logical-row stack return and first-chunk pop are deleted. Payload is not zeroed.
@@ -270,9 +272,9 @@ of outstanding output returns, using one terminal return for a zero-output call.
 Successful completion publishes outputs and releases its consumed inputs and
 producer references. Every reader releases its reference through its existing
 completion. Only after every output has returned does the owning numerical
-worker rearm native storage, restore each output's R with an atomic store,
+worker rearm native storage, restore each output's R through `mesh_buffer_reset`,
 clear its old presence, and restore the return and pending counts. All old uses
-have ended, so no concurrent reader can decrement the newly stored count.
+have ended. The reset uses an atomic store; the retirement flag is a separate word.
 The worker releases the call's frame reference after this preparation. There
 is no occupancy query, reader scan, additional return event or caller free.
 
@@ -284,6 +286,39 @@ function, argument and two operand counts fit unused space in the existing
 submit pointer in the function object is deleted. Error cancellation and safe
 cross-participant frame reuse remain R2/N1 work; this ordering proves local
 rearming only.
+
+### One buffer ownership count
+
+ABI 64 stores the prepared reference count alongside the live 32-bit counter in
+`mesh_buffer`. The packed 64-bit count/flag word is deleted; retirement has its
+own 32-bit flag, so resetting the count cannot clear that flag. The prepared
+count replaces the redundant logical-row extent (`pages / block`), so the record
+remains 40 bytes. Realization snapshots the count once after all
+bindings and setup releases. The function's separately allocated count array and
+every receive record's duplicate count are deleted. Numerical return and receive
+return call the same reset; publication and native completion release references
+through the same existing `mesh_buffer_release`.
+
+Producer, numerical reader and transport reader are uses of that one mechanism.
+The prepared count is immutable setup data, not a second live reference count.
+Long-lived binding references end with the program's existing retirement; they
+do not require a special shared-input destructor. Retirement also discharges
+unissued uses after native users and the QPs have ended.
+
+This change does not make the buffer's logical row a safe reusable identity.
+The row and operand page list can still be rebound while an earlier remote use
+is live (N1). Receive-buffer return also still decrements a frame counter even
+for a long-lived value whose transfer was already counted at publication (L7/R2).
+These are separate unfinished lifecycle defects. Adding a reference-category
+branch or resetting the count cannot repair either ownership relationship.
+
+Source effects: first-chunk receipt loses one atomic ownership addition and one
+presence store; reset uses stores on final return. Sequence is stored at
+publication, so the first-chunk flag and its per-chunk conditional are deleted.
+Retain/release use 32-bit atomics without packed flag extraction. There is no extra event,
+payload copy, allocation on launch, or measured latency claim. Maintained source
+changes from 2,456 to 2,451 lines across the same eleven Swift/C/header files;
+documentation changes are separate.
 
 ### Input lifetime ends at its own use
 

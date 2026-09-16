@@ -70,9 +70,16 @@ and collector thread. Refzero sets one row bit in the section free pool; setup
 consumes those entries without reading refcounts or zeroing payload. The bridge
 discharges abandoned positive counts at the device-close retirement event.
 ABI 53 keeps received backing in its RX-owned pool, including when no live value
-occupies a row. Refzero notifies that RX thread; it returns both backing and the
-logical row. Setup captures the binding's reference-count template, and a new
-value reinstalls it on a popped row. Client/device retirement returns the entire
+occupies a row. Refzero notifies that RX thread; it returns backing through the
+canonical entries. ABI 64 keeps the prepared count in the buffer itself and
+removes the function's count array and the receive record's count copy.
+`mesh_buffer_reset` reinstalls the count and clears presence on final return,
+before another numerical launch or receive repost. The live count is an ordinary
+32-bit atomic; the retirement flag is separate. Reset uses a plain atomic store
+without erasing that flag, an occupancy query, or a retry. First-chunk receipt
+no longer adds ownership or clears presence; the first-chunk conditional and
+flag are deleted. Final-chunk publication stores the sequence before notifying
+consumers. Client/device retirement returns the entire
 receive pool, including zero-count posted rows, only after QP teardown.
 The [event derivation and limits](pages-and-functions.md#reclamation-events)
 distinguish this bitmap pool from the still-required X5/N1 per-worker instance
@@ -331,8 +338,8 @@ The call's prepared submit function, argument and operand counts now occupy the
 unused space in its existing 64-byte record. Launch reads no function/program
 object. Collins's counted ownership applies to the complete declared use set:
 startup preserves the compiled output counts, and final output return restores
-them before releasing the frame. This removes refcount increments and presence
-clearing from launch, as derived in
+them through the buffer's common reset before releasing the frame. This removes
+refcount increments and presence clearing from launch, as derived in
 [output ownership](pages-and-functions.md#output-ownership-is-prepared-before-launch).
 The readiness function takes the call directly and reads its function only when
 its pending count reaches zero. These changes apply Monsoon's prepared activation
