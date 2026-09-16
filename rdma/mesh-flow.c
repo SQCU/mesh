@@ -14,7 +14,7 @@ _Static_assert(sizeof(struct mesh_receive_request)==64 && _Alignof(struct mesh_r
 struct mesh_ready {uint64_t head,tail;size_t first,mask;};
 struct mesh_receive_record {
   _Alignas(32) struct mesh_buffer *buffer;
-  _Atomic uint32_t *entry; uint32_t row,references,flags;
+  _Atomic uint32_t *entry; uint32_t row,references,flags,frame;
 };
 _Static_assert(sizeof(struct mesh_receive_record)==32 && _Alignof(struct mesh_receive_record)==32,"mesh_receive_record");
 struct mesh_receive {
@@ -131,7 +131,7 @@ static int link_configure(void *state,int socket,uint64_t client){
         for(uint32_t chunk=0;chunk<chunks;chunk++)
           receive->records[peer[i].local_row+value*peer[i].stride+chunk]=(struct mesh_receive_record){
             .buffer=&mesh_buffers(m)[row],.entry=mesh_buffer_pages(m,row)+chunk,.row=row,.references=references,
-            .flags=(!chunk)|((chunk+1==chunks)<<1)|((!in[i].stride)<<2)};
+            .flags=(!chunk)|((chunk+1==chunks)<<1)|((!in[i].stride)<<2),.frame=value};
       }
     }
     for(uint32_t i=0;i<sends;i++)for(uint32_t value=0;value<out[i].count;value++){
@@ -214,17 +214,18 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
         struct mesh_wire_tag *tag=mesh_tag(m,page);
         struct mesh_receive *receive=&link->receive[q];
         uint64_t tag_value=atomic_load_explicit(&tag->value,memory_order_relaxed);
-        uint32_t frame=(uint32_t)(tag_value>>32);
+        uint32_t invocation=(uint32_t)(tag_value>>32);
         struct mesh_receive_record record=receive->records[(uint32_t)tag_value];
         if(record.flags&1){
           atomic_fetch_add_explicit(&record.buffer->ownership,record.references,memory_order_relaxed);
           atomic_store_explicit(&mesh_presence(m)[record.row],0,memory_order_relaxed);
-          record.buffer->invocation=frame;
+          record.buffer->invocation=invocation;
         }
         atomic_store_explicit(record.entry,page,memory_order_relaxed);
         if(record.flags&2){
-          mesh_publish(m,record.row,(uint64_t)frame+1);
+          mesh_publish(m,record.row,(uint64_t)invocation+1);
           if(record.flags&4)mesh_shared_release(link->instances,link->instance_count);
+          else atomic_store_explicit(&link->instances[record.frame].invocation,invocation,memory_order_relaxed);
           mesh_buffer_release(m,record.row);
         }
       } else {

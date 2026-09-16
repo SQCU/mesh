@@ -283,7 +283,7 @@ int mesh_calls_start(struct mesh_calls *calls){
   for(uint32_t frame=0;frame<calls->extent;frame++){
     calls->instances[frame].count=dynamic;
     atomic_store_explicit(&calls->instances[frame].remaining,dynamic+shared,memory_order_relaxed);
-    if(!dynamic && !shared)atomic_store_explicit(&calls->instances[frame].status,0,memory_order_relaxed);
+    if(!dynamic && !shared)atomic_store_explicit(&calls->instances[frame].status,MESH_RESULT(MESH_RESULT_SUCCESS,1,0),memory_order_relaxed);
   }
   if(!dynamic && !shared)atomic_store_explicit(&m->result[calls->context->client>>63],0,memory_order_release);
   atomic_store_explicit(&calls->running,1,memory_order_release);
@@ -312,6 +312,7 @@ uint64_t mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
   struct mesh_instance *instance=&calls->instances[frame];
   if(!atomic_load_explicit(&instance->available,memory_order_acquire))return MESH_RESULT(MESH_RESULT_BUSY,0,0);
   atomic_store_explicit(&instance->available,0,memory_order_relaxed);
+  atomic_store_explicit(&instance->invocation,index,memory_order_relaxed);
   atomic_store_explicit(&instance->status,MESH_RESULT(MESH_RESULT_BUSY,0,0),memory_order_release);
   status=atomic_load_explicit(&m->result[calls->context->client>>63],memory_order_acquire);
   if(status>>62!=MESH_RESULT_BUSY){mesh_result_conclude(&instance->status,status);return status;}
@@ -326,7 +327,8 @@ uint64_t mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
 
 /* design/algorithm-sources.md#meshresult */
 uint64_t mesh_calls_result(struct mesh_calls *calls,uint32_t index){
-  return atomic_load_explicit(&calls->instances[index%calls->extent].status,memory_order_acquire);
+  uint64_t status=atomic_load_explicit(&calls->instances[index%calls->extent].status,memory_order_acquire);
+  return !(status>>32) && (uint32_t)status!=index?MESH_RESULT(MESH_RESULT_BUSY,0,0):status;
 }
 
 /* design/algorithm-sources.md#programkernel_call */

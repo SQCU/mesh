@@ -353,8 +353,8 @@ returns busy if it is unavailable, and otherwise resets status and publishes the
 roots. It does not allocate, wait, query readers or touch a receive queue. This
 is **not** the requested free-frame-ring admission: it can return busy while a
 different frame is free. The missing admission mechanism and whole-plan lifetime
-realization remain N1 work. Passive-participant status rearming and cancellation
-also remain unfinished; the single load alone does not complete N2.
+realization remain N1 work. ABI 61 addresses passive result identity below;
+cancellation remains unfinished, so N2 is still partial.
 
 These edits reduce maintained Swift/C/header source from 2,612 to 2,415 lines,
 including `Bounds.swift` and `Topology.swift` and excluding the separately pending
@@ -365,6 +365,41 @@ addresses preserve that source count. Send records grow from 20 to 32 bytes
 per resident send edge and use a 32-byte-aligned allocation; receive records
 remain 32 bytes. The ABI changes because the receive buffer's `binding` field
 now supplies its setup-assigned frame index to the bridge.
+
+### Versioned frame results
+
+For invocation i and resident capacity V, result reads the status word at i mod V.
+Each new traversal uses a new 32-bit invocation index, as in `submit(inFlight + k)`;
+the index is not a reusable frame handle. A dynamic success stores i in its
+otherwise unused 32-bit code field. A success
+for j != i decodes as busy, so an earlier traversal's success cannot complete a
+new traversal on a passive rank. A static success (ordinal one) covers all indices
+when the program has no recurring local work. Errors retain their native code
+and function/link identity. The lookup remains one atomic 64-bit acquire load.
+
+Submission supplies the frame's invocation before publishing roots. For received
+work, the prepared receive record supplies the frame index. After publishing the
+completed section, RX stores the invocation and then releases the section's
+producer reference. That reference prevents the section's final return, and
+hence its frame-reference decrement, from preceding the store. The final frame
+reference publishes that invocation's success. Frame and receive records both
+remain 32 bytes; their spare space holds the new fields. ABI 61 is required on
+both sides because result encoding and the frame layout change.
+
+Conclusion loads the old word and makes one strong compare-exchange when it is
+success or pending. It never retries or replaces an error. For a native failure
+and a final success racing on the same observed word, only one wins; success
+cannot clear an already published error. A new traversal can replace an earlier
+success without first writing busy at receipt. Link failure invalidates resident
+slot results, including earlier successes not retained by the caller. Stored
+`Result` values are unaffected. These are reusable slots, not a result archive.
+
+The Core ML chain's existing driver keeps submitted and completed indices within
+its configured window and calls `result` on both submitting and passive ranks.
+Numerical callbacks still only produce/consume their tensor operands. The library
+adds no synchronization call or transport permission check. This fixes stale
+successes; it does not prove disjoint cross-participant frame lifetimes or close
+N1 and failure cancellation.
 
 ### Prepared native requests
 

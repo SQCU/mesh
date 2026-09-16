@@ -131,12 +131,21 @@ struct CoreMLChain {
             }, inputs: [parts[i]], outputs: [], on: layout[i].owner, worker: i % plan.workers)
         }
         try mesh.start()
-        var index = 0
-        while index < plan.count {
-            switch mesh.submit(index) {
-            case .success: index += 1
-            case .failure(.busy): break
-            case .failure(let error): throw error
+        var submitted = 0, completed = 0
+        while completed < plan.count {
+            if submitted < plan.count && submitted - completed < plan.inFlight {
+                switch mesh.submit(submitted) {
+                case .success: submitted += 1
+                case .failure(.busy): break
+                case .failure(let error): throw error
+                }
+            }
+            if completed < submitted {
+                switch mesh.result(completed) {
+                case .success: completed += 1
+                case .failure(.busy): break
+                case .failure(let error): throw error
+                }
             }
         }
         withExtendedLifetime((mesh, parts)) { dispatchMain() }

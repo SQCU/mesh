@@ -44,10 +44,10 @@ George E. Collins, [A method for overlapping and erasure of lists](https://doi.o
 (1960): reference counting. The user explicitly requested automatic ownership
 release and background pool return, without caller free/done calls.
 The implementation groups shared-input ownership by prepared function binding,
-while transient inputs retain one reference per indexed use. The native slot keeps
-these input references through final output ownership, and its numerical worker
-returns them with the slot. Pending input matches have separate indexed records;
-they do not reserve native output storage.
+while transient inputs retain one reference per indexed use. Native completion
+releases those input references after publishing outputs; downstream readers own
+the outputs separately. Each prepared call holds its frame's input countdown
+and output storage, selected by the realized consumer records.
 The [lifetime derivation](pages-and-functions.md#what-the-page-table-is) describes
 completion, cancellation and destruction. This is an application of counted
 ownership to known lifetimes, not a new collection algorithm attributed to Collins.
@@ -109,10 +109,37 @@ Saltzer, Reed and Clark, [End-to-End Arguments in System Design](https://web.mit
 (1984), motivates keeping recovery with the caller. Mesh records native errors;
 it does not retransmit an operation or make its consumers wait for recovery.
 ABI 59 replaces the keyed resident directory with frame-indexed status and
-ownership arrays. `mesh_calls_result` performs one status-word load. The result
-encoding remains two kind bits, thirty function/link ordinal bits and thirty-two
-native-code bits; the Swift decoder is unchanged. This completes the direct load,
-not passive-participant status rearming or cancellation.
+ownership arrays. ABI 61 keeps the one-word result read while distinguishing
+repeated invocations of that frame. A successful dynamic result carries its
+32-bit invocation in the code field; success with ordinal one denotes a program
+with no recurring local work. Errors retain the two kind bits, thirty
+function/link ordinal bits and thirty-two native-code bits. The Swift decoder
+is unchanged. A dynamic success for another invocation reads as busy. This is
+comparison within the loaded word, not a directory or a second shared load.
+
+Submission records the invocation in the existing 32-byte frame record. RX
+records the received invocation after `mesh_publish` and before dropping the
+buffer's existing producer reference; its 32-byte receive record supplies the
+frame index from setup. The RX ownership event therefore cannot release that
+frame's final reference before the invocation store. The last reference
+publishes success with that invocation. No passive-arrival busy store, new
+notification, transport gate or per-generation allocation is needed.
+
+`mesh_result_conclude` makes one strong compare-exchange against its observed
+success/pending word. It never overwrites an error and never retries. A new
+success can replace a prior traversal's success; an error can conclude during
+a passive traversal even while the word still contains an older success.
+A link fault invalidates resident result slots, including unretained older
+successes; callers retain any result they need as a value. A losing completion
+cannot replace an error with success. This does not make the frame a historical
+result store or establish N1's cross-participant ownership bound.
+
+The existing Core ML chain now submits a bounded window and observes each
+invocation's result before reusing its window position, including on ranks whose
+work arrives solely from peers. It reports native failure through the same
+public `Result` path. This adds no library scheduling path or numerical kernel;
+it exercises the status API in the existing arbitrary-stage producer/consumer
+composition. No runtime or killed-peer result is claimed.
 
 Collins's reference counting, cited above, supplies the ownership mechanism.
 Setup counts numerical and transfer references per frame. Final function/transfer
@@ -142,7 +169,8 @@ teardown, so publishing an error does not release device storage early.
 Owner and worker references keep program metadata alive through native callbacks.
 A forwarding-only rank needs no numerical worker. The frame-indexed representation
 replaces the old assignment-order storage identities; N1 admission/capacity, N2
-passive status rearming, R2 cancellation and driver recovery remain unfinished.
+R2 cancellation and driver recovery remain unfinished; passive result identity
+is implemented by ABI 61.
 
 ## Program.kernel_call
 

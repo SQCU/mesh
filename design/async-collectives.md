@@ -131,7 +131,10 @@ local calls and transfers; errors record the failing function or
 peer before unfinished descendants complete. These observations do not gate
 publication or dispatch. The [status and lifetime contract](algorithm-sources.md#meshresult)
 describes the two reference counts, shared constants and remaining failure-
-detection and reuse work. Indices still belong to the finite configured extent.
+detection and reuse work. ABI 61 places the completed 32-bit invocation in a
+success word; a prior traversal's success reads as busy for another invocation.
+The frame is selected by index modulo the configured extent. Result reads do not
+retain history or supply the still-unfinished cross-participant lifetime proof.
 
 For N operand bytes and internal payload capacity C, setup represents
 K = ceil(N / C) transport chunks. A value has K page-table entries and one
