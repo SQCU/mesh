@@ -368,10 +368,31 @@ TN3205 explicitly limits this transport to `IBV_WR_SEND`; its SDK enum for
 show local `wr_id` values returned with completions. Mesh uses these identifiers
 for buffer lifetime. ABI 59 carries one `(sequence, sourceChunkRow)` word. ABI 60 resolves the
 chunk's local row and page-entry address at setup, alongside its publication flag.
-The native SGE length is the declared payload length plus its tag. ABI 60 stores
-the final chunk's exact length in the send record at setup, so neither small
-sections nor tails are sent at an unrelated queue maximum. RX buffers keep their
-prepared capacity; the known transfer relation still determines publication.
+Request extents belong to setup, before a native request is submitted. TN3205
+requires paired SEND and RECV requests to occupy the same number of 4 KiB
+frames. ABI 60's exact-tail SEND change violated that requirement whenever the
+shortened SEND crossed fewer frames than the preposted RECV. That change and
+its claim of padding-free wire traffic are withdrawn. Setup chooses one matched
+extent per queue direction from its declared transfers; native posting neither
+truncates nor infers a length. Logical operand lengths remain exact. The
+[framing accounting](pages-and-functions.md#prepared-native-requests) includes
+padding explicitly, independently of numerical partial boundaries.
+
+`link_configure` prepares a native RECV WR and SGE per pool block and a native
+SEND WR and SGE per resident send edge. RX posts the prepared request selected
+by its pool index. TX selects the current backing address and registration key,
+then posts its prepared request without changing the length. `link_post` and
+`last_bytes` are deleted. The local Apple SDK defines a 128-byte `ibv_send_wr`,
+32-byte `ibv_recv_wr` and 16-byte SGE: a complete SEND WR plus SGE cannot fit the
+former H2 limit of 64 bytes. The receive request occupies 64 aligned bytes;
+the send record occupies 256 aligned bytes, with its SGE, application fields
+and common SEND header in the first 128 bytes. Compile-time assertions check
+these layouts; they do not prove one-line provider access or the whole H2 path.
+The send edge counts its signalled chunk completions before releasing its
+existing buffer reference. This is thread-local completion bookkeeping, with
+no new completion event or admission check. TX address resolution and wire-tag
+stores still precede the post; those remaining H3/H6 costs are not hidden by
+request preparation.
 The tag arrives in the payload's own work request. There is no index QP or
 cross-QP identity join. On September 15, `ibv_devinfo -v` reported `max_sge: 1`
 on the local Thunderbolt devices. The alias representation uses one SGE and

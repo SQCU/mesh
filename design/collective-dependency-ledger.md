@@ -33,9 +33,9 @@ not copy payload from a transport-only staging store.
 The MLX authors' [JACCL transport](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/lib/jaccl/rdma.h)
 uses work-request identifiers and CQ polling. Mesh preposts physical slots;
 `wr_id` identifies the completed physical chunk. A tag in the same request
-identifies its invocation, source head, section definition and chunk ordinal.
-Setup maps peer section definitions to local bindings; the chunk ordinal selects
-the page-table entry and identifies the final numerical publication. Sender publication order
+contains the sequence and source-chunk row in eight bytes. Setup maps each
+peer source-chunk row directly to its local buffer, page-table entry and
+publication flags. Sender publication order
 need not match declaration order. Chunks from different sends may interleave
 within a receive run. The canonical page table preserves logical chunk order;
 contiguous consumers use the [indexed placement path](pages-and-functions.md#indexed-receive-runs-and-contiguous-consumers).
@@ -44,10 +44,13 @@ contiguous consumers use the [indexed placement path](pages-and-functions.md#ind
 
 TN3205 requires matching frame counts and specifies finite queue capacity. It does
 not require one request per numerical partial. Mesh uses internally sized chunks
-with a 24-byte invocation/source-head/definition/chunk tag. The fixed chunk framing permits preposting independently
-of producer order; operand size determines only the number of chunks. Tail
-padding and the tag's additional frame remain explicit transport costs, without
-a caller capacity query or a requirement to reshape numerical operands.
+with an eight-byte sequence/source-chunk tag. Setup prepares the same request
+extent on both ends of a queue direction. Fixed framing permits preposting
+independently of producer order; logical operand size determines the number of
+chunks and usable bytes. Neither posting interface shortens the prepared
+request. Tail padding and tag bytes are explicit transport costs in the
+[byte accounting](pages-and-functions.md#prepared-native-requests), without a
+caller capacity query or a requirement to reshape numerical operands.
 
 ## D7. Publication does not await delivery
 

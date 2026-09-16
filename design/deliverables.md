@@ -363,7 +363,8 @@ sequence word (Disruptor); no CAS loop, no list, no level. Check: the number of 
 kinds is three; every hot-path hand-off is a ring store; no other shared structure is
 written on the hot path (source audit lists the stores).
 
-**H2. Records are 32-byte lines indexed by the integer in the ring.**
+**H2. Records are directly indexed by the integer in the ring; native ABI sizes
+are explicit.**
 `send_record[i]` `{ibv_send_wr wr; ibv_sge sge; release_row}` prebuilt at `start()` (the
 WR and SGE are the record: the post is `ibv_post_send(qp, &send_record[i].wr, &bad)`);
 `receive_record[wr_id]` `{ibv_recv_wr wr; ibv_sge sge; row; stamp_index; use_first;
@@ -371,10 +372,15 @@ use_count}` prebuilt at `start()`, page planned per chunk (`row = first[t] + k·
 posting order, so a transfer's chunks are contiguous and a consumer reads `.data`);
 `use_record[u]` `{call; pending_address}` contiguous per row; `call_record[c]`
 `{operand_array; worker; output_rows; pending}`; `instance_record[f]` `{status; first_row;
-row_count}` with `f` the frame integer `submit` hands out. Each `_Alignas(32)`,
-`_Static_assert(sizeof ≤ 32)` (a WR+SGE record may be ≤ 64 with the assert saying so).
-No record contains a pointer to another record; no record is mutated after `start()`
-except the counters it names. Check: the asserts compile; the audit lists, per event,
+row_count}` with `f` the frame integer `submit` hands out. Application records
+use `_Alignas(32)` and `_Static_assert(sizeof ≤ 32)`. Native request records use
+the actual provider ABI with asserted size/alignment: Apple's SEND WR is 128
+bytes, RECV WR 32 bytes and SGE 16 bytes. The former complete WR+SGE ≤ 64-byte
+requirement is withdrawn; it cannot describe that ABI. Report the common header
+footprint and full allocation separately, and count the actual loads before
+posting. Request extents are chosen before posting; neither native interface
+truncates them. No record contains a pointer to another record; no record is
+mutated after `start()` except the counters it names. Check: the asserts compile; the audit lists, per event,
 exactly one record load after the ring read.
 
 **H3. The hot flows, written out.**
@@ -535,7 +541,7 @@ subset, never as "done".
 |---|---|---|---|
 | 1 | S1 links list | ✓ | `c9d9e18` |
 | 2 | S2 TX/RX threads per link | ✓ | `c9d9e18`; used by P1's paired Core ML run |
-| 3 | S3 chunked transport invisible | ✓ | `98742c8`; P1 transported four/eight-chunk sections. ABI 60 prepares exact final-chunk SEND lengths: N-byte sections transmit N payload bytes plus 8 bytes per chunk, without queue-maximum tail padding. No caller shape or partial boundary changes. |
+| 3 | S3 chunked transport invisible | ✓ source; prior P1 run | `98742c8`; P1 transported four/eight-chunk sections. The ABI 60 exact-tail SEND regression is removed: setup prepares matching native extents for SEND/RECV, posted unchanged. Logical lengths stay exact; tags and padding are included in [byte accounting](pages-and-functions.md#prepared-native-requests). The padding-free wire claim is withdrawn. No caller shape or partial boundary changes; no new runtime or latency claim. |
 | 4 | S4 bounded pairing | ✓ | `06dcdb3`; checked nonblocking sockets, one deadline across all pairing exchanges |
 | 5 | L1 partial tensor | ✓ | `swift/Mesh.swift` `TensorPart` |
 | 6 | L2 supplied function | ✓ | `TensorFunction.cpu/.metal/.prediction` |
@@ -591,7 +597,7 @@ subset, never as "done".
 | W7 | collective compositions declaration-only | ✓ | audited f1ae04a: all conditionals in `send…allReduce` (Mesh.swift:324-409) run before `start()`; no runtime code; [audit](w-audit-2026-09-15.md#w7) |
 | W8 | caller bindings encode-and-return | ◐ | The removed prefill wait remains forbidden; `lm_engine.swift:1909` still inserts `encodeWaitForEvent(graph.meshStepEvent, ...)` before `encodeDecodeOutput`, whose operand dependency must be declared through Mesh. Gram bindings encode or execute supplied numerical functions and return. The engine `encAttn` binding still reaches the host `attentionSplits` scan; prefill must publish declared operands consumed by decode. Indexed `MeshBindings` view selection is permitted. |
 | H1 | index rings are the only hot-path interface (three kinds; one store per hand-off) | ✗ | notice levels + returns words + summary bitmaps today |
-| H2 | 32-byte records indexed by the ring integer; WR/SGE prebuilt inside; `_Static_assert` | ✗ | no runtime struct aligned or asserted; WRs built per post |
+| H2 | Directly indexed records; native WR/SGE prepared with actual ABI sizes asserted | ◐ | RX WR/SGE prepared per physical block (64 B); SEND WR/SGE prepared per edge (256 B, common prefix and SGE within 128 B). `link_post` deleted; extents fixed at setup. Complete native SEND WR+SGE ≤ 64 B withdrawn because the WR alone is 128 B. TX still binds backing address/key; H1 rings and one-record event paths remain incomplete. [Audit](w-audit-2026-09-15.md#w3). |
 | H3 | the four hot flows exactly as listed (value ready / TX / RX / worker) and the cold pass | ✗ | current: publish→post 10 dependent loads, completion→first byte 21 |
 | H4 | permission never costs a load (ring empty, verbs return, pending == 0 only) | ◐ | X4 deleted the software gates; the one-post-per-pass `if` remains (19r) |
 | H5 | dependent loads last in line (hot stores precede them in every hot function) | ✗ | refcount `fetch_sub`, invocation loads and tag stores precede the post today |

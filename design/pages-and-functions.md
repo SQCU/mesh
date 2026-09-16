@@ -345,14 +345,43 @@ per resident send edge and use a 32-byte-aligned allocation; receive records
 remain 32 bytes. The ABI changes because the receive buffer's `binding` field
 now supplies its setup-assigned frame index to the bridge.
 
-The send record also stores the exact final request length. For N payload bytes
-and capacity C, K = ceil(N/C) requests carry N + 8K bytes, including their tags.
-Setup computes the final payload `(N - 1) % C + 1`; every preceding request
-carries C bytes. Previously every request used the queue's maximum length,
-transmitting padding for small sections and final chunks. Receives retain their
-prepared maximum capacity. Shapes, partial publication and consumer layouts do
-not change; transport fragmentation remains separate from tensor partials. This
-is byte accounting from the post path, not a measured bandwidth or latency claim.
+### Prepared native requests
+
+The exact-tail SEND change in ABI 60 was incorrect: a shortened SEND may use
+fewer native frames than its preposted RECV. Apple
+[TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
+requires matching frame counts. The tail-length field and runtime length choice
+are removed. Setup chooses the matching request extents, and posting submits
+those extents unchanged. No truncation occurs in SEND or RECV.
+
+For transport payload capacity C and a queue's declared logical transfer lengths
+N_t, setup chooses L_q = min(C, max_t N_t) + 8 bytes for both ends of that
+direction. A section of N bytes occupies K = ceil(N/C) requests, each of L_q
+bytes. The posted SGE byte total is K L_q: N logical bytes, 8K tag bytes, and
+K(L_q - 8) - N padding bytes. The receiver's prepared request has the same
+extent for every arrival, independent of which producer finishes first. This
+corrects the former N + 8K claim; it is API byte accounting, not measured wire
+time. Reducing padding would require selecting compatible requests before
+posting, without imposing producer order or changing the caller's tensor.
+
+Each physical receive block has a 64-byte aligned native WR/SGE record. The RX
+pool ring carries indices into this array; returning a page computes its index
+once, and reposting passes the prepared WR directly. Each resident send edge
+has a 256-byte record aligned to 128 bytes, containing its native WR, SGE and
+existing ownership/cursor fields. Its common SEND header, SGE and application
+fields fit the first 128 bytes; the full native SEND WR is itself 128 bytes.
+TX still selects the backing address/key from the canonical page table, but
+constructs no WR and changes no extent at posting. All signalled chunk
+completions identify the edge; its thread-local countdown releases the buffer
+and frame references after the final completion. WR/SGE metadata is reusable
+after `ibv_post_*` returns; payload backing stays owned through completion.
+
+Receive requests add 64 bytes per pool block; send records grow from 32 to 256
+bytes per resident edge. There is no shared-memory ABI change. This correction
+adds three maintained source lines to the 2,413-line library, excluding the
+separate unfinished control-event work. Shapes, partial publication and consumer
+layouts remain unchanged; transport fragmentation and numerical partials remain
+separate. The remaining TX page lookup, wire tag and RX mapping are still H work.
 
 ## Reclamation events
 
