@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 61u
+#define MESH_VERSION 62u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -35,7 +35,9 @@ struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
 /* design/algorithm-sources.md#meshresult */
 enum { MESH_RESULT_SUCCESS, MESH_RESULT_LINK, MESH_RESULT_FUNCTION, MESH_RESULT_BUSY };
 #define MESH_RESULT(kind,id,code) ((uint64_t)(kind)<<62|(uint64_t)(id)<<32|(uint32_t)(code))
-struct mesh_instance { _Alignas(32) _Atomic uint64_t status; _Atomic uint32_t available,remaining,invocation; uint32_t count; };
+struct mesh_status { uint64_t value,completed; };
+_Static_assert(sizeof(struct mesh_status)==16 && __atomic_always_lock_free(sizeof(struct mesh_status),0),"mesh_status lock-free snapshot");
+struct mesh_instance { _Alignas(32) _Atomic(struct mesh_status) status; _Atomic uint32_t available,remaining,invocation; uint32_t count; };
 _Static_assert(sizeof(struct mesh_instance)==32 && _Alignof(struct mesh_instance)==32,"mesh_instance");
 struct mesh_wire_tag { _Atomic uint64_t value; };
 _Static_assert(sizeof(struct mesh_wire_tag)==8,"mesh_wire_tag");
@@ -46,7 +48,7 @@ struct hdr {
   uint64_t planes_off,presence_off,page_off,buffer_off,pool_off,link_off,send_off,order_off,notice_off,instance_off,tags_off,data_off,length;
   uint32_t notice_levels,notice_words,notice_offsets[MESH_NOTICE_LEVELS];
   uint32_t instance_count[MESH_NOTICE_BANKS];
-  _Atomic uint64_t result[MESH_NOTICE_BANKS];
+  _Atomic(struct mesh_status) result[MESH_NOTICE_BANKS];
   _Atomic uint64_t client,bridge_pid,device_client,serial,retired;
   struct mesh_port_info port;
 };
@@ -54,10 +56,14 @@ void mesh_publish(struct hdr *,uint32_t row,uint64_t stamp);
 /* design/algorithm-sources.md#meshresult */
 static inline struct mesh_instance *mesh_instances(struct hdr *m,uint64_t owner){return (struct mesh_instance *)((char *)m+m->instance_off)+(owner>>63)*m->rows;}
 /* design/algorithm-sources.md#meshresult */
-static inline void mesh_result_conclude(_Atomic uint64_t *destination,uint64_t status){
-  uint64_t previous=atomic_load_explicit(destination,memory_order_relaxed);
-  if(previous>>62==MESH_RESULT_SUCCESS || previous>>62==MESH_RESULT_BUSY)
-    atomic_compare_exchange_strong_explicit(destination,&previous,status,memory_order_release,memory_order_relaxed);
+static inline void mesh_result_conclude(_Atomic(struct mesh_status) *destination,uint64_t status){
+  struct mesh_status previous=atomic_load_explicit(destination,memory_order_relaxed);
+  do {
+    if(previous.value>>62!=MESH_RESULT_SUCCESS && previous.value>>62!=MESH_RESULT_BUSY)return;
+    struct mesh_status next={status,previous.completed};
+    if(status>>62==MESH_RESULT_SUCCESS)next.completed=status>>32?UINT64_MAX:(uint64_t)(uint32_t)status+1;
+    if(atomic_compare_exchange_strong_explicit(destination,&previous,next,memory_order_release,memory_order_relaxed))return;
+  } while(status>>62!=MESH_RESULT_SUCCESS);
 }
 /* design/algorithm-sources.md#meshresult */
 static inline void mesh_instance_release(struct mesh_instance *instance){

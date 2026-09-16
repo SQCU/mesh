@@ -1,6 +1,7 @@
 #include "mesh-verbs.h"
 #include "mesh-dataflow.h"
 #include <pthread.h>
+#include <sys/event.h>
 
 /* design/algorithm-sources.md#programcopy */
 struct mesh_send_edge {
@@ -29,6 +30,7 @@ struct mesh_link {
   struct mesh_worker workers[2];
   uint32_t worker_count,index;
   pthread_t controller;
+  int events;
   char *configuration;
   _Atomic int progressing;
   struct hdr *M;struct mesh_verbs provider;int qps;uint64_t client;
@@ -45,12 +47,19 @@ static int link_receive(struct mesh_link *link,uint32_t q);
 static void link_receive_destroy(struct mesh_receive *receive){
   free(receive->requests);free(receive->records);free(receive->pages);
 }
+/* design/algorithm-sources.md#meshresult */
+static void link_stop(struct mesh_link *link){
+  atomic_store_explicit(&link->progressing,0,memory_order_release);
+  struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,0,NOTE_TRIGGER,0,0,0,0);
+  kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+}
 /* design/algorithm-sources.md#programcopy */
 static void link_error(struct mesh_link *link,int64_t code,uint32_t domain){
   struct mesh_port_info *port=&mesh_links(link->M)[link->index].port;port->code=code;port->domain=domain;
-  atomic_store_explicit(&link->M->result[link->client>>63],MESH_RESULT(MESH_RESULT_LINK,link->index,code),memory_order_release);
+  mesh_result_conclude(&link->M->result[link->client>>63],MESH_RESULT(MESH_RESULT_LINK,link->index,code));
+  atomic_store_explicit(&port->phase,MESH_STOPPED,memory_order_release);
+  link_stop(link);
   for(uint32_t i=0;i<link->instance_count;i++)mesh_result_conclude(&link->instances[i].status,MESH_RESULT(MESH_RESULT_LINK,link->index,code));
-  atomic_store_explicit(&link->progressing,0,memory_order_release);
 }
 /* design/algorithm-sources.md#programcopy */
 static int link_configure(void *state,int socket,uint64_t client){
@@ -278,25 +287,42 @@ static void *link_run(void *argument){
   for(uint32_t q=0;q<m->qps;q++)for(int d=0;d<2;d++)transfers+=atomic_load(mesh_order_length(m,link->client,link->index*m->qps+q,d));
   if(!transfers)return NULL;
   atomic_store_explicit(&port->phase,MESH_PAIRING,memory_order_release);
-  int setup=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
-  if(setup<0){
+  int control=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
+  if(control<0){
     if(errno!=ECANCELED)link_error(link,errno?errno:EIO,1);
   } else {
-    int error=0;
-    for(uint32_t d=0;d<2;d++){
+    struct kevent64_s changes[2];
+    EV_SET64(&changes[0],control,EVFILT_READ,EV_ADD|EV_CLEAR,0,0,0,0,0);
+    EV_SET64(&changes[1],(uint32_t)link->client,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
+    int error=kevent64(link->events,changes,2,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)?errno:0;
+    if(!error){
+      __atomic_store_n(&mesh_links(m)[link->index].bandwidth,link->provider.bandwidth,__ATOMIC_RELAXED);
+      atomic_store_explicit(&port->phase,MESH_PAIRED,memory_order_release);
+    }
+    for(uint32_t d=0;d<2 && !error;d++){
       link->workers[d]=(struct mesh_worker){.link=link,.direction=d};
       error=pthread_create(&link->workers[d].thread,NULL,link_progress,&link->workers[d]);
       if(error)break;
       link->worker_count++;
     }
     if(error)link_error(link,error,1);
-    else {
-      __atomic_store_n(&mesh_links(m)[link->index].bandwidth,link->provider.bandwidth,__ATOMIC_RELAXED);
-      atomic_store_explicit(&port->phase,MESH_PAIRED,memory_order_release);
+    while(atomic_load_explicit(&link->progressing,memory_order_acquire)){
+      struct kevent64_s event;
+      int count=kevent64(link->events,NULL,0,&event,1,0,NULL);
+      if(count<0){if(errno==EINTR)continue;link_error(link,errno,4);break;}
+      if(event.flags&EV_ERROR)link_error(link,event.data,4);
+      else if(event.filter==EVFILT_PROC)link_error(link,ECANCELED,4);
+      else if(event.filter==EVFILT_READ)
+        link_error(link,event.flags&EV_EOF?(event.fflags?event.fflags:ECONNRESET):EPROTO,4);
     }
+    shutdown(control,SHUT_RDWR);
     while(link->worker_count)pthread_join(link->workers[--link->worker_count].thread,NULL);
+    EV_SET64(&changes[0],(uint32_t)link->client,EVFILT_PROC,EV_DELETE,0,0,0,0,0);
+    kevent64(link->events,changes,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+    close(control);
   }
   while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);
+  if(link->provider.listener>=0){close(link->provider.listener);link->provider.listener=-1;}
   atomic_store_explicit(&port->phase,MESH_STOPPED,memory_order_release);
   return NULL;
 }
@@ -358,6 +384,9 @@ int main(int argc,char **argv){
     link->send_offsets=calloc((size_t)mesh_rows(m)+1,sizeof *link->send_offsets);
     link->provider.completions=calloc(2,sizeof *link->provider.completions);
     if(!link->send_offsets || !link->provider.completions)die("link allocation");
+    link->events=kqueue();
+    struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,0,0,0);
+    if(link->events<0 || kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("link control events");
     mesh_links(m)[i].peer=link->provider.peer;
     snprintf(mesh_links(m)[i].device,sizeof mesh_links(m)[i].device,"%s",link->provider.device->name);
     atomic_store(&mesh_links(m)[i].port.phase,MESH_PAIRING);
@@ -383,7 +412,7 @@ int main(int argc,char **argv){
       started++;
     }
     while(!stop && atomic_load_explicit(&m->client,memory_order_acquire)==client){}
-    for(uint32_t i=0;i<started;i++)atomic_store_explicit(&links[i].progressing,0,memory_order_release);
+    for(uint32_t i=0;i<started;i++)link_stop(&links[i]);
     for(uint32_t i=0;i<started;i++)pthread_join(links[i].controller,NULL);
     atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);
   }
@@ -394,6 +423,7 @@ int main(int argc,char **argv){
     struct mesh_link *link=&links[i];
     atomic_store(&mesh_links(m)[i].port.phase,MESH_STOPPED);
     if(link->provider.listener>=0)close(link->provider.listener);
+    close(link->events);
     free(link->provider.completions);free(link->send_offsets);free(link->send_edges);free(link->send_ready);
     for(uint32_t q=0;q<qps;q++)link_receive_destroy(&link->receive[q]);
     free(link->configuration);

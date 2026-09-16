@@ -108,31 +108,35 @@ The Legion authors, [reduction privileges](https://legion.stanford.edu/tutorial/
 Saltzer, Reed and Clark, [End-to-End Arguments in System Design](https://web.mit.edu/Saltzer/www/publications/endtoend/endtoend.pdf)
 (1984), motivates keeping recovery with the caller. Mesh records native errors;
 it does not retransmit an operation or make its consumers wait for recovery.
-ABI 59 replaces the keyed resident directory with frame-indexed status and
-ownership arrays. ABI 61 keeps the one-word result read while distinguishing
-repeated invocations of that frame. A successful dynamic result carries its
-32-bit invocation in the code field; success with ordinal one denotes a program
-with no recurring local work. Errors retain the two kind bits, thirty
-function/link ordinal bits and thirty-two native-code bits. The Swift decoder
-is unchanged. A dynamic success for another invocation reads as busy. This is
-comparison within the loaded word, not a directory or a second shared load.
+ABI 62 uses one atomic 16-byte status snapshot inside the existing aligned
+32-byte frame record: `{value, completed}`. `value` retains the two kind bits,
+thirty function/link ordinal bits and thirty-two native-code bits. `completed`
+is the last successful invocation plus one, zero before success, or `UINT64_MAX`
+for completed static-only work. `mesh_calls_result` returns success for that
+completed invocation and otherwise returns the fault or busy. The Swift decoder
+is unchanged. The compile-time assertion requires a lock-free 16-byte snapshot;
+on this ARM64 compiler the acquire read is `ldp` plus `dmb ishld`, with register
+comparisons and no polling loop. This replaces ABI 61's single 64-bit code word,
+which could lose the prior success on link failure and therefore violated F10.
 
-Submission records the invocation in the existing 32-byte frame record. RX
-records the received invocation after `mesh_publish` and before dropping the
-buffer's existing producer reference; its 32-byte receive record supplies the
-frame index from setup. The RX ownership event therefore cannot release that
-frame's final reference before the invocation store. The last reference
-publishes success with that invocation. No passive-arrival busy store, new
-notification, transport gate or per-generation allocation is needed.
+Submission records the invocation before publishing roots. RX records it after
+`mesh_publish` and before dropping the buffer's existing producer reference;
+the 32-byte receive record supplies the frame index from setup. That ownership
+event cannot release the frame's final reference before the invocation store.
+The last reference publishes success with that invocation. No passive-arrival
+busy store, extra notification or transport permission check is added.
 
-`mesh_result_conclude` makes one strong compare-exchange against its observed
-success/pending word. It never overwrites an error and never retries. A new
-success can replace a prior traversal's success; an error can conclude during
-a passive traversal even while the word still contains an older success.
-A link fault invalidates resident result slots, including unretained older
-successes; callers retain any result they need as a value. A losing completion
-cannot replace an error with success. This does not make the frame a historical
-result store or establish N1's cross-participant ownership bound.
+`mesh_result_conclude` never overwrites an error. Normal success makes one strong
+compare-exchange. Fault publication preserves `completed`; if its compare-exchange
+loses to a concurrent successful completion, it retries with that observed
+snapshot so the completion is retained and the fault is not lost. This retry is
+confined to error reporting; it neither retries a transfer nor waits for remote
+work. An existing error ends it. Consequently a link error can report failure
+for pending work while the last completed invocation still returns success.
+A new explicit submission reassigns its resident slot; callers retain older
+results themselves. This does not establish N1's cross-participant ownership
+bound. A passive rank's explicit `submit` now reads the program fault before
+returning success for its lack of local roots; reception still needs no submit.
 
 The existing Core ML chain now submits a bounded window and observes each
 invocation's result before reusing its window position, including on ranks whose
@@ -168,9 +172,36 @@ teardown, so publishing an error does not release device storage early.
 
 Owner and worker references keep program metadata alive through native callbacks.
 A forwarding-only rank needs no numerical worker. The frame-indexed representation
-replaces the old assignment-order storage identities; N1 admission/capacity, N2
-R2 cancellation and driver recovery remain unfinished; passive result identity
-is implemented by ABI 61.
+replaces the old assignment-order storage identities. N1 admission/capacity,
+R2 cancellation and driver recovery remain unfinished; ABI 62 implements the
+status snapshot but does not complete N2.
+
+Jonathan Lemon and Apple's [kqueue interface](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/kqueue.2)
+provide socket EOF and process-exit events. The link controller retains
+the pairing socket for the connection's lifetime. The existing link controller
+observes its EOF/error and the local client's `NOTE_EXIT`; either event records
+a link failure and stops that connection. A native CQ/post error uses `link_stop`
+to wake the controller through its preallocated user event. The controller shuts
+down the socket, joins TX/RX, and closes QPs/CQs. Its event queue remains open
+until bridge shutdown, after every controller has joined, so a stop notification
+cannot target a recycled descriptor. Event registration and notification use
+`KEVENT_FLAG_IMMEDIATE`; only the separate controller's event observation blocks.
+No heartbeat, elapsed-time failure inference, or healthy-path TX/RX socket query
+is added. The first program and instance errors and each frame's last completed
+invocation are preserved. The old listener is closed after QP teardown, so a new
+realization opens a fresh listener without the prior connection's backlog.
+This implements event observation in source, not complete R2 cancellation or
+R3–R7 recovery. An unreported silent partition is not detected by inventing a timer.
+No caller-death or cable-loss run accompanies this change.
+
+`mesh_rows_alloc` now records the client owner for metadata rows as well as
+operand rows. `mesh_retire` clears their row ownership even when `pages == 0`;
+only actual operand buffers receive the closed-storage flag. Previously a dead
+client's root and return rows had owner zero and survived replacement, leaking
+row capacity across realizations. Normal client retirement or replacement of a
+dead client now covers both. Actual backing retains the existing device-close
+retirement rule. Link error alone still does not cancel unissued numerical uses
+or rearm the same program: those R2/R4 steps remain unfinished.
 
 ## Program.kernel_call
 

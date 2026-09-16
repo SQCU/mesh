@@ -40,8 +40,8 @@ static void mesh_retire(struct hdr *m,uint64_t client){
   for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(m,client,q,d),0,memory_order_release);
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    if(buffer->owner==client && buffer->pages){
-      atomic_fetch_or_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_CLOSED),memory_order_release);
+    if(buffer->owner==client){
+      if(buffer->pages)atomic_fetch_or_explicit(&buffer->ownership,MESH_BUFFER_FLAG(MESH_BUFFER_CLOSED),memory_order_release);
       mesh_bits_clear(m,MESH_ROW_OWN,row,buffer->rows);
     }
   }
@@ -117,7 +117,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   for(uint32_t r=first;r<first+count;r++){
     atomic_store_explicit(&mesh_presence(c->M)[r],0,memory_order_relaxed);
     atomic_store_explicit(&mesh_page(c->M)[r],MESH_ABSENT,memory_order_release);
-    mesh_buffers(c->M)[r]=(struct mesh_buffer){.rows=1,.channel=MESH_ABSENT,.mapping=c->M->page_off+(uint64_t)r*sizeof(uint32_t)};
+    mesh_buffers(c->M)[r]=(struct mesh_buffer){.rows=1,.channel=MESH_ABSENT,.owner=c->client,.mapping=c->M->page_off+(uint64_t)r*sizeof(uint32_t)};
     for(uint32_t w=0;w<(c->M->links+63)/64;w++)atomic_store_explicit(&mesh_send_uses(c->M,r)[w],0,memory_order_relaxed);
   }
   c->rows+=count;

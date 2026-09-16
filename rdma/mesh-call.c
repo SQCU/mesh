@@ -82,10 +82,10 @@ struct mesh_calls *mesh_calls_create(struct mesh_ctx *context,uint32_t workers,u
   calls->instances=mesh_instances(context->M,context->client);
   context->M->instance_count[context->client>>63]=count;
   for(uint32_t i=0;i<count;i++){
-    atomic_store_explicit(&calls->instances[i].status,MESH_RESULT(MESH_RESULT_BUSY,0,0),memory_order_relaxed);
+    atomic_store_explicit(&calls->instances[i].status,((struct mesh_status){MESH_RESULT(MESH_RESULT_BUSY,0,0),0}),memory_order_relaxed);
     atomic_store_explicit(&calls->instances[i].available,1,memory_order_relaxed);
   }
-  atomic_store_explicit(&context->M->result[context->client>>63],MESH_RESULT(MESH_RESULT_BUSY,0,0),memory_order_release);
+  atomic_store_explicit(&context->M->result[context->client>>63],((struct mesh_status){MESH_RESULT(MESH_RESULT_BUSY,0,0),0}),memory_order_release);
   calls->owner=owner;calls->dispose=dispose;
   return calls;
 }
@@ -283,9 +283,9 @@ int mesh_calls_start(struct mesh_calls *calls){
   for(uint32_t frame=0;frame<calls->extent;frame++){
     calls->instances[frame].count=dynamic;
     atomic_store_explicit(&calls->instances[frame].remaining,dynamic+shared,memory_order_relaxed);
-    if(!dynamic && !shared)atomic_store_explicit(&calls->instances[frame].status,MESH_RESULT(MESH_RESULT_SUCCESS,1,0),memory_order_relaxed);
+    if(!dynamic && !shared)atomic_store_explicit(&calls->instances[frame].status,((struct mesh_status){0,UINT64_MAX}),memory_order_relaxed);
   }
-  if(!dynamic && !shared)atomic_store_explicit(&m->result[calls->context->client>>63],0,memory_order_release);
+  if(!dynamic && !shared)atomic_store_explicit(&m->result[calls->context->client>>63],((struct mesh_status){0,UINT64_MAX}),memory_order_release);
   atomic_store_explicit(&calls->running,1,memory_order_release);
   atomic_fetch_add_explicit(&calls->references,(uint32_t)__builtin_popcount(workers),memory_order_relaxed);
   while(workers){
@@ -304,17 +304,17 @@ int mesh_calls_start(struct mesh_calls *calls){
 
 /* design/algorithm-sources.md#program */
 uint64_t mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
-  if(!calls->root_workers)return 0;
   struct hdr *m=calls->context->M;
-  uint64_t status=atomic_load_explicit(&m->result[calls->context->client>>63],memory_order_acquire);
+  uint64_t status=atomic_load_explicit(&m->result[calls->context->client>>63],memory_order_acquire).value;
   if(status>>62!=MESH_RESULT_BUSY)return status;
+  if(!calls->root_workers)return 0;
   uint32_t frame=index%calls->extent;
   struct mesh_instance *instance=&calls->instances[frame];
   if(!atomic_load_explicit(&instance->available,memory_order_acquire))return MESH_RESULT(MESH_RESULT_BUSY,0,0);
   atomic_store_explicit(&instance->available,0,memory_order_relaxed);
   atomic_store_explicit(&instance->invocation,index,memory_order_relaxed);
-  atomic_store_explicit(&instance->status,MESH_RESULT(MESH_RESULT_BUSY,0,0),memory_order_release);
-  status=atomic_load_explicit(&m->result[calls->context->client>>63],memory_order_acquire);
+  atomic_store_explicit(&instance->status,((struct mesh_status){MESH_RESULT(MESH_RESULT_BUSY,0,0),0}),memory_order_release);
+  status=atomic_load_explicit(&m->result[calls->context->client>>63],memory_order_acquire).value;
   if(status>>62!=MESH_RESULT_BUSY){mesh_result_conclude(&instance->status,status);return status;}
   mesh_buffers(m)[calls->first+frame].invocation=index;
   uint32_t workers=calls->root_workers;
@@ -327,8 +327,9 @@ uint64_t mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
 
 /* design/algorithm-sources.md#meshresult */
 uint64_t mesh_calls_result(struct mesh_calls *calls,uint32_t index){
-  uint64_t status=atomic_load_explicit(&calls->instances[index%calls->extent].status,memory_order_acquire);
-  return !(status>>32) && (uint32_t)status!=index?MESH_RESULT(MESH_RESULT_BUSY,0,0):status;
+  struct mesh_status status=atomic_load_explicit(&calls->instances[index%calls->extent].status,memory_order_acquire);
+  if(status.completed==(uint64_t)index+1 || status.completed==UINT64_MAX)return 0;
+  return status.value>>62==MESH_RESULT_SUCCESS?MESH_RESULT(MESH_RESULT_BUSY,0,0):status.value;
 }
 
 /* design/algorithm-sources.md#programkernel_call */

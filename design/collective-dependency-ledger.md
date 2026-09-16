@@ -112,6 +112,12 @@ send and receive use tables from setup descriptions and retains abandoned sectio
 backing through QP teardown.
 This controls resource lifetime; it is not a default collective completion barrier.
 
+Client retirement also releases metadata rows. `mesh_rows_alloc` records their
+owner even when they have no payload pages; `mesh_retire` clears their row
+allocation while marking only real operand storage closed. This covers root and
+return rows when a dead client is replaced. It does not cancel a still-attached
+failed program's unissued uses or authorize reclaiming backing before QP teardown.
+
 ## D16. Application-specific output communication stays in the caller
 
 Megatron's vocabulary-parallel example fuses its loss to reduce communicated values.
