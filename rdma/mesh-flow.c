@@ -35,7 +35,6 @@ struct mesh_link {
   uint32_t instance_count;
 };
 static int link_receive(struct mesh_link *link,uint32_t q);
-static int link_returns(struct mesh_link *link,uint32_t q);
 /* design/algorithm-sources.md#programcopy */
 static void link_receive_destroy(struct mesh_receive *receive){
   free(receive->records);free(receive->pages);
@@ -155,14 +154,26 @@ static int link_configure(void *state,int socket,uint64_t client){
 }
 /* design/algorithm-sources.md#programcopy */
 static int link_receive(struct mesh_link *link,uint32_t q){
+  struct hdr *m=link->M;
   struct mesh_receive *receive=&link->receive[q];
   struct mesh_ready *ready=&receive->ready;
-  while(ready->head!=ready->tail){
-    int error=link_post(link,q,MESH_RECEIVE,0,receive->pages[ready->head&ready->mask],link->bytes[2*q+MESH_RECEIVE]);
-    if(error)return error;
-    ready->head++;
+  for(;;){
+    int error=0;
+    while(ready->head!=ready->tail){
+      error=link_post(link,q,MESH_RECEIVE,0,receive->pages[ready->head&ready->mask],link->bytes[2*q+MESH_RECEIVE]);
+      if(error)break;
+      ready->head++;
+    }
+    if(error && error!=ENOMEM && error!=EAGAIN)return error;
+    uint32_t row=mesh_notice_take(&receive->returns);
+    if(row==MESH_ABSENT)return error;
+    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+    for(uint32_t offset=0;offset<buffer->pages;offset+=m->block){
+      receive->pages[ready->tail++&ready->mask]=atomic_load_explicit(&mesh_buffer_pages(m,row)[offset/m->block],memory_order_relaxed);
+      atomic_store_explicit(&mesh_buffer_pages(m,row)[offset/m->block],MESH_ABSENT,memory_order_relaxed);
+    }
+    mesh_instance_release(&link->instances[buffer->binding]);
   }
-  return 0;
 }
 /* design/algorithm-sources.md#programkernel_call */
 static int link_send_ready(struct mesh_link *link,uint32_t q){
@@ -190,7 +201,7 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
   for(uint32_t q=0;q<(uint32_t)link->qps;q++){
     int count=ibv_poll_cq(v->completion_queues[2*q+direction],1,completions);
     if(count<0){link_error(link,count,3);return count;}
-    int error=direction==MESH_RECEIVE?link_returns(link,q):link_send_ready(link,q);
+    int error=direction==MESH_SEND?link_send_ready(link,q):0;
     if(error && error!=ENOMEM && error!=EAGAIN){link_error(link,error,1);return error;}
     for(int i=0;i<count;i++){
       struct ibv_wc *wc=&completions[i];
@@ -222,6 +233,10 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
         }
       }
     }
+    if(direction==MESH_RECEIVE){
+      error=link_receive(link,q);
+      if(error && error!=ENOMEM && error!=EAGAIN){link_error(link,error,1);return error;}
+    }
   }
   return 0;
 }
@@ -237,23 +252,6 @@ static void link_publications(struct mesh_link *link){
       if(mesh_progress(link,MESH_SEND))return;
     }
   }
-}
-
-/* design/algorithm-sources.md#programcopy */
-static int link_returns(struct mesh_link *link,uint32_t q){
-  struct hdr *m=link->M;
-  struct mesh_receive *receive=&link->receive[q];
-  struct mesh_ready *ready=&receive->ready;
-  uint32_t row=mesh_notice_take(&receive->returns);
-  if(row!=MESH_ABSENT){
-    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    for(uint32_t offset=0;offset<buffer->pages;offset+=m->block){
-      receive->pages[ready->tail++&ready->mask]=atomic_load_explicit(&mesh_buffer_pages(m,row)[offset/m->block],memory_order_relaxed);
-      atomic_store_explicit(&mesh_buffer_pages(m,row)[offset/m->block],MESH_ABSENT,memory_order_relaxed);
-    }
-    mesh_instance_release(&link->instances[buffer->binding]);
-  }
-  return link_receive(link,q);
 }
 
 /* design/algorithm-sources.md#programkernel_call */

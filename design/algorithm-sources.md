@@ -153,6 +153,19 @@ The invocation hash, join/free tables and independent native-slot ring are delet
 The [current lifetime contract](pages-and-functions.md#native-slot-return) supersedes
 the older slot-assignment descriptions below. N1 remains incomplete.
 
+Collins's reference counting releases a numerical input at the completion of its
+own declared use. `mesh_call_finish` now performs those decrements directly for
+CPU, Metal and Core ML, after publishing outputs. The former output-return path
+retained inputs through downstream readers; it no longer releases inputs.
+Output references still determine output storage. A native-completion reference
+keeps the call's operands live through input cleanup; its prepared return row
+releases that reference afterward, completing native-slot return independently
+of the order in which the output readers finish.
+The worker drains publication notices before return cleanup and rearming;
+both use their existing indexed notification queues.
+The [chain and fan-out derivation](pages-and-functions.md#input-lifetime-ends-at-its-own-use)
+distinguishes this local storage fact from unfinished global frame reuse.
+
 Gregory M. Papadopoulos and David E. Culler,
 [Monsoon: an Explicit Token-Store Architecture](https://people.eecs.berkeley.edu/~kubitron/courses/cs252-F03/handouts/papers/p398-papadopoulos.pdf)
 (ISCA, 1990), supplies the operand-associated state-bit mechanism and statically
@@ -393,11 +406,21 @@ software outstanding-request count and its derived request-capacity gates.
 Each TX/RX progress step polls a completion and posts available requests until
 the prepared ring is empty or the native provider refuses, then continues across queues. A refused request does not advance the cursor.
 `ENOMEM` and `EAGAIN` are deferred to the next step; other post errors conclude
-the link's invocation through [its Result](#meshresult). RX attempts its post before publishing the
-completion. A zero-completion poll still permits posting. Initial receive setup
+the link's invocation through [its Result](#meshresult). RX now publishes the
+completion before its return/repost pass. A zero-completion poll still permits posting. Initial receive setup
 posts until the declared list ends or the native queue refuses. Actual QP capacity is
 used only at setup to check that an individual framed request fits. This does
 not claim the remaining receive mapping or publication queues satisfy W2/W3.
+
+Receive posting and returned-page draining now share `link_receive`. After each
+returned section's entries are detached, its backing is immediately offered to
+the NIC. A capacity refusal retains the unposted cursor and still allows the
+return set to drain; it is not a condition on reclaiming other pages. The old
+single-return `link_returns` stage is deleted. This changes when existing
+references and ready pages are processed, not their counts or the wire protocol.
+The receive completion publishes before that drain, so accumulated return work
+cannot precede publication of the already polled completion. TX still offers
+ready sends before processing its completion cleanup.
 
 `Mesh.send` expands [explicit placement routes](#placement) before binding these
 transfers. At an intermediate rank the received section itself is retained by

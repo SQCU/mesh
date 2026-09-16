@@ -230,11 +230,58 @@ backshift deletion, or per-function native-slot ring remains.
 
 Shared inputs update every prepared frame once and decrement each countdown.
 Setup initializes all countdowns, including the root dependency for a function
-with no varying inputs. Successful completion publishes outputs immediately.
+with no varying inputs. Successful native completion publishes outputs, releases
+that call's consumed input references, then returns its native-completion reference.
 Their final references return through the existing numerical-worker notices;
-the last output return releases the consumed inputs, rearms the native object
+the last output/native-completion return rearms the native object
 when necessary, restores that frame's pending template, and releases one frame reference directly. Zero-output functions emit the same return through their metadata row.
 A native error concludes status separately; complete failure cancellation is R2.
+
+### Input lifetime ends at its own use
+
+For a declared chain `receive(x) → f(x)=y → g(y)=z`, the numerical reference
+to `x` ends at `f`'s native completion. The former implementation retained `x`
+until the final reader of `y` returned it, extending ownership into downstream
+execution. That extension was unnecessary: `g` reads `y`, and has its own
+reference to `y`; it does not read `x`. The same argument applies to fan-out:
+every direct numerical reader releases its own reference at its completion,
+and every transport reader releases its reference at native SEND completion.
+The last of those events returns the backing. No caller reports that it is done.
+
+The consumed-input index list and initial reference counts are already compiled
+from bindings. CPU, Metal and Core ML use the same completion entry point,
+including native failure. Output publication comes first; input reference
+decrements follow. The call's remaining count is `output_count + 1`, including
+its native-completion reference. The existing prepared return row publishes that
+last reference after input cleanup, so another worker cannot recycle the call's
+operand metadata while completion still reads it. This adds one cold return
+notice to successful calls with outputs; zero-output and failed calls already
+used that return row. There is no new queue, allocation, reader query or wait.
+Native output storage and command-buffer rearming retain their separate existing
+lifetimes. This local lifetime fact does not establish cross-participant frame
+reuse; that remains N1.
+
+The numerical worker drains ready publications before processing output/native
+return notices. Cleanup and command-buffer rearming therefore follow launches
+already represented in its publication queue, rather than preceding them.
+
+RX now drains return notices within `link_receive` itself. It posts available
+pages first, consumes a returned section, clears its old page entries, appends
+the pages to the receive ring, and immediately repeats posting. Native capacity
+refusal leaves the unposted pages in that ring but does not prevent draining
+other returned sections. An empty return set ends the pass; a fatal native error
+concludes the link. No tensor-readiness or destination-occupancy condition is
+introduced. This removes the separate one-return-per-pass `link_returns` helper.
+An RX completion is published before this return/repost pass: draining accumulated
+returns must not delay delivery of a completion already polled. TX retains its
+post-before-completion-cleanup order. Full hot/cold separation, native request
+preparation and the notice-ring replacement remain group H work; no H row is
+completed by this change.
+
+This change reduces maintained Swift/C/header source from 2,415 to 2,413 lines.
+It adds no runtime storage. The native-completion reference uses the existing
+count and return row; successful output-producing calls gain one cold return
+notice. Documentation changes are explanatory additions, not source migration.
 
 Core ML's feature provider and output options use the frame's prepared bindings.
 Indexed CPU/Metal operands keep the canonical page-list address. A contiguous
