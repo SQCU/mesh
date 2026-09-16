@@ -94,6 +94,15 @@ result references. A zero total attempts one strong compare-exchange from busy t
 success. Native failure attempts one strong compare-exchange from busy to its
 error. Neither operation retries, and neither replaces an already concluded result.
 
+Native post errors other than capacity refusal, CQ poll errors and unsuccessful
+work completions end that link's invocation after publishing its error result.
+The TX/RX loops return on that native error; the controller joins them and closes
+the QPs. It does not re-pair and replay the same invocation. The bridge remains
+available for a newly realized client. The receive-side `failed` latch and its
+publication guard are deleted; successful completions do not consult a software
+health flag. Outstanding references remain owned until normal completion or
+teardown, so publishing an error does not release device storage early.
+
 There is no submission reference. An unsubmitted local root already has its
 numerical-call reference; a receive-driven rank has its declared receive and call
 references. Their existing completions account for all work without requiring a
@@ -229,23 +238,27 @@ does not infer two-entry support from the general verbs API. The
 describe this mesh-specific representation. Receive storage is preallocated
 across the finite extent; refill does not depend on consumer completion or page
 reclamation.
-The dedicated TX worker starts posting as each send edge is enqueued, then polls
-completion queues. It does not construct a runtime list of all chunks before
-posting the first. Completion processing refills
-available send slots directly. RX independently refills receives before publishing
-the received section. No completion wait or new scheduler is introduced.
+The dedicated TX worker consumes publication events and advances the associated
+send edges. RX independently refills receives before publishing each received
+section. Neither constructs a runtime list of all chunks before posting the first.
 
 The rdma-core authors' [ibv_post_send contract](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_send.3)
 returns acceptance or a native error for each posted request. X4 removes Mesh's
 software outstanding-request count and its derived request-capacity gates.
 Each TX/RX progress step polls one completion and attempts one available request,
 then continues immediately. A refused request does not advance the cursor.
-`ENOMEM` and `EAGAIN` are deferred to the next step; other post errors retain
-their existing out-of-band reporting. RX attempts its post before publishing the
+`ENOMEM` and `EAGAIN` are deferred to the next step; other post errors conclude
+the link's invocation through [its Result](#meshresult). RX attempts its post before publishing the
 completion. A zero-completion poll still permits posting. Initial receive setup
 posts until the declared list ends or the native queue refuses. Actual QP capacity is
 used only at setup to check that an individual framed request fits. This does
 not claim the remaining receive mapping or publication queues satisfy W2/W3.
+
+Dotan Barak's rdma-core [work-completion contract](https://man7.org/linux/man-pages/man3/ibv_poll_cq.3.html)
+defines the valid fields of an unsuccessful completion as its work-request id,
+status, QP number and vendor error. Mesh returns on that native status before
+reading the received tag or resolving a destination. It does not treat an error
+completion as a filled partial tensor.
 
 The compressed-row representation cited under [numerical submission](#programkernel_call)
 also stores each published row's send edges contiguously. Each queue has a
