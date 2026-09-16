@@ -62,6 +62,17 @@ The numerical partial is not a transport request. A tensor's byte count must not
 be limited by one request, and internal fragmentation must not change its shape,
 partition, numerical function or public send/receive declaration.
 
+The subsequent exact-tail clarification is authoritative:
+
+> an exact tail change has to implement exact tails by choosing what to push to the send interface instead of trying to do weird truncation logic inside of the send or recv interface. throw out the requirement if the requirement is stupid / cooked / washed / chopped
+
+Tail selection belongs to preparation of the messages submitted to transport.
+It does not authorize SEND or RECV to reinterpret or shorten those messages.
+The current implementation prepares matching native request extents and retains
+padding; it does not implement padding-free wire tails. The incorrect requirement
+to shorten a SEND against an incompatible preposted RECV is withdrawn. See
+[prepared native requests](pages-and-functions.md#prepared-native-requests).
+
 The user-selected continuation objective is the attachment
 `5701aa94-8d2a-4238-851b-7ad3af7e91bc/pasted-text-1.txt`. It reiterates these
 requirements and actual integration through existing numerical implementations.

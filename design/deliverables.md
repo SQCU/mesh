@@ -261,6 +261,13 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 **S3. Chunked transport, invisible.** `mesh_section_create(ctx, bytes, count, receive, &section)`; internal `C`, `K = ceil(N/C)`. Ref: TN3205 frame matching; llama.cpp PR #26421 (128 KiB stride cost). Check: I10.
 
+The [operator's exact-tail clarification](collective-goals.md) places message
+selection before the send interface. An exact-tail change must prepare compatible
+requests on both ends; neither SEND nor RECV truncates a supplied request. Exact
+logical tensor lengths do not imply padding-free native messages. The latter
+claim was withdrawn with the ABI 60 truncation change; current transport padding
+is accounted for in [prepared native requests](pages-and-functions.md#prepared-native-requests).
+
 **S4. Out-of-band pairing once; versioned exchange; every syscall bounded.** `verbs_up(link)` with `XMAGIC+MESH_VERSION`; `accept/connect/read` each with a deadline. Ref: TN3205; `RDMA-RULES.md`. Check: each of those calls in `rdma/mesh-verbs.h` is followed by a timeout.
 
 ### L — library core
