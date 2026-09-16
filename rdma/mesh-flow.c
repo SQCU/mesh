@@ -47,7 +47,7 @@ static int link_post(struct mesh_link *link,uint32_t q,int direction,uint32_t ro
     struct ibv_recv_wr request={.wr_id=page,.sg_list=&span,.num_sge=1},*bad=NULL;
     error=ibv_post_recv(v->pairs[q],&request,&bad);
   }
-  return error;
+  return error<0?-error:error;
 }
 /* design/algorithm-sources.md#programcopy */
 static int link_configure(void *state,int socket,uint64_t client){
