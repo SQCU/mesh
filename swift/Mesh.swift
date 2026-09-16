@@ -221,9 +221,10 @@ public final class Mesh {
     private var deliveries: [MeshDelivery: TensorPart] = [:]
     private var preparations: [() throws -> Void] = []
     private var partialContributions: Set<Int> = []
+    private var routes: [Placement.Edge: [Int]]
 
     // design/algorithm-sources.md#program
-    public init(region: String, rank: Int, size: Int, workers: Int, count: Int = 1) throws {
+    public init(region: String, rank: Int, size: Int, workers: Int, count: Int = 1, placement: Placement = Placement()) throws {
         precondition(size > 0 && (0..<size).contains(rank) && count > 0)
         let memory = try MeshMemory(region)
         let owner = Unmanaged.passRetained(memory).toOpaque()
@@ -233,6 +234,7 @@ public final class Mesh {
             throw POSIXError(POSIXErrorCode(rawValue: errno)!)
         }
         self.memory = memory; self.calls = calls; self.rank = rank; self.size = size; self.count = count
+        routes = placement.routes
         peers = (0..<Int(memory.context.pointee.M.pointee.links)).map { Int(mesh_links(memory.context.pointee.M)[$0].peer) }
     }
 
@@ -346,23 +348,29 @@ public final class Mesh {
     // design/algorithm-sources.md#programcopy
     public func send(_ part: TensorPart, to destination: Int, queue: Int = 0) throws -> TensorPart {
         if part.rank == destination { return part }
-        precondition((0..<size).contains(destination))
-        let delivery = MeshDelivery(value: part.identity, source: part.rank, destination: destination, queue: queue)
-        if let existing = deliveries[delivery] { return existing.withPartial(part.partial) }
-        let identity = transfer; transfer += 1
-        let participating = rank == part.rank || rank == destination
-        let channel = participating ? mesh_peer_channel(memory.context, UInt32(rank == destination ? part.rank : destination), UInt32(queue)) : 0
-        if channel == MESH_ABSENT { throw POSIXError(.ENETUNREACH) }
-        var output = try self.part(on: destination, bytes: part.bytes, partial: part.partial, shared: part.shared, queue: channel)
-        output.identity = part.identity
-        if participating {
-            let local = rank == destination ? output : part
-            let error = mesh_transfer_bind(memory.context, channel, rank == destination ? 1 : 0,
-                                           identity, local.section!)
-            if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
+        let path = routes[Placement.Edge(part.rank, destination)] ?? [destination]
+        precondition(path.last == destination && path.allSatisfy { (0..<size).contains($0) })
+        var source = part
+        for next in path {
+            if source.rank == next { continue }
+            let delivery = MeshDelivery(value: source.identity, source: source.rank, destination: next, queue: queue)
+            if let existing = deliveries[delivery] { source = existing.withPartial(source.partial); continue }
+            let identity = transfer; transfer += 1
+            let participating = rank == source.rank || rank == next
+            let channel = participating ? mesh_peer_channel(memory.context, UInt32(rank == next ? source.rank : next), UInt32(queue)) : 0
+            if channel == MESH_ABSENT { throw POSIXError(.ENETUNREACH) }
+            var output = try self.part(on: next, bytes: source.bytes, partial: source.partial, shared: source.shared, queue: channel)
+            output.identity = source.identity
+            if participating {
+                let local = rank == next ? output : source
+                let error = mesh_transfer_bind(memory.context, channel, rank == next ? 1 : 0,
+                                               identity, local.section!)
+                if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
+            }
+            deliveries[delivery] = output
+            source = output
         }
-        deliveries[delivery] = output
-        return output
+        return source
     }
 
     // design/algorithm-sources.md#collective-movement
@@ -443,6 +451,7 @@ public final class Mesh {
         preparations.removeAll()
         deliveries.removeAll()
         partialContributions.removeAll()
+        routes.removeAll()
         memory.releaseSections()
         let error = mesh_calls_start(calls)
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }

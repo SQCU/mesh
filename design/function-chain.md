@@ -283,6 +283,24 @@ rdma/gram-chain 0 2 /mesh0 examples/gram-chain.json
 rdma/gram-chain 1 2 /mesh0 examples/gram-chain.json
 ```
 
+The same program accepts explicit routes. `examples/gram-chain-star.json` places
+the numerical work on ranks 0 and 2 and routes both directions through rank 1.
+Configure physical links `0 ↔ 1 ↔ 2`; each rank reads the same placement:
+
+```sh
+rdma/gram-chain 0 3 /mesh0 examples/gram-chain-star.json
+rdma/gram-chain 1 3 /mesh0 examples/gram-chain-star.json
+rdma/gram-chain 2 3 /mesh0 examples/gram-chain-star.json
+```
+
+The JSON routes include both endpoints; the caller converts each path into a
+`Placement.Edge` key and subsequent-rank list. `0 → 2` and `2 → 0` are separately
+declared. Rank 1 has transfer bindings but no tensor functions, and starts no
+numerical worker. Only the configured numerical owners submit local roots; the
+relay never calls `submit`. Its received section is bound directly as the onward SEND
+source. This configuration is source usage of T2, not a three-node run or a
+performance measurement.
+
 The caller builds and satisfies G1's source composition check. It has not been
 run or measured. W1–W6 remain failed in the shared runtime audit, so G1 remains
 partial under I18; this caller does not establish waitless execution, reusable

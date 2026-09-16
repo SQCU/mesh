@@ -73,6 +73,10 @@ For the call storage itself, let O be the Mesh owner reference, W the active
 worker references, and I the instances with outstanding numerical call records.
 Its count is O+W+I. Startup acquires W+I before any worker starts. Each instance
 counts its unissued and issued records together; issuance changes neither count.
+W counts workers named by declared functions, not the configured worker limit.
+A rank that only forwards received sections starts no numerical workers. A failed
+worker launch releases references for the remaining unstarted worker mask;
+cancellation still visits only unissued records in that index range.
 Native completion retires one record. Its instance's final record releases one
 program reference. Worker exit cancels its unissued records and releases its W
 reference; only that worker reads and changes its records' pending counts.

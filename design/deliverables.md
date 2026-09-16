@@ -67,7 +67,9 @@ The importable library is the Swift module `Mesh` (`swift/Mesh.swift`) over the 
 runtime (`rdma/mesh-call.c`, `mesh-dataflow.c`, `mesh-flow.c`, `mesh-verbs.h`, `mesh.h`):
 
 ```
-Mesh(region:, rank:, size:, workers:, count:)            // N1 changes `count` to in-flight instances
+Mesh(region:, rank:, size:, workers:, count:, placement:) // N1 changes `count` to in-flight instances
+Placement(owners:, routes:, work:, bytes:, cuts:, path:)  // explicit ownership, directed routes, optional bound inputs
+Placement.Edge(source, destination)                     // ordered endpoints; route excludes source and includes destination
 Mesh.tensor(on:sections:) -> [TensorPart]                 // partial tensor = contiguous sections, each with a rank
 TensorPart.partial: Bool                                 // contribution view pending reduction
 MeshError.partialOperand(TensorPart)                     // invalid use reported during setup
@@ -268,7 +270,7 @@ subset, never as "done".
 | 24 | T3 multi-link striping | ◐ on branch `row/T1-T3` (`60bf25a`, not merged) | codex striped chunk c → link c mod L at realization but did it with a banked append log walked by per-link cursors, a per-operand `remaining` fan-in counter, padding chunks and hidden `receive_width` state — runtime structures I17 forbids and that W2/W3's deletions remove; re-do on top of row 19c as a start()-time column in the `send_edge` table (chunk → link, planned page per link), then merge |
 | 22a | T1 latency observation: bridge records per-link `mesh_link_info.latency` with validity; `observe()` exposes seconds or nil; no pairing-RTT substitute | ✗ | — |
 | 22b | T1 idle pairing: the bridge pairs every configured link at startup (no `if(!transfers) return` in `link_run`; controllers start before the client loop) so `observe()` before `Mesh(…)` sees every cabled link | ✗ | — |
-| 25 | T2 routes/forwarding | ✗ | — |
+| 25 | T2 routes/forwarding | ◐ source | `Placement.owners/routes` and directed `Placement.Edge`; `Mesh.send` expands caller paths at declaration and binds each relay's received section as its onward SEND source. The route table is dropped before execution. Compute workers start only for declared functions, so a relay starts none. The existing Gram caller accepts routes; `examples/gram-chain-star.json` places ranks 0/2 through rank 1, which never calls `submit`. Source expansion gives two SENDs on `0 → 1 → 2` and payload bytes per cut from distinct realized legs. W7 re-audited; W1–W6 and the multi-hop run remain open. |
 | 26 | T4 bounds() | ✓ | `67b46e5`+`8f6316f` `swift/Bounds.swift` pure; `rdma/bounds-table` prints 199.34/229.01, 44.81/53.67, 359.28/389.61 |
 | 27 | T5 retopology Result | ✗ | — |
 | 28 | T6 replicas | ✗ | — |

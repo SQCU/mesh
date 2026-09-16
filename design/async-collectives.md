@@ -17,6 +17,14 @@ is a list of these sections. Mesh allocates their actual shared, registered
 backing and binds their uses before `start()`. `count` is the AOT extent of the
 value index; `submit(index)` starts that value through the realized functions.
 
+`Mesh(..., placement: Placement(owners: ..., routes: ...))` accepts caller-selected
+directed paths. `Placement.Edge(0, 2): [1, 2]` makes a send to rank 2 traverse
+rank 1. All collective movement uses the same `send` declaration. An intermediate
+rank forwards the received registered section through its existing transport
+publication, without a numerical callback or payload copy. Routes are expanded
+and discarded before execution; they are not consulted by the RDMA threads.
+See [the source construction and traffic count](algorithm-sources.md#placement).
+
 ## Algebra and callers
 
 For a linear function, `X = sum(P[i])` gives `T(X) = sum(T(P[i]))`. No inverse

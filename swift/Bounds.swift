@@ -21,6 +21,13 @@ public struct Program {
 }
 
 public struct Placement {
+    public struct Edge: Hashable {
+        public let source, destination: Int
+
+        // design/algorithm-sources.md#placement
+        public init(_ source: Int, _ destination: Int) { self.source = source; self.destination = destination }
+    }
+
     public struct Cut {
         public let links: Set<Topology.Pair>
         public let bytes: Double
@@ -41,12 +48,18 @@ public struct Placement {
         }
     }
 
+    public let owners: [Int]
+    public let routes: [Edge: [Int]]
     public let work: [Int: Double]
     public let bytes: [Int: Double]
     public let cuts: [CutKey: Cut]
     public let path: [Hop]
 
-    public init(work: [Int: Double], bytes: [Int: Double], cuts: [CutKey: Cut], path: [Hop]) {
+    // design/algorithm-sources.md#placement
+    public init(owners: [Int] = [], routes: [Edge: [Int]] = [:],
+                work: [Int: Double] = [:], bytes: [Int: Double] = [:], cuts: [CutKey: Cut] = [:], path: [Hop] = []) {
+        self.owners = owners
+        self.routes = routes
         self.work = work
         self.bytes = bytes
         self.cuts = cuts
@@ -62,14 +75,12 @@ public struct Bounds {
     public let max: Double
 }
 
-/// Seconds to move `amount` at `rate`: nothing takes no time; anything at rate 0 never finishes.
+// design/algorithm-sources.md#bounds
 private func seconds(_ amount: Double, at rate: Double) -> Double {
     amount == 0 ? 0 : amount / rate
 }
 
-/// Their maximum is a lower bound, not an exact execution-time formula.
-/// Total over its inputs: a node or link the placement names but the topology lacks has
-/// rate 0, so the bound through it is `+inf` (losing a link changes `bounds()`, not correctness).
+// design/algorithm-sources.md#bounds
 public func bounds(_ program: Program, _ placement: Placement, _ topology: Topology, _ capability: [Int: Capability]) -> Bounds {
     var rate = 0.0
     var bandwidth = 0.0

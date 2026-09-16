@@ -115,6 +115,11 @@ reference. `mesh_call_finish` shares input retirement between success and failur
 invoke numerical completion or publish their outputs. Setup reserves owner,
 worker and instance references before launching any worker. Operand ownership and
 the existing page collector remain separate: a result is not a free-page claim.
+The worker mask is derived from declared function bindings during setup. Only
+those workers acquire references and start threads; unused indices retain no
+worker reference. Startup failure cancels the unstarted function range and
+releases the remaining mask's worker references. A rank with only forwarding
+edges starts no numerical thread, while its transfers still count toward Result.
 
 This implements status publication for the current finite extent. N1 reuse,
 detecting a remote caller's death, driver recovery and the existing W failures
@@ -254,6 +259,11 @@ posts until the declared list ends or the native queue refuses. Actual QP capaci
 used only at setup to check that an individual framed request fits. This does
 not claim the remaining receive mapping or publication queues satisfy W2/W3.
 
+`Mesh.send` expands [explicit placement routes](#placement) before binding these
+transfers. At an intermediate rank the received section itself is retained by
+the onward SEND. No additional function, operand copy or runtime route lookup
+is introduced.
+
 Dotan Barak's rdma-core [work-completion contract](https://man7.org/linux/man-pages/man3/ibv_poll_cq.3.html)
 defines the valid fields of an unsuccessful completion as its work-request id,
 status, QP number and vendor error. Mesh returns on that native status before
@@ -308,13 +318,44 @@ The deadline is setup state only: TX, RX, numerical publication and consumer
 completion contain no clock check. As [RDMA-RULES.md](../RDMA-RULES.md) explains,
 userspace deadlines cannot unwind a driver call already blocked in kernel sleep.
 
+## Placement
+
+Pitch Patarasuk and Xin Yuan,
+[Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf)
+(2009), motivate supporting sparse connected topologies. `Placement` and its
+directed `Edge` keys represent caller-selected paths; the library does not run
+the paper's route-selection or all-reduce algorithm. A route lists the subsequent
+ranks through its destination, so `Edge(0, 2): [1, 2]` means `0 → 1 → 2`.
+The reverse direction has its own key. `owners` is the caller's section-owner
+list; callers still pass ownership explicitly to tensor and function declarations.
+The same value retains the existing work, traffic, cut and path inputs to `bounds`.
+
+`Mesh.send` walks the supplied path during declaration and registers each directed
+leg through the existing send binding. With no path entry, it requests the direct
+edge. A missing configured physical edge reports the existing setup error; no
+route is guessed from rank count or topology. The queue argument applies to each
+leg's selected pair. Existing identical-leg deduplication remains in effect.
+`Mesh.start` discards its route dictionary before workers run.
+
+For a section s on `v0 → v1 → … → vk`, each intermediate receive section is the
+actual source of the next SEND. Its receive completion publishes that section;
+the existing send-use metadata queues onward transport. The intermediate owns
+one producer reference until receive publication and one transport reference
+until onward SEND completion. It has no extra numerical function or consumer
+stamp. Setup starts compute threads only for workers with declared functions.
+For the distinct realized legs E and a cut C, payload traffic is
+`B(C) = sum(bytes(s) * count(s) for (u,v,s) in E crossing C)`.
+Transport framing remains the separate S3 mechanism. This source construction
+does not establish measured forwarding latency or repair W1–W6.
+
 ## Topology
 
 `Topology`: MLX authors' [JACCL hostfile](https://github.com/ml-explore/mlx/blob/main/docs/src/usage/distributed.rst#defining-a-mesh) supplies the full-mesh special case; Patarasuk–Yuan, [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf) (2009), supplies tree-connectivity sufficiency.
 The value stores a node set and lists of parallel links on unordered pairs. Trees,
 rings with spurs, tori and full meshes use the same representation. The paper's
-tree algorithm motivates admitting sparse connected graphs; it does not establish
-that this runtime already forwards between non-adjacent nodes or achieves its bound.
+tree algorithm motivates admitting sparse connected graphs; source forwarding
+is implemented through explicit `Placement` routes. Neither establishes that
+this runtime achieves the paper's bandwidth bound.
 
 ### Topology.Pair
 
@@ -350,8 +391,8 @@ Swift resizes if a replacement region has more links, then includes only paired
 links and their peers alongside the local node. Header/layout validation prevents
 invalid reads; it changes no bridge state. Per-link phase reads are acquired
 individually, not a simultaneous fleet snapshot. Before a client configures
-transfers the current bridge has no paired links. Forwarding, idle pairing and
-latency measurement remain separate deliverables.
+transfers the current bridge has no paired links. Explicit forwarding is described
+under `Placement`; idle pairing and latency measurement remain separate deliverables.
 
 ## Program.write
 
@@ -449,3 +490,6 @@ over that cut's summed bandwidth, and the dependency path's summed startup and
 transfer time; "their maximum is a lower bound, not an exact execution-time formula".
 The caller supplies the placement; `bounds` evaluates it and never chooses one
 (`examples/bounds-table.swift` supplies the proportional placement of the ten-minute table).
+Zero work or traffic takes zero time; positive work or traffic at zero capacity
+yields infinity. Missing nodes and links contribute zero capacity. These rules
+come from the existing `seconds` function; its prose comments now live here.

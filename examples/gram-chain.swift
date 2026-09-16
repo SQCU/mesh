@@ -5,6 +5,7 @@ import Mesh
 private struct Plan: Decodable {
     let owners, rows, latent, hidden, width: [Int]
     let blocks, count, workers: Int
+    let routes: [[Int]]?
 }
 
 // design/algorithm-sources.md#programkernel_call
@@ -46,7 +47,11 @@ struct GramChain {
         let n = p.owners.count
         precondition(n > 0 && [p.rows, p.latent, p.hidden, p.width].allSatisfy { $0.count == n && $0.allSatisfy { $0 > 0 } })
         precondition(p.owners.allSatisfy { (0..<size).contains($0) } && p.blocks > 0 && p.count > 0 && p.workers > 0)
-        let mesh = try Mesh(region: args[3], rank: rank, size: size, workers: p.workers, count: p.count)
+        precondition((p.routes ?? []).allSatisfy { $0.count >= 2 })
+        let placement = Placement(owners: p.owners, routes: Dictionary(uniqueKeysWithValues: (p.routes ?? []).map {
+            (Placement.Edge($0[0], $0.last!), Array($0.dropFirst()))
+        }))
+        let mesh = try Mesh(region: args[3], rank: rank, size: size, workers: p.workers, count: p.count, placement: placement)
         let tiles = Array(0..<n * n), workers = tiles.map { $0 % p.workers }
         let rowOwners = tiles.map { p.owners[$0 / n] }, columnOwners = tiles.map { p.owners[$0 % n] }
         let zBytes = tiles.map { p.rows[$0 / n] * p.width[$0 % n] * 4 }
@@ -102,7 +107,7 @@ struct GramChain {
             z = next
         }
         try mesh.start()
-        for index in 0..<p.count { mesh.submit(index) }
+        if p.owners.contains(rank) { for index in 0..<p.count { mesh.submit(index) } }
         withExtendedLifetime((mesh, z)) { dispatchMain() }
     }
 }

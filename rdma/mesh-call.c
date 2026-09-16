@@ -179,7 +179,7 @@ static void *mesh_call_progress(void *argument){
 /* design/algorithm-sources.md#programkernel_call */
 int mesh_calls_start(struct mesh_calls *calls){
   struct hdr *m=calls->context->M;
-  uint32_t rows=mesh_rows(m);
+  uint32_t rows=mesh_rows(m),workers=0;
   for(uint32_t index=0;index<calls->extent;index++){
     uint32_t transfers_count=0;
     for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++){
@@ -194,6 +194,7 @@ int mesh_calls_start(struct mesh_calls *calls){
   for(int pass=0;pass<2;pass++){
     for(struct mesh_function *function=calls->functions;function;function=function->next){
       struct mesh_call_worker *worker=&calls->workers[function->worker];
+      workers|=UINT32_C(1)<<function->worker;
       for(uint32_t index=0;index<calls->extent;index++){
         struct mesh_call *call=&function->values[index];
         int varying=0;
@@ -225,15 +226,17 @@ int mesh_calls_start(struct mesh_calls *calls){
     }
   }
   atomic_store_explicit(&calls->running,1,memory_order_release);
-  atomic_fetch_add_explicit(&calls->references,calls->count+(calls->function_count?calls->extent:0),memory_order_relaxed);
-  for(uint32_t i=0;i<calls->count;i++){
+  atomic_fetch_add_explicit(&calls->references,(uint32_t)__builtin_popcount(workers)+(calls->function_count?calls->extent:0),memory_order_relaxed);
+  while(workers){
+    uint32_t i=(uint32_t)__builtin_ctz(workers);
     pthread_t thread;
     int error=pthread_create(&thread,NULL,mesh_call_progress,&calls->workers[i]);
     if(error){
       atomic_store(&calls->running,0);
       mesh_calls_cancel(calls,i,calls->count-i);
-      mesh_calls_release(calls,calls->count-i);return error;
+      mesh_calls_release(calls,(uint32_t)__builtin_popcount(workers));return error;
     }
+    workers&=workers-1;
     pthread_detach(thread);
   }
   return 0;

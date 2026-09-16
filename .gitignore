@@ -12,6 +12,7 @@ rdma/sync-on-remote-fill
 rdma/bounds-table
 rdma/coreml-chain
 rdma/gram-chain
+rdma/indexed-gather
 rdma/mesh-hop
 rdma/qcaps
 rdma/qfill
