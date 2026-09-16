@@ -201,7 +201,7 @@ private final class MeshInvocation {
                 encode = function
             } else {
                 let sources = copies.map { copy -> (UInt32, [MTLBuffer]) in
-                    let range = context.pointee.receives[Int(copy.source.channel)]
+                    let range = mesh_receive_range(context, copy.source.channel)
                     let buffers = stride(from: range.first, to: range.first + range.count, by: Int(block)).map { page in
                         memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page), count: quantum))
                     }
@@ -376,7 +376,7 @@ public final class Mesh {
         let source = part.section!, context = memory.context
         let pages: [UInt32], index: (mesh_operand) -> Int
         if source.channel != MESH_ABSENT {
-            let range = context.pointee.receives[Int(source.channel)]
+            let range = mesh_receive_range(context, source.channel)
             let first = Int(range.first), quantum = Int(mesh_block_pages(context))
             pages = stride(from: first, through: first + Int(range.count - source.pages), by: quantum).map(UInt32.init)
             index = { (Int($0.page) - first) / quantum }

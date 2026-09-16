@@ -55,8 +55,11 @@ the memory mapping alive; their actual reads are owned by the declared calls.
 
 All retains occur before S is dropped, when R is necessarily positive. They need
 one increment, with no resurrection check, retry or rollback. After setup, the
-count only decreases. Its transition from one to zero publishes one indexed
-free-pool bit; there is no sealed state, queue claim or retry. Forced teardown
+count only decreases for that value. Its transition from one to zero publishes
+one indexed return event; there is no sealed state, queue claim or retry. ABI 53
+returns receive-owned rows and backing to the RX thread, which reinstalls the
+declared reference count when it assigns the row to a new value. Local sections
+still return to the setup allocator. Forced teardown
 preserves unfinished device ownership until the bridge closes the queue pairs.
 The [reclamation events](#reclamation-events) below replace the former collector.
 
@@ -93,12 +96,17 @@ external code. No caller free/done call or consumer-stamp protocol is required.
 
 ABI 50 stores tensor presence as one atomic 32-bit word per logical row, at a
 fixed offset in the shared mapping. Row allocation initializes the word to zero;
-the row's producer release-stores one after making the payload visible. This
+the row's producer release-stores `invocation + 1` after making the payload visible
+(ABI 53; ABI 50 used the constant one). Shared constants retain stamp one. This
 replaces the packed presence bitmap and its read-modify-write. Constant binding
 and dependency realization read the word during setup. Runtime numerical firing
 continues through notifications and countdowns; only the explicit
 `syncOnRemoteFill` implementation reads presence in a host polling loop. The X9
 native stamp binding and resident-consumer demonstration remain unimplemented.
+The explicit blocking call searches the section's storage slots for the requested
+invocation stamp; a slot number no longer identifies an invocation. This search
+exists only in the opt-in synchronization path. It does not retain a value beyond
+its declared readers, and can wait forever if asked for an unavailable value.
 
 For each numerical worker or TX link, the pending notification set has one bit
 per logical row. A row's one producer publishes it once for that value instance;
@@ -166,15 +174,93 @@ needs no fullness guard and cannot overwrite a queued edge. Power-of-two indexin
 continues to work when the unsigned positions wrap. This does not select an
 invocation slot by modulo: it indexes storage for already-selected queue entries.
 
-The receive cursors, call records and native submissions still have a finite
-extent. This ring removes the append-only send representation; it does not by
-itself rearm a complete invocation or authorize a second publication of a live row.
-N1/N1t still require those remaining changes together.
+ABI 53 completes the companion receive-storage cycle below. Call records,
+instance statuses and native submissions still have a finite extent. These rings
+do not by themselves rearm a complete invocation or authorize a second
+publication of a live row. N1 still requires those remaining changes together.
 
 The library is 2,191 → 2,198 maintained lines for the presence and TX changes.
 For 229,376 rows, the presence words use 917,504 bytes, replacing a 28,672-byte
 bitmap (raw sizes before region alignment). TX entry storage is four bytes times
 the sum of the per-queue capacities. These counts are not performance evidence.
+
+## Receive storage return
+
+ABI 53 connects the final reference of a received value directly to its RX
+thread. The buffer head names its receive channel and binding. Refzero publishes
+one row bit to that queue's return-notice bank; local sections continue to use the
+general free bitmap. Callbacks neither inspect readers nor walk payload backing.
+Only that link's RX thread consumes the return banks. Concurrent native and TX
+publishers use the existing atomic notification mechanism.
+
+Each queue has a fixed physical-page ring, initially containing all its registered
+receive backing. Each binding has a stack of its logical section rows. RX alone
+changes these structures. Unfilled rows have no page mapping. The receive pool
+owns the posted pages independently of those rows; its canonical descriptor
+records the physical extent and client owner. `mesh_receive_range` reads that
+descriptor through the transfer's pool index, replacing the private range array.
+
+Every queue progress step polls its CQ, consumes one available return notice,
+returns one chunk, and attempts one available RECV before handling the completion.
+Returned sections rotate through a bounded ring after each chunk. A large section
+therefore cannot occupy the entire return pass or hold up other queue polls.
+The handler reads the chunk's actual page and clears that row's mapping before
+putting the page at the physical ring's head. This gives returned pages priority
+over unused initial pages. Native refusal leaves the page queued; no software
+outstanding-frame limit or retry wait exists.
+
+After its final chunk is detached, the logical row returns to its binding's
+stack. The first chunk of a new value pops a row, installs the binding's realized
+reference count, clears its old presence and sets its invocation. It neither
+queries occupancy nor waits. Completion places each received page with one
+indexed store; later chunks use the same head and prepared relative offsets.
+The inverse page table, placeholder assignments and four-store permutation are
+removed. A returned row is already unmapped, and a posted page has no live reader,
+so there is no displaced mapping to repair or payload to move.
+
+The source-chunk relation names a binding/value record and relative chunk offset.
+Its occurrence cursor cycles through the declared copies of each source chunk.
+SEND ordering and final ownership keep a sender slot's next value behind its
+previous value on that queue. The final chunk publishes the selected head.
+This also serves forwarding: a received row can carry k=0, be forwarded, return
+at refzero, and carry k=1. The existing send edge resets, and downstream matching
+accepts the same source row with the new invocation. No extra local submit,
+acknowledgement, epoch barrier or inferred collective is involved.
+
+For P physical blocks, every block is in one of: the post ring, a posted
+receive/completion, a live value, or a pending return. A block moves to the ring
+only after its value's final reference. Hence queued blocks never exceed P.
+Each returned section similarly contributes at most one cursor until all its
+chunks are detached. Power-of-two capacities cover these bounds without fullness
+checks. A live reader's reference prevents its physical page from being reposted.
+
+For a binding with V configured rows, the finite API produces at most V values.
+Before first chunk n arrives, its stack has V-(n-1)+R rows, where R is the number
+of completed returns. Since n<=V, a row is always available, even while other
+returns are partly processed. This permits different peer and invocation orders.
+N1's unbounded admission must preserve the bound on live and returning values;
+this change does not claim that an unlimited caller can overrun a finite pool.
+
+Setup captures the binding's declared reference count and removes those counts
+from its initially unused rows. The pool owns their storage while no value occupies
+them. Assignment adds the count for a new value. Atomic add/subtract preserves
+the client-close flag if teardown overlaps. Posted backing never enters the
+ordinary allocator while a QP may name it. After QP teardown, client retirement
+clears received row mappings and returns their logical slots, then releases the
+inactive client's physical pool extents. New-client pool ownership is preserved.
+Payload is never zeroed.
+
+Payload allocation is unchanged. Buffer heads grow from 32 to 40 bytes for the
+channel and binding. Each receive queue adds a return-notice bank per client bank,
+a four-byte physical-ring entry per rounded-up block capacity, and an eight-byte
+return cursor per rounded-up section capacity. Logical free rows use four bytes,
+source values eight, receive bindings 24, and the additional source-row offsets
+four each. Targets remain 12 bytes. Sixteen-byte pool descriptors per arena block
+replace the inverse table's four bytes per OS page. The private receive-range
+array, `mesh_queue` and its indexing wrapper are removed. The library is
+2,272 → 2,349 maintained Swift/C/header lines. This implements N1t's transport
+storage cycle in source; call/status namespaces, native rearm, per-worker
+instance pools, and the unbounded N1 API remain unfinished. No run is claimed.
 
 ## Invocation identity and storage reuse
 
@@ -219,10 +305,11 @@ Core ML feature inputs and Metal matrix inputs therefore select their own views;
 native command buffers and prediction output options use the consumer slot.
 
 This is still a finite extent: call/status arrays are indexed by k in `0..<count`,
-each function advances through its prepared slots once, and receive targets are
-used once. It does not implement `submit(inFlight + k)`. The wire identity and
+each function advances through its prepared slots once. ABI 53 recycles receive
+targets and backing within that namespace. It does not implement
+`submit(inFlight + k)`. The wire identity and
 independent storage selection remove the prior coupling; the free-pool and
-native/RX rearm work below remains required.
+native rearm work below remains required.
 
 The maintained Swift/C/header total remains 2,272 lines. The operand is now 32
 bytes instead of 24; the invocation field fills existing padding in the 32-byte
@@ -252,8 +339,9 @@ policy and supplies no unbounded result-retention claim.
 `82b9b98` (ABI 49) removes the reclamation stack, linked entries, duplicate-enqueue claim,
 deferred list and collector thread. A section's final `mesh_buffer_release`
 publishes its first logical row in `MESH_FREE`: one atomic OR after the existing
-reference decrement. Its descriptor supplies the page count. TX/RX and native
-callbacks do not walk the section's backing, clear allocation bits or query readers.
+reference decrement. Its descriptor supplies the page count. Publication and
+native callbacks do not walk backing or query readers. ABI 53's RX return handler
+performs the indexed backing walk required to repost its freed blocks.
 
 The free bitmap is an unordered pool of section descriptors, with at most one
 entry per live section. Setup's sole allocator first uses available arena ranges.
@@ -273,14 +361,15 @@ a position or waits for another publisher. The allocator reads no refcounts.
 Program destruction marks its sections closed and advances a retirement epoch.
 The bridge processes that event outside active link execution, after joining the
 link controllers and their QP teardown. It discharges still-positive abandoned
-counts into the same pool. Zero counts already have their ordinary free event,
-or have already been consumed. There is no repeatedly deferred buffer and no
+counts into the same pool. ABI 53 also returns zero-count receive-pool rows here;
+their posted backing stayed owned by RX throughout active execution. Local zero
+counts already have their ordinary free event, or have been consumed. There is no repeatedly deferred buffer and no
 device-ownership query on ordinary release. Partial allocation failure drops its
 two known setup/producer references directly; it never acquires device ownership.
 
 This is the existing section allocator's event pool, **not** N1's reusable
 instance pool. Per-worker SPSC instance rings, the in-flight arena bound, native
-launch reuse, transport rearming, and complete R2 failure cancellation remain
+launch reuse, unbounded invocation matching, and complete R2 failure cancellation remain
 required. In particular, recovery of interrupted reference/event publication on
 abrupt caller death is not proved by this ordinary-completion protocol.
 
@@ -366,14 +455,12 @@ The library grows from 2,198 to 2,272 maintained Swift/C/header lines (+74);
 the ring configuration is 12 lines of caller data. No source generator or new
 numerical implementation is introduced. Documentation changes are separate.
 
-Before publication, receive blocks form a bijection between unfilled logical
-destinations and reserved physical blocks. If the next completion fills physical
-block p for destination s, let d be p's current logical owner and q = p(s).
-Assignment exchanges `(s,q), (d,p)` for `(s,p), (d,q)`. Two forward-table stores
-and two inverse-table stores maintain that bijection. The identity case d = s
-uses the same writes. Every physical receive slot appears once in the finite
-posting list, so a previously published block cannot be displaced by a later
-completion. No payload is copied and no published operand changes address.
+ABI 53 keeps unfilled logical rows unmapped. A completion assigns its actual
+physical page directly to the selected row and chunk offset. Return removes that
+mapping before reposting the page; the logical head returns to its binding only
+after all its chunks are detached. There is no inverse-table permutation and no
+payload copy. The [return proof](#receive-storage-return) covers both capacity
+and preservation of live operands.
 
 For example, let A and B each have three chunks and receive positions p0–p5:
 

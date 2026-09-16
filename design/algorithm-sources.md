@@ -47,6 +47,11 @@ seal operation are deleted. ABI 49 also removes the reclamation claim, retry sta
 and collector thread. Refzero sets one row bit in the section free pool; setup
 consumes those entries without reading refcounts or zeroing payload. The bridge
 discharges abandoned positive counts at the device-close retirement event.
+ABI 53 keeps received backing in its RX-owned pool, including when no live value
+occupies a row. Refzero notifies that RX thread; it returns both backing and the
+logical row. Setup captures the binding's reference-count template, and a new
+value reinstalls it on a popped row. Client/device retirement returns the entire
+receive pool, including zero-count posted rows, only after QP teardown.
 The [event derivation and limits](pages-and-functions.md#reclamation-events)
 distinguish this bitmap pool from the still-required X5/N1 per-worker instance
 rings. Counted ownership follows Collins; the bitmap and teardown epoch are Mesh's
@@ -153,6 +158,10 @@ addresses one 32-bit word per logical row; `mesh_publish` release-stores one.
 The packed presence bitmap and its read-modify-write are deleted. Setup consumes
 constant presence while realizing dependencies; the host runtime still fires
 through the existing notification ranges and countdowns.
+ABI 53 writes the logical invocation plus one as the presence stamp. This lets
+the explicitly blocking synchronization call find a moved invocation through
+its storage slots without a racy read of mutable buffer identity. Default firing
+does not read these stamps.
 
 Robert A. van de Geijn and Jerrell Watts,
 [SUMMA: Scalable Universal Matrix Multiplication Algorithm](https://www.cs.utexas.edu/~rvdg/abstracts/SUMMA.html)
@@ -288,8 +297,17 @@ on the local Thunderbolt devices. The alias representation uses one SGE and
 does not infer two-entry support from the general verbs API. The
 [record layout and execution path](async-collectives.md#execution-and-ownership)
 describe this mesh-specific representation. Receive storage is preallocated
-across the finite extent; refill does not depend on consumer completion or page
-reclamation.
+and reused by the owning RX thread at final reference release. The existing
+notification mechanism carries the return event; only RX writes its page and
+return rings and per-binding row stacks. Each queue poll returns one chunk,
+rotates unfinished sections and attempts an available post. It reposts actual pages without clearing them and
+cycles the source-chunk occurrence relation. The [receive-storage proof](pages-and-functions.md#receive-storage-return)
+accounts for receive ownership, bounded metadata, teardown, repeated forwarding,
+and the finite caller namespace still awaiting N1. `link_receive_destroy`
+disposes this setup-owned metadata after its link worker stops. This is an
+application of the cited SEND/RECV and reference-count mechanisms, not a new
+algorithm attributed to JACCL. Posting always uses available pool backing;
+the RX thread does not wait for a particular consumer or return event.
 Apple's [Metal buffer copy](https://developer.apple.com/documentation/metal/mtlblitcommandencoder/copy(from:sourceoffset:to:destinationoffset:size:))
 encodes a copy between existing buffers. ABI 51 uses it to place logical chunks
 into canonical contiguous storage before the supplied encoder in that same

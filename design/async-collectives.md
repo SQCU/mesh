@@ -180,20 +180,29 @@ gives the concurrent-write and reuse conditions. ABI 49 removes the reclamation
 stack and collector; final references publish free-pool bits. ABI 50 replaces
 lasting presence with one release-stored word per row and the send-edge append
 range with a circular array. Each send cursor resets at its final native
-completion. Receive and native invocation rearming still remain N1/N1t work.
+completion. ABI 53 implements receive-storage rearming; native invocation
+rearming and the unbounded N1 API remain unfinished.
 
-Receive posting computes `firstPage + chunkIndex * blockPages` over the contiguous
-run allocated at setup; the former table of every receive address is removed.
+Receive posting pops actual pages from the RX-owned ring, initially filled from
+the contiguous run allocated at setup. Final-reference events return the value's
+actual pages to this ring, with immediate post attempts and no zeroing. Only the
+RX thread changes its ring and per-binding logical-row stacks; other threads
+publish return notices. The pool remains transport-owned through QP teardown.
 Every RX completion identifies its physical chunk through `wr_id`. Its tag indexes
-a cursor in the contiguous destination table. Repeated sends of the same source
-have one target per declared copy, in the same order for every chunk; the cursor
-advances through those targets without following a linked record. Assignment exchanges forward and inverse
-page-table entries, preserving ownership of the displaced unfilled backing.
+a cursor in the source-to-binding table. Repeated sends of the same source have
+one target per declared copy, in the same order for every chunk; the cursor cycles
+through those targets without a linked record. The first chunk selects a free
+logical row and installs its realized reference count. One indexed store records
+each actual page. Free rows are unmapped; receive pools own unfilled backing.
+Returns rotate by chunk, with one return chunk and one available post attempt
+alongside each queue poll, so a large section cannot monopolize RX progress.
 The page-index list therefore fills incrementally. The final chunk's target
 also names the numerical head to publish; earlier chunks do not publish a
 replacement numerical partial. The queue's FIFO order establishes that this
 partial's earlier chunks are already placed. No thread waits for another
-partial or a whole operation to finish. A failed receive reports the provider
+partial or a whole operation to finish. The [receive-return proof](pages-and-functions.md#receive-storage-return)
+states the capacity and lifetime bounds, including what N1 still has to preserve.
+A failed receive reports the provider
 error and ends the affected link invocation before interpreting failed payload;
 there is no sticky per-receive publication guard.
 
@@ -505,7 +514,7 @@ current source and example callers. It does not close the deployment gaps above.
 |---|---|
 | Higher-order partial tensor functions using existing numerics | `TensorFunction` owns raw or native operand preparation. Calls, maps and reductions accept the same function value. Backend selection and view construction finish before invocation. The configured caller supplies existing Core ML functions. |
 | Distinct collective semantics | `Mesh.swift` defines send/receive endpoints, broadcast, scatter, gather, all-scatter, all-gather, all-to-all, reduce, reduce-scatter and all-reduce. Movement returns indexed sections; only the supplied combining function performs reduction arithmetic. |
-| AOT bindings, zero-copy asynchronous use | `mesh_call_bind` prepares operands and retains inputs. `mesh_calls_start` realizes contiguous consumer ranges before transfer activation. Swift prepares native views once; input publications supply their actual rows and invocation identities independently of native storage slots. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_assign` places each chunk through page-index assignment over registered aliases without copying. ABI 51 adds per-consumer canonical materialization for fragmented contiguous operands, with its copy/storage cost stated in the layout section; transport and forwarding still copy no payload. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
+| AOT bindings, zero-copy asynchronous use | `mesh_call_bind` prepares operands and retains inputs. `mesh_calls_start` realizes contiguous consumer ranges before transfer activation. Swift prepares native views once; input publications supply their actual rows and invocation identities independently of native storage slots. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. ABI 53 assigns each completed chunk directly to its logical row and returns the actual backing through the RX pool without copying. ABI 51 adds per-consumer canonical materialization for fragmented contiguous operands, with its copy/storage cost stated in the layout section; transport and forwarding still copy no payload. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
 | Delete incompatible implementation and callers | The former executor/frontend and engine adapters are absent from the current tree. The source inventory includes their replacements. The index transport channel, paired native-binding Cartesian product, per-page receive metadata and process-memory ranking scan are also absent. |
 | Actual producer/collective/numerical-consumer integration | `coreml-chain.swift` composes caller-supplied block functions, reduce-scatter and supplied consumers across a configurable stage list. P1 ran four FFN residual blocks and four indices on the RDMA pair, reaching all eight final consumers. Accelerate performs the supplied float32 sum. This establishes operation, without a throughput claim. |
 | Automatic lifetime; explicit synchronization only | `mesh_buffer_retain` accounts for declared uses. `mesh_publish`, native numerical completion, TX completion and ordinary object destruction discharge their references; final references publish free-pool bits and setup returns backing without clearing payload. Runtime presence polling occurs only in the explicitly called `mesh_sync_on_remote_fill`; its source counterexample includes a self-dependent permanent wait. |
