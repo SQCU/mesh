@@ -105,13 +105,15 @@ partials declared by supplied tensor functions. Transport streaming carries each
 send through internally sized requests. Transport fragmentation does not change
 the tensor partition, numerical function, shape, or send/receive API.
 
-Setup prepares local input and output addresses once. At invocation, the numerical
-worker resolves only received inputs through the canonical page table and invokes
-the supplied function. Input references keep local backing fixed through completion;
+Setup prepares native input and output views once. Each input publication supplies
+its logical invocation and actual source row to the consuming function's indexed
+call record. Its worker selects native storage independently of producer slot
+order and invokes the supplied function when its declared operands are present.
+Input references keep local backing fixed through completion;
 received addresses reflect the actual placement of incoming bytes. CPU completion is its return; Metal and Core ML
 use their native asynchronous completion. Successful completion publishes the
 outputs and releases transient input references. Completion traverses a contiguous
-list of transient input descriptors prepared at setup; it does not test each
+list of transient input positions prepared at setup and releases their actual rows; it does not test each
 input's storage kind or touch shared-constant reference counts. Failures are recorded and do not publish
 failed output as valid data.
 
@@ -147,7 +149,8 @@ live receives have writable backing without consumer credits or reclamation wait
 The bridge prepares two virtual representations of the same shared-memory
 payload pages. Numerical functions see dense operands. Registered transport
 spans alias a tag page followed by each C-byte chunk. A request starts at
-the tag page's final four bytes and continues into the payload. This uses one SGE, as exposed
+the tag page's final eight bytes and continues into the payload. The tag carries
+the invocation and source-chunk row. This uses one SGE, as exposed
 by the local device. It adds no payload copy, runtime mmap, or second identity
 channel. Registration spans are whole alias slots, placed in separate virtual
 address banks; no request crosses a memory-registration boundary. Numerical
@@ -213,7 +216,7 @@ pool and returns actual backing without clearing it. The client notice banks kee
 device publications distinct during handoff.
 
 Setup chooses L = min(C, max operand bytes on that queue direction). The wire
-request carries L + 4 bytes and occupies ceil((L + 4) / 4096) native frames.
+request carries L + 8 bytes and occupies ceil((L + 8) / 4096) native frames.
 Queue capacity counts those frames. This preserves short requests when every
 operand is smaller than C; a large operand never enlarges a request beyond C.
 Tail chunks and smaller operands on a mixed queue include padding up to L. Each physical
@@ -310,8 +313,9 @@ The internal `MeshSubmission` enum selects the backend during realization;
 `MeshInvocation.submit` remains the resolved runtime closure. Function factories
 are not traversed during numerical execution.
 
-A local operand selects a binding by value index; a shared constant selects
-index zero. A materialized input selects its invocation index. Each receive
+A local input selects its producer's storage index; a shared constant selects
+index zero. Outputs and materialized inputs select the consuming function's
+native slot. The logical invocation is a separate operand field. Each receive
 channel has a contiguous preallocated page range; a direct single-chunk input
 selects a prepared binding by `(page - firstPage) / blockPages`.
 The range is recorded once when allocated; neither a per-operand slot table nor
@@ -433,7 +437,8 @@ allocation counts, not performance measurements.
 Shared function metadata is constant in N; per-value operands, consumer references,
 pending counts and backing grow with the finite extent. For W numerical workers,
 L logical rows and E declared arrival dependencies, adjacency contains W*(L+1)
-offsets and E call pointers. This replaces list heads and two-pointer use
+offsets and E eight-byte consumer entries (function/input pairs in ABI 52,
+formerly call pointers). This replaces list heads and two-pointer use
 records, including records previously allocated for inputs already present at setup.
 Repeated uses of one operand retain repeated references and dependencies;
 compaction does not deduplicate the dataflow itself. Submission touches the root
@@ -500,7 +505,7 @@ current source and example callers. It does not close the deployment gaps above.
 |---|---|
 | Higher-order partial tensor functions using existing numerics | `TensorFunction` owns raw or native operand preparation. Calls, maps and reductions accept the same function value. Backend selection and view construction finish before invocation. The configured caller supplies existing Core ML functions. |
 | Distinct collective semantics | `Mesh.swift` defines send/receive endpoints, broadcast, scatter, gather, all-scatter, all-gather, all-to-all, reduce, reduce-scatter and all-reduce. Movement returns indexed sections; only the supplied combining function performs reduction arithmetic. |
-| AOT bindings, zero-copy asynchronous use | `mesh_call_bind` prepares operands and retains inputs. `mesh_calls_start` realizes contiguous consumer ranges before transfer activation. Swift prepares native views once; only received input addresses resolve at invocation. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_assign` places each chunk through page-index assignment over registered aliases without copying. ABI 51 adds per-consumer canonical materialization for fragmented contiguous operands, with its copy/storage cost stated in the layout section; transport and forwarding still copy no payload. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
+| AOT bindings, zero-copy asynchronous use | `mesh_call_bind` prepares operands and retains inputs. `mesh_calls_start` realizes contiguous consumer ranges before transfer activation. Swift prepares native views once; input publications supply their actual rows and invocation identities independently of native storage slots. `link_configure` realizes routes and posts receives before `verbs_up` enables sends. `mesh_receive_assign` places each chunk through page-index assignment over registered aliases without copying. ABI 51 adds per-consumer canonical materialization for fragmented contiguous operands, with its copy/storage cost stated in the layout section; transport and forwarding still copy no payload. Dedicated TX/RX threads post and drain; numerical completion publishes only the corresponding value's uses. |
 | Delete incompatible implementation and callers | The former executor/frontend and engine adapters are absent from the current tree. The source inventory includes their replacements. The index transport channel, paired native-binding Cartesian product, per-page receive metadata and process-memory ranking scan are also absent. |
 | Actual producer/collective/numerical-consumer integration | `coreml-chain.swift` composes caller-supplied block functions, reduce-scatter and supplied consumers across a configurable stage list. P1 ran four FFN residual blocks and four indices on the RDMA pair, reaching all eight final consumers. Accelerate performs the supplied float32 sum. This establishes operation, without a throughput claim. |
 | Automatic lifetime; explicit synchronization only | `mesh_buffer_retain` accounts for declared uses. `mesh_publish`, native numerical completion, TX completion and ordinary object destruction discharge their references; final references publish free-pool bits and setup returns backing without clearing payload. Runtime presence polling occurs only in the explicitly called `mesh_sync_on_remote_fill`; its source counterexample includes a self-dependent permanent wait. |

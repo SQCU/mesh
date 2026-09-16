@@ -113,7 +113,7 @@ numerical-call reference; a receive-driven rank has its declared receive and cal
 references. Their existing completions account for all work without requiring a
 local `submit`. A rank with no declared work has a successful result at setup.
 
-`mesh_call_retire` replaces the old per-call whole-program reference update.
+`mesh_call_finish` replaces the old per-call whole-program reference update.
 Only the last numerical call of an instance drops that instance's program
 reference. `mesh_call_finish` shares input retirement between success and failure.
 `mesh_calls_cancel` retires unissued records after their workers stop; it does not
@@ -177,10 +177,21 @@ Yousef Saad, [Iterative Methods for Sparse Linear Systems, second edition](https
 SIAM (2003), section 3.4: compressed row storage uses row offsets to index contiguous
 entries. Mesh applies that representation to declared consumer references, not
 numerical sparse-matrix computation. `mesh_calls_start` counts references, forms
-prefix offsets and scatters call pointers into those ranges before transport
-activation. Publication traverses only its row's range. Setup also prepares local
-operand addresses and records direct received-input positions; invocation resolves
-only those positions. ABI 51 separates dependency rows from contiguous operand
+prefix offsets and scatters function/input identities into those ranges before
+transport activation. Publication traverses only its row's range. ABI 52 applies
+Monsoon's explicit activation-address idea to the finite invocation namespace:
+the function worker indexes its call record by the published invocation, then
+selects its prepared native storage independently. This is direct array indexing,
+not associative token matching or Monsoon hardware. Each input publication supplies
+its actual source row. Shared inputs have one consumer entry per binding. Completion
+releases those actual rows; the obsolete slot-derived cleanup and remote-refresh
+paths are removed. The original shared and unissued references end at the existing
+client/device retirement event after native callbacks, without caller release.
+`mesh_row_page` is the direct canonical row lookup used by native placement;
+the redundant section-to-page wrapper is removed. The [identity derivation and
+costs](pages-and-functions.md#invocation-identity-and-storage-reuse) separate this
+finite implementation from unfinished N1 reuse.
+ABI 51 separates dependency rows from contiguous operand
 views. A single-chunk input selects a view by its received page offset; multi-chunk
 inputs use the indexed placement described under [transport](#programcopy).
 
@@ -267,8 +278,10 @@ distinguish substrate facts from the retained bridge's protocol decisions.
 TN3205 explicitly limits this transport to `IBV_WR_SEND`; its SDK enum for
 `IBV_WR_SEND_WITH_IMM` does not establish hardware support. Both TN3205 and JACCL
 show local `wr_id` values returned with completions. Mesh uses these identifiers
-for buffer lifetime. Every chunk carries a source-chunk row tag; setup maps that
-row to a destination chunk and, for the final chunk, the numerical publication.
+for buffer lifetime. Every chunk carries an eight-byte invocation/source-chunk
+row tag; setup maps that row to a destination chunk and, for the final chunk, the
+numerical publication. The invocation follows the value across peers separately
+from any producer or consumer storage ordinal.
 The tag arrives in the payload's own work request. There is no index QP or
 cross-QP identity join. On September 15, `ibv_devinfo -v` reported `max_sge: 1`
 on the local Thunderbolt devices. The alias representation uses one SGE and

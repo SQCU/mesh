@@ -66,7 +66,7 @@ struct GramChain {
         }
         var z = try tiles.map { try mesh.tensor(on: columnOwners[$0], sections: [zBytes[$0]])[0] }
         let produce = TensorFunction.cpu { _, outputs in
-            var first = Float(outputs[0].index), step: Float = 0.001
+            var first = Float(outputs[0].invocation), step: Float = 0.001
             vDSP_vramp(&first, &step, outputs[0].data!.assumingMemoryBound(to: Float.self), 1,
                        vDSP_Length(outputs[0].bytes / 4))
         }

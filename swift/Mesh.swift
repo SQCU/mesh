@@ -183,12 +183,7 @@ private final class MeshInvocation {
         let context = memory.context, block = mesh_block_pages(context)
         let quantum = Int(block * context.pointee.M.pointee.pgsz)
         let chunks = copies.map { copy in
-            stride(from: 0, to: copy.source.bytes, by: quantum).map { offset in
-                var section = copy.source
-                section.first += UInt32(offset / quantum) * block
-                section.bytes = min(quantum, copy.source.bytes - offset)
-                return section
-            }
+            stride(from: 0, to: copy.source.bytes, by: quantum).map { min(quantum, copy.source.bytes - $0) }
         }
         let launch: (OpaquePointer, UInt32, MeshOperands, MeshOperands) -> Void
         let copyOnCPU: Bool
@@ -218,13 +213,13 @@ private final class MeshInvocation {
                     }
                 }
                 encode = { command, inputs, outputs in
-                    let index = inputs[0].index
                     let blit = command.makeBlitCommandEncoder()!
                     for i in copies.indices {
-                        for (chunk, section) in chunks[i].enumerated() {
-                            let page = mesh_section_page(context, section, index)
+                        let input = inputs[copies[i].input]
+                        for (chunk, bytes) in chunks[i].enumerated() {
+                            let page = mesh_row_page(context, input.row + UInt32(chunk) * block)
                             blit.copy(from: sources[i].1[Int((page - sources[i].0) / block)], sourceOffset: 0,
-                                      to: targets[i][Int(index)], destinationOffset: chunk * quantum, size: (section.bytes + 3) / 4 * 4)
+                                      to: targets[i][Int(input.index)], destinationOffset: chunk * quantum, size: (bytes + 3) / 4 * 4)
                         }
                     }
                     blit.endEncoding()
@@ -256,9 +251,10 @@ private final class MeshInvocation {
         if copyOnCPU && !copies.isEmpty {
             submit = { call, index, inputs, outputs in
                 for i in copies.indices {
-                    for (chunk, section) in chunks[i].enumerated() {
-                        memcpy(inputs[copies[i].input].data!.advanced(by: chunk * quantum),
-                               mesh_section_address(context, section, index), section.bytes)
+                    let input = inputs[copies[i].input]
+                    for (chunk, bytes) in chunks[i].enumerated() {
+                        let page = mesh_row_page(context, input.row + UInt32(chunk) * block)
+                        memcpy(input.data!.advanced(by: chunk * quantum), mesh_page_address(context, page), bytes)
                     }
                 }
                 launch(call, index, inputs, outputs)
@@ -385,7 +381,7 @@ public final class Mesh {
             pages = stride(from: first, through: first + Int(range.count - source.pages), by: quantum).map(UInt32.init)
             index = { (Int($0.page) - first) / quantum }
         } else {
-            pages = (0..<source.count).map { mesh_section_page(context, source, $0) }
+            pages = (0..<source.count).map { mesh_row_page(context, source.first + $0 * source.stride) }
             let stride = part.shared ? 0 : 1
             index = { Int($0.index) * stride }
         }

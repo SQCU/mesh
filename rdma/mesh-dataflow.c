@@ -137,7 +137,6 @@ void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t
   for(uint32_t offset=0;offset<pages;offset+=c->M->block){
     atomic_store_explicit(&mesh_page(c->M)[first+offset],page+offset,memory_order_relaxed);
     mesh_backing(c->M)[page+offset]=first+offset;
-    *mesh_tag(c->M,page+offset)=first+offset;
   }
 }
 

@@ -3,8 +3,8 @@
 #include <pthread.h>
 
 /* design/algorithm-sources.md#programcopy */
-struct mesh_send_edge {uint32_t queue,row,pages,offset,instance,count;};
-struct mesh_target {uint32_t row,publish,instance,count;};
+struct mesh_send_edge {uint32_t queue,row,pages,offset,shared;};
+struct mesh_target {uint32_t row,publish,shared;};
 struct mesh_ready {uint64_t head,tail;size_t first,mask;};
 struct mesh_queue {uint32_t next,bytes;};
 struct mesh_receive {uint32_t first,*next,length;struct mesh_target *targets;};
@@ -91,7 +91,7 @@ static int link_configure(void *state,int socket,uint64_t client){
       struct mesh_transfer *transfers=direction==MESH_SEND?out:in;
       uint64_t bytes=0;
       for(uint32_t i=0;i<counts[direction];i++)if(transfers[i].bytes>bytes)bytes=transfers[i].bytes;
-      queue->bytes=(uint32_t)(bytes<payload?bytes:payload)+sizeof(uint32_t);
+      queue->bytes=(uint32_t)(bytes<payload?bytes:payload)+sizeof(uint64_t);
       if(counts[direction] && (queue->bytes+4095)/4096>link->provider.capacity[q][direction]){free(bindings);free(peer);errno=EMSGSIZE;return -1;}
     }
     int error=exchange(socket,out,peer,sends*sizeof *out,receives*sizeof *peer,m,client,link->provider.deadline);
@@ -123,14 +123,14 @@ static int link_configure(void *state,int socket,uint64_t client){
       uint32_t chunks=(uint32_t)((in[i].bytes+payload-1)/payload);
       for(uint32_t chunk=0;chunk<chunks;chunk++){
         uint32_t row=first+chunk*m->block,key=source+chunk*peer[i].chunk_stride;
-        receive->targets[receive->next[key]++]=(struct mesh_target){row,chunk+1==chunks?first:MESH_ABSENT,in[i].stride?value:0,in[i].stride?1:link->instance_count};
+        receive->targets[receive->next[key]++]=(struct mesh_target){row,chunk+1==chunks?first:MESH_ABSENT,!in[i].stride};
       }
     }
     memmove(receive->next+1,receive->next,(size_t)rows*sizeof *receive->next);receive->next[0]=0;
     for(uint32_t i=0;i<sends;i++)for(uint32_t value=0;value<out[i].count;value++){
       uint32_t row=out[i].local_row+value*out[i].stride;
       uint32_t chunks=(uint32_t)((out[i].bytes+payload-1)/payload);
-      link->send_edges[link->send_offsets[row]++]=(struct mesh_send_edge){.queue=q,.row=row,.pages=chunks*m->block,.instance=out[i].stride?value:0,.count=out[i].stride?1:link->instance_count};
+      link->send_edges[link->send_offsets[row]++]=(struct mesh_send_edge){.queue=q,.row=row,.pages=chunks*m->block,.shared=!out[i].stride};
     }
     free(bindings);free(peer);
   }
@@ -165,6 +165,8 @@ static int link_send_ready(struct mesh_link *link,uint32_t q){
     uint32_t edge=link->send_ready[ready->first+(ready->head&ready->mask)];
     struct mesh_send_edge *source=&link->send_edges[edge];
     uint32_t page=atomic_load_explicit(&mesh_page(link->M)[source->row+source->offset],memory_order_acquire);
+    uint64_t tag=((uint64_t)mesh_buffers(link->M)[source->row].invocation<<32)|(source->row+source->offset);
+    atomic_store_explicit(mesh_tag(link->M,page),tag,memory_order_relaxed);
     uint32_t end=source->offset+link->M->block;
     int error=link_post(link,q,MESH_SEND,end==source->pages?edge:MESH_ABSENT,page);
     if(error)return error;
@@ -187,20 +189,24 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
       struct ibv_wc *wc=&completions[i];
       if(wc->status){link_error(link,wc->status,2);return wc->status;}
       if(direction==MESH_RECEIVE){
-        uint32_t page=(uint32_t)wc->wr_id,source=*mesh_tag(m,page);
+        uint32_t page=(uint32_t)wc->wr_id;
+        uint64_t tag=atomic_load_explicit(mesh_tag(m,page),memory_order_relaxed);
         struct mesh_receive *receive=&link->receive[q];
-        struct mesh_target target=receive->targets[receive->next[source]++];
+        struct mesh_target target=receive->targets[receive->next[(uint32_t)tag]++];
         mesh_receive_assign(m,target.row,page);
         if(target.publish!=MESH_ABSENT){
+          uint32_t invocation=(uint32_t)(tag>>32),first=target.shared?0:invocation,end=target.shared?link->instance_count:invocation+1;
+          mesh_buffers(m)[target.publish].invocation=invocation;
           mesh_publish(m,target.publish);
-          for(uint32_t i=target.instance;i<target.instance+target.count;i++)mesh_instance_release(&link->instances[i],MESH_TRANSFER_REFERENCE);
+          for(uint32_t i=first;i<end;i++)mesh_instance_release(&link->instances[i],MESH_TRANSFER_REFERENCE);
         }
       } else {
         if((uint32_t)wc->wr_id!=MESH_ABSENT){
           struct mesh_send_edge *source=&link->send_edges[(uint32_t)wc->wr_id];
+          uint32_t invocation=mesh_buffers(m)[source->row].invocation,first=source->shared?0:invocation,end=source->shared?link->instance_count:invocation+1;
           source->offset=0;
           mesh_buffer_release(m,source->row,1);
-          for(uint32_t i=source->instance;i<source->instance+source->count;i++)mesh_instance_release(&link->instances[i],MESH_TRANSFER_REFERENCE);
+          for(uint32_t i=first;i<end;i++)mesh_instance_release(&link->instances[i],MESH_TRANSFER_REFERENCE);
         }
       }
     }

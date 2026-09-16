@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 51u
+#define MESH_VERSION 52u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -19,7 +19,7 @@ enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_BUFFER_CLOSED=4 };
 #define MESH_BUFFER_FLAG(flag) ((uint64_t)(flag)<<32)
-struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages; _Atomic uint32_t uses; uint64_t owner; };
+struct mesh_buffer { _Atomic uint64_t ownership; uint32_t first,pages; _Atomic uint32_t uses; uint32_t invocation; uint64_t owner; };
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_COMPUTE_THREADS 8
@@ -83,7 +83,7 @@ static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return &mesh_links(m)[queue/m->qps].order_length[(owner>>63)*2*MESH_QPS+2*(queue%m->qps)+(uint32_t)direction]; }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
 /* design/algorithm-sources.md#programcopy */
-static inline uint32_t *mesh_tag(struct hdr *m,uint32_t page){ return (uint32_t *)((char *)m+m->tags_off+(size_t)(page/m->block+1)*m->pgsz-sizeof(uint32_t)); }
+static inline _Atomic uint64_t *mesh_tag(struct hdr *m,uint32_t page){ return (_Atomic uint64_t *)((char *)m+m->tags_off+(size_t)(page/m->block+1)*m->pgsz-sizeof(uint64_t)); }
 
 static inline uint64_t mesh_word_mask(uint32_t first,uint32_t count,uint32_t word){
   uint32_t lo=word*64,hi=lo+64,a=first>lo?first:lo,b=first+count<hi?first+count:hi;
@@ -107,7 +107,6 @@ static inline void mesh_receive_assign(struct hdr *m,uint32_t row,uint32_t page)
   mesh_backing(m)[previous]=displaced;
   mesh_backing(m)[page]=row;
   atomic_store_explicit(&mesh_page(m)[row],page,memory_order_relaxed);
-  *mesh_tag(m,page)=row;
 }
 
 /* design/algorithm-sources.md#programkernel_call */

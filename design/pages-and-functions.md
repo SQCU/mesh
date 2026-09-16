@@ -62,9 +62,12 @@ The [reclamation events](#reclamation-events) below replace the former collector
 
 For a transient input, each indexed use is a numerical owner and its native
 completion releases that reference. For an immutable shared input, the prepared
-function holds one reference per binding across all its value indices. Destruction
-of that function follows completion or cancellation of all its call records and
-releases the shared reference. Thus the constant remains live throughout every
+function holds one reference per binding across all its value indices. Program
+destruction follows completion or cancellation of all its call records. ABI 52
+leaves shared and unissued operand references to the existing client-retirement
+event, after native callbacks end and the bridge closes the queue pairs. It removes
+the destructor's reconstruction of consumed rows from consumer slot numbers.
+Thus the constant remains live throughout every
 native read without per-invocation reference updates. This groups equal storage
 lifetimes; it does not remove input-arrival dependencies or alter tensor values.
 
@@ -175,19 +178,60 @@ the sum of the per-queue capacities. These counts are not performance evidence.
 
 ## Invocation identity and storage reuse
 
-The remaining N1 change must distinguish the invocation label k, its local
-storage slot s, a logical operand row j, and the physical pages backing that row:
+ABI 52 distinguishes the invocation label k, each function's native storage slot
+s_f(k), a logical operand row j, and the physical pages backing that row:
 
 \[
- (k,j) \longmapsto (s(k),j) \longmapsto \operatorname{pages}(s(k),j).
+ (k,j) \longmapsto (s_f(k),j) \longmapsto \operatorname{pages}(s_f(k),j).
 \]
 
-The current source identifies k with s throughout `mesh_call`, the status array,
-prepared native objects and transfer targets. It consequently implements a finite
-set of single-use invocations. Returning a slot to a free ring alone cannot fix
-this: later work needs its own identity while native views continue to select the
-chosen storage. Receive matching must carry that identity between peers and keep
-it distinct from the physical slot that a particular rank selected.
+The row's publication carries k. A transport chunk contains `(k, sourceChunkRow)`
+in its eight-byte tag; the queue's source-row relation determines its destination,
+and the received head retains k for numerical consumers and forwarding. The tag
+does not carry a raw pointer or select the receiver's native storage. TX stores
+the tag immediately before posting. Concurrent links sending the same backing
+write the same atomic word; their declared references keep that backing live.
+RX does not rewrite the received tag. The existing pairing version rejects a
+different wire ABI before posting data.
+
+A prepared consumer range contains `(function, inputPosition)` entries. Its
+single numerical worker indexes that function's call record directly by k;
+there is no hash search, cross-worker slot claim or admission coordinator.
+The first dynamic input or root publication assigns the function's next prepared
+native slot. All inputs for k populate that record, independently of their own
+producer slots. Shared inputs update their prepared views once across the finite
+extent and discharge their dependency for every record. They do not allocate
+native slots ahead of dynamic inputs.
+
+For example, P can produce k=1 in slot 0 and k=0 in slot 1, while Q produces k=0
+in slot 0 and k=1 in slot 1. If P(1) reaches C first, C assigns its slot 0 to k=1.
+Q(0) can independently assign C's slot 1 to k=0. Q(1) then fills C(1)'s second
+operand using Q's slot 1; P(0) fills C(0) using P's slot 1. Neither C call mixes
+invocations or requires the producers to agree on slot order.
+
+`mesh_operand.invocation` is k; `.index` selects that operand's native storage;
+`.row` names its original logical value; `.page` and `.data` select its native
+view. A materialized input retains its original row while its data/index name
+the consuming function's contiguous storage. Placement resolves each source
+chunk from `.row`. Completion releases the original rows actually consumed,
+publishes output rows already held in the operand array, and retires status k.
+Core ML feature inputs and Metal matrix inputs therefore select their own views;
+native command buffers and prediction output options use the consumer slot.
+
+This is still a finite extent: call/status arrays are indexed by k in `0..<count`,
+each function advances through its prepared slots once, and receive targets are
+used once. It does not implement `submit(inFlight + k)`. The wire identity and
+independent storage selection remove the prior coupling; the free-pool and
+native/RX rearm work below remains required.
+
+The maintained Swift/C/header total remains 2,272 lines. The operand is now 32
+bytes instead of 24; the invocation field fills existing padding in the 32-byte
+buffer head. Consumer entries remain eight bytes; shared-input entries shrink
+from `count` entries to one per binding. Send edges shrink from 24 to 20 bytes,
+receive targets from 16 to 12. A function pointer array adds eight bytes per
+function. The duplicate output-section array, consumed-section copies,
+remote-refresh index list, completed flags and submission/retirement forwarding
+helpers are removed. These are representation costs, not measured latency gains.
 
 Reuse follows final declared ownership, with every worker's call countdowns,
 receive targets and native submission storage prepared for the new invocation.
@@ -200,8 +244,8 @@ has one actual writer because its publisher and drainer are the same TX thread.
 Result retention is a separate API lifetime: a live invocation's status must be
 findable independently of the slot chosen for its operands. The pending retention
 clarification concerns completed results after storage reuse, not preservation
-of live work. No invocation-directory or result-retention policy has been added
-to source by these prerequisites.
+of live work. The current finite status array adds no completed-result eviction
+policy and supplies no unbounded result-retention claim.
 
 ## Reclamation events
 
@@ -307,7 +351,7 @@ created at setup through the existing shared-buffer cache. CPU and Core ML paths
 perform indexed `memcpy` on their numerical worker before the supplied function or
 prediction. They add no GPU-to-host completion round trip and execute no layout
 work on an RDMA thread. Unaffected inputs retain their existing direct bindings.
-The backend choice, chunk rows, byte extents and native views are all realized
+The backend choice, relative chunk offsets, byte extents and native views are all realized
 before invocation. No runtime predicate asks whether an entire receive happened
 to land contiguously.
 
@@ -350,8 +394,8 @@ The existing [Gram chain ring configuration](../examples/gram-chain-ring.json)
 uses that path through ordinary gathers, supplied functions and reduce-scatters.
 It is source usage, not a measured four-node run.
 
-Each chunk completion performs that assignment independently, updating one
-forward entry and preparing the chunk's local source tag for forwarding. The
+Each chunk completion performs that assignment independently. TX prepares the
+forwarded chunk's local row and invocation tag when it posts that chunk. The
 last chunk's precomputed target also names the numerical head to publish.
 FIFO completion puts that publication after all the partial's bytes are placed.
 It does not publish a different tensor partition or wait for any other partial.
@@ -360,7 +404,7 @@ the page table, including the displaced mappings of unfinished receives.
 
 The registered transport address space aliases these payload pages and a
 separate tag page before each chunk. Its one-entry SEND/RECV span starts at
-that page's final four bytes and continues into the payload; the dense numerical address space excludes
+that page's final eight bytes and continues into the payload; the dense numerical address space excludes
 tag pages. Both address spaces map the same shared-memory payload, not two
 copies. All aliases and registrations are made before execution. The tag page
 costs one OS page of storage per chunk; framing costs are recorded in
@@ -371,7 +415,7 @@ or one receive. Its initial reference represents that write. `mesh_publish`
 releases this reference once after publishing the declared uses. There is no
 producer flag or duplicate-publication check. Transient numerical and transport
 references were retained during realization and end through their own native completions;
-shared numerical references end with their prepared function's lifetime;
+shared numerical references end with client retirement after native users finish;
 external handles have ordinary automatic lifetimes. This preserves
 `R = P + C + T + E` while removing a redundant atomic producer-flag operation.
 The final reference publishes the section to the [free pool](#reclamation-events).

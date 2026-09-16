@@ -75,7 +75,7 @@ struct CoreMLChain {
         for i in parts.indices {
             let elements = layout[i].elements
             try mesh.call(.cpu { _, outputs in
-                var start = Float(Int(outputs[0].index) + i), step: Float = 1
+                var start = Float(Int(outputs[0].invocation) + i), step: Float = 1
                 vDSP_vramp(&start, &step, outputs[0].data!.assumingMemoryBound(to: Float.self), 1, vDSP_Length(elements))
             }, inputs: [], outputs: [parts[i]], on: layout[i].owner, worker: i % plan.workers)
         }
@@ -122,7 +122,7 @@ struct CoreMLChain {
         for i in parts.indices {
             try mesh.call(.cpu { inputs, _ in
                 let input = inputs[0], data = input.data!.assumingMemoryBound(to: Float.self)
-                let first = data[0], last = data[Int(input.bytes) / 4 - 1], index = input.index
+                let first = data[0], last = data[Int(input.bytes) / 4 - 1], index = input.invocation
                 DispatchQueue.main.async {
                     print("rank=\(rank) part=\(i) index=\(index) first=\(first) last=\(last)")
                     fflush(stdout)
