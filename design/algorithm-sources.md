@@ -225,17 +225,20 @@ client/device retirement event after native callbacks, without caller release.
 the redundant section-to-page wrapper is removed. The [identity derivation and
 costs](pages-and-functions.md#invocation-identity-and-storage-reuse) separate this
 finite implementation from unfinished N1 reuse.
-The numerical consumer relation now has one entry per declared function/input
-use, independent of resident slot count. A buffer's `definition` indexes that
-immutable relation; its row and invocation continue to identify the actual value.
-Protocol 57 placed the field in the existing alignment gap of its 48-byte buffer descriptor; ABI 58 adds the mapping offset described above.
-For E varying/root uses, S shared uses and V resident slots, target storage drops
-from 8(VE+S) to 8(E+S) bytes. Per-worker row-offset arrays remain unchanged.
-Publication still uses the descriptor's worker bitmask; numerical dispatch loads
-its definition and traverses only that section's consumer range. No predicate,
-wait or scan is introduced. This removes numerical matching's dependency on a
-private range of storage rows; receive row allocation and forwarding state are
-still separate N1 work.
+Row 19v realizes the consumer relation for every resident row. Dispatch indexes
+its CSR range directly by the event's row; the section-definition lookup and the
+function-index-to-pointer `program` array are removed. Each consumer record holds
+the prepared function pointer, input position and shared-input classification in
+32 bytes with 32-byte alignment, asserted at compilation. Records use an aligned
+setup allocation. For E varying/root uses, S shared uses, V resident slots and F
+functions, target storage changes from 8(E+S) to 32(VE+S) bytes and the separate
+8F-byte function-pointer array disappears. Row-offset storage is unchanged.
+This spends setup memory to remove dependent runtime reads. The supplied stamp
+argument also removes `mesh_publish`'s read of `buffer.invocation`: native completion
+passes its call's stamp, RX passes the tag's stamp, and constants pass one.
+These changes apply Monsoon's prepared activation addresses and Saad's contiguous
+row ranges; they do not complete X10's receive/call/instance records or N1's frame
+replacement.
 ABI 51 separates dependency rows from contiguous operand
 views. A single-chunk input selects a view by its received page offset; multi-chunk
 inputs use the indexed placement described under [transport](#programcopy).

@@ -204,18 +204,19 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
         struct mesh_wire_tag *tag=mesh_tag(m,page);
         struct mesh_receive *receive=&link->receive[q];
         uint32_t source=atomic_load_explicit(&tag->row,memory_order_relaxed),chunk=atomic_load_explicit(&tag->chunk,memory_order_relaxed);
+        uint64_t invocation=atomic_load_explicit(&tag->invocation,memory_order_relaxed);
         struct mesh_receive_binding *binding=&receive->bindings[receive->definitions[atomic_load_explicit(&tag->definition,memory_order_relaxed)]];
         if(!chunk){
           receive->active[source]=binding->rows[--binding->count];
           struct mesh_buffer *buffer=&mesh_buffers(m)[receive->active[source]];
           atomic_fetch_add_explicit(&buffer->ownership,binding->references,memory_order_relaxed);
           atomic_store_explicit(&mesh_presence(m)[receive->active[source]],0,memory_order_relaxed);
-          buffer->invocation=atomic_load_explicit(&tag->invocation,memory_order_relaxed);
+          buffer->invocation=invocation;
         }
         uint32_t row=receive->active[source];
         atomic_store_explicit(&mesh_buffer_pages(m,row)[chunk],page,memory_order_relaxed);
         if(chunk+1==binding->chunks){
-          mesh_publish(m,row);
+          mesh_publish(m,row,invocation+1);
           if(binding->shared)mesh_event_push(m,link->client,1+MESH_COMPUTE_THREADS+2*link->index+MESH_RECEIVE,
             (struct mesh_event){0,0,MESH_EVENT_SHARED});
         }

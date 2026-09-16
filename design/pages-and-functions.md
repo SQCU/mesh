@@ -253,15 +253,14 @@ live dataflow together. Local SEND completion alone does not establish remote
 last use. A receive-side occupancy check, acknowledgement or wait would withhold
 work without repairing the allocation model and is not the proposed remedy.
 
-Numerical consumer ranges are now indexed by the buffer's immutable section
-`definition`, rather than duplicated for each resident row. All root rows name
-the same root definition; all slots of a tensor section name its section
-definition. A publication still supplies its actual row and invocation, so input
-binding, page mapping and ownership continue to refer to the actual value. This
-is the prerequisite for assigning a received descriptor independently of its
-section's old private row range. The current RX allocator and TX forwarding
-arrays have not yet made that transition, and no receive-capacity completion is
-claimed from this dependency-table change.
+Numerical consumer ranges are indexed directly by the published row. Setup
+replicates the function/input relation across its resident rows, and each aligned
+consumer record contains the prepared function pointer and input classification.
+Row 19v removes the definition indirection introduced in protocol 57 and the
+separate function-index lookup: that metadata compression increased dependent
+loads on the execution path. The actual input row still identifies its page list
+and ownership. The RX allocator's private row stacks remain unfinished work;
+consumer-table changes do not establish their capacity or reuse correctness.
 
 Setup captures the binding's declared reference count and removes those counts
 from its initially unused rows. The pool owns their storage while no value occupies

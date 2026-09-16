@@ -51,7 +51,7 @@ struct hdr {
   _Atomic uint64_t client,bridge_pid,device_client,serial,retired;
   struct mesh_port_info port;
 };
-void mesh_publish(struct hdr *,uint32_t row);
+void mesh_publish(struct hdr *,uint32_t row,uint64_t stamp);
 /* design/algorithm-sources.md#meshresult */
 static inline struct mesh_instance *mesh_instances(struct hdr *m,uint64_t owner){return (struct mesh_instance *)((char *)m+m->instance_off)+(owner>>63)*m->rows;}
 /* design/algorithm-sources.md#meshresult */
