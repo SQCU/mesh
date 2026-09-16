@@ -118,11 +118,11 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
     *call=(struct mesh_call){.function=function,.operands=function->operands+index*count,.index=index};
     for(size_t i=0;i<count;i++){
       struct mesh_section section=i<input_count?views[i]:outputs[i-input_count];
-      uint32_t page=atomic_load_explicit(mesh_buffer_pages(m,mesh_section_row(section,index)),memory_order_acquire);
+      uint32_t page=atomic_load_explicit(mesh_page(m)+mesh_section_row(section,index),memory_order_acquire);
       uint32_t row=mesh_section_row(i<input_count?inputs[i]:section,index);
       function->operands[index*count+i]=(struct mesh_operand){.data=page==MESH_ABSENT?NULL:mesh_at(m,page),.bytes=section.bytes,
         .page=page,.index=section.stride?index:0,.row=row,
-        .pages=mesh_buffer_pages(m,mesh_section_row(section,index)),.page_size=m->pgsz,.block_pages=m->block};
+        .pages=mesh_page(m)+mesh_section_row(section,index),.page_size=m->pgsz,.block_pages=m->block};
     }
   }
   function->identity=calls->function_count++;
@@ -251,7 +251,7 @@ int mesh_calls_start(struct mesh_calls *calls){
           if(pass){
             struct mesh_call *call=&function->values[index];
             struct mesh_operand *operand=input==MESH_ABSENT?NULL:&call->operands[input];
-            if(operand && (section.channel==MESH_ABSENT || operand->pages!=mesh_buffer_pages(m,row)))operand=NULL;
+            if(operand && (section.channel==MESH_ABSENT || operand->pages!=mesh_page(m)+row))operand=NULL;
             worker->targets[worker->offsets[row]++]=(struct mesh_use){call,operand,operand?operand->pages:NULL,input,!section.stride};
           } else {worker->offsets[row+1]++;mesh_buffers(m)[row].uses|=UINT32_C(1)<<function->worker;}
         }
@@ -417,7 +417,7 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uin
   uint32_t stride=(uint32_t)span/m->block,rows=count*stride,first=mesh_rows_alloc(context,rows);
   if(first==MESH_ABSENT)return errno;
   for(uint32_t row=first;row<first+rows;row+=stride)
-    mesh_buffers(m)[row]=(struct mesh_buffer){.ownership=2,.rows=stride,.pages=(uint32_t)span,.channel=channel,.binding=(row-first)/stride,.owner=context->client,.mapping=m->page_off+(uint64_t)row*sizeof(uint32_t)};
+    mesh_buffers(m)[row]=(struct mesh_buffer){.ownership=2,.rows=stride,.pages=(uint32_t)span,.channel=channel,.binding=(row-first)/stride,.owner=context->client};
   mesh_bits_set(m,MESH_ROW_HOT,first,rows);
   if(channel==MESH_ABSENT)for(uint32_t row=first;row<first+rows;row+=stride){
     uint32_t page=mesh_arena_alloc(context,(uint32_t)span,m->block);
@@ -432,7 +432,7 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uin
   return 0;
 }
 /* design/algorithm-sources.md#programtensor */
-uint32_t mesh_row_page(struct mesh_ctx *context,uint32_t row,uint32_t chunk){return atomic_load_explicit(mesh_buffer_pages(context->M,row)+chunk,memory_order_acquire);}
+uint32_t mesh_row_page(struct mesh_ctx *context,uint32_t row,uint32_t chunk){return atomic_load_explicit(mesh_page(context->M)+row+chunk,memory_order_acquire);}
 /* design/algorithm-sources.md#programtensor */
 void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return mesh_at(context->M,mesh_row_page(context,mesh_section_row(section,index),0));}
 /* design/algorithm-sources.md#programwrite */

@@ -33,12 +33,13 @@ from 40 to 56 bytes: one mapping pointer and two geometry integers. The first-pa
 Local outputs remain contiguous and retain their direct pointer interface.
 The indexed scalar API describes logical elements; neither its indices nor the
 caller function changes when the bridge's transport extent changes.
-ABI 58 stores a setup-realized page-list offset in each buffer descriptor and
-uses consecutive chunk entries. `mesh_buffer_pages` resolves that canonical list;
-`mesh_row_page` selects a chunk for the existing native placement paths. Logical
+ABI 63 removes ABI 58's redundant page-list offset and `mesh_buffer_pages`.
+Every list starts at its buffer's logical row, so chunk j is directly
+`mesh_page(m)[row + j]`. `mesh_row_page` selects that entry for existing native
+placement paths. Logical
 metadata extent is independent of payload-page extent, and retain/release acts
 on one buffer identity. The [compact-list derivation](pages-and-functions.md#prepared-compact-page-lists)
-gives the address algebra, allocation counts and descriptor cost. Neither the
+gives the address algebra, allocation counts and metadata cost. Neither the
 indexed scalar helper nor receive placement performs packing or allocation.
 George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
 (1960): reference counting. The user explicitly requested automatic ownership
@@ -467,6 +468,12 @@ existing buffer reference. This is thread-local completion bookkeeping, with
 no new completion event or admission check. TX address resolution and wire-tag
 stores still precede the post; those remaining H3/H6 costs are not hidden by
 request preparation.
+ABI 63 also posts a newly enqueued edge on its selected queue immediately.
+The preceding all-queue CQ scan per publication is deleted. Native capacity
+refusal returns to the existing CQ progress path; other errors retain the
+existing link-failure path. The outer loop still services every configured
+queue. This changes posting order relative to bookkeeping, not collective
+semantics, request extents or the source-lifetime completion rule.
 The tag arrives in the payload's own work request. There is no index QP or
 cross-QP identity join. On September 15, `ibv_devinfo -v` reported `max_sge: 1`
 on the local Thunderbolt devices. The alias representation uses one SGE and

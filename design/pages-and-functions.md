@@ -488,14 +488,14 @@ alignment. These are source/storage counts, not latency measurements.
 
 ### Prepared compact page lists
 
-ABI 58 separates a buffer descriptor's identity, metadata extent, payload extent
-and page-list address. For an N-byte value, page size P and transport capacity
-C = BP, setup computes K = ceil(N/C). Each resident slot owns K logical entries
-and KB physical pages. Its immutable `mapping` offset names those K entries in
-canonical shared memory; its `rows` count governs metadata reclamation, while
-`pages` governs backing reclamation. Metadata ownership was previously VKB rows
-for V slots; it is now VK. The bridge still reserves its existing metadata arena,
-so this is not a claim that process RSS falls by B.
+For an N-byte value, page size P and transport capacity C = BP, setup computes
+K = ceil(N/C). Each resident slot owns K consecutive logical entries and KB
+physical pages. Slot v starts at row r = first + vK; chunk j always occupies
+`mesh_page(m)[r + j]`. The ranges for distinct slots are disjoint. The buffer's
+`rows` count governs metadata reclamation, while `pages` governs backing
+reclamation. ABI 58 reduced metadata ownership from VKB rows to VK for V slots.
+The bridge still reserves its metadata arena, so this is not a claim that
+process RSS falls by B.
 
 TX and RX address entry j through that prepared list. An indexed operand caches
 the list pointer; a byte offset b uses entry floor(b/C) and relative offset b mod C.
@@ -506,9 +506,19 @@ setup and destruction enumerate section slots explicitly. The reference-count
 range walks and their assumption that payload extent determines descriptor
 positions are removed.
 
-ABI 59 removes the section-definition field and narrows the runtime sequence;
-the buffer descriptor and operand are each 48 bytes. Compact page-list addressing
-still adds a descriptor dependency on TX/RX; X10 must finish the event records.
+ABI 63 deletes `buffer.mapping` and `mesh_buffer_pages`: both initializers stored
+exactly `page_off + row * sizeof(uint32_t)`, with no alternate mapping or mutation.
+Direct row indexing therefore selects the same canonical entry for every chunk.
+It removes the descriptor load from TX address resolution, receive-page return,
+reclamation and `mesh_row_page`. RX completion and indexed numerical operands
+already retain prepared entry addresses; they gain no additional runtime-load
+reduction from this deletion. No payload moves and no page-table entries disappear.
+
+Buffer metadata shrinks from 48 to 40 bytes, saving eight bytes per arena row
+before region alignment. Operands remain 56 bytes. The shared-memory layout
+changes, so both participants and their clients require ABI 63. Runtime page
+loads, wire tags, hierarchical notices and contiguous-input copies remain;
+this deletion does not establish H1–H7 or a measured latency result.
 
 ### Explicit section identity on the wire
 
