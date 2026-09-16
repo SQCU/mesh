@@ -108,25 +108,23 @@ The Legion authors, [reduction privileges](https://legion.stanford.edu/tutorial/
 Saltzer, Reed and Clark, [End-to-End Arguments in System Design](https://web.mit.edu/Saltzer/www/publications/endtoend/endtoend.pdf)
 (1984), motivates keeping recovery with the caller. Mesh records native errors;
 it does not retransmit an operation or make its consumers wait for recovery.
-Working ABI 55 resolves a resident invocation through a keyed directory, then
-loads its status and validates the frame's invocation. It performs no link scan
-or readiness polling, but this is not yet N2's literal one-load implementation.
-Swift decodes success, busy,
-`link(peer:code:)` or `function(call:code:)` from that word. Identities are local
-function or link ordinals; a setup-captured peer array maps link ordinals to the
-configured ranks. The encoding uses two kind bits, thirty ordinal bits and
-thirty-two code bits.
+ABI 59 replaces the keyed resident directory with frame-indexed status and
+ownership arrays. `mesh_calls_result` performs one status-word load. The result
+encoding remains two kind bits, thirty function/link ordinal bits and thirty-two
+native-code bits; the Swift decoder is unchanged. This completes the direct load,
+not passive-participant status rearming or cancellation.
 
-The counted ownership mechanism is Collins's reference counting cited above.
-Setup counts declared native slot returns and transfer lifetimes. Numerical
-workers and each link's TX/RX thread report through separate single-writer event
-rings. A lifecycle thread associates these events with invocation labels; it
-neither schedules tensor functions nor authorizes communication. The final SEND
-completion and complete RX storage return supply varying-transfer events. Shared
-transfers decrement both the initial template and already resident records. Zero
-remaining ownership concludes the instance and returns its admission frame. Each
-conclusion attempts one strong compare-exchange from busy to its outcome, without
-retrying or replacing an already concluded result.
+Collins's reference counting, cited above, supplies the ownership mechanism.
+Setup counts numerical and transfer references per frame. Final function/transfer
+release decrements the frame's atomic count directly; zero restores its recurring
+template, concludes status and marks it available. Shared-transfer completion
+releases one initial reference from every frame. The lifecycle thread and its
+event rings/arena storage are deleted: reference release needs no handoff to a
+second poller. There is no hash, tombstone, label-to-frame search or
+submission-association event. The current selected-frame admission and missing
+whole-plan reuse proof are specified explicitly in
+[frame identity and reuse](pages-and-functions.md#invocation-identity-and-storage-reuse).
+Neither the one-load result nor deleting a stack establishes safe unbounded reuse.
 
 Native post errors other than capacity refusal, CQ poll errors and unsuccessful
 work completions end that link's invocation after publishing its error result.
@@ -137,22 +135,19 @@ publication guard are deleted; successful completions do not consult a software
 health flag. Outstanding references remain owned until normal completion or
 teardown, so publishing an error does not release device storage early.
 
-Submission associates a free frame with a label and publishes roots; immediate
-busy consumes nothing. Receive-driven ranks associate frames from their existing
-ownership events without a local submission. Owner and worker references keep
-program metadata alive; each numerical worker additionally counts active native
-callbacks before it can exit. Finite per-invocation program references and
-`mesh_calls_cancel` are removed. A rank with only forwarding edges needs no
-numerical thread.
-
-Resident result identities expire when their frames are reused; callers can keep
-returned Result values. Labels identify distinct admissions. N1's receive/event
-capacity proof, N2's lookup contract, failure cancellation, remote caller death
-detection and driver recovery remain unfinished. The bridge currently owns the
-QPs beyond a caller's death and closes its pairing socket after setup; status
-publication alone cannot detect that death.
+Owner and worker references keep program metadata alive through native callbacks.
+A forwarding-only rank needs no numerical worker. The frame-indexed representation
+replaces the old assignment-order storage identities; N1 admission/capacity, N2
+passive status rearming, R2 cancellation and driver recovery remain unfinished.
 
 ## Program.kernel_call
+
+ABI 59 implements Monsoon's frame-indexed activation directly: the prepared
+consumer record includes the frame, its input updates that call's operand, and
+its countdown reaching zero invokes the supplied function in the same frame.
+The invocation hash, join/free tables and independent native-slot ring are deleted.
+The [current lifetime contract](pages-and-functions.md#native-slot-return) supersedes
+the older slot-assignment descriptions below. N1 remains incomplete.
 
 Gregory M. Papadopoulos and David E. Culler,
 [Monsoon: an Explicit Token-Store Architecture](https://people.eecs.berkeley.edu/~kubitron/courses/cs252-F03/handouts/papers/p398-papadopoulos.pdf)
@@ -333,15 +328,13 @@ rdma/indexed-gather RANK 4 /mesh0 examples/indexed-gather-ring.json
 
 ## Program.copy
 
-Protocol 57 makes the section definition, source head and chunk ordinal explicit
-beside the invocation label in the existing request tag. Queue setup translates
-the peer's definition once; receive progress uses direct definition/active-head
-array indexing and a canonical page assignment. The former per-source-chunk
-target table, source-value records and cycling occurrence cursors are deleted.
-The [wire derivation](pages-and-functions.md#explicit-section-identity-on-the-wire)
-accounts for the 24-byte tag, lookup storage, shared-tag writers and the remaining
-destination-row allocation work. This is a representation change to the existing
-SEND/RECV transport, not a new collective algorithm or credit protocol.
+ABI 59 realizes a peer-qualified, source-chunk-indexed table of aligned 32-byte
+receive records. The eight-byte tag names the 32-bit sequence and source chunk.
+The record supplies frame-relative destination arithmetic, reference count and
+chunk flags. This is direct addressing of the known transfer relation, applying
+the existing compressed-row/direct-index mechanisms; it introduces no collective
+algorithm or credit protocol. The [wire layout](pages-and-functions.md#explicit-section-identity-on-the-wire)
+accounts for table storage, shared-tag writers and the unfinished N1 lifetime proof.
 
 Apple [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt),
 MLX authors' [JACCL transport](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/jaccl/lib/jaccl/rdma.h),
@@ -351,10 +344,8 @@ distinguish substrate facts from the retained bridge's protocol decisions.
 TN3205 explicitly limits this transport to `IBV_WR_SEND`; its SDK enum for
 `IBV_WR_SEND_WITH_IMM` does not establish hardware support. Both TN3205 and JACCL
 show local `wr_id` values returned with completions. Mesh uses these identifiers
-for buffer lifetime. Protocol 57 carries a 24-byte invocation/source-head/
-definition/chunk tag; setup maps the definition to the local binding, and the
-chunk ordinal identifies its relative placement and final publication. The invocation follows the value across peers separately
-from any producer or consumer storage ordinal.
+for buffer lifetime. ABI 59 carries one `(sequence, sourceChunkRow)` word. Setup determines the
+chunk's local row formula and final-publication flag.
 The tag arrives in the payload's own work request. There is no index QP or
 cross-QP identity join. On September 15, `ibv_devinfo -v` reported `max_sge: 1`
 on the local Thunderbolt devices. The alias representation uses one SGE and
@@ -363,9 +354,9 @@ does not infer two-entry support from the general verbs API. The
 describe this mesh-specific representation. Receive storage is preallocated
 and reused by the owning RX thread at final reference release. The existing
 notification mechanism carries the return event; only RX writes its page and
-return rings and per-binding row stacks. Each queue poll returns one completed section's backing,
+return ring. Each queue poll returns one completed section's backing,
 rotates unfinished sections and attempts an available post. It reposts actual pages without clearing them and
-indexes the explicit definition and active head. The [receive-storage proof](pages-and-functions.md#receive-storage-return)
+indexes the prepared source-chunk record. The [receive-storage proof](pages-and-functions.md#receive-storage-return)
 accounts for receive ownership, bounded metadata, teardown, repeated forwarding,
 and the finite caller namespace still awaiting N1. `link_receive_destroy`
 disposes this setup-owned metadata after its link worker stops. This is an
@@ -390,8 +381,8 @@ section. Neither constructs a runtime list of all chunks before posting the firs
 The rdma-core authors' [ibv_post_send contract](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_send.3)
 returns acceptance or a native error for each posted request. X4 removes Mesh's
 software outstanding-request count and its derived request-capacity gates.
-Each TX/RX progress step polls one completion and attempts one available request,
-then continues immediately. A refused request does not advance the cursor.
+Each TX/RX progress step polls a completion and posts available requests until
+the prepared ring is empty or the native provider refuses, then continues across queues. A refused request does not advance the cursor.
 `ENOMEM` and `EAGAIN` are deferred to the next step; other post errors conclude
 the link's invocation through [its Result](#meshresult). RX attempts its post before publishing the
 completion. A zero-completion poll still permits posting. Initial receive setup

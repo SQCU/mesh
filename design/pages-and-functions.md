@@ -186,251 +186,97 @@ the sum of the per-queue capacities. These counts are not performance evidence.
 
 ## Receive storage return
 
-ABI 53 connects the final reference of a received value directly to its RX
-thread. The buffer head names its receive channel and binding. Refzero publishes
-one row bit to that queue's return-notice bank; local sections continue to use the
-general free bitmap. Callbacks neither inspect readers nor walk payload backing.
-Only that link's RX thread consumes the return banks. Concurrent native and TX
-publishers use the existing atomic notification mechanism.
+ABI 59 removes the per-binding logical-row stacks, the definition-to-binding
+lookup, and the active-source-head array. Setup expands each peer-qualified
+source chunk into an aligned 32-byte receive record. It contains the destination
+section's first row, frame stride and count, the chunk ordinal, the declared
+reference count, and first/final/shared flags. RX indexes that record using the
+source chunk in the received tag. It does not allocate or search for a row.
 
-Each queue has a fixed physical-page ring, initially containing all its registered
-receive backing. Each binding has a stack of its logical section rows. RX alone
-changes these structures. Unfilled rows have no page mapping. The receive pool
-owns the posted pages independently of those rows; its canonical descriptor
-records the physical extent and client owner. `mesh_receive_range` reads that
-descriptor through the transfer's pool index, replacing the private range array.
+For sequence q and a section with V resident frames, the compiled destination is
+`first + (q % V) * stride`; the page-list entry is the record's chunk ordinal.
+The first chunk installs the declared references and sequence, each chunk stores
+its actual received page, and the final chunk publishes. The section's physical
+pages may be interleaved with other sections or peers. The formula determines
+logical coordinates; it does not make the physical pages contiguous.
 
-Every queue progress step polls its CQ, consumes one available return notice,
-and attempts one available RECV before handling the completion. The working ABI 55
-return path appends all K backing indices of that returned section to the physical
-ring and clears their mappings. It returns the logical row before posting from
-that ring. This removes the partially detached return queue: replenishing only
-part of a section could admit another value before its logical row returned.
-Reclamation costs K metadata loads and stores in one RX pass, without payload
-copying. This cost grows with section size; it is not a constant-time latency
-claim. Native refusal leaves the page queued; no software outstanding-frame limit
-or retry wait exists.
+A queue still owns one ring of physical receive blocks. Final-reference notices
+return all of a section's actual blocks to that ring, clear its mappings, and
+release the transfer's frame reference directly. RX posts available blocks until native
+refusal, without a software window or a destination-reuse check. The former
+logical-row stack return and first-chunk pop are deleted. Payload is not zeroed.
 
-After its final chunk is detached, the logical row returns to its binding's
-stack. The first chunk of a new value pops a row, installs the binding's realized
-reference count, clears its old presence and sets its invocation. It neither
-queries occupancy nor waits. Completion places each received page with one
-indexed store; later chunks use the same head and prepared relative offsets.
-The inverse page table, placeholder assignments and four-store permutation are
-removed. A returned row is already unmapped, and a posted page has no live reader,
-so there is no displaced mapping to repair or payload to move.
-
-Protocol 57 replaces the source-chunk occurrence cursors with explicit definition,
-source-head and chunk fields. The first chunk records the actual local head for
-that source head; later chunks directly select the same head and their offset.
-SEND ordering and final ownership keep a sender slot's next value behind its
-previous value on that queue. The final chunk publishes the selected head.
-This also serves forwarding: a received row can carry k=0, be forwarded, return
-at refzero, and carry k=1. The existing send edge resets, and downstream matching
-accepts the same source row with the new invocation. No extra local submit,
-acknowledgement, epoch barrier or inferred collective is involved.
-
-For P physical blocks, every block is in one of: the post ring, a posted
-receive/completion, a live value, or a pending return. A block moves to the ring
-only after its value's final reference. Hence queued blocks never exceed P.
-Power-of-two capacity covers this bound without fullness checks. A live reader's
-reference prevents its physical page from being reposted. There is no return-cursor
-allocation or queue in the working ABI 55 implementation.
-
-For a binding with V configured rows and L assigned values whose rows have not
-returned, its free-row count is V-L. The original finite API admitted at most V
-values in total, which established this bound. ABI 55 permits more than V labels
-over time, so that historical argument does not establish its receive capacity.
-Physical backing and logical rows currently have different allocation domains:
-backing is pooled per queue, while rows are reserved per binding. Other bindings'
-unused backing can receive another value even when this binding has L=V. The
-unchecked first-chunk row pop then has no valid row. Returning a complete section
-before reposting its pages does not resolve this cross-binding case.
-
-This is N1's unfinished allocation contract, independent of arrival order or peer
-count. Realization must provide logical descriptors and backing for the declared
-live dataflow together. Local SEND completion alone does not establish remote
-last use. A receive-side occupancy check, acknowledgement or wait would withhold
-work without repairing the allocation model and is not the proposed remedy.
-
-Numerical consumer ranges are indexed directly by the published row. Setup
-replicates the function/input relation across its resident rows, and each aligned
-consumer record contains the prepared function pointer and input classification.
-Row 19v removes the definition indirection introduced in protocol 57 and the
-separate function-index lookup: that metadata compression increased dependent
-loads on the execution path. The actual input row still identifies its page list
-and ownership. The RX allocator's private row stacks remain unfinished work;
-consumer-table changes do not establish their capacity or reuse correctness.
-
-Setup captures the binding's declared reference count and removes those counts
-from its initially unused rows. The pool owns their storage while no value occupies
-them. Assignment adds the count for a new value. Atomic add/subtract preserves
-the client-close flag if teardown overlaps. Posted backing never enters the
-ordinary allocator while a QP may name it. After QP teardown, client retirement
-clears received row mappings and returns their logical slots, then releases the
-inactive client's physical pool extents. New-client pool ownership is preserved.
-Payload is never zeroed.
-
-Payload allocation is unchanged. Buffer heads grow from 32 to 40 bytes for the
-channel and binding. Each receive queue adds a return-notice bank per client bank,
-a four-byte physical-ring entry per rounded-up block capacity, and an eight-byte
-return cursor per rounded-up section capacity. Logical free rows use four bytes,
-source values eight, receive bindings 24, and the additional source-row offsets
-four each. Targets remain 12 bytes. Sixteen-byte pool descriptors per arena block
-replace the inverse table's four bytes per OS page. The private receive-range
-array, `mesh_queue` and its indexing wrapper are removed. The library is
-2,272 → 2,349 maintained Swift/C/header lines. This implements N1t's transport
-storage cycle in source; call/status namespaces, native rearm, per-worker
-instance pools, and the unbounded N1 API remain unfinished at ABI 53. Native slot
-return is implemented by ABI 54 below. No run is claimed.
+This is the frame-indexed representation required by N1, not yet its complete
+allocation proof. In particular, modulo arithmetic cannot establish that a
+previous use of the same logical frame has ended on another participant. Setup
+still must establish the disjoint live intervals of the declared plan, including
+receive mappings and native operands. Local SEND
+completion is not remote final use. Adding an RX occupancy guard or a credit
+message would not complete this requirement. Until that realization is complete,
+N1 and unrestricted cross-participant frame reuse remain unfinished.
 
 ## Native slot return
 
-The native return path returns operand storage to the function's numerical worker on
-ordinary completion. A slot owns its output sections, including canonical input
-placement storage, and one native invocation. Setup captures each output's
-reference-count template, removes the unused references, and records the owning
-slot and return channel in its existing buffer head. Unassigned local backing
-stays allocated to the realized function. The existing bitmap allocator remains
-responsible for its eventual program retirement.
+Every function now has one prepared call and operand array per frame. Its
+row-indexed consumer records contain the function pointer, input position,
+shared-input flag and frame. A dynamic publication fills that frame's input and
+decrements its pending count; zero invokes the supplied function using the same
+frame's prepared output/native bindings. No hash probe, join record acquisition,
+backshift deletion, or per-function native-slot ring remains.
 
-The numerical worker owns a compact free-index ring for each of its functions.
-A first operand or root event acquires an indexed join record, separate from the
-native slots. It records the invocation and arriving logical input rows. The
-operand countdown reaching zero pops a native slot, transfers those row indices
-to its prepared operands, and returns the join record. Assignment restores output
-reference counts and invocation stamps. No slot is chosen by invocation modulo
-and no occupied slot is queried.
+Shared inputs update every prepared frame once and decrement each countdown.
+Setup initializes all countdowns, including the root dependency for a function
+with no varying inputs. Successful completion publishes outputs immediately.
+Their final references return through the existing numerical-worker notices;
+the last output return releases the consumed inputs, rearms the native object
+when necessary, restores that frame's pending template, and releases one frame reference directly. Zero-output functions emit the same return through their metadata row.
+A native error concludes status separately; complete failure cancellation is R2.
 
-In the working ABI 55 source, a slot with Q outputs has Q return events. Native
-completion publishes outputs directly, so an output's final ownership also
-proves its native execution has finished. The slot retains its input references
-through final output ownership. Its numerical worker releases those references
-when returning the slot, including on the failure notification. A successful call
-with no outputs publishes one synthetic return event. The final event replenishes
-the native launch object, if required, and pushes the index back into the ring.
-Only the numerical worker decrements this return count or changes the ring. Core ML and Metal
-callbacks and TX completions only publish the existing atomic row notices; they
-are not incorrectly treated as a single SPSC writer.
+Core ML's feature provider and output options use the frame's prepared bindings.
+Indexed CPU/Metal operands keep the canonical page-list address. A contiguous
+backend still uses the already implemented asynchronous placement path when its
+received physical pages are not contiguous. No copy is removed or called
+zero-copy merely because receive rows have a compiled logical order.
 
-Each output emits once at refzero. No event from a previous use can remain when
-its slot returns: every event was consumed to make the count zero. The worker
-drains available returns before the next publication dequeue; it never waits for
-a missing return. Callbacks publish completed outputs directly, with no extra
-completion hop. A per-worker active-callback count keeps program metadata alive
-through the callback's final action. It does not authorize publication or transfer.
-
-Metal's private queue has V command-buffer positions. Initially V objects are
-prepared. A return event proves this slot's GPU execution has finished, so at
-most V-1 other objects are unfinished when its replacement is made. Creation
-therefore requires no completion from another slot. The numerical worker alone
-reads or changes the command array, and the completed object is never recommitted.
-This uses Apple's existing command-buffer API; object creation and encoding still
-have their native costs. No operand allocation, view factory, pipeline compilation
-or queue-capacity polling is added to numerical invocation. CPU functions need no
-rearm callback. Core ML reuses its prepared feature provider and output options
-only when that slot returns.
-
-The same mechanism applies on a rank whose calls are all driven by received
-operands. Neither assignment nor output/native retirement depends on a local
-`submit`. For a function with a varying input, choose any one of its input
-sections with V rows. Every occupied native slot retains a distinct row of that
-section. A newly complete input set owns another distinct row, so at most V-1
-native slots are occupied. Returning input references and the native index on the
-same numerical worker precedes its next publication dequeue. Thus native admission
-needs no availability guard. Functions with only shared inputs consume local
-root admissions, also bounded by V.
-
-For E varying operands, at most E*V pending joins can exist: each owns at least
-one input occurrence, and no occurrence belongs to two invocations. Shared-only
-functions instead have at most V pending root admissions. The match table has
-power-of-two capacity at least twice this bound, preserving an empty probe entry.
-These proofs depend on valid input-row ownership. The receive-binding bound across
-unbounded submissions and shared physical pools remains unfinished N1 work.
-Local send completion alone does not establish that remote bound.
-Failure cancellation remains R2 work: a failed native call does not publish its
-outputs, and abandoned references are reclaimed during program/device retirement.
-
-The free-index ring has power-of-two capacity at least 2*max(E,1)*V, shared with the
-invocation-match table's mask, and four bytes per entry. It uses the preallocated
-ring representation cited under [Program.copy](algorithm-sources.md#programcopy),
-with one numerical worker owning both positions and no fullness or reader query.
-Output reference templates use four bytes per output; each native slot has one
-metadata-only return-notification row. Working ABI 55 also changes invocation tags,
-matching and result/event storage; its complete capacity accounting and caller
-integration remain N1 work. No runtime or speedup claim follows from these edits.
+Metal command-buffer replacement remains row 19s: the current rearm callback
+creates a new single-use command buffer on the numerical worker. It is not solved
+by these frame-array changes, and completed command buffers are not recommitted.
 
 ## Invocation identity and storage reuse
 
-ABI 52 distinguishes the invocation label k, each function's native storage slot
-s_f(k), a logical operand row j, and the physical pages backing that row:
+The ABI-59 runtime sequence is 32 bits. The public integer is converted to that
+sequence; the resident frame is `sequence % inFlight`. Every function's call,
+operands, countdown and native index use the same frame. The sequence in
+`mesh_operand.invocation` remains available to the supplied function. The
+section row determines its canonical page list. Different producer completion
+orders therefore need no assignment-order matching table.
 
-\[
- (k,j) \longmapsto (s_f(k),j) \longmapsto \operatorname{pages}(s_f(k),j).
-\]
+Frame ownership is an array indexed by frame. Setup counts numerical and
+varying-transfer references per frame, plus the initial shared-transfer references.
+A function's final output return or transfer completion/storage return directly
+decrements that frame's atomic count. Zero restores its recurring count,
+concludes status, and marks it available. Shared-transfer completion releases one
+initial reference from every frame. The last release is not enqueued elsewhere.
 
-The row's publication carries k. A transport chunk contains `(k, sourceChunkRow)`
-in its eight-byte tag; the queue's source-row relation determines its destination,
-and the received head retains k for numerical consumers and forwarding. The tag
-does not carry a raw pointer or select the receiver's native storage. TX stores
-the tag immediately before posting. Concurrent links sending the same backing
-write the same atomic word; their declared references keep that backing live.
-RX does not rewrite the received tag. The existing pairing version rejects a
-different wire ABI before posting data.
+The lifecycle thread, producer event rings and their arena storage are deleted,
+along with the keyed status directory, tombstones, frame-to-label array and
+submission-association event. This also removes the separate event-ring capacity
+obligation. `result(index)` loads that resident frame's status once; it is not a
+historical result dictionary. Completed result values can be retained by the caller.
 
-A prepared consumer range contains `(function, inputPosition)` entries. Its
-single numerical worker indexes that function's call record directly by k;
-there is no hash search, cross-worker slot claim or admission coordinator.
-The first dynamic input or root publication assigns the function's next prepared
-native slot. All inputs for k populate that record, independently of their own
-producer slots. Shared inputs update their prepared views once across the finite
-extent and discharge their dependency for every record. They do not allocate
-native slots ahead of dynamic inputs.
+Submission currently reads the selected frame's availability word, immediately
+returns busy if it is unavailable, and otherwise resets status and publishes the
+roots. It does not allocate, wait, query readers or touch a receive queue. This
+is **not** the requested free-frame-ring admission: it can return busy while a
+different frame is free. The missing admission mechanism and whole-plan lifetime
+realization remain N1 work. Passive-participant status rearming and cancellation
+also remain unfinished; the single load alone does not complete N2.
 
-For example, P can produce k=1 in slot 0 and k=0 in slot 1, while Q produces k=0
-in slot 0 and k=1 in slot 1. If P(1) reaches C first, C assigns its slot 0 to k=1.
-Q(0) can independently assign C's slot 1 to k=0. Q(1) then fills C(1)'s second
-operand using Q's slot 1; P(0) fills C(0) using P's slot 1. Neither C call mixes
-invocations or requires the producers to agree on slot order.
-
-`mesh_operand.invocation` is k; `.index` selects that operand's native storage;
-`.row` names its original logical value; `.page` and `.data` select its native
-view. A materialized input retains its original row while its data/index name
-the consuming function's contiguous storage. Placement resolves each source
-chunk from `.row`. Completion releases the original rows actually consumed,
-publishes output rows already held in the operand array, and retires status k.
-Core ML feature inputs and Metal matrix inputs therefore select their own views;
-native command buffers and prediction output options use the consumer slot.
-
-This is still a finite extent: call/status arrays are indexed by k in `0..<count`,
-ABI 54 recycles each function's prepared storage slots, and ABI 53 recycles receive
-targets and backing within that namespace. It does not implement
-`submit(inFlight + k)`. The wire identity and
-independent storage selection remove the prior coupling. ABI 54 supplies native
-slot return; unbounded invocation matching and instance admission remain required.
-
-The maintained Swift/C/header total remains 2,272 lines. The operand is now 32
-bytes instead of 24; the invocation field fills existing padding in the 32-byte
-buffer head. Consumer entries remain eight bytes; shared-input entries shrink
-from `count` entries to one per binding. Send edges shrink from 24 to 20 bytes,
-receive targets from 16 to 12. A function pointer array adds eight bytes per
-function. The duplicate output-section array, consumed-section copies,
-remote-refresh index list, completed flags and submission/retirement forwarding
-helpers are removed. These are representation costs, not measured latency gains.
-
-Reuse follows final declared ownership, with every worker's call countdowns,
-receive targets and native submission storage prepared for the new invocation.
-It does not follow a caller's numeric index wrapping. A non-submitting rank must
-perform the same transition from received work. Native completion callbacks are
-not documented as a single writer for a Mesh worker's ring; assigning a function
-to a worker does not establish that property. The already implemented TX ring
-has one actual writer because its publisher and drainer are the same TX thread.
-
-Result retention is a separate API lifetime: a live invocation's status must be
-findable independently of the slot chosen for its operands. The pending retention
-clarification concerns completed results after storage reuse, not preservation
-of live work. The current finite status array adds no completed-result eviction
-policy and supplies no unbounded result-retention claim.
+These edits reduce maintained Swift/C/header source from 2,612 to 2,415 lines,
+including `Bounds.swift` and `Topology.swift` and excluding the separately pending
+control-event work. Documentation replacement is separate. The source compiles
+with existing callers; no runtime, deployment, safe-unbounded-reuse or latency
+claim accompanies this intermediate replacement.
 
 ## Reclamation events
 
@@ -498,42 +344,30 @@ setup and destruction enumerate section slots explicitly. The reference-count
 range walks and their assumption that payload extent determines descriptor
 positions are removed.
 
-The buffer descriptor grows from 48 to 56 bytes for the prepared mapping offset;
-the operand remains 56 bytes and the wire tag remains 24 bytes. Existing per-binding
-receive stacks and native/lifecycle capacity still require N1 integration. This
-change establishes the addressing representation, not a new admission bound or
-measured latency claim.
+ABI 59 removes the section-definition field and narrows the runtime sequence;
+the buffer descriptor and operand are each 48 bytes. Compact page-list addressing
+still adds a descriptor dependency on TX/RX; X10 must finish the event records.
 
 ### Explicit section identity on the wire
 
-Protocol 57 carries `(invocation, sourceHead, definition, chunk)` in a 24-byte
-tag, replacing the 16-byte invocation/source-chunk tag. `definition` names the
-sender's logical section; `sourceHead` names its current live descriptor; `chunk`
-is an ordinal independent of either peer's OS-page units. A queue's setup table
-maps the peer's definition to its local binding. The first chunk assigns the
-local head, and an array indexed by source head names it for subsequent chunks.
-Publication occurs at the binding's final chunk. No arrival cursor reconstructs
-the section identity, and no particular value can hold up another queue.
+ABI 59 carries one atomic 64-bit word `(sequence << 32) | sourceChunkRow`.
+`sourceChunkRow = sourceHead + chunk` uses the compact logical row namespace,
+not OS-page spacing. Every sending link for that backing writes the same tag.
+The tag and payload share one SEND request. Pairing rejects another wire ABI
+before posting data.
 
-The receive target records, source-value records, prefix offsets, cyclic cursors
-and transport `chunk_stride` field are removed. The two new lookup arrays use
-eight bytes per row in the peer's advertised row namespace per receiving queue;
-queues with no receives allocate only empty placeholders. They may exceed the
-old prefix arrays when the old source-row high-water mark was small. Setup no
-longer generates target records for every chunk of every source slot.
+At setup, each receiving queue prepares a source-chunk-indexed table. Each entry
+is 32 bytes and aligned to 32 bytes; compilation asserts both properties. Source
+rows are qualified by their peer/queue, so equal row integers on two peers do not
+alias. RX loads one entry and computes the frame's destination and chunk address.
+No definition lookup, binding pointer, active-head array or free-row pop intervenes.
+The table uses 32 times the peer's advertised row count per receiving queue.
+This is a setup-memory cost; the eight-byte wire tag replaces 24 bytes.
 
-All TX links forwarding the same backing write identical tag fields, as they
-did for the old tag; no destination-specific field is stored in shared payload
-backing. The same-QP ordering contract ensures a source head's old final chunk is
-drained before its next first chunk replaces the active-head entry. Other source
-heads and other peer queues may interleave freely. The versioned pairing rejects
-the old wire layout before data posts. The extra eight tag bytes do not add a
-4096-byte transport frame for page-multiple payloads. No latency result is claimed.
-
-This removes receive matching's dependency on pre-enumerated sender storage
-slots. Per-binding destination row stacks, TX edge storage and native/lifecycle
-capacity still need the remaining N1 allocation work; this change does not
-establish an unlimited-admission bound.
+The compiled row is independent of which registered page received that chunk.
+RX associates the actual page through the canonical list. Arbitrary interleaving
+is preserved; physical contiguity and N1's reuse proof do not follow from this
+metadata reduction.
 
 ### Logical order and interleaved arrivals
 

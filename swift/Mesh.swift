@@ -550,10 +550,10 @@ public final class Mesh {
 
     // design/algorithm-sources.md#program
     @discardableResult
-    public func submit(_ index: Int) -> Result<Void, MeshError> { outcome(mesh_calls_submit(calls, UInt64(index))) }
+    public func submit(_ index: Int) -> Result<Void, MeshError> { outcome(mesh_calls_submit(calls, UInt32(truncatingIfNeeded: index))) }
 
     // design/algorithm-sources.md#meshresult
-    public func result(_ index: Int) -> Result<Void, MeshError> { outcome(mesh_calls_result(calls, UInt64(index))) }
+    public func result(_ index: Int) -> Result<Void, MeshError> { outcome(mesh_calls_result(calls, UInt32(truncatingIfNeeded: index))) }
 
     // design/algorithm-sources.md#meshresult
     private func outcome(_ status: UInt64) -> Result<Void, MeshError> {
@@ -569,6 +569,6 @@ public final class Mesh {
     // design/algorithm-sources.md#collectivesync_on_remote_fill
     public func syncOnRemoteFill(_ parts: [TensorPart], index: Int = 0) {
         let sections = parts.map { $0.section! }
-        mesh_sync_on_remote_fill(memory.context, sections, sections.count, UInt64(index))
+        mesh_sync_on_remote_fill(memory.context, sections, sections.count, UInt32(truncatingIfNeeded: index))
     }
 }

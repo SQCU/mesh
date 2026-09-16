@@ -5,11 +5,13 @@
 /* design/algorithm-sources.md#programcopy */
 struct mesh_send_edge {uint32_t queue,row,chunks,offset,shared;};
 struct mesh_ready {uint64_t head,tail;size_t first,mask;};
-struct mesh_receive_binding {uint32_t *rows,count,references,shared,chunks;};
+struct mesh_receive_record {
+  _Alignas(32) uint32_t first; uint32_t stride,count,chunk,references,flags;
+};
+_Static_assert(sizeof(struct mesh_receive_record)==32 && _Alignof(struct mesh_receive_record)==32,"mesh_receive_record");
 struct mesh_receive {
-  uint32_t *pages,*active,*definitions;
-  struct mesh_receive_binding *bindings;
-  uint32_t binding_count;
+  uint32_t *pages;
+  struct mesh_receive_record *records;
   struct mesh_ready ready;
   struct mesh_notice_reader returns;
 };
@@ -34,8 +36,7 @@ static int link_receive(struct mesh_link *link,uint32_t q);
 static int link_returns(struct mesh_link *link,uint32_t q);
 /* design/algorithm-sources.md#programcopy */
 static void link_receive_destroy(struct mesh_receive *receive){
-  for(uint32_t i=0;i<receive->binding_count;i++)free(receive->bindings[i].rows);
-  free(receive->bindings);free(receive->pages);free(receive->active);free(receive->definitions);
+  free(receive->records);free(receive->pages);
 }
 /* design/algorithm-sources.md#programcopy */
 static void link_error(struct mesh_link *link,int64_t code,uint32_t domain){
@@ -119,24 +120,20 @@ static int link_configure(void *state,int socket,uint64_t client){
     *receive=(struct mesh_receive){.ready={.tail=chunks_count,.mask=capacity-1},
       .returns=mesh_notice_reader_init(m,mesh_notice_queue(m,client,m->links+link->index*m->qps+q))};
     receive->pages=calloc(capacity,sizeof *receive->pages);
-    receive->active=calloc(receives?peer_counts[2]:1,sizeof *receive->active);
-    receive->definitions=calloc(receives?peer_counts[2]:1,sizeof *receive->definitions);
-    receive->bindings=calloc(receives?receives:1,sizeof *receive->bindings);
-    if(!receive->pages || !receive->active || !receive->definitions || !receive->bindings){free(bindings);free(peer);return -1;}
-    receive->binding_count=receives;
+    receive->records=aligned_alloc(_Alignof(struct mesh_receive_record),(receives?peer_counts[2]:1)*sizeof *receive->records);
+    if(!receive->pages || !receive->records){free(bindings);free(peer);return -1;}
     uint32_t first=receives?in[0].pool:0;
     for(uint32_t i=0;i<chunks_count;i++)receive->pages[i]=first+i*m->block;
     for(uint32_t i=0;i<receives;i++){
-      receive->definitions[peer[i].local_row]=i;
-      struct mesh_receive_binding *binding=&receive->bindings[i];
-      *binding=(struct mesh_receive_binding){.rows=calloc(in[i].count,sizeof(uint32_t)),.count=in[i].count,
-        .references=(uint32_t)atomic_load_explicit(&mesh_buffers(m)[in[i].local_row].ownership,memory_order_relaxed),
-        .shared=!in[i].stride,.chunks=(uint32_t)((in[i].bytes+payload-1)/payload)};
-      if(!binding->rows){free(bindings);free(peer);return -1;}
+      uint32_t references=(uint32_t)atomic_load_explicit(&mesh_buffers(m)[in[i].local_row].ownership,memory_order_relaxed);
+      uint32_t chunks=(uint32_t)((in[i].bytes+payload-1)/payload);
       for(uint32_t value=0;value<in[i].count;value++){
-        uint32_t first=in[i].local_row+value*in[i].stride;
-        binding->rows[in[i].count-value-1]=first;mesh_buffers(m)[first].binding=i;
-        atomic_fetch_sub_explicit(&mesh_buffers(m)[first].ownership,binding->references,memory_order_relaxed);
+        uint32_t row=in[i].local_row+value*in[i].stride;
+        atomic_fetch_sub_explicit(&mesh_buffers(m)[row].ownership,references,memory_order_relaxed);
+        for(uint32_t chunk=0;chunk<chunks;chunk++)
+          receive->records[peer[i].local_row+value*peer[i].stride+chunk]=(struct mesh_receive_record){
+            .first=in[i].local_row,.stride=in[i].stride,.count=in[i].count,.chunk=chunk,.references=references,
+            .flags=(!chunk)|((chunk+1==chunks)<<1)|((!in[i].stride)<<2)};
       }
     }
     for(uint32_t i=0;i<sends;i++)for(uint32_t value=0;value<out[i].count;value++){
@@ -174,10 +171,7 @@ static int link_send_ready(struct mesh_link *link,uint32_t q){
     uint32_t page=atomic_load_explicit(&mesh_buffer_pages(link->M,source->row)[source->offset],memory_order_acquire);
     struct mesh_wire_tag *tag=mesh_tag(link->M,page);
     struct mesh_buffer *buffer=&mesh_buffers(link->M)[source->row];
-    atomic_store_explicit(&tag->invocation,buffer->invocation,memory_order_relaxed);
-    atomic_store_explicit(&tag->row,source->row,memory_order_relaxed);
-    atomic_store_explicit(&tag->definition,buffer->definition,memory_order_relaxed);
-    atomic_store_explicit(&tag->chunk,source->offset,memory_order_relaxed);
+    atomic_store_explicit(&tag->value,((uint64_t)buffer->invocation<<32)|(source->row+source->offset),memory_order_relaxed);
     uint32_t end=source->offset+1;
     int error=link_post(link,q,MESH_SEND,end==source->chunks?edge:MESH_ABSENT,page);
     if(error)return error;
@@ -203,31 +197,28 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
         uint32_t page=(uint32_t)wc->wr_id;
         struct mesh_wire_tag *tag=mesh_tag(m,page);
         struct mesh_receive *receive=&link->receive[q];
-        uint32_t source=atomic_load_explicit(&tag->row,memory_order_relaxed),chunk=atomic_load_explicit(&tag->chunk,memory_order_relaxed);
-        uint64_t invocation=atomic_load_explicit(&tag->invocation,memory_order_relaxed);
-        struct mesh_receive_binding *binding=&receive->bindings[receive->definitions[atomic_load_explicit(&tag->definition,memory_order_relaxed)]];
-        if(!chunk){
-          receive->active[source]=binding->rows[--binding->count];
-          struct mesh_buffer *buffer=&mesh_buffers(m)[receive->active[source]];
-          atomic_fetch_add_explicit(&buffer->ownership,binding->references,memory_order_relaxed);
-          atomic_store_explicit(&mesh_presence(m)[receive->active[source]],0,memory_order_relaxed);
-          buffer->invocation=invocation;
+        uint64_t tag_value=atomic_load_explicit(&tag->value,memory_order_relaxed);
+        uint32_t frame=(uint32_t)(tag_value>>32);
+        struct mesh_receive_record record=receive->records[(uint32_t)tag_value];
+        uint32_t row=record.first+(frame%record.count)*record.stride;
+        if(record.flags&1){
+          atomic_fetch_add_explicit(&mesh_buffers(m)[row].ownership,record.references,memory_order_relaxed);
+          atomic_store_explicit(&mesh_presence(m)[row],0,memory_order_relaxed);
+          mesh_buffers(m)[row].invocation=frame;
         }
-        uint32_t row=receive->active[source];
-        atomic_store_explicit(&mesh_buffer_pages(m,row)[chunk],page,memory_order_relaxed);
-        if(chunk+1==binding->chunks){
-          mesh_publish(m,row,invocation+1);
-          if(binding->shared)mesh_event_push(m,link->client,1+MESH_COMPUTE_THREADS+2*link->index+MESH_RECEIVE,
-            (struct mesh_event){0,0,MESH_EVENT_SHARED});
+        atomic_store_explicit(&mesh_buffer_pages(m,row)[record.chunk],page,memory_order_relaxed);
+        if(record.flags&2){
+          mesh_publish(m,row,(uint64_t)frame+1);
+          if(record.flags&4)mesh_shared_release(link->instances,link->instance_count);
         }
       } else {
         if((uint32_t)wc->wr_id!=MESH_ABSENT){
           struct mesh_send_edge *source=&link->send_edges[(uint32_t)wc->wr_id];
-          uint64_t invocation=mesh_buffers(m)[source->row].invocation;
+          uint32_t invocation=mesh_buffers(m)[source->row].invocation;
           source->offset=0;
           mesh_buffer_release(m,source->row);
-          mesh_event_push(m,link->client,1+MESH_COMPUTE_THREADS+2*link->index+MESH_SEND,
-            (struct mesh_event){0,invocation,source->shared?MESH_EVENT_SHARED:MESH_EVENT_RETURN});
+          if(source->shared)mesh_shared_release(link->instances,link->instance_count);
+          else mesh_instance_release(&link->instances[invocation%link->instance_count]);
         }
       }
     }
@@ -260,10 +251,7 @@ static int link_returns(struct mesh_link *link,uint32_t q){
       receive->pages[ready->tail++&ready->mask]=atomic_load_explicit(&mesh_buffer_pages(m,row)[offset/m->block],memory_order_relaxed);
       atomic_store_explicit(&mesh_buffer_pages(m,row)[offset/m->block],MESH_ABSENT,memory_order_relaxed);
     }
-    struct mesh_receive_binding *binding=&receive->bindings[buffer->binding];
-    binding->rows[binding->count++]=row;
-    mesh_event_push(m,link->client,1+MESH_COMPUTE_THREADS+2*link->index+MESH_RECEIVE,
-      (struct mesh_event){0,buffer->invocation,MESH_EVENT_RETURN});
+    mesh_instance_release(&link->instances[buffer->invocation%link->instance_count]);
   }
   return link_receive(link,q);
 }
