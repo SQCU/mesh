@@ -25,6 +25,8 @@ static inline uint32_t mesh_peer_channel(struct mesh_ctx *c,uint32_t peer,uint32
 }
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_detach(struct mesh_ctx *);
+/* design/algorithm-sources.md#programtensor */
+void mesh_retire(struct hdr *,uint64_t client);
 
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);

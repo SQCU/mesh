@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 65u
+#define MESH_VERSION 66u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -17,7 +17,7 @@ enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
-struct mesh_buffer { _Atomic uint32_t references,closed; uint32_t initial,pages; _Atomic uint32_t uses; uint32_t channel,binding,invocation; uint64_t owner; uint32_t completions; };
+struct mesh_buffer { _Atomic uint32_t references,closed; uint32_t initial,pages; _Atomic uint32_t uses; uint32_t channel,binding,invocation; _Atomic uint64_t owner; uint32_t completions; };
 _Static_assert(sizeof(struct mesh_buffer)==48,"mesh_buffer");
 struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */

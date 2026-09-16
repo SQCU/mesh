@@ -115,7 +115,9 @@ This controls resource lifetime; it is not a default collective completion barri
 Client retirement also releases metadata rows. `mesh_rows_alloc` records their
 owner even when they have no payload pages; `mesh_retire` clears their row
 allocation while marking only real operand storage closed. This covers root and
-return rows when a dead client is replaced. It does not cancel a still-attached
+return rows when a dead client is replaced or its process-exit event is observed.
+The same retirement routine claims the old client identity before clearing it;
+connection teardown preserves process-exit observation. It does not cancel a still-attached
 failed program's unissued uses or authorize reclaiming backing before QP teardown.
 
 ## D16. Application-specific output communication stays in the caller

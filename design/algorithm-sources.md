@@ -69,6 +69,15 @@ seal operation are deleted. ABI 49 also removes the reclamation claim, retry sta
 and collector thread. Refzero sets one row bit in the section free pool; setup
 consumes those entries without reading refcounts or zeroing payload. The bridge
 discharges abandoned positive counts at the device-close retirement event.
+ABI 66 arbitrates setup reclamation and forced retirement through the existing
+atomic buffer owner. The bridge publishes the free bit before restoring that
+owner; setup consumes the bit only after claiming the descriptor, and alone
+returns descriptor capacity. Allocation initializes atomic fields individually
+and publishes owner last. These are cold allocation/teardown operations, with
+no new reference category or claim on publication, consumption or RDMA progress.
+The [retirement mechanism and limits](pages-and-functions.md#client-retirement-has-one-owner)
+describe this handoff; it does not establish remote-value reuse or multi-client
+allocation.
 ABI 53 keeps received backing in its RX-owned pool, including when no live value
 occupies a row. Refzero notifies that RX thread; it returns backing through the
 canonical entries. ABI 64 keeps the prepared count in the buffer itself and
@@ -195,8 +204,13 @@ provide socket EOF and process-exit events. The link controller retains
 the pairing socket for the connection's lifetime. The existing link controller
 observes its EOF/error and the local client's `NOTE_EXIT`; either event records
 a link failure and stops that connection. A native CQ/post error uses `link_stop`
-to wake the controller through its preallocated user event. The controller shuts
-down the socket, joins TX/RX, and closes QPs/CQs. Its event queue remains open
+to wake the controller through its preallocated user event. `link_close` shuts
+down the socket, joins TX/RX, and closes QPs/CQs without deleting the process watch.
+Registration precedes pairing; after connection teardown the controller keeps
+observing the client until detach or bridge shutdown. `NOTE_EXIT`, or `ESRCH` at
+registration, invokes the same `mesh_retire` used by detach and dead-client
+replacement. The kqueue interface removes descriptor events on close and defines
+`ESRCH` as a nonexistent target process. Its event queue remains open
 until bridge shutdown, after every controller has joined, so a stop notification
 cannot target a recycled descriptor. Event registration and notification use
 `KEVENT_FLAG_IMMEDIATE`; only the separate controller's event observation blocks.
@@ -213,8 +227,13 @@ operand rows. `mesh_retire` clears their row ownership even when `pages == 0`;
 only actual operand buffers receive the closed-storage flag. Previously a dead
 client's root and return rows had owner zero and survived replacement, leaking
 row capacity across realizations. Normal client retirement or replacement of a
-dead client now covers both. Actual backing retains the existing device-close
-retirement rule. Link error alone still does not cancel unissued numerical uses
+dead client now covers both. Retirement claims the exact old client identity
+before clearing its state, uses a fresh generation and the retiring process's live PID during cleanup,
+and publishes vacancy last. This prevents competing exit observers/replacements
+from clearing a newer client's state. The mechanism and limits are documented in
+[client retirement](pages-and-functions.md#client-retirement-has-one-owner).
+Actual backing retains the existing device-close retirement rule.
+Link error alone still does not cancel unissued numerical uses
 or rearm the same program: those R2/R4 steps remain unfinished.
 
 ## Program.kernel_call

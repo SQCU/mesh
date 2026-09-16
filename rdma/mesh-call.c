@@ -205,7 +205,7 @@ int mesh_calls_start(struct mesh_calls *calls){
   uint32_t rows=mesh_rows(m),workers=0;
   for(uint32_t row=0;row<rows;row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    if(buffer->owner==calls->context->client)buffer->initial=atomic_load_explicit(&buffer->references,memory_order_relaxed);
+    if(atomic_load_explicit(&buffer->owner,memory_order_relaxed)==calls->context->client)buffer->initial=atomic_load_explicit(&buffer->references,memory_order_relaxed);
   }
   if(calls->function_count>rows/calls->extent)return ENOMEM;
   calls->slots=calloc(calls->function_count?calls->function_count*calls->extent:1,sizeof *calls->slots);
@@ -414,8 +414,11 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uin
   if(span>mesh_rows(m)/count)return ENOMEM;
   uint32_t stride=(uint32_t)span/m->block,rows=count*stride,first=mesh_rows_alloc(context,rows);
   if(first==MESH_ABSENT)return errno;
-  for(uint32_t row=first;row<first+rows;row+=stride)
-    mesh_buffers(m)[row]=(struct mesh_buffer){.references=2,.pages=(uint32_t)span,.channel=channel,.owner=context->client};
+  for(uint32_t row=first;row<first+rows;row+=stride){
+    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+    atomic_store_explicit(&buffer->references,2,memory_order_relaxed);buffer->pages=(uint32_t)span;buffer->channel=channel;
+    atomic_store_explicit(&buffer->owner,context->client,memory_order_release);
+  }
   mesh_bits_set(m,MESH_ROW_HOT,first,rows);
   if(channel==MESH_ABSENT)for(uint32_t row=first;row<first+rows;row+=stride){
     uint32_t page=mesh_arena_alloc(context,(uint32_t)span,m->block);

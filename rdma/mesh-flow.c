@@ -282,51 +282,60 @@ static void *link_progress(void *argument){
   return NULL;
 }
 
+/* design/algorithm-sources.md#meshresult */
+static void link_close(struct mesh_link *link,int *control){
+  atomic_store_explicit(&link->progressing,0,memory_order_release);
+  if(*control>=0)shutdown(*control,SHUT_RDWR);
+  while(link->worker_count)pthread_join(link->workers[--link->worker_count].thread,NULL);
+  if(*control>=0){close(*control);*control=-1;}
+  while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);
+  if(link->provider.listener>=0){close(link->provider.listener);link->provider.listener=-1;}
+  atomic_store_explicit(&mesh_links(link->M)[link->index].port.phase,MESH_STOPPED,memory_order_release);
+}
+
 /* design/algorithm-sources.md#programcopy */
 static void *link_run(void *argument){
   struct mesh_link *link=argument;struct hdr *m=link->M;
   struct mesh_port_info *port=&mesh_links(m)[link->index].port;
   uint32_t transfers=0;
   for(uint32_t q=0;q<m->qps;q++)for(int d=0;d<2;d++)transfers+=atomic_load(mesh_order_length(m,link->client,link->index*m->qps+q,d));
-  if(!transfers)return NULL;
-  atomic_store_explicit(&port->phase,MESH_PAIRING,memory_order_release);
-  int control=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
-  if(control<0){
-    if(errno!=ECANCELED)link_error(link,errno?errno:EIO,1);
-  } else {
-    struct kevent64_s changes[2];
-    EV_SET64(&changes[0],control,EVFILT_READ,EV_ADD|EV_CLEAR,0,0,0,0,0);
-    EV_SET64(&changes[1],(uint32_t)link->client,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
-    int error=kevent64(link->events,changes,2,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)?errno:0;
-    if(!error){
-      __atomic_store_n(&mesh_links(m)[link->index].bandwidth,link->provider.bandwidth,__ATOMIC_RELAXED);
-      atomic_store_explicit(&port->phase,MESH_PAIRED,memory_order_release);
+  struct kevent64_s event;
+  EV_SET64(&event,(uint32_t)link->client,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
+  int error=kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)?errno:0,control=-1;
+  if(error){link_error(link,error,4);if(error==ESRCH)mesh_retire(m,link->client);}
+  if(!error && transfers){
+    atomic_store_explicit(&port->phase,MESH_PAIRING,memory_order_release);
+    control=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
+    if(control<0)link_error(link,errno?errno:EIO,1);
+    else {
+      EV_SET64(&event,control,EVFILT_READ,EV_ADD|EV_CLEAR,0,0,0,0,0);
+      error=kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)?errno:0;
+      if(!error){
+        __atomic_store_n(&mesh_links(m)[link->index].bandwidth,link->provider.bandwidth,__ATOMIC_RELAXED);
+        atomic_store_explicit(&port->phase,MESH_PAIRED,memory_order_release);
+      }
+      for(uint32_t d=0;d<2 && !error;d++){
+        link->workers[d]=(struct mesh_worker){.link=link,.direction=d};
+        error=pthread_create(&link->workers[d].thread,NULL,link_progress,&link->workers[d]);
+        if(error)break;
+        link->worker_count++;
+      }
+      if(error)link_error(link,error,1);
     }
-    for(uint32_t d=0;d<2 && !error;d++){
-      link->workers[d]=(struct mesh_worker){.link=link,.direction=d};
-      error=pthread_create(&link->workers[d].thread,NULL,link_progress,&link->workers[d]);
-      if(error)break;
-      link->worker_count++;
-    }
-    if(error)link_error(link,error,1);
-    while(atomic_load_explicit(&link->progressing,memory_order_acquire)){
-      struct kevent64_s event;
-      int count=kevent64(link->events,NULL,0,&event,1,0,NULL);
-      if(count<0){if(errno==EINTR)continue;link_error(link,errno,4);break;}
-      if(event.flags&EV_ERROR)link_error(link,event.data,4);
-      else if(event.filter==EVFILT_PROC)link_error(link,ECANCELED,4);
-      else if(event.filter==EVFILT_READ)
-        link_error(link,event.flags&EV_EOF?(event.fflags?event.fflags:ECONNRESET):EPROTO,4);
-    }
-    shutdown(control,SHUT_RDWR);
-    while(link->worker_count)pthread_join(link->workers[--link->worker_count].thread,NULL);
-    EV_SET64(&changes[0],(uint32_t)link->client,EVFILT_PROC,EV_DELETE,0,0,0,0,0);
-    kevent64(link->events,changes,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
-    close(control);
+  } else atomic_store_explicit(&link->progressing,0,memory_order_release);
+  for(;;){
+    if(!atomic_load_explicit(&link->progressing,memory_order_acquire))link_close(link,&control);
+    if(stop || atomic_load_explicit(&m->client,memory_order_acquire)!=link->client)break;
+    int count=kevent64(link->events,NULL,0,&event,1,0,NULL);
+    if(count<0){if(errno==EINTR)continue;link_error(link,errno,4);break;}
+    if(event.flags&EV_ERROR)link_error(link,event.data,4);
+    else if(event.filter==EVFILT_PROC){link_error(link,ECANCELED,4);mesh_retire(m,link->client);}
+    else if(event.filter==EVFILT_READ)
+      link_error(link,event.flags&EV_EOF?(event.fflags?event.fflags:ECONNRESET):EPROTO,4);
   }
-  while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);
-  if(link->provider.listener>=0){close(link->provider.listener);link->provider.listener=-1;}
-  atomic_store_explicit(&port->phase,MESH_STOPPED,memory_order_release);
+  link_close(link,&control);
+  EV_SET64(&event,(uint32_t)link->client,EVFILT_PROC,EV_DELETE,0,0,0,0,0);
+  kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
   return NULL;
 }
 

@@ -34,18 +34,22 @@ int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,u
   munmap(m,(size_t)info.st_size);return result;
 }
 
-/* design/collective-dependency-ledger.md#d14-teardown-retains-outstanding-device-storage */
-static void mesh_retire(struct hdr *m,uint64_t client){
+/* design/algorithm-sources.md#programtensor */
+void mesh_retire(struct hdr *m,uint64_t client){
+  uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&UINT64_C(0x7fffffff);
+  uint64_t retiring=(client&(UINT64_C(1)<<63))|(generation<<32)|(uint32_t)getpid();
+  if(!atomic_compare_exchange_strong_explicit(&m->client,&client,retiring,memory_order_seq_cst,memory_order_acquire))return;
   atomic_store_explicit(&m->configured,0,memory_order_release);
   for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(m,client,q,d),0,memory_order_release);
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    if(buffer->owner==client){
+    if(atomic_load_explicit(&buffer->owner,memory_order_acquire)==client){
       if(buffer->pages)atomic_store_explicit(&buffer->closed,1,memory_order_release);
       mesh_bits_clear(m,MESH_ROW_OWN,row,1);
     }
   }
   atomic_fetch_add_explicit(&m->retired,1,memory_order_release);
+  atomic_store_explicit(&m->client,0,memory_order_release);
 }
 
 int mesh_attach(struct mesh_ctx *c,const char *name){
@@ -65,10 +69,8 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   uint64_t client=(((atomic_fetch_add_explicit(&memory->serial,1,memory_order_relaxed)+1)&UINT64_C(0x7fffffff))<<32)|(uint32_t)getpid(),vacant=0;
   while(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,client,memory_order_seq_cst,memory_order_acquire)){
     if(!vacant || !kill((pid_t)(uint32_t)vacant,0) || errno!=ESRCH){ munmap(memory,(size_t)info.st_size); close(file); return EADDRINUSE; }
-    uint64_t previous=vacant;
-    if(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,client,memory_order_seq_cst,memory_order_acquire)) continue;
-    mesh_retire(memory,previous);
-    break;
+    mesh_retire(memory,vacant);
+    vacant=0;
   }
   uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
   client|=(~device)&(UINT64_C(1)<<63);
@@ -85,7 +87,6 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
   mesh_retire(c->M,c->client);
-  atomic_store_explicit(&c->M->client,0,memory_order_release);
   int status=munmap(c->M,c->len);
   int error=status?errno:0;
   if(close(c->fd) && !error) error=errno;
@@ -117,7 +118,12 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   for(uint32_t r=first;r<first+count;r++){
     atomic_store_explicit(&mesh_presence(c->M)[r],0,memory_order_relaxed);
     atomic_store_explicit(&mesh_page(c->M)[r],MESH_ABSENT,memory_order_release);
-    mesh_buffers(c->M)[r]=(struct mesh_buffer){.channel=MESH_ABSENT,.owner=c->client};
+    struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
+    atomic_store_explicit(&buffer->references,0,memory_order_relaxed);
+    atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
+    atomic_store_explicit(&buffer->uses,0,memory_order_relaxed);
+    buffer->initial=buffer->pages=buffer->binding=buffer->invocation=buffer->completions=0;buffer->channel=MESH_ABSENT;
+    atomic_store_explicit(&buffer->owner,c->client,memory_order_release);
     for(uint32_t w=0;w<(c->M->links+63)/64;w++)atomic_store_explicit(&mesh_send_uses(c->M,r)[w],0,memory_order_relaxed);
   }
   c->rows+=count;
@@ -141,18 +147,22 @@ void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t
 /* design/algorithm-sources.md#programtensor */
 static void mesh_buffer_reclaim(struct hdr *m,uint32_t row){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+  uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
+  if(!owner || !atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed))return;
+  atomic_fetch_and_explicit(&mesh_plane(m,MESH_FREE)[row/64],~(UINT64_C(1)<<(row%64)),memory_order_relaxed);
   uint32_t pages=buffer->pages;
   for(uint32_t offset=0;offset<pages;offset+=m->block){
     uint32_t page=atomic_load_explicit(&mesh_page(m)[row+offset/m->block],memory_order_acquire);
     if(page!=MESH_ABSENT)mesh_bits_clear(m,MESH_PAGE_OWN,page,m->block);
   }
+  atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
   mesh_bits_clear(m,MESH_ROW_HOT,row,pages/m->block);
 }
 
 /* design/algorithm-sources.md#programtensor */
 static void mesh_reclaim(struct hdr *m){
   for(uint32_t word=0;word<mesh_words(m);word++){
-    uint64_t available=atomic_exchange_explicit(&mesh_plane(m,MESH_FREE)[word],0,memory_order_acquire);
+    uint64_t available=atomic_load_explicit(&mesh_plane(m,MESH_FREE)[word],memory_order_acquire);
     while(available){
       uint32_t row=word*64+(uint32_t)__builtin_ctzll(available);available&=available-1;
       mesh_buffer_reclaim(m,row);
@@ -170,7 +180,7 @@ void mesh_buffer_release(struct hdr *m,uint32_t row){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
   if(atomic_fetch_sub_explicit(&buffer->references,1,memory_order_acq_rel)==1){
     if(buffer->channel==MESH_ABSENT)atomic_fetch_or_explicit(&mesh_plane(m,MESH_FREE)[row/64],UINT64_C(1)<<(row%64),memory_order_release);
-    else mesh_notice_push(m,mesh_notice_queue(m,buffer->owner,m->links+buffer->channel),row);
+    else mesh_notice_push(m,mesh_notice_queue(m,atomic_load_explicit(&buffer->owner,memory_order_relaxed),m->links+buffer->channel),row);
   }
 }
 
@@ -178,13 +188,16 @@ void mesh_buffer_release(struct hdr *m,uint32_t row){
 void mesh_retired_release(struct hdr *m){
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    if(atomic_load_explicit(&buffer->closed,memory_order_acquire) &&
-       (atomic_load_explicit(&buffer->references,memory_order_acquire) || buffer->channel!=MESH_ABSENT)){
+    uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
+    if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) &&
+       atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed)){
       if(buffer->channel<m->links*m->qps)for(uint32_t offset=0;offset<buffer->pages;offset+=m->block)
         atomic_store_explicit(&mesh_page(m)[row+offset/m->block],MESH_ABSENT,memory_order_relaxed);
       atomic_store_explicit(&buffer->references,0,memory_order_relaxed);
       buffer->channel=MESH_ABSENT;
+      atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
       mesh_bits_set(m,MESH_FREE,row,1);
+      atomic_store_explicit(&buffer->owner,owner,memory_order_release);
     }
   }
   for(uint32_t index=0;index<mesh_blocks(m);index++){
@@ -210,13 +223,13 @@ void mesh_publish(struct hdr *m,uint32_t row,uint64_t stamp){
     uint64_t links=atomic_load_explicit(&mesh_send_uses(m,row)[w],memory_order_relaxed);
     while(links){
       uint32_t link=w*64+(uint32_t)__builtin_ctzll(links);links&=links-1;
-      mesh_notice_push(m,mesh_notice_queue(m,buffer->owner,link),row);
+      mesh_notice_push(m,mesh_notice_queue(m,atomic_load_explicit(&buffer->owner,memory_order_relaxed),link),row);
     }
   }
   atomic_store_explicit(&mesh_presence(m)[row],stamp,memory_order_release);
   uint32_t uses=atomic_load_explicit(&buffer->uses,memory_order_relaxed);
   while(uses){
     uint32_t worker=(uint32_t)__builtin_ctz(uses);uses&=uses-1;
-    mesh_notice_push(m,mesh_notice_queue(m,buffer->owner,m->links*(m->qps+1)+worker),row);
+    mesh_notice_push(m,mesh_notice_queue(m,atomic_load_explicit(&buffer->owner,memory_order_relaxed),m->links*(m->qps+1)+worker),row);
   }
 }

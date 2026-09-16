@@ -36,24 +36,26 @@ entries name actual registered backing. A view alone does not establish contigui
 setup decomposes the operand into the contiguous sections required by the chosen
 numerical calls, preserving contraction contributions and output coordinates.
 
-For section s, outstanding ownership is R(s) = S(s) + P(s) + C(s) + T(s): the
-temporary setup owner, unfinished production, configured numerical owners and
-transport uses. Setup derives known uses from the feed-forward graph and drops
-S after all bindings are realized. Observations are declared consumers and count
-in C. Existing completions discharge those uses. Early publication does not release an
+There is one owning reference: an unfinished use keeps its allocation alive.
+For section s, R(s) is the number of those uses, including setup's temporary
+ownership. Producers, numerical readers, observations and transport operations
+all use the same `mesh_buffer.references` and `mesh_buffer_release`; their names
+describe where use ends, not separate reference mechanisms. Setup derives the
+uses from the declared feed-forward graph and drops its reference after all
+bindings are realized. Existing completions discharge those uses. Early publication does not release an
 unfinished producer. The final reference publishes a free-pool entry without
 clearing payload bytes. Independent work already has its configured sections and
 never awaits reclamation.
 
 `TensorPart` contains rank, byte extent, a C section descriptor and value flags;
 it has no heap-object reference or destructor. Copying or retaining the descriptor
-does not add a reader or delay reclamation. `MeshMemory.sections` holds S during
+does not add a reader or delay reclamation. `MeshMemory.sections` holds setup ownership during
 configuration. `Mesh.start` releases it after binding all functions and transfers,
 before starting numerical workers; failed configuration returns any setup
 references still held by that array. The array is then empty. Backend views keep
 the memory mapping alive; their actual reads are owned by the declared calls.
 
-All retains occur before S is dropped, when R is necessarily positive. They need
+All retains occur before setup ownership is dropped, when R is necessarily positive. They need
 one increment, with no resurrection check, retry or rollback. After setup, the
 count only decreases for that value. Its transition from one to zero publishes
 one indexed return event; there is no sealed state, queue claim or retry. ABI 53
@@ -66,7 +68,7 @@ The [reclamation events](#reclamation-events) below replace the former collector
 For a transient input, each indexed use is a numerical owner and its native
 completion releases that reference. For an immutable shared input, the prepared
 function holds one reference per binding across all its value indices. Program
-destruction follows completion or cancellation of all its call records. ABI 52
+storage remains alive through outstanding native callbacks. ABI 52
 leaves shared and unissued operand references to the existing client-retirement
 event, after native callbacks end and the bridge closes the queue pairs. It removes
 the destructor's reconstruction of consumed rows from consumer slot numbers.
@@ -74,23 +76,72 @@ Thus the constant remains live throughout every
 native read without per-invocation reference updates. This groups equal storage
 lifetimes; it does not remove input-arrival dependencies or alter tensor values.
 
-For the call storage itself, let O be the Mesh owner reference, W the active
-worker references, and I the instances with outstanding numerical call records.
-Its count is O+W+I. Startup acquires W+I before any worker starts. Each instance
-counts its unissued and issued records together; issuance changes neither count.
-W counts workers named by declared functions, not the configured worker limit.
-A rank that only forwards received sections starts no numerical workers. A failed
-worker launch releases references for the remaining unstarted worker mask;
-cancellation still visits only unissued records in that index range.
-Native completion retires one record. Its instance's final record releases one
-program reference. Worker exit cancels its unissued records and releases its W
-reference; only that worker reads and changes its records' pending counts.
-This keeps callback operands and memory alive without a launch-time atomic retain,
-a join in submission, or a caller completion/free protocol.
+Call storage has one Mesh owner reference and one reference per started numerical
+worker. Startup acquires the worker references before creating the threads;
+failed creation releases the references for threads not started. Each worker's
+active-call count keeps that worker alive through native callbacks after destroy
+clears `running`. Worker exit drops its program reference. There is no additional
+per-instance program reference, and worker exit does not walk or cancel unissued
+operand uses. Those references end at client retirement after native callbacks
+and QP teardown. A forwarding-only rank starts no numerical workers.
 
 The implementation trusts caller configuration and backend completion contracts.
 Its ownership records describe actual accesses; they do not police arbitrary
 external code. No caller free/done call or consumer-stamp protocol is required.
+
+An address, page-table entry or copied section descriptor identifies storage; it
+does not itself own a use. A call's pending-input count expresses a numerical
+dependency, not allocation ownership. A frame's completion count records when
+its work ends. Private call storage has its own allocation count, governed by the
+same lifetime rule. None of those distinctions licenses another buffer refcounter
+or a caller-managed release protocol.
+
+### Client retirement has one owner
+
+Detach, replacement of a dead client, and the controller's process-exit event use
+the same `mesh_retire`. It claims the exact old client identity with a fresh
+generation and the retiring process's live PID, retaining the old notice bank.
+The claim precedes clearing configuration, transfer lengths and row ownership.
+A competing controller or replacement cannot clear a newer client's state;
+attachment sees a live owner until retirement publishes the vacant client slot.
+No reference category, extra thread, or data-path ownership check is introduced.
+
+The link controller registers `NOTE_EXIT` before pairing. It closes a failed
+connection through `link_close`, but continues observing client exit until detach
+or bridge shutdown. A socket/CQ failure therefore cannot discard a later process
+exit. The controller also handles `ESRCH` during process-watch registration through
+retirement. Closing the socket removes its descriptor events while preserving
+the process watch, as specified by the cited kqueue interface.
+
+Retirement marks operand storage closed; it does not immediately free pages.
+The bridge's existing outer loop discharges abandoned references and returns
+backing only after every old link controller has joined and its QPs have closed.
+Client disappearance now triggers that path without needing a new attachment.
+Death during pairing is observed after the existing bounded pairing call returns.
+This does not implement cancellation of a still-attached failed program or
+same-program recovery; R2/R4 and N1 remain open.
+
+ABI 66 also makes the existing buffer owner atomic. Setup reclamation and the
+bridge's discharge of abandoned uses each claim that field before changing the
+descriptor. The bridge publishes the free-pool bit before restoring the owner as
+its last write. Setup leaves the bit pending until it claims the descriptor,
+then removes the bit and returns backing and row capacity. Only setup makes the
+descriptor reusable. Initialization publishes owner last and writes its atomic
+fields individually. This prevents cleanup's stale closed/count observations
+from modifying a replacement allocation.
+
+The claims occur in setup and teardown, with no retry or wait. Publication and
+transport retain their existing reference-release and notification paths; owner
+reads there are relaxed loads. The buffer remains 48 bytes and receives no new
+field. The allocator still has one configuration owner per region; this change
+does not implement T7's multiple concurrent clients or N1's remote-value reuse.
+Maintained library source is 2,454 → 2,481 lines across the same eleven tracked
+Swift/C/header files. Documentation changes are counted separately; this repair
+is not a structural source reduction.
+Strict C compilation, the existing four Mesh callers and the engine's Mesh
+library build pass. No runtime or latency result is claimed. The local bridge
+build uses the Makefile's ad-hoc signing fallback because the named signing
+identity is unavailable; no bridge deployment was performed.
 
 ## Publication notifications
 
