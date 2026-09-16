@@ -31,6 +31,9 @@ Operator, 2026-09-15, verbatim:
 > while extremely slow and bad programs must be implementable, we are not here to test
 > them, and we are not here to test or validate bad kernel launch patterns either
 
+> so are we allowed to implement useful persistent kernels for linear algebra for this
+> sort of topic to satisfy [the crossing is the wire, not a host hop]?
+
 This document is the goal. It is handed verbatim to a Codex session, a Claude session,
 or a Claude that launches `codex` as a subagent. Every row is a deliverable with a
 signature, a reference to cross-implement from, and a check readable from source; the
@@ -266,6 +269,8 @@ re-establish who they are and what they will do; nothing inside an NFE is recove
 
 **R7. Demonstration and number.** Signature: on the pair, pull the cable during an NFE: the NFE concludes `Result.link` within one completion on both sides; replug (same or other port): the next `submit` completes with no process restart, no bridge exit, no U-state process; report time-to-repair (cable in → paired) and time-to-first-completed-NFE-after-repair. Check: bridge pids unchanged before/after; both numbers in `output_data/mesh_recovery/`; repeated three times.
 
+**X9. Presence stamps are device-readable; consumers may be resident kernels.** Signature: `TensorPart.stamp` — the address (in the same shared mapping the GPU sees via `bytesNoCopy`) of the section's per-instance presence word; the bridge/worker writes it with a release store after the data is visible (X1). A supplied `TensorFunction.metal` may encode one command buffer for a whole local step and wait *inside the kernel* on the stamps of the sections it consumes (device-scope atomic load loop), or use a Metal 4 queue-side `waitForEvent` that the RX thread signals — either way the dependent work is resident before the tile lands and the crossing costs the wire only. The in-kernel wait is the X2 firing rule executed on the device: presence only, no data-dependent branch, no retry; the GPU watchdog is the fail-stop (`Result.function` on timeout, I12/I19). Ref: MLX `fence_wait` (`MLX_METAL_FAST_SYNCH`); NCCL LL flags; MSCCL++ device semaphores; Gupta et al. 2012 persistent threads; Anukari (spin to keep the Apple GPU clocked). Check: `TensorPart.stamp` exists and `mesh_publish` stores it release-ordered after the payload; a caller example encodes one command buffer per step with in-kernel waits and completes with command buffers per step = O(segments), not O(tiles) or O(layers); measured µs-class arrival-to-consume on the pair.
+
 ### E — engine integration and measurement
 
 **E1. The serving step calls Mesh at the Megatron points.** in `metal-microbench`, one file ≤ 300 lines: a Gemma-4 layer where `o_proj` and `down_proj` partials go `call(dot) → reduceScatter(using: add) → call(norm+residual) → allGather`; every other op is `call` on the rank's head/column range with existing kernels bound as `TensorFunction.metal`. Ref: Megatron f/g; Korthikanti 2022; MLX `shard_linear`; Pallas collective matmul (reuse the local kernel). Check: `grep -c "reduceScatter\|allGather" <file>` = 2 × layers; no kernel arithmetic rewritten; solo and n-node are the same binary.
@@ -341,6 +346,7 @@ subset, never as "done".
 | 19e | X5 reclamation as free-list event; arena bound at start() | ✗ | X5/W5: replace `mesh_buffer_enqueue`/`reclaim_head`/`mesh_collect`/`link_collect` + collector thread; refcount→0 pushes `(first,pages)` on a per-worker SPSC ring; `Mesh.result` one-load status word (N2) |
 | 19f | X6 TensorPart is POD | ◐ (descriptor implemented; X3/W open) | `5203b2b`: primitive fields and an optional 32-byte C `mesh_section`; setup ownership ends after binding, declared uses own actual accesses. Logical indices intentionally resolve through the canonical page table. W1/W5 reclamation defects and general X3 layout integration remain. |
 | 19g | X7 functions get contiguous operand arrays | ✓ (verify) | `MeshOperands` |
+| 19m | X9 device-readable stamps; resident-kernel consumers (the only way condition 1 of FFN-only TP scale-out holds) | ✗ | needs X1 dense stamps; caller side = one command buffer per step with in-kernel stamp waits |
 | 20 | G1 contraction/Gram as the same calls | ◐ (source composition complete; W1–W6 open) | `c30fe6f` `examples/gram-chain.swift` (108 lines): one supplied-function composition for `ZA`, `RᵀH`, `RU`, `YW`; direct Gram-to-down and residual-to-next-block operands; unequal rectangular tiles, explicit owners, configured depth; `make -C rdma gram-chain` builds; unrun, no performance claim; [algebra and flow](function-chain.md#g1-gram-and-projection-chain) |
 | 21 | G2 indices as data (caller pattern) | ✓ | `e47f669` `examples/indexed-gather.swift` 120 lines: index sections are ordinary `TensorPart`s (produced locally or received by `send`); routed expert = `map` over `[x, w0, w1, expertIdx]`, neighbourhood sum = `map` over `[table, idx]`; selection inside the supplied function; firing by X2 countdown; library delta 0; no new symbol |
 | 22 | G3 two callers | ✗ | — |
