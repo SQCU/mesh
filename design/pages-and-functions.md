@@ -781,6 +781,39 @@ regression review. The output descriptor reads and `mesh_publish`'s own loads
 remain part of the total publication budget; this change does not certify them
 or hide them behind the callback boundary.
 
+### Direct receive completion addresses
+
+Each prepared native RECV now uses its local canonical tag address as `wr_id`.
+The completion reads that address directly. The identifier is local to the
+native queue; it is not transmitted to a peer. Both the tag alias used by the
+registered receive and the canonical tag address name the same shared backing.
+Setup stores the first tag address, page-size shift and block size beside the
+receive queue. For returned tag address t, first tag address t0, page size 2^s
+and block size B pages, the canonical physical page is `((t - t0) >> s) * B`.
+The handler stores that page through its already prepared destination pointer.
+No runtime arena-header lookup is needed to locate the arriving tag, and no
+new binding table, wrapper, allocation or receive-data predicate is introduced.
+Queue-local constants add 16 bytes per queue; native receive requests and
+destination records retain their 64-byte and 32-byte layouts. ABI 69 is unchanged.
+
+The native posting loop is shared by initial posting and returned-page posting
+and forced inline. On a return it attempts to drain the native request queue
+before resetting the logical row or releasing instance references. Native
+capacity refusal still leaves the head request in place and permits draining
+other returned pages; it introduces no software credit or waiting condition.
+The final-reference event already ended the page's prior uses. Reposting does
+not require its logical row to have finished bookkeeping, and the same receive
+thread processes later native completions after that bookkeeping.
+
+`native-audit` shows the completion identifier followed immediately by the tag
+load, without the old arena-header loads or division. It also shows the native
+repost before reset/refcount instructions and no out-of-line posting helper.
+The bridge build and strict assembly generation pass. These are source and
+code-generation results, with no workload execution or latency claim. The
+source total is 2,713 lines over the same eleven maintained library files,
+up from 2,704. The full receive path still includes publication, native request
+selection and return bookkeeping; these changes do not close H3/H5/H7 or N1.
+
 ### Prepared native requests
 
 Setup prepares matching native request extents under Apple's

@@ -29,6 +29,8 @@ struct mesh_receive {
   uint32_t *pages,first;
   struct mesh_receive_request *requests;
   struct mesh_receive_record *records;
+  uintptr_t tag_base;
+  uint32_t page_shift,block;
   struct mesh_ready ready;
   struct mesh_event_reader returns;
 };
@@ -137,7 +139,8 @@ static int link_configure(void *state,int socket,uint64_t client){
     link_receive_destroy(receive);
     size_t capacity=1;
     while(capacity<chunks_count)capacity*=2;
-    *receive=(struct mesh_receive){.first=receives?in[0].pool:0,.ready={.tail=chunks_count,.mask=capacity-1}};
+    *receive=(struct mesh_receive){.first=receives?in[0].pool:0,.tag_base=(uintptr_t)mesh_tag(m,0),
+      .page_shift=(uint32_t)__builtin_ctz(m->pgsz),.block=m->block,.ready={.tail=chunks_count,.mask=capacity-1}};
     int reader_error=mesh_event_reader_init(&receive->returns,m,mesh_notice_queue(m,client,m->links+link->index*m->qps+q));
     if(reader_error){free(bindings);free(peer);errno=reader_error;return -1;}
     receive->pages=calloc(capacity,sizeof *receive->pages);
@@ -147,7 +150,7 @@ static int link_configure(void *state,int socket,uint64_t client){
     for(uint32_t i=0;i<chunks_count;i++){
       uint32_t page=receive->first+i*m->block;receive->pages[i]=i;
       struct mesh_receive_request *request=&receive->requests[i];
-      *request=(struct mesh_receive_request){.span=link->provider.device->spans[page/m->block],.request={.wr_id=page,.sg_list=&request->span,.num_sge=1}};
+      *request=(struct mesh_receive_request){.span=link->provider.device->spans[page/m->block],.request={.wr_id=(uintptr_t)mesh_tag(m,page),.sg_list=&request->span,.num_sge=1}};
       request->span.length=bytes[2*q+MESH_RECEIVE];
     }
     for(uint32_t i=0;i<receives;i++){
@@ -183,19 +186,24 @@ static int link_configure(void *state,int socket,uint64_t client){
   return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
 }
 /* design/algorithm-sources.md#programcopy */
+static inline __attribute__((always_inline)) int link_receive_post(struct mesh_queue *queue,struct mesh_receive *receive){
+  struct mesh_ready *ready=&receive->ready;
+  while(ready->head!=ready->tail){
+    struct ibv_recv_wr *bad=NULL;
+    int error=queue->receive(queue->pair,&receive->requests[receive->pages[ready->head&ready->mask]].request,&bad);
+    if(error)return error;
+    ready->head++;
+  }
+  return 0;
+}
+/* design/algorithm-sources.md#programcopy */
 static int link_receive(struct mesh_link *link,uint32_t q){
   struct hdr *m=link->M;
   struct mesh_receive *receive=&link->receive[q];
   struct mesh_queue *queue=&link->provider.queues[q];
   struct mesh_ready *ready=&receive->ready;
+  int error=link_receive_post(queue,receive);
   for(;;){
-    int error=0;
-    while(ready->head!=ready->tail){
-      struct ibv_recv_wr *bad=NULL;
-      error=queue->receive(queue->pair,&receive->requests[receive->pages[ready->head&ready->mask]].request,&bad);
-      if(error)break;
-      ready->head++;
-    }
     if(error<0)error=-error;
     if(error && error!=ENOMEM && error!=EAGAIN)return error;
     uint32_t row=mesh_event_take(&receive->returns);
@@ -205,6 +213,7 @@ static int link_receive(struct mesh_link *link,uint32_t q){
       receive->pages[ready->tail++&ready->mask]=(atomic_load_explicit(&mesh_page(m)[row+offset/m->block],memory_order_relaxed)-receive->first)/m->block;
       atomic_store_explicit(&mesh_page(m)[row+offset/m->block],MESH_ABSENT,memory_order_relaxed);
     }
+    error=link_receive_post(queue,receive);
     mesh_buffer_reset(m,row);
     for(uint32_t i=0;i<buffer->completions;i++){
       struct mesh_instance *instance=&link->instances[buffer->binding+i];
@@ -247,10 +256,10 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
       struct ibv_wc *wc=&completions[i];
       if(wc->status){link_error(link,wc->status,2);return wc->status;}
       if(direction==MESH_RECEIVE){
-        uint32_t page=(uint32_t)wc->wr_id;
-        struct mesh_wire_tag *tag=mesh_tag(m,page);
         struct mesh_receive *receive=&link->receive[q];
+        struct mesh_wire_tag *tag=(struct mesh_wire_tag *)(uintptr_t)wc->wr_id;
         uint64_t tag_value=atomic_load_explicit(&tag->value,memory_order_relaxed);
+        uint32_t page=(uint32_t)(((uintptr_t)tag-receive->tag_base)>>receive->page_shift)*receive->block;
         uint32_t invocation=(uint32_t)(tag_value>>32);
         struct mesh_receive_record record=receive->records[(uint32_t)tag_value];
         atomic_store_explicit(record.entry,page,memory_order_relaxed);

@@ -520,6 +520,13 @@ handling; it does not implement a replacement provider or completion protocol.
 Re-pairing fills these records again before progress starts. This is partial
 evaluation of upstream dispatch, not a new transport algorithm.
 
+The [direct completion address](pages-and-functions.md#direct-receive-completion-addresses)
+uses the native `wr_id` return mechanism cited below to carry the prepared local
+tag address. Affine tag-address inversion recovers the physical page without
+reconstructing that address from the arena header. `link_receive_post` submits
+the same prepared native requests for initial posting and returned pages; it
+is inlined, and the return path posts before logical-row and instance cleanup.
+
 ABI 59 realizes a peer-qualified, source-chunk-indexed table of aligned 32-byte
 receive records. The eight-byte tag names the 32-bit sequence and source chunk.
 ABI 60's record supplies the destination row, buffer address, exact canonical
