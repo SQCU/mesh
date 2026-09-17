@@ -33,6 +33,12 @@ is needed when the input partials are available. Splitting an already computed
 is not a transport operation and is not implemented in mesh. A coordinate
 slice of `T(X)` is not generally `T` applied to a coordinate slice of `X`.
 
+Each `T(P[i])` is the same supplied T applied to a different operand scope.
+Mesh does not classify a contribution as ineligible for ordinary calls, or give
+reduction's combine a privileged call path. `call`, `map`, and `reduce` use the
+same binder. The caller supplies the projections, indices, functions and explicit
+recombination edges. See the [L5 correction](distributed-reduce.md#l5-same-function-different-operand-scopes).
+
 The scalar `linear-chain` program and the earlier fixed matrix executable have
 been deleted. Neither establishes the requested large composed use.
 

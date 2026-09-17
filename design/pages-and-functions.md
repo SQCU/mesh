@@ -1174,6 +1174,58 @@ removed by the following change. Publication streams, native
 operand view selection, full H1–H7 latency evidence and N1 realization remain
 unfinished. No runtime workload or deployment accompanies this change.
 
+### Direct TX publication
+
+The TX event already identifies prepared native requests. Publication now
+attempts the first request directly, before accessing the private pending-range
+ring. It writes the request's existing tag and calls its prepared native target.
+The previous unconditional enqueue, head lookup and range reload before that
+first post are deleted. This applies to every declared send, link and queue.
+
+After acceptance, only the remaining interval enters the existing ring; after
+native capacity refusal, the unchanged interval enters it. The ring is drained
+immediately in either case, and queued requests retain their existing rotation
+and refusal behavior. One forced-inline `link_send_request` body serves both
+paths. It adds no call frame, request construction or capacity predicate.
+Transient refusal can cost an additional unsuccessful native attempt for a new
+publication; this is accounted for rather than hidden behind a software gate.
+
+There is at most one unfinished interval per declared live send. A fresh
+publication has none queued, and acceptance either removes its first request
+or finishes the interval. Enqueue therefore preserves the existing E-range
+capacity bound, with no new reservation or allocation. Requests within an
+interval retain their order. Different intervals can reach posting in a
+different interleaving; indexed receive matching already supports that order.
+This does not establish N1's cross-participant lifetime bound.
+
+Setup binds each of the existing two dedicated threads directly to its send
+or receive entry point. The shared direction-dispatch function, runtime direction
+field and worker-to-link wrapper are deleted. Poll/post targets have constant
+direction indices. The send thread retains the native request-array base for
+its lifetime, including completion processing and retry posting. Controller
+teardown still joins both threads before changing that storage.
+
+Each poll requests at most one completion, so its consumer uses that one output
+record directly rather than a completion-index loop. The verbs `bad_wr` arguments
+are output storage whose values Mesh never reads; their per-post null stores
+are removed. Native error handling and completion-driven ownership are preserved.
+
+Optimized ARM64 holds the SEND-array base in a callee-saved register. From the
+event index to the first post, it reads the prepared native header, writes the
+tag, and calls the stored function. Pending-ring loads/stores follow that call.
+The helper has no emitted call frame. Stream polling and the later range queue
+still have their recorded costs; no whole-path latency result is claimed.
+
+This is private bridge code with the same ABI 76 wire/shared layout and queue
+reservations. It removes the worker wrapper storage and adds no allocation.
+This transport change alone adds 27 maintained source lines. The accompanying
+deletion of contribution typing removes 24 Swift lines, giving 2,830 → 2,833 lines
+across the same eleven files; documentation changes are excluded. The
+[dependency recount](h-audit-2026-09-16.md#follow-up--direct-first-send-and-deletion-of-contribution-typing)
+records the net first-post depth reduction separately from that source count.
+Strict C diagnostics, the bridge and native assembly generation pass. No workload
+or fleet deployment was performed.
+
 ### Prepared receive forwarding
 
 The forwarding descriptor holds `{destination SGE, registration key}` in 16

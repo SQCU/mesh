@@ -23,52 +23,51 @@ Publication exposes completed contributions without waiting for transfer or a
 consumer. Actual operand presence enables consumers. Distinct live contributions
 retain distinct canonical backing until their numerical and transport reads end.
 
-## L5 contribution typing
+## L5 same function, different operand scopes
 
-`TensorPart.partial` describes a value view pending reduction, following the
-[canonical DTensor reference](algorithm-sources.md#tensorpartpartial).
-`reduce` marks its contribution views and nonfinal intermediate views partial.
-Its supplied combine is bound directly through the ordinary preparation path.
-Public `call` instead records this validation closure:
+The user's construction fixes the numerical function and changes its operands.
+For coordinate projections with `sum_i Q_i = I`, let `P_i = Q_i X`. Linearity gives
 
-```swift
-preparations.append { [unowned self] in
-    if let part = inputs.first(where: { $0.partial || partialContributions.contains($0.identity) }) {
-        throw MeshError.partialOperand(part.withPartial(true))
-    }
-}
-```
+    T(X) = T(sum_i P_i) = sum_i T(P_i).
 
-That is the only throw in `call`. It executes inside `start()`, after declaration
-has identified every reduction contribution. Declaring a consumer before its
-reduction therefore does not bypass the check. `map` uses public `call` and has
-the same rule. The check does not inspect the supplied numerical function.
+Every occurrence is the same T. A contribution may feed another ordinary call
+before recombination. For another linear U, the caller can equivalently arrange
+`sum_i U(T(P_i)) = U(T(X))`. Mesh has no numerical rule to infer or enforce here;
+it binds the input and output scopes that the caller actually declared.
 
-There are two identities to distinguish: a logical value and the registered
-storage it names. `send` preserves the former while binding destination storage.
-The completed result of `reduce` has a fresh logical identity over the final
-result's storage. This applies uniformly to every contribution count. For a
-single contribution, the reduction is the identity function and adds no combine
-call, allocation or copy just to distinguish the completed view.
+The supplied example has
 
-The source consequences are:
+    T(x,y,z) = (x+y, y+z, z+x)
+    T(P_1) = (x,0,x), T(P_2) = (y,y,0), T(P_3) = (0,z,z).
 
-| Declaration | Setup consequence |
-|---|---|
-| A call reads a contribution, before or after `reduce` is declared | Its logical identity occurs in `partialContributions`; `start()` throws |
-| A value is sent, then either source or received view is declared a contribution | Both views have the same logical identity; neither bypasses validation |
-| An already-partial view passes through a cached delivery | `send` preserves the view's partial bit |
-| A public call reads the completed result of `reduce([x])` | The completed identity differs from x; the call is valid |
-| A public call reads a result of a reduction with several contributions | The completed view is nonpartial and has a distinct identity; the call is valid |
-| The same logical value is explicitly sent from different ranks | Source rank distinguishes the delivery keys; an earlier route does not replace the requested edge |
+Their sum is T(X). Given only `t = T(X)`, invertibility permits the split
+`S(t) = (T Q_1 T^-1 t, T Q_2 T^-1 t, T Q_3 T^-1 t)` and the sum R satisfies
+`R S = I`. This algebra does not require Mesh to compute T, its inverse,
+projections, or a numerical reduction. Those are supplied operations. Packed
+contiguous subviews retain the caller's coordinate/index meaning; a slice of
+T(X) is not silently substituted for T applied to a projected input.
 
-Earlier value-type snapshots are not retroactively mutated; the setup contribution
-set is what recognizes them. The thrown operand explicitly has `partial == true`.
-`preparations`, `deliveries` and `partialContributions` are discarded before
-`mesh_calls_start`. The C descriptors, native submission closures and numerical
-completion code are unchanged. There is no partial-type query or identity lookup
-on invocation, publication, TX, or RX.
+`TensorPart` describes operand storage and placement. It carries no numerical
+permission or pending-reduction type. `call`, `map`, and reduction's supplied
+combine all bind through the same public `call`. Producers publish each declared
+output scope at numerical completion; sends move that scope; consumers receive
+their declared scopes without a library-imposed whole-tensor reduction barrier.
+If a particular operation requires a recombined input, its caller names that
+input in the dataflow. The library does not inspect or classify the operation.
 
-The source check covers the declaration rules above; the module and existing
-Core ML, Gram-chain and explicit-sync callers build. No runtime measurement is
-claimed. L5 does not resolve the separately recorded W1–W6 runtime defects.
+The former L5 was a specification error, removed on 2026-09-16. It treated a
+reduction input as forbidden to ordinary calls, even though the same value could
+legitimately feed T or U. Removing it deletes `TensorPart.partial`,
+`withPartial`, `partialContributions`, `MeshError.partialOperand`, the validation
+closure per call, the private function-binding bypass, and the fresh identity
+created only to certify a reduction result. A one-contribution reduction is the
+existing send of that value; it introduces no new identity or storage.
+
+These deletions remove setup records and work. They do not by themselves shorten
+the C runtime's dependent-load chain or establish zero-copy contiguous receive
+placement. Those remaining defects retain their status in H1–H8.
+
+The Mesh module, native assembly, existing Core ML/Gram/indexed-gather/explicit-sync
+callers and the engine Mesh library build with the deletion. No runtime workload
+or new evaluator was used. Swift source decreases by 24 lines; documentation
+correction is separate from implementation reduction.

@@ -139,15 +139,15 @@ Metal buffers cover each operand's page-aligned window, using Apple's
 [no-copy buffer API](https://developer.apple.com/documentation/metal/mtldevice/makebuffer(bytesnocopy:length:options:deallocator:)).
 The whole-arena Metal buffer and transport-capacity query have been removed.
 
-## TensorPart.partial
-
-The PyTorch authors, [DTensor Partial](https://docs.pytorch.org/docs/stable/distributed.tensor.html#torch.distributed.tensor.placement_types.Partial): pending reduction is a declared value property. Mesh marks contribution and intermediate views and clears the completed reduction view. A completed reduction receives a new logical identity over its existing storage, including when its contribution list has length one. There is no copy or extra numerical call for that identity change.
-
-Movement preserves the logical identity, so a contribution's setup restriction follows sends declared before or after its reduction. The delivery key includes source rank as well as logical identity, destination and queue; explicitly different transport edges remain different. The original value-type snapshots are not mutated. The setup contribution set recognizes those earlier snapshots during validation and is discarded before numerical workers start. No runtime function reads `partial` or the logical identity. See the [L5 source derivation](distributed-reduce.md#l5-contribution-typing).
-
 ## MeshError
 
-The Legion authors, [reduction privileges](https://legion.stanford.edu/tutorial/privileges.html): reduction operands have restricted uses. Mesh's public `call` records one validation closure, executed by `start()` after all reductions have been declared. Its sole throw reports `partialOperand` with a partial view of the offending operand. The reduction's supplied combine uses the same private binding path without that validation. This is a declaration-time restriction, independent of backend and numerical completion order.
+Saltzer, Reed and Clark's end-to-end argument, cited below, places recovery with
+the caller. `MeshError` reports native link/function failures and admission status.
+It does not classify numerical functions or forbid calls on contributions.
+DTensor placement types and Legion reduction privileges are not requirements of
+this ABI; the former contribution-type feature and its privileged binding path
+were deleted. The [operand-scope algebra](distributed-reduce.md#l5-same-function-different-operand-scopes)
+explains why ordinary calls and reduction combines use the same binding path.
 
 ## Mesh.result
 
@@ -568,6 +568,14 @@ rdma/indexed-gather RANK 4 /mesh0 examples/indexed-gather-ring.json
 ```
 
 ## Program.copy
+
+The [direct TX publication path](pages-and-functions.md#direct-tx-publication)
+uses the same Apple/rdma-core native posting interface cited below. The prepared
+request reaches that interface before any pending-ring staging; one inlined
+posting body also handles retries. The existing pending-interval capacity and
+counted ownership remain. Dedicated thread roles are selected during setup,
+and their poll target indices are constants. These are partial evaluation and
+removal of intermediate storage, not a replacement collective or transport.
 
 ABI 71's [prepared SEND operands](pages-and-functions.md#prepared-send-operands)
 apply the native WR/SGE mechanism cited below to every native request at setup.
