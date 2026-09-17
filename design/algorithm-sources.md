@@ -1126,11 +1126,16 @@ The JAX authors' Pallas indexing and the llama.cpp authors'
 references for indexed operands and the existing model loader.
 
 The engine's embedding gather uses grid coordinates `(batch row, section)`:
-`output[(section * rows + row) * width + component] = table[token[row] * stride + section * width + component]`.
+`output[(row * sections + section) * width + component] = table[token[row] * stride + section * width + component]`.
 This is the same indexed gather for ordinary embeddings and E2B per-layer inputs.
-One grid replaces the layer-by-layer host dispatch loop; the layer-major contiguous
-operands used by downstream numerical functions are unchanged. No new arithmetic
-kernel, transport behavior or model interpretation is added to Mesh.
+One grid replaces the layer-by-layer host dispatch loop. Row/section/component
+storage also lets the engine use one existing matrix contraction for the full
+model projection, by concatenating the per-layer weight columns. Layer consumers
+bind their component slice using an offset and row stride; the existing `gelu_mul`
+specializes the second operand's stride at setup. The
+[projection algebra and consumer addresses](../../../metal-microbench/docs/compute_execution.md#per-layer-inputs)
+account for all row counts and the removed 34 projection launches on E2B.
+Mesh gains no arithmetic kernel or transport behavior from this engine change.
 
 ## collective.sync_on_remote_fill
 
