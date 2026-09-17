@@ -841,10 +841,28 @@ the shutdown flag before reading the slots and drains their final publications
 before queue-pair and registered-memory destruction. The thread-start order also
 allows this teardown after a partially successful startup.
 
-This adds one thread per link and one index publication per completion. It removes
-completion reference/instance bookkeeping from the spinners, not from the
-program. RX page return, reset and repost still execute on RX; publication,
-address binding and forwarding updates also remain. The
+The same retirement thread now owns the existing receive-return reader. It
+collects a returned section's physical page indices into the existing pending
+RECV array, clears its old mappings, resets its initial references and presence,
+and finishes the old frame's accounting. Only then does one release store publish
+the array's new tail. RX acquires that tail and posts the already prepared native
+requests. A native capacity refusal leaves the head unchanged. The former
+`link_receive` bookkeeping function is deleted; no replacement call lies between
+RX polling and reposting.
+
+The array still has power-of-two capacity covering every registered page in its
+queue. A page is pending for posting, held by the NIC, or retained by a received
+value; it cannot occupy two pending entries. Thus no producer fullness query is
+needed. RX owns the head and retirement owns the tail, on separate 128-byte
+lines. Setup initially fills the array and preposts receives before either
+thread starts. This introduces a release/acquire queue boundary, not another
+queue or thread. Instance accounting and row reset precede publication to RX,
+preserving their order before the next completion can reuse the returned page.
+
+The retirement change adds one thread per link and one index publication per
+completion. It removes reference/instance bookkeeping and buffer reset from the
+spinners, not from the program. RX publication, address binding and forwarding
+updates remain. The
 [native assembly account](h-audit-2026-09-16.md#follow-up--transport-retirement)
 records the local change without claiming the H budgets or measured latency.
 
