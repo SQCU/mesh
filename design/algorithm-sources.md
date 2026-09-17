@@ -1284,15 +1284,26 @@ applies the existing add body to its contiguous sections, and repeats. Only
 presence and the consumed mask select inputs; payload values do not select control
 flow. No missing peer prevents a present peer from being added. The output reaches
 the nonlinear finishing operations only after all contributions have been added.
-The consumed mask is local numerical state, not a shared completion or reclamation
+The mask and peer-table addresses are lane-private arrays, with peer `p` assigned
+to lane `p % 32`, element `p / 32`. The configured mesh size fixes their extent at
+shader compilation; Metal's SIMD minimum selects a present peer and SIMD shuffle
+broadcasts its saved address. This uses Apple's Metal SIMD intrinsics alongside
+the same supplied addition. It deletes the threadgroup flag array and its SIMD
+barriers. Every output element has the same writer lane across contributions, so
+the next accumulation reads its own preceding write; different rows are disjoint.
+The publication barrier and system-scope visibility fences remain. See the
+[source account](../../../metal-microbench/docs/async_collectives.md#resident-sum-state)
+for the removed loads and encoding calls. Compiler spilling is not ruled out.
+The consumed mask is numerical state, not a shared completion or reclamation
 protocol. A failed producer can leave the resident consumer waiting; X9's stated
 GPU-watchdog failure behavior has not been exercised by this change.
 
 The supplied resident function publishes its externally consumed outputs at the
 points where they are complete. Native `mesh_call_finish` retires its input/output
 references after the command buffer finishes; it does not republish early outputs.
-The E1d function's only externally consumed numerical outputs are its FFN partials;
-its intermediate scratch and hidden values stay within the same supplied function.
+The E1d function's externally consumed numerical outputs are its FFN partials and
+vocabulary tile; its intermediate scratch and hidden values stay within the same
+supplied function unless an explicit diagnostic consumer requests a snapshot.
 The native return path prepares the next command buffer before marking that frame
 reusable. Re-recording commands remains host work per step; it is not charged away
 or assumed free in the pending end-to-end measurement.
