@@ -350,30 +350,28 @@ slot-address load and owner separation are regression boundaries, not full H1.
 
 ### Operand addresses and sequence values
 
-Address binding is not a separate runtime phase. Let A be the registered arena
-base, s its page size, B the transport block size in pages, Q = sB, and p the
-canonical page-index array prepared for an operand. Its byte address is
+Address binding is not a separate runtime phase. Let A be the numerical client's
+mapped data base, s its page size, Q the realized byte extent of one entry, and
+p[k] its physical page. ABI 75 stores the terminal address a[k] in that same
+canonical entry when backing is established:
 
 ```
-k = floor(offset / Q)
-address(offset) = A + s * p[k] + (offset - k * Q)
+a[k] = A + s * p[k]                 // setup or receive placement
+address(offset) = a[floor(offset / Q)] + (offset mod Q)
 ```
 
-The receive completion stores its actual page at the prepared p[k] location.
-The 48-byte operand carries A, p, s, B, extent, logical row, frame index and a
-pointer to its call's sequence value. There is no cached first-page identity or
-cached materialized first-page pointer. `mesh_operand_address` performs the
-indexed gather and affine arithmetic directly. The Swift `data`, `page` and
-`invocation` accessors preserve their caller spelling while using those values.
+The 40-byte operand carries the entry pointer, Q, extent, logical row, frame
+index and a pointer to its call's sequence value. It no longer carries A or
+separate page geometry. Swift `data` loads a[0] directly; indexed `load` selects
+the entry and adds the within-entry offset. The `page` and `invocation`
+accessors retain their meanings. There is no dispatch refresh loop.
 Native `MeshBindings` select the already constructed view using the index now
 stored beside the physical page; Core ML objects, output backing and model
 invocation remain prepared. The ABI 72 change below deletes their indexing closure.
-The dispatch-time remote-input classification, page load and two copied fields
-are deleted. Indexed reads previously loaded p again after that refresh; now
-there is one canonical lookup at the actual access. Local raw `data` access also
-reads its canonical first entry, where the old cached pointer needed no such
-read. This is an explicit cost of the uniform descriptor, not hidden zero-cost
-addressing or completion of H6.
+The canonical read remains, including for local raw `data`. Memoizing the
+address removes reconstruction, not the entry read or every dependent load.
+The [storage and placement account](#prepared-operand-addresses) below therefore
+does not claim H6 completion.
 
 Every operand of a call references the same existing sequence scalar. Launch
 therefore does not stamp each operand. ABI 70 carries the invocation beside
@@ -423,7 +421,7 @@ the public index method uses a direct tail branch to those same two operations,
 with no stack frame, captured closure or operand copy at that boundary. Array
 access and native-object access still have their normal costs.
 
-The 48-byte operand retains one pointer to this canonical array. Indexed tensor
+At ABI 72 the 48-byte operand retained one pointer to this canonical array. Indexed tensor
 reads and the `page` accessor use the low word; view selection uses the high
 word. The per-call `operand.index` continues to mean the resident invocation
 slot and is unchanged. There is no second mapping table, mutable cache per
@@ -456,6 +454,53 @@ Strict C compilation, both library builds, all four existing callers and the
 engine's Mesh library build pass. No runtime workload or latency measurement
 is claimed. Canonical indexed reads, contiguous-input materialization,
 publication-stream probing and full H1–H7 closure remain unfinished.
+
+### Prepared operand addresses
+
+ABI 75 extends the existing canonical entry from eight to sixteen bytes:
+the physical-page/native-view word and the final numerical-client address.
+Both are individually atomic; the entry is aligned to sixteen bytes. Local
+allocation computes the address once. Attach records the numerical client's
+mapped data base in its existing ownership bank; link configuration caches
+that base in the receive geometry. Receive placement computes the same address
+for its actual incoming page. The bridge never dereferences a client address.
+The mappings need not share a virtual base, and there is no remapping step.
+
+The address store precedes the existing release publication. Consumers acquire
+that publication before using the entry; the existing reference lifetime keeps
+the backing live during use. These are the same ownership requirements as the
+page/view word, not an additional readiness check. Reclamation need not clear
+the address. Cross-participant reuse remains the unfinished N1 obligation.
+
+The existing contiguous-input path now consumes setup-prepared copy records.
+CPU/Core ML records contain the source entry, terminal destination pointer and
+byte count. Metal records contain the source entry, prepared native-view array,
+destination object, offset and byte count. They are flat per-frame arrays;
+runtime no longer calls `mesh_row_page` or reconstructs destination addresses,
+pool coordinates or copy extents. Shared sources keep their zero stride;
+each destination uses its own resident frame. This changes neither copied bytes
+nor the supplied function. These copies remain an explicit H6 defect.
+
+Native views use `ContiguousArray`, including `MeshBindings.values`. This fixes
+their storage representation during setup, removing the bridged-array fallback
+from native view selection. Existing subscripting and index methods remain.
+
+For R arena rows, canonical storage grows by 8R bytes, or 1,835,008 bytes at
+R = 229,376. Each operand shrinks from 48 to 40 bytes. The header stores two
+eight-byte client bases; receive geometry grows from 40 to 48 bytes within its
+existing 64-byte alignment and 128-byte state. RX adds one address store and
+its fixed arithmetic per received entry. For F frames and C copied entries,
+CPU copy records reserve 24FC bytes and Metal records reserve 40FC bytes,
+excluding Swift array headers and the existing native objects. This explicitly
+trades setup storage and one producer-side calculation for repeated consumer
+resolution. It is not free work or a whole-path latency result.
+
+The native `data` getter is two loads and a return: descriptor to entry, entry
+to terminal address. CPU placement's inner loop loads its 24-byte copy record,
+loads the cached source address, and calls `memcpy`; Metal uses 40-byte records.
+Native library, existing caller and engine integration builds pass. No runtime
+workload was run. Maintained source is 2,790 → 2,805 lines across the same eleven
+files. H1–H7, N1 and R2 remain open; no completion status is upgraded here.
 
 ## Reusable send queue
 

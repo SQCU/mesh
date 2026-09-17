@@ -129,9 +129,9 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
     for(size_t i=0;i<count;i++){
       struct mesh_section section=i<input_count?views[i]:outputs[i-input_count];
       uint32_t row=mesh_section_row(i<input_count?inputs[i]:section,index);
-      function->operands[index*count+i]=(struct mesh_operand){.arena=mesh_at(m,0),.bytes=section.bytes,
+      function->operands[index*count+i]=(struct mesh_operand){.bytes=section.bytes,
         .index=section.stride?index:0,.row=row,.sequence=&call->invocation,
-        .pages=mesh_page(m)+mesh_section_row(section,index),.page_size=m->pgsz,.block_pages=m->block};
+        .pages=mesh_page(m)+mesh_section_row(section,index),.quantum=(size_t)m->pgsz*m->block};
     }
   }
   function->identity=calls->function_count++;
@@ -570,7 +570,7 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uin
   return 0;
 }
 /* design/algorithm-sources.md#programtensor */
-uint32_t mesh_row_page(struct mesh_ctx *context,uint32_t row,uint32_t chunk){return atomic_load_explicit(mesh_page(context->M)+row+chunk,memory_order_acquire);}
+uint32_t mesh_row_page(struct mesh_ctx *context,uint32_t row,uint32_t chunk){return atomic_load_explicit(&mesh_page(context->M)[row+chunk].mapping,memory_order_acquire);}
 /* design/algorithm-sources.md#programtensor */
 void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return mesh_at(context->M,mesh_row_page(context,mesh_section_row(section,index),0));}
 /* design/algorithm-sources.md#programwrite */

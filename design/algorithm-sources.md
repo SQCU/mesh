@@ -28,7 +28,7 @@ mapping and realized page geometry. For byte offset b and transport
 extent C, it reads entry floor(b/C), then addresses b mod C within that backing.
 It does not allocate, check presence, scan pages or materialize the operand. The
 helper is inlined into supplied Swift numerical functions. Indexed operands carry
-one mapping pointer and two geometry integers; the current operand is 48 bytes.
+one mapping pointer and one realized byte extent; the current operand is 40 bytes.
 The first-page
 `data` pointer alone does not describe a discontiguous input of `bytes` length.
 Local outputs remain contiguous and retain their direct pointer interface.
@@ -59,6 +59,15 @@ word, and `MeshBindings.index` replaces the stored Swift indexing closure with
 that direct read. Receive-pool return uses the same value. The mechanism is
 setup specialization of the Pallas-style indexed operands above and the existing
 registered-storage interface, independent of the supplied numerical function.
+
+ABI 75 extends that canonical entry with the terminal client address. Under the
+same Pallas/Apple mapping mechanism, local setup and receive placement compute
+`client_base + page_size * physical_page` once. `mesh_operand_data` reads that
+result; indexed reads add only their within-entry offset. The bridge receives
+the client's mapped base during setup and never dereferences the resulting
+client address. Native copy bindings precompute their source-entry pointers,
+destinations and extents. [Address preparation](pages-and-functions.md#prepared-operand-addresses)
+accounts for the added producer store, storage and remaining canonical read.
 
 George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
 (1960): reference counting. The user explicitly requested automatic ownership

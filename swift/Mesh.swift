@@ -7,7 +7,7 @@ public typealias MeshOperands = UnsafeBufferPointer<mesh_operand>
 
 extension mesh_operand {
     // design/algorithm-sources.md#programtensor
-    @inlinable public var data: UnsafeMutableRawPointer? { mesh_operand_address(self, 0) }
+    @inlinable public var data: UnsafeMutableRawPointer? { mesh_operand_data(pages) }
     // design/algorithm-sources.md#programtensor
     @inlinable public var page: UInt32 { mesh_operand_page(self) }
     // design/algorithm-sources.md#programtensor
@@ -94,7 +94,7 @@ public struct TensorFunction {
 }
 
 public struct MeshBindings<Value> {
-    public let values: [Value]
+    public let values: ContiguousArray<Value>
 
     // design/algorithm-sources.md#programtensor
     @inlinable public func index(_ operand: mesh_operand) -> Int { mesh_operand_view(operand.pages) }
@@ -221,27 +221,30 @@ private final class MeshInvocation {
             if copies.isEmpty {
                 encode = function
             } else {
-                let sources = copies.map { copy -> (UInt32, [MTLBuffer]) in
+                let sources = copies.map { copy -> ContiguousArray<MTLBuffer> in
                     let range = mesh_receive_range(context, copy.source.channel)
-                    let buffers = stride(from: range.first, to: range.first + range.count, by: Int(block)).map { page in
+                    return ContiguousArray(stride(from: range.first, to: range.first + range.count, by: Int(block)).map { page in
                         memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page), count: quantum))
-                    }
-                    return (range.first, buffers)
+                    })
                 }
                 let targets = copies.map { copy in
                     (0..<copy.target.count).map { index in
                         memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_section_address(context, copy.target, index), count: copy.target.bytes))
                     }
                 }
+                let placements = (0..<count).map { frame in copies.indices.flatMap { i in
+                    let copy = copies[i]
+                    let source = mesh_page(context.pointee.M)!.advanced(by: Int(copy.source.first) + frame * Int(copy.source.stride))
+                    return chunks[i].enumerated().map { chunk, bytes in
+                        (source: source.advanced(by: chunk), views: sources[i], target: targets[i][frame], offset: chunk * quantum, bytes: (bytes + 3) / 4 * 4)
+                    }
+                } }
+                let inputSlot = copies[0].input
                 encode = { command, inputs, outputs in
                     let blit = command.makeBlitCommandEncoder()!
-                    for i in copies.indices {
-                        let input = inputs[copies[i].input]
-                        for (chunk, bytes) in chunks[i].enumerated() {
-                            let page = mesh_row_page(context, input.row, UInt32(chunk))
-                            blit.copy(from: sources[i].1[Int((page - sources[i].0) / block)], sourceOffset: 0,
-                                      to: targets[i][Int(input.index)], destinationOffset: chunk * quantum, size: (bytes + 3) / 4 * 4)
-                        }
+                    for copy in placements[Int(inputs[inputSlot].index)] {
+                        blit.copy(from: copy.views[mesh_operand_view(copy.source)], sourceOffset: 0,
+                                  to: copy.target, destinationOffset: copy.offset, size: copy.bytes)
                     }
                     blit.endEncoding()
                     function(command, inputs, outputs)
@@ -276,14 +279,16 @@ private final class MeshInvocation {
             }
         }
         if copyOnCPU && !copies.isEmpty {
-            submit = { call, index, inputs, outputs in
-                for i in copies.indices {
-                    let input = inputs[copies[i].input]
-                    for (chunk, bytes) in chunks[i].enumerated() {
-                        let page = mesh_row_page(context, input.row, UInt32(chunk))
-                        memcpy(input.data!.advanced(by: chunk * quantum), mesh_page_address(context, page), bytes)
-                    }
+            let placements = (0..<count).map { frame in copies.indices.flatMap { i in
+                let copy = copies[i]
+                let source = mesh_page(context.pointee.M)!.advanced(by: Int(copy.source.first) + frame * Int(copy.source.stride))
+                let target = mesh_section_address(context, copy.target, UInt32(frame))!
+                return chunks[i].enumerated().map { chunk, bytes in
+                    (source: source.advanced(by: chunk), target: target.advanced(by: chunk * quantum), bytes: bytes)
                 }
+            } }
+            submit = { call, index, inputs, outputs in
+                for copy in placements[Int(index)] { memcpy(copy.target, mesh_operand_data(copy.source), copy.bytes) }
                 launch(call, index, inputs, outputs)
             }
         } else {
@@ -415,7 +420,7 @@ public final class Mesh {
             try make(MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page),
                                                                  count: source.bytes), memory: memory))
         }
-        return MeshBindings(values: values)
+        return MeshBindings(values: ContiguousArray(values))
     }
 
     // design/algorithm-sources.md#programtensor

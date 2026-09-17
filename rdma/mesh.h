@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 74u
+#define MESH_VERSION 75u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_EVENT_ABSENT UINT64_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
@@ -29,6 +29,9 @@ struct mesh_buffer {
 };
 _Static_assert(sizeof(struct mesh_buffer)==64 && _Alignof(struct mesh_buffer)==64,"mesh_buffer");
 struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
+/* design/algorithm-sources.md#programtensor */
+struct mesh_page_entry { _Alignas(16) _Atomic uint64_t mapping; _Atomic uintptr_t address; };
+_Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 && offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_COMPUTE_THREADS 8
@@ -64,6 +67,7 @@ struct hdr {
   uint64_t planes_off,presence_off,page_off,buffer_off,pool_off,link_off,target_off,order_off,notice_off,instance_off,tags_off,data_off,length;
   uint64_t notice_bytes;
   uint32_t instance_count[MESH_NOTICE_BANKS];
+  uintptr_t client_data[MESH_NOTICE_BANKS];
   _Atomic(struct mesh_status) result[MESH_NOTICE_BANKS];
   _Atomic uint64_t client,bridge_pid,device_client,serial,retired;
   struct mesh_port_info port;
@@ -104,7 +108,7 @@ static inline uint32_t mesh_blocks(const struct hdr *m){ return mesh_rows(m)/m->
 static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_Atomic uint64_t*)((unsigned char*)m+m->planes_off)+(size_t)plane*mesh_words(m); }
 /* design/algorithm-sources.md#programkernel_call */
 static inline _Atomic uint64_t *mesh_presence(struct hdr *m){return (_Atomic uint64_t *)((char *)m+m->presence_off);}
-static inline _Atomic uint64_t *mesh_page(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->page_off); }
+static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
 /* design/algorithm-sources.md#programtensor */
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }
 /* design/algorithm-sources.md#programtensor */
@@ -179,7 +183,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->pgsz=pgsz; h->block=block; h->rows=rows; h->links=links; h->qps=qps;
   h->planes_off=at; at+=(uint64_t)MESH_PLANES*words*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->presence_off=at;at+=(uint64_t)rows*sizeof(uint64_t);at=(at+pgsz-1)/pgsz*pgsz;
-  h->page_off=at; at+=(uint64_t)rows*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
+  h->page_off=at; at+=(uint64_t)rows*sizeof(struct mesh_page_entry); at=(at+pgsz-1)/pgsz*pgsz;
   h->buffer_off=at; at+=(uint64_t)rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->pool_off=at; at+=blocks*sizeof(struct mesh_pool); at=(at+pgsz-1)/pgsz*pgsz;
   h->link_off=at; at+=(uint64_t)links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
