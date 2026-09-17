@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 75u
+#define MESH_VERSION 76u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_EVENT_ABSENT UINT64_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
@@ -21,7 +21,7 @@ enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
 struct mesh_buffer {
   _Alignas(64) _Atomic uint32_t references;
   _Atomic uint32_t closed;
-  uint32_t initial,pages,uses,sends,channel,return_index;
+  uint32_t initial,pages,channel,return_index;
   _Atomic uint64_t owner;
   uint64_t return_slot;
   uint32_t invocation,completions;
@@ -41,6 +41,9 @@ struct mesh_stream { _Alignas(128) uint32_t position; uint32_t mask; _Atomic uin
 _Static_assert(sizeof(struct mesh_stream)==128 && _Alignof(struct mesh_stream)==128 && offsetof(struct mesh_stream,slots)==8,"mesh_stream");
 struct mesh_target { uint64_t stream; uint32_t index,count; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
+/* design/algorithm-sources.md#index-hand-off */
+struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t uses,row; struct mesh_target targets[]; };
+_Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publication)==64 && offsetof(struct mesh_publication,targets)==16,"mesh_publication");
 struct mesh_events {
   uint32_t count;
   _Alignas(128) unsigned char streams[];
@@ -65,14 +68,14 @@ struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps,links;
   _Atomic uint64_t configured;
   uint64_t planes_off,presence_off,page_off,buffer_off,pool_off,link_off,target_off,order_off,notice_off,instance_off,tags_off,data_off,length;
-  uint64_t notice_bytes;
+  uint64_t notice_bytes,target_stride;
   uint32_t instance_count[MESH_NOTICE_BANKS];
   uintptr_t client_data[MESH_NOTICE_BANKS];
   _Atomic(struct mesh_status) result[MESH_NOTICE_BANKS];
   _Atomic uint64_t client,bridge_pid,device_client,serial,retired;
   struct mesh_port_info port;
 };
-void mesh_publish(struct hdr *,uint32_t row,uint64_t stamp);
+void mesh_publish(struct hdr *,struct mesh_publication *,uint64_t stamp);
 /* design/algorithm-sources.md#meshresult */
 static inline struct mesh_instance *mesh_instances(struct hdr *m,uint64_t owner){return (struct mesh_instance *)((char *)m+m->instance_off)+(owner>>63)*m->rows;}
 /* design/algorithm-sources.md#meshresult */
@@ -101,7 +104,7 @@ static inline uint32_t mesh_notice_queue(struct hdr *m,uint64_t owner,uint32_t q
 /* design/algorithm-sources.md#programcopy */
 static inline struct mesh_link_info *mesh_links(struct hdr *m){return (struct mesh_link_info *)((char *)m+m->link_off);}
 /* design/algorithm-sources.md#index-hand-off */
-static inline struct mesh_target *mesh_targets(struct hdr *m,uint32_t row){return (struct mesh_target *)((char *)m+m->target_off)+(size_t)row*(m->links+MESH_COMPUTE_THREADS);}
+static inline struct mesh_publication *mesh_publication_at(struct hdr *m,uint32_t row){return (struct mesh_publication *)((char *)m+m->target_off+(size_t)row*m->target_stride);}
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
 static inline uint32_t mesh_blocks(const struct hdr *m){ return mesh_rows(m)/m->block; }
@@ -187,7 +190,8 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->buffer_off=at; at+=(uint64_t)rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->pool_off=at; at+=blocks*sizeof(struct mesh_pool); at=(at+pgsz-1)/pgsz*pgsz;
   h->link_off=at; at+=(uint64_t)links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
-  h->target_off=at; at+=(uint64_t)rows*(links+MESH_COMPUTE_THREADS)*sizeof(struct mesh_target); at=(at+pgsz-1)/pgsz*pgsz;
+  h->target_stride=(offsetof(struct mesh_publication,targets)+((uint64_t)links+MESH_COMPUTE_THREADS)*sizeof(struct mesh_target)+63)&~UINT64_C(63);
+  h->target_off=at; at+=(uint64_t)rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
   h->order_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*links*qps*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
   h->notice_bytes=sizeof(struct mesh_events)+2*(uint64_t)rows*sizeof(struct mesh_stream);
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;

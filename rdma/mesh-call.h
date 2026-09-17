@@ -8,10 +8,10 @@ struct mesh_function;
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride,channel; };
 struct mesh_operand {
   size_t bytes;
-  struct mesh_page_entry *pages; uint32_t index,row;
+  struct mesh_page_entry *pages; struct mesh_publication *publication; uint32_t index;
   uint32_t *sequence; size_t quantum;
 };
-_Static_assert(sizeof(struct mesh_operand)==40,"mesh_operand");
+_Static_assert(sizeof(struct mesh_operand)==48,"mesh_operand");
 /* design/algorithm-sources.md#programtensor */
 static inline __attribute__((always_inline)) void *mesh_operand_data(const struct mesh_page_entry *pages){return (void *)atomic_load_explicit(&pages->address,memory_order_relaxed);}
 /* design/algorithm-sources.md#programtensor */

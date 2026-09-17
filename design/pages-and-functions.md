@@ -204,6 +204,40 @@ after varying inputs. The expression is `old ^ ((old ^ incoming) & mask)`;
 it adds no readiness predicate. Native dispatch loads only the use and call
 records for these fields; the label no longer requires another buffer record.
 
+### Direct publication operands
+
+ABI 76 moves the send/use counts out of `mesh_buffer` and into a prefix of
+the existing target array. The prefix and targets form one immutable publication
+record, aligned to 64 bytes. Counts occupy bytes 0–7, the cold ownership row
+bytes 8–11, and the first target bytes 16–31. Publication reads no lifecycle
+buffer before its handoffs. This is the existing target storage with its counts
+adjacent, not a descriptor pointing to another target allocation.
+
+Each numerical operand stores the terminal publication pointer prepared at
+binding; its copied row number is deleted. Completion loads that pointer and
+calls `mesh_publish` directly. Each receive record likewise stores its final
+publication pointer, replacing its row and separate publish flag while remaining
+32 bytes. Intermediate receive entries have no publication operand, as previously
+expressed by their false publish flag. This is unchanged declared message
+structure, not a readiness or reuse test. Root admission still addresses its
+prepared record by frame; this change does not complete N1.
+
+Generated `mesh_publish` is frameless. It writes all TX events before reading
+presence storage, then writes local events, and only then resolves the lifecycle
+buffer for its existing invocation store. The numerical output loop performs
+no row-to-target arithmetic or arena-header target lookup. Stream cursor/slot
+loads, the output-pointer load and the publication-record load remain counted;
+this does not establish the full one-record H1–H7 budget.
+
+For D = links + compute-worker capacity and R arena rows, target storage changes
+from `16DR` bytes to `round_up(16 + 16D, 64) * R`. At one link and eight workers,
+the stride is 192 rather than 144 bytes: an extra 11,010,048 bytes at R = 229,376.
+The lifecycle buffer remains 64 bytes despite losing its two counts. Operands
+grow from 40 to 48 bytes to hold the terminal pointer instead of the row; there
+is no per-invocation allocation. Maintained source grows from 2,805 to 2,830
+lines across the same eleven files. Native library, existing callers and engine
+integration builds pass; no runtime workload or latency measurement is claimed.
+
 ### Independent publication streams
 
 ABI 68's independent slots removed the unpublished-reservation stall of ABI 67,
@@ -360,8 +394,8 @@ a[k] = A + s * p[k]                 // setup or receive placement
 address(offset) = a[floor(offset / Q)] + (offset mod Q)
 ```
 
-The 40-byte operand carries the entry pointer, Q, extent, logical row, frame
-index and a pointer to its call's sequence value. It no longer carries A or
+The current 48-byte operand carries the entry pointer, Q, extent, prepared
+publication pointer, frame index and a pointer to its call's sequence value. It no longer carries A or
 separate page geometry. Swift `data` loads a[0] directly; indexed `load` selects
 the entry and adds the within-entry offset. The `page` and `invocation`
 accessors retain their meanings. There is no dispatch refresh loop.
@@ -1023,12 +1057,21 @@ the arena before the first output publication. Function/worker ownership is
 read afterward for the existing reference releases; no extra reference or
 completion event is added. Record size, alignment and array stride stay 64.
 
-The optimized ARM64 code reads the arena at byte 48 and both counts at byte 56,
-then calls `mesh_publish` for the output rows. Its first function-record load
-appears after the publication loop. Preserve this ordering in the native-code
-regression review. The output descriptor reads and `mesh_publish`'s own loads
-remain part of the total publication budget; this change does not certify them
-or hide them behind the callback boundary.
+ABI 76 also binds the [terminal publication operands](#direct-publication-operands).
+The optimized output loop loads each prepared pointer and calls `mesh_publish`,
+without a row-to-target lookup. A compiler-enforced tail call transfers to
+`mesh_call_cleanup` after all publications. Cleanup preserves input releases,
+output producer releases, error/zero-output returns and active-reference release
+in their existing order, on the same thread. It introduces no queue or scheduler.
+
+Separating cleanup reduces the generated pre-publication stack frame from 112
+to 64 bytes. The cleanup frame is 112 bytes and starts after the publication
+frame has been removed; maximum nested depth does not increase at that boundary.
+The extra prologue/epilogue work is explicit: this moves lifetime-related spills
+off the handoff path, not a claim that total stack traffic falls. Publication's
+own generated code remains frameless. Preserve both the tail-call boundary and
+the first lifecycle load's position in native-code review. Operand, publication
+and stream reads still count against the full budget.
 
 ### Direct receive completion addresses
 

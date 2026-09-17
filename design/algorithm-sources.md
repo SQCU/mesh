@@ -28,7 +28,8 @@ mapping and realized page geometry. For byte offset b and transport
 extent C, it reads entry floor(b/C), then addresses b mod C within that backing.
 It does not allocate, check presence, scan pages or materialize the operand. The
 helper is inlined into supplied Swift numerical functions. Indexed operands carry
-one mapping pointer and one realized byte extent; the current operand is 40 bytes.
+one mapping pointer and one realized byte extent; the current operand is 48 bytes,
+including its prepared publication pointer.
 The first-page
 `data` pointer alone does not describe a discontiguous input of `bytes` length.
 Local outputs remain contiguous and retain their direct pointer interface.
@@ -274,6 +275,13 @@ records, publication sends the final index, and dispatch directly indexes the
 terminal record array. Numerical offset tables and TX cursor arrays are setup
 scratch. Mesh's ring software and compiler are not Monsoon hardware.
 
+ABI 76's [publication operands](pages-and-functions.md#direct-publication-operands)
+apply the same explicit-address principle at the producer: the output and
+receive record hold the terminal publication pointer. Counts are inline before
+the target array rather than read through a lifecycle buffer. The first target
+and counts fit the same aligned 32-byte prefix; stream access still has its
+separately accounted cost.
+
 The [Disruptor paper](https://lmax-exchange.github.io/disruptor/disruptor.html)
 (Thompson, Farley, Barker, Gee and Stewart, 2011), sections 2.2 and 3.1–3.3,
 explains single-writer ownership and preallocated circular storage. Mesh uses
@@ -334,6 +342,10 @@ memoizes the arena and operand counts at binding. Output publication consumes
 those fields directly; shared function/worker ownership is followed only for
 the subsequent reference releases. This applies the same explicit-record
 mechanism cited below without adding a scheduler or a completion protocol.
+ABI 76 puts the existing reference-release body in `mesh_call_cleanup`, reached
+by a compiler-enforced tail call after publication. It retains Collins's same
+ownership events; the purpose is to move their register spills and metadata
+loads after the handoffs, with the added stack traffic explicitly accounted for.
 
 ABI 59 implements Monsoon's frame-indexed activation directly: the prepared
 consumer record includes the frame, its input updates that call's operand, and

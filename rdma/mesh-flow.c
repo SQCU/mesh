@@ -25,8 +25,9 @@ struct mesh_send_binding {_Alignas(16) struct ibv_sge *target;uint32_t key;};
 _Static_assert(sizeof(struct mesh_send_binding)==16 && _Alignof(struct mesh_send_binding)==16,"mesh_send_binding");
 struct mesh_receive_record {
   _Alignas(32) struct mesh_page_entry *entry;
-  uint32_t row,last,completions,send_count;
+  struct mesh_publication *publication;
   struct mesh_send_binding *sends;
+  uint32_t completions,send_count;
 };
 _Static_assert(sizeof(struct mesh_receive_record)==32 && _Alignof(struct mesh_receive_record)==32,"mesh_receive_record");
 struct mesh_receive {
@@ -104,8 +105,9 @@ static int link_prepare(struct mesh_link *link){
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     if(atomic_load_explicit(&buffer->owner,memory_order_relaxed)!=link->client)continue;
-    struct mesh_target *targets=mesh_targets(m,row);
-    for(uint32_t i=0;i<buffer->sends;i++)if(targets[i].stream>=first && targets[i].stream<first+m->notice_bytes){
+    struct mesh_publication *publication=mesh_publication_at(m,row);
+    struct mesh_target *targets=publication->targets;
+    for(uint32_t i=0;i<publication->sends;i++)if(targets[i].stream>=first && targets[i].stream<first+m->notice_bytes){
       offsets[row]=targets[i].index;
       uint32_t end=targets[i].index+targets[i].count;
       for(uint32_t at=targets[i].index;at<end;at++)link->send_edges[at].end=end;
@@ -169,8 +171,9 @@ static int link_configure(void *state,int socket,uint64_t client){
     uint64_t send_first=m->notice_off+(uint64_t)mesh_notice_queue(m,client,0)*m->notice_bytes;
     for(uint32_t i=0;i<receives;i++)for(uint32_t value=0;value<in[i].count;value++){
       uint32_t row=in[i].local_row+value*in[i].stride;
-      struct mesh_target *targets=mesh_targets(m,row);
-      for(uint32_t j=0;j<mesh_buffers(m)[row].sends;j++){
+      struct mesh_publication *publication=mesh_publication_at(m,row);
+      struct mesh_target *targets=publication->targets;
+      for(uint32_t j=0;j<publication->sends;j++){
         struct mesh_link *out=&link->links[(targets[j].stream-send_first)/m->notice_bytes];
         if(device_up(out->provider.device,out->provider.wire,m)){free(bindings);free(peer);return -1;}
         send_count+=targets[j].count;
@@ -209,14 +212,15 @@ static int link_configure(void *state,int socket,uint64_t client){
         uint32_t row=in[i].local_row+value*in[i].stride;
         struct mesh_buffer *buffer=&mesh_buffers(m)[row];
         buffer->frame=value;buffer->completions=in[i].stride!=0;
-        struct mesh_target *targets=mesh_targets(m,row);
+        struct mesh_publication *publication=mesh_publication_at(m,row);
+        struct mesh_target *targets=publication->targets;
         for(uint32_t chunk=0;chunk<chunks;chunk++){
           struct mesh_receive_record *record=&receive->records[peer[i].local_row+value*peer[i].stride+chunk];
           *record=(struct mesh_receive_record){
-            .entry=mesh_page(m)+row+chunk,.row=row,
-            .last=chunk+1==chunks,.completions=in[i].stride?0:link->instance_count,.sends=receive->sends+next_send};
+            .entry=mesh_page(m)+row+chunk,.publication=chunk+1==chunks?publication:NULL,
+            .completions=in[i].stride?0:link->instance_count,.sends=receive->sends+next_send};
           size_t first_send=next_send;
-          for(uint32_t region=first_region;region<first_region+regions;region++)for(uint32_t j=0;j<buffer->sends;j++){
+          for(uint32_t region=first_region;region<first_region+regions;region++)for(uint32_t j=0;j<publication->sends;j++){
             struct mesh_link *out=&link->links[(targets[j].stream-send_first)/m->notice_bytes];
             for(uint32_t at=targets[j].index;at<targets[j].index+targets[j].count;at+=out->send_edges[at].chunks){
               if(chunk<out->send_edges[at].chunks){
@@ -332,9 +336,9 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
           struct mesh_send_binding binding=sends[j];
           binding.target->addr=(uintptr_t)tag;binding.target->lkey=binding.key;
         }
-        if(record.last){
-          mesh_publish(m,record.row,(uint64_t)invocation+1);
-          mesh_buffer_release(m,record.row);
+        if(record.publication){
+          mesh_publish(m,record.publication,(uint64_t)invocation+1);
+          mesh_buffer_release(m,record.publication->row);
           mesh_instance_release(link->instances,record.completions);
         }
       } else {
