@@ -258,13 +258,3 @@ struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t q
   *target=(struct mesh_target){.stream=mesh_event_bind(m,destination),.index=row};
   return target;
 }
-
-/* design/algorithm-sources.md#programkernel_call */
-void mesh_publish(struct hdr *m,struct mesh_publication *publication,struct mesh_page_entry *entry,uint64_t stamp){
-  struct mesh_target *targets=publication->targets;
-  uint32_t sends=publication->sends,invocation=(uint32_t)(stamp-1);
-  for(uint32_t i=0;i<sends;i++)mesh_event_push(m,targets[i].stream,targets[i].index,invocation);
-  atomic_store_explicit(&entry->stamp,stamp,memory_order_release);
-  uint32_t end=sends+publication->uses;
-  for(uint32_t i=sends;i<end;i++)mesh_event_push(m,targets[i].stream,targets[i].index,invocation);
-}

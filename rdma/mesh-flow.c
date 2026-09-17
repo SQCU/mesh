@@ -25,9 +25,8 @@ struct mesh_send_binding {_Alignas(16) struct ibv_sge *target;uint32_t key;};
 _Static_assert(sizeof(struct mesh_send_binding)==16 && _Alignof(struct mesh_send_binding)==16,"mesh_send_binding");
 struct mesh_receive_record {
   _Alignas(32) struct mesh_page_entry *entry;
-  struct mesh_publication *publication;
   struct mesh_send_binding *sends;
-  uint32_t send_count,chunk;
+  uint32_t row,send_count,send_notices,use_notices;
 };
 _Static_assert(sizeof(struct mesh_receive_record)==32 && _Alignof(struct mesh_receive_record)==32,"mesh_receive_record");
 struct mesh_receive {
@@ -239,8 +238,8 @@ static int link_configure(void *state,int socket,uint64_t client){
         for(uint32_t chunk=0;chunk<chunks;chunk++){
           struct mesh_receive_record *record=&receive->records[peer[i].local_row+value*peer[i].stride+chunk];
           *record=(struct mesh_receive_record){
-            .entry=mesh_page(m)+row,.publication=chunk+1==chunks?publication:NULL,
-            .sends=receive->sends+next_send,.chunk=chunk};
+            .entry=mesh_page(m)+row+chunk,.row=chunk+1==chunks?row:MESH_ABSENT,
+            .sends=receive->sends+next_send,.send_notices=publication->sends,.use_notices=publication->uses};
           size_t first_send=next_send;
           for(uint32_t region=first_region;region<first_region+regions;region++)for(uint32_t j=0;j<publication->sends;j++){
             struct mesh_link *out=&link->links[(targets[j].stream-send_first)/m->notice_bytes];
@@ -341,7 +340,7 @@ static int mesh_receive_progress(struct mesh_link *link,struct mesh_free_ring *r
       uint32_t block=region*receive->region_blocks+slot,page=receive->page_base+block*receive->block;
       uint32_t invocation=(uint32_t)(tag_value>>32);
       struct mesh_receive_record record=receive->records[(uint32_t)tag_value];
-      struct mesh_page_entry *entry=record.entry+record.chunk;
+      struct mesh_page_entry *entry=record.entry;
       atomic_store_explicit(&entry->mapping,((uint64_t)(block+receive->pool_offset)<<32)|page,memory_order_relaxed);
       atomic_store_explicit(&entry->address,receive->client_data+((uintptr_t)page<<receive->page_shift),memory_order_relaxed);
       atomic_store_explicit(&entry->device,device_address,memory_order_relaxed);
@@ -350,9 +349,10 @@ static int mesh_receive_progress(struct mesh_link *link,struct mesh_free_ring *r
         struct mesh_send_binding binding=sends[j];
         binding.target->addr=(uintptr_t)tag;binding.target->lkey=binding.key;
       }
-      if(record.publication){
-        mesh_publish(m,record.publication,record.entry,(uint64_t)invocation+1);
-        atomic_store_explicit(&retirements->slots[retirements->position++&retirements->mask],(uint32_t)(record.entry-pages)+1,memory_order_release);
+      if(record.row!=MESH_ABSENT){
+        const struct mesh_target *targets=record.send_notices || record.use_notices?mesh_publication_at(m,record.row)->targets:NULL;
+        mesh_publish(m,targets,record.send_notices,record.use_notices,pages+record.row,(uint64_t)invocation+1);
+        atomic_store_explicit(&retirements->slots[retirements->position++&retirements->mask],record.row+1,memory_order_release);
       }
     }
     int error=link_receive_post(queue,&link->receive[q]);

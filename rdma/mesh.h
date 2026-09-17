@@ -81,7 +81,6 @@ struct hdr {
   _Atomic uint64_t client,bridge_pid,device_client,serial,retired;
   struct mesh_port_info port;
 };
-void mesh_publish(struct hdr *,struct mesh_publication *,struct mesh_page_entry *,uint64_t stamp);
 /* design/algorithm-sources.md#meshresult */
 static inline struct mesh_instance *mesh_instances(struct hdr *m,uint64_t owner){return (struct mesh_instance *)((char *)m+m->instance_off)+(owner>>63)*m->rows;}
 /* design/algorithm-sources.md#meshresult */
@@ -168,6 +167,13 @@ static inline void mesh_event_push(struct hdr *m,uint64_t slot,uint32_t index,ui
   struct mesh_stream *stream=(struct mesh_stream *)((char *)m+slot);
   uint32_t at=stream->position++&stream->mask;
   atomic_store_explicit(stream->slots+at,((uint64_t)invocation<<32)|(index+1),memory_order_release);
+}
+/* design/algorithm-sources.md#programkernel_call */
+static inline __attribute__((always_inline)) void mesh_publish(struct hdr *m,const struct mesh_target *targets,uint32_t sends,uint32_t uses,struct mesh_page_entry *entry,uint64_t stamp){
+  uint32_t invocation=(uint32_t)(stamp-1);
+  for(uint32_t i=0;i<sends;i++)mesh_event_push(m,targets[i].stream,targets[i].index,invocation);
+  atomic_store_explicit(&entry->stamp,stamp,memory_order_release);
+  for(uint32_t i=sends,end=sends+uses;i<end;i++)mesh_event_push(m,targets[i].stream,targets[i].index,invocation);
 }
 /* design/algorithm-sources.md#index-hand-off */
 static inline uint64_t mesh_event_take(struct mesh_event_reader *reader){

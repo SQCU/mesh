@@ -665,6 +665,17 @@ reconstructing that address from the arena header. `link_receive_post` submits
 the same prepared native requests for initial posting and returned pages; it
 is inlined, and the return path posts before logical-row and instance cleanup.
 
+The [prepared receive publication](pages-and-functions.md#prepared-receive-publication)
+uses the same direct-index mechanism to bind the exact chunk-entry address,
+completed section row and publication counts in the existing 32-byte receive
+record. Publication is one inline primitive with explicit counts; the separate
+native publisher call is removed. A receive with no notification targets, such
+as the engine's resident FFN input, writes its canonical stamp without reading a
+publication header or notification table. Nonempty ranges still read their
+canonical targets and streams. This specializes fixed graph metadata; it does
+not infer a collective or introduce a receive mode. Native matching, registered
+pages, onward-SGE writes and reference-counted retirement remain as before.
+
 ABI 59 realizes a peer-qualified, source-chunk-indexed table of aligned 32-byte
 receive records. The eight-byte tag names the 32-bit sequence and source chunk.
 ABI 60's record supplies the destination row, buffer address, exact canonical

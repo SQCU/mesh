@@ -305,7 +305,7 @@ static int mesh_events_prepare(struct mesh_calls *calls){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     struct mesh_publication *publication=mesh_publication_at(m,row);
     if(atomic_load_explicit(&buffer->owner,memory_order_relaxed)==calls->context->client && publication->sends &&
-       atomic_load_explicit(&mesh_page(m)[row].stamp,memory_order_relaxed))mesh_publish(m,publication,mesh_page(m)+row,1);
+       atomic_load_explicit(&mesh_page(m)[row].stamp,memory_order_relaxed))mesh_publish(m,publication->targets,publication->sends,publication->uses,mesh_page(m)+row,1);
   }
   fprintf(stderr,"mesh events: bindings=%llu streams=%llu\n",(unsigned long long)total_bindings,(unsigned long long)total_streams);
 done:
@@ -445,7 +445,9 @@ uint64_t mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
   atomic_store_explicit(&instance->status,((struct mesh_status){MESH_RESULT(MESH_RESULT_BUSY,0,0),0}),memory_order_release);
   status=atomic_load_explicit(&m->result[calls->context->client>>63],memory_order_acquire).value;
   if(status>>62!=MESH_RESULT_BUSY){mesh_result_conclude(&instance->status,status);return status;}
-  mesh_publish(m,mesh_publication_at(m,calls->first+frame),mesh_page(m)+calls->first+frame,(uint64_t)index+1);
+  uint32_t row=calls->first+frame;
+  struct mesh_publication *publication=mesh_publication_at(m,row);
+  mesh_publish(m,publication->targets,publication->sends,publication->uses,mesh_page(m)+row,(uint64_t)index+1);
   return 0;
 }
 
@@ -485,7 +487,10 @@ void mesh_call_complete(struct mesh_call *call,int error){
     struct mesh_operand *outputs=call->operands+call->input_count;
     uint64_t stamp=(uint64_t)call->invocation+1;
     uint32_t count=call->output_count;
-    for(uint32_t i=0;i<count;i++)mesh_publish(m,outputs[i].publication,outputs[i].pages,stamp);
+    for(uint32_t i=0;i<count;i++){
+      struct mesh_publication *publication=outputs[i].publication;
+      mesh_publish(m,publication->targets,publication->sends,publication->uses,outputs[i].pages,stamp);
+    }
   }
   __attribute__((musttail)) return mesh_call_cleanup(call,error);
 }

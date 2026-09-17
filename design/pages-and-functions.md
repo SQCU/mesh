@@ -1150,6 +1150,49 @@ source total is 2,713 lines over the same eleven maintained library files,
 up from 2,704. The full receive path still includes publication, native request
 selection and return bookkeeping; these changes do not close H3/H5/H7 or N1.
 
+### Prepared receive publication
+
+RX previously followed its receive record to a publication header to read send
+and use counts, even when both were zero. The resident E2B FFN inputs have that
+shape: their consumer is already on the GPU and observes the canonical stamp.
+The header read and native `mesh_publish` call contributed no notification.
+
+The existing receive record now contains `{entry, sends, row, send_count,
+send_notices, use_notices}` and remains 32-byte sized and aligned. `entry` is
+the exact chunk's page-table address, resolved at configuration. `row` names
+the completed section on its final chunk; other chunks carry `MESH_ABSENT`,
+replacing the former null publication pointer. This keeps all counts 32-bit
+and adds no topology or operand-size limit. No extra table is allocated.
+
+Configuration runs after the client's graph, target ranges and streams have
+been finalized and `configured` has been released. Re-pairing constructs the
+records again. Counts are immutable throughout progress. Each completion still
+installs its physical backing and onward SGEs. A final chunk pushes its declared
+send targets, writes the first canonical page's stamp with release ordering,
+then pushes its declared host consumers and its retirement event. Empty ranges
+perform no target lookup. This preserves the existing per-queue chunk order,
+publication order and reference lifetime for all peers and operand extents.
+
+The publication primitive is inline in `mesh.h`; there is one implementation
+of the range walks and stamp store. CPU publication passes its existing target
+pointer and counts, with no added row lookup. RX resolves its canonical target
+array once when either count is nonzero, then walks the same targets. The empty
+range check uses those fixed counts and never reads a readiness or occupancy
+word. Generated code skips both target geometry and the send loop on that edge.
+There is no replacement publication descriptor, callback or queue. This removes
+the native publisher symbol, so native library dependents must rebuild together.
+The shared-memory and wire ABI remain 79.
+
+On optimized ARM64, a receive with both counts zero goes from its receive record
+through the existing page-address stores to `stlr` on the stamp, without loading
+a publication header or calling a helper. The page-table base is retained from
+thread entry but spills to the private stack and is reloaded for the indexed
+stamp address; that load is included, not claimed away. The RX function still
+has a 128-byte stack frame. Nonempty RX publications still read arena geometry, target
+records and stream headers. Tag matching, page-table writes, forwarding bindings,
+retirement and repost selection remain. This is one removed dependent header
+read on the resident path, not a complete H3/H5/H7 or latency result.
+
 ### Prepared SEND operands
 
 ABI 71 removes `pages`, `spans`, `offset` and `block` from the SEND record.
