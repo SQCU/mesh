@@ -34,8 +34,7 @@ struct mesh_use {
   void *argument;
   struct mesh_call *call;
   struct mesh_operand *operands;
-  uint32_t *invocation;
-  uint32_t input_count,end;
+  uint32_t invocation_mask,input_count,end;
 };
 _Static_assert(sizeof(struct mesh_use)==64 && _Alignof(struct mesh_use)==64,"mesh_use record");
 struct mesh_call_worker {
@@ -148,20 +147,20 @@ static void *mesh_call_progress(void *argument){
 
   pthread_setname_np("mesh.numerical");
   while(atomic_load_explicit(&calls->running,memory_order_acquire) || atomic_load_explicit(&worker->active,memory_order_acquire)){
-    uint32_t event;
+    uint64_t event;
     if(atomic_load_explicit(&calls->running,memory_order_acquire)){
-      while((event=mesh_event_take(&worker->arrivals))!=MESH_ABSENT){
-        for(uint32_t i=event,end=worker->targets[event].end;i<end;i++){
+      while((event=mesh_event_take(&worker->arrivals))!=MESH_EVENT_ABSENT){
+        for(uint32_t i=(uint32_t)event,end=worker->targets[i].end;i<end;i++){
           struct mesh_use use=worker->targets[i];
-          use.call->invocation=*use.invocation;
+          use.call->invocation^=(use.call->invocation^(uint32_t)(event>>32))&use.invocation_mask;
           if(--use.call->pending)continue;
           atomic_fetch_add_explicit(&worker->active,1,memory_order_relaxed);
           use.submit(use.call,use.call->index,use.argument,use.operands,use.operands+use.input_count);
         }
       }
     }
-    while((event=mesh_event_take(&worker->returns))!=MESH_ABSENT){
-      struct mesh_call *call=calls->slots[buffers[event].binding];
+    while((event=mesh_event_take(&worker->returns))!=MESH_EVENT_ABSENT){
+      struct mesh_call *call=calls->slots[buffers[(uint32_t)event].binding];
       if(!call->error && --call->remaining)continue;
       struct mesh_function *function=call->function;
       if(call->error)mesh_result_conclude(&calls->instances[call->index].status,
@@ -268,7 +267,7 @@ static int mesh_events_prepare(struct mesh_calls *calls){
       while(end<count && bindings[end].source==bindings[i].source)end++;
       while(capacity<end-i)capacity*=2;
       struct mesh_stream *stream=&events->streams[streams++];
-      *stream=(struct mesh_stream){.slots=slots+used*sizeof(uint32_t),.mask=capacity-1};
+      *stream=(struct mesh_stream){.slots=slots+used*sizeof(uint64_t),.mask=capacity-1};
       uint64_t offset=(uint64_t)((char *)stream-(char *)m);
       for(uint32_t j=i;j<end;j++)mapping[(size_t)q*rows+bindings[j].index]=offset;
       used+=capacity;i=end;
@@ -367,7 +366,7 @@ int mesh_calls_start(struct mesh_calls *calls){
             struct mesh_call *call=&function->values[index];
             worker->targets[indices[row]++]=(struct mesh_use){
               function->submit,function->argument,call,call->operands,
-              section.stride?&mesh_buffers(m)[row].invocation:&call->invocation,
+              section.stride?UINT32_MAX:0,
               (uint32_t)function->input_count,0};
           } else {
             indices[row+1]++;
@@ -474,7 +473,7 @@ void mesh_call_complete(struct mesh_call *call,int error){
     mesh_buffer_release(m,call->operands[input].row);
   }
   if(error || !output_count)
-    mesh_event_push(m,call->return_slot,call->return_row);
+    mesh_event_push(m,call->return_slot,call->return_row,0);
   else for(size_t i=0;i<output_count;i++)mesh_buffer_release(m,outputs[i].row);
   atomic_fetch_sub_explicit(active,1,memory_order_release);
 }

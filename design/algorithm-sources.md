@@ -260,8 +260,17 @@ The [Disruptor paper](https://lmax-exchange.github.io/disruptor/disruptor.html)
 explains single-writer ownership and preallocated circular storage. Mesh uses
 that principle without importing a consumer gating strategy. Independent
 writers get independent streams; a writer increments its own position and
-release-stores an index. The consumer clears slots after acquiring their values.
+release-stores its prepared event. The consumer clears slots after acquiring their values.
 Declared lifetimes provide the reuse order; the producer does not read fullness.
+
+ABI 70 carries the publication's invocation value alongside its final record
+index in the same lock-free eight-byte slot. TX copies that value into the
+prepared SEND record. A numerical use selects it with its setup-defined mask,
+preserving the current call label for a shared input. No destination reads the
+publishing buffer merely to recover this already supplied value. The persisted
+receive-return label is written after publication; the producer's existing
+reference protects that write. This extends the event operand, not the queue's
+admission or synchronization behavior.
 
 `mesh_events_prepare`, `mesh_event_compare`, `mesh_event_root` and
 `mesh_event_remap` implement Mesh's setup-only assignment. They group known

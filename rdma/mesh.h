@@ -8,8 +8,9 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 69u
+#define MESH_VERSION 70u
 #define MESH_ABSENT UINT32_MAX
+#define MESH_EVENT_ABSENT UINT64_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
 struct mesh_transfer { uint32_t local_row,binding,count,stride,pool; uint64_t bytes; };
@@ -42,9 +43,10 @@ struct mesh_events {
   _Alignas(128) struct mesh_stream streams[];
 };
 _Static_assert(sizeof(struct mesh_events)==128 && offsetof(struct mesh_events,streams)==128,"mesh_events header");
-struct mesh_event_input { _Atomic uint32_t *slots; uint32_t position,mask; };
+struct mesh_event_input { _Atomic uint64_t *slots; uint32_t position,mask; };
 struct mesh_event_reader { struct mesh_event_input *inputs; uint32_t count,cursor; };
 _Static_assert(sizeof(struct mesh_event_input)==16 && sizeof(struct mesh_event_reader)==16,"mesh_event_reader");
+_Static_assert(sizeof(_Atomic uint64_t)==8 && __atomic_always_lock_free(8,0),"mesh_event slot");
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
 /* design/algorithm-sources.md#meshresult */
 enum { MESH_RESULT_SUCCESS, MESH_RESULT_LINK, MESH_RESULT_FUNCTION, MESH_RESULT_BUSY };
@@ -149,24 +151,24 @@ static inline uint64_t mesh_event_bind(struct hdr *m,uint32_t queue){
   return offset;
 }
 /* design/algorithm-sources.md#index-hand-off */
-static inline void mesh_event_push(struct hdr *m,uint64_t slot,uint32_t index){
+static inline void mesh_event_push(struct hdr *m,uint64_t slot,uint32_t index,uint32_t invocation){
   struct mesh_stream *stream=(struct mesh_stream *)((char *)m+slot);
   uint32_t at=stream->position++&stream->mask;
-  atomic_store_explicit((_Atomic uint32_t *)((char *)m+stream->slots)+at,index+1,memory_order_release);
+  atomic_store_explicit((_Atomic uint64_t *)((char *)m+stream->slots)+at,((uint64_t)invocation<<32)|(index+1),memory_order_release);
 }
 /* design/algorithm-sources.md#index-hand-off */
-static inline uint32_t mesh_event_take(struct mesh_event_reader *reader){
+static inline uint64_t mesh_event_take(struct mesh_event_reader *reader){
   for(uint32_t visited=0;visited<reader->count;visited++){
     struct mesh_event_input *input=&reader->inputs[reader->cursor++];
     if(reader->cursor==reader->count)reader->cursor=0;
-    _Atomic uint32_t *slot=&input->slots[input->position&input->mask];
-    uint32_t value=atomic_load_explicit(slot,memory_order_acquire);
+    _Atomic uint64_t *slot=&input->slots[input->position&input->mask];
+    uint64_t value=atomic_load_explicit(slot,memory_order_acquire);
     if(!value)continue;
     atomic_store_explicit(slot,0,memory_order_relaxed);
     input->position++;
     return value-1;
   }
-  return MESH_ABSENT;
+  return MESH_EVENT_ABSENT;
 }
 
 /* design/algorithm-sources.md#programkernel_call */
@@ -181,7 +183,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->link_off=at; at+=(uint64_t)links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
   h->target_off=at; at+=(uint64_t)rows*(links+MESH_COMPUTE_THREADS)*sizeof(struct mesh_target); at=(at+pgsz-1)/pgsz*pgsz;
   h->order_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*links*qps*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->notice_bytes=(sizeof(struct mesh_events)+(uint64_t)rows*(sizeof(struct mesh_stream)+2*sizeof(uint32_t))+127)&~UINT64_C(127);
+  h->notice_bytes=(sizeof(struct mesh_events)+(uint64_t)rows*(sizeof(struct mesh_stream)+2*sizeof(uint64_t))+127)&~UINT64_C(127);
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links*(qps+1)+2*MESH_COMPUTE_THREADS)*h->notice_bytes; at=(at+bytes-1)/bytes*bytes;
   h->instance_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*rows*sizeof(struct mesh_instance); at=(at+bytes-1)/bytes*bytes;

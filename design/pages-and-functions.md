@@ -164,18 +164,24 @@ invocation stamp; a slot number no longer identifies an invocation. This search
 exists only in the opt-in synchronization path. It does not retain a value beyond
 its declared readers, and can wait forever if asked for an unavailable value.
 
-ABI 69 publishes the destination's already prepared record index. The event
-word remains 32 bits. Setup assigns each row/destination a 16-byte target
+ABI 70 publishes the destination's already prepared 32-bit record index and
+the 32-bit invocation label together in one atomic 64-bit event. Setup assigns each row/destination a 16-byte target
 `{stream_offset, record_index, count}`; no process address crosses the mapping.
 The count is setup data. Publication reads the stream and final index from that
 same target, writes the TX events first, stores presence, then writes local
-events. It never reconstructs the destination from the tensor row.
+events. It then stores the invocation used by later receive-return bookkeeping.
+TX and numerical consumers take their label from the event, so neither rereads
+the publishing buffer. The publisher's existing producer reference protects
+that final store until publication returns and releases the reference. No new
+reference or completion handshake is required. Destination reconstruction from
+the tensor row remains deleted.
 
 For TX, transfer realization counts each row's sends on each link and assigns a
 contiguous send-record range. Bridge configuration fills that exact range. The
 first send record contains its end. The TX event therefore goes directly to
 `send_edges[index]`; `link_publications` no longer reads a row-indexed offset
-table. The remaining loop visits actual declared sends, including distinct
+table. The event's invocation is stored directly in each SEND record instead
+of retaining an address of the buffer's label. The remaining loop visits actual declared sends, including distinct
 queues on the same link. Its setup cursor array is freed before progress starts.
 
 For numerical work, setup expands every input use, including a shared input's
@@ -187,6 +193,12 @@ range end fits inside the use record after removing duplicate remote-address
 fields. Native SEND wrappers remain 256 bytes and receive
 records remain 32 bytes. No tensor function or collective is specialized by this
 change. A row with three sends or five consumers still visits all of them.
+Each use now carries a setup-defined invocation mask instead of a label pointer.
+For a varying input the all-ones mask selects the event label; a shared input's
+zero mask preserves the call's label, including when the shared value arrives
+after varying inputs. The expression is `old ^ ((old ^ incoming) & mask)`;
+it adds no readiness predicate. Native dispatch loads only the use and call
+records for these fields; the label no longer requires another buffer record.
 
 ### Independent publication streams
 
@@ -214,9 +226,11 @@ to one stream. A straight single-output dependency chain can share a stream per
 resident frame where the notification-order condition holds, independent of
 whether it has eight or one hundred functions.
 
-Each stream contains 32-bit record indices, encoded as index + 1, with zero
-meaning empty. Its producer advances its own position and release-stores the
-index. There is no shared reservation, CAS, sequence admission or occupancy
+Each stream contains 64-bit words encoded as `(invocation << 32) | (index + 1)`,
+with zero meaning empty. The index retains its existing reserved absent value.
+Return events use invocation zero. Its producer advances its own position and
+release-stores the word. A compile-time assertion requires an eight-byte,
+lock-free slot. There is no shared reservation, CAS, sequence admission or occupancy
 read. The consumer's position and payload pointer are private, allocated before
 progress begins. It acquire-loads the next slot, clears a consumed slot and
 advances; an empty stream advances the polling cursor to another stream.
@@ -241,8 +255,8 @@ stream descriptors, and polling latency remain; grouping is not free progress.
 
 After a successful dequeue, TX and numerical dispatch directly address the
 terminal record array. Optimized ARM64 output shows `index << 8` followed by the
-SEND range-end load at byte 80, and `index << 6` followed by the use range-end
-load at byte 44. The former offset-table loads are absent from those paths.
+SEND range-end load at byte 72, and `index << 6` followed by the use range-end
+load at byte 40. The former offset-table loads are absent from those paths.
 This is source/assembly evidence of one removed dependent table access per
 dispatch, not a measurement of cache misses or end-to-end latency. TX still
 prepares the backing address/key and wire tag. Numerical launch still accesses the declared dependency count and sequence
@@ -252,18 +266,26 @@ operand loops from launch; they do not remove stream polling or TX binding.
 H1/H3/H5/H6/H7 and N1 therefore remain incomplete.
 
 The allocation tradeoff is explicit. At 229,376 rows, one link and eight native
-queues, the two banks of 25 event arrays reserve 275,257,600 bytes before region
-alignment, versus ABI 68's 45,881,600. Targets reserve 33,030,144 bytes versus
-16,515,072. These regions grow by 245,891,072 bytes; the buffer remains 64 bytes.
+queues, the two banks of 25 event arrays reserve 367,008,000 bytes before region
+alignment in ABI 70, versus ABI 69's 275,257,600 and ABI 68's 45,881,600.
+Carrying labels adds 91,750,400 reserved bytes over ABI 69. Targets remain
+33,030,144 bytes; the buffer remains 64 bytes. The index/label pair shares one
+atomic load/store, but event density decreases from eight to four per 32 bytes.
+This is a storage trade for removing dependent buffer-label reads, not free
+capacity or proof of cache residency.
 Only compiled streams are polled. Each private stream input is 16 bytes and each
 reader is 16 bytes. Numerical offset tables no longer occupy 1,835,016 bytes per
 worker during execution; the TX setup cursor likewise is not retained as a live
 allocation. This trades reserved arena capacity for fewer probes and removes
-two runtime lookup paths; it is not a source-size reduction. Maintained library
-source is 2,491 -> 2,680 lines across the same eleven Swift/C/header files.
-Documentation migration is separate. Strict C diagnostics, the four existing
-Mesh callers and the engine Mesh library build pass with ABI 69. Optimized
-ARM64 dispatch confirms the lookup and loop removals above. The bridge uses
+two runtime lookup paths; it is not a source-size reduction. ABI 70 changes
+maintained library source from 2,713 to 2,717 lines across the same eleven
+Swift/C/header files. Documentation changes are separate. Strict C diagnostics,
+the four existing Mesh callers and the engine Mesh library build pass with ABI 70.
+Optimized ARM64 dispatch loads the use and call records with no buffer-label
+load; publication writes the persisted buffer label after its event stores.
+SEND preparation decreases from 23 to 22 instructions and 12 to 11 load
+instructions in the previously defined interval. Its label is now in the SEND
+record; the page/registration chain remains. The bridge uses
 the existing ad-hoc signing fallback because the named identity is unavailable;
 no bridge deployment, runtime test or latency result is claimed.
 
@@ -294,13 +316,13 @@ read. This is an explicit cost of the uniform descriptor, not hidden zero-cost
 addressing or completion of H6.
 
 Every operand of a call references the same existing sequence scalar. Launch
-therefore does not stamp each operand. Publication writes the output row's
-sequence from its supplied stamp once, before enqueueing readers that use it;
-RX and root submission no longer make their own copy of that write. The output
-loop is deleted from numerical launch. This publication store supplies the
-wire/value identity: it is not an occupancy or permission query and introduces
-no new dependent read. It remains a store on the publication path and is counted
-against the unfinished complete H3/H5 contract.
+therefore does not stamp each operand. ABI 70 carries the invocation beside
+the record index in each publication event. Numerical dispatch selects that
+label with the use's prepared mask; TX stores it in its SEND record. Neither
+follows a label pointer back to the source buffer. The single persisted buffer
+label is written after TX and local notifications for receive-return bookkeeping.
+The existing producer reference keeps that bookkeeping live through the store.
+The remaining publication and lifetime work still counts against H3/H5.
 
 The remaining pending count has a narrower meaning than a call-state machine:
 for a function with n declared varying input uses, each arriving use decrements

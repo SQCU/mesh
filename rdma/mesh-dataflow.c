@@ -77,7 +77,7 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   for(uint32_t queue=0;queue<memory->links*(memory->qps+1)+2*MESH_COMPUTE_THREADS;queue++){
     struct mesh_events *events=mesh_events(memory,mesh_notice_queue(memory,client,queue));
     events->count=0;
-    _Atomic uint32_t *slots=(_Atomic uint32_t *)(events->streams+memory->rows);
+    _Atomic uint64_t *slots=(_Atomic uint64_t *)(events->streams+memory->rows);
     for(uint64_t i=0;i<2*(uint64_t)memory->rows;i++)atomic_store_explicit(&slots[i],0,memory_order_relaxed);
   }
   for(uint32_t q=0;q<memory->links*memory->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(memory,client,q,d),0,memory_order_relaxed);
@@ -181,7 +181,7 @@ void mesh_buffer_release(struct hdr *m,uint32_t row){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
   if(atomic_fetch_sub_explicit(&buffer->references,1,memory_order_acq_rel)==1){
     if(buffer->channel==MESH_ABSENT)atomic_fetch_or_explicit(&mesh_plane(m,MESH_FREE)[row/64],UINT64_C(1)<<(row%64),memory_order_release);
-    else mesh_event_push(m,buffer->return_slot,row);
+    else mesh_event_push(m,buffer->return_slot,row,0);
   }
 }
 
@@ -223,7 +223,7 @@ int mesh_event_reader_init(struct mesh_event_reader *reader,struct hdr *m,uint32
   struct mesh_event_input *inputs=calloc(events->count?events->count:1,sizeof *inputs);
   if(!inputs)return ENOMEM;
   for(uint32_t i=0;i<events->count;i++)
-    inputs[i]=(struct mesh_event_input){.slots=(_Atomic uint32_t *)((char *)m+events->streams[i].slots),.mask=events->streams[i].mask};
+    inputs[i]=(struct mesh_event_input){.slots=(_Atomic uint64_t *)((char *)m+events->streams[i].slots),.mask=events->streams[i].mask};
   free(reader->inputs);
   *reader=(struct mesh_event_reader){inputs,events->count,0};
   return 0;
@@ -246,11 +246,11 @@ struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t q
 /* design/algorithm-sources.md#programkernel_call */
 void mesh_publish(struct hdr *m,uint32_t row,uint64_t stamp){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-  buffer->invocation=(uint32_t)(stamp-1);
   struct mesh_target *targets=mesh_targets(m,row);
-  uint32_t sends=buffer->sends;
-  for(uint32_t i=0;i<sends;i++)mesh_event_push(m,targets[i].stream,targets[i].index);
+  uint32_t sends=buffer->sends,invocation=(uint32_t)(stamp-1);
+  for(uint32_t i=0;i<sends;i++)mesh_event_push(m,targets[i].stream,targets[i].index,invocation);
   atomic_store_explicit(&mesh_presence(m)[row],stamp,memory_order_release);
   uint32_t end=sends+buffer->uses;
-  for(uint32_t i=sends;i<end;i++)mesh_event_push(m,targets[i].stream,targets[i].index);
+  for(uint32_t i=sends;i<end;i++)mesh_event_push(m,targets[i].stream,targets[i].index,invocation);
+  buffer->invocation=invocation;
 }
