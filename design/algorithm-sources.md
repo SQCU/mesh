@@ -348,6 +348,16 @@ extracts code/context pairs from that value and retains it in the existing
 register. It does not invoke a C callback that discovers another Swift function.
 The same representation supplies the optional native rearm function.
 
+The engine's `MatrixOperations.multiply` now binds concrete operands before
+returning the numerical function, using Apple's
+[`setBuffers:offsets:withRange:`](https://developer.apple.com/documentation/metal/mtlcomputecommandencoder/setbuffers(_:offsets:range:))
+for contiguous native binding arrays. Fixed calls no longer invoke the indexed
+adapter or reread `MatrixView` descriptors. Indexed callers select from a setup
+array of prepared functions. MPS uses its existing matrix multiplication with
+concrete operands. The source path and compiler comparison are recorded in
+[resolved matrix dispatch](../../../metal-microbench/docs/async_collectives.md#resolved-matrix-dispatch).
+This removes host binding work; native command replay remains unfinished.
+
 The invocation ABI passes only the existing call address. The worker no longer
 loads operand-array pointers and input counts to construct unused arguments for
 a resident command. Ordinary CPU/Metal and Core ML functions read the operands
