@@ -160,6 +160,55 @@ when its tokens arrive) on a NIC that only does SEND/RECV, with the program comp
 ahead of time. The Swift and C in this repository are that machine's microcode and its
 assembler; they are not a software framework.
 
+## Definition — partial tensor
+
+A partial tensor is a mathematical object, not a storage layout. Let `T : D → C` be a
+linear map and `Q_1 … Q_n` projections on `D` with `Σ_i Q_i = I` (here: coordinate
+projections — a partition of the domain coordinates; `Q_i X` is the shard node `i`
+holds). The **`i`-th partial of `T(X)`** is
+
+```
+T_i := T(Q_i X)   ∈ C
+```
+
+Everything the library does with partials is one of three consequences:
+
+1. **Exact linear decomposition.** `T(X) = Σ_i T_i`; the split `S(T(X)) = (T_1, …, T_n)`
+   and the reconstruction `R(T_1, …, T_n) = T_1 + … + T_n` are both linear and
+   `R ∘ S = I`. Each `T_i` has the *codomain* shape and is computed from `Q_i X` alone:
+   a node holding only its domain shard produces a full-codomain partial with no
+   communication. Nothing is approximated; a partial is not "less than a value", it is
+   one term of an exact sum.
+2. **Reduction is addition, and addition commutes with every cut the transport makes.**
+   For any codomain coordinate range `c` — a chunk, a row tile, a ragged pipeline
+   segment — `(Σ_i T_i)[c] = Σ_i (T_i[c])`: a chunk of a partial is a partial of the
+   chunk. Partials may therefore arrive in any order, be summed in any grouping (direct,
+   ring, tree, as they land), and be chunked along any axis independently; the
+   arithmetic is identical under every schedule. This is the whole license for S3
+   chunking, F3 tiles and streaming reduce-scatter.
+3. **Two projections, one definition.** Domain projections give terms with full support
+   that must be *added*: `P(term)` in the F notation (`cut(W, rows)`:
+   `XW = Σ_i (XQ_i)W`). Codomain projections `Q'_j`, `Σ_j Q'_j = I`, give terms
+   `Q'_j T(X)` with *disjoint* support: `S(slice)` (`cut(W, columns)`:
+   `XW = Σ_j XWQ'_j`) — the same sum, but each term is zero outside its block, so only
+   the block moves and "reduce" is placement into the block. `S` and `P` are the two
+   partial layouts of one value and `R` is the total; `reduceScatter : P → S` is the sum
+   restricted to a block, `allGather : S → R` is the sum of disjoint-support terms, i.e.
+   a copy.
+
+Two corollaries fix what the runtime may and may not do. Given the total `T(X)` alone,
+the domain-projection split is `S(t) = (T Q_i T^{-1} t)_i` and exists when `T` is
+invertible; the program never executes it — partials originate where the domain shard
+is, and the only operation ever applied to a total is a codomain projection (an index
+range: free). A nonlinear `f` has `f(Σ_i T_i) ≠ Σ_i f(T_i)`: a partial cannot be bound
+to a nonlinear function (L5, F1); the sum completes first, and that completion is the
+crossing (F2).
+
+In the machine a partial is three integers fixed at `start()` and carried by the receive
+record: which sum it belongs to (the consumer's row), which term `i`, and which codomain
+coordinates its bytes are (a chunk range). Its combine is `+`. Ragged sizes are chunk
+ranges; nothing else about a partial exists at runtime.
+
 ## 0. How to use this document as a goal
 
 1. Read §5. Take the **first row whose status is ✗ or ◐**, in order, unless a steering
@@ -201,6 +250,7 @@ assembler; they are not a software framework.
 | I20 | Rebuilding or launching the bridge never raises a new networking permission. Every executable that accepts connections is one binary at one install path per node (`/usr/local/mesh/bin/mesh-flow`), signed with a persistent identity (`Mesh Bridge`) and a fixed identifier (`io.mesh.bridge`), allow-listed once; rebuilds replace it in place; the launchd plist never points into a worktree, `.build`, or scratch path; clients never `listen()`. | `codesign -dv /usr/local/mesh/bin/mesh-flow` shows `Identifier=io.mesh.bridge` and a non-adhoc signature on both nodes; `bin/mesh-bridge.sh` refuses worktree/build paths; `socketfilterfw --listapps` has exactly one mesh entry per node; a rebuild + restart raises no dialog and adds no entry; clients open no listening socket (`lsof -i -P` on a running client shows none) |
 | I21 | A legitimacy measurement is a separable linear-algebra assignment at a shape whose bound is > 1.0× before transport — any Amdahl-positive bound, however small, is an explicit objective to be secured, not a reason to skip the run: FFN column split and attention head split at prefill-class row counts (≥ 512 rows: prefill, continued prefill, speculative verification), V ≥ 2 NFEs in flight, placement proportional to measured sustained rates (peer share ≈ r/(1+r)). Small-batch per-layer TP decode on an asymmetric pair and any 50/50 placement on an asymmetric pair are not tests; they are not run at all — not for attribution, not for validation: a measurement of a bad launch pattern (per-layer command buffers at small batch, host round-trips per step) validates nothing and normalizes the pattern. `bounds()`/the Amdahl form with measured r is stated before the run; a shape with bound ≤ 1.0× is refused; the objective for a run is to realize the stated bound, and the report states the realized fraction `S / bound`. | every row-19/E3/E4 evidence line names the shape, the bound and the rates; `report.py` refuses a legitimacy comparison whose declared bound is ≤ 1.0 and reports `S / bound` |
 | I22 | One shm→L1 per event, ever. Every runtime decision (a completion, a publication, a submit, a consume, a result read) reads exactly ONE contiguous, aligned metadata record — a 32-byte block (or one 64/128-byte cache line where the platform line is wider) — precomputed at `start()` and indexed directly by the event's integer (`wr_id`, row, instance, call index). The record contains everything the event needs (addresses, lengths, queue, tag words, consumer range bounds, pending-count location, stamp address). No second dependent load, no table-of-tables, no struct-of-pointers, no page-table lookup, no hash probe, no string key, on any runtime path. Metadata that does not fit one record is a design error to be repacked, not chained. Algorithms are specified as wide-line loads and stores over these records, not as Python-shaped object graphs. | per runtime path the audit lists the records touched per event: exactly one metadata line plus the payload; every runtime record's size and alignment are asserted at compile time; the trace shows one shm→L1 of metadata latency per event |\]\[" rdma/mesh-flow.c rdma/mesh-call.c rdma/mesh-dataflow.c` on runtime functions is empty; every runtime struct is `_Alignas(32)` (or 64) and `sizeof` ≤ one line |
+| I23 | Partials are exact and schedule-free (Definition). Every `(term i, chunk c)` of every reduction is added exactly once into exactly one destination range; no arrival order, grouping, chunk grain or tile size changes the arithmetic, and no runtime path splits a total into domain partials (`T Q_i T^{-1}` never executes) or reconstructs a partial from anything but its own domain shard. | the plan printed at `start()` maps each `(term, chunk)` of each reduction to one `+` into one destination range, and per term the chunk bytes sum to the codomain bytes (`P`) or the block bytes (`S`); no runtime function computes an inverse, a re-split, or a second add of the same chunk |
 
 ## 2. Public surface (closed)
 
@@ -211,7 +261,7 @@ runtime (`rdma/mesh-call.c`, `mesh-dataflow.c`, `mesh-flow.c`, `mesh-verbs.h`, `
 Mesh(region:, rank:, size:, workers:, inFlight:, placement:) // resident capacity; N1 bounds remain open
 Placement(owners:, routes:, work:, bytes:, cuts:, path:)  // explicit ownership, directed routes, optional bound inputs
 Placement.Edge(source, destination)                     // ordered endpoints; route excludes source and includes destination
-Mesh.tensor(on:sections:) -> [TensorPart]                 // partial tensor = contiguous sections, each with a rank
+Mesh.tensor(on:sections:) -> [TensorPart]                 // storage of one term T_i or block Q'_j T(X) (Definition): contiguous sections, each with a rank
 TensorPart.partial: Bool                                 // contribution view pending reduction
 MeshError.partialOperand(TensorPart)                     // invalid use reported during setup
 Mesh.constant(on:bytes:initialize:) -> TensorPart
@@ -265,7 +315,7 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 ### L — library core
 
-**L1. Partial tensor = sections with ranks.** `TensorPart(rank, bytes)`; `Mesh.tensor(on:sections:)`. Ref: Pallas BlockSpec. Check: a section is contiguous locally, addressable globally by `(rank, section)`; no hidden dense copy (I4).
+**L1. Partial tensor storage = sections with ranks.** A `TensorPart(rank, bytes)` is the storage of one term `T_i = T(Q_i X)` (layout `P`) or one block `Q'_j T(X)` (layout `S`) of the Definition; `Mesh.tensor(on:sections:)`. The partial itself is the mathematical term; the storage never carries more than its coordinates. Ref: Pallas BlockSpec. Check: a section is contiguous locally, addressable globally by `(rank, section)`; no hidden dense copy (I4); I23.
 
 **L2. Supplied function over sections.** `TensorFunction.cpu/.metal/.prediction`; `Mesh.call/map`. Ref: Pallas `pallas_call`; StarPU codelets. Check: I7; a CPU, a Metal and a Core ML function each bound through the same `call`. Not it: an expression compiler; a kernel zoo.
 
@@ -273,9 +323,9 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 **L4. Ten collective verbs as movement + supplied combine.** §2 list; `reduce*` take `using: TensorFunction`. Ref: MPI-4.1 ch. 5; Rabenseifner/Patarasuk–Yuan; Gloo. Check: every verb is `send` + `call(combine)`; movement does no arithmetic; explicit destinations at every world size. Not it: gather-everything-then-sum; any verb inferred from `size`.
 
-**L5. Partial is a type.** `TensorPart.partial: Bool` set on `reduceScatter/reduce` contributions; `Mesh.call` throws `MeshError.partialOperand(part)` at setup when a non-combine function binds a partial. Ref: DTensor `Partial`; Legion `reduce`; Korthikanti 2022. Check: one `throw` in `call`; no runtime state.
+**L5. Partial is a type.** A `P`-layout term of the Definition (full support, pending `+`) is typed: `TensorPart.partial: Bool` set on `reduceScatter/reduce` contributions; `Mesh.call` throws `MeshError.partialOperand(part)` at setup when a non-combine function binds a partial. Ref: DTensor `Partial`; Legion `reduce`; Korthikanti 2022. Check: one `throw` in `call`; no runtime state.
 
-**L6. Combine is any associative supplied function.** `reduce(…, using:)`; explicit binary tree. Ref: `MPI_Op`; Blelloch. Check: no special case for `+`.
+**L6. Combine is any associative supplied function.** `reduce(…, using:)`; explicit binary tree. A *partial tensor* (Definition) has combine `+` and the exactness of I23; another associative combine is movement plus a supplied function and carries no claim beyond associativity. Ref: `MPI_Op`; Blelloch. Check: no special case for `+` in the movement.
 
 **L7. Lifetime without explicit free.** internal `mesh_buffer_retain/release`; uses count down on numerical completion, TX completion, destruction; the free pool returns pages unzeroed. Ref: RCU; Disruptor. Check: I5.
 
@@ -534,8 +584,9 @@ re-establish who they are and what they will do; nothing inside an NFE is recove
 
 ### F — the scale-out structure as types and satisfaction constraints
 
-Notation: `R` replicated, `S(slice)` sliced over coordinates, `P(term)` a partial-sum
-term; `N` nodes with rates `r_i` (leader = 1); `K` row tiles; `c` = wire latency +
+Notation (the three layouts of one value, per the Definition): `R` the total `T(X)`,
+`S(slice)` a codomain-projection partial `Q'_j T(X)` (disjoint support), `P(term)` a
+domain-projection partial `T(Q_i X)` (full support, pending `+`); `N` nodes with rates `r_i` (leader = 1); `K` row tiles; `c` = wire latency +
 serialization of one tile's vector; `T_f` the split sublayer's leader-alone time;
 `T_rest` the unsplit remainder per layer.
 
