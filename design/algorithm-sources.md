@@ -356,7 +356,8 @@ adapter or reread `MatrixView` descriptors. Indexed callers select from a setup
 array of prepared functions. MPS uses its existing matrix multiplication with
 concrete operands. The source path and compiler comparison are recorded in
 [resolved matrix dispatch](../../../metal-microbench/docs/async_collectives.md#resolved-matrix-dispatch).
-This removes host binding work; native command replay remains unfinished.
+The engine now also records its complete native decode step; see
+[Native Metal program](#native-metal-program).
 
 The invocation ABI passes only the existing call address. The worker no longer
 loads operand-array pointers and input counts to construct unused arguments for
@@ -1348,7 +1349,7 @@ followed. This deletes the launch's Swift access calls, array count/type checks,
 temporary command-object retain/release and stack frame. The frame-index load is
 from the call record already accessed for its pending count. The C worker no
 longer reads operand fields for this path. Earlier use/call accesses, Metal's own
-submission work and all re-recording remain; these four instructions do not
+submission work and command-buffer rearm remain; these four instructions do not
 establish the complete H7 path or a latency pass.
 
 Apple's [indirect command buffers](https://developer.apple.com/documentation/metal/mtlindirectcommandbuffer)
@@ -1356,7 +1357,8 @@ support recording commands once and executing them repeatedly. That is distinct
 from [Metal 4 command-buffer reuse](https://developer.apple.com/documentation/metal/understanding-the-metal-4-core-api),
 whose documented lifecycle begins a new recording. Neither a Metal 4 migration
 nor wrapping the current per-kernel encoder callbacks removes their recording
-work. Native replay of the realized numerical graph remains unimplemented.
+work. The engine now composes native numerical commands at setup and replays
+the complete decode range; see [Native Metal program](#native-metal-program).
 
 The existing `Mesh.bindings` setup constructor is public so a supplied function
 can bind working storage without declaring it as an externally consumed output.
@@ -1473,7 +1475,8 @@ and [`supportIndirectCommandBuffers`](https://developer.apple.com/documentation/
 define compute recording, dependencies and pipeline compilation. This is native
 Metal replay, not recommitting an ordinary command buffer.
 
-The engine's `bindMetalProgram` consumes setup-only dispatch descriptions. For
+The engine's `MetalProgram.bind` consumes setup-only dispatch descriptions.
+The earlier `bindMetalProgram` entry point is replaced by setup composition. For
 multiple commands or indirect reads, it records the supplied pipelines, buffer
 bindings, scalar constants and grids into one `MTLIndirectCommandBuffer`.
 Constants are packed UInt32 metadata in shared
@@ -1586,8 +1589,37 @@ producer prepends the existing KV scatter with a device dependency before
 attention. Reduction retains its numerical dependency too. No kernel arithmetic,
 tensor backing or remote-fill rule is added. The bound row count determines the
 KV grid. Vocabulary projection and publication are now recorded together;
-token embedding and streaming sums still need recording. Replicated sampling
-and the E1d/E8 floor remain open.
+token embedding and streaming sums now join the complete native step recording.
+Replicated sampling and the E1d/E8 floor remain open.
+
+
+Engine `fb3bab4` uses `MetalProgram` to compose its existing command
+descriptions before native recording. `append` resolves relative command and external-encoder positions and
+preserves each numerical dependency. `bind` stores native commands, packed scalar
+constants and deduplicated resources once. Its inline native encoder body makes
+five Metal calls without a command-description walk. Ordinary single commands
+retain direct bulk binding. Apple's
+[`setThreadgroupMemoryLength`](https://developer.apple.com/documentation/metal/mtlindirectcomputecommand/setthreadgroupmemorylength(_:index:))
+records the dense-prefill kernels' existing dynamic threadgroup storage too.
+
+`decodeAttentionProgram`, `DenseFFNWeights.program`, `layerFinishProgram`,
+`unembedProgram` and `samplingCommands` supply the existing numerical sequences.
+`denseMmProgram` and `realizedMatrixProgram` share native matrix preparation with
+the ordinary engine; MPS remains an actual native external encoder where selected.
+`meshDecodeLayerProgram` includes the unchanged supplied streaming sum. The full
+`bindMeshDecodeStep` now binds one concatenated sequence: embedding, PLE prefix,
+all layers, output normalization, vocabulary publications and rank-0 sampling.
+Prepared diagnostic ranges refer to the same recording. The one runtime
+inspection predicate preserves changing QKV capture/ablation requests; its
+ordinary branch enters the native body directly. Only explicit instrumentation
+or real external MPS calls execute a segmented callback sequence.
+
+The [whole-step source account](../../../metal-microbench/docs/async_collectives.md#whole-step-native-recording)
+records the 251/250-to-one encoder reduction, corresponding native call counts,
+source growth, exact scope and remaining limitations. This deletes per-layer
+rearm invocation and repeated binding; it does not change the collective routes,
+shader arithmetic, operand backing or device visibility dependencies. Source and
+compilation evidence are not a measured floor-latency pass.
 
 ## Prefill KV
 
