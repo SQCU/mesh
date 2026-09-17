@@ -1503,8 +1503,20 @@ The engine's [FFN source account](../../../metal-microbench/docs/async_collectiv
 records the before/after encoding counts and limitations. Both engine libraries
 build; 126 affected native pipelines compile, and Metal/tensor FFN projection
 programs record with 1, 8 and 128 rows and nonzero offsets without GPU submission.
-Attention and finishing still record commands per step; whole-step replay,
-replicated sampling and the E1d/E8 floor remain open.
+The native Metal branch of `bindLayerFinish` records the six existing E2B
+post-sum operations together, using the same matrix setup factory and existing
+normalization, activation and scaling shaders. MPS retains its native path;
+non-PLE models retain their existing single fused encoder. Fixed PLE offsets,
+strides and launch grids are recorded once. The five local dependency boundaries
+replace the former separate serial passes. The engine's
+[finishing account](../../../metal-microbench/docs/async_collectives.md#prepared-layer-finishing)
+counts six encoders/45 native calls becoming one encoder/five calls per layer.
+Resource-array lengths are captured at setup too: optimized invocation SIL
+contains neither of the former two array-header count loads. This does not remove
+native resource tracking or captured-value loads. The three additional pipeline
+configurations compile with indirect support, and both engine libraries build.
+Attention, prefix, sum and final projection recording, replicated sampling and
+the E1d/E8 floor remain open.
 
 ## Prefill KV
 
