@@ -1472,9 +1472,39 @@ Source review and optimized Swift SIL show five native calls in sampler rearm:
 encoder creation, two bulk resource declarations, range execution and encoder
 completion. All five ordinary and all five indexed pipelines compile with native
 indirect-command support. These are compilation and source observations, not
-numerical execution or latency evidence. The rest of the model still records
-commands per step; whole-step replay, replicated sampling and the E1d/E8 floor
-remain open. The existing one-in-flight engine limitation is unchanged.
+numerical execution or latency evidence. The existing one-in-flight engine
+limitation is unchanged.
+
+The same construction records each complete FFN sequence in
+`DenseFFNWeights.bind`: normalization, the existing fused gate/up matrix operation
+and down projection, or the existing three/five-kernel batched GEMV sequence.
+`gateUpCommands`, `denseGemvPipeline` and `rmsNormCommand` realize native pipeline,
+operand, offset, grid and scalar bindings once. `MatrixOperations.dispatch`
+shares its preparation with ordinary `multiply`; the latter still captures direct
+native calls, without an indirect program around an individual kernel. The old
+split `bindFFN` wrapper and paired up/down invocation are deleted. CPU encoding
+shrinks from three/five encoders to one per replayed FFN, with five native calls
+per invocation. Native device barriers preserve the existing normalization,
+activation and down-projection dependencies. The MPS and ordinary matrix-prefill
+branch retains its existing native encoders.
+
+The [matrix product](#kernelsdot) sums over exactly the operand's inner
+dimension. The pre-existing
+FP16 GEMV implementation read complete 32-element groups even for a shorter final
+group; it now bounds that loop by the actual input width. Output launches cover
+`ceil(columns/32)` groups, and inactive lanes use a valid weight address before
+the common threadgroup reduction and masked store. `BatchPipelines` supplies the
+actual occupancy as a Metal function constant; `ENTRY_DENSE_GEMV` specializes its
+existing bounded implementation for non-power-of-two batches. This preserves
+caller placement and prevents reads/writes of absent rows without adding a
+readiness guard, transport condition or runtime pipeline choice.
+
+The engine's [FFN source account](../../../metal-microbench/docs/async_collectives.md#prepared-ffn-programs)
+records the before/after encoding counts and limitations. Both engine libraries
+build; 126 affected native pipelines compile, and Metal/tensor FFN projection
+programs record with 1, 8 and 128 rows and nonzero offsets without GPU submission.
+Attention and finishing still record commands per step; whole-step replay,
+replicated sampling and the E1d/E8 floor remain open.
 
 ## Prefill KV
 
