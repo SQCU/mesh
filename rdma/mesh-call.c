@@ -5,20 +5,9 @@
 #include <stdio.h>
 
 /* design/algorithm-sources.md#programkernel_call */
-typedef __attribute__((swiftcall)) void (*mesh_invoke)(struct mesh_call *,uint32_t,
-  const struct mesh_operand *,struct mesh_operand *,void * __attribute__((swift_context)));
+typedef __attribute__((swiftcall)) void (*mesh_invoke)(struct mesh_call *,void * __attribute__((swift_context)));
 typedef __attribute__((swiftcall)) void (*mesh_rearm)(uint32_t,void * __attribute__((swift_context)));
 
-struct mesh_call {
-  _Alignas(64) struct mesh_function *function;
-  struct mesh_operand *operands;
-  uint64_t return_slot;
-  uint32_t index,remaining,pending,invocation,return_index;
-  int error;
-  struct hdr *memory;
-  uint32_t input_count,output_count;
-};
-_Static_assert(sizeof(struct mesh_call)==64 && _Alignof(struct mesh_call)==64,"mesh_call record");
 struct mesh_function {
   struct mesh_calls *calls;
   struct mesh_section *inputs;
@@ -172,8 +161,7 @@ static void *mesh_call_progress(void *argument){
         struct mesh_use use=targets[i];
         use.call->invocation^=(use.call->invocation^(uint32_t)(event>>32))&use.invocation_mask;
         if(--use.call->pending)continue;
-        struct mesh_operand *operands=use.call->operands;
-        use.submit(use.call,use.call->index,operands,operands+use.call->input_count,use.argument);
+        use.submit(use.call,use.argument);
         submitted++;
       }
     }

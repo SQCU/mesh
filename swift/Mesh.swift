@@ -247,7 +247,7 @@ private final class MeshMemory {
     }
 }
 
-private typealias MeshBody = (OpaquePointer?, UInt32, UnsafePointer<mesh_operand>?, UnsafeMutablePointer<mesh_operand>?) -> Void
+private typealias MeshBody = (OpaquePointer) -> Void
 private struct MeshLaunch {
     let function: MeshBody
     let rearm: ((UInt32) -> Void)?
@@ -276,8 +276,9 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
         retained = []
         rearm = nil
         copyOnCPU = true
-        launch = { call, _, input, output in
-            let inputs = MeshOperands(start: input, count: inputs), outputs = MeshOperands(start: output, count: outputs)
+        launch = { call in
+            let operands = mesh_call_operands(call)
+            let inputs = MeshOperands(start: operands, count: inputs), outputs = MeshOperands(start: operands.advanced(by: inputs.count), count: outputs)
             function(inputs, outputs)
             mesh_call_complete(call, 0)
         }
@@ -328,9 +329,10 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
         }
         var commands = (0..<count).map { _ in queue.makeCommandBuffer()! }
         rearm = { index in commands[Int(index)] = queue.makeCommandBuffer()! }
-        launch = { call, index, input, output in
-            let inputs = MeshOperands(start: input, count: inputs), outputs = MeshOperands(start: output, count: outputs)
-            let command = commands[Int(index)]
+        launch = { call in
+            let operands = mesh_call_operands(call)
+            let inputs = MeshOperands(start: operands, count: inputs), outputs = MeshOperands(start: operands.advanced(by: inputs.count), count: outputs)
+            let command = commands[Int(mesh_call_index(call))]
             encode(command, inputs, outputs)
             command.addCompletedHandler { [memory] command in
                 withExtendedLifetime(memory) {
@@ -344,11 +346,11 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
         retained = []
         rearm = nil
         copyOnCPU = true
-        launch = { call, index, input, _ in
-            let inputs = MeshOperands(start: input, count: inputs)
-            let provider = features[Int(index)]
+        launch = { call in
+            let inputs = MeshOperands(start: mesh_call_operands(call), count: inputs)
+            let index = Int(mesh_call_index(call)), provider = features[index]
             provider.operands = inputs
-            model.__prediction(fromFeatures: provider, options: options[Int(index)]) { [memory] _, error in
+            model.__prediction(fromFeatures: provider, options: options[index]) { [memory] _, error in
                 withExtendedLifetime(memory) {
                     if let error { mesh_call_fail(call, Int32((error as NSError).code)) }
                     else { mesh_call_complete(call, 0) }
@@ -365,9 +367,9 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
                 (source: source.advanced(by: chunk), target: target.advanced(by: chunk * quantum), bytes: bytes)
             }
         } }
-        return MeshLaunch(function: { call, index, inputs, outputs in
-            for copy in placements[Int(index)] { memcpy(copy.target, mesh_operand_data(copy.source), copy.bytes) }
-            launch(call, index, inputs, outputs)
+        return MeshLaunch(function: { call in
+            for copy in placements[Int(mesh_call_index(call))] { memcpy(copy.target, mesh_operand_data(copy.source), copy.bytes) }
+            launch(call)
         }, rearm: rearm, resources: retained)
     }
     return MeshLaunch(function: launch, rearm: rearm, resources: retained)
@@ -874,8 +876,8 @@ private func meshResident(_ device: MTLDevice, memory: MeshMemory, inputs: [[Mes
         encoders[Int(index)](command)
         storage.withUnsafeMutablePointerToElements { $0[Int(index)] = command }
     }
-    return MeshLaunch(function: { [storage] _, index, _, _ in
-        storage.withUnsafeMutablePointerToElements { $0[Int(index)].commit() }
+    return MeshLaunch(function: { [storage] call in
+        storage.withUnsafeMutablePointerToElements { $0[Int(mesh_call_index(call))].commit() }
     }, rearm: rearm, resources: [], dependencies: dependencies, prepare: { function in
         frames = try (0..<count).map { index in
             let frame = MeshMetalFrame(memory: memory, device: device, function: function, index: index,

@@ -12,6 +12,20 @@ struct mesh_operand {
   uint32_t *sequence; size_t quantum;
 };
 _Static_assert(sizeof(struct mesh_operand)==48,"mesh_operand");
+struct mesh_call {
+  _Alignas(64) struct mesh_function *function;
+  struct mesh_operand *operands;
+  uint64_t return_slot;
+  uint32_t index,remaining,pending,invocation,return_index;
+  int error;
+  struct hdr *memory;
+  uint32_t input_count,output_count;
+};
+_Static_assert(sizeof(struct mesh_call)==64 && _Alignof(struct mesh_call)==64,"mesh_call record");
+/* design/algorithm-sources.md#programkernel_call */
+static inline __attribute__((always_inline)) uint32_t mesh_call_index(const struct mesh_call *call){return call->index;}
+/* design/algorithm-sources.md#programkernel_call */
+static inline __attribute__((always_inline,returns_nonnull)) struct mesh_operand *mesh_call_operands(const struct mesh_call *call){return call->operands;}
 /* design/algorithm-sources.md#programtensor */
 static inline __attribute__((always_inline)) void *mesh_operand_data(const struct mesh_page_entry *pages){return (void *)atomic_load_explicit(&pages->address,memory_order_relaxed);}
 /* design/algorithm-sources.md#programtensor */

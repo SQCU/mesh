@@ -1051,8 +1051,8 @@ is performed.
 ### Direct Swift dispatch
 
 The `MeshInvocation` heap object, its C callback trampoline and its separate
-per-function disposer are deleted. A 32-byte setup value (`MeshLaunch`) contains
-the ordinary launch and optional rearm functions. The existing memory owner
+per-function disposer are deleted. The setup value (`MeshLaunch`) begins with
+the 32-byte pair of ordinary launch and optional rearm functions. The existing memory owner
 retains these values until native workers and callbacks finish, then releases
 the array once. Dispatch never indexes or reads that ownership array.
 
@@ -1060,8 +1060,11 @@ Each 32-byte consumer record contains code, context, call address, invocation
 mask and the end of its contiguous use range. The duplicate operand-array
 address and input count were removed from that record; they already occupy the
 same 64-byte call record as the required dependency count. The generated ARM64
-worker loads code and context together, puts the context in `x20`, reads the
-call’s operand fields and executes `blr`. There is no intermediate invocation
+worker loads code and context together, puts the context in `x20`, and passes
+the call address in `x0`. After updating the dependency count it executes `blr`
+without reading operand pointers, input counts or frame indices. The selected
+native function reads only the fields it uses; resident launch reads the frame
+index and commits its prepared command. There is no intermediate invocation
 object, block conversion, launch retain/release or shared atomic increment.
 The supplied function and its backend still have their own captures and work;
 this does not claim to delete those native operations.
@@ -1215,23 +1218,25 @@ unfinished. No runtime workload or deployment accompanies this change.
 
 ### Direct TX publication
 
-The TX event already identifies prepared native requests. Publication now
-attempts the first request directly, before accessing the private pending-range
-ring. It writes the request's existing tag and calls its prepared native target.
-The previous unconditional enqueue, head lookup and range reload before that
-first post are deleted. This applies to every declared send, link and queue.
+The TX event already identifies prepared native requests. Publication attempts
+every request directly until one is refused by the native provider. It writes
+the request's existing tag and calls its prepared native target. A successful
+post advances directly to the next prepared request. It performs no pending-ring
+enqueue, head lookup, range reload or rotation. This applies to every declared
+send, link and queue, including a single-request FFN partial.
 
-After acceptance, only the remaining interval enters the existing ring; after
-native capacity refusal, the unchanged interval enters it. The ring is drained
-immediately in either case, and queued requests retain their existing rotation
-and refusal behavior. One forced-inline `link_send_request` body serves both
-paths. It adds no call frame, request construction or capacity predicate.
+Only `ENOMEM`/`EAGAIN` enqueues the unaccepted suffix, immediately followed by CQ
+progress and retry drainage. The existing CQ progress body owns that drainage;
+the separate `link_send_ready` function and its unconditional invocation after
+every publication are deleted. Queued intervals retain their rotation and
+refusal behavior. One forced-inline `link_send_request` body serves both paths.
+It adds no call frame, request construction or capacity predicate.
 Transient refusal can cost an additional unsuccessful native attempt for a new
 publication; this is accounted for rather than hidden behind a software gate.
 
 There is at most one unfinished interval per declared live send. A fresh
-publication has none queued, and acceptance either removes its first request
-or finishes the interval. Enqueue therefore preserves the existing E-range
+publication has none queued, and direct posting either finishes it or enqueues
+its sole remaining suffix. Enqueue therefore preserves the existing E-range
 capacity bound, with no new reservation or allocation. Requests within an
 interval retain their order. Different intervals can reach posting in a
 different interleaving; indexed receive matching already supports that order.

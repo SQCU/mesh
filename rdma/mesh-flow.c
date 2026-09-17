@@ -293,18 +293,6 @@ static inline __attribute__((always_inline)) int link_send_request(struct mesh_s
   int error=source->post(source->pair,&source->request,&bad);
   return error<0?-error:error;
 }
-/* design/algorithm-sources.md#programkernel_call */
-static inline __attribute__((always_inline)) int link_send_ready(struct mesh_link *link,uint32_t q,struct mesh_send_edge *edges){
-  struct mesh_ready *ready=&link->ready[q];
-  while(ready->head!=ready->tail){
-    struct mesh_send_range pending=link->send_ready[ready->first+(ready->head&ready->mask)];
-    int error=link_send_request(&edges[pending.first],pending.invocation);
-    if(error)return error;
-    ready->head++;
-    if(++pending.first!=pending.end)link->send_ready[ready->first+(ready->tail++&ready->mask)]=pending;
-  }
-  return 0;
-}
 /* design/algorithm-sources.md#programcopy */
 static int mesh_send_progress(struct mesh_link *link,struct mesh_send_edge *edges){
   struct mesh_verbs *v=&link->provider;
@@ -313,8 +301,17 @@ static int mesh_send_progress(struct mesh_link *link,struct mesh_send_edge *edge
     struct mesh_queue *queue=&v->queues[q];
     int count=queue->poll[MESH_SEND](queue->completions[MESH_SEND],1,completions);
     if(count<0){link_error(link,count,3);return count;}
-    int error=link_send_ready(link,q,edges);
-    if(error && error!=ENOMEM && error!=EAGAIN){link_error(link,error,1);return error;}
+    struct mesh_ready *ready=&link->ready[q];
+    while(ready->head!=ready->tail){
+      struct mesh_send_range pending=link->send_ready[ready->first+(ready->head&ready->mask)];
+      int error=link_send_request(&edges[pending.first],pending.invocation);
+      if(error){
+        if(error!=ENOMEM && error!=EAGAIN){link_error(link,error,1);return error;}
+        break;
+      }
+      ready->head++;
+      if(++pending.first!=pending.end)link->send_ready[ready->first+(ready->tail++&ready->mask)]=pending;
+    }
     if(count){
       struct ibv_wc *wc=completions;
       if(wc->status){link_error(link,wc->status,2);return wc->status;}
@@ -370,21 +367,20 @@ static void link_publications(struct mesh_link *link,struct mesh_send_edge *edge
   uint64_t event;
   while((event=mesh_event_take(notices))!=MESH_EVENT_ABSENT){
     uint32_t first=(uint32_t)event;
-    for(uint32_t at=first,end=edges[first].end;at<end;at+=edges[at].chunks){
+    for(uint32_t at=first,end=edges[first].end;at<end;){
       struct mesh_send_edge *source=&edges[at];
-      uint32_t q=source->queue,invocation=(uint32_t)(event>>32);
-      int error=link_send_request(source,invocation);
-      if(error && error!=ENOMEM && error!=EAGAIN){link_error(link,error,1);return;}
-      struct mesh_send_range pending={at+(error==0),at+source->chunks,invocation};
-      if(pending.first!=pending.end){
-        struct mesh_ready *ready=&link->ready[q];
-        link->send_ready[ready->first+(ready->tail++&ready->mask)]=pending;
-      }
-      error=link_send_ready(link,q,edges);
-      if(error){
-        if(error!=ENOMEM && error!=EAGAIN){link_error(link,error,1);return;}
-        if(mesh_send_progress(link,edges))return;
-      }
+      uint32_t chunk=at,next=at+source->chunks,invocation=(uint32_t)(event>>32);
+      do {
+        int error=link_send_request(&edges[chunk],invocation);
+        if(error){
+          if(error!=ENOMEM && error!=EAGAIN){link_error(link,error,1);return;}
+          struct mesh_ready *ready=&link->ready[source->queue];
+          link->send_ready[ready->first+(ready->tail++&ready->mask)]=(struct mesh_send_range){chunk,next,invocation};
+          if(mesh_send_progress(link,edges))return;
+          break;
+        }
+      } while(++chunk<next);
+      at=next;
     }
   }
 }

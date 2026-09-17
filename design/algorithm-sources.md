@@ -348,6 +348,18 @@ extracts code/context pairs from that value and retains it in the existing
 register. It does not invoke a C callback that discovers another Swift function.
 The same representation supplies the optional native rearm function.
 
+The invocation ABI passes only the existing call address. The worker no longer
+loads operand-array pointers and input counts to construct unused arguments for
+a resident command. Ordinary CPU/Metal and Core ML functions read the operands
+they consume; their input/output counts are already setup captures. Inline C
+field accessors expose the aligned record to Swift without a second descriptor
+or an out-of-line call. Binding allocates an operand array even for a zero-operand
+call, so its accessor's nonnull result needs no runtime check. The resident thunk
+reads only the frame index before selecting its prepared command. The index read
+moves from C to Swift; the unused operand-pointer/count reads are deleted, not
+deferred. The remaining use-record → call-record → command dependency depth is
+unchanged. C and Swift libraries must be rebuilt together for this private ABI.
+
 This is specific to the existing Darwin 64-bit Swift/Clang ABI. Reading a generic
 function value with `unsafeBitCast` is not equivalent: Swift can introduce an
 indirect-argument reabstraction thunk. Likewise, importing the launch as an Apple
@@ -608,9 +620,11 @@ rdma/indexed-gather RANK 4 /mesh0 examples/indexed-gather-ring.json
 
 The [direct TX publication path](pages-and-functions.md#direct-tx-publication)
 uses the same Apple/rdma-core native posting interface cited below. The prepared
-request reaches that interface before any pending-ring staging; one inlined
-posting body also handles retries. The existing pending-interval capacity and
-counted ownership remain. Dedicated thread roles are selected during setup,
+requests reach that interface directly until the provider refuses one; only that
+unaccepted suffix enters the pending ring. One inlined posting body handles both
+direct posts and retries. No pending record, head/tail access or range rotation
+intervenes between successful direct posts. The existing pending-interval capacity
+and counted ownership remain. Dedicated thread roles are selected during setup,
 and their poll target indices are constants. These are partial evaluation and
 removal of intermediate storage, not a replacement collective or transport.
 
@@ -1264,16 +1278,19 @@ releases initialized command references when the native graph is disposed.
 Optimized ARM64 resident launch is exactly:
 
 ```
-add x8, x20, w1, uxtw #3
+ldr w8, [x0, #24]
+add x8, x20, x8, lsl #3
 ldr x0, [x8, #24]
 b _objc_msgSend$commit
 ```
 
 The captured storage object is the closure context: no second descriptor is
 followed. This deletes the launch's Swift access calls, array count/type checks,
-temporary command-object retain/release and stack frame. The C worker's earlier
-use/call/operand reads, Metal's own submission work and all re-recording remain;
-the three instructions do not establish the complete H7 path or a latency pass.
+temporary command-object retain/release and stack frame. The frame-index load is
+from the call record already accessed for its pending count. The C worker no
+longer reads operand fields for this path. Earlier use/call accesses, Metal's own
+submission work and all re-recording remain; these four instructions do not
+establish the complete H7 path or a latency pass.
 
 Apple's [indirect command buffers](https://developer.apple.com/documentation/metal/mtlindirectcommandbuffer)
 support recording commands once and executing them repeatedly. That is distinct
