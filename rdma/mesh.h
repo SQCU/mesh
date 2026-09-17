@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 76u
+#define MESH_VERSION 77u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_EVENT_ABSENT UINT64_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
@@ -30,8 +30,14 @@ struct mesh_buffer {
 _Static_assert(sizeof(struct mesh_buffer)==64 && _Alignof(struct mesh_buffer)==64,"mesh_buffer");
 struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
 /* design/algorithm-sources.md#programtensor */
-struct mesh_page_entry { _Alignas(16) _Atomic uint64_t mapping; _Atomic uintptr_t address; };
-_Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 && offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
+struct mesh_page_entry {
+  _Alignas(16) _Atomic uint64_t mapping;
+  _Atomic uintptr_t address;
+  _Atomic uint64_t device,stamp;
+};
+_Static_assert(sizeof(struct mesh_page_entry)==32 && _Alignof(struct mesh_page_entry)==16 &&
+  offsetof(struct mesh_page_entry,address)==8 && offsetof(struct mesh_page_entry,device)==16 &&
+  offsetof(struct mesh_page_entry,stamp)==24,"mesh_page_entry");
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_COMPUTE_THREADS 8
@@ -67,7 +73,7 @@ struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; stru
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps,links;
   _Atomic uint64_t configured;
-  uint64_t planes_off,presence_off,page_off,buffer_off,pool_off,link_off,target_off,order_off,notice_off,instance_off,tags_off,data_off,length;
+  uint64_t planes_off,page_off,buffer_off,pool_off,link_off,target_off,order_off,notice_off,instance_off,tags_off,data_off,length;
   uint64_t notice_bytes,target_stride;
   uint32_t instance_count[MESH_NOTICE_BANKS];
   uintptr_t client_data[MESH_NOTICE_BANKS];
@@ -109,8 +115,6 @@ static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
 static inline uint32_t mesh_blocks(const struct hdr *m){ return mesh_rows(m)/m->block; }
 static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_Atomic uint64_t*)((unsigned char*)m+m->planes_off)+(size_t)plane*mesh_words(m); }
-/* design/algorithm-sources.md#programkernel_call */
-static inline _Atomic uint64_t *mesh_presence(struct hdr *m){return (_Atomic uint64_t *)((char *)m+m->presence_off);}
 static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
 /* design/algorithm-sources.md#programtensor */
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }
@@ -121,7 +125,7 @@ void mesh_buffer_release(struct hdr *,uint32_t row);
 static inline void mesh_buffer_reset(struct hdr *m,uint32_t row){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
   atomic_store_explicit(&buffer->references,buffer->initial,memory_order_relaxed);
-  atomic_store_explicit(&mesh_presence(m)[row],0,memory_order_relaxed);
+  atomic_store_explicit(&mesh_page(m)[row].stamp,0,memory_order_relaxed);
 }
 /* ledger D5 */
 static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+((size_t)(owner>>63)*2*m->links*m->qps+2*queue+(uint32_t)direction)*mesh_blocks(m); }
@@ -185,7 +189,6 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz,words=((uint64_t)rows+63)/64,blocks=rows/block;
   h->pgsz=pgsz; h->block=block; h->rows=rows; h->links=links; h->qps=qps;
   h->planes_off=at; at+=(uint64_t)MESH_PLANES*words*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
-  h->presence_off=at;at+=(uint64_t)rows*sizeof(uint64_t);at=(at+pgsz-1)/pgsz*pgsz;
   h->page_off=at; at+=(uint64_t)rows*sizeof(struct mesh_page_entry); at=(at+pgsz-1)/pgsz*pgsz;
   h->buffer_off=at; at+=(uint64_t)rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->pool_off=at; at+=blocks*sizeof(struct mesh_pool); at=(at+pgsz-1)/pgsz*pgsz;

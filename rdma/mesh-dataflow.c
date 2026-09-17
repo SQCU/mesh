@@ -117,7 +117,8 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   uint32_t first=mesh_allocate(c,count,1,0,mesh_rows(c->M),MESH_ROW_OWN,MESH_ROW_HOT);
   if(first==MESH_ABSENT) return first;
   for(uint32_t r=first;r<first+count;r++){
-    atomic_store_explicit(&mesh_presence(c->M)[r],0,memory_order_relaxed);
+    atomic_store_explicit(&mesh_page(c->M)[r].stamp,0,memory_order_relaxed);
+    atomic_store_explicit(&mesh_page(c->M)[r].device,0,memory_order_relaxed);
     atomic_store_explicit(&mesh_page(c->M)[r].mapping,MESH_ABSENT,memory_order_release);
     struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
     atomic_store_explicit(&buffer->references,0,memory_order_relaxed);
@@ -146,6 +147,13 @@ void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t
     atomic_store_explicit(&entry->mapping,((uint64_t)index<<32)|(page+offset),memory_order_relaxed);
     atomic_store_explicit(&entry->address,(uintptr_t)mesh_at(c->M,page+offset),memory_order_relaxed);
   }
+}
+
+/* design/algorithm-sources.md#device-operands */
+void mesh_device_bind(struct mesh_ctx *c,uint32_t row,uint32_t page,uint64_t address){
+  if(row!=MESH_ABSENT)atomic_store_explicit(&mesh_page(c->M)[row].device,address,memory_order_relaxed);
+  uint64_t *local=(uint64_t *)mesh_tag(c->M,page)-1;
+  *local=address;
 }
 
 /* design/algorithm-sources.md#programtensor */
@@ -257,7 +265,7 @@ void mesh_publish(struct hdr *m,struct mesh_publication *publication,uint64_t st
   uint32_t sends=publication->sends,invocation=(uint32_t)(stamp-1);
   for(uint32_t i=0;i<sends;i++)mesh_event_push(m,targets[i].stream,targets[i].index,invocation);
   uint32_t row=publication->row;
-  atomic_store_explicit(&mesh_presence(m)[row],stamp,memory_order_release);
+  atomic_store_explicit(&mesh_page(m)[row].stamp,stamp,memory_order_release);
   uint32_t end=sends+publication->uses;
   for(uint32_t i=sends;i<end;i++)mesh_event_push(m,targets[i].stream,targets[i].index,invocation);
   mesh_buffers(m)[row].invocation=invocation;

@@ -1015,3 +1015,62 @@ TTFT, outside every tensor function and mesh progress thread. Completion periods
 include the interval from batch submission to the first completion, so their mean
 is total batch time divided by request count. The [report contract](../../../metal-microbench/docs/amdahl_superiority.md#public-prefill-report)
 distinguishes concurrent throughput, request latency, and the units of mesh bounds.
+
+## Device operands
+
+The JAX authors' [Pallas reference and indexing model](https://docs.jax.dev/en/latest/pallas/design/design.html),
+Apple's [Metal buffer GPU addresses](https://developer.apple.com/documentation/metal/mtlbuffer/gpuaddress)
+and [queue residency sets](https://developer.apple.com/documentation/metal/mtlcommandqueue/addresidencyset(_:)),
+and the MLX authors' [system-coherent Metal accesses](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/fence.metal)
+provide the mechanisms used here. This is operand representation; numerical
+functions remain supplied by the caller.
+
+ABI 77 replaces the separate presence array with a 32-byte page-table entry:
+`{ mapping, hostAddress, deviceAddress, stamp }`, four 64-bit words in that order.
+The table begins at a VM-page boundary and its entry stride is 32 bytes, so every
+entry begins on a 32-byte boundary. The C type retains 16-byte alignment for Swift
+import; C and Metal check the size and C checks the field offsets. Logical rows,
+CPU consumers, constants, reclamation and explicit synchronization all use this
+same stamp. No parallel GPU page table is reconstructed.
+
+`mesh_device_bind` resolves Metal addresses during setup. For a local operand it
+writes its canonical entries. For a receive pool it writes the address immediately
+before each existing wire tag, in receiver-local metadata outside the receive SGE.
+RX loads that address beside the received tag and writes it beside the CPU address
+before release-publishing the stamp. These are the actual registered payload pages,
+not placement copies. The configured Metal device's addresses are used; CPU and GPU
+virtual addresses are never presumed equal. The extra RX address load is in the
+same cache line as the tag, and the stamp store now shares the canonical address
+record's cache line. This is a source-level locality account, not measured latency.
+
+`TensorPart.stamp` is the CPU address of the first instance's canonical word;
+nonlocal parts have no local address. TensorPart remains a value of primitive
+fields and pointers without an owning object. Per-instance Metal bindings below
+provide the corresponding GPU table addresses, including the stamp at byte 24.
+`MeshSpan.metalOffset` is the offset inside its page-aligned `bytesNoCopy` buffer;
+metadata users bind both buffer and offset. Existing page-aligned tensor spans
+retain offset zero.
+
+`TensorFunction.metal(device, operands:)` realizes per-instance `MeshMetalOperand`
+arrays before execution. A Metal operand contains its canonical table binding,
+resource lifetimes and an optional contiguous local buffer. Each received chunk is
+wrapped independently; the whole receive arena need not fit one Metal buffer.
+The native launch owns the backing buffers, and its queue has a residency set
+installed at setup. The shader receives resources through their GPU addresses;
+there is no per-launch walk declaring every possible receive buffer.
+
+`MeshMetalOperand.source` supplies `mesh::contiguous<T>`: it resolves one address
+and length for a contiguous section of the logical operand. `pipeline` specializes
+its indexing with Metal function constant 37. That constant is reserved by this
+shader ABI and does not change the numerical function. Address resolution happens
+per contiguous section, not per scalar. Allocation, Metal wrapping and pipeline
+compilation are setup work. The engine's `add_inplace` uses the same `matrixAdd`
+body for ordinary pointers and for these sections; its arithmetic is not duplicated
+inside Mesh.
+
+This integrates device-side address resolution into the E1d decode sum. It does
+not yet make that consumer resident before arrival: the current Mesh submission
+path still waits for all host notifications and then encodes/commits the command
+buffer. GPU publication, system-scope stamp acquisition in an already-submitted
+consumer, and the one-command-buffer-per-step integration remain open. No floor
+latency or end-to-end improvement follows from the ABI or compilation alone.

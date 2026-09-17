@@ -243,7 +243,7 @@ static int mesh_events_prepare(struct mesh_calls *calls){
           uint32_t target=function->values[frame].operands[function->input_count].publication->row;
           for(size_t i=0;i<function->input_count;i++){
             uint32_t row=mesh_section_row(function->inputs[i],frame),source=last[row];
-            if(!function->inputs[i].stride || atomic_load_explicit(&mesh_presence(m)[row],memory_order_relaxed))continue;
+            if(!function->inputs[i].stride || atomic_load_explicit(&mesh_page(m)[row].stamp,memory_order_relaxed))continue;
             if(!source || successors[source-1])continue;
             source--;
             if(q>=local){
@@ -307,7 +307,7 @@ static int mesh_events_prepare(struct mesh_calls *calls){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     struct mesh_publication *publication=mesh_publication_at(m,row);
     if(atomic_load_explicit(&buffer->owner,memory_order_relaxed)==calls->context->client && publication->sends &&
-       atomic_load_explicit(&mesh_presence(m)[row],memory_order_relaxed))mesh_publish(m,publication,1);
+       atomic_load_explicit(&mesh_page(m)[row].stamp,memory_order_relaxed))mesh_publish(m,publication,1);
   }
   fprintf(stderr,"mesh events: bindings=%llu streams=%llu\n",(unsigned long long)total_bindings,(unsigned long long)total_streams);
 done:
@@ -358,7 +358,7 @@ int mesh_calls_start(struct mesh_calls *calls){
         } else {
           section=function->inputs[i];
           varying|=section.stride!=0;
-          if(atomic_load_explicit(&mesh_presence(m)[section.first],memory_order_relaxed))continue;
+          if(atomic_load_explicit(&mesh_page(m)[section.first].stamp,memory_order_relaxed))continue;
         }
         initial++;pending+=section.stride!=0;
         for(uint32_t index=0;index<calls->extent;index++){
@@ -594,7 +594,7 @@ void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,
 /* design/algorithm-sources.md#programwrite */
 void mesh_section_constant(struct mesh_ctx *context,struct mesh_section section){
   mesh_buffers(context->M)[section.first].publisher=UINT64_MAX;
-  atomic_store_explicit(&mesh_presence(context->M)[section.first],1,memory_order_release);
+  atomic_store_explicit(&mesh_page(context->M)[section.first].stamp,1,memory_order_release);
   mesh_buffer_release(context->M,section.first);
 }
 /* design/algorithm-sources.md#programtensor */
@@ -608,7 +608,7 @@ void mesh_sync_on_remote_fill(struct mesh_ctx *context,const struct mesh_section
     struct mesh_section section=sections[i];
     uint64_t stamp=section.stride?(uint64_t)index+1:1;
     for(;;)for(uint32_t slot=0;slot<section.count;slot++)
-      if(atomic_load_explicit(&mesh_presence(context->M)[mesh_section_row(section,slot)],memory_order_acquire)==stamp)goto filled;
+      if(atomic_load_explicit(&mesh_page(context->M)[mesh_section_row(section,slot)].stamp,memory_order_acquire)==stamp)goto filled;
 filled:;
   }
 }

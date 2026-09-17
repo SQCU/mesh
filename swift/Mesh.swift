@@ -20,7 +20,7 @@ extension mesh_operand {
 
 fileprivate enum MeshSubmission {
     case cpu((MeshOperands, MeshOperands) -> Void)
-    case metal(MTLDevice, (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void)
+    case metal(MTLDevice, (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void, [MTLBuffer])
     case prediction(MLModel, [MeshFeatures], [MLPredictionOptions])
 }
 
@@ -57,7 +57,18 @@ public struct TensorFunction {
 
     // design/algorithm-sources.md#programkernel_call
     public static func metal(_ device: MTLDevice, _ function: @escaping (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void) -> Self {
-        Self { _, _, _ in .metal(device, function) }
+        Self { _, _, _ in .metal(device, function, []) }
+    }
+
+    // design/algorithm-sources.md#device-operands
+    public static func metal(_ device: MTLDevice,
+        operands: @escaping ([ContiguousArray<MeshMetalOperand>], [ContiguousArray<MeshMetalOperand>]) throws
+            -> (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void) -> Self {
+        Self { mesh, inputs, outputs in
+            let x = inputs.map { mesh.metal($0, device: device) }, y = outputs.map { mesh.metal($0, device: device) }
+            let resources = (x + y).flatMap { $0.flatMap { $0.resources } }
+            return .metal(device, try operands(x, y), resources)
+        }
     }
 
     // design/algorithm-sources.md#programkernel_call
@@ -103,12 +114,50 @@ public struct MeshBindings<Value> {
     @inlinable public subscript(_ operand: mesh_operand) -> Value { values[index(operand)] }
 }
 
+public struct MeshMetalOperand {
+    public let table: MTLBuffer
+    public let offset: Int
+    fileprivate let resources: ContiguousArray<MTLBuffer>
+    public let bytes: Int
+    fileprivate let quantum: Int
+    public let data: MTLBuffer?
+
+    // design/algorithm-sources.md#device-operands
+    public func pipeline(library: MTLLibrary, function: String) throws -> MTLComputePipelineState {
+        let values = MTLFunctionConstantValues()
+        var quantum = UInt64(quantum)
+        values.setConstantValue(&quantum, type: .ulong, index: 37)
+        return try library.device.makeComputePipelineState(function: library.makeFunction(name: function, constantValues: values))
+    }
+
+    // design/algorithm-sources.md#device-operands
+    public static let source = #"""
+    #include <metal_stdlib>
+    #pragma METAL internals : enable
+    constant ulong mesh_quantum [[function_constant(37)]];
+    namespace mesh {
+    struct page { ulong mapping, host, address, stamp; };
+    static_assert(sizeof(page) == 32, "mesh_page_entry");
+    template<typename T> struct span { volatile coherent(system) device T* data; uint count; };
+    // design/algorithm-sources.md#device-operands
+    template<typename T> inline span<T> contiguous(volatile coherent(system) device const page* pages, ulong offset, uint count) {
+        ulong byte = offset * sizeof(T), at = byte % mesh_quantum;
+        return {reinterpret_cast<volatile coherent(system) device T*>(pages[byte / mesh_quantum].address + at),
+                metal::min(count, uint((mesh_quantum - at) / sizeof(T)))};
+    }
+    }
+    """#
+}
+
 public struct MeshSpan {
     public let data: UnsafeMutableRawBufferPointer
     fileprivate let memory: MeshMemory
 
     // design/algorithm-sources.md#programtensor
     public func metal(device: MTLDevice) -> MTLBuffer { memory.metal(device, data: data) }
+
+    // design/algorithm-sources.md#device-operands
+    public var metalOffset: Int { Int(bitPattern: data.baseAddress!) % Int(memory.context.pointee.M.pointee.pgsz) }
 
     // design/algorithm-sources.md#programkernel_call
     public func multiArray(shape: [Int], strides: [Int], type: MLMultiArrayDataType) throws -> MLMultiArray {
@@ -127,6 +176,7 @@ public struct TensorPart {
     fileprivate let section: mesh_section?
     fileprivate let shared: Bool
     fileprivate var identity: Int
+    public let stamp: UnsafeRawPointer?
 }
 
 // design/algorithm-sources.md#mesherror
@@ -173,7 +223,9 @@ private final class MeshMemory {
     // design/algorithm-sources.md#programtensor
     func metal(_ device: MTLDevice, data: UnsafeMutableRawBufferPointer) -> MTLBuffer {
         let pageSize = Int(context.pointee.M.pointee.pgsz)
-        let address = data.baseAddress!, bytes = (data.count + pageSize - 1) / pageSize * pageSize
+        let offset = Int(bitPattern: data.baseAddress!) % pageSize
+        let address = data.baseAddress!.advanced(by: -offset)
+        let bytes = (offset + data.count + pageSize - 1) / pageSize * pageSize
         let key = "\(device.registryID):\(UInt(bitPattern: address)):\(bytes)" as NSString
         if let buffer = buffers.object(forKey: key) as? MTLBuffer { return buffer }
         let buffer = device.makeBuffer(bytesNoCopy: address, length: bytes, options: .storageModeShared,
@@ -187,6 +239,7 @@ private typealias MeshBody = (OpaquePointer?, UInt32, UnsafePointer<mesh_operand
 private struct MeshLaunch {
     let function: MeshBody
     let rearm: ((UInt32) -> Void)?
+    let resources: [MTLBuffer]
 }
 
 // design/algorithm-sources.md#programkernel_call
@@ -200,8 +253,10 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
     let launch: MeshBody
     let rearm: ((UInt32) -> Void)?
     let copyOnCPU: Bool
+    let retained: [MTLBuffer]
     switch function {
     case .cpu(let function):
+        retained = []
         rearm = nil
         copyOnCPU = true
         launch = { call, _, input, output in
@@ -209,7 +264,8 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
             function(inputs, outputs)
             mesh_call_complete(call, 0)
         }
-    case .metal(let device, let function):
+    case .metal(let device, let function, let resources):
+        retained = resources
         copyOnCPU = false
         let encode: (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void
         if copies.isEmpty {
@@ -245,6 +301,14 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
             }
         }
         let queue = device.makeCommandQueue(maxCommandBufferCount: count)!
+        if !resources.isEmpty {
+            let descriptor = MTLResidencySetDescriptor()
+            descriptor.initialCapacity = resources.count
+            let residency = try! device.makeResidencySet(descriptor: descriptor)
+            residency.addAllocations(resources)
+            residency.commit()
+            queue.addResidencySet(residency)
+        }
         var commands = (0..<count).map { _ in queue.makeCommandBuffer()! }
         rearm = { index in commands[Int(index)] = queue.makeCommandBuffer()! }
         launch = { call, index, input, output in
@@ -260,6 +324,7 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
             command.commit()
         }
     case .prediction(let model, let features, let options):
+        retained = []
         rearm = nil
         copyOnCPU = true
         launch = { call, index, input, _ in
@@ -286,9 +351,9 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
         return MeshLaunch(function: { call, index, inputs, outputs in
             for copy in placements[Int(index)] { memcpy(copy.target, mesh_operand_data(copy.source), copy.bytes) }
             launch(call, index, inputs, outputs)
-        }, rearm: rearm)
+        }, rearm: rearm, resources: retained)
     }
-    return MeshLaunch(function: launch, rearm: rearm)
+    return MeshLaunch(function: launch, rearm: rearm, resources: retained)
 }
 
 
@@ -335,7 +400,8 @@ public final class Mesh {
             if shared { local.stride = 0; memory.context.pointee.shared_pages += local.pages }
             memory.sections.append(local); section = local
         }
-        return TensorPart(rank: owner, bytes: bytes, section: section, shared: shared, identity: identity)
+        let stamp = section.map { UnsafeRawPointer(mesh_page(memory.context.pointee.M)!.advanced(by: Int($0.first))).advanced(by: 24) }
+        return TensorPart(rank: owner, bytes: bytes, section: section, shared: shared, identity: identity, stamp: stamp)
     }
 
     // design/algorithm-sources.md#programtensor
@@ -397,6 +463,42 @@ public final class Mesh {
                                                                  count: source.bytes), memory: memory))
         }
         return MeshBindings(values: ContiguousArray(values))
+    }
+
+    // design/algorithm-sources.md#device-operands
+    fileprivate func metal(_ part: TensorPart, device: MTLDevice) -> ContiguousArray<MeshMetalOperand> {
+        let section = part.section!, context = memory.context, block = mesh_block_pages(context)
+        let quantum = Int(block * context.pointee.M.pointee.pgsz)
+        var resources: ContiguousArray<MTLBuffer> = []
+        if section.channel != MESH_ABSENT {
+            let range = mesh_receive_range(context, section.channel)
+            for page in stride(from: range.first, to: range.first + range.count, by: Int(block)) {
+                let buffer = memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page), count: quantum))
+                mesh_device_bind(context, MESH_ABSENT, page, buffer.gpuAddress)
+                resources.append(buffer)
+            }
+        }
+        let count = Int(section.pages / block)
+        return ContiguousArray((0..<section.count).map { instance in
+            let row = section.first + instance * section.stride
+            var backing = resources
+            if section.channel == MESH_ABSENT {
+                for chunk in 0..<count {
+                    let page = mesh_row_page(context, row, UInt32(chunk))
+                    let buffer = memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page), count: quantum))
+                    mesh_device_bind(context, row + UInt32(chunk), page, buffer.gpuAddress)
+                    backing.append(buffer)
+                }
+            }
+            let entries = UnsafeMutableRawBufferPointer(start: mesh_page(context.pointee.M)!.advanced(by: Int(row)),
+                                                     count: count * MemoryLayout<mesh_page_entry>.stride)
+            let span = MeshSpan(data: entries, memory: memory)
+            let data = section.channel == MESH_ABSENT && section.bytes <= device.maxBufferLength
+                ? memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_section_address(context, section, instance), count: section.bytes)) : nil
+            if let data { backing.append(data) }
+            return MeshMetalOperand(table: span.metal(device: device), offset: span.metalOffset,
+                                    resources: backing, bytes: section.bytes, quantum: quantum, data: data)
+        })
     }
 
     // design/algorithm-sources.md#programtensor

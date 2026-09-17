@@ -347,6 +347,7 @@ static int mesh_receive_progress(struct mesh_link *link){
       struct mesh_receive *receive=&link->receive[q];
       struct mesh_wire_tag *tag=(struct mesh_wire_tag *)(uintptr_t)wc->wr_id;
       uint64_t tag_value=atomic_load_explicit(&tag->value,memory_order_relaxed);
+      uint64_t device_address=*((uint64_t *)tag-1);
       uint32_t region=(uint32_t)(wc->wr_id>>32)-receive->region_base;
       uint32_t slot=(uint32_t)(((uint64_t)((uint32_t)wc->wr_id>>receive->page_shift)*receive->block_reciprocal)>>32);
       uint32_t block=region*receive->region_blocks+slot,page=receive->page_base+block*receive->block;
@@ -354,6 +355,7 @@ static int mesh_receive_progress(struct mesh_link *link){
       struct mesh_receive_record record=receive->records[(uint32_t)tag_value];
       atomic_store_explicit(&record.entry->mapping,((uint64_t)(block+receive->pool_offset)<<32)|page,memory_order_relaxed);
       atomic_store_explicit(&record.entry->address,receive->client_data+((uintptr_t)page<<receive->page_shift),memory_order_relaxed);
+      atomic_store_explicit(&record.entry->device,device_address,memory_order_relaxed);
       struct mesh_send_binding *sends=record.sends+(size_t)region*record.send_count;
       for(uint32_t j=0;j<record.send_count;j++){
         struct mesh_send_binding binding=sends[j];
