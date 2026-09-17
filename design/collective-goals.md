@@ -1,111 +1,108 @@
-# Collective goal
+# Goal — the prepared machine
 
-The current user instructions define the work. The excerpts below are verbatim
-from the September 14 conversation. Papers describe mechanisms; existing code,
-agent plans, inventories and old specifications do not add requirements.
+Operator, 2026-09-17, verbatim:
 
-The [instruction-adherence record](instruction-adherence-2026-09-17.md) preserves
-the quotation ledger for the repeatedly stated prepared-storage/execution
-requirement and the implementation's documented departures from it.
+> we need to write code which has certain effects within a certain deadline. the
+> lazy post hoc just in time assembly of the data structure needed to produce
+> those effects is incompatible in latency and bandwidth w/ the latency deadline.
+> therefore you must write, explicitly, what the layout of the computer MUST
+> ALREADY BE LIKE IN RUNTIME for the rdma related code to have the required
+> effects on the required schedule. if the runtime state of the computer MUST
+> ALREADY EXHIBIT A CERTAIN STRUCTURE, the runtime memory of the computer and the
+> corresponding pointers and offsets and related structures allowing linear
+> algebra program execution MUST OCCUPY THE CORRECT STATES AHEAD OF TIME, and be
+> ALREADY PREPARED TO OPERATE UPON RECEIVED DATA at the INSTANT that a polled
+> result is submitted or received.
 
-> 1: SOME FUCKING HIGHER ORDER FUNCTIONS FOR PARTIAL TENSORS 2: THE PARTIAL TENSORS NEED TO HAVE COLLECTIVE COMMS TOO 3: OF COURSE THE WHOLE THING HAS TO BE ZEROCOPY AND ASYNC ONCE WE'VE FIGURED OUT THE CALLGRAPH AOT.
+That paragraph is the whole requirement. D0, D1 and D2 below are its only
+deliverables. Nothing else in this repository is a requirement, a task, or
+evidence.
 
-> the *runtime* is necessarily extremely ismple, ebcause any artificially imposed control flow puts more cache reads and loads in between 'work is ready on peer' and 'work has arrived to this meshnode from peer and is being used'.
+## Standing of every other document
 
-> all responsibilty lands on the CALLER to supply a MESH AND TENSOR PLACEMENT CONFIG which is USEFUL instead of USELESS.
+Frozen — readable, not requirements, not tasks, not evidence:
+`deliverables.md` (its I25/E1d/E8 objective survives as D2, its 29 rows do not),
+`collective-goals-2026-09-14.md`, `async-collectives.md`, `h-audit-2026-09-16.md`,
+`e2b-structural-latency-2026-09-17.md`, `instruction-adherence-2026-09-17.md`,
+`e2b-crossover-2026-09-16.md`, `pages-and-functions.md`, `function-chain.md`,
+`algorithm-sources.md` (citations only), `AGENDA.md`, `RELEASE-CLOSURE.md`,
+every other file in `design/`, and `metal-microbench/docs/*`.
 
-> we are here to do IMPLEMENTATION OF DISTRIBUTED COLLECTIVE PARTIAL TENSOR STREAMING CODE. we DO NOT NEED TO IMPLEMENT EVERY SINGLE ALGORITHM EVER INLINE INSIDE OF OUR MESH CODE. we can in fact SEPARATE THE TRANSPORT AND PARTIAL PUBLICATION AND SO ON from the FUNCTION WHICH IS RUN OVER THE TENSOR PARTIALS
+No agent edits this file, adds a link to it, or annotates it. A commit that
+does is reverted and the turn is void.
 
-> implement streaming independently of each collective comms pattern, implement all of the collective communication patterns as async non blocking streaming operations, and worry about which you'll need later (at calling function def time)
+## D0. The layout, as memory
 
-> these hardware constraints simply mean that all queues must be drained IMMEDIATELY WITHOUT EXCEPTION WITH NO WAITS SEPARATING QUEUES FROM BEING FILLED AND EMPTIED.
+One file, `design/prepared-machine.md`, committed before any source edit. It is
+a table of memory, not an explanation. One row per object that must already
+exist when `start()` returns, for every (rank, invocation slot, layer, peer) of
+the E2B decode step on the pair (M5 Max + M4 Pro, B = 1):
 
-> there is no reason for the send/receive rdma work to share a thread with any other work under any situation for any reason
+| column | content |
+| --- | --- |
+| object | producer output / SEND record / receive backing / RECV record / consumer operand view / availability word / ring |
+| address | a formula in `start()`-time integers only (`base + slot·S + layer·L + peer·P`) |
+| bytes | the extent, and the `_Static_assert` that pins it |
+| constructed at start() by | `file:line` |
+| read by which event | exactly one of: value-ready, TX post, RX completion, consumer read |
+| loads to reach it at runtime | `0` (address already held by the thread) or `1` (the ring integer). No other value is admissible. |
 
-> your task here isn't to introduce incompatibility with core ml or ANE
+Then the two runtime transitions, each written as the exact sequence of loads
+and stores, one line per instruction, with every address taken from the table
+above:
 
-> a partial tensor can literally be made of several contiguous sectinos which are globally contiguous but are also locally contiguous so that tehy can be individually consumed by different contiguous-typed function launches.
+1. value ready → SEND posted
+2. RECV completion → consumer's first read of the operand
 
-> have a subagent literally write a refcounter which doesn't rely on users of buffers specifically and literally inlining some kind of 'please say im done using the resource' explicit free like we're in c.
+Pass value for each transition: one ring read, one 32-byte record line, the
+payload. No load whose address depends on any runtime-loaded value other than
+the ring integer. No allocation, no address rewrite, no lookup, no match, no
+decision, no notification traversal.
 
-> remember that garbage collection in this case simply means 'releasing' pages into the 'pool of pages you can write to if you wanna lol' without even needing to zero them lol
+A row whose address formula needs a value not known at `start()` is not a row.
+It is a defect in the design, and the design changes until it is a row.
 
-> if we want to supply a 'sync_on_remote_fill' barrier, this is library code that needs to be used EXPLICITLY AND DIEGETICALLY IN CALLING CONTEXTS, it can NEVER be a default behavior.
+## D1. The source is D0, and nothing else runs on the hot path
 
-> we must now implement an explicit 'sync on remote fill' call that our library users can use, and a peice of demonstration code which shows it is slower and can deadlock forever
+Every D0 row cites the line in `rdma/mesh-*.c`, `rdma/mesh.h`, `swift/Mesh.swift`,
+`metal-microbench/mesh_layer.swift` or `metal-microbench/matrix_shaders.swift`
+that constructs it at `start()`.
 
-> the goal has not been achieved until the requirements are implemented in source and *demonstrated* ergo *used* for a streaming producer/consumer operation chain.
+Every load and store executed between a producer's last store and a consumer's
+first read appears in a second table, against the D0 row it reads. A load that
+reads nothing in D0 is deleted in the same commit. Code that constructs nothing
+in D0 and executes nothing in the two transitions is deleted in the same commit
+— not explained, not moved to another thread, not renamed, not documented as a
+follow-up. Documentation of code that D1 deletes is deleted with it.
 
-> runtime testing is not part of any requirement and does not inform any actions
+## D2. The step, on that machine
 
-> never ask for permission to handle integration and build steps
+35 layer pushes + 1 vocabulary push per rank per step; each rank's partial is
+pushed directly to every consumer and summed on arrival in any order; the plan
+is printed at `start()`. Attention, norms, residual and PLE are duplicated on
+every rank. The objective (`S ≥ 1.10` at B = 1 decode, overhead ≤ 0.5 ms per
+forward) is unchanged, and is reached by D0 + D1 — not by separate work.
 
-> successful compilation is not important compared to the literal textual goals, which are all about producer async streaming consumer async streaming tensor ops that finish tensor parallel operations (the trivial obvious case of async producer/consumer meshing) faster than the same operations run standalone at worldsize 1.
+## Rules of action
 
-> you might want to upgrade the prefill kernel to be ready for continued prefill tasks and also specdec draft verifier shaped tasks while yo'ure at it
-
-> delete. the fucking. 'inherited'. implementation. delete it immediately and commit the deletion.
-
-The subsequent deployment clarification is also authoritative:
-
-> we should note that writing something which sounds like it satisfies all contraints but is slow and doesn't utilize flops on two computers concurrently would be 'fake'. so would anything which is depthwise recurrent, like a resnet with 4 ffn-residual-layers, running slower with the mesh collectives than without them, because some asshole decided to add a global sync or global guard or global wait again
-
-> the importable path is that oyu are writing a tensor function invariant streaming partial function library. what do you think the linear algebra notes earlier meant?
-
-The user's repeated-block workloads motivate actual use of this invariant
-library. They do not authorize a model-specific API or numerical implementation
-inside Mesh. Block counts and function compositions belong to the caller.
-
-The subsequent transport clarification distinguishes two abstraction levels:
-
-> there's no relationship between the transport level idea of streaming and our idea of partial tensors to have early emit by producers and asynchronous concurrent placement for consumption btw; tehse are two harmonious and different notions of streamedness which affect two different elvels of abstraction.
-
-> remember that a streaming transportmessagesize transport layer implementation should be totally transparent to all users of a send or receive api call exposed through our mesh api; this is something which is purely internal and have no effect on any caller or user of this api at any point in the future.
-
-The numerical partial is not a transport request. A tensor's byte count must not
-be limited by one request, and internal fragmentation must not change its shape,
-partition, numerical function or public send/receive declaration.
-
-The subsequent exact-tail clarification is authoritative:
-
-> an exact tail change has to implement exact tails by choosing what to push to the send interface instead of trying to do weird truncation logic inside of the send or recv interface. throw out the requirement if the requirement is stupid / cooked / washed / chopped
-
-Tail selection belongs to preparation of the messages submitted to transport.
-It does not authorize SEND or RECV to reinterpret or shorten those messages.
-The current implementation prepares matching native request extents and retains
-padding; it does not implement padding-free wire tails. The incorrect requirement
-to shorten a SEND against an incompatible preposted RECV is withdrawn. See
-[prepared native requests](pages-and-functions.md#prepared-native-requests).
-
-The user-selected continuation objective is the attachment
-`5701aa94-8d2a-4238-851b-7ad3af7e91bc/pasted-text-1.txt`. It reiterates these
-requirements and actual integration through existing numerical implementations.
-
-The old executor, frontend and callers were deleted in mesh `5762898` and
-metal-microbench `e108f4b`. The replacement higher-order interface, collective
-relations and source operation chains are described in [the implementation](async-collectives.md).
-Finite indexed submissions now reuse the realized functions and routes.
-The small matrix example and its build target have been deleted at the user's
-instruction. They no longer serve as evidence of integration.
-The fixed scalar chain has also been deleted. Its replacement is the
-[configured function chain](function-chain.md), which uses supplied Core ML
-functions, reduce-scatter and supplied consumers at each declared depth. The
-function representation is shared by calls, maps and reductions; model stages
-remain caller code.
-The earlier completion claim was too broad: the single-use value extent and
-example-only integration remain
-implementation restrictions, not user-authorized definitions of the deployment
-target. The implementation description records these gaps and actual transport
-costs. Deletion, documentation and successful builds alone are not completion.
-
-The subsequent peer-count clarification is authoritative:
-
-> special casing one peer is an error in library design for the same reason as special casing exactly one tensor function ever and no guardless continuation of work between multiple tensor functions.
-
-> note that peer>1 prohibits the use of type inference of broadcasts or alls rather than defined scatters and defined gathers
-
-The one-peer restriction has now been removed from the Swift rank bound, endpoint
-binding, bridge configuration, connection ownership and send notification layout.
-The [configured links](async-collectives.md#configured-peers) share canonical
-storage and device registrations, with independent TX/RX progress. Collective
-verbs remain explicit and are not inferred from rank count or tensor types.
+- Order: D0 committed → source edits, each citing a D0 row → D1 tables. A source
+  edit citing no row is reverted.
+- `prepared-machine.md` and the D1 tables are the only documents this goal
+  produces. Forbidden: analyses, audits, inventories, incident notes, follow-ups,
+  scope corrections, verdicts, adherence or compliance records, counts of the
+  operator's instructions, diagrams of code that exists, and explanations of why
+  existing code exists. Reporting on your own noncompliance is not work; deleting
+  the noncompliant lines is.
+- The current source has no standing. Its jobs, threads, cadences, records and
+  helpers are not preserved because they exist. A line survives only where a D0
+  row cites it as that row's constructor.
+- No subagent is spawned to measure, count, review or audit. Subagents write
+  source.
+- Runtime testing and benchmarks remain out of scope. Build, commit and push
+  every buildable state.
+- Each turn ends with exactly these lines and nothing else:
+  `D0 rows: <constructed>/<total>` · `hot-path loads listed: <n>, deleted: <n>` ·
+  `dependent-load depth T1/T2: <n>/<n>` · `commits: <hashes>`
+- A turn that ends with more lines under `design/` or `docs/` than it began with,
+  and no line deleted from a runtime source, has failed, and is reported as
+  failed.
