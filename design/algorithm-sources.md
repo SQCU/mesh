@@ -1153,6 +1153,55 @@ sampling-active mask identifies live rows.
 
 Compilation covers the resident handoff shaders, streaming sum, Mesh ABI, native
 C warnings and engine integration. No RDMA workload, GPU numerical execution,
-watchdog exercise, floor timing or speedup is implied. Vocabulary sharding and
-follower KV initialization remain required before the E1d/E8 comparison; coherent
-publication dispatches and command re-recording also remain costs to measure.
+watchdog exercise, floor timing or speedup is implied. Vocabulary sharding, imported prefix-cache propagation and numerical validation
+of the [prefill KV path](#prefill-kv) remain required before the E1d/E8 comparison;
+coherent publication dispatches and command re-recording remain costs to measure.
+
+## Prefill KV
+
+Vaswani et al., [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
+(2017), supplies the projected query/key/value algebra. Dao et al.,
+[FlashAttention](https://arxiv.org/abs/2205.14135) (2022), supplies the tiled
+attention reference. This change reuses the engine's existing projections,
+normalization, rotary transform, KV scatter and attention kernel; it adds no
+numerical operation to Mesh.
+
+E1d's replicated decode attention consumes all KV heads on every rank. The
+engine's head-partitioned prefill formerly wrote only its assigned heads, with
+that smaller head count as the physical cache stride. A rank assigned no heads
+wrote nothing. Those caches could not be read as full-head caches at decode.
+
+`bindPrefillKV` now binds the existing full K/V projection and write sequence,
+shared by standalone prefill and Mesh. A rank computing attention executes it
+inside its existing attention command buffer. A rank with no attention heads
+executes it before its FFN stage, using the original hidden inputs already bound
+to that stage; `missingKV` prepares that input normalization and the existing KV
+function. The Metal and Core ML FFN compositions both use this preparation.
+The FFN partial is published only after that command buffer completes, so the
+existing FFN reduction dependency also carries the completed KV write. No extra
+collective, host callback or command buffer is introduced.
+
+Prefill readers keep their local query/KV grouping while specialization constants
+bind the full physical KV head stride and the first selected head. For page p,
+position t, head h and component d, the address is
+`((p * PAGE + t) * fullKVHeads + firstHead + h) * headDimension + d`.
+The same reader remains the standalone kernel when those constants are absent.
+Shared-KV layers reuse their configured source layer and do not recompute KV.
+
+The existing caller placement accepts an explicit `prefillRows` partition of
+`B * MAX_Q_LEN`; `placement.py --prefill-rows` writes that partition from the
+same caller-supplied rates. Decode's replicated batch and prefill's token-row
+partition are distinct dimensions, so B=1 no longer forces an empty prefill
+operand for the second rank. The old batch-row interpretation remains the
+fallback for existing placements. Setup checks the complete token-row partition.
+
+Distributed decode now always constructs its associated prefill graph. The
+prefill region defaults to the decode region plus `-prefill`; its instance count
+defaults to the decode count. The existing explicit prefill region/count settings
+still override those defaults. Both regions must be supplied by the bridge setup.
+The switch that left all prompt computation on the leader is removed.
+
+The source path covers ordinary and continued distributed prefill, not imported
+leader-only prefix-cache snapshots. Numerical KV equivalence, public decode,
+latency and speedup are still unmeasured. It implements E1d's replicated cache
+preparation, not F11's separate sequence partition; F11 remains open.
