@@ -42,6 +42,14 @@ metadata extent is independent of payload-page extent, and retain/release acts
 on one buffer identity. The [compact-list derivation](pages-and-functions.md#prepared-compact-page-lists)
 gives the address algebra, allocation counts and metadata cost. Neither the
 indexed scalar helper nor receive placement performs packing or allocation.
+The ABI-69 operand representation uses the canonical page array directly:
+`mesh_operand_address` implements arena base + page size × indexed page +
+in-block offset; `mesh_operand_page` selects that same first entry. The Swift
+`data` and `page` accessors use these operations, while `invocation` reads the
+prepared sequence address. These replace dispatch's cached address/page copies
+and per-operand sequence writes. See the
+[explicit address algebra and costs](pages-and-functions.md#operand-addresses-and-sequence-values).
+
 George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
 (1960): reference counting. The user explicitly requested automatic ownership
 release and background pool return, without caller free/done calls.
@@ -241,27 +249,35 @@ or rearm the same program: those R2/R4 steps remain unfinished.
 Papadopoulos and Culler's
 [Monsoon: an Explicit Token-Store Architecture](https://people.eecs.berkeley.edu/~kubitron/courses/cs252-F03/handouts/papers/p398-papadopoulos.pdf)
 (ISCA, 1990), section 2, assigns graph arcs to explicit frame locations rather
-than discovering matches dynamically. ABI 68 uses prepared locations for index
-hand-offs. `mesh_events` resolves an event array; `mesh_event_bind` assigns a
-slot before execution; `mesh_publish_bind` deduplicates destinations and records
-their shared-memory offsets in the row's contiguous target range. Runtime
-`mesh_event_push` release-stores the supplied index. `mesh_event_reader_init`
-binds the consumer's range; `mesh_event_take` reads slots directly, clears each
-consumed event, and continues past empty locations. This software polling loop
-is Mesh's implementation, not Monsoon hardware or a copied queue algorithm.
+than discovering matches dynamically. Mesh applies that principle to the
+already realized use/send indices: `mesh_publish_bind` prepares destination
+records, publication sends the final index, and dispatch directly indexes the
+terminal record array. Numerical offset tables and TX cursor arrays are setup
+scratch. Mesh's ring software and compiler are not Monsoon hardware.
 
 The [Disruptor paper](https://lmax-exchange.github.io/disruptor/disruptor.html)
-(Thompson, Farley, Barker, Gee and Stewart, 2011), section 2.2, distinguishes
-visibility from contended updates and favors a single writer per resource.
-The row lifetime gives each event slot one publication at a time; distinct rows
-write distinct slots. Acquire/release makes preceding data visible. Refcounts
-supply reuse ordering without a runtime slot-occupancy query.
+(Thompson, Farley, Barker, Gee and Stewart, 2011), sections 2.2 and 3.1–3.3,
+explains single-writer ownership and preallocated circular storage. Mesh uses
+that principle without importing a consumer gating strategy. Independent
+writers get independent streams; a writer increments its own position and
+release-stores an index. The consumer clears slots after acquiring their values.
+Declared lifetimes provide the reuse order; the producer does not read fullness.
 
-ABI 67's shared-ticket FIFO implementation is deleted: a publisher paused after
-reservation could delay unrelated published entries. The
-[handoff analysis](pages-and-functions.md#publication-notifications) records the
-replacement's operation counts and its remaining O(E) polling cost. Direct
-publication and independent drainage do not prove the latency target.
+`mesh_events_prepare`, `mesh_event_compare`, `mesh_event_root` and
+`mesh_event_remap` implement Mesh's setup-only assignment. They group known
+writers and dependency-ordered native completions, sort binding indices,
+allocate power-of-two ring spans and replace provisional handles with final
+shared-memory offsets. The grouping is greedy and makes no optimality or
+union-find complexity claim. Scratch parents and mappings are discarded.
+`mesh_event_reader_init` prepares private reader addresses before progress;
+`mesh_event_take` polls these independent streams, not the tensor graph.
+
+The [handoff analysis](pages-and-functions.md#publication-notifications) gives
+the complete source flow, capacity assumption and remaining polling/metadata
+costs. ABI 67's shared-ticket FIFO is deleted: an unpublished reservation could
+delay unrelated published entries. ABI 68's O(E) individual-slot polling is
+replaced by O(P) stream polling, but P can still grow with the declared graph.
+Neither this change nor these citations establish the required latency target.
 
 ## Program.kernel_call
 

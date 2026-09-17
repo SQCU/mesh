@@ -7,6 +7,12 @@ public typealias MeshOperands = UnsafeBufferPointer<mesh_operand>
 
 extension mesh_operand {
     // design/algorithm-sources.md#programtensor
+    @inlinable public var data: UnsafeMutableRawPointer? { mesh_operand_address(self, 0) }
+    // design/algorithm-sources.md#programtensor
+    @inlinable public var page: UInt32 { mesh_operand_page(self) }
+    // design/algorithm-sources.md#programtensor
+    @inlinable public var invocation: UInt32 { sequence.pointee }
+    // design/algorithm-sources.md#programtensor
     @inlinable public func load<Value>(at index: Int, as type: Value.Type = Value.self) -> Value {
         mesh_operand_address(self, index * MemoryLayout<Value>.stride)!.load(as: type)
     }

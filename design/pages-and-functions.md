@@ -164,62 +164,154 @@ invocation stamp; a slot number no longer identifies an invocation. This search
 exists only in the opt-in synchronization path. It does not retain a value beyond
 its declared readers, and can wait forever if asked for an unavailable value.
 
-ABI 68 gives each declared publication/destination pair a prepared 32-bit event
-slot. These slots form a dense array for each TX link, numerical worker and
-return consumer. Attachment reserves the arena; binding assigns positions only
-for actual subscribers. A publisher release-stores `row + 1` directly at its
-prepared shared-memory offset. Zero represents no event. It does not reserve a
-position, read another publisher's cursor, compare a sequence, or test capacity.
+ABI 69 publishes the destination's already prepared record index. The event
+word remains 32 bits. Setup assigns each row/destination a 16-byte target
+`{stream_offset, record_index, count}`; no process address crosses the mapping.
+The count is setup data. Publication reads the stream and final index from that
+same target, writes the TX events first, stores presence, then writes local
+events. It never reconstructs the destination from the tensor row.
 
-`mesh_publish_bind` deduplicates destinations during setup and prepares one
-contiguous list of slot offsets per row. TX destinations precede numerical
-consumers. `mesh_publish` walks the TX range first, stores presence, then walks
-the numerical range. Link bitsets, worker bitsets, runtime bit decoding and
-per-destination queue-address reconstruction are deleted. Root submissions use
-this same prepared publication. Buffer returns carry their slot offset directly;
-function errors and no-output completions carry prepared slot/row values in the
-existing call record. A failed call with outputs uses its first output's existing
-return slot: failure publishes no successful output, so there is no competing
-success-return event. Only outputless calls allocate a metadata return row.
-The former per-call error-only slot and row are deleted. No caller API or
-numerical function changes.
+For TX, transfer realization counts each row's sends on each link and assigns a
+contiguous send-record range. Bridge configuration fills that exact range. The
+first send record contains its end. The TX event therefore goes directly to
+`send_edges[index]`; `link_publications` no longer reads a row-indexed offset
+table. The remaining loop visits actual declared sends, including distinct
+queues on the same link. Its setup cursor array is freed before progress starts.
 
-A consumer acquire-loads an event slot, clears a nonzero slot, and uses the
-already supplied row index. Its cursor advances past empty slots; after one
-complete empty pass it returns to its other work. No producer owns that cursor.
-For example, if A has not published and B has, observing A's zero continues to
-B's slot and consumes B. This is the source-level counterexample that the
-ABI-67 FIFO ring failed: its reserved head stopped at A even after B published.
-That ring, its tail/head reservations, packed generations and sequence check
-are deleted. The hierarchy removed by ABI 67 remains deleted.
+For numerical work, setup expands every input use, including a shared input's
+uses across all resident frames, into contiguous records. The event names the
+first use record, which contains the range end. The worker no longer reads
+`offsets[row]` and `offsets[row+1]`. Those arrays exist only during construction
+and are freed before worker launch. Use and call records remain 64 bytes;
+range end fits inside the use record after removing duplicate remote-address
+fields. Native SEND wrappers remain 256 bytes and receive
+records remain 32 bytes. No tensor function or collective is specialized by this
+change. A row with three sends or five consumers still visits all of them.
 
-Slot reuse follows the same declared row lifetime as operand reuse. Each
-publication has one event per destination, regardless of the number of consumer
-uses in its prepared range. The consumer clears the event before executing those
-uses. Their reference releases occur later, so a legal republication follows the
-clear; the publisher needs no occupancy read or consumer acknowledgment.
-Constants can seed the same immutable event repeatedly during setup; execution
-starts only after declarations finish. This argument assumes the declared
-lifetime has been realized; it does not close N1's cross-participant reuse gap.
+### Independent publication streams
 
-The remaining cost is explicit: with E subscribed slots, an empty pass performs
-E acquire loads. A ready event can require up to E probes according to the
-cursor position; polling order need not follow dataflow order. Each probe reads
-one contiguous four-byte slot, with no index-decoding hierarchy or dependent
-address lookup. This removes cross-publisher blocking, but **does not establish
-the one-line end-to-end latency or repeated-layer speedup requirements**.
-H1/H3/H7 remain incomplete. Polling cannot be described as free or hidden behind
-other work; no performance conclusion follows from these source changes.
+ABI 68's independent slots removed the unpublished-reservation stall of ABI 67,
+but required O(E) probes over E subscribed row/destination pairs. ABI 69 groups
+bindings into preallocated single-writer streams during setup:
 
-For 229,376 rows, one link and eight native queues, the two banks of 25 event
-arrays reserve 45,881,600 bytes before region alignment, versus ABI 67's
-104,870,400 bytes. Prepared destination offsets replace the send-use bitset:
-16,515,072 versus 1,835,008 bytes. Buffer records grow from 48 to 64 aligned bytes
-(3,670,016 additional bytes), keeping return destinations beside lifetime data.
-The net reduction of these regions is 40,638,720 bytes. Only bound slots are
-polled. A reader is 16 bytes, down from 32. Maintained source is 2,468 -> 2,491
-lines across the same eleven Swift/C/header files. These are layout/source
-counts, not measurements.
+- All receive publications from one link use its one RX writer.
+- One native completion publishes its outputs in sequence.
+- Native writers may share a stream when an explicit recurring input dependency
+  orders their writes to that destination. For local notifications, setup also
+  checks that the predecessor's destination store precedes its notification of
+  the successor's worker. This uses declared edges and target order, not an
+  inspection of the supplied tensor function.
+- Immutable constants have a single setup writer. Final-reference returns stay
+  independent because their releasing thread is not known from the producer.
+
+`mesh_events_prepare` uses temporary parent/group arrays, sorts the binding
+indices, assigns ring capacities and rewrites every publication and return
+handle to the final stream offset. These temporary maps are then freed. The
+parent walk, sort and remapping do not execute on receipt, publication or launch.
+The chain grouping is greedy, not an optimal path cover. Forks and unproved
+ordering remain separate; arbitrary residual graphs are not claimed to collapse
+to one stream. A straight single-output dependency chain can share a stream per
+resident frame where the notification-order condition holds, independent of
+whether it has eight or one hundred functions.
+
+Each stream contains 32-bit record indices, encoded as index + 1, with zero
+meaning empty. Its producer advances its own position and release-stores the
+index. There is no shared reservation, CAS, sequence admission or occupancy
+read. The consumer's position and payload pointer are private, allocated before
+progress begins. It acquire-loads the next slot, clears a consumed slot and
+advances; an empty stream advances the polling cursor to another stream.
+No unpublished ticket in one stream blocks a different stream.
+
+A stream's capacity is the next power of two at least as large as its number
+of bound publication locations. Reuse of a location follows its declared
+operand lifetime; consumption clears the event before those uses execute and
+release their references. This argument still requires N1's complete lifetime
+realization. It does not prove cross-participant frame reuse by assuming it.
+Constants are seeded once after record indices and stream offsets are final,
+before the transport is configured. No stream handle changes during execution.
+
+### Costs and remaining work
+
+For P compiled streams an empty pass performs P acquire probes, rather than E
+individual-location probes. P is not guaranteed independent of graph size.
+A probe still reads private input state and then its shared slot. An enqueue
+still reads a prepared stream descriptor, updates its producer position and
+stores its index. These costs, possible cache-line sharing between packed
+stream descriptors, and polling latency remain; grouping is not free progress.
+
+After a successful dequeue, TX and numerical dispatch directly address the
+terminal record array. Optimized ARM64 output shows `index << 8` followed by the
+SEND range-end load at byte 48, and `index << 6` followed by the use range-end
+load at byte 44. The former offset-table loads are absent from those paths.
+This is source/assembly evidence of one removed dependent table access per
+dispatch, not a measurement of cache misses or end-to-end latency. TX still
+prepares the backing address/key and wire tag. Numerical launch still accesses the declared dependency count and sequence
+value and records its active lifetime. Cold return processing retains its
+row-to-call lookup. The operand changes below remove address refresh and both
+operand loops from launch; they do not remove stream polling or TX binding.
+H1/H3/H5/H6/H7 and N1 therefore remain incomplete.
+
+The allocation tradeoff is explicit. At 229,376 rows, one link and eight native
+queues, the two banks of 25 event arrays reserve 275,257,600 bytes before region
+alignment, versus ABI 68's 45,881,600. Targets reserve 33,030,144 bytes versus
+16,515,072. These regions grow by 245,891,072 bytes; the buffer remains 64 bytes.
+Only compiled streams are polled. Each private stream input is 16 bytes and each
+reader is 16 bytes. Numerical offset tables no longer occupy 1,835,016 bytes per
+worker during execution; the TX setup cursor likewise is not retained as a live
+allocation. This trades reserved arena capacity for fewer probes and removes
+two runtime lookup paths; it is not a source-size reduction. Maintained library
+source is 2,491 -> 2,680 lines across the same eleven Swift/C/header files.
+Documentation migration is separate. Strict C diagnostics, the four existing
+Mesh callers and the engine Mesh library build pass with ABI 69. Optimized
+ARM64 dispatch confirms the lookup and loop removals above. The bridge uses
+the existing ad-hoc signing fallback because the named identity is unavailable;
+no bridge deployment, runtime test or latency result is claimed.
+
+### Operand addresses and sequence values
+
+Address binding is not a separate runtime phase. Let A be the registered arena
+base, s its page size, B the transport block size in pages, Q = sB, and p the
+canonical page-index array prepared for an operand. Its byte address is
+
+```
+k = floor(offset / Q)
+address(offset) = A + s * p[k] + (offset - k * Q)
+```
+
+The receive completion stores its actual page at the prepared p[k] location.
+The 48-byte operand carries A, p, s, B, extent, logical row, frame index and a
+pointer to its call's sequence value. There is no cached first-page identity or
+cached materialized first-page pointer. `mesh_operand_address` performs the
+indexed gather and affine arithmetic directly. The Swift `data`, `page` and
+`invocation` accessors preserve their caller spelling while using those values.
+Native `MeshBindings` select the already constructed view using the actual page
+index; Core ML objects, output backing and model invocation remain prepared.
+The dispatch-time remote-input classification, page load and two copied fields
+are deleted. Indexed reads previously loaded p again after that refresh; now
+there is one canonical lookup at the actual access. Local raw `data` access also
+reads its canonical first entry, where the old cached pointer needed no such
+read. This is an explicit cost of the uniform descriptor, not hidden zero-cost
+addressing or completion of H6.
+
+Every operand of a call references the same existing sequence scalar. Launch
+therefore does not stamp each operand. Publication writes the output row's
+sequence from its supplied stamp once, before enqueueing readers that use it;
+RX and root submission no longer make their own copy of that write. The output
+loop is deleted from numerical launch. This publication store supplies the
+wire/value identity: it is not an occupancy or permission query and introduces
+no new dependent read. It remains a store on the publication path and is counted
+against the unfinished complete H3/H5 contract.
+
+The remaining pending count has a narrower meaning than a call-state machine:
+for a function with n declared varying input uses, each arriving use decrements
+its prepared scalar, and the final use invokes the already stored function
+address with its already prepared operand array. Shared input uses are expanded
+at setup and counted for their actual first use. Reference and completion
+counts govern buffer/callback lifetime. No address-binding problem licenses
+additional discovery, interpreter state, backend selection or default waits.
+These statements describe the implementation changes and the remaining actual
+data dependencies; they are not an argument to defer the rest of the hot-path
+rewrite.
 
 ## Reusable send queue
 

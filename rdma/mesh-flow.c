@@ -6,7 +6,7 @@
 /* design/algorithm-sources.md#programcopy */
 struct mesh_send_edge {
   _Alignas(128) struct ibv_sge span;
-  struct mesh_instance *instances; uint32_t completions,queue,row,chunks,offset,remaining;
+  struct mesh_instance *instances; uint32_t completions,queue,row,chunks,offset,remaining,end;
   struct ibv_send_wr request;
 };
 _Static_assert(sizeof(struct mesh_send_edge)==256 && offsetof(struct mesh_send_edge,request)+offsetof(struct ibv_send_wr,wr)<=128,"mesh_send_edge native request");
@@ -14,8 +14,8 @@ struct mesh_receive_request {_Alignas(64) struct ibv_sge span;struct ibv_recv_wr
 _Static_assert(sizeof(struct mesh_receive_request)==64 && _Alignof(struct mesh_receive_request)==64,"mesh_receive_request");
 struct mesh_ready {uint64_t head,tail;size_t first,mask;};
 struct mesh_receive_record {
-  _Alignas(32) struct mesh_buffer *buffer;
-  _Atomic uint32_t *entry; uint32_t row,last,completions;
+  _Alignas(32) _Atomic uint32_t *entry;
+  uint32_t row,last,completions;
 };
 _Static_assert(sizeof(struct mesh_receive_record)==32 && _Alignof(struct mesh_receive_record)==32,"mesh_receive_record");
 struct mesh_receive {
@@ -45,7 +45,7 @@ struct mesh_link {
 static int link_receive(struct mesh_link *link,uint32_t q);
 /* design/algorithm-sources.md#programcopy */
 static void link_receive_destroy(struct mesh_receive *receive){
-  free(receive->requests);free(receive->records);free(receive->pages);
+  free(receive->requests);free(receive->records);free(receive->pages);free(receive->returns.inputs);
 }
 /* design/algorithm-sources.md#meshresult */
 static void link_stop(struct mesh_link *link){
@@ -64,15 +64,16 @@ static void link_error(struct mesh_link *link,int64_t code,uint32_t domain){
 /* design/algorithm-sources.md#programcopy */
 static int link_configure(void *state,int socket,uint64_t client){
   struct mesh_link *link=state;struct hdr *m=link->M;
-  link->notices=mesh_event_reader_init(m,mesh_notice_queue(m,client,link->index));
+  int notice_error=mesh_event_reader_init(&link->notices,m,mesh_notice_queue(m,client,link->index));
+  if(notice_error){errno=notice_error;return -1;}
   uint64_t payload=(uint64_t)m->block*m->pgsz;
   uint32_t bytes[2*MESH_QPS]={0};
   size_t count=0,ready_count=0,queue_counts[MESH_QPS]={0};
-  memset(link->send_offsets,0,((size_t)mesh_rows(m)+1)*sizeof *link->send_offsets);
+  free(link->send_offsets);link->send_offsets=calloc(mesh_rows(m),sizeof *link->send_offsets);
+  if(!link->send_offsets)return -1;
   for(uint32_t q=0;q<(uint32_t)link->qps;q++)for(uint32_t i=0;i<atomic_load(mesh_order_length(m,link->client,link->index*m->qps+q,MESH_SEND));i++){
     struct mesh_transfer transfer=mesh_transfers(m,link->client,link->index*m->qps+q,MESH_SEND)[i];
     count+=transfer.count;queue_counts[q]+=transfer.count;
-    for(uint32_t value=0;value<transfer.count;value++)link->send_offsets[transfer.local_row+value*transfer.stride+1]++;
   }
   for(uint32_t q=0;q<(uint32_t)link->qps;q++){
     size_t capacity=1;
@@ -83,7 +84,17 @@ static int link_configure(void *state,int socket,uint64_t client){
   free(link->send_edges);link->send_edges=aligned_alloc(_Alignof(struct mesh_send_edge),(count?count:1)*sizeof *link->send_edges);
   free(link->send_ready);link->send_ready=calloc(ready_count,sizeof *link->send_ready);
   if(!link->send_edges || !link->send_ready)return -1;
-  for(uint32_t row=0;row<mesh_rows(m);row++)link->send_offsets[row+1]+=link->send_offsets[row];
+  uint64_t first=m->notice_off+(uint64_t)mesh_notice_queue(m,client,link->index)*m->notice_bytes;
+  for(uint32_t row=0;row<mesh_rows(m);row++){
+    struct mesh_buffer *buffer=&mesh_buffers(m)[row];
+    if(atomic_load_explicit(&buffer->owner,memory_order_relaxed)!=client)continue;
+    struct mesh_target *targets=mesh_targets(m,row);
+    for(uint32_t i=0;i<buffer->sends;i++)if(targets[i].stream>=first && targets[i].stream<first+m->notice_bytes){
+      link->send_offsets[row]=targets[i].index;
+      uint32_t end=targets[i].index+targets[i].count;
+      for(uint32_t at=targets[i].index;at<end;at++)link->send_edges[at].end=end;
+    }
+  }
   for(uint32_t q=0;q<(uint32_t)link->qps;q++){
     uint32_t counts[3]={atomic_load(mesh_order_length(m,link->client,link->index*m->qps+q,MESH_SEND)),atomic_load(mesh_order_length(m,link->client,link->index*m->qps+q,MESH_RECEIVE)),mesh_rows(m)},peer_counts[3];
     if(exchange(socket,counts,peer_counts,sizeof counts,sizeof peer_counts,m,client,link->provider.deadline))return -1;
@@ -119,8 +130,9 @@ static int link_configure(void *state,int socket,uint64_t client){
     link_receive_destroy(receive);
     size_t capacity=1;
     while(capacity<chunks_count)capacity*=2;
-    *receive=(struct mesh_receive){.first=receives?in[0].pool:0,.ready={.tail=chunks_count,.mask=capacity-1},
-      .returns=mesh_event_reader_init(m,mesh_notice_queue(m,client,m->links+link->index*m->qps+q))};
+    *receive=(struct mesh_receive){.first=receives?in[0].pool:0,.ready={.tail=chunks_count,.mask=capacity-1}};
+    int reader_error=mesh_event_reader_init(&receive->returns,m,mesh_notice_queue(m,client,m->links+link->index*m->qps+q));
+    if(reader_error){free(bindings);free(peer);errno=reader_error;return -1;}
     receive->pages=calloc(capacity,sizeof *receive->pages);
     receive->requests=aligned_alloc(_Alignof(struct mesh_receive_request),(chunks_count?chunks_count:1)*sizeof *receive->requests);
     receive->records=aligned_alloc(_Alignof(struct mesh_receive_record),(receives?peer_counts[2]:1)*sizeof *receive->records);
@@ -139,7 +151,7 @@ static int link_configure(void *state,int socket,uint64_t client){
         buffer->binding=value;buffer->completions=in[i].stride!=0;
         for(uint32_t chunk=0;chunk<chunks;chunk++)
           receive->records[peer[i].local_row+value*peer[i].stride+chunk]=(struct mesh_receive_record){
-            .buffer=buffer,.entry=mesh_page(m)+row+chunk,.row=row,
+            .entry=mesh_page(m)+row+chunk,.row=row,
             .last=chunk+1==chunks,.completions=in[i].stride?0:link->instance_count};
       }
     }
@@ -147,17 +159,18 @@ static int link_configure(void *state,int socket,uint64_t client){
       uint32_t row=out[i].local_row+value*out[i].stride;
       uint32_t chunks=(uint32_t)((out[i].bytes+payload-1)/payload);
       uint32_t edge=link->send_offsets[row]++;struct mesh_send_edge *source=&link->send_edges[edge];
-      *source=(struct mesh_send_edge){.span={.length=bytes[2*q+MESH_SEND]},.instances=&link->instances[value],.completions=out[i].stride?1:link->instance_count,.queue=q,.row=row,.chunks=chunks,.remaining=chunks,
+      uint32_t end=source->end;
+      *source=(struct mesh_send_edge){.span={.length=bytes[2*q+MESH_SEND]},.instances=&link->instances[value],.completions=out[i].stride?1:link->instance_count,.queue=q,.row=row,.chunks=chunks,.remaining=chunks,.end=end,
         .request={.wr_id=edge,.sg_list=&source->span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED}};
     }
     free(bindings);free(peer);
   }
-  memmove(link->send_offsets+1,link->send_offsets,(size_t)mesh_rows(m)*sizeof *link->send_offsets);link->send_offsets[0]=0;
   for(uint32_t q=0;q<(uint32_t)link->qps;q++){
     int error=link_receive(link,q);
     if(error && error!=ENOMEM && error!=EAGAIN){errno=error;return -1;}
   }
   uint32_t posted=1,peer_posted;
+  free(link->send_offsets);link->send_offsets=NULL;
   return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
 }
 /* design/algorithm-sources.md#programcopy */
@@ -232,7 +245,6 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
         struct mesh_receive_record record=receive->records[(uint32_t)tag_value];
         atomic_store_explicit(record.entry,page,memory_order_relaxed);
         if(record.last){
-          record.buffer->invocation=invocation;
           mesh_publish(m,record.row,(uint64_t)invocation+1);
           mesh_buffer_release(m,record.row);
           mesh_instance_release(link->instances,record.completions);
@@ -256,9 +268,9 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
 
 /* design/algorithm-sources.md#programkernel_call */
 static void link_publications(struct mesh_link *link){
-  uint32_t row;
-  while((row=mesh_event_take(&link->notices))!=MESH_ABSENT){
-    for(uint32_t at=link->send_offsets[row];at<link->send_offsets[row+1];at++){
+  uint32_t first;
+  while((first=mesh_event_take(&link->notices))!=MESH_ABSENT){
+    for(uint32_t at=first,end=link->send_edges[first].end;at<end;at++){
       uint32_t q=link->send_edges[at].queue;
       struct mesh_ready *ready=&link->ready[q];
       link->send_ready[ready->first+(ready->tail++&ready->mask)]=at;
@@ -393,9 +405,8 @@ int main(int argc,char **argv){
   for(uint32_t i=0;i<link_count;i++){
     struct mesh_link *link=&links[i];
     link->M=m;link->qps=(int)qps;link->provider.wire=&wire;
-    link->send_offsets=calloc((size_t)mesh_rows(m)+1,sizeof *link->send_offsets);
     link->provider.completions=calloc(2,sizeof *link->provider.completions);
-    if(!link->send_offsets || !link->provider.completions)die("link allocation");
+    if(!link->provider.completions)die("link allocation");
     link->events=kqueue();
     struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,0,0,0);
     if(link->events<0 || kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("link control events");
@@ -436,7 +447,7 @@ int main(int argc,char **argv){
     atomic_store(&mesh_links(m)[i].port.phase,MESH_STOPPED);
     if(link->provider.listener>=0)close(link->provider.listener);
     close(link->events);
-    free(link->provider.completions);free(link->send_offsets);free(link->send_edges);free(link->send_ready);
+    free(link->provider.completions);free(link->send_offsets);free(link->send_edges);free(link->send_ready);free(link->notices.inputs);
     for(uint32_t q=0;q<qps;q++)link_receive_destroy(&link->receive[q]);
     free(link->configuration);
   }

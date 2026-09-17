@@ -76,8 +76,9 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   client|=(~device)&(UINT64_C(1)<<63);
   for(uint32_t queue=0;queue<memory->links*(memory->qps+1)+2*MESH_COMPUTE_THREADS;queue++){
     struct mesh_events *events=mesh_events(memory,mesh_notice_queue(memory,client,queue));
-    events->count=events->cursor=0;
-    for(uint32_t i=0;i<memory->rows;i++)atomic_store_explicit(&events->slots[i],0,memory_order_relaxed);
+    events->count=0;
+    _Atomic uint32_t *slots=(_Atomic uint32_t *)(events->streams+memory->rows);
+    for(uint64_t i=0;i<2*(uint64_t)memory->rows;i++)atomic_store_explicit(&slots[i],0,memory_order_relaxed);
   }
   for(uint32_t q=0;q<memory->links*memory->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(memory,client,q,d),0,memory_order_relaxed);
   atomic_store_explicit(&memory->client,client,memory_order_release);
@@ -122,7 +123,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
     struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
     atomic_store_explicit(&buffer->references,0,memory_order_relaxed);
     atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-    buffer->uses=buffer->sends=0;buffer->return_slot=0;
+    buffer->uses=buffer->sends=0;buffer->return_slot=0;buffer->publisher=(uint64_t)r+1;
     buffer->initial=buffer->pages=buffer->binding=buffer->invocation=buffer->completions=0;buffer->channel=MESH_ABSENT;
     atomic_store_explicit(&buffer->owner,c->client,memory_order_release);
   }
@@ -217,26 +218,39 @@ void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
 }
 
 /* design/algorithm-sources.md#index-hand-off */
-uint64_t mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t queue,int send){
+int mesh_event_reader_init(struct mesh_event_reader *reader,struct hdr *m,uint32_t queue){
+  struct mesh_events *events=mesh_events(m,queue);
+  struct mesh_event_input *inputs=calloc(events->count?events->count:1,sizeof *inputs);
+  if(!inputs)return ENOMEM;
+  for(uint32_t i=0;i<events->count;i++)
+    inputs[i]=(struct mesh_event_input){.slots=(_Atomic uint32_t *)((char *)m+events->streams[i].slots),.mask=events->streams[i].mask};
+  free(reader->inputs);
+  *reader=(struct mesh_event_reader){inputs,events->count,0};
+  return 0;
+}
+
+/* design/algorithm-sources.md#index-hand-off */
+struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t queue,int send){
   struct hdr *m=c->M;
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
   uint32_t *count=send?&buffer->sends:&buffer->uses;
-  uint64_t *targets=mesh_targets(m,row)+(send?0:buffer->sends);
+  struct mesh_target *targets=mesh_targets(m,row)+(send?0:buffer->sends);
   uint32_t destination=mesh_notice_queue(m,c->client,queue);
   uint64_t first=m->notice_off+(uint64_t)destination*m->notice_bytes;
-  for(uint32_t i=0;i<*count;i++)if(targets[i]>=first && targets[i]<first+m->notice_bytes)return targets[i];
-  uint64_t slot=mesh_event_bind(m,destination);
-  targets[(*count)++]=slot;
-  return slot;
+  for(uint32_t i=0;i<*count;i++)if(targets[i].stream>=first && targets[i].stream<first+m->notice_bytes)return &targets[i];
+  struct mesh_target *target=&targets[(*count)++];
+  *target=(struct mesh_target){.stream=mesh_event_bind(m,destination),.index=row};
+  return target;
 }
 
 /* design/algorithm-sources.md#programkernel_call */
 void mesh_publish(struct hdr *m,uint32_t row,uint64_t stamp){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-  uint64_t *targets=mesh_targets(m,row);
+  buffer->invocation=(uint32_t)(stamp-1);
+  struct mesh_target *targets=mesh_targets(m,row);
   uint32_t sends=buffer->sends;
-  for(uint32_t i=0;i<sends;i++)mesh_event_push(m,targets[i],row);
+  for(uint32_t i=0;i<sends;i++)mesh_event_push(m,targets[i].stream,targets[i].index);
   atomic_store_explicit(&mesh_presence(m)[row],stamp,memory_order_release);
   uint32_t end=sends+buffer->uses;
-  for(uint32_t i=sends;i<end;i++)mesh_event_push(m,targets[i],row);
+  for(uint32_t i=sends;i<end;i++)mesh_event_push(m,targets[i].stream,targets[i].index);
 }
