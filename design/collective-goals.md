@@ -4,6 +4,10 @@ The current user instructions define the work. The excerpts below are verbatim
 from the September 14 conversation. Papers describe mechanisms; existing code,
 agent plans, inventories and old specifications do not add requirements.
 
+The [instruction-adherence record](instruction-adherence-2026-09-17.md) preserves
+the quotation ledger for the repeatedly stated prepared-storage/execution
+requirement and the implementation's documented departures from it.
+
 > 1: SOME FUCKING HIGHER ORDER FUNCTIONS FOR PARTIAL TENSORS 2: THE PARTIAL TENSORS NEED TO HAVE COLLECTIVE COMMS TOO 3: OF COURSE THE WHOLE THING HAS TO BE ZEROCOPY AND ASYNC ONCE WE'VE FIGURED OUT THE CALLGRAPH AOT.
 
 > the *runtime* is necessarily extremely ismple, ebcause any artificially imposed control flow puts more cache reads and loads in between 'work is ready on peer' and 'work has arrived to this meshnode from peer and is being used'.
