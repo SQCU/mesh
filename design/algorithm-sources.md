@@ -867,6 +867,54 @@ The deadline is setup state only: TX, RX, numerical publication and consumer
 completion contain no clock check. As [RDMA-RULES.md](../RDMA-RULES.md) explains,
 userspace deadlines cannot unwind a driver call already blocked in kernel sleep.
 
+## Independent native queues
+
+Dotan Barak's rdma-core
+[completion API](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_poll_cq.3)
+and Barak, Majd Dibbiny and Yishai Hadas's
+[posting API](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_post_send.3)
+describe independently posted requests and retrieved native completions. The
+rdma-core authors' [rping example](https://github.com/linux-rdma/rdma-core/blob/master/librdmacm/examples/rping.c)
+also separates CQ handling from its posting caller. These are references for
+native queue ownership and completion lifetime. Mesh retains the registered
+SEND/RECV operations described under [transport](#programcopy); it adds no native
+transport implementation.
+
+`link_send_completions` owns all SEND CQs for its link and directly publishes
+completed indices to the existing retirement ring. `link_send_progress` owns
+SEND posting and its native-refusal cursors. It discovers a new publication,
+posts its requests directly, and visits each nonempty refusal queue for one
+native attempt before inspecting publications again. Successful attempts advance
+the existing cursor; a native refusal preserves it. The next transfer boundary
+is prepared in each SEND record, so successful posting walks native records
+without loading/reconstructing a separate chunk loop. The retirement chunk count
+remains beside the other cold fields. Continuous publication cannot suppress CQ
+polling, and a CQ sweep cannot precede discovery in the posting thread.
+
+`link_receive_progress` owns all RECV CQs and publishes received operands.
+`link_receive_posting` owns the existing returned-page ring's head and posts its
+prepared requests. It attempts one available receive per QP on each continuous
+sweep, so a batch returned to one QP does not have to finish before another QP is
+visited. Initial configuration still fills native receive queues before pairing
+completes. Runtime reposting no longer executes in the CQ-consumption path.
+
+Each CQ has one reader, each native send/receive queue one posting thread, and
+each software ring retains its existing single writer and reader. Completion
+scratch is a native record on its CQ reader's stack. The shared heap allocation
+and its provider pointer are deleted. This adds two threads per link, from three
+to five including retirement, and zero per-event handoffs, queues, counters,
+locks or payload copies. All progress loops spin; there is no timer, task queue
+or wakeup protocol. The extra threads consume CPU resources; no claim of free
+scheduling or measured latency follows from their separation.
+
+The startup order is retirement, SEND CQ, RECV CQ, receive posting, SEND posting.
+Teardown stops and joins all four native-queue workers before stopping retirement
+and destroying native queues. A partially completed startup uses the same join
+order. Operand references, frame reuse, page return and native-error reporting
+retain their existing mechanisms. The remaining metadata loads and measured
+native bodies are recorded in the
+[structural follow-up](e2b-structural-latency-2026-09-17.md#follow-up-independent-native-queue-progress).
+
 ## Transport retirement
 
 George E. Collins's [reference-counting mechanism](#programtensor) supplies the

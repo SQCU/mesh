@@ -6,6 +6,10 @@ revision `1766c7e` does not change that runtime). The controlling requirements a
 producer/consumer chain, not the deleted executor or a hypothetical CPU consumer.
 It adds no benchmark, runtime instrumentation, or new acceptance requirement.
 
+The baseline account below remains tied to those revisions. The
+[implementation follow-up](#follow-up-independent-native-queue-progress)
+records the subsequent queue separation and the changed native paths.
+
 **Verdict:** complete native recording removes the per-layer host encoding walk.
 It does not establish the transport's dependency-depth/line budgets, eliminate
 rearm allocation, or establish the E2B latency floor. Several remaining failures
@@ -422,6 +426,81 @@ whole rearm lifecycle rather than only its encoder body; and finish E1d's actual
 policy/dataflow. Moving a lookup behind a new descriptor or bulk function does
 not satisfy any of those items. Any subsequent reduction must recount the same
 trigger-to-effect path, including what moved into a callee.
+
+## Follow-up: independent native queue progress
+
+After the queue-backlog analysis, [`mesh-flow.c`](../rdma/mesh-flow.c) separates
+native posting and completion consumption. SEND completion polling has its own
+thread; receive reposting has its own thread. Their interfaces are the existing
+native CQs and returned-page ring. There is no new inter-thread message on either
+path. The [source and ownership account](algorithm-sources.md#independent-native-queues)
+records all five thread roles, startup and teardown.
+
+The changes to the earlier backlog table are specific:
+
+| Preceding work in the baseline | Current source |
+| --- | --- |
+| SEND CQ sweep before publication discovery | Absent from the posting thread; CQ polling runs independently |
+| Whole refusal queue drained before inspecting a new publication | Deleted; one native retry per QP is followed by another publication inspection |
+| Publication stream drained before the next SEND CQ sweep | Deleted; CQ progress is independent of the publication reader |
+| Whole RECV repost batch before the next RECV CQ poll | Absent from the CQ reader; reposting runs independently |
+| Whole returned-page batch on QP A before reposting QP B | Deleted from runtime; each sweep attempts one prepared receive per QP |
+| Stream-selection probes, work within a publication, worker rearm | Remain; not closed by this change |
+
+The posting thread still feeds a selected publication's prepared requests to the
+native interface until accepted or refused. A refusal records the unposted
+range in the existing queue and leaves independent ranges eligible. Setup now
+stores that range's terminal index directly. The successful path no longer loads
+its chunk count or maintains a nested chunk cursor. Native-refusal retries remain
+useful transport work; they are not an operation-completion wait or an additional
+admission policy.
+
+Recounting the same successful first-SEND and final-FFN-RECV paths as above:
+
+| Compiled caller-body property | Baseline | Current |
+| --- | ---: | ---: |
+| Nonempty SEND event check through first native post: instructions | 30 | 23 |
+| Same SEND path: load instructions | 6 | 5 |
+| Same SEND path: stores | 4 | 3 |
+| Same SEND path: conditional branches | 2 | 2 |
+| Positive CQ result through no-forward/no-notice final-row presence: instructions | 33 | 32 |
+| Same RECV path: load instructions | 12 | 11 |
+| Same RECV path: stores / conditional branches | 4 / 6 | 4 / 6 |
+| Posting thread's stack frame | 128 bytes | 128 bytes |
+| RECV CQ thread's stack frame | 128 bytes | 144 bytes |
+
+The SEND count includes an unconditional branch on the current path and excludes
+provider execution, as did the baseline. Its invocation stays in a register;
+the prior invocation spill and chunk-count load are gone. The RX canonical page
+base stays in a register instead of reloading from a spill. Its larger frame
+holds the local native completion record. The shared completion allocation and
+provider pointer are removed, so SEND and RECV CQ readers no longer write
+adjacent records in that allocation.
+
+The emitted RX function, including all its branches, shrinks from 216 to 179
+instructions. This is code-body size, not instructions executed per completion.
+The SEND posting body now includes retry logic previously in a separate helper;
+comparing its body size alone would omit that old helper. The new SEND CQ and
+receive-posting bodies contain 61 and 68 instructions, with 112- and 80-byte
+frames. These costs are present in separate running threads, not erased from the
+program. Counts include instruction mnemonics and exclude labels, directives and
+comments; paired loads/stores count as one instruction.
+
+**Remaining limits:** the complete TX metadata path still has three dependent
+stages; RX still has two stages after `wr_id`; GPU consumption still resolves
+the page address. QP scans and publication-stream probes remain. All five
+threads need CPU scheduling; this change does not prove the nanosecond budgets,
+the E2B speedup or full H completion. It removes specific software ordering edges
+and reduces instructions on the named first-effect paths. The public ABI,
+collective choices, numerical functions and engine operation chain are unchanged.
+
+The change is three net maintained C/header lines and two additional threads per
+link; the documentation expansion is separate. `make -C rdma mesh-flow
+native-audit` builds the bridge and emits strict-diagnostic native assembly.
+The selected current paths are recorded in
+`/tmp/mesh-independent-queue-paths.txt`; whole-function counts and frame sizes
+are in `/tmp/mesh-drain-before.json` and `/tmp/mesh-drain-after.json`. No workload
+or service restart is part of this source/build analysis.
 
 ## Evidence and reproducibility
 

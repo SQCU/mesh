@@ -44,7 +44,6 @@ struct mesh_verbs {
   uint64_t bandwidth;
   const char *local_address,*remote_address,*service;
   uint64_t deadline;
-  struct ibv_wc *completions;
 };
 /* design/algorithm-sources.md#programtensor */
 static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
