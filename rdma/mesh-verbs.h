@@ -28,10 +28,18 @@ struct mesh_device {
   struct ibv_sge *spans;
   pthread_mutex_t setup;
 };
+/* design/algorithm-sources.md#programcopy */
+struct mesh_queue {
+  _Alignas(64) struct ibv_qp *pair;
+  struct ibv_cq *completions[2];
+  int (*poll[2])(struct ibv_cq *,int,struct ibv_wc *);
+  int (*send)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **);
+  int (*receive)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **);
+};
+_Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
 struct mesh_verbs {
   struct mesh_device *device; struct mesh_wire *wire;
-  struct ibv_cq *completion_queues[2*MESH_QPS];
-  struct ibv_qp *pairs[MESH_QPS]; int qp_count,listener;
+  struct mesh_queue queues[MESH_QPS]; int qp_count,listener;
   uint32_t capacity[MESH_QPS][2],peer;
   uint64_t bandwidth;
   const char *local_address,*remote_address,*service;
@@ -64,10 +72,10 @@ static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
 static const char *shm; static _Atomic sig_atomic_t stop;
 /* design/algorithm-sources.md#programcopy */
 static int down_pair(struct mesh_verbs *provider){
-  while(provider->qp_count){ struct ibv_qp *q=provider->pairs[provider->qp_count-1]; if(q && ibv_destroy_qp(q))return 0; provider->pairs[--provider->qp_count]=NULL; }
-  for(int i=0;i<2*MESH_QPS;i++)if(provider->completion_queues[i]){
-    if(ibv_destroy_cq(provider->completion_queues[i]))return 0;
-    provider->completion_queues[i]=NULL;
+  while(provider->qp_count){ struct ibv_qp *q=provider->queues[provider->qp_count-1].pair; if(q && ibv_destroy_qp(q))return 0; provider->queues[--provider->qp_count].pair=NULL; }
+  for(int q=0;q<MESH_QPS;q++)for(int d=0;d<2;d++)if(provider->queues[q].completions[d]){
+    if(ibv_destroy_cq(provider->queues[q].completions[d]))return 0;
+    provider->queues[q].completions[d]=NULL;
   }
   return 1;
 }
@@ -230,31 +238,34 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   if(f<0)return -1;
   uint32_t frame_capacity=provider->device->frame_capacity;
   for(int q=0;q<qps;q++){
+    struct mesh_queue *queue=&provider->queues[q];
     for(int d=0;d<2;d++){
-      provider->completion_queues[2*q+d]=ibv_create_cq(provider->device->context,(int)frame_capacity+1,NULL,NULL,0);
-      if(!provider->completion_queues[2*q+d]){close(f);return -1;}
+      queue->completions[d]=ibv_create_cq(provider->device->context,(int)frame_capacity+1,NULL,NULL,0);
+      if(!queue->completions[d]){close(f);return -1;}
+      queue->poll[d]=queue->completions[d]->context->ops.poll_cq;
     }
-    struct ibv_qp_init_attr qi={.send_cq=provider->completion_queues[2*q+MESH_SEND],
-      .recv_cq=provider->completion_queues[2*q+MESH_RECEIVE],.qp_type=IBV_QPT_UC,
+    struct ibv_qp_init_attr qi={.send_cq=queue->completions[MESH_SEND],
+      .recv_cq=queue->completions[MESH_RECEIVE],.qp_type=IBV_QPT_UC,
       .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
-    provider->pairs[q]=ibv_create_qp(provider->device->domain,&qi);
-    if(!provider->pairs[q]){close(f);return -1;}
+    queue->pair=ibv_create_qp(provider->device->domain,&qi);
+    if(!queue->pair){close(f);return -1;}
+    queue->send=queue->pair->context->ops.post_send;queue->receive=queue->pair->context->ops.post_recv;
     provider->qp_count=q+1;
     struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
-    if(ibv_query_qp(provider->pairs[q],&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
+    if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
     provider->capacity[q][MESH_SEND]=actual.cap.max_send_wr<frame_capacity?actual.cap.max_send_wr:frame_capacity;
     provider->capacity[q][MESH_RECEIVE]=actual.cap.max_recv_wr<frame_capacity?actual.cap.max_recv_wr:frame_capacity;
     if(!provider->capacity[q][MESH_SEND] || !provider->capacity[q][MESH_RECEIVE]){close(f);errno=EOPNOTSUPP;return -1;}
     fprintf(stderr,"pair capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d,%d\n",q,
       provider->capacity[q][MESH_SEND],provider->capacity[q][MESH_RECEIVE],
-      provider->completion_queues[2*q+MESH_SEND]->cqe,provider->completion_queues[2*q+MESH_RECEIVE]->cqe);
+      queue->completions[MESH_SEND]->cqe,queue->completions[MESH_RECEIVE]->cqe);
   }
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
-  for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->pairs[q],&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
+  for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->queues[q].pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
   union ibv_gid gid; if(ibv_query_gid(provider->device->context,1,0,&gid)){ close(f); return -1; }
   uint32_t psn=arc4random()&0xffffff;
   struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.lid=pa.lid,.pgsz=m->block*m->pgsz,.node=m->node,.count=(uint32_t)qps},you;
-  for(int q=0;q<qps;q++){ mine.qpns[q]=provider->pairs[q]->qp_num; mine.psns[q]=(psn+(uint32_t)q)&0xffffff; }
+  for(int q=0;q<qps;q++){ mine.qpns[q]=provider->queues[q].pair->qp_num; mine.psns[q]=(psn+(uint32_t)q)&0xffffff; }
   memcpy(mine.gid,&gid,16);
   if(exchange(f,&mine,&you,sizeof mine,sizeof you,m,client,provider->deadline)){ int error=errno;close(f);fprintf(stderr,"exchange failed\n");errno=error;return -1; }
   /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
@@ -265,13 +276,13 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
       .dest_qp_num=you.qpns[q],.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
       .grh={.hop_limit=1,.sgid_index=0}}};
     memcpy(&r.ah_attr.grh.dgid,you.gid,16);
-    int rc=ibv_modify_qp(provider->pairs[q],&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
+    int rc=ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
     if(rc){ fprintf(stderr,"rtr %d rc %d dlid %u dqpn %u\n",q,rc,you.lid,you.qpns[q]); close(f); return -1; }
   }
   if(configure(state,f,client)){int error=errno;close(f);errno=error;return -1;}
   for(int q=0;q<qps;q++){
     struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=mine.psns[q]};
-    int rc=ibv_modify_qp(provider->pairs[q],&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
+    int rc=ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
     if(rc){ fprintf(stderr,"rts %d rc %d, failed\n",q,rc); close(f); return -1; }
   }
   /* design/algorithm-sources.md#link */

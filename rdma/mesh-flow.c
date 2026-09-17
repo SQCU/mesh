@@ -10,11 +10,13 @@ struct mesh_send_edge {
   _Atomic uint32_t *pages;
   uint32_t *sequence;
   struct ibv_qp *pair;
-  struct mesh_instance *instances;
-  uint32_t completions,queue,row,chunks,offset,remaining,end,block;
+  int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **);
+  uint32_t queue,row,chunks,offset,end,block;
   struct ibv_send_wr request;
+  struct mesh_instance *instances;
+  uint32_t completions,remaining;
 };
-_Static_assert(sizeof(struct mesh_send_edge)==256 && offsetof(struct mesh_send_edge,request)+offsetof(struct ibv_send_wr,wr)<=128,"mesh_send_edge native request");
+_Static_assert(sizeof(struct mesh_send_edge)==256 && _Alignof(struct mesh_send_edge)==128 && offsetof(struct mesh_send_edge,request)+offsetof(struct ibv_send_wr,wr)<=128,"mesh_send_edge native request");
 struct mesh_receive_request {_Alignas(64) struct ibv_sge span;struct ibv_recv_wr request;};
 _Static_assert(sizeof(struct mesh_receive_request)==64 && _Alignof(struct mesh_receive_request)==64,"mesh_receive_request");
 struct mesh_ready {uint64_t head,tail;size_t first,mask;};
@@ -166,7 +168,7 @@ static int link_configure(void *state,int socket,uint64_t client){
       uint32_t edge=link->send_offsets[row]++;struct mesh_send_edge *source=&link->send_edges[edge];
       uint32_t end=source->end;
       *source=(struct mesh_send_edge){.span={.length=bytes[2*q+MESH_SEND]},.spans=link->provider.device->spans,.pages=mesh_page(m)+row,
-        .sequence=&mesh_buffers(m)[row].invocation,.pair=link->provider.pairs[q],.instances=&link->instances[value],
+        .sequence=&mesh_buffers(m)[row].invocation,.pair=link->provider.queues[q].pair,.post=link->provider.queues[q].send,.instances=&link->instances[value],
         .completions=out[i].stride?1:link->instance_count,.queue=q,.row=row,.chunks=chunks,.remaining=chunks,.end=end,.block=m->block,
         .request={.wr_id=edge,.sg_list=&source->span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED}};
     }
@@ -184,12 +186,13 @@ static int link_configure(void *state,int socket,uint64_t client){
 static int link_receive(struct mesh_link *link,uint32_t q){
   struct hdr *m=link->M;
   struct mesh_receive *receive=&link->receive[q];
+  struct mesh_queue *queue=&link->provider.queues[q];
   struct mesh_ready *ready=&receive->ready;
   for(;;){
     int error=0;
     while(ready->head!=ready->tail){
       struct ibv_recv_wr *bad=NULL;
-      error=ibv_post_recv(link->provider.pairs[q],&receive->requests[receive->pages[ready->head&ready->mask]].request,&bad);
+      error=queue->receive(queue->pair,&receive->requests[receive->pages[ready->head&ready->mask]].request,&bad);
       if(error)break;
       ready->head++;
     }
@@ -222,7 +225,7 @@ static int link_send_ready(struct mesh_link *link,uint32_t q){
     atomic_store_explicit(&tag->value,((uint64_t)*source->sequence<<32)|(source->row+source->offset),memory_order_relaxed);
     source->span.addr=span.addr;source->span.lkey=span.lkey;
     struct ibv_send_wr *bad=NULL;
-    int error=ibv_post_send(source->pair,&source->request,&bad);
+    int error=source->post(source->pair,&source->request,&bad);
     if(error)return error<0?-error:error;
     source->offset++;
     ready->head++;
@@ -235,7 +238,8 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
   struct hdr *m=link->M;struct mesh_verbs *v=&link->provider;
   struct ibv_wc *completions=v->completions+direction;
   for(uint32_t q=0;q<(uint32_t)link->qps;q++){
-    int count=ibv_poll_cq(v->completion_queues[2*q+direction],1,completions);
+    struct mesh_queue *queue=&v->queues[q];
+    int count=queue->poll[direction](queue->completions[direction],1,completions);
     if(count<0){link_error(link,count,3);return count;}
     int error=direction==MESH_SEND?link_send_ready(link,q):0;
     if(error && error!=ENOMEM && error!=EAGAIN){link_error(link,error,1);return error;}
@@ -362,9 +366,10 @@ int main(int argc,char **argv){
   const char *name=MESH_NAME;int me=0,layout=0;double pct=0;
   uint64_t arena_pages=0,block_pages=0;
   uint32_t link_count=0,device_count=0,qps=getenv("MESH_QPS")?(uint32_t)atoi(getenv("MESH_QPS")):1;
-  struct mesh_link *links=calloc((size_t)argc,sizeof *links);
+  struct mesh_link *links=aligned_alloc(_Alignof(struct mesh_link),(size_t)argc*sizeof *links);
   struct mesh_device *devices=calloc((size_t)argc,sizeof *devices);
   if(!links || !devices)die("bridge configuration allocation");
+  memset(links,0,(size_t)argc*sizeof *links);
   for(int i=1;i<argc;i++){
     if(!strcmp(argv[i],"-I") && i+1<argc)me=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-M") && i+1<argc)pct=atof(argv[++i]);

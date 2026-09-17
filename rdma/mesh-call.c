@@ -10,6 +10,8 @@ struct mesh_call {
   uint64_t return_slot;
   uint32_t index,remaining,pending,invocation,return_row;
   int error;
+  struct hdr *memory;
+  uint32_t input_count,output_count;
 };
 _Static_assert(sizeof(struct mesh_call)==64 && _Alignof(struct mesh_call)==64,"mesh_call record");
 struct mesh_function {
@@ -120,7 +122,7 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   for(uint32_t index=0;index<extent;index++){
     struct mesh_call *call=&function->values[index];
     *call=(struct mesh_call){.function=function,.operands=function->operands+index*count,.index=index,
-      .remaining=(uint32_t)(output_count?output_count:1)};
+      .remaining=(uint32_t)(output_count?output_count:1),.memory=m,.input_count=(uint32_t)input_count,.output_count=(uint32_t)output_count};
     for(size_t i=0;i<count;i++){
       struct mesh_section section=i<input_count?views[i]:outputs[i-input_count];
       uint32_t row=mesh_section_row(i<input_count?inputs[i]:section,index);
@@ -459,14 +461,14 @@ uint64_t mesh_calls_result(struct mesh_calls *calls,uint32_t index){
 
 /* design/algorithm-sources.md#programkernel_call */
 void mesh_call_complete(struct mesh_call *call,int error){
-  struct mesh_function *function=call->function;
-  struct mesh_calls *calls=function->calls;
-  struct hdr *m=calls->context->M;
-  _Atomic uint32_t *active=&calls->workers[function->worker].active;
-  struct mesh_operand *outputs=call->operands+function->input_count;
-  size_t output_count=function->output_count;uint64_t stamp=(uint64_t)call->invocation+1;
+  struct hdr *m=call->memory;
+  struct mesh_operand *outputs=call->operands+call->input_count;
+  size_t output_count=call->output_count;uint64_t stamp=(uint64_t)call->invocation+1;
   if(error)call->error=error;
   else for(size_t i=0;i<output_count;i++)mesh_publish(m,outputs[i].row,stamp);
+  struct mesh_function *function=call->function;
+  struct mesh_calls *calls=function->calls;
+  _Atomic uint32_t *active=&calls->workers[function->worker].active;
   for(size_t i=0;i<function->consumed_count;i++){
     uint32_t input=function->consumed[i];
     mesh_buffer_release(m,call->operands[input].row);

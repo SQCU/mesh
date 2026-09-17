@@ -2,6 +2,10 @@ BINS = mesh-flow mesh-stat libmesh.dylib libmesh_swift.dylib
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 MESH_PREFIX ?= /usr/local/mesh
 all: $(BINS)
+native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
+.build/%.s: %.c mesh.h mesh-verbs.h mesh-dataflow.h mesh-call.h Makefile
+	mkdir -p .build
+	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
 mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-dataflow.h mesh-dataflow.c Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -o .build/$@ mesh-flow.c mesh-dataflow.c -lrdma
@@ -25,7 +29,7 @@ gram-chain: ../examples/gram-chain.swift libmesh_swift.dylib
 	swiftc -O -parse-as-library -Xcc -DACCELERATE_NEW_LAPACK -I . -L . -lmesh_swift -Xlinker -rpath -Xlinker @loader_path $< -o $@
 clean:
 	rm -f $(BINS) sync-on-remote-fill bounds-table coreml-chain indexed-gather gram-chain Mesh.swiftmodule Mesh.swiftdoc Mesh.swiftsourceinfo Mesh.abi.json
-.PHONY: all clean
+.PHONY: all clean native-audit
 install-bridge: mesh-flow mesh-stat
 	install -d $(MESH_PREFIX)/bin
 	install -m 755 mesh-flow mesh-stat $(MESH_PREFIX)/bin/

@@ -677,7 +677,7 @@ unfinished.
 
 ### Direct SEND record operands
 
-After `929abb8`, configuration places the page-entry address, registered
+In `01c1774`, configuration places the page-entry address, registered
 span-array address, sequence-word address, queue pair and block geometry in the
 existing SEND record. These values were already fixed for the record's lifetime.
 The TX loop no longer follows the mapping header to reconstruct page and buffer
@@ -710,6 +710,76 @@ Maintained library source changes from 2,680 to 2,686 lines across the same
 eleven Swift/C/header files. Documentation cleanup is reported separately.
 Strict C diagnostics and the existing bridge build pass; no runtime test or
 bridge deployment is performed.
+
+### Memoized native dispatch
+
+The SDK's inline post/poll functions traverse handle → context → provider
+function on every invocation. Those functions and handles are fixed for the
+native queue's lifetime. Setup now resolves the function targets once; progress
+reads them beside their arguments. Queue creation, pairing and teardown remain
+the existing native operations. Re-pairing replaces the prepared targets before
+starting progress, and teardown still joins progress threads before destroying
+the handles.
+
+The former separate queue-pair and completion-queue pointer arrays are replaced
+by one 64-byte aligned record per queue pair: pair, two completion queues, two
+poll targets, send target and receive target. Its size and alignment are asserted.
+The enclosing link allocation is aligned accordingly. This costs 64 bytes per
+queue pair instead of 24, or 320 additional bytes for eight pairs, plus enclosing
+structure padding. The SEND record memoizes its post target in existing space;
+its allocation remains 256 bytes aligned to 128. Queue/range indices, address
+inputs, target and common native request header fit the first 120 bytes. The
+range end is at byte 72. Completion-only reference fields follow the native
+request. There is no additional runtime descriptor or forwarding function.
+
+These are the regression boundaries at the native call site:
+
+| Operation | Function-target and handle retrieval | Forbidden reintroduction |
+|---|---|---|
+| SEND | Pair and post target from one prepared SEND header | Pair → context → operations lookup |
+| RECV | Pair and receive target from one prepared queue record | Pair → context → operations lookup |
+| POLL | Completion queue and poll target from one prepared queue record | CQ → context → operations lookup |
+
+With `cc -fblocks -O2 -S` on the same ARM64 compiler, SEND now loads its pair
+and function together with `ldp` and calls the target with `blr`. Polling loads
+its handle and target from the same queue record using independent addresses.
+Receive posting likewise reads its handle and target directly. The previous
+25-instruction SEND preparation interval is now 23 instructions, with 12 load
+instructions instead of 14, using the same interval defined above. The 64-byte
+nonempty-path stack frame is unchanged. These counts describe generated code,
+not elapsed time, cache misses or the complete native provider body.
+
+`make -C rdma native-audit` compiles the three existing C implementations to
+optimized assembly under `.build`, including their compile-time layout checks.
+Review must follow actual load dependencies; neither a symbol scan nor the
+total instruction count certifies the one-record property. No runtime check,
+timer or alternate implementation is introduced. The native-target lookup is
+closed; SEND still reads the canonical page, registered span and sequence,
+and RECV still resolves its returned-page index and prepared request. Those
+remaining accesses are not hidden by this regression boundary.
+
+Maintained library source is 2,704 lines across the same eleven Swift/C/header
+files, up from 2,686. The Makefile gains four build-rule lines and one phony target.
+Documentation changes are separate. Strict compilation, assembly generation
+and the existing bridge/C/Swift library builds pass; no workload or deployment
+is performed.
+
+### Memoized numerical completion
+
+The existing 64-byte call record now stores the arena pointer and input/output
+counts in its former 16 bytes of padding. Setup already knows all three values.
+Completion reads that record, traverses its actual output range and publishes
+the rows. It no longer follows call → function → calls → context to discover
+the arena before the first output publication. Function/worker ownership is
+read afterward for the existing reference releases; no extra reference or
+completion event is added. Record size, alignment and array stride stay 64.
+
+The optimized ARM64 code reads the arena at byte 48 and both counts at byte 56,
+then calls `mesh_publish` for the output rows. Its first function-record load
+appears after the publication loop. Preserve this ordering in the native-code
+regression review. The output descriptor reads and `mesh_publish`'s own loads
+remain part of the total publication budget; this change does not certify them
+or hide them behind the callback boundary.
 
 ### Prepared native requests
 

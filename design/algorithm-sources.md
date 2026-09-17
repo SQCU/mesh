@@ -281,6 +281,12 @@ Neither this change nor these citations establish the required latency target.
 
 ## Program.kernel_call
 
+The [prepared completion record](pages-and-functions.md#memoized-numerical-completion)
+memoizes the arena and operand counts at binding. Output publication consumes
+those fields directly; shared function/worker ownership is followed only for
+the subsequent reference releases. This applies the same explicit-record
+mechanism cited below without adding a scheduler or a completion protocol.
+
 ABI 59 implements Monsoon's frame-indexed activation directly: the prepared
 consumer record includes the frame, its input updates that call's operand, and
 its countdown reaching zero invokes the supplied function in the same frame.
@@ -502,6 +508,17 @@ rdma/indexed-gather RANK 4 /mesh0 examples/indexed-gather-ring.json
 ```
 
 ## Program.copy
+
+Apple's installed SDK `infiniband/verbs.h` implements `ibv_post_send`,
+`ibv_post_recv` and `ibv_poll_cq` as calls through the handle's
+`context->ops` field. Mesh resolves those exact function pointers when the
+native handles are created, storing handles and functions together in its
+prepared queue record and the send target in its existing SEND record.
+The [memoized dispatch implementation](pages-and-functions.md#memoized-native-dispatch)
+calls those provider functions directly with the same arguments and return
+handling; it does not implement a replacement provider or completion protocol.
+Re-pairing fills these records again before progress starts. This is partial
+evaluation of upstream dispatch, not a new transport algorithm.
 
 ABI 59 realizes a peer-qualified, source-chunk-indexed table of aligned 32-byte
 receive records. The eight-byte tag names the 32-bit sequence and source chunk.
