@@ -810,6 +810,44 @@ The deadline is setup state only: TX, RX, numerical publication and consumer
 completion contain no clock check. As [RDMA-RULES.md](../RDMA-RULES.md) explains,
 userspace deadlines cannot unwind a driver call already blocked in kernel sleep.
 
+## Transport retirement
+
+George E. Collins's [reference-counting mechanism](#programtensor) supplies the
+existing buffer lifetimes. Thompson, Farley, Barker, Gee and Stewart's
+[preallocated ring representation](#programcopy) supplies the index storage.
+`link_retire_progress` moves native completion retirement onto a dedicated
+thread per link; it does not change the declared references or require callers
+to release operands.
+
+TX publishes the completed SEND index. RX publishes the completed section's
+logical row after publishing its value to consumers. Each direction has one
+writer and a private ring of 32-bit indices; zero denotes an empty slot. The
+retirement thread consumes both rings independently, clears each slot, and
+performs the existing chunk countdown, buffer release and instance accounting.
+The RX record stores its logical row at setup, avoiding another publication
+record load merely to construct the retirement event.
+
+Setup sizes the TX ring for all chunks in all resident SEND frames and the RX
+ring for all resident received sections, rounded up to powers of two. A queued
+event retains the source use or received section's initial reference until this
+thread consumes it. Its frame therefore cannot be recycled while that event is
+queued. Clearing the slot precedes releasing that reference. This is the bound
+that permits unconditional producer stores without a fullness query, retry,
+reservation or shared producer cursor. The cold thread polls for available work;
+its empty RX ring does not withhold TX retirement, or vice versa.
+
+Teardown joins TX and RX before stopping retirement. The retirement thread reads
+the shutdown flag before reading the slots and drains their final publications
+before queue-pair and registered-memory destruction. The thread-start order also
+allows this teardown after a partially successful startup.
+
+This adds one thread per link and one index publication per completion. It removes
+completion reference/instance bookkeeping from the spinners, not from the
+program. RX page return, reset and repost still execute on RX; publication,
+address binding and forwarding updates also remain. The
+[native assembly account](h-audit-2026-09-16.md#follow-up--transport-retirement)
+records the local change without claiming the H budgets or measured latency.
+
 ## Placement
 
 Pitch Patarasuk and Xin Yuan,
