@@ -22,6 +22,8 @@ fileprivate enum MeshSubmission {
     case cpu((MeshOperands, MeshOperands) -> Void)
     case metal(MTLDevice, (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void, [MTLBuffer])
     case prediction(MLModel, [MeshFeatures], [MLPredictionOptions])
+    case resident(MTLDevice, [[MeshMetalOperand]], [[MeshMetalOperand]], [mesh_section], [mesh_section], Int,
+                  (MeshMetalFrame) throws -> (MTLCommandBuffer) -> Void)
 }
 
 fileprivate final class MeshFeatures: NSObject, MLFeatureProvider {
@@ -68,6 +70,16 @@ public struct TensorFunction {
             let x = inputs.map { mesh.metal($0, device: device) }, y = outputs.map { mesh.metal($0, device: device) }
             let resources = (x + y).flatMap { $0.flatMap { $0.resources } }
             return .metal(device, try operands(x, y), resources)
+        }
+    }
+
+    // design/algorithm-sources.md#resident-metal
+    public static func metal(_ device: MTLDevice, residentAfter dependencies: Int,
+        _ body: @escaping (MeshMetalFrame) throws -> (MTLCommandBuffer) -> Void) -> Self {
+        Self { mesh, inputs, outputs in
+            .resident(device, inputs.map { Array(mesh.metal($0, device: device)) },
+                      outputs.map { Array(mesh.metal($0, device: device)) },
+                      inputs.map { $0.section! }, outputs.map { $0.section! }, dependencies, body)
         }
     }
 
@@ -123,8 +135,8 @@ public struct MeshMetalOperand {
     public let data: MTLBuffer?
 
     // design/algorithm-sources.md#device-operands
-    public func pipeline(library: MTLLibrary, function: String) throws -> MTLComputePipelineState {
-        let values = MTLFunctionConstantValues()
+    public func pipeline(library: MTLLibrary, function: String,
+                         constants values: MTLFunctionConstantValues = MTLFunctionConstantValues()) throws -> MTLComputePipelineState {
         var quantum = UInt64(quantum)
         values.setConstantValue(&quantum, type: .ulong, index: 37)
         return try library.device.makeComputePipelineState(function: library.makeFunction(name: function, constantValues: values))
@@ -240,6 +252,8 @@ private struct MeshLaunch {
     let function: MeshBody
     let rearm: ((UInt32) -> Void)?
     let resources: [MTLBuffer]
+    var dependencies: Int? = nil
+    var prepare: ((OpaquePointer) throws -> Void)? = nil
 }
 
 // design/algorithm-sources.md#programkernel_call
@@ -255,6 +269,9 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
     let copyOnCPU: Bool
     let retained: [MTLBuffer]
     switch function {
+    case .resident(let device, let x, let y, let sources, let results, let dependencies, let body):
+        return meshResident(device, memory: memory, inputs: x, outputs: y, sources: sources, results: results,
+                            dependencies: dependencies, body: body, count: count)
     case .cpu(let function):
         retained = []
         rearm = nil
@@ -366,6 +383,7 @@ public final class Mesh {
     private var value = 0
     private var deliveries: [MeshDelivery: TensorPart] = [:]
     private var preparations: [() throws -> Void] = []
+    private var finalizations: [() throws -> Void] = []
     private var routes: [Placement.Edge: [Int]]
 
     // design/algorithm-sources.md#program
@@ -439,11 +457,13 @@ public final class Mesh {
             let native = withUnsafeBytes(of: invocation) {
                 $0.load(as: (UnsafeRawPointer, UnsafeMutableRawPointer?, UnsafeRawPointer?, UnsafeMutableRawPointer?).self)
             }
-            if mesh_call_bind(calls, UInt32(worker), inputRows, viewRows, inputRows.count, outputRows, outputRows.count,
-                              native.0, native.1, native.2, native.3) == nil {
+            guard let binding = mesh_call_bind(calls, UInt32(worker), inputRows, viewRows, inputRows.count,
+                              invocation.dependencies ?? inputRows.count, invocation.prepare == nil ? 1 : 0, outputRows, outputRows.count,
+                              native.0, native.1, native.2, native.3) else {
                 memory.functions.removeLast()
                 throw POSIXError(POSIXErrorCode(rawValue: errno)!)
             }
+            if let prepare = invocation.prepare { finalizations.append { try prepare(binding) } }
         }
     }
 
@@ -629,6 +649,8 @@ public final class Mesh {
         memory.releaseSections()
         let error = mesh_calls_start(calls)
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
+        for finalize in finalizations { try finalize() }
+        finalizations.removeAll()
         mesh_transfers_start(memory.context)
     }
 
@@ -655,4 +677,189 @@ public final class Mesh {
         let sections = parts.map { $0.section! }
         mesh_sync_on_remote_fill(memory.context, sections, sections.count, UInt32(truncatingIfNeeded: index))
     }
+}
+
+public final class MeshMetalFrame {
+    public let inputs, outputs: [MeshMetalOperand]
+    private let sequence: MTLBuffer, sequenceOffset: Int
+    private let waits: [UInt32]
+    private let targets: [(MTLBuffer, SIMD2<UInt32>)]
+    fileprivate let resources: [MTLBuffer]
+    private let coherent, signal, acquire: MTLComputePipelineState
+
+    // design/algorithm-sources.md#resident-metal
+    public var invocation: (buffer: MTLBuffer, offset: Int) { (sequence, sequenceOffset) }
+
+    // design/algorithm-sources.md#resident-metal
+    fileprivate init(memory: MeshMemory, device: MTLDevice, function: OpaquePointer, index: Int,
+        inputs: [MeshMetalOperand], outputs: [MeshMetalOperand], sources: [mesh_section], results: [mesh_section],
+        pipelines: [MTLComputePipelineState]) {
+        self.inputs = inputs; self.outputs = outputs
+        coherent = pipelines[0]; signal = pipelines[1]; acquire = pipelines[2]
+        let context = memory.context, m = context.pointee.M!
+        let state = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_function_sequence(function, UInt32(index)), count: 4), memory: memory)
+        sequence = state.metal(device: device); sequenceOffset = state.metalOffset
+        waits = sources.map { $0.stride == 0 ? 0 : UInt32.max }
+        var backing = (inputs + outputs).flatMap { $0.resources } + (inputs + outputs).map { $0.table }
+        targets = results.map { result in
+            let row = result.first + UInt32(index) * result.stride
+            let publication = UnsafeMutableRawPointer(mesh_publication_at(m, row)!)
+            let counts = publication.load(as: SIMD2<UInt32>.self)
+            let count = Int(counts[0] + counts[1])
+            let records = device.makeBuffer(length: max(32, count * 32), options: .storageModeShared)!
+            for i in 0..<count {
+                let target = publication.advanced(by: 16 + i * 16).load(as: mesh_target.self)
+                let pointer = UnsafeMutableRawPointer(m).advanced(by: Int(target.stream))
+                let mask = pointer.advanced(by: 4).load(as: UInt32.self)
+                let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: pointer, count: 8 + (Int(mask) + 1) * 8), memory: memory)
+                let buffer = span.metal(device: device), address = buffer.gpuAddress + UInt64(span.metalOffset)
+                backing.append(buffer)
+                let destination = records.contents().advanced(by: i * 32)
+                destination.storeBytes(of: address, as: UInt64.self)
+                destination.advanced(by: 8).storeBytes(of: address + 8, as: UInt64.self)
+                destination.advanced(by: 16).storeBytes(of: mask, as: UInt32.self)
+                destination.advanced(by: 20).storeBytes(of: target.index + 1, as: UInt32.self)
+            }
+            return (records, counts)
+        }
+        resources = backing + [sequence]
+    }
+
+    // design/algorithm-sources.md#resident-metal
+    public func wait(_ input: Int, on command: MTLCommandBuffer) {
+        let encoder = command.makeComputeCommandEncoder()!, operand = inputs[input]
+        encoder.setComputePipelineState(acquire)
+        encoder.setBuffer(operand.table, offset: operand.offset, index: 0)
+        encoder.setBuffer(sequence, offset: sequenceOffset, index: 1)
+        var mask = waits[input]
+        encoder.setBytes(&mask, length: 4, index: 2)
+        encoder.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    // design/algorithm-sources.md#resident-metal
+    public func publish(_ output: Int, on command: MTLCommandBuffer) {
+        let encoder = command.makeComputeCommandEncoder()!, operand = outputs[output]
+        encoder.setComputePipelineState(coherent)
+        let buffers = operand.data.map { [$0] } ?? Array(operand.resources.prefix((operand.bytes + operand.quantum - 1) / operand.quantum))
+        var remaining = operand.bytes
+        for buffer in buffers {
+            let bytes = min(remaining, buffer.length)
+            var count = UInt32((bytes + 3) / 4)
+            encoder.setBuffer(buffer, offset: 0, index: 0)
+            encoder.setBytes(&count, length: 4, index: 1)
+            encoder.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: min(256, coherent.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+            remaining -= bytes
+        }
+        encoder.memoryBarrier(scope: .buffers)
+        encoder.setComputePipelineState(signal)
+        encoder.setBuffer(operand.table, offset: operand.offset, index: 0)
+        encoder.setBuffer(sequence, offset: sequenceOffset, index: 1)
+        encoder.setBuffer(targets[output].0, offset: 0, index: 2)
+        var counts = targets[output].1
+        encoder.setBytes(&counts, length: 8, index: 3)
+        encoder.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    // design/algorithm-sources.md#resident-metal
+    public static let source = #"""
+    #ifndef __METAL_MEMORY_SCOPE_SYSTEM__
+    #define __METAL_MEMORY_SCOPE_SYSTEM__ 3
+    #endif
+    #include <metal_atomic>
+    namespace mesh {
+    // design/algorithm-sources.md#resident-metal
+    inline void fence() {
+        metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst,
+            static_cast<metal::thread_scope>(__METAL_MEMORY_SCOPE_SYSTEM__));
+    }
+    struct target {
+        volatile coherent(system) device uint* position;
+        volatile coherent(system) device uint2* slots;
+        uint mask, index;
+        ulong padding;
+    };
+    static_assert(sizeof(target) == 32, "mesh device target");
+    // design/algorithm-sources.md#resident-metal
+    inline void push(device const target& destination, uint invocation) {
+        uint position = (*destination.position)++ & destination.mask;
+        destination.slots[position].y = invocation;
+        fence();
+        destination.slots[position].x = destination.index;
+        fence();
+    }
+    }
+    // design/algorithm-sources.md#resident-metal
+    kernel void mesh_coherent(volatile coherent(system) device uint* data [[buffer(0)]],
+        constant uint& count [[buffer(1)]], uint index [[thread_position_in_grid]]) {
+        if (index < count) data[index] = data[index];
+        ::mesh::fence();
+    }
+    // design/algorithm-sources.md#resident-metal
+    kernel void mesh_signal(volatile coherent(system) device ::mesh::page* page [[buffer(0)]],
+        volatile coherent(system) device const uint& sequence [[buffer(1)]], device const ::mesh::target* targets [[buffer(2)]],
+        constant uint2& counts [[buffer(3)]]) {
+        uint invocation = sequence;
+        for (uint i = 0; i < counts.x; ++i) ::mesh::push(targets[i], invocation);
+        page->stamp = ulong(invocation) + 1;
+        ::mesh::fence();
+        for (uint i = counts.x; i < counts.x + counts.y; ++i) ::mesh::push(targets[i], invocation);
+    }
+    // design/algorithm-sources.md#resident-metal
+    kernel void mesh_acquire(volatile coherent(system) device const ::mesh::page* page [[buffer(0)]],
+        volatile coherent(system) device const uint& sequence [[buffer(1)]], constant uint& mask [[buffer(2)]]) {
+        ulong expected = ulong(sequence & mask) + 1;
+        do { ::mesh::fence(); } while (page->stamp != expected);
+        ::mesh::fence();
+    }
+    """#
+}
+
+// design/algorithm-sources.md#resident-metal
+private func meshResident(_ device: MTLDevice, memory: MeshMemory, inputs: [[MeshMetalOperand]], outputs: [[MeshMetalOperand]],
+    sources: [mesh_section], results: [mesh_section], dependencies: Int,
+    body: @escaping (MeshMetalFrame) throws -> (MTLCommandBuffer) -> Void, count: Int) -> MeshLaunch {
+    let queue = device.makeCommandQueue(maxCommandBufferCount: count)!
+    let options = MTLCompileOptions(); options.languageVersion = .version3_2
+    let library = try! device.makeLibrary(source: MeshMetalOperand.source + "\n" + MeshMetalFrame.source, options: options)
+    let pipelines = try! ["mesh_coherent", "mesh_signal", "mesh_acquire"].map {
+        try device.makeComputePipelineState(function: library.makeFunction(name: $0)!)
+    }
+    var commands: [MTLCommandBuffer] = []
+    var encoders: [(MTLCommandBuffer) -> Void] = []
+    var frames: [MeshMetalFrame] = []
+    let rearm: (UInt32) -> Void = { index in
+        let command = queue.makeCommandBuffer()!
+        encoders[Int(index)](command)
+        commands[Int(index)] = command
+    }
+    return MeshLaunch(function: { call, index, _, _ in
+        let command = commands[Int(index)]
+        command.addCompletedHandler { [memory] result in
+            withExtendedLifetime(memory) {
+                if result.status == .completed { mesh_call_finish(call) }
+                else { mesh_call_fail(call, Int32((result.error as NSError?)?.code ?? -1)) }
+            }
+        }
+        command.commit()
+    }, rearm: rearm, resources: [], dependencies: dependencies, prepare: { function in
+        frames = try (0..<count).map { index in
+            let frame = MeshMetalFrame(memory: memory, device: device, function: function, index: index,
+                inputs: inputs.map { $0[min(index, $0.count - 1)] }, outputs: outputs.map { $0[index] },
+                sources: sources, results: results, pipelines: pipelines)
+            encoders.append(try body(frame))
+            return frame
+        }
+        let descriptor = MTLResidencySetDescriptor()
+        let residency = try device.makeResidencySet(descriptor: descriptor)
+        residency.addAllocations(frames.flatMap { $0.resources })
+        residency.commit(); queue.addResidencySet(residency)
+        commands = (0..<count).map { index in
+            let command = queue.makeCommandBuffer()!
+            encoders[index](command)
+            return command
+        }
+    })
 }

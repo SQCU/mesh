@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 77u
+#define MESH_VERSION 78u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_EVENT_ABSENT UINT64_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
@@ -176,7 +176,7 @@ static inline uint64_t mesh_event_take(struct mesh_event_reader *reader){
     if(reader->cursor==reader->count)reader->cursor=0;
     _Atomic uint64_t *slot=&input->slots[input->position&input->mask];
     uint64_t value=atomic_load_explicit(slot,memory_order_acquire);
-    if(!value)continue;
+    if(!(uint32_t)value)continue;
     atomic_store_explicit(slot,0,memory_order_relaxed);
     input->position++;
     return value-1;

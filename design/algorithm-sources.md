@@ -1068,9 +1068,91 @@ compilation are setup work. The engine's `add_inplace` uses the same `matrixAdd`
 body for ordinary pointers and for these sections; its arithmetic is not duplicated
 inside Mesh.
 
-This integrates device-side address resolution into the E1d decode sum. It does
-not yet make that consumer resident before arrival: the current Mesh submission
-path still waits for all host notifications and then encodes/commits the command
-buffer. GPU publication, system-scope stamp acquisition in an already-submitted
-consumer, and the one-command-buffer-per-step integration remain open. No floor
-latency or end-to-end improvement follows from the ABI or compilation alone.
+This integrates device-side address resolution into the E1d decode sum. The
+[resident Metal path](#resident-metal) now uses those bindings in a command buffer
+submitted before the layer's remote inputs arrive. No floor latency or end-to-end
+improvement follows from the ABI or compilation alone.
+
+## Resident Metal
+
+Apple's MLX authors supply the system-coherent payload accesses and system-scope
+fence mechanism in [fence.metal](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/fence.metal)
+and [fence.cpp](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/fence.cpp).
+The shader adaptation is attributed to Apple (2024), under the
+[MLX MIT license](../licenses/mlx.txt). GPU command ordering and residency use
+Apple's Metal command-encoder and residency-set APIs. The masked ready-input sum
+uses the Pallas indexed-vector representation and the supplied Megatron-style
+column decomposition described at [nn.ffn](#nnffn); arithmetic remains the engine's
+`matrixAdd`, not a Mesh tensor-operation implementation.
+
+`TensorFunction.metal(device, residentAfter:, body)` binds the same tensor parts
+and lifetimes as the other native functions. Its integer specifies a prefix of
+inputs whose host preparation starts the local step; the rest are retained operands
+whose presence is handled by the supplied GPU program. It is setup metadata,
+not a runtime interpretation of the model. `mesh_call_bind` registers notifications
+only for that prefix. In the decode caller the prefix is one metadata operand.
+A follower therefore starts from its received/derived step metadata and needs no
+separate host submission scheduler.
+
+At setup, `meshResident` prepares a native command buffer per realized frame and
+`MeshMetalFrame` resolves sequence, operand and publication addresses. The sequence
+is the existing native call's invocation word, exposed through a Metal buffer over
+its owning allocation; there is no extra invocation-copy store at launch. The
+native call allocation outlives the GPU and the Metal view. Indirect payload, table
+and event-buffer resources are retained and registered with the queue's residency
+set before execution. Finalization follows event-stream realization and precedes
+transport start. Send indexes were already fixed by `mesh_transfers_prepare`;
+stream offsets and consumer indexes are resolved by `mesh_calls_start`.
+
+`MeshMetalFrame.publish` encodes the MLX-style coherent payload pass, a device
+buffer ordering operation and GPU publication. The GPU sends directly to the
+prepared TX streams, then writes the canonical presence word and local consumer
+streams. Each GPU target is 32 bytes containing the terminal position/slot
+addresses, mask and destination. There is no host completion callback in that
+handoff. A GPU slot writes the invocation word before the nonzero index word;
+ABI 78's CPU reader accepts a slot only when that index word is nonzero. CPU
+writers retain their native eight-byte release publication. A frame cannot reuse
+its ring capacity until its known uses retire.
+
+One serial Metal command stream owns a resident function's publications.
+`completion_publication` is setup-only information: early publishers do not
+contribute the old "last declared output implies all publications finished"
+ordering edge. This prevents unsafe cursor sharing between a GPU publisher and a
+CPU consumer. Independent frames and unordered writers retain independent streams.
+It does not establish the full H1 load budget, which remains open.
+
+`MeshMetalFrame.wait` exposes an explicit device-stamp wait when the supplied
+program needs one. The decode caller instead supplies `mesh_add`: one SIMD group
+per row tracks a private mask of consumed peers, picks a present unconsumed input,
+applies the existing add body to its contiguous sections, and repeats. Only
+presence and the consumed mask select inputs; payload values do not select control
+flow. No missing peer prevents a present peer from being added. The output reaches
+the nonlinear finishing operations only after all contributions have been added.
+The consumed mask is local numerical state, not a shared completion or reclamation
+protocol. A failed producer can leave the resident consumer waiting; X9's stated
+GPU-watchdog failure behavior has not been exercised by this change.
+
+The supplied resident function publishes its externally consumed outputs at the
+points where they are complete. Native `mesh_call_finish` retires its input/output
+references after the command buffer finishes; it does not republish early outputs.
+The E1d function's only externally consumed numerical outputs are its FFN partials;
+its intermediate scratch and hidden values stay within the same supplied function.
+The native return path prepares the next command buffer before marking that frame
+reusable. Re-recording commands remains host work per step; it is not charged away
+or assumed free in the pending end-to-end measurement.
+
+Engine `bindMeshDecodeStep` supplies embedding, every decode layer, and the current
+leader output path in one resident command buffer. `bindMeshDecodeLayer` uses the
+existing attention, gate/up/down, add and finishing functions. It publishes its
+partial directly, then consumes any ready remote partials. The old embedding,
+per-layer producer/consumer and tail Mesh calls are removed. Embedding writes its
+canonical output directly, and final normalization reads the last layer's output
+directly; the two hidden-state placement copies are gone. Per-layer inputs bind to
+that realized embedding buffer. The configured batch runs in full; the existing
+sampling-active mask identifies live rows.
+
+Compilation covers the resident handoff shaders, streaming sum, Mesh ABI, native
+C warnings and engine integration. No RDMA workload, GPU numerical execution,
+watchdog exercise, floor timing or speedup is implied. Vocabulary sharding and
+follower KV initialization remain required before the E1d/E8 comparison; coherent
+publication dispatches and command re-recording also remain costs to measure.
