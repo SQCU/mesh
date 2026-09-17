@@ -103,21 +103,46 @@ number. Not 280 µs; not 25 µs; the fabric, plus one shm→L1 on each side, plu
 F7's pass value ("arrival-to-first-consuming-kernel ≤ 2× the wire estimate") and H7's
 store→doorbell / CQ→ring bounds are this table; E7 uses `c ≤ 15 µs`.
 
-What the floor does to the model:
+### 4a. One push per layer
 
-- Megatron per layer (o_proj partial + down_proj partial, both pushed as they complete):
-  2 × ~12 µs = ~25 µs exposed per layer, **~0.9 ms per forward** on a 5.5 ms decode step.
-- With FFN columns and attention placed ∝ bandwidth on M5 Max + M4 Pro (`Σ BW/BW_leader =
-  1.44`), the bandwidth-bound weight term is 5.5/1.44 = 3.8 ms; 3.8 + 0.9 = **4.7 ms vs
-  5.5 ms: 1.17× at B = 1 decode, on a 2.3B model, with an M4 Pro as the peer.** Small,
-  positive, and therefore the objective (I21). The crossover of §5 collapses to `7c ≈
-  85 µs → B·L× ≈ 12k`, so at B = 1 the KV term is a second, independent win past ~12k
-  tokens, compounding to ~1.3× at 128k.
-- Four M5 Ultra-class nodes (`Σ BW/BW_leader ≈ 4`): weight term ~1.4 ms; reduce-scatter of a
-  3 KiB decode vector among 4 is one hop each way, so still ~25 µs per layer, ~0.9 ms per
-  forward: **~2.3 ms vs 5.5 ms, ~2.4× at B = 1** — on a model whose whole step was 5.5 ms.
-  That is what "marginally faster on an already-fast machine" buys at the floor; every
-  microsecond above the floor comes straight out of it.
+"Four crossings per layer" in §3 describes the engine's current binding (two
+reduce-scatter + all-gather pairs), not a requirement. Latency minimization has a
+specific meaning: the cost of a layer is the number of *serial* pushes on its critical
+path times the floor, and duplicated computation is free until it costs more than a
+hop. So the decode layer has **one** push (I25, F4, E1d): every rank runs attention,
+norms, residual and PLE in full (duplicated — attention at short context is a few
+microseconds of a 5.5 ms step, a norm is nothing); each rank computes only its FFN
+column slice; its `down_proj` output is a codomain-shaped partial (Definition) that it
+pushes **directly to every other rank** — 3 KiB per token, one hop, summed on arrival in
+whatever order the partials land. No reduce-scatter (that is a hop to *distribute* the
+sum), no all-gather (a second hop to *collect* it): two hops to save 6 KiB of wire on a
+3 KiB vector is exactly the mistake the old F4 ("never send-my-partial-to-all")
+mandated; it is rewritten. RS+AG belongs only where `(N−1)·bytes` costs more than a hop
+(above ~120 KiB: prefill tiles), and there it is pipelined per tile so the exposed cost
+is still one hop per layer. The lm_head (0.8 GB, 1.3 ms) is too expensive to duplicate,
+so it is split by vocabulary tile and its logit/top-k partial rides the same single hop.
+
+### 4b. What the floor does to the model, at one push per layer
+
+- **35 pushes × ~12 µs ≈ 0.42 ms per forward** — the entire mesh overhead of a decode
+  step, against 5.5 ms. That is the pass value (`≤ 0.5 ms`, I25/E8).
+- **M5 Max + M4 Pro, B = 1.** Decode is bandwidth-bound, so the placement ratio is the
+  bandwidth ratio `r = 273/614 = 0.44`, M4 share 31%. FFN is `f ≈ 0.69` of the weight
+  bytes: `T = 5.5 × (0.31 + 0.69/1.44) + 0.42 = 4.76 ms` → **1.16×** (zero-overhead bound
+  1.27×). Split the lm_head too (`f = 0.86`): `5.5 × (0.14 + 0.86/1.44) + 0.43 = 4.49 ms`
+  → **1.22×**. Small, positive, on a 2.3B model with a lesser laptop chip as the peer —
+  and therefore demanded (I21, E8: `S ≥ 1.10`). The size of the tensors has nothing to
+  do with it: a 3 KiB partial rides the same 10 µs as a 32 KiB one.
+- **Four M5 Ultra-class nodes** (`Σ BW/BW_leader ≈ 4`): `5.5 × (0.14 + 0.86/4) + 0.45 =
+  2.4 ms` → **~2.3× at B = 1**, on a model whose whole step was 5.5 ms; each layer's
+  push is still one hop because a rank sends its 3 KiB partial to three peers in 1 µs of
+  serialization.
+- The KV crossover of §5 uses F11's second push on the 7 global layers and is a separate,
+  additive win past `B·L ≈ 12k` at the floor.
+
+Every microsecond above the floor comes straight out of these numbers; the 1.16× on the
+pair is the regression test (E8), and "the model is too small" is not an admissible
+explanation of a miss.
 
 Anything between these numbers and 280 µs is not "the transport": it is a command-buffer
 commit, a completion handler, a dependent metadata load, a layout copy, or a wait, and
