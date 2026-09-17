@@ -8,7 +8,7 @@ struct mesh_function;
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride,channel; };
 struct mesh_operand {
   void *arena; size_t bytes;
-  _Atomic uint32_t *pages; uint32_t index,row;
+  _Atomic uint64_t *pages; uint32_t index,row;
   uint32_t *sequence; uint32_t page_size,block_pages;
 };
 _Static_assert(sizeof(struct mesh_operand)==48,"mesh_operand");
@@ -20,6 +20,8 @@ static inline void *mesh_operand_address(struct mesh_operand operand,size_t offs
 }
 /* design/algorithm-sources.md#programtensor */
 static inline uint32_t mesh_operand_page(struct mesh_operand operand){return atomic_load_explicit(operand.pages,memory_order_relaxed);}
+/* design/algorithm-sources.md#programtensor */
+static inline __attribute__((always_inline)) intptr_t mesh_operand_view(const _Atomic uint64_t *pages){return (intptr_t)(atomic_load_explicit(pages,memory_order_relaxed)>>32);}
 typedef void (*mesh_submit)(struct mesh_call *,uint32_t,void *,const struct mesh_operand *,struct mesh_operand *);
 typedef void (*mesh_dispose)(void *);
 typedef void (*mesh_rearm)(uint32_t,void *);

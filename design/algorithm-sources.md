@@ -50,6 +50,16 @@ prepared sequence address. These replace dispatch's cached address/page copies
 and per-operand sequence writes. See the
 [explicit address algebra and costs](pages-and-functions.md#operand-addresses-and-sequence-values).
 
+ABI 72's [prepared native view indices](pages-and-functions.md#prepared-native-view-indices)
+apply the same indexed-storage representation to backend view selection.
+`mesh_backing_bind` realizes local indices; receive placement supplies its already
+known pool index. A canonical 64-bit entry carries this result with its physical
+page, without an additional mapping table. `mesh_operand_view` loads its upper
+word, and `MeshBindings.index` replaces the stored Swift indexing closure with
+that direct read. Receive-pool return uses the same value. The mechanism is
+setup specialization of the Pallas-style indexed operands above and the existing
+registered-storage interface, independent of the supplied numerical function.
+
 George E. Collins, [A method for overlapping and erasure of lists](https://doi.org/10.1145/367487.367501)
 (1960): reference counting. The user explicitly requested automatic ownership
 release and background pool return, without caller free/done calls.

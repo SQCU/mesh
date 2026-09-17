@@ -139,9 +139,9 @@ uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
 }
 
 /* design/algorithm-sources.md#programtensor */
-void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t page){
+void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t page,uint32_t index){
   for(uint32_t offset=0;offset<pages;offset+=c->M->block){
-    atomic_store_explicit(&mesh_page(c->M)[first+offset/c->M->block],page+offset,memory_order_relaxed);
+    atomic_store_explicit(&mesh_page(c->M)[first+offset/c->M->block],((uint64_t)index<<32)|(page+offset),memory_order_relaxed);
   }
 }
 

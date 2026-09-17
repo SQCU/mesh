@@ -570,7 +570,7 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uin
       for(uint32_t r=first;r<first+rows;r+=stride){mesh_buffer_release(m,r);mesh_buffer_release(m,r);}
       mesh_rows_release(context,first,rows);return error;
     }
-    mesh_backing_bind(context,row,(uint32_t)span,page);
+    mesh_backing_bind(context,row,(uint32_t)span,page,(row-first)/stride);
   }
   *section=(struct mesh_section){first,(uint32_t)span,bytes,count,stride,channel};
   return 0;

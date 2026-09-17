@@ -24,22 +24,21 @@ _Static_assert(sizeof(struct mesh_send_range)==16 && _Alignof(struct mesh_send_r
 struct mesh_send_binding {_Alignas(16) struct ibv_sge *target;uint32_t key;};
 _Static_assert(sizeof(struct mesh_send_binding)==16 && _Alignof(struct mesh_send_binding)==16,"mesh_send_binding");
 struct mesh_receive_record {
-  _Alignas(32) _Atomic uint32_t *entry;
+  _Alignas(32) _Atomic uint64_t *entry;
   uint32_t row,last,completions,send_count;
   struct mesh_send_binding *sends;
 };
 _Static_assert(sizeof(struct mesh_receive_record)==32 && _Alignof(struct mesh_receive_record)==32,"mesh_receive_record");
 struct mesh_receive {
-  _Alignas(32) struct mesh_receive_record *records;
-  uint32_t region_base,page_base,region_pages,block,page_shift,block_reciprocal;
+  _Alignas(64) struct mesh_receive_record *records;
+  uint32_t region_base,page_base,region_blocks,block,page_shift,block_reciprocal,pool_offset;
   uint32_t *pages;
   struct mesh_receive_request *requests;
   struct mesh_send_binding *sends;
-  uint32_t first;
   struct mesh_ready ready;
   struct mesh_event_reader returns;
 };
-_Static_assert(offsetof(struct mesh_receive,pages)==32 && sizeof(struct mesh_receive)==128 && _Alignof(struct mesh_receive)==32,"mesh_receive completion geometry");
+_Static_assert(offsetof(struct mesh_receive,pages)==40 && sizeof(struct mesh_receive)==128 && _Alignof(struct mesh_receive)==64,"mesh_receive completion geometry");
 struct mesh_worker {struct mesh_link *link;pthread_t thread;uint32_t direction;};
 struct mesh_link {
   struct mesh_worker workers[2];
@@ -183,9 +182,9 @@ static int link_configure(void *state,int socket,uint64_t client){
     uint32_t stride=(m->block+1)*m->pgsz,region_blocks=(uint32_t)(link->provider.wire->region_extent/stride);
     uint32_t first=receives?in[0].pool:0,first_region=first/m->block/region_blocks;
     uint32_t regions=chunks_count?(first/m->block+chunks_count-1)/region_blocks-first_region+1:0;
-    *receive=(struct mesh_receive){.first=first,
+    *receive=(struct mesh_receive){
       .region_base=(uint32_t)((uintptr_t)link->provider.wire->data>>32)+first_region,
-      .page_base=first_region*region_blocks*m->block,.region_pages=region_blocks*m->block,
+      .page_base=first_region*region_blocks*m->block,.region_blocks=region_blocks,.pool_offset=first_region*region_blocks-first/m->block,
       .block_reciprocal=(uint32_t)(((UINT64_C(1)<<32)+m->block)/(m->block+1)),
       .page_shift=(uint32_t)__builtin_ctz(m->pgsz),.block=m->block,.ready={.tail=chunks_count,.mask=capacity-1}};
     int reader_error=mesh_event_reader_init(&receive->returns,m,mesh_notice_queue(m,client,m->links+link->index*m->qps+q));
@@ -196,7 +195,7 @@ static int link_configure(void *state,int socket,uint64_t client){
     receive->sends=malloc((send_count?send_count*regions:1)*sizeof *receive->sends);
     if(!receive->pages || !receive->requests || !receive->records || !receive->sends){free(bindings);free(peer);return -1;}
     for(uint32_t i=0;i<chunks_count;i++){
-      uint32_t page=receive->first+i*m->block;receive->pages[i]=i;
+      uint32_t page=first+i*m->block;receive->pages[i]=i;
       struct mesh_receive_request *request=&receive->requests[i];
       *request=(struct mesh_receive_request){.span=link->provider.device->spans[page/m->block],.request={.sg_list=&request->span,.num_sge=1}};
       request->request.wr_id=request->span.addr;
@@ -273,9 +272,10 @@ static int link_receive(struct mesh_link *link,uint32_t q){
     if(event==MESH_EVENT_ABSENT)return error;
     uint32_t row=(uint32_t)event;
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    for(uint32_t offset=0;offset<buffer->pages;offset+=m->block){
-      receive->pages[ready->tail++&ready->mask]=(atomic_load_explicit(&mesh_page(m)[row+offset/m->block],memory_order_relaxed)-receive->first)/m->block;
-      atomic_store_explicit(&mesh_page(m)[row+offset/m->block],MESH_ABSENT,memory_order_relaxed);
+    _Atomic uint64_t *entries=mesh_page(m)+row;
+    for(uint32_t chunk=0,count=buffer->pages/m->block;chunk<count;chunk++){
+      receive->pages[ready->tail++&ready->mask]=(uint32_t)(atomic_load_explicit(entries+chunk,memory_order_relaxed)>>32);
+      atomic_store_explicit(entries+chunk,MESH_ABSENT,memory_order_relaxed);
     }
     error=link_receive_post(queue,receive);
     mesh_buffer_reset(m,row);
@@ -321,10 +321,10 @@ static int mesh_progress(struct mesh_link *link,uint32_t direction){
         uint64_t tag_value=atomic_load_explicit(&tag->value,memory_order_relaxed);
         uint32_t region=(uint32_t)(wc->wr_id>>32)-receive->region_base;
         uint32_t slot=(uint32_t)(((uint64_t)((uint32_t)wc->wr_id>>receive->page_shift)*receive->block_reciprocal)>>32);
-        uint32_t page=receive->page_base+region*receive->region_pages+slot*receive->block;
+        uint32_t block=region*receive->region_blocks+slot,page=receive->page_base+block*receive->block;
         uint32_t invocation=(uint32_t)(tag_value>>32);
         struct mesh_receive_record record=receive->records[(uint32_t)tag_value];
-        atomic_store_explicit(record.entry,page,memory_order_relaxed);
+        atomic_store_explicit(record.entry,((uint64_t)(block+receive->pool_offset)<<32)|page,memory_order_relaxed);
         struct mesh_send_binding *sends=record.sends+(size_t)region*record.send_count;
         for(uint32_t j=0;j<record.send_count;j++){
           struct mesh_send_binding binding=sends[j];

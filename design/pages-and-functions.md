@@ -40,6 +40,10 @@ A logical tensor section is an index range with a configured layout. Its page-ta
 entries name actual registered backing. A view alone does not establish contiguity:
 setup decomposes the operand into the contiguous sections required by the chosen
 numerical calls, preserving contraction contributions and output coordinates.
+ABI 72 stores the physical page and its prepared native-view index in one
+64-bit entry. The latter is also the receive-pool return index for remote
+backing. [Native view selection](#prepared-native-view-indices) reads this
+terminal value instead of reconstructing it through an indexing closure.
 
 There is one owning reference: an unfinished use keeps its allocation alive.
 For section s, R(s) is the number of those uses, including setup's temporary
@@ -307,8 +311,9 @@ pointer to its call's sequence value. There is no cached first-page identity or
 cached materialized first-page pointer. `mesh_operand_address` performs the
 indexed gather and affine arithmetic directly. The Swift `data`, `page` and
 `invocation` accessors preserve their caller spelling while using those values.
-Native `MeshBindings` select the already constructed view using the actual page
-index; Core ML objects, output backing and model invocation remain prepared.
+Native `MeshBindings` select the already constructed view using the index now
+stored beside the physical page; Core ML objects, output backing and model
+invocation remain prepared. The ABI 72 change below deletes their indexing closure.
 The dispatch-time remote-input classification, page load and two copied fields
 are deleted. Indexed reads previously loaded p again after that refresh; now
 there is one canonical lookup at the actual access. Local raw `data` access also
@@ -335,6 +340,68 @@ additional discovery, interpreter state, backend selection or default waits.
 These statements describe the implementation changes and the remaining actual
 data dependencies; they are not an argument to defer the rest of the hot-path
 rewrite.
+
+### Prepared native view indices
+
+ABI 72 memoizes the native-view selection result in the canonical page entry:
+
+```
+entry = (uint64(view_index) << 32) | physical_page
+```
+
+For local storage, `mesh_backing_bind` writes the section's resident slot index
+during allocation. All chunks of that slot share its native contiguous view;
+shared constants have slot zero. For received storage, the completion writes
+the physical block's index within that queue's prepared pool. Native views for
+a directly consumed remote partial are already constructed in that same pool
+order. A contiguous materialized input uses its local placement entry, whose
+index was prepared during allocation. These are configuration and placement
+facts; the numerical reader does not classify the operand.
+
+`MeshBindings.index` now loads that prepared index, and subscripting uses it
+directly. The stored Swift closure, its captured range geometry, indirect call,
+remote page subtraction/division and local stride multiplication are deleted.
+The method keeps the existing `bindings.index(operand)` calling syntax used by
+the engine's supplied encoders. No numerical function or backend is replaced.
+`mesh_operand_view` accepts the already prepared entry pointer and returns a
+native-sized integer. Generated subscripting code inlines the load and shift;
+the public index method uses a direct tail branch to those same two operations,
+with no stack frame, captured closure or operand copy at that boundary. Array
+access and native-object access still have their normal costs.
+
+The 48-byte operand retains one pointer to this canonical array. Indexed tensor
+reads and the `page` accessor use the low word; view selection uses the high
+word. The per-call `operand.index` continues to mean the resident invocation
+slot and is unchanged. There is no second mapping table, mutable cache per
+consumer, dispatch refresh loop, receive-readiness predicate or new handoff.
+For local views the read now visits the canonical entry instead of using the
+operand's inline slot through a closure. That one data read remains explicit;
+the removal is the closure/context traversal and recomputation, not every load.
+
+RX already derives the block coordinate `b = region * region_blocks + slot`.
+Setup supplies `pool_offset = first_region_block - first_pool_block`, stored
+modulo 2^32. The view index is `b + pool_offset` modulo 2^32, which is exactly
+the nonnegative pool index for every posted receive. RX packs this and its
+physical page into one aligned lock-free 64-bit store before publication.
+Recycling loads the same word and appends its high half directly to the prepared
+RECV ring. It no longer subtracts a pool base and divides for each returned
+block. Its row traversal uses consecutive entry indices; only the section's
+chunk-count division remains, once before that loop.
+
+The page array costs eight bytes per arena row instead of four: an extra 4R
+raw metadata bytes for R rows, or 917,504 bytes at R = 229,376. Operand storage
+and payload storage are unchanged. RX geometry grows from a 32-byte header to
+a 40-byte extent aligned to 64; the complete receive state stays 128 bytes.
+Static assertions fix that extent and alignment. No additional allocation or
+event occurs during execution. Bridge and clients must agree on ABI 72.
+
+The eleven maintained library files total 2,791 lines, up from 2,790. The existing
+`native-audit` target also emits optimized Swift assembly from the library
+source, alongside the C assembly; it adds no evaluator or runtime harness.
+Strict C compilation, both library builds, all four existing callers and the
+engine's Mesh library build pass. No runtime workload or latency measurement
+is claimed. Canonical indexed reads, contiguous-input materialization,
+publication-stream probing and full H1–H7 closure remain unfinished.
 
 ## Reusable send queue
 
@@ -932,7 +999,8 @@ Setup stores `mu = ceil(2^32 / d)`. Then
 ```
 k = (uint64(n) * mu) >> 32
 r = high32(a) - first_alias_bank
-page = first_region_page + r * region_pages + k * B
+b = r * region_blocks + k
+page = first_region_page + b * B
 bindings = record.sends + r * record.send_count
 ```
 
@@ -943,8 +1011,9 @@ The first region may start before the queue's pool and the last may be partial;
 the stored bases and the pool's actual region interval cover both cases.
 No address or identifier is exchanged with peers by this local convention.
 
-The destination-record pointer and all six geometry constants occupy the first
-32 aligned bytes of the receive state. Static assertions retain that boundary,
+The destination-record pointer and placement geometry occupy a 40-byte extent
+aligned to 64 bytes after ABI 72's addition of the prepared pool index.
+Static assertions retain that boundary,
 the 32-byte destination record and the 16-byte forwarding descriptor. Optimized
 ARM64 code reads `wr_id` then the tag, uses shifts/multiplies for the page, and
 loads each destination/key pair before its two direct stores. It performs no
@@ -955,10 +1024,11 @@ the declared forwarding destinations.
 For queue q with D_q declared forwarding requests and R_q registration regions
 intersecting its pool, binding storage is `16 * max(1, D_q R_q)` bytes rather
 than `16 * max(1, D_q)`. This replicates keys by region, not physical page.
-Receive state is now 128 bytes, aligned to 32, versus 104 bytes; no tensor data
+Receive state is 128 bytes, now aligned to 64, versus the original 104 bytes; no tensor data
 is copied or additional event posted. Native requests and public/shared layouts
-are unchanged, so ABI 71 remains. The eleven maintained library files total
-2,790 source lines, up from 2,779. Strict native compilation, bridge compilation
+were unchanged by this forwarding change, which retained ABI 71; ABI 72 extends
+the canonical entries as described above. This forwarding step brought the
+eleven maintained library files to 2,790 source lines, up from 2,779. Strict native compilation, bridge compilation
 and generated-code inspection pass; no runtime workload or latency measurement
 was performed. Publication stream probing, numerical operand views, lifetime
 realization and the complete H1–H7 paths remain separate unfinished work.

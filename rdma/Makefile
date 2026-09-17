@@ -2,7 +2,10 @@ BINS = mesh-flow mesh-stat libmesh.dylib libmesh_swift.dylib
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 MESH_PREFIX ?= /usr/local/mesh
 all: $(BINS)
-native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
+native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s .build/Mesh.s
+.build/Mesh.s: ../swift/Mesh.swift ../swift/Bounds.swift ../swift/Topology.swift mesh.h mesh-call.h mesh-dataflow.h module.modulemap Makefile
+	mkdir -p .build
+	swiftc -O -whole-module-optimization -parse-as-library -emit-assembly -module-name Mesh -I . ../swift/Mesh.swift ../swift/Bounds.swift ../swift/Topology.swift -o $@
 .build/%.s: %.c mesh.h mesh-verbs.h mesh-dataflow.h mesh-call.h Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<

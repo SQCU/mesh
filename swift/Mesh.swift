@@ -95,10 +95,12 @@ public struct TensorFunction {
 
 public struct MeshBindings<Value> {
     public let values: [Value]
-    public let index: (mesh_operand) -> Int
 
     // design/algorithm-sources.md#programtensor
-    public subscript(_ operand: mesh_operand) -> Value { values[index(operand)] }
+    @inlinable public func index(_ operand: mesh_operand) -> Int { mesh_operand_view(operand.pages) }
+
+    // design/algorithm-sources.md#programtensor
+    @inlinable public subscript(_ operand: mesh_operand) -> Value { values[index(operand)] }
 }
 
 public struct MeshSpan {
@@ -401,22 +403,19 @@ public final class Mesh {
     // design/algorithm-sources.md#programtensor
     fileprivate func bindings<Value>(_ part: TensorPart, using make: (MeshSpan) throws -> Value) throws -> MeshBindings<Value> {
         let source = part.section!, context = memory.context
-        let pages: [UInt32], index: (mesh_operand) -> Int
+        let pages: [UInt32]
         if source.channel != MESH_ABSENT {
             let range = mesh_receive_range(context, source.channel)
             let first = Int(range.first), quantum = Int(mesh_block_pages(context))
             pages = stride(from: first, through: first + Int(range.count - source.pages), by: quantum).map(UInt32.init)
-            index = { (Int($0.page) - first) / quantum }
         } else {
             pages = (0..<source.count).map { mesh_row_page(context, source.first + $0 * source.stride, 0) }
-            let stride = part.shared ? 0 : 1
-            index = { Int($0.index) * stride }
         }
         let values = try pages.map { page in
             try make(MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page),
                                                                  count: source.bytes), memory: memory))
         }
-        return MeshBindings(values: values, index: index)
+        return MeshBindings(values: values)
     }
 
     // design/algorithm-sources.md#programtensor

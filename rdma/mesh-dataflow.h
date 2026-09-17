@@ -30,7 +30,7 @@ void mesh_retire(struct hdr *,uint64_t client);
 
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
-void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page);
+void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 /* design/algorithm-sources.md#index-hand-off */
 int mesh_event_reader_init(struct mesh_event_reader *,struct hdr *,uint32_t queue);
