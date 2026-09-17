@@ -22,7 +22,7 @@ fileprivate enum MeshSubmission {
     case cpu((MeshOperands, MeshOperands) -> Void)
     case metal(MTLDevice, (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void, [MTLBuffer])
     case prediction(MLModel, [MeshFeatures], [MLPredictionOptions])
-    case resident(MTLDevice, [[MeshMetalOperand]], [[MeshMetalOperand]], [mesh_section], [mesh_section], Int,
+    case resident(MTLDevice, [[MeshMetalOperand]], [[MeshMetalOperand]], [mesh_section], Int,
                   (MeshMetalFrame) throws -> (MTLCommandBuffer) -> Void)
 }
 
@@ -79,7 +79,7 @@ public struct TensorFunction {
         Self { mesh, inputs, outputs in
             .resident(device, inputs.map { Array(mesh.metal($0, device: device)) },
                       outputs.map { Array(mesh.metal($0, device: device)) },
-                      inputs.map { $0.section! }, outputs.map { $0.section! }, dependencies, body)
+                      outputs.map { $0.section! }, dependencies, body)
         }
     }
 
@@ -273,8 +273,8 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
     let copyOnCPU: Bool
     let retained: [MTLBuffer]
     switch function {
-    case .resident(let device, let x, let y, let sources, let results, let dependencies, let body):
-        return meshResident(device, memory: memory, inputs: x, outputs: y, sources: sources, results: results,
+    case .resident(let device, let x, let y, let results, let dependencies, let body):
+        return meshResident(device, memory: memory, inputs: x, outputs: y, results: results,
                             dependencies: dependencies, body: body, count: count)
     case .cpu(let function):
         retained = []
@@ -689,21 +689,20 @@ public final class MeshMetalFrame {
     public let index: Int
     public let inputs, outputs: [MeshMetalOperand]
     private let sequence: MTLBuffer, sequenceOffset: Int
-    private let waits: [UInt32]
     public let publications: [MTLBuffer]
     fileprivate let resources: [MTLBuffer]
     fileprivate let completion: MTLCommandBufferHandler
-    private let coherent, signal, acquire: MTLComputePipelineState
+    private let coherent, signal: MTLComputePipelineState
 
     // design/algorithm-sources.md#resident-metal
     public var invocation: (buffer: MTLBuffer, offset: Int) { (sequence, sequenceOffset) }
 
-    // design/algorithm-sources.md#resident-metal
+    // design/prepared-machine.md#M12
     fileprivate init(memory: MeshMemory, device: MTLDevice, function: OpaquePointer, index: Int,
-        inputs: [MeshMetalOperand], outputs: [MeshMetalOperand], sources: [mesh_section], results: [mesh_section],
+        inputs: [MeshMetalOperand], outputs: [MeshMetalOperand], results: [mesh_section],
         pipelines: [MTLComputePipelineState]) {
         self.index = index; self.inputs = inputs; self.outputs = outputs
-        coherent = pipelines[0]; signal = pipelines[1]; acquire = pipelines[2]
+        coherent = pipelines[0]; signal = pipelines[1]
         let context = memory.context, m = context.pointee.M!
         var invocation: UnsafeMutablePointer<UInt32>?
         let call = mesh_function_frame(function, UInt32(index), &invocation)
@@ -716,7 +715,6 @@ public final class MeshMetalFrame {
         let state = MeshSpan(data: UnsafeMutableRawBufferPointer(start: invocation, count: 4), memory: memory)
         sequence = state.metal(device: device); sequenceOffset = state.metalOffset
         let sequenceAddress = sequence.gpuAddress + UInt64(sequenceOffset)
-        waits = sources.map { $0.stride == 0 ? 0 : UInt32.max }
         var backing = (inputs + outputs).flatMap { $0.resources } + (inputs + outputs).map { $0.table }
         publications = results.enumerated().map { output, result in
             let row = result.first + UInt32(index) * result.stride
@@ -744,18 +742,6 @@ public final class MeshMetalFrame {
             return records
         }
         resources = backing + [sequence]
-    }
-
-    // design/algorithm-sources.md#resident-metal
-    public func wait(_ input: Int, on command: MTLCommandBuffer) {
-        let encoder = command.makeComputeCommandEncoder()!, operand = inputs[input]
-        encoder.setComputePipelineState(acquire)
-        encoder.setBuffer(operand.table, offset: operand.offset, index: 0)
-        encoder.setBuffer(sequence, offset: sequenceOffset, index: 1)
-        var mask = waits[input]
-        encoder.setBytes(&mask, length: 4, index: 2)
-        encoder.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
-        encoder.endEncoding()
     }
 
     // design/algorithm-sources.md#resident-metal
@@ -846,13 +832,6 @@ public final class MeshMetalFrame {
     kernel void mesh_signal(device const ::mesh::publication& event [[buffer(0)]]) {
         ::mesh::publish(event);
     }
-    // design/algorithm-sources.md#resident-metal
-    kernel void mesh_acquire(volatile coherent(system) device const ::mesh::page* page [[buffer(0)]],
-        volatile coherent(system) device const uint& sequence [[buffer(1)]], constant uint& mask [[buffer(2)]]) {
-        ulong expected = ulong(sequence & mask) + 1;
-        do { ::mesh::fence(); } while (page->stamp != expected);
-        ::mesh::fence();
-    }
     """#
 }
 
@@ -861,14 +840,14 @@ private final class MeshCommands: ManagedBuffer<Int, MTLCommandBuffer> {
     deinit { _ = withUnsafeMutablePointerToElements { $0.deinitialize(count: header) } }
 }
 
-// design/algorithm-sources.md#resident-metal
+// design/prepared-machine.md#M12
 private func meshResident(_ device: MTLDevice, memory: MeshMemory, inputs: [[MeshMetalOperand]], outputs: [[MeshMetalOperand]],
-    sources: [mesh_section], results: [mesh_section], dependencies: Int,
+    results: [mesh_section], dependencies: Int,
     body: @escaping (MeshMetalFrame) throws -> (MTLCommandBuffer) -> Void, count: Int) -> MeshLaunch {
     let queue = device.makeCommandQueue(maxCommandBufferCount: count)!
     let options = MTLCompileOptions(); options.languageVersion = .version3_2
     let library = try! device.makeLibrary(source: MeshMetalOperand.source + "\n" + MeshMetalFrame.source, options: options)
-    let pipelines = try! ["mesh_coherent", "mesh_signal", "mesh_acquire"].map {
+    let pipelines = try! ["mesh_coherent", "mesh_signal"].map {
         try device.makeComputePipelineState(function: library.makeFunction(name: $0)!)
     }
     let storage = MeshCommands.create(minimumCapacity: count) { _ in 0 }
@@ -886,7 +865,7 @@ private func meshResident(_ device: MTLDevice, memory: MeshMemory, inputs: [[Mes
         frames = try (0..<count).map { index in
             let frame = MeshMetalFrame(memory: memory, device: device, function: function, index: index,
                 inputs: inputs.map { $0[min(index, $0.count - 1)] }, outputs: outputs.map { $0[index] },
-                sources: sources, results: results, pipelines: pipelines)
+                results: results, pipelines: pipelines)
             encoders.append(try body(frame))
             return frame
         }
