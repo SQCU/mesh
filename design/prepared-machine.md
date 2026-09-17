@@ -69,7 +69,3 @@
 | T2.03 | Acquire-load the availability generation at the consumer's already bound M10 address. | M10 — one record line |
 | T2.04 | Load the first operand element from the M02 address already held by the native consumer. | M02 — payload |
 
-| Transition construction still required | Concrete unconstructed item |
-| --- | --- |
-| T1.06 | Native post execution reads M06/M07 as well as M05. The one-ring/one-32-byte-record pass is not established by the dispatch record above; the native submission loads remain to be flattened and listed. |
-| T2.03 | The native consumer must already hold M12 operands before receipt; the present source does not establish this for the replacement layout. |
