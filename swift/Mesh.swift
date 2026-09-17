@@ -686,6 +686,7 @@ public final class MeshMetalFrame {
     private let waits: [UInt32]
     public let publications: [MTLBuffer]
     fileprivate let resources: [MTLBuffer]
+    fileprivate let completion: MTLCommandBufferHandler
     private let coherent, signal, acquire: MTLComputePipelineState
 
     // design/algorithm-sources.md#resident-metal
@@ -698,7 +699,15 @@ public final class MeshMetalFrame {
         self.index = index; self.inputs = inputs; self.outputs = outputs
         coherent = pipelines[0]; signal = pipelines[1]; acquire = pipelines[2]
         let context = memory.context, m = context.pointee.M!
-        let state = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_function_sequence(function, UInt32(index)), count: 4), memory: memory)
+        var invocation: UnsafeMutablePointer<UInt32>?
+        let call = mesh_function_frame(function, UInt32(index), &invocation)
+        completion = { [memory] result in
+            withExtendedLifetime(memory) {
+                if result.status == .completed { mesh_call_finish(call) }
+                else { mesh_call_fail(call, Int32((result.error as NSError?)?.code ?? -1)) }
+            }
+        }
+        let state = MeshSpan(data: UnsafeMutableRawBufferPointer(start: invocation, count: 4), memory: memory)
         sequence = state.metal(device: device); sequenceOffset = state.metalOffset
         let sequenceAddress = sequence.gpuAddress + UInt64(sequenceOffset)
         waits = sources.map { $0.stride == 0 ? 0 : UInt32.max }
@@ -841,6 +850,11 @@ public final class MeshMetalFrame {
     """#
 }
 
+private final class MeshCommands: ManagedBuffer<Int, MTLCommandBuffer> {
+    // design/algorithm-sources.md#resident-metal
+    deinit { _ = withUnsafeMutablePointerToElements { $0.deinitialize(count: header) } }
+}
+
 // design/algorithm-sources.md#resident-metal
 private func meshResident(_ device: MTLDevice, memory: MeshMemory, inputs: [[MeshMetalOperand]], outputs: [[MeshMetalOperand]],
     sources: [mesh_section], results: [mesh_section], dependencies: Int,
@@ -851,23 +865,17 @@ private func meshResident(_ device: MTLDevice, memory: MeshMemory, inputs: [[Mes
     let pipelines = try! ["mesh_coherent", "mesh_signal", "mesh_acquire"].map {
         try device.makeComputePipelineState(function: library.makeFunction(name: $0)!)
     }
-    var commands: [MTLCommandBuffer] = []
+    let storage = MeshCommands.create(minimumCapacity: count) { _ in 0 }
     var encoders: [(MTLCommandBuffer) -> Void] = []
     var frames: [MeshMetalFrame] = []
     let rearm: (UInt32) -> Void = { index in
-        let command = queue.makeCommandBuffer()!
+        let command = queue.makeCommandBufferWithUnretainedReferences()!
+        command.addCompletedHandler(frames[Int(index)].completion)
         encoders[Int(index)](command)
-        commands[Int(index)] = command
+        storage.withUnsafeMutablePointerToElements { $0[Int(index)] = command }
     }
-    return MeshLaunch(function: { call, index, _, _ in
-        let command = commands[Int(index)]
-        command.addCompletedHandler { [memory] result in
-            withExtendedLifetime(memory) {
-                if result.status == .completed { mesh_call_finish(call) }
-                else { mesh_call_fail(call, Int32((result.error as NSError?)?.code ?? -1)) }
-            }
-        }
-        command.commit()
+    return MeshLaunch(function: { [storage] _, index, _, _ in
+        storage.withUnsafeMutablePointerToElements { $0[Int(index)].commit() }
     }, rearm: rearm, resources: [], dependencies: dependencies, prepare: { function in
         frames = try (0..<count).map { index in
             let frame = MeshMetalFrame(memory: memory, device: device, function: function, index: index,
@@ -880,10 +888,12 @@ private func meshResident(_ device: MTLDevice, memory: MeshMemory, inputs: [[Mes
         let residency = try device.makeResidencySet(descriptor: descriptor)
         residency.addAllocations(frames.flatMap { $0.resources })
         residency.commit(); queue.addResidencySet(residency)
-        commands = (0..<count).map { index in
-            let command = queue.makeCommandBuffer()!
+        for index in 0..<count {
+            let command = queue.makeCommandBufferWithUnretainedReferences()!
+            command.addCompletedHandler(frames[index].completion)
             encoders[index](command)
-            return command
+            storage.withUnsafeMutablePointerToElements { $0.advanced(by: index).initialize(to: command) }
+            storage.header += 1
         }
     })
 }

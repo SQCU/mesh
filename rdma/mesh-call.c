@@ -148,7 +148,11 @@ failed:
 }
 
 /* design/algorithm-sources.md#resident-metal */
-uint32_t *mesh_function_sequence(struct mesh_function *function,uint32_t frame){return &function->values[frame].invocation;}
+struct mesh_call *mesh_function_frame(struct mesh_function *function,uint32_t frame,uint32_t **sequence){
+  struct mesh_call *call=&function->values[frame];
+  *sequence=&call->invocation;
+  return call;
+}
 
 /* design/algorithm-sources.md#programkernel_call */
 static void *mesh_call_progress(void *argument){

@@ -31,7 +31,7 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *,uint32_t worker,
   const struct mesh_section *inputs,const struct mesh_section *views,size_t input_count,size_t dependency_count,int completion_publication,
   const struct mesh_section *outputs,size_t output_count,const void *submit,void *context,const void *rearm,void *rearm_context);
 /* design/algorithm-sources.md#resident-metal */
-uint32_t *mesh_function_sequence(struct mesh_function *,uint32_t frame);
+struct mesh_call *mesh_function_frame(struct mesh_function *,uint32_t frame,uint32_t **sequence);
 void mesh_call_finish(struct mesh_call *);
 int mesh_calls_start(struct mesh_calls *);
 uint64_t mesh_calls_submit(struct mesh_calls *,uint32_t index);

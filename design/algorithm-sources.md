@@ -1226,6 +1226,62 @@ set before execution. Finalization follows event-stream realization and precedes
 transport start. Send indexes were already fixed by `mesh_transfers_prepare`;
 stream offsets and consumer indexes are resolved by `mesh_calls_start`.
 
+Resident command buffers use Apple's
+[unretained-reference constructor](https://developer.apple.com/documentation/metal/mtlcommandqueue/makecommandbufferwithunretainedreferences()).
+The realized function already owns its frames and the returned encoder closures;
+frames retain canonical operand/event resources, while the supplied encoders
+capture their working buffers, weights and pipeline objects at binding. Native
+workers retain the function until submitted work completes, and the completion
+handler keeps its memory owner alive through native retirement. These existing
+references bound the GPU resource lifetime. The command buffer therefore need
+not acquire another set of resource references during every recording. Supplied
+resident encoders must retain their setup-bound resources in that realized
+function; a temporary resource created and discarded inside an invocation is
+not a valid setup-bound operand. Ordinary per-invocation encoders retain their
+existing Metal ownership behavior.
+
+`mesh_function_frame` replaces the sequence-only setup accessor, returning the
+existing native call and invocation-word address together. Each `MeshMetalFrame`
+binds its completion handler once to that call. Fresh command buffers attach the
+handler during construction/rearm, so the resident launch only selects its
+prepared command buffer and commits it. No extra native call, completion queue,
+runtime callback factory or forwarding function is added. Metal still registers
+a handler on each new command buffer; Swift's block bridging still occurs there.
+Command re-recording remains.
+
+The command table uses the Swift authors' reference-counted
+[ManagedBuffer](https://github.com/swiftlang/swift/blob/main/stdlib/public/core/ManagedBuffer.swift),
+with native command references in its contiguous element storage. Its header
+counts initialized elements for destruction only. Setup initializes the entries;
+the existing owning numerical worker replaces an entry during rearm. The same
+worker invokes that frame, so replacing the entry cannot interleave with its
+commit call. The index comes from `mesh_call_bind`'s fixed `0..<extent` frame
+indices. No runtime bounds, copy-on-write, array-bridging or exclusivity machinery
+is needed to select it. Pointer access stays inside ManagedBuffer's scoped API;
+no borrowed pointer escapes. The launch closure owns the buffer, and its destructor
+releases initialized command references when the native graph is disposed.
+
+Optimized ARM64 resident launch is exactly:
+
+```
+add x8, x20, w1, uxtw #3
+ldr x0, [x8, #24]
+b _objc_msgSend$commit
+```
+
+The captured storage object is the closure context: no second descriptor is
+followed. This deletes the launch's Swift access calls, array count/type checks,
+temporary command-object retain/release and stack frame. The C worker's earlier
+use/call/operand reads, Metal's own submission work and all re-recording remain;
+the three instructions do not establish the complete H7 path or a latency pass.
+
+Apple's [indirect command buffers](https://developer.apple.com/documentation/metal/mtlindirectcommandbuffer)
+support recording commands once and executing them repeatedly. That is distinct
+from [Metal 4 command-buffer reuse](https://developer.apple.com/documentation/metal/understanding-the-metal-4-core-api),
+whose documented lifecycle begins a new recording. Neither a Metal 4 migration
+nor wrapping the current per-kernel encoder callbacks removes their recording
+work. Native replay of the realized numerical graph remains unimplemented.
+
 The existing `Mesh.bindings` setup constructor is public so a supplied function
 can bind working storage without declaring it as an externally consumed output.
 It uses the same registered tensor allocation and view constructor described at
