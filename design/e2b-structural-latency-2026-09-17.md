@@ -1,0 +1,294 @@
+# E2B latency: the structure actually executed
+
+This is an analysis of engine `fb3bab4` and Mesh runtime `e69761b` (documentation
+revision `1766c7e` does not change that runtime). The controlling requirements are
+[I25/E1d/E8 and H1–H8](deliverables.md). It follows the actual resident decode
+producer/consumer chain, not the deleted executor or a hypothetical CPU consumer.
+It adds no benchmark, runtime instrumentation, or new acceptance requirement.
+
+**Verdict:** complete native recording removes the per-layer host encoding walk.
+It does not establish the transport's dependency-depth/line budgets, eliminate
+rearm allocation, or establish the E2B latency floor. Several remaining failures
+are identifiable from source and generated machine code without execution. The
+five-Metal-call count is one component, not the runtime cost of the whole step.
+
+## What the measurements mean
+
+Latency follows the longest causally dependent path. Total FLOPs, bytes, source
+lines, function names and the number of small structs do not measure that path.
+For every measurement, name both its trigger and first externally useful effect.
+
+| Structural measurement | What it establishes | What must be included |
+| --- | --- | --- |
+| Dependent-load depth | How many address-dependent memory accesses cannot start together | Ring selection, record lookup, closure context, operand resolution and spills that supply an address |
+| Metadata footprint | Which memory locations must become available before the effect | Both reads and writes; hot-field extent and alignment; no relabeling tags or addresses as payload |
+| Executed instructions and call boundaries | Work on the selected path, including empty wrappers | Optimized native code, taken branches, ARC/Objective-C calls, stack spills and restores |
+| Branches and loop bounds | Work that can postpone the first effect | Distinguish numerical dependencies, native refusal, queue scanning, optional diagnostics and lifecycle predicates |
+| Serialization edges | Which events are prerequisites rather than concurrent work | Device barriers, host wakeups, queue order, collective hops and rearm before reuse |
+| Runtime allocation and materialization | Work placed between invocations or before consumption | Command/encoder objects, blocks, arrays, payload copies and address reconstruction |
+| Scaling with layers, peers, tiles and streams | Whether a fixed-looking helper hides growing work | CPU and GPU costs separately; a bulk API may still walk its resources |
+
+A pass requires satisfying the relevant budget on the complete named path, not
+just removing one load in a helper. Structural evidence can establish that work
+is absent, or disprove a budget. It cannot convert an unspecified cache miss,
+provider call or device fence into a nanosecond guarantee.
+
+The goal's 32-byte record budget and a machine cache line are distinct measures.
+`sysctl hw.cachelinesize` reports **128 bytes on both machines**. This is a CPU
+property, not a GPU cache-line measurement. A 32-byte aligned record fits within
+one such CPU line; several independently allocated records do not thereby share
+one line. Likewise, six load instructions need not cause six cache misses.
+Reports below name address regions and actual field extents rather than inventing
+cache residency from byte counts.
+
+## The execution and data flow
+
+Setup selects the caller's placement, realizes weights and operand addresses,
+binds native functions and registers transport storage. Per Mesh frame, the
+engine records embedding, the PLE prefix, all numerical layers, direct partial
+publication/sum, final projection and the root sampler in one native ICB.
+Recording does not execute the tensor functions.
+
+The metadata dependency initially makes the rank's resident command buffer
+eligible to commit. Within each layer, every rank computes its full attention,
+normalization and residual work, then its configured FFN-column slice. The
+existing `mesh_add` kernel first makes that local down-projection partial visible
+and publishes its prepared send targets. Dedicated TX threads post those sends.
+The kernel then consumes available remote terms and finishes the local sum;
+PLE/layer finishing produces the next layer's hidden input.
+
+RX writes the actual received page's mapping/address values into the logical
+page entry, then publishes its presence. **This ordinary E2B FFN receive does not
+wake a CPU worker or submit another command buffer.** Its GPU consumer is already
+resident. The older H audit's generic RX → worker → launch chain is not the
+within-layer chain here. Worker launch still matters at step entry; worker rearm
+still matters between steps.
+
+Vocabulary projections are tiled and published to rank 0. The existing indexed
+sampler consumes those operands. Replicated sampling and its changing policy are
+not implemented. Kernel count, vocabulary communication and actual arithmetic
+are not reduced merely by recording them together.
+
+For a layer, a useful dependency model is
+
+```
+local term_i = FFN_slice_i(attention_i(hidden))
+arrival_(i→j) = publication_i + TX_i + wire_(i→j) + RX_j + acquisition_j
+next hidden_j = finish_j(sum of local term_j and arriving remote terms)
+```
+
+The next layer depends on that completed numerical sum. Sending attention or
+normalization results to avoid cheap repeated arithmetic would add another
+serial communication edge; I25 says not to do that when recomputation is cheaper.
+Removing host encoding affects rearm between steps. Removing a TX/RX dependent
+load affects a layer's communication edge. These are different contributions;
+one cannot stand in for the other.
+
+## Rearm: what five Metal calls left out
+
+[Engine source](../../../metal-microbench/matrix_operations.swift),
+[resident rearm](../swift/Mesh.swift), and optimized Swift SIL/ARM64 distinguish
+three paths:
+
+1. Mesh's launch thunk loads `call.index`, loads the prepared command-buffer
+   object and tail-calls `commit`: **four instructions, two load instructions,
+   no stack frame**. This is the thunk alone, not worker polling or Metal's commit.
+2. Mesh rearm still calls `commandBufferWithUnretainedReferences`, reads the frame
+   completion callback, bridges it through `_Block_copy`, registers the handler,
+   reads `encoders[index]`, invokes it and replaces the stored command buffer.
+   Its compiled frame is **144 bytes**. Array count checks, `swift_beginAccess`,
+   retain/release calls and the block copy remain. There is still one new command
+   buffer per frame reuse. H8's rearm-allocation deletion is not complete.
+3. The engine's ordinary recorded-range invocation uses the five Metal methods
+   previously reported. Its actual native path also calls the diagnostic-mode
+   predicate, retains the autoreleased encoder and releases it afterward.
+
+The native range invocation, with diagnostics false and successful encoder
+creation, has the following **compiled caller-body** account:
+
+| Item | Count |
+| --- | ---: |
+| ARM64 instructions, including prologue/epilogue but excluding callee bodies | 50 |
+| Load instructions, including paired loads and restores | 13 |
+| Store instructions, including spills | 7 |
+| Metal method calls | 5 |
+| Other call boundaries | 3: mode predicate, autorelease retain, object release |
+| Conditional branches | 2: diagnostic selection, encoder-result nil trap |
+| Stack frame | 112 bytes |
+| Captured-context load instructions | 6, reading 11 64-bit fields over offsets 16–111 |
+| Layer/dispatch-description traversal on this branch | 0 |
+
+The input and output resource-array lengths are captured values. Their native
+base addresses are formed directly; there is no Swift element traversal. But
+`useResources` receives arrays of resources, so **five API calls is not evidence
+of constant driver work independent of resource count**. Native ICB processing,
+Objective-C dispatch and device scheduling remain outside the counted body.
+The command/encoder objects still have runtime lifecycles. The assembly also
+shows that the optional inspection target is loaded even when inspection is off;
+recording has not magically removed all metadata from the invocation.
+
+The [before/after count](../../../metal-microbench/docs/async_collectives.md#whole-step-native-recording)
+remains useful: for the stated B=1 native E2B configuration, 251/250 compute
+encoders become one per rank, and the 35-entry layer walk disappears. It is a
+structural reduction in rearm. The count does not justify declaring rearm free,
+the entire runtime constant-work, or H7/E8 passed.
+
+## TX: successful post versus finding the event
+
+In [`link_send_progress` / `link_publications`](../rdma/mesh-flow.c), the thread
+holds the SEND-array base and the reader header in registers across iterations.
+For a nonempty event and a successful first post, the compiled path from the
+event's nonempty check through the native `post` call is:
+
+```
+clear event slot; reload/increment reader position
+load indexed SEND extent and chunk count
+load SEND span address and tag row; write the wire tag
+load prepared queue-pair and native post target; call post
+```
+
+That selected in-library path is **30 instructions, six load instructions and
+four store instructions**, including the invocation spill. It has two conditional
+branches before posting: nonempty event and nonempty SEND range. There is no
+pending-range enqueue/reload on this successful first-post path.
+
+The SEND fields read before the native call occupy offsets **0–47** of its
+128-byte-aligned record: **two 32-byte budget units, one reported CPU line**.
+The complete native-containing allocation is 256 bytes; the provider's own WR,
+SGE, queue-pair and doorbell accesses are not included in the 30 instructions.
+After the event integer is available, this part has one indexed SEND-record
+load stage; it no longer chases a queue object to discover its post function.
+
+However, discovering that integer still follows
+
+```
+reader.inputs[cursor] → input.slots[position & mask] → SEND[event]
+```
+
+There are **three serial load stages starting at the selected input descriptor**.
+The input descriptor, slot, SEND header, written tag and spill are separate
+address regions. The reader also probes up to P streams. P is a realized-plan
+quantity; this analysis does not invent P=1 from the fact there is one TX thread.
+The whole TX path therefore has not met H1/H7's one-record/one-line requirement.
+
+Before scanning new publications, the TX thread calls `mesh_send_progress`.
+That polls each QP and drains pending native-refusal retries. Reference-count
+retirement has been moved off this thread, but queue polling/retry work remains
+before a newly noticed publication. The structural delay includes preceding CQ
+polls, accepted retry posts and stream probes; it is not bounded by the short
+first-post body alone. An empty wrapper count cannot establish immediate drainage.
+
+## RX and the resident consumer
+
+For the common final FFN chunk with no forwarding bindings and no host notices,
+the compiled path from CQ poll return to the presence store is **33 instructions,
+12 load instructions and four stores**. It still contains six conditional
+branches: poll error, empty CQ, completion status, forwarding count, final-row
+identity and notice count. Some are native-result checks; the others must not be
+hidden by saying “the path has no guards.”
+
+The essential dependency chain is
+
+```
+wc.wr_id → posted-buffer tag → records[tag] → logical page-entry stores
+```
+
+After `wr_id` is in a register, there are **two successive metadata-load stages**
+before the logical entry is known; H7 allows one. The cached physical receive
+values beside the tag remove affine reconstruction, but do not remove the
+second logical-record lookup. Before the presence store, RX writes three fields:
+`mapping`, host `address`, and `device` address. The path also reloads its page
+array base from the stack. At least the CQ slot, posted-buffer header, logical
+record, receive descriptor, destination page entry and stack are involved; these
+are not one metadata line. Both 32-byte receive records have useful compactness,
+but that does not collapse their serial dependency.
+
+The resident shader loads its source-page addresses before polling, checks each
+incoming presence word and selects an unused available peer. After selection,
+`mesh::contiguous` still loads `pages[k].address` before reading the payload.
+Thus there is **at least one remaining page-address load before the consumer's
+first payload load**, including when the whole FFN partial fits one page. This
+fails H6's zero-runtime-page-table-read target. That load is a memory-resolution
+cost, not numerical work. Recording commands does not change it.
+
+The full GPU consumer also retains visibility fences, peer selection and the
+summation. The E1d resident presence dependency is explicit; it must not be
+confused with a library-inserted host barrier. Nor does that permission make every
+lookup around it free. The shader is unchanged by `fb3bab4`.
+
+RX posts available replacement receives after processing a completion. It drains
+`receive.pages[head]` through `requests[page]`, and availability is supplied by
+retirement. It does not re-post the completed logical record directly. That is a
+second unresolved H3/H6 difference. The post loop can precede polling the next
+QP; preposting and queue-drain order must be counted as well as the presence store.
+
+## GPU publication and numerical serialization
+
+For B=1 E2B, a down-projection partial is 1536 FP16 values. Before publication the
+supplied sum kernel touches **768 32-bit words with a coherent read and write**,
+then executes a device-memory threadgroup barrier. Publication reads its
+sequence, walks its declared targets and advances the target positions. Each
+`push` has two system-scope fences; publication adds its presence store and
+another fence. These are actual operations in the latency path, even though
+there is no extra host command-buffer submission.
+
+This analysis does not assume those coherence operations may be dropped without
+changing producer stores. It identifies where the cost is, so compatibility with
+the visibility contract can be addressed at the actual producer/transport
+boundary rather than concealed in a claim of “zero copy.”
+
+The native command barriers preserve the previous numerical ordering: projection
+before normalization/use, KV write before attention, FFN down projection before
+publication/sum, sum before finishing, and layer output before the next layer's
+input. They replace boundaries between prior separate compute encoders. The
+source still contains device barriers and resident polling; it does not have
+“zero synchronization instructions.” A serial edge should be retained only for
+a real data/visibility dependency or explicitly requested instrumentation.
+
+## What is established and what remains to implement
+
+| Requirement/property | Current structural verdict |
+| --- | --- |
+| Per-layer host command/descriptor walk in ordinary native E2B replay | Removed; zero traversal, one recorded-range execution |
+| No backend numerical reimplementation for Mesh | Existing engine command descriptions are shared by ordinary and Mesh bindings |
+| Prepared native post target and stackless resident launch thunk | Present; narrow properties, not full H passes |
+| H1/H7 complete TX path | Unmet: stream selection/probing, extra metadata regions, pre-scan progress work |
+| H3/H7 RX path | Unmet: tag → logical-record lookup and metadata writes before presence |
+| H6 consumer operand access and receive placement | Unmet: runtime page-address reads and return-order reposting |
+| H8 rearm allocation | Unmet: native command-buffer/encoder lifecycle and handler bridging remain |
+| E1d communication and policy | Incomplete: rank-0 vocabulary consumption and non-replicated sampler policy |
+| E8 nanosecond/step-latency thresholds | Not established by instruction counts or source structure |
+
+The next implementation work is constrained by these findings: remove complete
+resolution stages through prepared terminal targets and addresses; remove work
+that precedes publication/CQ drainage without a data dependency; account for the
+whole rearm lifecycle rather than only its encoder body; and finish E1d's actual
+policy/dataflow. Moving a lookup behind a new descriptor or bulk function does
+not satisfy any of those items. Any subsequent reduction must recount the same
+trigger-to-effect path, including what moved into a callee.
+
+## Evidence and reproducibility
+
+The C and Mesh Swift evidence is emitted by the existing
+`make -C rdma native-audit` target. The engine evidence uses:
+
+```
+swiftc -O -whole-module-optimization -emit-sil \
+  matrix_operations.swift matrix_shaders.swift parameter_configuration.swift \
+  -o /tmp/whole-step-matrix.sil
+swiftc -O -whole-module-optimization -emit-assembly \
+  matrix_operations.swift matrix_shaders.swift parameter_configuration.swift \
+  -o /tmp/whole-step-matrix.s
+```
+
+The replay count follows `MetalProgram.bind`'s `cfU11_TA`, ordinary branch, and
+includes its prologue/epilogue. The TX count follows `_link_send_progress` from
+the nonempty-event branch through its first accepted `blr`; the RX count follows
+`_link_receive_progress` from CQ return through the no-forward/no-notice final-row
+presence store. Callee bodies and alternate paths are explicitly excluded from
+those scoped instruction totals. Paired loads/stores count as one instruction;
+dependent stages are counted separately by following their address operands.
+The selected instruction lists are in `/tmp/whole-step-structural-paths.txt`.
+
+All three engine targets built from `fb3bab4` locally and on the Mini. No model
+workload, endpoint timing or runtime trace was run for this account.
