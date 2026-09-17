@@ -245,6 +245,162 @@ source still contains device barriers and resident polling; it does not have
 “zero synchronization instructions.” A serial edge should be retained only for
 a real data/visibility dependency or explicitly requested instrumentation.
 
+## Queue work before the counted path
+
+The short TX/RX instruction counts start after discovery. The user's latency
+requirement starts when work becomes available. These boundaries differ in the
+current implementation. The following loops are in
+[`mesh-flow.c`](../rdma/mesh-flow.c); the stream reader is in
+[`mesh.h`](../rdma/mesh.h).
+
+| Newly available work | Work that can precede its inspection in the owning thread | Structural dependence |
+| --- | --- | --- |
+| Published SEND event | `mesh_send_progress` polls QPs and drains each QP's pending SEND ranges before `link_publications` | QP count and the number of accepted pending chunks; retries also read/write their range ring |
+| Another published SEND event | `link_publications` finishes the selected event's ranges and chunks before taking another event | The selected event's native request count; one event can represent multiple requests |
+| SEND CQ completion | `link_publications` keeps taking events until its reader returns empty, unless a native refusal invokes progress sooner | Accepted publication traffic can postpone the next regular CQ sweep |
+| RX CQ completion on the next QP | `link_receive_post` drains returned pages for the current QP before the next poll | Returned-page count and successful native reposts |
+| Event in a later publication stream | `mesh_event_take` visits preceding stream descriptors and their current slots | Up to P probes for one call to the reader |
+| New worker arrival during rearm | `mesh_call_progress` drains its return loop, including native command-buffer creation and encoding, before inspecting arrivals again | Completed-call backlog and actual rearm work |
+
+The finite configured storage bounds how much outstanding work can exist. That
+does not establish a constant amount of work ahead of a particular event, and a
+loop reading a concurrently advancing producer can receive more work while it
+drains. None of the short-path counts is a bound on these preceding loops.
+For example, a pending range is removed, advanced by one chunk and appended again
+until exhausted or refused. The TX thread can therefore post every remaining
+chunk of earlier pending ranges before inspecting a newly published value.
+
+This is observable control flow without a timer: availability of event B does
+not cause its inspection until the current loop over A finishes. A
+`wait`/`synchronize` name search misses this serialization completely. Native
+refusal handling is necessary; choosing to finish an entire software batch before
+looking at independent work is a separate scheduling decision.
+
+Dedicated threads remove competition with numerical work on those threads. They
+do not remove competition among the thread's own queues. Moving retirement off
+TX/RX removed its instructions there. It did not remove these loops. Conversely,
+simply swapping the publication and completion sweeps would change who is delayed
+without eliminating the batch-dependent delay. A replacement must account for
+every queue's next useful operation, including receive replenishment.
+
+## How the paths compose across 35 layers
+
+The actual caller is [`bindMeshDecodeStep`](../../../metal-microbench/mesh_layer.swift).
+Its setup loop declares one full-shaped FFN term per rank per layer and sends it
+directly to every other rank. The supplied `mesh_add` consumes each remote term
+as it becomes available. It does not route each term through a reduction owner
+and then broadcast the result.
+
+For layer l and rank r, let U[l,r] be the time its local FFN term finishes. Let
+V[l,s,r] be the time rank r can first read rank s's term. The causal path for that
+remote term is
+
+```
+U[l,s]
+  -> coherent producer publication
+  -> TX discovers the event and posts its native requests
+  -> link transfers the term
+  -> RX discovers completion and publishes its address/presence
+  -> resident consumer acquires presence and resolves the address
+  -> V[l,s,r]
+```
+
+Each arrow must include work already ahead of the event, as well as the event's
+own instructions. The first-byte endpoint also does not imply that the whole
+term has been consumed. For the current B=1 FFN term, the 3072-byte term fits the
+configured transport block, so this example needs one native chunk.
+
+The source's actual sum is sequential over selected peers, while arrivals are
+concurrent. Let pi[k] be the peer selected for the k-th addition; it need not be
+rank order. Let A[l,r,k] include the selection and addition work after both its
+operands are usable. Then the dependency recurrence is
+
+```
+R[0] = time the local term has completed its publication path
+R[k] = max(R[k-1], V[l,pi[k],r]) + A[l,r,k]    for k = 1 .. N-1
+H[l+1,r] = R[N-1] + layer finishing work
+U[l+1,r] = H[l+1,r] + next attention/normalization/FFN-slice work
+```
+
+This explains both the streaming benefit and the limit: earlier additions can
+finish before the last term arrives, but the next layer still needs the
+completed numerical sum. There is no host launch between these layer terms.
+No overlap credit is assigned to unmeasured work; the recurrence states the
+dependencies that would permit overlap. It is an analysis of the supplied
+function and its operands, not another runtime component.
+
+For 35 layers and N ranks, excluding vocabulary and step metadata:
+
+| Work | Occurrences per rank per decode step |
+| --- | ---: |
+| Local FFN publication | 35 |
+| Direct outgoing FFN deliveries | 35(N-1) |
+| Incoming FFN terms and their address resolution | 35(N-1) |
+| Resident sum kernels on the multi-rank path | 35 |
+| Host launches triggered by these incoming FFN terms | 0 |
+| Whole-step command-buffer creation on frame reuse | 1 |
+
+The sum recurrence, rather than adding all ranks' elapsed work, determines the
+critical path. If an extra delay delta is exposed on the last-arriving term of
+each layer, it adds **35 delta** to the step. An illustrative 1 microsecond per
+layer is 35 microseconds; 10 microseconds is 350 microseconds. These are arithmetic
+consequences, not measured costs assigned to a load or a function call. A change
+on an input that still arrives before its consumer needs it may have no effect
+on that particular step's completion time; it still has to meet H's per-event
+budget.
+
+Using only [I25/E8's stated assumptions](deliverables.md), 35 crossings at
+12 microseconds consume 420 microseconds of the 500-microsecond allowance.
+That leaves 80 microseconds in that favorable accounting, about 2.29 microseconds
+per layer if nothing else used it. Step entry, vocabulary, acquisition and rearm
+cannot each spend that same remainder. This arithmetic is why a new per-layer
+host callback or communication round cannot be dismissed as small. It does not
+establish the actual link floor or a timing pass.
+
+The whole-step endpoint also includes two paths absent from an FFN-only count:
+
+- [`MeshDecodeGraph`](../../../metal-microbench/bootstrap.swift) broadcasts step
+  metadata from rank 0. A follower derives its token/KV inputs on its CPU worker
+  before committing its resident buffer. That is a startup communication and
+  worker dependency on each step, separate from the 35 resident layer crossings.
+- Vocabulary scopes are sent to rank 0. Its
+  [`sampling_values`](../../../metal-microbench/kernels.swift) acquires each
+  required scope and still resolves its page address. The ordinary sampler then
+  combines its vocabulary-wide partial statistics. Followers do not sample the
+  next token themselves. Thus the requested replicated-policy/replicated-sampling
+  continuation is still absent, even though FFN exchange is direct all-to-all.
+
+The supplied numerical algorithms determine the sum and sampling dependencies.
+Mesh's representation and scheduling determine the extra work on their edges.
+I25's instruction to repeat cheap computation avoids introducing another edge;
+it does not justify interpreting all collective verbs as the same operation.
+
+## What a subsequent reduction has to demonstrate
+
+Use the same endpoints, caller configuration and native compilation settings
+before and after a change. Follow each load's address in generated code: loads
+whose addresses depend on an earlier result form serial stages; independent
+fields in one known record do not. Include stack traffic and call targets. An
+inlined helper can retain every dependent access; an uninlined wrapper can add
+an actual call and frame. Neither source spelling establishes the result.
+
+For a moved operation, record its new reader and when it executes. A lookup
+removed from RX but required before the consumer's first payload read remains
+on the arrival-to-use path. An allocation removed from launch but required
+before frame reuse remains on the step recurrence. A lookup resolved only at
+setup, with its terminal operand used directly thereafter, is a runtime deletion.
+Runtime metadata bytes, payload traffic and serialization depth must be reported
+separately, so a smaller allocation cannot substitute for deleting a stage.
+
+The required evidence for this caller is therefore: actual load chains through
+first payload use; native instructions and callee boundaries; preceding queue
+work and its bounds; numerical versus added serialization edges; allocation and
+resource lifetimes through reuse; and their multiplicities over the whole step.
+Native provider/Metal method costs and GPU execution times remain unspecified
+where their bodies have not been examined. An unspecified cost stays in the
+account; it is never entered as zero. Source already establishes the failures
+above, so resolving those failures does not depend on a runtime experiment.
+
 ## What is established and what remains to implement
 
 | Requirement/property | Current structural verdict |
