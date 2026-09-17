@@ -1177,6 +1177,10 @@ inside its existing attention command buffer. A rank with no attention heads
 executes it before its FFN stage, using the original hidden inputs already bound
 to that stage; `missingKV` prepares that input normalization and the existing KV
 function. The Metal and Core ML FFN compositions both use this preparation.
+The existing prefill matrix views request half-precision conversion explicitly
+from `realizeDenseMatrix` at setup; the packed weight buffers and decode functions
+remain unchanged. Prefill can therefore be constructed without switching the
+engine-wide backend just to satisfy its weight-view representation.
 The FFN partial is published only after that command buffer completes, so the
 existing FFN reduction dependency also carries the completed KV write. No extra
 collective, host callback or command buffer is introduced.
