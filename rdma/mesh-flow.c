@@ -27,7 +27,7 @@ struct mesh_receive_record {
   _Alignas(32) struct mesh_page_entry *entry;
   struct mesh_publication *publication;
   struct mesh_send_binding *sends;
-  uint32_t send_count,row;
+  uint32_t send_count,chunk;
 };
 _Static_assert(sizeof(struct mesh_receive_record)==32 && _Alignof(struct mesh_receive_record)==32,"mesh_receive_record");
 struct mesh_receive {
@@ -239,8 +239,8 @@ static int link_configure(void *state,int socket,uint64_t client){
         for(uint32_t chunk=0;chunk<chunks;chunk++){
           struct mesh_receive_record *record=&receive->records[peer[i].local_row+value*peer[i].stride+chunk];
           *record=(struct mesh_receive_record){
-            .entry=mesh_page(m)+row+chunk,.publication=chunk+1==chunks?publication:NULL,
-            .sends=receive->sends+next_send,.row=row};
+            .entry=mesh_page(m)+row,.publication=chunk+1==chunks?publication:NULL,
+            .sends=receive->sends+next_send,.chunk=chunk};
           size_t first_send=next_send;
           for(uint32_t region=first_region;region<first_region+regions;region++)for(uint32_t j=0;j<publication->sends;j++){
             struct mesh_link *out=&link->links[(targets[j].stream-send_first)/m->notice_bytes];
@@ -325,7 +325,7 @@ static int mesh_send_progress(struct mesh_link *link,struct mesh_send_edge *edge
   return 0;
 }
 /* design/algorithm-sources.md#programcopy */
-static int mesh_receive_progress(struct mesh_link *link,struct mesh_free_ring *retirements){
+static int mesh_receive_progress(struct mesh_link *link,struct mesh_free_ring *retirements,struct mesh_page_entry *pages){
   struct hdr *m=link->M;struct mesh_verbs *v=&link->provider;
   struct ibv_wc *completions=v->completions+MESH_RECEIVE;
   for(uint32_t q=0;q<(uint32_t)link->qps;q++){
@@ -344,17 +344,18 @@ static int mesh_receive_progress(struct mesh_link *link,struct mesh_free_ring *r
       uint32_t block=region*receive->region_blocks+slot,page=receive->page_base+block*receive->block;
       uint32_t invocation=(uint32_t)(tag_value>>32);
       struct mesh_receive_record record=receive->records[(uint32_t)tag_value];
-      atomic_store_explicit(&record.entry->mapping,((uint64_t)(block+receive->pool_offset)<<32)|page,memory_order_relaxed);
-      atomic_store_explicit(&record.entry->address,receive->client_data+((uintptr_t)page<<receive->page_shift),memory_order_relaxed);
-      atomic_store_explicit(&record.entry->device,device_address,memory_order_relaxed);
+      struct mesh_page_entry *entry=record.entry+record.chunk;
+      atomic_store_explicit(&entry->mapping,((uint64_t)(block+receive->pool_offset)<<32)|page,memory_order_relaxed);
+      atomic_store_explicit(&entry->address,receive->client_data+((uintptr_t)page<<receive->page_shift),memory_order_relaxed);
+      atomic_store_explicit(&entry->device,device_address,memory_order_relaxed);
       struct mesh_send_binding *sends=record.sends+(size_t)region*record.send_count;
       for(uint32_t j=0;j<record.send_count;j++){
         struct mesh_send_binding binding=sends[j];
         binding.target->addr=(uintptr_t)tag;binding.target->lkey=binding.key;
       }
       if(record.publication){
-        mesh_publish(m,record.publication,(uint64_t)invocation+1);
-        atomic_store_explicit(&retirements->slots[retirements->position++&retirements->mask],record.row+1,memory_order_release);
+        mesh_publish(m,record.publication,record.entry,(uint64_t)invocation+1);
+        atomic_store_explicit(&retirements->slots[retirements->position++&retirements->mask],(uint32_t)(record.entry-pages)+1,memory_order_release);
       }
     }
     int error=link_receive_post(queue,&link->receive[q]);
@@ -437,7 +438,8 @@ static void *link_retire_progress(void *argument){
       uint32_t row=(uint32_t)event;
       struct mesh_buffer *buffer=&mesh_buffers(m)[row];
       struct mesh_page_entry *entries=mesh_page(m)+row;
-      uint32_t frame=buffer->frame,invocation=buffer->invocation,count=buffer->completions;
+      uint32_t frame=buffer->frame,count=buffer->completions;
+      uint32_t invocation=(uint32_t)(atomic_load_explicit(&entries->stamp,memory_order_relaxed)-1);
       uint64_t tail=atomic_load_explicit(&receive->tail,memory_order_relaxed);
       for(uint32_t chunk=0,chunks=buffer->pages/m->block;chunk<chunks;chunk++){
         receive->pages[tail++&receive->mask]=(uint32_t)(atomic_load_explicit(&entries[chunk].mapping,memory_order_relaxed)>>32);
@@ -458,9 +460,10 @@ static void *link_retire_progress(void *argument){
 static void *link_receive_progress(void *argument){
   struct mesh_link *link=argument;
   struct mesh_free_ring *retirements=link->retirements[MESH_RECEIVE];
+  struct mesh_page_entry *pages=mesh_page(link->M);
   pthread_setname_np("mesh.rdma.receive");
   while(atomic_load_explicit(&link->progressing,memory_order_acquire))
-    if(mesh_receive_progress(link,retirements))break;
+    if(mesh_receive_progress(link,retirements,pages))break;
   return NULL;
 }
 

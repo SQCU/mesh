@@ -124,7 +124,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
     atomic_store_explicit(&buffer->references,0,memory_order_relaxed);
     atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
     buffer->return_slot=0;buffer->return_index=r;buffer->publisher=(uint64_t)r+1;
-    buffer->initial=buffer->pages=buffer->invocation=buffer->completions=0;buffer->channel=MESH_ABSENT;
+    buffer->initial=buffer->pages=buffer->completions=0;buffer->channel=MESH_ABSENT;
     struct mesh_publication *publication=mesh_publication_at(c->M,r);
     publication->sends=publication->uses=0;publication->row=r;
     atomic_store_explicit(&buffer->owner,c->client,memory_order_release);
@@ -260,13 +260,11 @@ struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t q
 }
 
 /* design/algorithm-sources.md#programkernel_call */
-void mesh_publish(struct hdr *m,struct mesh_publication *publication,uint64_t stamp){
+void mesh_publish(struct hdr *m,struct mesh_publication *publication,struct mesh_page_entry *entry,uint64_t stamp){
   struct mesh_target *targets=publication->targets;
   uint32_t sends=publication->sends,invocation=(uint32_t)(stamp-1);
   for(uint32_t i=0;i<sends;i++)mesh_event_push(m,targets[i].stream,targets[i].index,invocation);
-  uint32_t row=publication->row;
-  atomic_store_explicit(&mesh_page(m)[row].stamp,stamp,memory_order_release);
+  atomic_store_explicit(&entry->stamp,stamp,memory_order_release);
   uint32_t end=sends+publication->uses;
   for(uint32_t i=sends;i<end;i++)mesh_event_push(m,targets[i].stream,targets[i].index,invocation);
-  mesh_buffers(m)[row].invocation=invocation;
 }

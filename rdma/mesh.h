@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 78u
+#define MESH_VERSION 79u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_EVENT_ABSENT UINT64_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
@@ -24,7 +24,7 @@ struct mesh_buffer {
   uint32_t initial,pages,channel,return_index;
   _Atomic uint64_t owner;
   uint64_t return_slot;
-  uint32_t invocation,completions;
+  uint32_t completions;
   union {uint64_t publisher;uint32_t frame;};
 };
 _Static_assert(sizeof(struct mesh_buffer)==64 && _Alignof(struct mesh_buffer)==64,"mesh_buffer");
@@ -81,7 +81,7 @@ struct hdr {
   _Atomic uint64_t client,bridge_pid,device_client,serial,retired;
   struct mesh_port_info port;
 };
-void mesh_publish(struct hdr *,struct mesh_publication *,uint64_t stamp);
+void mesh_publish(struct hdr *,struct mesh_publication *,struct mesh_page_entry *,uint64_t stamp);
 /* design/algorithm-sources.md#meshresult */
 static inline struct mesh_instance *mesh_instances(struct hdr *m,uint64_t owner){return (struct mesh_instance *)((char *)m+m->instance_off)+(owner>>63)*m->rows;}
 /* design/algorithm-sources.md#meshresult */

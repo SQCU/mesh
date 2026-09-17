@@ -877,6 +877,16 @@ updates remain. The
 [native assembly account](h-audit-2026-09-16.md#follow-up--transport-retirement)
 records the local change without claiming the H budgets or measured latency.
 
+ABI 79 deletes `mesh_buffer.invocation`. The canonical presence stamp already
+contains `invocation + 1`; the retirement thread reads it after the final use
+returns and before clearing it in `mesh_buffer_reset`. The retained RX reference
+prevents reuse while publication is still issuing its declared notifications.
+The return event's release/acquire handoff follows the final reference decrement,
+so retirement can use the existing stamp without another publisher store.
+Local GPU publishers already wrote only that stamp. CPU/RX publication now accepts
+the page entry already held by its completion operand or receive record, eliminating
+the row-to-page lookup inside `mesh_publish` as well.
+
 ## Placement
 
 Pitch Patarasuk and Xin Yuan,
@@ -1080,6 +1090,13 @@ The JAX authors' Pallas indexing and the llama.cpp authors'
 [GGUF format](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md):
 references for indexed operands and the existing model loader.
 
+The engine's embedding gather uses grid coordinates `(batch row, section)`:
+`output[(section * rows + row) * width + component] = table[token[row] * stride + section * width + component]`.
+This is the same indexed gather for ordinary embeddings and E2B per-layer inputs.
+One grid replaces the layer-by-layer host dispatch loop; the layer-major contiguous
+operands used by downstream numerical functions are unchanged. No new arithmetic
+kernel, transport behavior or model interpretation is added to Mesh.
+
 ## collective.sync_on_remote_fill
 
 The MPI Forum's [communication completion](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node74.htm):
@@ -1202,7 +1219,10 @@ set before execution. Finalization follows event-stream realization and precedes
 transport start. Send indexes were already fixed by `mesh_transfers_prepare`;
 stream offsets and consumer indexes are resolved by `mesh_calls_start`.
 
-`MeshMetalFrame.publish` encodes the MLX-style coherent payload pass, a device
+`MeshMetalFrame.publication` binds the payload spans, counts and terminal target
+bindings at setup and returns the encoder used by the supplied numerical function.
+The old per-recording operand-to-buffer-array construction and geometry queries
+are deleted. The bound encoder still encodes the MLX-style coherent payload pass, a device
 buffer ordering operation and GPU publication. The GPU sends directly to the
 prepared TX streams, then writes the canonical presence word and local consumer
 streams. Each GPU target is 32 bytes containing the terminal position/slot

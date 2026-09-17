@@ -738,29 +738,37 @@ public final class MeshMetalFrame {
     }
 
     // design/algorithm-sources.md#resident-metal
-    public func publish(_ output: Int, on command: MTLCommandBuffer) {
-        let encoder = command.makeComputeCommandEncoder()!, operand = outputs[output]
-        encoder.setComputePipelineState(coherent)
+    public func publication(_ output: Int) -> (MTLCommandBuffer) -> Void {
+        let operand = outputs[output]
         let buffers = operand.data.map { [$0] } ?? Array(operand.resources.prefix((operand.bytes + operand.quantum - 1) / operand.quantum))
         var remaining = operand.bytes
-        for buffer in buffers {
+        let spans = buffers.map { buffer -> (MTLBuffer, UInt32) in
             let bytes = min(remaining, buffer.length)
-            var count = UInt32((bytes + 3) / 4)
-            encoder.setBuffer(buffer, offset: 0, index: 0)
-            encoder.setBytes(&count, length: 4, index: 1)
-            encoder.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: min(256, coherent.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
             remaining -= bytes
+            return (buffer, UInt32((bytes + 3) / 4))
         }
-        encoder.memoryBarrier(scope: .buffers)
-        encoder.setComputePipelineState(signal)
-        encoder.setBuffer(operand.table, offset: operand.offset, index: 0)
-        encoder.setBuffer(sequence, offset: sequenceOffset, index: 1)
-        encoder.setBuffer(targets[output].0, offset: 0, index: 2)
-        var counts = targets[output].1
-        encoder.setBytes(&counts, length: 8, index: 3)
-        encoder.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
-        encoder.endEncoding()
+        let width = min(256, coherent.maxTotalThreadsPerThreadgroup)
+        let target = targets[output], table = operand.table, offset = operand.offset
+        return { [coherent, signal, sequence, sequenceOffset] command in
+            let encoder = command.makeComputeCommandEncoder()!
+            encoder.setComputePipelineState(coherent)
+            for (buffer, words) in spans {
+                var count = words
+                encoder.setBuffer(buffer, offset: 0, index: 0)
+                encoder.setBytes(&count, length: 4, index: 1)
+                encoder.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+            }
+            encoder.memoryBarrier(scope: .buffers)
+            encoder.setComputePipelineState(signal)
+            encoder.setBuffer(table, offset: offset, index: 0)
+            encoder.setBuffer(sequence, offset: sequenceOffset, index: 1)
+            encoder.setBuffer(target.0, offset: 0, index: 2)
+            var counts = target.1
+            encoder.setBytes(&counts, length: 8, index: 3)
+            encoder.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+            encoder.endEncoding()
+        }
     }
 
     // design/algorithm-sources.md#resident-metal
