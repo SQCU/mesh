@@ -657,6 +657,16 @@ multiply/shift quotient for these exact multiples. This is setup specialization
 of the same Apple/rdma-core registered-memory mechanism, with no replacement
 provider, dynamic address cache or new ownership protocol.
 
+The subsequent [prepared physical receive values](pages-and-functions.md#prepared-physical-receive-values)
+remove that physical-page/address reconstruction from completion. The posted
+buffer's known pool index, physical page and client address are stored beside its
+existing local GPU address and received tag. Apple's shared `mmap` mechanism
+cited under [Program.tensor](#programtensor) makes the registered tag alias and
+canonical local metadata refer to the same backing. Completion loads terminal
+values from that one 32-byte span and scatters them into the tag-selected logical
+entry. No extra allocation, lookup, transmitted metadata or readiness condition
+is added. The existing region selector for forwarding keys remains.
+
 Apple's installed SDK `infiniband/verbs.h` implements `ibv_post_send`,
 `ibv_post_recv` and `ibv_poll_cq` as calls through the handle's
 `context->ops` field. Mesh resolves those exact function pointers when the

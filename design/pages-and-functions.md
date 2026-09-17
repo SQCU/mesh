@@ -1150,6 +1150,47 @@ source total is 2,713 lines over the same eleven maintained library files,
 up from 2,704. The full receive path still includes publication, native request
 selection and return bookkeeping; these changes do not close H3/H5/H7 or N1.
 
+### Prepared physical receive values
+
+The registered buffer chosen by each posted RECV already fixes its physical
+page, pool view index and client address. Completion no longer derives these
+from the registered alias's region, page shift, block reciprocal and pool base.
+Configuration writes their terminal values into the unused words immediately
+before the existing local device-address word and eight-byte wire tag:
+
+| offset from returned tag address | local value |
+|---|---|
+| -24 | `(uint64(poolIndex) << 32) | physicalPage` |
+| -16 | `clientBase + physicalPage * pageBytes` |
+| -8 | existing GPU address, supplied by `mesh_device_bind` |
+| 0 | existing received invocation/source-chunk tag |
+
+This aligned 32-byte span is wholly inside the tag page already mapped by
+`wire_map`. The RECV/SEND SGE still starts at offset 0 in this table: the added
+local values are not transmitted or overwritten by DMA. Configuration writes
+only the first two words and preserves the independently bound GPU address.
+There is no new allocation, registered range, page table or lookup. Each queue's
+physical pool is disjoint; reposting the same buffer retains the same values.
+Teardown ends its native uses before configuration can assign a new pool.
+
+For pool origin p and posted slot i, `physicalPage = p + i * blockPages` and
+`poolIndex = i`. These equal the former alias-inversion results for every pool
+position, including pools beginning inside a region or spanning regions.
+Logical identity remains independent: the received tag selects the prepared
+logical entry, and completion scatters the three physical values into that
+canonical entry before publication. Interleaved receive order and forwarding
+retain their existing semantics. Forwarding still uses the alias bank to select
+its precomputed registration keys.
+
+Seven fields disappear from the runtime receive descriptor. In the same `-O2`
+ARM64 compilation, `link_receive_progress` changes from 229 to 217 static
+instructions and 54 to 51 load instructions; its 128-byte stack is unchanged.
+The affected receive-metadata operand loads drop by six because several removed
+loads were paired instructions. The tag-to-logical-record dependent chain is
+unchanged. Source grows by five lines to describe the explicit local tuple;
+no H3/H7 or timing pass follows from this scoped reduction. The shared ABI and
+wire tag are unchanged.
+
 ### Prepared receive publication
 
 RX previously followed its receive record to a publication header to read send
