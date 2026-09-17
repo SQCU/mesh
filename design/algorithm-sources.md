@@ -1529,9 +1529,23 @@ functions. MPS retains its encoder sequence. There is no new tensor storage or
 copy. The [source account](../../../metal-microbench/docs/async_collectives.md#prepared-qkv-and-ple-prefix)
 states the removed native encoding calls and the unchanged argument/launch
 contracts. Both engine libraries build; 35 affected pipeline configurations
-compile with indirect support without GPU submission. The active-KV resource
-walk, cache-write/attention recording, token embedding, sum and final projection
-recording, replicated sampling and the E1d/E8 floor remain open.
+compile with indirect support without GPU submission.
+
+Apple's [residency sets](https://developer.apple.com/documentation/metal/simplifying-gpu-resource-management-with-residency-sets)
+and [`MTLResidencySet`](https://developer.apple.com/documentation/metal/mtlresidencyset)
+supply persistent allocation declarations and setup residency requests. The
+engine now fills its existing KV set once with the unique configured cache
+buffers, attaches it to the ordinary queue and captures it for one attachment
+per Mesh step. It deletes the decode page scan, per-layer KV buffer walk,
+visited-chunk set and pin-on-growth callback. Full configured capacity is now
+requested at setup; the engine's [cache account](../../../metal-microbench/docs/async_collectives.md#prepared-cache-and-attention)
+reports that resident-memory scope explicitly. Residency does not track hazards:
+`attentionCommands` records the existing attention/reduction pair, and the
+producer prepends the existing KV scatter with a device dependency before
+attention. Reduction retains its numerical dependency too. No kernel arithmetic,
+tensor backing or remote-fill rule is added. The bound row count determines the
+KV grid. Token embedding, streaming sums and final projections still need
+recording; replicated sampling and the E1d/E8 floor remain open.
 
 ## Prefill KV
 
