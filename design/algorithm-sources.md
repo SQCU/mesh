@@ -953,6 +953,24 @@ there is no assembled whole-tensor intermediate or global stage barrier.
 The [caller description](function-chain.md) distinguishes this source composition
 from model artifacts and runtime performance evidence.
 
+The engine's E1d binding uses the same FFN column decomposition with a direct
+send of each codomain partial to every consumer, followed by the supplied local
+sum and layer finishing functions. `bindMeshDecodeLayer` declares this graph;
+`bindDecodeAttention` and `bindLayerFinish` reuse the standalone numerical
+functions over explicit buffers. The
+[source account](../../../metal-microbench/docs/async_collectives.md#e2b-decode-direct-partial-exchange)
+records the remaining command-buffer, publication and KV-initialization gaps.
+
+For the required resident GPU handoff, the Apple MLX authors' actual
+[fence implementation](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/fence.cpp)
+and [Metal kernels](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/kernels/fence.metal)
+use system-coherent accesses and a system-scope fence. Cross-device publication
+also dispatches `input_coherent` over the payload before updating the timestamp.
+Its fast wait is a submitted single-thread GPU kernel. This is the reference
+mechanism to account for; a timestamp alone is not evidence that payload stores
+are visible. Mesh has not yet integrated this mechanism, and its latency is not
+established by the engine's direct-send graph.
+
 ## nn.rmsnorm
 
 Zhang and Sennrich, [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467)
