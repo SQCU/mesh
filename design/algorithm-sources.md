@@ -1515,8 +1515,23 @@ Resource-array lengths are captured at setup too: optimized invocation SIL
 contains neither of the former two array-header count loads. This does not remove
 native resource tracking or captured-value loads. The three additional pipeline
 configurations compile with indirect support, and both engine libraries build.
-Attention, prefix, sum and final projection recording, replicated sampling and
-the E1d/E8 floor remain open.
+`qkvCommands` realizes the existing staged/batched/separate projection sequence;
+`bindDecodeAttention` records that sequence together with the existing Q/K
+normalization and RoPE and V normalization. Matrix projection configurations
+retain their numerical encoders and record the following transforms. KV-sharing
+layers record only their query preparation. Current positions remain buffer data,
+and QKV capture still follows preparation. Native recording neither changes
+attention arithmetic nor expands the declared KV resource set.
+
+`PerLayerInputs.begin` records the seven-operation prefix on native Metal matrix
+backends, using the existing projection views, embedding layout and numerical
+functions. MPS retains its encoder sequence. There is no new tensor storage or
+copy. The [source account](../../../metal-microbench/docs/async_collectives.md#prepared-qkv-and-ple-prefix)
+states the removed native encoding calls and the unchanged argument/launch
+contracts. Both engine libraries build; 35 affected pipeline configurations
+compile with indirect support without GPU submission. The active-KV resource
+walk, cache-write/attention recording, token embedding, sum and final projection
+recording, replicated sampling and the E1d/E8 floor remain open.
 
 ## Prefill KV
 
