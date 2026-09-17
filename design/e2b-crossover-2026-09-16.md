@@ -81,22 +81,47 @@ the whole solo forward, which is the measured pair result (5.5 tok/s vs 182). 96
 is Metal host round trips, 4% wire, <1% the RDMA runtime. The H campaign (25 commits,
 ABI 50→75) moved this number by about 0.1%.
 
-## 4. What extremely low latency looks like on this transport
+## 4. How fast a transaction *should* be — the floor, stage by stage
 
-The wire is 18 µs one-way for 32 KiB and can't be argued with. Everything else is a
-choice:
+Today's crossing cost is irrelevant to this section. The RDMA link is an RDMA link; the
+collectives are push-only (every node SENDs its partial into the consumer's posted
+RECV pages the moment the bytes exist; nobody asks, waits, or checks); the partial is
+exactly the bytes the consumer's kernel reads (Definition); the consumer is resident.
+Under those requirements one transaction — producer kernel's last store → consumer
+kernel's first load of the remote partial — is this budget and nothing else:
 
-- a resident consumer (X9/F5/F7): one command buffer per node per layer-chain, the
-  consuming kernel spinning on the presence stamp → no commit→start, no end→handler on the
-  critical path → crossing ≈ wire + stamp poll ≈ **20–30 µs**;
-- an index-ring runtime (H1–H8): CQ → ring → post in ≤ 1 metadata line each → ≤ 1 µs;
-- a partial that is exactly the bytes the consumer reads (Definition), so no layout
-  call, no blit, no `makeCommandBuffer()` per completion.
+| stage | mechanism | floor |
+|---|---|---|
+| 1. last GPU store → CPU spinner sees the completion word | unified memory; the spinner polls one 32-B line the kernel writes last | ≤ 0.5 µs |
+| 2. spinner: ring pop → `ibv_post_send` doorbell | prebuilt WR/SGE in the record (H2); store→doorbell ≤ 200 ns (H7) | ≤ 0.2 µs |
+| 3. NIC DMA → TB5 fabric → remote DMA → remote CQ | measured 12 µs one-way for 32 KiB on this stack, of which serialization at 10 GB/s is 3.3 µs; a 16.4 KiB `(m,l,O)` partial or a 3 KiB decode vector rides the ~8–9 µs fabric base | **8–12 µs** |
+| 4. remote CQ poll → presence stamp store | CQ→ring ≤ 100 ns (H7); the stamp is the ring store | ≤ 0.1 µs |
+| 5. resident consumer kernel sees the stamp | one threadgroup spinning on a device-coherent word (X9/F7) | ≤ 1 µs |
 
-Then the FFN/attention-TP path above costs 35 × 4 × ~25 µs ≈ **3.5 ms** per forward instead
-of 44 — under one solo forward, so decode TP at B = 8 becomes a thin but real proposition
-(zero-overhead bound 1.42), and at prefill the E2B bound 1.11 becomes securable at ~400
-tokens instead of ~4,500.
+**Total: ~10–14 µs for a decode-sized partial, i.e. the wire plus ≤ 2 µs.** That is the
+number. Not 280 µs; not 25 µs; the fabric, plus one shm→L1 on each side, plus one GPU poll.
+F7's pass value ("arrival-to-first-consuming-kernel ≤ 2× the wire estimate") and H7's
+store→doorbell / CQ→ring bounds are this table; E7 uses `c ≤ 15 µs`.
+
+What the floor does to the model:
+
+- Megatron per layer (o_proj partial + down_proj partial, both pushed as they complete):
+  2 × ~12 µs = ~25 µs exposed per layer, **~0.9 ms per forward** on a 5.5 ms decode step.
+- With FFN columns and attention placed ∝ bandwidth on M5 Max + M4 Pro (`Σ BW/BW_leader =
+  1.44`), the bandwidth-bound weight term is 5.5/1.44 = 3.8 ms; 3.8 + 0.9 = **4.7 ms vs
+  5.5 ms: 1.17× at B = 1 decode, on a 2.3B model, with an M4 Pro as the peer.** Small,
+  positive, and therefore the objective (I21). The crossover of §5 collapses to `7c ≈
+  85 µs → B·L× ≈ 12k`, so at B = 1 the KV term is a second, independent win past ~12k
+  tokens, compounding to ~1.3× at 128k.
+- Four M5 Ultra-class nodes (`Σ BW/BW_leader ≈ 4`): weight term ~1.4 ms; reduce-scatter of a
+  3 KiB decode vector among 4 is one hop each way, so still ~25 µs per layer, ~0.9 ms per
+  forward: **~2.3 ms vs 5.5 ms, ~2.4× at B = 1** — on a model whose whole step was 5.5 ms.
+  That is what "marginally faster on an already-fast machine" buys at the floor; every
+  microsecond above the floor comes straight out of it.
+
+Anything between these numbers and 280 µs is not "the transport": it is a command-buffer
+commit, a completion handler, a dependent metadata load, a layout copy, or a wait, and
+each one has a row in this document whose status is ✗ until it is gone.
 
 ## 5. The crossover: where the mesh wins *anyway*
 
@@ -126,9 +151,9 @@ For M5 Max + M4 Pro: `1/614 − 1/887 GB/s = 0.50 ps/B` → the left side is `B 
 
 | crossing cost c | 7c | B·L at crossover | B = 1 | B = 8 | B = 32 |
 |---|---|---|---|---|---|
-| 0.28 ms (today) | 1.96 ms | 272k | never (context is 128k) | 34k | 8.5k |
-| 25 µs (resident consumer) | 175 µs | 24k | 24k | 3k | 760 |
-| 5 µs (stamp in the same kernel, one line) | 35 µs | 4.9k | 4.9k | 610 | 150 |
+| **12 µs (the floor, §4)** | **85 µs** | **12k** | **12k** | **1.5k** | **370** |
+| 25 µs | 175 µs | 24k | 24k | 3k | 760 |
+| 0.28 ms (the current path, for the record) | 1.96 ms | 272k | never (context is 128k) | 34k | 8.5k |
 
 That is the crossover: **at today's crossing cost it does not exist inside the model's
 context window for a single stream**, and appears only for batched decode past ~34k
