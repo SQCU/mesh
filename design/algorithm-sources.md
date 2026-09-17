@@ -522,11 +522,20 @@ ABI 71's [prepared SEND operands](pages-and-functions.md#prepared-send-operands)
 apply the native WR/SGE mechanism cited below to every native request at setup.
 `link_prepare` assigns contiguous request intervals before progress starts.
 Local address/key bindings are realized in configuration; receive bindings use
-a compiled scatter of `{destination SGE, outgoing registration spans}`. The
+a compiled scatter of `{destination SGE, resolved outgoing registration key}`. The
 posting loop consumes these resolved records directly. Native completion IDs
 name the existing transfer contribution, so preparing separate requests adds
 no new buffer-ownership or completion protocol. This is Mesh's realization of
 the registered SEND/RECV interface, independent of the supplied tensor function.
+
+The [prepared receive forwarding](pages-and-functions.md#prepared-receive-forwarding)
+step specializes those keys by the finite registration regions intersecting
+each queue's pool. Its native completion identifier carries the registered alias
+address itself. The alias map's fixed page arithmetic gives the canonical page
+and region without another lookup; the cited section derives the integer
+multiply/shift quotient for these exact multiples. This is setup specialization
+of the same Apple/rdma-core registered-memory mechanism, with no replacement
+provider, dynamic address cache or new ownership protocol.
 
 Apple's installed SDK `infiniband/verbs.h` implements `ibv_post_send`,
 `ibv_post_recv` and `ibv_poll_cq` as calls through the handle's

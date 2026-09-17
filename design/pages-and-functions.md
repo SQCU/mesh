@@ -806,7 +806,9 @@ or hide them behind the callback boundary.
 
 ### Direct receive completion addresses
 
-Each prepared native RECV now uses its local canonical tag address as `wr_id`.
+The ABI 69 change used each native RECV's local canonical tag address as `wr_id`.
+The [prepared forwarding change](#prepared-receive-forwarding) below now supplies
+the registered alias itself, preserving the direct tag read.
 The completion reads that address directly. The identifier is local to the
 native queue; it is not transmitted to a peer. Both the tag alias used by the
 registered receive and the canonical tag address name the same shared backing.
@@ -862,9 +864,9 @@ The local binding cases converge on that same record format:
   address/key are written once into the native record there.
 - A received backing becomes known from its native completion. Its prepared
   32-byte destination record also contains a range of 16-byte scatter operands.
-  Each names an outgoing SGE and that outgoing device's registration spans.
-  Completion indexes the span using the physical block already supplied by
-  the completion and stores address/key directly into that SGE. It publishes
+  Each names an outgoing SGE and its already resolved registration key.
+  Completion selects the prepared range for the received region and stores
+  its own registered address plus the inline key directly into that SGE. It publishes
   the partial after binding its blocks. No canonical-page reread, peer lookup,
   queue selection or tensor-function dispatch occurs in this scatter.
 
@@ -886,7 +888,8 @@ caller interfaces are unchanged. Private record indices now count native
 requests, which requires the ABI 71 agreement between client and bridge.
 
 The memory cost is explicit: native records use `256 * sum(K_e)` bytes instead
-of `256 * number_of_sends`; each receive-to-send binding uses another 16 bytes.
+of `256 * number_of_sends`; each receive-to-send binding uses another 16 bytes
+per receive-pool region, as accounted for below.
 Each queue reserves 16 bytes times its existing power-of-two range capacity,
 instead of four bytes per queued transfer. These are metadata allocations;
 operand backing is unchanged and no tensor payload is copied. Maintained
@@ -897,10 +900,68 @@ existing callers and the engine Mesh library build pass. Generated posting code
 loads its address, tag row and native target from the same prepared header and
 its invocation from the queued range. It contains neither the former page load
 and divide nor the registration-span load and SGE rewrite. Receive forwarding
-still reads its scatter operands and selected registration spans once per
-binding; those costs remain in the RX budget. Publication streams, native
+reads its scatter operands once per binding; its registration-span lookup is
+removed by the following change. Publication streams, native
 operand view selection, full H1–H7 latency evidence and N1 realization remain
 unfinished. No runtime workload or deployment accompanies this change.
+
+### Prepared receive forwarding
+
+The forwarding descriptor holds `{destination SGE, registration key}` in 16
+aligned bytes. The former registration-span pointer and its dependent read are
+deleted. All local devices register the same wire aliases; keys differ by device
+and registration region. Configuration therefore emits one contiguous binding
+range per region intersecting the receive queue's physical pool. It resolves
+each key through the destination device during setup. Every configured outgoing
+link and queue participates; no single-peer or single-region case is assumed.
+
+The native RECV identifier is its registered SGE address. Completion reads the
+tag there directly and can store that same address into outgoing SGEs. It does
+not reconstruct an address, look up a registration, follow a native request, or
+read the canonical page table to bind forwarding. The selected binding range
+contains the terminal destination and key together. The stores still precede
+publication, using the existing release/acquire handoff and buffer references.
+
+The registered alias map already places each region in a 4 GiB bank and each
+physical block in `B + 1` pages, one tag page followed by B payload pages. Let
+`s = log2(page_bytes)`, `d = B + 1`, and `a` be the returned registered tag address.
+The tag occupies the last eight bytes of its first page. Consequently
+`n = low32(a) >> s = k d`, where k is its block index within the region.
+Setup stores `mu = ceil(2^32 / d)`. Then
+
+```
+k = (uint64(n) * mu) >> 32
+r = high32(a) - first_alias_bank
+page = first_region_page + r * region_pages + k * B
+bindings = record.sends + r * record.send_count
+```
+
+This quotient needs no division or corrective branch: writing
+`d mu = 2^32 + e`, with `0 <= e < d`, gives
+`n mu / 2^32 = k + k e / 2^32`, and `k e < k d = n < 2^32`.
+The first region may start before the queue's pool and the last may be partial;
+the stored bases and the pool's actual region interval cover both cases.
+No address or identifier is exchanged with peers by this local convention.
+
+The destination-record pointer and all six geometry constants occupy the first
+32 aligned bytes of the receive state. Static assertions retain that boundary,
+the 32-byte destination record and the 16-byte forwarding descriptor. Optimized
+ARM64 code reads `wr_id` then the tag, uses shifts/multiplies for the page, and
+loads each destination/key pair before its two direct stores. It performs no
+registration-table load, runtime division, helper call or added readiness test
+in this binding interval. The explicit scatter loop remains proportional to
+the declared forwarding destinations.
+
+For queue q with D_q declared forwarding requests and R_q registration regions
+intersecting its pool, binding storage is `16 * max(1, D_q R_q)` bytes rather
+than `16 * max(1, D_q)`. This replicates keys by region, not physical page.
+Receive state is now 128 bytes, aligned to 32, versus 104 bytes; no tensor data
+is copied or additional event posted. Native requests and public/shared layouts
+are unchanged, so ABI 71 remains. The eleven maintained library files total
+2,790 source lines, up from 2,779. Strict native compilation, bridge compilation
+and generated-code inspection pass; no runtime workload or latency measurement
+was performed. Publication stream probing, numerical operand views, lifetime
+realization and the complete H1–H7 paths remain separate unfinished work.
 
 ### Prepared native requests
 
