@@ -135,11 +135,15 @@ public struct MeshMetalOperand {
     public let data: MTLBuffer?
 
     // design/algorithm-sources.md#device-operands
+    // design/algorithm-sources.md#native-metal-program
     public func pipeline(library: MTLLibrary, function: String,
-                         constants values: MTLFunctionConstantValues = MTLFunctionConstantValues()) throws -> MTLComputePipelineState {
+                         constants values: MTLFunctionConstantValues = MTLFunctionConstantValues(), indirect: Bool = false) throws -> MTLComputePipelineState {
         var quantum = UInt64(quantum)
         values.setConstantValue(&quantum, type: .ulong, index: 37)
-        return try library.device.makeComputePipelineState(function: library.makeFunction(name: function, constantValues: values))
+        let descriptor = MTLComputePipelineDescriptor()
+        descriptor.computeFunction = try library.makeFunction(name: function, constantValues: values)
+        descriptor.supportIndirectCommandBuffers = indirect
+        return try library.device.makeComputePipelineState(descriptor: descriptor, options: [], reflection: nil)
     }
 
     // design/algorithm-sources.md#device-operands

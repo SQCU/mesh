@@ -1430,6 +1430,52 @@ watchdog exercise, floor timing or speedup is implied. Vocabulary sharding, impo
 of the [prefill KV path](#prefill-kv) remain required before the E1d/E8 comparison;
 coherent publication dispatches and command re-recording remain costs to measure.
 
+## Native Metal program
+
+Apple, [Encoding indirect command buffers on the CPU](https://developer.apple.com/documentation/metal/encoding-indirect-command-buffers-on-the-cpu),
+supplies the native command reuse mechanism. Apple's
+[`MTLIndirectComputeCommand`](https://developer.apple.com/documentation/metal/mtlindirectcomputecommand),
+[`setBarrier`](https://developer.apple.com/documentation/metal/mtlindirectcomputecommand/setbarrier()),
+and [`supportIndirectCommandBuffers`](https://developer.apple.com/documentation/metal/mtlcomputepipelinedescriptor/supportindirectcommandbuffers)
+define compute recording, dependencies and pipeline compilation. This is native
+Metal replay, not recommitting an ordinary command buffer.
+
+The engine's `bindMetalProgram` consumes setup-only dispatch descriptions and
+records the supplied pipelines, buffer bindings, scalar constants and grids into
+one `MTLIndirectCommandBuffer`. Constants are packed UInt32 metadata in shared
+storage; tensor payloads retain their supplied storage. Setup deduplicates read
+and write resource declarations, captures pipeline lifetimes, and discards the
+dispatch descriptions. Invocation creates one compute encoder, declares two
+prepared resource arrays through Metal's native bulk API, executes the recorded
+command range and ends encoding. There is no runtime dispatch-description walk,
+pipeline selection, scalar packing, buffer rebinding or Swift resource walk.
+The native resource declarations still incur Metal's own work and are not free.
+
+The actual five-stage engine sampler uses this program in ordinary decode,
+prefill and the resident Mesh decode function. `sampleTokenCommands` and
+`logprobCommands` describe the existing numerical functions; `bindSampling`
+records them together. The four explicit device command barriers preserve their
+data dependencies: local statistics precede mass computation and sampling, and
+candidate/logprob reads follow remote-input acquisition. These replace the
+prior separate serial compute passes. No host wait, remote-fill library guard,
+or transport synchronization is introduced. Indexed sampling additionally
+declares its local projection output as a read resource; a metadata buffer alone
+would hide that dependency from Metal. Existing Mesh frame residency covers the
+remote payload, and the supplied shader retains its remote visibility fences.
+
+`bindDecodeOutput` binds final normalization, projection and the prepared sampler
+during setup. The ordinary output encoders use the same prepared sampler. The
+existing numerical sampler entry point also uses this construction instead of
+retaining a second imperative implementation.
+
+Source review and optimized Swift SIL show five native calls in sampler rearm:
+encoder creation, two bulk resource declarations, range execution and encoder
+completion. All five ordinary and all five indexed pipelines compile with native
+indirect-command support. These are compilation and source observations, not
+numerical execution or latency evidence. The rest of the model still records
+commands per step; whole-step replay, replicated sampling and the E1d/E8 floor
+remain open. The existing one-in-flight engine limitation is unchanged.
+
 ## Prefill KV
 
 Vaswani et al., [Attention Is All You Need](https://arxiv.org/abs/1706.03762)
