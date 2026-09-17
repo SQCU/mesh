@@ -34,10 +34,12 @@ is not a transport operation and is not implemented in mesh. A coordinate
 slice of `T(X)` is not generally `T` applied to a coordinate slice of `X`.
 
 Each `T(P[i])` is the same supplied T applied to a different operand scope.
-Mesh does not classify a contribution as ineligible for ordinary calls, or give
-reduction's combine a privileged call path. `call`, `map`, and `reduce` use the
-same binder. The caller supplies the projections, indices, functions and explicit
-recombination edges. See the [L5 correction](distributed-reduce.md#l5-same-function-different-operand-scopes).
+This does not permit moving an arbitrary nonlinear function across the sum.
+The caller supplies the projections, indices, functions and explicit
+recombination edges; the implementation must preserve that algebra. The
+[Definition and L5/F1/F2 requirements](deliverables.md#definition--partial-tensor)
+remain in force. The [implementation account](distributed-reduce.md#l5-same-function-different-operand-scopes)
+records the code deleted at `3bd1eaa` and the remaining gap.
 
 The scalar `linear-chain` program and the earlier fixed matrix executable have
 been deleted. Neither establishes the requested large composed use.

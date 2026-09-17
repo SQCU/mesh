@@ -142,12 +142,11 @@ The whole-arena Metal buffer and transport-capacity query have been removed.
 ## MeshError
 
 Saltzer, Reed and Clark's end-to-end argument, cited below, places recovery with
-the caller. `MeshError` reports native link/function failures and admission status.
-It does not classify numerical functions or forbid calls on contributions.
-DTensor placement types and Legion reduction privileges are not requirements of
-this ABI; the former contribution-type feature and its privileged binding path
-were deleted. The [operand-scope algebra](distributed-reduce.md#l5-same-function-different-operand-scopes)
-explains why ordinary calls and reduction combines use the same binding path.
+the caller. The current `MeshError` reports native link/function failures and
+admission status. Its setup error `partialOperand` was deleted at `3bd1eaa`;
+the [restored L5 requirement](deliverables.md#l--library-core) remains unimplemented.
+The end-to-end argument does not authorize removing that requirement. See the
+[algebra and implementation account](distributed-reduce.md#l5-same-function-different-operand-scopes).
 
 ## Mesh.result
 

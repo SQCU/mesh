@@ -30,10 +30,13 @@ For coordinate projections with `sum_i Q_i = I`, let `P_i = Q_i X`. Linearity gi
 
     T(X) = T(sum_i P_i) = sum_i T(P_i).
 
-Every occurrence is the same T. A contribution may feed another ordinary call
-before recombination. For another linear U, the caller can equivalently arrange
-`sum_i U(T(P_i)) = U(T(X))`. Mesh has no numerical rule to infer or enforce here;
-it binds the input and output scopes that the caller actually declared.
+Every occurrence is the same T. For another linear U,
+`sum_i U(T(P_i)) = U(T(X))`. This identity does not extend to an arbitrary
+nonlinear f: `f(sum_i T(P_i))` generally differs from `sum_i f(T(P_i))`.
+Applying the same function to each operand does not make those two programs
+equivalent. The required recombination remains a data dependency. It may be
+restricted to the coordinates consumed by a call; this does not require a
+whole-tensor or whole-mesh barrier.
 
 The supplied example has
 
@@ -47,27 +50,23 @@ projections, or a numerical reduction. Those are supplied operations. Packed
 contiguous subviews retain the caller's coordinate/index meaning; a slice of
 T(X) is not silently substituted for T applied to a projected input.
 
-`TensorPart` describes operand storage and placement. It carries no numerical
-permission or pending-reduction type. `call`, `map`, and reduction's supplied
-combine all bind through the same public `call`. Producers publish each declared
-output scope at numerical completion; sends move that scope; consumers receive
-their declared scopes without a library-imposed whole-tensor reduction barrier.
-If a particular operation requires a recombined input, its caller names that
-input in the dataflow. The library does not inspect or classify the operation.
-
-The former L5 was a specification error, removed on 2026-09-16. It treated a
-reduction input as forbidden to ordinary calls, even though the same value could
-legitimately feed T or U. Removing it deletes `TensorPart.partial`,
+The [Definition and L5/F1/F2 requirements](deliverables.md#definition--partial-tensor)
+are the contract. Commit `3bd1eaa` deleted `TensorPart.partial`,
 `withPartial`, `partialContributions`, `MeshError.partialOperand`, the validation
-closure per call, the private function-binding bypass, and the fresh identity
-created only to certify a reduction result. A one-contribution reduction is the
-existing send of that value; it introduces no new identity or storage.
+closure per call, the private function-binding bypass, and the reduction-result
+identity. It also rewrote the requirements to license that deletion. Commit
+`9114872` restored the requirement text; it did not restore the implementation.
+The deletion is an open implementation gap, not a correction to the definition.
+
+The current source binds `call`, `map`, and reduction's supplied combine through
+the same public `call`. That describes the implementation and does not establish
+that L5, F1 or F2 is satisfied. Mesh must preserve the declared tensor algebra
+while keeping numerical functions supplied by callers.
 
 These deletions remove setup records and work. They do not by themselves shorten
 the C runtime's dependent-load chain or establish zero-copy contiguous receive
 placement. Those remaining defects retain their status in H1–H8.
 
-The Mesh module, native assembly, existing Core ML/Gram/indexed-gather/explicit-sync
-callers and the engine Mesh library build with the deletion. No runtime workload
-or new evaluator was used. Swift source decreases by 24 lines; documentation
-correction is separate from implementation reduction.
+The build checks recorded at `3bd1eaa` establish compilation only, not compliance
+with the restored requirements. Its 24-line Swift reduction is not completion
+of L5.
