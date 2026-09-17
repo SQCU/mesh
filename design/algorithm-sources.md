@@ -273,6 +273,16 @@ writers get independent streams; a writer increments its own position and
 release-stores its prepared event. The consumer clears slots after acquiring their values.
 Declared lifetimes provide the reuse order; the producer does not read fullness.
 
+ABI 73 puts each stream's cursor, mask and slots in one aligned extent, applying
+the same preallocated circular-storage mechanism without a separate slot-address
+field. `mesh_stream_bytes` supplies the setup layout rule; reader initialization
+walks those extents once and records their terminal slot pointers. Shared
+producer streams, private reader arrays and numerical-worker mutable state are
+separated at 128-byte boundaries. The [allocation analysis](pages-and-functions.md#costs-and-remaining-work)
+records the substantial reservation increase, actual layout formulas and the
+unchanged O(P) probe count. This is a layout specialization, not a new queue
+algorithm or a claim that padding alone solves handoff latency.
+
 ABI 70 carries the publication's invocation value alongside its final record
 index in the same lock-free eight-byte slot. TX copies that value into the
 prepared SEND record. A numerical use selects it with its setup-defined mask,

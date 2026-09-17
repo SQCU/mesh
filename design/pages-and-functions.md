@@ -248,14 +248,42 @@ realization. It does not prove cross-participant frame reuse by assuming it.
 Constants are seeded once after record indices and stream offsets are final,
 before the transport is configured. No stream handle changes during execution.
 
+ABI 73 places each stream's slots immediately after its cursor and mask. The
+separate slot-offset field is deleted. A compiled stream starts on a 128-byte
+boundary and occupies `round_up(8 + 8 * capacity, 128)` bytes; no other stream
+shares that range. Its slot address is `stream_base + 8 + 8 * index`, without
+loading a second address. Rings with capacity at most eight fit entirely in
+one 128-byte region. Larger rings retain the same address calculation but their
+slots span more regions. This makes no claim that an entire larger ring is one
+cache line or remains resident.
+
+Provisional bindings also have aligned locations. Their first slot temporarily
+holds the setup writer identity. For each queue, setup copies all those
+identities into its sorting scratch before writing any final streams over the
+provisional storage. It zeros every compiled slot, rewrites the handles, then
+initializes readers and seeds constants. The reader's variable-size layout walk
+runs only at setup; its existing private input records hold final slot pointers
+and masks. Attachment no longer clears the entire reserved slot capacity.
+
+Reader-input allocations now begin and end on 128-byte boundaries, and each
+numerical worker's cursor/active state occupies its own asserted 128-byte record.
+The encompassing call object uses an aligned allocation too. These boundaries
+prevent unrelated owners from sharing those mutable lines at that granularity;
+they add no thread, synchronization, publication store or runtime layout walk.
+Producer/consumer sharing of the event slots themselves remains the intended
+handoff.
+
 ### Costs and remaining work
 
 For P compiled streams an empty pass performs P acquire probes, rather than E
 individual-location probes. P is not guaranteed independent of graph size.
 A probe still reads private input state and then its shared slot. An enqueue
-still reads a prepared stream descriptor, updates its producer position and
-stores its index. These costs, possible cache-line sharing between packed
-stream descriptors, and polling latency remain; grouping is not free progress.
+reads its cursor/mask pair, updates its producer position and stores its event
+directly into the inline slots. Generated ARM64 code uses `ldp` for the two
+32-bit fields, followed by indexed address arithmetic and `stlr`; the stored
+slot-address load is absent. Cross-stream descriptor sharing is removed, but
+private-reader/slot probes and polling latency remain. P is unchanged by this
+layout correction; grouping is not free progress.
 
 After a successful dequeue, TX and numerical dispatch directly address the
 terminal record array. Optimized ARM64 output shows `index << 8` followed by the
@@ -293,6 +321,32 @@ operands](#prepared-send-operands) subsequently remove the page/registration
 chain from posting. The bridge uses
 the existing ad-hoc signing fallback because the named identity is unavailable;
 no bridge deployment, runtime test or latency result is claimed.
+
+ABI 73 reserves `128 + 128R` bytes per event array. For a group of n bindings,
+its next-power-of-two capacity c gives a final extent
+`round_up(8 + 8c, 128) <= 128n`. The n = 1 case occupies exactly 128 bytes;
+for n >= 2, `c < 2n` and rounding adds less than 128 bytes. Summing over the
+queue's groups proves that its aligned rings fit the reserved R binding slots.
+Thus the two banks of 25 arrays at R = 229,376 reserve 1,468,012,800 bytes,
+an increase of 1,101,004,800 over ABI 72. The reservation is deliberately
+reported separately from the compiled stream extents and from resident memory.
+Setup touches provisional bindings and final rings; it does not clear every
+reserved event slot. Neither source accounting nor that deletion proves RSS.
+The coarse per-queue reservation and graph-dependent stream count remain open.
+
+Each private reader allocates `round_up(16 * max(1, P), 128)` bytes for its P
+inputs, instead of `16 * max(1, P)`. Numerical worker fields still occupy 56
+bytes, but their aligned records use 128 rather than 56 bytes each. The containing
+call allocation is 1,280 bytes in the native build, including padding, versus
+536 bytes. These are setup allocations; the publication and polling loops add
+no allocator, fullness predicate, shared ticket or progress thread.
+
+The eleven maintained library files grow from 2,791 to 2,799 lines. Static
+assertions fix the stream alignment, slot offset and worker stride. Strict
+native compilation, generated C/Swift assembly, the bridge and existing caller
+builds pass. The engine Mesh integration build also passes. No workload,
+deployment or measured latency result accompanies this change. The removed
+slot-address load and owner separation are regression boundaries, not full H1.
 
 ### Operand addresses and sequence values
 

@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 72u
+#define MESH_VERSION 73u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_EVENT_ABSENT UINT64_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
@@ -34,13 +34,13 @@ enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_COMPUTE_THREADS 8
 #define MESH_NOTICE_BANKS 2
 /* design/algorithm-sources.md#index-hand-off */
-struct mesh_stream { uint64_t slots; uint32_t position,mask; };
-_Static_assert(sizeof(struct mesh_stream)==16,"mesh_stream");
+struct mesh_stream { _Alignas(128) uint32_t position; uint32_t mask; _Atomic uint64_t slots[]; };
+_Static_assert(sizeof(struct mesh_stream)==128 && _Alignof(struct mesh_stream)==128 && offsetof(struct mesh_stream,slots)==8,"mesh_stream");
 struct mesh_target { uint64_t stream; uint32_t index,count; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 struct mesh_events {
   uint32_t count;
-  _Alignas(128) struct mesh_stream streams[];
+  _Alignas(128) unsigned char streams[];
 };
 _Static_assert(sizeof(struct mesh_events)==128 && offsetof(struct mesh_events,streams)==128,"mesh_events header");
 struct mesh_event_input { _Atomic uint64_t *slots; uint32_t position,mask; };
@@ -143,18 +143,20 @@ static inline struct mesh_events *mesh_events(struct hdr *m,uint32_t queue){
   return (struct mesh_events *)((char *)m+m->notice_off+(uint64_t)queue*m->notice_bytes);
 }
 /* design/algorithm-sources.md#index-hand-off */
+static inline size_t mesh_stream_bytes(uint32_t capacity){return (offsetof(struct mesh_stream,slots)+(size_t)capacity*sizeof(uint64_t)+127)&~(size_t)127;}
+/* design/algorithm-sources.md#index-hand-off */
 static inline uint64_t mesh_event_bind(struct hdr *m,uint32_t queue){
   struct mesh_events *events=mesh_events(m,queue);
-  struct mesh_stream *stream=&events->streams[events->count++];
+  struct mesh_stream *stream=(struct mesh_stream *)(events->streams+(size_t)events->count++*sizeof(struct mesh_stream));
   uint64_t offset=(uint64_t)((char *)stream-(char *)m);
-  *stream=(struct mesh_stream){.slots=offset};
+  stream->position=stream->mask=0;atomic_store_explicit(stream->slots,offset,memory_order_relaxed);
   return offset;
 }
 /* design/algorithm-sources.md#index-hand-off */
 static inline void mesh_event_push(struct hdr *m,uint64_t slot,uint32_t index,uint32_t invocation){
   struct mesh_stream *stream=(struct mesh_stream *)((char *)m+slot);
   uint32_t at=stream->position++&stream->mask;
-  atomic_store_explicit((_Atomic uint64_t *)((char *)m+stream->slots)+at,((uint64_t)invocation<<32)|(index+1),memory_order_release);
+  atomic_store_explicit(stream->slots+at,((uint64_t)invocation<<32)|(index+1),memory_order_release);
 }
 /* design/algorithm-sources.md#index-hand-off */
 static inline uint64_t mesh_event_take(struct mesh_event_reader *reader){
@@ -183,7 +185,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->link_off=at; at+=(uint64_t)links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
   h->target_off=at; at+=(uint64_t)rows*(links+MESH_COMPUTE_THREADS)*sizeof(struct mesh_target); at=(at+pgsz-1)/pgsz*pgsz;
   h->order_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*links*qps*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->notice_bytes=(sizeof(struct mesh_events)+(uint64_t)rows*(sizeof(struct mesh_stream)+2*sizeof(uint64_t))+127)&~UINT64_C(127);
+  h->notice_bytes=sizeof(struct mesh_events)+(uint64_t)rows*sizeof(struct mesh_stream);
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links*(qps+1)+2*MESH_COMPUTE_THREADS)*h->notice_bytes; at=(at+bytes-1)/bytes*bytes;
   h->instance_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*rows*sizeof(struct mesh_instance); at=(at+bytes-1)/bytes*bytes;
