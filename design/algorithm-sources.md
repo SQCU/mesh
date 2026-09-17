@@ -1083,6 +1083,18 @@ sampling and per-rank vocabulary pushes remain open, as do its payload/floor
 checks and E8's complete-forward latency measurement. The engine account is
 [here](../../../metal-microbench/docs/async_collectives.md#distributed-vocabulary-projection).
 
+The same column decomposition now applies over explicit input-row scopes. Setup
+partitions each vocabulary shard into packed rectangles of at most 120 KiB, on
+1024-token sampler boundaries, and binds row offsets in all three existing
+projection backends. Larger batches use multiple row scopes. Each completed
+projection is published from its existing resident command buffer before the
+next projection; the sampler's precomputed operand records name each tile's own
+presence word and local offset. There is no full-shard completion prerequisite
+or dense logit assembly. The [bounded-publication account](../../../metal-microbench/docs/async_collectives.md#bounded-vocabulary-publication)
+records added publication/dispatch work and metadata capacity. Replicated
+sampling, sampling-policy distribution, the full 35+1-push contract and the floor
+latency remain open; per-tile payload bounds do not establish them.
+
 ## nn.ffn
 
 Shoeybi et al., [Megatron-LM](https://arxiv.org/abs/1909.08053), and MLX's
