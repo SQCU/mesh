@@ -518,6 +518,16 @@ rdma/indexed-gather RANK 4 /mesh0 examples/indexed-gather-ring.json
 
 ## Program.copy
 
+ABI 71's [prepared SEND operands](pages-and-functions.md#prepared-send-operands)
+apply the native WR/SGE mechanism cited below to every native request at setup.
+`link_prepare` assigns contiguous request intervals before progress starts.
+Local address/key bindings are realized in configuration; receive bindings use
+a compiled scatter of `{destination SGE, outgoing registration spans}`. The
+posting loop consumes these resolved records directly. Native completion IDs
+name the existing transfer contribution, so preparing separate requests adds
+no new buffer-ownership or completion protocol. This is Mesh's realization of
+the registered SEND/RECV interface, independent of the supplied tensor function.
+
 Apple's installed SDK `infiniband/verbs.h` implements `ibv_post_send`,
 `ibv_post_recv` and `ibv_poll_cq` as calls through the handle's
 `context->ops` field. Mesh resolves those exact function pointers when the

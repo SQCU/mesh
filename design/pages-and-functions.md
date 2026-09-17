@@ -176,12 +176,12 @@ that final store until publication returns and releases the reference. No new
 reference or completion handshake is required. Destination reconstruction from
 the tensor row remains deleted.
 
-For TX, transfer realization counts each row's sends on each link and assigns a
-contiguous send-record range. Bridge configuration fills that exact range. The
+For TX, ABI 71 transfer realization counts each row's native requests on each
+link and assigns a contiguous send-record range. Bridge preparation fills that exact range. The
 first send record contains its end. The TX event therefore goes directly to
 `send_edges[index]`; `link_publications` no longer reads a row-indexed offset
-table. The event's invocation is stored directly in each SEND record instead
-of retaining an address of the buffer's label. The remaining loop visits actual declared sends, including distinct
+table. The event's invocation is stored with the queued range instead of
+retaining an address of the buffer's label. The remaining loop visits actual declared sends, including distinct
 queues on the same link. Its setup cursor array is freed before progress starts.
 
 For numerical work, setup expands every input use, including a shared input's
@@ -255,11 +255,11 @@ stream descriptors, and polling latency remain; grouping is not free progress.
 
 After a successful dequeue, TX and numerical dispatch directly address the
 terminal record array. Optimized ARM64 output shows `index << 8` followed by the
-SEND range-end load at byte 72, and `index << 6` followed by the use range-end
+SEND range-end load at byte 40, and `index << 6` followed by the use range-end
 load at byte 40. The former offset-table loads are absent from those paths.
 This is source/assembly evidence of one removed dependent table access per
-dispatch, not a measurement of cache misses or end-to-end latency. TX still
-prepares the backing address/key and wire tag. Numerical launch still accesses the declared dependency count and sequence
+dispatch, not a measurement of cache misses or end-to-end latency. ABI 71 TX
+uses the prepared backing address/key and writes the wire tag. Numerical launch still accesses the declared dependency count and sequence
 value and records its active lifetime. Cold return processing retains its
 row-to-call lookup. The operand changes below remove address refresh and both
 operand loops from launch; they do not remove stream polling or TX binding.
@@ -283,9 +283,10 @@ Swift/C/header files. Documentation changes are separate. Strict C diagnostics,
 the four existing Mesh callers and the engine Mesh library build pass with ABI 70.
 Optimized ARM64 dispatch loads the use and call records with no buffer-label
 load; publication writes the persisted buffer label after its event stores.
-SEND preparation decreases from 23 to 22 instructions and 12 to 11 load
-instructions in the previously defined interval. Its label is now in the SEND
-record; the page/registration chain remains. The bridge uses
+In ABI 70 SEND preparation decreased from 23 to 22 instructions and 12 to 11
+load instructions in the previously defined interval. ABI 71's [prepared native
+operands](#prepared-send-operands) subsequently remove the page/registration
+chain from posting. The bridge uses
 the existing ad-hoc signing fallback because the named identity is unavailable;
 no bridge deployment, runtime test or latency result is claimed.
 
@@ -318,7 +319,7 @@ addressing or completion of H6.
 Every operand of a call references the same existing sequence scalar. Launch
 therefore does not stamp each operand. ABI 70 carries the invocation beside
 the record index in each publication event. Numerical dispatch selects that
-label with the use's prepared mask; TX stores it in its SEND record. Neither
+label with the use's prepared mask; TX retains it with its queued range. Neither
 follows a label pointer back to the source buffer. The single persisted buffer
 label is written after TX and local notifications for receive-return bookkeeping.
 The existing producer reference keeps that bookkeeping live through the store.
@@ -835,6 +836,71 @@ code-generation results, with no workload execution or latency claim. The
 source total is 2,713 lines over the same eleven maintained library files,
 up from 2,704. The full receive path still includes publication, native request
 selection and return bookkeeping; these changes do not close H3/H5/H7 or N1.
+
+### Prepared SEND operands
+
+ABI 71 removes `pages`, `spans`, `offset` and `block` from the SEND record.
+Each native request has its own 256-byte record with its SGE, queue pair,
+post target, tag row and native WR. The SGE and common native header occupy
+the first 88 bytes, within the asserted 128-byte alignment. Native requests
+are complete before their index reaches the posting loop. Posting reads the
+prepared address, writes the supplied invocation/tag row and calls the native
+target. It performs no page lookup, registration lookup, address binding or
+request reconstruction, including when retrying after native refusal.
+
+For a declared send e with K_e native requests, setup assigns an interval
+`[I_e, I_e + K_e)`. One 16-byte queued range contains its current index, end
+and invocation. A successful post advances that index and rotates unfinished
+ranges; native refusal leaves the request in place. This preserves immediate
+drainage and per-transfer chunk order without expanding each publication into
+K_e separate pending entries. The compiler inlines the posting loop into its
+callers; no additional posting call frame remains in the optimized ARM64 build.
+
+The local binding cases converge on that same record format:
+
+- Locally allocated backing is known during configuration. Its registered
+  address/key are written once into the native record there.
+- A received backing becomes known from its native completion. Its prepared
+  32-byte destination record also contains a range of 16-byte scatter operands.
+  Each names an outgoing SGE and that outgoing device's registration spans.
+  Completion indexes the span using the physical block already supplied by
+  the completion and stores address/key directly into that SGE. It publishes
+  the partial after binding its blocks. No canonical-page reread, peer lookup,
+  queue selection or tensor-function dispatch occurs in this scatter.
+
+Every configured outgoing link and queue is represented, including links using
+different registration keys. Required local devices are registered during
+configuration. All links' native-record allocations and immutable range fields
+are prepared before any controller/progress thread starts. Later queue setup
+writes the pair, post target and length; receive binding writes address/key.
+These are separate fields. Publication's release/acquire handoff precedes the
+TX read. The existing buffer references protect the backing and binding until
+all declared sends and numerical uses finish. No extra reference protocol or
+runtime configuration-readiness flag is added.
+
+All K_e native requests carry I_e as their completion identifier. Their
+completions decrement the existing group's remaining count in its first record.
+The last completion releases the same one buffer reference and one declared
+transfer contribution as before. Per-instance completion counts and numerical
+caller interfaces are unchanged. Private record indices now count native
+requests, which requires the ABI 71 agreement between client and bridge.
+
+The memory cost is explicit: native records use `256 * sum(K_e)` bytes instead
+of `256 * number_of_sends`; each receive-to-send binding uses another 16 bytes.
+Each queue reserves 16 bytes times its existing power-of-two range capacity,
+instead of four bytes per queued transfer. These are metadata allocations;
+operand backing is unchanged and no tensor payload is copied. Maintained
+library source grows from 2,717 to 2,779 lines across the same eleven files.
+
+Strict C compilation, optimized assembly generation, the bridge, the four
+existing callers and the engine Mesh library build pass. Generated posting code
+loads its address, tag row and native target from the same prepared header and
+its invocation from the queued range. It contains neither the former page load
+and divide nor the registration-span load and SGE rewrite. Receive forwarding
+still reads its scatter operands and selected registration spans once per
+binding; those costs remain in the RX budget. Publication streams, native
+operand view selection, full H1–H7 latency evidence and N1 realization remain
+unfinished. No runtime workload or deployment accompanies this change.
 
 ### Prepared native requests
 

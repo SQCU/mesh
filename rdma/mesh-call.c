@@ -499,7 +499,8 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
     uint32_t row=mesh_section_row(section,value);
     mesh_buffer_retain(m,row);
     uint32_t link=queue/m->qps;
-    mesh_publish_bind(context,row,link,1)->count++;
+    uint64_t payload=(uint64_t)m->block*m->pgsz;
+    mesh_publish_bind(context,row,link,1)->count+=(uint32_t)((section.bytes+payload-1)/payload);
   }
   mesh_transfers(m,context->client,queue,receive)[index]=(struct mesh_transfer){section.first,identity,section.count,section.stride,MESH_ABSENT,section.bytes};
   atomic_store_explicit(length,index+1,memory_order_release);
