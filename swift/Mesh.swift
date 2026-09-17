@@ -468,7 +468,7 @@ public final class Mesh {
     }
 
     // design/algorithm-sources.md#programtensor
-    fileprivate func bindings<Value>(_ part: TensorPart, using make: (MeshSpan) throws -> Value) throws -> MeshBindings<Value> {
+    public func bindings<Value>(_ part: TensorPart, using make: (MeshSpan) throws -> Value) throws -> MeshBindings<Value> {
         let source = part.section!, context = memory.context
         let pages: [UInt32]
         if source.channel != MESH_ABSENT {
@@ -680,6 +680,7 @@ public final class Mesh {
 }
 
 public final class MeshMetalFrame {
+    public let index: Int
     public let inputs, outputs: [MeshMetalOperand]
     private let sequence: MTLBuffer, sequenceOffset: Int
     private let waits: [UInt32]
@@ -694,7 +695,7 @@ public final class MeshMetalFrame {
     fileprivate init(memory: MeshMemory, device: MTLDevice, function: OpaquePointer, index: Int,
         inputs: [MeshMetalOperand], outputs: [MeshMetalOperand], sources: [mesh_section], results: [mesh_section],
         pipelines: [MTLComputePipelineState]) {
-        self.inputs = inputs; self.outputs = outputs
+        self.index = index; self.inputs = inputs; self.outputs = outputs
         coherent = pipelines[0]; signal = pipelines[1]; acquire = pipelines[2]
         let context = memory.context, m = context.pointee.M!
         let state = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_function_sequence(function, UInt32(index)), count: 4), memory: memory)

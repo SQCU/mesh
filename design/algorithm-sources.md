@@ -1219,6 +1219,17 @@ set before execution. Finalization follows event-stream realization and precedes
 transport start. Send indexes were already fixed by `mesh_transfers_prepare`;
 stream offsets and consumer indexes are resolved by `mesh_calls_start`.
 
+The existing `Mesh.bindings` setup constructor is public so a supplied function
+can bind working storage without declaring it as an externally consumed output.
+It uses the same registered tensor allocation and view constructor described at
+[program.tensor](#programtensor), not a second store. `MeshMetalFrame.index` is
+the prepared frame index used to select those views during setup. The engine's
+resident E2B function now declares only its FFN partials, vocabulary result and
+optional diagnostic output. Its internal intermediates have graph-lifetime
+storage, with no per-invocation output-release, return event or reset. This is
+ordinary function-local storage lifetime; the numerical operations and the
+existing frame completion rule do not change.
+
 `MeshMetalFrame.publication` binds the payload spans, counts and terminal target
 bindings at setup and returns the encoder used by the supplied numerical function.
 The old per-recording operand-to-buffer-array construction and geometry queries
