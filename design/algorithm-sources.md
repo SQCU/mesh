@@ -1232,6 +1232,33 @@ ABI 78's CPU reader accepts a slot only when that index word is nonzero. CPU
 writers retain their native eight-byte release publication. A frame cannot reuse
 its ring capacity until its known uses retire.
 
+The same publication is now available to a supplied shader in
+`MeshMetalFrame.publications`. Setup prepends the canonical page address,
+invocation address and send/use counts to the existing target allocation. Targets
+follow that header inline; there is no second target lookup structure. The frame
+retains the allocation in its residency set. `mesh::publish` contains the same
+send-before-stamp-before-local-use operations as `mesh_signal`, which calls it.
+`mesh::cohere` contains the MLX visibility accesses and system-scope fence. These
+are memory/publication primitives, independent of numerical operations.
+
+The engine's existing `mesh_add` now performs that visibility work and publication
+on entry, before considering remote presence. All threads in one cooperative
+threadgroup cover the local partial; after their system fences, a
+[`threadgroup_barrier(mem_device)`](https://developer.apple.com/documentation/apple-silicon/porting-your-metal-code-to-apple-silicon)
+orders those local accesses before its first thread publishes. There is no
+cross-threadgroup counter or waiting workgroup. SIMD groups then consume separate
+batch rows, each with its own consumed-peer mask; additional rows use a fixed
+stride. Every peer remains eligible independently. The numerical `matrixAdd`
+body and the projection backend are unchanged.
+
+Thus the FFN path removes both standalone publication dispatches and their
+encoder barrier: 70 dispatches per 35-layer E2B step. The local cooperative
+barrier and visibility accesses still execute, and the sum now uses one
+threadgroup instead of one per batch row. Their latency must be included in the
+floor measurement; dispatch deletion alone does not establish that floor.
+Vocabulary publication and opaque numerical producers retain the standalone
+encoder. No transport field, queue, reference count or host callback is added.
+
 One serial Metal command stream owns a resident function's publications.
 `completion_publication` is setup-only information: early publishers do not
 contribute the old "last declared output implies all publications finished"
@@ -1240,8 +1267,8 @@ CPU consumer. Independent frames and unordered writers retain independent stream
 It does not establish the full H1 load budget, which remains open.
 
 `MeshMetalFrame.wait` exposes an explicit device-stamp wait when the supplied
-program needs one. The decode caller instead supplies `mesh_add`: one SIMD group
-per row tracks a private mask of consumed peers, picks a present unconsumed input,
+program needs one. The decode caller instead supplies `mesh_add`: a SIMD group
+assigned to a row tracks a private mask of consumed peers, picks a present unconsumed input,
 applies the existing add body to its contiguous sections, and repeats. Only
 presence and the consumed mask select inputs; payload values do not select control
 flow. No missing peer prevents a present peer from being added. The output reaches

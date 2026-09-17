@@ -683,7 +683,7 @@ public final class MeshMetalFrame {
     public let inputs, outputs: [MeshMetalOperand]
     private let sequence: MTLBuffer, sequenceOffset: Int
     private let waits: [UInt32]
-    private let targets: [(MTLBuffer, SIMD2<UInt32>)]
+    public let publications: [MTLBuffer]
     fileprivate let resources: [MTLBuffer]
     private let coherent, signal, acquire: MTLComputePipelineState
 
@@ -699,14 +699,19 @@ public final class MeshMetalFrame {
         let context = memory.context, m = context.pointee.M!
         let state = MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_function_sequence(function, UInt32(index)), count: 4), memory: memory)
         sequence = state.metal(device: device); sequenceOffset = state.metalOffset
+        let sequenceAddress = sequence.gpuAddress + UInt64(sequenceOffset)
         waits = sources.map { $0.stride == 0 ? 0 : UInt32.max }
         var backing = (inputs + outputs).flatMap { $0.resources } + (inputs + outputs).map { $0.table }
-        targets = results.map { result in
+        publications = results.enumerated().map { output, result in
             let row = result.first + UInt32(index) * result.stride
             let publication = UnsafeMutableRawPointer(mesh_publication_at(m, row)!)
             let counts = publication.load(as: SIMD2<UInt32>.self)
             let count = Int(counts[0] + counts[1])
-            let records = device.makeBuffer(length: max(32, count * 32), options: .storageModeShared)!
+            let records = device.makeBuffer(length: 32 + count * 32, options: .storageModeShared)!
+            records.contents().storeBytes(of: outputs[output].table.gpuAddress + UInt64(outputs[output].offset), as: UInt64.self)
+            records.contents().advanced(by: 8).storeBytes(of: sequenceAddress, as: UInt64.self)
+            records.contents().advanced(by: 16).storeBytes(of: counts, as: SIMD2<UInt32>.self)
+            backing.append(records)
             for i in 0..<count {
                 let target = publication.advanced(by: 16 + i * 16).load(as: mesh_target.self)
                 let pointer = UnsafeMutableRawPointer(m).advanced(by: Int(target.stream))
@@ -714,13 +719,13 @@ public final class MeshMetalFrame {
                 let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: pointer, count: 8 + (Int(mask) + 1) * 8), memory: memory)
                 let buffer = span.metal(device: device), address = buffer.gpuAddress + UInt64(span.metalOffset)
                 backing.append(buffer)
-                let destination = records.contents().advanced(by: i * 32)
+                let destination = records.contents().advanced(by: 32 + i * 32)
                 destination.storeBytes(of: address, as: UInt64.self)
                 destination.advanced(by: 8).storeBytes(of: address + 8, as: UInt64.self)
                 destination.advanced(by: 16).storeBytes(of: mask, as: UInt32.self)
                 destination.advanced(by: 20).storeBytes(of: target.index + 1, as: UInt32.self)
             }
-            return (records, counts)
+            return records
         }
         resources = backing + [sequence]
     }
@@ -748,8 +753,8 @@ public final class MeshMetalFrame {
             return (buffer, UInt32((bytes + 3) / 4))
         }
         let width = min(256, coherent.maxTotalThreadsPerThreadgroup)
-        let target = targets[output], table = operand.table, offset = operand.offset
-        return { [coherent, signal, sequence, sequenceOffset] command in
+        let publication = publications[output]
+        return { [coherent, signal] command in
             let encoder = command.makeComputeCommandEncoder()!
             encoder.setComputePipelineState(coherent)
             for (buffer, words) in spans {
@@ -761,11 +766,7 @@ public final class MeshMetalFrame {
             }
             encoder.memoryBarrier(scope: .buffers)
             encoder.setComputePipelineState(signal)
-            encoder.setBuffer(table, offset: offset, index: 0)
-            encoder.setBuffer(sequence, offset: sequenceOffset, index: 1)
-            encoder.setBuffer(target.0, offset: 0, index: 2)
-            var counts = target.1
-            encoder.setBytes(&counts, length: 8, index: 3)
+            encoder.setBuffer(publication, offset: 0, index: 0)
             encoder.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
             encoder.endEncoding()
         }
@@ -790,6 +791,13 @@ public final class MeshMetalFrame {
         ulong padding;
     };
     static_assert(sizeof(target) == 32, "mesh device target");
+    struct publication {
+        volatile coherent(system) device page* value;
+        volatile coherent(system) device const uint* sequence;
+        uint2 counts;
+        ulong padding;
+    };
+    static_assert(sizeof(publication) == 32, "mesh device publication");
     // design/algorithm-sources.md#resident-metal
     inline void push(device const target& destination, uint invocation) {
         uint position = (*destination.position)++ & destination.mask;
@@ -798,22 +806,29 @@ public final class MeshMetalFrame {
         destination.slots[position].x = destination.index;
         fence();
     }
+    // design/algorithm-sources.md#resident-metal
+    inline void cohere(volatile coherent(system) device uint* data, uint count, uint index, uint stride) {
+        for (uint i = index; i < count; i += stride) data[i] = data[i];
+        fence();
+    }
+    // design/algorithm-sources.md#resident-metal
+    inline void publish(device const publication& event) {
+        uint invocation = *event.sequence;
+        auto targets = reinterpret_cast<device const target*>(&event + 1);
+        for (uint i = 0; i < event.counts.x; ++i) push(targets[i], invocation);
+        event.value->stamp = ulong(invocation) + 1;
+        fence();
+        for (uint i = event.counts.x; i < event.counts.x + event.counts.y; ++i) push(targets[i], invocation);
+    }
     }
     // design/algorithm-sources.md#resident-metal
     kernel void mesh_coherent(volatile coherent(system) device uint* data [[buffer(0)]],
-        constant uint& count [[buffer(1)]], uint index [[thread_position_in_grid]]) {
-        if (index < count) data[index] = data[index];
-        ::mesh::fence();
+        constant uint& count [[buffer(1)]], uint index [[thread_position_in_grid]], uint stride [[threads_per_grid]]) {
+        ::mesh::cohere(data, count, index, stride);
     }
     // design/algorithm-sources.md#resident-metal
-    kernel void mesh_signal(volatile coherent(system) device ::mesh::page* page [[buffer(0)]],
-        volatile coherent(system) device const uint& sequence [[buffer(1)]], device const ::mesh::target* targets [[buffer(2)]],
-        constant uint2& counts [[buffer(3)]]) {
-        uint invocation = sequence;
-        for (uint i = 0; i < counts.x; ++i) ::mesh::push(targets[i], invocation);
-        page->stamp = ulong(invocation) + 1;
-        ::mesh::fence();
-        for (uint i = counts.x; i < counts.x + counts.y; ++i) ::mesh::push(targets[i], invocation);
+    kernel void mesh_signal(device const ::mesh::publication& event [[buffer(0)]]) {
+        ::mesh::publish(event);
     }
     // design/algorithm-sources.md#resident-metal
     kernel void mesh_acquire(volatile coherent(system) device const ::mesh::page* page [[buffer(0)]],
