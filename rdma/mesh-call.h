@@ -23,15 +23,13 @@ static inline void *mesh_operand_address(struct mesh_operand operand,size_t offs
 static inline uint32_t mesh_operand_page(struct mesh_operand operand){return atomic_load_explicit(&operand.pages->mapping,memory_order_relaxed);}
 /* design/algorithm-sources.md#programtensor */
 static inline __attribute__((always_inline)) intptr_t mesh_operand_view(const struct mesh_page_entry *pages){return (intptr_t)(atomic_load_explicit(&pages->mapping,memory_order_relaxed)>>32);}
-typedef void (*mesh_submit)(struct mesh_call *,uint32_t,void *,const struct mesh_operand *,struct mesh_operand *);
 typedef void (*mesh_dispose)(void *);
-typedef void (*mesh_rearm)(uint32_t,void *);
 
 /* design/algorithm-sources.md#programkernel_call */
 struct mesh_calls *mesh_calls_create(struct mesh_ctx *,uint32_t workers,uint32_t count,void *owner,mesh_dispose);
 struct mesh_function *mesh_call_bind(struct mesh_calls *,uint32_t worker,
   const struct mesh_section *inputs,const struct mesh_section *views,size_t input_count,
-  const struct mesh_section *outputs,size_t output_count,mesh_submit,mesh_rearm,void *,mesh_dispose);
+  const struct mesh_section *outputs,size_t output_count,const void *submit,void *context,const void *rearm,void *rearm_context);
 int mesh_calls_start(struct mesh_calls *);
 uint64_t mesh_calls_submit(struct mesh_calls *,uint32_t index);
 /* design/algorithm-sources.md#meshresult */

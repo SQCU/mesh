@@ -327,6 +327,33 @@ Neither this change nor these citations establish the required latency target.
 
 ## Program.kernel_call
 
+The Swift project’s [calling convention](https://github.com/swiftlang/swift/blob/main/docs/ABI/CallingConvention.rst#closures),
+[ARM64 register summary](https://github.com/swiftlang/swift/blob/main/docs/ABI/CallingConventionSummary.rst),
+and [type layout](https://github.com/swiftlang/swift/blob/main/docs/ABI/TypeLayout.rst),
+together with Clang’s [`swiftcall` and `swift_context`](https://clang.llvm.org/docs/AttributeReference.html#swiftcall),
+supply the native invocation ABI. `meshInvocation` realizes ordinary Swift
+functions. `MeshLaunch` stores their concrete, nongeneric function values; setup
+extracts code/context pairs from that value and retains it in the existing
+`MeshMemory`. C calls the prepared target with the context in Swift’s context
+register. It does not invoke a C callback that discovers another Swift function.
+The same representation supplies the optional native rearm function.
+
+This is specific to the existing Darwin 64-bit Swift/Clang ABI. Reading a generic
+function value with `unsafeBitCast` is not equivalent: Swift can introduce an
+indirect-argument reabstraction thunk. Likewise, importing the launch as an Apple
+block introduces a context-retaining conversion thunk. Neither conversion is on
+the committed launch path. The concrete stored representation and the generated
+register assignment must agree; `native-audit` emits both sides for that review.
+See [direct Swift dispatch](pages-and-functions.md#direct-swift-dispatch).
+
+The engine’s `encodePrefillOutput` extraction and `encodeDecodeOutput` binding
+reuse its existing normalization, projection, sampling and logprob functions.
+Their final Mesh call supplies the command buffer and operand dimensions. They
+introduce no numerical algorithm. Engine session ownership uses the existing
+Collins-style page references through Swift ARC; the
+[caller lifecycle](../../../metal-microbench/docs/compute_execution.md#mesh-output-and-session-lifetime)
+describes successful completion and the retained resources of failed work.
+
 The [direct return indices](pages-and-functions.md#direct-native-return-indices)
 at ABI 74 apply Monsoon's explicit frame addressing to native-call reclamation.
 `mesh_call_bind` assigns each resident call a stable array index. Final-reference

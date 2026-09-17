@@ -88,8 +88,9 @@ lifetimes; it does not remove input-arrival dependencies or alter tensor values.
 Call storage has one Mesh owner reference and one reference per started numerical
 worker. Startup acquires the worker references before creating the threads;
 failed creation releases the references for threads not started. Each worker's
-active-call count keeps that worker alive through native callbacks after destroy
-clears `running`. Worker exit drops its program reference. There is no additional
+local submitted count and completion-only atomic count keep that worker alive
+through native callbacks after destroy clears `running`. Launch performs no
+shared counter increment; the completed count is read only during shutdown. Worker exit drops its program reference. There is no additional
 per-instance program reference, and worker exit does not walk or cancel unissued
 operand uses. Those references end at client retirement after native callbacks
 and QP teardown. A forwarding-only rank starts no numerical workers.
@@ -1046,6 +1047,44 @@ files, up from 2,686. The Makefile gains four build-rule lines and one phony tar
 Documentation changes are separate. Strict compilation, assembly generation
 and the existing bridge/C/Swift library builds pass; no workload or deployment
 is performed.
+
+### Direct Swift dispatch
+
+The `MeshInvocation` heap object, its C callback trampoline and its separate
+per-function disposer are deleted. A 32-byte setup value (`MeshLaunch`) contains
+the ordinary launch and optional rearm functions. The existing memory owner
+retains these values until native workers and callbacks finish, then releases
+the array once. Dispatch never indexes or reads that ownership array.
+
+Each 32-byte consumer record contains code, context, call address, invocation
+mask and the end of its contiguous use range. The duplicate operand-array
+address and input count were removed from that record; they already occupy the
+same 64-byte call record as the required dependency count. The generated ARM64
+worker loads code and context together, puts the context in `x20`, reads the
+call’s operand fields and executes `blr`. There is no intermediate invocation
+object, block conversion, launch retain/release or shared atomic increment.
+The supplied function and its backend still have their own captures and work;
+this does not claim to delete those native operations.
+
+A local submitted count replaces the pre-launch atomic increment. Native
+completion still increments one completion counter after output publication
+and ownership cleanup. Only shutdown compares the counts. This deletes one
+contended atomic RMW per invocation; it does not relocate it to another thread.
+The duplicate `running` acquire/branch around arrival drainage is also deleted.
+
+Before this change the maintained library had 2,833 lines across
+`swift/*.swift`, `rdma/*.c` and `rdma/*.h` (eleven files). The new total is 2,830.
+The material reduction is the removed runtime object access, callback adapter,
+atomic operation and 64-to-32-byte consumer record, not a halving of source.
+Documentation is counted separately. Shared wire layout remains ABI 76;
+the native library callback ABI changed and requires dependent libraries to
+rebuild. No workload or latency measurement was performed.
+
+This closes the invocation-object lookup and launch-lifetime increment only.
+Stream probing, indexed receive placement, contiguous materialization, backend
+command-buffer creation, inline transport reclamation and N1/R2 remain open.
+The [audit follow-up](h-audit-2026-09-16.md#follow-up--native-function-dispatch)
+records these limits instead of marking the entire H group complete.
 
 ### Memoized numerical completion
 
