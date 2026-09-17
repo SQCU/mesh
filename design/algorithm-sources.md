@@ -317,6 +317,17 @@ union-find complexity claim. Scratch parents and mappings are discarded.
 `mesh_event_reader_init` prepares private reader addresses before progress;
 `mesh_event_take` polls these independent streams, not the tensor graph.
 
+TX and numerical workers keep their prepared reader headers as thread-local
+values. Each reader has exactly one consumer; its input-array base and count
+are immutable for the thread's lifetime, and its cursor has no outside reader.
+The numerical worker likewise retains its immutable target-array base. This
+removes repeated owner-record loads without allocating another table or changing
+slot publication, stream order or lifetime rules. The generated code keeps the
+polling header fields in registers, with spills across native calls. The
+[assembly account](h-audit-2026-09-16.md#thread-local-reader-headers) reports both
+the removed reads and the increased stack frames; independent stream probing
+and its O(P) cost remain.
+
 The [handoff analysis](pages-and-functions.md#publication-notifications) gives
 the complete source flow, capacity assumption and remaining polling/metadata
 costs. ABI 67's shared-ticket FIFO is deleted: an unpublished reservation could

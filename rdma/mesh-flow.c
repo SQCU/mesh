@@ -365,9 +365,9 @@ static int mesh_receive_progress(struct mesh_link *link,struct mesh_free_ring *r
 }
 
 /* design/algorithm-sources.md#programkernel_call */
-static void link_publications(struct mesh_link *link,struct mesh_send_edge *edges){
+static void link_publications(struct mesh_link *link,struct mesh_send_edge *edges,struct mesh_event_reader *notices){
   uint64_t event;
-  while((event=mesh_event_take(&link->notices))!=MESH_EVENT_ABSENT){
+  while((event=mesh_event_take(notices))!=MESH_EVENT_ABSENT){
     uint32_t first=(uint32_t)event;
     for(uint32_t at=first,end=edges[first].end;at<end;at+=edges[at].chunks){
       struct mesh_send_edge *source=&edges[at];
@@ -392,10 +392,11 @@ static void link_publications(struct mesh_link *link,struct mesh_send_edge *edge
 static void *link_send_progress(void *argument){
   struct mesh_link *link=argument;
   struct mesh_send_edge *edges=link->send_edges;
+  struct mesh_event_reader notices=link->notices;
   pthread_setname_np("mesh.rdma.send");
   while(atomic_load_explicit(&link->progressing,memory_order_acquire)){
     if(mesh_send_progress(link,edges))break;
-    link_publications(link,edges);
+    link_publications(link,edges,&notices);
   }
   return NULL;
 }

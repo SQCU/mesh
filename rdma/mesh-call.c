@@ -156,14 +156,16 @@ static void *mesh_call_progress(void *argument){
   struct mesh_calls *calls=worker->calls;
   struct hdr *m=calls->context->M;
   struct mesh_call *values=calls->values;
+  struct mesh_use *targets=worker->targets;
+  struct mesh_event_reader arrivals=worker->arrivals,returns=worker->returns;
   uint32_t submitted=0;
 
   pthread_setname_np("mesh.numerical");
   while(atomic_load_explicit(&calls->running,memory_order_acquire) || atomic_load_explicit(&worker->completed,memory_order_acquire)!=submitted){
     uint64_t event;
-    while((event=mesh_event_take(&worker->arrivals))!=MESH_EVENT_ABSENT){
-      for(uint32_t i=(uint32_t)event,end=worker->targets[i].end;i<end;i++){
-        struct mesh_use use=worker->targets[i];
+    while((event=mesh_event_take(&arrivals))!=MESH_EVENT_ABSENT){
+      for(uint32_t i=(uint32_t)event,end=targets[i].end;i<end;i++){
+        struct mesh_use use=targets[i];
         use.call->invocation^=(use.call->invocation^(uint32_t)(event>>32))&use.invocation_mask;
         if(--use.call->pending)continue;
         struct mesh_operand *operands=use.call->operands;
@@ -171,7 +173,7 @@ static void *mesh_call_progress(void *argument){
         submitted++;
       }
     }
-    while((event=mesh_event_take(&worker->returns))!=MESH_EVENT_ABSENT){
+    while((event=mesh_event_take(&returns))!=MESH_EVENT_ABSENT){
       struct mesh_call *call=&values[(uint32_t)event];
       if(!call->error && --call->remaining)continue;
       struct mesh_function *function=call->function;
