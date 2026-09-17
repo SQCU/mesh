@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 73u
+#define MESH_VERSION 74u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_EVENT_ABSENT UINT64_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
@@ -21,11 +21,11 @@ enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
 struct mesh_buffer {
   _Alignas(64) _Atomic uint32_t references;
   _Atomic uint32_t closed;
-  uint32_t initial,pages,uses,sends,channel,binding;
+  uint32_t initial,pages,uses,sends,channel,return_index;
   _Atomic uint64_t owner;
   uint64_t return_slot;
   uint32_t invocation,completions;
-  uint64_t publisher;
+  union {uint64_t publisher;uint32_t frame;};
 };
 _Static_assert(sizeof(struct mesh_buffer)==64 && _Alignof(struct mesh_buffer)==64,"mesh_buffer");
 struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
@@ -185,7 +185,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->link_off=at; at+=(uint64_t)links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
   h->target_off=at; at+=(uint64_t)rows*(links+MESH_COMPUTE_THREADS)*sizeof(struct mesh_target); at=(at+pgsz-1)/pgsz*pgsz;
   h->order_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*links*qps*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->notice_bytes=sizeof(struct mesh_events)+(uint64_t)rows*sizeof(struct mesh_stream);
+  h->notice_bytes=sizeof(struct mesh_events)+2*(uint64_t)rows*sizeof(struct mesh_stream);
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links*(qps+1)+2*MESH_COMPUTE_THREADS)*h->notice_bytes; at=(at+bytes-1)/bytes*bytes;
   h->instance_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*rows*sizeof(struct mesh_instance); at=(at+bytes-1)/bytes*bytes;

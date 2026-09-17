@@ -292,8 +292,8 @@ load at byte 40. The former offset-table loads are absent from those paths.
 This is source/assembly evidence of one removed dependent table access per
 dispatch, not a measurement of cache misses or end-to-end latency. ABI 71 TX
 uses the prepared backing address/key and writes the wire tag. Numerical launch still accesses the declared dependency count and sequence
-value and records its active lifetime. Cold return processing retains its
-row-to-call lookup. The operand changes below remove address refresh and both
+value and records its active lifetime. ABI 74 removes cold return processing's
+row-to-call lookup through [direct return indices](#direct-native-return-indices). The operand changes below remove address refresh and both
 operand loops from launch; they do not remove stream polling or TX binding.
 H1/H3/H5/H6/H7 and N1 therefore remain incomplete.
 
@@ -541,8 +541,68 @@ with no varying inputs. Successful native completion publishes outputs, releases
 that call's consumed input references, then releases its outputs' producer references.
 Their final references return through the existing numerical-worker notices;
 the last output return rearms the native object
-when necessary, restores that frame's pending template, and releases one frame reference directly. Zero-output functions emit the same return through their metadata row.
+when necessary, restores that frame's pending template, and releases one frame reference directly. Zero-output functions now emit their final call index directly.
 A native error concludes status separately; complete failure cancellation is R2.
+
+### Direct native return indices
+
+ABI 74 removes the return path `row -> buffer.binding -> calls.slots -> call`.
+Call records occupy one stable, aligned array. Setup assigns function f and
+resident frame v the index `f * inFlight + v`; operand sequence pointers and
+prepared uses reference those records from their initial construction. Nothing
+is relocated or rebound at launch. The numerical worker retains the array base
+when it starts and addresses `values[event_index]` directly on a return.
+
+A buffer's existing 32-bit binding field is now its prepared `return_index`.
+Received buffers retain their logical row as that index; numerical outputs carry
+their owning call index. Their already distinct destination streams determine
+which array consumes the index. `mesh_buffer_release` emits that value when the
+one ownership count reaches zero. It adds a field read from the same 64-byte
+buffer record, while removing the buffer-record read and pointer-table read at
+the numerical consumer. There is no runtime return-kind classification.
+
+Each native completion also has its prepared call index for zero-output and
+failed calls. Zero-output functions therefore need no dummy row, buffer binding,
+row allocation or matching lookup. The `return_first`, `return_count` and
+`return_row` bookkeeping and the `calls.slots` pointer array are deleted.
+All three supplied backend kinds retain the same completion path and owning
+worker for native rearming. A call with several outputs still counts their
+actual final-reference events, and rearms after the last one; the reference
+protocol and event count are unchanged.
+
+Receive setup still binds a frame number for its instance-reference release.
+That field shares the eight bytes formerly needed only for the setup publisher
+identity. The publisher identity is consumed and discarded when streams are
+compiled, before the client publishes `configured`; the bridge installs the
+receive frame afterward, before receive progress. No runtime union test or
+additional buffer storage is introduced. The buffer and call records remain
+64 bytes with their existing assertions.
+
+For S = function_count * inFlight and R arena rows, the old implementation used
+64S bytes in separate call allocations plus an 8S-byte pointer table. The stable
+array reserves 64R bytes when the first numerical function is bound; only the S
+bound records are initialized. A transport-only participant allocates none.
+At R = 229,376 the array reserves 14,680,064 bytes. The existing S <= R setup
+bound moves to binding, where it prevents writing beyond that array. There is
+no invocation-time allocation or new admission check.
+
+Deleting dummy rows also deletes their implicit accounting for return-event
+capacity. With at most R distinct output rows and at most R call records,
+numerical returns need at most 2R provisional bindings, including zero-output
+completions. Publication queues still need at most R. The current uniform event
+reservation uses the 2R bound for every queue, and setup scratch uses the same
+bound. No stream-capacity check is added to execution. This coarse allocation
+remains an explicit cost: `128 + 256R` bytes per event array, or 2,936,019,200
+bytes for the documented two banks of 25 arrays at R = 229,376, versus ABI 73's
+1,468,012,800. These are reserved bytes, not a resident-memory measurement.
+
+Maintained library source decreases from 2,799 to 2,790 lines across the same
+eleven files. Generated numerical return code uses the event index shifted by
+six to address its call record; no row binding or call-pointer table intervenes.
+Strict C/Swift compilation, the bridge, existing callers and engine Mesh build
+pass. No runtime workload or latency result is claimed. This removes address
+discovery from local return processing; it does not close N1's cross-participant
+reuse, R2 cancellation, or the complete H1–H7 path requirements.
 
 ### Prepared numerical uses
 

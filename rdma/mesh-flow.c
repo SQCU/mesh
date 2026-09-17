@@ -207,7 +207,7 @@ static int link_configure(void *state,int socket,uint64_t client){
       for(uint32_t value=0;value<in[i].count;value++){
         uint32_t row=in[i].local_row+value*in[i].stride;
         struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-        buffer->binding=value;buffer->completions=in[i].stride!=0;
+        buffer->frame=value;buffer->completions=in[i].stride!=0;
         struct mesh_target *targets=mesh_targets(m,row);
         for(uint32_t chunk=0;chunk<chunks;chunk++){
           struct mesh_receive_record *record=&receive->records[peer[i].local_row+value*peer[i].stride+chunk];
@@ -280,7 +280,7 @@ static int link_receive(struct mesh_link *link,uint32_t q){
     error=link_receive_post(queue,receive);
     mesh_buffer_reset(m,row);
     for(uint32_t i=0;i<buffer->completions;i++){
-      struct mesh_instance *instance=&link->instances[buffer->binding+i];
+      struct mesh_instance *instance=&link->instances[buffer->frame+i];
       atomic_store_explicit(&instance->invocation,buffer->invocation,memory_order_relaxed);
       mesh_instance_release(instance,1);
     }

@@ -121,8 +121,8 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
     struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
     atomic_store_explicit(&buffer->references,0,memory_order_relaxed);
     atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-    buffer->uses=buffer->sends=0;buffer->return_slot=0;buffer->publisher=(uint64_t)r+1;
-    buffer->initial=buffer->pages=buffer->binding=buffer->invocation=buffer->completions=0;buffer->channel=MESH_ABSENT;
+    buffer->uses=buffer->sends=0;buffer->return_slot=0;buffer->return_index=r;buffer->publisher=(uint64_t)r+1;
+    buffer->initial=buffer->pages=buffer->invocation=buffer->completions=0;buffer->channel=MESH_ABSENT;
     atomic_store_explicit(&buffer->owner,c->client,memory_order_release);
   }
   c->rows+=count;
@@ -179,7 +179,7 @@ void mesh_buffer_release(struct hdr *m,uint32_t row){
   struct mesh_buffer *buffer=&mesh_buffers(m)[row];
   if(atomic_fetch_sub_explicit(&buffer->references,1,memory_order_acq_rel)==1){
     if(buffer->channel==MESH_ABSENT)atomic_fetch_or_explicit(&mesh_plane(m,MESH_FREE)[row/64],UINT64_C(1)<<(row%64),memory_order_release);
-    else mesh_event_push(m,buffer->return_slot,row,0);
+    else mesh_event_push(m,buffer->return_slot,buffer->return_index,0);
   }
 }
 

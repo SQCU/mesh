@@ -310,6 +310,16 @@ Neither this change nor these citations establish the required latency target.
 
 ## Program.kernel_call
 
+The [direct return indices](pages-and-functions.md#direct-native-return-indices)
+at ABI 74 apply Monsoon's explicit frame addressing to native-call reclamation.
+`mesh_call_bind` assigns each resident call a stable array index. Final-reference
+and native terminal events carry that index to the owning numerical worker;
+`mesh_call_progress` addresses the call directly. This deletes the row binding,
+pointer-table discovery and zero-output routing rows. The existing Collins
+reference count still supplies the final-use event; this is not a new ownership
+protocol. Array reservation, event bounds and the setup-only publisher/frame
+storage reuse are accounted for in the linked analysis.
+
 The [prepared completion record](pages-and-functions.md#memoized-numerical-completion)
 memoizes the arena and operand counts at binding. Output publication consumes
 those fields directly; shared function/worker ownership is followed only for
