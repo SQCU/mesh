@@ -1095,6 +1095,17 @@ records added publication/dispatch work and metadata capacity. Replicated
 sampling, sampling-policy distribution, the full 35+1-push contract and the floor
 latency remain open; per-tile payload bounds do not establish them.
 
+The engine now records the entire supplied projection/publication list using
+Apple's [native Metal program](#native-metal-program). Each output scope carries
+its setup-only continuation commands; the numerical binding remains independent
+of Mesh. Those continuations reuse `mesh_coherent` and `mesh_signal`, with their
+existing payload visibility and publication mechanism. No shader arithmetic,
+payload backing, dispatch count or collective route changes. Native projection
+backends replay one recorded range instead of encoding every tile on the host;
+MPS retains its own encoders and prepared following native segments. The engine's
+[encoding account](../../../metal-microbench/docs/async_collectives.md#recorded-vocabulary-projection-and-publication)
+states the removed host calls and the remaining device/driver costs.
+
 ## nn.ffn
 
 Shoeybi et al., [Megatron-LM](https://arxiv.org/abs/1909.08053), and MLX's
@@ -1452,9 +1463,10 @@ and [`supportIndirectCommandBuffers`](https://developer.apple.com/documentation/
 define compute recording, dependencies and pipeline compilation. This is native
 Metal replay, not recommitting an ordinary command buffer.
 
-The engine's `bindMetalProgram` consumes setup-only dispatch descriptions and
-records the supplied pipelines, buffer bindings, scalar constants and grids into
-one `MTLIndirectCommandBuffer`. Constants are packed UInt32 metadata in shared
+The engine's `bindMetalProgram` consumes setup-only dispatch descriptions. For
+multiple commands or indirect reads, it records the supplied pipelines, buffer
+bindings, scalar constants and grids into one `MTLIndirectCommandBuffer`.
+Constants are packed UInt32 metadata in shared
 storage; tensor payloads retain their supplied storage. Setup deduplicates read
 and write resource declarations, captures pipeline lifetimes, and discards the
 dispatch descriptions. Invocation creates one compute encoder, declares two
@@ -1462,6 +1474,13 @@ prepared resource arrays through Metal's native bulk API, executes the recorded
 command range and ends encoding. There is no runtime dispatch-description walk,
 pipeline selection, scalar packing, buffer rebinding or Swift resource walk.
 The native resource declarations still incur Metal's own work and are not free.
+
+A single command without indirect reads instead captures direct pipeline, grid
+and bulk buffer bindings at setup. Invocation creates an encoder, sets the
+pipeline and prepared buffers, dispatches and ends encoding. There is no native
+indirect command or separate resource-declaration call in this lowering. Ordinary
+matrix products use the same direct implementation, replacing their duplicate
+closure. This setup choice adds no runtime branch or descriptor traversal.
 
 The actual five-stage engine sampler uses this program in ordinary decode,
 prefill and the resident Mesh decode function. `sampleTokenCommands` and
@@ -1556,8 +1575,9 @@ reports that resident-memory scope explicitly. Residency does not track hazards:
 producer prepends the existing KV scatter with a device dependency before
 attention. Reduction retains its numerical dependency too. No kernel arithmetic,
 tensor backing or remote-fill rule is added. The bound row count determines the
-KV grid. Token embedding, streaming sums and final projections still need
-recording; replicated sampling and the E1d/E8 floor remain open.
+KV grid. Vocabulary projection and publication are now recorded together;
+token embedding and streaming sums still need recording. Replicated sampling
+and the E1d/E8 floor remain open.
 
 ## Prefill KV
 
