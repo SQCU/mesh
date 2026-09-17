@@ -1007,6 +1007,37 @@ The MPI Forum's [collectives](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-repor
 and MLX's [distributed operations](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/ops.cpp):
 [distinct communication relations](collective-verbs.md).
 
+## Vocabulary projection
+
+Shoeybi et al., [Megatron-LM](https://arxiv.org/abs/1909.08053), and the MLX
+authors' [tensor-parallel linear layers](https://github.com/ml-explore/mlx/blob/main/python/mlx/nn/layers/distributed.py)
+provide the output-column decomposition. For replicated h and disjoint column
+ranges C_i, each participant computes `logits[C_i] = softcap(h W[:, C_i])`.
+These are disjoint output coordinates; they are placed, not summed. The engine
+reuses its existing packed, transposed GEMV, and matrix launch paths with a
+weight offset/stride or a matrix subview. The selected backend is unchanged.
+
+The [Pallas operand representation](#programtensor) supplies the contiguous
+sampling scopes. Setup prepares each 1024-token sampling tile's canonical page
+array, element offset, presence address and invocation address. The existing
+sampling kernels resolve a contiguous pointer once per tile; logprob candidate
+merging retains its two per-thread pointers across the candidate loop. This is
+ordinary indexed operand access, not a second sampler or a tensor allocation.
+A Metal function constant selects indexed versus ordinary inputs at pipeline
+creation. The ordinary specialization does not poll Mesh or load page metadata.
+The indexed partials pass uses the existing [resident presence mechanism](#resident-metal);
+subsequent passes use their existing command-buffer dependencies.
+
+The implemented engine binding has every rank project its caller-configured
+vocabulary columns, with peers sending directly to rank 0's existing sampler.
+Rank 0 reads both its own and remote logits in canonical storage. It retains the
+existing temperature, global min-p, arbitrary logit biases, Philox/CDF draw,
+tie-breaking and logprob algorithms. No local top-k truncation substitutes for
+categorical sampling. This is an intermediate implementation: E1d's replicated
+sampling and per-rank vocabulary pushes remain open, as do its payload/floor
+checks and E8's complete-forward latency measurement. The engine account is
+[here](../../../metal-microbench/docs/async_collectives.md#distributed-vocabulary-projection).
+
 ## nn.ffn
 
 Shoeybi et al., [Megatron-LM](https://arxiv.org/abs/1909.08053), and MLX's
