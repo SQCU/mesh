@@ -6,7 +6,12 @@
 /* design/algorithm-sources.md#programcopy */
 struct mesh_send_edge {
   _Alignas(128) struct ibv_sge span;
-  struct mesh_instance *instances; uint32_t completions,queue,row,chunks,offset,remaining,end;
+  const struct ibv_sge *spans;
+  _Atomic uint32_t *pages;
+  uint32_t *sequence;
+  struct ibv_qp *pair;
+  struct mesh_instance *instances;
+  uint32_t completions,queue,row,chunks,offset,remaining,end,block;
   struct ibv_send_wr request;
 };
 _Static_assert(sizeof(struct mesh_send_edge)==256 && offsetof(struct mesh_send_edge,request)+offsetof(struct ibv_send_wr,wr)<=128,"mesh_send_edge native request");
@@ -160,7 +165,9 @@ static int link_configure(void *state,int socket,uint64_t client){
       uint32_t chunks=(uint32_t)((out[i].bytes+payload-1)/payload);
       uint32_t edge=link->send_offsets[row]++;struct mesh_send_edge *source=&link->send_edges[edge];
       uint32_t end=source->end;
-      *source=(struct mesh_send_edge){.span={.length=bytes[2*q+MESH_SEND]},.instances=&link->instances[value],.completions=out[i].stride?1:link->instance_count,.queue=q,.row=row,.chunks=chunks,.remaining=chunks,.end=end,
+      *source=(struct mesh_send_edge){.span={.length=bytes[2*q+MESH_SEND]},.spans=link->provider.device->spans,.pages=mesh_page(m)+row,
+        .sequence=&mesh_buffers(m)[row].invocation,.pair=link->provider.pairs[q],.instances=&link->instances[value],
+        .completions=out[i].stride?1:link->instance_count,.queue=q,.row=row,.chunks=chunks,.remaining=chunks,.end=end,.block=m->block,
         .request={.wr_id=edge,.sg_list=&source->span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED}};
     }
     free(bindings);free(peer);
@@ -209,14 +216,13 @@ static int link_send_ready(struct mesh_link *link,uint32_t q){
   while(ready->head!=ready->tail){
     uint32_t edge=link->send_ready[ready->first+(ready->head&ready->mask)];
     struct mesh_send_edge *source=&link->send_edges[edge];
-    uint32_t page=atomic_load_explicit(&mesh_page(link->M)[source->row+source->offset],memory_order_acquire);
-    struct mesh_wire_tag *tag=mesh_tag(link->M,page);
-    struct mesh_buffer *buffer=&mesh_buffers(link->M)[source->row];
-    atomic_store_explicit(&tag->value,((uint64_t)buffer->invocation<<32)|(source->row+source->offset),memory_order_relaxed);
-    struct ibv_sge span=link->provider.device->spans[page/link->M->block];
+    uint32_t page=atomic_load_explicit(source->pages+source->offset,memory_order_acquire);
+    struct ibv_sge span=source->spans[page/source->block];
+    struct mesh_wire_tag *tag=(struct mesh_wire_tag *)(uintptr_t)span.addr;
+    atomic_store_explicit(&tag->value,((uint64_t)*source->sequence<<32)|(source->row+source->offset),memory_order_relaxed);
     source->span.addr=span.addr;source->span.lkey=span.lkey;
     struct ibv_send_wr *bad=NULL;
-    int error=ibv_post_send(link->provider.pairs[q],&source->request,&bad);
+    int error=ibv_post_send(source->pair,&source->request,&bad);
     if(error)return error<0?-error:error;
     source->offset++;
     ready->head++;

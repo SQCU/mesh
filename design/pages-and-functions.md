@@ -241,7 +241,7 @@ stream descriptors, and polling latency remain; grouping is not free progress.
 
 After a successful dequeue, TX and numerical dispatch directly address the
 terminal record array. Optimized ARM64 output shows `index << 8` followed by the
-SEND range-end load at byte 48, and `index << 6` followed by the use range-end
+SEND range-end load at byte 80, and `index << 6` followed by the use range-end
 load at byte 44. The former offset-table loads are absent from those paths.
 This is source/assembly evidence of one removed dependent table access per
 dispatch, not a measurement of cache misses or end-to-end latency. TX still
@@ -675,24 +675,54 @@ assertion requires that snapshot to be lock-free. This is code-generation eviden
 not a timing claim. N1's cross-participant lifetime bound and cancellation remain
 unfinished.
 
+### Direct SEND record operands
+
+After `929abb8`, configuration places the page-entry address, registered
+span-array address, sequence-word address, queue pair and block geometry in the
+existing SEND record. These values were already fixed for the record's lifetime.
+The TX loop no longer follows the mapping header to reconstruct page and buffer
+addresses, follows the device object to find registration spans, or indexes the
+provider's queue-pair array. The selected span's address is already the shared
+tag-word address, so it also replaces the separately derived tag mapping.
+
+The runtime data flow is now: ready index → SEND record → canonical page value
+→ registered span; the sequence value is read through its prepared address;
+the tag and request address/key are written and the native post is called.
+The page/registration and sequence reads remain explicit. This removes object
+traversal; it does not establish the complete one-record contract.
+The 256-byte SEND allocation and 128-byte alignment are unchanged. Added fields
+use existing space; the asserted common native header still fits the first
+128 bytes. The range-end field is now at byte 80. No interface or shared-region
+ABI changes in this step.
+
+With the same `cc -fblocks -O2 -S` invocation, compare the generated
+`link_send_ready` instructions immediately after calculating the SEND-record
+address through, but excluding, the native indirect call. The previous source
+has 39 instructions, including 20 load instructions and two unsigned divides;
+the replacement has 25 instructions, including 14 loads and one divide. Paired
+loads count as one instruction, not one scalar access or cache-line fetch.
+The native provider dispatch itself is included in both preparation intervals.
+The nonempty-path stack frame decreases from 80 to 64 bytes; the empty path
+now returns before allocating a stack frame. These are generated-code counts,
+not cache-miss or latency measurements. Full H2/H3/H7 completion remains open.
+
+Maintained library source changes from 2,680 to 2,686 lines across the same
+eleven Swift/C/header files. Documentation cleanup is reported separately.
+Strict C diagnostics and the existing bridge build pass; no runtime test or
+bridge deployment is performed.
+
 ### Prepared native requests
 
-The exact-tail SEND change in ABI 60 was incorrect: a shortened SEND may use
-fewer native frames than its preposted RECV. Apple
+Setup prepares matching native request extents under Apple's
 [TN3205](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
-requires matching frame counts. The tail-length field and runtime length choice
-are removed. Setup chooses the matching request extents, and posting submits
-those extents unchanged. No truncation occurs in SEND or RECV.
+frame-count contract. Posting submits those extents unchanged.
 
 For transport payload capacity C and a queue's declared logical transfer lengths
 N_t, setup chooses L_q = min(C, max_t N_t) + 8 bytes for both ends of that
 direction. A section of N bytes occupies K = ceil(N/C) requests, each of L_q
 bytes. The posted SGE byte total is K L_q: N logical bytes, 8K tag bytes, and
 K(L_q - 8) - N padding bytes. The receiver's prepared request has the same
-extent for every arrival, independent of which producer finishes first. This
-corrects the former N + 8K claim; it is API byte accounting, not measured wire
-time. Reducing padding would require selecting compatible requests before
-posting, without imposing producer order or changing the caller's tensor.
+extent for every arrival, independent of which producer finishes first. This is API byte accounting, not measured wire time.
 
 Each physical receive block has a 64-byte aligned native WR/SGE record. The RX
 pool ring carries indices into this array; returning a page computes its index

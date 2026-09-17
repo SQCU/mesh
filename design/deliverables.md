@@ -261,13 +261,6 @@ Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 **S3. Chunked transport, invisible.** `mesh_section_create(ctx, bytes, count, receive, &section)`; internal `C`, `K = ceil(N/C)`. Ref: TN3205 frame matching; llama.cpp PR #26421 (128 KiB stride cost). Check: I10.
 
-The [operator's exact-tail clarification](collective-goals.md) places message
-selection before the send interface. An exact-tail change must prepare compatible
-requests on both ends; neither SEND nor RECV truncates a supplied request. Exact
-logical tensor lengths do not imply padding-free native messages. The latter
-claim was withdrawn with the ABI 60 truncation change; current transport padding
-is accounted for in [prepared native requests](pages-and-functions.md#prepared-native-requests).
-
 **S4. Out-of-band pairing once; versioned exchange; every syscall bounded.** `verbs_up(link)` with `XMAGIC+MESH_VERSION`; `accept/connect/read` each with a deadline. Ref: TN3205; `RDMA-RULES.md`. Check: each of those calls in `rdma/mesh-verbs.h` is followed by a timeout.
 
 ### L — library core
@@ -350,6 +343,10 @@ sentences licensed one more dependent load between a completion and a post or a 
 with the data structure and the data flow, and with counts.
 
 ### H — hot and cold data flow (the transport, as the machine executes it)
+
+The current intervention removes latency and dependent metadata loads in these
+runtime paths. Private transport details do not create new caller, tensor,
+collective or dispatch requirements.
 
 The hot path is the set of stores and loads between "a value became ready" and "the NIC
 was told", and between "the NIC returned a completion" and "the consumer was told". It
@@ -559,7 +556,7 @@ subset, never as "done".
 |---|---|---|---|
 | 1 | S1 links list | ✓ | `c9d9e18` |
 | 2 | S2 TX/RX threads per link | ✓ | `c9d9e18`; used by P1's paired Core ML run |
-| 3 | S3 chunked transport invisible | ✓ source; prior P1 run | `98742c8`; P1 transported four/eight-chunk sections. The ABI 60 exact-tail SEND regression is removed: setup prepares matching native extents for SEND/RECV, posted unchanged. Logical lengths stay exact; tags and padding are included in [byte accounting](pages-and-functions.md#prepared-native-requests). The padding-free wire claim is withdrawn. No caller shape or partial boundary changes; no new runtime or latency claim. |
+| 3 | S3 chunked transport invisible | ✓ source; prior P1 run | `98742c8`; P1 transported four/eight-chunk sections. Setup prepares matching native extents for SEND/RECV, posted unchanged; [byte accounting](pages-and-functions.md#prepared-native-requests) records their cost. No caller shape or partial boundary changes; no new runtime or latency claim. |
 | 4 | S4 bounded pairing | ✓ | `06dcdb3`; checked nonblocking sockets, one deadline across all pairing exchanges |
 | 5 | L1 partial tensor | ✓ | `swift/Mesh.swift` `TensorPart` |
 | 6 | L2 supplied function | ✓ | `TensorFunction.cpu/.metal/.prediction` |
@@ -615,8 +612,8 @@ subset, never as "done".
 | W7 | collective compositions declaration-only | ✓ | audited f1ae04a: all conditionals in `send…allReduce` (Mesh.swift:324-409) run before `start()`; no runtime code; [audit](w-audit-2026-09-15.md#w7) |
 | W8 | caller bindings encode-and-return | ◐ | The removed prefill wait remains forbidden; `lm_engine.swift:1909` still inserts `encodeWaitForEvent(graph.meshStepEvent, ...)` before `encodeDecodeOutput`, whose operand dependency must be declared through Mesh. Gram bindings encode or execute supplied numerical functions and return. The engine `encAttn` binding still reaches the host `attentionSplits` scan; prefill must publish declared operands consumed by decode. Indexed `MeshBindings` view selection is permitted. |
 | H1 | index rings are the only hot-path interface (three kinds; one store per hand-off) | ✗ (FIFO defect removed; target not met) | ABI 69 compiles independent single-writer streams and final publication indices. Shared tickets, sequence admission, masks and return-queue reconstruction remain deleted. Grouping/remapping is setup-only. **Unfinished:** P streams can still scale with graph size; descriptor/slot probes and packed descriptor sharing remain, as does complete hot/cold separation. Reserved metadata growth is accounted for. [Handoff analysis](pages-and-functions.md#publication-notifications). |
-| H2 | Directly indexed records; native WR/SGE prepared with actual ABI sizes asserted | ◐ | ABI 69 removes the TX and numerical row-to-range lookup: events directly name SEND/use records carrying range ends. SEND remains 256 B, RECV WR/SGE 64 B, receive dispatch 32 B, use/call records 64 B. Operand descriptors remain 48 B but carry the canonical mapping and sequence address; copied first-page/address fields and dispatch binding are deleted. Native view selection performs its canonical page read at actual use. TX backing/key/tag preparation and complete one-record event paths remain unfinished. [Address analysis](pages-and-functions.md#operand-addresses-and-sequence-values). |
-| H3 | the four hot flows exactly as listed (value ready / TX / RX / worker) and the cold pass | ✗ | ABI 69 emits final SEND/use indices, deletes their offset-table loads and removes remote binding plus both operand/output loops from numerical dispatch. Independent streams replace individual-slot scans. The single sequence write moves to publication. Stream polling, tag/address preparation and incomplete cold separation remain. No new timing trace is claimed. |
+| H2 | Directly indexed records; native WR/SGE prepared with actual ABI sizes asserted | ◐ | ABI 69 removes the TX and numerical row-to-range lookup: events directly name SEND/use records carrying range ends. SEND remains 256 B, RECV WR/SGE 64 B, receive dispatch 32 B, use/call records 64 B. Operand descriptors remain 48 B but carry the canonical mapping and sequence address; copied first-page/address fields and dispatch binding are deleted. Native view selection performs its canonical page read at actual use. The SEND record now contains its prepared page, registration, sequence and queue addresses; mapping-header/device traversal is deleted. Actual page/span reads and complete one-record event paths remain unfinished. [Address analysis](pages-and-functions.md#operand-addresses-and-sequence-values). |
+| H3 | the four hot flows exactly as listed (value ready / TX / RX / worker) and the cold pass | ✗ | ABI 69 emits final SEND/use indices, deletes their offset-table loads and removes remote binding plus both operand/output loops from numerical dispatch. Independent streams replace individual-slot scans. The single sequence write moves to publication. SEND preparation also drops header/device/queue reconstruction: its compiled pre-call interval is 39 → 25 instructions, 20 → 14 loads, with no record growth. Stream polling, actual page/span reads and incomplete cold separation remain. No new timing trace is claimed. |
 | H4 | permission never costs a load (ring empty, verbs return, pending == 0 only) | ◐ | Software posting gates and one-post-per-pass limits remain deleted. ABI 69 streams contain no shared reservation, producer occupancy check or sequence admission. An empty stream advances to another stream. Remote-address classification is removed from numerical dispatch. Full hot-flow and polling costs remain H1–H3. |
 | H5 | dependent loads last in line (hot stores precede them in every hot function) | ✗ | ABI 69 deletes both numerical launch operand loops and remote address refresh. The call sequence is shared by its operands; each publication writes the output sequence once before its TX indices, then presence and local indices. This identity store is counted, not hidden. Active-lifetime accounting, stream metadata and transport address/tag preparation still precede some hot actions. |
 | H6 | contiguity by construction; zero runtime page-table reads | ✗ | ABI 63 deletes `buffer.mapping` and its accessor. Canonical chunk entries are directly indexed by row; actual page loads and contiguous-input materialization remain. Independent arrival order is preserved. |
