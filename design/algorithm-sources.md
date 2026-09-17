@@ -1206,6 +1206,13 @@ inputs whose host preparation starts the local step; the rest are retained opera
 whose presence is handled by the supplied GPU program. It is setup metadata,
 not a runtime interpretation of the model. `mesh_call_bind` registers notifications
 only for that prefix. In the decode caller the prefix is one metadata operand.
+A leader's prefix is now the original metadata publication: its token and KV
+operands are already installed by the caller. The redundant local CPU decoder
+and its four-byte readiness output are deleted. Only remote ranks construct the
+decoder that installs received state, removing its runtime owner branch too.
+This uses the same Monsoon dependency edges and supplied functions, with one
+fewer operator on the leader's launch path; see the
+[source account](../../../metal-microbench/docs/async_collectives.md#direct-leader-step-dependency).
 A follower therefore starts from its received/derived step metadata and needs no
 separate host submission scheduler.
 
