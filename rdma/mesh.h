@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 86u
+#define MESH_VERSION 87u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -22,7 +22,7 @@ enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
 struct mesh_buffer {
   _Alignas(32) _Atomic uint64_t owner;
   _Atomic uint32_t closed;
-  uint32_t pages,channel;
+  uint32_t pages,channel,constant;
 };
 _Static_assert(sizeof(struct mesh_buffer)==32 && _Alignof(struct mesh_buffer)==32,"mesh_buffer");
 struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
@@ -31,11 +31,10 @@ struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
 struct mesh_page_entry {
   _Alignas(16) _Atomic uint64_t mapping;
   _Atomic uintptr_t address;
-  _Atomic uint64_t device,stamp;
+  _Atomic uint64_t device;
 };
 _Static_assert(sizeof(struct mesh_page_entry)==32 && _Alignof(struct mesh_page_entry)==16 &&
-  offsetof(struct mesh_page_entry,address)==8 && offsetof(struct mesh_page_entry,device)==16 &&
-  offsetof(struct mesh_page_entry,stamp)==24,"mesh_page_entry");
+  offsetof(struct mesh_page_entry,address)==8 && offsetof(struct mesh_page_entry,device)==16,"mesh_page_entry");
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_COMPUTE_THREADS 8
@@ -47,14 +46,15 @@ _Static_assert(sizeof(struct mesh_send)==32 && _Alignof(struct mesh_send)==32 &&
 struct mesh_target { uint64_t stream; uint32_t count; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off */
-struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t uses; struct mesh_target targets[]; };
-_Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publication)==64 && offsetof(struct mesh_publication,targets)==8,"mesh_publication");
+/* design/prepared-machine.md#M10 */
+struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t uses; _Atomic uint64_t argument; uint64_t device_input; struct mesh_target targets[]; };
+_Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publication)==64 && offsetof(struct mesh_publication,argument)==8 && offsetof(struct mesh_publication,device_input)==16 && offsetof(struct mesh_publication,targets)==24,"mesh_publication");
 /* design/prepared-machine.md#M18 */
-struct mesh_arrival { _Alignas(16) uint32_t call; uint32_t mask; _Atomic uint64_t stamp; };
-_Static_assert(sizeof(struct mesh_arrival)==16 && _Alignof(struct mesh_arrival)==16 && offsetof(struct mesh_arrival,stamp)==8,"M18");
+struct mesh_arrival { _Alignas(16) uint32_t call; _Atomic uint64_t argument; };
+_Static_assert(sizeof(struct mesh_arrival)==16 && _Alignof(struct mesh_arrival)==16 && offsetof(struct mesh_arrival,argument)==8,"M18");
 /* design/prepared-machine.md#M13 */
-struct prepared_publication { _Alignas(16) uint64_t destination; uint64_t scale,padding[2]; };
-_Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepared_publication)==16 && offsetof(struct prepared_publication,scale)==8,"M13");
+struct prepared_publication { _Alignas(16) uint64_t destination; uint64_t argument,padding[2]; };
+_Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepared_publication)==16 && offsetof(struct prepared_publication,argument)==8,"M13");
 /* design/algorithm-sources.md#index-hand-off */
 /* design/prepared-machine.md#M37 */
 struct mesh_completion { _Alignas(32) _Atomic uint64_t event; struct mesh_instance *result; };

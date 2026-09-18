@@ -22,7 +22,7 @@ static inline __attribute__((always_inline)) uint32_t mesh_submit(struct mesh_su
   for(uint32_t i=0;i<count;i++){
     struct mesh_arrival *cells=submission->destinations[i];
     uint32_t extent=submission->counts[i];
-    for(uint32_t k=0;k<extent;k++)atomic_store_explicit(&cells[k].stamp,(uint64_t)generation+1,memory_order_release);
+    for(uint32_t k=0;k<extent;k++)atomic_store_explicit(&cells[k].argument,1,memory_order_release);
   }
   return generation;
 }
@@ -39,23 +39,22 @@ struct mesh_operand {
   _Alignas(16) void *data;
   size_t bytes;
   uint32_t index,row;
-  uint32_t *sequence;
 };
-_Static_assert(sizeof(struct mesh_operand)==32 && _Alignof(struct mesh_operand)==16 && offsetof(struct mesh_operand,sequence)==24,"M43");
+_Static_assert(sizeof(struct mesh_operand)==32 && _Alignof(struct mesh_operand)==16,"M43");
 /* design/prepared-machine.md#M20 */
 struct mesh_call {
   _Alignas(128) struct mesh_operand *operands;
   struct mesh_instance *instance;
   _Atomic uint32_t *completed;
   _Alignas(16) uint32_t index;
-  uint32_t pending,invocation,identity;
+  uint32_t pending,identity;
   mesh_invoke submit;
   void *argument;
   uint32_t publication_count,recurring;
   _Alignas(128) struct prepared_publication publications[];
 };
 _Static_assert(sizeof(struct mesh_call)==128 && _Alignof(struct mesh_call)==128,"mesh_call record");
-_Static_assert(offsetof(struct mesh_call,pending)==36 && offsetof(struct mesh_call,invocation)==40 &&
+_Static_assert(offsetof(struct mesh_call,pending)==36 &&
   offsetof(struct mesh_call,submit)==48 && offsetof(struct mesh_call,argument)==56 &&
   offsetof(struct mesh_call,publication_count)==64 && offsetof(struct mesh_call,recurring)==68 && offsetof(struct mesh_call,publications)==128,"M20");
 /* design/prepared-machine.md#M26 */
@@ -130,6 +129,4 @@ uint32_t mesh_row_page(struct mesh_ctx *,uint32_t row,uint32_t chunk);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);
 void mesh_section_constant(struct mesh_ctx *,struct mesh_section);
 
-/* design/algorithm-sources.md#collectivesync_on_remote_fill */
-void mesh_sync_on_remote_fill(struct mesh_ctx *,const struct mesh_section *,size_t count,uint32_t index);
 #endif

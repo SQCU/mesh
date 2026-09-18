@@ -138,12 +138,11 @@ static void *mesh_call_progress(void *argument){
     for(uint32_t visited=0;visited<count;visited++){
       struct mesh_arrival *cell=arrivals+cursor;
       if(++cursor==count)cursor=0;
-      uint64_t value=atomic_load_explicit(&cell->stamp,memory_order_acquire);
+      uint64_t value=atomic_load_explicit(&cell->argument,memory_order_acquire);
       if(!value)continue;
-      atomic_store_explicit(&cell->stamp,0,memory_order_relaxed);
+      atomic_store_explicit(&cell->argument,0,memory_order_relaxed);
       /* design/prepared-machine.md#M20 */
       struct mesh_call *call=(void *)(values+(size_t)cell->call*stride);
-      call->invocation^=(call->invocation^(uint32_t)(value-1))&cell->mask;
       if(--call->pending)continue;
       call->pending=call->recurring;
       call->submit(call,call->argument);
@@ -169,13 +168,13 @@ static int mesh_events_prepare(struct mesh_calls *calls){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     struct mesh_publication *publication=mesh_publication_at(m,row);
     if(atomic_load_explicit(&buffer->owner,memory_order_relaxed)==calls->context->client && publication->sends &&
-       atomic_load_explicit(&mesh_page(m)[row].stamp,memory_order_relaxed)){
+       buffer->constant){
       /* design/prepared-machine.md#M13 */
-      uint32_t count=mesh_publication_prepare(m,row,1,NULL);
+      uint32_t count=mesh_publication_prepare(m,row,NULL);
       struct prepared_publication *stores=aligned_alloc(32,(size_t)count*sizeof *stores);
       if(!stores)return ENOMEM;
-      mesh_publication_prepare(m,row,1,stores);
-      for(uint32_t i=0;i<count;i++)atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)stores[i].destination,1,memory_order_release);
+      mesh_publication_prepare(m,row,stores);
+      for(uint32_t i=0;i<count;i++)atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)stores[i].destination,stores[i].argument,memory_order_release);
       free(stores);
     }
   }
@@ -202,7 +201,7 @@ int mesh_calls_prepare(struct mesh_calls *calls){
         } else {
           section=function->inputs[i];
           varying|=section.stride!=0;
-          if(atomic_load_explicit(&mesh_page(m)[section.first].stamp,memory_order_relaxed))continue;
+          if(mesh_buffers(m)[section.first].constant)continue;
         }
         initial++;pending+=section.stride!=0;
         for(uint32_t index=0;index<calls->extent;index++){
@@ -210,7 +209,7 @@ int mesh_calls_prepare(struct mesh_calls *calls){
           if(pass){
             /* design/prepared-machine.md#M18 */
             worker->arrivals[indices[row]++]=(struct mesh_arrival){
-              .call=function->identity*calls->extent+index,.mask=section.stride?UINT32_MAX:0};
+              .call=function->identity*calls->extent+index};
           } else {
             indices[row+1]++;
             mesh_publish_bind(calls->context,row,m->links+function->worker,0);
@@ -261,7 +260,7 @@ int mesh_calls_prepare(struct mesh_calls *calls){
     for(uint32_t frame=0;frame<calls->extent;frame++){
       size_t count=0;
       for(size_t i=0;i<function->output_count;i++)
-        count+=mesh_publication_prepare(m,mesh_section_row(function->inputs[function->input_count+i],frame),1,NULL);
+        count+=mesh_publication_prepare(m,mesh_section_row(function->inputs[function->input_count+i],frame),NULL);
       if(count>publications)publications=count;
     }
   }
@@ -294,10 +293,10 @@ int mesh_calls_prepare(struct mesh_calls *calls){
         struct mesh_section section=function->inputs[i];
         uint32_t row=mesh_section_row(section,index);
         call->operands[i]=(struct mesh_operand){.data=(void *)atomic_load_explicit(&mesh_page(m)[row].address,memory_order_relaxed),
-          .bytes=section.bytes,.index=section.stride?index:0,.row=row,.sequence=&call->invocation};
+          .bytes=section.bytes,.index=section.stride?index:0,.row=row};
         if(i<function->input_count)continue;
         /* design/prepared-machine.md#M13 */
-        call->publication_count+=mesh_publication_prepare(m,row,1,call->publications+call->publication_count);
+        call->publication_count+=mesh_publication_prepare(m,row,call->publications+call->publication_count);
       }
     }
   }
@@ -337,7 +336,9 @@ int mesh_calls_prepare(struct mesh_calls *calls){
       uint32_t row=in[i].local_row+slot*in[i].stride,chunks=mesh_buffers(m)[row].pages/m->block;
       struct mesh_publication *first=mesh_publication_at(m,row),*last=mesh_publication_at(m,row+chunks-1);
       if(first!=last){
+        uint64_t device_input=last->device_input;
         memcpy(last,first,(size_t)m->target_stride);
+        if(device_input)last->device_input=device_input;
         first->sends=first->uses=0;
       }
     }
@@ -386,10 +387,10 @@ static __attribute__((noinline)) void mesh_call_cleanup(struct mesh_call *call,i
 void mesh_call_complete(struct mesh_call *call,int error){
   if(!error){
     /* design/prepared-machine.md#M13 */
-    uint64_t invocation=call->invocation;
+    #pragma clang loop unroll(disable)
     for(uint32_t i=0,count=call->publication_count;i<count;i++){
       struct prepared_publication store=call->publications[i];
-      atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)store.destination,1+invocation*store.scale,memory_order_release);
+      atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)store.destination,store.argument,memory_order_release);
     }
   }
   __attribute__((musttail)) return mesh_call_cleanup(call,error);
@@ -546,15 +547,5 @@ uint32_t mesh_row_page(struct mesh_ctx *context,uint32_t row,uint32_t chunk){ret
 void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return mesh_at(context->M,mesh_row_page(context,mesh_section_row(section,index),0));}
 /* design/algorithm-sources.md#programwrite */
 void mesh_section_constant(struct mesh_ctx *context,struct mesh_section section){
-  atomic_store_explicit(&mesh_page(context->M)[section.first].stamp,1,memory_order_release);
-}
-/* design/algorithm-sources.md#collectivesync_on_remote_fill */
-void mesh_sync_on_remote_fill(struct mesh_ctx *context,const struct mesh_section *sections,size_t count,uint32_t index){
-  for(size_t i=0;i<count;i++){
-    struct mesh_section section=sections[i];
-    uint64_t stamp=section.stride?(uint64_t)index+1:1;
-    for(;;)for(uint32_t slot=0;slot<section.count;slot++)
-      if(atomic_load_explicit(&mesh_page(context->M)[mesh_section_row(section,slot)].stamp,memory_order_acquire)==stamp)goto filled;
-filled:;
-  }
+  mesh_buffers(context->M)[section.first].constant=1;
 }

@@ -112,14 +112,14 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   uint32_t first=mesh_allocate(c,count,1,0,mesh_rows(c->M),MESH_ROW_OWN,MESH_ROW_HOT);
   if(first==MESH_ABSENT) return first;
   for(uint32_t r=first;r<first+count;r++){
-    atomic_store_explicit(&mesh_page(c->M)[r].stamp,0,memory_order_relaxed);
     atomic_store_explicit(&mesh_page(c->M)[r].device,0,memory_order_relaxed);
     atomic_store_explicit(&mesh_page(c->M)[r].mapping,MESH_ABSENT,memory_order_release);
     struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
     atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-    buffer->pages=0;buffer->channel=MESH_ABSENT;
+    buffer->pages=buffer->constant=0;buffer->channel=MESH_ABSENT;
     struct mesh_publication *publication=mesh_publication_at(c->M,r);
-    publication->sends=publication->uses=0;
+    publication->sends=publication->uses=publication->device_input=0;
+    atomic_store_explicit(&publication->argument,0,memory_order_relaxed);
     atomic_store_explicit(&buffer->owner,c->client,memory_order_release);
   }
   c->rows+=count;
@@ -221,20 +221,20 @@ struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t q
 
 /* design/prepared-machine.md#M13 */
 /* design/algorithm-sources.md#programkernel_call */
-uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,int local,struct prepared_publication *records){
+uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,struct prepared_publication *records){
   struct mesh_publication *publication=mesh_publication_at(m,row);
   uint32_t count=0;
   for(uint32_t uses=0;uses<2;uses++){
-    if(uses && local){
-      if(records)records[count]=(struct prepared_publication){.destination=(uintptr_t)&mesh_page(m)[row].stamp,.scale=1};
+    if(uses && publication->device_input){
+      if(records)records[count]=(struct prepared_publication){.destination=(uintptr_t)&publication->argument,.argument=publication->device_input};
       count++;
     }
     uint32_t first=uses?publication->sends:0,end=first+(uses?publication->uses:publication->sends);
     for(uint32_t i=first;i<end;i++){
       struct mesh_target target=publication->targets[i];
-      size_t stride=uses?sizeof(struct mesh_arrival):sizeof(struct mesh_send),offset=uses?offsetof(struct mesh_arrival,stamp):0;
+      size_t stride=uses?sizeof(struct mesh_arrival):sizeof(struct mesh_send),offset=uses?offsetof(struct mesh_arrival,argument):0;
       for(uint32_t k=0;k<target.count;k++){
-        if(records)records[count]=(struct prepared_publication){.destination=(uintptr_t)m+target.stream+stride*k+offset,.scale=uses};
+        if(records)records[count]=(struct prepared_publication){.destination=(uintptr_t)m+target.stream+stride*k+offset,.argument=uses?atomic_load_explicit(&mesh_page(m)[row].address,memory_order_relaxed):1};
         count++;
       }
     }

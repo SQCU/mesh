@@ -7,8 +7,6 @@ public typealias MeshOperands = UnsafeBufferPointer<mesh_operand>
 
 extension mesh_operand {
     // design/algorithm-sources.md#programtensor
-    @inlinable public var invocation: UInt32 { sequence.pointee }
-    // design/algorithm-sources.md#programtensor
     @inlinable public func load<Value>(at index: Int, as type: Value.Type = Value.self) -> Value {
         data!.load(fromByteOffset: index * MemoryLayout<Value>.stride, as: type)
     }
@@ -126,7 +124,7 @@ public struct MeshMetalOperand {
     public let bytes: Int
     fileprivate let quantum: Int
     public let data: MTLBuffer?
-    public let availability: UInt64
+    public let input: (buffer: MTLBuffer, offset: Int)
 
     // design/algorithm-sources.md#device-operands
     // design/algorithm-sources.md#native-metal-program
@@ -146,7 +144,7 @@ public struct MeshMetalOperand {
     #pragma METAL internals : enable
     constant ulong mesh_quantum [[function_constant(37)]];
     namespace mesh {
-    struct page { ulong mapping, host, address, stamp; };
+    struct alignas(16) page { ulong mapping, host, address; };
     // design/prepared-machine.md#M10
     static_assert(sizeof(page) == 32, "mesh_page_entry");
     template<typename T> struct span { volatile coherent(system) device T* data; uint count; };
@@ -422,6 +420,7 @@ public final class Mesh {
     }
 
     // design/algorithm-sources.md#device-operands
+    // design/prepared-machine.md#M10
     fileprivate func metal(_ part: TensorPart, device: MTLDevice) -> ContiguousArray<MeshMetalOperand> {
         let section = part.section!, context = memory.context, block = mesh_block_pages(context)
         let quantum = Int(block * context.pointee.M.pointee.pgsz)
@@ -444,9 +443,13 @@ public final class Mesh {
                 ? memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_section_address(context, section, instance), count: section.bytes)) : nil
             if let data { backing.append(data) }
             let table = span.metal(device: device)
-            let available = table.gpuAddress + UInt64(span.metalOffset + (section.channel == MESH_ABSENT ? 0 : count - 1) * 32 + 24)
+            let port = mesh_publication_at(context.pointee.M, row + (section.channel == MESH_ABSENT ? 0 : UInt32(count - 1)))!
+            UnsafeMutableRawPointer(port).storeBytes(of: data?.gpuAddress ?? 0, toByteOffset: 16, as: UInt64.self)
+            let input = MeshSpan(data: UnsafeMutableRawBufferPointer(start: UnsafeMutableRawPointer(port).advanced(by: 8), count: 8), memory: memory)
+            let inputBuffer = input.metal(device: device)
+            backing.append(inputBuffer)
             return MeshMetalOperand(table: table, offset: span.metalOffset,
-                                    resources: backing, bytes: section.bytes, quantum: quantum, data: data, availability: available)
+                                    resources: backing, bytes: section.bytes, quantum: quantum, data: data, input: (inputBuffer, input.metalOffset))
         })
     }
 
@@ -605,11 +608,7 @@ public final class Mesh {
         }
     }
 
-    // design/algorithm-sources.md#collectivesync_on_remote_fill
-    public func syncOnRemoteFill(_ parts: [TensorPart], index: Int = 0) {
-        let sections = parts.map { $0.section! }
-        mesh_sync_on_remote_fill(memory.context, sections, sections.count, UInt32(truncatingIfNeeded: index))
-    }
+
 }
 
 public final class MeshMetalFrame {
@@ -632,9 +631,9 @@ public final class MeshMetalFrame {
         // design/prepared-machine.md#M13
         publications = results.map { result in
             let row = result.first + UInt32(index) * result.stride
-            let count = Int(mesh_publication_prepare(m, row, 1, nil))
+            let count = Int(mesh_publication_prepare(m, row, nil))
             var stores = [prepared_publication](repeating: prepared_publication(), count: count)
-            _ = stores.withUnsafeMutableBufferPointer { mesh_publication_prepare(m, row, 1, $0.baseAddress) }
+            _ = stores.withUnsafeMutableBufferPointer { mesh_publication_prepare(m, row, $0.baseAddress) }
             for i in stores.indices {
                 let pointer = UnsafeMutableRawPointer(bitPattern: UInt(stores[i].destination))!
                 let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: pointer, count: 8), memory: memory)
