@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 82u
+#define MESH_VERSION 83u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_EVENT_ABSENT UINT64_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
@@ -47,9 +47,10 @@ enum { MESH_SEND, MESH_RECEIVE };
 struct mesh_stream { _Alignas(128) uint32_t position; uint32_t mask; _Atomic uint64_t slots[]; };
 _Static_assert(sizeof(struct mesh_stream)==128 && _Alignof(struct mesh_stream)==128 && offsetof(struct mesh_stream,slots)==8,"mesh_stream");
 /* design/prepared-machine.md#M04 */
-struct mesh_tx { uint32_t count,slots,once; _Atomic uint64_t cells[]; };
-_Static_assert(offsetof(struct mesh_tx,cells)==16 && sizeof(_Atomic uint64_t)==8,"M04");
-struct mesh_target { uint64_t stream; uint32_t index,count; };
+struct mesh_send { _Alignas(32) _Atomic uint64_t ready; uintptr_t pair,request; uint64_t reserved; };
+struct mesh_tx { uint32_t count,slots,once; struct mesh_send cells[]; };
+_Static_assert(sizeof(struct mesh_send)==32 && _Alignof(struct mesh_send)==32 && offsetof(struct mesh_tx,cells)==32,"M04");
+struct mesh_target { uint64_t stream; uint32_t count; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off */
 struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t uses,row; struct mesh_target targets[]; };
@@ -175,8 +176,8 @@ static inline void mesh_event_push(struct hdr *m,uint64_t slot,uint32_t index,ui
 /* design/algorithm-sources.md#programkernel_call */
 static inline __attribute__((always_inline)) void mesh_publish(struct hdr *m,const struct mesh_target *targets,uint32_t sends,uint32_t uses,struct mesh_page_entry *entry,uint64_t stamp){
   for(uint32_t i=0;i<sends;i++){
-    _Atomic uint64_t *cells=(_Atomic uint64_t *)((char *)m+targets[i].stream);
-    for(uint32_t k=0;k<targets[i].count;k++)atomic_store_explicit(cells+k,(uint64_t)targets[i].index+k+1,memory_order_release);
+    struct mesh_send *cells=(void *)((char *)m+targets[i].stream);
+    for(uint32_t k=0;k<targets[i].count;k++)atomic_store_explicit(&cells[k].ready,1,memory_order_release);
   }
   atomic_store_explicit(&entry->stamp,stamp,memory_order_release);
   for(uint32_t i=sends,end=sends+uses;i<end;i++){

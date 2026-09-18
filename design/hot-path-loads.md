@@ -119,40 +119,36 @@
 | Output visibility reads the existing scalar output word before its coherent store. | M38 | `swift/Mesh.swift:708` |
 | Store completed generation, then fixed retirement event. | M35/M37 | `metal-microbench/mesh_layer.swift:352` |
 
-| T1 instruction: cursor → native SEND acceptance / advance | D0 row | Source |
+| T1 instruction: ready publication → native SEND post | D0 row | Source |
 | --- | --- | --- |
-| `ldr x26,[x25]`: current cell pointer. | M16 | `rdma/mesh-flow.c:227` |
-| `ldapr x8,[x26]`: publication cell. | M04 | `rdma/mesh-flow.c:228` |
-| `ldr x0,[x25,#24]`: QP from the same cursor line. | M16 | `rdma/mesh-flow.c:233` |
-| `add x1,x24,x8,lsl #7`: native WR address; x24 retains X-128. | M06 | `rdma/mesh-flow.c:233` |
-| `add x2,sp,#8`; `blr x22`: stack failure output and register-held native post. | M06, M07, M15 | `rdma/mesh-flow.c:233` |
-| `stlr xzr,[x26]`: accepted cell clear. | M04 | `rdma/mesh-flow.c:235` |
-| `ldr x9,[x25,#16]`: end. | M16 | `rdma/mesh-flow.c:236` |
-| `ldr x8,[x25,#8]`: first, only on wrap. | M16 | `rdma/mesh-flow.c:236` |
-| `str x8,[x25]`: cursor advance. | M16 | `rdma/mesh-flow.c:236` |
+| `ldapr x8,[x23]`: publication ready word, with record address in a register. | M04 | `rdma/mesh-flow.c:216` |
+| `str xzr,[x23]`: clear this accepted event before the native call. | M04 | `rdma/mesh-flow.c:217` |
+| `ldp x0,x1,[x23,#8]`: native QP and WR from that same aligned 32-byte line. | M04 | `rdma/mesh-flow.c:218` |
+| `add x2,sp,#8`; `blr x22`: stack failure output and register-held native post entry. | M06, M07, M15 | `rdma/mesh-flow.c:218` |
+| `add/cmp/csel`: advance to the next record; base/end retained in registers, no cursor load or store. Empty and accepted events use this same advance. | register | `rdma/mesh-flow.c:221` |
 
 | T2 instruction: native completion → availability publication | D0 row | Source |
 | --- | --- | --- |
-| `ldr w1,[x22,#8]`: native completion status. | M11 | `rdma/mesh-flow.c:277` |
-| `ldr w8,[x22]`: completed canonical row integer. | M11 | `rdma/mesh-flow.c:278` |
-| `ldr x28,[x9,#24]`: previous stamp at page base + 32*row + 24; add register F. | M10 | `rdma/mesh-flow.c:280` |
-| `stlr x9,[x10]`: publish availability at that same stamp address. | M10 | `rdma/mesh-flow.c:281` |
+| `ldr w1,[x22,#8]`: native completion status. | M11 | `rdma/mesh-flow.c:261` |
+| `ldr w8,[x22]`: completed canonical row integer. | M11 | `rdma/mesh-flow.c:262` |
+| `ldr x28,[x9,#24]`: previous stamp at page base + 32*row + 24; add register F. | M10 | `rdma/mesh-flow.c:264` |
+| `stlr x9,[x10]`: publish availability at that same stamp address. | M10 | `rdma/mesh-flow.c:265` |
 
 | RX continuation after availability publication | D0 row | Source |
 | --- | --- | --- |
-| `ldp x8,x0,[x23,#32]`: prepared native RECV post entry and QP; WR is x23, bad-WR output is SP+24. | M08, M09, M25 | `rdma/mesh-flow.c:285` |
-| `blr x8`: repost prepared WR; payload consumer can already read M10/M02. | M08, M09 | `rdma/mesh-flow.c:285` |
-| `ldp w10,w11,[x23,#52]`: compiled destination range. | M08 | `rdma/mesh-flow.c:288` |
-| `ldp x9,x8,[sp,#8]`: optional destination base/generation offset at RFP-104/-96. | M25 | `rdma/mesh-flow.c:289` |
-| `ldp x11,x12,[x9,#-16]`: destination and value from flat record. | M13 | `rdma/mesh-flow.c:289` |
-| `ldr x13,[x9],#32`: multiplier; advance to next consecutive record, no linked traversal. | M13 | `rdma/mesh-flow.c:291` |
-| `stlr x12,[x11]`: fixed CPU/forward destination after multiply/add in registers. | M04 or M18 | `rdma/mesh-flow.c:290` |
-| `ldr w23,[x23,#48]`: cold retirement row. | M08 | `rdma/mesh-flow.c:294` |
+| `ldp x8,x0,[x23,#32]`: prepared native RECV post entry and QP; WR is x23, bad-WR output is SP+24. | M08, M09, M25 | `rdma/mesh-flow.c:269` |
+| `blr x8`: repost prepared WR; payload consumer can already read M10/M02. | M08, M09 | `rdma/mesh-flow.c:269` |
+| `ldp w10,w11,[x23,#52]`: compiled destination range. | M08 | `rdma/mesh-flow.c:272` |
+| `ldp x9,x8,[sp,#8]`: optional destination base/generation offset at RFP-104/-96. | M25 | `rdma/mesh-flow.c:273` |
+| `ldp x11,x12,[x9,#-16]`: destination and value from flat record. | M13 | `rdma/mesh-flow.c:273` |
+| `ldr x13,[x9],#32`: multiplier; advance to next consecutive record, no linked traversal. | M13 | `rdma/mesh-flow.c:275` |
+| `stlr x12,[x11]`: fixed CPU/forward destination after multiply/add in registers. | M04 or M18 | `rdma/mesh-flow.c:274` |
+| `ldr w23,[x23,#48]`: cold retirement row. | M08 | `rdma/mesh-flow.c:278` |
 
 | Link polling lifecycle outside accepted-event handoff | D0 row | Source |
 | --- | --- | --- |
 | TX `ldapr w8,[x8]`: link progressing word, only on empty publication cell. | M17 | `rdma/mesh-flow.c:230` |
-| RX `ldapr w8,[x8]`: link progressing word on polling backedge. | M17 | `rdma/mesh-flow.c:273` |
+| RX `ldapr w8,[x8]`: link progressing word on polling backedge. | M17 | `rdma/mesh-flow.c:257` |
 
 | Input-preparation worker instructions; emitted AArch64, outside partial handoffs | D0 row | Source |
 | --- | --- | --- |
@@ -189,16 +185,16 @@
 
 | Removed TX source load site | Replacement |
 | --- | --- |
-| `reader->inputs` | M16 register cursor |
-| `reader->count` | M16 register end |
-| `reader->cursor` | M16 register cursor |
-| `input->slots` | M16 register cursor |
-| `input->position` | M16 register cursor |
-| `input->mask` | M16 register end |
-| `send_edges[first].end` | One M04 cell per native request |
+| `reader->inputs` | register-held M04 scan |
+| `reader->count` | register-held M04 end |
+| `reader->cursor` | register-held M04 scan |
+| `input->slots` | register-held M04 scan |
+| `input->position` | register-held M04 scan |
+| `input->mask` | register-held M04 end |
+| `send_edges[first].end` | One M04 record per independently published partial |
 | `source->span.addr` for a wire tag store | Deleted wire tag |
 | `source->tag_row` | Deleted wire tag |
-| `source->queue` | Native QP in M16 |
+| `source->queue` | Native QP in M04 |
 | Retry `ready->head` | Deleted retry queue |
 | Retry `ready->tail` | Deleted retry queue |
 | Retry `ready->first` | Deleted retry queue |
@@ -249,7 +245,8 @@
 | Removed direct-dispatch source loads | Replacement |
 | --- | --- |
 | M19 `end` and `call` (2) | Independent M18 cells carry the final M20 integer; no use range or call pointer |
-| M05 native `post`, `request`, `bad` (3) | Thread-held native entry, affine WR address, stack-native output; QP shares M16 |
+| M05 native `post`, `request`, `bad` (3) | Deleted intermediate dispatch; native operands now share the directly polled M04 record |
+| M16 `cell`, `first`, `end` (3) | Direct record scan; no per-slot cursor |
 | Input-worker target/call-group spill reloads (2 emitted sites, excluded from source deletion total) | Bases retained in registers after deleting the use table |
 
 | Deleted structures / stores | Replacement |
@@ -259,7 +256,9 @@
 | RX duplicate availability store through `mesh_publish` | One M10 store immediately after the native completion |
 | GPU split high/low CPU-event stores and ring-position write | One prepared 64-bit store |
 | Unread link `send_count` field and assignment | Deleted |
-| M05 prepared_send allocation and per-slot failure-output heap cells | Native WR array, existing M16 spare word and M15 stack output |
+| M05 prepared_send allocation and per-slot failure-output heap cells | Native WR array and M15 stack output |
+| M16 cursor allocation and updates; shared-QP cross-partial SEND order; temporary receive-order array | Each independent publication has a prepared QP and native fragment chain; directly polled M04 contains ready/QP/WR |
+| Unread target index and queried-capacity array | Deleted; publication addresses and native queue extents fixed at setup |
 | M19 mesh_use, duplicate function entry/context, setup event union/remap/sort, publisher field | One M20 record and final M18 cells; cold return streams are constructed at their final addresses |
 | Per-slot producer allocations | One allocation per operand, fixed slot stride |
 | Per-step decode embedding and scale dispatches | Resident `mesh_embed_resident`; neither launch remains in the step recording |
@@ -280,17 +279,17 @@
 
 | Count / construction boundary | Value |
 | --- | --- |
-| Loads listed | 117 sites: 27 emitted AArch64 loads and 90 GPU source-level accesses. Native: TX 5, RX handoff 3, RX continuation 6, link lifecycle 2, input-preparation entry 4, input lifecycle 1, prepared submit/result 6. GPU: embedding 7, FFN 14, attention 21, partial-consumption/finish 25, vocabulary 6, sampler 17. Atomic read-modify-write sites count once. Numerical weight/input/gather/reduction loops remain supplied arithmetic; these counts do not assert GPU ISA loads or spills. |
-| Deleted load sites | Previous 93 + M19 end/call 2 + M05 native-entry/request/failure-output 3 = 98 source/previously enumerated sites. Two additional emitted input-loop spills disappear but are excluded from this total. Relocated mask/QP reads and retained availability/payload reads are not counted as deleted. |
-| Native entry depth T1/T2 | `1/1`: TX cursor → cell, affine native WR; RX completion integer → M10 stamp. No M05 dispatch descriptor. CPU M18 → M20; native entry and context are in that same M20 line. Provider internals are outside this ABI depth. |
-| ABI frames | Input worker 112 bytes, FP=SP+96, no dispatch-loop spills. TX 96 bytes, FP=SP+80, bad-WR output SP+8. RX 128 bytes, FP=SP+112; publication base/generation reload remains after availability publication. No meshMetalRearm frame exists. |
+| Loads listed | 114 sites: 24 emitted AArch64 loads and 90 GPU source-level accesses. Native: TX 2, RX handoff 3, RX continuation 6, link lifecycle 2, input-preparation entry 4, input lifecycle 1, prepared submit/result 6. GPU: embedding 7, FFN 14, attention 21, partial-consumption/finish 25, vocabulary 6, sampler 17. Atomic read-modify-write sites count once. Numerical weight/input/gather/reduction loops remain supplied arithmetic; these counts do not assert GPU ISA loads or spills. |
+| Deleted load sites | Previous 93 + M19 end/call 2 + M05 native-entry/request/failure-output 3 + M16 cell/first/end 3 = 101 source/previously enumerated sites. Two additional emitted input-loop spills disappear but are excluded from this total. Relocated mask/QP reads and retained availability/payload reads are not counted as deleted. |
+| Native entry depth T1/T2 | `0/1`: TX directly polls M04 and reads native operands in the same line; RX completion integer → M10 stamp. CPU M18 → M20. Provider internals are outside this ABI depth. |
+| ABI frames | Input worker 112 bytes, FP=SP+96, no dispatch-loop spills. TX 80 bytes, FP=SP+64, bad-WR output SP+8. RX 128 bytes, FP=SP+112; publication base/generation reload remains after availability publication. No meshMetalRearm frame exists. |
 | Retirement | M37 is a dedicated prepared one-cell stream. The existing return reader selects its cold frame, performs refcount cleanup and later releases the invocation. It does not select, construct or submit a device command. |
-| Construction / compilation | 37/37 listed objects constructed; M05, M12, M14, M19, M21 retired. C/Swift build passes. The engine and four updated chain/example clients compile; generated MSL changes were read, not dispatched or runtime-compiled. Emitted submit/result code has no stack frame on success or pending. Numerical scope spans the whole step. Decode uses one setup command, no per-step command allocation and no renewal. The remaining source violations below prevent claiming invariant satisfaction from this construction count. |
+| Construction / compilation | 36/36 listed objects constructed; M05, M12, M14, M16, M19, M21 retired. C/Swift build passes. The engine and four updated chain/example clients compile; generated MSL changes were read, not dispatched or runtime-compiled. Emitted submit/result code has no stack frame on success or pending. Numerical scope spans the whole step. Decode uses one setup command, no per-step command allocation and no renewal. The remaining source violations below prevent claiming invariant satisfaction from this construction count. |
 
 | Governing invariant on the decode submission path | Source result |
 | --- | --- |
-| I2 | Holds for completed-partial publication: after visibility, FFN/vocabulary write the compiled TX/stamp destinations and return; `mesh_publish` has stores/range walks and no wait, semaphore or poll. `kernels.swift:1714`, `kernels.swift:4598`, `mesh_layer.swift:60`, `rdma/mesh.h:176`. |
+| I2 | Holds for completed-partial publication: after visibility, FFN/vocabulary write the compiled TX/stamp destinations and return; `mesh_publish` has stores/range walks and no wait, semaphore or poll. `kernels.swift:1714`, `kernels.swift:4598`, `mesh_layer.swift:60`, `rdma/mesh.h:177`. |
 | I4 | Submission modulo, availability state and admission are deleted. Independent handles bind disjoint storage at setup; reuse follows graph lifetimes. Full closure is still unproven: fixed receive backing is reposted immediately, and numerical work assignment still uses CAS. M41/M42 do not establish those lifetimes across arbitrary graphs. |
-| I17 | M18 directly indexes the complete M20 call record; M04 directly indexes native WRs. M05/M19 and setup remapping are deleted. Generic CPU output publication still loads operand and publication metadata and must be flattened; no end-to-end claim yet. |
-| I18 | The local-first poll and FFN down-completion gate are deleted. A free workgroup may consume a remote term while another finishes the local term. TX still inspects only the current cell of each cursor; the fixed native receive order and its independent-work implications remain to replace. |
-| I22 | TX reads M16 plus the M04 queue cell; CPU dispatch reads M18 plus one M20 line. Submission/result read M41/M42 respectively. Generic CPU publication still follows call → operand → publication; that competing path prevents end-to-end closure. |
+| I17 | M18 directly indexes the complete M20 call record; M04 directly supplies native QP/WR. M05/M16/M19 and setup remapping are deleted. Generic CPU output publication still loads operand and publication metadata and must be flattened; no end-to-end claim yet. |
+| I18 | TX no longer waits for a particular partial: each M04 has its own native queue, the scan advances unconditionally, and every ready record is posted immediately. Only fragments of the same published partial share ordering. The local-first and FFN down-completion gates remain deleted. This does not establish generic CPU/forward receipt-to-publication depth or inter-invocation lifetimes. |
+| I22 | TX readiness/QP/WR occupy one M04 line. CPU dispatch reads M18 plus one M20 line. Submission/result read M41/M42 respectively. Generic CPU publication still follows call → operand → publication; RX forwarding still reads a prepared destination range. Those paths prevent end-to-end closure. |

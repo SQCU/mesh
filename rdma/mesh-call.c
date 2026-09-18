@@ -287,7 +287,7 @@ int mesh_calls_prepare(struct mesh_calls *calls){
           if(first!=end){
             struct mesh_target *target=mesh_publish_bind(calls->context,row,m->links*(m->qps+1)+i,0);
             target->stream=(uint64_t)((char *)(worker->arrivals+first)-(char *)m);
-            target->index=0;target->count=end-first;
+            target->count=end-first;
           }
           first=end;
         }
@@ -442,8 +442,7 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
     uint32_t row=mesh_section_row(section,value);
     mesh_buffer_retain(m,row);
     uint32_t link=queue/m->qps;
-    uint64_t payload=(uint64_t)m->block*m->pgsz;
-    mesh_publish_bind(context,row,link,1)->count+=(uint32_t)((section.bytes+payload-1)/payload);
+    mesh_publish_bind(context,row,link,1)->count++;
   }
   mesh_transfers(m,context->client,queue,receive)[index]=(struct mesh_transfer){section.first,identity,section.count,section.stride,MESH_ABSENT,0,section.bytes};
   atomic_store_explicit(length,index+1,memory_order_release);
@@ -454,7 +453,7 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
 /* design/algorithm-sources.md#programcopy */
 static int mesh_transfer_compare(const void *a,const void *b){
   const struct mesh_transfer *left=*(const struct mesh_transfer *const *)a,*right=*(const struct mesh_transfer *const *)b;
-  return (left->binding>right->binding)-(left->binding<right->binding);
+  return (left->local_row>right->local_row)-(left->local_row<right->local_row);
 }
 
 /* design/algorithm-sources.md#programcopy */
@@ -462,7 +461,6 @@ int mesh_transfers_prepare(struct mesh_ctx *context){
   struct hdr *m=context->M;
   /* design/prepared-machine.md#M04 */
   uint32_t slots=m->instance_count[context->client>>63];
-  uint64_t payload=(uint64_t)m->block*m->pgsz;
   for(uint32_t p=0;p<m->links;p++){
     uint64_t base=m->notice_off+(uint64_t)mesh_notice_queue(m,context->client,p)*m->notice_bytes;
     struct mesh_tx *tx=(void *)((char *)m+base);
@@ -476,8 +474,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context){
       uint32_t length=atomic_load_explicit(mesh_order_length(m,context->client,p*m->qps+q,MESH_SEND),memory_order_relaxed);
       for(uint32_t i=0;i<length;i++){
         ordered[position++]=out+i;
-        uint32_t chunks=(uint32_t)((out[i].bytes+payload-1)/payload);
-        if(out[i].stride)count+=chunks;else once+=chunks;
+        if(out[i].stride)count++;else once++;
       }
     }
     *tx=(struct mesh_tx){.count=count,.slots=slots,.once=once};
@@ -486,16 +483,15 @@ int mesh_transfers_prepare(struct mesh_ctx *context){
     uint32_t next[2]={0,once};
     for(uint32_t i=0;i<length;i++){
       struct mesh_transfer *out=ordered[i];
-      uint32_t chunks=(uint32_t)((out->bytes+payload-1)/payload),varying=out->stride!=0;
+      uint32_t varying=out->stride!=0;
       out->first=next[varying];
       for(uint32_t slot=0;slot<out->count;slot++){
         struct mesh_publication *publication=mesh_publication_at(m,out->local_row+slot*out->stride);
         for(uint32_t j=0;j<publication->sends;j++)if(publication->targets[j].stream==base){
-          publication->targets[j].index=slot*count+next[varying];
-          publication->targets[j].stream=base+offsetof(struct mesh_tx,cells)+8*(slot*count+next[varying]);
+          publication->targets[j].stream=base+offsetof(struct mesh_tx,cells)+sizeof(struct mesh_send)*(slot*count+next[varying]);
         }
       }
-      next[varying]+=chunks;
+      next[varying]++;
     }
     free(ordered);
   }

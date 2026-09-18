@@ -253,6 +253,6 @@ struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t q
   uint64_t first=m->notice_off+(uint64_t)destination*m->notice_bytes;
   for(uint32_t i=0;i<*count;i++)if(targets[i].stream>=first && targets[i].stream<first+m->notice_bytes)return &targets[i];
   struct mesh_target *target=&targets[(*count)++];
-  *target=(struct mesh_target){.stream=first,.index=row};
+  *target=(struct mesh_target){.stream=first};
   return target;
 }

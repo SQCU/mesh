@@ -41,7 +41,7 @@ struct mesh_verbs {
   struct mesh_device *device; struct mesh_wire *wire;
   struct mesh_queue *queues; int qp_count,listener;
   struct ibv_cq *completions[2];
-  uint32_t (*capacity)[2],peer,completion_entries[2];
+  uint32_t peer,completion_entries[2],request_capacity;
   uint64_t bandwidth;
   const char *local_address,*remote_address,*service;
   uint64_t deadline;
@@ -69,7 +69,6 @@ static int down_pair(struct mesh_verbs *provider){
     provider->completions[d]=NULL;
   }
   free(provider->queues);provider->queues=NULL;
-  free(provider->capacity);provider->capacity=NULL;
   return 1;
 }
 /* design/algorithm-sources.md#programcopy */
@@ -222,6 +221,8 @@ done:
   return 0;
 }
 /* design/algorithm-sources.md#programcopy */
+/* design/prepared-machine.md#M06 */
+/* design/prepared-machine.md#M08 */
 static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
   if(device_up(provider->device,provider->wire,m))return -1;
   struct ibv_port_attr pa;
@@ -229,11 +230,10 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+UINT64_C(30000000000);
   int f=oob(provider,m,client);
   if(f<0)return -1;
-  uint32_t frame_capacity=provider->device->frame_capacity;
+  uint32_t frame_capacity=provider->request_capacity;
   /* design/prepared-machine.md#M11 */
   provider->queues=calloc((size_t)qps,sizeof *provider->queues);
-  provider->capacity=calloc((size_t)qps,sizeof *provider->capacity);
-  if(!provider->queues || !provider->capacity){close(f);return -1;}
+  if(!provider->queues){close(f);return -1;}
   for(int d=0;d<2;d++){
     provider->completions[d]=ibv_create_cq(provider->device->context,(int)(provider->completion_entries[d]+1),NULL,NULL,0);
     if(!provider->completions[d]){close(f);return -1;}
@@ -253,11 +253,8 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
     provider->qp_count=q+1;
     struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
     if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
-    provider->capacity[q][MESH_SEND]=actual.cap.max_send_wr<frame_capacity?actual.cap.max_send_wr:frame_capacity;
-    provider->capacity[q][MESH_RECEIVE]=actual.cap.max_recv_wr<frame_capacity?actual.cap.max_recv_wr:frame_capacity;
-    if(!provider->capacity[q][MESH_SEND] || !provider->capacity[q][MESH_RECEIVE]){close(f);errno=EOPNOTSUPP;return -1;}
     fprintf(stderr,"pair capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d,%d\n",q,
-      provider->capacity[q][MESH_SEND],provider->capacity[q][MESH_RECEIVE],
+      actual.cap.max_send_wr,actual.cap.max_recv_wr,
       queue->completions[MESH_SEND]->cqe,queue->completions[MESH_RECEIVE]->cqe);
   }
   struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
