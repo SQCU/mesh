@@ -25,7 +25,7 @@
 | `g` | Invocation generation held in the participating native execution and transport registers before the first producer store. It is a stored value, never an address component. |
 | `a, h, f, w` | Start-bound numerical notification ordinal, invocation-record ordinal, function identity, and worker index. `a` and `h` include the invocation slot. Normal decode has `F` input-preparation notification cells per rank; the resident step has no numerical-worker notification; optional trace calls add their declared cells. |
 | `E_r, D_r, C_r, K_r, J_rf, G_r, End_rs, Sarg_rq` | Start-bound CPU-input notification arena, CPU invocation records, cold call frames, worker records, function metadata, call group, device completion cell base and supplied sampler-operand bases. |
-| Constructor state | `37/37`. M12, M14 and M21 are retired. Resident numerical scope covers embedding, all 35 layers, final normalization, vocabulary projection, softcap, sampling and logprob capture. Decode has no per-step encoder or native command rearm. One prepared command remains live until explicit shutdown. No bank, successor, lease, replay or renewal timer exists. Construction count is not satisfaction of I4/I17/I18/I22. |
+| Constructor state | `38/39`; M41 is awaiting construction. M12, M14 and M21 are retired. Resident numerical scope covers embedding, all 35 layers, final normalization, vocabulary projection, softcap, sampling and logprob capture. Decode has no per-step encoder or native command rearm. One prepared command remains live until explicit shutdown. No bank, successor, lease, replay or renewal timer exists. Construction count is not satisfaction of I4/I17/I18/I22. |
 
 | ID / object | Address | Bytes and required `_Static_assert` | Constructed at `start()` by | Read by which event | Loads to reach it at runtime |
 | --- | --- | --- | --- | --- | --- |
@@ -71,6 +71,9 @@
 | <a id="M39"></a>M39 native resident command | One queue and one command prepared at start; dispatch index `3*s+kind`, kind embedding/sampling/body | Driver-owned encoding; native handle is 8 bytes, asserted by `rdma/mesh-call.h:52`. Three dispatches per slot with fixed buffers, offsets and grids. | `metal-microbench/mesh_layer.swift:418`, after all resident pipelines are constructed | consumer read | 0 — bind and commit once at setup; no ICB, replay, successor queue, timer or runtime re-encode. Resources remain retained through command completion. |
 
 | <a id="M40"></a>M40 resident shutdown word | `R_r+s*S_control+a_stop(r)`, `a_stop(r)=32*ceil((a_scope(r)+8*U)/32)` | 32-byte aligned cell: atomic shutdown +0, reserved +4..31; `_Static_assert(sizeof(struct mesh_resident_control)==32 && offsetof(struct mesh_resident_control,shutdown)==0,"M40");`; matching MSL `static_assert`. | Canonical extent `metal-microbench/mesh_layer.swift:530`, binding `:35`; C assertion `rdma/mesh-call.h:58`; MSL assertion `metal-microbench/kernels.swift:88` | consumer read | 0 — each stage has a direct pointer to the same shutdown word. Only explicit deinit sets it. No lease generation, entry publication, cross-bank observation or restart catch-up. The single-command lifetime probe survived 120.101440 seconds and retired explicitly; this is a tested duration, not an unlimited-lifetime claim. |
+
+| <a id="M41"></a>M41 prepared invocation publication | `Submit_r+128*s` | `128`, aligned 128: eight destination addresses, eight event integers, instance address, next generation, generation stride, destination count. `_Static_assert(sizeof(struct mesh_submission)==128 && _Alignof(struct mesh_submission)==128,"M41");` | Planned: `mesh_calls_create` allocation and `mesh_calls_prepare` after notification remapping; Swift `Mesh.invocation` binds the record once. | submit | 0 — caller retains the prepared record. Submit reads only this line, advances its generation, writes M42.invocation, then writes each prepared M18 cell. No group/context lookup, slot modulo, availability load, status reset or root publication traversal. |
+| <a id="M42"></a>M42 invocation result and cold reference count | `Instance_r+32*s` | `32`, aligned 32: status snapshot, remaining references, invocation, initial reference count, reserved. `_Static_assert(sizeof(struct mesh_instance)==32 && _Alignof(struct mesh_instance)==32,"mesh_instance");` | `rdma/mesh-call.c:95`, reference totals in `mesh_calls_prepare`; result address retained by `Mesh.invocation` at setup. | result | 0 — result reads its directly bound status snapshot. A generation's graph completion closes its lifetime; independent prepared invocation handles have disjoint backing. Repeated use of the same handle follows its result, not an implicit admission check. Link/function failures remain result values. |
 
 | Fixed native binding | Start-time contents |
 | --- | --- |
@@ -134,3 +137,13 @@
 | Cold lifetime work | M37 feeds existing refcount/frame release. Transport retirement and prefill reduce-scatter remain. |
 | Native generic Metal | Two Mesh.swift command-allocation sites remain for the ordinary nonresident/prefill API; decode does not call it. |
 | Resident lifetime | One setup-time command outlives token generations. Explicit shutdown is the only termination request. Renewal, its environment switch, two-bank storage, ICBs, timers, entry flags and generation comparisons are deleted. |
+
+| T3: prepared invocation publication | Instruction | Object |
+| --- | --- | --- |
+| T3.01 | Load next generation, stride, instance destination and destination count from the directly held record. | M41 |
+| T3.02 | Store next generation plus stride into that same record. | M41 |
+| T3.03 | Store submitted generation into the fixed instance destination; no status reset. | M42 |
+| T3.04 | Read each root cell address and event integer from the same 128-byte line. | M41 |
+| T3.05 | Release-store the event integer with submitted generation to the prepared root cell. | M18 |
+| T3.06 | Return the submitted generation as the result identity. | register |
+| T3.R1 | Acquire-load the directly held 16-byte result snapshot; compare its completed generation with the requested generation. | M42 |
