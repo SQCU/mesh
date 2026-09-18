@@ -47,8 +47,8 @@ struct mesh_call {
   _Alignas(128) struct mesh_operand *operands;
   struct mesh_instance *instance;
   _Atomic uint32_t *completed;
-  uint64_t completion_slot;
-  uint32_t index,pending,invocation,identity;
+  _Alignas(16) uint32_t index;
+  uint32_t pending,invocation,identity;
   mesh_invoke submit;
   void *argument;
   uint32_t publication_count,recurring;
@@ -72,8 +72,6 @@ _Static_assert(sizeof(struct prepared_residency)==32 && offsetof(struct prepared
 _Static_assert(4*sizeof(uint32_t)+2*sizeof(uint64_t)==32 && 6*sizeof(uint32_t)+sizeof(uint64_t)==32,"M27 M28 M33 M34 M35");
 /* design/prepared-machine.md#M36 */
 _Static_assert(2*sizeof(uint32_t)==8,"M36");
-/* design/prepared-machine.md#M37 */
-_Static_assert(sizeof(struct mesh_stream)==128 && offsetof(struct mesh_stream,slots)==8,"M37");
 /* design/prepared-machine.md#M29 */
 _Static_assert(2*sizeof(uint32_t)+3*sizeof(uint64_t)==32,"M29");
 /* design/prepared-machine.md#M30 */
@@ -112,7 +110,7 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *,uint32_t worker,
   const struct mesh_section *inputs,size_t input_count,size_t dependency_count,
   const struct mesh_section *outputs,size_t output_count,const void *submit,void *context);
 /* design/algorithm-sources.md#resident-metal */
-uint64_t *mesh_function_completion(struct mesh_function *,uint32_t frame,uint64_t *value);
+uint64_t *mesh_function_completion(struct mesh_function *,uint32_t frame);
 int mesh_calls_prepare(struct mesh_calls *);
 int mesh_calls_start(struct mesh_calls *);
 /* design/prepared-machine.md#M41 */

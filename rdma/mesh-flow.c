@@ -220,13 +220,6 @@ static void *link_send_completions(void *argument){
   return NULL;
 }
 
-/* design/prepared-machine.md#M08 */
-/* design/prepared-machine.md#M42 */
-/* design/algorithm-sources.md#meshresult */
-static __attribute__((noinline)) void link_receive_complete(struct prepared_receive *record){
-  mesh_instance_complete(record->instance,record->completions);
-}
-
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#programcopy */
 static void *link_receive_progress(void *argument){
@@ -260,7 +253,7 @@ static void *link_receive_progress(void *argument){
     struct ibv_recv_wr *bad;
     int error=record->post(record->pair,&record->request,&bad);
     if(error){link_error(link,error<0?-error:error,1);return NULL;}
-    if(record->completions)link_receive_complete(record);
+    if(record->completions)mesh_instance_complete(record->instance,record->completions);
   }
   return NULL;
 }

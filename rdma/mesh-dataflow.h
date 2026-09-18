@@ -30,8 +30,6 @@ void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t 
 void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 /* design/algorithm-sources.md#index-hand-off */
-int mesh_event_reader_init(struct mesh_event_reader *,struct hdr *,uint32_t queue);
-/* design/algorithm-sources.md#index-hand-off */
 struct mesh_target *mesh_publish_bind(struct mesh_ctx *,uint32_t row,uint32_t queue,int send);
 /* design/algorithm-sources.md#programkernel_call */
 uint32_t mesh_publication_prepare(struct hdr *,uint32_t row,int local,struct prepared_publication *);

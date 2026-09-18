@@ -187,7 +187,6 @@ public struct TensorPart {
     fileprivate let section: mesh_section?
     fileprivate let shared: Bool
     fileprivate var identity: Int
-    public let stamp: UnsafeRawPointer?
 }
 
 // design/algorithm-sources.md#mesherror
@@ -378,8 +377,7 @@ public final class Mesh {
             if shared { local.stride = 0; memory.context.pointee.shared_pages += local.pages }
             section = local
         }
-        let stamp = section.map { UnsafeRawPointer(mesh_page(memory.context.pointee.M)!.advanced(by: Int($0.first + ($0.channel == MESH_ABSENT ? 0 : $0.pages / mesh_block_pages(memory.context) - 1)))).advanced(by: 24) }
-        return TensorPart(rank: owner, bytes: bytes, section: section, shared: shared, identity: identity, stamp: stamp)
+        return TensorPart(rank: owner, bytes: bytes, section: section, shared: shared, identity: identity)
     }
 
     // design/algorithm-sources.md#programtensor
@@ -617,7 +615,7 @@ public final class Mesh {
 public final class MeshMetalFrame {
     public let index: Int
     public let inputs, outputs: [MeshMetalOperand]
-    public let completion: (buffer: MTLBuffer, offset: Int, value: UInt64)
+    public let completion: (buffer: MTLBuffer, offset: Int)
     public let publications: [MTLBuffer]
     public let resources: [MTLBuffer]
 
@@ -627,10 +625,9 @@ public final class MeshMetalFrame {
         self.index = index; self.inputs = inputs; self.outputs = outputs
         let context = memory.context, m = context.pointee.M!
         // design/prepared-machine.md#M37
-        var value: UInt64 = 0
-        let pointer = mesh_function_completion(function, UInt32(index), &value)
+        let pointer = mesh_function_completion(function, UInt32(index))
         let state = MeshSpan(data: UnsafeMutableRawBufferPointer(start: pointer, count: 8), memory: memory)
-        completion = (state.metal(device: device), state.metalOffset, value)
+        completion = (state.metal(device: device), state.metalOffset)
         var backing = (inputs + outputs).flatMap { $0.resources } + (inputs + outputs).map { $0.table }
         // design/prepared-machine.md#M13
         publications = results.map { result in

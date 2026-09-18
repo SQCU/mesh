@@ -74,10 +74,6 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   }
   uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
   client|=(~device)&(UINT64_C(1)<<63);
-  for(uint32_t queue=0;queue<memory->links+2*MESH_COMPUTE_THREADS;queue++){
-    struct mesh_events *events=mesh_events(memory,mesh_notice_queue(memory,client,queue));
-    events->count=0;
-  }
   for(uint32_t q=0;q<memory->links*memory->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(memory,client,q,d),0,memory_order_relaxed);
   atomic_store_explicit(&memory->client,client,memory_order_release);
   *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.client=client,.fd=file};
@@ -206,23 +202,6 @@ void mesh_retired_release(struct hdr *m){
 /* design/algorithm-sources.md#program */
 void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_clear(c->M,MESH_ROW_OWN,first,count);
-}
-
-/* design/algorithm-sources.md#index-hand-off */
-int mesh_event_reader_init(struct mesh_event_reader *reader,struct hdr *m,uint32_t queue){
-  struct mesh_events *events=mesh_events(m,queue);
-  size_t bytes=((events->count?events->count:1)*sizeof(struct mesh_event_input)+127)&~(size_t)127;
-  struct mesh_event_input *inputs=aligned_alloc(128,bytes);
-  if(!inputs)return ENOMEM;
-  unsigned char *at=events->streams;
-  for(uint32_t i=0;i<events->count;i++){
-    struct mesh_stream *stream=(struct mesh_stream *)at;
-    inputs[i]=(struct mesh_event_input){.slots=stream->slots,.mask=stream->mask};
-    at+=mesh_stream_bytes(stream->mask+1);
-  }
-  free(reader->inputs);
-  *reader=(struct mesh_event_reader){inputs,events->count,0};
-  return 0;
 }
 
 /* design/algorithm-sources.md#index-hand-off */
