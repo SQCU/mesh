@@ -55,13 +55,13 @@ struct mesh_call {
   uint64_t completion_slot;
   mesh_invoke submit;
   void *argument;
-  uint32_t publication_count;
+  uint32_t publication_count,recurring;
   _Alignas(128) struct prepared_publication publications[];
 };
 _Static_assert(sizeof(struct mesh_call)==128 && _Alignof(struct mesh_call)==128,"mesh_call record");
 _Static_assert(offsetof(struct mesh_call,pending)==32 && offsetof(struct mesh_call,invocation)==36 &&
   offsetof(struct mesh_call,submit)==72 && offsetof(struct mesh_call,argument)==80 &&
-  offsetof(struct mesh_call,publication_count)==88 && offsetof(struct mesh_call,publications)==128,"M20");
+  offsetof(struct mesh_call,publication_count)==88 && offsetof(struct mesh_call,recurring)==92 && offsetof(struct mesh_call,publications)==128,"M20");
 /* design/prepared-machine.md#M26 */
 struct prepared_residency {
   _Alignas(32) uint64_t completed;
@@ -114,7 +114,7 @@ typedef void (*mesh_dispose)(void *);
 struct mesh_calls *mesh_calls_create(struct mesh_ctx *,uint32_t workers,uint32_t count,void *owner,mesh_dispose);
 struct mesh_function *mesh_call_bind(struct mesh_calls *,uint32_t worker,
   const struct mesh_section *inputs,size_t input_count,size_t dependency_count,
-  const struct mesh_section *outputs,size_t output_count,const void *submit,void *context,const void *rearm,void *rearm_context);
+  const struct mesh_section *outputs,size_t output_count,const void *submit,void *context);
 /* design/algorithm-sources.md#resident-metal */
 uint64_t *mesh_function_completion(struct mesh_function *,uint32_t frame,uint64_t *value);
 void mesh_call_finish(struct mesh_call *);

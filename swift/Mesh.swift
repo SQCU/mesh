@@ -249,7 +249,6 @@ private final class MeshMemory {
 private typealias MeshBody = (OpaquePointer) -> Void
 private struct MeshLaunch {
     let function: MeshBody?
-    let rearm: ((UInt32) -> Void)?
     let resources: [MTLBuffer]
     var dependencies: Int? = nil
     var prepare: ((OpaquePointer) throws -> Void)? = nil
@@ -259,7 +258,6 @@ private struct MeshLaunch {
 // design/algorithm-sources.md#programkernel_call
 private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inputs: Int, outputs: Int, count: Int) -> MeshLaunch {
     let launch: MeshBody
-    let rearm: ((UInt32) -> Void)?
     let retained: [MTLBuffer]
     switch function {
     case .resident(let device, let x, let y, let results, let body):
@@ -267,7 +265,6 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
                             body: body, count: count)
     case .cpu(let function):
         retained = []
-        rearm = nil
         launch = { call in
             let operands = mesh_call_operands(call)
             let inputs = MeshOperands(start: operands, count: inputs), outputs = MeshOperands(start: operands.advanced(by: inputs.count), count: outputs)
@@ -285,12 +282,10 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
             residency.commit()
             queue.addResidencySet(residency)
         }
-        var commands = (0..<count).map { _ in queue.makeCommandBuffer()! }
-        rearm = { index in commands[Int(index)] = queue.makeCommandBuffer()! }
         launch = { call in
             let operands = mesh_call_operands(call)
             let inputs = MeshOperands(start: operands, count: inputs), outputs = MeshOperands(start: operands.advanced(by: inputs.count), count: outputs)
-            let command = commands[Int(mesh_call_index(call))]
+            let command = queue.makeCommandBuffer()!
             function(command, inputs, outputs)
             command.addCompletedHandler { [memory] command in
                 withExtendedLifetime(memory) {
@@ -302,7 +297,6 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
         }
     case .prediction(let model, let features, let options):
         retained = []
-        rearm = nil
         launch = { call in
             let inputs = MeshOperands(start: mesh_call_operands(call), count: inputs)
             let index = Int(mesh_call_index(call)), provider = features[index]
@@ -315,7 +309,7 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
             }
         }
     }
-    return MeshLaunch(function: launch, rearm: rearm, resources: retained)
+    return MeshLaunch(function: launch, resources: retained)
 }
 
 
@@ -414,11 +408,11 @@ public final class Mesh {
             let inputRows = inputs.map { $0.section! }, outputRows = outputs.map { $0.section! }
             memory.functions.append(invocation)
             let native = withUnsafeBytes(of: invocation) {
-                $0.load(as: (UnsafeRawPointer?, UnsafeMutableRawPointer?, UnsafeRawPointer?, UnsafeMutableRawPointer?).self)
+                $0.load(as: (UnsafeRawPointer?, UnsafeMutableRawPointer?).self)
             }
             guard let binding = mesh_call_bind(calls, UInt32(worker), inputRows, inputRows.count,
                               invocation.dependencies ?? inputRows.count, outputRows, outputRows.count,
-                              native.0, native.1, native.2, native.3) else {
+                              native.0, native.1) else {
                 memory.functions.removeLast()
                 throw POSIXError(POSIXErrorCode(rawValue: errno)!)
             }
@@ -694,7 +688,7 @@ public final class MeshMetalFrame {
 // design/prepared-machine.md#M37
 private func meshResident(_ device: MTLDevice, memory: MeshMemory, inputs: [[MeshMetalOperand]], outputs: [[MeshMetalOperand]],
     results: [mesh_section], body: @escaping (MeshMetalFrame) throws -> Void, count: Int) -> MeshLaunch {
-    return MeshLaunch(function: nil, rearm: nil, resources: [], dependencies: 0, prepare: { function in
+    return MeshLaunch(function: nil, resources: [], dependencies: 0, prepare: { function in
         for index in 0..<count {
             try body(MeshMetalFrame(memory: memory, device: device, function: function, index: index,
                 inputs: inputs.map { $0[min(index, $0.count - 1)] }, outputs: outputs.map { $0[index] },

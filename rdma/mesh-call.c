@@ -4,9 +4,6 @@
 #include <string.h>
 #include <stdio.h>
 
-/* design/algorithm-sources.md#programkernel_call */
-typedef __attribute__((swiftcall)) void (*mesh_rearm)(uint32_t,void * __attribute__((swift_context)));
-
 /* design/prepared-machine.md#M23 */
 struct mesh_function {
   struct mesh_calls *calls;
@@ -18,11 +15,9 @@ struct mesh_function {
   uint32_t worker,identity,pending,initial;
   mesh_invoke submit;
   void *argument;
-  mesh_rearm rearm;
-  void *rearm_argument;
   struct mesh_function *next;
 };
-_Static_assert(sizeof(struct mesh_function)==128,"M23");
+_Static_assert(sizeof(struct mesh_function)==112,"M23");
 /* design/prepared-machine.md#M22 */
 struct mesh_call_worker {
   _Alignas(128) struct mesh_calls *calls;
@@ -34,7 +29,7 @@ struct mesh_call_worker {
   _Atomic uintptr_t frame;
 };
 _Static_assert(sizeof(struct mesh_call_worker)==128 && _Alignof(struct mesh_call_worker)==128,"mesh_call_worker");
-_Static_assert(14*sizeof(uintptr_t)==112,"M25 input ABI frame");
+_Static_assert(12*sizeof(uintptr_t)==96,"M25 input ABI frame");
 struct mesh_calls {
   struct mesh_ctx *context;
   struct mesh_function *functions;
@@ -98,7 +93,7 @@ struct mesh_calls *mesh_calls_create(struct mesh_ctx *context,uint32_t workers,u
 /* design/algorithm-sources.md#programkernel_call */
 struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   const struct mesh_section *inputs,size_t input_count,size_t dependency_count,
-  const struct mesh_section *outputs,size_t output_count,const void *submit,void *argument,const void *rearm,void *rearm_argument){
+  const struct mesh_section *outputs,size_t output_count,const void *submit,void *argument){
   if(worker>=calls->count || dependency_count>input_count || input_count>UINT32_MAX || output_count>UINT32_MAX-input_count || atomic_load(&calls->running)){errno=EINVAL;return NULL;}
   /* design/prepared-machine.md#M23 */
   struct mesh_function *function=calloc(1,sizeof *function);
@@ -112,7 +107,6 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   function->calls=calls;function->worker=worker;function->input_count=input_count;function->output_count=output_count;
   function->dependency_count=dependency_count;
   function->submit=(mesh_invoke)submit;function->argument=argument;
-  function->rearm=(mesh_rearm)rearm;function->rearm_argument=rearm_argument;
   for(size_t i=0;i<input_count;i++){
     if(inputs[i].stride)function->consumed[function->consumed_count++]=(uint32_t)i;
     for(uint32_t index=0;index<(inputs[i].stride?calls->extent:1);index++)
@@ -155,6 +149,7 @@ static void *mesh_call_progress(void *argument){
       struct mesh_call *call=(void *)(values+(size_t)cell->call*stride);
       call->invocation^=(call->invocation^(uint32_t)(value-1))&cell->mask;
       if(--call->pending)continue;
+      call->pending=call->recurring;
       call->submit(call,call->argument);
       submitted++;
     }
@@ -169,10 +164,8 @@ static void *mesh_call_progress(void *argument){
         if(call->error)mesh_result_conclude(&calls->instances[call->index].status,
           MESH_RESULT(MESH_RESULT_FUNCTION,call->function->identity,call->error));
         else {
-          if(function->rearm)function->rearm(call->index,function->rearm_argument);
           for(size_t i=0;i<function->output_count;i++)mesh_buffer_reset(m,call->operands[function->input_count+i].row);
           call->remaining=(uint32_t)(function->output_count?function->output_count:1);
-          call->pending=function->pending;
           mesh_instance_release(&calls->instances[call->index],1);
         }
       }
@@ -307,7 +300,7 @@ int mesh_calls_prepare(struct mesh_calls *calls){
       struct mesh_call *call=(void *)(function->values+index*calls->stride);
       uint32_t slot=function->identity*calls->extent+index;
       *call=(struct mesh_call){.function=function,.operands=function->operands+index*count,.index=index,
-        .remaining=(uint32_t)(function->output_count?function->output_count:1),.pending=function->initial,
+        .remaining=(uint32_t)(function->output_count?function->output_count:1),.pending=function->initial,.recurring=function->pending,
         .memory=m,.input_count=(uint32_t)function->input_count,.output_count=(uint32_t)function->output_count,
         .return_index=slot,.submit=function->submit,.argument=function->argument};
       if(!call->submit)call->completion_slot=mesh_event_bind(m,queue);
