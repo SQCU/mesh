@@ -323,6 +323,35 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
 }
 
 
+// design/prepared-machine.md#M41
+// design/prepared-machine.md#M42
+public struct MeshInvocation {
+    @usableFromInline let owner: Mesh
+    @usableFromInline let publication: OpaquePointer
+    @usableFromInline let instance: OpaquePointer
+
+    // design/algorithm-sources.md#program
+    // design/prepared-machine.md#M41
+    fileprivate init(_ owner: Mesh, _ publication: OpaquePointer, _ instance: OpaquePointer) {
+        self.owner = owner; self.publication = publication; self.instance = instance
+    }
+
+    // design/algorithm-sources.md#program
+    // design/prepared-machine.md#M41
+    @inlinable @discardableResult
+    public func submit() -> UInt32 { mesh_submit(publication) }
+
+    // design/algorithm-sources.md#meshresult
+    // design/prepared-machine.md#M42
+    @inlinable
+    public func result(_ generation: UInt32) -> Result<Void, MeshError> {
+        let status = mesh_result(instance, generation)
+        if status == 0 { return .success(()) }
+        if status >> 62 == 3 { return .failure(.busy) }
+        return owner.outcome(status)
+    }
+}
+
 public final class Mesh {
     public let rank: Int, size: Int, inFlight: Int
     private let memory: MeshMemory
@@ -579,14 +608,15 @@ public final class Mesh {
     }
 
     // design/algorithm-sources.md#program
-    @discardableResult
-    public func submit(_ index: Int) -> Result<Void, MeshError> { outcome(mesh_calls_submit(calls, UInt32(truncatingIfNeeded: index))) }
+    // design/prepared-machine.md#M41
+    public func invocation(_ slot: Int) -> MeshInvocation {
+        var instance: OpaquePointer?
+        let publication = mesh_submission_at(calls, UInt32(slot), &instance)!
+        return MeshInvocation(self, publication, instance!)
+    }
 
     // design/algorithm-sources.md#meshresult
-    public func result(_ index: Int) -> Result<Void, MeshError> { outcome(mesh_calls_result(calls, UInt32(truncatingIfNeeded: index))) }
-
-    // design/algorithm-sources.md#meshresult
-    private func outcome(_ status: UInt64) -> Result<Void, MeshError> {
+    @usableFromInline func outcome(_ status: UInt64) -> Result<Void, MeshError> {
         let identity = Int((status >> 32) & 0x3fffffff), code = Int32(truncatingIfNeeded: status)
         switch status >> 62 {
         case 0: return .success(())

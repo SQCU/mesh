@@ -109,13 +109,25 @@ struct GramChain {
             z = next
         }
         try mesh.start()
+        // design/prepared-machine.md#M41
+        // design/prepared-machine.md#M42
+        let invocations = (0..<mesh.inFlight).map { mesh.invocation($0) }
         if p.owners.contains(rank) {
-            var index = 0
-            while index < p.count {
-                switch mesh.submit(index) {
-                case .success: index += 1
-                case .failure(.busy): break
-                case .failure(let error): throw error
+            var pending = [UInt32?](repeating: nil, count: invocations.count)
+            var submitted = 0, completed = 0
+            while completed < p.count {
+                for i in invocations.indices {
+                    if let generation = pending[i] {
+                        switch invocations[i].result(generation) {
+                        case .success: pending[i] = nil; completed += 1
+                        case .failure(.busy): continue
+                        case .failure(let error): throw error
+                        }
+                    }
+                    if submitted < p.count {
+                        pending[i] = invocations[i].submit()
+                        submitted += 1
+                    }
                 }
             }
         }

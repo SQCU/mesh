@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 80u
+#define MESH_VERSION 81u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_EVENT_ABSENT UINT64_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
@@ -69,7 +69,8 @@ enum { MESH_RESULT_SUCCESS, MESH_RESULT_LINK, MESH_RESULT_FUNCTION, MESH_RESULT_
 #define MESH_RESULT(kind,id,code) ((uint64_t)(kind)<<62|(uint64_t)(id)<<32|(uint32_t)(code))
 struct mesh_status { uint64_t value,completed; };
 _Static_assert(sizeof(struct mesh_status)==16 && __atomic_always_lock_free(sizeof(struct mesh_status),0),"mesh_status lock-free snapshot");
-struct mesh_instance { _Alignas(32) _Atomic(struct mesh_status) status; _Atomic uint32_t available,remaining,invocation; uint32_t count; };
+/* design/prepared-machine.md#M42 */
+struct mesh_instance { _Alignas(32) _Atomic(struct mesh_status) status; _Atomic uint32_t remaining,invocation; uint32_t count; };
 _Static_assert(sizeof(struct mesh_instance)==32 && _Alignof(struct mesh_instance)==32,"mesh_instance");
 struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; struct mesh_port_info port; _Atomic uint32_t order_length[2*MESH_NOTICE_BANKS*MESH_QPS]; };
 struct hdr {
@@ -101,7 +102,6 @@ static inline void mesh_instance_release(struct mesh_instance *instances,uint32_
     if(atomic_fetch_sub_explicit(&instance->remaining,1,memory_order_acq_rel)!=1)continue;
     atomic_store_explicit(&instance->remaining,instance->count,memory_order_relaxed);
     mesh_result_conclude(&instance->status,MESH_RESULT(MESH_RESULT_SUCCESS,!instance->count,atomic_load_explicit(&instance->invocation,memory_order_relaxed)));
-    atomic_store_explicit(&instance->available,1,memory_order_release);
   }
 }
 

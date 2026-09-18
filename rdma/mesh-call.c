@@ -50,9 +50,10 @@ struct mesh_calls {
   struct mesh_ctx *context;
   struct mesh_function *functions;
   struct mesh_call_worker workers[MESH_COMPUTE_THREADS];
-  uint32_t count,extent,first,root_workers,function_count;
+  uint32_t count,extent,first,function_count;
   struct mesh_call *values;
   struct mesh_instance *instances;
+  struct mesh_submission *submissions;
   _Atomic uint32_t references;
   _Atomic int running;
   void *owner;
@@ -74,7 +75,7 @@ static void mesh_calls_release(struct mesh_calls *calls,uint32_t references){
   }
   if(calls->first!=MESH_ABSENT)mesh_rows_release(calls->context,calls->first,calls->extent);
   if(calls->dispose)calls->dispose(calls->owner);
-  free(calls->values);free(calls);
+  free(calls->submissions);free(calls->values);free(calls);
 }
 
 /* design/algorithm-sources.md#programkernel_call */
@@ -90,10 +91,14 @@ struct mesh_calls *mesh_calls_create(struct mesh_ctx *context,uint32_t workers,u
   calls->first=mesh_rows_alloc(context,count);
   if(calls->first==MESH_ABSENT){mesh_calls_release(calls,1);return NULL;}
   calls->instances=mesh_instances(context->M,context->client);
+  /* design/prepared-machine.md#M41 */
+  calls->submissions=aligned_alloc(_Alignof(struct mesh_submission),(size_t)count*sizeof *calls->submissions);
+  if(!calls->submissions){mesh_calls_release(calls,1);return NULL;}
   context->M->instance_count[context->client>>63]=count;
+  /* design/prepared-machine.md#M42 */
   for(uint32_t i=0;i<count;i++){
+    calls->submissions[i]=(struct mesh_submission){.instance=calls->instances+i,.generation=i,.stride=count};
     atomic_store_explicit(&calls->instances[i].status,((struct mesh_status){MESH_RESULT(MESH_RESULT_BUSY,0,0),0}),memory_order_relaxed);
-    atomic_store_explicit(&calls->instances[i].available,1,memory_order_relaxed);
   }
   atomic_store_explicit(&context->M->result[context->client>>63],((struct mesh_status){MESH_RESULT(MESH_RESULT_BUSY,0,0),0}),memory_order_release);
   calls->owner=owner;calls->dispose=dispose;
@@ -351,7 +356,6 @@ int mesh_calls_prepare(struct mesh_calls *calls){
         if(i==function->dependency_count){
           if(varying)continue;
           section=(struct mesh_section){.first=calls->first,.count=calls->extent,.stride=1};
-          calls->root_workers|=UINT32_C(1)<<function->worker;
         } else {
           section=function->inputs[i];
           varying|=section.stride!=0;
@@ -416,6 +420,16 @@ int mesh_calls_prepare(struct mesh_calls *calls){
   if(!dynamic && !shared)atomic_store_explicit(&m->result[calls->context->client>>63],((struct mesh_status){0,UINT64_MAX}),memory_order_release);
   int event_error=mesh_events_prepare(calls);
   if(event_error)return event_error;
+  /* design/prepared-machine.md#M41 */
+  for(uint32_t slot=0;slot<calls->extent;slot++){
+    struct mesh_publication *root=mesh_publication_at(m,calls->first+slot);
+    struct mesh_submission *submission=calls->submissions+slot;
+    submission->count=root->uses;
+    for(uint32_t i=0;i<root->uses;i++){
+      submission->destinations[i]=(_Atomic uint64_t *)((char *)m+root->targets[i].stream+8);
+      submission->events[i]=root->targets[i].index+1;
+    }
+  }
   /* design/prepared-machine.md#M10 */
   for(uint32_t q=0;q<m->links*m->qps;q++){
     struct mesh_transfer *in=mesh_transfers(m,calls->context->client,q,MESH_RECEIVE);
@@ -456,31 +470,11 @@ int mesh_calls_start(struct mesh_calls *calls){
   return 0;
 }
 
+/* design/prepared-machine.md#M41 */
 /* design/algorithm-sources.md#program */
-uint64_t mesh_calls_submit(struct mesh_calls *calls,uint32_t index){
-  struct hdr *m=calls->context->M;
-  uint64_t status=atomic_load_explicit(&m->result[calls->context->client>>63],memory_order_acquire).value;
-  if(status>>62!=MESH_RESULT_BUSY)return status;
-  if(!calls->root_workers)return 0;
-  uint32_t frame=index%calls->extent;
-  struct mesh_instance *instance=&calls->instances[frame];
-  if(!atomic_load_explicit(&instance->available,memory_order_acquire))return MESH_RESULT(MESH_RESULT_BUSY,0,0);
-  atomic_store_explicit(&instance->available,0,memory_order_relaxed);
-  atomic_store_explicit(&instance->invocation,index,memory_order_relaxed);
-  atomic_store_explicit(&instance->status,((struct mesh_status){MESH_RESULT(MESH_RESULT_BUSY,0,0),0}),memory_order_release);
-  status=atomic_load_explicit(&m->result[calls->context->client>>63],memory_order_acquire).value;
-  if(status>>62!=MESH_RESULT_BUSY){mesh_result_conclude(&instance->status,status);return status;}
-  uint32_t row=calls->first+frame;
-  struct mesh_publication *publication=mesh_publication_at(m,row);
-  mesh_publish(m,publication->targets,publication->sends,publication->uses,mesh_page(m)+row,(uint64_t)index+1);
-  return 0;
-}
-
-/* design/algorithm-sources.md#meshresult */
-uint64_t mesh_calls_result(struct mesh_calls *calls,uint32_t index){
-  struct mesh_status status=atomic_load_explicit(&calls->instances[index%calls->extent].status,memory_order_acquire);
-  if(status.completed==(uint64_t)index+1 || status.completed==UINT64_MAX)return 0;
-  return status.value>>62==MESH_RESULT_SUCCESS?MESH_RESULT(MESH_RESULT_BUSY,0,0):status.value;
+struct mesh_submission *mesh_submission_at(struct mesh_calls *calls,uint32_t slot,struct mesh_instance **instance){
+  *instance=calls->instances+slot;
+  return calls->submissions+slot;
 }
 
 /* design/algorithm-sources.md#programkernel_call */

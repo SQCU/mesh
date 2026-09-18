@@ -240,10 +240,7 @@ static void *link_send_progress(void *argument){
     }
     struct prepared_send record=records[event-1];
     int error=record.post(record.pair,record.request,record.bad);
-    if(error){
-      if(error==ENOMEM || error==EAGAIN || error==-ENOMEM || error==-EAGAIN)continue;
-      link_error(link,error<0?-error:error,1);return NULL;
-    }
+    if(error){link_error(link,error<0?-error:error,1);return NULL;}
     atomic_store_explicit(cell,0,memory_order_release);
     cursor->cell=cell+1==cursor->end?cursor->first:cell+1;
   }

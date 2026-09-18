@@ -5,6 +5,31 @@
 struct mesh_calls;
 struct mesh_call;
 struct mesh_function;
+/* design/prepared-machine.md#M41 */
+struct mesh_submission {
+  _Alignas(128) _Atomic uint64_t *destinations[MESH_COMPUTE_THREADS];
+  uint32_t events[MESH_COMPUTE_THREADS];
+  struct mesh_instance *instance;
+  uint32_t generation,stride,count;
+};
+_Static_assert(sizeof(struct mesh_submission)==128 && _Alignof(struct mesh_submission)==128,"M41");
+/* design/prepared-machine.md#M41 */
+/* design/algorithm-sources.md#program */
+static inline __attribute__((always_inline)) uint32_t mesh_submit(struct mesh_submission *submission){
+  uint32_t generation=submission->generation,count=submission->count;
+  submission->generation=generation+submission->stride;
+  atomic_store_explicit(&submission->instance->invocation,generation,memory_order_relaxed);
+  for(uint32_t i=0;i<count;i++)
+    atomic_store_explicit(submission->destinations[i],((uint64_t)generation<<32)|submission->events[i],memory_order_release);
+  return generation;
+}
+/* design/prepared-machine.md#M42 */
+/* design/algorithm-sources.md#meshresult */
+static inline __attribute__((always_inline)) uint64_t mesh_result(struct mesh_instance *instance,uint32_t generation){
+  struct mesh_status status=atomic_load_explicit(&instance->status,memory_order_acquire);
+  if(status.completed==(uint64_t)generation+1 || status.completed==UINT64_MAX)return 0;
+  return status.value>>62==MESH_RESULT_SUCCESS?MESH_RESULT(MESH_RESULT_BUSY,0,0):status.value;
+}
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride,channel; };
 struct mesh_operand {
   size_t bytes;
@@ -93,9 +118,8 @@ uint64_t *mesh_function_completion(struct mesh_function *,uint32_t frame,uint64_
 void mesh_call_finish(struct mesh_call *);
 int mesh_calls_prepare(struct mesh_calls *);
 int mesh_calls_start(struct mesh_calls *);
-uint64_t mesh_calls_submit(struct mesh_calls *,uint32_t index);
-/* design/algorithm-sources.md#meshresult */
-uint64_t mesh_calls_result(struct mesh_calls *,uint32_t index);
+/* design/prepared-machine.md#M41 */
+struct mesh_submission *mesh_submission_at(struct mesh_calls *,uint32_t slot,struct mesh_instance **);
 void mesh_call_complete(struct mesh_call *,int error);
 void mesh_call_fail(struct mesh_call *,int error);
 void mesh_calls_destroy(struct mesh_calls *);

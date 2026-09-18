@@ -87,7 +87,8 @@ struct IndexedGather {
             }
         }
         try mesh.start()
-        mesh.submit(0)
+        // design/prepared-machine.md#M41
+        mesh.invocation(0).submit()
         withExtendedLifetime(mesh) { dispatchMain() }
     }
 }

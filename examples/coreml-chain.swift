@@ -131,20 +131,23 @@ struct CoreMLChain {
             }, inputs: [parts[i]], outputs: [], on: layout[i].owner, worker: i % plan.workers)
         }
         try mesh.start()
+        // design/prepared-machine.md#M41
+        // design/prepared-machine.md#M42
+        let invocations = (0..<plan.inFlight).map { mesh.invocation($0) }
+        var pending = [UInt32?](repeating: nil, count: invocations.count)
         var submitted = 0, completed = 0
         while completed < plan.count {
-            if submitted < plan.count && submitted - completed < plan.inFlight {
-                switch mesh.submit(submitted) {
-                case .success: submitted += 1
-                case .failure(.busy): break
-                case .failure(let error): throw error
+            for i in invocations.indices {
+                if let generation = pending[i] {
+                    switch invocations[i].result(generation) {
+                    case .success: pending[i] = nil; completed += 1
+                    case .failure(.busy): continue
+                    case .failure(let error): throw error
+                    }
                 }
-            }
-            if completed < submitted {
-                switch mesh.result(completed) {
-                case .success: completed += 1
-                case .failure(.busy): break
-                case .failure(let error): throw error
+                if submitted < plan.count {
+                    pending[i] = invocations[i].submit()
+                    submitted += 1
                 }
             }
         }
