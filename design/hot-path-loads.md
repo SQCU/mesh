@@ -10,22 +10,22 @@
 | Lane 0 loads the directly bound input generation; SIMD broadcast. | M10 | `metal-microbench/kernels.swift:137` |
 | Lane 0 reloads completed generation at +0 to skip work finished by the other bank. | M26 | `metal-microbench/kernels.swift:139` |
 | Lane 0 compare/exchanges embedding claim at +8 before reading token payload. | M26 | `metal-microbench/kernels.swift:142` |
-| Read token from the directly bound canonical input, rank 0 byte offset 12 and other ranks byte offset 0. | M01/M02 | `metal-microbench/kernels.swift:149`, binding at `metal-microbench/mesh_layer.swift:39` |
+| Read token from the directly bound canonical input, rank 0 byte offset 12 and other ranks byte offset 0. | M01/M02 | `metal-microbench/kernels.swift:149`, binding at `metal-microbench/mesh_layer.swift:40` |
 | Store embedding components into the fixed canonical hidden operand. | M03 | `metal-microbench/kernels.swift:151` |
 | After the numerical stores and fence, lane 0 stores completed generation at +0; advance generation in registers. | M26 | `metal-microbench/kernels.swift:154` |
 
 | Replay entry accesses, once per dispatch group; source, not GPU ISA | D0 row | Source |
 | --- | --- | --- |
 | Embedding loads its own generation at +4 into a register. | M40 | `metal-microbench/kernels.swift:130` |
-| Sampler loads its own generation at +4 into a register. | M40 | `metal-microbench/mesh_layer.swift:373` |
-| Body loads its own generation at +4 into a register. | M40 | `metal-microbench/mesh_layer.swift:413` |
+| Sampler loads its own generation at +4 into a register. | M40 | `metal-microbench/mesh_layer.swift:374` |
+| Body loads its own generation at +4 into a register. | M40 | `metal-microbench/mesh_layer.swift:414` |
 | An entering threadgroup stores its own stage’s spinning generation at +8, then fences. | M40 | `metal-microbench/kernels.swift:95` |
-| Body acknowledges only after reaching unfinished work; the joined flag remains in registers. | M40 | `metal-microbench/mesh_layer.swift:420` |
+| Body acknowledges only after reaching unfinished work; the joined flag remains in registers. | M40 | `metal-microbench/mesh_layer.swift:421` |
 | Every retirement poll below inlines the same one 8-byte pair load; compare with the register generation or explicit shutdown. These replace the old stop loads one for one. | M40 | `metal-microbench/kernels.swift:105` |
 
 | Resident FFN global control accesses; MSL source, not emitted GPU instructions | D0 row | Source |
 | --- | --- | --- |
-| Dispatch entry loads final vocabulary completed generation at its compiled offset. | M34 | `metal-microbench/mesh_layer.swift:414` |
+| Dispatch entry loads final vocabulary completed generation at its compiled offset. | M34 | `metal-microbench/mesh_layer.swift:415` |
 | Stage entry loads gate-done at +4. | M27 | `metal-microbench/kernels.swift:1669` |
 | Operand poll loads the successor spinning/shutdown pair at M40 +8/+12. | M40 | `metal-microbench/kernels.swift:1675` |
 | Operand poll loads input generation at +16. | M27 | `metal-microbench/kernels.swift:1675` |
@@ -75,12 +75,12 @@
 | --- | --- | --- |
 | Entry loads successor spinning/shutdown pair. | M40 | `metal-microbench/kernels.swift:1781` |
 | Entry loads completed generation. | M33 | `metal-microbench/kernels.swift:1781` |
-| Local partial poll loads successor spinning/shutdown pair. | M40 | `metal-microbench/mesh_layer.swift:187` |
-| Local partial poll loads its literal availability word. | M10 | `metal-microbench/mesh_layer.swift:187` |
-| Read first local contribution directly into numerical threadgroup scratch. | M01 | `metal-microbench/mesh_layer.swift:193` |
-| Remote partial poll loads successor spinning/shutdown pair. | M40 | `metal-microbench/mesh_layer.swift:200` |
-| Read literal peer stamp; peers are unrolled at setup. | M10 | `metal-microbench/mesh_layer.swift:176` |
-| Read first peer contribution through the literal payload pointer in matrixAdd. | M02 | `metal-microbench/mesh_layer.swift:179` |
+| Local partial poll loads successor spinning/shutdown pair. | M40 | `metal-microbench/mesh_layer.swift:188` |
+| Local partial poll loads its literal availability word. | M10 | `metal-microbench/mesh_layer.swift:188` |
+| Read first local contribution directly into numerical threadgroup scratch. | M01 | `metal-microbench/mesh_layer.swift:194` |
+| Remote partial poll loads successor spinning/shutdown pair. | M40 | `metal-microbench/mesh_layer.swift:201` |
+| Read literal peer stamp; peers are unrolled at setup. | M10 | `metal-microbench/mesh_layer.swift:177` |
+| Read first peer contribution through the literal payload pointer in matrixAdd. | M02 | `metal-microbench/mesh_layer.swift:180` |
 | Without PLE, output claim loads successor spinning/shutdown pair. | M40 | `metal-microbench/kernels.swift:1798` |
 | Without PLE, output claim compare/exchange reads and advances down-next. | M33 | `metal-microbench/kernels.swift:1798` |
 | Without PLE, claimed threadgroup stores the finished hidden components. | M03 | `metal-microbench/kernels.swift:1805` |
@@ -113,27 +113,27 @@
 | Vocabulary reads fixed final-layer availability. | M33 | `metal-microbench/kernels.swift:4618` |
 | Vocabulary claim compare/exchange reads and advances next tile. | M34 | `metal-microbench/kernels.swift:4618` |
 | Completed vocabulary tile increments done. | M34 | `metal-microbench/kernels.swift:4638` |
-| Last tile directly stores publication values; no record or sequence load. | M04/M10/M18 | `metal-microbench/mesh_layer.swift:252` |
+| Last tile directly stores publication values; no record or sequence load. | M04/M10/M18 | `metal-microbench/mesh_layer.swift:253` |
 | Last vocabulary tile stores completed generation. | M34 | `metal-microbench/kernels.swift:4640` |
-| Sampler dispatch entry loads final row completed generation. | M35 | `metal-microbench/mesh_layer.swift:375` |
-| Partial loop loads successor spinning/shutdown pair. | M40 | `metal-microbench/mesh_layer.swift:321` |
-| Partial loop loads completed partial count. | M35 | `metal-microbench/mesh_layer.swift:321` |
+| Sampler dispatch entry loads final row completed generation. | M35 | `metal-microbench/mesh_layer.swift:376` |
+| Partial loop loads successor spinning/shutdown pair. | M40 | `metal-microbench/mesh_layer.swift:322` |
+| Partial loop loads completed partial count. | M35 | `metal-microbench/mesh_layer.swift:322` |
 | Scope claim loads successor spinning/shutdown pair. | M40 | `metal-microbench/kernels.swift:4660` |
 | Scope claim loads its compiled local/remote stamp. | M10 | `metal-microbench/kernels.swift:4660` |
 | Scope claim loads next numerical tile. | M36 | `metal-microbench/kernels.swift:4661` |
 | Scope claim compare/exchange reads and advances next tile. | M36 | `metal-microbench/kernels.swift:4662` |
 | Read first bound logit element; no operand record. | M01/M02 | `metal-microbench/kernels.swift:4670` |
 | Completed numerical partial/capture tile increments done. | M35 | `metal-microbench/kernels.swift:4675` |
-| Mass loop loads successor spinning/shutdown pair. | M40 | `metal-microbench/mesh_layer.swift:330` |
-| Mass loop loads done count. | M35 | `metal-microbench/mesh_layer.swift:330` |
-| Mass claim loads next numerical tile. | M35 | `metal-microbench/mesh_layer.swift:332` |
-| Mass claim compare/exchange reads and advances next tile. | M35 | `metal-microbench/mesh_layer.swift:333` |
-| Completed mass tile increments mass-done. | M35 | `metal-microbench/mesh_layer.swift:342` |
-| Final claim loads successor spinning/shutdown pair. | M40 | `metal-microbench/mesh_layer.swift:348` |
-| Final claim loads completed generation. | M35 | `metal-microbench/mesh_layer.swift:348` |
-| Final claim compare/exchange reads and advances finish. | M35 | `metal-microbench/mesh_layer.swift:348` |
+| Mass loop loads successor spinning/shutdown pair. | M40 | `metal-microbench/mesh_layer.swift:331` |
+| Mass loop loads done count. | M35 | `metal-microbench/mesh_layer.swift:331` |
+| Mass claim loads next numerical tile. | M35 | `metal-microbench/mesh_layer.swift:333` |
+| Mass claim compare/exchange reads and advances next tile. | M35 | `metal-microbench/mesh_layer.swift:334` |
+| Completed mass tile increments mass-done. | M35 | `metal-microbench/mesh_layer.swift:343` |
+| Final claim loads successor spinning/shutdown pair. | M40 | `metal-microbench/mesh_layer.swift:349` |
+| Final claim loads completed generation. | M35 | `metal-microbench/mesh_layer.swift:349` |
+| Final claim compare/exchange reads and advances finish. | M35 | `metal-microbench/mesh_layer.swift:349` |
 | Output visibility reads the existing scalar output word before its coherent store. | M38 | `swift/Mesh.swift:676` |
-| Store completed generation, then fixed retirement event. | M35/M37 | `metal-microbench/mesh_layer.swift:360` |
+| Store completed generation, then fixed retirement event. | M35/M37 | `metal-microbench/mesh_layer.swift:361` |
 
 | T1 instruction: cursor → native SEND acceptance / advance | D0 row | Source |
 | --- | --- | --- |
@@ -275,4 +275,4 @@
 | Native entry depth T1/T2 | `2/1`: TX cursor → cell → dispatch; RX completion integer → M10 stamp. Device payload/stamp bindings and publication destinations are compiled literals. Native provider internals are outside this ABI depth. |
 | ABI frames | Input/retirement worker and RX worker each reserve 128 bytes with FP=SP+112 in emitted -O2 assembly. Input-worker target/call-group reloads at FP-88/-96. No meshMetalRearm frame exists. RX base/generation reload remains after availability publication. |
 | Retirement | M37 is a dedicated prepared one-cell stream. The existing return reader selects its cold frame, performs refcount cleanup and later releases the invocation. It does not select, construct or submit a device command. |
-| Construction / compilation | 37/37 rows constructed; M12, M14, M21 retired. Native C/Swift, engine Swift, generated resident sampler and the 35-layer body plus vocabulary compile. Threadgroup bytes: sampler 48, body 12256 at H=1536. Shared native sampling entries compile. Numerical coverage spans the whole decode step. Per-step decode command allocations and T3 derivations: 0. Two ordinary Mesh Metal allocation sites remain for nonresident/prefill callers. Fixed ICBs replay on two queues; each successor stage publishes its own generation and its matching incumbent stage observes it before retiring. Timer expiry only requests a successor replay; no deadline authorizes retirement. Optional `LM_MESH_LIFECYCLE_TRACE=1` records commits, completion status, all per-stage M40 cells and deinit on the host; it adds no device load. Runtime results belong in engine `output_data/resident-stage-handoff-20260918/`. |
+| Construction / compilation | 37/37 rows constructed; M12, M14, M21 retired. Native C/Swift, engine Swift, generated resident sampler and the 35-layer body plus vocabulary compile. Threadgroup bytes: sampler 48, body 12256 at H=1536. Shared native sampling entries compile. Numerical coverage spans the whole decode step. Per-step decode command allocations and T3 derivations: 0. Two ordinary Mesh Metal allocation sites remain for nonresident/prefill callers. Fixed ICBs replay on two queues; each successor stage publishes its own generation and its matching incumbent stage observes it before retiring. Timer expiry only requests a successor replay; no deadline authorizes retirement. Optional `LM_MESH_LIFECYCLE_TRACE=1` records commits, completion status, all per-stage M40 cells and deinit on the host; it adds no device load. Stage-2 handoff failed in engine `output_data/resident-stage-handoff-20260918/`: successor body spinning stayed zero. The bounded `output_data/resident-lifetime-20260918/` probe sets `LM_MESH_RESIDENT_RENEWAL=0` at setup, preserves every grid and device load, and logs native GPU command duration on completion; it adds no per-step or device work. |
