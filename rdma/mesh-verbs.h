@@ -39,43 +39,37 @@ struct mesh_queue {
 _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
 struct mesh_verbs {
   struct mesh_device *device; struct mesh_wire *wire;
-  struct mesh_queue queues[MESH_QPS]; int qp_count,listener;
-  uint32_t capacity[MESH_QPS][2],peer;
+  struct mesh_queue *queues; int qp_count,listener;
+  struct ibv_cq *completions[2];
+  uint32_t (*capacity)[2],peer,completion_entries[2];
   uint64_t bandwidth;
   const char *local_address,*remote_address,*service;
   uint64_t deadline;
 };
+/* design/prepared-machine.md#M07 */
 /* design/algorithm-sources.md#programtensor */
 static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
-  size_t bank=(size_t)1<<32,stride=(size_t)(m->block+1)*m->pgsz,blocks=mesh_blocks(m);
-  wire->region_extent=((size_t)1<<30)/stride*stride;
-  size_t regions=(blocks*stride+wire->region_extent-1)/wire->region_extent,length=regions*bank;
-  char *reserved=mmap(NULL,length+bank,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
-  if(reserved==MAP_FAILED)return -1;
-  char *base=(char *)(((uintptr_t)reserved+bank-1)&~(uintptr_t)(bank-1));
-  if(base>reserved)munmap(reserved,(size_t)(base-reserved));
-  munmap(base+length,(size_t)(reserved+length+bank-(base+length)));
-  wire->data=base;wire->length=length;
+  size_t payload=(size_t)m->block*m->pgsz,blocks=mesh_blocks(m);
+  wire->region_extent=((size_t)1<<30)/payload*payload;
+  wire->length=blocks*payload;
+  wire->data=mmap(NULL,wire->length,PROT_READ|PROT_WRITE,MAP_SHARED,file,(off_t)m->data_off);
+  if(wire->data==MAP_FAILED){wire->data=NULL;return -1;}
   wire->spans=calloc(blocks,sizeof *wire->spans);
   if(!wire->spans)return -1;
-  size_t payload=(size_t)m->block*m->pgsz;
-  for(size_t i=0;i<blocks;i++){
-    size_t offset=i*stride;
-    char *address=base+offset/wire->region_extent*bank+offset%wire->region_extent;
-    if(mmap(address,m->pgsz,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,file,(off_t)(m->tags_off+i*m->pgsz))==MAP_FAILED)return -1;
-    if(mmap(address+m->pgsz,payload,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,file,(off_t)(m->data_off+i*payload))==MAP_FAILED)return -1;
-    wire->spans[i]=(struct ibv_sge){.addr=(uintptr_t)address+m->pgsz-sizeof(struct mesh_wire_tag),.length=(uint32_t)(payload+sizeof(struct mesh_wire_tag))};
-  }
+  for(size_t i=0;i<blocks;i++)wire->spans[i]=(struct ibv_sge){.addr=(uintptr_t)wire->data+i*payload,.length=(uint32_t)payload};
   return 0;
 }
 static const char *shm; static _Atomic sig_atomic_t stop;
+/* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#programcopy */
 static int down_pair(struct mesh_verbs *provider){
   while(provider->qp_count){ struct ibv_qp *q=provider->queues[provider->qp_count-1].pair; if(q && ibv_destroy_qp(q))return 0; provider->queues[--provider->qp_count].pair=NULL; }
-  for(int q=0;q<MESH_QPS;q++)for(int d=0;d<2;d++)if(provider->queues[q].completions[d]){
-    if(ibv_destroy_cq(provider->queues[q].completions[d]))return 0;
-    provider->queues[q].completions[d]=NULL;
+  for(int d=0;d<2;d++)if(provider->completions[d]){
+    if(ibv_destroy_cq(provider->completions[d]))return 0;
+    provider->completions[d]=NULL;
   }
+  free(provider->queues);provider->queues=NULL;
+  free(provider->capacity);provider->capacity=NULL;
   return 1;
 }
 /* design/algorithm-sources.md#programcopy */
@@ -95,7 +89,7 @@ static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 static void onsig(int s){ (void)s; stop++; }
 
 /* design/collective-dependency-ledger.md#d13-connection-metadata-is-setup-work */
-struct qpi { uint32_t xmagic, xsize; uint32_t pgsz; uint16_t lid; uint8_t gid[16]; uint32_t node,count,qpns[MESH_QPS],psns[MESH_QPS]; };
+struct qpi { uint32_t xmagic, xsize; uint32_t pgsz; uint16_t lid; uint8_t gid[16]; uint32_t node,count; };
 #define XMAGIC 0x4d595048u
 
 /* design/algorithm-sources.md#programcopy */
@@ -202,14 +196,14 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
   if(ibv_query_device(device->context,&capabilities)){error=errno;goto done;}
   if(!device->domain)device->domain=ibv_alloc_pd(device->context);
   if(!device->domain){error=errno;goto done;}
-  size_t bank=(size_t)1<<32,stride=(size_t)(m->block+1)*m->pgsz,span=(size_t)mesh_blocks(m)*stride;
+  size_t stride=(size_t)m->block*m->pgsz,span=(size_t)mesh_blocks(m)*stride;
   size_t regions=(span+wire->region_extent-1)/wire->region_extent;
   if(regions>(size_t)capabilities.max_mr){error=ENOMEM;goto done;}
   if(!device->regions)device->regions=calloc(regions,sizeof *device->regions);
   if(!device->regions){error=ENOMEM;goto done;}
   while(device->region_count<regions){
     size_t offset=(size_t)device->region_count*wire->region_extent,end=offset+wire->region_extent;
-    device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+(size_t)device->region_count*bank,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
+    device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
     if(!device->regions[device->region_count]){error=errno;goto done;}
     device->region_count++;
   }
@@ -236,12 +230,19 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   int f=oob(provider,m,client);
   if(f<0)return -1;
   uint32_t frame_capacity=provider->device->frame_capacity;
+  /* design/prepared-machine.md#M11 */
+  provider->queues=calloc((size_t)qps,sizeof *provider->queues);
+  provider->capacity=calloc((size_t)qps,sizeof *provider->capacity);
+  if(!provider->queues || !provider->capacity){close(f);return -1;}
+  for(int d=0;d<2;d++){
+    provider->completions[d]=ibv_create_cq(provider->device->context,(int)(provider->completion_entries[d]+1),NULL,NULL,0);
+    if(!provider->completions[d]){close(f);return -1;}
+  }
   for(int q=0;q<qps;q++){
     struct mesh_queue *queue=&provider->queues[q];
     for(int d=0;d<2;d++){
-      queue->completions[d]=ibv_create_cq(provider->device->context,(int)frame_capacity+1,NULL,NULL,0);
-      if(!queue->completions[d]){close(f);return -1;}
-      queue->poll[d]=queue->completions[d]->context->ops.poll_cq;
+      queue->completions[d]=provider->completions[d];
+      queue->poll[d]=provider->completions[d]->context->ops.poll_cq;
     }
     struct ibv_qp_init_attr qi={.send_cq=queue->completions[MESH_SEND],
       .recv_cq=queue->completions[MESH_RECEIVE],.qp_type=IBV_QPT_UC,
@@ -264,23 +265,24 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   union ibv_gid gid; if(ibv_query_gid(provider->device->context,1,0,&gid)){ close(f); return -1; }
   uint32_t psn=arc4random()&0xffffff;
   struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.lid=pa.lid,.pgsz=m->block*m->pgsz,.node=m->node,.count=(uint32_t)qps},you;
-  for(int q=0;q<qps;q++){ mine.qpns[q]=provider->queues[q].pair->qp_num; mine.psns[q]=(psn+(uint32_t)q)&0xffffff; }
   memcpy(mine.gid,&gid,16);
   if(exchange(f,&mine,&you,sizeof mine,sizeof you,m,client,provider->deadline)){ int error=errno;close(f);fprintf(stderr,"exchange failed\n");errno=error;return -1; }
   /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.count!=mine.count || you.node!=provider->peer){
     fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,provider->peer); close(f);errno=EPROTO;return -1; }
   for(int q=0;q<qps;q++){
-    struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=you.psns[q],
-      .dest_qp_num=you.qpns[q],.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
-      .grh={.hop_limit=1,.sgid_index=0}}};
+    uint32_t local[2]={provider->queues[q].pair->qp_num,(psn+(uint32_t)q)&0xffffff},remote[2];
+    if(exchange(f,local,remote,sizeof local,sizeof remote,m,client,provider->deadline)){close(f);return -1;}
+    struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[1],
+      .dest_qp_num=remote[0],.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
+        .grh={.hop_limit=1,.sgid_index=0}}};
     memcpy(&r.ah_attr.grh.dgid,you.gid,16);
     int rc=ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
-    if(rc){ fprintf(stderr,"rtr %d rc %d dlid %u dqpn %u\n",q,rc,you.lid,you.qpns[q]); close(f); return -1; }
+    if(rc){fprintf(stderr,"rtr %d rc %d\n",q,rc);close(f);return -1;}
   }
   if(configure(state,f,client)){int error=errno;close(f);errno=error;return -1;}
   for(int q=0;q<qps;q++){
-    struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=mine.psns[q]};
+    struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(psn+(uint32_t)q)&0xffffff};
     int rc=ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
     if(rc){ fprintf(stderr,"rts %d rc %d, failed\n",q,rc); close(f); return -1; }
   }

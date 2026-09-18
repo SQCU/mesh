@@ -11,11 +11,6 @@ int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,u
 static inline uint32_t mesh_block_pages(const struct mesh_ctx *c){ return c->M->block; }
 static inline void *mesh_page_address(struct mesh_ctx *c,uint32_t page){ return mesh_at(c->M,page); }
 /* design/algorithm-sources.md#programcopy */
-static inline struct mesh_range mesh_receive_range(struct mesh_ctx *c,uint32_t channel){
-  uint32_t first=mesh_transfers(c->M,c->client,channel,MESH_RECEIVE)[0].pool;
-  return (struct mesh_range){first,mesh_pools(c->M)[first/c->M->block].pages};
-}
-/* design/algorithm-sources.md#programcopy */
 static inline uint32_t mesh_peer_channel(struct mesh_ctx *c,uint32_t peer,uint32_t queue){
   for(uint32_t i=0;i<c->M->links;i++)if(mesh_links(c->M)[i].peer==peer){
     if(queue<c->M->qps)return i*c->M->qps+queue;
@@ -32,7 +27,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
 /* design/algorithm-sources.md#device-operands */
-void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint32_t page,uint64_t address);
+void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 /* design/algorithm-sources.md#index-hand-off */
 int mesh_event_reader_init(struct mesh_event_reader *,struct hdr *,uint32_t queue);

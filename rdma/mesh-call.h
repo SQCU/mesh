@@ -35,14 +35,12 @@ static inline void *mesh_operand_address(struct mesh_operand operand,size_t offs
 }
 /* design/algorithm-sources.md#programtensor */
 static inline uint32_t mesh_operand_page(struct mesh_operand operand){return atomic_load_explicit(&operand.pages->mapping,memory_order_relaxed);}
-/* design/algorithm-sources.md#programtensor */
-static inline __attribute__((always_inline)) intptr_t mesh_operand_view(const struct mesh_page_entry *pages){return (intptr_t)(atomic_load_explicit(&pages->mapping,memory_order_relaxed)>>32);}
 typedef void (*mesh_dispose)(void *);
 
 /* design/algorithm-sources.md#programkernel_call */
 struct mesh_calls *mesh_calls_create(struct mesh_ctx *,uint32_t workers,uint32_t count,void *owner,mesh_dispose);
 struct mesh_function *mesh_call_bind(struct mesh_calls *,uint32_t worker,
-  const struct mesh_section *inputs,const struct mesh_section *views,size_t input_count,size_t dependency_count,int completion_publication,
+  const struct mesh_section *inputs,size_t input_count,size_t dependency_count,int completion_publication,
   const struct mesh_section *outputs,size_t output_count,const void *submit,void *context,const void *rearm,void *rearm_context);
 /* design/algorithm-sources.md#resident-metal */
 struct mesh_call *mesh_function_frame(struct mesh_function *,uint32_t frame,uint32_t **sequence);
@@ -58,7 +56,7 @@ void mesh_calls_destroy(struct mesh_calls *);
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfer_bind(struct mesh_ctx *,uint32_t queue,int receive,uint32_t identity,struct mesh_section);
 int mesh_transfers_prepare(struct mesh_ctx *);
-void mesh_transfers_start(struct mesh_ctx *);
+int mesh_transfers_start(struct mesh_ctx *);
 
 /* design/algorithm-sources.md#programtensor */
 int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,uint32_t channel,struct mesh_section *);

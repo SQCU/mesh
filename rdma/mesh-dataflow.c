@@ -79,7 +79,6 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
     events->count=0;
   }
   for(uint32_t q=0;q<memory->links*memory->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(memory,client,q,d),0,memory_order_relaxed);
-  memory->client_data[client>>63]=(uintptr_t)mesh_at(memory,0);
   atomic_store_explicit(&memory->client,client,memory_order_release);
   *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.client=client,.fd=file};
   return 0;
@@ -150,10 +149,8 @@ void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t
 }
 
 /* design/algorithm-sources.md#device-operands */
-void mesh_device_bind(struct mesh_ctx *c,uint32_t row,uint32_t page,uint64_t address){
+void mesh_device_bind(struct mesh_ctx *c,uint32_t row,uint64_t address){
   if(row!=MESH_ABSENT)atomic_store_explicit(&mesh_page(c->M)[row].device,address,memory_order_relaxed);
-  uint64_t *local=(uint64_t *)mesh_tag(c->M,page)-1;
-  *local=address;
 }
 
 /* design/algorithm-sources.md#programtensor */
@@ -255,6 +252,6 @@ struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t q
   uint64_t first=m->notice_off+(uint64_t)destination*m->notice_bytes;
   for(uint32_t i=0;i<*count;i++)if(targets[i].stream>=first && targets[i].stream<first+m->notice_bytes)return &targets[i];
   struct mesh_target *target=&targets[(*count)++];
-  *target=(struct mesh_target){.stream=mesh_event_bind(m,destination),.index=row};
+  *target=(struct mesh_target){.stream=send?first:mesh_event_bind(m,destination),.index=row};
   return target;
 }

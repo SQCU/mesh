@@ -8,12 +8,12 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 79u
+#define MESH_VERSION 80u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_EVENT_ABSENT UINT64_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
-struct mesh_transfer { uint32_t local_row,binding,count,stride,pool; uint64_t bytes; };
+struct mesh_transfer { uint32_t local_row,binding,count,stride,pool,first; uint64_t bytes; };
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
@@ -45,6 +45,9 @@ enum { MESH_SEND, MESH_RECEIVE };
 /* design/algorithm-sources.md#index-hand-off */
 struct mesh_stream { _Alignas(128) uint32_t position; uint32_t mask; _Atomic uint64_t slots[]; };
 _Static_assert(sizeof(struct mesh_stream)==128 && _Alignof(struct mesh_stream)==128 && offsetof(struct mesh_stream,slots)==8,"mesh_stream");
+/* design/prepared-machine.md#M04 */
+struct mesh_tx { uint32_t count,slots,once; _Atomic uint64_t cells[]; };
+_Static_assert(offsetof(struct mesh_tx,cells)==16 && sizeof(_Atomic uint64_t)==8,"M04");
 struct mesh_target { uint64_t stream; uint32_t index,count; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off */
@@ -59,7 +62,7 @@ struct mesh_event_input { _Atomic uint64_t *slots; uint32_t position,mask; };
 struct mesh_event_reader { struct mesh_event_input *inputs; uint32_t count,cursor; };
 _Static_assert(sizeof(struct mesh_event_input)==16 && sizeof(struct mesh_event_reader)==16,"mesh_event_reader");
 _Static_assert(sizeof(_Atomic uint64_t)==8 && __atomic_always_lock_free(8,0),"mesh_event slot");
-struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; };
+struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; _Atomic uint64_t prepared; };
 /* design/algorithm-sources.md#meshresult */
 enum { MESH_RESULT_SUCCESS, MESH_RESULT_LINK, MESH_RESULT_FUNCTION, MESH_RESULT_BUSY };
 #define MESH_RESULT(kind,id,code) ((uint64_t)(kind)<<62|(uint64_t)(id)<<32|(uint32_t)(code))
@@ -67,16 +70,13 @@ struct mesh_status { uint64_t value,completed; };
 _Static_assert(sizeof(struct mesh_status)==16 && __atomic_always_lock_free(sizeof(struct mesh_status),0),"mesh_status lock-free snapshot");
 struct mesh_instance { _Alignas(32) _Atomic(struct mesh_status) status; _Atomic uint32_t available,remaining,invocation; uint32_t count; };
 _Static_assert(sizeof(struct mesh_instance)==32 && _Alignof(struct mesh_instance)==32,"mesh_instance");
-struct mesh_wire_tag { _Atomic uint64_t value; };
-_Static_assert(sizeof(struct mesh_wire_tag)==8,"mesh_wire_tag");
 struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; struct mesh_port_info port; _Atomic uint32_t order_length[2*MESH_NOTICE_BANKS*MESH_QPS]; };
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps,links;
   _Atomic uint64_t configured;
-  uint64_t planes_off,page_off,buffer_off,pool_off,link_off,target_off,order_off,notice_off,instance_off,tags_off,data_off,length;
+  uint64_t planes_off,page_off,buffer_off,pool_off,link_off,target_off,order_off,notice_off,instance_off,data_off,length;
   uint64_t notice_bytes,target_stride;
   uint32_t instance_count[MESH_NOTICE_BANKS];
-  uintptr_t client_data[MESH_NOTICE_BANKS];
   _Atomic(struct mesh_status) result[MESH_NOTICE_BANKS];
   _Atomic uint64_t client,bridge_pid,device_client,serial,retired;
   struct mesh_port_info port;
@@ -130,8 +130,6 @@ static inline void mesh_buffer_reset(struct hdr *m,uint32_t row){
 static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+((size_t)(owner>>63)*2*m->links*m->qps+2*queue+(uint32_t)direction)*mesh_blocks(m); }
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return &mesh_links(m)[queue/m->qps].order_length[(owner>>63)*2*MESH_QPS+2*(queue%m->qps)+(uint32_t)direction]; }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
-/* design/algorithm-sources.md#programcopy */
-static inline struct mesh_wire_tag *mesh_tag(struct hdr *m,uint32_t page){ return (struct mesh_wire_tag *)((char *)m+m->tags_off+(size_t)(page/m->block+1)*m->pgsz-sizeof(struct mesh_wire_tag)); }
 
 static inline uint64_t mesh_word_mask(uint32_t first,uint32_t count,uint32_t word){
   uint32_t lo=word*64,hi=lo+64,a=first>lo?first:lo,b=first+count<hi?first+count:hi;
@@ -168,10 +166,14 @@ static inline void mesh_event_push(struct hdr *m,uint64_t slot,uint32_t index,ui
   uint32_t at=stream->position++&stream->mask;
   atomic_store_explicit(stream->slots+at,((uint64_t)invocation<<32)|(index+1),memory_order_release);
 }
+/* design/prepared-machine.md#M04 */
 /* design/algorithm-sources.md#programkernel_call */
 static inline __attribute__((always_inline)) void mesh_publish(struct hdr *m,const struct mesh_target *targets,uint32_t sends,uint32_t uses,struct mesh_page_entry *entry,uint64_t stamp){
   uint32_t invocation=(uint32_t)(stamp-1);
-  for(uint32_t i=0;i<sends;i++)mesh_event_push(m,targets[i].stream,targets[i].index,invocation);
+  for(uint32_t i=0;i<sends;i++){
+    _Atomic uint64_t *cells=(_Atomic uint64_t *)((char *)m+targets[i].stream);
+    for(uint32_t k=0;k<targets[i].count;k++)atomic_store_explicit(cells+k,(uint64_t)targets[i].index+k+1,memory_order_release);
+  }
   atomic_store_explicit(&entry->stamp,stamp,memory_order_release);
   for(uint32_t i=sends,end=sends+uses;i<end;i++)mesh_event_push(m,targets[i].stream,targets[i].index,invocation);
 }
@@ -206,7 +208,6 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links*(qps+1)+2*MESH_COMPUTE_THREADS)*h->notice_bytes; at=(at+bytes-1)/bytes*bytes;
   h->instance_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*rows*sizeof(struct mesh_instance); at=(at+bytes-1)/bytes*bytes;
-  h->tags_off=at; at+=blocks*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)rows*pgsz;
   h->length=at; return at;
 }

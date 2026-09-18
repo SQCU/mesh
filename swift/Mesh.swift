@@ -45,11 +45,10 @@ fileprivate final class MeshFeatures: NSObject, MLFeatureProvider {
 
 public struct TensorFunction {
     fileprivate let prepare: (Mesh, [TensorPart], [TensorPart]) throws -> MeshSubmission
-    fileprivate let contiguous: Bool
 
     // design/algorithm-sources.md#programkernel_call
-    private init(contiguous: Bool = false, _ prepare: @escaping (Mesh, [TensorPart], [TensorPart]) throws -> MeshSubmission) {
-        self.prepare = prepare; self.contiguous = contiguous
+    private init(_ prepare: @escaping (Mesh, [TensorPart], [TensorPart]) throws -> MeshSubmission) {
+        self.prepare = prepare
     }
 
     // design/algorithm-sources.md#programkernel_call
@@ -86,7 +85,7 @@ public struct TensorFunction {
     // design/algorithm-sources.md#programkernel_call
     public static func prediction(_ model: MLModel, inputs: [(String, (MeshSpan) throws -> MLMultiArray)],
                                   outputs: [(String, (MeshSpan) throws -> MLMultiArray)]) -> Self {
-        Self(contiguous: true) { mesh, parts, results in
+        Self { mesh, parts, results in
             precondition(parts.count == inputs.count && results.count == outputs.count)
             let bindings = try Dictionary(uniqueKeysWithValues: inputs.indices.map { i in
                 (inputs[i].0, (i, try mesh.bindings(parts[i]) { MLFeatureValue(multiArray: try inputs[i].1($0)) }))
@@ -106,7 +105,6 @@ public struct TensorFunction {
     // design/algorithm-sources.md#programkernel_call
     public init<Input, Output>(inputViews: [(MeshSpan) throws -> Input], outputViews: [(MeshSpan) throws -> Output],
                               _ function: @escaping ([MeshBindings<Input>], [MeshBindings<Output>]) throws -> TensorFunction) {
-        contiguous = true
         prepare = { mesh, inputs, outputs in
             precondition(inputs.count == inputViews.count && outputs.count == outputViews.count)
             let x = try zip(inputs, inputViews).map { try mesh.bindings($0.0, using: $0.1) }
@@ -120,7 +118,7 @@ public struct MeshBindings<Value> {
     public let values: ContiguousArray<Value>
 
     // design/algorithm-sources.md#programtensor
-    @inlinable public func index(_ operand: mesh_operand) -> Int { mesh_operand_view(operand.pages) }
+    @inlinable public func index(_ operand: mesh_operand) -> Int { Int(operand.index) }
 
     // design/algorithm-sources.md#programtensor
     @inlinable public subscript(_ operand: mesh_operand) -> Value { values[index(operand)] }
@@ -133,6 +131,7 @@ public struct MeshMetalOperand {
     public let bytes: Int
     fileprivate let quantum: Int
     public let data: MTLBuffer?
+    public let availability: UInt64
 
     // design/algorithm-sources.md#device-operands
     // design/algorithm-sources.md#native-metal-program
@@ -260,17 +259,11 @@ private struct MeshLaunch {
     var prepare: ((OpaquePointer) throws -> Void)? = nil
 }
 
+// design/prepared-machine.md#M02
 // design/algorithm-sources.md#programkernel_call
-private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inputs: Int, outputs: Int, count: Int,
-                            copies: [(input: Int, source: mesh_section, target: mesh_section)]) -> MeshLaunch {
-    let context = memory.context, block = mesh_block_pages(context)
-    let quantum = Int(block * context.pointee.M.pointee.pgsz)
-    let chunks = copies.map { copy in
-        stride(from: 0, to: copy.source.bytes, by: quantum).map { min(quantum, copy.source.bytes - $0) }
-    }
+private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inputs: Int, outputs: Int, count: Int) -> MeshLaunch {
     let launch: MeshBody
     let rearm: ((UInt32) -> Void)?
-    let copyOnCPU: Bool
     let retained: [MTLBuffer]
     switch function {
     case .resident(let device, let x, let y, let results, let dependencies, let body):
@@ -279,7 +272,6 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
     case .cpu(let function):
         retained = []
         rearm = nil
-        copyOnCPU = true
         launch = { call in
             let operands = mesh_call_operands(call)
             let inputs = MeshOperands(start: operands, count: inputs), outputs = MeshOperands(start: operands.advanced(by: inputs.count), count: outputs)
@@ -288,40 +280,6 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
         }
     case .metal(let device, let function, let resources):
         retained = resources
-        copyOnCPU = false
-        let encode: (MTLCommandBuffer, MeshOperands, MeshOperands) -> Void
-        if copies.isEmpty {
-            encode = function
-        } else {
-            let sources = copies.map { copy -> ContiguousArray<MTLBuffer> in
-                let range = mesh_receive_range(context, copy.source.channel)
-                return ContiguousArray(stride(from: range.first, to: range.first + range.count, by: Int(block)).map { page in
-                    memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page), count: quantum))
-                })
-            }
-            let targets = copies.map { copy in
-                (0..<copy.target.count).map { index in
-                    memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_section_address(context, copy.target, index), count: copy.target.bytes))
-                }
-            }
-            let placements = (0..<count).map { frame in copies.indices.flatMap { i in
-                let copy = copies[i]
-                let source = mesh_page(context.pointee.M)!.advanced(by: Int(copy.source.first) + frame * Int(copy.source.stride))
-                return chunks[i].enumerated().map { chunk, bytes in
-                    (source: source.advanced(by: chunk), views: sources[i], target: targets[i][frame], offset: chunk * quantum, bytes: (bytes + 3) / 4 * 4)
-                }
-            } }
-            let inputSlot = copies[0].input
-            encode = { command, inputs, outputs in
-                let blit = command.makeBlitCommandEncoder()!
-                for copy in placements[Int(inputs[inputSlot].index)] {
-                    blit.copy(from: copy.views[mesh_operand_view(copy.source)], sourceOffset: 0,
-                              to: copy.target, destinationOffset: copy.offset, size: copy.bytes)
-                }
-                blit.endEncoding()
-                function(command, inputs, outputs)
-            }
-        }
         let queue = device.makeCommandQueue(maxCommandBufferCount: count)!
         if !resources.isEmpty {
             let descriptor = MTLResidencySetDescriptor()
@@ -337,7 +295,7 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
             let operands = mesh_call_operands(call)
             let inputs = MeshOperands(start: operands, count: inputs), outputs = MeshOperands(start: operands.advanced(by: inputs.count), count: outputs)
             let command = commands[Int(mesh_call_index(call))]
-            encode(command, inputs, outputs)
+            function(command, inputs, outputs)
             command.addCompletedHandler { [memory] command in
                 withExtendedLifetime(memory) {
                     if command.status == .completed { mesh_call_complete(call, 0) }
@@ -349,7 +307,6 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
     case .prediction(let model, let features, let options):
         retained = []
         rearm = nil
-        copyOnCPU = true
         launch = { call in
             let inputs = MeshOperands(start: mesh_call_operands(call), count: inputs)
             let index = Int(mesh_call_index(call)), provider = features[index]
@@ -361,20 +318,6 @@ private func meshInvocation(_ function: MeshSubmission, memory: MeshMemory, inpu
                 }
             }
         }
-    }
-    if copyOnCPU && !copies.isEmpty {
-        let placements = (0..<count).map { frame in copies.indices.flatMap { i in
-            let copy = copies[i]
-            let source = mesh_page(context.pointee.M)!.advanced(by: Int(copy.source.first) + frame * Int(copy.source.stride))
-            let target = mesh_section_address(context, copy.target, UInt32(frame))!
-            return chunks[i].enumerated().map { chunk, bytes in
-                (source: source.advanced(by: chunk), target: target.advanced(by: chunk * quantum), bytes: bytes)
-            }
-        } }
-        return MeshLaunch(function: { call in
-            for copy in placements[Int(mesh_call_index(call))] { memcpy(copy.target, mesh_operand_data(copy.source), copy.bytes) }
-            launch(call)
-        }, rearm: rearm, resources: retained)
     }
     return MeshLaunch(function: launch, rearm: rearm, resources: retained)
 }
@@ -424,7 +367,7 @@ public final class Mesh {
             if shared { local.stride = 0; memory.context.pointee.shared_pages += local.pages }
             memory.sections.append(local); section = local
         }
-        let stamp = section.map { UnsafeRawPointer(mesh_page(memory.context.pointee.M)!.advanced(by: Int($0.first))).advanced(by: 24) }
+        let stamp = section.map { UnsafeRawPointer(mesh_page(memory.context.pointee.M)!.advanced(by: Int($0.first + ($0.channel == MESH_ABSENT ? 0 : $0.pages / mesh_block_pages(memory.context) - 1)))).advanced(by: 24) }
         return TensorPart(rank: owner, bytes: bytes, section: section, shared: shared, identity: identity, stamp: stamp)
     }
 
@@ -441,29 +384,14 @@ public final class Mesh {
         if owner != rank { return }
         preparations.append { [unowned self] in
             precondition(outputs.allSatisfy { $0.section!.channel == MESH_ABSENT })
-            var views = inputs, storage: [TensorPart] = []
-            var copies: [(input: Int, source: mesh_section, target: mesh_section)] = []
-            for (i, input) in inputs.enumerated() {
-                let section = input.section!
-                if function.contiguous && section.channel != MESH_ABSENT && section.pages > mesh_block_pages(memory.context) {
-                    if let existing = copies.first(where: { $0.source.first == section.first }) {
-                        views[i] = views[existing.input]
-                        continue
-                    }
-                    let target = try part(on: owner, bytes: input.bytes)
-                    views[i] = target; storage.append(target)
-                    copies.append((i, section, target.section!))
-                }
-            }
-            let invocation = meshInvocation(try function.prepare(self, views, outputs), memory: memory,
-                                            inputs: inputs.count, outputs: outputs.count, count: inFlight, copies: copies)
-            let inputRows = inputs.map { $0.section! }, viewRows = views.map { $0.section! }
-            let outputRows = (outputs + storage).map { $0.section! }
+            let invocation = meshInvocation(try function.prepare(self, inputs, outputs), memory: memory,
+                                            inputs: inputs.count, outputs: outputs.count, count: inFlight)
+            let inputRows = inputs.map { $0.section! }, outputRows = outputs.map { $0.section! }
             memory.functions.append(invocation)
             let native = withUnsafeBytes(of: invocation) {
                 $0.load(as: (UnsafeRawPointer, UnsafeMutableRawPointer?, UnsafeRawPointer?, UnsafeMutableRawPointer?).self)
             }
-            guard let binding = mesh_call_bind(calls, UInt32(worker), inputRows, viewRows, inputRows.count,
+            guard let binding = mesh_call_bind(calls, UInt32(worker), inputRows, inputRows.count,
                               invocation.dependencies ?? inputRows.count, invocation.prepare == nil ? 1 : 0, outputRows, outputRows.count,
                               native.0, native.1, native.2, native.3) else {
                 memory.functions.removeLast()
@@ -476,14 +404,7 @@ public final class Mesh {
     // design/algorithm-sources.md#programtensor
     public func bindings<Value>(_ part: TensorPart, using make: (MeshSpan) throws -> Value) throws -> MeshBindings<Value> {
         let source = part.section!, context = memory.context
-        let pages: [UInt32]
-        if source.channel != MESH_ABSENT {
-            let range = mesh_receive_range(context, source.channel)
-            let first = Int(range.first), quantum = Int(mesh_block_pages(context))
-            pages = stride(from: first, through: first + Int(range.count - source.pages), by: quantum).map(UInt32.init)
-        } else {
-            pages = (0..<source.count).map { mesh_row_page(context, source.first + $0 * source.stride, 0) }
-        }
+        let pages = (0..<source.count).map { mesh_row_page(context, source.first + $0 * source.stride, 0) }
         let values = try pages.map { page in
             try make(MeshSpan(data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page),
                                                                  count: source.bytes), memory: memory))
@@ -495,35 +416,28 @@ public final class Mesh {
     fileprivate func metal(_ part: TensorPart, device: MTLDevice) -> ContiguousArray<MeshMetalOperand> {
         let section = part.section!, context = memory.context, block = mesh_block_pages(context)
         let quantum = Int(block * context.pointee.M.pointee.pgsz)
-        var resources: ContiguousArray<MTLBuffer> = []
-        if section.channel != MESH_ABSENT {
-            let range = mesh_receive_range(context, section.channel)
-            for page in stride(from: range.first, to: range.first + range.count, by: Int(block)) {
-                let buffer = memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page), count: quantum))
-                mesh_device_bind(context, MESH_ABSENT, page, buffer.gpuAddress)
-                resources.append(buffer)
-            }
-        }
         let count = Int(section.pages / block)
         return ContiguousArray((0..<section.count).map { instance in
             let row = section.first + instance * section.stride
-            var backing = resources
-            if section.channel == MESH_ABSENT {
+            var backing: ContiguousArray<MTLBuffer> = []
+            do {
                 for chunk in 0..<count {
                     let page = mesh_row_page(context, row, UInt32(chunk))
                     let buffer = memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_page_address(context, page), count: quantum))
-                    mesh_device_bind(context, row + UInt32(chunk), page, buffer.gpuAddress)
+                    mesh_device_bind(context, row + UInt32(chunk), buffer.gpuAddress)
                     backing.append(buffer)
                 }
             }
             let entries = UnsafeMutableRawBufferPointer(start: mesh_page(context.pointee.M)!.advanced(by: Int(row)),
                                                      count: count * MemoryLayout<mesh_page_entry>.stride)
             let span = MeshSpan(data: entries, memory: memory)
-            let data = section.channel == MESH_ABSENT && section.bytes <= device.maxBufferLength
+            let data = section.bytes <= device.maxBufferLength
                 ? memory.metal(device, data: UnsafeMutableRawBufferPointer(start: mesh_section_address(context, section, instance), count: section.bytes)) : nil
             if let data { backing.append(data) }
-            return MeshMetalOperand(table: span.metal(device: device), offset: span.metalOffset,
-                                    resources: backing, bytes: section.bytes, quantum: quantum, data: data)
+            let table = span.metal(device: device)
+            let available = table.gpuAddress + UInt64(span.metalOffset + (section.channel == MESH_ABSENT ? 0 : count - 1) * 32 + 24)
+            return MeshMetalOperand(table: table, offset: span.metalOffset,
+                                    resources: backing, bytes: section.bytes, quantum: quantum, data: data, availability: available)
         })
     }
 
@@ -657,7 +571,8 @@ public final class Mesh {
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
         for finalize in finalizations { try finalize() }
         finalizations.removeAll()
-        mesh_transfers_start(memory.context)
+        let transportError = mesh_transfers_start(memory.context)
+        if transportError != 0 { throw POSIXError(POSIXErrorCode(rawValue: transportError) ?? .EIO) }
     }
 
     // design/algorithm-sources.md#program
@@ -729,15 +644,24 @@ public final class MeshMetalFrame {
             for i in 0..<count {
                 let target = publication.advanced(by: 16 + i * 16).load(as: mesh_target.self)
                 let pointer = UnsafeMutableRawPointer(m).advanced(by: Int(target.stream))
-                let mask = pointer.advanced(by: 4).load(as: UInt32.self)
-                let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: pointer, count: 8 + (Int(mask) + 1) * 8), memory: memory)
-                let buffer = span.metal(device: device), address = buffer.gpuAddress + UInt64(span.metalOffset)
-                backing.append(buffer)
                 let destination = records.contents().advanced(by: 32 + i * 32)
-                destination.storeBytes(of: address, as: UInt64.self)
-                destination.advanced(by: 8).storeBytes(of: address + 8, as: UInt64.self)
-                destination.advanced(by: 16).storeBytes(of: mask, as: UInt32.self)
-                destination.advanced(by: 20).storeBytes(of: target.index + 1, as: UInt32.self)
+                if i < Int(counts[0]) {
+                    let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: pointer, count: Int(target.count) * 8), memory: memory)
+                    let buffer = span.metal(device: device)
+                    backing.append(buffer)
+                    destination.storeBytes(of: buffer.gpuAddress + UInt64(span.metalOffset), as: UInt64.self)
+                    destination.advanced(by: 8).storeBytes(of: UInt64(target.index + 1), as: UInt64.self)
+                    destination.advanced(by: 16).storeBytes(of: target.count, as: UInt32.self)
+                } else {
+                    let mask = pointer.advanced(by: 4).load(as: UInt32.self)
+                    let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: pointer, count: 8 + (Int(mask) + 1) * 8), memory: memory)
+                    let buffer = span.metal(device: device), address = buffer.gpuAddress + UInt64(span.metalOffset)
+                    backing.append(buffer)
+                    destination.storeBytes(of: address, as: UInt64.self)
+                    destination.advanced(by: 8).storeBytes(of: address + 8, as: UInt64.self)
+                    destination.advanced(by: 16).storeBytes(of: mask, as: UInt32.self)
+                    destination.advanced(by: 20).storeBytes(of: target.index + 1, as: UInt32.self)
+                }
             }
             return records
         }
@@ -786,6 +710,14 @@ public final class MeshMetalFrame {
         metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst,
             static_cast<metal::thread_scope>(__METAL_MEMORY_SCOPE_SYSTEM__));
     }
+    // design/prepared-machine.md#M13
+    struct prepared_publication {
+        volatile coherent(system) device ulong* cells;
+        ulong event;
+        uint count;
+        uint padding[3];
+    };
+    static_assert(sizeof(prepared_publication) == 32, "M13");
     struct target {
         volatile coherent(system) device uint* position;
         volatile coherent(system) device uint2* slots;
@@ -817,7 +749,10 @@ public final class MeshMetalFrame {
     inline void publish(device const publication& event) {
         uint invocation = *event.sequence;
         auto targets = reinterpret_cast<device const target*>(&event + 1);
-        for (uint i = 0; i < event.counts.x; ++i) push(targets[i], invocation);
+        auto sends = reinterpret_cast<device const prepared_publication*>(targets);
+        for (uint i = 0; i < event.counts.x; ++i)
+            for (uint k = 0; k < sends[i].count; ++k) sends[i].cells[k] = sends[i].event + k;
+        fence();
         event.value->stamp = ulong(invocation) + 1;
         fence();
         for (uint i = event.counts.x; i < event.counts.x + event.counts.y; ++i) push(targets[i], invocation);
