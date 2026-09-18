@@ -30,6 +30,7 @@ struct mesh_buffer {
 _Static_assert(sizeof(struct mesh_buffer)==64 && _Alignof(struct mesh_buffer)==64,"mesh_buffer");
 struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
 /* design/algorithm-sources.md#programtensor */
+/* design/prepared-machine.md#M10 */
 struct mesh_page_entry {
   _Alignas(16) _Atomic uint64_t mapping;
   _Atomic uintptr_t address;

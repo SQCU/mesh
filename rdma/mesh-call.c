@@ -623,6 +623,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context){
     free(ordered);
   }
 
+  /* design/prepared-machine.md#M02 */
   for(uint32_t q=0;q<m->links*m->qps;q++){
     uint32_t count=atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE)),pages=0;
     struct mesh_transfer *transfers=mesh_transfers(m,context->client,q,MESH_RECEIVE);
@@ -681,14 +682,17 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,uin
     atomic_store_explicit(&buffer->owner,context->client,memory_order_release);
   }
   mesh_bits_set(m,MESH_ROW_HOT,first,rows);
-  if(channel==MESH_ABSENT)for(uint32_t row=first;row<first+rows;row+=stride){
-    uint32_t page=mesh_arena_alloc(context,(uint32_t)span,m->block);
+  /* design/prepared-machine.md#M01 */
+  /* design/prepared-machine.md#M03 */
+  if(channel==MESH_ABSENT){
+    uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,m->block);
     if(page==MESH_ABSENT){
       int error=errno;
       for(uint32_t r=first;r<first+rows;r+=stride){mesh_buffer_release(m,r);mesh_buffer_release(m,r);}
       mesh_rows_release(context,first,rows);return error;
     }
-    mesh_backing_bind(context,row,(uint32_t)span,page,(row-first)/stride);
+    for(uint32_t slot=0;slot<count;slot++)
+      mesh_backing_bind(context,first+slot*stride,(uint32_t)span,page+slot*(uint32_t)span,slot);
   }
   *section=(struct mesh_section){first,(uint32_t)span,bytes,count,stride,channel};
   return 0;

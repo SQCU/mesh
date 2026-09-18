@@ -1,5 +1,5 @@
 #include "mesh-verbs.h"
-#include "mesh-dataflow.h"
+#include "mesh-call.h"
 #include <pthread.h>
 #include <sys/event.h>
 
@@ -24,12 +24,16 @@ struct prepared_cursor {
   _Atomic uint64_t *first,*end;
 };
 _Static_assert(sizeof(struct prepared_cursor)==32 && _Alignof(struct prepared_cursor)==32,"M16");
-struct mesh_receive {
-  struct ibv_recv_wr *requests;
-  struct ibv_sge *spans;
-  uint32_t *rows;
-  size_t count;
+/* design/prepared-machine.md#M08 */
+struct prepared_receive {
+  _Alignas(32) struct ibv_recv_wr request;
+  int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **);
+  struct ibv_qp *pair;
+  uint32_t row,first,end,reserved;
 };
+_Static_assert(sizeof(struct prepared_receive)==64 && offsetof(struct prepared_receive,post)==32,"M08");
+/* design/prepared-machine.md#M25 */
+_Static_assert(16*sizeof(uintptr_t)==128,"M25 RX ABI frame");
 struct mesh_link {
   pthread_t workers[4];
   uint32_t worker_count,cursor_count,index;
@@ -37,8 +41,11 @@ struct mesh_link {
   int events;
   char *configuration;
   _Atomic int progressing;
+  _Atomic uintptr_t receive_frame;
   struct hdr *M;struct mesh_verbs provider;int qps;uint64_t client;
-  struct mesh_receive *receive;
+  struct prepared_receive *receive;
+  struct ibv_sge *receive_spans;
+  struct prepared_publication *receive_targets;
   struct prepared_send *sends;
   struct ibv_send_wr *requests;
   struct ibv_sge *spans;
@@ -46,7 +53,6 @@ struct mesh_link {
   struct prepared_cursor *cursors;
   struct mesh_event_reader *returns;
   struct ibv_wc *completion[2];
-  size_t send_count;
   struct mesh_instance *instances;
   uint32_t instance_count;
 };
@@ -71,6 +77,7 @@ static void link_error(struct mesh_link *link,int64_t code,uint32_t domain){
 /* design/algorithm-sources.md#programcopy */
 static int link_prepare(struct mesh_link *link){
   struct hdr *m=link->M;
+  atomic_store_explicit(&link->receive_frame,0,memory_order_relaxed);
   struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,link->client,link->index));
   size_t count=(size_t)tx->count*tx->slots+tx->once;
   free(link->sends);free(link->bad);free(link->cursors);
@@ -80,7 +87,6 @@ static int link_prepare(struct mesh_link *link){
   link->bad=calloc(link->instance_count,sizeof *link->bad);
   link->cursors=aligned_alloc(32,link->instance_count*sizeof *link->cursors);
   if(!link->sends || !link->bad || !link->cursors)return ENOMEM;
-  link->send_count=count;
   link->provider.completion_entries[MESH_SEND]=(uint32_t)count;
   uint32_t incoming=0;
   for(uint32_t q=0;q<m->qps;q++){
@@ -110,27 +116,27 @@ static int link_configure(void *state,int socket,uint64_t client){
   struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,client,link->index));
   struct mesh_tx peer_tx;
   if(exchange(socket,tx,&peer_tx,sizeof *tx,sizeof peer_tx,m,client,link->provider.deadline))return -1;
-  link->receive=calloc(link->instance_count,sizeof *link->receive);
+  /* design/prepared-machine.md#M08 */
+  link->receive=aligned_alloc(32,(size_t)m->rows*sizeof *link->receive);
+  /* design/prepared-machine.md#M09 */
+  link->receive_spans=calloc(m->rows,sizeof *link->receive_spans);
   link->returns=calloc(m->qps,sizeof *link->returns);
-  if(!link->receive || !link->returns)return -1;
+  if(!link->receive || !link->receive_spans || !link->returns)return -1;
   for(uint32_t q=0;q<m->qps;q++){
     int error=mesh_event_reader_init(&link->returns[q],m,mesh_notice_queue(m,client,m->links+link->index*m->qps+q));
     if(error){errno=error;return -1;}
   }
-  for(uint32_t slot=0;slot<link->instance_count;slot++){
-    struct mesh_receive *receive=&link->receive[slot];
-    receive->requests=calloc(m->rows,sizeof *receive->requests);
-    receive->spans=calloc(m->rows,sizeof *receive->spans);
-    if(!receive->requests || !receive->spans)return -1;
-  }
+  uint32_t target_count=0;
+  uint32_t *order=malloc(((size_t)peer_tx.count*peer_tx.slots+peer_tx.once)*sizeof *order);
+  if(!order && (peer_tx.count || peer_tx.once))return -1;
   for(uint32_t q=0;q<m->qps;q++){
     uint32_t channel=link->index*m->qps+q;
     uint32_t counts[2]={atomic_load(mesh_order_length(m,client,channel,MESH_SEND)),atomic_load(mesh_order_length(m,client,channel,MESH_RECEIVE))},peer_counts[2];
-    if(exchange(socket,counts,peer_counts,sizeof counts,sizeof peer_counts,m,client,link->provider.deadline))return -1;
+    if(exchange(socket,counts,peer_counts,sizeof counts,sizeof peer_counts,m,client,link->provider.deadline)){free(order);return -1;}
     struct mesh_transfer *out=mesh_transfers(m,client,channel,MESH_SEND),*in=mesh_transfers(m,client,channel,MESH_RECEIVE);
     struct mesh_transfer *peer=calloc(peer_counts[MESH_SEND]?peer_counts[MESH_SEND]:1,sizeof *peer);
-    if(!peer)return -1;
-    if(exchange(socket,out,peer,counts[MESH_SEND]*sizeof *out,peer_counts[MESH_SEND]*sizeof *peer,m,client,link->provider.deadline)){free(peer);return -1;}
+    if(!peer){free(order);return -1;}
+    if(exchange(socket,out,peer,counts[MESH_SEND]*sizeof *out,peer_counts[MESH_SEND]*sizeof *peer,m,client,link->provider.deadline)){free(order);free(peer);return -1;}
     for(uint32_t i=0;i<counts[MESH_SEND];i++)for(uint32_t slot=0;slot<out[i].count;slot++){
       struct mesh_queue *queue=&link->provider.queues[slot];
       uint32_t row=out[i].local_row+slot*out[i].stride;
@@ -149,15 +155,10 @@ static int link_configure(void *state,int socket,uint64_t client){
     for(uint32_t i=0;i<counts[MESH_RECEIVE];i++){
       uint32_t peer_index=0;
       while(peer_index<peer_counts[MESH_SEND] && peer[peer_index].binding!=in[i].binding)peer_index++;
-      if(peer_index==peer_counts[MESH_SEND]){free(peer);errno=EPROTO;return -1;}
+      if(peer_index==peer_counts[MESH_SEND]){free(order);free(peer);errno=EPROTO;return -1;}
       uint32_t chunks=(uint32_t)((in[i].bytes+payload-1)/payload);
       for(uint32_t slot=0;slot<in[i].count;slot++){
-        struct mesh_receive *receive=&link->receive[slot];
-        size_t offset=peer[peer_index].first-(slot?peer_tx.once:0),end=offset+chunks;
-        if(end>receive->count){
-          uint32_t *rows=realloc(receive->rows,end*sizeof *rows);
-          if(!rows){free(peer);return -1;}receive->rows=rows;receive->count=end;
-        }
+        size_t offset=(size_t)slot*peer_tx.count+peer[peer_index].first;
         uint32_t row=in[i].local_row+slot*in[i].stride;
         for(uint32_t k=0;k<chunks;k++){
           uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[row+k].mapping,memory_order_relaxed);
@@ -165,9 +166,35 @@ static int link_configure(void *state,int socket,uint64_t client){
           uint64_t remaining=in[i].bytes-k*payload;
           span.length=(uint32_t)(remaining<payload?remaining:payload);
           atomic_store_explicit(&mesh_page(m)[row+k].stamp,(uint64_t)slot+1-link->instance_count,memory_order_relaxed);
-          receive->spans[row+k]=span;
-          receive->requests[row+k]=(struct ibv_recv_wr){.wr_id=((uint64_t)slot<<32)|(row+k),.sg_list=receive->spans+row+k,.num_sge=1};
-          receive->rows[offset+k]=row+k;
+          /* design/prepared-machine.md#M08 */
+          /* design/prepared-machine.md#M09 */
+          link->receive_spans[row+k]=span;
+          struct mesh_queue *queue=&link->provider.queues[slot];
+          struct mesh_publication *publication=mesh_publication_at(m,row+k);
+          link->receive[row+k]=(struct prepared_receive){
+            .request={.wr_id=row+k,.sg_list=link->receive_spans+row+k,.num_sge=1},
+            .post=queue->receive,.pair=queue->pair,.row=publication->row,.first=target_count};
+          uint32_t targets=publication->uses;
+          for(uint32_t t=0;t<publication->sends;t++)targets+=publication->targets[t].count;
+          if(targets){
+            struct prepared_publication *all=realloc(link->receive_targets,((size_t)target_count+targets)*sizeof *all);
+            if(!all){free(order);free(peer);return -1;}
+            link->receive_targets=all;
+          }
+          /* design/prepared-machine.md#M13 */
+          for(uint32_t t=0;t<publication->sends;t++){
+            struct mesh_target target=publication->targets[t];
+            for(uint32_t n=0;n<target.count;n++)
+              link->receive_targets[target_count++]=(struct prepared_publication){
+                (uintptr_t)m+target.stream+8*n,(uint64_t)target.index+n+1,0,0};
+          }
+          for(uint32_t t=publication->sends;t<publication->sends+publication->uses;t++){
+            struct mesh_target target=publication->targets[t];
+            link->receive_targets[target_count++]=(struct prepared_publication){
+              (uintptr_t)m+target.stream+8,(uint64_t)target.index+1,UINT64_C(1)<<32,0};
+          }
+          link->receive[row+k].end=target_count;
+          order[offset+k]=row+k;
         }
         struct mesh_buffer *buffer=mesh_buffers(m)+row;
         buffer->frame=slot;buffer->completions=in[i].stride!=0;
@@ -175,14 +202,18 @@ static int link_configure(void *state,int socket,uint64_t client){
     }
     free(peer);
   }
-  for(uint32_t slot=0;slot<link->instance_count;slot++){
-    struct mesh_receive *receive=&link->receive[slot];
-    struct mesh_queue *queue=&link->provider.queues[slot];
-    for(size_t i=0;i<receive->count;i++){
-      struct ibv_recv_wr *bad;
-      int error=queue->receive(queue->pair,receive->requests+receive->rows[i],&bad);
-      if(error){errno=error<0?-error:error;return -1;}
-    }
+  for(size_t i=0;i<(size_t)peer_tx.count*peer_tx.slots+peer_tx.once;i++){
+    struct prepared_receive *receive=link->receive+order[i];
+    struct ibv_recv_wr *bad;
+    int error=receive->post(receive->pair,&receive->request,&bad);
+    if(error){free(order);errno=error<0?-error:error;return -1;}
+  }
+  free(order);
+  if(target_count){
+    struct prepared_publication *targets=aligned_alloc(32,(size_t)target_count*sizeof *targets);
+    if(!targets)return -1;
+    memcpy(targets,link->receive_targets,(size_t)target_count*sizeof *targets);
+    free(link->receive_targets);link->receive_targets=targets;
   }
   uint32_t posted=1,peer_posted;
   return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
@@ -244,27 +275,39 @@ static void *link_receive_progress(void *argument){
   struct mesh_link *link=argument;struct hdr *m=link->M;
   struct mesh_queue queue=link->provider.queues[0];
   struct mesh_page_entry *pages=mesh_page(m);
+  struct prepared_receive *records=link->receive;
+  const struct prepared_publication *targets=link->receive_targets;
   uint32_t generations=link->instance_count;
   struct ibv_wc *completion=link->completion[MESH_RECEIVE];
   pthread_setname_np("mesh.rdma.receive");
+  /* design/prepared-machine.md#M25 */
+  atomic_store_explicit(&link->receive_frame,(uintptr_t)__builtin_frame_address(0),memory_order_release);
   while(atomic_load_explicit(&link->progressing,memory_order_acquire)){
     int count=queue.poll[MESH_RECEIVE](queue.completions[MESH_RECEIVE],1,completion);
     if(count<0){link_error(link,count,3);return NULL;}
     if(!count)continue;
     if(completion->status){link_error(link,completion->status,2);return NULL;}
-    uint32_t row=(uint32_t)completion->wr_id,slot=(uint32_t)(completion->wr_id>>32);
+    uint32_t row=(uint32_t)completion->wr_id;
+    /* design/prepared-machine.md#M10 */
     uint64_t stamp=atomic_load_explicit(&pages[row].stamp,memory_order_relaxed)+generations;
     atomic_store_explicit(&pages[row].stamp,stamp,memory_order_release);
-    struct mesh_publication *publication=mesh_publication_at(m,row);
-    mesh_publish(m,publication->targets,publication->sends,publication->uses,pages+row,stamp);
-    struct mesh_queue *native=&link->provider.queues[slot];
+    /* design/prepared-machine.md#M08 */
+    struct prepared_receive *record=records+row;
     struct ibv_recv_wr *bad;
-    int error=native->receive(native->pair,link->receive[slot].requests+row,&bad);
+    int error=record->post(record->pair,&record->request,&bad);
     if(error){link_error(link,error<0?-error:error,1);return NULL;}
-    if(publication->row!=MESH_ABSENT){
-      row=publication->row;
+    /* design/prepared-machine.md#M13 */
+    for(uint32_t i=record->first,end=record->end;i<end;i++){
+      struct prepared_publication target=targets[i];
+      atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)target.destination,
+        target.value+(stamp-1)*target.scale,memory_order_release);
+    }
+    if(record->row!=MESH_ABSENT){
+      row=record->row;
       mesh_buffer_release(m,row);
-      if(!mesh_buffers(m)[row].completions)mesh_instance_release(link->instances,link->instance_count);
+      if(!mesh_buffers(m)[row].completions){
+        [[clang::noinline]] mesh_instance_release(link->instances,link->instance_count);
+      }
     }
   }
   return NULL;
@@ -301,11 +344,8 @@ static void link_close(struct mesh_link *link,int *control){
   if(*control>=0){close(*control);*control=-1;}
   while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);
   if(link->provider.listener>=0){close(link->provider.listener);link->provider.listener=-1;}
-  for(uint32_t slot=0;link->receive && slot<link->instance_count;slot++){
-    free(link->receive[slot].requests);free(link->receive[slot].spans);free(link->receive[slot].rows);
-  }
   for(uint32_t q=0;link->returns && q<link->M->qps;q++)free(link->returns[q].inputs);
-  free(link->receive);link->receive=NULL;free(link->returns);link->returns=NULL;
+  free(link->receive);link->receive=NULL;free(link->receive_spans);link->receive_spans=NULL;free(link->receive_targets);link->receive_targets=NULL;free(link->returns);link->returns=NULL;
   atomic_store_explicit(&mesh_links(link->M)[link->index].port.phase,MESH_STOPPED,memory_order_release);
 }
 
@@ -340,6 +380,8 @@ static void *link_run(void *argument){
       }
       if(error)link_error(link,error,1);
       else {
+        /* design/prepared-machine.md#M25 */
+        while(!atomic_load_explicit(&link->receive_frame,memory_order_acquire)){}
         atomic_store_explicit(&port->phase,MESH_PAIRED,memory_order_relaxed);
         atomic_store_explicit(&port->prepared,link->client,memory_order_release);
       }
@@ -471,11 +513,8 @@ int main(int argc,char **argv){
     if(link->provider.listener>=0)close(link->provider.listener);
     close(link->events);
     free(link->sends);free(link->bad);free(link->cursors);
-    for(uint32_t slot=0;link->receive && slot<link->instance_count;slot++){
-      free(link->receive[slot].requests);free(link->receive[slot].spans);free(link->receive[slot].rows);
-    }
     for(uint32_t q=0;link->returns && q<qps;q++)free(link->returns[q].inputs);
-    free(link->receive);free(link->returns);
+    free(link->receive);free(link->receive_spans);free(link->receive_targets);free(link->returns);
     free(link->configuration);
   }
   for(uint32_t i=0;i<device_count;i++)pthread_mutex_destroy(&devices[i].setup);

@@ -23,6 +23,16 @@ struct mesh_call {
   struct prepared_metal *metal;
 };
 _Static_assert(sizeof(struct mesh_call)==128 && _Alignof(struct mesh_call)==64,"mesh_call record");
+/* design/prepared-machine.md#M12 */
+struct prepared_arguments { uint64_t address; uint64_t offset,availability,sequence; };
+_Static_assert(sizeof(struct prepared_arguments)==32 && offsetof(struct prepared_arguments,sequence)==24,"M12");
+/* design/prepared-machine.md#M13 */
+struct prepared_publication { uint64_t destination; uint64_t value,scale,reserved; };
+_Static_assert(sizeof(struct prepared_publication)==32 && offsetof(struct prepared_publication,scale)==16,"M13");
+/* design/prepared-machine.md#M01 */
+/* design/prepared-machine.md#M02 */
+/* design/prepared-machine.md#M03 */
+_Static_assert(sizeof(uint16_t)==2,"M01 M02 M03 scalar storage");
 /* design/prepared-machine.md#M21 */
 struct prepared_metal {
   void *command;
