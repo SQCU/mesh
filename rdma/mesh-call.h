@@ -20,12 +20,9 @@ struct mesh_call {
   int error;
   struct hdr *memory;
   uint32_t input_count,output_count;
-  struct prepared_metal *metal;
+  uint64_t completion_slot;
 };
 _Static_assert(sizeof(struct mesh_call)==128 && _Alignof(struct mesh_call)==64,"mesh_call record");
-/* design/prepared-machine.md#M12 */
-struct prepared_arguments { uint64_t address; uint64_t offset,availability,sequence; };
-_Static_assert(sizeof(struct prepared_arguments)==32 && offsetof(struct prepared_arguments,sequence)==24,"M12");
 /* design/prepared-machine.md#M26 */
 struct prepared_residency {
   _Alignas(32) uint64_t completed;
@@ -36,11 +33,19 @@ _Static_assert(sizeof(struct prepared_residency)==32 && offsetof(struct prepared
 /* design/prepared-machine.md#M27 */
 /* design/prepared-machine.md#M28 */
 /* design/prepared-machine.md#M33 */
-_Static_assert(4*sizeof(uint32_t)+2*sizeof(uint64_t)==32 && 6*sizeof(uint32_t)+sizeof(uint64_t)==32,"M27 M28 M33");
+/* design/prepared-machine.md#M34 */
+/* design/prepared-machine.md#M35 */
+_Static_assert(4*sizeof(uint32_t)+2*sizeof(uint64_t)==32 && 6*sizeof(uint32_t)+sizeof(uint64_t)==32,"M27 M28 M33 M34 M35");
+/* design/prepared-machine.md#M36 */
+_Static_assert(2*sizeof(uint32_t)==8,"M36");
+/* design/prepared-machine.md#M37 */
+_Static_assert(sizeof(struct mesh_stream)==128 && offsetof(struct mesh_stream,slots)==8,"M37");
 /* design/prepared-machine.md#M29 */
 _Static_assert(2*sizeof(uint32_t)+3*sizeof(uint64_t)==32,"M29");
 /* design/prepared-machine.md#M30 */
 _Static_assert(sizeof(float)==4,"M30");
+/* design/prepared-machine.md#M38 */
+_Static_assert(sizeof(uint32_t)==4 && sizeof(float)==4 && sizeof(uint8_t)==1,"M38");
 /* design/prepared-machine.md#M31 */
 /* design/prepared-machine.md#M32 */
 _Static_assert(sizeof(uint32_t)==4 && sizeof(uint64_t)==8 && sizeof(uint16_t)==2,"M31 M32");
@@ -56,32 +61,6 @@ _Static_assert(sizeof(struct prepared_publication)==32 && offsetof(struct prepar
 /* design/prepared-machine.md#M02 */
 /* design/prepared-machine.md#M03 */
 _Static_assert(sizeof(uint16_t)==2,"M01 M02 M03 scalar storage");
-/* design/prepared-machine.md#M21 */
-struct prepared_metal {
-  void *command;
-  void (*commit)(void *,void *);
-  void *selector,*queue;
-  const void *encode;
-  void *encode_argument;
-  void *completion;
-  void (*add_completion)(void *,void *,void *);
-  void *add_selector;
-  void (*rearm)(struct prepared_metal *);
-  uint64_t reserved[2];
-};
-_Static_assert(sizeof(struct prepared_metal)==96 && offsetof(struct prepared_metal,encode)==32,"M21");
-/* design/prepared-machine.md#M21 */
-/* design/algorithm-sources.md#resident-metal */
-static inline __attribute__((always_inline)) void *mesh_metal_rearm(struct prepared_metal *step,void *command){
-  step->add_completion(command,step->add_selector,step->completion);
-  void *old=step->command;
-  step->command=command;
-  typedef __attribute__((swiftcall)) void (*encode)(const void *,void * __attribute__((swift_context)));
-  ((encode)step->encode)(&step->command,step->encode_argument);
-  return old;
-}
-/* design/algorithm-sources.md#resident-metal */
-void mesh_metal_bind(struct mesh_function *,uint32_t,struct prepared_metal *);
 /* design/algorithm-sources.md#programkernel_call */
 static inline __attribute__((always_inline)) uint32_t mesh_call_index(const struct mesh_call *call){return call->index;}
 /* design/algorithm-sources.md#programkernel_call */
@@ -103,7 +82,7 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *,uint32_t worker,
   const struct mesh_section *inputs,size_t input_count,size_t dependency_count,int completion_publication,
   const struct mesh_section *outputs,size_t output_count,const void *submit,void *context,const void *rearm,void *rearm_context);
 /* design/algorithm-sources.md#resident-metal */
-struct mesh_call *mesh_function_frame(struct mesh_function *,uint32_t frame,uint32_t **sequence);
+uint64_t *mesh_function_completion(struct mesh_function *,uint32_t frame,uint64_t *value);
 void mesh_call_finish(struct mesh_call *);
 int mesh_calls_prepare(struct mesh_calls *);
 int mesh_calls_start(struct mesh_calls *);

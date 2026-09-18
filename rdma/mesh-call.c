@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
-#include <objc/runtime.h>
 
 /* design/algorithm-sources.md#programkernel_call */
 typedef __attribute__((swiftcall)) void (*mesh_invoke)(struct mesh_call *,void * __attribute__((swift_context)));
@@ -46,7 +45,7 @@ struct mesh_call_worker {
   _Atomic uintptr_t frame;
 };
 _Static_assert(sizeof(struct mesh_call_worker)==128 && _Alignof(struct mesh_call_worker)==128,"mesh_call_worker");
-_Static_assert(24*sizeof(uintptr_t)==192,"M25");
+_Static_assert(16*sizeof(uintptr_t)==128,"M25");
 struct mesh_calls {
   struct mesh_ctx *context;
   struct mesh_function *functions;
@@ -151,34 +150,11 @@ failed:
 }
 
 /* design/algorithm-sources.md#resident-metal */
-struct mesh_call *mesh_function_frame(struct mesh_function *function,uint32_t frame,uint32_t **sequence){
+/* design/prepared-machine.md#M37 */
+uint64_t *mesh_function_completion(struct mesh_function *function,uint32_t frame,uint64_t *value){
   struct mesh_call *call=&function->values[frame];
-  *sequence=&call->invocation;
-  return call;
-}
-
-/* design/prepared-machine.md#M21 */
-/* design/algorithm-sources.md#resident-metal */
-static __attribute__((swiftcall)) void mesh_metal_submit(struct mesh_call *call,void * __attribute__((swift_context)) argument){
-  (void)call;
-  struct prepared_metal *step=argument;
-  step->commit(step->command,step->selector);
-}
-
-/* design/prepared-machine.md#M19 */
-/* design/prepared-machine.md#M21 */
-/* design/algorithm-sources.md#resident-metal */
-void mesh_metal_bind(struct mesh_function *function,uint32_t slot,struct prepared_metal *native){
-  struct mesh_call_worker *worker=&function->calls->workers[function->worker];
-  struct mesh_call *call=&function->values[slot];
-  call->metal=native;
-  native->selector=sel_registerName("commit");
-  native->add_selector=sel_registerName("addCompletedHandler:");
-  native->add_completion=(void (*)(void *,void *,void *))class_getMethodImplementation(object_getClass(native->command),native->add_selector);
-  native->commit=(void (*)(void *,void *))class_getMethodImplementation(object_getClass(native->command),native->selector);
-  for(uint32_t i=0;i<worker->target_count;i++)if(worker->targets[i].call==call){
-    worker->targets[i].submit=mesh_metal_submit;worker->targets[i].argument=native;
-  }
+  *value=(UINT64_C(1)<<63)|((uint64_t)call->return_index+1);
+  return (uint64_t *)((char *)call->memory+call->completion_slot+8);
 }
 
 /* design/algorithm-sources.md#programkernel_call */
@@ -216,15 +192,13 @@ static void *mesh_call_progress(void *argument){
       uint64_t event;
       while((event=mesh_event_take(&worker->returns))!=MESH_EVENT_ABSENT){
         struct mesh_call *call=&values[(uint32_t)event];
+        if(event>>63){mesh_call_finish(call);submitted++;continue;}
         if(!call->error && --call->remaining)continue;
         struct mesh_function *function=call->function;
         if(call->error)mesh_result_conclude(&calls->instances[call->index].status,
           MESH_RESULT(MESH_RESULT_FUNCTION,call->function->identity,call->error));
         else {
-          if(call->metal){
-            struct prepared_metal *native=call->metal;
-            native->rearm(native);
-          } else if(function->rearm)function->rearm(call->index,function->rearm_argument);
+          if(function->rearm)function->rearm(call->index,function->rearm_argument);
           for(size_t i=0;i<function->output_count;i++)mesh_buffer_reset(m,call->operands[function->input_count+i].publication->row);
           call->remaining=(uint32_t)(function->output_count?function->output_count:1);
           call->pending=function->pending;
@@ -315,6 +289,7 @@ static int mesh_events_prepare(struct mesh_calls *calls){
   for(struct mesh_function *function=calls->functions;function;function=function->next)
     for(uint32_t frame=0;frame<calls->extent;frame++){
       struct mesh_call *call=&function->values[frame];call->return_slot=mesh_event_remap(m,first,mapping,call->return_slot);
+      if(call->completion_slot)call->completion_slot=mesh_event_remap(m,first,mapping,call->completion_slot);
     }
   for(uint32_t i=0;i<calls->count;i++){
     struct mesh_call_worker *worker=&calls->workers[i];
@@ -352,6 +327,7 @@ int mesh_calls_prepare(struct mesh_calls *calls){
       uint32_t queue=mesh_notice_queue(m,calls->context->client,m->links*(m->qps+1)+MESH_COMPUTE_THREADS+function->worker);
       struct mesh_call *call=&function->values[index];
       call->return_index=slot;
+      if(!function->submit)call->completion_slot=mesh_event_bind(m,queue);
       for(size_t j=0;j<function->output_count;j++){
         uint32_t row=function->operands[index*count+function->input_count+j].publication->row;
         struct mesh_buffer *buffer=&mesh_buffers(m)[row];
@@ -370,7 +346,7 @@ int mesh_calls_prepare(struct mesh_calls *calls){
       struct mesh_call_worker *worker=&calls->workers[function->worker];
       size_t *indices=offsets+function->worker*width;
       uint32_t pending=0,initial=0;int varying=0;
-      for(size_t i=0;i<=function->dependency_count;i++){
+      for(size_t i=0;function->submit && i<=function->dependency_count;i++){
         struct mesh_section section;
         if(i==function->dependency_count){
           if(varying)continue;
@@ -461,7 +437,7 @@ int mesh_calls_prepare(struct mesh_calls *calls){
 /* design/algorithm-sources.md#programkernel_call */
 int mesh_calls_start(struct mesh_calls *calls){
   uint32_t workers=0;
-  for(uint32_t i=0;i<calls->count;i++)if(calls->workers[i].target_count)workers|=UINT32_C(1)<<i;
+  for(uint32_t i=0;i<calls->count;i++)if(calls->workers[i].target_count || calls->workers[i].returns.count)workers|=UINT32_C(1)<<i;
   atomic_store_explicit(&calls->running,1,memory_order_release);
   atomic_fetch_add_explicit(&calls->references,(uint32_t)__builtin_popcount(workers),memory_order_relaxed);
   while(workers){
