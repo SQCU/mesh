@@ -11,58 +11,90 @@
 | Read token from the directly bound canonical input, rank 0 byte offset 12 and other ranks byte offset 0. | M01/M02 | `metal-microbench/kernels.swift:111`, binding at `metal-microbench/mesh_layer.swift:33` |
 | Store embedding components into the fixed canonical hidden operand. | M03 | `metal-microbench/kernels.swift:113` |
 | After the numerical stores and fence, lane 0 stores completed generation at +0; advance generation in registers. | M26 | `metal-microbench/kernels.swift:116` |
-| First remaining numerical consumer loads invocation from its native sequence argument. | M20 | `metal-microbench/kernels.swift:87` |
-| First remaining numerical consumer polls completed generation through its native state argument. | M26 | `metal-microbench/kernels.swift:87` |
+| Final model norm consumer loads invocation from its native sequence argument. | M20 | `metal-microbench/kernels.swift:87` |
+| Final model norm consumer polls completed generation through its native state argument. | M33 | `metal-microbench/kernels.swift:87` |
 
-| Resident FFN and layer-finish global control accesses; MSL source, not emitted GPU instructions | D0 row | Source |
+| Resident FFN global control accesses; MSL source, not emitted GPU instructions | D0 row | Source |
 | --- | --- | --- |
-| Layer-finish producer loads its bound sequence. | M20 | `metal-microbench/kernels.swift:85` |
-| Layer-finish producer stores the next attention input generation after coherent operand stores. | M28 | `metal-microbench/kernels.swift:85` |
-| Dispatch entry loads final layer's completed generation at its compiled offset. | M27 | `metal-microbench/mesh_layer.swift:162` |
-| Stage entry loads gate-done at +4. | M27 | `metal-microbench/kernels.swift:1639` |
-| Operand poll loads the lease stop at M26 +8. | M26 | `metal-microbench/kernels.swift:1645` |
-| Operand poll loads input generation at +16. | M27 | `metal-microbench/kernels.swift:1645` |
-| Operand poll loads completed generation at +24. | M27 | `metal-microbench/kernels.swift:1645` |
-| Numerical normalization first reads the bound input payload. | M03 | `metal-microbench/kernels.swift:1652` |
-| Gate loop loads gate-done at +4. | M27 | `metal-microbench/kernels.swift:1661` |
-| Gate loop loads lease stop at M26 +8. | M26 | `metal-microbench/kernels.swift:1662` |
-| Gate claim loads gate-next at +0. | M27 | `metal-microbench/kernels.swift:1664` |
-| Gate claim compare/exchange reads and writes gate-next at +0. | M27 | `metal-microbench/kernels.swift:1665` |
-| Completed numerical gate tile increments gate-done at +4. | M27 | `metal-microbench/kernels.swift:1688` |
-| Down loop loads down-done at +12. | M27 | `metal-microbench/kernels.swift:1696` |
-| Down loop loads lease stop at M26 +8. | M26 | `metal-microbench/kernels.swift:1697` |
-| Down claim loads down-next at +8. | M27 | `metal-microbench/kernels.swift:1699` |
-| Down claim compare/exchange reads and writes down-next at +8. | M27 | `metal-microbench/kernels.swift:1700` |
-| Completed numerical down tile increments down-done at +12 before direct publication. | M27 | `metal-microbench/kernels.swift:1718` |
-| Final tile stores completed generation at +24 after publication. | M27 | `metal-microbench/kernels.swift:1720` |
+| Dispatch entry loads final layer-finish completed generation at its compiled offset. | M33 | `metal-microbench/mesh_layer.swift:244` |
+| Stage entry loads gate-done at +4. | M27 | `metal-microbench/kernels.swift:1635` |
+| Operand poll loads the lease stop at M26 +8. | M26 | `metal-microbench/kernels.swift:1641` |
+| Operand poll loads input generation at +16. | M27 | `metal-microbench/kernels.swift:1641` |
+| Operand poll loads completed generation at +24. | M27 | `metal-microbench/kernels.swift:1641` |
+| Numerical normalization first reads the bound input payload. | M03 | `metal-microbench/kernels.swift:1648` |
+| Gate loop loads gate-done at +4. | M27 | `metal-microbench/kernels.swift:1657` |
+| Gate loop loads lease stop at M26 +8. | M26 | `metal-microbench/kernels.swift:1658` |
+| Gate claim loads gate-next at +0. | M27 | `metal-microbench/kernels.swift:1660` |
+| Gate claim compare/exchange reads and writes gate-next at +0. | M27 | `metal-microbench/kernels.swift:1661` |
+| Completed numerical gate tile increments gate-done at +4. | M27 | `metal-microbench/kernels.swift:1684` |
+| Down loop loads down-done at +12. | M27 | `metal-microbench/kernels.swift:1692` |
+| Down loop loads lease stop at M26 +8. | M26 | `metal-microbench/kernels.swift:1693` |
+| Down claim loads down-next at +8. | M27 | `metal-microbench/kernels.swift:1695` |
+| Down claim compare/exchange reads and writes down-next at +8. | M27 | `metal-microbench/kernels.swift:1696` |
+| Completed numerical down tile increments down-done at +12 before direct publication. | M27 | `metal-microbench/kernels.swift:1714` |
+| Final tile stores completed generation at +24 after publication. | M27 | `metal-microbench/kernels.swift:1716` |
 
 | Resident attention global control accesses; MSL source, not emitted GPU instructions | D0 row | Source |
 | --- | --- | --- |
-| Input poll loads lease stop. | M26 | `metal-microbench/kernels.swift:2867` |
-| Input poll loads completed generation. | M28 | `metal-microbench/kernels.swift:2867` |
-| Input poll loads embedding completion or the fixed layer input generation. | M26 or M28 | `metal-microbench/kernels.swift:2867` |
-| Normalization reads its first bound hidden component. | M03 | `metal-microbench/kernels.swift:2875` |
-| Projection claim loads next column tile. | M28 | `metal-microbench/kernels.swift:2881` |
-| Projection loop loads lease stop. | M26 | `metal-microbench/kernels.swift:2882` |
-| Projection claim compare/exchange reads and advances next tile. | M28 | `metal-microbench/kernels.swift:2883` |
-| Completed column tile increments its head's count. | M29 | `metal-microbench/kernels.swift:2906` |
-| Last tile stores head readiness after norm/RoPE/KV work. | M29 | `metal-microbench/kernels.swift:2931` |
-| Split claim loads next split ordinal. | M28 | `metal-microbench/kernels.swift:2940` |
-| Split loop loads lease stop. | M26 | `metal-microbench/kernels.swift:2941` |
-| Split claim loads its query-group readiness. | M29 | `metal-microbench/kernels.swift:2944` |
-| Split claim loads the bound KV producer head readiness. | M29 | `metal-microbench/kernels.swift:2945` |
-| Split claim compare/exchange reads and advances next ordinal. | M28 | `metal-microbench/kernels.swift:2946` |
-| Completed split increments its query-group count. | M29 | `metal-microbench/kernels.swift:2963` |
-| Last split stores reduced generation after the existing numerical reduction. | M29 | `metal-microbench/kernels.swift:2971` |
-| Output-input poll loads lease stop. | M26 | `metal-microbench/kernels.swift:2980` |
-| Output-input poll reads each query group's reduced generation once before the output tile loop. | M29 | `metal-microbench/kernels.swift:2982` |
-| Output tile loop loads completed tile count. | M28 | `metal-microbench/kernels.swift:2993` |
-| Output tile loop loads lease stop. | M26 | `metal-microbench/kernels.swift:2994` |
-| Output claim loads next column tile. | M28 | `metal-microbench/kernels.swift:2996` |
-| Output claim compare/exchange reads and advances next tile. | M28 | `metal-microbench/kernels.swift:2997` |
-| Completed output tile increments output-done. | M28 | `metal-microbench/kernels.swift:3010` |
-| Last tile stores FFN input generation after post-attention norm/residual output. | M27 | `metal-microbench/kernels.swift:3018` |
-| Last tile stores attention completion generation. | M28 | `metal-microbench/kernels.swift:3018` |
+| Input poll loads lease stop. | M26 | `metal-microbench/kernels.swift:3019` |
+| Input poll loads completed generation. | M28 | `metal-microbench/kernels.swift:3019` |
+| Input poll loads embedding completion or the fixed layer input generation. | M26 or M28 | `metal-microbench/kernels.swift:3019` |
+| Normalization reads its first bound hidden component. | M03 | `metal-microbench/kernels.swift:3027` |
+| Projection claim loads next column tile. | M28 | `metal-microbench/kernels.swift:3033` |
+| Projection loop loads lease stop. | M26 | `metal-microbench/kernels.swift:3034` |
+| Projection claim compare/exchange reads and advances next tile. | M28 | `metal-microbench/kernels.swift:3035` |
+| Completed column tile increments its head's count. | M29 | `metal-microbench/kernels.swift:3058` |
+| Last tile stores head readiness after norm/RoPE/KV work. | M29 | `metal-microbench/kernels.swift:3083` |
+| Split claim loads next split ordinal. | M28 | `metal-microbench/kernels.swift:3092` |
+| Split loop loads lease stop. | M26 | `metal-microbench/kernels.swift:3093` |
+| Split claim loads its query-group readiness. | M29 | `metal-microbench/kernels.swift:3096` |
+| Split claim loads the bound KV producer head readiness. | M29 | `metal-microbench/kernels.swift:3097` |
+| Split claim compare/exchange reads and advances next ordinal. | M28 | `metal-microbench/kernels.swift:3098` |
+| Completed split increments its query-group count. | M29 | `metal-microbench/kernels.swift:3115` |
+| Last split stores reduced generation after the existing numerical reduction. | M29 | `metal-microbench/kernels.swift:3123` |
+| Output-input poll loads lease stop. | M26 | `metal-microbench/kernels.swift:3132` |
+| Output-input poll reads each query group's reduced generation once before the output tile loop. | M29 | `metal-microbench/kernels.swift:3134` |
+| Output tile loop loads completed tile count. | M28 | `metal-microbench/kernels.swift:3145` |
+| Output tile loop loads lease stop. | M26 | `metal-microbench/kernels.swift:3146` |
+| Output claim loads next column tile. | M28 | `metal-microbench/kernels.swift:3148` |
+| Output claim compare/exchange reads and advances next tile. | M28 | `metal-microbench/kernels.swift:3149` |
+| Completed output tile increments output-done. | M28 | `metal-microbench/kernels.swift:3162` |
+| Last tile stores FFN input generation after post-attention norm/residual output. | M27 | `metal-microbench/kernels.swift:3170` |
+| Last tile stores attention completion generation. | M28 | `metal-microbench/kernels.swift:3170` |
+
+| Resident partial consumption and layer finishing; MSL source, not emitted GPU instructions | D0 row | Source |
+| --- | --- | --- |
+| Entry loads lease stop. | M26 | `metal-microbench/kernels.swift:1746` |
+| Entry loads completed generation. | M33 | `metal-microbench/kernels.swift:1746` |
+| Local partial poll loads lease stop. | M26 | `metal-microbench/mesh_layer.swift:181` |
+| Local partial poll loads its literal availability word. | M10 | `metal-microbench/mesh_layer.swift:181` |
+| Read first local contribution directly into numerical threadgroup scratch. | M01 | `metal-microbench/mesh_layer.swift:188` |
+| Remote partial poll loads lease stop. | M26 | `metal-microbench/mesh_layer.swift:195` |
+| Read literal peer stamp; peers are unrolled at setup. | M10 | `metal-microbench/mesh_layer.swift:170` |
+| Read first peer contribution through the literal payload pointer in matrixAdd. | M02 | `metal-microbench/mesh_layer.swift:173` |
+| Without PLE, output claim loads lease stop. | M26 | `metal-microbench/kernels.swift:1762` |
+| Without PLE, output claim compare/exchange reads and advances down-next. | M33 | `metal-microbench/kernels.swift:1762` |
+| Without PLE, claimed threadgroup stores the finished hidden components. | M03 | `metal-microbench/kernels.swift:1769` |
+| Without PLE, claimed threadgroup stores next-layer input generation, then completion. | M28/M33 | `metal-microbench/kernels.swift:1772` |
+| PLE input loop loads completed tiles/final-normalization count. | M33 | `metal-microbench/kernels.swift:1782` |
+| PLE input loop loads lease stop. | M26 | `metal-microbench/kernels.swift:1783` |
+| PLE input claim loads next tile. | M33 | `metal-microbench/kernels.swift:1785` |
+| PLE input claim compare/exchange reads and advances next tile. | M33 | `metal-microbench/kernels.swift:1786` |
+| Completed input tile increments input-done. | M33 | `metal-microbench/kernels.swift:1801` |
+| Read canonical token for the supplied PLE embedding calculation. | M01/M02 | `metal-microbench/kernels.swift:1805` |
+| Last input tile increments input-done again after normalized/combined input stores. | M33 | `metal-microbench/kernels.swift:1814` |
+| Gate loop loads completed tiles. | M33 | `metal-microbench/kernels.swift:1823` |
+| Gate loop loads lease stop. | M26 | `metal-microbench/kernels.swift:1824` |
+| Gate claim loads next tile. | M33 | `metal-microbench/kernels.swift:1826` |
+| Gate claim compare/exchange reads and advances next tile. | M33 | `metal-microbench/kernels.swift:1827` |
+| Completed gate tile increments gate-done. | M33 | `metal-microbench/kernels.swift:1842` |
+| Down loop loads completed tiles. | M33 | `metal-microbench/kernels.swift:1849` |
+| Down loop loads lease stop. | M26 | `metal-microbench/kernels.swift:1850` |
+| Down claim loads next tile. | M33 | `metal-microbench/kernels.swift:1852` |
+| Down claim compare/exchange reads and advances next tile. | M33 | `metal-microbench/kernels.swift:1853` |
+| Completed down tile increments down-done before final norm/residual/scale. | M33 | `metal-microbench/kernels.swift:1865` |
+| Last down tile stores finished hidden components. | M03 | `metal-microbench/kernels.swift:1871` |
+| Last down tile stores next-layer input generation, then completed generation. | M28/M33 | `metal-microbench/kernels.swift:1875` |
 
 | T1 instruction: cursor → native SEND acceptance / advance | D0 row | Source |
 | --- | --- | --- |
@@ -101,22 +133,16 @@
 
 | GPU access site; MSL source, not an emitted GPU instruction count | D0 row | Source |
 | --- | --- | --- |
-| FFN load remote input address before polling local contribution. | M12 | `metal-microbench/matrix_shaders.swift:236` |
-| FFN load remote stamp address before polling local contribution. | M12 | `metal-microbench/matrix_shaders.swift:236` |
-| FFN consumer loads invocation sequence. | M20 | `metal-microbench/matrix_shaders.swift:238` |
-| FFN consumer polls directly bound local availability. | M10 | `metal-microbench/matrix_shaders.swift:240` |
-| FFN final tile stores publication values to destinations compiled at setup; no publication record is loaded. | M04, M10 or M18 | `metal-microbench/mesh_layer.swift:61`, `metal-microbench/kernels.swift:1720` |
-| FFN poll generation at the preloaded stamp address. | M10 | `metal-microbench/matrix_shaders.swift:249` |
-| FFN first payload read by supplied matrixAdd, address selected from resident bindings by SIMD shuffle. | M02 | `metal-microbench/matrix_shaders.swift:257` |
+| FFN final tile stores publication values to destinations compiled at setup; no publication record is loaded. | M04, M10 or M18 | `metal-microbench/mesh_layer.swift:61`, `metal-microbench/kernels.swift:1716` |
 | Vocabulary signal loads TX record; count is a function constant and generation is not loaded for TX. | M13 | `swift/Mesh.swift:768` |
 | Vocabulary signal stores TX value to its prepared cell. | M04 | `swift/Mesh.swift:755` |
 | Vocabulary signal loads invocation after TX publication. | M20 | `swift/Mesh.swift:769` |
 | Vocabulary signal loads local-availability/CPU record. | M13 | `swift/Mesh.swift:770` |
 | Vocabulary signal stores generation/value at the prepared destination. | M10 or M18 | `swift/Mesh.swift:755` |
-| Sampler loads its tile's fixed 32-byte record before polling. | M12 | `metal-microbench/kernels.swift:4182` |
-| Sampler loads sequence through the start-bound argument before polling. | M20 | `metal-microbench/kernels.swift:4186` |
-| Sampler polls the prebound availability word. | M10 | `metal-microbench/kernels.swift:4187` |
-| Sampler reads its first tile element through the returned coherent data pointer. | M01 or M02 | `metal-microbench/kernels.swift:4172` |
+| Sampler loads its tile's fixed 32-byte record before polling. | M12 | `metal-microbench/kernels.swift:4334` |
+| Sampler loads sequence through the start-bound argument before polling. | M20 | `metal-microbench/kernels.swift:4338` |
+| Sampler polls the prebound availability word. | M10 | `metal-microbench/kernels.swift:4339` |
+| Sampler reads its first tile element through the returned coherent data pointer. | M01 or M02 | `metal-microbench/kernels.swift:4324` |
 
 | T3 instruction: numerical notification → native Metal commit | D0 row | Source |
 | --- | --- | --- |
@@ -142,12 +168,12 @@
 | `stp x20,x19,[sp,#32]`: rearm save at FP-144. | M25 | `swift/Mesh.swift:799` |
 | `stp x29,x30,[sp,#48]`: rearm save at FP-128. | M25 | `swift/Mesh.swift:799` |
 | `ldr x19,[x0,#24]`: queue; native retain and command-buffer creation follow. | M21 | `swift/Mesh.swift:801` |
-| `ldp x20,x21,[x24,#56]`: add-completion entry and selector. | M21 | `rdma/mesh-call.h:75` |
-| `ldr x22,[x24,#48]`: start-created completion block; invoke native attachment. | M21 | `rdma/mesh-call.h:75` |
-| `ldr x21,[x24]`: previous command. | M21 | `rdma/mesh-call.h:76` |
-| `str x23,[x24]`: new command. | M21 | `rdma/mesh-call.h:77` |
-| `ldp x8,x20,[x24,#32]`: encoder entry/context. | M21 | `rdma/mesh-call.h:79` |
-| `blr x8` with `x0=x24`: supplied encoder receives the address of M21.command directly. | M21 | `rdma/mesh-call.h:79` |
+| `ldp x20,x21,[x24,#56]`: add-completion entry and selector. | M21 | `rdma/mesh-call.h:76` |
+| `ldr x22,[x24,#48]`: start-created completion block; invoke native attachment. | M21 | `rdma/mesh-call.h:76` |
+| `ldr x21,[x24]`: previous command. | M21 | `rdma/mesh-call.h:77` |
+| `str x23,[x24]`: new command. | M21 | `rdma/mesh-call.h:78` |
+| `ldp x8,x20,[x24,#32]`: encoder entry/context. | M21 | `rdma/mesh-call.h:80` |
+| `blr x8` with `x0=x24`: supplied encoder receives the address of M21.command directly. | M21 | `rdma/mesh-call.h:80` |
 | `ldp x29,x30,[sp,#48]`: rearm restore. | M25 | `swift/Mesh.swift:804` |
 | `ldp x20,x19,[sp,#32]`: rearm restore. | M25 | `swift/Mesh.swift:804` |
 | `ldp x22,x21,[sp,#16]`: rearm restore. | M25 | `swift/Mesh.swift:804` |
@@ -214,6 +240,11 @@
 | GPU CPU-event `*destination.position` | No reservation or position update |
 | GPU CPU-event `destination.mask` | Fixed destination in M13 |
 
+| FFN remote payload address in `mesh_add` | Compiled literal operand in the resident consumer |
+| FFN remote stamp address in `mesh_add` | Compiled literal M10 address |
+| FFN consumer invocation sequence | Resident generation register |
+| Layer-finish publisher invocation sequence | Resident generation register |
+
 | Deleted structures / stores | Replacement |
 | --- | --- |
 | Per-slot `mesh_receive` arrays and retained `rows`/`count` | Flat canonical-row M08/M09 arrays; setup-only posting order is freed before start returns |
@@ -227,13 +258,17 @@
 | Per-step post-attention FFN-input publisher | Direct M27.input store by the resident attention producer |
 | Per-step mesh decode FFN program construction and dispatches | Resident `mesh_ffn_resident` across all 35 layers; existing dot/quantization routines reused |
 | FFN collective cohere pass and publication traversal | Coherent numerical output stores followed by direct compiled publication stores |
+| Per-step `meshDecodeLayerProgram`, `mesh_add`, and layer-finish output publisher | Resident partial sum, post-FFN norm/residual, PLE and scale; direct M28 input publication |
+| Decode `PerLayerInputs.begin` and its private input/embedding buffers | Resident PLE projection/embedding into canonical M03 input storage |
+| Unused decode normalized-attention section, global FFN-sum section and FFN M12 argument table | Removed; numerical sum uses existing threadgroup scratch |
+| Embedding/QKV per-step FC80 handoffs | Removed; only final model RMS remains a per-step consumer |
 | Uninstantiated `MeshCommands` class | Deleted |
 
 | Count / construction boundary | Value |
 | --- | --- |
-| Loads listed | 100 sites: 40 emitted AArch64 load instructions and 60 GPU source-level accesses. GPU: resident embedding/handoff 9, resident FFN control 16, layer-finish handoff 1, resident attention control/handoff 21, collective/vocabulary/sampler 13. Atomic read-modify-write sites count once. Numerical weight/input loops (including the existing M31/M32 position/page/mask gathers) and threadgroup arithmetic remain supplied numerical work, not ABI load instructions. AArch64: TX 6, RX handoff 3, RX continuation 6, link lifecycle 2, numerical notification-to-commit 8, rearm selection 2, rearm descriptor 5, rearm ABI restores 4, numerical lifecycle/backedge 4. No GPU ISA load or spill count is inferred from MSL. |
-| Deleted load sites | Prior 38 plus the two FFN publication-record sites = 40. M08 post/QP and retirement-row loads replace earlier equivalents and are not counted as deletions. M08 range bounds replace header send/use counts and are not counted as deletions. Stores and setup-only structures are separate above. |
-| Native entry depth T1/T2 | `2/1`: TX cursor → cell → dispatch; RX completion integer → M10 stamp. Record bases remain in registers; no RX stack reload precedes M10 publication. Consumer payload/stamp addresses are preloaded before polling; native provider internals are outside this ABI depth. |
+| Loads listed | 120 sites: 40 emitted AArch64 load instructions and 80 GPU source-level accesses. GPU: embedding/final-norm handoff 9, resident FFN control/dispatch entry 16, resident attention 21, resident partial consumption/finish 27, vocabulary/sampler 7. The finish count includes both compiled PLE choices; only one executes per layer. Atomic read-modify-write sites count once. Numerical weight/input loops (including the existing M31/M32 position/page/mask gathers) and threadgroup arithmetic remain supplied numerical work, not ABI load instructions. AArch64: TX 6, RX handoff 3, RX continuation 6, link lifecycle 2, numerical notification-to-commit 8, rearm selection 2, rearm descriptor 5, rearm ABI restores 4, numerical lifecycle/backedge 4. No GPU ISA load or spill count is inferred from MSL. |
+| Deleted load sites | Prior 40 plus FFN payload/stamp descriptor loads, FFN sequence and layer-finish publisher sequence = 44. Moved partial stamp/payload reads are not counted as deleted. M08 post/QP and retirement-row loads replace earlier equivalents and are not counted as deletions. M08 range bounds replace header send/use counts and are not counted as deletions. Stores and setup-only structures are separate above. |
+| Native entry depth T1/T2 | `2/1`: TX cursor → cell → dispatch; RX completion integer → M10 stamp. Record bases remain in registers; no RX stack reload precedes M10 publication. FFN payload/stamp addresses are compiled constants; vocabulary bindings are preloaded before polling; native provider internals are outside this ABI depth. |
 | ABI frame sizes | AArch64 `-O2` C and `-O -whole-module-optimization` Swift: numerical worker 128 bytes with FP=SP+112; native rearm 64 bytes; RX worker 128 bytes with RFP=SP+112. M25 covers the numerical FP-176..FP+15 and RX RFP-112..RFP+15. RX reload at RFP-104 occurs only for a declared notification range, after availability and repost. Cold frame-release call remains out of line; no spilled base is reloaded on the completion-to-stamp path. |
 | Retained work | Native SEND/RECV/Metal internals, supplied numerical code and encoder bodies, cold numerical and transport refcount/reset work, and the transport retirement scan. Optional CPU/forward publications execute their flat prepared stores after M10; they do not gate the resident consumer. |
-| Construction / compilation | 31/31 listed objects constructed. Swift engine, native transport and generated 35-layer attention + FFN resident body compile; the combined body uses 12256 threadgroup bytes at H=1536. RoPE, KV write, split attention/reduction and both specialized layer-finish handoff entries compile. Embedding/scaling, attention and FFNs are resident; finish/PLE, vocabulary and sampler remain per-step. T3's 26 derivation instructions and four Mesh.swift command-buffer allocation sites remain until the final per-step encoder is removed. The whole-step requirement is unmet; GPU execution and throughput are unmeasured. |
+| Construction / compilation | 32/32 listed objects constructed. Native transport/Swift and the generated 35-layer attention + FFN + finish resident body compile; H=1536 uses 12256 threadgroup bytes. PLE/no-PLE and zero/one/two peer bodies compile. Embedding/scaling and all 35 layer bodies are resident; final model norm, vocabulary and sampler remain per-step. T3 retains 26 derivation instructions and four Mesh.swift command-buffer allocation sites until the final per-step encoder is removed. The whole-step requirement is unmet; GPU execution and throughput are unmeasured. |

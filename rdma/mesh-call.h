@@ -35,7 +35,8 @@ struct prepared_residency {
 _Static_assert(sizeof(struct prepared_residency)==32 && offsetof(struct prepared_residency,stop)==8,"M26");
 /* design/prepared-machine.md#M27 */
 /* design/prepared-machine.md#M28 */
-_Static_assert(4*sizeof(uint32_t)+2*sizeof(uint64_t)==32,"M27 M28");
+/* design/prepared-machine.md#M33 */
+_Static_assert(4*sizeof(uint32_t)+2*sizeof(uint64_t)==32 && 6*sizeof(uint32_t)+sizeof(uint64_t)==32,"M27 M28 M33");
 /* design/prepared-machine.md#M29 */
 _Static_assert(2*sizeof(uint32_t)+3*sizeof(uint64_t)==32,"M29");
 /* design/prepared-machine.md#M30 */
