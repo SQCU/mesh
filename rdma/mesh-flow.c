@@ -3,6 +3,8 @@
 #include <pthread.h>
 #include <sys/event.h>
 
+_Static_assert(sizeof(pthread_t)==8,"M17");
+
 /* design/prepared-machine.md#M05 */
 struct prepared_send {
   _Alignas(32) int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **);
@@ -18,11 +20,10 @@ _Static_assert(sizeof(struct ibv_wc)==48,"M11");
 _Static_assert(sizeof(struct ibv_send_wr *)==8,"M15");
 /* design/prepared-machine.md#M16 */
 struct prepared_cursor {
-  struct mesh_link *link;
-  _Atomic uint64_t *first,*repeat,*end;
-  struct prepared_send *records;
+  _Alignas(32) _Atomic uint64_t *cell;
+  _Atomic uint64_t *first,*end;
 };
-_Static_assert(sizeof(struct prepared_cursor)==40,"M16");
+_Static_assert(sizeof(struct prepared_cursor)==32 && _Alignof(struct prepared_cursor)==32,"M16");
 struct mesh_receive {
   struct ibv_recv_wr *requests;
   struct ibv_sge *spans;
@@ -30,8 +31,8 @@ struct mesh_receive {
   size_t count;
 };
 struct mesh_link {
-  pthread_t workers[3],*senders;
-  uint32_t worker_count,sender_count,index;
+  pthread_t workers[4];
+  uint32_t worker_count,cursor_count,index;
   pthread_t controller;
   int events;
   char *configuration;
@@ -72,14 +73,13 @@ static int link_prepare(struct mesh_link *link){
   struct hdr *m=link->M;
   struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,link->client,link->index));
   size_t count=(size_t)tx->count*tx->slots+tx->once;
-  free(link->sends);free(link->bad);free(link->cursors);free(link->senders);
+  free(link->sends);free(link->bad);free(link->cursors);
   link->sends=aligned_alloc(32,((count?count:1)*176+31)&~(size_t)31);
   link->requests=(void *)(link->sends+count);
   link->spans=(void *)(link->requests+count);
   link->bad=calloc(link->instance_count,sizeof *link->bad);
-  link->cursors=calloc(link->instance_count,sizeof *link->cursors);
-  link->senders=calloc(link->instance_count,sizeof *link->senders);
-  if(!link->sends || !link->bad || !link->cursors || !link->senders)return ENOMEM;
+  link->cursors=aligned_alloc(32,link->instance_count*sizeof *link->cursors);
+  if(!link->sends || !link->bad || !link->cursors)return ENOMEM;
   link->send_count=count;
   link->provider.completion_entries[MESH_SEND]=(uint32_t)count;
   uint32_t incoming=0;
@@ -90,8 +90,12 @@ static int link_prepare(struct mesh_link *link){
       incoming+=in[i].count*(uint32_t)((in[i].bytes+(uint64_t)m->block*m->pgsz-1)/((uint64_t)m->block*m->pgsz));
   }
   link->provider.completion_entries[MESH_RECEIVE]=incoming;
-  for(uint32_t slot=0;slot<link->instance_count;slot++)
-    link->cursors[slot]=(struct prepared_cursor){link,tx->cells+(slot?tx->once+(size_t)slot*tx->count:0),tx->cells+tx->once+(size_t)slot*tx->count,tx->cells+tx->once+(size_t)(slot+1)*tx->count,link->sends};
+  link->cursor_count=tx->count?link->instance_count:(tx->once?1:0);
+  for(uint32_t slot=0;slot<link->cursor_count;slot++){
+    _Atomic uint64_t *cell=tx->cells+(slot?tx->once+(size_t)slot*tx->count:0);
+    _Atomic uint64_t *first=tx->cells+tx->once+(size_t)slot*tx->count,*end=first+tx->count;
+    link->cursors[slot]=(struct prepared_cursor){cell,first==end?cell:first,end};
+  }
   return 0;
 }
 
@@ -189,13 +193,15 @@ static int link_configure(void *state,int socket,uint64_t client){
 /* design/prepared-machine.md#M16 */
 /* design/algorithm-sources.md#independent-native-queues */
 static void *link_send_progress(void *argument){
-  const struct prepared_cursor *prepared=argument;
-  struct mesh_link *link=prepared->link;
-  _Atomic uint64_t *first=prepared->repeat,*end=prepared->end,*cell=prepared->first;
-  if(first==end)first=cell;
-  const struct prepared_send *records=prepared->records;
+  struct mesh_link *link=argument;
+  struct prepared_cursor *cursors=link->cursors;
+  uint32_t count=link->cursor_count,slot=0;
+  const struct prepared_send *records=link->sends;
   pthread_setname_np("mesh.rdma.send");
   for(;;){
+    struct prepared_cursor *cursor=cursors+slot;
+    if(++slot==count)slot=0;
+    _Atomic uint64_t *cell=cursor->cell;
     uint64_t event=atomic_load_explicit(cell,memory_order_acquire);
     if(!event){
       if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
@@ -208,7 +214,7 @@ static void *link_send_progress(void *argument){
       link_error(link,error<0?-error:error,1);return NULL;
     }
     atomic_store_explicit(cell,0,memory_order_release);
-    if(++cell==end)cell=first;
+    cursor->cell=cell+1==cursor->end?cursor->first:cell+1;
   }
   return NULL;
 }
@@ -291,7 +297,6 @@ static void *link_retire_progress(void *argument){
 static void link_close(struct mesh_link *link,int *control){
   atomic_store_explicit(&link->progressing,0,memory_order_release);
   if(*control>=0)shutdown(*control,SHUT_RDWR);
-  while(link->sender_count)pthread_join(link->senders[--link->sender_count],NULL);
   while(link->worker_count)pthread_join(link->workers[--link->worker_count],NULL);
   if(*control>=0){close(*control);*control=-1;}
   while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);
@@ -326,16 +331,12 @@ static void *link_run(void *argument){
         __atomic_store_n(&mesh_links(m)[link->index].bandwidth,link->provider.bandwidth,__ATOMIC_RELAXED);
 
       }
-      void *(*progress[3])(void *)={link_retire_progress,link_send_completions,link_receive_progress};
-      for(uint32_t d=0;d<3 && !error;d++){
+      /* design/prepared-machine.md#M17 */
+      void *(*progress[4])(void *)={link_retire_progress,link_send_completions,link_receive_progress,link_send_progress};
+      for(uint32_t d=0;d<3+(link->cursor_count!=0) && !error;d++){
         error=pthread_create(&link->workers[d],NULL,progress[d],link);
         if(error)break;
         link->worker_count++;
-      }
-      for(uint32_t slot=0;slot<link->instance_count && !error;slot++){
-        if(link->cursors[slot].first==link->cursors[slot].end)continue;
-        error=pthread_create(link->senders+link->sender_count,NULL,link_send_progress,link->cursors+slot);
-        if(!error)link->sender_count++;
       }
       if(error)link_error(link,error,1);
       else {
@@ -469,7 +470,7 @@ int main(int argc,char **argv){
     atomic_store(&mesh_links(m)[i].port.phase,MESH_STOPPED);
     if(link->provider.listener>=0)close(link->provider.listener);
     close(link->events);
-    free(link->sends);free(link->bad);free(link->cursors);free(link->senders);
+    free(link->sends);free(link->bad);free(link->cursors);
     for(uint32_t slot=0;link->receive && slot<link->instance_count;slot++){
       free(link->receive[slot].requests);free(link->receive[slot].spans);free(link->receive[slot].rows);
     }

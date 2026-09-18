@@ -252,7 +252,7 @@ private final class MeshMemory {
 
 private typealias MeshBody = (OpaquePointer) -> Void
 private struct MeshLaunch {
-    let function: MeshBody
+    let function: MeshBody?
     let rearm: ((UInt32) -> Void)?
     let resources: [MTLBuffer]
     var dependencies: Int? = nil
@@ -389,7 +389,7 @@ public final class Mesh {
             let inputRows = inputs.map { $0.section! }, outputRows = outputs.map { $0.section! }
             memory.functions.append(invocation)
             let native = withUnsafeBytes(of: invocation) {
-                $0.load(as: (UnsafeRawPointer, UnsafeMutableRawPointer?, UnsafeRawPointer?, UnsafeMutableRawPointer?).self)
+                $0.load(as: (UnsafeRawPointer?, UnsafeMutableRawPointer?, UnsafeRawPointer?, UnsafeMutableRawPointer?).self)
             }
             guard let binding = mesh_call_bind(calls, UInt32(worker), inputRows, inputRows.count,
                               invocation.dependencies ?? inputRows.count, invocation.prepare == nil ? 1 : 0, outputRows, outputRows.count,
@@ -567,10 +567,13 @@ public final class Mesh {
         deliveries.removeAll()
         routes.removeAll()
         memory.releaseSections()
-        let error = mesh_calls_start(calls)
+        // design/prepared-machine.md#M18
+        let error = mesh_calls_prepare(calls)
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
         for finalize in finalizations { try finalize() }
         finalizations.removeAll()
+        let workerError = mesh_calls_start(calls)
+        if workerError != 0 { throw POSIXError(POSIXErrorCode(rawValue: workerError)!) }
         let transportError = mesh_transfers_start(memory.context)
         if transportError != 0 { throw POSIXError(POSIXErrorCode(rawValue: transportError) ?? .EIO) }
     }
@@ -775,6 +778,37 @@ private final class MeshCommands: ManagedBuffer<Int, MTLCommandBuffer> {
     deinit { _ = withUnsafeMutablePointerToElements { $0.deinitialize(count: header) } }
 }
 
+// design/prepared-machine.md#M21
+private final class MeshResidentCommands {
+    let slots: UnsafeMutablePointer<prepared_metal>
+    var count = 0
+    // design/prepared-machine.md#M21
+    // design/algorithm-sources.md#resident-metal
+    init(_ capacity: Int) {
+        slots = UnsafeMutableRawPointer.allocate(byteCount: capacity * MemoryLayout<prepared_metal>.stride, alignment: 32)
+            .bindMemory(to: prepared_metal.self, capacity: capacity)
+    }
+    // design/algorithm-sources.md#resident-metal
+    deinit {
+        for i in 0..<count {
+            Unmanaged<AnyObject>.fromOpaque(slots[i].command!).release()
+            Unmanaged<AnyObject>.fromOpaque(slots[i].completion!).release()
+        }
+        slots.deinitialize(count: count)
+        UnsafeMutableRawPointer(slots).deallocate()
+    }
+}
+
+// design/prepared-machine.md#M21
+// design/algorithm-sources.md#resident-metal
+private func meshMetalRearm(_ record: UnsafeMutablePointer<prepared_metal>?) {
+    let slot = unsafeBitCast(record, to: UnsafeMutablePointer<prepared_metal>.self)
+    let queue = unsafeBitCast(slot.pointee.queue, to: MTLCommandQueue.self)
+    let command = queue.makeCommandBufferWithUnretainedReferences()!
+    let old = mesh_metal_rearm(slot, Unmanaged.passRetained(command as AnyObject).toOpaque())
+    Unmanaged<AnyObject>.fromOpaque(unsafeBitCast(old, to: UnsafeRawPointer.self)).release()
+}
+
 // design/prepared-machine.md#M12
 private func meshResident(_ device: MTLDevice, memory: MeshMemory, inputs: [[MeshMetalOperand]], outputs: [[MeshMetalOperand]],
     results: [mesh_section], dependencies: Int,
@@ -785,18 +819,11 @@ private func meshResident(_ device: MTLDevice, memory: MeshMemory, inputs: [[Mes
     let pipelines = try! ["mesh_coherent", "mesh_signal"].map {
         try device.makeComputePipelineState(function: library.makeFunction(name: $0)!)
     }
-    let storage = MeshCommands.create(minimumCapacity: count) { _ in 0 }
+    // design/prepared-machine.md#M21
+    let storage = MeshResidentCommands(count)
     var encoders: [(MTLCommandBuffer) -> Void] = []
     var frames: [MeshMetalFrame] = []
-    let rearm: (UInt32) -> Void = { index in
-        let command = queue.makeCommandBufferWithUnretainedReferences()!
-        command.addCompletedHandler(frames[Int(index)].completion)
-        encoders[Int(index)](command)
-        storage.withUnsafeMutablePointerToElements { $0[Int(index)] = command }
-    }
-    return MeshLaunch(function: { [storage] call in
-        storage.withUnsafeMutablePointerToElements { $0[Int(mesh_call_index(call))].commit() }
-    }, rearm: rearm, resources: [], dependencies: dependencies, prepare: { function in
+    return MeshLaunch(function: nil, rearm: nil, resources: [], dependencies: dependencies, prepare: { function in
         frames = try (0..<count).map { index in
             let frame = MeshMetalFrame(memory: memory, device: device, function: function, index: index,
                 inputs: inputs.map { $0[min(index, $0.count - 1)] }, outputs: outputs.map { $0[index] },
@@ -812,8 +839,20 @@ private func meshResident(_ device: MTLDevice, memory: MeshMemory, inputs: [[Mes
             let command = queue.makeCommandBufferWithUnretainedReferences()!
             command.addCompletedHandler(frames[index].completion)
             encoders[index](command)
-            storage.withUnsafeMutablePointerToElements { $0.advanced(by: index).initialize(to: command) }
-            storage.header += 1
+            let encode = unsafeBitCast(encoders[index], to: (UnsafeRawPointer, UnsafeMutableRawPointer?).self)
+            let complete: @convention(block) (MTLCommandBuffer) -> Void = frames[index].completion
+            do {
+                let slot = storage.slots.advanced(by: index)
+                var record = prepared_metal()
+                record.command = Unmanaged.passRetained(command as AnyObject).toOpaque()
+                record.queue = Unmanaged.passUnretained(queue as AnyObject).toOpaque()
+                record.encode = encode.0; record.encode_argument = encode.1
+                record.completion = Unmanaged.passRetained(unsafeBitCast(complete, to: AnyObject.self)).toOpaque()
+                record.rearm = meshMetalRearm
+                slot.initialize(to: record)
+                mesh_metal_bind(function, UInt32(index), slot)
+            }
+            storage.count += 1
         }
     })
 }

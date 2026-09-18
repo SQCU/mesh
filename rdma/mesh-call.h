@@ -20,8 +20,35 @@ struct mesh_call {
   int error;
   struct hdr *memory;
   uint32_t input_count,output_count;
+  struct prepared_metal *metal;
 };
-_Static_assert(sizeof(struct mesh_call)==64 && _Alignof(struct mesh_call)==64,"mesh_call record");
+_Static_assert(sizeof(struct mesh_call)==128 && _Alignof(struct mesh_call)==64,"mesh_call record");
+/* design/prepared-machine.md#M21 */
+struct prepared_metal {
+  void *command;
+  void (*commit)(void *,void *);
+  void *selector,*queue;
+  const void *encode;
+  void *encode_argument;
+  void *completion;
+  void (*add_completion)(void *,void *,void *);
+  void *add_selector;
+  void (*rearm)(struct prepared_metal *);
+  uint64_t reserved[2];
+};
+_Static_assert(sizeof(struct prepared_metal)==96 && offsetof(struct prepared_metal,encode)==32,"M21");
+/* design/prepared-machine.md#M21 */
+/* design/algorithm-sources.md#resident-metal */
+static inline __attribute__((always_inline)) void *mesh_metal_rearm(struct prepared_metal *step,void *command){
+  step->add_completion(command,step->add_selector,step->completion);
+  void *old=step->command;
+  step->command=command;
+  typedef __attribute__((swiftcall)) void (*encode)(const void *,void * __attribute__((swift_context)));
+  ((encode)step->encode)(&step->command,step->encode_argument);
+  return old;
+}
+/* design/algorithm-sources.md#resident-metal */
+void mesh_metal_bind(struct mesh_function *,uint32_t,struct prepared_metal *);
 /* design/algorithm-sources.md#programkernel_call */
 static inline __attribute__((always_inline)) uint32_t mesh_call_index(const struct mesh_call *call){return call->index;}
 /* design/algorithm-sources.md#programkernel_call */
@@ -45,6 +72,7 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *,uint32_t worker,
 /* design/algorithm-sources.md#resident-metal */
 struct mesh_call *mesh_function_frame(struct mesh_function *,uint32_t frame,uint32_t **sequence);
 void mesh_call_finish(struct mesh_call *);
+int mesh_calls_prepare(struct mesh_calls *);
 int mesh_calls_start(struct mesh_calls *);
 uint64_t mesh_calls_submit(struct mesh_calls *,uint32_t index);
 /* design/algorithm-sources.md#meshresult */
