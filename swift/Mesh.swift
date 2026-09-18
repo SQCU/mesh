@@ -203,7 +203,6 @@ private struct MeshDelivery: Hashable {
 
 private final class MeshMemory {
     let context: UnsafeMutablePointer<mesh_ctx>
-    var sections: [mesh_section] = []
     var functions: [MeshLaunch] = []
     private let buffers = NSMapTable<NSString, AnyObject>(keyOptions: .strongMemory, valueOptions: .weakMemory)
 
@@ -220,15 +219,8 @@ private final class MeshMemory {
 
     // design/algorithm-sources.md#programtensor
     deinit {
-        releaseSections()
         mesh_detach(context)
         context.deinitialize(count: 1); context.deallocate()
-    }
-
-    // design/algorithm-sources.md#programtensor
-    func releaseSections() {
-        for section in sections { mesh_section_release(context, section) }
-        sections.removeAll()
     }
 
     // design/algorithm-sources.md#programtensor
@@ -384,7 +376,7 @@ public final class Mesh {
             let error = mesh_section_create(memory.context, bytes, UInt32(shared ? 1 : inFlight), queue ?? MESH_ABSENT, &local)
             if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }
             if shared { local.stride = 0; memory.context.pointee.shared_pages += local.pages }
-            memory.sections.append(local); section = local
+            section = local
         }
         let stamp = section.map { UnsafeRawPointer(mesh_page(memory.context.pointee.M)!.advanced(by: Int($0.first + ($0.channel == MESH_ABSENT ? 0 : $0.pages / mesh_block_pages(memory.context) - 1)))).advanced(by: 24) }
         return TensorPart(rank: owner, bytes: bytes, section: section, shared: shared, identity: identity, stamp: stamp)
@@ -585,7 +577,6 @@ public final class Mesh {
         preparations.removeAll()
         deliveries.removeAll()
         routes.removeAll()
-        memory.releaseSections()
         // design/prepared-machine.md#M18
         let error = mesh_calls_prepare(calls)
         if error != 0 { throw POSIXError(POSIXErrorCode(rawValue: error)!) }

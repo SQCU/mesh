@@ -35,6 +35,5 @@ int mesh_event_reader_init(struct mesh_event_reader *,struct hdr *,uint32_t queu
 struct mesh_target *mesh_publish_bind(struct mesh_ctx *,uint32_t row,uint32_t queue,int send);
 /* design/algorithm-sources.md#programkernel_call */
 uint32_t mesh_publication_prepare(struct hdr *,uint32_t row,int local,struct prepared_publication *);
-void mesh_buffer_retain(struct hdr *,uint32_t row);
 void mesh_retired_release(struct hdr *);
 #endif

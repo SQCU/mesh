@@ -116,70 +116,68 @@
 | Final claim loads explicit shutdown word. | M40 | `metal-microbench/mesh_layer.swift:340` |
 | Final claim loads completed generation. | M35 | `metal-microbench/mesh_layer.swift:340` |
 | Final claim compare/exchange reads and advances finish. | M35 | `metal-microbench/mesh_layer.swift:340` |
-| Output visibility reads the existing scalar output word before its coherent store. | M38 | `swift/Mesh.swift:680` |
-| Store completed generation, then fixed retirement event. | M35/M37 | `metal-microbench/mesh_layer.swift:352` |
+| Output visibility reads the existing scalar output word before its coherent store. | M38 | `swift/Mesh.swift:670` |
+| Store completed generation, then fixed execution-completion event. | M35/M37 | `metal-microbench/mesh_layer.swift:352` |
 
 | T1 instruction: ready publication → native SEND post | D0 row | Source |
 | --- | --- | --- |
-| `ldapr x8,[x23]`: publication ready word, with record address in a register. | M04 | `rdma/mesh-flow.c:201` |
-| `str xzr,[x23]`: clear this accepted event before the native call. | M04 | `rdma/mesh-flow.c:202` |
-| `ldp x0,x1,[x23,#8]`: native QP and WR from that same aligned 32-byte line. | M04 | `rdma/mesh-flow.c:203` |
-| `add x2,sp,#8`; `blr x22`: stack failure output and register-held native post entry. | M06, M07, M15 | `rdma/mesh-flow.c:203` |
-| `add/cmp/csel`: advance to the next record; base/end retained in registers, no cursor load or store. Empty and accepted events use this same advance. | register | `rdma/mesh-flow.c:206` |
+| `ldapr x8,[x23]`: publication ready word, with record address in a register. | M04 | `rdma/mesh-flow.c:195` |
+| `str xzr,[x23]`: clear this accepted event before the native call. | M04 | `rdma/mesh-flow.c:196` |
+| `ldp x0,x1,[x23,#8]`: native QP and WR from that same aligned 32-byte line. | M04 | `rdma/mesh-flow.c:197` |
+| `add x2,sp,#8`; `blr x22`: stack failure output and register-held native post entry. | M06, M07, M15 | `rdma/mesh-flow.c:197` |
+| `add/cmp/csel`: advance to the next record; base/end retained in registers, no cursor load or store. Empty and accepted events use this same advance. | register | `rdma/mesh-flow.c:200` |
 
 | T2 instruction: native completion → availability publication | D0 row | Source |
 | --- | --- | --- |
-| `ldr w1,[x21,#8]`: native completion status. | M11 | `rdma/mesh-flow.c:254` |
-| `ldr w9,[x21]`: completed canonical row integer. | M11 | `rdma/mesh-flow.c:255` |
-| `ldr x8,[x8,#24]`: previous stamp at page base + 32*row +24; add register F. | M10 | `rdma/mesh-flow.c:257` |
-| `stlr x8,[x10]`: publish availability at that same stamp address. | M10 | `rdma/mesh-flow.c:258` |
+| `ldr w1,[x21,#8]`: native completion status. | M11 | `rdma/mesh-flow.c:247` |
+| `ldr w9,[x21]`: completed canonical row integer. | M11 | `rdma/mesh-flow.c:248` |
+| `ldr x8,[x8,#24]`: previous stamp at page base + 32*row +24; add register F. | M10 | `rdma/mesh-flow.c:250` |
+| `stlr x8,[x10]`: publish availability at that same stamp address. | M10 | `rdma/mesh-flow.c:251` |
 
 | RX continuation; inline publications precede native repost | D0 row | Source |
 | --- | --- | --- |
-| `mul/add`: record address from register base/stride and completion integer. | M08 | `rdma/mesh-flow.c:260` |
-| `ldr w9,[x22,#52]`: inline instruction count. | M08 | `rdma/mesh-flow.c:262` |
-| `ldp x11,x12,[x10,#-8]`: destination and multiplier in one aligned 32-byte instruction. | M13 | `rdma/mesh-flow.c:263` |
-| `cmp/csinc`; `stlr x12,[x11]`: select generation or 1 without a branch, then store. | M04 or M18 | `rdma/mesh-flow.c:264` |
-| `ldp x8,x0,[x22,#32]`: native RECV entry/QP; WR x22, bad-WR SP+8. | M08, M09, M25 | `rdma/mesh-flow.c:268` |
-| `blr x8`: native repost after all declared publications. | M08 | `rdma/mesh-flow.c:268` |
-| `ldr w1,[x22,#48]`: cold retirement row. No loop spill reloads before publication or repost. | M08 | `rdma/mesh-flow.c:270` |
+| `mul/add`: record address from register base/stride and completion integer. | M08 | `rdma/mesh-flow.c:253` |
+| `ldr w9,[x22,#56]`: inline instruction count. | M08 | `rdma/mesh-flow.c:255` |
+| `ldp x11,x12,[x10,#-8]`: destination and multiplier in one aligned 32-byte instruction. | M13 | `rdma/mesh-flow.c:256` |
+| `cmp/csinc`; `stlr x12,[x11]`: select generation or 1 without a branch, then store. | M04 or M18 | `rdma/mesh-flow.c:257` |
+| `ldp x8,x0,[x22,#32]`: native RECV entry/QP; WR x22, bad-WR SP+8. | M08, M09, M25 | `rdma/mesh-flow.c:261` |
+| `blr x8`: native repost after all declared publications. | M08 | `rdma/mesh-flow.c:261` |
+| `ldr w8,[x22,#60]`: prepared execution-completion extent. No loop spill reloads before publication or repost. | M08 | `rdma/mesh-flow.c:263` |
 
 | CPU completion publication and operand access | D0 row | Source |
 | --- | --- | --- |
-| `ldr w8,[x0,#88]`: inline instruction count. | M20 | `rdma/mesh-call.c:423` |
-| `ldr w9,[x0,#36]`: invocation. | M20 | `rdma/mesh-call.c:422` |
-| `ldp x12,x13,[x10,#-8]`: destination/multiplier at call+128+32*a. | M13 | `rdma/mesh-call.c:424` |
-| `madd`; `stlr x13,[x12]`: prepared store; advance 32 bytes, then tail-branch to cleanup. No operand or publication-object traversal and no frame. | M04/M10/M18 | `rdma/mesh-call.c:425` |
+| `ldr w8,[x0,#64]`: inline instruction count. | M20 | `rdma/mesh-call.c:386` |
+| `ldr w9,[x0,#40]`: invocation. | M20 | `rdma/mesh-call.c:385` |
+| `ldp x12,x13,[x10,#-8]`: destination/multiplier at call+128+32*a. | M13 | `rdma/mesh-call.c:387` |
+| `madd`; `stlr x13,[x12]`: prepared store; advance 32 bytes, then tail-branch to cleanup. No operand or publication-object traversal and no frame. | M04/M10/M18 | `rdma/mesh-call.c:388` |
 | Read operand.data at +0, then numerical payload at the supplied offset. One metadata source access; caller-dependent Swift instruction count is not asserted. | M43 | `swift/Mesh.swift:13` |
 
 | Link polling lifecycle outside accepted-event handoff | D0 row | Source |
 | --- | --- | --- |
-| TX `ldapr w8,[x8]`: link progressing word, only on empty publication cell. | M17 | `rdma/mesh-flow.c:215` |
-| RX `ldapr w8,[x8]`: link progressing word on polling backedge. | M17 | `rdma/mesh-flow.c:250` |
+| TX `ldapr w8,[x8]`: link progressing word, only on empty publication cell. | M17 | `rdma/mesh-flow.c:209` |
+| RX `ldapr w8,[x8]`: link progressing word on polling backedge. | M17 | `rdma/mesh-flow.c:243` |
 
 | Input-preparation worker instructions; emitted AArch64, outside partial handoffs | D0 row | Source |
 | --- | --- | --- |
-| `ldapr x9,[x9]`: input generation at cell+8. | M18 | `rdma/mesh-call.c:145` |
-| `str xzr,[x8,#8]`: clear event cell. | M18 | `rdma/mesh-call.c:147` |
-| `ldp w10,w8,[x8]`: prepared call integer and invocation mask. | M18 | `rdma/mesh-call.c:149` |
-| `madd x0,x23,x10,x22`: directly indexed call address using start-bound stride. | M20 | `rdma/mesh-call.c:149` |
-| `ldp w11,w10,[x0,#32]`: pending count and generation. | M20 | `rdma/mesh-call.c:150` |
-| `stp w9,w8,[x0,#32]`: dependency count/generation update. | M20 | `rdma/mesh-call.c:151` |
-| `ldr w8,[x0,#92]`; `str w8,[x0,#32]`: restore the recurring dependency count before invoking the function. | M20 | `rdma/mesh-call.c:152` |
-| `ldp x8,x20,[x0,#72]`; `blr x8`: entry/context in that same line. | M20 | `rdma/mesh-call.c:153` |
-| `ldapr w8,[x8]`: call-group running word. No dispatch-loop stack reloads. | M24 | `rdma/mesh-call.c:140` |
+| `ldapr x9,[x9]`: input generation at cell+8. | M18 | `rdma/mesh-call.c:142` |
+| `str xzr,[x8,#8]`: clear event cell. | M18 | `rdma/mesh-call.c:144` |
+| `ldp w10,w8,[x8]`: prepared call integer and invocation mask. | M18 | `rdma/mesh-call.c:146` |
+| `madd x0,x23,x10,x22`: directly indexed call address using start-bound stride. | M20 | `rdma/mesh-call.c:146` |
+| `ldp w11,w10,[x0,#36]`: pending count and generation. | M20 | `rdma/mesh-call.c:147` |
+| `stp w9,w8,[x0,#36]`: dependency count/generation update. | M20 | `rdma/mesh-call.c:148` |
+| `ldr w8,[x0,#68]`; `str w8,[x0,#36]`: restore the recurring dependency count before invoking the function. | M20 | `rdma/mesh-call.c:149` |
+| `ldp x8,x20,[x0,#48]`; `blr x8`: entry/context in that same line. | M20 | `rdma/mesh-call.c:150` |
+| `ldapr w8,[x8]`: call-group running word. No dispatch-loop stack reloads. | M24 | `rdma/mesh-call.c:137` |
 
 | Prepared invocation publication and result; emitted AArch64 | D0 row | Source |
 | --- | --- | --- |
-| `ldp w9,w8,[x1,#108]`: stride and root count. | M41 | `rdma/mesh-call.h:21` |
-| `ldr w0,[x1,#104]`: submitted generation. | M41 | `rdma/mesh-call.h:21` |
-| `str w9,[x1,#104]`: advance generation; no slot calculation. | M41 | `rdma/mesh-call.h:22` |
-| `ldr x9,[x1,#96]`: invocation destination. | M41 | `rdma/mesh-call.h:23` |
-| `str w0,[x9,#20]`: write invocation, without resetting result status. | M42 | `rdma/mesh-call.h:23` |
-| `ldr w12,[x10,x9,lsl #2]`: root range extent. | M41 | `rdma/mesh-call.h:23` |
-| `ldr x13,[x1,x9,lsl #3]`: root range address; stamp offset 8. | M41 | `rdma/mesh-call.h:23` |
-| `stlr x11,[x13]`: generation+1; advance 16 bytes with register extent. | M18 | `rdma/mesh-call.h:23` |
-| `ldp x8,x9,[x3]`; `dmb ishld`: directly held result snapshot. Success and pending paths return without a frame. | M42 | `rdma/mesh-call.h:34`, `swift/Mesh.swift:337` |
+| `ldp w9,w8,[x1,#100]`: stride and root count. | M41 | `rdma/mesh-call.h:19` |
+| `ldr w0,[x1,#96]`: submitted generation. | M41 | `rdma/mesh-call.h:19` |
+| `str w9,[x1,#96]`: advance generation; no slot calculation. | M41 | `rdma/mesh-call.h:20` |
+| `ldr w12,[x10,x9,lsl #2]`: root range extent. | M41 | `rdma/mesh-call.h:21` |
+| `ldr x13,[x1,x9,lsl #3]`: root range address; stamp offset 8. | M41 | `rdma/mesh-call.h:21` |
+| `stlr x11,[x13]`: generation+1; advance 16 bytes with register extent. | M18 | `rdma/mesh-call.h:21` |
+| `ldp x8,x9,[x3]`; `dmb ishld`: directly held result snapshot. Success and pending paths return without a frame. | M42 | `rdma/mesh-call.h:31`, `swift/Mesh.swift:328` |
 
 | Deleted submission/result and consumer load sites (20 source sites, not an ISA count) | Replacement |
 | --- | --- |
@@ -218,8 +216,8 @@
 | Per-input `position` load | Register ordinal |
 | Per-input `mask` load | Fixed one-cell stream |
 | Per-input `position` store | Register ordinal |
-| CPU-arrival union/find and stream merging | Fixed M18 cells; retirement grouping remains |
-| Resident step notification/submit, M21 descriptors, mesh_metal_submit, meshMetalRearm, MeshResidentCommands | Deleted; setup-only body and M37 retirement publication |
+| CPU-arrival union/find and stream merging | Fixed M18 cells; device completion cells remain |
+| Resident step notification/submit, M21 descriptors, mesh_metal_submit, meshMetalRearm, MeshResidentCommands | Deleted; setup-only body and M37 execution-completion publication |
 | Vocabulary GPU publication record/sequence reads (3) | Compiled stores with register generation |
 | Sampler descriptor and sequence reads (2) | Compiled payload/stamp bindings |
 | Final per-step norm sequence read (1) | Resident generation |
@@ -299,17 +297,26 @@
 
 | Count / construction boundary | Value |
 | --- | --- |
-| Loads listed | 117 sites: 26 emitted AArch64 loads, 1 direct CPU-operand source access and 90 GPU source-level accesses. Native: TX 2, RX handoff 3, RX continuation 4, link lifecycle 2, input-preparation entry 5, input lifecycle 1, prepared submit/result 6, CPU completion 3. GPU: embedding 7, FFN 14, attention 21, partial-consumption/finish 25, vocabulary 6, sampler 17. Atomic read-modify-write sites count once. Numerical weight/input/gather/reduction loops remain supplied arithmetic; these counts do not assert GPU ISA loads or spills. |
+| Loads listed | 116 sites: 25 emitted AArch64 loads, 1 direct CPU-operand source access and 90 GPU source-level accesses. Native: TX 2, RX handoff 3, RX continuation 4, link lifecycle 2, input-preparation entry 5, input lifecycle 1, prepared submit/result 5, CPU completion 3. GPU: embedding 7, FFN 14, attention 21, partial-consumption/finish 25, vocabulary 6, sampler 17. Atomic read-modify-write sites count once. Numerical weight/input/gather/reduction loops remain supplied arithmetic; these counts do not assert GPU ISA loads or spills. |
 | Deleted load sites | Previous 101 + CPU publication 12 + RX first/value 2 + CPU operand quantum/page-address 2 = 117 source/previously enumerated sites. Emitted spill removals are excluded from this total. Destination, count and generation reads that remain are listed above. |
 | Native entry depth T1/T2 | `0/1`: TX directly polls M04 and reads native operands in the same line; RX completion integer → M10/M08, with M13 at fixed inline offsets. CPU M18 → M20, with M13 at fixed inline offsets. Provider internals are outside this ABI depth. |
 | ABI frames | Input worker 96 bytes, FP=SP+80, no dispatch-loop spills. TX 80 bytes, FP=SP+64, bad-WR SP+8. RX 112 bytes, FP=SP+96, bad-WR SP+8, no hot-loop spills. CPU completion has no frame and tail-branches to cold cleanup. |
-| Retirement | M37 feeds cold refcount cleanup and invocation release. RX retirement's buffer/frame operations execute after every prepared publication and native repost; their separate function keeps cold metadata out of the RX register set. No retirement selects, constructs or submits a device command. |
-| Construction / compilation | 37/37 listed objects constructed; M05, M12, M14, M16, M19, M21 retired. C/Swift, engine and four chain clients compile. Generated MSL changes were read, not dispatched or runtime-compiled. Numerical scope spans the whole step. Decode uses one setup command, no per-step command allocation and no renewal. Construction count does not establish the remaining whole-graph lifetime conditions below. |
+| Execution completion | Per-buffer references, consumed-input walks, output-return cells, cyclic resets, the reference CAS helper and the transport retirement thread are deleted. M37 reports a completed resident function. M42 counts actual numerical/transport completions for result reporting; no completion releases storage. RX result reporting follows publication and native repost. |
+| Construction / compilation | 37/37 listed objects constructed; M05, M12, M14, M16, M19, M21, M44 retired. C/Swift, engine and four chain clients compile. Generated MSL changes were read, not dispatched or runtime-compiled. Numerical scope spans the whole step. Decode uses one setup command, no per-step command allocation and no renewal. Construction count does not establish the remaining whole-graph lifetime conditions below. |
 
 | Governing invariant on the decode submission path | Source result |
 | --- | --- |
-| I2 | Completed-partial publication writes the prepared TX/stamp destinations without waits. CPU completion writes inline M13 instructions and tail-calls retirement. RX writes availability and all CPU/forward destinations before reposting. |
-| I4 | Submission modulo, availability admission and bank/lease renewal are deleted. Independent handles bind disjoint storage at setup. Whole-graph reuse closure remains unresolved: fixed receive backing is immediately reposted, and root completion alone has not established remote sampler completion before the next generation. Cold refcount/reset bookkeeping remains separate from numerical readiness. |
+| I2 | Completed-partial publication writes the prepared TX/stamp destinations without waits. CPU completion writes inline M13 instructions and tail-calls result accounting. RX writes availability and all CPU/forward destinations before reposting. |
+| I4 | Submission modulo, availability admission and bank/lease renewal are deleted. Independent handles bind disjoint storage at setup. Whole-graph reuse closure remains unresolved: fixed receive backing is immediately reposted, and root completion alone has not established remote sampler completion before the next generation. Canonical backing has program lifetime; no per-execution buffer reference or reset remains. |
 | I17 | M18 directly indexes M20; M04 directly supplies native QP/WR. Generic CPU operands contain direct contiguous pointers. CPU/RX publication instructions occupy fixed inline offsets and use the same setup constructor as GPU bindings. |
-| I18 | Independent M04 queues post ready partials without cross-partial ordering. RX CPU/forward publications precede native repost. Local-first and FFN down-completion gates stay deleted. Numerical readiness resets before invocation; cold retirement no longer admits the next call. Buffer refcount/reset closure still remains necessary. |
+| I18 | Independent M04 queues post ready partials without cross-partial ordering. RX CPU/forward publications precede native repost. Local-first and FFN down-completion gates stay deleted. Numerical readiness resets before invocation; result accounting does not admit the next call. The software availability-stamp relay remains and is incompatible with the operator’s latest requirement; native CQ polling remains required. |
 | I22 | Direct M04, M08/M13, M18/M20, M41/M42 and M43 records replace pointer-chased publication/operand objects. This records the constructed paths; it does not establish every numerical caller's metadata footprint. |
+
+| Removed per-execution storage mechanism | Source replacement |
+| --- | --- |
+| Buffer retain/release/reset and cyclic reference CAS | Whole-program arena ownership; detach after native aliases are released |
+| Consumed-input index array and per-input/per-output release loops | Direct M20 execution result and worker-completion destinations |
+| Per-output return streams and output-refzero countdown | Function completion reports once, after numerical output publication |
+| Link return readers, buffer-frame reconstruction and retirement pthread | Prebound M08 execution-completion destination; SEND CQ remains drained |
+| Submit's result-pointer load and invocation store | M42's start-bound sequence advances on actual step completion |
+| Queue arenas reserved for buffer returns | Removed from the shared-memory layout |
