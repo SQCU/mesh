@@ -26,10 +26,10 @@ _Static_assert(sizeof(struct mesh_call)==128 && _Alignof(struct mesh_call)==64,"
 /* design/prepared-machine.md#M26 */
 struct prepared_residency {
   _Alignas(32) uint64_t completed;
-  _Atomic uint32_t stop;
+  _Atomic uint32_t next;
   uint32_t reserved[5];
 };
-_Static_assert(sizeof(struct prepared_residency)==32 && offsetof(struct prepared_residency,stop)==8,"M26");
+_Static_assert(sizeof(struct prepared_residency)==32 && offsetof(struct prepared_residency,next)==8,"M26");
 /* design/prepared-machine.md#M27 */
 /* design/prepared-machine.md#M28 */
 /* design/prepared-machine.md#M33 */
@@ -49,10 +49,19 @@ _Static_assert(sizeof(uint32_t)==4 && sizeof(float)==4 && sizeof(uint8_t)==1,"M3
 /* design/prepared-machine.md#M31 */
 /* design/prepared-machine.md#M32 */
 _Static_assert(sizeof(uint32_t)==4 && sizeof(uint64_t)==8 && sizeof(uint16_t)==2,"M31 M32");
-/* design/prepared-machine.md#M26 */
+/* design/prepared-machine.md#M39 */
+_Static_assert(sizeof(void *)==8,"M39 native handle");
+/* design/prepared-machine.md#M40 */
+struct mesh_resident_lease {
+  _Alignas(32) _Atomic uint32_t entered;
+  _Atomic uint32_t stop;
+  uint32_t retire,reserved[5];
+};
+_Static_assert(sizeof(struct mesh_resident_lease)==32 && offsetof(struct mesh_resident_lease,stop)==4,"M40");
+/* design/prepared-machine.md#M40 */
 /* design/algorithm-sources.md#resident-metal */
-static inline void mesh_residency_stop(struct prepared_residency *state,uint32_t count,uint32_t stop){
-  for(uint32_t i=0;i<count;i++)atomic_store_explicit(&state[i].stop,stop,memory_order_release);
+static inline void mesh_residency_lease_stop(struct mesh_resident_lease *lease){
+  atomic_store_explicit(&lease->stop,1,memory_order_release);
 }
 /* design/prepared-machine.md#M13 */
 struct prepared_publication { uint64_t destination; uint64_t value,scale,reserved; };
