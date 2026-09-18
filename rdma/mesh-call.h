@@ -5,10 +5,12 @@
 struct mesh_calls;
 struct mesh_call;
 struct mesh_function;
+/* design/algorithm-sources.md#programkernel_call */
+typedef __attribute__((swiftcall)) void (*mesh_invoke)(struct mesh_call *,void * __attribute__((swift_context)));
 /* design/prepared-machine.md#M41 */
 struct mesh_submission {
-  _Alignas(128) _Atomic uint64_t *destinations[MESH_COMPUTE_THREADS];
-  uint32_t events[MESH_COMPUTE_THREADS];
+  _Alignas(128) struct mesh_arrival *destinations[MESH_COMPUTE_THREADS];
+  uint32_t counts[MESH_COMPUTE_THREADS];
   struct mesh_instance *instance;
   uint32_t generation,stride,count;
 };
@@ -19,8 +21,11 @@ static inline __attribute__((always_inline)) uint32_t mesh_submit(struct mesh_su
   uint32_t generation=submission->generation,count=submission->count;
   submission->generation=generation+submission->stride;
   atomic_store_explicit(&submission->instance->invocation,generation,memory_order_relaxed);
-  for(uint32_t i=0;i<count;i++)
-    atomic_store_explicit(submission->destinations[i],((uint64_t)generation<<32)|submission->events[i],memory_order_release);
+  for(uint32_t i=0;i<count;i++){
+    struct mesh_arrival *cells=submission->destinations[i];
+    uint32_t extent=submission->counts[i];
+    for(uint32_t k=0;k<extent;k++)atomic_store_explicit(&cells[k].stamp,(uint64_t)generation+1,memory_order_release);
+  }
   return generation;
 }
 /* design/prepared-machine.md#M42 */
@@ -38,7 +43,7 @@ struct mesh_operand {
 };
 _Static_assert(sizeof(struct mesh_operand)==48,"mesh_operand");
 struct mesh_call {
-  _Alignas(64) struct mesh_function *function;
+  _Alignas(128) struct mesh_function *function;
   struct mesh_operand *operands;
   uint64_t return_slot;
   uint32_t index,remaining,pending,invocation,return_index;
@@ -46,8 +51,12 @@ struct mesh_call {
   struct hdr *memory;
   uint32_t input_count,output_count;
   uint64_t completion_slot;
+  mesh_invoke submit;
+  void *argument;
 };
-_Static_assert(sizeof(struct mesh_call)==128 && _Alignof(struct mesh_call)==64,"mesh_call record");
+_Static_assert(sizeof(struct mesh_call)==128 && _Alignof(struct mesh_call)==128,"mesh_call record");
+_Static_assert(offsetof(struct mesh_call,pending)==32 && offsetof(struct mesh_call,invocation)==36 &&
+  offsetof(struct mesh_call,submit)==72 && offsetof(struct mesh_call,argument)==80,"M20");
 /* design/prepared-machine.md#M26 */
 struct prepared_residency {
   _Alignas(32) uint64_t completed;

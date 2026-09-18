@@ -673,12 +673,14 @@ public final class MeshMetalFrame {
             stores.append(prepared_publication(destination: outputs[output].availability, value: 1, scale: 1, reserved: 0))
             for i in sends..<(sends + uses) {
                 let target = targets[i]
-                let pointer = UnsafeMutableRawPointer(m).advanced(by: Int(target.stream) + 8)
-                let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: pointer, count: 8), memory: memory)
+                let pointer = UnsafeMutableRawPointer(m).advanced(by: Int(target.stream))
+                let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: pointer, count: Int(target.count) * 16), memory: memory)
                 let buffer = span.metal(device: device)
                 backing.append(buffer)
-                stores.append(prepared_publication(destination: buffer.gpuAddress + UInt64(span.metalOffset),
-                    value: UInt64(target.index) + 1, scale: 1 << 32, reserved: 0))
+                for k in 0..<target.count {
+                    stores.append(prepared_publication(destination: buffer.gpuAddress + UInt64(span.metalOffset) + UInt64(k) * 16 + 8,
+                        value: 1, scale: 1, reserved: 0))
+                }
             }
             let records = stores.withUnsafeBytes {
                 device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)!
