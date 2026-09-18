@@ -144,8 +144,20 @@ forward) is unchanged, and is reached by D0 + D1 — not by separate work.
   row cites it as that row's constructor.
 - No subagent is spawned to measure, count, review or audit. Subagents write
   source.
-- Runtime testing and benchmarks remain out of scope. Build, commit and push
-  every buildable state.
+- Runtime testing is authorised. Operator, 2026-09-18, verbatim:
+
+  > idk you coach the codex through running this, measuring performance,
+  > etcetera. the m4p machine is there to be used by this research agenda;
+  > there's no inhibition against runtime testing if what's being tested is
+  > following the design documents
+
+  What is tested is the design: the crossing floor of
+  `e2b-crossover-2026-09-16.md` section 4, the H7 thresholds, and D2's
+  `S >= 1.10` at B = 1 decode. A run that measures something the documents do
+  not define is not a deliverable. Build, commit and push every buildable state
+  before any cross-node run; the M4 Pro builds from committed source.
+  Run outputs go to `output_data`, never `/tmp`. Sum planned bytes per node
+  before launch. Never auto-relaunch after an unexplained death.
 - Each turn ends with exactly these lines and nothing else:
   `D0 rows: <constructed>/<total>` · `hot-path loads listed: <n>, deleted: <n>` ·
   `dependent-load depth T1/T2: <n>/<n>` · `commits: <hashes>`
