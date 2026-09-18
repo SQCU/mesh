@@ -7,14 +7,10 @@ public typealias MeshOperands = UnsafeBufferPointer<mesh_operand>
 
 extension mesh_operand {
     // design/algorithm-sources.md#programtensor
-    @inlinable public var data: UnsafeMutableRawPointer? { mesh_operand_data(pages) }
-    // design/algorithm-sources.md#programtensor
-    @inlinable public var page: UInt32 { mesh_operand_page(self) }
-    // design/algorithm-sources.md#programtensor
     @inlinable public var invocation: UInt32 { sequence.pointee }
     // design/algorithm-sources.md#programtensor
     @inlinable public func load<Value>(at index: Int, as type: Value.Type = Value.self) -> Value {
-        mesh_operand_address(self, index * MemoryLayout<Value>.stride)!.load(as: type)
+        data!.load(fromByteOffset: index * MemoryLayout<Value>.stride, as: type)
     }
 }
 
@@ -421,7 +417,7 @@ public final class Mesh {
                 $0.load(as: (UnsafeRawPointer?, UnsafeMutableRawPointer?, UnsafeRawPointer?, UnsafeMutableRawPointer?).self)
             }
             guard let binding = mesh_call_bind(calls, UInt32(worker), inputRows, inputRows.count,
-                              invocation.dependencies ?? inputRows.count, invocation.prepare == nil ? 1 : 0, outputRows, outputRows.count,
+                              invocation.dependencies ?? inputRows.count, outputRows, outputRows.count,
                               native.0, native.1, native.2, native.3) else {
                 memory.functions.removeLast()
                 throw POSIXError(POSIXErrorCode(rawValue: errno)!)
@@ -652,35 +648,17 @@ public final class MeshMetalFrame {
         completion = (state.metal(device: device), state.metalOffset, value)
         var backing = (inputs + outputs).flatMap { $0.resources } + (inputs + outputs).map { $0.table }
         // design/prepared-machine.md#M13
-        publications = results.enumerated().map { output, result in
+        publications = results.map { result in
             let row = result.first + UInt32(index) * result.stride
-            let publication = mesh_publication_at(m, row)!
-            let targets = UnsafeRawPointer(publication).advanced(by: 16).assumingMemoryBound(to: mesh_target.self)
-            let counts = UnsafeRawPointer(publication).load(as: SIMD2<UInt32>.self)
-            let sends = Int(counts.x), uses = Int(counts.y)
-            var stores: [prepared_publication] = []
-            for i in 0..<sends {
-                let target = targets[i]
-                let pointer = UnsafeMutableRawPointer(m).advanced(by: Int(target.stream))
-                let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: pointer, count: Int(target.count) * 32), memory: memory)
+            let count = Int(mesh_publication_prepare(m, row, 1, nil))
+            var stores = [prepared_publication](repeating: prepared_publication(), count: count)
+            _ = stores.withUnsafeMutableBufferPointer { mesh_publication_prepare(m, row, 1, $0.baseAddress) }
+            for i in stores.indices {
+                let pointer = UnsafeMutableRawPointer(bitPattern: UInt(stores[i].destination))!
+                let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: pointer, count: 8), memory: memory)
                 let buffer = span.metal(device: device)
                 backing.append(buffer)
-                for k in 0..<target.count {
-                    stores.append(prepared_publication(destination: buffer.gpuAddress + UInt64(span.metalOffset) + UInt64(k) * 32,
-                        value: 1, scale: 0, reserved: 0))
-                }
-            }
-            stores.append(prepared_publication(destination: outputs[output].availability, value: 1, scale: 1, reserved: 0))
-            for i in sends..<(sends + uses) {
-                let target = targets[i]
-                let pointer = UnsafeMutableRawPointer(m).advanced(by: Int(target.stream))
-                let span = MeshSpan(data: UnsafeMutableRawBufferPointer(start: pointer, count: Int(target.count) * 16), memory: memory)
-                let buffer = span.metal(device: device)
-                backing.append(buffer)
-                for k in 0..<target.count {
-                    stores.append(prepared_publication(destination: buffer.gpuAddress + UInt64(span.metalOffset) + UInt64(k) * 16 + 8,
-                        value: 1, scale: 1, reserved: 0))
-                }
+                stores[i].destination = buffer.gpuAddress + UInt64(span.metalOffset)
             }
             let records = stores.withUnsafeBytes {
                 device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)!

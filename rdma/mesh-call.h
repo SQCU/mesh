@@ -36,12 +36,14 @@ static inline __attribute__((always_inline)) uint64_t mesh_result(struct mesh_in
   return status.value>>62==MESH_RESULT_SUCCESS?MESH_RESULT(MESH_RESULT_BUSY,0,0):status.value;
 }
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride,channel; };
+/* design/prepared-machine.md#M43 */
 struct mesh_operand {
+  _Alignas(16) void *data;
   size_t bytes;
-  struct mesh_page_entry *pages; struct mesh_publication *publication; uint32_t index;
-  uint32_t *sequence; size_t quantum;
+  uint32_t index,row;
+  uint32_t *sequence;
 };
-_Static_assert(sizeof(struct mesh_operand)==48,"mesh_operand");
+_Static_assert(sizeof(struct mesh_operand)==32 && _Alignof(struct mesh_operand)==16 && offsetof(struct mesh_operand,sequence)==24,"M43");
 struct mesh_call {
   _Alignas(128) struct mesh_function *function;
   struct mesh_operand *operands;
@@ -53,10 +55,13 @@ struct mesh_call {
   uint64_t completion_slot;
   mesh_invoke submit;
   void *argument;
+  uint32_t publication_count;
+  _Alignas(128) struct prepared_publication publications[];
 };
 _Static_assert(sizeof(struct mesh_call)==128 && _Alignof(struct mesh_call)==128,"mesh_call record");
 _Static_assert(offsetof(struct mesh_call,pending)==32 && offsetof(struct mesh_call,invocation)==36 &&
-  offsetof(struct mesh_call,submit)==72 && offsetof(struct mesh_call,argument)==80,"M20");
+  offsetof(struct mesh_call,submit)==72 && offsetof(struct mesh_call,argument)==80 &&
+  offsetof(struct mesh_call,publication_count)==88 && offsetof(struct mesh_call,publications)==128,"M20");
 /* design/prepared-machine.md#M26 */
 struct prepared_residency {
   _Alignas(32) uint64_t completed;
@@ -95,9 +100,6 @@ _Static_assert(sizeof(struct mesh_resident_control)==32 && offsetof(struct mesh_
 static inline void mesh_residency_stop(struct mesh_resident_control *control){
   atomic_store_explicit(&control->shutdown,1,memory_order_release);
 }
-/* design/prepared-machine.md#M13 */
-struct prepared_publication { uint64_t destination; uint64_t value,scale,reserved; };
-_Static_assert(sizeof(struct prepared_publication)==32 && offsetof(struct prepared_publication,scale)==16,"M13");
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M02 */
 /* design/prepared-machine.md#M03 */
@@ -106,21 +108,12 @@ _Static_assert(sizeof(uint16_t)==2,"M01 M02 M03 scalar storage");
 static inline __attribute__((always_inline)) uint32_t mesh_call_index(const struct mesh_call *call){return call->index;}
 /* design/algorithm-sources.md#programkernel_call */
 static inline __attribute__((always_inline,returns_nonnull)) struct mesh_operand *mesh_call_operands(const struct mesh_call *call){return call->operands;}
-/* design/algorithm-sources.md#programtensor */
-static inline __attribute__((always_inline)) void *mesh_operand_data(const struct mesh_page_entry *pages){return (void *)atomic_load_explicit(&pages->address,memory_order_relaxed);}
-/* design/algorithm-sources.md#programtensor */
-static inline void *mesh_operand_address(struct mesh_operand operand,size_t offset){
-  size_t block=offset/operand.quantum;
-  return (char *)mesh_operand_data(operand.pages+block)+(offset-block*operand.quantum);
-}
-/* design/algorithm-sources.md#programtensor */
-static inline uint32_t mesh_operand_page(struct mesh_operand operand){return atomic_load_explicit(&operand.pages->mapping,memory_order_relaxed);}
 typedef void (*mesh_dispose)(void *);
 
 /* design/algorithm-sources.md#programkernel_call */
 struct mesh_calls *mesh_calls_create(struct mesh_ctx *,uint32_t workers,uint32_t count,void *owner,mesh_dispose);
 struct mesh_function *mesh_call_bind(struct mesh_calls *,uint32_t worker,
-  const struct mesh_section *inputs,size_t input_count,size_t dependency_count,int completion_publication,
+  const struct mesh_section *inputs,size_t input_count,size_t dependency_count,
   const struct mesh_section *outputs,size_t output_count,const void *submit,void *context,const void *rearm,void *rearm_context);
 /* design/algorithm-sources.md#resident-metal */
 uint64_t *mesh_function_completion(struct mesh_function *,uint32_t frame,uint64_t *value);

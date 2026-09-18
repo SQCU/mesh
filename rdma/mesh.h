@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 83u
+#define MESH_VERSION 84u
 #define MESH_ABSENT UINT32_MAX
 #define MESH_EVENT_ABSENT UINT64_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
@@ -63,6 +63,9 @@ _Static_assert(sizeof(struct mesh_events)==128 && offsetof(struct mesh_events,st
 /* design/prepared-machine.md#M18 */
 struct mesh_arrival { _Alignas(16) uint32_t call; uint32_t mask; _Atomic uint64_t stamp; };
 _Static_assert(sizeof(struct mesh_arrival)==16 && _Alignof(struct mesh_arrival)==16 && offsetof(struct mesh_arrival,stamp)==8,"M18");
+/* design/prepared-machine.md#M13 */
+struct prepared_publication { _Alignas(16) uint64_t destination; uint64_t scale,padding[2]; };
+_Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepared_publication)==16 && offsetof(struct prepared_publication,scale)==8,"M13");
 struct mesh_event_input { _Atomic uint64_t *slots; uint32_t position,mask; };
 struct mesh_event_reader { struct mesh_event_input *inputs; uint32_t count,cursor; };
 _Static_assert(sizeof(struct mesh_event_input)==16 && sizeof(struct mesh_event_reader)==16,"mesh_event_reader");
@@ -170,20 +173,6 @@ static inline void mesh_event_push(struct hdr *m,uint64_t slot,uint32_t index,ui
   struct mesh_stream *stream=(struct mesh_stream *)((char *)m+slot);
   uint32_t at=stream->position++&stream->mask;
   atomic_store_explicit(stream->slots+at,((uint64_t)invocation<<32)|(index+1),memory_order_release);
-}
-/* design/prepared-machine.md#M04 */
-/* design/prepared-machine.md#M18 */
-/* design/algorithm-sources.md#programkernel_call */
-static inline __attribute__((always_inline)) void mesh_publish(struct hdr *m,const struct mesh_target *targets,uint32_t sends,uint32_t uses,struct mesh_page_entry *entry,uint64_t stamp){
-  for(uint32_t i=0;i<sends;i++){
-    struct mesh_send *cells=(void *)((char *)m+targets[i].stream);
-    for(uint32_t k=0;k<targets[i].count;k++)atomic_store_explicit(&cells[k].ready,1,memory_order_release);
-  }
-  atomic_store_explicit(&entry->stamp,stamp,memory_order_release);
-  for(uint32_t i=sends,end=sends+uses;i<end;i++){
-    struct mesh_arrival *cells=(void *)((char *)m+targets[i].stream);
-    for(uint32_t k=0;k<targets[i].count;k++)atomic_store_explicit(&cells[k].stamp,stamp,memory_order_release);
-  }
 }
 /* design/algorithm-sources.md#index-hand-off */
 static inline uint64_t mesh_event_take(struct mesh_event_reader *reader){
