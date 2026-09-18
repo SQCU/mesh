@@ -66,8 +66,27 @@ operand passing are the deliverable. Everything else is how it is shown.
 
 ## Standing of every other document
 
+**Not frozen — `deliverables.md`'s numbered invariants (the `I` rows) are governing
+algorithmic requirements** on how a program submission may be composed as data
+structure, control flow and runtime. Freezing them was an overseer's error. They
+are reasserted over any narrower or finer-grained gate, including any invented by
+an overseer, and they take precedence over per-stage acceptance criteria,
+throughput thresholds and refusal conditions, none of which are requirements.
+In particular: I2 producers never wait; I4 memory mapping, not control flow, with
+no reuse guard, claim check, occupancy check or slot-modulo; I17 bindings realized
+before execution; I18 no guards or blocks that withhold ready work; I22 one
+shm->L1 per event. With the goalfile's own `zerocopy and async once we've figured
+out the callgraph AOT`, and `the runtime is necessarily extremely simple, because
+any artificially imposed control flow puts more cache reads and loads in between
+work is ready on peer and work has arrived`.
+
+A successor `spinning` word is an occupancy check, a `bank` index is slot-modulo,
+and an incumbent awaiting a successor is a guard withholding ready work. I4 and
+I18 forbid all three. The overseer's `overlap the renewal` instruction is
+withdrawn; the deadlock it produced was predicted by I4.
+
 Frozen — readable, not requirements, not tasks, not evidence:
-`deliverables.md` (its I25/E1d/E8 objective survives as D2, its 29 rows do not),
+`deliverables.md`'s prose and status cells (its I25/E1d/E8 objective survives as D2),
 `collective-goals-2026-09-14.md`, `async-collectives.md`, `h-audit-2026-09-16.md`,
 `e2b-structural-latency-2026-09-17.md`, `instruction-adherence-2026-09-17.md`,
 `e2b-crossover-2026-09-16.md`, `pages-and-functions.md`, `function-chain.md`,
