@@ -145,4 +145,3 @@
 | Polling | At most `2F` cell probes per normal decode sweep; 1 cell load plus the listed M25 base-pair reload per probe; normal sweep also reads M24 running state. Counter gate and range handling are explicitly retained in T3.03–08. |
 | Cold lifetime work | The numerical return loop still drains return events, decrements output references, resets frames and invokes T3.13–22 before returning the frame. `link_retire_progress` and its event scan remain unchanged. |
 | Native work per rearm | One new command buffer, one attachment of the start-created completion block, and the supplied encoder call; engine `MetalProgram.bind` replays its prepared ICB through a new native compute encoder and native resource declarations. These native operations are work, not zero-cost instructions. |
-| D2 accounting | Per-step native command construction is common-mode with the solo baseline and therefore outside the differential budget. |
