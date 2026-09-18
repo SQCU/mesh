@@ -773,11 +773,6 @@ public final class MeshMetalFrame {
     """#
 }
 
-private final class MeshCommands: ManagedBuffer<Int, MTLCommandBuffer> {
-    // design/algorithm-sources.md#resident-metal
-    deinit { _ = withUnsafeMutablePointerToElements { $0.deinitialize(count: header) } }
-}
-
 // design/prepared-machine.md#M21
 private final class MeshResidentCommands {
     let slots: UnsafeMutablePointer<prepared_metal>

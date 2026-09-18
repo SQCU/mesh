@@ -26,6 +26,18 @@ _Static_assert(sizeof(struct mesh_call)==128 && _Alignof(struct mesh_call)==64,"
 /* design/prepared-machine.md#M12 */
 struct prepared_arguments { uint64_t address; uint64_t offset,availability,sequence; };
 _Static_assert(sizeof(struct prepared_arguments)==32 && offsetof(struct prepared_arguments,sequence)==24,"M12");
+/* design/prepared-machine.md#M26 */
+struct prepared_residency {
+  _Alignas(32) uint64_t completed;
+  _Atomic uint32_t stop;
+  uint32_t reserved[5];
+};
+_Static_assert(sizeof(struct prepared_residency)==32 && offsetof(struct prepared_residency,stop)==8,"M26");
+/* design/prepared-machine.md#M26 */
+/* design/algorithm-sources.md#resident-metal */
+static inline void mesh_residency_stop(struct prepared_residency *state,uint32_t count,uint32_t stop){
+  for(uint32_t i=0;i<count;i++)atomic_store_explicit(&state[i].stop,stop,memory_order_release);
+}
 /* design/prepared-machine.md#M13 */
 struct prepared_publication { uint64_t destination; uint64_t value,scale,reserved; };
 _Static_assert(sizeof(struct prepared_publication)==32 && offsetof(struct prepared_publication,scale)==16,"M13");
