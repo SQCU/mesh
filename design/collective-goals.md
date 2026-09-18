@@ -83,6 +83,46 @@ is printed at `start()`. Attention, norms, residual and PLE are duplicated on
 every rank. The objective (`S ≥ 1.10` at B = 1 decode, overhead ≤ 0.5 ms per
 forward) is unchanged, and is reached by D0 + D1 — not by separate work.
 
+## D3. The persistent kernel and pure operand passing (controlling)
+
+Operator, 2026-09-17, verbatim:
+
+> numerical checks... do not matter... other than the numerical check... of
+> tokens/sec decoded... more critically... there is no intermediate form of this
+> source code which can exist... which 'partially satisfies a latency requirement'
+> whose nature is to also require an extremely specific runtime data structure:
+> that of the persistent kernel, and that of collective code which does literally
+> nothing but pass operands to a device resident function, so that the function
+> might consume them, with no derivation of addresses, pointers, types,
+> configuration, origins, metadata, anything during the runtime... pure buffer to
+> buffer operations... that was the requirement this entire time... was that what
+> was written? we will know this without even running the corresponding code
+
+This is the requirement D0, D1 and D2 were always serving, and it is binary.
+There is no partial form. Two things must be true of the source, and both are
+established by reading it:
+
+1. **A persistent device-resident function.** One dispatch that outlives the step
+   and consumes operands as they arrive. Not a kernel re-dispatched per step, and
+   not an operand wait inside a per-step dispatch. Today the only spin in either
+   repository is `kernels.swift:3727`, inside a dispatch, and `meshMetalRearm`
+   (`swift/Mesh.swift:804`) allocates an `MTLCommandBuffer` with ObjC
+   retain/release every step. That is the defect.
+2. **Collective code that only passes operands.** No derivation at runtime of
+   addresses, pointers, types, configuration, origins or metadata. Buffer to
+   buffer. Today 26 of T3's 34 instructions load descriptors, selectors, entries
+   and queues.
+
+**A revocation.** On 2026-09-17 an overseeing assistant told the implementation
+that per-step native command construction was acceptable because it is
+common-mode with the solo baseline and cancels in `S`. That instruction is
+revoked and must not be cited. It answered a structural requirement with a
+performance argument, which is how a hop gets licensed. A cost that cancels in a
+ratio is still a forbidden structure.
+
+**Acceptance is by reading**, and the only run that matters is decoded tokens per
+second. Numerical equivalence checks are not required and do not gate this work.
+
 ## Rules of action
 
 - Order: D0 committed → source edits, each citing a D0 row → D1 tables. A source
