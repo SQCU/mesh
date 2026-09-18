@@ -612,7 +612,7 @@ public final class MeshMetalFrame {
     private let sequence: MTLBuffer, sequenceOffset: Int
     public let publications: [MTLBuffer]
     private let sendCounts: [UInt32]
-    fileprivate let resources: [MTLBuffer]
+    public let resources: [MTLBuffer]
     fileprivate let completion: MTLCommandBufferHandler
     private let coherent: MTLComputePipelineState
     private let signal: [MTLComputePipelineState]
