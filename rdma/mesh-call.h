@@ -34,7 +34,15 @@ struct prepared_residency {
 };
 _Static_assert(sizeof(struct prepared_residency)==32 && offsetof(struct prepared_residency,stop)==8,"M26");
 /* design/prepared-machine.md#M27 */
-_Static_assert(4*sizeof(uint32_t)+2*sizeof(uint64_t)==32,"M27");
+/* design/prepared-machine.md#M28 */
+_Static_assert(4*sizeof(uint32_t)+2*sizeof(uint64_t)==32,"M27 M28");
+/* design/prepared-machine.md#M29 */
+_Static_assert(2*sizeof(uint32_t)+3*sizeof(uint64_t)==32,"M29");
+/* design/prepared-machine.md#M30 */
+_Static_assert(sizeof(float)==4,"M30");
+/* design/prepared-machine.md#M31 */
+/* design/prepared-machine.md#M32 */
+_Static_assert(sizeof(uint32_t)==4 && sizeof(uint64_t)==8 && sizeof(uint16_t)==2,"M31 M32");
 /* design/prepared-machine.md#M26 */
 /* design/algorithm-sources.md#resident-metal */
 static inline void mesh_residency_stop(struct prepared_residency *state,uint32_t count,uint32_t stop){
