@@ -53,7 +53,7 @@ _Static_assert(sizeof(uint32_t)==4 && sizeof(uint64_t)==8 && sizeof(uint16_t)==2
 _Static_assert(sizeof(void *)==8,"M39 native handle");
 /* design/prepared-machine.md#M40 */
 struct mesh_resident_lease {
-  _Alignas(32) _Atomic uint32_t entered;
+  _Alignas(32) uint32_t reserved0;
   uint32_t generation;
   _Atomic uint32_t spinning,shutdown;
   uint32_t reserved[4];
