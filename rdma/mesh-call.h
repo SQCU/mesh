@@ -54,14 +54,15 @@ _Static_assert(sizeof(void *)==8,"M39 native handle");
 /* design/prepared-machine.md#M40 */
 struct mesh_resident_lease {
   _Alignas(32) _Atomic uint32_t entered;
-  _Atomic uint32_t stop;
-  uint32_t retire,reserved[5];
+  uint32_t generation;
+  _Atomic uint32_t spinning,shutdown;
+  uint32_t reserved[4];
 };
-_Static_assert(sizeof(struct mesh_resident_lease)==32 && offsetof(struct mesh_resident_lease,stop)==4,"M40");
+_Static_assert(sizeof(struct mesh_resident_lease)==32 && offsetof(struct mesh_resident_lease,spinning)==8 && offsetof(struct mesh_resident_lease,shutdown)==12,"M40");
 /* design/prepared-machine.md#M40 */
 /* design/algorithm-sources.md#resident-metal */
 static inline void mesh_residency_lease_stop(struct mesh_resident_lease *lease){
-  atomic_store_explicit(&lease->stop,1,memory_order_release);
+  atomic_store_explicit(&lease->shutdown,1,memory_order_release);
 }
 /* design/prepared-machine.md#M13 */
 struct prepared_publication { uint64_t destination; uint64_t value,scale,reserved; };
