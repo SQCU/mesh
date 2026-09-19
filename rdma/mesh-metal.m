@@ -11,10 +11,10 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
     "kernel void mesh_publish(volatile coherent(system) device uint *payload [[buffer(0)]],"
     "constant uint2 &extent [[buffer(1)]],constant Publication *records [[buffer(2)]],"
     "uint lane [[thread_index_in_threadgroup]]) {"
-    "for(uint i=lane;i<extent.x;i+=32)payload[i]=payload[i];"
+    "for(uint i=lane;i<extent.x;i+=256)payload[i]=payload[i];"
     "atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(3));"
     "threadgroup_barrier(mem_flags::mem_device);"
-    "for(uint i=lane;i<extent.y;i+=32) {"
+    "for(uint i=lane;i<extent.y;i+=256) {"
     "auto destination=(volatile coherent(system) device ulong *)records[i].destination;"
     "*destination=records[i].argument;"
     "}"
@@ -98,7 +98,7 @@ void mesh_metal_transfer_encode(struct mesh_ctx *context,struct mesh_metal_trans
     [encoder setBuffer:payload offset:0 atIndex:0];[encoder setBytes:extent length:sizeof extent atIndex:1];
     [encoder setBuffer:bindings offset:0 atIndex:2];
     [encoder useResource:memory usage:MTLResourceUsageWrite];
-    [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(32,1,1)];
+    [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
     [bindings release];
   }
 }
