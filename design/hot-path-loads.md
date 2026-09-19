@@ -43,7 +43,7 @@ The receive destination/value and repost fields occupy the same 128-byte aligned
 | Deleted generated-kernel and Swift-worker instruction claims | This table describes only current source and emitted native instructions |
 | Per-step host command construction, completion wait, position/parameter/mask stores | M13 fixed boundary copies, prepared before the one interval submission |
 | Separate prefill command buffer without an encoded KV dependency on decode | M14 prefill and decode ranges share M19's prepared compute sequence and native dispatch dependencies; no host wait or resource traversal |
-| Metal 3 interval submission and implicit barriers on both sides of every ICB range | M19 native Metal 4 submission, with one encoded dependency at each numerical/boundary-copy cut; M20 measures only the complete decode interval and M21 reports final retirement once |
+| Metal 3 interval submission and implicit barriers on both sides of every ICB range | M19 native Metal 4 submission, with one encoded dependency at each numerical/boundary-copy cut; M20 brackets the measured decode steps after the first completed collective step, reporting their count explicitly, and M21 reports final retirement once |
 | Exported cache-index temporaries across incompatible host/GPU physical layouts | Original expressions retained with consumers during graph preparation (M15) |
 | Resource-array declaration at numerical submission | One prepared native residency set (M06) |
 | Native command bindings unused by the reflected shader, and unoptimized repeated command state | M06 encodes only used binding slots and runs Apple’s native ICB optimizer during preparation, before transport starts; replay uses the complete optimized ranges |
