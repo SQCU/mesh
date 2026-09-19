@@ -23,16 +23,18 @@ The one-stream selection occurs at thread entry. For multiple independent stream
 | Native receive identity | Load pointer at completion +0 | Same completion; native `wr_id` |
 | Destination and value | Load pair at receive record +64 | M08 |
 | Publish native completion | Release-store the value at that destination | M07's directly bound completion word |
-| Receive repost binding | Load pair at receive record +48 | M08 |
-| Repost | Call the already bound provider function with the same receive record | M08 |
-| GPU observation | System-scope fence, system-coherent read of the directly bound word until the actual dependency arrives; explicit shutdown read only while absent | M07, M12 |
-| Consume completion | Store zero to that same word, system-scope fence | M07 |
-| Numerical input | Upstream prepared command reads the canonical received payload | M02, M06 |
+| Receive repost binding | Load next request and QP at receive record +48 | M08 |
+| Repost | Call the register-held provider function with the prepared next request | M08 |
+| GPU observation | System-scope fence, system-coherent read inside each actual numerical reader until the actual dependency arrives; explicit shutdown read only while absent | M07, M12 |
+| Numerical consumer entry | Original numerical kernel observes its directly bound M07 word; no reset or intervening dispatch | M07, M06 |
+| Numerical input | That same upstream kernel reads the canonical received payload | M02, M06 |
 
-The receive destination/value and repost fields occupy the same 128-byte aligned receive record. Native TX discovery depth is 0 for one stream; native RX discovery depth is 1 from `wr_id`. TX has three accepted-path load instructions, all from one M04 cell. RX has four through repost: two from the native completion and two from its directly addressed record. Neither accepted path reloads a spilled register. The provider's own loads, GPU command-launch cost, coherence cost, and full store-to-consumer latency remain unmeasured.
+The receive destination/value and repost fields occupy the same 128-byte aligned receive record. Native TX discovery depth is 0 for one stream; native RX discovery depth is 1 from `wr_id`. TX has three accepted-path load instructions, all from one M04 cell. RX has four through repost: two from the native completion and two from its directly addressed record. Neither accepted path reloads a spilled register. The provider's own loads, coherence cost, and full store-to-consumer latency remain unmeasured.
 
 | Deleted execution | Replacement |
 | --- | --- |
+| Standalone receive kernel, completion reset and subsequent numerical dispatch | M07 is directly bound inside the actual numerical entry; immutable completion words are prepared for each requested step, and M08 directly preposts the next request |
+| Per-record provider-function load and repeated receive identity | Register-held provider function plus precomputed next-request binding in the same record line |
 | Scan every layer's SEND cell on each empty probe | Register-held next cell, plus bounded independent-stream cursors |
 | One native QP per SEND and receive transfer | Prepared FIFO per independent channel and invocation slot |
 | Per-completion invocation decrement, generation advance and status update | No replacement; these values had no reader in the decode chain |
@@ -59,7 +61,7 @@ The receive destination/value and repost fields occupy the same 128-byte aligned
 | GPU consumer waiting after native/control-link failure until a separate client signal | M12's existing cancellation operand is bound to `link_stop` during preparation; only the error branch records abandonment, checked by the caller after GPU retirement |
 | Default WebGPU robustness and integer division/modulo polyfills in generated numerical code | Reference compiler toggles realized in M06 before compilation; native subgroup-matrix feature and limits exposed at setup |
 
-The GPU handoff is inside the prepared indirect numerical program. The requested steps and M13 boundary copies are submitted together; numerical dispatches are still replayed, not across-step resident. An accepted CQ publishes the actual transport completion; no additional generation identity is computed. A new generation cannot reuse a layer contribution before both ranks have consumed the preceding step's dependent layer chain. This graph fact is not implemented as a reuse guard. Paired execution is recorded in D0; it does not establish the required speedup or crossing latency.
+The GPU handoff is inside the actual numerical kernel in the prepared indirect program. Entry-prefix compilation and selection happen only during recording; no compiler description is traversed at execution. Each requested step has a prepared native range with distinct completion bindings, while pipelines and numerical storage remain shared. The requested steps and M13 boundary copies are submitted together; numerical dispatches are still replayed, not across-step resident. An accepted CQ publishes the actual transport completion; no additional generation identity is computed. A new generation cannot reuse a layer contribution before both ranks have consumed the preceding step's dependent layer chain. This graph fact is not implemented as a reuse guard. Paired execution is recorded in D0; it does not establish the required speedup or crossing latency.
 
 | Device boundary copy, source operations | D0 object |
 | --- | --- |

@@ -3,7 +3,7 @@
 
 /* design/algorithm-sources.md#resident-metal */
 /* design/prepared-machine.md#M07 */
-int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mesh_metal_transport *transport){
+int mesh_metal_transport_create(struct mesh_ctx *context,void *device,uint32_t invocations,struct mesh_metal_transport *transport){
   NSString *source=@"#include <metal_stdlib>\n"
     "#pragma METAL internals : enable\n"
     "using namespace metal;\n"
@@ -19,33 +19,17 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
     "*destination=records[i].argument;"
     "}"
     "atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(3));"
-    "}\n"
-    "kernel void mesh_consume(volatile coherent(system) device ulong *completion [[buffer(0)]],"
-    "volatile coherent(system) device uint *stop [[buffer(1)]]) {"
-    "for(;;) {"
-    "atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(3));"
-    "if(*completion)break; if(*stop){stop[1]=1;return;}"
-    "}"
-    "*completion=0;"
-    "atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(3));"
     "}\n";
   *transport=(struct mesh_metal_transport){0};
   NSError *error=nil;
   id<MTLLibrary> library=[(id<MTLDevice>)device newLibraryWithSource:source options:nil error:&error];
   if(!library){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);return EINVAL;}
-  void **pipelines[]={&transport->publish,&transport->consume};
-  NSArray *names=@[@"mesh_publish",@"mesh_consume"];
-  for(unsigned i=0;i<2;i++){
-    id<MTLFunction> function=[library newFunctionWithName:names[i]];
-    MTLComputePipelineDescriptor *descriptor=[MTLComputePipelineDescriptor new];
-    descriptor.computeFunction=function;descriptor.supportIndirectCommandBuffers=YES;
-    *pipelines[i]=[(id<MTLDevice>)device newComputePipelineStateWithDescriptor:descriptor options:0 reflection:nil error:&error];
-    [descriptor release];[function release];
-    if(!*pipelines[i]){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);[library release];mesh_metal_transport_destroy(transport);return EINVAL;}
-  }
-  [library release];
-  transport->completion=[(id<MTLDevice>)device newBufferWithBytesNoCopy:context->M length:context->M->notice_off
-    options:MTLResourceStorageModeShared deallocator:nil];
+  id<MTLFunction> function=[library newFunctionWithName:@"mesh_publish"];
+  MTLComputePipelineDescriptor *descriptor=[MTLComputePipelineDescriptor new];
+  descriptor.computeFunction=function;descriptor.supportIndirectCommandBuffers=YES;
+  transport->publish=[(id<MTLDevice>)device newComputePipelineStateWithDescriptor:descriptor options:0 reflection:nil error:&error];
+  [descriptor release];[function release];[library release];
+  if(!transport->publish){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);return EINVAL;}
   /* design/prepared-machine.md#M17 */
   transport->publication=[(id<MTLDevice>)device newBufferWithBytesNoCopy:(char *)context->M+context->M->notice_off
     length:context->M->data_off-context->M->notice_off
@@ -57,30 +41,39 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
   /* design/prepared-machine.md#M12 */
   for(uint32_t p=0;p<context->M->links;p++){
     struct mesh_tx *tx=(void *)mesh_events(context->M,mesh_notice_queue(context->M,context->client,p));
-    tx->cancel=(uintptr_t)address-(uintptr_t)context->M;
+    tx->cancel=(uintptr_t)address-(uintptr_t)context->M;tx->invocations=invocations;
   }
   transport->stop=[(id<MTLDevice>)device newBufferWithBytesNoCopy:address length:context->M->pgsz
     options:MTLResourceStorageModeShared deallocator:nil];
-  if(!transport->completion||!transport->publication||!transport->stop){mesh_metal_transport_destroy(transport);return ENOMEM;}
+  if(!transport->publication||!transport->stop){mesh_metal_transport_destroy(transport);return ENOMEM;}
   return 0;
 }
 
 /* design/algorithm-sources.md#resident-metal */
-/* design/prepared-machine.md#M04 */
 /* design/prepared-machine.md#M07 */
-void mesh_metal_transfer_encode(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  void *command,void *operand,struct mesh_section section,int receive){
+int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
+  struct mesh_section operand,uint32_t invocations,struct mesh_metal_input *input){
+  struct mesh_section words;
+  int status=mesh_section_create(context,8*(uint64_t)invocations,1,MESH_ABSENT,&words);
+  if(status)return status;
+  void *address=mesh_section_address(context,words,0);
+  memset(address,0,words.bytes);
+  for(uint32_t k=0;k<operand.stride;k++)
+    mesh_publication_at(context->M,operand.first+k)->device_input=(uintptr_t)address-(uintptr_t)context->M;
+  id<MTLDevice> device=[(id<MTLBuffer>)transport->publication device];
+  *input=(struct mesh_metal_input){.completion=[device newBufferWithBytesNoCopy:address
+    length:words.pages*context->M->pgsz options:MTLResourceStorageModeShared deallocator:nil],
+    .stop=transport->stop,.stride=8};
+  return input->completion?0:ENOMEM;
+}
+
+/* design/algorithm-sources.md#resident-metal */
+/* design/prepared-machine.md#M04 */
+/* design/prepared-machine.md#M10 */
+void mesh_metal_publish_encode(struct mesh_ctx *context,struct mesh_metal_transport *transport,
+  void *command,void *operand,struct mesh_section section){
   id<MTLComputeCommandEncoder> encoder=command;
   id<MTLBuffer> payload=operand;
-  struct mesh_publication *publication=mesh_publication_at(context->M,section.first);
-  if(receive){
-    publication->device_input=1;
-    [encoder setComputePipelineState:transport->consume];
-    [encoder setBuffer:transport->completion offset:(uintptr_t)&publication->argument-(uintptr_t)context->M atIndex:0];
-    [encoder setBuffer:transport->stop offset:0 atIndex:1];
-    [encoder useResource:payload usage:MTLResourceUsageWrite];
-    [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
-  }else{
     uint32_t extent[]={(uint32_t)((section.bytes+3)/4),mesh_publication_prepare(context->M,section.first,NULL)};
     if(!extent[1])return;
     struct mesh_section records;
@@ -100,12 +93,10 @@ void mesh_metal_transfer_encode(struct mesh_ctx *context,struct mesh_metal_trans
     [encoder useResource:memory usage:MTLResourceUsageWrite];
     [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
     [bindings release];
-  }
 }
 
 /* design/algorithm-sources.md#resident-metal */
 void mesh_metal_transport_destroy(struct mesh_metal_transport *transport){
-  [(id)transport->completion release];[(id)transport->publication release];[(id)transport->publish release];
-  [(id)transport->consume release];[(id)transport->stop release];
+  [(id)transport->publication release];[(id)transport->publish release];[(id)transport->stop release];
   *transport=(struct mesh_metal_transport){0};
 }

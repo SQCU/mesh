@@ -14,13 +14,13 @@ _Static_assert(sizeof(struct ibv_send_wr *)==8,"M15");
 struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
   struct ibv_sge span;
-  int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **);
+  struct ibv_recv_wr *next;
   struct ibv_qp *pair;
   _Atomic uint64_t *input;
   uint64_t argument;
 };
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
-  offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,post)==48 &&
+  offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,next)==48 &&
   offsetof(struct prepared_receive,input)==64 && offsetof(struct prepared_receive,argument)==72,"M08 M09");
 struct mesh_link {
   pthread_t workers[3];
@@ -111,9 +111,11 @@ static int link_configure(void *state,int socket,uint64_t client){
   struct mesh_send *last[link->qps],*repeat[link->qps];
   memset(last,0,sizeof last);memset(repeat,0,sizeof repeat);
   /* design/prepared-machine.md#M08 */
-  link->receive=aligned_alloc(128,(size_t)m->rows*sizeof *link->receive);
+  uint32_t invocations=tx->invocations?tx->invocations:1;
+  size_t receive_count=(size_t)link->provider.completion_entries[MESH_RECEIVE]*invocations;
+  link->receive=aligned_alloc(128,(receive_count?receive_count:1)*sizeof *link->receive);
   if(!link->receive)return -1;
-  uint32_t next=0;
+  uint32_t next=0,received=0;
   for(uint32_t q=0;q<m->qps;q++){
     uint32_t channel=link->index*m->qps+q;
     uint32_t counts[2]={atomic_load(mesh_order_length(m,client,channel,MESH_SEND)),atomic_load(mesh_order_length(m,client,channel,MESH_RECEIVE))},peer_counts[2];
@@ -165,20 +167,21 @@ static int link_configure(void *state,int socket,uint64_t client){
           /* design/prepared-machine.md#M08 */
           /* design/prepared-machine.md#M09 */
           struct mesh_queue *queue=&link->provider.queues[q*tx->slots+slot];
-          struct prepared_receive *record=link->receive+row+k;
+          struct prepared_receive *records=link->receive+(size_t)received++*invocations;
           struct mesh_publication *delivery=mesh_publication_at(m,row+k);
           uintptr_t input=(uintptr_t)&delivery->argument;
-          uint64_t argument=delivery->device_input;
-          if(!delivery->device_input && delivery->sends){
-            input=(uintptr_t)m+delivery->targets[0].stream;
-            argument=1;
+          if(delivery->device_input)input=(uintptr_t)m+delivery->device_input;
+          else if(delivery->sends)input=(uintptr_t)m+delivery->targets[0].stream;
+          for(uint32_t t=0;t<invocations;t++){
+            struct prepared_receive *record=records+t;
+            *record=(struct prepared_receive){
+              .request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
+              .span=span,.input=(_Atomic uint64_t *)(input+(delivery->device_input?8*(size_t)t:0)),
+              .argument=delivery->device_input?(k+1==chunks):1,
+              .next=&records[t+1<invocations?t+1:0].request,.pair=queue->pair};
           }
-          *record=(struct prepared_receive){
-            .request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
-            .span=span,.input=(_Atomic uint64_t *)input,.argument=argument,
-            .post=queue->receive,.pair=queue->pair};
           struct ibv_recv_wr *bad;
-          int error=record->post(record->pair,&record->request,&bad);
+          int error=queue->receive(queue->pair,&records->request,&bad);
           if(error){free(peer);errno=error<0?-error:error;return -1;}
         }
       }
@@ -248,6 +251,7 @@ static void *link_receive_progress(void *argument){
   struct mesh_link *link=argument;
   struct mesh_queue queue=link->provider.queues[0];
   struct ibv_wc *completion=link->completion[MESH_RECEIVE];
+  int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=queue.receive;
   pthread_setname_np("mesh.rdma.receive");
   while(atomic_load_explicit(&link->progressing,memory_order_acquire)){
     int count=queue.poll[MESH_RECEIVE](queue.completions[MESH_RECEIVE],1,completion);
@@ -258,7 +262,7 @@ static void *link_receive_progress(void *argument){
     struct prepared_receive *record=(void *)(uintptr_t)completion->wr_id;
     atomic_store_explicit(record->input,record->argument,memory_order_release);
     struct ibv_recv_wr *bad;
-    int error=record->post(record->pair,&record->request,&bad);
+    int error=post(record->pair,record->next,&bad);
     if(error){link_error(link,error<0?-error:error,1);return NULL;}
   }
   return NULL;
