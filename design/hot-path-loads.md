@@ -26,16 +26,15 @@ M08 requests user-interactive QoS in `pthread_create` attributes and destroys th
 | Publish native completion | Release-store the value at that destination | M07's directly bound completion word |
 | Receive repost binding | Load next request and QP at receive record +64 | M08 |
 | Repost | Call the register-held provider function with the prepared next request | M08 |
-| GPU observation | Single-SIMD workgroup: every lane performs its system-scope fence and coherent completion read, broadcasting the predicate before branching. Larger workgroup: thread zero observes. Shutdown is read only while the dependency is absent | M07, M12 |
-| Local cancellation outcome | Single-SIMD consumer: broadcast stop predicate, lane-zero abandonment store on cancellation, uniform return. Larger group: cancellation value in static threadgroup scratch | M25; no SHM access |
-| Workgroup handoff | Single-SIMD consumer: no memory handoff and no barrier; each lane has fenced its own reads. Larger group: threadgroup/device barrier and scratch read | M25; no additional SHM load or host action |
+| GPU observation | Workgroup thread zero performs the system-scope fence and coherent completion read; shutdown is read only while the dependency is absent | M07, M12 |
+| Local cancellation outcome | Thread zero stores zero to static threadgroup scratch, changing it to one only on cancellation | M25; no SHM access |
+| Workgroup handoff | Threadgroup/device barrier, then one local scratch read per numerical thread; a cancelled group returns together | M25; no additional SHM load or host action |
 | Numerical consumer entry | Original numerical kernel observes its directly bound M07 word; no reset or intervening dispatch | M07, M06 |
 | Numerical input | That same upstream kernel reads the canonical received payload | M02, M06 |
 
 The receive destination/value and next-request/QP fields occupy one aligned 32-byte line at +64 within the 128-byte receive record. Native TX discovery depth is 0 for one stream; native RX discovery depth is 1 from `wr_id`. TX has three accepted-path load instructions, all from one M04 cell. RX has four through repost: two from the native completion and two from its directly addressed record. Neither accepted path reloads a spilled register. The provider's own loads, coherence cost, and full store-to-consumer latency remain unmeasured.
 
 | Deleted execution | Replacement |
-| Threadgroup scratch stores/loads and full-group handoff inside single-SIMD receive consumers | M25 direct per-lane observation with uniform SIMD predicates; no scratch or barrier. Selection uses bound group size and native execution width at preparation. Numerical instructions are unchanged |
 | Main-thread polling of client/configuration throughout idle time and every active invocation | M26 OS notification on the existing shared lifecycle word. Setup, retirement and explicit shutdown notify once; the main thread consumes no polling core. Native TX/RX and publication issue no wait/wake call. |
 | Publication's payload reread/rewrite loop, extent buffer, loop indexing and threadgroup barrier | Original numerical stores perform the system-coherent write/fence in M06. M10 runs one thread per prepared destination and writes its SEND cell. |
 | Implicit all-rank publication destinations | M04/M08 bind each output's explicit destination list during preparation. No runtime route choice or inference remains. |
