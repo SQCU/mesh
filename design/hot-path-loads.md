@@ -46,6 +46,7 @@ The receive destination/value and repost fields occupy the same 128-byte aligned
 | Metal 3 interval submission and implicit barriers on both sides of every ICB range | M19 native Metal 4 submission, with one encoded dependency at each numerical/boundary-copy cut; M20 measures only the complete decode interval and M21 reports final retirement once |
 | Exported cache-index temporaries across incompatible host/GPU physical layouts | Original expressions retained with consumers during graph preparation (M15) |
 | Resource-array declaration at numerical submission | One prepared native residency set (M06) |
+| Native command bindings unused by the reflected shader, and unoptimized repeated command state | M06 encodes only used binding slots and runs Apple’s native ICB optimizer during preparation, before transport starts; replay uses the complete optimized ranges |
 | Separate native Metal numerical delegate and its queue-residency bookkeeping | Actual benchmark WebGPU provider; prepared Metal commands and canonical host-mapped operands |
 | Vocabulary BITCAST, concatenation, slicing and candidate-array construction | M16 direct gather/pair store and direct MAXLOC comparison, bound before recording |
 | Per-binding WebGPU allocation and separate numerical Metal aliases | One native GPU resource per M01 operand; typed LiteRT views and native commands share it |
