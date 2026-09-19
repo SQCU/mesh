@@ -6,8 +6,8 @@ These are the emitted instructions in `rdma/.build/mesh-flow.s`, produced by `ma
 | --- | --- | --- |
 | GPU payload visibility | Original producer value is stored through a system-coherent pointer, followed by a system-scope fence; the typed lowering is forced inline | M01, M06 |
 | Producer-to-publication order | Prepared M06 dispatch barrier from the declared operand read dependency, retained before the fused consumer; no payload load | M06, M10 |
-| GPU destination | Read prepared publication record's destination and argument; fused entry runs this in its existing observer lane before receive observation | M10; `prepared_publication`, 32 bytes |
-| GPU publication | Store argument to the already prepared SEND ready cell; system-scope fence | M04 |
+| GPU destination | Fused entry uses destination and argument literals specialized at preparation, with zero record loads; standalone publication reads the prepared record | M10; `prepared_publication`, 32 bytes, consumed during fused-entry construction |
+| GPU publication | Store argument directly to the prepared SEND ready cell; system-scope fence | M04 |
 | TX poll | `ldapr x9, [x8]` | M04; current cell address held in `x8` |
 | Native request and next cell | `ldp x1, x21, [x8, #16]` | M04; both fields in that same 32-byte cell |
 | Accept publication | `str xzr, [x8]` | M04 |
