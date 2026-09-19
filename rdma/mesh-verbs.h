@@ -20,7 +20,7 @@
 #include <time.h>
 
 #define QD 4095
-struct mesh_wire { char *data; size_t length,region_extent; struct ibv_sge *spans; };
+struct mesh_wire { char *data; size_t length; struct ibv_sge *spans; };
 struct mesh_device {
   const char *name;
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
@@ -50,7 +50,6 @@ struct mesh_verbs {
 /* design/algorithm-sources.md#programtensor */
 static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
   size_t payload=(size_t)m->block*m->pgsz,blocks=mesh_blocks(m);
-  wire->region_extent=((size_t)1<<30)/payload*payload;
   wire->length=blocks*payload;
   wire->data=mmap(NULL,wire->length,PROT_READ|PROT_WRITE,MAP_SHARED,file,(off_t)m->data_off);
   if(wire->data==MAP_FAILED){wire->data=NULL;return -1;}
@@ -196,12 +195,15 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
   if(!device->domain)device->domain=ibv_alloc_pd(device->context);
   if(!device->domain){error=errno;goto done;}
   size_t stride=(size_t)m->block*m->pgsz,span=(size_t)mesh_blocks(m)*stride;
-  size_t regions=(span+wire->region_extent-1)/wire->region_extent;
+  /* design/prepared-machine.md#M09 */
+  size_t limit=capabilities.max_mr_size<span?capabilities.max_mr_size:span;
+  size_t extent=limit/stride*stride;
+  size_t regions=(span+extent-1)/extent;
   if(regions>(size_t)capabilities.max_mr){error=ENOMEM;goto done;}
   if(!device->regions)device->regions=calloc(regions,sizeof *device->regions);
   if(!device->regions){error=ENOMEM;goto done;}
   while(device->region_count<regions){
-    size_t offset=(size_t)device->region_count*wire->region_extent,end=offset+wire->region_extent;
+    size_t offset=(size_t)device->region_count*extent,end=offset+extent;
     device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
     if(!device->regions[device->region_count]){error=errno;goto done;}
     device->region_count++;
@@ -210,7 +212,7 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
   if(!device->spans){error=ENOMEM;goto done;}
   for(size_t i=0;i<mesh_blocks(m);i++){
     device->spans[i]=wire->spans[i];
-    device->spans[i].lkey=device->regions[i*stride/wire->region_extent]->lkey;
+    device->spans[i].lkey=device->regions[i*stride/extent]->lkey;
   }
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity){error=EOPNOTSUPP;goto done;}
@@ -226,7 +228,8 @@ done:
 static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
   if(device_up(provider->device,provider->wire,m))return -1;
   struct ibv_port_attr pa;
-  if(ibv_query_port(provider->device->context,1,&pa) || pa.state!=IBV_PORT_ACTIVE)return -1;
+  if(ibv_query_port(provider->device->context,1,&pa))return -1;
+  if(pa.state!=IBV_PORT_ACTIVE){errno=ENETDOWN;return -1;}
   provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+UINT64_C(30000000000);
   int f=oob(provider,m,client);
   if(f<0)return -1;

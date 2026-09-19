@@ -100,7 +100,8 @@ void mesh_metal_transfer_encode(struct mesh_ctx *context,struct mesh_metal_trans
     [encoder setBuffer:transport->stop offset:0 atIndex:1];
     [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
   }else{
-    uint32_t extent[]={(uint32_t)((section.bytes+3)/4),publication->sends};
+    uint32_t extent[]={(uint32_t)((section.bytes+3)/4),mesh_publication_prepare(context->M,section.first,NULL)};
+    if(!extent[1])return;
     struct mesh_section records;
     int status=mesh_section_create(context,extent[1]*sizeof(struct prepared_publication),1,MESH_ABSENT,&records);
     if(status)[NSException raise:NSMallocException format:@"publication allocation: %d",status];

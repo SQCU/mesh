@@ -33,23 +33,6 @@ static int mesh_transfer_compare(const void *a,const void *b){
 int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots){
   struct hdr *m=context->M;
   if(!slots || slots>mesh_rows(m))return EINVAL;
-  /* design/prepared-machine.md#M05 */
-  m->instance_count[context->client>>63]=slots;
-  uint32_t recurring=0,shared=0;
-  for(uint32_t q=0;q<m->links*m->qps;q++)for(int direction=0;direction<2;direction++){
-    uint32_t count=atomic_load_explicit(mesh_order_length(m,context->client,q,direction),memory_order_relaxed);
-    struct mesh_transfer *transfers=mesh_transfers(m,context->client,q,direction);
-    for(uint32_t i=0;i<count;i++){if(transfers[i].stride)recurring++;else shared++;}
-  }
-  struct mesh_instance *instances=mesh_instances(m,context->client);
-  struct mesh_status initial=recurring+shared?(struct mesh_status){MESH_RESULT(MESH_RESULT_BUSY,0,0),0}:(struct mesh_status){0,UINT64_MAX};
-  for(uint32_t slot=0;slot<slots;slot++){
-    instances[slot].count=recurring;instances[slot].stride=slots;
-    atomic_store_explicit(&instances[slot].invocation,slot,memory_order_relaxed);
-    atomic_store_explicit(&instances[slot].remaining,recurring+shared,memory_order_relaxed);
-    atomic_store_explicit(&instances[slot].status,initial,memory_order_relaxed);
-  }
-  atomic_store_explicit(&m->result[context->client>>63],initial,memory_order_relaxed);
   /* design/prepared-machine.md#M04 */
   for(uint32_t p=0;p<m->links;p++){
     uint64_t base=m->notice_off+(uint64_t)mesh_notice_queue(m,context->client,p)*m->notice_bytes;
