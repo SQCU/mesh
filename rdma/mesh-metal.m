@@ -2,33 +2,37 @@
 #include "mesh-metal.h"
 
 /* design/algorithm-sources.md#programtensor */
+static void mesh_webgpu_borrowed(void *context){(void)context;}
+
+/* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M02 */
-LiteRtStatus mesh_metal_bind(struct mesh_ctx *context,struct mesh_section section,uint32_t slot,
-  LiteRtEnvironment environment,void *device,const LiteRtRankedTensorType *type,
-  LiteRtTensorBufferType storage,struct mesh_metal_operand *operand){
-  *operand=(struct mesh_metal_operand){0};
+LiteRtStatus mesh_webgpu_bind(struct mesh_ctx *context,struct mesh_section section,uint32_t slot,
+  LiteRtEnvironment environment,WGPUDevice device,const LiteRtRankedTensorType *type,
+  LiteRtTensorBufferType storage,struct mesh_webgpu_operand *operand){
+  *operand=(struct mesh_webgpu_operand){0};
   if(storage==kLiteRtTensorBufferTypeHostMemory)
     return LiteRtCreateTensorBufferFromHostMemory(type,mesh_section_address(context,section,slot),
       section.bytes,NULL,&operand->tensor);
   size_t page=context->M->pgsz;
-  id<MTLBuffer> buffer=[(id<MTLDevice>)device
-    newBufferWithBytesNoCopy:mesh_section_address(context,section,slot)
-    length:(section.bytes+page-1)/page*page options:MTLResourceStorageModeShared
-    deallocator:nil];
-  if(!buffer)return kLiteRtStatusErrorMemoryAllocationFailure;
-  LiteRtStatus status=LiteRtCreateTensorBufferFromMetalMemory(environment,type,storage,
-    buffer,section.bytes,NULL,&operand->tensor);
-  if(status){[buffer release];return status;}
-  operand->buffer=buffer;
-  return kLiteRtStatusOk;
+  WGPUBufferHostMappedPointer memory=WGPU_BUFFER_HOST_MAPPED_POINTER_INIT;
+  memory.pointer=mesh_section_address(context,section,slot);
+  memory.disposeCallback=mesh_webgpu_borrowed;
+  WGPUBufferDescriptor descriptor=WGPU_BUFFER_DESCRIPTOR_INIT;
+  descriptor.nextInChain=&memory.chain;
+  descriptor.size=(section.bytes+page-1)/page*page;
+  descriptor.usage=WGPUBufferUsage_Storage|WGPUBufferUsage_CopySrc|WGPUBufferUsage_CopyDst;
+  operand->buffer=wgpuDeviceCreateBuffer(device,&descriptor);
+  if(!operand->buffer)return kLiteRtStatusErrorMemoryAllocationFailure;
+  return LiteRtCreateTensorBufferFromWebGpuBuffer(environment,type,storage,
+    (LiteRtWGPUBuffer)operand->buffer,section.bytes,NULL,&operand->tensor);
 }
 
 /* design/algorithm-sources.md#programtensor */
-void mesh_metal_unbind(struct mesh_metal_operand *operand){
+void mesh_webgpu_unbind(struct mesh_webgpu_operand *operand){
   if(operand->tensor)LiteRtDestroyTensorBuffer(operand->tensor);
-  [(id<MTLBuffer>)operand->buffer release];
-  *operand=(struct mesh_metal_operand){0};
+  if(operand->buffer)wgpuBufferRelease(operand->buffer);
+  *operand=(struct mesh_webgpu_operand){0};
 }
 
 /* design/algorithm-sources.md#resident-metal */
