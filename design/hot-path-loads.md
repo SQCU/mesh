@@ -4,7 +4,8 @@ These are the emitted instructions in `rdma/.build/mesh-flow.s`, produced by `ma
 
 | Value-ready to SEND post, one prepared stream | Memory operation | D0 object |
 | --- | --- | --- |
-| GPU payload visibility | Aligned 16-byte system-coherent payload reads and writes, system-scope fence, threadgroup barrier in the measured 256-lane publication workgroup | M01, M07 |
+| GPU payload visibility | Original producer value is stored through a system-coherent pointer, followed by a system-scope fence; the typed lowering is forced inline | M01, M06 |
+| Producer-to-publication order | Prepared M06 dispatch barrier from the publication command's declared operand read dependency; no payload load | M06, M10 |
 | GPU destination | Read prepared publication record's destination and argument | M10; `prepared_publication`, 32 bytes |
 | GPU publication | Store argument to the already prepared SEND ready cell; system-scope fence | M04 |
 | TX poll | `ldapr x9, [x8]` | M04; current cell address held in `x8` |
@@ -32,7 +33,7 @@ M08 requests user-interactive QoS in `pthread_create` attributes and destroys th
 The receive destination/value and next-request/QP fields occupy one aligned 32-byte line at +64 within the 128-byte receive record. Native TX discovery depth is 0 for one stream; native RX discovery depth is 1 from `wr_id`. TX has three accepted-path load instructions, all from one M04 cell. RX has four through repost: two from the native completion and two from its directly addressed record. Neither accepted path reloads a spilled register. The provider's own loads, coherence cost, and full store-to-consumer latency remain unmeasured.
 
 | Deleted execution | Replacement |
-| --- | --- |
+| Publication's payload reread/rewrite loop, extent buffer, loop indexing and threadgroup barrier | Original numerical stores perform the system-coherent write/fence in M06. M10 runs one thread per prepared destination and writes its SEND cell. |
 | Implicit all-rank publication destinations | M04/M08 bind each output's explicit destination list during preparation. No runtime route choice or inference remains. |
 | Numerical shader loads of fixed `Scalars` integer vectors and address arithmetic dependent on them | M06 reads those setup-only blocks after upload, substitutes the integer literals before compilation, and records the resulting native pipeline; reflected unused bindings are omitted from replay |
 | Packed two-bit weights extracted by float conversion, repeated division, floor and subtraction | M06 compiles equivalent unsigned shifts and masks before the original scale/bias and multiply-accumulate; the packed storage and native output are unchanged |

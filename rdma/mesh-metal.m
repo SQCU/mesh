@@ -8,16 +8,10 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,uint32_t i
     "#pragma METAL internals : enable\n"
     "using namespace metal;\n"
     "struct Publication { ulong destination,argument,padding[2]; };\n"
-    "kernel void mesh_publish(volatile coherent(system) device uint4 *payload [[buffer(0)]],"
-    "constant uint2 &extent [[buffer(1)]],constant Publication *records [[buffer(2)]],"
-    "uint lane [[thread_index_in_threadgroup]]) {"
-    "for(uint i=lane;i<extent.x;i+=256)payload[i]=payload[i];"
-    "atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(3));"
-    "threadgroup_barrier(mem_flags::mem_device);"
-    "for(uint i=lane;i<extent.y;i+=256) {"
-    "auto destination=(volatile coherent(system) device ulong *)records[i].destination;"
-    "*destination=records[i].argument;"
-    "}"
+    "kernel void mesh_publish(constant Publication *records [[buffer(0)]],"
+    "uint lane [[thread_position_in_grid]]) {"
+    "auto destination=(volatile coherent(system) device ulong *)records[lane].destination;"
+    "*destination=records[lane].argument;"
     "atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(3));"
     "}\n";
   *transport=(struct mesh_metal_transport){0};
@@ -75,24 +69,24 @@ void mesh_metal_publish_encode(struct mesh_ctx *context,struct mesh_metal_transp
   void *command,void *operand,struct mesh_section section){
   id<MTLComputeCommandEncoder> encoder=command;
   id<MTLBuffer> payload=operand;
-  uint32_t extent[]={(uint32_t)((section.bytes+15)/16),mesh_publication_prepare(context->M,section.first,NULL)};
-  if(!extent[1])return;
+  uint32_t count=mesh_publication_prepare(context->M,section.first,NULL);
+  if(!count)return;
   struct mesh_section records;
-  int status=mesh_section_create(context,extent[1]*sizeof(struct prepared_publication),1,MESH_ABSENT,&records);
+  int status=mesh_section_create(context,count*sizeof(struct prepared_publication),1,MESH_ABSENT,&records);
   if(status)[NSException raise:NSMallocException format:@"publication allocation: %d",status];
   struct prepared_publication *prepared=mesh_section_address(context,records,0);
   mesh_publication_prepare(context->M,section.first,prepared);
   /* design/prepared-machine.md#M17 */
   id<MTLBuffer> memory=transport->publication;
-  for(uint32_t i=0;i<extent[1];i++)prepared[i].destination=memory.gpuAddress+prepared[i].destination-(uintptr_t)context->M-context->M->notice_off;
+  for(uint32_t i=0;i<count;i++)prepared[i].destination=memory.gpuAddress+prepared[i].destination-(uintptr_t)context->M-context->M->notice_off;
   id<MTLDevice> device=memory.device;
   id<MTLBuffer> bindings=[device newBufferWithBytesNoCopy:prepared length:records.pages*context->M->pgsz
     options:MTLResourceStorageModeShared deallocator:nil];
   [encoder setComputePipelineState:transport->publish];
-  [encoder setBuffer:payload offset:0 atIndex:0];[encoder setBytes:extent length:sizeof extent atIndex:1];
-  [encoder setBuffer:bindings offset:0 atIndex:2];
+  [encoder setBuffer:bindings offset:0 atIndex:0];
+  [encoder useResource:payload usage:MTLResourceUsageRead];
   [encoder useResource:memory usage:MTLResourceUsageWrite];
-  [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
+  [encoder dispatchThreads:MTLSizeMake(count,1,1) threadsPerThreadgroup:MTLSizeMake(MIN(count,32),1,1)];
   [bindings release];
 }
 
