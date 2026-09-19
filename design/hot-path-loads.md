@@ -5,8 +5,8 @@ These are the emitted instructions in `rdma/.build/mesh-flow.s`, produced by `ma
 | Value-ready to SEND post, one prepared stream | Memory operation | D0 object |
 | --- | --- | --- |
 | GPU payload visibility | Original producer value is stored through a system-coherent pointer, followed by a system-scope fence; the typed lowering is forced inline | M01, M06 |
-| Producer-to-publication order | Prepared M06 dispatch barrier from the declared operand read dependency, retained before the fused consumer; no payload load | M06, M10 |
-| GPU destination | Fused entry uses destination and argument literals specialized at preparation, with zero record loads; standalone publication reads the prepared record | M10; `prepared_publication`, 32 bytes, consumed during fused-entry construction |
+| Producer-to-publication order | Single-thread producer: publication follows its coherent output store in the same entry. Multiple-thread producers: prepared M06 dispatch barrier from the declared operand read dependency, retained before the fused consumer; no payload load | M06, M10 |
+| GPU destination | Fused producer exit or consumer entry uses destination and argument literals specialized at preparation, with zero record loads; standalone publication reads the prepared record | M10; `prepared_publication`, 32 bytes, consumed during fused-entry construction |
 | GPU publication | Store argument directly to the prepared SEND ready cell; system-scope fence | M04 |
 | TX poll | `ldapr x9, [x8]` | M04; current cell address held in `x8` |
 | Native request and next cell | `ldp x1, x21, [x8, #16]` | M04; both fields in that same 32-byte cell |
@@ -36,8 +36,9 @@ The receive destination/value and next-request/QP fields occupy one aligned 32-b
 
 | Deleted execution | Replacement |
 | Main-thread polling of client/configuration throughout idle time and every active invocation | M26 OS notification on the existing shared lifecycle word. Setup, retirement and explicit shutdown notify once; the main thread consumes no polling core. Native TX/RX and publication issue no wait/wake call. |
+| Publication delayed until the next consumer dispatch after a single-thread producer | M06 appends M10 literal stores at the producer entry exit. Preparation checks that publication reads the preceding producer outputs and adds no unrepresented resource conflict; no per-event eligibility check, buffer lookup, record load or workgroup rendezvous. The original coherent payload store and fence remain. |
 | Standalone publication dispatch before a global-index-only consumer whose grid fits one workgroup | M06 removes the recorded publication and binds its M10 records directly to the consumer. Preparation preserves global coordinates, moves the producer barrier with the publication, and carries its resource declarations. The existing observer publishes before polling; no extra barrier, completion counter or inter-workgroup dependency. |
-| Publication's payload reread/rewrite loop, extent buffer, loop indexing and threadgroup barrier | Original numerical stores perform the system-coherent write/fence in M06. M10 writes the prepared SEND cells from the fused consumer observer, or from the standalone publication for other geometries. |
+| Publication's payload reread/rewrite loop, extent buffer, loop indexing and threadgroup barrier | Original numerical stores perform the system-coherent write/fence in M06. M10 writes the prepared SEND cells at a qualifying producer exit, from the fused consumer observer, or from the standalone publication for other geometries. |
 | Implicit all-rank publication destinations | M04/M08 bind each output's explicit destination list during preparation. No runtime route choice or inference remains. |
 | Numerical shader loads of fixed `Scalars` integer and floating vectors and arithmetic dependent on them | M06 reads those setup-only blocks after upload, substitutes exact typed bit-pattern constants before compilation, and records the resulting native pipeline; reflected unused bindings are omitted from replay |
 | Packed two-bit weights extracted by float conversion, repeated division, floor and subtraction | M06 compiles equivalent unsigned shifts and masks before the original scale/bias and multiply-accumulate; the packed storage and native output are unchanged |
