@@ -49,6 +49,17 @@ struct mesh_link {
   struct ibv_wc *completion[2];
   _Atomic uint32_t *cancel;
 };
+/* design/prepared-machine.md#M26 */
+static _Atomic(struct hdr *) control_memory;
+/* design/algorithm-sources.md#meshresult */
+/* design/prepared-machine.md#M26 */
+static void stop_bridge(int signal){
+  int error=errno;
+  onsig(signal);
+  struct hdr *m=atomic_load_explicit(&control_memory,memory_order_relaxed);
+  if(m)mesh_control_notify(m);
+  errno=error;
+}
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M12 */
 static void link_stop(struct mesh_link *link){
@@ -424,7 +435,7 @@ int main(int argc,char **argv){
   uint64_t ram=0;size_t rl=sizeof ram;sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
   if(pct && length>(uint64_t)(pct/100*(double)ram))die("configured graph exceeds page capacity");
   if(layout){printf("%llu\n",(unsigned long long)length);return 0;}
-  atexit(down);struct sigaction sa={0};sa.sa_handler=onsig;
+  atexit(down);struct sigaction sa={0};sa.sa_handler=stop_bridge;
   sigaction(SIGINT,&sa,NULL);sigaction(SIGTERM,&sa,NULL);sigaction(SIGHUP,&sa,NULL);signal(SIGPIPE,SIG_IGN);
   shm_unlink(name);int fd=shm_open(name,O_CREAT|O_RDWR,MESH_MODE);if(fd<0)die("shm");
   if(ftruncate(fd,(off_t)length))die("ftruncate");fchmod(fd,MESH_MODE);
@@ -450,15 +461,19 @@ int main(int argc,char **argv){
   struct ibv_wc *completion_outputs=calloc(2*(link_count?link_count:1),sizeof *completion_outputs);
   if(!completion_outputs)die("completion output allocation");
   for(uint32_t p=0;p<link_count;p++)for(uint32_t d=0;d<2;d++)links[p].completion[d]=completion_outputs+d*link_count+p;
-  uint64_t retired=0;
+  /* design/prepared-machine.md#M26 */
+  atomic_store_explicit(&control_memory,m,memory_order_relaxed);
   atomic_store(&m->bridge_pid,(uint64_t)getpid());atomic_store(&m->port.phase,MESH_PAIRING);
   __sync_synchronize();m->magic=MESH_MAGIC;
   fprintf(stderr,"bridge node %d: %u links, %u queue pairs per link\n",me,link_count,qps);
   while(!stop){
-    uint64_t retirement=atomic_load_explicit(&m->retired,memory_order_acquire);
-    if(retired!=retirement){mesh_retired_release(m);retired=retirement;}
+    uint64_t notification=atomic_load_explicit(&m->control,memory_order_acquire);
+    mesh_retired_release(m);
     uint64_t client=atomic_load_explicit(&m->client,memory_order_acquire);
-    if(!client || atomic_load_explicit(&m->configured,memory_order_acquire)!=client)continue;
+    if(!client || atomic_load_explicit(&m->configured,memory_order_acquire)!=client){
+      if(!stop)os_sync_wait_on_address(&m->control,notification,sizeof m->control,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
+      continue;
+    }
     atomic_store_explicit(&m->device_client,client,memory_order_seq_cst);
     if(atomic_load_explicit(&m->client,memory_order_seq_cst)!=client || atomic_load_explicit(&m->configured,memory_order_seq_cst)!=client){atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);continue;}
     uint32_t started=0;
@@ -475,7 +490,10 @@ int main(int argc,char **argv){
       if(error){status=error;stop=1;break;}
       started++;
     }
-    while(!stop && atomic_load_explicit(&m->client,memory_order_acquire)==client){}
+    while(!stop && atomic_load_explicit(&m->client,memory_order_acquire)==client){
+      os_sync_wait_on_address(&m->control,notification,sizeof m->control,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
+      notification=atomic_load_explicit(&m->control,memory_order_acquire);
+    }
     for(uint32_t i=0;i<started;i++)link_stop(&links[i]);
     for(uint32_t i=0;i<started;i++)pthread_join(links[i].controller,NULL);
     atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);
@@ -494,5 +512,7 @@ int main(int argc,char **argv){
   }
   for(uint32_t i=0;i<device_count;i++)pthread_mutex_destroy(&devices[i].setup);
   free(completion_outputs);free(devices);free(links);munmap(wire.data,wire.length);free(wire.spans);
-  atomic_store(&m->port.phase,MESH_STOPPED);munmap(m,length);return status;
+  atomic_store(&m->port.phase,MESH_STOPPED);
+  atomic_store_explicit(&control_memory,NULL,memory_order_relaxed);
+  munmap(m,length);return status;
 }

@@ -96,6 +96,8 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots){
 int mesh_transfers_start(struct mesh_ctx *context){
   struct hdr *m=context->M;
   atomic_store_explicit(&m->configured,context->client,memory_order_release);
+  /* design/prepared-machine.md#M26 */
+  mesh_control_notify(m);
   for(uint32_t p=0;p<m->links;p++){
     uint32_t transfers=0;
     for(uint32_t q=0;q<m->qps;q++)for(int d=0;d<2;d++)transfers+=atomic_load(mesh_order_length(m,context->client,p*m->qps+q,d));

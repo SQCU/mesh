@@ -48,8 +48,9 @@ void mesh_retire(struct hdr *m,uint64_t client){
       mesh_bits_clear(m,MESH_ROW_OWN,row,1);
     }
   }
-  atomic_fetch_add_explicit(&m->retired,1,memory_order_release);
   atomic_store_explicit(&m->client,0,memory_order_release);
+  /* design/prepared-machine.md#M26 */
+  mesh_control_notify(m);
 }
 
 int mesh_attach(struct mesh_ctx *c,const char *name){

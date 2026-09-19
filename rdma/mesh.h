@@ -3,12 +3,13 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdatomic.h>
+#include <os/os_sync_wait_on_address.h>
 /* design/pages-and-functions.md#block-addressing */
 #define MESH_MAGIC 0x4d455348u
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 91u
+#define MESH_VERSION 92u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -58,9 +59,17 @@ struct hdr {
   _Atomic uint64_t configured;
   uint64_t planes_off,page_off,buffer_off,pool_off,link_off,target_off,order_off,notice_off,data_off,length;
   uint64_t notice_bytes,target_stride;
-  _Atomic uint64_t client,bridge_pid,device_client,serial,retired;
+  _Atomic uint64_t client,bridge_pid,device_client,serial,control;
   struct mesh_port_info port;
 };
+/* design/prepared-machine.md#M26 */
+_Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
+/* design/algorithm-sources.md#meshresult */
+/* design/prepared-machine.md#M26 */
+static inline void mesh_control_notify(struct hdr *m){
+  atomic_fetch_add_explicit(&m->control,1,memory_order_release);
+  os_sync_wake_by_address_all(&m->control,sizeof m->control,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+}
 /* design/algorithm-sources.md#programtensor */
 static inline uint32_t mesh_notice_queue(struct hdr *m,uint64_t owner,uint32_t queue){return (uint32_t)(owner>>63)*m->links+queue;}
 /* design/algorithm-sources.md#programcopy */

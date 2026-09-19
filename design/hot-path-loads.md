@@ -35,6 +35,7 @@ M08 requests user-interactive QoS in `pthread_create` attributes and destroys th
 The receive destination/value and next-request/QP fields occupy one aligned 32-byte line at +64 within the 128-byte receive record. Native TX discovery depth is 0 for one stream; native RX discovery depth is 1 from `wr_id`. TX has three accepted-path load instructions, all from one M04 cell. RX has four through repost: two from the native completion and two from its directly addressed record. Neither accepted path reloads a spilled register. The provider's own loads, coherence cost, and full store-to-consumer latency remain unmeasured.
 
 | Deleted execution | Replacement |
+| Main-thread polling of client/configuration throughout idle time and every active invocation | M26 OS notification on the existing shared lifecycle word. Setup, retirement and explicit shutdown notify once; the main thread consumes no polling core. Native TX/RX and publication issue no wait/wake call. |
 | Publication's payload reread/rewrite loop, extent buffer, loop indexing and threadgroup barrier | Original numerical stores perform the system-coherent write/fence in M06. M10 runs one thread per prepared destination and writes its SEND cell. |
 | Implicit all-rank publication destinations | M04/M08 bind each output's explicit destination list during preparation. No runtime route choice or inference remains. |
 | Numerical shader loads of fixed `Scalars` integer and floating vectors and arithmetic dependent on them | M06 reads those setup-only blocks after upload, substitutes exact typed bit-pattern constants before compilation, and records the resulting native pipeline; reflected unused bindings are omitted from replay |
@@ -83,5 +84,7 @@ The GPU handoff is inside the actual numerical kernel in the prepared indirect p
 | Store prepared mask word at its bound offset | M01, M13 |
 
 This boundary table states the shader source accesses, not an emitted GPU instruction count. It is outside both RDMA crossing transitions. After submission the host only observes completion of the requested interval and reads its outputs.
+
+M26 is outside both crossing transitions and outside decode steps. `mesh_transfers_start` stores the prepared client, advances the shared notification word and wakes the bridge main thread; `mesh_retire` stores the released client and notifies; explicit bridge shutdown advances the same word before wake. Main retains the notification value before reading control state and uses Apple's atomic compare-and-wait, so notification before sleep is observed without a timer. The native progress threads retain the same accepted-path load instructions and independent continuous polling.
 
 M22 diagnostic samples are native timestamp commands with indices and command-range cuts realized during preparation. `TRACE_CROSSINGS` samples one publication-to-first-numerical-consumer boundary per step and exposes the associated numerical-region duration; its precise samples perturb the sampled step and do not establish an H7 pass. With the option absent, no cut storage, subrange replay or additional timestamp is submitted; M20 remains the two endpoint samples.
