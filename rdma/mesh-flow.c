@@ -14,14 +14,14 @@ _Static_assert(sizeof(struct ibv_send_wr *)==8,"M15");
 struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
   struct ibv_sge span;
-  struct ibv_recv_wr *next;
+  _Alignas(32) struct ibv_recv_wr *next;
   struct ibv_qp *pair;
   _Atomic uint64_t *input;
   uint64_t argument;
 };
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
-  offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,next)==48 &&
-  offsetof(struct prepared_receive,input)==64 && offsetof(struct prepared_receive,argument)==72,"M08 M09");
+  offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,next)==64 &&
+  offsetof(struct prepared_receive,input)==80 && offsetof(struct prepared_receive,argument)==88,"M08 M09");
 struct mesh_link {
   pthread_t workers[3];
   uint32_t worker_count,publication_count,cursor_count,index;

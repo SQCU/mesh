@@ -21,15 +21,15 @@ The one-stream selection occurs at thread entry. For multiple independent stream
 | Native CQ polling | Provider writes the 48-byte completion at the poller's fixed output address | M11; native `ibv_wc`, constructed by `mesh-flow.c:401` |
 | Completion status | Load word at completion +8 | Same completion |
 | Native receive identity | Load pointer at completion +0 | Same completion; native `wr_id` |
-| Destination and value | Load pair at receive record +64 | M08 |
+| Destination and value | Load pair at receive record +80 | M08 |
 | Publish native completion | Release-store the value at that destination | M07's directly bound completion word |
-| Receive repost binding | Load next request and QP at receive record +48 | M08 |
+| Receive repost binding | Load next request and QP at receive record +64 | M08 |
 | Repost | Call the register-held provider function with the prepared next request | M08 |
 | GPU observation | System-scope fence, system-coherent read inside each actual numerical reader until the actual dependency arrives; explicit shutdown read only while absent | M07, M12 |
 | Numerical consumer entry | Original numerical kernel observes its directly bound M07 word; no reset or intervening dispatch | M07, M06 |
 | Numerical input | That same upstream kernel reads the canonical received payload | M02, M06 |
 
-The receive destination/value and repost fields occupy the same 128-byte aligned receive record. Native TX discovery depth is 0 for one stream; native RX discovery depth is 1 from `wr_id`. TX has three accepted-path load instructions, all from one M04 cell. RX has four through repost: two from the native completion and two from its directly addressed record. Neither accepted path reloads a spilled register. The provider's own loads, coherence cost, and full store-to-consumer latency remain unmeasured.
+The receive destination/value and next-request/QP fields occupy one aligned 32-byte line at +64 within the 128-byte receive record. Native TX discovery depth is 0 for one stream; native RX discovery depth is 1 from `wr_id`. TX has three accepted-path load instructions, all from one M04 cell. RX has four through repost: two from the native completion and two from its directly addressed record. Neither accepted path reloads a spilled register. The provider's own loads, coherence cost, and full store-to-consumer latency remain unmeasured.
 
 | Deleted execution | Replacement |
 | --- | --- |
