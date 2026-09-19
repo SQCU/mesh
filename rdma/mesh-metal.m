@@ -24,7 +24,7 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
     "volatile coherent(system) device uint *stop [[buffer(1)]]) {"
     "for(;;) {"
     "atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(3));"
-    "if(*completion)break; if(*stop)return;"
+    "if(*completion)break; if(*stop){stop[1]=1;return;}"
     "}"
     "*completion=0;"
     "atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(3));"
@@ -47,9 +47,14 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
   transport->memory=[(id<MTLDevice>)device newBufferWithBytesNoCopy:context->M length:context->M->data_off
     options:MTLResourceStorageModeShared deallocator:nil];
   struct mesh_section stop;
-  int status=mesh_section_create(context,4,1,MESH_ABSENT,&stop);
+  int status=mesh_section_create(context,2*sizeof(uint32_t),1,MESH_ABSENT,&stop);
   if(status){mesh_metal_transport_destroy(transport);return status;}
-  uint32_t *address=mesh_section_address(context,stop,0);*address=0;
+  uint32_t *address=mesh_section_address(context,stop,0);address[0]=address[1]=0;
+  /* design/prepared-machine.md#M12 */
+  for(uint32_t p=0;p<context->M->links;p++){
+    struct mesh_tx *tx=(void *)mesh_events(context->M,mesh_notice_queue(context->M,context->client,p));
+    tx->cancel=(uintptr_t)address-(uintptr_t)context->M;
+  }
   transport->stop=[(id<MTLDevice>)device newBufferWithBytesNoCopy:address length:context->M->pgsz
     options:MTLResourceStorageModeShared deallocator:nil];
   if(!transport->memory||!transport->stop){mesh_metal_transport_destroy(transport);return ENOMEM;}

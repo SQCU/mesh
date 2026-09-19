@@ -36,9 +36,12 @@ struct mesh_link {
   struct ibv_sge *spans;
   struct mesh_send *publications,**cursors;
   struct ibv_wc *completion[2];
+  _Atomic uint32_t *cancel;
 };
 /* design/algorithm-sources.md#meshresult */
+/* design/prepared-machine.md#M12 */
 static void link_stop(struct mesh_link *link){
+  if(link->cancel)atomic_store_explicit(link->cancel,1,memory_order_release);
   atomic_store_explicit(&link->progressing,0,memory_order_release);
   struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,0,NOTE_TRIGGER,0,0,0,0);
   kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
@@ -57,6 +60,8 @@ static int link_prepare(struct mesh_link *link){
   struct hdr *m=link->M;
   atomic_store_explicit(&link->receive_frame,0,memory_order_relaxed);
   struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,link->client,link->index));
+  /* design/prepared-machine.md#M12 */
+  link->cancel=tx->cancel?(void *)((char *)m+tx->cancel):NULL;
   link->publications=tx->cells;
   link->publication_count=tx->count*tx->slots+tx->once;
   uint64_t payload=(uint64_t)m->block*m->pgsz;
