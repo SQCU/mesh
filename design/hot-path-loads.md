@@ -33,6 +33,7 @@ The receive destination/value and next-request/QP fields occupy one aligned 32-b
 
 | Deleted execution | Replacement |
 | --- | --- |
+| Numerical shader loads of fixed `Scalars` integer vectors and address arithmetic dependent on them | M06 reads those setup-only blocks after upload, substitutes the integer literals before compilation, and records the resulting native pipeline; reflected unused bindings are omitted from replay |
 | Packed two-bit weights extracted by float conversion, repeated division, floor and subtraction | M06 compiles equivalent unsigned shifts and masks before the original scale/bias and multiply-accumulate; the packed storage and native output are unchanged |
 | Normalization sum's per-stride shared-memory barriers within one SIMD group | M06 lowers the normalization sum to two-level SIMD sums and one final shared broadcast, following upstream MLX; the recorded native pipeline replaces the old reduction, with two cross-SIMD barriers and no new dispatch |
 | Projection reduction's shared-memory stores, loads and barriers for strides contained in one SIMD group | M06 compiles register shuffles for those strides, retaining the descending sum order and original cross-SIMD exchanges; recording replaces the native pipeline rather than adding a dispatch |
