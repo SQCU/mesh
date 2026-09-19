@@ -155,6 +155,7 @@ static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t re
 }
 
 /* design/algorithm-sources.md#programcopy */
+/* design/prepared-machine.md#M08 */
 static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
   if(!pairing_active(m,client,provider->deadline))return -1;
   if(m->node>provider->peer){
@@ -172,9 +173,14 @@ static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
   struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC,.ai_flags=AI_NUMERICHOST|AI_NUMERICSERV},*addresses;
   if(getaddrinfo(provider->remote_address,provider->service,&hint,&addresses)){errno=EINVAL;return -1;}
   int socket=-1,error=EHOSTUNREACH;
-  for(struct addrinfo *a=addresses;a;a=a->ai_next){
-    socket=dial(a,m,client,provider->deadline);error=errno;
-    if(socket>=0 || error==ECANCELED || error==ETIMEDOUT)break;
+  for(;;){
+    if(!pairing_active(m,client,provider->deadline)){error=errno;break;}
+    for(struct addrinfo *a=addresses;a;a=a->ai_next){
+      socket=dial(a,m,client,provider->deadline);error=errno;
+      if(socket>=0 || error==ECANCELED || error==ETIMEDOUT)break;
+    }
+    if(socket>=0 || (error!=ECONNREFUSED && error!=ENETUNREACH && error!=EHOSTUNREACH))break;
+    poll(NULL,0,1);
   }
   freeaddrinfo(addresses);errno=error;return socket;
 }
