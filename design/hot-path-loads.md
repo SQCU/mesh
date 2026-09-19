@@ -48,6 +48,8 @@ The receive destination/value and repost fields occupy the same 128-byte aligned
 | Per-binding WebGPU allocation and separate numerical Metal aliases | One native GPU resource per M01 operand; typed LiteRT views and native commands share it |
 | Mesh-owned numerical-provider handles and import wrappers | Native imports and typed views are realized by the engine compiler setup |
 | Separate original prefix, FFN and finishing graph interfaces | One region between collective publication boundaries; original local edges stay inside upstream compilation |
+| Unconditional barrier before every recorded numerical command | M06 compiles RAW/WAR/WAW conflicts from pipeline reflection and indirect-resource declarations; access sets are absent from execution |
+| Separate publication buffer alias | The transport receives the existing canonical native buffer during setup; receive completion declares the external write to that resource |
 | Default WebGPU robustness and integer division/modulo polyfills in generated numerical code | Reference compiler toggles realized in M06 before compilation; native subgroup-matrix feature and limits exposed at setup |
 
 The GPU handoff is inside the prepared indirect numerical program. The requested steps and M13 boundary copies are submitted together; numerical dispatches are still replayed, not across-step resident. An accepted CQ publishes the actual transport completion; no additional generation identity is computed. A new generation cannot reuse a layer contribution before both ranks have consumed the preceding step's dependent layer chain. This graph fact is not implemented as a reuse guard. The paired execution and its timing have not yet validated the source construction.

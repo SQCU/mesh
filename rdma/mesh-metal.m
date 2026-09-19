@@ -60,14 +60,16 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
 /* design/prepared-machine.md#M04 */
 /* design/prepared-machine.md#M07 */
 void mesh_metal_transfer_encode(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  void *command,struct mesh_section section,int receive){
+  void *command,void *operand,struct mesh_section section,int receive){
   id<MTLComputeCommandEncoder> encoder=command;
+  id<MTLBuffer> payload=operand;
   struct mesh_publication *publication=mesh_publication_at(context->M,section.first);
   if(receive){
     publication->device_input=1;
     [encoder setComputePipelineState:transport->consume];
     [encoder setBuffer:transport->memory offset:(uintptr_t)&publication->argument-(uintptr_t)context->M atIndex:0];
     [encoder setBuffer:transport->stop offset:0 atIndex:1];
+    [encoder useResource:payload usage:MTLResourceUsageWrite];
     [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
   }else{
     uint32_t extent[]={(uint32_t)((section.bytes+3)/4),mesh_publication_prepare(context->M,section.first,NULL)};
@@ -80,8 +82,6 @@ void mesh_metal_transfer_encode(struct mesh_ctx *context,struct mesh_metal_trans
     id<MTLBuffer> memory=transport->memory;
     for(uint32_t i=0;i<extent[1];i++)prepared[i].destination=memory.gpuAddress+prepared[i].destination-(uintptr_t)context->M;
     id<MTLDevice> device=memory.device;
-    id<MTLBuffer> payload=[device newBufferWithBytesNoCopy:mesh_section_address(context,section,0)
-      length:(section.bytes+context->M->pgsz-1)/context->M->pgsz*context->M->pgsz options:MTLResourceStorageModeShared deallocator:nil];
     id<MTLBuffer> bindings=[device newBufferWithBytesNoCopy:prepared length:records.pages*context->M->pgsz
       options:MTLResourceStorageModeShared deallocator:nil];
     [encoder setComputePipelineState:transport->publish];
@@ -89,7 +89,7 @@ void mesh_metal_transfer_encode(struct mesh_ctx *context,struct mesh_metal_trans
     [encoder setBuffer:bindings offset:0 atIndex:2];
     [encoder useResource:memory usage:MTLResourceUsageWrite];
     [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
-    [payload release];[bindings release];
+    [bindings release];
   }
 }
 
