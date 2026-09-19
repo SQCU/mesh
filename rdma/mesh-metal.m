@@ -44,7 +44,11 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
     if(!*pipelines[i]){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);[library release];mesh_metal_transport_destroy(transport);return EINVAL;}
   }
   [library release];
-  transport->memory=[(id<MTLDevice>)device newBufferWithBytesNoCopy:context->M length:context->M->data_off
+  transport->completion=[(id<MTLDevice>)device newBufferWithBytesNoCopy:context->M length:context->M->notice_off
+    options:MTLResourceStorageModeShared deallocator:nil];
+  /* design/prepared-machine.md#M17 */
+  transport->publication=[(id<MTLDevice>)device newBufferWithBytesNoCopy:(char *)context->M+context->M->notice_off
+    length:context->M->data_off-context->M->notice_off
     options:MTLResourceStorageModeShared deallocator:nil];
   struct mesh_section stop;
   int status=mesh_section_create(context,2*sizeof(uint32_t),1,MESH_ABSENT,&stop);
@@ -57,7 +61,7 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
   }
   transport->stop=[(id<MTLDevice>)device newBufferWithBytesNoCopy:address length:context->M->pgsz
     options:MTLResourceStorageModeShared deallocator:nil];
-  if(!transport->memory||!transport->stop){mesh_metal_transport_destroy(transport);return ENOMEM;}
+  if(!transport->completion||!transport->publication||!transport->stop){mesh_metal_transport_destroy(transport);return ENOMEM;}
   return 0;
 }
 
@@ -72,7 +76,7 @@ void mesh_metal_transfer_encode(struct mesh_ctx *context,struct mesh_metal_trans
   if(receive){
     publication->device_input=1;
     [encoder setComputePipelineState:transport->consume];
-    [encoder setBuffer:transport->memory offset:(uintptr_t)&publication->argument-(uintptr_t)context->M atIndex:0];
+    [encoder setBuffer:transport->completion offset:(uintptr_t)&publication->argument-(uintptr_t)context->M atIndex:0];
     [encoder setBuffer:transport->stop offset:0 atIndex:1];
     [encoder useResource:payload usage:MTLResourceUsageWrite];
     [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
@@ -84,8 +88,9 @@ void mesh_metal_transfer_encode(struct mesh_ctx *context,struct mesh_metal_trans
     if(status)[NSException raise:NSMallocException format:@"publication allocation: %d",status];
     struct prepared_publication *prepared=mesh_section_address(context,records,0);
     mesh_publication_prepare(context->M,section.first,prepared);
-    id<MTLBuffer> memory=transport->memory;
-    for(uint32_t i=0;i<extent[1];i++)prepared[i].destination=memory.gpuAddress+prepared[i].destination-(uintptr_t)context->M;
+    /* design/prepared-machine.md#M17 */
+    id<MTLBuffer> memory=transport->publication;
+    for(uint32_t i=0;i<extent[1];i++)prepared[i].destination=memory.gpuAddress+prepared[i].destination-(uintptr_t)context->M-context->M->notice_off;
     id<MTLDevice> device=memory.device;
     id<MTLBuffer> bindings=[device newBufferWithBytesNoCopy:prepared length:records.pages*context->M->pgsz
       options:MTLResourceStorageModeShared deallocator:nil];
@@ -100,7 +105,7 @@ void mesh_metal_transfer_encode(struct mesh_ctx *context,struct mesh_metal_trans
 
 /* design/algorithm-sources.md#resident-metal */
 void mesh_metal_transport_destroy(struct mesh_metal_transport *transport){
-  [(id)transport->memory release];[(id)transport->publish release];
+  [(id)transport->completion release];[(id)transport->publication release];[(id)transport->publish release];
   [(id)transport->consume release];[(id)transport->stop release];
   *transport=(struct mesh_metal_transport){0};
 }

@@ -50,6 +50,7 @@ The receive destination/value and repost fields occupy the same 128-byte aligned
 | Separate original prefix, FFN and finishing graph interfaces | One region between collective publication boundaries; original local edges stay inside upstream compilation |
 | Unconditional barrier before every recorded numerical command | M06 compiles RAW/WAR/WAW conflicts from pipeline reflection and indirect-resource declarations; access sets are absent from execution |
 | Separate publication buffer alias | The transport receives the existing canonical native buffer during setup; receive completion declares the external write to that resource |
+| One Metal metadata resource aliasing independent SEND cells and receive completions | M07 and M17 expose disjoint, page-aligned parts of the same canonical mapping; publication no longer conflicts with completion observation merely because their addresses share an arena |
 | GPU consumer waiting after native/control-link failure until a separate client signal | M12's existing cancellation operand is bound to `link_stop` during preparation; only the error branch records abandonment, checked by the caller after GPU retirement |
 | Default WebGPU robustness and integer division/modulo polyfills in generated numerical code | Reference compiler toggles realized in M06 before compilation; native subgroup-matrix feature and limits exposed at setup |
 
