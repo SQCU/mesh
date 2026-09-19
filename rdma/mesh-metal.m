@@ -54,12 +54,13 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,uint32_t i
 int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   struct mesh_section operand,uint32_t invocations,struct mesh_metal_input *input){
   struct mesh_section words;
-  int status=mesh_section_create(context,8*(uint64_t)invocations,1,MESH_ABSENT,&words);
+  int status=mesh_section_create(context,8*(uint64_t)invocations*operand.count,1,MESH_ABSENT,&words);
   if(status)return status;
   void *address=mesh_section_address(context,words,0);
   memset(address,0,words.bytes);
-  for(uint32_t k=0;k<operand.stride;k++)
-    mesh_publication_at(context->M,operand.first+k)->device_input=(uintptr_t)address-(uintptr_t)context->M;
+  for(uint32_t s=0;s<operand.count;s++)for(uint32_t k=0;k<operand.stride;k++)
+    mesh_publication_at(context->M,operand.first+s*operand.stride+k)->device_input=
+      (uintptr_t)address-(uintptr_t)context->M+8*(uint64_t)s*invocations;
   id<MTLDevice> device=[(id<MTLBuffer>)transport->publication device];
   *input=(struct mesh_metal_input){.completion=[device newBufferWithBytesNoCopy:address
     length:words.pages*context->M->pgsz options:MTLResourceStorageModeShared deallocator:nil],
@@ -74,25 +75,25 @@ void mesh_metal_publish_encode(struct mesh_ctx *context,struct mesh_metal_transp
   void *command,void *operand,struct mesh_section section){
   id<MTLComputeCommandEncoder> encoder=command;
   id<MTLBuffer> payload=operand;
-    uint32_t extent[]={(uint32_t)((section.bytes+3)/4),mesh_publication_prepare(context->M,section.first,NULL)};
-    if(!extent[1])return;
-    struct mesh_section records;
-    int status=mesh_section_create(context,extent[1]*sizeof(struct prepared_publication),1,MESH_ABSENT,&records);
-    if(status)[NSException raise:NSMallocException format:@"publication allocation: %d",status];
-    struct prepared_publication *prepared=mesh_section_address(context,records,0);
-    mesh_publication_prepare(context->M,section.first,prepared);
-    /* design/prepared-machine.md#M17 */
-    id<MTLBuffer> memory=transport->publication;
-    for(uint32_t i=0;i<extent[1];i++)prepared[i].destination=memory.gpuAddress+prepared[i].destination-(uintptr_t)context->M-context->M->notice_off;
-    id<MTLDevice> device=memory.device;
-    id<MTLBuffer> bindings=[device newBufferWithBytesNoCopy:prepared length:records.pages*context->M->pgsz
-      options:MTLResourceStorageModeShared deallocator:nil];
-    [encoder setComputePipelineState:transport->publish];
-    [encoder setBuffer:payload offset:0 atIndex:0];[encoder setBytes:extent length:sizeof extent atIndex:1];
-    [encoder setBuffer:bindings offset:0 atIndex:2];
-    [encoder useResource:memory usage:MTLResourceUsageWrite];
-    [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
-    [bindings release];
+  uint32_t extent[]={(uint32_t)((section.bytes+3)/4),mesh_publication_prepare(context->M,section.first,NULL)};
+  if(!extent[1])return;
+  struct mesh_section records;
+  int status=mesh_section_create(context,extent[1]*sizeof(struct prepared_publication),1,MESH_ABSENT,&records);
+  if(status)[NSException raise:NSMallocException format:@"publication allocation: %d",status];
+  struct prepared_publication *prepared=mesh_section_address(context,records,0);
+  mesh_publication_prepare(context->M,section.first,prepared);
+  /* design/prepared-machine.md#M17 */
+  id<MTLBuffer> memory=transport->publication;
+  for(uint32_t i=0;i<extent[1];i++)prepared[i].destination=memory.gpuAddress+prepared[i].destination-(uintptr_t)context->M-context->M->notice_off;
+  id<MTLDevice> device=memory.device;
+  id<MTLBuffer> bindings=[device newBufferWithBytesNoCopy:prepared length:records.pages*context->M->pgsz
+    options:MTLResourceStorageModeShared deallocator:nil];
+  [encoder setComputePipelineState:transport->publish];
+  [encoder setBuffer:payload offset:0 atIndex:0];[encoder setBytes:extent length:sizeof extent atIndex:1];
+  [encoder setBuffer:bindings offset:0 atIndex:2];
+  [encoder useResource:memory usage:MTLResourceUsageWrite];
+  [encoder dispatchThreadgroups:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
+  [bindings release];
 }
 
 /* design/algorithm-sources.md#resident-metal */
