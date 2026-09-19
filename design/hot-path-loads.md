@@ -44,6 +44,9 @@ The receive destination/value and repost fields occupy the same 128-byte aligned
 | Exported cache-index temporaries across incompatible host/GPU physical layouts | Original expressions retained with consumers during graph preparation (M15) |
 | Resource-array declaration at numerical submission | One prepared native residency set (M06) |
 | Separate native Metal numerical delegate and its queue-residency bookkeeping | Actual benchmark WebGPU provider; prepared Metal commands and canonical host-mapped operands |
+| Vocabulary BITCAST, concatenation, slicing and candidate-array construction | M16 direct gather/pair store and direct MAXLOC comparison, bound before recording |
+| Per-binding WebGPU allocation and separate numerical Metal aliases | One native GPU resource per M01 operand; typed LiteRT views and native commands share it |
+| Mesh-owned numerical-provider handles and import wrappers | Native imports and typed views are realized by the engine compiler setup |
 | Separate original prefix, FFN and finishing graph interfaces | One region between collective publication boundaries; original local edges stay inside upstream compilation |
 | Default WebGPU robustness and integer division/modulo polyfills in generated numerical code | Reference compiler toggles realized in M06 before compilation; native subgroup-matrix feature and limits exposed at setup |
 
