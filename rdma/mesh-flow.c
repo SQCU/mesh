@@ -304,7 +304,7 @@ static void *link_run(void *argument){
         __atomic_store_n(&mesh_links(m)[link->index].bandwidth,link->provider.bandwidth,__ATOMIC_RELAXED);
 
       }
-      /* design/prepared-machine.md#M17 */
+      /* design/prepared-machine.md#M08 */
       void *(*progress[3])(void *)={link_send_completions,link_receive_progress,link_send_progress};
       for(uint32_t d=0;d<2+(link->publication_count!=0) && !error;d++){
         error=pthread_create(&link->workers[d],NULL,progress[d],link);
