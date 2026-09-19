@@ -40,5 +40,16 @@ The receive destination/value and repost fields occupy the same 128-byte aligned
 | TX completion `wr_id` decoding and completion-counter call | Native CQ drain and native error handling |
 | Fixed 1 GiB registration extent | Setup derives extents from the provider's `max_mr_size` |
 | Deleted generated-kernel and Swift-worker instruction claims | This table describes only current source and emitted native instructions |
+| Per-step host command construction, completion wait, position/parameter/mask stores | M13 fixed boundary copies, prepared before the one interval submission |
 
-The GPU handoff is inside a prepared per-step indirect program, not an across-step resident dispatch. An accepted CQ publishes the actual transport completion; no additional generation identity is computed. A new generation cannot reuse a layer contribution before both ranks have consumed the preceding step's dependent layer chain. This graph fact is not implemented as a reuse guard. The paired execution and its timing have not yet validated the source construction.
+The GPU handoff is inside the prepared indirect numerical program. The requested steps and M13 boundary copies are submitted together; numerical dispatches are still replayed, not across-step resident. An accepted CQ publishes the actual transport completion; no additional generation identity is computed. A new generation cannot reuse a layer contribution before both ranks have consumed the preceding step's dependent layer chain. This graph fact is not implemented as a reuse guard. The paired execution and its timing have not yet validated the source construction.
+
+| Device boundary copy, source operations | D0 object |
+| --- | --- |
+| Read `state[0]`, `state[1]`: two `int4` values within one 32-byte record | M13 |
+| Read token | M01 token operand |
+| Store emitted token at the bound step output | M13 |
+| Store position and two parameter vectors | M01 |
+| Store prepared mask word at its bound offset | M01, M13 |
+
+This boundary table states the shader source accesses, not an emitted GPU instruction count. It is outside both RDMA crossing transitions. After submission the host only observes completion of the requested interval and reads its outputs.
