@@ -45,6 +45,7 @@ The receive destination/value and repost fields occupy the same 128-byte aligned
 | Resource-array declaration at numerical submission | One prepared native residency set (M06) |
 | Separate native Metal numerical delegate and its queue-residency bookkeeping | Actual benchmark WebGPU provider; prepared Metal commands and canonical host-mapped operands |
 | Separate original prefix, FFN and finishing graph interfaces | One region between collective publication boundaries; original local edges stay inside upstream compilation |
+| Default WebGPU robustness and integer division/modulo polyfills in generated numerical code | Reference compiler toggles realized in M06 before compilation; native subgroup-matrix feature and limits exposed at setup |
 
 The GPU handoff is inside the prepared indirect numerical program. The requested steps and M13 boundary copies are submitted together; numerical dispatches are still replayed, not across-step resident. An accepted CQ publishes the actual transport completion; no additional generation identity is computed. A new generation cannot reuse a layer contribution before both ranks have consumed the preceding step's dependent layer chain. This graph fact is not implemented as a reuse guard. The paired execution and its timing have not yet validated the source construction.
 
