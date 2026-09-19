@@ -29,7 +29,6 @@ struct mesh_link {
   int events;
   char *configuration;
   _Atomic int progressing;
-  _Atomic uintptr_t receive_frame;
   struct hdr *M;struct mesh_verbs provider;int qps;uint64_t client;
   struct prepared_receive *receive;
   struct ibv_send_wr *requests;
@@ -58,7 +57,6 @@ static __attribute__((noinline)) void link_error(struct mesh_link *link,int64_t 
 /* design/algorithm-sources.md#programcopy */
 static int link_prepare(struct mesh_link *link){
   struct hdr *m=link->M;
-  atomic_store_explicit(&link->receive_frame,0,memory_order_relaxed);
   struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,link->client,link->index));
   /* design/prepared-machine.md#M12 */
   link->cancel=tx->cancel?(void *)((char *)m+tx->cancel):NULL;
@@ -251,8 +249,6 @@ static void *link_receive_progress(void *argument){
   struct mesh_queue queue=link->provider.queues[0];
   struct ibv_wc *completion=link->completion[MESH_RECEIVE];
   pthread_setname_np("mesh.rdma.receive");
-  /* design/prepared-machine.md#M25 */
-  atomic_store_explicit(&link->receive_frame,(uintptr_t)__builtin_frame_address(0),memory_order_release);
   while(atomic_load_explicit(&link->progressing,memory_order_acquire)){
     int count=queue.poll[MESH_RECEIVE](queue.completions[MESH_RECEIVE],1,completion);
     if(count<0){link_error(link,count,3);return NULL;}
@@ -313,8 +309,6 @@ static void *link_run(void *argument){
       }
       if(error)link_error(link,error,1);
       else {
-        /* design/prepared-machine.md#M25 */
-        while(!atomic_load_explicit(&link->receive_frame,memory_order_acquire)){}
         atomic_store_explicit(&port->phase,MESH_PAIRED,memory_order_relaxed);
         atomic_store_explicit(&port->prepared,link->client,memory_order_release);
       }

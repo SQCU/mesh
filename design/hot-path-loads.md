@@ -37,6 +37,7 @@ The receive destination/value and repost fields occupy the same 128-byte aligned
 | One native QP per SEND and receive transfer | Prepared FIFO per independent channel and invocation slot |
 | Per-completion invocation decrement, generation advance and status update | No replacement; these values had no reader in the decode chain |
 | RX completion-count branch and call | Direct completion store followed by native repost |
+| RX thread stack-address publication and controller readiness spin | No replacement: M08 requests and M11 completion storage exist before thread creation; the stack address had no reader other than the deleted guard |
 | TX completion `wr_id` decoding and completion-counter call | Native CQ drain and native error handling |
 | Fixed 1 GiB registration extent | Setup derives extents from the provider's `max_mr_size` |
 | Deleted generated-kernel and Swift-worker instruction claims | This table describes only current source and emitted native instructions |
