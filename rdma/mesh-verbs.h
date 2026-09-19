@@ -180,16 +180,19 @@ static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
 }
 
 /* design/algorithm-sources.md#programcopy */
-static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hdr *m){
+/* design/prepared-machine.md#M09 */
+static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hdr *m,struct ibv_port_attr *port){
   int error=0;
   pthread_mutex_lock(&device->setup);
-  if(device->frame_capacity)goto done;
   if(!device->context){
     struct ibv_device **list=ibv_get_device_list(NULL);
     for(int i=0;list && list[i];i++)if(!strcmp(device->name,ibv_get_device_name(list[i]))){device->context=ibv_open_device(list[i]);break;}
     if(list)ibv_free_device_list(list);
     if(!device->context){error=errno?errno:ENODEV;goto done;}
   }
+  if(ibv_query_port(device->context,1,port)){error=errno;goto done;}
+  if(port->state!=IBV_PORT_ACTIVE){error=ENETDOWN;goto done;}
+  if(device->frame_capacity)goto done;
   struct ibv_device_attr capabilities;
   if(ibv_query_device(device->context,&capabilities)){error=errno;goto done;}
   if(!device->domain)device->domain=ibv_alloc_pd(device->context);
@@ -226,10 +229,8 @@ done:
 /* design/prepared-machine.md#M06 */
 /* design/prepared-machine.md#M08 */
 static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
-  if(device_up(provider->device,provider->wire,m))return -1;
   struct ibv_port_attr pa;
-  if(ibv_query_port(provider->device->context,1,&pa))return -1;
-  if(pa.state!=IBV_PORT_ACTIVE){errno=ENETDOWN;return -1;}
+  if(device_up(provider->device,provider->wire,m,&pa))return -1;
   provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+UINT64_C(30000000000);
   int f=oob(provider,m,client);
   if(f<0)return -1;
