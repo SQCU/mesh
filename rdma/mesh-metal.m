@@ -8,6 +8,9 @@ LiteRtStatus mesh_metal_bind(struct mesh_ctx *context,struct mesh_section sectio
   LiteRtEnvironment environment,void *device,const LiteRtRankedTensorType *type,
   LiteRtTensorBufferType storage,struct mesh_metal_operand *operand){
   *operand=(struct mesh_metal_operand){0};
+  if(storage==kLiteRtTensorBufferTypeHostMemory)
+    return LiteRtCreateTensorBufferFromHostMemory(type,mesh_section_address(context,section,slot),
+      section.bytes,NULL,&operand->tensor);
   size_t page=context->M->pgsz;
   id<MTLBuffer> buffer=[(id<MTLDevice>)device
     newBufferWithBytesNoCopy:mesh_section_address(context,section,slot)
