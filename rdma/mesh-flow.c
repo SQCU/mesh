@@ -2,6 +2,11 @@
 #include "mesh-call.h"
 #include <pthread.h>
 #include <sys/event.h>
+#include <sys/ioctl.h>
+#include <sys/kern_event.h>
+#include <net/if.h>
+#include <net/if_var.h>
+#include <net/net_kev.h>
 
 _Static_assert(sizeof(pthread_t)==8,"M17");
 
@@ -10,6 +15,12 @@ _Static_assert(sizeof(struct ibv_sge)==16,"M07 M09");
 _Static_assert(sizeof(struct ibv_recv_wr)==32,"M08");
 _Static_assert(sizeof(struct ibv_wc)==48,"M11");
 _Static_assert(sizeof(struct ibv_send_wr *)==8,"M15");
+/* design/prepared-machine.md#M24 */
+union mesh_network_event {
+  struct kern_event_msg header;
+  unsigned char bytes[KEV_MSG_HEADER_SIZE+sizeof(struct net_event_data)];
+};
+_Static_assert(sizeof(union mesh_network_event)==48,"M24");
 /* design/prepared-machine.md#M08 */
 struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
@@ -26,7 +37,8 @@ struct mesh_link {
   pthread_t workers[3];
   uint32_t worker_count,publication_count,cursor_count,index;
   pthread_t controller;
-  int events;
+  int events,network;
+  union mesh_network_event network_event;
   char *configuration;
   _Atomic int progressing;
   struct hdr *M;struct mesh_verbs provider;int qps;uint64_t client;
@@ -272,6 +284,7 @@ static void *link_receive_progress(void *argument){
 /* design/algorithm-sources.md#meshresult */
 static void link_close(struct mesh_link *link,int *control){
   atomic_store_explicit(&link->progressing,0,memory_order_release);
+  if(link->network>=0){close(link->network);link->network=-1;}
   if(*control>=0)shutdown(*control,SHUT_RDWR);
   while(link->worker_count)pthread_join(link->workers[--link->worker_count],NULL);
   if(*control>=0){close(*control);*control=-1;}
@@ -283,7 +296,9 @@ static void link_close(struct mesh_link *link,int *control){
 }
 
 /* design/prepared-machine.md#M04 */
+/* design/prepared-machine.md#M24 */
 /* design/algorithm-sources.md#programcopy */
+/* design/algorithm-sources.md#meshresult */
 static void *link_run(void *argument){
   struct mesh_link *link=argument;struct hdr *m=link->M;
   struct mesh_port_info *port=&mesh_links(m)[link->index].port;
@@ -293,6 +308,17 @@ static void *link_run(void *argument){
   EV_SET64(&event,(uint32_t)link->client,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
   int error=kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)?errno:0,control=-1;
   if(error){link_error(link,error,4);if(error==ESRCH)mesh_retire(m,link->client);}
+  if(!error && transfers){
+    link->network=socket(PF_SYSTEM,SOCK_RAW,SYSPROTO_EVENT);
+    struct kev_request filter={KEV_VENDOR_APPLE,KEV_NETWORK_CLASS,KEV_DL_SUBCLASS};
+    if(link->network<0 || fcntl(link->network,F_SETFL,O_NONBLOCK)<0 ||
+       ioctl(link->network,SIOCSKEVFILT,&filter))error=errno;
+    if(!error){
+      EV_SET64(&event,link->network,EVFILT_READ,EV_ADD,0,0,0,0,0);
+      if(kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))error=errno;
+    }
+    if(error)link_error(link,error,4);
+  }
   if(!error && transfers){
     atomic_store_explicit(&port->phase,MESH_PAIRING,memory_order_release);
     control=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
@@ -317,7 +343,7 @@ static void *link_run(void *argument){
         atomic_store_explicit(&port->prepared,link->client,memory_order_release);
       }
     }
-  } else {
+  } else if(!transfers){
     atomic_store_explicit(&port->phase,MESH_PAIRED,memory_order_release);
     atomic_store_explicit(&link->progressing,0,memory_order_release);
   }
@@ -328,7 +354,23 @@ static void *link_run(void *argument){
     if(count<0){if(errno==EINTR)continue;link_error(link,errno,4);break;}
     if(event.flags&EV_ERROR)link_error(link,event.data,4);
     else if(event.filter==EVFILT_PROC){link_error(link,ECANCELED,4);mesh_retire(m,link->client);}
-    else if(event.filter==EVFILT_READ)
+    else if(event.filter==EVFILT_READ && event.ident==(uint64_t)link->network){
+      ssize_t length=recv(link->network,link->network_event.bytes,sizeof link->network_event,0);
+      if(length<0){
+        if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)link_error(link,errno,4);
+      } else if((size_t)length>=KEV_MSG_HEADER_SIZE+sizeof(struct net_event_data)){
+        const struct kern_event_msg *notification=&link->network_event.header;
+        if(notification->event_code==KEV_DL_LINK_OFF || notification->event_code==KEV_DL_IF_DETACHED){
+          const struct net_event_data *interface=(const void *)(link->network_event.bytes+KEV_MSG_HEADER_SIZE);
+          char device[sizeof interface->if_name+16];
+          snprintf(device,sizeof device,"rdma_%.*s%u",(int)sizeof interface->if_name,interface->if_name,interface->if_unit);
+          if(!strcmp(device,link->provider.device->name)){
+            fprintf(stderr,"link unavailable: %s event=%u\n",device,notification->event_code);
+            link_error(link,ENETDOWN,4);
+          }
+        }
+      }
+    } else if(event.filter==EVFILT_READ)
       link_error(link,event.flags&EV_EOF?(event.fflags?event.fflags:ECONNRESET):EPROTO,4);
   }
   link_close(link,&control);
@@ -391,7 +433,7 @@ int main(int argc,char **argv){
   close(fd);
   for(uint32_t i=0;i<link_count;i++){
     struct mesh_link *link=&links[i];
-    link->M=m;link->provider.wire=&wire;
+    link->M=m;link->provider.wire=&wire;link->network=-1;
     link->events=kqueue();
     struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,0,0,0);
     if(link->events<0 || kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("link control events");
