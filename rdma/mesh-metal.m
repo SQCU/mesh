@@ -65,29 +65,23 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
 /* design/algorithm-sources.md#resident-metal */
 /* design/prepared-machine.md#M04 */
 /* design/prepared-machine.md#M10 */
-void mesh_metal_publish_encode(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  void *command,void *operand,struct mesh_section section){
-  id<MTLComputeCommandEncoder> encoder=command;
-  id<MTLBuffer> payload=operand;
+int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
+  struct mesh_section section,struct mesh_metal_publication *publication){
   uint32_t count=mesh_publication_prepare(context->M,section.first,NULL);
-  if(!count)return;
+  *publication=(struct mesh_metal_publication){.count=count};
+  if(!count)return 0;
   struct mesh_section records;
   int status=mesh_section_create(context,count*sizeof(struct prepared_publication),1,MESH_ABSENT,&records);
-  if(status)[NSException raise:NSMallocException format:@"publication allocation: %d",status];
+  if(status)return status;
   struct prepared_publication *prepared=mesh_section_address(context,records,0);
   mesh_publication_prepare(context->M,section.first,prepared);
   /* design/prepared-machine.md#M17 */
   id<MTLBuffer> memory=transport->publication;
   for(uint32_t i=0;i<count;i++)prepared[i].destination=memory.gpuAddress+prepared[i].destination-(uintptr_t)context->M-context->M->notice_off;
   id<MTLDevice> device=memory.device;
-  id<MTLBuffer> bindings=[device newBufferWithBytesNoCopy:prepared length:records.pages*context->M->pgsz
+  publication->records=[device newBufferWithBytesNoCopy:prepared length:records.pages*context->M->pgsz
     options:MTLResourceStorageModeShared deallocator:nil];
-  [encoder setComputePipelineState:transport->publish];
-  [encoder setBuffer:bindings offset:0 atIndex:0];
-  [encoder useResource:payload usage:MTLResourceUsageRead];
-  [encoder useResource:memory usage:MTLResourceUsageWrite];
-  [encoder dispatchThreads:MTLSizeMake(count,1,1) threadsPerThreadgroup:MTLSizeMake(MIN(count,32),1,1)];
-  [bindings release];
+  return publication->records?0:ENOMEM;
 }
 
 /* design/algorithm-sources.md#resident-metal */
