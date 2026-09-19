@@ -33,6 +33,7 @@ The receive destination/value and next-request/QP fields occupy one aligned 32-b
 
 | Deleted execution | Replacement |
 | --- | --- |
+| Projection reduction's shared-memory stores, loads and barriers for strides contained in one SIMD group | M06 compiles register shuffles for those strides, retaining the descending sum order and original cross-SIMD exchanges; recording replaces the native pipeline rather than adding a dispatch |
 | WebGPU scratch zero stores and entry barrier before kernels that assign their own scratch | M06 configures `disable_workgroup_init` before compiling the native tensor program; original numerical scratch stores, reduction identities and data dependencies remain |
 | Cable-loss detection depending only on a later CQ error or control-socket EOF | M24 subscribes to native data-link loss before pairing, using the existing control thread and M12 cancellation; no successful-crossing load or additional polling thread |
 | Device-input completion publication from SEND preparation | Deleted; M07 is published only by its native receive completion, and M10 contains SEND destinations only |
