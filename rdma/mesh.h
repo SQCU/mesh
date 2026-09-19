@@ -8,7 +8,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 87u
+#define MESH_VERSION 88u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -37,7 +37,6 @@ _Static_assert(sizeof(struct mesh_page_entry)==32 && _Alignof(struct mesh_page_e
   offsetof(struct mesh_page_entry,address)==8 && offsetof(struct mesh_page_entry,device)==16,"mesh_page_entry");
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
-#define MESH_COMPUTE_THREADS 8
 #define MESH_NOTICE_BANKS 2
 /* design/prepared-machine.md#M04 */
 struct mesh_send { _Alignas(32) _Atomic uint64_t ready; uintptr_t pair,request; uint64_t reserved; };
@@ -47,25 +46,18 @@ struct mesh_target { uint64_t stream; uint32_t count; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off */
 /* design/prepared-machine.md#M10 */
-struct mesh_publication { _Alignas(64) uint32_t sends; uint32_t uses; _Atomic uint64_t argument; uint64_t device_input; struct mesh_target targets[]; };
+struct mesh_publication { _Alignas(64) uint32_t sends; _Atomic uint64_t argument; uint64_t device_input; struct mesh_target targets[]; };
 _Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publication)==64 && offsetof(struct mesh_publication,argument)==8 && offsetof(struct mesh_publication,device_input)==16 && offsetof(struct mesh_publication,targets)==24,"mesh_publication");
-/* design/prepared-machine.md#M18 */
-struct mesh_arrival { _Alignas(16) uint32_t call; _Atomic uint64_t argument; };
-_Static_assert(sizeof(struct mesh_arrival)==16 && _Alignof(struct mesh_arrival)==16 && offsetof(struct mesh_arrival,argument)==8,"M18");
 /* design/prepared-machine.md#M13 */
 struct prepared_publication { _Alignas(16) uint64_t destination; uint64_t argument,padding[2]; };
 _Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepared_publication)==16 && offsetof(struct prepared_publication,argument)==8,"M13");
-/* design/algorithm-sources.md#index-hand-off */
-/* design/prepared-machine.md#M37 */
-struct mesh_completion { _Alignas(32) _Atomic uint64_t event; struct mesh_instance *result; };
-_Static_assert(sizeof(struct mesh_completion)==32 && _Alignof(struct mesh_completion)==32 && offsetof(struct mesh_completion,result)==8,"M37");
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; _Atomic uint64_t prepared; };
 /* design/algorithm-sources.md#meshresult */
 enum { MESH_RESULT_SUCCESS, MESH_RESULT_LINK, MESH_RESULT_FUNCTION, MESH_RESULT_BUSY };
 #define MESH_RESULT(kind,id,code) ((uint64_t)(kind)<<62|(uint64_t)(id)<<32|(uint32_t)(code))
 struct mesh_status { uint64_t value,completed; };
 _Static_assert(sizeof(struct mesh_status)==16 && __atomic_always_lock_free(sizeof(struct mesh_status),0),"mesh_status lock-free snapshot");
-/* design/prepared-machine.md#M42 */
+/* design/prepared-machine.md#M05 */
 struct mesh_instance { _Alignas(32) _Atomic(struct mesh_status) status; _Atomic uint32_t remaining,invocation; uint32_t count,stride; };
 _Static_assert(sizeof(struct mesh_instance)==32 && _Alignof(struct mesh_instance)==32,"mesh_instance");
 struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; struct mesh_port_info port; _Atomic uint32_t order_length[2*MESH_NOTICE_BANKS*MESH_QPS]; };
@@ -92,7 +84,7 @@ static inline void mesh_result_conclude(_Atomic(struct mesh_status) *destination
   } while(status>>62!=MESH_RESULT_SUCCESS);
 }
 /* design/algorithm-sources.md#meshresult */
-/* design/prepared-machine.md#M42 */
+/* design/prepared-machine.md#M05 */
 static __attribute__((noinline,unused)) void mesh_instance_complete(struct mesh_instance *instances,uint32_t count){
   for(uint32_t i=0;i<count;i++){
     struct mesh_instance *instance=&instances[i];
@@ -105,7 +97,7 @@ static __attribute__((noinline,unused)) void mesh_instance_complete(struct mesh_
 }
 
 /* design/algorithm-sources.md#programtensor */
-static inline uint32_t mesh_notice_queue(struct hdr *m,uint64_t owner,uint32_t queue){return (uint32_t)(owner>>63)*(m->links+2*MESH_COMPUTE_THREADS)+queue;}
+static inline uint32_t mesh_notice_queue(struct hdr *m,uint64_t owner,uint32_t queue){return (uint32_t)(owner>>63)*m->links+queue;}
 /* design/algorithm-sources.md#programcopy */
 static inline struct mesh_link_info *mesh_links(struct hdr *m){return (struct mesh_link_info *)((char *)m+m->link_off);}
 /* design/algorithm-sources.md#index-hand-off */
@@ -153,12 +145,12 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->buffer_off=at; at+=(uint64_t)rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->pool_off=at; at+=blocks*sizeof(struct mesh_pool); at=(at+pgsz-1)/pgsz*pgsz;
   h->link_off=at; at+=(uint64_t)links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
-  h->target_stride=(offsetof(struct mesh_publication,targets)+((uint64_t)links+MESH_COMPUTE_THREADS)*sizeof(struct mesh_target)+63)&~UINT64_C(63);
+  h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
   h->order_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*links*qps*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->notice_bytes=sizeof(struct mesh_tx)+2*(uint64_t)rows*sizeof(struct mesh_completion);
+  h->notice_bytes=sizeof(struct mesh_tx)+2*(uint64_t)rows*sizeof(struct mesh_send);
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
-  h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*(links+2*MESH_COMPUTE_THREADS)*h->notice_bytes; at=(at+bytes-1)/bytes*bytes;
+  h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*links*h->notice_bytes; at=(at+bytes-1)/bytes*bytes;
   h->instance_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*rows*sizeof(struct mesh_instance); at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)rows*pgsz;
   h->length=at; return at;

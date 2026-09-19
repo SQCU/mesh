@@ -157,10 +157,7 @@ static int link_configure(void *state,int socket,uint64_t client){
           struct mesh_publication *delivery=mesh_publication_at(m,row+k);
           uintptr_t input=(uintptr_t)&delivery->argument;
           uint64_t argument=delivery->device_input;
-          if(!delivery->device_input && delivery->uses){
-            input=(uintptr_t)m+delivery->targets[delivery->sends].stream+offsetof(struct mesh_arrival,argument);
-            argument=atomic_load_explicit(&mesh_page(m)[row].address,memory_order_relaxed);
-          } else if(!delivery->device_input && delivery->sends){
+          if(!delivery->device_input && delivery->sends){
             input=(uintptr_t)m+delivery->targets[0].stream;
             argument=1;
           }
