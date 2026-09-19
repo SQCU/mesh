@@ -33,8 +33,7 @@ The receive destination/value and next-request/QP fields occupy one aligned 32-b
 
 | Deleted execution | Replacement |
 | --- | --- |
-| Implicit all-rank publication destinations and mandatory duplicated attention | M04/M08 bind each output's explicit consumer ranks from caller placement. An attention owner publishes FFN inputs; column ranks publish their results only to that owner. The same compiler emits either placement, with no runtime route choice. |
-| Position/mask/parameter allocation and boundary stores on ranks with no attention inputs | M13 constructs and encodes only the operands that rank's numerical graph consumes; token output remains directly bound |
+| Implicit all-rank publication destinations | M04/M08 bind each output's explicit destination list during preparation. No runtime route choice or inference remains. |
 | Numerical shader loads of fixed `Scalars` integer vectors and address arithmetic dependent on them | M06 reads those setup-only blocks after upload, substitutes the integer literals before compilation, and records the resulting native pipeline; reflected unused bindings are omitted from replay |
 | Packed two-bit weights extracted by float conversion, repeated division, floor and subtraction | M06 compiles equivalent unsigned shifts and masks before the original scale/bias and multiply-accumulate; the packed storage and native output are unchanged |
 | Normalization sum's per-stride shared-memory barriers within one SIMD group | M06 lowers the normalization sum to two-level SIMD sums and one final shared broadcast, following upstream MLX; the recorded native pipeline replaces the old reduction, with two cross-SIMD barriers and no new dispatch |
@@ -80,6 +79,6 @@ The GPU handoff is inside the actual numerical kernel in the prepared indirect p
 | Store position and two parameter vectors | M01 |
 | Store prepared mask word at its bound offset | M01, M13 |
 
-At preparation M13 omits position, parameter and mask instructions whose corresponding local operand is absent, together with the unused state allocation. This boundary table states the shader source accesses, not an emitted GPU instruction count. It is outside both RDMA crossing transitions. After submission the host only observes completion of the requested interval and reads its outputs.
+This boundary table states the shader source accesses, not an emitted GPU instruction count. It is outside both RDMA crossing transitions. After submission the host only observes completion of the requested interval and reads its outputs.
 
 M22 diagnostic samples are native timestamp commands with indices and command-range cuts realized during preparation. `TRACE_CROSSINGS` samples one publication-to-first-numerical-consumer boundary per step and exposes the associated numerical-region duration; its precise samples perturb the sampled step and do not establish an H7 pass. With the option absent, no cut storage, subrange replay or additional timestamp is submitted; M20 remains the two endpoint samples.
