@@ -33,6 +33,11 @@ struct prepared_receive {
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
   offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,next)==64 &&
   offsetof(struct prepared_receive,input)==80 && offsetof(struct prepared_receive,argument)==88,"M08 M09");
+#if MESH_TRACE
+/* design/prepared-machine.md#M27 */
+struct mesh_trace { _Alignas(32) uint64_t identity; uint64_t begin,middle,end; };
+_Static_assert(sizeof(struct mesh_trace)==32 && _Alignof(struct mesh_trace)==32,"M27");
+#endif
 struct mesh_link {
   pthread_t workers[3];
   uint32_t worker_count,publication_count,cursor_count,index;
@@ -48,6 +53,10 @@ struct mesh_link {
   struct mesh_send *publications,**cursors;
   struct ibv_wc *completion[2];
   _Atomic uint32_t *cancel;
+#if MESH_TRACE
+  struct mesh_trace *trace[2];
+  size_t traced[2],trace_capacity[2];
+#endif
 };
 /* design/prepared-machine.md#M26 */
 static _Atomic(struct hdr *) control_memory;
@@ -108,6 +117,15 @@ static int link_prepare(struct mesh_link *link){
   if(!link->requests)return ENOMEM;
   link->provider.completion_entries[MESH_SEND]=link->publication_count;
   link->provider.completion_entries[MESH_RECEIVE]=incoming;
+#if MESH_TRACE
+  /* design/prepared-machine.md#M27 */
+  for(int d=0;d<2;d++){
+    link->trace_capacity[d]=(size_t)link->provider.completion_entries[d]*(tx->invocations?tx->invocations:1);
+    link->traced[d]=0;
+    link->trace[d]=aligned_alloc(32,(link->trace_capacity[d]+1)*sizeof(struct mesh_trace));
+    if(!link->trace[d])return ENOMEM;
+  }
+#endif
   return 0;
 }
 
@@ -217,6 +235,11 @@ static int link_configure(void *state,int socket,uint64_t client){
     link->cursors[link->cursor_count++]=link->cursors[q];
   }
   uint32_t posted=1,peer_posted;
+#if MESH_TRACE
+  fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"send_base\":%llu,\"receive_base\":%llu,\"invocations\":%u,\"send_capacity\":%zu,\"receive_capacity\":%zu}\n",
+    link->index,m->node,(unsigned long long)(uintptr_t)link->publications,(unsigned long long)(uintptr_t)link->receive,
+    invocations,link->trace_capacity[MESH_SEND],link->trace_capacity[MESH_RECEIVE]);
+#endif
   return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
 }
 
@@ -229,11 +252,25 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
   uint32_t stream=0;
   struct ibv_send_wr *bad;
   int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **)=link->provider.queues[0].send;
+#if MESH_TRACE
+  /* design/prepared-machine.md#M27 */
+  struct mesh_trace *trace=link->trace[MESH_SEND];
+#endif
   for(;;){
     if((streams==1 || record) && atomic_load_explicit(&record->ready,memory_order_acquire)){
+#if MESH_TRACE
+        uint64_t observed=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#endif
         struct mesh_send *next=(void *)record->next;
         atomic_store_explicit(&record->ready,0,memory_order_relaxed);
+#if MESH_TRACE
+        uint64_t posting=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#endif
         int error=post((struct ibv_qp *)record->pair,(struct ibv_send_wr *)record->request,&bad);
+#if MESH_TRACE
+        uint64_t posted=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        trace[link->traced[MESH_SEND]++]=(struct mesh_trace){(uintptr_t)record,observed,posting,posted};
+#endif
         if(error){link_error(link,error<0?-error:error,1);return NULL;}
         if(streams==1 && !next)return NULL;
         if(streams>1)cursors[stream]=next;
@@ -276,16 +313,30 @@ static void *link_receive_progress(void *argument){
   struct ibv_wc *completion=link->completion[MESH_RECEIVE];
   int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=queue.receive;
   pthread_setname_np("mesh.rdma.receive");
+#if MESH_TRACE
+  /* design/prepared-machine.md#M27 */
+  struct mesh_trace *trace=link->trace[MESH_RECEIVE];
+#endif
   while(atomic_load_explicit(&link->progressing,memory_order_acquire)){
     int count=queue.poll[MESH_RECEIVE](queue.completions[MESH_RECEIVE],1,completion);
+#if MESH_TRACE
+    uint64_t polled=count>0?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
+#endif
     if(count<0){link_error(link,count,3);return NULL;}
     if(!count)continue;
     if(completion->status){link_error(link,completion->status,2);return NULL;}
     /* design/prepared-machine.md#M08 */
     struct prepared_receive *record=(void *)(uintptr_t)completion->wr_id;
     atomic_store_explicit(record->input,record->argument,memory_order_release);
+#if MESH_TRACE
+    uint64_t published=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#endif
     struct ibv_recv_wr *bad;
     int error=post(record->pair,record->next,&bad);
+#if MESH_TRACE
+    uint64_t posted=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    trace[link->traced[MESH_RECEIVE]++]=(struct mesh_trace){(uintptr_t)record,polled,published,posted};
+#endif
     if(error){link_error(link,error<0?-error:error,1);return NULL;}
   }
   return NULL;
@@ -298,6 +349,17 @@ static void link_close(struct mesh_link *link,int *control){
   if(link->network>=0){close(link->network);link->network=-1;}
   if(*control>=0)shutdown(*control,SHUT_RDWR);
   while(link->worker_count)pthread_join(link->workers[--link->worker_count],NULL);
+#if MESH_TRACE
+  /* design/prepared-machine.md#M27 */
+  for(int d=0;d<2;d++){
+    for(size_t i=0;i<link->traced[d];i++){
+      struct mesh_trace t=link->trace[d][i];
+      fprintf(stderr,"{\"native_trace\":%u,\"direction\":%d,\"event\":%zu,\"identity\":%llu,\"ns\":[%llu,%llu,%llu]}\n",
+        link->index,d,i,(unsigned long long)t.identity,(unsigned long long)t.begin,(unsigned long long)t.middle,(unsigned long long)t.end);
+    }
+    free(link->trace[d]);link->trace[d]=NULL;link->traced[d]=0;
+  }
+#endif
   if(*control>=0){close(*control);*control=-1;}
   while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);
   if(link->provider.listener>=0){close(link->provider.listener);link->provider.listener=-1;}
