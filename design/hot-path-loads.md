@@ -14,7 +14,7 @@ These are the emitted instructions in `rdma/.build/mesh-flow.s`, produced by `ma
 | Post | `blr x20`; native function already held in a register | M08 native queue |
 | Advance | Move the already loaded successor into `x8` | M04; no memory operation |
 
-The one-stream selection occurs at thread entry. For multiple independent streams, the loop additionally stores the accepted successor at its prepared cursor position and loads the next stream's cursor; the number of probes is bounded by configured streams times invocation concurrency, not the 35-layer graph. No later receive can change the prepared send order. Empty polling checks the explicit shutdown word; accepted publications do not read it before posting.
+M08 requests user-interactive QoS in `pthread_create` attributes and destroys those attributes before preparation completes. There is no policy read or call in either progress loop; emitted accepted paths retain the seven loads below. The one-stream selection occurs at thread entry. For multiple independent streams, the loop additionally stores the accepted successor at its prepared cursor position and loads the next stream's cursor; the number of probes is bounded by configured streams times invocation concurrency, not the 35-layer graph. No later receive can change the prepared send order. Empty polling checks the explicit shutdown word; accepted publications do not read it before posting.
 
 | RECV completion to consumer input | Memory operation | D0 object |
 | --- | --- | --- |

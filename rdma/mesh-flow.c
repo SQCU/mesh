@@ -332,11 +332,15 @@ static void *link_run(void *argument){
       }
       /* design/prepared-machine.md#M08 */
       void *(*progress[3])(void *)={link_send_completions,link_receive_progress,link_send_progress};
+      pthread_attr_t attributes;
+      pthread_attr_init(&attributes);
+      pthread_attr_set_qos_class_np(&attributes,QOS_CLASS_USER_INTERACTIVE,0);
       for(uint32_t d=0;d<2+(link->publication_count!=0) && !error;d++){
-        error=pthread_create(&link->workers[d],NULL,progress[d],link);
+        error=pthread_create(&link->workers[d],&attributes,progress[d],link);
         if(error)break;
         link->worker_count++;
       }
+      pthread_attr_destroy(&attributes);
       if(error)link_error(link,error,1);
       else {
         atomic_store_explicit(&port->phase,MESH_PAIRED,memory_order_relaxed);
