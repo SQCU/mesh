@@ -79,6 +79,7 @@ The GPU handoff is inside the actual numerical kernel in the prepared indirect p
 
 | Device boundary copy, source operations | D0 object |
 | --- | --- |
+| Replication of every invariant numerical command and binding for every invocation | M06 prepares invariant native command spans once and replicates only spans with invocation-specific completion operands. `MetalReplayEncode` resolves each native range before submission; the GPU receives fixed replay ranges with the original command barriers. No crossing-time host traversal is added. |
 | Read `state[0]`, `state[1]`: two `int4` values within one 32-byte record | M13 |
 | Read token | M01 token operand |
 | Store emitted token at the bound step output | M13 |
