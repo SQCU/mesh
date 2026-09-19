@@ -70,3 +70,5 @@ The GPU handoff is inside the prepared indirect numerical program. The requested
 | Store prepared mask word at its bound offset | M01, M13 |
 
 This boundary table states the shader source accesses, not an emitted GPU instruction count. It is outside both RDMA crossing transitions. After submission the host only observes completion of the requested interval and reads its outputs.
+
+M22 diagnostic samples are native timestamp commands with indices and command-range cuts realized during preparation. `TRACE_CROSSINGS` samples one publication/receive boundary per step and exposes the associated numerical-region duration; its precise samples perturb the sampled step and do not establish an H7 pass. With the option absent, no cut storage, subrange replay or additional timestamp is submitted; M20 remains the two endpoint samples.
