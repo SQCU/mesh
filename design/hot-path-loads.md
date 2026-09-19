@@ -26,7 +26,9 @@ M08 requests user-interactive QoS in `pthread_create` attributes and destroys th
 | Publish native completion | Release-store the value at that destination | M07's directly bound completion word |
 | Receive repost binding | Load next request and QP at receive record +64 | M08 |
 | Repost | Call the register-held provider function with the prepared next request | M08 |
-| GPU observation | System-scope fence, system-coherent read inside each actual numerical reader until the actual dependency arrives; explicit shutdown read only while absent | M07, M12 |
+| GPU observation | Workgroup thread zero performs the system-scope fence and coherent completion read; shutdown is read only while the dependency is absent | M07, M12 |
+| Local cancellation outcome | Thread zero stores zero to static threadgroup scratch, changing it to one only on cancellation | M25; no SHM access |
+| Workgroup handoff | Threadgroup/device barrier, then one local scratch read per numerical thread; a cancelled group returns together | M25; no additional SHM load or host action |
 | Numerical consumer entry | Original numerical kernel observes its directly bound M07 word; no reset or intervening dispatch | M07, M06 |
 | Numerical input | That same upstream kernel reads the canonical received payload | M02, M06 |
 
