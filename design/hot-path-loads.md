@@ -34,7 +34,7 @@ The receive destination/value and next-request/QP fields occupy one aligned 32-b
 | Deleted execution | Replacement |
 | --- | --- |
 | Packed two-bit weights extracted by float conversion, repeated division, floor and subtraction | M06 compiles equivalent unsigned shifts and masks before the original scale/bias and multiply-accumulate; the packed storage and native output are unchanged |
-| Normalization sum's per-stride shared-memory barriers within one SIMD group | M06 lowers the exact original descending sum to register shuffles and one final shared broadcast; the recorded native pipeline replaces the old reduction, without a new dispatch |
+| Normalization sum's per-stride shared-memory barriers within one SIMD group | M06 lowers the normalization sum to two-level SIMD sums and one final shared broadcast, following upstream MLX; the recorded native pipeline replaces the old reduction, with two cross-SIMD barriers and no new dispatch |
 | Projection reduction's shared-memory stores, loads and barriers for strides contained in one SIMD group | M06 compiles register shuffles for those strides, retaining the descending sum order and original cross-SIMD exchanges; recording replaces the native pipeline rather than adding a dispatch |
 | WebGPU scratch zero stores and entry barrier before kernels that assign their own scratch | M06 configures `disable_workgroup_init` before compiling the native tensor program; original numerical scratch stores, reduction identities and data dependencies remain |
 | Cable-loss detection depending only on a later CQ error or control-socket EOF | M24 subscribes to native data-link loss before pairing, using the existing control thread and M12 cancellation; no successful-crossing load or additional polling thread |
