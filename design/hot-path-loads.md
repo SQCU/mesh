@@ -4,7 +4,7 @@ These are the emitted instructions in `rdma/.build/mesh-flow.s`, produced by `ma
 
 | Value-ready to SEND post, one prepared stream | Memory operation | D0 object |
 | --- | --- | --- |
-| GPU payload visibility | System-coherent payload reads and writes, system-scope fence, threadgroup barrier | M01, M07 |
+| GPU payload visibility | System-coherent payload reads and writes, system-scope fence, threadgroup barrier in one 32-lane SIMD group on M4/M5 | M01, M07 |
 | GPU destination | Read prepared publication record's destination and argument | M10; `prepared_publication`, 32 bytes |
 | GPU publication | Store argument to the already prepared SEND ready cell; system-scope fence | M04 |
 | TX poll | `ldapr x9, [x8]` | M04; current cell address held in `x8` |
