@@ -231,9 +231,5 @@ uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,struct prepared_pub
       count++;
     }
   }
-  if(publication->device_input){
-    if(records)records[count]=(struct prepared_publication){.destination=(uintptr_t)m+publication->device_input,.argument=1};
-    count++;
-  }
   return count;
 }

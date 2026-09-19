@@ -18,7 +18,7 @@ The one-stream selection occurs at thread entry. For multiple independent stream
 
 | RECV completion to consumer input | Memory operation | D0 object |
 | --- | --- | --- |
-| Native CQ polling | Provider writes the 48-byte completion at the poller's fixed output address | M11; native `ibv_wc`, constructed by `mesh-flow.c:401` |
+| Native CQ polling | Provider writes the 48-byte completion at the poller's fixed output address | M11; native `ibv_wc`, constructed by `mesh-flow.c:404` |
 | Completion status | Load word at completion +8 | Same completion |
 | Native receive identity | Load pointer at completion +0 | Same completion; native `wr_id` |
 | Destination and value | Load pair at receive record +80 | M08 |
@@ -33,6 +33,7 @@ The receive destination/value and next-request/QP fields occupy one aligned 32-b
 
 | Deleted execution | Replacement |
 | --- | --- |
+| Device-input completion publication from SEND preparation | Deleted; M07 is published only by its native receive completion, and M10 contains SEND destinations only |
 | Standalone receive kernel, completion reset and subsequent numerical dispatch | M07 is directly bound inside the actual numerical entry; immutable completion words are prepared for each requested step, and M08 directly preposts the next request |
 | Per-record provider-function load and repeated receive identity | Register-held provider function plus precomputed next-request binding in the same record line |
 | Scan every layer's SEND cell on each empty probe | Register-held next cell, plus bounded independent-stream cursors |
