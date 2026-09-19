@@ -8,7 +8,7 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,uint32_t i
     "#pragma METAL internals : enable\n"
     "using namespace metal;\n"
     "struct Publication { ulong destination,argument,padding[2]; };\n"
-    "kernel void mesh_publish(volatile coherent(system) device uint *payload [[buffer(0)]],"
+    "kernel void mesh_publish(volatile coherent(system) device uint4 *payload [[buffer(0)]],"
     "constant uint2 &extent [[buffer(1)]],constant Publication *records [[buffer(2)]],"
     "uint lane [[thread_index_in_threadgroup]]) {"
     "for(uint i=lane;i<extent.x;i+=256)payload[i]=payload[i];"
@@ -75,7 +75,7 @@ void mesh_metal_publish_encode(struct mesh_ctx *context,struct mesh_metal_transp
   void *command,void *operand,struct mesh_section section){
   id<MTLComputeCommandEncoder> encoder=command;
   id<MTLBuffer> payload=operand;
-  uint32_t extent[]={(uint32_t)((section.bytes+3)/4),mesh_publication_prepare(context->M,section.first,NULL)};
+  uint32_t extent[]={(uint32_t)((section.bytes+15)/16),mesh_publication_prepare(context->M,section.first,NULL)};
   if(!extent[1])return;
   struct mesh_section records;
   int status=mesh_section_create(context,extent[1]*sizeof(struct prepared_publication),1,MESH_ABSENT,&records);
