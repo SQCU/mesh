@@ -17,7 +17,7 @@ int mesh_metal_transport_create(struct mesh_ctx *,void *,struct mesh_metal_trans
 /* design/algorithm-sources.md#resident-metal */
 int mesh_metal_receive_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,struct mesh_metal_input *);
 /* design/algorithm-sources.md#resident-metal */
-int mesh_metal_publication_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,uint32_t,struct mesh_metal_publication *);
+int mesh_metal_publication_prepare(struct mesh_ctx *,struct mesh_metal_transport *,const struct mesh_section *,uint32_t,uint32_t,struct mesh_metal_publication *);
 /* design/algorithm-sources.md#resident-metal */
 void mesh_metal_transport_destroy(struct mesh_metal_transport *);
 #endif

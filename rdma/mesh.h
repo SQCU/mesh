@@ -10,7 +10,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 100u
+#define MESH_VERSION 101u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -25,10 +25,9 @@ enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
 struct mesh_buffer {
   _Alignas(32) _Atomic uint64_t owner;
   _Atomic uint32_t closed;
-  uint32_t pages,channel,constant;
+  uint32_t pages,constant;
 };
 _Static_assert(sizeof(struct mesh_buffer)==32 && _Alignof(struct mesh_buffer)==32,"mesh_buffer");
-struct mesh_pool { _Atomic uint64_t owner; uint32_t pages; };
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M10 */
 struct mesh_page_entry {
@@ -67,7 +66,7 @@ struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; stru
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps,links;
   _Atomic uint64_t configured;
-  uint64_t planes_off,page_off,buffer_off,pool_off,link_off,target_off,order_off,notice_off,data_off,length;
+  uint64_t planes_off,page_off,buffer_off,link_off,target_off,order_off,notice_off,data_off,length;
   uint64_t notice_bytes,target_stride;
   _Atomic uint64_t client,bridge_pid,device_client,serial,control;
   struct mesh_port_info port;
@@ -108,12 +107,17 @@ static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_At
 static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
 /* design/algorithm-sources.md#programtensor */
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }
-/* design/algorithm-sources.md#programtensor */
-static inline struct mesh_pool *mesh_pools(struct hdr *m){return (struct mesh_pool *)((char *)m+m->pool_off);}
 /* ledger D5 */
 static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+((size_t)(owner>>63)*2*m->links*m->qps+2*queue+(uint32_t)direction)*mesh_blocks(m); }
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return &mesh_links(m)[queue/m->qps].order_length[(owner>>63)*2*MESH_QPS+2*(queue%m->qps)+(uint32_t)direction]; }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
+/* design/algorithm-sources.md#programcopy */
+/* design/prepared-machine.md#M08 */
+static inline uint32_t mesh_row_chunks(struct hdr *m,uint32_t row,uint64_t bytes){
+  uint64_t block=(uint64_t)m->block*m->pgsz;
+  uint64_t offset=atomic_load_explicit(&mesh_page(m)[row].address,memory_order_relaxed)-m->data_off;
+  return (uint32_t)((offset%block+bytes+block-1)/block);
+}
 
 static inline uint64_t mesh_word_mask(uint32_t first,uint32_t count,uint32_t word){
   uint32_t lo=word*64,hi=lo+64,a=first>lo?first:lo,b=first+count<hi?first+count:hi;
@@ -142,7 +146,6 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->planes_off=at; at+=(uint64_t)MESH_PLANES*words*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->page_off=at; at+=(uint64_t)rows*sizeof(struct mesh_page_entry); at=(at+pgsz-1)/pgsz*pgsz;
   h->buffer_off=at; at+=(uint64_t)rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->pool_off=at; at+=blocks*sizeof(struct mesh_pool); at=(at+pgsz-1)/pgsz*pgsz;
   h->link_off=at; at+=(uint64_t)links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
   h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;

@@ -117,7 +117,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
     atomic_store_explicit(&mesh_page(c->M)[r].mapping,MESH_ABSENT,memory_order_release);
     struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
     atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-    buffer->pages=buffer->constant=0;buffer->channel=MESH_ABSENT;
+    buffer->pages=buffer->constant=0;
     struct mesh_publication *publication=mesh_publication_at(c->M,r);
     publication->sends=publication->device_input=publication->device_stride=0;
     atomic_store_explicit(&publication->argument,0,memory_order_relaxed);
@@ -139,7 +139,7 @@ void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t
   for(uint32_t offset=0;offset<pages;offset+=c->M->block){
     struct mesh_page_entry *entry=&mesh_page(c->M)[first+offset/c->M->block];
     atomic_store_explicit(&entry->mapping,((uint64_t)index<<32)|(page+offset),memory_order_relaxed);
-    atomic_store_explicit(&entry->address,(uintptr_t)mesh_at(c->M,page+offset),memory_order_relaxed);
+    atomic_store_explicit(&entry->address,(uintptr_t)mesh_at(c->M,page+offset)-(uintptr_t)c->M,memory_order_relaxed);
   }
 }
 
@@ -181,23 +181,12 @@ void mesh_retired_release(struct hdr *m){
     uint64_t owner=atomic_load_explicit(&buffer->owner,memory_order_acquire);
     if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) &&
        atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed)){
-      if(buffer->channel<m->links*m->qps)for(uint32_t offset=0;offset<buffer->pages;offset+=m->block)
-        atomic_store_explicit(&mesh_page(m)[row+offset/m->block].mapping,MESH_ABSENT,memory_order_relaxed);
-      buffer->channel=MESH_ABSENT;
       atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
       mesh_bits_set(m,MESH_FREE,row,1);
       atomic_store_explicit(&buffer->owner,owner,memory_order_release);
     }
   }
-  for(uint32_t index=0;index<mesh_blocks(m);index++){
-    struct mesh_pool *pool=&mesh_pools(m)[index];
-    uint64_t owner=atomic_load_explicit(&pool->owner,memory_order_acquire);
-    if(owner && owner!=atomic_load_explicit(&m->client,memory_order_acquire)){
-      uint32_t pages=pool->pages;pool->pages=0;
-      atomic_store_explicit(&pool->owner,0,memory_order_relaxed);
-      mesh_bits_clear(m,MESH_PAGE_OWN,index*m->block,pages);
-    }
-  }
+
 }
 
 /* design/algorithm-sources.md#program */

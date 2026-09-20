@@ -95,7 +95,6 @@ static int link_prepare(struct mesh_link *link){
   link->cancel=tx->cancel?(void *)((char *)m+tx->cancel):NULL;
   link->publications=(void *)((char *)m+tx->cells);
   link->publication_count=tx->count*tx->slots+tx->once;
-  uint64_t payload=(uint64_t)m->block*m->pgsz;
   size_t count=0;
   uint32_t incoming=0;
   link->qps=(int)(m->qps*tx->slots);
@@ -103,7 +102,7 @@ static int link_prepare(struct mesh_link *link){
     uint32_t channel=link->index*m->qps+q;
     struct mesh_transfer *transfers=mesh_transfers(m,link->client,channel,d);
     for(uint32_t i=0;i<atomic_load(mesh_order_length(m,link->client,channel,d));i++){
-      uint32_t chunks=(uint32_t)((transfers[i].bytes+payload-1)/payload);
+      uint32_t chunks=mesh_row_chunks(m,transfers[i].local_row,transfers[i].bytes);
       if(d==MESH_SEND)count+=(size_t)(chunks-1)*transfers[i].count*(transfers[i].stride?tx->invocations:1);
       else incoming+=chunks*transfers[i].count;
     }
@@ -142,7 +141,7 @@ static int link_configure(void *state,int socket,uint64_t client){
     struct mesh_transfer *out=mesh_transfers(m,client,channel,MESH_SEND),*in=mesh_transfers(m,client,channel,MESH_RECEIVE);
     for(uint32_t i=0;i<counts[MESH_SEND];i++)for(uint32_t slot=0;slot<out[i].count;slot++){
       uint32_t row=out[i].local_row+slot*out[i].stride;
-      uint32_t chunks=(uint32_t)((out[i].bytes+payload-1)/payload);
+      uint32_t chunks=mesh_row_chunks(m,row,out[i].bytes);
       uint32_t publication=slot*tx->count+out[i].first;
       /* design/prepared-machine.md#M04 */
       uint32_t stream=q*tx->slots+slot;
@@ -152,11 +151,15 @@ static int link_configure(void *state,int socket,uint64_t client){
       unsigned flags=cell->request.send_flags;
       for(uint32_t t=0;t<repetitions;t++){
         cell[t].pair=(uintptr_t)link->provider.queues[stream].pair;
+        uint64_t remaining=out[i].bytes;
         for(uint32_t k=0;k<chunks;k++){
-          uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[row+(size_t)t*out[i].invocation_pages/m->block+k].mapping,memory_order_relaxed);
+          uint32_t address_row=row+(size_t)t*out[i].invocation_pages/m->block+k;
+          uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[address_row].mapping,memory_order_relaxed);
           struct ibv_sge span=link->provider.device->spans[page/m->block];
-          uint64_t remaining=out[i].bytes-k*payload;
-          span.length=(uint32_t)(remaining<payload?remaining:payload);
+          uint64_t offset=atomic_load_explicit(&mesh_page(m)[address_row].address,memory_order_relaxed);
+          uint64_t capacity=payload-(offset-m->data_off)%payload;
+          span.addr=(uintptr_t)m+offset;span.length=(uint32_t)(remaining<capacity?remaining:capacity);
+          remaining-=span.length;
           /* design/prepared-machine.md#M29 */
           struct ibv_sge *entry=k?&link->requests[next+k-1].span:&cell[t].span;
           struct ibv_send_wr *request=k?&link->requests[next+k-1].request:&cell[t].request;
@@ -170,12 +173,14 @@ static int link_configure(void *state,int socket,uint64_t client){
       if(!link->cursors[stream])link->cursors[stream]=cell;
     }
     for(uint32_t i=0;i<counts[MESH_RECEIVE];i++){
-      uint32_t chunks=(uint32_t)((in[i].bytes+payload-1)/payload);
+      uint32_t chunks=mesh_row_chunks(m,in[i].local_row,in[i].bytes);
       for(uint32_t slot=0;slot<in[i].count;slot++){
         uint32_t row=in[i].local_row+slot*in[i].stride;
+        uint64_t remaining=in[i].bytes;
         for(uint32_t k=0;k<chunks;k++){
-          uint64_t remaining=in[i].bytes-k*payload;
-          uint32_t bytes=(uint32_t)(remaining<payload?remaining:payload);
+          uint64_t offset=atomic_load_explicit(&mesh_page(m)[row+k].address,memory_order_relaxed);
+          uint64_t capacity=payload-(offset-m->data_off)%payload;
+          uint32_t bytes=(uint32_t)(remaining<capacity?remaining:capacity);remaining-=bytes;
           /* design/prepared-machine.md#M08 */
           /* design/prepared-machine.md#M09 */
           struct mesh_queue *queue=&link->provider.queues[q*tx->slots+slot];
@@ -194,6 +199,7 @@ static int link_configure(void *state,int socket,uint64_t client){
           for(uint32_t t=0;t<invocations;t++){
             uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[row+(size_t)t*in[i].invocation_pages/m->block+k].mapping,memory_order_relaxed);
             struct ibv_sge span=link->provider.device->spans[page/m->block];span.length=bytes;
+            span.addr=(uintptr_t)m+atomic_load_explicit(&mesh_page(m)[row+(size_t)t*in[i].invocation_pages/m->block+k].address,memory_order_relaxed);
             struct prepared_receive *record=link->receive+(size_t)t*incoming+frame;
             *record=(struct prepared_receive){
               .request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
