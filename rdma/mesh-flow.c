@@ -266,11 +266,6 @@ static int link_configure(void *state,int socket,uint64_t client){
   link->cursor_count=0;
   for(int q=0;q<link->qps;q++)if(last[q]){
     struct mesh_send *end=last[q];
-    for(uint32_t t=0;t<(repeat[q]?invocations:1);t++){
-      struct ibv_send_wr *request=(void *)(end+t)->request;
-      while(request->next)request=request->next;
-      request->send_flags=IBV_SEND_SIGNALED;
-    }
     for(uint32_t t=1;t<invocations && repeat[q];t++){
       for(struct mesh_send *source=repeat[q];;source=(void *)source->next){
         struct mesh_send *cell=source+t;
@@ -278,6 +273,17 @@ static int link_configure(void *state,int socket,uint64_t client){
         if(source==end)break;
       }
     }
+    /* design/prepared-machine.md#M08 */
+    uint32_t period=link->provider.queues[q].send_capacity/2;
+    if(!period)period=1;
+    size_t count=0,signals=0;
+    for(struct mesh_send *cell=link->cursors[q];cell;cell=(void *)cell->next)
+      for(struct ibv_send_wr *request=(void *)cell->request;request;request=request->next){
+        if(++count%period==0 || (!cell->next && !request->next)){
+          request->send_flags=IBV_SEND_SIGNALED;signals++;
+        }
+      }
+    fprintf(stderr,"send queue=%d requests=%zu signals=%zu period=%u\n",q,count,signals,period);
     link->cursors[link->cursor_count++]=link->cursors[q];
   }
   uint32_t posted=1,peer_posted;

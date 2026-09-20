@@ -35,9 +35,10 @@ struct mesh_queue {
   int (*poll)(struct ibv_cq *,int,struct ibv_wc *);
   int (*send)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **);
   int (*receive)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **);
-  uint32_t receive_capacity;
+  uint32_t receive_capacity,send_capacity;
 };
-_Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
+_Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64 &&
+  offsetof(struct mesh_queue,send_capacity)==44,"M08 native dispatch");
 struct mesh_verbs {
   struct mesh_device *device; struct mesh_wire *wire;
   struct mesh_queue *queues; int qp_count,listener;
@@ -265,6 +266,7 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
     struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
     if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
     queue->receive_capacity=actual.cap.max_recv_wr;
+    queue->send_capacity=actual.cap.max_send_wr;
     fprintf(stderr,"pair capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",q,
       actual.cap.max_send_wr,actual.cap.max_recv_wr,
       queue->completion->cqe);
