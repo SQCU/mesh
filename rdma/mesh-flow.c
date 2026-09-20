@@ -392,8 +392,8 @@ static void link_close(struct mesh_link *link,int *control){
   atomic_store_explicit(&link->progressing,0,memory_order_release);
   if(link->network>=0){close(link->network);link->network=-1;}
   if(*control>=0)shutdown(*control,SHUT_RDWR);
-  if(link->cancel)mesh_cancel(link->M,link->cancel);
   while(link->worker_count)pthread_join(link->workers[--link->worker_count],NULL);
+  if(link->cancel)mesh_cancel(link->M,link->cancel,link->index);
 #if MESH_TRACE
   /* design/prepared-machine.md#M27 */
   for(int d=0;d<2;d++){

@@ -25,12 +25,9 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
   void *input=mesh_section_address(context,words,0);memset(input,0,words.bytes);
   transport->inputs=[(id<MTLDevice>)device newBufferWithBytesNoCopy:input length:words.pages*m->pgsz
     options:MTLResourceStorageModeShared deallocator:nil];
-  status=mesh_section_create(context,sizeof(struct mesh_cancellation)+sizeof(struct mesh_cancel_range),1,MESH_ABSENT,&stop);
+  status=mesh_section_create(context,sizeof(struct mesh_cancellation)+m->links*sizeof(struct mesh_cancel_range),1,MESH_ABSENT,&stop);
   if(status){mesh_metal_transport_destroy(transport);return status;}
   struct mesh_cancellation *address=mesh_section_address(context,stop,0);memset(address,0,stop.bytes);
-  /* design/prepared-machine.md#M12 */
-  address->ranges[0]=(struct mesh_cancel_range){.offset=(uintptr_t)input-(uintptr_t)m,.count=inputs};
-  atomic_store_explicit(&address->count,1,memory_order_release);
   uint64_t first=0;
   for(uint32_t p=0;p<m->links;p++){
     struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,context->client,p));
@@ -41,6 +38,8 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
       for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
         frames+=(in[i].bytes+block-1)/block*in[i].count;
     }
+    /* design/prepared-machine.md#M12 */
+    address->ranges[p]=(struct mesh_cancel_range){.offset=(uintptr_t)input-(uintptr_t)m+first*sizeof(struct mesh_input_status),.count=frames*tx->invocations};
     uint64_t frame=0;
     /* design/prepared-machine.md#M07 */
     for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
