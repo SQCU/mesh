@@ -27,7 +27,7 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
 /* design/algorithm-sources.md#programcopy */
 static int mesh_transfer_compare(const void *a,const void *b){
   const struct mesh_transfer *left=*(const struct mesh_transfer *const *)a,*right=*(const struct mesh_transfer *const *)b;
-  return (left->local_row>right->local_row)-(left->local_row<right->local_row);
+  return (left->binding>right->binding)-(left->binding<right->binding);
 }
 
 /* design/algorithm-sources.md#programcopy */
