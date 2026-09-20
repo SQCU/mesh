@@ -23,19 +23,19 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
   return 0;
 }
 
-/* design/prepared-machine.md#M04 */
-/* design/algorithm-sources.md#programcopy */
-static int mesh_transfer_compare(const void *a,const void *b){
-  const struct mesh_transfer *left=*(const struct mesh_transfer *const *)a,*right=*(const struct mesh_transfer *const *)b;
-  return (left->binding>right->binding)-(left->binding<right->binding);
-}
-
 /* design/prepared-machine.md#M08 */
 /* design/algorithm-sources.md#programcopy */
 static int mesh_binding_order(const void *a,const void *b){
   const struct mesh_transfer *left=a,*right=b;
   int varying=(left->stride!=0)-(right->stride!=0);
   return varying?varying:(left->binding>right->binding)-(left->binding<right->binding);
+}
+
+/* design/prepared-machine.md#M04 */
+/* design/prepared-machine.md#M07 */
+/* design/algorithm-sources.md#programcopy */
+static int mesh_transfer_compare(const void *a,const void *b){
+  return mesh_binding_order(*(const struct mesh_transfer *const *)a,*(const struct mesh_transfer *const *)b);
 }
 
 /* design/algorithm-sources.md#programcopy */
@@ -64,9 +64,13 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   for(uint32_t p=0;p<m->links;p++){
     uint64_t base=m->notice_off+(uint64_t)mesh_notice_queue(m,context->client,p)*m->notice_bytes;
     struct mesh_tx *tx=(void *)((char *)m+base);
-    uint32_t count=0,once=0,length=0;
-    for(uint32_t q=0;q<m->qps;q++)length+=atomic_load_explicit(mesh_order_length(m,context->client,p*m->qps+q,MESH_SEND),memory_order_relaxed);
-    struct mesh_transfer **ordered=malloc((length?length:1)*sizeof *ordered);
+    uint32_t count=0,once=0,length=0,incoming=0;
+    for(uint32_t q=0;q<m->qps;q++){
+      length+=atomic_load_explicit(mesh_order_length(m,context->client,p*m->qps+q,MESH_SEND),memory_order_relaxed);
+      incoming+=atomic_load_explicit(mesh_order_length(m,context->client,p*m->qps+q,MESH_RECEIVE),memory_order_relaxed);
+    }
+    uint32_t capacity=length>incoming?length:incoming;
+    struct mesh_transfer **ordered=malloc((capacity?capacity:1)*sizeof *ordered);
     if(!ordered)return ENOMEM;
     uint32_t position=0;
     for(uint32_t q=0;q<m->qps;q++){
@@ -112,6 +116,19 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
     for(uint32_t stream=0;stream<m->qps*slots;stream++)if(last[stream]){
       last[stream]->request.wr_id=(uintptr_t)(repeat[stream]?repeat[stream]+1:last[stream]+invocations)-(uintptr_t)last[stream];
       last[stream]->request.send_flags=IBV_SEND_SIGNALED;
+    }
+    /* design/prepared-machine.md#M07 */
+    position=0;
+    for(uint32_t q=0;q<m->qps;q++){
+      struct mesh_transfer *in=mesh_transfers(m,context->client,p*m->qps+q,MESH_RECEIVE);
+      uint32_t count=atomic_load_explicit(mesh_order_length(m,context->client,p*m->qps+q,MESH_RECEIVE),memory_order_relaxed);
+      for(uint32_t i=0;i<count;i++)ordered[position++]=in+i;
+    }
+    qsort(ordered,position,sizeof *ordered,mesh_transfer_compare);
+    uint32_t frame=0;
+    for(uint32_t i=0;i<position;i++){
+      ordered[i]->first=frame;
+      frame+=mesh_row_chunks(m,ordered[i]->local_row,ordered[i]->bytes)*ordered[i]->count;
     }
     free(ordered);
   }
