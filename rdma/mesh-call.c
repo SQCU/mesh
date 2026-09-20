@@ -5,8 +5,9 @@
 /* design/algorithm-sources.md#programtensor */
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
 
+/* design/prepared-machine.md#M08 */
 /* design/algorithm-sources.md#programcopy */
-int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint32_t identity,struct mesh_section section){
+int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint32_t identity,struct mesh_section section,uint32_t invocation_pages){
   struct hdr *m=context->M;
   if(queue>=m->links*m->qps)return EINVAL;
   _Atomic uint32_t *length=mesh_order_length(m,context->client,queue,receive);
@@ -17,7 +18,7 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
     uint32_t link=queue/m->qps;
     mesh_publish_bind(context,row,link)->count++;
   }
-  mesh_transfers(m,context->client,queue,receive)[index]=(struct mesh_transfer){section.first,identity,section.count,section.stride,MESH_ABSENT,0,section.bytes};
+  mesh_transfers(m,context->client,queue,receive)[index]=(struct mesh_transfer){section.first,identity,section.count,section.stride,invocation_pages,0,section.bytes};
   atomic_store_explicit(length,index+1,memory_order_release);
   return 0;
 }
@@ -95,7 +96,6 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
     struct mesh_pool *pool=&mesh_pools(m)[page/m->block];pool->pages=pages;
     atomic_store_explicit(&pool->owner,context->client,memory_order_release);
     for(uint32_t i=0;i<count;i++){
-      transfers[i].pool=page;
       uint32_t span=mesh_buffers(m)[transfers[i].local_row].pages;
       for(uint32_t slot=0;slot<transfers[i].count;slot++){
         mesh_backing_bind(context,transfers[i].local_row+slot*transfers[i].stride,span,page,slot);

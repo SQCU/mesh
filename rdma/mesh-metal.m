@@ -42,7 +42,8 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
   cancel->ranges[count]=(struct mesh_cancel_range){.offset=(uintptr_t)address-(uintptr_t)context->M,.count=(uint64_t)invocations*operand.count};
   atomic_store_explicit(&cancel->count,count+1,memory_order_release);
   if(atomic_load_explicit(&cancel->requested,memory_order_relaxed))mesh_cancel(context->M,cancel);
-  for(uint32_t s=0;s<operand.count;s++)for(uint32_t k=0;k<operand.stride;k++)
+  uint64_t block=(uint64_t)context->M->pgsz*context->M->block;
+  for(uint32_t s=0;s<operand.count;s++)for(uint32_t k=0;k<(operand.bytes+block-1)/block;k++)
     mesh_publication_at(context->M,operand.first+s*operand.stride+k)->device_input=
       (uintptr_t)address-(uintptr_t)context->M+sizeof(struct mesh_input_status)*(uint64_t)s*invocations;
   id<MTLDevice> device=[(id<MTLBuffer>)transport->publication device];
