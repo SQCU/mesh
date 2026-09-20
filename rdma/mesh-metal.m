@@ -4,26 +4,7 @@
 /* design/algorithm-sources.md#resident-metal */
 /* design/prepared-machine.md#M07 */
 int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mesh_metal_transport *transport){
-  NSString *source=@"#include <metal_stdlib>\n"
-    "#pragma METAL internals : enable\n"
-    "using namespace metal;\n"
-    "struct Publication { ulong destination,argument,padding[2]; };\n"
-    "kernel void mesh_publish(constant Publication *records [[buffer(0)]], device uchar *cells [[buffer(1)]],"
-    "uint lane [[thread_position_in_grid]]) {"
-    "auto destination=(volatile coherent(system) device ulong *)(cells+records[lane].destination);"
-    "*destination=records[lane].argument;"
-    "atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(3));"
-    "}\n";
   *transport=(struct mesh_metal_transport){0};
-  NSError *error=nil;
-  id<MTLLibrary> library=[(id<MTLDevice>)device newLibraryWithSource:source options:nil error:&error];
-  if(!library){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);return EINVAL;}
-  id<MTLFunction> function=[library newFunctionWithName:@"mesh_publish"];
-  MTLComputePipelineDescriptor *descriptor=[MTLComputePipelineDescriptor new];
-  descriptor.computeFunction=function;descriptor.supportIndirectCommandBuffers=YES;
-  transport->publish=[(id<MTLDevice>)device newComputePipelineStateWithDescriptor:descriptor options:0 reflection:nil error:&error];
-  [descriptor release];[function release];[library release];
-  if(!transport->publish){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);return EINVAL;}
   /* design/prepared-machine.md#M17 */
   transport->publication=[(id<MTLDevice>)device newBufferWithBytesNoCopy:(char *)context->M+context->send_off
     length:context->send_bytes
@@ -106,6 +87,6 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
 
 /* design/algorithm-sources.md#resident-metal */
 void mesh_metal_transport_destroy(struct mesh_metal_transport *transport){
-  [(id)transport->publication release];[(id)transport->publish release];[(id)transport->stop release];
+  [(id)transport->publication release];[(id)transport->stop release];
   *transport=(struct mesh_metal_transport){0};
 }
