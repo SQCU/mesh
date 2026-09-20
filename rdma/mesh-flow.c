@@ -176,6 +176,11 @@ static int link_configure(void *state,int socket,uint64_t client){
       /* design/prepared-machine.md#M04 */
       uint32_t stream=q*tx->slots+slot;
       struct mesh_send *cell=link->publications+(size_t)publication*invocations;
+#if MESH_TRACE
+      /* design/prepared-machine.md#M27 */
+      fprintf(stderr,"{\"trace_binding\":%u,\"rank\":%u,\"direction\":0,\"index\":%u,\"binding\":%u,\"slot\":%u}\n",
+        link->index,m->node,publication,out[i].binding,slot);
+#endif
       cell->pair=(uintptr_t)link->provider.queues[stream].pair;
       cell->request=(uintptr_t)(link->requests+next);cell->next=0;
       if(last[stream])last[stream]->next=(uintptr_t)cell;else link->cursors[stream]=cell;
@@ -214,6 +219,11 @@ static int link_configure(void *state,int socket,uint64_t client){
           multiple_receive_queues|=receive_pair && receive_pair!=queue->pair;
           receive_pair=queue->pair;
           uint32_t frame=received++;
+#if MESH_TRACE
+          /* design/prepared-machine.md#M27 */
+          fprintf(stderr,"{\"trace_binding\":%u,\"rank\":%u,\"direction\":1,\"index\":%u,\"binding\":%u,\"slot\":%u,\"chunk\":%u,\"chunks\":%u}\n",
+            link->index,m->node,frame,in[i].binding,slot,k,chunks);
+#endif
           frames[q*tx->slots+slot]+=(span.length+4095)/4096;
           struct mesh_publication *delivery=mesh_publication_at(m,row+k);
           uintptr_t input=(uintptr_t)&delivery->argument;
