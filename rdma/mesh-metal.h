@@ -2,7 +2,7 @@
 #define MESH_METAL_H
 #include "mesh-call.h"
 /* design/prepared-machine.md#M07 */
-struct mesh_metal_transport { void *publication,*stop; };
+struct mesh_metal_transport { void *publication,*stop,*inputs; };
 struct mesh_metal_input { void *completion,*stop; uint64_t offset,stride; };
 /* design/prepared-machine.md#M10 */
 struct mesh_metal_publication { void *records,*completion; uint32_t count,stride; };
@@ -10,12 +10,12 @@ struct mesh_metal_publication { void *records,*completion; uint32_t count,stride
 struct mesh_output_status { _Alignas(128) uint32_t remaining; uint32_t padding[63]; };
 _Static_assert(sizeof(struct mesh_output_status)==sizeof(struct mesh_send) && _Alignof(struct mesh_output_status)==128,"M28");
 _Static_assert(sizeof(struct mesh_metal_publication)==24,"prepared publication binding");
-_Static_assert(sizeof(struct mesh_metal_transport)==16,"prepared Metal transport");
+_Static_assert(sizeof(struct mesh_metal_transport)==24,"prepared Metal transport");
 _Static_assert(sizeof(struct mesh_metal_input)==32,"prepared numerical input");
 /* design/algorithm-sources.md#resident-metal */
 int mesh_metal_transport_create(struct mesh_ctx *,void *,struct mesh_metal_transport *);
 /* design/algorithm-sources.md#resident-metal */
-int mesh_metal_receive_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,uint32_t,struct mesh_metal_input *);
+int mesh_metal_receive_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,struct mesh_metal_input *);
 /* design/algorithm-sources.md#resident-metal */
 int mesh_metal_publication_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,uint32_t,struct mesh_metal_publication *);
 /* design/algorithm-sources.md#resident-metal */

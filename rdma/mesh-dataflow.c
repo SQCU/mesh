@@ -119,7 +119,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
     atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
     buffer->pages=buffer->constant=0;buffer->channel=MESH_ABSENT;
     struct mesh_publication *publication=mesh_publication_at(c->M,r);
-    publication->sends=publication->device_input=0;
+    publication->sends=publication->device_input=publication->device_stride=0;
     atomic_store_explicit(&publication->argument,0,memory_order_relaxed);
     atomic_store_explicit(&buffer->owner,c->client,memory_order_release);
   }

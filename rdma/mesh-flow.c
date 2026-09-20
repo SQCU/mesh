@@ -53,7 +53,7 @@ struct mesh_link {
   pthread_t workers[2];
   uint32_t worker_count,publication_count,cursor_count,index;
   pthread_t controller;
-  int events,network,refill;
+  int events,network,refill,linear;
   union mesh_network_event network_event;
   char *configuration;
   _Atomic int progressing;
@@ -135,15 +135,6 @@ static int link_prepare(struct mesh_link *link){
   return 0;
 }
 
-/* design/prepared-machine.md#M06 */
-/* design/prepared-machine.md#M07 */
-/* design/prepared-machine.md#M08 */
-/* design/prepared-machine.md#M09 */
-/* design/algorithm-sources.md#programcopy */
-static int link_transfer_order(const void *a,const void *b){
-  const struct mesh_transfer *left=a,*right=b;
-  return (left->first>right->first)-(left->first<right->first);
-}
 
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M08 */
@@ -151,8 +142,6 @@ static int link_configure(void *state,int socket,uint64_t client){
   struct mesh_link *link=state;struct hdr *m=link->M;
   uint64_t payload=(uint64_t)m->block*m->pgsz;
   struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,client,link->index));
-  struct mesh_tx peer_tx;
-  if(exchange(socket,tx,&peer_tx,sizeof *tx,sizeof peer_tx,m,client,link->provider.deadline))return -1;
   link->cursors=calloc((size_t)link->qps,sizeof *link->cursors);
   if(!link->cursors)return -1;
   /* design/prepared-machine.md#M08 */
@@ -167,13 +156,8 @@ static int link_configure(void *state,int socket,uint64_t client){
   int multiple_receive_queues=0;
   for(uint32_t q=0;q<m->qps;q++){
     uint32_t channel=link->index*m->qps+q;
-    uint32_t counts[2]={atomic_load(mesh_order_length(m,client,channel,MESH_SEND)),atomic_load(mesh_order_length(m,client,channel,MESH_RECEIVE))},peer_counts[2];
-    if(exchange(socket,counts,peer_counts,sizeof counts,sizeof peer_counts,m,client,link->provider.deadline))return -1;
+    uint32_t counts[2]={atomic_load(mesh_order_length(m,client,channel,MESH_SEND)),atomic_load(mesh_order_length(m,client,channel,MESH_RECEIVE))};
     struct mesh_transfer *out=mesh_transfers(m,client,channel,MESH_SEND),*in=mesh_transfers(m,client,channel,MESH_RECEIVE);
-    qsort(out,counts[MESH_SEND],sizeof *out,link_transfer_order);
-    struct mesh_transfer *peer=calloc(peer_counts[MESH_SEND]?peer_counts[MESH_SEND]:1,sizeof *peer);
-    if(!peer)return -1;
-    if(exchange(socket,out,peer,counts[MESH_SEND]*sizeof *out,peer_counts[MESH_SEND]*sizeof *peer,m,client,link->provider.deadline)){free(peer);return -1;}
     for(uint32_t i=0;i<counts[MESH_SEND];i++)for(uint32_t slot=0;slot<out[i].count;slot++){
       uint32_t row=out[i].local_row+slot*out[i].stride;
       uint32_t chunks=(uint32_t)((out[i].bytes+payload-1)/payload);
@@ -209,13 +193,6 @@ static int link_configure(void *state,int socket,uint64_t client){
       if(!link->cursors[stream])link->cursors[stream]=cell;
     }
     for(uint32_t i=0;i<counts[MESH_RECEIVE];i++){
-      uint32_t peer_index=0;
-      while(peer_index<peer_counts[MESH_SEND] && peer[peer_index].binding!=in[i].binding)peer_index++;
-      if(peer_index==peer_counts[MESH_SEND]){free(peer);errno=EPROTO;return -1;}
-      in[i].first=peer[peer_index].first;
-    }
-    qsort(in,counts[MESH_RECEIVE],sizeof *in,link_transfer_order);
-    for(uint32_t i=0;i<counts[MESH_RECEIVE];i++){
       uint32_t chunks=(uint32_t)((in[i].bytes+payload-1)/payload);
       for(uint32_t slot=0;slot<in[i].count;slot++){
         uint32_t row=in[i].local_row+slot*in[i].stride;
@@ -248,16 +225,18 @@ static int link_configure(void *state,int socket,uint64_t client){
             struct prepared_receive *record=link->receive+(size_t)t*incoming+frame;
             *record=(struct prepared_receive){
               .request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
-              .span=span,.input=(_Atomic uint64_t *)(input+(delivery->device_input||delivery->sends?sizeof(struct mesh_input_status)*(size_t)t:0)),
-              .argument=delivery->device_input?(k+1==chunks):argument,.pair=queue->pair};
+              .span=span,.input=(_Atomic uint64_t *)(input+(delivery->device_input?delivery->device_stride*t:delivery->sends?sizeof(struct mesh_send)*(size_t)t:0)),
+              .argument=argument,.pair=queue->pair};
           }
         }
       }
     }
-    free(peer);
   }
   /* design/prepared-machine.md#M08 */
   link->receive_pair=multiple_receive_queues?NULL:receive_pair;
+  link->linear=receive_count!=0;
+  for(size_t i=0;i<receive_count;i++)
+    link->linear&=(uintptr_t)link->receive[i].input==(uintptr_t)link->receive[0].input+i*sizeof(struct mesh_input_status) && link->receive[i].argument==1;
   uint32_t window=invocations;
   for(int q=0;q<link->qps;q++)if(frames[q]){
     uint32_t capacity=link->provider.queues[q].receive_capacity/frames[q];
@@ -337,19 +316,20 @@ static void *link_send_progress(void *argument){
 /* design/prepared-machine.md#M08 */
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#programcopy */
-static __attribute__((always_inline)) inline void *link_receive_drain(struct mesh_link *link,int ordered,int refill){
+static __attribute__((always_inline)) inline void *link_receive_drain(struct mesh_link *link,int ordered,int refill,int linear){
   struct mesh_queue queue=link->provider.queues[0];
   struct ibv_wc *completion=link->completion;
   int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=queue.receive;
   struct ibv_qp *pair=link->receive_pair;
   struct prepared_receive *record=link->receive;
+  _Atomic uint64_t *input=linear?record->input:NULL;
+  uint64_t value=linear?1:0;
 #if MESH_TRACE
   /* design/prepared-machine.md#M27 */
   struct mesh_trace *trace=link->trace[MESH_RECEIVE];
 #endif
   for(;;){
-    _Atomic uint64_t *input=ordered?record->input:NULL;
-    uint64_t value=ordered?record->argument:0;
+    if(ordered&&!linear){input=record->input;value=record->argument;}
     for(;;){
       int count=queue.poll(queue.completion,1,completion);
       if(count<0){link_error(link,count,3);return NULL;}
@@ -384,6 +364,7 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
     uint64_t posted=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     trace[link->traced[MESH_RECEIVE]++]=(struct mesh_trace){(uintptr_t)record,polled,published,posted};
 #endif
+    if(linear)input=(void *)((uintptr_t)input+sizeof(struct mesh_input_status));
     if(ordered)record++;
   }
 }
@@ -394,11 +375,15 @@ static void *link_receive_progress(void *argument){
   struct mesh_link *link=argument;
   pthread_setname_np("mesh.rdma.receive");
   if(link->receive_pair){
-    if(link->refill)return link_receive_drain(link,1,1);
-    return link_receive_drain(link,1,0);
+    if(link->linear){
+      if(link->refill)return link_receive_drain(link,1,1,1);
+      return link_receive_drain(link,1,0,1);
+    }
+    if(link->refill)return link_receive_drain(link,1,1,0);
+    return link_receive_drain(link,1,0,0);
   }
-  if(link->refill)return link_receive_drain(link,0,1);
-  return link_receive_drain(link,0,0);
+  if(link->refill)return link_receive_drain(link,0,1,0);
+  return link_receive_drain(link,0,0,0);
 }
 
 /* design/prepared-machine.md#M11 */

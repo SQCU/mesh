@@ -30,12 +30,23 @@ static int mesh_transfer_compare(const void *a,const void *b){
   return (left->binding>right->binding)-(left->binding<right->binding);
 }
 
+/* design/prepared-machine.md#M08 */
+/* design/algorithm-sources.md#programcopy */
+static int mesh_binding_order(const void *a,const void *b){
+  const struct mesh_transfer *left=a,*right=b;
+  int varying=(left->stride!=0)-(right->stride!=0);
+  return varying?varying:(left->binding>right->binding)-(left->binding<right->binding);
+}
+
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invocations){
   struct hdr *m=context->M;
   if(!slots || slots>mesh_rows(m) || !invocations)return EINVAL;
   uint64_t cells=0;
   for(uint32_t q=0;q<m->links*m->qps;q++){
+    /* design/prepared-machine.md#M08 */
+    for(int d=0;d<2;d++)qsort(mesh_transfers(m,context->client,q,d),
+      atomic_load(mesh_order_length(m,context->client,q,d)),sizeof(struct mesh_transfer),mesh_binding_order);
     struct mesh_transfer *out=mesh_transfers(m,context->client,q,MESH_SEND);
     for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_SEND));i++)
       cells+=out[i].stride?slots:1;
