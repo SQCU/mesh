@@ -215,7 +215,10 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
   while(device->region_count<regions){
     size_t offset=(size_t)device->region_count*extent,end=offset+extent;
     device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
-    if(!device->regions[device->region_count]){error=errno;goto done;}
+    if(!device->regions[device->region_count]){
+      error=errno;fprintf(stderr,"register %s offset=%zu bytes=%zu max_mr_size=%llu max_mr=%d: %s\n",
+        device->name,offset,(end<span?end:span)-offset,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));goto done;
+    }
     device->region_count++;
   }
   if(!device->spans)device->spans=calloc(mesh_blocks(m),sizeof *device->spans);
