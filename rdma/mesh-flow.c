@@ -158,7 +158,7 @@ static int link_configure(void *state,int socket,uint64_t client){
           struct ibv_sge span=link->provider.device->spans[page/m->block];
           uint64_t offset=atomic_load_explicit(&mesh_page(m)[address_row].address,memory_order_relaxed);
           uint64_t capacity=payload-(offset-m->data_off)%payload;
-          span.addr=(uintptr_t)m+offset;span.length=(uint32_t)(remaining<capacity?remaining:capacity);
+          span.addr+=(offset-m->data_off)%payload;span.length=(uint32_t)(remaining<capacity?remaining:capacity);
           remaining-=span.length;
           /* design/prepared-machine.md#M29 */
           struct ibv_sge *entry=k?&link->requests[next+k-1].span:&cell[t].span;
@@ -199,7 +199,7 @@ static int link_configure(void *state,int socket,uint64_t client){
           for(uint32_t t=0;t<invocations;t++){
             uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[row+(size_t)t*in[i].invocation_pages/m->block+k].mapping,memory_order_relaxed);
             struct ibv_sge span=link->provider.device->spans[page/m->block];span.length=bytes;
-            span.addr=(uintptr_t)m+atomic_load_explicit(&mesh_page(m)[row+(size_t)t*in[i].invocation_pages/m->block+k].address,memory_order_relaxed);
+            span.addr+=(atomic_load_explicit(&mesh_page(m)[row+(size_t)t*in[i].invocation_pages/m->block+k].address,memory_order_relaxed)-m->data_off)%payload;
             struct prepared_receive *record=link->receive+(size_t)t*incoming+frame;
             *record=(struct prepared_receive){
               .request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
