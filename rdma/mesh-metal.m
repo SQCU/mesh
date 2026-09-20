@@ -8,9 +8,9 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,uint32_t i
     "#pragma METAL internals : enable\n"
     "using namespace metal;\n"
     "struct Publication { ulong destination,argument,padding[2]; };\n"
-    "kernel void mesh_publish(constant Publication *records [[buffer(0)]],"
+    "kernel void mesh_publish(constant Publication *records [[buffer(0)]], device uchar *cells [[buffer(1)]],"
     "uint lane [[thread_position_in_grid]]) {"
-    "auto destination=(volatile coherent(system) device ulong *)records[lane].destination;"
+    "auto destination=(volatile coherent(system) device ulong *)(cells+records[lane].destination);"
     "*destination=records[lane].argument;"
     "atomic_thread_fence(mem_flags::mem_device,memory_order_seq_cst,static_cast<thread_scope>(3));"
     "}\n";
@@ -25,8 +25,8 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,uint32_t i
   [descriptor release];[function release];[library release];
   if(!transport->publish){fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);return EINVAL;}
   /* design/prepared-machine.md#M17 */
-  transport->publication=[(id<MTLDevice>)device newBufferWithBytesNoCopy:(char *)context->M+context->M->notice_off
-    length:context->M->data_off-context->M->notice_off
+  transport->publication=[(id<MTLDevice>)device newBufferWithBytesNoCopy:(char *)context->M+context->send_off
+    length:context->send_bytes
     options:MTLResourceStorageModeShared deallocator:nil];
   struct mesh_section stop;
   uint64_t inputs=0;
@@ -86,7 +86,7 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
   mesh_publication_prepare(context->M,section.first,prepared);
   /* design/prepared-machine.md#M17 */
   id<MTLBuffer> memory=transport->publication;
-  for(uint32_t i=0;i<count;i++)prepared[i].destination=memory.gpuAddress+prepared[i].destination-(uintptr_t)context->M-context->M->notice_off;
+  for(uint32_t i=0;i<count;i++)prepared[i].destination-=((uintptr_t)context->M+context->send_off);
   id<MTLDevice> device=memory.device;
   publication->records=[device newBufferWithBytesNoCopy:prepared length:records.pages*context->M->pgsz
     options:MTLResourceStorageModeShared deallocator:nil];

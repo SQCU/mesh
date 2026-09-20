@@ -6,7 +6,7 @@ struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride,
 
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfer_bind(struct mesh_ctx *,uint32_t queue,int receive,uint32_t identity,struct mesh_section);
-int mesh_transfers_prepare(struct mesh_ctx *,uint32_t slots);
+int mesh_transfers_prepare(struct mesh_ctx *,uint32_t slots,uint32_t invocations);
 int mesh_transfers_start(struct mesh_ctx *);
 
 /* design/algorithm-sources.md#programtensor */

@@ -92,7 +92,7 @@ static int link_prepare(struct mesh_link *link){
   struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,link->client,link->index));
   /* design/prepared-machine.md#M12 */
   link->cancel=tx->cancel?(void *)((char *)m+tx->cancel):NULL;
-  link->publications=tx->cells;
+  link->publications=(void *)((char *)m+tx->cells);
   link->publication_count=tx->count*tx->slots+tx->once;
   uint64_t payload=(uint64_t)m->block*m->pgsz;
   size_t count=0;
@@ -172,7 +172,7 @@ static int link_configure(void *state,int socket,uint64_t client){
       uint32_t publication=slot*tx->count+out[i].first;
       /* design/prepared-machine.md#M04 */
       uint32_t stream=q*tx->slots+slot;
-      struct mesh_send *cell=tx->cells+publication;
+      struct mesh_send *cell=link->publications+(size_t)publication*invocations;
       cell->pair=(uintptr_t)link->provider.queues[stream].pair;
       cell->request=(uintptr_t)(link->requests+next);cell->next=0;
       if(last[stream])last[stream]->next=(uintptr_t)cell;else link->cursors[stream]=cell;
@@ -231,7 +231,15 @@ static int link_configure(void *state,int socket,uint64_t client){
   }
   link->cursor_count=0;
   for(int q=0;q<link->qps;q++)if(last[q]){
-    last[q]->next=(uintptr_t)repeat[q];
+    struct mesh_send *end=last[q];
+    for(uint32_t t=1;t<invocations && repeat[q];t++){
+      for(struct mesh_send *source=repeat[q];;source=(void *)source->next){
+        struct mesh_send *cell=source+t;
+        *cell=(struct mesh_send){.pair=source->pair,.request=source->request};
+        last[q]->next=(uintptr_t)cell;last[q]=cell;
+        if(source==end)break;
+      }
+    }
     link->cursors[link->cursor_count++]=link->cursors[q];
   }
   uint32_t posted=1,peer_posted;
@@ -262,7 +270,6 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
         uint64_t observed=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #endif
         struct mesh_send *next=(void *)record->next;
-        atomic_store_explicit(&record->ready,0,memory_order_relaxed);
 #if MESH_TRACE
         uint64_t posting=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #endif

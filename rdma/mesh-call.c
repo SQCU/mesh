@@ -30,9 +30,23 @@ static int mesh_transfer_compare(const void *a,const void *b){
 }
 
 /* design/algorithm-sources.md#programcopy */
-int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots){
+int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invocations){
   struct hdr *m=context->M;
-  if(!slots || slots>mesh_rows(m))return EINVAL;
+  if(!slots || slots>mesh_rows(m) || !invocations)return EINVAL;
+  uint64_t cells=0;
+  for(uint32_t q=0;q<m->links*m->qps;q++){
+    struct mesh_transfer *out=mesh_transfers(m,context->client,q,MESH_SEND);
+    for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_SEND));i++)
+      cells+=out[i].stride?slots:1;
+  }
+  struct mesh_section storage;
+  int status=mesh_section_create(context,(cells?cells:1)*invocations*sizeof(struct mesh_send),1,MESH_ABSENT,&storage);
+  if(status)return status;
+  void *address=mesh_section_address(context,storage,0);
+  memset(address,0,storage.bytes);
+  context->send_off=(uintptr_t)address-(uintptr_t)m;
+  context->send_bytes=(uint64_t)storage.pages*m->pgsz;
+  uint64_t first=context->send_off;
   /* design/prepared-machine.md#M04 */
   for(uint32_t p=0;p<m->links;p++){
     uint64_t base=m->notice_off+(uint64_t)mesh_notice_queue(m,context->client,p)*m->notice_bytes;
@@ -50,8 +64,8 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots){
         if(out[i].stride)count++;else once++;
       }
     }
-    *tx=(struct mesh_tx){.count=count,.slots=slots,.once=once};
-    memset(tx->cells,0,((size_t)count*slots+once)*sizeof *tx->cells);
+    *tx=(struct mesh_tx){.count=count,.slots=slots,.once=once,.invocations=invocations,.cells=first};
+    first+=((uint64_t)count*slots+once)*invocations*sizeof(struct mesh_send);
     qsort(ordered,length,sizeof *ordered,mesh_transfer_compare);
     uint32_t next[2]={0,once};
     for(uint32_t i=0;i<length;i++){
@@ -61,7 +75,8 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots){
       for(uint32_t slot=0;slot<out->count;slot++){
         struct mesh_publication *publication=mesh_publication_at(m,out->local_row+slot*out->stride);
         for(uint32_t j=0;j<publication->sends;j++)if(publication->targets[j].stream==base){
-          publication->targets[j].stream=base+offsetof(struct mesh_tx,cells)+sizeof(struct mesh_send)*(slot*count+next[varying]);
+          publication->targets[j].stream=tx->cells+sizeof(struct mesh_send)*invocations*(slot*count+next[varying]);
+          publication->targets[j].stride=invocations;
         }
       }
       next[varying]++;

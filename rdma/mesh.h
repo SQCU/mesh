@@ -9,7 +9,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 93u
+#define MESH_VERSION 94u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -41,9 +41,9 @@ enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_NOTICE_BANKS 2
 /* design/prepared-machine.md#M04 */
 struct mesh_send { _Alignas(32) _Atomic uint64_t ready; uintptr_t pair,request,next; };
-struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel; struct mesh_send cells[]; };
-_Static_assert(sizeof(struct mesh_send)==32 && _Alignof(struct mesh_send)==32 && offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==32,"M04/M12");
-struct mesh_target { uint64_t stream; uint32_t count; };
+struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells; };
+_Static_assert(sizeof(struct mesh_send)==32 && _Alignof(struct mesh_send)==32 && offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && sizeof(struct mesh_tx)==32,"M04/M12");
+struct mesh_target { uint64_t stream; uint32_t count,stride; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off */
 /* design/prepared-machine.md#M10 */
@@ -139,7 +139,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
   h->order_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*links*qps*blocks*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->notice_bytes=sizeof(struct mesh_tx)+2*(uint64_t)rows*sizeof(struct mesh_send);
+  h->notice_bytes=sizeof(struct mesh_tx);
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*links*h->notice_bytes; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)rows*pgsz;

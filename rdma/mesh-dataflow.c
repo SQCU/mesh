@@ -228,7 +228,7 @@ uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,struct prepared_pub
   for(uint32_t i=0;i<publication->sends;i++){
     struct mesh_target target=publication->targets[i];
     for(uint32_t k=0;k<target.count;k++){
-      if(records)records[count]=(struct prepared_publication){.destination=(uintptr_t)m+target.stream+sizeof(struct mesh_send)*k,.argument=1};
+      if(records)records[count]=(struct prepared_publication){.destination=(uintptr_t)m+target.stream+sizeof(struct mesh_send)*target.stride*k,.argument=1};
       count++;
     }
   }
