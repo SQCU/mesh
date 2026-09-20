@@ -12,7 +12,7 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
   if(queue>=m->links*m->qps)return EINVAL;
   _Atomic uint32_t *length=mesh_order_length(m,context->client,queue,receive);
   uint32_t index=atomic_load_explicit(length,memory_order_relaxed);
-  if(index==mesh_blocks(m))return ENOSPC;
+  if(index==mesh_rows(m))return ENOSPC;
   if(!receive)for(uint32_t value=0;value<section.count;value++){
     uint32_t row=mesh_section_row(section,value);
     uint32_t link=queue/m->qps;
@@ -104,7 +104,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
     for(uint32_t varying=0;varying<2;varying++)for(uint32_t i=0;i<length;i++){
       struct mesh_transfer *out=ordered[i];
       if((out->stride!=0)!=varying)continue;
-      uint32_t q=(uint32_t)(out-mesh_transfers(m,context->client,p*m->qps,MESH_SEND))/(2*mesh_blocks(m));
+      uint32_t q=(uint32_t)(out-mesh_transfers(m,context->client,p*m->qps,MESH_SEND))/(2*mesh_rows(m));
       for(uint32_t slot=0;slot<out->count;slot++){
         uint32_t stream=q*slots+slot;
         struct mesh_send *cell=(void *)((char *)m+tx->cells+sizeof(struct mesh_send)*column*(slot*count+out->first));
@@ -162,9 +162,10 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,str
   struct hdr *m=context->M;
   if(!bytes || !count)return EINVAL;
   size_t quantum=(size_t)m->block*m->pgsz;
-  if(bytes>(size_t)mesh_rows(m)*m->pgsz)return ENOMEM;
+  size_t capacity=(size_t)mesh_blocks(m)*m->block;
+  if(bytes>capacity*m->pgsz)return ENOMEM;
   size_t span=(bytes+quantum-1)/quantum*m->block;
-  if(span>mesh_rows(m)/count)return ENOMEM;
+  if(span>capacity/count)return ENOMEM;
   uint32_t stride=(uint32_t)span/m->block,rows=count*stride,first=mesh_rows_alloc(context,rows);
   if(first==MESH_ABSENT)return errno;
   for(uint32_t row=first;row<first+rows;row+=stride){

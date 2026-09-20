@@ -439,7 +439,7 @@ static void *link_run(void *argument){
 /* design/algorithm-sources.md#programcopy */
 int main(int argc,char **argv){
   const char *name=MESH_NAME;int me=0,layout=0;double pct=0;
-  uint64_t arena_pages=0,block_pages=0;
+  uint64_t arena_pages=0,block_pages=0,table_rows=0;
   uint32_t link_count=0,device_count=0,qps=getenv("MESH_QPS")?(uint32_t)atoi(getenv("MESH_QPS")):1;
   struct mesh_link *links=aligned_alloc(_Alignof(struct mesh_link),(size_t)argc*sizeof *links);
   struct mesh_device *devices=calloc((size_t)argc,sizeof *devices);
@@ -448,10 +448,10 @@ int main(int argc,char **argv){
   for(int i=1;i<argc;i++){
     if(!strcmp(argv[i],"-I") && i+1<argc)me=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-M") && i+1<argc)pct=atof(argv[++i]);
-    else if((!strcmp(argv[i],"-A") || !strcmp(argv[i],"-B")) && i+1<argc){
+    else if((!strcmp(argv[i],"-A") || !strcmp(argv[i],"-B") || !strcmp(argv[i],"-R")) && i+1<argc){
       char kind=argv[i][1],*end;uint64_t pages=strtoull(argv[++i],&end,10);
       if(*end || !pages || pages>INT32_MAX)die("configured page count");
-      if(kind=='A')arena_pages=pages;else block_pages=pages;
+      if(kind=='A')arena_pages=pages;else if(kind=='B')block_pages=pages;else table_rows=pages;
     }
     else if(!strcmp(argv[i],"--layout"))layout=1;
     else if(!strcmp(argv[i],"-s") && i+1<argc)name=argv[++i];
@@ -473,7 +473,7 @@ int main(int argc,char **argv){
   /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
   if((uint64_t)block_pages*pg+4096>16773120)die("transport chunk exceeds native request capacity");
   struct hdr geometry={0};
-  uint64_t length=mesh_layout(&geometry,pg,(uint32_t)block_pages,(uint32_t)arena_pages,link_count,qps);
+  uint64_t length=mesh_layout(&geometry,pg,(uint32_t)block_pages,(uint32_t)arena_pages,(uint32_t)table_rows,link_count,qps);
   uint64_t ram=0;size_t rl=sizeof ram;sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
   if(pct && length>(uint64_t)(pct/100*(double)ram))die("configured graph exceeds page capacity");
   if(layout){printf("%llu\n",(unsigned long long)length);return 0;}
