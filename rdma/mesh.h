@@ -3,13 +3,14 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdatomic.h>
+#include <infiniband/verbs.h>
 #include <os/os_sync_wait_on_address.h>
 /* design/pages-and-functions.md#block-addressing */
 #define MESH_MAGIC 0x4d455348u
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 96u
+#define MESH_VERSION 97u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -41,9 +42,17 @@ _Static_assert(sizeof(struct mesh_page_entry)==32 && _Alignof(struct mesh_page_e
 enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_NOTICE_BANKS 2
 /* design/prepared-machine.md#M04 */
-struct mesh_send { _Alignas(32) _Atomic uint64_t ready; uintptr_t pair,request,next; };
+struct mesh_send {
+  _Alignas(128) _Atomic uint64_t ready;
+  uintptr_t pair,next;
+  _Alignas(32) struct ibv_sge span;
+  struct ibv_send_wr request;
+};
 struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells; };
-_Static_assert(sizeof(struct mesh_send)==32 && _Alignof(struct mesh_send)==32 && offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && sizeof(struct mesh_tx)==32,"M04/M12");
+_Static_assert(sizeof(struct mesh_send)==256 && _Alignof(struct mesh_send)==128 &&
+  offsetof(struct mesh_send,next)==16 && offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 &&
+  offsetof(struct mesh_send,request.send_flags)+sizeof(unsigned int)<=128,"M04/M29");
+_Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && sizeof(struct mesh_tx)==32,"M04/M12");
 struct mesh_target { uint64_t stream; uint32_t count,stride; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off */
@@ -66,8 +75,8 @@ struct hdr {
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
 /* design/prepared-machine.md#M07 */
-struct mesh_input_status { _Alignas(32) _Atomic uint64_t completed; _Atomic uint64_t cancelled; uint64_t padding[2]; };
-_Static_assert(sizeof(struct mesh_input_status)==32 && offsetof(struct mesh_input_status,cancelled)==8,"M07");
+struct mesh_input_status { _Alignas(128) _Atomic uint64_t completed; _Atomic uint64_t cancelled; uint64_t padding[30]; };
+_Static_assert(sizeof(struct mesh_input_status)==sizeof(struct mesh_send) && offsetof(struct mesh_input_status,cancelled)==8,"M07");
 /* design/prepared-machine.md#M12 */
 struct mesh_cancel_range { _Alignas(32) uint64_t offset; uint64_t count,padding[2]; };
 struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; _Atomic uint32_t abandoned; _Atomic uint32_t count; uint32_t reserved; uint64_t padding[2]; struct mesh_cancel_range ranges[]; };

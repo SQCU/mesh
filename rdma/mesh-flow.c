@@ -113,14 +113,14 @@ static int link_prepare(struct mesh_link *link){
     struct mesh_transfer *transfers=mesh_transfers(m,link->client,channel,d);
     for(uint32_t i=0;i<atomic_load(mesh_order_length(m,link->client,channel,d));i++){
       uint32_t chunks=(uint32_t)((transfers[i].bytes+payload-1)/payload);
-      if(d==MESH_SEND)count+=(size_t)chunks*transfers[i].count*(transfers[i].stride?tx->invocations:1);
+      if(d==MESH_SEND)count+=(size_t)(chunks-1)*transfers[i].count*(transfers[i].stride?tx->invocations:1);
       else incoming+=chunks*transfers[i].count;
     }
   }
   free(link->requests);
   /* design/prepared-machine.md#M29 */
-  link->requests=aligned_alloc(128,(count?count:1)*sizeof *link->requests);
-  if(!link->requests)return ENOMEM;
+  link->requests=count?aligned_alloc(128,count*sizeof *link->requests):NULL;
+  if(count&&!link->requests)return ENOMEM;
   link->provider.completion_entries[MESH_SEND]=link->publication_count;
   link->provider.completion_entries[MESH_RECEIVE]=incoming;
 #if MESH_TRACE
@@ -190,21 +190,20 @@ static int link_configure(void *state,int socket,uint64_t client){
 #endif
       uint32_t repetitions=out[i].stride?invocations:1;
       for(uint32_t t=0;t<repetitions;t++){
-        cell[t]=(struct mesh_send){.pair=(uintptr_t)link->provider.queues[stream].pair,
-          .request=(uintptr_t)&link->requests[next].request};
+        cell[t]=(struct mesh_send){.pair=(uintptr_t)link->provider.queues[stream].pair};
         for(uint32_t k=0;k<chunks;k++){
-          uint32_t j=next+k;
           uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[row+(size_t)t*out[i].invocation_pages/m->block+k].mapping,memory_order_relaxed);
           struct ibv_sge span=link->provider.device->spans[page/m->block];
           uint64_t remaining=out[i].bytes-k*payload;
           span.length=(uint32_t)(remaining<payload?remaining:payload);
           /* design/prepared-machine.md#M29 */
-          struct prepared_send *record=link->requests+j;
-          *record=(struct prepared_send){.span=span,.request={
-            .next=k+1==chunks?NULL:&link->requests[j+1].request,
-            .sg_list=&record->span,.num_sge=1,.opcode=IBV_WR_SEND}};
+          struct ibv_sge *entry=k?&link->requests[next+k-1].span:&cell[t].span;
+          struct ibv_send_wr *request=k?&link->requests[next+k-1].request:&cell[t].request;
+          *entry=span;
+          *request=(struct ibv_send_wr){.next=k+1==chunks?NULL:&link->requests[next+k].request,
+            .sg_list=entry,.num_sge=1,.opcode=IBV_WR_SEND};
         }
-        next+=chunks;
+        next+=chunks-1;
       }
       if(last[stream])last[stream]->next=(uintptr_t)cell;else link->cursors[stream]=cell;
       last[stream]=cell;
@@ -277,7 +276,7 @@ static int link_configure(void *state,int socket,uint64_t client){
   for(int q=0;q<link->qps;q++)if(last[q]){
     struct mesh_send *end=last[q];
     for(uint32_t t=0;t<(repeat[q]?invocations:1);t++){
-      struct ibv_send_wr *request=(void *)(end+t)->request;
+      struct ibv_send_wr *request=&(end+t)->request;
       while(request->next)request=request->next;
       request->send_flags=IBV_SEND_SIGNALED;
     }
@@ -292,9 +291,9 @@ static int link_configure(void *state,int socket,uint64_t client){
   }
   uint32_t posted=1,peer_posted;
 #if MESH_TRACE
-  fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"send_base\":%llu,\"receive_base\":%llu,\"invocations\":%u,\"send_stride\":%u,\"receive_stride\":%u,\"send_capacity\":%zu,\"receive_capacity\":%zu}\n",
+  fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"send_base\":%llu,\"receive_base\":%llu,\"invocations\":%u,\"send_stride\":%u,\"send_record_bytes\":%zu,\"receive_stride\":%u,\"send_capacity\":%zu,\"receive_capacity\":%zu}\n",
     link->index,m->node,(unsigned long long)(uintptr_t)link->publications,(unsigned long long)(uintptr_t)link->receive,
-    invocations,invocations,incoming,link->trace_capacity[MESH_SEND],link->trace_capacity[MESH_RECEIVE]);
+    invocations,invocations,sizeof(struct mesh_send),incoming,link->trace_capacity[MESH_SEND],link->trace_capacity[MESH_RECEIVE]);
 #endif
   return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
 }
@@ -322,7 +321,7 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
 #if MESH_TRACE
         uint64_t posting=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #endif
-        int error=post(streams==1?pair:(struct ibv_qp *)record->pair,(struct ibv_send_wr *)record->request,&bad);
+        int error=post(streams==1?pair:(struct ibv_qp *)record->pair,&record->request,&bad);
 #if MESH_TRACE
         uint64_t posted=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         trace[link->traced[MESH_SEND]++]=(struct mesh_trace){(uintptr_t)record,observed,posting,posted};

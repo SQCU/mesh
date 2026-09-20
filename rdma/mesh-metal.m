@@ -59,7 +59,7 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
 int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   struct mesh_section section,uint32_t invocations,struct mesh_metal_publication *publication){
   uint32_t count=mesh_publication_prepare(context->M,section.first,NULL);
-  *publication=(struct mesh_metal_publication){.count=count};
+  *publication=(struct mesh_metal_publication){.count=count,.stride=sizeof(struct mesh_send)};
   if(!count)return 0;
   struct mesh_section records;
   int status=mesh_section_create(context,count*sizeof(struct prepared_publication),1,MESH_ABSENT,&records);
