@@ -155,8 +155,6 @@ static int link_configure(void *state,int socket,uint64_t client){
   if(exchange(socket,tx,&peer_tx,sizeof *tx,sizeof peer_tx,m,client,link->provider.deadline))return -1;
   link->cursors=calloc((size_t)link->qps,sizeof *link->cursors);
   if(!link->cursors)return -1;
-  struct mesh_send *last[link->qps],*repeat[link->qps];
-  memset(last,0,sizeof last);memset(repeat,0,sizeof repeat);
   /* design/prepared-machine.md#M08 */
   uint32_t invocations=tx->invocations?tx->invocations:1;
   uint32_t incoming=link->provider.completion_entries[MESH_RECEIVE];
@@ -182,15 +180,17 @@ static int link_configure(void *state,int socket,uint64_t client){
       uint32_t publication=slot*tx->count+out[i].first;
       /* design/prepared-machine.md#M04 */
       uint32_t stream=q*tx->slots+slot;
-      struct mesh_send *cell=link->publications+(size_t)publication*invocations;
+      struct mesh_send *cell=link->publications+(size_t)publication*((size_t)invocations+1);
 #if MESH_TRACE
       /* design/prepared-machine.md#M27 */
       fprintf(stderr,"{\"trace_binding\":%u,\"rank\":%u,\"direction\":0,\"index\":%u,\"binding\":%u,\"slot\":%u}\n",
         link->index,m->node,publication,out[i].binding,slot);
 #endif
       uint32_t repetitions=out[i].stride?invocations:1;
+      uint64_t continuation=cell->request.wr_id;
+      unsigned flags=cell->request.send_flags;
       for(uint32_t t=0;t<repetitions;t++){
-        cell[t]=(struct mesh_send){.pair=(uintptr_t)link->provider.queues[stream].pair};
+        cell[t].pair=(uintptr_t)link->provider.queues[stream].pair;
         for(uint32_t k=0;k<chunks;k++){
           uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[row+(size_t)t*out[i].invocation_pages/m->block+k].mapping,memory_order_relaxed);
           struct ibv_sge span=link->provider.device->spans[page/m->block];
@@ -200,14 +200,13 @@ static int link_configure(void *state,int socket,uint64_t client){
           struct ibv_sge *entry=k?&link->requests[next+k-1].span:&cell[t].span;
           struct ibv_send_wr *request=k?&link->requests[next+k-1].request:&cell[t].request;
           *entry=span;
-          *request=(struct ibv_send_wr){.next=k+1==chunks?NULL:&link->requests[next+k].request,
+          *request=(struct ibv_send_wr){.wr_id=k?0:continuation,.next=k+1==chunks?NULL:&link->requests[next+k].request,
+            .send_flags=k+1==chunks?flags:0,
             .sg_list=entry,.num_sge=1,.opcode=IBV_WR_SEND};
         }
         next+=chunks-1;
       }
-      if(last[stream])last[stream]->next=(uintptr_t)cell;else link->cursors[stream]=cell;
-      last[stream]=cell;
-      if(out[i].stride&&!repeat[stream])repeat[stream]=cell;
+      if(!link->cursors[stream])link->cursors[stream]=cell;
     }
     for(uint32_t i=0;i<counts[MESH_RECEIVE];i++){
       uint32_t peer_index=0;
@@ -237,16 +236,20 @@ static int link_configure(void *state,int socket,uint64_t client){
           frames[q*tx->slots+slot]+=(bytes+4095)/4096;
           struct mesh_publication *delivery=mesh_publication_at(m,row+k);
           uintptr_t input=(uintptr_t)&delivery->argument;
+          uint64_t argument=1;
           if(delivery->device_input)input=(uintptr_t)m+delivery->device_input;
-          else if(delivery->sends)input=(uintptr_t)m+delivery->targets[0].stream;
+          else if(delivery->sends){
+            struct mesh_send *cell=(void *)((char *)m+delivery->targets[0].stream);
+            input=(uintptr_t)cell;argument=cell->request.wr_id;
+          }
           for(uint32_t t=0;t<invocations;t++){
             uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[row+(size_t)t*in[i].invocation_pages/m->block+k].mapping,memory_order_relaxed);
             struct ibv_sge span=link->provider.device->spans[page/m->block];span.length=bytes;
             struct prepared_receive *record=link->receive+(size_t)t*incoming+frame;
             *record=(struct prepared_receive){
               .request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
-              .span=span,.input=(_Atomic uint64_t *)(input+(delivery->device_input?sizeof(struct mesh_input_status)*(size_t)t:0)),
-              .argument=delivery->device_input?(k+1==chunks):1,.pair=queue->pair};
+              .span=span,.input=(_Atomic uint64_t *)(input+(delivery->device_input||delivery->sends?sizeof(struct mesh_input_status)*(size_t)t:0)),
+              .argument=delivery->device_input?(k+1==chunks):argument,.pair=queue->pair};
           }
         }
       }
@@ -273,27 +276,14 @@ static int link_configure(void *state,int socket,uint64_t client){
   if(receive_count)link->receive[receive_count]=link->receive[receive_count-1];
   fprintf(stderr,"receive window=%u invocations=%u frames=%u refill=%d\n",window,invocations,incoming,link->refill);
   link->cursor_count=0;
-  for(int q=0;q<link->qps;q++)if(last[q]){
-    struct mesh_send *end=last[q];
-    for(uint32_t t=0;t<(repeat[q]?invocations:1);t++){
-      struct ibv_send_wr *request=&(end+t)->request;
-      while(request->next)request=request->next;
-      request->send_flags=IBV_SEND_SIGNALED;
-    }
-    for(uint32_t t=1;t<invocations && repeat[q];t++){
-      for(struct mesh_send *source=repeat[q];;source=(void *)source->next){
-        struct mesh_send *cell=source+t;
-        last[q]->next=(uintptr_t)cell;last[q]=cell;
-        if(source==end)break;
-      }
-    }
+  for(int q=0;q<link->qps;q++)if(link->cursors[q]){
     link->cursors[link->cursor_count++]=link->cursors[q];
   }
   uint32_t posted=1,peer_posted;
 #if MESH_TRACE
   fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"send_base\":%llu,\"receive_base\":%llu,\"invocations\":%u,\"send_stride\":%u,\"send_record_bytes\":%zu,\"receive_stride\":%u,\"send_capacity\":%zu,\"receive_capacity\":%zu}\n",
     link->index,m->node,(unsigned long long)(uintptr_t)link->publications,(unsigned long long)(uintptr_t)link->receive,
-    invocations,invocations,sizeof(struct mesh_send),incoming,link->trace_capacity[MESH_SEND],link->trace_capacity[MESH_RECEIVE]);
+    invocations,invocations+1,sizeof(struct mesh_send),incoming,link->trace_capacity[MESH_SEND],link->trace_capacity[MESH_RECEIVE]);
 #endif
   return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
 }
@@ -313,11 +303,12 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
   struct mesh_trace *trace=link->trace[MESH_SEND];
 #endif
   for(;;){
-    if((streams==1 || record) && atomic_load_explicit(&record->ready,memory_order_acquire)){
+    uint64_t continuation=atomic_load_explicit(&record->ready,memory_order_acquire);
+    if(continuation){
 #if MESH_TRACE
         uint64_t observed=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #endif
-        struct mesh_send *next=(void *)record->next;
+        struct mesh_send *next=(void *)((uintptr_t)record+continuation);
 #if MESH_TRACE
         uint64_t posting=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #endif
@@ -327,7 +318,6 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
         trace[link->traced[MESH_SEND]++]=(struct mesh_trace){(uintptr_t)record,observed,posting,posted};
 #endif
         if(error){link_error(link,error<0?-error:error,1);return NULL;}
-        if(streams==1 && !next)return NULL;
         if(streams>1)cursors[stream]=next;
         record=next;
     }else if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;

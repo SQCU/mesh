@@ -221,6 +221,7 @@ struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t q
 }
 
 /* design/prepared-machine.md#M13 */
+/* design/prepared-machine.md#M04 */
 /* design/algorithm-sources.md#programkernel_call */
 uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,struct prepared_publication *records){
   struct mesh_publication *publication=mesh_publication_at(m,row);
@@ -228,7 +229,10 @@ uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,struct prepared_pub
   for(uint32_t i=0;i<publication->sends;i++){
     struct mesh_target target=publication->targets[i];
     for(uint32_t k=0;k<target.count;k++){
-      if(records)records[count]=(struct prepared_publication){.destination=(uintptr_t)m+target.stream+sizeof(struct mesh_send)*target.stride*k,.argument=1};
+      if(records){
+        struct mesh_send *cell=(void *)((char *)m+target.stream+sizeof(struct mesh_send)*target.stride*k);
+        records[count]=(struct prepared_publication){.destination=(uintptr_t)cell,.argument=cell->request.wr_id};
+      }
       count++;
     }
   }

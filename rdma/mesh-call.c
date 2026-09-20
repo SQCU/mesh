@@ -41,7 +41,8 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
       cells+=out[i].stride?slots:1;
   }
   struct mesh_section storage;
-  int status=mesh_section_create(context,(cells?cells:1)*invocations*sizeof(struct mesh_send),1,MESH_ABSENT,&storage);
+  uint64_t column=(uint64_t)invocations+1;
+  int status=mesh_section_create(context,(cells?cells:1)*column*sizeof(struct mesh_send),1,MESH_ABSENT,&storage);
   if(status)return status;
   void *address=mesh_section_address(context,storage,0);
   memset(address,0,storage.bytes);
@@ -66,7 +67,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
       }
     }
     *tx=(struct mesh_tx){.count=count,.slots=slots,.once=once,.invocations=invocations,.cells=first};
-    first+=((uint64_t)count*slots+once)*invocations*sizeof(struct mesh_send);
+    first+=((uint64_t)count*slots+once)*column*sizeof(struct mesh_send);
     qsort(ordered,length,sizeof *ordered,mesh_transfer_compare);
     uint32_t next[2]={0,once};
     for(uint32_t i=0;i<length;i++){
@@ -76,11 +77,30 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
       for(uint32_t slot=0;slot<out->count;slot++){
         struct mesh_publication *publication=mesh_publication_at(m,out->local_row+slot*out->stride);
         for(uint32_t j=0;j<publication->sends;j++)if(publication->targets[j].stream==base){
-          publication->targets[j].stream=tx->cells+sizeof(struct mesh_send)*invocations*(slot*count+next[varying]);
-          publication->targets[j].stride=invocations;
+          publication->targets[j].stream=tx->cells+sizeof(struct mesh_send)*column*(slot*count+next[varying]);
+          publication->targets[j].stride=(uint32_t)column;
         }
       }
       next[varying]++;
+    }
+    /* design/prepared-machine.md#M04 */
+    struct mesh_send *last[m->qps*slots],*repeat[m->qps*slots];
+    memset(last,0,sizeof last);memset(repeat,0,sizeof repeat);
+    for(uint32_t varying=0;varying<2;varying++)for(uint32_t i=0;i<length;i++){
+      struct mesh_transfer *out=ordered[i];
+      if((out->stride!=0)!=varying)continue;
+      uint32_t q=(uint32_t)(out-mesh_transfers(m,context->client,p*m->qps,MESH_SEND))/(2*mesh_blocks(m));
+      for(uint32_t slot=0;slot<out->count;slot++){
+        uint32_t stream=q*slots+slot;
+        struct mesh_send *cell=(void *)((char *)m+tx->cells+sizeof(struct mesh_send)*column*(slot*count+out->first));
+        if(last[stream])last[stream]->request.wr_id=(uintptr_t)cell-(uintptr_t)last[stream];
+        last[stream]=cell;
+        if(varying&&!repeat[stream])repeat[stream]=cell;
+      }
+    }
+    for(uint32_t stream=0;stream<m->qps*slots;stream++)if(last[stream]){
+      last[stream]->request.wr_id=(uintptr_t)(repeat[stream]?repeat[stream]+1:last[stream]+invocations)-(uintptr_t)last[stream];
+      last[stream]->request.send_flags=IBV_SEND_SIGNALED;
     }
     free(ordered);
   }

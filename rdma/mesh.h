@@ -10,7 +10,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 97u
+#define MESH_VERSION 98u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -44,13 +44,13 @@ enum { MESH_SEND, MESH_RECEIVE };
 /* design/prepared-machine.md#M04 */
 struct mesh_send {
   _Alignas(128) _Atomic uint64_t ready;
-  uintptr_t pair,next;
+  uintptr_t pair;
   _Alignas(32) struct ibv_sge span;
   struct ibv_send_wr request;
 };
 struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells; };
 _Static_assert(sizeof(struct mesh_send)==256 && _Alignof(struct mesh_send)==128 &&
-  offsetof(struct mesh_send,next)==16 && offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 &&
+  offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 &&
   offsetof(struct mesh_send,request.send_flags)+sizeof(unsigned int)<=128,"M04/M29");
 _Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && sizeof(struct mesh_tx)==32,"M04/M12");
 struct mesh_target { uint64_t stream; uint32_t count,stride; };
