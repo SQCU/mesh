@@ -184,7 +184,7 @@ static int link_configure(void *state,int socket,uint64_t client){
         uint64_t remaining=out[i].bytes-k*payload;
         span.length=(uint32_t)(remaining<payload?remaining:payload);
         link->spans[j]=span;
-        link->requests[j]=(struct ibv_send_wr){.next=k+1==chunks?NULL:link->requests+j+1,.sg_list=link->spans+j,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=k+1==chunks?IBV_SEND_SIGNALED:0};
+        link->requests[j]=(struct ibv_send_wr){.next=k+1==chunks?NULL:link->requests+j+1,.sg_list=link->spans+j,.num_sge=1,.opcode=IBV_WR_SEND};
       }
       next+=chunks;
     }
@@ -231,6 +231,9 @@ static int link_configure(void *state,int socket,uint64_t client){
   link->cursor_count=0;
   for(int q=0;q<link->qps;q++)if(last[q]){
     struct mesh_send *end=last[q];
+    struct ibv_send_wr *request=(void *)end->request;
+    while(request->next)request=request->next;
+    request->send_flags=IBV_SEND_SIGNALED;
     for(uint32_t t=1;t<invocations && repeat[q];t++){
       for(struct mesh_send *source=repeat[q];;source=(void *)source->next){
         struct mesh_send *cell=source+t;
