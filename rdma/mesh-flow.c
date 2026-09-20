@@ -72,7 +72,6 @@ static void stop_bridge(int signal){
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M12 */
 static void link_stop(struct mesh_link *link){
-  if(link->cancel)mesh_cancel(link->M,link->cancel);
   atomic_store_explicit(&link->progressing,0,memory_order_release);
   struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,0,NOTE_TRIGGER,0,0,0,0);
   kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
@@ -355,6 +354,7 @@ static void link_close(struct mesh_link *link,int *control){
   atomic_store_explicit(&link->progressing,0,memory_order_release);
   if(link->network>=0){close(link->network);link->network=-1;}
   if(*control>=0)shutdown(*control,SHUT_RDWR);
+  if(link->cancel)mesh_cancel(link->M,link->cancel);
   while(link->worker_count)pthread_join(link->workers[--link->worker_count],NULL);
 #if MESH_TRACE
   /* design/prepared-machine.md#M27 */
@@ -433,7 +433,8 @@ static void *link_run(void *argument){
   }
   for(;;){
     if(!atomic_load_explicit(&link->progressing,memory_order_acquire))link_close(link,&control);
-    if(stop || atomic_load_explicit(&m->client,memory_order_acquire)!=link->client)break;
+    if(stop || atomic_load_explicit(&m->client,memory_order_acquire)!=link->client ||
+       atomic_load_explicit(&m->configured,memory_order_acquire)!=link->client)break;
     int count=kevent64(link->events,NULL,0,&event,1,0,NULL);
     if(count<0){if(errno==EINTR)continue;link_error(link,errno,4);break;}
     if(event.flags&EV_ERROR)link_error(link,event.data,4);
@@ -559,7 +560,8 @@ int main(int argc,char **argv){
       if(error){status=error;stop=1;break;}
       started++;
     }
-    while(!stop && atomic_load_explicit(&m->client,memory_order_acquire)==client){
+    while(!stop && atomic_load_explicit(&m->client,memory_order_acquire)==client &&
+          atomic_load_explicit(&m->configured,memory_order_acquire)==client){
       os_sync_wait_on_address(&m->control,notification,sizeof m->control,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
       notification=atomic_load_explicit(&m->control,memory_order_acquire);
     }

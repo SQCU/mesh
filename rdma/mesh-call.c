@@ -110,7 +110,9 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfers_start(struct mesh_ctx *context){
   struct hdr *m=context->M;
-  atomic_store_explicit(&m->configured,context->client,memory_order_release);
+  /* design/prepared-machine.md#M12 */
+  uint64_t idle=0;
+  if(!atomic_compare_exchange_strong_explicit(&m->configured,&idle,context->client,memory_order_release,memory_order_relaxed))return ECANCELED;
   /* design/prepared-machine.md#M26 */
   mesh_control_notify(m);
   for(uint32_t p=0;p<m->links;p++){
