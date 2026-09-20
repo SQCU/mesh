@@ -29,15 +29,18 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,uint32_t i
     length:context->M->data_off-context->M->notice_off
     options:MTLResourceStorageModeShared deallocator:nil];
   struct mesh_section stop;
-  int status=mesh_section_create(context,2*sizeof(uint32_t),1,MESH_ABSENT,&stop);
+  uint64_t inputs=0;
+  for(uint32_t q=0;q<context->M->links*context->M->qps;q++)
+    inputs+=atomic_load(mesh_order_length(context->M,context->client,q,MESH_RECEIVE));
+  int status=mesh_section_create(context,sizeof(struct mesh_cancellation)+inputs*sizeof(struct mesh_cancel_range),1,MESH_ABSENT,&stop);
   if(status){mesh_metal_transport_destroy(transport);return status;}
-  uint32_t *address=mesh_section_address(context,stop,0);address[0]=address[1]=0;
+  struct mesh_cancellation *address=mesh_section_address(context,stop,0);memset(address,0,stop.bytes);
   /* design/prepared-machine.md#M12 */
   for(uint32_t p=0;p<context->M->links;p++){
     struct mesh_tx *tx=(void *)mesh_events(context->M,mesh_notice_queue(context->M,context->client,p));
     tx->cancel=(uintptr_t)address-(uintptr_t)context->M;tx->invocations=invocations;
   }
-  transport->stop=[(id<MTLDevice>)device newBufferWithBytesNoCopy:address length:context->M->pgsz
+  transport->stop=[(id<MTLDevice>)device newBufferWithBytesNoCopy:address length:stop.pages*context->M->pgsz
     options:MTLResourceStorageModeShared deallocator:nil];
   if(!transport->publication||!transport->stop){mesh_metal_transport_destroy(transport);return ENOMEM;}
   return 0;
@@ -48,17 +51,23 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,uint32_t i
 int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
   struct mesh_section operand,uint32_t invocations,struct mesh_metal_input *input){
   struct mesh_section words;
-  int status=mesh_section_create(context,8*(uint64_t)invocations*operand.count,1,MESH_ABSENT,&words);
+  int status=mesh_section_create(context,sizeof(struct mesh_input_status)*(uint64_t)invocations*operand.count,1,MESH_ABSENT,&words);
   if(status)return status;
   void *address=mesh_section_address(context,words,0);
   memset(address,0,words.bytes);
+  /* design/prepared-machine.md#M12 */
+  struct mesh_cancellation *cancel=[(id<MTLBuffer>)transport->stop contents];
+  uint32_t count=atomic_load_explicit(&cancel->count,memory_order_relaxed);
+  cancel->ranges[count]=(struct mesh_cancel_range){.offset=(uintptr_t)address-(uintptr_t)context->M,.count=(uint64_t)invocations*operand.count};
+  atomic_store_explicit(&cancel->count,count+1,memory_order_release);
+  if(atomic_load_explicit(&cancel->requested,memory_order_relaxed))mesh_cancel(context->M,cancel);
   for(uint32_t s=0;s<operand.count;s++)for(uint32_t k=0;k<operand.stride;k++)
     mesh_publication_at(context->M,operand.first+s*operand.stride+k)->device_input=
-      (uintptr_t)address-(uintptr_t)context->M+8*(uint64_t)s*invocations;
+      (uintptr_t)address-(uintptr_t)context->M+sizeof(struct mesh_input_status)*(uint64_t)s*invocations;
   id<MTLDevice> device=[(id<MTLBuffer>)transport->publication device];
   *input=(struct mesh_metal_input){.completion=[device newBufferWithBytesNoCopy:address
     length:words.pages*context->M->pgsz options:MTLResourceStorageModeShared deallocator:nil],
-    .stop=transport->stop,.stride=8};
+    .stop=transport->stop,.stride=sizeof(struct mesh_input_status)};
   return input->completion?0:ENOMEM;
 }
 

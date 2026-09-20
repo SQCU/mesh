@@ -52,7 +52,7 @@ struct mesh_link {
   struct ibv_sge *spans;
   struct mesh_send *publications,**cursors;
   struct ibv_wc *completion[2];
-  _Atomic uint32_t *cancel;
+  struct mesh_cancellation *cancel;
 #if MESH_TRACE
   struct mesh_trace *trace[2];
   size_t traced[2],trace_capacity[2];
@@ -72,7 +72,7 @@ static void stop_bridge(int signal){
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M12 */
 static void link_stop(struct mesh_link *link){
-  if(link->cancel)atomic_store_explicit(link->cancel,1,memory_order_release);
+  if(link->cancel)mesh_cancel(link->M,link->cancel);
   atomic_store_explicit(&link->progressing,0,memory_order_release);
   struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,0,NOTE_TRIGGER,0,0,0,0);
   kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
@@ -217,7 +217,7 @@ static int link_configure(void *state,int socket,uint64_t client){
             struct prepared_receive *record=records+t;
             *record=(struct prepared_receive){
               .request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
-              .span=span,.input=(_Atomic uint64_t *)(input+(delivery->device_input?8*(size_t)t:0)),
+              .span=span,.input=(_Atomic uint64_t *)(input+(delivery->device_input?sizeof(struct mesh_input_status)*(size_t)t:0)),
               .argument=delivery->device_input?(k+1==chunks):1,
               .next=&records[t+1<invocations?t+1:0].request,.pair=queue->pair};
           }

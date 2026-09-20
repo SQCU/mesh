@@ -26,7 +26,7 @@ M08 requests user-interactive QoS in `pthread_create` attributes and destroys th
 | Publish native completion | Release-store the value at that destination | M07's directly bound completion word |
 | Receive repost binding | Load next request and QP at receive record +64 | M08 |
 | Repost | Call the register-held provider function with the prepared next request | M08 |
-| GPU observation | Workgroup thread zero performs the system-scope fence and coherent completion read; shutdown is read only while the dependency is absent | M07, M12 |
+| GPU observation | Workgroup thread zero performs the system-scope fence and one coherent `ulong2` source read of adjacent completion/cancellation fields. No separate global shutdown read remains; cancellation acknowledgement is written only when an absent operand is abandoned | M07, M12 |
 | Local cancellation outcome | Thread zero stores zero to static threadgroup scratch, changing it to one only on cancellation | M25; no SHM access |
 | Workgroup handoff | Threadgroup/device barrier, then one local scratch read per numerical thread; a cancelled group returns together | M25; no additional SHM load or host action |
 | Numerical consumer entry | Original numerical kernel observes its directly bound M07 word; no reset or intervening dispatch | M07, M06 |
@@ -36,6 +36,7 @@ The receive destination/value and next-request/QP fields occupy one aligned 32-b
 
 | Deleted execution | Replacement |
 | --- | --- |
+| Separate global shutdown read on every unsuccessful GPU completion poll | M07 holds independent adjacent 64-bit completion and cancellation fields in one aligned 16-byte operand. M12's prepared ranges are traversed only by explicit shutdown/error handling, which writes the cancellation fields without changing completion. The source has one vector read; emitted GPU instruction count is not established. Native RX retains its original release store and four accepted-path loads. |
 | Caller-inserted publication encoders after each model fragment | M10 send and M07 receive operands are registered once before capture. M06 places SEND commands at actual producer writes and observations at actual consumer reads. The caller no longer determines publication timing by a fragment return. |
 | Per-layer numerical model interfaces between partials | M06 composes one rank graph. Outgoing partials and KV state remain graph outputs; incoming partials remain inputs. Ordered send operands determine native transfer order at setup, and the offline solver retains the declared partition widths. |
 | Main-thread polling of client/configuration throughout idle time and every active invocation | M26 OS notification on the existing shared lifecycle word. Setup, retirement and explicit shutdown notify once; the main thread consumes no polling core. Native TX/RX and publication issue no wait/wake call. |
