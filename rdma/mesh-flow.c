@@ -23,6 +23,14 @@ union mesh_network_event {
   unsigned char bytes[KEV_MSG_HEADER_SIZE+sizeof(struct net_event_data)];
 };
 _Static_assert(sizeof(union mesh_network_event)==48,"M24");
+/* design/prepared-machine.md#M29 */
+struct prepared_send {
+  _Alignas(128) struct ibv_sge span;
+  struct ibv_send_wr request;
+};
+_Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_send)==128 &&
+  offsetof(struct prepared_send,span)==0 && offsetof(struct prepared_send,request)==16 &&
+  offsetof(struct prepared_send,request.send_flags)+sizeof(unsigned int)<=64,"M29");
 /* design/prepared-machine.md#M08 */
 struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
@@ -52,8 +60,7 @@ struct mesh_link {
   struct hdr *M;struct mesh_verbs provider;int qps;uint64_t client;
   struct prepared_receive *receive;
   struct ibv_qp *receive_pair;
-  struct ibv_send_wr *requests;
-  struct ibv_sge *spans;
+  struct prepared_send *requests;
   struct mesh_send *publications,**cursors;
   struct ibv_wc *completion;
   struct mesh_cancellation *cancel;
@@ -111,8 +118,8 @@ static int link_prepare(struct mesh_link *link){
     }
   }
   free(link->requests);
-  link->requests=aligned_alloc(128,((count?count:1)*144+127)&~(size_t)127);
-  link->spans=(void *)(link->requests+count);
+  /* design/prepared-machine.md#M29 */
+  link->requests=aligned_alloc(128,(count?count:1)*sizeof *link->requests);
   if(!link->requests)return ENOMEM;
   link->provider.completion_entries[MESH_SEND]=link->publication_count;
   link->provider.completion_entries[MESH_RECEIVE]=incoming;
@@ -184,15 +191,18 @@ static int link_configure(void *state,int socket,uint64_t client){
       uint32_t repetitions=out[i].stride?invocations:1;
       for(uint32_t t=0;t<repetitions;t++){
         cell[t]=(struct mesh_send){.pair=(uintptr_t)link->provider.queues[stream].pair,
-          .request=(uintptr_t)(link->requests+next)};
+          .request=(uintptr_t)&link->requests[next].request};
         for(uint32_t k=0;k<chunks;k++){
           uint32_t j=next+k;
           uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[row+(size_t)t*out[i].invocation_pages/m->block+k].mapping,memory_order_relaxed);
           struct ibv_sge span=link->provider.device->spans[page/m->block];
           uint64_t remaining=out[i].bytes-k*payload;
           span.length=(uint32_t)(remaining<payload?remaining:payload);
-          link->spans[j]=span;
-          link->requests[j]=(struct ibv_send_wr){.next=k+1==chunks?NULL:link->requests+j+1,.sg_list=link->spans+j,.num_sge=1,.opcode=IBV_WR_SEND};
+          /* design/prepared-machine.md#M29 */
+          struct prepared_send *record=link->requests+j;
+          *record=(struct prepared_send){.span=span,.request={
+            .next=k+1==chunks?NULL:&link->requests[j+1].request,
+            .sg_list=&record->span,.num_sge=1,.opcode=IBV_WR_SEND}};
         }
         next+=chunks;
       }
