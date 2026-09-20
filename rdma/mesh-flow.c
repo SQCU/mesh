@@ -268,9 +268,9 @@ static int link_configure(void *state,int socket,uint64_t client){
   }
   uint32_t posted=1,peer_posted;
 #if MESH_TRACE
-  fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"send_base\":%llu,\"receive_base\":%llu,\"invocations\":%u,\"send_stride\":%u,\"send_capacity\":%zu,\"receive_capacity\":%zu}\n",
+  fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"send_base\":%llu,\"receive_base\":%llu,\"invocations\":%u,\"send_stride\":%u,\"receive_stride\":%u,\"send_capacity\":%zu,\"receive_capacity\":%zu}\n",
     link->index,m->node,(unsigned long long)(uintptr_t)link->publications,(unsigned long long)(uintptr_t)link->receive,
-    invocations,invocations,link->trace_capacity[MESH_SEND],link->trace_capacity[MESH_RECEIVE]);
+    invocations,invocations,incoming,link->trace_capacity[MESH_SEND],link->trace_capacity[MESH_RECEIVE]);
 #endif
   return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
 }
