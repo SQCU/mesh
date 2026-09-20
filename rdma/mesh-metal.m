@@ -75,7 +75,7 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
 /* design/prepared-machine.md#M04 */
 /* design/prepared-machine.md#M10 */
 int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  struct mesh_section section,struct mesh_metal_publication *publication){
+  struct mesh_section section,uint32_t invocations,struct mesh_metal_publication *publication){
   uint32_t count=mesh_publication_prepare(context->M,section.first,NULL);
   *publication=(struct mesh_metal_publication){.count=count};
   if(!count)return 0;
@@ -90,6 +90,17 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
   id<MTLDevice> device=memory.device;
   publication->records=[device newBufferWithBytesNoCopy:prepared length:records.pages*context->M->pgsz
     options:MTLResourceStorageModeShared deallocator:nil];
+  /* design/prepared-machine.md#M28 */
+  if(section.bytes<=UINT32_MAX){
+    struct mesh_section words;
+    status=mesh_section_create(context,sizeof(struct mesh_output_status)*(uint64_t)invocations,1,MESH_ABSENT,&words);
+    if(status){[(id)publication->records release];return status;}
+    struct mesh_output_status *address=mesh_section_address(context,words,0);
+    for(uint32_t t=0;t<invocations;t++)address[t]=(struct mesh_output_status){.remaining=(uint32_t)section.bytes};
+    publication->completion=[device newBufferWithBytesNoCopy:address length:words.pages*context->M->pgsz
+      options:MTLResourceStorageModeShared deallocator:nil];
+    if(!publication->completion){[(id)publication->records release];return ENOMEM;}
+  }
   return publication->records?0:ENOMEM;
 }
 
