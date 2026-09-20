@@ -35,13 +35,14 @@ struct mesh_queue {
   int (*poll)(struct ibv_cq *,int,struct ibv_wc *);
   int (*send)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **);
   int (*receive)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **);
+  uint32_t receive_capacity;
 };
 _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
 struct mesh_verbs {
   struct mesh_device *device; struct mesh_wire *wire;
   struct mesh_queue *queues; int qp_count,listener;
   struct ibv_cq *completion;
-  uint32_t peer,completion_entries[2],request_capacity;
+  uint32_t peer,completion_entries[2];
   uint64_t bandwidth;
   const char *local_address,*remote_address,*service;
   uint64_t deadline;
@@ -240,12 +241,12 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+UINT64_C(30000000000);
   int f=oob(provider,m,client);
   if(f<0)return -1;
-  uint32_t frame_capacity=provider->request_capacity;
+  uint32_t frame_capacity=provider->device->frame_capacity;
   /* design/prepared-machine.md#M11 */
   provider->queues=calloc((size_t)qps,sizeof *provider->queues);
   if(!provider->queues){close(f);return -1;}
   provider->completion=ibv_create_cq(provider->device->context,
-    (int)(provider->completion_entries[MESH_SEND]+provider->completion_entries[MESH_RECEIVE]+1),NULL,NULL,0);
+    (int)(frame_capacity+1),NULL,NULL,0);
   if(!provider->completion){close(f);return -1;}
   for(int q=0;q<qps;q++){
     struct mesh_queue *queue=&provider->queues[q];
@@ -260,6 +261,7 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
     provider->qp_count=q+1;
     struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
     if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
+    queue->receive_capacity=actual.cap.max_recv_wr;
     fprintf(stderr,"pair capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",q,
       actual.cap.max_send_wr,actual.cap.max_recv_wr,
       queue->completion->cqe);

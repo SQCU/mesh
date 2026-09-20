@@ -28,13 +28,13 @@ struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
   struct ibv_sge span;
   _Alignas(32) struct ibv_recv_wr *next;
-  union { struct ibv_qp *pair; struct prepared_receive *following; };
+  struct ibv_qp *pair;
   _Atomic uint64_t *input;
   uint64_t argument;
 };
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
   offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,next)==64 &&
-  offsetof(struct prepared_receive,following)==72 && offsetof(struct prepared_receive,input)==80 &&
+  offsetof(struct prepared_receive,pair)==72 && offsetof(struct prepared_receive,input)==80 &&
   offsetof(struct prepared_receive,argument)==88,"M08 M09");
 #if MESH_TRACE
 /* design/prepared-machine.md#M27 */
@@ -45,7 +45,7 @@ struct mesh_link {
   pthread_t workers[2];
   uint32_t worker_count,publication_count,cursor_count,index;
   pthread_t controller;
-  int events,network;
+  int events,network,refill;
   union mesh_network_event network_event;
   char *configuration;
   _Atomic int progressing;
@@ -101,18 +101,14 @@ static int link_prepare(struct mesh_link *link){
   size_t count=0;
   uint32_t incoming=0;
   link->qps=(int)(m->qps*tx->slots);
-  link->provider.request_capacity=1;
   for(uint32_t q=0;q<m->qps;q++)for(uint32_t d=0;d<2;d++){
     uint32_t channel=link->index*m->qps+q;
     struct mesh_transfer *transfers=mesh_transfers(m,link->client,channel,d);
-    uint32_t frames=0;
     for(uint32_t i=0;i<atomic_load(mesh_order_length(m,link->client,channel,d));i++){
       uint32_t chunks=(uint32_t)((transfers[i].bytes+payload-1)/payload);
-      frames+=chunks;
       if(d==MESH_SEND)count+=(size_t)chunks*transfers[i].count;
       else incoming+=chunks*transfers[i].count;
     }
-    if(frames>link->provider.request_capacity)link->provider.request_capacity=frames;
   }
   free(link->requests);
   link->requests=aligned_alloc(128,((count?count:1)*144+127)&~(size_t)127);
@@ -156,9 +152,11 @@ static int link_configure(void *state,int socket,uint64_t client){
   memset(last,0,sizeof last);memset(repeat,0,sizeof repeat);
   /* design/prepared-machine.md#M08 */
   uint32_t invocations=tx->invocations?tx->invocations:1;
-  size_t receive_count=(size_t)link->provider.completion_entries[MESH_RECEIVE]*invocations;
-  link->receive=aligned_alloc(128,(receive_count?receive_count:1)*sizeof *link->receive);
+  uint32_t incoming=link->provider.completion_entries[MESH_RECEIVE];
+  size_t receive_count=(size_t)incoming*invocations;
+  link->receive=aligned_alloc(128,(receive_count+1)*sizeof *link->receive);
   if(!link->receive)return -1;
+  uint32_t frames[link->qps];memset(frames,0,sizeof frames);
   uint32_t next=0,received=0;
   struct ibv_qp *receive_pair=NULL;
   int multiple_receive_queues=0;
@@ -215,22 +213,19 @@ static int link_configure(void *state,int socket,uint64_t client){
           struct mesh_queue *queue=&link->provider.queues[q*tx->slots+slot];
           multiple_receive_queues|=receive_pair && receive_pair!=queue->pair;
           receive_pair=queue->pair;
-          struct prepared_receive *records=link->receive+(size_t)received++*invocations;
+          uint32_t frame=received++;
+          frames[q*tx->slots+slot]+=(span.length+4095)/4096;
           struct mesh_publication *delivery=mesh_publication_at(m,row+k);
           uintptr_t input=(uintptr_t)&delivery->argument;
           if(delivery->device_input)input=(uintptr_t)m+delivery->device_input;
           else if(delivery->sends)input=(uintptr_t)m+delivery->targets[0].stream;
           for(uint32_t t=0;t<invocations;t++){
-            struct prepared_receive *record=records+t;
+            struct prepared_receive *record=link->receive+(size_t)t*incoming+frame;
             *record=(struct prepared_receive){
               .request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
               .span=span,.input=(_Atomic uint64_t *)(input+(delivery->device_input?sizeof(struct mesh_input_status)*(size_t)t:0)),
-              .argument=delivery->device_input?(k+1==chunks):1,
-              .next=&records[t+1<invocations?t+1:0].request,.pair=queue->pair};
+              .argument=delivery->device_input?(k+1==chunks):1,.pair=queue->pair};
           }
-          struct ibv_recv_wr *bad;
-          int error=queue->receive(queue->pair,&records->request,&bad);
-          if(error){free(peer);errno=error<0?-error:error;return -1;}
         }
       }
     }
@@ -238,11 +233,23 @@ static int link_configure(void *state,int socket,uint64_t client){
   }
   /* design/prepared-machine.md#M08 */
   link->receive_pair=multiple_receive_queues?NULL:receive_pair;
-  if(link->receive_pair)for(uint32_t f=0;f<received;f++)for(uint32_t t=0;t<invocations;t++){
-    struct prepared_receive *record=link->receive+(size_t)f*invocations+t;
-    record->following=f+1<received?link->receive+(size_t)(f+1)*invocations+t:
-      t+1<invocations?link->receive+t+1:record;
+  uint32_t window=invocations;
+  for(int q=0;q<link->qps;q++)if(frames[q]){
+    uint32_t capacity=link->provider.queues[q].receive_capacity/frames[q];
+    if(capacity<window)window=capacity?capacity:1;
   }
+  link->refill=window<invocations;
+  for(uint32_t t=0;t<invocations;t++)for(uint32_t f=0;f<incoming;f++){
+    struct prepared_receive *record=link->receive+(size_t)t*incoming+f;
+    record->next=t+window<invocations?&link->receive[(size_t)(t+window)*incoming+f].request:NULL;
+    if(t<window){
+      struct ibv_recv_wr *bad;
+      int error=link->provider.queues[0].receive(record->pair,&record->request,&bad);
+      if(error){errno=error<0?-error:error;return -1;}
+    }
+  }
+  if(receive_count)link->receive[receive_count]=link->receive[receive_count-1];
+  fprintf(stderr,"receive window=%u invocations=%u frames=%u refill=%d\n",window,invocations,incoming,link->refill);
   link->cursor_count=0;
   for(int q=0;q<link->qps;q++)if(last[q]){
     struct mesh_send *end=last[q];
@@ -317,7 +324,7 @@ static void *link_send_progress(void *argument){
 /* design/prepared-machine.md#M08 */
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#programcopy */
-static __attribute__((always_inline)) inline void *link_receive_drain(struct mesh_link *link,int ordered){
+static __attribute__((always_inline)) inline void *link_receive_drain(struct mesh_link *link,int ordered,int refill){
   struct mesh_queue queue=link->provider.queues[0];
   struct ibv_wc *completion=link->completion;
   int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=queue.receive;
@@ -351,15 +358,16 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
 #if MESH_TRACE
     uint64_t published=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #endif
-    struct ibv_recv_wr *bad;
-    struct prepared_receive *following=ordered?record->following:NULL;
-    int error=post(ordered?pair:record->pair,record->next,&bad);
+    if(refill && record->next){
+      struct ibv_recv_wr *bad;
+      int error=post(ordered?pair:record->pair,record->next,&bad);
+      if(error){link_error(link,error<0?-error:error,1);return NULL;}
+    }
 #if MESH_TRACE
     uint64_t posted=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     trace[link->traced[MESH_RECEIVE]++]=(struct mesh_trace){(uintptr_t)record,polled,published,posted};
 #endif
-    if(error){link_error(link,error<0?-error:error,1);return NULL;}
-    if(ordered)record=following;
+    if(ordered)record++;
   }
 }
 
@@ -368,8 +376,12 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
 static void *link_receive_progress(void *argument){
   struct mesh_link *link=argument;
   pthread_setname_np("mesh.rdma.receive");
-  if(link->receive_pair)return link_receive_drain(link,1);
-  return link_receive_drain(link,0);
+  if(link->receive_pair){
+    if(link->refill)return link_receive_drain(link,1,1);
+    return link_receive_drain(link,1,0);
+  }
+  if(link->refill)return link_receive_drain(link,0,1);
+  return link_receive_drain(link,0,0);
 }
 
 /* design/prepared-machine.md#M11 */
