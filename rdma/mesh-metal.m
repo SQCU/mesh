@@ -3,7 +3,7 @@
 
 /* design/algorithm-sources.md#resident-metal */
 /* design/prepared-machine.md#M07 */
-int mesh_metal_transport_create(struct mesh_ctx *context,void *device,uint32_t invocations,struct mesh_metal_transport *transport){
+int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mesh_metal_transport *transport){
   NSString *source=@"#include <metal_stdlib>\n"
     "#pragma METAL internals : enable\n"
     "using namespace metal;\n"
@@ -38,7 +38,7 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,uint32_t i
   /* design/prepared-machine.md#M12 */
   for(uint32_t p=0;p<context->M->links;p++){
     struct mesh_tx *tx=(void *)mesh_events(context->M,mesh_notice_queue(context->M,context->client,p));
-    tx->cancel=(uintptr_t)address-(uintptr_t)context->M;tx->invocations=invocations;
+    tx->cancel=(uintptr_t)address-(uintptr_t)context->M;
   }
   transport->stop=[(id<MTLDevice>)device newBufferWithBytesNoCopy:address length:stop.pages*context->M->pgsz
     options:MTLResourceStorageModeShared deallocator:nil];

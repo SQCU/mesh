@@ -9,7 +9,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 94u
+#define MESH_VERSION 95u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -65,8 +65,8 @@ struct hdr {
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
 /* design/prepared-machine.md#M07 */
-struct mesh_input_status { _Alignas(16) _Atomic uint64_t completed; _Atomic uint64_t cancelled; };
-_Static_assert(sizeof(struct mesh_input_status)==16 && offsetof(struct mesh_input_status,cancelled)==8,"M07");
+struct mesh_input_status { _Alignas(32) _Atomic uint64_t completed; _Atomic uint64_t cancelled; uint64_t padding[2]; };
+_Static_assert(sizeof(struct mesh_input_status)==32 && offsetof(struct mesh_input_status,cancelled)==8,"M07");
 /* design/prepared-machine.md#M12 */
 struct mesh_cancel_range { _Alignas(32) uint64_t offset; uint64_t count,padding[2]; };
 struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; _Atomic uint32_t abandoned; _Atomic uint32_t count; uint32_t reserved; uint64_t padding[2]; struct mesh_cancel_range ranges[]; };

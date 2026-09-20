@@ -10,7 +10,7 @@ _Static_assert(sizeof(struct mesh_metal_publication)==16,"prepared publication b
 _Static_assert(sizeof(struct mesh_metal_transport)==24,"prepared Metal transport");
 _Static_assert(sizeof(struct mesh_metal_input)==32,"prepared numerical input");
 /* design/algorithm-sources.md#resident-metal */
-int mesh_metal_transport_create(struct mesh_ctx *,void *,uint32_t,struct mesh_metal_transport *);
+int mesh_metal_transport_create(struct mesh_ctx *,void *,struct mesh_metal_transport *);
 /* design/algorithm-sources.md#resident-metal */
 int mesh_metal_receive_prepare(struct mesh_ctx *,struct mesh_metal_transport *,struct mesh_section,uint32_t,struct mesh_metal_input *);
 /* design/algorithm-sources.md#resident-metal */

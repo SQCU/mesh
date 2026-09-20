@@ -6,7 +6,7 @@ These are the emitted instructions in `rdma/.build/mesh-flow.s`, produced by `ma
 | --- | --- | --- |
 | GPU payload visibility | Original producer value is stored through a system-coherent pointer, followed by a system-scope fence; the typed lowering is forced inline | M01, M06 |
 | Producer-to-publication order | Single-thread producer: publication follows its coherent output store in the same entry. Multiple-thread producers: prepared M06 dispatch barrier from the declared operand read dependency, retained before the fused consumer; no payload load | M06, M10 |
-| GPU destination | Fused producer exit or consumer entry uses the prepared M17 binding and constant destination offset and argument, with zero record loads; standalone publication reads the prepared record | M10; `prepared_publication`, 32 bytes, consumed during fused-entry construction |
+| GPU destination | Fused producer exit or consumer entry uses the bound M07 address plus a prepared constant displacement in consumer entries, or the M17 binding in single-thread producer exits, with zero record loads; standalone publication reads the prepared record | M10; `prepared_publication`, 32 bytes, consumed during fused-entry construction |
 | GPU publication | Store argument directly to the prepared SEND ready cell; system-scope fence | M04 |
 | TX poll | `ldapr x9, [x8]` | M04; current cell address held in `x8` |
 | Native request and next cell | `ldp x1, x21, [x8, #16]` | M04; both fields in that same 32-byte cell |
@@ -35,7 +35,7 @@ The receive destination/value and next-request/QP fields occupy one aligned 32-b
 
 | Deleted execution | Replacement |
 | --- | --- |
-| TX clearing a publication cell and cycling back to reuse it | M04 allocates distinct cells for every prepared invocation; M06 binds M17 at each invocation offset before submission. Native successor pointers walk the finite prepared SEND sequence. The accepted TX path has no metadata store, reset, invocation calculation or reuse decision. |
+| TX clearing a publication cell and cycling back to reuse it | M04 allocates distinct cells for every prepared invocation; M06 binds M07 and M17 with the same 32-byte invocation stride before submission; fused consumers reuse M07 for publication without an extra pointer binding. Native successor pointers walk the finite prepared SEND sequence. The accepted TX path has no metadata store, reset, invocation calculation or reuse decision. |
 | Separate global shutdown read on every unsuccessful GPU completion poll | M07 holds independent adjacent 64-bit completion and cancellation fields in one aligned 16-byte operand. M12's prepared ranges are traversed only by explicit shutdown/error handling, which writes the cancellation fields without changing completion. The source has one vector read; emitted GPU instruction count is not established. Native RX retains its original release store and four accepted-path loads. |
 | Caller-inserted publication encoders after each model fragment | M10 send and M07 receive operands are registered once before capture. M06 places SEND commands at actual producer writes and observations at actual consumer reads. The caller no longer determines publication timing by a fragment return. |
 | Per-layer numerical model interfaces between partials | M06 composes one rank graph. Outgoing partials and KV state remain graph outputs; incoming partials remain inputs. Ordered send operands determine native transfer order at setup, and the offline solver retains the declared partition widths. |
