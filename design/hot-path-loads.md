@@ -88,7 +88,7 @@ The GPU handoff is inside the actual numerical kernel in the prepared indirect p
 | Store position and two parameter vectors | M01 |
 | Store prepared mask word at its bound offset | M01, M13 |
 
-This boundary table states the shader source accesses, not an emitted GPU instruction count. It is outside both RDMA crossing transitions. After submission the host only observes completion of the requested interval and reads its outputs.
+This boundary table states the shader source accesses, not an emitted GPU instruction count. It is outside both RDMA crossing transitions. After submission the host only observes completion of the requested interval and reads its outputs. For an original layer interval (`prepare_e2b.py --layers LO:HI`), M01 initializes static boundary operands before recording; M06 contains only those layers, with the same publication and receive lowering. The replay client constructs no M13 token/state operands or decode-advance commands for that interval. No layer-selection branch, input initializer or numerical timing operation executes in T1/T2.
 
 M26 is outside both crossing transitions and outside decode steps. `mesh_transfers_start` stores the prepared client, advances the shared notification word and wakes the bridge main thread; `mesh_retire` stores the released client and notifies; explicit bridge shutdown advances the same word before wake. Main retains the notification value before reading control state and uses Apple's atomic compare-and-wait, so notification before sleep is observed without a timer. The native progress threads retain the same accepted-path load instructions and independent continuous polling.
 
