@@ -358,10 +358,14 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
 #if MESH_TRACE
     uint64_t published=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #endif
-    if(refill && record->next){
-      struct ibv_recv_wr *bad;
-      int error=post(ordered?pair:record->pair,record->next,&bad);
-      if(error){link_error(link,error<0?-error:error,1);return NULL;}
+    if(refill){
+      struct ibv_recv_wr *next,*bad;struct ibv_qp *target=pair;
+      if(ordered)next=record->next;
+      else __asm__("ldp %0, %1, [%2, #64]":"=r"(next),"=r"(target):"r"(record):"memory");
+      if(next){
+        int error=post(target,next,&bad);
+        if(error){link_error(link,error<0?-error:error,1);return NULL;}
+      }
     }
 #if MESH_TRACE
     uint64_t posted=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
