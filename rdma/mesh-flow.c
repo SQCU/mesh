@@ -259,6 +259,7 @@ static int link_configure(void *state,int socket,uint64_t client){
 /* design/algorithm-sources.md#independent-native-queues */
 static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_link *link,uint32_t streams){
   struct mesh_send **cursors=link->cursors,*record=cursors[0];
+  struct ibv_qp *pair=streams==1?(void *)record->pair:NULL;
   uint32_t stream=0;
   struct ibv_send_wr *bad;
   int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **)=link->provider.queues[0].send;
@@ -275,7 +276,7 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
 #if MESH_TRACE
         uint64_t posting=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #endif
-        int error=post((struct ibv_qp *)record->pair,(struct ibv_send_wr *)record->request,&bad);
+        int error=post(streams==1?pair:(struct ibv_qp *)record->pair,(struct ibv_send_wr *)record->request,&bad);
 #if MESH_TRACE
         uint64_t posted=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         trace[link->traced[MESH_SEND]++]=(struct mesh_trace){(uintptr_t)record,observed,posting,posted};
