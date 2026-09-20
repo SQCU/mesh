@@ -14,6 +14,8 @@ _Static_assert(sizeof(struct ibv_send_wr)==128,"M06");
 _Static_assert(sizeof(struct ibv_sge)==16,"M07 M09");
 _Static_assert(sizeof(struct ibv_recv_wr)==32,"M08");
 _Static_assert(sizeof(struct ibv_wc)==48,"M11");
+_Static_assert(offsetof(struct ibv_wc,status)==8 && offsetof(struct ibv_wc,opcode)==12 &&
+  sizeof(((struct ibv_wc *)0)->status)==4 && sizeof(((struct ibv_wc *)0)->opcode)==4,"M11");
 _Static_assert(sizeof(struct ibv_send_wr *)==8,"M15");
 /* design/prepared-machine.md#M24 */
 union mesh_network_event {
@@ -40,7 +42,7 @@ struct mesh_trace { _Alignas(32) uint64_t identity; uint64_t begin,middle,end; }
 _Static_assert(sizeof(struct mesh_trace)==32 && _Alignof(struct mesh_trace)==32,"M27");
 #endif
 struct mesh_link {
-  pthread_t workers[3];
+  pthread_t workers[2];
   uint32_t worker_count,publication_count,cursor_count,index;
   pthread_t controller;
   int events,network;
@@ -53,7 +55,7 @@ struct mesh_link {
   struct ibv_send_wr *requests;
   struct ibv_sge *spans;
   struct mesh_send *publications,**cursors;
-  struct ibv_wc *completion[2];
+  struct ibv_wc *completion;
   struct mesh_cancellation *cancel;
 #if MESH_TRACE
   struct mesh_trace *trace[2];
@@ -239,7 +241,7 @@ static int link_configure(void *state,int socket,uint64_t client){
   if(link->receive_pair)for(uint32_t f=0;f<received;f++)for(uint32_t t=0;t<invocations;t++){
     struct prepared_receive *record=link->receive+(size_t)f*invocations+t;
     record->following=f+1<received?link->receive+(size_t)(f+1)*invocations+t:
-      t+1<invocations?link->receive+t+1:NULL;
+      t+1<invocations?link->receive+t+1:record;
   }
   link->cursor_count=0;
   for(int q=0;q<link->qps;q++)if(last[q]){
@@ -312,28 +314,12 @@ static void *link_send_progress(void *argument){
   return link_send_drain(link,link->cursor_count);
 }
 
-/* design/prepared-machine.md#M11 */
-/* design/algorithm-sources.md#independent-native-queues */
-static void *link_send_completions(void *argument){
-  struct mesh_link *link=argument;
-  struct mesh_queue queue=link->provider.queues[0];
-  struct ibv_wc *completion=link->completion[MESH_SEND];
-  pthread_setname_np("mesh.rdma.send.cq");
-  while(atomic_load_explicit(&link->progressing,memory_order_acquire)){
-    int count=queue.poll[MESH_SEND](queue.completions[MESH_SEND],1,completion);
-    if(count<0){link_error(link,count,3);return NULL;}
-    if(!count)continue;
-    if(completion->status){link_error(link,completion->status,2);return NULL;}
-  }
-  return NULL;
-}
-
 /* design/prepared-machine.md#M08 */
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#programcopy */
 static __attribute__((always_inline)) inline void *link_receive_drain(struct mesh_link *link,int ordered){
   struct mesh_queue queue=link->provider.queues[0];
-  struct ibv_wc *completion=link->completion[MESH_RECEIVE];
+  struct ibv_wc *completion=link->completion;
   int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=queue.receive;
   struct ibv_qp *pair=link->receive_pair;
   struct prepared_receive *record=link->receive;
@@ -344,17 +330,21 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
   for(;;){
     _Atomic uint64_t *input=ordered?record->input:NULL;
     uint64_t value=ordered?record->argument:0;
-    int count;
-    do{
-      count=queue.poll[MESH_RECEIVE](queue.completions[MESH_RECEIVE],1,completion);
-      if(count)break;
+    for(;;){
+      int count=queue.poll(queue.completion,1,completion);
+      if(count<0){link_error(link,count,3);return NULL;}
+      if(count){
+        uint64_t status_opcode;
+        memcpy(&status_opcode,&completion->status,sizeof status_opcode);
+        if((uint32_t)status_opcode){link_error(link,(uint32_t)status_opcode,2);return NULL;}
+        if((status_opcode>>32)&IBV_WC_RECV)break;
+        continue;
+      }
       if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
-    }while(1);
+    }
 #if MESH_TRACE
-    uint64_t polled=count>0?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
+    uint64_t polled=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #endif
-    if(count<0){link_error(link,count,3);return NULL;}
-    if(completion->status){link_error(link,completion->status,2);return NULL;}
     /* design/prepared-machine.md#M08 */
     if(!ordered){record=(void *)(uintptr_t)completion->wr_id;input=record->input;value=record->argument;}
     atomic_store_explicit(input,value,memory_order_release);
@@ -369,7 +359,7 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
     trace[link->traced[MESH_RECEIVE]++]=(struct mesh_trace){(uintptr_t)record,polled,published,posted};
 #endif
     if(error){link_error(link,error<0?-error:error,1);return NULL;}
-    if(ordered){record=following;if(!record)return NULL;}
+    if(ordered)record=following;
   }
 }
 
@@ -445,11 +435,11 @@ static void *link_run(void *argument){
 
       }
       /* design/prepared-machine.md#M08 */
-      void *(*progress[3])(void *)={link_send_completions,link_receive_progress,link_send_progress};
+      void *(*progress[2])(void *)={link_receive_progress,link_send_progress};
       pthread_attr_t attributes;
       pthread_attr_init(&attributes);
       pthread_attr_set_qos_class_np(&attributes,QOS_CLASS_USER_INTERACTIVE,0);
-      for(uint32_t d=0;d<2+(link->publication_count!=0) && !error;d++){
+      for(uint32_t d=0;d<1+(link->publication_count!=0) && !error;d++){
         error=pthread_create(&link->workers[d],&attributes,progress[d],link);
         if(error)break;
         link->worker_count++;
@@ -562,9 +552,9 @@ int main(int argc,char **argv){
   }
   int status=0;
   /* design/prepared-machine.md#M11 */
-  struct ibv_wc *completion_outputs=calloc(2*(link_count?link_count:1),sizeof *completion_outputs);
+  struct ibv_wc *completion_outputs=calloc(link_count?link_count:1,sizeof *completion_outputs);
   if(!completion_outputs)die("completion output allocation");
-  for(uint32_t p=0;p<link_count;p++)for(uint32_t d=0;d<2;d++)links[p].completion[d]=completion_outputs+d*link_count+p;
+  for(uint32_t p=0;p<link_count;p++)links[p].completion=completion_outputs+p;
   /* design/prepared-machine.md#M26 */
   atomic_store_explicit(&control_memory,m,memory_order_relaxed);
   atomic_store(&m->bridge_pid,(uint64_t)getpid());atomic_store(&m->port.phase,MESH_PAIRING);
