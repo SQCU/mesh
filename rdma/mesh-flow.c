@@ -26,13 +26,14 @@ struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
   struct ibv_sge span;
   _Alignas(32) struct ibv_recv_wr *next;
-  struct ibv_qp *pair;
+  union { struct ibv_qp *pair; struct prepared_receive *following; };
   _Atomic uint64_t *input;
   uint64_t argument;
 };
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
   offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,next)==64 &&
-  offsetof(struct prepared_receive,input)==80 && offsetof(struct prepared_receive,argument)==88,"M08 M09");
+  offsetof(struct prepared_receive,following)==72 && offsetof(struct prepared_receive,input)==80 &&
+  offsetof(struct prepared_receive,argument)==88,"M08 M09");
 #if MESH_TRACE
 /* design/prepared-machine.md#M27 */
 struct mesh_trace { _Alignas(32) uint64_t identity; uint64_t begin,middle,end; };
@@ -48,6 +49,7 @@ struct mesh_link {
   _Atomic int progressing;
   struct hdr *M;struct mesh_verbs provider;int qps;uint64_t client;
   struct prepared_receive *receive;
+  struct ibv_qp *receive_pair;
   struct ibv_send_wr *requests;
   struct ibv_sge *spans;
   struct mesh_send *publications,**cursors;
@@ -156,6 +158,8 @@ static int link_configure(void *state,int socket,uint64_t client){
   link->receive=aligned_alloc(128,(receive_count?receive_count:1)*sizeof *link->receive);
   if(!link->receive)return -1;
   uint32_t next=0,received=0;
+  struct ibv_qp *receive_pair=NULL;
+  int multiple_receive_queues=0;
   for(uint32_t q=0;q<m->qps;q++){
     uint32_t channel=link->index*m->qps+q;
     uint32_t counts[2]={atomic_load(mesh_order_length(m,client,channel,MESH_SEND)),atomic_load(mesh_order_length(m,client,channel,MESH_RECEIVE))},peer_counts[2];
@@ -207,6 +211,8 @@ static int link_configure(void *state,int socket,uint64_t client){
           /* design/prepared-machine.md#M08 */
           /* design/prepared-machine.md#M09 */
           struct mesh_queue *queue=&link->provider.queues[q*tx->slots+slot];
+          multiple_receive_queues|=receive_pair && receive_pair!=queue->pair;
+          receive_pair=queue->pair;
           struct prepared_receive *records=link->receive+(size_t)received++*invocations;
           struct mesh_publication *delivery=mesh_publication_at(m,row+k);
           uintptr_t input=(uintptr_t)&delivery->argument;
@@ -227,6 +233,13 @@ static int link_configure(void *state,int socket,uint64_t client){
       }
     }
     free(peer);
+  }
+  /* design/prepared-machine.md#M08 */
+  link->receive_pair=multiple_receive_queues?NULL:receive_pair;
+  if(link->receive_pair)for(uint32_t f=0;f<received;f++)for(uint32_t t=0;t<invocations;t++){
+    struct prepared_receive *record=link->receive+(size_t)f*invocations+t;
+    record->following=f+1<received?link->receive+(size_t)(f+1)*invocations+t:
+      t+1<invocations?link->receive+t+1:NULL;
   }
   link->cursor_count=0;
   for(int q=0;q<link->qps;q++)if(last[q]){
@@ -315,41 +328,58 @@ static void *link_send_completions(void *argument){
   return NULL;
 }
 
+/* design/prepared-machine.md#M08 */
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#programcopy */
-static void *link_receive_progress(void *argument){
-  struct mesh_link *link=argument;
+static __attribute__((always_inline)) inline void *link_receive_drain(struct mesh_link *link,int ordered){
   struct mesh_queue queue=link->provider.queues[0];
   struct ibv_wc *completion=link->completion[MESH_RECEIVE];
   int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=queue.receive;
-  pthread_setname_np("mesh.rdma.receive");
+  struct ibv_qp *pair=link->receive_pair;
+  struct prepared_receive *record=link->receive;
 #if MESH_TRACE
   /* design/prepared-machine.md#M27 */
   struct mesh_trace *trace=link->trace[MESH_RECEIVE];
 #endif
-  while(atomic_load_explicit(&link->progressing,memory_order_acquire)){
-    int count=queue.poll[MESH_RECEIVE](queue.completions[MESH_RECEIVE],1,completion);
+  for(;;){
+    _Atomic uint64_t *input=ordered?record->input:NULL;
+    uint64_t value=ordered?record->argument:0;
+    int count;
+    do{
+      count=queue.poll[MESH_RECEIVE](queue.completions[MESH_RECEIVE],1,completion);
+      if(count)break;
+      if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
+    }while(1);
 #if MESH_TRACE
     uint64_t polled=count>0?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
 #endif
     if(count<0){link_error(link,count,3);return NULL;}
-    if(!count)continue;
     if(completion->status){link_error(link,completion->status,2);return NULL;}
     /* design/prepared-machine.md#M08 */
-    struct prepared_receive *record=(void *)(uintptr_t)completion->wr_id;
-    atomic_store_explicit(record->input,record->argument,memory_order_release);
+    if(!ordered){record=(void *)(uintptr_t)completion->wr_id;input=record->input;value=record->argument;}
+    atomic_store_explicit(input,value,memory_order_release);
 #if MESH_TRACE
     uint64_t published=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #endif
     struct ibv_recv_wr *bad;
-    int error=post(record->pair,record->next,&bad);
+    struct prepared_receive *following=ordered?record->following:NULL;
+    int error=post(ordered?pair:record->pair,record->next,&bad);
 #if MESH_TRACE
     uint64_t posted=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     trace[link->traced[MESH_RECEIVE]++]=(struct mesh_trace){(uintptr_t)record,polled,published,posted};
 #endif
     if(error){link_error(link,error<0?-error:error,1);return NULL;}
+    if(ordered){record=following;if(!record)return NULL;}
   }
-  return NULL;
+}
+
+/* design/prepared-machine.md#M08 */
+/* design/algorithm-sources.md#programcopy */
+static void *link_receive_progress(void *argument){
+  struct mesh_link *link=argument;
+  pthread_setname_np("mesh.rdma.receive");
+  if(link->receive_pair)return link_receive_drain(link,1);
+  return link_receive_drain(link,0);
 }
 
 /* design/prepared-machine.md#M11 */
