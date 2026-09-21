@@ -54,9 +54,8 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
     }
     first+=frames*tx->invocations;
   }
-  transport->stop=[(id<MTLDevice>)device newBufferWithBytesNoCopy:address length:stop.pages*context->M->pgsz
-    options:MTLResourceStorageModeShared deallocator:nil];
-  if(!transport->publication||!transport->stop||!transport->inputs){mesh_metal_transport_destroy(transport);return ENOMEM;}
+  transport->cancel=address;
+  if(!transport->publication||!transport->inputs){mesh_metal_transport_destroy(transport);return ENOMEM;}
   return 0;
 }
 
@@ -66,7 +65,7 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
   struct mesh_section operand,struct mesh_metal_input *input){
   struct mesh_publication *delivery=mesh_publication_at(context->M,operand.first+mesh_row_chunks(context->M,operand.first,operand.bytes)-1);
   id<MTLBuffer> memory=transport->inputs;
-  *input=(struct mesh_metal_input){.completion=[memory retain],.stop=transport->stop,
+  *input=(struct mesh_metal_input){.completion=[memory retain],
     .offset=(uintptr_t)context->M+delivery->device_input-(uintptr_t)memory.contents,.stride=delivery->device_stride};
   return 0;
 }
@@ -107,6 +106,6 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
 
 /* design/algorithm-sources.md#resident-metal */
 void mesh_metal_transport_destroy(struct mesh_metal_transport *transport){
-  [(id)transport->publication release];[(id)transport->stop release];[(id)transport->inputs release];
+  [(id)transport->publication release];[(id)transport->inputs release];
   *transport=(struct mesh_metal_transport){0};
 }

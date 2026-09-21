@@ -78,7 +78,7 @@ struct mesh_input_status { _Alignas(128) _Atomic uint64_t value; uint64_t paddin
 _Static_assert(sizeof(struct mesh_input_status)==sizeof(struct mesh_send) && _Alignof(struct mesh_input_status)==128 && offsetof(struct mesh_input_status,value)==0,"M07");
 /* design/prepared-machine.md#M12 */
 struct mesh_cancel_range { _Alignas(32) uint64_t offset; uint64_t count,padding[2]; };
-struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; _Atomic uint32_t abandoned; uint64_t padding[3]; struct mesh_cancel_range ranges[]; };
+struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; uint32_t padding[7]; struct mesh_cancel_range ranges[]; };
 _Static_assert(sizeof(struct mesh_cancel_range)==32 && sizeof(struct mesh_cancellation)==32 && offsetof(struct mesh_cancellation,ranges)==32,"M12");
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M12 */
