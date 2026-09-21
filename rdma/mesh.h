@@ -10,7 +10,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 102u
+#define MESH_VERSION 103u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -74,8 +74,7 @@ struct hdr {
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
 /* design/prepared-machine.md#M07 */
-struct mesh_input_status { _Alignas(128) _Atomic uint64_t value; uint64_t padding[31]; };
-_Static_assert(sizeof(struct mesh_input_status)==sizeof(struct mesh_send) && _Alignof(struct mesh_input_status)==128 && offsetof(struct mesh_input_status,value)==0,"M07");
+_Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07");
 /* design/prepared-machine.md#M12 */
 struct mesh_cancel_range { _Alignas(32) uint64_t offset; uint64_t count,padding[2]; };
 struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; uint32_t padding[7]; struct mesh_cancel_range ranges[]; };
@@ -83,11 +82,11 @@ _Static_assert(sizeof(struct mesh_cancel_range)==32 && sizeof(struct mesh_cancel
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M12 */
 static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,uint32_t link){
-  struct mesh_input_status *words=(void *)((char *)m+cancel->ranges[link].offset);
+  _Atomic uint64_t *words=(void *)((char *)m+cancel->ranges[link].offset);
   for(uint64_t j=0;j<cancel->ranges[link].count;j++)
-    if(!atomic_load_explicit(&words[j].value,memory_order_relaxed)){
+    if(!atomic_load_explicit(words+j,memory_order_relaxed)){
       atomic_store_explicit(&cancel->requested,1,memory_order_release);
-      atomic_store_explicit(&words[j].value,UINT64_MAX,memory_order_release);
+      atomic_store_explicit(words+j,UINT64_MAX,memory_order_release);
     }
 }
 /* design/algorithm-sources.md#meshresult */

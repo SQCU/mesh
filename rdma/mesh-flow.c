@@ -214,7 +214,7 @@ static int link_configure(void *state,int socket,uint64_t client){
   link->receive_pair=multiple_receive_queues?NULL:receive_pair;
   link->linear=receive_count!=0;
   for(size_t i=0;i<receive_count;i++)
-    link->linear&=(uintptr_t)link->receive[i].input==(uintptr_t)link->receive[0].input+i*sizeof(struct mesh_input_status) && link->receive[i].argument==1;
+    link->linear&=link->receive[i].input==link->receive[0].input+i && link->receive[i].argument==1;
   uint32_t window=invocations;
   for(int q=0;q<link->qps;q++)if(frames[q]){
     uint32_t capacity=link->provider.queues[q].receive_capacity/frames[q];
@@ -309,7 +309,7 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
         if(error){link_error(link,error<0?-error:error,1);return NULL;}
       }
     }
-    if(linear)input=(void *)((uintptr_t)input+sizeof(struct mesh_input_status));
+    if(linear)input++;
     if(ordered)record++;
   }
 }

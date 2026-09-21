@@ -13,6 +13,7 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
   struct mesh_section stop,words;
   uint64_t inputs=0;
   for(uint32_t p=0;p<m->links;p++){
+    inputs=(inputs+15)&~UINT64_C(15);
     struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,context->client,p));
     for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
       struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
@@ -20,7 +21,7 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
         inputs+=mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*tx->invocations;
     }
   }
-  int status=mesh_section_create(context,sizeof(struct mesh_input_status)*(inputs?inputs:1),1,&words);
+  int status=mesh_section_create(context,sizeof(_Atomic uint64_t)*(inputs?inputs:1),1,&words);
   if(status){mesh_metal_transport_destroy(transport);return status;}
   void *input=mesh_section_address(context,words,0);memset(input,0,words.bytes);
   transport->inputs=[(id<MTLDevice>)device newBufferWithBytesNoCopy:input length:words.pages*m->pgsz
@@ -30,6 +31,7 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
   struct mesh_cancellation *address=mesh_section_address(context,stop,0);memset(address,0,stop.bytes);
   uint64_t first=0;
   for(uint32_t p=0;p<m->links;p++){
+    first=(first+15)&~UINT64_C(15);
     struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,context->client,p));
     tx->cancel=(uintptr_t)address-(uintptr_t)m;
     uint64_t frames=0;
@@ -39,7 +41,7 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
         frames+=mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count;
     }
     /* design/prepared-machine.md#M12 */
-    address->ranges[p]=(struct mesh_cancel_range){.offset=(uintptr_t)input-(uintptr_t)m+first*sizeof(struct mesh_input_status),.count=frames*tx->invocations};
+    address->ranges[p]=(struct mesh_cancel_range){.offset=(uintptr_t)input-(uintptr_t)m+first*sizeof(_Atomic uint64_t),.count=frames*tx->invocations};
     /* design/prepared-machine.md#M07 */
     for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
       struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
@@ -47,8 +49,8 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
         uint32_t chunks=mesh_row_chunks(m,in[i].local_row,in[i].bytes);
         for(uint32_t s=0;s<in[i].count;s++)for(uint32_t k=0;k<chunks;k++){
           struct mesh_publication *delivery=mesh_publication_at(m,in[i].local_row+s*in[i].stride+k);
-          delivery->device_input=(uintptr_t)input-(uintptr_t)m+sizeof(struct mesh_input_status)*(first+in[i].first+s*chunks+k);
-          delivery->device_stride=sizeof(struct mesh_input_status)*frames;
+          delivery->device_input=(uintptr_t)input-(uintptr_t)m+sizeof(_Atomic uint64_t)*(first+in[i].first+s*chunks+k);
+          delivery->device_stride=sizeof(_Atomic uint64_t)*frames;
         }
       }
     }
