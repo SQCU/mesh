@@ -83,10 +83,12 @@ _Static_assert(sizeof(struct mesh_cancel_range)==32 && sizeof(struct mesh_cancel
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M12 */
 static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,uint32_t link){
-  atomic_store_explicit(&cancel->requested,1,memory_order_release);
   struct mesh_input_status *words=(void *)((char *)m+cancel->ranges[link].offset);
   for(uint64_t j=0;j<cancel->ranges[link].count;j++)
-    if(!atomic_load_explicit(&words[j].value,memory_order_relaxed))atomic_store_explicit(&words[j].value,UINT64_MAX,memory_order_release);
+    if(!atomic_load_explicit(&words[j].value,memory_order_relaxed)){
+      atomic_store_explicit(&cancel->requested,1,memory_order_release);
+      atomic_store_explicit(&words[j].value,UINT64_MAX,memory_order_release);
+    }
 }
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M26 */
