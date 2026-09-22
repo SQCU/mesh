@@ -1,18 +1,45 @@
 #include "mesh-call.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* design/algorithm-sources.md#programtensor */
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
 
+/* design/prepared-machine.md#M09 */
+/* A bound row is an SGE target, so it must lie in the registered window.  Refusing it here is the
+   whole enforcement of the split: an operand allocated out of the unregistered arena fails at bind
+   with EINVAL instead of reaching the wire with a lkey that does not cover it. */
+static uint64_t mesh_section_rows(struct mesh_section section){
+  return section.stride?(uint64_t)section.stride*section.count:1;
+}
+static int mesh_section_wired(struct hdr *m,struct mesh_section section){
+  uint64_t block=(uint64_t)m->block*m->pgsz,rows=mesh_section_rows(section);
+  for(uint64_t i=0;i<rows;i++){
+    struct mesh_page_entry *entry=&mesh_page(m)[section.first+i];
+    if(atomic_load_explicit(&entry->mapping,memory_order_relaxed)==MESH_ABSENT)continue;
+    uint64_t offset=atomic_load_explicit(&entry->address,memory_order_relaxed)-m->data_off;
+    if(!mesh_wired(m,offset,block-offset%block))return 0;
+  }
+  return 1;
+}
+
 /* design/prepared-machine.md#M08 */
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint32_t identity,struct mesh_section section,uint32_t invocation_pages){
   struct hdr *m=context->M;
   if(queue>=m->links*m->qps)return EINVAL;
+  if(!section.count || (uint64_t)section.first+mesh_section_rows(section)>mesh_rows(m))return EINVAL;
+  /* design/prepared-machine.md#M09 */
+  if(!mesh_section_wired(m,section)){
+    fprintf(stderr,"transfer binding %u queue %u %s outside the registered window: rows %u+%u*%u, window %llu bytes\n",
+      identity,queue,receive?"receive":"send",section.first,section.stride,section.count,
+      (unsigned long long)mesh_wire_bytes(m));
+    return EINVAL;
+  }
   _Atomic uint32_t *length=mesh_order_length(m,context->client,queue,receive);
   uint32_t index=atomic_load_explicit(length,memory_order_relaxed);
-  if(index==mesh_rows(m))return ENOSPC;
+  if(index==m->orders)return ENOSPC;
   if(!receive)for(uint32_t value=0;value<section.count;value++){
     uint32_t row=mesh_section_row(section,value);
     uint32_t link=queue/m->qps;
@@ -39,9 +66,15 @@ static int mesh_transfer_compare(const void *a,const void *b){
 }
 
 /* design/algorithm-sources.md#programcopy */
-int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invocations){
+int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invocations,uint32_t depth){
   struct hdr *m=context->M;
   if(!slots || slots>mesh_rows(m) || !invocations)return EINVAL;
+  /* design/prepared-machine.md#M01 */
+  /* The ring depth is one run-wide policy value and there is no room for it in the 32-byte
+     mesh_transfer or mesh_tx, so it is published in the header, before mesh_transfers_start hands
+     the client to the bridge.  depth==invocations is the unrung machine. */
+  if(!depth || depth>invocations)depth=invocations;
+  atomic_store_explicit(&m->depth,depth,memory_order_relaxed);
   uint64_t cells=0;
   for(uint32_t q=0;q<m->links*m->qps;q++){
     /* design/prepared-machine.md#M08 */
@@ -53,7 +86,10 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   }
   struct mesh_section storage;
   uint64_t column=(uint64_t)invocations+1;
-  int status=mesh_section_create(context,(cells?cells:1)*column*sizeof(struct mesh_send),1,&storage);
+  /* design/prepared-machine.md#M04 */
+  /* The SEND cell array is read by the provider and written by the GPU; it never appears in an
+     SGE, so it is allocated outside the registered window. */
+  int status=mesh_section_create(context,(cells?cells:1)*column*sizeof(struct mesh_send),1,0,&storage);
   if(status)return status;
   void *address=mesh_section_address(context,storage,0);
   memset(address,0,storage.bytes);
@@ -104,7 +140,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
     for(uint32_t varying=0;varying<2;varying++)for(uint32_t i=0;i<length;i++){
       struct mesh_transfer *out=ordered[i];
       if((out->stride!=0)!=varying)continue;
-      uint32_t q=(uint32_t)(out-mesh_transfers(m,context->client,p*m->qps,MESH_SEND))/(2*mesh_rows(m));
+      uint32_t q=(uint32_t)(out-mesh_transfers(m,context->client,p*m->qps,MESH_SEND))/(2*m->orders);
       for(uint32_t slot=0;slot<out->count;slot++){
         uint32_t stream=q*slots+slot;
         struct mesh_send *cell=(void *)((char *)m+tx->cells+sizeof(struct mesh_send)*column*(slot*count+out->first));
@@ -158,12 +194,13 @@ int mesh_transfers_start(struct mesh_ctx *context){
 }
 
 /* design/algorithm-sources.md#programtensor */
-int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){
+int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int wire,struct mesh_section *section){
   struct hdr *m=context->M;
   if(!bytes || !count)return EINVAL;
   size_t quantum=(size_t)m->block*m->pgsz;
-  size_t capacity=(size_t)mesh_blocks(m)*m->block;
-  if(bytes>capacity*m->pgsz)return ENOMEM;
+  /* design/prepared-machine.md#M09 */
+  size_t capacity=mesh_arena_range(m,wire).count;
+  if(bytes>capacity*(size_t)m->pgsz)return ENOMEM;
   size_t span=(bytes+quantum-1)/quantum*m->block;
   if(span>capacity/count)return ENOMEM;
   uint32_t stride=(uint32_t)span/m->block,rows=count*stride,first=mesh_rows_alloc(context,rows);
@@ -173,13 +210,19 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,str
     buffer->pages=(uint32_t)span;
     atomic_store_explicit(&buffer->owner,context->client,memory_order_release);
   }
-  mesh_bits_set(m,MESH_ROW_HOT,first,rows);
+  mesh_bits_set(mesh_plane(m,MESH_ROW_HOT),first,rows);
   /* design/prepared-machine.md#M01 */
   /* design/prepared-machine.md#M03 */
-  uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,m->block);
+  uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,m->block,wire);
+  /* design/prepared-machine.md#M01 */
+  /* Registration wires its pages eagerly, so until now every operand was resident by the time the
+     bridge came up.  Unregistered pages are not, and their first fault would land in the measured
+     region; touch the span here, at preparation, where it costs nothing that is being timed. */
+  if(!wire && page!=MESH_ABSENT)
+    for(uint32_t p=0;p<(uint32_t)span*count;p++)*(volatile unsigned char *)mesh_at(m,page+p)=0;
   if(page==MESH_ABSENT){
     int error=errno;
-    mesh_bits_clear(m,MESH_ROW_HOT,first,rows);
+    mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),first,rows);
     for(uint32_t r=first;r<first+rows;r+=stride)mesh_buffers(m)[r].pages=0;
     mesh_rows_release(context,first,rows);return error;
   }

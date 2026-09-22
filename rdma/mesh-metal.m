@@ -21,12 +21,15 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
         inputs+=mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*tx->invocations;
     }
   }
-  int status=mesh_section_create(context,sizeof(_Atomic uint64_t)*(inputs?inputs:1),1,&words);
+  /* design/prepared-machine.md#M07 */
+  /* completion words are written by the host after a completion and read by the GPU; never an SGE target */
+  int status=mesh_section_create(context,sizeof(_Atomic uint64_t)*(inputs?inputs:1),1,0,&words);
   if(status){mesh_metal_transport_destroy(transport);return status;}
   void *input=mesh_section_address(context,words,0);memset(input,0,words.bytes);
   transport->inputs=[(id<MTLDevice>)device newBufferWithBytesNoCopy:input length:words.pages*m->pgsz
     options:MTLResourceStorageModeShared deallocator:nil];
-  status=mesh_section_create(context,sizeof(struct mesh_cancellation)+m->links*sizeof(struct mesh_cancel_range),1,&stop);
+  /* design/prepared-machine.md#M12 */
+  status=mesh_section_create(context,sizeof(struct mesh_cancellation)+m->links*sizeof(struct mesh_cancel_range),1,0,&stop);
   if(status){mesh_metal_transport_destroy(transport);return status;}
   struct mesh_cancellation *address=mesh_section_address(context,stop,0);memset(address,0,stop.bytes);
   uint64_t first=0;
@@ -81,7 +84,8 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
   *publication=(struct mesh_metal_publication){.count=count*ranges,.stride=sizeof(struct mesh_send)};
   if(!count)return 0;
   struct mesh_section records;
-  int status=mesh_section_create(context,count*ranges*sizeof(struct prepared_publication),1,&records);
+  /* design/prepared-machine.md#M10 */
+  int status=mesh_section_create(context,count*ranges*sizeof(struct prepared_publication),1,0,&records);
   if(status)return status;
   struct prepared_publication *prepared=mesh_section_address(context,records,0);
   for(uint32_t j=0;j<ranges;j++)mesh_publication_prepare(context->M,sections[j].first,prepared+j*count);
@@ -94,7 +98,8 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
   /* design/prepared-machine.md#M28 */
   if(invocations && sections[0].bytes<=UINT32_MAX){
     struct mesh_section words;
-    status=mesh_section_create(context,sizeof(struct mesh_output_status)*(uint64_t)(invocations+1)*ranges,1,&words);
+    /* design/prepared-machine.md#M28 */
+    status=mesh_section_create(context,sizeof(struct mesh_output_status)*(uint64_t)(invocations+1)*ranges,1,0,&words);
     if(status){[(id)publication->records release];return status;}
     struct mesh_output_status *address=mesh_section_address(context,words,0);
     for(uint32_t j=0;j<ranges;j++)for(uint32_t t=0;t<=invocations;t++)

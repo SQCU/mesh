@@ -10,7 +10,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 103u
+#define MESH_VERSION 104u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -18,7 +18,7 @@ struct mesh_transfer { uint32_t local_row,binding,count,stride,invocation_pages,
 _Static_assert(sizeof(struct mesh_transfer)==32,"M08 prepared transfer");
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
-enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_PAGE_OWN, MESH_FREE, MESH_PLANES };
+enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M02 */
@@ -62,11 +62,16 @@ _Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publi
 struct prepared_publication { _Alignas(16) uint64_t destination; uint64_t argument,padding[2]; };
 _Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepared_publication)==16 && offsetof(struct prepared_publication,argument)==8,"M13");
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; _Atomic uint64_t prepared; };
-struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; struct mesh_port_info port; _Atomic uint32_t order_length[2*MESH_NOTICE_BANKS*MESH_QPS]; };
+struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; struct mesh_port_info port; };
+/* design/prepared-machine.md#M01 */
+/* design/prepared-machine.md#M09 */
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps,links;
+  uint32_t orders,wire_pages;
+  _Atomic uint32_t depth;
+  uint32_t padding;
   _Atomic uint64_t configured;
-  uint64_t planes_off,page_off,buffer_off,link_off,target_off,order_off,notice_off,data_off,length;
+  uint64_t planes_off,arena_off,page_off,buffer_off,link_off,length_off,target_off,order_off,notice_off,data_off,length;
   uint64_t notice_bytes,target_stride;
   _Atomic uint64_t client,bridge_pid,device_client,serial,control;
   struct mesh_port_info port;
@@ -105,13 +110,27 @@ static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
 /* design/prepared-machine.md#M09 */
 static inline uint32_t mesh_blocks(const struct hdr *m){ return (uint32_t)((m->length-m->data_off)/((uint64_t)m->block*m->pgsz)); }
+/* design/pages-and-functions.md#what-the-page-table-is */
+static inline uint32_t mesh_arena_pages(const struct hdr *m){ return mesh_blocks(m)*m->block; }
 static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_Atomic uint64_t*)((unsigned char*)m+m->planes_off)+(size_t)plane*mesh_words(m); }
+/* design/prepared-machine.md#M01 */
+/* the arena occupancy bitmap is indexed by arena page and sized by arena pages: it is not a row plane */
+static inline _Atomic uint64_t *mesh_arena_bits(struct hdr *m){ return (_Atomic uint64_t*)((unsigned char*)m+m->arena_off); }
+/* design/prepared-machine.md#M09 */
+/* the registered window is the first wire_pages of the arena; every other page is addressable and unregistered */
+static inline uint64_t mesh_wire_bytes(const struct hdr *m){ return (uint64_t)m->wire_pages*m->pgsz; }
+static inline int mesh_wired(const struct hdr *m,uint64_t offset,uint64_t bytes){ return offset<=mesh_wire_bytes(m) && bytes<=mesh_wire_bytes(m)-offset; }
 static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
 /* design/algorithm-sources.md#programtensor */
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }
 /* ledger D5 */
-static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+((size_t)(owner>>63)*2*m->links*m->qps+2*queue+(uint32_t)direction)*mesh_rows(m); }
-static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return &mesh_links(m)[queue/m->qps].order_length[(owner>>63)*2*MESH_QPS+2*(queue%m->qps)+(uint32_t)direction]; }
+/* one index for the transfer list and for its length: both are (bank,queue,direction), both stride by the
+   runtime queue count, so a client built with another MESH_QPS cannot disagree with the bridge about either */
+static inline size_t mesh_order_index(const struct hdr *m,uint64_t owner,uint32_t queue,int direction){
+  return (((size_t)(owner>>63)*m->links*m->qps)+queue)*2+(uint32_t)direction;
+}
+static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return (struct mesh_transfer*)((unsigned char*)m+m->order_off)+mesh_order_index(m,owner,queue,direction)*m->orders; }
+static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t queue,int direction){ return (_Atomic uint32_t*)((unsigned char*)m+m->length_off)+mesh_order_index(m,owner,queue,direction); }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M08 */
@@ -127,12 +146,10 @@ static inline uint64_t mesh_word_mask(uint32_t first,uint32_t count,uint32_t wor
   uint64_t bits=b-a==64?~UINT64_C(0):((UINT64_C(1)<<(b-a))-1);
   return bits<<(a-lo);
 }
-static inline void mesh_bits_set(struct hdr *m,int plane,uint32_t first,uint32_t count){
-  _Atomic uint64_t *p=mesh_plane(m,plane);
+static inline void mesh_bits_set(_Atomic uint64_t *p,uint32_t first,uint32_t count){
   for(uint32_t w=first/64;count && w<=(first+count-1)/64;w++) atomic_fetch_or_explicit(&p[w],mesh_word_mask(first,count,w),memory_order_acq_rel);
 }
-static inline void mesh_bits_clear(struct hdr *m,int plane,uint32_t first,uint32_t count){
-  _Atomic uint64_t *p=mesh_plane(m,plane);
+static inline void mesh_bits_clear(_Atomic uint64_t *p,uint32_t first,uint32_t count){
   for(uint32_t w=first/64;count && w<=(first+count-1)/64;w++) atomic_fetch_and_explicit(&p[w],~mesh_word_mask(first,count,w),memory_order_acq_rel);
 }
 
@@ -144,21 +161,35 @@ static inline void *mesh_events(struct hdr *m,uint32_t queue){
 /* design/algorithm-sources.md#programkernel_call */
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M08 */
-static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t pages,uint32_t rows,uint32_t links,uint32_t qps){
-  if(rows<pages)rows=pages;
-  uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz,words=((uint64_t)rows+63)/64;
-  h->pgsz=pgsz; h->block=block; h->rows=rows; h->links=links; h->qps=qps;
+/* Four independent dimensions, none of them derived from another: arena pages, page-table rows,
+   transfer-list entries (orders) and the registered window.  rows was welded to pages because the
+   arena bitmap lived in a row plane and the order table was rows-strided; both are now their own
+   table, so a 512 GiB arena costs a 4 MiB bitmap and nothing else. */
+struct mesh_geometry { uint32_t pgsz,block,pages,rows,orders,links,qps,wire_pages; };
+static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
+  uint32_t blocks=g.pages/g.block,arena=blocks*g.block;
+  if(!g.rows)g.rows=arena;
+  if(!g.orders)g.orders=g.rows;
+  if(!g.wire_pages || g.wire_pages>arena)g.wire_pages=arena;
+  g.wire_pages=(g.wire_pages+g.block-1)/g.block*g.block;
+  if(g.wire_pages>arena)g.wire_pages=arena;
+  uint32_t pgsz=g.pgsz;
+  uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz,words=((uint64_t)g.rows+63)/64;
+  h->pgsz=pgsz; h->block=g.block; h->rows=g.rows; h->orders=g.orders; h->wire_pages=g.wire_pages;
+  h->links=g.links; h->qps=g.qps;
   h->planes_off=at; at+=(uint64_t)MESH_PLANES*words*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
-  h->page_off=at; at+=(uint64_t)rows*sizeof(struct mesh_page_entry); at=(at+pgsz-1)/pgsz*pgsz;
-  h->buffer_off=at; at+=(uint64_t)rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
-  h->link_off=at; at+=(uint64_t)links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
-  h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
-  h->target_off=at; at+=(uint64_t)rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
-  h->order_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*links*qps*rows*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
+  h->arena_off=at; at+=(((uint64_t)arena+63)/64)*sizeof(uint64_t); at=(at+pgsz-1)/pgsz*pgsz;
+  h->page_off=at; at+=(uint64_t)g.rows*sizeof(struct mesh_page_entry); at=(at+pgsz-1)/pgsz*pgsz;
+  h->buffer_off=at; at+=(uint64_t)g.rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
+  h->link_off=at; at+=(uint64_t)g.links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
+  h->length_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*g.links*g.qps*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
+  h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)g.links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
+  h->target_off=at; at+=(uint64_t)g.rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
+  h->order_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*g.links*g.qps*g.orders*sizeof(struct mesh_transfer); at=(at+pgsz-1)/pgsz*pgsz;
   h->notice_bytes=sizeof(struct mesh_tx);
-  uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
-  h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*links*h->notice_bytes; at=(at+bytes-1)/bytes*bytes;
-  h->data_off=at; at+=(uint64_t)pages*pgsz;
+  uint64_t bytes=(uint64_t)g.block*pgsz; at=(at+bytes-1)/bytes*bytes;
+  h->notice_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*g.links*h->notice_bytes; at=(at+bytes-1)/bytes*bytes;
+  h->data_off=at; at+=(uint64_t)g.pages*pgsz;
   h->length=at; return at;
 }
 #endif

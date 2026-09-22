@@ -45,7 +45,7 @@ void mesh_retire(struct hdr *m,uint64_t client){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     if(atomic_load_explicit(&buffer->owner,memory_order_acquire)==client){
       if(buffer->pages)atomic_store_explicit(&buffer->closed,1,memory_order_release);
-      mesh_bits_clear(m,MESH_ROW_OWN,row,1);
+      mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,1);
     }
   }
   atomic_store_explicit(&m->client,0,memory_order_release);
@@ -92,25 +92,41 @@ int mesh_detach(struct mesh_ctx *c){
 }
 
 /* design/algorithm-sources.md#programkernel_call */
-static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t begin,uint32_t end,int own,int hot){
-  for(uint32_t pass=0;pass<2;pass++){
-    if(pass)mesh_reclaim(c->M);
-    for(uint32_t first=(begin+align-1)/align*align;first<=end && count<=end-first;){
-      uint32_t next=first;
-      for(uint32_t w=first/64;w<=(first+count-1)/64;w++){
-        uint64_t occupied=(atomic_load_explicit(&mesh_plane(c->M,own)[w],memory_order_acquire)|atomic_load_explicit(&mesh_plane(c->M,hot)[w],memory_order_acquire))&mesh_word_mask(first,count,w);
-        if(occupied) next=w*64+64-(uint32_t)__builtin_clzll(occupied);
-      }
-      if(next==first){ mesh_bits_set(c->M,own,first,count); return first; }
-      first=(next+align-1)/align*align;
+/* One first-fit scan over an explicit pair of bitmaps and an explicit range.  The caller names the
+   bitmaps because the arena bitmap is indexed by arena page and the row planes by row: they are two
+   index spaces and sharing one sizing is what forced rows >= pages. */
+static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
+                          _Atomic uint64_t *own,_Atomic uint64_t *hot){
+  for(uint32_t first=(begin+align-1)/align*align;first<=end && count<=end-first;){
+    uint32_t next=first;
+    for(uint32_t w=first/64;w<=(first+count-1)/64;w++){
+      uint64_t occupied=(atomic_load_explicit(&own[w],memory_order_acquire)|atomic_load_explicit(&hot[w],memory_order_acquire))&mesh_word_mask(first,count,w);
+      if(occupied) next=w*64+64-(uint32_t)__builtin_clzll(occupied);
     }
+    if(next==first){ mesh_bits_set(own,first,count); return first; }
+    first=(next+align-1)/align*align;
   }
-  errno=ENOMEM; return MESH_ABSENT;
+  return MESH_ABSENT;
+}
+
+/* design/algorithm-sources.md#programkernel_call */
+/* The cursor resumes where the last allocation ended, so preparing N operands over P pages costs
+   O(P) in total rather than O(N*P); a full scan and then a reclaim still back it, so the result is
+   the same page the unresumed scan would have returned whenever nothing has been released. */
+static uint32_t mesh_allocate(struct mesh_ctx *c,uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
+                              _Atomic uint64_t *own,_Atomic uint64_t *hot,uint32_t *cursor){
+  uint32_t resume=*cursor<begin||*cursor>end?begin:*cursor;
+  uint32_t first=mesh_scan(count,align,resume,end,own,hot);
+  if(first==MESH_ABSENT && resume!=begin)first=mesh_scan(count,align,begin,end,own,hot);
+  if(first==MESH_ABSENT){ mesh_reclaim(c->M); first=mesh_scan(count,align,begin,end,own,hot); }
+  if(first==MESH_ABSENT){ errno=ENOMEM; return MESH_ABSENT; }
+  *cursor=first+count;
+  return first;
 }
 
 uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   if(!count){ errno=EINVAL; return MESH_ABSENT; }
-  uint32_t first=mesh_allocate(c,count,1,0,mesh_rows(c->M),MESH_ROW_OWN,MESH_ROW_HOT);
+  uint32_t first=mesh_allocate(c,count,1,0,mesh_rows(c->M),mesh_plane(c->M,MESH_ROW_OWN),mesh_plane(c->M,MESH_ROW_HOT),&c->row_cursor);
   if(first==MESH_ABSENT) return first;
   for(uint32_t r=first;r<first+count;r++){
     atomic_store_explicit(&mesh_page(c->M)[r].device,0,memory_order_relaxed);
@@ -128,10 +144,18 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
 }
 
 /* design/prepared-machine.md#M01 */
-uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
+/* design/prepared-machine.md#M09 */
+/* Two ranges over one arena and one bitmap: [0,wire_pages) is registered and is the only memory an
+   SGE may name; [wire_pages,arena) is addressable by every client and by the GPU and is never
+   registered, so it costs virtual memory and neither wired pages nor an MR slot. */
+uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align,int wire){
+  struct hdr *m=c->M;
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
-  uint32_t first=mesh_allocate(c,pages,align,0,mesh_blocks(c->M)*c->M->block,MESH_PAGE_OWN,MESH_PAGE_OWN);
-  if(first!=MESH_ABSENT) c->arena+=pages;
+  struct mesh_range range=mesh_arena_range(m,wire);
+  _Atomic uint64_t *bits=mesh_arena_bits(m);
+  uint32_t first=mesh_allocate(c,pages,align,range.first,range.first+range.count,bits,bits,
+    wire?&c->wire_cursor:&c->bulk_cursor);
+  if(first!=MESH_ABSENT){ c->arena+=pages; if(wire)c->wire+=pages; }
   return first;
 }
 
@@ -158,10 +182,10 @@ static void mesh_buffer_reclaim(struct hdr *m,uint32_t row){
   uint32_t pages=buffer->pages;
   for(uint32_t offset=0;offset<pages;offset+=m->block){
     uint32_t page=atomic_load_explicit(&mesh_page(m)[row+offset/m->block].mapping,memory_order_acquire);
-    if(page!=MESH_ABSENT)mesh_bits_clear(m,MESH_PAGE_OWN,page,m->block);
+    if(page!=MESH_ABSENT)mesh_bits_clear(mesh_arena_bits(m),page,m->block);
   }
   atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-  mesh_bits_clear(m,MESH_ROW_HOT,row,pages/m->block);
+  mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),row,pages/m->block);
 }
 
 /* design/algorithm-sources.md#programtensor */
@@ -183,7 +207,7 @@ void mesh_retired_release(struct hdr *m){
     if(owner && atomic_load_explicit(&buffer->closed,memory_order_acquire) &&
        atomic_compare_exchange_strong_explicit(&buffer->owner,&owner,0,memory_order_acq_rel,memory_order_relaxed)){
       atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-      mesh_bits_set(m,MESH_FREE,row,1);
+      mesh_bits_set(mesh_plane(m,MESH_FREE),row,1);
       atomic_store_explicit(&buffer->owner,owner,memory_order_release);
     }
   }
@@ -192,7 +216,7 @@ void mesh_retired_release(struct hdr *m){
 
 /* design/algorithm-sources.md#program */
 void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
-  mesh_bits_clear(c->M,MESH_ROW_OWN,first,count);
+  mesh_bits_clear(mesh_plane(c->M,MESH_ROW_OWN),first,count);
 }
 
 /* design/algorithm-sources.md#index-hand-off */

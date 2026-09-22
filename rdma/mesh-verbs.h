@@ -20,14 +20,31 @@
 #include <time.h>
 
 #define QD 4095
-struct mesh_wire { char *data; size_t length; struct ibv_sge *spans; };
+/* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
+/* tbt_post_recv loads only the low 32 address bits of an SGE, so no registration may cross a 4 GiB
+   virtual-address boundary.  The window is mapped at a bank-aligned base and is required to fit in
+   one bank, which makes every region cut interior to that bank and a straddle impossible. */
+#define MESH_BANK ((size_t)1<<32)
+struct mesh_wire { char *data; size_t length; };
 struct mesh_device {
   const char *name;
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
   uint32_t region_count,frame_capacity;
-  struct ibv_sge *spans;
+  char *wire; size_t extent,payload;
   pthread_mutex_t setup;
 };
+/* design/prepared-machine.md#M09 */
+/* design/prepared-machine.md#M07 */
+/* The one copy of the wire-address arithmetic.  offset is a byte offset into the arena, which is a
+   byte offset into the registered window because the window begins at data_off.  No per-block span
+   array, no page-table mapping load, no startup loop over blocks: an arena of any size costs this
+   divide and nothing else. */
+static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t offset,uint64_t remaining){
+  uint64_t capacity=device->payload-offset%device->payload;
+  return (struct ibv_sge){.addr=(uintptr_t)device->wire+offset,
+    .length=(uint32_t)(remaining<capacity?remaining:capacity),
+    .lkey=device->regions[offset/device->extent]->lkey};
+}
 /* design/algorithm-sources.md#programcopy */
 struct mesh_queue {
   _Alignas(64) struct ibv_qp *pair;
@@ -49,14 +66,22 @@ struct mesh_verbs {
 };
 /* design/prepared-machine.md#M07 */
 /* design/algorithm-sources.md#programtensor */
+/* design/prepared-machine.md#M09 */
+/* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
-  size_t payload=(size_t)m->block*m->pgsz,blocks=mesh_blocks(m);
-  wire->length=blocks*payload;
-  wire->data=mmap(NULL,wire->length,PROT_READ|PROT_WRITE,MAP_SHARED,file,(off_t)m->data_off);
+  wire->length=(size_t)m->wire_pages*m->pgsz;
+  wire->data=NULL;
+  if(wire->length>MESH_BANK){errno=ENOMEM;return -1;}
+  char *reserved=mmap(NULL,wire->length+MESH_BANK,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE,-1,0);
+  if(reserved==MAP_FAILED)return -1;
+  char *base=(char *)(((uintptr_t)reserved+MESH_BANK-1)&~(uintptr_t)(MESH_BANK-1));
+  if(base>reserved)munmap(reserved,(size_t)(base-reserved));
+  size_t tail=(size_t)((reserved+wire->length+MESH_BANK)-(base+wire->length));
+  if(tail)munmap(base+wire->length,tail);
+  wire->data=mmap(base,wire->length,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,file,(off_t)m->data_off);
   if(wire->data==MAP_FAILED){wire->data=NULL;return -1;}
-  wire->spans=calloc(blocks,sizeof *wire->spans);
-  if(!wire->spans)return -1;
-  for(size_t i=0;i<blocks;i++)wire->spans[i]=(struct ibv_sge){.addr=(uintptr_t)wire->data+i*payload,.length=(uint32_t)payload};
+  fprintf(stderr,"wire window=%zu bytes base=%p bank=%llu offset_in_bank=%llu\n",wire->length,(void *)wire->data,
+    (unsigned long long)((uintptr_t)wire->data>>32),(unsigned long long)((uintptr_t)wire->data&(MESH_BANK-1)));
   return 0;
 }
 static const char *shm; static _Atomic sig_atomic_t stop;
@@ -80,7 +105,6 @@ static int down_device(struct mesh_device *device){
   free(device->regions);device->regions=NULL;
   if(device->domain){if(ibv_dealloc_pd(device->domain))return 0;device->domain=NULL;}
   if(device->context){if(ibv_close_device(device->context))return 0;device->context=NULL;}
-  free(device->spans);device->spans=NULL;
   return 1;
 }
 static void down(void){ if(shm)shm_unlink(shm); }
@@ -204,29 +228,36 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
   if(ibv_query_device(device->context,&capabilities)){error=errno;goto done;}
   if(!device->domain)device->domain=ibv_alloc_pd(device->context);
   if(!device->domain){error=errno;goto done;}
-  size_t stride=(size_t)m->block*m->pgsz,span=(size_t)mesh_blocks(m)*stride;
   /* design/prepared-machine.md#M09 */
-  size_t limit=capabilities.max_mr_size<span?capabilities.max_mr_size:span;
-  size_t extent=limit/stride*stride;
-  size_t regions=(span+extent-1)/extent;
-  if(regions>(size_t)capabilities.max_mr){error=ENOMEM;goto done;}
+  /* Registered memory is the declared window, not the arena: it is what an SGE names, it is wired
+     1:1 by the provider, and it is the only thing the MR table has to cover.  The addressable arena
+     grows without it. */
+  size_t stride=(size_t)m->block*m->pgsz,span=wire->length;
+  size_t extent=(capabilities.max_mr_size<span?capabilities.max_mr_size:span)/stride*stride;
+  size_t regions=extent?(span+extent-1)/extent:0;
+  /* extent is a whole number of blocks and the window is one bank, so no region cut falls inside a
+     block and no region crosses a 4 GiB boundary: wire_span's divide is the only addressing form. */
+  if(!extent || regions>(size_t)capabilities.max_mr || span>MESH_BANK ||
+     ((uintptr_t)wire->data&(MESH_BANK-1))+span>MESH_BANK){
+    error=ENOMEM;
+    fprintf(stderr,"register %s window=%zu extent=%zu regions=%zu base=%p max_mr_size=%llu max_mr=%d\n",
+      device->name,span,extent,regions,(void *)wire->data,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr);
+    goto done;
+  }
   if(!device->regions)device->regions=calloc(regions,sizeof *device->regions);
   if(!device->regions){error=ENOMEM;goto done;}
   while(device->region_count<regions){
     size_t offset=(size_t)device->region_count*extent,end=offset+extent;
     device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
     if(!device->regions[device->region_count]){
-      error=errno;fprintf(stderr,"register %s offset=%zu bytes=%zu max_mr_size=%llu max_mr=%d: %s\n",
-        device->name,offset,(end<span?end:span)-offset,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));goto done;
+      error=errno;fprintf(stderr,"register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
+        device->name,offset,(end<span?end:span)-offset,span,extent,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));goto done;
     }
     device->region_count++;
   }
-  if(!device->spans)device->spans=calloc(mesh_blocks(m),sizeof *device->spans);
-  if(!device->spans){error=ENOMEM;goto done;}
-  for(size_t i=0;i<mesh_blocks(m);i++){
-    device->spans[i]=wire->spans[i];
-    device->spans[i].lkey=device->regions[i*stride/extent]->lkey;
-  }
+  device->wire=wire->data;device->extent=extent;device->payload=stride;
+  fprintf(stderr,"register %s window=%zu bytes extent=%zu regions=%zu arena=%llu bytes\n",
+    device->name,span,extent,regions,(unsigned long long)mesh_arena_pages(m)*(uint64_t)m->pgsz);
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity){error=EOPNOTSUPP;goto done;}
   device->frame_capacity=capacity>=(uint32_t)capabilities.max_cqe?(uint32_t)capabilities.max_cqe-1:capacity;

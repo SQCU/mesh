@@ -138,12 +138,17 @@ static int link_prepare(struct mesh_link *link){
 /* design/prepared-machine.md#M08 */
 static int link_configure(void *state,int socket,uint64_t client){
   struct mesh_link *link=state;struct hdr *m=link->M;
-  uint64_t payload=(uint64_t)m->block*m->pgsz;
   struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,client,link->index));
   link->cursors=calloc((size_t)link->qps,sizeof *link->cursors);
   if(!link->cursors)return -1;
   /* design/prepared-machine.md#M08 */
   uint32_t invocations=tx->invocations?tx->invocations:1;
+  /* design/prepared-machine.md#M01 */
+  /* Invocation t addresses slot t mod depth.  depth==invocations is the unrung machine and the
+     modulus is the identity; the client sizes its operands to depth and publishes it in the header
+     before the handshake, so the two agree by construction. */
+  uint32_t depth=atomic_load_explicit(&m->depth,memory_order_acquire);
+  if(!depth||depth>invocations)depth=invocations;
   uint32_t incoming=link->provider.completion_entries[MESH_RECEIVE];
   size_t receive_count=(size_t)incoming*invocations;
   link->receive=aligned_alloc(128,(receive_count+1)*sizeof *link->receive);
@@ -173,12 +178,9 @@ static int link_configure(void *state,int socket,uint64_t client){
         cell[t].pair=(uintptr_t)link->provider.queues[stream].pair;
         uint64_t remaining=out[i].bytes;
         for(uint32_t k=0;k<chunks;k++){
-          uint32_t address_row=row+(size_t)t*out[i].invocation_pages/m->block+k;
-          uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[address_row].mapping,memory_order_relaxed);
-          struct ibv_sge span=link->provider.device->spans[page/m->block];
-          uint64_t offset=atomic_load_explicit(&mesh_page(m)[address_row].address,memory_order_relaxed);
-          uint64_t capacity=payload-(offset-m->data_off)%payload;
-          span.addr+=(offset-m->data_off)%payload;span.length=(uint32_t)(remaining<capacity?remaining:capacity);
+          uint32_t address_row=row+(uint32_t)((size_t)(t%depth)*out[i].invocation_pages/m->block)+k;
+          uint64_t offset=atomic_load_explicit(&mesh_page(m)[address_row].address,memory_order_relaxed)-m->data_off;
+          struct ibv_sge span=wire_span(link->provider.device,offset,remaining);
           remaining-=span.length;
           /* design/prepared-machine.md#M29 */
           struct ibv_sge *entry=k?&link->requests[next+k-1].span:&cell[t].span;
@@ -198,9 +200,8 @@ static int link_configure(void *state,int socket,uint64_t client){
         uint32_t row=in[i].local_row+slot*in[i].stride;
         uint64_t remaining=in[i].bytes;
         for(uint32_t k=0;k<chunks;k++){
-          uint64_t offset=atomic_load_explicit(&mesh_page(m)[row+k].address,memory_order_relaxed);
-          uint64_t capacity=payload-(offset-m->data_off)%payload;
-          uint32_t bytes=(uint32_t)(remaining<capacity?remaining:capacity);remaining-=bytes;
+          uint64_t chunk=atomic_load_explicit(&mesh_page(m)[row+k].address,memory_order_relaxed)-m->data_off;
+          uint32_t bytes=wire_span(link->provider.device,chunk,remaining).length;remaining-=bytes;
           /* design/prepared-machine.md#M08 */
           /* design/prepared-machine.md#M09 */
           struct mesh_queue *queue=&link->provider.queues[q*tx->slots+slot];
@@ -220,9 +221,9 @@ static int link_configure(void *state,int socket,uint64_t client){
             input=(uintptr_t)cell;argument=cell->request.wr_id;
           }
           for(uint32_t t=0;t<invocations;t++){
-            uint32_t page=(uint32_t)atomic_load_explicit(&mesh_page(m)[row+(size_t)t*in[i].invocation_pages/m->block+k].mapping,memory_order_relaxed);
-            struct ibv_sge span=link->provider.device->spans[page/m->block];span.length=bytes;
-            span.addr+=(atomic_load_explicit(&mesh_page(m)[row+(size_t)t*in[i].invocation_pages/m->block+k].address,memory_order_relaxed)-m->data_off)%payload;
+            uint32_t address_row=row+(uint32_t)((size_t)(t%depth)*in[i].invocation_pages/m->block)+k;
+            uint64_t offset=atomic_load_explicit(&mesh_page(m)[address_row].address,memory_order_relaxed)-m->data_off;
+            struct ibv_sge span=wire_span(link->provider.device,offset,bytes);
             struct prepared_receive *record=link->receive+(size_t)t*incoming+frame;
             *record=(struct prepared_receive){
               .request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
@@ -243,6 +244,10 @@ static int link_configure(void *state,int socket,uint64_t client){
     uint32_t capacity=link->provider.queues[q].receive_capacity/frames[q];
     if(capacity<window)window=capacity?capacity:1;
   }
+  /* design/prepared-machine.md#M01 */
+  /* Receive t+window lands in slot (t+window) mod depth while the local reader is at t, so the
+     window is held a slot short of the ring: the same depth-1 step margin the send side has. */
+  if(depth<invocations && window>depth-1)window=depth>1?depth-1:1;
   link->refill=window<invocations;
   for(uint32_t t=0;t<invocations;t++)for(uint32_t f=0;f<incoming;f++){
     struct prepared_receive *record=link->receive+(size_t)t*incoming+f;
@@ -254,7 +259,7 @@ static int link_configure(void *state,int socket,uint64_t client){
     }
   }
   if(receive_count)link->receive[receive_count]=link->receive[receive_count-1];
-  fprintf(stderr,"receive window=%u invocations=%u frames=%u refill=%d\n",window,invocations,incoming,link->refill);
+  fprintf(stderr,"receive window=%u invocations=%u depth=%u frames=%u refill=%d\n",window,invocations,depth,incoming,link->refill);
   link->cursor_count=0;
   for(int q=0;q<link->qps;q++)if(link->cursors[q]){
     link->cursors[link->cursor_count++]=link->cursors[q];
@@ -508,7 +513,7 @@ static void *link_run(void *argument){
 /* design/algorithm-sources.md#programcopy */
 int main(int argc,char **argv){
   const char *name=MESH_NAME;int me=0,layout=0;double pct=0;
-  uint64_t arena_pages=0,block_pages=0,table_rows=0;
+  uint64_t arena_pages=0,block_pages=0,table_rows=0,window_pages=0,orders=4096;
   uint32_t link_count=0,device_count=0,qps=getenv("MESH_QPS")?(uint32_t)atoi(getenv("MESH_QPS")):1;
   struct mesh_link *links=aligned_alloc(_Alignof(struct mesh_link),(size_t)argc*sizeof *links);
   struct mesh_device *devices=calloc((size_t)argc,sizeof *devices);
@@ -517,10 +522,16 @@ int main(int argc,char **argv){
   for(int i=1;i<argc;i++){
     if(!strcmp(argv[i],"-I") && i+1<argc)me=atoi(argv[++i]);
     else if(!strcmp(argv[i],"-M") && i+1<argc)pct=atof(argv[++i]);
-    else if((!strcmp(argv[i],"-A") || !strcmp(argv[i],"-B") || !strcmp(argv[i],"-R")) && i+1<argc){
+    /* design/prepared-machine.md#M09 */
+    /* -A addressable arena pages, -B pages per block, -R page-table rows, -W registered window
+       pages, -O transfer-list entries per queue and direction.  None of the five is derived from
+       another; -W defaults to the whole arena and -O to 4096. */
+    else if((!strcmp(argv[i],"-A") || !strcmp(argv[i],"-B") || !strcmp(argv[i],"-R") ||
+             !strcmp(argv[i],"-W") || !strcmp(argv[i],"-O")) && i+1<argc){
       char kind=argv[i][1],*end;uint64_t pages=strtoull(argv[++i],&end,10);
       if(*end || !pages || pages>INT32_MAX)die("configured page count");
-      if(kind=='A')arena_pages=pages;else if(kind=='B')block_pages=pages;else table_rows=pages;
+      if(kind=='A')arena_pages=pages;else if(kind=='B')block_pages=pages;
+      else if(kind=='R')table_rows=pages;else if(kind=='W')window_pages=pages;else orders=pages;
     }
     else if(!strcmp(argv[i],"--layout"))layout=1;
     else if(!strcmp(argv[i],"-s") && i+1<argc)name=argv[++i];
@@ -542,7 +553,11 @@ int main(int argc,char **argv){
   /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
   if((uint64_t)block_pages*pg+4096>16773120)die("transport chunk exceeds native request capacity");
   struct hdr geometry={0};
-  uint64_t length=mesh_layout(&geometry,pg,(uint32_t)block_pages,(uint32_t)arena_pages,(uint32_t)table_rows,link_count,qps);
+  uint64_t length=mesh_layout(&geometry,(struct mesh_geometry){.pgsz=pg,.block=(uint32_t)block_pages,
+    .pages=(uint32_t)arena_pages,.rows=(uint32_t)table_rows,.orders=(uint32_t)orders,
+    .links=link_count,.qps=qps,.wire_pages=(uint32_t)window_pages});
+  /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
+  if((uint64_t)geometry.wire_pages*pg>MESH_BANK)die("registered window exceeds one 4 GiB bank: pass -W");
   uint64_t ram=0;size_t rl=sizeof ram;sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
   if(pct && length>(uint64_t)(pct/100*(double)ram))die("configured graph exceeds page capacity");
   if(layout){printf("%llu\n",(unsigned long long)length);return 0;}
@@ -576,7 +591,8 @@ int main(int argc,char **argv){
   atomic_store_explicit(&control_memory,m,memory_order_relaxed);
   atomic_store(&m->bridge_pid,(uint64_t)getpid());atomic_store(&m->port.phase,MESH_PAIRING);
   __sync_synchronize();m->magic=MESH_MAGIC;
-  fprintf(stderr,"bridge node %d: %u links, %u queue pairs per link\n",me,link_count,qps);
+  fprintf(stderr,"bridge node %d: %u links, %u queue pairs per link, arena %llu pages, window %u pages, rows %u, orders %u\n",
+    me,link_count,qps,(unsigned long long)mesh_arena_pages(m),m->wire_pages,m->rows,m->orders);
   while(!stop){
     uint64_t notification=atomic_load_explicit(&m->control,memory_order_acquire);
     mesh_retired_release(m);
@@ -623,7 +639,7 @@ int main(int argc,char **argv){
     free(link->configuration);
   }
   for(uint32_t i=0;i<device_count;i++)pthread_mutex_destroy(&devices[i].setup);
-  free(completion_outputs);free(devices);free(links);munmap(wire.data,wire.length);free(wire.spans);
+  free(completion_outputs);free(devices);free(links);munmap(wire.data,wire.length);
   atomic_store(&m->port.phase,MESH_STOPPED);
   atomic_store_explicit(&control_memory,NULL,memory_order_relaxed);
   munmap(m,length);return status;
