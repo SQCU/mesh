@@ -122,7 +122,7 @@ static int link_prepare(struct mesh_link *link){
   link->provider.completion_entries[MESH_RECEIVE]=incoming;
   /* design/prepared-machine.md#M27 */
   const char *ledger=getenv("MESH_LEDGER");
-  link->ledger=!(ledger && ledger[0]=='0' && !ledger[1]);
+  link->ledger=ledger && ledger[0] && !(ledger[0]=='0' && !ledger[1]);
   for(int d=0;d<2;d++){
     free(link->trace[d]);link->trace[d]=NULL;link->traced[d]=0;
     link->trace_capacity[d]=link->ledger?(size_t)link->provider.completion_entries[d]*(tx->invocations?tx->invocations:1):0;
