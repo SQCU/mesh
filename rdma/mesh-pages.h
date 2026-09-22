@@ -4,7 +4,7 @@
 
 #define MESH_PAGES_LOCAL UINT16_MAX
 #define MESH_PAGES_DEPENDENCIES 8
-struct mesh_pages_slot { uint32_t sid, pages; uint16_t peer; uint8_t receive, depends, pagewise; uint32_t dependency[MESH_PAGES_DEPENDENCIES]; };
+struct mesh_pages_slot { uint32_t sid, pages; uint16_t peer; uint8_t receive, depends; uint32_t dependency[MESH_PAGES_DEPENDENCIES]; };
 struct mesh_pages_policy { uint64_t open_retry_ns, fault_seed; uint32_t fault_period, control_pages; };
 typedef struct mesh_pages mesh_pages;
 typedef void (*mesh_pages_hook)(void *capture, uint32_t slot, uint64_t generation);

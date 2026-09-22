@@ -205,13 +205,6 @@ static int push_page(mesh_pages *p, struct slot *s, uint32_t page){
   s->inflight[page]=1; s->flying++; p->flying++;
   return 1;
 }
-static void flush_later(mesh_pages *p){
-  while(p->later_count){
-    struct desc d={.page=p->later[0]};
-    if(push(p->M,REL,&d)) break;
-    memmove(p->later,p->later+1,(--p->later_count)*sizeof *p->later);
-  }
-}
 static void release_page(mesh_pages *p, uint32_t page){
   struct desc d={.page=page};
   if(push(p->M,REL,&d) && p->later_count<MESH_RING) p->later[p->later_count++]=page;
@@ -226,24 +219,16 @@ static void filled(mesh_pages *p, struct slot *s, uint64_t generation){
   if(generation>atomic_load_explicit(&s->highest,memory_order_relaxed)) atomic_store_explicit(&s->highest,generation,memory_order_release);
   if(count==s->spec.pages && generation>atomic_load_explicit(&s->complete,memory_order_relaxed)) atomic_store_explicit(&s->complete,generation,memory_order_release);
 }
-static void release_entry(mesh_pages *p, struct slot *a, uint32_t j, uint64_t generation){
-  if(a->stamp[j]!=generation || a->table[j]==ABSENT) return;
-  release_page(p,a->table[j]); __atomic_store_n(&a->table[j],ABSENT,__ATOMIC_RELEASE);
-}
-static void release_dependencies(mesh_pages *p, struct slot *s, uint32_t page, uint64_t generation){
-  if(s->spec.pagewise){
-    for(uint8_t d=0;d<s->spec.depends;d++){
-      struct slot *a=&p->slots[s->spec.dependency[d]];
-      if(a->spec.receive && page<a->spec.pages) release_entry(p,a,page,generation);
-    }
-    return;
-  }
+static void release_dependencies(mesh_pages *p, struct slot *s, uint64_t generation){
   if(generation<=s->released) return;
   s->released=generation;
   for(uint8_t d=0;d<s->spec.depends;d++){
     struct slot *a=&p->slots[s->spec.dependency[d]];
     if(!a->spec.receive) continue;
-    for(uint32_t j=0;j<a->spec.pages;j++) release_entry(p,a,j,generation);
+    for(uint32_t j=0;j<a->spec.pages;j++){
+      if(a->stamp[j]!=generation || a->table[j]==ABSENT) continue;
+      release_page(p,a->table[j]); __atomic_store_n(&a->table[j],ABSENT,__ATOMIC_RELEASE);
+    }
   }
 }
 static void arrive(mesh_pages *p, struct slot *s, uint32_t page, uint32_t physical, uint64_t generation){
@@ -256,15 +241,9 @@ static void arrive(mesh_pages *p, struct slot *s, uint32_t page, uint32_t physic
   if(s->fault_have<4 && (page==s->fault_first || page==s->fault_second)){
     s->fault_have|=page==s->fault_first?1:2;
     if(s->fault_have==3){
-      uint32_t first=s->table[s->fault_first], second=s->table[s->fault_second];
+      unsigned char *a=payload_at(p,s->table[s->fault_first]), *b=payload_at(p,s->table[s->fault_second]);
       size_t bytes=mesh_pages_payload(p);
-      if(first!=ABSENT && second!=ABSENT){
-        unsigned char *a=payload_at(p,first), *b=payload_at(p,second);
-        for(size_t i=0;i<bytes;i++){ unsigned char x=a[i]^b[i]; a[i]=x; b[i]=x; }
-      } else {
-        unsigned char *a=payload_at(p,first!=ABSENT?first:second);
-        for(size_t i=0;i<bytes;i++) a[i]^=0xa5;
-      }
+      for(size_t i=0;i<bytes;i++){ unsigned char x=a[i]^b[i]; a[i]=x; b[i]=x; }
       p->faults++; s->fault_have=4;
     }
   }
@@ -277,8 +256,7 @@ static void offer(mesh_pages *p, size_t i){
   if(s->dependents){
     limit=UINT64_MAX;
     for(uint32_t d=0;d<s->dependents;d++){
-      const struct slot *b=&p->slots[s->dependent[d]];
-      uint64_t shown=b->spec.pagewise && !s->transported?atomic_load_explicit(&b->complete,memory_order_acquire):atomic_load_explicit(&b->highest,memory_order_acquire);
+      uint64_t shown=atomic_load_explicit(&p->slots[s->dependent[d]].highest,memory_order_acquire);
       if(shown<limit) limit=shown;
     }
     limit+=p->versions;
@@ -359,7 +337,7 @@ static void transmit(mesh_pages *p, size_t i){
         uint32_t page=(uint32_t)(w*64+(size_t)__builtin_ctzll(bits));
         if(s->stamp[page]>=generation) continue;
         s->stamp[page]=generation;
-        release_dependencies(p,s,page,generation);
+        release_dependencies(p,s,generation);
         if(s->transported) s->pending[w]|=UINT64_C(1)<<(page%64);
         filled(p,s,generation);
       }
@@ -417,7 +395,11 @@ int mesh_pages_progress(mesh_pages *p){
   if(status<0 && !p->announced){ p->announced=1; for(size_t i=0;i<p->count;i++) p->slots[i].abort_due=1; }
   refresh(p);
   acknowledge(p);
-  flush_later(p);
+  while(p->later_count){
+    struct desc d={.page=p->later[0]};
+    if(push(p->M,REL,&d)) break;
+    memmove(p->later,p->later+1,(--p->later_count)*sizeof *p->later);
+  }
   for(int turn=0;turn<256;turn++){
     struct desc d; if(pop(p->M,CMP,&d)) break;
     if(d.page>=p->M->pool){ p->integrity++; continue; }
@@ -467,7 +449,11 @@ int mesh_pages_recover(mesh_pages *p){
     s->flying=0; s->released=0; s->fault_generation=0; s->fault_have=0;
     s->agreed=!s->transported; s->open_due=s->abort_due=0; s->open_ns=s->open_retry=0; s->peer_nonce=0;
   }
-  flush_later(p);
+  while(p->later_count){
+    struct desc d={.page=p->later[0]};
+    if(push(p->M,REL,&d)) break;
+    memmove(p->later,p->later+1,(--p->later_count)*sizeof *p->later);
+  }
   p->flying=0; p->control_free=p->control_count;
   p->nonce=fresh_nonce(); p->incarnation++; p->announced=0;
   atomic_store_explicit(&p->status,0,memory_order_release);

@@ -5,7 +5,7 @@
 #include <time.h>
 #include <unistd.h>
 
-static id<MTLBuffer> mesh_metal_memory(id<MTLDevice> device,const void *source,size_t bytes){
+id<MTLBuffer> mesh_metal_memory(id<MTLDevice> device,const void *source,size_t bytes){
   mach_vm_address_t address=0;
   vm_prot_t current,maximum;
   kern_return_t status=mach_vm_remap(mach_task_self(),&address,bytes,0,VM_FLAGS_ANYWHERE,
@@ -34,7 +34,8 @@ id<MTLBuffer> mesh_metal_transmit_pool(id<MTLDevice> device, struct mesh_ctx *co
 }
 int mesh_metal_row_layout(struct mesh_ctx *context,struct mesh_scope scope,size_t rows,
   size_t row_bytes,size_t alignment,struct mesh_metal_rows *result){
-  size_t header=sizeof(struct wire)+(mesh_epoch_set(scope.epoch)?sizeof(struct mesh_frame):MESH_OFF), stride=context->M->pgsz;
+  struct mstream stream={.scope=scope};
+  size_t header=sizeof(struct wire)+mesh_stream_header(&stream), stride=context->M->pgsz;
   if(!rows || !alignment || stride%alignment || !row_bytes) return EINVAL;
   size_t padding=(alignment-header%alignment)%alignment;
   if(header+padding>=stride || row_bytes>stride-header-padding) return EOVERFLOW;
