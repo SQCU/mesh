@@ -7,7 +7,7 @@
 #include <string.h>
 #define MESH_MAGIC   0x4d455348u
 #define MESH_NAME    "/mesh0"
-#define MESH_PORT    "18519"
+#define MESH_PORT    "18529"
 #define MESH_MODE    0666
 #define MESH_VERSION 5u
 #define MESH_CLIENT_DRAIN UINT64_MAX

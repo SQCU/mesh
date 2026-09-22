@@ -43,8 +43,8 @@ static void *link_worker(void *argument){
   while(!stop){
     atomic_store(&link->heartbeat,flight_time()); atomic_store(&link->phase,MESH_PAIRING);
     if(monotime()<retry_at){ usleep(100000); continue; }
-    if(lsock<0 && listener_up()){ retry_at=monotime()+retry_delay(); continue; }
-    const char *peer=expected_peer>=0 && link->node<expected_peer?NULL:link->peer;
+    if(lsock<0 && (expected_peer<0 || link->node>expected_peer) && listener_up()){ retry_at=monotime()+retry_delay(); continue; }
+    const char *peer=expected_peer>=0 && link->node>expected_peer?NULL:link->peer;
     int ready=!verbs_up(peer,link->memory,link->span,link->node);
     if(ready && !stop){
       backoff_n=0; generation++; atomic_store(&link->phase,MESH_PAIRED);
