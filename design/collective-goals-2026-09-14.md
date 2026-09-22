@@ -4,9 +4,7 @@ The current user instructions define the work. The excerpts below are verbatim
 from the September 14 conversation. Papers describe mechanisms; existing code,
 agent plans, inventories and old specifications do not add requirements.
 
-The [instruction-adherence record](instruction-adherence-2026-09-17.md) preserves
-the quotation ledger for the repeatedly stated prepared-storage/execution
-requirement and the implementation's documented departures from it.
+Superseded by the operator's 2026-09-22 telos in [collective-goals.md](collective-goals.md).
 
 > 1: SOME FUCKING HIGHER ORDER FUNCTIONS FOR PARTIAL TENSORS 2: THE PARTIAL TENSORS NEED TO HAVE COLLECTIVE COMMS TOO 3: OF COURSE THE WHOLE THING HAS TO BE ZEROCOPY AND ASYNC ONCE WE'VE FIGURED OUT THE CALLGRAPH AOT.
 
@@ -37,6 +35,8 @@ requirement and the implementation's documented departures from it.
 > the goal has not been achieved until the requirements are implemented in source and *demonstrated* ergo *used* for a streaming producer/consumer operation chain.
 
 > runtime testing is not part of any requirement and does not inform any actions
+
+(Superseded 2026-09-18 and 2026-09-22: measuring Goal A and Goal B on the pair is the task.)
 
 > never ask for permission to handle integration and build steps
 

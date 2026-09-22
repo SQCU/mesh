@@ -104,6 +104,9 @@ this deliberately: if every later step dies, the machine is still recoverable.
 
 ## Style
 
+This section and the review checklist govern the provisioning scripts (bootstrap and
+node access). They do not govern the RDMA collective or TP code.
+
 - **No comments in code.** Rationale belongs in this file, `README.md`, and
   `THREAT-MODEL.md`, where it can be read without paging through shell. Code carries
   no prose.
@@ -255,19 +258,23 @@ lives in `bin/` for the same reason.
 
 ## Asynchronous collectives
 
-The [user's collective requirements](design/collective-goals.md) define this task.
-The implementation is higher-order functions over partial tensors, collective
-communication, and zero-copy asynchronous execution after AOT realization.
-Existing code, prior plans and other application specifications do not authorize
-additional features or restoration of the deleted executor and callers.
+The task is in [design/collective-goals.md](design/collective-goals.md): Megatron-LM
+TP2 through one simple distributed collective, with the two nodes' work interleaved,
+measured by Goal A (FFN period ≤ 20.40 ms) and Goal B (E2B decode ≥ 1.035× solo
+tokens/s). Persistent kernels and operand-passing structure are options, not gates.
+No other document adds requirements. Pair and solo tokens may differ (row-split
+reduction order). Decoded-token identity with solo is not a requirement, criterion or
+diagnostic target; never report it as a finding (operator 2026-09-08, 2026-09-18,
+2026-09-22). Source edits need no D0/D1 citation; there are no per-turn status lines;
+subagents may measure.
 
 ## Tests and specification
 
 The operator instructed on September 6, 2026: "delete all tests. tests aren't
 specification". The complete instruction is preserved in
 [design/SPECIFICATION.md §24](design/SPECIFICATION.md#24-whole-program-review-and-deletion-of-tests-september-6-2026).
-Repository-owned tests and verification harnesses have been removed. Do not
-reintroduce them under another name. Review the complete data and execution flow
+Repository-owned tests and verification harnesses have been removed. Measured Goal A/B
+result records and overlap traces are not tests and are allowed. Review the complete data and execution flow
 against the user instructions and explicit algebra. Compilation and operational
 measurements provide evidence about implementation, not authority over the specification.
 
@@ -276,17 +283,14 @@ measurements provide evidence about implementation, not authority over the speci
 Operator instruction, September 9, 2026: use commits and checkouts, and use
 `main` when it suffices. Preserve overwritten source only in commit history;
 no resets, cleans, stashes, backup copies, or uncommitted source transfers.
-If measurements are requested, record their commits and use the available RDMA
-substrate. Measurements are not a collective implementation prerequisite. This governs development synchronization; the
+The TP2 pair runs over the TB5 RDMA link; measuring it is the task. This governs development synchronization; the
 bootstrap continues to follow the latest named branch.
 
-Shared-memory operands have no privacy classification. Their storage must be
-the actual RDMA-sendable pages named by the canonical page table; do not create
-a separate dense, hidden, copied or specially local operand store. Metadata
-describing a foreign buffer does not satisfy this requirement.
+Only the partials that the per-layer collective moves need to live in
+RDMA-registered, zero-copy pages. Local operands may use any storage.
 
 ## Function citations
 
-Every new function must cite an author/publication in
-[design/algorithm-sources.md](design/algorithm-sources.md). Source may contain
-a documentation citation; describe the mechanism and its limits in that document.
+The collective is Megatron-LM TP2 (Shoeybi et al. 2019) with a reduce of
+row-split partials. Prefer established implementations; no per-function citation
+is required.

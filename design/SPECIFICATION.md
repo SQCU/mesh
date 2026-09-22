@@ -310,6 +310,8 @@ Current session, operator, verbatim:
 Program and input/output correspondence: [`POLICY-PROGRAM.md`](POLICY-PROGRAM.md).
 Deletion and source-review evidence: [whole-program review](../measurements/policy-whole-program-20260906/README.md).
 
+This prohibits hand-written tests. Measured Goal A/B result records and overlap traces are allowed.
+
 ## 25. Asynchronous concurrent publication, current mesh session
 
 Operator instruction, September 14, 2026:
@@ -320,9 +322,7 @@ Operator instruction, September 14, 2026:
 
 > strict dependencies of this featureset are *required* and are to be written with *urgency* instead of procrastination and hand-wringing. use established literautre or canonical implementatinos of this sort of code instead of inlining or inventing algorithmic code.
 
-The complete collective contract is [asynchronous collectives](async-collectives.md).
-The application-specific sections elsewhere in this file add no requirements to
-that interface.
+The mesh task is Megatron TP2 with Goals A and B in [collective-goals.md](collective-goals.md) (operator, 2026-09-22). [Asynchronous collectives](async-collectives.md) describes the deleted Swift executor.
 
 ## Provenance law (carried from the agentfile / vine-polycompiler stratagem)
 

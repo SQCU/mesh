@@ -1,7 +1,7 @@
 # Current release closure
 
 Updated 2026-09-04. This is the current implementation/verification/deployment ledger,
-not a replacement specification. Requirements remain in `GOAL.md`, `SPECIFICATION.md`,
+not a replacement specification. Requirements remain in `RELEASE-CLOSURE-GOAL.md`, `SPECIFICATION.md`,
 and the operator quotes. Historical observations in `AGENDA.md` remain historical.
 The current working branch is `codex/policy-collapse`; its [single-policy manifest](POLICY-STATE-CONTRACT.md)
 supersedes the split-model implementation without changing the running demo.
@@ -118,7 +118,7 @@ branch still needs publication before another node can fetch it from GitHub.
 
 ## 3. Reconcile closure without erasing either accomplishments or gaps
 
-The [seventeen release obligations](../GOAL.md) are indexed below. Claimfiles describe
+The [seventeen release obligations](RELEASE-CLOSURE-GOAL.md) are indexed below. Claimfiles describe
 implementation; they are not seventeen new empirical passes. Existing game/runtime
 evidence remains credited, and current-generation measurements remain separately due.
 

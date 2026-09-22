@@ -1,5 +1,7 @@
 # What "Amdahl improvement" means here — gemma-4-E2B on an M5 Max, made marginally faster by a mesh
 
+Historical; countermanded as a source of requirements (operator, 2026-09-22; see [collective-goals.md](collective-goals.md)). Its reference-class line, crossover sweep, per-stage budgets and E8 thresholds are not gates.
+
 This is the tedious version. It exists because every previous measurement of "the mesh"
 compared a slow, wrongly-shaped two-node run against a solo run and then explained the
 result. The objective is the opposite and it is narrow: take an **otherwise optimal**

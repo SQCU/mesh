@@ -1,11 +1,8 @@
 # mesh
 
-The [user's collective goal](design/collective-goals.md) is higher-order
-functions over partial tensors, collective communication, and zero-copy async
-execution after AOT realization. The inherited numerical stack and its callers
-have been deleted. The [replacement interface and source examples](design/async-collectives.md)
-accept supplied tensor functions; the remaining integration and transport limits
-are listed with the implementation.
+The [collective goal](design/collective-goals.md) is Megatron-LM TP2 through one
+simple distributed collective, with interleaved execution of the two nodes' work,
+measured by Goal A (FFN period) and Goal B (E2B decoded tokens/s over solo).
 
 Provisioning for a fabric of Apple Silicon Macs wired together with Thunderbolt and
 talking RDMA. The invariant: **a node may never become unreachable, and may never
@@ -499,12 +496,11 @@ Runs as root at boot with no login session. `KeepAlive` restarts it forever.
 
 ## Collective implementation
 
-The [user's requirements](design/collective-goals.md) are the scope.
+The goal is Megatron TP2 with Goals A and B in [design/collective-goals.md](design/collective-goals.md).
 The retained substrate is `rdma/mesh-flow.c`, canonical page storage and buffer
 ownership. Ordinary bridge lifecycle commands are in `bin/mesh-bridge.sh`.
-`swift/Mesh.swift` supplies higher-order partial calls and collective relations;
-`rdma/mesh-call.c` binds their operand uses to native completion. See the
-[source data flow, examples and current limits](design/async-collectives.md).
+[design/async-collectives.md](design/async-collectives.md) describes the deleted
+Swift executor.
 No deleted Python API, numerical executor, solver or demonstration is a current
 implementation dependency.
 
@@ -542,4 +538,3 @@ participant, then launch its configured rank:
 Each command runs on its corresponding participant. Final consumers report the
 first and last element for every local output and invocation index; the process
 retains the graph until terminated. This is an operational chain demonstration.
-Performance measurements and their public serving path are separate deliverables.

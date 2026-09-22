@@ -45,8 +45,8 @@ The device has `max_qp: 11` and `max_mr: 100`. It does not take many leaks.
   version of `mesh-hop` had a deadline on `ibv_poll_cq` and still hung forever, because
   `accept()`, `connect()` and the out-of-band `read()` in front of it had none. A
   program with one unbounded syscall is an unbounded program.
-- **One experiment at a time.** A sweep that launches a process per size, killing
-  the previous one, is a leak amplifier.
+- **Do not SIGKILL between runs.** A sweep that launches a process per size, killing
+  the previous one, is a leak amplifier. Sequential runs on a live bridge are fine.
 
 ## Habits that are safe elsewhere and are not safe here
 
@@ -189,3 +189,6 @@ What stands:
 - **A finding assembled while the instrument is being rewritten is a suspicion.** Twenty-five
   revisions of the pairing path during the measurement window meant every data point came
   from a different program. Freeze the instrument, then measure.
+
+These rules apply to the bridge pairing protocol. They impose no program-identity,
+same-build or provenance check on TP runs.

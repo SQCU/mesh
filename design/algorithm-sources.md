@@ -3,7 +3,7 @@
 The [user's requirements](collective-goals.md) define scope. These sources supply
 mechanisms, not additional features, architecture, tests or prerequisites. Section
 names retain existing source citation anchors; they do not prescribe public APIs.
-The deleted implementation is not an implementation template.
+The deleted implementation is not an implementation template. No per-function citation is required; prefer established implementations (the collective is Megatron-LM TP2, Shoeybi et al. 2019).
 
 ## Program
 
@@ -1242,6 +1242,8 @@ yields infinity. Missing nodes and links contribute zero capacity. These rules
 come from the existing `seconds` function; its prose comments now live here.
 
 ## report statistics
+
+Optional; reporting count, mean or variance is not required.
 
 B. P. Welford, [Note on a Method for Calculating Corrected Sums of Squares and
 Products](https://doi.org/10.1080/00401706.1962.10490022), *Technometrics* 4(3),

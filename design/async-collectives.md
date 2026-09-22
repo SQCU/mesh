@@ -1,7 +1,6 @@
 # Asynchronous partial tensor calls
 
-The [user's requirements](collective-goals.md) define scope. This document
-explains the source; it does not add requirements.
+This document describes the deleted Swift executor (`swift/Mesh.swift`, deleted at `2b49f3c`). It adds no requirements; the task is in [collective-goals.md](collective-goals.md).
 
 The previous claim of full completion is withdrawn. The source demonstrates
 finite producer/collective/consumer chains, but a single-use value extent and
