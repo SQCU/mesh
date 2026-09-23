@@ -43,7 +43,7 @@ Operator, 2026-09-22, verbatim:
   neurons) with a streaming reduce-scatter/all-gather exchange: median
   completed-result period ≤ 20.40 ms, against the recorded 26.12 ms for the M5
   alone. Any build that meets the period counts.
-- **Goal B.** gemma-4-E2B B=1 decode, attention heads [7,1] and FFN 7:1: pair
+- **Goal B.** gemma-4-E2B decode (any rows per forward: batch, sessions, draft-verify width; B=1 is one point, never the target), attention heads [7,1] and FFN 7:1: pair
   decoded tokens/s ≥ 1.035× solo decoded tokens/s (recorded best 1.035–1.045×).
   The divisor is the ordinary single-node decoder measured next to the pair
   ("whatever n is"). Rank programs differ from the solo by construction; nothing
