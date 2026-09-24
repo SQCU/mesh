@@ -18,7 +18,28 @@ int mesh_link_map_read(const char *path,struct mesh_link_map *map){
       for(uint32_t k=0;k<3;k++)if(!strcmp(kind,kinds[k])){map->kind=k;map->nodes=a;}
   }
   fclose(file);
-  return map->kind==UINT32_MAX || map->nodes>MESH_LINK_MAP_NODES?EINVAL:0;
+  /* Refuse a map its algorithm cannot run, instead of indexing past the planner's arrays or
+     walking a broken ring forever: every node < nodes and at most one link into it; a ring is one
+     cycle through every node; a tree has nodes-1 links and every node reaches the root. */
+  uint32_t n=map->nodes,up[MESH_LINK_MAP_NODES],at,steps;
+  if(map->kind==UINT32_MAX || !n || n>MESH_LINK_MAP_NODES)return EINVAL;
+  if(map->kind==MESH_LINKS_MESH)return 0;
+  for(uint32_t v=0;v<n;v++)up[v]=n;
+  for(uint32_t l=0;l<map->links;l++){
+    if(map->link[l][0]>=n || map->link[l][1]>=n || up[map->link[l][1]]<n)return EINVAL;
+    up[map->link[l][1]]=map->link[l][0];
+  }
+  if(map->kind==MESH_LINKS_RING){
+    at=0;steps=0;
+    do{at=up[at];steps++;}while(at<n && at && steps<n);
+    return at==0 && steps==n?0:EINVAL;
+  }
+  if(map->links!=n-1)return EINVAL;
+  for(uint32_t v=0;v<n;v++){
+    for(at=v,steps=0;up[at]<n && steps<n;steps++)at=up[at];
+    if(up[at]<n)return EINVAL;
+  }
+  return 0;
 }
 
 static struct mesh_step mesh_piece(uint32_t op,uint32_t peer,uint32_t round,uint64_t first,uint64_t elements,struct mesh_operand operand){
