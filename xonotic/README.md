@@ -17,6 +17,14 @@ publishes every 2.22 ms and spends 0.03 ms of each tick in the collective, while
 bridge ledger the M4's partial arrives a median 1.25 ms before the M5's own, so the M4
 idles for most of each tick. Records: metal-microbench `output_data/restore-20260923-xonotic`.
 
+Measured split, 2026-09-24 (mesh afd40eb): a pair ledger pass at 1408:640 timed each rank's
+own columns (`solve_ms`) at 1.393 µs per column on the M5 and 0.946 µs on the M4, so equal
+finish falls at 832:1216, now the default in `planner/split.json`. The pair re-run at 832:1216
+takes 1.43 ms per tick (M5 publish interval 1.41 ms) against 2.22 ms, with the M4's partial
+arriving a median 0.03 ms before the M5's instead of 1.25 ms; both ranks again end with the
+objective split `[0, 332, 148, 0, 0]` and 353,792 switches. Records: metal-microbench
+`output_data/native-20260923-xonotic-{ledger,split}`.
+
 The old persistent-policy runtime, learner/responder, curriculum, frame runtime and
 distributed launcher scripts were removed; they are not alternative entry points.
 
