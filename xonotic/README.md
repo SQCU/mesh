@@ -9,6 +9,14 @@ from the repository root:
 
     MESH_REGION=<region> PYTHONPATH=xonotic:rdma bin/mesh-python -B -m planner.plan [ticks] [bots]
 
+Pair run, 2026-09-23 (mesh aa36138; bridges on /xonrdma; M5 rank 0 with 1408 of each
+expert's 2048 columns, M4 rank 1 with 640; 2000 ticks of 480 bots, width 256, 8 experts):
+both ranks completed 960,000 bot plans and ended with the same objective split
+`[0, 332, 148, 0, 0]` and 353,792 switches. The M5's share is the critical path: it
+publishes every 2.22 ms and spends 0.03 ms of each tick in the collective, while in the
+bridge ledger the M4's partial arrives a median 1.25 ms before the M5's own, so the M4
+idles for most of each tick. Records: metal-microbench `output_data/restore-20260923-xonotic`.
+
 The old persistent-policy runtime, learner/responder, curriculum, frame runtime and
 distributed launcher scripts were removed; they are not alternative entry points.
 
