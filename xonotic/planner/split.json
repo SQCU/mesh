@@ -1,4 +1,11 @@
 {
  "columns": [832, 1216],
- "source": "equal-finish split from one pair ledger pass at 1408:640 (mesh 978c67e, 2000 ticks x 480 bots): solve_ms M5 1.961 over 1408 columns = 1.393 us/column, M4 0.606 over 640 = 0.946 us/column; replicated remainder 0.182 / 0.186 ms per tick; rank 1's partial led rank 0's publish by a median 1.244 ms. Both ranks predicted at 1.34 ms solve+remainder; rounded to 64 columns. Record: metal-microbench output_data/native-20260923-xonotic-ledger"
+ "grain": 16,
+ "low": [16, 16],
+ "prior": [[0.182, 1.393e-3, 0.033124, 4.8512e-7], [0.186, 0.946e-3, 0.034596, 2.2373e-7]],
+ "floor": [2.67e-5, 6.0e-5],
+ "forget": 0.99,
+ "step": 0.5,
+ "warmup": 4,
+ "source": "columns is config_t0, which rdma/allocate.py moves every tick after the first `warmup` ticks by `grain` columns, never below `low`, with forgetting factor `forget` and step `step`. It is the equal-finish split from one pair ledger pass at 1408:640 (mesh 978c67e, 2000 ticks x 480 bots): solve_ms M5 1.961 over 1408 columns = 1.393 us/column, M4 0.606 over 640 = 0.946 us/column; replicated remainder 0.182 / 0.186 ms per tick; rank 1's partial led rank 0's publish by a median 1.244 ms. Both ranks predicted at 1.34 ms solve+remainder; rounded to 64 columns. Record: metal-microbench output_data/native-20260923-xonotic-ledger. prior per rank is [a ms, b ms per column, var a = a^2, var b = (b/2)^2] from that pass. floor is ms per column: a column's 16384 B of weights (8 experts x 256 x 4 B of up and as much of down) over the published 614 / 273 GB/s; no CPU compute peak is recorded (metal-microbench docs/hardware_roofline_measurements_2026-09-05.json), so the memory term stands alone."
 }
