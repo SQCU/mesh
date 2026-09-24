@@ -9,9 +9,10 @@ back, so the next call's configuration is one more value in the dataflow: no roo
 
 1. Recursive least squares with forgetting factor lambda on theta_i = (a_i, b_i), regressor
    u = (1, x_i) [Haykin 2014, Table 10.1]: pi = P u, k = pi / (lambda + u'pi),
-   theta += k (t_i - theta'u), P = (P - k pi') / lambda.  trace(P) is held at its prior's
-   [Goodwin & Sin 1984, constant trace], so P cannot wind up while a share stands still.  b_i is
-   floored at the roofline time per unit.
+   theta += k (t_i - theta'u), P = (P - k pi') / lambda.  trace(P) is capped at its prior's, the
+   bound the constant-trace modification holds it at [Goodwin & Sin 1984], so P cannot wind up
+   while a share stands still and still shrinks under excitation.  b_i is floored at the
+   roofline time per unit.
 2. g_i = t_i + b_i (kappa' s_i - kappa c_i): the observed time moved along the model to the
    continuous iterate s at the next call's scale kappa'.  It is the gradient of
    F(s) = sum_i integral t_i, whose minimum on sum s = W is equal finish [Beckmann 1956]; at
