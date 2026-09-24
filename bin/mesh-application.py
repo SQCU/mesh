@@ -8,6 +8,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tarfile
 
 SSH = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8']
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,9 @@ def command(values, host=None, **kwargs):
 
 # ../design/algorithm-sources.md#programtensor
 def checkout(root, host=None):
+    if not host and not (Path(root) / '.git').exists():
+        archive = Path(root) / 'source.tgz'
+        return tarfile.open(archive).pax_headers.get('comment') if archive.exists() else None
     dirty = command(['git', '-C', root, 'status', '--porcelain'], host, capture_output=True, text=True).stdout.strip()
     if dirty:
         raise RuntimeError(f'{host or "local"}:{root}: commit source changes before deployment')
