@@ -1,11 +1,16 @@
 # Xonotic on mesh
 
-The retained numerical caller is `planner/plan.py`, which uses canonical
-`mesh.Program.kernel_call` and the existing symbolic Metal operator compiler.
-Application framing uses `solver/frames.py` and `solver/xonwire.py`.
-The old persistent-policy runtime, learner/responder, curriculum and distributed
-launcher scripts were removed; they are not alternative entry points.
-See [caller migration](../design/caller-migration.md) for current scope.
+The game's numerical caller is `planner/plan.py`, the routed-expert bot planner. Each
+rank holds a block of every expert's columns (Megatron-LM tensor parallelism), and one
+all-reduce per tick from `rdma/mesh-collective.h` completes the expert output over an
+explicit link map (`examples/links-pair.conf` for the pair). `rdma/mesh.py` binds it
+(`AllReduce`). With the bridges up on the region, run the same command on every node
+from the repository root:
+
+    MESH_REGION=<region> PYTHONPATH=xonotic:rdma bin/mesh-python -B -m planner.plan [ticks] [bots]
+
+The old persistent-policy runtime, learner/responder, curriculum, frame runtime and
+distributed launcher scripts were removed; they are not alternative entry points.
 
 The game engine, payload, rendering and telemetry/viewer source remain.
 Build the payload from this directory with `payload/build.sh`.
