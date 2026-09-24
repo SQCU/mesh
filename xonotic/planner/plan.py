@@ -14,6 +14,7 @@ TEAMS = 5
 EXPERTS = 8
 FF = 2048
 SEED = 20260828
+SPLIT = Path(__file__).with_name('split.json')
 
 
 # Megatron-LM tensor parallelism (Shoeybi et al. 2019) over the planner's routed experts: rank r
@@ -44,24 +45,29 @@ def main():
     parser.add_argument('ticks', type=int, nargs='?', default=2000)
     parser.add_argument('bots', type=int, nargs='?', default=480)
     parser.add_argument('--width', type=int, default=256)
-    parser.add_argument('--columns', default='1408,640', help="each rank's expert columns, in rank order")
+    parser.add_argument('--columns', default=','.join(map(str, json.loads(SPLIT.read_text())['columns'])),
+                        help="each rank's expert columns, in rank order (default: split.json)")
     parser.add_argument('--links', default=str(ROOT / 'examples/links-pair.conf'))
     parser.add_argument('--depth', type=int, default=4)
     parser.add_argument('--seconds', type=float, default=150)
     args = parser.parse_args()
     columns = [int(value) for value in args.columns.split(',')]
+    if sum(columns) != FF:
+        parser.error(f'--columns must sum to {FF}')
     deadline = time.monotonic() + args.seconds
     reduce = AllReduce((args.bots, args.width), np.float32, args.links, args.ticks, args.depth)
     route, up, down, objective = model(args.width, columns, reduce.rank)
     positions = np.random.default_rng(7).standard_normal((args.bots, args.width)).astype(np.float32) * .1
     positions[:, 0] = np.arange(args.bots)
     objectives = np.full(args.bots, -1)
-    switches = collective = 0
+    switches = collective = solving = 0
     print(json.dumps({'event': 'planner_started', 'rank': reduce.rank, 'bots': args.bots, 'width': args.width,
                       'experts': EXPERTS, 'columns': columns[reduce.rank], 'steps': len(reduce.steps)}), flush=True)
     start = time.monotonic()
     for tick in range(args.ticks):
+        began = time.monotonic()
         solve(positions, route, up, down, reduce.slot(tick))
+        solving += time.monotonic() - began
         began = time.monotonic()
         experts = reduce(tick, deadline)
         collective += time.monotonic() - began
@@ -74,7 +80,8 @@ def main():
     reduce.close()
     print(json.dumps({'event': 'planner_finished', 'rank': reduce.rank, 'ticks': args.ticks,
                       'bot_plans': args.ticks * args.bots, 'seconds': elapsed, 'tick_ms': 1e3 * elapsed / args.ticks,
-                      'collective_ms': 1e3 * collective / args.ticks, 'switches': switches,
+                      'solve_ms': 1e3 * solving / args.ticks, 'collective_ms': 1e3 * collective / args.ticks,
+                      'switches': switches,
                       'objective_split': np.bincount(objectives, minlength=TEAMS).tolist()}), flush=True)
 
 
