@@ -6,6 +6,7 @@
 #include <sys/sysctl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -275,6 +276,14 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+UINT64_C(30000000000);
   int f=oob(provider,m,client);
   if(f<0)return -1;
+  /* A peer host that dies silently (power, panic) becomes an EOF on this control socket within
+     idle + interval x count seconds, a link event (mesh-flow.c link_run); UC queue pairs report
+     nothing (docs/elastic.md §1 in metal-microbench). */
+  int on=1,idle=5,interval=1,count=3;
+  if(setsockopt(f,SOL_SOCKET,SO_KEEPALIVE,&on,sizeof on) || setsockopt(f,IPPROTO_TCP,TCP_KEEPALIVE,&idle,sizeof idle) ||
+     setsockopt(f,IPPROTO_TCP,TCP_KEEPINTVL,&interval,sizeof interval) || setsockopt(f,IPPROTO_TCP,TCP_KEEPCNT,&count,sizeof count)){
+    int error=errno;close(f);errno=error;return -1;
+  }
   uint32_t frame_capacity=provider->device->frame_capacity;
   /* design/prepared-machine.md#M11 */
   provider->queues=calloc((size_t)qps,sizeof *provider->queues);
