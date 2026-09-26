@@ -18,11 +18,15 @@ back, so the next call's configuration is one more value in the dataflow: no roo
    F(s) = sum_i integral t_i, whose minimum on sum s = W is equal finish [Beckmann 1956]; at
    kappa' = kappa and s = c it is the observed time itself.
 3. A projected online gradient step preconditioned by b [Zinkevich 2003]:
-   s'_i = s_i - eta (g_i - mu) / (b_i kappa'), mu keeping sum s' = W.  A rank that falls below
-   its lower bound is fixed there and mu re-solved [Bitran & Hax 1981].  eta = 1 is the
-   equal-finish solve.
+   s'_i = s_i - eta (g_i - mu) / (b_i kappa'), mu keeping sum s' = W.  It is equal_finish below
+   with a_i = eta g_i - b_i kappa' s_i and T = eta mu; eta = 1 is the equal-finish solve.
 4. c_i = low_i + g floor((s'_i - low_i) / g), the leftover grains to the largest remainders,
    ties to the lower rank.  s' stays the iterate; c is the next call's operand and regressor.
+
+equal_finish(W, g, low, high, a, b) is steps 3-4 alone: rank i finishing at a_i + b_i s_i, the
+shares s_i = (T - a_i) / b_i with sum s = W; ranks outside their bounds are held at them and T
+re-solved, the side with the larger total violation first [Bitran & Hax 1981].  The mesh's
+programs take config_t0 from it (metal-microbench tools/mesh/programs.py).
 
 O(n) plain floats in a fixed order: identical inputs give identical shares on every rank.
 """
@@ -71,22 +75,35 @@ class Allocator:
             b = max(self.b[i], self.floor[i])
             g.append(times[i] + b * (next_scale * self.s[i] - x))
             w.append(1.0 / (b * next_scale))
-        free = [True] * n
-        while True:
-            held = sum(self.low[i] for i in range(n) if not free[i])
-            mu = ((self.total - held - sum(self.s[i] for i in range(n) if free[i])
-                   + eta * sum(w[i] * g[i] for i in range(n) if free[i]))
-                  / (eta * sum(w[i] for i in range(n) if free[i])))
-            new = [self.s[i] - eta * w[i] * (g[i] - mu) if free[i] else float(self.low[i]) for i in range(n)]
-            below = [i for i in range(n) if free[i] and new[i] < self.low[i]]
-            if not below:
-                break
-            for i in below:
-                free[i] = False
-        self.s = new
-        c = [self.low[i] + self.grain * math.floor((new[i] - self.low[i]) / self.grain) for i in range(n)]
-        order = sorted(range(n), key=lambda i: (c[i] - new[i], i))
-        for j in range((self.total - sum(c)) // self.grain):
-            c[order[j % n]] += self.grain
+        B = [1.0 / x for x in w]
+        c, self.s, _ = equal_finish(self.total, self.grain, self.low, [math.inf] * n,
+                                    [eta * g[i] - B[i] * self.s[i] for i in range(n)], B)
         self.shares = c
         return list(c)
+
+
+def equal_finish(total, grain, low, high, a, b):
+    """Shares of `total` units at `grain` over ranks finishing at a_i + b_i s_i, within
+    [low_i, high_i] (multiples of grain): (c, s, T), c the integer shares, s the continuous ones
+    and T their common finish (steps 3-4 above)."""
+    n, held = len(a), {}
+    while True:
+        free = [i for i in range(n) if i not in held]
+        T = ((total - sum(held.values()) + sum(a[i] / b[i] for i in free)) / sum(1.0 / b[i] for i in free)
+             if free else math.inf)
+        s = [held[i] if i in held else (T - a[i]) / b[i] for i in range(n)]
+        below = [i for i in free if s[i] < low[i]]
+        above = [i for i in free if s[i] > high[i]]
+        if not below and not above:
+            break
+        if sum(low[i] - s[i] for i in below) >= sum(s[i] - high[i] for i in above):
+            held.update((i, float(low[i])) for i in below)
+        else:
+            held.update((i, float(high[i])) for i in above)
+    c = [low[i] + grain * math.floor((s[i] - low[i]) / grain) for i in range(n)]
+    left = (total - sum(c)) // grain  # fewer than n: each floor drops less than one grain
+    for i in sorted(range(n), key=lambda i: (c[i] - s[i], i)):
+        if left and c[i] + grain <= high[i]:
+            c[i] += grain
+            left -= 1
+    return c, s, T
