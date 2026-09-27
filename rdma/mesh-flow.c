@@ -57,6 +57,8 @@ struct receive_ring {
   size_t count,posted;
   int64_t completed;
   uint32_t outstanding,capacity,span,blocked;
+  /* the census: records landed, their bytes, records a variable transfer did not send */
+  uint64_t landed,bytes,skipped;
 };
 /* A queue pair's SEND gate: the frames posted (the send thread's) and retired (the completion
    thread's, from each signaled request's count), the queue's capacity, and the frames posted since
@@ -64,7 +66,8 @@ struct receive_ring {
 #define MESH_GATE_MASK ((UINT64_C(1)<<48)-1)
 struct send_gate {
   _Alignas(128) _Atomic uint64_t retired;
-  _Alignas(128) uint64_t posted;
+  uint64_t completions;
+  _Alignas(128) uint64_t posted,requests;
   uint32_t unsignaled,capacity;
 };
 /* A SEND stream's progress: its current cell, the next request of that cell's chain and the requests
@@ -195,7 +198,7 @@ static int ring_advance(struct mesh_link *link,struct receive_ring *ring){
    their lengths, the rest never arrive: their words complete now and the last chunk sent also
    completes the final chunk's word, the one a reader of the operand waits on.  Bounded by the
    transfer's prepared chunks, never by the value on the wire. */
-static void receive_resolve(struct prepared_receive *head){
+static uint32_t receive_resolve(struct prepared_receive *head){
   uint64_t bytes=atomic_load_explicit((_Atomic uint64_t *)(uintptr_t)head->span.addr,memory_order_acquire),block=head->block;
   uint32_t n=head->chunks,k=bytes<=block?1:(uint32_t)((bytes+block-1)/block);
   if(k>n)k=n;
@@ -210,6 +213,7 @@ static void receive_resolve(struct prepared_receive *head){
     }
   }
   if(k<n)head[k-1].also=head[n-1].input;
+  return n-k;
 }
 
 /* design/algorithm-sources.md#programcopy */
@@ -398,7 +402,10 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
       if(stream->remaining==1 && stream->last && stream->last<request->sg_list->length)request->sg_list->length=(uint32_t)stream->last;
       uint32_t frames=(request->sg_list->length+4095)/4096;
       uint64_t retired=atomic_load_explicit(&gate->retired,memory_order_acquire);
-      if(((gate->posted-retired)&MESH_GATE_MASK)+frames>gate->capacity)break;
+      if(((gate->posted-retired)&MESH_GATE_MASK)+frames>gate->capacity){
+        if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
+        break;
+      }
       struct ibv_send_wr *following=request->next;
       request->next=NULL;
       gate->posted+=frames;
@@ -408,7 +415,7 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
       } else gate->unsignaled+=frames;
       int error=post((struct ibv_qp *)cell->pair,request,&bad);
       if(error){link_error(link,error<0?-error:error,1);return NULL;}
-      stream->next=following;stream->remaining--;
+      stream->next=following;stream->remaining--;gate->requests++;
     }
     if(traced && observed && link->traced[MESH_SEND]<capacity)
       trace[link->traced[MESH_SEND]++]=(struct mesh_trace){(uintptr_t)cell,observed,posting,clock_gettime_nsec_np(CLOCK_UPTIME_RAW)};
@@ -450,13 +457,15 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
     if((uint32_t)status_opcode){link_error(link,(uint32_t)status_opcode,2);return NULL;}
     if(!((status_opcode>>32)&IBV_WC_RECV)){
       uint64_t identity=completion->wr_id;
+      link->gates[identity>>48].completions++;
       atomic_store_explicit(&link->gates[identity>>48].retired,identity&MESH_GATE_MASK,memory_order_release);
       continue;
     }
     uint64_t polled=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
     struct prepared_receive *record=(void *)(uintptr_t)completion->wr_id;
     struct receive_ring *ring=link->rings+record->queue;
-    if(record->chunks)receive_resolve(record);
+    if(record->chunks)ring->skipped+=receive_resolve(record);
+    ring->landed++;ring->bytes+=completion->byte_len;
     atomic_store_explicit(record->input,record->argument,memory_order_release);
     if(record->also)atomic_store_explicit(record->also,record->argument,memory_order_release);
     uint64_t published=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
@@ -497,6 +506,14 @@ static void link_close(struct mesh_link *link,int *control){
     }
     free(link->trace[d]);link->trace[d]=NULL;link->traced[d]=0;link->trace_capacity[d]=0;
   }
+  /* the link's census: each queue pair's requests and frames sent and retired by the send completions
+     it took, and its ring's records landed, their bytes and the records variable transfers skipped */
+  for(int q=0;link->gates && link->rings && q<link->qps;q++)
+    fprintf(stderr,"link %u census queue=%d requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu skipped=%llu\n",
+      link->index,q,(unsigned long long)link->gates[q].requests,(unsigned long long)link->gates[q].posted,
+      (unsigned long long)atomic_load(&link->gates[q].retired),(unsigned long long)link->gates[q].completions,
+      link->rings[q].count,link->rings[q].posted,(unsigned long long)link->rings[q].landed,
+      (unsigned long long)link->rings[q].bytes,(unsigned long long)link->rings[q].skipped);
   if(*control>=0){close(*control);*control=-1;}
   while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);
   if(link->provider.listener>=0){close(link->provider.listener);link->provider.listener=-1;}
