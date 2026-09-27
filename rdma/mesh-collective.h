@@ -42,11 +42,10 @@ uint32_t mesh_allreduce_plan(const struct mesh_link_map *,uint32_t rank,struct m
    binomial tree's [Thakur, Rabenseifner & Gropp 2005] (the rank bits' pairs, a mesh's).  A partial
    combination a node sends on to be combined further (a ring's reduce-scatter after its first round,
    a tree's interior node going up) is typed at `accumulator_bytes` an element (0: the operand's):
-   half partials summed in float cross as float.  `fanin` bounds the receives one step of a node
-   combines (0: none; checked by mesh_collective_choose). */
+   half partials summed in float cross as float.  A step combines any number of receives. */
 enum { MESH_ALLREDUCE, MESH_BROADCAST };
 enum { MESH_DIRECT, MESH_RING, MESH_TREE, MESH_BINOMIAL, MESH_UNAVAILABLE };
-struct mesh_collective { uint32_t what,how,root,contributors,accumulator_bytes,fanin; };
+struct mesh_collective { uint32_t what,how,root,contributors,accumulator_bytes; };
 #define MESH_COLLECTIVE_STEPS(nodes) (4*(nodes))
 /* The rank's steps in its dependency order (at most MESH_COLLECTIVE_STEPS), each SEND's piece typed
    as the receiving step's; 0 where the map lacks a pair the algorithm uses, the map has fewer than
@@ -57,7 +56,7 @@ uint32_t mesh_collective_plan(const struct mesh_link_map *,uint32_t rank,struct 
    negative where a node has no plan, a receive has no SEND of its piece, or the schedule stops. */
 double mesh_collective_time(const struct mesh_link_map *,struct mesh_collective,struct mesh_operand,double alpha,double beta);
 /* `c` with `how` (and an all-reduce tree's `root`) of least time among the algorithms of the bit set
-   c.how (0: every one) that the map carries within `fanin`; how MESH_UNAVAILABLE where none. */
+   c.how (0: every one) that the map carries; how MESH_UNAVAILABLE where none. */
 struct mesh_collective mesh_collective_choose(const struct mesh_link_map *,struct mesh_collective c,struct mesh_operand,double alpha,double beta);
 /* Binds every step onto the existing SEND/RECV transport (mesh_transfer_bind).  `operand` is the
    whole operand's section; `received` holds one section per REDUCE step, in step order, each

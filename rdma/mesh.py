@@ -36,8 +36,8 @@ class LinkMap(C.Structure):
 class Collective(C.Structure):
     """mesh-collective.h struct mesh_collective: what (ALLREDUCE, BROADCAST), how (an algorithm; on
     mesh_collective_choose's entry the bit set of the algorithms it may take, 0 every one), root,
-    contributors (a bit set of nodes, 0 every one), accumulator_bytes, fanin."""
-    _fields_ = [(k, U) for k in ('what', 'how', 'root', 'contributors', 'accumulator_bytes', 'fanin')]
+    contributors (a bit set of nodes, 0 every one), accumulator_bytes."""
+    _fields_ = [(k, U) for k in ('what', 'how', 'root', 'contributors', 'accumulator_bytes')]
 
 
 SEND, REDUCE, COPY = range(3)

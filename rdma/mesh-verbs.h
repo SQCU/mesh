@@ -23,9 +23,13 @@
 #define QD 4095
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 /* tbt_post_recv loads only the low 32 address bits of an SGE, so no registration may cross a 4 GiB
-   virtual-address boundary.  The window is mapped at a bank-aligned base and is required to fit in
-   one bank, which makes every region cut interior to that bank and a straddle impossible. */
+   virtual-address boundary.  The window is mapped at a bank-aligned base and cut into regions of
+   MESH_REGION bytes, which divides the bank: every region lies inside one bank, however many banks
+   the window spans.  1 GiB is the registration the provider takes (the RCA's 32 GiB and 6 GiB windows
+   in 1 GiB regions; its advertised max_mr_size, 16.4 MB, is not enforced), so max_mr regions of it
+   are the device's registrable memory. */
 #define MESH_BANK ((size_t)1<<32)
+#define MESH_REGION ((size_t)1<<30)
 struct mesh_wire { char *data; size_t length; };
 struct mesh_device {
   const char *name;
@@ -72,7 +76,6 @@ struct mesh_verbs {
 static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
   wire->length=(size_t)m->wire_pages*m->pgsz;
   wire->data=NULL;
-  if(wire->length>MESH_BANK){errno=ENOMEM;return -1;}
   char *reserved=mmap(NULL,wire->length+MESH_BANK,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE,-1,0);
   if(reserved==MAP_FAILED)return -1;
   char *base=(char *)(((uintptr_t)reserved+MESH_BANK-1)&~(uintptr_t)(MESH_BANK-1));
@@ -230,32 +233,42 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
   if(!device->domain)device->domain=ibv_alloc_pd(device->context);
   if(!device->domain){error=errno;goto done;}
   /* design/prepared-machine.md#M09 */
-  /* Registered memory is the declared window, not the arena: it is what an SGE names, it is wired
-     1:1 by the provider, and it is the only thing the MR table has to cover.  The addressable arena
-     grows without it. */
+  /* Registered memory is the declared window (by default the whole arena): what an SGE names, wired
+     1:1 by the provider, in regions of MESH_REGION bytes.  A provider that refuses a region that size
+     is registered in regions of its advertised max_mr_size instead, at most max_mr of them. */
   size_t stride=(size_t)m->block*m->pgsz,span=wire->length;
-  size_t extent=(capabilities.max_mr_size<span?capabilities.max_mr_size:span)/stride*stride;
-  size_t regions=extent?(span+extent-1)/extent:0;
-  /* extent is a whole number of blocks and the window is one bank, so no region cut falls inside a
-     block and no region crosses a 4 GiB boundary: wire_span's divide is the only addressing form. */
-  if(!extent || regions>(size_t)capabilities.max_mr || span>MESH_BANK ||
-     ((uintptr_t)wire->data&(MESH_BANK-1))+span>MESH_BANK){
-    error=ENOMEM;
-    fprintf(stderr,"register %s window=%zu extent=%zu regions=%zu base=%p max_mr_size=%llu max_mr=%d\n",
-      device->name,span,extent,regions,(void *)wire->data,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr);
-    goto done;
-  }
-  if(!device->regions)device->regions=calloc(regions,sizeof *device->regions);
-  if(!device->regions){error=ENOMEM;goto done;}
-  while(device->region_count<regions){
-    size_t offset=(size_t)device->region_count*extent,end=offset+extent;
-    device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
-    if(!device->regions[device->region_count]){
-      error=errno;fprintf(stderr,"register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
-        device->name,offset,(end<span?end:span)-offset,span,extent,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));goto done;
+  if(!device->extent)device->extent=(MESH_REGION<span?MESH_REGION:(span+stride-1))/stride*stride;
+  for(;;){
+    size_t extent=device->extent,regions=extent?(span+extent-1)/extent:0;
+    if(!extent || regions>(size_t)capabilities.max_mr || (MESH_BANK%extent && span>MESH_BANK)){
+      error=ENOMEM;
+      fprintf(stderr,"register %s window=%zu extent=%zu regions=%zu base=%p max_mr_size=%llu max_mr=%d\n",
+        device->name,span,extent,regions,(void *)wire->data,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr);
+      goto done;
     }
-    device->region_count++;
+    if(!device->regions)device->regions=calloc(regions,sizeof *device->regions);
+    if(!device->regions){error=ENOMEM;goto done;}
+    int refused=0;
+    while(device->region_count<regions){
+      size_t offset=(size_t)device->region_count*extent,end=offset+extent;
+      device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
+      if(!device->regions[device->region_count]){
+        error=errno;fprintf(stderr,"register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
+          device->name,offset,(end<span?end:span)-offset,span,extent,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));
+        refused=1;break;
+      }
+      device->region_count++;
+    }
+    if(!refused)break;
+    size_t fallback=capabilities.max_mr_size/stride*stride;
+    if(!fallback || fallback>=extent)goto done;
+    while(device->region_count){
+      if(ibv_dereg_mr(device->regions[device->region_count-1]))goto done;
+      device->region_count--;
+    }
+    free(device->regions);device->regions=NULL;device->extent=fallback;error=0;
   }
+  size_t extent=device->extent,regions=device->region_count;
   device->wire=wire->data;device->extent=extent;device->payload=stride;
   fprintf(stderr,"register %s window=%zu bytes extent=%zu regions=%zu arena=%llu bytes\n",
     device->name,span,extent,regions,(unsigned long long)mesh_arena_pages(m)*(uint64_t)m->pgsz);

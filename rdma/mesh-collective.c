@@ -287,9 +287,10 @@ uint32_t mesh_allreduce_plan(const struct mesh_link_map *map,uint32_t rank,struc
    reached it and its port is free, and arrives alpha after its bytes x beta; a REDUCE or COPY
    waits for its SEND's arrival and its port.  The time is the last node's; negative where a node
    has no plan, a receive has no matching SEND of the same piece (a mismatched schedule), the
-   schedule stops (a deadlock), or a step combines more than `fanin` receives (when checked). */
+   schedule stops (a deadlock).  A step combines any number of receives: a kernel past its
+   buffer slots chains its combine (metal-microbench decode_crossings.swift). */
 static double mesh_collective_evaluate(const struct mesh_link_map *map,struct mesh_collective c,struct mesh_operand operand,
-  double alpha,double beta,int fanin){
+  double alpha,double beta){
   const uint32_t n=map->nodes,capacity=MESH_COLLECTIVE_STEPS(n);
   if(n<2)return 0;
   if(n>MESH_LINK_MAP_NODES)return -1;
@@ -300,12 +301,6 @@ static double mesh_collective_evaluate(const struct mesh_link_map *map,struct me
   if(!steps||!arrival)goto done;
   for(uint32_t r=0;r<n;r++){
     if(!(count[r]=mesh_collective_plan(map,r,c,operand,steps+(size_t)r*capacity)))goto done;
-    if(fanin && c.fanin)for(uint32_t i=0,j;i<count[r];i=j){
-      uint32_t receives=0;
-      for(j=i;j<count[r] && steps[(size_t)r*capacity+j].round==steps[(size_t)r*capacity+i].round;j++)
-        receives+=steps[(size_t)r*capacity+j].op!=MESH_STEP_SEND;
-      if(receives>c.fanin)goto done;
-    }
   }
   for(int progress=1;progress;){
     progress=0;
@@ -348,12 +343,12 @@ done:
 }
 
 double mesh_collective_time(const struct mesh_link_map *map,struct mesh_collective c,struct mesh_operand operand,double alpha,double beta){
-  return mesh_collective_evaluate(map,c,operand,alpha,beta,0);
+  return mesh_collective_evaluate(map,c,operand,alpha,beta);
 }
 
 /* The algorithm of least time for this operand on this map among those of the bit set template.how
    (0: every one): the direct exchange, the ring, the spanning tree and the binomial tree, each where
-   the map carries it and its steps combine at most `fanin` receives; an all-reduce's trees from
+   the map carries it; an all-reduce's trees from
    every root (every node takes the result).  Ties go to the earlier in that order, then the lower
    root. */
 struct mesh_collective mesh_collective_choose(const struct mesh_link_map *map,struct mesh_collective template,struct mesh_operand operand,double alpha,double beta){
@@ -366,7 +361,7 @@ struct mesh_collective mesh_collective_choose(const struct mesh_link_map *map,st
     for(uint32_t root=any?0:template.root;root<(any?map->nodes:template.root+1);root++){
       struct mesh_collective c=template;
       c.how=how;c.root=root;
-      const double t=mesh_collective_evaluate(map,c,operand,alpha,beta,1);
+      const double t=mesh_collective_evaluate(map,c,operand,alpha,beta);
       if(t>=0 && t<least){least=t;best=c;}
     }
   }
@@ -409,9 +404,9 @@ int mesh_host_inputs(struct mesh_ctx *context){
     for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
       struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
       for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
-        frames[p]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count;
+        frames[p]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*mesh_transfer_active(in+i,tx->invocations);
     }
-    words+=frames[p]*tx->invocations;
+    words+=frames[p];
   }
   struct mesh_section input,stop;
   int status=mesh_section_create(context,sizeof(uint64_t)*(words?words:1),1,0,&input);
@@ -423,19 +418,19 @@ int mesh_host_inputs(struct mesh_ctx *context){
   for(uint32_t p=0;p<m->links;p++){
     struct mesh_tx *tx=mesh_events(m,mesh_notice_queue(m,context->client,p));
     tx->cancel=(uintptr_t)cancel-(uintptr_t)m;
-    cancel->ranges[p]=(struct mesh_cancel_range){.offset=(uintptr_t)word-(uintptr_t)m,.count=frames[p]*tx->invocations};
+    cancel->ranges[p]=(struct mesh_cancel_range){.offset=(uintptr_t)word-(uintptr_t)m,.count=frames[p]};
     for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
       struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
       for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++){
         uint32_t chunks=mesh_row_chunks(m,in[i].local_row,in[i].bytes);
         for(uint32_t s=0;s<in[i].count;s++)for(uint32_t k=0;k<chunks;k++){
           struct mesh_publication *delivery=mesh_publication_at(m,in[i].local_row+s*in[i].stride+k);
-          delivery->device_input=(uintptr_t)(word+in[i].first+s*chunks+k)-(uintptr_t)m;
-          delivery->device_stride=sizeof(uint64_t)*frames[p];
+          delivery->device_input=(uintptr_t)(word+in[i].first+(uint64_t)s*chunks+k)-(uintptr_t)m;
+          delivery->device_stride=sizeof(uint64_t)*(uint64_t)in[i].count*chunks;
         }
       }
     }
-    word+=frames[p]*tx->invocations;
+    word+=frames[p];
   }
   return 0;
 }
