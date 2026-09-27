@@ -6,10 +6,7 @@
      <kind> <nodes>             kind is mesh, ring or tree
      <a> <b>                    one link per line; '#' starts a comment line
    ring: b follows a around the ring.  tree: a is b's parent; the root is nobody's child.  mesh: every pair is linked.
-   The kind picks mesh_allreduce_plan's all-reduce: mesh -> direct exchange, ring -> reduce-scatter +
-   all-gather, tree (a star is a tree) -> reduce to the root + broadcast.  mesh_collective_choose
-   picks among every algorithm whose links the map has, by the operand's size.  Nothing is inferred
-   from the links. */
+   mesh_collective_choose picks among every algorithm whose links the map has, by the operand's size. */
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE };
 /* Any number of nodes and links: `link` is the links' storage, the caller's, or mesh_link_map_read's
    (freed by mesh_link_map_free). */
@@ -19,7 +16,7 @@ void mesh_link_map_free(struct mesh_link_map *);
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
 struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
-/* One step of one rank's all-reduce, in that rank's dependency order.
+/* One step of one rank's collective, in that rank's dependency order.
    SEND   publishes operand elements [first, first+piece.elements) to peer.
    REDUCE receives that typed piece from peer into the next caller-supplied received section;
           the caller's supplied reduction adds it into the operand at `first` before any later
@@ -30,10 +27,6 @@ struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
    round  is the step's position in the algorithm; sender and receiver agree on it. */
 enum { MESH_STEP_SEND, MESH_STEP_REDUCE, MESH_STEP_COPY };
 struct mesh_step { uint32_t op,peer,round,padding; uint64_t first; struct mesh_operand piece; };
-#define MESH_ALLREDUCE_STEPS(nodes) (4*(nodes))
-
-/* The rank's steps for one all-reduce of `operand` over `map`, by the map's kind; returns the step count. */
-uint32_t mesh_allreduce_plan(const struct mesh_link_map *,uint32_t rank,struct mesh_operand,struct mesh_step *steps);
 
 /* A collective of one typed operand among a map's nodes (metal-microbench docs/kernels.md
    Collectives).  what: MESH_ALLREDUCE combines the contributions of the nodes of the bit set
@@ -60,23 +53,4 @@ double mesh_collective_time(const struct mesh_link_map *,struct mesh_collective,
 /* `c` with `how` (and an all-reduce tree's `root`) of least time among the algorithms of the bit set
    c.how (0: every one) that the map carries; how MESH_UNAVAILABLE where none. */
 struct mesh_collective mesh_collective_choose(const struct mesh_link_map *,struct mesh_collective c,struct mesh_operand,double alpha,double beta);
-/* Binds every step onto the existing SEND/RECV transport (mesh_transfer_bind).  `operand` is the
-   whole operand's section; `received` holds one section per REDUCE step, in step order, each
-   sized for that step's piece.  identity+round is the transfer identity on both ends; a ring
-   uses identities [identity, identity+2*(nodes-1)), a tree two, a mesh one.  `pieces`, when
-   given, receives every step's bound section in step order: what a SEND publishes and where a
-   REDUCE or COPY arrives. */
-int mesh_allreduce_bind(struct mesh_ctx *,const struct mesh_step *steps,uint32_t count,uint32_t identity,
-  struct mesh_section operand,const struct mesh_section *received,uint32_t invocations,uint32_t invocation_pages,
-  struct mesh_section *pieces);
-
-/* A host (CPU) program's side of the prepared transfers, as mesh-metal.m is a GPU program's.
-   mesh_host_inputs gives every received chunk one completion word per invocation (M07) and the
-   link's cancellation range (M12); call it between mesh_transfers_prepare and mesh_transfers_start.
-   mesh_host_publish releases invocation t of a bound SEND section.  mesh_host_arrived acquires
-   invocation t of a bound receive section: 0 until it lands, then 1, or UINT64_MAX once its link
-   was cancelled. */
-int mesh_host_inputs(struct mesh_ctx *);
-void mesh_host_publish(struct mesh_ctx *,struct mesh_section,uint32_t invocation);
-uint64_t mesh_host_arrived(struct mesh_ctx *,struct mesh_section,uint32_t invocation);
 #endif

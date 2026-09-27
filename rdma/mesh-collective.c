@@ -292,18 +292,6 @@ uint32_t mesh_collective_plan(const struct mesh_link_map *map,uint32_t rank,stru
   }
 }
 
-/* The kind's all-reduce: a ring map's ring, a tree map's tree from its root (the node nobody's child),
-   a mesh's direct exchange. */
-uint32_t mesh_allreduce_plan(const struct mesh_link_map *map,uint32_t rank,struct mesh_operand operand,struct mesh_step *steps){
-  struct mesh_collective c={.what=MESH_ALLREDUCE,.how=map->kind==MESH_LINKS_RING?MESH_RING:map->kind==MESH_LINKS_TREE?MESH_TREE:MESH_DIRECT};
-  if(map->kind==MESH_LINKS_TREE)
-    for(uint32_t v=0,child;v<map->nodes;v++){
-      for(child=0;child<map->links && map->link[child][1]!=v;child++);
-      if(child==map->links){c.root=v;break;}
-    }
-  return mesh_collective_plan(map,rank,c,operand,steps);
-}
-
 /* Every node's plan, then its time under the alpha-beta model [Hockney 1994] with a node's sends
    sharing its outgoing port and its receives its incoming one, as Thakur, Rabenseifner and Gropp
    cost these algorithms: each node takes its steps in order; a SEND leaves when the node has
@@ -389,90 +377,4 @@ struct mesh_collective mesh_collective_choose(const struct mesh_link_map *map,st
     }
   }
   return best;
-}
-
-/* Each step becomes one prepared transfer, bound exactly as the pair's direct push binds its
-   partials: a section over the typed piece, the peer's channel on queue identity%qps, and the
-   same identity on the sending and the receiving rank. */
-int mesh_allreduce_bind(struct mesh_ctx *context,const struct mesh_step *steps,uint32_t count,uint32_t identity,
-  struct mesh_section operand,const struct mesh_section *received,uint32_t invocations,uint32_t invocation_pages,
-  struct mesh_section *pieces){
-  for(uint32_t i=0,reduced=0;i<count;i++){
-    const struct mesh_step *step=steps+i;
-    struct mesh_section piece;
-    if(step->op==MESH_STEP_REDUCE)piece=received[reduced++];
-    else{
-      int status=mesh_section_slice(context,operand,step->first*step->piece.element_bytes,
-        step->piece.elements*step->piece.element_bytes,invocations,invocation_pages,&piece);
-      if(status)return status;
-    }
-    if(pieces)pieces[i]=piece;
-    uint32_t transfer=identity+step->round;
-    int status=mesh_transfer_bind(context,mesh_peer_channel(context,step->peer,transfer%context->M->qps),
-      step->op==MESH_STEP_SEND?MESH_SEND:MESH_RECEIVE,transfer,piece,piece.pages);
-    if(status)return status;
-  }
-  return 0;
-}
-
-/* The word layout and cancellation ranges of mesh_metal_transport_create, without the Metal
-   buffers: link p's words follow link p-1's, invocation-major, one per received chunk in the
-   frame order mesh_transfers_prepare assigned. */
-int mesh_host_inputs(struct mesh_ctx *context){
-  struct hdr *m=context->M;
-  uint64_t frames[m->links?m->links:1],words=0;
-  for(uint32_t p=0;p<m->links;p++){
-    struct mesh_tx *tx=mesh_events(m,mesh_notice_queue(m,context->client,p));
-    frames[p]=0;
-    for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
-      struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
-        frames[p]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*mesh_transfer_active(in+i,tx->invocations);
-    }
-    words+=frames[p];
-  }
-  struct mesh_section input,stop;
-  int status=mesh_section_create(context,sizeof(uint64_t)*(words?words:1),1,0,&input);
-  if(!status)status=mesh_section_create(context,sizeof(struct mesh_cancellation)+m->links*sizeof(struct mesh_cancel_range),1,0,&stop);
-  if(status)return status;
-  uint64_t *word=mesh_section_address(context,input,0);
-  struct mesh_cancellation *cancel=mesh_section_address(context,stop,0);
-  memset(word,0,input.bytes);memset(cancel,0,stop.bytes);
-  for(uint32_t p=0;p<m->links;p++){
-    struct mesh_tx *tx=mesh_events(m,mesh_notice_queue(m,context->client,p));
-    tx->cancel=(uintptr_t)cancel-(uintptr_t)m;
-    cancel->ranges[p]=(struct mesh_cancel_range){.offset=(uintptr_t)word-(uintptr_t)m,.count=frames[p]};
-    for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
-      struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++){
-        uint32_t chunks=mesh_row_chunks(m,in[i].local_row,in[i].bytes);
-        for(uint32_t s=0;s<in[i].count;s++)for(uint32_t k=0;k<chunks;k++){
-          struct mesh_publication *delivery=mesh_publication_at(m,in[i].local_row+s*in[i].stride+k);
-          delivery->device_input=(uintptr_t)(word+in[i].first+(uint64_t)s*chunks+k)-(uintptr_t)m;
-          delivery->device_stride=sizeof(uint64_t)*(uint64_t)in[i].count*chunks;
-        }
-      }
-    }
-    word+=frames[p];
-  }
-  return 0;
-}
-
-/* What the GPU publication kernel stores (M04/M10): each prepared cell's continuation, into the
-   cell of invocation t, released after the caller's writes to the section. */
-void mesh_host_publish(struct mesh_ctx *context,struct mesh_section section,uint32_t invocation){
-  uint32_t count=mesh_publication_prepare(context->M,section.first,NULL);
-  struct prepared_publication records[count?count:1];
-  mesh_publication_prepare(context->M,section.first,records);
-  for(uint32_t i=0;i<count;i++)
-    atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)(records[i].destination+(uint64_t)invocation*sizeof(struct mesh_send)),
-      records[i].argument,memory_order_release);
-}
-
-/* The last chunk's word, as mesh_metal_receive_prepare reads it: chunks of one receive land in order. */
-uint64_t mesh_host_arrived(struct mesh_ctx *context,struct mesh_section section,uint32_t invocation){
-  struct hdr *m=context->M;
-  struct mesh_publication *delivery=mesh_publication_at(m,section.first+mesh_row_chunks(m,section.first,section.bytes)-1);
-  return atomic_load_explicit((_Atomic uint64_t *)((char *)m+delivery->device_input+(uint64_t)invocation*delivery->device_stride),
-    memory_order_acquire);
 }

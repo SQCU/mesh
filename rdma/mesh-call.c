@@ -78,7 +78,7 @@ static int mesh_transfer_compare(const void *a,const void *b){
    request carries the producer's argument (1: a nonzero ready word); the bridge prepares the chains,
    each cell's successor and the queue gates (mesh-flow.c link_configure).  Each link's completion
    words: every receive transfer's slots and chunks an invocation of its range, transfer by transfer
-   in the same order; the transfer's `first` is its first word (mesh-metal.m, mesh_host_inputs). */
+   in the same order; the transfer's `first` is its first word (mesh-metal.m). */
 int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invocations,uint32_t depth){
   struct hdr *m=context->M;
   if(!slots || slots>mesh_rows(m) || !invocations)return EINVAL;
