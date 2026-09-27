@@ -11,10 +11,15 @@ int mesh_link_map_read(const char *path,struct mesh_link_map *map){
   FILE *file=fopen(path,"r");
   if(!file)return errno;
   char line[128],kind[8]="";
-  uint32_t a,b;
+  uint32_t a,b,capacity=0;
   *map=(struct mesh_link_map){.kind=UINT32_MAX};
   while(fgets(line,sizeof line,file)){
-    if(sscanf(line,"%u %u",&a,&b)==2 && map->links<MESH_LINK_MAP_NODES*(MESH_LINK_MAP_NODES-1)/2){
+    if(sscanf(line,"%u %u",&a,&b)==2){
+      if(map->links==capacity){
+        uint32_t (*grown)[2]=realloc(map->link,(size_t)(capacity=capacity?2*capacity:64)*sizeof *map->link);
+        if(!grown){fclose(file);mesh_link_map_free(map);return ENOMEM;}
+        map->link=grown;
+      }
       map->link[map->links][0]=a;map->link[map->links++][1]=b;
     }else if(map->kind==UINT32_MAX && sscanf(line,"%7s %u",kind,&a)==2)
       for(uint32_t k=0;k<3;k++)if(!strcmp(kind,kinds[k])){map->kind=k;map->nodes=a;}
@@ -23,25 +28,41 @@ int mesh_link_map_read(const char *path,struct mesh_link_map *map){
   /* Refuse a map its algorithm cannot run, instead of indexing past the planner's arrays or
      walking a broken ring forever: every node < nodes and at most one link into it; a ring is one
      cycle through every node; a tree has nodes-1 links and every node reaches the root. */
-  uint32_t n=map->nodes,up[MESH_LINK_MAP_NODES],at,steps;
-  if(map->kind==UINT32_MAX || !n || n>MESH_LINK_MAP_NODES)return EINVAL;
+  uint32_t n=map->nodes,at,steps;
+  if(map->kind==UINT32_MAX || !n)return EINVAL;
   if(map->kind==MESH_LINKS_MESH)return 0;
+  uint32_t *up=malloc((size_t)n*sizeof *up);
+  if(!up)return ENOMEM;
+  int result=0;
   for(uint32_t v=0;v<n;v++)up[v]=n;
-  for(uint32_t l=0;l<map->links;l++){
-    if(map->link[l][0]>=n || map->link[l][1]>=n || up[map->link[l][1]]<n)return EINVAL;
-    up[map->link[l][1]]=map->link[l][0];
+  for(uint32_t l=0;l<map->links && !result;l++){
+    if(map->link[l][0]>=n || map->link[l][1]>=n || up[map->link[l][1]]<n)result=EINVAL;
+    else up[map->link[l][1]]=map->link[l][0];
   }
-  if(map->kind==MESH_LINKS_RING){
+  if(!result && map->kind==MESH_LINKS_RING){
     at=0;steps=0;
     do{at=up[at];steps++;}while(at<n && at && steps<n);
-    return at==0 && steps==n?0:EINVAL;
+    result=at==0 && steps==n?0:EINVAL;
+  } else if(!result){
+    if(map->links!=n-1)result=EINVAL;
+    for(uint32_t v=0;v<n && !result;v++){
+      for(at=v,steps=0;up[at]<n && steps<n;steps++)at=up[at];
+      if(up[at]<n)result=EINVAL;
+    }
   }
-  if(map->links!=n-1)return EINVAL;
-  for(uint32_t v=0;v<n;v++){
-    for(at=v,steps=0;up[at]<n && steps<n;steps++)at=up[at];
-    if(up[at]<n)return EINVAL;
-  }
-  return 0;
+  free(up);
+  return result;
+}
+
+void mesh_link_map_free(struct mesh_link_map *map){
+  free(map->link);map->link=NULL;map->links=0;
+}
+
+/* Whether node `v` contributes to `c`: a broadcast's root; an all-reduce's contributors, every node
+   without a set. */
+static int mesh_contributes(struct mesh_collective c,uint32_t v){
+  if(c.what==MESH_BROADCAST)return v==c.root;
+  return !c.contributors || (c.contributors[v/64]>>(v%64)&1);
 }
 
 static struct mesh_step mesh_piece(uint32_t op,uint32_t peer,uint32_t round,uint64_t first,uint64_t elements,struct mesh_operand operand){
@@ -90,12 +111,12 @@ static int mesh_ring_order(const struct mesh_link_map *map,uint32_t *next,uint32
    None where the map has no ring or a segment would be empty (fewer elements than nodes). */
 static uint32_t mesh_ring_allreduce(const struct mesh_link_map *map,uint32_t node,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *out){
   const uint32_t size=map->nodes;
-  uint32_t next[MESH_LINK_MAP_NODES],previous[MESH_LINK_MAP_NODES],start,rank=0,count=0;
+  uint32_t next[size],previous[size],start,rank=0,count=0;
   if(operand.elements<size || !mesh_ring_order(map,next,previous,&start))return 0;
   for(uint32_t at=start;at!=node;at=next[at])rank++;
   const struct mesh_operand partial=mesh_accumulated(operand,c);
   // Compute the sizes of the chunks, and where each chunk ends.
-  uint64_t segment_sizes[MESH_LINK_MAP_NODES],segment_ends[MESH_LINK_MAP_NODES];
+  uint64_t segment_sizes[size],segment_ends[size];
   const uint64_t segment_size=operand.elements/size,residual=operand.elements%size;
   for(uint32_t i=0;i<size;i++)segment_sizes[i]=segment_size+(i<residual);
   segment_ends[0]=segment_sizes[0];
@@ -150,7 +171,8 @@ static int mesh_spanning_tree(const struct mesh_link_map *map,uint32_t root,uint
    operands and every leaf one each way. */
 static uint32_t mesh_tree_collective(const struct mesh_link_map *map,uint32_t rank,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *out){
   const uint32_t n=map->nodes;
-  uint32_t parent[MESH_LINK_MAP_NODES],order[MESH_LINK_MAP_NODES],children[MESH_LINK_MAP_NODES],interior[MESH_LINK_MAP_NODES]={0},k=0,count=0;
+  uint32_t parent[n],order[n],children[n],interior[n],k=0,count=0;
+  memset(interior,0,sizeof interior);
   if(c.root>=n || !mesh_spanning_tree(map,c.root,parent,order))return 0;
   for(uint32_t i=1;i<n;i++){interior[parent[order[i]]]=1;if(parent[order[i]]==rank)children[k++]=order[i];}
   const struct mesh_operand partial=mesh_accumulated(operand,c);
@@ -245,21 +267,22 @@ static uint32_t mesh_binomial_collective(const struct mesh_link_map *map,uint32_
    bytes.  Its SENDs may still be reading the operand when a REDUCE lands, so the sum goes to the
    caller's result operand, as in the pair's existing programs. */
 static uint32_t mesh_direct_collective(const struct mesh_link_map *map,uint32_t rank,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *out){
-  const uint32_t n=map->nodes,every=n>=32?UINT32_MAX:(UINT32_C(1)<<n)-1;
-  const uint32_t from=c.what==MESH_BROADCAST?UINT32_C(1)<<c.root:(c.contributors?c.contributors&every:every);
-  uint32_t count=0;
-  if((c.what==MESH_BROADCAST && c.root>=n) || !from)return 0;
+  const uint32_t n=map->nodes;
+  uint32_t count=0,any=0;
+  if(c.what==MESH_BROADCAST && c.root>=n)return 0;
+  for(uint32_t v=0;v<n;v++)any|=(uint32_t)mesh_contributes(c,v);
+  if(!any)return 0;
   /* every node's plan or none: each contributor linked to every other node */
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++)if(a!=b && from>>a&1 && !mesh_linked(map,a,b))return 0;
-  if(from>>rank&1)for(uint32_t peer=0;peer<n;peer++)if(peer!=rank)
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++)if(a!=b && mesh_contributes(c,a) && !mesh_linked(map,a,b))return 0;
+  if(mesh_contributes(c,rank))for(uint32_t peer=0;peer<n;peer++)if(peer!=rank)
     out[count++]=mesh_piece(MESH_STEP_SEND,peer,0,0,operand.elements,operand);
-  for(uint32_t peer=0;peer<n;peer++)if(peer!=rank && from>>peer&1)
+  for(uint32_t peer=0;peer<n;peer++)if(peer!=rank && mesh_contributes(c,peer))
     out[count++]=mesh_piece(c.what==MESH_BROADCAST?MESH_STEP_COPY:MESH_STEP_REDUCE,peer,0,0,operand.elements,operand);
   return count;
 }
 
 uint32_t mesh_collective_plan(const struct mesh_link_map *map,uint32_t rank,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *steps){
-  if(map->nodes<2 || map->nodes>MESH_LINK_MAP_NODES || rank>=map->nodes)return 0;
+  if(map->nodes<2 || rank>=map->nodes)return 0;
   switch(c.how){
     case MESH_DIRECT:return mesh_direct_collective(map,rank,c,operand,steps);
     case MESH_RING:return c.what==MESH_ALLREDUCE?mesh_ring_allreduce(map,rank,c,operand,steps):0;
@@ -293,11 +316,11 @@ static double mesh_collective_evaluate(const struct mesh_link_map *map,struct me
   double alpha,double beta){
   const uint32_t n=map->nodes,capacity=MESH_COLLECTIVE_STEPS(n);
   if(n<2)return 0;
-  if(n>MESH_LINK_MAP_NODES)return -1;
   struct mesh_step *steps=calloc((size_t)n*capacity,sizeof *steps);
   double *arrival=calloc((size_t)n*capacity,sizeof *arrival),result=-1;
-  uint32_t count[MESH_LINK_MAP_NODES],cursor[MESH_LINK_MAP_NODES]={0};
-  double clock[MESH_LINK_MAP_NODES]={0},out_free[MESH_LINK_MAP_NODES]={0},in_free[MESH_LINK_MAP_NODES]={0};
+  uint32_t count[n],cursor[n];
+  double clock[n],out_free[n],in_free[n];
+  memset(cursor,0,sizeof cursor);memset(clock,0,sizeof clock);memset(out_free,0,sizeof out_free);memset(in_free,0,sizeof in_free);
   if(!steps||!arrival)goto done;
   for(uint32_t r=0;r<n;r++){
     if(!(count[r]=mesh_collective_plan(map,r,c,operand,steps+(size_t)r*capacity)))goto done;

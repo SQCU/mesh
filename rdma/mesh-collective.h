@@ -11,9 +11,11 @@
    picks among every algorithm whose links the map has, by the operand's size.  Nothing is inferred
    from the links. */
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE };
-#define MESH_LINK_MAP_NODES 32
-struct mesh_link_map { uint32_t kind,nodes,links; uint32_t link[MESH_LINK_MAP_NODES*(MESH_LINK_MAP_NODES-1)/2][2]; };
+/* Any number of nodes and links: `link` is the links' storage, the caller's, or mesh_link_map_read's
+   (freed by mesh_link_map_free). */
+struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; };
 int mesh_link_map_read(const char *path,struct mesh_link_map *);
+void mesh_link_map_free(struct mesh_link_map *);
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
 struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
@@ -35,7 +37,7 @@ uint32_t mesh_allreduce_plan(const struct mesh_link_map *,uint32_t rank,struct m
 
 /* A collective of one typed operand among a map's nodes (metal-microbench docs/kernels.md
    Collectives).  what: MESH_ALLREDUCE combines the contributions of the nodes of the bit set
-   `contributors` (0: every node) at every node; MESH_BROADCAST gives every node the operand of
+   `contributors` (a bit a node, 64 a word; NULL: every node) at every node; MESH_BROADCAST gives every node the operand of
    `root`.  how: the direct exchange (every pair linked), the ring's reduce-scatter + all-gather
    [Patarasuk & Yuan 2009] (a ring map's cycle, or rank order where the map links it), a spanning
    tree's reduce + broadcast from `root` (any connected map: a tree map's own tree, a star), or the
@@ -45,7 +47,7 @@ uint32_t mesh_allreduce_plan(const struct mesh_link_map *,uint32_t rank,struct m
    half partials summed in float cross as float.  A step combines any number of receives. */
 enum { MESH_ALLREDUCE, MESH_BROADCAST };
 enum { MESH_DIRECT, MESH_RING, MESH_TREE, MESH_BINOMIAL, MESH_UNAVAILABLE };
-struct mesh_collective { uint32_t what,how,root,contributors,accumulator_bytes; };
+struct mesh_collective { uint32_t what,how,root,accumulator_bytes; const uint64_t *contributors; };
 #define MESH_COLLECTIVE_STEPS(nodes) (4*(nodes))
 /* The rank's steps in its dependency order (at most MESH_COLLECTIVE_STEPS), each SEND's piece typed
    as the receiving step's; 0 where the map lacks a pair the algorithm uses, the map has fewer than

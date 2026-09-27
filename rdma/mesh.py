@@ -30,14 +30,32 @@ class Step(C.Structure):
 
 
 class LinkMap(C.Structure):
-    _fields_ = [('kind', U), ('nodes', U), ('links', U), ('link', U * 2 * (32 * 31 // 2))]
+    """mesh-collective.h struct mesh_link_map: any number of nodes; `link` its links' storage (link_map
+    builds one the map keeps; mesh_link_map_read allocates one mesh_link_map_free releases)."""
+    _fields_ = [('kind', U), ('nodes', U), ('links', U), ('link', C.POINTER(U * 2))]
+
+
+def link_map(kind, nodes, pairs):
+    """A LinkMap of `kind` (KINDS) over `nodes` with the links `pairs`, its storage held by the map."""
+    storage = ((U * 2) * max(1, len(pairs)))(*[(U * 2)(a, b) for a, b in pairs])
+    made = LinkMap(kind=KINDS.index(kind), nodes=nodes, links=len(pairs), link=C.cast(storage, C.POINTER(U * 2)))
+    made._storage = storage
+    return made
 
 
 class Collective(C.Structure):
     """mesh-collective.h struct mesh_collective: what (ALLREDUCE, BROADCAST), how (an algorithm; on
     mesh_collective_choose's entry the bit set of the algorithms it may take, 0 every one), root,
-    contributors (a bit set of nodes, 0 every one), accumulator_bytes."""
-    _fields_ = [(k, U) for k in ('what', 'how', 'root', 'contributors', 'accumulator_bytes')]
+    accumulator_bytes, contributors (a bit set of nodes, 64 a word; NULL every one: see bits)."""
+    _fields_ = [*((k, U) for k in ('what', 'how', 'root', 'accumulator_bytes')), ('contributors', C.POINTER(Q))]
+
+
+def bits(nodes, members):
+    """A contributors bit set of `members` among `nodes`, for Collective.contributors (keep it alive)."""
+    words = (Q * max(1, -(-nodes // 64)))()
+    for m in members:
+        words[m // 64] |= 1 << (m % 64)
+    return words
 
 
 SEND, REDUCE, COPY = range(3)
@@ -51,6 +69,7 @@ for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
         ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_link_map_read', C.c_int, [C.c_char_p, C.POINTER(LinkMap)]),
+        ('mesh_link_map_free', None, [C.POINTER(LinkMap)]),
         ('mesh_allreduce_plan', U, [C.POINTER(LinkMap), U, Operand, C.POINTER(Step)]),
         ('mesh_collective_plan', U, [C.POINTER(LinkMap), U, Collective, Operand, C.POINTER(Step)]),
         ('mesh_collective_time', C.c_double, [C.POINTER(LinkMap), Collective, Operand, C.c_double, C.c_double]),
@@ -91,6 +110,7 @@ class AllReduce:
         count = LIB.mesh_allreduce_plan(C.byref(link_map), self.rank,
             Operand(ord(self.dtype.char), self.dtype.itemsize, int(np.prod(shape))), steps)
         self.steps = steps[:count]
+        LIB.mesh_link_map_free(C.byref(link_map))
 
         def ring(nbytes):
             pages = -(-nbytes // (header.pgsz * header.block)) * header.block
