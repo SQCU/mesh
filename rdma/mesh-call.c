@@ -26,8 +26,8 @@ static int mesh_section_wired(struct hdr *m,struct mesh_section section){
 
 /* design/prepared-machine.md#M08 */
 /* design/algorithm-sources.md#programcopy */
-int mesh_transfer_bind_range(struct mesh_ctx *context,uint32_t queue,int receive,uint32_t identity,struct mesh_section section,uint32_t invocation_pages,
-  uint32_t begin,uint32_t end,uint32_t depth,uint32_t flags){
+int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint32_t identity,struct mesh_section section,uint32_t invocation_pages,
+  uint32_t begin,uint32_t end,uint32_t depth){
   struct hdr *m=context->M;
   if(queue>=m->links*m->qps || end<=begin)return EINVAL;
   if(!section.count || (uint64_t)section.first+mesh_section_rows(section)>mesh_rows(m))return EINVAL;
@@ -47,13 +47,10 @@ int mesh_transfer_bind_range(struct mesh_ctx *context,uint32_t queue,int receive
     mesh_publish_bind(context,row,link)->count++;
   }
   mesh_transfers(m,context->client,queue,receive)[index]=(struct mesh_transfer){.local_row=section.first,.binding=identity,
-    .count=section.count,.stride=section.stride,.invocation_pages=invocation_pages,.begin=begin,.end=end,.flags=flags,.depth=depth,
+    .count=section.count,.stride=section.stride,.invocation_pages=invocation_pages,.begin=begin,.end=end,.depth=depth,
     .bytes=section.bytes};
   atomic_store_explicit(length,index+1,memory_order_release);
   return 0;
-}
-int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint32_t identity,struct mesh_section section,uint32_t invocation_pages){
-  return mesh_transfer_bind_range(context,queue,receive,identity,section,invocation_pages,0,UINT32_MAX,0,0);
 }
 
 /* design/prepared-machine.md#M08 */

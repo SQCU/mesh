@@ -5,13 +5,11 @@
 struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride; };
 
 /* design/algorithm-sources.md#programcopy */
-int mesh_transfer_bind(struct mesh_ctx *,uint32_t queue,int receive,uint32_t identity,struct mesh_section,uint32_t invocation_pages);
 /* The transfer bound for the invocations [begin, end) alone, invocation t at ring slot (t - begin) mod
-   `depth` (0: the call's), `flags` MESH_TRANSFER_VARIABLE for a variable transfer.  A transfer's SEND
-   cells, completion words and slots are indexed from `begin`: its producer's and reader's invocation
-   t - begin (metal-microbench docs/kernels.md Transport). */
-int mesh_transfer_bind_range(struct mesh_ctx *,uint32_t queue,int receive,uint32_t identity,struct mesh_section,uint32_t invocation_pages,
-  uint32_t begin,uint32_t end,uint32_t depth,uint32_t flags);
+   `depth` (0: the call's).  A transfer's SEND cells, completion words and slots are indexed from
+   `begin`: its producer's and reader's invocation t - begin. */
+int mesh_transfer_bind(struct mesh_ctx *,uint32_t queue,int receive,uint32_t identity,struct mesh_section,uint32_t invocation_pages,
+  uint32_t begin,uint32_t end,uint32_t depth);
 int mesh_transfers_prepare(struct mesh_ctx *,uint32_t slots,uint32_t invocations,uint32_t depth);
 int mesh_transfers_start(struct mesh_ctx *);
 

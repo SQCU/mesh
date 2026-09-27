@@ -33,32 +33,29 @@ _Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_sen
   offsetof(struct prepared_send,request.send_flags)+sizeof(unsigned int)<=64,"M29");
 /* design/prepared-machine.md#M08 */
 /* One chunk of a receive transfer in one invocation: its native request and SGE into the chunk's
-   destination range, the completion word it stores (`input`, and `also` a variable transfer's final
-   chunk's word where this is its last chunk sent), its queue pair, the frames it holds posted, its
-   invocation and ring, and for a variable transfer's first chunk the transfer's chunks and a full
-   chunk's bytes (its later chunks follow it in the ring). */
+   destination range, the completion word it stores (`input`), its queue pair, the frames it holds
+   posted, its invocation and ring. */
 struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
   struct ibv_sge span;
-  _Atomic uint64_t *input,*also;
+  _Atomic uint64_t *input;
   struct ibv_qp *pair;
-  uint64_t argument,block;
-  uint32_t frames,invocation,queue,chunks,skip;
+  uint64_t argument;
+  uint32_t frames,invocation,queue;
 };
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
   offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,input)==48,"M08 M09");
 /* design/prepared-machine.md#M08 */
 /* A queue pair's receive ring: its records in invocation, binding, chunk order; `posted` the next to
    post, `outstanding` the frames posted and not completed, within the queue's `capacity`; a record is
-   posted once its invocation is within `span` of the latest completed (the ring slots' margin) and,
-   after a variable transfer's first chunk, once that chunk has landed (`blocked` until then). */
+   posted once its invocation is within `span` of the latest completed (the ring slots' margin). */
 struct receive_ring {
   struct prepared_receive *first;
   size_t count,posted;
   int64_t completed;
-  uint32_t outstanding,capacity,span,blocked;
-  /* the census: records landed, their bytes, records a variable transfer did not send */
-  uint64_t landed,bytes,skipped;
+  uint32_t outstanding,capacity,span;
+  /* the census: records landed, their bytes */
+  uint64_t landed,bytes;
 };
 /* A queue pair's SEND gate, the send thread's alone: the frames posted and retired (each request
    carries its queue and the frames posted through it, which its completion returns), the queue's
@@ -69,8 +66,8 @@ struct send_gate {
   uint32_t capacity;
 };
 /* A SEND stream's progress: its current cell, the next request of that cell's chain and the requests
-   left, and a variable transfer's last chunk's bytes. */
-struct send_stream { struct mesh_send *cell; struct ibv_send_wr *next; uint32_t remaining; uint64_t last; };
+   left. */
+struct send_stream { struct mesh_send *cell; struct ibv_send_wr *next; uint32_t remaining; };
 /* design/prepared-machine.md#M27 */
 struct mesh_trace { _Alignas(32) uint64_t identity; uint64_t begin,middle,end; };
 _Static_assert(sizeof(struct mesh_trace)==32 && _Alignof(struct mesh_trace)==32,"M27");
@@ -173,45 +170,20 @@ static uint32_t transfer_row(struct hdr *m,const struct mesh_transfer *transfer,
 
 /* design/prepared-machine.md#M08 */
 /* Posts the ring's next records while its queue has room and each is within the ring's span of the
-   latest completed invocation; a variable transfer's first chunk holds the rest until it lands.
-   Called once at configuration and at each receive completion: the refill is fired by the event. */
+   latest completed invocation.  Called once at configuration and at each receive completion: the
+   refill is fired by the event. */
 static int ring_advance(struct mesh_link *link,struct receive_ring *ring){
   int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=link->provider.queues[0].receive;
   while(ring->posted<ring->count){
     struct prepared_receive *record=ring->first+ring->posted;
-    if(record->skip){ring->posted++;continue;}
-    if(ring->blocked || (int64_t)record->invocation>ring->completed+(int64_t)ring->span ||
+    if((int64_t)record->invocation>ring->completed+(int64_t)ring->span ||
        ring->outstanding+record->frames>ring->capacity)break;
     struct ibv_recv_wr *bad;
     int error=post(record->pair,&record->request,&bad);
     if(error)return error<0?-error:error;
     ring->outstanding+=record->frames;ring->posted++;
-    if(record->chunks)ring->blocked=1;
   }
   return 0;
-}
-
-/* A variable transfer's first chunk has landed: its first eight bytes are the bytes sent, which the
-   sender's own header gave it the same way (link_send_drain).  The chunks they reach are posted at
-   their lengths, the rest never arrive: their words complete now and the last chunk sent also
-   completes the final chunk's word, the one a reader of the operand waits on.  Bounded by the
-   transfer's prepared chunks, never by the value on the wire. */
-static uint32_t receive_resolve(struct prepared_receive *head){
-  uint64_t bytes=atomic_load_explicit((_Atomic uint64_t *)(uintptr_t)head->span.addr,memory_order_acquire),block=head->block;
-  uint32_t n=head->chunks,k=bytes<=block?1:(uint32_t)((bytes+block-1)/block);
-  if(k>n)k=n;
-  for(uint32_t j=1;j<n;j++){
-    struct prepared_receive *record=head+j;
-    if(j<k){
-      uint64_t rest=bytes-(uint64_t)j*block;
-      if(j+1==k && rest<record->span.length){record->span.length=(uint32_t)rest;record->frames=(uint32_t)((rest+4095)/4096);}
-    } else {
-      record->skip=1;
-      if(j+1<n)atomic_store_explicit(record->input,record->argument,memory_order_release);
-    }
-  }
-  if(k<n)head[k-1].also=head[n-1].input;
-  return n-k;
 }
 
 /* design/algorithm-sources.md#programcopy */
@@ -250,7 +222,6 @@ static int link_configure(void *state,int socket,uint64_t client){
     /* each cell's chain over its invocation's ring slot */
     for(uint32_t i=0;i<count;i++){
       uint32_t active=mesh_transfer_active(out+i,invocations),column=active+1;
-      uint64_t block=(uint64_t)m->block*m->pgsz;
       for(uint32_t slot=0;slot<out[i].count;slot++){
         uint32_t row=out[i].local_row+slot*out[i].stride,chunks=mesh_row_chunks(m,row,out[i].bytes),stream=q*tx->slots+slot;
         struct mesh_send *cells=link->publications+out[i].first+(size_t)slot*column;
@@ -260,7 +231,6 @@ static int link_configure(void *state,int socket,uint64_t client){
         for(uint32_t u=0;u<active;u++){
           struct mesh_send *cell=cells+u;
           cell->pair=(uintptr_t)link->provider.queues[stream].pair;cell->queue=stream;cell->chunks=chunks;
-          cell->variable=(out[i].flags&MESH_TRANSFER_VARIABLE) && chunks>1?block:0;
           uint64_t remaining=out[i].bytes;
           for(uint32_t k=0;k<chunks;k++){
             uint32_t address=transfer_row(m,out+i,row,out[i].begin+u,k);
@@ -322,7 +292,6 @@ static int link_configure(void *state,int socket,uint64_t client){
       uint32_t active=mesh_transfer_active(in+i,invocations);
       if(slot>=in[i].count || t<in[i].begin || t-in[i].begin>=active)continue;
       uint32_t u=t-in[i].begin,row=in[i].local_row+slot*in[i].stride,chunks=mesh_row_chunks(m,row,in[i].bytes);
-      int variable=(in[i].flags&MESH_TRANSFER_VARIABLE) && chunks>1;
       uint64_t remaining=in[i].bytes;
       for(uint32_t k=0;k<chunks;k++){
         uint32_t address=transfer_row(m,in+i,row,t,k);
@@ -337,8 +306,7 @@ static int link_configure(void *state,int socket,uint64_t client){
         struct prepared_receive *record=link->receive+at++;
         *record=(struct prepared_receive){.request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
           .span=span,.input=(_Atomic uint64_t *)input,.pair=link->provider.queues[ring].pair,.argument=1,
-          .frames=(span.length+4095)/4096,.invocation=t,.queue=(uint32_t)ring,
-          .chunks=variable&&!k?chunks:0,.block=variable&&!k?(uint64_t)m->block*m->pgsz:0};
+          .frames=(span.length+4095)/4096,.invocation=t,.queue=(uint32_t)ring};
       }
     }
     r->count=(size_t)(link->receive+at-r->first);
@@ -376,9 +344,8 @@ static __attribute__((always_inline)) inline int send_retire(struct mesh_link *l
 
 /* Each stream's cells in order: a cell released by its producer posts its chain's requests while its
    queue pair holds their frames (the gate: frames posted less those its SEND completions retired;
-   ibv_post_send accepts past the queue's frames and corrupts later, so the gate is the caller's), a
-   variable transfer only the chunks its header's bytes reach.  The thread takes its completions
-   when a stream waits for its producer or its gate. */
+   ibv_post_send accepts past the queue's frames and corrupts later, so the gate is the caller's).
+   The thread takes its completions when a stream waits for its producer or its gate. */
 static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_link *link,int traced){
   struct send_stream *streams=link->streams;
   uint32_t count=link->stream_count;
@@ -399,20 +366,13 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
         continue;
       }
       observed=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
-      stream->next=&cell->request;stream->remaining=cell->chunks;stream->last=0;
-      if(cell->variable){
-        uint64_t bytes=*(volatile uint64_t *)(uintptr_t)cell->span.addr,block=cell->variable;
-        uint32_t k=bytes<=block?1:(uint32_t)((bytes+block-1)/block);
-        if(k>cell->chunks)k=cell->chunks;
-        stream->remaining=k;stream->last=k>1?bytes-(uint64_t)(k-1)*block:0;
-      }
+      stream->next=&cell->request;stream->remaining=cell->chunks;
     }
     struct mesh_send *cell=stream->cell;
     struct send_gate *gate=link->gates+cell->queue;
     uint64_t posting=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
     while(stream->remaining){
       struct ibv_send_wr *request=stream->next;
-      if(stream->remaining==1 && stream->last && stream->last<request->sg_list->length)request->sg_list->length=(uint32_t)stream->last;
       uint32_t frames=(request->sg_list->length+4095)/4096;
       if(((gate->posted-gate->retired)&MESH_GATE_MASK)+frames>gate->capacity){
         if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
@@ -447,8 +407,7 @@ static void *link_send_progress(void *argument){
 /* design/prepared-machine.md#M08 */
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#programcopy */
-/* The link's receive completions: each stores its completion word (a variable transfer's first chunk
-   first resolving the chunks sent) and posts the ring's next records. */
+/* The link's receive completions: each stores its completion word and posts the ring's next records. */
 static __attribute__((always_inline)) inline void *link_receive_drain(struct mesh_link *link,int traced){
   struct mesh_queue queue=link->provider.queues[0];
   struct ibv_wc *completion=link->completion;
@@ -469,13 +428,10 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
     uint64_t polled=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
     struct prepared_receive *record=(void *)(uintptr_t)completion->wr_id;
     struct receive_ring *ring=link->rings+record->queue;
-    if(record->chunks)ring->skipped+=receive_resolve(record);
     ring->landed++;ring->bytes+=completion->byte_len;
     atomic_store_explicit(record->input,record->argument,memory_order_release);
-    if(record->also)atomic_store_explicit(record->also,record->argument,memory_order_release);
     uint64_t published=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
     ring->outstanding-=record->frames;ring->completed=record->invocation;
-    if(record->chunks)ring->blocked=0;
     int error=ring_advance(link,ring);
     if(error){link_error(link,error,1);return NULL;}
     /* design/prepared-machine.md#M27 */
@@ -512,13 +468,13 @@ static void link_close(struct mesh_link *link,int *control){
     free(link->trace[d]);link->trace[d]=NULL;link->traced[d]=0;link->trace_capacity[d]=0;
   }
   /* the link's census: each queue pair's requests and frames sent and retired by the send completions
-     it took, and its ring's records landed, their bytes and the records variable transfers skipped */
+     it took, and its ring's records landed and their bytes */
   for(int q=0;link->gates && link->rings && q<link->qps;q++)
-    fprintf(stderr,"link %u census queue=%d requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu skipped=%llu\n",
+    fprintf(stderr,"link %u census queue=%d requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu\n",
       link->index,q,(unsigned long long)link->gates[q].requests,(unsigned long long)link->gates[q].posted,
       (unsigned long long)link->gates[q].retired,(unsigned long long)link->gates[q].completions,
       link->rings[q].count,link->rings[q].posted,(unsigned long long)link->rings[q].landed,
-      (unsigned long long)link->rings[q].bytes,(unsigned long long)link->rings[q].skipped);
+      (unsigned long long)link->rings[q].bytes);
   if(*control>=0){close(*control);*control=-1;}
   while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);
   if(link->provider.listener>=0){close(link->provider.listener);link->provider.listener=-1;}

@@ -10,17 +10,14 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 105u
+#define MESH_VERSION 106u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
 /* A prepared transfer: `count` slots of `bytes` from `local_row`, bound for the invocations [begin, end)
    that use it (end past the call's invocations: every one), invocation t addressing its ring slot
-   (t - begin) mod depth (0: the header's depth) at `invocation_pages` a slot.  A variable transfer
-   (MESH_TRANSFER_VARIABLE) moves only the leading bytes its operand's first eight bytes state: its
-   first chunk whole, then the chunks those bytes reach (metal-microbench docs/kernels.md Transport). */
-enum { MESH_TRANSFER_VARIABLE=1 };
-struct mesh_transfer { uint32_t local_row,binding,count,stride,invocation_pages,first,begin,end,flags,depth; uint64_t bytes; };
+   (t - begin) mod depth (0: the header's depth) at `invocation_pages` a slot. */
+struct mesh_transfer { uint32_t local_row,binding,count,stride,invocation_pages,first,begin,end,depth; uint64_t bytes; };
 _Static_assert(sizeof(struct mesh_transfer)==48,"M08 prepared transfer");
 static inline uint32_t mesh_transfer_active(const struct mesh_transfer *transfer,uint32_t invocations){
   uint32_t end=transfer->end<invocations?transfer->end:invocations;
@@ -53,14 +50,13 @@ enum { MESH_SEND, MESH_RECEIVE };
 /* design/prepared-machine.md#M04 */
 /* One publication's SEND cell of one invocation: `ready`, released by its producer, then the chain
    of `chunks` requests from `request` the bridge posts, `successor` the stream's next cell (the
-   bridge's, prepared per invocation), `variable` a variable transfer's full chunk bytes (0: fixed). */
+   bridge's, prepared per invocation). */
 struct mesh_send {
   _Alignas(128) _Atomic uint64_t ready;
   uintptr_t pair;
   _Alignas(32) struct ibv_sge span;
   struct ibv_send_wr request;
   uintptr_t successor;
-  uint64_t variable;
   uint32_t chunks,queue;
 };
 struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells; };
