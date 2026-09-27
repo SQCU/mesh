@@ -60,15 +60,13 @@ struct receive_ring {
   /* the census: records landed, their bytes, records a variable transfer did not send */
   uint64_t landed,bytes,skipped;
 };
-/* A queue pair's SEND gate: the frames posted (the send thread's) and retired (the completion
-   thread's, from each signaled request's count), the queue's capacity, and the frames posted since
-   the last signaled request. */
+/* A queue pair's SEND gate, the send thread's alone: the frames posted and retired (each request
+   carries its queue and the frames posted through it, which its completion returns), the queue's
+   capacity, and the census's requests and completions. */
 #define MESH_GATE_MASK ((UINT64_C(1)<<48)-1)
 struct send_gate {
-  _Alignas(128) _Atomic uint64_t retired;
-  uint64_t completions;
-  _Alignas(128) uint64_t posted,requests;
-  uint32_t unsignaled,capacity;
+  _Alignas(64) uint64_t posted,retired,requests,completions;
+  uint32_t capacity;
 };
 /* A SEND stream's progress: its current cell, the next request of that cell's chain and the requests
    left, and a variable transfer's last chunk's bytes. */
@@ -232,17 +230,17 @@ static int link_configure(void *state,int socket,uint64_t client){
   if(!depth||depth>invocations)depth=invocations;
   int qps=link->qps;
   link->streams=calloc((size_t)qps,sizeof *link->streams);
-  link->gates=aligned_alloc(128,(size_t)qps*sizeof *link->gates);
+  link->gates=aligned_alloc(64,(size_t)qps*sizeof *link->gates);
   link->rings=calloc((size_t)qps,sizeof *link->rings);
   link->receive=aligned_alloc(128,(link->receive_count+1)*sizeof *link->receive);
   struct mesh_send **last=calloc((size_t)qps,sizeof *last),**terminal=calloc((size_t)qps,sizeof *terminal);
   if(!link->streams||!link->gates||!link->rings||!link->receive||!last||!terminal){free(last);free(terminal);errno=ENOMEM;return -1;}
-  /* a ring's records are one frame at least, so its frames also bound the completions it can have
-     pending in the link's one completion queue, beside each gate's signaled requests (two at most) */
-  uint32_t entries=(uint32_t)link->provider.completion->cqe,share=entries>(uint32_t)(3*qps)?(entries-3*(uint32_t)qps)/(uint32_t)qps:1;
+  /* a record or request is one frame at least, so a queue pair's frames also bound the completions
+     it can have pending in the link's receive and SEND completion queues, which its pairs share */
+  uint32_t receives=(uint32_t)link->provider.completion->cqe/(uint32_t)qps,sends=(uint32_t)link->provider.sent->cqe/(uint32_t)qps;
   for(int q=0;q<qps;q++){
-    link->gates[q]=(struct send_gate){.capacity=link->provider.queues[q].send_capacity};
-    link->rings[q]=(struct receive_ring){.completed=-1,.capacity=MIN(link->provider.queues[q].receive_capacity,share),.span=UINT32_MAX};
+    link->gates[q]=(struct send_gate){.capacity=MIN(link->provider.queues[q].send_capacity,sends)};
+    link->rings[q]=(struct receive_ring){.completed=-1,.capacity=MIN(link->provider.queues[q].receive_capacity,receives),.span=UINT32_MAX};
   }
   /* design/prepared-machine.md#M29 */
   size_t next=0;
@@ -362,12 +360,25 @@ static int link_configure(void *state,int socket,uint64_t client){
 /* design/prepared-machine.md#M06 */
 /* design/prepared-machine.md#M15 */
 /* design/algorithm-sources.md#independent-native-queues */
+/* The link's SEND completions: each retires its queue's frames through its request (the device
+   completes every SEND, signaled or not).  0, or an error completion's status. */
+static __attribute__((always_inline)) inline int send_retire(struct mesh_link *link){
+  struct ibv_wc done[16];
+  int count=link->provider.queues[0].poll(link->provider.sent,16,done);
+  if(count<0)return EIO;
+  for(int i=0;i<count;i++){
+    if(done[i].status)return (int)done[i].status;
+    struct send_gate *gate=link->gates+(done[i].wr_id>>48);
+    gate->retired=done[i].wr_id&MESH_GATE_MASK;gate->completions++;
+  }
+  return 0;
+}
+
 /* Each stream's cells in order: a cell released by its producer posts its chain's requests while its
-   queue pair holds their frames (the gate: frames posted less those a signaled completion retired;
+   queue pair holds their frames (the gate: frames posted less those its SEND completions retired;
    ibv_post_send accepts past the queue's frames and corrupts later, so the gate is the caller's), a
-   variable transfer only the chunks its header's bytes reach.  A request is signaled once the frames
-   since the last signaled one reach half the queue, so a signaled completion is always in flight
-   while the gate is closed. */
+   variable transfer only the chunks its header's bytes reach.  The thread takes its completions
+   when a stream waits for its producer or its gate. */
 static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_link *link,int traced){
   struct send_stream *streams=link->streams;
   uint32_t count=link->stream_count;
@@ -383,6 +394,8 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
       struct mesh_send *cell=stream->cell;
       if(!atomic_load_explicit(&cell->ready,memory_order_acquire)){
         if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
+        int error=send_retire(link);
+        if(error){link_error(link,error,2);return NULL;}
         continue;
       }
       observed=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
@@ -401,18 +414,16 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
       struct ibv_send_wr *request=stream->next;
       if(stream->remaining==1 && stream->last && stream->last<request->sg_list->length)request->sg_list->length=(uint32_t)stream->last;
       uint32_t frames=(request->sg_list->length+4095)/4096;
-      uint64_t retired=atomic_load_explicit(&gate->retired,memory_order_acquire);
-      if(((gate->posted-retired)&MESH_GATE_MASK)+frames>gate->capacity){
+      if(((gate->posted-gate->retired)&MESH_GATE_MASK)+frames>gate->capacity){
         if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
+        int error=send_retire(link);
+        if(error){link_error(link,error,2);return NULL;}
         break;
       }
       struct ibv_send_wr *following=request->next;
       request->next=NULL;
       gate->posted+=frames;
-      if(gate->unsignaled+frames>=gate->capacity/2){
-        request->send_flags=IBV_SEND_SIGNALED;request->wr_id=((uint64_t)cell->queue<<48)|(gate->posted&MESH_GATE_MASK);
-        gate->unsignaled=0;
-      } else gate->unsignaled+=frames;
+      request->send_flags=IBV_SEND_SIGNALED;request->wr_id=((uint64_t)cell->queue<<48)|(gate->posted&MESH_GATE_MASK);
       int error=post((struct ibv_qp *)cell->pair,request,&bad);
       if(error){link_error(link,error<0?-error:error,1);return NULL;}
       stream->next=following;stream->remaining--;gate->requests++;
@@ -436,9 +447,8 @@ static void *link_send_progress(void *argument){
 /* design/prepared-machine.md#M08 */
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#programcopy */
-/* The link's one completion queue: a signaled SEND's completion retires its queue's frames up to
-   its count; a receive's stores its completion word (a variable transfer's first chunk first
-   resolving the chunks sent) and posts the ring's next records. */
+/* The link's receive completions: each stores its completion word (a variable transfer's first chunk
+   first resolving the chunks sent) and posts the ring's next records. */
 static __attribute__((always_inline)) inline void *link_receive_drain(struct mesh_link *link,int traced){
   struct mesh_queue queue=link->provider.queues[0];
   struct ibv_wc *completion=link->completion;
@@ -455,12 +465,7 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
     uint64_t status_opcode;
     memcpy(&status_opcode,&completion->status,sizeof status_opcode);
     if((uint32_t)status_opcode){link_error(link,(uint32_t)status_opcode,2);return NULL;}
-    if(!((status_opcode>>32)&IBV_WC_RECV)){
-      uint64_t identity=completion->wr_id;
-      link->gates[identity>>48].completions++;
-      atomic_store_explicit(&link->gates[identity>>48].retired,identity&MESH_GATE_MASK,memory_order_release);
-      continue;
-    }
+    if(!((status_opcode>>32)&IBV_WC_RECV))continue;
     uint64_t polled=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
     struct prepared_receive *record=(void *)(uintptr_t)completion->wr_id;
     struct receive_ring *ring=link->rings+record->queue;
@@ -511,7 +516,7 @@ static void link_close(struct mesh_link *link,int *control){
   for(int q=0;link->gates && link->rings && q<link->qps;q++)
     fprintf(stderr,"link %u census queue=%d requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu skipped=%llu\n",
       link->index,q,(unsigned long long)link->gates[q].requests,(unsigned long long)link->gates[q].posted,
-      (unsigned long long)atomic_load(&link->gates[q].retired),(unsigned long long)link->gates[q].completions,
+      (unsigned long long)link->gates[q].retired,(unsigned long long)link->gates[q].completions,
       link->rings[q].count,link->rings[q].posted,(unsigned long long)link->rings[q].landed,
       (unsigned long long)link->rings[q].bytes,(unsigned long long)link->rings[q].skipped);
   if(*control>=0){close(*control);*control=-1;}

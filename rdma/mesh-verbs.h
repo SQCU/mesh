@@ -51,9 +51,12 @@ static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t
     .lkey=device->regions[offset/device->extent]->lkey};
 }
 /* design/algorithm-sources.md#programcopy */
+/* A queue pair: its receives complete on `completion`, its SENDs on `sent`.  The device completes
+   every SEND, IBV_SEND_SIGNALED or not (the bridge's census: send completions equal requests), so a
+   SEND's completion is its queue's retirement and lands where the send thread polls it. */
 struct mesh_queue {
   _Alignas(64) struct ibv_qp *pair;
-  struct ibv_cq *completion;
+  struct ibv_cq *completion,*sent;
   int (*poll)(struct ibv_cq *,int,struct ibv_wc *);
   int (*send)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **);
   int (*receive)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **);
@@ -63,7 +66,7 @@ _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,
 struct mesh_verbs {
   struct mesh_device *device; struct mesh_wire *wire;
   struct mesh_queue *queues; int qp_count,listener;
-  struct ibv_cq *completion;
+  struct ibv_cq *completion,*sent;
   uint32_t peer,completion_entries[2];
   uint64_t bandwidth;
   const char *local_address,*remote_address,*service;
@@ -96,6 +99,10 @@ static int down_pair(struct mesh_verbs *provider){
   if(provider->completion){
     if(ibv_destroy_cq(provider->completion))return 0;
     provider->completion=NULL;
+  }
+  if(provider->sent){
+    if(ibv_destroy_cq(provider->sent))return 0;
+    provider->sent=NULL;
   }
   free(provider->queues);provider->queues=NULL;
   return 1;
@@ -304,11 +311,13 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   provider->completion=ibv_create_cq(provider->device->context,
     (int)(frame_capacity+1),NULL,NULL,0);
   if(!provider->completion){close(f);return -1;}
+  provider->sent=ibv_create_cq(provider->device->context,(int)(frame_capacity+1),NULL,NULL,0);
+  if(!provider->sent){close(f);return -1;}
   for(int q=0;q<qps;q++){
     struct mesh_queue *queue=&provider->queues[q];
-    queue->completion=provider->completion;
+    queue->completion=provider->completion;queue->sent=provider->sent;
     queue->poll=provider->completion->context->ops.poll_cq;
-    struct ibv_qp_init_attr qi={.send_cq=queue->completion,
+    struct ibv_qp_init_attr qi={.send_cq=queue->sent,
       .recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
       .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
     queue->pair=ibv_create_qp(provider->device->domain,&qi);
