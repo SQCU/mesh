@@ -33,7 +33,17 @@ class LinkMap(C.Structure):
     _fields_ = [('kind', U), ('nodes', U), ('links', U), ('link', U * 2 * (32 * 31 // 2))]
 
 
+class Collective(C.Structure):
+    """mesh-collective.h struct mesh_collective: what (ALLREDUCE, BROADCAST), how (an algorithm; on
+    mesh_collective_choose's entry the bit set of the algorithms it may take, 0 every one), root,
+    contributors (a bit set of nodes, 0 every one), accumulator_bytes, fanin."""
+    _fields_ = [(k, U) for k in ('what', 'how', 'root', 'contributors', 'accumulator_bytes', 'fanin')]
+
+
 SEND, REDUCE, COPY = range(3)
+KINDS = ('mesh', 'ring', 'tree')  # MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE
+ALLREDUCE, BROADCAST = range(2)
+ALGORITHMS = ('direct', 'ring', 'tree', 'binomial')  # MESH_DIRECT .. MESH_BINOMIAL; MESH_UNAVAILABLE after them
 DIRECT, CANCELLED = 0, 2 ** 64 - 1
 LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))
 CONTEXT = C.POINTER(Context)
@@ -42,6 +52,9 @@ for name, result, arguments in (
         ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_link_map_read', C.c_int, [C.c_char_p, C.POINTER(LinkMap)]),
         ('mesh_allreduce_plan', U, [C.POINTER(LinkMap), U, Operand, C.POINTER(Step)]),
+        ('mesh_collective_plan', U, [C.POINTER(LinkMap), U, Collective, Operand, C.POINTER(Step)]),
+        ('mesh_collective_time', C.c_double, [C.POINTER(LinkMap), Collective, Operand, C.c_double, C.c_double]),
+        ('mesh_collective_choose', Collective, [C.POINTER(LinkMap), Collective, Operand, C.c_double, C.c_double]),
         ('mesh_section_create', C.c_int, [CONTEXT, Z, U, C.c_int, C.POINTER(Section)]),
         ('mesh_section_slice', C.c_int, [CONTEXT, Section, Z, Z, U, U, C.POINTER(Section)]),
         ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),
