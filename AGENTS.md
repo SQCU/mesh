@@ -259,9 +259,8 @@ lives in `bin/` for the same reason.
 ## Collectives and tensor parallelism
 
 Read `../../metal-microbench/docs/principles.md` (from this repo's root; on the Mini,
-`~/metal-microbench/docs/principles.md`) and its `docs/measurement.md`. They replace every earlier
-task statement, goal and countermand here. Collectives are transcribed from the literature
-(`rdma/mesh-collective.c`) and selected from an explicit link map.
+`~/metal-microbench/docs/principles.md`) and its `docs/measurement.md`. Collectives are transcribed
+from the literature (`rdma/mesh-collective.c`) and selected from an explicit link map.
 
 ## Tests and specification
 
