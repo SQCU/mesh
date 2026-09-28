@@ -198,10 +198,11 @@ cc app.c -I rdma -L rdma -lnccl-mesh -Wl,-rpath,$PWD/rdma
 MESH_REGION=/mesh0 MESH_LINKS=links.txt ./app
 ```
 
-`rdma/torch-mesh` is torch.distributed's `mesh` backend over it (CPU and MPS tensors; an MPS tensor of
-`torch_mesh.empty` lies in the bridge's window and is sent and received in place, any other is blitted
-through it on the MPS stream). Installed into a venv that has torch, it registers itself when torch is
-imported, so a script names it alone: `torch.distributed.init_process_group(backend="mesh")`.
+`rdma/torch-mesh` is torch.distributed's `mesh` backend over it (CPU and MPS tensors; once the backend
+exists, torch's MPS factories make window tensors, sent and received in place and freed only once every
+use recorded on them is done; any other tensor is blitted through the window by the GPU, never copied by
+the CPU). Installed into a venv that has torch, it registers itself when torch is imported, so a script
+names it alone: `torch.distributed.init_process_group(backend="mesh")`.
 
 ```
 uv pip install --python <venv>/bin/python --no-build-isolation rdma/torch-mesh
