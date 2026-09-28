@@ -140,11 +140,13 @@ FABRIC_READ = int(os.environ.get("MESH_FABRIC_READ", str(16 << 20)))
 BRIDGES = {}
 SLOW = {}
 
-def bridge_log(entry):
+def bridge_log(entry, final=False):
     try:
         with open(entry["log"], "rb") as stream:
             size = os.fstat(stream.fileno()).st_size
-            if size < entry["log_offset"]: entry.update(bridge_counters())
+            if size < entry["log_offset"]:
+                if final: return
+                entry.update(bridge_counters())
             stream.seek(entry["log_offset"])
             chunk = stream.read(FABRIC_READ)
     except Exception as error:
@@ -212,7 +214,7 @@ def fabric_bridges(now):
         if pid in table: continue
         if entry["exited_at"] is None:
             entry.update({"exited_at": now, "state": "exited"})
-            if entry["log"]: bridge_log(entry)
+            if entry["log"]: bridge_log(entry, True)
         elif now - entry["exited_at"] > FABRIC_KEEP: BRIDGES.pop(pid)
     return [copy.deepcopy({key: value for key, value in entry.items() if key != "spans"}) for entry in BRIDGES.values()]
 

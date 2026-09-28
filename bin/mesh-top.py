@@ -212,7 +212,7 @@ class Top:
             if any((x.get("log_size") or 0) - x.get("log_offset", 0) > 65536 for x in (old or {}, bridge)): continue
             for index, total in (bridge.get("census") or {}).items():
                 base = ((old or {}).get("census") or {}).get(index) or {}
-                delta = {key: value - base.get(key, 0) for key, value in total.items()}
+                delta = {key: max(0, value - base.get(key, 0)) for key, value in total.items()}
                 specs = bridge.get("links") or []
                 spec = specs[int(index)] if int(index) < len(specs) else {}
                 peer = self.owner(spec.get("remote"))[0] or self.peer_by_rank(spec.get("peer")) or f"rank{spec.get('peer', '?')}"
@@ -314,6 +314,7 @@ class Top:
                 if now - (keeper.get("modified") or 0) < 3600: hints.append(("warn", f"{node.name}: keeper {alarm}"))
             for b in f.get("bridges") or []:
                 if str(b.get("state", "")).startswith("U"): hints.append(("bad", f"{node.name}: bridge pid {b['pid']} is in U (uninterruptible, blocked in a verbs call); never SIGKILL it and do not launch ibv_devinfo there (RDMA-RULES.md)"))
+                if b.get("log_error") and not b.get("exited_at"): hints.append(("warn", f"{node.name}: bridge {b['region']} log unreadable by telemetry ({b['log_error']}); no census"))
                 if b.get("errors") and not b.get("exited_at"): hints.append(("warn", f"{node.name}: bridge {b['region']} logged {b['errors']} error line(s), last: {b.get('last_error')}"))
             for port in f.get("ports") or []:
                 for holder in port.get("holders") or []:
