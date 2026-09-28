@@ -142,6 +142,13 @@ def probe(node):
         node.probe = {"at": time.time(), "states": {}, "note": f"probe did not return: {type(error).__name__}; not retried while it runs"}
     node.probing = False
 
+def flows(bridge):
+    """A bridge's live counts a link: the poller's `flow`, or its mesh-stat's own where the poller predates them."""
+    return bridge.get("flow") or [peer.get("flow") or {} for peer in (bridge.get("stat") or {}).get("peers") or []]
+
+def communicators(bridge):
+    return bridge.get("communicators") or (bridge.get("stat") or {}).get("communicators") or []
+
 def fabric(node):
     return ((node.sample or {}).get("fabric") or {}) if isinstance((node.sample or {}).get("fabric"), dict) else {}
 
@@ -210,7 +217,7 @@ class Top:
         for bridge in sample["fabric"].get("bridges") or []:
             old = before.get(bridge["pid"])
             specs = bridge.get("links") or []
-            for index, (flow, was) in enumerate(zip(bridge.get("flow") or [], (old or {}).get("flow") or [])):
+            for index, (flow, was) in enumerate(zip(flows(bridge), flows(old or {}))):
                 spec = specs[index] if index < len(specs) else {}
                 peer = self.owner(spec.get("remote"))[0] or self.peer_by_rank(spec.get("peer")) or f"rank{spec.get('peer', '?')}"
                 delta = lambda *keys: max(0, sum(flow.get(k, 0) - was.get(k, 0) for k in keys))
@@ -385,9 +392,9 @@ class Top:
                     if last.get("span_ns"): reference.append(f"{node.name} last call (MESH_LEDGER): {last['bytes']} bytes landed over {last['span_ns'] / 1e3:.0f} us of crossings = {rate_text(last['bytes'] * 1e9 / last['span_ns'])}")
                     if total and not bridge.get("exited_at"):
                         reference.append(f"{node.name} bridge {bridge['region']}: {total['calls']} calls, {rate_text(total['bytes']).replace('/s', '')} landed, {bridge.get('pairs', 0)} pairings, {bridge.get('retries', 0)} pairing retries, {bridge.get('resets', 0)} pairing resets reconnected, {bridge.get('credit_limited', 0)} credit-limited calls, {bridge.get('errors', 0)} errors, unretired SEND frames {total['frames'] - total['retired']}")
-                    flows, peers = bridge.get("flow") or [], (bridge.get("stat") or {}).get("peers") or []
-                    if index is not None and int(index) < len(flows) and not bridge.get("exited_at"):
-                        f, p = flows[int(index)], peers[int(index)] if int(index) < len(peers) else {}
+                    live, peers = flows(bridge), (bridge.get("stat") or {}).get("peers") or []
+                    if index is not None and int(index) < len(live) and not bridge.get("exited_at"):
+                        f, p = live[int(index)], peers[int(index)] if int(index) < len(peers) else {}
                         session, regions = p.get("session") or {}, p.get("regions") or {}
                         reference.append(f"{node.name} bridge {bridge['region']} live: flow-control stalls send {f.get('send_stalls', 0)} receive {f.get('receive_stalls', 0)}, credit waits {f.get('credit_waits', 0)}; "
                                          f"program {f.get('sends', 0)} SENDs {rate_text(f.get('send_bytes', 0)).replace('/s', '')}, {f.get('receives', 0)} RECVs {rate_text(f.get('receive_bytes', 0)).replace('/s', '')}; "
@@ -399,7 +406,7 @@ class Top:
         shown = 0
         for node in self.nodes:
             for bridge in fabric(node).get("bridges") or []:
-                comms, stat = bridge.get("communicators") or [], bridge.get("stat") or {}
+                comms, stat = communicators(bridge), bridge.get("stat") or {}
                 if bridge.get("exited_at") or not (comms or stat.get("clients")): continue
                 shown += 1
                 add(("  ", ""), (f"{node.name} {bridge['region']}", "bold"), (f"   {len(comms)} comms, {len(stat.get('clients') or [])} clients (pids {', '.join(map(str, stat.get('clients') or [])) or '-'})", "dim"))
