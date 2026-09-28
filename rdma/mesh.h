@@ -134,7 +134,8 @@ struct mesh_net_mr {
 struct mesh_net_client { _Alignas(64) _Atomic uint64_t owner; };
 /* A link's live counts, both paths': SENDs that waited for their queue's frames (send_stalls), receives
    held back because their queue's frames or ring span were full, so the peer's SENDs into them waited
-   for credit (receive_stalls), communicator sends taken before their receiver's credit (credit_waits);
+   for credit (receive_stalls), communicator sends announced before their receiver's irecv, which waited
+   for its credit (credit_waits);
    the prepared program's SEND requests and receive records and bytes, the communicators' messages and
    bytes; the session's phase and pairings, and the device's registered regions. */
 struct mesh_net_link {
