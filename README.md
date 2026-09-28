@@ -188,8 +188,8 @@ this depends on the routing layer.
 ## NCCL's API over the bridges
 
 `rdma/nccl.h` is NCCL 2.32.3's header for `rdma/libnccl-mesh.dylib`, which serves NCCL's calls on
-the bridges' communicator sessions; the header's opening comment says what is implemented and how
-the stream and buffers work. Every node runs its bridge (`mesh-flow`); a rank names it by
+the bridges' communicator sessions, their reductions as Metal kernels; the header's opening comment
+says what is implemented and how the stream and buffers work. Every node runs its bridge (`mesh-flow`); a rank names it by
 `MESH_REGION`.
 
 ```
@@ -198,9 +198,10 @@ cc app.c -I rdma -L rdma -lnccl-mesh -Wl,-rpath,$PWD/rdma
 MESH_REGION=/mesh0 MESH_LINKS=links.txt ./app
 ```
 
-`rdma/torch-mesh` is torch.distributed's `mesh` backend over it (CPU and MPS tensors). Installed into
-a venv that has torch, it registers itself when torch is imported, so a script names it alone:
-`torch.distributed.init_process_group(backend="mesh")`.
+`rdma/torch-mesh` is torch.distributed's `mesh` backend over it (CPU and MPS tensors; an MPS tensor of
+`torch_mesh.empty` lies in the bridge's window and is sent and received in place, any other is blitted
+through it on the MPS stream). Installed into a venv that has torch, it registers itself when torch is
+imported, so a script names it alone: `torch.distributed.init_process_group(backend="mesh")`.
 
 ```
 uv pip install --python <venv>/bin/python --no-build-isolation rdma/torch-mesh

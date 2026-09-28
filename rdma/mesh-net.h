@@ -93,6 +93,8 @@ extern const struct mesh_net_v12 mesh_net_plugin;
    window, shared with the bridge, mapped in this process by init. */
 int mesh_net_mem_alloc(void **pointer,size_t size);
 int mesh_net_mem_free(void *pointer);
+/* The whole registered window as this process maps it (for a GPU buffer over it). */
+int mesh_net_window(void **base,size_t *bytes);
 /* The errno behind this thread's last result other than success, and a comm's counts: bytes moved,
    requests completed, sends that waited for credit, requests posted. */
 int mesh_net_error(void);

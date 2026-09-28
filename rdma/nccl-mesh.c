@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,41 +18,71 @@
    the link map over its ranks, and two connections each way with every rank the map links it to:
    channel 0 carries the collectives' steps, channel 1 the point-to-point calls, so that each keeps
    NCCL's matching rule (the k-th send on a connection is the peer's k-th receive on it) whatever the
-   other does.  A collective is mesh_collective_choose's algorithm, and this rank's steps from
-   mesh_collective_plan run in plan order: a SEND an isend of the operand's piece, a COPY an irecv into
-   the operand, a REDUCE an irecv into scratch and its combine into the operand, each piece written
-   only once no isend still reads it.  A group is split by communicator; each communicator's worker
-   thread starts its part in issue order, after its streams' prior work, and runs its collectives;
-   its point-to-point transfers stay in flight while the worker goes on (a send completes only once
-   its peer has posted the receive), and the part is done once both are. */
+   other does.  A collective is mesh_collective_choose's algorithm and this rank's steps from
+   mesh_collective_plan, its operand and each REDUCE step's received piece in the bridge's registered
+   window.  A group ends by placing them there and committing one GPU program (nccl-mesh-metal.m) to
+   the call's stream queue, or to the communicator's own queue for the NULL stream and a stream
+   without a queue: the operands staged in from send buffers in the window (a blit, or the
+   premultiplication kernel), then for each REDUCE step a wait for its arrival, the combine kernel
+   reading the piece where it landed and writing the operand in place, and a signal; the
+   post-division and a blit of the result out; the stream's completion value.  Each communicator's
+   worker thread starts its part of a group in issue order once its streams' prior work is done: a
+   SEND is an isend of the operand's piece (once the GPU has combined it), a COPY an irecv into the
+   operand, a REDUCE an irecv into its piece whose arrival it signals to the GPU; a buffer outside the
+   window is copied in and out on the CPU, as NCCL stages a buffer it has not registered.  Its
+   point-to-point transfers stay in flight while the worker goes on (a send completes only once its
+   peer has posted the receive), and the part is done once both are.  What the library copies and
+   waits for is counted, a call each (ncclMeshGetCounts, ncclMeshGroupCounts). */
 
 enum { CH_COLL, CH_P2P, CHANNELS };
 enum { K_SEND=MESH_ALLGATHER+1, K_RECV };
+enum { CPU_COPY, GPU_COPY, GPU_KERNELS, HOST_WAITS, INPUT_WAITS, COUNTS };
+enum { KERNEL_COMBINE, KERNEL_PREMULTIPLY, KERNEL_POSTDIVIDE };
 #define UID_MAGIC 0x4d4e434cu
+#define FLIGHTS 32
 struct uid { uint32_t magic,version; uint64_t key; };
 _Static_assert(sizeof(struct uid)<=NCCL_UNIQUE_ID_BYTES,"unique id");
 
 struct peer { int dev; void *send[CHANNELS],*recv[CHANNELS]; };
 struct op_entry { int used; ncclDataType_t type; unsigned char scalar[8]; };
+/* A REDUCE step's received piece in the window; the arrivals value the worker signals once it has
+   landed, and the program's value once the GPU has combined it. */
+struct piece { unsigned char *at; uint64_t arrived,combined; };
 struct call {
   int kind; const void *send; void *recv; size_t count; ncclDataType_t type; int op,root,peer;
   struct ncclComm *comm; struct ncclMeshStream *stream; uint32_t how; int force;
   /* resolved when the group ends */
   int combine,premultiply,postdivide; unsigned char scalar[8];
-  uint64_t elements; struct mesh_collective chosen; struct mesh_step *steps; uint32_t nsteps;
+  uint64_t elements; struct mesh_collective chosen; struct mesh_step *steps; struct piece *pieces; uint32_t nsteps;
+  /* placed when the group ends: the operand in the window; the bytes the worker copies on the CPU in
+     (send to `into`) and out (`from` to recv); the arrivals values it signals (staged in, the network
+     done) and the program's values it waits for (premultiplied, ended); a receive from this rank
+     itself that the program copies */
+  unsigned char *operand,*into,*from; size_t in,out;
+  uint64_t staged,premultiplied,networked,ended; int copied;
+  uint64_t *tally;
 };
 struct mark { struct ncclMeshStream *stream; uint64_t wait,done; };
-struct launch { pthread_mutex_t lock; pthread_cond_t cond; int items,sync,nmarks; ncclResult_t result; struct mark *marks; };
+struct tally { _Atomic int refs; int n; uint64_t counts[][COUNTS]; };
+/* A group: its streams' marks; its program's event, the value the workers start at (gate, 0: none,
+   `staged` its GPU copies in) and its last value; its window memory where it has no program. */
+struct launch { pthread_mutex_t lock; pthread_cond_t cond; int items,sync,nmarks,staged; ncclResult_t result; struct mark *marks;
+  void *event,*stage; uint64_t gate,end; struct tally *tally; };
 struct flight;
-struct item { struct call *calls; int n; struct launch *launch; struct item *next; uint64_t deadline; int collectives_done;
-  struct flight *flight; ncclResult_t result; };
+/* A communicator's part of a group: `arrived` its last arrivals value, `final` its done value. */
+struct item { struct call *calls; int n; struct launch *launch; struct item *next; uint64_t deadline,arrived,final;
+  int collectives_done; struct flight *flight; ncclResult_t result; };
 struct ncclComm {
   uint64_t key; int rank,nranks;
   struct mesh_link_map map; double alpha,beta;
   void *net; struct peer *peers;
   uint64_t splits;
   struct op_entry *ops; int nops;
-  unsigned char *stage; size_t stage_bytes; void *stage_mh;
+  /* its own queue and that queue's event; `arrive`, which the worker signals as pieces land (in plan
+     order), and `done`, which it signals as parts finish (in issue order: `next`, the ones done early
+     held back); the values reserved on each; the programs not yet run */
+  void *queue,*event,*arrive,*done; uint64_t event_value,arrive_value,done_value,next,early[FLIGHTS+2]; int nearly;
+  _Atomic int programs;
   pthread_t worker; int started,stopping,finalized;
   pthread_mutex_t lock; pthread_cond_t cond;
   struct item *head,*tail; int busy;
@@ -60,12 +91,23 @@ struct ncclComm {
   char error[512];
 };
 
-__attribute__((visibility("hidden"))) void *nccl_mesh_event_create(void *queue);
-__attribute__((visibility("hidden"))) void nccl_mesh_event_release(void *event);
-__attribute__((visibility("hidden"))) uint64_t nccl_mesh_event_value(void *event);
-__attribute__((visibility("hidden"))) void nccl_mesh_event_signal(void *event,uint64_t value);
-__attribute__((visibility("hidden"))) int nccl_mesh_queue_signal(void *queue,void *event,uint64_t value);
-__attribute__((visibility("hidden"))) int nccl_mesh_queue_wait(void *queue,void *event,uint64_t value);
+#define HIDDEN __attribute__((visibility("hidden")))
+HIDDEN int nccl_mesh_gpu_attach(void *base,size_t bytes,char *error,size_t size);
+HIDDEN int nccl_mesh_gpu_failed(void);
+HIDDEN void *nccl_mesh_queue_create(void);
+HIDDEN void nccl_mesh_retain(void *object);
+HIDDEN void nccl_mesh_release(void *object);
+HIDDEN void *nccl_mesh_event_create(void *queue);
+HIDDEN uint64_t nccl_mesh_event_value(void *event);
+HIDDEN void nccl_mesh_event_signal(void *event,uint64_t value);
+HIDDEN int nccl_mesh_queue_signal(void *queue,void *event,uint64_t value);
+HIDDEN int nccl_mesh_queue_wait(void *queue,void *event,uint64_t value);
+HIDDEN void *nccl_mesh_program_begin(void *queue);
+HIDDEN void nccl_mesh_program_wait(void *program,void *event,uint64_t value);
+HIDDEN void nccl_mesh_program_signal(void *program,void *event,uint64_t value);
+HIDDEN void nccl_mesh_program_kernel(void *program,int kernel,uint64_t dst,uint64_t src,uint64_t n,int type,int op,int nranks,uint64_t scalar);
+HIDDEN void nccl_mesh_program_copy(void *program,uint64_t dst,uint64_t src,uint64_t bytes);
+HIDDEN void nccl_mesh_program_commit(void *program,void (*done)(void *,int),void *argument);
 
 /* ---- errors ---- */
 static _Thread_local char last_error[512];
@@ -92,22 +134,23 @@ static uint64_t mix(uint64_t x){
   return x^(x>>31);
 }
 
+/* ---- counts: the process's, and each call's in its group's tally ---- */
+static _Atomic uint64_t totals[COUNTS];
+static void count(struct call *k,int what,uint64_t amount){
+  if(!amount)return;
+  atomic_fetch_add_explicit(&totals[what],amount,memory_order_relaxed);
+  if(k && k->tally)k->tally[what]+=amount;
+}
+static void tally_release(struct tally *t){if(t && atomic_fetch_sub(&t->refs,1)==1)free(t);}
+
 /* ---- datatypes and operators ---- */
 static const size_t type_bytes[ncclNumTypes]={1,1,4,4,8,8,2,4,8,2,1,1};
 static int integral(ncclDataType_t t){return t<=ncclUint64;}
 
-/* bfloat16 and the two fp8 formats: decoded to double, and a double rounded to nearest even into
-   them (one rounding); fp8 saturates to its largest finite value as NCCL's __NV_SATFINITE does. */
+/* A double rounded to nearest even into bfloat16 or an fp8 format (their scalars: ncclAvg's 1/nranks);
+   fp8 saturates to its largest finite value as NCCL's __NV_SATFINITE does. */
 struct small { int e,m,fn,saturate; };
 static const struct small BF16={8,7,0,0},E4M3={4,3,1,1},E5M2={5,2,0,1};
-static double small_decode(uint32_t bits,struct small f){
-  uint32_t top=(1u<<f.e)-1,exponent=(bits>>f.m)&top,mantissa=bits&((1u<<f.m)-1);
-  int bias=(1<<(f.e-1))-1;double sign=(bits>>(f.e+f.m))&1?-1.0:1.0;
-  if(!f.fn && exponent==top)return mantissa?NAN:sign*INFINITY;
-  if(f.fn && exponent==top && mantissa==(1u<<f.m)-1)return NAN;
-  if(!exponent)return sign*ldexp((double)mantissa,1-bias-f.m);
-  return sign*ldexp((double)(mantissa|(1u<<f.m)),(int)exponent-bias-f.m);
-}
 static uint32_t small_encode(double x,struct small f){
   uint32_t sign=signbit(x)?1u<<(f.e+f.m):0,top=(1u<<f.e)-1;
   int bias=(1<<(f.e-1))-1;
@@ -126,96 +169,15 @@ static uint32_t small_encode(double x,struct small f){
     return f.saturate?sign|largest:sign|(top<<f.m);
   return sign|bits;
 }
-static const struct small *small_of(ncclDataType_t t){return t==ncclBfloat16?&BF16:t==ncclFloat8e4m3?&E4M3:t==ncclFloat8e5m2?&E5M2:NULL;}
-
-/* dst = dst op src, every element one operation of the type (NCCL's FuncSum/FuncProd/FuncMax/FuncMin):
-   integers wrap; float and double natively; half, bfloat16 and fp8 exactly in double, rounded once. */
-#define INTEGER_LOOP(T,U) { T *d=dst;const T *s=src; switch(op){ \
-  case ncclSum: for(size_t i=0;i<n;i++)d[i]=(T)((U)d[i]+(U)s[i]); break; \
-  case ncclProd: for(size_t i=0;i<n;i++)d[i]=(T)((U)d[i]*(U)s[i]); break; \
-  case ncclMax: for(size_t i=0;i<n;i++)if(s[i]>d[i])d[i]=s[i]; break; \
-  default: for(size_t i=0;i<n;i++)if(s[i]<d[i])d[i]=s[i]; } break; }
-/* max and min of floating values: a NaN propagates, and -0 orders below +0 */
-#define MAX_OF(a,b) (isnan(b) || (b)>(a) || ((b)==(a) && !signbit(b) && signbit(a))?(b):(a))
-#define MIN_OF(a,b) (isnan(b) || (b)<(a) || ((b)==(a) && signbit(b) && !signbit(a))?(b):(a))
-#define NATIVE_LOOP(T) { T *d=dst;const T *s=src; switch(op){ \
-  case ncclSum: for(size_t i=0;i<n;i++)d[i]=d[i]+s[i]; break; \
-  case ncclProd: for(size_t i=0;i<n;i++)d[i]=d[i]*s[i]; break; \
-  case ncclMax: for(size_t i=0;i<n;i++)d[i]=MAX_OF(d[i],s[i]); break; \
-  default: for(size_t i=0;i<n;i++)d[i]=MIN_OF(d[i],s[i]); } break; }
-static double apply(int op,double a,double b){
-  switch(op){case ncclSum:return a+b;case ncclProd:return a*b;case ncclMax:return MAX_OF(a,b);default:return MIN_OF(a,b);}
-}
-static void combine(void *dst,const void *src,size_t n,ncclDataType_t t,int op){
-  switch(t){
-  case ncclInt8: INTEGER_LOOP(int8_t,uint32_t)
-  case ncclUint8: INTEGER_LOOP(uint8_t,uint32_t)
-  case ncclInt32: INTEGER_LOOP(int32_t,uint32_t)
-  case ncclUint32: INTEGER_LOOP(uint32_t,uint32_t)
-  case ncclInt64: INTEGER_LOOP(int64_t,uint64_t)
-  case ncclUint64: INTEGER_LOOP(uint64_t,uint64_t)
-  case ncclFloat32: NATIVE_LOOP(float)
-  case ncclFloat64: NATIVE_LOOP(double)
-  case ncclFloat16: { _Float16 *d=dst;const _Float16 *s=src;
-    for(size_t i=0;i<n;i++)d[i]=(_Float16)apply(op,(double)d[i],(double)s[i]); break; }
-  default: { const struct small *f=small_of(t);
-    if(type_bytes[t]==2){uint16_t *d=dst;const uint16_t *s=src;
-      for(size_t i=0;i<n;i++)d[i]=(uint16_t)small_encode(apply(op,small_decode(d[i],*f),small_decode(s[i],*f)),*f);}
-    else{uint8_t *d=dst;const uint8_t *s=src;
-      for(size_t i=0;i<n;i++)d[i]=(uint8_t)small_encode(apply(op,small_decode(d[i],*f),small_decode(s[i],*f)),*f);}
-  }
-  }
-}
-/* dst = src x scalar, one operation of the type (a premultiplication: ncclAvg on floating types,
-   PreMulSum). */
-static void premultiply(void *dst,const void *src,size_t n,ncclDataType_t t,const unsigned char *scalar){
-  switch(t){
-#define SCALE_INT(T,U) { T *d=dst;const T *s=src;T k;memcpy(&k,scalar,sizeof k); for(size_t i=0;i<n;i++)d[i]=(T)((U)s[i]*(U)k); break; }
-  case ncclInt8: SCALE_INT(int8_t,uint32_t)
-  case ncclUint8: SCALE_INT(uint8_t,uint32_t)
-  case ncclInt32: SCALE_INT(int32_t,uint32_t)
-  case ncclUint32: SCALE_INT(uint32_t,uint32_t)
-  case ncclInt64: SCALE_INT(int64_t,uint64_t)
-  case ncclUint64: SCALE_INT(uint64_t,uint64_t)
-  case ncclFloat32: { float *d=dst;const float *s=src;float k;memcpy(&k,scalar,sizeof k); for(size_t i=0;i<n;i++)d[i]=s[i]*k; break; }
-  case ncclFloat64: { double *d=dst;const double *s=src;double k;memcpy(&k,scalar,sizeof k); for(size_t i=0;i<n;i++)d[i]=s[i]*k; break; }
-  case ncclFloat16: { _Float16 *d=dst;const _Float16 *s=src;_Float16 k;memcpy(&k,scalar,sizeof k);
-    for(size_t i=0;i<n;i++)d[i]=(_Float16)((double)s[i]*(double)k); break; }
-  default: { const struct small *f=small_of(t);
-    if(type_bytes[t]==2){uint16_t *d=dst;const uint16_t *s=src;uint16_t k;memcpy(&k,scalar,sizeof k);double v=small_decode(k,*f);
-      for(size_t i=0;i<n;i++)d[i]=(uint16_t)small_encode(small_decode(s[i],*f)*v,*f);}
-    else{uint8_t *d=dst;const uint8_t *s=src;double v=small_decode(scalar[0],*f);
-      for(size_t i=0;i<n;i++)d[i]=(uint8_t)small_encode(small_decode(s[i],*f)*v,*f);}
-  }
-#undef SCALE_INT
-  }
-}
-/* ncclAvg on integer types: the wrapped sum divided by n, truncating toward zero (NCCL's
-   FuncSumPostDiv::divide: the magnitude divided, the sign kept). */
-static void postdivide(void *data,size_t n,ncclDataType_t t,int nranks){
-  switch(t){
-#define DIVIDE_SIGNED(T,U) { T *d=data; for(size_t i=0;i<n;i++){U u=d[i]<0?(U)0-(U)d[i]:(U)d[i];U q=u/(U)nranks;d[i]=d[i]<0?(T)((U)0-q):(T)q;} break; }
-#define DIVIDE_UNSIGNED(T) { T *d=data; for(size_t i=0;i<n;i++)d[i]=(T)(d[i]/(T)nranks); break; }
-  case ncclInt8: DIVIDE_SIGNED(int8_t,uint8_t)
-  case ncclInt32: DIVIDE_SIGNED(int32_t,uint32_t)
-  case ncclInt64: DIVIDE_SIGNED(int64_t,uint64_t)
-  case ncclUint8: DIVIDE_UNSIGNED(uint8_t)
-  case ncclUint32: DIVIDE_UNSIGNED(uint32_t)
-  case ncclUint64: DIVIDE_UNSIGNED(uint64_t)
-  default: break;
-#undef DIVIDE_SIGNED
-#undef DIVIDE_UNSIGNED
-  }
-}
 /* 1/nranks rounded to the type (ncclAvg's premultiplier on floating types: 1/n as a double, then
-   the type). */
+   the type); the GPU's premultiply kernel applies it. */
 static void reciprocal(unsigned char *scalar,ncclDataType_t t,int nranks){
   double v=1.0/nranks;
   memset(scalar,0,8);
   if(t==ncclFloat32){float k=(float)v;memcpy(scalar,&k,4);}
   else if(t==ncclFloat64)memcpy(scalar,&v,8);
   else if(t==ncclFloat16){_Float16 k=(_Float16)v;memcpy(scalar,&k,2);}
-  else{uint32_t bits=small_encode(v,*small_of(t));memcpy(scalar,&bits,type_bytes[t]);}
+  else{uint32_t bits=small_encode(v,t==ncclBfloat16?BF16:t==ncclFloat8e4m3?E4M3:E5M2);memcpy(scalar,&bits,type_bytes[t]);}
 }
 
 /* ---- the link map over a communicator's ranks ---- */
@@ -321,28 +283,30 @@ static ncclResult_t connect_peers(struct ncclComm *c){
 /* ---- window memory ---- */
 static pthread_mutex_t global_lock=PTHREAD_MUTEX_INITIALIZER;
 static void *global_net;
+/* The bridge's registered window: named once for every request, and one GPU buffer over it. */
+static struct { unsigned char *base; size_t bytes; void *mh; } window;
 static ncclResult_t global_attach(void){
+  ncclResult_t status=ncclSuccess;
   pthread_mutex_lock(&global_lock);
-  int result=global_net?0:mesh_net_init(&global_net,0,NULL,NULL,NULL);
+  if(!window.base){
+    void *base=NULL,*mh=NULL;size_t bytes=0;char error[256];
+    int result=global_net?0:mesh_net_init(&global_net,0,NULL,NULL,NULL);
+    if(!result)result=mesh_net_window(&base,&bytes);
+    if(!result)result=mesh_net_reg_mr(NULL,base,bytes,MESH_NET_PTR_HOST,&mh);
+    if(result)status=net_failure(NULL,result,"mesh_net_init (the bridge region MESH_REGION)");
+    else if(nccl_mesh_gpu_attach(base,bytes,error,sizeof error)){mesh_net_dereg_mr(NULL,mh);status=FAIL(NULL,ncclUnhandledCudaError,"the GPU: %s",error);}
+    else{window.base=base;window.bytes=bytes;window.mh=mh;}
+  }
   pthread_mutex_unlock(&global_lock);
-  return result?net_failure(NULL,result,"mesh_net_init (the bridge region MESH_REGION)"):ncclSuccess;
+  return status;
 }
-static int in_window(const void *pointer,size_t bytes,void **mhandle){
-  *mhandle=NULL;
-  return bytes && !mesh_net_reg_mr(NULL,(void *)pointer,bytes,MESH_NET_PTR_HOST,mhandle);
+static int in_window(const void *pointer,size_t bytes){
+  const unsigned char *p=pointer;
+  return bytes && window.base && p>=window.base && (size_t)(p-window.base)<=window.bytes && bytes<=window.bytes-(size_t)(p-window.base);
 }
-static ncclResult_t stage_reserve(struct ncclComm *c,size_t bytes){
-  if(bytes<=c->stage_bytes)return ncclSuccess;
-  if(c->stage){mesh_net_dereg_mr(NULL,c->stage_mh);mesh_net_mem_free(c->stage);c->stage=NULL;c->stage_bytes=0;}
-  size_t size=(bytes+(1u<<20)-1)&~(size_t)((1u<<20)-1);
-  void *pointer=NULL;
-  int result=mesh_net_mem_alloc(&pointer,size);
-  if(result)return net_failure(c,result,"staging memory from the bridge's registered window");
-  if((result=mesh_net_reg_mr(NULL,pointer,size,MESH_NET_PTR_HOST,&c->stage_mh))){mesh_net_mem_free(pointer);return net_failure(c,result,"mesh_net_reg_mr");}
-  c->stage=pointer;c->stage_bytes=size;
-  return ncclSuccess;
-}
+static uint64_t at(const void *pointer){return (uint64_t)((const unsigned char *)pointer-window.base);}
 static size_t aligned(size_t bytes){return (bytes+4095)&~(size_t)4095;}
+static size_t slice(size_t bytes){return (bytes+255)&~(size_t)255;}
 
 /* ---- requests ---- */
 struct pending { size_t lo,hi; void *request; };
@@ -391,89 +355,98 @@ static ncclResult_t post(struct ncclComm *c,int send,void *comm,void *data,size_
   }
 }
 
+
+/* The worker waits for the program's event to reach `value` (the library's own GPU work), the
+   point-to-point transfers moving meanwhile. */
+static ncclResult_t gpu_wait(struct ncclComm *c,struct call *k,void *event,uint64_t value,uint64_t deadline,const char *what){
+  count(k,HOST_WAITS,1);
+  while(nccl_mesh_event_value(event)<value){
+    if(nccl_mesh_gpu_failed())return FAIL(c,ncclUnhandledCudaError,"%s: a GPU program failed",what);
+    if(stopped(c,deadline))return stop_reason(c,what);
+    progress(c);
+    sched_yield();
+  }
+  return ncclSuccess;
+}
+
 /* ---- one collective ---- */
-/* The operand: in recvbuff itself where recvbuff lies in the registered window and holds the whole
-   result (all-reduce, broadcast, all-gather, a reduce's root), else window memory; stage in (the
-   contribution, premultiplied where the operator says), this rank's plan, stage out (the result,
-   post-divided where the operator says). */
-static ncclResult_t run_collective(struct ncclComm *c,struct call *k,unsigned char *stage,uint64_t deadline){
-  const size_t e=type_bytes[k->type],bytes=(size_t)k->elements*e,part=k->count*e;
-  const int r=c->rank,root=k->root,what=k->kind;
-  unsigned char *operand=stage,*scratch=stage+aligned(bytes);
-  void *operand_mh=c->stage_mh,*own=NULL;
-  if(k->recv && (what==MESH_ALLREDUCE || what==MESH_BROADCAST || what==MESH_ALLGATHER || (what==MESH_REDUCE && r==root)) &&
-     in_window(k->recv,bytes,&own)){operand=k->recv;operand_mh=own;}
-  const unsigned char *send=k->send;
-  if(what==MESH_ALLREDUCE || what==MESH_REDUCE || what==MESH_REDUCE_SCATTER){
-    if(k->premultiply)premultiply(operand,send,k->elements,k->type,k->scalar);
-    else if(operand!=send)memmove(operand,send,bytes);
-  } else if(what==MESH_BROADCAST){if(r==root && operand!=send)memmove(operand,send,bytes);}
-  else if(operand+(size_t)r*part!=send)memmove(operand+(size_t)r*part,send,part);
+/* The worker's side of a collective the group's end placed: the send buffer copied into the operand
+   on the CPU where it lies outside the window, this rank's plan, the result copied out where recv
+   lies outside it.  A piece the GPU combines is sent, or landed on, only once it has combined it. */
+struct combined { size_t lo,hi; uint64_t value; };
+static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct launch *l,uint64_t deadline){
+  const size_t e=type_bytes[k->type];
   ncclResult_t status=ncclSuccess;
-  struct pending *sends=calloc(k->nsteps?k->nsteps:1,sizeof *sends);int count=0;
+  if(k->in){memmove(k->into,k->send,k->in);count(k,CPU_COPY,k->in);}
+  if(k->staged)nccl_mesh_event_signal(c->arrive,k->staged);
+  if(k->premultiplied)status=gpu_wait(c,k,l->event,k->premultiplied,deadline,"the premultiplication");
+  struct pending *sends=calloc(k->nsteps?k->nsteps:1,sizeof *sends);int count_=0;
+  struct combined *done=calloc(k->nsteps?k->nsteps:1,sizeof *done);int ndone=0;uint64_t seen=0;
   void *used[64];int nused=0;
-  if(!sends)status=FAIL(c,ncclSystemError,"allocation");
+  if(!status && (!sends || !done))status=FAIL(c,ncclSystemError,"allocation");
   for(uint32_t i=0;i<k->nsteps && !status;i++){
     const struct mesh_step *s=k->steps+i;
     const size_t lo=s->first*e,length=s->piece.elements*e;
     struct peer *p=c->peers+s->peer;
     void *request=NULL;
     if(!length)continue;
+    if(s->op!=MESH_STEP_REDUCE){
+      uint64_t need=0;
+      for(int j=0;j<ndone;j++)if(done[j].lo<lo+length && lo<done[j].hi && done[j].value>need)need=done[j].value;
+      if(need>seen){if((status=gpu_wait(c,k,l->event,need,deadline,"a combine")))break;seen=need;}
+    }
     if(s->op==MESH_STEP_SEND){
-      if(!(status=post(c,1,p->send[CH_COLL],operand+lo,length,operand_mh,sends,&count,deadline,&request)))
-        sends[count++]=(struct pending){lo,lo+length,request};
+      if(!(status=post(c,1,p->send[CH_COLL],k->operand+lo,length,window.mh,sends,&count_,deadline,&request)))
+        sends[count_++]=(struct pending){lo,lo+length,request};
       continue;
     }
-    int seen=0;
-    for(int u=0;u<nused;u++)seen|=used[u]==p->recv[CH_COLL];
-    if(!seen && nused<64)used[nused++]=p->recv[CH_COLL];
-    /* a piece is written only once no isend still reads it */
-    for(int j=0;j<count && !status && s->op==MESH_STEP_COPY;)
-      if(sends[j].lo<lo+length && lo<sends[j].hi){status=await(c,sends[j].request,SIZE_MAX,NULL,NULL,deadline,"an isend");sends[j]=sends[--count];}
+    int known=0;
+    for(int u=0;u<nused;u++)known|=used[u]==p->recv[CH_COLL];
+    if(!known && nused<64)used[nused++]=p->recv[CH_COLL];
+    /* a piece of the operand is written only once no isend still reads it */
+    for(int j=0;j<count_ && !status && s->op==MESH_STEP_COPY;)
+      if(sends[j].lo<lo+length && lo<sends[j].hi){status=await(c,sends[j].request,SIZE_MAX,NULL,NULL,deadline,"an isend");sends[j]=sends[--count_];}
       else j++;
     if(status)break;
-    unsigned char *into=s->op==MESH_STEP_COPY?operand:scratch;
-    if((status=post(c,0,p->recv[CH_COLL],into+lo,length,s->op==MESH_STEP_COPY?operand_mh:c->stage_mh,sends,&count,deadline,&request)))break;
-    if((status=await(c,request,length,sends,&count,deadline,s->op==MESH_STEP_COPY?"a COPY step's irecv":"a REDUCE step's irecv")))break;
+    unsigned char *into=s->op==MESH_STEP_COPY?k->operand+lo:k->pieces[i].at;
+    if((status=post(c,0,p->recv[CH_COLL],into,length,window.mh,sends,&count_,deadline,&request)))break;
+    if((status=await(c,request,length,sends,&count_,deadline,s->op==MESH_STEP_COPY?"a COPY step's irecv":"a REDUCE step's irecv")))break;
     if(s->op==MESH_STEP_REDUCE){
-      for(int j=0;j<count && !status;)
-        if(sends[j].lo<lo+length && lo<sends[j].hi){status=await(c,sends[j].request,SIZE_MAX,NULL,NULL,deadline,"an isend");sends[j]=sends[--count];}
+      for(int j=0;j<count_ && !status;)
+        if(sends[j].lo<lo+length && lo<sends[j].hi){status=await(c,sends[j].request,SIZE_MAX,NULL,NULL,deadline,"an isend");sends[j]=sends[--count_];}
         else j++;
-      if(!status)combine(operand+lo,scratch+lo,s->piece.elements,k->type,k->combine);
+      if(!status){
+        nccl_mesh_event_signal(c->arrive,k->pieces[i].arrived);
+        done[ndone++]=(struct combined){lo,lo+length,k->pieces[i].combined};
+      }
     }
   }
-  while(count && !status){status=await(c,sends[count-1].request,SIZE_MAX,NULL,NULL,deadline,"an isend");count--;}
+  while(count_ && !status){status=await(c,sends[count_-1].request,SIZE_MAX,NULL,NULL,deadline,"an isend");count_--;}
   for(int u=0;u<nused && !status;u++){
     void *flush=NULL;int result=mesh_net_iflush(used[u],1,NULL,NULL,NULL,&flush);
     if(result)status=net_failure(c,result,"mesh_net_iflush");
     else if(flush)status=await(c,flush,SIZE_MAX,NULL,NULL,deadline,"an iflush");
   }
-  free(sends);
-  if(!status){
-    unsigned char *result=what==MESH_REDUCE_SCATTER?operand+(size_t)r*part:operand;
-    size_t length=what==MESH_REDUCE_SCATTER?part:bytes;
-    if(what==MESH_REDUCE && r!=root)length=0;
-    if(length && k->postdivide)postdivide(result,length/e,k->type,c->nranks);
-    if(length && result!=(unsigned char *)k->recv)memmove(k->recv,result,length);
-  }
-  if(own)mesh_net_dereg_mr(NULL,own);
+  free(sends);free(done);
+  if(!status && k->networked)nccl_mesh_event_signal(c->arrive,k->networked);
+  if(!status && k->out && k->ended)status=gpu_wait(c,k,l->event,k->ended,deadline,"the result");
+  if(!status && k->out){memmove(k->recv,k->from,k->out);count(k,CPU_COPY,k->out);}
   return status;
 }
 
 /* ---- one communicator's part of a group ---- */
-struct transfer { int send; struct peer *peer; unsigned char *window,*user; size_t bytes; void *mhandle,*request; int state; };
+struct transfer { int send; struct peer *peer; unsigned char *window,*user; size_t bytes; void *request; int state; struct call *call; };
 /* A part's point-to-point transfers, in flight: posted in order on each connection (across every
    flight, oldest first) as far as its request ring takes them, tested, and retired together. */
-struct flight { struct item *it; struct transfer *t; int n,remaining; void *stage,*stage_mh; ncclResult_t status; struct flight *next; };
-#define FLIGHTS 32
+struct flight { struct item *it; struct transfer *t; int n,remaining; void *stage; ncclResult_t status; struct flight *next; };
 
 static void finish(struct ncclComm *c,struct item *it,ncclResult_t result);
 /* A flight done: received data out of its staging, its memory released, and its part finished if its
    collectives are. */
 static void retire(struct ncclComm *c,struct flight *f){
-  for(int j=0;j<f->n && !f->status;j++)if(!f->t[j].send && f->t[j].window!=f->t[j].user)memcpy(f->t[j].user,f->t[j].window,f->t[j].bytes);
-  for(int j=0;j<f->n;j++)if(f->t[j].window==f->t[j].user && f->t[j].mhandle)mesh_net_dereg_mr(NULL,f->t[j].mhandle);
-  if(f->stage){mesh_net_dereg_mr(NULL,f->stage_mh);mesh_net_mem_free(f->stage);}
+  for(int j=0;j<f->n && !f->status;j++)
+    if(!f->t[j].send && f->t[j].window!=f->t[j].user){memcpy(f->t[j].user,f->t[j].window,f->t[j].bytes);count(f->t[j].call,CPU_COPY,f->t[j].bytes);}
+  if(f->stage)mesh_net_mem_free(f->stage);
   struct item *it=f->it;
   it->flight=NULL;
   if(f->status){if(!it->result)it->result=f->status;atomic_store(&c->broken,1);}
@@ -489,9 +462,9 @@ static void progress(struct ncclComm *c){
     for(int j=0;j<f->n && !f->status;j++){
       struct transfer *x=f->t+j;int slot=(int)(x->peer-c->peers)*2+x->send;
       if(x->state==0 && !c->blocked[slot]){
-        void *comm=x->send?x->peer->send[CH_P2P]:x->peer->recv[CH_P2P],*data=x->window;size_t size=x->bytes;
-        int result=x->send?mesh_net_isend(comm,data,size,0,x->mhandle,NULL,&x->request):
-          mesh_net_irecv(comm,1,&data,&size,(int[]){0},&x->mhandle,NULL,&x->request);
+        void *comm=x->send?x->peer->send[CH_P2P]:x->peer->recv[CH_P2P],*data=x->window,*mh=window.mh;size_t size=x->bytes;
+        int result=x->send?mesh_net_isend(comm,data,size,0,mh,NULL,&x->request):
+          mesh_net_irecv(comm,1,&data,&size,(int[]){0},&mh,NULL,&x->request);
         if(result)f->status=net_failure(c,result,x->send?"a send's isend":"a receive's irecv");
         else if(x->request)x->state=1;
       }
@@ -512,36 +485,30 @@ static void progress(struct ncclComm *c){
   }
 }
 
-/* A part started: sends to and receives from this rank itself copied (the k-th with the k-th), the
-   other point-to-point calls put in flight, then the collectives run in issue order; the part is
-   finished here, or when its flight retires. */
+/* A part started: sends to and receives from this rank itself copied on the CPU where the program does
+   not (the k-th with the k-th), the other point-to-point calls put in flight, then the collectives run
+   in issue order; the part is finished here, or when its flight retires. */
 static void start(struct ncclComm *c,struct item *it){
+  struct launch *l=it->launch;
   ncclResult_t status=atomic_load(&c->broken)?FAIL(c,ncclRemoteError,"the communicator failed earlier: %s",c->error):ncclSuccess;
-  size_t p2p=0,largest=0;
-  int transfers=0,collectives=0;
+  if(it->n)count(it->calls,l->staged?HOST_WAITS:INPUT_WAITS,l->staged || l->gate || l->nmarks);
+  size_t p2p=0;
+  int transfers=0;
   for(int i=0;i<it->n;i++){
     struct call *k=it->calls+i;
-    size_t bytes=k->count*type_bytes[k->type];void *mh;
-    if(k->kind>=K_SEND){
-      if(k->peer==c->rank)continue;
-      transfers++;
-      if(in_window(k->kind==K_SEND?k->send:k->recv,bytes,&mh))mesh_net_dereg_mr(NULL,mh);
-      else p2p+=aligned(bytes);
-    } else {
-      size_t operand=aligned((size_t)k->elements*type_bytes[k->type]);
-      if(2*operand>largest)largest=2*operand;
-      collectives++;
-    }
+    if(k->kind<K_SEND || k->peer==c->rank)continue;
+    transfers++;
+    if(!in_window(k->kind==K_SEND?k->send:k->recv,k->count*type_bytes[k->type]))p2p+=aligned(k->count*type_bytes[k->type]);
   }
   for(int i=0;i<it->n && !status;i++){
     struct call *k=it->calls+i;
-    if(k->kind!=K_RECV || k->peer!=c->rank)continue;
+    if(k->kind!=K_RECV || k->peer!=c->rank || k->copied)continue;
     int sends=0,receives=0;const struct call *mine=NULL;
     for(int j=0;j<i;j++)receives+=it->calls[j].kind==K_RECV && it->calls[j].peer==c->rank;
     for(int j=0;j<it->n && !mine;j++)if(it->calls[j].kind==K_SEND && it->calls[j].peer==c->rank && sends++==receives)mine=it->calls+j;
     if(!mine)status=FAIL(c,ncclInvalidUsage,"a receive from this rank itself has no matching send to itself in the group");
     else if(mine->count*type_bytes[mine->type]!=k->count*type_bytes[k->type])status=FAIL(c,ncclInvalidUsage,"a send to itself and its receive differ in size");
-    else memmove(k->recv,mine->send,k->count*type_bytes[k->type]);
+    else{memmove(k->recv,mine->send,k->count*type_bytes[k->type]);count(k,CPU_COPY,k->count*type_bytes[k->type]);}
   }
   if(!status && transfers){
     struct flight *f=calloc(1,sizeof *f);
@@ -549,20 +516,17 @@ static void start(struct ncclComm *c,struct item *it){
     if(f)f->t=calloc((size_t)transfers,sizeof *f->t);
     if(!f || !f->t)status=FAIL(c,ncclSystemError,"allocation");
     else if(p2p && (result=mesh_net_mem_alloc(&f->stage,p2p)))status=net_failure(c,result,"staging memory from the bridge's registered window");
-    else if(p2p && (result=mesh_net_reg_mr(NULL,f->stage,p2p,MESH_NET_PTR_HOST,&f->stage_mh))){
-      mesh_net_mem_free(f->stage);f->stage=NULL;status=net_failure(c,result,"mesh_net_reg_mr");
-    }
     if(status){if(f)free(f->t);free(f);}
     else{
-      unsigned char *at=f->stage;
+      unsigned char *next=f->stage;
       for(int i=0;i<it->n;i++){
         struct call *k=it->calls+i;
         if(k->kind<K_SEND || k->peer==c->rank)continue;
         size_t bytes=k->count*type_bytes[k->type];
         struct transfer *x=f->t+f->n++;
-        *x=(struct transfer){.send=k->kind==K_SEND,.peer=c->peers+k->peer,.user=k->kind==K_SEND?(unsigned char *)k->send:k->recv,.bytes=bytes};
-        if(in_window(x->user,bytes,&x->mhandle))x->window=x->user;
-        else{x->window=at;at+=aligned(bytes);x->mhandle=f->stage_mh;if(x->send)memcpy(x->window,x->user,bytes);}
+        *x=(struct transfer){.send=k->kind==K_SEND,.peer=c->peers+k->peer,.user=k->kind==K_SEND?(unsigned char *)k->send:k->recv,.bytes=bytes,.call=k};
+        if(in_window(x->user,bytes))x->window=x->user;
+        else{x->window=next;next+=aligned(bytes);if(x->send){memcpy(x->window,x->user,bytes);count(k,CPU_COPY,bytes);}}
       }
       f->remaining=f->n;f->it=it;it->flight=f;
       struct flight **end=&c->flights;
@@ -572,8 +536,9 @@ static void start(struct ncclComm *c,struct item *it){
       progress(c);
     }
   }
-  if(!status && collectives)status=stage_reserve(c,largest);
-  for(int i=0;i<it->n && !status;i++)if(it->calls[i].kind<K_SEND)status=run_collective(c,it->calls+i,c->stage,it->deadline);
+  for(int i=0;i<it->n && !status;i++)if(it->calls[i].kind<K_SEND)status=run_collective(c,it->calls+i,l,it->deadline);
+  /* every arrival the program waits for, whatever happened */
+  if(it->arrived)nccl_mesh_event_signal(c->arrive,it->arrived);
   if(status){
     if(!it->result)it->result=status;
     if(status!=ncclInvalidArgument)atomic_store(&c->broken,1);
@@ -583,25 +548,40 @@ static void start(struct ncclComm *c,struct item *it){
 }
 
 /* ---- the worker: a communicator's parts of groups, started in issue order ---- */
+static void launch_free(struct launch *l){
+  pthread_mutex_destroy(&l->lock);pthread_cond_destroy(&l->cond);
+  if(l->stage)mesh_net_mem_free(l->stage);
+  tally_release(l->tally);free(l->marks);free(l);
+}
+/* A part's done value signalled once every earlier part's is (flights retire out of order). */
+static void part_done(struct ncclComm *c,uint64_t value){
+  if(value!=c->next+1){if(c->nearly<FLIGHTS+2)c->early[c->nearly++]=value;return;}
+  for(int found=1;found;){
+    nccl_mesh_event_signal(c->done,++c->next);
+    found=0;
+    for(int i=0;i<c->nearly;i++)if(c->early[i]==c->next+1){c->early[i]=c->early[--c->nearly];found=1;break;}
+  }
+}
 static void finish(struct ncclComm *c,struct item *it,ncclResult_t result){
   struct launch *l=it->launch;
+  if(it->final)part_done(c,it->final);
   pthread_mutex_lock(&l->lock);
   if(result && !l->result)l->result=result;
   int last=!--l->items;
-  if(last)for(int m=0;m<l->nmarks;m++)nccl_mesh_event_signal(l->marks[m].stream->event,l->marks[m].done);
   if(result && !l->sync){int none=0;atomic_compare_exchange_strong(&c->async,&none,(int)result);}
   int sync=l->sync;
   if(last && sync)pthread_cond_broadcast(&l->cond);
   pthread_mutex_unlock(&l->lock);
-  if(last && !sync){pthread_mutex_destroy(&l->lock);pthread_cond_destroy(&l->cond);free(l->marks);free(l);}
-  for(int i=0;i<it->n;i++)free(it->calls[i].steps);
+  if(last && !sync)launch_free(l);
+  for(int i=0;i<it->n;i++){free(it->calls[i].steps);free(it->calls[i].pieces);}
   free(it->calls);free(it);
 }
-/* Whether the part's streams have reached its prior work's values. */
+/* Whether the part's streams have reached its prior work's values, and its program its gate. */
 static int ready(struct item *it){
-  for(int m=0;m<it->launch->nmarks;m++)
-    if(nccl_mesh_event_value(it->launch->marks[m].stream->event)<it->launch->marks[m].wait)return 0;
-  return 1;
+  struct launch *l=it->launch;
+  for(int m=0;m<l->nmarks;m++)
+    if(l->marks[m].wait && nccl_mesh_event_value(l->marks[m].stream->event)<l->marks[m].wait)return 0;
+  return !l->gate || nccl_mesh_event_value(l->event)>=l->gate;
 }
 static void *worker(void *argument){
   struct ncclComm *c=argument;
@@ -616,13 +596,17 @@ static void *worker(void *argument){
     progress(c);
     if(it && room){
       int go=ready(it);
+      if(!go && nccl_mesh_gpu_failed()){go=1;it->result=FAIL(c,ncclUnhandledCudaError,"waiting for the stream's prior work: a GPU program failed");}
       if(!go && stopped(c,it->deadline)){go=1;it->result=stop_reason(c,"waiting for the stream's prior work");}
       if(go){
         pthread_mutex_lock(&c->lock);
         c->head=it->next;if(!c->head)c->tail=NULL;
         c->busy=1;
         pthread_mutex_unlock(&c->lock);
-        if(it->result){it->collectives_done=1;finish(c,it,it->result);}
+        if(it->result){
+          if(it->arrived)nccl_mesh_event_signal(c->arrive,it->arrived);
+          it->collectives_done=1;finish(c,it,it->result);
+        }
         else start(c,it);
         pthread_mutex_lock(&c->lock);
         c->busy=0;pthread_cond_broadcast(&c->cond);
@@ -653,16 +637,27 @@ static void comm_free(struct ncclComm *c){
     pthread_mutex_lock(&c->lock);c->stopping=1;pthread_cond_broadcast(&c->cond);pthread_mutex_unlock(&c->lock);
     pthread_join(c->worker,NULL);
   }
+  /* the programs that wait for its events run first */
+  for(uint64_t deadline=deadline_after();atomic_load(&c->programs) && !nccl_mesh_gpu_failed() && now_ns()<deadline;)usleep(100);
   close_peers(c);
-  if(c->stage){mesh_net_dereg_mr(NULL,c->stage_mh);mesh_net_mem_free(c->stage);}
   if(c->net)mesh_net_finalize(c->net);
   mesh_link_map_free(&c->map);
+  if(c->done)nccl_mesh_release(c->done);
+  if(c->arrive)nccl_mesh_release(c->arrive);
+  if(c->event)nccl_mesh_release(c->event);
+  if(c->queue)nccl_mesh_release(c->queue);
   pthread_mutex_destroy(&c->lock);pthread_cond_destroy(&c->cond);
   free(c->peers);free(c->blocked);free(c->ops);free(c);
 }
-/* Attached to the bridge, connected to every linked rank, its worker started. */
+/* Attached to the bridge, its GPU queue and events made, connected to every linked rank, its worker
+   started. */
 static ncclResult_t comm_start(struct ncclComm *c){
   ncclResult_t status=global_attach();
+  if(!status){
+    c->queue=nccl_mesh_queue_create();
+    if(c->queue){c->event=nccl_mesh_event_create(c->queue);c->arrive=nccl_mesh_event_create(c->queue);c->done=nccl_mesh_event_create(c->queue);}
+    if(!c->event || !c->arrive || !c->done)status=FAIL(c,ncclUnhandledCudaError,"the communicator's Metal queue and events");
+  }
   int result=status?0:mesh_net_init(&c->net,c->key,NULL,NULL,NULL);
   if(!status && result)status=net_failure(c,result,"mesh_net_init (the bridge region MESH_REGION)");
   if(!status)status=connect_peers(c);
@@ -810,7 +805,7 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op,ncclComm_t comm){
 
 /* ---- groups ---- */
 static _Thread_local struct { int depth,n,capacity; struct call *calls; ncclResult_t error; } group;
-static _Thread_local struct { int n; int how[4096],root[4096]; } plans;
+static _Thread_local struct { int n; int how[4096],root[4096]; struct tally *tally; } plans;
 static pthread_mutex_t stream_lock=PTHREAD_MUTEX_INITIALIZER;
 
 ncclResult_t ncclGroupStart(void){group.depth++;return ncclSuccess;}
@@ -847,7 +842,8 @@ static ncclResult_t resolve(struct call *k){
     return FAIL(c,ncclInvalidUsage,"no algorithm of the selection %#x carries this collective (%d) of %llu elements on the communicator's link map",
       k->how,k->kind,(unsigned long long)k->elements);
   k->steps=calloc(MESH_COLLECTIVE_STEPS(c->nranks),sizeof *k->steps);
-  if(!k->steps)return FAIL(c,ncclSystemError,"allocation");
+  k->pieces=calloc(MESH_COLLECTIVE_STEPS(c->nranks),sizeof *k->pieces);
+  if(!k->steps || !k->pieces)return FAIL(c,ncclSystemError,"allocation");
   k->nsteps=mesh_collective_plan(&c->map,(uint32_t)c->rank,k->chosen,operand,k->steps);
   if(!k->nsteps)return FAIL(c,ncclInternalError,"the planner gave rank %d no steps",c->rank);
   for(uint32_t i=0;i<k->nsteps;i++)if(!c->peers[k->steps[i].peer].send[CH_COLL])
@@ -856,9 +852,175 @@ static ncclResult_t resolve(struct call *k){
 }
 
 static void calls_free(struct call *calls,int n){
-  for(int i=0;i<n;i++)free(calls[i].steps);
+  for(int i=0;i<n;i++){free(calls[i].steps);free(calls[i].pieces);}
   free(calls);
 }
+
+/* ---- a group's placement in the window and its GPU program ---- */
+/* The operand lies in recv itself where recv is in the window and holds the whole result (all-reduce,
+   broadcast, all-gather, a reduce's root), else in the group's window memory with the pieces. */
+static int in_place(const struct call *k){
+  int whole=k->kind==MESH_ALLREDUCE || k->kind==MESH_BROADCAST || k->kind==MESH_ALLGATHER || (k->kind==MESH_REDUCE && k->comm->rank==k->root);
+  return k->recv && whole && in_window(k->recv,(size_t)k->elements*type_bytes[k->type]);
+}
+static ncclResult_t place(struct call *calls,int n,void **stage){
+  *stage=NULL;
+  for(int pass=0;pass<2;pass++){
+    size_t used=0;
+    for(int i=0;i<n;i++){
+      struct call *k=calls+i;
+      if(k->kind>=K_SEND)continue;
+      const size_t e=type_bytes[k->type];
+      if(in_place(k))k->operand=k->recv;
+      else{if(pass)k->operand=(unsigned char *)*stage+used;used+=slice((size_t)k->elements*e);}
+      for(uint32_t s=0;s<k->nsteps;s++)if(k->steps[s].op==MESH_STEP_REDUCE){
+        if(pass)k->pieces[s].at=(unsigned char *)*stage+used;
+        used+=slice(k->steps[s].piece.elements*e);
+      }
+    }
+    if(!pass){
+      if(!used)return ncclSuccess;
+      int result=mesh_net_mem_alloc(stage,used);
+      if(result)return net_failure(NULL,result,"the group's operands in the bridge's registered window");
+    }
+  }
+  return ncclSuccess;
+}
+/* A collective's operand before the network, from send (the contribution, the root's data, this
+   rank's segment), and its result in the operand: bytes, and where. */
+static size_t input(const struct call *k,unsigned char **to){
+  const size_t part=k->count*type_bytes[k->type];
+  *to=k->kind==MESH_ALLGATHER?k->operand+(size_t)k->comm->rank*part:k->operand;
+  return k->kind==MESH_ALLGATHER?part:k->kind==MESH_BROADCAST && k->comm->rank!=k->root?0:(size_t)k->elements*type_bytes[k->type];
+}
+static size_t output(const struct call *k,unsigned char **from){
+  const size_t part=k->count*type_bytes[k->type];
+  *from=k->kind==MESH_REDUCE_SCATTER?k->operand+(size_t)k->comm->rank*part:k->operand;
+  return k->kind==MESH_REDUCE_SCATTER?part:k->kind==MESH_REDUCE && k->comm->rank!=k->root?0:(size_t)k->elements*type_bytes[k->type];
+}
+static int reduces(const struct call *k){
+  for(uint32_t s=0;s<k->nsteps;s++)if(k->steps[s].op==MESH_STEP_REDUCE)return 1;
+  return 0;
+}
+/* Whether collective k gives the GPU work: a premultiplication, a combine, a post-division, a copy
+   within the window. */
+static int gpu_work(const struct call *k){
+  unsigned char *to,*from;
+  size_t in=input(k,&to),out=output(k,&from);
+  if(in && (k->premultiply || (to!=(const unsigned char *)k->send && in_window(k->send,in))))return 1;
+  if(reduces(k) || (out && k->postdivide))return 1;
+  return out && from!=(unsigned char *)k->recv && in_window(k->recv,out);
+}
+/* A receive from this rank itself whose send (the k-th with the k-th) the program copies, both in the
+   window. */
+static const struct call *self_copy(const struct call *calls,int n,int i){
+  const struct call *k=calls+i;
+  if(k->kind!=K_RECV || k->peer!=k->comm->rank)return NULL;
+  int sends=0,receives=0;
+  for(int j=0;j<i;j++)receives+=calls[j].kind==K_RECV && calls[j].comm==k->comm && calls[j].peer==k->comm->rank;
+  size_t bytes=k->count*type_bytes[k->type];
+  for(int j=0;j<n;j++)
+    if(calls[j].kind==K_SEND && calls[j].comm==k->comm && calls[j].peer==k->comm->rank && sends++==receives)
+      return calls[j].count*type_bytes[calls[j].type]==bytes && in_window(calls[j].send,bytes) && in_window(k->recv,bytes)?calls+j:NULL;
+  return NULL;
+}
+static void kernel(void *program,struct call *k,int which,const void *dst,const void *src,uint64_t n,int op){
+  uint64_t scalar;memcpy(&scalar,k->scalar,8);
+  nccl_mesh_program_kernel(program,which,at(dst),at(src),n,(int)k->type,op,k->comm->nranks,scalar);
+  count(k,GPU_KERNELS,1);
+}
+static void blit(void *program,struct call *k,void *dst,const void *src,size_t bytes){
+  nccl_mesh_program_copy(program,at(dst),at(src),bytes);
+  count(k,GPU_COPY,bytes);
+}
+/* What a program holds until the GPU has run it: its window memory, the streams' events, and a count on
+   each communicator whose events it waits for. */
+struct ran { void *stage; int ncomms,nevents; struct ncclComm **comms; void **events; };
+static void program_ran(void *argument,int failed){
+  (void)failed;
+  struct ran *r=argument;
+  if(r->stage)mesh_net_mem_free(r->stage);
+  for(int i=0;i<r->nevents;i++)nccl_mesh_release(r->events[i]);
+  for(int i=0;i<r->ncomms;i++)atomic_fetch_sub(&r->comms[i]->programs,1);
+  free(r);
+}
+
+/* The group's CPU copies, and its program (on the one stream's queue, else its first communicator's):
+   the streams' prior work waited for, the operands staged in from the window and the gate after them; each
+   collective's premultiplication of a CPU-staged operand, its combines as its pieces arrive, its
+   post-division and copy out once its network is done; each communicator's part done; the end and each
+   stream's completion value.  Values: `value` the program's event's, each communicator's arrive and
+   done; under stream_lock. */
+static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **comms,int ncomms,uint64_t *finals,uint64_t *arrived,
+  void *program,struct ncclMeshStream *same,struct ran *ran){
+  /* a stream's prior work is ordered before the group by an event (Metal orders a queue's command buffers
+     by the buffer objects they name, and the window's is not the caller's): its value signalled by the
+     queue (a command buffer of the signal alone), or by the caller, and waited for by the program */
+  for(int m=0;m<l->nmarks;m++){
+    struct mark *mark=l->marks+m;struct ncclMeshStream *s=mark->stream;
+    if(s->queue){mark->wait=++s->value;nccl_mesh_queue_signal(s->queue,s->event,mark->wait);}
+    else mark->wait=s->value;
+    if(program && mark->wait)nccl_mesh_program_wait(program,s->event,mark->wait);
+  }
+  void *event=same?same->event:comms[0]->event;
+  uint64_t *value=same?&same->value:&comms[0]->event_value;
+  for(int i=0;i<n;i++){
+    struct call *k=calls+i;
+    const struct call *mine=self_copy(calls,n,i);
+    unsigned char *to,*from;
+    size_t in=k->kind<K_SEND?input(k,&to):0,out=k->kind<K_SEND?output(k,&from):0;
+    if(out && from!=(unsigned char *)k->recv && !in_window(k->recv,out)){k->out=out;k->from=from;}
+    if(!mine && (!in || (!k->premultiply && to==(const unsigned char *)k->send)))continue;
+    if(!mine && !in_window(k->send,in)){k->in=in;k->into=to;continue;}
+    l->staged++;
+    if(mine){blit(program,k,k->recv,mine->send,k->count*type_bytes[k->type]);k->copied=1;}
+    else if(k->premultiply)kernel(program,k,KERNEL_PREMULTIPLY,to,k->send,in/type_bytes[k->type],0);
+    else blit(program,k,to,k->send,in);
+  }
+  if(!program)return;
+  l->event=event;
+  if(l->staged){l->gate=++*value;nccl_mesh_program_signal(program,event,l->gate);}
+  for(int i=0;i<n;i++){
+    struct call *k=calls+i;struct ncclComm *c=k->comm;
+    if(k->kind>=K_SEND)continue;
+    const size_t e=type_bytes[k->type];
+    if(k->in && k->premultiply){
+      k->staged=++c->arrive_value;nccl_mesh_program_wait(program,c->arrive,k->staged);
+      kernel(program,k,KERNEL_PREMULTIPLY,k->into,k->into,k->in/e,0);
+      k->premultiplied=++*value;nccl_mesh_program_signal(program,event,k->premultiplied);
+    }
+    for(uint32_t s=0;s<k->nsteps;s++)if(k->steps[s].op==MESH_STEP_REDUCE){
+      struct piece *p=k->pieces+s;
+      p->arrived=++c->arrive_value;nccl_mesh_program_wait(program,c->arrive,p->arrived);
+      kernel(program,k,KERNEL_COMBINE,k->operand+k->steps[s].first*e,p->at,k->steps[s].piece.elements,k->combine);
+      p->combined=++*value;nccl_mesh_program_signal(program,event,p->combined);
+    }
+    unsigned char *from;size_t out=output(k,&from);
+    int divide=out && k->postdivide,copy=out && from!=(unsigned char *)k->recv && in_window(k->recv,out);
+    int later=reduces(k) || divide || (k->in && k->premultiply);
+    if(divide || copy || (k->out && later)){
+      k->networked=++c->arrive_value;nccl_mesh_program_wait(program,c->arrive,k->networked);
+      if(divide)kernel(program,k,KERNEL_POSTDIVIDE,from,from,out/e,0);
+      if(copy)blit(program,k,k->recv,from,out);
+      if(k->out){k->ended=++*value;nccl_mesh_program_signal(program,event,k->ended);}
+    }
+  }
+  for(int j=0;j<ncomms;j++){
+    arrived[j]=comms[j]->arrive_value;
+    finals[j]=++comms[j]->done_value;nccl_mesh_program_wait(program,comms[j]->done,finals[j]);
+    ran->comms[ran->ncomms++]=comms[j];atomic_fetch_add(&comms[j]->programs,1);
+  }
+  l->end=++*value;nccl_mesh_program_signal(program,event,l->end);
+  for(int m=0;m<l->nmarks;m++){
+    struct mark *mark=l->marks+m;struct ncclMeshStream *s=mark->stream;
+    if(s==same){mark->done=l->end;continue;}
+    mark->done=++s->value;nccl_mesh_program_signal(program,s->event,mark->done);
+    nccl_mesh_retain(s->event);ran->events[ran->nevents++]=s->event;
+  }
+  nccl_mesh_program_commit(program,program_ran,ran);
+  for(int m=0;m<l->nmarks;m++)if(l->marks[m].stream->queue)nccl_mesh_queue_wait(l->marks[m].stream->queue,l->marks[m].stream->event,l->marks[m].done);
+}
+
 ncclResult_t ncclGroupEnd(void){
   if(group.depth<=0)return FAIL(NULL,ncclInvalidUsage,"ncclGroupEnd without ncclGroupStart");
   if(--group.depth)return ncclSuccess;
@@ -866,17 +1028,28 @@ ncclResult_t ncclGroupEnd(void){
   group.calls=NULL;group.n=group.capacity=0;group.error=ncclSuccess;
   for(int i=0;i<n && !status;i++)status=resolve(calls+i);
   plans.n=0;
+  tally_release(plans.tally);plans.tally=NULL;
   for(int i=0;i<n && !status && plans.n<4096;i++,plans.n++){
     int local=calls[i].kind>=K_SEND || calls[i].comm->nranks==1;
     plans.how[plans.n]=local?-1:(int)calls[i].chosen.how;plans.root[plans.n]=local?0:(int)calls[i].chosen.root;
   }
   if(status || !n){calls_free(calls,n);return status;}
   struct launch *l=calloc(1,sizeof *l);
+  struct tally *tally=calloc(1,sizeof *tally+(size_t)n*sizeof tally->counts[0]);
   struct ncclComm **comms=calloc((size_t)n,sizeof *comms);int ncomms=0;
-  if(!l || !comms){free(l);free(comms);calls_free(calls,n);return FAIL(NULL,ncclSystemError,"allocation");}
+  uint64_t *finals=calloc((size_t)n,sizeof *finals),*arrived=calloc((size_t)n,sizeof *arrived);
+  struct ran *ran=calloc(1,sizeof *ran+(size_t)n*(sizeof(struct ncclComm *)+sizeof(void *)));
+  if(l)l->marks=calloc((size_t)n,sizeof *l->marks);
+  if(!l || !l->marks || !tally || !comms || !finals || !arrived || !ran){
+    if(l)free(l->marks);
+    free(l);free(tally);free(comms);free(finals);free(arrived);free(ran);calls_free(calls,n);
+    return FAIL(NULL,ncclSystemError,"allocation");
+  }
+  ran->comms=(struct ncclComm **)(ran+1);ran->events=(void **)(ran->comms+n);
   pthread_mutex_init(&l->lock,NULL);pthread_cond_init(&l->cond,NULL);
-  l->marks=calloc((size_t)n,sizeof *l->marks);
+  tally->refs=2;tally->n=n;l->tally=plans.tally=tally;
   for(int i=0;i<n;i++){
+    calls[i].tally=tally->counts[i];
     int seen=0;
     for(int j=0;j<ncomms;j++)seen|=comms[j]==calls[i].comm;
     if(!seen)comms[ncomms++]=calls[i].comm;
@@ -887,22 +1060,29 @@ ncclResult_t ncclGroupEnd(void){
       if(!seen)l->marks[l->nmarks++].stream=calls[i].stream;
     }
   }
-  /* each stream: its prior work's value (the queue signals it, or the caller has), then the value the
-     group's completion signals, which the queue's later work waits for */
-  pthread_mutex_lock(&stream_lock);
-  for(int m=0;m<l->nmarks;m++){
-    struct mark *mark=l->marks+m;struct ncclMeshStream *s=mark->stream;
-    if(s->queue){mark->wait=++s->value;nccl_mesh_queue_signal(s->queue,s->event,mark->wait);}
-    else mark->wait=s->value;
-    mark->done=++s->value;
-    if(s->queue)nccl_mesh_queue_wait(s->queue,s->event,mark->done);
+  void *stage=NULL,*program=NULL;
+  status=place(calls,n,&stage);
+  /* a program where a stream's completion is its, or the GPU has work */
+  int work=l->nmarks>0;
+  for(int i=0;i<n && !work && !status;i++)work=calls[i].kind<K_SEND?gpu_work(calls+i):self_copy(calls,n,i)!=NULL;
+  struct ncclMeshStream *same=!l->sync && l->nmarks==1 && l->marks[0].stream->queue?l->marks[0].stream:NULL;
+  if(!status && work && !(program=nccl_mesh_program_begin(same?same->queue:comms[0]->queue)))
+    status=FAIL(NULL,ncclUnhandledCudaError,"a command buffer on the queue");
+  if(status){
+    if(stage)mesh_net_mem_free(stage);
+    launch_free(l);free(comms);free(finals);free(arrived);free(ran);calls_free(calls,n);
+    return status;
   }
-  pthread_mutex_unlock(&stream_lock);
+  if(program)ran->stage=stage;else l->stage=stage;
+  pthread_mutex_lock(&stream_lock);
+  encode(l,calls,n,comms,ncomms,finals,arrived,program,same,ran);
+  if(!program)free(ran);
   l->items=ncomms;
   for(int j=0;j<ncomms;j++){
     struct item *it=calloc(1,sizeof *it);
     it->calls=calloc((size_t)n,sizeof *it->calls);it->launch=l;it->deadline=deadline_after();
-    for(int i=0;i<n;i++)if(calls[i].comm==comms[j]){it->calls[it->n++]=calls[i];calls[i].steps=NULL;}
+    it->final=finals[j];it->arrived=arrived[j];
+    for(int i=0;i<n;i++)if(calls[i].comm==comms[j]){it->calls[it->n++]=calls[i];calls[i].steps=NULL;calls[i].pieces=NULL;}
     struct ncclComm *c=comms[j];
     pthread_mutex_lock(&c->lock);
     if(c->tail)c->tail->next=it;else c->head=it;
@@ -910,13 +1090,23 @@ ncclResult_t ncclGroupEnd(void){
     pthread_cond_signal(&c->cond);
     pthread_mutex_unlock(&c->lock);
   }
-  free(comms);free(calls);
+  pthread_mutex_unlock(&stream_lock);
+  free(comms);free(finals);free(arrived);free(calls);
   if(!l->sync)return ncclSuccess;
   pthread_mutex_lock(&l->lock);
   while(l->items)pthread_cond_wait(&l->cond,&l->lock);
   status=l->result;
   pthread_mutex_unlock(&l->lock);
-  pthread_mutex_destroy(&l->lock);pthread_cond_destroy(&l->cond);free(l->marks);free(l);
+  if(l->event){
+    /* the NULL stream: the program's end */
+    count(&(struct call){.tally=tally->counts[n-1]},HOST_WAITS,1);
+    for(uint64_t deadline=deadline_after();!status && nccl_mesh_event_value(l->event)<l->end;){
+      if(nccl_mesh_gpu_failed())status=FAIL(NULL,ncclUnhandledCudaError,"the group's GPU program failed");
+      else if(now_ns()>deadline)status=FAIL(NULL,ncclTimeout,"the group's GPU program: not done by the deadline (MESH_NCCL_TIMEOUT)");
+      else sched_yield();
+    }
+  }
+  launch_free(l);
   return status;
 }
 
@@ -1130,7 +1320,7 @@ ncclResult_t ncclMeshStreamCreate(cudaStream_t *stream,void *queue){
 }
 ncclResult_t ncclMeshStreamDestroy(cudaStream_t stream){
   if(!stream)return ncclSuccess;
-  nccl_mesh_event_release(stream->event);free(stream);
+  nccl_mesh_release(stream->event);free(stream);
   return ncclSuccess;
 }
 ncclResult_t ncclMeshStreamSynchronize(cudaStream_t stream){
@@ -1152,5 +1342,22 @@ ncclResult_t ncclMeshGroupPlans(int *algorithms,int *roots,int capacity,int *cou
   if(!count)return FAIL(NULL,ncclInvalidArgument,"ncclMeshGroupPlans: count is NULL");
   *count=plans.n;
   for(int i=0;i<plans.n && i<capacity;i++){if(algorithms)algorithms[i]=plans.how[i];if(roots)roots[i]=plans.root[i];}
+  return ncclSuccess;
+}
+static ncclMeshCounts_t counts_of(const uint64_t *c){
+  return (ncclMeshCounts_t){.cpuCopyBytes=c[CPU_COPY],.gpuCopyBytes=c[GPU_COPY],.gpuKernels=c[GPU_KERNELS],.hostWaits=c[HOST_WAITS],.inputWaits=c[INPUT_WAITS]};
+}
+ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t *counts){
+  if(!counts)return FAIL(NULL,ncclInvalidArgument,"ncclMeshGetCounts: counts is NULL");
+  uint64_t now[COUNTS];
+  for(int i=0;i<COUNTS;i++)now[i]=atomic_load_explicit(&totals[i],memory_order_relaxed);
+  *counts=counts_of(now);
+  return ncclSuccess;
+}
+ncclResult_t ncclMeshGroupCounts(ncclMeshCounts_t *counts,int capacity,int *count){
+  if(!count)return FAIL(NULL,ncclInvalidArgument,"ncclMeshGroupCounts: count is NULL");
+  struct tally *t=plans.tally;
+  *count=t?t->n:0;
+  for(int i=0;t && counts && i<t->n && i<capacity;i++)counts[i]=counts_of(t->counts[i]);
   return ncclSuccess;
 }

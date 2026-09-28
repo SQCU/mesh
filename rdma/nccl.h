@@ -28,18 +28,25 @@
 
    Buffers are host pointers: unified memory, e.g. an MTLBuffer's contents.  A buffer in the
    bridge's registered window (ncclMemAlloc; wrap it with newBufferWithBytesNoCopy for the GPU) is
-   sent and received in place; any other buffer is staged through window memory, as NCCL stages a
-   buffer it has not registered.
+   sent and received in place, and the GPU copies between window buffers; any other buffer is copied
+   in and out of window memory on the CPU, as NCCL stages a buffer it has not registered.  The
+   reductions (sum, prod, max, min, avg, PreMulSum, every datatype) are Metal kernels: a group's
+   calls are one command buffer that waits for each received piece, combines it where it landed in
+   the window, and signals; float64, and float32 or bfloat16 below 2^-101, are rounded exactly in
+   software (the GPU has no float64 and flushes float32 subnormals).
 
    The stream: cudaStream_t is a struct ncclMeshStream *.  NULL makes a call (or a group holding a
-   call with a NULL stream) synchronous: it returns once complete.  On a stream a call returns once
-   enqueued; it runs after the stream's prior work and its completion is the stream's next value:
-     - with `queue` (an id<MTLCommandQueue>) set, the call commits to that queue a command buffer
-       signalling `event` at a new value (the queue's prior work done) and one waiting for the
-       call's completion value, so GPU work committed to the queue before the call is its input
-       and work committed after it waits for its output, with no host synchronization;
-     - with `queue` NULL, the caller signals `event` at `value` itself when its input is ready,
-       and waits for the value the call leaves in `value`.
+   call with a NULL stream) synchronous: its kernels run on the communicator's own queue and it
+   returns once they and its transfers are complete.  On a stream a call returns once enqueued; it
+   runs after the stream's prior work and its completion is the stream's next value:
+     - with `queue` (an id<MTLCommandQueue>) set, the group's command buffer is committed to that
+       queue after the prior work, and signals `event` at the group's completion value, and a
+       command buffer waiting for that value follows it, so GPU work committed to the queue before
+       the call is its input and work committed after it waits for its output, with no host
+       synchronization;
+     - with `queue` NULL, the caller signals `event` at `value` itself when its input is ready (not
+       before the stream has reached its previous value), and waits for the value the call leaves in
+       `value`, which the communicator's queue signals.
    `value` is the timeline's last reserved value; a call reserves the next one(s).  Calls on one stream
    run in order; point-to-point calls on different streams progress together (a send completes only
    once its peer has posted the receive, so a send and a receive that wait on each other's peers
@@ -762,6 +769,21 @@ ncclResult_t ncclMeshStreamQuery(cudaStream_t stream);
    order (at most `capacity`): 0 direct, 1 ring, 2 tree, 3 binomial (mesh-collective.h MESH_*),
    -1 a point-to-point call or a one-rank communicator's local copy; `roots` the tree's root. */
 ncclResult_t ncclMeshGroupPlans(int* algorithms, int* roots, int capacity, int* count);
+/* What the library copied and waited for, counted (not timed): bytes a library thread copied on the
+   CPU (a buffer outside the window staged in or out, a send to this rank itself), bytes its GPU
+   programs copied within the window, the combine, premultiply and post-divide kernels they ran, the
+   waits of a library thread for the library's own GPU work (a combined piece before its SEND, the
+   result before a CPU copy out, the operands copied in on the GPU before a part starts, the NULL
+   stream's return), and a part's waits for its streams' prior work (its input). */
+typedef struct {
+  uint64_t cpuCopyBytes, gpuCopyBytes, gpuKernels, hostWaits, inputWaits;
+} ncclMeshCounts_t;
+/* The process's counts so far. */
+ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t* counts);
+/* The counts of each call of this thread's last ended group, in issue order (at most `capacity`),
+   as ncclMeshGroupPlans; complete once the group has (a part's wait for its input counts on its
+   first call, the NULL stream's end on the group's last). */
+ncclResult_t ncclMeshGroupCounts(ncclMeshCounts_t* counts, int capacity, int* count);
 
 #ifdef __cplusplus
 } // end extern "C"

@@ -391,6 +391,11 @@ int mesh_net_mem_free(void *pointer){
   }
   return net_result(EINVAL);
 }
+int mesh_net_window(void **base,size_t *bytes){
+  if(!net.m)return net_result(EBUSY);
+  *base=(char *)net.m+net.m->data_off;*bytes=(size_t)mesh_wire_bytes(net.m);
+  return MESH_NET_SUCCESS;
+}
 void mesh_net_comm_counts(void *comm,uint64_t counts[4]){
   struct mesh_net_comm *slot=net_slot(comm);
   counts[0]=atomic_load_explicit(&slot->bytes,memory_order_relaxed);
