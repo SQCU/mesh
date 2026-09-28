@@ -26,34 +26,42 @@
    "binomial" (comma-separated).  MESH_NCCL_TIMEOUT bounds a connection or a call, in seconds
    (default 300).
 
-   Buffers are host pointers: unified memory, e.g. an MTLBuffer's contents.  A buffer in the
-   bridge's registered window (ncclMemAlloc; wrap it with newBufferWithBytesNoCopy for the GPU) is
-   sent and received in place, and the GPU copies between window buffers; any other buffer is copied
-   in and out of window memory on the CPU, as NCCL stages a buffer it has not registered.  The
-   reductions (sum, prod, max, min, avg, PreMulSum, every datatype) are Metal kernels: a group's
-   calls are one command buffer that waits for each received piece, combines it where it landed in
-   the window, and signals; float64, and float32 or bfloat16 below 2^-101, are rounded exactly in
-   software (the GPU has no float64 and flushes float32 subnormals).
+   Buffers are host pointers: unified memory.  The bridge's registered window is handed out as
+   allocations (ncclMemAlloc), each a record of the library: its pages, the one Metal buffer over them
+   (ncclMeshMemBuffer: bind it in the caller's kernels too), and the points after which its last
+   writer and its readers since are done, each an event and a value.  A buffer in an allocation is
+   sent and received in place; any other buffer (a numpy array, a CPU tensor, other MTLBuffer contents)
+   is copied between it and window memory by GPU blits, through a Metal buffer over the host pages that
+   hold it (no CPU copy; the window stays the network's target, as the provider lands a receive only
+   in memory registered before its queue pair was set up).  The reductions (sum, prod, max, min, avg,
+   PreMulSum, every datatype) are Metal kernels: a group's calls are one command buffer that waits
+   for each received piece, combines it where it landed in the window, and signals; float64, and
+   float32 or bfloat16 below 2^-101, are rounded exactly in software (the GPU has no float64 and
+   flushes float32 subnormals).
+
+   Ordering is per allocation, from its record: a group waits for the recorded points of the
+   allocations it touches (of a buffer it reads, the writer; of one it writes, the writer and the
+   readers) and records its completion there, nothing else.  The caller's own GPU work on an
+   allocation declares its point (ncclMeshMemUse: a value its event reaches once that work is done),
+   and waits for the library's through ncclMeshMemWaits.  Memory outside the window that GPU work
+   writes (another MTLBuffer's contents) is ordered the same way by records of its ranges, which
+   hold points but no lifetime; host memory the CPU wrote before the call needs none.  Lifetime is the same data: ncclMemFree, or
+   ncclMeshMemRelease with the point of the caller's last use (a tensor's release closure), marks the
+   record freed, and its pages are handed out again only once every recorded point is reached.
 
    The stream: cudaStream_t is a struct ncclMeshStream *.  NULL makes a call (or a group holding a
-   call with a NULL stream) synchronous: its kernels run on the communicator's own queue and it
-   returns once they and its transfers are complete.  On a stream a call returns once enqueued; it
-   runs after the stream's prior work and its completion is the stream's next value:
-     - with `queue` (an id<MTLCommandQueue>) set, the group's command buffer is committed to that
-       queue after the prior work, and signals `event` at the group's completion value, and a
-       command buffer waiting for that value follows it, so GPU work committed to the queue before
-       the call is its input and work committed after it waits for its output, with no host
-       synchronization;
-     - with `queue` NULL, the caller signals `event` at `value` itself when its input is ready (not
-       before the stream has reached its previous value), and waits for the value the call leaves in
-       `value`, which the communicator's queue signals.
-   `value` is the timeline's last reserved value; a call reserves the next one(s).  Calls on one stream
-   run in order; point-to-point calls on different streams progress together (a send completes only
-   once its peer has posted the receive, so a send and a receive that wait on each other's peers
-   belong in one group or on different streams).  ncclMeshStreamQuery is cudaStreamQuery.  A failed call
-   still signals its completion value (the GPU is never left waiting); its error is the
-   communicator's ncclCommGetAsyncError.  ncclMeshStreamCreate makes the event on the queue's
-   device (or the system default device); ncclMeshStreamSynchronize waits on the host for `value`.
+   call with a NULL stream) synchronous: its program runs on the communicator's own queue and it
+   returns once it and its transfers are complete.  On a stream a call returns once enqueued; its
+   program is committed to the stream's queue (the `queue` given to ncclMeshStreamCreate, or one of
+   the stream's own: Metal orders the work of a queue's command buffers only where they bind the same
+   buffer objects, so the records, not the queue, order a call after the work it reads), and its
+   completion is the stream's next value.  `value` is the timeline's last reserved value; a call reserves the next
+   one(s).  Calls on one stream run in order; calls on different streams progress together (a send
+   completes only once its peer has posted the receive, so a send and a receive that wait on each
+   other's peers belong in one group or on different streams).  ncclMeshStreamQuery is
+   cudaStreamQuery.  A failed call still signals its completion value (the GPU is never left waiting);
+   its error is the communicator's ncclCommGetAsyncError.  ncclMeshStreamSynchronize waits on the host
+   for `value`.
 
    Not implemented (not exported): ncclCommRevoke, ncclCommShrink, ncclCommGetUniqueId,
    ncclCommGrow, ncclCommInitRankScalable, ncclCommSuspend, ncclCommResume, ncclCommMemStats,
@@ -61,7 +69,7 @@
    ncclWaitSignal (TB5 RDMA has no one-sided write), ncclGroupSimulateEnd, ncclSetEncryption, the
    ncclParam* functions.  ncclCommInitAll takes one device (a node has one Metal device);
    ncclRedOpCreatePreMulSum takes ncclScalarHostImmediate; ncclCommRegister of memory outside the
-   window records it and it stays staged. */
+   window records it and it stays copied in and out by the GPU. */
 
 #ifndef NCCL_H_
 #define NCCL_H_
@@ -82,9 +90,9 @@ extern "C" {
 #include <stdint.h>
 #include <stddef.h>
 
-/* The stream (above).  queue: id<MTLCommandQueue> or NULL; event: id<MTLSharedEvent>; value: the
-   event's last reserved value. */
-struct ncclMeshStream { void *queue; void *event; uint64_t value; };
+/* The stream (above).  queue: id<MTLCommandQueue>; event: id<MTLSharedEvent>; value: the event's last
+   reserved value; made: the queue is the stream's own. */
+struct ncclMeshStream { void *queue; void *event; uint64_t value; int made; };
 typedef struct ncclMeshStream *cudaStream_t;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
 typedef void *cudaEvent_t;
@@ -757,8 +765,8 @@ ncclResult_t  ncclGroupEnd(void);
 ncclResult_t pncclGroupEnd(void);
 
 /* The mesh's own additions (not NCCL's). */
-/* A stream on `queue` (an id<MTLCommandQueue>, or NULL): its event made on the queue's device (or
-   the system default device), value 0. */
+/* A stream whose calls are committed to `queue` (an id<MTLCommandQueue>), or with NULL to a queue of
+   its own; its event made on the queue's device, value 0. */
 ncclResult_t ncclMeshStreamCreate(cudaStream_t* stream, void* queue);
 ncclResult_t ncclMeshStreamDestroy(cudaStream_t stream);
 /* Waits on the host until the stream's event reaches its value (cudaStreamSynchronize). */
@@ -769,21 +777,45 @@ ncclResult_t ncclMeshStreamQuery(cudaStream_t stream);
    order (at most `capacity`): 0 direct, 1 ring, 2 tree, 3 binomial (mesh-collective.h MESH_*),
    -1 a point-to-point call or a one-rank communicator's local copy; `roots` the tree's root. */
 ncclResult_t ncclMeshGroupPlans(int* algorithms, int* roots, int capacity, int* count);
-/* What the library copied and waited for, counted (not timed): bytes a library thread copied on the
-   CPU (a buffer outside the window staged in or out, a send to this rank itself), bytes its GPU
-   programs copied within the window, the combine, premultiply and post-divide kernels they ran, the
-   waits of a library thread for the library's own GPU work (a combined piece before its SEND, the
-   result before a CPU copy out, the operands copied in on the GPU before a part starts, the NULL
-   stream's return), and a part's waits for its streams' prior work (its input). */
+/* What the library copied, sent and waited for, counted: bytes a library thread copied on the CPU
+   (none: every copy is the GPU's), bytes its GPU programs copied (blits into and out of the window,
+   within it), the combine, premultiply and post-divide kernels they ran, the waits of a library
+   thread for the library's own GPU work (a group's gate, a combined piece before its SEND, the NULL
+   stream's end, room in the window), a part's waits for recorded points without a program, the
+   bytes this rank sent and received on the network; and, per call, the monotonic times (ns) its part
+   started (after the gate) and ended (its transfers complete). */
 typedef struct {
-  uint64_t cpuCopyBytes, gpuCopyBytes, gpuKernels, hostWaits, inputWaits;
+  uint64_t cpuCopyBytes, gpuCopyBytes, gpuKernels, hostWaits, inputWaits, sentBytes, receivedBytes, startNs, endNs;
 } ncclMeshCounts_t;
-/* The process's counts so far. */
+/* The process's counts so far (the times 0). */
 ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t* counts);
 /* The counts of each call of this thread's last ended group, in issue order (at most `capacity`),
-   as ncclMeshGroupPlans; complete once the group has (a part's wait for its input counts on its
-   first call, the NULL stream's end on the group's last). */
+   as ncclMeshGroupPlans; complete once the group has (a part's wait for its gate counts on its first
+   call, the NULL stream's end on the group's last). */
 ncclResult_t ncclMeshGroupCounts(ncclMeshCounts_t* counts, int capacity, int* count);
+
+/* The window's allocations (above).  The Metal buffer (id<MTLBuffer>) over the allocation holding
+   `ptr`, and ptr's offset in it: the library's for as long as the allocation lives. */
+ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
+/* The caller's GPU work on the allocation holding `ptr` (writing it, or reading it) is done once
+   `event` (an id<MTLSharedEvent>) reaches `value`.  Outside the window, a record of the `bytes` at
+   `ptr` (other MTLBuffer contents the caller's kernels write) holds the point, without a lifetime: it
+   is dropped once every point on it is reached. */
+ncclResult_t ncclMeshMemUse(const void* ptr, size_t bytes, void* event, uint64_t value, int write);
+/* The recorded points not yet reached that a use of the allocation holding `ptr` (outside the window,
+   of the records over its `bytes`) waits for: the writer's, and for a writer (`write`) the readers'
+   too; at most `capacity`, `count` all of them. */
+ncclResult_t ncclMeshMemWaits(const void* ptr, size_t bytes, int write, void** events, uint64_t* values, int capacity, int* count);
+/* The allocation at `ptr` freed (the allocation's closure) once `event` (if not NULL) reaches `value`
+   and every recorded point is reached; ncclMemFree(ptr) is ncclMeshMemRelease(ptr, NULL, 0). */
+ncclResult_t ncclMeshMemRelease(void* ptr, void* event, uint64_t value);
+/* The allocator's records: each allocation's address (as this process maps the window) and bytes,
+   whether it is freed (its pages not yet handed out again), and its recorded points: each value (the
+   writer's first) and its event's value now. */
+typedef struct {
+  uint64_t address, bytes; int32_t freed, points; uint64_t value[9], reached[9];
+} ncclMeshMemRecord_t;
+ncclResult_t ncclMeshMemRecords(ncclMeshMemRecord_t* records, int capacity, int* count);
 
 #ifdef __cplusplus
 } // end extern "C"

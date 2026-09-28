@@ -2,17 +2,25 @@
 // as PyTorch's "Customize Process Group Backends Using Cpp Extensions" tutorial prescribes.  Rank 0
 // makes the communicator's unique id and hands it out through the group's store.  The reductions are
 // libnccl-mesh's Metal kernels.
-//   CPU tensors are the buffers themselves (libnccl-mesh copies one outside the bridge's registered
-// window in and out on the CPU); a collective on them completes before it returns, a send or recv runs
-// on a stream of its own (as NCCL's point-to-point calls on separate streams), so isend/irecv pairs
-// progress together, and its Work waits for that stream.
-//   MPS tensors, through PyTorch 2.14's at::mps API: a tensor whose MTLBuffer (getMTLBufferStorage)
-// lies in the window (empty() below) is passed in place; any other is copied by GPU blits on the
-// current MPS stream (MPSStream::copy) into a window buffer of the call before it and out after it.
-// The call runs on a stream of its own whose shared event orders it with the MPS stream: its input is
-// a signal encoded in the MPS command buffer after the blits in, committed without a wait; its Work's
-// wait() encodes a wait for the call's completion value and the blits out, so no host synchronization
-// sits between the MPS work before and after the call.
+//   Window tensors (window_tensor below; torch_mesh makes torch's MPS factories return them by
+// default): the bytes of a window allocation, whose one Metal buffer is the tensor's MTLBuffer.  The
+// tensor's release closure (its DataPtr's deleter) writes the allocation's retire point: a signal of
+// the backend's fence event encoded on the MPS stream after every command enqueued so far, then
+// ncclMeshMemRelease at that value, so the pages are handed out again only once that value and every
+// call's recorded point are reached.
+//   MPS tensors: a window tensor (its parts contiguous and adjacent in one allocation) is passed in
+// place; any other is copied by GPU blits on the MPS stream (MPSStream::copy) into a window allocation
+// of the call before it and out after it.  The MPS work enqueued before the call (the caller's and
+// those blits) is declared the writer of every allocation the call touches (the fence's value,
+// ncclMeshMemUse), so the call waits for exactly that; it runs on a stream of its own (a queue of its
+// own), and its Work's wait() encodes on the MPS stream a wait for the call's completion value and the
+// blits out, so no host synchronization sits between the MPS work before and after the call.
+//   CPU tensors: a tensor, or parts contiguous and adjacent, are the buffer itself (libnccl-mesh copies
+// memory outside the window in and out by GPU blits through a Metal buffer over its pages); parts that
+// are not are copied by the backend's own GPU blits, through Metal buffers over their pages, into a
+// window allocation and out of it.  A collective on them completes before it returns; a send or recv
+// runs on a stream of its own (as NCCL's point-to-point calls on separate streams), so isend/irecv
+// pairs progress together, and its Work waits for that stream.
 #include <torch/extension.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
@@ -26,7 +34,6 @@
 #include <atomic>
 #include <mutex>
 #include <unistd.h>
-#include <unordered_set>
 
 #include "nccl.h"
 
@@ -54,52 +61,104 @@ static ncclDataType_t datatype(const at::Tensor &t) {
   }
 }
 
-// The backend's own copies (libnccl-mesh counts its own): bytes the CPU copied (a CPU tensor made
-// contiguous or its parts laid end to end, and back) and bytes GPU blits copied (an MPS tensor outside
-// the window, into and out of the call's window buffer).
+// The backend's own copies (libnccl-mesh counts its own): bytes the CPU copied (a non-contiguous CPU
+// tensor made contiguous, and back) and bytes GPU blits copied (an MPS tensor outside the window, CPU
+// parts, into and out of the call's window allocation).
 static std::atomic<uint64_t> cpu_copied{0}, gpu_copied{0};
 
-// ---- window memory for the GPU ----
-// Pages of the bridge's registered window (ncclMemAlloc) as an MTLBuffer, no copy; freed with it.
-static id<MTLBuffer> window_buffer(size_t bytes) {
-  const size_t page = (size_t)getpagesize(), size = std::max<size_t>(page, (bytes + page - 1) / page * page);
+static id<MTLDevice> device() {
+  static id<MTLDevice> made = at::mps::is_available() ? at::mps::MPSDevice::getInstance()->device() : MTLCreateSystemDefaultDevice();
+  return made;
+}
+
+// ---- the MPS stream's fence ----
+// `body` on the MPS stream's serial queue (inline when already on it: a release closure can run there).
+template <typename F> static void on_mps(at::mps::MPSStream *s, F body) {
+  const char *here = dispatch_queue_get_label(DISPATCH_CURRENT_QUEUE_LABEL), *mps = dispatch_queue_get_label(s->queue());
+  if (here && mps && !strcmp(here, mps)) body();
+  else dispatch_sync(s->queue(), ^{ body(); });
+}
+static id<MTLSharedEvent> fence_event() {
+  static id<MTLSharedEvent> event = [device() newSharedEvent];
+  return event;
+}
+static std::atomic<uint64_t> fence_next{0};
+// A signal of the fence event after every command enqueued on the current MPS stream so far,
+// committed; its value.
+static uint64_t mps_fence() {
+  auto *s = at::mps::getCurrentMPSStream();
+  id<MTLSharedEvent> event = fence_event();
+  uint64_t value = 0;
+  on_mps(s, [&] {
+    s->endKernelCoalescing();
+    value = ++fence_next;
+    [s->commandBuffer() encodeSignalEvent:event value:value];
+    s->synchronize(at::mps::SyncType::COMMIT);
+  });
+  return value;
+}
+
+// ---- window allocations ----
+// The closures that release a window allocation: an MPS tensor's at the fence after the MPS work so far,
+// a CPU tensor's at once (the CPU's writes are done; the library's recorded points still hold it).
+static void release_mps(void *memory) {
+  check(ncclMeshMemRelease(memory, (__bridge void *)fence_event(), mps_fence()), nullptr, "ncclMeshMemRelease");
+}
+static void release_host(void *memory) { check(ncclMemFree(memory), nullptr, "ncclMemFree"); }
+static id<MTLBuffer> buffer_of(void *memory, size_t *offset) {
+  void *buffer = nullptr;
+  check(ncclMeshMemBuffer(memory, &buffer, offset), nullptr, "ncclMeshMemBuffer");
+  return (__bridge id<MTLBuffer>)buffer;
+}
+// A window tensor: an MPS tensor whose MTLBuffer is the allocation's Metal buffer, or a CPU tensor of
+// its bytes; its storage's deleter is the allocation's release closure.
+static at::Tensor window_tensor(at::IntArrayRef sizes, at::ScalarType dtype, bool mps) {
+  const size_t bytes = std::max<size_t>(1, (size_t)c10::multiply_integers(sizes) * c10::elementSize(dtype));
   void *memory = nullptr;
-  check(ncclMemAlloc(&memory, size), nullptr, "ncclMemAlloc");
-  id<MTLBuffer> buffer = [at::mps::MPSDevice::getInstance()->device() newBufferWithBytesNoCopy:memory length:size
-      options:MTLResourceStorageModeShared deallocator:^(void *pointer, NSUInteger) { ncclMemFree(pointer); }];
-  if (!buffer) ncclMemFree(memory);
-  TORCH_CHECK(buffer, "mesh: window memory as an MTLBuffer (newBufferWithBytesNoCopy)");
-  return buffer;
+  check(ncclMemAlloc(&memory, bytes), nullptr, "ncclMemAlloc");
+  auto options = at::TensorOptions().dtype(dtype);
+  if (!mps) return at::from_blob(memory, sizes, [memory](void *) { release_host(memory); }, options.device(at::kCPU));
+  size_t offset = 0;
+  id<MTLBuffer> buffer = buffer_of(memory, &offset);
+  return at::from_blob((__bridge void *)buffer, sizes, [memory](void *) { release_mps(memory); }, options.device(at::kMPS));
 }
-// The MTLBuffers over window memory that empty() made tensors of.
-static std::mutex windows_lock;
-static std::unordered_set<void *> windows;
-static bool in_window(id<MTLBuffer> buffer) {
-  std::lock_guard<std::mutex> guard(windows_lock);
-  return windows.count((void *)buffer) != 0;
-}
-// An MPS (or CPU) tensor whose bytes are window memory: libnccl-mesh sends and receives it in place.
 static at::Tensor empty(std::vector<int64_t> sizes, const at::Tensor &like, const std::string &device) {
-  int64_t numel = 1;
-  for (auto s : sizes) numel *= s;
-  id<MTLBuffer> buffer = window_buffer((size_t)numel * like.element_size());
-  auto options = at::TensorOptions().dtype(like.scalar_type());
-  if (device == "cpu")
-    return at::from_blob([buffer contents], sizes, [buffer](void *) { [buffer release]; }, options.device(at::kCPU));
-  TORCH_CHECK(device == "mps", "mesh: empty() makes cpu or mps tensors, not ", device);
-  {
-    std::lock_guard<std::mutex> guard(windows_lock);
-    windows.insert((void *)buffer);
-  }
-  // released when the tensor's storage is; Metal holds it while a committed command buffer uses it
-  return at::from_blob((void *)buffer, sizes, [buffer](void *) {
-    { std::lock_guard<std::mutex> guard(windows_lock); windows.erase((void *)buffer); }
-    [buffer release];
-  }, options.device(at::kMPS));
+  TORCH_CHECK(device == "cpu" || device == "mps", "mesh: empty() makes cpu or mps tensors, not ", device);
+  return window_tensor(sizes, like.scalar_type(), device == "mps");
+}
+// Where an MPS tensor's bytes are in the window: its MTLBuffer the Metal buffer of the allocation its
+// contents lie in (nullptr: not a window tensor).
+static char *window_bytes(const at::Tensor &t) {
+  id<MTLBuffer> buffer = at::native::mps::getMTLBufferStorage(t);
+  char *contents = buffer ? (char *)[buffer contents] : nullptr;
+  void *theirs = nullptr;
+  size_t offset = 0;
+  if (!contents || ncclMeshMemBuffer(contents, &theirs, &offset) != ncclSuccess || theirs != (__bridge void *)buffer) return nullptr;
+  return contents + t.storage_offset() * t.element_size();
+}
+
+// The backend's queue for CPU parts' blits, and its event.
+static id<MTLCommandQueue> host_queue() {
+  static id<MTLCommandQueue> queue = [device() newCommandQueue];
+  return queue;
+}
+static id<MTLSharedEvent> host_event() {
+  static id<MTLSharedEvent> event = [device() newSharedEvent];
+  return event;
+}
+static std::atomic<uint64_t> host_next{0};
+// A Metal buffer over the host pages holding `bytes` at `pointer`, no copy; `offset` the pointer's place.
+static id<MTLBuffer> host_pages(void *pointer, size_t bytes, size_t *offset) {
+  const uintptr_t page = (uintptr_t)getpagesize(), at = (uintptr_t)pointer, first = at & ~(page - 1),
+                  end = (at + std::max<size_t>(bytes, 1) + page - 1) & ~(page - 1);
+  *offset = at - first;
+  id<MTLBuffer> buffer = [device() newBufferWithBytesNoCopy:(void *)first length:end - first options:MTLResourceStorageModeShared deallocator:nil];
+  TORCH_CHECK(buffer, "mesh: the host pages of a CPU tensor as a Metal buffer (newBufferWithBytesNoCopy)");
+  return buffer;
 }
 
 // Streams for calls that run asynchronously (a send or recv on CPU tensors, every call on MPS tensors):
-// one a call, reused once the Work holding it is gone and its work done.
+// one a call, each with a queue of its own, reused once the Work holding it is gone and its work done.
 struct StreamPool {
   std::mutex lock;
   std::vector<cudaStream_t> all, idle;
@@ -130,9 +189,9 @@ struct StreamPool {
 };
 
 // One torch call's buffers where libnccl-mesh reads and writes them, and the stream it runs on.  A place
-// is tensors laid end to end (one tensor, or a list): in place where they already are (CPU: adjacent and
-// contiguous; MPS: adjacent in one window MTLBuffer), else a contiguous CPU copy, or a slice of the call's
-// window buffer with GPU blits.
+// is tensors laid end to end (one tensor, or a list): in place where they already are (CPU: contiguous
+// and adjacent; MPS: contiguous and adjacent in one window allocation), else a slice of the call's
+// window allocation, filled and emptied by GPU blits.
 class Call {
  public:
   Call(const at::Tensor &like, bool async, std::shared_ptr<StreamPool> pool)
@@ -150,64 +209,55 @@ class Call {
   void *ptr(int i) const { return places_[i].pointer; }
   cudaStream_t stream() const { return stream_; }
 
-  // Every place's pointer; on MPS the blits in and the stream's input signal, committed.
+  // Every place's pointer: the call's window allocation for those not in place, and the blits in; on MPS
+  // the fence after them declared the writer of every allocation the call touches.
   void begin() {
+    size_t used = 0;
+    for (auto &p : places_)
+      if (!(mps_ ? window_place(p) : host_place(p))) { p.at = used; used += (p.bytes + 255) & ~(size_t)255; }
+    if (used) {
+      check(ncclMemAlloc(&scratch_, used), nullptr, "ncclMemAlloc");
+      size_t offset = 0;
+      buffer_ = buffer_of(scratch_, &offset);
+      scratch_bytes_ = used;
+    }
+    for (auto &p : places_)
+      if (p.at != SIZE_MAX) p.pointer = (char *)scratch_ + p.at;
     if (!mps_) {
-      for (auto &p : places_) cpu_place(p);
+      host_blits(true);
       if (async_) stream_ = pool_->acquire();
       return;
     }
-    size_t used = 0;
-    for (auto &p : places_)
-      if (!window_place(p)) { p.at = used; used += (p.bytes + 255) & ~(size_t)255; }
-    if (used) scratch_ = window_buffer(used);
     auto *s = at::mps::getCurrentMPSStream();
-    for (auto &p : places_) {
-      if (p.at == SIZE_MAX) continue;
-      p.pointer = (char *)[scratch_ contents] + p.at;
-      if (p.in) blits(s, p, true);
-    }
+    for (auto &p : places_)
+      if (p.at != SIZE_MAX && p.in) mps_blits(s, p, true);
+    const uint64_t fence = mps_fence();
+    for (auto &p : places_)
+      if (p.bytes) check(ncclMeshMemUse(p.pointer, p.bytes, (__bridge void *)fence_event(), fence, 1), nullptr, "ncclMeshMemUse");
     stream_ = pool_->acquire();
-    const uint64_t ready = ++stream_->value;
-    id<MTLSharedEvent> event = (id<MTLSharedEvent>)stream_->event;
-    dispatch_sync(s->queue(), ^{
-      s->endKernelCoalescing();
-      [s->commandBuffer() encodeSignalEvent:event value:ready];
-      s->synchronize(at::mps::SyncType::COMMIT);
-    });
   }
   // Once the call is complete (CPU) or its completion is ordered on the current MPS stream: the places
-  // written copied back.
+  // not in place copied back, and the call's window allocation released after them.
   void after() {
     if (!mps_) {
-      for (auto &p : places_)
-        if (p.out && p.host.defined()) {
-          int64_t at = 0;
-          for (auto &t : p.parts) {
-            t.copy_(p.host.narrow(0, at, t.numel()).view(t.sizes()));
-            at += t.numel();
-          }
-          cpu_copied += p.bytes;
-        }
+      host_blits(false);
       return;
     }
-    if (!stream_) return;
     auto *s = at::mps::getCurrentMPSStream();
     const uint64_t done = stream_->value;
-    id<MTLSharedEvent> event = (id<MTLSharedEvent>)stream_->event;
-    dispatch_sync(s->queue(), ^{
+    id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)stream_->event;
+    on_mps(s, [&] {
       s->endKernelCoalescing();
       [s->commandBuffer() encodeWaitForEvent:event value:done];
     });
     for (auto &p : places_)
-      if (p.at != SIZE_MAX && p.out) blits(s, p, false);
-    if (scratch_) {
-      id<MTLBuffer> held = scratch_;
-      scratch_ = nil;
-      s->addCompletedHandler(^(id<MTLCommandBuffer>) { [held release]; });
-    }
+      if (p.at != SIZE_MAX && p.out) mps_blits(s, p, false);
+    if (scratch_) release_mps(scratch_);
+    scratch_ = nullptr;
   }
-  ~Call() { [scratch_ release]; }
+  ~Call() {
+    if (scratch_) ncclMeshMemRelease(scratch_, nullptr, 0);
+  }
 
  private:
   struct Place {
@@ -215,57 +265,109 @@ class Call {
     bool in = false, out = false;
     size_t bytes = 0, at = SIZE_MAX;
     void *pointer = nullptr;
-    at::Tensor host;
   };
-  // CPU: the parts themselves where they are contiguous and adjacent, else one contiguous copy.
-  void cpu_place(Place &p) {
+  // CPU: the parts themselves where they are contiguous and adjacent.
+  bool host_place(Place &p) {
     char *end = nullptr;
-    bool adjacent = true;
     for (auto &t : p.parts) {
-      adjacent &= t.is_contiguous() && (!end || (char *)t.data_ptr() == end);
+      if (!t.is_contiguous() || (end && (char *)t.data_ptr() != end)) return false;
       end = (char *)t.data_ptr() + t.nbytes();
     }
-    if (adjacent) { p.pointer = p.parts[0].data_ptr(); return; }
-    std::vector<at::Tensor> flat;
-    for (auto &t : p.parts) flat.push_back(t.reshape({-1}));
-    p.host = p.in ? at::cat(flat) : at::empty({(int64_t)(p.bytes / p.parts[0].element_size())}, p.parts[0].options());
-    if (p.in) cpu_copied += p.bytes;
-    p.pointer = p.host.data_ptr();
-  }
-  // MPS: the parts in place where they are contiguous and adjacent in one window MTLBuffer.
-  bool window_place(Place &p) {
-    id<MTLBuffer> buffer = at::native::mps::getMTLBufferStorage(p.parts[0]);
-    size_t end = SIZE_MAX;
-    for (auto &t : p.parts) {
-      size_t offset = t.storage_offset() * t.element_size();
-      if (!t.is_contiguous() || at::native::mps::getMTLBufferStorage(t) != buffer || (end != SIZE_MAX && offset != end)) return false;
-      end = offset + t.nbytes();
-    }
-    if (!in_window(buffer)) return false;
-    p.pointer = (char *)[buffer contents] + p.parts[0].storage_offset() * p.parts[0].element_size();
+    p.pointer = p.parts[0].data_ptr();
     return true;
   }
-  // Each part's bytes between its MTLBuffer and the call's window buffer, blitted on the MPS stream (a
-  // non-contiguous part through a contiguous MPS copy).
-  void blits(at::mps::MPSStream *s, Place &p, bool in) {
+  // MPS: the parts in place where they are contiguous and adjacent in one window allocation.
+  bool window_place(Place &p) {
+    char *first = nullptr, *end = nullptr;
+    for (auto &t : p.parts) {
+      char *at = t.is_contiguous() ? window_bytes(t) : nullptr;
+      if (!at || (end && at != end) || at::native::mps::getMTLBufferStorage(t) != at::native::mps::getMTLBufferStorage(p.parts[0])) return false;
+      if (!first) first = at;
+      end = at + t.nbytes();
+    }
+    p.pointer = first;
+    return first != nullptr;
+  }
+  // Each MPS part's bytes between its MTLBuffer and the call's window allocation, blitted on the MPS
+  // stream (a non-contiguous part through a contiguous MPS copy).
+  void mps_blits(at::mps::MPSStream *s, Place &p, bool in) {
     size_t at = p.at;
     for (auto &t : p.parts) {
       at::Tensor c = t.is_contiguous() ? t : in ? t.contiguous() : at::empty(t.sizes(), t.options());
       if (in && !c.is_same(t)) gpu_copied += c.nbytes();
       id<MTLBuffer> buffer = at::native::mps::getMTLBufferStorage(c);
       size_t offset = c.storage_offset() * c.element_size();
-      if (in) s->copy(buffer, scratch_, c.nbytes(), offset, at, 0, at::mps::SyncType::NONE);
-      else s->copy(scratch_, buffer, c.nbytes(), at, offset, 0, at::mps::SyncType::NONE);
+      if (in) s->copy(buffer, buffer_, c.nbytes(), offset, at, 0, at::mps::SyncType::NONE);
+      else s->copy(buffer_, buffer, c.nbytes(), at, offset, 0, at::mps::SyncType::NONE);
       if (!in && !c.is_same(t)) { t.copy_(c); gpu_copied += c.nbytes(); }
       gpu_copied += c.nbytes();
       at += c.nbytes();
     }
   }
+  // Each CPU part's bytes between its pages and the call's window allocation, blitted on the backend's
+  // queue through a Metal buffer over its pages (a non-contiguous part through a contiguous CPU copy):
+  // in, declared the writer of the allocation; out, after the call's recorded points, waited for on the
+  // host, then the allocation released.
+  void host_blits(bool in) {
+    if (!scratch_) return;
+    @autoreleasepool {
+      host_blits_(in);
+    }
+  }
+  void host_blits_(bool in) {
+    id<MTLCommandBuffer> cb = [host_queue() commandBuffer];
+    std::vector<id<MTLBuffer>> wrapped;
+    if (!in) {
+      void *events[16];
+      uint64_t values[16];
+      int count = 0;
+      check(ncclMeshMemWaits(scratch_, scratch_bytes_, 1, events, values, 16, &count), nullptr, "ncclMeshMemWaits");
+      for (int i = 0; i < count && i < 16; i++) [cb encodeWaitForEvent:(__bridge id<MTLSharedEvent>)events[i] value:values[i]];
+    }
+    std::vector<std::pair<at::Tensor, at::Tensor>> back;
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    for (auto &p : places_) {
+      if (p.at == SIZE_MAX || !(in ? p.in : p.out)) continue;
+      size_t at = p.at;
+      for (auto &t : p.parts) {
+        at::Tensor c = t;
+        if (!t.is_contiguous()) {
+          c = in ? t.contiguous() : at::empty(t.sizes(), t.options());
+          if (in) cpu_copied += c.nbytes();
+          else back.emplace_back(t, c);
+        }
+        size_t offset = 0;
+        id<MTLBuffer> pages = host_pages(c.data_ptr(), c.nbytes(), &offset);
+        wrapped.push_back(pages);
+        if (c.nbytes()) {
+          if (in) [blit copyFromBuffer:pages sourceOffset:offset toBuffer:buffer_ destinationOffset:at size:c.nbytes()];
+          else [blit copyFromBuffer:buffer_ sourceOffset:at toBuffer:pages destinationOffset:offset size:c.nbytes()];
+        }
+        gpu_copied += c.nbytes();
+        at += c.nbytes();
+      }
+    }
+    [blit endEncoding];
+    const uint64_t value = ++host_next;
+    [cb encodeSignalEvent:host_event() value:value];
+    [cb commit];
+    for (id<MTLBuffer> pages : wrapped) [pages release];  // the command buffer holds them until it has run
+    if (in) {
+      check(ncclMeshMemUse(scratch_, scratch_bytes_, (__bridge void *)host_event(), value, 1), nullptr, "ncclMeshMemUse");
+      return;
+    }
+    [cb waitUntilCompleted];
+    for (auto &b : back) { b.first.copy_(b.second); cpu_copied += b.second.nbytes(); }
+    check(ncclMeshMemRelease(scratch_, (__bridge void *)host_event(), value), nullptr, "ncclMeshMemRelease");
+    scratch_ = nullptr;
+  }
   bool mps_, async_;
   std::shared_ptr<StreamPool> pool_;
   cudaStream_t stream_ = nullptr;
   std::vector<Place> places_;
-  id<MTLBuffer> scratch_ = nil;
+  void *scratch_ = nullptr;
+  size_t scratch_bytes_ = 0;
+  id<MTLBuffer> buffer_ = nil;
   friend class WorkMesh;
 };
 
@@ -584,7 +686,7 @@ static void mps_to_backend(const c10::OperatorHandle &op, torch::jit::Stack *sta
   op.redispatchBoxed(c10::DispatchKeySet(c10::DispatchKey::CPU), stack);
 }
 
-// What libnccl-mesh and this backend copied and waited for so far (counted, not timed).
+// What libnccl-mesh and this backend copied, sent and waited for so far (counted, not timed).
 static pybind11::dict counts() {
   ncclMeshCounts_t c;
   check(ncclMeshGetCounts(&c), nullptr, "ncclMeshGetCounts");
@@ -594,9 +696,37 @@ static pybind11::dict counts() {
   d["library_gpu_kernels"] = c.gpuKernels;
   d["library_host_waits"] = c.hostWaits;
   d["library_input_waits"] = c.inputWaits;
+  d["library_sent_bytes"] = c.sentBytes;
+  d["library_received_bytes"] = c.receivedBytes;
   d["backend_cpu_copy_bytes"] = cpu_copied.load();
   d["backend_gpu_copy_bytes"] = gpu_copied.load();
   return d;
+}
+// The window allocator's records (ncclMeshMemRecords): address, bytes, freed, and each recorded point's
+// value and its event's value now.
+static pybind11::list records() {
+  std::vector<ncclMeshMemRecord_t> table(4096);
+  int count = 0;
+  check(ncclMeshMemRecords(table.data(), (int)table.size(), &count), nullptr, "ncclMeshMemRecords");
+  pybind11::list out;
+  for (int i = 0; i < count && i < (int)table.size(); i++) {
+    pybind11::dict d;
+    d["address"] = table[i].address;
+    d["bytes"] = table[i].bytes;
+    d["freed"] = (bool)table[i].freed;
+    pybind11::list points;
+    for (int j = 0; j < table[i].points; j++) points.append(pybind11::make_tuple(table[i].value[j], table[i].reached[j]));
+    d["points"] = points;
+    out.append(d);
+  }
+  return out;
+}
+// Where a tensor's bytes are, as the records name them (0 for a tensor outside the window).
+static uint64_t address(const at::Tensor &t) {
+  if (t.is_mps()) return (uint64_t)(uintptr_t)window_bytes(t);
+  void *buffer = nullptr;
+  size_t offset = 0;
+  return ncclMeshMemBuffer(t.data_ptr(), &buffer, &offset) == ncclSuccess ? (uint64_t)(uintptr_t)t.data_ptr() : 0;
 }
 
 } // namespace c10d
@@ -613,4 +743,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("createProcessGroupMesh", &c10d::ProcessGroupMesh::create);
   m.def("empty", &c10d::empty);
   m.def("counts", &c10d::counts);
+  m.def("records", &c10d::records);
+  m.def("address", &c10d::address);
 }
