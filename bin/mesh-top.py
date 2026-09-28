@@ -209,6 +209,12 @@ class Top:
         before = {bridge["pid"]: bridge for bridge in previous["fabric"].get("bridges") or []}
         for bridge in sample["fabric"].get("bridges") or []:
             old = before.get(bridge["pid"])
+            specs = bridge.get("links") or []
+            for index, (flow, was) in enumerate(zip(bridge.get("flow") or [], (old or {}).get("flow") or [])):
+                spec = specs[index] if index < len(specs) else {}
+                peer = self.owner(spec.get("remote"))[0] or self.peer_by_rank(spec.get("peer")) or f"rank{spec.get('peer', '?')}"
+                delta = lambda *keys: max(0, sum(flow.get(k, 0) - was.get(k, 0) for k in keys))
+                self.series[(peer, node.name, "live")].append((float(sample["observed_at"]), dt, delta("receive_bytes", "net_receive_bytes"), delta("receives", "net_receives"), 0))
             if any((x.get("log_size") or 0) - x.get("log_offset", 0) > 65536 for x in (old or {}, bridge)): continue
             for index, total in (bridge.get("census") or {}).items():
                 base = ((old or {}).get("census") or {}).get(index) or {}
@@ -363,6 +369,8 @@ class Top:
                     row += [(f"{rate_text(recv['now']):>11} last", "ok" if recv["now"] else ""), f"  {rate_text(recv['avg']):>11} {W:g}s" + (f" {100 * recv['avg'] / declared:3.0f}%" if declared else ""), f"  peak {rate_text(recv['peak']):>10}  ", (f"{spark:<32}", "accent"),
                             f"  RECV {count_text(recv['avg_ops'])}/s", f"  SEND {count_text((send or {}).get('avg_ops'))}/s", f"  calls {recv['calls']}"]
                 else: row.append(("no census yet (rates start after two samples of a node running a bridge)", "dim"))
+                live = self.rates((src, dst, "live"), W)
+                if live: row += [("   live ", "dim"), (f"{rate_text(live['now'])}", "ok" if live["now"] else ""), f" ({count_text(live['now_ops'])} RECV/s, bridge counters)"]
                 add(*row)
             reference = []
             if ranks in self.links["costs"]:
@@ -376,8 +384,31 @@ class Top:
                     total, last = (bridge.get("census") or {}).get(index), (bridge.get("last_call") or {}).get(index) or {}
                     if last.get("span_ns"): reference.append(f"{node.name} last call (MESH_LEDGER): {last['bytes']} bytes landed over {last['span_ns'] / 1e3:.0f} us of crossings = {rate_text(last['bytes'] * 1e9 / last['span_ns'])}")
                     if total and not bridge.get("exited_at"):
-                        reference.append(f"{node.name} bridge {bridge['region']}: {total['calls']} calls, {rate_text(total['bytes']).replace('/s', '')} landed, {bridge.get('pairs', 0)} pairings, {bridge.get('retries', 0)} pairing retries, {bridge.get('credit_limited', 0)} credit-limited calls, {bridge.get('errors', 0)} errors, unretired SEND frames {total['frames'] - total['retired']}")
+                        reference.append(f"{node.name} bridge {bridge['region']}: {total['calls']} calls, {rate_text(total['bytes']).replace('/s', '')} landed, {bridge.get('pairs', 0)} pairings, {bridge.get('retries', 0)} pairing retries, {bridge.get('resets', 0)} pairing resets reconnected, {bridge.get('credit_limited', 0)} credit-limited calls, {bridge.get('errors', 0)} errors, unretired SEND frames {total['frames'] - total['retired']}")
+                    flows, peers = bridge.get("flow") or [], (bridge.get("stat") or {}).get("peers") or []
+                    if index is not None and int(index) < len(flows) and not bridge.get("exited_at"):
+                        f, p = flows[int(index)], peers[int(index)] if int(index) < len(peers) else {}
+                        session, regions = p.get("session") or {}, p.get("regions") or {}
+                        reference.append(f"{node.name} bridge {bridge['region']} live: flow-control stalls send {f.get('send_stalls', 0)} receive {f.get('receive_stalls', 0)}, credit waits {f.get('credit_waits', 0)}; "
+                                         f"program {f.get('sends', 0)} SENDs {rate_text(f.get('send_bytes', 0)).replace('/s', '')}, {f.get('receives', 0)} RECVs {rate_text(f.get('receive_bytes', 0)).replace('/s', '')}; "
+                                         f"communicators {f.get('net_sends', 0)} sent {rate_text(f.get('net_send_bytes', 0)).replace('/s', '')}, {f.get('net_receives', 0)} received {rate_text(f.get('net_receive_bytes', 0)).replace('/s', '')}; "
+                                         f"session {PHASES.get(session.get('phase'), '?')} ({session.get('sessions', 0)} pairings, {session.get('chunk_frames', 0)} frames a chunk); regions {regions.get('wire', 0)} window + {regions.get('client', 0)} client")
             for text in reference: add(("      " + text, "dim"))
+        add()
+        add(("COMMUNICATORS", "head"), ("   the bridges' ncclNet-shaped connections (mesh-net.h): one direction of one connection each, keyed by its listen", "dim"))
+        shown = 0
+        for node in self.nodes:
+            for bridge in fabric(node).get("bridges") or []:
+                comms, stat = bridge.get("communicators") or [], bridge.get("stat") or {}
+                if bridge.get("exited_at") or not (comms or stat.get("clients")): continue
+                shown += 1
+                add(("  ", ""), (f"{node.name} {bridge['region']}", "bold"), (f"   {len(comms)} comms, {len(stat.get('clients') or [])} clients (pids {', '.join(map(str, stat.get('clients') or [])) or '-'})", "dim"))
+                for c in comms:
+                    style = "bad" if c.get("state") == "failed" else "ok" if c.get("state") in ("send", "recv") else "dim"
+                    add(("    ", ""), (f"#{c['comm']:<3} {c.get('state', '?'):<10}", style),
+                        f" {'->' if c.get('state') == 'send' else '<-' if c.get('state') == 'recv' else '  '} node {c.get('peer')}  pid {c.get('pid')}  key {c.get('key', '')[:8]}"
+                        f"  posted {c.get('posted', 0)}  completed {c.get('completions', 0)}  {rate_text(c.get('bytes', 0)).replace('/s', '')}  credit waits {c.get('credit_waits', 0)}" + (f"  error {c['error']}" if c.get("error") else ""))
+        if not shown: add(("  none open", "dim"))
         add()
         add(("TOPOLOGY", "head"))
         if self.links["kind"]: add(f"  declared  {self.links['kind']} {self.links['count']}: " + "  ".join(f"{x}-{y}" for x, y in self.links["links"]), (f"   ({self.links['path']})", "dim"))

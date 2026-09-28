@@ -133,7 +133,7 @@ def bridge():
 CENSUS = re.compile(r"link (\d+) census queue=(\d+) requests=(\d+) frames=(\d+) retired=(\d+) send_completions=(\d+) records=(\d+) posted=(\d+) landed=(\d+) bytes=(\d+)")
 RECEIVE_RING = re.compile(r"receive ring=\d+ records=(\d+) posted=(\d+)")
 TRACE = re.compile(r'\{"native_trace":(\d+),.*"ns":\[(\d+),\d+,(\d+)\]')
-INFO = ("wire window=", "bridge node ", "pair capacity ", "pair up: ", '{"trace_')
+INFO = ("wire window=", "bridge node ", "pair capacity ", "pair up: ", '{"trace_', "session link ", "session capacity ", "session up: ")
 COUNTS = ("requests", "frames", "retired", "send_completions", "records", "posted", "landed", "bytes")
 FABRIC_KEEP = float(os.environ.get("MESH_FABRIC_KEEP", "600"))
 FABRIC_READ = int(os.environ.get("MESH_FABRIC_READ", str(16 << 20)))
@@ -180,12 +180,13 @@ def bridge_log(entry, final=False):
             if match and int(match.group(1)) > int(match.group(2)): entry["credit_limited"] += 1
         elif line.startswith("pair up: "): entry["pairs"] += 1
         elif line.startswith("exchange failed"): entry["retries"] += 1
+        elif line.startswith("exchange reset"): entry["resets"] += 1
         elif line.strip() and not line.startswith(INFO) and not (line.startswith("register ") and ": " not in line):
             entry["errors"] += 1
             entry["last_error"] = line[:240]
 
 def bridge_counters():
-    return {"log_offset": 0, "census": {}, "last_call": {}, "spans": {}, "traces": 0, "rings": 0, "credit_limited": 0, "pairs": 0, "retries": 0, "errors": 0, "last_error": None}
+    return {"log_offset": 0, "census": {}, "last_call": {}, "spans": {}, "traces": 0, "rings": 0, "credit_limited": 0, "pairs": 0, "retries": 0, "resets": 0, "errors": 0, "last_error": None}
 
 def processes(pids):
     table = {}
@@ -203,12 +204,14 @@ def fabric_bridges(now):
         entry = BRIDGES.get(pid)
         if entry is None:
             option = lambda flag, default=None: next((argv[i + 1] for i in range(len(argv) - 1) if argv[i] == flag), default)
-            links = [dict(zip(("device", "peer", "local", "remote", "service"), argv[i + 1].split(","))) for i in range(len(argv) - 1) if argv[i] == "--link"]
+            links = [dict(zip(("device", "peer", "local", "remote", "service", "net_service"), argv[i + 1].split(","))) for i in range(len(argv) - 1) if argv[i] == "--link"]
             log = next((line[1:] for line in output(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "2", "-Fn"]).splitlines() if line.startswith("n/")), None)
             entry = BRIDGES[pid] = {"pid": pid, "rank": option("-I"), "region": option("-s", "/mesh0"), "links": links, "log": log, "log_size": None, **bridge_counters()}
         entry.update({"state": process["stat"], "elapsed": process["elapsed"], "exited_at": None})
         try: entry["stat"] = json.loads(output([stat, entry["region"]]).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
         except Exception as error: entry["stat"] = {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
+        entry["flow"] = [{"node": peer.get("node"), "session": (peer.get("session") or {}).get("phase"), **(peer.get("flow") or {})} for peer in entry["stat"].get("peers") or []]
+        entry["communicators"] = entry["stat"].get("communicators") or []
         if entry["log"]: bridge_log(entry)
     for pid, entry in list(BRIDGES.items()):
         if pid in table: continue
