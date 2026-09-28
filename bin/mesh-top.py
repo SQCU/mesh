@@ -1,5 +1,5 @@
 #!/usr/bin/env mesh-python
-import argparse, collections, concurrent.futures, curses, html, json, os, re, socket, subprocess, sys, threading, time, urllib.request
+import argparse, collections, concurrent.futures, curses, html, json, os, re, socket, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 TELEMETRY_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
@@ -46,7 +46,7 @@ class Node:
     def __init__(self, spec):
         self.spec, self.name, self.rank = spec, spec["name"], spec.get("rank")
         self.sample, self.info, self.info_at, self.error, self.transport, self.rtt = None, {}, 0.0, None, None, None
-        self.sequence, self.previous, self.probe, self.probing, self.retry_at = None, None, None, False, 0.0
+        self.sequence, self.previous, self.probe, self.probing, self.retry_at, self.address = None, None, None, False, 0.0, None
 
     def hosts(self):
         if self.spec.get("self"): return ["127.0.0.1"]
@@ -61,15 +61,33 @@ def bracket(host):
 def ssh(host, command, timeout):
     return subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", host, command], capture_output=True, text=True, timeout=timeout)
 
-def nodeinfo_text(host):
+def connect(address, port, timeout):
+    family, sockaddr, _ = address
+    connection = socket.socket(family, socket.SOCK_STREAM)
+    connection.settimeout(timeout)
+    try: connection.connect((sockaddr[0], port) + tuple(sockaddr[2:]))
+    except Exception:
+        connection.close()
+        raise
+    return connection
+
+def exchange(address, port, request, timeout=2):
+    with connect(address, port, min(timeout, 0.7)) as connection:
+        connection.settimeout(timeout)
+        connection.sendall(request)
+        data = b""
+        while chunk := connection.recv(1 << 20): data += chunk
+    return data
+
+def addresses(host):
+    try: return [(family, sockaddr, host) for family, _, _, _, sockaddr in socket.getaddrinfo(host, TELEMETRY_PORT, type=socket.SOCK_STREAM)]
+    except Exception: return []
+
+def nodeinfo_text(address):
     for port in (8099, 8100):
-        try:
-            with socket.create_connection((host, port), timeout=2) as connection:
-                connection.sendall(b"x")
-                data = b""
-                while chunk := connection.recv(65536): data += chunk
-            if data.startswith(b"mesh1 "): return data.split(b"\n", 1)[1].decode(errors="replace")
+        try: data = exchange(address, port, b"x")
         except Exception: continue
+        if data.startswith(b"mesh1 "): return data.split(b"\n", 1)[1].decode(errors="replace")
     return ""
 
 def parse_info(text):
@@ -86,12 +104,13 @@ def fetch(node):
     started = time.monotonic()
     path = f"/v1/latest?measures=scalars"
     attempts = []
-    for host in ([node.transport[1]] if node.transport and node.transport[0] == "http" else []) + node.hosts():
+    for address in ([node.address] if node.address else []) + [a for host in node.hosts() for a in addresses(host)]:
         try:
-            with urllib.request.urlopen(f"http://{bracket(host)}:{TELEMETRY_PORT}{path}", timeout=2) as response: envelope = json.load(response)
-            node.transport = ("http", host)
+            data = exchange(address, TELEMETRY_PORT, f"GET {path} HTTP/1.1\r\nHost: {bracket(address[2])}\r\nConnection: close\r\n\r\n".encode())
+            envelope = json.loads(data.partition(b"\r\n\r\n")[2])
+            node.transport, node.address = ("http", address[2]), address
             break
-        except Exception as error: attempts.append(f"http {host}: {type(error).__name__}")
+        except Exception as error: attempts.append(f"http {address[2]} {address[1][0]}: {type(error).__name__}")
     else:
         envelope = None
         for host in node.ssh_hosts():
@@ -104,13 +123,13 @@ def fetch(node):
     node.rtt = time.monotonic() - started
     record = (envelope or {}).get("record") or {}
     if not record.get("sample"):
-        node.error, node.transport, node.retry_at = "; ".join(attempts) or "telemetry ring empty", None, time.monotonic() + 10
+        node.error, node.transport, node.retry_at = "; ".join(attempts) or f"no address or ssh host answered for {', '.join(node.hosts() + node.ssh_hosts()) or node.name}", None, time.monotonic() + 10
         return
     node.error = None
     if record.get("sequence") != node.sequence:
         node.previous, node.sample, node.sequence = node.sample, record["sample"], record.get("sequence")
     if time.time() - node.info_at > 10:
-        text = nodeinfo_text(node.transport[1]) if node.transport[0] == "http" else ssh(node.transport[1], "printf x | nc -G 2 -w 2 ::1 8099 || printf x | nc -G 2 -w 2 ::1 8100", 8).stdout.split("\n", 1)[-1]
+        text = nodeinfo_text(node.address) if node.transport[0] == "http" else ssh(node.transport[1], "printf x | nc -G 2 -w 2 ::1 8099 || printf x | nc -G 2 -w 2 ::1 8100", 8).stdout.split("\n", 1)[-1]
         if text: node.info, node.info_at = parse_info(text), time.time()
 
 def probe(node):
