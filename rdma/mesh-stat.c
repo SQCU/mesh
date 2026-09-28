@@ -42,9 +42,9 @@ int main(int argc,char **argv){
       (unsigned long long)atomic_load(&n->send_stalls),(unsigned long long)atomic_load(&n->receive_stalls),(unsigned long long)atomic_load(&n->credit_waits),
       (unsigned long long)atomic_load(&n->sends),(unsigned long long)atomic_load(&n->send_bytes),(unsigned long long)atomic_load(&n->receives),(unsigned long long)atomic_load(&n->receive_bytes),
       (unsigned long long)atomic_load(&n->net_sends),(unsigned long long)atomic_load(&n->net_send_bytes),(unsigned long long)atomic_load(&n->net_receives),(unsigned long long)atomic_load(&n->net_receive_bytes));
-    printf("\"session\":{\"phase\":%u,\"code\":%lld,\"sessions\":%llu,\"chunk_frames\":%u},\"regions\":{\"wire\":%u,\"client\":%u,\"client_bytes\":%llu}}",
+    printf("\"session\":{\"phase\":%u,\"code\":%lld,\"sessions\":%llu,\"chunk_frames\":%u},\"regions\":{\"wire\":%u}}",
       atomic_load(&n->phase),(long long)atomic_load(&n->code),(unsigned long long)atomic_load(&n->sessions),atomic_load(&n->chunk_frames),
-      atomic_load(&n->wire_regions),atomic_load(&n->client_regions),(unsigned long long)atomic_load(&n->client_bytes));
+      atomic_load(&n->wire_regions));
   }
   printf("],\"clients\":[");
   uint32_t listed=0;
@@ -52,8 +52,11 @@ int main(int argc,char **argv){
     uint64_t owner=atomic_load(&mesh_net_clients(h)[i].owner);
     if(owner)printf("%s%u",listed++?",":"",(uint32_t)owner);
   }
+  uint64_t client_bytes=0;
+  for(uint32_t i=0;i<MESH_NET_MEMORY;i++)if(atomic_load(&mesh_net_memory(h)[i].owner))client_bytes+=(uint64_t)mesh_net_memory(h)[i].pages*h->pgsz;
+  printf("],\"client_bytes\":%llu",(unsigned long long)client_bytes);
   static const char *const states[]={"free","claimed","listen","connecting","acceptable","send","recv","closing","failed"};
-  printf("],\"communicators\":[");
+  printf(",\"communicators\":[");
   listed=0;
   for(uint32_t i=0;i<MESH_NET_COMMS;i++){
     struct mesh_net_comm *comm=mesh_net_comms(h)+i;

@@ -7,9 +7,10 @@
    by the bridge's communicator sessions (mesh-flow.c): every call of the plugin with its arguments in
    its order, returning ncclResult_t's values, and `mesh_net_plugin` the table in the plugin's member
    order.  A device is one of the bridge's links (one peer); a comm is one direction of one connection;
-   memory is registered as it is, in place, when it is a POSIX shared-memory object the bridge can map
-   (mesh_net_mem_alloc, mesh_net_mem_import) or the region's registered window.  Host pointers only;
-   one receive per irecv (maxRecvs 1). */
+   memory is registered as it is, in place: the region's registered window, which mesh_net_mem_alloc
+   hands out, is named by the device's registered regions (a receive lands only in memory registered
+   before its queue pair was set up, so nothing is registered later).  Host pointers only; one
+   receive per irecv (maxRecvs 1). */
 enum { MESH_NET_SUCCESS=0, MESH_NET_SYSTEM_ERROR=2, MESH_NET_INTERNAL_ERROR=3, MESH_NET_INVALID_ARGUMENT=4,
        MESH_NET_INVALID_USAGE=5, MESH_NET_REMOTE_ERROR=6, MESH_NET_IN_PROGRESS=7 };
 #define MESH_NET_HANDLE_BYTES 128
@@ -85,11 +86,10 @@ struct mesh_net_v12 {
 };
 extern const struct mesh_net_v12 mesh_net_plugin;
 
-/* Memory a registration takes as it is (ncclMemAlloc's place): a POSIX shared-memory object of this
-   process, or one the caller mapped itself (`name` mapped from its offset 0 at `pointer`). */
+/* Memory a registration takes as it is (ncclMemAlloc's place): whole blocks of the region's registered
+   window, shared with the bridge, mapped in this process by init. */
 int mesh_net_mem_alloc(void **pointer,size_t size);
 int mesh_net_mem_free(void *pointer);
-int mesh_net_mem_import(const char *name,void *pointer,size_t size);
 /* The errno behind this thread's last result other than success, and a comm's counts: bytes moved,
    requests completed, sends that waited for credit, requests posted. */
 int mesh_net_error(void);

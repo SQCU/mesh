@@ -16,8 +16,10 @@ requires a numerical caller to pump communication or await an enclosing tensor.
 Besides the one prepared program, the bridge serves any number of clients and
 communicators at NCCL's network-plugin level (`rdma/mesh-net.h`, `ncclNet_v12_t`):
 one session per link for the bridge's lifetime (its own port, the link's service +
-1000), connections by listen key, clients' shared memory registered in place, and
-isend/irecv/test/iflush driven by the receiver: an isend announces its message, the
+1000), connections by listen key, clients' memory in the region's registered window
+used in place (a receive lands only in memory registered before its queue pair was
+set up, so nothing is registered later), and isend/irecv/test/iflush driven by the
+receiver: an isend announces its message, the
 receiver matches it with an irecv, posts each chunk's RECV and only then grants that
 chunk, and the sender SENDs exactly the granted chunks, so no SEND meets a queue
 without its RECV. The region's counters record flow-control stalls, credit waits and

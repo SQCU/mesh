@@ -95,6 +95,9 @@ int mesh_detach(struct mesh_ctx *c){
 /* One first-fit scan over an explicit pair of bitmaps and an explicit range.  The caller names the
    bitmaps because the arena bitmap is indexed by arena page and the row planes by row: they are two
    index spaces and sharing one sizing is what forced rows >= pages. */
+/* The claim is atomic word by word: several processes allocate from one arena (the prepared program's
+   client and the communicator clients, mesh-net.c), so a bit another claimant set since the scan read
+   it undoes this claim and the scan goes on past it. */
 static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
                           _Atomic uint64_t *own,_Atomic uint64_t *hot){
   for(uint32_t first=(begin+align-1)/align*align;first<=end && count<=end-first;){
@@ -103,10 +106,31 @@ static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t 
       uint64_t occupied=(atomic_load_explicit(&own[w],memory_order_acquire)|atomic_load_explicit(&hot[w],memory_order_acquire))&mesh_word_mask(first,count,w);
       if(occupied) next=w*64+64-(uint32_t)__builtin_clzll(occupied);
     }
-    if(next==first){ mesh_bits_set(own,first,count); return first; }
+    if(next==first){
+      uint32_t w=first/64,last=(first+count-1)/64;
+      for(;w<=last;w++){
+        uint64_t mask=mesh_word_mask(first,count,w),before=atomic_fetch_or_explicit(&own[w],mask,memory_order_acq_rel);
+        if(before&mask){atomic_fetch_and_explicit(&own[w],~(mask&~before),memory_order_acq_rel);break;}
+      }
+      if(w>last) return first;
+      for(uint32_t u=first/64;u<w;u++)atomic_fetch_and_explicit(&own[u],~mesh_word_mask(first,count,u),memory_order_acq_rel);
+      next=first+1;
+    }
     first=(next+align-1)/align*align;
   }
   return MESH_ABSENT;
+}
+
+/* Arena pages of the registered window (wire) or the rest, for a process that is not the region's
+   program client (mesh_net_mem_alloc): the same atomic claim, after a reclaim when none is free. */
+uint32_t mesh_arena_claim(struct hdr *m,uint32_t pages,uint32_t align,int wire){
+  struct mesh_range range=mesh_arena_range(m,wire);
+  _Atomic uint64_t *bits=mesh_arena_bits(m);
+  if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
+  uint32_t first=mesh_scan(pages,align,range.first,range.first+range.count,bits,bits);
+  if(first==MESH_ABSENT){ mesh_reclaim(m); first=mesh_scan(pages,align,range.first,range.first+range.count,bits,bits); }
+  if(first==MESH_ABSENT) errno=ENOMEM;
+  return first;
 }
 
 /* design/algorithm-sources.md#programkernel_call */

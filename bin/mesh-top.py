@@ -392,7 +392,7 @@ class Top:
                         reference.append(f"{node.name} bridge {bridge['region']} live: flow-control stalls send {f.get('send_stalls', 0)} receive {f.get('receive_stalls', 0)}, credit waits {f.get('credit_waits', 0)}; "
                                          f"program {f.get('sends', 0)} SENDs {rate_text(f.get('send_bytes', 0)).replace('/s', '')}, {f.get('receives', 0)} RECVs {rate_text(f.get('receive_bytes', 0)).replace('/s', '')}; "
                                          f"communicators {f.get('net_sends', 0)} sent {rate_text(f.get('net_send_bytes', 0)).replace('/s', '')}, {f.get('net_receives', 0)} received {rate_text(f.get('net_receive_bytes', 0)).replace('/s', '')}; "
-                                         f"session {PHASES.get(session.get('phase'), '?')} ({session.get('sessions', 0)} pairings, {session.get('chunk_frames', 0)} frames a chunk); regions {regions.get('wire', 0)} window + {regions.get('client', 0)} client")
+                                         f"session {PHASES.get(session.get('phase'), '?')} ({session.get('sessions', 0)} pairings, {session.get('chunk_frames', 0)} frames a chunk); {regions.get('wire', 0)} window regions, {rate_text((bridge.get('stat') or {}).get('client_bytes', 0)).replace('/s', '')} of the window communicators' memory")
             for text in reference: add(("      " + text, "dim"))
         add()
         add(("COMMUNICATORS", "head"), ("   the bridges' ncclNet-shaped connections (mesh-net.h): one direction of one connection each, keyed by its listen", "dim"))

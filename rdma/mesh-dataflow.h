@@ -35,6 +35,7 @@ void mesh_retire(struct hdr *,uint64_t client);
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 /* design/prepared-machine.md#M09 */
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align,int wire);
+uint32_t mesh_arena_claim(struct hdr *,uint32_t pages,uint32_t align,int wire);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
 /* design/algorithm-sources.md#device-operands */
 void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);

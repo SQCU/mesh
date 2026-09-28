@@ -132,7 +132,7 @@ def net_check(result):
 class Net:
     """NCCL's network plugin (ncclNet_v12_t) over this node's bridge (mesh-net.h): init on `region`
     (MESH_REGION), the links as devices, listen/connect/accept by 128-byte handles, registrations of
-    shared memory in place, and isend/irecv/iflush/test.  `handle(node, key)` is the handle a listen
+    the bridge's registered window in place (alloc), and isend/irecv/iflush/test.  `handle(node, key)` is the handle a listen
     of that key on bridge node `node` gives, so peers deriving keys from one commId need no bootstrap."""
 
     def __init__(self, comm_id=0, region=None):
@@ -172,7 +172,8 @@ class Net:
         return comm if comm.value else None
 
     def alloc(self, nbytes):
-        """A uint8 array over a new shared-memory object a registration takes in place."""
+        """A uint8 array over whole blocks of the bridge's registered window, which a registration takes
+        in place (mesh_net_mem_alloc)."""
         pointer = C.c_void_p()
         net_check(LIB.mesh_net_mem_alloc(C.byref(pointer), nbytes))
         array = np.frombuffer((C.c_char * nbytes).from_address(pointer.value), np.uint8)

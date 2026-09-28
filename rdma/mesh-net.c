@@ -1,5 +1,5 @@
 #include "mesh-net.h"
-#include "mesh.h"
+#include "mesh-dataflow.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -14,8 +14,9 @@
 
 /* The client side of the communicator service (mesh-net.h): a comm is a slot of the region's table
    (mesh.h mesh_net_comm) this process claimed or accepted; a request is its comm's ring slot; the
-   bridge's session thread of the comm's link serves both (mesh-flow.c).  Nothing here waits on the
-   wire except registration, which NCCL's regMr and deregMr are. */
+   bridge's session thread of the comm's link serves both (mesh-flow.c).  Memory is the region's
+   registered window: mesh_net_mem_alloc claims its pages, and regMr names the device's registered
+   regions they lie in, so data lands in place and nothing here waits on the wire. */
 #define NET_HANDLE_MAGIC 0x4d4e4844u
 #define NET_PENDING 256
 #define NET_WAIT_NS UINT64_C(60000000000)
@@ -31,12 +32,10 @@ struct net_comm_handle {
 struct net_mhandle { uint32_t mr,generation; char *address; size_t size; uint64_t offset; };
 struct net_pending { struct net_comm_handle *comm; uint64_t key; uint32_t node; int dev; };
 struct net_context { uint64_t comm_id; int traffic_class; mesh_net_logger log; struct net_pending pending[NET_PENDING]; };
-struct net_memory { char name[32]; char *base; size_t size; int owned; };
 static struct {
   pthread_mutex_t lock;
   int inits;
   struct hdr *m; size_t length; uint64_t owner; uint32_t client;
-  struct net_memory *memory; size_t memories,allocated;
   char **names;
   uint64_t checked;
 } net = {.lock=PTHREAD_MUTEX_INITIALIZER};
@@ -230,61 +229,20 @@ int mesh_net_accept(void *listenComm,void **recvComm,void **recvDevComm){
   return MESH_NET_SUCCESS;
 }
 
-static struct net_memory *net_memory_of(const char *data,size_t size){
-  for(size_t i=0;i<net.memories;i++){
-    struct net_memory *memory=net.memory+i;
-    if(data>=memory->base && data<=memory->base+memory->size && size<=(size_t)(memory->base+memory->size-data))return memory;
-  }
-  return NULL;
-}
-/* In place: the region's registered window as it is, or a shared-memory object this process allocated
-   or imported, registered by the bridge (mesh-flow.c net_register) before this returns. */
+/* In place: memory in the region's registered window (mesh_net_mem_alloc's, or any section a client has
+   there) is named by the device's registered regions it lies in; the bridge registers nothing new, as a
+   receive lands only in memory registered before its queue pair was set up.  Other memory is refused. */
 int mesh_net_reg_mr(void *comm,void *data,size_t size,int type,void **mhandle){
-  struct net_comm_handle *c=comm;
+  (void)comm;
   if(!net.m)return net_result(EBUSY);
   if(type!=MESH_NET_PTR_HOST)return net_result(EINVAL);
+  char *window=(char *)net.m+net.m->data_off;uint64_t wire=mesh_wire_bytes(net.m);
+  if(size && ((char *)data<window || (char *)data>window+wire || size>(size_t)(window+wire-(char *)data)))return net_result(EFAULT);
   struct net_mhandle *h=calloc(1,sizeof *h);
   if(!h)return net_result(ENOMEM);
-  char *window=(char *)net.m+net.m->data_off;uint64_t wire=mesh_wire_bytes(net.m);
-  if(!size || ((char *)data>=window && (char *)data<=window+wire && size<=(size_t)(window+wire-(char *)data))){
-    *h=(struct net_mhandle){.mr=MESH_NET_WINDOW,.address=data,.size=size,.offset=size?(uint64_t)((char *)data-window):0};
-    *mhandle=h;
-    return MESH_NET_SUCCESS;
-  }
-  pthread_mutex_lock(&net.lock);
-  struct net_memory *memory=net_memory_of(data,size);
-  char name[32];uint64_t offset=0;
-  if(memory){memcpy(name,memory->name,sizeof name);offset=(uint64_t)((char *)data-memory->base);}
-  pthread_mutex_unlock(&net.lock);
-  if(!memory){free(h);return net_result(EFAULT);}
-  struct mesh_net_mr *mrs=mesh_net_mrs(net.m),*mr=NULL;
-  uint32_t index=0;
-  for(;index<MESH_NET_MRS;index++){
-    uint32_t vacant=MESH_NET_FREE;
-    if(atomic_compare_exchange_strong_explicit(&mrs[index].state,&vacant,MESH_NET_CLAIMED,memory_order_acq_rel,memory_order_relaxed)){mr=mrs+index;break;}
-  }
-  if(!mr){free(h);return net_result(ENOSPC);}
-  mr->generation++;mr->link=c->link;mr->regions=0;mr->owner=net.owner;mr->offset=offset;mr->size=size;
-  memcpy(mr->name,name,sizeof mr->name);
-  atomic_store_explicit(&mr->error,0,memory_order_relaxed);
-  atomic_store_explicit(&mr->state,MESH_NET_REQUESTED,memory_order_release);
-  net_ring(c->link);
-  uint64_t end=net_now()+NET_WAIT_NS;
-  uint32_t state;
-  while((state=atomic_load_explicit(&mr->state,memory_order_acquire))==MESH_NET_REQUESTED && net_now()<end)usleep(20);
-  if(state==MESH_NET_REGISTERED){
-    *h=(struct net_mhandle){.mr=index,.generation=mr->generation,.address=data,.size=size,.offset=offset};
-    *mhandle=h;
-    return MESH_NET_SUCCESS;
-  }
-  /* refused, or unanswered: the slot is withdrawn (a registration made meanwhile is released) */
-  int error=state==MESH_NET_REFUSED?atomic_load_explicit(&mr->error,memory_order_relaxed):ETIMEDOUT;
-  if(state==MESH_NET_REQUESTED && !atomic_compare_exchange_strong_explicit(&mr->state,&state,MESH_NET_FREE,memory_order_acq_rel,memory_order_acquire)){
-    if(state==MESH_NET_REGISTERED){atomic_store_explicit(&mr->state,MESH_NET_RELEASING,memory_order_release);net_ring(c->link);}
-  }
-  if(state==MESH_NET_REFUSED)atomic_store_explicit(&mr->state,MESH_NET_FREE,memory_order_release);
-  free(h);
-  return net_result(error?error:EIO);
+  *h=(struct net_mhandle){.mr=MESH_NET_WINDOW,.address=data,.size=size,.offset=size?(uint64_t)((char *)data-window):0};
+  *mhandle=h;
+  return MESH_NET_SUCCESS;
 }
 int mesh_net_reg_mr_dma_buf(void *comm,void *data,size_t size,int type,uint64_t offset,int fd,void **mhandle){
   (void)comm;(void)data;(void)size;(void)type;(void)offset;(void)fd;(void)mhandle;
@@ -292,19 +250,7 @@ int mesh_net_reg_mr_dma_buf(void *comm,void *data,size_t size,int type,uint64_t 
 }
 int mesh_net_dereg_mr(void *comm,void *mhandle){
   (void)comm;
-  struct net_mhandle *h=mhandle;
-  if(!h)return net_result(EINVAL);
-  if(h->mr!=MESH_NET_WINDOW){
-    struct mesh_net_mr *mr=mesh_net_mrs(net.m)+h->mr;
-    uint32_t registered=MESH_NET_REGISTERED;
-    if(mr->generation==h->generation &&
-       atomic_compare_exchange_strong_explicit(&mr->state,&registered,MESH_NET_RELEASING,memory_order_acq_rel,memory_order_relaxed)){
-      net_ring(mr->link);
-      uint64_t end=net_now()+NET_WAIT_NS;
-      while(atomic_load_explicit(&mr->state,memory_order_acquire)==MESH_NET_RELEASING && net_now()<end && !net_bridge_gone())usleep(20);
-    }
-  }
-  free(h);
+  free(mhandle);
   return MESH_NET_SUCCESS;
 }
 
@@ -395,6 +341,13 @@ int mesh_net_finalize(void *ctx){
   free(context);
   pthread_mutex_lock(&net.lock);
   if(net.inits && !--net.inits && net.m){
+    struct mesh_net_memory *memory=mesh_net_memory(net.m);
+    for(uint32_t i=0;i<MESH_NET_MEMORY;i++){
+      uint64_t owner=net.owner;uint32_t first=memory[i].first,pages=memory[i].pages;
+      if(atomic_load_explicit(&memory[i].owner,memory_order_acquire)==owner &&
+         atomic_compare_exchange_strong_explicit(&memory[i].owner,&owner,0,memory_order_acq_rel,memory_order_relaxed))
+        mesh_bits_clear(mesh_arena_bits(net.m),first,pages);
+    }
     if(net.client<MESH_NET_CLIENTS){
       uint64_t owner=net.owner;
       atomic_compare_exchange_strong_explicit(&mesh_net_clients(net.m)[net.client].owner,&owner,0,memory_order_acq_rel,memory_order_relaxed);
@@ -407,55 +360,37 @@ int mesh_net_finalize(void *ctx){
   return MESH_NET_SUCCESS;
 }
 
-static int net_remember(const char *name,void *pointer,size_t size,int owned){
-  if(net.memories==net.allocated){
-    size_t grown=net.allocated?2*net.allocated:16;
-    struct net_memory *memory=realloc(net.memory,grown*sizeof *memory);
-    if(!memory)return ENOMEM;
-    net.memory=memory;net.allocated=grown;
-  }
-  struct net_memory *memory=net.memory+net.memories++;
-  memset(memory,0,sizeof *memory);snprintf(memory->name,sizeof memory->name,"%s",name);
-  memory->base=pointer;memory->size=size;memory->owned=owned;
-  return 0;
-}
+/* Pages of the registered window, whole blocks of them, recorded as this client's in the region so the
+   bridge vacates them if it exits without freeing them. */
 int mesh_net_mem_alloc(void **pointer,size_t size){
-  static _Atomic uint32_t made;
+  if(!net.m)return net_result(EBUSY);
   if(!size)return net_result(EINVAL);
-  char name[32];
-  snprintf(name,sizeof name,"/mn%u.%u",(unsigned)getpid(),(unsigned)atomic_fetch_add(&made,1));
-  size_t page=(size_t)getpagesize(),bytes=(size+page-1)/page*page;
-  int file=shm_open(name,O_CREAT|O_EXCL|O_RDWR,MESH_MODE);
-  if(file<0)return net_result(errno);
-  fchmod(file,MESH_MODE);
-  void *address=MAP_FAILED;
-  int error=ftruncate(file,(off_t)bytes)?errno:0;
-  if(!error && (address=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_SHARED,file,0))==MAP_FAILED)error=errno;
-  close(file);
-  pthread_mutex_lock(&net.lock);
-  if(!error)error=net_remember(name,address,bytes,1);
-  pthread_mutex_unlock(&net.lock);
-  if(error){if(address!=MAP_FAILED)munmap(address,bytes);shm_unlink(name);return net_result(error);}
-  *pointer=address;
+  struct hdr *m=net.m;
+  uint64_t quantum=(uint64_t)m->block*m->pgsz,pages=(size+quantum-1)/quantum*m->block;
+  if(pages>UINT32_MAX)return net_result(ENOMEM);
+  struct mesh_net_memory *memory=mesh_net_memory(m),*entry=NULL;
+  for(uint32_t i=0;i<MESH_NET_MEMORY && !entry;i++){
+    uint64_t vacant=0;
+    if(atomic_compare_exchange_strong_explicit(&memory[i].owner,&vacant,net.owner,memory_order_acq_rel,memory_order_relaxed))entry=memory+i;
+  }
+  if(!entry)return net_result(ENOSPC);
+  uint32_t first=mesh_arena_claim(m,(uint32_t)pages,m->block,1);
+  if(first==MESH_ABSENT){int error=errno;atomic_store_explicit(&entry->owner,0,memory_order_release);return net_result(error);}
+  entry->first=first;entry->pages=(uint32_t)pages;
+  *pointer=mesh_at(m,first);
   return MESH_NET_SUCCESS;
 }
-int mesh_net_mem_import(const char *name,void *pointer,size_t size){
-  if(!name || strlen(name)>=sizeof net.memory->name || !pointer || !size)return net_result(EINVAL);
-  pthread_mutex_lock(&net.lock);
-  int error=net_remember(name,pointer,size,0);
-  pthread_mutex_unlock(&net.lock);
-  return net_result(error);
-}
 int mesh_net_mem_free(void *pointer){
-  pthread_mutex_lock(&net.lock);
-  for(size_t i=0;i<net.memories;i++)if(net.memory[i].base==pointer){
-    struct net_memory memory=net.memory[i];
-    net.memory[i]=net.memory[--net.memories];
-    pthread_mutex_unlock(&net.lock);
-    if(memory.owned){munmap(memory.base,memory.size);shm_unlink(memory.name);}
+  if(!net.m)return net_result(EBUSY);
+  struct mesh_net_memory *memory=mesh_net_memory(net.m);
+  for(uint32_t i=0;i<MESH_NET_MEMORY;i++){
+    uint64_t owner=net.owner;
+    if(atomic_load_explicit(&memory[i].owner,memory_order_acquire)!=owner || mesh_at(net.m,memory[i].first)!=(unsigned char *)pointer)continue;
+    uint32_t first=memory[i].first,pages=memory[i].pages;
+    if(atomic_compare_exchange_strong_explicit(&memory[i].owner,&owner,0,memory_order_acq_rel,memory_order_relaxed))
+      mesh_bits_clear(mesh_arena_bits(net.m),first,pages);
     return MESH_NET_SUCCESS;
   }
-  pthread_mutex_unlock(&net.lock);
   return net_result(EINVAL);
 }
 void mesh_net_comm_counts(void *comm,uint64_t counts[4]){

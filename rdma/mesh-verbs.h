@@ -30,12 +30,16 @@
    are the device's registrable memory. */
 #define MESH_BANK ((size_t)1<<32)
 #define MESH_REGION ((size_t)1<<30)
+/* The device's discard buffer (mesh-flow.c communicator sessions): registered with the window, before any
+   queue pair, since a receive lands only in memory registered before its queue pair was set up. */
+#define MESH_DISCARD ((size_t)4<<20)
 struct mesh_wire { char *data; size_t length; };
 struct mesh_device {
   const char *name;
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
   uint32_t region_count,frame_capacity;
   char *wire; size_t extent,payload;
+  char *discard; struct ibv_mr *discard_region;
   pthread_mutex_t setup;
 };
 /* design/prepared-machine.md#M09 */
@@ -110,6 +114,8 @@ static int down_pair(struct mesh_verbs *provider){
 }
 /* design/algorithm-sources.md#programcopy */
 static int down_device(struct mesh_device *device){
+  if(device->discard_region){if(ibv_dereg_mr(device->discard_region))return 0;device->discard_region=NULL;}
+  if(device->discard){munmap(device->discard,MESH_DISCARD);device->discard=NULL;}
   while(device->region_count){
     if(ibv_dereg_mr(device->regions[device->region_count-1]))return 0;
     device->region_count--;
@@ -285,6 +291,16 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
   }
   size_t extent=device->extent,regions=device->region_count;
   device->wire=wire->data;device->extent=extent;device->payload=stride;
+  if(!device->discard){
+    char *reserved=mmap(NULL,MESH_DISCARD+MESH_BANK,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE,-1,0);
+    if(reserved==MAP_FAILED){error=errno;goto done;}
+    char *base=(char *)(((uintptr_t)reserved+MESH_BANK-1)&~(uintptr_t)(MESH_BANK-1));
+    if(base>reserved)munmap(reserved,(size_t)(base-reserved));
+    munmap(base+MESH_DISCARD,(size_t)(reserved+MESH_DISCARD+MESH_BANK-(base+MESH_DISCARD)));
+    device->discard=mmap(base,MESH_DISCARD,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON|MAP_FIXED,-1,0);
+    if(device->discard==MAP_FAILED){error=errno;device->discard=NULL;munmap(base,MESH_DISCARD);goto done;}
+  }
+  if(!device->discard_region && !(device->discard_region=ibv_reg_mr(device->domain,device->discard,MESH_DISCARD,IBV_ACCESS_LOCAL_WRITE))){error=errno?errno:ENOMEM;goto done;}
   fprintf(stderr,"register %s window=%zu bytes extent=%zu regions=%zu arena=%llu bytes\n",
     device->name,span,extent,regions,(unsigned long long)mesh_arena_pages(m)*(uint64_t)m->pgsz);
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
