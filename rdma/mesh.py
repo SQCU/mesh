@@ -1,5 +1,6 @@
 import ctypes as C
 import os
+import struct
 import time
 
 import numpy as np
@@ -86,6 +87,171 @@ for name, result, arguments in (
         ('mesh_host_arrived', Q, [CONTEXT, Section, U])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
+
+
+class NetProperties(C.Structure):
+    """mesh-net.h struct mesh_net_properties, ncclNetProperties_v12_t member for member."""
+    _fields_ = [('name', C.c_char_p), ('pciPath', C.c_char_p), ('guid', Q), *((k, C.c_int) for k in (
+        'ptrSupport', 'regIsGlobal', 'forceFlush', 'speed', 'port')), ('latency', C.c_float),
+        *((k, C.c_int) for k in ('maxComms', 'maxRecvs', 'netDeviceType', 'netDeviceVersion')),
+        ('ndevs', C.c_int), ('devs', C.c_int * 8), ('maxP2pBytes', Z), ('maxCollBytes', Z),
+        ('maxMultiRequestSize', C.c_int), ('railId', C.c_int16), ('planeId', C.c_int16)]
+
+
+P = C.c_void_p
+PP = C.POINTER(C.c_void_p)
+for name, arguments in (
+        ('mesh_net_init', [PP, Q, P, P, P]), ('mesh_net_devices', [C.POINTER(C.c_int)]),
+        ('mesh_net_get_properties', [C.c_int, C.POINTER(NetProperties)]),
+        ('mesh_net_listen', [P, C.c_int, P, PP]), ('mesh_net_connect', [P, C.c_int, P, PP, PP]),
+        ('mesh_net_accept', [P, PP, PP]), ('mesh_net_reg_mr', [P, P, Z, C.c_int, PP]), ('mesh_net_dereg_mr', [P, P]),
+        ('mesh_net_isend', [P, P, Z, C.c_int, P, P, PP]),
+        ('mesh_net_irecv', [P, C.c_int, PP, C.POINTER(Z), C.POINTER(C.c_int), PP, PP, PP]),
+        ('mesh_net_iflush', [P, C.c_int, PP, C.POINTER(C.c_int), PP, PP]),
+        ('mesh_net_test', [P, C.POINTER(C.c_int), C.POINTER(C.c_int)]),
+        ('mesh_net_close_send', [P]), ('mesh_net_close_recv', [P]), ('mesh_net_close_listen', [P]),
+        ('mesh_net_finalize', [P]), ('mesh_net_mem_alloc', [PP, Z]), ('mesh_net_mem_free', [P]), ('mesh_net_error', [])):
+    function = getattr(LIB, name)
+    function.restype, function.argtypes = C.c_int, arguments
+LIB.mesh_net_comm_counts.restype, LIB.mesh_net_comm_counts.argtypes = None, [P, C.POINTER(Q)]
+NET_RESULTS = {0: 'ncclSuccess', 2: 'ncclSystemError', 3: 'ncclInternalError', 4: 'ncclInvalidArgument',
+               5: 'ncclInvalidUsage', 6: 'ncclRemoteError', 7: 'ncclInProgress'}
+NET_HANDLE_MAGIC, NET_HANDLE_BYTES = 0x4d4e4844, 128
+
+
+class NetError(OSError):
+    pass
+
+
+def net_check(result):
+    if result:
+        error = LIB.mesh_net_error()
+        raise NetError(error, f'{NET_RESULTS.get(result, result)}: {os.strerror(error)}')
+
+
+class Net:
+    """NCCL's network plugin (ncclNet_v12_t) over this node's bridge (mesh-net.h): init on `region`
+    (MESH_REGION), the links as devices, listen/connect/accept by 128-byte handles, registrations of
+    shared memory in place, and isend/irecv/iflush/test.  `handle(node, key)` is the handle a listen
+    of that key on bridge node `node` gives, so peers deriving keys from one commId need no bootstrap."""
+
+    def __init__(self, comm_id=0, region=None):
+        if region:
+            os.environ['MESH_REGION'] = region
+        self.ctx, self.memory = C.c_void_p(), {}
+        net_check(LIB.mesh_net_init(C.byref(self.ctx), comm_id, None, None, None))
+
+    def devices(self):
+        count = C.c_int()
+        net_check(LIB.mesh_net_devices(C.byref(count)))
+        return count.value
+
+    def properties(self, dev):
+        props = NetProperties()
+        net_check(LIB.mesh_net_get_properties(dev, C.byref(props)))
+        return props
+
+    @staticmethod
+    def handle(node, key):
+        return C.create_string_buffer(struct.pack('<IIQ', NET_HANDLE_MAGIC, node, key), NET_HANDLE_BYTES)
+
+    def listen(self, dev, key=0):
+        """(handle, listen comm); a nonzero `key` names the listen."""
+        handle, comm = self.handle(0, key) if key else C.create_string_buffer(NET_HANDLE_BYTES), C.c_void_p()
+        net_check(LIB.mesh_net_listen(self.ctx, dev, handle, C.byref(comm)))
+        return handle, comm
+
+    def connect(self, dev, handle):
+        comm = C.c_void_p()
+        net_check(LIB.mesh_net_connect(self.ctx, dev, handle, C.byref(comm), None))
+        return comm if comm.value else None
+
+    def accept(self, listen):
+        comm = C.c_void_p()
+        net_check(LIB.mesh_net_accept(listen, C.byref(comm), None))
+        return comm if comm.value else None
+
+    def alloc(self, nbytes):
+        """A uint8 array over a new shared-memory object a registration takes in place."""
+        pointer = C.c_void_p()
+        net_check(LIB.mesh_net_mem_alloc(C.byref(pointer), nbytes))
+        array = np.frombuffer((C.c_char * nbytes).from_address(pointer.value), np.uint8)
+        self.memory[array.ctypes.data] = pointer
+        return array
+
+    def free(self, array):
+        net_check(LIB.mesh_net_mem_free(self.memory.pop(array.ctypes.data)))
+
+    def regmr(self, comm, array):
+        mhandle = C.c_void_p()
+        net_check(LIB.mesh_net_reg_mr(comm, array.ctypes.data, array.nbytes, 1, C.byref(mhandle)))
+        return mhandle
+
+    def deregmr(self, comm, mhandle):
+        net_check(LIB.mesh_net_dereg_mr(comm, mhandle))
+
+    def isend(self, comm, array, mhandle, tag=0):
+        """A request, or None when the comm's ring is full (post again)."""
+        request = C.c_void_p()
+        net_check(LIB.mesh_net_isend(comm, array.ctypes.data, array.nbytes, tag, mhandle, None, C.byref(request)))
+        return request if request.value else None
+
+    def irecv(self, comm, array, mhandle, tag=0):
+        request, data, size, tags, handles = C.c_void_p(), (P * 1)(array.ctypes.data), (Z * 1)(array.nbytes), \
+            (C.c_int * 1)(tag), (P * 1)(mhandle.value if mhandle else None)
+        net_check(LIB.mesh_net_irecv(comm, 1, data, size, tags, handles, None, C.byref(request)))
+        return request if request.value else None
+
+    def iflush(self, comm):
+        request = C.c_void_p()
+        net_check(LIB.mesh_net_iflush(comm, 1, None, None, None, C.byref(request)))
+        return request if request.value else None
+
+    def test(self, request):
+        """(done, bytes)."""
+        done, size = C.c_int(), C.c_int()
+        net_check(LIB.mesh_net_test(request, C.byref(done), C.byref(size)))
+        return bool(done.value), size.value
+
+    def wait(self, request, deadline=float('inf')):
+        while True:
+            done, size = self.test(request)
+            if done:
+                return size
+            if time.monotonic() > deadline:
+                raise TimeoutError('request not done by its deadline')
+
+    @staticmethod
+    def counts(comm):
+        """The comm's bytes moved, requests completed, sends that waited for credit, requests posted."""
+        out = (Q * 4)()
+        LIB.mesh_net_comm_counts(comm, out)
+        return dict(zip(('bytes', 'completions', 'credit_waits', 'posted'), out))
+
+    def close(self, comm, kind):
+        net_check(getattr(LIB, f'mesh_net_close_{kind}')(comm))
+
+    def finalize(self):
+        for pointer in self.memory.values():
+            LIB.mesh_net_mem_free(pointer)
+        self.memory.clear()
+        net_check(LIB.mesh_net_finalize(self.ctx))
+
+
+class LinkView(C.Structure):
+    _fields_ = [('peer', U), ('phase', U), ('device', C.c_char * 32), ('bandwidth', Q)]
+
+
+LIB.mesh_observe.argtypes = [C.c_char_p, C.POINTER(LinkView), U, C.POINTER(U)]
+
+
+def links_of(region=None):
+    """(this bridge's node, [(link, peer node, device)]) from its region (mesh_observe)."""
+    views, node = (LinkView * 64)(), U()
+    count = LIB.mesh_observe(os.fsencode(region) if region else None, views, 64, C.byref(node))
+    if count < 0:
+        raise OSError(-count, os.strerror(-count))
+    return node.value, [(i, views[i].peer, views[i].device.decode()) for i in range(min(count, 64))]
 
 
 def check(status):

@@ -69,8 +69,9 @@ struct mesh_verbs {
   struct ibv_cq *completion,*sent;
   uint32_t peer,completion_entries[2];
   uint64_t bandwidth;
-  const char *local_address,*remote_address,*service;
-  uint64_t deadline;
+  const char *local_address,*remote_address,*service,*kind;
+  uint64_t deadline,window;
+  uint32_t magic;
 };
 /* design/prepared-machine.md#M07 */
 /* design/algorithm-sources.md#programtensor */
@@ -126,9 +127,11 @@ static void onsig(int s){ (void)s; stop++; }
 struct qpi { uint32_t xmagic, xsize; uint32_t pgsz; uint16_t lid; uint8_t gid[16]; uint32_t node,count; };
 #define XMAGIC 0x4d595048u
 
+/* A link's communicator session (mesh-flow.c net_session) pairs for the bridge's lifetime, not a client's. */
+#define MESH_NET_SESSION UINT64_MAX
 /* design/algorithm-sources.md#programcopy */
 static int pairing_active(struct hdr *m,uint64_t client,uint64_t deadline){
-  if(stop || atomic_load_explicit(&m->client,memory_order_acquire)!=client){errno=ECANCELED;return 0;}
+  if(stop || (client!=MESH_NET_SESSION && atomic_load_explicit(&m->client,memory_order_acquire)!=client)){errno=ECANCELED;return 0;}
   if(clock_gettime_nsec_np(CLOCK_MONOTONIC)>=deadline){errno=ETIMEDOUT;return 0;}
   return 1;
 }
@@ -192,6 +195,10 @@ static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t re
 
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M08 */
+/* The higher node accepts, the lower dials.  The listener lives only while its pairing waits: it closes
+   the moment it accepts, so a peer dialing for its next pairing is refused (and dials again) until this
+   node's next pairing listens, instead of landing in a backlog that nobody accepts and that is reset when
+   the link closes. */
 static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
   if(!pairing_active(m,client,provider->deadline))return -1;
   if(m->node>provider->peer){
@@ -199,6 +206,7 @@ static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
     while(pairing_active(m,client,provider->deadline)){
       int f=accept(provider->listener,NULL,NULL);
       if(f>=0){
+        close(provider->listener);provider->listener=-1;
         if(fcntl(f,F_SETFL,O_NONBLOCK)==0)return f;
         int error=errno;close(f);errno=error;return -1;
       }
@@ -293,51 +301,61 @@ done:
 static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
   struct ibv_port_attr pa;
   if(device_up(provider->device,provider->wire,m,&pa))return -1;
-  provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+UINT64_C(30000000000);
-  int f=oob(provider,m,client);
-  if(f<0)return -1;
-  /* A peer host that dies silently (power, panic) becomes an EOF on this control socket within
-     idle + interval x count seconds, a link event (mesh-flow.c link_run); UC queue pairs report
-     nothing (docs/elastic.md §1 in metal-microbench). */
-  int on=1,idle=5,interval=1,count=3;
-  if(setsockopt(f,SOL_SOCKET,SO_KEEPALIVE,&on,sizeof on) || setsockopt(f,IPPROTO_TCP,TCP_KEEPALIVE,&idle,sizeof idle) ||
-     setsockopt(f,IPPROTO_TCP,TCP_KEEPINTVL,&interval,sizeof interval) || setsockopt(f,IPPROTO_TCP,TCP_KEEPCNT,&count,sizeof count)){
-    int error=errno;close(f);errno=error;return -1;
-  }
+  provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+(provider->window?provider->window:UINT64_C(30000000000));
   uint32_t frame_capacity=provider->device->frame_capacity;
-  /* design/prepared-machine.md#M11 */
-  provider->queues=calloc((size_t)qps,sizeof *provider->queues);
-  if(!provider->queues){close(f);return -1;}
-  provider->completion=ibv_create_cq(provider->device->context,
-    (int)(frame_capacity+1),NULL,NULL,0);
-  if(!provider->completion){close(f);return -1;}
-  provider->sent=ibv_create_cq(provider->device->context,(int)(frame_capacity+1),NULL,NULL,0);
-  if(!provider->sent){close(f);return -1;}
-  for(int q=0;q<qps;q++){
-    struct mesh_queue *queue=&provider->queues[q];
-    queue->completion=provider->completion;queue->sent=provider->sent;
-    queue->poll=provider->completion->context->ops.poll_cq;
-    struct ibv_qp_init_attr qi={.send_cq=queue->sent,
-      .recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
-      .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
-    queue->pair=ibv_create_qp(provider->device->domain,&qi);
-    if(!queue->pair){close(f);return -1;}
-    queue->send=queue->pair->context->ops.post_send;queue->receive=queue->pair->context->ops.post_recv;
-    provider->qp_count=q+1;
-    struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
-    if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
-    queue->receive_capacity=actual.cap.max_recv_wr;queue->send_capacity=actual.cap.max_send_wr;
-    fprintf(stderr,"pair capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",q,
-      actual.cap.max_send_wr,actual.cap.max_recv_wr,
-      queue->completion->cqe);
+  union ibv_gid gid;uint32_t psn=arc4random()&0xffffff;
+  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION+provider->magic,.xsize=sizeof mine,.lid=pa.lid,.pgsz=m->block*m->pgsz,.node=m->node,.count=(uint32_t)qps},you;
+  int f;
+  /* A connection reset before the peers' first exchange is a peer's abandoned attempt, not this
+     pairing's failure: the pairing connects again while its deadline lasts. */
+  for(;;){
+    f=oob(provider,m,client);
+    if(f<0)return -1;
+    /* A peer host that dies silently (power, panic) becomes an EOF on this control socket within
+       idle + interval x count seconds, a link event (mesh-flow.c link_run); UC queue pairs report
+       nothing (docs/elastic.md §1 in metal-microbench). */
+    int on=1,idle=5,interval=1,count=3;
+    if(setsockopt(f,SOL_SOCKET,SO_KEEPALIVE,&on,sizeof on) || setsockopt(f,IPPROTO_TCP,TCP_KEEPALIVE,&idle,sizeof idle) ||
+       setsockopt(f,IPPROTO_TCP,TCP_KEEPINTVL,&interval,sizeof interval) || setsockopt(f,IPPROTO_TCP,TCP_KEEPCNT,&count,sizeof count)){
+      int error=errno;close(f);errno=error;return -1;
+    }
+    if(!provider->queues){
+      /* design/prepared-machine.md#M11 */
+      provider->queues=calloc((size_t)qps,sizeof *provider->queues);
+      if(!provider->queues){close(f);return -1;}
+      provider->completion=ibv_create_cq(provider->device->context,
+        (int)(frame_capacity+1),NULL,NULL,0);
+      if(!provider->completion){close(f);return -1;}
+      provider->sent=ibv_create_cq(provider->device->context,(int)(frame_capacity+1),NULL,NULL,0);
+      if(!provider->sent){close(f);return -1;}
+      for(int q=0;q<qps;q++){
+        struct mesh_queue *queue=&provider->queues[q];
+        queue->completion=provider->completion;queue->sent=provider->sent;
+        queue->poll=provider->completion->context->ops.poll_cq;
+        struct ibv_qp_init_attr qi={.send_cq=queue->sent,
+          .recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
+          .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
+        queue->pair=ibv_create_qp(provider->device->domain,&qi);
+        if(!queue->pair){close(f);return -1;}
+        queue->send=queue->pair->context->ops.post_send;queue->receive=queue->pair->context->ops.post_recv;
+        provider->qp_count=q+1;
+        struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
+        if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
+        queue->receive_capacity=actual.cap.max_recv_wr;queue->send_capacity=actual.cap.max_send_wr;
+        fprintf(stderr,"%s capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",provider->kind?provider->kind:"pair",q,
+          actual.cap.max_send_wr,actual.cap.max_recv_wr,
+          queue->completion->cqe);
+      }
+      struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
+      for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->queues[q].pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
+      if(ibv_query_gid(provider->device->context,1,0,&gid)){ close(f); return -1; }
+      memcpy(mine.gid,&gid,16);
+    }
+    if(!exchange(f,&mine,&you,sizeof mine,sizeof you,m,client,provider->deadline))break;
+    int error=errno;close(f);
+    if(error!=ECONNRESET && error!=EPIPE && error!=ENOTCONN && error!=ECONNABORTED){fprintf(stderr,"exchange failed\n");errno=error;return -1;}
+    fprintf(stderr,"exchange reset: %s; connecting again\n",strerror(error));
   }
-  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
-  for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->queues[q].pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
-  union ibv_gid gid; if(ibv_query_gid(provider->device->context,1,0,&gid)){ close(f); return -1; }
-  uint32_t psn=arc4random()&0xffffff;
-  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.lid=pa.lid,.pgsz=m->block*m->pgsz,.node=m->node,.count=(uint32_t)qps},you;
-  memcpy(mine.gid,&gid,16);
-  if(exchange(f,&mine,&you,sizeof mine,sizeof you,m,client,provider->deadline)){ int error=errno;close(f);fprintf(stderr,"exchange failed\n");errno=error;return -1; }
   /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.count!=mine.count || you.node!=provider->peer){
     fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,provider->peer); close(f);errno=EPROTO;return -1; }
@@ -361,5 +379,5 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   static const uint64_t speeds[256]={[1]=2500000000,[2]=5000000000,[4]=10000000000,[8]=10000000000,[16]=14000000000,[32]=25000000000,[64]=50000000000,[128]=100000000000};
   static const uint8_t widths[256]={[1]=1,[2]=4,[4]=8,[8]=12};
   provider->bandwidth=speeds[pa.active_speed]*widths[pa.active_width];
-  fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(provider->device->context->device),m->node);
+  fprintf(stderr,"%s up: %s node %d\n",provider->kind?provider->kind:"pair",ibv_get_device_name(provider->device->context->device),m->node);
   return f; }

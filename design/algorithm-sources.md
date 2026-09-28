@@ -243,8 +243,11 @@ cannot target a recycled descriptor. Event registration and notification use
 `KEVENT_FLAG_IMMEDIATE`; only the separate controller's event observation blocks.
 No heartbeat, elapsed-time failure inference, or healthy-path TX/RX socket query
 is added. The first program and instance errors and each frame's last completed
-invocation are preserved. The old listener is closed after QP teardown, so a new
-realization opens a fresh listener without the prior connection's backlog.
+invocation are preserved. The listener closes the moment it accepts, so a peer
+dialing for its next realization is refused, and dials again, until this node's next
+realization listens; nothing lands in a backlog that no pairing accepts. A connection
+reset before the peers' first exchange is an abandoned attempt, and the pairing
+connects again within its deadline.
 This implements event observation in source, not complete R2 cancellation or
 R3–R7 recovery. An unreported silent partition is not detected by inventing a timer.
 No caller-death or cable-loss run accompanies this change.

@@ -10,7 +10,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 106u
+#define MESH_VERSION 107u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -84,10 +84,77 @@ struct hdr {
   uint32_t padding;
   _Atomic uint64_t configured;
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,length_off,target_off,order_off,notice_off,data_off,length;
-  uint64_t notice_bytes,target_stride;
+  uint64_t notice_bytes,target_stride,net_off;
   _Atomic uint64_t client,bridge_pid,device_client,serial,control;
   struct mesh_port_info port;
 };
+/* The communicator service (mesh-net.h, NCCL's network plugin ncclNet_v12_t): its tables in the region.
+   A client claims a slot by CAS from MESH_NET_FREE and publishes it; the session thread of the slot's
+   link serves it (mesh-flow.c net_scan).  A comm is one direction of one connection (a listen, a send or
+   a receive end), its requests a ring by sequence, posted by the client and completed by the bridge. */
+#define MESH_NET_CLIENTS 32
+#define MESH_NET_COMMS 256
+#define MESH_NET_REQUESTS 64
+#define MESH_NET_MRS 128
+#define MESH_NET_WINDOW UINT32_MAX
+enum { MESH_NET_FREE, MESH_NET_CLAIMED, MESH_NET_LISTEN, MESH_NET_CONNECTING, MESH_NET_ACCEPTABLE, MESH_NET_SEND,
+       MESH_NET_RECV, MESH_NET_CLOSING, MESH_NET_FAILED };
+enum { MESH_NET_REQUESTED=2, MESH_NET_REGISTERED, MESH_NET_RELEASING, MESH_NET_REFUSED };
+enum { MESH_NET_IDLE, MESH_NET_POSTED, MESH_NET_ACTIVE, MESH_NET_DONE, MESH_NET_ERROR };
+enum { MESH_NET_ISEND, MESH_NET_IRECV, MESH_NET_IFLUSH };
+/* A request: `offset` into its registration (MESH_NET_WINDOW: the region's registered window), `size`
+   the bytes sent or the receive's capacity, `transferred` the bytes moved once it is done. */
+struct mesh_net_request {
+  _Alignas(64) _Atomic uint32_t state;
+  uint32_t op,mr,mr_generation;
+  int32_t tag; _Atomic int32_t error;
+  uint64_t sequence,offset,size;
+  _Atomic uint64_t transferred;
+};
+_Static_assert(sizeof(struct mesh_net_request)==64,"mesh_net_request");
+/* A comm: its link, its client (`owner`), the key a connect names, a receive end's listen, the other
+   end's comm on the peer bridge; `posted` the client's count of requests, the rest the bridge's counts. */
+struct mesh_net_comm {
+  _Alignas(64) _Atomic uint32_t state;
+  uint32_t generation,link,listen,listen_generation,peer,peer_generation;
+  _Atomic int32_t error;
+  uint64_t owner,key;
+  _Atomic uint64_t posted,bytes,completions,credit_waits;
+  struct mesh_net_request requests[MESH_NET_REQUESTS];
+};
+/* A registration of a client's POSIX shared-memory object `name`, bytes [offset, offset+size) of it,
+   registered by the bridge on its link's device in `regions` memory regions. */
+struct mesh_net_mr {
+  _Alignas(64) _Atomic uint32_t state;
+  uint32_t generation,link,regions;
+  _Atomic int32_t error; uint32_t padding;
+  uint64_t owner,offset,size;
+  char name[32];
+};
+struct mesh_net_client { _Alignas(64) _Atomic uint64_t owner; };
+/* A link's live counts, both paths': SENDs that waited for their queue's frames (send_stalls), receives
+   held back because their queue's frames or ring span were full, so the peer's SENDs into them waited
+   for credit (receive_stalls), communicator sends taken before their receiver's credit (credit_waits);
+   the prepared program's SEND requests and receive records and bytes, the communicators' messages and
+   bytes; the session's phase and pairings, and the device's registered regions. */
+struct mesh_net_link {
+  _Alignas(64) _Atomic uint32_t phase,chunk_frames;
+  _Atomic int64_t code;
+  _Atomic uint64_t doorbell,sessions;
+  _Atomic uint64_t send_stalls,receive_stalls,credit_waits;
+  _Atomic uint64_t sends,send_bytes,receives,receive_bytes;
+  _Atomic uint64_t net_sends,net_send_bytes,net_receives,net_receive_bytes;
+  _Atomic uint32_t wire_regions,client_regions;
+  _Atomic uint64_t client_bytes;
+};
+static inline struct mesh_net_link *mesh_net_links(struct hdr *m){return (struct mesh_net_link *)((char *)m+m->net_off);}
+static inline struct mesh_net_client *mesh_net_clients(struct hdr *m){return (struct mesh_net_client *)(mesh_net_links(m)+m->links);}
+static inline struct mesh_net_mr *mesh_net_mrs(struct hdr *m){return (struct mesh_net_mr *)(mesh_net_clients(m)+MESH_NET_CLIENTS);}
+static inline struct mesh_net_comm *mesh_net_comms(struct hdr *m){return (struct mesh_net_comm *)(mesh_net_mrs(m)+MESH_NET_MRS);}
+static inline uint64_t mesh_net_bytes(uint32_t links){
+  return (uint64_t)links*sizeof(struct mesh_net_link)+MESH_NET_CLIENTS*sizeof(struct mesh_net_client)+
+    MESH_NET_MRS*sizeof(struct mesh_net_mr)+MESH_NET_COMMS*sizeof(struct mesh_net_comm);
+}
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
 /* design/prepared-machine.md#M07 */
@@ -194,6 +261,7 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   h->page_off=at; at+=(uint64_t)g.rows*sizeof(struct mesh_page_entry); at=(at+pgsz-1)/pgsz*pgsz;
   h->buffer_off=at; at+=(uint64_t)g.rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->link_off=at; at+=(uint64_t)g.links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
+  h->net_off=at; at+=mesh_net_bytes(g.links); at=(at+pgsz-1)/pgsz*pgsz;
   h->length_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*g.links*g.qps*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)g.links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)g.rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
