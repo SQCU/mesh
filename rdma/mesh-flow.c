@@ -648,7 +648,7 @@ struct net_session {
   unsigned char input[sizeof(struct net_message)*64];size_t input_bytes;
   struct { uint32_t from,generation; uint64_t key; } pending[MESH_NET_COMMS];uint32_t pending_count;
   int send_blocked,receive_blocked;
-  uint64_t bell,scanned,reaped,strays,logged;
+  uint64_t bell,scanned,reaped,strays;
 };
 
 static uint64_t net_now(void){return clock_gettime_nsec_np(CLOCK_MONOTONIC);}
@@ -945,8 +945,6 @@ static int net_post(struct net_session *s){
     s->send_blocked=0;
     struct ibv_sge span=net_span(s,chunk->mr,chunk->offset,chunk->length);
     struct ibv_send_wr request={.wr_id=s->send_post,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
-    if(s->logged<8 && ++s->logged)fprintf(stderr,"session link %u: SEND %u addr=0x%llx length=%u lkey=0x%x registration %u\n",s->index,s->send_post,
-      (unsigned long long)span.addr,span.length,span.lkey,chunk->mr);
     int error=ibv_post_send(s->provider.queues[0].pair,&request,&bad);
     if(error)return error<0?-error:error;
     s->send_post++;s->send_posted+=frames;
@@ -963,8 +961,6 @@ static int net_post(struct net_session *s){
     s->receive_blocked=0;
     struct ibv_sge span=net_span(s,t->mr,t->offset+t->cursor,length);
     struct ibv_recv_wr request={.wr_id=s->receive_chunk_tail,.sg_list=&span,.num_sge=1},*bad;
-    if(s->logged<8 && ++s->logged)fprintf(stderr,"session link %u: RECV %u addr=0x%llx length=%u lkey=0x%x registration %u\n",s->index,s->receive_chunk_tail,
-      (unsigned long long)span.addr,span.length,span.lkey,t->mr);
     int error=ibv_post_recv(s->provider.queues[0].pair,&request,&bad);
     if(error)return error<0?-error:error;
     s->receive_chunks[s->receive_chunk_tail++%s->chunk_slots]=(struct net_chunk){s->receive_post,frames,length,span};
@@ -997,7 +993,8 @@ static int net_complete(struct net_session *s,int *busy){
     struct mesh_net_comm *comm=chunk.comm==NET_NONE?NULL:net_comm_at(s,chunk.comm,chunk.generation);
     if(!comm)continue;
     struct net_comm *state=net_state(comm,chunk.comm);
-    if((state->sent[chunk.slot]+=chunk.length)==comm->requests[chunk.slot].size)net_end(s,comm,state,chunk.slot,0,comm->requests[chunk.slot].size);
+    if(state->phase[chunk.slot]==2 && (state->sent[chunk.slot]+=chunk.length)==comm->requests[chunk.slot].size)
+      net_end(s,comm,state,chunk.slot,0,comm->requests[chunk.slot].size);
   }
   *busy|=count>0;
   count=ibv_poll_cq(s->provider.completion,16,done);
@@ -1161,7 +1158,7 @@ static void net_reset(struct net_session *s){
   s->send_posted=s->send_retired=0;s->receive_outstanding=0;
   s->send_head=s->send_post=s->send_tail=s->receive_head=s->receive_post=s->receive_tail=0;
   s->receive_chunk_head=s->receive_chunk_tail=0;
-  s->output_head=s->output_tail=0;s->output_partial=s->input_bytes=0;s->failed=0;s->send_blocked=s->receive_blocked=0;s->logged=0;
+  s->output_head=s->output_tail=0;s->output_partial=s->input_bytes=0;s->failed=0;s->send_blocked=s->receive_blocked=0;
 }
 /* The session's configuration, between RTR and RTS: the priming RECV posted into the device's discard
    buffer, then each end's queue capacities exchanged, so that neither end SENDs before the other's
@@ -1181,7 +1178,6 @@ static int net_configure(void *argument,int socket,uint64_t client){
   struct ibv_recv_wr prime={.wr_id=s->receive_chunk_tail,.sg_list=&span,.num_sge=1},*bad;
   int error=ibv_post_recv(queue->pair,&prime,&bad);
   if(error){errno=error<0?-error:error;return -1;}
-  fprintf(stderr,"session link %u: priming RECV addr=0x%llx length=%u lkey=0x%x\n",s->index,(unsigned long long)span.addr,span.length,span.lkey);
   s->receive_chunks[s->receive_chunk_tail++%s->chunk_slots]=(struct net_chunk){NET_NONE,1,NET_PRIME,span};
   s->receive_outstanding=1;
   uint32_t mine[2]={s->send_capacity,s->receive_capacity},peer[2];
@@ -1231,6 +1227,7 @@ static void *net_session_run(void *argument){
       continue;
     }
     s->control=f;
+    __atomic_store_n(&mesh_links(m)[s->index].bandwidth,s->provider.bandwidth,__ATOMIC_RELAXED);
     atomic_store_explicit(&s->counts->code,0,memory_order_relaxed);
     atomic_fetch_add_explicit(&s->counts->sessions,1,memory_order_relaxed);
     atomic_store_explicit(&s->counts->phase,MESH_PAIRED,memory_order_release);

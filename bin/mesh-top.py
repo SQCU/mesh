@@ -295,7 +295,9 @@ class Top:
                 b = live[0]
                 stat = b.get("stat") or {}
                 phases = "/".join(PHASES.get(p.get("phase"), "?") for p in stat.get("peers") or []) or ("up" if stat.get("up") else "no region")
-                bridge = (f"{b['region']} pid {b['pid']} {phases}" + (f" call {stat['client']}" if stat.get("client") else " idle") + (f" +{len(live) - 1}" if len(live) > 1 else ""), "ok" if "PAIRED" in phases else "warn")
+                session = "/".join(PHASES.get((p.get("session") or {}).get("phase"), "?") for p in stat.get("peers") or [])
+                state = f"{phases} call {stat['client']}" if stat.get("client") else f"idle, net {session}" if session else "idle"
+                bridge = (f"{b['region']} pid {b['pid']} {state}" + (f" +{len(live) - 1}" if len(live) > 1 else ""), "ok" if "PAIRED" in phases or "PAIRED" in session else "warn")
             elif f.get("bridges"):
                 b = max(f["bridges"], key=lambda x: x["exited_at"])
                 bridge = (f"none (last {b['region']} exited {duration(now - b['exited_at'])} ago)", "dim")
