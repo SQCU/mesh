@@ -27,6 +27,7 @@ mkdir -p "$MESH_ROOT"/{bin,etc,jobs,log,templates,viz} /usr/local/bin
 install -m 755 -o root -g wheel "$REPO"/bin/*.sh "$MESH_ROOT/bin/"
 try "UV runtime realized" "$MESH_ROOT/bin/mesh-runtime-install.sh" "$MESH_ROOT" "$REPO"
 install -m 755 -o root -g wheel "$REPO"/bin/mesh-observe.py "$MESH_ROOT/bin/mesh-observe.py"
+install -m 755 -o root -g wheel "$REPO"/bin/mesh-top.py "$MESH_ROOT/bin/mesh-top.py"
 install -m 755 -o root -g wheel "$REPO"/user/mesh-telemetry.py "$MESH_ROOT/bin/mesh-telemetry.py"
 install -m 644 -o root -g wheel "$REPO"/etc/mesh-capacity.json "$MESH_ROOT/etc/mesh-capacity.json"
 install -m 644 -o root -g wheel "$REPO"/etc/mesh-nodes.json "$MESH_ROOT/etc/mesh-nodes.json"
@@ -44,8 +45,9 @@ ln -sf "$MESH_ROOT/bin/mesh-status.sh" /usr/local/bin/mesh-status
 ln -sf "$MESH_ROOT/bin/mesh-peers.sh"  /usr/local/bin/mesh-peers
 ln -sf "$MESH_ROOT/bin/mesh-run.sh"    /usr/local/bin/mesh-run
 ln -sf "$MESH_ROOT/bin/mesh-observe.py" /usr/local/bin/mesh-observe
+ln -sf "$MESH_ROOT/bin/mesh-top.py" /usr/local/bin/mesh-top
 ln -sf "$MESH_ROOT/bin/mesh-python" /usr/local/bin/mesh-python
-ok "$MESH_ROOT; mesh-status, mesh-peers and mesh-observe on PATH"
+ok "$MESH_ROOT; mesh-status, mesh-peers, mesh-observe and mesh-top on PATH"
 printf 'sleep 0\ndisplaysleep 0\ndisksleep 0\nstandby 0\nautorestart 1\nwomp 1\npowermode 2\nfirewall off\n' > "$MESH_ROOT/policy.default"
 cp "$MESH_ROOT/policy.default" "$MESH_ROOT/policy"
 ok "policy: uniform fleet default"
