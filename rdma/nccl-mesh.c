@@ -442,6 +442,18 @@ static ncclResult_t span_alloc(size_t size,unsigned char **out,uint64_t *tally){
   for(uint64_t deadline=deadline_after();;){
     sweep();
     unsigned char *at=gap(bytes);
+    if(!at){
+      /* a new slab, the allocation its first */
+      void *claimed=NULL;
+      struct slab *grown=realloc(heap.slabs,(size_t)(heap.nslabs+1)*sizeof *grown);
+      if(!grown){status=FAIL(NULL,ncclSystemError,"allocation");break;}
+      heap.slabs=grown;
+      size_t want=bytes>SLAB?bytes:SLAB;
+      if(!mesh_net_mem_alloc(&claimed,want) || (want>bytes && !mesh_net_mem_alloc(&claimed,want=bytes))){
+        heap.slabs[heap.nslabs++]=(struct slab){claimed,want};
+        at=claimed;
+      }
+    }
     if(at){
       uint64_t offset;void *buffer=nccl_mesh_buffer(at,bytes,&offset);
       if(!buffer){status=FAIL(NULL,ncclUnhandledCudaError,"window memory as a Metal buffer (newBufferWithBytesNoCopy)");break;}
@@ -456,15 +468,6 @@ static ncclResult_t span_alloc(size_t size,unsigned char **out,uint64_t *tally){
       heap.spans[i]=(struct span){.at=at,.bytes=bytes,.buffer=buffer};heap.n++;
       *out=at;
       break;
-    }
-    void *claimed=NULL;
-    struct slab *grown=realloc(heap.slabs,(size_t)(heap.nslabs+1)*sizeof *grown);
-    if(!grown){status=FAIL(NULL,ncclSystemError,"allocation");break;}
-    heap.slabs=grown;
-    size_t want=bytes>SLAB?bytes:SLAB;
-    if(!mesh_net_mem_alloc(&claimed,want) || (want>bytes && !mesh_net_mem_alloc(&claimed,want=bytes))){
-      heap.slabs[heap.nslabs++]=(struct slab){claimed,want};
-      continue;
     }
     int freed=0;
     for(int i=0;i<heap.n && !freed;i++)freed=heap.spans[i].freed;
