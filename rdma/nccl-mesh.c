@@ -21,7 +21,9 @@
    mesh_collective_plan run in plan order: a SEND an isend of the operand's piece, a COPY an irecv into
    the operand, a REDUCE an irecv into scratch and its combine into the operand, each piece written
    only once no isend still reads it.  A group is split by communicator; each communicator's worker
-   thread runs its part in issue order, after its streams' prior work. */
+   thread starts its part in issue order, after its streams' prior work, and runs its collectives;
+   its point-to-point transfers stay in flight while the worker goes on (a send completes only once
+   its peer has posted the receive), and the part is done once both are. */
 
 enum { CH_COLL, CH_P2P, CHANNELS };
 enum { K_SEND=MESH_ALLGATHER+1, K_RECV };
@@ -40,7 +42,9 @@ struct call {
 };
 struct mark { struct ncclMeshStream *stream; uint64_t wait,done; };
 struct launch { pthread_mutex_t lock; pthread_cond_t cond; int items,sync,nmarks; ncclResult_t result; struct mark *marks; };
-struct item { struct call *calls; int n; struct launch *launch; struct item *next; };
+struct flight;
+struct item { struct call *calls; int n; struct launch *launch; struct item *next; uint64_t deadline; int collectives_done;
+  struct flight *flight; ncclResult_t result; };
 struct ncclComm {
   uint64_t key; int rank,nranks;
   struct mesh_link_map map; double alpha,beta;
@@ -51,6 +55,7 @@ struct ncclComm {
   pthread_t worker; int started,stopping,finalized;
   pthread_mutex_t lock; pthread_cond_t cond;
   struct item *head,*tail; int busy;
+  struct flight *flights; int nflights,*blocked;
   _Atomic int aborting,broken,async;
   char error[512];
 };
@@ -252,7 +257,8 @@ static void close_peers(struct ncclComm *c){
    link.  The probing connects that met no listen are withdrawn with their context. */
 static ncclResult_t connect_peers(struct ncclComm *c){
   c->peers=calloc((size_t)c->nranks,sizeof *c->peers);
-  if(!c->peers)return FAIL(c,ncclSystemError,"peer table allocation");
+  c->blocked=calloc((size_t)c->nranks*2,sizeof *c->blocked);
+  if(!c->peers || !c->blocked)return FAIL(c,ncclSystemError,"peer table allocation");
   for(int p=0;p<c->nranks;p++)c->peers[p].dev=-1;
   int wanted=0;
   for(int p=0;p<c->nranks;p++)wanted+=linked(&c->map,c->rank,p);
@@ -340,6 +346,7 @@ static size_t aligned(size_t bytes){return (bytes+4095)&~(size_t)4095;}
 
 /* ---- requests ---- */
 struct pending { size_t lo,hi; void *request; };
+static void progress(struct ncclComm *c);
 static int stopped(struct ncclComm *c,uint64_t deadline){return atomic_load(&c->aborting) || now_ns()>deadline;}
 static ncclResult_t stop_reason(struct ncclComm *c,const char *what){
   return atomic_load(&c->aborting)?FAIL(c,ncclInvalidUsage,"%s: the communicator was aborted",what):
@@ -365,6 +372,7 @@ static ncclResult_t await(struct ncclComm *c,void *request,size_t bytes,struct p
     }
     if(sends){ncclResult_t r=reap(c,sends,count);if(r)return r;}
     if(stopped(c,deadline))return stop_reason(c,what);
+    progress(c);
     sched_yield();
   }
 }
@@ -378,6 +386,7 @@ static ncclResult_t post(struct ncclComm *c,int send,void *comm,void *data,size_
     if(*request)return ncclSuccess;
     if(sends){ncclResult_t r=reap(c,sends,count);if(r)return r;}
     if(stopped(c,deadline))return stop_reason(c,send?"an isend":"an irecv");
+    progress(c);
     sched_yield();
   }
 }
@@ -453,13 +462,63 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,unsigned ch
 
 /* ---- one communicator's part of a group ---- */
 struct transfer { int send; struct peer *peer; unsigned char *window,*user; size_t bytes; void *mhandle,*request; int state; };
-/* Point-to-point calls first posted (receives and sends each in call order on their connection, as
-   many as the rings take), the collectives run in issue order, then the point-to-point calls
-   finished; a send to and a receive from this rank itself are one copy, the k-th with the k-th. */
-static ncclResult_t run_item(struct ncclComm *c,struct item *it,uint64_t deadline){
-  if(atomic_load(&c->broken))return FAIL(c,ncclRemoteError,"the communicator failed earlier: %s",c->error);
+/* A part's point-to-point transfers, in flight: posted in order on each connection (across every
+   flight, oldest first) as far as its request ring takes them, tested, and retired together. */
+struct flight { struct item *it; struct transfer *t; int n,remaining; void *stage,*stage_mh; ncclResult_t status; struct flight *next; };
+#define FLIGHTS 32
+
+static void finish(struct ncclComm *c,struct item *it,ncclResult_t result);
+/* A flight done: received data out of its staging, its memory released, and its part finished if its
+   collectives are. */
+static void retire(struct ncclComm *c,struct flight *f){
+  for(int j=0;j<f->n && !f->status;j++)if(!f->t[j].send && f->t[j].window!=f->t[j].user)memcpy(f->t[j].user,f->t[j].window,f->t[j].bytes);
+  for(int j=0;j<f->n;j++)if(f->t[j].window==f->t[j].user && f->t[j].mhandle)mesh_net_dereg_mr(NULL,f->t[j].mhandle);
+  if(f->stage){mesh_net_dereg_mr(NULL,f->stage_mh);mesh_net_mem_free(f->stage);}
+  struct item *it=f->it;
+  it->flight=NULL;
+  if(f->status){if(!it->result)it->result=f->status;atomic_store(&c->broken,1);}
+  free(f->t);free(f);
+  pthread_mutex_lock(&c->lock);c->nflights--;pthread_cond_broadcast(&c->cond);pthread_mutex_unlock(&c->lock);
+  if(it->collectives_done)finish(c,it,it->result);
+}
+static void progress(struct ncclComm *c){
+  if(!c->flights)return;
+  memset(c->blocked,0,sizeof *c->blocked*(size_t)c->nranks*2);
+  for(struct flight **link=&c->flights;*link;){
+    struct flight *f=*link;
+    for(int j=0;j<f->n && !f->status;j++){
+      struct transfer *x=f->t+j;int slot=(int)(x->peer-c->peers)*2+x->send;
+      if(x->state==0 && !c->blocked[slot]){
+        void *comm=x->send?x->peer->send[CH_P2P]:x->peer->recv[CH_P2P],*data=x->window;size_t size=x->bytes;
+        int result=x->send?mesh_net_isend(comm,data,size,0,x->mhandle,NULL,&x->request):
+          mesh_net_irecv(comm,1,&data,&size,(int[]){0},&x->mhandle,NULL,&x->request);
+        if(result)f->status=net_failure(c,result,x->send?"a send's isend":"a receive's irecv");
+        else if(x->request)x->state=1;
+      }
+      if(x->state==0)c->blocked[slot]=1;
+      if(x->state==1){
+        int done=0,size=0,result=mesh_net_test(x->request,&done,&size);
+        if(result)f->status=net_failure(c,result,x->send?"a send":"a receive");
+        else if(done){
+          x->state=2;f->remaining--;
+          if(!x->send && x->bytes<=INT32_MAX && (size_t)size!=x->bytes)
+            f->status=FAIL(c,ncclInvalidUsage,"a receive: %d bytes arrived, %zu expected (the peer's count or datatype differs)",size,x->bytes);
+        }
+      }
+    }
+    if(!f->status && f->remaining && stopped(c,f->it->deadline))f->status=stop_reason(c,"a point-to-point call");
+    if(f->status || !f->remaining){*link=f->next;retire(c,f);}
+    else link=&f->next;
+  }
+}
+
+/* A part started: sends to and receives from this rank itself copied (the k-th with the k-th), the
+   other point-to-point calls put in flight, then the collectives run in issue order; the part is
+   finished here, or when its flight retires. */
+static void start(struct ncclComm *c,struct item *it){
+  ncclResult_t status=atomic_load(&c->broken)?FAIL(c,ncclRemoteError,"the communicator failed earlier: %s",c->error):ncclSuccess;
   size_t p2p=0,largest=0;
-  int transfers=0;
+  int transfers=0,collectives=0;
   for(int i=0;i<it->n;i++){
     struct call *k=it->calls+i;
     size_t bytes=k->count*type_bytes[k->type];void *mh;
@@ -471,74 +530,59 @@ static ncclResult_t run_item(struct ncclComm *c,struct item *it,uint64_t deadlin
     } else {
       size_t operand=aligned((size_t)k->elements*type_bytes[k->type]);
       if(2*operand>largest)largest=2*operand;
+      collectives++;
     }
   }
-  ncclResult_t status=stage_reserve(c,p2p+largest);
-  if(status)return status;
-  struct transfer *t=calloc(transfers?(size_t)transfers:1,sizeof *t);
-  if(!t)return FAIL(c,ncclSystemError,"allocation");
-  unsigned char *at=c->stage+largest;
-  int n=0;
-  for(int i=0;i<it->n;i++){
+  for(int i=0;i<it->n && !status;i++){
     struct call *k=it->calls+i;
-    if(k->kind<K_SEND)continue;
-    size_t bytes=k->count*type_bytes[k->type];
-    if(k->peer==c->rank){
-      if(k->kind!=K_RECV)continue;
-      int sends=0,receives=0;const struct call *mine=NULL;
-      for(int j=0;j<i;j++)receives+=it->calls[j].kind==K_RECV && it->calls[j].peer==c->rank;
-      for(int j=0;j<it->n && !mine;j++)if(it->calls[j].kind==K_SEND && it->calls[j].peer==c->rank && sends++==receives)mine=it->calls+j;
-      if(!mine){status=FAIL(c,ncclInvalidUsage,"a receive from this rank itself has no matching send to itself in the group");break;}
-      if(mine->count*type_bytes[mine->type]!=bytes){status=FAIL(c,ncclInvalidUsage,"a send to itself and its receive differ in size");break;}
-      memmove(k->recv,mine->send,bytes);
-      continue;
+    if(k->kind!=K_RECV || k->peer!=c->rank)continue;
+    int sends=0,receives=0;const struct call *mine=NULL;
+    for(int j=0;j<i;j++)receives+=it->calls[j].kind==K_RECV && it->calls[j].peer==c->rank;
+    for(int j=0;j<it->n && !mine;j++)if(it->calls[j].kind==K_SEND && it->calls[j].peer==c->rank && sends++==receives)mine=it->calls+j;
+    if(!mine)status=FAIL(c,ncclInvalidUsage,"a receive from this rank itself has no matching send to itself in the group");
+    else if(mine->count*type_bytes[mine->type]!=k->count*type_bytes[k->type])status=FAIL(c,ncclInvalidUsage,"a send to itself and its receive differ in size");
+    else memmove(k->recv,mine->send,k->count*type_bytes[k->type]);
+  }
+  if(!status && transfers){
+    struct flight *f=calloc(1,sizeof *f);
+    int result=0;
+    if(f)f->t=calloc((size_t)transfers,sizeof *f->t);
+    if(!f || !f->t)status=FAIL(c,ncclSystemError,"allocation");
+    else if(p2p && (result=mesh_net_mem_alloc(&f->stage,p2p)))status=net_failure(c,result,"staging memory from the bridge's registered window");
+    else if(p2p && (result=mesh_net_reg_mr(NULL,f->stage,p2p,MESH_NET_PTR_HOST,&f->stage_mh))){
+      mesh_net_mem_free(f->stage);f->stage=NULL;status=net_failure(c,result,"mesh_net_reg_mr");
     }
-    struct transfer *x=t+n++;
-    *x=(struct transfer){.send=k->kind==K_SEND,.peer=c->peers+k->peer,.user=k->kind==K_SEND?(unsigned char *)k->send:k->recv,.bytes=bytes};
-    if(in_window(x->user,bytes,&x->mhandle))x->window=x->user;
-    else{x->window=at;at+=aligned(bytes);x->mhandle=c->stage_mh;x->state=0;if(x->send)memcpy(x->window,x->user,bytes);}
+    if(status){if(f)free(f->t);free(f);}
+    else{
+      unsigned char *at=f->stage;
+      for(int i=0;i<it->n;i++){
+        struct call *k=it->calls+i;
+        if(k->kind<K_SEND || k->peer==c->rank)continue;
+        size_t bytes=k->count*type_bytes[k->type];
+        struct transfer *x=f->t+f->n++;
+        *x=(struct transfer){.send=k->kind==K_SEND,.peer=c->peers+k->peer,.user=k->kind==K_SEND?(unsigned char *)k->send:k->recv,.bytes=bytes};
+        if(in_window(x->user,bytes,&x->mhandle))x->window=x->user;
+        else{x->window=at;at+=aligned(bytes);x->mhandle=f->stage_mh;if(x->send)memcpy(x->window,x->user,bytes);}
+      }
+      f->remaining=f->n;f->it=it;it->flight=f;
+      struct flight **end=&c->flights;
+      while(*end)end=&(*end)->next;
+      *end=f;
+      pthread_mutex_lock(&c->lock);c->nflights++;pthread_mutex_unlock(&c->lock);
+      progress(c);
+    }
   }
-  /* posts every transfer its connection's ring takes, in order per connection, and tests the posted */
-  int remaining=n;
-  int *blocked=calloc((size_t)c->nranks*2,sizeof *blocked);
-  if(!blocked && !status)status=FAIL(c,ncclSystemError,"allocation");
-  #define PROGRESS() do{ \
-    memset(blocked,0,sizeof *blocked*(size_t)c->nranks*2); \
-    for(int j=0;j<n && !status;j++){ \
-      struct transfer *x=t+j;int slot=(int)(x->peer-c->peers)*2+x->send; \
-      if(x->state==0 && !blocked[slot]){ \
-        void *comm=x->send?x->peer->send[CH_P2P]:x->peer->recv[CH_P2P];void *data=x->window;size_t size=x->bytes; \
-        int result=x->send?mesh_net_isend(comm,data,size,0,x->mhandle,NULL,&x->request): \
-          mesh_net_irecv(comm,1,&data,&size,(int[]){0},&x->mhandle,NULL,&x->request); \
-        if(result)status=net_failure(c,result,x->send?"a send's isend":"a receive's irecv"); \
-        else if(x->request)x->state=1;else blocked[slot]=1; \
-      } \
-      if(x->state==1){ \
-        int done=0,size=0,result=mesh_net_test(x->request,&done,&size); \
-        if(result)status=net_failure(c,result,x->send?"a send":"a receive"); \
-        else if(done){ \
-          x->state=2;remaining--; \
-          if(!x->send && x->bytes<=INT32_MAX && (size_t)size!=x->bytes) \
-            status=FAIL(c,ncclInvalidUsage,"a receive: %d bytes arrived, %zu expected (the peer's count or datatype differs)",size,x->bytes); \
-        } \
-      } \
-    } \
-  }while(0)
-  if(!status)PROGRESS();
-  for(int i=0;i<it->n && !status;i++)if(it->calls[i].kind<K_SEND)status=run_collective(c,it->calls+i,c->stage,deadline);
-  while(remaining && !status){
-    PROGRESS();
-    if(remaining && !status){if(stopped(c,deadline))status=stop_reason(c,"a point-to-point call");else sched_yield();}
+  if(!status && collectives)status=stage_reserve(c,largest);
+  for(int i=0;i<it->n && !status;i++)if(it->calls[i].kind<K_SEND)status=run_collective(c,it->calls+i,c->stage,it->deadline);
+  if(status){
+    if(!it->result)it->result=status;
+    if(status!=ncclInvalidArgument)atomic_store(&c->broken,1);
   }
-  #undef PROGRESS
-  for(int j=0;j<n && !status;j++)if(!t[j].send && t[j].window!=t[j].user)memcpy(t[j].user,t[j].window,t[j].bytes);
-  for(int j=0;j<n;j++)if(t[j].window==t[j].user && t[j].mhandle)mesh_net_dereg_mr(NULL,t[j].mhandle);
-  free(blocked);free(t);
-  if(status && status!=ncclInvalidArgument)atomic_store(&c->broken,1);
-  return status;
+  it->collectives_done=1;
+  if(!it->flight)finish(c,it,it->result);
 }
 
-/* ---- the worker: a communicator's parts of groups, in issue order ---- */
+/* ---- the worker: a communicator's parts of groups, started in issue order ---- */
 static void finish(struct ncclComm *c,struct item *it,ncclResult_t result){
   struct launch *l=it->launch;
   pthread_mutex_lock(&l->lock);
@@ -553,35 +597,46 @@ static void finish(struct ncclComm *c,struct item *it,ncclResult_t result){
   for(int i=0;i<it->n;i++)free(it->calls[i].steps);
   free(it->calls);free(it);
 }
+/* Whether the part's streams have reached its prior work's values. */
+static int ready(struct item *it){
+  for(int m=0;m<it->launch->nmarks;m++)
+    if(nccl_mesh_event_value(it->launch->marks[m].stream->event)<it->launch->marks[m].wait)return 0;
+  return 1;
+}
 static void *worker(void *argument){
   struct ncclComm *c=argument;
   pthread_setname_np("nccl-mesh.comm");
   for(;;){
     pthread_mutex_lock(&c->lock);
-    while(!c->head && !c->stopping)pthread_cond_wait(&c->cond,&c->lock);
+    while(!c->head && !c->flights && !c->stopping)pthread_cond_wait(&c->cond,&c->lock);
     struct item *it=c->head;
-    if(!it){pthread_mutex_unlock(&c->lock);break;}
-    c->head=it->next;if(!c->head)c->tail=NULL;
-    c->busy=1;
+    int flying=c->flights!=NULL,room=c->nflights<FLIGHTS;
+    if(!it && !flying){pthread_mutex_unlock(&c->lock);break;}
     pthread_mutex_unlock(&c->lock);
-    uint64_t deadline=deadline_after();
-    ncclResult_t result=ncclSuccess;
-    for(int m=0;m<it->launch->nmarks && !result;m++)
-      while(nccl_mesh_event_value(it->launch->marks[m].stream->event)<it->launch->marks[m].wait){
-        if(stopped(c,deadline)){result=stop_reason(c,"waiting for the stream's prior work");break;}
-        usleep(20);
+    progress(c);
+    if(it && room){
+      int go=ready(it);
+      if(!go && stopped(c,it->deadline)){go=1;it->result=stop_reason(c,"waiting for the stream's prior work");}
+      if(go){
+        pthread_mutex_lock(&c->lock);
+        c->head=it->next;if(!c->head)c->tail=NULL;
+        c->busy=1;
+        pthread_mutex_unlock(&c->lock);
+        if(it->result){it->collectives_done=1;finish(c,it,it->result);}
+        else start(c,it);
+        pthread_mutex_lock(&c->lock);
+        c->busy=0;pthread_cond_broadcast(&c->cond);
+        pthread_mutex_unlock(&c->lock);
+        continue;
       }
-    if(!result)result=run_item(c,it,deadline);
-    finish(c,it,result);
-    pthread_mutex_lock(&c->lock);
-    c->busy=0;pthread_cond_broadcast(&c->cond);
-    pthread_mutex_unlock(&c->lock);
+    }
+    if(flying)sched_yield();else usleep(20);
   }
   return NULL;
 }
 static void drain(struct ncclComm *c){
   pthread_mutex_lock(&c->lock);
-  while(c->head || c->busy)pthread_cond_wait(&c->cond,&c->lock);
+  while(c->head || c->busy || c->nflights)pthread_cond_wait(&c->cond,&c->lock);
   pthread_mutex_unlock(&c->lock);
 }
 
@@ -603,7 +658,7 @@ static void comm_free(struct ncclComm *c){
   if(c->net)mesh_net_finalize(c->net);
   mesh_link_map_free(&c->map);
   pthread_mutex_destroy(&c->lock);pthread_cond_destroy(&c->cond);
-  free(c->peers);free(c->ops);free(c);
+  free(c->peers);free(c->blocked);free(c->ops);free(c);
 }
 /* Attached to the bridge, connected to every linked rank, its worker started. */
 static ncclResult_t comm_start(struct ncclComm *c){
@@ -846,7 +901,7 @@ ncclResult_t ncclGroupEnd(void){
   l->items=ncomms;
   for(int j=0;j<ncomms;j++){
     struct item *it=calloc(1,sizeof *it);
-    it->calls=calloc((size_t)n,sizeof *it->calls);it->launch=l;
+    it->calls=calloc((size_t)n,sizeof *it->calls);it->launch=l;it->deadline=deadline_after();
     for(int i=0;i<n;i++)if(calls[i].comm==comms[j]){it->calls[it->n++]=calls[i];calls[i].steps=NULL;}
     struct ncclComm *c=comms[j];
     pthread_mutex_lock(&c->lock);
@@ -1087,6 +1142,11 @@ ncclResult_t ncclMeshStreamSynchronize(cudaStream_t stream){
     usleep(20);
   }
   return ncclSuccess;
+}
+ncclResult_t ncclMeshStreamQuery(cudaStream_t stream){
+  if(!stream || !stream->event)return FAIL(NULL,ncclInvalidArgument,"ncclMeshStreamQuery: no stream");
+  pthread_mutex_lock(&stream_lock);uint64_t value=stream->value;pthread_mutex_unlock(&stream_lock);
+  return nccl_mesh_event_value(stream->event)>=value?ncclSuccess:ncclInProgress;
 }
 ncclResult_t ncclMeshGroupPlans(int *algorithms,int *roots,int capacity,int *count){
   if(!count)return FAIL(NULL,ncclInvalidArgument,"ncclMeshGroupPlans: count is NULL");

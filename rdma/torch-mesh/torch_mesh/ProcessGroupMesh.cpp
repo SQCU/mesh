@@ -2,15 +2,17 @@
 // as PyTorch's "Customize Process Group Backends Using Cpp Extensions" tutorial prescribes.  Rank 0
 // makes the communicator's unique id and hands it out through the group's store.  CPU tensors are the
 // buffers themselves; MPS and non-contiguous tensors go through contiguous CPU copies (an MPS tensor's
-// copy synchronizes its stream).  Collectives complete before they return; send and recv are enqueued
-// on the group's stream (asynchronous, in issue order) so that isend/irecv pairs progress together,
-// and their Work waits for it.
+// copy synchronizes its stream).  Collectives complete before they return; each send and recv is
+// enqueued on a stream of its own (as NCCL's point-to-point calls on separate streams), so isend/irecv
+// pairs progress together, and its Work waits for that stream.
 #include <torch/extension.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
 #include <torch/csrc/distributed/c10d/Types.hpp>
 #include <torch/csrc/distributed/c10d/Work.hpp>
 #include <pybind11/chrono.h>
+
+#include <mutex>
 
 #include "nccl.h"
 
@@ -48,32 +50,72 @@ struct Host {
   void back() { if (!host.is_same(tensor)) tensor.copy_(host); }
 };
 
+// Streams for point-to-point calls: one a call, reused once the Work holding it is gone and its work done.
+struct StreamPool {
+  std::mutex lock;
+  std::vector<cudaStream_t> all, idle;
+  cudaStream_t acquire() {
+    std::lock_guard<std::mutex> guard(lock);
+    for (size_t i = 0; i < idle.size(); i++)
+      if (ncclMeshStreamQuery(idle[i]) == ncclSuccess) {
+        cudaStream_t s = idle[i];
+        idle.erase(idle.begin() + (long)i);
+        return s;
+      }
+    cudaStream_t s;
+    check(ncclMeshStreamCreate(&s, nullptr), nullptr, "ncclMeshStreamCreate");
+    all.push_back(s);
+    return s;
+  }
+  void release(cudaStream_t s) {
+    std::lock_guard<std::mutex> guard(lock);
+    idle.push_back(s);
+  }
+  void synchronize() {
+    std::lock_guard<std::mutex> guard(lock);
+    for (auto s : all) ncclMeshStreamSynchronize(s);
+  }
+  ~StreamPool() {
+    for (auto s : all) { ncclMeshStreamSynchronize(s); ncclMeshStreamDestroy(s); }
+  }
+};
+
 class WorkMesh : public Work {
  public:
   // On a stream: `held` stays alive until the call is done, and is written back to its tensors when
   // `written` (a receive).
-  WorkMesh(OpType type, std::vector<at::Tensor> outputs, cudaStream_t stream = nullptr, std::vector<Host> held = {}, bool written = false)
-      : Work(-1, type), outputs_(std::move(outputs)), stream_(stream), held_(std::move(held)), written_(written),
+  WorkMesh(OpType type, std::vector<at::Tensor> outputs, std::shared_ptr<StreamPool> pool = nullptr, cudaStream_t stream = nullptr,
+           std::vector<Host> held = {}, bool written = false)
+      : Work(-1, type), outputs_(std::move(outputs)), pool_(std::move(pool)), stream_(stream), owned_(stream),
+        held_(std::move(held)), written_(written),
         future_(c10::make_intrusive<c10::ivalue::Future>(c10::ListType::create(c10::TensorType::get()))) {
     if (!stream_) future_->markCompleted(c10::IValue(outputs_));
   }
-  bool isCompleted() override { return !stream_; }
+  ~WorkMesh() override { if (owned_) pool_->release(owned_); }
+  bool isCompleted() override {
+    if (stream_ && ncclMeshStreamQuery(stream_) == ncclSuccess) complete();
+    return !stream_;
+  }
   bool isSuccess() const override { return true; }
   bool wait(std::chrono::milliseconds) override {
     if (stream_) {
       check(ncclMeshStreamSynchronize(stream_), nullptr, "the stream");
-      if (written_) for (auto &h : held_) h.back();
-      held_.clear();
-      stream_ = nullptr;
-      future_->markCompleted(c10::IValue(outputs_));
+      complete();
     }
     return true;
   }
   c10::intrusive_ptr<c10::ivalue::Future> getFuture() override { return future_; }
 
  private:
+  void complete() {
+    if (written_) for (auto &h : held_) h.back();
+    held_.clear();
+    stream_ = nullptr;
+    future_->markCompleted(c10::IValue(outputs_));
+  }
   std::vector<at::Tensor> outputs_;
-  cudaStream_t stream_;
+  std::shared_ptr<StreamPool> pool_;
+  cudaStream_t stream_, owned_;
   std::vector<Host> held_;
   bool written_;
   c10::intrusive_ptr<c10::ivalue::Future> future_;
@@ -93,12 +135,10 @@ class ProcessGroupMesh : public Backend {
       std::memcpy(id.internal, bytes.data(), NCCL_UNIQUE_ID_BYTES);
     }
     check(ncclCommInitRank(&comm_, size, id, rank), nullptr, "ncclCommInitRank");
-    check(ncclMeshStreamCreate(&stream_, nullptr), comm_, "ncclMeshStreamCreate");
   }
   ~ProcessGroupMesh() override {
-    if (stream_) ncclMeshStreamSynchronize(stream_);
+    streams_->synchronize();
     if (comm_) ncclCommDestroy(comm_);
-    if (stream_) ncclMeshStreamDestroy(stream_);
   }
   const std::string getBackendName() const override { return "mesh"; }
 
@@ -277,14 +317,16 @@ class ProcessGroupMesh : public Backend {
 
   c10::intrusive_ptr<Work> send(std::vector<at::Tensor> &tensors, int dst, int) override {
     std::vector<Host> hosts(tensors.begin(), tensors.end());
-    for (auto &h : hosts) check(ncclSend(h.data(), h.host.numel(), datatype(h.host), dst, comm_, stream_), comm_, "ncclSend");
-    return c10::make_intrusive<WorkMesh>(OpType::SEND, tensors, stream_, std::move(hosts), false);
+    cudaStream_t stream = streams_->acquire();
+    for (auto &h : hosts) check(ncclSend(h.data(), h.host.numel(), datatype(h.host), dst, comm_, stream), comm_, "ncclSend");
+    return c10::make_intrusive<WorkMesh>(OpType::SEND, tensors, streams_, stream, std::move(hosts), false);
   }
 
   c10::intrusive_ptr<Work> recv(std::vector<at::Tensor> &tensors, int src, int) override {
     std::vector<Host> hosts(tensors.begin(), tensors.end());
-    for (auto &h : hosts) check(ncclRecv(h.data(), h.host.numel(), datatype(h.host), src, comm_, stream_), comm_, "ncclRecv");
-    return c10::make_intrusive<WorkMesh>(OpType::RECV, tensors, stream_, std::move(hosts), true);
+    cudaStream_t stream = streams_->acquire();
+    for (auto &h : hosts) check(ncclRecv(h.data(), h.host.numel(), datatype(h.host), src, comm_, stream), comm_, "ncclRecv");
+    return c10::make_intrusive<WorkMesh>(OpType::RECV, tensors, streams_, stream, std::move(hosts), true);
   }
 
   c10::intrusive_ptr<Work> barrier(const BarrierOptions &) override {
@@ -296,7 +338,7 @@ class ProcessGroupMesh : public Backend {
 
  private:
   ncclComm_t comm_ = nullptr;
-  cudaStream_t stream_ = nullptr;
+  std::shared_ptr<StreamPool> streams_ = std::make_shared<StreamPool>();
 
   template <typename F> void group(F body) {
     check(ncclGroupStart(), comm_, "ncclGroupStart");

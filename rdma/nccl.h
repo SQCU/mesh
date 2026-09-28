@@ -40,7 +40,10 @@
        and work committed after it waits for its output, with no host synchronization;
      - with `queue` NULL, the caller signals `event` at `value` itself when its input is ready,
        and waits for the value the call leaves in `value`.
-   `value` is the timeline's last reserved value; a call reserves the next one(s).  A failed call
+   `value` is the timeline's last reserved value; a call reserves the next one(s).  Calls on one stream
+   run in order; point-to-point calls on different streams progress together (a send completes only
+   once its peer has posted the receive, so a send and a receive that wait on each other's peers
+   belong in one group or on different streams).  ncclMeshStreamQuery is cudaStreamQuery.  A failed call
    still signals its completion value (the GPU is never left waiting); its error is the
    communicator's ncclCommGetAsyncError.  ncclMeshStreamCreate makes the event on the queue's
    device (or the system default device); ncclMeshStreamSynchronize waits on the host for `value`.
@@ -753,6 +756,8 @@ ncclResult_t ncclMeshStreamCreate(cudaStream_t* stream, void* queue);
 ncclResult_t ncclMeshStreamDestroy(cudaStream_t stream);
 /* Waits on the host until the stream's event reaches its value (cudaStreamSynchronize). */
 ncclResult_t ncclMeshStreamSynchronize(cudaStream_t stream);
+/* ncclSuccess once the stream's event has reached its value, else ncclInProgress (cudaStreamQuery). */
+ncclResult_t ncclMeshStreamQuery(cudaStream_t stream);
 /* The algorithms the planner took for this thread's last ended group, a call each in issue
    order (at most `capacity`): 0 direct, 1 ring, 2 tree, 3 binomial (mesh-collective.h MESH_*),
    -1 a point-to-point call or a one-rank communicator's local copy; `roots` the tree's root. */
