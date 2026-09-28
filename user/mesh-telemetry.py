@@ -1,5 +1,5 @@
 #!/usr/bin/env mesh-python
-import collections, ctypes, json, math, os, platform, plistlib, re, shutil, signal, socket, subprocess, sys, threading, time, urllib.parse
+import collections, copy, ctypes, json, math, os, platform, plistlib, re, shutil, signal, socket, subprocess, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -129,6 +129,150 @@ def bridge():
         try: return json.loads(output([path]).splitlines()[-1])
         except Exception as error: return {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
     return {"up": False, "error": "mesh-stat unavailable"}
+
+CENSUS = re.compile(r"link (\d+) census queue=(\d+) requests=(\d+) frames=(\d+) retired=(\d+) send_completions=(\d+) records=(\d+) posted=(\d+) landed=(\d+) bytes=(\d+)")
+RECEIVE_RING = re.compile(r"receive ring=\d+ records=(\d+) posted=(\d+)")
+TRACE = re.compile(r'\{"native_trace":(\d+),.*"ns":\[(\d+),\d+,(\d+)\]')
+INFO = ("wire window=", "bridge node ", "pair capacity ", "pair up: ", '{"trace_')
+COUNTS = ("requests", "frames", "retired", "send_completions", "records", "posted", "landed", "bytes")
+FABRIC_KEEP = float(os.environ.get("MESH_FABRIC_KEEP", "600"))
+FABRIC_READ = int(os.environ.get("MESH_FABRIC_READ", str(16 << 20)))
+BRIDGES = {}
+SLOW = {}
+
+def bridge_log(entry):
+    try:
+        with open(entry["log"], "rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            if size < entry["log_offset"]: entry.update(bridge_counters())
+            stream.seek(entry["log_offset"])
+            chunk = stream.read(FABRIC_READ)
+    except Exception as error:
+        entry["log_error"] = f"{type(error).__name__}: {error}"
+        return
+    end = chunk.rfind(b"\n") + 1
+    entry["log_offset"] += end
+    entry["log_size"] = size
+    for line in chunk[:end].decode(errors="replace").splitlines():
+        match = CENSUS.match(line)
+        if match:
+            link, queue, values = match.group(1), int(match.group(2)), [int(value) for value in match.groups()[2:]]
+            total = entry["census"].setdefault(link, dict.fromkeys(("calls",) + COUNTS, 0))
+            if queue == 0:
+                total["calls"] += 1
+                span = entry["spans"].pop(link, None)
+                entry["last_call"][link] = {**dict.fromkeys(COUNTS, 0), "span_ns": span[1] - span[0] if span else None}
+            for key, value in zip(COUNTS, values):
+                total[key] += value
+                entry["last_call"].setdefault(link, dict.fromkeys(COUNTS, 0))[key] += value
+            continue
+        match = TRACE.match(line)
+        if match:
+            span = entry["spans"].get(match.group(1))
+            begin, end_ns = int(match.group(2)), int(match.group(3))
+            entry["spans"][match.group(1)] = (min(begin, span[0]), max(end_ns, span[1])) if span else (begin, end_ns)
+            entry["traces"] += 1
+        elif line.startswith("receive ring="):
+            entry["rings"] += 1
+            match = RECEIVE_RING.match(line)
+            if match and int(match.group(1)) > int(match.group(2)): entry["credit_limited"] += 1
+        elif line.startswith("pair up: "): entry["pairs"] += 1
+        elif line.startswith("exchange failed"): entry["retries"] += 1
+        elif line.strip() and not line.startswith(INFO) and not (line.startswith("register ") and ": " not in line):
+            entry["errors"] += 1
+            entry["last_error"] = line[:240]
+
+def bridge_counters():
+    return {"log_offset": 0, "census": {}, "last_call": {}, "spans": {}, "traces": 0, "rings": 0, "credit_limited": 0, "pairs": 0, "retries": 0, "errors": 0, "last_error": None}
+
+def processes(pids):
+    table = {}
+    for line in output(["/bin/ps", "-ww", "-o", "pid=,stat=,etime=,command=", "-p", ",".join(map(str, pids))]).splitlines() if pids else ():
+        fields = line.split(None, 3)
+        if len(fields) == 4 and fields[0].isdigit(): table[int(fields[0])] = {"stat": fields[1], "elapsed": fields[2], "argv": fields[3].split()}
+    return table
+
+def fabric_bridges(now):
+    table = processes([int(pid) for pid in output(["/usr/bin/pgrep", "-x", "mesh-flow"]).split()])
+    stat = executable([os.environ.get("MESH_STAT", ""), os.path.join(ROOT, "rdma", "mesh-stat"), os.path.join(HERE, "mesh-stat"), "/usr/local/mesh/bin/mesh-stat"])
+    for pid, process in table.items():
+        argv = process["argv"]
+        if os.path.basename(argv[0]) != "mesh-flow": continue
+        entry = BRIDGES.get(pid)
+        if entry is None:
+            option = lambda flag, default=None: next((argv[i + 1] for i in range(len(argv) - 1) if argv[i] == flag), default)
+            links = [dict(zip(("device", "peer", "local", "remote", "service"), argv[i + 1].split(","))) for i in range(len(argv) - 1) if argv[i] == "--link"]
+            log = next((line[1:] for line in output(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "2", "-Fn"]).splitlines() if line.startswith("n/")), None)
+            entry = BRIDGES[pid] = {"pid": pid, "rank": option("-I"), "region": option("-s", "/mesh0"), "links": links, "log": log, "log_size": None, **bridge_counters()}
+        entry.update({"state": process["stat"], "elapsed": process["elapsed"], "exited_at": None})
+        try: entry["stat"] = json.loads(output([stat, entry["region"]]).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
+        except Exception as error: entry["stat"] = {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
+        if entry["log"]: bridge_log(entry)
+    for pid, entry in list(BRIDGES.items()):
+        if pid in table: continue
+        if entry["exited_at"] is None:
+            entry.update({"exited_at": now, "state": "exited"})
+            if entry["log"]: bridge_log(entry)
+        elif now - entry["exited_at"] > FABRIC_KEEP: BRIDGES.pop(pid)
+    return [copy.deepcopy({key: value for key, value in entry.items() if key != "spans"}) for entry in BRIDGES.values()]
+
+def fabric_ports():
+    try: tree = plistlib.loads(subprocess.run(["/usr/sbin/ioreg", "-r", "-c", "AppleThunderboltIPPort", "-l", "-a"], capture_output=True, timeout=3).stdout)
+    except Exception as error: return [{"error": f"ioreg: {type(error).__name__}: {error}"}]
+    blocks = {block.split(":", 1)[0]: block for block in re.split(r"\n(?=\S)", output(["/sbin/ifconfig"]))}
+    neighbors = {}
+    for line in output(["/usr/sbin/ndp", "-an"]).splitlines()[1:]:
+        fields = line.split()
+        if len(fields) >= 5 and fields[3] != "permanent": neighbors.setdefault(fields[2], []).append({"address": fields[0], "expire": fields[3], "state": fields[4]})
+    ports, holders = [], []
+    for port in tree:
+        for interface in port.get("IORegistryEntryChildren", []):
+            name = interface.get("BSD Name")
+            if not name: continue
+            children = interface.get("IORegistryEntryChildren", [])
+            rdma = next((child for child in children if child.get("IOObjectClass") == "AppleThunderboltRDMAInterface"), {})
+            connection = next((child for child in port.get("IORegistryEntryChildren", []) if child.get("IOObjectClass") == "AppleThunderboltIPConnection"), None)
+            holders += [(name, int(match.group(1))) for child in rdma.get("IORegistryEntryChildren", []) for match in [re.match(r"pid (\d+)", child.get("IOUserClientCreator", ""))] if match]
+            block = blocks.get(name, "")
+            status = re.search(r"status: (\w+)", block)
+            address = re.search(r"inet6 (fe80::[0-9a-f:]+)", block)
+            ports.append({
+                "iface": name, "device": "rdma_" + name if rdma else None,
+                "tb_link": "up" if int(port.get("IOLinkStatus", 0)) & 2 else "down", "speed": port.get("IOLinkSpeed"),
+                "link_ups": interface.get("IOLinkActiveCount"), "tb_connection": (connection or {}).get("Thunderbolt IP Connection State"),
+                "ip": status.group(1) if status else "unknown", "address": address.group(1) if address else None,
+                "neighbors": neighbors.get(name, []),
+                "rdma_power": (rdma.get("IOPowerManagement") or {}).get("CurrentPowerState"),
+                "holders": [],
+                "queue_pairs": sum(child.get("IOObjectClass") == "AppleThunderboltRDMAQueuePair" for child in rdma.get("IORegistryEntryChildren", [])),
+            })
+    table = processes(sorted({pid for _, pid in holders}))
+    for name, pid in holders:
+        next(port for port in ports if port["iface"] == name)["holders"].append({"pid": pid, "stat": (table.get(pid) or {}).get("stat"), "command": os.path.basename(((table.get(pid) or {}).get("argv") or ["?"])[0])})
+    return ports
+
+def fabric_services():
+    found = {}
+    owner = os.getuid() or int(output(["/usr/bin/stat", "-f%u", "/dev/console"]) or 0)
+    for domain in ("system", f"gui/{owner}"):
+        text = output(["/bin/launchctl", "print", domain])
+        for match in re.finditer(r"^\s+(\d+|-)\s+(\S+)\s+(io\.mesh\.\S+)$", text, re.M):
+            found.setdefault(match.group(3), []).append({"domain": domain, "pid": int(match.group(1)) if match.group(1).isdigit() else 0, "status": match.group(2)})
+        for match in re.finditer(r'"(io\.mesh\.[^"]+)" => disabled', text):
+            found.setdefault(match.group(1), []).append({"domain": domain, "disabled": True})
+    keeper = {"path": "/usr/local/mesh/log/keeper.log"}
+    try:
+        with open(keeper["path"], "rb") as stream:
+            stream.seek(max(0, os.fstat(stream.fileno()).st_size - 4096))
+            lines = [line for line in stream.read().decode(errors="replace").splitlines() if line.strip()]
+        keeper.update({"last": lines[-1] if lines else None, "alarms": [line for line in lines if re.search(r"DEGRADED|ALARM", line)][-3:], "modified": os.path.getmtime(keeper["path"])})
+    except Exception as error: keeper["error"] = f"{type(error).__name__}: {error}"
+    return {"services": found, "keeper": keeper, "booted_at": number(output(["/usr/sbin/sysctl", "-n", "kern.boottime"]), r"sec = (\d+)")}
+
+def fabric(now):
+    if now - SLOW.get("ports_at", 0) >= 5: SLOW.update(ports_at=now, ports=fabric_ports())
+    if now - SLOW.get("services_at", 0) >= 10: SLOW.update(services_at=now, services=fabric_services())
+    return {"bridges": fabric_bridges(now), "ports": SLOW["ports"], "ports_at": SLOW["ports_at"], **SLOW["services"], "services_at": SLOW["services_at"]}
 
 class TelemetryRecord(dict):
     def __init__(self, value):
@@ -332,7 +476,10 @@ def snapshot(store, facts=None):
     }
     if not power.get("up"): machine["sampler_error"] = power.get("error") or "powermetrics unavailable"
     if cpu_error is not None: machine["cpu_sampler_error"] = cpu_error
+    try: links = fabric(time.time())
+    except Exception as error: links = {"error": f"{type(error).__name__}: {error}"}
     result = dict(stat)
+    result["fabric"] = links
     result.update({
         "schema": 2,
         "observed_at": time.time(),
