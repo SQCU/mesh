@@ -39,8 +39,11 @@ typedef int (*mesh_net_profiler)(void **eHandle,int type,void *phandle,int64_t p
 int mesh_net_init(void **ctx,uint64_t commId,struct mesh_net_comm_config *config,mesh_net_logger logFunction,mesh_net_profiler profFunction);
 int mesh_net_devices(int *ndev);
 int mesh_net_get_properties(int dev,struct mesh_net_properties *props);
-/* A handle whose bytes on entry already hold a mesh handle's magic and a key names the listen by that
-   key: peers that derive each other's handles from one commId need no bootstrap exchange. */
+/* A handle's first bytes: MESH_NET_HANDLE_MAGIC, the listening bridge's node and the listen's key.  A
+   handle whose bytes on entry already hold the magic and a key names the listen by that key: peers
+   that derive each other's handles from one commId need no bootstrap exchange. */
+#define MESH_NET_HANDLE_MAGIC 0x4d4e4844u
+struct mesh_net_handle { uint32_t magic,node; uint64_t key; };
 int mesh_net_listen(void *ctx,int dev,void *handle,void **listenComm);
 int mesh_net_connect(void *ctx,int dev,void *handle,void **sendComm,void **sendDevComm);
 int mesh_net_accept(void *listenComm,void **recvComm,void **recvDevComm);

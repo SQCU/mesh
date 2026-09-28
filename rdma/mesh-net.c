@@ -17,11 +17,9 @@
    bridge's session thread of the comm's link serves both (mesh-flow.c).  Memory is the region's
    registered window: mesh_net_mem_alloc claims its pages, and regMr names the device's registered
    regions they lie in, so data lands in place and nothing here waits on the wire. */
-#define NET_HANDLE_MAGIC 0x4d4e4844u
 #define NET_PENDING 256
 #define NET_WAIT_NS UINT64_C(60000000000)
-struct net_handle { uint32_t magic,node; uint64_t key; };
-_Static_assert(sizeof(struct net_handle)<=MESH_NET_HANDLE_BYTES,"handle");
+_Static_assert(sizeof(struct mesh_net_handle)<=MESH_NET_HANDLE_BYTES,"handle");
 struct net_comm_handle;
 struct net_request_handle { struct net_comm_handle *comm; uint64_t sequence; };
 struct net_comm_handle {
@@ -158,13 +156,13 @@ int mesh_net_listen(void *ctx,int dev,void *handle,void **listenComm){
   (void)ctx;
   if(!net.m)return net_result(EBUSY);
   if(dev<0 || (uint32_t)dev>=net.m->links || !handle)return net_result(EINVAL);
-  struct net_handle given;memcpy(&given,handle,sizeof given);
-  uint64_t key=given.magic==NET_HANDLE_MAGIC?given.key:0;
+  struct mesh_net_handle given;memcpy(&given,handle,sizeof given);
+  uint64_t key=given.magic==MESH_NET_HANDLE_MAGIC?given.key:0;
   while(!key)key=((uint64_t)arc4random()<<32)|arc4random();
   struct net_comm_handle *c=net_claim((uint32_t)dev,MESH_NET_LISTEN,key);
   if(!c)return net_result(errno);
   memset(handle,0,MESH_NET_HANDLE_BYTES);
-  struct net_handle made={NET_HANDLE_MAGIC,net.m->node,key};
+  struct mesh_net_handle made={MESH_NET_HANDLE_MAGIC,net.m->node,key};
   memcpy(handle,&made,sizeof made);
   *listenComm=c;
   return MESH_NET_SUCCESS;
@@ -177,8 +175,8 @@ int mesh_net_connect(void *ctx,int dev,void *handle,void **sendComm,void **sendD
   struct net_context *context=ctx;
   *sendComm=NULL;
   if(!net.m)return net_result(EBUSY);
-  struct net_handle given;memcpy(&given,handle,sizeof given);
-  if(dev<0 || (uint32_t)dev>=net.m->links || given.magic!=NET_HANDLE_MAGIC || !given.key || mesh_links(net.m)[dev].peer!=given.node)return net_result(EINVAL);
+  struct mesh_net_handle given;memcpy(&given,handle,sizeof given);
+  if(dev<0 || (uint32_t)dev>=net.m->links || given.magic!=MESH_NET_HANDLE_MAGIC || !given.key || mesh_links(net.m)[dev].peer!=given.node)return net_result(EINVAL);
   struct net_pending *pending=NULL,*vacant=NULL;
   for(int i=0;i<NET_PENDING && !pending;i++){
     struct net_pending *p=context->pending+i;

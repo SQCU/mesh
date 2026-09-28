@@ -185,6 +185,19 @@ this depends on the routing layer.
 > [RDMA-RULES.md](RDMA-RULES.md). Killing a stuck verbs process can wedge a node
 > badly enough to need a physical power cycle.
 
+## NCCL's API over the bridges
+
+`rdma/nccl.h` is NCCL 2.32.3's header for `rdma/libnccl-mesh.dylib`, which serves NCCL's calls on
+the bridges' communicator sessions; the header's opening comment says what is implemented and how
+the stream and buffers work. Every node runs its bridge (`mesh-flow`); a rank names it by
+`MESH_REGION`.
+
+```
+make -C rdma libmesh.dylib libnccl-mesh.dylib
+cc app.c -I rdma -L rdma -lnccl-mesh -Wl,-rpath,$PWD/rdma
+MESH_REGION=/mesh0 MESH_LINKS=links.txt ./app
+```
+
 ## Links, and knowing when you only have one
 
 A node reaches the world over Wi-Fi/LAN and over the Thunderbolt fabric. It is
