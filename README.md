@@ -198,6 +198,14 @@ cc app.c -I rdma -L rdma -lnccl-mesh -Wl,-rpath,$PWD/rdma
 MESH_REGION=/mesh0 MESH_LINKS=links.txt ./app
 ```
 
+`rdma/torch-mesh` is torch.distributed's `mesh` backend over it (CPU and MPS tensors). Installed into
+a venv that has torch, it registers itself when torch is imported, so a script names it alone:
+`torch.distributed.init_process_group(backend="mesh")`.
+
+```
+uv pip install --python <venv>/bin/python --no-build-isolation rdma/torch-mesh
+```
+
 ## Links, and knowing when you only have one
 
 A node reaches the world over Wi-Fi/LAN and over the Thunderbolt fabric. It is
