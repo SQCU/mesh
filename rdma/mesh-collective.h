@@ -31,14 +31,18 @@ struct mesh_step { uint32_t op,peer,round,padding; uint64_t first; struct mesh_o
 /* A collective of one typed operand among a map's nodes (metal-microbench docs/kernels.md
    Collectives).  what: MESH_ALLREDUCE combines the contributions of the nodes of the bit set
    `contributors` (a bit a node, 64 a word; NULL: every node) at every node; MESH_BROADCAST gives every node the operand of
-   `root`.  how: the direct exchange (every pair linked), the ring's reduce-scatter + all-gather
-   [Patarasuk & Yuan 2009] (a ring map's cycle, or rank order where the map links it), a spanning
-   tree's reduce + broadcast from `root` (any connected map: a tree map's own tree, a star), or the
-   binomial tree's [Thakur, Rabenseifner & Gropp 2005] (the rank bits' pairs, a mesh's).  A partial
+   `root`; MESH_REDUCE combines them at `root` alone; MESH_REDUCE_SCATTER leaves at node v the
+   combination of its segment v; MESH_ALLGATHER gives every node every node's segment v.  Node v's
+   segment is the v-th of the operand's elements cut in `nodes` parts, the first elements%nodes of
+   them one element longer.  how: the direct exchange (every pair linked), the ring's reduce-scatter + all-gather
+   [Patarasuk & Yuan 2009] (a ring map's cycle, or rank order where the map links it; either half
+   alone), a spanning tree's reduce + broadcast from `root` (any connected map: a tree map's own
+   tree, a star; the reduce alone, or a gather + broadcast, or a reduce + scatter), or the binomial
+   tree's [Thakur, Rabenseifner & Gropp 2005] (the rank bits' pairs, a mesh's; its reduce alone).  A partial
    combination a node sends on to be combined further (a ring's reduce-scatter after its first round,
    a tree's interior node going up) is typed at `accumulator_bytes` an element (0: the operand's):
    half partials summed in float cross as float.  A step combines any number of receives. */
-enum { MESH_ALLREDUCE, MESH_BROADCAST };
+enum { MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER };
 enum { MESH_DIRECT, MESH_RING, MESH_TREE, MESH_BINOMIAL, MESH_UNAVAILABLE };
 struct mesh_collective { uint32_t what,how,root,accumulator_bytes; const uint64_t *contributors; };
 #define MESH_COLLECTIVE_STEPS(nodes) (4*(nodes))
@@ -50,8 +54,9 @@ uint32_t mesh_collective_plan(const struct mesh_link_map *,uint32_t rank,struct 
    node's sends sharing one port and its receives another (alpha in us, beta in ns a byte);
    negative where a node has no plan, a receive has no SEND of its piece, or the schedule stops. */
 double mesh_collective_time(const struct mesh_link_map *,struct mesh_collective,struct mesh_operand,double alpha,double beta);
-/* `c` with `how` (and an all-reduce tree's `root`) of least time among the algorithms of the bit set
-   c.how (0: every one) that the map carries; how MESH_UNAVAILABLE where none. */
+/* `c` with `how` (and an all-reduce's, reduce-scatter's or all-gather's tree `root`) of least time
+   among the algorithms of the bit set c.how (0: every one) that the map carries; how
+   MESH_UNAVAILABLE where none. */
 struct mesh_collective mesh_collective_choose(const struct mesh_link_map *,struct mesh_collective c,struct mesh_operand,double alpha,double beta);
 /* Binds a plan's steps onto the SEND/RECV transport (mesh_transfer_bind).  `operand` is the
    whole operand's section; `received` holds one section per REDUCE step, in step order, each

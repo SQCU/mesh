@@ -70,6 +70,13 @@ static struct mesh_step mesh_piece(uint32_t op,uint32_t peer,uint32_t round,uint
   return (struct mesh_step){.op=op,.peer=peer,.round=round,.first=first,.piece=operand};
 }
 
+/* Node v's segment of the operand among `nodes`, as one step's piece: elements/nodes elements, one
+   more for each of the first elements%nodes nodes (the ring's segment sizes). */
+static struct mesh_step mesh_segment(uint32_t op,uint32_t peer,uint32_t round,uint32_t v,uint32_t nodes,struct mesh_operand operand){
+  const uint64_t size=operand.elements/nodes,residual=operand.elements%nodes;
+  return mesh_piece(op,peer,round,v*size+(v<residual?v:residual),size+(v<residual),operand);
+}
+
 /* The operand as a partial combination crosses: at the collective's accumulator, where it has one. */
 static struct mesh_operand mesh_accumulated(struct mesh_operand operand,struct mesh_collective c){
   if(c.accumulator_bytes)operand.element_bytes=c.accumulator_bytes;
@@ -108,8 +115,9 @@ static int mesh_ring_order(const struct mesh_link_map *map,uint32_t *next,uint32
    segment sizes, recv_from/send_to, and the two loops, with `rank` read as the ring position and
    each MPI call replaced by the step it performs.  Every rank sends and receives 2(size-1)/size of
    the operand; a reduce-scatter piece after the first round is a partial sum, at the accumulator.
+   A reduce-scatter or an all-gather is its loop alone, node v's own segment v.
    None where the map has no ring or a segment would be empty (fewer elements than nodes). */
-static uint32_t mesh_ring_allreduce(const struct mesh_link_map *map,uint32_t node,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *out){
+static uint32_t mesh_ring_collective(const struct mesh_link_map *map,uint32_t node,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *out){
   const uint32_t size=map->nodes;
   uint32_t next[size],previous[size],start,rank=0,count=0;
   if(operand.elements<size || !mesh_ring_order(map,next,previous,&start))return 0;
@@ -121,17 +129,21 @@ static uint32_t mesh_ring_allreduce(const struct mesh_link_map *map,uint32_t nod
   for(uint32_t i=0;i<size;i++)segment_sizes[i]=segment_size+(i<residual);
   segment_ends[0]=segment_sizes[0];
   for(uint32_t i=1;i<size;i++)segment_ends[i]=segment_sizes[i]+segment_ends[i-1];
+  /* The segment of chunk c: c in an all-reduce; alone, the segment of the node at ring position c-1,
+     where the reduce-scatter leaves chunk c reduced and the all-gather starts from it. */
+  uint32_t segment[size];
+  for(uint32_t i=0,at=start;i<size;i++,at=next[at])segment[(i+1)%size]=c.what==MESH_ALLREDUCE?(i+1)%size:at;
   // Receive from your left neighbor; send to your right neighbor.
   const uint32_t recv_from=previous[node],send_to=next[node];
   // At the i'th iteration, sends segment (rank - i) and receives segment (rank - i - 1).
-  for(uint32_t i=0;i<size-1;i++){
-    uint32_t recv_chunk=(rank-i-1+size)%size,send_chunk=(rank-i+size)%size;
+  for(uint32_t i=0;c.what!=MESH_ALLGATHER && i<size-1;i++){
+    uint32_t recv_chunk=segment[(rank-i-1+size)%size],send_chunk=segment[(rank-i+size)%size];
     out[count++]=mesh_piece(MESH_STEP_SEND,send_to,i,segment_ends[send_chunk]-segment_sizes[send_chunk],segment_sizes[send_chunk],i?partial:operand);
     out[count++]=mesh_piece(MESH_STEP_REDUCE,recv_from,i,segment_ends[recv_chunk]-segment_sizes[recv_chunk],segment_sizes[recv_chunk],i?partial:operand);
   }
   // Pipelined ring allgather: at the i'th iteration, sends segment (rank + 1 - i), receives (rank - i).
-  for(uint32_t i=0;i<size-1;i++){
-    uint32_t send_chunk=(rank-i+1+size)%size,recv_chunk=(rank-i+size)%size;
+  for(uint32_t i=0;c.what!=MESH_REDUCE_SCATTER && i<size-1;i++){
+    uint32_t send_chunk=segment[(rank-i+1+size)%size],recv_chunk=segment[(rank-i+size)%size];
     out[count++]=mesh_piece(MESH_STEP_SEND,send_to,size-1+i,segment_ends[send_chunk]-segment_sizes[send_chunk],segment_sizes[send_chunk],operand);
     out[count++]=mesh_piece(MESH_STEP_COPY,recv_from,size-1+i,segment_ends[recv_chunk]-segment_sizes[recv_chunk],segment_sizes[recv_chunk],operand);
   }
@@ -168,19 +180,36 @@ static int mesh_spanning_tree(const struct mesh_link_map *map,uint32_t root,uint
    reduce each child's whole operand, then send the result to the parent (an interior node's result
    a partial sum, at the accumulator).  Bcast: receive the whole result from the parent, then send it
    to each child; a broadcast is the bcast alone.  On a star the root sends and receives (nodes-1)
-   operands and every leaf one each way. */
+   operands and every leaf one each way.  A reduce is the reduce alone.  An all-gather gathers up
+   first (MPICH's gather on this tree: each node receives its children's subtrees' segments and sends
+   its own subtree's up, segment w at round w) and then broadcasts; a reduce-scatter reduces and then
+   scatters (each node receives its own subtree's segments from its parent and sends each child its
+   subtree's, segment w at round 1+w), in node order both. */
+static int mesh_below(const uint32_t *parent,uint32_t w,uint32_t v){
+  for(uint32_t at=w;;at=parent[at]){if(at==v)return 1;if(parent[at]==at)return 0;}
+}
 static uint32_t mesh_tree_collective(const struct mesh_link_map *map,uint32_t rank,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *out){
   const uint32_t n=map->nodes;
   uint32_t parent[n],order[n],children[n],interior[n],k=0,count=0;
   memset(interior,0,sizeof interior);
   if(c.root>=n || !mesh_spanning_tree(map,c.root,parent,order))return 0;
+  if((c.what==MESH_REDUCE_SCATTER || c.what==MESH_ALLGATHER) && operand.elements<n)return 0;
   for(uint32_t i=1;i<n;i++){interior[parent[order[i]]]=1;if(parent[order[i]]==rank)children[k++]=order[i];}
   const struct mesh_operand partial=mesh_accumulated(operand,c);
-  const uint32_t down=c.what==MESH_ALLREDUCE;
-  if(c.what==MESH_ALLREDUCE){
+  const uint32_t down=c.what==MESH_ALLGATHER?n:c.what==MESH_ALLREDUCE;
+  if(c.what==MESH_ALLREDUCE || c.what==MESH_REDUCE || c.what==MESH_REDUCE_SCATTER){
     for(uint32_t j=0;j<k;j++)out[count++]=mesh_piece(MESH_STEP_REDUCE,children[j],0,0,operand.elements,interior[children[j]]?partial:operand);
     if(rank!=c.root)out[count++]=mesh_piece(MESH_STEP_SEND,parent[rank],0,0,operand.elements,interior[rank]?partial:operand);
   }
+  if(c.what==MESH_ALLGATHER){
+    for(uint32_t j=0;j<k;j++)for(uint32_t w=0;w<n;w++)if(mesh_below(parent,w,children[j]))out[count++]=mesh_segment(MESH_STEP_COPY,children[j],w,w,n,operand);
+    for(uint32_t w=0;rank!=c.root && w<n;w++)if(mesh_below(parent,w,rank))out[count++]=mesh_segment(MESH_STEP_SEND,parent[rank],w,w,n,operand);
+  }
+  if(c.what==MESH_REDUCE_SCATTER){
+    for(uint32_t w=0;rank!=c.root && w<n;w++)if(mesh_below(parent,w,rank))out[count++]=mesh_segment(MESH_STEP_COPY,parent[rank],1+w,w,n,operand);
+    for(uint32_t j=0;j<k;j++)for(uint32_t w=0;w<n;w++)if(mesh_below(parent,w,children[j]))out[count++]=mesh_segment(MESH_STEP_SEND,children[j],1+w,w,n,operand);
+  }
+  if(c.what==MESH_REDUCE || c.what==MESH_REDUCE_SCATTER)return count;
   if(rank!=c.root)out[count++]=mesh_piece(MESH_STEP_COPY,parent[rank],down,0,operand.elements,operand);
   for(uint32_t j=0;j<k;j++)out[count++]=mesh_piece(MESH_STEP_SEND,children[j],down,0,operand.elements,operand);
   return count;
@@ -200,19 +229,19 @@ static uint32_t mesh_binomial_children(int relrank,int size){
    (commutative case: lroot = root) and MPIR_Bcast_intra_binomial, each MPIC_Recv and MPIC_Send
    replaced by the step it performs; a child that received from children of its own sends a partial
    sum, at the accumulator.  ceil(log2 nodes) rounds up and down; the pairs are the rank bits', so a
-   map that lacks one of them has none. */
+   map that lacks one of them has none.  A reduce is the binomial reduce alone. */
 static uint32_t mesh_binomial_collective(const struct mesh_link_map *map,uint32_t node,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *out){
   const int comm_size=(int)map->nodes,root=(int)c.root,rank=(int)node;
   const struct mesh_operand partial=mesh_accumulated(operand,c);
   const uint32_t down=c.what==MESH_ALLREDUCE;
   uint32_t count=0;
   int mask,source,src,dst;
-  if(root>=comm_size)return 0;
+  if(root>=comm_size || c.what==MESH_REDUCE_SCATTER || c.what==MESH_ALLGATHER)return 0;
   /* every node's plan or none: each relative rank's pair with its parent, its least significant 1
      bit cleared, is a link */
   for(int relative=1;relative<comm_size;relative++)
     if(!mesh_linked(map,(uint32_t)((relative+root)%comm_size),(uint32_t)(((relative&(relative-1))+root)%comm_size)))return 0;
-  if(c.what==MESH_ALLREDUCE){
+  if(c.what==MESH_ALLREDUCE || c.what==MESH_REDUCE){
     const int lroot=root,relrank=(rank-lroot+comm_size)%comm_size;
     mask=0x1;
     while(mask<comm_size){
@@ -233,6 +262,7 @@ static uint32_t mesh_binomial_collective(const struct mesh_link_map *map,uint32_
       }
       mask<<=1;
     }
+    if(c.what==MESH_REDUCE)return count;
   }
   const int relative_rank=(rank>=root)?rank-root:rank-root+comm_size;
   /* 1. Wait for arrival of data: the source is the process whose relative rank has the least
@@ -265,19 +295,26 @@ static uint32_t mesh_binomial_collective(const struct mesh_link_map *map,uint32_
    Shoeybi et al. 2019, over MPI_Allreduce's semantics); a broadcast's root sends its operand to
    every other rank.  At two nodes this is the pair's existing exchange and has the ring's per-rank
    bytes.  Its SENDs may still be reading the operand when a REDUCE lands, so the sum goes to the
-   caller's result operand, as in the pair's existing programs. */
+   caller's result operand, as in the pair's existing programs.  A reduce sends to the root alone; a
+   reduce-scatter sends each node its segment and an all-gather each node its own. */
 static uint32_t mesh_direct_collective(const struct mesh_link_map *map,uint32_t rank,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *out){
-  const uint32_t n=map->nodes;
+  const uint32_t n=map->nodes,segmented=c.what==MESH_REDUCE_SCATTER || c.what==MESH_ALLGATHER;
   uint32_t count=0,any=0;
-  if(c.what==MESH_BROADCAST && c.root>=n)return 0;
+  if((c.what==MESH_BROADCAST || c.what==MESH_REDUCE) && c.root>=n)return 0;
+  if(segmented && operand.elements<n)return 0;
   for(uint32_t v=0;v<n;v++)any|=(uint32_t)mesh_contributes(c,v);
   if(!any)return 0;
-  /* every node's plan or none: each contributor linked to every other node */
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++)if(a!=b && mesh_contributes(c,a) && !mesh_linked(map,a,b))return 0;
-  if(mesh_contributes(c,rank))for(uint32_t peer=0;peer<n;peer++)if(peer!=rank)
-    out[count++]=mesh_piece(MESH_STEP_SEND,peer,0,0,operand.elements,operand);
-  for(uint32_t peer=0;peer<n;peer++)if(peer!=rank && mesh_contributes(c,peer))
-    out[count++]=mesh_piece(c.what==MESH_BROADCAST?MESH_STEP_COPY:MESH_STEP_REDUCE,peer,0,0,operand.elements,operand);
+  /* every node's plan or none: each contributor linked to every node it sends to */
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++)
+    if(a!=b && mesh_contributes(c,a) && (c.what!=MESH_REDUCE || b==c.root) && !mesh_linked(map,a,b))return 0;
+  if(mesh_contributes(c,rank))for(uint32_t peer=0;peer<n;peer++)if(peer!=rank && (c.what!=MESH_REDUCE || peer==c.root))
+    out[count++]=segmented?mesh_segment(MESH_STEP_SEND,peer,0,c.what==MESH_ALLGATHER?rank:peer,n,operand):
+      mesh_piece(MESH_STEP_SEND,peer,0,0,operand.elements,operand);
+  for(uint32_t peer=0;peer<n && (c.what!=MESH_REDUCE || rank==c.root);peer++)if(peer!=rank && mesh_contributes(c,peer)){
+    const uint32_t op=c.what==MESH_BROADCAST || c.what==MESH_ALLGATHER?MESH_STEP_COPY:MESH_STEP_REDUCE;
+    out[count++]=segmented?mesh_segment(op,peer,0,c.what==MESH_ALLGATHER?peer:rank,n,operand):
+      mesh_piece(op,peer,0,0,operand.elements,operand);
+  }
   return count;
 }
 
@@ -285,7 +322,8 @@ uint32_t mesh_collective_plan(const struct mesh_link_map *map,uint32_t rank,stru
   if(map->nodes<2 || rank>=map->nodes)return 0;
   switch(c.how){
     case MESH_DIRECT:return mesh_direct_collective(map,rank,c,operand,steps);
-    case MESH_RING:return c.what==MESH_ALLREDUCE?mesh_ring_allreduce(map,rank,c,operand,steps):0;
+    case MESH_RING:return c.what==MESH_ALLREDUCE || c.what==MESH_REDUCE_SCATTER || c.what==MESH_ALLGATHER?
+      mesh_ring_collective(map,rank,c,operand,steps):0;
     case MESH_TREE:return mesh_tree_collective(map,rank,c,operand,steps);
     case MESH_BINOMIAL:return mesh_binomial_collective(map,rank,c,operand,steps);
     default:return 0;
@@ -359,8 +397,8 @@ double mesh_collective_time(const struct mesh_link_map *map,struct mesh_collecti
 
 /* The algorithm of least time for this operand on this map among those of the bit set template.how
    (0: every one): the direct exchange, the ring, the spanning tree and the binomial tree, each where
-   the map carries it; an all-reduce's trees from
-   every root (every node takes the result).  Ties go to the earlier in that order, then the lower
+   the map carries it; an all-reduce's, reduce-scatter's and all-gather's trees from
+   every root (every node takes a result).  Ties go to the earlier in that order, then the lower
    root. */
 struct mesh_collective mesh_collective_choose(const struct mesh_link_map *map,struct mesh_collective template,struct mesh_operand operand,double alpha,double beta){
   const uint32_t allowed=template.how?template.how:(UINT32_C(1)<<MESH_UNAVAILABLE)-1;
@@ -368,7 +406,8 @@ struct mesh_collective mesh_collective_choose(const struct mesh_link_map *map,st
   best.how=map->nodes<2?MESH_DIRECT:MESH_UNAVAILABLE;
   double least=INFINITY;
   for(uint32_t how=MESH_DIRECT;map->nodes>=2 && how<MESH_UNAVAILABLE;how++)if(allowed>>how&1){
-    const int any=template.what==MESH_ALLREDUCE && (how==MESH_TREE || how==MESH_BINOMIAL);
+    const int any=(template.what==MESH_ALLREDUCE || template.what==MESH_REDUCE_SCATTER || template.what==MESH_ALLGATHER) &&
+      (how==MESH_TREE || how==MESH_BINOMIAL);
     for(uint32_t root=any?0:template.root;root<(any?map->nodes:template.root+1);root++){
       struct mesh_collective c=template;
       c.how=how;c.root=root;
