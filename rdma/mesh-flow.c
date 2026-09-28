@@ -638,7 +638,7 @@ static struct net_comm net_comms[MESH_NET_COMMS];
    and a posted RECV. */
 struct net_send { uint32_t comm,generation,slot,mr; uint64_t offset,length; };
 struct net_transfer { uint32_t comm,generation,slot,mr,peer,peer_generation; uint64_t sequence,size,offset,cursor,landed,e1,p1,e2,p2; };
-struct net_chunk { uint32_t transfer,frames; uint64_t length; };
+struct net_chunk { uint32_t transfer,frames; uint64_t length; struct ibv_sge span; };
 struct net_session {
   struct hdr *M;uint32_t index;struct mesh_verbs provider;struct mesh_net_link *counts;
   char service[16];pthread_t thread;int started,control,failed;
@@ -651,7 +651,7 @@ struct net_session {
   struct { uint32_t from,generation; uint64_t key; } pending[MESH_NET_COMMS];uint32_t pending_count;
   char *discard;struct ibv_mr *discard_region;
   int send_blocked,receive_blocked;
-  uint64_t bell,scanned,reaped,strays;
+  uint64_t bell,scanned,reaped,strays,logged;
 };
 
 static uint64_t net_now(void){return clock_gettime_nsec_np(CLOCK_MONOTONIC);}
@@ -773,6 +773,8 @@ static void net_register(struct net_session *s,uint32_t index){
     return;
   }
   mr->regions=count;
+  fprintf(stderr,"session link %u: registration %u %s offset=%llu bytes=%llu mapped at %p length %zu, %u regions, first lkey 0x%x\n",s->index,index,name,
+    (unsigned long long)mr->offset,(unsigned long long)mr->size,(void *)g->map,g->length,count,g->regions[0]->lkey);
   atomic_fetch_add_explicit(&s->counts->client_regions,count,memory_order_relaxed);
   atomic_fetch_add_explicit(&s->counts->client_bytes,g->length,memory_order_relaxed);
   atomic_store_explicit(&mr->state,MESH_NET_REGISTERED,memory_order_release);
@@ -1025,6 +1027,8 @@ static int net_post(struct net_session *s){
     s->send_blocked=0;
     struct ibv_sge span=net_span(s,chunk->mr,chunk->offset,chunk->length);
     struct ibv_send_wr request={.wr_id=s->send_post,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+    if(s->logged<8 && ++s->logged)fprintf(stderr,"session link %u: SEND %u addr=0x%llx length=%u lkey=0x%x registration %u\n",s->index,s->send_post,
+      (unsigned long long)span.addr,span.length,span.lkey,chunk->mr);
     int error=ibv_post_send(s->provider.queues[0].pair,&request,&bad);
     if(error)return error<0?-error:error;
     s->send_post++;s->send_posted+=frames;
@@ -1041,9 +1045,11 @@ static int net_post(struct net_session *s){
     s->receive_blocked=0;
     struct ibv_sge span=net_span(s,t->mr,t->offset+t->cursor,length);
     struct ibv_recv_wr request={.wr_id=s->receive_chunk_tail,.sg_list=&span,.num_sge=1},*bad;
+    if(s->logged<8 && ++s->logged)fprintf(stderr,"session link %u: RECV %u addr=0x%llx length=%u lkey=0x%x registration %u\n",s->index,s->receive_chunk_tail,
+      (unsigned long long)span.addr,span.length,span.lkey,t->mr);
     int error=ibv_post_recv(s->provider.queues[0].pair,&request,&bad);
     if(error)return error<0?-error:error;
-    s->receive_chunks[s->receive_chunk_tail++%s->chunk_slots]=(struct net_chunk){s->receive_post,frames,length};
+    s->receive_chunks[s->receive_chunk_tail++%s->chunk_slots]=(struct net_chunk){s->receive_post,frames,length,span};
     s->receive_outstanding+=frames;
     net_emit(s,(struct net_message){.kind=NET_CREDIT,.to=t->peer,.to_generation=t->peer_generation,.from=t->comm,.from_generation=t->generation,
       .sequence=t->sequence,.offset=t->cursor,.size=length});
@@ -1051,14 +1057,23 @@ static int net_post(struct net_session *s){
   }
   return 0;
 }
+/* A failed completion, logged with the work request it names: the session ends on it. */
+static int net_failed(struct net_session *s,const struct ibv_wc *done,const char *kind,uint64_t expected,struct ibv_sge span,uint32_t mr,uint32_t transfer){
+  fprintf(stderr,"session link %u: %s completion %s (status %d vendor %u) wr_id %llu expected %llu byte_len %u; its SGE addr=0x%llx length=%u lkey=0x%x registration %u transfer %u\n",
+    s->index,kind,ibv_wc_status_str(done->status),done->status,done->vendor_err,(unsigned long long)done->wr_id,(unsigned long long)expected,done->byte_len,
+    (unsigned long long)span.addr,span.length,span.lkey,mr,transfer);
+  return EIO;
+}
 /* Completions retire chunks in the order they were posted (one queue pair each way). */
 static int net_complete(struct net_session *s,int *busy){
   struct ibv_wc done[16];
   int count=ibv_poll_cq(s->provider.sent,16,done);
   if(count<0)return EIO;
   for(int i=0;i<count;i++){
-    if(done[i].status)return (int)done[i].status;
-    if(done[i].wr_id!=s->send_head)return EPROTO;
+    if(done[i].status || done[i].wr_id!=s->send_head){
+      struct net_send *chunk=s->sends+s->send_head%NET_SENDS;
+      return net_failed(s,done+i,"SEND",s->send_head,net_span(s,chunk->mr,chunk->offset,chunk->length),chunk->mr,chunk->comm);
+    }
     struct net_send chunk=s->sends[s->send_head++%NET_SENDS];
     s->send_retired+=(chunk.length+4095)/4096;
     struct mesh_net_comm *comm=chunk.comm==NET_NONE?NULL:net_comm_at(s,chunk.comm,chunk.generation);
@@ -1070,11 +1085,10 @@ static int net_complete(struct net_session *s,int *busy){
   count=ibv_poll_cq(s->provider.completion,16,done);
   if(count<0)return EIO;
   for(int i=0;i<count;i++){
-    if(done[i].status)return (int)done[i].status;
-    if(!(done[i].opcode&IBV_WC_RECV))continue;
-    if(done[i].wr_id!=s->receive_chunk_head)return EPROTO;
+    struct net_chunk *posted=s->receive_chunks+s->receive_chunk_head%s->chunk_slots;
+    if(done[i].status || done[i].wr_id!=s->receive_chunk_head || done[i].byte_len!=posted->length)
+      return net_failed(s,done+i,"RECV",s->receive_chunk_head,posted->span,posted->transfer==NET_NONE?NET_DISCARD:s->receives[posted->transfer%NET_RECEIVES].mr,posted->transfer);
     struct net_chunk chunk=s->receive_chunks[s->receive_chunk_head++%s->chunk_slots];
-    if(done[i].byte_len!=chunk.length)return EPROTO;
     s->receive_outstanding-=chunk.frames;
     if(chunk.transfer==NET_NONE)continue;
     struct net_transfer *t=s->receives+chunk.transfer%NET_RECEIVES;
@@ -1231,7 +1245,7 @@ static void net_reset(struct net_session *s){
   s->send_posted=s->send_retired=0;s->receive_outstanding=0;
   s->send_head=s->send_post=s->send_tail=s->receive_head=s->receive_post=s->receive_tail=0;
   s->receive_chunk_head=s->receive_chunk_tail=0;
-  s->output_head=s->output_tail=0;s->output_partial=s->input_bytes=0;s->failed=0;s->send_blocked=s->receive_blocked=0;
+  s->output_head=s->output_tail=0;s->output_partial=s->input_bytes=0;s->failed=0;s->send_blocked=s->receive_blocked=0;s->logged=0;
 }
 /* The session's configuration, between RTR and RTS: the discard buffer registered and the priming RECV
    posted into it, then each end's queue capacities exchanged, so that neither end SENDs before the
@@ -1260,12 +1274,14 @@ static int net_configure(void *argument,int socket,uint64_t client){
     }
     s->discard_region=ibv_reg_mr(s->provider.device->domain,s->discard,bytes,IBV_ACCESS_LOCAL_WRITE);
     if(!s->discard_region)return -1;
+    fprintf(stderr,"session link %u: discard buffer %p lkey 0x%x\n",s->index,(void *)s->discard,s->discard_region->lkey);
   }
   struct ibv_sge span=net_span(s,NET_DISCARD,0,NET_PRIME);
   struct ibv_recv_wr prime={.wr_id=s->receive_chunk_tail,.sg_list=&span,.num_sge=1},*bad;
   int error=ibv_post_recv(queue->pair,&prime,&bad);
   if(error){errno=error<0?-error:error;return -1;}
-  s->receive_chunks[s->receive_chunk_tail++%s->chunk_slots]=(struct net_chunk){NET_NONE,1,NET_PRIME};
+  fprintf(stderr,"session link %u: priming RECV addr=0x%llx length=%u lkey=0x%x\n",s->index,(unsigned long long)span.addr,span.length,span.lkey);
+  s->receive_chunks[s->receive_chunk_tail++%s->chunk_slots]=(struct net_chunk){NET_NONE,1,NET_PRIME,span};
   s->receive_outstanding=1;
   uint32_t mine[2]={s->send_capacity,s->receive_capacity},peer[2];
   if(exchange(socket,mine,peer,sizeof mine,sizeof peer,s->M,client,s->provider.deadline))return -1;
@@ -1326,6 +1342,9 @@ static void *net_session_run(void *argument){
     net_lost(s,error);
     close(f);s->control=-1;
     while(!down_pair(&s->provider))poll(NULL,0,100);
+    /* a lost session pairs again after a pause, not at once: failed completions, torn-down queue pairs
+       and immediate re-pairing preceded the Sep 5 kernel panic (design/RDMA-KERNEL-RECOVERY.md) */
+    net_nap(UINT64_C(3000000000));
   }
   /* the bridge stops: every registration of this link is withdrawn before the device closes */
   for(uint32_t i=0;i<MESH_NET_MRS;i++)if(mesh_net_mrs(m)[i].link==s->index && net_registrations[i].count){
