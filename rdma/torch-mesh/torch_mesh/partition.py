@@ -353,17 +353,23 @@ def _empty(shape, like):
 
 
 def _allgatherv(x, dim, sizes, group):
-    y = x.movedim(dim, 0).contiguous()
+    """The blocks gathered, this rank's copied into its place in the output first (the backend then runs
+    the all-gather in place)."""
+    y = x.movedim(dim, 0)
     out = _empty((sum(sizes),) + y.shape[1:], y)
-    dist.all_gather(list(out.split(sizes)), y, group=group)
+    blocks = list(out.split(sizes))
+    mine = blocks[dist.get_rank(group)].copy_(y)
+    dist.all_gather(blocks, mine, group=group)
     return out.movedim(0, dim)
 
 
 def _reduce_scatterv(x, dim, sizes, rank, op, group):
-    y = x.movedim(dim, 0).contiguous()
-    out = _empty((sizes[rank],) + y.shape[1:], y)
-    dist.reduce_scatter(out, list(y.split(sizes)), op=getattr(dist.ReduceOp, op.upper()), group=group)
-    return out.movedim(0, dim).contiguous()
+    """The blocks reduce-scattered in place in a contiguous copy of x (the backend's in-place form: the
+    output is this rank's block of the input)."""
+    y = x.movedim(dim, 0)
+    blocks = list(_empty(y.shape, y).copy_(y).split(sizes))
+    dist.reduce_scatter(blocks[rank], blocks, op=getattr(dist.ReduceOp, op.upper()), group=group)
+    return blocks[rank].movedim(0, dim).contiguous()
 
 
 # Shard (torch/distributed/tensor/placement_types.py).
@@ -747,7 +753,8 @@ def _ring_attention(group, n, query, key, value, is_causal=False, **kwargs):
     row_k, row_v = key.numel() // key.size(2), value.numel() // value.size(2)
     counts = [s * (row_k + row_v) for s in lengths]
     blocks = list(_empty((sum(counts),), key).split(counts))
-    gathered = dist.all_gather(blocks, torch.cat([key.flatten(), value.flatten()]), group=group, async_op=True)
+    mine = torch.cat([key.flatten(), value.flatten()], out=blocks[rank])
+    gathered = dist.all_gather(blocks, mine, group=group, async_op=True)
     merger = _cp._SDPAMerger(_cp._cp_options.convert_to_f32, seq_dim=2)
     for i in range(size):
         j = (rank - i) % size
