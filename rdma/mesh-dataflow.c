@@ -47,7 +47,7 @@ int mesh_link_table_open(const char *region,int create,struct mesh_link_table **
   struct stat info;
   if(create)fchmod(file,MESH_MODE);  /* as the region's: past the umask where the system allows it */
   int error=create && ftruncate(file,sizeof **out)?errno:fstat(file,&info)?errno:0;
-  if(!error && !create && (size_t)info.st_size!=sizeof **out)error=EINVAL;
+  if(!error && !create && (size_t)info.st_size<sizeof **out)error=EINVAL;  /* the system rounds it up to a page */
   struct mesh_link_table *t=error?MAP_FAILED:mmap(NULL,sizeof *t,PROT_READ|PROT_WRITE,MAP_SHARED,file,0);
   if(!error && t==MAP_FAILED)error=errno;
   close(file);
