@@ -8,17 +8,33 @@
 /* The GPU side of nccl-mesh.c.  Every buffer a program binds is a Metal buffer over exactly one
    window allocation (made once with the allocation, the one Metal object for its pages, which the
    caller's kernels bind too) or, for memory outside the window, over the host pages that hold it
-   (newBufferWithBytesNoCopy on the containing pages: no copy, the program's blits read and write the
+   (newBufferWithBytesNoCopy on the containing pages: no copy, the program's kernels read and write the
    caller's memory).  A program: one command buffer of a group on its stream's queue (the NULL stream's
-   on the communicator's own), whose kernels combine, premultiply and post-divide, and whose blits copy,
-   between waits for shared-event values (a region's recorded writer or reader done, a piece arrived)
-   and signals (the operands staged, a piece combined, the group done). */
+   on the communicator's own), or a deferred stream's commands in the caller's, whose kernels copy,
+   combine, premultiply and post-divide, wait on completion words and publish them, between waits for
+   shared-event values (a region's recorded writer or reader done, another stream's work) and signals
+   (the group done).
+     The network and the GPU meet in mapped memory, as the prepared programs' crossings do (metal-microbench
+   metal_recording.m MetalRemoteSpin, MetalPayloadRead, mesh_coherent_store): the bridge stores each
+   request's end into its completion word (mesh.h mesh_net_request), which a kernel polls with a
+   system-coherent load after a system-scope fence, a bounded number of times (a timed-out wait sets the
+   communicator's failure word: the call fails as a value, never hangs); what the NIC wrote is loaded
+   system-coherent, and every store a kernel makes is system-coherent, so a later SEND (and the host) sees
+   it once the kernel's publication word is seen.  A store that is not reaches another agent only when
+   its command buffer completes: on the M5 a word published mid-command-buffer after 16 MB of plain
+   stores found 2,041,216 of their 4,194,304 words stale on the host, none with system-coherent stores
+   (metal-microbench output_data/handoffs-20260929/probe/coh-m5.jsonl).  coherent(system) needs Metal's
+   internals pragma, as the recorder's generated sources begin. */
 static const char *source =
+  "#pragma METAL internals : enable\n"
   "#include <metal_stdlib>\n"
   "using namespace metal;\n"
+  "#define FENCE atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3))\n"
+  "#define SYS volatile coherent(system) device\n"
   "// ncclDataType_t 0 int8 1 uint8 2 int32 3 uint32 4 int64 5 uint64 6 float16 7 float32 8 float64 9 bfloat16\n"
-  "// 10 float8e4m3 11 float8e5m2; ncclRedOp_t 0 sum 1 prod 2 max 3 min.  dst and src: byte offsets into buffers 0 and 1.\n"
-  "struct args { ulong dst, src, n, scalar; uint type, op, nranks, pad; };\n"
+  "// 10 float8e4m3 11 float8e5m2; ncclRedOp_t 0 sum 1 prod 2 max 3 min.  dst and src: byte offsets into buffers 0 and 1;\n"
+  "// width: a copy's unit (16, 4 or 1 bytes), received: its source the NIC wrote.\n"
+  "struct args { ulong dst, src, n, scalar; uint type, op, nranks, width, received, pad[3]; };\n"
   "\n"
   "// half and the fp8 formats decoded exactly to float, a float rounded to nearest even into them (one\n"
   "// rounding; fp8 saturating as NCCL's __NV_SATFINITE); bfloat16 by its float bits\n"
@@ -216,45 +232,51 @@ static const char *source =
   "  if (f64_nan(a)) return a;\n"
   "  return (op == 2 ? f64_key(b) > f64_key(a) : f64_key(b) < f64_key(a)) ? b : a;\n"
   "}\n"
+  "// D: the operand read; O: the operand stored, system-coherent; R: a piece the NIC wrote, loaded system-coherent;\n"
+  "// S: a source the GPU or the host wrote before the program\n"
   "#define D(T) ((device T *)(d + p.dst))\n"
+  "#define O(T) ((SYS T *)(d + p.dst))\n"
+  "#define R(T) ((SYS T *)(s + p.src))\n"
   "#define S(T) ((device T *)(s + p.src))\n"
   "#define EACH for (ulong i = first; i < p.n; i += grid)\n"
   "#define GRID uint first [[thread_position_in_grid]], uint grid [[threads_per_grid]]\n"
   "\n"
-  "// dst = dst op src\n"
+  "// dst = dst op src, src a received piece\n"
   "kernel void combine(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
   "  switch (p.type) {\n"
-  "  case 0: EACH D(char)[i] = integer<char, uint>(D(char)[i], S(char)[i], p.op); break;\n"
-  "  case 1: EACH D(uchar)[i] = integer<uchar, uint>(D(uchar)[i], S(uchar)[i], p.op); break;\n"
-  "  case 2: EACH D(int)[i] = integer<int, uint>(D(int)[i], S(int)[i], p.op); break;\n"
-  "  case 3: EACH D(uint)[i] = integer<uint, uint>(D(uint)[i], S(uint)[i], p.op); break;\n"
-  "  case 4: EACH D(long)[i] = integer<long, ulong>(D(long)[i], S(long)[i], p.op); break;\n"
-  "  case 5: EACH D(ulong)[i] = integer<ulong, ulong>(D(ulong)[i], S(ulong)[i], p.op); break;\n"
-  "  case 6: EACH D(ushort)[i] = ushort(encode(apply(decode(D(ushort)[i], F16), decode(S(ushort)[i], F16), p.op), F16)); break;\n"
-  "  case 7: EACH D(uint)[i] = f32_apply(D(uint)[i], S(uint)[i], p.op, 23); break;\n"
-  "  case 8: EACH D(ulong)[i] = f64_apply(D(ulong)[i], S(ulong)[i], p.op); break;\n"
-  "  case 9: EACH D(ushort)[i] = ushort(f32_apply(uint(D(ushort)[i]) << 16, uint(S(ushort)[i]) << 16, p.op, 7)); break;\n"
-  "  case 10: EACH D(uchar)[i] = uchar(encode(apply(decode(D(uchar)[i], E4M3), decode(S(uchar)[i], E4M3), p.op), E4M3)); break;\n"
-  "  default: EACH D(uchar)[i] = uchar(encode(apply(decode(D(uchar)[i], E5M2), decode(S(uchar)[i], E5M2), p.op), E5M2)); break;\n"
+  "  case 0: EACH O(char)[i] = integer<char, uint>(D(char)[i], R(char)[i], p.op); break;\n"
+  "  case 1: EACH O(uchar)[i] = integer<uchar, uint>(D(uchar)[i], R(uchar)[i], p.op); break;\n"
+  "  case 2: EACH O(int)[i] = integer<int, uint>(D(int)[i], R(int)[i], p.op); break;\n"
+  "  case 3: EACH O(uint)[i] = integer<uint, uint>(D(uint)[i], R(uint)[i], p.op); break;\n"
+  "  case 4: EACH O(long)[i] = integer<long, ulong>(D(long)[i], R(long)[i], p.op); break;\n"
+  "  case 5: EACH O(ulong)[i] = integer<ulong, ulong>(D(ulong)[i], R(ulong)[i], p.op); break;\n"
+  "  case 6: EACH O(ushort)[i] = ushort(encode(apply(decode(D(ushort)[i], F16), decode(R(ushort)[i], F16), p.op), F16)); break;\n"
+  "  case 7: EACH O(uint)[i] = f32_apply(D(uint)[i], R(uint)[i], p.op, 23); break;\n"
+  "  case 8: EACH O(ulong)[i] = f64_apply(D(ulong)[i], R(ulong)[i], p.op); break;\n"
+  "  case 9: EACH O(ushort)[i] = ushort(f32_apply(uint(D(ushort)[i]) << 16, uint(R(ushort)[i]) << 16, p.op, 7)); break;\n"
+  "  case 10: EACH O(uchar)[i] = uchar(encode(apply(decode(D(uchar)[i], E4M3), decode(R(uchar)[i], E4M3), p.op), E4M3)); break;\n"
+  "  default: EACH O(uchar)[i] = uchar(encode(apply(decode(D(uchar)[i], E5M2), decode(R(uchar)[i], E5M2), p.op), E5M2)); break;\n"
   "  }\n"
+  "  FENCE;\n"
   "}\n"
   "// dst = src x scalar (a premultiplication: ncclAvg on floating types, PreMulSum), one operation of the type\n"
   "kernel void premultiply(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
   "  const ulong k = p.scalar;\n"
   "  switch (p.type) {\n"
-  "  case 0: EACH D(char)[i] = char(uint(S(char)[i]) * uint(char(k))); break;\n"
-  "  case 1: EACH D(uchar)[i] = uchar(uint(S(uchar)[i]) * uint(uchar(k))); break;\n"
-  "  case 2: EACH D(int)[i] = int(uint(S(int)[i]) * uint(k)); break;\n"
-  "  case 3: EACH D(uint)[i] = S(uint)[i] * uint(k); break;\n"
-  "  case 4: EACH D(long)[i] = long(ulong(S(long)[i]) * k); break;\n"
-  "  case 5: EACH D(ulong)[i] = S(ulong)[i] * k; break;\n"
-  "  case 6: EACH D(ushort)[i] = ushort(encode(decode(S(ushort)[i], F16) * decode(uint(k & 0xffff), F16), F16)); break;\n"
-  "  case 7: EACH D(uint)[i] = mul32(S(uint)[i], uint(k), 23); break;\n"
-  "  case 8: EACH D(ulong)[i] = f64_mul(S(ulong)[i], k); break;\n"
-  "  case 9: EACH D(ushort)[i] = ushort(mul32(uint(S(ushort)[i]) << 16, uint(k & 0xffff) << 16, 7)); break;\n"
-  "  case 10: EACH D(uchar)[i] = uchar(encode(decode(S(uchar)[i], E4M3) * decode(uint(k & 0xff), E4M3), E4M3)); break;\n"
-  "  default: EACH D(uchar)[i] = uchar(encode(decode(S(uchar)[i], E5M2) * decode(uint(k & 0xff), E5M2), E5M2)); break;\n"
+  "  case 0: EACH O(char)[i] = char(uint(S(char)[i]) * uint(char(k))); break;\n"
+  "  case 1: EACH O(uchar)[i] = uchar(uint(S(uchar)[i]) * uint(uchar(k))); break;\n"
+  "  case 2: EACH O(int)[i] = int(uint(S(int)[i]) * uint(k)); break;\n"
+  "  case 3: EACH O(uint)[i] = S(uint)[i] * uint(k); break;\n"
+  "  case 4: EACH O(long)[i] = long(ulong(S(long)[i]) * k); break;\n"
+  "  case 5: EACH O(ulong)[i] = S(ulong)[i] * k; break;\n"
+  "  case 6: EACH O(ushort)[i] = ushort(encode(decode(S(ushort)[i], F16) * decode(uint(k & 0xffff), F16), F16)); break;\n"
+  "  case 7: EACH O(uint)[i] = mul32(S(uint)[i], uint(k), 23); break;\n"
+  "  case 8: EACH O(ulong)[i] = f64_mul(S(ulong)[i], k); break;\n"
+  "  case 9: EACH O(ushort)[i] = ushort(mul32(uint(S(ushort)[i]) << 16, uint(k & 0xffff) << 16, 7)); break;\n"
+  "  case 10: EACH O(uchar)[i] = uchar(encode(decode(S(uchar)[i], E4M3) * decode(uint(k & 0xff), E4M3), E4M3)); break;\n"
+  "  default: EACH O(uchar)[i] = uchar(encode(decode(S(uchar)[i], E5M2) * decode(uint(k & 0xff), E5M2), E5M2)); break;\n"
   "  }\n"
+  "  FENCE;\n"
   "}\n"
   "// ncclAvg on integer types: the wrapped sum over nranks, truncated toward zero (NCCL's\n"
   "// FuncSumPostDiv::divide: the magnitude divided, the sign kept)\n"
@@ -264,30 +286,71 @@ static const char *source =
   "}\n"
   "kernel void postdivide(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
   "  switch (p.type) {\n"
-  "  case 0: EACH D(char)[i] = divide<char, uint>(D(char)[i], p.nranks); break;\n"
-  "  case 1: EACH D(uchar)[i] = uchar(uint(D(uchar)[i]) / p.nranks); break;\n"
-  "  case 2: EACH D(int)[i] = divide<int, uint>(D(int)[i], p.nranks); break;\n"
-  "  case 3: EACH D(uint)[i] = D(uint)[i] / p.nranks; break;\n"
-  "  case 4: EACH D(long)[i] = divide<long, ulong>(D(long)[i], ulong(p.nranks)); break;\n"
-  "  case 5: EACH D(ulong)[i] = D(ulong)[i] / ulong(p.nranks); break;\n"
+  "  case 0: EACH O(char)[i] = divide<char, uint>(D(char)[i], p.nranks); break;\n"
+  "  case 1: EACH O(uchar)[i] = uchar(uint(D(uchar)[i]) / p.nranks); break;\n"
+  "  case 2: EACH O(int)[i] = divide<int, uint>(D(int)[i], p.nranks); break;\n"
+  "  case 3: EACH O(uint)[i] = D(uint)[i] / p.nranks; break;\n"
+  "  case 4: EACH O(long)[i] = divide<long, ulong>(D(long)[i], ulong(p.nranks)); break;\n"
+  "  case 5: EACH O(ulong)[i] = D(ulong)[i] / ulong(p.nranks); break;\n"
   "  default: break;\n"
   "  }\n"
+  "  FENCE;\n"
   "}\n"
-  "// bytes a blit does not take (an offset or length not a multiple of 4)\n"
+  "// n units of `width` bytes (16: uint4, 4: uint, 1: uchar), stored system-coherent; loaded system-coherent\n"
+  "// where the NIC wrote them (received)\n"
+  "#define COPY(T) EACH { T v = p.received ? ((SYS T *)(s + p.src))[i] : ((device T *)(s + p.src))[i]; ((SYS T *)(d + p.dst))[i] = v; }\n"
   "kernel void copy(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
-  "  EACH d[p.dst + i] = s[p.src + i];\n"
+  "  if (p.width == 16) COPY(uint4) else if (p.width == 4) COPY(uint) else COPY(uchar)\n"
+  "  FENCE;\n"
   "}\n"
-  "// one thread's n atomic adds: the GPU kept out of its idle state (nccl_mesh_hold)\n"
-  "kernel void hold(device atomic_uint *c [[buffer(0)]], constant uint &n [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
+  "// One thread waits for each listed word (a byte offset into buffer 0) to reach its value: a system-scope\n"
+  "// fence, then a system-coherent load, at most `bound` polls in all; past them, the failure word (buffer 1)\n"
+  "// is set and the rest are not waited for.  list: n, bound, then n (offset, value) pairs.\n"
+  "kernel void wait(device uchar *w [[buffer(0)]], device uchar *f [[buffer(1)]], constant ulong *list [[buffer(2)]],\n"
+  "                 uint i [[thread_position_in_grid]]) {\n"
   "  if (i) return;\n"
-  "  for (uint k = 0; k < n; k++) atomic_fetch_add_explicit(c, 1u, memory_order_relaxed);\n"
+  "  ulong polls = 0;\n"
+  "  for (ulong k = 0; k < list[0]; k++)\n"
+  "    for (SYS ulong *word = (SYS ulong *)(w + list[2 + 2 * k]);; polls++) {\n"
+  "      if (polls >= list[1]) { *(SYS ulong *)f = 1ul; FENCE; return; }\n"
+  "      FENCE;\n"
+  "      if (*word >= list[3 + 2 * k]) break;\n"
+  "    }\n"
+  "  FENCE;\n"
+  "}\n"
+  "// a word (a byte offset into buffer 0) set to `value`, system-coherent, after the dispatches before it\n"
+  "kernel void publish(device uchar *w [[buffer(0)]], constant ulong *a [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
+  "  if (i) return;\n"
+  "  FENCE;\n"
+  "  *(SYS ulong *)(w + a[0]) = a[1];\n"
+  "  FENCE;\n"
   "}\n";
 
-enum { KERNELS = 5, KERNEL_HOLD = 4 };
-static struct { id<MTLDevice> device; id<MTLComputePipelineState> kernels[KERNELS]; } gpu;
+enum { KERNELS = 6, KERNEL_COPY = 3, KERNEL_WAIT = 4, KERNEL_PUBLISH = 5 };
+static struct { id<MTLDevice> device; id<MTLComputePipelineState> kernels[KERNELS]; uint64_t bound; } gpu;
 static _Atomic int failed;
 #define HIDDEN __attribute__((visibility("hidden")))
 
+/* The polls one completion word's wait makes in `seconds`: the wait kernel timed once, on a word nobody sets,
+   for 4096 polls. */
+static uint64_t polls_in(id<MTLCommandQueue> queue,double seconds){
+  @autoreleasepool {
+    id<MTLBuffer> word=[[gpu.device newBufferWithLength:64 options:MTLResourceStorageModeShared] autorelease];
+    memset(word.contents,0,64);
+    const uint64_t list[4]={1,4096,0,1};
+    id<MTLCommandBuffer> buffer=[queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder=[buffer computeCommandEncoder];
+    [encoder setComputePipelineState:gpu.kernels[KERNEL_WAIT]];
+    [encoder setBuffer:word offset:0 atIndex:0];
+    [encoder setBuffer:word offset:8 atIndex:1];
+    [encoder setBytes:list length:sizeof list atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+    [encoder endEncoding];
+    [buffer commit];[buffer waitUntilCompleted];
+    double took=buffer.GPUEndTime-buffer.GPUStartTime;
+    return took>0?(uint64_t)(4096*seconds/took):(uint64_t)1<<20;
+  }
+}
 /* The device and the kernels; 0, or -1 with the reason in `error`. */
 HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
   @autoreleasepool {
@@ -298,7 +361,7 @@ HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
     if(@available(macOS 15.0,*))options.mathMode=MTLMathModeSafe;
     NSError *failure=nil;
     id<MTLLibrary> library=[[device newLibraryWithSource:@(source) options:options error:&failure] autorelease];
-    static const char *const names[KERNELS]={"combine","premultiply","postdivide","copy","hold"};
+    static const char *const names[KERNELS]={"combine","premultiply","postdivide","copy","wait","publish"};
     for(int k=0;library && k<KERNELS;k++){
       id<MTLFunction> function=[[library newFunctionWithName:@(names[k])] autorelease];
       if(!(gpu.kernels[k]=[device newComputePipelineStateWithFunction:function error:&failure]))library=nil;
@@ -310,11 +373,16 @@ HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
       return -1;
     }
     gpu.device=device;
+    id<MTLCommandQueue> queue=[device newCommandQueue];
+    gpu.bound=polls_in(queue,1.0);
+    [queue release];
     return 0;
   }
 }
 /* A GPU program failed (its command buffer's status an error) since the process started. */
 HIDDEN int nccl_mesh_gpu_failed(void){return atomic_load(&failed);}
+/* The polls a completion word's wait makes before it fails: about a second's (GPU_WAIT_NS). */
+HIDDEN uint64_t nccl_mesh_wait_bound(void){return gpu.bound;}
 
 /* A Metal buffer over `bytes` at `pointer`, no copy: the pages holding them (from the page below
    `pointer`), `*offset` the pointer's place in it.  A window allocation's pages are its own. */
@@ -344,93 +412,89 @@ HIDDEN void nccl_mesh_event_signal(void *event,uint64_t value){
   if(shared.signaledValue<value)shared.signaledValue=value;
 }
 
-/* ---- holds ----
-   A GPU left idle for about a millisecond drops into a state it leaves slowly: on the M4 Pro a command
-   buffer parked 2 ms on a shared event started 433 us (median) after the host signalled it and ran its
-   combine at 340 us, against 68 us after a 200 us park, and 51 us and 160 us while one thread of another
-   queue kept the GPU busy (metal-microbench output_data/perf-torch-20260929/probe, wake2).  So while a
-   worker waits on the network for a part whose GPU work waits on it, holds keep the GPU busy: a hold is
-   one thread's atomic adds on the holds' own queue, then a signal of the worker's hold event. */
-static struct { pthread_mutex_t lock; id<MTLCommandQueue> queue; id<MTLBuffer> counter; uint32_t adds; } holding={.lock=PTHREAD_MUTEX_INITIALIZER};
-/* One hold of `adds` adds committed, `event` signalled `value` once it ends. */
-static void hold_commit(void *event,uint64_t value,uint32_t adds){
-  @autoreleasepool {
-    id<MTLCommandBuffer> buffer=[holding.queue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder=[buffer computeCommandEncoder];
-    [encoder setComputePipelineState:gpu.kernels[KERNEL_HOLD]];
-    [encoder setBuffer:holding.counter offset:0 atIndex:0];
-    [encoder setBytes:&adds length:sizeof adds atIndex:1];
-    [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
-    [encoder endEncoding];
-    if(event)[buffer encodeSignalEvent:(id<MTLSharedEvent>)event value:value];
-    [buffer commit];
+/* ---- programs ----
+   A program's consecutive kernels share one serial compute encoder, so each dispatch runs after the ones
+   before it (a wait before the combine it guards, a publication after the stores it publishes); an event's
+   wait or signal, a commit, or the caller's own encoding ends it (nccl_mesh_program_end).  Programs are
+   encoded one at a time (nccl-mesh.c's stream_lock). */
+static struct { void *program; id<MTLComputeCommandEncoder> encoder; } encoding;
+static id<MTLComputeCommandEncoder> encoder_of(void *program){
+  if(encoding.program!=program || !encoding.encoder){
+    if(encoding.encoder){[encoding.encoder endEncoding];[encoding.encoder release];}
+    encoding.program=program;
+    encoding.encoder=[[(id<MTLCommandBuffer>)program computeCommandEncoder] retain];
   }
+  return encoding.encoder;
 }
-/* The holds' queue made, and a hold's adds taken for about `us` microseconds: timed once on a GPU the
-   first hold has woken.  0 where the GPU is not attached. */
-HIDDEN uint32_t nccl_mesh_hold_adds(double us){
-  pthread_mutex_lock(&holding.lock);
-  if(!holding.queue && gpu.device){
-    holding.queue=[gpu.device newCommandQueue];
-    holding.counter=[gpu.device newBufferWithLength:64 options:MTLResourceStorageModeShared];
-    double seconds=0;const uint32_t trial=1u<<16;
-    for(int k=0;k<2;k++){
-      @autoreleasepool {
-        id<MTLCommandBuffer> buffer=[holding.queue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder=[buffer computeCommandEncoder];
-        [encoder setComputePipelineState:gpu.kernels[KERNEL_HOLD]];
-        [encoder setBuffer:holding.counter offset:0 atIndex:0];
-        [encoder setBytes:&trial length:sizeof trial atIndex:1];
-        [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
-        [encoder endEncoding];
-        [buffer commit];[buffer waitUntilCompleted];
-        seconds=buffer.GPUEndTime-buffer.GPUStartTime;
-      }
-    }
-    double adds=seconds>0?trial*(us*1e-6)/seconds:trial;
-    holding.adds=adds<1024?1024:adds>(1u<<26)?(1u<<26):(uint32_t)adds;
-  }
-  uint32_t adds=holding.adds;
-  pthread_mutex_unlock(&holding.lock);
-  return adds;
+HIDDEN void nccl_mesh_program_end(void *program){
+  if(encoding.encoder && (!program || encoding.program==program)){[encoding.encoder endEncoding];[encoding.encoder release];encoding.encoder=nil;encoding.program=NULL;}
 }
-HIDDEN void nccl_mesh_hold(void *event,uint64_t value,uint32_t adds){hold_commit(event,value,adds);}
-
-/* ---- programs ---- */
 HIDDEN void *nccl_mesh_program_begin(void *queue){
   @autoreleasepool {return [[(id<MTLCommandQueue>)queue commandBuffer] retain];}
 }
 HIDDEN void nccl_mesh_program_wait(void *program,void *event,uint64_t value){
+  nccl_mesh_program_end(program);
   [(id<MTLCommandBuffer>)program encodeWaitForEvent:(id<MTLSharedEvent>)event value:value];
 }
 HIDDEN void nccl_mesh_program_signal(void *program,void *event,uint64_t value){
+  nccl_mesh_program_end(program);
   [(id<MTLCommandBuffer>)program encodeSignalEvent:(id<MTLSharedEvent>)event value:value];
 }
 /* Kernel k (0 combine: dst op= src, 1 premultiply: dst = src x scalar, 2 postdivide: dst /= nranks, 3
-   copy: n bytes) over n elements of `type`, dst a byte offset into buffer `to`, src into `from`. */
-struct args { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,pad; };
-HIDDEN void nccl_mesh_program_kernel(void *program,int k,void *to,uint64_t dst,void *from,uint64_t src,uint64_t n,int type,int op,
-  int nranks,uint64_t scalar){
+   copy: n units of `width` bytes) over n elements of `type`, dst a byte offset into buffer `to`, src into
+   `from`. */
+struct args { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,pad[3]; };
+static void dispatch(void *program,int k,void *to,void *from,struct args a){
   @autoreleasepool {
-    struct args a={dst,src,n,scalar,(uint32_t)type,(uint32_t)op,(uint32_t)nranks,0};
-    id<MTLComputeCommandEncoder> encoder=[(id<MTLCommandBuffer>)program computeCommandEncoder];
+    id<MTLComputeCommandEncoder> encoder=encoder_of(program);
     [encoder setComputePipelineState:gpu.kernels[k]];
     [encoder setBuffer:(id<MTLBuffer>)to offset:0 atIndex:0];
     [encoder setBuffer:(id<MTLBuffer>)from offset:0 atIndex:1];
     [encoder setBytes:&a length:sizeof a atIndex:2];
     NSUInteger width=gpu.kernels[k].maxTotalThreadsPerThreadgroup<256?gpu.kernels[k].maxTotalThreadsPerThreadgroup:256;
-    [encoder dispatchThreads:MTLSizeMake(n<(1u<<20)?(NSUInteger)n:(1u<<20),1,1) threadsPerThreadgroup:MTLSizeMake(width,1,1)];
-    [encoder endEncoding];
+    [encoder dispatchThreads:MTLSizeMake(a.n<(1u<<20)?(NSUInteger)a.n:(1u<<20),1,1) threadsPerThreadgroup:MTLSizeMake(width,1,1)];
   }
 }
-/* `bytes` from offset src of buffer `from` to offset dst of buffer `to`: a blit, or the copy kernel
-   where an offset or the length is not a multiple of 4 (a blit's rule on macOS). */
-HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes){
-  if((dst|src|bytes)&3){nccl_mesh_program_kernel(program,3,to,dst,from,src,bytes,0,0,0,0);return;}
+HIDDEN void nccl_mesh_program_kernel(void *program,int k,void *to,uint64_t dst,void *from,uint64_t src,uint64_t n,int type,int op,
+  int nranks,uint64_t scalar){
+  if(n)dispatch(program,k,to,from,(struct args){dst,src,n,scalar,(uint32_t)type,(uint32_t)op,(uint32_t)nranks,1,0,{0}});
+}
+/* `bytes` from offset src of buffer `from` to offset dst of buffer `to`, stored system-coherent (a SEND or the
+   host reads them); loaded system-coherent where the NIC wrote them (`received`): the copy kernel in the
+   widest unit the offsets and length allow. */
+HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received){
+  const uint32_t width=!((dst|src|bytes)&15)?16:!((dst|src|bytes)&3)?4:1;
+  if(bytes)dispatch(program,KERNEL_COPY,to,from,(struct args){dst,src,bytes/width,0,0,0,0,width,(uint32_t)(received!=0),{0}});
+}
+/* A wait for words of `buffer` to reach their values (`at`: n pairs of a byte offset and a value), after the
+   dispatches before it and before those after it; a timed-out wait sets the failure word, 8 bytes at
+   offset `failure` of buffer `failures`. */
+HIDDEN void nccl_mesh_program_words(void *program,void *buffer,const uint64_t *at,uint32_t n,void *failures,uint64_t failure){
+  for(uint32_t done=0;done<n;){
+    @autoreleasepool {
+      uint64_t list[2+2*240];
+      uint32_t take=n-done<240?n-done:240;
+      list[0]=take;list[1]=gpu.bound;
+      memcpy(list+2,at+2*done,2*take*sizeof *at);
+      id<MTLComputeCommandEncoder> encoder=encoder_of(program);
+      [encoder setComputePipelineState:gpu.kernels[KERNEL_WAIT]];
+      [encoder setBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:0];
+      [encoder setBuffer:(id<MTLBuffer>)failures offset:failure atIndex:1];
+      [encoder setBytes:list length:(2+2*take)*sizeof *list atIndex:2];
+      [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+      done+=take;
+    }
+  }
+}
+/* The word at byte offset `at` of `buffer` set to `value`, system-coherent, after the dispatches before it. */
+HIDDEN void nccl_mesh_program_publish(void *program,void *buffer,uint64_t at,uint64_t value){
   @autoreleasepool {
-    id<MTLBlitCommandEncoder> encoder=[(id<MTLCommandBuffer>)program blitCommandEncoder];
-    [encoder copyFromBuffer:(id<MTLBuffer>)from sourceOffset:src toBuffer:(id<MTLBuffer>)to destinationOffset:dst size:bytes];
-    [encoder endEncoding];
+    const uint64_t a[2]={at,value};
+    id<MTLComputeCommandEncoder> encoder=encoder_of(program);
+    [encoder setComputePipelineState:gpu.kernels[KERNEL_PUBLISH]];
+    [encoder setBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:0];
+    [encoder setBytes:a length:sizeof a atIndex:1];
+    [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
   }
 }
 /* `done(argument, failed)` once the GPU has run the command buffer (a failed one marks the process's
@@ -445,6 +509,7 @@ HIDDEN void nccl_mesh_program_handler(void *program,void (*done)(void *,int),voi
 }
 /* Committed, with `done` as above. */
 HIDDEN void nccl_mesh_program_commit(void *program,void (*done)(void *,int),void *argument){
+  nccl_mesh_program_end(program);
   nccl_mesh_program_handler(program,done,argument);
   [(id<MTLCommandBuffer>)program commit];
   [(id<MTLCommandBuffer>)program release];

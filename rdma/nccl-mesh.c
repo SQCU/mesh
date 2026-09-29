@@ -30,27 +30,32 @@
    completion there; the caller's GPU work declares its own (ncclMeshMemUse).  Freeing an allocation
    (ncclMemFree, or the closure that releases it, ncclMeshMemRelease) marks its record; its pages are
    given out again only once every recorded point's event has reached its value.
-     A group ends by placing its operands, pieces and staged transfers in an allocation of its own and
-   committing one GPU program (nccl-mesh-metal.m) to its stream's queue (the NULL stream's: the
-   communicator's), or keeping it for the caller's command buffer (a deferred stream: nccl.h
-   ncclMeshStreamDefer, the workers then waiting for the recorded points themselves, no gate): the
-   recorded points waited for; the send buffers copied in by GPU blits (memory
-   outside the window read in place through a Metal buffer over its pages), or premultiplied; the gate
-   the workers start at; for each REDUCE step a wait for its arrival, the combine kernel reading the
-   piece where it landed and writing the operand in place, and a signal; the post-division and the
-   results copied out by blits; the group's completion.  Each communicator's worker thread starts its
-   part of a group in issue order once the gate is reached: a SEND is an isend of the operand's piece
-   (once the GPU has combined it), a COPY an irecv into the operand, a REDUCE an irecv into its piece
-   whose arrival it signals to the GPU.  Its point-to-point transfers stay in flight while the worker
-   goes on (a send completes only once its peer has posted the receive), and the part is done once both
-   are.  No library thread copies bytes on the CPU; what the library copied, sent, received and waited
-   for is counted, a call each (ncclMeshGetCounts, ncclMeshGroupCounts). */
+     A group ends by placing its operands, pieces, staged transfers and completion words in an
+   allocation of its own and committing one GPU program (nccl-mesh-metal.m) to its stream's queue (the
+   NULL stream's: the communicator's), or keeping it for the caller's command buffer (a deferred stream:
+   nccl.h ncclMeshStreamDefer, the workers then waiting for the recorded points themselves, no gate): the
+   recorded points waited for; the send buffers copied in by the copy kernel (memory outside the window
+   read in place through a Metal buffer over its pages), or premultiplied; the gate word the workers
+   start at; for each REDUCE chunk a wait on its receive's completion word (and the earlier sends'
+   reading its range), the combine kernel reading the piece where it landed and writing the operand in
+   place, and, where a later send reads it, a published word; the post-division and the results copied
+   out once every completion word is set; the group's completion.  The bridge stores each isend's and
+   irecv's end into its completion word (mesh.h), so the GPU waits on the network itself, no library
+   thread between.  Each communicator's worker thread starts its part of a group in issue order once the
+   gate word is set (or, without a program, the recorded points are reached): a SEND is an isend of the
+   operand's piece (once the GPU has published its combine), a COPY an irecv into the operand, a REDUCE an
+   irecv into its piece.  Its point-to-point transfers stay in flight while the worker goes on (a send
+   completes only once its peer has posted the receive), and the part is done once both are; a part that
+   fails sets every completion word of its calls the bridge has not, so its program goes on.  No library
+   thread copies bytes on the CPU; what the library copied, sent, received and waited for is counted, a
+   call each (ncclMeshGetCounts, ncclMeshGroupCounts). */
 
 enum { CH_COLL, CH_P2P, CHANNELS };
 enum { K_SEND=MESH_ALLGATHER+1, K_RECV };
 /* a call's tallies: counts (also summed for the process), then its part's start and end times and when
-   the worker last signalled one of its arrivals to the GPU */
-enum { CPU_COPY, GPU_COPY, GPU_KERNELS, HOST_WAITS, INPUT_WAITS, SENT, RECEIVED, COUNTS, STARTED=COUNTS, ENDED, ARRIVED, TALLIES };
+   the worker saw the last of its pieces land */
+enum { CPU_COPY, GPU_COPY, GPU_KERNELS, HOST_WAITS, INPUT_WAITS, SENT, RECEIVED, GPU_EVENT_WAITS, GPU_WORD_WAITS, HOST_WORD_WAITS, COMMITS,
+       COUNTS, STARTED=COUNTS, ENDED, ARRIVED, TALLIES };
 enum { KERNEL_COMBINE, KERNEL_PREMULTIPLY, KERNEL_POSTDIVIDE };
 #define UID_MAGIC 0x4d4e434cu
 #define FLIGHTS 32
@@ -59,9 +64,8 @@ _Static_assert(sizeof(struct uid)<=NCCL_UNIQUE_ID_BYTES,"unique id");
 
 struct peer { int dev; void *send[CHANNELS],*recv[CHANNELS]; };
 struct op_entry { int used; ncclDataType_t type; unsigned char scalar[8]; };
-/* A REDUCE step's received piece in the window; the arrivals value the worker signals once it has
-   landed, and the program's value once the GPU has combined it. */
-struct piece { unsigned char *at; uint64_t arrived,combined; };
+/* A REDUCE step's received piece in the window. */
+struct piece { unsigned char *at; };
 /* Where the program reads or writes a buffer: a Metal buffer and the address at its offset 0; `span`
    the window allocation's record (its first byte) it lies in, NULL for memory outside the window (the
    buffer then over the host pages holding it). */
@@ -81,25 +85,29 @@ struct call {
   /* placed when the group ends: send's and recv's regions; the operand in the window (recv itself where
      it is an allocation holding the whole result, else the group's) and its region; a point-to-point
      call's bytes in the window (its buffer, or the group's allocation where the buffer lies outside);
-     the arrivals value the worker signals once its network is done; a receive from this rank itself
-     that the program copies */
+     a receive from this rank itself that the program copies; its completion words in the group's
+     allocation, one each isend and irecv the worker posts for it in plan order (chunk by chunk), which
+     the bridge sets, and, where a later send of the call reads a combine, one each REDUCE chunk, which
+     the GPU publishes */
   struct region in,out,at; unsigned char *operand,*wire;
-  uint64_t networked; int copied;
+  int copied;
+  _Atomic uint64_t *words,*combined; uint32_t nwords,ncombined;
   uint64_t *tally;
 };
-/* An event's value: the point after which a use of an allocation is done. */
-struct point { void *event; uint64_t value; };
+/* An event's value, or a word's in the window (a GPU kernel publishes it, system-coherent): the point after
+   which a use of an allocation is done. */
+struct point { void *event; uint64_t value; _Atomic uint64_t *word; };
 struct mark { struct ncclMeshStream *stream; uint64_t done; };
 struct tally { _Atomic int refs; int n; uint64_t counts[][TALLIES]; };
-/* A group: its streams' marks; its program's event, the value the workers start at (the gate) and its
-   last value; without a program, the recorded points the workers wait for; its window allocation. */
+/* A group: its streams' marks; its program's event and last value, and the gate word the workers start at
+   (NULL: none); without a program, the recorded points the workers wait for; its window allocation. */
 struct launch { pthread_mutex_t lock; pthread_cond_t cond; int items,sync,nmarks,nwaits; ncclResult_t result; struct mark *marks;
-  void *event; uint64_t gate,end; struct tally *tally; struct point *waits; unsigned char *stage,*placed; struct region own; };
+  void *event; uint64_t end; _Atomic uint64_t *gate; struct tally *tally; struct point *waits; unsigned char *stage,*placed; struct region own; };
 struct flight;
-/* A communicator's part of a group: `arrived` its last arrivals value, `final` its done value (0: no
-   program waits on it); `bound`, while its program waits on the network, when that wait fails it. */
-struct item { struct call *calls; int n; struct launch *launch; struct item *next; uint64_t deadline,bound,arrived,final;
-  int collectives_done,networked; struct flight *flight; ncclResult_t result; };
+/* A communicator's part of a group: `gpu` where a program waits on its completion words; `bound`, while it
+   does, when that wait fails it. */
+struct item { struct call *calls; int n; struct launch *launch; struct item *next; uint64_t deadline,bound;
+  int gpu,collectives_done,networked; struct flight *flight; ncclResult_t result; };
 /* A plan kept for (epoch, call signature): the algorithm chosen, this rank's steps and the whole plan's
    hash; its segments (a rank each) and steps (MESH_COLLECTIVE_STEPS of the ranks) sized with the
    communicator. */
@@ -119,11 +127,11 @@ struct ncclComm {
   void *net; struct peer *peers;
   uint64_t splits;
   struct op_entry *ops; int nops;
-  /* its own queue and that queue's event; `arrive`, which the worker signals as pieces land (in plan
-     order), and `done`, which it signals as parts finish (in issue order: `next`, the ones done early
-     held back); the values reserved on each; the programs not yet run */
-  void *queue,*event,*arrive,*done; uint64_t event_value,arrive_value,done_value,next,early[FLIGHTS+2]; int nearly;
+  /* its own queue and that queue's event, the value reserved on it; the programs not yet run; its control
+     allocation (its first word the failure word a timed-out GPU wait of its calls sets) and Metal buffer */
+  void *queue,*event; uint64_t event_value;
   _Atomic int programs;
+  _Atomic uint64_t *control; void *control_buffer;
   pthread_t worker; int started,stopping,finalized;
   pthread_mutex_t lock; pthread_cond_t cond;
   struct item *head,*tail; int busy;
@@ -136,13 +144,12 @@ struct ncclComm {
      until the bridge has vacated them (`quiet`: the value it is held for) */
   _Atomic uint64_t issued; uint64_t failed,agreements; char cause[256];
   uint64_t *closed; int nclosed,open; void *quiet; uint64_t quiet_value;
-  /* the worker's holds (keep_awake): their event, the last value committed, a hold's adds */
-  void *hold; uint64_t held; uint32_t hold_adds;
 };
 
 #define HIDDEN __attribute__((visibility("hidden")))
 HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size);
 HIDDEN int nccl_mesh_gpu_failed(void);
+HIDDEN uint64_t nccl_mesh_wait_bound(void);
 HIDDEN void *nccl_mesh_buffer(const void *pointer,size_t bytes,uint64_t *offset);
 HIDDEN void *nccl_mesh_queue_create(void);
 HIDDEN void nccl_mesh_retain(void *object);
@@ -154,11 +161,12 @@ HIDDEN void *nccl_mesh_program_begin(void *queue);
 HIDDEN void nccl_mesh_program_wait(void *program,void *event,uint64_t value);
 HIDDEN void nccl_mesh_program_signal(void *program,void *event,uint64_t value);
 HIDDEN void nccl_mesh_program_kernel(void *program,int kernel,void *to,uint64_t dst,void *from,uint64_t src,uint64_t n,int type,int op,int nranks,uint64_t scalar);
-HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes);
+HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received);
+HIDDEN void nccl_mesh_program_words(void *program,void *buffer,const uint64_t *at,uint32_t n,void *failures,uint64_t failure);
+HIDDEN void nccl_mesh_program_publish(void *program,void *buffer,uint64_t at,uint64_t value);
+HIDDEN void nccl_mesh_program_end(void *program);
 HIDDEN void nccl_mesh_program_handler(void *program,void (*done)(void *,int),void *argument);
 HIDDEN void nccl_mesh_program_commit(void *program,void (*done)(void *,int),void *argument);
-HIDDEN uint32_t nccl_mesh_hold_adds(double us);
-HIDDEN void nccl_mesh_hold(void *event,uint64_t value,uint32_t adds);
 
 /* ---- errors ---- */
 static _Thread_local char last_error[512];
@@ -428,8 +436,11 @@ struct slab { unsigned char *at; size_t bytes; };
 static struct { pthread_mutex_t lock; struct span *spans; int n,capacity; struct slab *slabs; int nslabs; struct span *outside; int nout,outcap; }
   heap={.lock=PTHREAD_MUTEX_INITIALIZER};
 
-static int reached(struct point p){return !p.event || nccl_mesh_event_value(p.event)>=p.value;}
-static void point_drop(struct point *p){if(p->event)nccl_mesh_release(p->event);p->event=NULL;p->value=0;}
+static int reached(struct point p){
+  if(p.word)return atomic_load_explicit(p.word,memory_order_acquire)>=p.value;
+  return !p.event || nccl_mesh_event_value(p.event)>=p.value;
+}
+static void point_drop(struct point *p){if(p->event)nccl_mesh_release(p->event);p->event=NULL;p->value=0;p->word=NULL;}
 static void point_set(struct point *p,void *event,uint64_t value){
   if(event)nccl_mesh_retain(event);
   point_drop(p);
@@ -596,24 +607,17 @@ static ncclResult_t span_release(void *p,void *event,uint64_t value){
 }
 
 /* ---- requests ---- */
-/* The longest the GPU waits on the network: a part whose program waits for its pieces' arrivals or its
-   done value fails as a value once the network has given the GPU nothing it waits for in this long,
-   and the worker signals every value the program waits for, so the program and its stream's later
-   work go on.  Metal ends a command buffer that waits past its watchdog, and then refuses the process's
-   later submissions (kIOGPUCommandBufferCallbackErrorTimeout, then ...SubmissionsIgnored: the M5's own
-   bridge stopped for 5 s, metal-microbench output_data/epoch-20260929/replay-local-stop; one command
-   buffer waiting 4.5 s on a shared event alone was not ended). */
+/* The longest the GPU waits on the network: a part whose program waits on its completion words fails as
+   a value once the network has given the GPU nothing it waits for in this long, and the worker sets
+   every word of the part the bridge has not, so the program and its stream's later work go on; the
+   GPU's own wait is bounded too, at about this long in polls (nccl_mesh_wait_bound), and a wait that
+   runs out sets the communicator's failure word (a failed call, program_ran).  Metal ends a command
+   buffer that waits past its watchdog, and then refuses the process's later submissions
+   (kIOGPUCommandBufferCallbackErrorTimeout, then ...SubmissionsIgnored: the M5's own bridge stopped for
+   5 s, metal-microbench output_data/epoch-20260929/replay-local-stop). */
 #define GPU_WAIT_NS UINT64_C(1000000000)
 struct pending { size_t lo,hi; void *request; };
 static void progress(struct ncclComm *c);
-/* While the worker waits on the network for a part whose GPU work waits on it, the GPU is kept out of
-   its idle state (nccl-mesh-metal.m, holds): two holds of about HOLD_US each in flight on the holds'
-   queue, a new one committed as each ends. */
-#define HOLD_US 200.0
-static void keep_awake(struct ncclComm *c){
-  if(!c->hold || !c->hold_adds || nccl_mesh_event_value(c->hold)+2<=c->held)return;
-  nccl_mesh_hold(c->hold,++c->held,c->hold_adds);
-}
 static int stopped(struct ncclComm *c,const struct item *it){
   const uint64_t now=now_ns();
   return atomic_load(&c->aborting) || atomic_load(&c->broken) || now>it->deadline || (it->bound && now>it->bound);
@@ -628,8 +632,8 @@ static ncclResult_t stop_reason(struct ncclComm *c,const struct item *it,const c
                 "joined the call); the call fails before Metal's command-buffer watchdog",what,GPU_WAIT_NS/1e9);
   return FAIL(c,ncclTimeout,"%s: not done by the deadline (MESH_NCCL_TIMEOUT)",what);
 }
-/* The GPU passed a network wait (an arrival signalled, a combine done): the bound starts again. */
-static void rebound(struct item *it){if(it->final)it->bound=now_ns()+GPU_WAIT_NS;}
+/* The network gave the GPU what it waits for (a piece landed, a combine published): the bound starts again. */
+static void rebound(struct item *it){if(it->gpu)it->bound=now_ns()+GPU_WAIT_NS;}
 /* Reaps every pending isend that is done (its ring slot free again). */
 static ncclResult_t reap(struct ncclComm *c,struct pending *sends,int *count){
   for(int i=0;i<*count;){
@@ -651,34 +655,31 @@ static ncclResult_t await(struct ncclComm *c,void *request,size_t bytes,struct p
     if(sends){ncclResult_t r=reap(c,sends,count);if(r)return r;}
     if(stopped(c,it))return stop_reason(c,it,what);
     progress(c);
-    keep_awake(c);
     sched_yield();
   }
 }
-/* An isend or irecv posted, waiting while its connection's request ring is full. */
-static ncclResult_t post(struct ncclComm *c,int send,void *comm,void *data,size_t bytes,void *mhandle,
+/* An isend or irecv posted, its end stored into `word` by the bridge, waiting while its connection's
+   request ring is full. */
+static ncclResult_t post(struct ncclComm *c,int send,void *comm,void *data,size_t bytes,_Atomic uint64_t *word,
   struct pending *sends,int *count,struct item *it,void **request){
   for(*request=NULL;;){
-    int result=send?mesh_net_isend(comm,data,bytes,0,mhandle,NULL,request):
-      mesh_net_irecv(comm,1,&data,&bytes,(int[]){0},&mhandle,NULL,request);
+    int result=send?mesh_net_isend_word(comm,data,bytes,window.mh,(uint64_t *)word,request):
+      mesh_net_irecv_word(comm,data,bytes,window.mh,(uint64_t *)word,request);
     if(result)return net_failure(c,result,send?"mesh_net_isend":"mesh_net_irecv");
     if(*request)return ncclSuccess;
     if(sends){ncclResult_t r=reap(c,sends,count);if(r)return r;}
     if(stopped(c,it))return stop_reason(c,it,send?"an isend":"an irecv");
     progress(c);
-    keep_awake(c);
     sched_yield();
   }
 }
 
-
-/* The worker waits for the program's event to reach `value` (the library's own GPU work, which waits on
-   no network meanwhile: the bound starts again once it is done), the point-to-point transfers moving
-   meanwhile. */
-static ncclResult_t gpu_wait(struct ncclComm *c,struct call *k,void *event,uint64_t value,struct item *it,const char *what){
-  count(k,HOST_WAITS,1);
+/* The worker waits for a word the program publishes (the library's own GPU work, which waits on no network
+   meanwhile: the bound starts again once it is done), the point-to-point transfers moving meanwhile. */
+static ncclResult_t word_wait(struct ncclComm *c,struct call *k,_Atomic uint64_t *word,struct item *it,const char *what){
+  count(k,HOST_WORD_WAITS,1);
   it->bound=0;
-  while(nccl_mesh_event_value(event)<value){
+  while(!atomic_load_explicit(word,memory_order_acquire)){
     if(nccl_mesh_gpu_failed())return FAIL(c,ncclUnhandledCudaError,"%s: a GPU program failed",what);
     if(stopped(c,it))return stop_reason(c,it,what);
     progress(c);
@@ -686,6 +687,15 @@ static ncclResult_t gpu_wait(struct ncclComm *c,struct call *k,void *event,uint6
   }
   rebound(it);
   return ncclSuccess;
+}
+/* A failed part's completion words the bridge has not set, set (2: failed), so the program waiting on
+   them goes on; collectives, or point-to-point calls. */
+static void words_fail(struct item *it,int p2p){
+  for(int i=0;i<it->n;i++){
+    struct call *k=it->calls+i;
+    if((k->kind>=K_SEND)!=p2p)continue;
+    for(uint32_t w=0;w<k->nwords;w++){uint64_t none=0;atomic_compare_exchange_strong(k->words+w,&none,2);}
+  }
 }
 
 /* ---- one collective ---- */
@@ -715,18 +725,21 @@ static uint64_t chunk_count(uint64_t elements,size_t e,uint32_t j){
 /* The receives a REDUCE or COPY step keeps posted ahead of the one it waits for (a connection's request
    ring holds MESH_NET_REQUESTS). */
 #define AHEAD 8
-/* The worker's side of a collective the group's end placed: this rank's plan.  A piece the GPU
-   combines is sent, or landed on, only once it has combined it. */
-struct combined { size_t lo,hi; uint64_t value; };
-static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct launch *l,struct item *it){
+/* The worker's side of a collective the group's end placed: this rank's plan, each isend and irecv with
+   its completion word (the next of the call's, in plan order).  A piece the GPU combines is sent only once
+   the program has published its combine (the call's combined words); the GPU waits for a REDUCE chunk's
+   receive and the earlier sends of its range on their words itself. */
+struct combined { size_t lo,hi; _Atomic uint64_t *word; };
+static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct item *it){
   const size_t e=type_bytes[k->type];
   ncclResult_t status=ncclSuccess;
   size_t total=1;
   for(uint32_t i=0;i<k->nsteps;i++)total+=chunks_of(k->steps[i].piece.elements,e);
   struct pending *sends=calloc(total,sizeof *sends);int count_=0;
-  struct combined *done=calloc(total,sizeof *done);int ndone=0;uint64_t seen=0;
+  struct combined *done=calloc(total,sizeof *done);int ndone=0;
   void **requests=calloc(total,sizeof *requests);
   void **used=c->used;int nused=0;
+  uint32_t w=0,r=0;
   if(!sends || !done || !requests)status=FAIL(c,ncclSystemError,"allocation");
   for(uint32_t i=0;i<k->nsteps && !status;i++){
     const struct mesh_step *s=k->steps+i;
@@ -736,15 +749,16 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct laun
     if(s->op==MESH_STEP_SEND){
       for(uint32_t j=0;j<n && !status;j++){
         const size_t lo=(s->first+chunk_first(s->piece.elements,e,j))*e,length=chunk_count(s->piece.elements,e,j)*e;
-        uint64_t need=0;
-        for(int d=0;d<ndone;d++)if(done[d].lo<lo+length && lo<done[d].hi && done[d].value>need)need=done[d].value;
-        if(need>seen){if((status=gpu_wait(c,k,l->event,need,it,"a combine")))break;seen=need;}
+        for(int d=0;d<ndone && !status;d++)
+          if(done[d].lo<lo+length && lo<done[d].hi && !atomic_load_explicit(done[d].word,memory_order_acquire))
+            status=word_wait(c,k,done[d].word,it,"a combine");
         void *request=NULL;
-        if(!(status=post(c,1,p->send[CH_COLL],k->operand+lo,length,window.mh,sends,&count_,it,&request))){
+        if(!status && !(status=post(c,1,p->send[CH_COLL],k->operand+lo,length,k->words+w+j,sends,&count_,it,&request))){
           sends[count_++]=(struct pending){lo,lo+length,request};
           count(k,SENT,length);
         }
       }
+      w+=n;
       continue;
     }
     int known=0;
@@ -761,27 +775,21 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct laun
       for(;posted<n && posted<j+AHEAD && !status;posted++){
         const size_t at=chunk_first(s->piece.elements,e,posted)*e,bytes=chunk_count(s->piece.elements,e,posted)*e;
         unsigned char *into=s->op==MESH_STEP_COPY?k->operand+lo+at:k->pieces[i].at+at;
-        status=post(c,0,p->recv[CH_COLL],into,bytes,window.mh,sends,&count_,it,requests+posted);
+        status=post(c,0,p->recv[CH_COLL],into,bytes,k->words+w+posted,sends,&count_,it,requests+posted);
       }
       if(status)break;
       const size_t at=lo+chunk_first(s->piece.elements,e,j)*e,bytes=chunk_count(s->piece.elements,e,j)*e;
       if((status=await(c,requests[j],bytes,sends,&count_,it,s->op==MESH_STEP_COPY?"a COPY step's irecv":"a REDUCE step's irecv")))break;
       count(k,RECEIVED,bytes);
       if(s->op!=MESH_STEP_REDUCE)continue;
-      for(int d=0;d<count_ && !status;)
-        if(sends[d].lo<at+bytes && at<sends[d].hi){status=await(c,sends[d].request,SIZE_MAX,NULL,NULL,it,"an isend");sends[d]=sends[--count_];}
-        else d++;
-      if(!status){
-        nccl_mesh_event_signal(c->arrive,k->pieces[i].arrived+j);
-        if(k->tally)k->tally[ARRIVED]=now_ns();
-        rebound(it);
-        if(k->pieces[i].combined)done[ndone++]=(struct combined){at,at+bytes,k->pieces[i].combined+j};
-      }
+      if(k->tally)k->tally[ARRIVED]=now_ns();
+      rebound(it);
+      if(k->combined)done[ndone++]=(struct combined){at,at+bytes,k->combined+r+j};
     }
+    w+=n;
+    if(s->op==MESH_STEP_REDUCE && k->combined)r+=n;
   }
   while(count_ && !status){status=await(c,sends[count_-1].request,SIZE_MAX,NULL,NULL,it,"an isend");count_--;}
-  /* every receive landed and every send done: the GPU's wait for the whole network ends before the flush */
-  if(!status && k->networked){nccl_mesh_event_signal(c->arrive,k->networked);if(k->tally)k->tally[ARRIVED]=now_ns();rebound(it);}
   for(int u=0;u<nused && !status;u++){
     void *flush=NULL;int result=mesh_net_iflush(used[u],1,NULL,NULL,NULL,&flush);
     if(result)status=net_failure(c,result,"mesh_net_iflush");
@@ -802,6 +810,7 @@ static void finish(struct ncclComm *c,struct item *it,ncclResult_t result);
 static void retire(struct ncclComm *c,struct flight *f){
   struct item *it=f->it;
   it->flight=NULL;
+  if(f->status)words_fail(it,1);
   if(f->status && !it->result)it->result=f->status;
   it->networked=1;
   free(f->t);free(f);
@@ -817,9 +826,10 @@ static void progress(struct ncclComm *c){
     for(int j=0;j<f->n && !f->status;j++){
       struct transfer *x=f->t+j;int slot=(int)(x->peer-c->peers)*2+x->send;
       if(x->state==0 && !c->blocked[slot]){
-        void *comm=x->send?x->peer->send[CH_P2P]:x->peer->recv[CH_P2P],*data=x->window,*mh=window.mh;size_t size=x->bytes;
-        int result=x->send?mesh_net_isend(comm,data,size,0,mh,NULL,&x->request):
-          mesh_net_irecv(comm,1,&data,&size,(int[]){0},&mh,NULL,&x->request);
+        void *comm=x->send?x->peer->send[CH_P2P]:x->peer->recv[CH_P2P];
+        uint64_t *word=x->call->nwords?(uint64_t *)x->call->words:NULL;
+        int result=x->send?mesh_net_isend_word(comm,x->window,x->bytes,window.mh,word,&x->request):
+          mesh_net_irecv_word(comm,x->window,x->bytes,window.mh,word,&x->request);
         if(result)f->status=net_failure(c,result,x->send?"a send's isend":"a receive's irecv");
         else if(x->request)x->state=1;
       }
@@ -849,7 +859,10 @@ static void start(struct ncclComm *c,struct item *it){
   const uint64_t now=now_ns();
   rebound(it);
   for(int i=0;i<it->n;i++)if(it->calls[i].tally && !it->calls[i].tally[STARTED])it->calls[i].tally[STARTED]=now;
-  if(it->n)count(it->calls,it->launch->gate?HOST_WAITS:INPUT_WAITS,it->launch->gate || it->launch->nwaits);
+  /* what it started at: the gate word, or the recorded points (events, words) */
+  const struct launch *l=it->launch;
+  if(it->n && l->gate)count(it->calls,HOST_WORD_WAITS,1);
+  for(int w=0;it->n && !l->gate && w<l->nwaits;w++)count(it->calls,l->waits[w].word?HOST_WORD_WAITS:INPUT_WAITS,1);
   int transfers=0;
   for(int i=0;i<it->n && !status;i++){
     struct call *k=it->calls+i;
@@ -875,9 +888,9 @@ static void start(struct ncclComm *c,struct item *it){
       progress(c);
     }
   }
-  for(int i=0;i<it->n && !status;i++)if(it->calls[i].kind<K_SEND)status=run_collective(c,it->calls+i,it->launch,it),it->networked=1;
-  /* every arrival the program waits for, whatever happened */
-  if(it->arrived)nccl_mesh_event_signal(c->arrive,it->arrived);
+  for(int i=0;i<it->n && !status;i++)if(it->calls[i].kind<K_SEND)status=run_collective(c,it->calls+i,it),it->networked=1;
+  /* every completion word the program waits on, whatever happened (a flight's once it retires) */
+  if(status){words_fail(it,0);if(!it->flight)words_fail(it,1);}
   if(status && !it->result)it->result=status;
   it->collectives_done=1;
   if(!it->flight)finish(c,it,it->result);
@@ -889,15 +902,6 @@ static void launch_free(struct launch *l){
   if(l->stage)span_release(l->stage,NULL,0);
   for(int w=0;w<l->nwaits;w++)point_drop(l->waits+w);
   tally_release(l->tally);free(l->waits);free(l->marks);free(l);
-}
-/* A part's done value signalled once every earlier part's is (flights retire out of order). */
-static void part_done(struct ncclComm *c,uint64_t value){
-  if(value!=c->next+1){if(c->nearly<FLIGHTS+2)c->early[c->nearly++]=value;return;}
-  for(int found=1;found;){
-    nccl_mesh_event_signal(c->done,++c->next);
-    found=0;
-    for(int i=0;i<c->nearly;i++)if(c->early[i]==c->next+1){c->early[i]=c->early[--c->nearly];found=1;break;}
-  }
 }
 /* A part whose calls planned on an epoch the link map has since left fails as a value, whatever its
    transfers did, where the move touches a call's plan: a collective whose whole plan (the algorithm the
@@ -973,7 +977,6 @@ static void finish(struct ncclComm *c,struct item *it,ncclResult_t result){
   }
   const uint64_t now=now_ns();
   for(int i=0;i<it->n;i++)if(it->calls[i].tally)it->calls[i].tally[ENDED]=now;
-  if(it->final)part_done(c,it->final);
   pthread_mutex_lock(&l->lock);
   if(result && !l->result)l->result=result;
   int last=!--l->items;
@@ -985,12 +988,12 @@ static void finish(struct ncclComm *c,struct item *it,ncclResult_t result){
   for(int i=0;i<it->n;i++){free(it->calls[i].steps);free(it->calls[i].pieces);free(it->calls[i].segments);}
   free(it->calls);free(it);
 }
-/* Whether the part's program has reached its gate (the regions' recorded points and its operands
-   copied in), or, without a program, whether the recorded points are reached. */
+/* Whether the part's program has published its gate word (the regions' recorded points reached and its
+   operands copied in), or, without a gate, whether the recorded points are reached. */
 static int ready(struct item *it){
   struct launch *l=it->launch;
   for(int w=0;w<l->nwaits;w++)if(!reached(l->waits[w]))return 0;
-  return !l->gate || nccl_mesh_event_value(l->event)>=l->gate;
+  return !l->gate || atomic_load_explicit(l->gate,memory_order_acquire);
 }
 static void *worker(void *argument){
   struct ncclComm *c=argument;
@@ -1015,7 +1018,7 @@ static void *worker(void *argument){
         c->busy=1;
         pthread_mutex_unlock(&c->lock);
         if(it->result){
-          if(it->arrived)nccl_mesh_event_signal(c->arrive,it->arrived);
+          words_fail(it,0);words_fail(it,1);
           it->collectives_done=1;finish(c,it,it->result);
         }
         else start(c,it);
@@ -1025,9 +1028,7 @@ static void *worker(void *argument){
         continue;
       }
     }
-    /* a part waiting for its gate or its recorded points: the GPU's value is polled, not slept on; while
-       point-to-point transfers fly, the GPU waiting on them is kept awake */
-    if(flying)keep_awake(c);
+    /* a part waiting for its gate or its recorded points: the word or value is polled, not slept on */
     sched_yield();
   }
   return NULL;
@@ -1058,28 +1059,30 @@ static void comm_free(struct ncclComm *c){
   for(int p=0;c->plans && p<PLANS;p++){free(c->plans[p].segments);free(c->plans[p].steps);}
   free(c->nodes);free(c->seen);free(c->pairs);free(c->cost);free(c->plans);free(c->closed);free(c->used);
   free(c->later);free(c->moved_pairs);free(c->moved_cost);free(c->scratch);free(c->planning);
-  if(c->hold)for(uint64_t deadline=deadline_after();nccl_mesh_event_value(c->hold)<c->held && !nccl_mesh_gpu_failed() && now_ns()<deadline;)usleep(100);
-  if(c->hold)nccl_mesh_release(c->hold);
+  if(c->control_buffer)nccl_mesh_release(c->control_buffer);
+  if(c->control)span_release((void *)c->control,NULL,0);
   if(c->quiet)nccl_mesh_release(c->quiet);
-  if(c->done)nccl_mesh_release(c->done);
-  if(c->arrive)nccl_mesh_release(c->arrive);
   if(c->event)nccl_mesh_release(c->event);
   if(c->queue)nccl_mesh_release(c->queue);
   pthread_mutex_destroy(&c->lock);pthread_cond_destroy(&c->cond);
   free(c->peers);free(c->blocked);free(c->ops);free(c);
 }
-/* Attached to the bridge, its GPU queue and events made, connected to every linked rank, its worker
-   started. */
+/* Attached to the bridge, its GPU queue, events and control allocation made, connected to every linked
+   rank, its worker started. */
 static ncclResult_t comm_start(struct ncclComm *c){
   ncclResult_t status=global_attach();
   if(!status){
     c->queue=nccl_mesh_queue_create();
-    if(c->queue){
-      c->event=nccl_mesh_event_create(c->queue);c->arrive=nccl_mesh_event_create(c->queue);
-      c->done=nccl_mesh_event_create(c->queue);c->quiet=nccl_mesh_event_create(c->queue);
-      c->hold=nccl_mesh_event_create(c->queue);c->hold_adds=nccl_mesh_hold_adds(HOLD_US);
-    }
-    if(!c->event || !c->arrive || !c->done || !c->quiet || !c->hold)status=FAIL(c,ncclUnhandledCudaError,"the communicator's Metal queue and events");
+    if(c->queue){c->event=nccl_mesh_event_create(c->queue);c->quiet=nccl_mesh_event_create(c->queue);}
+    if(!c->event || !c->quiet)status=FAIL(c,ncclUnhandledCudaError,"the communicator's Metal queue and events");
+  }
+  unsigned char *control=NULL;
+  if(!status && !(status=span_alloc(64,&control,NULL))){
+    memset(control,0,64);
+    c->control=(_Atomic uint64_t *)control;
+    pthread_mutex_lock(&heap.lock);
+    c->control_buffer=span_of(control,64)->buffer;nccl_mesh_retain(c->control_buffer);
+    pthread_mutex_unlock(&heap.lock);
   }
   c->peers=calloc((size_t)c->nranks,sizeof *c->peers);
   c->blocked=calloc((size_t)c->nranks*2,sizeof *c->blocked);
@@ -1364,11 +1367,13 @@ static int reduces(const struct call *k){
   return 0;
 }
 
-/* A recorded point the group waits for (the same event's once, at its latest value). */
+/* A recorded point the group waits for (the same event's or word's once, at its latest value). */
 static void wait_add(struct launch *l,struct point p){
   if(reached(p))return;
-  for(int w=0;w<l->nwaits;w++)if(l->waits[w].event==p.event){if(p.value>l->waits[w].value)l->waits[w].value=p.value;return;}
-  l->waits[l->nwaits].event=NULL;
+  for(int w=0;w<l->nwaits;w++)
+    if(p.word?l->waits[w].word==p.word:!l->waits[w].word && l->waits[w].event==p.event){if(p.value>l->waits[w].value)l->waits[w].value=p.value;return;}
+  if(p.word){l->waits[l->nwaits++]=(struct point){.word=p.word,.value=p.value};return;}
+  l->waits[l->nwaits]=(struct point){0};
   point_set(l->waits+l->nwaits++,p.event,p.value);
 }
 /* A buffer where the program reads or writes it: its window allocation's Metal buffer, else one over
@@ -1445,7 +1450,27 @@ static int in_place(const struct call *k){
      (const unsigned char *)k->recv==(const unsigned char *)k->send+before(k,k->comm->rank)*type_bytes[k->type])return 2;
   return 0;
 }
-static ncclResult_t place(struct call *calls,int n,struct launch *l){
+/* A call's isends and irecvs, as the worker posts them (a collective's chunk by chunk in plan order; a
+   point-to-point call's one, none to this rank itself), and its REDUCE chunks where a later SEND of the
+   call reads a combine (a ring's or tree's partial sent on; else none). */
+static uint32_t requests(const struct call *k){
+  if(k->kind>=K_SEND)return k->peer!=k->comm->rank;
+  uint32_t n=0;
+  for(uint32_t s=0;s<k->nsteps;s++)if(k->steps[s].piece.elements)n+=chunks_of(k->steps[s].piece.elements,type_bytes[k->type]);
+  return n;
+}
+static uint32_t combines(const struct call *k){
+  uint32_t n=0;int reduced=0,resent=0;
+  for(uint32_t s=0;k->kind<K_SEND && s<k->nsteps;s++){
+    if(k->steps[s].op==MESH_STEP_REDUCE){reduced=1;n+=k->steps[s].piece.elements?chunks_of(k->steps[s].piece.elements,type_bytes[k->type]):0;}
+    else if(k->steps[s].op==MESH_STEP_SEND && reduced)resent=1;
+  }
+  return resent?n:0;
+}
+/* Operands, pieces and staged bytes in the group's allocation (in_place above), then, where the group has
+   a program (`words`), the completion words: each call's requests' and combines' and the gate's, zeroed. */
+static ncclResult_t place(struct call *calls,int n,struct launch *l,int words){
+  size_t first=0,end=0;
   for(int pass=0;pass<2;pass++){
     size_t used=0;
     for(int i=0;i<n;i++){
@@ -1467,6 +1492,15 @@ static ncclResult_t place(struct call *calls,int n,struct launch *l){
         used+=slice(k->steps[s].piece.elements*e);
       }
     }
+    first=used;
+    for(int i=0;words && i<n;i++){
+      struct call *k=calls+i;
+      const uint32_t w=requests(k),c=combines(k);
+      if(pass){k->words=(_Atomic uint64_t *)(l->stage+used);k->nwords=w;k->combined=c?(_Atomic uint64_t *)(l->stage+used+8*w):NULL;k->ncombined=c;}
+      used+=8*((size_t)w+c);
+    }
+    if(words){if(pass)l->gate=(_Atomic uint64_t *)(l->stage+used);used+=8;}
+    end=used;
     if(!pass){
       if(!used)return ncclSuccess;
       ncclResult_t status=span_alloc(used,&l->stage,calls[0].tally);
@@ -1478,6 +1512,7 @@ static ncclResult_t place(struct call *calls,int n,struct launch *l){
       pthread_mutex_unlock(&heap.lock);
     }
   }
+  if(words)memset(l->stage+first,0,end-first);
   return ncclSuccess;
 }
 /* A receive from this rank itself: its send (the k-th with the k-th) where the sizes agree, which the
@@ -1506,13 +1541,14 @@ static int gpu_work(const struct call *calls,int n,int i){
   return out && output_at(k)!=(unsigned char *)k->recv;
 }
 /* What a program holds until the GPU has run it: the streams' events it signals, and a count on each
-   communicator whose events it waits for; a kept program's commands (below) until then too. */
+   communicator whose words it waits on (with its first call's index in the group, for a timed-out wait's
+   failure); a kept program's commands (below) until then too. */
 struct recording;
-struct ran { int ncomms,nevents; struct ncclComm **comms; void **events; struct recording *kept; };
+struct ran { int ncomms,nevents; struct ncclComm **comms; uint64_t *first; void **events; struct recording *kept; };
 /* A kept program (a deferred stream's, nccl.h ncclMeshStreamDefer): its commands, each object they name
    retained, encoded later into a command buffer the caller hands over. */
-enum { R_WAIT, R_SIGNAL, R_KERNEL, R_COPY };
-struct recorded { int kind,which,type,op,nranks; void *a,*b; uint64_t x,y,n,scalar; };
+enum { R_WAIT, R_SIGNAL, R_KERNEL, R_COPY, R_WORDS, R_PUBLISH };
+struct recorded { int kind,which,type,op,nranks; void *a,*b; uint64_t x,y,n,scalar; uint64_t *list; };
 struct recording { struct recording *next; int n,capacity,failed; struct recorded *ops; struct ran *ran; };
 /* Where a program's commands go: a command buffer, or a recording. */
 struct sink { void *program; struct recording *kept; };
@@ -1521,18 +1557,37 @@ static void keep(struct sink *s,struct recorded r){
   if(k->n==k->capacity){
     int capacity=k->capacity?2*k->capacity:32;
     struct recorded *grown=realloc(k->ops,(size_t)capacity*sizeof *grown);
-    if(!grown){k->failed=1;return;}
+    if(!grown){k->failed=1;free(r.list);return;}
     k->ops=grown;k->capacity=capacity;
   }
   if(r.a)nccl_mesh_retain(r.a);
   if(r.b)nccl_mesh_retain(r.b);
   k->ops[k->n++]=r;
 }
-static void sink_wait(struct sink *s,void *event,uint64_t value){
+static void sink_wait(struct sink *s,struct call *k,void *event,uint64_t value){
   if(s->kept)keep(s,(struct recorded){.kind=R_WAIT,.a=event,.x=value});else nccl_mesh_program_wait(s->program,event,value);
+  count(k,GPU_EVENT_WAITS,1);
 }
 static void sink_signal(struct sink *s,void *event,uint64_t value){
   if(s->kept)keep(s,(struct recorded){.kind=R_SIGNAL,.a=event,.x=value});else nccl_mesh_program_signal(s->program,event,value);
+}
+/* A wait for words of the window allocation `r` to reach their values (`list`: n pairs of an offset and a
+   value), a timed-out wait setting the failure word of k's communicator. */
+static void sink_words(struct sink *s,struct call *k,struct region r,const uint64_t *list,uint32_t n){
+  if(!n)return;
+  struct ncclComm *c=k->comm;
+  if(s->kept){
+    uint64_t *copy=malloc(2*n*sizeof *copy);
+    if(!copy){s->kept->failed=1;return;}
+    memcpy(copy,list,2*n*sizeof *copy);
+    keep(s,(struct recorded){.kind=R_WORDS,.a=r.buffer,.b=c->control_buffer,.n=n,.list=copy});
+  } else nccl_mesh_program_words(s->program,r.buffer,list,n,c->control_buffer,0);
+  count(k,GPU_WORD_WAITS,n);
+}
+/* A word of the window allocation `r` set to `value` once the program's dispatches before it are done. */
+static void sink_publish(struct sink *s,struct region r,const void *word,uint64_t value){
+  if(s->kept)keep(s,(struct recorded){.kind=R_PUBLISH,.a=r.buffer,.x=off(r,word),.y=value});
+  else nccl_mesh_program_publish(s->program,r.buffer,off(r,word),value);
 }
 /* The kept commands encoded into `program`, their objects released once it has run (program_ran). */
 static void play(struct recording *k,void *program){
@@ -1541,11 +1596,14 @@ static void play(struct recording *k,void *program){
     if(r->kind==R_WAIT)nccl_mesh_program_wait(program,r->a,r->x);
     else if(r->kind==R_SIGNAL)nccl_mesh_program_signal(program,r->a,r->x);
     else if(r->kind==R_KERNEL)nccl_mesh_program_kernel(program,r->which,r->a,r->x,r->b,r->y,r->n,r->type,r->op,r->nranks,r->scalar);
-    else nccl_mesh_program_copy(program,r->a,r->x,r->b,r->y,r->n);
+    else if(r->kind==R_COPY)nccl_mesh_program_copy(program,r->a,r->x,r->b,r->y,r->n,r->which);
+    else if(r->kind==R_WORDS)nccl_mesh_program_words(program,r->a,r->list,(uint32_t)r->n,r->b,r->y);
+    else nccl_mesh_program_publish(program,r->a,r->x,r->y);
   }
+  nccl_mesh_program_end(program);
 }
 static void recording_free(struct recording *k){
-  for(int i=0;k && i<k->n;i++){if(k->ops[i].a)nccl_mesh_release(k->ops[i].a);if(k->ops[i].b)nccl_mesh_release(k->ops[i].b);}
+  for(int i=0;k && i<k->n;i++){if(k->ops[i].a)nccl_mesh_release(k->ops[i].a);if(k->ops[i].b)nccl_mesh_release(k->ops[i].b);free(k->ops[i].list);}
   if(k)free(k->ops);
   free(k);
 }
@@ -1556,16 +1614,30 @@ static void kernel(struct sink *s,struct call *k,int which,struct region to,cons
   else nccl_mesh_program_kernel(s->program,which,to.buffer,off(to,dst),from.buffer,off(from,src),n,(int)k->type,op,k->comm->nranks,scalar);
   count(k,GPU_KERNELS,1);
 }
-static void blit(struct sink *s,struct call *k,struct region to,const void *dst,struct region from,const void *src,size_t bytes){
-  if(s->kept)keep(s,(struct recorded){.kind=R_COPY,.a=to.buffer,.x=off(to,dst),.b=from.buffer,.y=off(from,src),.n=bytes});
-  else nccl_mesh_program_copy(s->program,to.buffer,off(to,dst),from.buffer,off(from,src),bytes);
+/* `bytes` copied by the copy kernel (stored system-coherent; loaded system-coherent where the NIC wrote
+   them: `received`). */
+static void copy_into(struct sink *s,struct call *k,struct region to,const void *dst,struct region from,const void *src,size_t bytes,int received){
+  if(s->kept)keep(s,(struct recorded){.kind=R_COPY,.which=received,.a=to.buffer,.x=off(to,dst),.b=from.buffer,.y=off(from,src),.n=bytes});
+  else nccl_mesh_program_copy(s->program,to.buffer,off(to,dst),from.buffer,off(from,src),bytes,received);
   count(k,GPU_COPY,bytes);
 }
+/* Once the GPU has run a program: its objects released; a communicator whose failure word a timed-out wait
+   set fails (the call is its group's first there; the communicator revoked, the error its async error). */
 static void program_ran(void *argument,int failed){
   (void)failed;
   struct ran *r=argument;
   for(int i=0;i<r->nevents;i++)nccl_mesh_release(r->events[i]);
-  for(int i=0;i<r->ncomms;i++)atomic_fetch_sub(&r->comms[i]->programs,1);
+  for(int i=0;i<r->ncomms;i++){
+    struct ncclComm *c=r->comms[i];
+    if(atomic_exchange_explicit(c->control,0,memory_order_acq_rel)){
+      FAIL(c,ncclRemoteError,"a GPU wait on the network ran out (%llu polls, about %.0f s): a bridge stalled, or a peer has not joined "
+           "the call",(unsigned long long)nccl_mesh_wait_bound(),GPU_WAIT_NS/1e9);
+      failed_at(c,r->first[i],c->error);
+      comm_revoke(c);
+      int none=0;atomic_compare_exchange_strong(&c->async,&none,(int)ncclRemoteError);
+    }
+    atomic_fetch_sub(&c->programs,1);
+  }
   recording_free(r->kept);
   free(r);
 }
@@ -1581,24 +1653,6 @@ static void take_kept(struct ncclMeshStream *s,void *program){
     nccl_mesh_program_handler(program,program_ran,k->ran);
     k=next;
   }
-}
-/* Whether a collective's arrivals cover its network: no COPY step, and every SEND overlaps a REDUCE's
-   range (the worker awaits those sends before signalling that arrival), so the GPU that has waited for
-   every arrival needs no wait for the whole network. */
-static int covered(const struct call *k){
-  const size_t e=type_bytes[k->type];
-  for(uint32_t s=0;s<k->nsteps;s++){
-    const struct mesh_step *a=k->steps+s;
-    if(a->op==MESH_STEP_COPY)return 0;
-    if(a->op!=MESH_STEP_SEND)continue;
-    int over=0;
-    for(uint32_t r=0;r<k->nsteps && !over;r++){
-      const struct mesh_step *b=k->steps+r;
-      over=b->op==MESH_STEP_REDUCE && b->first*e<(a->first+a->piece.elements)*e && a->first*e<(b->first+b->piece.elements)*e;
-    }
-    if(!over)return 0;
-  }
-  return 1;
 }
 /* Whether a group's program has GPU work before its transfers start (so it needs a gate): a receive
    from this rank itself, a send's bytes staged into the group's allocation, a contribution copied or
@@ -1616,92 +1670,139 @@ static int gated(const struct call *calls,int n){
 /* Whether a call's worker waits for a combine (a SEND after a REDUCE: a ring's or tree's partial sent
    on), which the library's own program must then run as the pieces arrive. */
 static int sends_combined(const struct call *calls,int n){
-  for(int i=0;i<n;i++){
-    int reduced=0;
-    for(uint32_t s=0;calls[i].kind<K_SEND && s<calls[i].nsteps;s++){
-      if(calls[i].steps[s].op==MESH_STEP_REDUCE)reduced=1;
-      else if(calls[i].steps[s].op==MESH_STEP_SEND && reduced)return 1;
-    }
-  }
+  for(int i=0;i<n;i++)if(combines(calls+i))return 1;
   return 0;
+}
+/* A word's wait: its (offset, value) pair appended to `list` (grown). */
+static uint64_t *pair(uint64_t *list,uint32_t *n,size_t *capacity,struct region r,const void *word,uint64_t value){
+  if(2*(size_t)(*n+1)>*capacity){
+    size_t grown=*capacity?2**capacity:64;
+    uint64_t *more=realloc(list,grown*sizeof *more);
+    if(!more)return list;
+    list=more;*capacity=grown;
+  }
+  list[2**n]=off(r,word);list[2**n+1]=value;++*n;
+  return list;
 }
 
 /* The group's program, on its first stream's queue (else its first communicator's): the other streams'
    prior work and the recorded points waited for; the operands copied in (a receive from this rank
    itself, a send's bytes into the group's allocation, a contribution into its operand, or
-   premultiplied there) and the gate after them; each collective's combines as its pieces arrive, its
-   post-division and copy out once its network is done; each communicator's part done; the received
-   bytes copied out; the end and each stream's completion value.  Values: the program's event's, each
-   communicator's arrive and done; under stream_lock.  A kept program (`kept`: a deferred stream's,
-   ncclMeshStreamDefer) has no gate: the workers wait for the recorded points themselves; each
-   collective's network ends in an arrival it waits for, and it waits for the parts' done only where the
-   group has point-to-point calls. */
-static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **comms,int ncomms,uint64_t *finals,uint64_t *arrived,
-  struct sink *sink,struct ran *ran){
+   premultiplied there) and, after them, the gate word the workers start at; each REDUCE chunk's
+   combine once its receive's completion word and those of the earlier sends reading its range are set,
+   and, where a later send reads it, its combined word published; the post-division and copy out once
+   every completion word of the call is set; the received bytes of point-to-point calls copied out once
+   theirs are; every word not yet waited for; the end and each stream's completion value.  Values: the
+   program's event's, under stream_lock.  A kept program (`kept`: a deferred stream's,
+   ncclMeshStreamDefer) has no gate: the workers wait for the recorded points themselves. */
+static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **comms,int ncomms,struct sink *sink,struct ran *ran){
   struct ncclMeshStream *primary=l->nmarks?l->marks[0].stream:NULL;
   void *event=primary?primary->event:comms[0]->event;
   uint64_t *value=primary?&primary->value:&comms[0]->event_value;
   const int kept=sink->kept!=NULL;
-  int p2p=0;
-  for(int i=0;i<n;i++)p2p|=calls[i].kind>=K_SEND;
+  uint64_t *list=NULL;size_t capacity=0;uint32_t m=0;
   l->event=event;
+  _Atomic uint64_t *gate=l->gate;
+  l->gate=NULL;
   if(!kept){
-    for(int m=0;m<l->nmarks;m++)if(l->marks[m].stream->pending)take_kept(l->marks[m].stream,sink->program);
-    for(int m=1;m<l->nmarks;m++){struct ncclMeshStream *s=l->marks[m].stream;if(s->value)sink_wait(sink,s->event,s->value);}
-    for(int w=0;w<l->nwaits;w++)sink_wait(sink,l->waits[w].event,l->waits[w].value);
+    int before=0;
+    for(int k=0;k<l->nmarks;k++)if(l->marks[k].stream->pending)take_kept(l->marks[k].stream,sink->program);
+    for(int k=1;k<l->nmarks;k++){struct ncclMeshStream *s=l->marks[k].stream;if(s->value){sink_wait(sink,calls,s->event,s->value);before=1;}}
+    for(int w=0;w<l->nwaits;w++,before=1){
+      if(!l->waits[w].word){sink_wait(sink,calls,l->waits[w].event,l->waits[w].value);continue;}
+      pthread_mutex_lock(&heap.lock);
+      struct span *s=span_of((const void *)l->waits[w].word,8);
+      struct region r=s?(struct region){s->buffer,s->at,s->at}:(struct region){0};
+      pthread_mutex_unlock(&heap.lock);
+      m=0;list=pair(list,&m,&capacity,r,(const void *)l->waits[w].word,l->waits[w].value);
+      if(r.buffer)sink_words(sink,calls,r,list,m);
+    }
     for(int i=0;i<n;i++){
       struct call *k=calls+i;
       const struct call *mine=self_copy(calls,n,i);
       const size_t bytes=k->count*type_bytes[k->type];
-      if(mine){blit(sink,k,k->out,k->recv,mine->in,mine->send,bytes);k->copied=1;continue;}
-      if(k->kind==K_SEND && k->peer!=k->comm->rank && k->wire!=(const unsigned char *)k->send)blit(sink,k,l->own,k->wire,k->in,k->send,bytes);
+      if(mine){copy_into(sink,k,k->out,k->recv,mine->in,mine->send,bytes,0);k->copied=1;before=1;continue;}
+      if(k->kind==K_SEND && k->peer!=k->comm->rank && k->wire!=(const unsigned char *)k->send){copy_into(sink,k,l->own,k->wire,k->in,k->send,bytes,0);before=1;}
       if(k->kind>=K_SEND)continue;
       const size_t in=in_bytes(k);unsigned char *to=input_at(k);
       if(!in)continue;
-      if(k->premultiply)kernel(sink,k,KERNEL_PREMULTIPLY,k->at,to,k->in,k->send,in/type_bytes[k->type],0);
-      else if(to!=(const unsigned char *)k->send)blit(sink,k,k->at,to,k->in,k->send,in);
+      if(k->premultiply){kernel(sink,k,KERNEL_PREMULTIPLY,k->at,to,k->in,k->send,in/type_bytes[k->type],0);before=1;}
+      else if(to!=(const unsigned char *)k->send){copy_into(sink,k,k->at,to,k->in,k->send,in,0);before=1;}
     }
-    l->gate=++*value;sink_signal(sink,event,l->gate);
+    if(before && gate){sink_publish(sink,l->own,gate,1);l->gate=gate;}
   }
+  /* the words each call's program has waited for so far */
+  unsigned char **waited=calloc((size_t)n,sizeof *waited);
+  for(int i=0;waited && i<n;i++)waited[i]=calloc(calls[i].nwords?calls[i].nwords:1,1);
+  #define WAIT(k,i,w) do{ if(waited && waited[i] && !waited[i][w]){waited[i][w]=1;list=pair(list,&m,&capacity,l->own,(k)->words+(w),1);} }while(0)
   for(int i=0;i<n;i++){
-    struct call *k=calls+i;struct ncclComm *c=k->comm;
+    struct call *k=calls+i;
     if(k->kind>=K_SEND)continue;
     const size_t e=type_bytes[k->type];
-    for(uint32_t s=0;s<k->nsteps;s++)if(k->steps[s].op==MESH_STEP_REDUCE){
-      struct piece *p=k->pieces+s;
-      const uint64_t elements=k->steps[s].piece.elements;
-      const uint32_t n=chunks_of(elements,e);
-      p->arrived=c->arrive_value+1;c->arrive_value+=n;
-      /* a combined chunk is signalled for the worker's SENDs that read it (never in a kept program) */
-      if(!kept){p->combined=*value+1;*value+=n;}
-      for(uint32_t j=0;j<n;j++){
-        const uint64_t first=chunk_first(elements,e,j);
-        sink_wait(sink,c->arrive,p->arrived+j);
-        kernel(sink,k,KERNEL_COMBINE,k->at,k->operand+(k->steps[s].first+first)*e,l->own,p->at+first*e,chunk_count(elements,e,j),k->combine);
-        if(!kept)sink_signal(sink,event,p->combined+j);
+    uint32_t w=0,r=0;
+    for(uint32_t s=0;s<k->nsteps && k->nwords;s++){
+      const struct mesh_step *step=k->steps+s;
+      if(!step->piece.elements)continue;
+      const uint32_t chunks=chunks_of(step->piece.elements,e);
+      for(uint32_t j=0;step->op==MESH_STEP_REDUCE && j<chunks;j++){
+        const uint64_t first=chunk_first(step->piece.elements,e,j),elements=chunk_count(step->piece.elements,e,j);
+        const size_t lo=(step->first+first)*e,hi=lo+elements*e;
+        m=0;WAIT(k,i,w+j);
+        /* the earlier steps' sends that read the range the combine writes */
+        for(uint32_t q=0,v=0;q<s;q++){
+          const struct mesh_step *earlier=k->steps+q;
+          if(!earlier->piece.elements)continue;
+          const uint32_t sent=chunks_of(earlier->piece.elements,e);
+          for(uint32_t t=0;earlier->op==MESH_STEP_SEND && t<sent;t++){
+            const size_t a=(earlier->first+chunk_first(earlier->piece.elements,e,t))*e,b=a+chunk_count(earlier->piece.elements,e,t)*e;
+            if(a<hi && lo<b)WAIT(k,i,v+t);
+          }
+          v+=sent;
+        }
+        sink_words(sink,k,l->own,list,m);
+        kernel(sink,k,KERNEL_COMBINE,k->at,k->operand+lo,l->own,k->pieces[s].at+first*e,elements,k->combine);
+        if(k->combined)sink_publish(sink,l->own,k->combined+r+j,1);
       }
+      if(step->op==MESH_STEP_REDUCE && k->combined)r+=chunks;
+      w+=chunks;
     }
     const size_t out=out_bytes(k);unsigned char *from=output_at(k);
-    int divide=out && k->postdivide,copy=out && from!=(unsigned char *)k->recv;
-    if(divide || copy || (kept && !covered(k))){
-      k->networked=++c->arrive_value;sink_wait(sink,c->arrive,k->networked);
+    const int divide=out && k->postdivide,copy=out && from!=(unsigned char *)k->recv;
+    if(divide || copy){
+      m=0;
+      for(uint32_t x=0;x<k->nwords;x++)WAIT(k,i,x);
+      sink_words(sink,k,l->own,list,m);
       if(divide)kernel(sink,k,KERNEL_POSTDIVIDE,k->at,from,k->at,from,out/e,0);
-      if(copy)blit(sink,k,k->out,k->recv,k->at,from,out);
+      if(copy)copy_into(sink,k,k->out,k->recv,k->at,from,out,1);
     }
-  }
-  for(int j=0;j<ncomms;j++){
-    arrived[j]=comms[j]->arrive_value;
-    if(!kept || p2p){finals[j]=++comms[j]->done_value;sink_wait(sink,comms[j]->done,finals[j]);}
-    ran->comms[ran->ncomms++]=comms[j];atomic_fetch_add(&comms[j]->programs,1);
   }
   for(int i=0;i<n;i++){
     struct call *k=calls+i;
-    if(k->kind==K_RECV && k->peer!=k->comm->rank && k->wire!=(unsigned char *)k->recv)
-      blit(sink,k,k->out,k->recv,l->own,k->wire,k->count*type_bytes[k->type]);
+    if(k->kind==K_RECV && k->peer!=k->comm->rank && k->wire!=(unsigned char *)k->recv){
+      m=0;WAIT(k,i,0);
+      sink_words(sink,k,l->own,list,m);
+      copy_into(sink,k,k->out,k->recv,l->own,k->wire,k->count*type_bytes[k->type],1);
+    }
+  }
+  /* the network done before the program's end: every word not yet waited for (a call's sends, COPY
+     steps' receives, point-to-point transfers) */
+  for(int i=0;i<n;i++){
+    m=0;
+    for(uint32_t x=0;x<calls[i].nwords;x++)WAIT(calls+i,i,x);
+    sink_words(sink,calls+i,l->own,list,m);
+  }
+  #undef WAIT
+  for(int i=0;waited && i<n;i++)free(waited[i]);
+  free(waited);free(list);
+  for(int j=0;j<ncomms;j++){
+    uint64_t first=0;
+    for(int i=0;i<n;i++)if(calls[i].comm==comms[j] && (!first || calls[i].index<first))first=calls[i].index;
+    ran->first[ran->ncomms]=first;
+    ran->comms[ran->ncomms++]=comms[j];atomic_fetch_add(&comms[j]->programs,1);
   }
   l->end=++*value;sink_signal(sink,event,l->end);
-  for(int m=0;m<l->nmarks;m++){
-    struct mark *mark=l->marks+m;struct ncclMeshStream *s=mark->stream;
+  for(int k=0;k<l->nmarks;k++){
+    struct mark *mark=l->marks+k;struct ncclMeshStream *s=mark->stream;
     if(s==primary){mark->done=l->end;continue;}
     mark->done=++s->value;sink_signal(sink,s->event,mark->done);
     nccl_mesh_retain(s->event);ran->events[ran->nevents++]=s->event;
@@ -1714,7 +1815,8 @@ static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **c
     return;
   }
   if(primary)primary->committed=primary->value;
-  for(int m=1;m<l->nmarks;m++)l->marks[m].stream->committed=l->marks[m].stream->value;
+  for(int k=1;k<l->nmarks;k++)l->marks[k].stream->committed=l->marks[k].stream->value;
+  count(calls,COMMITS,1);
   nccl_mesh_program_commit(sink->program,program_ran,ran);
 }
 
@@ -1741,15 +1843,14 @@ ncclResult_t ncclGroupEnd(void){
   struct launch *l=calloc(1,sizeof *l);
   struct tally *tally=calloc(1,sizeof *tally+(size_t)n*sizeof tally->counts[0]);
   struct ncclComm **comms=calloc((size_t)n,sizeof *comms);int ncomms=0;
-  uint64_t *finals=calloc((size_t)n,sizeof *finals),*arrived=calloc((size_t)n,sizeof *arrived);
-  struct ran *ran=calloc(1,sizeof *ran+(size_t)n*(sizeof(struct ncclComm *)+sizeof(void *)));
-  if(l){l->marks=calloc((size_t)n,sizeof *l->marks);l->waits=calloc((size_t)n*2*(READS+1),sizeof *l->waits);}
-  if(!l || !l->marks || !l->waits || !tally || !comms || !finals || !arrived || !ran){
+  struct ran *ran=calloc(1,sizeof *ran+(size_t)n*(sizeof(struct ncclComm *)+sizeof(uint64_t)+sizeof(void *)));
+  if(l){l->marks=calloc((size_t)n,sizeof *l->marks);l->waits=calloc((size_t)n*(2*(READS+1)+1),sizeof *l->waits);}
+  if(!l || !l->marks || !l->waits || !tally || !comms || !ran){
     if(l){free(l->marks);free(l->waits);}
-    free(l);free(tally);free(comms);free(finals);free(arrived);free(ran);calls_free(calls,n);
+    free(l);free(tally);free(comms);free(ran);calls_free(calls,n);
     return FAIL(NULL,ncclSystemError,"allocation");
   }
-  ran->comms=(struct ncclComm **)(ran+1);ran->events=(void **)(ran->comms+n);
+  ran->comms=(struct ncclComm **)(ran+1);ran->first=(uint64_t *)(ran->comms+n);ran->events=(void **)(ran->first+n);
   pthread_mutex_init(&l->lock,NULL);pthread_cond_init(&l->cond,NULL);
   tally->refs=2;tally->n=n;l->tally=plans.tally=tally;
   for(int i=0;i<n;i++){
@@ -1766,7 +1867,16 @@ ncclResult_t ncclGroupEnd(void){
   }
   pthread_mutex_lock(&stream_lock);
   status=regions(calls,n,l);
-  if(!status)status=place(calls,n,l);
+  /* a stream's word (ncclMeshStreamWaitWord): a recorded point of its groups from then on (reached, it
+     costs a later group one load) */
+  for(int m=0;m<l->nmarks;m++){
+    struct ncclMeshStream *s=l->marks[m].stream;
+    if(s->word)wait_add(l,(struct point){.word=(_Atomic uint64_t *)s->word,.value=s->word_value});
+  }
+  /* completion words where a program may wait on them: a stream's call, or any isend or irecv */
+  int words=l->nmarks>0;
+  for(int i=0;i<n && !words;i++)words=requests(calls+i)>0;
+  if(!status)status=place(calls,n,l,words);
   /* a program where a stream's completion is its, or the GPU has work; kept where its stream defers and
      it has no GPU work before its transfers (ncclMeshStreamDefer) */
   int work=l->nmarks>0;
@@ -1779,24 +1889,24 @@ ncclResult_t ncclGroupEnd(void){
   if(status){
     pthread_mutex_unlock(&stream_lock);
     regions_release(calls,n,l);
-    launch_free(l);free(comms);free(finals);free(arrived);free(ran);calls_free(calls,n);
+    launch_free(l);free(comms);free(ran);calls_free(calls,n);
     return status;
   }
-  if(sink.program || sink.kept){
-    encode(l,calls,n,comms,ncomms,finals,arrived,&sink,ran);
+  const int program=sink.program || sink.kept;
+  if(program){
+    encode(l,calls,n,comms,ncomms,&sink,ran);
     record(l,calls,n);
     if(!defer){
       for(int w=0;w<l->nwaits;w++)point_drop(l->waits+w);
       l->nwaits=0;
     }
   }
-  else free(ran);
+  else{free(ran);l->gate=NULL;}
   regions_release(calls,n,l);
   l->items=ncomms;
   for(int j=0;j<ncomms;j++){
     struct item *it=calloc(1,sizeof *it);
-    it->calls=calloc((size_t)n,sizeof *it->calls);it->launch=l;it->deadline=deadline_after();
-    it->final=finals[j];it->arrived=arrived[j];
+    it->calls=calloc((size_t)n,sizeof *it->calls);it->launch=l;it->deadline=deadline_after();it->gpu=program;
     for(int i=0;i<n;i++)if(calls[i].comm==comms[j]){it->calls[it->n++]=calls[i];calls[i].steps=NULL;calls[i].pieces=NULL;calls[i].segments=NULL;}
     struct ncclComm *c=comms[j];
     pthread_mutex_lock(&c->lock);
@@ -1806,7 +1916,7 @@ ncclResult_t ncclGroupEnd(void){
     pthread_mutex_unlock(&c->lock);
   }
   pthread_mutex_unlock(&stream_lock);
-  free(comms);free(finals);free(arrived);free(calls);
+  free(comms);free(calls);
   if(!l->sync)return ncclSuccess;
   pthread_mutex_lock(&l->lock);
   while(l->items)pthread_cond_wait(&l->cond,&l->lock);
@@ -2077,6 +2187,7 @@ static ncclResult_t flush_kept(struct ncclMeshStream *s){
   if(s->committed)nccl_mesh_program_wait(program,s->event,s->committed);
   take_kept(s,program);
   s->committed=s->value;
+  count(NULL,COMMITS,1);
   nccl_mesh_program_commit(program,no_ran,NULL);
   return ncclSuccess;
 }
@@ -2106,6 +2217,37 @@ ncclResult_t ncclMeshStreamDefer(cudaStream_t stream,int defer){
   stream->deferred=defer!=0;
   ncclResult_t status=defer?ncclSuccess:flush_kept(stream);
   pthread_mutex_unlock(&stream_lock);
+  return status;
+}
+ncclResult_t ncclMeshStreamWaitWord(cudaStream_t stream,const uint64_t *word,uint64_t value){
+  if(!stream || !word)return FAIL(NULL,ncclInvalidArgument,"ncclMeshStreamWaitWord: NULL argument");
+  pthread_mutex_lock(&stream_lock);
+  stream->word=word;stream->word_value=value;
+  pthread_mutex_unlock(&stream_lock);
+  return ncclSuccess;
+}
+ncclResult_t ncclMeshEncodeCopies(void *commandBuffer,int n,void *const *dst,void *const *src,const size_t *offset,const size_t *bytes,
+  uint64_t *word,uint64_t value){
+  if(!commandBuffer || n<0 || (n && (!dst || !src || !offset || !bytes)) || !word)return FAIL(NULL,ncclInvalidArgument,"ncclMeshEncodeCopies: NULL argument");
+  void **buffers=calloc((size_t)n+1,sizeof *buffers);uint64_t *at=calloc((size_t)n+1,sizeof *at);
+  ncclResult_t status=buffers && at?ncclSuccess:FAIL(NULL,ncclSystemError,"allocation");
+  pthread_mutex_lock(&heap.lock);
+  for(int i=0;i<=n && !status;i++){
+    const void *p=i<n?dst[i]:(const void *)word;
+    struct span *s=span_of(p,i<n?(bytes[i]?bytes[i]:1):8);
+    if(!s)status=FAIL(NULL,ncclInvalidArgument,"ncclMeshEncodeCopies: %p is not in a live allocation of the window (ncclMemAlloc)",p);
+    else{buffers[i]=s->buffer;nccl_mesh_retain(s->buffer);at[i]=(uint64_t)((const unsigned char *)p-s->at);}
+  }
+  pthread_mutex_unlock(&heap.lock);
+  if(!status){
+    pthread_mutex_lock(&stream_lock);
+    for(int i=0;i<n;i++)nccl_mesh_program_copy(commandBuffer,buffers[i],at[i],src[i],offset[i],bytes[i],0);
+    nccl_mesh_program_publish(commandBuffer,buffers[n],at[n],value);
+    nccl_mesh_program_end(commandBuffer);
+    pthread_mutex_unlock(&stream_lock);
+  }
+  for(int i=0;buffers && i<=n;i++)if(buffers[i])nccl_mesh_release(buffers[i]);
+  free(buffers);free(at);
   return status;
 }
 ncclResult_t ncclMeshStreamEncodeWait(cudaStream_t stream,void *commandBuffer){
@@ -2299,7 +2441,8 @@ ncclResult_t ncclMeshGroupPlans(int *algorithms,int *roots,int capacity,int *cou
 static ncclMeshCounts_t counts_of(const uint64_t *c,int timed){
   return (ncclMeshCounts_t){.cpuCopyBytes=c[CPU_COPY],.gpuCopyBytes=c[GPU_COPY],.gpuKernels=c[GPU_KERNELS],.hostWaits=c[HOST_WAITS],
     .inputWaits=c[INPUT_WAITS],.sentBytes=c[SENT],.receivedBytes=c[RECEIVED],.startNs=timed?c[STARTED]:0,.endNs=timed?c[ENDED]:0,
-    .arrivedNs=timed?c[ARRIVED]:0};
+    .arrivedNs=timed?c[ARRIVED]:0,.gpuEventWaits=c[GPU_EVENT_WAITS],.gpuWordWaits=c[GPU_WORD_WAITS],.hostWordWaits=c[HOST_WORD_WAITS],
+    .commits=c[COMMITS]};
 }
 ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t *counts){
   if(!counts)return FAIL(NULL,ncclInvalidArgument,"ncclMeshGetCounts: counts is NULL");

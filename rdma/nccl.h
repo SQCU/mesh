@@ -38,22 +38,24 @@
    ncclCollConfig_t.algSelection names the planner's algorithms: "direct", "ring", "tree",
    "binomial" (comma-separated).  MESH_NCCL_TIMEOUT bounds a connection or a call, in seconds
    (default 300).  A call whose GPU program waits on the network fails as a value (ncclRemoteError)
-   once the network has given the GPU nothing it waits for in 1 s, and every value the program waits
-   for is signalled, so it and its stream's later work go on: Metal ends a command buffer that waits
-   past its watchdog, and then refuses every later submission of the process.
+   once the network has given the GPU nothing it waits for in 1 s, and every completion word the
+   program waits on is set, so it and its stream's later work go on; the GPU's own wait on a word is
+   bounded at about 1 s of polls, after which the call fails the same way: Metal ends a command buffer
+   that waits past its watchdog, and then refuses every later submission of the process.
 
    Buffers are host pointers: unified memory.  The bridge's registered window is handed out as
    allocations (ncclMemAlloc), each a record of the library: its pages, the one Metal buffer over them
    (ncclMeshMemBuffer: bind it in the caller's kernels too), and the points after which its last
    writer and its readers since are done, each an event and a value.  A buffer in an allocation is
    sent and received in place; any other buffer (a numpy array, a CPU tensor, other MTLBuffer contents)
-   is copied between it and window memory by GPU blits, through a Metal buffer over the host pages that
-   hold it (no CPU copy; the window stays the network's target, as the provider lands a receive only
-   in memory registered before its queue pair was set up).  The reductions (sum, prod, max, min, avg,
-   PreMulSum, every datatype) are Metal kernels: a group's calls are one command buffer that waits
-   for each received piece, combines it where it landed in the window, and signals; float64, and
-   float32 or bfloat16 below 2^-101, are rounded exactly in software (the GPU has no float64 and
-   flushes float32 subnormals).
+   is copied between it and window memory by the library's copy kernel, through a Metal buffer over the
+   host pages that hold it (no CPU copy; the window stays the network's target, as the provider lands a
+   receive only in memory registered before its queue pair was set up).  The reductions (sum, prod,
+   max, min, avg, PreMulSum, every datatype) are Metal kernels: a group's calls are one command buffer
+   that waits for each received piece on the completion word the bridge stores when it lands (a
+   kernel polling mapped memory, no host thread between), combines it where it landed in the window,
+   and stores system-coherent; float64, and float32 or bfloat16 below 2^-101, are rounded exactly in
+   software (the GPU has no float64 and flushes float32 subnormals).
 
    Ordering is per allocation, from its record: a group waits for the recorded points of the
    allocations it touches (of a buffer it reads, the writer; of one it writes, the writer and the
@@ -110,8 +112,9 @@ extern "C" {
 /* The stream (above).  queue: id<MTLCommandQueue>; event: id<MTLSharedEvent>; value: the event's last
    reserved value; made: the queue is the stream's own; deferred: ncclMeshStreamDefer's; pending: the
    programs kept for ncclMeshStreamEncodeWait, oldest first; committed: the last value a program
-   committed to the queue signals. */
-struct ncclMeshStream { void *queue; void *event; uint64_t value; int made, deferred; void *pending; uint64_t committed; };
+   committed to the queue signals; word, word_value: ncclMeshStreamWaitWord's, for the next group. */
+struct ncclMeshStream { void *queue; void *event; uint64_t value; int made, deferred; void *pending; uint64_t committed;
+  const uint64_t *word; uint64_t word_value; };
 typedef struct ncclMeshStream *cudaStream_t;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
 typedef void *cudaEvent_t;
@@ -852,8 +855,8 @@ ncclResult_t ncclMeshStreamQuery(cudaStream_t stream);
    start (no copy in or premultiplication before them, no combine a later send of the call reads, one
    communicator) instead of committing it: the workers start on the recorded points themselves (no gate
    program between the caller's GPU work and the network), and ncclMeshStreamEncodeWait encodes the kept
-   programs, in order, into a command buffer of the caller's: its waits for the pieces' arrivals (the
-   worker signals them), combines, post-division, copies out and the stream's completion value, so the
+   programs, in order, into a command buffer of the caller's: its waits on the completion words (the
+   bridge sets them), combines, post-division, copies out and the stream's completion value, so the
    caller's later work in that command buffer follows them on its own queue with no other queue between.
    A group that cannot defer first takes the stream's kept programs into its own; ncclMeshStreamSynchronize
    commits them to the stream's queue.  Every kept program must be encoded (EncodeWait or Synchronize)
@@ -862,6 +865,17 @@ ncclResult_t ncclMeshStreamDefer(cudaStream_t stream, int defer);
 /* Into `commandBuffer` (an id<MTLCommandBuffer> not yet committed): a wait for the stream's committed
    programs, then the stream's kept programs; the caller commits it. */
 ncclResult_t ncclMeshStreamEncodeWait(cudaStream_t stream, void* commandBuffer);
+/* The groups on `stream` from now on start their transfers once `word` (8 bytes in a window allocation)
+   reaches `value`: their recorded point, a word the caller's GPU work publishes (ncclMeshEncodeCopies)
+   instead of an event its command buffer signals at its end. */
+ncclResult_t ncclMeshStreamWaitWord(cudaStream_t stream, const uint64_t* word, uint64_t value);
+/* Into `commandBuffer` (an id<MTLCommandBuffer> not yet committed, no encoder open): n copies into the
+   window, bytes[i] to dst[i] (in an allocation) from the id<MTLBuffer> src[i] at offset[i], stored
+   system-coherent, then `word` (in an allocation) set to `value`, system-coherent, once they are done.
+   The GPU's plain stores reach the NIC only when their command buffer completes; these reach it as soon
+   as the word is seen (nccl-mesh-metal.m). */
+ncclResult_t ncclMeshEncodeCopies(void* commandBuffer, int n, void* const* dst, void* const* src, const size_t* offset,
+    const size_t* bytes, uint64_t* word, uint64_t value);
 /* The algorithms the planner took for this thread's last ended group, a call each in issue
    order (at most `capacity`): 0 direct, 1 ring, 2 tree, 3 binomial (mesh-collective.h MESH_*),
    -1 a point-to-point call or a one-rank communicator's local copy; `roots` the tree's root. */
@@ -869,15 +883,18 @@ ncclResult_t ncclMeshGroupPlans(int* algorithms, int* roots, int capacity, int* 
 /* The link map's epoch each of those calls planned on (0 for a point-to-point call). */
 ncclResult_t ncclMeshGroupEpochs(uint64_t* epochs, int capacity, int* count);
 /* What the library copied, sent and waited for, counted: bytes a library thread copied on the CPU
-   (none: every copy is the GPU's), bytes its GPU programs copied (blits into and out of the window,
-   within it), the combine, premultiply and post-divide kernels they ran, the waits of a library
-   thread for the library's own GPU work (a group's gate, a combined piece before its SEND, the NULL
-   stream's end, room in the window), a part's waits for recorded points without a program, the
-   bytes this rank sent and received on the network; and, per call, the monotonic times (ns) its part
-   started (after the gate) and ended (its transfers complete) and the worker last signalled one of its
-   arrivals to the GPU (0: none). */
+   (none: every copy is the GPU's), bytes its GPU programs copied (into and out of the window, within
+   it), the combine, premultiply and post-divide kernels they ran, the waits of a library thread for a
+   shared event (the NULL stream's end, room in the window), a part's waits for recorded points that are
+   events, the bytes this rank sent and received on the network; per call, the monotonic times (ns) its
+   part started (after the gate) and ended (its transfers complete) and the worker saw its last piece
+   land (0: none); and the handoffs between the GPU and the host: the GPU's waits on shared events its
+   program encodes, the completion words its kernels wait on (the bridge's, or another program's), a
+   library thread's waits on words a program publishes (a gate, a combine before its SEND, a recorded
+   word), and the command buffers the library commits. */
 typedef struct {
   uint64_t cpuCopyBytes, gpuCopyBytes, gpuKernels, hostWaits, inputWaits, sentBytes, receivedBytes, startNs, endNs, arrivedNs;
+  uint64_t gpuEventWaits, gpuWordWaits, hostWordWaits, commits;
 } ncclMeshCounts_t;
 /* The process's counts so far (the times 0). */
 ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t* counts);
