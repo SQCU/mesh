@@ -1,17 +1,27 @@
-"""Context parallelism's SDPA on CPU and MPS tensors.
+"""What PyTorch's parallelism APIs need of MPS tensors that torch 2.14 lacks, registered with the backend.
 
-torch's context_parallel (torch/distributed/tensor/experimental/_context_parallel/_attention.py) gives the
-DTensor dispatcher a handler for CUDA's fused SDPA ops alone (custom_ops: _scaled_dot_product_flash,
-_efficient and _cudnn_attention), each a block op whose second output is the logsumexp that the ring's
-merge (_SDPAMerger) needs.  Without gradient, F.scaled_dot_product_attention reaches
+DeviceMesh(device_type="mps") asks the device module whether a device is already selected and, if not,
+selects one: torch/distributed/device_mesh.py, DeviceMesh._setup_world_group_and_device calls
+device_handle.is_initialized() and then set_device() (device_mesh.py:496, 505, 530), and torch.mps has
+neither.  A process has one Metal device, in use once MPS is available.
+
+DTensor's backward through nn.Linear: on MPS, aten::linear has a kernel of its own whose autograd formula
+is aten::linear_backward (an MPS-only kernel), which DTensor has no sharding strategy for
+(NotImplementedError in its sharding propagation); on CPU and CUDA linear decomposes into matmul, whose
+backward DTensor shards.  Here DTensor computes linear_backward as those matmuls.
+
+Context parallelism's SDPA: torch's context_parallel
+(torch/distributed/tensor/experimental/_context_parallel/_attention.py) gives the DTensor dispatcher a
+handler for CUDA's fused SDPA ops alone (custom_ops: _scaled_dot_product_flash, _efficient and
+_cudnn_attention), each a block op whose second output is the logsumexp that the ring's merge
+(_SDPAMerger) needs.  Without gradient, F.scaled_dot_product_attention reaches
 aten._scaled_dot_product_flash_attention_for_cpu on CPU tensors and
 aten._scaled_dot_product_attention_math_for_mps on MPS tensors; neither has a sharding strategy, so the
-call fails (NotImplementedError in DTensor's sharding propagation).  Here each gets the handler CUDA's
-ops get: torch's own ring (_templated_ring_attention, its rotation and merge) over the query's sequence
-shard, each block by an op that returns the output and the logsumexp: CPU's flash kernel as it is; on MPS,
-whose SDPA returns no logsumexp, the block's scores rows at a time (at most 2^26 live).  With gradient,
-SDPA on MPS decomposes into matmul and softmax before the dispatcher sees it, and CP's backward handlers
-are CUDA's too: forward only."""
+call fails.  Here each gets the handler CUDA's ops get: torch's own ring (_templated_ring_attention, its
+rotation and merge) over the query's sequence shard, each block by an op that returns the output and the
+logsumexp: CPU's flash kernel as it is; on MPS, whose SDPA returns no logsumexp, the block's scores rows
+at a time (at most 2^26 live).  With gradient, SDPA on MPS decomposes into matmul and softmax before the
+dispatcher sees it, and CP's backward handlers are CUDA's too: forward only."""
 import torch
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
@@ -71,7 +81,20 @@ def _ring(op_call, args, kwargs):
     return out, DTensor(lse, _spec(spec, query.shape[:-1], lse.dtype), requires_grad=False)
 
 
+def _linear_backward(op_call, args, kwargs):
+    """aten.linear_backward on DTensors as the matmuls it is: grad @ weight, grad^T @ input, grad summed."""
+    named = dict(zip((a.name for a in op_call._schema.arguments), args), **kwargs)
+    x, grad, weight, mask = named["self"], named["grad_output"], named["weight"], named["output_mask"]
+    rows = grad.flatten(0, -2)
+    return (grad @ weight if mask[0] else None, rows.t() @ x.flatten(0, -2) if mask[1] else None,
+            rows.sum(0) if mask[2] else None)
+
+
 def register():
-    """The handlers among those context_parallel installs while it is active."""
+    """torch.mps.is_initialized; DTensor's linear_backward; the SDPA handlers among those context_parallel
+    installs while it is active."""
+    if not hasattr(torch.mps, "is_initialized"):
+        torch.mps.is_initialized = torch.backends.mps.is_available
+    DTensor._op_dispatcher._custom_op_handlers[aten.linear_backward.default] = _linear_backward
     for op in _BLOCKS:
         _attention.custom_ops[op] = _ring
