@@ -132,7 +132,7 @@ struct ncclComm {
      progress word: advance) and Metal buffer */
   void *queue,*event; uint64_t event_value;
   _Atomic int programs;
-  _Atomic uint64_t *control; void *control_buffer;
+  _Atomic uint64_t *control; void *control_buffer; uint64_t ticked;
   pthread_t worker; int started,stopping,finalized;
   pthread_mutex_t lock; pthread_cond_t cond;
   struct item *head,*tail; int busy;
@@ -642,7 +642,11 @@ static void rebound(struct item *it){if(it->gpu)it->bound=now_ns()+GPU_WAIT_NS;}
    reached yet: it takes them in issue order).  The bound is the host's clock, which the worker writes as it
    runs (tick): a GPU wait fails once GPU_WAIT_NS of it pass with no progress. */
 static void advance(struct ncclComm *c){atomic_fetch_add_explicit(c->control+1,1,memory_order_release);}
-static void tick(struct ncclComm *c){atomic_store_explicit(c->control+2,now_ns(),memory_order_relaxed);}
+static void tick(struct ncclComm *c){
+  const uint64_t now=now_ns();
+  if(now-c->ticked<1000000)return;  /* a millisecond's resolution: the bound is a second */
+  c->ticked=now;atomic_store_explicit(c->control+2,now,memory_order_relaxed);
+}
 /* Reaps every pending isend that is done (its ring slot free again). */
 static ncclResult_t reap(struct ncclComm *c,struct pending *sends,int *count){
   for(int i=0;i<*count;){
