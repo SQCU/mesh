@@ -47,8 +47,10 @@ def link_map(kind, nodes, pairs):
 class Collective(C.Structure):
     """mesh-collective.h struct mesh_collective: what (an index of WHATS), how (an algorithm; on
     mesh_collective_choose's entry the bit set of the algorithms it may take, 0 every one), root,
-    accumulator_bytes, contributors (a bit set of nodes, 64 a word; NULL every one: see bits)."""
-    _fields_ = [*((k, U) for k in ('what', 'how', 'root', 'accumulator_bytes')), ('contributors', C.POINTER(Q))]
+    accumulator_bytes, contributors (a bit set of nodes, 64 a word; NULL every one: see bits), segments
+    (a reduce-scatter's or all-gather's count a node, (Q * nodes)(...); NULL the equal cut)."""
+    _fields_ = [*((k, U) for k in ('what', 'how', 'root', 'accumulator_bytes')), ('contributors', C.POINTER(Q)),
+                ('segments', C.POINTER(Q))]
 
 
 def bits(nodes, members):

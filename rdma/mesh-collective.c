@@ -70,11 +70,25 @@ static struct mesh_step mesh_piece(uint32_t op,uint32_t peer,uint32_t round,uint
   return (struct mesh_step){.op=op,.peer=peer,.round=round,.first=first,.piece=operand};
 }
 
-/* Node v's segment of the operand among `nodes`, as one step's piece: elements/nodes elements, one
-   more for each of the first elements%nodes nodes (the ring's segment sizes). */
-static struct mesh_step mesh_segment(uint32_t op,uint32_t peer,uint32_t round,uint32_t v,uint32_t nodes,struct mesh_operand operand){
-  const uint64_t size=operand.elements/nodes,residual=operand.elements%nodes;
-  return mesh_piece(op,peer,round,v*size+(v<residual?v:residual),size+(v<residual),operand);
+/* The nodes' segments of the operand, their sizes in node order: a reduce-scatter's or an
+   all-gather's `segments` where it gives them, else elements/nodes elements, one more for each of the
+   first elements%nodes nodes (the ring's segment sizes).  0 where a segment is empty or they do not
+   sum to the operand's elements. */
+static int mesh_cut(struct mesh_collective c,uint32_t nodes,uint64_t elements,uint64_t *sizes){
+  const uint64_t *given=c.what==MESH_REDUCE_SCATTER || c.what==MESH_ALLGATHER?c.segments:NULL;
+  uint64_t sum=0;
+  for(uint32_t v=0;v<nodes;v++){
+    sizes[v]=given?given[v]:elements/nodes+(v<elements%nodes);
+    if(!sizes[v])return 0;
+    sum+=sizes[v];
+  }
+  return sum==elements;
+}
+/* Node v's segment of the cut `sizes` as one step's piece: after the segments of the nodes before it. */
+static struct mesh_step mesh_segment(uint32_t op,uint32_t peer,uint32_t round,uint32_t v,const uint64_t *sizes,struct mesh_operand operand){
+  uint64_t first=0;
+  for(uint32_t u=0;u<v;u++)first+=sizes[u];
+  return mesh_piece(op,peer,round,first,sizes[v],operand);
 }
 
 /* The operand as a partial combination crosses: at the collective's accumulator, where it has one. */
@@ -115,18 +129,17 @@ static int mesh_ring_order(const struct mesh_link_map *map,uint32_t *next,uint32
    segment sizes, recv_from/send_to, and the two loops, with `rank` read as the ring position and
    each MPI call replaced by the step it performs.  Every rank sends and receives 2(size-1)/size of
    the operand; a reduce-scatter piece after the first round is a partial sum, at the accumulator.
-   A reduce-scatter or an all-gather is its loop alone, node v's own segment v.
-   None where the map has no ring or a segment would be empty (fewer elements than nodes). */
+   A reduce-scatter or an all-gather is its loop alone, node v's own segment v (mesh_cut: the
+   collective's segments, where it gives them).
+   None where the map has no ring or the cut has an empty segment (fewer elements than nodes). */
 static uint32_t mesh_ring_collective(const struct mesh_link_map *map,uint32_t node,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *out){
   const uint32_t size=map->nodes;
   uint32_t next[size],previous[size],start,rank=0,count=0;
-  if(operand.elements<size || !mesh_ring_order(map,next,previous,&start))return 0;
-  for(uint32_t at=start;at!=node;at=next[at])rank++;
-  const struct mesh_operand partial=mesh_accumulated(operand,c);
   // Compute the sizes of the chunks, and where each chunk ends.
   uint64_t segment_sizes[size],segment_ends[size];
-  const uint64_t segment_size=operand.elements/size,residual=operand.elements%size;
-  for(uint32_t i=0;i<size;i++)segment_sizes[i]=segment_size+(i<residual);
+  if(!mesh_cut(c,size,operand.elements,segment_sizes) || !mesh_ring_order(map,next,previous,&start))return 0;
+  for(uint32_t at=start;at!=node;at=next[at])rank++;
+  const struct mesh_operand partial=mesh_accumulated(operand,c);
   segment_ends[0]=segment_sizes[0];
   for(uint32_t i=1;i<size;i++)segment_ends[i]=segment_sizes[i]+segment_ends[i-1];
   /* The segment of chunk c: c in an all-reduce; alone, the segment of the node at ring position c-1,
@@ -191,9 +204,10 @@ static int mesh_below(const uint32_t *parent,uint32_t w,uint32_t v){
 static uint32_t mesh_tree_collective(const struct mesh_link_map *map,uint32_t rank,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *out){
   const uint32_t n=map->nodes;
   uint32_t parent[n],order[n],children[n],interior[n],k=0,count=0;
+  uint64_t sizes[n];
   memset(interior,0,sizeof interior);
   if(c.root>=n || !mesh_spanning_tree(map,c.root,parent,order))return 0;
-  if((c.what==MESH_REDUCE_SCATTER || c.what==MESH_ALLGATHER) && operand.elements<n)return 0;
+  if((c.what==MESH_REDUCE_SCATTER || c.what==MESH_ALLGATHER) && !mesh_cut(c,n,operand.elements,sizes))return 0;
   for(uint32_t i=1;i<n;i++){interior[parent[order[i]]]=1;if(parent[order[i]]==rank)children[k++]=order[i];}
   const struct mesh_operand partial=mesh_accumulated(operand,c);
   const uint32_t down=c.what==MESH_ALLGATHER?n:c.what==MESH_ALLREDUCE;
@@ -202,12 +216,12 @@ static uint32_t mesh_tree_collective(const struct mesh_link_map *map,uint32_t ra
     if(rank!=c.root)out[count++]=mesh_piece(MESH_STEP_SEND,parent[rank],0,0,operand.elements,interior[rank]?partial:operand);
   }
   if(c.what==MESH_ALLGATHER){
-    for(uint32_t j=0;j<k;j++)for(uint32_t w=0;w<n;w++)if(mesh_below(parent,w,children[j]))out[count++]=mesh_segment(MESH_STEP_COPY,children[j],w,w,n,operand);
-    for(uint32_t w=0;rank!=c.root && w<n;w++)if(mesh_below(parent,w,rank))out[count++]=mesh_segment(MESH_STEP_SEND,parent[rank],w,w,n,operand);
+    for(uint32_t j=0;j<k;j++)for(uint32_t w=0;w<n;w++)if(mesh_below(parent,w,children[j]))out[count++]=mesh_segment(MESH_STEP_COPY,children[j],w,w,sizes,operand);
+    for(uint32_t w=0;rank!=c.root && w<n;w++)if(mesh_below(parent,w,rank))out[count++]=mesh_segment(MESH_STEP_SEND,parent[rank],w,w,sizes,operand);
   }
   if(c.what==MESH_REDUCE_SCATTER){
-    for(uint32_t w=0;rank!=c.root && w<n;w++)if(mesh_below(parent,w,rank))out[count++]=mesh_segment(MESH_STEP_COPY,parent[rank],1+w,w,n,operand);
-    for(uint32_t j=0;j<k;j++)for(uint32_t w=0;w<n;w++)if(mesh_below(parent,w,children[j]))out[count++]=mesh_segment(MESH_STEP_SEND,children[j],1+w,w,n,operand);
+    for(uint32_t w=0;rank!=c.root && w<n;w++)if(mesh_below(parent,w,rank))out[count++]=mesh_segment(MESH_STEP_COPY,parent[rank],1+w,w,sizes,operand);
+    for(uint32_t j=0;j<k;j++)for(uint32_t w=0;w<n;w++)if(mesh_below(parent,w,children[j]))out[count++]=mesh_segment(MESH_STEP_SEND,children[j],1+w,w,sizes,operand);
   }
   if(c.what==MESH_REDUCE || c.what==MESH_REDUCE_SCATTER)return count;
   if(rank!=c.root)out[count++]=mesh_piece(MESH_STEP_COPY,parent[rank],down,0,operand.elements,operand);
@@ -300,19 +314,20 @@ static uint32_t mesh_binomial_collective(const struct mesh_link_map *map,uint32_
 static uint32_t mesh_direct_collective(const struct mesh_link_map *map,uint32_t rank,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *out){
   const uint32_t n=map->nodes,segmented=c.what==MESH_REDUCE_SCATTER || c.what==MESH_ALLGATHER;
   uint32_t count=0,any=0;
+  uint64_t sizes[n];
   if((c.what==MESH_BROADCAST || c.what==MESH_REDUCE) && c.root>=n)return 0;
-  if(segmented && operand.elements<n)return 0;
+  if(segmented && !mesh_cut(c,n,operand.elements,sizes))return 0;
   for(uint32_t v=0;v<n;v++)any|=(uint32_t)mesh_contributes(c,v);
   if(!any)return 0;
   /* every node's plan or none: each contributor linked to every node it sends to */
   for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++)
     if(a!=b && mesh_contributes(c,a) && (c.what!=MESH_REDUCE || b==c.root) && !mesh_linked(map,a,b))return 0;
   if(mesh_contributes(c,rank))for(uint32_t peer=0;peer<n;peer++)if(peer!=rank && (c.what!=MESH_REDUCE || peer==c.root))
-    out[count++]=segmented?mesh_segment(MESH_STEP_SEND,peer,0,c.what==MESH_ALLGATHER?rank:peer,n,operand):
+    out[count++]=segmented?mesh_segment(MESH_STEP_SEND,peer,0,c.what==MESH_ALLGATHER?rank:peer,sizes,operand):
       mesh_piece(MESH_STEP_SEND,peer,0,0,operand.elements,operand);
   for(uint32_t peer=0;peer<n && (c.what!=MESH_REDUCE || rank==c.root);peer++)if(peer!=rank && mesh_contributes(c,peer)){
     const uint32_t op=c.what==MESH_BROADCAST || c.what==MESH_ALLGATHER?MESH_STEP_COPY:MESH_STEP_REDUCE;
-    out[count++]=segmented?mesh_segment(op,peer,0,c.what==MESH_ALLGATHER?peer:rank,n,operand):
+    out[count++]=segmented?mesh_segment(op,peer,0,c.what==MESH_ALLGATHER?peer:rank,sizes,operand):
       mesh_piece(op,peer,0,0,operand.elements,operand);
   }
   return count;

@@ -33,8 +33,10 @@ struct mesh_step { uint32_t op,peer,round,padding; uint64_t first; struct mesh_o
    `contributors` (a bit a node, 64 a word; NULL: every node) at every node; MESH_BROADCAST gives every node the operand of
    `root`; MESH_REDUCE combines them at `root` alone; MESH_REDUCE_SCATTER leaves at node v the
    combination of its segment v; MESH_ALLGATHER gives every node every node's segment v.  Node v's
-   segment is the v-th of the operand's elements cut in `nodes` parts, the first elements%nodes of
-   them one element longer.  how: the direct exchange (every pair linked), the ring's reduce-scatter + all-gather
+   segment is `segments[v]` elements after the segments of the nodes before it (`segments`: one count
+   a node, summing to the operand's elements: MPI_Reduce_scatter's recvcounts, MPI_Allgatherv's
+   recvcounts in rank order), or without them the v-th of the operand's elements cut in `nodes` parts,
+   the first elements%nodes of them one element longer.  how: the direct exchange (every pair linked), the ring's reduce-scatter + all-gather
    [Patarasuk & Yuan 2009] (a ring map's cycle, or rank order where the map links it; either half
    alone), a spanning tree's reduce + broadcast from `root` (any connected map: a tree map's own
    tree, a star; the reduce alone, or a gather + broadcast, or a reduce + scatter), or the binomial
@@ -44,11 +46,12 @@ struct mesh_step { uint32_t op,peer,round,padding; uint64_t first; struct mesh_o
    half partials summed in float cross as float.  A step combines any number of receives. */
 enum { MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER };
 enum { MESH_DIRECT, MESH_RING, MESH_TREE, MESH_BINOMIAL, MESH_UNAVAILABLE };
-struct mesh_collective { uint32_t what,how,root,accumulator_bytes; const uint64_t *contributors; };
+struct mesh_collective { uint32_t what,how,root,accumulator_bytes; const uint64_t *contributors,*segments; };
 #define MESH_COLLECTIVE_STEPS(nodes) (4*(nodes))
 /* The rank's steps in its dependency order (at most MESH_COLLECTIVE_STEPS), each SEND's piece typed
    as the receiving step's; 0 where the map lacks a pair the algorithm uses, the map has fewer than
-   two nodes, or a ring's segment would be empty (fewer elements than nodes). */
+   two nodes, or a segment would be empty (fewer elements than nodes, a count of 0) or the segments
+   do not sum to the operand. */
 uint32_t mesh_collective_plan(const struct mesh_link_map *,uint32_t rank,struct mesh_collective,struct mesh_operand,struct mesh_step *steps);
 /* Its time in microseconds, every node's plan run in the alpha-beta model [Hockney 1994] with a
    node's sends sharing one port and its receives another (alpha in us, beta in ns a byte);
