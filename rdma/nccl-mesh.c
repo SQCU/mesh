@@ -90,8 +90,9 @@ struct tally { _Atomic int refs; int n; uint64_t counts[][TALLIES]; };
 struct launch { pthread_mutex_t lock; pthread_cond_t cond; int items,sync,nmarks,nwaits; ncclResult_t result; struct mark *marks;
   void *event; uint64_t gate,end; struct tally *tally; struct point *waits; unsigned char *stage; struct region own; };
 struct flight;
-/* A communicator's part of a group: `arrived` its last arrivals value, `final` its done value. */
-struct item { struct call *calls; int n; struct launch *launch; struct item *next; uint64_t deadline,arrived,final;
+/* A communicator's part of a group: `arrived` its last arrivals value, `final` its done value (0: no
+   program waits on it); `bound`, while its program waits on the network, when that wait fails it. */
+struct item { struct call *calls; int n; struct launch *launch; struct item *next; uint64_t deadline,bound,arrived,final;
   int collectives_done; struct flight *flight; ncclResult_t result; };
 /* A plan kept for (epoch, call signature): the algorithm chosen and this rank's steps. */
 #define PLANS 64
@@ -523,13 +524,29 @@ static ncclResult_t span_release(void *p,void *event,uint64_t value){
 }
 
 /* ---- requests ---- */
+/* The longest the GPU waits on the network: a part whose program waits for its pieces' arrivals or its
+   done value fails as a value once the network has given the GPU nothing it waits for in this long,
+   and the worker signals every value the program waits for, so the program and its stream's later
+   work go on.  Metal ends a command buffer that waits past its watchdog, and then refuses the process's
+   later submissions (kIOGPUCommandBufferCallbackErrorTimeout, then ...SubmissionsIgnored: the M5's own
+   bridge stopped for 5 s, metal-microbench output_data/epoch-20260929/replay-local-stop; one command
+   buffer waiting 4.5 s on a shared event alone was not ended). */
+#define GPU_WAIT_NS UINT64_C(1000000000)
 struct pending { size_t lo,hi; void *request; };
 static void progress(struct ncclComm *c);
-static int stopped(struct ncclComm *c,uint64_t deadline){return atomic_load(&c->aborting) || now_ns()>deadline;}
-static ncclResult_t stop_reason(struct ncclComm *c,const char *what){
-  return atomic_load(&c->aborting)?FAIL(c,ncclInvalidUsage,"%s: the communicator was aborted",what):
-    FAIL(c,ncclTimeout,"%s: not done by the deadline (MESH_NCCL_TIMEOUT)",what);
+static int stopped(struct ncclComm *c,const struct item *it){
+  const uint64_t now=now_ns();
+  return atomic_load(&c->aborting) || now>it->deadline || (it->bound && now>it->bound);
 }
+static ncclResult_t stop_reason(struct ncclComm *c,const struct item *it,const char *what){
+  if(atomic_load(&c->aborting))return FAIL(c,ncclInvalidUsage,"%s: the communicator was aborted",what);
+  if(it->bound && now_ns()>it->bound)
+    return FAIL(c,ncclRemoteError,"%s: the network gave the GPU nothing it waits for in %.0f s (a bridge stalled, or a peer has not "
+                "joined the call); the call fails before Metal's command-buffer watchdog",what,GPU_WAIT_NS/1e9);
+  return FAIL(c,ncclTimeout,"%s: not done by the deadline (MESH_NCCL_TIMEOUT)",what);
+}
+/* The GPU passed a network wait (an arrival signalled, a combine done): the bound starts again. */
+static void rebound(struct item *it){if(it->final)it->bound=now_ns()+GPU_WAIT_NS;}
 /* Reaps every pending isend that is done (its ring slot free again). */
 static ncclResult_t reap(struct ncclComm *c,struct pending *sends,int *count){
   for(int i=0;i<*count;){
@@ -540,7 +557,7 @@ static ncclResult_t reap(struct ncclComm *c,struct pending *sends,int *count){
   }
   return ncclSuccess;
 }
-static ncclResult_t await(struct ncclComm *c,void *request,size_t bytes,struct pending *sends,int *count,uint64_t deadline,const char *what){
+static ncclResult_t await(struct ncclComm *c,void *request,size_t bytes,struct pending *sends,int *count,struct item *it,const char *what){
   for(;;){
     int done=0,size=0,result=mesh_net_test(request,&done,&size);
     if(result)return net_failure(c,result,what);
@@ -549,37 +566,40 @@ static ncclResult_t await(struct ncclComm *c,void *request,size_t bytes,struct p
       return ncclSuccess;
     }
     if(sends){ncclResult_t r=reap(c,sends,count);if(r)return r;}
-    if(stopped(c,deadline))return stop_reason(c,what);
+    if(stopped(c,it))return stop_reason(c,it,what);
     progress(c);
     sched_yield();
   }
 }
 /* An isend or irecv posted, waiting while its connection's request ring is full. */
 static ncclResult_t post(struct ncclComm *c,int send,void *comm,void *data,size_t bytes,void *mhandle,
-  struct pending *sends,int *count,uint64_t deadline,void **request){
+  struct pending *sends,int *count,struct item *it,void **request){
   for(*request=NULL;;){
     int result=send?mesh_net_isend(comm,data,bytes,0,mhandle,NULL,request):
       mesh_net_irecv(comm,1,&data,&bytes,(int[]){0},&mhandle,NULL,request);
     if(result)return net_failure(c,result,send?"mesh_net_isend":"mesh_net_irecv");
     if(*request)return ncclSuccess;
     if(sends){ncclResult_t r=reap(c,sends,count);if(r)return r;}
-    if(stopped(c,deadline))return stop_reason(c,send?"an isend":"an irecv");
+    if(stopped(c,it))return stop_reason(c,it,send?"an isend":"an irecv");
     progress(c);
     sched_yield();
   }
 }
 
 
-/* The worker waits for the program's event to reach `value` (the library's own GPU work), the
-   point-to-point transfers moving meanwhile. */
-static ncclResult_t gpu_wait(struct ncclComm *c,struct call *k,void *event,uint64_t value,uint64_t deadline,const char *what){
+/* The worker waits for the program's event to reach `value` (the library's own GPU work, which waits on
+   no network meanwhile: the bound starts again once it is done), the point-to-point transfers moving
+   meanwhile. */
+static ncclResult_t gpu_wait(struct ncclComm *c,struct call *k,void *event,uint64_t value,struct item *it,const char *what){
   count(k,HOST_WAITS,1);
+  it->bound=0;
   while(nccl_mesh_event_value(event)<value){
     if(nccl_mesh_gpu_failed())return FAIL(c,ncclUnhandledCudaError,"%s: a GPU program failed",what);
-    if(stopped(c,deadline))return stop_reason(c,what);
+    if(stopped(c,it))return stop_reason(c,it,what);
     progress(c);
     sched_yield();
   }
+  rebound(it);
   return ncclSuccess;
 }
 
@@ -587,7 +607,7 @@ static ncclResult_t gpu_wait(struct ncclComm *c,struct call *k,void *event,uint6
 /* The worker's side of a collective the group's end placed: this rank's plan.  A piece the GPU
    combines is sent, or landed on, only once it has combined it. */
 struct combined { size_t lo,hi; uint64_t value; };
-static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct launch *l,uint64_t deadline){
+static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct launch *l,struct item *it){
   const size_t e=type_bytes[k->type];
   ncclResult_t status=ncclSuccess;
   struct pending *sends=calloc(k->nsteps?k->nsteps:1,sizeof *sends);int count_=0;
@@ -603,10 +623,10 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct laun
     if(s->op!=MESH_STEP_REDUCE){
       uint64_t need=0;
       for(int j=0;j<ndone;j++)if(done[j].lo<lo+length && lo<done[j].hi && done[j].value>need)need=done[j].value;
-      if(need>seen){if((status=gpu_wait(c,k,l->event,need,deadline,"a combine")))break;seen=need;}
+      if(need>seen){if((status=gpu_wait(c,k,l->event,need,it,"a combine")))break;seen=need;}
     }
     if(s->op==MESH_STEP_SEND){
-      if(!(status=post(c,1,p->send[CH_COLL],k->operand+lo,length,window.mh,sends,&count_,deadline,&request))){
+      if(!(status=post(c,1,p->send[CH_COLL],k->operand+lo,length,window.mh,sends,&count_,it,&request))){
         sends[count_++]=(struct pending){lo,lo+length,request};
         count(k,SENT,length);
       }
@@ -617,31 +637,32 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct laun
     if(!known && nused<64)used[nused++]=p->recv[CH_COLL];
     /* a piece of the operand is written only once no isend still reads it */
     for(int j=0;j<count_ && !status && s->op==MESH_STEP_COPY;)
-      if(sends[j].lo<lo+length && lo<sends[j].hi){status=await(c,sends[j].request,SIZE_MAX,NULL,NULL,deadline,"an isend");sends[j]=sends[--count_];}
+      if(sends[j].lo<lo+length && lo<sends[j].hi){status=await(c,sends[j].request,SIZE_MAX,NULL,NULL,it,"an isend");sends[j]=sends[--count_];}
       else j++;
     if(status)break;
     unsigned char *into=s->op==MESH_STEP_COPY?k->operand+lo:k->pieces[i].at;
-    if((status=post(c,0,p->recv[CH_COLL],into,length,window.mh,sends,&count_,deadline,&request)))break;
-    if((status=await(c,request,length,sends,&count_,deadline,s->op==MESH_STEP_COPY?"a COPY step's irecv":"a REDUCE step's irecv")))break;
+    if((status=post(c,0,p->recv[CH_COLL],into,length,window.mh,sends,&count_,it,&request)))break;
+    if((status=await(c,request,length,sends,&count_,it,s->op==MESH_STEP_COPY?"a COPY step's irecv":"a REDUCE step's irecv")))break;
     count(k,RECEIVED,length);
     if(s->op==MESH_STEP_REDUCE){
       for(int j=0;j<count_ && !status;)
-        if(sends[j].lo<lo+length && lo<sends[j].hi){status=await(c,sends[j].request,SIZE_MAX,NULL,NULL,deadline,"an isend");sends[j]=sends[--count_];}
+        if(sends[j].lo<lo+length && lo<sends[j].hi){status=await(c,sends[j].request,SIZE_MAX,NULL,NULL,it,"an isend");sends[j]=sends[--count_];}
         else j++;
       if(!status){
         nccl_mesh_event_signal(c->arrive,k->pieces[i].arrived);
+        rebound(it);
         done[ndone++]=(struct combined){lo,lo+length,k->pieces[i].combined};
       }
     }
   }
-  while(count_ && !status){status=await(c,sends[count_-1].request,SIZE_MAX,NULL,NULL,deadline,"an isend");count_--;}
+  while(count_ && !status){status=await(c,sends[count_-1].request,SIZE_MAX,NULL,NULL,it,"an isend");count_--;}
   for(int u=0;u<nused && !status;u++){
     void *flush=NULL;int result=mesh_net_iflush(used[u],1,NULL,NULL,NULL,&flush);
     if(result)status=net_failure(c,result,"mesh_net_iflush");
-    else if(flush)status=await(c,flush,SIZE_MAX,NULL,NULL,deadline,"an iflush");
+    else if(flush)status=await(c,flush,SIZE_MAX,NULL,NULL,it,"an iflush");
   }
   free(sends);free(done);
-  if(!status && k->networked)nccl_mesh_event_signal(c->arrive,k->networked);
+  if(!status && k->networked){nccl_mesh_event_signal(c->arrive,k->networked);rebound(it);}
   return status;
 }
 
@@ -687,7 +708,7 @@ static void progress(struct ncclComm *c){
         }
       }
     }
-    if(!f->status && f->remaining && stopped(c,f->it->deadline))f->status=stop_reason(c,"a point-to-point call");
+    if(!f->status && f->remaining && stopped(c,f->it))f->status=stop_reason(c,f->it,"a point-to-point call");
     if(f->status || !f->remaining){*link=f->next;retire(c,f);}
     else link=&f->next;
   }
@@ -699,6 +720,7 @@ static void progress(struct ncclComm *c){
 static void start(struct ncclComm *c,struct item *it){
   ncclResult_t status=atomic_load(&c->broken)?FAIL(c,ncclRemoteError,"the communicator failed earlier: %s",c->error):ncclSuccess;
   const uint64_t now=now_ns();
+  rebound(it);
   for(int i=0;i<it->n;i++)if(it->calls[i].tally && !it->calls[i].tally[STARTED])it->calls[i].tally[STARTED]=now;
   if(it->n)count(it->calls,it->launch->gate?HOST_WAITS:INPUT_WAITS,it->launch->gate || it->launch->nwaits);
   int transfers=0;
@@ -727,7 +749,7 @@ static void start(struct ncclComm *c,struct item *it){
     }
   }
   int networked=0;
-  for(int i=0;i<it->n && !status;i++)if(it->calls[i].kind<K_SEND)status=run_collective(c,it->calls+i,it->launch,it->deadline),networked=1;
+  for(int i=0;i<it->n && !status;i++)if(it->calls[i].kind<K_SEND)status=run_collective(c,it->calls+i,it->launch,it),networked=1;
   /* every arrival the program waits for, whatever happened */
   if(it->arrived)nccl_mesh_event_signal(c->arrive,it->arrived);
   if(status){
@@ -805,7 +827,7 @@ static void *worker(void *argument){
     if(it && room){
       int go=ready(it);
       if(!go && nccl_mesh_gpu_failed()){go=1;it->result=FAIL(c,ncclUnhandledCudaError,"waiting for the group's gate: a GPU program failed");}
-      if(!go && stopped(c,it->deadline)){go=1;it->result=stop_reason(c,"waiting for the group's gate");}
+      if(!go && stopped(c,it)){go=1;it->result=stop_reason(c,it,"waiting for the group's gate");}
       if(go){
         pthread_mutex_lock(&c->lock);
         c->head=it->next;if(!c->head)c->tail=NULL;

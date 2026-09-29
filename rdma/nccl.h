@@ -30,7 +30,10 @@
    that reaches it.
    ncclCollConfig_t.algSelection names the planner's algorithms: "direct", "ring", "tree",
    "binomial" (comma-separated).  MESH_NCCL_TIMEOUT bounds a connection or a call, in seconds
-   (default 300).
+   (default 300).  A call whose GPU program waits on the network fails as a value (ncclRemoteError)
+   once the network has given the GPU nothing it waits for in 1 s, and every value the program waits
+   for is signalled, so it and its stream's later work go on: Metal ends a command buffer that waits
+   past its watchdog, and then refuses every later submission of the process.
 
    Buffers are host pointers: unified memory.  The bridge's registered window is handed out as
    allocations (ncclMemAlloc), each a record of the library: its pages, the one Metal buffer over them
