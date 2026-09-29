@@ -1,6 +1,13 @@
 """torch.distributed's "mesh" backend: libnccl-mesh's collectives for CPU and MPS tensors
 (ProcessGroupMesh.mm).  Importing it, or importing torch with this package installed (its
-torch.backends entry point), registers the backend; a rank's bridge is MESH_REGION.  Once a process
+torch.backends entry point), registers the backend; a rank's bridge is MESH_REGION.  The group's link
+map is its options: init_process_group(backend="mesh", pg_options=torch_mesh.Options(nodes, links)),
+rank r's node nodes[r] in the bridge's link table, `links` a link-map file stated into it first (none:
+the table as it stands); without them there is no group (ValueError on every rank alike).  A group made
+later (new_group, a DeviceMesh's) without options takes the world's, restricted to its ranks.
+links() is a snapshot of the table (epoch, the bridge's node, present, alpha/beta/stated/up per
+directed link); take_error() the first failure of a call issued earlier (a link lost, or the link
+map's epoch moved during it: revoked), once, else None.  Once a process
 group of the backend exists, torch's MPS factories (torch.empty, zeros, ones, full, rand, randn,
 tensor, their *_like forms, and Tensor.to onto "mps") make window tensors on that thread: tensors of
 the bridge's registered window, which the backend sends and receives in place, and whose release
@@ -10,8 +17,8 @@ waited for so far; records() the window allocator's records, and address(t) wher
 lie in them (0: outside the window).
   The backend also completes what PyTorch's parallelism APIs need of MPS tensors (_mps.py): DeviceMesh
 on "mps", DTensor's backward through nn.Linear, and context_parallel's SDPA (CPU tensors too).  Its
-first process group also installs partition.py: a mesh dimension's parts (MESH_PARTITION), by which
-DTensor's Shard, tensor and context parallelism split it instead of equally.
+first process group also installs partition.py: a mesh dimension's capacity-shaped parts (attach, write),
+by which DTensor's Shard, tensor and context parallelism split it instead of equally.
 MESH_TRACE=<file> writes each call's trace there (ProcessGroupMesh.mm) when the group is destroyed or the
 process exits."""
 import atexit
@@ -20,17 +27,40 @@ import os
 import threading
 
 
+class Options:
+    """The "mesh" backend's pg_options: the link map as an operand whose shape is fixed and whose
+    contents vary, the link table of the bridge of `region` (None: MESH_REGION), with rank r of the
+    group at node nodes[r]; `links`, a link-map file (mesh rdma/mesh-collective.h), is stated into the
+    table when the group is made (its nodes and each link's alpha and beta)."""
+
+    def __init__(self, nodes, links=None, region=None):
+        self.nodes, self.links, self.region = tuple(int(v) for v in nodes), links, region
+
+
+_world = None
+
+
 def _autoload():
     import torch.distributed as dist
     if 'mesh' in dist.Backend.backend_list:
         return
-    dist.Backend.register_backend('mesh', _create, devices=['cpu', 'mps'])
+    dist.Backend.register_backend('mesh', _create, extended_api=True, devices=['cpu', 'mps'])
 
 
-def _create(store, rank, size, timeout):
+def _create(opts, options):
     """The backend, and from then on this thread's MPS factories making window tensors."""
     from . import _C, _mps, partition  # noqa: F401 (partition installs itself)
-    backend = _C.createProcessGroupMesh(store, rank, size, timeout)
+    global _world
+    ranks = list(opts.global_ranks_in_group)
+    if options is None and _world is not None:
+        options = Options([_world.nodes[r] for r in ranks], region=_world.region)
+    if not isinstance(options, Options):
+        raise ValueError('mesh: no link map: init_process_group(backend="mesh", pg_options=torch_mesh.Options(nodes, links)) '
+                         'names each rank\'s node in the bridge\'s link table and the link-map file stated into it')
+    if _world is None:
+        _world = options
+    backend = _C.createProcessGroupMesh(opts.store, opts.group_rank, opts.group_size, opts.timeout, options.region or '',
+                                        str(options.links or ''), list(options.nodes))
     global _mode
     if _mode is None:
         _mode = _window_mode()
@@ -68,6 +98,18 @@ def empty(*size, dtype=None, device='mps'):
 def counts():
     from . import _C
     return _C.counts()
+
+
+def links(region=None):
+    """(epoch, the bridge's node, present [16], links [16, 16, 4]: alpha, beta, stated, up of a to b)."""
+    from . import _C
+    return _C.links(region or '')
+
+
+def take_error():
+    """The first failure of a call issued earlier since the last take, once; else None."""
+    from . import _C
+    return _C.take_error()
 
 
 def records():

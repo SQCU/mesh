@@ -32,16 +32,65 @@ class Step(C.Structure):
 
 class LinkMap(C.Structure):
     """mesh-collective.h struct mesh_link_map: any number of nodes; `link` its links' storage (link_map
-    builds one the map keeps; mesh_link_map_read allocates one mesh_link_map_free releases)."""
-    _fields_ = [('kind', U), ('nodes', U), ('links', U), ('link', C.POINTER(U * 2))]
+    builds one the map keeps; mesh_link_map_read allocates one mesh_link_map_free releases); `cost`, where
+    not NULL, each directed pair's (alpha us, beta ns a byte) at [a * nodes + b]."""
+    _fields_ = [('kind', U), ('nodes', U), ('links', U), ('link', C.POINTER(U * 2)), ('cost', C.POINTER(C.c_float * 2))]
 
 
-def link_map(kind, nodes, pairs):
-    """A LinkMap of `kind` (KINDS) over `nodes` with the links `pairs`, its storage held by the map."""
+def link_map(kind, nodes, pairs, cost=None):
+    """A LinkMap of `kind` (KINDS) over `nodes` with the links `pairs`, its storage held by the map;
+    `cost` {(a, b): (alpha, beta)} each directed pair's, where given (every pair's: the planner weighs it
+    instead of the alpha and beta it is passed)."""
     storage = ((U * 2) * max(1, len(pairs)))(*[(U * 2)(a, b) for a, b in pairs])
     made = LinkMap(kind=KINDS.index(kind), nodes=nodes, links=len(pairs), link=C.cast(storage, C.POINTER(U * 2)))
     made._storage = storage
+    if cost is not None:
+        costs = ((C.c_float * 2) * (nodes * nodes))(*[(C.c_float * 2)(*cost.get((a, b), (0.0, 0.0)))
+                                                       for a in range(nodes) for b in range(nodes)])
+        made.cost, made._costs = C.cast(costs, C.POINTER(C.c_float * 2)), costs
     return made
+
+
+LINK_NODES = 16  # mesh-dataflow.h MESH_LINK_NODES
+
+
+class LinkState(C.Structure):
+    """mesh-dataflow.h struct mesh_link_state: one directed link's stated alpha and beta, stated, up."""
+    _fields_ = [('alpha', C.c_float), ('beta', C.c_float), ('stated', U), ('up', U)]
+
+
+class LinkContents(C.Structure):
+    """mesh-dataflow.h struct mesh_link_contents: a snapshot of the link table."""
+    _fields_ = [('present', U * LINK_NODES), ('link', (LinkState * LINK_NODES) * LINK_NODES)]
+
+
+class LinkTable:
+    """The link table of a bridge region (mesh-dataflow.h: the link map as an operand of fixed shape),
+    mapped: state(path) writes a link-map file's stated configuration into it, read() a snapshot and its
+    epoch, map(snapshot, nodes) the planner's LinkMap of it over those nodes."""
+
+    def __init__(self, region=None, create=False):
+        self.table = C.c_void_p()
+        check(LIB.mesh_link_table_open(os.fsencode(region) if region else None, int(create), C.byref(self.table)))
+        self.node = C.cast(self.table, C.POINTER(U))[1]
+
+    def state(self, path):
+        check(LIB.mesh_link_table_state(self.table, os.fsencode(str(path))))
+
+    def read(self):
+        contents = LinkContents()
+        return contents, LIB.mesh_link_table_read(self.table, C.byref(contents))
+
+    @staticmethod
+    def map(contents, nodes):
+        n = len(nodes)
+        made, pairs, cost = LinkMap(), ((U * 2) * max(1, n * n))(), ((C.c_float * 2) * max(1, n * n))()
+        LIB.mesh_link_table_map(C.byref(contents), (U * n)(*nodes), n, C.byref(made), pairs, cost)
+        made._storage = (pairs, cost)
+        return made
+
+    def close(self):
+        LIB.mesh_link_table_close(self.table)
 
 
 class Collective(C.Structure):
@@ -62,7 +111,7 @@ def bits(nodes, members):
 
 
 SEND, REDUCE, COPY = range(3)
-KINDS = ('mesh', 'ring', 'tree')  # MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE
+KINDS = ('mesh', 'ring', 'tree', 'graph')  # MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH
 ALLREDUCE, BROADCAST = range(2)
 WHATS = ('allreduce', 'broadcast', 'reduce', 'reduce_scatter', 'allgather')  # MESH_ALLREDUCE .. MESH_ALLGATHER
 ALGORITHMS = ('direct', 'ring', 'tree', 'binomial')  # MESH_DIRECT .. MESH_BINOMIAL; MESH_UNAVAILABLE after them
@@ -74,6 +123,11 @@ for name, result, arguments in (
         ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_link_map_read', C.c_int, [C.c_char_p, C.POINTER(LinkMap)]),
         ('mesh_link_map_free', None, [C.POINTER(LinkMap)]),
+        ('mesh_link_table_open', C.c_int, [C.c_char_p, C.c_int, C.POINTER(C.c_void_p)]),
+        ('mesh_link_table_close', None, [C.c_void_p]),
+        ('mesh_link_table_state', C.c_int, [C.c_void_p, C.c_char_p]),
+        ('mesh_link_table_read', Q, [C.c_void_p, C.c_void_p]),
+        ('mesh_link_table_map', None, [C.c_void_p, C.POINTER(U), U, C.POINTER(LinkMap), C.c_void_p, C.c_void_p]),
         ('mesh_collective_plan', U, [C.POINTER(LinkMap), U, Collective, Operand, C.POINTER(Step)]),
         ('mesh_collective_time', C.c_double, [C.POINTER(LinkMap), Collective, Operand, C.c_double, C.c_double]),
         ('mesh_collective_choose', Collective, [C.POINTER(LinkMap), Collective, Operand, C.c_double, C.c_double]),

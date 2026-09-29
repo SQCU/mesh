@@ -17,11 +17,17 @@
      cc app.c -I rdma -L rdma -lnccl-mesh -Wl,-rpath,<rdma>
    A rank is a process on a node whose bridge (mesh-flow) is up: MESH_REGION names the bridge's
    region (default /mesh0).  The collectives are planned by mesh-collective.h's one planner
-   (mesh_collective_choose / _plan) over MESH_LINKS, an explicit link map over the communicator's
-   ranks (default: every pair linked; a link line's third and fourth fields are the alpha-beta cost
-   the planner weighs), and run as that plan's SEND / REDUCE / COPY steps on the bridge's
-   communicator sessions (mesh-net.h, NCCL's ncclNet_v12 model).  ncclCommInitRank connects this
-   rank to every rank the map links it to, on the bridge link that reaches it.
+   (mesh_collective_choose / _plan) over the link map, an operand whose shape is fixed and whose
+   contents vary: the bridge's link table (mesh-dataflow.h, ncclMeshLinksAttach) of stated nodes and
+   per directed link a stated alpha-beta cost and an observed up, which the communicator takes through
+   ncclMeshConfig_t (ncclCommInitRankConfig; no table, no communicator) and a split inherits.  Each call
+   plans on one snapshot of it, read when its group ends, and records its epoch; plans are kept by
+   (epoch, call); a call during which the epoch moves fails as a value (ncclRemoteError, revoked), and a
+   call whose plan needs a link that is down fails so at once; the next call plans on the new contents,
+   connecting again first where the bridge lost a connection.  Calls run as their plan's SEND / REDUCE
+   / COPY steps on the bridge's communicator sessions (mesh-net.h, NCCL's ncclNet_v12 model).
+   ncclCommInitRankConfig connects this rank to every rank the table links it to, on the bridge link
+   that reaches it.
    ncclCollConfig_t.algSelection names the planner's algorithms: "direct", "ring", "tree",
    "binomial" (comma-separated).  MESH_NCCL_TIMEOUT bounds a connection or a call, in seconds
    (default 300).
@@ -60,7 +66,7 @@
    completes only once its peer has posted the receive, so a send and a receive that wait on each
    other's peers belong in one group or on different streams).  ncclMeshStreamQuery is
    cudaStreamQuery.  A failed call still signals its completion value (the GPU is never left waiting);
-   its error is the communicator's ncclCommGetAsyncError.  ncclMeshStreamSynchronize waits on the host
+   its error is the communicator's ncclCommGetAsyncError (ncclMeshCommTakeError takes it).  ncclMeshStreamSynchronize waits on the host
    for `value`.
 
    Not implemented (not exported): ncclCommRevoke, ncclCommShrink, ncclCommGetUniqueId,
@@ -765,6 +771,34 @@ ncclResult_t  ncclGroupEnd(void);
 ncclResult_t pncclGroupEnd(void);
 
 /* The mesh's own additions (not NCCL's). */
+/* The link map (above): the table of the bridge of `region` (NULL: MESH_REGION, else /mesh0), mapped
+   (ncclMeshLinksAttach) until ncclMeshLinksDetach, after every communicator that references it.
+   ncclMeshLinksState states a link-map file (mesh-collective.h) into it, a write between calls: its
+   nodes, its links' alpha and beta; the up of the bridge's own links stays as observed.
+   ncclMeshLinksRead copies one consistent snapshot: links[a * NCCL_MESH_LINK_NODES + b] of a to b,
+   present[v] of node v, the bridge's node and the epoch (each where not NULL). */
+#define NCCL_MESH_LINK_NODES 16
+typedef struct { float alpha, beta; uint32_t stated, up; } ncclMeshLink_t;
+ncclResult_t ncclMeshLinksAttach(const char* region, void** links);
+ncclResult_t ncclMeshLinksDetach(void* links);
+ncclResult_t ncclMeshLinksState(void* links, const char* path);
+ncclResult_t ncclMeshLinksRead(void* links, ncclMeshLink_t* snapshot, uint32_t* present, uint32_t* node, uint64_t* epoch);
+/* ncclCommInitRankConfig's and ncclCommSplit's config, recognized by base.size: `links` the table,
+   nodes[r] rank r's node in it (every rank's node present and distinct), each read at the call.  A
+   split without it inherits its parent's, restricted to its ranks. */
+typedef struct { ncclConfig_t base; void* links; const int* nodes; } ncclMeshConfig_t;
+#define NCCL_MESH_CONFIG_INITIALIZER {                                  \
+  { sizeof(ncclMeshConfig_t), NCCL_API_MAGIC, NCCL_VERSION_CODE,        \
+    NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, \
+    NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_PTR, NCCL_CONFIG_UNDEF_INT, \
+    NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_PTR, NCCL_CONFIG_UNDEF_INT, \
+    NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, \
+    NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, \
+    NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, \
+    NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, \
+    NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT }, NULL, NULL }
+/* The first failure of a call on a stream since the last take (ncclSuccess: none), cleared. */
+ncclResult_t ncclMeshCommTakeError(ncclComm_t comm, ncclResult_t* result);
 /* MPI_Allgatherv and MPI_Reduce_scatter: rank r's segment is counts[r] elements (counts: nranks
    entries, the same on every rank, each at least 1), the segments packed in rank order, so rank r's
    lies after the segments of the ranks before it.  ncclMeshAllGatherV sends counts[rank] elements of
@@ -793,6 +827,8 @@ ncclResult_t ncclMeshStreamQuery(cudaStream_t stream);
    order (at most `capacity`): 0 direct, 1 ring, 2 tree, 3 binomial (mesh-collective.h MESH_*),
    -1 a point-to-point call or a one-rank communicator's local copy; `roots` the tree's root. */
 ncclResult_t ncclMeshGroupPlans(int* algorithms, int* roots, int capacity, int* count);
+/* The link map's epoch each of those calls planned on (0 for a point-to-point call). */
+ncclResult_t ncclMeshGroupEpochs(uint64_t* epochs, int capacity, int* count);
 /* What the library copied, sent and waited for, counted: bytes a library thread copied on the CPU
    (none: every copy is the GPU's), bytes its GPU programs copied (blits into and out of the window,
    within it), the combine, premultiply and post-divide kernels they ran, the waits of a library

@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <limits.h>
+#include <stdio.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
 static void mesh_reclaim(struct hdr *);
 
@@ -32,6 +33,59 @@ int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,u
     }
   }
   munmap(m,(size_t)info.st_size);return result;
+}
+
+/* The link table (mesh-dataflow.h): the latch sequence counter of Linux include/linux/seqlock.h
+   (raw_write_seqcount_latch: two copies, the counter's parity naming the one readers take), in shared
+   memory named after the region. */
+int mesh_link_table_open(const char *region,int create,struct mesh_link_table **out){
+  char name[64];
+  snprintf(name,sizeof name,"%s.links",region?region:MESH_NAME);
+  if(create)shm_unlink(name);
+  int file=shm_open(name,create?O_CREAT|O_EXCL|O_RDWR:O_RDWR,MESH_MODE);
+  if(file<0)return errno;
+  struct stat info;
+  if(create)fchmod(file,MESH_MODE);  /* as the region's: past the umask where the system allows it */
+  int error=create && ftruncate(file,sizeof **out)?errno:fstat(file,&info)?errno:0;
+  if(!error && !create && (size_t)info.st_size!=sizeof **out)error=EINVAL;
+  struct mesh_link_table *t=error?MAP_FAILED:mmap(NULL,sizeof *t,PROT_READ|PROT_WRITE,MAP_SHARED,file,0);
+  if(!error && t==MAP_FAILED)error=errno;
+  close(file);
+  if(error)return error;
+  if(create)t->magic=MESH_LINK_MAGIC;
+  else if(t->magic!=MESH_LINK_MAGIC){munmap(t,sizeof *t);return EINVAL;}
+  *out=t;
+  return 0;
+}
+void mesh_link_table_close(struct mesh_link_table *t){if(t)munmap(t,sizeof *t);}
+uint64_t mesh_link_table_read(const struct mesh_link_table *t,struct mesh_link_contents *out){
+  for(;;){
+    uint64_t epoch=atomic_load_explicit(&t->epoch,memory_order_acquire);
+    memcpy(out,&t->copy[epoch&1],sizeof *out);
+    atomic_thread_fence(memory_order_acquire);
+    if(atomic_load_explicit(&t->epoch,memory_order_relaxed)==epoch)return epoch;
+  }
+}
+int mesh_link_table_write(struct mesh_link_table *t,void (*edit)(struct mesh_link_contents *,const void *),const void *argument){
+  for(uint32_t idle=0;!atomic_compare_exchange_weak_explicit(&t->writer,&idle,1,memory_order_acquire,memory_order_relaxed);idle=0)usleep(10);
+  uint64_t epoch=atomic_load_explicit(&t->epoch,memory_order_relaxed);
+  struct mesh_link_contents *now=&t->copy[epoch&1],*next=&t->copy[(epoch+1)&1];
+  memcpy(next,now,sizeof *next);
+  edit(next,argument);
+  int changed=memcmp(next,now,sizeof *next)!=0;
+  if(changed)atomic_store_explicit(&t->epoch,epoch+1,memory_order_release);
+  atomic_store_explicit(&t->writer,0,memory_order_release);
+  return changed;
+}
+struct mesh_link_seen { uint32_t node,peer,up; };
+static void mesh_link_seen(struct mesh_link_contents *c,const void *argument){
+  const struct mesh_link_seen *s=argument;
+  c->link[s->node][s->peer].up=c->link[s->peer][s->node].up=s->up;
+}
+int mesh_link_table_observe(struct mesh_link_table *t,uint32_t peer,uint32_t up){
+  if(peer>=MESH_LINK_NODES || t->node>=MESH_LINK_NODES)return EINVAL;
+  mesh_link_table_write(t,mesh_link_seen,&(struct mesh_link_seen){t->node,peer,up!=0});
+  return 0;
 }
 
 /* design/algorithm-sources.md#programtensor */

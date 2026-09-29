@@ -4,15 +4,31 @@
 
 /* An explicit link map, one small text file:
      <kind> <nodes>             kind is mesh, ring or tree
-     <a> <b>                    one link per line; '#' starts a comment line
+     <a> <b> [<alpha> <beta>]   one link per line, a to b and its crossing cost (alpha us a message,
+                                beta ns a byte [Hockney 1994]); '#' starts a comment line
+     node <id> ...              a node of the map (tools read the rest of the line)
    ring: b follows a around the ring.  tree: a is b's parent; the root is nobody's child.  mesh: every pair is linked.
-   mesh_collective_choose picks among every algorithm whose links the map has, by the operand's size. */
-enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE };
+   mesh_collective_choose picks among every algorithm whose links the map has, by the operand's size.
+   graph (a link table's map, mesh_link_table_map): any links, a ring in rank order where they carry one
+   and spanning trees by breadth. */
+enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
 /* Any number of nodes and links: `link` is the links' storage, the caller's, or mesh_link_map_read's
-   (freed by mesh_link_map_free). */
-struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; };
+   (freed by mesh_link_map_free).  `cost`, where given, is each directed pair's (alpha, beta), node a to
+   node b at [a * nodes + b], which the planner weighs instead of the one alpha and beta it is passed. */
+struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; const float (*cost)[2]; };
 int mesh_link_map_read(const char *path,struct mesh_link_map *);
 void mesh_link_map_free(struct mesh_link_map *);
+/* The link table's (mesh-dataflow.h) stated configuration from a link-map file: its nodes present (the
+   kind line's 0..nodes-1 and every node line's), each link line a to b stated with its alpha and beta;
+   what the file does not state is not stated.  The up of the bridge's own links stays as observed,
+   every other stated link is up.  EINVAL where a link line states no cost (nothing infers one) or a
+   node lies past MESH_LINK_NODES. */
+int mesh_link_table_state(struct mesh_link_table *,const char *path);
+/* The planner's map of a snapshot over `nodes` (rank r is node nodes[r]): ranks a and b linked where
+   both directions are stated and up, mesh kind where every pair is, else graph; each directed pair's
+   stated cost.  pairs: n (n - 1) / 2 entries, cost: n n, the caller's. */
+void mesh_link_table_map(const struct mesh_link_contents *,const uint32_t *nodes,uint32_t n,struct mesh_link_map *,
+  uint32_t (*pairs)[2],float (*cost)[2]);
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
 struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
@@ -54,7 +70,8 @@ struct mesh_collective { uint32_t what,how,root,accumulator_bytes; const uint64_
    do not sum to the operand. */
 uint32_t mesh_collective_plan(const struct mesh_link_map *,uint32_t rank,struct mesh_collective,struct mesh_operand,struct mesh_step *steps);
 /* Its time in microseconds, every node's plan run in the alpha-beta model [Hockney 1994] with a
-   node's sends sharing one port and its receives another (alpha in us, beta in ns a byte);
+   node's sends sharing one port and its receives another (alpha in us, beta in ns a byte: each link's
+   own where the map has costs);
    negative where a node has no plan, a receive has no SEND of its piece, or the schedule stops. */
 double mesh_collective_time(const struct mesh_link_map *,struct mesh_collective,struct mesh_operand,double alpha,double beta);
 /* `c` with `how` (and an all-reduce's, reduce-scatter's or all-gather's tree `root`) of least time

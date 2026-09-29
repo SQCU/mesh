@@ -404,6 +404,11 @@ void mesh_net_comm_counts(void *comm,uint64_t counts[4]){
   counts[3]=atomic_load_explicit(&slot->posted,memory_order_relaxed);
 }
 
+int mesh_net_alive(void *comm){
+  struct net_comm_handle *c=comm;
+  return c && atomic_load_explicit(&net_slot(c)->state,memory_order_acquire)==c->kind;
+}
+
 const struct mesh_net_v12 mesh_net_plugin={"mesh",mesh_net_init,mesh_net_devices,mesh_net_get_properties,mesh_net_listen,
   mesh_net_connect,mesh_net_accept,mesh_net_reg_mr,mesh_net_reg_mr_dma_buf,mesh_net_dereg_mr,mesh_net_isend,mesh_net_irecv,
   mesh_net_iflush,mesh_net_test,mesh_net_close_send,mesh_net_close_recv,mesh_net_close_listen,mesh_net_get_device_mr,

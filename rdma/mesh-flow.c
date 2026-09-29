@@ -610,12 +610,17 @@ static void *link_run(void *argument){
 #define NET_OUTPUT 32768
 #define NET_NONE UINT32_MAX
 #define NET_DISCARD (UINT32_MAX-1)
-enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE };
+#define NET_HEARTBEAT_NS UINT64_C(200000000)
+#define NET_SILENCE_NS UINT64_C(2000000000)
+enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT };
 /* One control message.  CONNECT: `key` the listen it names, `from` the connecting comm.  ACCEPT: `from`
    the receiving comm made for `to`.  RTS: send request `sequence` of `from`, `size` its bytes,
    extent/phase where its registration regions end.  CREDIT: a chunk of that request, `offset` into it
    and `size` long, whose RECV is posted (size 0: the empty message received; `error`: refused).
-   CLOSE: `from` announces and grants nothing more on this connection; flags 1 asks for a CLOSE back. */
+   CLOSE: `from` announces and grants nothing more on this connection; flags 1 asks for a CLOSE back.
+   HEARTBEAT: nothing; each end sends one whenever it has sent nothing for NET_HEARTBEAT_NS, and ends the
+   session once it has heard nothing for NET_SILENCE_NS (a peer stopped, a cable pulled: the link's
+   down, observed). */
 struct net_message { uint32_t kind,from,from_generation,to,to_generation,flags; int32_t tag,error; uint64_t key,sequence,size,extent,phase,offset; };
 _Static_assert(sizeof(struct net_message)==80,"net_message");
 /* A comm's bridge side, its link's session thread's alone: requests taken; a receive comm's requests
@@ -648,8 +653,12 @@ struct net_session {
   unsigned char input[sizeof(struct net_message)*64];size_t input_bytes;
   struct { uint32_t from,generation; uint64_t key; } pending[MESH_NET_COMMS];uint32_t pending_count;
   int send_blocked,receive_blocked;
-  uint64_t bell,scanned,reaped,strays;
+  uint64_t bell,scanned,reaped,strays,heard,said;
 };
+/* The link table beside the region (mesh-dataflow.h): the sessions write their links' up and down. */
+static struct mesh_link_table *link_table;
+static char link_table_region[64];
+static void link_table_down(void){if(link_table){char name[80];snprintf(name,sizeof name,"%s.links",link_table_region);shm_unlink(name);}}
 
 static uint64_t net_now(void){return clock_gettime_nsec_np(CLOCK_MONOTONIC);}
 static void net_nap(uint64_t ns){for(uint64_t end=net_now()+ns;!stop && net_now()<end;)poll(NULL,0,10);}
@@ -673,6 +682,7 @@ static struct ibv_sge net_span(struct net_session *s,uint32_t mr,uint64_t offset
 static void net_emit(struct net_session *s,struct net_message message){
   if(s->output_tail-s->output_head>=NET_OUTPUT){s->failed=ENOBUFS;return;}
   s->output[s->output_tail++%NET_OUTPUT]=message;
+  s->said=net_now();
 }
 static struct mesh_net_comm *net_comm_at(struct net_session *s,uint32_t index,uint32_t generation){
   if(index>=MESH_NET_COMMS)return NULL;
@@ -927,6 +937,7 @@ static void net_receive(struct net_session *s,const struct net_message *message)
   case NET_RTS: net_announced(s,message); break;
   case NET_CREDIT: net_granted(s,message); break;
   case NET_CLOSE: net_closed(s,message); break;
+  case NET_HEARTBEAT: break;
   default: s->failed=EPROTO;
   }
 }
@@ -1030,7 +1041,7 @@ static int net_read(struct net_session *s,int *busy){
     ssize_t n=read(s->control,s->input+s->input_bytes,sizeof s->input-s->input_bytes);
     if(!n)return ECONNRESET;
     if(n<0)return errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR?0:errno;
-    s->input_bytes+=(size_t)n;*busy=1;
+    s->input_bytes+=(size_t)n;*busy=1;s->heard=net_now();
     size_t whole=s->input_bytes/sizeof(struct net_message)*sizeof(struct net_message);
     for(size_t at=0;at<whole && !s->failed;at+=sizeof(struct net_message)){
       struct net_message message;memcpy(&message,s->input+at,sizeof message);net_receive(s,&message);
@@ -1195,11 +1206,14 @@ static int net_configure(void *argument,int socket,uint64_t client){
 static void net_serve(struct net_session *s){
   s->sends[s->send_tail++%NET_SENDS]=(struct net_send){.comm=NET_NONE,.mr=NET_DISCARD,.length=NET_PRIME};
   uint64_t last=net_now();
+  s->heard=s->said=last;
   while(!stop && !s->failed){
     int busy=0,error=net_complete(s,&busy);
     if(!error)error=net_read(s,&busy);
     if(error){s->failed=error;break;}
     uint64_t now=net_now(),bell=atomic_load_explicit(&s->counts->doorbell,memory_order_acquire);
+    if(now-s->heard>NET_SILENCE_NS){s->failed=ETIMEDOUT;break;}
+    if(now-s->said>NET_HEARTBEAT_NS)net_emit(s,(struct net_message){.kind=NET_HEARTBEAT});
     if(bell!=s->bell || now-s->scanned>1000000){busy|=bell!=s->bell;s->bell=bell;s->scanned=now;net_scan(s);}
     if(now-s->reaped>500000000){s->reaped=now;net_reap(s);}
     if(!s->failed && (error=net_post(s)))s->failed=error;
@@ -1231,12 +1245,14 @@ static void *net_session_run(void *argument){
     atomic_store_explicit(&s->counts->code,0,memory_order_relaxed);
     atomic_fetch_add_explicit(&s->counts->sessions,1,memory_order_relaxed);
     atomic_store_explicit(&s->counts->phase,MESH_PAIRED,memory_order_release);
+    if(link_table)mesh_link_table_observe(link_table,s->provider.peer,1);
     net_serve(s);
     int32_t error=stop?ECANCELED:s->failed?s->failed:EIO;
     if(!stop)fprintf(stderr,"session down: link %u: %s\n",s->index,strerror(error));
     if(s->strays)fprintf(stderr,"session link %u: %llu grants no request held, filled from the discard buffer\n",s->index,(unsigned long long)s->strays);
     atomic_store_explicit(&s->counts->code,error,memory_order_relaxed);
     atomic_store_explicit(&s->counts->phase,MESH_STOPPED,memory_order_release);
+    if(link_table)mesh_link_table_observe(link_table,s->provider.peer,0);
     net_lost(s,error);
     close(f);s->control=-1;
     while(!down_pair(&s->provider))poll(NULL,0,100);
@@ -1311,6 +1327,9 @@ int main(int argc,char **argv){
   if(ftruncate(fd,(off_t)length))die("ftruncate");fchmod(fd,MESH_MODE);
   struct hdr *m=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
   if(m==MAP_FAILED)die("mmap");shm=name;
+  snprintf(link_table_region,sizeof link_table_region,"%s",name);
+  if(me>=MESH_LINK_NODES || mesh_link_table_open(name,1,&link_table))die("link table");
+  link_table->node=(uint32_t)me;atexit(link_table_down);
   *m=geometry;m->node=(uint32_t)me;m->version=MESH_VERSION;
   for(uint32_t r=0;r<mesh_rows(m);r++)atomic_store_explicit(&mesh_page(m)[r].mapping,MESH_ABSENT,memory_order_relaxed);
   struct mesh_wire wire={0};

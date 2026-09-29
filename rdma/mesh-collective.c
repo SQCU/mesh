@@ -58,6 +58,56 @@ void mesh_link_map_free(struct mesh_link_map *map){
   free(map->link);map->link=NULL;map->links=0;
 }
 
+struct mesh_link_stated { struct mesh_link_contents file; uint32_t node; };
+static void mesh_link_restate(struct mesh_link_contents *c,const void *argument){
+  const struct mesh_link_stated *s=argument;
+  for(uint32_t a=0;a<MESH_LINK_NODES;a++)for(uint32_t b=0;b<MESH_LINK_NODES;b++){
+    struct mesh_link_state next=s->file.link[a][b];
+    next.up=a==s->node || b==s->node?c->link[a][b].up:next.stated;
+    c->link[a][b]=next;
+  }
+  memcpy(c->present,s->file.present,sizeof c->present);
+}
+int mesh_link_table_state(struct mesh_link_table *table,const char *path){
+  FILE *file=fopen(path,"r");
+  if(!file)return errno;
+  struct mesh_link_stated s={.node=table->node};
+  char line[256],word[8];
+  unsigned a,b,n;
+  float alpha,beta;
+  int result=0,fields,counted=0;
+  while(!result && fgets(line,sizeof line,file)){
+    if(line[0]=='#')continue;
+    if((fields=sscanf(line,"%u %u %f %f",&a,&b,&alpha,&beta))>=2){
+      if(fields!=4 || a>=MESH_LINK_NODES || b>=MESH_LINK_NODES || a==b)result=EINVAL;
+      else s.file.link[a][b]=(struct mesh_link_state){alpha,beta,1,0};
+    }else if(sscanf(line,"node %u",&n)==1){
+      if(n>=MESH_LINK_NODES)result=EINVAL;
+      else s.file.present[n]=1;
+    }else if(!counted && sscanf(line,"%7s %u",word,&n)==2 && (!strcmp(word,"mesh") || !strcmp(word,"ring") || !strcmp(word,"tree"))){
+      counted=1;
+      if(n>MESH_LINK_NODES)result=EINVAL;
+      for(uint32_t v=0;v<n && !result;v++)s.file.present[v]=1;
+    }
+  }
+  fclose(file);
+  if(!result)mesh_link_table_write(table,mesh_link_restate,&s);
+  return result;
+}
+void mesh_link_table_map(const struct mesh_link_contents *c,const uint32_t *nodes,uint32_t n,struct mesh_link_map *map,
+  uint32_t (*pairs)[2],float (*cost)[2]){
+  uint32_t links=0,every=1;
+  for(uint32_t i=0;i<n;i++)for(uint32_t j=0;j<n;j++){
+    const struct mesh_link_state *l=&c->link[nodes[i]][nodes[j]];
+    cost[i*n+j][0]=l->alpha;cost[i*n+j][1]=l->beta;
+    if(j<=i)continue;
+    const struct mesh_link_state *back=&c->link[nodes[j]][nodes[i]];
+    if(l->stated && l->up && back->stated && back->up){pairs[links][0]=i;pairs[links++][1]=j;}
+    else every=0;
+  }
+  *map=(struct mesh_link_map){every?MESH_LINKS_MESH:MESH_LINKS_GRAPH,n,links,pairs,(const float (*)[2])cost};
+}
+
 /* Whether node `v` contributes to `c`: a broadcast's root; an all-reduce's contributors, every node
    without a set. */
 static int mesh_contributes(struct mesh_collective c,uint32_t v){
@@ -373,8 +423,8 @@ static double mesh_collective_evaluate(const struct mesh_link_map *map,struct me
       const double bytes=(double)step->piece.elements*step->piece.element_bytes;
       if(step->op==MESH_STEP_SEND){
         const double start=clock[r]>out_free[r]?clock[r]:out_free[r];
-        out_free[r]=start+bytes*beta/1e3;
-        arrival[(size_t)r*capacity+cursor[r]++]=out_free[r]+alpha;
+        out_free[r]=start+bytes*(map->cost?map->cost[(size_t)r*n+step->peer][1]:beta)/1e3;
+        arrival[(size_t)r*capacity+cursor[r]++]=out_free[r]+(map->cost?map->cost[(size_t)r*n+step->peer][0]:alpha);
         progress=1;
         continue;
       }
@@ -388,7 +438,7 @@ static double mesh_collective_evaluate(const struct mesh_link_map *map,struct me
       const struct mesh_step *send=steps+(size_t)p*capacity+k;
       if(k==count[p] || send->piece.elements!=step->piece.elements || send->piece.element_bytes!=step->piece.element_bytes)goto done;
       if(cursor[p]<=k)break;
-      double complete=in_free[r]+bytes*beta/1e3;
+      double complete=in_free[r]+bytes*(map->cost?map->cost[(size_t)p*n+r][1]:beta)/1e3;
       if(arrival[(size_t)p*capacity+k]>complete)complete=arrival[(size_t)p*capacity+k];
       in_free[r]=complete;
       if(complete>clock[r])clock[r]=complete;

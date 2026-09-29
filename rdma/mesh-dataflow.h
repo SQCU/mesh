@@ -8,6 +8,29 @@ struct mesh_ctx { struct hdr *M; size_t len; uint64_t client,send_off,send_bytes
 struct mesh_link_view { uint32_t peer,phase; char device[32]; uint64_t bandwidth; };
 /* design/algorithm-sources.md#meshobserve */
 int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
+/* The link map as an operand: its shape fixed (MESH_LINK_NODES nodes), its contents varying.  Per node:
+   present, as stated.  Per directed link a->b: alpha (us a message) and beta (ns a byte), as stated, and
+   up, as the bridge of a or b observes it (its communicator session with the other paired, or lost).
+   The bridge makes it beside its region (<region>.links, `node` its own), writes its links' up, and
+   unlinks it at exit.  Two copies of the contents: a writer copies the current one (copy[epoch & 1])
+   into the other, changes it there and publishes it by bumping epoch; a reader copies the current one
+   and keeps it only if epoch has not moved meanwhile, so no reader sees a half-written table.  Writers
+   (the bridge, a stated configuration) take `writer` one at a time; a write that changes nothing leaves
+   epoch as it is. */
+#define MESH_LINK_NODES 16
+#define MESH_LINK_MAGIC 0x4d4c4e4bu
+struct mesh_link_state { float alpha,beta; uint32_t stated,up; };
+struct mesh_link_contents { uint32_t present[MESH_LINK_NODES]; struct mesh_link_state link[MESH_LINK_NODES][MESH_LINK_NODES]; };
+struct mesh_link_table { uint32_t magic,node; _Atomic uint32_t writer,padding; _Atomic uint64_t epoch; struct mesh_link_contents copy[2]; };
+/* The table of the bridge of `region` (NULL: MESH_NAME), mapped; create (the bridge's): made afresh. */
+int mesh_link_table_open(const char *region,int create,struct mesh_link_table **);
+void mesh_link_table_close(struct mesh_link_table *);
+/* One consistent snapshot of the contents; its epoch. */
+uint64_t mesh_link_table_read(const struct mesh_link_table *,struct mesh_link_contents *);
+/* `edit` applied to a copy of the contents and published; 1 where it changed them (epoch bumped). */
+int mesh_link_table_write(struct mesh_link_table *,void (*edit)(struct mesh_link_contents *,const void *),const void *);
+/* The bridge's observation: its link with `peer` up or down, both directions. */
+int mesh_link_table_observe(struct mesh_link_table *,uint32_t peer,uint32_t up);
 /* design/prepared-machine.md#M09 */
 /* The two arena ranges.  [0,wire_pages) is the registered window and the only memory an SGE may
    name; [wire_pages,arena) is addressable and never registered.  An undeclared window is the whole

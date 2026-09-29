@@ -99,4 +99,6 @@ int mesh_net_window(void **base,size_t *bytes);
    requests completed, sends that waited for credit, requests posted. */
 int mesh_net_error(void);
 void mesh_net_comm_counts(void *comm,uint64_t counts[4]);
+/* Whether a send or receive comm is still connected: its session not lost. */
+int mesh_net_alive(void *comm);
 #endif

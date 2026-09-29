@@ -195,15 +195,15 @@ says what is implemented and how the stream and buffers work. Every node runs it
 ```
 make -C rdma libmesh.dylib libnccl-mesh.dylib
 cc app.c -I rdma -L rdma -lnccl-mesh -Wl,-rpath,$PWD/rdma
-MESH_REGION=/mesh0 MESH_LINKS=links.txt ./app
+MESH_REGION=/mesh0 ./app    # app.c passes the link map: ncclMeshConfig_t (nccl.h)
 ```
 
 `rdma/torch-mesh` is torch.distributed's `mesh` backend over it (CPU and MPS tensors; once the backend
 exists, torch's MPS factories make window tensors, sent and received in place and freed only once every
 use recorded on them is done; any other tensor is blitted through the window by the GPU, never copied by
 the CPU). Installed into a venv that has torch, it registers itself when torch is imported, so a script
-names it alone: `torch.distributed.init_process_group(backend="mesh")`. Its first process group also
-installs `torch_mesh.partition`: a mesh dimension's parts (`MESH_PARTITION="tp=3,5"`), by which DTensor,
+names it and its link map: `init_process_group(backend="mesh", pg_options=torch_mesh.Options(nodes, links))`.
+Its first process group also installs `torch_mesh.partition`: a mesh dimension's parts (`partition.attach`), by which DTensor,
 tensor and context parallelism split that dimension by the nodes' rates instead of equally
 ([design/heterogeneity.md](design/heterogeneity.md)).
 

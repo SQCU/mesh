@@ -1,7 +1,10 @@
 // torch.distributed's "mesh" backend: a c10d::Backend whose collectives are libnccl-mesh's (../../nccl.h),
 // as PyTorch's "Customize Process Group Backends Using Cpp Extensions" tutorial prescribes.  Rank 0
-// makes the communicator's unique id and hands it out through the group's store.  The reductions are
-// libnccl-mesh's Metal kernels.
+// makes the communicator's unique id and hands it out through the group's store.  The communicator's
+// link map is the bridge's link table (ncclMeshConfig_t), which the group's options name (torch_mesh.
+// Options: the region, a link-map file stated into it, each rank's node).  The reductions are
+// libnccl-mesh's Metal kernels.  A call that fails after it was issued (a link lost, the link map's
+// epoch moved: revoked) is the communicator's error, which take_error() returns once.
 //   Window tensors (window_tensor below; torch_mesh makes torch's MPS factories return them by
 // default): the bytes of a window allocation, whose one Metal buffer is the tensor's MTLBuffer.  The
 // tensor's release closure (its DataPtr's deleter) writes the allocation's retire point: a signal of
@@ -35,6 +38,7 @@
 #include <ATen/native/mps/OperationUtils.h>
 #include <pybind11/chrono.h>
 
+#include <algorithm>
 #include <atomic>
 #include <fstream>
 #include <map>
@@ -519,9 +523,18 @@ class WorkMesh : public Work {
   c10::intrusive_ptr<c10::ivalue::Future> future_;
 };
 
+// The communicators of the live groups, for take_error().
+static std::mutex comms_lock;
+static std::vector<ncclComm_t> comms;
+
 class ProcessGroupMesh : public Backend {
  public:
-  ProcessGroupMesh(const c10::intrusive_ptr<Store> &store, int rank, int size) : Backend(rank, size) {
+  ProcessGroupMesh(const c10::intrusive_ptr<Store> &store, int rank, int size, const std::string &region, const std::string &links,
+                   const std::vector<int> &nodes)
+      : Backend(rank, size) {
+    TORCH_CHECK((int)nodes.size() == size, "mesh: the options name ", nodes.size(), " nodes for ", size, " ranks");
+    check(ncclMeshLinksAttach(region.empty() ? nullptr : region.c_str(), &links_), nullptr, "ncclMeshLinksAttach");
+    if (!links.empty()) check(ncclMeshLinksState(links_, links.c_str()), nullptr, "ncclMeshLinksState");
     ncclUniqueId id;
     const std::string key = "mesh_nccl_unique_id";
     if (rank == 0) {
@@ -532,18 +545,28 @@ class ProcessGroupMesh : public Backend {
       TORCH_CHECK(bytes.size() == NCCL_UNIQUE_ID_BYTES, "mesh: the unique id in the store has ", bytes.size(), " bytes");
       std::memcpy(id.internal, bytes.data(), NCCL_UNIQUE_ID_BYTES);
     }
-    check(ncclCommInitRank(&comm_, size, id, rank), nullptr, "ncclCommInitRank");
+    ncclMeshConfig_t config = NCCL_MESH_CONFIG_INITIALIZER;
+    config.links = links_;
+    config.nodes = nodes.data();
+    check(ncclCommInitRankConfig(&comm_, size, id, rank, &config.base), nullptr, "ncclCommInitRankConfig");
+    std::lock_guard<std::mutex> guard(comms_lock);
+    comms.push_back(comm_);
   }
   ~ProcessGroupMesh() override {
     streams_->synchronize();
+    {
+      std::lock_guard<std::mutex> guard(comms_lock);
+      comms.erase(std::remove(comms.begin(), comms.end(), comm_), comms.end());
+    }
     if (comm_) ncclCommDestroy(comm_);
+    if (links_) ncclMeshLinksDetach(links_);
     trace_dump();
   }
   const std::string getBackendName() const override { return "mesh"; }
 
-  static c10::intrusive_ptr<Backend> create(const c10::intrusive_ptr<Store> &store, int rank, int size,
-                                            const std::chrono::duration<float> &) {
-    return c10::make_intrusive<ProcessGroupMesh>(store, rank, size);
+  static c10::intrusive_ptr<Backend> create(const c10::intrusive_ptr<Store> &store, int rank, int size, const std::chrono::duration<float> &,
+                                            const std::string &region, const std::string &links, const std::vector<int> &nodes) {
+    return c10::make_intrusive<ProcessGroupMesh>(store, rank, size, region, links, nodes);
   }
 
   c10::intrusive_ptr<Work> broadcast(std::vector<at::Tensor> &tensors, const BroadcastOptions &opts) override {
@@ -790,6 +813,7 @@ class ProcessGroupMesh : public Backend {
 
  private:
   ncclComm_t comm_ = nullptr;
+  void *links_ = nullptr;
   std::shared_ptr<StreamPool> streams_ = std::make_shared<StreamPool>();
 
   // A collective's call: synchronous on CPU tensors, on a stream of its own on MPS tensors.
@@ -883,6 +907,35 @@ static pybind11::list records() {
   }
   return out;
 }
+// The first failure of a call issued earlier on any live group's communicator since the last take (its
+// message), else None; each failure is returned once.
+static pybind11::object take_error() {
+  std::lock_guard<std::mutex> guard(comms_lock);
+  for (auto comm : comms) {
+    ncclResult_t result = ncclSuccess;
+    check(ncclMeshCommTakeError(comm, &result), comm, "ncclMeshCommTakeError");
+    if (result != ncclSuccess) return pybind11::str(std::string(ncclGetErrorString(result)) + ": " + ncclGetLastError(comm));
+  }
+  return pybind11::none();
+}
+// A snapshot of the link table of `region` (empty: MESH_REGION): (epoch, the bridge's node, present [16],
+// links [16, 16, 4] of alpha, beta, stated, up).
+static pybind11::tuple links(const std::string &region) {
+  void *table = nullptr;
+  check(ncclMeshLinksAttach(region.empty() ? nullptr : region.c_str(), &table), nullptr, "ncclMeshLinksAttach");
+  std::vector<ncclMeshLink_t> snapshot(NCCL_MESH_LINK_NODES * NCCL_MESH_LINK_NODES);
+  uint32_t present[NCCL_MESH_LINK_NODES], node = 0;
+  uint64_t epoch = 0;
+  check(ncclMeshLinksRead(table, snapshot.data(), present, &node, &epoch), nullptr, "ncclMeshLinksRead");
+  ncclMeshLinksDetach(table);
+  at::Tensor t = at::empty({NCCL_MESH_LINK_NODES, NCCL_MESH_LINK_NODES, 4}, at::kFloat), p = at::empty({NCCL_MESH_LINK_NODES}, at::kInt);
+  for (int i = 0; i < NCCL_MESH_LINK_NODES * NCCL_MESH_LINK_NODES; i++) {
+    float *row = t.data_ptr<float>() + 4 * i;
+    row[0] = snapshot[i].alpha, row[1] = snapshot[i].beta, row[2] = (float)snapshot[i].stated, row[3] = (float)snapshot[i].up;
+  }
+  for (int i = 0; i < NCCL_MESH_LINK_NODES; i++) p.data_ptr<int>()[i] = (int)present[i];
+  return pybind11::make_tuple(epoch, node, p, t);
+}
 // Where a tensor's bytes are, as the records name them (0 for a tensor outside the window).
 static uint64_t address(const at::Tensor &t) {
   if (t.is_mps()) return (uint64_t)(uintptr_t)window_bytes(t);
@@ -968,4 +1021,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("records", &c10d::records);
   m.def("address", &c10d::address);
   m.def("trace_dump", &c10d::trace_dump);
+  m.def("take_error", &c10d::take_error);
+  m.def("links", &c10d::links);
 }
