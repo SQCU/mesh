@@ -297,12 +297,14 @@ class Call {
     stream_ = pool_->acquire();
   }
   // Once the call is complete (CPU) or its completion is ordered on the current MPS stream: the places
-  // not in place copied back, and the call's window allocation released after them.
+  // not in place copied back, and the call's window allocation released after them.  A call that issued
+  // nothing (a coalesced call's Work, each of whose parts ordered its own) has nothing to order.
   void after() {
     if (!mps_) {
       host_blits(false);
       return;
     }
+    if (!stream_) return;
     auto *s = at::mps::getCurrentMPSStream();
     const uint64_t done = stream_->value;
     id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)stream_->event;
@@ -348,7 +350,7 @@ class Call {
     t.fence = fence_;
     ncclMeshGroupTally(&t.tally);
     if (stream_) {
-      t.stream_event = stream_->event;
+      t.stream_event = (__bridge void *)[(__bridge id<MTLSharedEvent>)stream_->event retain];  // read at the dump, past the stream
       t.stream_value = stream_->value;
       note_reached((__bridge id<MTLSharedEvent>)stream_->event, stream_->value);
     }
