@@ -22,9 +22,11 @@ rotation and merge) over the query's sequence shard, each block by an op that re
 logsumexp: CPU's flash kernel as it is; on MPS, whose SDPA returns no logsumexp, the block's scores rows
 at a time (at most 2^26 live).  On a partitioned mesh dimension (partition.py) the ring is torch's over
 capacity blocks, each source's keys past their valid extents masked, the block computed as MPS's is on
-either device.  With gradient, SDPA on MPS decomposes into matmul and softmax before the
-dispatcher sees it, and CP's backward handlers are CUDA's too: forward only."""
+either device.  Under torch.compile the handler is a graph break (_ring).  With gradient, SDPA on MPS
+decomposes into matmul and softmax before the dispatcher sees it, and CP's backward handlers are CUDA's
+too: forward only."""
 import torch
+from torch._subclasses.fake_tensor import FakeTensor, UnsupportedOperatorException
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
 from torch.distributed.tensor.experimental._context_parallel import _attention
@@ -70,9 +72,14 @@ def _spec(like, shape, dtype):
 
 
 def _ring(op_call, args, kwargs):
-    """The SDPA op on DTensors sharded along the sequence (Shard(2)): torch's ring over their shards."""
+    """The SDPA op on DTensors sharded along the sequence (Shard(2)): torch's ring over their shards.
+    torch.compile's tracing runs ops on fake tensors, and the ring (its collectives, a partition's host-side
+    tables) runs only on real ones: under fake tensors the op is refused as unsupported, which dynamo takes
+    as a graph break, so the attention runs eagerly between compiled graphs."""
     named = dict(zip((a.name for a in op_call._schema.arguments), args), **kwargs)
     query, key, value = named["query"], named["key"], named["value"]
+    if any(isinstance(t._local_tensor, FakeTensor) for t in (query, key, value)):
+        raise UnsupportedOperatorException(op_call)
     if (named.get("attn_mask") is not None or named.get("dropout_p", 0.0) or named.get("dropout_mask") is not None
             or named.get("enable_gqa", False)):
         raise NotImplementedError("mesh: context-parallel SDPA takes no attn_mask, dropout or enable_gqa")
