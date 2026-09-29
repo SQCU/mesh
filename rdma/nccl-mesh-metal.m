@@ -16,11 +16,12 @@
    (the group done).
      The network and the GPU meet in mapped memory, as the prepared programs' crossings do (metal-microbench
    metal_recording.m MetalRemoteSpin, MetalPayloadRead, mesh_coherent_store): the bridge stores each
-   request's end into its completion word (mesh.h mesh_net_request), which a kernel polls with a
-   system-coherent load after a system-scope fence, a bounded number of times (a timed-out wait sets the
-   communicator's failure word: the call fails as a value, never hangs); what the NIC wrote is loaded
-   system-coherent, and every store a kernel makes is system-coherent, so a later SEND (and the host) sees
-   it once the kernel's publication word is seen.  A store that is not reaches another agent only when
+   request's end into its completion word (mesh.h mesh_net_request), which a kernel polls with
+   system-coherent loads and system-scope fences, until 1 s of the host's clock passes with no progress
+   or a count of polls runs out (a timed-out wait sets the communicator's failure word: the call fails as
+   a value, never hangs); what the NIC wrote is loaded system-coherent, and what a later SEND reads a
+   kernel stores system-coherent, so the NIC sees it once the kernel's publication word is seen; its
+   declared buffers order the queue's later work after a wait.  A store that is not reaches another agent only when
    its command buffer completes: on the M5 a word published mid-command-buffer after 16 MB of plain
    stores found 2,041,216 of their 4,194,304 words stale on the host, none with system-coherent stores
    (metal-microbench output_data/handoffs-20260929/probe/coh-m5.jsonl).  coherent(system) needs Metal's

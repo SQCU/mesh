@@ -613,8 +613,9 @@ static ncclResult_t span_release(void *p,void *event,uint64_t value){
 /* The longest the GPU waits on the network: a part whose program waits on its completion words fails as
    a value once the network has given the GPU nothing it waits for in this long, and the worker sets
    every word of the part the bridge has not, so the program and its stream's later work go on; the
-   GPU's own wait is bounded too, at about this long in polls (nccl_mesh_wait_bound), and a wait that
-   runs out sets the communicator's failure word (a failed call, program_ran).  Metal ends a command
+   GPU's own wait is bounded too, by this long of the host's clock without progress (advance, tick) and
+   a count of polls (nccl_mesh_wait_bound), and a wait that runs out sets the communicator's failure word
+   (a failed call, program_ran).  Metal ends a command
    buffer that waits past its watchdog, and then refuses the process's later submissions
    (kIOGPUCommandBufferCallbackErrorTimeout, then ...SubmissionsIgnored: the M5's own bridge stopped for
    5 s, metal-microbench output_data/epoch-20260929/replay-local-stop). */

@@ -39,9 +39,10 @@
    "binomial" (comma-separated).  MESH_NCCL_TIMEOUT bounds a connection or a call, in seconds
    (default 300).  A call whose GPU program waits on the network fails as a value (ncclRemoteError)
    once the network has given the GPU nothing it waits for in 1 s, and every completion word the
-   program waits on is set, so it and its stream's later work go on; the GPU's own wait on a word is
-   bounded at about 1 s of polls, after which the call fails the same way: Metal ends a command buffer
-   that waits past its watchdog, and then refuses every later submission of the process.
+   program waits on is set, so it and its stream's later work go on; the GPU's own wait on a word fails
+   the call the same way once 1 s of the host's clock passes with no progress (or its count of polls runs
+   out): Metal ends a command buffer that waits past its watchdog, and then refuses every later
+   submission of the process.
 
    Buffers are host pointers: unified memory.  The bridge's registered window is handed out as
    allocations (ncclMemAlloc), each a record of the library: its pages, the one Metal buffer over them
