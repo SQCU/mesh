@@ -342,7 +342,14 @@ _IDENTITY = {'sum': 0.0, 'avg': 0.0, 'max': -math.inf, 'min': math.inf}
 
 
 def _empty(shape, like):
-    return torch.empty(shape, dtype=like.dtype, device=like.device)  # an MPS window tensor (torch_mesh)
+    """An MPS window tensor where the mesh backend has a group (torch_mesh.empty: its collectives run on it in
+    place), else torch.empty.  Named explicitly: under DTensor's dispatch (the ring's handler) torch
+    function modes do not run, so the backend's factory mode would not see a torch.empty there."""
+    if like.device.type == 'mps':
+        import torch_mesh
+        if torch_mesh._world is not None:
+            return torch_mesh.empty(tuple(shape), dtype=like.dtype)
+    return torch.empty(shape, dtype=like.dtype, device=like.device)
 
 
 def _allgatherv(x, dim, sizes, group):
@@ -707,10 +714,16 @@ def context_parallel_unshard(mesh, buffers, seq_dims, load_balancer=None):
         raise ValueError(f'mesh: {local} positions on rank {rank} are no capacity block of {n.capacity}')
     halves = 2 if (load_balancer or _create_default_load_balancer(S, n, buffers[0].device)) else 1
     sizes, offsets = _split(n, S)
-    order = torch.empty(S, dtype=torch.int64, device=buffers[0].device)
-    for r in range(len(sizes)):
-        index, valid = _positions(n.key, r, S, halves, buffers[0].device)
-        order[index[valid]] = offsets[r] + valid.nonzero().squeeze(1)
+
+    def build(parts):
+        """Where each logical position lies in the gathered blocks, from the parts on the host (no device
+        sync per call)."""
+        order = torch.empty(S, dtype=torch.int64)
+        for r in range(len(sizes)):
+            index, valid = _positions(n.key, r, S, halves, 'cpu')
+            order[index[valid]] = offsets[r] + valid.nonzero().squeeze(1)
+        return order.to(buffers[0].device)
+    order = _OPERANDS[n.key].cached(('order', S, halves, str(buffers[0].device)), build)
     return [_allgatherv(b, dim, sizes, mesh.get_group()).index_select(dim, order) for b, dim in zip(buffers, seq_dims)]
 
 
