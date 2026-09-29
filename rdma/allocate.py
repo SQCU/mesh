@@ -38,6 +38,11 @@ by the largest share: the same fill under each cap m on the largest share, the l
 max cost + shared kept [HAP, EuroSys 2024, §2.4].  A rank's high bound is what it can hold
 (its window over its bytes per unit).
 
+capacity(W, g, low, high) is each rank's largest share of W at grain g within [low_i, high_i]: its
+high bound, or W less every other rank's low bound, whichever is less.  A partitioned dimension's
+local buffers are shaped to it, so that any parts the bounds allow fit without a shape change
+(torch_mesh/partition.py; design/heterogeneity.md R14).
+
 O(n) plain floats in a fixed order (min_max O((W/g)^2 n)): identical inputs give identical
 shares on every rank.
 """
@@ -137,3 +142,9 @@ def min_max(total, grain, low, high, cost, shared=None):
     fills = [fill(cap) for cap in range(max(low), total + 1, grain)]
     c, t = min((f for f in fills if sum(f[0]) == sum(fills[-1][0])), key=lambda f: f[1] + shared(f[0]))
     return c, t + shared(c)
+
+
+def capacity(total, grain, low, high):
+    """Each rank's largest share of `total` units at `grain` within [low_i, high_i] (multiples of
+    grain): min(high_i, total - sum of the other ranks' low bounds)."""
+    return [min(high[i], total - sum(low) + low[i]) // grain * grain for i in range(len(low))]

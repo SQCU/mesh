@@ -40,7 +40,7 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 | Fact | Written in | Read by | Decides |
 |---|---|---|---|
 | Node rates | the link map's node lines | the derivation (`allocate.min_max`) | the parts: what each node computes |
-| Links | the link map's link lines | the planner (`mesh_collective_choose`; libnccl-mesh through `MESH_LINKS`); the derivation, only to price collectives (R7) | direct, ring or tree: how operands travel |
+| Links | the link map's link lines | the planner (`mesh_collective_choose`; libnccl-mesh through the bridge's link table, `ncclMeshConfig_t`); the derivation, only to price collectives (R7) | direct, ring or tree: how operands travel |
 
 - Rates decide the parts. The link map decides the algorithm.
 - A link's cost never becomes a node's rate, and a node's rate never selects an algorithm.
@@ -61,7 +61,7 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 | R3 | Rates are per node **and per operator class** at the program's dtype, taken at the call's shape (bytes and operations), from a functional model. | functional performance model [Lastovetsky & Reddy 2007]; [Roofline 2009]; per-device memory bandwidth and FLOPS in the cost model [HexGen 2024, App. B] | one speed per node applied to every operator; bandwidth-bound (decode) rates applied to compute-bound work; another class's or dtype's rate borrowed where the map has none |
 | R4 | Counts are derived once per configuration, from shared configuration, by one deterministic procedure, so they are identical on every rank. | counts agree across ranks: recvcounts are the same on all members [MPI 4.1 §6.7, §6.10.2]; the distribution follows from a declared performance model [HeteroMPI 2006] | counts from each rank's own timing: ranks that disagree hang or corrupt |
 | R5 | Integer rounding minimises the largest finish time: each grain goes to the rank that finishes earliest with it. | [Beaumont et al. 2001, Alg. 3.1]; greedy allocation is optimal for nondecreasing costs [Ibaraki & Katoh 1988] | largest remainder rounding the slow rank up by a whole grain |
-| R6 | Tensors that meet in one operation split their shared extent alike, and every rank can invert its own split from its local extent and the parts (`from_local`: global = local·P/p_r). | the first GEMM's column split is the second's row split [Megatron-LM 2019, §3]; the literature's ratios are per tensor, `RaggedShard(local_units)` on each placement [pytorch#169320], and per layer [HAP 2024, §2.4] | rounding each extent separately, or splitting an extent the parts do not divide by `torch.chunk`: views and the inverse break, and ranks infer different global shapes |
+| R6 | Tensors that meet in one operation split their shared extent alike, and every rank can invert its own split from its local extent and the capacities (`from_local`: global = local·P/c_r, R14). | the first GEMM's column split is the second's row split [Megatron-LM 2019, §3]; the literature's ratios are per tensor, `RaggedShard(local_units)` on each placement [pytorch#169320], and per layer [HAP 2024, §2.4] | rounding each extent separately, or splitting an extent the parts do not divide by `torch.chunk`: views and the inverse break, and ranks infer different global shapes |
 | R7 | The collectives a share waits for are priced inside the derivation, at the largest share. | communication time depends on the largest shard; even ratios win "when communication is the bottleneck", and since layers differ in computation-to-communication ratio, the optimal ratios may vary for each layer [HAP 2024, §2.4]; the ring's irregular all-gather is dominated by the largest block [Träff et al. 2010] | compute-proportional shares on communication-bound work |
 | R8 | Equal counts run the regular collective. Unequal counts run the v-collective with each block at its own size, never padded to the largest. | Gatherv, Scatterv, Allgatherv, Alltoallv, Reduce_scatter [MPI 4.1 §6.5-6.10]; regular ⪯ irregular [Hunold & Carpen-Amarie 2017, GL4, GL8, GL12, GL18, GL22]; pad or per-rank broadcast [HAP 2024, §2.5.1; pytorch#198344] | padding's wasted bytes and window memory; the v-form's overhead on even splits |
 | R9 | What a node can hold is a hard upper bound on its share. A share that exceeds it is clamped and the rest is solved again. | memory-bounded load balance [Whale 2022; Metis 2024]; GPU memory limits the batch [LB-BSP 2020]; bounded variables held at their bound and the rest re-solved [Bitran & Hax 1981] | a share the fast node cannot hold, which pages and makes the fast node slow |
@@ -69,6 +69,7 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 | R11 | Parts change with the configuration, not per step. An online loop follows its sources: it predicts robustly and reduces its step once it oscillates, stops at a relative accuracy, and rebalances only when the gain exceeds the cost. `allocate.Allocator` has a forgetting factor and a step η in (0, 1] (η = 1 is the equal-finish solve), and none of the rest. | static distributions avoid redistribution and control overhead [Beaumont et al. 2001, §2.2]; prediction robust to non-deterministic perturbation "to avoid over-reaction or oscillation" [LB-BSP 2020, §3.2.1], an observation window and a smaller step once oscillation is detected [LB-BSP 2020, §3.3.2]; stop at a relative accuracy ε [DFPA 2011]; invoke the balancer when the gain exceeds its cost [Meta-Balancer 2012] | ping-pong after one noisy step; re-sharding weights because of jitter |
 | R12 | Balance comes before overlap. Overlap hides a collective behind independent work, but it shortens a rank's own finish, not its wait for a slower rank. Decomposed pieces follow the counts, and k pieces cost k·α. | overlap by decomposition [Wang et al. 2023; Domino 2024; FLUX 2024]; balance first because the step ends at the largest finish time (§1); k·α in the α-β model [Hockney 1994] | using overlap to cure an imbalance |
 | R13 | Anything the partition cannot express falls back to stock's own fallback, or raises the same error on every rank. Nothing silently computes a wrong shape or value. | `AGENTS.md`: "A branch that quietly does less is worse than one that fails loudly" | silent numerics, such as a mean of unequal shards averaged as if the shards were equal |
+| R14 | Parts change without shapes changing. Each rank's local buffer is shaped to the largest share the bounds allow it (`allocate.capacity`); the parts are a tensor operand read when the ops run. Padding holds the identity of its next consumer: sources write it (weights zero-padded at load, collectives the identity past the valid extent), and before any op that reduces or contracts over a partitioned dimension the shard is re-masked to that op's identity (0 for sums and contractions, -inf for max and masked softmax); attention masks keys past the valid extents; count-dependent ops divide masked sums by the valid count. Kernels are stock: they compute garbage in padding that nothing reads unmasked. | uneven partitioning: pad to the shards' size and mask the padding to the identity of the next operation wherever it could leak into valid results [GSPMD 2021, §3.3] | shapes that follow the parts, so every change of parts recompiles, re-records and reallocates a program |
 
 ## 4. The operand in use
 
@@ -82,15 +83,13 @@ The module docstring (`torch_mesh/partition.py`) is the API. This section is onl
 - On any other backend, import `torch_mesh.partition` before making the mesh.
 
 **Operand.**
-- `MESH_PARTITION="tp=3,5"` gives parts by mesh-dimension name and must be the same on every rank. It
-  is attached when a `DeviceMesh` with that dimension name is made, and a sub-mesh keeps its root's
-  parts.
-- `partition.attach(mesh, tp=(3, 5))` does the same, before the mesh is first used.
-- `partition.sizes(mesh, "tp", N)` gives the shares of N.
+- `partition.attach(mesh, tp=(capacity, parts))`, before the mesh is first used, the same on every
+  rank; a sub-mesh keeps its root's. `partition.write(mesh, tp=parts)` changes the parts between calls.
+- `partition.sizes(mesh, "tp", N)` gives the local buffers' sizes of N (R14).
 - A program takes its own splits from
   `distribute_tensor(x, mesh, [Shard(d)], src_data_rank=None).to_local()` or from `sizes()`, never
   from `x.chunk(world)`.
-- `from_local` without `shape=` means "split by the parts".
+- `from_local` without `shape=` means "a capacity block" (global = local·P/c_r).
 - Every extent split along a partitioned dimension is a multiple of P; any other raises
   `ValueError`, on every rank alike. No mesh dimension of more than one coordinate precedes a
   partitioned one (attach raises otherwise), so no outer split reaches a partitioned dimension first
@@ -119,7 +118,7 @@ or identically on every rank:
    map is more than a pair.
 4. Call `allocate.min_max(P, 1, [1] * n, high, cost, shared)`, where `high[r]` is what the node can
    hold: its window over its bytes per unit.
-5. Send the parts to every rank as `MESH_PARTITION`.
+5. Give every rank the parts and the capacities (`allocate.capacity` of the same bounds) to attach.
 
 The rates go into the link map once, from a recorded run that the map cites. They change when the
 configuration changes (R11), not with each run's timings.
@@ -138,7 +137,6 @@ configuration changes (R11), not with each run's timings.
   processors, placed by the run-time system [Charm++ 1993], is the fallback alternative to derived
   parts and is not built here.
 - What cannot take uneven shards falls back or raises; the docstring lists these cases.
-- Eager mode only.
 
 ## References
 
@@ -154,6 +152,7 @@ configuration changes (R11), not with each run's timings.
 - HeteroMPI: Lastovetsky, A. & Reddy, R. (2006). HeteroMPI: towards a message-passing library for heterogeneous networks of computers. JPDC 66(2). https://doi.org/10.1016/j.jpdc.2005.08.002
 - HexGen: Jiang, Y. et al. (2024). HexGen: generative inference of large language model over heterogeneous environment. ICML. https://arxiv.org/abs/2311.11514
 - Hockney, R. W. (1994). The communication challenge for MPP: Intel Paragon and Meiko CS-2. Parallel Computing 20(3). https://doi.org/10.1016/S0167-8191(06)80021-9
+- GSPMD: Xu, Y. et al. (2021). GSPMD: general and scalable parallelization for ML computation graphs. https://arxiv.org/abs/2105.04663
 - Hunold, S. & Carpen-Amarie, A. (2017). Tuning MPI collectives by verifying performance guidelines. https://arxiv.org/abs/1707.09965
 - Ibaraki, T. & Katoh, N. (1988). Resource Allocation Problems: Algorithmic Approaches. MIT Press. https://dl.acm.org/doi/book/10.5555/49354
 - Lastovetsky, A. & Reddy, R. (2007). Data partitioning with a functional performance model of heterogeneous processors. IJHPCA 21(1). https://doi.org/10.1177/1094342006074864

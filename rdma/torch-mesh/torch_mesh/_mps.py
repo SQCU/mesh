@@ -20,8 +20,9 @@ aten._scaled_dot_product_attention_math_for_mps on MPS tensors; neither has a sh
 call fails.  Here each gets the handler CUDA's ops get: torch's own ring (_templated_ring_attention, its
 rotation and merge) over the query's sequence shard, each block by an op that returns the output and the
 logsumexp: CPU's flash kernel as it is; on MPS, whose SDPA returns no logsumexp, the block's scores rows
-at a time (at most 2^26 live).  On a partitioned mesh dimension (partition.py) the ring is torch's with
-each source's block at its own length.  With gradient, SDPA on MPS decomposes into matmul and softmax before the
+at a time (at most 2^26 live).  On a partitioned mesh dimension (partition.py) the ring is torch's over
+capacity blocks, each source's keys past their valid extents masked, the block computed as MPS's is on
+either device.  With gradient, SDPA on MPS decomposes into matmul and softmax before the
 dispatcher sees it, and CP's backward handlers are CUDA's too: forward only."""
 import torch
 from torch.distributed.tensor import DTensor, Shard
@@ -38,8 +39,9 @@ def _cpu_block(query, key, value, is_causal=False, scale=None, **_):
     return aten._scaled_dot_product_flash_attention_for_cpu(query, key, value, is_causal=is_causal, scale=scale)
 
 
-def _mps_block(query, key, value, is_causal=False, scale=None, **_):
-    """softmax(q k^T scale) v and each query row's logsumexp, SCORES scores at a time."""
+def _mps_block(query, key, value, is_causal=False, scale=None, key_valid=None, **_):
+    """softmax(q k^T scale) v and each query row's logsumexp, SCORES scores at a time; keys where
+    key_valid (a bool per key) is False are masked."""
     scale = query.shape[-1] ** -0.5 if scale is None else scale
     rows, keys = query.shape[-2], key.shape[-2]
     step = max(1, SCORES // (query[..., 0, 0].numel() * keys))
@@ -50,6 +52,8 @@ def _mps_block(query, key, value, is_causal=False, scale=None, **_):
         scores = (query[..., at:at + step, :] @ kt).float() * scale
         if is_causal:
             scores.masked_fill_(positions > torch.arange(at, min(at + step, rows), device=query.device)[:, None], float("-inf"))
+        if key_valid is not None:
+            scores.masked_fill_(~key_valid, float("-inf"))
         top = torch.logsumexp(scores, -1, keepdim=True)
         lse[..., at:at + step] = top.squeeze(-1)
         out[..., at:at + step, :] = torch.exp(scores - top).to(value.dtype) @ value
@@ -78,8 +82,7 @@ def _ring(op_call, args, kwargs):
     local = (query._local_tensor, key._local_tensor, value._local_tensor)
     options, n = dict(is_causal=named.get("is_causal", False), scale=named.get("scale")), spec.mesh.size()
     if isinstance(n, partition._Chunks):
-        lengths = partition._split(n, query.shape[2])[0]
-        out, lse = partition._ring_attention(spec.mesh.get_group(), _BLOCKS[op_call], *local, lengths, **options)
+        out, lse = partition._ring_attention(spec.mesh.get_group(), n, *local, **options)
     else:
         out, lse = _attention._templated_ring_attention(spec.mesh.get_group(), 2, _BLOCKS[op_call], *local, **options)
     out = DTensor(out, _spec(spec, query.shape[:-1] + value.shape[-1:], out.dtype), requires_grad=False)
