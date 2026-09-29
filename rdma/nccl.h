@@ -76,7 +76,8 @@
    other's peers belong in one group or on different streams).  ncclMeshStreamQuery is
    cudaStreamQuery.  A failed call still signals its completion value (the GPU is never left waiting);
    its error is the communicator's ncclCommGetAsyncError until an agreement.  ncclMeshStreamSynchronize waits on the host
-   for `value`.
+   for `value`.  A deferred stream (ncclMeshStreamDefer) keeps a call's GPU work for a command buffer
+   the caller hands over (ncclMeshStreamEncodeWait) instead of committing it to the stream's queue.
 
    Not implemented (not exported): ncclCommRevoke, ncclCommShrink, ncclCommGetUniqueId,
    ncclCommGrow, ncclCommInitRankScalable, ncclCommSuspend, ncclCommResume, ncclCommMemStats,
@@ -106,8 +107,10 @@ extern "C" {
 #include <stddef.h>
 
 /* The stream (above).  queue: id<MTLCommandQueue>; event: id<MTLSharedEvent>; value: the event's last
-   reserved value; made: the queue is the stream's own. */
-struct ncclMeshStream { void *queue; void *event; uint64_t value; int made; };
+   reserved value; made: the queue is the stream's own; deferred: ncclMeshStreamDefer's; pending: the
+   programs kept for ncclMeshStreamEncodeWait, oldest first; committed: the last value a program
+   committed to the queue signals. */
+struct ncclMeshStream { void *queue; void *event; uint64_t value; int made, deferred; void *pending; uint64_t committed; };
 typedef struct ncclMeshStream *cudaStream_t;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
 typedef void *cudaEvent_t;
@@ -844,6 +847,20 @@ ncclResult_t ncclMeshStreamDestroy(cudaStream_t stream);
 ncclResult_t ncclMeshStreamSynchronize(cudaStream_t stream);
 /* ncclSuccess once the stream's event has reached its value, else ncclInProgress (cudaStreamQuery). */
 ncclResult_t ncclMeshStreamQuery(cudaStream_t stream);
+/* A deferred stream (defer 1) keeps the program of a group whose GPU work all follows its transfers'
+   start (no copy in or premultiplication before them, no combine a later send of the call reads, one
+   communicator) instead of committing it: the workers start on the recorded points themselves (no gate
+   program between the caller's GPU work and the network), and ncclMeshStreamEncodeWait encodes the kept
+   programs, in order, into a command buffer of the caller's: its waits for the pieces' arrivals (the
+   worker signals them), combines, post-division, copies out and the stream's completion value, so the
+   caller's later work in that command buffer follows them on its own queue with no other queue between.
+   A group that cannot defer first takes the stream's kept programs into its own; ncclMeshStreamSynchronize
+   commits them to the stream's queue.  Every kept program must be encoded (EncodeWait or Synchronize)
+   for the stream to complete. */
+ncclResult_t ncclMeshStreamDefer(cudaStream_t stream, int defer);
+/* Into `commandBuffer` (an id<MTLCommandBuffer> not yet committed): a wait for the stream's committed
+   programs, then the stream's kept programs; the caller commits it. */
+ncclResult_t ncclMeshStreamEncodeWait(cudaStream_t stream, void* commandBuffer);
 /* The algorithms the planner took for this thread's last ended group, a call each in issue
    order (at most `capacity`): 0 direct, 1 ring, 2 tree, 3 binomial (mesh-collective.h MESH_*),
    -1 a point-to-point call or a one-rank communicator's local copy; `roots` the tree's root. */

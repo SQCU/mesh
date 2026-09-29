@@ -15,11 +15,17 @@
 // call's recorded point are reached.
 //   MPS tensors: a window tensor (its parts contiguous and adjacent in one allocation) is passed in
 // place; any other is copied by GPU blits on the MPS stream (MPSStream::copy) into a window allocation
-// of the call before it and out after it.  The MPS work enqueued before the call (the caller's and
-// those blits) is declared the writer of every allocation the call touches (the fence's value,
-// ncclMeshMemUse), so the call waits for exactly that; it runs on a stream of its own (a queue of its
-// own), and its Work's wait() encodes on the MPS stream a wait for the call's completion value and the
-// blits out, so no host synchronization sits between the MPS work before and after the call.
+// of the call before it and out after it.  An all-gather's input is copied into its segment of the
+// output first and the call runs in place; a reduce-scatter runs in place on its input where the output
+// is that input's segment in the window, else on a copy of it, the segment copied out after.  The MPS
+// work enqueued before the call (the caller's and those copies) is declared the writer of every
+// allocation the call touches (the fence's value, ncclMeshMemUse), so the call waits for exactly that.
+// It runs on a deferred stream of its own (ncclMeshStreamDefer): the library's worker starts its
+// transfers once the GPU has reached that fence, and the call's GPU work after them (the combines as
+// the pieces arrive, its completion value) is kept until its Work's wait() encodes it on the current
+// MPS stream (ncclMeshStreamEncodeWait), the copies out after it.  No host synchronization and no other
+// queue sits between the MPS work before and after the call.  torch's functional collectives on MPS
+// tensors make their outputs window tensors (functional_* below).
 //   CPU tensors: a tensor, or parts contiguous and adjacent, are the buffer itself (libnccl-mesh copies
 // memory outside the window in and out by GPU blits through a Metal buffer over its pages); parts that
 // are not are copied by the backend's own GPU blits, through Metal buffers over their pages, into a
@@ -32,6 +38,8 @@
 // call (ncclMeshGroupTally), written as JSON lines when the group is destroyed or the process exits.
 #include <torch/extension.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
+#include <torch/csrc/distributed/c10d/GroupRegistry.hpp>
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
 #include <torch/csrc/distributed/c10d/Types.hpp>
 #include <torch/csrc/distributed/c10d/Work.hpp>
@@ -213,6 +221,21 @@ static char *window_bytes(const at::Tensor &t) {
   return contents + t.storage_offset() * t.element_size();
 }
 
+// Where MPS tensors laid end to end are in the window: the first's bytes where every one is contiguous
+// and they are adjacent in one window allocation (an empty one lies anywhere), else nullptr.
+static char *window_span(const std::vector<at::Tensor> &parts) {
+  char *first = nullptr, *end = nullptr;
+  id<MTLBuffer> buffer = nil;
+  for (auto &t : parts) {
+    if (!t.nbytes()) continue;
+    char *at = t.is_mps() && t.is_contiguous() ? window_bytes(t) : nullptr;
+    if (!at || (end && at != end) || (buffer && at::native::mps::getMTLBufferStorage(t) != buffer)) return nullptr;
+    if (!first) { first = at; buffer = at::native::mps::getMTLBufferStorage(t); }
+    end = at + t.nbytes();
+  }
+  return first;
+}
+
 // The backend's queue for CPU parts' blits, and its event.
 static id<MTLCommandQueue> host_queue() {
   static id<MTLCommandQueue> queue = [device() newCommandQueue];
@@ -235,20 +258,24 @@ static id<MTLBuffer> host_pages(void *pointer, size_t bytes, size_t *offset) {
 
 // Streams for calls that run asynchronously (a send or recv on CPU tensors, every call on MPS tensors):
 // one a call, each with a queue of its own, reused once the Work holding it is gone and its work done.
+// An MPS call's stream is deferred (ncclMeshStreamDefer): the library keeps the GPU work that follows its
+// transfers (the combines, the stream's completion) and the Work's wait encodes it on the MPS stream.
 struct StreamPool {
   std::mutex lock;
   std::vector<cudaStream_t> all, idle;
-  cudaStream_t acquire() {
+  cudaStream_t acquire(bool defer) {
     std::lock_guard<std::mutex> guard(lock);
-    for (size_t i = 0; i < idle.size(); i++)
+    cudaStream_t s = nullptr;
+    for (size_t i = 0; i < idle.size() && !s; i++)
       if (ncclMeshStreamQuery(idle[i]) == ncclSuccess) {
-        cudaStream_t s = idle[i];
+        s = idle[i];
         idle.erase(idle.begin() + (long)i);
-        return s;
       }
-    cudaStream_t s;
-    check(ncclMeshStreamCreate(&s, nullptr), nullptr, "ncclMeshStreamCreate");
-    all.push_back(s);
+    if (!s) {
+      check(ncclMeshStreamCreate(&s, nullptr), nullptr, "ncclMeshStreamCreate");
+      all.push_back(s);
+    }
+    check(ncclMeshStreamDefer(s, defer), nullptr, "ncclMeshStreamDefer");
     return s;
   }
   void release(cudaStream_t s) {
@@ -267,31 +294,39 @@ struct StreamPool {
 // One torch call's buffers where libnccl-mesh reads and writes them, and the stream it runs on.  A place
 // is tensors laid end to end (one tensor, or a list): in place where they already are (CPU: contiguous
 // and adjacent; MPS: contiguous and adjacent in one window allocation), else a slice of the call's
-// window allocation, filled and emptied by GPU blits.
+// window allocation, filled and emptied by GPU blits.  On MPS a place may also be filled from another
+// tensor at an offset before the call (fill: an all-gather's own segment, so the library runs it in
+// place) and a destination filled from a place's offset after it (drain: a reduce-scatter's segment of
+// its operand); a place added `scratch` is always the call's allocation (an operand the library
+// overwrites in place, whose tensor must keep its values).
 class Call {
  public:
   Call(const at::Tensor &like, bool async, std::shared_ptr<StreamPool> pool, const char *op = nullptr)
       : mps_(like.is_mps()), async_(async || like.is_mps()), pool_(std::move(pool)), op_(op), dtype_(like.scalar_type()),
         enter_(tracing() && op ? uptime() : 0) {}
-  int add(const at::Tensor &t, bool in, bool out) { return add(std::vector<at::Tensor>{t}, in, out); }
-  int add(std::vector<at::Tensor> parts, bool in, bool out) {
+  int add(const at::Tensor &t, bool in, bool out, bool scratch = false) { return add(std::vector<at::Tensor>{t}, in, out, scratch); }
+  int add(std::vector<at::Tensor> parts, bool in, bool out, bool scratch = false) {
     Place p;
     p.parts = std::move(parts);
     p.in = in;
     p.out = out;
+    p.scratch = scratch;
     for (auto &t : p.parts) p.bytes += t.nbytes();
     places_.push_back(std::move(p));
     return (int)places_.size() - 1;
   }
+  void fill(const at::Tensor &from, int place, size_t at) { fills_.push_back({from, place, at}); }
+  void drain(const at::Tensor &to, int place, size_t at) { drains_.push_back({to, place, at}); }
+  bool mps() const { return mps_; }
   void *ptr(int i) const { return places_[i].pointer; }
   cudaStream_t stream() const { return stream_; }
 
-  // Every place's pointer: the call's window allocation for those not in place, and the blits in; on MPS
-  // the fence after them declared the writer of every allocation the call touches.
+  // Every place's pointer: the call's window allocation for those not in place, and the blits in and
+  // fills; on MPS the fence after them declared the writer of every allocation the call touches.
   void begin() {
     size_t used = 0;
     for (auto &p : places_)
-      if (!(mps_ ? window_place(p) : host_place(p))) { p.at = used; used += (p.bytes + 255) & ~(size_t)255; }
+      if (p.scratch || !(mps_ ? window_place(p) : host_place(p))) { p.at = used; used += (p.bytes + 255) & ~(size_t)255; }
     if (used) {
       check(ncclMemAlloc(&scratch_, used), nullptr, "ncclMemAlloc");
       size_t offset = 0;
@@ -302,20 +337,22 @@ class Call {
       if (p.at != SIZE_MAX) p.pointer = (char *)scratch_ + p.at;
     if (!mps_) {
       host_blits(true);
-      if (async_) stream_ = pool_->acquire();
+      if (async_) stream_ = pool_->acquire(false);
       return;
     }
     auto *s = at::mps::getCurrentMPSStream();
     for (auto &p : places_)
       if (p.at != SIZE_MAX && p.in) mps_blits(s, p, true);
+    for (auto &f : fills_) mps_segment(s, f, true);
     const uint64_t fence = fence_ = mps_fence();
     for (auto &p : places_)
       if (p.bytes) check(ncclMeshMemUse(p.pointer, p.bytes, (__bridge void *)fence_event(), fence, 1), nullptr, "ncclMeshMemUse");
-    stream_ = pool_->acquire();
+    stream_ = pool_->acquire(true);
   }
-  // Once the call is complete (CPU) or its completion is ordered on the current MPS stream: the places
-  // not in place copied back, and the call's window allocation released after them.  A call that issued
-  // nothing (a coalesced call's Work, each of whose parts ordered its own) has nothing to order.
+  // Once the call is complete (CPU) or its completion is ordered on the current MPS stream (the stream's
+  // kept GPU work encoded there: ncclMeshStreamEncodeWait): the drains and the places not in place copied
+  // back, and the call's window allocation released after them.  A call that issued nothing has nothing
+  // to order.
   void after() {
     if (!mps_) {
       host_blits(false);
@@ -323,11 +360,9 @@ class Call {
     }
     if (!stream_) return;
     auto *s = at::mps::getCurrentMPSStream();
-    const uint64_t done = stream_->value;
-    id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)stream_->event;
     on_mps(s, [&] {
       s->endKernelCoalescing();
-      [s->commandBuffer() encodeWaitForEvent:event value:done];
+      check(ncclMeshStreamEncodeWait(stream_, (__bridge void *)s->commandBuffer()), nullptr, "ncclMeshStreamEncodeWait");
       if (traced_ != SIZE_MAX) {  // a signal after the wait: when the MPS stream passed it
         const uint64_t resume = ++fence_next;
         [s->commandBuffer() encodeSignalEvent:fence_event() value:resume];
@@ -337,6 +372,7 @@ class Call {
         trace.calls[traced_].resume = resume;
       }
     });
+    for (auto &d : drains_) mps_segment(s, d, false);
     for (auto &p : places_)
       if (p.at != SIZE_MAX && p.out) mps_blits(s, p, false);
     if (scratch_) release_mps(scratch_);
@@ -361,6 +397,8 @@ class Call {
         if (p.out) t.blit_out += p.bytes;
       }
     }
+    for (auto &f : fills_) t.blit_in += f.tensor.nbytes();
+    for (auto &d : drains_) t.blit_out += d.tensor.nbytes();
     t.splits = std::move(splits);
     t.enter = enter_;
     t.issued = uptime();
@@ -379,9 +417,14 @@ class Call {
  private:
   struct Place {
     std::vector<at::Tensor> parts;
-    bool in = false, out = false;
+    bool in = false, out = false, scratch = false;
     size_t bytes = 0, at = SIZE_MAX;
     void *pointer = nullptr;
+  };
+  struct Segment {
+    at::Tensor tensor;
+    int place;
+    size_t at;
   };
   // CPU: the parts themselves where they are contiguous and adjacent (an empty part lies anywhere).
   bool host_place(Place &p) {
@@ -398,17 +441,8 @@ class Call {
   // MPS: the parts in place where they are contiguous and adjacent in one window allocation (an empty
   // part lies anywhere).
   bool window_place(Place &p) {
-    char *first = nullptr, *end = nullptr;
-    id<MTLBuffer> buffer = nil;
-    for (auto &t : p.parts) {
-      if (!t.nbytes()) continue;
-      char *at = t.is_contiguous() ? window_bytes(t) : nullptr;
-      if (!at || (end && at != end) || (buffer && at::native::mps::getMTLBufferStorage(t) != buffer)) return false;
-      if (!first) { first = at; buffer = at::native::mps::getMTLBufferStorage(t); }
-      end = at + t.nbytes();
-    }
-    p.pointer = first;
-    return first != nullptr;
+    p.pointer = window_span(p.parts);
+    return p.pointer != nullptr;
   }
   // Each MPS part's bytes between its MTLBuffer and the call's window allocation, blitted on the MPS
   // stream (a non-contiguous part through a contiguous MPS copy).
@@ -426,6 +460,21 @@ class Call {
       gpu_copied += c.nbytes();
       at += c.nbytes();
     }
+  }
+  // A fill (in) or drain: a tensor's bytes and a place's at an offset, blitted on the MPS stream.
+  void mps_segment(at::mps::MPSStream *s, Segment &g, bool in) {
+    at::Tensor &t = g.tensor;
+    if (!t.nbytes()) return;
+    at::Tensor c = t.is_contiguous() ? t : in ? t.contiguous() : at::empty(t.sizes(), t.options());
+    void *buffer = nullptr;
+    size_t offset = 0;
+    check(ncclMeshMemBuffer((char *)places_[g.place].pointer + g.at, &buffer, &offset), nullptr, "ncclMeshMemBuffer");
+    id<MTLBuffer> theirs = at::native::mps::getMTLBufferStorage(c);
+    const size_t at = c.storage_offset() * c.element_size();
+    if (in) s->copy(theirs, (__bridge id<MTLBuffer>)buffer, c.nbytes(), at, offset, 0, at::mps::SyncType::NONE);
+    else s->copy((__bridge id<MTLBuffer>)buffer, theirs, c.nbytes(), offset, at, 0, at::mps::SyncType::NONE);
+    if (!in && !c.is_same(t)) t.copy_(c);
+    gpu_copied += c.nbytes();
   }
   // Each CPU part's bytes between its pages and the call's window allocation, blitted on the backend's
   // queue through a Metal buffer over its pages (a non-contiguous part through a contiguous CPU copy):
@@ -493,6 +542,7 @@ class Call {
   size_t traced_ = SIZE_MAX;
   cudaStream_t stream_ = nullptr;
   std::vector<Place> places_;
+  std::vector<Segment> fills_, drains_;
   void *scratch_ = nullptr;
   size_t scratch_bytes_ = 0;
   id<MTLBuffer> buffer_ = nil;
@@ -644,6 +694,7 @@ class ProcessGroupMesh : public Backend {
   }
 
   // The list's tensors are the ranks' counts (MPI_Allgatherv): equal, ncclAllGather; else the planner's cut.
+  // On MPS the input is copied into its segment of the output (a fill) and the call runs in place.
   c10::intrusive_ptr<Work> allgather(std::vector<std::vector<at::Tensor>> &outputs, std::vector<at::Tensor> &inputs,
                                      const AllgatherOptions &) override {
     TORCH_CHECK(inputs.size() == 1 && outputs.size() == 1 && (int)outputs[0].size() == getSize(), "mesh: allgather takes one tensor and a list of world_size");
@@ -651,26 +702,39 @@ class ProcessGroupMesh : public Backend {
     TORCH_CHECK(inputs[0].numel() == (int64_t)counts[getRank()], "mesh: all_gather's input is this rank's tensor of the list: ", inputs[0].numel(),
                 " elements, the list's ", counts[getRank()]);
     auto call = start(inputs[0], "all_gather");
-    int in = call->add(inputs[0], true, false), out = call->add(outputs[0], false, true);
+    size_t at = 0;
+    for (int r = 0; r < getRank(); r++) at += counts[r] * inputs[0].element_size();
+    int in = -1, out = call->add(outputs[0], false, true);
+    if (!call->mps()) in = call->add(inputs[0], true, false);
+    else if (!lies_at(inputs[0], outputs[0], at)) call->fill(inputs[0], out, at);
     call->begin();
-    check(ncclMeshAllGatherV(call->ptr(in), call->ptr(out), counts.data(), datatype(inputs[0]), comm_, call->stream()), comm_, "ncclMeshAllGatherV");
+    check(ncclMeshAllGatherV(in < 0 ? (char *)call->ptr(out) + at : call->ptr(in), call->ptr(out), counts.data(), datatype(inputs[0]), comm_,
+                             call->stream()), comm_, "ncclMeshAllGatherV");
     return work(OpType::ALLGATHER, outputs[0], call, uneven(counts));
   }
 
   c10::intrusive_ptr<Work> all_gather_single(at::Tensor &output, at::Tensor &input, const AllgatherOptions &) override {
     TORCH_CHECK(output.numel() == getSize() * input.numel(), "mesh: all_gather_into_tensor's output is world_size inputs");
     auto call = start(input, "all_gather_into_tensor");
-    int in = call->add(input, true, false), out = call->add(output, false, true);
+    gather_into(*call, output, input);
     call->begin();
-    check(ncclAllGather(call->ptr(in), call->ptr(out), input.numel(), datatype(input), comm_, call->stream()), comm_, "ncclAllGather");
+    gather_issue(*call, output, input);
     std::vector<at::Tensor> result{output};
     return work(OpType::_ALLGATHER_BASE, result, call);
   }
 
   c10::intrusive_ptr<Work> allgather_into_tensor_coalesced(std::vector<at::Tensor> &outputs, std::vector<at::Tensor> &inputs,
-                                                           const AllgatherOptions &opts) override {
-    for (size_t i = 0; i < inputs.size(); i++) all_gather_single(outputs[i], inputs[i], opts)->wait();
-    return c10::make_intrusive<WorkMesh>(OpType::COALESCED, outputs, std::make_shared<Call>(inputs[0], false, streams_), comm_);
+                                                           const AllgatherOptions &) override {
+    TORCH_CHECK(!inputs.empty() && inputs.size() == outputs.size(), "mesh: allgather_into_tensor_coalesced takes as many outputs as inputs");
+    for (size_t i = 0; i < inputs.size(); i++)
+      TORCH_CHECK(outputs[i].numel() == getSize() * inputs[i].numel(), "mesh: all_gather_into_tensor's output is world_size inputs");
+    auto call = start(inputs[0], "all_gather_into_tensor_coalesced");
+    for (size_t i = 0; i < inputs.size(); i++) gather_into(*call, outputs[i], inputs[i]);
+    call->begin();
+    group([&] {
+      for (size_t i = 0; i < inputs.size(); i++) gather_issue(*call, outputs[i], inputs[i], (int)i);
+    });
+    return work(OpType::COALESCED, outputs, call);
   }
 
   // The root's list is the ranks' counts (MPI_Gatherv, MPI_Scatterv): equal, ncclGather or ncclScatter; else
@@ -729,6 +793,8 @@ class ProcessGroupMesh : public Backend {
   }
 
   // The list's tensors are the ranks' counts (MPI_Reduce_scatter): equal, ncclReduceScatter; else the planner's cut.
+  // On MPS the call runs in place: on the input itself where the output is its rank's segment in the
+  // window, else on a copy of it in the call's allocation, the rank's segment then copied out (a drain).
   c10::intrusive_ptr<Work> reduce_scatter(std::vector<at::Tensor> &outputs, std::vector<std::vector<at::Tensor>> &inputs,
                                           const ReduceScatterOptions &opts) override {
     TORCH_CHECK(outputs.size() == 1 && inputs.size() == 1 && (int)inputs[0].size() == getSize(), "mesh: reduce_scatter takes one tensor and a list of world_size");
@@ -736,10 +802,13 @@ class ProcessGroupMesh : public Backend {
     TORCH_CHECK(outputs[0].numel() == (int64_t)counts[getRank()], "mesh: reduce_scatter's output is this rank's tensor of the list: ",
                 outputs[0].numel(), " elements, the list's ", counts[getRank()]);
     auto call = start(outputs[0], "reduce_scatter");
-    int out = call->add(outputs[0], false, true), in = call->add(inputs[0], true, false);
+    size_t at = 0;
+    for (int r = 0; r < getRank(); r++) at += counts[r] * outputs[0].element_size();
+    int out = -1, in = scatter_from(*call, outputs[0], inputs[0], at, &out);
     call->begin();
     reduce_call("ncclMeshReduceScatterV", opts.reduceOp, outputs[0], [&](ncclRedOp_t op) {
-      return ncclMeshReduceScatterV(call->ptr(in), call->ptr(out), counts.data(), datatype(outputs[0]), op, comm_, call->stream());
+      return ncclMeshReduceScatterV(call->ptr(in), out < 0 ? (char *)call->ptr(in) + at : call->ptr(out), counts.data(), datatype(outputs[0]), op,
+                                    comm_, call->stream());
     });
     return work(OpType::REDUCE_SCATTER, outputs, call, uneven(counts));
   }
@@ -747,10 +816,12 @@ class ProcessGroupMesh : public Backend {
   c10::intrusive_ptr<Work> reduce_scatter_single(at::Tensor &output, at::Tensor &input, const ReduceScatterOptions &opts) override {
     TORCH_CHECK(input.numel() == getSize() * output.numel(), "mesh: reduce_scatter_tensor's input is world_size outputs");
     auto call = start(output, "reduce_scatter_tensor");
-    int out = call->add(output, false, true), in = call->add(input, true, false);
+    const size_t at = getRank() * output.nbytes();
+    int out = -1, in = scatter_from(*call, output, {input}, at, &out);
     call->begin();
     reduce_call("ncclReduceScatter", opts.reduceOp, output, [&](ncclRedOp_t op) {
-      return ncclReduceScatter(call->ptr(in), call->ptr(out), output.numel(), datatype(output), op, comm_, call->stream());
+      return ncclReduceScatter(call->ptr(in), out < 0 ? (char *)call->ptr(in) + at : call->ptr(out), output.numel(), datatype(output), op, comm_,
+                               call->stream());
     });
     std::vector<at::Tensor> result{output};
     return work(OpType::_REDUCE_SCATTER_BASE, result, call);
@@ -758,8 +829,22 @@ class ProcessGroupMesh : public Backend {
 
   c10::intrusive_ptr<Work> reduce_scatter_tensor_coalesced(std::vector<at::Tensor> &outputs, std::vector<at::Tensor> &inputs,
                                                            const ReduceScatterOptions &opts) override {
-    for (size_t i = 0; i < inputs.size(); i++) reduce_scatter_single(outputs[i], inputs[i], opts)->wait();
-    return c10::make_intrusive<WorkMesh>(OpType::COALESCED, outputs, std::make_shared<Call>(inputs[0], false, streams_), comm_);
+    TORCH_CHECK(!inputs.empty() && inputs.size() == outputs.size(), "mesh: reduce_scatter_tensor_coalesced takes as many outputs as inputs");
+    auto call = start(outputs[0], "reduce_scatter_tensor_coalesced");
+    std::vector<int> ins, outs(inputs.size(), -1);
+    for (size_t i = 0; i < inputs.size(); i++) {
+      TORCH_CHECK(inputs[i].numel() == getSize() * outputs[i].numel(), "mesh: reduce_scatter_tensor's input is world_size outputs");
+      ins.push_back(scatter_from(*call, outputs[i], {inputs[i]}, getRank() * outputs[i].nbytes(), &outs[i]));
+    }
+    call->begin();
+    group([&] {
+      for (size_t i = 0; i < inputs.size(); i++) reduce_call("ncclReduceScatter", opts.reduceOp, outputs[i], [&](ncclRedOp_t op) {
+        const size_t at = getRank() * outputs[i].nbytes();
+        return ncclReduceScatter(call->ptr(ins[i]), outs[i] < 0 ? (char *)call->ptr(ins[i]) + at : call->ptr(outs[i]), outputs[i].numel(),
+                                 datatype(outputs[i]), op, comm_, call->stream());
+      });
+    });
+    return work(OpType::COALESCED, outputs, call);
   }
 
   // Equal splits are ncclAlltoAll; others, grouped ncclSend/ncclRecv of each rank's rows.
@@ -852,6 +937,37 @@ class ProcessGroupMesh : public Backend {
 
   // A collective's call: synchronous on CPU tensors, on a stream of its own on MPS tensors.
   std::shared_ptr<Call> start(const at::Tensor &like, const char *op) { return std::make_shared<Call>(like, false, streams_, op); }
+  // Whether `t`'s bytes are the window bytes `at` into the list laid end to end.
+  static bool lies_at(const at::Tensor &t, const std::vector<at::Tensor> &list, size_t at) {
+    char *base = window_span(list), *mine = t.is_mps() && t.is_contiguous() ? window_bytes(t) : nullptr;
+    return base && mine && mine == base + at;
+  }
+  // An all-gather into `output`: on MPS in place, the input filled into its segment (above); on CPU the
+  // input a place of its own.  gather_issue issues it (the coalesced form's i-th pair of places).
+  void gather_into(Call &call, at::Tensor &output, at::Tensor &input) {
+    const int out = call.add(output, false, true);
+    if (!call.mps()) call.add(input, true, false);
+    else if (!lies_at(input, {output}, getRank() * input.nbytes())) call.fill(input, out, getRank() * input.nbytes());
+  }
+  void gather_issue(Call &call, at::Tensor &output, at::Tensor &input, int i = 0) {
+    const int places = call.mps() ? 1 : 2, out = i * places;
+    void *in = call.mps() ? (char *)call.ptr(out) + getRank() * input.nbytes() : call.ptr(out + 1);
+    check(ncclAllGather(in, call.ptr(out), input.numel(), datatype(input), comm_, call.stream()), comm_, "ncclAllGather");
+  }
+  // A reduce-scatter's operand place: on MPS the input itself where `output` is its segment `at` in the
+  // window (in place), else the call's own copy of it with the segment drained into `output`; on CPU the
+  // input and the output places.  Returns the operand's place; *out the output's (-1: in the operand).
+  int scatter_from(Call &call, at::Tensor &output, const std::vector<at::Tensor> &input, size_t at, int *out) {
+    if (!call.mps()) {
+      *out = call.add(output, false, true);
+      return call.add(input, true, false);
+    }
+    *out = -1;
+    if (lies_at(output, input, at)) return call.add(input, true, true);
+    const int operand = call.add(input, true, false, true);
+    call.drain(output, operand, at);
+    return operand;
+  }
   // A list's element counts; uneven: those counts where they differ (the trace's splits), else none.
   static std::vector<size_t> numels(const std::vector<at::Tensor> &list) {
     std::vector<size_t> counts;
@@ -1054,7 +1170,149 @@ static void trace_dump() {
         << gpu(r.first) << "}\n";
 }
 
+// ---- functional collectives on MPS tensors ----
+// torch's _c10d_functional ops (torch/csrc/distributed/c10d/Functional.cpp, DTensor's redistributions
+// and context parallelism) allocate their outputs with at::empty or clone, which on MPS is the MPS
+// allocator's memory, so every call blitted its operand into the window and out again.  These MPS
+// kernels are Functional.cpp's with the outputs made window tensors: all_reduce's clone, all_gather's
+// output and all_to_all's are the window's and the call runs on them in place; reduce_scatter's input
+// is copied into a window tensor and reduced there in place, the output its rank's segment (a view).
+// The work is registered on the output as Functional.cpp registers it, for wait_tensor.
+static c10::intrusive_ptr<ProcessGroup> group_of(const c10::IValue &v) {
+  return v.isString() ? resolve_process_group(v.toStringRef()) : v.toCustomClass<ProcessGroup>();
+}
+static ReduceOp reduce_of(const std::string &name) {
+  if (name == "sum") return ReduceOp::SUM;
+  if (name == "avg") return ReduceOp::AVG;
+  if (name == "product") return ReduceOp::PRODUCT;
+  if (name == "min") return ReduceOp::MIN;
+  if (name == "max") return ReduceOp::MAX;
+  TORCH_CHECK(false, "mesh: functional collectives on MPS take sum, avg, product, min and max, not ", name);
+}
+static at::Tensor window_like(at::IntArrayRef sizes, const at::Tensor &like) { return window_tensor(sizes, like.scalar_type(), true); }
+static std::vector<int64_t> rows(at::IntArrayRef sizes, int64_t first) {
+  std::vector<int64_t> shape(sizes.begin(), sizes.end());
+  shape[0] = first;
+  return shape;
+}
+static void functional_all_reduce(const c10::OperatorHandle &, torch::jit::Stack *stack) {
+  auto group = group_of((*stack)[2]);
+  const std::string op = (*stack)[1].toStringRef();
+  at::Tensor input = (*stack)[0].toTensor();
+  torch::jit::drop(*stack, 3);
+  at::Tensor out = window_like(input.sizes(), input).copy_(input);
+  std::vector<at::Tensor> tensors{out};
+  AllreduceOptions opts;
+  opts.reduceOp = reduce_of(op);
+  register_work(out, group->allreduce(tensors, opts));
+  torch::jit::push(*stack, out);
+}
+static void functional_all_gather(const c10::OperatorHandle &, torch::jit::Stack *stack) {
+  auto group = group_of((*stack)[2]);
+  const int64_t size = (*stack)[1].toInt();
+  at::Tensor input = (*stack)[0].toTensor().contiguous();
+  torch::jit::drop(*stack, 3);
+  at::Tensor out = window_like(rows(input.sizes(), input.size(0) * size), input);
+  register_work(out, group->_allgather_base(out, input));
+  torch::jit::push(*stack, out);
+}
+static void functional_reduce_scatter(const c10::OperatorHandle &, torch::jit::Stack *stack) {
+  auto group = group_of((*stack)[3]);
+  const int64_t size = (*stack)[2].toInt();
+  const std::string op = (*stack)[1].toStringRef();
+  at::Tensor input = (*stack)[0].toTensor();
+  torch::jit::drop(*stack, 4);
+  TORCH_CHECK(input.dim() && input.size(0) % size == 0, "mesh: reduce_scatter_tensor's first dimension is a multiple of the group size");
+  at::Tensor operand = window_like(input.sizes(), input).copy_(input);
+  const int64_t each = input.size(0) / size;
+  at::Tensor out = operand.narrow(0, group->getRank() * each, each);
+  ReduceScatterOptions opts;
+  opts.reduceOp = reduce_of(op);
+  register_work(out, group->_reduce_scatter_base(out, operand, opts));
+  torch::jit::push(*stack, out);
+}
+static void functional_all_to_all(const c10::OperatorHandle &, torch::jit::Stack *stack) {
+  auto group = group_of((*stack)[3]);
+  std::vector<int64_t> in_splits, out_splits;
+  for (auto &v : (*stack)[2].toListRef()) in_splits.push_back(v.isInt() ? v.toInt() : v.toSymInt().guard_int(__FILE__, __LINE__));
+  for (auto &v : (*stack)[1].toListRef()) out_splits.push_back(v.isInt() ? v.toInt() : v.toSymInt().guard_int(__FILE__, __LINE__));
+  at::Tensor input = (*stack)[0].toTensor().contiguous();
+  torch::jit::drop(*stack, 4);
+  int64_t first = input.dim() ? input.size(0) : 1;
+  if (!out_splits.empty()) {
+    first = 0;
+    for (auto v : out_splits) first += v;
+  }
+  at::Tensor out = window_like(input.dim() ? rows(input.sizes(), first) : std::vector<int64_t>{}, input);
+  register_work(out, group->alltoall_base(out, input, out_splits, in_splits));
+  torch::jit::push(*stack, out);
+}
+static void functional_broadcast(const c10::OperatorHandle &, torch::jit::Stack *stack) {
+  auto group = group_of((*stack)[2]);
+  const int64_t src = (*stack)[1].toInt();
+  at::Tensor input = (*stack)[0].toTensor();
+  torch::jit::drop(*stack, 3);
+  at::Tensor out = window_like(input.sizes(), input).copy_(input);
+  std::vector<at::Tensor> tensors{out};
+  BroadcastOptions opts;
+  opts.rootRank = src;
+  register_work(out, group->broadcast(tensors, opts));
+  torch::jit::push(*stack, out);
+}
+static void functional_all_gather_coalesced(const c10::OperatorHandle &, torch::jit::Stack *stack) {
+  auto group = group_of((*stack)[2]);
+  const int64_t size = (*stack)[1].toInt();
+  std::vector<at::Tensor> inputs, outs;
+  for (auto &t : (*stack)[0].toTensorVector()) inputs.push_back(t.contiguous());
+  torch::jit::drop(*stack, 3);
+  for (auto &t : inputs) outs.push_back(window_like(rows(t.sizes(), t.size(0) * size), t));
+  auto work = group->allgather_into_tensor_coalesced(outs, inputs);
+  for (auto &t : outs) register_work(t, work);
+  torch::jit::push(*stack, outs);
+}
+static void functional_reduce_scatter_coalesced(const c10::OperatorHandle &, torch::jit::Stack *stack) {
+  auto group = group_of((*stack)[3]);
+  const int64_t size = (*stack)[2].toInt();
+  const std::string op = (*stack)[1].toStringRef();
+  std::vector<at::Tensor> inputs = (*stack)[0].toTensorVector(), operands, outs;
+  torch::jit::drop(*stack, 4);
+  for (auto &t : inputs) {
+    TORCH_CHECK(t.dim() && t.size(0) % size == 0, "mesh: reduce_scatter_tensor's first dimension is a multiple of the group size");
+    operands.push_back(window_like(t.sizes(), t).copy_(t));
+    const int64_t each = t.size(0) / size;
+    outs.push_back(operands.back().narrow(0, group->getRank() * each, each));
+  }
+  ReduceScatterOptions opts;
+  opts.reduceOp = reduce_of(op);
+  auto work = group->reduce_scatter_tensor_coalesced(outs, operands, opts);
+  for (auto &t : outs) register_work(t, work);
+  torch::jit::push(*stack, outs);
+}
+static void functional_all_reduce_coalesced(const c10::OperatorHandle &, torch::jit::Stack *stack) {
+  auto group = group_of((*stack)[2]);
+  const std::string op = (*stack)[1].toStringRef();
+  std::vector<at::Tensor> inputs = (*stack)[0].toTensorVector(), outs;
+  torch::jit::drop(*stack, 3);
+  for (auto &t : inputs) outs.push_back(window_like(t.sizes(), t).copy_(t));
+  AllreduceCoalescedOptions opts;
+  opts.reduceOp = reduce_of(op);
+  auto work = group->allreduce_coalesced(outs, opts);
+  for (auto &t : outs) register_work(t, work);
+  torch::jit::push(*stack, outs);
+}
+
 } // namespace c10d
+
+TORCH_LIBRARY_IMPL(_c10d_functional, MPS, m) {
+  m.impl("all_reduce", torch::CppFunction::makeFromBoxedFunction<&c10d::functional_all_reduce>());
+  m.impl("all_gather_into_tensor", torch::CppFunction::makeFromBoxedFunction<&c10d::functional_all_gather>());
+  m.impl("reduce_scatter_tensor", torch::CppFunction::makeFromBoxedFunction<&c10d::functional_reduce_scatter>());
+  m.impl("all_to_all_single", torch::CppFunction::makeFromBoxedFunction<&c10d::functional_all_to_all>());
+  m.impl("broadcast", torch::CppFunction::makeFromBoxedFunction<&c10d::functional_broadcast>());
+  m.impl("all_gather_into_tensor_coalesced", torch::CppFunction::makeFromBoxedFunction<&c10d::functional_all_gather_coalesced>());
+  m.impl("reduce_scatter_tensor_coalesced", torch::CppFunction::makeFromBoxedFunction<&c10d::functional_reduce_scatter_coalesced>());
+  m.impl("all_reduce_coalesced", torch::CppFunction::makeFromBoxedFunction<&c10d::functional_all_reduce_coalesced>());
+}
 
 TORCH_LIBRARY_IMPL(c10d, MPS, m) {
   for (const char *name : {"broadcast_", "allreduce_", "allreduce_coalesced_", "reduce_", "allgather_", "_allgather_base_",

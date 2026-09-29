@@ -13,7 +13,8 @@ is that agreement on the default group, every rank calling it: (the first call t
 since the previous agreement, or None; this rank's link-table epoch); agreed() the last agreement made,
 by agree() or the error path: (how many so far, the failed call or None, the epoch).  Once a process
 group of the backend exists, torch's MPS factories (torch.empty, zeros, ones, full, rand, randn,
-tensor, their *_like forms, and Tensor.to onto "mps") make window tensors on that thread: tensors of
+tensor, their *_like forms, Tensor.new_empty, new_zeros, new_ones, new_full, and Tensor.to onto "mps")
+make window tensors on that thread: tensors of
 the bridge's registered window, which the backend sends and receives in place, and whose release
 returns their pages only once every use recorded on them is done (window(False) turns it off for a
 block).  empty() makes one directly; counts() is what libnccl-mesh and the backend copied, sent and
@@ -150,13 +151,28 @@ def _window_mode():
         return (kwargs.get('out') is None and kwargs.get('layout') in (None, torch.strided) and not kwargs.get('pin_memory')
                 and kwargs.get('memory_format') in (None, torch.contiguous_format, torch.preserve_format))
 
+    sequence = (list, tuple, torch.Size)
+
     def made(size, dtype):
-        return empty(list(size), dtype=dtype or torch.get_default_dtype())
+        return empty(list(size) if isinstance(size, sequence) else [size], dtype=dtype or torch.get_default_dtype())
+
+    methods = {torch.Tensor.new_empty: None, torch.Tensor.new_zeros: 0, torch.Tensor.new_ones: 1, torch.Tensor.new_full: 'full'}
 
     def make(func, args, kwargs):
         """A window tensor for an MPS factory call, filled on the MPS stream; None for any other call."""
         if not plain(kwargs):
             return None
+        if func in methods:
+            source, how = args[0], methods[func]
+            if not on_mps(kwargs.get('device', source.device)) or kwargs.get('requires_grad'):
+                return None
+            rest, value = args[1:], None
+            if how == 'full':
+                size, value = (rest[0] if rest else kwargs['size']), (rest[1] if len(rest) > 1 else kwargs['fill_value'])
+            else:
+                size = kwargs['size'] if 'size' in kwargs else rest[0] if len(rest) == 1 and isinstance(rest[0], sequence) else rest
+            t = made(size, kwargs.get('dtype') or source.dtype)
+            return t if how is None else t.fill_(value if how == 'full' else how)
         if func is torch.Tensor.to:
             device, dtype, _, _ = torch._C._nn._parse_to(*args[1:], **kwargs)
             source = args[0]
@@ -173,7 +189,6 @@ def _window_mode():
         if func not in filled:
             return None
         how = filled[func]
-        sequence = (list, tuple, torch.Size)
         if func in (torch.empty_like, torch.zeros_like, torch.ones_like, torch.full_like, torch.rand_like, torch.randn_like):
             source = args[0]
             if not on_mps(kwargs.get('device', source.device)):

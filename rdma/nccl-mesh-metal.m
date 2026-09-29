@@ -375,15 +375,19 @@ HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *fro
     [encoder endEncoding];
   }
 }
-/* Committed; `done(argument, failed)` once the GPU has run it (a failed program marks the process's
-   GPU failed, so no host wait on its values goes on). */
-HIDDEN void nccl_mesh_program_commit(void *program,void (*done)(void *,int),void *argument){
-  id<MTLCommandBuffer> buffer=program;
-  [buffer addCompletedHandler:^(id<MTLCommandBuffer> ran){
+/* `done(argument, failed)` once the GPU has run the command buffer (a failed one marks the process's
+   GPU failed, so no host wait on its values goes on): the library's own program, or a caller's that a
+   stream's deferred programs were encoded into (ncclMeshStreamEncodeWait). */
+HIDDEN void nccl_mesh_program_handler(void *program,void (*done)(void *,int),void *argument){
+  [(id<MTLCommandBuffer>)program addCompletedHandler:^(id<MTLCommandBuffer> ran){
     int error=ran.status==MTLCommandBufferStatusError;
     if(error){atomic_store(&failed,1);fprintf(stderr,"nccl-mesh: a GPU program failed: %s\n",ran.error.localizedDescription.UTF8String);}
     done(argument,error);
   }];
-  [buffer commit];
-  [buffer release];
+}
+/* Committed, with `done` as above. */
+HIDDEN void nccl_mesh_program_commit(void *program,void (*done)(void *,int),void *argument){
+  nccl_mesh_program_handler(program,done,argument);
+  [(id<MTLCommandBuffer>)program commit];
+  [(id<MTLCommandBuffer>)program release];
 }
