@@ -9,7 +9,9 @@ block).  empty() makes one directly; counts() is what libnccl-mesh and the backe
 waited for so far; records() the window allocator's records, and address(t) where a tensor's bytes
 lie in them (0: outside the window).
   The backend also completes what PyTorch's parallelism APIs need of MPS tensors (_mps.py): DeviceMesh
-on "mps", DTensor's backward through nn.Linear, and context_parallel's SDPA (CPU tensors too).
+on "mps", DTensor's backward through nn.Linear, and context_parallel's SDPA (CPU tensors too).  Its
+first process group also installs partition.py: a mesh dimension's parts (MESH_PARTITION), by which
+DTensor's Shard, tensor and context parallelism split it instead of equally.
 MESH_TRACE=<file> writes each call's trace there (ProcessGroupMesh.mm) when the group is destroyed or the
 process exits."""
 import atexit
@@ -27,7 +29,7 @@ def _autoload():
 
 def _create(store, rank, size, timeout):
     """The backend, and from then on this thread's MPS factories making window tensors."""
-    from . import _C, _mps
+    from . import _C, _mps, partition  # noqa: F401 (partition installs itself)
     backend = _C.createProcessGroupMesh(store, rank, size, timeout)
     global _mode
     if _mode is None:

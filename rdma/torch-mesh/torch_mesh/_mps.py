@@ -20,12 +20,15 @@ aten._scaled_dot_product_attention_math_for_mps on MPS tensors; neither has a sh
 call fails.  Here each gets the handler CUDA's ops get: torch's own ring (_templated_ring_attention, its
 rotation and merge) over the query's sequence shard, each block by an op that returns the output and the
 logsumexp: CPU's flash kernel as it is; on MPS, whose SDPA returns no logsumexp, the block's scores rows
-at a time (at most 2^26 live).  With gradient, SDPA on MPS decomposes into matmul and softmax before the
+at a time (at most 2^26 live).  On a partitioned mesh dimension (partition.py) the ring is torch's with
+each source's block at its own length.  With gradient, SDPA on MPS decomposes into matmul and softmax before the
 dispatcher sees it, and CP's backward handlers are CUDA's too: forward only."""
 import torch
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
 from torch.distributed.tensor.experimental._context_parallel import _attention
+
+from . import partition
 
 aten = torch.ops.aten
 SCORES = 1 << 26
@@ -72,9 +75,13 @@ def _ring(op_call, args, kwargs):
     spec = query._spec
     if spec.mesh.ndim != 1 or any(t._spec.placements != (Shard(2),) for t in (query, key, value)):
         raise NotImplementedError(f"mesh: context-parallel SDPA on Shard(2) of a 1-D mesh, not {spec.placements}")
-    out, lse = _attention._templated_ring_attention(spec.mesh.get_group(), 2, _BLOCKS[op_call], query._local_tensor,
-                                                    key._local_tensor, value._local_tensor,
-                                                    is_causal=named.get("is_causal", False), scale=named.get("scale"))
+    local = (query._local_tensor, key._local_tensor, value._local_tensor)
+    options, n = dict(is_causal=named.get("is_causal", False), scale=named.get("scale")), spec.mesh.size()
+    if isinstance(n, partition._Chunks):
+        lengths = partition._split(n, query.shape[2])[0]
+        out, lse = partition._ring_attention(spec.mesh.get_group(), _BLOCKS[op_call], *local, lengths, **options)
+    else:
+        out, lse = _attention._templated_ring_attention(spec.mesh.get_group(), 2, _BLOCKS[op_call], *local, **options)
     out = DTensor(out, _spec(spec, query.shape[:-1] + value.shape[-1:], out.dtype), requires_grad=False)
     if op_call is aten._scaled_dot_product_attention_math_for_mps.default:
         return out, None

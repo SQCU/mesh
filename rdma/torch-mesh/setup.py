@@ -1,4 +1,4 @@
-"""torch.distributed's "mesh" backend (torch_mesh/ProcessGroupMesh.cpp) over ../libnccl-mesh.dylib.
+"""torch.distributed's "mesh" backend (torch_mesh/ProcessGroupMesh.mm) over ../libnccl-mesh.dylib.
 
   make -C .. libmesh.dylib libnccl-mesh.dylib
   uv pip install --python <venv>/bin/python --no-build-isolation .
