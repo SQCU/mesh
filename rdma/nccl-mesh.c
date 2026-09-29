@@ -609,7 +609,7 @@ static void progress(struct ncclComm *c);
 /* While the worker waits on the network for a part whose GPU work waits on it, the GPU is kept out of
    its idle state (nccl-mesh-metal.m, holds): two holds of about HOLD_US each in flight on the holds'
    queue, a new one committed as each ends. */
-#define HOLD_US 200.0
+#define HOLD_US 50.0
 static void keep_awake(struct ncclComm *c){
   if(!c->hold || !c->hold_adds || nccl_mesh_event_value(c->hold)+2<=c->held)return;
   nccl_mesh_hold(c->hold,++c->held,c->hold_adds);
