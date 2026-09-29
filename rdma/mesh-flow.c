@@ -884,10 +884,13 @@ static void net_closed(struct net_session *s,const struct net_message *message){
       net_emit(s,(struct net_message){.kind=NET_CLOSE,.to=message->from,.to_generation=message->from_generation,.from=index,.from_generation=comm->generation});
   }
 }
-/* RTS: queued for the receive comm's next irecv, or refused when that comm is gone or closing. */
+/* RTS: queued for the receive comm's next irecv, or refused when that comm is gone or closing.  A comm
+   accepted but not yet taken by its client (ACCEPTABLE) queues it too: the sender's connect completes at
+   this bridge's accept, so it may announce before the client's accept has taken the comm. */
 static void net_announced(struct net_session *s,const struct net_message *message){
   struct mesh_net_comm *comm=net_comm_at(s,message->to,message->to_generation);
-  if(!comm || atomic_load_explicit(&comm->state,memory_order_acquire)!=MESH_NET_RECV){net_refuse(s,message,ECONNRESET);return;}
+  uint32_t at=comm?atomic_load_explicit(&comm->state,memory_order_acquire):MESH_NET_FREE;
+  if(at!=MESH_NET_RECV && at!=MESH_NET_ACCEPTABLE){net_refuse(s,message,ECONNRESET);return;}
   struct net_comm *state=net_state(comm,message->to);
   if(state->announce_tail-state->announce_head>=MESH_NET_REQUESTS){s->failed=EPROTO;return;}
   state->announced[state->announce_tail++%MESH_NET_REQUESTS]=(struct net_announce){message->sequence,message->size,message->extent,message->phase};
