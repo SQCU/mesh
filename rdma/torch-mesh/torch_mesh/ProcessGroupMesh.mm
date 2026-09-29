@@ -33,9 +33,11 @@
 // runs on a stream of its own (as NCCL's point-to-point calls on separate streams), so isend/irecv
 // pairs progress together, and its Work waits for that stream.
 //   MESH_TRACE=<file>: each call's host times and bytes, when the GPU reached the MPS fence before it, the
-// call's stream reached its value and the MPS stream passed its wait (MTLSharedEventListener), the GPU
-// times of the MPS command buffers those fences and waits end or begin, and libnccl-mesh's tallies of the
-// call (ncclMeshGroupTally), written as JSON lines when the group is destroyed or the process exits.
+// call's stream reached its value and the MPS stream passed its kept work (MTLSharedEventListener: a
+// signal is seen once its command buffer ends), the GPU times of the MPS command buffers that end at the
+// fence and at the wait and of the one holding the kept work (its start is when the wait passed), and
+// libnccl-mesh's tallies of the call (ncclMeshGroupTally), written as JSON lines when the group is
+// destroyed or the process exits.
 #include <torch/extension.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/GroupRegistry.hpp>
@@ -112,7 +114,7 @@ static uint64_t uptime() { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }  //
 struct Traced {
   std::string op, dtype;
   bool mps = false;
-  uint64_t bytes = 0, in_place = 0, blit_in = 0, blit_out = 0, enter = 0, issued = 0, fence = 0, resume = 0;
+  uint64_t bytes = 0, in_place = 0, blit_in = 0, blit_out = 0, enter = 0, issued = 0, fence = 0, reach = 0, resume = 0;
   std::vector<int64_t> splits;
   void *tally = nullptr, *stream_event = nullptr;
   uint64_t stream_value = 0;
@@ -361,9 +363,20 @@ class Call {
     if (!stream_) return;
     auto *s = at::mps::getCurrentMPSStream();
     on_mps(s, [&] {
+      // The kept work is a command buffer of its own: the MPS work before it committed (its GPU end is
+      // when the stream reached the wait), and it committed (its GPU start is when the wait passed, its
+      // end when the combines are done).
       s->endKernelCoalescing();
+      if (traced_ != SIZE_MAX) {
+        const uint64_t reach = ++fence_next;
+        [s->commandBuffer() encodeSignalEvent:fence_event() value:reach];
+        note_gpu(s->commandBuffer(), reach);
+        std::lock_guard<std::mutex> guard(trace.lock);
+        trace.calls[traced_].reach = reach;
+      }
+      s->synchronize(at::mps::SyncType::COMMIT);
       check(ncclMeshStreamEncodeWait(stream_, (__bridge void *)s->commandBuffer()), nullptr, "ncclMeshStreamEncodeWait");
-      if (traced_ != SIZE_MAX) {  // a signal after the wait: when the MPS stream passed it
+      if (traced_ != SIZE_MAX) {  // a signal after the kept work: when the MPS stream passed it
         const uint64_t resume = ++fence_next;
         [s->commandBuffer() encodeSignalEvent:fence_event() value:resume];
         note_gpu(s->commandBuffer(), resume);
@@ -371,6 +384,7 @@ class Call {
         std::lock_guard<std::mutex> guard(trace.lock);
         trace.calls[traced_].resume = resume;
       }
+      s->synchronize(at::mps::SyncType::COMMIT);
     });
     for (auto &d : drains_) mps_segment(s, d, false);
     for (auto &p : places_)
@@ -1123,8 +1137,10 @@ static void trace_dump() {
       return !trace.reached.count({event, value}) || (gpu && !trace.gpu.count(value));
     };
     void *fence = (__bridge void *)fence_event();
-    for (auto &c : trace.calls)
+    for (auto &c : trace.calls) {
       if (waiting(fence, c.fence, true) || waiting(fence, c.resume, true) || waiting(c.stream_event, c.stream_value, false)) return true;
+      if (c.reach && [(__bridge id<MTLSharedEvent>)fence signaledValue] >= c.reach && !trace.gpu.count(c.reach)) return true;
+    }
     for (auto &r : trace.releases)
       if (waiting(fence, r.first, true)) return true;
     return false;
@@ -1152,7 +1168,8 @@ static void trace_dump() {
     for (size_t k = 0; k < c.splits.size(); k++) out << (k ? "," : "") << c.splits[k];
     out << "],\"enter_ns\":" << c.enter << ",\"issued_ns\":" << c.issued << ",\"fence\":" << c.fence << ",\"fence_reached_ns\":"
         << reached(fence, c.fence) << ",\"fence_gpu_ns\":" << gpu(c.fence) << ",\"stream_done_ns\":" << reached(c.stream_event, c.stream_value)
-        << ",\"resume\":" << c.resume << ",\"resume_ns\":" << reached(fence, c.resume) << ",\"resume_gpu_ns\":" << gpu(c.resume) << ",\"library\":[";
+        << ",\"reach_gpu_ns\":" << gpu(c.reach) << ",\"resume\":" << c.resume << ",\"resume_ns\":" << reached(fence, c.resume)
+        << ",\"resume_gpu_ns\":" << gpu(c.resume) << ",\"library\":[";
     ncclMeshCounts_t counts[64];
     int n = 0;
     ncclMeshTallyCounts(c.tally, counts, 64, &n);

@@ -1,4 +1,5 @@
 #import <Metal/Metal.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -275,9 +276,14 @@ static const char *source =
   "// bytes a blit does not take (an offset or length not a multiple of 4)\n"
   "kernel void copy(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
   "  EACH d[p.dst + i] = s[p.src + i];\n"
+  "}\n"
+  "// one thread's n atomic adds: the GPU kept out of its idle state (nccl_mesh_hold)\n"
+  "kernel void hold(device atomic_uint *c [[buffer(0)]], constant uint &n [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
+  "  if (i) return;\n"
+  "  for (uint k = 0; k < n; k++) atomic_fetch_add_explicit(c, 1u, memory_order_relaxed);\n"
   "}\n";
 
-enum { KERNELS = 4 };
+enum { KERNELS = 5, KERNEL_HOLD = 4 };
 static struct { id<MTLDevice> device; id<MTLComputePipelineState> kernels[KERNELS]; } gpu;
 static _Atomic int failed;
 #define HIDDEN __attribute__((visibility("hidden")))
@@ -292,7 +298,7 @@ HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
     if(@available(macOS 15.0,*))options.mathMode=MTLMathModeSafe;
     NSError *failure=nil;
     id<MTLLibrary> library=[[device newLibraryWithSource:@(source) options:options error:&failure] autorelease];
-    static const char *const names[KERNELS]={"combine","premultiply","postdivide","copy"};
+    static const char *const names[KERNELS]={"combine","premultiply","postdivide","copy","hold"};
     for(int k=0;library && k<KERNELS;k++){
       id<MTLFunction> function=[[library newFunctionWithName:@(names[k])] autorelease];
       if(!(gpu.kernels[k]=[device newComputePipelineStateWithFunction:function error:&failure]))library=nil;
@@ -337,6 +343,58 @@ HIDDEN void nccl_mesh_event_signal(void *event,uint64_t value){
   id<MTLSharedEvent> shared=event;
   if(shared.signaledValue<value)shared.signaledValue=value;
 }
+
+/* ---- holds ----
+   A GPU left idle for about a millisecond drops into a state it leaves slowly: on the M4 Pro a command
+   buffer parked 2 ms on a shared event started 433 us (median) after the host signalled it and ran its
+   combine at 340 us, against 68 us after a 200 us park, and 51 us and 160 us while one thread of another
+   queue kept the GPU busy (metal-microbench output_data/perf-torch-20260929/probe, wake2).  So while a
+   worker waits on the network for a part whose GPU work waits on it, holds keep the GPU busy: a hold is
+   one thread's atomic adds on the holds' own queue, then a signal of the worker's hold event. */
+static struct { pthread_mutex_t lock; id<MTLCommandQueue> queue; id<MTLBuffer> counter; uint32_t adds; } holding={.lock=PTHREAD_MUTEX_INITIALIZER};
+/* One hold of `adds` adds committed, `event` signalled `value` once it ends. */
+static void hold_commit(void *event,uint64_t value,uint32_t adds){
+  @autoreleasepool {
+    id<MTLCommandBuffer> buffer=[holding.queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder=[buffer computeCommandEncoder];
+    [encoder setComputePipelineState:gpu.kernels[KERNEL_HOLD]];
+    [encoder setBuffer:holding.counter offset:0 atIndex:0];
+    [encoder setBytes:&adds length:sizeof adds atIndex:1];
+    [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+    [encoder endEncoding];
+    if(event)[buffer encodeSignalEvent:(id<MTLSharedEvent>)event value:value];
+    [buffer commit];
+  }
+}
+/* The holds' queue made, and a hold's adds taken for about `us` microseconds: timed once on a GPU the
+   first hold has woken.  0 where the GPU is not attached. */
+HIDDEN uint32_t nccl_mesh_hold_adds(double us){
+  pthread_mutex_lock(&holding.lock);
+  if(!holding.queue && gpu.device){
+    holding.queue=[gpu.device newCommandQueue];
+    holding.counter=[gpu.device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+    double seconds=0;const uint32_t trial=1u<<16;
+    for(int k=0;k<2;k++){
+      @autoreleasepool {
+        id<MTLCommandBuffer> buffer=[holding.queue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder=[buffer computeCommandEncoder];
+        [encoder setComputePipelineState:gpu.kernels[KERNEL_HOLD]];
+        [encoder setBuffer:holding.counter offset:0 atIndex:0];
+        [encoder setBytes:&trial length:sizeof trial atIndex:1];
+        [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+        [encoder endEncoding];
+        [buffer commit];[buffer waitUntilCompleted];
+        seconds=buffer.GPUEndTime-buffer.GPUStartTime;
+      }
+    }
+    double adds=seconds>0?trial*(us*1e-6)/seconds:trial;
+    holding.adds=adds<1024?1024:adds>(1u<<26)?(1u<<26):(uint32_t)adds;
+  }
+  uint32_t adds=holding.adds;
+  pthread_mutex_unlock(&holding.lock);
+  return adds;
+}
+HIDDEN void nccl_mesh_hold(void *event,uint64_t value,uint32_t adds){hold_commit(event,value,adds);}
 
 /* ---- programs ---- */
 HIDDEN void *nccl_mesh_program_begin(void *queue){

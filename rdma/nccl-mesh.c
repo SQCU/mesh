@@ -135,6 +135,8 @@ struct ncclComm {
      until the bridge has vacated them (`quiet`: the value it is held for) */
   _Atomic uint64_t issued; uint64_t failed,agreements; char cause[256];
   uint64_t *closed; int nclosed,open; void *quiet; uint64_t quiet_value;
+  /* the worker's holds (keep_awake): their event, the last value committed, a hold's adds */
+  void *hold; uint64_t held; uint32_t hold_adds;
 };
 
 #define HIDDEN __attribute__((visibility("hidden")))
@@ -154,6 +156,8 @@ HIDDEN void nccl_mesh_program_kernel(void *program,int kernel,void *to,uint64_t 
 HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes);
 HIDDEN void nccl_mesh_program_handler(void *program,void (*done)(void *,int),void *argument);
 HIDDEN void nccl_mesh_program_commit(void *program,void (*done)(void *,int),void *argument);
+HIDDEN uint32_t nccl_mesh_hold_adds(double us);
+HIDDEN void nccl_mesh_hold(void *event,uint64_t value,uint32_t adds);
 
 /* ---- errors ---- */
 static _Thread_local char last_error[512];
@@ -601,6 +605,14 @@ static ncclResult_t span_release(void *p,void *event,uint64_t value){
 #define GPU_WAIT_NS UINT64_C(1000000000)
 struct pending { size_t lo,hi; void *request; };
 static void progress(struct ncclComm *c);
+/* While the worker waits on the network for a part whose GPU work waits on it, the GPU is kept out of
+   its idle state (nccl-mesh-metal.m, holds): two holds of about HOLD_US each in flight on the holds'
+   queue, a new one committed as each ends. */
+#define HOLD_US 200.0
+static void keep_awake(struct ncclComm *c){
+  if(!c->hold || !c->hold_adds || nccl_mesh_event_value(c->hold)+2<=c->held)return;
+  nccl_mesh_hold(c->hold,++c->held,c->hold_adds);
+}
 static int stopped(struct ncclComm *c,const struct item *it){
   const uint64_t now=now_ns();
   return atomic_load(&c->aborting) || atomic_load(&c->broken) || now>it->deadline || (it->bound && now>it->bound);
@@ -638,6 +650,7 @@ static ncclResult_t await(struct ncclComm *c,void *request,size_t bytes,struct p
     if(sends){ncclResult_t r=reap(c,sends,count);if(r)return r;}
     if(stopped(c,it))return stop_reason(c,it,what);
     progress(c);
+    keep_awake(c);
     sched_yield();
   }
 }
@@ -652,6 +665,7 @@ static ncclResult_t post(struct ncclComm *c,int send,void *comm,void *data,size_
     if(sends){ncclResult_t r=reap(c,sends,count);if(r)return r;}
     if(stopped(c,it))return stop_reason(c,it,send?"an isend":"an irecv");
     progress(c);
+    keep_awake(c);
     sched_yield();
   }
 }
@@ -970,7 +984,9 @@ static void *worker(void *argument){
         continue;
       }
     }
-    /* a part waiting for its gate or its recorded points: the GPU's value is polled, not slept on */
+    /* a part waiting for its gate or its recorded points: the GPU's value is polled, not slept on; while
+       point-to-point transfers fly, the GPU waiting on them is kept awake */
+    if(flying)keep_awake(c);
     sched_yield();
   }
   return NULL;
@@ -1001,6 +1017,8 @@ static void comm_free(struct ncclComm *c){
   for(int p=0;c->plans && p<PLANS;p++){free(c->plans[p].segments);free(c->plans[p].steps);}
   free(c->nodes);free(c->seen);free(c->pairs);free(c->cost);free(c->plans);free(c->closed);free(c->used);
   free(c->later);free(c->moved_pairs);free(c->moved_cost);free(c->scratch);free(c->planning);
+  if(c->hold)for(uint64_t deadline=deadline_after();nccl_mesh_event_value(c->hold)<c->held && !nccl_mesh_gpu_failed() && now_ns()<deadline;)usleep(100);
+  if(c->hold)nccl_mesh_release(c->hold);
   if(c->quiet)nccl_mesh_release(c->quiet);
   if(c->done)nccl_mesh_release(c->done);
   if(c->arrive)nccl_mesh_release(c->arrive);
@@ -1018,8 +1036,9 @@ static ncclResult_t comm_start(struct ncclComm *c){
     if(c->queue){
       c->event=nccl_mesh_event_create(c->queue);c->arrive=nccl_mesh_event_create(c->queue);
       c->done=nccl_mesh_event_create(c->queue);c->quiet=nccl_mesh_event_create(c->queue);
+      c->hold=nccl_mesh_event_create(c->queue);c->hold_adds=nccl_mesh_hold_adds(HOLD_US);
     }
-    if(!c->event || !c->arrive || !c->done || !c->quiet)status=FAIL(c,ncclUnhandledCudaError,"the communicator's Metal queue and events");
+    if(!c->event || !c->arrive || !c->done || !c->quiet || !c->hold)status=FAIL(c,ncclUnhandledCudaError,"the communicator's Metal queue and events");
   }
   c->peers=calloc((size_t)c->nranks,sizeof *c->peers);
   c->blocked=calloc((size_t)c->nranks*2,sizeof *c->blocked);
