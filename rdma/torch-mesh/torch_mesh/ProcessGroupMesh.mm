@@ -861,34 +861,42 @@ class ProcessGroupMesh : public Backend {
     return work(OpType::COALESCED, outputs, call);
   }
 
-  // Equal splits are ncclAlltoAll; others, grouped ncclSend/ncclRecv of each rank's rows.
+  // Equal splits are ncclAlltoAll; others, grouped ncclSend/ncclRecv of each rank's rows.  On MPS this
+  // rank's own rows are copied into their place in the output on the MPS stream before the call (a fill)
+  // and only the other ranks' travel, so the library's group has no copy before its transfers.
   c10::intrusive_ptr<Work> all_to_all_single(at::Tensor &output, at::Tensor &input, std::vector<int64_t> &outputSplits,
                                              std::vector<int64_t> &inputSplits, const AllToAllOptions &) override {
-    const int n = getSize();
+    const int n = getSize(), me = getRank();
     auto call = start(input, "all_to_all_single");
+    const int64_t inRow = input.dim() ? input.numel() / std::max<int64_t>(input.size(0), 1) : 1;
+    const int64_t outRow = output.dim() ? output.numel() / std::max<int64_t>(output.size(0), 1) : 1;
+    auto split_of = [&](std::vector<int64_t> s, const at::Tensor &t) {
+      if (s.empty()) s.assign(n, t.dim() ? t.size(0) / n : 0);
+      return s;
+    };
+    std::vector<int64_t> ins = split_of(inputSplits, input), outs = split_of(outputSplits, output);
+    int64_t mineIn = 0, mineOut = 0;
+    for (int r = 0; r < me; r++) { mineIn += ins[r]; mineOut += outs[r]; }
+    const bool own = call->mps() && input.dim() && ins[me] * inRow == outs[me] * outRow;
     int in = call->add(input, true, false), out = call->add(output, false, true);
+    if (own && ins[me]) call->fill(input.narrow(0, mineIn, ins[me]), out, (size_t)(mineOut * outRow) * output.element_size());
     call->begin();
-    if (outputSplits.empty() && inputSplits.empty()) {
+    if (outputSplits.empty() && inputSplits.empty() && !own) {
       TORCH_CHECK(input.numel() % n == 0 && input.numel() == output.numel(), "mesh: all_to_all_single's tensors split evenly");
       check(ncclAlltoAll(call->ptr(in), call->ptr(out), input.numel() / n, datatype(input), comm_, call->stream()), comm_, "ncclAlltoAll");
     } else {
-      const int64_t inRow = input.dim() ? input.numel() / std::max<int64_t>(input.size(0), 1) : 1;
-      const int64_t outRow = output.dim() ? output.numel() / std::max<int64_t>(output.size(0), 1) : 1;
-      auto splits = [&](std::vector<int64_t> s, const at::Tensor &t) {
-        if (s.empty()) s.assign(n, t.size(0) / n);
-        return s;
-      };
-      std::vector<int64_t> ins = splits(inputSplits, input), outs = splits(outputSplits, output);
       const size_t element = input.element_size();
       group([&] {
         int64_t at = 0;
         for (int r = 0; r < n; r++) {
-          check(ncclSend((char *)call->ptr(in) + at * inRow * element, ins[r] * inRow, datatype(input), r, comm_, call->stream()), comm_, "ncclSend");
+          if (!(own && r == me))
+            check(ncclSend((char *)call->ptr(in) + at * inRow * element, ins[r] * inRow, datatype(input), r, comm_, call->stream()), comm_, "ncclSend");
           at += ins[r];
         }
         at = 0;
         for (int r = 0; r < n; r++) {
-          check(ncclRecv((char *)call->ptr(out) + at * outRow * element, outs[r] * outRow, datatype(output), r, comm_, call->stream()), comm_, "ncclRecv");
+          if (!(own && r == me))
+            check(ncclRecv((char *)call->ptr(out) + at * outRow * element, outs[r] * outRow, datatype(output), r, comm_, call->stream()), comm_, "ncclRecv");
           at += outs[r];
         }
       });
@@ -901,15 +909,19 @@ class ProcessGroupMesh : public Backend {
 
   c10::intrusive_ptr<Work> alltoall(std::vector<at::Tensor> &outputs, std::vector<at::Tensor> &inputs, const AllToAllOptions &) override {
     TORCH_CHECK((int)outputs.size() == getSize() && (int)inputs.size() == getSize(), "mesh: alltoall takes lists of world_size");
+    const int me = getRank();
     auto call = start(inputs[0], "all_to_all");
+    const bool own = call->mps() && inputs[me].nbytes() == outputs[me].nbytes();  // this rank's own tensor: a fill (all_to_all_single)
     std::vector<int> ins, outs;
     for (int r = 0; r < getSize(); r++) {
       ins.push_back(call->add(inputs[r], true, false));
       outs.push_back(call->add(outputs[r], false, true));
     }
+    if (own && inputs[me].nbytes()) call->fill(inputs[me], outs[me], 0);
     call->begin();
     group([&] {
       for (int r = 0; r < getSize(); r++) {
+        if (own && r == me) continue;
         check(ncclSend(call->ptr(ins[r]), inputs[r].numel(), datatype(inputs[r]), r, comm_, call->stream()), comm_, "ncclSend");
         check(ncclRecv(call->ptr(outs[r]), outputs[r].numel(), datatype(outputs[r]), r, comm_, call->stream()), comm_, "ncclRecv");
       }
