@@ -33,8 +33,9 @@ static const char *source =
   "#define SYS volatile coherent(system) device\n"
   "// ncclDataType_t 0 int8 1 uint8 2 int32 3 uint32 4 int64 5 uint64 6 float16 7 float32 8 float64 9 bfloat16\n"
   "// 10 float8e4m3 11 float8e5m2; ncclRedOp_t 0 sum 1 prod 2 max 3 min.  dst and src: byte offsets into buffers 0 and 1;\n"
-  "// width: a copy's unit (16, 4 or 1 bytes), received: its source the NIC wrote.\n"
-  "struct args { ulong dst, src, n, scalar; uint type, op, nranks, width, received, pad[3]; };\n"
+  "// width: a copy's unit (16, 4 or 1 bytes), received: its source the NIC wrote; published: its stores\n"
+  "// system-coherent and fenced, a word published after them (a SEND reads them), else plain (the GPU reads them).\n"
+  "struct args { ulong dst, src, n, scalar; uint type, op, nranks, width, received, published, pad[2]; };\n"
   "\n"
   "// half and the fp8 formats decoded exactly to float, a float rounded to nearest even into them (one\n"
   "// rounding; fp8 saturating as NCCL's __NV_SATFINITE); bfloat16 by its float bits\n"
@@ -241,23 +242,23 @@ static const char *source =
   "#define EACH for (ulong i = first; i < p.n; i += grid)\n"
   "#define GRID uint first [[thread_position_in_grid]], uint grid [[threads_per_grid]]\n"
   "\n"
-  "// dst = dst op src, src a received piece\n"
-  "kernel void combine(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
-  "  switch (p.type) {\n"
-  "  case 0: EACH O(char)[i] = integer<char, uint>(D(char)[i], R(char)[i], p.op); break;\n"
-  "  case 1: EACH O(uchar)[i] = integer<uchar, uint>(D(uchar)[i], R(uchar)[i], p.op); break;\n"
-  "  case 2: EACH O(int)[i] = integer<int, uint>(D(int)[i], R(int)[i], p.op); break;\n"
-  "  case 3: EACH O(uint)[i] = integer<uint, uint>(D(uint)[i], R(uint)[i], p.op); break;\n"
-  "  case 4: EACH O(long)[i] = integer<long, ulong>(D(long)[i], R(long)[i], p.op); break;\n"
-  "  case 5: EACH O(ulong)[i] = integer<ulong, ulong>(D(ulong)[i], R(ulong)[i], p.op); break;\n"
-  "  case 6: EACH O(ushort)[i] = ushort(encode(apply(decode(D(ushort)[i], F16), decode(R(ushort)[i], F16), p.op), F16)); break;\n"
-  "  case 7: EACH O(uint)[i] = f32_apply(D(uint)[i], R(uint)[i], p.op, 23); break;\n"
-  "  case 8: EACH O(ulong)[i] = f64_apply(D(ulong)[i], R(ulong)[i], p.op); break;\n"
-  "  case 9: EACH O(ushort)[i] = ushort(f32_apply(uint(D(ushort)[i]) << 16, uint(R(ushort)[i]) << 16, p.op, 7)); break;\n"
-  "  case 10: EACH O(uchar)[i] = uchar(encode(apply(decode(D(uchar)[i], E4M3), decode(R(uchar)[i], E4M3), p.op), E4M3)); break;\n"
-  "  default: EACH O(uchar)[i] = uchar(encode(apply(decode(D(uchar)[i], E5M2), decode(R(uchar)[i], E5M2), p.op), E5M2)); break;\n"
+  "// dst = dst op src, src a received piece; stored OUT (O published, D plain)\n"
+  "#define COMBINE(OUT) switch (p.type) {\\\n"
+  "  case 0: EACH OUT(char)[i] = integer<char, uint>(D(char)[i], R(char)[i], p.op); break;\\\n"
+  "  case 1: EACH OUT(uchar)[i] = integer<uchar, uint>(D(uchar)[i], R(uchar)[i], p.op); break;\\\n"
+  "  case 2: EACH OUT(int)[i] = integer<int, uint>(D(int)[i], R(int)[i], p.op); break;\\\n"
+  "  case 3: EACH OUT(uint)[i] = integer<uint, uint>(D(uint)[i], R(uint)[i], p.op); break;\\\n"
+  "  case 4: EACH OUT(long)[i] = integer<long, ulong>(D(long)[i], R(long)[i], p.op); break;\\\n"
+  "  case 5: EACH OUT(ulong)[i] = integer<ulong, ulong>(D(ulong)[i], R(ulong)[i], p.op); break;\\\n"
+  "  case 6: EACH OUT(ushort)[i] = ushort(encode(apply(decode(D(ushort)[i], F16), decode(R(ushort)[i], F16), p.op), F16)); break;\\\n"
+  "  case 7: EACH OUT(uint)[i] = f32_apply(D(uint)[i], R(uint)[i], p.op, 23); break;\\\n"
+  "  case 8: EACH OUT(ulong)[i] = f64_apply(D(ulong)[i], R(ulong)[i], p.op); break;\\\n"
+  "  case 9: EACH OUT(ushort)[i] = ushort(f32_apply(uint(D(ushort)[i]) << 16, uint(R(ushort)[i]) << 16, p.op, 7)); break;\\\n"
+  "  case 10: EACH OUT(uchar)[i] = uchar(encode(apply(decode(D(uchar)[i], E4M3), decode(R(uchar)[i], E4M3), p.op), E4M3)); break;\\\n"
+  "  default: EACH OUT(uchar)[i] = uchar(encode(apply(decode(D(uchar)[i], E5M2), decode(R(uchar)[i], E5M2), p.op), E5M2)); break;\\\n"
   "  }\n"
-  "  FENCE;\n"
+  "kernel void combine(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
+  "  if (p.published) { COMBINE(O) FENCE; } else { COMBINE(D) }\n"
   "}\n"
   "// dst = src x scalar (a premultiplication: ncclAvg on floating types, PreMulSum), one operation of the type\n"
   "kernel void premultiply(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
@@ -286,25 +287,27 @@ static const char *source =
   "}\n"
   "kernel void postdivide(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
   "  switch (p.type) {\n"
-  "  case 0: EACH O(char)[i] = divide<char, uint>(D(char)[i], p.nranks); break;\n"
-  "  case 1: EACH O(uchar)[i] = uchar(uint(D(uchar)[i]) / p.nranks); break;\n"
-  "  case 2: EACH O(int)[i] = divide<int, uint>(D(int)[i], p.nranks); break;\n"
-  "  case 3: EACH O(uint)[i] = D(uint)[i] / p.nranks; break;\n"
-  "  case 4: EACH O(long)[i] = divide<long, ulong>(D(long)[i], ulong(p.nranks)); break;\n"
-  "  case 5: EACH O(ulong)[i] = D(ulong)[i] / ulong(p.nranks); break;\n"
+  "  case 0: EACH D(char)[i] = divide<char, uint>(D(char)[i], p.nranks); break;\n"
+  "  case 1: EACH D(uchar)[i] = uchar(uint(D(uchar)[i]) / p.nranks); break;\n"
+  "  case 2: EACH D(int)[i] = divide<int, uint>(D(int)[i], p.nranks); break;\n"
+  "  case 3: EACH D(uint)[i] = D(uint)[i] / p.nranks; break;\n"
+  "  case 4: EACH D(long)[i] = divide<long, ulong>(D(long)[i], ulong(p.nranks)); break;\n"
+  "  case 5: EACH D(ulong)[i] = D(ulong)[i] / ulong(p.nranks); break;\n"
   "  default: break;\n"
   "  }\n"
-  "  FENCE;\n"
   "}\n"
-  "// n units of `width` bytes (16: uint4, 4: uint, 1: uchar), stored system-coherent; loaded system-coherent\n"
-  "// where the NIC wrote them (received)\n"
-  "#define COPY(T) EACH { T v = p.received ? ((SYS T *)(s + p.src))[i] : ((device T *)(s + p.src))[i]; ((SYS T *)(d + p.dst))[i] = v; }\n"
+  "// n units of `width` bytes (16: uint4, 4: uint, 1: uchar), loaded system-coherent where the NIC wrote them\n"
+  "// (received), stored system-coherent where published\n"
+  "#define COPY(T) EACH { T v = p.received ? ((SYS T *)(s + p.src))[i] : ((device T *)(s + p.src))[i];\\\n"
+  "  if (p.published) ((SYS T *)(d + p.dst))[i] = v; else ((device T *)(d + p.dst))[i] = v; }\n"
   "kernel void copy(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
   "  if (p.width == 16) COPY(uint4) else if (p.width == 4) COPY(uint) else COPY(uchar)\n"
-  "  FENCE;\n"
+  "  if (p.published) FENCE;\n"
   "}\n"
-  "// One thread waits for each listed word (a byte offset into buffer 0) to reach its value: a system-scope\n"
-  "// fence, then a system-coherent load.  Buffer 1 holds the communicator's failure word, its progress word\n"
+  "// One thread waits for each listed word (a byte offset into buffer 0) to reach its value: a system-coherent\n"
+  "// load, a system-scope fence every 64 (one before every load slowed a concurrent host copy 3x, one every\n"
+  "// 64 did not and saw a host store within 3 us: metal-microbench output_data/handoffs-20260929/probe/spin*),\n"
+  "// and one once it is seen, before the loads it orders.  Buffer 1 holds the communicator's failure word, its progress word\n"
   "// and the host's clock (ns), which the host advances as the network moves and as it runs: the wait fails\n"
   "// once `ns` of the host's clock pass with no progress, or after `polls` polls in all (a backstop under\n"
   "// Metal's watchdog), setting the failure word; the rest are not waited for.  list: n, polls, ns, then n\n"
@@ -317,9 +320,9 @@ static const char *source =
   "  for (ulong k = 0; k < list[0]; k++)\n"
   "    for (SYS ulong *word = (SYS ulong *)(w + list[3 + 2 * k]);; total++) {\n"
   "      if (total >= list[1]) { *failure = 1ul; FENCE; return; }\n"
-  "      FENCE;\n"
   "      if (*word >= list[4 + 2 * k]) break;\n"
   "      if (total & 63) continue;\n"
+  "      FENCE;\n"
   "      const ulong now = *clock, moved = *progress;\n"
   "      if (moved != seen) { seen = moved; since = now; }\n"
   "      else if (now > since + list[2]) { *failure = 1ul; FENCE; return; }\n"
@@ -349,7 +352,7 @@ static uint64_t polls_in(id<MTLCommandQueue> queue,double seconds){
     id<MTLBuffer> bulk=[[gpu.device newBufferWithLength:(size_t)64<<20 options:MTLResourceStorageModePrivate] autorelease];
     memset(word.contents,0,64);
     const uint64_t list[5]={1,4096,UINT64_MAX,0,1};
-    const struct { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,pad[3]; } copy={0,(uint64_t)32<<20,(uint64_t)2<<20,0,0,0,0,16,0,{0}};
+    const struct { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,published,pad[2]; } copy={0,(uint64_t)32<<20,(uint64_t)2<<20,0,0,0,0,16,0,0,{0}};
     id<MTLCommandBuffer> warm=[queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder=[warm computeCommandEncoder];
     [encoder setComputePipelineState:gpu.kernels[KERNEL_COPY]];
@@ -465,7 +468,7 @@ HIDDEN void nccl_mesh_program_signal(void *program,void *event,uint64_t value){
 /* Kernel k (0 combine: dst op= src, 1 premultiply: dst = src x scalar, 2 postdivide: dst /= nranks, 3
    copy: n units of `width` bytes) over n elements of `type`, dst a byte offset into buffer `to`, src into
    `from`. */
-struct args { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,pad[3]; };
+struct args { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,published,pad[2]; };
 static void dispatch(void *program,int k,void *to,void *from,struct args a){
   @autoreleasepool {
     id<MTLComputeCommandEncoder> encoder=encoder_of(program);
@@ -478,15 +481,15 @@ static void dispatch(void *program,int k,void *to,void *from,struct args a){
   }
 }
 HIDDEN void nccl_mesh_program_kernel(void *program,int k,void *to,uint64_t dst,void *from,uint64_t src,uint64_t n,int type,int op,
-  int nranks,uint64_t scalar){
-  if(n)dispatch(program,k,to,from,(struct args){dst,src,n,scalar,(uint32_t)type,(uint32_t)op,(uint32_t)nranks,1,0,{0}});
+  int nranks,uint64_t scalar,int published){
+  if(n)dispatch(program,k,to,from,(struct args){dst,src,n,scalar,(uint32_t)type,(uint32_t)op,(uint32_t)nranks,1,0,(uint32_t)(published!=0),{0}});
 }
-/* `bytes` from offset src of buffer `from` to offset dst of buffer `to`, stored system-coherent (a SEND or the
-   host reads them); loaded system-coherent where the NIC wrote them (`received`): the copy kernel in the
-   widest unit the offsets and length allow. */
-HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received){
+/* `bytes` from offset src of buffer `from` to offset dst of buffer `to`, stored system-coherent where a word
+   published after them lets a SEND read them (`published`), loaded system-coherent where the NIC wrote them
+   (`received`): the copy kernel in the widest unit the offsets and length allow. */
+HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received,int published){
   const uint32_t width=!((dst|src|bytes)&15)?16:!((dst|src|bytes)&3)?4:1;
-  if(bytes)dispatch(program,KERNEL_COPY,to,from,(struct args){dst,src,bytes/width,0,0,0,0,width,(uint32_t)(received!=0),{0}});
+  if(bytes)dispatch(program,KERNEL_COPY,to,from,(struct args){dst,src,bytes/width,0,0,0,0,width,(uint32_t)(received!=0),(uint32_t)(published!=0),{0}});
 }
 /* A wait for words of `buffer` to reach their values (`at`: n pairs of a byte offset and a value), after the
    dispatches before it and before those after it; the communicator's failure word (8 bytes at offset

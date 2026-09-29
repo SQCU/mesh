@@ -161,8 +161,9 @@ HIDDEN void nccl_mesh_event_signal(void *event,uint64_t value);
 HIDDEN void *nccl_mesh_program_begin(void *queue);
 HIDDEN void nccl_mesh_program_wait(void *program,void *event,uint64_t value);
 HIDDEN void nccl_mesh_program_signal(void *program,void *event,uint64_t value);
-HIDDEN void nccl_mesh_program_kernel(void *program,int kernel,void *to,uint64_t dst,void *from,uint64_t src,uint64_t n,int type,int op,int nranks,uint64_t scalar);
-HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received);
+HIDDEN void nccl_mesh_program_kernel(void *program,int kernel,void *to,uint64_t dst,void *from,uint64_t src,uint64_t n,int type,int op,int nranks,uint64_t scalar,
+  int published);
+HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received,int published);
 HIDDEN void nccl_mesh_program_words(void *program,void *buffer,const uint64_t *at,uint32_t n,void *failures,uint64_t failure,uint64_t ns,
   void *const *touch,int ntouch);
 HIDDEN void nccl_mesh_program_publish(void *program,void *buffer,uint64_t at,uint64_t value);
@@ -1560,7 +1561,7 @@ struct ran { int ncomms,nevents; struct ncclComm **comms; uint64_t *first; void 
 /* A kept program (a deferred stream's, nccl.h ncclMeshStreamDefer): its commands, each object they name
    retained, encoded later into a command buffer the caller hands over. */
 enum { R_WAIT, R_SIGNAL, R_KERNEL, R_COPY, R_WORDS, R_PUBLISH };
-struct recorded { int kind,which,type,op,nranks; void *a,*b; uint64_t x,y,n,scalar; uint64_t *list; void *touch[4]; };
+struct recorded { int kind,which,type,op,nranks,published; void *a,*b; uint64_t x,y,n,scalar; uint64_t *list; void *touch[4]; };
 struct recording { struct recording *next; int n,capacity,failed; struct recorded *ops; struct ran *ran; };
 /* Where a program's commands go: a command buffer, or a recording. */
 struct sink { void *program; struct recording *kept; };
@@ -1614,8 +1615,8 @@ static void play(struct recording *k,void *program){
     const struct recorded *r=k->ops+i;
     if(r->kind==R_WAIT)nccl_mesh_program_wait(program,r->a,r->x);
     else if(r->kind==R_SIGNAL)nccl_mesh_program_signal(program,r->a,r->x);
-    else if(r->kind==R_KERNEL)nccl_mesh_program_kernel(program,r->which,r->a,r->x,r->b,r->y,r->n,r->type,r->op,r->nranks,r->scalar);
-    else if(r->kind==R_COPY)nccl_mesh_program_copy(program,r->a,r->x,r->b,r->y,r->n,r->which);
+    else if(r->kind==R_KERNEL)nccl_mesh_program_kernel(program,r->which,r->a,r->x,r->b,r->y,r->n,r->type,r->op,r->nranks,r->scalar,r->published);
+    else if(r->kind==R_COPY)nccl_mesh_program_copy(program,r->a,r->x,r->b,r->y,r->n,r->which,r->published);
     else if(r->kind==R_WORDS)nccl_mesh_program_words(program,r->a,r->list,(uint32_t)r->n,r->b,r->y,GPU_WAIT_NS,r->touch,4);
     else nccl_mesh_program_publish(program,r->a,r->x,r->y);
   }
@@ -1631,18 +1632,22 @@ static void recording_free(struct recording *k){
   if(k)free(k->ops);
   free(k);
 }
-static void kernel(struct sink *s,struct call *k,int which,struct region to,const void *dst,struct region from,const void *src,uint64_t n,int op){
+/* A kernel over n elements; `published`: its stores system-coherent and fenced, as a word published after
+   them lets a SEND read them (nccl-mesh-metal.m). */
+static void kernel(struct sink *s,struct call *k,int which,struct region to,const void *dst,struct region from,const void *src,uint64_t n,int op,
+  int published){
   uint64_t scalar;memcpy(&scalar,k->scalar,8);
   if(s->kept)keep(s,(struct recorded){.kind=R_KERNEL,.which=which,.a=to.buffer,.x=off(to,dst),.b=from.buffer,.y=off(from,src),.n=n,
-                                      .type=(int)k->type,.op=op,.nranks=k->comm->nranks,.scalar=scalar});
-  else nccl_mesh_program_kernel(s->program,which,to.buffer,off(to,dst),from.buffer,off(from,src),n,(int)k->type,op,k->comm->nranks,scalar);
+                                      .type=(int)k->type,.op=op,.nranks=k->comm->nranks,.scalar=scalar,.published=published});
+  else nccl_mesh_program_kernel(s->program,which,to.buffer,off(to,dst),from.buffer,off(from,src),n,(int)k->type,op,k->comm->nranks,scalar,published);
   count(k,GPU_KERNELS,1);
 }
-/* `bytes` copied by the copy kernel (stored system-coherent; loaded system-coherent where the NIC wrote
-   them: `received`). */
-static void copy_into(struct sink *s,struct call *k,struct region to,const void *dst,struct region from,const void *src,size_t bytes,int received){
-  if(s->kept)keep(s,(struct recorded){.kind=R_COPY,.which=received,.a=to.buffer,.x=off(to,dst),.b=from.buffer,.y=off(from,src),.n=bytes});
-  else nccl_mesh_program_copy(s->program,to.buffer,off(to,dst),from.buffer,off(from,src),bytes,received);
+/* `bytes` copied by the copy kernel (loaded system-coherent where the NIC wrote them: `received`; stored
+   system-coherent where a SEND reads them: `published`). */
+static void copy_into(struct sink *s,struct call *k,struct region to,const void *dst,struct region from,const void *src,size_t bytes,int received,
+  int published){
+  if(s->kept)keep(s,(struct recorded){.kind=R_COPY,.which=received,.published=published,.a=to.buffer,.x=off(to,dst),.b=from.buffer,.y=off(from,src),.n=bytes});
+  else nccl_mesh_program_copy(s->program,to.buffer,off(to,dst),from.buffer,off(from,src),bytes,received,published);
   count(k,GPU_COPY,bytes);
 }
 /* Once the GPU has run a program: its objects released; a communicator whose failure word a timed-out wait
@@ -1745,13 +1750,13 @@ static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **c
       struct call *k=calls+i;
       const struct call *mine=self_copy(calls,n,i);
       const size_t bytes=k->count*type_bytes[k->type];
-      if(mine){copy_into(sink,k,k->out,k->recv,mine->in,mine->send,bytes,0);k->copied=1;before=1;continue;}
-      if(k->kind==K_SEND && k->peer!=k->comm->rank && k->wire!=(const unsigned char *)k->send){copy_into(sink,k,l->own,k->wire,k->in,k->send,bytes,0);before=1;}
+      if(mine){copy_into(sink,k,k->out,k->recv,mine->in,mine->send,bytes,0,0);k->copied=1;before=1;continue;}
+      if(k->kind==K_SEND && k->peer!=k->comm->rank && k->wire!=(const unsigned char *)k->send){copy_into(sink,k,l->own,k->wire,k->in,k->send,bytes,0,1);before=1;}
       if(k->kind>=K_SEND)continue;
       const size_t in=in_bytes(k);unsigned char *to=input_at(k);
       if(!in)continue;
-      if(k->premultiply){kernel(sink,k,KERNEL_PREMULTIPLY,k->at,to,k->in,k->send,in/type_bytes[k->type],0);before=1;}
-      else if(to!=(const unsigned char *)k->send){copy_into(sink,k,k->at,to,k->in,k->send,in,0);before=1;}
+      if(k->premultiply){kernel(sink,k,KERNEL_PREMULTIPLY,k->at,to,k->in,k->send,in/type_bytes[k->type],0,1);before=1;}
+      else if(to!=(const unsigned char *)k->send){copy_into(sink,k,k->at,to,k->in,k->send,in,0,1);before=1;}
     }
     if(before && gate){sink_publish(sink,l->own,gate,1);l->gate=gate;}
   }
@@ -1784,7 +1789,7 @@ static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **c
           v+=sent;
         }
         sink_words(sink,k,l->own,list,m);
-        kernel(sink,k,KERNEL_COMBINE,k->at,k->operand+lo,l->own,k->pieces[s].at+first*e,elements,k->combine);
+        kernel(sink,k,KERNEL_COMBINE,k->at,k->operand+lo,l->own,k->pieces[s].at+first*e,elements,k->combine,k->combined!=NULL);
         if(k->combined)sink_publish(sink,l->own,k->combined+r+j,1);
       }
       if(step->op==MESH_STEP_REDUCE && k->combined)r+=chunks;
@@ -1796,8 +1801,8 @@ static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **c
       m=0;
       for(uint32_t x=0;x<k->nwords;x++)WAIT(k,i,x);
       sink_words(sink,k,l->own,list,m);
-      if(divide)kernel(sink,k,KERNEL_POSTDIVIDE,k->at,from,k->at,from,out/e,0);
-      if(copy)copy_into(sink,k,k->out,k->recv,k->at,from,out,1);
+      if(divide)kernel(sink,k,KERNEL_POSTDIVIDE,k->at,from,k->at,from,out/e,0,0);
+      if(copy)copy_into(sink,k,k->out,k->recv,k->at,from,out,1,0);
     }
   }
   for(int i=0;i<n;i++){
@@ -1805,7 +1810,7 @@ static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **c
     if(k->kind==K_RECV && k->peer!=k->comm->rank && k->wire!=(unsigned char *)k->recv){
       m=0;WAIT(k,i,0);
       sink_words(sink,k,l->own,list,m);
-      copy_into(sink,k,k->out,k->recv,l->own,k->wire,k->count*type_bytes[k->type],1);
+      copy_into(sink,k,k->out,k->recv,l->own,k->wire,k->count*type_bytes[k->type],1,0);
     }
   }
   /* the network done before the program's end: every word not yet waited for (a call's sends, COPY
@@ -2265,7 +2270,7 @@ ncclResult_t ncclMeshEncodeCopies(void *commandBuffer,int n,void *const *dst,voi
   pthread_mutex_unlock(&heap.lock);
   if(!status){
     pthread_mutex_lock(&stream_lock);
-    for(int i=0;i<n;i++)nccl_mesh_program_copy(commandBuffer,buffers[i],at[i],src[i],offset[i],bytes[i],0);
+    for(int i=0;i<n;i++)nccl_mesh_program_copy(commandBuffer,buffers[i],at[i],src[i],offset[i],bytes[i],0,1);
     nccl_mesh_program_publish(commandBuffer,buffers[n],at[n],value);
     nccl_mesh_program_end(commandBuffer);
     pthread_mutex_unlock(&stream_lock);
