@@ -689,20 +689,28 @@ static ncclResult_t gpu_wait(struct ncclComm *c,struct call *k,void *event,uint6
 }
 
 /* ---- one collective ---- */
-/* A step's piece moves in chunks of CHUNK bytes (the bridge's own RECV chunk, MESH_DISCARD), the last
-   the remainder: each chunk its own isend or irecv and, for a REDUCE, its own arrival and combine, so the
-   GPU combines chunk j while chunk j + 1 is on the wire and after the last byte lands only the last
-   chunk's combine remains [the pipelined chunks of Patarasuk & Yuan 2009, §4; NCCL's slices].  Both
-   ranks cut a piece alike, from its elements alone. */
+/* A step's piece moves in chunks of CHUNK bytes (the bridge's own RECV chunk, MESH_DISCARD), its last
+   CHUNK bytes (or its remainder past the whole chunks) in quarters: each chunk its own isend or irecv and,
+   for a REDUCE, its own arrival and combine, so the GPU combines chunk j while chunk j + 1 is on the wire
+   and after the last byte lands only a quarter chunk's combine remains [the pipelined chunks of Patarasuk
+   & Yuan 2009, §4; NCCL's slices].  A piece of CHUNK bytes or fewer is one chunk.  Both ranks cut a piece
+   alike, from its elements alone. */
 #define CHUNK ((size_t)4<<20)
-static uint32_t chunks_of(uint64_t elements,size_t e){
+static uint64_t chunk_whole(uint64_t elements,size_t e){
   const uint64_t stride=CHUNK/e;
-  return elements<=stride?1:(uint32_t)((elements+stride-1)/stride);
+  return elements<=stride?0:(elements-1)/stride;
 }
-static uint64_t chunk_first(size_t e,uint32_t j){return (uint64_t)j*(CHUNK/e);}
+static uint32_t chunks_of(uint64_t elements,size_t e){
+  const uint64_t stride=CHUNK/e,quarter=stride/4,whole=chunk_whole(elements,e),rest=elements-whole*stride;
+  return elements<=stride?1:(uint32_t)(whole+(rest+quarter-1)/quarter);
+}
+static uint64_t chunk_first(uint64_t elements,size_t e,uint32_t j){
+  const uint64_t stride=CHUNK/e,whole=chunk_whole(elements,e);
+  return j<whole || elements<=stride?(uint64_t)j*stride:whole*stride+(j-whole)*(stride/4);
+}
 static uint64_t chunk_count(uint64_t elements,size_t e,uint32_t j){
-  const uint64_t first=chunk_first(e,j),stride=CHUNK/e;
-  return elements-first<stride?elements-first:stride;
+  const uint64_t stride=CHUNK/e,first=chunk_first(elements,e,j),whole=chunk_whole(elements,e),size=elements<=stride?elements:j<whole?stride:stride/4;
+  return elements-first<size?elements-first:size;
 }
 /* The receives a REDUCE or COPY step keeps posted ahead of the one it waits for (a connection's request
    ring holds MESH_NET_REQUESTS). */
@@ -727,7 +735,7 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct laun
     if(!s->piece.elements)continue;
     if(s->op==MESH_STEP_SEND){
       for(uint32_t j=0;j<n && !status;j++){
-        const size_t lo=(s->first+chunk_first(e,j))*e,length=chunk_count(s->piece.elements,e,j)*e;
+        const size_t lo=(s->first+chunk_first(s->piece.elements,e,j))*e,length=chunk_count(s->piece.elements,e,j)*e;
         uint64_t need=0;
         for(int d=0;d<ndone;d++)if(done[d].lo<lo+length && lo<done[d].hi && done[d].value>need)need=done[d].value;
         if(need>seen){if((status=gpu_wait(c,k,l->event,need,it,"a combine")))break;seen=need;}
@@ -751,12 +759,12 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct laun
     uint32_t posted=0;
     for(uint32_t j=0;j<n && !status;j++){
       for(;posted<n && posted<j+AHEAD && !status;posted++){
-        const size_t at=chunk_first(e,posted)*e,bytes=chunk_count(s->piece.elements,e,posted)*e;
+        const size_t at=chunk_first(s->piece.elements,e,posted)*e,bytes=chunk_count(s->piece.elements,e,posted)*e;
         unsigned char *into=s->op==MESH_STEP_COPY?k->operand+lo+at:k->pieces[i].at+at;
         status=post(c,0,p->recv[CH_COLL],into,bytes,window.mh,sends,&count_,it,requests+posted);
       }
       if(status)break;
-      const size_t at=lo+chunk_first(e,j)*e,bytes=chunk_count(s->piece.elements,e,j)*e;
+      const size_t at=lo+chunk_first(s->piece.elements,e,j)*e,bytes=chunk_count(s->piece.elements,e,j)*e;
       if((status=await(c,requests[j],bytes,sends,&count_,it,s->op==MESH_STEP_COPY?"a COPY step's irecv":"a REDUCE step's irecv")))break;
       count(k,RECEIVED,bytes);
       if(s->op!=MESH_STEP_REDUCE)continue;
@@ -1667,7 +1675,7 @@ static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **c
       /* a combined chunk is signalled for the worker's SENDs that read it (never in a kept program) */
       if(!kept){p->combined=*value+1;*value+=n;}
       for(uint32_t j=0;j<n;j++){
-        const uint64_t first=chunk_first(e,j);
+        const uint64_t first=chunk_first(elements,e,j);
         sink_wait(sink,c->arrive,p->arrived+j);
         kernel(sink,k,KERNEL_COMBINE,k->at,k->operand+(k->steps[s].first+first)*e,l->own,p->at+first*e,chunk_count(elements,e,j),k->combine);
         if(!kept)sink_signal(sink,event,p->combined+j);
