@@ -66,6 +66,8 @@ static uint64_t off(struct region r,const void *p){return (uint64_t)((const unsi
 struct call {
   int kind; const void *send; void *recv; size_t count; ncclDataType_t type; int op,root,peer;
   struct ncclComm *comm; struct ncclMeshStream *stream; uint32_t how; int force;
+  /* a reduce-scatter's or all-gather's count a rank, the call's own copy (NULL: `count` each) */
+  uint64_t *segments;
   /* resolved when the group ends */
   int combine,premultiply,postdivide; unsigned char scalar[8];
   uint64_t elements; struct mesh_collective chosen; struct mesh_step *steps; struct piece *pieces; uint32_t nsteps;
@@ -742,7 +744,7 @@ static void finish(struct ncclComm *c,struct item *it,ncclResult_t result){
   if(last && sync)pthread_cond_broadcast(&l->cond);
   pthread_mutex_unlock(&l->lock);
   if(last && !sync)launch_free(l);
-  for(int i=0;i<it->n;i++){free(it->calls[i].steps);free(it->calls[i].pieces);}
+  for(int i=0;i<it->n;i++){free(it->calls[i].steps);free(it->calls[i].pieces);free(it->calls[i].segments);}
   free(it->calls);free(it);
 }
 /* Whether the part's program has reached its gate (the regions' recorded points and its operands
@@ -975,6 +977,12 @@ static pthread_mutex_t stream_lock=PTHREAD_MUTEX_INITIALIZER;
 
 ncclResult_t ncclGroupStart(void){group.depth++;return ncclSuccess;}
 
+/* A reduce-scatter's or all-gather's elements in the segments of the ranks before `rank`. */
+static uint64_t before(const struct call *k,int rank){
+  uint64_t at=0;
+  for(int r=0;r<rank;r++)at+=k->segments?k->segments[r]:k->count;
+  return at;
+}
 /* The operator, the algorithm and this rank's plan of a collective; a point-to-point call's peer
    checked. */
 static ncclResult_t resolve(struct call *k){
@@ -984,7 +992,7 @@ static ncclResult_t resolve(struct call *k){
       return FAIL(c,ncclInvalidUsage,"%s rank %d: no link joins rank %d to it (the mesh does not forward point-to-point)",k->kind==K_SEND?"ncclSend to":"ncclRecv from",k->peer,c->rank);
     return ncclSuccess;
   }
-  k->elements=(uint64_t)k->count*(k->kind==MESH_REDUCE_SCATTER || k->kind==MESH_ALLGATHER?(uint64_t)c->nranks:1);
+  k->elements=k->kind==MESH_REDUCE_SCATTER || k->kind==MESH_ALLGATHER?before(k,c->nranks):k->count;
   k->combine=ncclSum;
   if(k->kind==MESH_ALLREDUCE || k->kind==MESH_REDUCE || k->kind==MESH_REDUCE_SCATTER){
     if(k->op<ncclAvg)k->combine=k->op;
@@ -1000,7 +1008,7 @@ static ncclResult_t resolve(struct call *k){
   }
   if(c->nranks==1)return ncclSuccess;
   struct mesh_operand operand={(uint32_t)k->type,(uint32_t)type_bytes[k->type],k->elements};
-  struct mesh_collective wanted={.what=(uint32_t)k->kind,.how=k->how,.root=(uint32_t)k->root};
+  struct mesh_collective wanted={.what=(uint32_t)k->kind,.how=k->how,.root=(uint32_t)k->root,.segments=k->segments};
   k->chosen=mesh_collective_choose(&c->map,wanted,operand,c->alpha,c->beta);
   if(k->chosen.how==MESH_UNAVAILABLE && k->how && !k->force){wanted.how=0;k->chosen=mesh_collective_choose(&c->map,wanted,operand,c->alpha,c->beta);}
   if(k->chosen.how==MESH_UNAVAILABLE)
@@ -1017,7 +1025,7 @@ static ncclResult_t resolve(struct call *k){
 }
 
 static void calls_free(struct call *calls,int n){
-  for(int i=0;i<n;i++){free(calls[i].steps);free(calls[i].pieces);}
+  for(int i=0;i<n;i++){free(calls[i].steps);free(calls[i].pieces);free(calls[i].segments);}
   free(calls);
 }
 
@@ -1034,12 +1042,13 @@ static size_t out_bytes(const struct call *k){
   if(k->kind>=K_SEND)return k->kind==K_RECV?part:0;
   return k->kind==MESH_REDUCE_SCATTER?part:k->kind==MESH_REDUCE && k->comm->rank!=k->root?0:(size_t)k->elements*e;
 }
-/* Where a collective's contribution goes in its operand, and where its result is. */
+/* Where a collective's contribution goes in its operand (an all-gather's: this rank's segment), and
+   where its result is (a reduce-scatter's: this rank's segment). */
 static unsigned char *input_at(const struct call *k){
-  return k->kind==MESH_ALLGATHER?k->operand+k->count*type_bytes[k->type]*(size_t)k->comm->rank:k->operand;
+  return k->kind==MESH_ALLGATHER?k->operand+before(k,k->comm->rank)*type_bytes[k->type]:k->operand;
 }
 static unsigned char *output_at(const struct call *k){
-  return k->kind==MESH_REDUCE_SCATTER?k->operand+k->count*type_bytes[k->type]*(size_t)k->comm->rank:k->operand;
+  return k->kind==MESH_REDUCE_SCATTER?k->operand+before(k,k->comm->rank)*type_bytes[k->type]:k->operand;
 }
 static int reduces(const struct call *k){
   for(uint32_t s=0;s<k->nsteps;s++)if(k->steps[s].op==MESH_STEP_REDUCE)return 1;
@@ -1332,7 +1341,7 @@ ncclResult_t ncclGroupEnd(void){
     struct item *it=calloc(1,sizeof *it);
     it->calls=calloc((size_t)n,sizeof *it->calls);it->launch=l;it->deadline=deadline_after();
     it->final=finals[j];it->arrived=arrived[j];
-    for(int i=0;i<n;i++)if(calls[i].comm==comms[j]){it->calls[it->n++]=calls[i];calls[i].steps=NULL;calls[i].pieces=NULL;}
+    for(int i=0;i<n;i++)if(calls[i].comm==comms[j]){it->calls[it->n++]=calls[i];calls[i].steps=NULL;calls[i].pieces=NULL;calls[i].segments=NULL;}
     struct ncclComm *c=comms[j];
     pthread_mutex_lock(&c->lock);
     if(c->tail)c->tail->next=it;else c->head=it;
@@ -1360,7 +1369,8 @@ ncclResult_t ncclGroupEnd(void){
   return status;
 }
 
-/* A call joins the open group, or is a group of one. */
+/* A call joins the open group, or is a group of one; its segments (if any) are the group's then, else
+   freed. */
 static ncclResult_t enqueue(struct call k,const ncclCollConfig_t *config){
   struct ncclComm *c=k.comm;
   ncclResult_t status=ncclSuccess;
@@ -1388,7 +1398,9 @@ static ncclResult_t enqueue(struct call k,const ncclCollConfig_t *config){
       }
     }
   }
-  if(!status && !k.count)return ncclSuccess;
+  for(int r=0;!status && k.segments && r<c->nranks;r++)
+    if(!k.segments[r])status=FAIL(c,ncclInvalidArgument,"counts[%d] is 0 (every rank's segment holds an element)",r);
+  if(!status && !k.count){free(k.segments);return ncclSuccess;}
   ncclGroupStart();
   if(status){if(!group.error)group.error=status;}
   else {
@@ -1398,8 +1410,9 @@ static ncclResult_t enqueue(struct call k,const ncclCollConfig_t *config){
       if(!grown){if(!group.error)group.error=FAIL(c,ncclSystemError,"allocation");}
       else{group.calls=grown;group.capacity=capacity;}
     }
-    if(group.n<group.capacity)group.calls[group.n++]=k;
+    if(group.n<group.capacity){group.calls[group.n++]=k;k.segments=NULL;}
   }
+  free(k.segments);
   ncclResult_t ended=ncclGroupEnd();
   return status?status:ended;
 }
@@ -1442,6 +1455,33 @@ ncclResult_t ncclAllGatherConfig(const void *sendbuff,void *recvbuff,size_t send
 }
 ncclResult_t ncclAllGather(const void *sendbuff,void *recvbuff,size_t sendcount,ncclDataType_t datatype,ncclComm_t comm,cudaStream_t stream){
   return ncclAllGatherConfig(sendbuff,recvbuff,sendcount,datatype,comm,stream,NULL);
+}
+/* MPI_Allgatherv and MPI_Reduce_scatter: equal counts are NCCL's own call; others the planner's cut
+   into them (mesh_collective.segments), a copy of them the call's. */
+static ncclResult_t enqueue_counts(struct call k,const size_t *counts,const ncclCollConfig_t *config){
+  struct ncclComm *c=k.comm;
+  if(!c || !counts)return FAIL(c,ncclInvalidArgument,"%s is NULL",c?"counts":"comm");
+  int equal=1;
+  for(int r=0;r<c->nranks;r++)equal&=counts[r]==counts[0];
+  k.count=counts[c->rank];
+  if(!equal && !(k.segments=malloc((size_t)c->nranks*sizeof *k.segments)))return FAIL(c,ncclSystemError,"allocation");
+  for(int r=0;!equal && r<c->nranks;r++)k.segments[r]=counts[r];
+  return enqueue(k,config);
+}
+ncclResult_t ncclMeshAllGatherVConfig(const void *sendbuff,void *recvbuff,const size_t *counts,ncclDataType_t datatype,ncclComm_t comm,
+  cudaStream_t stream,const ncclCollConfig_t *config){
+  return enqueue_counts(CALL(.kind=MESH_ALLGATHER,.send=sendbuff,.recv=recvbuff,.type=datatype,.comm=comm,.stream=stream),counts,config);
+}
+ncclResult_t ncclMeshAllGatherV(const void *sendbuff,void *recvbuff,const size_t *counts,ncclDataType_t datatype,ncclComm_t comm,cudaStream_t stream){
+  return ncclMeshAllGatherVConfig(sendbuff,recvbuff,counts,datatype,comm,stream,NULL);
+}
+ncclResult_t ncclMeshReduceScatterVConfig(const void *sendbuff,void *recvbuff,const size_t *counts,ncclDataType_t datatype,ncclRedOp_t op,
+  ncclComm_t comm,cudaStream_t stream,const ncclCollConfig_t *config){
+  return enqueue_counts(CALL(.kind=MESH_REDUCE_SCATTER,.send=sendbuff,.recv=recvbuff,.type=datatype,.op=op,.comm=comm,.stream=stream),counts,config);
+}
+ncclResult_t ncclMeshReduceScatterV(const void *sendbuff,void *recvbuff,const size_t *counts,ncclDataType_t datatype,ncclRedOp_t op,
+  ncclComm_t comm,cudaStream_t stream){
+  return ncclMeshReduceScatterVConfig(sendbuff,recvbuff,counts,datatype,op,comm,stream,NULL);
 }
 ncclResult_t ncclSend(const void *sendbuff,size_t count,ncclDataType_t datatype,int peer,ncclComm_t comm,cudaStream_t stream){
   return enqueue(CALL(.kind=K_SEND,.send=sendbuff,.count=count,.type=datatype,.peer=peer,.comm=comm,.stream=stream),NULL);

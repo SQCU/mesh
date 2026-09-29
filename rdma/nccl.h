@@ -765,6 +765,22 @@ ncclResult_t  ncclGroupEnd(void);
 ncclResult_t pncclGroupEnd(void);
 
 /* The mesh's own additions (not NCCL's). */
+/* MPI_Allgatherv and MPI_Reduce_scatter: rank r's segment is counts[r] elements (counts: nranks
+   entries, the same on every rank, each at least 1), the segments packed in rank order, so rank r's
+   lies after the segments of the ranks before it.  ncclMeshAllGatherV sends counts[rank] elements of
+   sendbuff and leaves every segment in recvbuff (in place where sendbuff is rank's segment of
+   recvbuff); ncclMeshReduceScatterV reduces sendbuff's segments (the sum of counts elements) and leaves
+   rank's in recvbuff, counts[rank] elements (in place where recvbuff is rank's segment of sendbuff).
+   Equal counts are ncclAllGather and ncclReduceScatter; others are the planner's cut of the operand
+   into those segments (mesh_collective.segments).  The *Config forms take ncclCollConfig_t as NCCL's. */
+ncclResult_t ncclMeshAllGatherV(const void* sendbuff, void* recvbuff, const size_t* counts,
+    ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclMeshAllGatherVConfig(const void* sendbuff, void* recvbuff, const size_t* counts,
+    ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
+ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const size_t* counts,
+    ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclMeshReduceScatterVConfig(const void* sendbuff, void* recvbuff, const size_t* counts,
+    ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
 /* A stream whose calls are committed to `queue` (an id<MTLCommandQueue>), or with NULL to a queue of
    its own; its event made on the queue's device, value 0. */
 ncclResult_t ncclMeshStreamCreate(cudaStream_t* stream, void* queue);
