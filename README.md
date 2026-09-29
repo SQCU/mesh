@@ -202,7 +202,10 @@ MESH_REGION=/mesh0 MESH_LINKS=links.txt ./app
 exists, torch's MPS factories make window tensors, sent and received in place and freed only once every
 use recorded on them is done; any other tensor is blitted through the window by the GPU, never copied by
 the CPU). Installed into a venv that has torch, it registers itself when torch is imported, so a script
-names it alone: `torch.distributed.init_process_group(backend="mesh")`.
+names it alone: `torch.distributed.init_process_group(backend="mesh")`. Its first process group also
+installs `torch_mesh.partition`: a mesh dimension's parts (`MESH_PARTITION="tp=3,5"`), by which DTensor,
+tensor and context parallelism split that dimension by the nodes' rates instead of equally
+([design/heterogeneity.md](design/heterogeneity.md)).
 
 ```
 uv pip install --python <venv>/bin/python --no-build-isolation rdma/torch-mesh
