@@ -784,19 +784,20 @@ ncclResult_t pncclGroupEnd(void);
    (ncclMeshLinksAttach) until ncclMeshLinksDetach, after every communicator that references it.
    ncclMeshLinksState states a link-map file (mesh-collective.h) into it, a write between calls: its
    nodes, its links' alpha and beta; the up of the bridge's own links stays as observed.
-   ncclMeshLinksRead copies one consistent snapshot: links[a * NCCL_MESH_LINK_NODES + b] of a to b,
-   present[v] of node v, reported[v] the sequence of node v's last report the table holds (0: none), the
-   bridge's node and the epoch (each where not NULL). */
-#define NCCL_MESH_LINK_NODES 16
+   ncclMeshLinksRead copies one consistent snapshot: *nodes the table's nodes N (the bridge's
+   configuration, mesh-flow -N), links[a * N + b] of a to b, present[v] of node v, reported[v] the
+   sequence of node v's last report the table holds (0: none), the bridge's node and the epoch (each
+   where not NULL; call it once with only `nodes` to size the others). */
 typedef struct { float alpha, beta; uint32_t stated, up; } ncclMeshLink_t;
 ncclResult_t ncclMeshLinksAttach(const char* region, void** links);
 ncclResult_t ncclMeshLinksDetach(void* links);
 ncclResult_t ncclMeshLinksState(void* links, const char* path);
-ncclResult_t ncclMeshLinksRead(void* links, ncclMeshLink_t* snapshot, uint32_t* present, uint64_t* reported, uint32_t* node,
-    uint64_t* epoch);
+ncclResult_t ncclMeshLinksRead(void* links, uint32_t* nodes, ncclMeshLink_t* snapshot, uint32_t* present, uint64_t* reported,
+    uint32_t* node, uint64_t* epoch);
 /* ncclCommInitRankConfig's and ncclCommSplit's config, recognized by base.size: `links` the table,
-   nodes[r] rank r's node in it (every rank's node present and distinct), each read at the call.  A
-   split without it inherits its parent's, restricted to its ranks. */
+   nodes[r] rank r's node in it (every rank's node present and distinct, below the table's nodes), each
+   read at the call; the communicator's arrays are sized then, by its ranks.  A split without it inherits
+   its parent's, restricted to its ranks. */
 typedef struct { ncclConfig_t base; void* links; const int* nodes; } ncclMeshConfig_t;
 #define NCCL_MESH_CONFIG_INITIALIZER {                                  \
   { sizeof(ncclMeshConfig_t), NCCL_API_MAGIC, NCCL_VERSION_CODE,        \

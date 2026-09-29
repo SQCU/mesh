@@ -621,7 +621,7 @@ enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT,
    HEARTBEAT: nothing; each end sends one whenever it has sent nothing for NET_HEARTBEAT_NS, and ends the
    session once it has heard nothing for NET_SILENCE_NS (a peer stopped, a cable pulled: the link's
    down, observed).  LINKS: node `from`'s report, sequence `sequence`, its links' up a bit a node in
-   key, size, extent, phase, offset (320 nodes); each bridge sends its own node's whenever its sessions
+   key, size, extent, phase, offset (NET_LINK_NODES: a table of at most 320 nodes); each bridge sends its own node's whenever its sessions
    pair or end, every newer one it takes on to its other peers, and every one it holds to a peer when
    their session pairs (mesh-dataflow.h: a link no report names is down). */
 struct net_message { uint32_t kind,from,from_generation,to,to_generation,flags; int32_t tag,error; uint64_t key,sequence,size,extent,phase,offset; };
@@ -658,7 +658,7 @@ struct net_session {
   int send_blocked,receive_blocked;
   uint64_t bell,scanned,reaped,strays,heard,said;
   /* the link reports sent to the peer: link_news when last looked, each node's sequence sent */
-  uint64_t news,sent[MESH_LINK_NODES];
+  uint64_t news,*sent;
 };
 /* The link table beside the region (mesh-dataflow.h): the sessions write their links' up and down and
    the reports they take; link_news moves whenever a report this bridge holds does, and wakes every
@@ -668,7 +668,7 @@ static char link_table_region[64];
 static _Atomic uint64_t link_news;
 static struct net_session *net_sessions;
 static uint32_t net_session_count;
-_Static_assert(MESH_LINK_NODES<=5*64,"a report's bits in one message");
+#define NET_LINK_NODES (5*64)
 static void link_table_down(void){if(link_table){char name[80];snprintf(name,sizeof name,"%s.links",link_table_region);shm_unlink(name);}}
 
 static uint64_t net_now(void){return clock_gettime_nsec_np(CLOCK_MONOTONIC);}
@@ -947,7 +947,7 @@ static void net_granted(struct net_session *s,const struct net_message *message)
 }
 /* Every report newer than the one last sent to this session's peer, sent (its own node's excepted). */
 static void net_publish(struct net_session *s){
-  for(uint32_t v=0;link_table && v<MESH_LINK_NODES && !s->failed;v++){
+  for(uint32_t v=0;link_table && v<link_table->nodes && !s->failed;v++){
     uint64_t up[5]={0},sequence=v==s->provider.peer?0:mesh_link_table_row(link_table,v,up);
     if(sequence<=s->sent[v])continue;
     net_emit(s,(struct net_message){.kind=NET_LINKS,.from=v,.sequence=sequence,.key=up[0],.size=up[1],.extent=up[2],.phase=up[3],.offset=up[4]});
@@ -957,7 +957,7 @@ static void net_publish(struct net_session *s){
 /* A peer's report: the peer holds it (not sent back), and, where newer, applied and passed on. */
 static void net_links(struct net_session *s,const struct net_message *message){
   const uint64_t up[5]={message->key,message->size,message->extent,message->phase,message->offset};
-  if(message->from>=MESH_LINK_NODES)return;
+  if(!link_table || message->from>=link_table->nodes)return;
   if(message->sequence>s->sent[message->from])s->sent[message->from]=message->sequence;
   if(link_table && mesh_link_table_report(link_table,message->from,message->sequence,up))net_links_moved();
 }
@@ -1287,7 +1287,7 @@ static void *net_session_run(void *argument){
     atomic_fetch_add_explicit(&s->counts->sessions,1,memory_order_relaxed);
     atomic_store_explicit(&s->counts->phase,MESH_PAIRED,memory_order_release);
     /* the new peer is sent every report this bridge holds, then each newer one */
-    memset(s->sent,0,sizeof s->sent);
+    if(link_table)memset(s->sent,0,link_table->nodes*sizeof *s->sent);
     s->news=atomic_load_explicit(&link_news,memory_order_acquire)-1;
     if(link_table && mesh_link_table_observe(link_table,s->provider.peer,1)>0)net_links_moved();
     net_serve(s);
@@ -1311,7 +1311,7 @@ static void *net_session_run(void *argument){
 
 /* design/algorithm-sources.md#programcopy */
 int main(int argc,char **argv){
-  const char *name=MESH_NAME;int me=0,layout=0;double pct=0;
+  const char *name=MESH_NAME;int me=0,layout=0;double pct=0;uint32_t table_nodes=0;
   uint64_t arena_pages=0,block_pages=0,table_rows=0,window_pages=0,orders=4096;
   uint32_t link_count=0,device_count=0,qps=getenv("MESH_QPS")?(uint32_t)atoi(getenv("MESH_QPS")):1;
   struct mesh_link *links=aligned_alloc(_Alignof(struct mesh_link),(size_t)argc*sizeof *links);
@@ -1333,6 +1333,9 @@ int main(int argc,char **argv){
       if(kind=='A')arena_pages=pages;else if(kind=='B')block_pages=pages;
       else if(kind=='R')table_rows=pages;else if(kind=='W')window_pages=pages;else orders=pages;
     }
+    /* -N the link table's nodes (the configured link map's: its node ids below it); without it, the
+       largest node this bridge's configuration names (itself, its links' peers) and one */
+    else if(!strcmp(argv[i],"-N") && i+1<argc){char *end;unsigned long n=strtoul(argv[++i],&end,10);if(*end || !n || n>NET_LINK_NODES)die("link table nodes (-N, at most 320)");table_nodes=(uint32_t)n;}
     else if(!strcmp(argv[i],"--layout"))layout=1;
     else if(!strcmp(argv[i],"-s") && i+1<argc)name=argv[++i];
     else if(!strcmp(argv[i],"--link") && i+1<argc){
@@ -1372,11 +1375,16 @@ int main(int argc,char **argv){
   struct hdr *m=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
   if(m==MAP_FAILED)die("mmap");shm=name;
   snprintf(link_table_region,sizeof link_table_region,"%s",name);
-  if(me>=MESH_LINK_NODES || mesh_link_table_open(name,1,&link_table))die("link table");
-  link_table->node=(uint32_t)me;atexit(link_table_down);
+  if(!table_nodes){
+    table_nodes=(uint32_t)me+1;
+    for(uint32_t i=0;i<link_count;i++)if(links[i].provider.peer>=table_nodes)table_nodes=links[i].provider.peer+1;
+  }
+  for(uint32_t i=0;i<link_count;i++)if(links[i].provider.peer>=table_nodes)die("a link's peer past the link table's nodes (-N)");
+  if((uint32_t)me>=table_nodes || table_nodes>NET_LINK_NODES || mesh_link_table_open(name,table_nodes,(uint32_t)me,&link_table))die("link table");
+  atexit(link_table_down);
   /* this bridge's reports' sequence starts past any an earlier bridge of its node sent: its start in ms */
   struct timespec started;clock_gettime(CLOCK_REALTIME,&started);
-  atomic_store(&link_table->reported[me],((uint64_t)started.tv_sec*1000+(uint64_t)started.tv_nsec/1000000)<<20);
+  atomic_store(&mesh_link_reported(link_table)[me],((uint64_t)started.tv_sec*1000+(uint64_t)started.tv_nsec/1000000)<<20);
   *m=geometry;m->node=(uint32_t)me;m->version=MESH_VERSION;
   for(uint32_t r=0;r<mesh_rows(m);r++)atomic_store_explicit(&mesh_page(m)[r].mapping,MESH_ABSENT,memory_order_relaxed);
   struct mesh_wire wire={0};
@@ -1404,7 +1412,10 @@ int main(int argc,char **argv){
   __sync_synchronize();m->magic=MESH_MAGIC;
   fprintf(stderr,"bridge node %d: %u links, %u queue pairs per link, arena %llu pages, window %u pages, rows %u, orders %u\n",
     me,link_count,qps,(unsigned long long)mesh_arena_pages(m),m->wire_pages,m->rows,m->orders);
-  for(uint32_t i=0;i<link_count;i++){sessions[i].M=m;sessions[i].counts=links[i].counts;sessions[i].provider.wire=&wire;}
+  for(uint32_t i=0;i<link_count;i++){
+    sessions[i].M=m;sessions[i].counts=links[i].counts;sessions[i].provider.wire=&wire;
+    if(!(sessions[i].sent=calloc(table_nodes,sizeof *sessions[i].sent)))die("link report allocation");
+  }
   net_sessions=sessions;net_session_count=link_count;
   for(uint32_t i=0;i<link_count;i++){
     struct net_session *session=&sessions[i];

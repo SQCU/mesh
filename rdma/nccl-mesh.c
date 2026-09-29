@@ -98,16 +98,19 @@ struct flight;
 struct item { struct call *calls; int n; struct launch *launch; struct item *next; uint64_t deadline,bound,arrived,final;
   int collectives_done,networked; struct flight *flight; ncclResult_t result; };
 /* A plan kept for (epoch, call signature): the algorithm chosen, this rank's steps and the whole plan's
-   hash. */
+   hash; its segments (a rank each) and steps (MESH_COLLECTIVE_STEPS of the ranks) sized with the
+   communicator. */
 #define PLANS 64
-struct plan { uint64_t epoch,elements,whole,segments[NCCL_MESH_LINK_NODES]; int kind,type,root,force,uneven; uint32_t how,nsteps;
-  struct mesh_collective chosen; struct mesh_step steps[MESH_COLLECTIVE_STEPS(NCCL_MESH_LINK_NODES)]; };
+struct plan { uint64_t epoch,elements,whole,*segments; int kind,type,root,force,uneven; uint32_t how,nsteps;
+  struct mesh_collective chosen; struct mesh_step *steps; };
 struct ncclComm {
   uint64_t key; int rank,nranks;
   /* the link table and rank r's node in it; the snapshot the calls plan on (`epoch` its epoch) and the
      planner's map of it over the ranks; the plans */
   struct mesh_link_table *table; uint32_t *nodes; uint64_t epoch; struct mesh_link_contents *seen;
   struct mesh_link_map map; uint32_t (*pairs)[2]; float (*cost)[2]; struct plan *plans; struct mesh_step *planning;
+  /* the worker's: the receive connections a collective used (a rank each), flushed at its end */
+  void **used;
   /* the worker's own: a later snapshot, its map, and steps, to judge whether a move revokes a call */
   struct mesh_link_contents *later; struct mesh_link_map moved; uint32_t (*moved_pairs)[2]; float (*moved_cost)[2]; struct mesh_step *scratch;
   void *net; struct peer *peers;
@@ -250,32 +253,38 @@ static uint64_t whole_plan(const struct mesh_link_map *map,int n,struct mesh_col
 }
 /* The communicator's link table and nodes from its config (ncclMeshConfig_t, recognized by its size),
    each node distinct and present in the table: no table, no communicator, and every rank refuses alike
-   (the refusal reads only the config and the table's stated contents). */
+   (the refusal reads only the config and the table's stated contents).  Its arrays are sized here, by
+   its ranks and the table's nodes (the bridge's configuration), the only bounds. */
 static ncclResult_t links_for(struct ncclComm *c,const ncclConfig_t *config){
   const ncclMeshConfig_t *mesh=config && config->size==sizeof(ncclMeshConfig_t)?(const ncclMeshConfig_t *)config:NULL;
   if(!mesh || !mesh->links || !mesh->nodes)
     return FAIL(c,ncclInvalidUsage,"no link map: the communicator takes an ncclMeshConfig_t (base.size sizeof(ncclMeshConfig_t)) naming the link "
                 "table (ncclMeshLinksAttach) and each rank's node in it%s",mesh?(mesh->links?"; its nodes are NULL":"; its links are NULL"):"");
   c->table=mesh->links;
-  c->nodes=calloc((size_t)c->nranks,sizeof *c->nodes);
-  c->seen=calloc(1,sizeof *c->seen);
+  const size_t n=(size_t)c->nranks,steps=MESH_COLLECTIVE_STEPS(c->nranks);
+  c->nodes=calloc(n,sizeof *c->nodes);
+  c->seen=mesh_link_contents_new(c->table->nodes);
   c->pairs=calloc((size_t)c->nranks*(size_t)c->nranks,sizeof *c->pairs);
   c->cost=calloc((size_t)c->nranks*(size_t)c->nranks,sizeof *c->cost);
   c->plans=calloc(PLANS,sizeof *c->plans);
-  c->later=calloc(1,sizeof *c->later);
+  for(int p=0;c->plans && p<PLANS;p++){c->plans[p].segments=calloc(n,sizeof *c->plans[p].segments);c->plans[p].steps=calloc(steps,sizeof *c->plans[p].steps);}
+  for(int p=0;c->plans && p<PLANS;p++)if(!c->plans[p].segments || !c->plans[p].steps)return FAIL(c,ncclSystemError,"allocation");
+  c->used=calloc(n,sizeof *c->used);
+  c->later=mesh_link_contents_new(c->table->nodes);
   c->moved_pairs=calloc((size_t)c->nranks*(size_t)c->nranks,sizeof *c->moved_pairs);
   c->moved_cost=calloc((size_t)c->nranks*(size_t)c->nranks,sizeof *c->moved_cost);
   c->scratch=calloc(MESH_COLLECTIVE_STEPS(c->nranks),sizeof *c->scratch);
   c->planning=calloc(MESH_COLLECTIVE_STEPS(c->nranks),sizeof *c->planning);
-  if(!c->nodes || !c->seen || !c->pairs || !c->cost || !c->plans || !c->later || !c->moved_pairs || !c->moved_cost || !c->scratch || !c->planning)
+  if(!c->nodes || !c->seen || !c->pairs || !c->cost || !c->plans || !c->later || !c->moved_pairs || !c->moved_cost || !c->scratch || !c->planning ||
+     !c->used)
     return FAIL(c,ncclSystemError,"allocation");
-  if(c->nranks>NCCL_MESH_LINK_NODES)return FAIL(c,ncclInvalidUsage,"%d ranks: the link table holds %d nodes",c->nranks,NCCL_MESH_LINK_NODES);
   c->epoch=mesh_link_table_read(c->table,c->seen);
   for(int r=0;r<c->nranks;r++){
     int v=mesh->nodes[r];
     for(int q=0;q<r;q++)if(mesh->nodes[q]==v)return FAIL(c,ncclInvalidUsage,"no link map for rank %d: node %d is rank %d's too",r,v,q);
-    if(v<0 || v>=NCCL_MESH_LINK_NODES || !c->seen->present[v])
-      return FAIL(c,ncclInvalidUsage,"no link map for rank %d: its node %d is not stated in the link table (ncclMeshLinksState)",r,v);
+    if(v<0 || (uint32_t)v>=c->table->nodes || !mesh_link_present(c->seen)[v])
+      return FAIL(c,ncclInvalidUsage,"no link map for rank %d: its node %d is not stated in the link table of %u nodes (ncclMeshLinksState)",
+                  r,v,c->table->nodes);
     c->nodes[r]=(uint32_t)v;
   }
   mesh_link_table_map(c->seen,c->nodes,(uint32_t)c->nranks,&c->map,c->pairs,c->cost);
@@ -670,7 +679,7 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct laun
   ncclResult_t status=ncclSuccess;
   struct pending *sends=calloc(k->nsteps?k->nsteps:1,sizeof *sends);int count_=0;
   struct combined *done=calloc(k->nsteps?k->nsteps:1,sizeof *done);int ndone=0;uint64_t seen=0;
-  void *used[64];int nused=0;
+  void **used=c->used;int nused=0;
   if(!sends || !done)status=FAIL(c,ncclSystemError,"allocation");
   for(uint32_t i=0;i<k->nsteps && !status;i++){
     const struct mesh_step *s=k->steps+i;
@@ -692,7 +701,7 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct laun
     }
     int known=0;
     for(int u=0;u<nused;u++)known|=used[u]==p->recv[CH_COLL];
-    if(!known && nused<64)used[nused++]=p->recv[CH_COLL];
+    if(!known)used[nused++]=p->recv[CH_COLL];
     /* a piece of the operand is written only once no isend still reads it */
     for(int j=0;j<count_ && !status && s->op==MESH_STEP_COPY;)
       if(sends[j].lo<lo+length && lo<sends[j].hi){status=await(c,sends[j].request,SIZE_MAX,NULL,NULL,it,"an isend");sends[j]=sends[--count_];}
@@ -985,7 +994,8 @@ static void comm_free(struct ncclComm *c){
   for(uint64_t deadline=deadline_after();atomic_load(&c->programs) && !nccl_mesh_gpu_failed() && now_ns()<deadline;)usleep(100);
   close_peers(c,c->peers,0);
   if(c->net)mesh_net_finalize(c->net);
-  free(c->nodes);free(c->seen);free(c->pairs);free(c->cost);free(c->plans);free(c->closed);
+  for(int p=0;c->plans && p<PLANS;p++){free(c->plans[p].segments);free(c->plans[p].steps);}
+  free(c->nodes);free(c->seen);free(c->pairs);free(c->cost);free(c->plans);free(c->closed);free(c->used);
   free(c->later);free(c->moved_pairs);free(c->moved_cost);free(c->scratch);free(c->planning);
   if(c->quiet)nccl_mesh_release(c->quiet);
   if(c->done)nccl_mesh_release(c->done);
@@ -1191,7 +1201,7 @@ static ncclResult_t refresh(struct ncclComm *c){
 static void down_links(struct ncclComm *c,char *text,size_t size){
   size_t at=0;text[0]=0;
   for(int a=0;a<c->nranks;a++)for(int b=a+1;b<c->nranks;b++){
-    const struct mesh_link_state *x=&c->seen->link[c->nodes[a]][c->nodes[b]],*y=&c->seen->link[c->nodes[b]][c->nodes[a]];
+    const struct mesh_link_state *x=mesh_link_at(c->seen,c->nodes[a],c->nodes[b]),*y=mesh_link_at(c->seen,c->nodes[b],c->nodes[a]);
     if(x->stated && y->stated && !(x->up && y->up) && at<size)
       at+=(size_t)snprintf(text+at,size-at,"%sranks %d-%d (nodes %u-%u)",at?", ":"",a,b,c->nodes[a],c->nodes[b]);
   }
@@ -1959,7 +1969,7 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm,uint64_t *failed,uint64_t *epoch)
   /* the flood's neighbours: the ranks the stated map links to this one, up or not */
   c->epoch=mesh_link_table_read(c->table,c->seen);
   for(int p=0;!status && p<n;p++)
-    want[p]=p!=c->rank && c->seen->link[c->nodes[c->rank]][c->nodes[p]].stated && c->seen->link[c->nodes[p]][c->nodes[c->rank]].stated;
+    want[p]=p!=c->rank && mesh_link_at(c->seen,c->nodes[c->rank],c->nodes[p])->stated && mesh_link_at(c->seen,c->nodes[p],c->nodes[c->rank])->stated;
   if(!status && n>1)status=connect_ranks(c,key,want,fresh,deadline);
   if(!status)status=span_alloc(slot*(size_t)(n+1),&buffers,NULL);
   /* the votes flooded n - 1 rounds; again, once the tables move, until every rank's map is the same */
@@ -2013,11 +2023,11 @@ ncclResult_t ncclMeshGroupEpochs(uint64_t *epochs,int capacity,int *count){
   for(int i=0;epochs && i<plans.n && i<capacity;i++)epochs[i]=plans.epoch[i];
   return ncclSuccess;
 }
-_Static_assert(NCCL_MESH_LINK_NODES==MESH_LINK_NODES && sizeof(ncclMeshLink_t)==sizeof(struct mesh_link_state),"the link table");
+_Static_assert(sizeof(ncclMeshLink_t)==sizeof(struct mesh_link_state),"the link table");
 ncclResult_t ncclMeshLinksAttach(const char *region,void **links){
   if(!links)return FAIL(NULL,ncclInvalidArgument,"ncclMeshLinksAttach: links is NULL");
   if(!region)region=getenv("MESH_REGION");
-  int error=mesh_link_table_open(region,0,(struct mesh_link_table **)links);
+  int error=mesh_link_table_open(region,0,0,(struct mesh_link_table **)links);
   return error?FAIL(NULL,ncclSystemError,"the link table of the bridge region %s: %s",region?region:"/mesh0",strerror(error)):ncclSuccess;
 }
 ncclResult_t ncclMeshLinksDetach(void *links){mesh_link_table_close(links);return ncclSuccess;}
@@ -2027,14 +2037,19 @@ ncclResult_t ncclMeshLinksState(void *links,const char *path){
   return error?FAIL(NULL,error==EINVAL?ncclInvalidArgument:ncclSystemError,"the link map %s: %s%s",path,strerror(error),
                     error==EINVAL?" (a link line without its alpha and beta, or a node past the table's)":""):ncclSuccess;
 }
-ncclResult_t ncclMeshLinksRead(void *links,ncclMeshLink_t *snapshot,uint32_t *present,uint64_t *reported,uint32_t *node,uint64_t *epoch){
+ncclResult_t ncclMeshLinksRead(void *links,uint32_t *nodes,ncclMeshLink_t *snapshot,uint32_t *present,uint64_t *reported,uint32_t *node,
+  uint64_t *epoch){
   if(!links)return FAIL(NULL,ncclInvalidArgument,"ncclMeshLinksRead: links is NULL");
-  struct mesh_link_contents c;
   struct mesh_link_table *t=links;
-  uint64_t at=mesh_link_table_read(t,&c);
-  if(snapshot)memcpy(snapshot,c.link,sizeof c.link);
-  if(present)memcpy(present,c.present,sizeof c.present);
-  for(uint32_t v=0;reported && v<MESH_LINK_NODES;v++)reported[v]=atomic_load_explicit(&t->reported[v],memory_order_acquire);
+  struct mesh_link_contents *c=mesh_link_contents_new(t->nodes);
+  if(!c)return FAIL(NULL,ncclSystemError,"allocation");
+  const size_t n=t->nodes;
+  uint64_t at=mesh_link_table_read(t,c);
+  if(nodes)*nodes=t->nodes;
+  if(snapshot)memcpy(snapshot,c->link,n*n*sizeof *snapshot);
+  if(present)memcpy(present,mesh_link_present(c),n*sizeof *present);
+  for(size_t v=0;reported && v<n;v++)reported[v]=atomic_load_explicit(&mesh_link_reported(t)[v],memory_order_acquire);
+  free(c);
   if(node)*node=((struct mesh_link_table *)links)->node;
   if(epoch)*epoch=at;
   return ncclSuccess;

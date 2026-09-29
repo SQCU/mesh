@@ -38,30 +38,49 @@ int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,u
 /* The link table (mesh-dataflow.h): the latch sequence counter of Linux include/linux/seqlock.h
    (raw_write_seqcount_latch: two copies, the counter's parity naming the one readers take), in shared
    memory named after the region. */
-int mesh_link_table_open(const char *region,int create,struct mesh_link_table **out){
+struct mesh_link_contents *mesh_link_contents_new(uint32_t nodes){
+  struct mesh_link_contents *c=calloc(1,mesh_link_contents_bytes(nodes));
+  if(c)c->nodes=nodes;
+  return c;
+}
+int mesh_link_table_open(const char *region,uint32_t nodes,uint32_t node,struct mesh_link_table **out){
   char name[64];
   snprintf(name,sizeof name,"%s.links",region?region:MESH_NAME);
-  if(create)shm_unlink(name);
-  int file=shm_open(name,create?O_CREAT|O_EXCL|O_RDWR:O_RDWR,MESH_MODE);
+  if(nodes && node>=nodes)return EINVAL;
+  if(nodes)shm_unlink(name);
+  int file=shm_open(name,nodes?O_CREAT|O_EXCL|O_RDWR:O_RDWR,MESH_MODE);
   if(file<0)return errno;
   struct stat info;
-  if(create)fchmod(file,MESH_MODE);  /* as the region's: past the umask where the system allows it */
-  int error=create && ftruncate(file,sizeof **out)?errno:fstat(file,&info)?errno:0;
-  if(!error && !create && (size_t)info.st_size<sizeof **out)error=EINVAL;  /* the system rounds it up to a page */
-  struct mesh_link_table *t=error?MAP_FAILED:mmap(NULL,sizeof *t,PROT_READ|PROT_WRITE,MAP_SHARED,file,0);
+  if(nodes)fchmod(file,MESH_MODE);  /* as the region's: past the umask where the system allows it */
+  size_t bytes=mesh_link_table_bytes(nodes);
+  int error=nodes && ftruncate(file,(off_t)bytes)?errno:fstat(file,&info)?errno:0;
+  if(!error && !nodes){
+    /* the bridge's table: its size from its header (the system rounds the object up to a page) */
+    struct mesh_link_table *head=(size_t)info.st_size<sizeof *head?MAP_FAILED:mmap(NULL,sizeof *head,PROT_READ,MAP_SHARED,file,0);
+    if(head==MAP_FAILED)error=EINVAL;
+    else{
+      if(head->magic!=MESH_LINK_MAGIC || (size_t)info.st_size<(bytes=mesh_link_table_bytes(head->nodes)))error=EINVAL;
+      munmap(head,sizeof *head);
+    }
+  }
+  struct mesh_link_table *t=error?MAP_FAILED:mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_SHARED,file,0);
   if(!error && t==MAP_FAILED)error=errno;
   close(file);
   if(error)return error;
-  if(create)t->magic=MESH_LINK_MAGIC;
-  else if(t->magic!=MESH_LINK_MAGIC){munmap(t,sizeof *t);return EINVAL;}
+  if(nodes){
+    t->nodes=nodes;t->node=node;
+    mesh_link_copy(t,0)->nodes=mesh_link_copy(t,1)->nodes=nodes;
+    atomic_thread_fence(memory_order_release);
+    t->magic=MESH_LINK_MAGIC;
+  }
   *out=t;
   return 0;
 }
-void mesh_link_table_close(struct mesh_link_table *t){if(t)munmap(t,sizeof *t);}
+void mesh_link_table_close(struct mesh_link_table *t){if(t)munmap(t,mesh_link_table_bytes(t->nodes));}
 uint64_t mesh_link_table_read(const struct mesh_link_table *t,struct mesh_link_contents *out){
   for(;;){
     uint64_t epoch=atomic_load_explicit(&t->epoch,memory_order_acquire);
-    memcpy(out,&t->copy[epoch&1],sizeof *out);
+    memcpy(out,mesh_link_copy(t,epoch),mesh_link_contents_bytes(t->nodes));
     atomic_thread_fence(memory_order_acquire);
     if(atomic_load_explicit(&t->epoch,memory_order_relaxed)==epoch)return epoch;
   }
@@ -73,10 +92,11 @@ static void mesh_link_table_unlock(struct mesh_link_table *t){atomic_store_expli
 /* The write, the writer held. */
 static int mesh_link_table_edit(struct mesh_link_table *t,void (*edit)(struct mesh_link_contents *,const void *),const void *argument){
   uint64_t epoch=atomic_load_explicit(&t->epoch,memory_order_relaxed);
-  struct mesh_link_contents *now=&t->copy[epoch&1],*next=&t->copy[(epoch+1)&1];
-  memcpy(next,now,sizeof *next);
+  struct mesh_link_contents *now=mesh_link_copy(t,epoch),*next=mesh_link_copy(t,epoch+1);
+  const size_t bytes=mesh_link_contents_bytes(t->nodes);
+  memcpy(next,now,bytes);
   edit(next,argument);
-  int changed=memcmp(next,now,sizeof *next)!=0;
+  int changed=memcmp(next,now,bytes)!=0;
   if(changed)atomic_store_explicit(&t->epoch,epoch+1,memory_order_release);
   return changed;
 }
@@ -90,38 +110,38 @@ int mesh_link_table_write(struct mesh_link_table *t,void (*edit)(struct mesh_lin
 struct mesh_link_row { uint32_t node; const uint64_t *up; };
 static void mesh_link_row_set(struct mesh_link_contents *c,const void *argument){
   const struct mesh_link_row *r=argument;
-  for(uint32_t b=0;b<MESH_LINK_NODES;b++)c->link[r->node][b].up=b!=r->node && (r->up[b/64]>>(b%64)&1);
+  for(uint32_t b=0;b<c->nodes;b++)mesh_link_at(c,r->node,b)->up=b!=r->node && (r->up[b/64]>>(b%64)&1);
 }
 uint64_t mesh_link_table_row(struct mesh_link_table *t,uint32_t v,uint64_t *up){
-  struct mesh_link_contents *c=malloc(sizeof *c);
-  if(v>=MESH_LINK_NODES || !c){free(c);return 0;}
+  if(v>=t->nodes)return 0;
+  memset(up,0,(t->nodes+63)/64*sizeof *up);
   mesh_link_table_lock(t);
-  uint64_t sequence=atomic_load_explicit(&t->reported[v],memory_order_relaxed);
-  memcpy(c,&t->copy[atomic_load_explicit(&t->epoch,memory_order_relaxed)&1],sizeof *c);
+  const struct mesh_link_contents *c=mesh_link_copy(t,atomic_load_explicit(&t->epoch,memory_order_relaxed));
+  for(uint32_t b=0;b<t->nodes;b++)if(mesh_link_at(c,v,b)->up)up[b/64]|=UINT64_C(1)<<(b%64);
+  uint64_t sequence=atomic_load_explicit(&mesh_link_reported(t)[v],memory_order_relaxed);
   mesh_link_table_unlock(t);
-  memset(up,0,(MESH_LINK_NODES+63)/64*sizeof *up);
-  for(uint32_t b=0;b<MESH_LINK_NODES;b++)if(c->link[v][b].up)up[b/64]|=UINT64_C(1)<<(b%64);
-  free(c);
   return sequence;
 }
 int mesh_link_table_observe(struct mesh_link_table *t,uint32_t peer,uint32_t up){
-  if(peer>=MESH_LINK_NODES || t->node>=MESH_LINK_NODES)return -EINVAL;
-  uint64_t row[(MESH_LINK_NODES+63)/64];
+  if(peer>=t->nodes)return -EINVAL;
+  uint64_t *row=calloc((t->nodes+63)/64,sizeof *row);
+  if(!row)return -ENOMEM;
   mesh_link_table_row(t,t->node,row);
   if(up)row[peer/64]|=UINT64_C(1)<<(peer%64);else row[peer/64]&=~(UINT64_C(1)<<(peer%64));
   mesh_link_table_lock(t);
   int changed=mesh_link_table_edit(t,mesh_link_row_set,&(struct mesh_link_row){t->node,row});
-  if(changed)atomic_fetch_add_explicit(&t->reported[t->node],1,memory_order_release);
+  if(changed)atomic_fetch_add_explicit(&mesh_link_reported(t)[t->node],1,memory_order_release);
   mesh_link_table_unlock(t);
+  free(row);
   return changed;
 }
 int mesh_link_table_report(struct mesh_link_table *t,uint32_t origin,uint64_t sequence,const uint64_t *up){
-  if(origin>=MESH_LINK_NODES || origin==t->node)return 0;
+  if(origin>=t->nodes || origin==t->node)return 0;
   mesh_link_table_lock(t);
-  int newer=sequence>atomic_load_explicit(&t->reported[origin],memory_order_relaxed);
+  int newer=sequence>atomic_load_explicit(&mesh_link_reported(t)[origin],memory_order_relaxed);
   if(newer){
     mesh_link_table_edit(t,mesh_link_row_set,&(struct mesh_link_row){origin,up});
-    atomic_store_explicit(&t->reported[origin],sequence,memory_order_release);
+    atomic_store_explicit(&mesh_link_reported(t)[origin],sequence,memory_order_release);
   }
   mesh_link_table_unlock(t);
   return newer;

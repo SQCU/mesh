@@ -22,7 +22,7 @@ void mesh_link_map_free(struct mesh_link_map *);
    kind line's 0..nodes-1 and every node line's), each link line a to b stated with its alpha and beta;
    what the file does not state is not stated.  Every link's up stays as observed (the bridge's own, the
    other nodes' reports): stating a link never makes it up.  EINVAL where a link line states no cost
-   (nothing infers one) or a node lies past MESH_LINK_NODES. */
+   (nothing infers one) or a node lies past the table's nodes. */
 int mesh_link_table_state(struct mesh_link_table *,const char *path);
 /* The planner's map of a snapshot over `nodes` (rank r is node nodes[r]): ranks a and b linked where
    both directions are stated and up, mesh kind where every pair is, else graph; each directed pair's

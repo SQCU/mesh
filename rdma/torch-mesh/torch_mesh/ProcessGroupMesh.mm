@@ -960,23 +960,27 @@ static pybind11::tuple agreed() {
   return pybind11::make_tuple(agreement.count, agreement.failed ? pybind11::object(pybind11::int_(agreement.failed)) : pybind11::none(),
                               agreement.epoch);
 }
-// A snapshot of the link table of `region` (empty: MESH_REGION): (epoch, the bridge's node, present [16],
-// links [16, 16, 4] of alpha, beta, stated, up, reported [16]: each node's last report's sequence, 0 none).
+// A snapshot of the link table of `region` (empty: MESH_REGION) of N nodes: (epoch, the bridge's node,
+// present [N], links [N, N, 4] of alpha, beta, stated, up, reported [N]: each node's last report's
+// sequence, 0 none).
 static pybind11::tuple links(const std::string &region) {
   void *table = nullptr;
   check(ncclMeshLinksAttach(region.empty() ? nullptr : region.c_str(), &table), nullptr, "ncclMeshLinksAttach");
-  std::vector<ncclMeshLink_t> snapshot(NCCL_MESH_LINK_NODES * NCCL_MESH_LINK_NODES);
-  uint32_t present[NCCL_MESH_LINK_NODES], node = 0;
-  uint64_t epoch = 0, reported[NCCL_MESH_LINK_NODES];
-  check(ncclMeshLinksRead(table, snapshot.data(), present, reported, &node, &epoch), nullptr, "ncclMeshLinksRead");
+  uint32_t n = 0, node = 0;
+  uint64_t epoch = 0;
+  check(ncclMeshLinksRead(table, &n, nullptr, nullptr, nullptr, nullptr, nullptr), nullptr, "ncclMeshLinksRead");
+  std::vector<ncclMeshLink_t> snapshot((size_t)n * n);
+  std::vector<uint32_t> present(n);
+  std::vector<uint64_t> reported(n);
+  check(ncclMeshLinksRead(table, &n, snapshot.data(), present.data(), reported.data(), &node, &epoch), nullptr, "ncclMeshLinksRead");
   ncclMeshLinksDetach(table);
-  at::Tensor t = at::empty({NCCL_MESH_LINK_NODES, NCCL_MESH_LINK_NODES, 4}, at::kFloat), p = at::empty({NCCL_MESH_LINK_NODES}, at::kInt);
-  for (int i = 0; i < NCCL_MESH_LINK_NODES * NCCL_MESH_LINK_NODES; i++) {
+  at::Tensor t = at::empty({(int64_t)n, (int64_t)n, 4}, at::kFloat), p = at::empty({(int64_t)n}, at::kInt);
+  for (size_t i = 0; i < (size_t)n * n; i++) {
     float *row = t.data_ptr<float>() + 4 * i;
     row[0] = snapshot[i].alpha, row[1] = snapshot[i].beta, row[2] = (float)snapshot[i].stated, row[3] = (float)snapshot[i].up;
   }
   pybind11::list sequences;
-  for (int i = 0; i < NCCL_MESH_LINK_NODES; i++) {
+  for (uint32_t i = 0; i < n; i++) {
     p.data_ptr<int>()[i] = (int)present[i];
     sequences.append(reported[i]);
   }

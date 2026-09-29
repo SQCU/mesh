@@ -105,8 +105,8 @@ def counts():
 
 
 def links(region=None):
-    """(epoch, the bridge's node, present [16], links [16, 16, 4]: alpha, beta, stated, up of a to b, reported
-    [16]: the sequence of each node's last report the table holds, 0 none)."""
+    """The link table of N nodes: (epoch, the bridge's node, present [N], links [N, N, 4]: alpha, beta, stated,
+    up of a to b, reported [N]: the sequence of each node's last report the table holds, 0 none)."""
     from . import _C
     return _C.links(region or '')
 

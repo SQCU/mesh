@@ -51,17 +51,14 @@ def link_map(kind, nodes, pairs, cost=None):
     return made
 
 
-LINK_NODES = 16  # mesh-dataflow.h MESH_LINK_NODES
-
-
 class LinkState(C.Structure):
     """mesh-dataflow.h struct mesh_link_state: one directed link's stated alpha and beta, stated, up."""
     _fields_ = [('alpha', C.c_float), ('beta', C.c_float), ('stated', U), ('up', U)]
 
 
-class LinkContents(C.Structure):
-    """mesh-dataflow.h struct mesh_link_contents: a snapshot of the link table."""
-    _fields_ = [('present', U * LINK_NODES), ('link', (LinkState * LINK_NODES) * LINK_NODES)]
+def contents_bytes(nodes):
+    """mesh-dataflow.h mesh_link_contents_bytes: a snapshot of a table of `nodes` nodes."""
+    return (16 + nodes * nodes * C.sizeof(LinkState) + nodes * 4 + 15) & ~15
 
 
 class LinkTable:
@@ -71,18 +68,17 @@ class LinkTable:
     as node `node`) takes what a bridge would write: observe(peer, up) its node's own link, report(origin,
     sequence, up) another node's report (the set of nodes its links reach up)."""
 
-    def __init__(self, region=None, create=False, node=0):
+    def __init__(self, region=None, create=0, node=0):
+        """The bridge's table of `region`, or with create=N one made here of N nodes as node `node`'s."""
         self.table, self.region, self.created = C.c_void_p(), region, create
-        check(LIB.mesh_link_table_open(os.fsencode(region) if region else None, int(create), C.byref(self.table)))
-        if create:
-            C.cast(self.table, C.POINTER(U))[1] = node
-        self.node = C.cast(self.table, C.POINTER(U))[1]
+        check(LIB.mesh_link_table_open(os.fsencode(region) if region else None, create, node, C.byref(self.table)))
+        self.node, self.nodes = C.cast(self.table, C.POINTER(U))[1], C.cast(self.table, C.POINTER(U))[2]
 
     def observe(self, peer, up):
         return LIB.mesh_link_table_observe(self.table, peer, int(up))
 
     def report(self, origin, sequence, up):
-        words = (Q * ((LINK_NODES + 63) // 64))()
+        words = (Q * ((self.nodes + 63) // 64))()
         for v in up:
             words[v // 64] |= 1 << (v % 64)
         return LIB.mesh_link_table_report(self.table, origin, sequence, words)
@@ -91,14 +87,20 @@ class LinkTable:
         check(LIB.mesh_link_table_state(self.table, os.fsencode(str(path))))
 
     def read(self):
-        contents = LinkContents()
-        return contents, LIB.mesh_link_table_read(self.table, C.byref(contents))
+        """A snapshot (mesh_link_contents, bytes) and its epoch; at(contents, a, b) its link a -> b."""
+        contents = C.create_string_buffer(contents_bytes(self.nodes))
+        return contents, LIB.mesh_link_table_read(self.table, contents)
+
+    @staticmethod
+    def at(contents, a, b):
+        nodes = C.cast(contents, C.POINTER(U))[0]
+        return LinkState.from_buffer(contents, 16 + (a * nodes + b) * C.sizeof(LinkState))
 
     @staticmethod
     def map(contents, nodes):
         n = len(nodes)
         made, pairs, cost = LinkMap(), ((U * 2) * max(1, n * n))(), ((C.c_float * 2) * max(1, n * n))()
-        LIB.mesh_link_table_map(C.byref(contents), (U * n)(*nodes), n, C.byref(made), pairs, cost)
+        LIB.mesh_link_table_map(contents, (U * n)(*nodes), n, C.byref(made), pairs, cost)
         made._storage = (pairs, cost)
         return made
 
@@ -138,7 +140,7 @@ for name, result, arguments in (
         ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_link_map_read', C.c_int, [C.c_char_p, C.POINTER(LinkMap)]),
         ('mesh_link_map_free', None, [C.POINTER(LinkMap)]),
-        ('mesh_link_table_open', C.c_int, [C.c_char_p, C.c_int, C.POINTER(C.c_void_p)]),
+        ('mesh_link_table_open', C.c_int, [C.c_char_p, U, U, C.POINTER(C.c_void_p)]),
         ('mesh_link_table_close', None, [C.c_void_p]),
         ('mesh_link_table_state', C.c_int, [C.c_void_p, C.c_char_p]),
         ('mesh_link_table_read', Q, [C.c_void_p, C.c_void_p]),
