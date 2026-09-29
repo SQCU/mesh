@@ -767,7 +767,7 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct laun
         nccl_mesh_event_signal(c->arrive,k->pieces[i].arrived+j);
         if(k->tally)k->tally[ARRIVED]=now_ns();
         rebound(it);
-        done[ndone++]=(struct combined){at,at+bytes,k->pieces[i].combined+j};
+        if(k->pieces[i].combined)done[ndone++]=(struct combined){at,at+bytes,k->pieces[i].combined+j};
       }
     }
   }
@@ -1664,12 +1664,13 @@ static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **c
       const uint64_t elements=k->steps[s].piece.elements;
       const uint32_t n=chunks_of(elements,e);
       p->arrived=c->arrive_value+1;c->arrive_value+=n;
-      p->combined=*value+1;*value+=n;
+      /* a combined chunk is signalled for the worker's SENDs that read it (never in a kept program) */
+      if(!kept){p->combined=*value+1;*value+=n;}
       for(uint32_t j=0;j<n;j++){
         const uint64_t first=chunk_first(e,j);
         sink_wait(sink,c->arrive,p->arrived+j);
         kernel(sink,k,KERNEL_COMBINE,k->at,k->operand+(k->steps[s].first+first)*e,l->own,p->at+first*e,chunk_count(elements,e,j),k->combine);
-        sink_signal(sink,event,p->combined+j);
+        if(!kept)sink_signal(sink,event,p->combined+j);
       }
     }
     const size_t out=out_bytes(k);unsigned char *from=output_at(k);
