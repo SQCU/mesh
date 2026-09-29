@@ -54,6 +54,10 @@ int mesh_net_isend(void *sendComm,void *data,size_t size,int tag,void *mhandle,v
 int mesh_net_irecv(void *recvComm,int n,void **data,size_t *sizes,int *tags,void **mhandles,void **phandles,void **request);
 int mesh_net_iflush(void *recvComm,int n,void **data,int *sizes,void **mhandles,void **request);
 int mesh_net_test(void *request,int *done,int *sizes);
+/* isend and irecv whose end the bridge also stores into the 8-byte word `word` of the registered window
+   (mesh.h mesh_net_request.completion): 1 done, 2 failed. */
+int mesh_net_isend_word(void *sendComm,void *data,size_t size,void *mhandle,uint64_t *word,void **request);
+int mesh_net_irecv_word(void *recvComm,void *data,size_t size,void *mhandle,uint64_t *word,void **request);
 int mesh_net_close_send(void *sendComm);
 int mesh_net_close_recv(void *recvComm);
 int mesh_net_close_listen(void *listenComm);

@@ -10,7 +10,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 108u
+#define MESH_VERSION 109u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -104,13 +104,16 @@ enum { MESH_NET_FREE, MESH_NET_CLAIMED, MESH_NET_LISTEN, MESH_NET_CONNECTING, ME
 enum { MESH_NET_IDLE, MESH_NET_POSTED, MESH_NET_ACTIVE, MESH_NET_DONE, MESH_NET_ERROR };
 enum { MESH_NET_ISEND, MESH_NET_IRECV, MESH_NET_IFLUSH };
 /* A request: `offset` into the region's registered window (mr MESH_NET_WINDOW), `size` the bytes sent or
-   the receive's capacity, `transferred` the bytes moved once it is done. */
+   the receive's capacity, `transferred` the bytes moved once it is done; `completion` 0, or 1 + the window
+   offset of an 8-byte word into which the bridge stores the request's end (1 done, 2 failed) before its
+   state, for a GPU kernel that waits on the word (nccl-mesh.c). */
 struct mesh_net_request {
   _Alignas(64) _Atomic uint32_t state;
   uint32_t op,mr,mr_generation;
   int32_t tag; _Atomic int32_t error;
   uint64_t sequence,offset,size;
   _Atomic uint64_t transferred;
+  uint64_t completion;
 };
 _Static_assert(sizeof(struct mesh_net_request)==64,"mesh_net_request");
 /* A comm: its link, its client (`owner`), the key a connect names, a receive end's listen, the other

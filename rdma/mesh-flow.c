@@ -816,9 +816,14 @@ static struct net_comm *net_state(struct mesh_net_comm *comm,uint32_t index){
   }
   return state;
 }
+/* A request's end: its completion word (a GPU kernel waits on it: mesh.h), then its state, which frees the
+   slot for the client's next request. */
+static struct hdr *net_region;
 static void net_finish(struct mesh_net_request *request,int32_t error,uint64_t transferred){
+  const uint64_t completion=request->completion;
   atomic_store_explicit(&request->error,error,memory_order_relaxed);
   atomic_store_explicit(&request->transferred,transferred,memory_order_relaxed);
+  if(completion)atomic_store_explicit((_Atomic uint64_t *)((char *)net_region+net_region->data_off+completion-1),error?2:1,memory_order_release);
   atomic_store_explicit(&request->state,error?MESH_NET_ERROR:MESH_NET_DONE,memory_order_release);
 }
 /* A request on the wire ends: the comm's hold released, its counts, its state. */
@@ -900,7 +905,11 @@ static void net_take(struct net_session *s,uint32_t index){
     state->taken++;
     atomic_store_explicit(&request->state,MESH_NET_ACTIVE,memory_order_relaxed);
     state->phase[slot]=0;state->sent[slot]=0;
-    int ordered=request->sequence==state->taken-1,valid=ordered && net_request_valid(s,request);
+    /* a completion word outside the window is refused, and never stored */
+    const uint64_t word=request->completion,wire=mesh_wire_bytes(s->M);
+    const int stray=word && (word-1>wire-8 || (word-1)%8);
+    if(stray)request->completion=0;
+    int ordered=request->sequence==state->taken-1,valid=!stray && ordered && net_request_valid(s,request);
     if(request->op==MESH_NET_IFLUSH && kind==MESH_NET_RECV && ordered)continue;
     if(!valid || (request->op==MESH_NET_ISEND)!=(kind==MESH_NET_SEND) || (request->op!=MESH_NET_ISEND && request->op!=MESH_NET_IRECV)){
       net_finish(request,EINVAL,0);continue;
@@ -1549,6 +1558,7 @@ int main(int argc,char **argv){
   for(uint32_t p=0;p<link_count;p++)links[p].completion=completion_outputs+p;
   /* design/prepared-machine.md#M26 */
   atomic_store_explicit(&control_memory,m,memory_order_relaxed);
+  net_region=m;
   atomic_store(&m->bridge_pid,(uint64_t)getpid());atomic_store(&m->port.phase,MESH_PAIRING);
   __sync_synchronize();m->magic=MESH_MAGIC;
   fprintf(stderr,"bridge node %d: %u links, %u queue pairs per link, arena %llu pages, window %u pages, rows %u, orders %u\n",

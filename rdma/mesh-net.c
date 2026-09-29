@@ -253,9 +253,11 @@ int mesh_net_dereg_mr(void *comm,void *mhandle){
 }
 
 /* A request in the comm's ring, or none (NULL: the ring is full; try again) as ncclNet allows. */
-static int net_post(struct net_comm_handle *c,uint32_t op,void *data,size_t size,int tag,struct net_mhandle *h,void **request){
+static int net_post(struct net_comm_handle *c,uint32_t op,void *data,size_t size,int tag,struct net_mhandle *h,uint64_t *word,void **request){
   *request=NULL;
   struct mesh_net_comm *comm=net_slot(c);
+  char *window=(char *)net.m+net.m->data_off;
+  if(word && ((char *)word<window || (char *)(word+1)>window+mesh_wire_bytes(net.m) || ((uintptr_t)word&7)))return net_result(EINVAL);
   uint32_t state=atomic_load_explicit(&comm->state,memory_order_acquire);
   if(state!=c->kind){
     int error=atomic_load_explicit(&comm->error,memory_order_relaxed);
@@ -267,6 +269,7 @@ static int net_post(struct net_comm_handle *c,uint32_t op,void *data,size_t size
   if(atomic_load_explicit(&r->state,memory_order_acquire)!=MESH_NET_IDLE)return MESH_NET_SUCCESS;
   r->op=op;r->mr=h?h->mr:MESH_NET_WINDOW;r->mr_generation=h?h->generation:0;r->tag=tag;r->sequence=sequence;
   r->offset=size?h->offset+(uint64_t)((char *)data-h->address):0;r->size=size;
+  r->completion=word?(uint64_t)((char *)word-window)+1:0;
   atomic_store_explicit(&r->transferred,0,memory_order_relaxed);atomic_store_explicit(&r->error,0,memory_order_relaxed);
   atomic_store_explicit(&r->state,MESH_NET_POSTED,memory_order_release);
   atomic_store_explicit(&comm->posted,sequence+1,memory_order_release);
@@ -279,18 +282,24 @@ static int net_post(struct net_comm_handle *c,uint32_t op,void *data,size_t size
 }
 int mesh_net_isend(void *sendComm,void *data,size_t size,int tag,void *mhandle,void *phandle,void **request){
   (void)phandle;
-  return net_post(sendComm,MESH_NET_ISEND,data,size,tag,mhandle,request);
+  return net_post(sendComm,MESH_NET_ISEND,data,size,tag,mhandle,NULL,request);
+}
+int mesh_net_isend_word(void *sendComm,void *data,size_t size,void *mhandle,uint64_t *word,void **request){
+  return net_post(sendComm,MESH_NET_ISEND,data,size,0,mhandle,word,request);
+}
+int mesh_net_irecv_word(void *recvComm,void *data,size_t size,void *mhandle,uint64_t *word,void **request){
+  return net_post(recvComm,MESH_NET_IRECV,data,size,0,mhandle,word,request);
 }
 int mesh_net_irecv(void *recvComm,int n,void **data,size_t *sizes,int *tags,void **mhandles,void **phandles,void **request){
   (void)phandles;
   if(n!=1){*request=NULL;return net_result(EINVAL);}
-  return net_post(recvComm,MESH_NET_IRECV,data[0],sizes[0],tags?tags[0]:0,mhandles?mhandles[0]:NULL,request);
+  return net_post(recvComm,MESH_NET_IRECV,data[0],sizes[0],tags?tags[0]:0,mhandles?mhandles[0]:NULL,NULL,request);
 }
 /* A fence: done once every earlier request of the comm is, after the bridge's full barrier. */
 int mesh_net_iflush(void *recvComm,int n,void **data,int *sizes,void **mhandles,void **request){
   (void)data;(void)sizes;(void)mhandles;
   if(n>1){*request=NULL;return net_result(EINVAL);}
-  return net_post(recvComm,MESH_NET_IFLUSH,NULL,0,0,NULL,request);
+  return net_post(recvComm,MESH_NET_IFLUSH,NULL,0,0,NULL,NULL,request);
 }
 int mesh_net_test(void *request,int *done,int *sizes){
   struct net_request_handle *handle=request;
