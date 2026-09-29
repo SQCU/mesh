@@ -22,8 +22,10 @@
    per directed link a stated alpha-beta cost and an observed up, which the communicator takes through
    ncclMeshConfig_t (ncclCommInitRankConfig; no table, no communicator) and a split inherits.  Each call
    plans on one snapshot of it, read when its group ends, and records its epoch; plans are kept by
-   (epoch, call); a call during which the epoch moves fails as a value (ncclRemoteError, revoked), and a
-   call whose plan needs a link that is down fails so at once.  A failed call revokes the communicator
+   (epoch, call); a call during which the epoch moves fails as a value (ncclRemoteError, revoked) where
+   the move touches its plan (on the new contents its selection takes another algorithm, or some rank's
+   steps differ: a link or node it uses, or costs that choose another; a point-to-point call, where its
+   link is no longer stated and up), and a call whose plan needs a link that is down fails so at once.  A failed call revokes the communicator
    (ULFM's MPI_Comm_revoke): the calls in flight fail, its connections are closed, so each peer's calls
    with this rank fail too, and it makes no call until every rank has called ncclMeshCommAgree, which
    agrees on the first failed call and makes the connections again.  Calls run as their plan's SEND /

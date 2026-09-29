@@ -67,8 +67,9 @@ static uint64_t off(struct region r,const void *p){return (uint64_t)((const unsi
 struct call {
   int kind; const void *send; void *recv; size_t count; ncclDataType_t type; int op,root,peer;
   struct ncclComm *comm; struct ncclMeshStream *stream; uint32_t how; int force; uint64_t epoch;
-  /* its place among the calls issued on the communicator since its last agreement, from 1 */
-  uint64_t index;
+  /* its place among the calls issued on the communicator since its last agreement, from 1; the hash of
+     its whole plan (every rank's steps: what an epoch's move must leave alone for it to stand) */
+  uint64_t index,whole;
   /* a reduce-scatter's or all-gather's count a rank, the call's own copy (NULL: `count` each) */
   uint64_t *segments;
   /* resolved when the group ends */
@@ -96,16 +97,19 @@ struct flight;
    program waits on it); `bound`, while its program waits on the network, when that wait fails it. */
 struct item { struct call *calls; int n; struct launch *launch; struct item *next; uint64_t deadline,bound,arrived,final;
   int collectives_done,networked; struct flight *flight; ncclResult_t result; };
-/* A plan kept for (epoch, call signature): the algorithm chosen and this rank's steps. */
+/* A plan kept for (epoch, call signature): the algorithm chosen, this rank's steps and the whole plan's
+   hash. */
 #define PLANS 64
-struct plan { uint64_t epoch,elements,segments[NCCL_MESH_LINK_NODES]; int kind,type,root,force,uneven; uint32_t how,nsteps;
+struct plan { uint64_t epoch,elements,whole,segments[NCCL_MESH_LINK_NODES]; int kind,type,root,force,uneven; uint32_t how,nsteps;
   struct mesh_collective chosen; struct mesh_step steps[MESH_COLLECTIVE_STEPS(NCCL_MESH_LINK_NODES)]; };
 struct ncclComm {
   uint64_t key; int rank,nranks;
   /* the link table and rank r's node in it; the snapshot the calls plan on (`epoch` its epoch) and the
      planner's map of it over the ranks; the plans */
   struct mesh_link_table *table; uint32_t *nodes; uint64_t epoch; struct mesh_link_contents *seen;
-  struct mesh_link_map map; uint32_t (*pairs)[2]; float (*cost)[2]; struct plan *plans;
+  struct mesh_link_map map; uint32_t (*pairs)[2]; float (*cost)[2]; struct plan *plans; struct mesh_step *planning;
+  /* the worker's own: a later snapshot, its map, and steps, to judge whether a move revokes a call */
+  struct mesh_link_contents *later; struct mesh_link_map moved; uint32_t (*moved_pairs)[2]; float (*moved_cost)[2]; struct mesh_step *scratch;
   void *net; struct peer *peers;
   uint64_t splits;
   struct op_entry *ops; int nops;
@@ -224,6 +228,26 @@ static int linked(const struct mesh_link_map *map,int a,int b){
     if(((int)map->link[l][0]==a && (int)map->link[l][1]==b) || ((int)map->link[l][0]==b && (int)map->link[l][1]==a))return 1;
   return 0;
 }
+/* The algorithm a collective takes on `map`: its selection, else (not forced) any; MESH_UNAVAILABLE where
+   none carries it. */
+static struct mesh_collective choose(const struct mesh_link_map *map,const struct call *k,struct mesh_operand operand){
+  struct mesh_collective wanted={.what=(uint32_t)k->kind,.how=k->how,.root=(uint32_t)k->root,.segments=k->segments};
+  struct mesh_collective chosen=mesh_collective_choose(map,wanted,operand,0,0);
+  if(chosen.how==MESH_UNAVAILABLE && k->how && !k->force){wanted.how=0;chosen=mesh_collective_choose(map,wanted,operand,0,0);}
+  chosen.segments=k->segments;
+  return chosen;
+}
+/* The hash of a collective's whole plan on `map`: the algorithm and every rank's steps. */
+static uint64_t whole_plan(const struct mesh_link_map *map,int n,struct mesh_collective chosen,struct mesh_operand operand,struct mesh_step *steps){
+  uint64_t h=mix(((uint64_t)chosen.how<<32)^chosen.root);
+  for(int r=0;chosen.how!=MESH_UNAVAILABLE && r<n;r++){
+    uint32_t count=mesh_collective_plan(map,(uint32_t)r,chosen,operand,steps);
+    h=mix(h^count^((uint64_t)r<<32));
+    for(uint32_t i=0;i<count;i++)
+      h=mix(h^((uint64_t)steps[i].op<<56)^((uint64_t)steps[i].peer<<40)^((uint64_t)steps[i].round<<24)^mix(steps[i].first^(steps[i].piece.elements<<20)));
+  }
+  return h;
+}
 /* The communicator's link table and nodes from its config (ncclMeshConfig_t, recognized by its size),
    each node distinct and present in the table: no table, no communicator, and every rank refuses alike
    (the refusal reads only the config and the table's stated contents). */
@@ -238,7 +262,13 @@ static ncclResult_t links_for(struct ncclComm *c,const ncclConfig_t *config){
   c->pairs=calloc((size_t)c->nranks*(size_t)c->nranks,sizeof *c->pairs);
   c->cost=calloc((size_t)c->nranks*(size_t)c->nranks,sizeof *c->cost);
   c->plans=calloc(PLANS,sizeof *c->plans);
-  if(!c->nodes || !c->seen || !c->pairs || !c->cost || !c->plans)return FAIL(c,ncclSystemError,"allocation");
+  c->later=calloc(1,sizeof *c->later);
+  c->moved_pairs=calloc((size_t)c->nranks*(size_t)c->nranks,sizeof *c->moved_pairs);
+  c->moved_cost=calloc((size_t)c->nranks*(size_t)c->nranks,sizeof *c->moved_cost);
+  c->scratch=calloc(MESH_COLLECTIVE_STEPS(c->nranks),sizeof *c->scratch);
+  c->planning=calloc(MESH_COLLECTIVE_STEPS(c->nranks),sizeof *c->planning);
+  if(!c->nodes || !c->seen || !c->pairs || !c->cost || !c->plans || !c->later || !c->moved_pairs || !c->moved_cost || !c->scratch || !c->planning)
+    return FAIL(c,ncclSystemError,"allocation");
   if(c->nranks>NCCL_MESH_LINK_NODES)return FAIL(c,ncclInvalidUsage,"%d ranks: the link table holds %d nodes",c->nranks,NCCL_MESH_LINK_NODES);
   c->epoch=mesh_link_table_read(c->table,c->seen);
   for(int r=0;r<c->nranks;r++){
@@ -803,12 +833,34 @@ static void part_done(struct ncclComm *c,uint64_t value){
   }
 }
 /* A part whose calls planned on an epoch the link map has since left fails as a value, whatever its
-   transfers did; the next call plans on the new contents. */
+   transfers did, where the move touches a call's plan: a collective whose whole plan (the algorithm the
+   selection takes on the new contents and every rank's steps: the links and nodes it uses, and the
+   costs that choose it) is not the one it ran, a point-to-point call whose link is no longer stated and
+   up.  A move that leaves every plan as it was (a node or link the calls do not use, a cost that does not
+   change their choice) revokes nothing.  Every rank judges from its own table, so alike where the
+   tables are.  The next call plans on the new contents. */
 static ncclResult_t revoked(struct ncclComm *c,struct item *it,ncclResult_t result){
   const uint64_t now=atomic_load_explicit(&c->table->epoch,memory_order_acquire);
-  for(int i=0;i<it->n && !result;i++)if(it->calls[i].epoch!=now)
-    return FAIL(c,ncclRemoteError,"revoked: the link map's epoch moved from %llu to %llu during the call",
-                (unsigned long long)it->calls[i].epoch,(unsigned long long)now);
+  int moved=0;
+  for(int i=0;i<it->n;i++)moved|=it->calls[i].epoch!=now;
+  if(result || !moved)return result;
+  const uint64_t later=mesh_link_table_read(c->table,c->later);
+  mesh_link_table_map(c->later,c->nodes,(uint32_t)c->nranks,&c->moved,c->moved_pairs,c->moved_cost);
+  for(int i=0;i<it->n;i++){
+    const struct call *k=it->calls+i;
+    int touched;
+    if(k->epoch==later)continue;
+    if(k->kind>=K_SEND)touched=k->peer!=c->rank && !linked(&c->moved,c->rank,k->peer);
+    else if(c->nranks==1)touched=0;
+    else{
+      struct mesh_operand operand={(uint32_t)k->type,(uint32_t)type_bytes[k->type],k->elements};
+      touched=whole_plan(&c->moved,c->nranks,choose(&c->moved,k,operand),operand,c->scratch)!=k->whole;
+    }
+    if(touched)
+      return FAIL(c,ncclRemoteError,"revoked: the link map moved from epoch %llu to %llu during call %llu, and the move touches its plan "
+                  "(a link or node it uses, or costs that choose another)",(unsigned long long)k->epoch,(unsigned long long)later,
+                  (unsigned long long)k->index);
+  }
   return result;
 }
 /* The first failure since the last agreement: its call's index (the least) and its cause. */
@@ -934,6 +986,7 @@ static void comm_free(struct ncclComm *c){
   close_peers(c,c->peers,0);
   if(c->net)mesh_net_finalize(c->net);
   free(c->nodes);free(c->seen);free(c->pairs);free(c->cost);free(c->plans);free(c->closed);
+  free(c->later);free(c->moved_pairs);free(c->moved_cost);free(c->scratch);free(c->planning);
   if(c->quiet)nccl_mesh_release(c->quiet);
   if(c->done)nccl_mesh_release(c->done);
   if(c->arrive)nccl_mesh_release(c->arrive);
@@ -1183,9 +1236,7 @@ static ncclResult_t resolve(struct call *k){
     p->force==k->force && p->elements==k->elements && p->uneven==(k->segments!=NULL) &&
     (!k->segments || !memcmp(p->segments,k->segments,(size_t)c->nranks*sizeof *k->segments));
   if(!kept){
-    struct mesh_collective wanted={.what=(uint32_t)k->kind,.how=k->how,.root=(uint32_t)k->root,.segments=k->segments};
-    struct mesh_collective chosen=mesh_collective_choose(&c->map,wanted,operand,0,0);
-    if(chosen.how==MESH_UNAVAILABLE && k->how && !k->force){wanted.how=0;chosen=mesh_collective_choose(&c->map,wanted,operand,0,0);}
+    struct mesh_collective chosen=choose(&c->map,k,operand);
     if(chosen.how==MESH_UNAVAILABLE){
       char down[256];down_links(c,down,sizeof down);
       return FAIL(c,*down?ncclRemoteError:ncclInvalidUsage,"no algorithm of the selection %#x carries this collective (%d) of %llu elements on the "
@@ -1193,11 +1244,12 @@ static ncclResult_t resolve(struct call *k){
     }
     uint32_t nsteps=mesh_collective_plan(&c->map,(uint32_t)c->rank,chosen,operand,p->steps);
     if(!nsteps)return FAIL(c,ncclInternalError,"the planner gave rank %d no steps",c->rank);
+    p->whole=whole_plan(&c->map,c->nranks,chosen,operand,c->planning);
     p->nsteps=nsteps;p->epoch=c->epoch;p->kind=k->kind;p->how=k->how;p->root=k->root;p->type=(int)k->type;p->force=k->force;
     p->elements=k->elements;p->uneven=k->segments!=NULL;p->chosen=chosen;
     if(k->segments)memcpy(p->segments,k->segments,(size_t)c->nranks*sizeof *k->segments);
   }
-  k->chosen=p->chosen;k->chosen.segments=k->segments;
+  k->chosen=p->chosen;k->chosen.segments=k->segments;k->whole=p->whole;
   k->steps=calloc(MESH_COLLECTIVE_STEPS(c->nranks),sizeof *k->steps);
   k->pieces=calloc(MESH_COLLECTIVE_STEPS(c->nranks),sizeof *k->pieces);
   if(!k->steps || !k->pieces)return FAIL(c,ncclSystemError,"allocation");
