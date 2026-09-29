@@ -163,7 +163,8 @@ HIDDEN void nccl_mesh_program_wait(void *program,void *event,uint64_t value);
 HIDDEN void nccl_mesh_program_signal(void *program,void *event,uint64_t value);
 HIDDEN void nccl_mesh_program_kernel(void *program,int kernel,void *to,uint64_t dst,void *from,uint64_t src,uint64_t n,int type,int op,int nranks,uint64_t scalar);
 HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received);
-HIDDEN void nccl_mesh_program_words(void *program,void *buffer,const uint64_t *at,uint32_t n,void *failures,uint64_t failure);
+HIDDEN void nccl_mesh_program_words(void *program,void *buffer,const uint64_t *at,uint32_t n,void *failures,uint64_t failure,uint64_t ns,
+  void *const *touch,int ntouch);
 HIDDEN void nccl_mesh_program_publish(void *program,void *buffer,uint64_t at,uint64_t value);
 HIDDEN void nccl_mesh_program_end(void *program);
 HIDDEN void nccl_mesh_program_handler(void *program,void (*done)(void *,int),void *argument);
@@ -637,8 +638,10 @@ static ncclResult_t stop_reason(struct ncclComm *c,const struct item *it,const c
 static void rebound(struct item *it){if(it->gpu)it->bound=now_ns()+GPU_WAIT_NS;}
 /* The network moved for the communicator (a part started, a request done): its progress word advances, which
    starts the bound of every GPU wait on its words again (its programs may wait on parts the worker has not
-   reached yet: it takes them in issue order). */
+   reached yet: it takes them in issue order).  The bound is the host's clock, which the worker writes as it
+   runs (tick): a GPU wait fails once GPU_WAIT_NS of it pass with no progress. */
 static void advance(struct ncclComm *c){atomic_fetch_add_explicit(c->control+1,1,memory_order_release);}
+static void tick(struct ncclComm *c){atomic_store_explicit(c->control+2,now_ns(),memory_order_relaxed);}
 /* Reaps every pending isend that is done (its ring slot free again). */
 static ncclResult_t reap(struct ncclComm *c,struct pending *sends,int *count){
   for(int i=0;i<*count;){
@@ -824,6 +827,7 @@ static void retire(struct ncclComm *c,struct flight *f){
   if(it->collectives_done)finish(c,it,it->result);
 }
 static void progress(struct ncclComm *c){
+  tick(c);
   if(!c->flights)return;
   memset(c->blocked,0,sizeof *c->blocked*(size_t)c->nranks*2);
   for(struct flight **link=&c->flights;*link;){
@@ -1035,6 +1039,7 @@ static void *worker(void *argument){
       }
     }
     /* a part waiting for its gate or its recorded points: the word or value is polled, not slept on */
+    tick(c);
     sched_yield();
   }
   return NULL;
@@ -1086,6 +1091,7 @@ static ncclResult_t comm_start(struct ncclComm *c){
   if(!status && !(status=span_alloc(64,&control,NULL))){
     memset(control,0,64);
     c->control=(_Atomic uint64_t *)control;
+    tick(c);
     pthread_mutex_lock(&heap.lock);
     c->control_buffer=span_of(control,64)->buffer;nccl_mesh_retain(c->control_buffer);
     pthread_mutex_unlock(&heap.lock);
@@ -1554,7 +1560,7 @@ struct ran { int ncomms,nevents; struct ncclComm **comms; uint64_t *first; void 
 /* A kept program (a deferred stream's, nccl.h ncclMeshStreamDefer): its commands, each object they name
    retained, encoded later into a command buffer the caller hands over. */
 enum { R_WAIT, R_SIGNAL, R_KERNEL, R_COPY, R_WORDS, R_PUBLISH };
-struct recorded { int kind,which,type,op,nranks; void *a,*b; uint64_t x,y,n,scalar; uint64_t *list; };
+struct recorded { int kind,which,type,op,nranks; void *a,*b; uint64_t x,y,n,scalar; uint64_t *list; void *touch[4]; };
 struct recording { struct recording *next; int n,capacity,failed; struct recorded *ops; struct ran *ran; };
 /* Where a program's commands go: a command buffer, or a recording. */
 struct sink { void *program; struct recording *kept; };
@@ -1568,6 +1574,7 @@ static void keep(struct sink *s,struct recorded r){
   }
   if(r.a)nccl_mesh_retain(r.a);
   if(r.b)nccl_mesh_retain(r.b);
+  for(int t=0;t<4;t++)if(r.touch[t])nccl_mesh_retain(r.touch[t]);
   k->ops[k->n++]=r;
 }
 static void sink_wait(struct sink *s,struct call *k,void *event,uint64_t value){
@@ -1578,16 +1585,22 @@ static void sink_signal(struct sink *s,void *event,uint64_t value){
   if(s->kept)keep(s,(struct recorded){.kind=R_SIGNAL,.a=event,.x=value});else nccl_mesh_program_signal(s->program,event,value);
 }
 /* A wait for words of the window allocation `r` to reach their values (`list`: n pairs of an offset and a
-   value), a timed-out wait setting the failure word of k's communicator. */
+   value), a timed-out wait setting the failure word of k's communicator; the buffers k's requests read and
+   write declared used (with `r`'s), so later work on them follows the wait. */
 static void sink_words(struct sink *s,struct call *k,struct region r,const uint64_t *list,uint32_t n){
   if(!n)return;
   struct ncclComm *c=k->comm;
+  void *touch[4]={0};int m=0;
+  void *const each[4]={r.buffer,k->at.buffer,k->in.buffer,k->out.buffer};
+  for(int i=0;i<4;i++){int seen=!each[i];for(int j=0;j<m;j++)seen|=touch[j]==each[i];if(!seen)touch[m++]=each[i];}
   if(s->kept){
     uint64_t *copy=malloc(2*n*sizeof *copy);
     if(!copy){s->kept->failed=1;return;}
     memcpy(copy,list,2*n*sizeof *copy);
-    keep(s,(struct recorded){.kind=R_WORDS,.a=r.buffer,.b=c->control_buffer,.n=n,.list=copy});
-  } else nccl_mesh_program_words(s->program,r.buffer,list,n,c->control_buffer,0);
+    struct recorded rec={.kind=R_WORDS,.a=r.buffer,.b=c->control_buffer,.n=n,.list=copy};
+    memcpy(rec.touch,touch,sizeof touch);
+    keep(s,rec);
+  } else nccl_mesh_program_words(s->program,r.buffer,list,n,c->control_buffer,0,GPU_WAIT_NS,touch,m);
   count(k,GPU_WORD_WAITS,n);
 }
 /* A word of the window allocation `r` set to `value` once the program's dispatches before it are done. */
@@ -1603,13 +1616,18 @@ static void play(struct recording *k,void *program){
     else if(r->kind==R_SIGNAL)nccl_mesh_program_signal(program,r->a,r->x);
     else if(r->kind==R_KERNEL)nccl_mesh_program_kernel(program,r->which,r->a,r->x,r->b,r->y,r->n,r->type,r->op,r->nranks,r->scalar);
     else if(r->kind==R_COPY)nccl_mesh_program_copy(program,r->a,r->x,r->b,r->y,r->n,r->which);
-    else if(r->kind==R_WORDS)nccl_mesh_program_words(program,r->a,r->list,(uint32_t)r->n,r->b,r->y);
+    else if(r->kind==R_WORDS)nccl_mesh_program_words(program,r->a,r->list,(uint32_t)r->n,r->b,r->y,GPU_WAIT_NS,r->touch,4);
     else nccl_mesh_program_publish(program,r->a,r->x,r->y);
   }
   nccl_mesh_program_end(program);
 }
 static void recording_free(struct recording *k){
-  for(int i=0;k && i<k->n;i++){if(k->ops[i].a)nccl_mesh_release(k->ops[i].a);if(k->ops[i].b)nccl_mesh_release(k->ops[i].b);free(k->ops[i].list);}
+  for(int i=0;k && i<k->n;i++){
+    if(k->ops[i].a)nccl_mesh_release(k->ops[i].a);
+    if(k->ops[i].b)nccl_mesh_release(k->ops[i].b);
+    for(int t=0;t<4;t++)if(k->ops[i].touch[t])nccl_mesh_release(k->ops[i].touch[t]);
+    free(k->ops[i].list);
+  }
   if(k)free(k->ops);
   free(k);
 }
@@ -1636,8 +1654,8 @@ static void program_ran(void *argument,int failed){
   for(int i=0;i<r->ncomms;i++){
     struct ncclComm *c=r->comms[i];
     if(atomic_exchange_explicit(c->control,0,memory_order_acq_rel)){
-      FAIL(c,ncclRemoteError,"a GPU wait on the network ran out (%llu polls, about %.0f s): a bridge stalled, or a peer has not joined "
-           "the call",(unsigned long long)nccl_mesh_wait_bound(),GPU_WAIT_NS/1e9);
+      FAIL(c,ncclRemoteError,"a GPU wait on the network ran out (%.0f s of the host's clock without progress, or %llu polls): a bridge "
+           "stalled, or a peer has not joined the call",GPU_WAIT_NS/1e9,(unsigned long long)nccl_mesh_wait_bound());
       failed_at(c,r->first[i],c->error);
       comm_revoke(c);
       int none=0;atomic_compare_exchange_strong(&c->async,&none,(int)ncclRemoteError);

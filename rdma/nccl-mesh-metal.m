@@ -304,21 +304,25 @@ static const char *source =
   "  FENCE;\n"
   "}\n"
   "// One thread waits for each listed word (a byte offset into buffer 0) to reach its value: a system-scope\n"
-  "// fence, then a system-coherent load.  It fails after `bound` polls in which the progress word (buffer 1's\n"
-  "// second, which the host advances as the network moves) has not moved, or after 3 x bound polls in all:\n"
-  "// the failure word (buffer 1's first) is set and the rest are not waited for.  list: n, bound, then n\n"
+  "// fence, then a system-coherent load.  Buffer 1 holds the communicator's failure word, its progress word\n"
+  "// and the host's clock (ns), which the host advances as the network moves and as it runs: the wait fails\n"
+  "// once `ns` of the host's clock pass with no progress, or after `polls` polls in all (a backstop under\n"
+  "// Metal's watchdog), setting the failure word; the rest are not waited for.  list: n, polls, ns, then n\n"
   "// (offset, value) pairs.\n"
   "kernel void wait(device uchar *w [[buffer(0)]], device uchar *f [[buffer(1)]], constant ulong *list [[buffer(2)]],\n"
   "                 uint i [[thread_position_in_grid]]) {\n"
   "  if (i) return;\n"
-  "  SYS ulong *progress = (SYS ulong *)(f + 8);\n"
-  "  ulong polls = 0, total = 0, seen = *progress;\n"
+  "  SYS ulong *failure = (SYS ulong *)f, *progress = failure + 1, *clock = failure + 2;\n"
+  "  ulong total = 0, seen = *progress, since = *clock;\n"
   "  for (ulong k = 0; k < list[0]; k++)\n"
-  "    for (SYS ulong *word = (SYS ulong *)(w + list[2 + 2 * k]);; polls++, total++) {\n"
-  "      if (polls >= list[1] || total >= 3 * list[1]) { *(SYS ulong *)f = 1ul; FENCE; return; }\n"
+  "    for (SYS ulong *word = (SYS ulong *)(w + list[3 + 2 * k]);; total++) {\n"
+  "      if (total >= list[1]) { *failure = 1ul; FENCE; return; }\n"
   "      FENCE;\n"
-  "      if (*word >= list[3 + 2 * k]) break;\n"
-  "      if (!(total & 63)) { const ulong now = *progress; if (now != seen) { seen = now; polls = 0; } }\n"
+  "      if (*word >= list[4 + 2 * k]) break;\n"
+  "      if (total & 63) continue;\n"
+  "      const ulong now = *clock, moved = *progress;\n"
+  "      if (moved != seen) { seen = moved; since = now; }\n"
+  "      else if (now > since + list[2]) { *failure = 1ul; FENCE; return; }\n"
   "    }\n"
   "  FENCE;\n"
   "}\n"
@@ -336,23 +340,35 @@ static _Atomic int failed;
 #define HIDDEN __attribute__((visibility("hidden")))
 
 /* The polls one completion word's wait makes in `seconds`: the wait kernel timed once, on a word nobody sets,
-   for 4096 polls. */
+   for 4096 polls, after a 64 MB copy (about 0.83 M polls a second on the M5 either way, but a wait on a word in
+   the window polled about 2.4 M a second during tp.py: its 1 s count ran out after 0.36 s, metal-microbench
+   output_data/handoffs-20260929/t1; so polls are a backstop, not the bound). */
 static uint64_t polls_in(id<MTLCommandQueue> queue,double seconds){
   @autoreleasepool {
     id<MTLBuffer> word=[[gpu.device newBufferWithLength:64 options:MTLResourceStorageModeShared] autorelease];
+    id<MTLBuffer> bulk=[[gpu.device newBufferWithLength:(size_t)64<<20 options:MTLResourceStorageModePrivate] autorelease];
     memset(word.contents,0,64);
-    const uint64_t list[4]={1,4096,0,1};
+    const uint64_t list[5]={1,4096,UINT64_MAX,0,1};
+    const struct { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,pad[3]; } copy={0,(uint64_t)32<<20,(uint64_t)2<<20,0,0,0,0,16,0,{0}};
+    id<MTLCommandBuffer> warm=[queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder=[warm computeCommandEncoder];
+    [encoder setComputePipelineState:gpu.kernels[KERNEL_COPY]];
+    [encoder setBuffer:bulk offset:0 atIndex:0];
+    [encoder setBuffer:bulk offset:0 atIndex:1];
+    [encoder setBytes:&copy length:sizeof copy atIndex:2];
+    [encoder dispatchThreads:MTLSizeMake(1u<<20,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
+    [encoder endEncoding];
     id<MTLCommandBuffer> buffer=[queue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder=[buffer computeCommandEncoder];
+    encoder=[buffer computeCommandEncoder];
     [encoder setComputePipelineState:gpu.kernels[KERNEL_WAIT]];
     [encoder setBuffer:word offset:0 atIndex:0];
     [encoder setBuffer:word offset:8 atIndex:1];
     [encoder setBytes:list length:sizeof list atIndex:2];
     [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
     [encoder endEncoding];
-    [buffer commit];[buffer waitUntilCompleted];
+    [warm commit];[buffer commit];[buffer waitUntilCompleted];
     double took=buffer.GPUEndTime-buffer.GPUStartTime;
-    return took>0?(uint64_t)(4096*seconds/took):(uint64_t)1<<20;
+    return took>0?(uint64_t)(4096*seconds/took):(uint64_t)1<<22;
   }
 }
 /* The device and the kernels; 0, or -1 with the reason in `error`. */
@@ -378,15 +394,16 @@ HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
     }
     gpu.device=device;
     id<MTLCommandQueue> queue=[device newCommandQueue];
-    gpu.bound=polls_in(queue,1.0);
+    gpu.bound=polls_in(queue,12.0);
     [queue release];
     return 0;
   }
 }
 /* A GPU program failed (its command buffer's status an error) since the process started. */
 HIDDEN int nccl_mesh_gpu_failed(void){return atomic_load(&failed);}
-/* The polls a completion word's wait makes without the network moving before it fails: about a second's
-   (GPU_WAIT_NS); three times that in all (Metal ends a command buffer that runs past its watchdog). */
+/* The polls a completion word's wait makes in all before it fails: 12 s of polls as timed at attach, about 4 s
+   of a wait's in the window (Metal ends a command buffer that runs past its watchdog); its bound on the
+   network is the host's clock (the wait kernel). */
 HIDDEN uint64_t nccl_mesh_wait_bound(void){return gpu.bound;}
 
 /* A Metal buffer over `bytes` at `pointer`, no copy: the pages holding them (from the page below
@@ -472,20 +489,25 @@ HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *fro
   if(bytes)dispatch(program,KERNEL_COPY,to,from,(struct args){dst,src,bytes/width,0,0,0,0,width,(uint32_t)(received!=0),{0}});
 }
 /* A wait for words of `buffer` to reach their values (`at`: n pairs of a byte offset and a value), after the
-   dispatches before it and before those after it; a timed-out wait sets the failure word, 8 bytes at
-   offset `failure` of buffer `failures`, the progress word the 8 after it. */
-HIDDEN void nccl_mesh_program_words(void *program,void *buffer,const uint64_t *at,uint32_t n,void *failures,uint64_t failure){
+   dispatches before it and before those after it; the communicator's failure word (8 bytes at offset
+   `failure` of `failures`; its progress word and the host's clock the next two) bounds it: `ns` of the
+   host's clock without progress.  The buffers the waited requests read or write (`touch`) are declared
+   used, so Metal orders a later command buffer's work on them after the wait, as it did after an event
+   wait, which stalls the whole queue: it orders a queue's command buffers only where they share a buffer. */
+HIDDEN void nccl_mesh_program_words(void *program,void *buffer,const uint64_t *at,uint32_t n,void *failures,uint64_t failure,uint64_t ns,
+  void *const *touch,int ntouch){
   for(uint32_t done=0;done<n;){
     @autoreleasepool {
-      uint64_t list[2+2*240];
+      uint64_t list[3+2*240];
       uint32_t take=n-done<240?n-done:240;
-      list[0]=take;list[1]=gpu.bound;
-      memcpy(list+2,at+2*done,2*take*sizeof *at);
+      list[0]=take;list[1]=gpu.bound;list[2]=ns;
+      memcpy(list+3,at+2*done,2*take*sizeof *at);
       id<MTLComputeCommandEncoder> encoder=encoder_of(program);
+      for(int t=0;t<ntouch;t++)if(touch[t])[encoder useResource:(id<MTLBuffer>)touch[t] usage:MTLResourceUsageRead|MTLResourceUsageWrite];
       [encoder setComputePipelineState:gpu.kernels[KERNEL_WAIT]];
       [encoder setBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:0];
       [encoder setBuffer:(id<MTLBuffer>)failures offset:failure atIndex:1];
-      [encoder setBytes:list length:(2+2*take)*sizeof *list atIndex:2];
+      [encoder setBytes:list length:(3+2*take)*sizeof *list atIndex:2];
       [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
       done+=take;
     }
