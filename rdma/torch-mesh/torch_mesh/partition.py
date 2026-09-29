@@ -4,15 +4,21 @@ split each mesh dimension by it instead of equally.
 Stock PyTorch splits every sharded extent into equal chunks (Shard follows torch.chunk), a uniform
 prior over the ranks that nothing in a program can change.  Here a mesh dimension carries integer
 parts p_r >= 1, one per coordinate, of P = sum(p) units: an extent N split along it is split into
-N p_r / P per coordinate r, in rank order, and P must divide N (any other N raises ValueError; N is
-the global extent, the same on every rank, unless an outer mesh dimension split that tensor
-dimension first); a dimension whose parts are all equal is split as stock splits it.  The grain is
-N / P (a head, an expert, a tile), and a program chooses it by choosing P.  Without an operand
-every replaced function below calls PyTorch's own with the same arguments and returns its result.
+N p_r / P per coordinate r, in rank order, and P must divide N (any other N raises ValueError, on
+every rank alike: no mesh dimension of more than one coordinate precedes a partitioned one, so no
+outer split reaches it first and N is the global extent, the same on every rank); a dimension whose
+parts are all equal is split as stock splits it.  The grain is N / P (a head, an expert, a tile), and
+a program chooses it by choosing P.  Without an operand every replaced function below calls
+PyTorch's own with the same arguments and returns its result.
 
 The operand, keyed by mesh dimension name:
   MESH_PARTITION="tp=5,11 cp=21,43"  attached when a DeviceMesh with that dimension name is made (a
                                      sub-mesh keeps its root's parts); the same on every rank.
+                                     Every mesh dimension before a partitioned one has one
+                                     coordinate (else attach raises): DTensor splits a tensor
+                                     dimension sharded on several mesh dimensions outer first, and
+                                     an outer split's shares can differ by coordinate, so ranks
+                                     would disagree about P dividing them.
   attach(mesh, tp=(5, 11))           the same, before the mesh is first used.
   sizes(mesh, "tp", N)               the per-coordinate sizes of N along that dimension.
 The parts come from the nodes' rates (mesh rdma/allocate.py min_max; design/heterogeneity.md).
@@ -125,6 +131,10 @@ def _attach(mesh, named):
         if len(parts) != _size(mesh, d) or min(parts) < 1:
             raise ValueError(f'mesh: partition {name}={parts}: {_size(mesh, d)} whole parts, each at least 1')
         if len(set(parts)) > 1:
+            outer = [mesh.mesh_dim_names[j] for j in range(d) if _size(mesh, j) > 1]
+            if outer:
+                raise ValueError(f'mesh: partition {name}={parts}: mesh dimensions {outer} precede it; a partitioned '
+                                 f'dimension is its mesh\'s first of more than one coordinate')
             partition[d] = parts
     mesh._partition = partition
     mesh._chunks = {d: _Chunks(p) for d, p in partition.items()}

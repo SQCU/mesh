@@ -21,8 +21,9 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
   shape. It is written on the node's line of the link map as that class's constants, in the form
   the map's node-line comment gives (metal-microbench `configs/links/pair-ring.txt`: `proj=u,v`, u ns
   per weight byte plus v ns per weight element per row, for the engine's fp16 projections;
-  `attn=u,v`, u + v·bs ns per byte of one cached position read at batch bs). A node has one rate per
-  class and dtype, never one speed.
+  `attn=u,v`, u + v·bs ns per byte of one cached position read at batch bs; `mm32=` ns per fp32 FMA
+  of an MPS matmul and `sdpa32=` ns per score of torch_mesh's MPS attention block, for
+  `tools/torch_parallel`'s fp32 programs). A node has one rate per class and dtype, never one speed.
 - **Link**: the cost of one direction of one pair of nodes, α (µs) per message plus β (ns) per byte.
   It is written on a link line of the link map.
 - **Parts**: a mesh dimension's integers p_r ≥ 1, one per coordinate, of P = Σp units.
@@ -91,23 +92,28 @@ The module docstring (`torch_mesh/partition.py`) is the API. This section is onl
   from `x.chunk(world)`.
 - `from_local` without `shape=` means "split by the parts".
 - Every extent split along a partitioned dimension is a multiple of P; any other raises
-  `ValueError`. A global extent raises on every rank alike. Where an outer mesh dimension splits the
-  same tensor dimension first, P must divide each of its shares.
+  `ValueError`, on every rank alike. No mesh dimension of more than one coordinate precedes a
+  partitioned one (attach raises otherwise), so no outer split reaches a partitioned dimension first
+  and the extent it splits is the global one: DTensor splits a tensor dimension sharded on several
+  mesh dimensions outer first, and an outer split's shares can differ by coordinate, so ranks would
+  disagree about P dividing them. To partition an inner dimension, order the mesh with it first.
 
 **Derivation from the link map.** It runs once per configuration, by one procedure, on the driver
 or identically on every rank:
 1. For each mesh dimension, fix its grain (P), the operator classes it runs (a TP dimension runs the
    QKV and output projections, the FFN and attention), and each class's work per unit at the call's
-   shape.
+   shape. These are stated for the program, never read from the ops it dispatches
+   (metal-microbench `tools/torch_parallel/parts.py`).
 2. `cost[r](c)` is the sum, over those classes, of each class's model on rank r's node evaluated at
    the work of c units, so a fixed term counts once, not c times. It may be nonlinear in c (R10).
-   Find a rank's node by its host, never by assuming rank i is node i.
+   Rank r's node is stated with the launch (`tools/torch_parallel/pair.py` `RANKS`), never found by
+   host name or assumed to be node r.
    - If the map has no rate for a class at the program's dtype and shape, measure it on each node
      and add it to the node lines as its own class, with the record it came from, before deriving.
      Never borrow another class's rate. The first weighted run on the pair derived fp32 MPS
      programs' parts from the engine's fp16 projection rates (4.1x per FMA between the nodes, where
-     these programs run 2.3-2.4x), and the wait moved to the slower node (metal-microbench
-     `docs/measurement.md` ledger, 2026-09-28).
+     these programs' matmuls run 2.6x), and the wait moved to the slower node (metal-microbench
+     `docs/measurement.md` ledger, 2026-09-28); the map now states `mm32` and `sdpa32`.
 3. `shared(c)` is the time of the collectives on the dimension's critical path at the largest
    share: α + β·bytes for each, or `mesh_collective_time` with `segments` (`rdma/mesh.py`) where the
    map is more than a pair.
