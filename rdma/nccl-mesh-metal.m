@@ -304,17 +304,21 @@ static const char *source =
   "  FENCE;\n"
   "}\n"
   "// One thread waits for each listed word (a byte offset into buffer 0) to reach its value: a system-scope\n"
-  "// fence, then a system-coherent load, at most `bound` polls in all; past them, the failure word (buffer 1)\n"
-  "// is set and the rest are not waited for.  list: n, bound, then n (offset, value) pairs.\n"
+  "// fence, then a system-coherent load.  It fails after `bound` polls in which the progress word (buffer 1's\n"
+  "// second, which the host advances as the network moves) has not moved, or after 3 x bound polls in all:\n"
+  "// the failure word (buffer 1's first) is set and the rest are not waited for.  list: n, bound, then n\n"
+  "// (offset, value) pairs.\n"
   "kernel void wait(device uchar *w [[buffer(0)]], device uchar *f [[buffer(1)]], constant ulong *list [[buffer(2)]],\n"
   "                 uint i [[thread_position_in_grid]]) {\n"
   "  if (i) return;\n"
-  "  ulong polls = 0;\n"
+  "  SYS ulong *progress = (SYS ulong *)(f + 8);\n"
+  "  ulong polls = 0, total = 0, seen = *progress;\n"
   "  for (ulong k = 0; k < list[0]; k++)\n"
-  "    for (SYS ulong *word = (SYS ulong *)(w + list[2 + 2 * k]);; polls++) {\n"
-  "      if (polls >= list[1]) { *(SYS ulong *)f = 1ul; FENCE; return; }\n"
+  "    for (SYS ulong *word = (SYS ulong *)(w + list[2 + 2 * k]);; polls++, total++) {\n"
+  "      if (polls >= list[1] || total >= 3 * list[1]) { *(SYS ulong *)f = 1ul; FENCE; return; }\n"
   "      FENCE;\n"
   "      if (*word >= list[3 + 2 * k]) break;\n"
+  "      if (!(total & 63)) { const ulong now = *progress; if (now != seen) { seen = now; polls = 0; } }\n"
   "    }\n"
   "  FENCE;\n"
   "}\n"
@@ -381,7 +385,8 @@ HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
 }
 /* A GPU program failed (its command buffer's status an error) since the process started. */
 HIDDEN int nccl_mesh_gpu_failed(void){return atomic_load(&failed);}
-/* The polls a completion word's wait makes before it fails: about a second's (GPU_WAIT_NS). */
+/* The polls a completion word's wait makes without the network moving before it fails: about a second's
+   (GPU_WAIT_NS); three times that in all (Metal ends a command buffer that runs past its watchdog). */
 HIDDEN uint64_t nccl_mesh_wait_bound(void){return gpu.bound;}
 
 /* A Metal buffer over `bytes` at `pointer`, no copy: the pages holding them (from the page below
@@ -468,7 +473,7 @@ HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *fro
 }
 /* A wait for words of `buffer` to reach their values (`at`: n pairs of a byte offset and a value), after the
    dispatches before it and before those after it; a timed-out wait sets the failure word, 8 bytes at
-   offset `failure` of buffer `failures`. */
+   offset `failure` of buffer `failures`, the progress word the 8 after it. */
 HIDDEN void nccl_mesh_program_words(void *program,void *buffer,const uint64_t *at,uint32_t n,void *failures,uint64_t failure){
   for(uint32_t done=0;done<n;){
     @autoreleasepool {

@@ -128,7 +128,8 @@ struct ncclComm {
   uint64_t splits;
   struct op_entry *ops; int nops;
   /* its own queue and that queue's event, the value reserved on it; the programs not yet run; its control
-     allocation (its first word the failure word a timed-out GPU wait of its calls sets) and Metal buffer */
+     allocation (its first word the failure word a timed-out GPU wait of its calls sets, its second the
+     progress word: advance) and Metal buffer */
   void *queue,*event; uint64_t event_value;
   _Atomic int programs;
   _Atomic uint64_t *control; void *control_buffer;
@@ -634,12 +635,16 @@ static ncclResult_t stop_reason(struct ncclComm *c,const struct item *it,const c
 }
 /* The network gave the GPU what it waits for (a piece landed, a combine published): the bound starts again. */
 static void rebound(struct item *it){if(it->gpu)it->bound=now_ns()+GPU_WAIT_NS;}
+/* The network moved for the communicator (a part started, a request done): its progress word advances, which
+   starts the bound of every GPU wait on its words again (its programs may wait on parts the worker has not
+   reached yet: it takes them in issue order). */
+static void advance(struct ncclComm *c){atomic_fetch_add_explicit(c->control+1,1,memory_order_release);}
 /* Reaps every pending isend that is done (its ring slot free again). */
 static ncclResult_t reap(struct ncclComm *c,struct pending *sends,int *count){
   for(int i=0;i<*count;){
     int done=0,size=0,result=mesh_net_test(sends[i].request,&done,&size);
     if(result)return net_failure(c,result,"an isend");
-    if(done){sends[i]=sends[--*count];continue;}
+    if(done){sends[i]=sends[--*count];advance(c);continue;}
     i++;
   }
   return ncclSuccess;
@@ -649,6 +654,7 @@ static ncclResult_t await(struct ncclComm *c,void *request,size_t bytes,struct p
     int done=0,size=0,result=mesh_net_test(request,&done,&size);
     if(result)return net_failure(c,result,what);
     if(done){
+      advance(c);
       if(bytes<=INT32_MAX && (size_t)size!=bytes)return FAIL(c,ncclInvalidUsage,"%s: %d bytes arrived, %zu expected (the peer's count or datatype differs)",what,size,bytes);
       return ncclSuccess;
     }
@@ -838,7 +844,7 @@ static void progress(struct ncclComm *c){
         int done=0,size=0,result=mesh_net_test(x->request,&done,&size);
         if(result)f->status=net_failure(c,result,x->send?"a send":"a receive");
         else if(done){
-          x->state=2;f->remaining--;
+          x->state=2;f->remaining--;advance(c);
           count(x->call,x->send?SENT:RECEIVED,x->bytes);
           if(!x->send && x->bytes<=INT32_MAX && (size_t)size!=x->bytes)
             f->status=FAIL(c,ncclInvalidUsage,"a receive: %d bytes arrived, %zu expected (the peer's count or datatype differs)",size,x->bytes);
@@ -857,7 +863,7 @@ static void progress(struct ncclComm *c){
 static void start(struct ncclComm *c,struct item *it){
   ncclResult_t status=atomic_load(&c->broken)?ncclRemoteError:ncclSuccess;
   const uint64_t now=now_ns();
-  rebound(it);
+  rebound(it);advance(c);
   for(int i=0;i<it->n;i++)if(it->calls[i].tally && !it->calls[i].tally[STARTED])it->calls[i].tally[STARTED]=now;
   /* what it started at: the gate word, or the recorded points (events, words) */
   const struct launch *l=it->launch;
