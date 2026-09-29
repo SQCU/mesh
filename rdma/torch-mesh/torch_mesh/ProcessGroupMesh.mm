@@ -15,17 +15,24 @@
 // call's recorded point are reached.
 //   MPS tensors: a window tensor (its parts contiguous and adjacent in one allocation) is passed in
 // place; any other is copied by GPU blits on the MPS stream (MPSStream::copy) into a window allocation
-// of the call before it and out after it.  An all-gather's input is copied into its segment of the
-// output first and the call runs in place; a reduce-scatter runs in place on its input where the output
-// is that input's segment in the window, else on a copy of it, the segment copied out after.  The MPS
-// work enqueued before the call (the caller's and those copies) is declared the writer of every
-// allocation the call touches (the fence's value, ncclMeshMemUse), so the call waits for exactly that.
-// It runs on a deferred stream of its own (ncclMeshStreamDefer): the library's worker starts its
-// transfers once the GPU has reached that fence, and the call's GPU work after them (the combines as
-// the pieces arrive, its completion value) is kept until its Work's wait() encodes it on the current
-// MPS stream (ncclMeshStreamEncodeWait), the copies out after it.  No host synchronization and no other
-// queue sits between the MPS work before and after the call.  torch's functional collectives on MPS
-// tensors make their outputs window tensors (functional_* below).
+// of the call before it and out after it (an MPS tensor's storage is private to the GPU, so the NIC,
+// which reads and writes registered host memory, cannot reach it: PyTorch's MPS allocator,
+// aten/src/ATen/mps/MPSAllocator.mm _getPrivateAllocator, MTLStorageModePrivate).  An all-gather's input
+// is copied into its segment of the output first and the call runs in place; a reduce-scatter runs in
+// place on its input where the output is that input's segment in the window, else on a copy of it, the
+// segment copied out after.  The MPS work enqueued before the call (the caller's and those copies) is
+// declared the writer of every allocation the call touches (the fence's value, ncclMeshMemUse), so the
+// call waits for exactly that: the MPS kernels' plain stores reach the NIC only once their command
+// buffer completes, which the fence's event marks.  A published call (torch's functional collectives,
+// below: every place the call's own window allocation or a window tensor the functional op made for it)
+// has its copies made by libnccl-mesh's copy kernel instead, stored system-coherent, and a word
+// published after them (ncclMeshEncodeCopies): the call waits on that word (ncclMeshStreamWaitWord), not
+// on the command buffer's end.  It runs on a deferred stream of its own (ncclMeshStreamDefer): the
+// library's worker starts its transfers once the GPU has reached that fence or word, and the call's GPU
+// work after them (the combines as the pieces land, on the completion words the bridge sets; its
+// completion value) is kept until its Work's wait() encodes it on the current MPS stream
+// (ncclMeshStreamEncodeWait), the copies out after it.  No host synchronization and no other queue
+// sits between the MPS work before and after the call.
 //   CPU tensors: a tensor, or parts contiguous and adjacent, are the buffer itself (libnccl-mesh copies
 // memory outside the window in and out by GPU blits through a Metal buffer over its pages); parts that
 // are not are copied by the backend's own GPU blits, through Metal buffers over their pages, into a
@@ -96,9 +103,11 @@ static ncclDataType_t datatype(const at::Tensor &t) {
 }
 
 // The backend's own copies (libnccl-mesh counts its own): bytes the CPU copied (a non-contiguous CPU
-// tensor made contiguous, and back) and bytes GPU blits copied (an MPS tensor outside the window, CPU
-// parts, into and out of the call's window allocation).
-static std::atomic<uint64_t> cpu_copied{0}, gpu_copied{0};
+// tensor made contiguous, and back) and bytes the GPU copied (an MPS tensor outside the window, CPU
+// parts, into and out of the call's window allocation; a published call's copies); and its handoffs:
+// the MPS command buffers it committed, the fences (an event signalled at a command buffer's end) and
+// the words it published.
+static std::atomic<uint64_t> cpu_copied{0}, gpu_copied{0}, commits{0}, fences{0}, publications{0};
 
 static id<MTLDevice> device() {
   static id<MTLDevice> made = at::mps::is_available() ? at::mps::MPSDevice::getInstance()->device() : MTLCreateSystemDefaultDevice();
@@ -114,7 +123,7 @@ static uint64_t uptime() { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }  //
 struct Traced {
   std::string op, dtype;
   bool mps = false;
-  uint64_t bytes = 0, in_place = 0, blit_in = 0, blit_out = 0, enter = 0, issued = 0, fence = 0, reach = 0, resume = 0;
+  uint64_t bytes = 0, in_place = 0, blit_in = 0, blit_out = 0, enter = 0, issued = 0, fence = 0, reach = 0, resume = 0, word = 0, commits = 0;
   std::vector<int64_t> splits;
   void *tally = nullptr, *stream_event = nullptr;
   uint64_t stream_value = 0;
@@ -160,6 +169,11 @@ static id<MTLSharedEvent> fence_event() {
   return event;
 }
 static std::atomic<uint64_t> fence_next{0};
+// The current MPS stream's command buffer committed.
+static void commit(at::mps::MPSStream *s) {
+  s->synchronize(at::mps::SyncType::COMMIT);
+  commits++;
+}
 // A signal of the fence event after every command enqueued on the current MPS stream so far,
 // committed; its value.
 static uint64_t mps_fence() {
@@ -174,10 +188,23 @@ static uint64_t mps_fence() {
       note_gpu(s->commandBuffer(), value);
       note_reached(event, value);
     }
-    s->synchronize(at::mps::SyncType::COMMIT);
+    commit(s);
   });
+  fences++;
   return value;
 }
+// The word published calls' copies publish (8 bytes of a window allocation of its own), and the values
+// published so far: the MPS stream publishes them in order, so a later value covers the earlier ones.
+static uint64_t *publish_word() {
+  static uint64_t *word = [] {
+    void *memory = nullptr;
+    check(ncclMemAlloc(&memory, 64), nullptr, "ncclMemAlloc");
+    std::memset(memory, 0, 64);
+    return (uint64_t *)memory;
+  }();
+  return word;
+}
+static std::atomic<uint64_t> publish_next{0};
 
 // ---- window allocations ----
 // The closures that release a window allocation: an MPS tensor's at the fence after the MPS work so far,
@@ -196,6 +223,14 @@ static id<MTLBuffer> buffer_of(void *memory, size_t *offset) {
   check(ncclMeshMemBuffer(memory, &buffer, offset), nullptr, "ncclMeshMemBuffer");
   return (__bridge id<MTLBuffer>)buffer;
 }
+// The window tensors a functional collective made for the call it is issuing on this thread (no GPU work
+// has touched them), and the copies into them it wants made (a source tensor, a made tensor, a byte
+// offset into it): what makes a call published (Call::begin).
+struct Fresh {
+  std::vector<at::Tensor> made;
+  std::vector<std::tuple<at::Tensor, at::Tensor, size_t>> fills;
+};
+static thread_local Fresh fresh;
 // A window tensor: an MPS tensor whose MTLBuffer is the allocation's Metal buffer, or a CPU tensor of
 // its bytes; its storage's deleter is the allocation's release closure.
 static at::Tensor window_tensor(at::IntArrayRef sizes, at::ScalarType dtype, bool mps) {
@@ -318,6 +353,13 @@ class Call {
     return (int)places_.size() - 1;
   }
   void fill(const at::Tensor &from, int place, size_t at) { fills_.push_back({from, place, at}); }
+  // The copies a functional collective asked for (fresh.fills), each into the place whose tensor it made.
+  void fill_fresh() {
+    for (auto &f : fresh_.fills)
+      for (size_t i = 0; i < places_.size(); i++)
+        for (auto &t : places_[i].parts)
+          if (t.is_same(std::get<1>(f))) fills_.push_back({std::get<0>(f), (int)i, std::get<2>(f)});
+  }
   void drain(const at::Tensor &to, int place, size_t at) { drains_.push_back({to, place, at}); }
   bool mps() const { return mps_; }
   void *ptr(int i) const { return places_[i].pointer; }
@@ -326,6 +368,8 @@ class Call {
   // Every place's pointer: the call's window allocation for those not in place, and the blits in and
   // fills; on MPS the fence after them declared the writer of every allocation the call touches.
   void begin() {
+    fresh_ = std::move(fresh);
+    fresh = Fresh();
     size_t used = 0;
     for (auto &p : places_)
       if (p.scratch || !(mps_ ? window_place(p) : host_place(p))) { p.at = used; used += (p.bytes + 255) & ~(size_t)255; }
@@ -343,10 +387,16 @@ class Call {
       return;
     }
     auto *s = at::mps::getCurrentMPSStream();
+    fill_fresh();
+    if (published()) {
+      publish(s);
+      return;
+    }
     for (auto &p : places_)
       if (p.at != SIZE_MAX && p.in) mps_blits(s, p, true);
     for (auto &f : fills_) mps_segment(s, f, true);
     const uint64_t fence = fence_ = mps_fence();
+    commits_++;
     for (auto &p : places_)
       if (p.bytes) check(ncclMeshMemUse(p.pointer, p.bytes, (__bridge void *)fence_event(), fence, 1), nullptr, "ncclMeshMemUse");
     stream_ = pool_->acquire(true);
@@ -374,7 +424,7 @@ class Call {
         std::lock_guard<std::mutex> guard(trace.lock);
         trace.calls[traced_].reach = reach;
       }
-      s->synchronize(at::mps::SyncType::COMMIT);
+      commit(s);
       check(ncclMeshStreamEncodeWait(stream_, (__bridge void *)s->commandBuffer()), nullptr, "ncclMeshStreamEncodeWait");
       if (traced_ != SIZE_MAX) {  // a signal after the kept work: when the MPS stream passed it
         const uint64_t resume = ++fence_next;
@@ -384,8 +434,13 @@ class Call {
         std::lock_guard<std::mutex> guard(trace.lock);
         trace.calls[traced_].resume = resume;
       }
-      s->synchronize(at::mps::SyncType::COMMIT);
+      commit(s);
     });
+    commits_ += 2;
+    if (traced_ != SIZE_MAX) {
+      std::lock_guard<std::mutex> guard(trace.lock);
+      trace.calls[traced_].commits = commits_;
+    }
     for (auto &d : drains_) mps_segment(s, d, false);
     for (auto &p : places_)
       if (p.at != SIZE_MAX && p.out) mps_blits(s, p, false);
@@ -417,6 +472,8 @@ class Call {
     t.enter = enter_;
     t.issued = uptime();
     t.fence = fence_;
+    t.word = word_;
+    t.commits = commits_;
     ncclMeshGroupTally(&t.tally);
     if (stream_) {
       t.stream_event = (__bridge void *)[(__bridge id<MTLSharedEvent>)stream_->event retain];  // read at the dump, past the stream
@@ -440,6 +497,65 @@ class Call {
     int place;
     size_t at;
   };
+  // Whether the call is published: MPS, every place the call's own window allocation or a window tensor
+  // the functional op issuing it made (fresh.made), so the only GPU writes the NIC reads are this call's
+  // own copies.
+  bool published() const {
+    if (!mps_ || fresh_.made.empty()) return false;
+    for (auto &p : places_) {
+      if (p.at != SIZE_MAX) continue;
+      for (auto &t : p.parts) {
+        bool made = !t.nbytes();
+        for (auto &m : fresh_.made) made |= window_bytes(t) && window_bytes(m) && window_bytes(t) >= window_bytes(m) &&
+                                           window_bytes(t) + t.nbytes() <= window_bytes(m) + m.nbytes();
+        if (!made) return false;
+      }
+    }
+    return true;
+  }
+  // A published call's copies (the places not in place, and the fills) by libnccl-mesh's copy kernel on
+  // the MPS stream, then the word published after them; the command buffer committed; the call's
+  // stream waits on the word.  A non-contiguous source goes through a contiguous MPS copy first.
+  void publish(at::mps::MPSStream *s) {
+    std::vector<void *> dst, src;
+    std::vector<size_t> offset, bytes;
+    std::vector<at::Tensor> held;
+    auto add = [&](const at::Tensor &t, char *to) {
+      at::Tensor c = t.is_contiguous() ? t : t.contiguous();
+      if (!c.is_same(t)) gpu_copied += c.nbytes();
+      held.push_back(c);
+      dst.push_back(to);
+      src.push_back((__bridge void *)at::native::mps::getMTLBufferStorage(c));
+      offset.push_back(c.storage_offset() * c.element_size());
+      bytes.push_back(c.nbytes());
+      gpu_copied += c.nbytes();
+    };
+    for (auto &p : places_) {
+      if (p.at == SIZE_MAX || !p.in) continue;
+      size_t at = 0;
+      for (auto &t : p.parts)
+        if (t.nbytes()) { add(t, (char *)p.pointer + at); at += t.nbytes(); }
+    }
+    for (auto &f : fills_)
+      if (f.tensor.nbytes()) add(f.tensor, (char *)places_[f.place].pointer + f.at);
+    const uint64_t value = word_ = ++publish_next;
+    on_mps(s, [&] {
+      s->endKernelCoalescing();
+      check(ncclMeshEncodeCopies((__bridge void *)s->commandBuffer(), (int)dst.size(), dst.data(), src.data(), offset.data(), bytes.data(),
+                                 publish_word(), value), nullptr, "ncclMeshEncodeCopies");
+      if (tracing()) {  // the fence's GPU end and when it is seen, for the trace alone: nothing waits on it
+        fence_ = ++fence_next;
+        [s->commandBuffer() encodeSignalEvent:fence_event() value:fence_];
+        note_gpu(s->commandBuffer(), fence_);
+        note_reached(fence_event(), fence_);
+      }
+      commit(s);
+    });
+    commits_++;
+    publications++;
+    stream_ = pool_->acquire(true);
+    check(ncclMeshStreamWaitWord(stream_, publish_word(), value), nullptr, "ncclMeshStreamWaitWord");
+  }
   // CPU: the parts themselves where they are contiguous and adjacent (an empty part lies anywhere).
   bool host_place(Place &p) {
     char *first = nullptr, *end = nullptr;
@@ -552,7 +668,8 @@ class Call {
   std::shared_ptr<StreamPool> pool_;
   const char *op_;
   at::ScalarType dtype_;
-  uint64_t enter_, fence_ = 0;
+  uint64_t enter_, fence_ = 0, word_ = 0, commits_ = 0;
+  Fresh fresh_;
   size_t traced_ = SIZE_MAX;
   cudaStream_t stream_ = nullptr;
   std::vector<Place> places_;
@@ -1060,8 +1177,15 @@ static pybind11::dict counts() {
   d["library_input_waits"] = c.inputWaits;
   d["library_sent_bytes"] = c.sentBytes;
   d["library_received_bytes"] = c.receivedBytes;
+  d["library_gpu_event_waits"] = c.gpuEventWaits;
+  d["library_gpu_word_waits"] = c.gpuWordWaits;
+  d["library_host_word_waits"] = c.hostWordWaits;
+  d["library_commits"] = c.commits;
   d["backend_cpu_copy_bytes"] = cpu_copied.load();
   d["backend_gpu_copy_bytes"] = gpu_copied.load();
+  d["backend_commits"] = commits.load();
+  d["backend_fences"] = fences.load();
+  d["backend_published"] = publications.load();
   return d;
 }
 // The window allocator's records (ncclMeshMemRecords): address, bytes, freed, and each recorded point's
@@ -1181,7 +1305,7 @@ static void trace_dump() {
     out << "],\"enter_ns\":" << c.enter << ",\"issued_ns\":" << c.issued << ",\"fence\":" << c.fence << ",\"fence_reached_ns\":"
         << reached(fence, c.fence) << ",\"fence_gpu_ns\":" << gpu(c.fence) << ",\"stream_done_ns\":" << reached(c.stream_event, c.stream_value)
         << ",\"reach_gpu_ns\":" << gpu(c.reach) << ",\"resume\":" << c.resume << ",\"resume_ns\":" << reached(fence, c.resume)
-        << ",\"resume_gpu_ns\":" << gpu(c.resume) << ",\"library\":[";
+        << ",\"resume_gpu_ns\":" << gpu(c.resume) << ",\"word\":" << c.word << ",\"commits\":" << c.commits << ",\"library\":[";
     ncclMeshCounts_t counts[64];
     int n = 0;
     ncclMeshTallyCounts(c.tally, counts, 64, &n);
@@ -1191,7 +1315,9 @@ static void trace_dump() {
       out << (k ? "," : "") << "{\"start_ns\":" << time(t.startNs) << ",\"end_ns\":" << time(t.endNs) << ",\"arrived_ns\":" << time(t.arrivedNs)
           << ",\"sent\":" << t.sentBytes
           << ",\"received\":" << t.receivedBytes << ",\"host_waits\":" << t.hostWaits << ",\"input_waits\":" << t.inputWaits
-          << ",\"kernels\":" << t.gpuKernels << ",\"gpu_copy\":" << t.gpuCopyBytes << ",\"cpu_copy\":" << t.cpuCopyBytes << "}";
+          << ",\"kernels\":" << t.gpuKernels << ",\"gpu_copy\":" << t.gpuCopyBytes << ",\"cpu_copy\":" << t.cpuCopyBytes
+          << ",\"gpu_event_waits\":" << t.gpuEventWaits << ",\"gpu_word_waits\":" << t.gpuWordWaits << ",\"host_word_waits\":" << t.hostWordWaits
+          << ",\"commits\":" << t.commits << "}";
     }
     out << "]}\n";
   }
@@ -1207,7 +1333,10 @@ static void trace_dump() {
 // kernels are Functional.cpp's with the outputs made window tensors: all_reduce's clone, all_gather's
 // output and all_to_all's are the window's and the call runs on them in place; reduce_scatter's input
 // is copied into a window tensor and reduced there in place, the output its rank's segment (a view).
-// The work is registered on the output as Functional.cpp registers it, for wait_tensor.
+// Each op makes those tensors itself (fresh), and the copies into them are the call's (fills), so the
+// call is published (Call::published): the copy all_reduce's out-of-place result needs (Functional.cpp
+// clones its input) is the one copy, made system-coherent, and the transfers start on its word.  The
+// work is registered on the output as Functional.cpp registers it, for wait_tensor.
 static c10::intrusive_ptr<ProcessGroup> group_of(const c10::IValue &v) {
   return v.isString() ? resolve_process_group(v.toStringRef()) : v.toCustomClass<ProcessGroup>();
 }
@@ -1230,7 +1359,8 @@ static void functional_all_reduce(const c10::OperatorHandle &, torch::jit::Stack
   const std::string op = (*stack)[1].toStringRef();
   at::Tensor input = (*stack)[0].toTensor();
   torch::jit::drop(*stack, 3);
-  at::Tensor out = window_like(input.sizes(), input).copy_(input);
+  at::Tensor out = window_like(input.sizes(), input);
+  fresh = Fresh{{out}, {{input, out, 0}}};
   std::vector<at::Tensor> tensors{out};
   AllreduceOptions opts;
   opts.reduceOp = reduce_of(op);
@@ -1243,6 +1373,7 @@ static void functional_all_gather(const c10::OperatorHandle &, torch::jit::Stack
   at::Tensor input = (*stack)[0].toTensor().contiguous();
   torch::jit::drop(*stack, 3);
   at::Tensor out = window_like(rows(input.sizes(), input.size(0) * size), input);
+  fresh = Fresh{{out}, {}};
   register_work(out, group->_allgather_base(out, input));
   torch::jit::push(*stack, out);
 }
@@ -1253,7 +1384,8 @@ static void functional_reduce_scatter(const c10::OperatorHandle &, torch::jit::S
   at::Tensor input = (*stack)[0].toTensor();
   torch::jit::drop(*stack, 4);
   TORCH_CHECK(input.dim() && input.size(0) % size == 0, "mesh: reduce_scatter_tensor's first dimension is a multiple of the group size");
-  at::Tensor operand = window_like(input.sizes(), input).copy_(input);
+  at::Tensor operand = window_like(input.sizes(), input);
+  fresh = Fresh{{operand}, {{input, operand, 0}}};
   const int64_t each = input.size(0) / size;
   at::Tensor out = operand.narrow(0, group->getRank() * each, each);
   ReduceScatterOptions opts;
@@ -1274,6 +1406,7 @@ static void functional_all_to_all(const c10::OperatorHandle &, torch::jit::Stack
     for (auto v : out_splits) first += v;
   }
   at::Tensor out = window_like(input.dim() ? rows(input.sizes(), first) : std::vector<int64_t>{}, input);
+  fresh = Fresh{{out}, {}};
   register_work(out, group->alltoall_base(out, input, out_splits, in_splits));
   torch::jit::push(*stack, out);
 }
@@ -1282,7 +1415,8 @@ static void functional_broadcast(const c10::OperatorHandle &, torch::jit::Stack 
   const int64_t src = (*stack)[1].toInt();
   at::Tensor input = (*stack)[0].toTensor();
   torch::jit::drop(*stack, 3);
-  at::Tensor out = window_like(input.sizes(), input).copy_(input);
+  at::Tensor out = window_like(input.sizes(), input);
+  fresh = Fresh{{out}, {{input, out, 0}}};
   std::vector<at::Tensor> tensors{out};
   BroadcastOptions opts;
   opts.rootRank = src;
@@ -1296,6 +1430,7 @@ static void functional_all_gather_coalesced(const c10::OperatorHandle &, torch::
   for (auto &t : (*stack)[0].toTensorVector()) inputs.push_back(t.contiguous());
   torch::jit::drop(*stack, 3);
   for (auto &t : inputs) outs.push_back(window_like(rows(t.sizes(), t.size(0) * size), t));
+  fresh = Fresh{outs, {}};
   auto work = group->allgather_into_tensor_coalesced(outs, inputs);
   for (auto &t : outs) register_work(t, work);
   torch::jit::push(*stack, outs);
@@ -1306,12 +1441,16 @@ static void functional_reduce_scatter_coalesced(const c10::OperatorHandle &, tor
   const std::string op = (*stack)[1].toStringRef();
   std::vector<at::Tensor> inputs = (*stack)[0].toTensorVector(), operands, outs;
   torch::jit::drop(*stack, 4);
+  Fresh made;
   for (auto &t : inputs) {
     TORCH_CHECK(t.dim() && t.size(0) % size == 0, "mesh: reduce_scatter_tensor's first dimension is a multiple of the group size");
-    operands.push_back(window_like(t.sizes(), t).copy_(t));
+    operands.push_back(window_like(t.sizes(), t));
+    made.made.push_back(operands.back());
+    made.fills.emplace_back(t, operands.back(), 0);
     const int64_t each = t.size(0) / size;
     outs.push_back(operands.back().narrow(0, group->getRank() * each, each));
   }
+  fresh = std::move(made);
   ReduceScatterOptions opts;
   opts.reduceOp = reduce_of(op);
   auto work = group->reduce_scatter_tensor_coalesced(outs, operands, opts);
@@ -1323,7 +1462,13 @@ static void functional_all_reduce_coalesced(const c10::OperatorHandle &, torch::
   const std::string op = (*stack)[1].toStringRef();
   std::vector<at::Tensor> inputs = (*stack)[0].toTensorVector(), outs;
   torch::jit::drop(*stack, 3);
-  for (auto &t : inputs) outs.push_back(window_like(t.sizes(), t).copy_(t));
+  Fresh made;
+  for (auto &t : inputs) {
+    outs.push_back(window_like(t.sizes(), t));
+    made.made.push_back(outs.back());
+    made.fills.emplace_back(t, outs.back(), 0);
+  }
+  fresh = std::move(made);
   AllreduceCoalescedOptions opts;
   opts.reduceOp = reduce_of(op);
   auto work = group->allreduce_coalesced(outs, opts);
