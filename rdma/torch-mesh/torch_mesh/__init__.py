@@ -6,8 +6,12 @@ rank r's node nodes[r] in the bridge's link table, `links` a link-map file state
 the table as it stands); without them there is no group (ValueError on every rank alike).  A group made
 later (new_group, a DeviceMesh's) without options takes the world's, restricted to its ranks.
 links() is a snapshot of the table (epoch, the bridge's node, present, alpha/beta/stated/up per
-directed link); take_error() the first failure of a call issued earlier (a link lost, or the link
-map's epoch moved during it: revoked), once, else None.  Once a process
+directed link).  A failed call (a link lost, a bridge stalled, the link map's epoch moved during it:
+revoked) revokes the group's communicator; the backend raises it only once every rank has agreed on it
+(ncclMeshCommAgree, ULFM's MPI_Comm_agree), when the call is issued or at a later Work's wait.  agree()
+is that agreement on the default group, every rank calling it: (the first call that failed on any rank
+since the previous agreement, or None; this rank's link-table epoch); agreed() the last agreement made,
+by agree() or the error path: (how many so far, the failed call or None, the epoch).  Once a process
 group of the backend exists, torch's MPS factories (torch.empty, zeros, ones, full, rand, randn,
 tensor, their *_like forms, and Tensor.to onto "mps") make window tensors on that thread: tensors of
 the bridge's registered window, which the backend sends and receives in place, and whose release
@@ -106,10 +110,18 @@ def links(region=None):
     return _C.links(region or '')
 
 
-def take_error():
-    """The first failure of a call issued earlier since the last take, once; else None."""
+def agree():
+    """ULFM's MPI_Comm_agree on the default group, every rank calling it: (the first call that failed on
+    any rank since the previous agreement, or None; this rank's link-table epoch)."""
     from . import _C
-    return _C.take_error()
+    return _C.agree()
+
+
+def agreed():
+    """The last agreement this process made (by agree() or a call's error path): (how many so far, the
+    failed call or None, the epoch)."""
+    from . import _C
+    return _C.agreed()
 
 
 def records():

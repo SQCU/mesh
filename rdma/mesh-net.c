@@ -408,6 +408,14 @@ int mesh_net_alive(void *comm){
   struct net_comm_handle *c=comm;
   return c && atomic_load_explicit(&net_slot(c)->state,memory_order_acquire)==c->kind;
 }
+uint64_t mesh_net_slot(void *comm){
+  struct net_comm_handle *c=comm;
+  return ((uint64_t)c->index<<32)|c->generation;
+}
+int mesh_net_vacated(uint64_t slot){
+  struct mesh_net_comm *comm=mesh_net_comms(net.m)+(uint32_t)(slot>>32);
+  return atomic_load_explicit(&comm->state,memory_order_acquire)==MESH_NET_FREE || comm->generation!=(uint32_t)slot;
+}
 
 const struct mesh_net_v12 mesh_net_plugin={"mesh",mesh_net_init,mesh_net_devices,mesh_net_get_properties,mesh_net_listen,
   mesh_net_connect,mesh_net_accept,mesh_net_reg_mr,mesh_net_reg_mr_dma_buf,mesh_net_dereg_mr,mesh_net_isend,mesh_net_irecv,

@@ -23,9 +23,11 @@
    ncclMeshConfig_t (ncclCommInitRankConfig; no table, no communicator) and a split inherits.  Each call
    plans on one snapshot of it, read when its group ends, and records its epoch; plans are kept by
    (epoch, call); a call during which the epoch moves fails as a value (ncclRemoteError, revoked), and a
-   call whose plan needs a link that is down fails so at once; the next call plans on the new contents,
-   connecting again first where the bridge lost a connection.  Calls run as their plan's SEND / REDUCE
-   / COPY steps on the bridge's communicator sessions (mesh-net.h, NCCL's ncclNet_v12 model).
+   call whose plan needs a link that is down fails so at once.  A failed call revokes the communicator
+   (ULFM's MPI_Comm_revoke): the calls in flight fail, its connections are closed, so each peer's calls
+   with this rank fail too, and it makes no call until every rank has called ncclMeshCommAgree, which
+   agrees on the first failed call and makes the connections again.  Calls run as their plan's SEND /
+   REDUCE / COPY steps on the bridge's communicator sessions (mesh-net.h, NCCL's ncclNet_v12 model).
    ncclCommInitRankConfig connects this rank to every rank the table links it to, on the bridge link
    that reaches it.
    ncclCollConfig_t.algSelection names the planner's algorithms: "direct", "ring", "tree",
@@ -69,7 +71,7 @@
    completes only once its peer has posted the receive, so a send and a receive that wait on each
    other's peers belong in one group or on different streams).  ncclMeshStreamQuery is
    cudaStreamQuery.  A failed call still signals its completion value (the GPU is never left waiting);
-   its error is the communicator's ncclCommGetAsyncError (ncclMeshCommTakeError takes it).  ncclMeshStreamSynchronize waits on the host
+   its error is the communicator's ncclCommGetAsyncError until an agreement.  ncclMeshStreamSynchronize waits on the host
    for `value`.
 
    Not implemented (not exported): ncclCommRevoke, ncclCommShrink, ncclCommGetUniqueId,
@@ -800,8 +802,17 @@ typedef struct { ncclConfig_t base; void* links; const int* nodes; } ncclMeshCon
     NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, \
     NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, \
     NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT }, NULL, NULL }
-/* The first failure of a call on a stream since the last take (ncclSuccess: none), cleared. */
-ncclResult_t ncclMeshCommTakeError(ncclComm_t comm, ncclResult_t* result);
+/* ULFM's MPI_Comm_agree after a failure: every rank calls it (a collective of its own).  Once this
+   rank's calls are done, each rank's vote (its first failed call, whether its connections are whole,
+   its link table's map of the communicator) is flooded over the stated links [FloodSet, Lynch 1996
+   §6.2.1], again until every rank's map is the same.  *failed: the index of the first call that
+   failed on any rank since the last agreement (the calls issued on the communicator counted from 1;
+   0: none), *epoch: this rank's link-table epoch whose map every rank holds.  After a failure, or
+   where a rank's connections are not whole, every rank closes its connections and takes the
+   agreement's; the memory a failed call received into is held until the bridge has vacated its old
+   connections; the async error is cleared and the count starts again.  Every rank must answer by
+   MESH_NCCL_TIMEOUT (a rank that does not fails the agreement: there is no shrink). */
+ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t* failed, uint64_t* epoch);
 /* MPI_Allgatherv and MPI_Reduce_scatter: rank r's segment is counts[r] elements (counts: nranks
    entries, the same on every rank, each at least 1), the segments packed in rank order, so rank r's
    lies after the segments of the ranks before it.  ncclMeshAllGatherV sends counts[rank] elements of

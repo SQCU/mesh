@@ -101,4 +101,8 @@ int mesh_net_error(void);
 void mesh_net_comm_counts(void *comm,uint64_t counts[4]);
 /* Whether a send or receive comm is still connected: its session not lost. */
 int mesh_net_alive(void *comm);
+/* A comm's slot in the region's table (its index and generation), taken before it is closed, and
+   whether the bridge has vacated that slot since (nothing of the comm on the wire any more). */
+uint64_t mesh_net_slot(void *comm);
+int mesh_net_vacated(uint64_t slot);
 #endif

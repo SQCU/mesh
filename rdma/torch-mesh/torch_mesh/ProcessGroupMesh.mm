@@ -3,8 +3,10 @@
 // makes the communicator's unique id and hands it out through the group's store.  The communicator's
 // link map is the bridge's link table (ncclMeshConfig_t), which the group's options name (torch_mesh.
 // Options: the region, a link-map file stated into it, each rank's node).  The reductions are
-// libnccl-mesh's Metal kernels.  A call that fails after it was issued (a link lost, the link map's
-// epoch moved: revoked) is the communicator's error, which take_error() returns once.
+// libnccl-mesh's Metal kernels.  A failed call (a link lost, a bridge stalled, the link map's epoch
+// moved: revoked) revokes the communicator; the error path, a call's own failure when it is issued or an
+// earlier call's at a Work's wait, first agrees with every rank (ncclMeshCommAgree: ULFM's
+// MPI_Comm_agree), then raises the agreed failure; agree() is that agreement, agreed() the last one.
 //   Window tensors (window_tensor below; torch_mesh makes torch's MPS factories return them by
 // default): the bytes of a window allocation, whose one Metal buffer is the tensor's MTLBuffer.  The
 // tensor's release closure (its DataPtr's deleter) writes the allocation's retire point: a signal of
@@ -50,8 +52,19 @@
 
 namespace c10d {
 
+static std::pair<uint64_t, uint64_t> agree_on(ncclComm_t comm, const char *after);
+// A failure raised; a failure of the communicator (ncclRemoteError, ncclTimeout, ncclSystemError: the
+// network, a revoked call) only once every rank has agreed on it, the first failed call and each rank's
+// link-table epoch in its message.
 static void check(ncclResult_t result, ncclComm_t comm, const char *what) {
-  TORCH_CHECK(result == ncclSuccess, "mesh: ", what, ": ", ncclGetErrorString(result), ": ", ncclGetLastError(comm));
+  if (result == ncclSuccess) return;
+  const std::string cause = ncclGetLastError(comm);
+  if (comm && (result == ncclRemoteError || result == ncclTimeout || result == ncclSystemError)) {
+    auto agreed = agree_on(comm, " after the failure");
+    TORCH_CHECK(false, "mesh: ", what, ": ", ncclGetErrorString(result), ": ", cause, " [agreed by every rank: call ", agreed.first,
+                " since the previous agreement failed; this rank plans on its link-table epoch ", agreed.second, "]");
+  }
+  TORCH_CHECK(false, "mesh: ", what, ": ", ncclGetErrorString(result), ": ", cause);
 }
 
 static ncclDataType_t datatype(const at::Tensor &t) {
@@ -487,11 +500,12 @@ class Call {
 };
 
 // A call's Work: done at once for a CPU collective; else done once its stream reaches the call's value,
-// wait() waiting on the host (CPU) or ordering the current MPS stream after it (MPS), then copying back.
+// wait() waiting on the host (CPU) or ordering the current MPS stream after it (MPS), then copying back,
+// and raising (once every rank has agreed on it) an earlier call's failure the communicator holds.
 class WorkMesh : public Work {
  public:
-  WorkMesh(OpType type, std::vector<at::Tensor> outputs, std::shared_ptr<Call> call)
-      : Work(-1, type), outputs_(std::move(outputs)), call_(std::move(call)),
+  WorkMesh(OpType type, std::vector<at::Tensor> outputs, std::shared_ptr<Call> call, ncclComm_t comm)
+      : Work(-1, type), outputs_(std::move(outputs)), call_(std::move(call)), comm_(comm),
         future_(c10::make_intrusive<c10::ivalue::Future>(c10::ListType::create(c10::TensorType::get()))) {
     if (!call_->stream()) finish();
   }
@@ -505,6 +519,9 @@ class WorkMesh : public Work {
   bool isSuccess() const override { return true; }
   bool wait(std::chrono::milliseconds) override {
     if (call_) finish();
+    ncclResult_t failed = ncclSuccess;
+    if (comm_) ncclCommGetAsyncError(comm_, &failed);
+    check(failed, comm_, "a call issued earlier");
     return true;
   }
   c10::intrusive_ptr<c10::ivalue::Future> getFuture() override { return future_; }
@@ -520,12 +537,29 @@ class WorkMesh : public Work {
   }
   std::vector<at::Tensor> outputs_;
   std::shared_ptr<Call> call_;
+  ncclComm_t comm_;
   c10::intrusive_ptr<c10::ivalue::Future> future_;
 };
 
-// The communicators of the live groups, for take_error().
+// The communicators of the live groups in the order they were made (the default group's first).
 static std::mutex comms_lock;
 static std::vector<ncclComm_t> comms;
+// The last agreement this process made (the error path's or agree()'s): how many so far, the first failed
+// call it found (0: none) and this rank's link-table epoch.
+static struct {
+  std::mutex lock;
+  uint64_t count = 0, failed = 0, epoch = 0;
+} agreement;
+static std::pair<uint64_t, uint64_t> agree_on(ncclComm_t comm, const char *after) {
+  uint64_t failed = 0, epoch = 0;
+  const ncclResult_t result = ncclMeshCommAgree(comm, &failed, &epoch);
+  TORCH_CHECK(result == ncclSuccess, "mesh: ncclMeshCommAgree", after, ": ", ncclGetErrorString(result), ": ", ncclGetLastError(comm));
+  std::lock_guard<std::mutex> guard(agreement.lock);
+  agreement.count++;
+  agreement.failed = failed;
+  agreement.epoch = epoch;
+  return {failed, epoch};
+}
 
 class ProcessGroupMesh : public Backend {
  public:
@@ -636,7 +670,7 @@ class ProcessGroupMesh : public Backend {
   c10::intrusive_ptr<Work> allgather_into_tensor_coalesced(std::vector<at::Tensor> &outputs, std::vector<at::Tensor> &inputs,
                                                            const AllgatherOptions &opts) override {
     for (size_t i = 0; i < inputs.size(); i++) all_gather_single(outputs[i], inputs[i], opts)->wait();
-    return c10::make_intrusive<WorkMesh>(OpType::COALESCED, outputs, std::make_shared<Call>(inputs[0], false, streams_));
+    return c10::make_intrusive<WorkMesh>(OpType::COALESCED, outputs, std::make_shared<Call>(inputs[0], false, streams_), comm_);
   }
 
   // The root's list is the ranks' counts (MPI_Gatherv, MPI_Scatterv): equal, ncclGather or ncclScatter; else
@@ -725,7 +759,7 @@ class ProcessGroupMesh : public Backend {
   c10::intrusive_ptr<Work> reduce_scatter_tensor_coalesced(std::vector<at::Tensor> &outputs, std::vector<at::Tensor> &inputs,
                                                            const ReduceScatterOptions &opts) override {
     for (size_t i = 0; i < inputs.size(); i++) reduce_scatter_single(outputs[i], inputs[i], opts)->wait();
-    return c10::make_intrusive<WorkMesh>(OpType::COALESCED, outputs, std::make_shared<Call>(inputs[0], false, streams_));
+    return c10::make_intrusive<WorkMesh>(OpType::COALESCED, outputs, std::make_shared<Call>(inputs[0], false, streams_), comm_);
   }
 
   // Equal splits are ncclAlltoAll; others, grouped ncclSend/ncclRecv of each rank's rows.
@@ -808,7 +842,7 @@ class ProcessGroupMesh : public Backend {
     at::Tensor one = at::ones({1}, at::kFloat);
     check(ncclAllReduce(one.data_ptr(), one.data_ptr(), 1, ncclFloat32, ncclSum, comm_, nullptr), comm_, "barrier");
     std::vector<at::Tensor> none;
-    return c10::make_intrusive<WorkMesh>(OpType::BARRIER, none, std::make_shared<Call>(one, false, streams_));
+    return c10::make_intrusive<WorkMesh>(OpType::BARRIER, none, std::make_shared<Call>(one, false, streams_), comm_);
   }
 
  private:
@@ -831,7 +865,7 @@ class ProcessGroupMesh : public Backend {
   }
   c10::intrusive_ptr<Work> work(OpType type, std::vector<at::Tensor> &outputs, std::shared_ptr<Call> call, std::vector<int64_t> splits = {}) {
     call->traced(std::move(splits));
-    return c10::make_intrusive<WorkMesh>(type, outputs, std::move(call));
+    return c10::make_intrusive<WorkMesh>(type, outputs, std::move(call), comm_);
   }
   template <typename F> void group(F body) {
     check(ncclGroupStart(), comm_, "ncclGroupStart");
@@ -907,16 +941,24 @@ static pybind11::list records() {
   }
   return out;
 }
-// The first failure of a call issued earlier on any live group's communicator since the last take (its
-// message), else None; each failure is returned once.
-static pybind11::object take_error() {
-  std::lock_guard<std::mutex> guard(comms_lock);
-  for (auto comm : comms) {
-    ncclResult_t result = ncclSuccess;
-    check(ncclMeshCommTakeError(comm, &result), comm, "ncclMeshCommTakeError");
-    if (result != ncclSuccess) return pybind11::str(std::string(ncclGetErrorString(result)) + ": " + ncclGetLastError(comm));
+// ULFM's MPI_Comm_agree on the default group's communicator (the first made): every rank calls it; the
+// first call that failed on any rank since the previous agreement (None: none did) and this rank's
+// link-table epoch, on which every rank's table holds the same map of the group.
+static pybind11::tuple agree() {
+  ncclComm_t comm;
+  {
+    std::lock_guard<std::mutex> guard(comms_lock);
+    TORCH_CHECK(!comms.empty(), "mesh: agree() needs a process group of the backend");
+    comm = comms[0];
   }
-  return pybind11::none();
+  auto agreed = agree_on(comm, "");
+  return pybind11::make_tuple(agreed.first ? pybind11::object(pybind11::int_(agreed.first)) : pybind11::none(), agreed.second);
+}
+// The last agreement this process made: (how many so far, the first failed call or None, the epoch).
+static pybind11::tuple agreed() {
+  std::lock_guard<std::mutex> guard(agreement.lock);
+  return pybind11::make_tuple(agreement.count, agreement.failed ? pybind11::object(pybind11::int_(agreement.failed)) : pybind11::none(),
+                              agreement.epoch);
 }
 // A snapshot of the link table of `region` (empty: MESH_REGION): (epoch, the bridge's node, present [16],
 // links [16, 16, 4] of alpha, beta, stated, up).
@@ -1021,6 +1063,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("records", &c10d::records);
   m.def("address", &c10d::address);
   m.def("trace_dump", &c10d::trace_dump);
-  m.def("take_error", &c10d::take_error);
+  m.def("agree", &c10d::agree);
+  m.def("agreed", &c10d::agreed);
   m.def("links", &c10d::links);
 }
