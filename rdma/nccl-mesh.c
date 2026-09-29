@@ -303,6 +303,10 @@ static ncclResult_t connect_ranks(struct ncclComm *c,uint64_t key,const unsigned
     done=1;
     for(int p=0;p<c->nranks && !status;p++)if(want[p])for(int ch=0;ch<CHANNELS && !status;ch++){
       struct peer *e=peers+p;
+      /* one made in a session that has since ended (a bridge resuming from a stop takes the connects its
+         socket still holds, then finds the session over) is withdrawn and made again on the next */
+      if(e->send[ch] && !mesh_net_alive(e->send[ch])){mesh_net_close_send(e->send[ch]);e->send[ch]=NULL;}
+      if(e->recv[ch] && !mesh_net_alive(e->recv[ch])){mesh_net_close_recv(e->recv[ch]);e->recv[ch]=NULL;}
       for(int l=0;l<links && !e->send[ch] && !status;l++){
         size_t at=((size_t)p*CHANNELS+(size_t)ch)*(size_t)links+(size_t)l;
         unsigned char handle[MESH_NET_HANDLE_BYTES]={0};memcpy(handle,targets+at,sizeof targets[at]);
