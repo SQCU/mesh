@@ -579,14 +579,18 @@ class ProcessGroupMesh : public Backend {
     return work(OpType::REDUCE, tensors, call);
   }
 
+  // The list's tensors are the ranks' counts (MPI_Allgatherv): equal, ncclAllGather; else the planner's cut.
   c10::intrusive_ptr<Work> allgather(std::vector<std::vector<at::Tensor>> &outputs, std::vector<at::Tensor> &inputs,
                                      const AllgatherOptions &) override {
     TORCH_CHECK(inputs.size() == 1 && outputs.size() == 1 && (int)outputs[0].size() == getSize(), "mesh: allgather takes one tensor and a list of world_size");
+    std::vector<size_t> counts = numels(outputs[0]);
+    TORCH_CHECK(inputs[0].numel() == (int64_t)counts[getRank()], "mesh: all_gather's input is this rank's tensor of the list: ", inputs[0].numel(),
+                " elements, the list's ", counts[getRank()]);
     auto call = start(inputs[0], "all_gather");
     int in = call->add(inputs[0], true, false), out = call->add(outputs[0], false, true);
     call->begin();
-    check(ncclAllGather(call->ptr(in), call->ptr(out), inputs[0].numel(), datatype(inputs[0]), comm_, call->stream()), comm_, "ncclAllGather");
-    return work(OpType::ALLGATHER, outputs[0], call);
+    check(ncclMeshAllGatherV(call->ptr(in), call->ptr(out), counts.data(), datatype(inputs[0]), comm_, call->stream()), comm_, "ncclMeshAllGatherV");
+    return work(OpType::ALLGATHER, outputs[0], call, uneven(counts));
   }
 
   c10::intrusive_ptr<Work> all_gather_single(at::Tensor &output, at::Tensor &input, const AllgatherOptions &) override {
@@ -605,18 +609,33 @@ class ProcessGroupMesh : public Backend {
     return c10::make_intrusive<WorkMesh>(OpType::COALESCED, outputs, std::make_shared<Call>(inputs[0], false, streams_));
   }
 
+  // The root's list is the ranks' counts (MPI_Gatherv, MPI_Scatterv): equal, ncclGather or ncclScatter; else
+  // grouped ncclSend/ncclRecv of each rank's own, as libnccl-mesh lowers those two.
   c10::intrusive_ptr<Work> gather(std::vector<std::vector<at::Tensor>> &outputs, std::vector<at::Tensor> &inputs,
                                   const GatherOptions &opts) override {
     TORCH_CHECK(inputs.size() == 1, "mesh: gather takes one tensor");
     const bool root = getRank() == opts.rootRank;
     TORCH_CHECK(!root || (outputs.size() == 1 && (int)outputs[0].size() == getSize()), "mesh: gather's root takes a list of world_size");
+    std::vector<size_t> counts = root ? numels(outputs[0]) : std::vector<size_t>{};
+    TORCH_CHECK(!root || inputs[0].numel() == (int64_t)counts[getRank()], "mesh: gather's input is the root's tensor of its list");
     auto call = start(inputs[0], "gather");
     int in = call->add(inputs[0], true, false), out = root ? call->add(outputs[0], false, true) : -1;
     call->begin();
-    check(ncclGather(call->ptr(in), root ? call->ptr(out) : nullptr, inputs[0].numel(), datatype(inputs[0]), (int)opts.rootRank, comm_,
-                     call->stream()), comm_, "ncclGather");
+    const ncclDataType_t type = datatype(inputs[0]);
+    if (!root || uneven(counts).empty())
+      check(ncclGather(call->ptr(in), root ? call->ptr(out) : nullptr, inputs[0].numel(), type, (int)opts.rootRank, comm_, call->stream()), comm_,
+            "ncclGather");
+    else
+      group([&] {
+        check(ncclSend(call->ptr(in), inputs[0].numel(), type, (int)opts.rootRank, comm_, call->stream()), comm_, "ncclSend");
+        size_t at = 0;
+        for (int r = 0; r < getSize(); r++) {
+          check(ncclRecv((char *)call->ptr(out) + at, counts[r], type, r, comm_, call->stream()), comm_, "ncclRecv");
+          at += counts[r] * inputs[0].element_size();
+        }
+      });
     std::vector<at::Tensor> result = root ? outputs[0] : std::vector<at::Tensor>{};
-    return work(OpType::GATHER, result, call);
+    return work(OpType::GATHER, result, call, uneven(counts));
   }
 
   c10::intrusive_ptr<Work> scatter(std::vector<at::Tensor> &outputs, std::vector<std::vector<at::Tensor>> &inputs,
@@ -624,24 +643,41 @@ class ProcessGroupMesh : public Backend {
     TORCH_CHECK(outputs.size() == 1, "mesh: scatter takes one tensor");
     const bool root = getRank() == opts.rootRank;
     TORCH_CHECK(!root || (inputs.size() == 1 && (int)inputs[0].size() == getSize()), "mesh: scatter's root takes a list of world_size");
+    std::vector<size_t> counts = root ? numels(inputs[0]) : std::vector<size_t>{};
+    TORCH_CHECK(!root || outputs[0].numel() == (int64_t)counts[getRank()], "mesh: scatter's output is the root's tensor of its list");
     auto call = start(outputs[0], "scatter");
     int out = call->add(outputs[0], false, true), in = root ? call->add(inputs[0], true, false) : -1;
     call->begin();
-    check(ncclScatter(root ? call->ptr(in) : nullptr, call->ptr(out), outputs[0].numel(), datatype(outputs[0]), (int)opts.rootRank, comm_,
-                      call->stream()), comm_, "ncclScatter");
-    return work(OpType::SCATTER, outputs, call);
+    const ncclDataType_t type = datatype(outputs[0]);
+    if (!root || uneven(counts).empty())
+      check(ncclScatter(root ? call->ptr(in) : nullptr, call->ptr(out), outputs[0].numel(), type, (int)opts.rootRank, comm_, call->stream()), comm_,
+            "ncclScatter");
+    else
+      group([&] {
+        size_t at = 0;
+        for (int r = 0; r < getSize(); r++) {
+          check(ncclSend((char *)call->ptr(in) + at, counts[r], type, r, comm_, call->stream()), comm_, "ncclSend");
+          at += counts[r] * outputs[0].element_size();
+        }
+        check(ncclRecv(call->ptr(out), outputs[0].numel(), type, (int)opts.rootRank, comm_, call->stream()), comm_, "ncclRecv");
+      });
+    return work(OpType::SCATTER, outputs, call, uneven(counts));
   }
 
+  // The list's tensors are the ranks' counts (MPI_Reduce_scatter): equal, ncclReduceScatter; else the planner's cut.
   c10::intrusive_ptr<Work> reduce_scatter(std::vector<at::Tensor> &outputs, std::vector<std::vector<at::Tensor>> &inputs,
                                           const ReduceScatterOptions &opts) override {
     TORCH_CHECK(outputs.size() == 1 && inputs.size() == 1 && (int)inputs[0].size() == getSize(), "mesh: reduce_scatter takes one tensor and a list of world_size");
+    std::vector<size_t> counts = numels(inputs[0]);
+    TORCH_CHECK(outputs[0].numel() == (int64_t)counts[getRank()], "mesh: reduce_scatter's output is this rank's tensor of the list: ",
+                outputs[0].numel(), " elements, the list's ", counts[getRank()]);
     auto call = start(outputs[0], "reduce_scatter");
     int out = call->add(outputs[0], false, true), in = call->add(inputs[0], true, false);
     call->begin();
-    reduce_call("ncclReduceScatter", opts.reduceOp, outputs[0], [&](ncclRedOp_t op) {
-      return ncclReduceScatter(call->ptr(in), call->ptr(out), outputs[0].numel(), datatype(outputs[0]), op, comm_, call->stream());
+    reduce_call("ncclMeshReduceScatterV", opts.reduceOp, outputs[0], [&](ncclRedOp_t op) {
+      return ncclMeshReduceScatterV(call->ptr(in), call->ptr(out), counts.data(), datatype(outputs[0]), op, comm_, call->stream());
     });
-    return work(OpType::REDUCE_SCATTER, outputs, call);
+    return work(OpType::REDUCE_SCATTER, outputs, call, uneven(counts));
   }
 
   c10::intrusive_ptr<Work> reduce_scatter_single(at::Tensor &output, at::Tensor &input, const ReduceScatterOptions &opts) override {
@@ -751,6 +787,17 @@ class ProcessGroupMesh : public Backend {
 
   // A collective's call: synchronous on CPU tensors, on a stream of its own on MPS tensors.
   std::shared_ptr<Call> start(const at::Tensor &like, const char *op) { return std::make_shared<Call>(like, false, streams_, op); }
+  // A list's element counts; uneven: those counts where they differ (the trace's splits), else none.
+  static std::vector<size_t> numels(const std::vector<at::Tensor> &list) {
+    std::vector<size_t> counts;
+    for (auto &t : list) counts.push_back((size_t)t.numel());
+    return counts;
+  }
+  static std::vector<int64_t> uneven(const std::vector<size_t> &counts) {
+    for (auto c : counts)
+      if (c != counts[0]) return std::vector<int64_t>(counts.begin(), counts.end());
+    return {};
+  }
   c10::intrusive_ptr<Work> work(OpType type, std::vector<at::Tensor> &outputs, std::shared_ptr<Call> call, std::vector<int64_t> splits = {}) {
     call->traced(std::move(splits));
     return c10::make_intrusive<WorkMesh>(type, outputs, std::move(call));
