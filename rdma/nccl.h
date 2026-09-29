@@ -19,7 +19,8 @@
    region (default /mesh0).  The collectives are planned by mesh-collective.h's one planner
    (mesh_collective_choose / _plan) over the link map, an operand whose shape is fixed and whose
    contents vary: the bridge's link table (mesh-dataflow.h, ncclMeshLinksAttach) of stated nodes and
-   per directed link a stated alpha-beta cost and an up as the link's node observes it (this node's
+   per directed link a stated alpha-beta cost (its beta, with the bridges' estimator on, mesh-flow -E, as
+   the node it leads into estimates it) and an up as the link's node observes it (this node's
    bridge its own links, every other node's bridge its links in the reports the bridges pass on; a link
    no report names is down, whatever is stated), which the communicator takes through
    ncclMeshConfig_t (ncclCommInitRankConfig; no table, no communicator) and a split inherits.  Each call

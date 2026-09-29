@@ -612,7 +612,7 @@ static void *link_run(void *argument){
 #define NET_DISCARD (UINT32_MAX-1)
 #define NET_HEARTBEAT_NS UINT64_C(200000000)
 #define NET_SILENCE_NS UINT64_C(2000000000)
-enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT, NET_LINKS };
+enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT, NET_LINKS, NET_BETA };
 /* One control message.  CONNECT: `key` the listen it names, `from` the connecting comm.  ACCEPT: `from`
    the receiving comm made for `to`.  RTS: send request `sequence` of `from`, `size` its bytes,
    extent/phase where its registration regions end.  CREDIT: a chunk of that request, `offset` into it
@@ -623,7 +623,9 @@ enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT,
    down, observed).  LINKS: node `from`'s report, sequence `sequence`, its links' up a bit a node in
    key, size, extent, phase, offset (NET_LINK_NODES: a table of at most 320 nodes); each bridge sends its own node's whenever its sessions
    pair or end, every newer one it takes on to its other peers, and every one it holds to a peer when
-   their session pairs (mesh-dataflow.h: a link no report names is down). */
+   their session pairs (mesh-dataflow.h: a link no report names is down).  BETA: node `from`'s estimate,
+   sequence `sequence`, of link `key` -> `from`'s beta, the float's bits in `size` (-E, below), passed
+   on as reports are. */
 struct net_message { uint32_t kind,from,from_generation,to,to_generation,flags; int32_t tag,error; uint64_t key,sequence,size,extent,phase,offset; };
 _Static_assert(sizeof(struct net_message)==80,"net_message");
 /* A comm's bridge side, its link's session thread's alone: requests taken; a receive comm's requests
@@ -659,6 +661,13 @@ struct net_session {
   uint64_t bell,scanned,reaped,strays,heard,said;
   /* the link reports sent to the peer: link_news when last looked, each node's sequence sent */
   uint64_t news,*sent;
+  /* the estimator's (-E, estimate_observe): the receives' busy period open (its start, the bytes landed
+     in it), the least-squares state of t = a + b x (x MB, t us) and its prior's trace, the observations
+     since it last moved the link's beta, its step and the sign of its last move; estimate_news when last
+     looked and each estimate's sequence sent to the peer (source x observer) */
+  int period; uint64_t period_start,period_bytes;
+  double theta[2],P[3],trace,step; uint32_t observed; int moved;
+  uint64_t estimate_seen,*estimates_sent;
 };
 /* The link table beside the region (mesh-dataflow.h): the sessions write their links' up and down and
    the reports they take; link_news moves whenever a report this bridge holds does, and wakes every
@@ -679,6 +688,95 @@ static void net_links_moved(void){
     atomic_fetch_add_explicit(bell,1,memory_order_release);
     os_sync_wake_by_address_any(bell,sizeof *bell,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
   }
+}
+
+/* ---- the link's rate, estimated (-E): the table's third writer ----
+   Each session estimates the beta of its link into this node from its receives: a busy period opens when
+   a chunk of a receive is posted and granted with none outstanding and closes when the last outstanding
+   one lands (both ends are ready from its grant on, so it is wire time, not either end's lateness); a
+   period of at least ESTIMATE_BYTES is one observation (x its MB, t its us) of t = a + b x, fitted by
+   recursive least squares with forgetting ESTIMATE_FORGET [Haykin 2014, Table 10.1], the covariance's
+   trace capped at its prior's [Goodwin & Sin 1984] (rdma/allocate.py's Allocator), the prior the link's
+   stated alpha and beta.  After ESTIMATE_MIN observations an estimate outside ESTIMATE_BAND of the
+   table's beta (a relative accuracy the estimate stops at: inside it nothing moves) moves the table's
+   beta toward it by the step, which halves (to 1/8 at least) each time the moves change direction (it
+   oscillated); a move writes the link's beta into the table (an edit of the stated beta, the link's
+   presence and alpha as stated) and passes it to every peer (BETA), each bridge applying the newest of
+   each link's observer, so every table holds the observer's estimate.  design/heterogeneity.md R11: a
+   robust online loop, a smaller step once it oscillates, a relative accuracy it stops at, a move only
+   where it changes the modelled time by more than the band. */
+#define ESTIMATE_BYTES (UINT64_C(1)<<20)
+#define ESTIMATE_FORGET 0.98
+#define ESTIMATE_MIN 8
+#define ESTIMATE_BAND 0.1
+static int estimating;
+static uint32_t estimate_node;
+struct estimate { uint64_t sequence; float beta; };
+static struct estimate *estimates;
+static pthread_mutex_t estimates_lock=PTHREAD_MUTEX_INITIALIZER;
+static uint64_t estimate_sequence;
+static _Atomic uint64_t estimate_news;
+struct set_beta { uint32_t source,observer; float beta; };
+static void estimate_edit(struct mesh_link_contents *c,const void *argument){
+  const struct set_beta *b=argument;
+  struct mesh_link_state *l=mesh_link_at(c,b->source,b->observer);
+  if(l->stated)l->beta=b->beta;
+}
+/* An estimate of link source -> observer held (where newer than the one held) and written into the
+   table; 1 where it was newer. */
+static int estimate_hold(uint32_t source,uint32_t observer,uint64_t sequence,float beta){
+  if(!link_table || source>=link_table->nodes || observer>=link_table->nodes)return 0;
+  pthread_mutex_lock(&estimates_lock);
+  struct estimate *e=estimates+(size_t)source*link_table->nodes+observer;
+  int newer=sequence>e->sequence;
+  if(newer){e->sequence=sequence;e->beta=beta;}
+  pthread_mutex_unlock(&estimates_lock);
+  if(!newer)return 0;
+  if(mesh_link_table_write(link_table,estimate_edit,&(struct set_beta){source,observer,beta}))net_links_moved();
+  atomic_fetch_add_explicit(&estimate_news,1,memory_order_release);
+  return 1;
+}
+/* The table's beta of link source -> observer now (0: not stated). */
+static float estimate_stated(uint32_t source,uint32_t observer){
+  struct mesh_link_contents *c=mesh_link_contents_new(link_table->nodes);
+  if(!c)return 0;
+  mesh_link_table_read(link_table,c);
+  const struct mesh_link_state *l=mesh_link_at(c,source,observer);
+  float beta=l->stated?l->beta:0;
+  free(c);
+  return beta;
+}
+/* The estimator's prior from the link's stated alpha and beta, at a session's pairing. */
+static void estimate_start(struct net_session *s){
+  s->period=0;s->observed=0;s->moved=0;s->step=1;
+  struct mesh_link_contents *c=link_table?mesh_link_contents_new(link_table->nodes):NULL;
+  if(!c)return;
+  mesh_link_table_read(link_table,c);
+  const struct mesh_link_state *l=mesh_link_at(c,s->provider.peer,estimate_node);
+  const double a=l->stated?l->alpha:20,b=l->stated?l->beta*1e3:100;
+  free(c);
+  s->theta[0]=a;s->theta[1]=b;s->P[0]=a*a+100;s->P[1]=0;s->P[2]=b*b/4;s->trace=s->P[0]+s->P[2];
+}
+static void estimate_observe(struct net_session *s,uint64_t bytes,uint64_t ns){
+  if(bytes<ESTIMATE_BYTES || !link_table)return;
+  const double x=(double)bytes/1e6,t=(double)ns/1e3,lambda=ESTIMATE_FORGET;
+  double p00=s->P[0],p01=s->P[1],p11=s->P[2];
+  const double pi0=p00+p01*x,pi1=p01+p11*x,den=lambda+pi0+pi1*x,k0=pi0/den,k1=pi1/den,e=t-s->theta[0]-s->theta[1]*x;
+  s->theta[0]+=k0*e;s->theta[1]+=k1*e;
+  p00=(p00-k0*pi0)/lambda;p01=(p01-k0*pi1)/lambda;p11=(p11-k1*pi1)/lambda;
+  if(p00+p11>s->trace){const double f=s->trace/(p00+p11);p00*=f;p01*=f;p11*=f;}
+  s->P[0]=p00;s->P[1]=p01;s->P[2]=p11;
+  const double beta=s->theta[1]/1e3,stated=estimate_stated(s->provider.peer,estimate_node);
+  if(++s->observed<ESTIMATE_MIN || beta<=0 || stated<=0 || fabs(beta-stated)<=ESTIMATE_BAND*stated)return;
+  const int sign=beta>stated?1:-1;
+  if(s->moved && sign!=s->moved)s->step=fmax(s->step/2,1.0/8);
+  s->moved=sign;s->observed=0;
+  pthread_mutex_lock(&estimates_lock);
+  const uint64_t sequence=++estimate_sequence;
+  pthread_mutex_unlock(&estimates_lock);
+  const float next=(float)(stated+s->step*(beta-stated));
+  fprintf(stderr,"estimate: link %u -> %u beta %.4f ns/B (fit %.4f, stated %.4f, step %.3f)\n",s->provider.peer,estimate_node,next,beta,stated,s->step);
+  estimate_hold(s->provider.peer,estimate_node,sequence,next);
 }
 static void net_nap(uint64_t ns){for(uint64_t end=net_now()+ns;!stop && net_now()<end;)poll(NULL,0,10);}
 /* The next cut after `at`: a multiple of the chunk, or where either end's registration region ends
@@ -954,6 +1052,31 @@ static void net_publish(struct net_session *s){
     s->sent[v]=sequence;
   }
 }
+/* Every estimate newer than the one last sent to this session's peer, sent (the peer's own excepted). */
+static void net_publish_estimates(struct net_session *s){
+  const uint32_t n=link_table->nodes;
+  for(uint32_t source=0;source<n && !s->failed;source++)for(uint32_t observer=0;observer<n && !s->failed;observer++){
+    if(observer==s->provider.peer)continue;
+    pthread_mutex_lock(&estimates_lock);
+    const struct estimate e=estimates[(size_t)source*n+observer];
+    pthread_mutex_unlock(&estimates_lock);
+    uint64_t *sent=s->estimates_sent+(size_t)source*n+observer;
+    if(e.sequence<=*sent)continue;
+    uint32_t bits;memcpy(&bits,&e.beta,sizeof bits);
+    net_emit(s,(struct net_message){.kind=NET_BETA,.from=observer,.key=source,.sequence=e.sequence,.size=bits});
+    *sent=e.sequence;
+  }
+}
+/* A peer's estimate: the peer holds it (not sent back), and, where newer, held, written and passed on. */
+static void net_estimated(struct net_session *s,const struct net_message *message){
+  if(!link_table || message->from>=link_table->nodes || message->key>=link_table->nodes)return;
+  const uint32_t n=link_table->nodes,bits=(uint32_t)message->size;
+  float beta;memcpy(&beta,&bits,sizeof beta);
+  uint64_t *sent=s->estimates_sent+(size_t)message->key*n+message->from;
+  if(message->sequence>*sent)*sent=message->sequence;
+  if(isfinite(beta) && beta>0 && estimate_hold((uint32_t)message->key,message->from,message->sequence,beta))
+    fprintf(stderr,"estimate: link %u -> %u beta %.4f ns/B (node %u's)\n",(uint32_t)message->key,message->from,beta,message->from);
+}
 /* A peer's report: the peer holds it (not sent back), and, where newer, applied and passed on. */
 static void net_links(struct net_session *s,const struct net_message *message){
   const uint64_t up[5]={message->key,message->size,message->extent,message->phase,message->offset};
@@ -977,6 +1100,7 @@ static void net_receive(struct net_session *s,const struct net_message *message)
   case NET_CLOSE: net_closed(s,message); break;
   case NET_HEARTBEAT: break;
   case NET_LINKS: net_links(s,message); break;
+  case NET_BETA: if(estimates)net_estimated(s,message); break;
   default: s->failed=EPROTO;
   }
 }
@@ -1014,6 +1138,7 @@ static int net_post(struct net_session *s){
     int error=ibv_post_recv(s->provider.queues[0].pair,&request,&bad);
     if(error)return error<0?-error:error;
     s->receive_chunks[s->receive_chunk_tail++%s->chunk_slots]=(struct net_chunk){s->receive_post,frames,length,span};
+    if(estimating && !s->period){s->period=1;s->period_start=net_now();s->period_bytes=0;}
     s->receive_outstanding+=frames;
     net_emit(s,(struct net_message){.kind=NET_CREDIT,.to=t->peer,.to_generation=t->peer_generation,.from=t->comm,.from_generation=t->generation,
       .sequence=t->sequence,.offset=t->cursor,.size=length});
@@ -1056,12 +1181,14 @@ static int net_complete(struct net_session *s,int *busy){
     struct net_chunk chunk=s->receive_chunks[s->receive_chunk_head++%s->chunk_slots];
     s->receive_outstanding-=chunk.frames;
     if(chunk.transfer==NET_NONE)continue;
+    s->period_bytes+=chunk.length;
     struct net_transfer *t=s->receives+chunk.transfer%NET_RECEIVES;
     if((t->landed+=chunk.length)<t->size)continue;
     struct mesh_net_comm *comm=net_comm_at(s,t->comm,t->generation);
     if(comm)net_end(s,comm,net_state(comm,t->comm),t->slot,0,t->size);
   }
   while(s->receive_head!=s->receive_post && s->receives[s->receive_head%NET_RECEIVES].landed==s->receives[s->receive_head%NET_RECEIVES].size)s->receive_head++;
+  if(s->period && !s->receive_outstanding){s->period=0;estimate_observe(s,s->period_bytes,net_now()-s->period_start);}
   *busy|=count>0;
   return 0;
 }
@@ -1255,6 +1382,8 @@ static void net_serve(struct net_session *s){
     if(now-s->said>NET_HEARTBEAT_NS)net_emit(s,(struct net_message){.kind=NET_HEARTBEAT});
     uint64_t news=atomic_load_explicit(&link_news,memory_order_acquire);
     if(news!=s->news){s->news=news;net_publish(s);}
+    uint64_t estimated=atomic_load_explicit(&estimate_news,memory_order_acquire);
+    if(estimates && estimated!=s->estimate_seen){s->estimate_seen=estimated;net_publish_estimates(s);}
     if(bell!=s->bell || now-s->scanned>1000000){busy|=bell!=s->bell;s->bell=bell;s->scanned=now;net_scan(s);}
     if(now-s->reaped>500000000){s->reaped=now;net_reap(s);}
     if(!s->failed && (error=net_post(s)))s->failed=error;
@@ -1286,9 +1415,15 @@ static void *net_session_run(void *argument){
     atomic_store_explicit(&s->counts->code,0,memory_order_relaxed);
     atomic_fetch_add_explicit(&s->counts->sessions,1,memory_order_relaxed);
     atomic_store_explicit(&s->counts->phase,MESH_PAIRED,memory_order_release);
-    /* the new peer is sent every report this bridge holds, then each newer one */
+    /* the new peer is sent every report this bridge holds, then each newer one; every estimate too, and
+       this session's estimator starts from the link's stated cost */
     if(link_table)memset(s->sent,0,link_table->nodes*sizeof *s->sent);
     s->news=atomic_load_explicit(&link_news,memory_order_acquire)-1;
+    if(estimates){
+      memset(s->estimates_sent,0,(size_t)link_table->nodes*link_table->nodes*sizeof *s->estimates_sent);
+      s->estimate_seen=atomic_load_explicit(&estimate_news,memory_order_acquire)-1;
+      if(estimating)estimate_start(s);
+    }
     if(link_table && mesh_link_table_observe(link_table,s->provider.peer,1)>0)net_links_moved();
     net_serve(s);
     int32_t error=stop?ECANCELED:s->failed?s->failed:EIO;
@@ -1336,6 +1471,8 @@ int main(int argc,char **argv){
     /* -N the link table's nodes (the configured link map's: its node ids below it); without it, the
        largest node this bridge's configuration names (itself, its links' peers) and one */
     else if(!strcmp(argv[i],"-N") && i+1<argc){char *end;unsigned long n=strtoul(argv[++i],&end,10);if(*end || !n || n>NET_LINK_NODES)die("link table nodes (-N, at most 320)");table_nodes=(uint32_t)n;}
+    /* -E: estimate the beta of each link into this node from its receives (the table's third writer) */
+    else if(!strcmp(argv[i],"-E"))estimating=1;
     else if(!strcmp(argv[i],"--layout"))layout=1;
     else if(!strcmp(argv[i],"-s") && i+1<argc)name=argv[++i];
     else if(!strcmp(argv[i],"--link") && i+1<argc){
@@ -1385,6 +1522,10 @@ int main(int argc,char **argv){
   /* this bridge's reports' sequence starts past any an earlier bridge of its node sent: its start in ms */
   struct timespec started;clock_gettime(CLOCK_REALTIME,&started);
   atomic_store(&mesh_link_reported(link_table)[me],((uint64_t)started.tv_sec*1000+(uint64_t)started.tv_nsec/1000000)<<20);
+  /* the estimates this bridge holds (every bridge applies and passes on its peers'), its own (-E) sequenced
+     from its start as its reports are */
+  if(!(estimates=calloc((size_t)table_nodes*table_nodes,sizeof *estimates)))die("link estimate allocation");
+  estimate_node=(uint32_t)me;estimate_sequence=((uint64_t)started.tv_sec*1000+(uint64_t)started.tv_nsec/1000000)<<20;
   *m=geometry;m->node=(uint32_t)me;m->version=MESH_VERSION;
   for(uint32_t r=0;r<mesh_rows(m);r++)atomic_store_explicit(&mesh_page(m)[r].mapping,MESH_ABSENT,memory_order_relaxed);
   struct mesh_wire wire={0};
@@ -1415,6 +1556,7 @@ int main(int argc,char **argv){
   for(uint32_t i=0;i<link_count;i++){
     sessions[i].M=m;sessions[i].counts=links[i].counts;sessions[i].provider.wire=&wire;
     if(!(sessions[i].sent=calloc(table_nodes,sizeof *sessions[i].sent)))die("link report allocation");
+    if(!(sessions[i].estimates_sent=calloc((size_t)table_nodes*table_nodes,sizeof *sessions[i].estimates_sent)))die("link estimate allocation");
   }
   net_sessions=sessions;net_session_count=link_count;
   for(uint32_t i=0;i<link_count;i++){

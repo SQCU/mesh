@@ -20,8 +20,10 @@ int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,u
    (<region>.links, `node` its own), writes its links' up, and unlinks it at exit.  Two copies of the
    contents: a writer copies the current one (mesh_link_copy(t, epoch)) into the other, changes it there
    and publishes it by bumping epoch; a reader copies the current one and keeps it only if epoch has not
-   moved meanwhile, so no reader sees a half-written table.  Writers (the bridge, a stated
-   configuration) take `writer` one at a time; a write that changes nothing leaves epoch as it is. */
+   moved meanwhile, so no reader sees a half-written table.  Writers take `writer` one at a time: the
+   bridge (the links' up), a stated configuration (presence, alpha and beta: mesh_link_table_state), and
+   the bridges' estimator (mesh-flow -E: a stated link's beta as the node it leads into estimates it from
+   its receives, passed to every bridge); a write that changes nothing leaves epoch as it is. */
 #define MESH_LINK_MAGIC 0x4d4c4e4cu
 struct mesh_link_state { float alpha,beta; uint32_t stated,up; };
 /* The contents over `nodes` nodes: link a->b at mesh_link_at(c, a, b), then present[v] (mesh_link_present);

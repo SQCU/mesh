@@ -123,6 +123,17 @@ or identically on every rank:
 The rates go into the link map once, from a recorded run that the map cites. They change when the
 configuration changes (R11), not with each run's timings.
 
+**Links' beta, estimated.** With the bridges' estimator on (`mesh-flow -E`), the link table has a third
+writer beside the bridge's up and the stated configuration: the node a link leads into fits t = a + b·x to
+its receives' busy periods (from a chunk's grant, when both ends are ready, to the last landing; x at
+least 1 MB) by recursive least squares with forgetting, its prior the stated alpha and beta, and moves the
+table's beta only where its estimate leaves a band of 10 % around it, by a step that halves each time the
+moves change direction; every bridge takes the newest estimate of each link from that link's node, so the
+tables agree and the planner's choices with them. This is R11 for links: a robust online loop with a
+smaller step once it oscillates, a relative accuracy it stops at, and a move only where the modelled time
+changes by more than the band. It writes links' costs from the wire alone, never a node's rate (R2); the
+derivation of the parts still reads the stated map.
+
 **What stays uniform.**
 - No operand, or equal parts: stock PyTorch.
 - The strategy costs (`MeshTopoInfo`, `redistribute_cost`). They choose among collectives, not
