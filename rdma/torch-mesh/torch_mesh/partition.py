@@ -45,7 +45,8 @@ its tail's, padding.
 Without an attach every replaced function calls PyTorch's own.  Refused (on every rank alike): a mesh
 dimension of more than one coordinate before a partitioned one (ValueError at attach), _StridedShard,
 flattening or unflattening a partitioned dimension, flex-attention context parallelism, the
-per-document and PTRR balancers and LocalTensor's RNG tracker (NotImplementedError).  Left as they are:
+per-document and PTRR balancers and LocalTensor's RNG tracker (NotImplementedError).  Under torch.compile
+context parallelism's SDPA on a partitioned mesh is a graph break (_distribute_function).  Left as they are:
 the strategy costs (MeshTopoInfo, redistribute_cost), which choose among collectives, not splits.  This
 module is imported by the backend's first process group; a program that imports
 context_parallel_unshard by name imports this module before it."""
@@ -733,6 +734,21 @@ def context_parallel_unshard(mesh, buffers, seq_dims, load_balancer=None):
     return [_allgatherv(b, dim, sizes, mesh.get_group()).index_select(dim, order) for b, dim in zip(buffers, seq_dims)]
 
 
+_distribute = _cp._distribute_function
+
+
+def _distribute_function(fn, fn_module, device_mesh, input_fn, output_fn):
+    """context_parallel's SDPA on a partitioned mesh dimension, left out of torch.compile's graphs: its
+    input conversion (DTensor.from_local over a partitioned mesh, whose size dynamo cannot build) and the
+    ring run eagerly (torch.compiler.disable on the function it installs: a graph break at the call)."""
+    _distribute(fn, fn_module, device_mesh, input_fn, output_fn)
+    wrapper = getattr(fn_module, fn.__name__)
+    if isinstance(device_mesh.size(), _Chunks) and wrapper in _cp._replaced_functions:
+        disabled = torch.compiler.disable(wrapper)
+        _cp._replaced_functions[disabled] = _cp._replaced_functions.pop(wrapper)
+        setattr(fn_module, fn.__name__, disabled)
+
+
 def _ring_attention(group, n, query, key, value, is_causal=False, **kwargs):
     """torch's _templated_ring_attention forward (_attention.py) over capacity blocks: the rotation one
     Allgatherv of every rank's keys and values (static counts), the block of source j = (rank - i) mod
@@ -803,6 +819,7 @@ def _install():
     for balancer in (_lb._PerDocumentHeadTailLoadBalancer, _lb._PTRRLoadBalancer):
         balancer._generate_indices = _refuse_balancer(balancer._generate_indices)
     _cp._create_cp_block_mask = _create_cp_block_mask
+    _cp._distribute_function = _distribute_function
     for module in (_cp, _context_parallel, _attention_stub):
         module.context_parallel_unshard = context_parallel_unshard
 
