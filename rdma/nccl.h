@@ -873,9 +873,10 @@ ncclResult_t ncclMeshGroupEpochs(uint64_t* epochs, int capacity, int* count);
    thread for the library's own GPU work (a group's gate, a combined piece before its SEND, the NULL
    stream's end, room in the window), a part's waits for recorded points without a program, the
    bytes this rank sent and received on the network; and, per call, the monotonic times (ns) its part
-   started (after the gate) and ended (its transfers complete). */
+   started (after the gate) and ended (its transfers complete) and the worker last signalled one of its
+   arrivals to the GPU (0: none). */
 typedef struct {
-  uint64_t cpuCopyBytes, gpuCopyBytes, gpuKernels, hostWaits, inputWaits, sentBytes, receivedBytes, startNs, endNs;
+  uint64_t cpuCopyBytes, gpuCopyBytes, gpuKernels, hostWaits, inputWaits, sentBytes, receivedBytes, startNs, endNs, arrivedNs;
 } ncclMeshCounts_t;
 /* The process's counts so far (the times 0). */
 ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t* counts);

@@ -1176,7 +1176,8 @@ static void trace_dump() {
     for (int k = 0; k < n && k < 64; k++) {
       auto &t = counts[k];
       auto time = [&](uint64_t ns) { return ns ? std::to_string(ns - offset) : std::string("null"); };
-      out << (k ? "," : "") << "{\"start_ns\":" << time(t.startNs) << ",\"end_ns\":" << time(t.endNs) << ",\"sent\":" << t.sentBytes
+      out << (k ? "," : "") << "{\"start_ns\":" << time(t.startNs) << ",\"end_ns\":" << time(t.endNs) << ",\"arrived_ns\":" << time(t.arrivedNs)
+          << ",\"sent\":" << t.sentBytes
           << ",\"received\":" << t.receivedBytes << ",\"host_waits\":" << t.hostWaits << ",\"input_waits\":" << t.inputWaits
           << ",\"kernels\":" << t.gpuKernels << ",\"gpu_copy\":" << t.gpuCopyBytes << ",\"cpu_copy\":" << t.cpuCopyBytes << "}";
     }

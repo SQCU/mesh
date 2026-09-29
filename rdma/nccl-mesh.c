@@ -48,8 +48,9 @@
 
 enum { CH_COLL, CH_P2P, CHANNELS };
 enum { K_SEND=MESH_ALLGATHER+1, K_RECV };
-/* a call's tallies: counts (also summed for the process), then its part's start and end times */
-enum { CPU_COPY, GPU_COPY, GPU_KERNELS, HOST_WAITS, INPUT_WAITS, SENT, RECEIVED, COUNTS, STARTED=COUNTS, ENDED, TALLIES };
+/* a call's tallies: counts (also summed for the process), then its part's start and end times and when
+   the worker last signalled one of its arrivals to the GPU */
+enum { CPU_COPY, GPU_COPY, GPU_KERNELS, HOST_WAITS, INPUT_WAITS, SENT, RECEIVED, COUNTS, STARTED=COUNTS, ENDED, ARRIVED, TALLIES };
 enum { KERNEL_COMBINE, KERNEL_PREMULTIPLY, KERNEL_POSTDIVIDE };
 #define UID_MAGIC 0x4d4e434cu
 #define FLIGHTS 32
@@ -688,65 +689,97 @@ static ncclResult_t gpu_wait(struct ncclComm *c,struct call *k,void *event,uint6
 }
 
 /* ---- one collective ---- */
+/* A step's piece moves in chunks of CHUNK bytes (the bridge's own RECV chunk, MESH_DISCARD), the last
+   the remainder: each chunk its own isend or irecv and, for a REDUCE, its own arrival and combine, so the
+   GPU combines chunk j while chunk j + 1 is on the wire and after the last byte lands only the last
+   chunk's combine remains [the pipelined chunks of Patarasuk & Yuan 2009, §4; NCCL's slices].  Both
+   ranks cut a piece alike, from its elements alone. */
+#define CHUNK ((size_t)4<<20)
+static uint32_t chunks_of(uint64_t elements,size_t e){
+  const uint64_t stride=CHUNK/e;
+  return elements<=stride?1:(uint32_t)((elements+stride-1)/stride);
+}
+static uint64_t chunk_first(size_t e,uint32_t j){return (uint64_t)j*(CHUNK/e);}
+static uint64_t chunk_count(uint64_t elements,size_t e,uint32_t j){
+  const uint64_t first=chunk_first(e,j),stride=CHUNK/e;
+  return elements-first<stride?elements-first:stride;
+}
+/* The receives a REDUCE or COPY step keeps posted ahead of the one it waits for (a connection's request
+   ring holds MESH_NET_REQUESTS). */
+#define AHEAD 8
 /* The worker's side of a collective the group's end placed: this rank's plan.  A piece the GPU
    combines is sent, or landed on, only once it has combined it. */
 struct combined { size_t lo,hi; uint64_t value; };
 static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct launch *l,struct item *it){
   const size_t e=type_bytes[k->type];
   ncclResult_t status=ncclSuccess;
-  struct pending *sends=calloc(k->nsteps?k->nsteps:1,sizeof *sends);int count_=0;
-  struct combined *done=calloc(k->nsteps?k->nsteps:1,sizeof *done);int ndone=0;uint64_t seen=0;
+  size_t total=1;
+  for(uint32_t i=0;i<k->nsteps;i++)total+=chunks_of(k->steps[i].piece.elements,e);
+  struct pending *sends=calloc(total,sizeof *sends);int count_=0;
+  struct combined *done=calloc(total,sizeof *done);int ndone=0;uint64_t seen=0;
+  void **requests=calloc(total,sizeof *requests);
   void **used=c->used;int nused=0;
-  if(!sends || !done)status=FAIL(c,ncclSystemError,"allocation");
+  if(!sends || !done || !requests)status=FAIL(c,ncclSystemError,"allocation");
   for(uint32_t i=0;i<k->nsteps && !status;i++){
     const struct mesh_step *s=k->steps+i;
-    const size_t lo=s->first*e,length=s->piece.elements*e;
+    const uint32_t n=chunks_of(s->piece.elements,e);
     struct peer *p=c->peers+s->peer;
-    void *request=NULL;
-    if(!length)continue;
-    if(s->op!=MESH_STEP_REDUCE){
-      uint64_t need=0;
-      for(int j=0;j<ndone;j++)if(done[j].lo<lo+length && lo<done[j].hi && done[j].value>need)need=done[j].value;
-      if(need>seen){if((status=gpu_wait(c,k,l->event,need,it,"a combine")))break;seen=need;}
-    }
+    if(!s->piece.elements)continue;
     if(s->op==MESH_STEP_SEND){
-      if(!(status=post(c,1,p->send[CH_COLL],k->operand+lo,length,window.mh,sends,&count_,it,&request))){
-        sends[count_++]=(struct pending){lo,lo+length,request};
-        count(k,SENT,length);
+      for(uint32_t j=0;j<n && !status;j++){
+        const size_t lo=(s->first+chunk_first(e,j))*e,length=chunk_count(s->piece.elements,e,j)*e;
+        uint64_t need=0;
+        for(int d=0;d<ndone;d++)if(done[d].lo<lo+length && lo<done[d].hi && done[d].value>need)need=done[d].value;
+        if(need>seen){if((status=gpu_wait(c,k,l->event,need,it,"a combine")))break;seen=need;}
+        void *request=NULL;
+        if(!(status=post(c,1,p->send[CH_COLL],k->operand+lo,length,window.mh,sends,&count_,it,&request))){
+          sends[count_++]=(struct pending){lo,lo+length,request};
+          count(k,SENT,length);
+        }
       }
       continue;
     }
     int known=0;
     for(int u=0;u<nused;u++)known|=used[u]==p->recv[CH_COLL];
     if(!known)used[nused++]=p->recv[CH_COLL];
+    const size_t lo=s->first*e,length=s->piece.elements*e;
     /* a piece of the operand is written only once no isend still reads it */
     for(int j=0;j<count_ && !status && s->op==MESH_STEP_COPY;)
       if(sends[j].lo<lo+length && lo<sends[j].hi){status=await(c,sends[j].request,SIZE_MAX,NULL,NULL,it,"an isend");sends[j]=sends[--count_];}
       else j++;
     if(status)break;
-    unsigned char *into=s->op==MESH_STEP_COPY?k->operand+lo:k->pieces[i].at;
-    if((status=post(c,0,p->recv[CH_COLL],into,length,window.mh,sends,&count_,it,&request)))break;
-    if((status=await(c,request,length,sends,&count_,it,s->op==MESH_STEP_COPY?"a COPY step's irecv":"a REDUCE step's irecv")))break;
-    count(k,RECEIVED,length);
-    if(s->op==MESH_STEP_REDUCE){
-      for(int j=0;j<count_ && !status;)
-        if(sends[j].lo<lo+length && lo<sends[j].hi){status=await(c,sends[j].request,SIZE_MAX,NULL,NULL,it,"an isend");sends[j]=sends[--count_];}
-        else j++;
+    uint32_t posted=0;
+    for(uint32_t j=0;j<n && !status;j++){
+      for(;posted<n && posted<j+AHEAD && !status;posted++){
+        const size_t at=chunk_first(e,posted)*e,bytes=chunk_count(s->piece.elements,e,posted)*e;
+        unsigned char *into=s->op==MESH_STEP_COPY?k->operand+lo+at:k->pieces[i].at+at;
+        status=post(c,0,p->recv[CH_COLL],into,bytes,window.mh,sends,&count_,it,requests+posted);
+      }
+      if(status)break;
+      const size_t at=lo+chunk_first(e,j)*e,bytes=chunk_count(s->piece.elements,e,j)*e;
+      if((status=await(c,requests[j],bytes,sends,&count_,it,s->op==MESH_STEP_COPY?"a COPY step's irecv":"a REDUCE step's irecv")))break;
+      count(k,RECEIVED,bytes);
+      if(s->op!=MESH_STEP_REDUCE)continue;
+      for(int d=0;d<count_ && !status;)
+        if(sends[d].lo<at+bytes && at<sends[d].hi){status=await(c,sends[d].request,SIZE_MAX,NULL,NULL,it,"an isend");sends[d]=sends[--count_];}
+        else d++;
       if(!status){
-        nccl_mesh_event_signal(c->arrive,k->pieces[i].arrived);
+        nccl_mesh_event_signal(c->arrive,k->pieces[i].arrived+j);
+        if(k->tally)k->tally[ARRIVED]=now_ns();
         rebound(it);
-        done[ndone++]=(struct combined){lo,lo+length,k->pieces[i].combined};
+        done[ndone++]=(struct combined){at,at+bytes,k->pieces[i].combined+j};
       }
     }
   }
   while(count_ && !status){status=await(c,sends[count_-1].request,SIZE_MAX,NULL,NULL,it,"an isend");count_--;}
+  /* every receive landed and every send done: the GPU's wait for the whole network ends before the flush */
+  if(!status && k->networked){nccl_mesh_event_signal(c->arrive,k->networked);if(k->tally)k->tally[ARRIVED]=now_ns();rebound(it);}
   for(int u=0;u<nused && !status;u++){
     void *flush=NULL;int result=mesh_net_iflush(used[u],1,NULL,NULL,NULL,&flush);
     if(result)status=net_failure(c,result,"mesh_net_iflush");
     else if(flush)status=await(c,flush,SIZE_MAX,NULL,NULL,it,"an iflush");
   }
-  free(sends);free(done);
-  if(!status && k->networked){nccl_mesh_event_signal(c->arrive,k->networked);rebound(it);}
+  free(sends);free(done);free(requests);
   return status;
 }
 
@@ -1541,6 +1574,24 @@ static void take_kept(struct ncclMeshStream *s,void *program){
     k=next;
   }
 }
+/* Whether a collective's arrivals cover its network: no COPY step, and every SEND overlaps a REDUCE's
+   range (the worker awaits those sends before signalling that arrival), so the GPU that has waited for
+   every arrival needs no wait for the whole network. */
+static int covered(const struct call *k){
+  const size_t e=type_bytes[k->type];
+  for(uint32_t s=0;s<k->nsteps;s++){
+    const struct mesh_step *a=k->steps+s;
+    if(a->op==MESH_STEP_COPY)return 0;
+    if(a->op!=MESH_STEP_SEND)continue;
+    int over=0;
+    for(uint32_t r=0;r<k->nsteps && !over;r++){
+      const struct mesh_step *b=k->steps+r;
+      over=b->op==MESH_STEP_REDUCE && b->first*e<(a->first+a->piece.elements)*e && a->first*e<(b->first+b->piece.elements)*e;
+    }
+    if(!over)return 0;
+  }
+  return 1;
+}
 /* Whether a group's program has GPU work before its transfers start (so it needs a gate): a receive
    from this rank itself, a send's bytes staged into the group's allocation, a contribution copied or
    premultiplied into its operand. */
@@ -1610,13 +1661,20 @@ static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **c
     const size_t e=type_bytes[k->type];
     for(uint32_t s=0;s<k->nsteps;s++)if(k->steps[s].op==MESH_STEP_REDUCE){
       struct piece *p=k->pieces+s;
-      p->arrived=++c->arrive_value;sink_wait(sink,c->arrive,p->arrived);
-      kernel(sink,k,KERNEL_COMBINE,k->at,k->operand+k->steps[s].first*e,l->own,p->at,k->steps[s].piece.elements,k->combine);
-      p->combined=++*value;sink_signal(sink,event,p->combined);
+      const uint64_t elements=k->steps[s].piece.elements;
+      const uint32_t n=chunks_of(elements,e);
+      p->arrived=c->arrive_value+1;c->arrive_value+=n;
+      p->combined=*value+1;*value+=n;
+      for(uint32_t j=0;j<n;j++){
+        const uint64_t first=chunk_first(e,j);
+        sink_wait(sink,c->arrive,p->arrived+j);
+        kernel(sink,k,KERNEL_COMBINE,k->at,k->operand+(k->steps[s].first+first)*e,l->own,p->at+first*e,chunk_count(elements,e,j),k->combine);
+        sink_signal(sink,event,p->combined+j);
+      }
     }
     const size_t out=out_bytes(k);unsigned char *from=output_at(k);
     int divide=out && k->postdivide,copy=out && from!=(unsigned char *)k->recv;
-    if(divide || copy || kept){
+    if(divide || copy || (kept && !covered(k))){
       k->networked=++c->arrive_value;sink_wait(sink,c->arrive,k->networked);
       if(divide)kernel(sink,k,KERNEL_POSTDIVIDE,k->at,from,k->at,from,out/e,0);
       if(copy)blit(sink,k,k->out,k->recv,k->at,from,out);
@@ -2231,7 +2289,8 @@ ncclResult_t ncclMeshGroupPlans(int *algorithms,int *roots,int capacity,int *cou
 }
 static ncclMeshCounts_t counts_of(const uint64_t *c,int timed){
   return (ncclMeshCounts_t){.cpuCopyBytes=c[CPU_COPY],.gpuCopyBytes=c[GPU_COPY],.gpuKernels=c[GPU_KERNELS],.hostWaits=c[HOST_WAITS],
-    .inputWaits=c[INPUT_WAITS],.sentBytes=c[SENT],.receivedBytes=c[RECEIVED],.startNs=timed?c[STARTED]:0,.endNs=timed?c[ENDED]:0};
+    .inputWaits=c[INPUT_WAITS],.sentBytes=c[SENT],.receivedBytes=c[RECEIVED],.startNs=timed?c[STARTED]:0,.endNs=timed?c[ENDED]:0,
+    .arrivedNs=timed?c[ARRIVED]:0};
 }
 ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t *counts){
   if(!counts)return FAIL(NULL,ncclInvalidArgument,"ncclMeshGetCounts: counts is NULL");
