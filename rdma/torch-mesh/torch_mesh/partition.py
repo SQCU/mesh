@@ -3,11 +3,12 @@ split each mesh dimension by it instead of equally.
 
 Stock PyTorch splits every sharded extent into equal chunks (Shard follows torch.chunk), a uniform
 prior over the ranks that nothing in a program can change.  Here a mesh dimension carries integer
-parts p_r >= 1, one per coordinate, of P = sum(p) units: an extent N that P divides is split into
-N p_r / P per coordinate r, in rank order; any other extent, and a dimension whose parts are all
-equal, is split as stock splits it.  The grain is N / P (a head, an expert, a tile), and a program
-chooses it by choosing P.  Without an operand every replaced function below calls PyTorch's own
-with the same arguments and returns its result.
+parts p_r >= 1, one per coordinate, of P = sum(p) units: an extent N split along it is split into
+N p_r / P per coordinate r, in rank order, and P must divide N (any other N raises ValueError; N is
+the global extent, the same on every rank, unless an outer mesh dimension split that tensor
+dimension first); a dimension whose parts are all equal is split as stock splits it.  The grain is
+N / P (a head, an expert, a tile), and a program chooses it by choosing P.  Without an operand
+every replaced function below calls PyTorch's own with the same arguments and returns its result.
 
 The operand, keyed by mesh dimension name:
   MESH_PARTITION="tp=5,11 cp=21,43"  attached when a DeviceMesh with that dimension name is made (a
@@ -38,11 +39,13 @@ Where uneven shards cannot go, stock's own fallback, or the same error on every 
 partitioned shard only where P divides the dimension it splits or the first it flattens (stock's
 rule with P for the mesh size), else Replicate (reshape) or an error (view); mean and avg over a
 partitioned dimension replicate it first; convolution's last-dimension sharding is not offered;
-DTensor's RNG offsets step by the largest shard.  _StridedShard (FSDP2 with TP, nested views),
-flattening or unflattening a partitioned dimension, flex-attention context parallelism and the
-per-document and PTRR balancers raise NotImplementedError.  Left as they are: the strategy costs
+DTensor's RNG gives each shard the offsets past the shards before it and ends the op past the last.
+_StridedShard (FSDP2 with TP, nested views), flattening or unflattening a partitioned dimension,
+flex-attention context parallelism, the per-document and PTRR balancers and LocalTensor's RNG
+tracker raise NotImplementedError.  Left as they are: the strategy costs
 (MeshTopoInfo, redistribute_cost), which choose among collectives, not splits."""
 import functools
+import itertools
 import math
 import os
 
@@ -73,18 +76,31 @@ class _Chunks(int):
 
 
 def _weighted(n, N):
-    return isinstance(n, _Chunks) and N % n.units == 0
+    """Whether an extent N is split by parts (n a partitioned dimension's size).  P must divide N:
+    torch.chunk's split there is not the one from_local's and context_parallel_unshard's inverse
+    (global = local P / p_r) assumes, and the ranks would infer different global extents."""
+    if not isinstance(n, _Chunks):
+        return False
+    if N % n.units:
+        raise ValueError(f'mesh: an extent of {N} split over the parts {n.parts} is no multiple of their '
+                         f'{n.units} units')
+    return True
 
 
 def _split(n, N):
-    """(sizes, offsets) of an extent N over a mesh dimension of size n: the parts' where P divides
-    N, else torch.chunk's."""
+    """(sizes, offsets) of an extent N over a mesh dimension of size n: the parts' on a partitioned
+    dimension, else torch.chunk's."""
     if _weighted(n, N):
         sizes = [N // n.units * p for p in n.parts]
     else:
         step = -(-N // n)
         sizes = [max(0, min(step, N - step * r)) for r in range(n)]
     return sizes, [sum(sizes[:r]) for r in range(len(sizes))]
+
+
+def _by_parts(mesh, placements):
+    """Whether placements shard a tensor dimension over a partitioned mesh dimension."""
+    return any(p.is_shard() and isinstance(mesh.size(i), _Chunks) for i, p in enumerate(placements))
 
 
 def sizes(mesh, name, N):
@@ -289,7 +305,7 @@ _global_tensor_info = _utils.compute_global_tensor_info
 
 def _compute_global_tensor_info(tensor, mesh, placements):
     coordinate = mesh.get_coordinate()
-    if coordinate is None or not any(p.is_shard() and isinstance(mesh.size(i), _Chunks) for i, p in enumerate(placements)):
+    if coordinate is None or not _by_parts(mesh, placements):
         return _global_tensor_info(tensor, mesh, placements)
     shape, stride = list(tensor.size()), list(tensor.stride())
     for i in reversed(range(len(placements))):
@@ -353,15 +369,39 @@ def _convolution_filter(stock):
     return last_dim_unpartitioned
 
 
-def _calc_first_shard_size(spec):
-    """DTensor RNG's per-shard stride: the largest shard (rank 0's under torch.chunk), so no two
-    shards' offsets overlap."""
-    size = list(spec.shape)
+_rng_offsets, _first_shard_size = _random.OffsetBasedRNGTracker._compute_rng_offsets, _random._calc_first_shard_size
+
+
+def _compute_rng_offsets(self, spec):
+    """DTensor RNG's (start, end) offset increments: stock's are k times the first shard's elements
+    for shard k and the tensor's elements, which under the parts would run the larger shards past
+    the op's end into the next op's offsets.  Here shard k (stock's row-major order over the shard
+    grid) starts past the shards before it and the op ends past the last, each rounded up to 4 as
+    stock rounds."""
+    mesh = spec.mesh
+    if not _by_parts(mesh, spec.placements):
+        return _rng_offsets(self, spec)
+    extents = [[N] for N in spec.shape]
     for i, p in enumerate(spec.placements):
-        if isinstance(p, (Shard, _StridedShard)):
-            n, N = spec.mesh.size(i), spec.shape[p.dim]
-            size[p.dim] = max(_split(n, N)[0]) if _weighted(n, N) else p._local_shard_size_and_offset(N, n, 0)[0]
-    return size
+        if isinstance(p, _StridedShard):
+            raise NotImplementedError('mesh: DTensor RNG over _StridedShard with a partitioned mesh dimension')
+        if p.is_shard():
+            n = mesh.size(i)
+            extents[p.dim] = [_shard_size_and_offset(e, n, r)[0] for e in extents[p.dim] for r in range(n)]
+    starts, end = [], 0
+    for index in itertools.product(*(range(len(e)) for e in extents)):
+        starts.append(end)
+        end = (end + math.prod(e[j] for e, j in zip(extents, index)) + 3) // 4 * 4
+    coordinate = [mesh._sym_get_coordinate(i) for i in range(mesh.ndim)]
+    return starts[_random._calc_shard_linear_idx(*_random._calc_shard_info(coordinate, spec))], end
+
+
+def _calc_first_shard_size(spec):
+    """Stock's per-shard stride, which no longer serves a partitioned spec (above); LocalTensor's
+    RNG tracker still calls it."""
+    if _by_parts(spec.mesh, spec.placements):
+        raise NotImplementedError("mesh: LocalTensor's DTensor RNG on a partitioned mesh dimension")
+    return _first_shard_size(spec)
 
 
 _optimize = _redistribute._optimize_transform_infos
@@ -499,6 +539,7 @@ def _install():
     for op in (aten.convolution.default, aten.convolution_backward.default):
         info = DTensor._op_dispatcher.sharding_propagator.op_single_dim_strategy_funcs[op]
         info.full_mesh_strategy_filter = _convolution_filter(info.full_mesh_strategy_filter)
+    _random.OffsetBasedRNGTracker._compute_rng_offsets = _compute_rng_offsets
     _random._calc_first_shard_size = _calc_first_shard_size
     _redistribute._optimize_transform_infos = _optimize_transform_infos
     _lb._create_default_load_balancer = _cp._create_default_load_balancer = _create_default_load_balancer
