@@ -366,23 +366,28 @@ class Call {
     size_t bytes = 0, at = SIZE_MAX;
     void *pointer = nullptr;
   };
-  // CPU: the parts themselves where they are contiguous and adjacent.
+  // CPU: the parts themselves where they are contiguous and adjacent (an empty part lies anywhere).
   bool host_place(Place &p) {
-    char *end = nullptr;
-    for (auto &t : p.parts) {
-      if (!t.is_contiguous() || (end && (char *)t.data_ptr() != end)) return false;
-      end = (char *)t.data_ptr() + t.nbytes();
-    }
-    p.pointer = p.parts[0].data_ptr();
-    return true;
-  }
-  // MPS: the parts in place where they are contiguous and adjacent in one window allocation.
-  bool window_place(Place &p) {
     char *first = nullptr, *end = nullptr;
     for (auto &t : p.parts) {
+      if (!t.nbytes()) continue;
+      if (!t.is_contiguous() || (end && (char *)t.data_ptr() != end)) return false;
+      if (!first) first = (char *)t.data_ptr();
+      end = (char *)t.data_ptr() + t.nbytes();
+    }
+    p.pointer = first;
+    return true;
+  }
+  // MPS: the parts in place where they are contiguous and adjacent in one window allocation (an empty
+  // part lies anywhere).
+  bool window_place(Place &p) {
+    char *first = nullptr, *end = nullptr;
+    id<MTLBuffer> buffer = nil;
+    for (auto &t : p.parts) {
+      if (!t.nbytes()) continue;
       char *at = t.is_contiguous() ? window_bytes(t) : nullptr;
-      if (!at || (end && at != end) || at::native::mps::getMTLBufferStorage(t) != at::native::mps::getMTLBufferStorage(p.parts[0])) return false;
-      if (!first) first = at;
+      if (!at || (end && at != end) || (buffer && at::native::mps::getMTLBufferStorage(t) != buffer)) return false;
+      if (!first) { first = at; buffer = at::native::mps::getMTLBufferStorage(t); }
       end = at + t.nbytes();
     }
     p.pointer = first;
@@ -393,6 +398,7 @@ class Call {
   void mps_blits(at::mps::MPSStream *s, Place &p, bool in) {
     size_t at = p.at;
     for (auto &t : p.parts) {
+      if (!t.nbytes()) continue;
       at::Tensor c = t.is_contiguous() ? t : in ? t.contiguous() : at::empty(t.sizes(), t.options());
       if (in && !c.is_same(t)) gpu_copied += c.nbytes();
       id<MTLBuffer> buffer = at::native::mps::getMTLBufferStorage(c);
@@ -430,6 +436,7 @@ class Call {
       if (p.at == SIZE_MAX || !(in ? p.in : p.out)) continue;
       size_t at = p.at;
       for (auto &t : p.parts) {
+        if (!t.nbytes()) continue;
         at::Tensor c = t;
         if (!t.is_contiguous()) {
           c = in ? t.contiguous() : at::empty(t.sizes(), t.options());
