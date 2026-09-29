@@ -7,8 +7,14 @@ the bridge's registered window, which the backend sends and receives in place, a
 returns their pages only once every use recorded on them is done (window(False) turns it off for a
 block).  empty() makes one directly; counts() is what libnccl-mesh and the backend copied, sent and
 waited for so far; records() the window allocator's records, and address(t) where a tensor's bytes
-lie in them (0: outside the window)."""
+lie in them (0: outside the window).
+  The backend also completes what PyTorch's parallelism APIs need of an MPS device: DeviceMesh("mps")
+asks torch.mps whether its device is set up (_mps_device), and context_parallel's SDPA dispatch covers
+CPU and MPS tensors (_context_parallel.py).  MESH_TRACE=<file> writes each call's trace there
+(ProcessGroupMesh.mm) when the group is destroyed or the process exits."""
+import atexit
 import contextlib
+import os
 import threading
 
 
@@ -21,13 +27,27 @@ def _autoload():
 
 def _create(store, rank, size, timeout):
     """The backend, and from then on this thread's MPS factories making window tensors."""
-    from . import _C
+    from . import _C, _context_parallel
     backend = _C.createProcessGroupMesh(store, rank, size, timeout)
     global _mode
     if _mode is None:
         _mode = _window_mode()
         _mode.__enter__()
+        _mps_device()
+        _context_parallel.register()
+        if os.environ.get('MESH_TRACE'):
+            atexit.register(_C.trace_dump)
     return backend
+
+
+def _mps_device():
+    """DeviceMesh(device_type="mps") asks the device module whether a device is already selected and, if
+    not, selects one: torch/distributed/device_mesh.py, DeviceMesh._setup_world_group_and_device calls
+    device_handle.is_initialized() and then set_device() (torch 2.14, device_mesh.py:496, 505, 530), and
+    torch.mps has neither.  A process has one Metal device, in use once MPS is available."""
+    import torch
+    if not hasattr(torch.mps, 'is_initialized'):
+        torch.mps.is_initialized = torch.backends.mps.is_available
 
 
 _mode = None

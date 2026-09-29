@@ -21,6 +21,10 @@
 // window allocation and out of it.  A collective on them completes before it returns; a send or recv
 // runs on a stream of its own (as NCCL's point-to-point calls on separate streams), so isend/irecv
 // pairs progress together, and its Work waits for that stream.
+//   MESH_TRACE=<file>: each call's host times and bytes, when the GPU reached the MPS fence before it, the
+// call's stream reached its value and the MPS stream passed its wait (MTLSharedEventListener), the GPU
+// times of the MPS command buffers those fences and waits end or begin, and libnccl-mesh's tallies of the
+// call (ncclMeshGroupTally), written as JSON lines when the group is destroyed or the process exits.
 #include <torch/extension.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/Store.hpp>
@@ -32,7 +36,10 @@
 #include <pybind11/chrono.h>
 
 #include <atomic>
+#include <fstream>
+#include <map>
 #include <mutex>
+#include <time.h>
 #include <unistd.h>
 
 #include "nccl.h"
@@ -71,6 +78,49 @@ static id<MTLDevice> device() {
   return made;
 }
 
+// ---- the trace (MESH_TRACE) ----
+static bool tracing() {
+  static const bool on = getenv("MESH_TRACE") != nullptr;
+  return on;
+}
+static uint64_t uptime() { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }  // Python's time.monotonic_ns
+struct Traced {
+  std::string op, dtype;
+  bool mps = false;
+  uint64_t bytes = 0, in_place = 0, blit_in = 0, blit_out = 0, enter = 0, issued = 0, fence = 0, resume = 0;
+  std::vector<int64_t> splits;
+  void *tally = nullptr, *stream_event = nullptr;
+  uint64_t stream_value = 0;
+};
+static struct {
+  std::mutex lock;
+  std::vector<Traced> calls;
+  std::vector<std::pair<uint64_t, uint64_t>> releases;              // a window release's fence value, host time
+  std::map<std::pair<void *, uint64_t>, uint64_t> reached;          // (event, value): when the GPU reached it
+  std::map<uint64_t, std::pair<double, double>> gpu;                // fence value: its command buffer's GPU times (s)
+} trace;
+static void trace_dump();
+static MTLSharedEventListener *listener() {
+  static MTLSharedEventListener *made = [[MTLSharedEventListener alloc] initWithDispatchQueue:dispatch_queue_create("mesh.trace", DISPATCH_QUEUE_SERIAL)];
+  return made;
+}
+// When `event` reaches `value`, noted in trace.reached.
+static void note_reached(id<MTLSharedEvent> event, uint64_t value) {
+  void *key = (__bridge void *)event;
+  [event notifyListener:listener() atValue:value block:^(id<MTLSharedEvent>, uint64_t) {
+    const uint64_t now = uptime();
+    std::lock_guard<std::mutex> guard(trace.lock);
+    trace.reached[{key, value}] = now;
+  }];
+}
+// The GPU times of the command buffer `cb` (not yet committed), noted under the fence value `value`.
+static void note_gpu(id<MTLCommandBuffer> cb, uint64_t value) {
+  [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+    std::lock_guard<std::mutex> guard(trace.lock);
+    trace.gpu[value] = {done.GPUStartTime, done.GPUEndTime};
+  }];
+}
+
 // ---- the MPS stream's fence ----
 // `body` on the MPS stream's serial queue (inline when already on it: a release closure can run there).
 template <typename F> static void on_mps(at::mps::MPSStream *s, F body) {
@@ -93,6 +143,10 @@ static uint64_t mps_fence() {
     s->endKernelCoalescing();
     value = ++fence_next;
     [s->commandBuffer() encodeSignalEvent:event value:value];
+    if (tracing()) {
+      note_gpu(s->commandBuffer(), value);
+      note_reached(event, value);
+    }
     s->synchronize(at::mps::SyncType::COMMIT);
   });
   return value;
@@ -102,7 +156,12 @@ static uint64_t mps_fence() {
 // The closures that release a window allocation: an MPS tensor's at the fence after the MPS work so far,
 // a CPU tensor's at once (the CPU's writes are done; the library's recorded points still hold it).
 static void release_mps(void *memory) {
-  check(ncclMeshMemRelease(memory, (__bridge void *)fence_event(), mps_fence()), nullptr, "ncclMeshMemRelease");
+  const uint64_t value = mps_fence();
+  if (tracing()) {
+    std::lock_guard<std::mutex> guard(trace.lock);
+    trace.releases.emplace_back(value, uptime());
+  }
+  check(ncclMeshMemRelease(memory, (__bridge void *)fence_event(), value), nullptr, "ncclMeshMemRelease");
 }
 static void release_host(void *memory) { check(ncclMemFree(memory), nullptr, "ncclMemFree"); }
 static id<MTLBuffer> buffer_of(void *memory, size_t *offset) {
@@ -194,8 +253,9 @@ struct StreamPool {
 // window allocation, filled and emptied by GPU blits.
 class Call {
  public:
-  Call(const at::Tensor &like, bool async, std::shared_ptr<StreamPool> pool)
-      : mps_(like.is_mps()), async_(async || like.is_mps()), pool_(std::move(pool)) {}
+  Call(const at::Tensor &like, bool async, std::shared_ptr<StreamPool> pool, const char *op = nullptr)
+      : mps_(like.is_mps()), async_(async || like.is_mps()), pool_(std::move(pool)), op_(op), dtype_(like.scalar_type()),
+        enter_(tracing() && op ? uptime() : 0) {}
   int add(const at::Tensor &t, bool in, bool out) { return add(std::vector<at::Tensor>{t}, in, out); }
   int add(std::vector<at::Tensor> parts, bool in, bool out) {
     Place p;
@@ -231,7 +291,7 @@ class Call {
     auto *s = at::mps::getCurrentMPSStream();
     for (auto &p : places_)
       if (p.at != SIZE_MAX && p.in) mps_blits(s, p, true);
-    const uint64_t fence = mps_fence();
+    const uint64_t fence = fence_ = mps_fence();
     for (auto &p : places_)
       if (p.bytes) check(ncclMeshMemUse(p.pointer, p.bytes, (__bridge void *)fence_event(), fence, 1), nullptr, "ncclMeshMemUse");
     stream_ = pool_->acquire();
@@ -249,6 +309,14 @@ class Call {
     on_mps(s, [&] {
       s->endKernelCoalescing();
       [s->commandBuffer() encodeWaitForEvent:event value:done];
+      if (traced_ != SIZE_MAX) {  // a signal after the wait: when the MPS stream passed it
+        const uint64_t resume = ++fence_next;
+        [s->commandBuffer() encodeSignalEvent:fence_event() value:resume];
+        note_gpu(s->commandBuffer(), resume);
+        note_reached(fence_event(), resume);
+        std::lock_guard<std::mutex> guard(trace.lock);
+        trace.calls[traced_].resume = resume;
+      }
     });
     for (auto &p : places_)
       if (p.at != SIZE_MAX && p.out) mps_blits(s, p, false);
@@ -257,6 +325,36 @@ class Call {
   }
   ~Call() {
     if (scratch_) ncclMeshMemRelease(scratch_, nullptr, 0);
+  }
+  // The call's trace record once it is issued (MESH_TRACE): its places' bytes, in place or blitted, its
+  // host times, its fence, and the library's tallies of its group, held.
+  void traced(std::vector<int64_t> splits = {}) {
+    if (!enter_) return;
+    Traced t;
+    t.op = op_;
+    t.dtype = c10::toString(dtype_);
+    t.mps = mps_;
+    for (auto &p : places_) {
+      t.bytes += p.bytes;
+      if (p.at == SIZE_MAX) t.in_place += p.bytes;
+      else {
+        if (p.in) t.blit_in += p.bytes;
+        if (p.out) t.blit_out += p.bytes;
+      }
+    }
+    t.splits = std::move(splits);
+    t.enter = enter_;
+    t.issued = uptime();
+    t.fence = fence_;
+    ncclMeshGroupTally(&t.tally);
+    if (stream_) {
+      t.stream_event = stream_->event;
+      t.stream_value = stream_->value;
+      note_reached((__bridge id<MTLSharedEvent>)stream_->event, stream_->value);
+    }
+    std::lock_guard<std::mutex> guard(trace.lock);
+    traced_ = trace.calls.size();
+    trace.calls.push_back(std::move(t));
   }
 
  private:
@@ -363,6 +461,10 @@ class Call {
   }
   bool mps_, async_;
   std::shared_ptr<StreamPool> pool_;
+  const char *op_;
+  at::ScalarType dtype_;
+  uint64_t enter_, fence_ = 0;
+  size_t traced_ = SIZE_MAX;
   cudaStream_t stream_ = nullptr;
   std::vector<Place> places_;
   void *scratch_ = nullptr;
@@ -426,6 +528,7 @@ class ProcessGroupMesh : public Backend {
   ~ProcessGroupMesh() override {
     streams_->synchronize();
     if (comm_) ncclCommDestroy(comm_);
+    trace_dump();
   }
   const std::string getBackendName() const override { return "mesh"; }
 
@@ -435,7 +538,7 @@ class ProcessGroupMesh : public Backend {
   }
 
   c10::intrusive_ptr<Work> broadcast(std::vector<at::Tensor> &tensors, const BroadcastOptions &opts) override {
-    auto call = start(tensors[0]);
+    auto call = start(tensors[0], "broadcast");
     std::vector<int> at;
     for (auto &t : tensors) at.push_back(call->add(t, getRank() == opts.rootRank, true));
     call->begin();
@@ -448,7 +551,7 @@ class ProcessGroupMesh : public Backend {
   }
 
   c10::intrusive_ptr<Work> allreduce(std::vector<at::Tensor> &tensors, const AllreduceOptions &opts) override {
-    auto call = start(tensors[0]);
+    auto call = start(tensors[0], "all_reduce");
     std::vector<int> at;
     for (auto &t : tensors) at.push_back(call->add(t, true, true));
     call->begin();
@@ -463,7 +566,7 @@ class ProcessGroupMesh : public Backend {
   }
 
   c10::intrusive_ptr<Work> reduce(std::vector<at::Tensor> &tensors, const ReduceOptions &opts) override {
-    auto call = start(tensors[0]);
+    auto call = start(tensors[0], "reduce");
     std::vector<int> at;
     for (auto &t : tensors) at.push_back(call->add(t, true, getRank() == opts.rootRank));
     call->begin();
@@ -477,7 +580,7 @@ class ProcessGroupMesh : public Backend {
   c10::intrusive_ptr<Work> allgather(std::vector<std::vector<at::Tensor>> &outputs, std::vector<at::Tensor> &inputs,
                                      const AllgatherOptions &) override {
     TORCH_CHECK(inputs.size() == 1 && outputs.size() == 1 && (int)outputs[0].size() == getSize(), "mesh: allgather takes one tensor and a list of world_size");
-    auto call = start(inputs[0]);
+    auto call = start(inputs[0], "all_gather");
     int in = call->add(inputs[0], true, false), out = call->add(outputs[0], false, true);
     call->begin();
     check(ncclAllGather(call->ptr(in), call->ptr(out), inputs[0].numel(), datatype(inputs[0]), comm_, call->stream()), comm_, "ncclAllGather");
@@ -486,7 +589,7 @@ class ProcessGroupMesh : public Backend {
 
   c10::intrusive_ptr<Work> all_gather_single(at::Tensor &output, at::Tensor &input, const AllgatherOptions &) override {
     TORCH_CHECK(output.numel() == getSize() * input.numel(), "mesh: all_gather_into_tensor's output is world_size inputs");
-    auto call = start(input);
+    auto call = start(input, "all_gather_into_tensor");
     int in = call->add(input, true, false), out = call->add(output, false, true);
     call->begin();
     check(ncclAllGather(call->ptr(in), call->ptr(out), input.numel(), datatype(input), comm_, call->stream()), comm_, "ncclAllGather");
@@ -505,7 +608,7 @@ class ProcessGroupMesh : public Backend {
     TORCH_CHECK(inputs.size() == 1, "mesh: gather takes one tensor");
     const bool root = getRank() == opts.rootRank;
     TORCH_CHECK(!root || (outputs.size() == 1 && (int)outputs[0].size() == getSize()), "mesh: gather's root takes a list of world_size");
-    auto call = start(inputs[0]);
+    auto call = start(inputs[0], "gather");
     int in = call->add(inputs[0], true, false), out = root ? call->add(outputs[0], false, true) : -1;
     call->begin();
     check(ncclGather(call->ptr(in), root ? call->ptr(out) : nullptr, inputs[0].numel(), datatype(inputs[0]), (int)opts.rootRank, comm_,
@@ -519,7 +622,7 @@ class ProcessGroupMesh : public Backend {
     TORCH_CHECK(outputs.size() == 1, "mesh: scatter takes one tensor");
     const bool root = getRank() == opts.rootRank;
     TORCH_CHECK(!root || (inputs.size() == 1 && (int)inputs[0].size() == getSize()), "mesh: scatter's root takes a list of world_size");
-    auto call = start(outputs[0]);
+    auto call = start(outputs[0], "scatter");
     int out = call->add(outputs[0], false, true), in = root ? call->add(inputs[0], true, false) : -1;
     call->begin();
     check(ncclScatter(root ? call->ptr(in) : nullptr, call->ptr(out), outputs[0].numel(), datatype(outputs[0]), (int)opts.rootRank, comm_,
@@ -530,7 +633,7 @@ class ProcessGroupMesh : public Backend {
   c10::intrusive_ptr<Work> reduce_scatter(std::vector<at::Tensor> &outputs, std::vector<std::vector<at::Tensor>> &inputs,
                                           const ReduceScatterOptions &opts) override {
     TORCH_CHECK(outputs.size() == 1 && inputs.size() == 1 && (int)inputs[0].size() == getSize(), "mesh: reduce_scatter takes one tensor and a list of world_size");
-    auto call = start(outputs[0]);
+    auto call = start(outputs[0], "reduce_scatter");
     int out = call->add(outputs[0], false, true), in = call->add(inputs[0], true, false);
     call->begin();
     reduce_call("ncclReduceScatter", opts.reduceOp, outputs[0], [&](ncclRedOp_t op) {
@@ -541,7 +644,7 @@ class ProcessGroupMesh : public Backend {
 
   c10::intrusive_ptr<Work> reduce_scatter_single(at::Tensor &output, at::Tensor &input, const ReduceScatterOptions &opts) override {
     TORCH_CHECK(input.numel() == getSize() * output.numel(), "mesh: reduce_scatter_tensor's input is world_size outputs");
-    auto call = start(output);
+    auto call = start(output, "reduce_scatter_tensor");
     int out = call->add(output, false, true), in = call->add(input, true, false);
     call->begin();
     reduce_call("ncclReduceScatter", opts.reduceOp, output, [&](ncclRedOp_t op) {
@@ -561,7 +664,7 @@ class ProcessGroupMesh : public Backend {
   c10::intrusive_ptr<Work> all_to_all_single(at::Tensor &output, at::Tensor &input, std::vector<int64_t> &outputSplits,
                                              std::vector<int64_t> &inputSplits, const AllToAllOptions &) override {
     const int n = getSize();
-    auto call = start(input);
+    auto call = start(input, "all_to_all_single");
     int in = call->add(input, true, false), out = call->add(output, false, true);
     call->begin();
     if (outputSplits.empty() && inputSplits.empty()) {
@@ -589,13 +692,15 @@ class ProcessGroupMesh : public Backend {
         }
       });
     }
+    std::vector<int64_t> splits(inputSplits);
+    splits.insert(splits.end(), outputSplits.begin(), outputSplits.end());
     std::vector<at::Tensor> result{output};
-    return work(OpType::ALLTOALL_BASE, result, call);
+    return work(OpType::ALLTOALL_BASE, result, call, splits);
   }
 
   c10::intrusive_ptr<Work> alltoall(std::vector<at::Tensor> &outputs, std::vector<at::Tensor> &inputs, const AllToAllOptions &) override {
     TORCH_CHECK((int)outputs.size() == getSize() && (int)inputs.size() == getSize(), "mesh: alltoall takes lists of world_size");
-    auto call = start(inputs[0]);
+    auto call = start(inputs[0], "all_to_all");
     std::vector<int> ins, outs;
     for (int r = 0; r < getSize(); r++) {
       ins.push_back(call->add(inputs[r], true, false));
@@ -612,7 +717,7 @@ class ProcessGroupMesh : public Backend {
   }
 
   c10::intrusive_ptr<Work> send(std::vector<at::Tensor> &tensors, int dst, int) override {
-    auto call = std::make_shared<Call>(tensors[0], true, streams_);
+    auto call = std::make_shared<Call>(tensors[0], true, streams_, "send");
     std::vector<int> at;
     for (auto &t : tensors) at.push_back(call->add(t, true, false));
     call->begin();
@@ -622,7 +727,7 @@ class ProcessGroupMesh : public Backend {
   }
 
   c10::intrusive_ptr<Work> recv(std::vector<at::Tensor> &tensors, int src, int) override {
-    auto call = std::make_shared<Call>(tensors[0], true, streams_);
+    auto call = std::make_shared<Call>(tensors[0], true, streams_, "recv");
     std::vector<int> at;
     for (auto &t : tensors) at.push_back(call->add(t, false, true));
     call->begin();
@@ -643,8 +748,9 @@ class ProcessGroupMesh : public Backend {
   std::shared_ptr<StreamPool> streams_ = std::make_shared<StreamPool>();
 
   // A collective's call: synchronous on CPU tensors, on a stream of its own on MPS tensors.
-  std::shared_ptr<Call> start(const at::Tensor &like) { return std::make_shared<Call>(like, false, streams_); }
-  c10::intrusive_ptr<Work> work(OpType type, std::vector<at::Tensor> &outputs, std::shared_ptr<Call> call) {
+  std::shared_ptr<Call> start(const at::Tensor &like, const char *op) { return std::make_shared<Call>(like, false, streams_, op); }
+  c10::intrusive_ptr<Work> work(OpType type, std::vector<at::Tensor> &outputs, std::shared_ptr<Call> call, std::vector<int64_t> splits = {}) {
+    call->traced(std::move(splits));
     return c10::make_intrusive<WorkMesh>(type, outputs, std::move(call));
   }
   template <typename F> void group(F body) {
@@ -729,6 +835,66 @@ static uint64_t address(const at::Tensor &t) {
   return ncclMeshMemBuffer(t.data_ptr(), &buffer, &offset) == ncclSuccess ? (uint64_t)(uintptr_t)t.data_ptr() : 0;
 }
 
+// The trace (MESH_TRACE) written out, once the points still to be noted are (at most 1 s): a header line
+// (the clock, uptime ns, and the library's clock's offset from it), a line per call (its GPU times are
+// its command buffers', from the fence before it and the wait after it), a line per window release.
+static void trace_dump() {
+  const char *path = getenv("MESH_TRACE");
+  if (!path) return;
+  auto pending = [] {
+    std::lock_guard<std::mutex> guard(trace.lock);
+    auto waiting = [&](void *event, uint64_t value, bool gpu) {
+      if (!event || !value || [(__bridge id<MTLSharedEvent>)event signaledValue] < value) return false;
+      return !trace.reached.count({event, value}) || (gpu && !trace.gpu.count(value));
+    };
+    void *fence = (__bridge void *)fence_event();
+    for (auto &c : trace.calls)
+      if (waiting(fence, c.fence, true) || waiting(fence, c.resume, true) || waiting(c.stream_event, c.stream_value, false)) return true;
+    for (auto &r : trace.releases)
+      if (waiting(fence, r.first, true)) return true;
+    return false;
+  };
+  for (int i = 0; i < 1000 && pending(); i++) usleep(1000);
+  std::lock_guard<std::mutex> guard(trace.lock);
+  const uint64_t offset = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - uptime();
+  void *fence = (__bridge void *)fence_event();
+  auto reached = [&](void *event, uint64_t value) -> std::string {
+    auto it = trace.reached.find({event, value});
+    return value && it != trace.reached.end() ? std::to_string(it->second) : "null";
+  };
+  auto gpu = [&](uint64_t value) -> std::string {
+    auto it = trace.gpu.find(value);
+    if (!value || it == trace.gpu.end()) return "null";
+    return "[" + std::to_string((uint64_t)(it->second.first * 1e9)) + "," + std::to_string((uint64_t)(it->second.second * 1e9)) + "]";
+  };
+  std::ofstream out(path);
+  out << "{\"clock\":\"uptime_ns\",\"library_offset_ns\":" << offset << ",\"pid\":" << getpid() << "}\n";
+  for (size_t i = 0; i < trace.calls.size(); i++) {
+    auto &c = trace.calls[i];
+    out << "{\"call\":" << i << ",\"op\":\"" << c.op << "\",\"dtype\":\"" << c.dtype << "\",\"device\":\"" << (c.mps ? "mps" : "cpu")
+        << "\",\"bytes\":" << c.bytes << ",\"in_place\":" << c.in_place << ",\"blit_in\":" << c.blit_in << ",\"blit_out\":" << c.blit_out
+        << ",\"splits\":[";
+    for (size_t k = 0; k < c.splits.size(); k++) out << (k ? "," : "") << c.splits[k];
+    out << "],\"enter_ns\":" << c.enter << ",\"issued_ns\":" << c.issued << ",\"fence\":" << c.fence << ",\"fence_reached_ns\":"
+        << reached(fence, c.fence) << ",\"fence_gpu_ns\":" << gpu(c.fence) << ",\"stream_done_ns\":" << reached(c.stream_event, c.stream_value)
+        << ",\"resume\":" << c.resume << ",\"resume_ns\":" << reached(fence, c.resume) << ",\"resume_gpu_ns\":" << gpu(c.resume) << ",\"library\":[";
+    ncclMeshCounts_t counts[64];
+    int n = 0;
+    ncclMeshTallyCounts(c.tally, counts, 64, &n);
+    for (int k = 0; k < n && k < 64; k++) {
+      auto &t = counts[k];
+      auto time = [&](uint64_t ns) { return ns ? std::to_string(ns - offset) : std::string("null"); };
+      out << (k ? "," : "") << "{\"start_ns\":" << time(t.startNs) << ",\"end_ns\":" << time(t.endNs) << ",\"sent\":" << t.sentBytes
+          << ",\"received\":" << t.receivedBytes << ",\"host_waits\":" << t.hostWaits << ",\"input_waits\":" << t.inputWaits
+          << ",\"kernels\":" << t.gpuKernels << ",\"gpu_copy\":" << t.gpuCopyBytes << ",\"cpu_copy\":" << t.cpuCopyBytes << "}";
+    }
+    out << "]}\n";
+  }
+  for (auto &r : trace.releases)
+    out << "{\"release\":" << r.first << ",\"host_ns\":" << r.second << ",\"reached_ns\":" << reached(fence, r.first) << ",\"gpu_ns\":"
+        << gpu(r.first) << "}\n";
+}
+
 } // namespace c10d
 
 TORCH_LIBRARY_IMPL(c10d, MPS, m) {
@@ -745,4 +911,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("counts", &c10d::counts);
   m.def("records", &c10d::records);
   m.def("address", &c10d::address);
+  m.def("trace_dump", &c10d::trace_dump);
 }

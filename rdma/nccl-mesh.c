@@ -1614,13 +1614,20 @@ ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t *counts){
   *counts=counts_of(now,0);
   return ncclSuccess;
 }
-ncclResult_t ncclMeshGroupCounts(ncclMeshCounts_t *counts,int capacity,int *count){
-  if(!count)return FAIL(NULL,ncclInvalidArgument,"ncclMeshGroupCounts: count is NULL");
-  struct tally *t=plans.tally;
+ncclResult_t ncclMeshTallyCounts(void *tally,ncclMeshCounts_t *counts,int capacity,int *count){
+  if(!count)return FAIL(NULL,ncclInvalidArgument,"ncclMeshTallyCounts: count is NULL");
+  struct tally *t=tally;
   *count=t?t->n:0;
   for(int i=0;t && counts && i<t->n && i<capacity;i++)counts[i]=counts_of(t->counts[i],1);
   return ncclSuccess;
 }
+ncclResult_t ncclMeshGroupCounts(ncclMeshCounts_t *counts,int capacity,int *count){return ncclMeshTallyCounts(plans.tally,counts,capacity,count);}
+ncclResult_t ncclMeshGroupTally(void **tally){
+  if(!tally)return FAIL(NULL,ncclInvalidArgument,"ncclMeshGroupTally: tally is NULL");
+  if((*tally=plans.tally))atomic_fetch_add(&plans.tally->refs,1);
+  return ncclSuccess;
+}
+ncclResult_t ncclMeshTallyRelease(void *tally){tally_release(tally);return ncclSuccess;}
 
 /* ---- the window's allocations, for the caller ---- */
 ncclResult_t ncclMeshMemBuffer(const void *ptr,void **buffer,size_t *offset){

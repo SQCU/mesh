@@ -793,6 +793,12 @@ ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t* counts);
    as ncclMeshGroupPlans; complete once the group has (a part's wait for its gate counts on its first
    call, the NULL stream's end on the group's last). */
 ncclResult_t ncclMeshGroupCounts(ncclMeshCounts_t* counts, int capacity, int* count);
+/* The same counts held past the thread's next group: ncclMeshGroupTally takes a reference to this
+   thread's last ended group's tallies (NULL: none), ncclMeshTallyCounts reads them as
+   ncclMeshGroupCounts does, ncclMeshTallyRelease drops the reference. */
+ncclResult_t ncclMeshGroupTally(void** tally);
+ncclResult_t ncclMeshTallyCounts(void* tally, ncclMeshCounts_t* counts, int capacity, int* count);
+ncclResult_t ncclMeshTallyRelease(void* tally);
 
 /* The window's allocations (above).  The Metal buffer (id<MTLBuffer>) over the allocation holding
    `ptr`, and ptr's offset in it: the library's for as long as the allocation lives. */
