@@ -59,11 +59,12 @@ void mesh_link_map_free(struct mesh_link_map *map){
 }
 
 struct mesh_link_stated { struct mesh_link_contents file; uint32_t node; };
+/* What is stated replaced; every link's up stays as observed (its node's bridge, or its report). */
 static void mesh_link_restate(struct mesh_link_contents *c,const void *argument){
   const struct mesh_link_stated *s=argument;
   for(uint32_t a=0;a<MESH_LINK_NODES;a++)for(uint32_t b=0;b<MESH_LINK_NODES;b++){
     struct mesh_link_state next=s->file.link[a][b];
-    next.up=a==s->node || b==s->node?c->link[a][b].up:next.stated;
+    next.up=c->link[a][b].up;
     c->link[a][b]=next;
   }
   memcpy(c->present,s->file.present,sizeof c->present);

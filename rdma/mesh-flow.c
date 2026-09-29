@@ -612,7 +612,7 @@ static void *link_run(void *argument){
 #define NET_DISCARD (UINT32_MAX-1)
 #define NET_HEARTBEAT_NS UINT64_C(200000000)
 #define NET_SILENCE_NS UINT64_C(2000000000)
-enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT };
+enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT, NET_LINKS };
 /* One control message.  CONNECT: `key` the listen it names, `from` the connecting comm.  ACCEPT: `from`
    the receiving comm made for `to`.  RTS: send request `sequence` of `from`, `size` its bytes,
    extent/phase where its registration regions end.  CREDIT: a chunk of that request, `offset` into it
@@ -620,7 +620,10 @@ enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT 
    CLOSE: `from` announces and grants nothing more on this connection; flags 1 asks for a CLOSE back.
    HEARTBEAT: nothing; each end sends one whenever it has sent nothing for NET_HEARTBEAT_NS, and ends the
    session once it has heard nothing for NET_SILENCE_NS (a peer stopped, a cable pulled: the link's
-   down, observed). */
+   down, observed).  LINKS: node `from`'s report, sequence `sequence`, its links' up a bit a node in
+   key, size, extent, phase, offset (320 nodes); each bridge sends its own node's whenever its sessions
+   pair or end, every newer one it takes on to its other peers, and every one it holds to a peer when
+   their session pairs (mesh-dataflow.h: a link no report names is down). */
 struct net_message { uint32_t kind,from,from_generation,to,to_generation,flags; int32_t tag,error; uint64_t key,sequence,size,extent,phase,offset; };
 _Static_assert(sizeof(struct net_message)==80,"net_message");
 /* A comm's bridge side, its link's session thread's alone: requests taken; a receive comm's requests
@@ -654,13 +657,29 @@ struct net_session {
   struct { uint32_t from,generation; uint64_t key; } pending[MESH_NET_COMMS];uint32_t pending_count;
   int send_blocked,receive_blocked;
   uint64_t bell,scanned,reaped,strays,heard,said;
+  /* the link reports sent to the peer: link_news when last looked, each node's sequence sent */
+  uint64_t news,sent[MESH_LINK_NODES];
 };
-/* The link table beside the region (mesh-dataflow.h): the sessions write their links' up and down. */
+/* The link table beside the region (mesh-dataflow.h): the sessions write their links' up and down and
+   the reports they take; link_news moves whenever a report this bridge holds does, and wakes every
+   session to pass it on. */
 static struct mesh_link_table *link_table;
 static char link_table_region[64];
+static _Atomic uint64_t link_news;
+static struct net_session *net_sessions;
+static uint32_t net_session_count;
+_Static_assert(MESH_LINK_NODES<=5*64,"a report's bits in one message");
 static void link_table_down(void){if(link_table){char name[80];snprintf(name,sizeof name,"%s.links",link_table_region);shm_unlink(name);}}
 
 static uint64_t net_now(void){return clock_gettime_nsec_np(CLOCK_MONOTONIC);}
+static void net_links_moved(void){
+  atomic_fetch_add_explicit(&link_news,1,memory_order_release);
+  for(uint32_t i=0;i<net_session_count;i++){
+    _Atomic uint64_t *bell=&net_sessions[i].counts->doorbell;
+    atomic_fetch_add_explicit(bell,1,memory_order_release);
+    os_sync_wake_by_address_any(bell,sizeof *bell,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+  }
+}
 static void net_nap(uint64_t ns){for(uint64_t end=net_now()+ns;!stop && net_now()<end;)poll(NULL,0,10);}
 /* The next cut after `at`: a multiple of the chunk, or where either end's registration region ends
    (extent e, the message's start at phase p within its region). */
@@ -926,6 +945,22 @@ static void net_granted(struct net_session *s,const struct net_message *message)
   s->sends[s->send_tail++%NET_SENDS]=(struct net_send){.comm=message->to,.generation=message->to_generation,.slot=slot,.mr=request->mr,
     .offset=request->offset+message->offset,.length=message->size};
 }
+/* Every report newer than the one last sent to this session's peer, sent (its own node's excepted). */
+static void net_publish(struct net_session *s){
+  for(uint32_t v=0;link_table && v<MESH_LINK_NODES && !s->failed;v++){
+    uint64_t up[5]={0},sequence=v==s->provider.peer?0:mesh_link_table_row(link_table,v,up);
+    if(sequence<=s->sent[v])continue;
+    net_emit(s,(struct net_message){.kind=NET_LINKS,.from=v,.sequence=sequence,.key=up[0],.size=up[1],.extent=up[2],.phase=up[3],.offset=up[4]});
+    s->sent[v]=sequence;
+  }
+}
+/* A peer's report: the peer holds it (not sent back), and, where newer, applied and passed on. */
+static void net_links(struct net_session *s,const struct net_message *message){
+  const uint64_t up[5]={message->key,message->size,message->extent,message->phase,message->offset};
+  if(message->from>=MESH_LINK_NODES)return;
+  if(message->sequence>s->sent[message->from])s->sent[message->from]=message->sequence;
+  if(link_table && mesh_link_table_report(link_table,message->from,message->sequence,up))net_links_moved();
+}
 static void net_receive(struct net_session *s,const struct net_message *message){
   switch(message->kind){
   case NET_CONNECT: net_connected(s,message); break;
@@ -941,6 +976,7 @@ static void net_receive(struct net_session *s,const struct net_message *message)
   case NET_CREDIT: net_granted(s,message); break;
   case NET_CLOSE: net_closed(s,message); break;
   case NET_HEARTBEAT: break;
+  case NET_LINKS: net_links(s,message); break;
   default: s->failed=EPROTO;
   }
 }
@@ -1217,6 +1253,8 @@ static void net_serve(struct net_session *s){
     uint64_t now=net_now(),bell=atomic_load_explicit(&s->counts->doorbell,memory_order_acquire);
     if(now-s->heard>NET_SILENCE_NS){s->failed=ETIMEDOUT;break;}
     if(now-s->said>NET_HEARTBEAT_NS)net_emit(s,(struct net_message){.kind=NET_HEARTBEAT});
+    uint64_t news=atomic_load_explicit(&link_news,memory_order_acquire);
+    if(news!=s->news){s->news=news;net_publish(s);}
     if(bell!=s->bell || now-s->scanned>1000000){busy|=bell!=s->bell;s->bell=bell;s->scanned=now;net_scan(s);}
     if(now-s->reaped>500000000){s->reaped=now;net_reap(s);}
     if(!s->failed && (error=net_post(s)))s->failed=error;
@@ -1248,14 +1286,17 @@ static void *net_session_run(void *argument){
     atomic_store_explicit(&s->counts->code,0,memory_order_relaxed);
     atomic_fetch_add_explicit(&s->counts->sessions,1,memory_order_relaxed);
     atomic_store_explicit(&s->counts->phase,MESH_PAIRED,memory_order_release);
-    if(link_table)mesh_link_table_observe(link_table,s->provider.peer,1);
+    /* the new peer is sent every report this bridge holds, then each newer one */
+    memset(s->sent,0,sizeof s->sent);
+    s->news=atomic_load_explicit(&link_news,memory_order_acquire)-1;
+    if(link_table && mesh_link_table_observe(link_table,s->provider.peer,1)>0)net_links_moved();
     net_serve(s);
     int32_t error=stop?ECANCELED:s->failed?s->failed:EIO;
     if(!stop)fprintf(stderr,"session down: link %u: %s\n",s->index,strerror(error));
     if(s->strays)fprintf(stderr,"session link %u: %llu grants no request held, filled from the discard buffer\n",s->index,(unsigned long long)s->strays);
     atomic_store_explicit(&s->counts->code,error,memory_order_relaxed);
     atomic_store_explicit(&s->counts->phase,MESH_STOPPED,memory_order_release);
-    if(link_table)mesh_link_table_observe(link_table,s->provider.peer,0);
+    if(link_table && mesh_link_table_observe(link_table,s->provider.peer,0)>0)net_links_moved();
     net_lost(s,error);
     close(f);s->control=-1;
     while(!down_pair(&s->provider))poll(NULL,0,100);
@@ -1333,6 +1374,9 @@ int main(int argc,char **argv){
   snprintf(link_table_region,sizeof link_table_region,"%s",name);
   if(me>=MESH_LINK_NODES || mesh_link_table_open(name,1,&link_table))die("link table");
   link_table->node=(uint32_t)me;atexit(link_table_down);
+  /* this bridge's reports' sequence starts past any an earlier bridge of its node sent: its start in ms */
+  struct timespec started;clock_gettime(CLOCK_REALTIME,&started);
+  atomic_store(&link_table->reported[me],((uint64_t)started.tv_sec*1000+(uint64_t)started.tv_nsec/1000000)<<20);
   *m=geometry;m->node=(uint32_t)me;m->version=MESH_VERSION;
   for(uint32_t r=0;r<mesh_rows(m);r++)atomic_store_explicit(&mesh_page(m)[r].mapping,MESH_ABSENT,memory_order_relaxed);
   struct mesh_wire wire={0};
@@ -1360,9 +1404,10 @@ int main(int argc,char **argv){
   __sync_synchronize();m->magic=MESH_MAGIC;
   fprintf(stderr,"bridge node %d: %u links, %u queue pairs per link, arena %llu pages, window %u pages, rows %u, orders %u\n",
     me,link_count,qps,(unsigned long long)mesh_arena_pages(m),m->wire_pages,m->rows,m->orders);
+  for(uint32_t i=0;i<link_count;i++){sessions[i].M=m;sessions[i].counts=links[i].counts;sessions[i].provider.wire=&wire;}
+  net_sessions=sessions;net_session_count=link_count;
   for(uint32_t i=0;i<link_count;i++){
     struct net_session *session=&sessions[i];
-    session->M=m;session->counts=links[i].counts;session->provider.wire=&wire;
     fprintf(stderr,"session link %u: communicators on port %s\n",i,session->service);
     int error=pthread_create(&session->thread,NULL,net_session_run,session);
     if(error)fprintf(stderr,"session link %u: %s\n",i,strerror(error));

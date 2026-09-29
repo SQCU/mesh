@@ -19,7 +19,9 @@
    region (default /mesh0).  The collectives are planned by mesh-collective.h's one planner
    (mesh_collective_choose / _plan) over the link map, an operand whose shape is fixed and whose
    contents vary: the bridge's link table (mesh-dataflow.h, ncclMeshLinksAttach) of stated nodes and
-   per directed link a stated alpha-beta cost and an observed up, which the communicator takes through
+   per directed link a stated alpha-beta cost and an up as the link's node observes it (this node's
+   bridge its own links, every other node's bridge its links in the reports the bridges pass on; a link
+   no report names is down, whatever is stated), which the communicator takes through
    ncclMeshConfig_t (ncclCommInitRankConfig; no table, no communicator) and a split inherits.  Each call
    plans on one snapshot of it, read when its group ends, and records its epoch; plans are kept by
    (epoch, call); a call during which the epoch moves fails as a value (ncclRemoteError, revoked) where
@@ -783,13 +785,15 @@ ncclResult_t pncclGroupEnd(void);
    ncclMeshLinksState states a link-map file (mesh-collective.h) into it, a write between calls: its
    nodes, its links' alpha and beta; the up of the bridge's own links stays as observed.
    ncclMeshLinksRead copies one consistent snapshot: links[a * NCCL_MESH_LINK_NODES + b] of a to b,
-   present[v] of node v, the bridge's node and the epoch (each where not NULL). */
+   present[v] of node v, reported[v] the sequence of node v's last report the table holds (0: none), the
+   bridge's node and the epoch (each where not NULL). */
 #define NCCL_MESH_LINK_NODES 16
 typedef struct { float alpha, beta; uint32_t stated, up; } ncclMeshLink_t;
 ncclResult_t ncclMeshLinksAttach(const char* region, void** links);
 ncclResult_t ncclMeshLinksDetach(void* links);
 ncclResult_t ncclMeshLinksState(void* links, const char* path);
-ncclResult_t ncclMeshLinksRead(void* links, ncclMeshLink_t* snapshot, uint32_t* present, uint32_t* node, uint64_t* epoch);
+ncclResult_t ncclMeshLinksRead(void* links, ncclMeshLink_t* snapshot, uint32_t* present, uint64_t* reported, uint32_t* node,
+    uint64_t* epoch);
 /* ncclCommInitRankConfig's and ncclCommSplit's config, recognized by base.size: `links` the table,
    nodes[r] rank r's node in it (every rank's node present and distinct), each read at the call.  A
    split without it inherits its parent's, restricted to its ranks. */

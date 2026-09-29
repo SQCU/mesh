@@ -2027,12 +2027,14 @@ ncclResult_t ncclMeshLinksState(void *links,const char *path){
   return error?FAIL(NULL,error==EINVAL?ncclInvalidArgument:ncclSystemError,"the link map %s: %s%s",path,strerror(error),
                     error==EINVAL?" (a link line without its alpha and beta, or a node past the table's)":""):ncclSuccess;
 }
-ncclResult_t ncclMeshLinksRead(void *links,ncclMeshLink_t *snapshot,uint32_t *present,uint32_t *node,uint64_t *epoch){
+ncclResult_t ncclMeshLinksRead(void *links,ncclMeshLink_t *snapshot,uint32_t *present,uint64_t *reported,uint32_t *node,uint64_t *epoch){
   if(!links)return FAIL(NULL,ncclInvalidArgument,"ncclMeshLinksRead: links is NULL");
   struct mesh_link_contents c;
-  uint64_t at=mesh_link_table_read(links,&c);
+  struct mesh_link_table *t=links;
+  uint64_t at=mesh_link_table_read(t,&c);
   if(snapshot)memcpy(snapshot,c.link,sizeof c.link);
   if(present)memcpy(present,c.present,sizeof c.present);
+  for(uint32_t v=0;reported && v<MESH_LINK_NODES;v++)reported[v]=atomic_load_explicit(&t->reported[v],memory_order_acquire);
   if(node)*node=((struct mesh_link_table *)links)->node;
   if(epoch)*epoch=at;
   return ncclSuccess;

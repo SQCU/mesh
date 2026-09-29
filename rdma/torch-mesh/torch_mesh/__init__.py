@@ -6,7 +6,7 @@ rank r's node nodes[r] in the bridge's link table, `links` a link-map file state
 the table as it stands); without them there is no group (ValueError on every rank alike).  A group made
 later (new_group, a DeviceMesh's) without options takes the world's, restricted to its ranks.
 links() is a snapshot of the table (epoch, the bridge's node, present, alpha/beta/stated/up per
-directed link).  A failed call (a link lost, a bridge stalled, the link map's epoch moved during it:
+directed link, each node's last report's sequence).  A failed call (a link lost, a bridge stalled, the link map's epoch moved during it:
 revoked) revokes the group's communicator; the backend raises it only once every rank has agreed on it
 (ncclMeshCommAgree, ULFM's MPI_Comm_agree), when the call is issued or at a later Work's wait.  agree()
 is that agreement on the default group, every rank calling it: (the first call that failed on any rank
@@ -105,7 +105,8 @@ def counts():
 
 
 def links(region=None):
-    """(epoch, the bridge's node, present [16], links [16, 16, 4]: alpha, beta, stated, up of a to b)."""
+    """(epoch, the bridge's node, present [16], links [16, 16, 4]: alpha, beta, stated, up of a to b, reported
+    [16]: the sequence of each node's last report the table holds, 0 none)."""
     from . import _C
     return _C.links(region or '')
 

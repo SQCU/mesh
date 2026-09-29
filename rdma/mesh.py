@@ -67,12 +67,25 @@ class LinkContents(C.Structure):
 class LinkTable:
     """The link table of a bridge region (mesh-dataflow.h: the link map as an operand of fixed shape),
     mapped: state(path) writes a link-map file's stated configuration into it, read() a snapshot and its
-    epoch, map(snapshot, nodes) the planner's LinkMap of it over those nodes."""
+    epoch, map(snapshot, nodes) the planner's LinkMap of it over those nodes.  A table made here (create,
+    as node `node`) takes what a bridge would write: observe(peer, up) its node's own link, report(origin,
+    sequence, up) another node's report (the set of nodes its links reach up)."""
 
-    def __init__(self, region=None, create=False):
-        self.table = C.c_void_p()
+    def __init__(self, region=None, create=False, node=0):
+        self.table, self.region, self.created = C.c_void_p(), region, create
         check(LIB.mesh_link_table_open(os.fsencode(region) if region else None, int(create), C.byref(self.table)))
+        if create:
+            C.cast(self.table, C.POINTER(U))[1] = node
         self.node = C.cast(self.table, C.POINTER(U))[1]
+
+    def observe(self, peer, up):
+        return LIB.mesh_link_table_observe(self.table, peer, int(up))
+
+    def report(self, origin, sequence, up):
+        words = (Q * ((LINK_NODES + 63) // 64))()
+        for v in up:
+            words[v // 64] |= 1 << (v % 64)
+        return LIB.mesh_link_table_report(self.table, origin, sequence, words)
 
     def state(self, path):
         check(LIB.mesh_link_table_state(self.table, os.fsencode(str(path))))
@@ -91,6 +104,8 @@ class LinkTable:
 
     def close(self):
         LIB.mesh_link_table_close(self.table)
+        if self.created:
+            C.CDLL(None).shm_unlink(os.fsencode(f'{self.region}.links'))
 
 
 class Collective(C.Structure):
@@ -128,6 +143,8 @@ for name, result, arguments in (
         ('mesh_link_table_state', C.c_int, [C.c_void_p, C.c_char_p]),
         ('mesh_link_table_read', Q, [C.c_void_p, C.c_void_p]),
         ('mesh_link_table_map', None, [C.c_void_p, C.POINTER(U), U, C.POINTER(LinkMap), C.c_void_p, C.c_void_p]),
+        ('mesh_link_table_observe', C.c_int, [C.c_void_p, U, U]),
+        ('mesh_link_table_report', C.c_int, [C.c_void_p, U, Q, C.POINTER(Q)]),
         ('mesh_collective_plan', U, [C.POINTER(LinkMap), U, Collective, Operand, C.POINTER(Step)]),
         ('mesh_collective_time', C.c_double, [C.POINTER(LinkMap), Collective, Operand, C.c_double, C.c_double]),
         ('mesh_collective_choose', Collective, [C.POINTER(LinkMap), Collective, Operand, C.c_double, C.c_double]),
