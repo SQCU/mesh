@@ -356,9 +356,13 @@ def _empty(shape, like):
 
 def _allgatherv(x, dim, sizes, group):
     """The blocks gathered out of place from x's block (contiguous along dim): the backend reads it in place
-    and copies it into its place in the output while the transfers run."""
+    and copies it into its place in the output while the transfers run.  An MPS output is the backend's
+    (torch_mesh.empty: in a recorded step, pages the step's commands before its last cut alone touched, so the
+    receives are posted ahead)."""
+    from . import _C
     y = x.movedim(dim, 0).contiguous()
-    out = _empty((sum(sizes),) + y.shape[1:], y)
+    shape = (sum(sizes),) + y.shape[1:]
+    out = _C.empty(list(shape), y, 'mps') if y.is_mps else _empty(shape, y)
     dist.all_gather(list(out.split(sizes)), y, group=group)
     return out.movedim(0, dim)
 

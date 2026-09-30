@@ -76,7 +76,9 @@ _autoload()
 
 
 def empty(*size, dtype=None, device='mps'):
-    """A tensor of window memory (for 'mps' the MPS allocator's): collectives read and write it in place."""
+    """A tensor of window memory (for 'mps' the MPS allocator's): collectives read and write it in place.  While
+    a step is record()ed, an 'mps' one is in pages no command of the step binds after its last cut so far, so a
+    collective's receives into it are posted ahead from that cut (the backend's collective outputs are so too)."""
     import torch
     from . import _C
     return _C.empty(list(size[0] if len(size) == 1 and isinstance(size[0], (list, tuple, torch.Size)) else size),

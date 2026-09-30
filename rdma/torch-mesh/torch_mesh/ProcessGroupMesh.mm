@@ -263,7 +263,8 @@ struct RecordedCall {
 // The recorder's replay (its layout, metal_recording.h struct MetalReplay: the commands of one invocation
 // at 24), the persistent calls, and the event the replay signals at its cuts (its first, before the step's
 // commands: the replay before it done); each recorded call, the window allocations holding the published
-// ranges' words, and the replays made so far.
+// ranges' words, the replays made so far, and the collective outputs given pages of their own (output()) and
+// their buffers' bytes.
 struct Recording {
   void *replay = nullptr, *calls = nullptr;
   int ncalls = 0;
@@ -271,7 +272,7 @@ struct Recording {
   id<MTLSharedEvent> event = nil;
   std::vector<RecordedCall> recorded;
   std::vector<void *> words;
-  uint64_t replays = 0;
+  uint64_t replays = 0, fresh_outputs = 0, fresh_bytes = 0;
   uint32_t commands() const { return replay ? *(const uint32_t *)((const char *)replay + 24) : 0; }
   ~Recording() {
     if (calls) ncclMeshPersistentFree(calls);
@@ -401,11 +402,40 @@ static id<MTLBuffer> buffer_of(void *memory, size_t *offset) {
   check(ncclMeshMemBuffer(memory, &buffer, offset), nullptr, "ncclMeshMemBuffer");
   return (__bridge id<MTLBuffer>)buffer;
 }
-// A window tensor: an MPS tensor of the MPS allocator (its heaps window heaps), or a CPU tensor of a window
-// allocation's bytes, its storage's deleter the allocation's release closure.
+// An MPS tensor a collective's receives land in (an all-gather's, an all-to-all's, a broadcast's output): while
+// a step is recorded, in pages no command of the step binds after its last cut so far (every value its own
+// pages), so the call's receives are posted ahead from that cut, not at its own part.  A buffer of the MPS
+// allocator's cache that another tensor of the step used after that cut (MetalRecordFreeAfter: NSNotFound) is
+// held aside while the allocator gives another, at last one it newly places (a window allocation of its own,
+// window_heaps), and given back once one is found.
+static at::Tensor output(at::IntArrayRef sizes, const at::TensorOptions &options) {
+  at::Tensor out = at::empty(sizes, options);
+  if (!recording || !recorded || !out.is_mps() || !out.nbytes()) return out;
+  auto *s = at::mps::getCurrentMPSStream();
+  std::vector<at::Tensor> held;
+  for (;;) {
+    id<MTLBuffer> buffer = at::native::mps::getMTLBufferStorage(out);
+    NSUInteger free = NSNotFound;
+    on_mps(s, [&] {
+      s->endKernelCoalescing();  // the commands before it recorded
+      free = recorder()->free_after(buffer);
+    });
+    if (free != NSNotFound || held.size() >= 256) break;
+    held.push_back(out);
+    out = at::empty(sizes, options);
+  }
+  if (!held.empty()) {
+    recorded->fresh_outputs++;
+    recorded->fresh_bytes += [at::native::mps::getMTLBufferStorage(out) length];
+  }
+  return out;
+}
+// A window tensor: an MPS tensor of the MPS allocator (its heaps window heaps; while a step is recorded, one a
+// collective's receives may land in ahead, output()), or a CPU tensor of a window allocation's bytes, its
+// storage's deleter the allocation's release closure.
 static at::Tensor window_tensor(at::IntArrayRef sizes, at::ScalarType dtype, bool mps) {
   auto options = at::TensorOptions().dtype(dtype);
-  if (mps) return at::empty(sizes, options.device(at::kMPS));
+  if (mps) return output(sizes, options.device(at::kMPS));
   const size_t bytes = std::max<size_t>(1, (size_t)c10::multiply_integers(sizes) * c10::elementSize(dtype));
   void *memory = nullptr;
   check(ncclMemAlloc(&memory, bytes), nullptr, "ncclMemAlloc");
@@ -1741,7 +1771,7 @@ static void functional_all_gather(const c10::OperatorHandle &, torch::jit::Stack
   const int64_t size = (*stack)[1].toInt();
   at::Tensor input = (*stack)[0].toTensor().contiguous();
   torch::jit::drop(*stack, 3);
-  at::Tensor out = at::empty(rows(input.sizes(), input.size(0) * size), input.options());
+  at::Tensor out = output(rows(input.sizes(), input.size(0) * size), input.options());
   register_work(out, group->_allgather_base(out, input));
   torch::jit::push(*stack, out);
 }
@@ -1770,7 +1800,7 @@ static void functional_all_to_all(const c10::OperatorHandle &, torch::jit::Stack
     first = 0;
     for (auto v : out_splits) first += v;
   }
-  at::Tensor out = at::empty(input.dim() ? rows(input.sizes(), first) : std::vector<int64_t>{}, input.options());
+  at::Tensor out = output(input.dim() ? rows(input.sizes(), first) : std::vector<int64_t>{}, input.options());
   register_work(out, group->alltoall_base(out, input, out_splits, in_splits));
   torch::jit::push(*stack, out);
 }
@@ -1779,7 +1809,7 @@ static void functional_broadcast(const c10::OperatorHandle &, torch::jit::Stack 
   const int64_t src = (*stack)[1].toInt();
   at::Tensor input = (*stack)[0].toTensor().contiguous();
   torch::jit::drop(*stack, 3);
-  at::Tensor out = at::empty(input.sizes(), input.options());
+  at::Tensor out = output(input.sizes(), input.options());
   if (auto *mesh = mesh_of(group)) register_work(out, mesh->broadcast_into(out, input, (int)src));
   else {
     out.copy_(input);
@@ -1796,7 +1826,7 @@ static void functional_all_gather_coalesced(const c10::OperatorHandle &, torch::
   std::vector<at::Tensor> inputs, outs;
   for (auto &t : (*stack)[0].toTensorVector()) inputs.push_back(t.contiguous());
   torch::jit::drop(*stack, 3);
-  for (auto &t : inputs) outs.push_back(at::empty(rows(t.sizes(), t.size(0) * size), t.options()));
+  for (auto &t : inputs) outs.push_back(output(rows(t.sizes(), t.size(0) * size), t.options()));
   auto work = group->allgather_into_tensor_coalesced(outs, inputs);
   for (auto &t : outs) register_work(t, work);
   torch::jit::push(*stack, outs);
@@ -1873,7 +1903,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   pybind11::class_<c10d::Recording, std::shared_ptr<c10d::Recording>>(m, "Recording")
       .def_property_readonly("commands", &c10d::Recording::commands)
       .def_property_readonly("cuts", [](const c10d::Recording &r) { return (uint64_t)r.cuts; })
-      .def_property_readonly("calls", [](const c10d::Recording &r) { return r.ncalls; });
+      .def_property_readonly("calls", [](const c10d::Recording &r) { return r.ncalls; })
+      .def_property_readonly("fresh_outputs", [](const c10d::Recording &r) { return r.fresh_outputs; })
+      .def_property_readonly("fresh_bytes", [](const c10d::Recording &r) { return r.fresh_bytes; });
   m.def("record", &c10d::record);
   m.def("replay", &c10d::replay);
 }
