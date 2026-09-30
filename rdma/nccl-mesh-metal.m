@@ -35,8 +35,10 @@ static const char *source =
   "// ncclDataType_t 0 int8 1 uint8 2 int32 3 uint32 4 int64 5 uint64 6 float16 7 float32 8 float64 9 bfloat16\n"
   "// 10 float8e4m3 11 float8e5m2; ncclRedOp_t 0 sum 1 prod 2 max 3 min.  dst and src: byte offsets into buffers 0 and 1;\n"
   "// width: a copy's unit (16, 4 or 1 bytes), received: its source the NIC wrote; published: its stores\n"
-  "// system-coherent and fenced, a word published after them (a SEND reads them), else plain (the GPU reads them).\n"
-  "struct args { ulong dst, src, n, scalar; uint type, op, nranks, width, received, published, pad[2]; };\n"
+  "// system-coherent and fenced, a word published after them (a SEND reads them), else plain (the GPU reads them);\n"
+  "// fresh: a combine's first operand is buffer 3 at byte offset `other` (the caller's send buffer, read in place),\n"
+  "// not the destination.\n"
+  "struct args { ulong dst, src, n, scalar; uint type, op, nranks, width, received, published, fresh, pad; ulong other; };\n"
   "\n"
   "// half and the fp8 formats decoded exactly to float, a float rounded to nearest even into them (one\n"
   "// rounding; fp8 saturating as NCCL's __NV_SATFINITE); bfloat16 by its float bits\n"
@@ -234,16 +236,17 @@ static const char *source =
   "  if (f64_nan(a)) return a;\n"
   "  return (op == 2 ? f64_key(b) > f64_key(a) : f64_key(b) < f64_key(a)) ? b : a;\n"
   "}\n"
-  "// D: the operand read; O: the operand stored, system-coherent; R: a piece the NIC wrote, loaded system-coherent;\n"
-  "// S: a source the GPU or the host wrote before the program\n"
-  "#define D(T) ((device T *)(d + p.dst))\n"
+  "// D: the operand read (or, fresh, the send buffer); O: the operand stored, system-coherent; W: stored plain;\n"
+  "// R: a piece the NIC wrote, loaded system-coherent; S: a source the GPU or the host wrote before the program\n"
+  "#define D(T) ((device T *)(p.fresh ? x + p.other : d + p.dst))\n"
+  "#define W(T) ((device T *)(d + p.dst))\n"
   "#define O(T) ((SYS T *)(d + p.dst))\n"
   "#define R(T) ((SYS T *)(s + p.src))\n"
   "#define S(T) ((device T *)(s + p.src))\n"
   "#define EACH for (ulong i = first; i < p.n; i += grid)\n"
   "#define GRID uint first [[thread_position_in_grid]], uint grid [[threads_per_grid]]\n"
   "\n"
-  "// dst = dst op src, src a received piece; stored OUT (O published, D plain)\n"
+  "// dst = dst op src (fresh: send op src), src a received piece; stored OUT (O published, W plain)\n"
   "#define COMBINE(OUT) switch (p.type) {\\\n"
   "  case 0: EACH OUT(char)[i] = integer<char, uint>(D(char)[i], R(char)[i], p.op); break;\\\n"
   "  case 1: EACH OUT(uchar)[i] = integer<uchar, uint>(D(uchar)[i], R(uchar)[i], p.op); break;\\\n"
@@ -258,8 +261,9 @@ static const char *source =
   "  case 10: EACH OUT(uchar)[i] = uchar(encode(apply(decode(D(uchar)[i], E4M3), decode(R(uchar)[i], E4M3), p.op), E4M3)); break;\\\n"
   "  default: EACH OUT(uchar)[i] = uchar(encode(apply(decode(D(uchar)[i], E5M2), decode(R(uchar)[i], E5M2), p.op), E5M2)); break;\\\n"
   "  }\n"
-  "kernel void combine(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
-  "  if (p.published) { COMBINE(O) FENCE; } else { COMBINE(D) }\n"
+  "kernel void combine(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]],\n"
+  "                    device uchar *x [[buffer(3)]], GRID) {\n"
+  "  if (p.published) { COMBINE(O) FENCE; } else { COMBINE(W) }\n"
   "}\n"
   "// dst = src x scalar (a premultiplication: ncclAvg on floating types, PreMulSum), one operation of the type\n"
   "kernel void premultiply(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
@@ -288,12 +292,12 @@ static const char *source =
   "}\n"
   "kernel void postdivide(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
   "  switch (p.type) {\n"
-  "  case 0: EACH D(char)[i] = divide<char, uint>(D(char)[i], p.nranks); break;\n"
-  "  case 1: EACH D(uchar)[i] = uchar(uint(D(uchar)[i]) / p.nranks); break;\n"
-  "  case 2: EACH D(int)[i] = divide<int, uint>(D(int)[i], p.nranks); break;\n"
-  "  case 3: EACH D(uint)[i] = D(uint)[i] / p.nranks; break;\n"
-  "  case 4: EACH D(long)[i] = divide<long, ulong>(D(long)[i], ulong(p.nranks)); break;\n"
-  "  case 5: EACH D(ulong)[i] = D(ulong)[i] / ulong(p.nranks); break;\n"
+  "  case 0: EACH W(char)[i] = divide<char, uint>(W(char)[i], p.nranks); break;\n"
+  "  case 1: EACH W(uchar)[i] = uchar(uint(W(uchar)[i]) / p.nranks); break;\n"
+  "  case 2: EACH W(int)[i] = divide<int, uint>(W(int)[i], p.nranks); break;\n"
+  "  case 3: EACH W(uint)[i] = W(uint)[i] / p.nranks; break;\n"
+  "  case 4: EACH W(long)[i] = divide<long, ulong>(W(long)[i], ulong(p.nranks)); break;\n"
+  "  case 5: EACH W(ulong)[i] = W(ulong)[i] / ulong(p.nranks); break;\n"
   "  default: break;\n"
   "  }\n"
   "}\n"
@@ -345,6 +349,9 @@ static const char *source =
   "}\n";
 
 enum { KERNELS = 6, KERNEL_COPY = 3, KERNEL_WAIT = 4, KERNEL_PUBLISH = 5 };
+/* A kernel's arguments (the source's struct args): byte offsets dst and src into buffers 0 and 1, `other`
+   into buffer 3 (a fresh combine's first operand). */
+struct args { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,published,fresh,pad; uint64_t other; };
 static struct { id<MTLDevice> device; id<MTLComputePipelineState> kernels[KERNELS]; uint64_t bound; } gpu;
 static _Atomic int failed;
 #define HIDDEN __attribute__((visibility("hidden")))
@@ -359,7 +366,7 @@ static uint64_t polls_in(id<MTLCommandQueue> queue,double seconds){
     id<MTLBuffer> bulk=[[gpu.device newBufferWithLength:(size_t)64<<20 options:MTLResourceStorageModePrivate] autorelease];
     memset(word.contents,0,64);
     const uint64_t list[5]={1,4096,UINT64_MAX,0,1};
-    const struct { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,published,pad[2]; } copy={0,(uint64_t)32<<20,(uint64_t)2<<20,0,0,0,0,16,0,0,{0}};
+    const struct args copy={.dst=0,.src=(uint64_t)32<<20,.n=(uint64_t)2<<20,.width=16};
     id<MTLCommandBuffer> warm=[queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder=[warm computeCommandEncoder];
     [encoder setComputePipelineState:gpu.kernels[KERNEL_COPY]];
@@ -423,6 +430,12 @@ HIDDEN void *nccl_mesh_buffer(const void *pointer,size_t bytes,uint64_t *offset)
   *offset=at-first;
   return [gpu.device newBufferWithBytesNoCopy:(void *)first length:end-first options:MTLResourceStorageModeShared deallocator:nil];
 }
+/* As nccl_mesh_buffer, the buffer made with `options` for a caller that owns it: `gone(argument)` once it is
+   deallocated. */
+HIDDEN void *nccl_mesh_buffer_owned(const void *pointer,size_t bytes,uint64_t options,void (*gone)(void *),void *argument){
+  return [gpu.device newBufferWithBytesNoCopy:(void *)pointer length:bytes options:(MTLResourceOptions)options
+                                  deallocator:^(void *at,NSUInteger length){(void)at;(void)length;gone(argument);}];
+}
 HIDDEN void *nccl_mesh_queue_create(void){
   return [gpu.device newCommandQueueWithMaxCommandBufferCount:4096];
 }
@@ -472,31 +485,33 @@ HIDDEN void nccl_mesh_program_signal(void *program,void *event,uint64_t value){
   nccl_mesh_program_end(program);
   [(id<MTLCommandBuffer>)program encodeSignalEvent:(id<MTLSharedEvent>)event value:value];
 }
-/* Kernel k (0 combine: dst op= src, 1 premultiply: dst = src x scalar, 2 postdivide: dst /= nranks, 3
-   copy: n units of `width` bytes) over n elements of `type`, dst a byte offset into buffer `to`, src into
-   `from`. */
-struct args { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,published,pad[2]; };
-static void dispatch(void *program,int k,void *to,void *from,struct args a){
+/* Kernel k (0 combine: dst op= src, or with `other` dst = other op src, other at byte offset `at` of that
+   buffer; 1 premultiply: dst = src x scalar, 2 postdivide: dst /= nranks, 3 copy: n units of `width`
+   bytes) over n elements of `type`, dst a byte offset into buffer `to`, src into `from`. */
+static void dispatch(void *program,int k,void *to,void *from,void *other,struct args a){
   @autoreleasepool {
     id<MTLComputeCommandEncoder> encoder=encoder_of(program);
     [encoder setComputePipelineState:gpu.kernels[k]];
     [encoder setBuffer:(id<MTLBuffer>)to offset:0 atIndex:0];
     [encoder setBuffer:(id<MTLBuffer>)from offset:0 atIndex:1];
     [encoder setBytes:&a length:sizeof a atIndex:2];
+    if(k==0)[encoder setBuffer:(id<MTLBuffer>)(other?other:to) offset:0 atIndex:3];
     NSUInteger width=gpu.kernels[k].maxTotalThreadsPerThreadgroup<256?gpu.kernels[k].maxTotalThreadsPerThreadgroup:256;
     [encoder dispatchThreads:MTLSizeMake(a.n<(1u<<20)?(NSUInteger)a.n:(1u<<20),1,1) threadsPerThreadgroup:MTLSizeMake(width,1,1)];
   }
 }
 HIDDEN void nccl_mesh_program_kernel(void *program,int k,void *to,uint64_t dst,void *from,uint64_t src,uint64_t n,int type,int op,
-  int nranks,uint64_t scalar,int published){
-  if(n)dispatch(program,k,to,from,(struct args){dst,src,n,scalar,(uint32_t)type,(uint32_t)op,(uint32_t)nranks,1,0,(uint32_t)(published!=0),{0}});
+  int nranks,uint64_t scalar,int published,void *other,uint64_t at){
+  if(n)dispatch(program,k,to,from,other,(struct args){.dst=dst,.src=src,.n=n,.scalar=scalar,.type=(uint32_t)type,.op=(uint32_t)op,
+    .nranks=(uint32_t)nranks,.width=1,.published=(uint32_t)(published!=0),.fresh=(uint32_t)(other!=NULL),.other=at});
 }
 /* `bytes` from offset src of buffer `from` to offset dst of buffer `to`, stored system-coherent where a word
    published after them lets a SEND read them (`published`), loaded system-coherent where the NIC wrote them
    (`received`): the copy kernel in the widest unit the offsets and length allow. */
 HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received,int published){
   const uint32_t width=!((dst|src|bytes)&15)?16:!((dst|src|bytes)&3)?4:1;
-  if(bytes)dispatch(program,KERNEL_COPY,to,from,(struct args){dst,src,bytes/width,0,0,0,0,width,(uint32_t)(received!=0),(uint32_t)(published!=0),{0}});
+  if(bytes)dispatch(program,KERNEL_COPY,to,from,NULL,(struct args){.dst=dst,.src=src,.n=bytes/width,.width=width,.received=(uint32_t)(received!=0),
+    .published=(uint32_t)(published!=0)});
 }
 /* A wait for words of `buffer` to reach their values (`at`: n pairs of a byte offset and a value), after the
    dispatches before it and before those after it; the communicator's failure word (8 bytes at offset

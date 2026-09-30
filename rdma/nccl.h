@@ -51,7 +51,12 @@
    sent and received in place; any other buffer (a numpy array, a CPU tensor, other MTLBuffer contents)
    is copied between it and window memory by the library's copy kernel, through a Metal buffer over the
    host pages that hold it (no CPU copy; the window stays the network's target, as the provider lands a
-   receive only in memory registered before its queue pair was set up).  The reductions (sum, prod,
+   receive only in memory registered before its queue pair was set up).  An out-of-place collective
+   whose send buffer is in an allocation reads it in place, with no copy into its operand: a SEND of a
+   range no earlier step of this rank's plan has written reads the send buffer, the first combine of a
+   range writes the result from the send buffer and the received piece, and the ranges of the result no
+   step writes (an all-gather's own segment, a broadcast root's) are copied from it after the transfers
+   start; a reduce-scatter whose plan writes only this rank's segment combines straight into recvbuff.  The reductions (sum, prod,
    max, min, avg, PreMulSum, every datatype) are Metal kernels: a group's calls are one command buffer
    that waits for each received piece on the completion word the bridge stores when it lands (a
    kernel polling mapped memory, no host thread between), combines it where it landed in the window,
@@ -892,10 +897,13 @@ ncclResult_t ncclMeshGroupEpochs(uint64_t* epochs, int capacity, int* count);
    land (0: none); and the handoffs between the GPU and the host: the GPU's waits on shared events its
    program encodes, the completion words its kernels wait on (the bridge's, or another program's), a
    library thread's waits on words a program publishes (a gate, a combine before its SEND, a recorded
-   word), and the command buffers the library commits. */
+   word), and the command buffers the library commits; the times a communicator's worker woke from its
+   condition variable to start a part (it spins for WORKER_SPIN_NS after its last part before it
+   sleeps), and the Metal buffers the library made (an allocation's, where no retired one of its size
+   was kept). */
 typedef struct {
   uint64_t cpuCopyBytes, gpuCopyBytes, gpuKernels, hostWaits, inputWaits, sentBytes, receivedBytes, startNs, endNs, arrivedNs;
-  uint64_t gpuEventWaits, gpuWordWaits, hostWordWaits, commits;
+  uint64_t gpuEventWaits, gpuWordWaits, hostWordWaits, commits, wakeups, buffers;
 } ncclMeshCounts_t;
 /* The process's counts so far (the times 0). */
 ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t* counts);
@@ -918,6 +926,13 @@ ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);
    `ptr` (other MTLBuffer contents the caller's kernels write) holds the point, without a lifetime: it
    is dropped once every point on it is reached. */
 ncclResult_t ncclMeshMemUse(const void* ptr, size_t bytes, void* event, uint64_t value, int write);
+/* A window allocation of `size` bytes whose Metal buffer, made with `options` (MTLResourceOptions), the
+   caller owns (*buffer, an id<MTLBuffer> of one reference; the library keeps none): the allocation is
+   freed (ncclMeshMemRelease's rule) once that buffer is deallocated, its last reference dropped by the
+   caller, a command buffer or a kept program.  It never waits for room: where the window has none, or
+   the caller's buffers would hold more than three quarters of it, it fails (ncclSystemError) and the
+   caller makes its memory elsewhere.  A tensor allocator's buffers, sent and received in place. */
+ncclResult_t ncclMeshMemAllocBuffer(void** ptr, size_t size, uint64_t options, void** buffer);
 /* The recorded points not yet reached that a use of the allocation holding `ptr` (outside the window,
    of the records over its `bytes`) waits for: the writer's, and for a writer (`write`) the readers'
    too; at most `capacity`, `count` all of them. */
