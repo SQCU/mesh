@@ -624,7 +624,7 @@ static void *link_run(void *argument){
    memory named after the region (<region>.keep: net_keep), as the comm tables live in the region, not in the
    bridge's process.  A bridge stopped (SIGTERM) with clients attached leaves the region, its keep and its link
    table as they are, its sessions suspended, and exits EX_TEMPFAIL, so its supervisor starts the next (launchd:
-   bin/mesh-bridge.sh); the next bridge started on them with the same configuration, while a client of them is
+   bin/mesh-bridge.sh; a bridge stopped with no client attached exits 0, and none is started); the next bridge started on them with the same configuration, while a client of them is
    alive, takes them as they are, registers the window before its queue pairs, pairs as the same instance and
    resumes, so a restart is to its clients and its peers a lost session: late, never failed.  Kept state whose
    clients' processes are all gone is released, by the next bridge's start (made afresh) or by --release
@@ -2103,10 +2103,10 @@ int main(int argc,char **argv){
   keeping=!atomic_load(&leaving) && net_attached(m);
   if(keeping)say("bridge node %d: stopped with clients attached: the region kept for the next bridge\n",me);
   /* The exit status says whether a successor is wanted, to a supervisor that starts one where it is not 0
-     (bin/mesh-bridge.sh: launchd's KeepAlive, SuccessfulExit false): 0, none (this bridge left the mesh; or its
-     device's teardown failed, where a successor opening the device could meet what this one still holds:
-     RDMA-RULES.md); EX_TEMPFAIL, one (a bridge stopped: its clients and peers wait for the next, which takes a
-     kept region and resumes them). */
+     (bin/mesh-bridge.sh: launchd's KeepAlive, SuccessfulExit false): EX_TEMPFAIL where the region is kept (a bridge
+     stopped with clients attached: they and its peers wait for the next, which takes it and resumes them); else 0
+     (no client waits: stopped without one, or it left the mesh; or its device's teardown failed, where a successor
+     opening the device could meet what this one still holds: RDMA-RULES.md). */
   for(uint32_t i=0;i<device_count;i++)if(!down_device(&devices[i])){say("verbs teardown failed: %s: no successor wanted\n",strerror(errno));return 0;}
   atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);
   mesh_retired_release(m);
@@ -2124,5 +2124,5 @@ int main(int argc,char **argv){
   atomic_store(&m->port.phase,atomic_load(&leaving)?MESH_LEFT:MESH_STOPPED);
   atomic_store(&m->bridge_pid,0);
   atomic_store_explicit(&control_memory,NULL,memory_order_relaxed);
-  munmap(m,length);return status?status:atomic_load(&leaving)?0:EX_TEMPFAIL;
+  munmap(m,length);return status?status:keeping?EX_TEMPFAIL:0;
 }

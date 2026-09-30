@@ -59,7 +59,7 @@ $( for arg in ${link_args[@]+"${link_args[@]}"}; do printf '<string>%s</string>'
 </array>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-<key>ExitTimeOut</key><integer>0</integer>
+<key>ExitTimeOut</key><integer>60</integer>
 <key>EnvironmentVariables</key><dict><key>MESH_LOG_DIR</key><string>$LOGDIR</string><key>MESH_QPS</key><string>$mesh_qps</string>$( [ -n "${MESH_LEDGER:-}" ] && printf '<key>MESH_LEDGER</key><string>%s</string>' "$MESH_LEDGER" )</dict>
 <key>StandardOutPath</key><string>$LOG</string>
 <key>StandardErrorPath</key><string>$LOG</string>
@@ -71,16 +71,15 @@ pid_of() { launchctl print "$DOM/$LABEL" 2>/dev/null | awk '/^\tpid = /{print $3
 
 do_stop() {
   p=$(pid_of)
-  launchctl bootout "$DOM/$LABEL" >/dev/null 2>&1 & request=$!
-  for _ in $(seq 1 300); do
-    if ! kill -0 "$request" 2>/dev/null && { [ -z "$p" ] || ! kill -0 "$p" 2>/dev/null; }; then break; fi
-    sleep 0.1
-  done
-  if kill -0 "$request" 2>/dev/null || { [ -n "$p" ] && kill -0 "$p" 2>/dev/null; }; then
-    echo "mesh-bridge: stop pending after 30s (bridge=${p:-none}, request=$request); not escalating or replacing its region" >&2
-    return 1
+  if [ -n "$p" ]; then
+    kill -TERM "$p" 2>/dev/null
+    for _ in $(seq 1 300); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
+    if kill -0 "$p" 2>/dev/null; then
+      echo "mesh-bridge: stop pending after 30s (bridge=$p); not escalating or replacing its region" >&2
+      return 1
+    fi
   fi
-  wait "$request" 2>/dev/null
+  launchctl bootout "$DOM/$LABEL" >/dev/null 2>&1
   echo "mesh-bridge: stopped"
 }
 

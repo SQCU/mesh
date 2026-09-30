@@ -32,9 +32,12 @@ interpret a model graph, choose tensor placement, or invoke application kernels.
 SIGINT and SIGTERM request orderly teardown of device resources. The operational
 rules are in [RDMA-RULES.md](../RDMA-RULES.md). The bridge is a supervised service, as
 it has been since the first pairing loop: `bin/mesh-bridge.sh` loads it as a launchd job
-that is started again whenever it exits other than 0. A stopped bridge exits
-EX_TEMPFAIL, and its successor takes the region it kept for its clients and resumes
-them. A bridge that leaves the mesh (SIGUSR2) exits 0, and none is started. A kept
+that is started again whenever it exits other than 0. A bridge stopped with clients
+attached exits EX_TEMPFAIL, and its successor takes the region it kept for them and
+resumes them; one stopped with none, or that leaves the mesh (SIGUSR2), exits 0, and
+none is started. The launcher stops a bridge with SIGTERM and boots its job out only
+once it has exited: launchd's own stop sends SIGKILL after ExitTimeOut, which it caps
+at 60 s, and 0 is SIGKILL at once (observed 2026-09-30). A kept
 region none of whose clients' processes remains is released by the next bridge's
 start or by `mesh-flow --release -s REGION`; a peer that pairs again as another
 instance (its machine restarted) fails the lost session's transfers. Device teardown belongs to the bridge,
