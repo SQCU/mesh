@@ -2144,7 +2144,10 @@ static void counted_copy(struct recording *s,struct call *k,struct launch *l,con
                           .q=pred?l->own.buffer:NULL,.grid=grid});
   count(k,GPU_KERNELS,1);
 }
-static void program_gate(struct recording *s,struct gate *g){add(s,(struct recorded){.kind=R_GATE,.gate=g});}
+/* A gate: its event and value kept with the command (the group's launch, and its gates, may be gone by the time a
+   kept program is encoded: its part ended), a persistent call's the gate itself (its launch lives with the
+   persistent calls), whose place among the recording's gates is given as it is played. */
+static void program_gate(struct recording *s,struct gate *g){add(s,(struct recorded){.kind=R_GATE,.a=g->event,.x=g->value,.gate=g->run?g:NULL});}
 /* A gate's command buffer (nccl.h ncclMeshStreamEncodeWait): `argument`'s. */
 typedef void *(*gate_fn)(void *argument,void *program,void *event,uint64_t value);
 /* The library's own: `program` committed on the queue `argument`, and the next one begun with the wait. */
@@ -2167,9 +2170,9 @@ static void *play(struct recording *k,void *program,gate_fn gate,void *argument)
     if(r->kind==R_GATE){
       struct gate *g=r->gate;
       nccl_mesh_program_end(program);
-      if(g->run){if(g->index<0)g->index=g->run->gates++;program=gate(argument,program,NULL,(uint64_t)g->index);}
-      else if(waiting)nccl_mesh_program_wait(program,g->event,g->value);
-      else program=gate(argument,program,g->event,g->value);
+      if(g){if(g->index<0)g->index=g->run->gates++;program=gate(argument,program,NULL,(uint64_t)g->index);}
+      else if(waiting)nccl_mesh_program_wait(program,r->a,r->x);
+      else program=gate(argument,program,r->a,r->x);
       waiting=1;
       continue;
     }
