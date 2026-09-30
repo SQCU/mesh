@@ -680,10 +680,13 @@ struct net_session {
   uint64_t news,*sent;
   /* the estimator's (-E, estimate_observe): the receives' busy period open (1; 2: a chunk of a held isend's
      message posted in it, its sender maybe not ready, so no observation) (its start, the bytes landed
-     in it), the least-squares state of t = a + b x (x MB, t us) and its prior's trace, the observations
-     since it last moved the link's beta, its step and the sign of its last move; estimate_news when last
-     looked and each estimate's sequence sent to the peer (source x observer) */
+     in it), the observations waiting for their lag (each busy period's bytes and ns, and the evaluations ended
+     when it closed: it is fitted once `lag` more have, as every statistic is read, mesh.h), the least-squares
+     state of t = a + b x (x MB, t us) and its prior's trace, the observations since it last moved the link's
+     beta, its step and the sign of its last move; estimate_news when last looked and each estimate's sequence
+     sent to the peer (source x observer) */
   int period; uint64_t period_start,period_bytes;
+  struct { uint64_t bytes,ns,evaluation; } lagged[64]; uint32_t lagged_head,lagged_tail;
   double theta[2],P[3],trace,step; uint32_t observed; int moved;
   uint64_t estimate_seen,*estimates_sent;
 };
@@ -712,7 +715,8 @@ static void net_links_moved(void){
    Each session estimates the beta of its link into this node from its receives: a busy period opens when
    a chunk of a receive is posted and granted with none outstanding and closes when the last outstanding
    one lands (both ends are ready from its grant on, so it is wire time, not either end's lateness); a
-   period of at least ESTIMATE_BYTES is one observation (x its MB, t its us) of t = a + b x, fitted by
+   period of at least ESTIMATE_BYTES is one observation (x its MB, t its us) of t = a + b x, taken once the
+   statistics' lag of function evaluations has ended after it (mesh.h: no call plans on a fresher one), fitted by
    recursive least squares with forgetting ESTIMATE_FORGET [Haykin 2014, Table 10.1], the covariance's
    trace capped at its prior's [Goodwin & Sin 1984] (rdma/allocate.py's Allocator), the prior the link's
    stated alpha and beta.  After ESTIMATE_MIN observations an estimate outside ESTIMATE_BAND of the
@@ -775,8 +779,7 @@ static void estimate_start(struct net_session *s){
   free(c);
   s->theta[0]=a;s->theta[1]=b;s->P[0]=a*a+100;s->P[1]=0;s->P[2]=b*b/4;s->trace=s->P[0]+s->P[2];
 }
-static void estimate_observe(struct net_session *s,uint64_t bytes,uint64_t ns){
-  if(bytes<ESTIMATE_BYTES || !link_table)return;
+static void estimate_fit(struct net_session *s,uint64_t bytes,uint64_t ns){
   const double x=(double)bytes/1e6,t=(double)ns/1e3,lambda=ESTIMATE_FORGET;
   double p00=s->P[0],p01=s->P[1],p11=s->P[2];
   const double pi0=p00+p01*x,pi1=p01+p11*x,den=lambda+pi0+pi1*x,k0=pi0/den,k1=pi1/den,e=t-s->theta[0]-s->theta[1]*x;
@@ -795,6 +798,22 @@ static void estimate_observe(struct net_session *s,uint64_t bytes,uint64_t ns){
   const float next=(float)(stated+s->step*(beta-stated));
   fprintf(stderr,"estimate: link %u -> %u beta %.4f ns/B (fit %.4f, stated %.4f, step %.3f)\n",s->provider.peer,estimate_node,next,beta,stated,s->step);
   estimate_hold(s->provider.peer,estimate_node,sequence,next);
+}
+/* A busy period observed: held until the lag's evaluations have ended after it (mesh.h, the statistics' one
+   read), then fitted (estimate_ripen). */
+static void estimate_observe(struct net_session *s,uint64_t bytes,uint64_t ns){
+  if(bytes<ESTIMATE_BYTES || !link_table)return;
+  if(s->lagged_tail-s->lagged_head>=64)s->lagged_head++;
+  const uint32_t at=s->lagged_tail++%64;
+  s->lagged[at].bytes=bytes;s->lagged[at].ns=ns;s->lagged[at].evaluation=atomic_load_explicit(&s->M->evaluations,memory_order_acquire);
+}
+static void estimate_ripen(struct net_session *s){
+  const uint64_t now=atomic_load_explicit(&s->M->evaluations,memory_order_acquire);
+  while(s->lagged_head!=s->lagged_tail && s->lagged[s->lagged_head%64].evaluation+s->M->stats_lag<=now){
+    const uint64_t bytes=s->lagged[s->lagged_head%64].bytes,ns=s->lagged[s->lagged_head%64].ns;
+    s->lagged_head++;
+    estimate_fit(s,bytes,ns);
+  }
 }
 static void net_nap(uint64_t ns){for(uint64_t end=net_now()+ns;!stop && net_now()<end;)poll(NULL,0,10);}
 /* The next cut after `at`: a multiple of the chunk, or where either end's registration region ends
@@ -818,6 +837,7 @@ static void net_emit(struct net_session *s,struct net_message message){
   if(s->output_tail-s->output_head>=NET_OUTPUT){s->failed=ENOBUFS;return;}
   s->output[s->output_tail++%NET_OUTPUT]=message;
   s->said=net_now();
+  if(message.kind==NET_HEARTBEAT)atomic_fetch_add_explicit(&s->counts->heartbeats_sent,1,memory_order_relaxed);
 }
 static struct mesh_net_comm *net_comm_at(struct net_session *s,uint32_t index,uint32_t generation){
   if(index>=MESH_NET_COMMS)return NULL;
@@ -1130,7 +1150,7 @@ static void net_receive(struct net_session *s,const struct net_message *message)
   case NET_RTS: net_announced(s,message); break;
   case NET_CREDIT: net_granted(s,message); break;
   case NET_CLOSE: net_closed(s,message); break;
-  case NET_HEARTBEAT: break;
+  case NET_HEARTBEAT: atomic_fetch_add_explicit(&s->counts->heartbeats_heard,1,memory_order_relaxed); break;
   case NET_LINKS: net_links(s,message); break;
   case NET_BETA: if(estimates)net_estimated(s,message); break;
   default: s->failed=EPROTO;
@@ -1257,7 +1277,12 @@ static int net_read(struct net_session *s,int *busy){
     ssize_t n=read(s->control,s->input+s->input_bytes,sizeof s->input-s->input_bytes);
     if(!n)return ECONNRESET;
     if(n<0)return errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR?0:errno;
-    s->input_bytes+=(size_t)n;*busy=1;s->heard=net_now();
+    /* the peer heard: the longest it had been silent, and when (its liveness) */
+    const uint64_t now=net_now();
+    if(now-s->heard>atomic_load_explicit(&s->counts->silence_ns,memory_order_relaxed))
+      atomic_store_explicit(&s->counts->silence_ns,now-s->heard,memory_order_relaxed);
+    atomic_store_explicit(&s->counts->heard_ns,now,memory_order_relaxed);
+    s->input_bytes+=(size_t)n;*busy=1;s->heard=now;
     size_t whole=s->input_bytes/sizeof(struct net_message)*sizeof(struct net_message);
     for(size_t at=0;at<whole && !s->failed;at+=sizeof(struct net_message)){
       struct net_message message;memcpy(&message,s->input+at,sizeof message);net_receive(s,&message);
@@ -1438,6 +1463,7 @@ static void net_serve(struct net_session *s){
     if(now-s->said>NET_HEARTBEAT_NS)net_emit(s,(struct net_message){.kind=NET_HEARTBEAT});
     uint64_t news=atomic_load_explicit(&link_news,memory_order_acquire);
     if(news!=s->news){s->news=news;net_publish(s);}
+    if(estimating)estimate_ripen(s);
     uint64_t estimated=atomic_load_explicit(&estimate_news,memory_order_acquire);
     if(estimates && estimated!=s->estimate_seen){s->estimate_seen=estimated;net_publish_estimates(s);}
     if(bell!=s->bell || now-s->scanned>1000000){busy|=bell!=s->bell;s->bell=bell;s->scanned=now;net_scan(s);}
@@ -1479,7 +1505,7 @@ static void *net_session_run(void *argument){
     if(estimates){
       memset(s->estimates_sent,0,(size_t)link_table->nodes*link_table->nodes*sizeof *s->estimates_sent);
       s->estimate_seen=atomic_load_explicit(&estimate_news,memory_order_acquire)-1;
-      if(estimating)estimate_start(s);
+      if(estimating){estimate_start(s);s->lagged_head=s->lagged_tail=0;}
     }
     if(link_table && mesh_link_table_observe(link_table,s->provider.peer,1)>0)net_links_moved();
     net_serve(s);
@@ -1503,7 +1529,7 @@ static void *net_session_run(void *argument){
 
 /* design/algorithm-sources.md#programcopy */
 int main(int argc,char **argv){
-  const char *name=MESH_NAME;int me=0,layout=0;double pct=0;uint32_t table_nodes=0;
+  const char *name=MESH_NAME;int me=0,layout=0;double pct=0;uint32_t table_nodes=0,lag=10;
   uint64_t arena_pages=0,block_pages=0,table_rows=0,window_pages=0,orders=4096;
   uint32_t link_count=0,device_count=0,qps=getenv("MESH_QPS")?(uint32_t)atoi(getenv("MESH_QPS")):1;
   struct mesh_link *links=aligned_alloc(_Alignof(struct mesh_link),(size_t)argc*sizeof *links);
@@ -1530,6 +1556,8 @@ int main(int argc,char **argv){
     else if(!strcmp(argv[i],"-N") && i+1<argc){char *end;unsigned long n=strtoul(argv[++i],&end,10);if(*end || !n || n>NET_LINK_NODES)die("link table nodes (-N, at most 320)");table_nodes=(uint32_t)n;}
     /* -E: estimate the beta of each link into this node from its receives (the table's third writer) */
     else if(!strcmp(argv[i],"-E"))estimating=1;
+    /* -K: the evaluations the transport's statistics lag behind their readers (mesh.h mesh_stats_read; 10) */
+    else if(!strcmp(argv[i],"-K") && i+1<argc){char *end;unsigned long k=strtoul(argv[++i],&end,10);if(*end || k>MESH_STATS/2)die("statistics lag (-K)");lag=(uint32_t)k;}
     else if(!strcmp(argv[i],"--layout"))layout=1;
     else if(!strcmp(argv[i],"-s") && i+1<argc)name=argv[++i];
     else if(!strcmp(argv[i],"--link") && i+1<argc){
@@ -1588,7 +1616,7 @@ int main(int argc,char **argv){
      from its start as its reports are */
   if(!(estimates=calloc((size_t)table_nodes*table_nodes,sizeof *estimates)))die("link estimate allocation");
   estimate_node=(uint32_t)me;estimate_sequence=((uint64_t)started.tv_sec*1000+(uint64_t)started.tv_nsec/1000000)<<20;
-  *m=geometry;m->node=(uint32_t)me;m->version=MESH_VERSION;
+  *m=geometry;m->node=(uint32_t)me;m->version=MESH_VERSION;m->stats_lag=lag;
   for(uint32_t r=0;r<mesh_rows(m);r++)atomic_store_explicit(&mesh_page(m)[r].mapping,MESH_ABSENT,memory_order_relaxed);
   struct mesh_wire wire={0};
   if(wire_map(&wire,m,fd))die("transport page aliases");

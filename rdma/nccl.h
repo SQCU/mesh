@@ -964,8 +964,21 @@ typedef struct {
   uint64_t cpuCopyBytes, gpuCopyBytes, gpuKernels, hostWaits, inputWaits, sentBytes, receivedBytes, startNs, endNs, arrivedNs;
   uint64_t gpuEventWaits, gpuWordWaits, hostWordWaits, commits, wakeups, buffers, sends, grantWaits, readyNs;
 } ncclMeshCounts_t;
-/* The process's counts so far (the times 0). */
+/* The process's counts as they stood K evaluations ago or earlier (ncclMeshStats: its last entry among those a
+   reader now may read; the times 0; all 0 where there is none). */
 ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t* counts);
+/* The transport's statistics, lagged (mesh.h): the bridge's ring holds, for each function evaluation (a part of a
+   group, as it ends), every link's counts as they stood then (ncclMeshStatsLink_t: flow control, bytes, the
+   communicator session's pairings, its heartbeats sent and heard, the longest silence it heard from its peer, its
+   resumptions and the chunks sent and posted again) and the ending process's (its pid, and client: ncclMeshCounts_t's
+   counts in their order, then the gates opened and the spins that gave up).  The one read: the reader's evaluation `evaluation` (0: the
+   evaluations ended so far) and the entries of evaluations first..evaluation - lag still in the ring, at most
+   `capacity` into `out`, `count` of them; the evaluations ended so far and the lag (the bridge's -K), where not
+   NULL.  Nothing reads a fresher one: a statistic reaches a reader K evaluations after the one it describes. */
+typedef struct { uint64_t sendStalls, receiveStalls, creditWaits, sends, sendBytes, receives, receiveBytes, netSends, netSendBytes, netReceives,
+  netReceiveBytes, sessions, heartbeatsSent, heartbeatsHeard, silenceNs, resumes, resends, reposts; } ncclMeshStatsLink_t;
+typedef struct { uint64_t evaluation, ns; uint32_t links, pid; uint64_t client[24]; ncclMeshStatsLink_t link[8]; } ncclMeshStats_t;
+ncclResult_t ncclMeshStats(uint64_t evaluation, uint64_t first, ncclMeshStats_t* out, int capacity, int* count, uint64_t* evaluations, uint32_t* lag);
 /* The counts of each call of this thread's last ended group, in issue order (at most `capacity`),
    as ncclMeshGroupPlans; complete once the group has (a part's wait for its gate counts on its first
    call, the NULL stream's end on the group's last). */

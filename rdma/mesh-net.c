@@ -425,6 +425,17 @@ void mesh_net_comm_counts(void *comm,uint64_t counts[4]){
   counts[3]=atomic_load_explicit(&slot->posted,memory_order_relaxed);
 }
 
+uint64_t mesh_net_stats_record(const uint64_t *client,uint32_t count){
+  return net.m?mesh_stats_record(net.m,client,count,(uint32_t)getpid(),clock_gettime_nsec_np(CLOCK_UPTIME_RAW)):0;
+}
+size_t mesh_net_stats_read(uint64_t evaluation,uint64_t first,void *out,size_t capacity){
+  return net.m?mesh_stats_read(net.m,evaluation,first,out,capacity):0;
+}
+void mesh_net_stats_shape(uint64_t *evaluations,uint32_t *lag,size_t *entry){
+  if(evaluations)*evaluations=net.m?atomic_load_explicit(&net.m->evaluations,memory_order_acquire):0;
+  if(lag)*lag=net.m?net.m->stats_lag:0;
+  if(entry)*entry=net.m?(size_t)net.m->stats_stride:0;
+}
 int mesh_net_alive(void *comm){
   struct net_comm_handle *c=comm;
   return c && atomic_load_explicit(&net_slot(c)->state,memory_order_acquire)==c->kind;

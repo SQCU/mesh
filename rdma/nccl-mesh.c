@@ -209,7 +209,8 @@ HIDDEN void nccl_mesh_program_kernel(void *program,int kernel,void *to,uint64_t 
   int published,void *other,uint64_t at,void *pred,uint64_t pred_at,int want,uint64_t grid);
 HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received,int published,
   void *pred,uint64_t pred_at,int want,uint64_t grid);
-HIDDEN void nccl_mesh_program_spin(void *program,void *buffer,const uint64_t *at,uint32_t n,uint64_t flag,uint64_t leaked,void *const *touch,int ntouch);
+HIDDEN void nccl_mesh_program_spin(void *program,void *buffer,const uint64_t *at,uint32_t n,uint64_t flag,uint64_t leaked,void *given,
+  void *const *touch,int ntouch);
 HIDDEN void nccl_mesh_program_publish(void *program,void *buffer,uint64_t at,uint64_t value,void *pred,uint64_t pred_at,int want);
 HIDDEN void nccl_mesh_program_zero(void *program,void *buffer,uint64_t at,uint64_t n);
 HIDDEN void nccl_mesh_program_counted(void *program,void *to,void *from,void *counts,void *got,void *landed,const uint64_t *a,uint32_t na,uint64_t units,
@@ -252,6 +253,19 @@ static void count(struct call *k,int what,uint64_t amount){
   if(k && k->tally)k->tally[what]+=amount;
 }
 static void tally_release(struct tally *t){if(t && atomic_fetch_sub(&t->refs,1)==1)free(t);}
+/* Gates opened (struct gate), and a word of the window each spin that gives up counts itself in (the process's
+   first program makes it), counts of the process's as the others. */
+static _Atomic uint64_t opened;
+static struct { void *buffer; _Atomic uint32_t *word; } gave_up;
+/* An evaluation's end (a part of a group, finish): the bridge's ring (mesh.h) takes every link's counts and the
+   process's (totals, then the gates opened), which only a reader K evaluations on sees (ncclMeshStats). */
+static void stats_record(void){
+  uint64_t client[MESH_STATS_CLIENT]={0};
+  for(int i=0;i<COUNTS;i++)client[i]=atomic_load_explicit(&totals[i],memory_order_relaxed);
+  client[COUNTS]=atomic_load_explicit(&opened,memory_order_relaxed);
+  client[COUNTS+1]=gave_up.word?atomic_load_explicit(gave_up.word,memory_order_relaxed):0;
+  mesh_net_stats_record(client,MESH_STATS_CLIENT);
+}
 
 /* ---- datatypes and operators ---- */
 static const size_t type_bytes[ncclNumTypes]={1,1,4,4,8,8,2,4,8,2,1,1};
@@ -1048,19 +1062,20 @@ static void gate_arm(struct gate *g){
 static void gates_check(struct ncclComm *c){
   if(!c->narmed)return;
   pthread_mutex_lock(&c->gates_lock);
-  int opened=0;
+  int opened_now=0;
   for(int i=0;i<c->narmed;i++){
     struct gate *g=c->armed[i];
     if(!g->ready){
       g->ready=1;
       for(uint32_t w=0;w<g->nwords && g->ready;w++)g->ready=atomic_load_explicit(g->words[w],memory_order_acquire)!=0;
     }
-    if(!g->ready || i!=opened)continue;
+    if(!g->ready || i!=opened_now)continue;
     if(g->event)nccl_mesh_event_signal(g->event,g->value);
     if(g->landing)atomic_store_explicit(g->landing,1,memory_order_release);
-    opened++;
+    atomic_fetch_add_explicit(&opened,1,memory_order_relaxed);
+    opened_now++;
   }
-  if(opened){memmove(c->armed,c->armed+opened,(size_t)(c->narmed-opened)*sizeof *c->armed);c->narmed-=opened;}
+  if(opened_now){memmove(c->armed,c->armed+opened_now,(size_t)(c->narmed-opened_now)*sizeof *c->armed);c->narmed-=opened_now;}
   pthread_mutex_unlock(&c->gates_lock);
 }
 /* A flight done: its part finished if its collectives are. */
@@ -1345,6 +1360,7 @@ static int persistent_step(struct ncclComm *c,struct persistent *p){
 static void finish(struct ncclComm *c,struct item *it,ncclResult_t result){
   struct launch *l=it->launch;
   gates_check(c);
+  stats_record();
   if(result){
     uint64_t first=0;
     for(int i=0;i<it->n;i++)if(!first || it->calls[i].index<first)first=it->calls[i].index;
@@ -2090,7 +2106,17 @@ static void spin(struct recording *k,struct call *call,struct region r,const uin
   uint64_t *copy=malloc(2*n*sizeof *copy);
   if(!copy){k->failed=1;return;}
   memcpy(copy,list,2*n*sizeof *copy);
-  struct recorded rec={.kind=R_SPIN,.a=r.buffer,.n=n,.list=copy,.x=off(r,(const void *)flag),.y=off(r,(const void *)leaked)};
+  if(!gave_up.buffer){
+    unsigned char *word=NULL;
+    if(!span_alloc(64,&word,NULL)){
+      memset(word,0,64);
+      pthread_mutex_lock(&heap.lock);
+      gave_up.buffer=span_of(word,64)->buffer;nccl_mesh_retain(gave_up.buffer);
+      pthread_mutex_unlock(&heap.lock);
+      gave_up.word=(_Atomic uint32_t *)word;
+    }
+  }
+  struct recorded rec={.kind=R_SPIN,.a=r.buffer,.b=gave_up.buffer,.n=n,.list=copy,.x=off(r,(const void *)flag),.y=off(r,(const void *)leaked)};
   memcpy(rec.touch,touch,sizeof touch);
   add(k,rec);
   count(call,GPU_WORD_WAITS,n);
@@ -2182,7 +2208,7 @@ static void *play(struct recording *k,void *program,gate_fn gate,void *argument)
     else if(r->kind==R_KERNEL)nccl_mesh_program_kernel(program,r->which,r->a,r->x,r->b,r->y,r->n,r->type,r->op,r->nranks,r->scalar,r->published,r->c,r->z,
                                                       r->q,r->pred?r->pred-1:0,r->want,r->grid);
     else if(r->kind==R_COPY)nccl_mesh_program_copy(program,r->a,r->x,r->b,r->y,r->n,r->which,r->published,NULL,0,0,0);
-    else if(r->kind==R_SPIN)nccl_mesh_program_spin(program,r->a,r->list,(uint32_t)r->n,r->x,r->y,r->touch,4);
+    else if(r->kind==R_SPIN)nccl_mesh_program_spin(program,r->a,r->list,(uint32_t)r->n,r->x,r->y,r->b,r->touch,4);
     else if(r->kind==R_COUNTED)nccl_mesh_program_counted(program,r->a,r->b,r->c,r->d,r->e,r->list,(uint32_t)r->x,r->n,r->q,r->grid);
     else if(r->kind==R_ZERO)nccl_mesh_program_zero(program,r->a,r->x,r->n);
     else nccl_mesh_program_publish(program,r->a,r->x,r->y,r->q,r->pred?r->pred-1:0,r->want);
@@ -3240,11 +3266,52 @@ static ncclMeshCounts_t counts_of(const uint64_t *c,int timed){
     .arrivedNs=timed?c[ARRIVED]:0,.gpuEventWaits=c[GPU_EVENT_WAITS],.gpuWordWaits=c[GPU_WORD_WAITS],.hostWordWaits=c[HOST_WORD_WAITS],
     .commits=c[COMMITS],.wakeups=c[WAKEUPS],.buffers=c[BUFFERS],.sends=c[SENDS],.grantWaits=c[GRANT_WAITS],.readyNs=timed?c[READIED]:0};
 }
+_Static_assert(sizeof(ncclMeshStatsLink_t)==sizeof(struct mesh_stats_link) && MESH_STATS_CLIENT==24 && COUNTS+2<=MESH_STATS_CLIENT,"ncclMeshStats_t");
+/* The ring's entries (mesh.h) read as ncclMeshStats_t; the last of this process's among them, its counts. */
+static void stats_copy(const struct mesh_stats_entry *e,ncclMeshStats_t *out){
+  memset(out,0,sizeof *out);
+  out->evaluation=atomic_load_explicit(&e->evaluation,memory_order_relaxed);out->ns=e->ns;out->pid=e->pid;
+  out->links=e->links<8?e->links:8;
+  memcpy(out->client,e->client,sizeof out->client);
+  for(uint32_t l=0;l<out->links;l++)memcpy(out->link+l,e->link+l,sizeof out->link[l]);
+}
+ncclResult_t ncclMeshStats(uint64_t evaluation,uint64_t first,ncclMeshStats_t *out,int capacity,int *count,uint64_t *evaluations,uint32_t *lag){
+  if(!count)return FAIL(NULL,ncclInvalidArgument,"ncclMeshStats: count is NULL");
+  ncclResult_t status=global_attach();
+  if(status)return status;
+  uint64_t ended=0;uint32_t k=0;size_t bytes=0;
+  mesh_net_stats_shape(&ended,&k,&bytes);
+  if(evaluations)*evaluations=ended;
+  if(lag)*lag=k;
+  *count=0;
+  if(!evaluation || evaluation>ended)evaluation=ended;
+  unsigned char *entries=capacity>0?malloc((size_t)capacity*bytes):NULL;
+  if(capacity>0 && !entries)return FAIL(NULL,ncclSystemError,"allocation");
+  const size_t got=capacity>0?mesh_net_stats_read(evaluation,first,entries,(size_t)capacity):0;
+  for(size_t i=0;i<got;i++)stats_copy((const struct mesh_stats_entry *)(entries+i*bytes),out+i);
+  *count=(int)got;
+  free(entries);
+  return ncclSuccess;
+}
 ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t *counts){
   if(!counts)return FAIL(NULL,ncclInvalidArgument,"ncclMeshGetCounts: counts is NULL");
-  uint64_t now[COUNTS];
-  for(int i=0;i<COUNTS;i++)now[i]=atomic_load_explicit(&totals[i],memory_order_relaxed);
-  *counts=counts_of(now,0);
+  memset(counts,0,sizeof *counts);
+  /* this process's counts as its last evaluation K or more before the region's last recorded them */
+  ncclMeshStats_t last[64];int n=0;uint64_t ended=0;uint32_t k=0;
+  ncclResult_t status=ncclMeshStats(0,0,NULL,0,&n,&ended,&k);
+  if(status)return status;
+  const uint64_t top=ended>k?ended-k:0;
+  const uint32_t pid=(uint32_t)getpid();
+  for(uint64_t first=top>=64?top-63:1;top && first>=1;first=first>64?first-64:0){
+    if((status=ncclMeshStats(ended,first,last,64,&n,NULL,NULL)))return status;
+    for(int i=n-1;i>=0;i--)if(last[i].pid==pid){
+      uint64_t now[COUNTS];
+      for(int j=0;j<COUNTS;j++)now[j]=last[i].client[j];
+      *counts=counts_of(now,0);
+      return ncclSuccess;
+    }
+    if(first==1)break;
+  }
   return ncclSuccess;
 }
 ncclResult_t ncclMeshTallyCounts(void *tally,ncclMeshCounts_t *counts,int capacity,int *count){

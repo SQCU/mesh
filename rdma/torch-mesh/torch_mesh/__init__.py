@@ -6,8 +6,9 @@ rank r's node nodes[r] in the bridge's link table, `links` a link-map file state
 the table as it stands); without them there is no group (ValueError on every rank alike).  A group made
 later (new_group, a DeviceMesh's) without options takes the world's, restricted to its ranks.
 links() is a snapshot of the table (epoch, the bridge's node, present, alpha/beta/stated/up per
-directed link, each node's last report's sequence).  A failed call (a link lost, a bridge stalled, the link map's epoch moved during it:
-revoked) revokes the group's communicator; the backend raises it only once every rank has agreed on it
+directed link, each node's last report's sequence).  Nothing fails a call in time (a late peer, a bridge stopped, a link whose
+session resumes make it late); a call that fails (its bridge observed a peer's exit) revokes the group's communicator; the
+backend raises it only once every rank has agreed on it
 (ncclMeshCommAgree, ULFM's MPI_Comm_agree), when the call is issued or at a later Work's wait.  agree()
 is that agreement on the default group, every rank calling it: (the first call that failed on any rank
 since the previous agreement, or None; this rank's link-table epoch); agreed() the last agreement made,
@@ -15,9 +16,9 @@ by agree() or the error path: (how many so far, the failed call or None, the epo
 group of the backend exists, every MPS tensor PyTorch's MPS allocator makes (a factory's, an op's
 output) is window memory, which the backend sends and receives in place: the allocator's heaps place
 each buffer in a window allocation of its own (ProcessGroupMesh.mm window_heaps).  empty() makes a
-tensor (an MPS one, or a CPU one of a window allocation); counts() is what libnccl-mesh and the backend
-copied, sent and waited for so far; records() the window allocator's records, and address(t) where a
-tensor's bytes lie in them (0: outside the window).
+tensor (an MPS one, or a CPU one of a window allocation); counts() is what libnccl-mesh (lagged, as stats())
+and the backend copied, sent and waited for so far; stats() the transport's statistics, lagged; records() the
+window allocator's records, and address(t) where a tensor's bytes lie in them (0: outside the window).
   The backend also completes what PyTorch's parallelism APIs need of MPS tensors (_mps.py): DeviceMesh
 on "mps", DTensor's backward through nn.Linear, and context_parallel's SDPA (CPU tensors too).  Its
 first process group also installs partition.py: a mesh dimension's capacity-shaped parts (attach, write),
@@ -144,6 +145,14 @@ def replay(recording, steps=1):
 def counts():
     from . import _C
     return _C.counts()
+
+
+def stats(first=0):
+    """The transport's statistics as a reader may read them now, lagged (libnccl-mesh ncclMeshStats: a statistic
+    reaches a reader K function evaluations after the one it describes, K the bridge's -K): the evaluations ended,
+    K, and the entries of evaluations `first` (0: the last readable only) up to the evaluations ended less K."""
+    from . import _C
+    return _C.stats(first)
 
 
 def links(region=None):

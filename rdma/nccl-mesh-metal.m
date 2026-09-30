@@ -332,14 +332,16 @@ static const char *source =
   "// saw a host store within 3 us: metal-microbench output_data/handoffs-20260929/probe/spin*), and one once it is\n"
   "// seen, before the loads it orders.  It polls at most `bound` times in all, a performance setting: every word\n"
   "// seen, its flag word is set (the work predicated on it runs now); else its call's leaked word is set, so the\n"
-  "// call's later spins give up at once, and the work runs after the gate instead.  list: n, bound, flag, leaked\n"
-  "// (byte offsets into buffer 0), then n (offset, value) pairs.\n"
-  "kernel void wait(device uchar *w [[buffer(0)]], constant ulong *list [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
+  "// call's later spins give up at once, and the work runs after the gate instead; the first to give up counts\n"
+  "// itself in buffer 2's word (a statistic).  list: n, bound, flag, leaked (byte offsets into buffer 0), then n\n"
+  "// (offset, value) pairs.\n"
+  "kernel void wait(device uchar *w [[buffer(0)]], constant ulong *list [[buffer(1)]], device atomic_uint *given [[buffer(2)]],\n"
+  "                 uint i [[thread_position_in_grid]]) {\n"
   "  if (i) return;\n"
   "  SYS ulong *flag = (SYS ulong *)(w + list[2]), *leaked = (SYS ulong *)(w + list[3]);\n"
   "  ulong total = 0;\n"
   "  float pace = float(list[0]);\n"
-  "  bool seen = !*leaked;\n"
+  "  bool seen = !*leaked, fresh = seen;\n"
   "  for (ulong k = 0; seen && k < list[0]; k++)\n"
   "    for (SYS ulong *word = (SYS ulong *)(w + list[4 + 2 * k]);; total++) {\n"
   "      if (*word >= list[5 + 2 * k]) break;\n"
@@ -350,7 +352,7 @@ static const char *source =
   "    }\n"
   "  if (pace < 0.0f) seen = false;\n"
   "  FENCE;\n"
-  "  if (seen) *flag = 1ul; else *leaked = 1ul;\n"
+  "  if (seen) *flag = 1ul; else { *leaked = 1ul; if (fresh) atomic_fetch_add_explicit(given, 1u, memory_order_relaxed); }\n"
   "  FENCE;\n"
   "}\n"
   "// a counted all-to-all's own rows (nccl-mesh.c counted_copy): a: dst and src (byte offsets into buffers 0 and 1),\n"
@@ -545,7 +547,7 @@ HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *fro
    byte offset `flag`) set where it saw them all, else its call's leaked word (`leaked`).  The buffers the waited
    requests read or write (`touch`) are declared used, so Metal orders a later command buffer's work on them after
    the spin, as it did after an event wait: it orders a queue's command buffers only where they share a buffer. */
-HIDDEN void nccl_mesh_program_spin(void *program,void *buffer,const uint64_t *at,uint32_t n,uint64_t flag,uint64_t leaked,
+HIDDEN void nccl_mesh_program_spin(void *program,void *buffer,const uint64_t *at,uint32_t n,uint64_t flag,uint64_t leaked,void *given,
   void *const *touch,int ntouch){
   @autoreleasepool {
     const size_t bytes=(4+2*(size_t)n)*sizeof(uint64_t);
@@ -557,6 +559,7 @@ HIDDEN void nccl_mesh_program_spin(void *program,void *buffer,const uint64_t *at
     for(int t=0;t<ntouch;t++)if(touch[t])[encoder useResource:(id<MTLBuffer>)touch[t] usage:MTLResourceUsageRead|MTLResourceUsageWrite];
     [encoder setComputePipelineState:gpu.kernels[KERNEL_WAIT]];
     [encoder setBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:0];
+    [encoder setBuffer:(id<MTLBuffer>)(given?given:buffer) offset:0 atIndex:2];
     if(bytes<=4096)[encoder setBytes:list length:bytes atIndex:1];
     else{
       id<MTLBuffer> held=[[gpu.device newBufferWithBytes:list length:bytes options:MTLResourceStorageModeShared] autorelease];

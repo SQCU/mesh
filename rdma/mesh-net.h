@@ -108,6 +108,13 @@ int mesh_net_window(void **base,size_t *bytes);
    requests completed, sends that waited for credit, requests posted. */
 int mesh_net_error(void);
 void mesh_net_comm_counts(void *comm,uint64_t counts[4]);
+/* The transport's statistics, lagged (mesh.h mesh_stats_record, mesh_stats_read): an evaluation's end recorded
+   with this client's `count` counts (its evaluation's index); the entries of evaluations first..evaluation - lag
+   copied into `out` (capacity entries of the ring's entry bytes; how many); the evaluations ended so far, the
+   lag, an entry's bytes. */
+uint64_t mesh_net_stats_record(const uint64_t *client,uint32_t count);
+size_t mesh_net_stats_read(uint64_t evaluation,uint64_t first,void *out,size_t capacity);
+void mesh_net_stats_shape(uint64_t *evaluations,uint32_t *lag,size_t *entry);
 /* Whether a send or receive comm is still connected: its session not lost. */
 int mesh_net_alive(void *comm);
 /* A comm's slot in the region's table (its index and generation), taken before it is closed, and

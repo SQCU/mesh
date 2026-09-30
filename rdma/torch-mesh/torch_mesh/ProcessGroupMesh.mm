@@ -3,10 +3,10 @@
 // makes the communicator's unique id and hands it out through the group's store.  The communicator's
 // link map is the bridge's link table (ncclMeshConfig_t), which the group's options name (torch_mesh.
 // Options: the region, a link-map file stated into it, each rank's node).  The reductions are
-// libnccl-mesh's Metal kernels.  A failed call (a link lost, a bridge stalled, the link map's epoch
-// moved: revoked) revokes the communicator; the error path, a call's own failure when it is issued or an
-// earlier call's at a Work's wait, first agrees with every rank (ncclMeshCommAgree: ULFM's
-// MPI_Comm_agree), then raises the agreed failure; agree() is that agreement, agreed() the last one.
+// libnccl-mesh's Metal kernels.  Nothing fails a call in time; a failed call (its bridge observed a peer's
+// exit) revokes the communicator; the error path, a call's own failure when it is issued or an earlier
+// call's at a Work's wait, first agrees with every rank (ncclMeshCommAgree: ULFM's MPI_Comm_agree), then
+// raises the agreed failure; agree() is that agreement, agreed() the last one.
 //   MPS tensors in the window (window_heaps below): once the first group exists, the heaps PyTorch's MPS
 // allocator makes place each buffer in a window allocation of its own, whose one Metal buffer is the
 // tensor's MTLBuffer, so every MPS tensor made from then on (an op's output, x * 2, as much as a
@@ -22,9 +22,11 @@
 // stream of its own (ncclMeshStreamDefer): the library's worker starts its transfers once the GPU has
 // reached the fence, and the call's GPU work after them (the combines as the pieces land, on the
 // completion words the bridge sets; its completion value) is kept until its Work's wait() encodes it into
-// the current MPS command buffer (ncclMeshStreamEncodeWait), uncommitted: the next fence, or PyTorch's own
-// commits, submit it, and the MPS work after it follows it in that command buffer.  No host
-// synchronization and no other queue sits between the MPS work before and after the call.
+// the current MPS command buffer (ncclMeshStreamEncodeWait): its leaky spins and first combines, then its gate
+// (mps_gate: that command buffer committed, the next begun with a wait for the library's event, so none runs on
+// while the network is late), then the rest, uncommitted: the next fence, or PyTorch's own commits, submit it,
+// and the MPS work after it follows it.  No host synchronization and no other queue sits between the MPS work
+// before and after the call.
 //   CPU tensors: a tensor, or parts contiguous and adjacent, are the buffer itself (libnccl-mesh copies
 // memory outside the window in and out by GPU blits through a Metal buffer over its pages); parts that
 // are not are copied by the backend's own GPU blits, through Metal buffers over their pages, into a
@@ -1455,7 +1457,50 @@ static std::vector<int64_t> counted(at::Tensor host) {
   return std::vector<int64_t>(at, at + host.numel() - 1);
 }
 
-// What libnccl-mesh and this backend copied, sent and waited for so far (counted, not timed).
+// The transport's statistics as a reader may read them now (nccl.h ncclMeshStats: lagged): the evaluations ended,
+// the lag, and the entries of evaluations `first` (0: only the last one readable) up to the evaluations ended less
+// the lag, each its evaluation, time (uptime ns), process, the library's counts and each link's counts.
+static pybind11::dict stats(uint64_t first) {
+  uint64_t ended = 0;
+  uint32_t lag = 0;
+  int n = 0;
+  check(ncclMeshStats(0, 0, nullptr, 0, &n, &ended, &lag), nullptr, "ncclMeshStats");
+  if (!first) first = ended > lag ? ended - lag : 0;
+  std::vector<ncclMeshStats_t> entries(1024);
+  if (first) check(ncclMeshStats(ended, first, entries.data(), (int)entries.size(), &n, nullptr, nullptr), nullptr, "ncclMeshStats");
+  static const char *const client[] = {"cpu_copy_bytes", "gpu_copy_bytes", "gpu_kernels", "host_waits", "input_waits", "sent_bytes", "received_bytes",
+                                       "gpu_event_waits", "gpu_word_waits", "host_word_waits", "commits", "wakeups", "buffers", "sends", "grant_waits",
+                                       "gates_opened", "spins_given_up"};
+  static const char *const link[] = {"send_stalls", "receive_stalls", "credit_waits", "sends", "send_bytes", "receives", "receive_bytes", "net_sends",
+                                     "net_send_bytes", "net_receives", "net_receive_bytes", "sessions", "heartbeats_sent", "heartbeats_heard",
+                                     "silence_ns", "resumes", "resends", "reposts"};
+  pybind11::list list;
+  for (int i = 0; first && i < n; i++) {
+    const ncclMeshStats_t &e = entries[i];
+    pybind11::dict d, library;
+    pybind11::list links;
+    d["evaluation"] = e.evaluation;
+    d["ns"] = e.ns;
+    d["pid"] = e.pid;
+    for (int k = 0; k < 17; k++) library[client[k]] = e.client[k];
+    d["library"] = library;
+    for (uint32_t l = 0; l < e.links; l++) {
+      pybind11::dict counts;
+      const uint64_t *v = (const uint64_t *)&e.link[l];
+      for (int k = 0; k < 18; k++) counts[link[k]] = v[k];
+      links.append(counts);
+    }
+    d["links"] = links;
+    list.append(d);
+  }
+  pybind11::dict out;
+  out["evaluations"] = ended;
+  out["lag"] = lag;
+  out["entries"] = list;
+  return out;
+}
+// What libnccl-mesh (as its statistics' lag lets it be read: ncclMeshGetCounts) and this backend copied, sent and
+// waited for so far (counted, not timed).
 static pybind11::dict counts() {
   ncclMeshCounts_t c;
   check(ncclMeshGetCounts(&c), nullptr, "ncclMeshGetCounts");
@@ -1982,6 +2027,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("createProcessGroupMesh", &c10d::ProcessGroupMesh::create);
   m.def("empty", &c10d::empty);
   m.def("counts", &c10d::counts);
+  m.def("stats", &c10d::stats, pybind11::arg("first") = 0);
   m.def("records", &c10d::records);
   m.def("address", &c10d::address);
   m.def("trace_dump", &c10d::trace_dump);

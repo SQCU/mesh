@@ -143,7 +143,8 @@ def probe(node):
     node.probing = False
 
 def flows(bridge):
-    """A bridge's live counts a link: the poller's `flow`, or its mesh-stat's own where the poller predates them."""
+    """A bridge's counts a link, lagged (mesh-stat reads the transport's statistics as every reader does, K function
+    evaluations late: mesh.h mesh_stats_read): the poller's `flow`, or its mesh-stat's own where the poller predates them."""
     return bridge.get("flow") or [peer.get("flow") or {} for peer in (bridge.get("stat") or {}).get("peers") or []]
 
 def communicators(bridge):

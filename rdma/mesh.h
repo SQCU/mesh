@@ -5,12 +5,13 @@
 #include <stdatomic.h>
 #include <infiniband/verbs.h>
 #include <os/os_sync_wait_on_address.h>
+#include <string.h>
 /* design/pages-and-functions.md#block-addressing */
 #define MESH_MAGIC 0x4d455348u
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 109u
+#define MESH_VERSION 110u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -87,6 +88,11 @@ struct hdr {
   uint64_t notice_bytes,target_stride,net_off;
   _Atomic uint64_t client,bridge_pid,device_client,serial,control;
   struct mesh_port_info port;
+  /* the transport's statistics, lagged (below): the function evaluations ended so far, the ring's place, its
+     entries' size, how many, and the lag its readers take (the bridge's -K) */
+  _Atomic uint64_t evaluations;
+  uint64_t stats_off,stats_stride;
+  uint32_t stats_entries,stats_lag;
 };
 /* The communicator service (mesh-net.h, NCCL's network plugin ncclNet_v12_t): its tables in the region.
    A client claims a slot by CAS from MESH_NET_FREE and publishes it; the session thread of the slot's
@@ -140,7 +146,11 @@ struct mesh_net_client { _Alignas(64) _Atomic uint64_t owner; };
    for credit (receive_stalls), communicator sends announced before their receiver's irecv, which waited
    for its credit (credit_waits);
    the prepared program's SEND requests and receive records and bytes, the communicators' messages and
-   bytes; the session's phase and pairings, and the device's registered window regions. */
+   bytes; the session's phase and pairings, and the device's registered window regions; the session's
+   heartbeats sent and heard, the longest it went hearing nothing from its peer (ns), when it last heard
+   (CLOCK_MONOTONIC ns: the peer's liveness), and its resumptions after a session lost (the sessions that
+   resumed, the chunks SENT again, the chunks' RECVs posted again).  These are live, for the bridge and
+   liveness alone; everyone else reads them lagged (mesh_stats_read). */
 struct mesh_net_link {
   _Alignas(64) _Atomic uint32_t phase,chunk_frames;
   _Atomic int64_t code;
@@ -149,6 +159,7 @@ struct mesh_net_link {
   _Atomic uint64_t sends,send_bytes,receives,receive_bytes;
   _Atomic uint64_t net_sends,net_send_bytes,net_receives,net_receive_bytes;
   _Atomic uint32_t wire_regions,padding;
+  _Atomic uint64_t heartbeats_sent,heartbeats_heard,silence_ns,heard_ns,resumes,resends,reposts;
 };
 static inline struct mesh_net_link *mesh_net_links(struct hdr *m){return (struct mesh_net_link *)((char *)m+m->net_off);}
 static inline struct mesh_net_client *mesh_net_clients(struct hdr *m){return (struct mesh_net_client *)(mesh_net_links(m)+m->links);}
@@ -157,6 +168,64 @@ static inline struct mesh_net_comm *mesh_net_comms(struct hdr *m){return (struct
 static inline uint64_t mesh_net_bytes(uint32_t links){
   return (uint64_t)links*sizeof(struct mesh_net_link)+MESH_NET_CLIENTS*sizeof(struct mesh_net_client)+
     MESH_NET_MEMORY*sizeof(struct mesh_net_memory)+MESH_NET_COMMS*sizeof(struct mesh_net_comm);
+}
+/* The transport's statistics, lagged.  The operator: statistics "can still be available and be exposed, albeit
+   they should never be exposed to the inner contents of a function evaluation ... (why not have a literally
+   enforced delay on the computation of statistics ...)".  A ring of stats_entries entries indexed by function
+   evaluation: the client whose evaluation n ends (a library call's part: mesh_net_stats_record) writes entry n,
+   every link's counts (mesh_net_link) and its own (`client`: libnccl-mesh's) as they stand then; the one read
+   takes the reader's evaluation n and gives entries of evaluations up to n - lag (mesh_stats_read), so nothing
+   inside an evaluation reads anything fresher, and whatever it reads is at least `lag` evaluations old. */
+#define MESH_STATS 1024
+#define MESH_STATS_CLIENT 24
+struct mesh_stats_link { uint64_t send_stalls,receive_stalls,credit_waits,sends,send_bytes,receives,receive_bytes,
+  net_sends,net_send_bytes,net_receives,net_receive_bytes,sessions,heartbeats_sent,heartbeats_heard,silence_ns,resumes,resends,reposts; };
+struct mesh_stats_entry { _Atomic uint64_t evaluation; uint64_t ns; uint32_t links,pid; uint64_t client[MESH_STATS_CLIENT]; struct mesh_stats_link link[]; };
+static inline struct mesh_stats_entry *mesh_stats_at(struct hdr *m,uint64_t evaluation){
+  return (struct mesh_stats_entry *)((char *)m+m->stats_off+(size_t)(evaluation%m->stats_entries)*m->stats_stride);
+}
+static inline struct mesh_net_link *mesh_net_links(struct hdr *m);
+/* An evaluation's end recorded (`client`: `count` counts, `pid` its process's; `ns` the time): entry n of the ring,
+   n the evaluations ended with this one; n. */
+static inline uint64_t mesh_stats_record(struct hdr *m,const uint64_t *client,uint32_t count,uint32_t pid,uint64_t ns){
+  const uint64_t n=atomic_fetch_add_explicit(&m->evaluations,1,memory_order_acq_rel)+1;
+  struct mesh_stats_entry *e=mesh_stats_at(m,n);
+  atomic_store_explicit(&e->evaluation,0,memory_order_release);
+  atomic_thread_fence(memory_order_release);
+  e->ns=ns;e->links=m->links;e->pid=pid;
+  for(uint32_t i=0;i<MESH_STATS_CLIENT;i++)e->client[i]=i<count?client[i]:0;
+  for(uint32_t l=0;l<m->links;l++){
+    struct mesh_net_link *k=mesh_net_links(m)+l;
+    e->link[l]=(struct mesh_stats_link){atomic_load(&k->send_stalls),atomic_load(&k->receive_stalls),atomic_load(&k->credit_waits),atomic_load(&k->sends),
+      atomic_load(&k->send_bytes),atomic_load(&k->receives),atomic_load(&k->receive_bytes),atomic_load(&k->net_sends),atomic_load(&k->net_send_bytes),
+      atomic_load(&k->net_receives),atomic_load(&k->net_receive_bytes),atomic_load(&k->sessions),atomic_load(&k->heartbeats_sent),
+      atomic_load(&k->heartbeats_heard),atomic_load(&k->silence_ns),atomic_load(&k->resumes),atomic_load(&k->resends),atomic_load(&k->reposts)};
+  }
+  atomic_store_explicit(&e->evaluation,n,memory_order_release);
+  return n;
+}
+/* The one read of the statistics: the reader's evaluation `evaluation` (the evaluations it has seen end, at
+   most the region's), and the entries of evaluations first..evaluation - lag still in the ring copied into
+   `out` (capacity entries of stats_stride bytes); how many. */
+static inline size_t mesh_stats_read(struct hdr *m,uint64_t evaluation,uint64_t first,void *out,size_t capacity){
+  const uint64_t ended=atomic_load_explicit(&m->evaluations,memory_order_acquire);
+  if(evaluation>ended)evaluation=ended;
+  if(evaluation<=m->stats_lag)return 0;
+  const uint64_t last=evaluation-m->stats_lag,oldest=ended>=m->stats_entries?ended-m->stats_entries+1:1;
+  if(first<oldest)first=oldest;
+  if(!first)first=1;
+  size_t got=0;
+  for(uint64_t n=first;n<=last && got<capacity;n++){
+    const struct mesh_stats_entry *e=mesh_stats_at(m,n);
+    struct mesh_stats_entry *to=(struct mesh_stats_entry *)((char *)out+got*m->stats_stride);
+    if(atomic_load_explicit(&e->evaluation,memory_order_acquire)!=n)continue;
+    memcpy((char *)to+sizeof to->evaluation,(const char *)e+sizeof e->evaluation,m->stats_stride-sizeof e->evaluation);
+    atomic_thread_fence(memory_order_acquire);
+    if(atomic_load_explicit(&e->evaluation,memory_order_relaxed)!=n)continue;
+    atomic_store_explicit(&to->evaluation,n,memory_order_relaxed);
+    got++;
+  }
+  return got;
 }
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
@@ -265,6 +334,9 @@ static inline uint64_t mesh_layout(struct hdr *h,struct mesh_geometry g){
   h->buffer_off=at; at+=(uint64_t)g.rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->link_off=at; at+=(uint64_t)g.links*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
   h->net_off=at; at+=mesh_net_bytes(g.links); at=(at+pgsz-1)/pgsz*pgsz;
+  h->stats_stride=(sizeof(struct mesh_stats_entry)+(uint64_t)g.links*sizeof(struct mesh_stats_link)+63)&~UINT64_C(63);
+  h->stats_entries=MESH_STATS;
+  h->stats_off=at; at+=(uint64_t)MESH_STATS*h->stats_stride; at=(at+pgsz-1)/pgsz*pgsz;
   h->length_off=at; at+=(uint64_t)MESH_NOTICE_BANKS*2*g.links*g.qps*sizeof(uint32_t); at=(at+pgsz-1)/pgsz*pgsz;
   h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)g.links*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)g.rows*h->target_stride; at=(at+pgsz-1)/pgsz*pgsz;
