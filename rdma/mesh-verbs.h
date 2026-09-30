@@ -19,6 +19,21 @@
 #include <limits.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdarg.h>
+#include "mesh-disk.h"
+
+/* A line of the bridge's log (its stderr): one write, made only as mesh-disk.h's log guard allows (past
+   its cap the log moves to <path>.1; under the disk floor its lines are dropped, the first saying so). */
+__attribute__((format(printf, 1, 2))) static void say(const char *format, ...) {
+  char line[2048];
+  va_list arguments;
+  va_start(arguments, format);
+  int n = vsnprintf(line, sizeof line, format, arguments);
+  va_end(arguments);
+  if (n < 0) return;
+  if ((size_t)n >= sizeof line) n = (int)sizeof line - 1;
+  if (mesh_log_room((size_t)n)) (void)!write(2, line, (size_t)n);
+}
 
 #define QD 4095
 /* TN3205: a device's UC queue pairs (it reports max_qp 11, 10 usable); a link's session's and its prepared
@@ -95,7 +110,7 @@ static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
   if(tail)munmap(base+wire->length,tail);
   wire->data=mmap(base,wire->length,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,file,(off_t)m->data_off);
   if(wire->data==MAP_FAILED){wire->data=NULL;return -1;}
-  fprintf(stderr,"wire window=%zu bytes base=%p bank=%llu offset_in_bank=%llu\n",wire->length,(void *)wire->data,
+  say("wire window=%zu bytes base=%p bank=%llu offset_in_bank=%llu\n",wire->length,(void *)wire->data,
     (unsigned long long)((uintptr_t)wire->data>>32),(unsigned long long)((uintptr_t)wire->data&(MESH_BANK-1)));
   return 0;
 }
@@ -129,7 +144,7 @@ static int down_device(struct mesh_device *device){
   return 1;
 }
 static void down(void){ if(shm)shm_unlink(shm); }
-static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
+static void die(const char*m){ say("%s\n",m); exit(1); }
 static void onsig(int s){ (void)s; stop++; }
 
 /* design/collective-dependency-ledger.md#d13-connection-metadata-is-setup-work */
@@ -266,7 +281,7 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
     size_t extent=device->extent,regions=extent?(span+extent-1)/extent:0;
     if(!extent || regions>(size_t)capabilities.max_mr || (MESH_BANK%extent && span>MESH_BANK)){
       error=ENOMEM;
-      fprintf(stderr,"register %s window=%zu extent=%zu regions=%zu base=%p max_mr_size=%llu max_mr=%d\n",
+      say("register %s window=%zu extent=%zu regions=%zu base=%p max_mr_size=%llu max_mr=%d\n",
         device->name,span,extent,regions,(void *)wire->data,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr);
       goto done;
     }
@@ -277,7 +292,7 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
       size_t offset=(size_t)device->region_count*extent,end=offset+extent;
       device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
       if(!device->regions[device->region_count]){
-        error=errno;fprintf(stderr,"register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
+        error=errno;say("register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
           device->name,offset,(end<span?end:span)-offset,span,extent,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));
         refused=1;break;
       }
@@ -304,7 +319,7 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
     if(device->discard==MAP_FAILED){error=errno;device->discard=NULL;munmap(base,MESH_DISCARD);goto done;}
   }
   if(!device->discard_region && !(device->discard_region=ibv_reg_mr(device->domain,device->discard,MESH_DISCARD,IBV_ACCESS_LOCAL_WRITE))){error=errno?errno:ENOMEM;goto done;}
-  fprintf(stderr,"register %s window=%zu bytes extent=%zu regions=%zu arena=%llu bytes\n",
+  say("register %s window=%zu bytes extent=%zu regions=%zu arena=%llu bytes\n",
     device->name,span,extent,regions,(unsigned long long)mesh_arena_pages(m)*(uint64_t)m->pgsz);
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity){error=EOPNOTSUPP;goto done;}
@@ -361,7 +376,7 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
         struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
         if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
         queue->receive_capacity=actual.cap.max_recv_wr;queue->send_capacity=actual.cap.max_send_wr;
-        fprintf(stderr,"%s capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",provider->kind?provider->kind:"pair",q,
+        say("%s capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",provider->kind?provider->kind:"pair",q,
           actual.cap.max_send_wr,actual.cap.max_recv_wr,
           queue->completion->cqe);
       }
@@ -372,12 +387,12 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
     }
     if(!exchange(f,&mine,&you,sizeof mine,sizeof you,m,client,provider->deadline))break;
     int error=errno;close(f);
-    if(error!=ECONNRESET && error!=EPIPE && error!=ENOTCONN && error!=ECONNABORTED){fprintf(stderr,"exchange failed\n");errno=error;return -1;}
-    fprintf(stderr,"exchange reset: %s; connecting again\n",strerror(error));
+    if(error!=ECONNRESET && error!=EPIPE && error!=ENOTCONN && error!=ECONNABORTED){say("exchange failed\n");errno=error;return -1;}
+    say("exchange reset: %s; connecting again\n",strerror(error));
   }
   /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.count!=mine.count || you.node!=provider->peer){
-    fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,provider->peer); close(f);errno=EPROTO;return -1; }
+    say("exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,provider->peer); close(f);errno=EPROTO;return -1; }
   for(int q=0;q<qps;q++){
     uint32_t local[2]={provider->queues[q].pair->qp_num,(psn+(uint32_t)q)&0xffffff},remote[2];
     if(exchange(f,local,remote,sizeof local,sizeof remote,m,client,provider->deadline)){close(f);return -1;}
@@ -386,17 +401,17 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
         .grh={.hop_limit=1,.sgid_index=0}}};
     memcpy(&r.ah_attr.grh.dgid,you.gid,16);
     int rc=ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
-    if(rc){fprintf(stderr,"rtr %d rc %d\n",q,rc);close(f);return -1;}
+    if(rc){say("rtr %d rc %d\n",q,rc);close(f);return -1;}
   }
   if(configure(state,f,client)){int error=errno;close(f);errno=error;return -1;}
   for(int q=0;q<qps;q++){
     struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(psn+(uint32_t)q)&0xffffff};
     int rc=ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
-    if(rc){ fprintf(stderr,"rts %d rc %d, failed\n",q,rc); close(f); return -1; }
+    if(rc){ say("rts %d rc %d, failed\n",q,rc); close(f); return -1; }
   }
   /* design/algorithm-sources.md#link */
   static const uint64_t speeds[256]={[1]=2500000000,[2]=5000000000,[4]=10000000000,[8]=10000000000,[16]=14000000000,[32]=25000000000,[64]=50000000000,[128]=100000000000};
   static const uint8_t widths[256]={[1]=1,[2]=4,[4]=8,[8]=12};
   provider->bandwidth=speeds[pa.active_speed]*widths[pa.active_width];
-  fprintf(stderr,"%s up: %s node %d\n",provider->kind?provider->kind:"pair",ibv_get_device_name(provider->device->context->device),m->node);
+  say("%s up: %s node %d\n",provider->kind?provider->kind:"pair",ibv_get_device_name(provider->device->context->device),m->node);
   return f; }

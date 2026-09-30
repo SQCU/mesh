@@ -234,7 +234,7 @@ static int link_configure(void *state,int socket,uint64_t client){
         uint32_t row=out[i].local_row+slot*out[i].stride,chunks=mesh_row_chunks(m,row,out[i].bytes),stream=q*tx->slots+slot;
         struct mesh_send *cells=link->publications+out[i].first+(size_t)slot*column;
         /* design/prepared-machine.md#M27 */
-        if(link->ledger)fprintf(stderr,"{\"trace_binding\":%u,\"rank\":%u,\"direction\":0,\"binding\":%u,\"slot\":%u,\"begin\":%u,\"active\":%u,\"cells\":%llu}\n",
+        if(link->ledger)say("{\"trace_binding\":%u,\"rank\":%u,\"direction\":0,\"binding\":%u,\"slot\":%u,\"begin\":%u,\"active\":%u,\"cells\":%llu}\n",
           link->index,m->node,out[i].binding,slot,out[i].begin,active,(unsigned long long)(uintptr_t)cells);
         for(uint32_t u=0;u<active;u++){
           struct mesh_send *cell=cells+u;
@@ -293,7 +293,7 @@ static int link_configure(void *state,int socket,uint64_t client){
          own slot bounds nothing */
       if(own<active)r->span=MIN(r->span,own>1?own-1:1);
       /* design/prepared-machine.md#M27 */
-      if(link->ledger)fprintf(stderr,"{\"trace_binding\":%u,\"rank\":%u,\"direction\":1,\"ring\":%d,\"binding\":%u,\"slot\":%u,\"begin\":%u,\"active\":%u,\"chunks\":%u}\n",
+      if(link->ledger)say("{\"trace_binding\":%u,\"rank\":%u,\"direction\":1,\"ring\":%d,\"binding\":%u,\"slot\":%u,\"begin\":%u,\"active\":%u,\"chunks\":%u}\n",
         link->index,m->node,ring,in[i].binding,slot,in[i].begin,active,mesh_row_chunks(m,in[i].local_row+slot*in[i].stride,in[i].bytes));
     }
     for(uint32_t t=0;t<invocations;t++)for(uint32_t i=0;i<count;i++){
@@ -320,13 +320,13 @@ static int link_configure(void *state,int socket,uint64_t client){
     r->count=(size_t)(link->receive+at-r->first);
     int error=ring_advance(link,r);
     if(error){errno=error;return -1;}
-    fprintf(stderr,"receive ring=%d records=%zu posted=%zu frames=%u capacity=%u span=%u\n",
+    say("receive ring=%d records=%zu posted=%zu frames=%u capacity=%u span=%u\n",
       ring,r->count,r->posted,r->outstanding,r->capacity,r->span);
   }
   if(at)link->receive[at]=link->receive[at-1];
   uint32_t posted=1,peer_posted;
   /* design/prepared-machine.md#M27 */
-  if(link->ledger)fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"send_base\":%llu,\"receive_base\":%llu,\"invocations\":%u,\"send_capacity\":%zu,\"receive_capacity\":%zu}\n",
+  if(link->ledger)say("{\"trace_layout\":%u,\"rank\":%u,\"send_base\":%llu,\"receive_base\":%llu,\"invocations\":%u,\"send_capacity\":%zu,\"receive_capacity\":%zu}\n",
     link->index,m->node,(unsigned long long)(uintptr_t)link->publications,(unsigned long long)(uintptr_t)link->receive,
     invocations,link->trace_capacity[MESH_SEND],link->trace_capacity[MESH_RECEIVE]);
   return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
@@ -475,7 +475,7 @@ static void link_close(struct mesh_link *link,int *control){
   for(int d=0;d<2;d++){
     for(size_t i=0;i<link->traced[d];i++){
       struct mesh_trace t=link->trace[d][i];
-      fprintf(stderr,"{\"native_trace\":%u,\"direction\":%d,\"event\":%zu,\"identity\":%llu,\"ns\":[%llu,%llu,%llu]}\n",
+      say("{\"native_trace\":%u,\"direction\":%d,\"event\":%zu,\"identity\":%llu,\"ns\":[%llu,%llu,%llu]}\n",
         link->index,d,i,(unsigned long long)t.identity,(unsigned long long)t.begin,(unsigned long long)t.middle,(unsigned long long)t.end);
     }
     free(link->trace[d]);link->trace[d]=NULL;link->traced[d]=0;link->trace_capacity[d]=0;
@@ -483,7 +483,7 @@ static void link_close(struct mesh_link *link,int *control){
   /* the link's census: each queue pair's requests and frames sent and retired by the send completions
      it took, and its ring's records landed and their bytes */
   for(int q=0;link->gates && link->rings && q<link->qps;q++)
-    fprintf(stderr,"link %u census queue=%d requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu\n",
+    say("link %u census queue=%d requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu\n",
       link->index,q,(unsigned long long)link->gates[q].requests,(unsigned long long)link->gates[q].posted,
       (unsigned long long)link->gates[q].retired,(unsigned long long)link->gates[q].completions,
       link->rings[q].count,link->rings[q].posted,(unsigned long long)link->rings[q].landed,
@@ -571,7 +571,7 @@ static void *link_run(void *argument){
           char device[sizeof interface->if_name+16];
           snprintf(device,sizeof device,"rdma_%.*s%u",(int)sizeof interface->if_name,interface->if_name,interface->if_unit);
           if(!strcmp(device,link->provider.device->name)){
-            fprintf(stderr,"link unavailable: %s event=%u\n",device,notification->event_code);
+            say("link unavailable: %s event=%u\n",device,notification->event_code);
             link_error(link,ENETDOWN,4);
           }
         }
@@ -823,7 +823,7 @@ static void estimate_fit(struct net_session *s,uint64_t bytes,uint64_t ns){
   const uint64_t sequence=++estimate_sequence;
   pthread_mutex_unlock(&estimates_lock);
   const float next=(float)(stated+s->step*(beta-stated));
-  fprintf(stderr,"estimate: link %u -> %u beta %.4f ns/B (fit %.4f, stated %.4f, step %.3f)\n",s->provider.peer,estimate_node,next,beta,stated,s->step);
+  say("estimate: link %u -> %u beta %.4f ns/B (fit %.4f, stated %.4f, step %.3f)\n",s->provider.peer,estimate_node,next,beta,stated,s->step);
   estimate_hold(s->provider.peer,estimate_node,sequence,next);
 }
 /* A busy period observed: held until the lag's evaluations have ended after it (mesh.h, the statistics' one
@@ -1177,7 +1177,7 @@ static void net_estimated(struct net_session *s,const struct net_message *messag
   uint64_t *sent=s->estimates_sent+(size_t)message->key*n+message->from;
   if(message->sequence>*sent)*sent=message->sequence;
   if(isfinite(beta) && beta>0 && estimate_hold((uint32_t)message->key,message->from,message->sequence,beta))
-    fprintf(stderr,"estimate: link %u -> %u beta %.4f ns/B (node %u's)\n",(uint32_t)message->key,message->from,beta,message->from);
+    say("estimate: link %u -> %u beta %.4f ns/B (node %u's)\n",(uint32_t)message->key,message->from,beta,message->from);
 }
 /* A peer's report: the peer holds it (not sent back), and, where newer, applied and passed on. */
 static void net_links(struct net_session *s,const struct net_message *message){
@@ -1315,7 +1315,7 @@ static int net_post(struct net_session *s){
 }
 /* A failed completion, logged with the work request it names: the session ends on it. */
 static int net_failed(struct net_session *s,const struct ibv_wc *done,const char *kind,uint64_t expected,struct ibv_sge span,uint32_t mr,uint32_t transfer){
-  fprintf(stderr,"session link %u: %s completion %s (status %d vendor %u) wr_id %llu expected %llu byte_len %u; its SGE addr=0x%llx length=%u lkey=0x%x registration %u transfer %u\n",
+  say("session link %u: %s completion %s (status %d vendor %u) wr_id %llu expected %llu byte_len %u; its SGE addr=0x%llx length=%u lkey=0x%x registration %u transfer %u\n",
     s->index,kind,ibv_wc_status_str(done->status),done->status,done->vendor_err,(unsigned long long)done->wr_id,(unsigned long long)expected,done->byte_len,
     (unsigned long long)span.addr,span.length,span.lkey,mr,transfer);
   return EIO;
@@ -1644,7 +1644,7 @@ static int net_link_off(struct net_session *s){
     char device[sizeof interface->if_name+16];
     snprintf(device,sizeof device,"rdma_%.*s%u",(int)sizeof interface->if_name,interface->if_name,interface->if_unit);
     if(!strcmp(device,s->provider.device->name)){
-      fprintf(stderr,"session link %u: link unavailable: %s event=%u\n",s->index,device,event.header.event_code);
+      say("session link %u: link unavailable: %s event=%u\n",s->index,device,event.header.event_code);
       off=1;
     }
   }
@@ -1660,7 +1660,7 @@ static void net_serve(struct net_session *s){
     if(error){s->failed=error;break;}
     uint64_t now=net_now(),bell=atomic_load_explicit(&s->counts->doorbell,memory_order_acquire);
     const uint64_t drops=atomic_load_explicit(&net_drops,memory_order_relaxed);
-    if(drops!=s->drops){s->drops=drops;fprintf(stderr,"session link %u: dropped on request\n",s->index);s->failed=ECONNABORTED;break;}
+    if(drops!=s->drops){s->drops=drops;say("session link %u: dropped on request\n",s->index);s->failed=ECONNABORTED;break;}
     if(now-looked>1000000){looked=now;if(net_link_off(s)){s->failed=ENETDOWN;break;}}
     if(now-s->said>NET_HEARTBEAT_NS)net_emit(s,(struct net_message){.kind=NET_HEARTBEAT});
     uint64_t news=atomic_load_explicit(&link_news,memory_order_acquire);
@@ -1688,7 +1688,7 @@ static void *net_session_run(void *argument){
   s->events=socket(PF_SYSTEM,SOCK_RAW,SYSPROTO_EVENT);
   struct kev_request filter={KEV_VENDOR_APPLE,KEV_NETWORK_CLASS,KEV_DL_SUBCLASS};
   if(s->events>=0 && (fcntl(s->events,F_SETFL,O_NONBLOCK)<0 || ioctl(s->events,SIOCSKEVFILT,&filter)<0)){close(s->events);s->events=-1;}
-  if(s->events<0)fprintf(stderr,"session link %u: no link events (%s): a link lost is seen only as a failed completion or the control socket's end\n",
+  if(s->events<0)say("session link %u: no link events (%s): a link lost is seen only as a failed completion or the control socket's end\n",
                          s->index,strerror(errno));
   while(!stop){
     atomic_store_explicit(&s->counts->phase,MESH_PAIRING,memory_order_release);
@@ -1709,9 +1709,9 @@ static void *net_session_run(void *argument){
     /* the session lost resumes with the same peer instance; another's pairing means the peer's side of it is gone */
     if(s->suspended){
       s->suspended=0;
-      if(s->instance==s->paired){fprintf(stderr,"session link %u: resumed\n",s->index);net_resume(s);}
+      if(s->instance==s->paired){say("session link %u: resumed\n",s->index);net_resume(s);}
       else{
-        fprintf(stderr,"session link %u: its peer paired as another instance: the lost session's transfers fail\n",s->index);
+        say("session link %u: its peer paired as another instance: the lost session's transfers fail\n",s->index);
         net_lost(s,ECONNRESET);s->receive_head=s->receive_post=s->receive_tail=0;
       }
     }
@@ -1729,8 +1729,8 @@ static void *net_session_run(void *argument){
     if(link_table && mesh_link_table_observe(link_table,s->provider.peer,1)>0)net_links_moved();
     net_serve(s);
     int32_t error=stop?ECANCELED:s->failed?s->failed:EIO;
-    if(!stop)fprintf(stderr,"session down: link %u: %s\n",s->index,strerror(error));
-    if(s->strays)fprintf(stderr,"session link %u: %llu grants no request held, filled from the discard buffer\n",s->index,(unsigned long long)s->strays);
+    if(!stop)say("session down: link %u: %s\n",s->index,strerror(error));
+    if(s->strays)say("session link %u: %llu grants no request held, filled from the discard buffer\n",s->index,(unsigned long long)s->strays);
     atomic_store_explicit(&s->counts->code,error,memory_order_relaxed);
     atomic_store_explicit(&s->counts->phase,MESH_STOPPED,memory_order_release);
     if(link_table && mesh_link_table_observe(link_table,s->provider.peer,0)>0)net_links_moved();
@@ -1865,7 +1865,7 @@ int main(int argc,char **argv){
   net_region=m;
   atomic_store(&m->bridge_pid,(uint64_t)getpid());atomic_store(&m->port.phase,MESH_PAIRING);
   __sync_synchronize();m->magic=MESH_MAGIC;
-  fprintf(stderr,"bridge node %d: %u links, %u queue pairs per link, arena %llu pages, window %u pages, rows %u, orders %u\n",
+  say("bridge node %d: %u links, %u queue pairs per link, arena %llu pages, window %u pages, rows %u, orders %u\n",
     me,link_count,qps,(unsigned long long)mesh_arena_pages(m),m->wire_pages,m->rows,m->orders);
   for(uint32_t i=0;i<link_count;i++){
     sessions[i].M=m;sessions[i].counts=links[i].counts;sessions[i].provider.wire=&wire;
@@ -1875,9 +1875,9 @@ int main(int argc,char **argv){
   net_sessions=sessions;net_session_count=link_count;
   for(uint32_t i=0;i<link_count;i++){
     struct net_session *session=&sessions[i];
-    fprintf(stderr,"session link %u: communicators on port %s\n",i,session->service);
+    say("session link %u: communicators on port %s\n",i,session->service);
     int error=pthread_create(&session->thread,NULL,net_session_run,session);
-    if(error)fprintf(stderr,"session link %u: %s\n",i,strerror(error));
+    if(error)say("session link %u: %s\n",i,strerror(error));
     else session->started=1;
   }
   while(!stop){
@@ -1920,7 +1920,7 @@ int main(int argc,char **argv){
     atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);
   }
   for(uint32_t i=0;i<link_count;i++)if(sessions[i].started)pthread_join(sessions[i].thread,NULL);
-  for(uint32_t i=0;i<device_count;i++)if(!down_device(&devices[i])){fprintf(stderr,"verbs teardown failed: %s\n",strerror(errno));return 1;}
+  for(uint32_t i=0;i<device_count;i++)if(!down_device(&devices[i])){say("verbs teardown failed: %s\n",strerror(errno));return 1;}
   atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);
   mesh_retired_release(m);
   for(uint32_t i=0;i<link_count;i++){
