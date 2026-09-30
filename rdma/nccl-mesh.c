@@ -761,28 +761,34 @@ static void words_fail(struct item *it,int p2p){
 }
 
 /* ---- one collective ---- */
-/* A step's piece moves in chunks of CHUNK bytes (the bridge's own RECV chunk, MESH_DISCARD), its last
-   CHUNK bytes (or its remainder past the whole chunks) in quarters: each chunk its own isend or irecv and,
-   for a REDUCE, its own arrival and combine, so the GPU combines chunk j while chunk j + 1 is on the wire
-   and after the last byte lands only a quarter chunk's combine remains [the pipelined chunks of Patarasuk
-   & Yuan 2009, §4; NCCL's slices].  A piece of CHUNK bytes or fewer is one chunk.  Both ranks cut a piece
-   alike, from its elements alone. */
-#define CHUNK ((size_t)4<<20)
-static uint64_t chunk_whole(uint64_t elements,size_t e){
-  const uint64_t stride=CHUNK/e;
-  return elements<=stride?0:(elements-1)/stride;
+/* A step's piece moves in chunks, each its own isend or irecv and, for a REDUCE, its own arrival and
+   combine, so the GPU combines a chunk while the chunks after it are on the wire and after the last byte
+   lands only the last chunk's combine remains [the pipelined chunks of Patarasuk & Yuan 2009, §4; NCCL's
+   slices].  That overlap is all they are for (the bridge cuts every request into its own RECV chunks,
+   MESH_DISCARD, and the GPU waits on each request's completion word), so a piece is cut as its combines
+   need: from its end, TAIL, TAIL, 2 TAIL, 4 TAIL, ... bytes, as many as the piece holds whole, the first
+   chunk taking the rest too.  The last chunk's combine is TAIL's, and every other chunk's is done before
+   the chunks after it have landed: the GPU combines several times faster than the link delivers (16 MB in
+   340 us on the M4 Pro, 1.8 ms on the wire), and the chunks after one are at least a third of it.  A piece
+   under 2 TAIL is one chunk.  Both ranks cut a piece alike, from its elements alone. */
+#define TAIL ((size_t)1<<20)
+/* The doublings of the piece's cut: the largest m with TAIL << m bytes within it (0: one chunk). */
+static uint32_t chunk_doublings(uint64_t elements,size_t e){
+  const uint64_t t=TAIL/e;
+  uint32_t m=0;
+  while(m<40 && (t<<(m+1))<=elements)m++;
+  return m;
 }
-static uint32_t chunks_of(uint64_t elements,size_t e){
-  const uint64_t stride=CHUNK/e,quarter=stride/4,whole=chunk_whole(elements,e),rest=elements-whole*stride;
-  return elements<=stride?1:(uint32_t)(whole+(rest+quarter-1)/quarter);
-}
+static uint32_t chunks_of(uint64_t elements,size_t e){return chunk_doublings(elements,e)+1;}
 static uint64_t chunk_first(uint64_t elements,size_t e,uint32_t j){
-  const uint64_t stride=CHUNK/e,whole=chunk_whole(elements,e);
-  return j<whole || elements<=stride?(uint64_t)j*stride:whole*stride+(j-whole)*(stride/4);
+  const uint32_t m=chunk_doublings(elements,e);
+  return j?elements-((TAIL/e)<<(m-j)):0;
 }
 static uint64_t chunk_count(uint64_t elements,size_t e,uint32_t j){
-  const uint64_t stride=CHUNK/e,first=chunk_first(elements,e,j),whole=chunk_whole(elements,e),size=elements<=stride?elements:j<whole?stride:stride/4;
-  return elements-first<size?elements-first:size;
+  const uint32_t m=chunk_doublings(elements,e);
+  const uint64_t t=TAIL/e;
+  if(!j)return m?elements-(t<<(m-1)):elements;
+  return j==m?t:t<<(m-j-1);
 }
 /* The receives a REDUCE or COPY step keeps posted ahead of the one it waits for (a connection's request
    ring holds MESH_NET_REQUESTS). */
