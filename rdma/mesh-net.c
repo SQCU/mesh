@@ -290,6 +290,18 @@ int mesh_net_isend_word(void *sendComm,void *data,size_t size,void *mhandle,uint
 int mesh_net_irecv_word(void *recvComm,void *data,size_t size,void *mhandle,uint64_t *word,void **request){
   return net_post(recvComm,MESH_NET_IRECV,data,size,0,mhandle,word,request);
 }
+int mesh_net_isend_held(void *sendComm,void *data,size_t size,void *mhandle,uint64_t *word,void **request){
+  return net_post(sendComm,MESH_NET_HELD,data,size,0,mhandle,word,request);
+}
+int mesh_net_release(void *request,uint64_t *granted){
+  struct net_request_handle *handle=request;
+  struct mesh_net_request *r=net_slot(handle->comm)->requests+handle->sequence%MESH_NET_REQUESTS;
+  if(r->sequence!=handle->sequence)return net_result(EINVAL);
+  if(granted)*granted=atomic_load_explicit(&r->transferred,memory_order_acquire);
+  uint32_t held=MESH_NET_HELD;
+  if(atomic_compare_exchange_strong_explicit(&r->op,&held,MESH_NET_ISEND,memory_order_release,memory_order_relaxed))net_ring(handle->comm->link);
+  return MESH_NET_SUCCESS;
+}
 int mesh_net_irecv(void *recvComm,int n,void **data,size_t *sizes,int *tags,void **mhandles,void **phandles,void **request){
   (void)phandles;
   if(n!=1){*request=NULL;return net_result(EINVAL);}

@@ -58,6 +58,11 @@ int mesh_net_test(void *request,int *done,int *sizes);
    (mesh.h mesh_net_request.completion): 1 done, 2 failed. */
 int mesh_net_isend_word(void *sendComm,void *data,size_t size,void *mhandle,uint64_t *word,void **request);
 int mesh_net_irecv_word(void *recvComm,void *data,size_t size,void *mhandle,uint64_t *word,void **request);
+/* An isend announced before its bytes are written (mesh.h MESH_NET_HELD): its receiver matches it and grants
+   its chunks, which the bridge SENDs only once mesh_net_release(request) (the bytes written and visible);
+   `granted` (if not NULL) receives the bytes granted by then (0: its first byte still waits for a grant). */
+int mesh_net_isend_held(void *sendComm,void *data,size_t size,void *mhandle,uint64_t *word,void **request);
+int mesh_net_release(void *request,uint64_t *granted);
 int mesh_net_close_send(void *sendComm);
 int mesh_net_close_recv(void *recvComm);
 int mesh_net_close_listen(void *listenComm);

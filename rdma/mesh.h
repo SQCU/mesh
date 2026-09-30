@@ -102,14 +102,19 @@ struct hdr {
 enum { MESH_NET_FREE, MESH_NET_CLAIMED, MESH_NET_LISTEN, MESH_NET_CONNECTING, MESH_NET_ACCEPTABLE, MESH_NET_SEND,
        MESH_NET_RECV, MESH_NET_CLOSING, MESH_NET_FAILED };
 enum { MESH_NET_IDLE, MESH_NET_POSTED, MESH_NET_ACTIVE, MESH_NET_DONE, MESH_NET_ERROR };
-enum { MESH_NET_ISEND, MESH_NET_IRECV, MESH_NET_IFLUSH };
+/* MESH_NET_HELD: an isend announced (its receiver matches it, posts its RECVs and grants them) whose granted
+   chunks are not SENT until the client stores MESH_NET_ISEND into its op (mesh_net_release): its bytes are
+   not yet written.  A closing comm's held isends go as they are. */
+enum { MESH_NET_ISEND, MESH_NET_IRECV, MESH_NET_IFLUSH, MESH_NET_HELD };
 /* A request: `offset` into the region's registered window (mr MESH_NET_WINDOW), `size` the bytes sent or
-   the receive's capacity, `transferred` the bytes moved once it is done; `completion` 0, or 1 + the window
-   offset of an 8-byte word into which the bridge stores the request's end (1 done, 2 failed) before its
-   state, for a GPU kernel that waits on the word (nccl-mesh.c). */
+   the receive's capacity, `transferred` the bytes moved once it is done (an active isend's: the bytes its
+   receiver has granted so far); `completion` 0, or 1 + the window offset of an 8-byte word into which the
+   bridge stores the request's end (1 done, 2 failed) before its state, for a GPU kernel that waits on the
+   word (nccl-mesh.c). */
 struct mesh_net_request {
   _Alignas(64) _Atomic uint32_t state;
-  uint32_t op,mr,mr_generation;
+  _Atomic uint32_t op;
+  uint32_t mr,mr_generation;
   int32_t tag; _Atomic int32_t error;
   uint64_t sequence,offset,size;
   _Atomic uint64_t transferred;
