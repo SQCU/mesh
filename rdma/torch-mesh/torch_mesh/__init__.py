@@ -131,9 +131,10 @@ def record(step):
 
 
 def replay(recording, steps=1):
-    """`steps` replays of a record()ed step, each waited for; every rank replays alike."""
+    """`steps` replays of a record()ed step, each waited for; every rank replays alike.  The last one's command
+    buffers on the GPU, in seconds: (their GPU times summed, the first's start to the last's end)."""
     from . import _C
-    _C.replay(recording, steps)
+    return _C.replay(recording, steps)
 
 
 def counts():

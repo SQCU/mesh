@@ -208,14 +208,16 @@ struct Recorder {
   NSUInteger (*cuts)(const void *);
   int (*run_cut)(void *, NSUInteger, NSUInteger, id, uint64_t);
   void (*release)(void *);
+  void (*times)(const void *, double *, double *);
 };
 static const Recorder *recorder() {
   static const Recorder found = {(void *(*)(id, void (^)(void), const void *, size_t, NSUInteger, int))dlsym(RTLD_DEFAULT, "MetalRecord"),
                                  (void (*)(id))dlsym(RTLD_DEFAULT, "MetalRecordQueue"), (void (*)(void))dlsym(RTLD_DEFAULT, "MetalRecordCut"),
                                  (NSUInteger (*)(const void *))dlsym(RTLD_DEFAULT, "MetalReplayCuts"),
                                  (int (*)(void *, NSUInteger, NSUInteger, id, uint64_t))dlsym(RTLD_DEFAULT, "MetalReplayRunCut"),
-                                 (void (*)(void *))dlsym(RTLD_DEFAULT, "MetalReplayFree")};
-  return found.record && found.queue && found.cut && found.cuts && found.run_cut && found.release ? &found : nullptr;
+                                 (void (*)(void *))dlsym(RTLD_DEFAULT, "MetalReplayFree"),
+                                 (void (*)(const void *, double *, double *))dlsym(RTLD_DEFAULT, "MetalReplayTimes")};
+  return found.record && found.queue && found.cut && found.cuts && found.run_cut && found.release && found.times ? &found : nullptr;
 }
 // A step being recorded: each MPS call's fence is a cut of the recording (its inputs' command buffer ends
 // there at replay), its library call persistent (ncclMeshPersistentBegin), and nothing is traced.
@@ -1404,8 +1406,9 @@ static std::shared_ptr<Recording> record(pybind11::function fn) {
   return made;
 }
 // `steps` replays of a recording, each waited for: its command buffers on the recorder's queue, cut at its
-// calls, whose persistent calls start as the replay passes their cuts.
-static void replay(const std::shared_ptr<Recording> &made, int64_t steps) {
+// calls, whose persistent calls start as the replay passes their cuts.  The last one's command buffers on
+// the GPU (s): their GPU times summed, and from the first's start to the last's end.
+static std::pair<double, double> replay(const std::shared_ptr<Recording> &made, int64_t steps) {
   const Recorder *r = recorder();
   TORCH_CHECK(r && made && made->replay, "mesh: no recording to replay");
   at::mps::getCurrentMPSStream()->synchronize(at::mps::SyncType::COMMIT_AND_WAIT);  // the MPS work before it done
@@ -1421,6 +1424,9 @@ static void replay(const std::shared_ptr<Recording> &made, int64_t steps) {
   const ncclResult_t result = made->ncalls ? ncclMeshPersistentWait(made->calls) : ncclSuccess;
   TORCH_CHECK(!failed, "mesh: the replay failed (the recorder's reason is on stderr)");
   TORCH_CHECK(result == ncclSuccess, "mesh: a replayed step's calls: ", ncclGetErrorString(result), ": ", ncclGetLastError(nullptr));
+  double busy = 0, span = 0;
+  r->times(made->replay, &busy, &span);
+  return {busy, span};
 }
 
 // The trace (MESH_TRACE) written out, once the points still to be noted are (at most 1 s): a header line
