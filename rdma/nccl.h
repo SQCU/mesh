@@ -849,6 +849,20 @@ ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const 
     ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream);
 ncclResult_t ncclMeshReduceScatterVConfig(const void* sendbuff, void* recvbuff, const size_t* counts,
     ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
+/* MPI_Alltoallv with counts the GPU wrote: rank r sends each rank q the rows of sendbuff (grouped by
+   destination, in rank order: sendrows rows of `row` elements) that segment q of `counts` sums to, and
+   receives each rank's rows into recvbuff packed in rank order, at most `capacity` rows.  `counts` (int64,
+   sendsegs[q] entries for rank q, in a window allocation or host memory) is read once the call's
+   recorded points are reached; each rank's segment for this rank (recvsegs[q] entries, recvsegs[rank] =
+   sendsegs[rank]) is exchanged first and written to `received` (host memory, in rank order), and
+   `*arrived` set to 1 once it all is (2: the call failed first), so the caller can read the counts on
+   the host with no wait on the GPU; then the rows move, as many as the counts say, and the GPU copies
+   this rank's own and, where `landed` is not NULL, writes the same counts there (int64, for the caller's
+   GPU work after the call).  The caller keeps `received` and `arrived` until `*arrived` is set, or has them in
+   window allocations (their records then hold them to the call's end). */
+ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* sendsegs, void* recvbuff,
+    size_t capacity, int64_t* received, int64_t* landed, const size_t* recvsegs, uint64_t* arrived, size_t row, ncclDataType_t datatype,
+    ncclComm_t comm, cudaStream_t stream);
 /* A stream whose calls are committed to `queue` (an id<MTLCommandQueue>), or with NULL to a queue of
    its own; its event made on the queue's device, value 0. */
 ncclResult_t ncclMeshStreamCreate(cudaStream_t* stream, void* queue);

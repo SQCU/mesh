@@ -51,7 +51,8 @@
    call each (ncclMeshGetCounts, ncclMeshGroupCounts). */
 
 enum { CH_COLL, CH_P2P, CHANNELS };
-enum { K_SEND=MESH_ALLGATHER+1, K_RECV };
+enum { K_SEND=MESH_ALLGATHER+1, K_RECV, K_COUNTED };
+#define P2P(k) ((k)->kind==K_SEND || (k)->kind==K_RECV)
 /* a call's tallies: counts (also summed for the process), then its part's start and end times and when
    the worker saw the last of its pieces land */
 enum { CPU_COPY, GPU_COPY, GPU_KERNELS, HOST_WAITS, INPUT_WAITS, SENT, RECEIVED, GPU_EVENT_WAITS, GPU_WORD_WAITS, HOST_WORD_WAITS, COMMITS,
@@ -77,8 +78,12 @@ struct call {
   /* its place among the calls issued on the communicator since its last agreement, from 1; the hash of
      its whole plan (every rank's steps: what an epoch's move must leave alone for it to stand) */
   uint64_t index,whole;
-  /* a reduce-scatter's or all-gather's count a rank, the call's own copy (NULL: `count` each) */
+  /* a reduce-scatter's or all-gather's count a rank, the call's own copy (NULL: `count` each); a counted
+     all-to-all's (K_COUNTED, ncclMeshAlltoAllCounted) segment lengths, the sent then the received, a rank
+     each, its counts, where the received ones go on the host and the word set as they have, its rows of
+     `row` elements sent and the most received, and its counts' place */
   uint64_t *segments;
+  const int64_t *counted; int64_t *received,*landed; uint64_t *arrived; uint64_t row,rows,capacity; struct region cnt,lnd;
   /* resolved when the group ends */
   int combine,premultiply,postdivide; unsigned char scalar[8];
   uint64_t elements; struct mesh_collective chosen; struct mesh_step *steps; struct piece *pieces; uint32_t nsteps;
@@ -172,6 +177,7 @@ HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *fro
 HIDDEN void nccl_mesh_program_words(void *program,void *buffer,const uint64_t *at,uint32_t n,void *failures,uint64_t failure,uint64_t ns,
   void *const *touch,int ntouch);
 HIDDEN void nccl_mesh_program_publish(void *program,void *buffer,uint64_t at,uint64_t value);
+HIDDEN void nccl_mesh_program_counted(void *program,void *to,void *from,void *counts,void *got,void *landed,const uint64_t *a,uint32_t na,uint64_t units);
 HIDDEN void nccl_mesh_program_end(void *program);
 HIDDEN void nccl_mesh_program_handler(void *program,void (*done)(void *,int),void *argument);
 HIDDEN void nccl_mesh_program_commit(void *program,void (*done)(void *,int),void *argument);
@@ -748,8 +754,9 @@ static ncclResult_t word_wait(struct ncclComm *c,struct call *k,_Atomic uint64_t
 static void words_fail(struct item *it,int p2p){
   for(int i=0;i<it->n;i++){
     struct call *k=it->calls+i;
-    if((k->kind>=K_SEND)!=p2p)continue;
+    if(P2P(k)!=p2p)continue;
     for(uint32_t w=0;w<k->nwords;w++){uint64_t none=0;atomic_compare_exchange_strong(k->words+w,&none,2);}
+    if(k->arrived){uint64_t none=0;atomic_compare_exchange_strong((_Atomic uint64_t *)k->arrived,&none,2);}
   }
 }
 
@@ -857,6 +864,66 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct item
   return status;
 }
 
+/* ---- a counted all-to-all (nccl.h ncclMeshAlltoAllCounted) ----
+   The worker's side: each rank's segment of the counts exchanged with it first (its completion words the
+   call's first 2(n - 1): sends, then receives), each rank's segment for this rank written to the caller's
+   host array in rank order (this rank's own from its counts) and the caller's word set; then the rows,
+   as many to each rank as the sum of its segment and from each as the sum of the one it sent, packed in
+   rank order (the next 2(n - 1) words: sends, then receives); the GPU copies this rank's own rows (the
+   program).  A segment or a row count of 0 moves nothing: its word is set here. */
+static ncclResult_t run_counted(struct ncclComm *c,struct call *k,struct item *it){
+  const int n=c->nranks,me=c->rank,peers=n-1;
+  const size_t row=k->row*type_bytes[k->type];
+  const uint64_t *sseg=k->segments,*rseg=k->segments+n;
+  int64_t *got=(int64_t *)k->wire;
+  void **requests=calloc((size_t)(4*n),sizeof *requests);
+  size_t *bytes=calloc((size_t)(4*n),sizeof *bytes);
+  uint64_t *rows=calloc((size_t)(2*n),sizeof *rows);
+  ncclResult_t status=requests && bytes && rows?ncclSuccess:FAIL(c,ncclSystemError,"allocation");
+  for(int phase=0;phase<2 && !status;phase++){
+    uint64_t so=0,ro=0;
+    for(int q=0,i=0;q<n && !status;q++){
+      const uint64_t out=phase?rows[q]:sseg[q],in=phase?rows[n+q]:rseg[q];
+      if(q==me){so+=out;ro+=in;continue;}
+      struct peer *p=c->peers+q;
+      const int w=2*phase*peers+i;
+      unsigned char *into=phase?(unsigned char *)k->recv+ro*row:(unsigned char *)(got+ro);
+      const unsigned char *from=phase?(const unsigned char *)k->send+so*row:(const unsigned char *)(k->counted+so);
+      bytes[w]=out*(phase?row:8);bytes[w+peers]=in*(phase?row:8);
+      if(bytes[w+peers])status=post(c,0,p->recv[CH_COLL],into,bytes[w+peers],k->words+w+peers,NULL,NULL,it,requests+w+peers);
+      else atomic_store_explicit(k->words+w+peers,1,memory_order_release);
+      if(!status && bytes[w])status=post(c,1,p->send[CH_COLL],(void *)from,bytes[w],k->words+w,NULL,NULL,it,requests+w);
+      else if(!status)atomic_store_explicit(k->words+w,1,memory_order_release);
+      so+=out;ro+=in;i++;
+    }
+    for(int j=2*phase*peers;j<2*(phase+1)*peers && !status;j++)if(requests[j]){
+      status=await(c,requests[j],j<(2*phase+1)*peers?SIZE_MAX:bytes[j],NULL,NULL,it,phase?"a counted all-to-all's rows":"a counted all-to-all's counts");
+      count(k,j<(2*phase+1)*peers?SENT:RECEIVED,bytes[j]);
+      rebound(it);
+    }
+    if(status || phase)break;
+    /* the counts on the host, and each rank's rows: sent (its segment's sum), received (the sum of its segment for this rank) */
+    so=0;ro=0;
+    uint64_t total=0;
+    for(int q=0;q<n;q++){
+      const int64_t *mine=q==me?k->counted+so:got+ro;
+      memcpy(k->received+ro,mine,rseg[q]*8);
+      for(uint64_t x=0;x<sseg[q];x++)rows[q]+=(uint64_t)k->counted[so+x];
+      for(uint64_t x=0;x<rseg[q];x++)rows[n+q]+=(uint64_t)mine[x];
+      total+=rows[n+q];so+=sseg[q];ro+=rseg[q];
+    }
+    atomic_store_explicit((_Atomic uint64_t *)k->arrived,1,memory_order_release);
+    uint64_t sent=0;
+    for(int q=0;q<n;q++)sent+=rows[q];
+    if(total>k->capacity || sent>k->rows)
+      status=FAIL(c,ncclInvalidUsage,"a counted all-to-all: its counts send %llu rows of %llu and receive %llu, capacity %llu",(unsigned long long)sent,
+                  (unsigned long long)k->rows,(unsigned long long)total,(unsigned long long)k->capacity);
+  }
+  if(status && k->arrived){uint64_t none=0;atomic_compare_exchange_strong((_Atomic uint64_t *)k->arrived,&none,2);}
+  free(requests);free(bytes);free(rows);
+  return status;
+}
+
 /* ---- one communicator's part of a group ---- */
 struct transfer { int send; struct peer *peer; unsigned char *window; size_t bytes; void *request; int state; struct call *call; };
 /* A part's point-to-point transfers, in flight: posted in order on each connection (across every
@@ -926,7 +993,7 @@ static void start(struct ncclComm *c,struct item *it){
   int transfers=0;
   for(int i=0;i<it->n && !status;i++){
     struct call *k=it->calls+i;
-    if(k->kind<K_SEND)continue;
+    if(!P2P(k))continue;
     if(k->peer!=c->rank)transfers++;
     else if(k->kind==K_RECV && !k->copied)status=FAIL(c,ncclInvalidUsage,"a receive from this rank itself has no matching send to itself of its size in the group");
   }
@@ -937,7 +1004,7 @@ static void start(struct ncclComm *c,struct item *it){
     else{
       for(int i=0;i<it->n;i++){
         struct call *k=it->calls+i;
-        if(k->kind<K_SEND || k->peer==c->rank)continue;
+        if(!P2P(k) || k->peer==c->rank)continue;
         f->t[f->n++]=(struct transfer){.send=k->kind==K_SEND,.peer=c->peers+k->peer,.window=k->wire,.bytes=k->count*type_bytes[k->type],.call=k};
       }
       f->remaining=f->n;f->it=it;it->flight=f;
@@ -948,7 +1015,12 @@ static void start(struct ncclComm *c,struct item *it){
       progress(c);
     }
   }
-  for(int i=0;i<it->n && !status;i++)if(it->calls[i].kind<K_SEND)status=run_collective(c,it->calls+i,it),it->networked=1;
+  for(int i=0;i<it->n && !status;i++)if(!P2P(it->calls+i)){
+    struct call *k=it->calls+i;
+    status=k->kind==K_COUNTED?run_counted(c,k,it):run_collective(c,k,it);
+    it->networked=1;
+  }
+  for(int i=0;status && i<it->n;i++)if(it->calls[i].arrived){uint64_t none=0;atomic_compare_exchange_strong((_Atomic uint64_t *)it->calls[i].arrived,&none,2);}
   /* every completion word the program waits on, whatever happened (a flight's once it retires) */
   if(status){words_fail(it,0);if(!it->flight)words_fail(it,1);}
   if(status && !it->result)it->result=status;
@@ -985,7 +1057,8 @@ static ncclResult_t revoked(struct ncclComm *c,struct item *it,ncclResult_t resu
     const struct call *k=it->calls+i;
     int touched;
     if(k->epoch==later)continue;
-    if(k->kind>=K_SEND)touched=k->peer!=c->rank && !linked(&c->moved,c->rank,k->peer);
+    if(k->kind==K_COUNTED){touched=0;for(int q=0;q<c->nranks;q++)touched|=q!=c->rank && !linked(&c->moved,c->rank,q);}
+    else if(k->kind>=K_SEND)touched=k->peer!=c->rank && !linked(&c->moved,c->rank,k->peer);
     else if(c->nranks==1)touched=0;
     else{
       struct mesh_operand operand={(uint32_t)k->type,(uint32_t)type_bytes[k->type],k->elements};
@@ -1364,6 +1437,12 @@ static ncclResult_t resolve(struct call *k){
   ncclResult_t status=refresh(c);
   if(status)return status;
   k->epoch=c->epoch;
+  for(int q=0;k->kind==K_COUNTED && q<c->nranks;q++)if(q!=c->rank && (!linked(&c->map,c->rank,q) || !c->peers[q].send[CH_COLL])){
+    char down[256];down_links(c,down,sizeof down);
+    return FAIL(c,*down?ncclRemoteError:ncclInvalidUsage,"a counted all-to-all: no link joins rank %d to rank %d at the link map's epoch %llu%s%s",q,
+                c->rank,(unsigned long long)c->epoch,*down?"; down: ":"",down);
+  }
+  if(k->kind==K_COUNTED)return ncclSuccess;
   if(k->kind>=K_SEND){
     if(k->peer!=c->rank && (!linked(&c->map,c->rank,k->peer) || !c->peers[k->peer].send[CH_P2P])){
       char down[256];down_links(c,down,sizeof down);
@@ -1430,11 +1509,13 @@ static void calls_free(struct call *calls,int n){
    send's) and of recv it writes (its result; a receive's). */
 static size_t in_bytes(const struct call *k){
   const size_t e=type_bytes[k->type],part=k->count*e;
+  if(k->kind==K_COUNTED)return k->rows*k->row*e;
   if(k->kind>=K_SEND)return k->kind==K_SEND?part:0;
   return k->kind==MESH_ALLGATHER?part:k->kind==MESH_BROADCAST && k->comm->rank!=k->root?0:(size_t)k->elements*e;
 }
 static size_t out_bytes(const struct call *k){
   const size_t e=type_bytes[k->type],part=k->count*e;
+  if(k->kind==K_COUNTED)return k->capacity*k->row*e;
   if(k->kind>=K_SEND)return k->kind==K_RECV?part:0;
   return k->kind==MESH_REDUCE_SCATTER?part:k->kind==MESH_REDUCE && k->comm->rank!=k->root?0:(size_t)k->elements*e;
 }
@@ -1526,6 +1607,17 @@ static ncclResult_t regions(struct call *calls,int n,struct launch *l){
           wait_add(l,s->wrote);
           for(int r=0;r<s->nread;r++)wait_add(l,s->read[r]);
         }
+    const size_t counts=k->kind==K_COUNTED?8*(size_t)before(k,k->comm->nranks):0;
+    if(counts && !status && !(status=region_of(&k->cnt,k->counted,counts)))
+      for(int o=-1;o<(k->cnt.span?0:heap.nout);o++)
+        if((s=o<0?span_of(k->counted,counts):overlap(heap.outside+o,k->counted,counts)?heap.outside+o:NULL))wait_add(l,s->wrote);
+    const size_t landed=k->landed?8*(size_t)(before(k,2*k->comm->nranks)-before(k,k->comm->nranks)):0;
+    if(landed && !status && !(status=region_of(&k->lnd,k->landed,landed)))
+      for(int o=-1;o<(k->lnd.span?0:heap.nout);o++)
+        if((s=o<0?span_of(k->landed,landed):overlap(heap.outside+o,k->landed,landed)?heap.outside+o:NULL)){
+          wait_add(l,s->wrote);
+          for(int r=0;r<s->nread;r++)wait_add(l,s->read[r]);
+        }
   }
   pthread_mutex_unlock(&heap.lock);
   return status;
@@ -1534,7 +1626,9 @@ static void regions_release(struct call *calls,int n,struct launch *l){
   for(int i=0;i<n;i++){
     if(calls[i].in.buffer)nccl_mesh_release(calls[i].in.buffer);
     if(calls[i].out.buffer)nccl_mesh_release(calls[i].out.buffer);
-    calls[i].in.buffer=calls[i].out.buffer=NULL;
+    if(calls[i].cnt.buffer)nccl_mesh_release(calls[i].cnt.buffer);
+    if(calls[i].lnd.buffer)nccl_mesh_release(calls[i].lnd.buffer);
+    calls[i].in.buffer=calls[i].out.buffer=calls[i].cnt.buffer=calls[i].lnd.buffer=NULL;
   }
   if(l->own.buffer)nccl_mesh_release(l->own.buffer);
   l->own.buffer=NULL;
@@ -1555,6 +1649,13 @@ static void record(struct launch *l,struct call *calls,int n){
     const size_t in=in_bytes(k),out=out_bytes(k);
     if(in && (s=k->in.span?span_of(k->send,in):l->sync?NULL:outside_of(k->send,in)))read_add(s,l->event,l->end,k->tally);
     if(out && (s=k->out.span?span_of(k->recv,out):l->sync?NULL:outside_of(k->recv,out)))wrote_set(s,l->event,l->end,k->tally);
+    const size_t counts=k->kind==K_COUNTED?8*(size_t)before(k,k->comm->nranks):0;
+    if(counts && (s=k->cnt.span?span_of(k->counted,counts):l->sync?NULL:outside_of(k->counted,counts)))read_add(s,l->event,l->end,k->tally);
+    const size_t landed=k->landed?8*(size_t)(before(k,2*k->comm->nranks)-before(k,k->comm->nranks)):0;
+    if(landed && (s=k->lnd.span?span_of(k->landed,landed):l->sync?NULL:outside_of(k->landed,landed)))wrote_set(s,l->event,l->end,k->tally);
+    /* the host counts and word the worker writes: an allocation holding them is not given out again before the group's end */
+    if(landed && (s=span_of(k->received,landed)))wrote_set(s,l->event,l->end,k->tally);
+    if(k->arrived && (s=span_of(k->arrived,8)))wrote_set(s,l->event,l->end,k->tally);
   }
   pthread_mutex_unlock(&heap.lock);
   if(l->stage)span_release(l->stage,l->event,l->end);
@@ -1580,6 +1681,7 @@ static int in_place(const struct call *k){
    point-to-point call's one, none to this rank itself), and its REDUCE chunks where a later SEND of the
    call reads a combine (a ring's or tree's partial sent on; else none). */
 static uint32_t requests(const struct call *k){
+  if(k->kind==K_COUNTED)return 4*(uint32_t)(k->comm->nranks-1);
   if(k->kind>=K_SEND)return k->peer!=k->comm->rank;
   uint32_t n=0;
   for(uint32_t s=0;s<k->nsteps;s++)if(k->steps[s].piece.elements)n+=chunks_of(k->steps[s].piece.elements,type_bytes[k->type]);
@@ -1602,6 +1704,15 @@ static ncclResult_t place(struct call *calls,int n,struct launch *l,int words){
     for(int i=0;i<n;i++){
       struct call *k=calls+i;
       const size_t e=type_bytes[k->type];
+      if(k->kind==K_COUNTED){
+        if((in_bytes(k) && !k->in.span) || (out_bytes(k) && !k->out.span) || !k->cnt.span)
+          return FAIL(k->comm,ncclInvalidArgument,"a counted all-to-all's send buffer, receive buffer and counts are window allocations (ncclMemAlloc)");
+        uint64_t got=0;
+        for(int q=0;q<k->comm->nranks;q++)got+=k->segments[k->comm->nranks+q];
+        if(pass)k->wire=l->stage+used;
+        used+=slice(got*8);
+        continue;
+      }
       if(k->kind>=K_SEND){
         if(k->peer==k->comm->rank)continue;
         struct region r=k->kind==K_SEND?k->in:k->out;
@@ -1661,6 +1772,7 @@ static const struct call *self_copy(const struct call *calls,int n,int i){
 static int gpu_work(const struct call *calls,int n,int i){
   const struct call *k=calls+i;
   (void)n;
+  if(k->kind==K_COUNTED)return 1;
   if(k->kind==K_RECV)return k->peer==k->comm->rank || !k->out.span;
   if(k->kind==K_SEND)return k->peer!=k->comm->rank && !k->in.span;
   const size_t in=in_bytes(k),out=out_bytes(k);
@@ -1675,8 +1787,8 @@ struct recording;
 struct ran { int ncomms,nevents; struct ncclComm **comms; uint64_t *first; void **events; struct recording *kept; };
 /* A kept program (a deferred stream's, nccl.h ncclMeshStreamDefer): its commands, each object they name
    retained, encoded later into a command buffer the caller hands over. */
-enum { R_WAIT, R_SIGNAL, R_KERNEL, R_COPY, R_WORDS, R_PUBLISH };
-struct recorded { int kind,which,type,op,nranks,published; void *a,*b,*c; uint64_t x,y,z,n,scalar; uint64_t *list; void *touch[4]; };
+enum { R_WAIT, R_SIGNAL, R_KERNEL, R_COPY, R_WORDS, R_PUBLISH, R_COUNTED };
+struct recorded { int kind,which,type,op,nranks,published; void *a,*b,*c,*d,*e; uint64_t x,y,z,n,scalar; uint64_t *list; void *touch[4]; };
 struct recording { struct recording *next; int n,capacity,failed; struct recorded *ops; struct ran *ran; };
 /* Where a program's commands go: a command buffer, or a recording. */
 struct sink { void *program; struct recording *kept; };
@@ -1691,6 +1803,8 @@ static void keep(struct sink *s,struct recorded r){
   if(r.a)nccl_mesh_retain(r.a);
   if(r.b)nccl_mesh_retain(r.b);
   if(r.c)nccl_mesh_retain(r.c);
+  if(r.d)nccl_mesh_retain(r.d);
+  if(r.e)nccl_mesh_retain(r.e);
   for(int t=0;t<4;t++)if(r.touch[t])nccl_mesh_retain(r.touch[t]);
   k->ops[k->n++]=r;
 }
@@ -1734,6 +1848,7 @@ static void play(struct recording *k,void *program){
     else if(r->kind==R_KERNEL)nccl_mesh_program_kernel(program,r->which,r->a,r->x,r->b,r->y,r->n,r->type,r->op,r->nranks,r->scalar,r->published,r->c,r->z);
     else if(r->kind==R_COPY)nccl_mesh_program_copy(program,r->a,r->x,r->b,r->y,r->n,r->which,r->published);
     else if(r->kind==R_WORDS)nccl_mesh_program_words(program,r->a,r->list,(uint32_t)r->n,r->b,r->y,GPU_WAIT_NS,r->touch,4);
+    else if(r->kind==R_COUNTED)nccl_mesh_program_counted(program,r->a,r->b,r->c,r->d,r->e,r->list,(uint32_t)r->x,r->n);
     else nccl_mesh_program_publish(program,r->a,r->x,r->y);
   }
   nccl_mesh_program_end(program);
@@ -1743,6 +1858,8 @@ static void recording_free(struct recording *k){
     if(k->ops[i].a)nccl_mesh_release(k->ops[i].a);
     if(k->ops[i].b)nccl_mesh_release(k->ops[i].b);
     if(k->ops[i].c)nccl_mesh_release(k->ops[i].c);
+    if(k->ops[i].d)nccl_mesh_release(k->ops[i].d);
+    if(k->ops[i].e)nccl_mesh_release(k->ops[i].e);
     for(int t=0;t<4;t++)if(k->ops[i].touch[t])nccl_mesh_release(k->ops[i].touch[t]);
     free(k->ops[i].list);
   }
@@ -1769,6 +1886,29 @@ static void copy_into(struct sink *s,struct call *k,struct region to,const void 
   if(s->kept)keep(s,(struct recorded){.kind=R_COPY,.which=received,.published=published,.a=to.buffer,.x=off(to,dst),.b=from.buffer,.y=off(from,src),.n=bytes});
   else nccl_mesh_program_copy(s->program,to.buffer,off(to,dst),from.buffer,off(from,src),bytes,received,published);
   count(k,GPU_COPY,bytes);
+}
+/* A counted all-to-all's own rows copied from its send buffer into its receive buffer, their offsets and number
+   from the counts (its own; the other ranks' segments for this rank where they landed in the group's
+   allocation), and each rank's segment for this rank written to `landed` (if any): the counted kernel's
+   arguments (nccl-mesh-metal.m). */
+static void counted_copy(struct sink *s,struct call *k,struct launch *l){
+  const int n=k->comm->nranks;
+  const uint64_t row=k->row*type_bytes[k->type];
+  const uint32_t width=!(row&15)?16:!(row&3)?4:1,na=9+4*(uint32_t)n;
+  uint64_t *a=malloc(na*sizeof *a),landed=0;
+  if(!a){if(s->kept)s->kept->failed=1;return;}
+  a[0]=off(k->out,k->recv);a[1]=off(k->in,k->send);a[2]=off(k->cnt,k->counted);a[3]=off(l->own,k->wire);a[4]=row;a[5]=width;a[6]=(uint64_t)n;
+  a[7]=(uint64_t)k->comm->rank;a[8]=k->landed?off(k->lnd,k->landed):UINT64_MAX;
+  for(int q=0,so=0,ro=0;q<n;q++){
+    a[9+4*q]=(uint64_t)so;a[10+4*q]=k->segments[q];a[11+4*q]=(uint64_t)ro;a[12+4*q]=k->segments[n+q];
+    so+=(int)k->segments[q];ro+=(int)k->segments[n+q];landed+=k->segments[n+q];
+  }
+  uint64_t units=k->rows*row/width;
+  if(k->landed && units<landed)units=landed;
+  void *to=k->lnd.buffer?k->lnd.buffer:k->out.buffer;
+  if(s->kept)keep(s,(struct recorded){.kind=R_COUNTED,.a=k->out.buffer,.b=k->in.buffer,.c=k->cnt.buffer,.d=l->own.buffer,.e=to,.x=na,.n=units,.list=a});
+  else{nccl_mesh_program_counted(s->program,k->out.buffer,k->in.buffer,k->cnt.buffer,l->own.buffer,to,a,na,units);free(a);}
+  count(k,GPU_KERNELS,1);
 }
 /* Once the GPU has run a program: its objects released; a communicator whose failure word a timed-out wait
    set fails (the call is its group's first there; the communicator revoked, the error its async error). */
@@ -1954,6 +2094,16 @@ static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **c
       copy_into(sink,k,k->out,k->recv,l->own,k->wire,k->count*type_bytes[k->type],1,0);
     }
   }
+  /* a counted all-to-all's own rows, once the other ranks' count segments have landed */
+  for(int i=0;i<n;i++){
+    struct call *k=calls+i;
+    if(k->kind!=K_COUNTED)continue;
+    const uint32_t peers=(uint32_t)k->comm->nranks-1;
+    m=0;
+    for(uint32_t x=peers;x<2*peers;x++)WAIT(k,i,x);
+    sink_words(sink,k,l->own,list,m);
+    if(k->rows || k->landed)counted_copy(sink,k,l);
+  }
   /* the network done before the program's end: every word not yet waited for (a call's sends, COPY
      steps' receives, point-to-point transfers) */
   for(int i=0;i<n;i++){
@@ -2112,7 +2262,7 @@ static ncclResult_t enqueue(struct call k,const ncclCollConfig_t *config){
   ncclResult_t status=ncclSuccess;
   if(!c)status=FAIL(NULL,ncclInvalidArgument,"comm is NULL");
   else if((unsigned)k.type>=ncclNumTypes)status=FAIL(c,ncclInvalidArgument,"datatype %d",k.type);
-  else if(k.kind>=K_SEND && (k.peer<0 || k.peer>=c->nranks))status=FAIL(c,ncclInvalidArgument,"peer %d of %d ranks",k.peer,c->nranks);
+  else if(P2P(&k) && (k.peer<0 || k.peer>=c->nranks))status=FAIL(c,ncclInvalidArgument,"peer %d of %d ranks",k.peer,c->nranks);
   else if((k.kind==MESH_BROADCAST || k.kind==MESH_REDUCE) && (k.root<0 || k.root>=c->nranks))status=FAIL(c,ncclInvalidArgument,"root %d of %d ranks",k.root,c->nranks);
   else if(k.count && k.kind!=K_RECV && !k.send && !(k.kind==MESH_BROADCAST && c->rank!=k.root))status=FAIL(c,ncclInvalidArgument,"sendbuff is NULL");
   else if(k.count && k.kind!=K_SEND && !k.recv && !(k.kind==MESH_REDUCE && c->rank!=k.root))status=FAIL(c,ncclInvalidArgument,"recvbuff is NULL");
@@ -2134,7 +2284,7 @@ static ncclResult_t enqueue(struct call k,const ncclCollConfig_t *config){
       }
     }
   }
-  for(int r=0;!status && k.segments && r<c->nranks;r++)
+  for(int r=0;!status && k.segments && k.kind!=K_COUNTED && r<c->nranks;r++)
     if(!k.segments[r])status=FAIL(c,ncclInvalidArgument,"counts[%d] is 0 (every rank's segment holds an element)",r);
   if(!status && !k.count){free(k.segments);return ncclSuccess;}
   ncclGroupStart();
@@ -2218,6 +2368,21 @@ ncclResult_t ncclMeshReduceScatterVConfig(const void *sendbuff,void *recvbuff,co
 ncclResult_t ncclMeshReduceScatterV(const void *sendbuff,void *recvbuff,const size_t *counts,ncclDataType_t datatype,ncclRedOp_t op,
   ncclComm_t comm,cudaStream_t stream){
   return ncclMeshReduceScatterVConfig(sendbuff,recvbuff,counts,datatype,op,comm,stream,NULL);
+}
+ncclResult_t ncclMeshAlltoAllCounted(const void *sendbuff,size_t sendrows,const int64_t *counts,const size_t *sendsegs,void *recvbuff,size_t capacity,
+  int64_t *received,int64_t *landed,const size_t *recvsegs,uint64_t *arrived,size_t row,ncclDataType_t datatype,ncclComm_t comm,cudaStream_t stream){
+  if(!comm)return FAIL(NULL,ncclInvalidArgument,"comm is NULL");
+  if(!counts || !sendsegs || !recvsegs || !received || !arrived || !row || !sendbuff || !recvbuff)
+    return FAIL(comm,ncclInvalidArgument,"ncclMeshAlltoAllCounted: NULL argument or a row of no elements");
+  if(sendsegs[comm->rank]!=recvsegs[comm->rank])
+    return FAIL(comm,ncclInvalidArgument,"ncclMeshAlltoAllCounted: this rank's segment for itself sent (%zu) and received (%zu) differ",
+                sendsegs[comm->rank],recvsegs[comm->rank]);
+  uint64_t *segs=malloc(2*(size_t)comm->nranks*sizeof *segs);
+  if(!segs)return FAIL(comm,ncclSystemError,"allocation");
+  for(int r=0;r<comm->nranks;r++){segs[r]=sendsegs[r];segs[comm->nranks+r]=recvsegs[r];}
+  *arrived=0;
+  return enqueue(CALL(.kind=K_COUNTED,.send=sendbuff,.recv=recvbuff,.count=1,.type=datatype,.comm=comm,.stream=stream,.segments=segs,.counted=counts,
+                      .received=received,.landed=landed,.arrived=arrived,.row=row,.rows=sendrows,.capacity=capacity),NULL);
 }
 ncclResult_t ncclSend(const void *sendbuff,size_t count,ncclDataType_t datatype,int peer,ncclComm_t comm,cudaStream_t stream){
   return enqueue(CALL(.kind=K_SEND,.send=sendbuff,.count=count,.type=datatype,.peer=peer,.comm=comm,.stream=stream),NULL);

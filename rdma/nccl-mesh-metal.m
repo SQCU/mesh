@@ -244,6 +244,7 @@ static const char *source =
   "#define R(T) ((SYS T *)(s + p.src))\n"
   "#define S(T) ((device T *)(s + p.src))\n"
   "#define EACH for (ulong i = first; i < p.n; i += grid)\n"
+  "#define EACH_N(n) for (ulong i = first; i < (n); i += grid)\n"
   "#define GRID uint first [[thread_position_in_grid]], uint grid [[threads_per_grid]]\n"
   "\n"
   "// dst = dst op src (fresh: send op src), src a received piece; stored OUT (O published, W plain)\n"
@@ -340,6 +341,31 @@ static const char *source =
   "  if (pace < 0.0f) *failure = 2ul;\n"
   "  FENCE;\n"
   "}\n"
+  "// a counted all-to-all's own rows (nccl-mesh.c counted_copy): a: dst and src (byte offsets into buffers 0 and 1),\n"
+  "// the counts' and the landed segments' (into buffers 2 and 3, int64), row bytes, the copy's unit, ranks, this rank,\n"
+  "// the caller's landed counts' (into buffer 5; all ones: none), then a rank each: its sent segment's first and length,\n"
+  "// its received segment's first and length; the offsets the rows of the ranks before this one (sent: its counts;\n"
+  "// received: their segments, which the NIC wrote); each rank's segment for this one also written to buffer 5\n"
+  "kernel void counted(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], device uchar *c [[buffer(2)]],\n"
+  "                    device uchar *g [[buffer(3)]], constant ulong *a [[buffer(4)]], device uchar *out [[buffer(5)]], GRID) {\n"
+  "  device const long *counts = (device const long *)(c + a[2]);\n"
+  "  volatile coherent(system) device const long *landed = (volatile coherent(system) device const long *)(g + a[3]);\n"
+  "  ulong from = 0, to = 0, own = 0;\n"
+  "  for (ulong q = 0; q < a[6]; q++) {\n"
+  "    ulong sent = 0, got = 0;\n"
+  "    for (ulong i = 0; i < a[10 + 4 * q]; i++) sent += ulong(counts[a[9 + 4 * q] + i]);\n"
+  "    if (a[8] != ~0ul && first < a[12 + 4 * q])\n"
+  "      ((device long *)(out + a[8]))[a[11 + 4 * q] + first] = q == a[7] ? counts[a[9 + 4 * q] + first] : landed[a[11 + 4 * q] + first];\n"
+  "    if (q == a[7]) { own = sent; continue; }\n"
+  "    if (own || q > a[7]) continue;\n"
+  "    for (ulong i = 0; i < a[12 + 4 * q]; i++) got += ulong(landed[a[11 + 4 * q] + i]);\n"
+  "    from += sent; to += got;\n"
+  "  }\n"
+  "  const ulong units = own * a[4] / a[5], at = a[0] + to * a[4], fromat = a[1] + from * a[4];\n"
+  "  if (a[5] == 16) EACH_N(units) ((device uint4 *)(d + at))[i] = ((device uint4 *)(s + fromat))[i];\n"
+  "  else if (a[5] == 4) EACH_N(units) ((device uint *)(d + at))[i] = ((device uint *)(s + fromat))[i];\n"
+  "  else EACH_N(units) (d + at)[i] = (s + fromat)[i];\n"
+  "}\n"
   "// a word (a byte offset into buffer 0) set to `value`, system-coherent, after the dispatches before it\n"
   "kernel void publish(device uchar *w [[buffer(0)]], constant ulong *a [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
   "  if (i) return;\n"
@@ -348,7 +374,7 @@ static const char *source =
   "  FENCE;\n"
   "}\n";
 
-enum { KERNELS = 6, KERNEL_COPY = 3, KERNEL_WAIT = 4, KERNEL_PUBLISH = 5 };
+enum { KERNELS = 7, KERNEL_COPY = 3, KERNEL_WAIT = 4, KERNEL_PUBLISH = 5, KERNEL_COUNTED = 6 };
 /* A kernel's arguments (the source's struct args): byte offsets dst and src into buffers 0 and 1, `other`
    into buffer 3 (a fresh combine's first operand). */
 struct args { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,published,fresh,pad; uint64_t other; };
@@ -398,7 +424,7 @@ HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
     if(@available(macOS 15.0,*))options.mathMode=MTLMathModeSafe;
     NSError *failure=nil;
     id<MTLLibrary> library=[[device newLibraryWithSource:@(source) options:options error:&failure] autorelease];
-    static const char *const names[KERNELS]={"combine","premultiply","postdivide","copy","wait","publish"};
+    static const char *const names[KERNELS]={"combine","premultiply","postdivide","copy","wait","publish","counted"};
     for(int k=0;library && k<KERNELS;k++){
       id<MTLFunction> function=[[library newFunctionWithName:@(names[k])] autorelease];
       if(!(gpu.kernels[k]=[device newComputePipelineStateWithFunction:function error:&failure]))library=nil;
@@ -547,6 +573,22 @@ HIDDEN void nccl_mesh_program_publish(void *program,void *buffer,uint64_t at,uin
     [encoder setBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:0];
     [encoder setBytes:a length:sizeof a atIndex:1];
     [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+  }
+}
+/* The counted kernel (a counted all-to-all's own rows): `a` its arguments (na of them), over `units` copy units
+   at most. */
+HIDDEN void nccl_mesh_program_counted(void *program,void *to,void *from,void *counts,void *got,void *landed,const uint64_t *a,uint32_t na,uint64_t units){
+  if(!units)return;
+  @autoreleasepool {
+    id<MTLComputeCommandEncoder> encoder=encoder_of(program);
+    [encoder setComputePipelineState:gpu.kernels[KERNEL_COUNTED]];
+    [encoder setBuffer:(id<MTLBuffer>)to offset:0 atIndex:0];
+    [encoder setBuffer:(id<MTLBuffer>)from offset:0 atIndex:1];
+    [encoder setBuffer:(id<MTLBuffer>)counts offset:0 atIndex:2];
+    [encoder setBuffer:(id<MTLBuffer>)got offset:0 atIndex:3];
+    [encoder setBytes:a length:na*sizeof *a atIndex:4];
+    [encoder setBuffer:(id<MTLBuffer>)landed offset:0 atIndex:5];
+    [encoder dispatchThreads:MTLSizeMake(units<(1u<<20)?(NSUInteger)units:(1u<<20),1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
   }
 }
 /* `done(argument, failed)` once the GPU has run the command buffer (a failed one marks the process's
