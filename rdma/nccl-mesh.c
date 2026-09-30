@@ -188,7 +188,7 @@ struct ncclComm {
      that failed (0: none) and its cause; the agreements made (alike on every rank: their connections'
      keys); the slots of the connections closed since, and the event a failed part's memory is held on
      until the bridge has vacated them (`quiet`: the value it is held for); the ranks that voted in the last
-     agreement (`voted`: 1 a rank, 0 one whose bridge had left the mesh as this rank's bridge saw it) */
+     agreement (`voted`: 1 a rank, 0 one departed as this rank's bridge saw it: its bridge, or this rank's, left) */
   _Atomic uint64_t issued; uint64_t failed,agreements; char cause[256]; unsigned char *voted;
   uint64_t *closed; int nclosed,open; void *quiet; uint64_t quiet_value;
 };
@@ -3287,8 +3287,9 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm,uint64_t *failed,uint64_t *epoch)
   struct peer *fresh=calloc((size_t)n,sizeof *fresh);
   struct vote *votes=calloc((size_t)n,sizeof *votes);
   ncclResult_t status=want && gone && fresh && votes?ncclSuccess:FAIL(c,ncclSystemError,"allocation");
-  /* the flood's neighbours: the ranks the stated map links to this one, up or not, but those whose bridge left the
-     mesh as this node sees it (mesh_net_departed: a membership change; the agreement is among the ranks that stay) */
+  /* the flood's neighbours: the ranks the stated map links to this one, up or not, but those departed as this node
+     sees it (mesh_net_departed: its bridge's LEAVE heard, or this node's bridge left; a membership change; the
+     agreement is among the ranks that stay) */
   c->epoch=mesh_link_table_read(c->table,c->seen);
   for(int p=0;!status && p<n;p++){
     gone[p]=p!=c->rank && mesh_net_departed(c->nodes[p]);

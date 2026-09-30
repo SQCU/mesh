@@ -9,8 +9,8 @@ links() is a snapshot of the table (epoch, the bridge's node, present, alpha/bet
 directed link, each node's last report's sequence).  Nothing fails a call in time (a late peer, a bridge stopped, a link whose
 session resumes make it late); a call that fails (its bridge observed a peer's exit, a peer's bridge leaving the mesh, or a
 peer's bridge pairing again as another instance) revokes the group's communicator; the backend raises it only once the
-ranks that stay have agreed on it (ncclMeshCommAgree, ULFM's MPI_Comm_agree: a rank whose bridge left the mesh as this
-rank's bridge sees it does not vote), when the call is issued or at a later Work's wait, its message naming the ranks
+ranks that stay have agreed on it (ncclMeshCommAgree, ULFM's MPI_Comm_agree: a rank departed as this rank's bridge sees
+it, its bridge or this rank's having left the mesh, does not vote), when the call is issued or at a later Work's wait, its message naming the ranks
 that voted.  agree() is that agreement on the default group, every rank that stays calling it: (the first call that
 failed on any voting rank since the previous agreement, or None; this rank's link-table epoch); agreed() the last agreement made,
 by agree() or the error path: (how many so far, the failed call or None, the epoch).  Once a process
@@ -179,8 +179,8 @@ def links(region=None):
 
 
 def agree():
-    """ULFM's MPI_Comm_agree on the default group, every rank that stays calling it (a rank whose bridge left the
-    mesh as this rank's bridge sees it does not vote): (the first call that failed on any voting rank since the
+    """ULFM's MPI_Comm_agree on the default group, every rank that stays calling it (a rank departed as this rank's
+    bridge sees it, its bridge or this rank's having left the mesh, does not vote): (the first call that failed on any voting rank since the
     previous agreement, or None; this rank's link-table epoch)."""
     from . import _C
     return _C.agree()

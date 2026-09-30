@@ -6,8 +6,9 @@
 // libnccl-mesh's Metal kernels.  Nothing fails a call in time; a failed call (its bridge observed a peer's
 // exit, a peer's bridge leaving the mesh, or a peer's bridge pairing again as another instance) revokes the
 // communicator; the error path, a call's own failure when it is issued or an earlier call's at a Work's wait,
-// first agrees with the ranks that stay (ncclMeshCommAgree: ULFM's MPI_Comm_agree; a rank whose bridge left the
-// mesh as this rank's bridge sees it does not vote), then raises the agreed failure, naming the ranks that voted;
+// first agrees with the ranks that stay (ncclMeshCommAgree: ULFM's MPI_Comm_agree; a rank departed as this rank's
+// bridge sees it, its bridge or this rank's having left the mesh, does not vote), then raises the agreed failure,
+// naming the ranks that voted;
 // agree() is that agreement, agreed() the last one.
 //   MPS tensors in the window (window_heaps below): once the first group exists, the heaps PyTorch's MPS
 // allocator makes place each buffer in a window allocation of its own, whose one Metal buffer is the
@@ -77,8 +78,8 @@
 namespace c10d {
 
 static std::pair<uint64_t, uint64_t> agree_on(ncclComm_t comm, const char *after);
-// Who voted in this rank's last agreement: "every rank", or the ranks that did and those that did not, whose
-// bridge had left the mesh as this rank's bridge saw it (ncclMeshCommVoters).
+// Who voted in this rank's last agreement: "every rank", or the ranks that did and those that did not, departed as
+// this rank's bridge saw it (ncclMeshCommVoters: its bridge, or this rank's, left the mesh).
 static std::string voters(ncclComm_t comm) {
   int n = 0;
   if (ncclCommCount(comm, &n) != ncclSuccess || n <= 0) return "the ranks that stay";
@@ -92,8 +93,8 @@ static std::string voters(ncclComm_t comm) {
     for (size_t i = 0; i < ranks.size(); i++) text += (i ? ", " : "") + std::to_string(ranks[i]);
     return text;
   };
-  return named(in) + " (" + named(out) + (out.size() == 1 ? " not voting: its bridge" : " not voting: their bridges") +
-         " left the mesh as this rank's bridge sees it)";
+  return named(in) + " (" + named(out) + " not voting: departed as this rank's bridge sees it, " +
+         (out.size() == 1 ? "its bridge" : "their bridges") + " or this rank's having left the mesh)";
 }
 // A failure raised; a failure of the communicator (ncclRemoteError, ncclTimeout, ncclSystemError: the
 // network, a revoked call) only once the ranks that stay have agreed on it, the ranks that voted, the first
@@ -1609,9 +1610,9 @@ static pybind11::list records() {
   return out;
 }
 // ULFM's MPI_Comm_agree on the default group's communicator (the first made): every rank that stays calls it
-// (a rank whose bridge left the mesh as this rank's bridge sees it does not vote); the first call that failed
-// on any voting rank since the previous agreement (None: none did) and this rank's link-table epoch, on which
-// every voting rank's table holds the same map of the group.
+// (a rank departed as this rank's bridge sees it, its bridge or this rank's having left the mesh, does not vote); the
+// first call that failed on any voting rank since the previous agreement (None: none did) and this rank's
+// link-table epoch, on which every voting rank's table holds the same map of the group.
 static pybind11::tuple agree() {
   ncclComm_t comm;
   {
