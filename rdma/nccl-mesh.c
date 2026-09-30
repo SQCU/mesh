@@ -100,16 +100,18 @@ struct call {
   int copied,fresh;
   _Atomic uint64_t *words,*combined; uint32_t nwords,ncombined;
   uint64_t *tally;
-  /* a persistent call's (ncclMeshPersistentBegin): its requests in plan order as posted (the first `nposted`
-     of them this iteration); `ahead` where every receive of its plan lands where nothing reads or writes
-     before the call in its iteration (a REDUCE step's piece, or a COPY step's range of an operand that is
-     the group's own or a receive buffer the caller declared fresh, which none of its sends reads), so its
-     requests are posted ahead (persistent_post; a receive buffer the caller declared free only after a cut of
-     the iteration, `post_after`, once that cut is passed), its isends held until their bytes are ready; `ready`,
+  /* a persistent call's (ncclMeshPersistentBegin): its requests in plan order as posted this iteration (NULL:
+     not yet), the next of its isends and of its irecvs to post ahead (plan order: `spost`, `rpost`), and
+     whether its own part has posted its irecvs (`posted`); its isends are all posted ahead (persistent_post),
+     held until their bytes are ready; `ahead` where every receive of its plan lands where nothing reads or
+     writes before the call in its iteration (a REDUCE step's piece, or a COPY step's range of an operand that
+     is the group's own or a receive buffer the caller declared free, which none of its sends reads), so its
+     irecvs are posted ahead too (a receive buffer free only after a cut of the iteration, `post_after`, once
+     that cut is passed), else by its part; `ready`,
      where the caller's GPU work publishes its send buffer in ranges of `range` bytes (`ranges` of them,
      ncclMeshPersistentNext): each range's word, counted up once each iteration, and its count when the run
      started */
-  void **handles; uint32_t nposted; int ahead,post_after;
+  void **handles; uint32_t spost,rpost; int posted,ahead,post_after;
   const _Atomic uint64_t *ready; uint64_t range,*ready_base; uint32_t ranges;
 };
 /* An event's value, or a word's in the window (a GPU kernel publishes it, system-coherent): the point after
@@ -857,18 +859,18 @@ static ncclResult_t ranges_wait(struct ncclComm *c,struct call *k,struct item *i
 }
 /* A persistent call's request q, posted ahead by persistent_post (run from progress as the rings take it). */
 static ncclResult_t posted_wait(struct ncclComm *c,struct call *k,struct item *it,uint32_t q){
-  while(k->nposted<=q){
+  while(!k->handles[q]){
     ncclResult_t status=persistent_failure(c);
     if(status)return status;
     if(stopped(c,it))return stop_reason(c,it,"a persistent call's request posted ahead");
     progress(c);
-    if(k->nposted<=q)sched_yield();
+    if(!k->handles[q])sched_yield();
   }
   return ncclSuccess;
 }
 static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct item *it){
   const size_t e=type_bytes[k->type];
-  const int ahead=it->run && k->ahead;
+  const int held=it->run!=NULL,ahead=held && k->ahead;
   const uint64_t iteration=it->run?persistent_iteration(it):0;
   ncclResult_t status=ncclSuccess;
   size_t total=1;
@@ -895,12 +897,12 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct item
         const size_t in=(size_t)(from-(const unsigned char *)k->send);
         if(!status && k->ready && from>=(const unsigned char *)k->send && in+length<=in_bytes(k))status=ranges_wait(c,k,it,in,in+length,iteration);
         if(status)break;
-        if(ahead && !(status=posted_wait(c,k,it,w+j))){
+        if(held && !(status=posted_wait(c,k,it,w+j))){
           request=k->handles[w+j];
           int result=mesh_net_release(request,&granted);
           if(result)status=net_failure(c,result,"mesh_net_release");
         }
-        else if(!ahead)status=post(c,1,p->send[CH_COLL],from,length,k->words+w+j,sends,&count_,it,&request);
+        else if(!held)status=post(c,1,p->send[CH_COLL],from,length,k->words+w+j,sends,&count_,it,&request);
         if(!status){
           sends[count_++]=(struct pending){lo,lo+length,request};
           count(k,SENT,length);count(k,SENDS,1);
@@ -939,8 +941,8 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct item
     w+=n;
     if(s->op==MESH_STEP_REDUCE && k->combined)r+=n;
   }
-  /* a persistent call not posted ahead has posted every request of its plan: the posting passes it */
-  if(it->run && !ahead && !status)k->nposted=k->nwords;
+  /* a persistent call whose irecvs are not posted ahead has posted them all: the posting passes it */
+  if(held && !ahead && !status)k->posted=1;
   while(count_ && !status){status=await(c,sends[count_-1].request,SIZE_MAX,NULL,NULL,it,"an isend");count_--;}
   for(int u=0;u<nused && !status;u++){
     void *flush=NULL;int result=mesh_net_iflush(used[u],1,NULL,NULL,NULL,&flush);
@@ -1232,10 +1234,10 @@ static void hold(struct ncclComm *c,struct item *it){
    isends released as the ranges of its send buffer they read are published: ranges_wait).  `next` is the
    next iteration x n + part to start, `result` the first failure (the communicator is then revoked, so every
    later part fails at its start and sets its words: the programs waiting on them go on).  The posting: the
-   iteration open (`posting`: its index + 1, `opened` while requests of it remain to post), the first part
-   and call not all posted, and the first failure of a post. */
+   iteration open (`posting`: its index + 1), the first part and call whose isends, and whose irecvs, are not
+   all posted, and the first failure of a post. */
 struct persistent { struct item **items; int n,capacity; struct ncclComm *comm; void *event; uint64_t value,stride,total;
-  _Atomic uint64_t next; ncclResult_t result; uint64_t posting; int opened,part,call; ncclResult_t post_failed; };
+  _Atomic uint64_t next; ncclResult_t result; uint64_t posting; int spart,scall,rpart,rcall; ncclResult_t post_failed; };
 static struct { pthread_mutex_t lock; struct persistent *building; struct { const uint64_t *ready; uint64_t range,bytes; int fresh,given; } next;
   int cut,groups; } persisting={PTHREAD_MUTEX_INITIALIZER,NULL,{0},0,0};
 static uint64_t persistent_iteration(const struct item *it){return atomic_load(&it->run->next)/(uint64_t)it->run->n;}
@@ -1275,31 +1277,46 @@ static int persistent_request(struct ncclComm *c,struct persistent *p,struct cal
   }
   return 0;
 }
-/* The open iteration's requests posted in order as far as the request rings take them: every request of a
-   call posted ahead (struct call `ahead`); a call not is passed once its own run has posted its requests,
-   so each connection's requests stay in the order of its peer's. */
+/* Whether request q of call k (plan order) is an isend. */
+static int request_sends(const struct call *k,uint32_t q){
+  const size_t e=type_bytes[k->type];
+  for(uint32_t i=0,w=0;i<k->nsteps;i++){
+    if(!k->steps[i].piece.elements)continue;
+    w+=chunks_of(k->steps[i].piece.elements,e);
+    if(q<w)return k->steps[i].op==MESH_STEP_SEND;
+  }
+  return 0;
+}
+/* The open iteration's requests posted in order as far as the request rings take them, each connection's in
+   the order of its peer's: every call's isends, held; the irecvs of a call posted ahead (struct call `ahead`,
+   after its `post_after` cut), and a call's that is not passed once its own part has posted them. */
 static void persistent_post(struct ncclComm *c){
   struct persistent *p=c->run;
-  if(!p || !p->opened || p->post_failed || atomic_load(&c->broken))return;
-  while(p->part<p->n){
-    struct item *it=p->items[p->part];
-    struct call *k=it->calls+p->call;
-    /* a receive buffer free only after a cut of the iteration: once that cut is passed */
-    if(k->ahead && !k->nposted && k->post_after &&
-       nccl_mesh_event_value(p->event)<p->value+(p->posting-1)*p->stride+(uint64_t)k->post_after+1)return;
-    if(k->ahead)
-      while(k->nposted<k->nwords){
-        if(!persistent_request(c,p,k,k->nposted))return;
-        k->nposted++;
-      }
-    else if(k->nposted<k->nwords)return;
-    if(++p->call==it->n){p->call=0;p->part++;}
-  }
-  p->opened=0;
+  if(!p || !p->posting || p->post_failed || atomic_load(&c->broken))return;
+  for(;p->spart<p->n;p->scall=0,p->spart++)
+    for(;p->scall<p->items[p->spart]->n;p->scall++){
+      struct call *k=p->items[p->spart]->calls+p->scall;
+      for(;k->spost<k->nwords;k->spost++)
+        if(request_sends(k,k->spost) && !persistent_request(c,p,k,k->spost))goto receives;
+    }
+  receives:
+  for(;p->rpart<p->n;p->rcall=0,p->rpart++)
+    for(;p->rcall<p->items[p->rpart]->n;p->rcall++){
+      struct call *k=p->items[p->rpart]->calls+p->rcall;
+      if(!k->ahead){if(!k->posted)return;continue;}
+      /* a receive buffer free only after a cut of the iteration: once that cut is passed */
+      if(k->post_after && k->rpost<k->nwords &&
+         nccl_mesh_event_value(p->event)<p->value+(p->posting-1)*p->stride+(uint64_t)k->post_after+1)return;
+      for(;k->rpost<k->nwords;k->rpost++)
+        if(!request_sends(k,k->rpost) && !persistent_request(c,p,k,k->rpost))return;
+    }
 }
 static void persistent_open(struct persistent *p,uint64_t i){
-  for(int x=0;x<p->n;x++)for(int j=0;j<p->items[x]->n;j++)p->items[x]->calls[j].nposted=0;
-  p->part=p->call=0;p->posting=i+1;p->opened=1;
+  for(int x=0;x<p->n;x++)for(int j=0;j<p->items[x]->n;j++){
+    struct call *k=p->items[x]->calls+j;
+    memset(k->handles,0,(k->nwords?k->nwords:1)*sizeof *k->handles);k->spost=k->rpost=0;k->posted=0;
+  }
+  p->spart=p->scall=p->rpart=p->rcall=0;p->posting=i+1;
 }
 static void start(struct ncclComm *c,struct item *it);
 /* The next part of the communicator's persistent calls, started once its iteration is open and its cut is
@@ -2935,7 +2952,7 @@ ncclResult_t ncclMeshPersistentStart(void *handle,void *event,uint64_t value,uin
   if(p->event)nccl_mesh_release(p->event);
   nccl_mesh_retain(event);
   p->event=event;p->value=value;p->stride=stride;p->total=count*(uint64_t)p->n;p->result=ncclSuccess;
-  p->posting=0;p->opened=0;p->post_failed=ncclSuccess;
+  p->posting=0;p->post_failed=ncclSuccess;
   /* each published range's count before the run (the last run's publications done) */
   for(int i=0;i<p->n;i++)for(int j=0;j<p->items[i]->n;j++){
     struct call *k=p->items[i]->calls+j;
