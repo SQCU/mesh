@@ -229,7 +229,7 @@ struct Recorder {
   void (*times)(const void *, double *, double *);
   NSUInteger (*segments)(const void *, double *, NSUInteger);
   BOOL (*publish)(id, NSUInteger, NSUInteger, id, NSUInteger, NSUInteger);
-  NSUInteger (*touches)(id);
+  NSUInteger (*free_after)(id);
 };
 static const Recorder *recorder() {
   static const Recorder found = {(void *(*)(id, void (^)(void), const void *, size_t, NSUInteger, int))dlsym(RTLD_DEFAULT, "MetalRecord"),
@@ -240,9 +240,9 @@ static const Recorder *recorder() {
                                  (void (*)(const void *, double *, double *))dlsym(RTLD_DEFAULT, "MetalReplayTimes"),
                                  (NSUInteger (*)(const void *, double *, NSUInteger))dlsym(RTLD_DEFAULT, "MetalReplaySegmentTimes"),
                                  (BOOL (*)(id, NSUInteger, NSUInteger, id, NSUInteger, NSUInteger))dlsym(RTLD_DEFAULT, "MetalRecordPublish"),
-                                 (NSUInteger (*)(id))dlsym(RTLD_DEFAULT, "MetalRecordTouches")};
+                                 (NSUInteger (*)(id))dlsym(RTLD_DEFAULT, "MetalRecordFreeAfter")};
   return found.record && found.queue && found.cut && found.cuts && found.run_cut && found.release && found.times && found.segments &&
-                 found.publish && found.touches
+                 found.publish && found.free_after
              ? &found
              : nullptr;
 }
@@ -253,7 +253,8 @@ static const Recorder *recorder() {
 // recording being made.
 static std::atomic<bool> recording{false};
 // Each recorded call: its op, bytes, its cut's place among the recording's (0: none, its send buffer published),
-// its kept work's reach and resume words (the trace's), and whether its receive buffer was fresh.
+// its kept work's reach and resume words (the trace's), and after which cut its receive buffers are free (1 + that
+// cut's place, 1 the leading cut; 0: not before the call).
 struct RecordedCall {
   std::string op;
   uint64_t bytes = 0, reach = 0, resume = 0;
@@ -604,9 +605,10 @@ class Call {
   // A recorded call, before it is issued (ncclMeshPersistentNext): its send buffer (its one place it reads, or
   // the bytes in a place input_within names) published in ranges of PUBLISHED_RANGE by the recorded commands that
   // store it, where the recorder can make them (MetalRecordPublish: PyTorch's own copy kernels, their stores
-  // system-coherent and counted by range into words of a window allocation the recording holds); and whether
-  // every place it writes is untouched by the step's commands recorded before it (a buffer a publishing command
-  // stores into aside), so its receives may land from the step's start.
+  // system-coherent and counted by range into words of a window allocation the recording holds); and the cut
+  // after which every place it writes is free (MetalRecordFreeAfter: the first cut past the step's commands
+  // recorded before it that bind it, a buffer a publishing command stores into aside), so its receives may land
+  // from then on.
   void persist(at::mps::MPSStream *s) {
     RecordedCall r;
     r.op = op_ ? op_ : "";
@@ -637,8 +639,9 @@ class Call {
       for (auto &p : places_) {
         void *out = nullptr;
         size_t o = 0;
-        if (p.out && p.bytes && (!p.pointer || ncclMeshMemBuffer(p.pointer, &out, &o) != ncclSuccess || recorder()->touches((__bridge id)out)))
-          r.fresh = 0;
+        if (!p.out || !p.bytes || !r.fresh) continue;
+        const NSUInteger free = p.pointer && ncclMeshMemBuffer(p.pointer, &out, &o) == ncclSuccess ? recorder()->free_after((__bridge id)out) : NSNotFound;
+        r.fresh = free == NSNotFound ? 0 : std::max<int>(r.fresh, (int)free + 1);
       }
     });
     r.published = ready != nullptr;

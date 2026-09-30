@@ -901,7 +901,8 @@ ncclResult_t ncclMeshEncodeCopies(void* commandBuffer, int n, void* const* dst, 
    placed and their GPU work kept for ncclMeshStreamEncodeWait as ever (so a recording of the caller's
    command buffers takes it: metal-microbench metal_recording.h), but no worker starts them; each must defer
    (ncclMeshStreamDefer) and be a collective of one communicator.  ncclMeshPersistentNext, before a call,
-   declares its receive buffer untouched by the caller's work before it in each iteration (`fresh`) and, where
+   declares its receive buffer free for the network once the recording's cut `fresh` - 1 of each iteration is passed
+   (1: its leading cut; 0: not before the call) and, where
    `ready` is not NULL, its send buffer's `bytes` published by the caller's GPU work in ranges of `range` bytes:
    range r's word ready[r] (8 bytes in the window, stored system-coherent) counts up by one each iteration once
    the range is written.  ncclMeshPersistentCut then says whether the last group needs a cut of its own (1: its
@@ -910,7 +911,8 @@ ncclResult_t ncclMeshEncodeCopies(void* commandBuffer, int n, void* const* dst, 
    gives the calls as one handle, `calls` of them in issue order.  ncclMeshPersistentStart runs them `count`
    times: iteration i once `event` (an id<MTLSharedEvent>) reaches value + i * stride + 1 (the caller's leading
    cut: the iteration before it done), each call's requests then posted ahead where its receives may land
-   (a REDUCE step's piece, or a fresh or own operand's range no send of it reads) and its isends held
+   (a REDUCE step's piece, or a free or own operand's range no send of it reads, a free one once its cut is
+   passed) and its isends held
    (mesh-net.h mesh_net_isend_held: announced and granted before their bytes are ready, so their first byte
    waits for no request and credit exchange); call k with a cut starts once `event` reaches value + i * stride
    + c + 1 (c: its cut's place among the cuts, from 1: the command buffer that ends with its inputs complete,

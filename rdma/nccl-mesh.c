@@ -104,11 +104,12 @@ struct call {
      of them this iteration); `ahead` where every receive of its plan lands where nothing reads or writes
      before the call in its iteration (a REDUCE step's piece, or a COPY step's range of an operand that is
      the group's own or a receive buffer the caller declared fresh, which none of its sends reads), so its
-     requests are posted ahead (persistent_post), its isends held until their bytes are ready; `ready`,
+     requests are posted ahead (persistent_post; a receive buffer the caller declared free only after a cut of
+     the iteration, `post_after`, once that cut is passed), its isends held until their bytes are ready; `ready`,
      where the caller's GPU work publishes its send buffer in ranges of `range` bytes (`ranges` of them,
      ncclMeshPersistentNext): each range's word, counted up once each iteration, and its count when the run
      started */
-  void **handles; uint32_t nposted; int ahead;
+  void **handles; uint32_t nposted; int ahead,post_after;
   const _Atomic uint64_t *ready; uint64_t range,*ready_base; uint32_t ranges;
 };
 /* An event's value, or a word's in the window (a GPU kernel publishes it, system-coherent): the point after
@@ -1283,6 +1284,9 @@ static void persistent_post(struct ncclComm *c){
   while(p->part<p->n){
     struct item *it=p->items[p->part];
     struct call *k=it->calls+p->call;
+    /* a receive buffer free only after a cut of the iteration: once that cut is passed */
+    if(k->ahead && !k->nposted && k->post_after &&
+       nccl_mesh_event_value(p->event)<p->value+(p->posting-1)*p->stride+(uint64_t)k->post_after+1)return;
     if(k->ahead)
       while(k->nposted<k->nwords){
         if(!persistent_request(c,p,k,k->nposted))return;
@@ -1982,9 +1986,9 @@ static ncclResult_t place(struct call *calls,int n,struct launch *l,int words){
 }
 /* Whether a persistent call's requests are posted ahead (struct call `ahead`): every receive of its plan lands
    in a REDUCE step's piece (the group's own), or a COPY step's range of an operand that is the group's own or
-   a receive buffer untouched before the call in its iteration (`fresh`), which none of its sends reads; and
-   its requests fit a connection's request ring with room to spare. */
-static int ahead_of(const struct call *k,int fresh,const struct launch *l){
+   a receive buffer free once cut fresh - 1 of its iteration is passed (`fresh`, then its `post_after`), which
+   none of its sends reads; and its requests fit a connection's request ring with room to spare. */
+static int ahead_of(struct call *k,int fresh,const struct launch *l){
   if(k->kind>=K_SEND || k->kind==K_COUNTED || !k->nwords || k->nwords>MESH_NET_REQUESTS/2)return 0;
   const size_t e=type_bytes[k->type];
   const int own=k->at.buffer && k->at.buffer==l->own.buffer;
@@ -1992,6 +1996,7 @@ static int ahead_of(const struct call *k,int fresh,const struct launch *l){
     const struct mesh_step *t=k->steps+s;
     if(!t->piece.elements || t->op!=MESH_STEP_COPY)continue;
     if(!own && !fresh)return 0;
+    if(!own)k->post_after=fresh-1;
     const size_t a=t->first*e,b=a+t->piece.elements*e;
     for(uint32_t q=0;q<k->nsteps;q++){
       const struct mesh_step *u=k->steps+q;
@@ -2474,7 +2479,7 @@ ncclResult_t ncclGroupEnd(void){
     const __typeof__(persisting.next) next=persisting.next;
     persisting.next.given=0;
     pthread_mutex_unlock(&persisting.lock);
-    fresh=next.given && next.fresh;
+    fresh=next.given?next.fresh:0;
     for(int i=0;i<n;i++)calls[i].ahead=ahead_of(calls+i,fresh,l);
     if(next.given && next.ready && n==1 && next.range && in_bytes(calls) && in_bytes(calls)==next.bytes){
       calls[0].ready=(const _Atomic uint64_t *)next.ready;calls[0].range=next.range;
