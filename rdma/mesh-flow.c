@@ -1,6 +1,7 @@
 #include "mesh-verbs.h"
 #include "mesh-call.h"
 #include <pthread.h>
+#include <sysexits.h>
 #include <sys/event.h>
 #include <sys/ioctl.h>
 #include <sys/kern_event.h>
@@ -622,11 +623,16 @@ static void *link_run(void *argument){
      The bridge's side of the comms and of each session's transfers, and this node's bridge instance, live in shared
    memory named after the region (<region>.keep: net_keep), as the comm tables live in the region, not in the
    bridge's process.  A bridge stopped (SIGTERM) with clients attached leaves the region, its keep and its link
-   table as they are, its sessions suspended; the next bridge started on them with the same configuration takes
-   them as they are, registers the window before its queue pairs, pairs as the same instance and resumes, so a
-   restart is to its clients and its peers a lost session: late, never failed.  A bridge that leaves the mesh
+   table as they are, its sessions suspended, and exits EX_TEMPFAIL, so its supervisor starts the next (launchd:
+   bin/mesh-bridge.sh); the next bridge started on them with the same configuration, while a client of them is
+   alive, takes them as they are, registers the window before its queue pairs, pairs as the same instance and
+   resumes, so a restart is to its clients and its peers a lost session: late, never failed.  Kept state whose
+   clients' processes are all gone is released, by the next bridge's start (made afresh) or by --release
+   (region_release), never by a clock.  A peer that pairs as another instance (its machine restarted, or its region
+   made afresh) fails the lost session's transfers and releases their state.  A bridge that leaves the mesh
    (SIGUSR2) tells its peers (LEAVE): a membership change, which each end marks on the link (mesh.h MESH_LEFT)
-   before the transfers on it end failed, for the clients to plan on the nodes that stay. */
+   before the transfers on it end failed, for the clients to plan on the nodes that stay; it exits 0, so no
+   successor is started. */
 #define NET_PORT_OFFSET 1000
 /* a session's queue pairs; with the prepared program's, a link's are within the device's (mesh-verbs.h MESH_DEVICE_QPS) */
 #define NET_QUEUES 2
@@ -1847,10 +1853,36 @@ static int net_attached(struct hdr *m){
   const uint64_t client=atomic_load(&m->client);
   return client && !net_dead(client);
 }
+/* --release: region `name`, kept by the last bridge on it for its clients, released where no bridge runs on it
+   and no client of it is alive (net_attached: a process exists or it does not; nothing here waits or counts
+   time): the region, its keep and its link table are unlinked, and their pages freed once nothing maps them.  A
+   starting bridge applies the same rule (it takes a kept region only while a client of it lives). */
+static int region_release(const char *name){
+  int fd=shm_open(name,O_RDWR,MESH_MODE);
+  if(fd<0){say("%s: no region\n",name);return 0;}
+  struct stat info;struct hdr *m=MAP_FAILED;
+  if(!fstat(fd,&info) && (uint64_t)info.st_size>=sizeof *m)m=mmap(NULL,(size_t)info.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
+  close(fd);
+  const char *kept=m==MAP_FAILED || m->magic!=MESH_MAGIC || m->version!=MESH_VERSION || m->length>(uint64_t)info.st_size?"not a region of this version":
+                   !net_dead(atomic_load(&m->bridge_pid))?"a bridge of it is running":net_attached(m)?"a client of it is alive":NULL;
+  /* its pages in memory, which the release frees */
+  uint64_t resident=0;const size_t page=(size_t)getpagesize(),pages=(size_t)info.st_size/page;char *in=m!=MAP_FAILED?malloc(pages?pages:1):NULL;
+  if(in && !mincore((void *)m,pages*page,in))for(size_t i=0;i<pages;i++)resident+=(in[i]&MINCORE_INCORE)!=0;
+  free(in);
+  if(m!=MAP_FAILED)munmap(m,(size_t)info.st_size);
+  if(kept){say("%s kept (%llu bytes resident): %s\n",name,(unsigned long long)(resident*page),kept);return 1;}
+  char other[80];
+  shm_unlink(name);
+  snprintf(other,sizeof other,"%s.keep",name);shm_unlink(other);
+  snprintf(other,sizeof other,"%s.links",name);shm_unlink(other);
+  say("%s released (%llu bytes, %llu resident): no bridge runs on it and no client of it is alive\n",name,(unsigned long long)info.st_size,
+      (unsigned long long)(resident*page));
+  return 0;
+}
 
 /* design/algorithm-sources.md#programcopy */
 int main(int argc,char **argv){
-  const char *name=MESH_NAME;int me=0,layout=0;double pct=0;uint32_t table_nodes=0,lag=10;
+  const char *name=MESH_NAME;int me=0,layout=0,release=0;double pct=0;uint32_t table_nodes=0,lag=10;
   uint64_t arena_pages=0,block_pages=0,table_rows=0,window_pages=0,orders=4096;
   uint32_t link_count=0,device_count=0,qps=getenv("MESH_QPS")?(uint32_t)atoi(getenv("MESH_QPS")):1;
   struct mesh_link *links=aligned_alloc(_Alignof(struct mesh_link),(size_t)argc*sizeof *links);
@@ -1880,6 +1912,7 @@ int main(int argc,char **argv){
     /* -K: the evaluations the transport's statistics lag behind their readers (mesh.h mesh_stats_read; 10) */
     else if(!strcmp(argv[i],"-K") && i+1<argc){char *end;unsigned long k=strtoul(argv[++i],&end,10);if(*end || k>MESH_STATS/2)die("statistics lag (-K)");lag=(uint32_t)k;}
     else if(!strcmp(argv[i],"--layout"))layout=1;
+    else if(!strcmp(argv[i],"--release"))release=1;
     else if(!strcmp(argv[i],"-s") && i+1<argc)name=argv[++i];
     else if(!strcmp(argv[i],"--link") && i+1<argc){
       struct mesh_link *link=&links[link_count];
@@ -1900,6 +1933,7 @@ int main(int argc,char **argv){
     }
     else die("unknown bridge option");
   }
+  if(release)return region_release(name);
   if(me<0 || !isfinite(pct) || pct<0 || pct>100 || !arena_pages || !block_pages || arena_pages<block_pages || !qps || qps>MESH_QPS)die("bridge geometry");
   for(uint32_t d=0;d<device_count;d++){
     uint32_t pairs=0;
@@ -1926,16 +1960,18 @@ int main(int argc,char **argv){
   }
   for(uint32_t i=0;i<link_count;i++)if(links[i].provider.peer>=table_nodes)die("a link's peer past the link table's nodes (-N)");
   if((uint32_t)me>=table_nodes || table_nodes>NET_LINK_NODES)die("link table");
-  /* The region its last bridge left with clients attached, where it is this configuration's: taken as it is, with
-     its keep and link table, so its clients' comms and transfers resume (net_keep); a live bridge's is refused.
-     Otherwise all three are made afresh. */
+  /* The region its last bridge left with clients attached, where it is this configuration's and a client of it is
+     still alive: taken as it is, with its keep and link table, so its clients' comms and transfers resume
+     (net_keep); a live bridge's is refused.  Otherwise all three are made afresh: a kept region none of whose
+     clients' processes remains is released (region_release's rule), its pages freed with its last mapping. */
   struct hdr *m=MAP_FAILED;int fd=shm_open(name,O_RDWR,MESH_MODE),kept=0;
   if(fd>=0){
     struct stat info;
     if(!fstat(fd,&info) && (uint64_t)info.st_size>=length)m=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
     if(m!=MAP_FAILED && m->magic==MESH_MAGIC && !net_dead(atomic_load(&m->bridge_pid)))die("a bridge of this region is running");
-    if(m!=MAP_FAILED && region_same(m,&geometry,me,links,link_count) && (net_keep=net_keep_open(name,link_count,(uint32_t)me,length,0)) &&
-       !mesh_link_table_open(name,0,0,&link_table)){
+    const int same=m!=MAP_FAILED && region_same(m,&geometry,me,links,link_count),attached=same && net_attached(m);
+    if(same && !attached)say("bridge node %d: no client of the region its last bridge left is alive: region, keep and link table made afresh\n",me);
+    if(attached && (net_keep=net_keep_open(name,link_count,(uint32_t)me,length,0)) && !mesh_link_table_open(name,0,0,&link_table)){
       kept=link_table->nodes==table_nodes && link_table->node==(uint32_t)me;
       if(!kept){mesh_link_table_close(link_table);link_table=NULL;}
     }
@@ -2066,7 +2102,12 @@ int main(int argc,char **argv){
      does not leave the mesh; else removed at exit */
   keeping=!atomic_load(&leaving) && net_attached(m);
   if(keeping)say("bridge node %d: stopped with clients attached: the region kept for the next bridge\n",me);
-  for(uint32_t i=0;i<device_count;i++)if(!down_device(&devices[i])){say("verbs teardown failed: %s\n",strerror(errno));return 1;}
+  /* The exit status says whether a successor is wanted, to a supervisor that starts one where it is not 0
+     (bin/mesh-bridge.sh: launchd's KeepAlive, SuccessfulExit false): 0, none (this bridge left the mesh; or its
+     device's teardown failed, where a successor opening the device could meet what this one still holds:
+     RDMA-RULES.md); EX_TEMPFAIL, one (a bridge stopped: its clients and peers wait for the next, which takes a
+     kept region and resumes them). */
+  for(uint32_t i=0;i<device_count;i++)if(!down_device(&devices[i])){say("verbs teardown failed: %s: no successor wanted\n",strerror(errno));return 0;}
   atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);
   mesh_retired_release(m);
   for(uint32_t i=0;i<link_count;i++){
@@ -2083,5 +2124,5 @@ int main(int argc,char **argv){
   atomic_store(&m->port.phase,atomic_load(&leaving)?MESH_LEFT:MESH_STOPPED);
   atomic_store(&m->bridge_pid,0);
   atomic_store_explicit(&control_memory,NULL,memory_order_relaxed);
-  munmap(m,length);return status;
+  munmap(m,length);return status?status:atomic_load(&leaving)?0:EX_TEMPFAIL;
 }

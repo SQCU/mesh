@@ -10,7 +10,7 @@ BIN="${MESH_BIN:-/usr/local/mesh/bin/mesh-flow}"; [ -x "$BIN" ] || BIN="$ROOT/rd
 STAT="$(dirname "$BIN")/mesh-stat"; [ -x "$STAT" ] || STAT="$ROOT/rdma/mesh-stat"
 case "$BIN" in *-wt/*|*/.build/*|/tmp/*|/private/tmp/*) echo "mesh-bridge: refusing to launch the bridge from a worktree, build or scratch path ($BIN); run make install-bridge" >&2; exit 65 ;; esac
 
-scope=gui; mesh_pct=; node=0; links=(); region=/mesh0
+scope=gui; mesh_pct=; node=0; links=(); region=/mesh0; flags=()
 mesh_arena_pages=; mesh_block_pages=; mesh_qps=1
 
 if [ -f "$CONF" ]; then . "$CONF"; fi
@@ -20,12 +20,13 @@ mesh_arena_pages="${MESH_ARENA_PAGES:-$mesh_arena_pages}"
 mesh_block_pages="${MESH_BLOCK_PAGES:-$mesh_block_pages}"
 geometry=(-A "$mesh_arena_pages" -B "$mesh_block_pages")
 link_args=()
-for link in "${links[@]}"; do link_args+=(--link "$link"); done
+for link in ${links[@]+"${links[@]}"}; do link_args+=(--link "$link"); done
 [ -n "$mesh_pct" ] && geometry+=(-M "$mesh_pct")
+geometry+=(${flags[@]+"${flags[@]}"})
 
 case "$scope" in
 system)
-  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" MESH_ARENA_PAGES="$mesh_arena_pages" MESH_BLOCK_PAGES="$mesh_block_pages" MESH_QPS="$mesh_qps" "$0" "$@"; fi
+  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" MESH_ARENA_PAGES="$mesh_arena_pages" MESH_BLOCK_PAGES="$mesh_block_pages" MESH_QPS="$mesh_qps" MESH_BIN="$BIN" MESH_LOG_DIR="${MESH_LOG_DIR:-}" MESH_LOG="${MESH_LOG:-}" MESH_LEDGER="${MESH_LEDGER:-}" "$0" "$@"; fi
   DOM=system; PLIST=/Library/LaunchDaemons/$LABEL.plist
   LOGDIR="${MESH_LOG_DIR:-/usr/local/mesh/log}" ;;
 gui)
@@ -33,9 +34,10 @@ gui)
   LOGDIR="${MESH_LOG_DIR:-$HOME/.mesh-logs}" ;;
 *) echo "mesh-bridge: invalid configured scope $scope" >&2; exit 64 ;;
 esac
+LOG="${MESH_LOG:-$LOGDIR/$LABEL.log}"
 
 wire_check() {
-  want=$("$BIN" --layout -I "$node" "${geometry[@]}" "${link_args[@]}") || return $?
+  want=$("$BIN" --layout -I "$node" "${geometry[@]}" ${link_args[@]+"${link_args[@]}"}) || return $?
   if [ "$want" -gt "$(sysctl -n vm.global_user_wire_limit)" ]; then
     if [ "$(id -u)" = 0 ]; then sysctl -w vm.global_user_wire_limit="$want"
     else sudo -n sysctl -w vm.global_user_wire_limit="$want"; fi
@@ -43,7 +45,7 @@ wire_check() {
 }
 
 write_plist() {
-  mkdir -p "$(dirname "$PLIST")" "$LOGDIR"
+  mkdir -p "$(dirname "$PLIST")" "$(dirname "$LOG")"
   cat > "$PLIST" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -53,14 +55,14 @@ write_plist() {
 <string>$BIN</string><string>-I</string><string>$node</string>
 $( printf '<string>%s</string>' "${geometry[@]}" )
 <string>-s</string><string>$region</string>
-$( for arg in "${link_args[@]}"; do printf '<string>%s</string>' "$arg"; done )
+$( for arg in ${link_args[@]+"${link_args[@]}"}; do printf '<string>%s</string>' "$arg"; done )
 </array>
 <key>RunAtLoad</key><true/>
-<key>KeepAlive</key><true/>
+<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>ExitTimeOut</key><integer>0</integer>
-<key>EnvironmentVariables</key><dict><key>MESH_LOG_DIR</key><string>$LOGDIR</string><key>MESH_QPS</key><string>$mesh_qps</string></dict>
-<key>StandardOutPath</key><string>$LOGDIR/$LABEL.log</string>
-<key>StandardErrorPath</key><string>$LOGDIR/$LABEL.log</string>
+<key>EnvironmentVariables</key><dict><key>MESH_LOG_DIR</key><string>$LOGDIR</string><key>MESH_QPS</key><string>$mesh_qps</string>$( [ -n "${MESH_LEDGER:-}" ] && printf '<key>MESH_LEDGER</key><string>%s</string>' "$MESH_LEDGER" )</dict>
+<key>StandardOutPath</key><string>$LOG</string>
+<key>StandardErrorPath</key><string>$LOG</string>
 </dict></plist>
 PL
 }
@@ -100,7 +102,7 @@ do_start() {
   launchctl bootstrap "$DOM" "$PLIST" || return $?
   for _ in $(seq 1 400); do [ -n "$(pid_of)" ] && break; sleep 0.01; done
   p=$(pid_of)
-  [ -z "$p" ] && { echo "mesh-bridge: failed to start; see $LOGDIR/$LABEL.log" >&2; return 1; }
+  [ -z "$p" ] && { echo "mesh-bridge: failed to start; see $LOG" >&2; return 1; }
   for _ in $(seq 1 1200); do
     if "$STAT" --ready "$region" >/dev/null 2>&1; then
       echo "mesh-bridge: running as $p, registered $want bytes"
@@ -108,7 +110,7 @@ do_start() {
     fi
     sleep 0.1
   done
-  echo "mesh-bridge: setup incomplete; see $LOGDIR/$LABEL.log" >&2
+  echo "mesh-bridge: setup incomplete; see $LOG" >&2
   return 1
 }
 
@@ -122,7 +124,8 @@ case "${1:-status}" in
   start)   do_start ;;
   stop)    do_stop ;;
   restart) do_stop && do_start ;;
+  remove)  do_stop && rm -f "$PLIST" && echo "mesh-bridge: $PLIST removed" ;;
   status)  do_status ;;
   ready)   "$STAT" --ready "$region" ;;
-  *) echo "usage: $0 {start|stop|restart|status|ready}" >&2; exit 64 ;;
+  *) echo "usage: $0 {start|stop|restart|remove|status|ready}" >&2; exit 64 ;;
 esac

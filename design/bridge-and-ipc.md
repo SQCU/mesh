@@ -30,6 +30,13 @@ Independent values use their configured distinct storage. The bridge does not
 interpret a model graph, choose tensor placement, or invoke application kernels.
 
 SIGINT and SIGTERM request orderly teardown of device resources. The operational
-rules are in [RDMA-RULES.md](../RDMA-RULES.md). Device teardown belongs to the bridge,
+rules are in [RDMA-RULES.md](../RDMA-RULES.md). The bridge is a supervised service, as
+it has been since the first pairing loop: `bin/mesh-bridge.sh` loads it as a launchd job
+that is started again whenever it exits other than 0. A stopped bridge exits
+EX_TEMPFAIL, and its successor takes the region it kept for its clients and resumes
+them. A bridge that leaves the mesh (SIGUSR2) exits 0, and none is started. A kept
+region none of whose clients' processes remains is released by the next bridge's
+start or by `mesh-flow --release -s REGION`; a peer that pairs again as another
+instance (its machine restarted) fails the lost session's transfers. Device teardown belongs to the bridge,
 not to a numerical function. The storage boundary is documented in
 [abi-streams.md](abi-streams.md).

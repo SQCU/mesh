@@ -103,7 +103,8 @@ struct hdr {
    Communicator memory is the region's registered window, used in place: a receive lands only in memory
    registered before its queue pair was set up (mesh-flow.c net_configure), which the window is.  The tables, and
    the bridge's own state of them (<region>.keep), outlive the bridge's process: a bridge stopped with clients
-   attached leaves them for the next, which resumes their transfers (mesh-flow.c net_keep). */
+   attached leaves them for the next, which resumes their transfers while a client of them is alive, and releases
+   them once none is (mesh-flow.c net_keep, region_release). */
 #define MESH_NET_CLIENTS 32
 #define MESH_NET_COMMS 256
 #define MESH_NET_REQUESTS 64
