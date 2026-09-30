@@ -35,7 +35,8 @@
 // call's stream reached its value, the MPS stream reached its kept work and passed it (words the GPU
 // publishes before and after it, system-coherent, polled by a thread of the trace's: no command buffer of
 // its own), the GPU times of the MPS command buffer that ends at the fence, and libnccl-mesh's tallies of
-// the call (ncclMeshGroupTally), written as JSON lines when the group is destroyed or the process exits.
+// the call (ncclMeshGroupTally), written as JSON lines when the group is destroyed or the process exits; and
+// each replay of a recorded step (replay, below).
 #include <torch/extension.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/GroupRegistry.hpp>
@@ -123,10 +124,26 @@ struct Traced {
   void *tally = nullptr, *stream_event = nullptr;
   uint64_t stream_value = 0;
 };
+// A replayed call (torch_mesh.replay): its recorded call's op, bytes, cut (0: none), whether its send buffer
+// was published and its receive buffer fresh; the library's counts of its last iteration, and when the MPS
+// stream reached and passed its kept work (uptime ns, 0: not seen).
+struct ReplayedCall {
+  std::string op;
+  uint64_t bytes = 0, reach = 0, resume = 0;
+  int cut = 0, published = 0, fresh = 0;
+  ncclMeshCounts_t counts{};
+};
+// A replay: its segments' command buffers' GPU start and end (s; 0 for none) and its calls.
+struct Replayed {
+  uint64_t replay = 0;
+  std::vector<double> segments;
+  std::vector<ReplayedCall> calls;
+};
 // The trace's state, never destroyed (its thread polls it until the process ends).
 struct TraceState {
   std::mutex lock;
   std::vector<Traced> calls;
+  std::vector<Replayed> replays;
   std::map<std::pair<void *, uint64_t>, uint64_t> reached;          // (event or word, value): when the GPU reached it
   std::vector<std::tuple<void *, uint64_t, bool>> pending;          // (event or word, value, a word) not yet reached
   std::map<uint64_t, std::pair<double, double>> gpu;                // fence value: its command buffer's GPU times (s)
@@ -171,8 +188,9 @@ static void note_reached(id<MTLSharedEvent> event, uint64_t value) {
   pend((__bridge void *)event, value, false);
 }
 // A word of the trace's, published (1) by the GPU in `cb` after the work encoded so far (libnccl-mesh's
-// publish kernel, ncclMeshEncodeCopies of no copies), noted in trace.reached once seen; its index (0: none).
-static uint64_t note_word(id<MTLCommandBuffer> cb) {
+// publish kernel, ncclMeshEncodeCopies of no copies), noted in trace.reached once seen (`noted`: a recorded
+// one is noted at each replay); its index (0: none).
+static uint64_t note_word(id<MTLCommandBuffer> cb, bool noted = true) {
   uint64_t index;
   {
     std::lock_guard<std::mutex> guard(trace.lock);
@@ -186,7 +204,7 @@ static uint64_t note_word(id<MTLCommandBuffer> cb) {
     index = ++trace.used;
   }
   if (ncclMeshEncodeCopies((__bridge void *)cb, 0, nullptr, nullptr, nullptr, nullptr, trace.words + index, 1) != ncclSuccess) return 0;
-  pend(trace.words + index, 1, true);
+  if (noted) pend(trace.words + index, 1, true);
   return index;
 }
 // The GPU times of the command buffer `cb` (not yet committed), noted under the fence value `value`.
@@ -209,6 +227,9 @@ struct Recorder {
   int (*run_cut)(void *, NSUInteger, NSUInteger, id, uint64_t);
   void (*release)(void *);
   void (*times)(const void *, double *, double *);
+  NSUInteger (*segments)(const void *, double *, NSUInteger);
+  BOOL (*publish)(id, NSUInteger, NSUInteger, id, NSUInteger, NSUInteger);
+  NSUInteger (*touches)(id);
 };
 static const Recorder *recorder() {
   static const Recorder found = {(void *(*)(id, void (^)(void), const void *, size_t, NSUInteger, int))dlsym(RTLD_DEFAULT, "MetalRecord"),
@@ -216,12 +237,51 @@ static const Recorder *recorder() {
                                  (NSUInteger (*)(const void *))dlsym(RTLD_DEFAULT, "MetalReplayCuts"),
                                  (int (*)(void *, NSUInteger, NSUInteger, id, uint64_t))dlsym(RTLD_DEFAULT, "MetalReplayRunCut"),
                                  (void (*)(void *))dlsym(RTLD_DEFAULT, "MetalReplayFree"),
-                                 (void (*)(const void *, double *, double *))dlsym(RTLD_DEFAULT, "MetalReplayTimes")};
-  return found.record && found.queue && found.cut && found.cuts && found.run_cut && found.release && found.times ? &found : nullptr;
+                                 (void (*)(const void *, double *, double *))dlsym(RTLD_DEFAULT, "MetalReplayTimes"),
+                                 (NSUInteger (*)(const void *, double *, NSUInteger))dlsym(RTLD_DEFAULT, "MetalReplaySegmentTimes"),
+                                 (BOOL (*)(id, NSUInteger, NSUInteger, id, NSUInteger, NSUInteger))dlsym(RTLD_DEFAULT, "MetalRecordPublish"),
+                                 (NSUInteger (*)(id))dlsym(RTLD_DEFAULT, "MetalRecordTouches")};
+  return found.record && found.queue && found.cut && found.cuts && found.run_cut && found.release && found.times && found.segments &&
+                 found.publish && found.touches
+             ? &found
+             : nullptr;
 }
-// A step being recorded: each MPS call's fence is a cut of the recording (its inputs' command buffer ends
-// there at replay), its library call persistent (ncclMeshPersistentBegin), and nothing is traced.
+// A step being recorded: its library calls persistent (ncclMeshPersistentBegin); an MPS call's send buffer is
+// published in ranges by the commands that store it where the recorder can (MetalRecordPublish: PyTorch's copy
+// kernels from their source), else its fence is a cut of the recording (its inputs' command buffer ends there at
+// replay); the calls' own trace is not kept, their kept work's reach and resume are (replay).  `recorded` the
+// recording being made.
 static std::atomic<bool> recording{false};
+// Each recorded call: its op, bytes, its cut's place among the recording's (0: none, its send buffer published),
+// its kept work's reach and resume words (the trace's), and whether its receive buffer was fresh.
+struct RecordedCall {
+  std::string op;
+  uint64_t bytes = 0, reach = 0, resume = 0;
+  int cut = 0, fresh = 0, published = 0;
+};
+// The recorder's replay (its layout, metal_recording.h struct MetalReplay: the commands of one invocation
+// at 24), the persistent calls, and the event the replay signals at its cuts (its first, before the step's
+// commands: the replay before it done); each recorded call, the window allocations holding the published
+// ranges' words, and the replays made so far.
+struct Recording {
+  void *replay = nullptr, *calls = nullptr;
+  int ncalls = 0;
+  NSUInteger cuts = 0;
+  id<MTLSharedEvent> event = nil;
+  std::vector<RecordedCall> recorded;
+  std::vector<void *> words;
+  uint64_t replays = 0;
+  uint32_t commands() const { return replay ? *(const uint32_t *)((const char *)replay + 24) : 0; }
+  ~Recording() {
+    if (calls) ncclMeshPersistentFree(calls);
+    if (replay && recorder()) recorder()->release(replay);
+    for (void *w : words) ncclMemFree(w);
+    [event release];
+  }
+};
+static Recording *recorded = nullptr;
+// The ranges a published send buffer is counted in (MetalRecordPublish).
+static constexpr size_t PUBLISHED_RANGE = (size_t)1 << 20;
 
 // ---- the MPS stream's fence ----
 // `body` on the MPS stream's serial queue (inline when already on it: a release closure can run there).
@@ -460,6 +520,8 @@ class Call {
     return (int)places_.size() - 1;
   }
   void fill(const at::Tensor &from, int place, size_t at) { fills_.push_back({from, place, at}); }
+  // The call's send buffer lies `at` bytes into place `place` (an all-gather in place), `bytes` long.
+  void input_within(int place, size_t at, size_t bytes) { input_place_ = place; input_at_ = at; input_bytes_ = bytes; }
   bool mps() const { return mps_; }
   void *ptr(int i) const { return places_[i].pointer; }
   cudaStream_t stream() const { return stream_; }
@@ -485,12 +547,8 @@ class Call {
     }
     auto *s = at::mps::getCurrentMPSStream();
     if (recording) {
-      // the replay ends a command buffer here and signals its event, on which the persistent call starts
       TORCH_CHECK(!scratch_ && fills_.empty(), "mesh: a recorded call's tensors are window memory, in place (no copy through the call's own)");
-      on_mps(s, [&] {
-        s->endKernelCoalescing();
-        recorder()->cut();
-      });
+      persist(s);
       stream_ = pool_->acquire(true);
       return;
     }
@@ -522,12 +580,15 @@ class Call {
         std::lock_guard<std::mutex> guard(trace.lock);
         trace.calls[traced_].reach = reach;
       }
+      const bool noted = recorded && tracing() && recorded_call_ != SIZE_MAX;  // a recorded call's: noted at each replay
+      if (noted) recorded->recorded[recorded_call_].reach = note_word(s->commandBuffer(), false);
       check(ncclMeshStreamEncodeWait(stream_, (__bridge void *)s->commandBuffer()), nullptr, "ncclMeshStreamEncodeWait");
       if (traced_ != SIZE_MAX) {
         const uint64_t resume = note_word(s->commandBuffer());
         std::lock_guard<std::mutex> guard(trace.lock);
         trace.calls[traced_].resume = resume;
       }
+      if (noted) recorded->recorded[recorded_call_].resume = note_word(s->commandBuffer(), false);
     });
     for (auto &p : places_)
       if (p.at != SIZE_MAX && p.out) mps_blits(s, p, false);
@@ -539,6 +600,69 @@ class Call {
   }
   ~Call() {
     if (scratch_) ncclMeshMemRelease(scratch_, nullptr, 0);
+  }
+  // A recorded call, before it is issued (ncclMeshPersistentNext): its send buffer (its one place it reads, or
+  // the bytes in a place input_within names) published in ranges of PUBLISHED_RANGE by the recorded commands that
+  // store it, where the recorder can make them (MetalRecordPublish: PyTorch's own copy kernels, their stores
+  // system-coherent and counted by range into words of a window allocation the recording holds); and whether
+  // every place it writes is untouched by the step's commands recorded before it (a buffer a publishing command
+  // stores into aside), so its receives may land from the step's start.
+  void persist(at::mps::MPSStream *s) {
+    RecordedCall r;
+    r.op = op_ ? op_ : "";
+    char *send = nullptr;
+    size_t bytes = 0;
+    int ins = 0;
+    for (auto &p : places_) {
+      r.bytes += p.bytes;
+      if (p.in) { ins++; send = (char *)p.pointer; bytes = p.bytes; }
+    }
+    if (input_place_ >= 0) { send = (char *)places_[input_place_].pointer + input_at_; bytes = input_bytes_; }
+    else if (ins != 1) send = nullptr;
+    uint64_t *ready = nullptr;
+    on_mps(s, [&] {
+      s->endKernelCoalescing();  // the commands before the call recorded
+      void *buffer = nullptr, *words = nullptr, *held = nullptr;
+      size_t offset = 0, at = 0;
+      const size_t ranges = (bytes + PUBLISHED_RANGE - 1) / PUBLISHED_RANGE;
+      if (send && bytes && ncclMeshMemBuffer(send, &buffer, &offset) == ncclSuccess && ncclMemAlloc(&words, 16 * ranges) == ncclSuccess) {
+        std::memset(words, 0, 16 * ranges);
+        check(ncclMeshMemBuffer(words, &held, &at), nullptr, "ncclMeshMemBuffer");
+        if (recorder()->publish((__bridge id)buffer, offset, bytes, (__bridge id)held, at, PUBLISHED_RANGE)) {
+          ready = (uint64_t *)words;
+          recorded->words.push_back(words);
+        } else ncclMemFree(words);
+      }
+      r.fresh = 1;
+      for (auto &p : places_) {
+        void *out = nullptr;
+        size_t o = 0;
+        if (p.out && p.bytes && (!p.pointer || ncclMeshMemBuffer(p.pointer, &out, &o) != ncclSuccess || recorder()->touches((__bridge id)out)))
+          r.fresh = 0;
+      }
+    });
+    r.published = ready != nullptr;
+    check(ncclMeshPersistentNext(ready, PUBLISHED_RANGE, bytes, r.fresh), nullptr, "ncclMeshPersistentNext");
+    recorded_call_ = recorded->recorded.size();
+    recorded->recorded.push_back(r);
+  }
+  // A recorded call, issued: the replay ends a command buffer here and signals its event, on which the persistent
+  // call starts, where the library needs that cut (ncclMeshPersistentCut: its send buffer not published, or a
+  // receive of its plan may land only once it starts).
+  void persisted() {
+    if (!recording || !mps_ || !stream_ || recorded_call_ == SIZE_MAX) return;
+    int cut = 1, groups = 0;
+    check(ncclMeshPersistentCut(&cut, &groups), nullptr, "ncclMeshPersistentCut");
+    TORCH_CHECK(groups == 1, "mesh: a recorded call issues one group of the library (", groups, ")");
+    if (!cut) return;
+    auto *s = at::mps::getCurrentMPSStream();
+    on_mps(s, [&] {
+      s->endKernelCoalescing();
+      recorder()->cut();
+    });
+    int cuts = 0;
+    for (auto &c : recorded->recorded) cuts += c.cut != 0;
+    recorded->recorded[recorded_call_].cut = cuts + 1;
   }
   // The call's trace record once it is issued (MESH_TRACE): its places' bytes, in place or blitted, its
   // host times, its fence, and the library's tallies of its group, held.
@@ -695,7 +819,9 @@ class Call {
   const char *op_;
   at::ScalarType dtype_;
   uint64_t enter_, fence_ = 0, commits_ = 0;
-  size_t traced_ = SIZE_MAX;
+  size_t traced_ = SIZE_MAX, recorded_call_ = SIZE_MAX;
+  int input_place_ = -1;
+  size_t input_at_ = 0, input_bytes_ = 0;
   cudaStream_t stream_ = nullptr;
   std::vector<Place> places_;
   std::vector<Segment> fills_;
@@ -864,6 +990,7 @@ class ProcessGroupMesh : public Backend {
     for (int r = 0; r < getRank(); r++) at += counts[r] * inputs[0].element_size();
     int in = -1, out = call->add(outputs[0], false, true);
     if (!(call->mps() && lies_at(inputs[0], outputs[0], at))) in = call->add(inputs[0], true, false);
+    else call->input_within(out, at, inputs[0].nbytes());
     call->begin();
     check(ncclMeshAllGatherV(in < 0 ? (char *)call->ptr(out) + at : call->ptr(in), call->ptr(out), counts.data(), datatype(inputs[0]), comm_,
                              call->stream()), comm_, "ncclMeshAllGatherV");
@@ -1167,8 +1294,12 @@ class ProcessGroupMesh : public Backend {
   // else the input a place of its own (out of place).  gather_issue issues it (the coalesced form's i-th
   // pair of places: `ins[i]` the input's, -1 in place).
   int gather_into(Call &call, at::Tensor &output, at::Tensor &input) {
-    call.add(output, false, true);
-    return call.mps() && lies_at(input, {output}, getRank() * input.nbytes()) ? -1 : call.add(input, true, false);
+    const int out = call.add(output, false, true);
+    if (call.mps() && lies_at(input, {output}, getRank() * input.nbytes())) {
+      call.input_within(out, getRank() * input.nbytes(), input.nbytes());
+      return -1;
+    }
+    return call.add(input, true, false);
   }
   void gather_issue(Call &call, int out, int in, at::Tensor &input) {
     void *from = in < 0 ? (char *)call.ptr(out) + getRank() * input.nbytes() : call.ptr(in);
@@ -1195,6 +1326,7 @@ class ProcessGroupMesh : public Backend {
     return {};
   }
   c10::intrusive_ptr<Work> work(OpType type, std::vector<at::Tensor> &outputs, std::shared_ptr<Call> call, std::vector<int64_t> splits = {}) {
+    call->persisted();
     call->traced(std::move(splits));
     return c10::make_intrusive<WorkMesh>(type, outputs, std::move(call), comm_);
   }
@@ -1357,23 +1489,10 @@ static uint64_t address(const at::Tensor &t) {
 }
 
 // ---- a step recorded and replayed (torch_mesh.record, replay) ----
-// The recorder's replay (its layout, metal_recording.h struct MetalReplay: the commands of one invocation
-// at 24), the persistent calls, and the event the replay signals at its cuts.
-struct Recording {
-  void *replay = nullptr, *calls = nullptr;
-  int ncalls = 0;
-  NSUInteger cuts = 0;
-  id<MTLSharedEvent> event = nil;
-  uint32_t commands() const { return replay ? *(const uint32_t *)((const char *)replay + 24) : 0; }
-  ~Recording() {
-    if (calls) ncclMeshPersistentFree(calls);
-    if (replay && recorder()) recorder()->release(replay);
-    [event release];
-  }
-};
 // `fn` (a step) recorded as the recorder's one invocation: every MPS command encoded on the MPS stream's
-// queue, from any thread (the autograd engine encodes the backward on its own), each call's fence a cut
-// and its library call persistent (never started while recording).  Nothing runs: the step's tensors hold
+// queue, from any thread (the autograd engine encodes the backward on its own), after a leading cut; each
+// call's library call persistent (never started while recording), its send buffer published by the commands
+// that store it or its fence a cut (Call::persist, persisted).  Nothing runs: the step's tensors hold
 // what they held, its outputs are written by each replay.
 static std::shared_ptr<Recording> record(pybind11::function fn) {
   const Recorder *r = recorder();
@@ -1387,9 +1506,11 @@ static std::shared_ptr<Recording> record(pybind11::function fn) {
   auto made = std::make_shared<Recording>();
   __block std::exception_ptr failed;
   __block pybind11::function step = fn;
+  recorded = made.get();
   recording = true;
   made->replay = r->record(device(), ^{
     try {
+      r->cut();  // the leading cut: at replay, the replay before it done
       step();
       at::mps::getCurrentMPSStream()->synchronize(at::mps::SyncType::COMMIT_AND_WAIT);
     } catch (...) {
@@ -1397,22 +1518,41 @@ static std::shared_ptr<Recording> record(pybind11::function fn) {
     }
   }, nullptr, 0, 1, 1);  // the encoded form (metal_recording.h MetalFormEncoded): PyTorch's and MPS's kernels support no indirect commands
   recording = false;
+  recorded = nullptr;
   check(ncclMeshPersistentEnd(&made->calls, &made->ncalls), nullptr, "ncclMeshPersistentEnd");
   if (failed) std::rethrow_exception(failed);
   TORCH_CHECK(made->replay, "mesh: the step was not recorded (the recorder's reason is on stderr)");
   made->cuts = r->cuts(made->replay);
-  TORCH_CHECK(made->cuts == (NSUInteger)made->ncalls, "mesh: the recording has ", made->cuts, " cuts for ", made->ncalls, " calls");
+  NSUInteger cut = 1;
+  for (auto &c : made->recorded) cut += c.cut != 0;
+  TORCH_CHECK(made->recorded.size() == (size_t)made->ncalls && made->cuts == cut, "mesh: the recording has ", made->cuts, " cuts for ",
+              made->ncalls, " calls, ", cut - 1, " of them cut");
   made->event = [device() newSharedEvent];
   return made;
 }
 // `steps` replays of a recording, each waited for: its command buffers on the recorder's queue, cut at its
-// calls, whose persistent calls start as the replay passes their cuts.  The last one's command buffers on
-// the GPU (s): their GPU times summed, and from the first's start to the last's end.
+// cuts; each replay's persistent calls posted ahead once it passes its leading cut, each started as it passes
+// its cut or once its published ranges are (nccl.h ncclMeshPersistentStart).  The last one's command buffers on
+// the GPU (s): their GPU times summed, and from the first's start to the last's end.  Under MESH_TRACE a replay of
+// one step is traced: its segments' GPU times, each call's library counts and its kept work's reach and resume.
 static std::pair<double, double> replay(const std::shared_ptr<Recording> &made, int64_t steps) {
   const Recorder *r = recorder();
   TORCH_CHECK(r && made && made->replay, "mesh: no recording to replay");
   at::mps::getCurrentMPSStream()->synchronize(at::mps::SyncType::COMMIT_AND_WAIT);  // the MPS work before it done
   const uint64_t value = [made->event signaledValue];
+  // the trace (MESH_TRACE) of one replay: its recorded calls' kept work's words cleared and noted again
+  const bool traced = tracing() && steps == 1 && trace.words;
+  if (traced)
+    for (auto &c : made->recorded)
+      for (uint64_t index : {c.reach, c.resume}) {
+        if (!index) continue;
+        __atomic_store_n(trace.words + index, 0, __ATOMIC_RELEASE);
+        {
+          std::lock_guard<std::mutex> guard(trace.lock);
+          trace.reached.erase({trace.words + index, 1});
+        }
+        pend(trace.words + index, 1, true);
+      }
   if (made->ncalls) check(ncclMeshPersistentStart(made->calls, (__bridge void *)made->event, value, made->cuts, (uint64_t)steps), nullptr, "ncclMeshPersistentStart");
   int failed = 0;
   {
@@ -1426,6 +1566,43 @@ static std::pair<double, double> replay(const std::shared_ptr<Recording> &made, 
   TORCH_CHECK(result == ncclSuccess, "mesh: a replayed step's calls: ", ncclGetErrorString(result), ": ", ncclGetLastError(nullptr));
   double busy = 0, span = 0;
   r->times(made->replay, &busy, &span);
+  if (traced) {
+    Replayed replayed;
+    replayed.replay = made->replays;
+    replayed.segments.resize(2 * r->segments(made->replay, nullptr, 0));
+    r->segments(made->replay, replayed.segments.data(), replayed.segments.size() / 2);
+    std::vector<ncclMeshCounts_t> counts(made->recorded.size());
+    int n = 0;
+    ncclMeshPersistentCounts(made->calls, counts.data(), (int)counts.size(), &n);
+    auto seen = [&](uint64_t index) -> uint64_t {
+      if (!index) return 0;
+      for (int i = 0; i < 1000; i++) {
+        {
+          std::lock_guard<std::mutex> guard(trace.lock);
+          auto it = trace.reached.find({trace.words + index, 1});
+          if (it != trace.reached.end()) return it->second;
+        }
+        usleep(1000);
+      }
+      return 0;
+    };
+    for (size_t k = 0; k < made->recorded.size(); k++) {
+      auto &c = made->recorded[k];
+      ReplayedCall rc;
+      rc.op = c.op;
+      rc.bytes = c.bytes;
+      rc.cut = c.cut;
+      rc.published = c.published;
+      rc.fresh = c.fresh;
+      rc.reach = seen(c.reach);
+      rc.resume = seen(c.resume);
+      if ((int)k < n) rc.counts = counts[k];
+      replayed.calls.push_back(rc);
+    }
+    std::lock_guard<std::mutex> guard(trace.lock);
+    trace.replays.push_back(std::move(replayed));
+  }
+  made->replays++;
   return {busy, span};
 }
 
@@ -1484,7 +1661,28 @@ static void trace_dump() {
           << ",\"received\":" << t.receivedBytes << ",\"host_waits\":" << t.hostWaits << ",\"input_waits\":" << t.inputWaits
           << ",\"kernels\":" << t.gpuKernels << ",\"gpu_copy\":" << t.gpuCopyBytes << ",\"cpu_copy\":" << t.cpuCopyBytes
           << ",\"gpu_event_waits\":" << t.gpuEventWaits << ",\"gpu_word_waits\":" << t.gpuWordWaits << ",\"host_word_waits\":" << t.hostWordWaits
-          << ",\"commits\":" << t.commits << ",\"wakeups\":" << t.wakeups << ",\"buffers\":" << t.buffers << "}";
+          << ",\"commits\":" << t.commits << ",\"wakeups\":" << t.wakeups << ",\"buffers\":" << t.buffers << ",\"sends\":" << t.sends
+          << ",\"grant_waits\":" << t.grantWaits << "}";
+    }
+    out << "]}\n";
+  }
+  // each traced replay (torch_mesh.replay): its segments' GPU spans and its calls (library times on uptime ns)
+  for (auto &r : trace.replays) {
+    auto time = [&](uint64_t ns) { return ns ? std::to_string(ns - offset) : std::string("null"); };
+    out << "{\"replayed\":" << r.replay << ",\"segments_ns\":[";
+    for (size_t k = 0; k + 1 < r.segments.size(); k += 2)
+      out << (k ? "," : "") << "[" << (uint64_t)(r.segments[k] * 1e9) << "," << (uint64_t)(r.segments[k + 1] * 1e9) << "]";
+    out << "],\"calls\":[";
+    for (size_t k = 0; k < r.calls.size(); k++) {
+      auto &c = r.calls[k];
+      auto &t = c.counts;
+      out << (k ? "," : "") << "{\"call\":" << k << ",\"op\":\"" << c.op << "\",\"bytes\":" << c.bytes << ",\"cut\":" << c.cut
+          << ",\"published\":" << c.published << ",\"fresh\":" << c.fresh << ",\"ready_ns\":" << time(t.readyNs) << ",\"start_ns\":"
+          << time(t.startNs) << ",\"end_ns\":" << time(t.endNs) << ",\"arrived_ns\":" << time(t.arrivedNs) << ",\"reach_ns\":"
+          << (c.reach ? std::to_string(c.reach) : "null") << ",\"resume_ns\":" << (c.resume ? std::to_string(c.resume) : "null")
+          << ",\"sent\":" << t.sentBytes << ",\"received\":" << t.receivedBytes << ",\"sends\":" << t.sends << ",\"grant_waits\":"
+          << t.grantWaits << ",\"input_waits\":" << t.inputWaits << ",\"host_word_waits\":" << t.hostWordWaits
+          << ",\"gpu_word_waits\":" << t.gpuWordWaits << "}";
     }
     out << "]}\n";
   }
