@@ -896,6 +896,23 @@ ncclResult_t ncclMeshStreamWaitWord(cudaStream_t stream, const uint64_t* word, u
    as the word is seen (nccl-mesh-metal.m). */
 ncclResult_t ncclMeshEncodeCopies(void* commandBuffer, int n, void* const* dst, void* const* src, const size_t* offset,
     const size_t* bytes, uint64_t* word, uint64_t value);
+/* Persistent calls [MPI-4's persistent collectives, MPI_Allreduce_init and MPI_Start: MPI Forum, MPI 4.0,
+   2021, §6.12]: between ncclMeshPersistentBegin and ncclMeshPersistentEnd the process's calls are planned,
+   placed and their GPU work kept for ncclMeshStreamEncodeWait as ever (so a recording of the caller's
+   command buffers takes it: metal-microbench metal_recording.h), but no worker starts them; each must defer
+   (ncclMeshStreamDefer) and be a collective of one communicator.  End gives them as one handle, `calls` of
+   them in issue order.  ncclMeshPersistentStart runs them `count` times: call k of iteration i once `event`
+   (an id<MTLSharedEvent>) reaches value + i * stride + k + 1 (the command buffer that ends with the call's
+   inputs complete: plain stores reach the NIC then), its completion words zeroed first, then its transfers
+   as the call's own; ncclMeshPersistentWait waits for the last, and gives the first failure (a failed call
+   revokes the communicator, and every later one fails at its start, setting its words, so the GPU work
+   waiting on them goes on); the communicator makes no other call meanwhile.  ncclMeshPersistentFree
+   releases their allocations. */
+ncclResult_t ncclMeshPersistentBegin(void);
+ncclResult_t ncclMeshPersistentEnd(void** handle, int* calls);
+ncclResult_t ncclMeshPersistentStart(void* handle, void* event, uint64_t value, uint64_t stride, uint64_t count);
+ncclResult_t ncclMeshPersistentWait(void* handle);
+ncclResult_t ncclMeshPersistentFree(void* handle);
 /* The algorithms the planner took for this thread's last ended group, a call each in issue
    order (at most `capacity`): 0 direct, 1 ring, 2 tree, 3 binomial (mesh-collective.h MESH_*),
    -1 a point-to-point call or a one-rank communicator's local copy; `roots` the tree's root. */

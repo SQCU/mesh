@@ -366,6 +366,14 @@ static const char *source =
   "  else if (a[5] == 4) EACH_N(units) ((device uint *)(d + at))[i] = ((device uint *)(s + fromat))[i];\n"
   "  else EACH_N(units) (d + at)[i] = (s + fromat)[i];\n"
   "}\n"
+  "// n words from a byte offset into buffer 0 set to 0 after the dispatches before it (a persistent call's\n"
+  "// completion words once its program has waited for them all: its next iteration's waits see only its own)\n"
+  "kernel void zero(device uchar *w [[buffer(0)]], constant ulong *a [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
+  "  if (i) return;\n"
+  "  FENCE;\n"
+  "  for (ulong k = 0; k < a[1]; k++) ((SYS ulong *)(w + a[0]))[k] = 0ul;\n"
+  "  FENCE;\n"
+  "}\n"
   "// a word (a byte offset into buffer 0) set to `value`, system-coherent, after the dispatches before it\n"
   "kernel void publish(device uchar *w [[buffer(0)]], constant ulong *a [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
   "  if (i) return;\n"
@@ -374,7 +382,7 @@ static const char *source =
   "  FENCE;\n"
   "}\n";
 
-enum { KERNELS = 7, KERNEL_COPY = 3, KERNEL_WAIT = 4, KERNEL_PUBLISH = 5, KERNEL_COUNTED = 6 };
+enum { KERNELS = 8, KERNEL_COPY = 3, KERNEL_WAIT = 4, KERNEL_PUBLISH = 5, KERNEL_COUNTED = 6, KERNEL_ZERO = 7 };
 /* A kernel's arguments (the source's struct args): byte offsets dst and src into buffers 0 and 1, `other`
    into buffer 3 (a fresh combine's first operand). */
 struct args { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,published,fresh,pad; uint64_t other; };
@@ -424,7 +432,7 @@ HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
     if(@available(macOS 15.0,*))options.mathMode=MTLMathModeSafe;
     NSError *failure=nil;
     id<MTLLibrary> library=[[device newLibraryWithSource:@(source) options:options error:&failure] autorelease];
-    static const char *const names[KERNELS]={"combine","premultiply","postdivide","copy","wait","publish","counted"};
+    static const char *const names[KERNELS]={"combine","premultiply","postdivide","copy","wait","publish","counted","zero"};
     for(int k=0;library && k<KERNELS;k++){
       id<MTLFunction> function=[[library newFunctionWithName:@(names[k])] autorelease];
       if(!(gpu.kernels[k]=[device newComputePipelineStateWithFunction:function error:&failure]))library=nil;
@@ -570,6 +578,18 @@ HIDDEN void nccl_mesh_program_publish(void *program,void *buffer,uint64_t at,uin
     const uint64_t a[2]={at,value};
     id<MTLComputeCommandEncoder> encoder=encoder_of(program);
     [encoder setComputePipelineState:gpu.kernels[KERNEL_PUBLISH]];
+    [encoder setBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:0];
+    [encoder setBytes:a length:sizeof a atIndex:1];
+    [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+  }
+}
+/* `n` words of `buffer` from byte offset `at` set to 0 after the dispatches before it. */
+HIDDEN void nccl_mesh_program_zero(void *program,void *buffer,uint64_t at,uint64_t n){
+  if(!n)return;
+  @autoreleasepool {
+    const uint64_t a[2]={at,n};
+    id<MTLComputeCommandEncoder> encoder=encoder_of(program);
+    [encoder setComputePipelineState:gpu.kernels[KERNEL_ZERO]];
     [encoder setBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:0];
     [encoder setBytes:a length:sizeof a atIndex:1];
     [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];

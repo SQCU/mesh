@@ -107,13 +107,15 @@ struct mark { struct ncclMeshStream *stream; uint64_t done; };
 struct tally { _Atomic int refs; int n; uint64_t counts[][TALLIES]; };
 /* A group: its streams' marks; its program's event and last value, and the gate word the workers start at
    (NULL: none); without a program, the recorded points the workers wait for; its window allocation. */
-struct launch { pthread_mutex_t lock; pthread_cond_t cond; int items,sync,nmarks,nwaits; ncclResult_t result; struct mark *marks;
+struct launch { pthread_mutex_t lock; pthread_cond_t cond; int items,sync,nmarks,nwaits,persistent; ncclResult_t result; struct mark *marks;
   void *event; uint64_t end; _Atomic uint64_t *gate; struct tally *tally; struct point *waits; unsigned char *stage,*placed; struct region own; };
 struct flight;
+struct persistent;
 /* A communicator's part of a group: `gpu` where a program waits on its completion words; `bound`, while it
-   does, when that wait fails it. */
+   does, when that wait fails it; `run` a persistent call's (nccl.h ncclMeshPersistentBegin), which the
+   worker starts again each iteration and never frees. */
 struct item { struct call *calls; int n; struct launch *launch; struct item *next; uint64_t deadline,bound;
-  int gpu,collectives_done,networked; struct flight *flight; ncclResult_t result; };
+  int gpu,collectives_done,networked; struct flight *flight; ncclResult_t result; struct persistent *run; };
 /* A plan kept for (epoch, call signature): the algorithm chosen, this rank's steps and the whole plan's
    hash; its segments (a rank each) and steps (MESH_COLLECTIVE_STEPS of the ranks) sized with the
    communicator. */
@@ -143,6 +145,8 @@ struct ncclComm {
   /* woke: the worker came out of its condition variable (parked) with a part to start; agreeing: an
      agreement is making the connections again (the worker leaves them alone) */
   pthread_t worker; int started,stopping,finalized,parked,woke,agreeing;
+  /* the persistent calls the worker runs (ncclMeshPersistentStart), or NULL */
+  struct persistent *run;
   pthread_mutex_t lock; pthread_cond_t cond;
   struct item *head,*tail; int busy;
   struct flight *flights; int nflights,*blocked;
@@ -177,6 +181,7 @@ HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *fro
 HIDDEN void nccl_mesh_program_words(void *program,void *buffer,const uint64_t *at,uint32_t n,void *failures,uint64_t failure,uint64_t ns,
   void *const *touch,int ntouch);
 HIDDEN void nccl_mesh_program_publish(void *program,void *buffer,uint64_t at,uint64_t value);
+HIDDEN void nccl_mesh_program_zero(void *program,void *buffer,uint64_t at,uint64_t n);
 HIDDEN void nccl_mesh_program_counted(void *program,void *to,void *from,void *counts,void *got,void *landed,const uint64_t *a,uint32_t na,uint64_t units);
 HIDDEN void nccl_mesh_program_end(void *program);
 HIDDEN void nccl_mesh_program_handler(void *program,void (*done)(void *,int),void *argument);
@@ -1144,6 +1149,41 @@ static void hold(struct ncclComm *c,struct item *it){
   for(int i=0;i<it->n;i++)if(it->calls[i].out.span && (s=span_at(it->calls[i].out.span)))read_add(s,c->quiet,c->quiet_value,NULL);
   pthread_mutex_unlock(&heap.lock);
 }
+/* ---- persistent calls (nccl.h ncclMeshPersistentBegin) ----
+   [MPI-4's persistent collectives, MPI_Allreduce_init and MPI_Start: MPI Forum, MPI 4.0, 2021, §6.12] Their
+   parts in issue order, one communicator's; started, part k of iteration i starts once `event` reaches
+   value + i * stride + k + 1, its completion words zeroed first (the GPU program has waited for all of the
+   last iteration's: it has passed the cut before this one), `next` the next iteration x n + part to start,
+   `result` the first failure (the communicator is then revoked, so every later part fails at its start and
+   sets its words: the programs waiting on them go on). */
+struct persistent { struct item **items; int n,capacity; struct ncclComm *comm; void *event; uint64_t value,stride,total;
+  _Atomic uint64_t next; ncclResult_t result; };
+static struct { pthread_mutex_t lock; struct persistent *building; } persisting={PTHREAD_MUTEX_INITIALIZER,NULL};
+static void persistent_ended(struct ncclComm *c,struct item *it,ncclResult_t result){
+  struct persistent *p=it->run;
+  if(result && !p->result)p->result=result;
+  pthread_mutex_lock(&c->lock);
+  if(atomic_fetch_add(&p->next,1)+1>=p->total)c->run=NULL;
+  pthread_cond_broadcast(&c->cond);
+  pthread_mutex_unlock(&c->lock);
+}
+static void start(struct ncclComm *c,struct item *it);
+/* The next part of the communicator's persistent calls, started once its iteration's cut is reached; whether
+   it was. */
+static int persistent_step(struct ncclComm *c,struct persistent *p){
+  const uint64_t next=atomic_load(&p->next);
+  if(next>=p->total)return 0;
+  const uint64_t i=next/(uint64_t)p->n,k=next%(uint64_t)p->n;
+  if(nccl_mesh_event_value(p->event)<p->value+i*p->stride+k+1)return 0;
+  struct item *it=p->items[k];
+  for(int j=0;j<it->n;j++)if(it->calls[j].tally)it->calls[j].tally[STARTED]=it->calls[j].tally[ENDED]=it->calls[j].tally[ARRIVED]=0;
+  it->deadline=deadline_after();it->bound=0;it->result=ncclSuccess;it->collectives_done=0;it->networked=0;
+  pthread_mutex_lock(&c->lock);c->busy=1;pthread_mutex_unlock(&c->lock);
+  start(c,it);
+  pthread_mutex_lock(&c->lock);c->busy=0;pthread_cond_broadcast(&c->cond);pthread_mutex_unlock(&c->lock);
+  return 1;
+}
+
 static void finish(struct ncclComm *c,struct item *it,ncclResult_t result){
   struct launch *l=it->launch;
   result=revoked(c,it,result);
@@ -1155,6 +1195,7 @@ static void finish(struct ncclComm *c,struct item *it,ncclResult_t result){
   }
   const uint64_t now=now_ns();
   for(int i=0;i<it->n;i++)if(it->calls[i].tally)it->calls[i].tally[ENDED]=now;
+  if(it->run){persistent_ended(c,it,result);return;}
   pthread_mutex_lock(&l->lock);
   if(result && !l->result)l->result=result;
   int last=!--l->items;
@@ -1179,16 +1220,22 @@ static void *worker(void *argument){
   for(uint64_t busy=now_ns();;){
     pthread_mutex_lock(&c->lock);
     const int closing=atomic_load(&c->broken) && c->open && !c->agreeing;
-    if(!c->head && !c->flights && !c->stopping && !closing && now_ns()-busy>WORKER_SPIN_NS){
+    if(!c->head && !c->flights && !c->run && !c->stopping && !closing && now_ns()-busy>WORKER_SPIN_NS){
       c->parked=1;
-      while(!c->head && !c->flights && !c->stopping && !(atomic_load(&c->broken) && c->open && !c->agreeing))pthread_cond_wait(&c->cond,&c->lock);
-      c->parked=0;c->woke=c->head!=NULL;
+      while(!c->head && !c->flights && !c->run && !c->stopping && !(atomic_load(&c->broken) && c->open && !c->agreeing))pthread_cond_wait(&c->cond,&c->lock);
+      c->parked=0;c->woke=c->head!=NULL || c->run!=NULL;
     }
     if(atomic_load(&c->broken) && c->open && !c->agreeing)close_peers(c,c->peers,1);
     struct item *it=c->head;
+    struct persistent *run=c->run;
     int flying=c->flights!=NULL,room=c->nflights<FLIGHTS;
-    if(!it && !flying && c->stopping){pthread_mutex_unlock(&c->lock);break;}
+    if(!it && !flying && !run && c->stopping){pthread_mutex_unlock(&c->lock);break;}
     pthread_mutex_unlock(&c->lock);
+    if(run){
+      if(persistent_step(c,run))busy=now_ns();
+      else{tick(c);sched_yield();}
+      continue;
+    }
     if(!it && !flying){tick(c);sched_yield();continue;}
     busy=now_ns();
     progress(c);
@@ -1699,8 +1746,7 @@ static void record(struct launch *l,struct call *calls,int n){
     if(k->arrived && (s=span_of(k->arrived,8)))wrote_set(s,l->event,l->end,k->tally);
   }
   pthread_mutex_unlock(&heap.lock);
-  if(l->stage)span_release(l->stage,l->event,l->end);
-  l->stage=NULL;
+  if(l->stage && !l->persistent){span_release(l->stage,l->event,l->end);l->stage=NULL;}
 }
 
 /* The operand lies in recv itself where recv is a window allocation and holds the whole result
@@ -1828,7 +1874,7 @@ struct recording;
 struct ran { int ncomms,nevents; struct ncclComm **comms; uint64_t *first; void **events; struct recording *kept; };
 /* A kept program (a deferred stream's, nccl.h ncclMeshStreamDefer): its commands, each object they name
    retained, encoded later into a command buffer the caller hands over. */
-enum { R_WAIT, R_SIGNAL, R_KERNEL, R_COPY, R_WORDS, R_PUBLISH, R_COUNTED };
+enum { R_WAIT, R_SIGNAL, R_KERNEL, R_COPY, R_WORDS, R_PUBLISH, R_COUNTED, R_ZERO };
 struct recorded { int kind,which,type,op,nranks,published; void *a,*b,*c,*d,*e; uint64_t x,y,z,n,scalar; uint64_t *list; void *touch[4]; };
 struct recording { struct recording *next; int n,capacity,failed; struct recorded *ops; struct ran *ran; };
 /* Where a program's commands go: a command buffer, or a recording. */
@@ -1890,6 +1936,7 @@ static void play(struct recording *k,void *program){
     else if(r->kind==R_COPY)nccl_mesh_program_copy(program,r->a,r->x,r->b,r->y,r->n,r->which,r->published);
     else if(r->kind==R_WORDS)nccl_mesh_program_words(program,r->a,r->list,(uint32_t)r->n,r->b,r->y,GPU_WAIT_NS,r->touch,4);
     else if(r->kind==R_COUNTED)nccl_mesh_program_counted(program,r->a,r->b,r->c,r->d,r->e,r->list,(uint32_t)r->x,r->n);
+    else if(r->kind==R_ZERO)nccl_mesh_program_zero(program,r->a,r->x,r->n);
     else nccl_mesh_program_publish(program,r->a,r->x,r->y);
   }
   nccl_mesh_program_end(program);
@@ -2146,11 +2193,17 @@ static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **c
     if(k->rows || k->landed)counted_copy(sink,k,l);
   }
   /* the network done before the program's end: every word not yet waited for (a call's sends, COPY
-     steps' receives, point-to-point transfers) */
+     steps' receives, point-to-point transfers); a persistent call's words (and combined words) then zeroed,
+     so its next iteration's waits see only that iteration's (ncclMeshPersistentStart) */
   for(int i=0;i<n;i++){
     m=0;
     for(uint32_t x=0;x<calls[i].nwords;x++)WAIT(calls+i,i,x);
     sink_words(sink,calls+i,l->own,list,m);
+    if(l->persistent && calls[i].nwords+calls[i].ncombined){
+      const uint64_t at=off(l->own,(const void *)calls[i].words),words=calls[i].nwords+calls[i].ncombined;
+      if(sink->kept)keep(sink,(struct recorded){.kind=R_ZERO,.a=l->own.buffer,.x=at,.n=words});
+      else nccl_mesh_program_zero(sink->program,l->own.buffer,at,words);
+    }
   }
   #undef WAIT
   for(int i=0;waited && i<n;i++)free(waited[i]);
@@ -2243,6 +2296,17 @@ ncclResult_t ncclGroupEnd(void){
   int work=l->nmarks>0;
   for(int i=0;i<n && !work && !status;i++)work=gpu_work(calls,n,i);
   const int defer=!status && l->nmarks==1 && l->marks[0].stream->deferred && ncomms==1 && !gated(calls,n) && !sends_combined(calls,n);
+  /* a persistent call (ncclMeshPersistentBegin): kept and never started here, so it must defer, and its
+     calls be collectives of the persistent calls' one communicator */
+  pthread_mutex_lock(&persisting.lock);
+  struct persistent *persist=persisting.building;
+  pthread_mutex_unlock(&persisting.lock);
+  for(int i=0;persist && i<n && !status;i++)
+    if(P2P(calls+i) || calls[i].kind==K_COUNTED || (persist->comm && persist->comm!=calls[i].comm))
+      status=FAIL(calls[i].comm,ncclInvalidUsage,"a persistent call is a collective on the persistent calls' one communicator");
+  if(!status && persist && !defer)
+    status=FAIL(calls[0].comm,ncclInvalidUsage,"a persistent call defers (a deferred stream, no GPU work before its transfers: nccl.h ncclMeshStreamDefer)");
+  if(!status && persist){l->persistent=1;persist->comm=calls[0].comm;}
   struct sink sink={0};
   if(!status && defer && !(sink.kept=calloc(1,sizeof *sink.kept)))status=FAIL(NULL,ncclSystemError,"allocation");
   if(!status && work && !defer && !(sink.program=nccl_mesh_program_begin(l->nmarks?l->marks[0].stream->queue:comms[0]->queue)))
@@ -2270,6 +2334,18 @@ ncclResult_t ncclGroupEnd(void){
     it->calls=calloc((size_t)n,sizeof *it->calls);it->launch=l;it->deadline=deadline_after();it->gpu=program;
     for(int i=0;i<n;i++)if(calls[i].comm==comms[j]){it->calls[it->n++]=calls[i];calls[i].steps=NULL;calls[i].pieces=NULL;calls[i].segments=NULL;}
     struct ncclComm *c=comms[j];
+    if(persist){
+      /* kept for ncclMeshPersistentStart, not started */
+      pthread_mutex_lock(&persisting.lock);
+      if(persist->n==persist->capacity){
+        int capacity=persist->capacity?2*persist->capacity:32;
+        struct item **grown=realloc(persist->items,(size_t)capacity*sizeof *grown);
+        if(grown){persist->items=grown;persist->capacity=capacity;}
+      }
+      if(persist->n<persist->capacity){it->run=persist;persist->items[persist->n++]=it;}
+      pthread_mutex_unlock(&persisting.lock);
+      continue;
+    }
     pthread_mutex_lock(&c->lock);
     if(c->tail)c->tail->next=it;else c->head=it;
     c->tail=it;
@@ -2639,6 +2715,74 @@ ncclResult_t ncclMeshStreamEncodeWait(cudaStream_t stream,void *commandBuffer){
 /* A rank's vote: whether the flood has reached it, the index of its first call that failed since the
    last agreement (0: none), whether its connections are whole, and the hash of its link table's map of
    the communicator (what its next call plans on). */
+ncclResult_t ncclMeshPersistentBegin(void){
+  pthread_mutex_lock(&persisting.lock);
+  struct persistent *p=persisting.building?NULL:calloc(1,sizeof *p);
+  if(p)persisting.building=p;
+  pthread_mutex_unlock(&persisting.lock);
+  return p?ncclSuccess:FAIL(NULL,ncclInvalidUsage,"ncclMeshPersistentBegin: persistent calls are being made already (or no memory)");
+}
+ncclResult_t ncclMeshPersistentEnd(void **handle,int *calls){
+  pthread_mutex_lock(&persisting.lock);
+  struct persistent *p=persisting.building;
+  persisting.building=NULL;
+  pthread_mutex_unlock(&persisting.lock);
+  if(!p)return FAIL(NULL,ncclInvalidUsage,"ncclMeshPersistentEnd without ncclMeshPersistentBegin");
+  *handle=p;*calls=p->n;
+  /* each call's GPU work taken into a command buffer (ncclMeshStreamEncodeWait), which a recording holds */
+  int kept=0;
+  pthread_mutex_lock(&stream_lock);
+  for(int i=0;i<p->n;i++)kept|=p->items[i]->launch->nmarks && p->items[i]->launch->marks[0].stream->pending!=NULL;
+  pthread_mutex_unlock(&stream_lock);
+  return kept?FAIL(p->comm,ncclInvalidUsage,"ncclMeshPersistentEnd: a persistent call's GPU work was never encoded (ncclMeshStreamEncodeWait)"):ncclSuccess;
+}
+ncclResult_t ncclMeshPersistentStart(void *handle,void *event,uint64_t value,uint64_t stride,uint64_t count){
+  struct persistent *p=handle;
+  if(!p || !event)return FAIL(NULL,ncclInvalidArgument,"ncclMeshPersistentStart: no handle or no event");
+  if(!p->n || !count)return ncclSuccess;
+  struct ncclComm *c=p->comm;
+  pthread_mutex_lock(&c->lock);
+  if(c->run || c->head){pthread_mutex_unlock(&c->lock);return FAIL(c,ncclInvalidUsage,"ncclMeshPersistentStart: the communicator has calls in flight");}
+  if(p->event)nccl_mesh_release(p->event);
+  nccl_mesh_retain(event);
+  p->event=event;p->value=value;p->stride=stride;p->total=count*(uint64_t)p->n;p->result=ncclSuccess;
+  atomic_store(&p->next,0);
+  c->run=p;
+  pthread_cond_broadcast(&c->cond);
+  pthread_mutex_unlock(&c->lock);
+  return ncclSuccess;
+}
+ncclResult_t ncclMeshPersistentWait(void *handle){
+  struct persistent *p=handle;
+  if(!p || !p->n)return ncclSuccess;
+  struct ncclComm *c=p->comm;
+  pthread_mutex_lock(&c->lock);
+  while(c->run==p)pthread_cond_wait(&c->cond,&c->lock);
+  pthread_mutex_unlock(&c->lock);
+  /* a GPU wait of theirs that ran out (the failure word its program set) */
+  if(!p->result && atomic_exchange_explicit(c->control,0,memory_order_acq_rel))
+    p->result=FAIL(c,ncclRemoteError,"a persistent call's GPU wait on the network ran out");
+  return p->result;
+}
+ncclResult_t ncclMeshPersistentFree(void *handle){
+  struct persistent *p=handle;
+  if(!p)return ncclSuccess;
+  if(p->comm){
+    pthread_mutex_lock(&p->comm->lock);
+    const int running=p->comm->run==p;
+    pthread_mutex_unlock(&p->comm->lock);
+    if(running)return FAIL(p->comm,ncclInvalidUsage,"ncclMeshPersistentFree: its calls are running (ncclMeshPersistentWait first)");
+  }
+  for(int i=0;i<p->n;i++){
+    struct item *it=p->items[i];
+    for(int j=0;j<it->n;j++){free(it->calls[j].steps);free(it->calls[j].pieces);free(it->calls[j].segments);}
+    free(it->calls);launch_free(it->launch);free(it);
+  }
+  if(p->event)nccl_mesh_release(p->event);
+  free(p->items);free(p);
+  return ncclSuccess;
+}
+
 struct vote { uint64_t known,failed,whole,map; };
 static uint64_t map_hash(const struct ncclComm *c){
   uint64_t h=mix(((uint64_t)c->map.kind<<32)^c->map.links);
