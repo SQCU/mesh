@@ -23,8 +23,11 @@ window allocator's records, and address(t) where a tensor's bytes lie in them (0
 on "mps", DTensor's backward through nn.Linear, and context_parallel's SDPA (CPU tensors too).  Its
 first process group also installs partition.py: a mesh dimension's capacity-shaped parts (attach, write),
 by which DTensor's Shard, tensor and context parallelism split it instead of equally.
-MESH_TRACE=<file> writes each call's trace there (ProcessGroupMesh.mm) when the group is destroyed or the
-process exits."""
+MESH_TRACE=<file> traces each call and replay (ProcessGroupMesh.mm; off without it): held in a bounded ring (at
+most 8192 calls and 128 replays, about 12 MB), appended to the file when a group is destroyed, when the process
+exits and on trace_dump(), each record written once, under the mesh's disk floor (rdma/mesh-disk.h);
+trace_count() says how many calls and replays were traced so far (a call's records are the sequence numbers
+between two counts), how many the ring dropped, and how many it holds unwritten."""
 import atexit
 import os
 
@@ -140,6 +143,18 @@ def replay(recording, steps=1):
     buffers on the GPU, in seconds: (their GPU times summed, the first's start to the last's end)."""
     from . import _C
     return _C.replay(recording, steps)
+
+
+def trace_dump():
+    """The trace's records not yet written, appended to MESH_TRACE now (nothing without it)."""
+    from . import _C
+    _C.trace_dump()
+
+
+def trace_count():
+    """(calls traced, replays traced, calls dropped, replays dropped, calls held, replays held) so far."""
+    from . import _C
+    return _C.trace_count()
 
 
 def counts():

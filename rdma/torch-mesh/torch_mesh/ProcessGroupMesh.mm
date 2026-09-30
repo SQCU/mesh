@@ -37,8 +37,10 @@
 // call's stream reached its value, the MPS stream reached its kept work and passed it (words the GPU
 // publishes before and after it, system-coherent, polled by a thread of the trace's: no command buffer of
 // its own), the GPU times of the MPS command buffer that ends at the fence, and libnccl-mesh's tallies of
-// the call (ncclMeshGroupTally), written as JSON lines when the group is destroyed or the process exits; and
-// each replay of a recorded step (replay, below).
+// the call (ncclMeshGroupTally); and each replay of a recorded step (replay, below).  Off without MESH_TRACE.
+// The records are held in a bounded ring (TraceState: at most 8192 calls and 128 replays, about 12 MB of lines)
+// and appended to the file as JSON lines when a group is destroyed, when the process exits and on request
+// (torch_mesh.trace_dump), each record written once; every write under mesh-disk.h's guard.
 #include <torch/extension.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/GroupRegistry.hpp>
@@ -57,7 +59,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <deque>
 #include <fstream>
+#include <sstream>
 #include <map>
 #include <mutex>
 #include <set>
@@ -65,6 +69,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "mesh-disk.h"
 #include "nccl.h"
 
 namespace c10d {
@@ -143,11 +148,18 @@ struct Replayed {
   std::vector<double> segments;
   std::vector<ReplayedCall> calls;
 };
-// The trace's state, never destroyed (its thread polls it until the process ends).
+// The trace's state, never destroyed (its thread polls it until the process ends).  A ring of the records
+// not yet written out: at most kTraceCalls calls and kTraceReplays replays are held, the oldest dropped (and
+// counted) past that.  A call's line is about 0.7-1.3 KB, a replay's 8-13 KB (metal-microbench
+// output_data/fs-20260930/before), so the ring holds, and a dump writes, at most about 12 MB.  Each record's
+// sequence number is its index among every call (replay) traced by the process; a dump writes the records
+// not yet written, appended, and drops them from the ring.
+constexpr size_t kTraceCalls = 8192, kTraceReplays = 128;
 struct TraceState {
   std::mutex lock;
-  std::vector<Traced> calls;
-  std::vector<Replayed> replays;
+  std::deque<Traced> calls;                                         // calls first_call, first_call + 1, ...
+  std::deque<Replayed> replays;                                     // replays first_replay, ...
+  uint64_t first_call = 0, first_replay = 0, dropped_calls = 0, dropped_replays = 0;
   std::map<std::pair<void *, uint64_t>, uint64_t> reached;          // (event or word, value): when the GPU reached it
   std::vector<std::tuple<void *, uint64_t, bool>> pending;          // (event or word, value, a word) not yet reached
   std::map<uint64_t, std::pair<double, double>> gpu;                // fence value: its command buffer's GPU times (s)
@@ -156,6 +168,29 @@ struct TraceState {
 };
 static TraceState &trace = *new TraceState;
 static void trace_dump();
+// The call of sequence number `seq` while the ring holds it (trace.lock held), else null.
+static Traced *traced_call(uint64_t seq) {
+  return seq >= trace.first_call && seq - trace.first_call < trace.calls.size() ? &trace.calls[seq - trace.first_call] : nullptr;
+}
+static id<MTLSharedEvent> fence_event();
+// What the trace holds for call `c` besides its record, let go as the record leaves the ring (trace.lock held):
+// its points reached, its fence's GPU times, its tallies and its stream's event.
+static void forget(Traced &c) {
+  void *fence = (__bridge void *)fence_event();
+  if (c.fence) {
+    trace.reached.erase({fence, c.fence});
+    trace.gpu.erase(c.fence);
+  }
+  for (uint64_t index : {c.reach, c.resume})
+    if (index) trace.reached.erase({trace.words + index, 1});
+  if (c.stream_event) {
+    trace.reached.erase({c.stream_event, c.stream_value});
+    [(__bridge id<MTLSharedEvent>)c.stream_event release];
+    c.stream_event = nullptr;
+  }
+  if (c.tally) ncclMeshTallyRelease(c.tally);
+  c.tally = nullptr;
+}
 // The value an event or a word holds (a word the GPU stores system-coherent, seen within microseconds; an
 // event signalled inside a command buffer is seen only as the command buffer ends).
 static uint64_t value_of(void *at, bool word) {
@@ -648,7 +683,7 @@ class Call {
       if (traced_ != SIZE_MAX) {  // words published before and after the kept work: when the MPS stream reached and passed it
         const uint64_t reach = note_word(s->commandBuffer());
         std::lock_guard<std::mutex> guard(trace.lock);
-        trace.calls[traced_].reach = reach;
+        if (Traced *t = traced_call(traced_)) t->reach = reach;
       }
       const bool noted = recorded && tracing() && recorded_call_ != SIZE_MAX;  // a recorded call's: noted at each replay
       if (noted) recorded->recorded[recorded_call_].reach = note_word(s->commandBuffer(), false);
@@ -656,7 +691,7 @@ class Call {
       if (traced_ != SIZE_MAX) {
         const uint64_t resume = note_word(s->commandBuffer());
         std::lock_guard<std::mutex> guard(trace.lock);
-        trace.calls[traced_].resume = resume;
+        if (Traced *t = traced_call(traced_)) t->resume = resume;
       }
       if (noted) recorded->recorded[recorded_call_].resume = note_word(s->commandBuffer(), false);
     });
@@ -765,7 +800,13 @@ class Call {
       note_reached((__bridge id<MTLSharedEvent>)stream_->event, stream_->value);
     }
     std::lock_guard<std::mutex> guard(trace.lock);
-    traced_ = trace.calls.size();
+    if (trace.calls.size() == kTraceCalls) {  // the ring full: its oldest call dropped
+      forget(trace.calls.front());
+      trace.calls.pop_front();
+      trace.first_call++;
+      trace.dropped_calls++;
+    }
+    traced_ = trace.first_call + trace.calls.size();
     trace.calls.push_back(std::move(t));
   }
 
@@ -1769,16 +1810,25 @@ static std::pair<double, double> replay(const std::shared_ptr<Recording> &made, 
       replayed.calls.push_back(rc);
     }
     std::lock_guard<std::mutex> guard(trace.lock);
+    if (trace.replays.size() == kTraceReplays) {  // the ring full: its oldest replay dropped
+      trace.replays.pop_front();
+      trace.first_replay++;
+      trace.dropped_replays++;
+    }
     trace.replays.push_back(std::move(replayed));
   }
   made->replays++;
   return {busy, span};
 }
 
-// The trace (MESH_TRACE) written out, once the points still to be noted are (at most 1 s): a header line
-// (the clock, uptime ns, and the library's clock's offset from it), a line per call (its fence's command
-// buffer's GPU times; the host times its fence, its kept work's reach and resume signals and its stream's
-// value were seen reached).
+// The trace (MESH_TRACE) written out: the ring's records not yet written, once the points still to be noted
+// are (at most 1 s), appended to the file, then dropped from the ring; a new file begins with a header line (the
+// clock, uptime ns, and the library's clock's offset from it).  A line per call (its sequence number; its
+// fence's command buffer's GPU times; the host times its fence, its kept work's reach and resume signals and its
+// stream's value were seen reached), a line per replay, and a line of the records the ring dropped so far
+// where that changed.  Written only as mesh-disk.h's guard allows: under the disk floor nothing is written and
+// the records stay in the ring.  Called when a group is destroyed, at the process's exit (torch_mesh), and on
+// request (torch_mesh.trace_dump).
 static void trace_dump() {
   const char *path = getenv("MESH_TRACE");
   if (!path) return;
@@ -1796,6 +1846,9 @@ static void trace_dump() {
   };
   for (int i = 0; i < 1000 && pending(); i++) usleep(1000);
   std::lock_guard<std::mutex> guard(trace.lock);
+  static uint64_t dropped_written[2];
+  const bool dropped = trace.dropped_calls != dropped_written[0] || trace.dropped_replays != dropped_written[1];
+  if (trace.calls.empty() && trace.replays.empty() && !dropped) return;
   const uint64_t offset = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - uptime();
   void *fence = (__bridge void *)fence_event();
   auto reached = [&](void *event, uint64_t value) -> std::string {
@@ -1807,11 +1860,13 @@ static void trace_dump() {
     if (!value || it == trace.gpu.end()) return "null";
     return "[" + std::to_string((uint64_t)(it->second.first * 1e9)) + "," + std::to_string((uint64_t)(it->second.second * 1e9)) + "]";
   };
-  std::ofstream out(path);
-  out << "{\"clock\":\"uptime_ns\",\"library_offset_ns\":" << offset << ",\"pid\":" << getpid() << "}\n";
+  struct stat was;
+  std::ostringstream out;
+  if (stat(path, &was) || !was.st_size)
+    out << "{\"clock\":\"uptime_ns\",\"library_offset_ns\":" << offset << ",\"pid\":" << getpid() << "}\n";
   for (size_t i = 0; i < trace.calls.size(); i++) {
     auto &c = trace.calls[i];
-    out << "{\"call\":" << i << ",\"op\":\"" << c.op << "\",\"dtype\":\"" << c.dtype << "\",\"device\":\"" << (c.mps ? "mps" : "cpu")
+    out << "{\"call\":" << trace.first_call + i << ",\"op\":\"" << c.op << "\",\"dtype\":\"" << c.dtype << "\",\"device\":\"" << (c.mps ? "mps" : "cpu")
         << "\",\"bytes\":" << c.bytes << ",\"in_place\":" << c.in_place << ",\"blit_in\":" << c.blit_in << ",\"blit_out\":" << c.blit_out
         << ",\"splits\":[";
     for (size_t k = 0; k < c.splits.size(); k++) out << (k ? "," : "") << c.splits[k];
@@ -1855,6 +1910,33 @@ static void trace_dump() {
     }
     out << "]}\n";
   }
+  if (dropped)
+    out << "{\"dropped_calls\":" << trace.dropped_calls << ",\"dropped_replays\":" << trace.dropped_replays << ",\"ring\":[" << kTraceCalls
+        << "," << kTraceReplays << "]}\n";
+  const std::string text = out.str();
+  if (!mesh_disk_room(path, text.size(), (std::string("torch-mesh's trace ") + path).c_str())) return;
+  std::ofstream file(path, std::ios::app | std::ios::binary);
+  file << text;
+  file.flush();
+  if (!file) {
+    fprintf(stderr, "mesh: the trace %s not written: %s\n", path, strerror(errno));
+    return;
+  }
+  for (auto &c : trace.calls) forget(c);
+  trace.first_call += trace.calls.size();
+  trace.calls.clear();
+  trace.first_replay += trace.replays.size();
+  trace.replays.clear();
+  dropped_written[0] = trace.dropped_calls;
+  dropped_written[1] = trace.dropped_replays;
+}
+
+// What the trace has seen so far: (calls traced, replays traced, calls dropped, replays dropped, calls and
+// replays the ring holds unwritten); a call's records are its sequence numbers [calls before, calls after).
+static std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> trace_count() {
+  std::lock_guard<std::mutex> guard(trace.lock);
+  return {trace.first_call + trace.calls.size(), trace.first_replay + trace.replays.size(), trace.dropped_calls,
+          trace.dropped_replays, trace.calls.size(), trace.replays.size()};
 }
 
 // ---- functional collectives on MPS tensors ----
@@ -2032,6 +2114,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("records", &c10d::records);
   m.def("address", &c10d::address);
   m.def("trace_dump", &c10d::trace_dump);
+  m.def("trace_count", &c10d::trace_count);
   m.def("agree", &c10d::agree);
   m.def("agreed", &c10d::agreed);
   m.def("links", &c10d::links);
