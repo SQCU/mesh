@@ -25,8 +25,8 @@
    there instead).  A gate is where a command buffer ends and the next is committed only once an event the host
    signals says every word the work after it needs is set (nccl-mesh.c's dispatcher, a caller's ncclMeshGate_t),
    so no command buffer waits on the network: Metal ends one that waits past its watchdog, running kernels or
-   waiting on an event at its start (about 5 s; metal-microbench output_data/maybe-20260930/probe), though not
-   a Metal 4 queue's wait before a commit.  What the NIC wrote is loaded system-coherent, and what a later
+   waiting on an event at its start (about 5 s), and a Metal 4 queue's wait before a commit passes silently some
+   4 s after it is submitted (metal-microbench output_data/maybe-20260930/probe).  What the NIC wrote is loaded system-coherent, and what a later
    SEND reads a kernel stores system-coherent, so the NIC sees it once the kernel's publication word is seen;
    a spin's declared buffers order the queue's later work after it.  A store that is not reaches another agent
    only when its command buffer completes: on the M5 a word published mid-command-buffer after 16 MB of plain

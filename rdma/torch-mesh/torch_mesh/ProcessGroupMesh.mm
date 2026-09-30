@@ -339,7 +339,7 @@ static uint64_t mps_fence() {
 }
 
 // A kept program's gate (nccl.h ncclMeshGate_t) on the MPS stream `argument`, on its serial queue: while a step is
-// recorded, the recording's (its replay's Metal 4 queue waits there before its next commit: MetalRecordGate), or
+// recorded, the recording's (its replay commits the work after it once the gate is open: MetalRecordGate), or
 // the committed program's end waited for on the host; else, where the gate is open (the words the work after it
 // needs are set), nothing, and where not, the stream's command buffer committed (its spins give up, the GPU
 // goes on with the work before them) and the work after the gate encoded only once it opens, the host waiting

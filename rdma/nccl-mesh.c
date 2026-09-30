@@ -1085,8 +1085,8 @@ static void gates_check(struct ncclComm *c){
       c->armed[kept++]=g;
       continue;
     }
-    if(g->event)nccl_mesh_event_signal(g->event,g->value);
     if(g->landing)atomic_store_explicit(g->landing,1,memory_order_release);
+    if(g->event)nccl_mesh_event_signal(g->event,g->value);
     atomic_fetch_add_explicit(&opened,1,memory_order_relaxed);
     g->armed=0;
     if(!g->run){free(g->words);free(g);}

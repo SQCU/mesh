@@ -886,7 +886,8 @@ ncclResult_t ncclMeshStreamDefer(cudaStream_t stream, int defer);
    `value` (the library signals it once the words that work needs are set): committed only once it has (Metal
    ends a command buffer that waits past its watchdog, running kernels or waiting on an event at its start), or,
    for a recording, the same one with the recording's gate (event NULL, value its place among the recording's
-   gates: a persistent call's, ncclMeshPersistentGate), which a Metal 4 queue waits for before its next commit.
+   gates: a persistent call's, ncclMeshPersistentGate), at which its replay commits the work after it only once
+   the gate's event says so.
    NULL: the wait inside `commandBuffer`, the caller's to keep short. */
 typedef void* (*ncclMeshGate_t)(void* argument, void* commandBuffer, void* event, uint64_t value);
 /* Into `commandBuffer` (an id<MTLCommandBuffer> not yet committed): the stream's kept programs, each gate by
