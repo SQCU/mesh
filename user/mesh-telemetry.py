@@ -663,6 +663,12 @@ class TelemetryHTTPServer(ThreadingHTTPServer):
         self.store = store
         super().__init__(address, handler)
 
+    def handle_error(self, request, client_address):
+        # a request that failed (mostly a client that reset or left) noted in the ring, as log_message's lines are,
+        # not written to stderr as a traceback (about 3000 a month in the M5's io.mesh.telemetry.err.log)
+        error = sys.exc_info()[1]
+        self.store.publish_protocol({"at": time.time(), "client": client_address[0], "error": f"{type(error).__name__}: {error}"})
+
 class TelemetryHTTPServer6(TelemetryHTTPServer):
     address_family = socket.AF_INET6
 

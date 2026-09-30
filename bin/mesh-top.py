@@ -520,8 +520,10 @@ def main():
             time.sleep(args.interval)
             top.refresh()
         lines = top.frame()
-        if args.html:
-            with open(args.html, "w") as stream: stream.write(page(lines))
+        if args.html:  # written under the mesh's one capacity guard (rdma/mesh-disk.h, installed beside this file)
+            sys.path[:0] = [HERE, os.path.join(HERE, "..", "rdma")]
+            import mesh_disk
+            mesh_disk.write(args.html, page(lines), f"mesh-top's page {args.html}")
         if args.once or not args.html: print(ansi(lines, sys.stdout.isatty()))
         return
     if args.probe: start_probe(top)

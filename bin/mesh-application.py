@@ -84,7 +84,11 @@ def run(args):
     if args.log:
         log = Path(args.log)
         log.parent.mkdir(parents=True, exist_ok=True)
-        with log.open('ab') as output:
+        # opened under the mesh's one capacity guard (rdma/mesh-disk.h): /dev/null below its floor, said once
+        here = Path(__file__).resolve().parent
+        sys.path[:0] = [str(here), str(here.parent / 'rdma')]
+        import mesh_disk
+        with mesh_disk.sink(log, f'the application log {log}', 'ab') as output:
             process = subprocess.Popen(values, env=environment, stdin=subprocess.DEVNULL,
                 stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         print(json.dumps({'event': 'application_started', 'pid': process.pid, 'log': str(log)}), file=sys.stderr)

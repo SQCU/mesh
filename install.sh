@@ -28,6 +28,9 @@ install -m 755 -o root -g wheel "$REPO"/bin/*.sh "$MESH_ROOT/bin/"
 try "UV runtime realized" "$MESH_ROOT/bin/mesh-runtime-install.sh" "$MESH_ROOT" "$REPO"
 install -m 755 -o root -g wheel "$REPO"/bin/mesh-observe.py "$MESH_ROOT/bin/mesh-observe.py"
 install -m 755 -o root -g wheel "$REPO"/bin/mesh-top.py "$MESH_ROOT/bin/mesh-top.py"
+install -m 644 -o root -g wheel "$REPO"/rdma/mesh_disk.py "$REPO"/rdma/mesh-disk.h "$MESH_ROOT/bin/"
+# the services' logs rotated by the system's newsyslog past 4 MB (etc/newsyslog-mesh.conf)
+install -m 644 -o root -g wheel "$REPO"/etc/newsyslog-mesh.conf /etc/newsyslog.d/io.mesh.conf
 install -m 755 -o root -g wheel "$REPO"/user/mesh-telemetry.py "$MESH_ROOT/bin/mesh-telemetry.py"
 install -m 644 -o root -g wheel "$REPO"/etc/mesh-capacity.json "$MESH_ROOT/etc/mesh-capacity.json"
 install -m 644 -o root -g wheel "$REPO"/etc/mesh-nodes.json "$MESH_ROOT/etc/mesh-nodes.json"
