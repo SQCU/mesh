@@ -1393,7 +1393,7 @@ static std::shared_ptr<Recording> record(pybind11::function fn) {
     } catch (...) {
       failed = std::current_exception();
     }
-  }, nullptr, 0, 1, 0);
+  }, nullptr, 0, 1, 1);  // the encoded form (metal_recording.h MetalFormEncoded): PyTorch's and MPS's kernels support no indirect commands
   recording = false;
   check(ncclMeshPersistentEnd(&made->calls, &made->ncalls), nullptr, "ncclMeshPersistentEnd");
   if (failed) std::rethrow_exception(failed);
