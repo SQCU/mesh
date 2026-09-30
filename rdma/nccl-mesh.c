@@ -704,12 +704,15 @@ static ncclResult_t reap(struct ncclComm *c,struct pending *sends,int *count){
   }
   return ncclSuccess;
 }
-static ncclResult_t await(struct ncclComm *c,void *request,size_t bytes,struct pending *sends,int *count,struct item *it,const char *what){
+/* A request waited for: `bytes` expected (SIZE_MAX: any, those that arrived in *arrived where it is not
+   NULL). */
+static ncclResult_t await_(struct ncclComm *c,void *request,size_t bytes,size_t *arrived,struct pending *sends,int *count,struct item *it,const char *what){
   for(;;){
     int done=0,size=0,result=mesh_net_test(request,&done,&size);
     if(result)return net_failure(c,result,what);
     if(done){
       advance(c);
+      if(arrived)*arrived=(size_t)(unsigned)size;
       if(bytes<=INT32_MAX && (size_t)size!=bytes)return FAIL(c,ncclInvalidUsage,"%s: %d bytes arrived, %zu expected (the peer's count or datatype differs)",what,size,bytes);
       return ncclSuccess;
     }
@@ -718,6 +721,9 @@ static ncclResult_t await(struct ncclComm *c,void *request,size_t bytes,struct p
     progress(c);
     sched_yield();
   }
+}
+static ncclResult_t await(struct ncclComm *c,void *request,size_t bytes,struct pending *sends,int *count,struct item *it,const char *what){
+  return await_(c,request,bytes,NULL,sends,count,it,what);
 }
 /* An isend or irecv posted, its end stored into `word` by the bridge, waiting while its connection's
    request ring is full. */
@@ -871,63 +877,91 @@ static ncclResult_t run_collective(struct ncclComm *c,struct call *k,struct item
 }
 
 /* ---- a counted all-to-all (nccl.h ncclMeshAlltoAllCounted) ----
-   The worker's side: each rank's segment of the counts exchanged with it first (its completion words the
-   call's first 2(n - 1): sends, then receives), each rank's segment for this rank written to the caller's
-   host array in rank order (this rank's own from its counts) and the caller's word set; then the rows,
-   as many to each rank as the sum of its segment and from each as the sum of the one it sent, packed in
-   rank order (the next 2(n - 1) words: sends, then receives); the GPU copies this rank's own rows (the
-   program).  A segment or a row count of 0 moves nothing: its word is set here. */
+   The worker's side, one exchange: to each rank its segment of the counts and then its rows (as many as
+   that segment sums to; none, a message of no bytes), both posted at once, and from each rank the same,
+   so no rows wait for the counts to cross first.  Each rank's rows are received packed in rank order,
+   where the rows of the ranks before it end: their receive is posted once the counts of those ranks have
+   landed (at once for the first other rank, before which lie at most this rank's own rows, counted
+   here), sized to the capacity left and checked against its counts once they land.  Once every count has
+   landed each rank's segment for this rank is written to the caller's host array in rank order (this
+   rank's own from its counts) and the caller's word set, the rows maybe still on the wire; the GPU copies
+   this rank's own rows (the program).  Completion words: the counts' sends, their receives, the rows'
+   sends, their receives, n - 1 each; a segment of no counts moves nothing (its word set here). */
 static ncclResult_t run_counted(struct ncclComm *c,struct call *k,struct item *it){
   const int n=c->nranks,me=c->rank,peers=n-1;
   const size_t row=k->row*type_bytes[k->type];
   const uint64_t *sseg=k->segments,*rseg=k->segments+n;
   int64_t *got=(int64_t *)k->wire;
   void **requests=calloc((size_t)(4*n),sizeof *requests);
-  size_t *bytes=calloc((size_t)(4*n),sizeof *bytes);
-  uint64_t *rows=calloc((size_t)(2*n),sizeof *rows);
-  ncclResult_t status=requests && bytes && rows?ncclSuccess:FAIL(c,ncclSystemError,"allocation");
-  for(int phase=0;phase<2 && !status;phase++){
-    uint64_t so=0,ro=0;
-    for(int q=0,i=0;q<n && !status;q++){
-      const uint64_t out=phase?rows[q]:sseg[q],in=phase?rows[n+q]:rseg[q];
-      if(q==me){so+=out;ro+=in;continue;}
-      struct peer *p=c->peers+q;
-      const int w=2*phase*peers+i;
-      unsigned char *into=phase?(unsigned char *)k->recv+ro*row:(unsigned char *)(got+ro);
-      const unsigned char *from=phase?(const unsigned char *)k->send+so*row:(const unsigned char *)(k->counted+so);
-      bytes[w]=out*(phase?row:8);bytes[w+peers]=in*(phase?row:8);
-      if(bytes[w+peers])status=post(c,0,p->recv[CH_COLL],into,bytes[w+peers],k->words+w+peers,NULL,NULL,it,requests+w+peers);
-      else atomic_store_explicit(k->words+w+peers,1,memory_order_release);
-      if(!status && bytes[w])status=post(c,1,p->send[CH_COLL],(void *)from,bytes[w],k->words+w,NULL,NULL,it,requests+w);
-      else if(!status)atomic_store_explicit(k->words+w,1,memory_order_release);
-      so+=out;ro+=in;i++;
+  /* per rank: the rows sent to it and received from it, where its counts lie among this rank's and in
+     `got`; its place among the peers (-1: this rank) and the rank at each place; whether its counts have
+     landed */
+  uint64_t *rows=calloc((size_t)(4*n),sizeof *rows),*so=rows+2*n,*ro=rows+3*n;
+  int *index=calloc((size_t)(3*n),sizeof *index),*rank_at=index+n,*landed=index+2*n;
+  ncclResult_t status=requests && rows && index?ncclSuccess:FAIL(c,ncclSystemError,"allocation");
+  uint64_t sent=0;
+  for(int q=0,i=0;q<n && !status;q++){
+    if(q){so[q]=so[q-1]+sseg[q-1];ro[q]=ro[q-1]+rseg[q-1];}
+    for(uint64_t x=0;x<sseg[q];x++)rows[q]+=(uint64_t)k->counted[so[q]+x];
+    sent+=rows[q];
+    index[q]=q==me?-1:i;
+    if(q!=me)rank_at[i++]=q;
+    landed[q]=q==me || !rseg[q];
+  }
+  if(!status)rows[n+me]=rows[me];
+  if(!status && sent>k->rows)
+    status=FAIL(c,ncclInvalidUsage,"a counted all-to-all: its counts send %llu rows of %llu",(unsigned long long)sent,(unsigned long long)k->rows);
+  /* to each rank: its counts, then its rows; from each: its counts */
+  uint64_t before=0;
+  for(int q=0;q<n && !status;before+=rows[q],q++){
+    if(q==me)continue;
+    struct peer *p=c->peers+q;
+    const int i=index[q];
+    if(rseg[q])status=post(c,0,p->recv[CH_COLL],got+ro[q],rseg[q]*8,k->words+peers+i,NULL,NULL,it,requests+peers+i);
+    else atomic_store_explicit(k->words+peers+i,1,memory_order_release);
+    if(!status && sseg[q])status=post(c,1,p->send[CH_COLL],(void *)(k->counted+so[q]),sseg[q]*8,k->words+i,NULL,NULL,it,requests+i);
+    else if(!status)atomic_store_explicit(k->words+i,1,memory_order_release);
+    if(!status)status=post(c,1,p->send[CH_COLL],(unsigned char *)k->send+before*row,rows[q]*row,k->words+2*peers+i,NULL,NULL,it,requests+2*peers+i);
+  }
+  /* the rows from each rank received where the rows of the ranks before it end: posted once that is known,
+     then the next rank's counts waited for */
+  int next=0;
+  uint64_t at=0;
+  while(!status){
+    for(;next<n && !status;next++){
+      const int q=next,i=index[q];
+      if(q!=me && !requests[3*peers+i])
+        status=post(c,0,c->peers[q].recv[CH_COLL],(unsigned char *)k->recv+at*row,(k->capacity-at)*row,k->words+3*peers+i,NULL,NULL,it,
+                    requests+3*peers+i);
+      if(status || !landed[q])break;
+      if(rows[n+q]>k->capacity-at)
+        status=FAIL(c,ncclInvalidUsage,"a counted all-to-all: its counts receive more than its capacity of %llu rows",(unsigned long long)k->capacity);
+      else at+=rows[n+q];
     }
-    for(int j=2*phase*peers;j<2*(phase+1)*peers && !status;j++)if(requests[j]){
-      status=await(c,requests[j],j<(2*phase+1)*peers?SIZE_MAX:bytes[j],NULL,NULL,it,phase?"a counted all-to-all's rows":"a counted all-to-all's counts");
-      count(k,j<(2*phase+1)*peers?SENT:RECEIVED,bytes[j]);
-      rebound(it);
-    }
-    if(status || phase)break;
-    /* the counts on the host, and each rank's rows: sent (its segment's sum), received (the sum of its segment for this rank) */
-    so=0;ro=0;
-    uint64_t total=0;
-    for(int q=0;q<n;q++){
-      const int64_t *mine=q==me?k->counted+so:got+ro;
-      memcpy(k->received+ro,mine,rseg[q]*8);
-      for(uint64_t x=0;x<sseg[q];x++)rows[q]+=(uint64_t)k->counted[so+x];
-      for(uint64_t x=0;x<rseg[q];x++)rows[n+q]+=(uint64_t)mine[x];
-      total+=rows[n+q];so+=sseg[q];ro+=rseg[q];
-    }
+    if(status || next==n)break;
+    status=await(c,requests[peers+index[next]],rseg[next]*8,NULL,NULL,it,"a counted all-to-all's counts");
+    count(k,RECEIVED,rseg[next]*8);
+    rebound(it);
+    for(uint64_t x=0;!status && x<rseg[next];x++)rows[n+next]+=(uint64_t)got[ro[next]+x];
+    landed[next]=1;
+  }
+  if(!status){
+    /* the counts on the host */
+    for(int q=0;q<n;q++)memcpy(k->received+ro[q],q==me?k->counted+so[q]:got+ro[q],rseg[q]*8);
     atomic_store_explicit((_Atomic uint64_t *)k->arrived,1,memory_order_release);
-    uint64_t sent=0;
-    for(int q=0;q<n;q++)sent+=rows[q];
     count(k,GPU_COPY,rows[me]*row);  /* this rank's own rows: the GPU's counted copy */
-    if(total>k->capacity || sent>k->rows)
-      status=FAIL(c,ncclInvalidUsage,"a counted all-to-all: its counts send %llu rows of %llu and receive %llu, capacity %llu",(unsigned long long)sent,
-                  (unsigned long long)k->rows,(unsigned long long)total,(unsigned long long)k->capacity);
+  }
+  /* the counts sent, the rows sent, the rows received (as many as their counts say) */
+  for(int j=0;j<4*peers && !status;j++){
+    if((j>=peers && j<2*peers) || !requests[j])continue;
+    const int q=rank_at[j%peers];
+    const size_t bytes=j<peers?sseg[q]*8:j<3*peers?rows[q]*row:rows[n+q]*row;
+    status=await(c,requests[j],j<3*peers?SIZE_MAX:bytes,NULL,NULL,it,j<peers?"a counted all-to-all's counts":"a counted all-to-all's rows");
+    count(k,j<3*peers?SENT:RECEIVED,bytes);
+    rebound(it);
   }
   if(status && k->arrived){uint64_t none=0;atomic_compare_exchange_strong((_Atomic uint64_t *)k->arrived,&none,2);}
-  free(requests);free(bytes);free(rows);
+  free(requests);free(rows);free(index);
   return status;
 }
 

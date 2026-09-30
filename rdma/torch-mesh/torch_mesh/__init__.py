@@ -86,8 +86,8 @@ def empty(*size, dtype=None, device='mps'):
 def all_to_all_counted(input, counts, send_segments, recv_segments, capacity, group=None):
     """MPI_Alltoallv whose counts the GPU wrote (libnccl-mesh ncclMeshAlltoAllCounted): input's rows grouped by
     destination rank, as many to rank q as segment q of `counts` sums to (an int64 MPS tensor, or a list of
-    ints; send_segments[q] entries for rank q); each rank's segment for this rank (recv_segments[q] entries) is
-    exchanged first, then the rows, received packed in rank order into a tensor of `capacity` rows.  Returns
+    ints; send_segments[q] entries for rank q); each rank's segment for this rank (recv_segments[q] entries)
+    and its rows move in one exchange, the rows received packed in rank order into a tensor of `capacity` rows.  Returns
     (that tensor, the received counts on the input's device, their handle, the Work): counted(handle) is the
     received counts on the host, waited for as they land (no wait on the GPU); the Work's wait() orders the
     rows and the device counts on the MPS stream."""

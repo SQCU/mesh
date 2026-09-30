@@ -854,11 +854,11 @@ ncclResult_t ncclMeshReduceScatterVConfig(const void* sendbuff, void* recvbuff, 
    receives each rank's rows into recvbuff packed in rank order, at most `capacity` rows.  `counts` (int64,
    sendsegs[q] entries for rank q, in a window allocation or host memory) is read once the call's
    recorded points are reached; each rank's segment for this rank (recvsegs[q] entries, recvsegs[rank] =
-   sendsegs[rank]) is exchanged first and written to `received` (host memory, in rank order), and
-   `*arrived` set to 1 once it all is (2: the call failed first), so the caller can read the counts on
-   the host with no wait on the GPU; then the rows move, as many as the counts say, and the GPU copies
-   this rank's own and, where `landed` is not NULL, writes the same counts there (int64, for the caller's
-   GPU work after the call).  The caller keeps `received` and `arrived` until `*arrived` is set, or has them in
+   sendsegs[rank]) moves with its rows in one exchange (the segment, then as many rows as it says, sent
+   together), is written to `received` (host memory, in rank order), and `*arrived` set to 1 once it all
+   has landed (2: the call failed first), so the caller can read the counts on the host with no wait on
+   the GPU while the rows may still be on the wire; the GPU copies this rank's own rows and, where
+   `landed` is not NULL, writes the same counts there (int64, for the caller's GPU work after the call).  The caller keeps `received` and `arrived` until `*arrived` is set, or has them in
    window allocations (their records then hold them to the call's end). */
 ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* sendsegs, void* recvbuff,
     size_t capacity, int64_t* received, int64_t* landed, const size_t* recvsegs, uint64_t* arrived, size_t row, ncclDataType_t datatype,
