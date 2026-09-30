@@ -343,34 +343,25 @@ _IDENTITY = {'sum': 0.0, 'avg': 0.0, 'max': -math.inf, 'min': math.inf}
 
 
 def _empty(shape, like):
-    """An MPS window tensor where the mesh backend has a group (torch_mesh.empty: its collectives run on it in
-    place), else torch.empty.  Named explicitly: under DTensor's dispatch (the ring's handler) torch
-    function modes do not run, so the backend's factory mode would not see a torch.empty there."""
-    if like.device.type == 'mps':
-        import torch_mesh
-        if torch_mesh._world is not None:
-            return torch_mesh.empty(tuple(shape), dtype=like.dtype)
     return torch.empty(shape, dtype=like.dtype, device=like.device)
 
 
 def _allgatherv(x, dim, sizes, group):
-    """The blocks gathered, this rank's copied into its place in the output first (the backend then runs
-    the all-gather in place)."""
-    y = x.movedim(dim, 0)
+    """The blocks gathered out of place from x's block (contiguous along dim): the backend reads it in place
+    and copies it into its place in the output while the transfers run."""
+    y = x.movedim(dim, 0).contiguous()
     out = _empty((sum(sizes),) + y.shape[1:], y)
-    blocks = list(out.split(sizes))
-    mine = blocks[dist.get_rank(group)].copy_(y)
-    dist.all_gather(blocks, mine, group=group)
+    dist.all_gather(list(out.split(sizes)), y, group=group)
     return out.movedim(0, dim)
 
 
 def _reduce_scatterv(x, dim, sizes, rank, op, group):
-    """The blocks reduce-scattered in place in a contiguous copy of x (the backend's in-place form: the
-    output is this rank's block of the input)."""
-    y = x.movedim(dim, 0)
-    blocks = list(_empty(y.shape, y).copy_(y).split(sizes))
-    dist.reduce_scatter(blocks[rank], blocks, op=getattr(dist.ReduceOp, op.upper()), group=group)
-    return blocks[rank].movedim(0, dim).contiguous()
+    """The blocks reduce-scattered out of place from x (contiguous along dim): the backend reads it in
+    place, leaves it as it is, and writes this rank's block."""
+    y = x.movedim(dim, 0).contiguous()
+    out = _empty((sizes[rank],) + y.shape[1:], y)
+    dist.reduce_scatter(out, list(y.split(sizes)), op=getattr(dist.ReduceOp, op.upper()), group=group)
+    return out.movedim(0, dim).contiguous()
 
 
 # Shard (torch/distributed/tensor/placement_types.py).
