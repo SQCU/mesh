@@ -32,10 +32,10 @@
 // runs on a stream of its own (as NCCL's point-to-point calls on separate streams), so isend/irecv
 // pairs progress together, and its Work waits for that stream.
 //   MESH_TRACE=<file>: each call's host times and bytes, when the GPU reached the MPS fence before it, the
-// call's stream reached its value, the MPS stream reached its kept work and passed it (signals encoded
-// before and after it, their values polled by a thread of the trace's: no command buffer of its own), the
-// GPU times of the MPS command buffer that ends at the fence, and libnccl-mesh's tallies of the call
-// (ncclMeshGroupTally), written as JSON lines when the group is destroyed or the process exits.
+// call's stream reached its value, the MPS stream reached its kept work and passed it (words the GPU
+// publishes before and after it, system-coherent, polled by a thread of the trace's: no command buffer of
+// its own), the GPU times of the MPS command buffer that ends at the fence, and libnccl-mesh's tallies of
+// the call (ncclMeshGroupTally), written as JSON lines when the group is destroyed or the process exits.
 #include <torch/extension.h>
 #include <torch/csrc/distributed/c10d/Backend.hpp>
 #include <torch/csrc/distributed/c10d/GroupRegistry.hpp>
@@ -122,27 +122,34 @@ struct Traced {
   void *tally = nullptr, *stream_event = nullptr;
   uint64_t stream_value = 0;
 };
-static struct {
+// The trace's state, never destroyed (its thread polls it until the process ends).
+struct TraceState {
   std::mutex lock;
   std::vector<Traced> calls;
-  std::map<std::pair<void *, uint64_t>, uint64_t> reached;          // (event, value): when the GPU reached it
-  std::vector<std::pair<void *, uint64_t>> pending;                 // (event, value) not yet reached
+  std::map<std::pair<void *, uint64_t>, uint64_t> reached;          // (event or word, value): when the GPU reached it
+  std::vector<std::tuple<void *, uint64_t, bool>> pending;          // (event or word, value, a word) not yet reached
   std::map<uint64_t, std::pair<double, double>> gpu;                // fence value: its command buffer's GPU times (s)
-} trace;
+  uint64_t *words = nullptr;                                        // the words the GPU publishes (a window allocation)
+  size_t used = 0;
+};
+static TraceState &trace = *new TraceState;
 static void trace_dump();
-// The trace's thread: each pending (event, value) noted in trace.reached once the event's value reaches it,
-// polled (a shared event's value is readable as the GPU signals it; a listener is told only as its command
-// buffer ends).
+// The value an event or a word holds (a word the GPU stores system-coherent, seen within microseconds; an
+// event signalled inside a command buffer is seen only as the command buffer ends).
+static uint64_t value_of(void *at, bool word) {
+  return word ? __atomic_load_n((uint64_t *)at, __ATOMIC_ACQUIRE) : [(__bridge id<MTLSharedEvent>)at signaledValue];
+}
+// The trace's thread: each pending point noted in trace.reached once it is reached, polled.
 static void poll_trace() {
   for (;;) {
     bool idle;
     {
       std::lock_guard<std::mutex> guard(trace.lock);
       for (auto it = trace.pending.begin(); it != trace.pending.end();) {
-        id<MTLSharedEvent> event = (__bridge id<MTLSharedEvent>)it->first;
-        if ([event signaledValue] < it->second) { ++it; continue; }
-        trace.reached[*it] = uptime();
-        [event release];
+        auto [at, value, word] = *it;
+        if (value_of(at, word) < value) { ++it; continue; }
+        trace.reached[{at, value}] = uptime();
+        if (!word) [(__bridge id<MTLSharedEvent>)at release];
         it = trace.pending.erase(it);
       }
       idle = trace.pending.empty();
@@ -151,13 +158,35 @@ static void poll_trace() {
     else sched_yield();
   }
 }
-// When `event` reaches `value`, noted in trace.reached.
-static void note_reached(id<MTLSharedEvent> event, uint64_t value) {
+static void pend(void *at, uint64_t value, bool word) {
   static std::once_flag once;
   std::call_once(once, [] { std::thread(poll_trace).detach(); });
   std::lock_guard<std::mutex> guard(trace.lock);
+  trace.pending.emplace_back(at, value, word);
+}
+// When `event` reaches `value`, noted in trace.reached.
+static void note_reached(id<MTLSharedEvent> event, uint64_t value) {
   [event retain];
-  trace.pending.push_back({(__bridge void *)event, value});
+  pend((__bridge void *)event, value, false);
+}
+// A word of the trace's, published (1) by the GPU in `cb` after the work encoded so far (libnccl-mesh's
+// publish kernel, ncclMeshEncodeCopies of no copies), noted in trace.reached once seen; its index (0: none).
+static uint64_t note_word(id<MTLCommandBuffer> cb) {
+  uint64_t index;
+  {
+    std::lock_guard<std::mutex> guard(trace.lock);
+    if (!trace.words) {
+      void *memory = nullptr;
+      if (ncclMemAlloc(&memory, (size_t)1 << 20) != ncclSuccess) return 0;
+      std::memset(memory, 0, (size_t)1 << 20);
+      trace.words = (uint64_t *)memory;
+    }
+    if (trace.used + 1 >= ((size_t)1 << 17)) return 0;
+    index = ++trace.used;
+  }
+  if (ncclMeshEncodeCopies((__bridge void *)cb, 0, nullptr, nullptr, nullptr, nullptr, trace.words + index, 1) != ncclSuccess) return 0;
+  pend(trace.words + index, 1, true);
+  return index;
 }
 // The GPU times of the command buffer `cb` (not yet committed), noted under the fence value `value`.
 static void note_gpu(id<MTLCommandBuffer> cb, uint64_t value) {
@@ -439,16 +468,14 @@ class Call {
     auto *s = at::mps::getCurrentMPSStream();
     on_mps(s, [&] {
       s->endKernelCoalescing();
-      if (traced_ != SIZE_MAX) {  // signals before and after the kept work: when the MPS stream reached and passed it
-        const uint64_t reach = mps_signal(s);
-        note_reached(fence_event(), reach);
+      if (traced_ != SIZE_MAX) {  // words published before and after the kept work: when the MPS stream reached and passed it
+        const uint64_t reach = note_word(s->commandBuffer());
         std::lock_guard<std::mutex> guard(trace.lock);
         trace.calls[traced_].reach = reach;
       }
       check(ncclMeshStreamEncodeWait(stream_, (__bridge void *)s->commandBuffer()), nullptr, "ncclMeshStreamEncodeWait");
       if (traced_ != SIZE_MAX) {
-        const uint64_t resume = mps_signal(s);
-        note_reached(fence_event(), resume);
+        const uint64_t resume = note_word(s->commandBuffer());
         std::lock_guard<std::mutex> guard(trace.lock);
         trace.calls[traced_].resume = resume;
       }
@@ -1253,10 +1280,9 @@ static void trace_dump() {
       return !trace.reached.count({event, value}) || (gpu && !trace.gpu.count(value));
     };
     void *fence = (__bridge void *)fence_event();
+    auto unseen = [&](uint64_t index) { return index && trace.words[index] && !trace.reached.count({trace.words + index, 1}); };
     for (auto &c : trace.calls)
-      if (waiting(fence, c.fence, true) || waiting(fence, c.reach, false) || waiting(fence, c.resume, false) ||
-          waiting(c.stream_event, c.stream_value, false))
-        return true;
+      if (waiting(fence, c.fence, true) || unseen(c.reach) || unseen(c.resume) || waiting(c.stream_event, c.stream_value, false)) return true;
     return false;
   };
   for (int i = 0; i < 1000 && pending(); i++) usleep(1000);
@@ -1282,8 +1308,8 @@ static void trace_dump() {
     for (size_t k = 0; k < c.splits.size(); k++) out << (k ? "," : "") << c.splits[k];
     out << "],\"enter_ns\":" << c.enter << ",\"issued_ns\":" << c.issued << ",\"fence\":" << c.fence << ",\"fence_reached_ns\":"
         << reached(fence, c.fence) << ",\"fence_gpu_ns\":" << gpu(c.fence) << ",\"stream_done_ns\":" << reached(c.stream_event, c.stream_value)
-        << ",\"reach\":" << c.reach << ",\"reach_ns\":" << reached(fence, c.reach) << ",\"resume\":" << c.resume << ",\"resume_ns\":"
-        << reached(fence, c.resume) << ",\"commits\":" << c.commits << ",\"library\":[";
+        << ",\"reach_ns\":" << reached(c.reach ? trace.words + c.reach : nullptr, 1) << ",\"resume_ns\":"
+        << reached(c.resume ? trace.words + c.resume : nullptr, 1) << ",\"commits\":" << c.commits << ",\"library\":[";
     ncclMeshCounts_t counts[64];
     int n = 0;
     ncclMeshTallyCounts(c.tally, counts, 64, &n);
