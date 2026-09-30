@@ -23,10 +23,10 @@
 // reached the fence, and the call's GPU work after them (the combines as the pieces land, on the
 // completion words the bridge sets; its completion value) is kept until its Work's wait() encodes it into
 // the current MPS command buffer (ncclMeshStreamEncodeWait): its leaky spins and first combines, then its gate
-// (mps_gate: that command buffer committed, the next begun with a wait for the library's event, so none runs on
-// while the network is late), then the rest, uncommitted: the next fence, or PyTorch's own commits, submit it,
-// and the MPS work after it follows it.  No host synchronization and no other queue sits between the MPS work
-// before and after the call.
+// (mps_gate: open, nothing; not yet, that command buffer committed and the rest encoded once the library opens
+// it, the host waiting, so no command buffer waits on the network), then the rest, uncommitted: the next fence,
+// or PyTorch's own commits, submit it, and the MPS work after it follows it.  No other queue sits between the
+// MPS work before and after the call.
 //   CPU tensors: a tensor, or parts contiguous and adjacent, are the buffer itself (libnccl-mesh copies
 // memory outside the window in and out by GPU blits through a Metal buffer over its pages); parts that
 // are not are copied by the backend's own GPU blits, through Metal buffers over their pages, into a
@@ -339,23 +339,27 @@ static uint64_t mps_fence() {
 }
 
 // A kept program's gate (nccl.h ncclMeshGate_t) on the MPS stream `argument`, on its serial queue: while a step is
-// recorded, the recording's (its replay's queue waits there: MetalRecordGate), or a wait for a committed program's
-// end on the host; else the stream's command buffer committed and the next one begun with the wait, so no command
-// buffer of the stream runs on while the network is late (Metal ends one that waits after running kernels past its
-// watchdog, and then ignores the process's later submissions).
+// recorded, the recording's (its replay's Metal 4 queue waits there before its next commit: MetalRecordGate), or
+// the committed program's end waited for on the host; else, where the gate is open (the words the work after it
+// needs are set), nothing, and where not, the stream's command buffer committed (its spins give up, the GPU
+// goes on with the work before them) and the work after the gate encoded only once it opens, the host waiting
+// for it: no command buffer of the stream waits on the network, as Metal ends one that waits past its watchdog,
+// on an event at its start too (output_data/maybe-20260930/probe in metal-microbench), and a late peer only
+// makes the host later.
 static void *mps_gate(void *argument, void *commandBuffer, void *event, uint64_t value) {
   auto *s = (at::mps::MPSStream *)argument;
-  if (recording) {
-    if (!event) recorder()->gate();
-    else
-      while ([(__bridge id<MTLSharedEvent>)event signaledValue] < value) sched_yield();
+  if (recording && !event) {
+    recorder()->gate();
     return commandBuffer;
   }
-  s->synchronize(at::mps::SyncType::COMMIT);
-  commits++;
-  id<MTLCommandBuffer> next = s->commandBuffer();
-  [next encodeWaitForEvent:(__bridge id<MTLSharedEvent>)event value:value];
-  return (__bridge void *)next;
+  id<MTLSharedEvent> e = (__bridge id<MTLSharedEvent>)event;
+  if ([e signaledValue] >= value) return commandBuffer;
+  if (!recording) {
+    s->synchronize(at::mps::SyncType::COMMIT);
+    commits++;
+  }
+  while ([e signaledValue] < value) sched_yield();
+  return recording ? commandBuffer : (__bridge void *)s->commandBuffer();
 }
 
 // ---- MPS tensors in the window ----
@@ -1448,10 +1452,7 @@ static c10::intrusive_ptr<Work> all_to_all_counted(const std::string &group, at:
 // Its received counts once they have landed: waited for on the host (the arrival word), not on the GPU.
 static std::vector<int64_t> counted(at::Tensor host) {
   const uint64_t *arrived = (const uint64_t *)host.data_ptr<int64_t>();
-  for (uint64_t deadline = uptime() + 300000000000ull; !__atomic_load_n(arrived, __ATOMIC_ACQUIRE);) {
-    TORCH_CHECK(uptime() < deadline, "mesh: all_to_all_counted's counts did not arrive by the deadline");
-    sched_yield();
-  }
+  while (!__atomic_load_n(arrived, __ATOMIC_ACQUIRE)) sched_yield();
   TORCH_CHECK(__atomic_load_n(arrived, __ATOMIC_ACQUIRE) == 1, "mesh: all_to_all_counted failed before its counts arrived (the Work's wait raises why)");
   const int64_t *at = host.data_ptr<int64_t>() + 1;
   return std::vector<int64_t>(at, at + host.numel() - 1);

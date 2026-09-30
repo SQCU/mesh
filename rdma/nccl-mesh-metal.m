@@ -22,10 +22,11 @@
    performance setting, MESH_NCCL_SPIN, never a failure) and then writes not-yet (its flag word stays 0, the
    call's leaked word 1) and returns; the work that consumes what it waited for is dispatched twice, once
    predicated on the flag (it runs now) and once after the program's gate predicated on its absence (it runs
-   there instead).  A gate is a command buffer's first command, a wait for an event the host signals once
-   every word the work needs is set (nccl-mesh.c), so no command buffer runs past Metal's watchdog however
-   late the network is: a lone command buffer waiting on a shared event is not killed, one that waits after
-   running kernels is (metal-microbench 45b05d7).  What the NIC wrote is loaded system-coherent, and what a later
+   there instead).  A gate is where a command buffer ends and the next is committed only once an event the host
+   signals says every word the work after it needs is set (nccl-mesh.c's dispatcher, a caller's ncclMeshGate_t),
+   so no command buffer waits on the network: Metal ends one that waits past its watchdog, running kernels or
+   waiting on an event at its start (about 5 s; metal-microbench output_data/maybe-20260930/probe), though not
+   a Metal 4 queue's wait before a commit.  What the NIC wrote is loaded system-coherent, and what a later
    SEND reads a kernel stores system-coherent, so the NIC sees it once the kernel's publication word is seen;
    a spin's declared buffers order the queue's later work after it.  A store that is not reaches another agent
    only when its command buffer completes: on the M5 a word published mid-command-buffer after 16 MB of plain
@@ -631,12 +632,4 @@ HIDDEN void nccl_mesh_program_commit(void *program,void (*done)(void *,int),void
   [(id<MTLCommandBuffer>)program commit];
   [(id<MTLCommandBuffer>)program release];
 }
-/* A gate in the library's own program: `program` committed (`done` as above), and a new command buffer on `queue`
-   whose first command waits for `event` to reach `value` (the host signals it once the words the work after it
-   needs are set), returned. */
-HIDDEN void *nccl_mesh_program_gate(void *program,void *queue,void *event,uint64_t value,void (*done)(void *,int),void *argument){
-  nccl_mesh_program_commit(program,done,argument);
-  void *next=nccl_mesh_program_begin(queue);
-  if(next)[(id<MTLCommandBuffer>)next encodeWaitForEvent:(id<MTLSharedEvent>)event value:value];
-  return next;
-}
+

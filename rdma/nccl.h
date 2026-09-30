@@ -39,10 +39,10 @@
    ncclCollConfig_t.algSelection names the planner's algorithms: "direct", "ring", "tree",
    "binomial" (comma-separated).  MESH_NCCL_TIMEOUT bounds making a communicator's connections and an
    agreement, in seconds (default 300), never a call.  A GPU program's waits on the network are leaky spins
-   (MESH_NCCL_SPIN polls, a performance setting) followed by gates, each a command buffer that begins with a
-   wait for an event the library signals once the words the work after it needs are set: Metal ends a command
-   buffer that waits past its watchdog after running kernels, and then refuses every later submission of the
-   process, but not one that has not begun.
+   (MESH_NCCL_SPIN polls, a performance setting) followed by gates: the work after a gate is in a command buffer
+   committed only once an event the library signals says the words it needs are set (the library's dispatcher
+   for its own programs, the caller's ncclMeshGate_t for a kept one), as Metal ends a command buffer that waits
+   past its watchdog, running kernels or waiting on an event at its start.
 
    Buffers are host pointers: unified memory.  The bridge's registered window is handed out as
    allocations (ncclMemAlloc), each a record of the library: its pages, the one Metal buffer over them
@@ -882,11 +882,12 @@ ncclResult_t ncclMeshStreamQuery(cudaStream_t stream);
    (EncodeWait or Synchronize) for the stream to complete. */
 ncclResult_t ncclMeshStreamDefer(cudaStream_t stream, int defer);
 /* A gate of a kept program (above), the caller's: `commandBuffer` holds the work before it, and the work after
-   it goes into the command buffer returned, which must first wait for `event` (an id<MTLSharedEvent>) to reach
-   `value`: a new command buffer beginning with that wait (so no command buffer runs on while the network is
-   late: Metal ends one that waits after running kernels past its watchdog), or, for a recording, the same one
-   with the recording's gate (event NULL, value its place among the recording's gates: a persistent call's,
-   ncclMeshPersistentGate).  NULL: the wait inside `commandBuffer`. */
+   it goes into the command buffer returned, which must not run before `event` (an id<MTLSharedEvent>) reaches
+   `value` (the library signals it once the words that work needs are set): committed only once it has (Metal
+   ends a command buffer that waits past its watchdog, running kernels or waiting on an event at its start), or,
+   for a recording, the same one with the recording's gate (event NULL, value its place among the recording's
+   gates: a persistent call's, ncclMeshPersistentGate), which a Metal 4 queue waits for before its next commit.
+   NULL: the wait inside `commandBuffer`, the caller's to keep short. */
 typedef void* (*ncclMeshGate_t)(void* argument, void* commandBuffer, void* event, uint64_t value);
 /* Into `commandBuffer` (an id<MTLCommandBuffer> not yet committed): the stream's kept programs, each gate by
    `gate(argument, ...)` (a gate of the stream's committed programs first where they have not run); the caller

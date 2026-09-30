@@ -218,7 +218,6 @@ HIDDEN void nccl_mesh_program_counted(void *program,void *to,void *from,void *co
 HIDDEN void nccl_mesh_program_end(void *program);
 HIDDEN void nccl_mesh_program_handler(void *program,void (*done)(void *,int),void *argument);
 HIDDEN void nccl_mesh_program_commit(void *program,void (*done)(void *,int),void *argument);
-HIDDEN void *nccl_mesh_program_gate(void *program,void *queue,void *event,uint64_t value,void (*done)(void *,int),void *argument);
 
 /* ---- errors ---- */
 static _Thread_local char last_error[512];
@@ -1039,6 +1038,7 @@ struct transfer { int send; struct peer *peer; unsigned char *window; size_t byt
 struct flight { struct item *it; struct transfer *t; int n,remaining; ncclResult_t status; struct flight *next; };
 
 static void finish(struct ncclComm *c,struct item *it,ncclResult_t result);
+static void dispatch_pump(void);
 /* ---- gates (struct gate) ---- */
 /* `g` armed on its communicator: in the armed list by value. */
 static void gate_arm(struct gate *g){
@@ -1077,6 +1077,7 @@ static void gates_check(struct ncclComm *c){
   }
   if(opened_now){memmove(c->armed,c->armed+opened_now,(size_t)(c->narmed-opened_now)*sizeof *c->armed);c->narmed-=opened_now;}
   pthread_mutex_unlock(&c->gates_lock);
+  if(opened_now)dispatch_pump();
 }
 /* A flight done: its part finished if its collectives are. */
 static void retire(struct ncclComm *c,struct flight *f){
@@ -2176,34 +2177,124 @@ static void counted_copy(struct recording *s,struct call *k,struct launch *l,con
 static void program_gate(struct recording *s,struct gate *g){add(s,(struct recorded){.kind=R_GATE,.a=g->event,.x=g->value,.gate=g->run?g:NULL});}
 /* A gate's command buffer (nccl.h ncclMeshStreamEncodeWait): `argument`'s. */
 typedef void *(*gate_fn)(void *argument,void *program,void *event,uint64_t value);
-/* The library's own: `program` committed on the queue `argument`, and the next one begun with the wait. */
 static void segment_ran(void *argument,int failed){(void)argument;(void)failed;}
-static void *owned_gate(void *argument,void *program,void *event,uint64_t value){
-  return nccl_mesh_program_gate(program,argument,event,value,segment_ran,NULL);
+/* ---- the dispatcher: the library's own command buffers, each committed once its gates are reached ----
+   Metal ends a command buffer that waits on an event at its start past its watchdog (about 5 s: a lone one waiting
+   8 s on the M5, metal-microbench output_data/maybe-20260930/probe), so the library encodes no such wait: a command
+   buffer of its own carries its gates (events and values: a group's gate, a recorded point, another stream's
+   end) and the dispatcher commits it once they are reached, each queue's in the order given (a thread of its
+   own polls them, and the workers as they open gates). */
+struct entry { struct entry *next; void *program,*queue; void (*done)(void *,int); void *argument; int n,capacity; struct point *gates; };
+static struct { pthread_mutex_t lock; pthread_cond_t cond; struct entry *head,*tail; int started; } dispatcher=
+  {PTHREAD_MUTEX_INITIALIZER,PTHREAD_COND_INITIALIZER,NULL,NULL,0};
+/* The entries whose gates are reached and whose queue's earlier ones are all committed, committed in order;
+   dispatcher.lock held (the one committer). */
+static int dispatch_pump_locked(void){
+  int committed=0;
+  for(struct entry **at=&dispatcher.head,*e;(e=*at);){
+    int go=1;
+    for(struct entry *f=dispatcher.head;f!=e && go;f=f->next)go=f->queue!=e->queue;
+    for(int g=0;g<e->n && go;g++)go=reached(e->gates[g]);
+    if(!go){at=&e->next;continue;}
+    *at=e->next;
+    if(dispatcher.tail==e){dispatcher.tail=NULL;for(struct entry *f=dispatcher.head;f;f=f->next)dispatcher.tail=f;}
+    nccl_mesh_program_commit(e->program,e->done?e->done:segment_ran,e->argument);
+    for(int g=0;g<e->n;g++)point_drop(e->gates+g);
+    free(e->gates);free(e);
+    committed++;
+  }
+  return committed;
 }
-/* A caller's that names no gate of its own: the wait inside its command buffer. */
+static void dispatch_pump(void){
+  if(!atomic_load_explicit((_Atomic(struct entry *) *)&dispatcher.head,memory_order_relaxed) || pthread_mutex_trylock(&dispatcher.lock))return;
+  dispatch_pump_locked();
+  pthread_mutex_unlock(&dispatcher.lock);
+}
+static void *dispatch_run(void *argument){
+  (void)argument;
+  pthread_setname_np("nccl-mesh.dispatch");
+  pthread_mutex_lock(&dispatcher.lock);
+  for(;;){
+    while(!dispatcher.head)pthread_cond_wait(&dispatcher.cond,&dispatcher.lock);
+    dispatch_pump_locked();
+    if(!dispatcher.head)continue;
+    pthread_mutex_unlock(&dispatcher.lock);
+    usleep(20);
+    pthread_mutex_lock(&dispatcher.lock);
+  }
+  return NULL;
+}
+static void dispatch_submit(struct entry *e){
+  pthread_mutex_lock(&dispatcher.lock);
+  if(dispatcher.tail)dispatcher.tail->next=e;else dispatcher.head=e;
+  dispatcher.tail=e;
+  dispatch_pump_locked();
+  if(dispatcher.head){
+    if(!dispatcher.started){pthread_t t;if(!pthread_create(&t,NULL,dispatch_run,NULL)){pthread_detach(t);dispatcher.started=1;}}
+    pthread_cond_signal(&dispatcher.cond);
+  }
+  pthread_mutex_unlock(&dispatcher.lock);
+}
+static struct entry *entry_new(void *queue){
+  struct entry *e=calloc(1,sizeof *e);
+  if(e && !(e->program=nccl_mesh_program_begin(queue))){free(e);e=NULL;}
+  if(e)e->queue=queue;
+  return e;
+}
+static void entry_gate(struct entry *e,void *event,uint64_t value){
+  if(!event || nccl_mesh_event_value(event)>=value)return;
+  if(e->n==e->capacity){
+    int capacity=e->capacity?2*e->capacity:4;
+    struct point *grown=realloc(e->gates,(size_t)capacity*sizeof *grown);
+    if(!grown)return;
+    e->gates=grown;e->capacity=capacity;
+  }
+  e->gates[e->n]=(struct point){0};
+  point_set(e->gates+e->n++,event,value);
+}
+/* The library's own program on `queue`, in command buffers each committed by the dispatcher: `current` the one
+   being encoded.  A gate (or a recorded point to wait for) submits it and begins the next, gated. */
+struct owned { void *queue; struct entry *current; };
+static void *owned_gate(void *argument,void *program,void *event,uint64_t value){
+  struct owned *o=argument;
+  nccl_mesh_program_end(program);
+  dispatch_submit(o->current);
+  o->current=entry_new(o->queue);
+  if(!o->current)return NULL;
+  entry_gate(o->current,event,value);
+  return o->current->program;
+}
+/* The program's last command buffer submitted, `done(argument, failed)` once it has run. */
+static void owned_finish(struct owned *o,void (*done)(void *,int),void *argument){
+  if(!o->current)return;
+  nccl_mesh_program_end(o->current->program);
+  o->current->done=done;o->current->argument=argument;
+  dispatch_submit(o->current);
+  o->current=NULL;
+}
+/* A caller's that names no gate of its own: the wait inside its command buffer (the caller's to keep short). */
 static void *inline_gate(void *argument,void *program,void *event,uint64_t value){
   (void)argument;
   if(event)nccl_mesh_program_wait(program,event,value);
   return program;
 }
 /* The kept commands encoded into `program`, each gate by `gate` (a persistent call's with no event and its place
-   among the recording's gates, given as it is played); the command buffer the last of them went into. */
+   among the recording's gates, given as it is played; for the library's own programs a recorded point to wait for
+   too); the command buffer the last of them went into. */
 static void *play(struct recording *k,void *program,gate_fn gate,void *argument){
-  int waiting=0;  /* the command buffer holds only its gates' waits so far */
   for(int i=0;i<k->n && program;i++){
     const struct recorded *r=k->ops+i;
     if(r->kind==R_GATE){
       struct gate *g=r->gate;
       nccl_mesh_program_end(program);
       if(g){if(g->index<0)g->index=g->run->gates++;program=gate(argument,program,NULL,(uint64_t)g->index);}
-      else if(waiting)nccl_mesh_program_wait(program,r->a,r->x);
       else program=gate(argument,program,r->a,r->x);
-      waiting=1;
       continue;
     }
-    waiting=0;
-    if(r->kind==R_WAIT)nccl_mesh_program_wait(program,r->a,r->x);
+    if(r->kind==R_WAIT){
+      if(gate==owned_gate)program=gate(argument,program,r->a,r->x);
+      else nccl_mesh_program_wait(program,r->a,r->x);
+    }
     else if(r->kind==R_SIGNAL)nccl_mesh_program_signal(program,r->a,r->x);
     else if(r->kind==R_KERNEL)nccl_mesh_program_kernel(program,r->which,r->a,r->x,r->b,r->y,r->n,r->type,r->op,r->nranks,r->scalar,r->published,r->c,r->z,
                                                       r->q,r->pred?r->pred-1:0,r->want,r->grid);
@@ -2571,10 +2662,11 @@ ncclResult_t ncclGroupEnd(void){
       *at=rec;
     }
     else{
-      void *queue=l->nmarks?l->marks[0].stream->queue:comms[0]->queue;
-      void *program=nccl_mesh_program_begin(queue);
-      for(int k=0;program && k<l->nmarks;k++)if(l->marks[k].stream->pending)program=take_kept(l->marks[k].stream,program,owned_gate,queue);
-      if(program)program=play(rec,program,owned_gate,queue);
+      struct owned o={l->nmarks?l->marks[0].stream->queue:comms[0]->queue,NULL};
+      o.current=entry_new(o.queue);
+      void *program=o.current?o.current->program:NULL;
+      for(int k=0;program && k<l->nmarks;k++)if(l->marks[k].stream->pending)program=take_kept(l->marks[k].stream,program,owned_gate,&o);
+      if(program)program=play(rec,program,owned_gate,&o);
       if(!program || rec->failed){
         FAIL(NULL,ncclUnhandledCudaError,"a command buffer on the queue");
         atomic_store(&comms[0]->aborting,1);
@@ -2582,7 +2674,7 @@ ncclResult_t ncclGroupEnd(void){
       for(int k=0;k<l->nmarks;k++)l->marks[k].stream->committed=l->marks[k].stream->value;
       count(calls,COMMITS,1);
       ran->kept=rec;
-      if(program)nccl_mesh_program_commit(program,program_ran,ran);
+      if(program)owned_finish(&o,program_ran,ran);
       else program_ran(ran,1);
       for(int w=0;w<l->nwaits;w++)point_drop(l->waits+w);
       l->nwaits=0;
@@ -2898,13 +2990,13 @@ ncclResult_t ncclMeshStreamDestroy(cudaStream_t stream){
    start); stream_lock held. */
 static ncclResult_t flush_kept(struct ncclMeshStream *s){
   if(!s->pending)return ncclSuccess;
-  void *program=nccl_mesh_program_begin(s->queue);
-  if(!program)return FAIL(NULL,ncclUnhandledCudaError,"a command buffer on the stream's queue");
-  if(s->committed)nccl_mesh_program_wait(program,s->event,s->committed);
-  program=take_kept(s,program,owned_gate,s->queue);
+  struct owned o={s->queue,entry_new(s->queue)};
+  if(!o.current)return FAIL(NULL,ncclUnhandledCudaError,"a command buffer on the stream's queue");
+  if(s->committed)entry_gate(o.current,s->event,s->committed);
+  void *program=take_kept(s,o.current->program,owned_gate,&o);
   s->committed=s->value;
   count(NULL,COMMITS,1);
-  if(program)nccl_mesh_program_commit(program,segment_ran,NULL);
+  if(program)owned_finish(&o,segment_ran,NULL);
   return ncclSuccess;
 }
 ncclResult_t ncclMeshStreamSynchronize(cudaStream_t stream){
