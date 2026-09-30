@@ -21,6 +21,9 @@
 #include <time.h>
 
 #define QD 4095
+/* TN3205: a device's UC queue pairs (it reports max_qp 11, 10 usable); a link's session's and its prepared
+   program's, over every link of the device, are within them (mesh-flow.c) */
+#define MESH_DEVICE_QPS 10
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 /* tbt_post_recv loads only the low 32 address bits of an SGE, so no registration may cross a 4 GiB
    virtual-address boundary.  The window is mapped at a bank-aligned base and cut into regions of
