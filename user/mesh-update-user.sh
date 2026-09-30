@@ -9,6 +9,13 @@ SRC="$D/source-current"
 FLOOR=$(awk '$1=="#define" && $2=="MESH_DISK_FLOOR_GIB"{print $3}' "$SRC/rdma/mesh-disk.h" 2>/dev/null)
 CAP=$(awk '$1=="#define" && $2=="MESH_LOG_CAP_MIB"{print $3}' "$SRC/rdma/mesh-disk.h" 2>/dev/null)
 [ -n "$CAP" ] && [ "$(stat -f %z "$LOG" 2>/dev/null || echo 0)" -gt $((CAP << 20)) ] && mv -f "$LOG" "$LOG.1"
+# the user services' launchd logs ($D/log, the user's own files, so no newsyslog and no sudo): past the cap
+# each is copied to .1 and emptied in place, since its job keeps its open file (launchd appends to it)
+if [ -n "$CAP" ]; then
+  for L in "$D"/log/*.log; do
+    [ -f "$L" ] && [ "$(stat -f %z "$L")" -gt $((CAP << 20)) ] && cp -f "$L" "$L.1" && : >"$L"
+  done
+fi
 exec >>"$LOG" 2>&1
 ts(){ date '+%F %T'; }
 BRANCH=$(cat "$D/branch" 2>/dev/null); BRANCH=${BRANCH:-main}
