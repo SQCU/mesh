@@ -30,11 +30,13 @@
    session resumes, and the call waits for it).  Nothing fails a call in time: its results are a function of
    its inputs, and how late the network or a peer is changes only when it ends; a bridge stopped or
    restarted with its clients attached is such a lateness (its successor resumes their transfers).  A call
-   fails where its bridge observed a failure (a peer's process exited, or its bridge left the mesh), and a
-   failed call revokes the communicator
+   fails where its bridge observed a failure (a peer's process exited, its bridge left the mesh, or its bridge
+   paired again as another instance: its node restarted, or its kept region had no client left), and a failed
+   call revokes the communicator
    (ULFM's MPI_Comm_revoke): the calls in flight fail, its connections are closed, so each peer's calls
-   with this rank fail too, and it makes no call until every rank has called ncclMeshCommAgree, which
-   agrees on the first failed call and makes the connections again.  Calls run as their plan's SEND /
+   with this rank fail too, and it makes no call until the ranks that stay (every rank but those whose bridge
+   left the mesh) have called ncclMeshCommAgree, which agrees on the first failed call and makes the connections
+   again.  Calls run as their plan's SEND /
    REDUCE / COPY steps on the bridge's communicator sessions (mesh-net.h, NCCL's ncclNet_v12 model).
    ncclCommInitRankConfig connects this rank to every rank the table links it to, on the bridge link
    that reaches it.
@@ -827,12 +829,12 @@ typedef struct { ncclConfig_t base; void* links; const int* nodes; } ncclMeshCon
     NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, \
     NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT, \
     NCCL_CONFIG_UNDEF_INT, NCCL_CONFIG_UNDEF_INT }, NULL, NULL }
-/* ULFM's MPI_Comm_agree after a failure: every rank calls it (a collective of its own).  Once this
-   rank's calls are done, each rank's vote (its first failed call, whether its connections are whole,
-   its link table's map of the communicator) is flooded over the stated links [FloodSet, Lynch 1996
-   §6.2.1], again until every rank's map is the same.  *failed: the index of the first call that
-   failed on any rank since the last agreement (the calls issued on the communicator counted from 1;
-   0: none), *epoch: this rank's link-table epoch whose map every rank holds.  After a failure, or
+/* ULFM's MPI_Comm_agree after a failure: every rank that stays calls it (a collective of its own).  Once
+   this rank's calls are done, each voting rank's vote (its first failed call, whether its connections are
+   whole, its link table's map of the communicator) is flooded over the stated links [FloodSet, Lynch 1996
+   §6.2.1], again until every voting rank's map is the same.  *failed: the index of the first call that
+   failed on any voting rank since the last agreement (the calls issued on the communicator counted from 1;
+   0: none), *epoch: this rank's link-table epoch whose map every voting rank holds.  After a failure, or
    where a rank's connections are not whole, every rank closes its connections and takes the
    agreement's; the memory a failed call received into is held until the bridge has vacated its old
    connections; the async error is cleared and the count starts again.  A rank whose bridge left the mesh
@@ -840,6 +842,9 @@ typedef struct { ncclConfig_t base; void* links; const int* nodes; } ncclMeshCon
    by MESH_NCCL_TIMEOUT (a rank that does not fails the agreement).  The communicator keeps its ranks: a
    caller plans its next work on the ranks that stay. */
 ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t* failed, uint64_t* epoch);
+/* The ranks that voted in this rank's last ncclMeshCommAgree that succeeded: voters[r] (nranks entries) 1 where
+   rank r voted, 0 where its bridge had left the mesh as this rank's bridge saw it (all 0 before one). */
+ncclResult_t ncclMeshCommVoters(ncclComm_t comm, int* voters);
 /* MPI_Allgatherv and MPI_Reduce_scatter: rank r's segment is counts[r] elements (counts: nranks
    entries, the same on every rank, each at least 1), the segments packed in rank order, so rank r's
    lies after the segments of the ranks before it.  ncclMeshAllGatherV sends counts[rank] elements of

@@ -187,8 +187,9 @@ struct ncclComm {
   /* recovery (ncclMeshCommAgree): the calls issued since the last agreement, the index of the first
      that failed (0: none) and its cause; the agreements made (alike on every rank: their connections'
      keys); the slots of the connections closed since, and the event a failed part's memory is held on
-     until the bridge has vacated them (`quiet`: the value it is held for) */
-  _Atomic uint64_t issued; uint64_t failed,agreements; char cause[256];
+     until the bridge has vacated them (`quiet`: the value it is held for); the ranks that voted in the last
+     agreement (`voted`: 1 a rank, 0 one whose bridge had left the mesh as this rank's bridge saw it) */
+  _Atomic uint64_t issued; uint64_t failed,agreements; char cause[256]; unsigned char *voted;
   uint64_t *closed; int nclosed,open; void *quiet; uint64_t quiet_value;
 };
 
@@ -345,6 +346,7 @@ static ncclResult_t links_for(struct ncclComm *c,const ncclConfig_t *config){
   c->table=mesh->links;
   const size_t n=(size_t)c->nranks,steps=MESH_COLLECTIVE_STEPS(c->nranks);
   c->nodes=calloc(n,sizeof *c->nodes);
+  c->voted=calloc(n,1);
   c->seen=mesh_link_contents_new(c->table->nodes);
   c->pairs=calloc((size_t)c->nranks*(size_t)c->nranks,sizeof *c->pairs);
   c->stated_pairs=calloc((size_t)c->nranks*(size_t)c->nranks,sizeof *c->stated_pairs);
@@ -353,7 +355,7 @@ static ncclResult_t links_for(struct ncclComm *c,const ncclConfig_t *config){
   for(int p=0;c->plans && p<PLANS;p++){c->plans[p].segments=calloc(n,sizeof *c->plans[p].segments);c->plans[p].steps=calloc(steps,sizeof *c->plans[p].steps);}
   for(int p=0;c->plans && p<PLANS;p++)if(!c->plans[p].segments || !c->plans[p].steps)return FAIL(c,ncclSystemError,"allocation");
   c->used=calloc(n,sizeof *c->used);
-  if(!c->nodes || !c->seen || !c->pairs || !c->stated_pairs || !c->cost || !c->plans || !c->used)
+  if(!c->nodes || !c->voted || !c->seen || !c->pairs || !c->stated_pairs || !c->cost || !c->plans || !c->used)
     return FAIL(c,ncclSystemError,"allocation");
   c->epoch=mesh_link_table_read(c->table,c->seen);
   for(int r=0;r<c->nranks;r++){
@@ -1481,7 +1483,7 @@ static void comm_free(struct ncclComm *c){
   close_peers(c,c->peers,0);
   if(c->net)mesh_net_finalize(c->net);
   for(int p=0;c->plans && p<PLANS;p++){free(c->plans[p].segments);free(c->plans[p].steps);}
-  free(c->nodes);free(c->seen);free(c->pairs);free(c->stated_pairs);free(c->cost);free(c->plans);free(c->closed);free(c->used);
+  free(c->nodes);free(c->voted);free(c->seen);free(c->pairs);free(c->stated_pairs);free(c->cost);free(c->plans);free(c->closed);free(c->used);
   free(c->armed);
   if(c->landed)nccl_mesh_release(c->landed);
   if(c->quiet)nccl_mesh_release(c->quiet);
@@ -3336,9 +3338,14 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm,uint64_t *failed,uint64_t *epoch)
   if(!status){atomic_store(&c->issued,0);c->failed=0;c->cause[0]=0;atomic_store(&c->broken,0);atomic_store(&c->async,0);c->alive=0;}
   c->agreeing=0;
   pthread_mutex_unlock(&c->lock);
-  if(!status){*failed=first;*epoch=c->epoch;}
+  if(!status){*failed=first;*epoch=c->epoch;for(int r=0;r<n;r++)c->voted[r]=!gone[r];}
   free(want);free(gone);free(fresh);free(votes);
   return status;
+}
+ncclResult_t ncclMeshCommVoters(ncclComm_t comm,int *voters){
+  if(!comm || !voters)return FAIL(comm,ncclInvalidArgument,"ncclMeshCommVoters: NULL argument");
+  for(int r=0;r<comm->nranks;r++)voters[r]=comm->voted[r];
+  return ncclSuccess;
 }
 ncclResult_t ncclMeshGroupEpochs(uint64_t *epochs,int capacity,int *count){
   if(!count)return FAIL(NULL,ncclInvalidArgument,"ncclMeshGroupEpochs: count is NULL");

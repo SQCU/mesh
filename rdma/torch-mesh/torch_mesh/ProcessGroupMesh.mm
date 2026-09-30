@@ -4,9 +4,11 @@
 // link map is the bridge's link table (ncclMeshConfig_t), which the group's options name (torch_mesh.
 // Options: the region, a link-map file stated into it, each rank's node).  The reductions are
 // libnccl-mesh's Metal kernels.  Nothing fails a call in time; a failed call (its bridge observed a peer's
-// exit) revokes the communicator; the error path, a call's own failure when it is issued or an earlier
-// call's at a Work's wait, first agrees with every rank (ncclMeshCommAgree: ULFM's MPI_Comm_agree), then
-// raises the agreed failure; agree() is that agreement, agreed() the last one.
+// exit, a peer's bridge leaving the mesh, or a peer's bridge pairing again as another instance) revokes the
+// communicator; the error path, a call's own failure when it is issued or an earlier call's at a Work's wait,
+// first agrees with the ranks that stay (ncclMeshCommAgree: ULFM's MPI_Comm_agree; a rank whose bridge left the
+// mesh as this rank's bridge sees it does not vote), then raises the agreed failure, naming the ranks that voted;
+// agree() is that agreement, agreed() the last one.
 //   MPS tensors in the window (window_heaps below): once the first group exists, the heaps PyTorch's MPS
 // allocator makes place each buffer in a window allocation of its own, whose one Metal buffer is the
 // tensor's MTLBuffer, so every MPS tensor made from then on (an op's output, x * 2, as much as a
@@ -75,15 +77,33 @@
 namespace c10d {
 
 static std::pair<uint64_t, uint64_t> agree_on(ncclComm_t comm, const char *after);
+// Who voted in this rank's last agreement: "every rank", or the ranks that did and those that did not, whose
+// bridge had left the mesh as this rank's bridge saw it (ncclMeshCommVoters).
+static std::string voters(ncclComm_t comm) {
+  int n = 0;
+  if (ncclCommCount(comm, &n) != ncclSuccess || n <= 0) return "the ranks that stay";
+  std::vector<int> voted((size_t)n);
+  if (ncclMeshCommVoters(comm, voted.data()) != ncclSuccess) return "the ranks that stay";
+  std::vector<int> in, out;
+  for (int r = 0; r < n; r++) (voted[r] ? in : out).push_back(r);
+  if (out.empty()) return "every rank";
+  const auto named = [](const std::vector<int> &ranks) {
+    std::string text = ranks.size() == 1 ? "rank " : "ranks ";
+    for (size_t i = 0; i < ranks.size(); i++) text += (i ? ", " : "") + std::to_string(ranks[i]);
+    return text;
+  };
+  return named(in) + " (" + named(out) + (out.size() == 1 ? " not voting: its bridge" : " not voting: their bridges") +
+         " left the mesh as this rank's bridge sees it)";
+}
 // A failure raised; a failure of the communicator (ncclRemoteError, ncclTimeout, ncclSystemError: the
-// network, a revoked call) only once every rank has agreed on it, the first failed call and each rank's
-// link-table epoch in its message.
+// network, a revoked call) only once the ranks that stay have agreed on it, the ranks that voted, the first
+// failed call and this rank's link-table epoch in its message.
 static void check(ncclResult_t result, ncclComm_t comm, const char *what) {
   if (result == ncclSuccess) return;
   const std::string cause = ncclGetLastError(comm);
   if (comm && (result == ncclRemoteError || result == ncclTimeout || result == ncclSystemError)) {
     auto agreed = agree_on(comm, " after the failure");
-    TORCH_CHECK(false, "mesh: ", what, ": ", ncclGetErrorString(result), ": ", cause, " [agreed by every rank: call ", agreed.first,
+    TORCH_CHECK(false, "mesh: ", what, ": ", ncclGetErrorString(result), ": ", cause, " [agreed by ", voters(comm), ": call ", agreed.first,
                 " since the previous agreement failed; this rank plans on its link-table epoch ", agreed.second, "]");
   }
   TORCH_CHECK(false, "mesh: ", what, ": ", ncclGetErrorString(result), ": ", cause);
@@ -946,7 +966,7 @@ class Call {
 
 // A call's Work: done at once for a CPU collective; else done once its stream reaches the call's value,
 // wait() waiting on the host (CPU) or ordering the current MPS stream after it (MPS), then copying back,
-// and raising (once every rank has agreed on it) an earlier call's failure the communicator holds.
+// and raising (once the ranks that stay have agreed on it) an earlier call's failure the communicator holds.
 class WorkMesh : public Work {
  public:
   WorkMesh(OpType type, std::vector<at::Tensor> outputs, std::shared_ptr<Call> call, ncclComm_t comm)
@@ -1588,9 +1608,10 @@ static pybind11::list records() {
   }
   return out;
 }
-// ULFM's MPI_Comm_agree on the default group's communicator (the first made): every rank calls it; the
-// first call that failed on any rank since the previous agreement (None: none did) and this rank's
-// link-table epoch, on which every rank's table holds the same map of the group.
+// ULFM's MPI_Comm_agree on the default group's communicator (the first made): every rank that stays calls it
+// (a rank whose bridge left the mesh as this rank's bridge sees it does not vote); the first call that failed
+// on any voting rank since the previous agreement (None: none did) and this rank's link-table epoch, on which
+// every voting rank's table holds the same map of the group.
 static pybind11::tuple agree() {
   ncclComm_t comm;
   {
