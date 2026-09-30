@@ -25,10 +25,11 @@
    no report names is down, whatever is stated), which the communicator takes through
    ncclMeshConfig_t (ncclCommInitRankConfig; no table, no communicator) and a split inherits.  Each call
    plans on one snapshot of it, read when its group ends, and records its epoch; plans are kept by
-   (epoch, call); a call during which the epoch moves fails as a value (ncclRemoteError, revoked) where
-   the move touches its plan (on the new contents its selection takes another algorithm, or some rank's
-   steps differ: a link or node it uses, or costs that choose another; a point-to-point call, where its
-   link is no longer stated and up), and a call whose plan needs a link that is down fails so at once.  A failed call revokes the communicator
+   (epoch, call); a call keeps its plan whatever the table does while it runs (the next call plans on the new
+   contents), on the links up, or where they carry none of its algorithms on the links stated (a lost link's
+   session resumes, and the call waits for it).  Nothing fails a call in time: its results are a function of
+   its inputs, and how late the network or a peer is changes only when it ends.  A call fails where its
+   bridge observed a failure (a peer's bridge or process exited), and a failed call revokes the communicator
    (ULFM's MPI_Comm_revoke): the calls in flight fail, its connections are closed, so each peer's calls
    with this rank fail too, and it makes no call until every rank has called ncclMeshCommAgree, which
    agrees on the first failed call and makes the connections again.  Calls run as their plan's SEND /
@@ -36,13 +37,12 @@
    ncclCommInitRankConfig connects this rank to every rank the table links it to, on the bridge link
    that reaches it.
    ncclCollConfig_t.algSelection names the planner's algorithms: "direct", "ring", "tree",
-   "binomial" (comma-separated).  MESH_NCCL_TIMEOUT bounds a connection or a call, in seconds
-   (default 300).  A call whose GPU program waits on the network fails as a value (ncclRemoteError)
-   once the network has given the GPU nothing it waits for in 1 s, and every completion word the
-   program waits on is set, so it and its stream's later work go on; the GPU's own wait on a word fails
-   the call the same way once 1 s of the host's clock passes with no progress (or its count of polls runs
-   out): Metal ends a command buffer that waits past its watchdog, and then refuses every later
-   submission of the process.
+   "binomial" (comma-separated).  MESH_NCCL_TIMEOUT bounds making a communicator's connections and an
+   agreement, in seconds (default 300), never a call.  A GPU program's waits on the network are leaky spins
+   (MESH_NCCL_SPIN polls, a performance setting) followed by gates, each a command buffer that begins with a
+   wait for an event the library signals once the words the work after it needs are set: Metal ends a command
+   buffer that waits past its watchdog after running kernels, and then refuses every later submission of the
+   process, but not one that has not begun.
 
    Buffers are host pointers: unified memory.  The bridge's registered window is handed out as
    allocations (ncclMemAlloc), each a record of the library: its pages, the one Metal buffer over them
@@ -118,9 +118,8 @@ extern "C" {
 /* The stream (above).  queue: id<MTLCommandQueue>; event: id<MTLSharedEvent>; value: the event's last
    reserved value; made: the queue is the stream's own; deferred: ncclMeshStreamDefer's; pending: the
    programs kept for ncclMeshStreamEncodeWait, oldest first; committed: the last value a program
-   committed to the queue signals; word, word_value: ncclMeshStreamWaitWord's, for the next group. */
-struct ncclMeshStream { void *queue; void *event; uint64_t value; int made, deferred; void *pending; uint64_t committed;
-  const uint64_t *word; uint64_t word_value; };
+   committed to the queue signals. */
+struct ncclMeshStream { void *queue; void *event; uint64_t value; int made, deferred; void *pending; uint64_t committed; };
 typedef struct ncclMeshStream *cudaStream_t;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
 typedef void *cudaEvent_t;
@@ -875,20 +874,24 @@ ncclResult_t ncclMeshStreamQuery(cudaStream_t stream);
    start (no copy in or premultiplication before them, no combine a later send of the call reads, one
    communicator) instead of committing it: the workers start on the recorded points themselves (no gate
    program between the caller's GPU work and the network), and ncclMeshStreamEncodeWait encodes the kept
-   programs, in order, into a command buffer of the caller's: its waits on the completion words (the
-   bridge sets them), combines, post-division, copies out and the stream's completion value, so the
-   caller's later work in that command buffer follows them on its own queue with no other queue between.
-   A group that cannot defer first takes the stream's kept programs into its own; ncclMeshStreamSynchronize
-   commits them to the stream's queue.  Every kept program must be encoded (EncodeWait or Synchronize)
-   for the stream to complete. */
+   programs, in order, into a command buffer of the caller's: its leaky spins on the completion words (the
+   bridge sets them) and first combines, its gate, then the combines its spins gave up on, post-division,
+   copies out and the stream's completion value, so the caller's later work follows them on its own queue
+   with no other queue between.  A group that cannot defer first takes the stream's kept programs into its
+   own; ncclMeshStreamSynchronize commits them to the stream's queue.  Every kept program must be encoded
+   (EncodeWait or Synchronize) for the stream to complete. */
 ncclResult_t ncclMeshStreamDefer(cudaStream_t stream, int defer);
-/* Into `commandBuffer` (an id<MTLCommandBuffer> not yet committed): a wait for the stream's committed
-   programs, then the stream's kept programs; the caller commits it. */
-ncclResult_t ncclMeshStreamEncodeWait(cudaStream_t stream, void* commandBuffer);
-/* The groups on `stream` from now on start their transfers once `word` (8 bytes in a window allocation)
-   reaches `value`: their recorded point, a word the caller's GPU work publishes (ncclMeshEncodeCopies)
-   instead of an event its command buffer signals at its end. */
-ncclResult_t ncclMeshStreamWaitWord(cudaStream_t stream, const uint64_t* word, uint64_t value);
+/* A gate of a kept program (above), the caller's: `commandBuffer` holds the work before it, and the work after
+   it goes into the command buffer returned, which must first wait for `event` (an id<MTLSharedEvent>) to reach
+   `value`: a new command buffer beginning with that wait (so no command buffer runs on while the network is
+   late: Metal ends one that waits after running kernels past its watchdog), or, for a recording, the same one
+   with the recording's gate (event NULL, value its place among the recording's gates: a persistent call's,
+   ncclMeshPersistentGate).  NULL: the wait inside `commandBuffer`. */
+typedef void* (*ncclMeshGate_t)(void* argument, void* commandBuffer, void* event, uint64_t value);
+/* Into `commandBuffer` (an id<MTLCommandBuffer> not yet committed): the stream's kept programs, each gate by
+   `gate(argument, ...)` (a gate of the stream's committed programs first where they have not run); the caller
+   commits the command buffer its gate gave last. */
+ncclResult_t ncclMeshStreamEncodeWait(cudaStream_t stream, void* commandBuffer, ncclMeshGate_t gate, void* argument);
 /* Into `commandBuffer` (an id<MTLCommandBuffer> not yet committed, no encoder open): n copies into the
    window, bytes[i] to dst[i] (in an allocation) from the id<MTLBuffer> src[i] at offset[i], stored
    system-coherent, then `word` (in an allocation) set to `value`, system-coherent, once they are done.
@@ -928,6 +931,12 @@ ncclResult_t ncclMeshPersistentNext(const uint64_t* ready, uint64_t range, uint6
 ncclResult_t ncclMeshPersistentCut(int* cut, int* groups);
 ncclResult_t ncclMeshPersistentEnd(void** handle, int* calls);
 ncclResult_t ncclMeshPersistentStart(void* handle, void* event, uint64_t value, uint64_t stride, uint64_t count);
+/* The persistent calls' gates: `gates` of them in the recording (numbered as it played them: ncclMeshGate_t),
+   gate g of iteration i opened (the work after it runs) once `event` (an id<MTLSharedEvent>) reaches
+   value + i gates + g + 1, which the library signals once every completion word that work needs is set;
+   ncclMeshPersistentGate before ncclMeshPersistentStart. */
+ncclResult_t ncclMeshPersistentGate(void* handle, void* event, uint64_t value);
+ncclResult_t ncclMeshPersistentGates(void* handle, int* gates);
 ncclResult_t ncclMeshPersistentWait(void* handle);
 ncclResult_t ncclMeshPersistentFree(void* handle);
 /* The algorithms the planner took for this thread's last ended group, a call each in issue

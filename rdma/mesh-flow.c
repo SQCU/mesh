@@ -621,7 +621,6 @@ static void *link_run(void *argument){
 #define NET_NONE UINT32_MAX
 #define NET_DISCARD (UINT32_MAX-1)
 #define NET_HEARTBEAT_NS UINT64_C(200000000)
-#define NET_SILENCE_NS UINT64_C(2000000000)
 enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT, NET_LINKS, NET_BETA };
 /* One control message.  CONNECT: `key` the listen it names, `from` the connecting comm.  ACCEPT: `from`
    the receiving comm made for `to`.  RTS: send request `sequence` of `from`, `size` its bytes,
@@ -630,9 +629,10 @@ enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT,
    that request, `offset` into it and `size` long, whose RECV is posted on queue pair `flags` (size 0: the
    empty message received; `error`: refused).
    CLOSE: `from` announces and grants nothing more on this connection; flags 1 asks for a CLOSE back.
-   HEARTBEAT: nothing; each end sends one whenever it has sent nothing for NET_HEARTBEAT_NS, and ends the
-   session once it has heard nothing for NET_SILENCE_NS (a peer stopped, a cable pulled: the link's
-   down, observed).  LINKS: node `from`'s report, sequence `sequence`, its links' up a bit a node in
+   HEARTBEAT: nothing; each end sends one whenever it has sent nothing for NET_HEARTBEAT_NS: the peer's liveness,
+   for whoever supervises the bridges (a peer stopped is silent, and late: it ends nothing; its session ends
+   only on what is observed, the control socket's end or error, which TCP's keepalive gives a host that is gone,
+   or a failed completion).  LINKS: node `from`'s report, sequence `sequence`, its links' up a bit a node in
    key, size, extent, phase, offset (NET_LINK_NODES: a table of at most 320 nodes); each bridge sends its own node's whenever its sessions
    pair or end, every newer one it takes on to its other peers, and every one it holds to a peer when
    their session pairs (mesh-dataflow.h: a link no report names is down).  BETA: node `from`'s estimate,
@@ -1435,7 +1435,6 @@ static void net_serve(struct net_session *s){
     if(!error)error=net_read(s,&busy);
     if(error){s->failed=error;break;}
     uint64_t now=net_now(),bell=atomic_load_explicit(&s->counts->doorbell,memory_order_acquire);
-    if(now-s->heard>NET_SILENCE_NS){s->failed=ETIMEDOUT;break;}
     if(now-s->said>NET_HEARTBEAT_NS)net_emit(s,(struct net_message){.kind=NET_HEARTBEAT});
     uint64_t news=atomic_load_explicit(&link_news,memory_order_acquire);
     if(news!=s->news){s->news=news;net_publish(s);}

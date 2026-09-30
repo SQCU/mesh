@@ -44,6 +44,7 @@
 #include <torch/csrc/distributed/c10d/Store.hpp>
 #include <torch/csrc/distributed/c10d/Types.hpp>
 #include <torch/csrc/distributed/c10d/Work.hpp>
+#include <ATen/mps/MPSAllocatorInterface.h>
 #include <ATen/mps/MPSDevice.h>
 #include <ATen/mps/MPSStream.h>
 #include <ATen/native/mps/OperationUtils.h>
@@ -57,6 +58,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <time.h>
 #include <unistd.h>
@@ -224,25 +226,31 @@ struct Recorder {
   void (*queue)(id);
   void (*cut)(void);
   NSUInteger (*cuts)(const void *);
-  int (*run_cut)(void *, NSUInteger, NSUInteger, id, uint64_t);
   void (*release)(void *);
   void (*times)(const void *, double *, double *);
   NSUInteger (*segments)(const void *, double *, NSUInteger);
   BOOL (*publish)(id, NSUInteger, NSUInteger, id, NSUInteger, NSUInteger);
   NSUInteger (*free_after)(id);
+  void (*gate)(void);
+  NSUInteger (*gates)(const void *);
+  int (*run_gated)(void *, NSUInteger, NSUInteger, id, uint64_t, id, uint64_t);
+  NSUInteger (*buffers)(const void *, id *, NSUInteger);
 };
 static const Recorder *recorder() {
   static const Recorder found = {(void *(*)(id, void (^)(void), const void *, size_t, NSUInteger, int))dlsym(RTLD_DEFAULT, "MetalRecord"),
                                  (void (*)(id))dlsym(RTLD_DEFAULT, "MetalRecordQueue"), (void (*)(void))dlsym(RTLD_DEFAULT, "MetalRecordCut"),
                                  (NSUInteger (*)(const void *))dlsym(RTLD_DEFAULT, "MetalReplayCuts"),
-                                 (int (*)(void *, NSUInteger, NSUInteger, id, uint64_t))dlsym(RTLD_DEFAULT, "MetalReplayRunCut"),
                                  (void (*)(void *))dlsym(RTLD_DEFAULT, "MetalReplayFree"),
                                  (void (*)(const void *, double *, double *))dlsym(RTLD_DEFAULT, "MetalReplayTimes"),
                                  (NSUInteger (*)(const void *, double *, NSUInteger))dlsym(RTLD_DEFAULT, "MetalReplaySegmentTimes"),
                                  (BOOL (*)(id, NSUInteger, NSUInteger, id, NSUInteger, NSUInteger))dlsym(RTLD_DEFAULT, "MetalRecordPublish"),
-                                 (NSUInteger (*)(id))dlsym(RTLD_DEFAULT, "MetalRecordFreeAfter")};
-  return found.record && found.queue && found.cut && found.cuts && found.run_cut && found.release && found.times && found.segments &&
-                 found.publish && found.free_after
+                                 (NSUInteger (*)(id))dlsym(RTLD_DEFAULT, "MetalRecordFreeAfter"),
+                                 (void (*)(void))dlsym(RTLD_DEFAULT, "MetalRecordGate"),
+                                 (NSUInteger (*)(const void *))dlsym(RTLD_DEFAULT, "MetalReplayGates"),
+                                 (int (*)(void *, NSUInteger, NSUInteger, id, uint64_t, id, uint64_t))dlsym(RTLD_DEFAULT, "MetalReplayRunGated"),
+                                 (NSUInteger (*)(const void *, id *, NSUInteger))dlsym(RTLD_DEFAULT, "MetalReplayBuffers")};
+  return found.record && found.queue && found.cut && found.cuts && found.release && found.times && found.segments && found.publish &&
+                 found.free_after && found.gate && found.gates && found.run_gated && found.buffers
              ? &found
              : nullptr;
 }
@@ -261,24 +269,29 @@ struct RecordedCall {
   int cut = 0, fresh = 0, published = 0;
 };
 // The recorder's replay (its layout, metal_recording.h struct MetalReplay: the commands of one invocation
-// at 24), the persistent calls, and the event the replay signals at its cuts (its first, before the step's
-// commands: the replay before it done); each recorded call, the window allocations holding the published
-// ranges' words, the replays made so far, and the collective outputs given pages of their own (output()) and
-// their buffers' bytes.
+// at 24), the persistent calls, the event the replay signals at its cuts (its first, before the step's
+// commands: the replay before it done) and the one it waits for at its gates (the library signals it once the
+// words the work after a gate needs are set); each recorded call, the window allocations holding the published
+// ranges' words, the replays made so far, the collective outputs given pages of their own (output()) and their
+// buffers' bytes; and the MPS allocator's buffers the recording binds that were cached when it was made, held
+// (reserve).
 struct Recording {
   void *replay = nullptr, *calls = nullptr;
   int ncalls = 0;
-  NSUInteger cuts = 0;
-  id<MTLSharedEvent> event = nil;
+  NSUInteger cuts = 0, gates = 0;
+  id<MTLSharedEvent> event = nil, gate = nil;
   std::vector<RecordedCall> recorded;
   std::vector<void *> words;
-  uint64_t replays = 0, fresh_outputs = 0, fresh_bytes = 0;
+  std::vector<at::Tensor> reserved;
+  uint64_t replays = 0, fresh_outputs = 0, fresh_bytes = 0, bound = 0, marked = 0;
   uint32_t commands() const { return replay ? *(const uint32_t *)((const char *)replay + 24) : 0; }
   ~Recording() {
     if (calls) ncclMeshPersistentFree(calls);
     if (replay && recorder()) recorder()->release(replay);
     for (void *w : words) ncclMemFree(w);
     [event release];
+    [gate release];
+    reserved.clear();  // after the replay has let their buffers go
   }
 };
 static Recording *recorded = nullptr;
@@ -321,6 +334,26 @@ static uint64_t mps_fence() {
   commits++;
   fences++;
   return value;
+}
+
+// A kept program's gate (nccl.h ncclMeshGate_t) on the MPS stream `argument`, on its serial queue: while a step is
+// recorded, the recording's (its replay's queue waits there: MetalRecordGate), or a wait for a committed program's
+// end on the host; else the stream's command buffer committed and the next one begun with the wait, so no command
+// buffer of the stream runs on while the network is late (Metal ends one that waits after running kernels past its
+// watchdog, and then ignores the process's later submissions).
+static void *mps_gate(void *argument, void *commandBuffer, void *event, uint64_t value) {
+  auto *s = (at::mps::MPSStream *)argument;
+  if (recording) {
+    if (!event) recorder()->gate();
+    else
+      while ([(__bridge id<MTLSharedEvent>)event signaledValue] < value) sched_yield();
+    return commandBuffer;
+  }
+  s->synchronize(at::mps::SyncType::COMMIT);
+  commits++;
+  id<MTLCommandBuffer> next = s->commandBuffer();
+  [next encodeWaitForEvent:(__bridge id<MTLSharedEvent>)event value:value];
+  return (__bridge void *)next;
 }
 
 // ---- MPS tensors in the window ----
@@ -613,7 +646,7 @@ class Call {
       }
       const bool noted = recorded && tracing() && recorded_call_ != SIZE_MAX;  // a recorded call's: noted at each replay
       if (noted) recorded->recorded[recorded_call_].reach = note_word(s->commandBuffer(), false);
-      check(ncclMeshStreamEncodeWait(stream_, (__bridge void *)s->commandBuffer()), nullptr, "ncclMeshStreamEncodeWait");
+      check(ncclMeshStreamEncodeWait(stream_, (__bridge void *)s->commandBuffer(), mps_gate, s), nullptr, "ncclMeshStreamEncodeWait");
       if (traced_ != SIZE_MAX) {
         const uint64_t resume = note_word(s->commandBuffer());
         std::lock_guard<std::mutex> guard(trace.lock);
@@ -1522,6 +1555,52 @@ static uint64_t address(const at::Tensor &t) {
 }
 
 // ---- a step recorded and replayed (torch_mesh.record, replay) ----
+// The recording's buffers its own for as long as it lives, so that no later tensor's are its: torch 2.14's MPS
+// allocator gives a buffer it has cached to the next allocation of its size on the same stream as it is, retained
+// or not (MPSAllocator.mm get_free_buffer, allow_in_flight_reuse), so each replay wrote tensors made after the
+// recording over buffers it binds (tp.py's recordings and cp.py's kept reference output and input:
+// output_data/resident-20260930/p1 in metal-microbench).  Each buffer of the allocator the recording binds is
+// marked (recordEvents: freed while the recording retains it, it waits among the allocator's pending buffers),
+// and each one the allocator holds cached now is taken out of its cache: allocations of its size, the buffers of
+// the recording's held by the recording and the others given back, until one is newly placed (a window
+// allocation of its own: window_heaps), none of that size cached any more.
+static void reserve(Recording *made) {
+  const Recorder *r = recorder();
+  const NSUInteger n = r->buffers(made->replay, nullptr, 0);
+  std::vector<id> bound(n);
+  r->buffers(made->replay, bound.data(), n);
+  auto *allocator = at::mps::getIMPSAllocator();
+  std::vector<const void *> marked;
+  std::set<const void *> wanted;
+  std::map<size_t, int> sizes;  // the allocator's size of each (its request's), and how many
+  for (id b : bound) {
+    const ssize_t size = allocator->getUnalignedBufferSize((__bridge const void *)b);
+    if (size <= 0) continue;
+    marked.push_back((__bridge const void *)b);
+    wanted.insert((__bridge const void *)b);
+    sizes[(size_t)size]++;
+  }
+  made->bound = marked.size();
+  if (!marked.empty()) allocator->recordEvents(marked);
+  std::vector<at::Tensor> aside;
+  for (auto &size : sizes) {
+    for (uint64_t tries = 0; tries < 65536 && !wanted.empty(); tries++) {
+      const uint64_t placed = window_buffers + device_buffers;
+      at::Tensor t;
+      try {
+        t = at::empty({(int64_t)size.first}, at::TensorOptions().dtype(at::kByte).device(at::kMPS));
+      } catch (const std::exception &) {
+        break;
+      }
+      const void *got = (__bridge const void *)at::native::mps::getMTLBufferStorage(t);
+      if (wanted.erase(got)) made->reserved.push_back(t);
+      else aside.push_back(t);
+      if (window_buffers + device_buffers != placed) break;
+    }
+  }
+  made->marked = made->reserved.size();
+}
+
 // `fn` (a step) recorded as the recorder's one invocation: every MPS command encoded on the MPS stream's
 // queue, from any thread (the autograd engine encodes the backward on its own), after a leading cut; each
 // call's library call persistent (never started while recording), its send buffer published by the commands
@@ -1556,11 +1635,17 @@ static std::shared_ptr<Recording> record(pybind11::function fn) {
   if (failed) std::rethrow_exception(failed);
   TORCH_CHECK(made->replay, "mesh: the step was not recorded (the recorder's reason is on stderr)");
   made->cuts = r->cuts(made->replay);
+  made->gates = r->gates(made->replay);
   NSUInteger cut = 1;
   for (auto &c : made->recorded) cut += c.cut != 0;
   TORCH_CHECK(made->recorded.size() == (size_t)made->ncalls && made->cuts == cut, "mesh: the recording has ", made->cuts, " cuts for ",
               made->ncalls, " calls, ", cut - 1, " of them cut");
+  int gates = 0;
+  if (made->ncalls) check(ncclMeshPersistentGates(made->calls, &gates), nullptr, "ncclMeshPersistentGates");
+  TORCH_CHECK(made->gates == (NSUInteger)gates, "mesh: the recording has ", made->gates, " gates, its calls ", gates);
   made->event = [device() newSharedEvent];
+  made->gate = [device() newSharedEvent];
+  reserve(made.get());
   return made;
 }
 // `steps` replays of a recording, each waited for: its command buffers on the recorder's queue, cut at its
@@ -1586,11 +1671,16 @@ static std::pair<double, double> replay(const std::shared_ptr<Recording> &made, 
         }
         pend(trace.words + index, 1, true);
       }
-  if (made->ncalls) check(ncclMeshPersistentStart(made->calls, (__bridge void *)made->event, value, made->cuts, (uint64_t)steps), nullptr, "ncclMeshPersistentStart");
+  const uint64_t gated = [made->gate signaledValue];
+  if (made->ncalls) {
+    check(ncclMeshPersistentGate(made->calls, (__bridge void *)made->gate, gated), nullptr, "ncclMeshPersistentGate");
+    check(ncclMeshPersistentStart(made->calls, (__bridge void *)made->event, value, made->cuts, (uint64_t)steps), nullptr, "ncclMeshPersistentStart");
+  }
   int failed = 0;
   {
     pybind11::gil_scoped_release release;
-    for (int64_t i = 0; i < steps && !failed; i++) failed = r->run_cut(made->replay, 0, 1, made->event, value + (uint64_t)i * made->cuts);
+    for (int64_t i = 0; i < steps && !failed; i++)
+      failed = r->run_gated(made->replay, 0, 1, made->event, value + (uint64_t)i * made->cuts, made->gate, gated + (uint64_t)i * made->gates);
     // a failed replay: its cuts passed, so the persistent calls run out
     if (failed) made->event.signaledValue = value + (uint64_t)steps * made->cuts;
   }
@@ -1905,7 +1995,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def_property_readonly("cuts", [](const c10d::Recording &r) { return (uint64_t)r.cuts; })
       .def_property_readonly("calls", [](const c10d::Recording &r) { return r.ncalls; })
       .def_property_readonly("fresh_outputs", [](const c10d::Recording &r) { return r.fresh_outputs; })
-      .def_property_readonly("fresh_bytes", [](const c10d::Recording &r) { return r.fresh_bytes; });
+      .def_property_readonly("fresh_bytes", [](const c10d::Recording &r) { return r.fresh_bytes; })
+      .def_property_readonly("gates", [](const c10d::Recording &r) { return (uint64_t)r.gates; })
+      .def_property_readonly("bound", [](const c10d::Recording &r) { return r.bound; })
+      .def_property_readonly("reserved", [](const c10d::Recording &r) { return r.marked; });
   m.def("record", &c10d::record);
   m.def("replay", &c10d::replay);
 }

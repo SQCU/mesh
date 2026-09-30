@@ -3,6 +3,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 /* The GPU side of nccl-mesh.c.  Every buffer a program binds is a Metal buffer over exactly one
@@ -17,12 +18,17 @@
      The network and the GPU meet in mapped memory, as the prepared programs' crossings do (metal-microbench
    metal_recording.m MetalRemoteSpin, MetalPayloadRead, mesh_coherent_store): the bridge stores each
    request's end into its completion word (mesh.h mesh_net_request), which a kernel polls with
-   system-coherent loads and system-scope fences, until 1 s of the host's clock passes with no progress
-   or a count of polls runs out (a timed-out wait sets the communicator's failure word: the call fails as
-   a value, never hangs); what the NIC wrote is loaded system-coherent, and what a later SEND reads a
-   kernel stores system-coherent, so the NIC sees it once the kernel's publication word is seen; its
-   declared buffers order the queue's later work after a wait.  A store that is not reaches another agent only when
-   its command buffer completes: on the M5 a word published mid-command-buffer after 16 MB of plain
+   system-coherent loads and system-scope fences.  That spin is leaky: it polls at most `spin` times (a
+   performance setting, MESH_NCCL_SPIN, never a failure) and then writes not-yet (its flag word stays 0, the
+   call's leaked word 1) and returns; the work that consumes what it waited for is dispatched twice, once
+   predicated on the flag (it runs now) and once after the program's gate predicated on its absence (it runs
+   there instead).  A gate is a command buffer's first command, a wait for an event the host signals once
+   every word the work needs is set (nccl-mesh.c), so no command buffer runs past Metal's watchdog however
+   late the network is: a lone command buffer waiting on a shared event is not killed, one that waits after
+   running kernels is (metal-microbench 45b05d7).  What the NIC wrote is loaded system-coherent, and what a later
+   SEND reads a kernel stores system-coherent, so the NIC sees it once the kernel's publication word is seen;
+   a spin's declared buffers order the queue's later work after it.  A store that is not reaches another agent
+   only when its command buffer completes: on the M5 a word published mid-command-buffer after 16 MB of plain
    stores found 2,041,216 of their 4,194,304 words stale on the host, none with system-coherent stores
    (metal-microbench output_data/handoffs-20260929/probe/coh-m5.jsonl).  coherent(system) needs Metal's
    internals pragma, as the recorder's generated sources begin. */
@@ -37,8 +43,10 @@ static const char *source =
   "// width: a copy's unit (16, 4 or 1 bytes), received: its source the NIC wrote; published: its stores\n"
   "// system-coherent and fenced, a word published after them (a SEND reads them), else plain (the GPU reads them);\n"
   "// fresh: a combine's first operand is buffer 3 at byte offset `other` (the caller's send buffer, read in place),\n"
-  "// not the destination.\n"
-  "struct args { ulong dst, src, n, scalar; uint type, op, nranks, width, received, published, fresh, pad; ulong other; };\n"
+  "// not the destination; pred (0: none): 1 + the byte offset in buffer 4 of the flag word a spin wrote, the kernel\n"
+  "// running only where that flag is `want` (1: the spin saw its words; 0: it did not, the gate passed since).\n"
+  "struct args { ulong dst, src, n, scalar; uint type, op, nranks, width, received, published, fresh, want; ulong other, pred; };\n"
+  "#define PRED(q, at, want) if ((at) && ((*(SYS ulong *)((q) + (at) - 1) != 0ul) != ((want) != 0))) return;\n"
   "\n"
   "// half and the fp8 formats decoded exactly to float, a float rounded to nearest even into them (one\n"
   "// rounding; fp8 saturating as NCCL's __NV_SATFINITE); bfloat16 by its float bits\n"
@@ -263,11 +271,14 @@ static const char *source =
   "  default: EACH OUT(uchar)[i] = uchar(encode(apply(decode(D(uchar)[i], E5M2), decode(R(uchar)[i], E5M2), p.op), E5M2)); break;\\\n"
   "  }\n"
   "kernel void combine(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]],\n"
-  "                    device uchar *x [[buffer(3)]], GRID) {\n"
+  "                    device uchar *x [[buffer(3)]], device uchar *q [[buffer(4)]], GRID) {\n"
+  "  PRED(q, p.pred, p.want)\n"
   "  if (p.published) { COMBINE(O) FENCE; } else { COMBINE(W) }\n"
   "}\n"
   "// dst = src x scalar (a premultiplication: ncclAvg on floating types, PreMulSum), one operation of the type\n"
-  "kernel void premultiply(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
+  "kernel void premultiply(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]],\n"
+  "                        device uchar *q [[buffer(4)]], GRID) {\n"
+  "  PRED(q, p.pred, p.want)\n"
   "  const ulong k = p.scalar;\n"
   "  switch (p.type) {\n"
   "  case 0: EACH O(char)[i] = char(uint(S(char)[i]) * uint(char(k))); break;\n"
@@ -291,7 +302,9 @@ static const char *source =
   "  U u = x < 0 ? U(0) - U(x) : U(x), q = u / n;\n"
   "  return x < 0 ? T(U(0) - q) : T(q);\n"
   "}\n"
-  "kernel void postdivide(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
+  "kernel void postdivide(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]],\n"
+  "                       device uchar *q [[buffer(4)]], GRID) {\n"
+  "  PRED(q, p.pred, p.want)\n"
   "  switch (p.type) {\n"
   "  case 0: EACH W(char)[i] = divide<char, uint>(W(char)[i], p.nranks); break;\n"
   "  case 1: EACH W(uchar)[i] = uchar(uint(W(uchar)[i]) / p.nranks); break;\n"
@@ -306,48 +319,50 @@ static const char *source =
   "// (received), stored system-coherent where published\n"
   "#define COPY(T) EACH { T v = p.received ? ((SYS T *)(s + p.src))[i] : ((device T *)(s + p.src))[i];\\\n"
   "  if (p.published) ((SYS T *)(d + p.dst))[i] = v; else ((device T *)(d + p.dst))[i] = v; }\n"
-  "kernel void copy(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], GRID) {\n"
+  "kernel void copy(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]],\n"
+  "                 device uchar *q [[buffer(4)]], GRID) {\n"
+  "  PRED(q, p.pred, p.want)\n"
   "  if (p.width == 16) COPY(uint4) else if (p.width == 4) COPY(uint) else COPY(uchar)\n"
   "  if (p.published) FENCE;\n"
   "}\n"
-  "// One thread waits for each listed word (a byte offset into buffer 0) to reach its value: a system-coherent\n"
-  "// load about every 0.5 us (a dependent chain of 128 multiply-adds between them: a wait needs microseconds,\n"
-  "// and each load is a trip to the system's coherence point, which the NIC's writes share), a system-scope\n"
-  "// fence every 16 (one before every load slowed a concurrent host copy 3x, one every 64 did not and saw a\n"
-  "// host store within 3 us: metal-microbench output_data/handoffs-20260929/probe/spin*), and one once it is\n"
-  "// seen, before the loads it orders.  Buffer 1 holds the communicator's failure word, its progress word\n"
-  "// and the host's clock (ns), which the host advances as the network moves and as it runs: the wait fails\n"
-  "// once `ns` of the host's clock pass with no progress, or after `polls` polls in all (a backstop under\n"
-  "// Metal's watchdog), setting the failure word; the rest are not waited for.  list: n, polls, ns, then n\n"
-  "// (offset, value) pairs.\n"
-  "kernel void wait(device uchar *w [[buffer(0)]], device uchar *f [[buffer(1)]], constant ulong *list [[buffer(2)]],\n"
-  "                 uint i [[thread_position_in_grid]]) {\n"
+  "// The leaky spin: one thread waits for each listed word (a byte offset into buffer 0) to reach its value: a\n"
+  "// system-coherent load about every 0.5 us (a dependent chain of 128 multiply-adds between them: a wait needs\n"
+  "// microseconds, and each load is a trip to the system's coherence point, which the NIC's writes share), a\n"
+  "// system-scope fence every 16 (one before every load slowed a concurrent host copy 3x, one every 64 did not and\n"
+  "// saw a host store within 3 us: metal-microbench output_data/handoffs-20260929/probe/spin*), and one once it is\n"
+  "// seen, before the loads it orders.  It polls at most `bound` times in all, a performance setting: every word\n"
+  "// seen, its flag word is set (the work predicated on it runs now); else its call's leaked word is set, so the\n"
+  "// call's later spins give up at once, and the work runs after the gate instead.  list: n, bound, flag, leaked\n"
+  "// (byte offsets into buffer 0), then n (offset, value) pairs.\n"
+  "kernel void wait(device uchar *w [[buffer(0)]], constant ulong *list [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
   "  if (i) return;\n"
-  "  SYS ulong *failure = (SYS ulong *)f, *progress = failure + 1, *clock = failure + 2;\n"
-  "  ulong total = 0, seen = *progress, since = *clock;\n"
+  "  SYS ulong *flag = (SYS ulong *)(w + list[2]), *leaked = (SYS ulong *)(w + list[3]);\n"
+  "  ulong total = 0;\n"
   "  float pace = float(list[0]);\n"
-  "  for (ulong k = 0; k < list[0]; k++)\n"
-  "    for (SYS ulong *word = (SYS ulong *)(w + list[3 + 2 * k]);; total++) {\n"
-  "      if (total >= list[1]) { *failure = 1ul; FENCE; return; }\n"
-  "      if (*word >= list[4 + 2 * k]) break;\n"
+  "  bool seen = !*leaked;\n"
+  "  for (ulong k = 0; seen && k < list[0]; k++)\n"
+  "    for (SYS ulong *word = (SYS ulong *)(w + list[4 + 2 * k]);; total++) {\n"
+  "      if (*word >= list[5 + 2 * k]) break;\n"
+  "      if (total >= list[1]) { seen = false; break; }\n"
   "      for (uint a = 0; a < 128; a++) pace = fma(pace, 0.999f, 1e-3f);\n"
   "      if (total & 15) continue;\n"
   "      FENCE;\n"
-  "      if (total & 63) continue;\n"
-  "      const ulong now = *clock, moved = *progress;\n"
-  "      if (moved != seen) { seen = moved; since = now; }\n"
-  "      else if (now > since + list[2]) { *failure = 1ul; FENCE; return; }\n"
   "    }\n"
-  "  if (pace < 0.0f) *failure = 2ul;\n"
+  "  if (pace < 0.0f) seen = false;\n"
+  "  FENCE;\n"
+  "  if (seen) *flag = 1ul; else *leaked = 1ul;\n"
   "  FENCE;\n"
   "}\n"
   "// a counted all-to-all's own rows (nccl-mesh.c counted_copy): a: dst and src (byte offsets into buffers 0 and 1),\n"
   "// the counts' and the landed segments' (into buffers 2 and 3, int64), row bytes, the copy's unit, ranks, this rank,\n"
   "// the caller's landed counts' (into buffer 5; all ones: none), then a rank each: its sent segment's first and length,\n"
   "// its received segment's first and length; the offsets the rows of the ranks before this one (sent: its counts;\n"
-  "// received: their segments, which the NIC wrote); each rank's segment for this one also written to buffer 5\n"
+  "// received: their segments, which the NIC wrote); each rank's segment for this one also written to buffer 5; then\n"
+  "// its predicate (args' pred and want, buffer 6)\n"
   "kernel void counted(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], device uchar *c [[buffer(2)]],\n"
-  "                    device uchar *g [[buffer(3)]], constant ulong *a [[buffer(4)]], device uchar *out [[buffer(5)]], GRID) {\n"
+  "                    device uchar *g [[buffer(3)]], constant ulong *a [[buffer(4)]], device uchar *out [[buffer(5)]],\n"
+  "                    device uchar *q [[buffer(6)]], GRID) {\n"
+  "  PRED(q, a[9 + 4 * a[6]], a[10 + 4 * a[6]])\n"
   "  device const long *counts = (device const long *)(c + a[2]);\n"
   "  volatile coherent(system) device const long *landed = (volatile coherent(system) device const long *)(g + a[3]);\n"
   "  ulong from = 0, to = 0, own = 0;\n"
@@ -374,9 +389,12 @@ static const char *source =
   "  for (ulong k = 0; k < a[1]; k++) ((SYS ulong *)(w + a[0]))[k] = 0ul;\n"
   "  FENCE;\n"
   "}\n"
-  "// a word (a byte offset into buffer 0) set to `value`, system-coherent, after the dispatches before it\n"
-  "kernel void publish(device uchar *w [[buffer(0)]], constant ulong *a [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
+  "// a word (a byte offset into buffer 0) set to `value`, system-coherent, after the dispatches before it; a: the\n"
+  "// offset, the value, then its predicate (args' pred and want, buffer 2)\n"
+  "kernel void publish(device uchar *w [[buffer(0)]], constant ulong *a [[buffer(1)]], device uchar *q [[buffer(2)]],\n"
+  "                    uint i [[thread_position_in_grid]]) {\n"
   "  if (i) return;\n"
+  "  PRED(q, a[2], a[3])\n"
   "  FENCE;\n"
   "  *(SYS ulong *)(w + a[0]) = a[1];\n"
   "  FENCE;\n"
@@ -384,45 +402,17 @@ static const char *source =
 
 enum { KERNELS = 8, KERNEL_COPY = 3, KERNEL_WAIT = 4, KERNEL_PUBLISH = 5, KERNEL_COUNTED = 6, KERNEL_ZERO = 7 };
 /* A kernel's arguments (the source's struct args): byte offsets dst and src into buffers 0 and 1, `other`
-   into buffer 3 (a fresh combine's first operand). */
-struct args { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,published,fresh,pad; uint64_t other; };
-static struct { id<MTLDevice> device; id<MTLComputePipelineState> kernels[KERNELS]; uint64_t bound; } gpu;
+   into buffer 3 (a fresh combine's first operand), `pred` its predicate's flag in buffer 4 (1 + the offset; 0:
+   none) and the flag's value it runs at, `want`. */
+struct args { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,published,fresh,want; uint64_t other,pred; };
+static struct { id<MTLDevice> device; id<MTLComputePipelineState> kernels[KERNELS]; uint64_t spin; } gpu;
 static _Atomic int failed;
 #define HIDDEN __attribute__((visibility("hidden")))
 
-/* The polls one completion word's wait makes in `seconds`: the wait kernel timed once, on a word nobody sets,
-   for 4096 polls, after a 64 MB copy (about 0.83 M polls a second on the M5 either way, but a wait on a word in
-   the window polled about 2.4 M a second during tp.py: its 1 s count ran out after 0.36 s, metal-microbench
-   output_data/handoffs-20260929/t1; so polls are a backstop, not the bound). */
-static uint64_t polls_in(id<MTLCommandQueue> queue,double seconds){
-  @autoreleasepool {
-    id<MTLBuffer> word=[[gpu.device newBufferWithLength:64 options:MTLResourceStorageModeShared] autorelease];
-    id<MTLBuffer> bulk=[[gpu.device newBufferWithLength:(size_t)64<<20 options:MTLResourceStorageModePrivate] autorelease];
-    memset(word.contents,0,64);
-    const uint64_t list[5]={1,4096,UINT64_MAX,0,1};
-    const struct args copy={.dst=0,.src=(uint64_t)32<<20,.n=(uint64_t)2<<20,.width=16};
-    id<MTLCommandBuffer> warm=[queue commandBuffer];
-    id<MTLComputeCommandEncoder> encoder=[warm computeCommandEncoder];
-    [encoder setComputePipelineState:gpu.kernels[KERNEL_COPY]];
-    [encoder setBuffer:bulk offset:0 atIndex:0];
-    [encoder setBuffer:bulk offset:0 atIndex:1];
-    [encoder setBytes:&copy length:sizeof copy atIndex:2];
-    [encoder dispatchThreads:MTLSizeMake(1u<<20,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
-    [encoder endEncoding];
-    id<MTLCommandBuffer> buffer=[queue commandBuffer];
-    encoder=[buffer computeCommandEncoder];
-    [encoder setComputePipelineState:gpu.kernels[KERNEL_WAIT]];
-    [encoder setBuffer:word offset:0 atIndex:0];
-    [encoder setBuffer:word offset:8 atIndex:1];
-    [encoder setBytes:list length:sizeof list atIndex:2];
-    [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
-    [encoder endEncoding];
-    [warm commit];[buffer commit];[buffer waitUntilCompleted];
-    double took=buffer.GPUEndTime-buffer.GPUStartTime;
-    return took>0?(uint64_t)(4096*seconds/took):(uint64_t)1<<22;
-  }
-}
-/* The device and the kernels; 0, or -1 with the reason in `error`. */
+/* The device and the kernels; 0, or -1 with the reason in `error`.  The spin's bound, polls a spin makes in all
+   (MESH_NCCL_SPIN, default 65536: tens of milliseconds, about 0.4 to 1.2 us a poll as measured, metal-microbench
+   output_data/handoffs-20260929/t1): past it the waiting work runs after its gate, so it sets only how long the GPU
+   polls before it parks there. */
 HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
   @autoreleasepool {
     if(gpu.device)return 0;
@@ -443,19 +433,14 @@ HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
       [device release];
       return -1;
     }
+    const char *spin=getenv("MESH_NCCL_SPIN");
+    gpu.spin=spin && strtoull(spin,NULL,10)?strtoull(spin,NULL,10):UINT64_C(65536);
     gpu.device=device;
-    id<MTLCommandQueue> queue=[device newCommandQueue];
-    gpu.bound=polls_in(queue,12.0);
-    [queue release];
     return 0;
   }
 }
 /* A GPU program failed (its command buffer's status an error) since the process started. */
 HIDDEN int nccl_mesh_gpu_failed(void){return atomic_load(&failed);}
-/* The polls a completion word's wait makes in all before it fails: 12 s of polls as timed at attach, about 4 s
-   of a wait's in the window (Metal ends a command buffer that runs past its watchdog); its bound on the
-   network is the host's clock (the wait kernel). */
-HIDDEN uint64_t nccl_mesh_wait_bound(void){return gpu.bound;}
 
 /* A Metal buffer over `bytes` at `pointer`, no copy: the pages holding them (from the page below
    `pointer`), `*offset` the pointer's place in it.  A window allocation's pages are its own. */
@@ -521,8 +506,10 @@ HIDDEN void nccl_mesh_program_signal(void *program,void *event,uint64_t value){
 }
 /* Kernel k (0 combine: dst op= src, or with `other` dst = other op src, other at byte offset `at` of that
    buffer; 1 premultiply: dst = src x scalar, 2 postdivide: dst /= nranks, 3 copy: n units of `width`
-   bytes) over n elements of `type`, dst a byte offset into buffer `to`, src into `from`. */
-static void dispatch(void *program,int k,void *to,void *from,void *other,struct args a){
+   bytes) over n elements of `type`, dst a byte offset into buffer `to`, src into `from`; `pred` (nil: none) the
+   buffer holding its predicate's flag at `a.pred` - 1; at most `grid` threads (0: one an element, at most
+   2^20). */
+static void dispatch(void *program,int k,void *to,void *from,void *other,void *pred,uint64_t grid,struct args a){
   @autoreleasepool {
     id<MTLComputeCommandEncoder> encoder=encoder_of(program);
     [encoder setComputePipelineState:gpu.kernels[k]];
@@ -530,56 +517,65 @@ static void dispatch(void *program,int k,void *to,void *from,void *other,struct 
     [encoder setBuffer:(id<MTLBuffer>)from offset:0 atIndex:1];
     [encoder setBytes:&a length:sizeof a atIndex:2];
     if(k==0)[encoder setBuffer:(id<MTLBuffer>)(other?other:to) offset:0 atIndex:3];
+    [encoder setBuffer:(id<MTLBuffer>)(pred?pred:to) offset:0 atIndex:4];
     NSUInteger width=gpu.kernels[k].maxTotalThreadsPerThreadgroup<256?gpu.kernels[k].maxTotalThreadsPerThreadgroup:256;
-    [encoder dispatchThreads:MTLSizeMake(a.n<(1u<<20)?(NSUInteger)a.n:(1u<<20),1,1) threadsPerThreadgroup:MTLSizeMake(width,1,1)];
+    uint64_t threads=a.n<(1u<<20)?a.n:(1u<<20);
+    if(grid && threads>grid)threads=grid;
+    [encoder dispatchThreads:MTLSizeMake((NSUInteger)threads,1,1) threadsPerThreadgroup:MTLSizeMake(width,1,1)];
   }
 }
 HIDDEN void nccl_mesh_program_kernel(void *program,int k,void *to,uint64_t dst,void *from,uint64_t src,uint64_t n,int type,int op,
-  int nranks,uint64_t scalar,int published,void *other,uint64_t at){
-  if(n)dispatch(program,k,to,from,other,(struct args){.dst=dst,.src=src,.n=n,.scalar=scalar,.type=(uint32_t)type,.op=(uint32_t)op,
-    .nranks=(uint32_t)nranks,.width=1,.published=(uint32_t)(published!=0),.fresh=(uint32_t)(other!=NULL),.other=at});
+  int nranks,uint64_t scalar,int published,void *other,uint64_t at,void *pred,uint64_t pred_at,int want,uint64_t grid){
+  if(n)dispatch(program,k,to,from,other,pred,grid,(struct args){.dst=dst,.src=src,.n=n,.scalar=scalar,.type=(uint32_t)type,.op=(uint32_t)op,
+    .nranks=(uint32_t)nranks,.width=1,.published=(uint32_t)(published!=0),.fresh=(uint32_t)(other!=NULL),.other=at,
+    .pred=pred?pred_at+1:0,.want=(uint32_t)(want!=0)});
 }
 /* `bytes` from offset src of buffer `from` to offset dst of buffer `to`, stored system-coherent where a word
    published after them lets a SEND read them (`published`), loaded system-coherent where the NIC wrote them
-   (`received`): the copy kernel in the widest unit the offsets and length allow. */
-HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received,int published){
+   (`received`): the copy kernel in the widest unit the offsets and length allow; predicated and capped as a
+   kernel's. */
+HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received,int published,
+  void *pred,uint64_t pred_at,int want,uint64_t grid){
   const uint32_t width=!((dst|src|bytes)&15)?16:!((dst|src|bytes)&3)?4:1;
-  if(bytes)dispatch(program,KERNEL_COPY,to,from,NULL,(struct args){.dst=dst,.src=src,.n=bytes/width,.width=width,.received=(uint32_t)(received!=0),
-    .published=(uint32_t)(published!=0)});
+  if(bytes)dispatch(program,KERNEL_COPY,to,from,NULL,pred,grid,(struct args){.dst=dst,.src=src,.n=bytes/width,.width=width,
+    .received=(uint32_t)(received!=0),.published=(uint32_t)(published!=0),.pred=pred?pred_at+1:0,.want=(uint32_t)(want!=0)});
 }
-/* A wait for words of `buffer` to reach their values (`at`: n pairs of a byte offset and a value), after the
-   dispatches before it and before those after it; the communicator's failure word (8 bytes at offset
-   `failure` of `failures`; its progress word and the host's clock the next two) bounds it: `ns` of the
-   host's clock without progress.  The buffers the waited requests read or write (`touch`) are declared
-   used, so Metal orders a later command buffer's work on them after the wait, as it did after an event
-   wait, which stalls the whole queue: it orders a queue's command buffers only where they share a buffer. */
-HIDDEN void nccl_mesh_program_words(void *program,void *buffer,const uint64_t *at,uint32_t n,void *failures,uint64_t failure,uint64_t ns,
+/* The leaky spin for words of `buffer` to reach their values (`at`: n pairs of a byte offset and a value), after
+   the dispatches before it and before those after it: at most the spin's bound of polls, then its flag word (at
+   byte offset `flag`) set where it saw them all, else its call's leaked word (`leaked`).  The buffers the waited
+   requests read or write (`touch`) are declared used, so Metal orders a later command buffer's work on them after
+   the spin, as it did after an event wait: it orders a queue's command buffers only where they share a buffer. */
+HIDDEN void nccl_mesh_program_spin(void *program,void *buffer,const uint64_t *at,uint32_t n,uint64_t flag,uint64_t leaked,
   void *const *touch,int ntouch){
-  for(uint32_t done=0;done<n;){
-    @autoreleasepool {
-      uint64_t list[3+2*240];
-      uint32_t take=n-done<240?n-done:240;
-      list[0]=take;list[1]=gpu.bound;list[2]=ns;
-      memcpy(list+3,at+2*done,2*take*sizeof *at);
-      id<MTLComputeCommandEncoder> encoder=encoder_of(program);
-      for(int t=0;t<ntouch;t++)if(touch[t])[encoder useResource:(id<MTLBuffer>)touch[t] usage:MTLResourceUsageRead|MTLResourceUsageWrite];
-      [encoder setComputePipelineState:gpu.kernels[KERNEL_WAIT]];
-      [encoder setBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:0];
-      [encoder setBuffer:(id<MTLBuffer>)failures offset:failure atIndex:1];
-      [encoder setBytes:list length:(3+2*take)*sizeof *list atIndex:2];
-      [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
-      done+=take;
+  @autoreleasepool {
+    const size_t bytes=(4+2*(size_t)n)*sizeof(uint64_t);
+    uint64_t *list=malloc(bytes);
+    if(!list){atomic_store(&failed,1);return;}
+    list[0]=n;list[1]=gpu.spin;list[2]=flag;list[3]=leaked;
+    memcpy(list+4,at,2*(size_t)n*sizeof *at);
+    id<MTLComputeCommandEncoder> encoder=encoder_of(program);
+    for(int t=0;t<ntouch;t++)if(touch[t])[encoder useResource:(id<MTLBuffer>)touch[t] usage:MTLResourceUsageRead|MTLResourceUsageWrite];
+    [encoder setComputePipelineState:gpu.kernels[KERNEL_WAIT]];
+    [encoder setBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:0];
+    if(bytes<=4096)[encoder setBytes:list length:bytes atIndex:1];
+    else{
+      id<MTLBuffer> held=[[gpu.device newBufferWithBytes:list length:bytes options:MTLResourceStorageModeShared] autorelease];
+      [encoder setBuffer:held offset:0 atIndex:1];
     }
+    [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
+    free(list);
   }
 }
-/* The word at byte offset `at` of `buffer` set to `value`, system-coherent, after the dispatches before it. */
-HIDDEN void nccl_mesh_program_publish(void *program,void *buffer,uint64_t at,uint64_t value){
+/* The word at byte offset `at` of `buffer` set to `value`, system-coherent, after the dispatches before it;
+   predicated as a kernel is. */
+HIDDEN void nccl_mesh_program_publish(void *program,void *buffer,uint64_t at,uint64_t value,void *pred,uint64_t pred_at,int want){
   @autoreleasepool {
-    const uint64_t a[2]={at,value};
+    const uint64_t a[4]={at,value,pred?pred_at+1:0,(uint64_t)(want!=0)};
     id<MTLComputeCommandEncoder> encoder=encoder_of(program);
     [encoder setComputePipelineState:gpu.kernels[KERNEL_PUBLISH]];
     [encoder setBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:0];
     [encoder setBytes:a length:sizeof a atIndex:1];
+    [encoder setBuffer:(id<MTLBuffer>)(pred?pred:buffer) offset:0 atIndex:2];
     [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
   }
 }
@@ -595,9 +591,10 @@ HIDDEN void nccl_mesh_program_zero(void *program,void *buffer,uint64_t at,uint64
     [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
   }
 }
-/* The counted kernel (a counted all-to-all's own rows): `a` its arguments (na of them), over `units` copy units
-   at most. */
-HIDDEN void nccl_mesh_program_counted(void *program,void *to,void *from,void *counts,void *got,void *landed,const uint64_t *a,uint32_t na,uint64_t units){
+/* The counted kernel (a counted all-to-all's own rows): `a` its arguments (na of them, its predicate's two
+   appended), over `units` copy units at most (and `grid` threads at most, 0: 2^20). */
+HIDDEN void nccl_mesh_program_counted(void *program,void *to,void *from,void *counts,void *got,void *landed,const uint64_t *a,uint32_t na,uint64_t units,
+  void *pred,uint64_t grid){
   if(!units)return;
   @autoreleasepool {
     id<MTLComputeCommandEncoder> encoder=encoder_of(program);
@@ -608,7 +605,10 @@ HIDDEN void nccl_mesh_program_counted(void *program,void *to,void *from,void *co
     [encoder setBuffer:(id<MTLBuffer>)got offset:0 atIndex:3];
     [encoder setBytes:a length:na*sizeof *a atIndex:4];
     [encoder setBuffer:(id<MTLBuffer>)landed offset:0 atIndex:5];
-    [encoder dispatchThreads:MTLSizeMake(units<(1u<<20)?(NSUInteger)units:(1u<<20),1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
+    [encoder setBuffer:(id<MTLBuffer>)(pred?pred:got) offset:0 atIndex:6];
+    uint64_t threads=units<(1u<<20)?units:(1u<<20);
+    if(grid && threads>grid)threads=grid;
+    [encoder dispatchThreads:MTLSizeMake((NSUInteger)threads,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
   }
 }
 /* `done(argument, failed)` once the GPU has run the command buffer (a failed one marks the process's
@@ -627,4 +627,13 @@ HIDDEN void nccl_mesh_program_commit(void *program,void (*done)(void *,int),void
   nccl_mesh_program_handler(program,done,argument);
   [(id<MTLCommandBuffer>)program commit];
   [(id<MTLCommandBuffer>)program release];
+}
+/* A gate in the library's own program: `program` committed (`done` as above), and a new command buffer on `queue`
+   whose first command waits for `event` to reach `value` (the host signals it once the words the work after it
+   needs are set), returned. */
+HIDDEN void *nccl_mesh_program_gate(void *program,void *queue,void *event,uint64_t value,void (*done)(void *,int),void *argument){
+  nccl_mesh_program_commit(program,done,argument);
+  void *next=nccl_mesh_program_begin(queue);
+  if(next)[(id<MTLCommandBuffer>)next encodeWaitForEvent:(id<MTLSharedEvent>)event value:value];
+  return next;
 }
