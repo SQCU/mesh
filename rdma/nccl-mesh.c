@@ -915,6 +915,7 @@ static ncclResult_t run_counted(struct ncclComm *c,struct call *k,struct item *i
     atomic_store_explicit((_Atomic uint64_t *)k->arrived,1,memory_order_release);
     uint64_t sent=0;
     for(int q=0;q<n;q++)sent+=rows[q];
+    count(k,GPU_COPY,rows[me]*row);  /* this rank's own rows: the GPU's counted copy */
     if(total>k->capacity || sent>k->rows)
       status=FAIL(c,ncclInvalidUsage,"a counted all-to-all: its counts send %llu rows of %llu and receive %llu, capacity %llu",(unsigned long long)sent,
                   (unsigned long long)k->rows,(unsigned long long)total,(unsigned long long)k->capacity);
