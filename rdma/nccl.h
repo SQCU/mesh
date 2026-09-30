@@ -28,8 +28,10 @@
    (epoch, call); a call keeps its plan whatever the table does while it runs (the next call plans on the new
    contents), on the links up, or where they carry none of its algorithms on the links stated (a lost link's
    session resumes, and the call waits for it).  Nothing fails a call in time: its results are a function of
-   its inputs, and how late the network or a peer is changes only when it ends.  A call fails where its
-   bridge observed a failure (a peer's bridge or process exited), and a failed call revokes the communicator
+   its inputs, and how late the network or a peer is changes only when it ends; a bridge stopped or
+   restarted with its clients attached is such a lateness (its successor resumes their transfers).  A call
+   fails where its bridge observed a failure (a peer's process exited, or its bridge left the mesh), and a
+   failed call revokes the communicator
    (ULFM's MPI_Comm_revoke): the calls in flight fail, its connections are closed, so each peer's calls
    with this rank fail too, and it makes no call until every rank has called ncclMeshCommAgree, which
    agrees on the first failed call and makes the connections again.  Calls run as their plan's SEND /
@@ -833,8 +835,10 @@ typedef struct { ncclConfig_t base; void* links; const int* nodes; } ncclMeshCon
    0: none), *epoch: this rank's link-table epoch whose map every rank holds.  After a failure, or
    where a rank's connections are not whole, every rank closes its connections and takes the
    agreement's; the memory a failed call received into is held until the bridge has vacated its old
-   connections; the async error is cleared and the count starts again.  Every rank must answer by
-   MESH_NCCL_TIMEOUT (a rank that does not fails the agreement: there is no shrink). */
+   connections; the async error is cleared and the count starts again.  A rank whose bridge left the mesh
+   as this rank's bridge sees it (mesh-net.h mesh_net_departed) does not vote; every other rank must answer
+   by MESH_NCCL_TIMEOUT (a rank that does not fails the agreement).  The communicator keeps its ranks: a
+   caller plans its next work on the ranks that stay. */
 ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t* failed, uint64_t* epoch);
 /* MPI_Allgatherv and MPI_Reduce_scatter: rank r's segment is counts[r] elements (counts: nranks
    entries, the same on every rank, each at least 1), the segments packed in rank order, so rank r's

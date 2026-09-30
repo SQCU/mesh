@@ -24,7 +24,9 @@ static inline uint32_t mesh_transfer_active(const struct mesh_transfer *transfer
   uint32_t end=transfer->end<invocations?transfer->end:invocations;
   return transfer->stride?(end>transfer->begin?end-transfer->begin:0):(transfer->begin<invocations?1:0);
 }
-enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
+/* A link's (and a region's port's) phase; MESH_LEFT: the link's peer bridge left the mesh (its LEAVE), or this node's
+   bridge did, and no bridge has paired on the link since (mesh-flow.c net_leave). */
+enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED, MESH_LEFT };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
@@ -99,7 +101,9 @@ struct hdr {
    link serves it (mesh-flow.c net_scan).  A comm is one direction of one connection (a listen, a send or
    a receive end), its requests a ring by sequence, posted by the client and completed by the bridge.
    Communicator memory is the region's registered window, used in place: a receive lands only in memory
-   registered before its queue pair was set up (mesh-flow.c net_configure), which the window is. */
+   registered before its queue pair was set up (mesh-flow.c net_configure), which the window is.  The tables, and
+   the bridge's own state of them (<region>.keep), outlive the bridge's process: a bridge stopped with clients
+   attached leaves them for the next, which resumes their transfers (mesh-flow.c net_keep). */
 #define MESH_NET_CLIENTS 32
 #define MESH_NET_COMMS 256
 #define MESH_NET_REQUESTS 64

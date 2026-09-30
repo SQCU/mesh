@@ -114,7 +114,9 @@ static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
     (unsigned long long)((uintptr_t)wire->data>>32),(unsigned long long)((uintptr_t)wire->data&(MESH_BANK-1)));
   return 0;
 }
-static const char *shm; static _Atomic sig_atomic_t stop;
+/* The region is removed at exit, unless kept for the next bridge (`keeping`: mesh-flow.c, a bridge stopped with
+   clients attached). */
+static const char *shm; static int keeping; static _Atomic sig_atomic_t stop;
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#programcopy */
 static int down_pair(struct mesh_verbs *provider){
@@ -143,7 +145,7 @@ static int down_device(struct mesh_device *device){
   if(device->context){if(ibv_close_device(device->context))return 0;device->context=NULL;}
   return 1;
 }
-static void down(void){ if(shm)shm_unlink(shm); }
+static void down(void){ if(shm && !keeping)shm_unlink(shm); }
 static void die(const char*m){ say("%s\n",m); exit(1); }
 static void onsig(int s){ (void)s; stop++; }
 

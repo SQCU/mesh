@@ -16,7 +16,10 @@
    (mesh.h mesh_net_comm) this process claimed or accepted; a request is its comm's ring slot; the
    bridge's session thread of the comm's link serves both (mesh-flow.c).  Memory is the region's
    registered window: mesh_net_mem_alloc claims its pages, and regMr names the device's registered
-   regions they lie in, so data lands in place and nothing here waits on the wire. */
+   regions they lie in, so data lands in place and nothing here waits on the wire.  The bridge's absence fails
+   nothing: a request stays not yet done while no bridge serves the region, and the next bridge on it resumes it
+   (mesh-flow.c net_keep); a request fails only where a bridge ended it so (a peer that exited, closed or left
+   the mesh). */
 #define NET_PENDING 256
 #define NET_WAIT_NS UINT64_C(60000000000)
 _Static_assert(sizeof(struct mesh_net_handle)<=MESH_NET_HANDLE_BYTES,"handle");
@@ -35,7 +38,6 @@ static struct {
   int inits;
   struct hdr *m; size_t length; uint64_t owner; uint32_t client;
   char **names;
-  uint64_t checked;
 } net = {.lock=PTHREAD_MUTEX_INITIALIZER};
 static _Thread_local int net_errno;
 
@@ -50,19 +52,10 @@ static int net_result(int error){
   }
 }
 int mesh_net_error(void){return net_errno;}
-static uint64_t net_now(void){return clock_gettime_nsec_np(CLOCK_MONOTONIC);}
 static void net_ring(uint32_t link){
   struct mesh_net_link *l=mesh_net_links(net.m)+link;
   atomic_fetch_add_explicit(&l->doorbell,1,memory_order_release);
   os_sync_wake_by_address_any(&l->doorbell,sizeof l->doorbell,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
-}
-/* The bridge gone is every pending request's failure; looked at no more often than every 100 ms. */
-static int net_bridge_gone(void){
-  uint64_t now=net_now();
-  if(now-net.checked<100000000)return 0;
-  net.checked=now;
-  pid_t pid=(pid_t)atomic_load_explicit(&net.m->bridge_pid,memory_order_relaxed);
-  return !pid || (kill(pid,0) && errno==ESRCH);
 }
 static struct mesh_net_comm *net_slot(struct net_comm_handle *c){return mesh_net_comms(net.m)+c->index;}
 
@@ -196,7 +189,7 @@ int mesh_net_connect(void *ctx,int dev,void *handle,void **sendComm,void **sendD
     pending->comm->kind=MESH_NET_SEND;*sendComm=pending->comm;pending->comm=NULL;
     return MESH_NET_SUCCESS;
   }
-  if(state==MESH_NET_FAILED || net_bridge_gone()){
+  if(state==MESH_NET_FAILED){
     int error=atomic_load_explicit(&comm->error,memory_order_relaxed);
     atomic_store_explicit(&comm->state,MESH_NET_CLOSING,memory_order_release);net_ring(pending->comm->link);
     free(pending->comm);pending->comm=NULL;
@@ -223,7 +216,6 @@ int mesh_net_accept(void *listenComm,void **recvComm,void **recvDevComm){
     *recvComm=c;
     return MESH_NET_SUCCESS;
   }
-  if(net_bridge_gone())return net_result(ECONNRESET);
   return MESH_NET_SUCCESS;
 }
 
@@ -326,7 +318,6 @@ int mesh_net_test(void *request,int *done,int *sizes){
     *done=1;
     return net_result(error);
   }
-  if(net_bridge_gone())return net_result(ECONNRESET);
   return MESH_NET_SUCCESS;
 }
 static int net_close(void *handle){
@@ -444,9 +435,18 @@ uint64_t mesh_net_slot(void *comm){
   struct net_comm_handle *c=comm;
   return ((uint64_t)c->index<<32)|c->generation;
 }
+/* Whether link `link`'s peer left the mesh, or this node's bridge did (mesh.h MESH_LEFT): its session's queue pairs
+   are down and no bridge has paired on it since. */
+static int net_left(uint32_t link){
+  return link<net.m->links && atomic_load_explicit(&mesh_net_links(net.m)[link].phase,memory_order_acquire)==MESH_LEFT;
+}
 int mesh_net_vacated(uint64_t slot){
   struct mesh_net_comm *comm=mesh_net_comms(net.m)+(uint32_t)(slot>>32);
-  return atomic_load_explicit(&comm->state,memory_order_acquire)==MESH_NET_FREE || comm->generation!=(uint32_t)slot;
+  return atomic_load_explicit(&comm->state,memory_order_acquire)==MESH_NET_FREE || comm->generation!=(uint32_t)slot || net_left(comm->link);
+}
+int mesh_net_departed(uint32_t node){
+  for(uint32_t i=0;net.m && i<net.m->links;i++)if(mesh_links(net.m)[i].peer==node && net_left(i))return 1;
+  return 0;
 }
 
 const struct mesh_net_v12 mesh_net_plugin={"mesh",mesh_net_init,mesh_net_devices,mesh_net_get_properties,mesh_net_listen,

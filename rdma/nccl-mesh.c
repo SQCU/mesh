@@ -1666,8 +1666,9 @@ static uint64_t before(const struct call *k,int rank){
 static void drain(struct ncclComm *c);
 /* The snapshot a call plans on: the table read again once its epoch has moved, and the maps made again.  A
    call in flight keeps the plan it was made with whatever the table does meanwhile; the next plans on the new
-   contents.  A revoked communicator makes no call; a connection its bridge failed (the peer's bridge or process
-   exited: a link lost only suspends it, and its session resumes), or a rank no stated link reaches, fails the
+   contents.  A revoked communicator makes no call; a connection its bridge failed (the peer's process exited, or
+   its bridge left the mesh: a link lost or a bridge restarted only suspends it, and its session resumes), or a
+   rank no stated link reaches, fails the
    call (and revokes the communicator: ncclGroupEnd), and ncclMeshCommAgree makes the connections again.  The
    connections are checked once the epoch moves and after an agreement, not every call: a call's hot path is the
    epoch word; a connection failed with no move fails its call on the worker (revoking) instead. */
@@ -1683,11 +1684,12 @@ static ncclResult_t refresh(struct ncclComm *c){
     maps(c);
     c->alive=0;
   }
-  /* a connection its bridge failed (its peer's bridge or process exited: a session that resumes keeps it) */
+  /* a connection its bridge failed (its peer's process exited, or its bridge left the mesh: a session that resumes
+     keeps it) */
   for(int p=0;!c->alive && p<c->nranks;p++)
     for(int ch=0;ch<CHANNELS;ch++)if((c->peers[p].send[ch] && !mesh_net_alive(c->peers[p].send[ch])) ||
                                      (c->peers[p].recv[ch] && !mesh_net_alive(c->peers[p].recv[ch])))
-      return FAIL(c,ncclRemoteError,"the connection with rank %d is lost: its peer's bridge or process ended it (ncclMeshCommAgree makes it again)",p);
+      return FAIL(c,ncclRemoteError,"the connection with rank %d is lost: its peer's process ended it or its bridge left the mesh (ncclMeshCommAgree makes it again)",p);
   c->alive=1;
   return ncclSuccess;
 }
@@ -3279,14 +3281,18 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm,uint64_t *failed,uint64_t *epoch)
   pthread_mutex_unlock(&c->lock);
   const uint64_t deadline=deadline_after(),key=mix(c->key^mix(++c->agreements));
   const size_t slot=slice((size_t)n*sizeof(struct vote));
-  unsigned char *want=calloc((size_t)n,1),*buffers=NULL;
+  unsigned char *want=calloc((size_t)n,1),*gone=calloc((size_t)n,1),*buffers=NULL;
   struct peer *fresh=calloc((size_t)n,sizeof *fresh);
   struct vote *votes=calloc((size_t)n,sizeof *votes);
-  ncclResult_t status=want && fresh && votes?ncclSuccess:FAIL(c,ncclSystemError,"allocation");
-  /* the flood's neighbours: the ranks the stated map links to this one, up or not */
+  ncclResult_t status=want && gone && fresh && votes?ncclSuccess:FAIL(c,ncclSystemError,"allocation");
+  /* the flood's neighbours: the ranks the stated map links to this one, up or not, but those whose bridge left the
+     mesh as this node sees it (mesh_net_departed: a membership change; the agreement is among the ranks that stay) */
   c->epoch=mesh_link_table_read(c->table,c->seen);
-  for(int p=0;!status && p<n;p++)
-    want[p]=p!=c->rank && mesh_link_at(c->seen,c->nodes[c->rank],c->nodes[p])->stated && mesh_link_at(c->seen,c->nodes[p],c->nodes[c->rank])->stated;
+  for(int p=0;!status && p<n;p++){
+    gone[p]=p!=c->rank && mesh_net_departed(c->nodes[p]);
+    want[p]=p!=c->rank && !gone[p] && mesh_link_at(c->seen,c->nodes[c->rank],c->nodes[p])->stated &&
+      mesh_link_at(c->seen,c->nodes[p],c->nodes[c->rank])->stated;
+  }
   if(!status && n>1)status=connect_ranks(c,key,want,fresh,deadline);
   if(!status)status=span_alloc(slot*(size_t)(n+1),&buffers,NULL);
   /* the votes flooded n - 1 rounds; again, once the tables move, until every rank's map is the same */
@@ -3300,6 +3306,7 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm,uint64_t *failed,uint64_t *epoch)
     for(int round=1;round<n && !status;round++)status=flood(c,fresh,want,votes,buffers,slot,deadline);
     same=1;
     for(int r=0;!status && r<n;r++){
+      if(gone[r])continue;
       if(!votes[r].known)status=FAIL(c,ncclRemoteError,"ncclMeshCommAgree: rank %d's vote reached this rank by no stated link",r);
       same&=votes[r].map==votes[c->rank].map;
     }
@@ -3330,7 +3337,7 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm,uint64_t *failed,uint64_t *epoch)
   c->agreeing=0;
   pthread_mutex_unlock(&c->lock);
   if(!status){*failed=first;*epoch=c->epoch;}
-  free(want);free(fresh);free(votes);
+  free(want);free(gone);free(fresh);free(votes);
   return status;
 }
 ncclResult_t ncclMeshGroupEpochs(uint64_t *epochs,int capacity,int *count){

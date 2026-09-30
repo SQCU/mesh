@@ -118,7 +118,11 @@ void mesh_net_stats_shape(uint64_t *evaluations,uint32_t *lag,size_t *entry);
 /* Whether a send or receive comm is still connected: its session not lost. */
 int mesh_net_alive(void *comm);
 /* A comm's slot in the region's table (its index and generation), taken before it is closed, and
-   whether the bridge has vacated that slot since (nothing of the comm on the wire any more). */
+   whether the bridge has vacated that slot since, or its link's peer or this node's bridge left the mesh (nothing
+   of the comm on the wire any more). */
 uint64_t mesh_net_slot(void *comm);
 int mesh_net_vacated(uint64_t slot);
+/* Whether node `node`'s bridge left the mesh as this node sees it: its LEAVE heard on a link to it, or this node's
+   bridge left (mesh.h MESH_LEFT); a membership change, where a bridge's stop or restart is none. */
+int mesh_net_departed(uint32_t node);
 #endif
