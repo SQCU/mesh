@@ -900,15 +900,30 @@ ncclResult_t ncclMeshEncodeCopies(void* commandBuffer, int n, void* const* dst, 
    2021, §6.12]: between ncclMeshPersistentBegin and ncclMeshPersistentEnd the process's calls are planned,
    placed and their GPU work kept for ncclMeshStreamEncodeWait as ever (so a recording of the caller's
    command buffers takes it: metal-microbench metal_recording.h), but no worker starts them; each must defer
-   (ncclMeshStreamDefer) and be a collective of one communicator.  End gives them as one handle, `calls` of
-   them in issue order.  ncclMeshPersistentStart runs them `count` times: call k of iteration i once `event`
-   (an id<MTLSharedEvent>) reaches value + i * stride + k + 1 (the command buffer that ends with the call's
-   inputs complete: plain stores reach the NIC then), its completion words zeroed first, then its transfers
-   as the call's own; ncclMeshPersistentWait waits for the last, and gives the first failure (a failed call
-   revokes the communicator, and every later one fails at its start, setting its words, so the GPU work
-   waiting on them goes on); the communicator makes no other call meanwhile.  ncclMeshPersistentFree
-   releases their allocations. */
+   (ncclMeshStreamDefer) and be a collective of one communicator.  ncclMeshPersistentNext, before a call,
+   declares its receive buffer untouched by the caller's work before it in each iteration (`fresh`) and, where
+   `ready` is not NULL, its send buffer's `bytes` published by the caller's GPU work in ranges of `range` bytes:
+   range r's word ready[r] (8 bytes in the window, stored system-coherent) counts up by one each iteration once
+   the range is written.  ncclMeshPersistentCut then says whether the last group needs a cut of its own (1: its
+   send buffer is not published in ranges, or a receive of its plan may land only once its part starts), and how
+   many persistent groups were made since the last ncclMeshPersistentCut.  End
+   gives the calls as one handle, `calls` of them in issue order.  ncclMeshPersistentStart runs them `count`
+   times: iteration i once `event` (an id<MTLSharedEvent>) reaches value + i * stride + 1 (the caller's leading
+   cut: the iteration before it done), each call's requests then posted ahead where its receives may land
+   (a REDUCE step's piece, or a fresh or own operand's range no send of it reads) and its isends held
+   (mesh-net.h mesh_net_isend_held: announced and granted before their bytes are ready, so their first byte
+   waits for no request and credit exchange); call k with a cut starts once `event` reaches value + i * stride
+   + c + 1 (c: its cut's place among the cuts, from 1: the command buffer that ends with its inputs complete,
+   as plain stores reach the NIC then), releasing its isends; without one, once the call before it is done,
+   each isend released as the ranges it reads are published.  Its GPU work zeroes its completion words once it
+   has waited for them all.  ncclMeshPersistentWait waits for the last, and gives the first failure (a failed
+   call revokes the communicator, and every later one fails at its start, setting its words, so the GPU work
+   waiting on them goes on); the communicator makes no other call meanwhile.  ncclMeshPersistentCounts gives
+   each call's counts of its last iteration (ncclMeshGroupCounts' terms), ncclMeshPersistentFree releases
+   their allocations. */
 ncclResult_t ncclMeshPersistentBegin(void);
+ncclResult_t ncclMeshPersistentNext(const uint64_t* ready, uint64_t range, uint64_t bytes, int fresh);
+ncclResult_t ncclMeshPersistentCut(int* cut, int* groups);
 ncclResult_t ncclMeshPersistentEnd(void** handle, int* calls);
 ncclResult_t ncclMeshPersistentStart(void* handle, void* event, uint64_t value, uint64_t stride, uint64_t count);
 ncclResult_t ncclMeshPersistentWait(void* handle);
@@ -931,10 +946,12 @@ ncclResult_t ncclMeshGroupEpochs(uint64_t* epochs, int capacity, int* count);
    word), and the command buffers the library commits; the times a communicator's worker woke from its
    condition variable to start a part (it spins for WORKER_SPIN_NS after its last part before it
    sleeps), and the Metal buffers the library made (an allocation's, where no retired one of its size
-   was kept). */
+   was kept); the isends a collective posted or released once their bytes were ready, and of them those
+   whose receiver had granted no chunk by then (the first byte waits for a request and credit exchange);
+   the time (ns) the worker saw a persistent call's send buffer ready (its cut, or its first range). */
 typedef struct {
   uint64_t cpuCopyBytes, gpuCopyBytes, gpuKernels, hostWaits, inputWaits, sentBytes, receivedBytes, startNs, endNs, arrivedNs;
-  uint64_t gpuEventWaits, gpuWordWaits, hostWordWaits, commits, wakeups, buffers;
+  uint64_t gpuEventWaits, gpuWordWaits, hostWordWaits, commits, wakeups, buffers, sends, grantWaits, readyNs;
 } ncclMeshCounts_t;
 /* The process's counts so far (the times 0). */
 ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t* counts);
@@ -948,6 +965,8 @@ ncclResult_t ncclMeshGroupCounts(ncclMeshCounts_t* counts, int capacity, int* co
 ncclResult_t ncclMeshGroupTally(void** tally);
 ncclResult_t ncclMeshTallyCounts(void* tally, ncclMeshCounts_t* counts, int capacity, int* count);
 ncclResult_t ncclMeshTallyRelease(void* tally);
+/* A persistent handle's calls' counts of their last iteration (ncclMeshPersistentBegin), in issue order. */
+ncclResult_t ncclMeshPersistentCounts(void* handle, ncclMeshCounts_t* counts, int capacity, int* count);
 
 /* The window's allocations (above).  The Metal buffer (id<MTLBuffer>) over the allocation holding
    `ptr`, and ptr's offset in it: the library's for as long as the allocation lives. */
