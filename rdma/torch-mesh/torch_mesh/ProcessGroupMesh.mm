@@ -370,25 +370,28 @@ static id<MTLBuffer> host_pages(void *pointer, size_t bytes, size_t *offset) {
 // transfers (the combines, the stream's completion) and the Work's wait encodes it on the MPS stream.
 struct StreamPool {
   std::mutex lock;
-  std::vector<cudaStream_t> all, idle;
+  std::vector<cudaStream_t> all, idle[2];  // idle[defer]: a stream's mode is set once, when it is made
+  std::map<cudaStream_t, bool> deferred;
   cudaStream_t acquire(bool defer) {
     std::lock_guard<std::mutex> guard(lock);
     cudaStream_t s = nullptr;
-    for (size_t i = 0; i < idle.size() && !s; i++)
-      if (ncclMeshStreamQuery(idle[i]) == ncclSuccess) {
-        s = idle[i];
-        idle.erase(idle.begin() + (long)i);
+    auto &free = idle[defer];
+    for (size_t i = 0; i < free.size() && !s; i++)
+      if (ncclMeshStreamQuery(free[i]) == ncclSuccess) {
+        s = free[i];
+        free.erase(free.begin() + (long)i);
       }
     if (!s) {
       check(ncclMeshStreamCreate(&s, nullptr), nullptr, "ncclMeshStreamCreate");
+      check(ncclMeshStreamDefer(s, defer), nullptr, "ncclMeshStreamDefer");
       all.push_back(s);
+      deferred[s] = defer;
     }
-    check(ncclMeshStreamDefer(s, defer), nullptr, "ncclMeshStreamDefer");
     return s;
   }
   void release(cudaStream_t s) {
     std::lock_guard<std::mutex> guard(lock);
-    idle.push_back(s);
+    idle[deferred[s]].push_back(s);
   }
   void synchronize() {
     std::lock_guard<std::mutex> guard(lock);
