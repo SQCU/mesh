@@ -596,7 +596,8 @@ static void *link_run(void *argument){
    ends, and for each chunk posts its RECV first, on the queue pair of the chunk before it while that
    queue has the frames, else on one that has, and only then grants it (CREDIT: the chunk's offset,
    length and queue pair); the sender SENDs exactly the granted chunks in the order granted, each on its
-   queue pair as that one has the frames.  The queue pairs' RECVs together hold more
+   queue pair, and a chunk on another queue pair than the SENDs still outstanding only once they have
+   completed, so the wire carries the chunks in grant order.  The queue pairs' RECVs together hold more
    than one queue's frames (4095), so a message of more (tp.py's 16 MiB all-reduce: 4096) is posted and
    granted whole before its first byte.  A held isend (mesh.h
    MESH_NET_HELD) is announced before its bytes are ready, so its chunks are posted and granted ahead and
@@ -655,18 +656,18 @@ static struct net_comm net_comms[MESH_NET_COMMS];
 /* A granted chunk to SEND on its queue pair (comm NONE: a grant nobody holds, filled from the discard
    buffer), a matched message to receive (the ends' cut parameters e1/p1, e2/p2; the sender's comm and
    request to grant), and a posted RECV (its queue pair; landed, its completion taken). */
-struct net_send { uint32_t comm,generation,slot,mr,queue,done; uint64_t offset,length; };
+struct net_send { uint32_t comm,generation,slot,mr,queue; uint64_t offset,length; };
 struct net_transfer { uint32_t comm,generation,slot,mr,peer,peer_generation,held; uint64_t sequence,size,offset,cursor,landed,e1,p1,e2,p2; };
 struct net_chunk { uint32_t transfer,frames,queue,landed; uint64_t length; struct ibv_sge span; };
-/* The SENDs posted and not yet retired are send_head..send_post, the RECVs receive_chunk_head..tail, each in
-   posting order and at most its completion queue's entries less one (send_requests, receive_requests),
-   each queue pair's frames of them within send_capacity and receive_capacity (queue_sent, queue_frames);
-   the next RECV is posted on receive_queue while it has the frames. */
+/* The SENDs outstanding are all on `send_queue` (send_posted less send_retired: its frames, within one queue
+   pair's send_capacity); the RECVs posted and not yet taken are receive_chunk_head..tail in posting order
+   (at most receive_requests, the completion queue's entries less one), each queue pair's frames of them
+   within receive_capacity, the next posted on receive_queue while it has the frames. */
 struct net_session {
   struct hdr *M;uint32_t index;struct mesh_verbs provider;struct mesh_net_link *counts;
   char service[16];pthread_t thread;int started,control,failed;
-  uint64_t chunk;uint32_t send_capacity,receive_capacity,receive_outstanding,chunk_slots;
-  uint32_t send_requests,receive_requests,receive_queue,queue_sent[NET_QUEUES],queue_frames[NET_QUEUES];
+  uint64_t chunk,send_posted,send_retired;uint32_t send_capacity,receive_capacity,receive_outstanding,chunk_slots;
+  uint32_t send_queue,receive_queue,receive_requests,queue_frames[NET_QUEUES];
   struct net_send *sends;uint32_t send_head,send_post,send_tail;
   struct net_transfer *receives;uint32_t receive_head,receive_post,receive_tail;
   struct net_chunk *receive_chunks;uint32_t receive_chunk_head,receive_chunk_tail;
@@ -1145,8 +1146,8 @@ static int net_held(struct net_session *s,const struct net_send *chunk){
   if(!comm || atomic_load_explicit(&comm->state,memory_order_acquire)!=MESH_NET_SEND)return 0;
   return atomic_load_explicit(&comm->requests[chunk->slot].op,memory_order_acquire)==MESH_NET_HELD;
 }
-/* Granted chunks are SENT in grant order, each on its queue pair while it has the frames (a held one stops
-   them); matched
+/* Granted chunks are SENT in grant order, each on its queue pair while it has the frames and, on another
+   queue pair than the SENDs outstanding, once those have completed (a held one stops them); matched
    messages' chunks are posted as RECVs in match order on a queue pair with the frames (the last one's while
    it has them), each granted once posted, naming it. */
 static int net_post(struct net_session *s){
@@ -1155,16 +1156,16 @@ static int net_post(struct net_session *s){
     struct net_send *chunk=s->sends+s->send_post%NET_SENDS;
     if(net_held(s,chunk)){s->send_held=1;break;}
     uint32_t frames=(uint32_t)((chunk->length+4095)/4096);
-    if(s->queue_sent[chunk->queue]+frames>s->send_capacity || s->send_post-s->send_head>=s->send_requests){
+    if((chunk->queue!=s->send_queue && s->send_posted!=s->send_retired) || s->send_posted-s->send_retired+frames>s->send_capacity){
       if(!s->send_blocked){s->send_blocked=1;atomic_fetch_add_explicit(&s->counts->send_stalls,1,memory_order_relaxed);}
       break;
     }
-    s->send_blocked=0;
+    s->send_blocked=0;s->send_queue=chunk->queue;
     struct ibv_sge span=net_span(s,chunk->mr,chunk->offset,chunk->length);
     struct ibv_send_wr request={.wr_id=s->send_post,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
     int error=ibv_post_send(s->provider.queues[chunk->queue].pair,&request,&bad);
     if(error)return error<0?-error:error;
-    s->send_post++;s->queue_sent[chunk->queue]+=frames;
+    s->send_post++;s->send_posted+=frames;
   }
   while(s->receive_post!=s->receive_tail){
     struct net_transfer *t=s->receives+s->receive_post%NET_RECEIVES;
@@ -1198,26 +1199,25 @@ static int net_failed(struct net_session *s,const struct ibv_wc *done,const char
     (unsigned long long)span.addr,span.length,span.lkey,mr,transfer);
   return EIO;
 }
-/* SENDs and RECVs complete in each queue pair's order, each taken as it completes and retired in posting
-   order. */
+/* SENDs complete in the order posted (their queue pairs' one at a time); RECVs complete in each queue pair's
+   order, each taken as it lands and retired in posting order. */
 static int net_complete(struct net_session *s,int *busy){
   struct ibv_wc done[16];
   int count=ibv_poll_cq(s->provider.sent,16,done);
   if(count<0)return EIO;
   for(int i=0;i<count;i++){
-    const uint32_t index=(uint32_t)done[i].wr_id;
-    struct net_send *chunk=s->sends+index%NET_SENDS;
-    if(done[i].status || done[i].wr_id>UINT32_MAX || index-s->send_head>=s->send_post-s->send_head || chunk->done)
+    if(done[i].status || done[i].wr_id!=s->send_head){
+      struct net_send *chunk=s->sends+s->send_head%NET_SENDS;
       return net_failed(s,done+i,"SEND",s->send_head,net_span(s,chunk->mr,chunk->offset,chunk->length),chunk->mr,chunk->comm);
-    chunk->done=1;
-    s->queue_sent[chunk->queue]-=(uint32_t)((chunk->length+4095)/4096);
-    struct mesh_net_comm *comm=chunk->comm==NET_NONE?NULL:net_comm_at(s,chunk->comm,chunk->generation);
+    }
+    struct net_send chunk=s->sends[s->send_head++%NET_SENDS];
+    s->send_retired+=(chunk.length+4095)/4096;
+    struct mesh_net_comm *comm=chunk.comm==NET_NONE?NULL:net_comm_at(s,chunk.comm,chunk.generation);
     if(!comm)continue;
-    struct net_comm *state=net_state(comm,chunk->comm);
-    if(state->phase[chunk->slot]==2 && (state->sent[chunk->slot]+=chunk->length)==comm->requests[chunk->slot].size)
-      net_end(s,comm,state,chunk->slot,0,comm->requests[chunk->slot].size);
+    struct net_comm *state=net_state(comm,chunk.comm);
+    if(state->phase[chunk.slot]==2 && (state->sent[chunk.slot]+=chunk.length)==comm->requests[chunk.slot].size)
+      net_end(s,comm,state,chunk.slot,0,comm->requests[chunk.slot].size);
   }
-  while(s->send_head!=s->send_post && s->sends[s->send_head%NET_SENDS].done)s->send_head++;
   *busy|=count>0;
   count=ibv_poll_cq(s->provider.completion,16,done);
   if(count<0)return EIO;
@@ -1382,15 +1382,15 @@ static void net_lost(struct net_session *s,int32_t error){
   s->pending_count=0;
 }
 static void net_reset(struct net_session *s){
-  s->receive_outstanding=0;memset(s->queue_sent,0,sizeof s->queue_sent);
+  s->send_posted=s->send_retired=0;s->receive_outstanding=0;
   s->send_head=s->send_post=s->send_tail=s->receive_head=s->receive_post=s->receive_tail=0;
-  s->receive_chunk_head=s->receive_chunk_tail=0;s->receive_queue=0;memset(s->queue_frames,0,sizeof s->queue_frames);
+  s->receive_chunk_head=s->receive_chunk_tail=0;s->send_queue=s->receive_queue=0;memset(s->queue_frames,0,sizeof s->queue_frames);
   s->output_head=s->output_tail=0;s->output_partial=s->input_bytes=0;s->failed=0;s->send_blocked=s->receive_blocked=0;
 }
 /* The session's configuration, between RTR and RTS: a priming RECV posted on each queue pair into the
    device's discard buffer, then each end's queue capacities exchanged, so that neither end SENDs before
    the other's first RECVs are posted; the chunk both cut by, at most the discard buffer.  The queue pairs
-   share their completion queues: the requests posted and not retired are at most its entries less one. */
+   share their completion queues: the RECVs posted and not taken are at most its entries less one. */
 static int net_configure(void *argument,int socket,uint64_t client){
   struct net_session *s=argument;
   s->send_capacity=(uint32_t)s->provider.sent->cqe;s->receive_capacity=UINT32_MAX;
@@ -1398,7 +1398,7 @@ static int net_configure(void *argument,int socket,uint64_t client){
     s->send_capacity=MIN(s->send_capacity,s->provider.queues[q].send_capacity);
     s->receive_capacity=MIN(s->receive_capacity,s->provider.queues[q].receive_capacity);
   }
-  s->send_requests=(uint32_t)s->provider.sent->cqe-1;s->receive_requests=(uint32_t)s->provider.completion->cqe-1;
+  s->receive_requests=(uint32_t)s->provider.completion->cqe-1;
   /* a power of two past the RECVs posted, so the ring's indices wrap with their counters */
   for(s->chunk_slots=1;s->chunk_slots<=s->receive_requests;)s->chunk_slots*=2;
   free(s->receive_chunks);s->receive_chunks=calloc(s->chunk_slots,sizeof *s->receive_chunks);
