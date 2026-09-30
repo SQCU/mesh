@@ -48,6 +48,7 @@
 #include <ATen/native/mps/OperationUtils.h>
 #include <pybind11/chrono.h>
 #include <dlfcn.h>
+#include <objc/message.h>
 #include <objc/runtime.h>
 
 #include <algorithm>
@@ -196,6 +197,30 @@ static void note_gpu(id<MTLCommandBuffer> cb, uint64_t value) {
   }];
 }
 
+// ---- recording a step (torch_mesh.record, replay) ----
+// metal-microbench's recorder (metal_recording.h), found in the process (the program started with its
+// libmetal_recording.dylib inserted, DYLD_INSERT_LIBRARIES, so the Metal device PyTorch and libnccl-mesh use
+// is its interposed one), not linked.
+struct Recorder {
+  void *(*record)(id, void (^)(void), const void *, size_t, NSUInteger, int);
+  void (*queue)(id);
+  void (*cut)(void);
+  NSUInteger (*cuts)(const void *);
+  int (*run_cut)(void *, NSUInteger, NSUInteger, id, uint64_t);
+  void (*release)(void *);
+};
+static const Recorder *recorder() {
+  static const Recorder found = {(void *(*)(id, void (^)(void), const void *, size_t, NSUInteger, int))dlsym(RTLD_DEFAULT, "MetalRecord"),
+                                 (void (*)(id))dlsym(RTLD_DEFAULT, "MetalRecordQueue"), (void (*)(void))dlsym(RTLD_DEFAULT, "MetalRecordCut"),
+                                 (NSUInteger (*)(const void *))dlsym(RTLD_DEFAULT, "MetalReplayCuts"),
+                                 (int (*)(void *, NSUInteger, NSUInteger, id, uint64_t))dlsym(RTLD_DEFAULT, "MetalReplayRunCut"),
+                                 (void (*)(void *))dlsym(RTLD_DEFAULT, "MetalReplayFree")};
+  return found.record && found.queue && found.cut && found.cuts && found.run_cut && found.release ? &found : nullptr;
+}
+// A step being recorded: each MPS call's fence is a cut of the recording (its inputs' command buffer ends
+// there at replay), its library call persistent (ncclMeshPersistentBegin), and nothing is traced.
+static std::atomic<bool> recording{false};
+
 // ---- the MPS stream's fence ----
 // `body` on the MPS stream's serial queue (inline when already on it: a release closure can run there).
 template <typename F> static void on_mps(at::mps::MPSStream *s, F body) {
@@ -291,7 +316,16 @@ static void window_heaps() {
   std::call_once(once, [] {
     if (!at::mps::is_available()) return;
     id<MTLDevice> d = at::mps::MPSDevice::getInstance()->device();
-    metal_heap = method_setImplementation(class_getInstanceMethod(object_getClass(d), @selector(newHeapWithDescriptor:)), (IMP)window_heap);
+    Class cls = object_getClass(d);
+    Method method = class_getInstanceMethod(cls, @selector(newHeapWithDescriptor:));
+    // a device class that forwards the selector (the recorder's interposed device, an NSProxy): the method
+    // added, its own the forwarding
+    if (method && class_getMethodImplementation(cls, @selector(newHeapWithDescriptor:)) != (IMP)_objc_msgForward)
+      metal_heap = method_setImplementation(method, (IMP)window_heap);
+    else {
+      metal_heap = (IMP)_objc_msgForward;
+      class_addMethod(cls, @selector(newHeapWithDescriptor:), (IMP)window_heap, "@@:@");
+    }
   });
 }
 
@@ -412,7 +446,7 @@ class Call {
  public:
   Call(const at::Tensor &like, bool async, std::shared_ptr<StreamPool> pool, const char *op = nullptr)
       : mps_(like.is_mps()), async_(async || like.is_mps()), pool_(std::move(pool)), op_(op), dtype_(like.scalar_type()),
-        enter_(tracing() && op ? uptime() : 0) {}
+        enter_(tracing() && op && !recording ? uptime() : 0) {}
   int add(const at::Tensor &t, bool in, bool out) { return add(std::vector<at::Tensor>{t}, in, out); }
   int add(std::vector<at::Tensor> parts, bool in, bool out) {
     Place p;
@@ -448,6 +482,16 @@ class Call {
       return;
     }
     auto *s = at::mps::getCurrentMPSStream();
+    if (recording) {
+      // the replay ends a command buffer here and signals its event, on which the persistent call starts
+      TORCH_CHECK(!scratch_ && fills_.empty(), "mesh: a recorded call's tensors are window memory, in place (no copy through the call's own)");
+      on_mps(s, [&] {
+        s->endKernelCoalescing();
+        recorder()->cut();
+      });
+      stream_ = pool_->acquire(true);
+      return;
+    }
     for (auto &p : places_)
       if (p.at != SIZE_MAX && p.in) mps_blits(s, p, true);
     const uint64_t fence = fence_ = mps_fence();
@@ -1310,6 +1354,75 @@ static uint64_t address(const at::Tensor &t) {
   return ncclMeshMemBuffer(t.data_ptr(), &buffer, &offset) == ncclSuccess ? (uint64_t)(uintptr_t)t.data_ptr() : 0;
 }
 
+// ---- a step recorded and replayed (torch_mesh.record, replay) ----
+// The recorder's replay (its layout, metal_recording.h struct MetalReplay: the commands of one invocation
+// at 24), the persistent calls, and the event the replay signals at its cuts.
+struct Recording {
+  void *replay = nullptr, *calls = nullptr;
+  int ncalls = 0;
+  NSUInteger cuts = 0;
+  id<MTLSharedEvent> event = nil;
+  uint32_t commands() const { return replay ? *(const uint32_t *)((const char *)replay + 24) : 0; }
+  ~Recording() {
+    if (calls) ncclMeshPersistentFree(calls);
+    if (replay && recorder()) recorder()->release(replay);
+    [event release];
+  }
+};
+// `fn` (a step) recorded as the recorder's one invocation: every MPS command encoded on the MPS stream's
+// queue, from any thread (the autograd engine encodes the backward on its own), each call's fence a cut
+// and its library call persistent (never started while recording).  Nothing runs: the step's tensors hold
+// what they held, its outputs are written by each replay.
+static std::shared_ptr<Recording> record(pybind11::function fn) {
+  const Recorder *r = recorder();
+  TORCH_CHECK(r, "mesh: record() needs metal-microbench's recorder in the process: start the program with "
+              "DYLD_INSERT_LIBRARIES=<metal-microbench>/.build/libmetal_recording.dylib");
+  TORCH_CHECK(at::mps::is_available(), "mesh: record() records MPS work");
+  auto *s = at::mps::getCurrentMPSStream();
+  s->synchronize(at::mps::SyncType::COMMIT_AND_WAIT);
+  check(ncclMeshPersistentBegin(), nullptr, "ncclMeshPersistentBegin");
+  r->queue((id)s->commandQueue());
+  auto made = std::make_shared<Recording>();
+  __block std::exception_ptr failed;
+  __block pybind11::function step = fn;
+  recording = true;
+  made->replay = r->record(device(), ^{
+    try {
+      step();
+      at::mps::getCurrentMPSStream()->synchronize(at::mps::SyncType::COMMIT_AND_WAIT);
+    } catch (...) {
+      failed = std::current_exception();
+    }
+  }, nullptr, 0, 1, 0);
+  recording = false;
+  check(ncclMeshPersistentEnd(&made->calls, &made->ncalls), nullptr, "ncclMeshPersistentEnd");
+  if (failed) std::rethrow_exception(failed);
+  TORCH_CHECK(made->replay, "mesh: the step was not recorded (the recorder's reason is on stderr)");
+  made->cuts = r->cuts(made->replay);
+  TORCH_CHECK(made->cuts == (NSUInteger)made->ncalls, "mesh: the recording has ", made->cuts, " cuts for ", made->ncalls, " calls");
+  made->event = [device() newSharedEvent];
+  return made;
+}
+// `steps` replays of a recording, each waited for: its command buffers on the recorder's queue, cut at its
+// calls, whose persistent calls start as the replay passes their cuts.
+static void replay(const std::shared_ptr<Recording> &made, int64_t steps) {
+  const Recorder *r = recorder();
+  TORCH_CHECK(r && made && made->replay, "mesh: no recording to replay");
+  at::mps::getCurrentMPSStream()->synchronize(at::mps::SyncType::COMMIT_AND_WAIT);  // the MPS work before it done
+  const uint64_t value = [made->event signaledValue];
+  if (made->ncalls) check(ncclMeshPersistentStart(made->calls, (__bridge void *)made->event, value, made->cuts, (uint64_t)steps), nullptr, "ncclMeshPersistentStart");
+  int failed = 0;
+  {
+    pybind11::gil_scoped_release release;
+    for (int64_t i = 0; i < steps && !failed; i++) failed = r->run_cut(made->replay, 0, 1, made->event, value + (uint64_t)i * made->cuts);
+    // a failed replay: its cuts passed, so the persistent calls run out
+    if (failed) made->event.signaledValue = value + (uint64_t)steps * made->cuts;
+  }
+  const ncclResult_t result = made->ncalls ? ncclMeshPersistentWait(made->calls) : ncclSuccess;
+  TORCH_CHECK(!failed, "mesh: the replay failed (the recorder's reason is on stderr)");
+  TORCH_CHECK(result == ncclSuccess, "mesh: a replayed step's calls: ", ncclGetErrorString(result), ": ", ncclGetLastError(nullptr));
+}
+
 // The trace (MESH_TRACE) written out, once the points still to be noted are (at most 1 s): a header line
 // (the clock, uptime ns, and the library's clock's offset from it), a line per call (its fence's command
 // buffer's GPU times; the host times its fence, its kept work's reach and resume signals and its stream's
@@ -1550,4 +1663,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("links", &c10d::links);
   m.def("all_to_all_counted", &c10d::all_to_all_counted);
   m.def("counted", &c10d::counted);
+  pybind11::class_<c10d::Recording, std::shared_ptr<c10d::Recording>>(m, "Recording")
+      .def_property_readonly("commands", &c10d::Recording::commands)
+      .def_property_readonly("cuts", [](const c10d::Recording &r) { return (uint64_t)r.cuts; })
+      .def_property_readonly("calls", [](const c10d::Recording &r) { return r.ncalls; });
+  m.def("record", &c10d::record);
+  m.def("replay", &c10d::replay);
 }

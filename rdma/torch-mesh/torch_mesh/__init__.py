@@ -113,6 +113,29 @@ def counted(handle):
     return _C.counted(handle)
 
 
+def record(step):
+    """`step` (a function of no arguments that runs one step on MPS tensors) recorded, the CUDA graph's
+    analogue: every MPS command it encodes, from any thread, recorded as one invocation by metal-microbench's
+    recorder (the program started with DYLD_INSERT_LIBRARIES=<metal-microbench>/.build/libmetal_recording.dylib,
+    so every Metal object is its interposed one), each call's fence a cut there and its library call
+    persistent (ncclMeshPersistentBegin: planned and placed, its GPU work in the recording, started at each
+    replay as the replay passes its cut).  Nothing runs while it records: its tensors keep what they held,
+    and each replay writes them; the MPS allocator's cached buffers are given back afterwards, so the
+    recording's intermediates (retained by it) are never another tensor's.  Every rank records the same calls
+    in the same order.  A Recording (commands, cuts, calls)."""
+    import torch
+    from . import _C
+    made = _C.record(step)
+    torch.mps.empty_cache()
+    return made
+
+
+def replay(recording, steps=1):
+    """`steps` replays of a record()ed step, each waited for; every rank replays alike."""
+    from . import _C
+    _C.replay(recording, steps)
+
+
 def counts():
     from . import _C
     return _C.counts()

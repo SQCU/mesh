@@ -71,11 +71,15 @@ aten = torch.ops.aten
 
 
 class _Operand:
-    """A partitioned dimension's capacities (fixed) and parts (a CPU tensor, written between calls)."""
+    """A partitioned dimension's capacities (fixed) and parts (a CPU tensor, written between calls).  The
+    masks and indices ops read from the parts are cached per what they are, and a write rebuilds each in
+    place (the same tensors, their shapes fixed by the capacities), so a step recorded before it
+    (torch_mesh.record) reads the new parts where it reads the old ones: a parts change records nothing
+    again."""
 
     def __init__(self, key, capacity, parts):
         self.key, self.capacity, self.units = key, tuple(int(c) for c in capacity), sum(int(p) for p in parts)
-        self.parts, self.epoch, self.cache = torch.zeros(len(self.capacity), dtype=torch.int64), 0, {}
+        self.parts, self.epoch, self.cache, self.builds = torch.zeros(len(self.capacity), dtype=torch.int64), 0, {}, {}
         self.write(parts)
 
     def write(self, parts):
@@ -84,11 +88,15 @@ class _Operand:
             raise ValueError(f'mesh: parts {parts} of {self.units} units within the capacities {self.capacity}: one a '
                              f'coordinate, each at least 1')
         self.parts.copy_(torch.tensor(parts))
-        self.epoch, self.cache = self.epoch + 1, {}
+        self.epoch += 1
+        for what, held in self.cache.items():
+            fresh, held = self.builds[what](parts), held if isinstance(held, tuple) else (held,)
+            for old, new in zip(held, fresh if isinstance(fresh, tuple) else (fresh,)):
+                old.copy_(new)
 
     def cached(self, what, build):
         if what not in self.cache:
-            self.cache[what] = build(self.parts.tolist())
+            self.cache[what], self.builds[what] = build(self.parts.tolist()), build
         return self.cache[what]
 
 
