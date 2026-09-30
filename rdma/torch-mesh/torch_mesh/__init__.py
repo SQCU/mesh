@@ -83,6 +83,36 @@ def empty(*size, dtype=None, device='mps'):
                     torch.empty(0, dtype=dtype or torch.get_default_dtype()), device)
 
 
+def all_to_all_counted(input, counts, send_segments, recv_segments, capacity, group=None):
+    """MPI_Alltoallv whose counts the GPU wrote (libnccl-mesh ncclMeshAlltoAllCounted): input's rows grouped by
+    destination rank, as many to rank q as segment q of `counts` sums to (an int64 MPS tensor, or a list of
+    ints; send_segments[q] entries for rank q); each rank's segment for this rank (recv_segments[q] entries) is
+    exchanged first, then the rows, received packed in rank order into a tensor of `capacity` rows.  Returns
+    (that tensor, the received counts on the input's device, their handle, the Work): counted(handle) is the
+    received counts on the host, waited for as they land (no wait on the GPU); the Work's wait() orders the
+    rows and the device counts on the MPS stream."""
+    import torch
+    import torch.distributed as dist
+    from . import _C
+    group = group or dist.distributed_c10d._get_default_group()
+    if not isinstance(counts, torch.Tensor):
+        made = empty(len(counts), dtype=torch.int64, device='cpu')
+        made.copy_(torch.tensor(counts, dtype=torch.int64))
+        counts = made
+    out = torch.empty((capacity,) + tuple(input.shape[1:]), dtype=input.dtype, device=input.device)
+    host = empty(1 + sum(recv_segments), dtype=torch.int64, device='cpu').zero_()
+    landed = torch.empty(sum(recv_segments), dtype=torch.int64, device=input.device)
+    work = _C.all_to_all_counted(group.group_name, out, input.contiguous(), counts, list(send_segments), list(recv_segments), host, landed)
+    return out, landed, host, work
+
+
+def counted(handle):
+    """An all_to_all_counted's received counts (each rank's segment for this rank, in rank order), once they have
+    landed: waited for on the host, not the GPU."""
+    from . import _C
+    return _C.counted(handle)
+
+
 def counts():
     from . import _C
     return _C.counts()

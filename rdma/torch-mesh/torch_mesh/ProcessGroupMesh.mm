@@ -1065,6 +1065,27 @@ class ProcessGroupMesh : public Backend {
     });
     return work(OpType::ALLREDUCE, outs, call);
   }
+  // MPI_Alltoallv with the GPU's counts (torch_mesh.all_to_all_counted, ncclMeshAlltoAllCounted): `input`'s rows
+  // grouped by destination; `counts` int64, sends[q] entries for rank q (an MPS tensor, or a CPU window tensor);
+  // `out` [capacity, ...]; `host` int64, a CPU window tensor (the library's records hold it to the call's end), its
+  // first element the arrival word and the rest each rank's segment for this rank, receives[q] entries, written by
+  // the library's worker as they land; `landed` the same counts on MPS, written by the GPU (for GPU work after the
+  // call's wait).
+  c10::intrusive_ptr<Work> all_to_all_counted(at::Tensor &out, const at::Tensor &input, const at::Tensor &counts, const std::vector<size_t> &sends,
+                                              const std::vector<size_t> &receives, at::Tensor &host, at::Tensor &landed) {
+    auto call = start(input, "all_to_all_counted");
+    const int in = call->add(input, true, false), o = call->add(out, false, true), c = counts.is_mps() ? call->add(counts, true, false) : -1,
+              l = call->add(landed, false, true);
+    call->begin();
+    const int64_t rows = input.dim() ? input.size(0) : 1, row = rows ? input.numel() / std::max<int64_t>(rows, 1) : 1;
+    uint64_t *arrived = (uint64_t *)host.data_ptr<int64_t>();
+    check(ncclMeshAlltoAllCounted(call->ptr(in), (size_t)rows, (const int64_t *)(c < 0 ? counts.data_ptr() : call->ptr(c)), sends.data(), call->ptr(o),
+                                  (size_t)(out.dim() ? out.size(0) : 1), host.data_ptr<int64_t>() + 1, (int64_t *)call->ptr(l), receives.data(), arrived, (size_t)row,
+                                  datatype(input), comm_, call->stream()),
+          comm_, "ncclMeshAlltoAllCounted");
+    std::vector<at::Tensor> result{out, landed};
+    return work(OpType::ALLTOALL_BASE, result, call);
+  }
   c10::intrusive_ptr<Work> broadcast_into(at::Tensor &out, const at::Tensor &input, int root) {
     auto call = start(input, "broadcast");
     const int in = getRank() == root ? call->add(input, true, false) : -1, o = call->add(out, false, true);
@@ -1165,6 +1186,26 @@ class ProcessGroupMesh : public Backend {
 // the group's backend for "cpu" (this one), with the MPS tensors themselves.
 static void mps_to_backend(const c10::OperatorHandle &op, torch::jit::Stack *stack) {
   op.redispatchBoxed(c10::DispatchKeySet(c10::DispatchKey::CPU), stack);
+}
+
+// torch_mesh.all_to_all_counted (above) on the group named `group`.
+static c10::intrusive_ptr<Work> all_to_all_counted(const std::string &group, at::Tensor out, at::Tensor input, at::Tensor counts,
+                                                   std::vector<size_t> sends, std::vector<size_t> receives, at::Tensor host, at::Tensor landed) {
+  auto *mesh = dynamic_cast<ProcessGroupMesh *>(resolve_process_group(group)->getBackend(c10::DeviceType::CPU).get());
+  TORCH_CHECK(mesh, "mesh: all_to_all_counted runs on a group of the mesh backend");
+  TORCH_CHECK(host.is_cpu() && host.is_contiguous() && host.scalar_type() == at::kLong, "mesh: all_to_all_counted's host counts are a contiguous CPU int64 tensor");
+  return mesh->all_to_all_counted(out, input, counts, sends, receives, host, landed);
+}
+// Its received counts once they have landed: waited for on the host (the arrival word), not on the GPU.
+static std::vector<int64_t> counted(at::Tensor host) {
+  const uint64_t *arrived = (const uint64_t *)host.data_ptr<int64_t>();
+  for (uint64_t deadline = uptime() + 300000000000ull; !__atomic_load_n(arrived, __ATOMIC_ACQUIRE);) {
+    TORCH_CHECK(uptime() < deadline, "mesh: all_to_all_counted's counts did not arrive by the deadline");
+    sched_yield();
+  }
+  TORCH_CHECK(__atomic_load_n(arrived, __ATOMIC_ACQUIRE) == 1, "mesh: all_to_all_counted failed before its counts arrived (the Work's wait raises why)");
+  const int64_t *at = host.data_ptr<int64_t>() + 1;
+  return std::vector<int64_t>(at, at + host.numel() - 1);
 }
 
 // What libnccl-mesh and this backend copied, sent and waited for so far (counted, not timed).
@@ -1504,4 +1545,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("agree", &c10d::agree);
   m.def("agreed", &c10d::agreed);
   m.def("links", &c10d::links);
+  m.def("all_to_all_counted", &c10d::all_to_all_counted);
+  m.def("counted", &c10d::counted);
 }
