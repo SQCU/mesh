@@ -135,8 +135,9 @@ struct ncclComm {
   void *queue,*event; uint64_t event_value;
   _Atomic int programs;
   _Atomic uint64_t *control; void *control_buffer; uint64_t ticked;
-  /* woke: the worker came out of its condition variable (parked) with a part to start */
-  pthread_t worker; int started,stopping,finalized,parked,woke;
+  /* woke: the worker came out of its condition variable (parked) with a part to start; agreeing: an
+     agreement is making the connections again (the worker leaves them alone) */
+  pthread_t worker; int started,stopping,finalized,parked,woke,agreeing;
   pthread_mutex_t lock; pthread_cond_t cond;
   struct item *head,*tail; int busy;
   struct flight *flights; int nflights,*blocked;
@@ -1063,12 +1064,13 @@ static void *worker(void *argument){
   pthread_setname_np("nccl-mesh.comm");
   for(uint64_t busy=now_ns();;){
     pthread_mutex_lock(&c->lock);
-    if(!c->head && !c->flights && !c->stopping && !(atomic_load(&c->broken) && c->open) && now_ns()-busy>WORKER_SPIN_NS){
+    const int closing=atomic_load(&c->broken) && c->open && !c->agreeing;
+    if(!c->head && !c->flights && !c->stopping && !closing && now_ns()-busy>WORKER_SPIN_NS){
       c->parked=1;
-      while(!c->head && !c->flights && !c->stopping && !(atomic_load(&c->broken) && c->open))pthread_cond_wait(&c->cond,&c->lock);
+      while(!c->head && !c->flights && !c->stopping && !(atomic_load(&c->broken) && c->open && !c->agreeing))pthread_cond_wait(&c->cond,&c->lock);
       c->parked=0;c->woke=c->head!=NULL;
     }
-    if(atomic_load(&c->broken) && c->open)close_peers(c,c->peers,1);
+    if(atomic_load(&c->broken) && c->open && !c->agreeing)close_peers(c,c->peers,1);
     struct item *it=c->head;
     int flying=c->flights!=NULL,room=c->nflights<FLIGHTS;
     if(!it && !flying && c->stopping){pthread_mutex_unlock(&c->lock);break;}
@@ -2505,6 +2507,7 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm,uint64_t *failed,uint64_t *epoch)
   drain(c);
   pthread_mutex_lock(&c->lock);
   if(atomic_load(&c->broken) && c->open)close_peers(c,c->peers,1);
+  c->agreeing=1;
   pthread_mutex_unlock(&c->lock);
   const uint64_t deadline=deadline_after(),key=mix(c->key^mix(++c->agreements));
   const size_t slot=slice((size_t)n*sizeof(struct vote));
@@ -2554,12 +2557,11 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm,uint64_t *failed,uint64_t *epoch)
   pthread_mutex_unlock(&c->lock);
   if(buffers)span_release(buffers,NULL,0);
   if(!status)status=vacate(c,deadline);
-  if(!status){
-    pthread_mutex_lock(&c->lock);
-    atomic_store(&c->issued,0);c->failed=0;c->cause[0]=0;atomic_store(&c->broken,0);atomic_store(&c->async,0);c->alive=0;
-    pthread_mutex_unlock(&c->lock);
-    *failed=first;*epoch=c->epoch;
-  }
+  pthread_mutex_lock(&c->lock);
+  if(!status){atomic_store(&c->issued,0);c->failed=0;c->cause[0]=0;atomic_store(&c->broken,0);atomic_store(&c->async,0);c->alive=0;}
+  c->agreeing=0;
+  pthread_mutex_unlock(&c->lock);
+  if(!status){*failed=first;*epoch=c->epoch;}
   free(want);free(fresh);free(votes);
   return status;
 }
