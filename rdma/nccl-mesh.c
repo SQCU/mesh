@@ -133,13 +133,14 @@ struct persistent;
    the gate open).  The worker signals a communicator's gates in the order of their values, each once every word
    of it and of every gate before it is set (set 2: failed, so the program goes on). */
 struct gate { struct ncclComm *comm; _Atomic uint64_t **words; uint32_t nwords; _Atomic uint64_t *landing; void *event; uint64_t value;
-  struct persistent *run; int index,ready; };
+  struct persistent *run; int index,ready,armed; };
 /* A group: its streams' marks; its program's event and last value, and the gate word the workers start at
    (NULL: none); without a program, the recorded points the workers wait for; its window allocation; its
-   program's gates. */
+   program's gates (a persistent call's the launch's; another's its own once armed, freed once opened: its part,
+   and the launch, may end first). */
 struct launch { pthread_mutex_t lock; pthread_cond_t cond; int items,sync,nmarks,nwaits,persistent,ngates; ncclResult_t result; struct mark *marks;
   void *event; uint64_t end; _Atomic uint64_t *gate,*landing; struct tally *tally; struct point *waits; unsigned char *stage,*placed; struct region own;
-  struct gate *gates; uint64_t zero_at,zero_words; };
+  struct gate **gates; uint64_t zero_at,zero_words; };
 struct flight;
 /* A communicator's part of a group: `run` a persistent call's (nccl.h ncclMeshPersistentBegin), which the
    worker starts again each iteration and never frees, `cut` the place of its cut among the recording's
@@ -1040,11 +1041,17 @@ struct flight { struct item *it; struct transfer *t; int n,remaining; ncclResult
 static void finish(struct ncclComm *c,struct item *it,ncclResult_t result);
 static void dispatch_pump(void);
 /* ---- gates (struct gate) ---- */
-/* `g` armed on its communicator: in the armed list by value. */
+/* `g` armed on its communicator: in the armed list by value (where it is armed already, its entry taken out
+   first: a persistent call's gate is armed again each iteration with its value then). */
 static void gate_arm(struct gate *g){
   struct ncclComm *c=g->comm;
-  g->ready=0;
   pthread_mutex_lock(&c->gates_lock);
+  if(g->armed){
+    int kept=0;
+    for(int i=0;i<c->narmed;i++)if(c->armed[i]!=g)c->armed[kept++]=c->armed[i];
+    c->narmed=kept;
+  }
+  g->ready=0;g->armed=1;
   if(c->narmed==c->carmed){
     int capacity=c->carmed?2*c->carmed:64;
     struct gate **grown=realloc(c->armed,(size_t)capacity*sizeof *grown);
@@ -1057,25 +1064,35 @@ static void gate_arm(struct gate *g){
   }
   pthread_mutex_unlock(&c->gates_lock);
 }
-/* The communicator's armed gates whose words are all set marked ready, and the ready ones before the first that
-   is not opened in value order: each's event signalled at its value, then its landing word set. */
+/* The communicator's armed gates whose words are all set marked ready, and each ready one opened where every
+   armed gate of its event before it (by value: an event's value only grows) is: its event signalled at its value,
+   then its landing word set; a gate that is not a persistent call's then freed. */
+#define GATE_EVENTS 8
 static void gates_check(struct ncclComm *c){
   if(!c->narmed)return;
   pthread_mutex_lock(&c->gates_lock);
-  int opened_now=0;
+  void *blocked[GATE_EVENTS];int nblocked=0,kept=0,opened_now=0;
   for(int i=0;i<c->narmed;i++){
     struct gate *g=c->armed[i];
     if(!g->ready){
       g->ready=1;
       for(uint32_t w=0;w<g->nwords && g->ready;w++)g->ready=atomic_load_explicit(g->words[w],memory_order_acquire)!=0;
     }
-    if(!g->ready || i!=opened_now)continue;
+    int held=nblocked==GATE_EVENTS;
+    for(int b=0;b<nblocked && !held;b++)held=blocked[b]==g->event;
+    if(!g->ready || held){
+      if(!held)blocked[nblocked++]=g->event;
+      c->armed[kept++]=g;
+      continue;
+    }
     if(g->event)nccl_mesh_event_signal(g->event,g->value);
     if(g->landing)atomic_store_explicit(g->landing,1,memory_order_release);
     atomic_fetch_add_explicit(&opened,1,memory_order_relaxed);
+    g->armed=0;
+    if(!g->run){free(g->words);free(g);}
     opened_now++;
   }
-  if(opened_now){memmove(c->armed,c->armed+opened_now,(size_t)(c->narmed-opened_now)*sizeof *c->armed);c->narmed-=opened_now;}
+  c->narmed=kept;
   pthread_mutex_unlock(&c->gates_lock);
   if(opened_now)dispatch_pump();
 }
@@ -1186,7 +1203,7 @@ static void launch_free(struct launch *l){
   pthread_mutex_destroy(&l->lock);pthread_cond_destroy(&l->cond);
   if(l->stage)span_release(l->stage,NULL,0);
   for(int w=0;w<l->nwaits;w++)point_drop(l->waits+w);
-  for(int g=0;g<l->ngates;g++)free(l->gates[g].words);
+  for(int g=0;g<l->ngates;g++)if(l->gates[g]->run){free(l->gates[g]->words);free(l->gates[g]);}
   tally_release(l->tally);free(l->waits);free(l->marks);free(l->gates);free(l);
 }
 /* The first failure since the last agreement: its call's index (the least) and its cause. */
@@ -1322,7 +1339,7 @@ static void persistent_open(struct persistent *p,uint64_t i){
   for(int x=0;x<p->n;x++){
     struct launch *l=p->items[x]->launch;
     for(int g=0;g<l->ngates;g++){
-      struct gate *gate=l->gates+g;
+      struct gate *gate=l->gates[g];
       if(gate->index<0)continue;
       gate->event=p->gate_event;gate->value=p->gate_value+i*(uint64_t)p->gates+(uint64_t)gate->index+1;
       gate_arm(gate);
@@ -2374,8 +2391,10 @@ static uint64_t *pair(uint64_t *list,uint32_t *n,size_t *capacity,struct region 
    call's given per iteration), landing word `landing`. */
 static struct gate *gate_add(struct launch *l,struct ncclComm *c,_Atomic uint64_t **words,uint32_t nwords,_Atomic uint64_t *landing,
   struct persistent *run){
-  struct gate *g=l->gates+l->ngates++;
+  struct gate *g=malloc(sizeof *g);
+  if(!g){free(words);return NULL;}
   *g=(struct gate){.comm=c,.words=words,.nwords=nwords,.landing=landing,.event=run?NULL:c->landed,.value=run?0:++c->landed_next,.run=run,.index=-1};
+  l->gates[l->ngates++]=g;
   return g;
 }
 
@@ -2469,7 +2488,8 @@ static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **c
           v+=sent;
         }
         struct gate *g=NULL;
-        if(chunked){g=gate_add(l,k->comm,needs,nneeds,k->landings+w+j,run);list=pair(list,&m,&capacity,l->own,k->landings+w+j,1);}
+        if(chunked && !(g=gate_add(l,k->comm,needs,nneeds,k->landings+w+j,run))){rec->failed=1;continue;}
+        if(chunked)list=pair(list,&m,&capacity,l->own,k->landings+w+j,1);
         else free(needs);
         const _Atomic uint64_t *flag=k->flags+w+j;
         const void *given_first=k->fresh && !written(k,s,lo,hi)?given(k,lo):NULL;
@@ -2507,10 +2527,11 @@ static void encode(struct launch *l,struct call *calls,int n,struct ncclComm **c
     for(int i=0;i<n;i++)if(calls[i].comm==comms[j])
       for(uint32_t x=0;x<calls[i].nwords;x++){list=pair(list,&m,&capacity,l->own,calls[i].words+x,1);needs[nneeds++]=calls[i].words+x;}
     struct gate *g=gate_add(l,comms[j],needs,nneeds,l->landing+2*j,run);
+    if(!g){rec->failed=1;continue;}
     list=pair(list,&m,&capacity,l->own,g->landing,1);
     spin(rec,any,l->own,list,m,l->landing+2*j+1,any->flags+any->nwords);
   }
-  for(int g=0;g<l->ngates;g++)if(l->gates[g].landing>=l->landing && l->gates[g].landing<l->landing+2*ncomms)program_gate(rec,l->gates+g);
+  for(int g=0;g<l->ngates;g++)if(l->gates[g]->landing>=l->landing && l->gates[g]->landing<l->landing+2*ncomms)program_gate(rec,l->gates[g]);
   /* after the gates: what a spin gave up on, then what needs every word */
   for(int i=0;i<n;i++){
     struct call *k=calls+i;
@@ -2655,7 +2676,7 @@ ncclResult_t ncclGroupEnd(void){
     encode(l,calls,n,comms,ncomms,rec,ran,defer,persist);
     record(l,calls,n);
     /* a gate opens once its words are set (a persistent call's each iteration, ncclMeshPersistentStart) */
-    for(int g=0;!persist && g<l->ngates;g++)gate_arm(l->gates+g);
+    for(int g=0;!persist && g<l->ngates;g++)gate_arm(l->gates[g]);
     if(defer){
       struct recording **at=(struct recording **)&l->marks[0].stream->pending;
       while(*at)at=&(*at)->next;
