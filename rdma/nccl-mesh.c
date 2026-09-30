@@ -2986,14 +2986,17 @@ ncclResult_t ncclCommSplit(ncclComm_t comm,int color,int key,ncclComm_t *newcomm
 /* ---- the stream ---- */
 ncclResult_t ncclMeshStreamCreate(cudaStream_t *stream,void *queue){
   if(!stream)return FAIL(NULL,ncclInvalidArgument,"ncclMeshStreamCreate: stream is NULL");
+  /* never the caller's queue (nccl.h): the dispatcher commits the work after a gate late, and a caller's command
+     buffer waiting on the call there would hold it */
+  (void)queue;
   char error[256];
   pthread_mutex_lock(&global_lock);
-  int failed=!queue && nccl_mesh_gpu_attach(error,sizeof error);
+  int failed=nccl_mesh_gpu_attach(error,sizeof error);
   pthread_mutex_unlock(&global_lock);
   if(failed)return FAIL(NULL,ncclUnhandledCudaError,"the GPU: %s",error);
   struct ncclMeshStream *s=calloc(1,sizeof *s);
   if(!s)return FAIL(NULL,ncclSystemError,"allocation");
-  s->made=!queue;s->queue=queue?queue:nccl_mesh_queue_create();
+  s->made=1;s->queue=nccl_mesh_queue_create();
   s->event=s->queue?nccl_mesh_event_create(s->queue):NULL;
   if(!s->event){if(s->made && s->queue)nccl_mesh_release(s->queue);free(s);return FAIL(NULL,ncclUnhandledCudaError,"the stream's Metal queue and event");}
   *stream=s;
@@ -3007,8 +3010,8 @@ ncclResult_t ncclMeshStreamDestroy(cudaStream_t stream){
   free(stream);
   return ncclSuccess;
 }
-/* The stream's kept programs committed to its queue, after its committed ones (a wait at a command buffer's
-   start); stream_lock held. */
+/* The stream's kept programs committed to its queue, after its committed ones (the dispatcher's gate on their
+   completion); stream_lock held. */
 static ncclResult_t flush_kept(struct ncclMeshStream *s){
   if(!s->pending)return ncclSuccess;
   struct owned o={s->queue,entry_new(s->queue)};

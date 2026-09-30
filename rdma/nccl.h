@@ -76,9 +76,13 @@
    The stream: cudaStream_t is a struct ncclMeshStream *.  NULL makes a call (or a group holding a
    call with a NULL stream) synchronous: its program runs on the communicator's own queue and it
    returns once it and its transfers are complete.  On a stream a call returns once enqueued; its
-   program is committed to the stream's queue (the `queue` given to ncclMeshStreamCreate, or one of
-   the stream's own: Metal orders the work of a queue's command buffers only where they bind the same
-   buffer objects, so the records, not the queue, order a call after the work it reads), and its
+   program is committed to the stream's own queue, never a caller's: the work after a gate is committed
+   once the gate is reached, after the call has returned, and a Metal queue holds every command buffer
+   behind one that waits on an event at its start, so a caller's command buffer waiting there for the
+   call would hold the call's own work until the watchdog ended it (metal-microbench
+   output_data/maybe-20260930/probe/queueorder).  Metal orders the work of a queue's command buffers
+   only where they bind the same buffer objects, so the records, not a queue, order a call after the
+   work it reads and the caller's work after it; its
    completion is the stream's next value.  `value` is the timeline's last reserved value; a call reserves the next
    one(s).  Calls on one stream run in order; calls on different streams progress together (a send
    completes only once its peer has posted the receive, so a send and a receive that wait on each
@@ -115,8 +119,8 @@ extern "C" {
 #include <stdint.h>
 #include <stddef.h>
 
-/* The stream (above).  queue: id<MTLCommandQueue>; event: id<MTLSharedEvent>; value: the event's last
-   reserved value; made: the queue is the stream's own; deferred: ncclMeshStreamDefer's; pending: the
+/* The stream (above).  queue: id<MTLCommandQueue>, the stream's own; event: id<MTLSharedEvent>; value: the event's last
+   reserved value; made: 1 (the queue is the stream's own); deferred: ncclMeshStreamDefer's; pending: the
    programs kept for ncclMeshStreamEncodeWait, oldest first; committed: the last value a program
    committed to the queue signals. */
 struct ncclMeshStream { void *queue; void *event; uint64_t value; int made, deferred; void *pending; uint64_t committed; };
@@ -862,8 +866,8 @@ ncclResult_t ncclMeshReduceScatterVConfig(const void* sendbuff, void* recvbuff, 
 ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* sendsegs, void* recvbuff,
     size_t capacity, int64_t* received, int64_t* landed, const size_t* recvsegs, uint64_t* arrived, size_t row, ncclDataType_t datatype,
     ncclComm_t comm, cudaStream_t stream);
-/* A stream whose calls are committed to `queue` (an id<MTLCommandQueue>), or with NULL to a queue of
-   its own; its event made on the queue's device, value 0. */
+/* A stream, its calls committed to a queue of its own (above); `queue` (an id<MTLCommandQueue>, or
+   NULL) is not used; its event value 0. */
 ncclResult_t ncclMeshStreamCreate(cudaStream_t* stream, void* queue);
 ncclResult_t ncclMeshStreamDestroy(cudaStream_t stream);
 /* Waits on the host until the stream's event reaches its value (cudaStreamSynchronize). */
