@@ -24,9 +24,14 @@
 #define QD 4095
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 /* tbt_post_recv loads only the low 32 address bits of an SGE, so no registration may cross a 4 GiB
-   virtual-address boundary.  The window is mapped at a bank-aligned base and is required to fit in
-   one bank, which makes every region cut interior to that bank and a straddle impossible. */
+   virtual-address boundary.  The window is mapped at a bank-aligned base and cut into regions of
+   MESH_REGION bytes, which divides the bank: every region lies inside one bank, however many banks the
+   window spans.  1 GiB is the registration the provider takes (its advertised max_mr_size, 16.4 MB, is not
+   enforced: the RCA's 32 GiB and 6 GiB windows, and the tag pre-revert-20261001's 48 and 10 GiB), so max_mr
+   regions of it are the device's registrable memory; a provider that refuses one registers in regions of its
+   advertised max_mr_size, the window then within one bank. */
 #define MESH_BANK ((size_t)1<<32)
+#define MESH_REGION ((size_t)1<<30)
 struct mesh_wire { char *data; size_t length; };
 struct mesh_device {
   const char *name;
@@ -60,7 +65,8 @@ _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,
 struct mesh_verbs {
   struct mesh_device *device; struct mesh_wire *wire;
   struct mesh_queue *queues; int qp_count,listener;
-  struct ibv_cq *completion;
+  /* the prepared queue pairs' completions, and the streams' (a queue of their own: mesh-flow.c link_stream_*) */
+  struct ibv_cq *completion,*stream_completion;
   uint32_t peer,completion_entries[2];
   uint64_t bandwidth;
   const char *local_address,*remote_address,*service;
@@ -73,7 +79,6 @@ struct mesh_verbs {
 static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
   wire->length=(size_t)m->wire_pages*m->pgsz;
   wire->data=NULL;
-  if(wire->length>MESH_BANK){errno=ENOMEM;return -1;}
   char *reserved=mmap(NULL,wire->length+MESH_BANK,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE,-1,0);
   if(reserved==MAP_FAILED)return -1;
   char *base=(char *)(((uintptr_t)reserved+MESH_BANK-1)&~(uintptr_t)(MESH_BANK-1));
@@ -94,6 +99,10 @@ static int down_pair(struct mesh_verbs *provider){
   if(provider->completion){
     if(ibv_destroy_cq(provider->completion))return 0;
     provider->completion=NULL;
+  }
+  if(provider->stream_completion){
+    if(ibv_destroy_cq(provider->stream_completion))return 0;
+    provider->stream_completion=NULL;
   }
   free(provider->queues);provider->queues=NULL;
   return 1;
@@ -255,31 +264,43 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
   if(!device->domain)device->domain=ibv_alloc_pd(device->context);
   if(!device->domain){error=errno;goto done;}
   /* design/prepared-machine.md#M09 */
-  /* Registered memory is the declared window, not the arena: it is what an SGE names, it is wired
-     1:1 by the provider, and it is the only thing the MR table has to cover.  The addressable arena
-     grows without it. */
+  /* Registered memory is the declared window, not the arena: what an SGE names, wired 1:1 by the provider, in
+     regions of MESH_REGION bytes (a whole number of blocks, dividing the bank, so no region cut falls inside a
+     block and no region crosses a 4 GiB boundary: wire_span's divide is the only addressing form).  A provider
+     that refuses a region that size is registered in regions of its advertised max_mr_size instead, at most
+     max_mr of them, the window then within one bank. */
   size_t stride=(size_t)m->block*m->pgsz,span=wire->length;
-  size_t extent=(capabilities.max_mr_size<span?capabilities.max_mr_size:span)/stride*stride;
-  size_t regions=extent?(span+extent-1)/extent:0;
-  /* extent is a whole number of blocks and the window is one bank, so no region cut falls inside a
-     block and no region crosses a 4 GiB boundary: wire_span's divide is the only addressing form. */
-  if(!extent || regions>(size_t)capabilities.max_mr || span>MESH_BANK ||
-     ((uintptr_t)wire->data&(MESH_BANK-1))+span>MESH_BANK){
-    error=ENOMEM;
-    fprintf(stderr,"register %s window=%zu extent=%zu regions=%zu base=%p max_mr_size=%llu max_mr=%d\n",
-      device->name,span,extent,regions,(void *)wire->data,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr);
-    goto done;
-  }
-  if(!device->regions)device->regions=calloc(regions,sizeof *device->regions);
-  if(!device->regions){error=ENOMEM;goto done;}
-  while(device->region_count<regions){
-    size_t offset=(size_t)device->region_count*extent,end=offset+extent;
-    device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
-    if(!device->regions[device->region_count]){
-      error=errno;fprintf(stderr,"register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
-        device->name,offset,(end<span?end:span)-offset,span,extent,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));goto done;
+  size_t extent=(MESH_REGION<span?MESH_REGION:(span+stride-1))/stride*stride,regions=0;
+  for(;;){
+    regions=extent?(span+extent-1)/extent:0;
+    if(!extent || regions>(size_t)capabilities.max_mr || (MESH_BANK%extent && span>MESH_BANK) ||
+       ((uintptr_t)wire->data&(MESH_BANK-1))){
+      error=ENOMEM;
+      fprintf(stderr,"register %s window=%zu extent=%zu regions=%zu base=%p max_mr_size=%llu max_mr=%d\n",
+        device->name,span,extent,regions,(void *)wire->data,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr);
+      goto done;
     }
-    device->region_count++;
+    if(!device->regions)device->regions=calloc(regions,sizeof *device->regions);
+    if(!device->regions){error=ENOMEM;goto done;}
+    int refused=0;
+    while(device->region_count<regions){
+      size_t offset=(size_t)device->region_count*extent,end=offset+extent;
+      device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
+      if(!device->regions[device->region_count]){
+        error=errno;fprintf(stderr,"register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
+          device->name,offset,(end<span?end:span)-offset,span,extent,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));
+        refused=1;break;
+      }
+      device->region_count++;
+    }
+    if(!refused){error=0;break;}
+    size_t fallback=capabilities.max_mr_size/stride*stride;
+    if(!fallback || fallback>=extent)goto done;
+    while(device->region_count){
+      if(ibv_dereg_mr(device->regions[device->region_count-1]))goto done;
+      device->region_count--;
+    }
+    free(device->regions);device->regions=NULL;extent=fallback;
   }
   device->wire=wire->data;device->extent=extent;device->payload=stride;
   fprintf(stderr,"register %s window=%zu bytes extent=%zu regions=%zu arena=%llu bytes\n",
@@ -295,7 +316,10 @@ done:
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M06 */
 /* design/prepared-machine.md#M08 */
-static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
+/* `qps` prepared queue pairs on the provider's completion queue, then `streams` stream queue pairs on a queue of
+   their own (mesh-flow.c link_stream_*), every one paired with the peer's of the same index. */
+static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int prepared,int streams,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
+  int qps=prepared+streams;
   struct ibv_port_attr pa;
   if(device_up(provider->device,provider->wire,m,&pa))return -1;
   int f=oob(provider,m,client);
@@ -307,9 +331,13 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   provider->completion=ibv_create_cq(provider->device->context,
     (int)(frame_capacity+1),NULL,NULL,0);
   if(!provider->completion){close(f);return -1;}
+  if(streams){
+    provider->stream_completion=ibv_create_cq(provider->device->context,(int)(frame_capacity+1),NULL,NULL,0);
+    if(!provider->stream_completion){close(f);return -1;}
+  }
   for(int q=0;q<qps;q++){
     struct mesh_queue *queue=&provider->queues[q];
-    queue->completion=provider->completion;
+    queue->completion=q<prepared?provider->completion:provider->stream_completion;
     queue->poll=provider->completion->context->ops.poll_cq;
     struct ibv_qp_init_attr qi={.send_cq=queue->completion,
       .recv_cq=queue->completion,.qp_type=IBV_QPT_UC,

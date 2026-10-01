@@ -8,6 +8,9 @@ struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride;
 int mesh_transfer_bind(struct mesh_ctx *,uint32_t queue,int receive,uint32_t identity,struct mesh_section,uint32_t invocation_pages);
 int mesh_transfers_prepare(struct mesh_ctx *,uint32_t slots,uint32_t invocations,uint32_t depth);
 int mesh_transfers_start(struct mesh_ctx *);
+/* mesh.h mesh_ring: a link's communicator streams */
+int mesh_streams_bind(struct mesh_ctx *,uint32_t peer,uint32_t count,uint32_t entries,uint32_t chunk,
+                      struct mesh_ring **rings,struct mesh_section *storage);
 /* design/prepared-machine.md#M01 */
 void mesh_transfers_bank(struct mesh_ctx *,struct mesh_ctx *other);
 /* design/prepared-machine.md#M12 */

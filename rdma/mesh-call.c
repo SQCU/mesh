@@ -174,6 +174,36 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   return 0;
 }
 
+/* mesh.h mesh_ring: `count` streams on the link to node `peer`, each a send ring and a receive ring of `entries`
+   messages (a power of two, at least 4), made zeroed in the client's unregistered arena (`storage`: one section,
+   its rings in stream order, send before receive) and named in the link's notice entry with the chunk its messages
+   are cut in.  After mesh_transfers_prepare, before mesh_transfers_start; `rings` receives the 2 x count rings. */
+int mesh_streams_bind(struct mesh_ctx *context,uint32_t peer,uint32_t count,uint32_t entries,uint32_t chunk,
+                      struct mesh_ring **rings,struct mesh_section *storage){
+  struct hdr *m=context->M;
+  if(!count||entries<4||(entries&(entries-1))||!chunk)return EINVAL;
+  uint32_t link=MESH_ABSENT;
+  for(uint32_t p=0;p<m->links;p++)if(mesh_links(m)[p].peer==peer)link=p;
+  if(link==MESH_ABSENT)return ENOENT;
+  size_t ring=sizeof(struct mesh_ring)+(size_t)entries*sizeof(struct mesh_message);
+  struct mesh_section table;
+  int status=mesh_section_create(context,count*sizeof(struct mesh_stream),1,0,&table);
+  if(!status)status=mesh_section_create(context,2*count*ring,1,0,storage);
+  if(status)return status;
+  struct mesh_stream *stream=mesh_section_address(context,table,0);
+  char *base=mesh_section_address(context,*storage,0);
+  memset(stream,0,count*sizeof *stream);memset(base,0,2*count*ring);
+  for(uint32_t k=0;k<count;k++)for(int d=0;d<2;d++){
+    struct mesh_ring *made=(void *)(base+(2*k+(size_t)d)*ring);
+    made->entries=entries;
+    stream[k].ring[d]=(uintptr_t)made-(uintptr_t)m;
+    rings[2*k+(uint32_t)d]=made;
+  }
+  struct mesh_tx *tx=mesh_events(m,mesh_notice_queue(m,context->client,link));
+  tx->streams=(uintptr_t)stream-(uintptr_t)m;tx->stream_count=count;tx->chunk=chunk;
+  return 0;
+}
+
 /* design/prepared-machine.md#M01 */
 /* The client's other notice bank: `other` is `context` with the bank bit flipped and that bank's
    transfer lists emptied, so a second program is bound and prepared there while the bridge serves the
@@ -220,7 +250,8 @@ int mesh_transfers_start(struct mesh_ctx *context){
   /* design/prepared-machine.md#M26 */
   mesh_control_notify(m);
   for(uint32_t p=0;p<m->links;p++){
-    uint32_t transfers=0;
+    struct mesh_tx *tx=mesh_events(m,mesh_notice_queue(m,context->client,p));
+    uint32_t transfers=tx->streams?tx->stream_count:0;
     for(uint32_t q=0;q<m->qps;q++)for(int d=0;d<2;d++)transfers+=atomic_load(mesh_order_length(m,context->client,p*m->qps+q,d));
     if(!transfers)continue;
     struct mesh_port_info *port=&mesh_links(m)[p].port;

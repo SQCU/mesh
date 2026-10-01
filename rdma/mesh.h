@@ -10,7 +10,9 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 104u
+/* 104: d6dceac's prepared transfers.  113: 104 and each link's communicator streams (mesh_tx.streams, mesh_ring) and
+   its registered region's bytes (mesh_link_info.extent); 105-112 were the pre-revert sessions' and are not reused. */
+#define MESH_VERSION 113u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -47,11 +49,26 @@ struct mesh_send {
   _Alignas(32) struct ibv_sge span;
   struct ibv_send_wr request;
 };
-struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells; };
+struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells,streams; uint32_t stream_count,chunk; uint64_t padding[2]; };
 _Static_assert(sizeof(struct mesh_send)==256 && _Alignof(struct mesh_send)==128 &&
   offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 &&
   offsetof(struct mesh_send,request.send_flags)+sizeof(unsigned int)<=128,"M04/M29");
-_Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && sizeof(struct mesh_tx)==32,"M04/M12");
+_Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && offsetof(struct mesh_tx,streams)==32 &&
+  offsetof(struct mesh_tx,stream_count)==40 && sizeof(struct mesh_tx)==64,"M04/M12");
+/* A link's communicator streams (the client's mesh_streams_bind): each a queue pair of its own beyond the prepared
+   ones and two rings of messages in the client's memory, its SENDs' (MESH_SEND) and its RECVs' (MESH_RECEIVE).
+   Message k of a ring is its entry k mod entries once that entry's `ready` is k + 1 (stored last, release), by
+   whoever writes it (the client's host or its GPU): `bytes` bytes at byte `offset` of the registered window (a
+   SEND reads them, a RECV lands them there), within one registered region (mesh_link_info.extent).  The bridge
+   takes a ring's messages in order, cuts each into requests of at most mesh_tx.chunk bytes from its start (both
+   ends alike, so each SEND spans its RECV's frames), and stores k + 1 into the word at region offset `word` (0:
+   none) once its last request completes, or UINT64_MAX where its session ends first.  `taken` is how many
+   messages the bridge has taken (a mutable cell read at a defined point: it only grows): an entry is written
+   again only once the message it held is taken. */
+struct mesh_message { _Alignas(32) _Atomic uint64_t ready; uint64_t offset,bytes,word; };
+struct mesh_ring { _Alignas(128) _Atomic uint64_t taken; uint64_t entries,reserved[14]; struct mesh_message message[]; };
+struct mesh_stream { uint64_t ring[2]; };
+_Static_assert(sizeof(struct mesh_message)==32 && offsetof(struct mesh_ring,message)==128 && sizeof(struct mesh_stream)==16,"streams");
 struct mesh_target { uint64_t stream; uint32_t count,stride; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off */
@@ -62,7 +79,7 @@ _Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publi
 struct prepared_publication { _Alignas(16) uint64_t destination; uint64_t argument,padding[2]; };
 _Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepared_publication)==16 && offsetof(struct prepared_publication,argument)==8,"M13");
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; _Atomic uint64_t prepared; };
-struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth; struct mesh_port_info port; };
+struct mesh_link_info { uint32_t peer; char device[32]; uint64_t bandwidth,extent; struct mesh_port_info port; };
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M09 */
 struct hdr {

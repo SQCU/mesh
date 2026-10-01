@@ -1,5 +1,7 @@
-/* The d6dceac transport (MESH_VERSION 104), restored on 2026-10-01: the source of the fastest recorded E2B
-   decode (metal-microbench docs/measurement.md). TCP is used once per client session, at pairing. */
+/* The d6dceac transport, restored on 2026-10-01 (the source of the fastest recorded E2B decode: metal-microbench
+   docs/measurement.md), with each link's communicator streams beside its prepared transfers (MESH_VERSION 113).
+   TCP is used once per client session, at pairing; every byte and word after it travels as RDMA SEND into a posted
+   RECV. */
 #include "mesh-verbs.h"
 #include "mesh-call.h"
 #include <pthread.h>
@@ -49,6 +51,21 @@ _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_
 /* design/prepared-machine.md#M27 */
 struct mesh_trace { _Alignas(32) uint64_t identity; uint64_t begin,middle,end; };
 _Static_assert(sizeof(struct mesh_trace)==32 && _Alignof(struct mesh_trace)==32,"M27");
+/* A stream's request in flight: the frames it holds of its queue pair's send or receive capacity and, for a
+   message's last request, the word its completion is stored into and the value (the message's sequence + 1). */
+struct mesh_chunk { uint64_t word,value; uint32_t frames,stream; };
+#define MESH_STREAM_CHUNKS 4096
+/* A stream's state in the bridge, per direction (MESH_SEND, MESH_RECEIVE): the next message to take, the bytes of
+   the message being cut so far, and its requests in flight (a ring of MESH_STREAM_CHUNKS records, completions FIFO
+   per queue pair); its SENDs' frames in flight, which the receive thread's completions release. */
+struct mesh_stream_state {
+  uint64_t next[2],done[2],head[2],tail[2];
+  struct mesh_message current[2];
+  int active[2];
+  uint32_t receive_frames;
+  _Alignas(64) _Atomic uint32_t send_frames;
+  struct mesh_chunk chunks[2][MESH_STREAM_CHUNKS];
+};
 struct mesh_link {
   pthread_t workers[2];
   uint32_t worker_count,publication_count,cursor_count,index;
@@ -68,6 +85,11 @@ struct mesh_link {
   struct mesh_trace *trace[2];
   size_t traced[2],trace_capacity[2];
   int ledger;
+  /* the session's communicator streams (mesh.h mesh_ring): their rings, their state and their two threads */
+  uint32_t stream_count,stream_chunk,stream_worker_count,prepared_transfers;
+  struct mesh_ring **rings;
+  struct mesh_stream_state *streams;
+  pthread_t stream_workers[2];
 };
 /* design/prepared-machine.md#M26 */
 static _Atomic(struct hdr *) control_memory;
@@ -109,6 +131,26 @@ static int link_prepare(struct mesh_link *link){
   size_t count=0;
   uint32_t incoming=0;
   link->qps=(int)(m->qps*tx->slots);
+  /* the session's streams: their rings, and their state from each ring's taken (a session that pairs again
+     resumes there) */
+  free(link->rings);free(link->streams);link->rings=NULL;link->streams=NULL;
+  link->stream_count=tx->streams?tx->stream_count:0;link->stream_chunk=tx->chunk;
+  if(link->stream_count){
+    if(!link->stream_chunk || link->stream_chunk>(uint32_t)(QD-1)*4096)return EINVAL;
+    link->rings=calloc(2*(size_t)link->stream_count,sizeof *link->rings);
+    link->streams=aligned_alloc(64,link->stream_count*sizeof *link->streams);
+    if(!link->rings || !link->streams)return ENOMEM;
+    memset(link->streams,0,link->stream_count*sizeof *link->streams);
+    const struct mesh_stream *stream=(const void *)((char *)m+tx->streams);
+    for(uint32_t k=0;k<link->stream_count;k++)for(int d=0;d<2;d++){
+      struct mesh_ring *ring=(void *)((char *)m+stream[k].ring[d]);
+      if(!ring->entries || (ring->entries&(ring->entries-1)))return EINVAL;
+      link->rings[2*k+d]=ring;
+      link->streams[k].next[d]=atomic_load_explicit(&ring->taken,memory_order_acquire);
+    }
+  }
+  link->prepared_transfers=0;
+  for(uint32_t q=0;q<m->qps;q++)for(int d=0;d<2;d++)link->prepared_transfers+=atomic_load(mesh_order_length(m,link->client,link->index*m->qps+q,d));
   for(uint32_t q=0;q<m->qps;q++)for(uint32_t d=0;d<2;d++){
     uint32_t channel=link->index*m->qps+q;
     struct mesh_transfer *transfers=mesh_transfers(m,link->client,channel,d);
@@ -331,12 +373,18 @@ static int link_configure(void *state,int socket,uint64_t client){
   for(int q=0;q<link->qps;q++)if(link->cursors[q]){
     link->cursors[link->cursor_count++]=link->cursors[q];
   }
-  uint32_t posted=1,peer_posted;
+  /* the posted count, and the streams' count and chunk: the two ends cut each message alike */
+  uint32_t posted[3]={1,link->stream_count,link->stream_chunk},peer_posted[3];
   /* design/prepared-machine.md#M27 */
   if(link->ledger)fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"send_base\":%llu,\"receive_base\":%llu,\"invocations\":%u,\"send_stride\":%u,\"send_record_bytes\":%zu,\"receive_stride\":%u,\"send_capacity\":%zu,\"receive_capacity\":%zu}\n",
     link->index,m->node,(unsigned long long)(uintptr_t)link->publications,(unsigned long long)(uintptr_t)link->receive,
     invocations,invocations+1,sizeof(struct mesh_send),incoming,link->trace_capacity[MESH_SEND],link->trace_capacity[MESH_RECEIVE]);
-  return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,&link->provider,m,client);
+  if(exchange(socket,posted,peer_posted,sizeof posted,sizeof peer_posted,&link->provider,m,client))return -1;
+  if(peer_posted[1]!=posted[1] || peer_posted[2]!=posted[2]){
+    fprintf(stderr,"streams mismatch: %u of %u bytes here, %u of %u at the peer\n",posted[1],posted[2],peer_posted[1],peer_posted[2]);
+    errno=EPROTO;return -1;
+  }
+  return 0;
 }
 
 /* design/prepared-machine.md#M06 */
@@ -481,6 +529,141 @@ static void *link_receive_progress(void *argument){
   return link_receive_select(link,0);
 }
 
+/* mesh.h mesh_ring: a stream request's work request, over bytes [offset, offset + length) of the registered window;
+   its record in the stream's ring of requests in flight.  0, ENOMEM where the queue holds no more (not yet), or the
+   post's error. */
+static inline int link_stream_post(struct mesh_link *link,uint32_t k,int direction,uint64_t offset,uint32_t length,
+                                   uint32_t frames,uint64_t word,uint64_t value){
+  struct mesh_stream_state *state=&link->streams[k];
+  struct mesh_queue *queue=&link->provider.queues[link->qps+(int)k];
+  const struct mesh_device *device=link->provider.device;
+  struct mesh_chunk *record=&state->chunks[direction][state->head[direction]&(MESH_STREAM_CHUNKS-1)];
+  *record=(struct mesh_chunk){.word=word,.value=value,.frames=frames,.stream=k};
+  struct ibv_sge span={.addr=(uintptr_t)device->wire+offset,.length=length,.lkey=device->regions[offset/device->extent]->lkey};
+  int error;
+  atomic_thread_fence(memory_order_release);
+  if(direction==MESH_SEND){
+    struct ibv_send_wr request={.wr_id=(uintptr_t)record,.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+    error=queue->send(queue->pair,&request,&bad);
+  } else {
+    struct ibv_recv_wr request={.wr_id=(uintptr_t)record,.sg_list=&span,.num_sge=1},*bad;
+    error=queue->receive(queue->pair,&request,&bad);
+  }
+  if(error)return error<0?-error:error;
+  state->head[direction]++;
+  return 0;
+}
+
+/* One direction of every stream: each ring's next message taken once ready (its entry released for the client's
+   next write: taken), cut from its start into requests of at most the session's chunk, each posted while its queue
+   pair has the frames (a full queue is not yet), its last request carrying the message's word.  The send thread's
+   frames are released by the receive thread's completions (send_frames); the receive thread counts its own. */
+static __attribute__((always_inline)) inline int link_stream_advance(struct mesh_link *link,int direction){
+  int moved=0;
+  const uint32_t chunk=link->stream_chunk;
+  for(uint32_t k=0;k<link->stream_count;k++){
+    struct mesh_stream_state *state=&link->streams[k];
+    const uint32_t capacity=direction==MESH_SEND?link->provider.queues[link->qps+(int)k].send_capacity:
+      link->provider.queues[link->qps+(int)k].receive_capacity;
+    for(;;){
+      if(!state->active[direction]){
+        struct mesh_ring *ring=link->rings[2*k+(uint32_t)direction];
+        uint64_t sequence=state->next[direction];
+        struct mesh_message *entry=&ring->message[sequence&(ring->entries-1)];
+        if(atomic_load_explicit(&entry->ready,memory_order_acquire)!=sequence+1)break;
+        state->current[direction]=(struct mesh_message){.offset=entry->offset,.bytes=entry->bytes,.word=entry->word};
+        state->done[direction]=0;state->active[direction]=1;
+        atomic_store_explicit(&ring->taken,sequence+1,memory_order_release);
+      }
+      const struct mesh_message *message=&state->current[direction];
+      uint64_t remaining=message->bytes-state->done[direction];
+      uint32_t length=(uint32_t)(remaining<chunk?remaining:chunk),frames=length?(length+4095)/4096:1;
+      uint32_t held=direction==MESH_SEND?atomic_load_explicit(&state->send_frames,memory_order_acquire):state->receive_frames;
+      if(held+frames>capacity)break;
+      int last=state->done[direction]+length==message->bytes;
+      if(direction==MESH_SEND)atomic_fetch_add_explicit(&state->send_frames,frames,memory_order_relaxed);
+      else state->receive_frames+=frames;
+      int error=link_stream_post(link,k,direction,message->offset+state->done[direction],length,frames,
+                                 last?message->word:0,last?state->next[direction]+1:0);
+      if(error){
+        if(direction==MESH_SEND)atomic_fetch_sub_explicit(&state->send_frames,frames,memory_order_relaxed);
+        else state->receive_frames-=frames;
+        if(error==ENOMEM)break;
+        link_error(link,error,1);return -1;
+      }
+      state->done[direction]+=length;moved=1;
+      if(last){state->active[direction]=0;state->next[direction]++;}
+    }
+  }
+  return moved;
+}
+
+/* design/algorithm-sources.md#independent-native-queues */
+static void *link_stream_send(void *argument){
+  struct mesh_link *link=argument;
+  pthread_setname_np("mesh.rdma.stream.send");
+  for(;;){
+    int moved=link_stream_advance(link,MESH_SEND);
+    if(moved<0)return NULL;
+    if(!moved && !atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
+  }
+}
+
+/* The streams' receives posted as their rings give them, and every completion of the streams' queue: a request's
+   frames released, and a message's last request's word stored (release), so the waiting host or GPU sees the bytes
+   it covers. */
+static void *link_stream_receive(void *argument){
+  struct mesh_link *link=argument;
+  pthread_setname_np("mesh.rdma.stream.receive");
+  struct ibv_cq *completions=link->provider.stream_completion;
+  int (*poll)(struct ibv_cq *,int,struct ibv_wc *)=completions->context->ops.poll_cq;
+  struct ibv_wc done[16];
+  struct hdr *m=link->M;
+  for(;;){
+    int moved=link_stream_advance(link,MESH_RECEIVE);
+    if(moved<0)return NULL;
+    int count=poll(completions,16,done);
+    if(count<0){link_error(link,count,3);return NULL;}
+    if(count)atomic_thread_fence(memory_order_acquire);
+    for(int i=0;i<count;i++){
+      if(done[i].status){link_error(link,done[i].status,2);return NULL;}
+      struct mesh_chunk *record=(void *)(uintptr_t)done[i].wr_id;
+      struct mesh_stream_state *state=&link->streams[record->stream];
+      int direction=done[i].opcode&IBV_WC_RECV?MESH_RECEIVE:MESH_SEND;
+      if(direction==MESH_SEND)atomic_fetch_sub_explicit(&state->send_frames,record->frames,memory_order_release);
+      else state->receive_frames-=record->frames;
+      state->tail[direction]++;
+      if(record->word)atomic_store_explicit((_Atomic uint64_t *)((char *)m+record->word),record->value,memory_order_release);
+    }
+    if(!moved && !count && !atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
+  }
+}
+
+/* At a session's end, after the stream threads: every word a stream message would have stored that it has not is
+   UINT64_MAX (a request in flight, a message part taken, a message ready and not taken), so every waiter ends. */
+static void link_stream_cancel(struct mesh_link *link){
+  struct hdr *m=link->M;
+  for(uint32_t k=0;k<link->stream_count;k++)for(int d=0;d<2;d++){
+    struct mesh_stream_state *state=&link->streams[k];
+    for(uint64_t i=state->tail[d];i<state->head[d];i++){
+      struct mesh_chunk *record=&state->chunks[d][i&(MESH_STREAM_CHUNKS-1)];
+      if(record->word)atomic_store_explicit((_Atomic uint64_t *)((char *)m+record->word),UINT64_MAX,memory_order_release);
+    }
+    state->tail[d]=state->head[d];
+    if(state->active[d]){
+      if(state->current[d].word)atomic_store_explicit((_Atomic uint64_t *)((char *)m+state->current[d].word),UINT64_MAX,memory_order_release);
+      state->active[d]=0;state->next[d]++;
+    }
+    struct mesh_ring *ring=link->rings[2*k+(uint32_t)d];
+    for(;;){
+      struct mesh_message *entry=&ring->message[state->next[d]&(ring->entries-1)];
+      if(atomic_load_explicit(&entry->ready,memory_order_acquire)!=state->next[d]+1)break;
+      if(entry->word)atomic_store_explicit((_Atomic uint64_t *)((char *)m+entry->word),UINT64_MAX,memory_order_release);
+      atomic_store_explicit(&ring->taken,++state->next[d],memory_order_release);
+    }
+  }
+}
+
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#meshresult */
 static void link_close(struct mesh_link *link,int *control){
@@ -488,7 +671,9 @@ static void link_close(struct mesh_link *link,int *control){
   if(link->network>=0){close(link->network);link->network=-1;}
   if(*control>=0)shutdown(*control,SHUT_RDWR);
   while(link->worker_count)pthread_join(link->workers[--link->worker_count],NULL);
+  while(link->stream_worker_count)pthread_join(link->stream_workers[--link->stream_worker_count],NULL);
   if(link->cancel)mesh_cancel(link->M,link->cancel,link->index);
+  if(link->streams)link_stream_cancel(link);
   /* design/prepared-machine.md#M27 */
   for(int d=0;d<2;d++){
     for(size_t i=0;i<link->traced[d];i++){
@@ -512,8 +697,7 @@ static void link_close(struct mesh_link *link,int *control){
 static void *link_run(void *argument){
   struct mesh_link *link=argument;struct hdr *m=link->M;
   struct mesh_port_info *port=&mesh_links(m)[link->index].port;
-  uint32_t transfers=0;
-  for(uint32_t q=0;q<m->qps;q++)for(int d=0;d<2;d++)transfers+=atomic_load(mesh_order_length(m,link->client,link->index*m->qps+q,d));
+  uint32_t transfers=link->prepared_transfers+link->stream_count;
   struct kevent64_s event;
   EV_SET64(&event,(uint32_t)link->client,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,0,0,0);
   int error=kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)?errno:0,control=-1;
@@ -529,7 +713,7 @@ static void *link_run(void *argument){
     atomic_store_explicit(&port->phase,MESH_PAIRING,memory_order_release);
     /* a pairing whose connection went away is made again on the next one (mesh-verbs.h pairing_retried) */
     for(;;){
-      control=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
+      control=verbs_up(&link->provider,m,link->qps,(int)link->stream_count,link_configure,link,link->client);
       if(control>=0)break;
       int failure=errno?errno:EIO;
       while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);
@@ -547,25 +731,34 @@ static void *link_run(void *argument){
       error=kevent64(link->events,watched,2,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)?errno:0;
       if(!error){
         __atomic_store_n(&mesh_links(m)[link->index].bandwidth,link->provider.bandwidth,__ATOMIC_RELAXED);
-
+        __atomic_store_n(&mesh_links(m)[link->index].extent,link->provider.device->extent,__ATOMIC_RELEASE);
       }
       /* design/prepared-machine.md#M08 */
+      /* the prepared transfers' two threads where the session has prepared transfers, the streams' two where it
+         has streams: each set its own queue pairs and completion queue */
       void *(*progress[2])(void *)={link_receive_progress,link_send_progress};
+      void *(*streaming[2])(void *)={link_stream_receive,link_stream_send};
       pthread_attr_t attributes;
       pthread_attr_init(&attributes);
       pthread_attr_set_qos_class_np(&attributes,QOS_CLASS_USER_INTERACTIVE,0);
-      for(uint32_t d=0;d<1+(link->publication_count!=0) && !error;d++){
+      for(uint32_t d=0;link->prepared_transfers && d<1+(link->publication_count!=0) && !error;d++){
         error=pthread_create(&link->workers[d],&attributes,progress[d],link);
         if(error)break;
         link->worker_count++;
       }
+      for(uint32_t d=0;link->stream_count && d<2 && !error;d++){
+        error=pthread_create(&link->stream_workers[d],&attributes,streaming[d],link);
+        if(error)break;
+        link->stream_worker_count++;
+      }
       pthread_attr_destroy(&attributes);
       if(error)link_error(link,error,1);
       else {
-        qos_class_t classes[2]={QOS_CLASS_UNSPECIFIED,QOS_CLASS_UNSPECIFIED};int relative;
+        qos_class_t classes[4]={QOS_CLASS_UNSPECIFIED,QOS_CLASS_UNSPECIFIED,QOS_CLASS_UNSPECIFIED,QOS_CLASS_UNSPECIFIED};int relative;
         for(uint32_t d=0;d<link->worker_count;d++)pthread_get_qos_class_np(link->workers[d],&classes[d],&relative);
-        fprintf(stderr,"link %u progress threads %u qos receive 0x%x send 0x%x (0x%x user-interactive)\n",link->index,
-          link->worker_count,classes[0],classes[1],QOS_CLASS_USER_INTERACTIVE);
+        for(uint32_t d=0;d<link->stream_worker_count;d++)pthread_get_qos_class_np(link->stream_workers[d],&classes[2+d],&relative);
+        fprintf(stderr,"link %u progress threads %u qos receive 0x%x send 0x%x, stream threads %u qos 0x%x 0x%x (0x%x user-interactive)\n",
+          link->index,link->worker_count,classes[0],classes[1],link->stream_worker_count,classes[2],classes[3],QOS_CLASS_USER_INTERACTIVE);
         atomic_store_explicit(&port->phase,MESH_PAIRED,memory_order_relaxed);
         atomic_store_explicit(&port->prepared,link->client,memory_order_release);
       }
@@ -653,8 +846,6 @@ int main(int argc,char **argv){
   uint64_t length=mesh_layout(&geometry,(struct mesh_geometry){.pgsz=pg,.block=(uint32_t)block_pages,
     .pages=(uint32_t)arena_pages,.rows=(uint32_t)table_rows,.orders=(uint32_t)orders,
     .links=link_count,.qps=qps,.wire_pages=(uint32_t)window_pages});
-  /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
-  if((uint64_t)geometry.wire_pages*pg>MESH_BANK)die("registered window exceeds one 4 GiB bank: pass -W");
   uint64_t ram=0;size_t rl=sizeof ram;sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
   if(pct && length>(uint64_t)(pct/100*(double)ram))die("configured graph exceeds page capacity");
   if(layout){printf("%llu\n",(unsigned long long)length);return 0;}
@@ -682,6 +873,15 @@ int main(int argc,char **argv){
     mesh_links(m)[i].peer=link->provider.peer;
     snprintf(mesh_links(m)[i].device,sizeof mesh_links(m)[i].device,"%s",link->provider.device->name);
     atomic_store(&mesh_links(m)[i].port.phase,MESH_PAIRING);
+  }
+  /* design/prepared-machine.md#M09 */
+  /* the window registered at the start where its device's port is up, so a client knows each link's registered
+     region (mesh_link_info.extent: a stream message lies within one) before it allocates; a port that is down
+     registers at its first pairing */
+  for(uint32_t i=0;i<link_count;i++){
+    struct ibv_port_attr port;
+    if(!device_up(links[i].provider.device,&wire,m,&port))
+      __atomic_store_n(&mesh_links(m)[i].extent,links[i].provider.device->extent,__ATOMIC_RELEASE);
   }
   int status=0;
   /* design/prepared-machine.md#M11 */
@@ -738,6 +938,7 @@ int main(int argc,char **argv){
     close(link->events);
     free(link->requests);
     free(link->receive);
+    free(link->rings);free(link->streams);
     free(link->configuration);
   }
   for(uint32_t i=0;i<device_count;i++)pthread_mutex_destroy(&devices[i].setup);
