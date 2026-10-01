@@ -3328,6 +3328,22 @@ ncclResult_t ncclMeshPersistentStart(void *handle,void *event,uint64_t value,uin
   struct ncclComm *c=p->comm;
   pthread_mutex_lock(&c->lock);
   if(c->run || c->head){pthread_mutex_unlock(&c->lock);return FAIL(c,ncclInvalidUsage,"ncclMeshPersistentStart: the communicator has calls in flight");}
+  /* not revoked, and every rank of the calls' plans connected (one the last agreement left out, its node since back,
+     is not: the communicator agrees first, a remote error as an eager call's) */
+  int unconnected=-1;
+  for(int i=0;i<p->n && unconnected<0;i++)for(int j=0;j<p->items[i]->n && unconnected<0;j++){
+    const struct call *k=p->items[i]->calls+j;
+    for(uint32_t t=0;t<k->nsteps && unconnected<0;t++){
+      const struct peer *e=c->peers+k->steps[t].peer;
+      if(!e->send[CH_COLL] || !e->recv[CH_COLL])unconnected=(int)k->steps[t].peer;
+    }
+  }
+  const int revoked=atomic_load(&c->broken)!=0;
+  if(revoked || unconnected>=0){
+    pthread_mutex_unlock(&c->lock);
+    if(revoked)return FAIL(c,ncclRemoteError,"ncclMeshPersistentStart: the communicator is revoked (ncclMeshCommAgree first)");
+    return FAIL(c,ncclRemoteError,"ncclMeshPersistentStart: no connection reaches rank %d (ncclMeshCommAgree connects the ranks that stay)",unconnected);
+  }
   if(p->event)nccl_mesh_release(p->event);
   nccl_mesh_retain(event);
   p->event=event;p->value=value;p->stride=stride;p->total=count*(uint64_t)p->n;p->result=ncclSuccess;
@@ -3351,6 +3367,13 @@ ncclResult_t ncclMeshPersistentWait(void *handle){
   while(c->run==p)pthread_cond_wait(&c->cond,&c->lock);
   pthread_mutex_unlock(&c->lock);
   return p->result;
+}
+/* The persistent calls' communicator. */
+ncclResult_t ncclMeshPersistentComm(void *handle,ncclComm_t *comm){
+  struct persistent *p=handle;
+  if(!comm)return FAIL(NULL,ncclInvalidArgument,"ncclMeshPersistentComm: comm is NULL");
+  *comm=p?p->comm:NULL;
+  return ncclSuccess;
 }
 /* The persistent calls' communicator revoked (their replay failed): every part not yet started fails at its start,
    sending nothing; the caller may then let the replay's cuts pass so that every part starts and ends. */

@@ -964,6 +964,8 @@ ncclResult_t ncclMeshPersistentWait(void* handle);
    and sends nothing (the replay's cuts may then be signalled for them to run out); ncclMeshPersistentWait returns
    the failure, and the next call agrees. */
 ncclResult_t ncclMeshPersistentAbort(void* handle);
+/* The communicator the persistent calls run on (for its agreement where they fail). */
+ncclResult_t ncclMeshPersistentComm(void* handle, ncclComm_t* comm);
 ncclResult_t ncclMeshPersistentFree(void* handle);
 /* The algorithms the planner took for this thread's last ended group, a call each in issue
    order (at most `capacity`): 0 direct, 1 ring, 2 tree, 3 binomial (mesh-collective.h MESH_*),

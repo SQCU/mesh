@@ -1869,8 +1869,11 @@ static std::pair<double, double> replay(const std::shared_ptr<Recording> &made, 
       }
   const uint64_t gated = [made->gate signaledValue];
   if (made->ncalls) {
+    // a failure to start (the communicator revoked, or a rank it left out back) agrees, as an eager call's does
+    ncclComm_t comm = nullptr;
+    ncclMeshPersistentComm(made->calls, &comm);
     check(ncclMeshPersistentGate(made->calls, (__bridge void *)made->gate, gated), nullptr, "ncclMeshPersistentGate");
-    check(ncclMeshPersistentStart(made->calls, (__bridge void *)made->event, value, made->cuts, (uint64_t)steps), nullptr, "ncclMeshPersistentStart");
+    check(ncclMeshPersistentStart(made->calls, (__bridge void *)made->event, value, made->cuts, (uint64_t)steps), comm, "ncclMeshPersistentStart");
   }
   int failed = 0;
   {
@@ -1886,7 +1889,11 @@ static std::pair<double, double> replay(const std::shared_ptr<Recording> &made, 
   }
   const ncclResult_t result = made->ncalls ? ncclMeshPersistentWait(made->calls) : ncclSuccess;
   TORCH_CHECK(!failed, "mesh: the replay failed (the recorder's reason is on stderr)");
-  TORCH_CHECK(result == ncclSuccess, "mesh: a replayed step's calls: ", ncclGetErrorString(result), ": ", ncclGetLastError(nullptr));
+  if (result != ncclSuccess) {
+    ncclComm_t comm = nullptr;
+    ncclMeshPersistentComm(made->calls, &comm);
+    check(result, comm, "a replayed step's calls");
+  }
   double busy = 0, span = 0;
   r->times(made->replay, &busy, &span);
   if (traced) {
