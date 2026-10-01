@@ -38,11 +38,11 @@
    left the mesh) have called ncclMeshCommAgree, which agrees on the first failed call and makes the connections
    again.  Calls run as their plan's SEND /
    REDUCE / COPY steps on the bridge's communicator sessions (mesh-net.h, NCCL's ncclNet_v12 model).
-   ncclCommInitRankConfig connects this rank to every rank the table links it to, on the bridge link
-   that reaches it.
+   ncclCommInitRankConfig connects this rank to every rank the table states a link to, on the bridge link
+   that reaches it (a link not yet up is waited for).
    ncclCollConfig_t.algSelection names the planner's algorithms: "direct", "ring", "tree",
-   "binomial" (comma-separated).  MESH_NCCL_TIMEOUT bounds making a communicator's connections and an
-   agreement, in seconds (default 300), never a call.  A GPU program's waits on the network are leaky spins
+   "binomial" (comma-separated).  Nothing ends making a communicator's connections, an agreement or a call by
+   time: each waits for an observed event (a connection made, a rank departed).  A GPU program's waits on the network are leaky spins
    (MESH_NCCL_SPIN polls, a performance setting) followed by gates: the work after a gate is in a command buffer
    committed only once an event the library signals says the words it needs are set (the library's dispatcher
    for its own programs, the caller's ncclMeshGate_t for a kept one), as Metal ends a command buffer that waits
@@ -126,8 +126,9 @@ extern "C" {
 /* The stream (above).  queue: id<MTLCommandQueue>, the stream's own; event: id<MTLSharedEvent>; value: the event's last
    reserved value; made: 1 (the queue is the stream's own); deferred: ncclMeshStreamDefer's; pending: the
    programs kept for ncclMeshStreamEncodeWait, oldest first; committed: the last value a program
-   committed to the queue signals. */
-struct ncclMeshStream { void *queue; void *event; uint64_t value; int made, deferred; void *pending; uint64_t committed; };
+   committed to the queue signals; refs: the stream's holders (the caller's until ncclMeshStreamDestroy, and each
+   program of it until it has run); failed: 1 once a program of it failed for good (its synchronize and query fail). */
+struct ncclMeshStream { void *queue; void *event; uint64_t value; int made, deferred; void *pending; uint64_t committed; int refs, failed; };
 typedef struct ncclMeshStream *cudaStream_t;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
 typedef void *cudaEvent_t;
@@ -838,14 +839,19 @@ typedef struct { ncclConfig_t base; void* links; const int* nodes; } ncclMeshCon
    where a rank's connections are not whole, every rank closes its connections and takes the
    agreement's; the memory a failed call received into is held until the bridge has vacated its old
    connections; the async error is cleared and the count starts again.  A rank departed as this rank's bridge
-   sees it (mesh-net.h mesh_net_departed: its bridge's LEAVE heard, or this rank's bridge left) does not vote; every other rank must answer
-   by MESH_NCCL_TIMEOUT (a rank that does not fails the agreement).  The communicator keeps its ranks: a
-   caller plans its next work on the ranks that stay. */
+   observes it (its node's bridge left the mesh, or this rank's did; this process's region was replaced, its node
+   restarted; or its process exited: mesh-net.h mesh_net_departed, mesh_net_exited) does not vote, and one that
+   departs while the agreement runs leaves it then; every other rank's vote is waited for however late (nothing
+   ends an agreement by time).  A rank the last agreement left out whose node is back (its bridge paired again,
+   its process alive) votes again and is connected again: the communicator keeps its ranks and extends to those
+   that return (ULFM's shrink and its extension by the same agreement); a caller plans its next work on the
+   members (ncclMeshCommMembers). */
 ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t* failed, uint64_t* epoch);
 /* The ranks that voted in this rank's last ncclMeshCommAgree that succeeded: voters[r] (nranks entries) 1 where
-   rank r voted, 0 where it had departed as this rank's bridge saw it (its bridge, or this rank's, left the mesh;
-   all 0 before one). */
+   rank r voted, 0 where it had departed as this rank's bridge saw it (all 0 before one). */
 ncclResult_t ncclMeshCommVoters(ncclComm_t comm, int* voters);
+/* The ranks that are members as this rank's bridge observes them now: members[r] 1 but where rank r departed. */
+ncclResult_t ncclMeshCommMembers(ncclComm_t comm, int* members);
 /* MPI_Allgatherv and MPI_Reduce_scatter: rank r's segment is counts[r] elements (counts: nranks
    entries, the same on every rank, each at least 1), the segments packed in rank order, so rank r's
    lies after the segments of the ranks before it.  ncclMeshAllGatherV sends counts[rank] elements of
@@ -954,6 +960,10 @@ ncclResult_t ncclMeshPersistentStart(void* handle, void* event, uint64_t value, 
 ncclResult_t ncclMeshPersistentGate(void* handle, void* event, uint64_t value);
 ncclResult_t ncclMeshPersistentGates(void* handle, int* gates);
 ncclResult_t ncclMeshPersistentWait(void* handle);
+/* A replay that failed: the persistent calls' communicator revoked, so each part not yet started fails at its start
+   and sends nothing (the replay's cuts may then be signalled for them to run out); ncclMeshPersistentWait returns
+   the failure, and the next call agrees. */
+ncclResult_t ncclMeshPersistentAbort(void* handle);
 ncclResult_t ncclMeshPersistentFree(void* handle);
 /* The algorithms the planner took for this thread's last ended group, a call each in issue
    order (at most `capacity`): 0 direct, 1 ring, 2 tree, 3 binomial (mesh-collective.h MESH_*),

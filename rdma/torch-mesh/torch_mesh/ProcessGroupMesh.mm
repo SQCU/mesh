@@ -96,13 +96,14 @@ static std::string voters(ncclComm_t comm) {
   return named(in) + " (" + named(out) + " not voting: departed as this rank's bridge sees it, " +
          (out.size() == 1 ? "its bridge" : "their bridges") + " or this rank's having left the mesh)";
 }
-// A failure raised; a failure of the communicator (ncclRemoteError, ncclTimeout, ncclSystemError: the
-// network, a revoked call) only once the ranks that stay have agreed on it, the ranks that voted, the first
-// failed call and this rank's link-table epoch in its message.
+// A failure raised; a failure of the communicator (ncclRemoteError, ncclSystemError: the network, a revoked call;
+// ncclUnhandledCudaError: a GPU program of it failed for good) only once the ranks that stay have agreed on it, the
+// ranks that voted, the first failed call and this rank's link-table epoch in its message.  The agreement connects
+// the ranks that are members again (a rank whose node returned): a caller runs the call again on them.
 static void check(ncclResult_t result, ncclComm_t comm, const char *what) {
   if (result == ncclSuccess) return;
   const std::string cause = ncclGetLastError(comm);
-  if (comm && (result == ncclRemoteError || result == ncclTimeout || result == ncclSystemError)) {
+  if (comm && (result == ncclRemoteError || result == ncclTimeout || result == ncclSystemError || result == ncclUnhandledCudaError)) {
     auto agreed = agree_on(comm, " after the failure");
     TORCH_CHECK(false, "mesh: ", what, ": ", ncclGetErrorString(result), ": ", cause, " [agreed by ", voters(comm), ": call ", agreed.first,
                 " since the previous agreement failed; this rank plans on its link-table epoch ", agreed.second, "]");
@@ -134,6 +135,8 @@ static ncclDataType_t datatype(const at::Tensor &t) {
 // command buffers it committed, the fences (an event signalled at a command buffer's end); and the MPS
 // allocator's heaps made window heaps, their buffers in the window and those the device made (no room).
 static std::atomic<uint64_t> cpu_copied{0}, gpu_copied{0}, commits{0}, fences{0}, window_heaps_made{0}, window_buffers{0}, device_buffers{0};
+// The buffers a window heap placed on this thread (reserve: whether an allocation of its own was newly placed).
+static thread_local uint64_t placed_here = 0;
 
 static id<MTLDevice> device() {
   static id<MTLDevice> made = at::mps::is_available() ? at::mps::MPSDevice::getInstance()->device() : MTLCreateSystemDefaultDevice();
@@ -358,10 +361,23 @@ static constexpr size_t PUBLISHED_RANGE = (size_t)1 << 20;
 
 // ---- the MPS stream's fence ----
 // `body` on the MPS stream's serial queue (inline when already on it: a release closure can run there).
+// An exception the body throws is caught there and thrown again here (one leaving a dispatch_sync block ends the
+// process).
 template <typename F> static void on_mps(at::mps::MPSStream *s, F body) {
   const char *here = dispatch_queue_get_label(DISPATCH_CURRENT_QUEUE_LABEL), *mps = dispatch_queue_get_label(s->queue());
-  if (here && mps && !strcmp(here, mps)) body();
-  else dispatch_sync(s->queue(), ^{ body(); });
+  if (here && mps && !strcmp(here, mps)) {
+    body();
+    return;
+  }
+  __block std::exception_ptr thrown;
+  dispatch_sync(s->queue(), ^{
+    try {
+      body();
+    } catch (...) {
+      thrown = std::current_exception();
+    }
+  });
+  if (thrown) std::rethrow_exception(thrown);
 }
 static id<MTLSharedEvent> fence_event() {
   static id<MTLSharedEvent> event = [device() newSharedEvent];
@@ -447,6 +463,7 @@ static void *mps_gate(void *argument, void *commandBuffer, void *event, uint64_t
 }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options offset:(NSUInteger)offset {
   void *memory = nullptr, *buffer = nullptr;
+  c10d::placed_here++;
   if (ncclMeshMemAllocBuffer(&memory, length, options, &buffer) == ncclSuccess) {
     c10d::window_buffers++;
     return (__bridge id<MTLBuffer>)buffer;
@@ -479,8 +496,11 @@ static void window_heaps() {
     Method method = class_getInstanceMethod(cls, @selector(newHeapWithDescriptor:));
     // a device class that forwards the selector (the recorder's interposed device, an NSProxy): the method
     // added, its own the forwarding
-    if (method && class_getMethodImplementation(cls, @selector(newHeapWithDescriptor:)) != (IMP)_objc_msgForward)
-      metal_heap = method_setImplementation(method, (IMP)window_heap);
+    // the original published before the hook that calls it is installed
+    if (method && class_getMethodImplementation(cls, @selector(newHeapWithDescriptor:)) != (IMP)_objc_msgForward) {
+      metal_heap = method_getImplementation(method);
+      method_setImplementation(method, (IMP)window_heap);
+    }
     else {
       metal_heap = (IMP)_objc_msgForward;
       class_addMethod(cls, @selector(newHeapWithDescriptor:), (IMP)window_heap, "@@:@");
@@ -576,6 +596,10 @@ static id<MTLSharedEvent> host_event() {
   return event;
 }
 static std::atomic<uint64_t> host_next{0};
+static std::mutex &host_lock() {
+  static std::mutex lock;
+  return lock;
+}
 // A Metal buffer over the host pages holding `bytes` at `pointer`, no copy; `offset` the pointer's place.
 static id<MTLBuffer> host_pages(void *pointer, size_t bytes, size_t *offset) {
   const uintptr_t page = (uintptr_t)getpagesize(), at = (uintptr_t)pointer, first = at & ~(page - 1),
@@ -900,7 +924,25 @@ class Call {
       host_blits_(in);
     }
   }
+  // The blits on the backend's queue, one command buffer at a time (host_lock: the event's values signalled in
+  // order), each waited for: its value reached before it is declared; one that failed by no fault of its own
+  // (Metal's watchdog, a victim of another process's fault) run again from the same pages, one that faulted raised.
   void host_blits_(bool in) {
+    std::lock_guard<std::mutex> serial(host_lock());
+    for (;;) {
+      id<MTLCommandBuffer> cb = nil;
+      const uint64_t value = host_blits_once(in, &cb);
+      if (cb.status == MTLCommandBufferStatusCompleted) {
+        host_blits_done(in, value);
+        return;
+      }
+      const NSInteger code = cb.error.code;
+      TORCH_CHECK(code != MTLCommandBufferErrorPageFault && code != MTLCommandBufferErrorInvalidResource && code != MTLCommandBufferErrorStackOverflow &&
+                      code != MTLCommandBufferErrorNotPermitted && code != MTLCommandBufferErrorAccessRevoked && code != MTLCommandBufferErrorDeviceRemoved,
+                  "mesh: a CPU tensor's blits failed: ", cb.error.localizedDescription.UTF8String);
+    }
+  }
+  uint64_t host_blits_once(bool in, id<MTLCommandBuffer> *ran) {
     id<MTLCommandBuffer> cb = [host_queue() commandBuffer];
     std::vector<id<MTLBuffer>> wrapped;
     if (!in) {
@@ -939,12 +981,17 @@ class Call {
     [cb encodeSignalEvent:host_event() value:value];
     [cb commit];
     for (id<MTLBuffer> pages : wrapped) [pages release];  // the command buffer holds them until it has run
+    [cb waitUntilCompleted];
+    if (cb.status != MTLCommandBufferStatusCompleted && [host_event() signaledValue] < value) host_event().signaledValue = value;
+    for (auto &b : back) if (cb.status == MTLCommandBufferStatusCompleted) { b.first.copy_(b.second); cpu_copied += b.second.nbytes(); }
+    *ran = cb;
+    return value;
+  }
+  void host_blits_done(bool in, uint64_t value) {
     if (in) {
       check(ncclMeshMemUse(scratch_, scratch_bytes_, (__bridge void *)host_event(), value, 1), nullptr, "ncclMeshMemUse");
       return;
     }
-    [cb waitUntilCompleted];
-    for (auto &b : back) { b.first.copy_(b.second); cpu_copied += b.second.nbytes(); }
     check(ncclMeshMemRelease(scratch_, (__bridge void *)host_event(), value), nullptr, "ncclMeshMemRelease");
     scratch_ = nullptr;
   }
@@ -977,14 +1024,21 @@ class WorkMesh : public Work {
   }
   ~WorkMesh() override {
     try {
+      std::lock_guard<std::mutex> guard(lock_);
       if (call_) finish();
     } catch (const std::exception &) {
     }
   }
-  bool isCompleted() override { return !call_ || ncclMeshStreamQuery(call_->stream()) == ncclSuccess; }
+  bool isCompleted() override {
+    std::lock_guard<std::mutex> guard(lock_);
+    return !call_ || ncclMeshStreamQuery(call_->stream()) == ncclSuccess;
+  }
   bool isSuccess() const override { return true; }
   bool wait(std::chrono::milliseconds) override {
-    if (call_) finish();
+    {
+      std::lock_guard<std::mutex> guard(lock_);
+      if (call_) finish();
+    }
     ncclResult_t failed = ncclSuccess;
     if (comm_) ncclCommGetAsyncError(comm_, &failed);
     check(failed, comm_, "a call issued earlier");
@@ -993,6 +1047,7 @@ class WorkMesh : public Work {
   c10::intrusive_ptr<c10::ivalue::Future> getFuture() override { return future_; }
 
  private:
+  // once, under lock_ (a Work waited on from two threads finishes once)
   void finish() {
     cudaStream_t stream = call_->stream();
     if (stream && !call_->mps_) check(ncclMeshStreamSynchronize(stream), nullptr, "the stream");
@@ -1005,6 +1060,7 @@ class WorkMesh : public Work {
   std::shared_ptr<Call> call_;
   ncclComm_t comm_;
   c10::intrusive_ptr<c10::ivalue::Future> future_;
+  std::mutex lock_;
 };
 
 // The communicators of the live groups in the order they were made (the default group's first).
@@ -1416,6 +1472,9 @@ class ProcessGroupMesh : public Backend {
   ncclComm_t comm_ = nullptr;
   void *links_ = nullptr;
   std::shared_ptr<StreamPool> streams_ = std::make_shared<StreamPool>();
+  // a group's PreMulSum operators, destroyed once it has ended
+  bool grouping_ = false;
+  std::vector<ncclRedOp_t> created_;
 
   // A collective's call: synchronous on CPU tensors, on a stream of its own on MPS tensors.
   std::shared_ptr<Call> start(const at::Tensor &like, const char *op) { return std::make_shared<Call>(like, false, streams_, op); }
@@ -1466,8 +1525,16 @@ class ProcessGroupMesh : public Backend {
   }
   template <typename F> void group(F body) {
     check(ncclGroupStart(), comm_, "ncclGroupStart");
-    try { body(); } catch (...) { ncclGroupEnd(); throw; }
-    check(ncclGroupEnd(), comm_, "ncclGroupEnd");
+    grouping_ = true;
+    const auto destroy = [&] {
+      grouping_ = false;
+      for (ncclRedOp_t op : created_) ncclRedOpDestroy(op, comm_);
+      created_.clear();
+    };
+    try { body(); } catch (...) { ncclGroupEnd(); destroy(); throw; }
+    const ncclResult_t ended = ncclGroupEnd();
+    destroy();
+    check(ended, comm_, "ncclGroupEnd");
   }
   // A reduction under torch's ReduceOp: SUM, PRODUCT, MIN, MAX, AVG as NCCL's; PREMUL_SUM a PreMulSum
   // operator of its factor in the tensor's type; a bool tensor's SUM its MAX (logical or).
@@ -1491,7 +1558,11 @@ class ProcessGroupMesh : public Backend {
     default: TORCH_CHECK(false, "mesh: ", what, " has no NCCL operator for ReduceOp ", (int)(ReduceOp::RedOpType)reduceOp);
     }
     ncclResult_t result = call(op);
-    if (created) ncclRedOpDestroy(op, comm_);
+    // inside a group the operator is read at the group's end: destroyed then (group())
+    if (created) {
+      if (grouping_) created_.push_back(op);
+      else ncclRedOpDestroy(op, comm_);
+    }
     check(result, comm_, what);
   }
 };
@@ -1614,14 +1685,28 @@ static pybind11::list records() {
 // first call that failed on any voting rank since the previous agreement (None: none did) and this rank's
 // link-table epoch, on which every voting rank's table holds the same map of the group.
 static pybind11::tuple agree() {
-  ncclComm_t comm;
-  {
-    std::lock_guard<std::mutex> guard(comms_lock);
-    TORCH_CHECK(!comms.empty(), "mesh: agree() needs a process group of the backend");
-    comm = comms[0];
-  }
-  auto agreed = agree_on(comm, "");
+  std::lock_guard<std::mutex> guard(comms_lock);  // the group not destroyed while it agrees
+  TORCH_CHECK(!comms.empty(), "mesh: agree() needs a process group of the backend");
+  auto agreed = agree_on(comms[0], "");
   return pybind11::make_tuple(agreed.first ? pybind11::object(pybind11::int_(agreed.first)) : pybind11::none(), agreed.second);
+}
+// The ranks of the default group's communicator that are members as this rank's bridge observes them now (nccl.h
+// ncclMeshCommMembers: all but those departed: a node's bridge left, this node's region replaced, a rank's process
+// exited), and those that voted in its last agreement.
+static pybind11::tuple members() {
+  std::lock_guard<std::mutex> guard(comms_lock);
+  TORCH_CHECK(!comms.empty(), "mesh: members() needs a process group of the backend");
+  int n = 0;
+  check(ncclCommCount(comms[0], &n), nullptr, "ncclCommCount");
+  std::vector<int> now((size_t)n), voted((size_t)n);
+  check(ncclMeshCommMembers(comms[0], now.data()), nullptr, "ncclMeshCommMembers");
+  check(ncclMeshCommVoters(comms[0], voted.data()), nullptr, "ncclMeshCommVoters");
+  pybind11::list a, b;
+  for (int r = 0; r < n; r++) {
+    if (now[r]) a.append(r);
+    if (voted[r]) b.append(r);
+  }
+  return pybind11::make_tuple(a, b);
 }
 // The last agreement this process made: (how many so far, the first failed call or None, the epoch).
 static pybind11::tuple agreed() {
@@ -1692,9 +1777,11 @@ static void reserve(Recording *made) {
   made->bound = marked.size();
   if (!marked.empty()) allocator->recordEvents(marked);
   std::vector<at::Tensor> aside;
+  // each size until an allocation of it is newly placed (on this thread: the cache of that size is empty) or every
+  // wanted buffer is held
   for (auto &size : sizes) {
-    for (uint64_t tries = 0; tries < 65536 && !wanted.empty(); tries++) {
-      const uint64_t placed = window_buffers + device_buffers;
+    while (!wanted.empty()) {
+      const uint64_t placed = placed_here;
       at::Tensor t;
       try {
         t = at::empty({(int64_t)size.first}, at::TensorOptions().dtype(at::kByte).device(at::kMPS));
@@ -1704,7 +1791,7 @@ static void reserve(Recording *made) {
       const void *got = (__bridge const void *)at::native::mps::getMTLBufferStorage(t);
       if (wanted.erase(got)) made->reserved.push_back(t);
       else aside.push_back(t);
-      if (window_buffers + device_buffers != placed) break;
+      if (placed_here != placed) break;
     }
   }
   made->marked = made->reserved.size();
@@ -1790,8 +1877,12 @@ static std::pair<double, double> replay(const std::shared_ptr<Recording> &made, 
     pybind11::gil_scoped_release release;
     for (int64_t i = 0; i < steps && !failed; i++)
       failed = r->run_gated(made->replay, 0, 1, made->event, value + (uint64_t)i * made->cuts, made->gate, gated + (uint64_t)i * made->gates);
-    // a failed replay: its cuts passed, so the persistent calls run out
-    if (failed) made->event.signaledValue = value + (uint64_t)steps * made->cuts;
+    // a failed replay: its calls revoked (each not yet started fails at its start, sending nothing), then its cuts
+    // passed, so they run out
+    if (failed) {
+      if (made->ncalls) ncclMeshPersistentAbort(made->calls);
+      made->event.signaledValue = value + (uint64_t)steps * made->cuts;
+    }
   }
   const ncclResult_t result = made->ncalls ? ncclMeshPersistentWait(made->calls) : ncclSuccess;
   TORCH_CHECK(!failed, "mesh: the replay failed (the recorder's reason is on stderr)");
@@ -2139,6 +2230,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("trace_count", &c10d::trace_count);
   m.def("agree", &c10d::agree);
   m.def("agreed", &c10d::agreed);
+  m.def("members", &c10d::members);
   m.def("links", &c10d::links);
   m.def("all_to_all_counted", &c10d::all_to_all_counted);
   m.def("counted", &c10d::counted);

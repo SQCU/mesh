@@ -61,7 +61,7 @@ enum { K_SEND=MESH_ALLGATHER+1, K_RECV, K_COUNTED };
    worker saw the last of its pieces land and when it saw its send buffer's bytes ready (a persistent
    call's cut, or its first published range) */
 enum { CPU_COPY, GPU_COPY, GPU_KERNELS, HOST_WAITS, INPUT_WAITS, SENT, RECEIVED, GPU_EVENT_WAITS, GPU_WORD_WAITS, HOST_WORD_WAITS, COMMITS,
-       WAKEUPS, BUFFERS, SENDS, GRANT_WAITS, COUNTS, STARTED=COUNTS, ENDED, ARRIVED, READIED, TALLIES };
+       WAKEUPS, BUFFERS, SENDS, GRANT_WAITS, COUNTS, STARTED=COUNTS, ENDED, ARRIVED, READIED, DONE, TALLIES };
 enum { KERNEL_COMBINE, KERNEL_PREMULTIPLY, KERNEL_POSTDIVIDE };
 #define UID_MAGIC 0x4d4e434cu
 #define FLIGHTS 32
@@ -80,8 +80,9 @@ static uint64_t off(struct region r,const void *p){return (uint64_t)((const unsi
 struct call {
   int kind; const void *send; void *recv; size_t count; ncclDataType_t type; int op,root,peer;
   struct ncclComm *comm; struct ncclMeshStream *stream; uint32_t how; int force; uint64_t epoch;
-  /* its place among the calls issued on the communicator since its last agreement, from 1 */
-  uint64_t index;
+  /* its place among the collective calls issued on the communicator since its last agreement, from 1 (a
+     point-to-point call takes the next collective's: ranks issue different numbers of them), and that agreement */
+  uint64_t index,agreement;
   /* a reduce-scatter's or all-gather's count a rank, the call's own copy (NULL: `count` each); a counted
      all-to-all's (K_COUNTED, ncclMeshAlltoAllCounted) segment lengths, the sent then the received, a rank
      each, its counts, where the received ones go on the host and the word set as they have, its rows of
@@ -182,20 +183,24 @@ struct ncclComm {
   pthread_mutex_t lock; pthread_cond_t cond;
   struct item *head,*tail; int busy;
   struct flight *flights; int nflights,*blocked;
-  _Atomic int aborting,broken,async;
+  /* gpu_failed: a GPU program of this communicator failed and could not be run again (its inputs not retained):
+     its call failed, the communicator revoked until the next agreement */
+  _Atomic int aborting,broken,async,gpu_failed;
   char error[512];
   /* recovery (ncclMeshCommAgree): the calls issued since the last agreement, the index of the first
-     that failed (0: none) and its cause; the agreements made (alike on every rank: their connections'
-     keys); the slots of the connections closed since, and the event a failed part's memory is held on
-     until the bridge has vacated them (`quiet`: the value it is held for); the ranks that voted in the last
-     agreement (`voted`: 1 a rank, 0 one departed as this rank's bridge saw it: its bridge, or this rank's, left) */
-  _Atomic uint64_t issued; uint64_t failed,agreements; char cause[256]; unsigned char *voted;
-  uint64_t *closed; int nclosed,open; void *quiet; uint64_t quiet_value;
+     that failed (0: none) and its cause; the agreements made; the members of the last one (`view`: a hash of the
+     ranks that voted) and the agreements made in a row with that view (`in_view`), alike on the ranks of one view,
+     which key an agreement's connections, so ranks whose histories differ (a rank that agreed alone while its node
+     was gone) meet once their views are one; the slots of the connections closed since, and the event a failed
+     part's memory is held on until the bridge has vacated them (`quiet`: the value it is held for); the ranks that
+     voted in the last agreement (`voted`: 1 a rank, 0 one departed); each rank's process as its connections named
+     it (`owner`, mesh-net.h mesh_net_peer_owner: a rank whose process its node's bridge no longer reports departed) */
+  _Atomic uint64_t issued; uint64_t failed,agreements,view,in_view; char cause[256]; unsigned char *voted;
+  uint64_t *closed,*owner; int nclosed,open; void *quiet; uint64_t quiet_value;
 };
 
 #define HIDDEN __attribute__((visibility("hidden")))
 HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size);
-HIDDEN int nccl_mesh_gpu_failed(void);
 HIDDEN void *nccl_mesh_buffer(const void *pointer,size_t bytes,uint64_t *offset);
 HIDDEN void *nccl_mesh_buffer_owned(const void *pointer,size_t bytes,uint64_t options,void (*gone)(void *),void *argument);
 HIDDEN void *nccl_mesh_queue_create(void);
@@ -211,8 +216,8 @@ HIDDEN void nccl_mesh_program_kernel(void *program,int kernel,void *to,uint64_t 
   int published,void *other,uint64_t at,void *pred,uint64_t pred_at,int want,uint64_t grid);
 HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received,int published,
   void *pred,uint64_t pred_at,int want,uint64_t grid);
-HIDDEN void nccl_mesh_program_spin(void *program,void *buffer,const uint64_t *at,uint32_t n,uint64_t flag,uint64_t leaked,void *given,
-  void *const *touch,int ntouch);
+HIDDEN int nccl_mesh_program_spin(void *program,void *buffer,const uint64_t *at,uint32_t n,uint64_t flag,uint64_t leaked,void *given,
+  void *const *touch,int ntouch,void **held);
 HIDDEN void nccl_mesh_program_publish(void *program,void *buffer,uint64_t at,uint64_t value,void *pred,uint64_t pred_at,int want);
 HIDDEN void nccl_mesh_program_zero(void *program,void *buffer,uint64_t at,uint64_t n);
 HIDDEN void nccl_mesh_program_counted(void *program,void *to,void *from,void *counts,void *got,void *landed,const uint64_t *a,uint32_t na,uint64_t units,
@@ -220,6 +225,7 @@ HIDDEN void nccl_mesh_program_counted(void *program,void *to,void *from,void *co
 HIDDEN void nccl_mesh_program_end(void *program);
 HIDDEN void nccl_mesh_program_handler(void *program,void (*done)(void *,int),void *argument);
 HIDDEN void nccl_mesh_program_commit(void *program,void (*done)(void *,int),void *argument);
+HIDDEN void nccl_mesh_program_drop(void *program);
 
 /* ---- errors ---- */
 static _Thread_local char last_error[512];
@@ -236,10 +242,6 @@ static ncclResult_t net_failure(struct ncclComm *c,int result,const char *what){
 }
 
 static uint64_t now_ns(void){return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);}
-static uint64_t deadline_after(void){
-  const char *text=getenv("MESH_NCCL_TIMEOUT");double seconds=text?atof(text):0;
-  return now_ns()+(uint64_t)((seconds>0?seconds:300)*1e9);
-}
 static uint64_t mix(uint64_t x){
   x+=UINT64_C(0x9e3779b97f4a7c15);
   x=(x^(x>>30))*UINT64_C(0xbf58476d1ce4e5b9);x=(x^(x>>27))*UINT64_C(0x94d049bb133111eb);
@@ -347,6 +349,7 @@ static ncclResult_t links_for(struct ncclComm *c,const ncclConfig_t *config){
   const size_t n=(size_t)c->nranks,steps=MESH_COLLECTIVE_STEPS(c->nranks);
   c->nodes=calloc(n,sizeof *c->nodes);
   c->voted=calloc(n,1);
+  c->owner=calloc(n,sizeof *c->owner);
   c->seen=mesh_link_contents_new(c->table->nodes);
   c->pairs=calloc((size_t)c->nranks*(size_t)c->nranks,sizeof *c->pairs);
   c->stated_pairs=calloc((size_t)c->nranks*(size_t)c->nranks,sizeof *c->stated_pairs);
@@ -355,7 +358,7 @@ static ncclResult_t links_for(struct ncclComm *c,const ncclConfig_t *config){
   for(int p=0;c->plans && p<PLANS;p++){c->plans[p].segments=calloc(n,sizeof *c->plans[p].segments);c->plans[p].steps=calloc(steps,sizeof *c->plans[p].steps);}
   for(int p=0;c->plans && p<PLANS;p++)if(!c->plans[p].segments || !c->plans[p].steps)return FAIL(c,ncclSystemError,"allocation");
   c->used=calloc(n,sizeof *c->used);
-  if(!c->nodes || !c->voted || !c->seen || !c->pairs || !c->stated_pairs || !c->cost || !c->plans || !c->used)
+  if(!c->nodes || !c->voted || !c->owner || !c->seen || !c->pairs || !c->stated_pairs || !c->cost || !c->plans || !c->used)
     return FAIL(c,ncclSystemError,"allocation");
   c->epoch=mesh_link_table_read(c->table,c->seen);
   for(int r=0;r<c->nranks;r++){
@@ -381,18 +384,32 @@ static void close_peers(struct ncclComm *c,struct peer *peers,int keep){
     void **end[2]={&peers[p].send[ch],&peers[p].recv[ch]};
     for(int e=0;e<2;e++){
       if(!*end[e])continue;
-      if(keep && c->nclosed<c->nranks*CHANNELS*2)c->closed[c->nclosed++]=mesh_net_slot(*end[e]);
+      if(keep && c->nclosed<c->nranks*CHANNELS*4)c->closed[c->nclosed++]=mesh_net_slot(*end[e]);
       if(e)mesh_net_close_recv(*end[e]);else mesh_net_close_send(*end[e]);
       *end[e]=NULL;
     }
   }
   if(peers==c->peers)c->open=0;
 }
+/* Whether rank p departed as this rank's bridge observes it: its node's bridge left the mesh (or this node's did, or
+   this process's region was replaced), or its process exited (absent from its node's client table as that node's
+   bridge last reported it: mesh-net.h mesh_net_exited).  Observed events only; a node merely silent is late. */
+static int departed(struct ncclComm *c,int p){
+  return p!=c->rank && (mesh_net_departed(c->nodes[p]) || mesh_net_exited(c->nodes[p],c->owner[p]));
+}
+/* Each rank's process as the connections of `peers` name it. */
+static void owners(struct ncclComm *c,const struct peer *peers){
+  for(int p=0;p<c->nranks;p++){
+    const uint64_t owner=peers[p].recv[CH_P2P]?mesh_net_peer_owner(peers[p].recv[CH_P2P]):0;
+    if(owner)c->owner[p]=owner;
+  }
+}
 /* Both channels each way with every rank `want` marks, into `peers`, on whichever of the bridge's
    links reaches it: a listen on every link for each such rank's connections (keys both ends derive
    from the clique key `key`), a connect on every link to each such rank's; the one its bridge accepts
-   is the link.  The probing connects that met no listen are withdrawn with their context. */
-static ncclResult_t connect_ranks(struct ncclComm *c,uint64_t key,const unsigned char *want,struct peer *peers,uint64_t deadline){
+   is the link.  It waits until each is connected or departed (marked in `gone`, where given, and no longer
+   wanted): no clock ends it.  The probing connects that met no listen are withdrawn with their context. */
+static ncclResult_t connect_ranks(struct ncclComm *c,uint64_t key,unsigned char *want,struct peer *peers,unsigned char *gone){
   for(int p=0;p<c->nranks;p++)peers[p].dev=-1;
   int wanted=0;
   for(int p=0;p<c->nranks;p++)wanted+=want[p];
@@ -419,6 +436,14 @@ static ncclResult_t connect_ranks(struct ncclComm *c,uint64_t key,const unsigned
   }
   for(int done=0;!status && !done;){
     done=1;
+    for(int p=0;p<c->nranks && !status;p++)if(want[p] && departed(c,p)){
+      /* departed while waiting: no longer wanted, its connections made so far closed */
+      want[p]=0;if(gone)gone[p]=1;
+      for(int ch=0;ch<CHANNELS;ch++){
+        if(peers[p].send[ch]){mesh_net_close_send(peers[p].send[ch]);peers[p].send[ch]=NULL;}
+        if(peers[p].recv[ch]){mesh_net_close_recv(peers[p].recv[ch]);peers[p].recv[ch]=NULL;}
+      }
+    }
     for(int p=0;p<c->nranks && !status;p++)if(want[p])for(int ch=0;ch<CHANNELS && !status;ch++){
       struct peer *e=peers+p;
       /* one made in a session that has since ended (a bridge resuming from a stop takes the connects its
@@ -440,27 +465,22 @@ static ncclResult_t connect_ranks(struct ncclComm *c,uint64_t key,const unsigned
       }
       done&=e->send[ch] && e->recv[ch];
     }
-    if(!done && !status){
-      if(now_ns()>deadline){
-        int missing=-1;
-        for(int p=0;p<c->nranks && missing<0;p++)if(want[p])
-          for(int ch=0;ch<CHANNELS;ch++)if(!peers[p].send[ch] || !peers[p].recv[ch])missing=p;
-        status=FAIL(c,ncclTimeout,"rank %d: no connection with rank %d by the deadline (MESH_NCCL_TIMEOUT): no bridge link reaches it, or it has not joined",c->rank,missing);
-      } else usleep(200);
-    }
+    if(!done && !status)usleep(200);
   }
   for(size_t i=0;listens && i<count;i++)if(listens[i])mesh_net_close_listen(listens[i]);
   free(listens);free(targets);
   mesh_net_finalize(probe);
   return status;
 }
-/* The communicator's connections: with every rank the map links this one to. */
+/* The communicator's connections: with every rank the stated map links this one to (a link not yet up waits for
+   its session), each rank's process as they name it. */
 static ncclResult_t connect_peers(struct ncclComm *c){
   unsigned char *want=calloc((size_t)c->nranks,1);
   if(!want)return FAIL(c,ncclSystemError,"allocation");
-  for(int p=0;p<c->nranks;p++)want[p]=(unsigned char)linked(&c->map,c->rank,p);
-  ncclResult_t status=connect_ranks(c,c->key,want,c->peers,deadline_after());
+  for(int p=0;p<c->nranks;p++)want[p]=(unsigned char)linked(&c->stated,c->rank,p);
+  ncclResult_t status=connect_ranks(c,c->key,want,c->peers,NULL);
   free(want);
+  if(!status)owners(c,c->peers);
   c->open=!status;
   return status;
 }
@@ -513,14 +533,14 @@ static void point_set(struct point *p,void *event,uint64_t value){
 }
 /* A reader's point joins the record's: the same event's later value replaces its earlier one, the
    points already reached make room; with none, the host waits for the oldest (counted), for as long as it
-   takes (the GPU's work is late, not wrong), unless the process's GPU failed. */
+   takes (the GPU's work is late, not wrong; a program that failed for good has its points given by the host). */
 static void read_add(struct span *s,void *event,uint64_t value,uint64_t *tally){
   for(int i=0;i<s->nread;i++)if(s->read[i].event==event){if(value>s->read[i].value)s->read[i].value=value;return;}
   for(int i=0;i<s->nread;)if(reached(s->read[i])){point_drop(s->read+i);s->read[i]=s->read[--s->nread];}else i++;
   if(s->nread==READS){
     if(tally)tally[HOST_WAITS]++;
     atomic_fetch_add_explicit(&totals[HOST_WAITS],1,memory_order_relaxed);
-    while(!reached(s->read[0]) && !nccl_mesh_gpu_failed())sched_yield();
+    while(!reached(s->read[0]))sched_yield();
     point_drop(s->read);s->read[0]=s->read[--s->nread];
   }
   s->read[s->nread].event=NULL;
@@ -674,9 +694,8 @@ static ncclResult_t span_alloc_(size_t size,unsigned char **out,uint64_t *tally,
     }
     int freed=0;
     for(int i=0;i<heap.n && !freed;i++)freed=heap.spans[i].freed;
-    if(owned || !freed || nccl_mesh_gpu_failed()){
-      status=FAIL(NULL,ncclSystemError,"%zu bytes of the bridge's registered window: %s",bytes,
-                  freed?"its freed allocations' uses never end (the process's GPU failed)":"no room (the bridge's -A/-W window)");
+    if(owned || !freed){
+      status=FAIL(NULL,ncclSystemError,"%zu bytes of the bridge's registered window: no room (the bridge's -A/-W window)",bytes);
       break;
     }
     if(!waited++){if(tally)tally[HOST_WAITS]++;atomic_fetch_add_explicit(&totals[HOST_WAITS],1,memory_order_relaxed);}
@@ -766,7 +785,7 @@ static ncclResult_t post(struct ncclComm *c,int send,void *comm,void *data,size_
 static ncclResult_t word_wait(struct ncclComm *c,struct call *k,_Atomic uint64_t *word,const char *what){
   count(k,HOST_WORD_WAITS,1);
   while(!atomic_load_explicit(word,memory_order_acquire)){
-    if(nccl_mesh_gpu_failed())return FAIL(c,ncclUnhandledCudaError,"%s: a GPU program failed",what);
+    if(atomic_load(&c->gpu_failed))return FAIL(c,ncclUnhandledCudaError,"%s: a GPU program of the communicator failed",what);
     if(stopped(c))return stop_reason(c,what);
     progress(c);
     sched_yield();
@@ -843,7 +862,7 @@ static ncclResult_t ranges_wait(struct ncclComm *c,struct call *k,size_t lo,size
     if(atomic_load_explicit(k->ready+r,memory_order_acquire)>=want)continue;
     count(k,HOST_WORD_WAITS,1);
     while(atomic_load_explicit(k->ready+r,memory_order_acquire)<want){
-      if(nccl_mesh_gpu_failed())return FAIL(c,ncclUnhandledCudaError,"a published range of a persistent call's send buffer: a GPU program failed");
+      if(atomic_load(&c->gpu_failed))return FAIL(c,ncclUnhandledCudaError,"a published range of a persistent call's send buffer: a GPU program of the communicator failed");
       if(stopped(c))return stop_reason(c,"a published range of a persistent call's send buffer");
       progress(c);
       sched_yield();
@@ -1051,18 +1070,20 @@ static void gate_arm(struct gate *g){
   if(g->armed){
     int kept=0;
     for(int i=0;i<c->narmed;i++)if(c->armed[i]!=g)c->armed[kept++]=c->armed[i];
-    c->narmed=kept;
+    __atomic_store_n(&c->narmed,kept,__ATOMIC_RELEASE);
   }
   g->ready=0;g->armed=1;
   if(c->narmed==c->carmed){
+    /* a gate is never left unarmed (it would never open): the table's growth waited for */
     int capacity=c->carmed?2*c->carmed:64;
-    struct gate **grown=realloc(c->armed,(size_t)capacity*sizeof *grown);
-    if(grown){c->armed=grown;c->carmed=capacity;}
+    struct gate **grown;
+    while(!(grown=realloc(c->armed,(size_t)capacity*sizeof *grown)))sched_yield();
+    c->armed=grown;c->carmed=capacity;
   }
-  if(c->narmed<c->carmed){
+  {
     int at=c->narmed;
     while(at && c->armed[at-1]->value>g->value){c->armed[at]=c->armed[at-1];at--;}
-    c->armed[at]=g;c->narmed++;
+    c->armed[at]=g;__atomic_store_n(&c->narmed,c->narmed+1,__ATOMIC_RELEASE);
   }
   pthread_mutex_unlock(&c->gates_lock);
 }
@@ -1071,7 +1092,7 @@ static void gate_arm(struct gate *g){
    then its landing word set; a gate that is not a persistent call's then freed. */
 #define GATE_EVENTS 8
 static void gates_check(struct ncclComm *c){
-  if(!c->narmed)return;
+  if(!__atomic_load_n(&c->narmed,__ATOMIC_ACQUIRE))return;
   pthread_mutex_lock(&c->gates_lock);
   void *blocked[GATE_EVENTS];int nblocked=0,kept=0,opened_now=0;
   for(int i=0;i<c->narmed;i++){
@@ -1094,7 +1115,7 @@ static void gates_check(struct ncclComm *c){
     if(!g->run){free(g->words);free(g);}
     opened_now++;
   }
-  c->narmed=kept;
+  __atomic_store_n(&c->narmed,kept,__ATOMIC_RELEASE);
   pthread_mutex_unlock(&c->gates_lock);
   if(opened_now)dispatch_pump();
 }
@@ -1111,7 +1132,7 @@ static void retire(struct ncclComm *c,struct flight *f){
 }
 static void progress(struct ncclComm *c){
   gates_check(c);
-  if(c->run)persistent_post(c);
+  if(__atomic_load_n(&c->run,__ATOMIC_ACQUIRE))persistent_post(c);
   if(!c->flights)return;
   memset(c->blocked,0,sizeof *c->blocked*(size_t)c->nranks*2);
   for(struct flight **link=&c->flights;*link;){
@@ -1203,16 +1224,21 @@ static void start(struct ncclComm *c,struct item *it){
 #define WORKER_SPIN_NS UINT64_C(1000000000)
 static void launch_free(struct launch *l){
   pthread_mutex_destroy(&l->lock);pthread_cond_destroy(&l->cond);
-  if(l->stage)span_release(l->stage,NULL,0);
+  /* the group's allocation given back once its last part has ended (the workers are done with it) and its program
+     has run (its end), never before */
+  if(l->stage)span_release(l->stage,l->persistent?NULL:l->event,l->persistent?0:l->end);
   for(int w=0;w<l->nwaits;w++)point_drop(l->waits+w);
   for(int g=0;g<l->ngates;g++)if(l->gates[g]->run){free(l->gates[g]->words);free(l->gates[g]);}
   tally_release(l->tally);free(l->waits);free(l->marks);free(l->gates);free(l);
 }
 /* The first failure since the last agreement: its call's index (the least) and its cause. */
-static void failed_at(struct ncclComm *c,uint64_t index,const char *cause){
+/* (a call issued before the last agreement counts no more: its index was of the calls before it) */
+static void failed_at(struct ncclComm *c,uint64_t index,const char *cause,uint64_t agreement){
   pthread_mutex_lock(&c->lock);
-  if(index && (!c->failed || index<c->failed))c->failed=index;
-  if(!c->cause[0])snprintf(c->cause,sizeof c->cause,"%s",cause);
+  if(agreement==c->agreements){
+    if(index && (!c->failed || index<c->failed))c->failed=index;
+    if(!c->cause[0])snprintf(c->cause,sizeof c->cause,"%s",cause);
+  }
   pthread_mutex_unlock(&c->lock);
 }
 /* A failure revokes the communicator (ULFM's MPI_Comm_revoke [Bland et al., "Post-failure recovery of
@@ -1258,15 +1284,15 @@ static void hold(struct ncclComm *c,struct item *it){
 struct persistent { struct item **items; int n,capacity; struct ncclComm *comm; void *event; uint64_t value,stride,total;
   _Atomic uint64_t next; ncclResult_t result; uint64_t posting; int spart,scall,rpart,rcall; ncclResult_t post_failed;
   void *gate_event; uint64_t gate_value; int gates; };
-static struct { pthread_mutex_t lock; struct persistent *building; struct { const uint64_t *ready; uint64_t range,bytes; int fresh,given; } next;
+static _Thread_local struct { pthread_mutex_t lock; struct persistent *building; struct { const uint64_t *ready; uint64_t range,bytes; int fresh,given; } next;
   int cut,groups; } persisting={PTHREAD_MUTEX_INITIALIZER,NULL,{0},0,0};
 static uint64_t persistent_iteration(const struct item *it){return atomic_load(&it->run->next)/(uint64_t)it->run->n;}
-static ncclResult_t persistent_failure(struct ncclComm *c){return c->run?c->run->post_failed:ncclSuccess;}
+static ncclResult_t persistent_failure(struct ncclComm *c){struct persistent *p=__atomic_load_n(&c->run,__ATOMIC_ACQUIRE);return p?p->post_failed:ncclSuccess;}
 static void persistent_ended(struct ncclComm *c,struct item *it,ncclResult_t result){
   struct persistent *p=it->run;
   if(result && !p->result)p->result=result;
   pthread_mutex_lock(&c->lock);
-  if(atomic_fetch_add(&p->next,1)+1>=p->total)c->run=NULL;
+  if(atomic_fetch_add(&p->next,1)+1>=p->total)__atomic_store_n(&c->run,NULL,__ATOMIC_RELEASE);
   pthread_cond_broadcast(&c->cond);
   pthread_mutex_unlock(&c->lock);
 }
@@ -1379,16 +1405,17 @@ static int persistent_step(struct ncclComm *c,struct persistent *p){
    a failure (one the bridge observed, or a call refused) revokes the communicator. */
 static void finish(struct ncclComm *c,struct item *it,ncclResult_t result){
   struct launch *l=it->launch;
-  gates_check(c);
-  stats_record();
+  /* a failed part's memory held before its gates open (its program may then end, and its allocations go) */
   if(result){
     uint64_t first=0;
     for(int i=0;i<it->n;i++)if(!first || it->calls[i].index<first)first=it->calls[i].index;
-    failed_at(c,first,c->error);
+    failed_at(c,first,c->error,it->calls[0].agreement);
     if(it->networked || (result!=ncclInvalidArgument && result!=ncclInvalidUsage)){comm_revoke(c);hold(c,it);}
   }
+  gates_check(c);
+  stats_record();
   const uint64_t now=now_ns();
-  for(int i=0;i<it->n;i++)if(it->calls[i].tally)it->calls[i].tally[ENDED]=now;
+  for(int i=0;i<it->n;i++)if(it->calls[i].tally){it->calls[i].tally[ENDED]=now;__atomic_store_n(it->calls[i].tally+DONE,1,__ATOMIC_RELEASE);}
   if(it->run){persistent_ended(c,it,result);return;}
   pthread_mutex_lock(&l->lock);
   if(result && !l->result)l->result=result;
@@ -1435,7 +1462,7 @@ static void *worker(void *argument){
     progress(c);
     if(it && room){
       int go=ready(it);
-      if(!go && nccl_mesh_gpu_failed()){go=1;it->result=FAIL(c,ncclUnhandledCudaError,"waiting for the group's gate: a GPU program failed");}
+      if(!go && atomic_load(&c->gpu_failed)){go=1;it->result=FAIL(c,ncclUnhandledCudaError,"waiting for the group's gate: a GPU program of the communicator failed");}
       if(!go && stopped(c)){go=1;it->result=stop_reason(c,"waiting for the group's gate");}
       if(go){
         pthread_mutex_lock(&c->lock);
@@ -1478,12 +1505,12 @@ static void comm_free(struct ncclComm *c){
     pthread_mutex_lock(&c->lock);c->stopping=1;pthread_cond_broadcast(&c->cond);pthread_mutex_unlock(&c->lock);
     pthread_join(c->worker,NULL);
   }
-  /* the programs that wait for its events run first */
-  for(uint64_t deadline=deadline_after();atomic_load(&c->programs) && !nccl_mesh_gpu_failed() && now_ns()<deadline;)usleep(100);
+  /* the programs that use it end first (each ends: run, or failed and released), however late */
+  while(atomic_load(&c->programs))usleep(100);
   close_peers(c,c->peers,0);
   if(c->net)mesh_net_finalize(c->net);
   for(int p=0;c->plans && p<PLANS;p++){free(c->plans[p].segments);free(c->plans[p].steps);}
-  free(c->nodes);free(c->voted);free(c->seen);free(c->pairs);free(c->stated_pairs);free(c->cost);free(c->plans);free(c->closed);free(c->used);
+  free(c->nodes);free(c->voted);free(c->owner);free(c->seen);free(c->pairs);free(c->stated_pairs);free(c->cost);free(c->plans);free(c->closed);free(c->used);
   free(c->armed);
   if(c->landed)nccl_mesh_release(c->landed);
   if(c->quiet)nccl_mesh_release(c->quiet);
@@ -1502,7 +1529,8 @@ static ncclResult_t comm_start(struct ncclComm *c){
   }
   c->peers=calloc((size_t)c->nranks,sizeof *c->peers);
   c->blocked=calloc((size_t)c->nranks*2,sizeof *c->blocked);
-  c->closed=calloc((size_t)c->nranks*CHANNELS*2,sizeof *c->closed);
+  /* an agreement closes the old connections and its own: twice a rank's */
+  c->closed=calloc((size_t)c->nranks*CHANNELS*4,sizeof *c->closed);
   if(!status && (!c->peers || !c->blocked || !c->closed))status=FAIL(c,ncclSystemError,"peer table allocation");
   int result=status?0:mesh_net_init(&c->net,c->key,NULL,NULL,NULL);
   if(!status && result)status=net_failure(c,result,"mesh_net_init (the bridge region MESH_REGION)");
@@ -1597,12 +1625,18 @@ const char *ncclGetErrorString(ncclResult_t result){
   case ncclInvalidUsage: return "invalid usage (set MESH_NCCL_DEBUG=1 for details)";
   case ncclRemoteError: return "remote process exited or there was a network error";
   case ncclInProgress: return "NCCL operation in progress";
-  case ncclTimeout: return "operation timed out (MESH_NCCL_TIMEOUT)";
+  case ncclTimeout: return "operation timed out";
   default: return "unknown result code";
   }
 }
+/* The communicator's last failure (copied under its lock into this thread's text), else this thread's. */
 const char *ncclGetLastError(ncclComm_t comm){
-  return comm && comm->error[0]?comm->error:last_error;
+  if(comm){
+    pthread_mutex_lock(&comm->lock);
+    if(comm->error[0])snprintf(last_error,sizeof last_error,"%s",comm->error);
+    pthread_mutex_unlock(&comm->lock);
+  }
+  return last_error;
 }
 struct registration { void *buffer; size_t size; };
 ncclResult_t ncclCommRegister(const ncclComm_t comm,void *buff,size_t size,void **handle){
@@ -1675,6 +1709,8 @@ static void drain(struct ncclComm *c);
    connections are checked once the epoch moves and after an agreement, not every call: a call's hot path is the
    epoch word; a connection failed with no move fails its call on the worker (revoking) instead. */
 static ncclResult_t refresh(struct ncclComm *c){
+  pthread_mutex_lock(&c->lock);const int agreeing=c->agreeing;pthread_mutex_unlock(&c->lock);
+  if(agreeing)return FAIL(c,ncclInvalidUsage,"a call while the communicator agrees (ncclMeshCommAgree)");
   if(atomic_load(&c->broken)){
     char cause[256];uint64_t failed;
     pthread_mutex_lock(&c->lock);snprintf(cause,sizeof cause,"%s",c->cause);failed=c->failed;pthread_mutex_unlock(&c->lock);
@@ -1688,16 +1724,24 @@ static ncclResult_t refresh(struct ncclComm *c){
   }
   /* a connection its bridge failed (its peer's process exited, or its bridge left the mesh: a session that resumes
      keeps it) */
-  for(int p=0;!c->alive && p<c->nranks;p++)
+  int lost=-1;
+  pthread_mutex_lock(&c->lock);
+  for(int p=0;!c->alive && lost<0 && p<c->nranks;p++)
     for(int ch=0;ch<CHANNELS;ch++)if((c->peers[p].send[ch] && !mesh_net_alive(c->peers[p].send[ch])) ||
-                                     (c->peers[p].recv[ch] && !mesh_net_alive(c->peers[p].recv[ch])))
-      return FAIL(c,ncclRemoteError,"the connection with rank %d is lost: its peer's process ended it or its bridge left the mesh (ncclMeshCommAgree makes it again)",p);
+                                     (c->peers[p].recv[ch] && !mesh_net_alive(c->peers[p].recv[ch])))lost=p;
+  pthread_mutex_unlock(&c->lock);
+  if(lost>=0)
+    return FAIL(c,ncclRemoteError,"the connection with rank %d is lost: its peer closed it, its process exited, its bridge left the mesh or paired "
+                "again as another instance (ncclMeshCommAgree makes it again)",lost);
   c->alive=1;
   return ncclSuccess;
 }
 /* Whether this rank reaches rank q: a link the stated map has and a connection made on it. */
 static int reaches(struct ncclComm *c,int q,int channel){
-  return linked(&c->stated,c->rank,q) && c->peers[q].send[channel] && c->peers[q].recv[channel];
+  pthread_mutex_lock(&c->lock);
+  const int connected=c->peers[q].send[channel] && c->peers[q].recv[channel];
+  pthread_mutex_unlock(&c->lock);
+  return linked(&c->stated,c->rank,q) && connected;
 }
 /* The ranks whose link is stated but down, for a failure's message. */
 static void down_links(struct ncclComm *c,char *text,size_t size){
@@ -1772,8 +1816,14 @@ static ncclResult_t resolve(struct call *k){
   k->pieces=calloc(MESH_COLLECTIVE_STEPS(c->nranks),sizeof *k->pieces);
   if(!k->steps || !k->pieces)return FAIL(c,ncclSystemError,"allocation");
   k->nsteps=p->nsteps;memcpy(k->steps,p->steps,p->nsteps*sizeof *k->steps);
-  for(uint32_t i=0;i<k->nsteps;i++)if(!c->peers[k->steps[i].peer].send[CH_COLL])
-    return FAIL(c,ncclInvalidUsage,"the plan uses rank %u, which no connection reaches",k->steps[i].peer);
+  pthread_mutex_lock(&c->lock);
+  uint32_t unconnected=UINT32_MAX;
+  for(uint32_t i=0;i<k->nsteps && unconnected==UINT32_MAX;i++)if(!c->peers[k->steps[i].peer].send[CH_COLL])unconnected=k->steps[i].peer;
+  pthread_mutex_unlock(&c->lock);
+  /* a rank the last agreement left out (departed then): the communicator agrees again, connecting it if it is back */
+  if(unconnected!=UINT32_MAX)
+    return FAIL(c,ncclRemoteError,"the plan uses rank %u, which no connection reaches (it %s; ncclMeshCommAgree connects the ranks that stay)",
+                unconnected,departed(c,(int)unconnected)?"departed":"was left out of the last agreement");
   return ncclSuccess;
 }
 
@@ -1935,7 +1985,6 @@ static void record(struct launch *l,struct call *calls,int n){
     if(k->arrived && (s=span_of(k->arrived,8)))wrote_set(s,l->event,l->end,k->tally);
   }
   pthread_mutex_unlock(&heap.lock);
-  if(l->stage && !l->persistent){span_release(l->stage,l->event,l->end);l->stage=NULL;}
 }
 
 /* The operand lies in recv itself where recv is a window allocation and holds the whole result
@@ -2086,7 +2135,9 @@ static int gpu_work(const struct call *calls,int n,int i){
 /* What a program holds until the GPU has run it: the streams' events it signals, and a count on each
    communicator whose words it waits on; its commands (below) until then too. */
 struct recording;
-struct ran { int ncomms,nevents; struct ncclComm **comms; void **events; struct recording *kept; };
+/* What a program holds until it has run: its communicators, the events it signals, its commands, and its stream
+   (NULL: a communicator's own), which it marks failed where it fails for good. */
+struct ran { int ncomms,nevents; struct ncclComm **comms; void **events; struct recording *kept; struct ncclMeshStream *stream; };
 /* A group's program: its commands, each object they name retained, encoded once its group has ended (into the
    library's own command buffers, committed) or later into a command buffer the caller hands over (a deferred
    stream's, nccl.h ncclMeshStreamDefer, and so a recording's).  A predicated command runs where the flag word at
@@ -2094,7 +2145,7 @@ struct ran { int ncomms,nevents; struct ncclComm **comms; void **events; struct 
    its wait. */
 enum { R_WAIT, R_SIGNAL, R_KERNEL, R_COPY, R_SPIN, R_PUBLISH, R_COUNTED, R_ZERO, R_GATE };
 struct recorded { int kind,which,type,op,nranks,published,want; void *a,*b,*c,*d,*e,*q; uint64_t x,y,z,n,scalar,pred,grid; uint64_t *list;
-  void *touch[4]; struct gate *gate; };
+  void *touch[4]; struct gate *gate; void *held; };
 struct recording { struct recording *next; int n,capacity,failed; struct recorded *ops; struct ran *ran; };
 /* The threads of a kernel that runs where a spin gave up, after its gate (the network was late, so the program
    was too): a few, so that where the spin saw its words the kernel costs next to nothing. */
@@ -2138,6 +2189,8 @@ static void spin(struct recording *k,struct call *call,struct region r,const uin
       gave_up.word=(_Atomic uint32_t *)word;
     }
   }
+  /* without the counter's word the spin would count into the group's own bytes: the program is not made */
+  if(!gave_up.buffer){free(copy);k->failed=1;return;}
   struct recorded rec={.kind=R_SPIN,.a=r.buffer,.b=gave_up.buffer,.n=n,.list=copy,.x=off(r,(const void *)flag),.y=off(r,(const void *)leaked)};
   memcpy(rec.touch,touch,sizeof touch);
   add(k,rec);
@@ -2198,31 +2251,81 @@ static void counted_copy(struct recording *s,struct call *k,struct launch *l,con
 static void program_gate(struct recording *s,struct gate *g){add(s,(struct recorded){.kind=R_GATE,.a=g->event,.x=g->value,.gate=g->run?g:NULL});}
 /* A gate's command buffer (nccl.h ncclMeshStreamEncodeWait): `argument`'s. */
 typedef void *(*gate_fn)(void *argument,void *program,void *event,uint64_t value);
-static void segment_ran(void *argument,int failed){(void)argument;(void)failed;}
 /* ---- the dispatcher: the library's own command buffers, each committed once its gates are reached ----
    Metal ends a command buffer that waits on an event at its start past its watchdog (about 5 s: a lone one waiting
    8 s on the M5, metal-microbench output_data/maybe-20260930/probe), so the library encodes no such wait: a command
    buffer of its own carries its gates (events and values: a group's gate, a recorded point, another stream's
    end) and the dispatcher commits it once they are reached, each queue's in the order given (a thread of its
-   own polls them, and the workers as they open gates). */
-struct entry { struct entry *next; void *program,*queue; void (*done)(void *,int); void *argument; int n,capacity; struct point *gates; };
-static struct { pthread_mutex_t lock; pthread_cond_t cond; struct entry *head,*tail; int started; } dispatcher=
-  {PTHREAD_MUTEX_INITIALIZER,PTHREAD_COND_INITIALIZER,NULL,NULL,0};
-/* The entries whose gates are reached and whose queue's earlier ones are all committed, committed in order;
-   dispatcher.lock held (the one committer). */
+   own polls them, and the workers as they open gates).
+     A program's command buffers (a run) are committed in order, each once the one before it has run, so one that
+   fails is the last of its program the GPU ran.  One that failed by no fault of its own (nccl-mesh-metal.m
+   nccl_mesh_program_handler, status 1) runs again: where the program's inputs are retained (`redoable`: no call of
+   it in place, no send of it reading a combine, nothing of a caller's kept in it), its recording is played again
+   from its start (a new generation; the command buffers of the last one not yet committed are dropped), the same
+   commands on the same inputs giving the same result (S3); otherwise, or where it faulted itself, it fails for good
+   (program_ran), the rest of it run so that every handler and signal of it happens. */
+struct run { _Atomic int refs; struct recording *rec; struct ran *ran; void *queue; int redoable,failed;
+  _Atomic uint32_t generation,done; struct run *redo; };
+struct ticket { struct run *run; uint32_t generation,index; int last; };
+static void program_ran(void *argument,int status);
+struct entry { struct entry *next; void *program,*queue; int n,capacity; struct point *gates; struct run *run; uint32_t generation,index; int last;
+  struct ticket *ticket; };
+static struct { pthread_mutex_t lock; pthread_cond_t cond; struct entry *head,*tail; struct run *redo; int started; } dispatcher=
+  {PTHREAD_MUTEX_INITIALIZER,PTHREAD_COND_INITIALIZER,NULL,NULL,NULL,0};
+static void run_release(struct run *r){if(atomic_fetch_sub(&r->refs,1)==1)free(r);}
+/* The run ended: its program released (failed where any of it failed for good). */
+static void run_finish(struct run *r){
+  if(r->ran)program_ran(r->ran,r->failed?2:0);
+  r->ran=NULL;r->rec=NULL;
+}
+static void *dispatch_run(void *argument);
+/* The dispatcher's thread started (once) and woken; dispatcher.lock held. */
+static void dispatch_wake_locked(void){
+  if(!dispatcher.started){pthread_t t;if(!pthread_create(&t,NULL,dispatch_run,NULL)){pthread_detach(t);dispatcher.started=1;}}
+  pthread_cond_signal(&dispatcher.cond);
+}
+static void dispatch_wake(void){pthread_mutex_lock(&dispatcher.lock);dispatch_wake_locked();pthread_mutex_unlock(&dispatcher.lock);}
+/* A command buffer of a run has run (Metal's completion thread). */
+static void entry_ran(void *argument,int status){
+  struct ticket *t=argument;struct run *r=t->run;
+  if(t->generation==atomic_load(&r->generation)){
+    if(status==1 && r->redoable){
+      /* run again from its start, by the dispatcher's thread (it encodes) */
+      pthread_mutex_lock(&dispatcher.lock);
+      atomic_fetch_add(&r->refs,1);r->redo=dispatcher.redo;dispatcher.redo=r;
+      dispatch_wake_locked();
+      pthread_mutex_unlock(&dispatcher.lock);
+    } else {
+      if(status)r->failed=1;
+      atomic_store(&r->done,t->index+1);
+      if(t->last)run_finish(r);
+      else dispatch_wake();
+    }
+  }
+  run_release(r);free(t);
+}
+/* The entries whose gates are reached, whose run's earlier command buffers have run, and whose queue's earlier ones
+   are all committed, committed in order; an older play's entries dropped; dispatcher.lock held (the one committer). */
 static int dispatch_pump_locked(void){
   int committed=0;
   for(struct entry **at=&dispatcher.head,*e;(e=*at);){
-    int go=1;
+    const int stale=e->run && e->generation!=atomic_load(&e->run->generation);
+    int go=!stale;
     for(struct entry *f=dispatcher.head;f!=e && go;f=f->next)go=f->queue!=e->queue;
+    if(go && e->run)go=e->index==atomic_load(&e->run->done);
     for(int g=0;g<e->n && go;g++)go=reached(e->gates[g]);
-    if(!go){at=&e->next;continue;}
+    if(!go && !stale){at=&e->next;continue;}
     *at=e->next;
     if(dispatcher.tail==e){dispatcher.tail=NULL;for(struct entry *f=dispatcher.head;f;f=f->next)dispatcher.tail=f;}
-    nccl_mesh_program_commit(e->program,e->done?e->done:segment_ran,e->argument);
+    if(stale){nccl_mesh_program_drop(e->program);free(e->ticket);}
+    else{
+      *e->ticket=(struct ticket){e->run,e->generation,e->index,e->last};atomic_fetch_add(&e->run->refs,1);
+      nccl_mesh_program_commit(e->program,entry_ran,e->ticket);
+      committed++;
+    }
     for(int g=0;g<e->n;g++)point_drop(e->gates+g);
+    if(e->run)run_release(e->run);
     free(e->gates);free(e);
-    committed++;
   }
   return committed;
 }
@@ -2231,12 +2334,19 @@ static void dispatch_pump(void){
   dispatch_pump_locked();
   pthread_mutex_unlock(&dispatcher.lock);
 }
+static void run_play(struct run *r);
 static void *dispatch_run(void *argument){
   (void)argument;
   pthread_setname_np("nccl-mesh.dispatch");
   pthread_mutex_lock(&dispatcher.lock);
   for(;;){
-    while(!dispatcher.head)pthread_cond_wait(&dispatcher.cond,&dispatcher.lock);
+    while(!dispatcher.head && !dispatcher.redo)pthread_cond_wait(&dispatcher.cond,&dispatcher.lock);
+    while(dispatcher.redo){
+      struct run *r=dispatcher.redo;dispatcher.redo=r->redo;
+      pthread_mutex_unlock(&dispatcher.lock);
+      run_play(r);run_release(r);
+      pthread_mutex_lock(&dispatcher.lock);
+    }
     dispatch_pump_locked();
     if(!dispatcher.head)continue;
     pthread_mutex_unlock(&dispatcher.lock);
@@ -2250,15 +2360,12 @@ static void dispatch_submit(struct entry *e){
   if(dispatcher.tail)dispatcher.tail->next=e;else dispatcher.head=e;
   dispatcher.tail=e;
   dispatch_pump_locked();
-  if(dispatcher.head){
-    if(!dispatcher.started){pthread_t t;if(!pthread_create(&t,NULL,dispatch_run,NULL)){pthread_detach(t);dispatcher.started=1;}}
-    pthread_cond_signal(&dispatcher.cond);
-  }
+  if(dispatcher.head)dispatch_wake_locked();
   pthread_mutex_unlock(&dispatcher.lock);
 }
 static struct entry *entry_new(void *queue){
   struct entry *e=calloc(1,sizeof *e);
-  if(e && !(e->program=nccl_mesh_program_begin(queue))){free(e);e=NULL;}
+  if(e && (!(e->ticket=malloc(sizeof *e->ticket)) || !(e->program=nccl_mesh_program_begin(queue)))){free(e->ticket);free(e);e=NULL;}
   if(e)e->queue=queue;
   return e;
 }
@@ -2267,31 +2374,65 @@ static void entry_gate(struct entry *e,void *event,uint64_t value){
   if(e->n==e->capacity){
     int capacity=e->capacity?2*e->capacity:4;
     struct point *grown=realloc(e->gates,(size_t)capacity*sizeof *grown);
-    if(!grown)return;
+    if(!grown){
+      /* a gate that cannot be kept is waited for here, so the command buffer never runs before it */
+      while(nccl_mesh_event_value(event)<value)sched_yield();
+      return;
+    }
     e->gates=grown;e->capacity=capacity;
   }
   e->gates[e->n]=(struct point){0};
   point_set(e->gates+e->n++,event,value);
 }
 /* The library's own program on `queue`, in command buffers each committed by the dispatcher: `current` the one
-   being encoded.  A gate (or a recorded point to wait for) submits it and begins the next, gated. */
-struct owned { void *queue; struct entry *current; };
+   being encoded, the `index`th of its run.  A gate (or a recorded point to wait for) submits it and begins the next,
+   gated. */
+struct owned { void *queue; struct entry *current; struct run *run; uint32_t index; };
+static struct entry *owned_entry(struct owned *o){
+  struct entry *e=entry_new(o->queue);
+  if(e){e->run=o->run;e->generation=atomic_load(&o->run->generation);e->index=o->index++;atomic_fetch_add(&o->run->refs,1);}
+  return e;
+}
 static void *owned_gate(void *argument,void *program,void *event,uint64_t value){
   struct owned *o=argument;
   nccl_mesh_program_end(program);
   dispatch_submit(o->current);
-  o->current=entry_new(o->queue);
+  o->current=owned_entry(o);
   if(!o->current)return NULL;
   entry_gate(o->current,event,value);
   return o->current->program;
 }
-/* The program's last command buffer submitted, `done(argument, failed)` once it has run. */
-static void owned_finish(struct owned *o,void (*done)(void *,int),void *argument){
+/* A run of `queue` for a program (`ran`, its recording `rec`; both NULL: the commands of streams' kept programs, which
+   carry their own), held by its maker until run_release. */
+static struct run *run_new(void *queue,struct recording *rec,struct ran *ran,int redoable){
+  struct run *r=calloc(1,sizeof *r);
+  if(r){atomic_store(&r->refs,1);r->queue=queue;r->rec=rec;r->ran=ran;r->redoable=redoable && rec;}
+  return r;
+}
+/* The program's last command buffer submitted; its run ends once it has run. */
+static void owned_finish(struct owned *o){
   if(!o->current)return;
   nccl_mesh_program_end(o->current->program);
-  o->current->done=done;o->current->argument=argument;
+  o->current->last=1;
   dispatch_submit(o->current);
   o->current=NULL;
+}
+static void *play(struct recording *k,void *program,gate_fn gate,void *argument);
+/* A run played again from its start (the dispatcher's thread): its recording into command buffers of a new
+   generation; where it cannot be encoded, it fails for good. */
+static void run_play(struct run *r){
+  pthread_mutex_lock(&stream_lock);
+  atomic_fetch_add(&r->generation,1);atomic_store(&r->done,0);
+  struct owned o={r->queue,NULL,r,0};
+  o.current=owned_entry(&o);
+  void *program=o.current?o.current->program:NULL;
+  if(program)program=play(r->rec,program,owned_gate,&o);
+  if(program && !r->rec->failed)owned_finish(&o);
+  else{
+    if(o.current){nccl_mesh_program_drop(o.current->program);run_release(o.current->run);free(o.current->gates);free(o.current->ticket);free(o.current);}
+    atomic_fetch_add(&r->generation,1);r->failed=1;run_finish(r);
+  }
+  pthread_mutex_unlock(&stream_lock);
 }
 /* A caller's that names no gate of its own: the wait inside its command buffer (the caller's to keep short). */
 static void *inline_gate(void *argument,void *program,void *event,uint64_t value){
@@ -2320,7 +2461,11 @@ static void *play(struct recording *k,void *program,gate_fn gate,void *argument)
     else if(r->kind==R_KERNEL)nccl_mesh_program_kernel(program,r->which,r->a,r->x,r->b,r->y,r->n,r->type,r->op,r->nranks,r->scalar,r->published,r->c,r->z,
                                                       r->q,r->pred?r->pred-1:0,r->want,r->grid);
     else if(r->kind==R_COPY)nccl_mesh_program_copy(program,r->a,r->x,r->b,r->y,r->n,r->which,r->published,NULL,0,0,0);
-    else if(r->kind==R_SPIN)nccl_mesh_program_spin(program,r->a,r->list,(uint32_t)r->n,r->x,r->y,r->b,r->touch,4);
+    else if(r->kind==R_SPIN){
+      struct recorded *op=k->ops+i;
+      if(op->held){nccl_mesh_release(op->held);op->held=NULL;}
+      if(nccl_mesh_program_spin(program,r->a,r->list,(uint32_t)r->n,r->x,r->y,r->b,r->touch,4,&op->held))k->failed=1;
+    }
     else if(r->kind==R_COUNTED)nccl_mesh_program_counted(program,r->a,r->b,r->c,r->d,r->e,r->list,(uint32_t)r->x,r->n,r->q,r->grid);
     else if(r->kind==R_ZERO)nccl_mesh_program_zero(program,r->a,r->x,r->n);
     else nccl_mesh_program_publish(program,r->a,r->x,r->y,r->q,r->pred?r->pred-1:0,r->want);
@@ -2333,17 +2478,29 @@ static void recording_free(struct recording *k){
     void *const held[6]={k->ops[i].a,k->ops[i].b,k->ops[i].c,k->ops[i].d,k->ops[i].e,k->ops[i].q};
     for(int h=0;h<6;h++)if(held[h])nccl_mesh_release(held[h]);
     for(int t=0;t<4;t++)if(k->ops[i].touch[t])nccl_mesh_release(k->ops[i].touch[t]);
+    if(k->ops[i].held)nccl_mesh_release(k->ops[i].held);
     free(k->ops[i].list);
   }
   if(k)free(k->ops);
   free(k);
 }
-/* Once the GPU has run a program: its objects released. */
-static void program_ran(void *argument,int failed){
-  (void)failed;
+static void stream_release(struct ncclMeshStream *s);
+/* A program that failed for good (nccl-mesh-metal.m nccl_mesh_program_handler: its own fault, or not to be run
+   again): its communicators' calls fail and they are revoked until their next agreement, its stream fails, and the
+   values it signals are given by the host, so the waits on them end (on calls that end failed). */
+static void program_failed(struct ran *r){
+  for(int i=0;i<r->ncomms;i++){atomic_store(&r->comms[i]->gpu_failed,1);comm_revoke(r->comms[i]);}
+  if(r->stream)__atomic_store_n(&r->stream->failed,1,__ATOMIC_RELEASE);
+  for(int i=0;r->kept && i<r->kept->n;i++)if(r->kept->ops[i].kind==R_SIGNAL)nccl_mesh_event_signal(r->kept->ops[i].a,r->kept->ops[i].x);
+}
+/* Once the GPU has run a program (status: nccl_mesh_program_handler's, a failure for good where not 0): its objects
+   released. */
+static void program_ran(void *argument,int status){
   struct ran *r=argument;
+  if(status)program_failed(r);
   for(int i=0;i<r->nevents;i++)nccl_mesh_release(r->events[i]);
   for(int i=0;i<r->ncomms;i++)atomic_fetch_sub(&r->comms[i]->programs,1);
+  if(r->stream)stream_release(r->stream);
   recording_free(r->kept);
   free(r);
 }
@@ -2360,6 +2517,12 @@ static void *take_kept(struct ncclMeshStream *s,void *program,gate_fn gate,void 
     k=next;
   }
   return program;
+}
+/* Whether a call writes what it reads (its send buffer's bytes and its result's overlap): its input is not
+   retained, so its program cannot run again from its start. */
+static int overwrites_input(const struct call *k){
+  const unsigned char *in=k->send,*out=k->recv;const size_t ni=in_bytes(k),no=out_bytes(k);
+  return ni && no && in && out && in<out+no && out<in+ni;
 }
 /* Whether a group's program has GPU work before its transfers start (so it needs a gate): a receive
    from this rank itself, a send's bytes staged into the group's allocation, a contribution copied or
@@ -2383,9 +2546,10 @@ static int sends_combined(const struct call *calls,int n){
 /* A word's wait: its (offset, value) pair appended to `list` (grown). */
 static uint64_t *pair(uint64_t *list,uint32_t *n,size_t *capacity,struct region r,const void *word,uint64_t value){
   if(2*(size_t)(*n+1)>*capacity){
+    /* a word is never left out of a spin's list: its growth waited for */
     size_t grown=*capacity?2**capacity:64;
-    uint64_t *more=realloc(list,grown*sizeof *more);
-    if(!more)return list;
+    uint64_t *more;
+    while(!(more=realloc(list,grown*sizeof *more)))sched_yield();
     list=more;*capacity=grown;
   }
   list[2**n]=off(r,word);list[2**n+1]=value;++*n;
@@ -2587,7 +2751,7 @@ ncclResult_t ncclGroupEnd(void){
     if((status=resolve(calls+i)) && status!=ncclInvalidArgument && status!=ncclInvalidUsage){
       /* the communicator failed (a link down, a connection lost, or revoked earlier): revoked */
       struct ncclComm *c=calls[i].comm;
-      failed_at(c,calls[i].index,c->error);
+      failed_at(c,calls[i].index,c->error,calls[i].agreement);
       comm_revoke(c);
     }
   plans.n=0;
@@ -2679,6 +2843,7 @@ ncclResult_t ncclGroupEnd(void){
   if(rec){
     encode(l,calls,n,comms,ncomms,rec,ran,defer,persist);
     record(l,calls,n);
+    if(l->nmarks){ran->stream=l->marks[0].stream;__atomic_add_fetch(&ran->stream->refs,1,__ATOMIC_RELAXED);}
     /* a gate opens once its words are set (a persistent call's each iteration, ncclMeshPersistentStart) */
     for(int g=0;!persist && g<l->ngates;g++)gate_arm(l->gates[g]);
     if(defer){
@@ -2687,20 +2852,29 @@ ncclResult_t ncclGroupEnd(void){
       *at=rec;
     }
     else{
-      struct owned o={l->nmarks?l->marks[0].stream->queue:comms[0]->queue,NULL};
-      o.current=entry_new(o.queue);
+      /* run again from its start after a failure that is not its own where its inputs are retained (struct run) */
+      void *queue=l->nmarks?l->marks[0].stream->queue:comms[0]->queue;
+      int redoable=!sends_combined(calls,n);
+      for(int i=0;i<n;i++)redoable&=!overwrites_input(calls+i);
+      for(int k=0;k<l->nmarks;k++)redoable&=!l->marks[k].stream->pending;
+      ran->kept=rec;
+      struct run *r=run_new(queue,rec,ran,redoable);
+      struct owned o={queue,NULL,r,0};
+      o.current=r?owned_entry(&o):NULL;
       void *program=o.current?o.current->program:NULL;
       for(int k=0;program && k<l->nmarks;k++)if(l->marks[k].stream->pending)program=take_kept(l->marks[k].stream,program,owned_gate,&o);
       if(program)program=play(rec,program,owned_gate,&o);
-      if(!program || rec->failed){
-        FAIL(NULL,ncclUnhandledCudaError,"a command buffer on the queue");
-        atomic_store(&comms[0]->aborting,1);
-      }
       for(int k=0;k<l->nmarks;k++)l->marks[k].stream->committed=l->marks[k].stream->value;
       count(calls,COMMITS,1);
-      ran->kept=rec;
-      if(program)owned_finish(&o,program_ran,ran);
-      else program_ran(ran,1);
+      if(program && !rec->failed)owned_finish(&o);
+      else{
+        /* not encoded (an allocation): it fails for good, its calls with it */
+        FAIL(NULL,ncclUnhandledCudaError,"a command buffer on the queue");
+        if(o.current){nccl_mesh_program_drop(o.current->program);run_release(o.current->run);free(o.current->gates);free(o.current->ticket);free(o.current);}
+        if(r){atomic_fetch_add(&r->generation,1);r->failed=1;run_finish(r);}
+        else program_ran(ran,2);
+      }
+      if(r)run_release(r);
       for(int w=0;w<l->nwaits;w++)point_drop(l->waits+w);
       l->nwaits=0;
     }
@@ -2735,20 +2909,20 @@ ncclResult_t ncclGroupEnd(void){
     pthread_mutex_unlock(&c->lock);
   }
   pthread_mutex_unlock(&stream_lock);
-  free(comms);free(calls);
-  if(!l->sync)return ncclSuccess;
+  free(calls);
+  if(!l->sync){free(comms);return ncclSuccess;}
   pthread_mutex_lock(&l->lock);
   while(l->items)pthread_cond_wait(&l->cond,&l->lock);
   status=l->result;
   pthread_mutex_unlock(&l->lock);
   if(l->event){
-    /* the NULL stream: the program's end, however late */
+    /* the NULL stream: the program's end, however late (one run again included; one that failed for good has its end
+       given by the host, and its communicators marked) */
     count(&(struct call){.tally=tally->counts[n-1]},HOST_WAITS,1);
-    while(!status && nccl_mesh_event_value(l->event)<l->end){
-      if(nccl_mesh_gpu_failed())status=FAIL(NULL,ncclUnhandledCudaError,"the group's GPU program failed");
-      else sched_yield();
-    }
+    while(!status && nccl_mesh_event_value(l->event)<l->end)sched_yield();
+    for(int j=0;!status && j<ncomms;j++)if(atomic_load(&comms[j]->gpu_failed))status=FAIL(comms[j],ncclUnhandledCudaError,"the group's GPU program failed");
   }
+  free(comms);
   launch_free(l);
   return status;
 }
@@ -2794,7 +2968,11 @@ static ncclResult_t enqueue(struct call k,const ncclCollConfig_t *config){
       if(!grown){if(!group.error)group.error=FAIL(c,ncclSystemError,"allocation");}
       else{group.calls=grown;group.capacity=capacity;}
     }
-    if(group.n<group.capacity){k.index=atomic_fetch_add(&c->issued,1)+1;group.calls[group.n++]=k;k.segments=NULL;}
+    if(group.n<group.capacity){
+      k.index=P2P(&k)?atomic_load(&c->issued)+1:atomic_fetch_add(&c->issued,1)+1;
+      pthread_mutex_lock(&c->lock);k.agreement=c->agreements;pthread_mutex_unlock(&c->lock);
+      group.calls[group.n++]=k;k.segments=NULL;
+    }
   }
   free(k.segments);
   ncclResult_t ended=ncclGroupEnd();
@@ -3000,31 +3178,39 @@ ncclResult_t ncclMeshStreamCreate(cudaStream_t *stream,void *queue){
   if(failed)return FAIL(NULL,ncclUnhandledCudaError,"the GPU: %s",error);
   struct ncclMeshStream *s=calloc(1,sizeof *s);
   if(!s)return FAIL(NULL,ncclSystemError,"allocation");
-  s->made=1;s->queue=nccl_mesh_queue_create();
+  s->made=1;s->refs=1;s->queue=nccl_mesh_queue_create();
   s->event=s->queue?nccl_mesh_event_create(s->queue):NULL;
   if(!s->event){if(s->made && s->queue)nccl_mesh_release(s->queue);free(s);return FAIL(NULL,ncclUnhandledCudaError,"the stream's Metal queue and event");}
   *stream=s;
   return ncclSuccess;
 }
+/* A stream's holder gone: the stream freed with its last (the caller's, and its programs' until they have run). */
+static void stream_release(struct ncclMeshStream *s){
+  if(__atomic_sub_fetch(&s->refs,1,__ATOMIC_ACQ_REL))return;
+  nccl_mesh_release(s->event);
+  if(s->made)nccl_mesh_release(s->queue);
+  free(s);
+}
 ncclResult_t ncclMeshStreamDestroy(cudaStream_t stream){
   if(!stream)return ncclSuccess;
   if(stream->pending)ncclMeshStreamSynchronize(stream);
-  nccl_mesh_release(stream->event);
-  if(stream->made)nccl_mesh_release(stream->queue);
-  free(stream);
+  stream_release(stream);
   return ncclSuccess;
 }
 /* The stream's kept programs committed to its queue, after its committed ones (the dispatcher's gate on their
    completion); stream_lock held. */
 static ncclResult_t flush_kept(struct ncclMeshStream *s){
   if(!s->pending)return ncclSuccess;
-  struct owned o={s->queue,entry_new(s->queue)};
-  if(!o.current)return FAIL(NULL,ncclUnhandledCudaError,"a command buffer on the stream's queue");
+  struct run *r=run_new(s->queue,NULL,NULL,0);
+  struct owned o={s->queue,NULL,r,0};
+  o.current=r?owned_entry(&o):NULL;
+  if(!o.current){if(r)run_release(r);return FAIL(NULL,ncclUnhandledCudaError,"a command buffer on the stream's queue");}
   if(s->committed)entry_gate(o.current,s->event,s->committed);
   void *program=take_kept(s,o.current->program,owned_gate,&o);
   s->committed=s->value;
   count(NULL,COMMITS,1);
-  if(program)owned_finish(&o,segment_ran,NULL);
+  if(program)owned_finish(&o);
+  run_release(r);
   return ncclSuccess;
 }
 ncclResult_t ncclMeshStreamSynchronize(cudaStream_t stream){
@@ -3035,16 +3221,17 @@ ncclResult_t ncclMeshStreamSynchronize(cudaStream_t stream){
   value=stream->value;
   pthread_mutex_unlock(&stream_lock);
   if(status)return status;
-  while(nccl_mesh_event_value(stream->event)<value){
-    if(nccl_mesh_gpu_failed())return FAIL(NULL,ncclUnhandledCudaError,"ncclMeshStreamSynchronize: a GPU program failed");
-    usleep(20);
-  }
+  /* however late (a program run again included; one failed for good has its values given by the host) */
+  while(nccl_mesh_event_value(stream->event)<value)usleep(20);
+  if(__atomic_load_n(&stream->failed,__ATOMIC_ACQUIRE))return FAIL(NULL,ncclUnhandledCudaError,"ncclMeshStreamSynchronize: a GPU program of the stream failed");
   return ncclSuccess;
 }
 ncclResult_t ncclMeshStreamQuery(cudaStream_t stream){
   if(!stream || !stream->event)return FAIL(NULL,ncclInvalidArgument,"ncclMeshStreamQuery: no stream");
   pthread_mutex_lock(&stream_lock);uint64_t value=stream->value;int kept=stream->pending!=NULL;pthread_mutex_unlock(&stream_lock);
-  return !kept && nccl_mesh_event_value(stream->event)>=value?ncclSuccess:ncclInProgress;
+  if(!kept && nccl_mesh_event_value(stream->event)>=value)
+    return __atomic_load_n(&stream->failed,__ATOMIC_ACQUIRE)?FAIL(NULL,ncclUnhandledCudaError,"ncclMeshStreamQuery: a GPU program of the stream failed"):ncclSuccess;
+  return ncclInProgress;
 }
 ncclResult_t ncclMeshStreamDefer(cudaStream_t stream,int defer){
   if(!stream || !stream->event)return FAIL(NULL,ncclInvalidArgument,"ncclMeshStreamDefer: no stream");
@@ -3149,7 +3336,7 @@ ncclResult_t ncclMeshPersistentStart(void *handle,void *event,uint64_t value,uin
     for(uint32_t r=0;k->ready && r<k->ranges;r++)k->ready_base[r]=atomic_load_explicit(k->ready+r,memory_order_acquire);
   }
   atomic_store(&p->next,0);
-  c->run=p;
+  __atomic_store_n(&c->run,p,__ATOMIC_RELEASE);
   pthread_cond_broadcast(&c->cond);
   pthread_mutex_unlock(&c->lock);
   return ncclSuccess;
@@ -3162,6 +3349,13 @@ ncclResult_t ncclMeshPersistentWait(void *handle){
   while(c->run==p)pthread_cond_wait(&c->cond,&c->lock);
   pthread_mutex_unlock(&c->lock);
   return p->result;
+}
+/* The persistent calls' communicator revoked (their replay failed): every part not yet started fails at its start,
+   sending nothing; the caller may then let the replay's cuts pass so that every part starts and ends. */
+ncclResult_t ncclMeshPersistentAbort(void *handle){
+  struct persistent *p=handle;
+  if(p && p->comm)comm_revoke(p->comm);
+  return ncclSuccess;
 }
 ncclResult_t ncclMeshPersistentFree(void *handle){
   struct persistent *p=handle;
@@ -3196,12 +3390,17 @@ ncclResult_t ncclMeshPersistentCut(int *cut,int *groups){
   return ncclSuccess;
 }
 static ncclMeshCounts_t counts_of(const uint64_t *c,int timed);
+/* A call's tally once its part has ended (its DONE word, written last), else none yet (zeros). */
+static ncclMeshCounts_t tally_of(const uint64_t *c){
+  if(__atomic_load_n(c+DONE,__ATOMIC_ACQUIRE))return counts_of(c,1);
+  return (ncclMeshCounts_t){0};
+}
 ncclResult_t ncclMeshPersistentCounts(void *handle,ncclMeshCounts_t *counts,int capacity,int *count){
   struct persistent *p=handle;
   if(!count)return FAIL(NULL,ncclInvalidArgument,"ncclMeshPersistentCounts: count is NULL");
   *count=0;
   for(int i=0;p && i<p->n;i++)for(int j=0;j<p->items[i]->n;j++,++*count)
-    if(counts && *count<capacity && p->items[i]->calls[j].tally)counts[*count]=counts_of(p->items[i]->calls[j].tally,1);
+    if(counts && *count<capacity && p->items[i]->calls[j].tally)counts[*count]=tally_of(p->items[i]->calls[j].tally);
   return ncclSuccess;
 }
 
@@ -3222,37 +3421,36 @@ static int whole(struct ncclComm *c){
     for(int ch=0;ch<CHANNELS;ch++)if(!mesh_net_alive(c->peers[p].send[ch]) || !mesh_net_alive(c->peers[p].recv[ch]))return 0;
   return 1;
 }
-/* A request posted (retried while its ring is full) and waited for, by the deadline. */
-static ncclResult_t host_post(struct ncclComm *c,int send,void *comm,void *data,size_t bytes,uint64_t deadline,void **request){
+/* A request posted (retried while its ring is full, the bridge consuming it), or none where rank p departed meanwhile. */
+static ncclResult_t host_post(struct ncclComm *c,int send,void *comm,void *data,size_t bytes,int p,void **request){
   for(*request=NULL;;){
     int result=send?mesh_net_isend(comm,data,bytes,0,window.mh,NULL,request):
       mesh_net_irecv(comm,1,&data,&bytes,(int[]){0},(void *[]){window.mh},NULL,request);
-    if(result)return net_failure(c,result,send?"ncclMeshCommAgree: an isend":"ncclMeshCommAgree: an irecv");
-    if(*request)return ncclSuccess;
-    if(now_ns()>deadline)return FAIL(c,ncclTimeout,"ncclMeshCommAgree: a request ring stayed full past the deadline");
+    if(result)return departed(c,p)?ncclSuccess:net_failure(c,result,send?"ncclMeshCommAgree: an isend":"ncclMeshCommAgree: an irecv");
+    if(*request || departed(c,p))return ncclSuccess;
     sched_yield();
   }
 }
 /* One round of FloodSet [Lynch, "Distributed Algorithms" 1996, §6.2.1]: the votes this rank knows sent
-   to each neighbour, each neighbour's received first, and theirs merged in. */
-static ncclResult_t flood(struct ncclComm *c,struct peer *peers,const unsigned char *want,struct vote *votes,unsigned char *buffers,
-  size_t slot,uint64_t deadline){
+   to each neighbour, each neighbour's received first, and theirs merged in.  A neighbour that departs meanwhile
+   leaves the round (`gone`): its requests are abandoned on connections closed after the agreement. */
+static ncclResult_t flood(struct ncclComm *c,struct peer *peers,unsigned char *want,unsigned char *gone,struct vote *votes,unsigned char *buffers,
+  size_t slot){
   const int n=c->nranks;
   void **requests=calloc((size_t)n*2,sizeof *requests);
   if(!requests)return FAIL(c,ncclSystemError,"allocation");
   memcpy(buffers,votes,(size_t)n*sizeof *votes);
   ncclResult_t status=ncclSuccess;
   for(int p=0;p<n && !status;p++)if(want[p]){
-    status=host_post(c,0,peers[p].recv[CH_P2P],buffers+slot*(size_t)(p+1),(size_t)n*sizeof *votes,deadline,requests+2*p);
-    if(!status)status=host_post(c,1,peers[p].send[CH_P2P],buffers,(size_t)n*sizeof *votes,deadline,requests+2*p+1);
+    status=host_post(c,0,peers[p].recv[CH_P2P],buffers+slot*(size_t)(p+1),(size_t)n*sizeof *votes,p,requests+2*p);
+    if(!status)status=host_post(c,1,peers[p].send[CH_P2P],buffers,(size_t)n*sizeof *votes,p,requests+2*p+1);
   }
-  for(int i=0;i<2*n && !status;i++)while(requests[i]){
+  for(int i=0;i<2*n && !status;i++)while(requests[i] && want[i/2]){
     int done=0,size=0,result=mesh_net_test(requests[i],&done,&size);
+    if(departed(c,i/2)){want[i/2]=0;gone[i/2]=1;break;}
     if(result)status=net_failure(c,result,"ncclMeshCommAgree: a vote");
     else if(done)requests[i]=NULL;
-    else if(now_ns()>deadline)status=FAIL(c,ncclTimeout,"ncclMeshCommAgree: rank %d's vote did not arrive by the deadline (MESH_NCCL_TIMEOUT)",i/2);
     else sched_yield();
-    if(status)break;
   }
   for(int p=0;p<n && !status;p++)if(want[p]){
     const struct vote *theirs=(const struct vote *)(buffers+slot*(size_t)(p+1));
@@ -3261,16 +3459,21 @@ static ncclResult_t flood(struct ncclComm *c,struct peer *peers,const unsigned c
   free(requests);
   return status;
 }
-/* Every connection closed since the last agreement vacated by the bridge (nothing of it on the wire),
-   by the deadline; then the memory held for the failed parts is given back. */
-static ncclResult_t vacate(struct ncclComm *c,uint64_t deadline){
+/* Every connection closed since the last agreement vacated by the bridge (nothing of it on the wire: its peer
+   closed it too, or its link was left), however late; then the memory held for the failed parts is given back. */
+static ncclResult_t vacate(struct ncclComm *c){
   while(c->nclosed){
     if(mesh_net_vacated(c->closed[c->nclosed-1])){c->nclosed--;continue;}
-    if(now_ns()>deadline)return FAIL(c,ncclTimeout,"ncclMeshCommAgree: the bridge did not vacate a closed connection by the deadline");
     usleep(200);
   }
   nccl_mesh_event_signal(c->quiet,c->quiet_value);
   return ncclSuccess;
+}
+/* The view an agreement starts from: a hash of the ranks not departed. */
+static uint64_t view_of(const struct ncclComm *c,const unsigned char *gone){
+  uint64_t h=mix((uint64_t)c->nranks);
+  for(int r=0;r<c->nranks;r++)if(!gone[r])h=mix(h^(uint64_t)(r+1));
+  return h;
 }
 ncclResult_t ncclMeshCommAgree(ncclComm_t comm,uint64_t *failed,uint64_t *epoch){
   if(!comm || !failed || !epoch)return FAIL(comm,ncclInvalidArgument,"ncclMeshCommAgree: NULL argument");
@@ -3278,70 +3481,86 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm,uint64_t *failed,uint64_t *epoch)
   const int n=c->nranks;
   drain(c);
   pthread_mutex_lock(&c->lock);
+  if(c->run){pthread_mutex_unlock(&c->lock);return FAIL(c,ncclInvalidUsage,"ncclMeshCommAgree while persistent calls run (ncclMeshPersistentWait first)");}
   if(atomic_load(&c->broken) && c->open)close_peers(c,c->peers,1);
   c->agreeing=1;
   pthread_mutex_unlock(&c->lock);
-  const uint64_t deadline=deadline_after(),key=mix(c->key^mix(++c->agreements));
   const size_t slot=slice((size_t)n*sizeof(struct vote));
   unsigned char *want=calloc((size_t)n,1),*gone=calloc((size_t)n,1),*buffers=NULL;
   struct peer *fresh=calloc((size_t)n,sizeof *fresh);
   struct vote *votes=calloc((size_t)n,sizeof *votes);
   ncclResult_t status=want && gone && fresh && votes?ncclSuccess:FAIL(c,ncclSystemError,"allocation");
   /* the flood's neighbours: the ranks the stated map links to this one, up or not, but those departed as this node
-     sees it (mesh_net_departed: its bridge's LEAVE heard, or this node's bridge left; a membership change; the
-     agreement is among the ranks that stay) */
+     observes it (departed: its bridge left, this node's region was replaced, or its process exited; a membership
+     change): the agreement is among the ranks that stay, and a rank departing while it runs leaves it then */
   c->epoch=mesh_link_table_read(c->table,c->seen);
   for(int p=0;!status && p<n;p++){
-    gone[p]=p!=c->rank && mesh_net_departed(c->nodes[p]);
+    gone[p]=departed(c,p);
     want[p]=p!=c->rank && !gone[p] && mesh_link_at(c->seen,c->nodes[c->rank],c->nodes[p])->stated &&
       mesh_link_at(c->seen,c->nodes[p],c->nodes[c->rank])->stated;
   }
-  if(!status && n>1)status=connect_ranks(c,key,want,fresh,deadline);
+  /* the connections' key: the view and the agreements made in a row with it (a returning rank's view and the ranks
+     that stayed are new alike, so both count from 0) */
+  const uint64_t view=view_of(c,gone);
+  if(view!=c->view){c->view=view;c->in_view=0;}
+  const uint64_t key=mix(c->key^mix(view^mix(++c->in_view)));
+  pthread_mutex_lock(&c->lock);c->agreements++;pthread_mutex_unlock(&c->lock);
+  if(!status && n>1)status=connect_ranks(c,key,want,fresh,gone);
   if(!status)status=span_alloc(slot*(size_t)(n+1),&buffers,NULL);
   /* the votes flooded n - 1 rounds; again, once the tables move, until every rank's map is the same */
   for(int same=0;!status && !same;){
     c->epoch=mesh_link_table_read(c->table,c->seen);
-    mesh_link_table_map(c->seen,c->nodes,(uint32_t)n,&c->map,c->pairs,c->cost);
+    maps(c);
     memset(votes,0,(size_t)n*sizeof *votes);
     pthread_mutex_lock(&c->lock);
     votes[c->rank]=(struct vote){1,c->failed,(uint64_t)whole(c),map_hash(c)};
     pthread_mutex_unlock(&c->lock);
-    for(int round=1;round<n && !status;round++)status=flood(c,fresh,want,votes,buffers,slot,deadline);
+    for(int round=1;round<n && !status;round++)status=flood(c,fresh,want,gone,votes,buffers,slot);
     same=1;
     for(int r=0;!status && r<n;r++){
       if(gone[r])continue;
       if(!votes[r].known)status=FAIL(c,ncclRemoteError,"ncclMeshCommAgree: rank %d's vote reached this rank by no stated link",r);
       same&=votes[r].map==votes[c->rank].map;
     }
-    if(!status && !same){
-      if(now_ns()>deadline)status=FAIL(c,ncclTimeout,"ncclMeshCommAgree: the ranks' link tables did not hold one map of the communicator by the deadline");
-      for(uint64_t e=c->epoch,until=now_ns()+20000000;!status && atomic_load(&c->table->epoch)==e && now_ns()<until;)usleep(200);
-    }
+    /* not yet one map: the tables are waited for (paced, never failed by time) and the votes flooded again */
+    for(uint64_t e=c->epoch,until=now_ns()+20000000;!status && !same && atomic_load(&c->table->epoch)==e && now_ns()<until;)usleep(200);
   }
   /* the first failed call among the ranks; after one, or where a rank's connections are not whole, every
      rank takes the agreement's connections as its own */
   uint64_t first=0;int kept=1;
   for(int r=0;!status && r<n;r++){
+    if(gone[r])continue;
     if(votes[r].failed && (!first || votes[r].failed<first))first=votes[r].failed;
     kept&=votes[r].whole!=0;
   }
+  for(int r=0;!status && r<n;r++)kept&=!gone[r] || !c->voted[r] || r==c->rank;
   pthread_mutex_lock(&c->lock);
   if(!status && (first || !kept)){
     close_peers(c,c->peers,1);
     memcpy(c->peers,fresh,(size_t)n*sizeof *fresh);memset(fresh,0,(size_t)n*sizeof *fresh);
+    owners(c,c->peers);
     c->open=1;
   }
-  close_peers(c,fresh,0);
+  close_peers(c,fresh,1);
   pthread_mutex_unlock(&c->lock);
-  if(buffers)span_release(buffers,NULL,0);
-  if(!status)status=vacate(c,deadline);
+  if(!status)status=vacate(c);
+  /* the vote buffers given back once the connections that received into them are vacated (the quiet point) */
+  if(buffers)span_release(buffers,c->quiet,c->quiet_value);
   pthread_mutex_lock(&c->lock);
-  if(!status){atomic_store(&c->issued,0);c->failed=0;c->cause[0]=0;atomic_store(&c->broken,0);atomic_store(&c->async,0);c->alive=0;}
+  if(!status){atomic_store(&c->issued,0);c->failed=0;c->cause[0]=0;atomic_store(&c->broken,0);atomic_store(&c->async,0);atomic_store(&c->gpu_failed,0);c->alive=0;}
   c->agreeing=0;
   pthread_mutex_unlock(&c->lock);
   if(!status){*failed=first;*epoch=c->epoch;for(int r=0;r<n;r++)c->voted[r]=!gone[r];}
   free(want);free(gone);free(fresh);free(votes);
   return status;
+}
+/* The ranks this rank's bridge observes as members now: 1 each but those departed (departed: its node's bridge left
+   the mesh, this node's region was replaced, or its process exited); a rank the last agreement left out counts once
+   its node is back (the next agreement connects it). */
+ncclResult_t ncclMeshCommMembers(ncclComm_t comm,int *members){
+  if(!comm || !members)return FAIL(comm,ncclInvalidArgument,"ncclMeshCommMembers: NULL argument");
+  for(int r=0;r<comm->nranks;r++)members[r]=r==comm->rank || !departed(comm,r);
+  return ncclSuccess;
 }
 ncclResult_t ncclMeshCommVoters(ncclComm_t comm,int *voters){
   if(!comm || !voters)return FAIL(comm,ncclInvalidArgument,"ncclMeshCommVoters: NULL argument");
@@ -3449,7 +3668,7 @@ ncclResult_t ncclMeshTallyCounts(void *tally,ncclMeshCounts_t *counts,int capaci
   if(!count)return FAIL(NULL,ncclInvalidArgument,"ncclMeshTallyCounts: count is NULL");
   struct tally *t=tally;
   *count=t?t->n:0;
-  for(int i=0;t && counts && i<t->n && i<capacity;i++)counts[i]=counts_of(t->counts[i],1);
+  for(int i=0;t && counts && i<t->n && i<capacity;i++)counts[i]=tally_of(t->counts[i]);
   return ncclSuccess;
 }
 ncclResult_t ncclMeshGroupCounts(ncclMeshCounts_t *counts,int capacity,int *count){return ncclMeshTallyCounts(plans.tally,counts,capacity,count);}

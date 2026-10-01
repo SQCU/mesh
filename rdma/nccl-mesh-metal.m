@@ -409,13 +409,14 @@ enum { KERNELS = 8, KERNEL_COPY = 3, KERNEL_WAIT = 4, KERNEL_PUBLISH = 5, KERNEL
    none) and the flag's value it runs at, `want`. */
 struct args { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,published,fresh,want; uint64_t other,pred; };
 static struct { id<MTLDevice> device; id<MTLComputePipelineState> kernels[KERNELS]; uint64_t spin; } gpu;
-static _Atomic int failed;
 #define HIDDEN __attribute__((visibility("hidden")))
 
 /* The device and the kernels; 0, or -1 with the reason in `error`.  The spin's bound, polls a spin makes in all
    (MESH_NCCL_SPIN, default 65536: tens of milliseconds, about 0.4 to 1.2 us a poll as measured, metal-microbench
    output_data/handoffs-20260929/t1): past it the waiting work runs after its gate, so it sets only how long the GPU
-   polls before it parks there. */
+   polls before it parks there.  At most SPIN_MOST (about 1 s at the slowest poll): a call spins once in full, and
+   the spins of a command buffer's calls stay under Metal's watchdog. */
+#define SPIN_MOST (UINT64_C(1)<<20)
 HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
   @autoreleasepool {
     if(gpu.device)return 0;
@@ -438,12 +439,12 @@ HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
     }
     const char *spin=getenv("MESH_NCCL_SPIN");
     gpu.spin=spin && strtoull(spin,NULL,10)?strtoull(spin,NULL,10):UINT64_C(65536);
+    if(gpu.spin>SPIN_MOST)gpu.spin=SPIN_MOST;
     gpu.device=device;
     return 0;
   }
 }
-/* A GPU program failed (its command buffer's status an error) since the process started. */
-HIDDEN int nccl_mesh_gpu_failed(void){return atomic_load(&failed);}
+
 
 /* A Metal buffer over `bytes` at `pointer`, no copy: the pages holding them (from the page below
    `pointer`), `*offset` the pointer's place in it.  A window allocation's pages are its own. */
@@ -548,12 +549,12 @@ HIDDEN void nccl_mesh_program_copy(void *program,void *to,uint64_t dst,void *fro
    byte offset `flag`) set where it saw them all, else its call's leaked word (`leaked`).  The buffers the waited
    requests read or write (`touch`) are declared used, so Metal orders a later command buffer's work on them after
    the spin, as it did after an event wait: it orders a queue's command buffers only where they share a buffer. */
-HIDDEN void nccl_mesh_program_spin(void *program,void *buffer,const uint64_t *at,uint32_t n,uint64_t flag,uint64_t leaked,void *given,
-  void *const *touch,int ntouch){
+HIDDEN int nccl_mesh_program_spin(void *program,void *buffer,const uint64_t *at,uint32_t n,uint64_t flag,uint64_t leaked,void *given,
+  void *const *touch,int ntouch,void **held){
   @autoreleasepool {
     const size_t bytes=(4+2*(size_t)n)*sizeof(uint64_t);
     uint64_t *list=malloc(bytes);
-    if(!list){atomic_store(&failed,1);return;}
+    if(!list)return -1;
     list[0]=n;list[1]=gpu.spin;list[2]=flag;list[3]=leaked;
     memcpy(list+4,at,2*(size_t)n*sizeof *at);
     id<MTLComputeCommandEncoder> encoder=encoder_of(program);
@@ -561,13 +562,18 @@ HIDDEN void nccl_mesh_program_spin(void *program,void *buffer,const uint64_t *at
     [encoder setComputePipelineState:gpu.kernels[KERNEL_WAIT]];
     [encoder setBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:0];
     [encoder setBuffer:(id<MTLBuffer>)(given?given:buffer) offset:0 atIndex:2];
+    /* a list past setBytes' 4 KB in a buffer of its own, retained by the caller's recording until it is freed (a
+       caller's command buffer may not retain what it binds) */
     if(bytes<=4096)[encoder setBytes:list length:bytes atIndex:1];
     else{
-      id<MTLBuffer> held=[[gpu.device newBufferWithBytes:list length:bytes options:MTLResourceStorageModeShared] autorelease];
-      [encoder setBuffer:held offset:0 atIndex:1];
+      id<MTLBuffer> made=[gpu.device newBufferWithBytes:list length:bytes options:MTLResourceStorageModeShared];
+      if(!made){free(list);return -1;}
+      [encoder setBuffer:made offset:0 atIndex:1];
+      if(held)*held=made;else [made autorelease];
     }
     [encoder dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
     free(list);
+    return 0;
   }
 }
 /* The word at byte offset `at` of `buffer` set to `value`, system-coherent, after the dispatches before it;
@@ -615,21 +621,33 @@ HIDDEN void nccl_mesh_program_counted(void *program,void *to,void *from,void *co
     [encoder dispatchThreads:MTLSizeMake((NSUInteger)threads,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
   }
 }
-/* `done(argument, failed)` once the GPU has run the command buffer (a failed one marks the process's
-   GPU failed, so no host wait on its values goes on): the library's own program, or a caller's that a
-   stream's deferred programs were encoded into (ncclMeshStreamEncodeWait). */
+/* `done(argument, status)` once the GPU has run the command buffer, its status as the device reported it: 0 it ran;
+   1 it failed by no fault of its own (Metal's watchdog, a victim of another process's fault or of a GPU recovery,
+   memory another process held: the same commands run again from the same inputs give the same result); 2 it
+   faulted itself (a page fault, an invalid resource, a stack overflow, access refused, the device gone).  The
+   library's own program, or a caller's that a stream's deferred programs were encoded into
+   (ncclMeshStreamEncodeWait). */
 HIDDEN void nccl_mesh_program_handler(void *program,void (*done)(void *,int),void *argument){
   [(id<MTLCommandBuffer>)program addCompletedHandler:^(id<MTLCommandBuffer> ran){
-    int error=ran.status==MTLCommandBufferStatusError;
-    if(error){atomic_store(&failed,1);fprintf(stderr,"nccl-mesh: a GPU program failed: %s\n",ran.error.localizedDescription.UTF8String);}
-    done(argument,error);
+    int status=0;
+    if(ran.status==MTLCommandBufferStatusError){
+      const NSInteger code=ran.error.code;
+      status=code==MTLCommandBufferErrorPageFault || code==MTLCommandBufferErrorInvalidResource || code==MTLCommandBufferErrorStackOverflow ||
+             code==MTLCommandBufferErrorNotPermitted || code==MTLCommandBufferErrorAccessRevoked || code==MTLCommandBufferErrorDeviceRemoved?2:1;
+      fprintf(stderr,"nccl-mesh: a GPU program failed (%s): %s\n",status==1?"to be run again":"its own fault",ran.error.localizedDescription.UTF8String);
+    }
+    done(argument,status);
   }];
 }
-/* Committed, with `done` as above. */
+/* Committed (its encoding ended by the caller), with `done` as above. */
 HIDDEN void nccl_mesh_program_commit(void *program,void (*done)(void *,int),void *argument){
-  nccl_mesh_program_end(program);
   nccl_mesh_program_handler(program,done,argument);
   [(id<MTLCommandBuffer>)program commit];
+  [(id<MTLCommandBuffer>)program release];
+}
+/* A command buffer never committed, released (a program run again from its start drops what it had not run). */
+HIDDEN void nccl_mesh_program_drop(void *program){
+  nccl_mesh_program_end(program);
   [(id<MTLCommandBuffer>)program release];
 }
 
