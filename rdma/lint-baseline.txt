@@ -1,0 +1,65 @@
+kill-launchd	bin/mesh-keeper.sh	1	echo "[$(ts)] DRIFT babeld down"; launchctl kickstart -k system/io.mesh.router >/dev/null 2>&1; drift=1; }
+kill-launchd	bin/mesh-keeper.sh	1	launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist >/dev/null 2>&1
+kill-launchd	bin/mesh-keeper.sh	1	launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist >/dev/null 2>&1
+kill-launchd	bin/mesh-keeper.sh	1	launchctl kickstart -k system/io.mesh.beacon >/dev/null 2>&1
+kill-launchd	bin/mesh-kill-guard.sh	1	a verbs call does not die when you SIGKILL it. It goes to STAT U, uninterruptible
+kill-launchd	bin/mesh-kill-guard.sh	1	grep -Eq '(^|[^A-Za-z0-9_])(pkill|killall)([^A-Za-z0-9_-]|$)|launchctl[[:space:]]+kill[[:space:]]+-?(9|17|KILL|SIGKILL|STOP|SIGSTOP)' <<<"$1" && return 0
+kill-launchd	bin/mesh-kill-guard.sh	1	grep -Eq -- '-((s|n)[[:space:]]+)?(9|17|KILL|STOP|SIGKILL|SIGSTOP)([^A-Za-z0-9_-]|$)' <<<"$1" && return 0
+kill-launchd	bin/mesh-kill-guard.sh	1	ibv_close_device. SIGTERM is safe precisely because the handler runs. SIGKILL
+kill-launchd	bin/mesh-top.py	1	if str(b.get("state", "")).startswith("U"): hints.append(("bad", f"{node.name}: bridge pid {b['pid']} is in U (uninterruptible, blocked in a verbs call); never SIGKILL it and do not launch ibv_devinfo there (RDMA-RULES.md)"))
+kill-launchd	bootstrap.sh	1	launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null
+kill-launchd	etc/io.mesh.observer.plist	1	<key>KeepAlive</key>
+kill-launchd	etc/io.mesh.telemetry.plist	1	<key>KeepAlive</key>
+kill-launchd	install-user.sh	3	<key>KeepAlive</key><true/>
+kill-launchd	install-user.sh	1	D="$HOME/.local/mesh"; A="$HOME/Library/LaunchAgents"
+kill-launchd	install-user.sh	1	for _ in 1 2 3; do launchctl bootstrap "gui/$UID" "$A/$label.plist" >/dev/null 2>&1; launchctl print "gui/$UID/$label" >/dev/null 2>&1 && break; sleep 1; done
+kill-launchd	install.sh	3	" <key>KeepAlive</key><true/>
+kill-launchd	install.sh	1	<key>KeepAlive</key><true/>
+kill-launchd	install.sh	1	cat > /Library/LaunchDaemons/io.mesh.nodeinfo.plist <<PL
+kill-launchd	install.sh	1	cat >"/Library/LaunchDaemons/$1.plist" <<PL
+kill-launchd	install.sh	1	chmod 644 "/Library/LaunchDaemons/$1.plist"
+kill-launchd	install.sh	1	chmod 644 /Library/LaunchDaemons/io.mesh.nodeinfo.plist
+kill-launchd	install.sh	1	chmod 644 /Library/LaunchDaemons/io.mesh.observer.plist
+kill-launchd	install.sh	1	install -m 644 -o root -g wheel "$REPO"/etc/io.mesh.telemetry.plist /Library/LaunchDaemons/io.mesh.telemetry.plist
+kill-launchd	install.sh	1	launchctl bootstrap "gui/$ADMIN_UID" "$H/Library/LaunchAgents/$label.plist" >/dev/null 2>&1
+kill-launchd	install.sh	1	launchctl bootstrap system "/Library/LaunchDaemons/$L.plist" >/dev/null 2>&1
+kill-launchd	install.sh	1	launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null
+kill-launchd	install.sh	2	launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null
+kill-launchd	install.sh	1	mkplist io.mesh.fabric "<string>$MESH_ROOT/bin/mesh-fabric-init.sh</string>" " <key>KeepAlive</key><false/>"
+kill-launchd	install.sh	1	mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" " <key>KeepAlive</key><false/>"
+kill-launchd	install.sh	1	sed -e "s|__MESH_USER__|$ADMIN_USER|g" -e "s|__MESH_HOME__|$H|g" "$REPO/etc/io.mesh.observer.plist" > /Library/LaunchDaemons/io.mesh.observer.plist
+spin	rdma/mesh-call.c	1	while(atomic_load_explicit(&port->prepared,memory_order_acquire)!=context->client){}
+spin	rdma/mesh-collective.c	1	do{at=up[at];steps++;}while(at<n && at && steps<n);
+spin	rdma/mesh-disk.h	1	for (;;) {
+spin	rdma/mesh-flow.c	4	for(;;){
+spin	rdma/mesh-verbs.h	1	for(;;){
+tcp	bin/mesh-top.py	1	connection = socket.socket(family, socket.SOCK_STREAM)
+tcp	bin/mesh-top.py	1	def connect(address, port, timeout):
+tcp	bin/mesh-top.py	1	try: connection.connect((sockaddr[0], port) + tuple(sockaddr[2:]))
+tcp	bin/mesh-top.py	1	try: return [(family, sockaddr, host) for family, _, _, _, sockaddr in socket.getaddrinfo(host, TELEMETRY_PORT, type=socket.SOCK_STREAM)]
+tcp	bin/mesh-top.py	1	with connect(address, port, min(timeout, 0.7)) as connection:
+tcp	rdma/mesh-verbs.h	1	if(connect(f,a->ai_addr,a->ai_addrlen)==0)return f;
+tcp	rdma/mesh-verbs.h	1	if(r->ai_family==AF_INET6)setsockopt(provider->listener,IPPROTO_IPV6,IPV6_V6ONLY,&off,sizeof off);
+tcp	rdma/mesh-verbs.h	1	int error=fcntl(provider->listener,F_SETFL,O_NONBLOCK)<0 || bind(provider->listener,r->ai_addr,r->ai_addrlen) || listen(provider->listener,4),code=errno;
+tcp	rdma/mesh-verbs.h	1	int f=accept(provider->listener,NULL,NULL);
+tcp	rdma/mesh-verbs.h	1	int f=socket(a->ai_family,SOCK_STREAM,0); if(f<0) return -1;
+tcp	rdma/mesh-verbs.h	1	provider->listener=socket(r->ai_family,SOCK_STREAM,0);
+tcp	rdma/mesh-verbs.h	1	setsockopt(provider->listener,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on);
+tcp	rdma/mesh-verbs.h	1	struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC,.ai_flags=AI_NUMERICHOST|AI_NUMERICSERV},*addresses;
+tcp	rdma/mesh-verbs.h	1	struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC,.ai_flags=AI_PASSIVE|AI_NUMERICHOST|AI_NUMERICSERV},*r;
+tcp	user/mesh-nodeinfod.py	1	s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+tcp	user/mesh-nodeinfod.py	1	s.bind(("::", PORT)); s.listen(64)
+tcp	user/mesh-nodeinfod.py	1	s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+tcp	user/mesh-nodeinfod.py	1	try: c, _ = s.accept()
+tcp	user/mesh-nodeinfod.py	1	try: s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+tcp	user/mesh-telemetry.py	1	server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+tcp	user/mesh-telemetry.py	1	try: self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+verbs-teardown	rdma/mesh-flow.c	1	for(uint32_t i=0;i<device_count;i++)if(!down_device(&devices[i])){fprintf(stderr,"verbs teardown failed: %s\n",strerror(errno));return 1;}
+verbs-teardown	rdma/mesh-flow.c	1	while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);
+verbs-teardown	rdma/mesh-verbs.h	1	if(device->context){if(ibv_close_device(device->context))return 0;device->context=NULL;}
+verbs-teardown	rdma/mesh-verbs.h	1	if(device->domain){if(ibv_dealloc_pd(device->domain))return 0;device->domain=NULL;}
+verbs-teardown	rdma/mesh-verbs.h	1	if(ibv_dereg_mr(device->regions[device->region_count-1]))return 0;
+verbs-teardown	rdma/mesh-verbs.h	1	if(ibv_destroy_cq(provider->completion))return 0;
+verbs-teardown	rdma/mesh-verbs.h	1	static int down_device(struct mesh_device *device){
+verbs-teardown	rdma/mesh-verbs.h	1	static int down_pair(struct mesh_verbs *provider){
+verbs-teardown	rdma/mesh-verbs.h	1	while(provider->qp_count){ struct ibv_qp *q=provider->queues[provider->qp_count-1].pair; if(q && ibv_destroy_qp(q))return 0; provider->queues[--provider->qp_count].pair=NULL; }
