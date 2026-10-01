@@ -1,13 +1,13 @@
-BINS = mesh-flow mesh-stat libmesh.dylib libnccl-mesh.dylib
+BINS = mesh-flow mesh-stat libmesh.dylib
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 all: $(BINS)
 native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
 .build/%.s: %.c mesh.h mesh-verbs.h mesh-dataflow.h mesh-call.h Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
-mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-dataflow.h mesh-call.h mesh-dataflow.c Makefile
+mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-dataflow.h mesh-call.h mesh-dataflow.c mesh-call.c Makefile
 	mkdir -p .build
-	cc $(CPPFLAGS) -fblocks -O2 -o .build/$@ mesh-flow.c mesh-dataflow.c -lrdma
+	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -o .build/$@ mesh-flow.c mesh-dataflow.c mesh-call.c -lrdma
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
 	mv -f .build/$@ $@
 mesh-stat: mesh-stat.c mesh.h

@@ -28,9 +28,12 @@ int main(int argc,char **argv){
   int alive=pid && (!kill((pid_t)pid,0) || errno==EPERM);
   uint32_t paired=0;
   for(uint32_t i=0;i<h->links;i++)paired+=alive && atomic_load(&mesh_links(h)[i].port.phase)==MESH_PAIRED;
-  printf("{\"up\":%s,\"ready\":%s,\"paired\":%s,\"bridge_pid\":%llu,\"client\":%llu,\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"rows\":%u,\"qps\":%u,\"links\":%u,\"paired_links\":%u,\"code\":%lld,\"domain\":%u,\"peers\":[",
-    alive?"true":"false",alive?"true":"false",paired?"true":"false",(unsigned long long)pid,(unsigned long long)(uint32_t)atomic_load(&h->client),
-    h->version,h->node,h->pgsz,h->block,h->rows,h->qps,h->links,paired,(long long)h->port.code,h->port.domain);
+  uint32_t sessions=0,rings=0;
+  for(uint32_t s=0;s<MESH_SESSIONS;s++)sessions+=atomic_load(&mesh_sessions(h)[s].served)!=0;
+  for(uint32_t r=0;r<MESH_RINGS;r++)rings+=atomic_load(&mesh_rings(h)[r])!=0;
+  printf("{\"up\":%s,\"ready\":%s,\"paired\":%s,\"bridge_pid\":%llu,\"sessions\":%u,\"rings\":%u,\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"rows\":%u,\"qps\":%u,\"links\":%u,\"paired_links\":%u,\"arena_pages\":%u,\"window_pages\":%u,\"code\":%lld,\"domain\":%u,\"peers\":[",
+    alive?"true":"false",alive?"true":"false",paired?"true":"false",(unsigned long long)pid,sessions,rings,
+    h->version,h->node,h->pgsz,h->block,h->rows,h->qps,h->links,paired,mesh_arena_pages(h),h->wire_pages,(long long)h->port.code,h->port.domain);
   for(uint32_t i=0;i<h->links;i++){
     struct mesh_link_info *link=&mesh_links(h)[i];
     printf("%s{\"node\":%u,\"phase\":%u,\"code\":%lld,\"domain\":%u,\"device\":\"%s\",\"bandwidth\":%llu}",i?",":"",link->peer,atomic_load(&link->port.phase),(long long)link->port.code,link->port.domain,link->device,(unsigned long long)__atomic_load_n(&link->bandwidth,__ATOMIC_RELAXED));

@@ -9,9 +9,10 @@ U, Q, Z = C.c_uint32, C.c_uint64, C.c_size_t
 
 
 class Context(C.Structure):
-    _fields_ = [('M', C.c_void_p), ('len', Z), *((k, Q) for k in ('client', 'send_off', 'send_bytes')),
-                *((k, U) for k in ('rows', 'arena', 'wire', 'shared_pages', 'row_cursor', 'wire_cursor', 'bulk_cursor')),
-                ('fd', C.c_int)]
+    """mesh-dataflow.h struct mesh_ctx: a process's mapping of its node's region (any number at once)."""
+    _fields_ = [('M', C.c_void_p), ('len', Z), *((k, Q) for k in ('key', 'send_off', 'send_bytes')),
+                *((k, U) for k in ('session', 'rows', 'arena', 'wire', 'shared_pages', 'row_cursor', 'wire_cursor', 'bulk_cursor')),
+                ('fd', C.c_int), ('owned', C.c_void_p)]
 
 
 class Header(C.Structure):
@@ -171,9 +172,9 @@ class Mesh:
         check(LIB.mesh_host_inputs(context))
         check(LIB.mesh_transfers_start(context))
 
-    def close(self, linger=0.5):
-        """Holds the pair open while the peer's last receive lands, then retires this client."""
-        time.sleep(linger)
+    def close(self):
+        """Detaches: the session finishes with the peer's (the bridge serves it until the peer's program is done too,
+        mesh-flow.c link_run), then this process's allocations are freed."""
         if self.owned:
             LIB.mesh_link_map_free(C.byref(self.map))
         return LIB.mesh_detach(C.byref(self.context))
@@ -236,9 +237,9 @@ class Steps:
                 flat[span] = mine[span]
         return total
 
-    def close(self, linger=0.5):
+    def close(self):
         """Closes this collective's Mesh (the one of AllReduce)."""
-        return self.mesh.close(linger)
+        return self.mesh.close()
 
 
 def AllReduce(shape, dtype, links, invocations, depth=4, identity=1, region=None):

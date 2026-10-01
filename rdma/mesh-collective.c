@@ -463,11 +463,11 @@ int mesh_host_inputs(struct mesh_ctx *context){
   struct hdr *m=context->M;
   uint64_t frames[m->links?m->links:1],words=0;
   for(uint32_t p=0;p<m->links;p++){
-    struct mesh_tx *tx=mesh_events(m,mesh_notice_queue(m,context->client,p));
+    struct mesh_tx *tx=mesh_events(m,mesh_notice_queue(m,context->session,p));
     frames[p]=0;
     for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
-      struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
+      struct mesh_transfer *in=mesh_transfers(m,context->session,q,MESH_RECEIVE);
+      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->session,q,MESH_RECEIVE));i++)
         frames[p]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count;
     }
     words+=frames[p]*tx->invocations;
@@ -480,12 +480,12 @@ int mesh_host_inputs(struct mesh_ctx *context){
   struct mesh_cancellation *cancel=mesh_section_address(context,stop,0);
   memset(word,0,input.bytes);memset(cancel,0,stop.bytes);
   for(uint32_t p=0;p<m->links;p++){
-    struct mesh_tx *tx=mesh_events(m,mesh_notice_queue(m,context->client,p));
+    struct mesh_tx *tx=mesh_events(m,mesh_notice_queue(m,context->session,p));
     tx->cancel=(uintptr_t)cancel-(uintptr_t)m;
     cancel->ranges[p]=(struct mesh_cancel_range){.offset=(uintptr_t)word-(uintptr_t)m,.count=frames[p]*tx->invocations};
     for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
-      struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++){
+      struct mesh_transfer *in=mesh_transfers(m,context->session,q,MESH_RECEIVE);
+      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->session,q,MESH_RECEIVE));i++){
         uint32_t chunks=mesh_row_chunks(m,in[i].local_row,in[i].bytes);
         for(uint32_t s=0;s<in[i].count;s++)for(uint32_t k=0;k<chunks;k++){
           struct mesh_publication *delivery=mesh_publication_at(m,in[i].local_row+s*in[i].stride+k);
