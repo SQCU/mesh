@@ -73,6 +73,18 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
     mesh_retire(memory,vacant);
     vacant=0;
   }
+  /* design/algorithm-sources.md#programtensor */
+  /* A retired client's pages are this client's to take once the bridge has closed its session (its queue pairs,
+     and the receives posted into those pages, destroyed): wait for that, then release them here rather than
+     racing the bridge's own release (an allocation right after a dead client's retirement had failed ENOMEM). */
+  for(;;){
+    uint64_t notification=atomic_load_explicit(&memory->control,memory_order_acquire);
+    uint64_t serving=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
+    uint64_t bridge=atomic_load_explicit(&memory->bridge_pid,memory_order_relaxed);
+    if(!serving || (uint32_t)serving==(uint32_t)client || !bridge || (kill((pid_t)bridge,0) && errno==ESRCH))break;
+    os_sync_wait_on_address(&memory->control,notification,sizeof memory->control,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
+  }
+  mesh_retired_release(memory);
   uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
   client|=(~device)&(UINT64_C(1)<<63);
   for(uint32_t q=0;q<memory->links*memory->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(memory,client,q,d),0,memory_order_relaxed);

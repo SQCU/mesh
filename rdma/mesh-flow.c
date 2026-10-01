@@ -90,6 +90,8 @@ static void link_stop(struct mesh_link *link){
 /* design/algorithm-sources.md#programcopy */
 static __attribute__((noinline)) void link_error(struct mesh_link *link,int64_t code,uint32_t domain){
   struct mesh_port_info *port=&mesh_links(link->M)[link->index].port;port->code=code;port->domain=domain;
+  if(atomic_load_explicit(&link->progressing,memory_order_relaxed) || atomic_load_explicit(&port->phase,memory_order_relaxed)!=MESH_STOPPED)
+    fprintf(stderr,"link %u error %lld domain %u (1 verbs, 2 completion status, 3 poll, 4 event)\n",link->index,(long long)code,domain);
   atomic_store_explicit(&port->phase,MESH_STOPPED,memory_order_relaxed);
   atomic_store_explicit(&port->prepared,link->client,memory_order_release);
   link_stop(link);
@@ -643,6 +645,7 @@ int main(int argc,char **argv){
     for(uint32_t i=0;i<started;i++)link_stop(&links[i]);
     for(uint32_t i=0;i<started;i++)pthread_join(links[i].controller,NULL);
     atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);
+    mesh_control_notify(m);
   }
   for(uint32_t i=0;i<device_count;i++)if(!down_device(&devices[i])){fprintf(stderr,"verbs teardown failed: %s\n",strerror(errno));return 1;}
   atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);
