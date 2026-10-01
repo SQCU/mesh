@@ -654,7 +654,7 @@ static void *link_run(void *argument){
 #define NET_DISCARD (UINT32_MAX-1)
 #define NET_HEARTBEAT_NS UINT64_C(200000000)
 enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT, NET_LINKS, NET_BETA, NET_RESUME, NET_LANDED, NET_LEAVE,
-       NET_CLIENTS, NET_RELEASED, NET_VOID };
+       NET_CLIENTS, NET_VOID, NET_VOIDED };
 /* One control message.  CONNECT: `key` the listen it names, `from` the connecting comm.  ACCEPT: `from`
    the receiving comm made for `to`.  RTS: send request `sequence` of `from`, `size` its bytes,
    extent/phase where its registration regions end, flags 1 a held isend (mesh.h MESH_NET_HELD: announced
@@ -680,8 +680,10 @@ enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT,
    ACCEPT carry their comm's client in `offset` (the comm's peer_owner at the other end).  CLIENTS: slot `flags` of
    the sender's node's client table holds `key` (0: none); the sender sends its whole table once a pairing begins and
    whenever it changes, before any CONNECT or ACCEPT of a client it names, and the last slot completes it (mesh.h
-   peer_clients).  RELEASED: held isend `sequence` of `from` was released (its bytes written); VOID: it was not, its
-   comm closed first: the receiver's request ends on its bytes landing and one of the two, failed on VOID. */
+   peer_clients).  VOID: held isend `sequence` of `from` was never released, its comm closed first: its chunks go from
+   the discard buffer, and only once its receiver has answered VOIDED (to `from`, the same sequence), so a receive whose
+   bytes land before any VOID holds the bytes its sender released, and ends on their landing (the bytes reach the NIC
+   only once released: no message need say so), and one that heard VOID first fails as they land. */
 struct net_message { uint32_t kind,from,from_generation,to,to_generation,flags; int32_t tag,error; uint64_t key,sequence,size,extent,phase,offset; };
 _Static_assert(sizeof(struct net_message)==80,"net_message");
 /* A comm's bridge side, its link's session thread's alone: requests taken; a receive comm's requests
@@ -706,7 +708,7 @@ struct net_comm {
    request to grant; resume, waiting for its sender's RESUME answer; again, what had been posted of it before
    its session was lost), and a posted RECV (its queue pair; landed, its completion taken). */
 struct net_send { uint32_t comm,generation,slot,mr,queue,voided; uint64_t sequence,offset,length; };
-/* `held`: a held isend's message, which ends once landed and released (`released` 1) or voided (2: failed) */
+/* `held`: a held isend's message, which ends once landed (`released` 3), failed where its VOID came first (2) */
 struct net_transfer { uint32_t comm,generation,slot,mr,peer,peer_generation,held,resume,released,padding; uint64_t sequence,size,offset,cursor,landed,e1,p1,e2,p2,again; };
 /* A posted RECV: its transfer (NET_NONE: the discard buffer), frames, queue pair, whether it landed, its bytes and
    where in its transfer they go (`at`). */
@@ -771,7 +773,7 @@ struct net_session {
   uint32_t send_queue,receive_queue,receive_requests,queue_frames[NET_QUEUES];
   struct net_send *sends;uint32_t send_head,send_post,send_tail;
   struct net_kept *k;
-  struct net_message *output;uint32_t output_head,output_tail,void_flush;size_t output_partial;
+  struct net_message *output;uint32_t output_head,output_tail;size_t output_partial;
   unsigned char input[sizeof(struct net_message)*64];size_t input_bytes;
   struct { uint32_t from,generation; uint64_t key,owner; } pending[MESH_NET_COMMS];uint32_t pending_count;
   int send_blocked,receive_blocked,send_held;
@@ -831,7 +833,8 @@ static int net_dead(uint64_t owner);
 struct net_transfer;
 static int net_ended(const struct net_transfer *t);
 struct net_message;
-static void net_released(struct net_session *s,const struct net_message *message,uint32_t released);
+static void net_released(struct net_session *s,const struct net_message *message);
+static void net_void_answered(struct net_session *s,const struct net_message *message);
 static void net_links_moved(void){
   atomic_fetch_add_explicit(&link_news,1,memory_order_release);
   for(uint32_t i=0;i<net_session_count;i++){
@@ -1137,15 +1140,6 @@ static void net_take(struct net_session *s,uint32_t index){
     atomic_signal_fence(memory_order_seq_cst);
     state->taken++;
   }
-  /* a held isend its client released (its bytes written) said to its receiver once: RELEASED */
-  for(uint32_t slot=0;kind==MESH_NET_SEND && slot<MESH_NET_REQUESTS && !s->failed;slot++){
-    struct mesh_net_request *request=comm->requests+slot;
-    if(state->released[slot]!=1 || atomic_load_explicit(&request->state,memory_order_acquire)!=MESH_NET_ACTIVE ||
-       atomic_load_explicit(&request->op,memory_order_acquire)!=MESH_NET_ISEND)continue;
-    net_emit(s,(struct net_message){.kind=NET_RELEASED,.to=comm->peer,.to_generation=comm->peer_generation,.from=index,.from_generation=comm->generation,
-      .sequence=request->sequence});
-    state->released[slot]=2;
-  }
   if(kind!=MESH_NET_RECV)return;
   net_match(s,index);
   for(uint32_t slot=0;slot<MESH_NET_REQUESTS;slot++){
@@ -1432,8 +1426,8 @@ static void net_receive(struct net_session *s,const struct net_message *message)
     atomic_store_explicit(&s->counts->peer_clients[message->flags],message->key,memory_order_release);
     if(message->flags==MESH_NET_CLIENTS-1)atomic_store_explicit(&s->counts->clients_pairing,s->pairing,memory_order_release);
     break;
-  case NET_RELEASED: net_released(s,message,1); break;
-  case NET_VOID: net_released(s,message,2); break;
+  case NET_VOID: net_released(s,message); break;
+  case NET_VOIDED: net_void_answered(s,message); break;
   default: s->failed=EPROTO;
   }
 }
@@ -1447,12 +1441,12 @@ static int net_held(struct net_session *s,const struct net_send *chunk){
   if(!comm || atomic_load_explicit(&comm->state,memory_order_acquire)!=MESH_NET_SEND)return 0;
   return atomic_load_explicit(&comm->requests[chunk->slot].op,memory_order_acquire)==MESH_NET_HELD;
 }
-/* Whether a granted chunk is of a held isend voided (its comm closed before its client released it): SENT from the
-   discard buffer, its receiver's RECV met, once the VOID before it is written (void_flush). */
-static int net_voided(struct net_session *s,const struct net_send *chunk){
+/* Whether a granted chunk is of a held isend voided (its comm closed before its client released it: `released` 3, its
+   VOID said; 4, its receiver's VOIDED heard): SENT from the discard buffer, its receiver's RECV met, once 4. */
+static int net_voided(struct net_session *s,const struct net_send *chunk,int answered){
   if(chunk->comm==NET_NONE)return 0;
   struct mesh_net_comm *comm=net_comm_at(s,chunk->comm,chunk->generation);
-  return comm && comm->requests[chunk->slot].sequence==chunk->sequence && net_comms[chunk->comm].released[chunk->slot]==3;
+  return comm && comm->requests[chunk->slot].sequence==chunk->sequence && net_comms[chunk->comm].released[chunk->slot]>=(answered?4:3);
 }
 /* Granted chunks are SENT in grant order, each on its queue pair while it has the frames and, on another
    queue pair than the SENDs outstanding, once those have completed (a held one stops them); matched
@@ -1463,8 +1457,8 @@ static int net_post(struct net_session *s){
   while(s->send_post!=s->send_tail){
     struct net_send *chunk=s->sends+s->send_post%NET_SENDS;
     if(net_held(s,chunk)){s->send_held=1;break;}
-    if(!chunk->voided && net_voided(s,chunk)){chunk->voided=1;chunk->mr=NET_DISCARD;chunk->offset=0;}
-    if(chunk->voided && (int32_t)(s->output_head-s->void_flush)<0){s->send_held=1;break;}
+    if(!chunk->voided && net_voided(s,chunk,0)){chunk->voided=1;chunk->mr=NET_DISCARD;chunk->offset=0;}
+    if(chunk->voided && !net_voided(s,chunk,1)){s->send_held=1;break;}
     uint32_t frames=(uint32_t)((chunk->length+4095)/4096);
     if((chunk->queue!=s->send_queue && s->send_posted!=s->send_retired) || s->send_posted-s->send_retired+frames>s->send_capacity){
       if(!s->send_blocked){s->send_blocked=1;atomic_fetch_add_explicit(&s->counts->send_stalls,1,memory_order_relaxed);}
@@ -1515,12 +1509,12 @@ static int net_failed(struct net_session *s,const struct ibv_wc *done,const char
     (unsigned long long)span.addr,span.length,span.lkey,mr,transfer);
   return EIO;
 }
-/* Whether a message to receive has ended: every byte landed and, a held isend's, released or voided. */
+/* Whether a message to receive has ended: every byte landed and, a held isend's, its end taken (net_landing). */
 static int net_ended(const struct net_transfer *t){return t->landed>=t->size && (!t->held || t->released==3);}
-/* A message every byte of which has landed ends (its sender told: LANDED), a held isend's once its sender said it
-   was released (or failed, voided); until then it waits, landed, for RELEASED or VOID (net_released). */
+/* A message every byte of which has landed ends (its sender told: LANDED), a held isend's as any other (a voided one's
+   bytes go only once its VOID has been answered: it fails, its VOID heard first). */
 static void net_landing(struct net_session *s,struct net_transfer *t){
-  if(t->released==3 || t->landed<t->size || (t->held && !t->released))return;
+  if(t->released==3 || t->landed<t->size)return;
   const int voided=t->released==2;
   struct mesh_net_comm *comm=net_comm_at(s,t->comm,t->generation);
   if(comm){
@@ -1532,23 +1526,32 @@ static void net_landing(struct net_session *s,struct net_transfer *t){
   net_emit(s,(struct net_message){.kind=voided?NET_CREDIT:NET_LANDED,.to=t->peer,.to_generation=t->peer_generation,.from=t->comm,.from_generation=t->generation,
     .sequence=t->sequence,.size=voided?0:t->size,.error=voided?ECONNRESET:0});
 }
-/* RELEASED or VOID for a held isend: its receive (or its announcement still waiting for an irecv) told, and ended
-   if every byte of it has landed. */
-static void net_released(struct net_session *s,const struct net_message *message,uint32_t released){
+/* VOID for a held isend: its receive (or its announcement still waiting for an irecv) marked failed, and answered
+   (VOIDED: its chunks may go now, from the discard buffer), again however often it is said (a session that resumed
+   says it again where its answer may have been lost). */
+static void net_released(struct net_session *s,const struct net_message *message){
+  net_emit(s,(struct net_message){.kind=NET_VOIDED,.to=message->from,.to_generation=message->from_generation,.from=message->to,
+    .from_generation=message->to_generation,.sequence=message->sequence});
   struct mesh_net_comm *comm=net_comm_at(s,message->to,message->to_generation);
   if(!comm)return;
   struct net_comm *state=net_state(comm,message->to);
   for(uint64_t a=state->announce_head;a!=state->announce_tail;a++){
     struct net_announce *announced=state->announced+a%MESH_NET_REQUESTS;
-    if(announced->sequence==message->sequence){announced->held=released==2?2:0;return;}
+    if(announced->sequence==message->sequence){announced->held=2;return;}
   }
   for(uint32_t r=s->k->receive_head;r!=s->k->receive_tail;r++){
     struct net_transfer *t=s->k->receives+r%NET_RECEIVES;
     if(t->comm!=message->to || t->generation!=message->to_generation || t->sequence!=message->sequence || t->released)continue;
-    t->released=released;
+    t->released=2;
     net_landing(s,t);
     return;
   }
+}
+/* VOIDED: a held isend's VOID answered by its receiver (`released` 4: its chunks go). */
+static void net_void_answered(struct net_session *s,const struct net_message *message){
+  struct mesh_net_comm *comm=net_comm_at(s,message->to,message->to_generation);
+  const uint32_t slot=(uint32_t)(message->sequence%MESH_NET_REQUESTS);
+  if(comm && comm->requests[slot].sequence==message->sequence && net_comms[message->to].released[slot]==3)net_comms[message->to].released[slot]=4;
 }
 /* SENDs complete in the order posted (their queue pairs' one at a time); RECVs complete in each queue pair's
    order, each taken as it lands and retired in posting order.  A SEND's completion retires its frames and counts
@@ -1682,12 +1685,14 @@ static void net_close(struct net_session *s,uint32_t index){
       net_emit(s,(struct net_message){.kind=NET_CREDIT,.to=comm->peer,.to_generation=comm->peer_generation,.from=index,.from_generation=comm->generation,
         .sequence=a.sequence,.error=ECONNRESET});
     }
-    /* a held isend its client never released: its receiver told (VOID) before its chunks go, from the discard buffer */
+    /* a held isend its client never released: its receiver told (VOID), its chunks going from the discard buffer once
+       it has answered (VOIDED) */
     for(uint32_t slot=0;slot<MESH_NET_REQUESTS;slot++)
-      if(state->released[slot]==1 && atomic_load_explicit(&comm->requests[slot].state,memory_order_acquire)==MESH_NET_ACTIVE){
+      if(state->released[slot]==1 && atomic_load_explicit(&comm->requests[slot].state,memory_order_acquire)==MESH_NET_ACTIVE &&
+         atomic_load_explicit(&comm->requests[slot].op,memory_order_acquire)==MESH_NET_HELD){
         net_emit(s,(struct net_message){.kind=NET_VOID,.to=comm->peer,.to_generation=comm->peer_generation,.from=index,.from_generation=comm->generation,
           .sequence=comm->requests[slot].sequence});
-        state->released[slot]=3;s->void_flush=s->output_tail;
+        state->released[slot]=3;
       }
     state->taken=state->matched=atomic_load_explicit(&comm->posted,memory_order_acquire);
     const int32_t why=net_dead(comm->owner)?ESRCH:0;
@@ -1846,11 +1851,10 @@ static void net_resume(struct net_session *s){
       if(request->size)net_geometry(s,request->offset,&extent,&phase);
       net_emit(s,(struct net_message){.kind=NET_RTS,.to=comm->peer,.to_generation=comm->peer_generation,.from=i,.from_generation=comm->generation,
         .flags=(op==MESH_NET_HELD)|2,.sequence=request->sequence,.size=request->size,.extent=extent,.phase=phase,.tag=request->tag});
-      /* a held isend's release, or its void, said again */
-      if(state->released[slot]>=2)
-        net_emit(s,(struct net_message){.kind=state->released[slot]==2?NET_RELEASED:NET_VOID,.to=comm->peer,.to_generation=comm->peer_generation,
+      /* a held isend's void not yet answered, said again */
+      if(state->released[slot]==3)
+        net_emit(s,(struct net_message){.kind=NET_VOID,.to=comm->peer,.to_generation=comm->peer_generation,
           .from=i,.from_generation=comm->generation,.sequence=request->sequence});
-      if(state->released[slot]==3)s->void_flush=s->output_tail;
     }
   }
   atomic_fetch_add_explicit(&s->counts->resumes,1,memory_order_relaxed);
@@ -1860,7 +1864,7 @@ static void net_reset(struct net_session *s){
   s->send_head=s->send_post=s->send_tail=0;
   if(!s->k->suspended)s->k->receive_head=s->k->receive_post=s->k->receive_tail=0;
   s->k->chunk_head=s->k->chunk_tail=0;s->send_queue=s->receive_queue=0;memset(s->queue_frames,0,sizeof s->queue_frames);
-  s->output_head=s->output_tail=s->void_flush=0;s->output_partial=s->input_bytes=0;s->failed=0;s->send_blocked=s->receive_blocked=0;
+  s->output_head=s->output_tail=0;s->output_partial=s->input_bytes=0;s->failed=0;s->send_blocked=s->receive_blocked=0;
   s->clients_known=0;
 }
 /* The session's configuration, between RTR and RTS: a priming RECV posted on each queue pair into the
