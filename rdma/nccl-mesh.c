@@ -1,6 +1,7 @@
 #include "nccl.h"
 #include "mesh-net.h"
 #include "mesh-collective.h"
+#include <errno.h>
 #include <math.h>
 #include <pthread.h>
 #include <sched.h>
@@ -236,9 +237,15 @@ static void fail_message(struct ncclComm *c,const char *format,...){
   if(getenv("MESH_NCCL_DEBUG"))fprintf(stderr,"nccl-mesh: %s\n",text);
 }
 #define FAIL(c,result,...) (fail_message((c),__VA_ARGS__),(ncclResult_t)(result))
+/* The observed event behind a transport error, in words (mesh-flow.c: a peer of another instance ESTALE, a peer that
+   left EHOSTDOWN, a peer client that exited ESRCH). */
+static const char *event_of(int error){
+  return error==ESTALE?"its peer's bridge paired again as another instance":error==EHOSTDOWN?"its peer's bridge left the mesh":
+         error==ESRCH?"its peer's process exited":strerror(error);
+}
 static ncclResult_t net_failure(struct ncclComm *c,int result,const char *what){
   int error=mesh_net_error();
-  return FAIL(c,result?result:ncclSystemError,"%s: %s (%s)",what,ncclGetErrorString((ncclResult_t)result),strerror(error));
+  return FAIL(c,result?result:ncclSystemError,"%s: %s (%s)",what,ncclGetErrorString((ncclResult_t)result),event_of(error));
 }
 
 static uint64_t now_ns(void){return clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);}

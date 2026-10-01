@@ -79,7 +79,7 @@ namespace c10d {
 
 static std::pair<uint64_t, uint64_t> agree_on(ncclComm_t comm, const char *after);
 // Who voted in this rank's last agreement: "every rank", or the ranks that did and those that did not, departed as
-// this rank's bridge saw it (ncclMeshCommVoters: its bridge, or this rank's, left the mesh).
+// this rank's bridge observed it (ncclMeshCommVoters).
 static std::string voters(ncclComm_t comm) {
   int n = 0;
   if (ncclCommCount(comm, &n) != ncclSuccess || n <= 0) return "the ranks that stay";
@@ -93,8 +93,9 @@ static std::string voters(ncclComm_t comm) {
     for (size_t i = 0; i < ranks.size(); i++) text += (i ? ", " : "") + std::to_string(ranks[i]);
     return text;
   };
-  return named(in) + " (" + named(out) + " not voting: departed as this rank's bridge sees it, " +
-         (out.size() == 1 ? "its bridge" : "their bridges") + " or this rank's having left the mesh)";
+  return named(in) + " (" + named(out) + " not voting: departed as this rank's bridge observes it: " +
+         (out.size() == 1 ? "its node's bridge" : "their nodes' bridges") + " or this one left the mesh, this node's region was replaced, or " +
+         (out.size() == 1 ? "its process" : "their processes") + " exited)";
 }
 // A failure raised; a failure of the communicator (ncclRemoteError, ncclSystemError: the network, a revoked call;
 // ncclUnhandledCudaError: a GPU program of it failed for good) only once the ranks that stay have agreed on it, the
