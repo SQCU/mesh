@@ -263,7 +263,18 @@ int mesh_transfers_start(struct mesh_ctx *context){
 }
 
 /* design/algorithm-sources.md#programtensor */
+static int mesh_section_place(struct mesh_ctx *context,size_t bytes,uint32_t count,uint32_t align,int wire,struct mesh_section *section);
 int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int wire,struct mesh_section *section){
+  return mesh_section_place(context,bytes,count,context->M->block,wire,section);
+}
+/* As mesh_section_create, one value whose pages start at an arena page that is a multiple of `align` pages (a
+   multiple of the block): a stream message's buffer then lies within one registered region (mesh_link_info.extent)
+   where the section does. */
+int mesh_section_aligned(struct mesh_ctx *context,size_t bytes,uint32_t align,int wire,struct mesh_section *section){
+  if(!align || align%context->M->block)return EINVAL;
+  return mesh_section_place(context,bytes,1,align,wire,section);
+}
+static int mesh_section_place(struct mesh_ctx *context,size_t bytes,uint32_t count,uint32_t align,int wire,struct mesh_section *section){
   struct hdr *m=context->M;
   if(!bytes || !count)return EINVAL;
   size_t quantum=(size_t)m->block*m->pgsz;
@@ -282,7 +293,7 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int
   mesh_bits_set(mesh_plane(m,MESH_ROW_HOT),first,rows);
   /* design/prepared-machine.md#M01 */
   /* design/prepared-machine.md#M03 */
-  uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,m->block,wire);
+  uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,align,wire);
   /* design/prepared-machine.md#M01 */
   /* Registration wires its pages eagerly, so until now every operand was resident by the time the
      bridge came up.  Unregistered pages are not, and their first fault would land in the measured
