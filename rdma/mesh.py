@@ -1,4 +1,5 @@
 import ctypes as C
+import hashlib
 import os
 import struct
 import time
@@ -6,20 +7,6 @@ import time
 import numpy as np
 
 U, Q, Z = C.c_uint32, C.c_uint64, C.c_size_t
-
-
-class Context(C.Structure):
-    _fields_ = [('M', C.c_void_p), ('len', Z), *((k, Q) for k in ('client', 'send_off', 'send_bytes')),
-                *((k, U) for k in ('rows', 'arena', 'wire', 'shared_pages', 'row_cursor', 'wire_cursor', 'bulk_cursor')),
-                ('fd', C.c_int)]
-
-
-class Header(C.Structure):
-    _fields_ = [(k, U) for k in ('magic', 'version', 'pgsz', 'block', 'rows', 'node', 'qps', 'links')]
-
-
-class Section(C.Structure):
-    _fields_ = [('first', U), ('pages', U), ('bytes', Z), ('count', U), ('stride', U)]
 
 
 class Operand(C.Structure):
@@ -132,12 +119,8 @@ KINDS = ('mesh', 'ring', 'tree', 'graph')  # MESH_LINKS_MESH, MESH_LINKS_RING, M
 ALLREDUCE, BROADCAST = range(2)
 WHATS = ('allreduce', 'broadcast', 'reduce', 'reduce_scatter', 'allgather')  # MESH_ALLREDUCE .. MESH_ALLGATHER
 ALGORITHMS = ('direct', 'ring', 'tree', 'binomial')  # MESH_DIRECT .. MESH_BINOMIAL; MESH_UNAVAILABLE after them
-CANCELLED = 2 ** 64 - 1
 LIB = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libmesh.dylib'))
-CONTEXT = C.POINTER(Context)
 for name, result, arguments in (
-        ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
-        ('mesh_detach', C.c_int, [CONTEXT]),
         ('mesh_link_map_read', C.c_int, [C.c_char_p, C.POINTER(LinkMap)]),
         ('mesh_link_map_free', None, [C.POINTER(LinkMap)]),
         ('mesh_link_table_open', C.c_int, [C.c_char_p, U, U, C.POINTER(C.c_void_p)]),
@@ -149,17 +132,7 @@ for name, result, arguments in (
         ('mesh_link_table_report', C.c_int, [C.c_void_p, U, Q, C.POINTER(Q)]),
         ('mesh_collective_plan', U, [C.POINTER(LinkMap), U, Collective, Operand, C.POINTER(Step)]),
         ('mesh_collective_time', C.c_double, [C.POINTER(LinkMap), Collective, Operand, C.c_double, C.c_double]),
-        ('mesh_collective_choose', Collective, [C.POINTER(LinkMap), Collective, Operand, C.c_double, C.c_double]),
-        ('mesh_section_create', C.c_int, [CONTEXT, Z, U, C.c_int, C.POINTER(Section)]),
-        ('mesh_section_slice', C.c_int, [CONTEXT, Section, Z, Z, U, U, C.POINTER(Section)]),
-        ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),
-        ('mesh_collective_bind', C.c_int, [CONTEXT, C.POINTER(Step), U, U, Section, C.POINTER(Section), U, U,
-                                           C.POINTER(Section)]),
-        ('mesh_transfers_prepare', C.c_int, [CONTEXT, U, U, U]),
-        ('mesh_host_inputs', C.c_int, [CONTEXT]),
-        ('mesh_transfers_start', C.c_int, [CONTEXT]),
-        ('mesh_host_publish', None, [CONTEXT, Section, U]),
-        ('mesh_host_arrived', Q, [CONTEXT, Section, U])):
+        ('mesh_collective_choose', Collective, [C.POINTER(LinkMap), Collective, Operand, C.c_double, C.c_double])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = result, arguments
 
@@ -327,140 +300,89 @@ def check(status):
         raise OSError(status, os.strerror(status))
 
 
-class Mesh:
-    """One attach to this node's bridge region and the one program prepared on it: every collective
-    and exchange bound on it (collective, bind), in the same order on every rank, prepared for
-    `invocations` calls, storage ringing over `depth` slots, and started by `start` (an NCCL group is
-    one).  `links` is an explicit link map (mesh-collective.h), its path or a LinkMap; its node v is
-    the bridge's node members[v] (default v), and this rank is the map node of this bridge's.  Each
-    collective takes the transfer identities from `identity` on, MESH_COLLECTIVE_STEPS(nodes) of them."""
-
-    def __init__(self, links, invocations=1, depth=4, region=None, identity=1, members=None):
-        self.context = Context()
-        check(LIB.mesh_attach(C.byref(self.context), os.fsencode(region) if region else None))
-        self.header = Header.from_address(self.context.M)
-        self.owned = not isinstance(links, LinkMap)
-        self.map = LinkMap() if self.owned else links
-        if self.owned:
-            check(LIB.mesh_link_map_read(os.fsencode(links), C.byref(self.map)))
-        self.nodes, self.members = self.map.nodes, list(members or range(self.map.nodes))
-        self.rank = self.members.index(self.header.node)
-        self.invocations, self.depth, self.identity = invocations, min(depth, invocations), identity
-        self.block = self.header.pgsz * self.header.block
-
-    def ring(self, nbytes, offset=0):
-        """A registered section of `depth` slots of `offset` + `nbytes` in whole blocks: the section, a
-        slot's pages, and the slots as bytes."""
-        pages = -(-(offset + nbytes) // self.block) * self.header.block
-        section = Section()
-        check(LIB.mesh_section_create(C.byref(self.context), self.depth * pages * self.header.pgsz, 1, 1, C.byref(section)))
-        memory = (C.c_char * (self.depth * pages * self.header.pgsz)).from_address(
-            LIB.mesh_section_address(C.byref(self.context), section, 0))
-        return section, pages, np.frombuffer(memory, np.uint8).reshape(self.depth, -1)
-
-    def collective(self, what, shape, dtype, root=0, op=np.add, how=0, alpha=0.0, beta=0.0):
-        """This rank's part of the collective `what` (WHATS) of a `shape` array of `dtype`, planned by
-        mesh_collective_choose among the algorithms of the bit set `how` (0: every one) that the map
-        carries, at a link cost of alpha us + beta ns a byte (0, 0: the first carried), and bound;
-        `op` combines what a REDUCE brings in (any binary ufunc of the dtype)."""
-        dtype = np.dtype(dtype)
-        operand = Operand(ord(dtype.char), dtype.itemsize, int(np.prod(shape)))
-        chosen = LIB.mesh_collective_choose(C.byref(self.map), Collective(what=WHATS.index(what), how=how, root=root),
-                                            operand, alpha, beta)
-        if chosen.how >= len(ALGORITHMS):
-            raise ValueError(f'no algorithm of {how:#x} carries {what} of {operand.elements} elements on this map')
-        steps = (Step * (4 * self.nodes))()
-        count = LIB.mesh_collective_plan(C.byref(self.map), self.rank, chosen, operand, steps)
-        return Steps(self, steps[:count], shape, dtype, op, chosen)
-
-    def bind(self, steps, shape, dtype, identity=None):
-        """The caller's own steps over one `shape` array of `dtype` (a point-to-point SEND or COPY),
-        bound under transfer identity `identity` + each step's round (default the next collective's)."""
-        return Steps(self, steps, shape, np.dtype(dtype), np.add, None, identity)
-
-    def start(self):
-        """Prepares every bound transfer for the invocations, gives each receive its completion words
-        and starts the transfers: the peers' bridges pair."""
-        context = C.byref(self.context)
-        check(LIB.mesh_transfers_prepare(context, 1, self.invocations, self.depth))
-        check(LIB.mesh_host_inputs(context))
-        check(LIB.mesh_transfers_start(context))
-
-    def close(self, linger=0.5):
-        """Holds the pair open while the peer's last receive lands, then retires this client."""
-        time.sleep(linger)
-        if self.owned:
-            LIB.mesh_link_map_free(C.byref(self.map))
-        return LIB.mesh_detach(C.byref(self.context))
+class UniqueId(C.Structure):
+    """nccl.h ncclUniqueId."""
+    _fields_ = [('internal', C.c_char * 128)]
 
 
-class Steps:
-    """One rank's steps of one collective or exchange over one typed operand, bound on its Mesh
-    (mesh_collective_bind): the operand's ring of slots, and one received section a REDUCE, placed at
-    its SEND piece's offset within a block so that both ends cut the piece in the same chunks."""
+class MeshConfig(C.Structure):
+    """nccl.h ncclMeshConfig_t: ncclConfig_t member for member (size, magic, version, then its ints and its two
+    names), the link table and nodes[r], rank r's node in it."""
+    _fields_ = [('size', Z), ('magic', C.c_uint), ('version', C.c_uint), *((f'int{i}', C.c_int) for i in range(4)),
+                ('netName', C.c_char_p), *((f'int{i}', C.c_int) for i in range(4, 6)), ('commName', C.c_char_p),
+                *((f'int{i}', C.c_int) for i in range(6, 21)), ('links', P), ('nodes', C.POINTER(C.c_int))]
 
-    def __init__(self, mesh, steps, shape, dtype, op, chosen, identity=None):
-        self.mesh, self.rank, self.shape, self.dtype, self.op = mesh, mesh.rank, tuple(shape), dtype, op
-        self.steps, self.chosen = list(steps), chosen
-        self.direct = chosen is not None and chosen.how == ALGORITHMS.index('direct')
-        if identity is None:
-            identity, mesh.identity = mesh.identity, mesh.identity + 4 * mesh.nodes
-        context = C.byref(mesh.context)
-        self.bytes = int(np.prod(shape)) * dtype.itemsize
-        self.operand, pages, self.slots = mesh.ring(self.bytes)
-        received, self.received = [], []
-        for step in self.steps:
-            if step.op == REDUCE:
-                size, offset = step.piece.elements * step.piece.element_bytes, step.first * step.piece.element_bytes % mesh.block
-                section, step_pages, slots = mesh.ring(size, offset)
-                received.append(Section())
-                check(LIB.mesh_section_slice(context, section, offset, size, mesh.depth, step_pages, C.byref(received[-1])))
-                self.received.append((slots, offset, size))
-        bound = [Step(op=s.op, peer=mesh.members[s.peer], round=s.round, first=s.first, piece=s.piece) for s in self.steps]
-        self.pieces = (Section * max(1, len(bound)))()
-        check(LIB.mesh_collective_bind(context, (Step * max(1, len(bound)))(*bound), len(bound), identity, self.operand,
-                                      (Section * max(1, len(received)))(*received), mesh.depth, pages, self.pieces))
+
+NCCL = None
+TYPES = ('int8', 'uint8', 'int32', 'uint32', 'int64', 'uint64', 'float16', 'float32', 'float64')  # ncclDataType_t's first
+
+
+def nccl():
+    """libnccl-mesh beside this file, loaded at its first use and typed."""
+    global NCCL
+    if NCCL is None:
+        NCCL = C.CDLL(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'libnccl-mesh.dylib'))
+        for name, arguments in (
+                ('ncclMeshLinksAttach', [C.c_char_p, PP]), ('ncclMeshLinksState', [P, C.c_char_p]),
+                ('ncclMeshLinksRead', [P, P, P, P, P, C.POINTER(U), P]), ('ncclMeshLinksDetach', [P]),
+                ('ncclMeshUniqueIdOf', [Q, C.POINTER(UniqueId)]),
+                ('ncclCommInitRankConfig', [PP, C.c_int, UniqueId, C.c_int, C.POINTER(MeshConfig)]),
+                ('ncclCommDestroy', [P]), ('ncclMemAlloc', [PP, Z]), ('ncclMemFree', [P]),
+                ('ncclAllReduce', [P, P, Z, C.c_int, C.c_int, P, P])):
+            getattr(NCCL, name).restype, getattr(NCCL, name).argtypes = C.c_int, arguments
+        NCCL.ncclGetErrorString.restype, NCCL.ncclGetErrorString.argtypes = C.c_char_p, [C.c_int]
+        NCCL.ncclGetLastError.restype, NCCL.ncclGetLastError.argtypes = C.c_char_p, [P]
+    return NCCL
+
+
+def nccl_check(result, comm=None):
+    if result:
+        raise RuntimeError(f'{NCCL.ncclGetErrorString(result).decode()}: {NCCL.ncclGetLastError(comm).decode()}')
+
+
+class AllReduce:
+    """One rank's all-reduce (a sum) of a `shape` array of `dtype` over the link map file `links` (the Xonotic
+    planner's), on libnccl-mesh: the file stated into the link table of this node's bridge (`region`, else
+    MESH_REGION), map node v the bridge node v, this rank the bridge's own node, the ranks' communicator named by
+    the unique id of a key each derives from the file's bytes and `identity` (ncclMeshUniqueIdOf: no exchange).
+    slot(t) is where this rank writes its contribution, one window allocation (ncclMemAlloc) every call's; a call
+    is one ncclAllReduce in place on the NULL stream (synchronous), returning the sum, a copy.  `steps` lists what
+    one call runs, one ncclAllReduce (the library plans it).  `invocations`, `depth` and a call's `deadline` are
+    accepted and unused: nothing is prepared ahead, and no time ends a call."""
+
+    def __init__(self, shape, dtype, links, invocations=1, depth=4, identity=1, region=None):
+        if region:
+            os.environ['MESH_REGION'] = region
+        lib, self.shape, self.dtype, self.steps = nccl(), tuple(shape), np.dtype(dtype), ['ncclAllReduce']
+        self.table, self.comm, self.buffer, node, read, unique = P(), P(), P(), U(), LinkMap(), UniqueId()
+        nccl_check(lib.ncclMeshLinksAttach(os.fsencode(region) if region else None, C.byref(self.table)))
+        nccl_check(lib.ncclMeshLinksState(self.table, os.fsencode(links)))
+        nccl_check(lib.ncclMeshLinksRead(self.table, None, None, None, None, C.byref(node), None))
+        check(LIB.mesh_link_map_read(os.fsencode(links), C.byref(read)))
+        nodes, self.rank = read.nodes, node.value
+        LIB.mesh_link_map_free(C.byref(read))
+        with open(links, 'rb') as file:
+            key = hashlib.blake2b(file.read() + identity.to_bytes(8, 'little'), digest_size=8).digest()
+        nccl_check(lib.ncclMeshUniqueIdOf(int.from_bytes(key, 'little') or 1, C.byref(unique)))
+        # NCCL_MESH_CONFIG_INITIALIZER: NCCL_API_MAGIC, NCCL_VERSION_CODE, every int NCCL_CONFIG_UNDEF_INT
+        config = MeshConfig(size=C.sizeof(MeshConfig), magic=0xcafebeef, version=23203, links=self.table,
+                            nodes=(C.c_int * nodes)(*range(nodes)),
+                            **{k: -2 ** 31 for k, t in MeshConfig._fields_ if t is C.c_int})
+        nccl_check(lib.ncclCommInitRankConfig(C.byref(self.comm), nodes, unique, self.rank, C.byref(config)))
+        self.count = int(np.prod(self.shape))
+        nccl_check(lib.ncclMemAlloc(C.byref(self.buffer), self.count * self.dtype.itemsize))
+        self.array = np.frombuffer((C.c_char * (self.count * self.dtype.itemsize)).from_address(self.buffer.value),
+                                   self.dtype).reshape(self.shape)
 
     def slot(self, invocation):
-        """Where this rank writes its contribution to `invocation`, in registered pages."""
-        return self.slots[invocation % self.mesh.depth, :self.bytes].view(self.dtype).reshape(self.shape)
+        return self.array
 
-    def __call__(self, invocation, deadline=float('inf')):
-        """Runs this rank's steps in plan order and returns the result: each SEND published, each
-        receive awaited, a REDUCE's piece combined into the result by `op`.  A direct exchange
-        combines into a copy, because its SEND may still be reading the slot, and copies each COPY's
-        piece into it; a ring or tree works in place."""
-        own = self.slot(invocation)
-        total = own.copy() if self.direct else own
-        flat, mine, received = total.reshape(-1), own.reshape(-1), iter(self.received)
-        context, row = C.byref(self.mesh.context), invocation % self.mesh.depth
-        for step, piece in zip(self.steps, self.pieces):
-            if step.op == SEND:
-                LIB.mesh_host_publish(context, piece, invocation)
-                continue
-            while not (arrived := LIB.mesh_host_arrived(context, piece, invocation)):
-                if time.monotonic() > deadline:
-                    raise TimeoutError(f'invocation {invocation} step {step.op} from {step.peer}')
-            if arrived == CANCELLED:
-                raise ConnectionAbortedError(f'invocation {invocation} cancelled on the link to {step.peer}')
-            span = slice(step.first, step.first + step.piece.elements)
-            if step.op == REDUCE:
-                slots, offset, size = next(received)
-                self.op(flat[span], slots[row, offset:offset + size].view(self.dtype), out=flat[span])
-            elif total is not own:
-                flat[span] = mine[span]
-        return total
+    def __call__(self, invocation, deadline=None):
+        nccl_check(NCCL.ncclAllReduce(self.buffer, self.buffer, self.count, TYPES.index(self.dtype.name), 0,  # ncclSum
+                                      self.comm, None), self.comm)
+        return self.array.copy()
 
-    def close(self, linger=0.5):
-        """Closes this collective's Mesh (the one of AllReduce)."""
-        return self.mesh.close(linger)
-
-
-def AllReduce(shape, dtype, links, invocations, depth=4, identity=1, region=None):
-    """One rank's all-reduce of a typed array over an explicit link map (the Xonotic planner's), by
-    the first algorithm the map carries (mesh_collective_choose at no cost: the direct exchange, a
-    ring, a tree), prepared once for `invocations` calls and started: a Mesh of one collective."""
-    mesh = Mesh(links, invocations, depth, region, identity)
-    steps = mesh.collective('allreduce', shape, dtype)
-    mesh.start()
-    return steps
+    def close(self):
+        NCCL.ncclCommDestroy(self.comm)
+        NCCL.ncclMemFree(self.buffer)
+        NCCL.ncclMeshLinksDetach(self.table)
