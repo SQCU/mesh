@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+#include <errno.h>
 
 /* design/algorithm-sources.md#programtensor */
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
@@ -172,10 +174,46 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   return 0;
 }
 
+/* design/prepared-machine.md#M01 */
+/* The client's other notice bank: `other` is `context` with the bank bit flipped and that bank's
+   transfer lists emptied, so a second program is bound and prepared there while the bridge serves the
+   first (mesh_attach took the bank the bridge was not using).  The rows stay the client's. */
+void mesh_transfers_bank(struct mesh_ctx *context,struct mesh_ctx *other){
+  struct hdr *m=context->M;
+  *other=*context;other->client^=UINT64_C(1)<<63;
+  for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++)
+    atomic_store_explicit(mesh_order_length(m,other->client,q,d),0,memory_order_relaxed);
+}
+
+/* design/prepared-machine.md#M12 */
+/* The session of the client's prepared transfers ends with the client still attached: the bridge closes
+   its links (each receive word not landed cancelled) and serves nothing until the next
+   mesh_transfers_start, of whichever bank's program.  Waits for the bridge to close them, an observed
+   event; a bridge that is gone ends the wait. */
+int mesh_transfers_stop(struct mesh_ctx *context){
+  struct hdr *m=context->M;
+  uint64_t serving=atomic_load_explicit(&m->configured,memory_order_acquire);
+  if(serving!=context->client)return 0;
+  if(!atomic_compare_exchange_strong_explicit(&m->configured,&serving,0,memory_order_acq_rel,memory_order_relaxed))return ECANCELED;
+  mesh_control_notify(m);
+  for(;;){
+    uint64_t notification=atomic_load_explicit(&m->control,memory_order_acquire);
+    uint64_t device=atomic_load_explicit(&m->device_client,memory_order_seq_cst);
+    uint64_t bridge=atomic_load_explicit(&m->bridge_pid,memory_order_relaxed);
+    if(device!=context->client || !bridge || (kill((pid_t)bridge,0) && errno==ESRCH))return 0;
+    os_sync_wait_on_address(&m->control,notification,sizeof m->control,OS_SYNC_WAIT_ON_ADDRESS_SHARED);
+  }
+}
+
 /* design/prepared-machine.md#M06 */
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfers_start(struct mesh_ctx *context){
   struct hdr *m=context->M;
+  /* the client's other bank (mesh_transfers_bank): the region names it so the bridge serves that bank */
+  uint64_t current=atomic_load_explicit(&m->client,memory_order_acquire);
+  if(current!=context->client && ((current^context->client)&~(UINT64_C(1)<<63))==0 &&
+     !atomic_load_explicit(&m->configured,memory_order_acquire))
+    atomic_store_explicit(&m->client,context->client,memory_order_release);
   /* design/prepared-machine.md#M12 */
   uint64_t idle=0;
   if(!atomic_compare_exchange_strong_explicit(&m->configured,&idle,context->client,memory_order_release,memory_order_relaxed))return ECANCELED;

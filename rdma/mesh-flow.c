@@ -158,6 +158,29 @@ static int link_configure(void *state,int socket,uint64_t client){
   link->receive=aligned_alloc(128,(receive_count+1)*sizeof *link->receive);
   if(!link->receive)return -1;
   uint32_t frames[link->qps];memset(frames,0,sizeof frames);
+  /* design/prepared-machine.md#M08 */
+  /* A queue retires unsignaled SEND requests only when a later signaled one completes, and holds
+     its frames until then.  A stream whose one invocation sends more frames than its queue holds
+     therefore signals each publication's last request, so the queue retires within the
+     invocation; every other stream signals the invocation's last alone (mesh-call.c). */
+  uint32_t sent[link->qps];memset(sent,0,sizeof sent);
+  for(uint32_t q=0;q<m->qps;q++){
+    uint32_t channel=link->index*m->qps+q;
+    uint32_t count=atomic_load(mesh_order_length(m,client,channel,MESH_SEND));
+    struct mesh_transfer *out=mesh_transfers(m,client,channel,MESH_SEND);
+    for(uint32_t i=0;i<count;i++)for(uint32_t slot=0;slot<out[i].count;slot++){
+      uint32_t row=out[i].local_row+slot*out[i].stride,chunks=mesh_row_chunks(m,row,out[i].bytes);
+      uint64_t remaining=out[i].bytes;
+      for(uint32_t k=0;k<chunks;k++){
+        uint64_t offset=atomic_load_explicit(&mesh_page(m)[row+k].address,memory_order_relaxed)-m->data_off;
+        uint32_t bytes=wire_span(link->provider.device,offset,remaining).length;remaining-=bytes;
+        sent[q*tx->slots+slot]+=(bytes+4095)/4096;
+      }
+    }
+  }
+  /* each receive frame's queue and 4096-byte frames, for a window within an invocation (below) */
+  uint32_t *lane=malloc((incoming?incoming:1)*sizeof *lane),*weight=malloc((incoming?incoming:1)*sizeof *weight);
+  if(!lane||!weight){free(lane);free(weight);return -1;}
   uint32_t next=0,received=0;
   struct ibv_qp *receive_pair=NULL;
   int multiple_receive_queues=0;
@@ -177,7 +200,7 @@ static int link_configure(void *state,int socket,uint64_t client){
         link->index,m->node,publication,out[i].binding,slot);
       uint32_t repetitions=out[i].stride?invocations:1;
       uint64_t continuation=cell->request.wr_id;
-      unsigned flags=cell->request.send_flags;
+      unsigned flags=cell->request.send_flags|(sent[stream]>link->provider.queues[stream].send_capacity?IBV_SEND_SIGNALED:0);
       for(uint32_t t=0;t<repetitions;t++){
         cell[t].pair=(uintptr_t)link->provider.queues[stream].pair;
         uint64_t remaining=out[i].bytes;
@@ -216,6 +239,7 @@ static int link_configure(void *state,int socket,uint64_t client){
           if(link->ledger)fprintf(stderr,"{\"trace_binding\":%u,\"rank\":%u,\"direction\":1,\"index\":%u,\"binding\":%u,\"slot\":%u,\"chunk\":%u,\"chunks\":%u}\n",
             link->index,m->node,frame,in[i].binding,slot,k,chunks);
           frames[q*tx->slots+slot]+=(bytes+4095)/4096;
+          lane[frame]=q*tx->slots+slot;weight[frame]=(bytes+4095)/4096;
           struct mesh_publication *delivery=mesh_publication_at(m,row+k);
           uintptr_t input=(uintptr_t)&delivery->argument;
           uint64_t argument=1;
@@ -244,26 +268,65 @@ static int link_configure(void *state,int socket,uint64_t client){
   for(size_t i=0;i<receive_count;i++)
     link->linear&=link->receive[i].input==link->receive[0].input+i && link->receive[i].argument==1;
   uint32_t window=invocations;
+  int within=0;
   for(int q=0;q<link->qps;q++)if(frames[q]){
     uint32_t capacity=link->provider.queues[q].receive_capacity/frames[q];
-    if(capacity<window)window=capacity?capacity:1;
+    if(!capacity)within=1;
+    else if(capacity<window)window=capacity;
   }
   /* design/prepared-machine.md#M01 */
   /* Receive t+window lands in slot (t+window) mod depth while the local reader is at t, so the
      window is held a slot short of the ring: the same depth-1 step margin the send side has. */
   if(depth<invocations && window>depth-1)window=depth>1?depth-1:1;
-  link->refill=window<invocations;
-  for(uint32_t t=0;t<invocations;t++)for(uint32_t f=0;f<incoming;f++){
-    struct prepared_receive *record=link->receive+(size_t)t*incoming+f;
-    record->next=t+window<invocations?&link->receive[(size_t)(t+window)*incoming+f].request:NULL;
-    if(t<window){
-      struct ibv_recv_wr *bad;
-      int error=link->provider.queues[0].receive(record->pair,&record->request,&bad);
-      if(error){errno=error<0?-error:error;return -1;}
+  link->refill=within||window<invocations;
+  if(!within){
+    for(uint32_t t=0;t<invocations;t++)for(uint32_t f=0;f<incoming;f++){
+      struct prepared_receive *record=link->receive+(size_t)t*incoming+f;
+      record->next=t+window<invocations?&link->receive[(size_t)(t+window)*incoming+f].request:NULL;
+      if(t<window){
+        struct ibv_recv_wr *bad;
+        int error=link->provider.queues[0].receive(record->pair,&record->request,&bad);
+        if(error){free(lane);free(weight);errno=error<0?-error:error;return -1;}
+      }
     }
   }
+  /* design/prepared-machine.md#M08 */
+  /* An invocation whose frames exceed a queue's capacity: the window is a run of records within
+     it.  Each queue preposts the longest run of its records, in invocation-then-frame order, that
+     fits its capacity wherever the run starts, and each completion posts the record that run's
+     length later on the same queue, so a queue always holds that many consecutive receives.  A
+     peer sends a record only after this rank published a crossing that record depends on, which
+     it did after completing its receives before that crossing, so the receives a peer can send
+     ahead of this rank's completions are the ones between; tools/mesh/programs.py chunk bounds a
+     chunk's rows so that they fit (metal-microbench docs/kernels.md Multimodal). */
+  uint32_t *order=within?malloc((incoming?incoming:1)*sizeof *order):NULL;
+  if(within&&!order){free(lane);free(weight);return -1;}
+  for(int q=0;within&&q<link->qps;q++){
+    uint32_t n=0;
+    for(uint32_t f=0;f<incoming;f++)if(lane[f]==(uint32_t)q)order[n++]=f;
+    if(!n)continue;
+    uint32_t capacity=link->provider.queues[q].receive_capacity,run=n;
+    for(uint32_t j=0;j<n&&run;j++){
+      uint32_t sum=0,r=0;
+      while(r<run&&sum+weight[order[(j+r)%n]]<=capacity){sum+=weight[order[(j+r)%n]];r++;}
+      run=r;
+    }
+    if(!run){free(lane);free(weight);free(order);errno=ENOMEM;return -1;}
+    for(uint32_t t=0;t<invocations;t++)for(uint32_t j=0;j<n;j++){
+      size_t position=(size_t)t*n+j,later=position+run;
+      struct prepared_receive *record=link->receive+(size_t)t*incoming+order[j];
+      record->next=later<(size_t)invocations*n?&link->receive[(later/n)*incoming+order[later%n]].request:NULL;
+      if(position<run){
+        struct ibv_recv_wr *bad;
+        int error=link->provider.queues[0].receive(record->pair,&record->request,&bad);
+        if(error){free(lane);free(weight);free(order);errno=error<0?-error:error;return -1;}
+      }
+    }
+    fprintf(stderr,"receive queue=%d records=%u run=%u\n",q,n,run);
+  }
+  free(lane);free(weight);free(order);
   if(receive_count)link->receive[receive_count]=link->receive[receive_count-1];
-  fprintf(stderr,"receive window=%u invocations=%u depth=%u frames=%u refill=%d\n",window,invocations,depth,incoming,link->refill);
+  fprintf(stderr,"receive window=%u invocations=%u depth=%u frames=%u refill=%d within=%d\n",within?0:window,invocations,depth,incoming,link->refill,within);
   link->cursor_count=0;
   for(int q=0;q<link->qps;q++)if(link->cursors[q]){
     link->cursors[link->cursor_count++]=link->cursors[q];

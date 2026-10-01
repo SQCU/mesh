@@ -35,15 +35,20 @@ int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,u
 }
 
 /* design/algorithm-sources.md#programtensor */
+/* A client is one id in either notice bank (mesh_transfers_bank): its rows are its whichever bank it runs in. */
+static int mesh_same_client(uint64_t a,uint64_t b){ return ((a^b)&~(UINT64_C(1)<<63))==0; }
 void mesh_retire(struct hdr *m,uint64_t client){
   uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&UINT64_C(0x7fffffff);
   uint64_t retiring=(client&(UINT64_C(1)<<63))|(generation<<32)|(uint32_t)getpid();
   if(!atomic_compare_exchange_strong_explicit(&m->client,&client,retiring,memory_order_seq_cst,memory_order_acquire))return;
   atomic_store_explicit(&m->configured,0,memory_order_release);
-  for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(m,client,q,d),0,memory_order_release);
+  for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++){
+    atomic_store_explicit(mesh_order_length(m,client,q,d),0,memory_order_release);
+    atomic_store_explicit(mesh_order_length(m,client^(UINT64_C(1)<<63),q,d),0,memory_order_release);
+  }
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
-    if(atomic_load_explicit(&buffer->owner,memory_order_acquire)==client){
+    if(mesh_same_client(atomic_load_explicit(&buffer->owner,memory_order_acquire),client)){
       if(buffer->pages)atomic_store_explicit(&buffer->closed,1,memory_order_release);
       mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,1);
     }
@@ -95,7 +100,8 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
 
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
-  mesh_retire(c->M,c->client);
+  uint64_t current=atomic_load_explicit(&c->M->client,memory_order_acquire);
+  mesh_retire(c->M,mesh_same_client(current,c->client)?current:c->client);
   int status=munmap(c->M,c->len);
   int error=status?errno:0;
   if(close(c->fd) && !error) error=errno;
