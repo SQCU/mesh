@@ -331,6 +331,35 @@ static int verbs_up(struct mesh_verbs *provider,int qps,int (*configure)(void *,
   struct hdr *m=provider->m;
   struct ibv_port_attr pa;
   if(device_up(provider->device,provider->wire,m,&pa))return -1;
+  /* design/prepared-machine.md#M11 */
+  /* the queue pairs made before the pairing's connection (d6dceac's order): the end that comes first makes its while
+     the other is still on its way */
+  uint32_t frame_capacity=provider->device->frame_capacity;
+  provider->queues=calloc((size_t)qps,sizeof *provider->queues);
+  if(!provider->queues)return -1;
+  provider->completion=ibv_create_cq(provider->device->context,
+    (int)(frame_capacity+1),NULL,NULL,0);
+  if(!provider->completion)return -1;
+  for(int q=0;q<qps;q++){
+    struct mesh_queue *queue=&provider->queues[q];
+    queue->completion=provider->completion;
+    queue->poll=provider->completion->context->ops.poll_cq;
+    struct ibv_qp_init_attr qi={.send_cq=queue->completion,
+      .recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
+      .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
+    queue->pair=ibv_create_qp(provider->device->domain,&qi);
+    if(!queue->pair)return -1;
+    queue->send=queue->pair->context->ops.post_send;queue->receive=queue->pair->context->ops.post_recv;
+    provider->qp_count=q+1;
+    struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
+    if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual))return -1;
+    queue->receive_capacity=actual.cap.max_recv_wr;queue->send_capacity=actual.cap.max_send_wr;
+    fprintf(stderr,"pair capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",q,
+      actual.cap.max_send_wr,actual.cap.max_recv_wr,
+      queue->completion->cqe);
+  }
+  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
+  for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->queues[q].pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return -1;
   union ibv_gid gid; if(ibv_query_gid(provider->device->context,1,0,&gid))return -1;
   struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.lid=pa.lid,.pgsz=m->block*m->pgsz,.node=m->node,.count=(uint32_t)qps,
     .key=provider->key},you;
@@ -343,33 +372,6 @@ static int verbs_up(struct mesh_verbs *provider,int qps,int (*configure)(void *,
       (unsigned long long)mine.key,you.xmagic,you.xsize,you.pgsz,you.count,you.node,(unsigned long long)you.key,provider->peer);
     close(f);errno=EPROTO;return -1;
   }
-  uint32_t frame_capacity=provider->device->frame_capacity;
-  /* design/prepared-machine.md#M11 */
-  provider->queues=calloc((size_t)qps,sizeof *provider->queues);
-  if(!provider->queues){close(f);return -1;}
-  provider->completion=ibv_create_cq(provider->device->context,
-    (int)(frame_capacity+1),NULL,NULL,0);
-  if(!provider->completion){close(f);return -1;}
-  for(int q=0;q<qps;q++){
-    struct mesh_queue *queue=&provider->queues[q];
-    queue->completion=provider->completion;
-    queue->poll=provider->completion->context->ops.poll_cq;
-    struct ibv_qp_init_attr qi={.send_cq=queue->completion,
-      .recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
-      .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
-    queue->pair=ibv_create_qp(provider->device->domain,&qi);
-    if(!queue->pair){close(f);return -1;}
-    queue->send=queue->pair->context->ops.post_send;queue->receive=queue->pair->context->ops.post_recv;
-    provider->qp_count=q+1;
-    struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
-    if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
-    queue->receive_capacity=actual.cap.max_recv_wr;queue->send_capacity=actual.cap.max_send_wr;
-    fprintf(stderr,"pair capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",q,
-      actual.cap.max_send_wr,actual.cap.max_recv_wr,
-      queue->completion->cqe);
-  }
-  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
-  for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->queues[q].pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
   uint32_t psn=arc4random()&0xffffff;
   for(int q=0;q<qps;q++){
     uint32_t local[2]={provider->queues[q].pair->qp_num,(psn+(uint32_t)q)&0xffffff},remote[2];
