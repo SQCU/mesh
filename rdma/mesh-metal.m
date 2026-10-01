@@ -14,10 +14,10 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
   uint64_t inputs=0;
   for(uint32_t p=0;p<m->links;p++){
     inputs=(inputs+15)&~UINT64_C(15);
-    struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,context->session,p));
+    struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,context->client,p));
     for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
-      struct mesh_transfer *in=mesh_transfers(m,context->session,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->session,q,MESH_RECEIVE));i++)
+      struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
+      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
         inputs+=mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*tx->invocations;
     }
   }
@@ -35,20 +35,20 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
   uint64_t first=0;
   for(uint32_t p=0;p<m->links;p++){
     first=(first+15)&~UINT64_C(15);
-    struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,context->session,p));
+    struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,context->client,p));
     tx->cancel=(uintptr_t)address-(uintptr_t)m;
     uint64_t frames=0;
     for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
-      struct mesh_transfer *in=mesh_transfers(m,context->session,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->session,q,MESH_RECEIVE));i++)
+      struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
+      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
         frames+=mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count;
     }
     /* design/prepared-machine.md#M12 */
     address->ranges[p]=(struct mesh_cancel_range){.offset=(uintptr_t)input-(uintptr_t)m+first*sizeof(_Atomic uint64_t),.count=frames*tx->invocations};
     /* design/prepared-machine.md#M07 */
     for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
-      struct mesh_transfer *in=mesh_transfers(m,context->session,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->session,q,MESH_RECEIVE));i++){
+      struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
+      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++){
         uint32_t chunks=mesh_row_chunks(m,in[i].local_row,in[i].bytes);
         for(uint32_t s=0;s<in[i].count;s++)for(uint32_t k=0;k<chunks;k++){
           struct mesh_publication *delivery=mesh_publication_at(m,in[i].local_row+s*in[i].stride+k);
