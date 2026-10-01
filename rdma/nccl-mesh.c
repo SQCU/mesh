@@ -1437,36 +1437,40 @@ static int request_sends(const struct call *k,uint32_t q){
   return 0;
 }
 /* The open iteration's requests posted in order as far as the request rings take them, each connection's in
-   the order of its peer's: every call's isends, held; the irecvs of a call posted ahead (struct call `ahead`,
-   after its `post_after` cut), and a call's that is not passed once its own part has posted them; a point-to-point
-   call's irecv as its iteration opens (the caller opens it once the iteration before it is done with the buffer). */
+   the order of its peer's: the irecvs of a call posted ahead (struct call `ahead`, after its `post_after` cut), and
+   a call's that is not passed once its own part has posted them; a point-to-point call's irecv as its iteration
+   opens (the caller opens it once the iteration before it is done with the buffer); every call's isends, held.  The
+   irecvs first: a peer's first send of the iteration waits for its receive's grant, while this rank's isends are
+   held until the caller's GPU work publishes their bytes (b0-litert-heads-p1024 and p1-pipelined, metal-microbench
+   output_data/stall-20261001: the irecvs posted after some 64 isends, each step's first crossing waited 51 and 86
+   us for its grant, against 8 us for the others). */
 static void persistent_post(struct ncclComm *c){
   struct persistent *p=c->run;
   if(!p || !p->posting || p->post_failed || atomic_load(&c->broken))return;
-  for(;p->spart<p->n;p->scall=0,p->spart++)
-    for(;p->scall<p->items[p->spart]->n;p->scall++){
-      struct call *k=p->items[p->spart]->calls+p->scall;
-      if(P2P(k)){
-        if(k->kind==K_SEND && !k->spost){if(!persistent_request(c,p,k,0))goto receives;k->spost=1;}
-        continue;
-      }
-      for(;k->spost<k->nwords;k->spost++)
-        if(request_sends(k,k->spost) && !persistent_request(c,p,k,k->spost))goto receives;
-    }
-  receives:
   for(;p->rpart<p->n;p->rcall=0,p->rpart++)
     for(;p->rcall<p->items[p->rpart]->n;p->rcall++){
       struct call *k=p->items[p->rpart]->calls+p->rcall;
       if(P2P(k)){
-        if(k->kind==K_RECV && !k->rpost){if(!persistent_request(c,p,k,0))return;k->rpost=1;}
+        if(k->kind==K_RECV && !k->rpost){if(!persistent_request(c,p,k,0))goto sends;k->rpost=1;}
         continue;
       }
-      if(!k->ahead){if(!k->posted)return;continue;}
+      if(!k->ahead){if(!k->posted)goto sends;continue;}
       /* a receive buffer free only after a cut of the iteration: once that cut is passed */
       if(k->post_after && k->rpost<k->nwords &&
-         nccl_mesh_event_value(p->event)<p->value+(p->posting-1)*p->stride+(uint64_t)k->post_after+1)return;
+         nccl_mesh_event_value(p->event)<p->value+(p->posting-1)*p->stride+(uint64_t)k->post_after+1)goto sends;
       for(;k->rpost<k->nwords;k->rpost++)
-        if(!request_sends(k,k->rpost) && !persistent_request(c,p,k,k->rpost))return;
+        if(!request_sends(k,k->rpost) && !persistent_request(c,p,k,k->rpost))goto sends;
+    }
+  sends:
+  for(;p->spart<p->n;p->scall=0,p->spart++)
+    for(;p->scall<p->items[p->spart]->n;p->scall++){
+      struct call *k=p->items[p->spart]->calls+p->scall;
+      if(P2P(k)){
+        if(k->kind==K_SEND && !k->spost){if(!persistent_request(c,p,k,0))return;k->spost=1;}
+        continue;
+      }
+      for(;k->spost<k->nwords;k->spost++)
+        if(request_sends(k,k->spost) && !persistent_request(c,p,k,k->spost))return;
     }
 }
 static void persistent_open(struct persistent *p,uint64_t i){
