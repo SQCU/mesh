@@ -1506,6 +1506,29 @@ static int net_attached(struct hdr *m){
   }
   return 0;
 }
+/* A region let go with no client of it alive (a bridge's exit that keeps nothing, --release, a start that makes it
+   afresh): every request still outstanding on it ended failed and its completion word written (2), as no bridge ends
+   it after.  A GPU's work outlives its process (no watchdog ends a kernel that polls), so a kernel of an exited client
+   may still wait on that word in the region's pages; it ends once it reads it, and the pages are freed with it. */
+static void region_end_requests(struct hdr *m){
+  const uint64_t wire=mesh_wire_bytes(m);
+  struct mesh_net_comm *comms=mesh_net_comms(m);
+  for(uint32_t i=0;i<MESH_NET_COMMS;i++){
+    const uint32_t at=atomic_load_explicit(&comms[i].state,memory_order_acquire);
+    if(at==MESH_NET_FREE || at==MESH_NET_CLAIMED)continue;
+    for(uint32_t slot=0;slot<MESH_NET_REQUESTS;slot++){
+      struct mesh_net_request *request=comms[i].requests+slot;
+      const uint32_t r=atomic_load_explicit(&request->state,memory_order_acquire);
+      if(r!=MESH_NET_POSTED && r!=MESH_NET_ACTIVE)continue;
+      /* a completion word outside the window is never stored (net_post) */
+      const uint64_t word=request->completion;
+      if(word && word-1<=wire-8 && !((word-1)%8))
+        atomic_store_explicit((_Atomic uint64_t *)((char *)m+m->data_off+word-1),2,memory_order_release);
+      atomic_store_explicit(&request->error,ESHUTDOWN,memory_order_relaxed);
+      atomic_store_explicit(&request->state,MESH_NET_ERROR,memory_order_release);
+    }
+  }
+}
 /* --release: region `name`, kept by the last bridge on it for its clients, released where no bridge runs on it
    and no client of it is alive (net_attached: a process exists or it does not; nothing here waits or counts
    time): the region, its keep and its link table are unlinked, and their pages freed once nothing maps them.  A
@@ -1522,6 +1545,7 @@ static int region_release(const char *name){
   uint64_t resident=0;const size_t page=(size_t)getpagesize(),pages=(size_t)info.st_size/page;char *in=m!=MAP_FAILED?malloc(pages?pages:1):NULL;
   if(in && !mincore((void *)m,pages*page,in))for(size_t i=0;i<pages;i++)resident+=(in[i]&MINCORE_INCORE)!=0;
   free(in);
+  if(m!=MAP_FAILED && !kept)region_end_requests(m);
   if(m!=MAP_FAILED)munmap(m,(size_t)info.st_size);
   if(kept){say("%s kept (%llu bytes resident): %s\n",name,(unsigned long long)(resident*page),kept);return 1;}
   char other[80];
@@ -1675,6 +1699,7 @@ int main(int argc,char **argv){
       die("a bridge of this region is running");
     const int same=m!=MAP_FAILED && region_same(m,&geometry,me,sessions,link_count) && m->stats_lag==lag,attached=same && net_attached(m);
     if(same && !attached)say("bridge node %d: no client of the region its last bridge left is alive: region, keep and link table made afresh\n",me);
+    if(m!=MAP_FAILED && m->magic==MESH_MAGIC && m->version==MESH_VERSION && m->length<=length && !net_attached(m))region_end_requests(m);
     if(attached && (net_keep=net_keep_open(name,link_count,(uint32_t)me,length,0)) && !mesh_link_table_open(name,0,0,&link_table)){
       kept=link_table->nodes==table_nodes && link_table->node==(uint32_t)me;
       if(!kept){mesh_link_table_close(link_table);link_table=NULL;}
@@ -1758,6 +1783,7 @@ int main(int argc,char **argv){
   /* the region, its keep and its link table kept where clients are attached, for the next bridge on it (one that left
      the mesh too: its clients rejoin when a bridge returns on the region); else removed at exit */
   keeping=net_attached(m);
+  if(!keeping)region_end_requests(m);
   if(keeping)say("bridge node %d: %s with clients attached: the region kept for the next bridge\n",me,atomic_load(&leaving)?"left the mesh":"stopped");
   /* The exit status says whether a successor is wanted, to a supervisor that starts one where it is not 0
      (bin/mesh-bridge.sh: launchd's KeepAlive, SuccessfulExit false): EX_TEMPFAIL where a bridge stopped with clients
