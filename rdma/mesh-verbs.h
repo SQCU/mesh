@@ -1,5 +1,7 @@
 #pragma once
 #include "mesh.h"
+#include "mesh-dataflow.h"
+#include <sys/event.h>
 #include <infiniband/verbs.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -62,7 +64,7 @@ struct mesh_verbs {
   uint32_t peer,completion_entries[2];
   uint64_t bandwidth;
   const char *local_address,*remote_address,*service;
-  uint64_t deadline;
+  int events;
 };
 /* design/prepared-machine.md#M07 */
 /* design/algorithm-sources.md#programtensor */
@@ -116,35 +118,51 @@ struct qpi { uint32_t xmagic, xsize; uint32_t pgsz; uint16_t lid; uint8_t gid[16
 #define XMAGIC 0x4d595048u
 
 /* design/algorithm-sources.md#programcopy */
-static int pairing_active(struct hdr *m,uint64_t client,uint64_t deadline){
-  if(stop || atomic_load_explicit(&m->client,memory_order_acquire)!=client){errno=ECANCELED;return 0;}
-  if(clock_gettime_nsec_np(CLOCK_MONOTONIC)>=deadline){errno=ETIMEDOUT;return 0;}
+/* Pairing ends only on observed events (standards S2): this client leaving, the bridge stopping, or its
+   process exiting (EVFILT_PROC on the link's kqueue); no clock ends it. */
+static int pairing_active(struct hdr *m,uint64_t client){
+  if(stop || atomic_load_explicit(&m->client,memory_order_acquire)!=client ||
+     atomic_load_explicit(&m->configured,memory_order_acquire)!=client){errno=ECANCELED;return 0;}
   return 1;
 }
 
 /* design/algorithm-sources.md#programcopy */
-static int dial(struct addrinfo *a,struct hdr *m,uint64_t client,uint64_t deadline){
-  if(!pairing_active(m,client,deadline))return -1;
+/* Waits on the link's kqueue for fd's filter (fd<0: the redial pacing timer, which steers how often a
+   refused dial is tried and decides nothing).  The link's EVFILT_USER (link_stop) and EVFILT_PROC (the
+   client's exit) wake it as well. */
+static int pairing_wait(struct mesh_verbs *provider,struct hdr *m,uint64_t client,int fd,int16_t filter){
+  struct kevent64_s change,event;int changes=1;
+  if(fd>=0)EV_SET64(&change,(uint64_t)fd,filter,EV_ADD|EV_ONESHOT,0,0,0,0,0);
+  else EV_SET64(&change,1,EVFILT_TIMER,EV_ADD|EV_ONESHOT,NOTE_USECONDS,1000,0,0,0);
+  for(;;){
+    if(!pairing_active(m,client))return -1;
+    int count=kevent64(provider->events,&change,changes,&event,1,0,NULL);changes=0;
+    if(count<0){if(errno==EINTR)continue;return -1;}
+    if(!count)continue;
+    if(event.filter==EVFILT_PROC){mesh_retire(m,client);errno=ECANCELED;return -1;}
+    if(fd>=0?event.filter==filter && event.ident==(uint64_t)fd:event.filter==EVFILT_TIMER)return 0;
+  }
+}
+
+/* design/algorithm-sources.md#programcopy */
+static int dial(struct addrinfo *a,struct mesh_verbs *provider,struct hdr *m,uint64_t client){
+  if(!pairing_active(m,client))return -1;
   int f=socket(a->ai_family,SOCK_STREAM,0); if(f<0) return -1;
   if(fcntl(f,F_SETFL,O_NONBLOCK)<0)goto failed;
   if(connect(f,a->ai_addr,a->ai_addrlen)==0)return f;
   if(errno!=EINPROGRESS)goto failed;
-  struct pollfd ready={.fd=f,.events=POLLOUT};
-  while(pairing_active(m,client,deadline)){
-    int status=poll(&ready,1,0);
-    if(status<0 && errno==EINTR)continue;
-    if(status<0)goto failed;
-    if(!status)continue;
-    int error=0;socklen_t length=sizeof error;
-    if(getsockopt(f,SOL_SOCKET,SO_ERROR,&error,&length))error=errno;
-    if(!error)return f;
-    errno=error;goto failed;
-  }
+  if(pairing_wait(provider,m,client,f,EVFILT_WRITE))goto failed;
+  int status=0;socklen_t length=sizeof status;
+  if(getsockopt(f,SOL_SOCKET,SO_ERROR,&status,&length))status=errno;
+  if(!status)return f;
+  errno=status;
 failed:;
   int error=errno;close(f);errno=error;return -1;
 }
 
 /* design/algorithm-sources.md#programcopy */
+/* The listener lives as long as the bridge (opened at its start, closed at its exit): a dial queued for
+   the next session waits in its backlog and is never reset by a session's end. */
 static int listener_up(struct mesh_verbs *provider){
   struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC,.ai_flags=AI_PASSIVE|AI_NUMERICHOST|AI_NUMERICSERV},*r;
   if(getaddrinfo(provider->local_address,provider->service,&hint,&r)){errno=EINVAL;return -1;}
@@ -153,28 +171,29 @@ static int listener_up(struct mesh_verbs *provider){
   int on=1,off=0;
   setsockopt(provider->listener,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on);
   if(r->ai_family==AF_INET6)setsockopt(provider->listener,IPPROTO_IPV6,IPV6_V6ONLY,&off,sizeof off);
-  int error=fcntl(provider->listener,F_SETFL,O_NONBLOCK)<0 || bind(provider->listener,r->ai_addr,r->ai_addrlen) || listen(provider->listener,4),code=errno;
+  int error=fcntl(provider->listener,F_SETFL,O_NONBLOCK)<0 || bind(provider->listener,r->ai_addr,r->ai_addrlen) || listen(provider->listener,16),code=errno;
   freeaddrinfo(r);
   if(error){ close(provider->listener); provider->listener=-1;errno=code;return -1; }
   return 0; }
 
 /* design/algorithm-sources.md#programcopy */
-static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t receive_bytes,struct hdr *m,uint64_t client,uint64_t deadline){
+static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t receive_bytes,struct mesh_verbs *provider,struct hdr *m,uint64_t client){
   size_t sent=0,got=0;
-  while(pairing_active(m,client,deadline)){
+  while(pairing_active(m,client)){
     if(sent==send_bytes && got==receive_bytes)return 0;
     if(sent<send_bytes){
       ssize_t n=write(f,(const char*)mine+sent,send_bytes-sent);
       if(n>0)sent+=(size_t)n;
       else if(!n){errno=ECONNRESET;return -1;}
       else if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
+      else if(pairing_wait(provider,m,client,f,EVFILT_WRITE))return -1;
+      continue;
     }
-    if(got<receive_bytes){
-      ssize_t n=read(f,(char*)you+got,receive_bytes-got);
-      if(n>0)got+=(size_t)n;
-      else if(!n){errno=ECONNRESET;return -1;}
-      else if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
-    }
+    ssize_t n=read(f,(char*)you+got,receive_bytes-got);
+    if(n>0)got+=(size_t)n;
+    else if(!n){errno=ECONNRESET;return -1;}
+    else if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
+    else if(pairing_wait(provider,m,client,f,EVFILT_READ))return -1;
   }
   return -1;
 }
@@ -182,32 +201,39 @@ static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t re
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M08 */
 static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
-  if(!pairing_active(m,client,provider->deadline))return -1;
+  if(!pairing_active(m,client))return -1;
   if(m->node>provider->peer){
     if(provider->listener<0 && listener_up(provider))return -1;
-    while(pairing_active(m,client,provider->deadline)){
+    for(;;){
       int f=accept(provider->listener,NULL,NULL);
       if(f>=0){
         if(fcntl(f,F_SETFL,O_NONBLOCK)==0)return f;
         int error=errno;close(f);errno=error;return -1;
       }
-      if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
+      if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR && errno!=ECONNABORTED)return -1;
+      if(pairing_wait(provider,m,client,provider->listener,EVFILT_READ))return -1;
     }
-    return -1;
   }
   struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC,.ai_flags=AI_NUMERICHOST|AI_NUMERICSERV},*addresses;
   if(getaddrinfo(provider->remote_address,provider->service,&hint,&addresses)){errno=EINVAL;return -1;}
   int socket=-1,error=EHOSTUNREACH;
   for(;;){
-    if(!pairing_active(m,client,provider->deadline)){error=errno;break;}
     for(struct addrinfo *a=addresses;a;a=a->ai_next){
-      socket=dial(a,m,client,provider->deadline);error=errno;
-      if(socket>=0 || error==ECANCELED || error==ETIMEDOUT)break;
+      socket=dial(a,provider,m,client);error=errno;
+      if(socket>=0 || error==ECANCELED)break;
     }
-    if(socket>=0 || (error!=ECONNREFUSED && error!=ENETUNREACH && error!=EHOSTUNREACH))break;
-    poll(NULL,0,1);
+    if(socket>=0 || error==ECANCELED)break;
+    if(pairing_wait(provider,m,client,-1,0)){error=errno;break;}
   }
   freeaddrinfo(addresses);errno=error;return socket;
+}
+
+/* A pairing attempt that failed because its connection went away (the peer's session ended before it
+   paired, or a stale dial from an earlier session) is tried again on the next connection; only this
+   client's leaving, the bridge's stop or a mismatch end it. */
+static int pairing_retried(int error){
+  return error==ECONNRESET || error==EPIPE || error==ENOTCONN || error==ECONNABORTED || error==ETIMEDOUT ||
+    error==ECONNREFUSED || error==EHOSTUNREACH || error==ENETUNREACH;
 }
 
 /* design/algorithm-sources.md#programcopy */
@@ -272,7 +298,6 @@ done:
 static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
   struct ibv_port_attr pa;
   if(device_up(provider->device,provider->wire,m,&pa))return -1;
-  provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+UINT64_C(30000000000);
   int f=oob(provider,m,client);
   if(f<0)return -1;
   uint32_t frame_capacity=provider->device->frame_capacity;
@@ -306,13 +331,13 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   uint32_t psn=arc4random()&0xffffff;
   struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.lid=pa.lid,.pgsz=m->block*m->pgsz,.node=m->node,.count=(uint32_t)qps},you;
   memcpy(mine.gid,&gid,16);
-  if(exchange(f,&mine,&you,sizeof mine,sizeof you,m,client,provider->deadline)){ int error=errno;close(f);fprintf(stderr,"exchange failed\n");errno=error;return -1; }
+  if(exchange(f,&mine,&you,sizeof mine,sizeof you,provider,m,client)){ int error=errno;close(f);fprintf(stderr,"exchange failed\n");errno=error;return -1; }
   /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
   if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.count!=mine.count || you.node!=provider->peer){
     fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,provider->peer); close(f);errno=EPROTO;return -1; }
   for(int q=0;q<qps;q++){
     uint32_t local[2]={provider->queues[q].pair->qp_num,(psn+(uint32_t)q)&0xffffff},remote[2];
-    if(exchange(f,local,remote,sizeof local,sizeof remote,m,client,provider->deadline)){close(f);return -1;}
+    if(exchange(f,local,remote,sizeof local,sizeof remote,provider,m,client)){close(f);return -1;}
     struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[1],
       .dest_qp_num=remote[0],.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
         .grh={.hop_limit=1,.sgid_index=0}}};

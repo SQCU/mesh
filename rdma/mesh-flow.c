@@ -271,7 +271,7 @@ static int link_configure(void *state,int socket,uint64_t client){
   if(link->ledger)fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"send_base\":%llu,\"receive_base\":%llu,\"invocations\":%u,\"send_stride\":%u,\"send_record_bytes\":%zu,\"receive_stride\":%u,\"send_capacity\":%zu,\"receive_capacity\":%zu}\n",
     link->index,m->node,(unsigned long long)(uintptr_t)link->publications,(unsigned long long)(uintptr_t)link->receive,
     invocations,invocations+1,sizeof(struct mesh_send),incoming,link->trace_capacity[MESH_SEND],link->trace_capacity[MESH_RECEIVE]);
-  return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
+  return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,&link->provider,m,client);
 }
 
 /* design/prepared-machine.md#M04 */
@@ -417,7 +417,6 @@ static void link_close(struct mesh_link *link,int *control){
   }
   if(*control>=0){close(*control);*control=-1;}
   while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);
-  if(link->provider.listener>=0){close(link->provider.listener);link->provider.listener=-1;}
   free(link->receive);link->receive=NULL;
   free(link->cursors);link->cursors=NULL;
   atomic_store_explicit(&mesh_links(link->M)[link->index].port.phase,MESH_STOPPED,memory_order_release);
@@ -441,19 +440,28 @@ static void *link_run(void *argument){
     struct kev_request filter={KEV_VENDOR_APPLE,KEV_NETWORK_CLASS,KEV_DL_SUBCLASS};
     if(link->network<0 || fcntl(link->network,F_SETFL,O_NONBLOCK)<0 ||
        ioctl(link->network,SIOCSKEVFILT,&filter))error=errno;
-    if(!error){
-      EV_SET64(&event,link->network,EVFILT_READ,EV_ADD,0,0,0,0,0);
-      if(kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))error=errno;
-    }
     if(error)link_error(link,error,4);
   }
   if(!error && transfers){
     atomic_store_explicit(&port->phase,MESH_PAIRING,memory_order_release);
-    control=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
+    /* a pairing whose connection went away is made again on the next one (mesh-verbs.h pairing_retried) */
+    for(;;){
+      control=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
+      if(control>=0)break;
+      int failure=errno?errno:EIO;
+      while(!down_pair(&link->provider))link_error(link,errno?errno:EIO,1);
+      free(link->receive);link->receive=NULL;free(link->cursors);link->cursors=NULL;
+      if(!pairing_retried(failure) || !pairing_active(m,link->client)){errno=failure;break;}
+      fprintf(stderr,"pairing again: %s\n",strerror(failure));
+    }
     if(control<0)link_error(link,errno?errno:EIO,1);
     else {
-      EV_SET64(&event,control,EVFILT_READ,EV_ADD|EV_CLEAR,0,0,0,0,0);
-      error=kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)?errno:0;
+      /* the interface events are watched once paired (pairing's waits take only its own events); those
+         queued meanwhile are read at once */
+      struct kevent64_s watched[2];
+      EV_SET64(&watched[0],control,EVFILT_READ,EV_ADD|EV_CLEAR,0,0,0,0,0);
+      EV_SET64(&watched[1],link->network,EVFILT_READ,EV_ADD,0,0,0,0,0);
+      error=kevent64(link->events,watched,2,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)?errno:0;
       if(!error){
         __atomic_store_n(&mesh_links(m)[link->index].bandwidth,link->provider.bandwidth,__ATOMIC_RELAXED);
 
@@ -471,6 +479,10 @@ static void *link_run(void *argument){
       pthread_attr_destroy(&attributes);
       if(error)link_error(link,error,1);
       else {
+        qos_class_t classes[2]={QOS_CLASS_UNSPECIFIED,QOS_CLASS_UNSPECIFIED};int relative;
+        for(uint32_t d=0;d<link->worker_count;d++)pthread_get_qos_class_np(link->workers[d],&classes[d],&relative);
+        fprintf(stderr,"link %u progress threads %u qos receive 0x%x send 0x%x (0x%x user-interactive)\n",link->index,
+          link->worker_count,classes[0],classes[1],QOS_CLASS_USER_INTERACTIVE);
         atomic_store_explicit(&port->phase,MESH_PAIRED,memory_order_relaxed);
         atomic_store_explicit(&port->prepared,link->client,memory_order_release);
       }
@@ -577,9 +589,13 @@ int main(int argc,char **argv){
   for(uint32_t i=0;i<link_count;i++){
     struct mesh_link *link=&links[i];
     link->M=m;link->provider.wire=&wire;link->network=-1;
-    link->events=kqueue();
+    link->events=kqueue();link->provider.events=link->events;
     struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,0,0,0);
     if(link->events<0 || kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("link control events");
+    /* design/algorithm-sources.md#programcopy */
+    if((uint32_t)me>link->provider.peer && listener_up(&link->provider)){
+      fprintf(stderr,"pairing listener %s port %s: %s\n",link->provider.local_address,link->provider.service,strerror(errno));die("pairing listener");
+    }
     mesh_links(m)[i].peer=link->provider.peer;
     snprintf(mesh_links(m)[i].device,sizeof mesh_links(m)[i].device,"%s",link->provider.device->name);
     atomic_store(&mesh_links(m)[i].port.phase,MESH_PAIRING);
