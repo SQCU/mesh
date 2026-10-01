@@ -118,8 +118,8 @@ int mesh_net_alive(void *comm);
 /* The client (process) at the other end of a connected comm (0: not known). */
 uint64_t mesh_net_peer_owner(void *comm);
 /* A comm's slot in the region's table (its index and generation), taken before it is closed, and
-   whether the bridge has vacated that slot since, or its link's peer or this node's bridge left the mesh (nothing
-   of the comm on the wire any more). */
+   whether the bridge has vacated that slot since, or its link's peer or this node's bridge left the mesh, or this
+   process's region was replaced (nothing of the comm on the wire any more). */
 uint64_t mesh_net_slot(void *comm);
 int mesh_net_vacated(uint64_t slot);
 /* Whether node `node`'s bridge left the mesh as this node sees it: its LEAVE heard on a link to it, or this node's

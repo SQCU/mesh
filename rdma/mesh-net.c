@@ -482,7 +482,8 @@ static int net_left(uint32_t link){
 }
 int mesh_net_vacated(uint64_t slot){
   struct mesh_net_comm *comm=mesh_net_comms(net.m)+(uint32_t)(slot>>32);
-  return atomic_load_explicit(&comm->state,memory_order_acquire)==MESH_NET_FREE || comm->generation!=(uint32_t)slot || net_left(comm->link);
+  return atomic_load_explicit(&comm->state,memory_order_acquire)==MESH_NET_FREE || comm->generation!=(uint32_t)slot || net_left(comm->link) ||
+    net_replaced();
 }
 int mesh_net_departed(uint32_t node){
   if(net.m && net_replaced())return 1;
