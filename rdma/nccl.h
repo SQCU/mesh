@@ -801,6 +801,9 @@ ncclResult_t  ncclGroupEnd(void);
 ncclResult_t pncclGroupEnd(void);
 
 /* The mesh's own additions (not NCCL's). */
+/* The unique id of clique key `key` (not 0): ranks that derive one key from what they share need no exchange
+   (ncclGetUniqueId's is a random key's). */
+ncclResult_t ncclMeshUniqueIdOf(uint64_t key, ncclUniqueId* id);
 /* The link map (above): the table of the bridge of `region` (NULL: MESH_REGION, else /mesh0), mapped
    (ncclMeshLinksAttach) until ncclMeshLinksDetach, after every communicator that references it.
    ncclMeshLinksState states a link-map file (mesh-collective.h) into it, a write between calls: its

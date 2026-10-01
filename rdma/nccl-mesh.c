@@ -1641,12 +1641,16 @@ ncclResult_t ncclGetVersion(int *version){
   *version=NCCL_VERSION_CODE;
   return ncclSuccess;
 }
-ncclResult_t ncclGetUniqueId(ncclUniqueId *id){
-  if(!id)return FAIL(NULL,ncclInvalidArgument,"ncclGetUniqueId: uniqueId is NULL");
-  struct uid made={UID_MAGIC,NCCL_VERSION_CODE,0};
-  while(!made.key)made.key=((uint64_t)arc4random()<<32)|arc4random();
+ncclResult_t ncclMeshUniqueIdOf(uint64_t key,ncclUniqueId *id){
+  if(!id || !key)return FAIL(NULL,ncclInvalidArgument,"ncclMeshUniqueIdOf: %s",id?"key 0 names no clique":"uniqueId is NULL");
+  struct uid made={UID_MAGIC,NCCL_VERSION_CODE,key};
   memset(id,0,sizeof *id);memcpy(id->internal,&made,sizeof made);
   return ncclSuccess;
+}
+ncclResult_t ncclGetUniqueId(ncclUniqueId *id){
+  uint64_t key=0;
+  while(!key)key=((uint64_t)arc4random()<<32)|arc4random();
+  return ncclMeshUniqueIdOf(key,id);
 }
 ncclResult_t ncclCommInitRankConfig(ncclComm_t *comm,int nranks,ncclUniqueId commId,int rank,ncclConfig_t *config){
   if(!comm)return FAIL(NULL,ncclInvalidArgument,"ncclCommInitRank: comm is NULL");
