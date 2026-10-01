@@ -185,31 +185,6 @@ this depends on the routing layer.
 > [RDMA-RULES.md](RDMA-RULES.md). Killing a stuck verbs process can wedge a node
 > badly enough to need a physical power cycle.
 
-## NCCL's API over the bridges
-
-`rdma/nccl.h` is NCCL 2.32.3's header for `rdma/libnccl-mesh.dylib`, which serves NCCL's calls on
-the bridges' communicator sessions, their reductions as Metal kernels; the header's opening comment
-says what is implemented and how the stream and buffers work. Every node runs its bridge (`mesh-flow`); a rank names it by
-`MESH_REGION`.
-
-```
-make -C rdma libmesh.dylib libnccl-mesh.dylib
-cc app.c -I rdma -L rdma -lnccl-mesh -Wl,-rpath,$PWD/rdma
-MESH_REGION=/mesh0 ./app    # app.c passes the link map: ncclMeshConfig_t (nccl.h)
-```
-
-`rdma/torch-mesh` is torch.distributed's `mesh` backend over it (CPU and MPS tensors; once the backend
-exists, every MPS tensor PyTorch's allocator makes is window memory, sent and received in place; any other
-tensor is blitted through the window by the GPU, never copied by the CPU). Installed into a venv that has torch, it registers itself when torch is imported, so a script
-names it and its link map: `init_process_group(backend="mesh", pg_options=torch_mesh.Options(nodes, links))`.
-Its first process group also installs `torch_mesh.partition`: a mesh dimension's parts (`partition.attach`), by which DTensor,
-tensor and context parallelism split that dimension by the nodes' rates instead of equally
-([design/heterogeneity.md](design/heterogeneity.md)).
-
-```
-uv pip install --python <venv>/bin/python --no-build-isolation rdma/torch-mesh
-```
-
 ## Links, and knowing when you only have one
 
 A node reaches the world over Wi-Fi/LAN and over the Thunderbolt fabric. It is
