@@ -707,6 +707,7 @@ static void *peer_accept(void *argument){
     if(event.ident==(uint64_t)peer->listener){
       int f=accept(peer->listener,NULL,NULL);
       if(f<0)continue;
+      connection_prompt(f);
       if(fcntl(f,F_SETFL,O_NONBLOCK)<0){close(f);continue;}
       EV_SET64(&change,(uint64_t)f,EVFILT_READ,EV_ADD|EV_ONESHOT,0,0,0,0,0);
       kevent64(peer->acceptor_events,&change,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);

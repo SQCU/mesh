@@ -8,6 +8,7 @@
 #include <sys/sysctl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -159,9 +160,13 @@ static int pairing_wait(struct mesh_verbs *provider,int fd,int16_t filter){
 }
 
 /* design/algorithm-sources.md#programcopy */
+/* A pairing connection carries a few small records each way, each waited for: sent at once (TCP_NODELAY), or a small
+   write waits on the peer's delayed acknowledgement (a session's pairing took 35 ms in its queue numbers' exchange). */
+static void connection_prompt(int f){int on=1;setsockopt(f,IPPROTO_TCP,TCP_NODELAY,&on,sizeof on);}
 static int dial(struct addrinfo *a,struct mesh_verbs *provider){
   if(!pairing_active(provider))return -1;
   int f=socket(a->ai_family,SOCK_STREAM,0); if(f<0) return -1;
+  connection_prompt(f);
   if(fcntl(f,F_SETFL,O_NONBLOCK)<0)goto failed;
   if(connect(f,a->ai_addr,a->ai_addrlen)==0)return f;
   if(errno!=EINPROGRESS)goto failed;
