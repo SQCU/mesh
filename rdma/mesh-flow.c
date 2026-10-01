@@ -276,6 +276,21 @@ static int link_configure(void *state,int socket,uint64_t client){
   return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,&link->provider,m,client);
 }
 
+/* design/prepared-machine.md#M06 */
+/* A full send queue is "not yet", never a failure (docs/standards.md S1): the requests the provider took stay
+   posted and the rest (from bad) is posted as the receive thread's polls of the shared completion queue retire
+   earlier SENDs.  Reached only from a post that failed, so the drains' posting path is unchanged.  Returns 0 once
+   posted, ECANCELED if the link stopped meanwhile, or the post's other error. */
+static __attribute__((noinline,cold)) int link_send_full(struct mesh_link *link,struct ibv_qp *pair,struct ibv_send_wr *rest,int error){
+  int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **)=link->provider.queues[0].send;
+  struct ibv_send_wr *bad=rest;
+  while(error==ENOMEM || error==-ENOMEM){
+    if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return ECANCELED;
+    rest=bad;error=post(pair,rest,&bad);
+  }
+  return error<0?-error:error;
+}
+
 /* design/prepared-machine.md#M04 */
 /* design/prepared-machine.md#M06 */
 /* design/prepared-machine.md#M15 */
@@ -300,7 +315,10 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
           uint64_t sent=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
           trace[link->traced[MESH_SEND]++]=(struct mesh_trace){(uintptr_t)record,observed,posting,sent};
         }
-        if(error){link_error(link,error<0?-error:error,1);return NULL;}
+        if(error && (error=link_send_full(link,streams==1?pair:(struct ibv_qp *)record->pair,bad,error))){
+          if(error!=ECANCELED)link_error(link,error,1);
+          return NULL;
+        }
         if(streams>1)cursors[stream]=next;
         record=next;
     }else if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
