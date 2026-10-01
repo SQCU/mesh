@@ -123,6 +123,12 @@ struct call {
   void **handles; uint32_t spost,rpost; int posted,ahead,post_after;
   const _Atomic uint64_t *ready; uint64_t range,*ready_base; uint32_t ranges;
   uint64_t *word;
+  /* a persistent point-to-point call in slots (ncclMeshPersistentSlots): its buffer, ready or landed word and tally
+     at slot 0 (`wire`, `ready`, `word` and `tally` then the open iteration's: persistent_open), its slots' buffers
+     `slot_stride` bytes apart, `slot_depth` of them, its words `slot_words` bytes apart (one a slot, written once),
+     and a tally a buffer slot */
+  uint64_t slot_depth,slot_stride,slot_words;
+  unsigned char *wire0; uint64_t *word0; const _Atomic uint64_t *ready0; uint64_t *tallies;
 };
 /* An event's value: the point after which a use of an allocation is done. */
 struct point { void *event; uint64_t value; };
@@ -928,7 +934,7 @@ static ncclResult_t run_held_p2p(struct ncclComm *c,struct item *it){
         state[i]=1;moved=1;
         continue;
       }
-      if(atomic_load_explicit(k->ready,memory_order_acquire)<k->ready_base[0]+iteration+1)continue;
+      if(atomic_load_explicit(k->ready,memory_order_acquire)<(k->slot_depth?1:k->ready_base[0]+iteration+1))continue;
       uint64_t granted=0;
       int result=mesh_net_release(k->handles[0],&granted);
       if(result){status=net_failure(c,result,"mesh_net_release");break;}
@@ -1361,7 +1367,7 @@ static void hold(struct ncclComm *c,struct item *it){
    all posted, and the first failure of a post.  The gates: `gates` of them in the recording (numbered as the
    recording plays them, struct gate index), each iteration's opened at gate_value + i gates + index + 1 of
    `gate_event` (ncclMeshPersistentGate), which the recording's replay waits for before the work after each. */
-struct persistent { struct item **items; int n,capacity; struct ncclComm *comm; void *event; uint64_t value,stride,total;
+struct persistent { struct item **items; int n,capacity; struct ncclComm *comm; void *event; uint64_t value,stride,total,origin;
   _Atomic uint64_t next; ncclResult_t result; uint64_t posting; int spart,scall,rpart,rcall; ncclResult_t post_failed;
   void *gate_event; uint64_t gate_value; int gates; };
 /* (process-wide: a recorded step's calls come from every thread that encodes it, PyTorch's autograd engine's too; a
@@ -1369,7 +1375,7 @@ struct persistent { struct item **items; int n,capacity; struct ncclComm *comm; 
    (ncclMeshPersistentLanded).  A point-to-point call takes `next` (a send) or `landed` (a receive) as it is issued,
    since one group holds many of them; a collective takes `next` as its group ends. */
 static struct { pthread_mutex_t lock; struct persistent *building; struct { const uint64_t *ready; uint64_t range,bytes; int fresh,given; } next;
-  uint64_t *landed; int cut,groups; } persisting={PTHREAD_MUTEX_INITIALIZER,NULL,{0},NULL,0,0};
+  uint64_t *landed; int cut,groups; struct { uint64_t depth,stride,words; int given; } slots; } persisting={PTHREAD_MUTEX_INITIALIZER,NULL,{0},NULL,0,0,{0}};
 static uint64_t persistent_iteration(const struct item *it){return atomic_load(&it->run->next)/(uint64_t)it->run->n;}
 static ncclResult_t persistent_failure(struct ncclComm *c){struct persistent *p=__atomic_load_n(&c->run,__ATOMIC_ACQUIRE);return p?p->post_failed:ncclSuccess;}
 static void persistent_ended(struct ncclComm *c,struct item *it,ncclResult_t result){
@@ -1467,6 +1473,14 @@ static void persistent_open(struct persistent *p,uint64_t i){
   for(int x=0;x<p->n;x++)for(int j=0;j<p->items[x]->n;j++){
     struct call *k=p->items[x]->calls+j;
     memset(k->handles,0,(k->nwords?k->nwords:1)*sizeof *k->handles);k->spost=k->rpost=0;k->posted=0;
+    /* a call in slots: the iteration's slot's buffer, word and tally */
+    if(k->slot_depth){
+      const uint64_t slot=p->origin+i,ring=slot%k->slot_depth;
+      k->wire=k->wire0+ring*k->slot_stride;
+      if(k->kind==K_SEND)k->ready=(const _Atomic uint64_t *)((const unsigned char *)k->ready0+slot*k->slot_words);
+      else{k->word=(uint64_t *)((unsigned char *)k->word0+slot*k->slot_words);k->words=(_Atomic uint64_t *)k->word;}
+      k->tally=k->tallies+ring*TALLIES;
+    }
   }
   /* the iteration's gates (its words and landing words zeroed by the iteration before it, as its leading cut
      is passed) */
@@ -1938,7 +1952,7 @@ static ncclResult_t resolve(struct call *k){
 }
 
 static void calls_free(struct call *calls,int n){
-  for(int i=0;i<n;i++){free(calls[i].steps);free(calls[i].pieces);free(calls[i].segments);free(calls[i].handles);free(calls[i].ready_base);}
+  for(int i=0;i<n;i++){free(calls[i].steps);free(calls[i].pieces);free(calls[i].segments);free(calls[i].handles);free(calls[i].ready_base);free(calls[i].tallies);}
   free(calls);
 }
 
@@ -2944,6 +2958,17 @@ ncclResult_t ncclGroupEnd(void){
     else{k->words=(_Atomic uint64_t *)k->word;k->nwords=1;}
     k->ahead=1;
     if(!status && !(k->handles=calloc(1,sizeof *k->handles)))status=FAIL(NULL,ncclSystemError,"allocation");
+    /* in slots: each slot's buffer in the same window allocation as the one issued */
+    if(!status && k->slot_depth){
+      k->wire0=k->wire;k->word0=k->word;k->ready0=k->ready;
+      pthread_mutex_lock(&heap.lock);
+      const int fits=span_of(k->wire,(k->slot_depth-1)*k->slot_stride+k->count*type_bytes[k->type])!=NULL;
+      pthread_mutex_unlock(&heap.lock);
+      if(!fits)
+        status=FAIL(k->comm,ncclInvalidArgument,"a persistent call's %llu slots of %llu bytes reach past its window allocation",
+                    (unsigned long long)k->slot_depth,(unsigned long long)k->slot_stride);
+      else if(!(k->tallies=calloc(k->slot_depth*TALLIES,sizeof *k->tallies)))status=FAIL(NULL,ncclSystemError,"allocation");
+    }
   }
   /* a persistent collective's receives posted ahead where they may be, and its send buffer published in ranges
      where the caller said so (ncclMeshPersistentNext): then it needs no cut */
@@ -3106,6 +3131,9 @@ static ncclResult_t enqueue(struct call k,const ncclCollConfig_t *config){
       k.ready=(const _Atomic uint64_t *)persisting.next.ready;persisting.next.given=0;
     }
     if(persisting.building && k.kind==K_RECV){k.word=persisting.landed;persisting.landed=NULL;}
+    if(persisting.building && persisting.slots.given){
+      k.slot_depth=persisting.slots.depth;k.slot_stride=persisting.slots.stride;k.slot_words=persisting.slots.words;persisting.slots.given=0;
+    }
     pthread_mutex_unlock(&persisting.lock);
   }
   if(!status && !k.count){free(k.segments);return ncclSuccess;}
@@ -3434,7 +3462,7 @@ ncclResult_t ncclMeshStreamEncodeWait(cudaStream_t stream,void *commandBuffer,nc
 ncclResult_t ncclMeshPersistentBegin(void){
   pthread_mutex_lock(&persisting.lock);
   struct persistent *p=persisting.building?NULL:calloc(1,sizeof *p);
-  if(p){persisting.building=p;persisting.next.given=0;persisting.landed=NULL;}
+  if(p){persisting.building=p;persisting.next.given=0;persisting.landed=NULL;persisting.slots.given=0;}
   pthread_mutex_unlock(&persisting.lock);
   return p?ncclSuccess:FAIL(NULL,ncclInvalidUsage,"ncclMeshPersistentBegin: persistent calls are being made already (or no memory)");
 }
@@ -3564,6 +3592,26 @@ ncclResult_t ncclMeshPersistentLanded(uint64_t *landed){
   pthread_mutex_unlock(&persisting.lock);
   return building?ncclSuccess:FAIL(NULL,ncclInvalidUsage,"ncclMeshPersistentLanded outside ncclMeshPersistentBegin and End");
 }
+ncclResult_t ncclMeshPersistentSlots(uint64_t depth,uint64_t stride,uint64_t words){
+  if(!depth || (depth>1 && !stride) || (words&7))return FAIL(NULL,ncclInvalidArgument,"ncclMeshPersistentSlots: a depth, a stride between buffers and whole words between words");
+  pthread_mutex_lock(&persisting.lock);
+  const int building=persisting.building!=NULL;
+  if(building){persisting.slots.depth=depth;persisting.slots.stride=stride;persisting.slots.words=words;persisting.slots.given=1;}
+  pthread_mutex_unlock(&persisting.lock);
+  return building?ncclSuccess:FAIL(NULL,ncclInvalidUsage,"ncclMeshPersistentSlots outside ncclMeshPersistentBegin and End");
+}
+ncclResult_t ncclMeshPersistentOrigin(void *handle,uint64_t origin){
+  struct persistent *p=handle;
+  if(!p)return FAIL(NULL,ncclInvalidArgument,"ncclMeshPersistentOrigin: no handle");
+  if(p->comm){
+    pthread_mutex_lock(&p->comm->lock);
+    const int running=p->comm->run==p;
+    pthread_mutex_unlock(&p->comm->lock);
+    if(running)return FAIL(p->comm,ncclInvalidUsage,"ncclMeshPersistentOrigin: its calls are running");
+  }
+  p->origin=origin;
+  return ncclSuccess;
+}
 ncclResult_t ncclMeshPersistentCut(int *cut,int *groups){
   if(!cut || !groups)return FAIL(NULL,ncclInvalidArgument,"ncclMeshPersistentCut: cut or groups is NULL");
   pthread_mutex_lock(&persisting.lock);
@@ -3576,6 +3624,16 @@ static ncclMeshCounts_t counts_of(const uint64_t *c,int timed);
 static ncclMeshCounts_t tally_of(const uint64_t *c){
   if(__atomic_load_n(c+DONE,__ATOMIC_ACQUIRE))return counts_of(c,1);
   return (ncclMeshCounts_t){0};
+}
+ncclResult_t ncclMeshPersistentSlotCounts(void *handle,uint64_t slot,ncclMeshCounts_t *counts,int capacity,int *count){
+  struct persistent *p=handle;
+  if(!count)return FAIL(NULL,ncclInvalidArgument,"ncclMeshPersistentSlotCounts: count is NULL");
+  *count=0;
+  for(int i=0;p && i<p->n;i++)for(int j=0;j<p->items[i]->n;j++,++*count){
+    const struct call *k=p->items[i]->calls+j;
+    if(counts && *count<capacity)counts[*count]=k->tallies?tally_of(k->tallies+(slot%k->slot_depth)*TALLIES):(ncclMeshCounts_t){0};
+  }
+  return ncclSuccess;
 }
 ncclResult_t ncclMeshPersistentCounts(void *handle,ncclMeshCounts_t *counts,int capacity,int *count){
   struct persistent *p=handle;

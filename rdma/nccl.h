@@ -966,6 +966,16 @@ ncclResult_t ncclMeshEncodeCopies(void* commandBuffer, int n, void* const* dst, 
 ncclResult_t ncclMeshPersistentBegin(void);
 ncclResult_t ncclMeshPersistentNext(const uint64_t* ready, uint64_t range, uint64_t bytes, int fresh);
 ncclResult_t ncclMeshPersistentLanded(uint64_t* landed);
+/* Persistent point-to-point calls in slots, so a run of many iterations needs nothing of the caller between them:
+   the next ncclSend or ncclRecv (after its ncclMeshPersistentNext or ncclMeshPersistentLanded) sends or receives,
+   at slot s, its buffer `stride` x (s mod `depth`) bytes past the one issued (in the same window allocation), and
+   its ready or landed word `words` x s bytes past the one named, each written once (a send released once its word
+   is set, not counted up; the caller zeroes a run's words before it starts); a run's iteration i is slot origin + i
+   (ncclMeshPersistentOrigin).  Iteration i's receives are posted as it opens (event at value + i stride + 1), into
+   the buffers of slot origin + i mod depth: the caller opens it once its work is done with them. */
+ncclResult_t ncclMeshPersistentSlots(uint64_t depth, uint64_t stride, uint64_t words);
+/* The slot of the next ncclMeshPersistentStart's first iteration (0 until set). */
+ncclResult_t ncclMeshPersistentOrigin(void* handle, uint64_t origin);
 ncclResult_t ncclMeshPersistentCut(int* cut, int* groups);
 ncclResult_t ncclMeshPersistentEnd(void** handle, int* calls);
 ncclResult_t ncclMeshPersistentStart(void* handle, void* event, uint64_t value, uint64_t stride, uint64_t count);
@@ -1035,6 +1045,10 @@ ncclResult_t ncclMeshTallyCounts(void* tally, ncclMeshCounts_t* counts, int capa
 ncclResult_t ncclMeshTallyRelease(void* tally);
 /* A persistent handle's calls' counts of their last iteration (ncclMeshPersistentBegin), in issue order. */
 ncclResult_t ncclMeshPersistentCounts(void* handle, ncclMeshCounts_t* counts, int capacity, int* count);
+/* The counts of the last iteration at slot `slot` (mod each call's depth) of a handle's calls in slots
+   (ncclMeshPersistentSlots; zeros for any other call), in issue order; zeros where that iteration's part has not
+   ended. */
+ncclResult_t ncclMeshPersistentSlotCounts(void* handle, uint64_t slot, ncclMeshCounts_t* counts, int capacity, int* count);
 
 /* The window's allocations (above).  The Metal buffer (id<MTLBuffer>) over the allocation holding
    `ptr`, and ptr's offset in it: the library's for as long as the allocation lives. */
