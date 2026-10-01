@@ -2,8 +2,9 @@
 where they are stated).  room(path, nbytes, what): True while the filesystem holding `path` keeps the floor free
 after `nbytes` more; else one line on stderr naming what is skipped and why, and False.  write() writes a whole
 file only with room; stream() is a file each of whose writes is made only with room (the first skipped says so);
-sink() is a file for a child process's output, os.devnull without room; cap() moves a log past the cap to
-<path>.1.  No write error of these raises: the computation a record serves never fails for want of disk."""
+sink() is a file for a child process's output, os.devnull without room at its open (its later writes unchecked);
+cap() moves a log past the cap to <path>.1.  No write error of these raises: the computation a record serves
+never fails for want of disk."""
 import os
 import re
 import sys
@@ -64,20 +65,24 @@ def write(path, data, what=None, mode='w'):
 
 class stream:
     """A file written piece by piece (a run's records), each write made only where there is room: the first
-    write skipped says so, and writes go on once there is room again."""
+    write skipped says so, and writes go on once there is room again (the file opened at the first write with
+    room where there was none at open)."""
 
     def __init__(self, path, what=None, mode='a'):
-        self.path, self.name, self.what, self.skipping = path, str(path), what or str(path), False
+        self.path, self.name, self.what, self.mode, self.closed = path, str(path), what or str(path), mode, False
         self.file = open(path, mode) if room(path, 0, self.what) else None
+        self.skipping = self.file is None
 
     def write(self, text):
-        if self.file is None:
+        if self.closed:
             return
         if not room(self.path, len(text), self.what, quiet=self.skipping):
             self.skipping = True
             return
         self.skipping = False
         try:
+            if self.file is None:
+                self.file = open(self.path, self.mode)
             self.file.write(text)
         except OSError as error:
             _say(f'{self.what}: a write not made: {error}')
@@ -90,6 +95,7 @@ class stream:
                 pass
 
     def close(self):
+        self.closed = True
         if self.file is not None:
             try:
                 self.file.close()
@@ -105,8 +111,9 @@ class stream:
 
 
 def sink(path, what=None, mode='w'):
-    """A file for a child process's stdout: `path` where there is room, else os.devnull (the child's output
-    is then not kept, said once)."""
+    """A file for a child process's stdout: `path` where there is room when it is opened, else os.devnull (the
+    child's output is then not kept, said once).  Room is checked at open only: the child's later writes are
+    not checked."""
     return open(path if room(path, 0, what or f'the output {path}') else os.devnull, mode)
 
 

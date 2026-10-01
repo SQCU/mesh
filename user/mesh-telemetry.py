@@ -8,6 +8,7 @@ RATE = max(100, int(os.environ.get("MESH_TELEMETRY_RATE", "1000")))
 BANDWIDTH_RATE = max(100, int(os.environ.get("MESH_BANDWIDTH_RATE", str(RATE))))
 PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 RING = max(2, int(os.environ.get("MESH_TELEMETRY_RING", "4096")))
+PRODUCERS = max(1, int(os.environ.get("MESH_TELEMETRY_PRODUCERS", "256")))
 LEASE = max(RATE / 1000 * 2, float(os.environ.get("MESH_WORKLOAD_LEASE", "10")))
 STOP = threading.Event()
 POWER = None
@@ -50,9 +51,18 @@ def parse(lines):
     if clusters: metrics["cpu_clusters"] = clusters
     return metrics
 
+def run(command, timeout=3, text=False):
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, start_new_session=True) as process:
+        try: return process.communicate(timeout=timeout)[0]
+        except BaseException:
+            try: os.killpg(process.pid, signal.SIGTERM)
+            except OSError: pass
+            process.wait()
+            raise
+
 def output(command, timeout=3):
     try:
-        return subprocess.run(command, capture_output=True, text=True, timeout=timeout).stdout.strip()
+        return run(command, timeout, True).strip()
     except Exception:
         return ""
 
@@ -70,7 +80,7 @@ def document(paths):
 
 def gpu():
     try:
-        data = subprocess.run(["/usr/sbin/ioreg", "-r", "-c", "AGXAccelerator", "-d", "1", "-a"], capture_output=True, timeout=3).stdout
+        data = run(["/usr/sbin/ioreg", "-r", "-c", "AGXAccelerator", "-d", "1", "-a"])
         stats = (plistlib.loads(data)[0].get("PerformanceStatistics") or {})
         metrics = {
             "gpu_active_pct": stats.get("Device Utilization %"),
@@ -114,7 +124,7 @@ def bandwidth():
         "/usr/local/mesh/bin/mesh-bandwidth",
     ])
     if path:
-        try: return json.loads(output([path, "-i", "200"]))
+        try: return json.loads(run([path, "-i", "200"], 3, True))
         except Exception as error: return {"up": False, "error": f"memory bandwidth sampler: {type(error).__name__}: {error}"}
     return {"up": False, "error": "memory bandwidth sampler unavailable"}
 
@@ -126,7 +136,7 @@ def bridge():
         "/usr/local/mesh/bin/mesh-stat",
     ])
     if path:
-        try: return json.loads(output([path]).splitlines()[-1])
+        try: return json.loads(run([path], 3, True).splitlines()[-1])
         except Exception as error: return {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
     return {"up": False, "error": "mesh-stat unavailable"}
 
@@ -208,7 +218,7 @@ def fabric_bridges(now):
             log = next((line[1:] for line in output(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "2", "-Fn"]).splitlines() if line.startswith("n/")), None)
             entry = BRIDGES[pid] = {"pid": pid, "rank": option("-I"), "region": option("-s", "/mesh0"), "links": links, "log": log, "log_size": None, **bridge_counters()}
         entry.update({"state": process["stat"], "elapsed": process["elapsed"], "exited_at": None})
-        try: entry["stat"] = json.loads(output([stat, entry["region"]]).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
+        try: entry["stat"] = json.loads(run([stat, entry["region"]], 3, True).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
         except Exception as error: entry["stat"] = {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
         entry["flow"] = [{"node": peer.get("node"), "session": (peer.get("session") or {}).get("phase"), **(peer.get("flow") or {})} for peer in entry["stat"].get("peers") or []]
         entry["communicators"] = entry["stat"].get("communicators") or []
@@ -222,7 +232,7 @@ def fabric_bridges(now):
     return [copy.deepcopy({key: value for key, value in entry.items() if key != "spans"}) for entry in BRIDGES.values()]
 
 def fabric_ports():
-    try: tree = plistlib.loads(subprocess.run(["/usr/sbin/ioreg", "-r", "-c", "AppleThunderboltIPPort", "-l", "-a"], capture_output=True, timeout=3).stdout)
+    try: tree = plistlib.loads(run(["/usr/sbin/ioreg", "-r", "-c", "AppleThunderboltIPPort", "-l", "-a"]))
     except Exception as error: return [{"error": f"ioreg: {type(error).__name__}: {error}"}]
     blocks = {block.split(":", 1)[0]: block for block in re.split(r"\n(?=\S)", output(["/sbin/ifconfig"]))}
     neighbors = {}
@@ -306,10 +316,12 @@ class TelemetryRing:
         self.power = {"up": False, "sampled_at": None, "source": "powermetrics", "error": "sampler starting", "metrics": {}}
         self.bandwidth = {"up": False, "source": "IOReport", "error": "sampler starting"}
         self.producers = {}
+        self.capacity = PRODUCERS
         self.unkeyed_producers = collections.deque(maxlen=size)
         self.protocol_events = collections.deque(maxlen=size)
         self.ingest_sequence = 0
         self.expired_producers = 0
+        self.evicted_producers = 0
 
     def set_power(self, payload):
         with self.lock: self.power = dict(payload)
@@ -329,6 +341,13 @@ class TelemetryRing:
     def protocol_sample(self):
         with self.lock: return list(self.protocol_events)[-16:]
 
+    def keep(self, key, row):
+        self.producers.pop(key, None)
+        self.producers[key] = row
+        while len(self.producers) > self.capacity:
+            self.producers.pop(next(iter(self.producers)))
+            self.evicted_producers += 1
+
     def publish_workload(self, payload):
         with self.lock:
             self.ingest_sequence += 1
@@ -343,7 +362,7 @@ class TelemetryRing:
                     if "measures" not in row and current is not None:
                         row["measures"] = current.get("measures", {})
                         row["measures_sampled_at"] = current.get("measures_sampled_at")
-                    self.producers[key] = row
+                    self.keep(key, row)
         except Exception:
             with self.lock:
                 self.unkeyed_producers.append({
@@ -359,7 +378,7 @@ class TelemetryRing:
             current = dict(self.producers.get(key) or payload)
             current["measures"] = {**current.get("measures", {}), **(payload.get("measures") or {})}
             current["measures_sampled_at"] = payload.get("sampled_at")
-            self.producers[key] = current
+            self.keep(key, current)
             return sequence
 
     def workload_sample(self, now=None):
@@ -370,7 +389,7 @@ class TelemetryRing:
             self.expired_producers += len(expired)
             active = [dict(row) for row in self.producers.values()]
             unkeyed = [dict(row) for row in self.unkeyed_producers]
-            expired_total = self.expired_producers
+            expired_total, evicted_total = self.expired_producers, self.evicted_producers
         for row in active:
             measures = row.get("measures", {})
             artifacts = measures.get("artifacts", {}) if isinstance(measures, dict) else {}
@@ -388,6 +407,7 @@ class TelemetryRing:
             "sampled_at": max([row.get("sampled_at", 0) for row in active], default=None),
             "active_producers": len(active),
             "expired_producers": expired_total,
+            "evicted_producers": evicted_total,
             "unkeyed_producers": unkeyed,
             "rows": numeric_sum(row.get("rows") for row in active),
             "fp32": {

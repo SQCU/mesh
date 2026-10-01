@@ -16,7 +16,7 @@ for pub in "$HOME"/.ssh/*.pub; do
 done
 [ "$#" -ge 2 ] || { echo "usage: mesh-run [<name>|all|others] <command...>" >&2; exit 1; }
 target=$1; shift
-probe(){ t=$(mktemp)
+probe(){ t=$(mktemp "$T/.probe.XXXXXX")
   { printf x | nc -G "$D" -w "$D" "$1" 8099 2>/dev/null | tr '
 ' ' ' > "$t.a"; } &
   { printf x | nc -G "$D" -w "$D" "$1" 8100 2>/dev/null | tr '
@@ -35,7 +35,7 @@ for p in $ports; do
 $n"
   done
 done
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; k=0
+T=$(mktemp -d); trap 'kill -TERM $(jobs -pr) 2>/dev/null; rm -rf "$T"' EXIT; trap 'exit 1' INT TERM; k=0
 IFS='
 '
 for a in $cand; do

@@ -3,6 +3,8 @@ from __future__ import annotations
 import ipaddress
 import hashlib
 import json
+import os
+import signal
 import socket
 import subprocess
 import time
@@ -54,11 +56,22 @@ class Node:
     def ranked(self) -> list[tuple[str, str]]:
         return sorted(self.paths, key=lambda p: KIND_RANK.get(p[0], 99))
 
+def _run(argv: list[str], timeout: float) -> str:
+    with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          start_new_session=True) as process:
+        try:
+            return process.communicate(timeout=timeout)[0]
+        except BaseException:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            process.wait()
+            raise
+
 def _dns_sd(args: list[str], timeout: float) -> list[str]:
     try:
-        p = subprocess.run(["dns-sd", *args], capture_output=True, text=True,
-                           timeout=timeout)
-        return p.stdout.splitlines()
+        return _run(["dns-sd", *args], timeout).splitlines()
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         output = getattr(e, "stdout", None) or ""
         return (output.decode(errors="replace") if isinstance(output, bytes) else output).splitlines()
@@ -73,8 +86,7 @@ def browse(timeout: float = 3.0) -> list[str]:
 
 def local_name() -> str:
     try:
-        return subprocess.run(["scutil", "--get", "LocalHostName"],
-                              capture_output=True, text=True, timeout=3).stdout.strip()
+        return _run(["scutil", "--get", "LocalHostName"], 3).strip()
     except Exception:
         return socket.gethostname().split(".")[0]
 

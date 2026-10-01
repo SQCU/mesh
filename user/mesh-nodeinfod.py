@@ -1,26 +1,20 @@
 import socket, subprocess, sys, os, threading, time
 SCRIPT = os.environ.get("MESH_NODEINFO", os.path.expanduser("~/.local/mesh/bin/mesh-nodeinfo.sh"))
 PORT = int(os.environ.get("MESH_NODEINFO_PORT", "8100"))
-SAMPLE = b""
-STATUS = "starting"
-UPDATED = 0.0
+LATEST = (b"", "starting", 0.0)
 
 def sample():
-    global SAMPLE, STATUS, UPDATED
+    global LATEST
     while True:
-        STATUS = "sampling"
+        lines, status = [], "failed"
         try:
-            process = subprocess.Popen(["/bin/bash", SCRIPT], stdout=subprocess.PIPE)
-            lines = []
-            for line in process.stdout:
-                if line.strip() != b"end": lines.append(line)
-                SAMPLE = b"".join(lines)
-                UPDATED = time.time()
-            STATUS = "complete" if process.wait() == 0 else "failed"
-            process.stdout.close()
+            with subprocess.Popen(["/bin/bash", SCRIPT], stdout=subprocess.PIPE) as process:
+                for line in process.stdout:
+                    if line.strip() != b"end": lines.append(line)
+                status = "complete" if process.wait() == 0 else "failed"
         except Exception as error:
-            STATUS = "failed"
             print(f"nodeinfo sample: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+        LATEST = (b"".join(lines), status, time.time()) if lines else (LATEST[0], status, LATEST[2])
         time.sleep(5)
 
 s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
@@ -35,7 +29,8 @@ while True:
         print(f"nodeinfo accept: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
         continue
     try:
-        body = SAMPLE + f"sample_status={STATUS} sample_updated={UPDATED:.3f} sample_age={max(0, time.time()-UPDATED):.3f}\nend\n".encode()
+        sample_body, status, updated = LATEST
+        body = sample_body + f"sample_status={status} sample_updated={updated:.3f} sample_age={max(0, time.time()-updated):.3f}\nend\n".encode()
         c.settimeout(5)
         c.sendall(b"mesh1 %d\n" % len(body) + body)
         c.shutdown(socket.SHUT_WR)

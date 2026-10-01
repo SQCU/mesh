@@ -1,7 +1,12 @@
 #!/bin/bash
 LOG=/usr/local/mesh/log/keeper.log
 [ -f "$LOG" ] && [ "$(stat -f%z "$LOG")" -gt 10485760 ] && { tail -c 2000000 "$LOG" >"$LOG.tmp"; mv "$LOG.tmp" "$LOG"; }
-exec >>"$LOG" 2>&1
+FLOOR=$(awk '$1=="#define" && $2=="MESH_DISK_FLOOR_GIB"{print $3}' /usr/local/mesh/bin/mesh-disk.h 2>/dev/null)
+FREE=$(df -k /usr/local/mesh/log 2>/dev/null | awk 'NR==2{print $4}')
+if [ -n "$FLOOR" ] && [ -n "$FREE" ] && [ "$FREE" -lt $((FLOOR << 20)) ]; then
+  echo "mesh-disk: $LOG not written: /usr/local/mesh/log has $((FREE * 1024)) bytes free, under the floor of $FLOOR GiB (mesh-disk.h)" >&2
+  exec >/dev/null 2>&1
+else exec >>"$LOG" 2>&1; fi
 ts(){ date '+%F %T'; }
 FW=/usr/libexec/ApplicationFirewall/socketfilterfw
 drift=0

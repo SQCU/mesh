@@ -1,5 +1,5 @@
 #!/usr/bin/env mesh-python
-import argparse, collections, concurrent.futures, curses, html, json, os, re, socket, subprocess, sys, threading, time
+import argparse, collections, concurrent.futures, curses, html, json, os, re, signal, socket, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 TELEMETRY_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
@@ -11,8 +11,18 @@ USAGE = "mesh-top [-n SECONDS] [--window SECONDS] [--links MAP] [--nodes A,B] [-
 def first_file(paths):
     return next((path for path in paths if path and os.path.isfile(os.path.expanduser(path))), None)
 
+def run(command, timeout):
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True) as process:
+        try: stdout, stderr = process.communicate(timeout=timeout)
+        except BaseException:
+            try: os.killpg(process.pid, signal.SIGTERM)
+            except OSError: pass
+            process.wait()
+            raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
 def local_name():
-    try: return subprocess.run(["/usr/sbin/scutil", "--get", "LocalHostName"], capture_output=True, text=True, timeout=2).stdout.strip() or socket.gethostname().split(".")[0]
+    try: return run(["/usr/sbin/scutil", "--get", "LocalHostName"], 2).stdout.strip() or socket.gethostname().split(".")[0]
     except Exception: return socket.gethostname().split(".")[0]
 
 def link_map(path):
@@ -59,7 +69,7 @@ def bracket(host):
     return f"[{host}]" if ":" in host else host
 
 def ssh(host, command, timeout):
-    return subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", host, command], capture_output=True, text=True, timeout=timeout)
+    return run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", host, command], timeout)
 
 def connect(address, port, timeout):
     family, sockaddr, _ = address
@@ -135,7 +145,7 @@ def fetch(node):
 def probe(node):
     command = "pgrep -x ibv_devinfo >/dev/null && echo MESH_TOP_BUSY || /usr/bin/ibv_devinfo 2>&1"
     try:
-        text = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True, timeout=10).stdout if node.spec.get("self") else ssh(node.ssh_hosts()[0], command, 15).stdout
+        text = run(["/bin/sh", "-c", command], 10).stdout if node.spec.get("self") else ssh(node.ssh_hosts()[0], command, 15).stdout
         states = {m.group(1): (re.search(r"state:\s*(PORT_\w+)", block) or [None, "?"])[1] for block in text.split("hca_id:")[1:] for m in [re.match(r"\s*(\S+)", block)] if m}
         node.probe = {"at": time.time(), "states": states, "note": "an earlier ibv_devinfo is still running there" if "MESH_TOP_BUSY" in text else None}
     except Exception as error:
