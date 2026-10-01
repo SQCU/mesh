@@ -1284,7 +1284,9 @@ static void hold(struct ncclComm *c,struct item *it){
 struct persistent { struct item **items; int n,capacity; struct ncclComm *comm; void *event; uint64_t value,stride,total;
   _Atomic uint64_t next; ncclResult_t result; uint64_t posting; int spart,scall,rpart,rcall; ncclResult_t post_failed;
   void *gate_event; uint64_t gate_value; int gates; };
-static _Thread_local struct { pthread_mutex_t lock; struct persistent *building; struct { const uint64_t *ready; uint64_t range,bytes; int fresh,given; } next;
+/* (process-wide: a recorded step's calls come from every thread that encodes it, PyTorch's autograd engine's too; a
+   process records one step at a time, between ncclMeshPersistentBegin and End) */
+static struct { pthread_mutex_t lock; struct persistent *building; struct { const uint64_t *ready; uint64_t range,bytes; int fresh,given; } next;
   int cut,groups; } persisting={PTHREAD_MUTEX_INITIALIZER,NULL,{0},0,0};
 static uint64_t persistent_iteration(const struct item *it){return atomic_load(&it->run->next)/(uint64_t)it->run->n;}
 static ncclResult_t persistent_failure(struct ncclComm *c){struct persistent *p=__atomic_load_n(&c->run,__ATOMIC_ACQUIRE);return p?p->post_failed:ncclSuccess;}
