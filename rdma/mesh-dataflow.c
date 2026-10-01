@@ -1,4 +1,5 @@
 #include <signal.h>
+#include <errno.h>
 #include "mesh-dataflow.h"
 #include <stdlib.h>
 #include <string.h>
@@ -85,8 +86,17 @@ uint64_t mesh_link_table_read(const struct mesh_link_table *t,struct mesh_link_c
     if(atomic_load_explicit(&t->epoch,memory_order_relaxed)==epoch)return epoch;
   }
 }
+/* The writer word holds its holder's pid: a holder whose process is gone (it can be a crashed bridge, the table kept)
+   is taken over, as an edit is published only by the epoch's bump, so a dead holder's half edit is never seen. */
 static void mesh_link_table_lock(struct mesh_link_table *t){
-  for(uint32_t idle=0;!atomic_compare_exchange_weak_explicit(&t->writer,&idle,1,memory_order_acquire,memory_order_relaxed);idle=0)usleep(10);
+  const uint32_t me=(uint32_t)getpid();
+  for(;;){
+    uint32_t holder=0;
+    if(atomic_compare_exchange_weak_explicit(&t->writer,&holder,me,memory_order_acquire,memory_order_relaxed))return;
+    if(holder && holder!=me && kill((pid_t)holder,0) && errno==ESRCH &&
+       atomic_compare_exchange_strong_explicit(&t->writer,&holder,me,memory_order_acquire,memory_order_relaxed))return;
+    usleep(10);
+  }
 }
 static void mesh_link_table_unlock(struct mesh_link_table *t){atomic_store_explicit(&t->writer,0,memory_order_release);}
 /* The write, the writer held. */
@@ -122,18 +132,25 @@ uint64_t mesh_link_table_row(struct mesh_link_table *t,uint32_t v,uint64_t *up){
   mesh_link_table_unlock(t);
   return sequence;
 }
+/* One link of this node set up or down, inside one edit (each session observes its own link). */
+struct mesh_link_one { uint32_t node,peer,up; };
+static void mesh_link_one_set(struct mesh_link_contents *c,const void *argument){
+  const struct mesh_link_one *o=argument;
+  mesh_link_at(c,o->node,o->peer)->up=o->up!=0;
+}
 int mesh_link_table_observe(struct mesh_link_table *t,uint32_t peer,uint32_t up){
-  if(peer>=t->nodes)return -EINVAL;
-  uint64_t *row=calloc((t->nodes+63)/64,sizeof *row);
-  if(!row)return -ENOMEM;
-  mesh_link_table_row(t,t->node,row);
-  if(up)row[peer/64]|=UINT64_C(1)<<(peer%64);else row[peer/64]&=~(UINT64_C(1)<<(peer%64));
+  if(peer>=t->nodes || peer==t->node)return -EINVAL;
   mesh_link_table_lock(t);
-  int changed=mesh_link_table_edit(t,mesh_link_row_set,&(struct mesh_link_row){t->node,row});
+  int changed=mesh_link_table_edit(t,mesh_link_one_set,&(struct mesh_link_one){t->node,peer,up});
   if(changed)atomic_fetch_add_explicit(&mesh_link_reported(t)[t->node],1,memory_order_release);
   mesh_link_table_unlock(t);
-  free(row);
   return changed;
+}
+void mesh_link_table_forget(struct mesh_link_table *t,uint32_t node){
+  if(node>=t->nodes || node==t->node)return;
+  mesh_link_table_lock(t);
+  atomic_store_explicit(&mesh_link_reported(t)[node],0,memory_order_release);
+  mesh_link_table_unlock(t);
 }
 int mesh_link_table_report(struct mesh_link_table *t,uint32_t origin,uint64_t sequence,const uint64_t *up){
   if(origin>=t->nodes || origin==t->node)return 0;

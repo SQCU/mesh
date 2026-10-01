@@ -64,7 +64,8 @@ static inline int mesh_log_room(size_t bytes) {
   if ((unsigned long long)was.st_size + bytes > MESH_LOG_CAP && !__atomic_exchange_n(&rotating, 1, __ATOMIC_ACQ_REL)) {
     char path[PATH_MAX], old[PATH_MAX + 2];
     struct stat out;
-    if (!fcntl(2, F_GETPATH, path) && snprintf(old, sizeof old, "%s.1", path) < (int)sizeof old && !rename(path, old)) {
+    /* looked at again once this thread rotates: another may have rotated it since the look above */
+    if (!fstat(2, &was) && (unsigned long long)was.st_size + bytes > MESH_LOG_CAP && !fcntl(2, F_GETPATH, path) && snprintf(old, sizeof old, "%s.1", path) < (int)sizeof old && !rename(path, old)) {
       const int file = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
       if (file >= 0) {
         if (!fstat(1, &out) && out.st_dev == was.st_dev && out.st_ino == was.st_ino) dup2(file, 1);

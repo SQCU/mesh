@@ -59,6 +59,7 @@ $( for arg in ${link_args[@]+"${link_args[@]}"}; do printf '<string>%s</string>'
 </array>
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>ThrottleInterval</key><integer>1</integer>
 <key>ExitTimeOut</key><integer>60</integer>
 <key>EnvironmentVariables</key><dict><key>MESH_LOG_DIR</key><string>$LOGDIR</string><key>MESH_QPS</key><string>$mesh_qps</string>$( [ -n "${MESH_LEDGER:-}" ] && printf '<key>MESH_LEDGER</key><string>%s</string>' "$MESH_LEDGER" )</dict>
 <key>StandardOutPath</key><string>$LOG</string>
@@ -68,16 +69,26 @@ PL
 }
 
 pid_of() { launchctl print "$DOM/$LABEL" 2>/dev/null | awk '/^\tpid = /{print $3}'; }
+# The job's last exit status as launchd reports it (empty: it has not exited).
+last_exit_of() { launchctl print "$DOM/$LABEL" 2>/dev/null | awk -F' = ' '/^\tlast exit code = /{print $2}' | grep -E '^[0-9]+$'; }
+# Whether a client is attached to the region (a client's bridge stopped then exits 75 and launchd starts the next).
+attached() { "$STAT" "$region" 2>/dev/null | grep -q '"attached":true'; }
 
+# SIGTERM to the job's bridge, its exit waited for however long it takes (never escalated: a line every 30 s while it
+# runs), then the job booted out.  A bridge with clients attached is not stopped: its clients' processes end first.
 do_stop() {
+  if attached; then
+    echo "mesh-bridge: a client of $region is attached; not stopping its bridge (end the client first)" >&2
+    return 1
+  fi
   p=$(pid_of)
   if [ -n "$p" ]; then
     kill -TERM "$p" 2>/dev/null
-    for _ in $(seq 1 300); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
-    if kill -0 "$p" 2>/dev/null; then
-      echo "mesh-bridge: stop pending after 30s (bridge=$p); not escalating or replacing its region" >&2
-      return 1
-    fi
+    n=0
+    while kill -0 "$p" 2>/dev/null; do
+      sleep 0.1; n=$((n+1))
+      [ $((n % 300)) -eq 0 ] && echo "mesh-bridge: bridge $p still running $((n/10)) s after its SIGTERM; not escalating" >&2
+    done
   fi
   launchctl bootout "$DOM/$LABEL" >/dev/null 2>&1
   echo "mesh-bridge: stopped"
@@ -99,18 +110,18 @@ do_start() {
   wire_check || return $?
   write_plist
   launchctl bootstrap "$DOM" "$PLIST" || return $?
-  for _ in $(seq 1 400); do [ -n "$(pid_of)" ] && break; sleep 0.01; done
-  p=$(pid_of)
-  [ -z "$p" ] && { echo "mesh-bridge: failed to start; see $LOG" >&2; return 1; }
-  for _ in $(seq 1 1200); do
+  # ready, or its bridge exited (launchd's last exit code): observed, never a clock
+  while :; do
     if "$STAT" --ready "$region" >/dev/null 2>&1; then
-      echo "mesh-bridge: running as $p, registered $want bytes"
+      echo "mesh-bridge: running as $(pid_of), registered $want bytes"
       return 0
+    fi
+    if [ -z "$(pid_of)" ] && [ -n "$(last_exit_of)" ]; then
+      echo "mesh-bridge: the bridge exited ($(last_exit_of)) before it was ready; see $LOG" >&2
+      return 1
     fi
     sleep 0.1
   done
-  echo "mesh-bridge: setup incomplete; see $LOG" >&2
-  return 1
 }
 
 do_status() {

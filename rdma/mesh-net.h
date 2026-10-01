@@ -104,10 +104,8 @@ int mesh_net_mem_alloc(void **pointer,size_t size);
 int mesh_net_mem_free(void *pointer);
 /* The whole registered window as this process maps it (for a GPU buffer over it). */
 int mesh_net_window(void **base,size_t *bytes);
-/* The errno behind this thread's last result other than success, and a comm's counts: bytes moved,
-   requests completed, sends that waited for credit, requests posted. */
+/* The errno behind this thread's last result other than success. */
 int mesh_net_error(void);
-void mesh_net_comm_counts(void *comm,uint64_t counts[4]);
 /* The transport's statistics, lagged (mesh.h mesh_stats_record, mesh_stats_read): an evaluation's end recorded
    with this client's `count` counts (its evaluation's index); the entries of evaluations first..evaluation - lag
    copied into `out` (capacity entries of the ring's entry bytes; how many); the evaluations ended so far, the
@@ -115,14 +113,20 @@ void mesh_net_comm_counts(void *comm,uint64_t counts[4]);
 uint64_t mesh_net_stats_record(const uint64_t *client,uint32_t count);
 size_t mesh_net_stats_read(uint64_t evaluation,uint64_t first,void *out,size_t capacity);
 void mesh_net_stats_shape(uint64_t *evaluations,uint32_t *lag,size_t *entry);
-/* Whether a send or receive comm is still connected: its session not lost. */
+/* Whether a send or receive comm is still connected: its session not lost, its peer has not closed it. */
 int mesh_net_alive(void *comm);
+/* The client (process) at the other end of a connected comm (0: not known). */
+uint64_t mesh_net_peer_owner(void *comm);
 /* A comm's slot in the region's table (its index and generation), taken before it is closed, and
    whether the bridge has vacated that slot since, or its link's peer or this node's bridge left the mesh (nothing
    of the comm on the wire any more). */
 uint64_t mesh_net_slot(void *comm);
 int mesh_net_vacated(uint64_t slot);
 /* Whether node `node`'s bridge left the mesh as this node sees it: its LEAVE heard on a link to it, or this node's
-   bridge left (mesh.h MESH_LEFT); a membership change, where a bridge's stop or restart is none. */
+   bridge left (mesh.h MESH_LEFT), or this process's region was replaced (its node restarted, or a bridge made it
+   afresh: no bridge serves this process again); a membership change, where a bridge's stop or restart is none. */
 int mesh_net_departed(uint32_t node);
+/* Whether client `owner` of node `node` has exited as its node's bridge last reported (mesh.h peer_clients): absent
+   from that node's client table in the current pairing with it (0 while no complete report of this pairing is held). */
+int mesh_net_exited(uint32_t node,uint64_t owner);
 #endif

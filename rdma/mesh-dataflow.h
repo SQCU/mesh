@@ -60,6 +60,9 @@ int mesh_link_table_observe(struct mesh_link_table *,uint32_t peer,uint32_t up);
 /* Node `origin`'s report (its links' up, a bit a node, 64 a word) applied where `sequence` is newer than
    the last applied from it; 1 where applied, 0 where not (older, the table's own node, past its nodes). */
 int mesh_link_table_report(struct mesh_link_table *,uint32_t origin,uint64_t sequence,const uint64_t *up);
+/* Node `node`'s reports taken afresh: the sequence of its last applied forgotten (a new instance of it, whose
+   sequence may start below its predecessor's). */
+void mesh_link_table_forget(struct mesh_link_table *,uint32_t node);
 /* Node v's report as this table holds it: its links' up (a bit a node, (nodes + 63) / 64 words) and its
    sequence (0: none). */
 uint64_t mesh_link_table_row(struct mesh_link_table *,uint32_t v,uint64_t *up);

@@ -19,9 +19,11 @@
    regions they lie in, so data lands in place and nothing here waits on the wire.  The bridge's absence fails
    nothing: a request stays not yet done while no bridge serves the region, and the next bridge on it resumes it
    (mesh-flow.c net_keep); a request fails only where a bridge ended it so (a peer that exited, closed or left
-   the mesh). */
+   the mesh), or once this process's region is replaced (net_replaced: its node restarted, or its bridge made the
+   region afresh), as no bridge serves it again. */
 #define NET_PENDING 256
-#define NET_WAIT_NS UINT64_C(60000000000)
+/* how often a waiting client looks whether its region was replaced: a pace for noticing that event */
+#define NET_LOOK_NS UINT64_C(100000000)
 _Static_assert(sizeof(struct mesh_net_handle)<=MESH_NET_HANDLE_BYTES,"handle");
 struct net_comm_handle;
 struct net_request_handle { struct net_comm_handle *comm; uint64_t sequence; };
@@ -38,6 +40,9 @@ static struct {
   int inits;
   struct hdr *m; size_t length; uint64_t owner; uint32_t client;
   char **names;
+  /* the region's name and the bridge instance of the region this process attached (replaced: the name names another
+     instance's region since, or none) */
+  char name[64]; uint64_t instance; _Atomic uint64_t looked; _Atomic int replaced;
 } net = {.lock=PTHREAD_MUTEX_INITIALIZER};
 static _Thread_local int net_errno;
 
@@ -47,7 +52,8 @@ static int net_result(int error){
   case 0: return MESH_NET_SUCCESS;
   case EINVAL: case EMSGSIZE: case ERANGE: return MESH_NET_INVALID_ARGUMENT;
   case EBUSY: case ENOTSUP: return MESH_NET_INVALID_USAGE;
-  case ECONNRESET: case ECONNREFUSED: case ENETDOWN: case ECANCELED: case EPIPE: case EIO: case ENOSPC: return MESH_NET_REMOTE_ERROR;
+  case ECONNRESET: case ECONNREFUSED: case ENETDOWN: case ECANCELED: case EPIPE: case EIO: case ENOSPC: case ESTALE: case EHOSTDOWN: case ESRCH:
+    return MESH_NET_REMOTE_ERROR;
   default: return MESH_NET_SYSTEM_ERROR;
   }
 }
@@ -58,6 +64,33 @@ static void net_ring(uint32_t link){
   os_sync_wake_by_address_any(&l->doorbell,sizeof l->doorbell,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
 }
 static struct mesh_net_comm *net_slot(struct net_comm_handle *c){return mesh_net_comms(net.m)+c->index;}
+/* A handle's comm state, `kind`'s only while the slot is still its generation (a slot vacated and claimed again is
+   another comm's): its state, else FREE. */
+static uint32_t net_state_of(struct net_comm_handle *c){
+  struct mesh_net_comm *comm=net_slot(c);
+  const uint32_t state=atomic_load_explicit(&comm->state,memory_order_acquire);
+  return comm->generation==c->generation && atomic_load_explicit(&comm->state,memory_order_acquire)==state?state:MESH_NET_FREE;
+}
+/* Whether the region this process attached is no longer the one its name names (sticky): looked at most every
+   NET_LOOK_NS by a waiting client. */
+static int net_replaced(void){
+  if(atomic_load_explicit(&net.replaced,memory_order_acquire))return 1;
+  const uint64_t now=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  uint64_t last=atomic_load_explicit(&net.looked,memory_order_relaxed);
+  if(!net.name[0] || now-last<NET_LOOK_NS || !atomic_compare_exchange_strong(&net.looked,&last,now))return 0;
+  int file=shm_open(net.name,O_RDONLY,0),replaced=file<0 && errno==ENOENT;
+  if(file>=0){
+    const struct hdr *now=mmap(NULL,sizeof *now,PROT_READ,MAP_SHARED,file,0);
+    close(file);
+    if(now!=MAP_FAILED){
+      const uint64_t instance=atomic_load_explicit(&now->instance,memory_order_acquire);
+      replaced=now->magic==MESH_MAGIC && instance && net.instance && instance!=net.instance;
+      munmap((void *)now,sizeof *now);
+    }
+  }
+  if(replaced)atomic_store_explicit(&net.replaced,1,memory_order_release);
+  return replaced;
+}
 
 int mesh_net_init(void **ctx,uint64_t commId,struct mesh_net_comm_config *config,mesh_net_logger logFunction,mesh_net_profiler profFunction){
   (void)profFunction;
@@ -72,6 +105,7 @@ int mesh_net_init(void **ctx,uint64_t commId,struct mesh_net_comm_config *config
     struct stat info;
     if(file<0)error=errno;
     else if(fstat(file,&info))error=errno;
+    if(!error)snprintf(net.name,sizeof net.name,"%s",name?name:MESH_NAME);
     struct hdr *m=MAP_FAILED;
     if(!error && (m=mmap(NULL,(size_t)info.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,file,0))==MAP_FAILED)error=errno;
     if(file>=0)close(file);
@@ -79,14 +113,17 @@ int mesh_net_init(void **ctx,uint64_t commId,struct mesh_net_comm_config *config
       munmap(m,(size_t)info.st_size);error=EINVAL;
     }
     if(!error){
-      net.m=m;net.length=(size_t)info.st_size;
+      net.m=m;net.length=(size_t)info.st_size;net.instance=atomic_load_explicit(&m->instance,memory_order_acquire);atomic_store(&net.replaced,0);
       net.owner=(((atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&UINT64_C(0x7fffffff))<<32)|(uint32_t)getpid();
+      /* a slot of the region's client table, which the bridge reports to its peers (mesh.h peer_clients): every
+         process with comms holds one, so a process its peers' tables lack has exited */
       net.client=MESH_NET_CLIENTS;
       for(uint32_t i=0;i<MESH_NET_CLIENTS;i++){
         uint64_t vacant=0;
         if(atomic_compare_exchange_strong_explicit(&mesh_net_clients(m)[i].owner,&vacant,net.owner,memory_order_acq_rel,memory_order_relaxed)){net.client=i;break;}
       }
-      net.names=calloc(m->links?m->links:1,sizeof *net.names);
+      if(net.client==MESH_NET_CLIENTS){munmap(m,net.length);net.m=NULL;error=ENOSPC;}
+      else net.names=calloc(m->links?m->links:1,sizeof *net.names);
     }
   }
   if(!error)net.inits++;
@@ -184,14 +221,15 @@ int mesh_net_connect(void *ctx,int dev,void *handle,void **sendComm,void **sendD
     return MESH_NET_SUCCESS;
   }
   struct mesh_net_comm *comm=net_slot(pending->comm);
-  uint32_t state=atomic_load_explicit(&comm->state,memory_order_acquire);
+  uint32_t state=net_state_of(pending->comm);
   if(state==MESH_NET_SEND){
     pending->comm->kind=MESH_NET_SEND;*sendComm=pending->comm;pending->comm=NULL;
     return MESH_NET_SUCCESS;
   }
   if(state==MESH_NET_FAILED){
     int error=atomic_load_explicit(&comm->error,memory_order_relaxed);
-    atomic_store_explicit(&comm->state,MESH_NET_CLOSING,memory_order_release);net_ring(pending->comm->link);
+    uint32_t failed=MESH_NET_FAILED;
+    atomic_compare_exchange_strong_explicit(&comm->state,&failed,MESH_NET_CLOSING,memory_order_acq_rel,memory_order_relaxed);net_ring(pending->comm->link);
     free(pending->comm);pending->comm=NULL;
     return net_result(error?error:ECONNREFUSED);
   }
@@ -250,9 +288,9 @@ static int net_post(struct net_comm_handle *c,uint32_t op,void *data,size_t size
   struct mesh_net_comm *comm=net_slot(c);
   char *window=(char *)net.m+net.m->data_off;
   if(word && ((char *)word<window || (char *)(word+1)>window+mesh_wire_bytes(net.m) || ((uintptr_t)word&7)))return net_result(EINVAL);
-  uint32_t state=atomic_load_explicit(&comm->state,memory_order_acquire);
+  uint32_t state=net_state_of(c);
   if(state!=c->kind){
-    int error=atomic_load_explicit(&comm->error,memory_order_relaxed);
+    int error=state==MESH_NET_FREE?0:atomic_load_explicit(&comm->error,memory_order_relaxed);
     return net_result(error?error:ECONNRESET);
   }
   if(size && (!h || (char *)data<h->address || (char *)data>h->address+h->size || size>(size_t)(h->address+h->size-(char *)data)))return net_result(EINVAL);
@@ -288,7 +326,7 @@ int mesh_net_isend_held(void *sendComm,void *data,size_t size,void *mhandle,uint
 int mesh_net_release(void *request,uint64_t *granted){
   struct net_request_handle *handle=request;
   struct mesh_net_request *r=net_slot(handle->comm)->requests+handle->sequence%MESH_NET_REQUESTS;
-  if(r->sequence!=handle->sequence)return net_result(EINVAL);
+  if(net_state_of(handle->comm)==MESH_NET_FREE || r->sequence!=handle->sequence)return net_result(EINVAL);
   if(granted)*granted=atomic_load_explicit(&r->transferred,memory_order_acquire);
   uint32_t held=MESH_NET_HELD;
   if(atomic_compare_exchange_strong_explicit(&r->op,&held,MESH_NET_ISEND,memory_order_release,memory_order_relaxed))net_ring(handle->comm->link);
@@ -309,6 +347,7 @@ int mesh_net_test(void *request,int *done,int *sizes){
   struct net_request_handle *handle=request;
   struct mesh_net_request *r=net_slot(handle->comm)->requests+handle->sequence%MESH_NET_REQUESTS;
   *done=0;
+  if(net_state_of(handle->comm)==MESH_NET_FREE)return net_result(EINVAL);
   uint32_t state=atomic_load_explicit(&r->state,memory_order_acquire);
   if(r->sequence!=handle->sequence)return net_result(EINVAL);
   if(state==MESH_NET_DONE || state==MESH_NET_ERROR){
@@ -318,13 +357,15 @@ int mesh_net_test(void *request,int *done,int *sizes){
     *done=1;
     return net_result(error);
   }
+  /* no bridge serves a replaced region again: its requests end failed (this node's new instance) */
+  if(net_replaced()){*done=1;return net_result(ENETDOWN);}
   return MESH_NET_SUCCESS;
 }
 static int net_close(void *handle){
   struct net_comm_handle *c=handle;
   if(!c)return MESH_NET_SUCCESS;
   struct mesh_net_comm *comm=net_slot(c);
-  uint32_t state=atomic_load_explicit(&comm->state,memory_order_acquire);
+  uint32_t state=net_state_of(c);
   while(state!=MESH_NET_FREE && state!=MESH_NET_CLAIMED && state!=MESH_NET_CLOSING && comm->generation==c->generation &&
         !atomic_compare_exchange_weak_explicit(&comm->state,&state,MESH_NET_CLOSING,memory_order_acq_rel,memory_order_acquire));
   net_ring(c->link);
@@ -353,9 +394,10 @@ int mesh_net_finalize(void *ctx){
   if(net.inits && !--net.inits && net.m){
     struct mesh_net_memory *memory=mesh_net_memory(net.m);
     for(uint32_t i=0;i<MESH_NET_MEMORY;i++){
-      uint64_t owner=net.owner;uint32_t first=memory[i].first,pages=memory[i].pages;
-      if(atomic_load_explicit(&memory[i].owner,memory_order_acquire)==owner &&
-         atomic_compare_exchange_strong_explicit(&memory[i].owner,&owner,0,memory_order_acq_rel,memory_order_relaxed))
+      uint64_t owner=net.owner;
+      if(atomic_load_explicit(&memory[i].owner,memory_order_acquire)!=owner)continue;
+      const uint32_t first=memory[i].first,pages=atomic_exchange_explicit(&memory[i].pages,0,memory_order_acq_rel);
+      if(atomic_compare_exchange_strong_explicit(&memory[i].owner,&owner,0,memory_order_acq_rel,memory_order_relaxed) && pages)
         mesh_bits_clear(mesh_arena_bits(net.m),first,pages);
     }
     if(net.client<MESH_NET_CLIENTS){
@@ -384,9 +426,11 @@ int mesh_net_mem_alloc(void **pointer,size_t size){
     if(atomic_compare_exchange_strong_explicit(&memory[i].owner,&vacant,net.owner,memory_order_acq_rel,memory_order_relaxed))entry=memory+i;
   }
   if(!entry)return net_result(ENOSPC);
+  /* the record names its range only once claimed (pages last): a client gone before then leaks it, never another's */
+  atomic_store_explicit(&entry->pages,0,memory_order_release);
   uint32_t first=mesh_arena_claim(m,(uint32_t)pages,m->block,1);
   if(first==MESH_ABSENT){int error=errno;atomic_store_explicit(&entry->owner,0,memory_order_release);return net_result(error);}
-  entry->first=first;entry->pages=(uint32_t)pages;
+  entry->first=first;atomic_store_explicit(&entry->pages,(uint32_t)pages,memory_order_release);
   *pointer=mesh_at(m,first);
   return MESH_NET_SUCCESS;
 }
@@ -396,8 +440,8 @@ int mesh_net_mem_free(void *pointer){
   for(uint32_t i=0;i<MESH_NET_MEMORY;i++){
     uint64_t owner=net.owner;
     if(atomic_load_explicit(&memory[i].owner,memory_order_acquire)!=owner || mesh_at(net.m,memory[i].first)!=(unsigned char *)pointer)continue;
-    uint32_t first=memory[i].first,pages=memory[i].pages;
-    if(atomic_compare_exchange_strong_explicit(&memory[i].owner,&owner,0,memory_order_acq_rel,memory_order_relaxed))
+    const uint32_t first=memory[i].first,pages=atomic_exchange_explicit(&memory[i].pages,0,memory_order_acq_rel);
+    if(atomic_compare_exchange_strong_explicit(&memory[i].owner,&owner,0,memory_order_acq_rel,memory_order_relaxed) && pages)
       mesh_bits_clear(mesh_arena_bits(net.m),first,pages);
     return MESH_NET_SUCCESS;
   }
@@ -408,14 +452,6 @@ int mesh_net_window(void **base,size_t *bytes){
   *base=(char *)net.m+net.m->data_off;*bytes=(size_t)mesh_wire_bytes(net.m);
   return MESH_NET_SUCCESS;
 }
-void mesh_net_comm_counts(void *comm,uint64_t counts[4]){
-  struct mesh_net_comm *slot=net_slot(comm);
-  counts[0]=atomic_load_explicit(&slot->bytes,memory_order_relaxed);
-  counts[1]=atomic_load_explicit(&slot->completions,memory_order_relaxed);
-  counts[2]=atomic_load_explicit(&slot->credit_waits,memory_order_relaxed);
-  counts[3]=atomic_load_explicit(&slot->posted,memory_order_relaxed);
-}
-
 uint64_t mesh_net_stats_record(const uint64_t *client,uint32_t count){
   return net.m?mesh_stats_record(net.m,client,count,(uint32_t)getpid(),clock_gettime_nsec_np(CLOCK_UPTIME_RAW)):0;
 }
@@ -429,7 +465,11 @@ void mesh_net_stats_shape(uint64_t *evaluations,uint32_t *lag,size_t *entry){
 }
 int mesh_net_alive(void *comm){
   struct net_comm_handle *c=comm;
-  return c && atomic_load_explicit(&net_slot(c)->state,memory_order_acquire)==c->kind;
+  return c && net_state_of(c)==c->kind && !atomic_load_explicit(&net_slot(c)->error,memory_order_acquire);
+}
+uint64_t mesh_net_peer_owner(void *comm){
+  struct net_comm_handle *c=comm;
+  return c && net_state_of(c)!=MESH_NET_FREE?net_slot(c)->peer_owner:0;
 }
 uint64_t mesh_net_slot(void *comm){
   struct net_comm_handle *c=comm;
@@ -445,7 +485,20 @@ int mesh_net_vacated(uint64_t slot){
   return atomic_load_explicit(&comm->state,memory_order_acquire)==MESH_NET_FREE || comm->generation!=(uint32_t)slot || net_left(comm->link);
 }
 int mesh_net_departed(uint32_t node){
+  if(net.m && net_replaced())return 1;
   for(uint32_t i=0;net.m && i<net.m->links;i++)if(mesh_links(net.m)[i].peer==node && net_left(i))return 1;
+  return 0;
+}
+int mesh_net_exited(uint32_t node,uint64_t owner){
+  for(uint32_t i=0;net.m && owner && i<net.m->links;i++){
+    if(mesh_links(net.m)[i].peer!=node)continue;
+    struct mesh_net_link *l=mesh_net_links(net.m)+i;
+    const uint64_t reported=atomic_load_explicit(&l->clients_pairing,memory_order_acquire);
+    if(!reported || reported!=atomic_load_explicit(&l->pairing,memory_order_acquire))continue;
+    int present=0;
+    for(uint32_t c=0;c<MESH_NET_CLIENTS && !present;c++)present=atomic_load_explicit(&l->peer_clients[c],memory_order_acquire)==owner;
+    if(!present)return 1;
+  }
   return 0;
 }
 

@@ -11,7 +11,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 110u
+#define MESH_VERSION 111u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
@@ -95,6 +95,9 @@ struct hdr {
   _Atomic uint64_t evaluations;
   uint64_t stats_off,stats_stride;
   uint32_t stats_entries,stats_lag;
+  /* this node's bridge instance (its keep's): the same while a bridge takes the region its last left, another once
+     the region is made afresh (a client attached to an earlier region finds its name naming another instance) */
+  _Atomic uint64_t instance;
 };
 /* The communicator service (mesh-net.h, NCCL's network plugin ncclNet_v12_t): its tables in the region.
    A client claims a slot by CAS from MESH_NET_FREE and publishes it; the session thread of the slot's
@@ -133,18 +136,21 @@ struct mesh_net_request {
 };
 _Static_assert(sizeof(struct mesh_net_request)==64,"mesh_net_request");
 /* A comm: its link, its client (`owner`), the key a connect names, a receive end's listen, the other
-   end's comm on the peer bridge; `posted` the client's count of requests, the rest the bridge's counts. */
+   end's comm on the peer bridge and that end's client (`peer_owner`, from its CONNECT or ACCEPT); `posted` the
+   client's count of requests, the rest the bridge's counts.  `error` set while the comm is connected: its peer
+   closed it (its requests then fail), ESRCH where the peer's client had exited. */
 struct mesh_net_comm {
   _Alignas(64) _Atomic uint32_t state;
   uint32_t generation,link,listen,listen_generation,peer,peer_generation;
   _Atomic int32_t error;
-  uint64_t owner,key;
+  uint64_t owner,key,peer_owner;
   _Atomic uint64_t posted,bytes,completions,credit_waits;
   struct mesh_net_request requests[MESH_NET_REQUESTS];
 };
 /* A client's allocation of arena pages [first, first+pages) of the registered window
-   (mesh_net_mem_alloc), vacated by the bridge once its client has exited and no comm of it remains. */
-struct mesh_net_memory { _Alignas(16) _Atomic uint64_t owner; uint32_t first,pages; };
+   (mesh_net_mem_alloc), vacated by the bridge once its client has exited and no comm of it remains.  `pages` is
+   written last when it is made and zeroed first when it is released: 0 names no range. */
+struct mesh_net_memory { _Alignas(16) _Atomic uint64_t owner; uint32_t first; _Atomic uint32_t pages; };
 struct mesh_net_client { _Alignas(64) _Atomic uint64_t owner; };
 /* A link's live counts, both paths': SENDs that waited for their queue's frames (send_stalls), receives
    held back because their queue's frames or ring span were full, so the peer's SENDs into them waited
@@ -155,7 +161,12 @@ struct mesh_net_client { _Alignas(64) _Atomic uint64_t owner; };
    heartbeats sent and heard, the longest it went hearing nothing from its peer (ns), when it last heard
    (CLOCK_MONOTONIC ns: the peer's liveness), and its resumptions after a session lost (the sessions that
    resumed, the chunks SENT again, the chunks' RECVs posted again).  These are live, for the bridge and
-   liveness alone; everyone else reads them lagged (mesh_stats_read). */
+   liveness alone; everyone else reads them lagged (mesh_stats_read).
+     Membership, not statistics: `pairing`, the identity of the two bridge instances the session last paired (0:
+   never; another value: either bridge is another instance, whatever of the link's transfers had been kept is gone),
+   and the peer node's client processes as its bridge reported them in that pairing (`peer_clients`, a slot each;
+   complete once `clients_pairing` equals `pairing`): a process of the peer node absent from a complete report has
+   exited (mesh-net.h mesh_net_exited).  A live process keeps its slot, so a report being rewritten never drops it. */
 struct mesh_net_link {
   _Alignas(64) _Atomic uint32_t phase,chunk_frames;
   _Atomic int64_t code;
@@ -165,6 +176,7 @@ struct mesh_net_link {
   _Atomic uint64_t net_sends,net_send_bytes,net_receives,net_receive_bytes;
   _Atomic uint32_t wire_regions,padding;
   _Atomic uint64_t heartbeats_sent,heartbeats_heard,silence_ns,heard_ns,resumes,resends,reposts;
+  _Atomic uint64_t pairing,clients_pairing,peer_clients[MESH_NET_CLIENTS];
 };
 static inline struct mesh_net_link *mesh_net_links(struct hdr *m){return (struct mesh_net_link *)((char *)m+m->net_off);}
 static inline struct mesh_net_client *mesh_net_clients(struct hdr *m){return (struct mesh_net_client *)(mesh_net_links(m)+m->links);}
@@ -191,11 +203,13 @@ static inline struct mesh_stats_entry *mesh_stats_at(struct hdr *m,uint64_t eval
 }
 static inline struct mesh_net_link *mesh_net_links(struct hdr *m);
 /* An evaluation's end recorded (`client`: `count` counts, `pid` its process's; `ns` the time): entry n of the ring,
-   n the evaluations ended with this one; n. */
+   n the evaluations ended with this one (not written where another writer still holds the slot); n. */
 static inline uint64_t mesh_stats_record(struct hdr *m,const uint64_t *client,uint32_t count,uint32_t pid,uint64_t ns){
   const uint64_t n=atomic_fetch_add_explicit(&m->evaluations,1,memory_order_acq_rel)+1;
   struct mesh_stats_entry *e=mesh_stats_at(m,n);
-  atomic_store_explicit(&e->evaluation,0,memory_order_release);
+  /* the slot taken from the entry it held (its writer done), else left to the writer that holds it: one writer a slot */
+  uint64_t held=atomic_load_explicit(&e->evaluation,memory_order_acquire);
+  if(held==UINT64_MAX || !atomic_compare_exchange_strong_explicit(&e->evaluation,&held,UINT64_MAX,memory_order_acq_rel,memory_order_relaxed))return n;
   atomic_thread_fence(memory_order_release);
   e->ns=ns;e->links=m->links;e->pid=pid;
   for(uint32_t i=0;i<MESH_STATS_CLIENT;i++)e->client[i]=i<count?client[i]:0;
@@ -242,13 +256,14 @@ struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; uint32_t pad
 _Static_assert(sizeof(struct mesh_cancel_range)==32 && sizeof(struct mesh_cancellation)==32 && offsetof(struct mesh_cancellation,ranges)==32,"M12");
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M12 */
+/* Every word of the link's range not yet written set cancelled (UINT64_MAX), once: a landed word stays landed. */
 static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,uint32_t link){
   _Atomic uint64_t *words=(void *)((char *)m+cancel->ranges[link].offset);
-  for(uint64_t j=0;j<cancel->ranges[link].count;j++)
-    if(!atomic_load_explicit(words+j,memory_order_relaxed)){
+  for(uint64_t j=0;j<cancel->ranges[link].count;j++){
+    uint64_t none=0;
+    if(atomic_compare_exchange_strong_explicit(words+j,&none,UINT64_MAX,memory_order_acq_rel,memory_order_relaxed))
       atomic_store_explicit(&cancel->requested,1,memory_order_release);
-      atomic_store_explicit(words+j,UINT64_MAX,memory_order_release);
-    }
+  }
 }
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M26 */

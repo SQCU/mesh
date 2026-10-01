@@ -188,7 +188,6 @@ for name, arguments in (
         ('mesh_net_finalize', [P]), ('mesh_net_mem_alloc', [PP, Z]), ('mesh_net_mem_free', [P]), ('mesh_net_error', [])):
     function = getattr(LIB, name)
     function.restype, function.argtypes = C.c_int, arguments
-LIB.mesh_net_comm_counts.restype, LIB.mesh_net_comm_counts.argtypes = None, [P, C.POINTER(Q)]
 NET_RESULTS = {0: 'ncclSuccess', 2: 'ncclSystemError', 3: 'ncclInternalError', 4: 'ncclInvalidArgument',
                5: 'ncclInvalidUsage', 6: 'ncclRemoteError', 7: 'ncclInProgress'}
 NET_HANDLE_MAGIC, NET_HANDLE_BYTES = 0x4d4e4844, 128
@@ -296,13 +295,6 @@ class Net:
                 return size
             if time.monotonic() > deadline:
                 raise TimeoutError('request not done by its deadline')
-
-    @staticmethod
-    def counts(comm):
-        """The comm's bytes moved, requests completed, sends that waited for credit, requests posted."""
-        out = (Q * 4)()
-        LIB.mesh_net_comm_counts(comm, out)
-        return dict(zip(('bytes', 'completions', 'credit_waits', 'posted'), out))
 
     def close(self, comm, kind):
         net_check(getattr(LIB, f'mesh_net_close_{kind}')(comm))

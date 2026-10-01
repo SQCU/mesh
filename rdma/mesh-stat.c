@@ -77,11 +77,20 @@ int main(int argc,char **argv){
     struct mesh_net_comm *comm=mesh_net_comms(h)+i;
     uint32_t state=atomic_load(&comm->state);
     if(state==MESH_NET_FREE || state==MESH_NET_CLAIMED || state>MESH_NET_FAILED)continue;
-    printf("%s{\"comm\":%u,\"state\":\"%s\",\"link\":%u,\"peer\":%u,\"pid\":%u,\"key\":\"%016llx\",\"posted\":%llu,\"completions\":%llu,\"bytes\":%llu,\"credit_waits\":%llu,\"error\":%d}",
+    printf("%s{\"comm\":%u,\"state\":\"%s\",\"link\":%u,\"peer\":%u,\"pid\":%u,\"key\":\"%016llx\",\"error\":%d}",
       listed++?",":"",i,states[state],comm->link,comm->link<h->links?mesh_links(h)[comm->link].peer:UINT32_MAX,(uint32_t)comm->owner,(unsigned long long)comm->key,
-      (unsigned long long)atomic_load(&comm->posted),(unsigned long long)atomic_load(&comm->completions),(unsigned long long)atomic_load(&comm->bytes),
-      (unsigned long long)atomic_load(&comm->credit_waits),atomic_load(&comm->error));
+      atomic_load(&comm->error));
   }
-  printf("]}\n");
+  /* whether a client of the region is alive (its bridge, stopped, keeps the region for it): a communicator client's
+     process, one owning a comm, or the prepared program's */
+  int attached=0;
+  for(uint32_t i=0;i<MESH_NET_CLIENTS && !attached;i++){const uint64_t o=atomic_load(&mesh_net_clients(h)[i].owner);attached=o && (!kill((pid_t)(uint32_t)o,0) || errno==EPERM);}
+  for(uint32_t i=0;i<MESH_NET_COMMS && !attached;i++){
+    const uint32_t state=atomic_load(&mesh_net_comms(h)[i].state);const uint64_t o=mesh_net_comms(h)[i].owner;
+    attached=state!=MESH_NET_FREE && state!=MESH_NET_CLAIMED && o && (!kill((pid_t)(uint32_t)o,0) || errno==EPERM);
+  }
+  const uint64_t c=atomic_load(&h->client);
+  attached|=c && (!kill((pid_t)(uint32_t)c,0) || errno==EPERM);
+  printf("],\"attached\":%s}\n",attached?"true":"false");
   munmap(h,bytes); close(f); return readiness && !alive;
 }

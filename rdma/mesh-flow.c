@@ -95,13 +95,13 @@ struct mesh_link {
   struct mesh_trace *trace[2];
   size_t traced[2],trace_capacity[2];
   int ledger;
-  /* the link's live counts in the region (mesh.h mesh_net_link): the send thread's and the receive
-     thread's running totals over every program, each stored by its one writer */
+  /* the link's live counts in the region (mesh.h mesh_net_link), each added to by its one writer thread */
   struct mesh_net_link *counts;
-  uint64_t sends,send_bytes,receives,receive_bytes;
 };
 /* design/prepared-machine.md#M26 */
 static _Atomic(struct hdr *) control_memory;
+/* set by SIGQUIT (crash_bridge, below): this bridge ends as a crash would */
+static _Atomic int crashing;
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M26 */
 static void stop_bridge(int signal){
@@ -119,8 +119,12 @@ static void link_stop(struct mesh_link *link){
   kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
 }
 /* design/algorithm-sources.md#programcopy */
+/* The link's first error of its client's epoch (its code and domain, one version) and the link stopped. */
 static __attribute__((noinline)) void link_error(struct mesh_link *link,int64_t code,uint32_t domain){
-  struct mesh_port_info *port=&mesh_links(link->M)[link->index].port;port->code=code;port->domain=domain;
+  struct mesh_port_info *port=&mesh_links(link->M)[link->index].port;
+  int64_t none=0;
+  if(atomic_compare_exchange_strong_explicit(&port->code,&none,code?code:EIO,memory_order_relaxed,memory_order_relaxed))
+    atomic_store_explicit(&port->domain,domain,memory_order_relaxed);
   atomic_store_explicit(&port->phase,MESH_STOPPED,memory_order_relaxed);
   atomic_store_explicit(&port->prepared,link->client,memory_order_release);
   link_stop(link);
@@ -330,7 +334,7 @@ static int link_configure(void *state,int socket,uint64_t client){
   if(link->ledger)say("{\"trace_layout\":%u,\"rank\":%u,\"send_base\":%llu,\"receive_base\":%llu,\"invocations\":%u,\"send_capacity\":%zu,\"receive_capacity\":%zu}\n",
     link->index,m->node,(unsigned long long)(uintptr_t)link->publications,(unsigned long long)(uintptr_t)link->receive,
     invocations,link->trace_capacity[MESH_SEND],link->trace_capacity[MESH_RECEIVE]);
-  return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
+  return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,&link->provider);
 }
 
 /* design/prepared-machine.md#M04 */
@@ -397,8 +401,8 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
       int error=post((struct ibv_qp *)cell->pair,request,&bad);
       if(error){link_error(link,error<0?-error:error,1);return NULL;}
       stream->next=following;stream->remaining--;gate->requests++;stream->stalled=0;
-      atomic_store_explicit(&link->counts->sends,++link->sends,memory_order_relaxed);
-      atomic_store_explicit(&link->counts->send_bytes,link->send_bytes+=request->sg_list->length,memory_order_relaxed);
+      atomic_fetch_add_explicit(&link->counts->sends,1,memory_order_relaxed);
+      atomic_fetch_add_explicit(&link->counts->send_bytes,request->sg_list->length,memory_order_relaxed);
     }
     if(traced && observed && link->traced[MESH_SEND]<capacity)
       trace[link->traced[MESH_SEND]++]=(struct mesh_trace){(uintptr_t)cell,observed,posting,clock_gettime_nsec_np(CLOCK_UPTIME_RAW)};
@@ -441,8 +445,8 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
     struct prepared_receive *record=(void *)(uintptr_t)completion->wr_id;
     struct receive_ring *ring=link->rings+record->queue;
     ring->landed++;ring->bytes+=completion->byte_len;
-    atomic_store_explicit(&link->counts->receives,++link->receives,memory_order_relaxed);
-    atomic_store_explicit(&link->counts->receive_bytes,link->receive_bytes+=completion->byte_len,memory_order_relaxed);
+    atomic_fetch_add_explicit(&link->counts->receives,1,memory_order_relaxed);
+    atomic_fetch_add_explicit(&link->counts->receive_bytes,completion->byte_len,memory_order_relaxed);
     atomic_store_explicit(record->input,record->argument,memory_order_release);
     uint64_t published=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
     ring->outstanding-=record->frames;ring->completed=record->invocation;
@@ -471,7 +475,7 @@ static void link_close(struct mesh_link *link,int *control){
   if(link->network>=0){close(link->network);link->network=-1;}
   if(*control>=0)shutdown(*control,SHUT_RDWR);
   while(link->worker_count)pthread_join(link->workers[--link->worker_count],NULL);
-  if(link->cancel)mesh_cancel(link->M,link->cancel,link->index);
+  if(link->cancel && !crashing)mesh_cancel(link->M,link->cancel,link->index);
   /* design/prepared-machine.md#M27 */
   for(int d=0;d<2;d++){
     for(size_t i=0;i<link->traced[d];i++){
@@ -628,11 +632,16 @@ static void *link_run(void *argument){
    alive, takes them as they are, registers the window before its queue pairs, pairs as the same instance and
    resumes, so a restart is to its clients and its peers a lost session: late, never failed.  Kept state whose
    clients' processes are all gone is released, by the next bridge's start (made afresh) or by --release
-   (region_release), never by a clock.  A peer that pairs as another instance (its machine restarted, or its region
-   made afresh) fails the lost session's transfers and releases their state.  A bridge that leaves the mesh
-   (SIGUSR2) tells its peers (LEAVE): a membership change, which each end marks on the link (mesh.h MESH_LEFT)
-   before the transfers on it end failed, for the clients to plan on the nodes that stay; it exits 0, so no
-   successor is started. */
+   (region_release), never by a clock.  The keep is written in place as the session runs (its receives, the RECVs
+   posted for them as they land, each comm's side in an order a successor can complete: net_normalize), so a bridge
+   that ends without its stop (a crash; SIGQUIT ends one so, for a check) leaves its successor what a stop would.  A
+   peer that pairs as another instance (its machine restarted, or its region made afresh: --renew) fails the lost
+   session's transfers and releases their state; each pairing's identity (mesh.h mesh_net_link.pairing) and the peer
+   node's client processes (peer_clients) are its clients' membership: a peer client absent from its node's report has
+   exited.  A bridge that leaves the mesh (SIGUSR2) tells its peers (LEAVE): a membership change, which each end
+   marks on the link (mesh.h MESH_LEFT) before the transfers on it end failed, for the clients to plan on the nodes
+   that stay; it exits 0, so no successor is started, and keeps the region for its clients where any is attached:
+   a bridge started on the node again takes it, pairs, and the clients are members again. */
 #define NET_PORT_OFFSET 1000
 /* a session's queue pairs; with the prepared program's, a link's are within the device's (mesh-verbs.h MESH_DEVICE_QPS) */
 #define NET_QUEUES 2
@@ -644,7 +653,8 @@ static void *link_run(void *argument){
 #define NET_NONE UINT32_MAX
 #define NET_DISCARD (UINT32_MAX-1)
 #define NET_HEARTBEAT_NS UINT64_C(200000000)
-enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT, NET_LINKS, NET_BETA, NET_RESUME, NET_LANDED, NET_LEAVE };
+enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT, NET_LINKS, NET_BETA, NET_RESUME, NET_LANDED, NET_LEAVE,
+       NET_CLIENTS, NET_RELEASED, NET_VOID };
 /* One control message.  CONNECT: `key` the listen it names, `from` the connecting comm.  ACCEPT: `from`
    the receiving comm made for `to`.  RTS: send request `sequence` of `from`, `size` its bytes,
    extent/phase where its registration regions end, flags 1 a held isend (mesh.h MESH_NET_HELD: announced
@@ -666,7 +676,12 @@ enum { NET_CONNECT=1, NET_ACCEPT, NET_RTS, NET_CREDIT, NET_CLOSE, NET_HEARTBEAT,
    only that the bytes left.  RESUME, as a lost session's transfers resume (net_resume): flags 0, the receiver
    asks whether request `sequence` of `to` goes on from `offset`, the bytes of it landed in order; flags 1, the
    sender's answer, `error` if it does not (the receiver's request then fails), else the receiver grants the
-   rest again.  LEAVE: the sender's bridge leaves the mesh; the session ends and nothing of it resumes. */
+   rest again.  LEAVE: the sender's bridge leaves the mesh; the session ends and nothing of it resumes.  CONNECT and
+   ACCEPT carry their comm's client in `offset` (the comm's peer_owner at the other end).  CLIENTS: slot `flags` of
+   the sender's node's client table holds `key` (0: none); the sender sends its whole table once a pairing begins and
+   whenever it changes, before any CONNECT or ACCEPT of a client it names, and the last slot completes it (mesh.h
+   peer_clients).  RELEASED: held isend `sequence` of `from` was released (its bytes written); VOID: it was not, its
+   comm closed first: the receiver's request ends on its bytes landing and one of the two, failed on VOID. */
 struct net_message { uint32_t kind,from,from_generation,to,to_generation,flags; int32_t tag,error; uint64_t key,sequence,size,extent,phase,offset; };
 _Static_assert(sizeof(struct net_message)==80,"net_message");
 /* A comm's bridge side, its link's session thread's alone: requests taken; a receive comm's requests
@@ -675,33 +690,46 @@ _Static_assert(sizeof(struct net_message)==80,"net_message");
    its session was lost: again); what is on the wire (`outstanding`), the close handshake, and a receive
    comm's `seen`, past the last sequence announced to it. */
 struct net_announce { uint64_t sequence,size,extent,phase; uint32_t held; };
+/* An announcement consumed (by sequence, a slot each): how it ended where its LANDED, its empty CREDIT or its
+   refusal can be lost with a session (`ended` 1 matched to a receive, 2 empty, 3 refused with `error`). */
+struct net_outcome { uint64_t sequence; uint32_t ended; int32_t error; };
 struct net_comm {
   uint32_t generation,outstanding,live,connect_sent,close_sent,peer_closed;
   uint64_t taken,matched,announce_head,announce_tail,seen;
   struct net_announce announced[MESH_NET_REQUESTS];
+  struct net_outcome outcome[MESH_NET_REQUESTS];
   uint64_t sent[MESH_NET_REQUESTS],again[MESH_NET_REQUESTS];
-  uint8_t phase[MESH_NET_REQUESTS];
+  uint8_t phase[MESH_NET_REQUESTS],released[MESH_NET_REQUESTS];
 };
 /* A granted chunk to SEND on its queue pair (comm NONE: a grant nobody holds, filled from the discard
    buffer), a matched message to receive (the ends' cut parameters e1/p1, e2/p2; the sender's comm and
    request to grant; resume, waiting for its sender's RESUME answer; again, what had been posted of it before
    its session was lost), and a posted RECV (its queue pair; landed, its completion taken). */
-struct net_send { uint32_t comm,generation,slot,mr,queue; uint64_t sequence,offset,length; };
-struct net_transfer { uint32_t comm,generation,slot,mr,peer,peer_generation,held,resume; uint64_t sequence,size,offset,cursor,landed,e1,p1,e2,p2,again; };
-struct net_chunk { uint32_t transfer,frames,queue,landed; uint64_t length; struct ibv_sge span; };
-/* What a link's session keeps past its bridge's process: the peer bridge's instance its last pairing exchanged
-   (`paired`), whether that session was lost with its transfers kept for the next pairing with it (`suspended`),
-   and its matched messages to receive, receive_head..receive_tail, each with the bytes of it landed in order
-   (net_suspend), receive_post the next to post. */
-struct net_kept { uint64_t paired; uint32_t suspended,receive_head,receive_post,receive_tail; struct net_transfer receives[NET_RECEIVES]; };
+struct net_send { uint32_t comm,generation,slot,mr,queue,voided; uint64_t sequence,offset,length; };
+/* `held`: a held isend's message, which ends once landed and released (`released` 1) or voided (2: failed) */
+struct net_transfer { uint32_t comm,generation,slot,mr,peer,peer_generation,held,resume,released,padding; uint64_t sequence,size,offset,cursor,landed,e1,p1,e2,p2,again; };
+/* A posted RECV: its transfer (NET_NONE: the discard buffer), frames, queue pair, whether it landed, its bytes and
+   where in its transfer they go (`at`). */
+struct net_chunk { uint32_t transfer,frames,queue,landed; uint64_t length,at; };
+#define NET_CHUNKS 8192
+/* What a link's session keeps past its bridge's process, written in place as the session runs, so that a successor
+   finds it current however the last bridge ended (a crash included): the peer bridge's instance its last pairing
+   exchanged (`paired`), whether that session was lost with its transfers kept for the next pairing with it
+   (`suspended`), its matched messages to receive, receive_head..receive_tail (receive_post the next to post), and the
+   RECVs posted for them and not yet retired, chunk_head..chunk_tail, each marked as it lands: a message's bytes landed
+   in order are the least start of its chunks not landed (net_rewind). */
+struct net_kept { uint64_t paired; uint32_t suspended,receive_head,receive_post,receive_tail,chunk_head,chunk_tail;
+  struct net_transfer receives[NET_RECEIVES]; struct net_chunk chunks[NET_CHUNKS]; };
 /* The bridge's state of the communicator service beside the region (<region>.keep), which outlives the bridge's
    process as the region does: this node's bridge instance (drawn when the keep is made: a peer pairing again with
    the instance it lost resumes the lost session's transfers, another instance's pairing fails them), each comm's
    bridge side and each link's session's kept state.  A bridge takes the keep its last one left where the region
    is this configuration's (the same geometry, node and links), else makes both afresh. */
 #define NET_KEEP_MAGIC 0x4b454550u
-#define NET_KEEP_VERSION 1u
-struct net_keep { uint32_t magic,version,links,node; uint64_t region,instance; struct net_comm comms[MESH_NET_COMMS]; struct net_kept kept[]; };
+#define NET_KEEP_VERSION 2u
+/* `renew` (mesh-flow --renew): the next bridge on the region makes region, keep and link table afresh, as after the
+   node restarted (a new instance; the clients attached to these are left on them). */
+struct net_keep { uint32_t magic,version,links,node; uint64_t region,instance; _Atomic uint32_t renew,padding; struct net_comm comms[MESH_NET_COMMS]; struct net_kept kept[]; };
 static struct net_keep *net_keep;
 static struct net_comm *net_comms;
 static char net_keep_name[80];
@@ -727,21 +755,25 @@ static struct net_keep *net_keep_open(const char *region,uint32_t links,uint32_t
   }
   return k;
 }
+/* The identity of a pairing of bridge instances a and b, in either order (mesh.h mesh_net_link.pairing; never 0). */
+static uint64_t net_mix(uint64_t x){
+  x+=UINT64_C(0x9e3779b97f4a7c15);x=(x^(x>>30))*UINT64_C(0xbf58476d1ce4e5b9);x=(x^(x>>27))*UINT64_C(0x94d049bb133111eb);return x^(x>>31);
+}
+static uint64_t net_pairing(uint64_t a,uint64_t b){const uint64_t p=net_mix(a<b?a:b)^net_mix((a<b?b:a)+1);return p?p:1;}
 /* The SENDs outstanding are all on `send_queue` (send_posted less send_retired: its frames, within one queue
-   pair's send_capacity); the RECVs posted and not yet taken are receive_chunk_head..tail in posting order
-   (at most receive_requests, the completion queue's entries less one), each queue pair's frames of them
-   within receive_capacity, the next posted on receive_queue while it has the frames. */
+   pair's send_capacity); the RECVs posted and not yet taken are the keep's chunk_head..chunk_tail in posting order
+   (at most receive_requests, the completion queue's entries less one, below NET_CHUNKS), each queue pair's frames
+   of them within receive_capacity, the next posted on receive_queue while it has the frames. */
 struct net_session {
   struct hdr *M;uint32_t index;struct mesh_verbs provider;struct mesh_net_link *counts;
   char service[16];pthread_t thread;int started,control,failed;
-  uint64_t chunk,send_posted,send_retired;uint32_t send_capacity,receive_capacity,receive_outstanding,chunk_slots;
+  uint64_t chunk,send_posted,send_retired;uint32_t send_capacity,receive_capacity,receive_outstanding;
   uint32_t send_queue,receive_queue,receive_requests,queue_frames[NET_QUEUES];
   struct net_send *sends;uint32_t send_head,send_post,send_tail;
   struct net_kept *k;
-  struct net_chunk *receive_chunks;uint32_t receive_chunk_head,receive_chunk_tail;
-  struct net_message *output;uint32_t output_head,output_tail;size_t output_partial;
+  struct net_message *output;uint32_t output_head,output_tail,void_flush;size_t output_partial;
   unsigned char input[sizeof(struct net_message)*64];size_t input_bytes;
-  struct { uint32_t from,generation; uint64_t key; } pending[MESH_NET_COMMS];uint32_t pending_count;
+  struct { uint32_t from,generation; uint64_t key,owner; } pending[MESH_NET_COMMS];uint32_t pending_count;
   int send_blocked,receive_blocked,send_held;
   uint64_t bell,scanned,reaped,strays,heard,said;
   /* resumption: the peer bridge's instance as this pairing exchanged it (the lost session's is kept: k), the drop
@@ -749,6 +781,8 @@ struct net_session {
      the link's peer left the mesh (its LEAVE heard: `peer_left`, or this bridge leaves) and no bridge has paired on
      it since */
   uint64_t instance,drops;int events,left,peer_left;
+  /* this pairing's identity (mesh.h mesh_net_link.pairing) and the node's client table as last sent to the peer */
+  uint64_t pairing,clients_sent[MESH_NET_CLIENTS];int clients_known;
   /* the link reports sent to the peer: link_news when last looked, each node's sequence sent */
   uint64_t news,*sent;
   /* the estimator's (-E, estimate_observe): the receives' busy period open (1; 2: a chunk of a held isend's
@@ -777,6 +811,12 @@ static void net_drop(int signal){(void)signal;atomic_fetch_add_explicit(&net_dro
 /* SIGUSR2: this bridge leaves the mesh (a membership change: every peer is told, LEAVE) and stops. */
 static _Atomic int leaving;
 static void leave_bridge(int signal){atomic_store(&leaving,1);stop_bridge(signal);}
+/* SIGQUIT: this bridge ends as a crash would, at its threads' next loop boundary: nothing suspended, nothing told to
+   its peers, nothing of the region or its keep written, the region left in place whatever is attached, and an exit
+   status that is not 0 (its supervisor starts the next).  Only the device is torn down (a bridge that does not
+   withdraw its registrations can wedge the RDMA provider: RDMA-RULES.md), so the successor finds exactly the keep a
+   crash leaves: what the running bridge wrote in place. */
+static void crash_bridge(int signal){atomic_store(&crashing,1);stop_bridge(signal);}
 #define NET_LINK_NODES (5*64)
 /* At exit the region's keep and link table are removed with it, unless kept for the next bridge (mesh-verbs.h
    `keeping`). */
@@ -787,6 +827,11 @@ static void link_table_down(void){
 }
 
 static uint64_t net_now(void){return clock_gettime_nsec_np(CLOCK_MONOTONIC);}
+static int net_dead(uint64_t owner);
+struct net_transfer;
+static int net_ended(const struct net_transfer *t);
+struct net_message;
+static void net_released(struct net_session *s,const struct net_message *message,uint32_t released);
 static void net_links_moved(void){
   atomic_fetch_add_explicit(&link_news,1,memory_order_release);
   for(uint32_t i=0;i<net_session_count;i++){
@@ -833,13 +878,14 @@ static void estimate_edit(struct mesh_link_contents *c,const void *argument){
    table; 1 where it was newer. */
 static int estimate_hold(uint32_t source,uint32_t observer,uint64_t sequence,float beta){
   if(!link_table || source>=link_table->nodes || observer>=link_table->nodes)return 0;
+  /* the table written under the same lock, so estimates are applied in their order */
   pthread_mutex_lock(&estimates_lock);
   struct estimate *e=estimates+(size_t)source*link_table->nodes+observer;
-  int newer=sequence>e->sequence;
-  if(newer){e->sequence=sequence;e->beta=beta;}
+  int newer=sequence>e->sequence,moved=0;
+  if(newer){e->sequence=sequence;e->beta=beta;moved=mesh_link_table_write(link_table,estimate_edit,&(struct set_beta){source,observer,beta});}
   pthread_mutex_unlock(&estimates_lock);
   if(!newer)return 0;
-  if(mesh_link_table_write(link_table,estimate_edit,&(struct set_beta){source,observer,beta}))net_links_moved();
+  if(moved)net_links_moved();
   atomic_fetch_add_explicit(&estimate_news,1,memory_order_release);
   return 1;
 }
@@ -971,6 +1017,34 @@ static void net_free(struct net_session *s,uint32_t index){
   net_comms[index].live=0;
   atomic_store_explicit(&comm->state,MESH_NET_FREE,memory_order_release);
 }
+/* A comm vacated with its requests not yet ended ended first (failed `error`: their completion words written). */
+static void net_vacate_comm(struct net_session *s,uint32_t index,int32_t error){
+  struct mesh_net_comm *comm=mesh_net_comms(s->M)+index;
+  for(uint32_t slot=0;slot<MESH_NET_REQUESTS;slot++){
+    const uint32_t r=atomic_load_explicit(&comm->requests[slot].state,memory_order_acquire);
+    if(r==MESH_NET_POSTED || r==MESH_NET_ACTIVE)net_finish(comm->requests+slot,error,0);
+  }
+  net_free(s,index);
+}
+/* An accepted comm its client has not taken (ACCEPTABLE) moved to `to`, unless its client's accept took it first:
+   whether it moved. */
+static int net_unaccepted(struct mesh_net_comm *comm,uint32_t to){
+  uint32_t acceptable=MESH_NET_ACCEPTABLE;
+  return atomic_compare_exchange_strong_explicit(&comm->state,&acceptable,to,memory_order_acq_rel,memory_order_acquire);
+}
+/* This node's client table sent to the peer where it changed since last sent this pairing (or `force`): every slot,
+   the last completing it (mesh.h peer_clients).  Before any CONNECT or ACCEPT naming a client, so the peer's table
+   holds that client before it learns of it. */
+static void net_publish_clients(struct net_session *s,int force){
+  uint64_t now[MESH_NET_CLIENTS];int changed=force || !s->clients_known;
+  for(uint32_t i=0;i<MESH_NET_CLIENTS;i++){
+    now[i]=atomic_load_explicit(&mesh_net_clients(s->M)[i].owner,memory_order_acquire);
+    changed|=now[i]!=s->clients_sent[i];
+  }
+  if(!changed)return;
+  for(uint32_t i=0;i<MESH_NET_CLIENTS;i++)net_emit(s,(struct net_message){.kind=NET_CLIENTS,.flags=i,.key=now[i]});
+  memcpy(s->clients_sent,now,sizeof now);s->clients_known=1;
+}
 static void net_refuse(struct net_session *s,const struct net_message *rts,int32_t error){
   net_emit(s,(struct net_message){.kind=NET_CREDIT,.to=rts->from,.to_generation=rts->from_generation,.from=rts->to,.from_generation=rts->to_generation,
     .sequence=rts->sequence,.error=error});
@@ -997,21 +1071,31 @@ static void net_match(struct net_session *s,uint32_t index){
       net_finish(request,ECONNRESET,0);state->phase[slot]=0;state->matched++;continue;
     }
     if(s->k->receive_tail-s->k->receive_head>=NET_RECEIVES)break;
-    struct net_announce a=state->announced[state->announce_head++%MESH_NET_REQUESTS];
+    struct net_announce a=state->announced[state->announce_head%MESH_NET_REQUESTS];
     struct net_message credit={.kind=NET_CREDIT,.to=comm->peer,.to_generation=comm->peer_generation,.from=index,.from_generation=comm->generation,.sequence=a.sequence};
-    state->matched++;
-    if(a.size>request->size){credit.error=EMSGSIZE;net_emit(s,credit);net_finish(request,EMSGSIZE,0);state->phase[slot]=0;continue;}
-    if(!a.size){
-      net_emit(s,credit);net_finish(request,0,0);state->phase[slot]=0;
-      atomic_fetch_add_explicit(&comm->completions,1,memory_order_relaxed);
+    struct net_outcome *outcome=state->outcome+a.sequence%MESH_NET_REQUESTS;
+    if(a.size>request->size || !a.size){
+      *outcome=(struct net_outcome){a.sequence,a.size?3:2,a.size?EMSGSIZE:0};
+      atomic_signal_fence(memory_order_seq_cst);
+      state->announce_head++;state->matched++;
+      if(a.size)credit.error=EMSGSIZE;
+      net_emit(s,credit);net_finish(request,a.size?EMSGSIZE:0,0);state->phase[slot]=0;
+      if(!a.size)atomic_fetch_add_explicit(&comm->completions,1,memory_order_relaxed);
       continue;
     }
     uint64_t extent,phase;
     net_geometry(s,request->offset,&extent,&phase);
-    s->k->receives[s->k->receive_tail++%NET_RECEIVES]=(struct net_transfer){.comm=index,.generation=comm->generation,.slot=slot,.mr=request->mr,
-      .peer=comm->peer,.peer_generation=comm->peer_generation,.held=a.held,.sequence=a.sequence,.size=a.size,.offset=request->offset,
-      .e1=extent,.p1=phase,.e2=a.extent,.p2=a.phase};
+    /* the receive kept before the announcement is consumed (a successor finds one, or both: net_normalize) */
+    s->k->receives[s->k->receive_tail%NET_RECEIVES]=(struct net_transfer){.comm=index,.generation=comm->generation,.slot=slot,.mr=request->mr,
+      .peer=comm->peer,.peer_generation=comm->peer_generation,.held=a.held!=0,.released=a.held==2?2:0,.sequence=a.sequence,.size=a.size,
+      .offset=request->offset,.e1=extent,.p1=phase,.e2=a.extent,.p2=a.phase};
+    atomic_signal_fence(memory_order_seq_cst);
+    s->k->receive_tail++;
+    atomic_signal_fence(memory_order_seq_cst);
+    *outcome=(struct net_outcome){a.sequence,1,0};
     state->phase[slot]=2;state->outstanding++;
+    atomic_signal_fence(memory_order_seq_cst);
+    state->announce_head++;state->matched++;
   }
 }
 /* The client's new requests on a connected comm, in its order: an isend is announced at once and is on
@@ -1021,31 +1105,46 @@ static void net_take(struct net_session *s,uint32_t index){
   struct mesh_net_comm *comm=mesh_net_comms(s->M)+index;struct net_comm *state=net_comms+index;
   uint32_t kind=atomic_load_explicit(&comm->state,memory_order_acquire);
   uint64_t posted=atomic_load_explicit(&comm->posted,memory_order_acquire);
+  /* each request's bridge side set before it is ACTIVE, and `taken` advanced last (a successor finds a request taken
+     or not: net_normalize) */
   while(state->taken<posted && !s->failed){
     uint32_t slot=(uint32_t)(state->taken%MESH_NET_REQUESTS);
     struct mesh_net_request *request=comm->requests+slot;
     if(atomic_load_explicit(&request->state,memory_order_acquire)!=MESH_NET_POSTED)break;
-    state->taken++;
-    atomic_store_explicit(&request->state,MESH_NET_ACTIVE,memory_order_relaxed);
-    state->phase[slot]=0;state->sent[slot]=0;state->again[slot]=0;
+    state->phase[slot]=0;state->sent[slot]=0;state->again[slot]=0;state->released[slot]=0;
     /* a completion word outside the window is refused, and never stored */
     const uint64_t word=request->completion,wire=mesh_wire_bytes(s->M);
     const int stray=word && (word-1>wire-8 || (word-1)%8);
     if(stray)request->completion=0;
-    int ordered=request->sequence==state->taken-1,valid=!stray && ordered && net_request_valid(s,request);
+    int ordered=request->sequence==state->taken,valid=!stray && ordered && net_request_valid(s,request);
     const uint32_t op=atomic_load_explicit(&request->op,memory_order_acquire);
     const int sending=op==MESH_NET_ISEND || op==MESH_NET_HELD;
-    if(op==MESH_NET_IFLUSH && kind==MESH_NET_RECV && ordered)continue;
-    if(!valid || sending!=(kind==MESH_NET_SEND) || (!sending && op!=MESH_NET_IRECV)){
-      net_finish(request,EINVAL,0);continue;
+    int32_t refused=0;
+    if(op==MESH_NET_IFLUSH && kind==MESH_NET_RECV && ordered){}
+    else if(!valid || sending!=(kind==MESH_NET_SEND) || (!sending && op!=MESH_NET_IRECV))refused=EINVAL;
+    else if(state->peer_closed && sending)refused=ECONNRESET;
+    else if(op==MESH_NET_IRECV)state->phase[slot]=1;
+    else {
+      uint64_t extent=0,phase=0;
+      if(request->size)net_geometry(s,request->offset,&extent,&phase);
+      net_emit(s,(struct net_message){.kind=NET_RTS,.to=comm->peer,.to_generation=comm->peer_generation,.from=index,.from_generation=comm->generation,
+        .flags=op==MESH_NET_HELD,.sequence=request->sequence,.size=request->size,.extent=extent,.phase=phase,.tag=request->tag});
+      state->phase[slot]=1;state->released[slot]=op==MESH_NET_HELD;state->outstanding++;
     }
-    if(state->peer_closed && sending){net_finish(request,ECONNRESET,0);continue;}
-    if(op==MESH_NET_IRECV){state->phase[slot]=1;continue;}
-    uint64_t extent=0,phase=0;
-    if(request->size)net_geometry(s,request->offset,&extent,&phase);
-    net_emit(s,(struct net_message){.kind=NET_RTS,.to=comm->peer,.to_generation=comm->peer_generation,.from=index,.from_generation=comm->generation,
-      .flags=op==MESH_NET_HELD,.sequence=request->sequence,.size=request->size,.extent=extent,.phase=phase,.tag=request->tag});
-    state->phase[slot]=1;state->outstanding++;
+    atomic_signal_fence(memory_order_seq_cst);
+    atomic_store_explicit(&request->state,MESH_NET_ACTIVE,memory_order_release);
+    if(refused)net_finish(request,refused,0);
+    atomic_signal_fence(memory_order_seq_cst);
+    state->taken++;
+  }
+  /* a held isend its client released (its bytes written) said to its receiver once: RELEASED */
+  for(uint32_t slot=0;kind==MESH_NET_SEND && slot<MESH_NET_REQUESTS && !s->failed;slot++){
+    struct mesh_net_request *request=comm->requests+slot;
+    if(state->released[slot]!=1 || atomic_load_explicit(&request->state,memory_order_acquire)!=MESH_NET_ACTIVE ||
+       atomic_load_explicit(&request->op,memory_order_acquire)!=MESH_NET_ISEND)continue;
+    net_emit(s,(struct net_message){.kind=NET_RELEASED,.to=comm->peer,.to_generation=comm->peer_generation,.from=index,.from_generation=comm->generation,
+      .sequence=request->sequence});
+    state->released[slot]=2;
   }
   if(kind!=MESH_NET_RECV)return;
   net_match(s,index);
@@ -1070,21 +1169,22 @@ static uint32_t net_listening(struct net_session *s,uint64_t key){
 }
 /* A connect meets its listen: a receive comm for the listen's client, ACCEPTABLE until the client's
    accept takes it, and the sender's comm told which comm receives it. */
-static int net_accept(struct net_session *s,uint32_t listen,uint32_t from,uint32_t generation){
+static int net_accept(struct net_session *s,uint32_t listen,uint32_t from,uint32_t generation,uint64_t owner){
   struct mesh_net_comm *comms=mesh_net_comms(s->M),*origin=comms+listen;
+  net_publish_clients(s,0);
   for(uint32_t i=0;i<MESH_NET_COMMS;i++){
     uint32_t vacant=MESH_NET_FREE;
     if(!atomic_compare_exchange_strong_explicit(&comms[i].state,&vacant,MESH_NET_CLAIMED,memory_order_acq_rel,memory_order_relaxed))continue;
     struct mesh_net_comm *comm=comms+i;
     comm->generation++;comm->link=s->index;comm->listen=listen;comm->listen_generation=origin->generation;
-    comm->peer=from;comm->peer_generation=generation;comm->owner=origin->owner;comm->key=origin->key;
+    comm->peer=from;comm->peer_generation=generation;comm->owner=origin->owner;comm->key=origin->key;comm->peer_owner=owner;
     atomic_store_explicit(&comm->error,0,memory_order_relaxed);
     atomic_store_explicit(&comm->posted,0,memory_order_relaxed);atomic_store_explicit(&comm->bytes,0,memory_order_relaxed);
     atomic_store_explicit(&comm->completions,0,memory_order_relaxed);atomic_store_explicit(&comm->credit_waits,0,memory_order_relaxed);
     for(uint32_t r=0;r<MESH_NET_REQUESTS;r++)atomic_store_explicit(&comm->requests[r].state,MESH_NET_IDLE,memory_order_relaxed);
     net_state(comm,i);
     atomic_store_explicit(&comm->state,MESH_NET_ACCEPTABLE,memory_order_release);
-    net_emit(s,(struct net_message){.kind=NET_ACCEPT,.to=from,.to_generation=generation,.from=i,.from_generation=comm->generation});
+    net_emit(s,(struct net_message){.kind=NET_ACCEPT,.to=from,.to_generation=generation,.from=i,.from_generation=comm->generation,.offset=comm->owner});
     return 1;
   }
   return 0;
@@ -1096,14 +1196,16 @@ static void net_connected(struct net_session *s,const struct net_message *messag
     uint32_t at=atomic_load_explicit(&comms[i].state,memory_order_acquire);
     if((at!=MESH_NET_ACCEPTABLE && at!=MESH_NET_RECV) || comms[i].link!=s->index || comms[i].peer!=message->from ||
        comms[i].peer_generation!=message->from_generation)continue;
-    net_emit(s,(struct net_message){.kind=NET_ACCEPT,.to=message->from,.to_generation=message->from_generation,.from=i,.from_generation=comms[i].generation});
+    net_publish_clients(s,0);
+    net_emit(s,(struct net_message){.kind=NET_ACCEPT,.to=message->from,.to_generation=message->from_generation,.from=i,.from_generation=comms[i].generation,
+      .offset=comms[i].owner});
     return;
   }
   uint32_t listen=net_listening(s,message->key);
-  if(listen!=NET_NONE && net_accept(s,listen,message->from,message->from_generation))return;
+  if(listen!=NET_NONE && net_accept(s,listen,message->from,message->from_generation,message->offset))return;
   if(listen==NET_NONE && s->pending_count<MESH_NET_COMMS){
     s->pending[s->pending_count].from=message->from;s->pending[s->pending_count].generation=message->from_generation;
-    s->pending[s->pending_count++].key=message->key;
+    s->pending[s->pending_count].owner=message->offset;s->pending[s->pending_count++].key=message->key;
     return;
   }
   net_emit(s,(struct net_message){.kind=NET_CLOSE,.to=message->from,.to_generation=message->from_generation,.from=NET_NONE,.error=ENOSPC});
@@ -1136,12 +1238,18 @@ static void net_closed(struct net_session *s,const struct net_message *message){
   uint32_t connecting=MESH_NET_CONNECTING;
   if(atomic_compare_exchange_strong_explicit(&comm->state,&connecting,MESH_NET_FAILED,memory_order_acq_rel,memory_order_relaxed))
     atomic_store_explicit(&comm->error,message->error?message->error:ECONNREFUSED,memory_order_relaxed);
+  /* a withdrawn connect's comm not yet taken by its client is never taken; a connected comm's client sees it closed
+     (ESRCH: its peer's client had exited) */
+  else if(message->to==NET_NONE)net_unaccepted(comm,MESH_NET_CLOSING);
+  int32_t none=0;
+  atomic_compare_exchange_strong_explicit(&comm->error,&none,message->error==ESRCH?ESRCH:ECONNRESET,memory_order_relaxed,memory_order_relaxed);
   state->peer_closed=1;
   if(atomic_load_explicit(&comm->state,memory_order_acquire)==MESH_NET_RECV)net_match(s,index);
   if(!state->close_sent){
     state->close_sent=1;
     if(message->from!=NET_NONE)
-      net_emit(s,(struct net_message){.kind=NET_CLOSE,.to=message->from,.to_generation=message->from_generation,.from=index,.from_generation=comm->generation});
+      net_emit(s,(struct net_message){.kind=NET_CLOSE,.to=message->from,.to_generation=message->from_generation,.from=index,.from_generation=comm->generation,
+        .error=net_dead(comm->owner)?ESRCH:0});
   }
 }
 /* RTS: queued for the receive comm's next irecv, or refused when that comm is gone or closing.  A comm
@@ -1152,22 +1260,30 @@ static void net_announced(struct net_session *s,const struct net_message *messag
   uint32_t at=comm?atomic_load_explicit(&comm->state,memory_order_acquire):MESH_NET_FREE;
   if(at!=MESH_NET_RECV && at!=MESH_NET_ACCEPTABLE){net_refuse(s,message,ECONNRESET);return;}
   struct net_comm *state=net_state(comm,message->to);
-  /* announced again as a session resumes: one this comm has seen is waiting for its irecv, or in progress (its
-     RESUME answers it), or landed (its LANDED, lost with the session, said again) */
-  if((message->flags&2) && message->sequence<state->seen){
+  /* announced again as a session resumes: one this comm holds is waiting for its irecv, or in progress (its RESUME
+     answers it), or ended, answered as it ended (its LANDED, empty CREDIT or refusal, lost with the session) */
+  if(message->flags&2){
     for(uint64_t a=state->announce_head;a!=state->announce_tail;a++)if(state->announced[a%MESH_NET_REQUESTS].sequence==message->sequence)return;
-    for(uint32_t r=s->k->receive_head;r!=s->k->receive_tail;r++){
-      const struct net_transfer *t=s->k->receives+r%NET_RECEIVES;
-      if(t->comm==message->to && t->generation==message->to_generation && t->sequence==message->sequence && t->landed<t->size)return;
+    if(message->sequence<state->seen){
+      for(uint32_t r=s->k->receive_head;r!=s->k->receive_tail;r++){
+        const struct net_transfer *t=s->k->receives+r%NET_RECEIVES;
+        if(t->comm==message->to && t->generation==message->to_generation && t->sequence==message->sequence && !net_ended(t))return;
+      }
+      const struct net_outcome *o=state->outcome+message->sequence%MESH_NET_REQUESTS;
+      const int known=o->sequence==message->sequence;
+      net_emit(s,(struct net_message){.kind=known && o->ended>=2?NET_CREDIT:NET_LANDED,.to=message->from,.to_generation=message->from_generation,
+        .from=message->to,.from_generation=message->to_generation,.sequence=message->sequence,.size=known && o->ended>=2?0:message->size,
+        .error=known && o->ended==3?o->error:0});
+      return;
     }
-    net_emit(s,(struct net_message){.kind=NET_LANDED,.to=message->from,.to_generation=message->from_generation,.from=message->to,
-      .from_generation=message->to_generation,.sequence=message->sequence,.size=message->size});
-    return;
   }
-  if(message->sequence>=state->seen)state->seen=message->sequence+1;
   if(state->announce_tail-state->announce_head>=MESH_NET_REQUESTS){s->failed=EPROTO;return;}
-  state->announced[state->announce_tail++%MESH_NET_REQUESTS]=(struct net_announce){message->sequence,message->size,message->extent,message->phase,
+  state->announced[state->announce_tail%MESH_NET_REQUESTS]=(struct net_announce){message->sequence,message->size,message->extent,message->phase,
     message->flags&1};
+  atomic_signal_fence(memory_order_seq_cst);
+  state->announce_tail++;
+  atomic_signal_fence(memory_order_seq_cst);
+  if(message->sequence>=state->seen)state->seen=message->sequence+1;
   uint64_t before=state->announce_head;
   net_match(s,message->to);
   if(state->announce_head==before){
@@ -1297,7 +1413,7 @@ static void net_receive(struct net_session *s,const struct net_message *message)
   case NET_ACCEPT: {
     struct mesh_net_comm *comm=net_comm_at(s,message->to,message->to_generation);
     if(!comm)break;
-    comm->peer=message->from;comm->peer_generation=message->from_generation;
+    comm->peer=message->from;comm->peer_generation=message->from_generation;comm->peer_owner=message->offset;
     uint32_t connecting=MESH_NET_CONNECTING;
     atomic_compare_exchange_strong_explicit(&comm->state,&connecting,MESH_NET_SEND,memory_order_acq_rel,memory_order_relaxed);
     break;
@@ -1311,6 +1427,13 @@ static void net_receive(struct net_session *s,const struct net_message *message)
   case NET_LANDED: net_landed(s,message); break;
   case NET_RESUME: net_resumed(s,message); break;
   case NET_LEAVE: s->peer_left=1;s->failed=ECONNRESET; break;
+  case NET_CLIENTS:
+    if(message->flags>=MESH_NET_CLIENTS)break;
+    atomic_store_explicit(&s->counts->peer_clients[message->flags],message->key,memory_order_release);
+    if(message->flags==MESH_NET_CLIENTS-1)atomic_store_explicit(&s->counts->clients_pairing,s->pairing,memory_order_release);
+    break;
+  case NET_RELEASED: net_released(s,message,1); break;
+  case NET_VOID: net_released(s,message,2); break;
   default: s->failed=EPROTO;
   }
 }
@@ -1324,6 +1447,13 @@ static int net_held(struct net_session *s,const struct net_send *chunk){
   if(!comm || atomic_load_explicit(&comm->state,memory_order_acquire)!=MESH_NET_SEND)return 0;
   return atomic_load_explicit(&comm->requests[chunk->slot].op,memory_order_acquire)==MESH_NET_HELD;
 }
+/* Whether a granted chunk is of a held isend voided (its comm closed before its client released it): SENT from the
+   discard buffer, its receiver's RECV met, once the VOID before it is written (void_flush). */
+static int net_voided(struct net_session *s,const struct net_send *chunk){
+  if(chunk->comm==NET_NONE)return 0;
+  struct mesh_net_comm *comm=net_comm_at(s,chunk->comm,chunk->generation);
+  return comm && comm->requests[chunk->slot].sequence==chunk->sequence && net_comms[chunk->comm].released[chunk->slot]==3;
+}
 /* Granted chunks are SENT in grant order, each on its queue pair while it has the frames and, on another
    queue pair than the SENDs outstanding, once those have completed (a held one stops them); matched
    messages' chunks are posted as RECVs in match order on a queue pair with the frames (the last one's while
@@ -1333,6 +1463,8 @@ static int net_post(struct net_session *s){
   while(s->send_post!=s->send_tail){
     struct net_send *chunk=s->sends+s->send_post%NET_SENDS;
     if(net_held(s,chunk)){s->send_held=1;break;}
+    if(!chunk->voided && net_voided(s,chunk)){chunk->voided=1;chunk->mr=NET_DISCARD;chunk->offset=0;}
+    if(chunk->voided && (int32_t)(s->output_head-s->void_flush)<0){s->send_held=1;break;}
     uint32_t frames=(uint32_t)((chunk->length+4095)/4096);
     if((chunk->queue!=s->send_queue && s->send_posted!=s->send_retired) || s->send_posted-s->send_retired+frames>s->send_capacity){
       if(!s->send_blocked){s->send_blocked=1;atomic_fetch_add_explicit(&s->counts->send_stalls,1,memory_order_relaxed);}
@@ -1352,16 +1484,20 @@ static int net_post(struct net_session *s){
     uint64_t next=net_cut(t->cursor,t->size,s->chunk,t->e1,t->p1,t->e2,t->p2),length=next-t->cursor;
     uint32_t frames=(uint32_t)((length+4095)/4096),q=s->receive_queue;
     for(uint32_t tried=1;tried<NET_QUEUES && s->queue_frames[q]+frames>s->receive_capacity;tried++)q=(q+1)%NET_QUEUES;
-    if(s->queue_frames[q]+frames>s->receive_capacity || s->receive_chunk_tail-s->receive_chunk_head>=s->receive_requests){
+    if(s->queue_frames[q]+frames>s->receive_capacity || s->k->chunk_tail-s->k->chunk_head>=s->receive_requests){
       if(!s->receive_blocked){s->receive_blocked=1;atomic_fetch_add_explicit(&s->counts->receive_stalls,1,memory_order_relaxed);}
       break;
     }
     s->receive_blocked=0;
     struct ibv_sge span=net_span(s,t->mr,t->offset+t->cursor,length);
-    struct ibv_recv_wr request={.wr_id=s->receive_chunk_tail,.sg_list=&span,.num_sge=1},*bad;
+    struct ibv_recv_wr request={.wr_id=s->k->chunk_tail,.sg_list=&span,.num_sge=1},*bad;
+    /* the chunk recorded in the keep before its RECV is posted, counted once posted */
+    s->k->chunks[s->k->chunk_tail%NET_CHUNKS]=(struct net_chunk){s->k->receive_post,frames,q,0,length,t->cursor};
+    atomic_signal_fence(memory_order_seq_cst);
     int error=ibv_post_recv(s->provider.queues[q].pair,&request,&bad);
     if(error)return error<0?-error:error;
-    s->receive_chunks[s->receive_chunk_tail++%s->chunk_slots]=(struct net_chunk){s->k->receive_post,frames,q,0,length,span};
+    s->k->chunk_tail++;
+    atomic_signal_fence(memory_order_seq_cst);
     if(t->cursor<t->again)atomic_fetch_add_explicit(&s->counts->reposts,1,memory_order_relaxed);
     if(estimating && !s->period){s->period=1;s->period_start=net_now();s->period_bytes=0;}
     if(estimating && t->held)s->period=2;
@@ -1378,6 +1514,41 @@ static int net_failed(struct net_session *s,const struct ibv_wc *done,const char
     s->index,kind,ibv_wc_status_str(done->status),done->status,done->vendor_err,(unsigned long long)done->wr_id,(unsigned long long)expected,done->byte_len,
     (unsigned long long)span.addr,span.length,span.lkey,mr,transfer);
   return EIO;
+}
+/* Whether a message to receive has ended: every byte landed and, a held isend's, released or voided. */
+static int net_ended(const struct net_transfer *t){return t->landed>=t->size && (!t->held || t->released==3);}
+/* A message every byte of which has landed ends (its sender told: LANDED), a held isend's once its sender said it
+   was released (or failed, voided); until then it waits, landed, for RELEASED or VOID (net_released). */
+static void net_landing(struct net_session *s,struct net_transfer *t){
+  if(t->released==3 || t->landed<t->size || (t->held && !t->released))return;
+  const int voided=t->released==2;
+  struct mesh_net_comm *comm=net_comm_at(s,t->comm,t->generation);
+  if(comm){
+    struct net_comm *state=net_state(comm,t->comm);
+    if(voided)state->outcome[t->sequence%MESH_NET_REQUESTS]=(struct net_outcome){t->sequence,3,ECONNRESET};
+    net_end(s,comm,state,t->slot,voided?ECONNRESET:0,voided?0:t->size);
+  }
+  t->released=3;
+  net_emit(s,(struct net_message){.kind=voided?NET_CREDIT:NET_LANDED,.to=t->peer,.to_generation=t->peer_generation,.from=t->comm,.from_generation=t->generation,
+    .sequence=t->sequence,.size=voided?0:t->size,.error=voided?ECONNRESET:0});
+}
+/* RELEASED or VOID for a held isend: its receive (or its announcement still waiting for an irecv) told, and ended
+   if every byte of it has landed. */
+static void net_released(struct net_session *s,const struct net_message *message,uint32_t released){
+  struct mesh_net_comm *comm=net_comm_at(s,message->to,message->to_generation);
+  if(!comm)return;
+  struct net_comm *state=net_state(comm,message->to);
+  for(uint64_t a=state->announce_head;a!=state->announce_tail;a++){
+    struct net_announce *announced=state->announced+a%MESH_NET_REQUESTS;
+    if(announced->sequence==message->sequence){announced->held=released==2?2:0;return;}
+  }
+  for(uint32_t r=s->k->receive_head;r!=s->k->receive_tail;r++){
+    struct net_transfer *t=s->k->receives+r%NET_RECEIVES;
+    if(t->comm!=message->to || t->generation!=message->to_generation || t->sequence!=message->sequence || t->released)continue;
+    t->released=released;
+    net_landing(s,t);
+    return;
+  }
 }
 /* SENDs complete in the order posted (their queue pairs' one at a time); RECVs complete in each queue pair's
    order, each taken as it lands and retired in posting order.  A SEND's completion retires its frames and counts
@@ -1406,11 +1577,13 @@ static int net_complete(struct net_session *s,int *busy,int lenient){
   if(count<0)return EIO;
   for(int i=0;i<count;i++){
     const uint32_t index=(uint32_t)done[i].wr_id;
-    struct net_chunk *chunk=s->receive_chunks+index%s->chunk_slots;
-    if(done[i].status || done[i].wr_id>UINT32_MAX || index-s->receive_chunk_head>=s->receive_chunk_tail-s->receive_chunk_head || chunk->landed ||
+    struct net_chunk *chunk=s->k->chunks+index%NET_CHUNKS;
+    if(done[i].status || done[i].wr_id>UINT32_MAX || index-s->k->chunk_head>=s->k->chunk_tail-s->k->chunk_head || chunk->landed ||
        done[i].byte_len!=chunk->length){
       if(lenient)continue;
-      return net_failed(s,done+i,"RECV",s->receive_chunk_head,chunk->span,chunk->transfer==NET_NONE?NET_DISCARD:s->k->receives[chunk->transfer%NET_RECEIVES].mr,chunk->transfer);
+      const struct net_transfer *of=chunk->transfer==NET_NONE?NULL:s->k->receives+chunk->transfer%NET_RECEIVES;
+      return net_failed(s,done+i,"RECV",s->k->chunk_head,of?net_span(s,of->mr,of->offset+chunk->at,chunk->length):net_span(s,NET_DISCARD,0,chunk->length),
+                        of?of->mr:NET_DISCARD,chunk->transfer);
     }
     chunk->landed=1;
     s->receive_outstanding-=chunk->frames;s->queue_frames[chunk->queue]-=chunk->frames;
@@ -1418,13 +1591,10 @@ static int net_complete(struct net_session *s,int *busy,int lenient){
     s->period_bytes+=chunk->length;
     struct net_transfer *t=s->k->receives+chunk->transfer%NET_RECEIVES;
     if((t->landed+=chunk->length)<t->size)continue;
-    struct mesh_net_comm *comm=net_comm_at(s,t->comm,t->generation);
-    if(comm)net_end(s,comm,net_state(comm,t->comm),t->slot,0,t->size);
-    net_emit(s,(struct net_message){.kind=NET_LANDED,.to=t->peer,.to_generation=t->peer_generation,.from=t->comm,.from_generation=t->generation,
-      .sequence=t->sequence,.size=t->size});
+    net_landing(s,t);
   }
-  while(s->receive_chunk_head!=s->receive_chunk_tail && s->receive_chunks[s->receive_chunk_head%s->chunk_slots].landed)s->receive_chunk_head++;
-  while(s->k->receive_head!=s->k->receive_post && s->k->receives[s->k->receive_head%NET_RECEIVES].landed==s->k->receives[s->k->receive_head%NET_RECEIVES].size)s->k->receive_head++;
+  while(s->k->chunk_head!=s->k->chunk_tail && s->k->chunks[s->k->chunk_head%NET_CHUNKS].landed)s->k->chunk_head++;
+  while(s->k->receive_head!=s->k->receive_post && net_ended(s->k->receives+s->k->receive_head%NET_RECEIVES))s->k->receive_head++;
   if(s->period && !s->receive_outstanding){if(s->period==1)estimate_observe(s,s->period_bytes,net_now()-s->period_start);s->period=0;}
   *busy|=count>0;
   return 0;
@@ -1481,7 +1651,7 @@ static void net_reap(struct net_session *s){
       held=at!=MESH_NET_FREE && at!=MESH_NET_CLAIMED && comms[c].owner==owner;
     }
     if(held)continue;
-    uint32_t first=memory[i].first,pages=memory[i].pages;
+    const uint32_t first=memory[i].first,pages=atomic_exchange_explicit(&memory[i].pages,0,memory_order_acq_rel);
     if(atomic_compare_exchange_strong_explicit(&memory[i].owner,&owner,0,memory_order_acq_rel,memory_order_relaxed) && pages)
       mesh_bits_clear(mesh_arena_bits(m),first,pages);
   }
@@ -1506,20 +1676,31 @@ static void net_close(struct net_session *s,uint32_t index){
       }
     }
     while(state->announce_head!=state->announce_tail){
-      struct net_announce a=state->announced[state->announce_head++%MESH_NET_REQUESTS];
+      struct net_announce a=state->announced[state->announce_head%MESH_NET_REQUESTS];
+      state->outcome[a.sequence%MESH_NET_REQUESTS]=(struct net_outcome){a.sequence,3,ECONNRESET};
+      state->announce_head++;
       net_emit(s,(struct net_message){.kind=NET_CREDIT,.to=comm->peer,.to_generation=comm->peer_generation,.from=index,.from_generation=comm->generation,
         .sequence=a.sequence,.error=ECONNRESET});
     }
+    /* a held isend its client never released: its receiver told (VOID) before its chunks go, from the discard buffer */
+    for(uint32_t slot=0;slot<MESH_NET_REQUESTS;slot++)
+      if(state->released[slot]==1 && atomic_load_explicit(&comm->requests[slot].state,memory_order_acquire)==MESH_NET_ACTIVE){
+        net_emit(s,(struct net_message){.kind=NET_VOID,.to=comm->peer,.to_generation=comm->peer_generation,.from=index,.from_generation=comm->generation,
+          .sequence=comm->requests[slot].sequence});
+        state->released[slot]=3;s->void_flush=s->output_tail;
+      }
     state->taken=state->matched=atomic_load_explicit(&comm->posted,memory_order_acquire);
+    const int32_t why=net_dead(comm->owner)?ESRCH:0;
     if(comm->peer!=NET_NONE)
-      net_emit(s,(struct net_message){.kind=NET_CLOSE,.to=comm->peer,.to_generation=comm->peer_generation,.from=index,.from_generation=comm->generation,.flags=1});
+      net_emit(s,(struct net_message){.kind=NET_CLOSE,.to=comm->peer,.to_generation=comm->peer_generation,.from=index,.from_generation=comm->generation,.flags=1,
+        .error=why});
     else if(state->connect_sent)
-      net_emit(s,(struct net_message){.kind=NET_CLOSE,.to=NET_NONE,.from=index,.from_generation=comm->generation,.key=comm->key,.flags=1});
+      net_emit(s,(struct net_message){.kind=NET_CLOSE,.to=NET_NONE,.from=index,.from_generation=comm->generation,.key=comm->key,.flags=1,.error=why});
     else state->peer_closed=1;
     for(uint32_t i=0;i<MESH_NET_COMMS;i++)
       if(atomic_load_explicit(&comms[i].state,memory_order_acquire)==MESH_NET_ACCEPTABLE && comms[i].link==s->index &&
          comms[i].listen==index && comms[i].listen_generation==comm->generation)
-        atomic_store_explicit(&comms[i].state,MESH_NET_CLOSING,memory_order_release);
+        net_unaccepted(comms+i,MESH_NET_CLOSING);
   }
   if(state->peer_closed && !state->outstanding)net_free(s,index);
 }
@@ -1533,13 +1714,14 @@ static void net_scan(struct net_session *s){
     struct net_comm *state=net_state(comm,i);
     if(at==MESH_NET_CONNECTING && !state->connect_sent){
       state->connect_sent=1;
-      net_emit(s,(struct net_message){.kind=NET_CONNECT,.to=NET_NONE,.from=i,.from_generation=comm->generation,.key=comm->key});
+      net_publish_clients(s,0);
+      net_emit(s,(struct net_message){.kind=NET_CONNECT,.to=NET_NONE,.from=i,.from_generation=comm->generation,.key=comm->key,.offset=comm->owner});
     }
     else if(at==MESH_NET_SEND || at==MESH_NET_RECV)net_take(s,i);
     else if(at==MESH_NET_CLOSING)net_close(s,i);
     else if(at==MESH_NET_LISTEN){
       for(uint32_t p=0;p<s->pending_count;){
-        if(s->pending[p].key==comm->key && net_accept(s,i,s->pending[p].from,s->pending[p].generation))s->pending[p]=s->pending[--s->pending_count];
+        if(s->pending[p].key==comm->key && net_accept(s,i,s->pending[p].from,s->pending[p].generation,s->pending[p].owner))s->pending[p]=s->pending[--s->pending_count];
         else p++;
       }
     }
@@ -1555,15 +1737,21 @@ static void net_lost(struct net_session *s,int32_t error){
     struct mesh_net_comm *comm=comms+i;
     uint32_t at=atomic_load_explicit(&comm->state,memory_order_acquire);
     if(at==MESH_NET_FREE || at==MESH_NET_CLAIMED || comm->link!=s->index)continue;
-    if(at==MESH_NET_ACCEPTABLE || at==MESH_NET_CLOSING){net_free(s,i);continue;}
+    /* an unaccepted comm vacated (unless its client's accept takes it first: then failed as connected) */
+    if(at==MESH_NET_ACCEPTABLE){if(net_unaccepted(comm,MESH_NET_CLAIMED)){net_vacate_comm(s,i,error);continue;}at=MESH_NET_RECV;}
+    if(at==MESH_NET_CLOSING){net_vacate_comm(s,i,error);continue;}
     for(uint32_t slot=0;slot<MESH_NET_REQUESTS;slot++){
       uint32_t r=atomic_load_explicit(&comm->requests[slot].state,memory_order_acquire);
       if(r==MESH_NET_POSTED || r==MESH_NET_ACTIVE)net_finish(comm->requests+slot,error,0);
     }
     net_comms[i].live=0;
     if(at==MESH_NET_SEND || at==MESH_NET_RECV){
+      /* failed unless its client closed it meanwhile (CLOSING: vacated) */
       atomic_store_explicit(&comm->error,error,memory_order_relaxed);
-      atomic_store_explicit(&comm->state,MESH_NET_FAILED,memory_order_release);
+      if(!atomic_compare_exchange_strong_explicit(&comm->state,&at,MESH_NET_FAILED,memory_order_acq_rel,memory_order_acquire)){
+        if(at==MESH_NET_CLOSING)net_vacate_comm(s,i,error);
+        continue;
+      }
       at=MESH_NET_FAILED;
     }
     if(at==MESH_NET_FAILED){
@@ -1578,23 +1766,27 @@ static void net_lost(struct net_session *s,int32_t error){
    socket's end, a drop request): its transfers are kept for the next pairing (net_resume).  The completions
    still queued are taken (what landed), and each receive goes back to the bytes of it landed in order, its
    chunks after them to be posted and granted again; the grants its sender held go with the session. */
-static void net_suspend(struct net_session *s){
-  for(int pass=0;pass<64;pass++){int busy=0;net_complete(s,&busy,1);if(!busy)break;}
-  for(uint32_t r=s->k->receive_head;r!=s->k->receive_tail;r++){
-    struct net_transfer *t=s->k->receives+r%NET_RECEIVES;
+/* Each receive of a lost session back to the bytes of it landed in order (its least chunk start not landed, else
+   its cursor), its chunks after them to be posted and granted again, and the RECVs forgotten: a session's state as
+   its next pairing resumes it.  It reads only the keep, so a successor applies it to what a crashed bridge left. */
+static void net_rewind(struct net_kept *k){
+  for(uint32_t r=k->receive_head;r!=k->receive_tail;r++){
+    struct net_transfer *t=k->receives+r%NET_RECEIVES;
     if(t->landed>=t->size)continue;
     uint64_t prefix=t->cursor;
-    for(uint32_t c=s->receive_chunk_head;c!=s->receive_chunk_tail;c++){
-      const struct net_chunk *k=s->receive_chunks+c%s->chunk_slots;
-      if(k->transfer!=r || k->landed)continue;
-      const uint64_t at=(uint64_t)(k->span.addr-(uintptr_t)s->provider.device->wire)-t->offset;
-      if(at<prefix)prefix=at;
+    for(uint32_t c=k->chunk_head;c!=k->chunk_tail;c++){
+      const struct net_chunk *chunk=k->chunks+c%NET_CHUNKS;
+      if(chunk->transfer==r && !chunk->landed && chunk->at<prefix)prefix=chunk->at;
     }
     if(t->cursor>t->again)t->again=t->cursor;
     t->cursor=t->landed=prefix;
   }
-  s->k->receive_post=s->k->receive_head;s->period=0;
-  s->k->suspended=1;
+  k->receive_post=k->receive_head;k->chunk_head=k->chunk_tail=0;
+  k->suspended=1;
+}
+static void net_suspend(struct net_session *s){
+  for(int pass=0;pass<64;pass++){int busy=0;net_complete(s,&busy,1);if(!busy)break;}
+  net_rewind(s->k);s->period=0;
 }
 /* A session's peer left the mesh (its LEAVE), or this bridge leaves it: a membership change, nothing of the
    session resumes.  Its queue pairs are down (nothing of it lands after), the link is marked left (mesh.h
@@ -1610,7 +1802,8 @@ static void net_vacate(struct net_session *s){
   struct mesh_net_comm *comms=mesh_net_comms(s->M);
   for(uint32_t i=0;i<MESH_NET_COMMS;i++){
     uint32_t at=atomic_load_explicit(&comms[i].state,memory_order_acquire);
-    if((at==MESH_NET_CLOSING || at==MESH_NET_ACCEPTABLE) && comms[i].link==s->index)net_free(s,i);
+    if(comms[i].link!=s->index)continue;
+    if(at==MESH_NET_CLOSING || (at==MESH_NET_ACCEPTABLE && net_unaccepted(comms+i,MESH_NET_CLAIMED)))net_vacate_comm(s,i,ENETDOWN);
   }
 }
 /* The session lost resumes on a pairing with the same peer instance.  Each receive in progress asks its
@@ -1653,6 +1846,11 @@ static void net_resume(struct net_session *s){
       if(request->size)net_geometry(s,request->offset,&extent,&phase);
       net_emit(s,(struct net_message){.kind=NET_RTS,.to=comm->peer,.to_generation=comm->peer_generation,.from=i,.from_generation=comm->generation,
         .flags=(op==MESH_NET_HELD)|2,.sequence=request->sequence,.size=request->size,.extent=extent,.phase=phase,.tag=request->tag});
+      /* a held isend's release, or its void, said again */
+      if(state->released[slot]>=2)
+        net_emit(s,(struct net_message){.kind=state->released[slot]==2?NET_RELEASED:NET_VOID,.to=comm->peer,.to_generation=comm->peer_generation,
+          .from=i,.from_generation=comm->generation,.sequence=request->sequence});
+      if(state->released[slot]==3)s->void_flush=s->output_tail;
     }
   }
   atomic_fetch_add_explicit(&s->counts->resumes,1,memory_order_relaxed);
@@ -1661,8 +1859,9 @@ static void net_reset(struct net_session *s){
   s->send_posted=s->send_retired=0;s->receive_outstanding=0;
   s->send_head=s->send_post=s->send_tail=0;
   if(!s->k->suspended)s->k->receive_head=s->k->receive_post=s->k->receive_tail=0;
-  s->receive_chunk_head=s->receive_chunk_tail=0;s->send_queue=s->receive_queue=0;memset(s->queue_frames,0,sizeof s->queue_frames);
-  s->output_head=s->output_tail=0;s->output_partial=s->input_bytes=0;s->failed=0;s->send_blocked=s->receive_blocked=0;
+  s->k->chunk_head=s->k->chunk_tail=0;s->send_queue=s->receive_queue=0;memset(s->queue_frames,0,sizeof s->queue_frames);
+  s->output_head=s->output_tail=s->void_flush=0;s->output_partial=s->input_bytes=0;s->failed=0;s->send_blocked=s->receive_blocked=0;
+  s->clients_known=0;
 }
 /* The session's configuration, between RTR and RTS: a priming RECV posted on each queue pair into the
    device's discard buffer, then each end's queue capacities exchanged, so that neither end SENDs before
@@ -1675,24 +1874,24 @@ static int net_configure(void *argument,int socket,uint64_t client){
     s->send_capacity=MIN(s->send_capacity,s->provider.queues[q].send_capacity);
     s->receive_capacity=MIN(s->receive_capacity,s->provider.queues[q].receive_capacity);
   }
-  s->receive_requests=(uint32_t)s->provider.completion->cqe-1;
-  /* a power of two past the RECVs posted, so the ring's indices wrap with their counters */
-  for(s->chunk_slots=1;s->chunk_slots<=s->receive_requests;)s->chunk_slots*=2;
-  free(s->receive_chunks);s->receive_chunks=calloc(s->chunk_slots,sizeof *s->receive_chunks);
+  /* the RECVs posted at once: the completion queue's entries less one, within the keep's ring (NET_CHUNKS, a power
+     of two, so its indices wrap with their counters) */
+  s->receive_requests=MIN((uint32_t)s->provider.completion->cqe-1,NET_CHUNKS-1);
   if(!s->sends)s->sends=calloc(NET_SENDS,sizeof *s->sends);
   if(!s->output)s->output=calloc(NET_OUTPUT,sizeof *s->output);
-  if(!s->receive_chunks || !s->sends || !s->output){errno=ENOMEM;return -1;}
+  if(!s->sends || !s->output){errno=ENOMEM;return -1;}
   struct ibv_sge span=net_span(s,NET_DISCARD,0,NET_PRIME);
   for(uint32_t q=0;q<NET_QUEUES;q++){
-    struct ibv_recv_wr prime={.wr_id=s->receive_chunk_tail,.sg_list=&span,.num_sge=1},*bad;
+    struct ibv_recv_wr prime={.wr_id=s->k->chunk_tail,.sg_list=&span,.num_sge=1},*bad;
+    s->k->chunks[s->k->chunk_tail%NET_CHUNKS]=(struct net_chunk){NET_NONE,1,q,0,NET_PRIME,0};
     int error=ibv_post_recv(s->provider.queues[q].pair,&prime,&bad);
     if(error){errno=error<0?-error:error;return -1;}
-    s->receive_chunks[s->receive_chunk_tail++%s->chunk_slots]=(struct net_chunk){NET_NONE,1,q,0,NET_PRIME,span};
+    s->k->chunk_tail++;
     s->queue_frames[q]=1;s->receive_outstanding++;
   }
   /* the capacities, and each bridge's instance (a pairing with the instance lost resumes: net_resume) */
   uint32_t mine[4]={s->send_capacity,s->receive_capacity,(uint32_t)net_keep->instance,(uint32_t)(net_keep->instance>>32)},peer[4];
-  if(exchange(socket,mine,peer,sizeof mine,sizeof peer,s->M,client,s->provider.deadline))return -1;
+  if(exchange(socket,mine,peer,sizeof mine,sizeof peer,s->M,client,&s->provider))return -1;
   s->instance=peer[2]|(uint64_t)peer[3]<<32;
   uint32_t least=MIN(MIN(mine[0],mine[1]),MIN(peer[0],peer[1])),frames=MIN(NET_CHUNK_FRAMES,least/2);
   s->chunk=(uint64_t)(frames?frames:1)*4096;
@@ -1743,12 +1942,14 @@ static void net_serve(struct net_session *s){
     if(estimating)estimate_ripen(s);
     uint64_t estimated=atomic_load_explicit(&estimate_news,memory_order_acquire);
     if(estimates && estimated!=s->estimate_seen){s->estimate_seen=estimated;net_publish_estimates(s);}
-    if(bell!=s->bell || now-s->scanned>1000000){busy|=bell!=s->bell;s->bell=bell;s->scanned=now;net_scan(s);}
+    if(bell!=s->bell || now-s->scanned>1000000){busy|=bell!=s->bell;s->bell=bell;s->scanned=now;net_publish_clients(s,0);net_scan(s);}
     if(now-s->reaped>500000000){s->reaped=now;net_reap(s);}
+    /* what the scan said (a release before its bytes) written before the SENDs are posted */
+    if(!s->failed && (error=net_flush(s)))s->failed=error;
     if(!s->failed && (error=net_post(s)))s->failed=error;
     if(!s->failed && (error=net_flush(s)))s->failed=error;
     if(busy)last=now;
-    int flight=s->send_head!=s->send_post || (s->send_post!=s->send_tail && !s->send_held) || s->receive_chunk_head!=s->receive_chunk_tail ||
+    int flight=s->send_head!=s->send_post || (s->send_post!=s->send_tail && !s->send_held) || s->k->chunk_head!=s->k->chunk_tail ||
       s->output_head!=s->output_tail;
     if(!busy && !flight && now-last>2000000)
       os_sync_wait_on_address_with_timeout(&s->counts->doorbell,bell,sizeof bell,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
@@ -1782,13 +1983,19 @@ static void *net_session_run(void *argument){
     __atomic_store_n(&mesh_links(m)[s->index].bandwidth,s->provider.bandwidth,__ATOMIC_RELAXED);
     atomic_store_explicit(&s->counts->code,0,memory_order_relaxed);
     atomic_fetch_add_explicit(&s->counts->sessions,1,memory_order_relaxed);
+    /* the pairing's identity, then this node's clients, the first the peer hears */
+    s->pairing=net_pairing(net_keep->instance,s->instance);
+    atomic_store_explicit(&s->counts->pairing,s->pairing,memory_order_release);
+    net_publish_clients(s,1);
+    /* a peer of another instance: its node's reports start again (its sequence may be below its predecessor's) */
+    if(s->k->paired && s->instance!=s->k->paired && link_table)mesh_link_table_forget(link_table,s->provider.peer);
     /* the session lost resumes with the same peer instance; another's pairing means the peer's side of it is gone */
     if(s->k->suspended){
       s->k->suspended=0;
       if(s->instance==s->k->paired){say("session link %u: resumed\n",s->index);net_resume(s);}
       else{
         say("session link %u: its peer paired as another instance: the lost session's transfers fail\n",s->index);
-        net_lost(s,ECONNRESET);s->k->receive_head=s->k->receive_post=s->k->receive_tail=0;
+        net_lost(s,ESTALE);s->k->receive_head=s->k->receive_post=s->k->receive_tail=0;
       }
     }
     s->k->paired=s->instance;s->drops=atomic_load_explicit(&net_drops,memory_order_relaxed);
@@ -1805,12 +2012,17 @@ static void *net_session_run(void *argument){
     }
     if(link_table && mesh_link_table_observe(link_table,s->provider.peer,1)>0)net_links_moved();
     net_serve(s);
-    /* a bridge that leaves says so last (its output flushed while the socket takes it) */
+    if(crashing){close(f);s->control=-1;while(!down_pair(&s->provider))poll(NULL,0,100);break;}
+    /* a bridge that leaves says so last: nothing of the session resumes, so what is queued is dropped (but a message
+       partly written, finished) and LEAVE is written whole, the socket blocking until it is or ends */
     if(leaving){
+      s->output_tail=s->output_head+(s->output_partial?1:0);
       net_emit(s,(struct net_message){.kind=NET_LEAVE});
-      for(int tries=0;tries<200 && s->output_head!=s->output_tail && !net_flush(s);tries++)poll(NULL,0,5);
+      const int flags=fcntl(f,F_GETFL);
+      if(flags>=0)fcntl(f,F_SETFL,flags&~O_NONBLOCK);
+      while(s->output_head!=s->output_tail && !net_flush(s)){}
     }
-    int32_t error=s->peer_left?ECONNRESET:leaving?ENETDOWN:stop?ECANCELED:s->failed?s->failed:EIO;
+    int32_t error=s->peer_left?EHOSTDOWN:leaving?ENETDOWN:stop?ECANCELED:s->failed?s->failed:EIO;
     if(s->peer_left || leaving)say("session link %u: %s\n",s->index,leaving?"this bridge leaves the mesh":"its peer's bridge left the mesh");
     else if(!stop)say("session down: link %u: %s\n",s->index,strerror(error));
     if(s->strays)say("session link %u: %llu grants no request held, filled from the discard buffer\n",s->index,(unsigned long long)s->strays);
@@ -1826,9 +2038,10 @@ static void *net_session_run(void *argument){
        and immediate re-pairing preceded the Sep 5 kernel panic (design/RDMA-KERNEL-RECOVERY.md) */
     if(!stop)net_nap(UINT64_C(3000000000));
   }
-  if(leaving && !s->left)net_leave(s,ENETDOWN);
   if(s->events>=0)close(s->events);
-  free(s->receive_chunks);free(s->sends);free(s->output);
+  if(crashing){free(s->sends);free(s->output);return NULL;}
+  if(leaving && !s->left)net_leave(s,ENETDOWN);
+  free(s->sends);free(s->output);
   atomic_store_explicit(&s->counts->phase,s->left?MESH_LEFT:MESH_STOPPED,memory_order_release);
   return NULL;
 }
@@ -1880,9 +2093,63 @@ static int region_release(const char *name){
   return 0;
 }
 
+/* --renew: region `name`'s keep marked so that the next bridge on it makes region, keep and link table afresh, as after
+   the node restarted (the bridge running on it goes on until it is stopped). */
+static int region_renew(const char *name){
+  char keep[80];snprintf(keep,sizeof keep,"%s.keep",name);
+  int fd=shm_open(keep,O_RDWR,0600);
+  if(fd<0){say("%s: no keep\n",name);return 1;}
+  struct net_keep *k=mmap(NULL,sizeof *k,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
+  close(fd);
+  if(k==MAP_FAILED || k->magic!=NET_KEEP_MAGIC || k->version!=NET_KEEP_VERSION){say("%s: not a keep of this version\n",name);if(k!=MAP_FAILED)munmap(k,sizeof *k);return 1;}
+  atomic_store(&k->renew,1);
+  say("%s: the next bridge on it makes it afresh (instance %016llx renewed)\n",name,(unsigned long long)k->instance);
+  munmap(k,sizeof *k);
+  return 0;
+}
+/* A successor's start on a kept region: every link's session suspended, its receives back to the bytes of each landed
+   in order (net_rewind: the next pairing resumes it with the same peer instance, or fails it with another), and each
+   comm's bridge side completed where its last bridge ended between two of its writes: a request made ACTIVE whose
+   `taken` had not moved (net_take), an announcement consumed whose receive was kept (net_match), and the requests on
+   the wire counted again from their phases. */
+static void net_normalize(struct hdr *m,uint32_t links){
+  for(uint32_t l=0;l<links;l++)net_rewind(net_keep->kept+l);
+  struct mesh_net_comm *comms=mesh_net_comms(m);
+  for(uint32_t i=0;i<MESH_NET_COMMS;i++){
+    struct mesh_net_comm *comm=comms+i;struct net_comm *state=net_comms+i;
+    const uint32_t at=atomic_load_explicit(&comm->state,memory_order_acquire);
+    if(at==MESH_NET_FREE || at==MESH_NET_CLAIMED || !state->live || state->generation!=comm->generation || comm->link>=links)continue;
+    const uint64_t posted=atomic_load_explicit(&comm->posted,memory_order_acquire);
+    for(;state->taken<posted;state->taken++){
+      const struct mesh_net_request *r=comm->requests+state->taken%MESH_NET_REQUESTS;
+      if(r->sequence!=state->taken || atomic_load_explicit(&r->state,memory_order_acquire)==MESH_NET_POSTED)break;
+    }
+    const struct net_kept *k=net_keep->kept+comm->link;
+    while(at==MESH_NET_RECV && state->announce_head!=state->announce_tail){
+      const struct net_announce *a=state->announced+state->announce_head%MESH_NET_REQUESTS;
+      int kept=0;
+      for(uint32_t r=k->receive_head;r!=k->receive_tail && !kept;r++){
+        const struct net_transfer *t=k->receives+r%NET_RECEIVES;
+        kept=t->comm==i && t->generation==comm->generation && t->sequence==a->sequence;
+      }
+      if(!kept)break;
+      state->outcome[a->sequence%MESH_NET_REQUESTS]=(struct net_outcome){a->sequence,1,0};
+      state->phase[state->matched%MESH_NET_REQUESTS]=2;
+      state->announce_head++;state->matched++;
+    }
+    state->outstanding=0;
+    for(uint32_t slot=0;slot<MESH_NET_REQUESTS;slot++){
+      const struct mesh_net_request *r=comm->requests+slot;
+      if(atomic_load_explicit(&r->state,memory_order_acquire)!=MESH_NET_ACTIVE || !state->phase[slot])continue;
+      const uint32_t op=atomic_load_explicit(&r->op,memory_order_acquire);
+      state->outstanding+=op!=MESH_NET_IRECV || state->phase[slot]==2;
+    }
+  }
+}
+
 /* design/algorithm-sources.md#programcopy */
 int main(int argc,char **argv){
-  const char *name=MESH_NAME;int me=0,layout=0,release=0;double pct=0;uint32_t table_nodes=0,lag=10;
+  const char *name=MESH_NAME;int me=0,layout=0,release=0,renew=0;double pct=0;uint32_t table_nodes=0,lag=10;
   uint64_t arena_pages=0,block_pages=0,table_rows=0,window_pages=0,orders=4096;
   uint32_t link_count=0,device_count=0,qps=getenv("MESH_QPS")?(uint32_t)atoi(getenv("MESH_QPS")):1;
   struct mesh_link *links=aligned_alloc(_Alignof(struct mesh_link),(size_t)argc*sizeof *links);
@@ -1913,6 +2180,7 @@ int main(int argc,char **argv){
     else if(!strcmp(argv[i],"-K") && i+1<argc){char *end;unsigned long k=strtoul(argv[++i],&end,10);if(*end || k>MESH_STATS/2)die("statistics lag (-K)");lag=(uint32_t)k;}
     else if(!strcmp(argv[i],"--layout"))layout=1;
     else if(!strcmp(argv[i],"--release"))release=1;
+    else if(!strcmp(argv[i],"--renew"))renew=1;
     else if(!strcmp(argv[i],"-s") && i+1<argc)name=argv[++i];
     else if(!strcmp(argv[i],"--link") && i+1<argc){
       struct mesh_link *link=&links[link_count];
@@ -1929,11 +2197,12 @@ int main(int argc,char **argv){
       if(net && *net)snprintf(session->service,sizeof session->service,"%s",net);
       else snprintf(session->service,sizeof session->service,"%ld",strtol(link->provider.service,NULL,10)+NET_PORT_OFFSET);
       session->index=link->index;session->provider=link->provider;session->provider.service=session->service;
-      session->provider.kind="session";session->provider.window=UINT64_C(3000000000);session->provider.magic=0x10000;
+      session->provider.kind="session";session->provider.magic=0x10000;
     }
     else die("unknown bridge option");
   }
   if(release)return region_release(name);
+  if(renew)return region_renew(name);
   if(me<0 || !isfinite(pct) || pct<0 || pct>100 || !arena_pages || !block_pages || arena_pages<block_pages || !qps || qps>MESH_QPS)die("bridge geometry");
   for(uint32_t d=0;d<device_count;d++){
     uint32_t pairs=0;
@@ -1954,6 +2223,7 @@ int main(int argc,char **argv){
   sigaction(SIGINT,&sa,NULL);sigaction(SIGTERM,&sa,NULL);sigaction(SIGHUP,&sa,NULL);signal(SIGPIPE,SIG_IGN);
   struct sigaction drop={0};drop.sa_handler=net_drop;drop.sa_flags=SA_RESTART;sigaction(SIGUSR1,&drop,NULL);
   struct sigaction leave={0};leave.sa_handler=leave_bridge;sigaction(SIGUSR2,&leave,NULL);
+  struct sigaction crash={0};crash.sa_handler=crash_bridge;sigaction(SIGQUIT,&crash,NULL);
   if(!table_nodes){
     table_nodes=(uint32_t)me+1;
     for(uint32_t i=0;i<link_count;i++)if(links[i].provider.peer>=table_nodes)table_nodes=links[i].provider.peer+1;
@@ -1968,12 +2238,19 @@ int main(int argc,char **argv){
   if(fd>=0){
     struct stat info;
     if(!fstat(fd,&info) && (uint64_t)info.st_size>=length)m=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
-    if(m!=MAP_FAILED && m->magic==MESH_MAGIC && !net_dead(atomic_load(&m->bridge_pid)))die("a bridge of this region is running");
-    const int same=m!=MAP_FAILED && region_same(m,&geometry,me,links,link_count),attached=same && net_attached(m);
+    /* the region claimed from its last bridge, dead (one bridge a region) */
+    uint64_t last=m!=MAP_FAILED && m->magic==MESH_MAGIC?atomic_load(&m->bridge_pid):0;
+    if(m!=MAP_FAILED && m->magic==MESH_MAGIC && ((last && !net_dead(last)) || !atomic_compare_exchange_strong(&m->bridge_pid,&last,(uint64_t)getpid())))
+      die("a bridge of this region is running");
+    const int same=m!=MAP_FAILED && region_same(m,&geometry,me,links,link_count) && m->stats_lag==lag,attached=same && net_attached(m);
     if(same && !attached)say("bridge node %d: no client of the region its last bridge left is alive: region, keep and link table made afresh\n",me);
     if(attached && (net_keep=net_keep_open(name,link_count,(uint32_t)me,length,0)) && !mesh_link_table_open(name,0,0,&link_table)){
       kept=link_table->nodes==table_nodes && link_table->node==(uint32_t)me;
       if(!kept){mesh_link_table_close(link_table);link_table=NULL;}
+      else if(atomic_load(&net_keep->renew)){
+        say("bridge node %d: the region its last bridge left is renewed: region, keep and link table made afresh, as after a restart\n",me);
+        mesh_link_table_close(link_table);link_table=NULL;kept=0;
+      }
     }
     if(!kept){
       if(net_keep){munmap(net_keep,net_keep_bytes(link_count));net_keep=NULL;}
@@ -1993,18 +2270,19 @@ int main(int argc,char **argv){
   net_comms=net_keep->comms;
   snprintf(link_table_region,sizeof link_table_region,"%s",name);
   atexit(link_table_down);
-  /* this bridge's reports' sequence starts past any an earlier bridge of its node sent: its start in ms */
+  /* this bridge's reports' sequence starts past any an earlier bridge of its node sent: its start in ms, and past the
+     kept table's (a clock stepped back); a peer meeting a new instance of this node takes its reports afresh */
   struct timespec started;clock_gettime(CLOCK_REALTIME,&started);
-  atomic_store(&mesh_link_reported(link_table)[me],((uint64_t)started.tv_sec*1000+(uint64_t)started.tv_nsec/1000000)<<20);
+  const uint64_t base=((uint64_t)started.tv_sec*1000+(uint64_t)started.tv_nsec/1000000)<<20,held=atomic_load(&mesh_link_reported(link_table)[me]);
+  atomic_store(&mesh_link_reported(link_table)[me],base>held?base:held+1);
   /* the estimates this bridge holds (every bridge applies and passes on its peers'), its own (-E) sequenced
      from its start as its reports are */
   if(!(estimates=calloc((size_t)table_nodes*table_nodes,sizeof *estimates)))die("link estimate allocation");
   estimate_node=(uint32_t)me;estimate_sequence=((uint64_t)started.tv_sec*1000+(uint64_t)started.tv_nsec/1000000)<<20;
   if(!kept){
-    *m=geometry;m->node=(uint32_t)me;m->version=MESH_VERSION;
+    *m=geometry;m->node=(uint32_t)me;m->version=MESH_VERSION;m->stats_lag=lag;atomic_store(&m->instance,net_keep->instance);
     for(uint32_t r=0;r<mesh_rows(m);r++)atomic_store_explicit(&mesh_page(m)[r].mapping,MESH_ABSENT,memory_order_relaxed);
   }
-  m->stats_lag=lag;
   struct mesh_wire wire={0};
   if(wire_map(&wire,m,fd))die("transport page aliases");
   close(fd);
@@ -2015,7 +2293,7 @@ int main(int argc,char **argv){
     struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,EV_ADD|EV_CLEAR,0,0,0,0,0);
     if(link->events<0 || kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))die("link control events");
     mesh_links(m)[i].peer=link->provider.peer;
-    link->counts=mesh_net_links(m)+i;
+    link->counts=mesh_net_links(m)+i;link->provider.left=&link->counts->phase;
     snprintf(mesh_links(m)[i].device,sizeof mesh_links(m)[i].device,"%s",link->provider.device->name);
     atomic_store(&mesh_links(m)[i].port.phase,MESH_PAIRING);
   }
@@ -2027,26 +2305,19 @@ int main(int argc,char **argv){
   /* design/prepared-machine.md#M26 */
   atomic_store_explicit(&control_memory,m,memory_order_relaxed);
   net_region=m;
-  atomic_store(&m->bridge_pid,(uint64_t)getpid());atomic_store(&m->port.phase,MESH_PAIRING);
+  if(!kept)atomic_store(&m->bridge_pid,(uint64_t)getpid());
+  atomic_store(&m->port.phase,MESH_PAIRING);
   __sync_synchronize();m->magic=MESH_MAGIC;
   say("bridge node %d: %u links, %u queue pairs per link, arena %llu pages, window %u pages, rows %u, orders %u\n",
     me,link_count,qps,(unsigned long long)mesh_arena_pages(m),m->wire_pages,m->rows,m->orders);
   if(kept)say("bridge node %d: the region its last bridge left taken as it is (instance %016llx)\n",me,(unsigned long long)net_keep->instance);
+  /* what the last bridge left, however it ended (stopped, or crashed: its keep is what it wrote in place) */
+  if(kept)net_normalize(m,link_count);
   for(uint32_t i=0;i<link_count;i++){
     sessions[i].M=m;sessions[i].counts=links[i].counts;sessions[i].provider.wire=&wire;sessions[i].k=net_keep->kept+i;
-    /* a session its last bridge did not suspend (it ended without its stop) resumes each receive from its start:
-       what of it landed in order is not known */
     struct net_kept *k=sessions[i].k;
-    if(kept && !k->suspended && k->receive_head!=k->receive_tail){
-      for(uint32_t r=k->receive_head;r!=k->receive_tail;r++){
-        struct net_transfer *t=k->receives+r%NET_RECEIVES;
-        if(t->landed>=t->size)continue;
-        if(t->cursor>t->again)t->again=t->cursor;
-        t->cursor=t->landed=0;
-      }
-      k->receive_post=k->receive_head;k->suspended=1;
-    }
-    if(kept)say("session link %u: %u receives kept, %s\n",i,k->receive_tail-k->receive_head,k->suspended?"suspended":"none in progress");
+    if(kept)say("session link %u: %u receives kept, suspended (resumed by the next pairing with instance %016llx)\n",i,k->receive_tail-k->receive_head,
+                (unsigned long long)k->paired);
     if(!(sessions[i].sent=calloc(table_nodes,sizeof *sessions[i].sent)))die("link report allocation");
     if(!(sessions[i].estimates_sent=calloc((size_t)table_nodes*table_nodes,sizeof *sessions[i].estimates_sent)))die("link estimate allocation");
   }
@@ -2070,6 +2341,8 @@ int main(int argc,char **argv){
     if(atomic_load_explicit(&m->client,memory_order_seq_cst)!=client || atomic_load_explicit(&m->configured,memory_order_seq_cst)!=client){atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);continue;}
     uint32_t started=0;
     for(uint32_t i=0;i<link_count;i++){
+      struct mesh_port_info *port=&mesh_links(m)[i].port;
+      atomic_store_explicit(&port->code,0,memory_order_relaxed);atomic_store_explicit(&port->domain,0,memory_order_relaxed);
       links[i].client=client;atomic_store_explicit(&links[i].progressing,1,memory_order_release);
     }
     int preparation=0;
@@ -2098,15 +2371,21 @@ int main(int argc,char **argv){
     atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);
   }
   for(uint32_t i=0;i<link_count;i++)if(sessions[i].started)pthread_join(sessions[i].thread,NULL);
-  /* the region, its keep and its link table kept for the next bridge where clients are attached and this bridge
-     does not leave the mesh; else removed at exit */
-  keeping=!atomic_load(&leaving) && net_attached(m);
-  if(keeping)say("bridge node %d: stopped with clients attached: the region kept for the next bridge\n",me);
+  /* a crash's end (SIGQUIT): the device torn down, nothing else, and no exit handler run (the region stays) */
+  if(atomic_load(&crashing)){
+    for(uint32_t i=0;i<device_count;i++)down_device(&devices[i]);
+    say("bridge node %d: ended as a crash (SIGQUIT): its keep as it stood\n",me);
+    _exit(EX_SOFTWARE);
+  }
+  /* the region, its keep and its link table kept where clients are attached, for the next bridge on it (one that left
+     the mesh too: its clients rejoin when a bridge returns on the region); else removed at exit */
+  keeping=net_attached(m);
+  if(keeping)say("bridge node %d: %s with clients attached: the region kept for the next bridge\n",me,atomic_load(&leaving)?"left the mesh":"stopped");
   /* The exit status says whether a successor is wanted, to a supervisor that starts one where it is not 0
-     (bin/mesh-bridge.sh: launchd's KeepAlive, SuccessfulExit false): EX_TEMPFAIL where the region is kept (a bridge
-     stopped with clients attached: they and its peers wait for the next, which takes it and resumes them); else 0
-     (no client waits: stopped without one, or it left the mesh; or its device's teardown failed, where a successor
-     opening the device could meet what this one still holds: RDMA-RULES.md). */
+     (bin/mesh-bridge.sh: launchd's KeepAlive, SuccessfulExit false): EX_TEMPFAIL where a bridge stopped with clients
+     attached (they and its peers wait for the next, which takes the region and resumes them); else 0 (no client
+     waits; or it left the mesh, its successor started only by whoever brings the node back; or its device's teardown
+     failed, where a successor opening the device could meet what this one still holds: RDMA-RULES.md). */
   for(uint32_t i=0;i<device_count;i++)if(!down_device(&devices[i])){say("verbs teardown failed: %s: no successor wanted\n",strerror(errno));return 0;}
   atomic_store_explicit(&m->device_client,0,memory_order_seq_cst);
   mesh_retired_release(m);
@@ -2124,5 +2403,5 @@ int main(int argc,char **argv){
   atomic_store(&m->port.phase,atomic_load(&leaving)?MESH_LEFT:MESH_STOPPED);
   atomic_store(&m->bridge_pid,0);
   atomic_store_explicit(&control_memory,NULL,memory_order_relaxed);
-  munmap(m,length);return status?status:keeping?EX_TEMPFAIL:0;
+  munmap(m,length);return status?status:keeping && !atomic_load(&leaving)?EX_TEMPFAIL:0;
 }
