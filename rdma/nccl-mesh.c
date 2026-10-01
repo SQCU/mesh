@@ -42,14 +42,19 @@ void nccl_mesh_release(void *object);
 void *nccl_mesh_command_buffer(void *queue);
 void *nccl_mesh_encoder(void *commandBuffer);
 void nccl_mesh_encoder_end(void *encoder);
-void nccl_mesh_commit_wait(void *commandBuffer,char *error,size_t size);
 void nccl_mesh_kernel(void *encoder,int k,void *to,uint64_t dst,void *from,uint64_t src,uint64_t n,int type,int op,int nranks,
-  uint64_t scalar,int published,void *other,uint64_t at);
-void nccl_mesh_copy(void *encoder,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received,int published);
-int nccl_mesh_post(void *encoder,void *rings,void *words,const uint64_t *list,size_t count,void **held);
-int nccl_mesh_wait(void *encoder,void *words,const uint64_t *list,size_t count,void **held);
-void nccl_mesh_publish(void *encoder,void *buffer,uint64_t at,uint64_t value);
+  uint64_t scalar,int published,void *other,uint64_t at,void *region,uint64_t giveup);
+void nccl_mesh_copy(void *encoder,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received,int published,
+  void *region,uint64_t giveup);
+int nccl_mesh_post(void *encoder,void *region,const uint64_t *list,uint64_t n,uint64_t entries,uint64_t step,uint64_t giveup,
+  uint64_t first,uint64_t polls,void **held);
+int nccl_mesh_wait(void *encoder,void *region,const uint64_t *list,uint64_t n,uint64_t entries,uint64_t step,uint64_t giveup,
+  uint64_t polls,void **held);
+void nccl_mesh_publish(void *encoder,void *region,uint64_t at,uint64_t value,uint64_t giveup);
+void nccl_mesh_clear(void *encoder,void *region,uint64_t giveup);
 void nccl_mesh_use(void *encoder,void *buffer);
+void nccl_mesh_on_completion(void *commandBuffer,void (*done)(void *,const char *),void *argument);
+void nccl_mesh_commit(void *commandBuffer);
 enum { KERNEL_COMBINE, KERNEL_PREMULTIPLY, KERNEL_POSTDIVIDE };
 
 #define STREAMS_DEFAULT 4
@@ -57,6 +62,7 @@ enum { KERNEL_COMBINE, KERNEL_PREMULTIPLY, KERNEL_POSTDIVIDE };
 #define CHUNK (UINT32_C(4)<<20)
 #define SLAB ((size_t)64<<20)
 #define KEPT 65536
+#define LANES 4096
 #define TAIL ((size_t)1<<20)
 #define UID_MAGIC 0x4d4e4353u
 
@@ -79,8 +85,10 @@ static struct {
   uint32_t links,streams;
   struct mesh_ring **rings;
   void *region;                 /* a Metal buffer over the whole region: the rings, the counters, the words */
-  struct mesh_section control;  /* counters (a word a ring), the rings' words (ENTRIES a ring), kept sequences, done words */
-  uint64_t control_at,kept_at,kept_next,done_at,done_next;
+  struct mesh_section control;  /* counters (a word a ring), the rings' words (ENTRIES a ring), kept sequences, lanes */
+  uint64_t control_at,kept_at,kept_next,lanes_at;
+  uint32_t lanes;               /* lanes given out: a stream's give-up words and done word, 32 bytes each */
+  uint64_t polls;               /* a GPU wait's bound (MESH_REMOTE_POLLS, 2^20 unset) */
   uint64_t extent;
   struct slab *slabs;
   struct allocation *allocations;
@@ -124,14 +132,16 @@ static ncclResult_t session(void){
   if(G.started)return ncclSuccess;
   struct hdr *m=region();
   uint64_t rings=(uint64_t)G.links*G.streams*2;
-  size_t bytes=(size_t)(rings*8+rings*ENTRIES*8+KEPT*8+4096*8);
+  size_t bytes=(size_t)(rings*8+rings*ENTRIES*8+KEPT*8+LANES*32);
   int status=mesh_section_create(&G.context,bytes,1,0,&G.control);
   if(status)return fail(ncclSystemError,"the control words: %s",strerror(status));
   unsigned char *control=mesh_section_address(&G.context,G.control,0);
   memset(control,0,bytes);
   G.control_at=region_offset(control);
   G.kept_at=G.control_at+rings*8+rings*ENTRIES*8;
-  G.done_at=G.kept_at+(uint64_t)KEPT*8;
+  G.lanes_at=G.kept_at+(uint64_t)KEPT*8;
+  const char *polls=getenv("MESH_REMOTE_POLLS");
+  G.polls=polls && strtoull(polls,NULL,10)?strtoull(polls,NULL,10):(uint64_t)1<<20;
   status=mesh_transfers_prepare(&G.context,1,1,1);
   if(status)return fail(ncclSystemError,"mesh_transfers_prepare: %s",strerror(status));
   G.rings=calloc(rings?rings:1,sizeof *G.rings);
@@ -217,11 +227,14 @@ static struct allocation *allocate(size_t bytes,uint64_t options,int owned){
   a->next=G.allocations;G.allocations=a;
   return a;
 }
+/* An allocation's pages given back; the library's own Metal buffer over them released (a caller's buffer is the
+   caller's: its deallocation brought us here). */
 static void allocation_free(struct allocation *a){
   struct allocation **p=&G.allocations;
   while(*p && *p!=a)p=&(*p)->next;
   if(*p)*p=a->next;
   window_give(a->slab,a->base);
+  if(!a->owned)nccl_mesh_release(a->buffer);
   free(a);
 }
 static void allocation_gone(void *argument){
@@ -384,25 +397,71 @@ static uint64_t chunk_count(uint64_t elements,size_t e,uint32_t j){
   return j==m?t:t<<(m-j-1);
 }
 
-/* A message of a program: its ring, its kept sequence's slot, its call, the operand range it moves (byte offsets
-   in the call's operand: a SEND's reads, a COPY's writes; a REDUCE's lands in scratch, its combine writes the
-   range), whether its word has been waited for. */
+/* ---- programs ----
+   A group's program is a list of ops, built once (build_group) and encoded into a serial compute encoder from any
+   op on (emit): a wait that reached its bound left its stream's give-up flag set with its op's step, every op after
+   it returned at once, and the program is encoded again from that op (a post from the record it stopped at). */
+enum { OP_KERNEL, OP_COPY, OP_POST, OP_WAIT };
+struct op {
+  int kind,k,type,op,nranks,published,received;
+  void *to,*from,*other; uint64_t dst,src,n,scalar,at;
+  uint64_t *list,records; void *held;
+};
+/* A message of a program while it is built: its ring, its kept sequence's slot, its call, the operand range it moves
+   (byte offsets in the call's operand: a SEND's reads, a COPY's writes; a REDUCE's lands in scratch, its combine writes
+   the range), whether its word has been waited for. */
 struct message { uint32_t ring; uint64_t kept,lo,hi; int call,send,reduce,waited; };
 struct program {
-  void *encoder;
+  struct op *ops; int nops,capops;
+  void **uses; int nuses,capuses;        /* the Metal buffers its commands use (declared at each encoding) */
+  struct allocation **owned; int nowned; /* operands and scratch, freed once it is done */
+  void **held; int nheld,heldcap;        /* Metal objects it made, released once it is done */
+  uint64_t base,value;                   /* its first op's step (a stream numbers its programs' ops), its done value */
+  uint64_t from,resume;                  /* where it is encoded again from: an op, and a post's record */
+  struct program *next;
   struct message *messages; int n,capacity;
   uint64_t *list; size_t nlist,listcap;
-  void **held; int nheld,heldcap;
 };
+static int grow(void **array,int *capacity,int count,size_t size){
+  if(count<*capacity)return 0;
+  int cap=*capacity?2**capacity:16;
+  void *grown=realloc(*array,(size_t)cap*size);
+  if(!grown)return -1;
+  *array=grown;*capacity=cap;
+  return 0;
+}
 static int program_hold(struct program *g,void *object){
   if(!object)return 0;
-  if(g->nheld==g->heldcap){
-    int cap=g->heldcap?2*g->heldcap:16;
-    void **grown=realloc(g->held,(size_t)cap*sizeof *grown);
-    if(!grown)return -1;
-    g->held=grown;g->heldcap=cap;
-  }
+  if(grow((void **)&g->held,&g->heldcap,g->nheld,sizeof *g->held))return -1;
   g->held[g->nheld++]=object;
+  return 0;
+}
+static int program_use(struct program *g,void *buffer){
+  if(!buffer)return 0;
+  for(int i=0;i<g->nuses;i++)if(g->uses[i]==buffer)return 0;
+  if(grow((void **)&g->uses,&g->capuses,g->nuses,sizeof *g->uses))return -1;
+  g->uses[g->nuses++]=buffer;
+  return 0;
+}
+static struct op *op_add(struct program *g,int kind){
+  if(grow((void **)&g->ops,&g->capops,g->nops,sizeof *g->ops))return NULL;
+  struct op *o=g->ops+g->nops++;
+  *o=(struct op){.kind=kind};
+  return o;
+}
+static int op_kernel(struct program *g,int k,void *to,uint64_t dst,void *from,uint64_t src,uint64_t n,int type,int op,int nranks,
+                     uint64_t scalar,int published){
+  if(!n)return 0;
+  struct op *o=op_add(g,OP_KERNEL);
+  if(!o)return -1;
+  o->k=k;o->to=to;o->dst=dst;o->from=from;o->src=src;o->n=n;o->type=type;o->op=op;o->nranks=nranks;o->scalar=scalar;o->published=published;
+  return 0;
+}
+static int op_copy(struct program *g,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received,int published){
+  if(!bytes)return 0;
+  struct op *o=op_add(g,OP_COPY);
+  if(!o)return -1;
+  o->to=to;o->dst=dst;o->from=from;o->src=src;o->n=bytes;o->received=received;o->published=published;
   return 0;
 }
 static int list_push(struct program *g,uint64_t v){
@@ -415,35 +474,38 @@ static int list_push(struct program *g,uint64_t v){
   g->list[g->nlist++]=v;
   return 0;
 }
+/* the list built so far, an op's own */
+static int op_list(struct program *g,int kind,uint64_t records){
+  struct op *o=op_add(g,kind);
+  if(!o)return -1;
+  o->list=malloc((g->nlist?g->nlist:1)*sizeof *o->list);
+  if(!o->list)return -1;
+  memcpy(o->list,g->list,g->nlist*sizeof *o->list);
+  o->records=records;
+  return 0;
+}
 static int message_add(struct program *g,uint32_t ring,int call,uint64_t lo,uint64_t hi,int send,int reduce){
-  if(g->n==g->capacity){
-    int cap=g->capacity?2*g->capacity:64;
-    struct message *grown=realloc(g->messages,(size_t)cap*sizeof *grown);
-    if(!grown)return -1;
-    g->messages=grown;g->capacity=cap;
-  }
+  if(grow((void **)&g->messages,&g->capacity,g->n,sizeof *g->messages))return -1;
   uint64_t kept=G.kept_at+(G.kept_next++%KEPT)*8;
   g->messages[g->n++]=(struct message){.ring=ring,.kept=kept,.call=call,.lo=lo,.hi=hi,.send=send,.reduce=reduce};
   return g->n-1;
 }
-/* Messages described by one post kernel: the program's messages [first, first + count), whose window offsets and
-   bytes are `window`[i] and `bytes`[i]. */
+/* Messages described by one post: the program's messages [first, first + count), whose window offsets and bytes are
+   `window`[i] and `bytes`[i]. */
 #define BATCH 256
 struct batch { int first,count; uint64_t window[BATCH],bytes[BATCH]; };
 static int post(struct program *g,struct batch *b){
   if(!b->count)return 0;
   g->nlist=0;
-  if(list_push(g,(uint64_t)b->count) || list_push(g,ENTRIES))return -1;
   for(int i=0;i<b->count;i++){
     struct message *x=g->messages+b->first+i;
     const struct mesh_ring *ring=G.rings[x->ring];
     if(list_push(g,region_offset(ring)) || list_push(g,counter_of(x->ring)) || list_push(g,b->window[i]) || list_push(g,b->bytes[i]) ||
        list_push(g,words_of(x->ring)) || list_push(g,x->kept))return -1;
   }
-  void *held=NULL;
-  if(nccl_mesh_post(g->encoder,G.region,G.region,g->list,g->nlist,&held))return -1;
+  if(op_list(g,OP_POST,(uint64_t)b->count))return -1;
   b->first+=b->count;b->count=0;
-  return program_hold(g,held);
+  return 0;
 }
 static int describe(struct program *g,struct batch *b,uint32_t ring,int call,uint64_t lo,uint64_t hi,int send,int reduce,uint64_t window){
   int i=message_add(g,ring,call,lo,hi,send,reduce);
@@ -452,23 +514,20 @@ static int describe(struct program *g,struct batch *b,uint32_t ring,int call,uin
   b->window[b->count]=window;b->bytes[b->count]=hi-lo;b->count++;
   return b->count==BATCH?post(g,b):0;
 }
-/* One wait kernel for the listed messages (indices), each marked waited. */
+/* One wait for the listed messages (indices), each marked waited. */
 static int wait_for(struct program *g,const int *which,int count){
   if(!count)return 0;
   g->nlist=0;
-  if(list_push(g,(uint64_t)count) || list_push(g,ENTRIES))return -1;
   for(int i=0;i<count;i++){
     struct message *x=g->messages+which[i];
     if(list_push(g,x->kept) || list_push(g,words_of(x->ring)))return -1;
     x->waited=1;
   }
-  void *held=NULL;
-  if(nccl_mesh_wait(g->encoder,G.region,g->list,g->nlist,&held))return -1;
-  return program_hold(g,held);
+  return op_list(g,OP_WAIT,(uint64_t)count);
 }
-/* Waits for the unwaited messages of call `call` overlapping [lo, hi) that `access` conflicts with: before a SEND
-   reads a range, the receives writing it (COPY); before a combine writes a range, the receives writing it and the
-   SENDs reading it; plus `also` (a message of its own, or -1). */
+/* Waits for the unwaited messages of call `call` overlapping [lo, hi) that the access conflicts with: before a SEND
+   reads a range, the receives writing it (COPY); before a combine writes a range (`writes`), the receives writing it
+   and the SENDs reading it; plus `also` (a message of its own, or -1). */
 static int wait_hazards(struct program *g,int call,uint64_t lo,uint64_t hi,int writes,int also){
   int which[256],count=0;
   if(also>=0)which[count++]=also;
@@ -480,6 +539,31 @@ static int wait_hazards(struct program *g,int call,uint64_t lo,uint64_t hi,int w
     which[count++]=i;
   }
   return wait_for(g,which,count);
+}
+/* The program's ops from op `from` on (a post there from record `resume`) into `encoder`, gated on the give-up words
+   at `giveup`; then its done word set (`done`, a region offset; 0: none). */
+static int emit(void *encoder,struct program *g,uint64_t from,uint64_t resume,uint64_t giveup,uint64_t done){
+  for(int i=0;i<g->nuses;i++)nccl_mesh_use(encoder,g->uses[i]);
+  for(uint64_t i=from;i<(uint64_t)g->nops;i++){
+    struct op *o=g->ops+i;
+    const uint64_t step=g->base+i;
+    switch(o->kind){
+    case OP_KERNEL:
+      nccl_mesh_kernel(encoder,o->k,o->to,o->dst,o->from,o->src,o->n,o->type,o->op,o->nranks,o->scalar,o->published,NULL,0,G.region,giveup);
+      break;
+    case OP_COPY:
+      nccl_mesh_copy(encoder,o->to,o->dst,o->from,o->src,o->n,o->received,o->published,G.region,giveup);
+      break;
+    case OP_POST:
+      if(nccl_mesh_post(encoder,G.region,o->list,o->records,ENTRIES,step,giveup,i==from?resume:0,G.polls,&o->held))return -1;
+      break;
+    default:
+      if(nccl_mesh_wait(encoder,G.region,o->list,o->records,ENTRIES,step,giveup,G.polls,&o->held))return -1;
+      break;
+    }
+  }
+  if(done)nccl_mesh_publish(encoder,G.region,done,g->value,giveup);
+  return 0;
 }
 
 /* The communicator's stream for a call: its collectives' or its point-to-point calls', on rank `peer`'s link. */
@@ -570,8 +654,8 @@ static ncclResult_t encode_steps(struct program *g,struct planned *p,int call,in
       int published=0;
       for(uint32_t t=s+1;t<p->nsteps && !published;t++)
         published=p->steps[t].op==MESH_STEP_SEND && p->steps[t].first*e<hi && lo<(p->steps[t].first+p->steps[t].piece.elements)*e;
-      nccl_mesh_kernel(g->encoder,KERNEL_COMBINE,p->operand.buffer,p->operand.offset+lo,p->scratch->buffer,p->pieces[s]+first,(hi-lo)/e,
-        (int)k->type,k->combine,c->nranks,0,published,NULL,0);
+      if(op_kernel(g,KERNEL_COMBINE,p->operand.buffer,p->operand.offset+lo,p->scratch->buffer,p->pieces[s]+first,(hi-lo)/e,
+        (int)k->type,k->combine,c->nranks,0,published))return fail(ncclSystemError,"allocation");
     }
   }
   if(post(g,&b))return fail(ncclSystemError,"post");
@@ -658,7 +742,7 @@ static ncclResult_t place_call(struct program *g,struct planned *p,struct alloca
 }
 /* The call's input stored into its operand system-coherent (a SEND reads what the GPU stored only once it is so; in
    place, stored again so), the premultiplication folded in; a local copy's bytes. */
-static void load_call(struct program *g,struct planned *p){
+static int load_call(struct program *g,struct planned *p){
   struct call *k=p->k;
   struct ncclComm *c=k->comm;
   const size_t e=p->element,in=in_bytes(k);
@@ -669,131 +753,243 @@ static void load_call(struct program *g,struct planned *p){
   case MESH_ALLGATHER: into=segment_first(k,c->rank)*e;length=in;break;
   default: break;
   }
-  if(!length)return;
+  if(!length)return 0;
   if(k->premultiply)
-    nccl_mesh_kernel(g->encoder,KERNEL_PREMULTIPLY,p->operand.buffer,p->operand.offset+into,p->in.buffer,p->in.offset,length/e,(int)k->type,0,
-      c->nranks,*(uint64_t *)k->scalar,1,NULL,0);
-  else nccl_mesh_copy(g->encoder,p->operand.buffer,p->operand.offset+into,p->in.buffer,p->in.offset,length,0,k->kind!=K_LOCAL);
+    return op_kernel(g,KERNEL_PREMULTIPLY,p->operand.buffer,p->operand.offset+into,p->in.buffer,p->in.offset,length/e,(int)k->type,0,
+      c->nranks,*(uint64_t *)k->scalar,1);
+  return op_copy(g,p->operand.buffer,p->operand.offset+into,p->in.buffer,p->in.offset,length,0,k->kind!=K_LOCAL);
 }
 
 /* The results out of the operand (where it was not the receive buffer), and an integer ncclAvg's division. */
-static void finish_call(struct program *g,struct planned *p){
+static int finish_call(struct program *g,struct planned *p){
   struct call *k=p->k;
   struct ncclComm *c=k->comm;
   const size_t e=p->element;
-  if(k->kind==K_SEND || k->kind==K_LOCAL)return;
-  if(k->kind==MESH_REDUCE && c->rank!=k->root)return;
+  if(k->kind==K_SEND || k->kind==K_LOCAL)return 0;
+  if(k->kind==MESH_REDUCE && c->rank!=k->root)return 0;
   uint64_t from=0,length=out_bytes(k);
   if(k->kind==MESH_REDUCE_SCATTER)from=segment_first(k,c->rank)*e;
-  if(p->operand.buffer!=p->out.buffer || p->operand.offset!=p->out.offset)
-    nccl_mesh_copy(g->encoder,p->out.buffer,p->out.offset,p->operand.buffer,p->operand.offset+from,length,1,0);
-  if(k->postdivide)
-    nccl_mesh_kernel(g->encoder,KERNEL_POSTDIVIDE,p->out.buffer,p->out.offset,p->out.buffer,p->out.offset,length/e,(int)k->type,0,c->nranks,0,0,NULL,0);
+  if((p->operand.buffer!=p->out.buffer || p->operand.offset!=p->out.offset) &&
+     op_copy(g,p->out.buffer,p->out.offset,p->operand.buffer,p->operand.offset+from,length,1,0))return -1;
+  if(k->postdivide &&
+     op_kernel(g,KERNEL_POSTDIVIDE,p->out.buffer,p->out.offset,p->out.buffer,p->out.offset,length/e,(int)k->type,0,c->nranks,0,0))return -1;
+  return 0;
 }
 
-/* A deferred stream's kept work: programs to encode, each its calls (copied) */
-struct kept { struct call *calls; int n; struct kept *next; };
+static void program_free(struct program *g){
+  if(!g)return;
+  pthread_mutex_lock(&G.lock);
+  for(int i=0;i<g->nowned;i++)if(g->owned[i])allocation_free(g->owned[i]);
+  pthread_mutex_unlock(&G.lock);
+  for(int i=0;i<g->nheld;i++)nccl_mesh_release(g->held[i]);
+  for(int i=0;i<g->nops;i++){free(g->ops[i].list);if(g->ops[i].held)nccl_mesh_release(g->ops[i].held);}
+  free(g->ops);free(g->uses);free(g->owned);free(g->held);free(g->messages);free(g->list);free(g);
+}
 
-/* The program of a group's `calls` into `commandBuffer`: every call planned and placed first (nothing encoded
-   where that fails), then its inputs loaded, every receive of the group described, each call's steps, one wait for
-   every message not yet waited for, the results finished, and the done word (`done`: a window word) set to
-   `value` last.  What the program holds (its operands' and scratch allocations, the Metal objects it made) is the
-   caller's to release once it has run. */
-static ncclResult_t encode_group(void *commandBuffer,struct call *calls,int n,uint64_t *done,uint64_t value,
-                                  struct allocation ***scratch,int *nscratch,void ***held,int *nheld){
-  struct program g={0};
+/* The program of a group's `calls`: every call planned and placed first (nothing built where that fails), then its
+   inputs loaded, every receive of the group described, each call's steps, one wait for every message not yet waited
+   for, and the results finished.  It holds its operands' and scratch allocations and the Metal objects it made until
+   it is freed (program_free, once it is done). */
+static ncclResult_t build_group(struct call *calls,int n,struct program **out){
+  struct program *g=calloc(1,sizeof *g);
   struct planned *p=calloc((size_t)n,sizeof *p);
-  struct allocation **owned=calloc((size_t)n*2,sizeof *owned);
-  ncclResult_t result=p && owned?ncclSuccess:fail(ncclSystemError,"allocation");
+  if(g)g->owned=calloc((size_t)n*2,sizeof *g->owned);
+  ncclResult_t result=g && p && g->owned?ncclSuccess:fail(ncclSystemError,"allocation");
+  if(g && g->owned)g->nowned=2*n;
   for(int i=0;result==ncclSuccess && i<n;i++){p[i].k=calls+i;result=plan(p+i);}
-  for(int i=0;result==ncclSuccess && i<n;i++){result=place_call(&g,p+i,owned+2*i);owned[2*i+1]=p[i].scratch;}
-  for(int i=0;result!=ncclSuccess && owned && i<n;i++)owned[2*i+1]=p[i].scratch;
+  for(int i=0;result==ncclSuccess && i<n;i++){result=place_call(g,p+i,g->owned+2*i);g->owned[2*i+1]=p[i].scratch;}
+  for(int i=0;result!=ncclSuccess && g && g->owned && i<n;i++)g->owned[2*i+1]=p[i].scratch;
+  for(int i=0;result==ncclSuccess && i<n;i++)
+    if(program_use(g,p[i].in.buffer) || program_use(g,p[i].out.buffer) || program_use(g,p[i].operand.buffer) ||
+       program_use(g,p[i].scratch?p[i].scratch->buffer:NULL))result=fail(ncclSystemError,"allocation");
+  for(int i=0;result==ncclSuccess && i<n;i++)if(load_call(g,p+i))result=fail(ncclSystemError,"allocation");
+  int *first=calloc((size_t)n,sizeof *first);
+  struct batch *b=calloc(1,sizeof *b);
+  if(result==ncclSuccess && (!first || !b))result=fail(ncclSystemError,"allocation");
+  for(int i=0;result==ncclSuccess && i<n;i++){first[i]=g->n;result=encode_receives(g,p+i,i,b);}
+  if(result==ncclSuccess && post(g,b))result=fail(ncclSystemError,"allocation");
+  for(int i=0;result==ncclSuccess && i<n;i++)result=encode_steps(g,p+i,i,first[i]);
+  free(first);free(b);
   if(result==ncclSuccess){
-    g.encoder=nccl_mesh_encoder(commandBuffer);
-    for(int i=0;i<n;i++){
-      if(p[i].in.buffer)nccl_mesh_use(g.encoder,p[i].in.buffer);
-      if(p[i].out.buffer)nccl_mesh_use(g.encoder,p[i].out.buffer);
-      if(p[i].operand.buffer)nccl_mesh_use(g.encoder,p[i].operand.buffer);
-      if(p[i].scratch)nccl_mesh_use(g.encoder,p[i].scratch->buffer);
-    }
-    for(int i=0;i<n;i++)load_call(&g,p+i);
-    int *first=calloc((size_t)n,sizeof *first);
-    struct batch *b=calloc(1,sizeof *b);
-    if(!first || !b)result=fail(ncclSystemError,"allocation");
-    for(int i=0;result==ncclSuccess && i<n;i++){first[i]=g.n;result=encode_receives(&g,p+i,i,b);}
-    if(result==ncclSuccess && post(&g,b))result=fail(ncclSystemError,"post");
-    for(int i=0;result==ncclSuccess && i<n;i++)result=encode_steps(&g,p+i,i,first[i]);
-    free(first);free(b);
-    if(result==ncclSuccess){
-      int *all=malloc(((size_t)g.n+1)*sizeof *all),count=0;
-      if(!all)result=fail(ncclSystemError,"allocation");
-      for(int i=0;all && i<g.n;i++)if(!g.messages[i].waited)all[count++]=i;
-      if(all && wait_for(&g,all,count))result=fail(ncclSystemError,"wait");
-      free(all);
-    }
-    for(int i=0;result==ncclSuccess && i<n;i++)finish_call(&g,p+i);
-    if(result==ncclSuccess && done)nccl_mesh_publish(g.encoder,G.region,region_offset(done),value);
-    nccl_mesh_encoder_end(g.encoder);
+    int *all=malloc(((size_t)g->n+1)*sizeof *all),count=0;
+    if(!all)result=fail(ncclSystemError,"allocation");
+    for(int i=0;all && i<g->n;i++)if(!g->messages[i].waited)all[count++]=i;
+    if(all && wait_for(g,all,count))result=fail(ncclSystemError,"allocation");
+    free(all);
   }
+  for(int i=0;result==ncclSuccess && i<n;i++)if(finish_call(g,p+i))result=fail(ncclSystemError,"allocation");
   for(int i=0;p && i<n;i++){free(p[i].steps);free(p[i].pieces);}
-  free(p);free(g.messages);free(g.list);
-  *scratch=owned;*nscratch=owned?2*n:0;
-  *held=g.held;*nheld=g.nheld;
+  free(p);
+  if(result!=ncclSuccess){program_free(g);return result;}
+  free(g->messages);g->messages=NULL;free(g->list);g->list=NULL;
+  *out=g;
+  return ncclSuccess;
+}
+
+/* ---- streams ----
+   A stream's calls are built into programs and encoded into command buffers in their order: a deferred stream's into
+   the caller's (ncclMeshStreamEncode), the NULL stream's into the library's queue's.  Each command buffer carries a
+   completion handler (a flight: its programs, in order) that reads the stream's give-up words once it has completed:
+   with the flag clear every program is done and freed; with it set, the program holding the step that gave up and
+   every one after it are kept, in order, to be encoded again (the first from that step), once no command buffer of
+   the stream is in flight, after a clear of the words (the programs encoded meanwhile all return at once while the
+   flag is set, and join them). */
+struct kept { struct call *calls; int n; struct kept *next; };
+struct ncclMeshStream {
+  pthread_mutex_t lock;
+  uint64_t giveup,done;      /* its lane's give-up words and done word: byte offsets in the region */
+  void *queue;               /* the queue its programs run again on when it is synchronized */
+  struct kept *kept;         /* groups issued, not yet built */
+  struct program *again;     /* programs to encode again, in order */
+  uint64_t steps,value;      /* the next program's first step and done value */
+  int outstanding;           /* command buffers encoded into and not yet completed */
+  int gaveup;                /* give-ups since ncclMeshStreamGaveUp read them */
+  char error[256];
+};
+struct flight { struct ncclMeshStream *stream; struct program *programs; };
+static struct ncclMeshStream null_stream={.lock=PTHREAD_MUTEX_INITIALIZER};
+
+static void completed(void *argument,const char *error){
+  struct flight *f=argument;
+  struct ncclMeshStream *s=f->stream;
+  pthread_mutex_lock(&s->lock);
+  const _Atomic uint64_t *words=(const _Atomic uint64_t *)((unsigned char *)region()+s->giveup);
+  const uint64_t flag=atomic_load_explicit(words,memory_order_acquire),step=atomic_load_explicit(words+1,memory_order_relaxed),
+    resume=atomic_load_explicit(words+2,memory_order_relaxed);
+  if(error && !s->error[0])snprintf(s->error,sizeof s->error,"%s",error);
+  struct program **tail=&s->again;
+  while(*tail)tail=&(*tail)->next;
+  int kept=0;
+  for(struct program *g=f->programs,*next;g;g=next){
+    next=g->next;g->next=NULL;
+    if(!flag || error || g->base+(uint64_t)g->nops<=step){program_free(g);continue;}
+    if(step>=g->base){g->from=step-g->base;g->resume=resume;}
+    else{g->from=0;g->resume=0;}
+    *tail=g;tail=&g->next;kept=1;
+  }
+  if(kept)s->gaveup++;
+  s->outstanding--;
+  pthread_mutex_unlock(&s->lock);
+  free(f);
+}
+
+/* The stream's kept groups built into programs, each given its steps and done value. */
+static ncclResult_t build_kept(struct ncclMeshStream *s,struct program **programs){
+  struct program **tail=programs;
+  while(s->kept){
+    struct kept *x=s->kept;
+    struct program *g;
+    ncclResult_t result=build_group(x->calls,x->n,&g);
+    if(result!=ncclSuccess)return result;
+    g->base=s->steps;s->steps+=(uint64_t)g->nops;g->value=++s->value;
+    *tail=g;tail=&g->next;
+    s->kept=x->next;
+    for(int i=0;i<x->n;i++)free(x->calls[i].segments);
+    free(x->calls);free(x);
+  }
+  return ncclSuccess;
+}
+/* Into `commandBuffer`: where no command buffer of the stream is in flight, the clear and its programs to run again
+   (and `fresh` after them), else `fresh` alone; the flight's handler added.  Under the stream's lock. */
+static ncclResult_t encode_flight(struct ncclMeshStream *s,void *commandBuffer,struct program *fresh){
+  struct flight *f=calloc(1,sizeof *f);
+  if(!f)return fail(ncclSystemError,"allocation");
+  f->stream=s;
+  void *encoder=nccl_mesh_encoder(commandBuffer);
+  struct program **tail=&f->programs;
+  if(s->again && !s->outstanding){
+    nccl_mesh_clear(encoder,G.region,s->giveup);
+    for(struct program *g=s->again;g;g=g->next)
+      if(emit(encoder,g,g->from,g->resume,s->giveup,s->done)){nccl_mesh_encoder_end(encoder);free(f);return fail(ncclSystemError,"encoding");}
+    *tail=s->again;s->again=NULL;
+    while(*tail)tail=&(*tail)->next;
+  }
+  for(struct program *g=fresh;g;g=g->next)
+    if(emit(encoder,g,0,0,s->giveup,s->done)){nccl_mesh_encoder_end(encoder);free(f);return fail(ncclSystemError,"encoding");}
+  *tail=fresh;
+  nccl_mesh_encoder_end(encoder);
+  s->outstanding++;
+  nccl_mesh_on_completion(commandBuffer,completed,f);
+  return ncclSuccess;
+}
+/* Every command buffer of the stream completed, then its programs to run again run on its queue until none is
+   left; the first command buffer error, or a stream that still holds groups not encoded. */
+static ncclResult_t synchronize(struct ncclMeshStream *s){
+  for(;;){
+    pthread_mutex_lock(&s->lock);
+    const int outstanding=s->outstanding;
+    if(!outstanding && s->again){
+      void *command=nccl_mesh_command_buffer(s->queue);
+      ncclResult_t result=encode_flight(s,command,NULL);
+      if(result==ncclSuccess)nccl_mesh_commit(command);
+      nccl_mesh_release(command);
+      pthread_mutex_unlock(&s->lock);
+      if(result!=ncclSuccess)return result;
+      continue;
+    }
+    pthread_mutex_unlock(&s->lock);
+    if(!outstanding)break;
+    sched_yield();
+  }
+  pthread_mutex_lock(&s->lock);
+  ncclResult_t result=s->error[0]?fail(ncclUnhandledCudaError,"a GPU program failed: %s",s->error):
+                      s->kept?fail(ncclInvalidUsage,"a stream's calls are encoded (ncclMeshStreamEncode) before it is synchronized"):ncclSuccess;
+  s->error[0]=0;
+  pthread_mutex_unlock(&s->lock);
   return result;
 }
-static void release_group(struct allocation **scratch,int nscratch,void **held,int nheld){
+/* A stream's lane, given out once a stream (the NULL stream: lane 0). */
+static ncclResult_t lane(struct ncclMeshStream *s,void *queue){
   pthread_mutex_lock(&G.lock);
-  for(int i=0;i<nscratch;i++)if(scratch[i])allocation_free(scratch[i]);
-  pthread_mutex_unlock(&G.lock);
-  for(int i=0;i<nheld;i++)nccl_mesh_release(held[i]);
-  free(scratch);free(held);
-}
-
-/* A deferred stream's program waiting to be released: its scratch and held objects, freed once its done word
-   reaches its value. */
-struct ran { uint64_t *done; uint64_t value; struct allocation **scratch; int nscratch; void **held; int nheld; struct ran *next; };
-static struct ran *running;
-static void reap(void){
-  struct ran **r=&running;
-  while(*r){
-    struct ran *x=*r;
-    if(atomic_load_explicit((_Atomic uint64_t *)x->done,memory_order_acquire)>=x->value){
-      *r=x->next;release_group(x->scratch,x->nscratch,x->held,x->nheld);free(x);
-    } else r=&x->next;
+  ncclResult_t r=attach();
+  if(r==ncclSuccess)r=session();
+  if(r==ncclSuccess && G.lanes>=LANES)r=fail(ncclInvalidUsage,"more than %d streams",LANES);
+  if(r==ncclSuccess){
+    s->giveup=G.lanes_at+32*(uint64_t)G.lanes++;s->done=s->giveup+24;
+    s->queue=queue?queue:G.queue;
+    memset((unsigned char *)region()+s->giveup,0,32);
   }
+  pthread_mutex_unlock(&G.lock);
+  return r;
 }
 
-/* A group's calls: on the NULL stream run now on the library's queue and waited for; on a stream kept for its
+/* A group's calls: on the NULL stream built, encoded into a command buffer of the library's queue and run to the end
+   (each command buffer ends within its waits' bound; the programs that gave up run again); on a stream kept for its
    ncclMeshStreamEncode. */
 static ncclResult_t run(struct call *calls,int n){
   if(!n)return ncclSuccess;
   for(int i=0;i<n;i++){ncclResult_t r=check_call(calls+i);if(r!=ncclSuccess)return r;}
   cudaStream_t stream=calls[0].stream;
   for(int i=1;i<n;i++)if(calls[i].stream!=stream)return fail(ncclInvalidUsage,"a group's calls on more than one stream");
-  if(stream){
-    struct kept *x=calloc(1,sizeof *x);
-    struct call *copy=malloc((size_t)n*sizeof *copy);
-    if(!x || !copy){free(x);free(copy);return fail(ncclSystemError,"allocation");}
-    memcpy(copy,calls,(size_t)n*sizeof *copy);
-    for(int i=0;i<n;i++)if(calls[i].segments){
-      copy[i].segments=malloc((size_t)calls[i].comm->nranks*sizeof(uint64_t));
-      if(!copy[i].segments)return fail(ncclSystemError,"allocation");
-      memcpy(copy[i].segments,calls[i].segments,(size_t)calls[i].comm->nranks*sizeof(uint64_t));
-    }
-    x->calls=copy;x->n=n;
-    struct kept **tail=(struct kept **)&stream->pending;
-    while(*tail)tail=&(*tail)->next;
-    *tail=x;
-    return ncclSuccess;
+  struct ncclMeshStream *s=stream?stream:&null_stream;
+  if(!s->giveup){ncclResult_t r=lane(s,NULL);if(r!=ncclSuccess)return r;}
+  struct kept *x=calloc(1,sizeof *x);
+  struct call *copy=malloc((size_t)n*sizeof *copy);
+  if(!x || !copy){free(x);free(copy);return fail(ncclSystemError,"allocation");}
+  memcpy(copy,calls,(size_t)n*sizeof *copy);
+  for(int i=0;i<n;i++)if(calls[i].segments){
+    copy[i].segments=malloc((size_t)calls[i].comm->nranks*sizeof(uint64_t));
+    if(!copy[i].segments)return fail(ncclSystemError,"allocation");
+    memcpy(copy[i].segments,calls[i].segments,(size_t)calls[i].comm->nranks*sizeof(uint64_t));
   }
-  void *command=nccl_mesh_command_buffer(G.queue);
-  struct allocation **scratch;int nscratch;void **held;int nheld;
-  ncclResult_t result=encode_group(command,calls,n,NULL,0,&scratch,&nscratch,&held,&nheld);
-  char error[256]="";
-  if(result==ncclSuccess)nccl_mesh_commit_wait(command,error,sizeof error);
-  else nccl_mesh_release(command);
-  release_group(scratch,nscratch,held,nheld);
-  if(result==ncclSuccess && error[0])result=fail(ncclUnhandledCudaError,"a GPU program failed: %s",error);
+  x->calls=copy;x->n=n;
+  pthread_mutex_lock(&s->lock);
+  struct kept **tail=&s->kept;
+  while(*tail)tail=&(*tail)->next;
+  *tail=x;
+  ncclResult_t result=ncclSuccess;
+  if(!stream){
+    struct program *programs=NULL;
+    result=build_kept(s,&programs);
+    void *command=result==ncclSuccess?nccl_mesh_command_buffer(G.queue):NULL;
+    if(command){
+      result=encode_flight(s,command,programs);
+      if(result==ncclSuccess)nccl_mesh_commit(command);
+      nccl_mesh_release(command);
+    }
+  }
+  pthread_mutex_unlock(&s->lock);
+  if(result==ncclSuccess && !stream)result=synchronize(s);
   return result;
 }
 
@@ -875,7 +1071,7 @@ ncclResult_t ncclMemAlloc(void **ptr,size_t size){
 ncclResult_t ncclMemFree(void *ptr){
   pthread_mutex_lock(&G.lock);
   struct allocation *a=allocation_of(ptr);
-  if(a && !a->owned){nccl_mesh_release(a->buffer);allocation_free(a);}
+  if(a && !a->owned)allocation_free(a);
   pthread_mutex_unlock(&G.lock);
   return a?ncclSuccess:fail(ncclInvalidArgument,"%p is no allocation",ptr);
 }
@@ -1033,57 +1229,48 @@ ncclResult_t ncclAlltoAllConfig(const void *s,void *r,size_t n,ncclDataType_t t,
 ncclResult_t ncclGatherConfig(const void *s,void *r,size_t n,ncclDataType_t t,int root,ncclComm_t c,cudaStream_t st,const ncclCollConfig_t *k){(void)k;return ncclGather(s,r,n,t,root,c,st);}
 ncclResult_t ncclScatterConfig(const void *s,void *r,size_t n,ncclDataType_t t,int root,ncclComm_t c,cudaStream_t st,const ncclCollConfig_t *k){(void)k;return ncclScatter(s,r,n,t,root,c,st);}
 
-/* ---- streams ---- */
+/* ---- deferred streams ---- */
 ncclResult_t ncclMeshStreamCreate(cudaStream_t *stream,void *queue){
-  (void)queue;
   if(!stream)return ncclInvalidArgument;
-  pthread_mutex_lock(&G.lock);
-  ncclResult_t r=attach();
-  if(r==ncclSuccess)r=session();
-  uint64_t *done=NULL;
-  if(r==ncclSuccess){
-    if(G.done_next>=4096)r=fail(ncclInvalidUsage,"too many streams");
-    else done=(uint64_t *)((unsigned char *)region()+G.done_at+8*G.done_next++);
-  }
-  pthread_mutex_unlock(&G.lock);
-  if(r!=ncclSuccess)return r;
   struct ncclMeshStream *s=calloc(1,sizeof *s);
   if(!s)return fail(ncclSystemError,"allocation");
-  s->done=done;*done=0;s->refs=1;
+  pthread_mutex_init(&s->lock,NULL);
+  ncclResult_t r=lane(s,queue);
+  if(r!=ncclSuccess){free(s);return r;}
   *stream=s;
   return ncclSuccess;
 }
 ncclResult_t ncclMeshStreamDestroy(cudaStream_t stream){
   if(!stream)return ncclInvalidArgument;
-  ncclMeshStreamSynchronize(stream);
+  ncclResult_t r=synchronize(stream);
+  pthread_mutex_destroy(&stream->lock);
   free(stream);
-  return ncclSuccess;
+  return r;
 }
 ncclResult_t ncclMeshStreamEncode(cudaStream_t stream,void *commandBuffer){
   if(!stream || !commandBuffer)return ncclInvalidArgument;
-  ncclResult_t result=ncclSuccess;
-  pthread_mutex_lock(&G.lock);reap();pthread_mutex_unlock(&G.lock);
-  while(stream->pending && result==ncclSuccess){
-    struct kept *x=stream->pending;stream->pending=x->next;
-    struct ran *r=calloc(1,sizeof *r);
-    if(!r)return fail(ncclSystemError,"allocation");
-    stream->value++;
-    result=encode_group(commandBuffer,x->calls,x->n,stream->done,stream->value,&r->scratch,&r->nscratch,&r->held,&r->nheld);
-    r->done=stream->done;r->value=stream->value;
-    pthread_mutex_lock(&G.lock);r->next=running;running=r;pthread_mutex_unlock(&G.lock);
-    for(int i=0;i<x->n;i++)free(x->calls[i].segments);
-    free(x->calls);free(x);
-  }
+  pthread_mutex_lock(&stream->lock);
+  struct program *programs=NULL;
+  ncclResult_t result=build_kept(stream,&programs);
+  if(result==ncclSuccess && (programs || (stream->again && !stream->outstanding)))result=encode_flight(stream,commandBuffer,programs);
+  pthread_mutex_unlock(&stream->lock);
   return result;
 }
 ncclResult_t ncclMeshStreamQuery(cudaStream_t stream){
   if(!stream)return ncclInvalidArgument;
-  return atomic_load_explicit((_Atomic uint64_t *)stream->done,memory_order_acquire)>=stream->value?ncclSuccess:ncclInProgress;
+  pthread_mutex_lock(&stream->lock);
+  const int busy=stream->kept || stream->again || stream->outstanding;
+  pthread_mutex_unlock(&stream->lock);
+  return busy?ncclInProgress:ncclSuccess;
 }
 ncclResult_t ncclMeshStreamSynchronize(cudaStream_t stream){
   if(!stream)return ncclInvalidArgument;
-  if(stream->pending)return fail(ncclInvalidUsage,"a stream's kept programs are encoded (ncclMeshStreamEncode) before it is synchronized");
-  while(atomic_load_explicit((_Atomic uint64_t *)stream->done,memory_order_acquire)<stream->value)sched_yield();
-  pthread_mutex_lock(&G.lock);reap();pthread_mutex_unlock(&G.lock);
+  return synchronize(stream);
+}
+ncclResult_t ncclMeshStreamGaveUp(cudaStream_t stream,int *gaveUp){
+  if(!stream || !gaveUp)return ncclInvalidArgument;
+  pthread_mutex_lock(&stream->lock);
+  *gaveUp=stream->gaveup;stream->gaveup=0;
+  pthread_mutex_unlock(&stream->lock);
   return ncclSuccess;
 }

@@ -34,6 +34,13 @@
    host thread between, the wait ending on the observed cancellation too: UINT64_MAX at a session's end),
    combines it where it landed, and ends once every message of the call is complete.  No library thread
    runs; nothing is waited for by a clock.
+     Every GPU wait is bounded, a leaky maybe (docs/standards.md S2, S3 of metal-microbench): past
+   MESH_REMOTE_POLLS polls (2^20 unset) it ends, leaving its stream's give-up words set, and every later
+   kernel of that stream returns at once, so no command buffer of the library's holds the GPU past its
+   waits' bounds (a kernel polling without end holds it from every other process, past its own process's
+   exit).  The library encodes the programs that gave up again from the step that gave up: on the NULL
+   stream at once, on a deferred stream at its next ncclMeshStreamEncode or ncclMeshStreamSynchronize;
+   the caller's own work after them in that command buffer ran on what was there (ncclMeshStreamGaveUp).
 
    Buffers are host pointers: unified memory.  The bridge's registered window is handed out as allocations
    (ncclMemAlloc, ncclMeshMemAllocBuffer) from slabs that never cross a registered region; a buffer in an
@@ -66,10 +73,9 @@ extern "C" {
 #include <stdint.h>
 #include <stddef.h>
 
-/* The stream (above): a deferred stream keeps the GPU programs of the calls issued on it, oldest first, for the
-   caller's command buffer (ncclMeshStreamEncode); `done` (a window word) is set to `value` by the last program
-   encoded once its call is complete. */
-struct ncclMeshStream { void *pending; uint64_t value; uint64_t *done; int refs; };
+/* The stream (above): a deferred stream keeps the calls issued on it, oldest first, for the caller's command buffer
+   (ncclMeshStreamEncode).  Opaque. */
+struct ncclMeshStream;
 typedef struct ncclMeshStream *cudaStream_t;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
 typedef void *cudaEvent_t;
@@ -777,10 +783,17 @@ ncclResult_t ncclMeshStreamDestroy(cudaStream_t stream);
 /* Into `commandBuffer` (an id<MTLCommandBuffer> not yet committed, no encoder open): the stream's kept programs,
    in order; the caller's later work in that command buffer, or its queue, follows them. */
 ncclResult_t ncclMeshStreamEncode(cudaStream_t stream, void* commandBuffer);
-/* ncclSuccess once the last program encoded has completed, else ncclInProgress (cudaStreamQuery). */
+/* ncclSuccess once every call issued on the stream is complete, else ncclInProgress (cudaStreamQuery). */
 ncclResult_t ncclMeshStreamQuery(cudaStream_t stream);
-/* Waits on the host until the last program encoded has completed (cudaStreamSynchronize). */
+/* Waits on the host until every command buffer encoded into has completed (the caller has committed them), then runs
+   the programs that gave up again on the stream's queue (`queue` of ncclMeshStreamCreate, else the library's) until
+   every call is complete (cudaStreamSynchronize).  A command buffer's error, or ncclInvalidUsage for calls never
+   encoded. */
 ncclResult_t ncclMeshStreamSynchronize(cudaStream_t stream);
+/* How many of the stream's command buffers completed with a program that gave up (above) since the last call: the
+   caller's own work after those programs in them ran on what was there, and the caller runs it again, from its
+   retained inputs, once the calls are complete. */
+ncclResult_t ncclMeshStreamGaveUp(cudaStream_t stream, int* gaveUp);
 /* The window's allocations (above): the Metal buffer (id<MTLBuffer>) over the slab holding `ptr`, and ptr's
    offset in it, the library's for as long as the allocation lives. */
 ncclResult_t ncclMeshMemBuffer(const void* ptr, void** buffer, size_t* offset);

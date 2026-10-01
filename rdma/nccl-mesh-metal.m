@@ -17,8 +17,14 @@
    after 16 MB of plain stores found 2,041,216 of 4,194,304 words stale on the host, none with system-coherent
    stores, metal-microbench output_data/handoffs-20260929/probe/coh-m5.jsonl); what the NIC wrote it loads
    system-coherent.  A wait ends once its word is set, the message's sequence + 1 or the session's cancellation
-   (UINT64_MAX): no bound, no clock.  The reductions are the tag pre-revert-20261001's kernels, verbatim but for
-   their predicates (no gate runs here). */
+   (UINT64_MAX), or once it has polled its bound (MESH_REMOTE_POLLS, 2^20 unset), a leaky maybe (docs/standards.md
+   S2, S3): it then sets its stream's give-up words (the flag, its step, where a post stopped) and ends, and every
+   kernel of the stream's programs after it returns at once while the flag is set, so the command buffer ends; the
+   host encodes the program again from that step (nccl-mesh.c).  A post waits for its ring's room the same way, before
+   it takes a sequence number.  No kernel here waits without a bound: a GPU's work outlives its process and a kernel
+   polling without end holds the GPU from every other process (2026-10-01 14:03: WindowServer's watchdog killed it
+   three times behind this library's unbounded wait).  The reductions are the tag pre-revert-20261001's kernels,
+   verbatim but for their predicates, which are now the give-up gate. */
 static const char *source =
   "#pragma METAL internals : enable\n"
   "#include <metal_stdlib>\n"
@@ -31,6 +37,8 @@ static const char *source =
   "// system-coherent and fenced (a SEND reads them), else plain (the GPU reads them); fresh: a combine's first operand\n"
   "// is buffer 3 at byte offset `other` (the caller's send buffer, read in place), not the destination.\n"
   "struct args { ulong dst, src, n, scalar; uint type, op, nranks, width, received, published, fresh, want; ulong other, pred; };\n"
+  "// the give-up gate: buffer 4 is the region, p.pred its stream's give-up flag (nccl-mesh.c)\n"
+  "#define GATE if (*(device const ulong *)(q + p.pred)) return;\n"
   "\n"
   "// half and the fp8 formats decoded exactly to float, a float rounded to nearest even into them (one\n"
   "// rounding; fp8 saturating as NCCL's __NV_SATFINITE); bfloat16 by its float bits\n"
@@ -256,11 +264,13 @@ static const char *source =
   "  }\n"
   "kernel void combine(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]],\n"
   "                    device uchar *x [[buffer(3)]], device uchar *q [[buffer(4)]], GRID) {\n"
+  "  GATE\n"
   "  if (p.published) { COMBINE(O) FENCE; } else { COMBINE(W) }\n"
   "}\n"
   "// dst = src x scalar (a premultiplication: ncclAvg on floating types, PreMulSum), one operation of the type\n"
   "kernel void premultiply(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]],\n"
   "                        device uchar *q [[buffer(4)]], GRID) {\n"
+  "  GATE\n"
   "  const ulong k = p.scalar;\n"
   "  switch (p.type) {\n"
   "  case 0: EACH O(char)[i] = char(uint(S(char)[i]) * uint(char(k))); break;\n"
@@ -286,6 +296,7 @@ static const char *source =
   "}\n"
   "kernel void postdivide(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]],\n"
   "                       device uchar *q [[buffer(4)]], GRID) {\n"
+  "  GATE\n"
   "  switch (p.type) {\n"
   "  case 0: EACH W(char)[i] = divide<char, uint>(W(char)[i], p.nranks); break;\n"
   "  case 1: EACH W(uchar)[i] = uchar(uint(W(uchar)[i]) / p.nranks); break;\n"
@@ -302,57 +313,81 @@ static const char *source =
   "  if (p.published) ((SYS T *)(d + p.dst))[i] = v; else ((device T *)(d + p.dst))[i] = v; }\n"
   "kernel void copy(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]],\n"
   "                 device uchar *q [[buffer(4)]], GRID) {\n"
+  "  GATE\n"
   "  if (p.width == 16) COPY(uint4) else if (p.width == 4) COPY(uint) else COPY(uchar)\n"
   "  if (p.published) FENCE;\n"
   "}\n"
-  "// The messages of one post (nccl-mesh.c post): for each, its ring (a byte offset into buffer 0: the rings'\n"
-  "// storage), its counter (into buffer 1: the counters, a word a ring), its window offset and bytes, its word ring\n"
-  "// (into buffer 1: R words a ring, the message's word its sequence mod R), and where its sequence is kept (into\n"
-  "// buffer 1: a word of the call's own, which its waits read).  Its sequence k is the counter, then the counter is\n"
-  "// k + 1; the entry k mod R is written once the bridge has taken message k - R (the ring's taken past it), then\n"
-  "// ready = k + 1 last.  list: n, entries R, then n records of 6.\n"
-  "kernel void post(device uchar *rings [[buffer(0)]], device uchar *words [[buffer(1)]], constant ulong *list [[buffer(2)]],\n"
+  "// A post's, a wait's, a publish's and a clear's control: n records, the rings' entries R, the op's step (kept in\n"
+  "// the give-up words where it gives up), the give-up words' byte offset in the region, the record a post starts at,\n"
+  "// the polls a wait makes before it gives up.\n"
+  "struct control { ulong n, entries, step, giveup, first, polls; };\n"
+  "static void give_up(SYS ulong *g, ulong step, ulong at) { g[1] = step; g[2] = at; FENCE; g[0] = 1; FENCE; }\n"
+  "// The messages of one post (nccl-mesh.c), records of 6: its ring and counter (byte offsets in the region), its window\n"
+  "// offset and bytes, its ring's R words and where its sequence is kept (byte offsets in the region).  Its sequence k\n"
+  "// is the counter; once the bridge has taken message k - R (the ring's taken past it: the entry free) the entry\n"
+  "// k mod R is written, ready = k + 1 last, then k kept and the counter k + 1, so a post that gives up while it\n"
+  "// waits for room has taken nothing and starts again at that record.\n"
+  "kernel void post(device uchar *region [[buffer(0)]], constant ulong *list [[buffer(1)]], constant control &c [[buffer(2)]],\n"
   "                 uint i [[thread_position_in_grid]]) {\n"
   "  if (i) return;\n"
-  "  const ulong n = list[0], entries = list[1];\n"
+  "  SYS ulong *g = (SYS ulong *)(region + c.giveup);\n"
+  "  if (g[0]) return;\n"
   "  FENCE;\n"
-  "  for (ulong m = 0; m < n; m++) {\n"
-  "    constant ulong *r = list + 2 + 6 * m;\n"
-  "    SYS ulong *counter = (SYS ulong *)(words + r[1]);\n"
+  "  for (ulong m = c.first; m < c.n; m++) {\n"
+  "    constant ulong *r = list + 6 * m;\n"
+  "    SYS ulong *counter = (SYS ulong *)(region + r[1]);\n"
   "    const ulong k = *counter;\n"
-  "    *counter = k + 1;\n"
-  "    *(SYS ulong *)(words + r[5]) = k;\n"
-  "    SYS ulong *ring = (SYS ulong *)(rings + r[0]);\n"
-  "    while (k >= entries && ring[0] <= k - entries) FENCE;\n"
-  "    SYS ulong *entry = (SYS ulong *)(rings + r[0] + 128 + (k & (entries - 1)) * 32);\n"
-  "    entry[1] = r[2]; entry[2] = r[3]; entry[3] = r[4] + (k & (entries - 1)) * 8;\n"
+  "    SYS ulong *ring = (SYS ulong *)(region + r[0]);\n"
+  "    for (ulong polls = 0; k >= c.entries && ring[0] <= k - c.entries; polls++) {\n"
+  "      if (polls >= c.polls) { give_up(g, c.step, m); return; }\n"
+  "      FENCE;\n"
+  "    }\n"
+  "    SYS ulong *entry = (SYS ulong *)(region + r[0] + 128 + (k & (c.entries - 1)) * 32);\n"
+  "    entry[1] = r[2]; entry[2] = r[3]; entry[3] = r[4] + (k & (c.entries - 1)) * 8;\n"
   "    FENCE;\n"
   "    entry[0] = k + 1;\n"
+  "    *(SYS ulong *)(region + r[5]) = k;\n"
+  "    *counter = k + 1;\n"
   "    FENCE;\n"
   "  }\n"
   "}\n"
-  "// One thread waits for each listed message: its sequence k where the post kept it (a byte offset into buffer 0),\n"
-  "// its word in its ring's R words (from the ring's first word's offset): set to at least k + 1 (the bridge's k + 1,\n"
-  "// or the session's cancellation).  list: n, entries R, then n pairs (where k is kept, the ring's words).\n"
-  "kernel void wait(device uchar *w [[buffer(0)]], constant ulong *list [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
+  "// One thread waits for each listed message, pairs (where its sequence k is kept, its ring's words): its word, of its\n"
+  "// ring's R, set to at least k + 1 (the bridge's k + 1, or the session's cancellation); past c.polls polls it gives up.\n"
+  "kernel void wait(device uchar *region [[buffer(0)]], constant ulong *list [[buffer(1)]], constant control &c [[buffer(2)]],\n"
+  "                 uint i [[thread_position_in_grid]]) {\n"
   "  if (i) return;\n"
-  "  const ulong n = list[0], entries = list[1];\n"
-  "  for (ulong m = 0; m < n; m++) {\n"
-  "    const ulong k = *(SYS ulong *)(w + list[2 + 2 * m]);\n"
-  "    SYS ulong *word = (SYS ulong *)(w + list[3 + 2 * m] + (k & (entries - 1)) * 8);\n"
-  "    while (*word <= k) FENCE;\n"
+  "  SYS ulong *g = (SYS ulong *)(region + c.giveup);\n"
+  "  if (g[0]) return;\n"
+  "  for (ulong m = 0; m < c.n; m++) {\n"
+  "    const ulong k = *(SYS ulong *)(region + list[2 * m]);\n"
+  "    SYS ulong *word = (SYS ulong *)(region + list[2 * m + 1] + (k & (c.entries - 1)) * 8);\n"
+  "    for (ulong polls = 0;; polls++) {\n"
+  "      FENCE;\n"
+  "      if (*word > k) break;\n"
+  "      if (polls >= c.polls) { give_up(g, c.step, 0); return; }\n"
+  "    }\n"
   "  }\n"
   "  FENCE;\n"
   "}\n"
-  "// a word (a byte offset into buffer 0) set to `value`, system-coherent, after the dispatches before it\n"
-  "kernel void publish(device uchar *w [[buffer(0)]], constant ulong *a [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
+  "// a word (c.first, a byte offset in the region) set to c.n after the dispatches before it, unless they gave up\n"
+  "kernel void publish(device uchar *region [[buffer(0)]], constant control &c [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
   "  if (i) return;\n"
+  "  if (*(SYS ulong *)(region + c.giveup)) return;\n"
   "  FENCE;\n"
-  "  *(SYS ulong *)(w + a[0]) = a[1];\n"
+  "  *(SYS ulong *)(region + c.first) = c.n;\n"
+  "  FENCE;\n"
+  "}\n"
+  "// the give-up words cleared: a program encoded again from where it gave up starts with it\n"
+  "kernel void clear(device uchar *region [[buffer(0)]], constant control &c [[buffer(1)]], uint i [[thread_position_in_grid]]) {\n"
+  "  if (i) return;\n"
+  "  SYS ulong *g = (SYS ulong *)(region + c.giveup);\n"
+  "  FENCE;\n"
+  "  g[0] = 0; g[1] = 0; g[2] = 0;\n"
   "  FENCE;\n"
   "}\n";
 
-enum { KERNEL_COMBINE, KERNEL_PREMULTIPLY, KERNEL_POSTDIVIDE, KERNEL_COPY, KERNEL_POST, KERNEL_WAIT, KERNEL_PUBLISH, KERNELS };
+enum { KERNEL_COMBINE, KERNEL_PREMULTIPLY, KERNEL_POSTDIVIDE, KERNEL_COPY, KERNEL_POST, KERNEL_WAIT, KERNEL_PUBLISH, KERNEL_CLEAR, KERNELS };
+struct control { uint64_t n,entries,step,giveup,first,polls; };
 struct args { uint64_t dst,src,n,scalar; uint32_t type,op,nranks,width,received,published,fresh,want; uint64_t other,pred; };
 static struct { id<MTLDevice> device; id<MTLComputePipelineState> kernels[KERNELS]; } gpu;
 #define HIDDEN __attribute__((visibility("hidden")))
@@ -367,7 +402,7 @@ HIDDEN int nccl_mesh_gpu_attach(char *error,size_t size){
     if(@available(macOS 15.0,*))options.mathMode=MTLMathModeSafe;
     NSError *failure=nil;
     id<MTLLibrary> library=[[device newLibraryWithSource:@(source) options:options error:&failure] autorelease];
-    static const char *const names[KERNELS]={"combine","premultiply","postdivide","copy","post","wait","publish"};
+    static const char *const names[KERNELS]={"combine","premultiply","postdivide","copy","post","wait","publish","clear"};
     for(int k=0;library && k<KERNELS;k++){
       id<MTLFunction> function=[[library newFunctionWithName:@(names[k])] autorelease];
       if(!(gpu.kernels[k]=[device newComputePipelineStateWithFunction:function error:&failure]))library=nil;
@@ -416,20 +451,21 @@ HIDDEN void nccl_mesh_commit_wait(void *commandBuffer,char *error,size_t size){
   [command release];
 }
 /* Kernel k (0 combine: dst op= src, or with `other` dst = other op src; 1 premultiply: dst = src x scalar; 2
-   postdivide: dst /= nranks) over n elements of `type`, dst a byte offset into buffer `to`, src into `from`. */
+   postdivide: dst /= nranks) over n elements of `type`, dst a byte offset into buffer `to`, src into `from`; it returns
+   at once while the give-up flag at byte `giveup` of `region` is set. */
 HIDDEN void nccl_mesh_kernel(void *encoder,int k,void *to,uint64_t dst,void *from,uint64_t src,uint64_t n,int type,int op,
-  int nranks,uint64_t scalar,int published,void *other,uint64_t at){
+  int nranks,uint64_t scalar,int published,void *other,uint64_t at,void *region,uint64_t giveup){
   if(!n)return;
   @autoreleasepool {
     id<MTLComputeCommandEncoder> e=encoder;
     struct args a={.dst=dst,.src=src,.n=n,.scalar=scalar,.type=(uint32_t)type,.op=(uint32_t)op,.nranks=(uint32_t)nranks,.width=1,
-      .published=(uint32_t)(published!=0),.fresh=(uint32_t)(other!=NULL),.other=at};
+      .published=(uint32_t)(published!=0),.fresh=(uint32_t)(other!=NULL),.other=at,.pred=giveup};
     [e setComputePipelineState:gpu.kernels[k]];
     [e setBuffer:(id<MTLBuffer>)to offset:0 atIndex:0];
     [e setBuffer:(id<MTLBuffer>)from offset:0 atIndex:1];
     [e setBytes:&a length:sizeof a atIndex:2];
     [e setBuffer:(id<MTLBuffer>)(other?other:to) offset:0 atIndex:3];
-    [e setBuffer:(id<MTLBuffer>)to offset:0 atIndex:4];
+    [e setBuffer:(id<MTLBuffer>)region offset:0 atIndex:4];
     NSUInteger width=gpu.kernels[k].maxTotalThreadsPerThreadgroup<256?gpu.kernels[k].maxTotalThreadsPerThreadgroup:256;
     uint64_t threads=n<(1u<<20)?n:(1u<<20);
     [e dispatchThreads:MTLSizeMake((NSUInteger)threads,1,1) threadsPerThreadgroup:MTLSizeMake(width,1,1)];
@@ -437,58 +473,77 @@ HIDDEN void nccl_mesh_kernel(void *encoder,int k,void *to,uint64_t dst,void *fro
 }
 /* `bytes` from offset src of `from` to offset dst of `to`, stored system-coherent and fenced where a SEND reads
    them (`published`), loaded system-coherent where the NIC wrote them (`received`), in the widest unit the offsets
-   and length allow. */
-HIDDEN void nccl_mesh_copy(void *encoder,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received,int published){
+   and length allow; gated as a kernel is. */
+HIDDEN void nccl_mesh_copy(void *encoder,void *to,uint64_t dst,void *from,uint64_t src,uint64_t bytes,int received,int published,
+  void *region,uint64_t giveup){
   if(!bytes)return;
   @autoreleasepool {
     id<MTLComputeCommandEncoder> e=encoder;
     const uint32_t width=!((dst|src|bytes)&15)?16:!((dst|src|bytes)&3)?4:1;
-    struct args a={.dst=dst,.src=src,.n=bytes/width,.width=width,.received=(uint32_t)(received!=0),.published=(uint32_t)(published!=0)};
+    struct args a={.dst=dst,.src=src,.n=bytes/width,.width=width,.received=(uint32_t)(received!=0),.published=(uint32_t)(published!=0),.pred=giveup};
     [e setComputePipelineState:gpu.kernels[KERNEL_COPY]];
     [e setBuffer:(id<MTLBuffer>)to offset:0 atIndex:0];
     [e setBuffer:(id<MTLBuffer>)from offset:0 atIndex:1];
     [e setBytes:&a length:sizeof a atIndex:2];
-    [e setBuffer:(id<MTLBuffer>)to offset:0 atIndex:4];
+    [e setBuffer:(id<MTLBuffer>)region offset:0 atIndex:4];
     uint64_t threads=a.n<(1u<<20)?a.n:(1u<<20);
     [e dispatchThreads:MTLSizeMake((NSUInteger)threads,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];
   }
 }
-/* A one-thread kernel (post or wait) over its list: `list` of `count` words, in a buffer of the caller's when past
-   setBytes' 4 KB (`held`, retained by the caller until the command buffer has run). */
-static int list_kernel(id<MTLComputeCommandEncoder> e,int k,void *b0,void *b1,const uint64_t *list,size_t count,void **held){
-  const size_t bytes=count*sizeof *list;
+/* A one-thread kernel (post or wait) over `count` records of `width` words, its control set: the records as bytes up
+   to setBytes' 4 KB, else from `*held`, a buffer made at the first encoding and kept by the caller. */
+static int list_kernel(id<MTLComputeCommandEncoder> e,int k,void *region,const uint64_t *list,size_t words,const struct control *c,void **held){
+  const size_t bytes=(words?words:1)*sizeof *list;
   [e setComputePipelineState:gpu.kernels[k]];
-  [e setBuffer:(id<MTLBuffer>)b0 offset:0 atIndex:0];
-  int index=k==KERNEL_POST?2:1;
-  if(k==KERNEL_POST)[e setBuffer:(id<MTLBuffer>)b1 offset:0 atIndex:1];
-  if(bytes<=4096)[e setBytes:list length:bytes atIndex:(NSUInteger)index];
+  [e setBuffer:(id<MTLBuffer>)region offset:0 atIndex:0];
+  if(bytes<=4096)[e setBytes:list length:bytes atIndex:1];
   else{
-    id<MTLBuffer> made=[gpu.device newBufferWithBytes:list length:bytes options:MTLResourceStorageModeShared];
-    if(!made)return -1;
-    [e setBuffer:made offset:0 atIndex:(NSUInteger)index];
-    *held=made;
+    if(!*held && !(*held=[gpu.device newBufferWithBytes:list length:bytes options:MTLResourceStorageModeShared]))return -1;
+    [e setBuffer:(id<MTLBuffer>)*held offset:0 atIndex:1];
   }
+  [e setBytes:c length:sizeof *c atIndex:2];
   [e dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
   return 0;
 }
-HIDDEN int nccl_mesh_post(void *encoder,void *rings,void *words,const uint64_t *list,size_t count,void **held){
-  @autoreleasepool {return list_kernel(encoder,KERNEL_POST,rings,words,list,count,held);}
+HIDDEN int nccl_mesh_post(void *encoder,void *region,const uint64_t *list,uint64_t n,uint64_t entries,uint64_t step,uint64_t giveup,
+  uint64_t first,uint64_t polls,void **held){
+  struct control c={n,entries,step,giveup,first,polls};
+  @autoreleasepool {return list_kernel(encoder,KERNEL_POST,region,list,6*n,&c,held);}
 }
-HIDDEN int nccl_mesh_wait(void *encoder,void *words,const uint64_t *list,size_t count,void **held){
-  @autoreleasepool {return list_kernel(encoder,KERNEL_WAIT,words,NULL,list,count,held);}
+HIDDEN int nccl_mesh_wait(void *encoder,void *region,const uint64_t *list,uint64_t n,uint64_t entries,uint64_t step,uint64_t giveup,
+  uint64_t polls,void **held){
+  struct control c={n,entries,step,giveup,0,polls};
+  @autoreleasepool {return list_kernel(encoder,KERNEL_WAIT,region,list,2*n,&c,held);}
 }
-HIDDEN void nccl_mesh_publish(void *encoder,void *buffer,uint64_t at,uint64_t value){
+/* The word at byte `at` of `region` set to `value` (unless the dispatches before it gave up), or (clear) the give-up
+   words cleared. */
+static void control_kernel(void *encoder,int k,void *region,const struct control *c){
   @autoreleasepool {
     id<MTLComputeCommandEncoder> e=encoder;
-    const uint64_t a[2]={at,value};
-    [e setComputePipelineState:gpu.kernels[KERNEL_PUBLISH]];
-    [e setBuffer:(id<MTLBuffer>)buffer offset:0 atIndex:0];
-    [e setBytes:a length:sizeof a atIndex:1];
+    [e setComputePipelineState:gpu.kernels[k]];
+    [e setBuffer:(id<MTLBuffer>)region offset:0 atIndex:0];
+    [e setBytes:c length:sizeof *c atIndex:1];
     [e dispatchThreads:MTLSizeMake(1,1,1) threadsPerThreadgroup:MTLSizeMake(1,1,1)];
   }
+}
+HIDDEN void nccl_mesh_publish(void *encoder,void *region,uint64_t at,uint64_t value,uint64_t giveup){
+  struct control c={.n=value,.giveup=giveup,.first=at};
+  control_kernel(encoder,KERNEL_PUBLISH,region,&c);
+}
+HIDDEN void nccl_mesh_clear(void *encoder,void *region,uint64_t giveup){
+  struct control c={.giveup=giveup};
+  control_kernel(encoder,KERNEL_CLEAR,region,&c);
 }
 /* The buffers a program's commands use but do not bind (a slab a SEND reads or a RECV lands in: the NIC's), declared
    to the encoder, so Metal orders the queue's later work on them after it. */
 HIDDEN void nccl_mesh_use(void *encoder,void *buffer){
   [(id<MTLComputeCommandEncoder>)encoder useResource:(id<MTLBuffer>)buffer usage:MTLResourceUsageRead|MTLResourceUsageWrite];
 }
+/* A completion handler on `commandBuffer` (an id<MTLCommandBuffer> not yet committed): `done(argument, error)` once it
+   has completed, `error` its failure or NULL. */
+HIDDEN void nccl_mesh_on_completion(void *commandBuffer,void (*done)(void *,const char *),void *argument){
+  [(id<MTLCommandBuffer>)commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> command){
+    done(argument,command.status==MTLCommandBufferStatusError?command.error.localizedDescription.UTF8String:NULL);
+  }];
+}
+HIDDEN void nccl_mesh_commit(void *commandBuffer){[(id<MTLCommandBuffer>)commandBuffer commit];}
