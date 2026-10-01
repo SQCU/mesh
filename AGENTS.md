@@ -259,7 +259,7 @@ lives in `bin/` for the same reason.
 Read `../../metal-microbench/docs/principles.md` (from this repo's root; on the Mini,
 `~/metal-microbench/docs/principles.md`) and its `docs/measurement.md`. Collectives are transcribed
 from the literature (`rdma/mesh-collective.c`) and selected from an explicit link map. Where nodes or
-links differ, read `design/heterogeneity.md`. Code is held to `../../metal-microbench/docs/standards.md`.
+links differ, read `design/heterogeneity.md`.
 
 ## Tests and specification
 
