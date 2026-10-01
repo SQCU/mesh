@@ -28,11 +28,11 @@ int main(int argc,char **argv){
   uint64_t pid=atomic_load(&h->bridge_pid);
   int alive=pid && (!kill((pid_t)pid,0) || errno==EPERM);
   uint32_t paired=0;
-  for(uint32_t i=0;i<h->links;i++)paired+=alive && atomic_load(&mesh_links(h)[i].port.phase)==MESH_PAIRED;
-  printf("{\"up\":%s,\"ready\":%s,\"paired\":%s,\"bridge_pid\":%llu,\"client\":%llu,\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"rows\":%u,\"qps\":%u,\"links\":%u,\"paired_links\":%u,\"code\":%lld,\"domain\":%u,\"peers\":[",
-    alive?"true":"false",alive?"true":"false",paired?"true":"false",(unsigned long long)pid,(unsigned long long)(uint32_t)atomic_load(&h->client),
-    h->version,h->node,h->pgsz,h->block,h->rows,h->qps,h->links,paired,(long long)h->port.code,h->port.domain);
-  /* each link's counts (mesh.h mesh_stats_link: flow control, both paths' traffic, the communicator session's
+  for(uint32_t i=0;i<h->links;i++)paired+=alive && atomic_load(&mesh_net_links(h)[i].phase)==MESH_PAIRED;
+  printf("{\"up\":%s,\"ready\":%s,\"paired\":%s,\"bridge_pid\":%llu,\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"pages\":%u,\"links\":%u,\"paired_links\":%u,\"peers\":[",
+    alive?"true":"false",alive?"true":"false",paired?"true":"false",(unsigned long long)pid,
+    h->version,h->node,h->pgsz,h->block,mesh_arena_pages(h),h->links,paired);
+  /* each link's counts (mesh.h mesh_stats_link: flow control, the communicators' traffic, the session's
      pairings, heartbeats, silence and resumptions) read lagged, as every reader reads them: the ring's entry of
      the last evaluation the lag lets this read (none before it); live, only the link's state and when its
      bridge last heard its peer (its liveness), and the device's registered regions */
@@ -46,12 +46,12 @@ int main(int argc,char **argv){
     struct mesh_net_link *n=mesh_net_links(h)+i;
     const struct mesh_stats_link f=seen && i<lagged->links?lagged->link[i]:(struct mesh_stats_link){0};
     const uint64_t heard=atomic_load(&n->heard_ns);
-    printf("%s{\"node\":%u,\"phase\":%u,\"code\":%lld,\"domain\":%u,\"device\":\"%s\",\"bandwidth\":%llu,",i?",":"",link->peer,atomic_load(&link->port.phase),(long long)link->port.code,link->port.domain,link->device,(unsigned long long)__atomic_load_n(&link->bandwidth,__ATOMIC_RELAXED));
-    printf("\"flow\":{\"send_stalls\":%llu,\"receive_stalls\":%llu,\"credit_waits\":%llu,\"sends\":%llu,\"send_bytes\":%llu,\"receives\":%llu,\"receive_bytes\":%llu,"
+    printf("%s{\"node\":%u,\"phase\":%u,\"device\":\"%s\",\"bandwidth\":%llu,",i?",":"",link->peer,atomic_load(&n->phase),link->device,
+      (unsigned long long)__atomic_load_n(&link->bandwidth,__ATOMIC_RELAXED));
+    printf("\"flow\":{\"send_stalls\":%llu,\"receive_stalls\":%llu,\"credit_waits\":%llu,"
       "\"net_sends\":%llu,\"net_send_bytes\":%llu,\"net_receives\":%llu,\"net_receive_bytes\":%llu,\"heartbeats_sent\":%llu,\"heartbeats_heard\":%llu,"
       "\"silence_ns\":%llu,\"resumes\":%llu,\"resends\":%llu,\"reposts\":%llu},",
-      (unsigned long long)f.send_stalls,(unsigned long long)f.receive_stalls,(unsigned long long)f.credit_waits,(unsigned long long)f.sends,
-      (unsigned long long)f.send_bytes,(unsigned long long)f.receives,(unsigned long long)f.receive_bytes,(unsigned long long)f.net_sends,
+      (unsigned long long)f.send_stalls,(unsigned long long)f.receive_stalls,(unsigned long long)f.credit_waits,(unsigned long long)f.net_sends,
       (unsigned long long)f.net_send_bytes,(unsigned long long)f.net_receives,(unsigned long long)f.net_receive_bytes,(unsigned long long)f.heartbeats_sent,
       (unsigned long long)f.heartbeats_heard,(unsigned long long)f.silence_ns,(unsigned long long)f.resumes,(unsigned long long)f.resends,
       (unsigned long long)f.reposts);
@@ -82,15 +82,13 @@ int main(int argc,char **argv){
       atomic_load(&comm->error));
   }
   /* whether a client of the region is alive (its bridge, stopped, keeps the region for it): a communicator client's
-     process, one owning a comm, or the prepared program's */
+     process, or one owning a comm */
   int attached=0;
   for(uint32_t i=0;i<MESH_NET_CLIENTS && !attached;i++){const uint64_t o=atomic_load(&mesh_net_clients(h)[i].owner);attached=o && (!kill((pid_t)(uint32_t)o,0) || errno==EPERM);}
   for(uint32_t i=0;i<MESH_NET_COMMS && !attached;i++){
     const uint32_t state=atomic_load(&mesh_net_comms(h)[i].state);const uint64_t o=mesh_net_comms(h)[i].owner;
     attached=state!=MESH_NET_FREE && state!=MESH_NET_CLAIMED && o && (!kill((pid_t)(uint32_t)o,0) || errno==EPERM);
   }
-  const uint64_t c=atomic_load(&h->client);
-  attached|=c && (!kill((pid_t)(uint32_t)c,0) || errno==EPERM);
   printf("],\"attached\":%s}\n",attached?"true":"false");
   munmap(h,bytes); close(f); return readiness && !alive;
 }

@@ -1019,8 +1019,8 @@ ncclResult_t ncclMeshGetCounts(ncclMeshCounts_t* counts);
    evaluations ended so far) and the entries of evaluations first..evaluation - lag still in the ring, at most
    `capacity` into `out`, `count` of them; the evaluations ended so far and the lag (the bridge's -K), where not
    NULL.  Nothing reads a fresher one: a statistic reaches a reader K evaluations after the one it describes. */
-typedef struct { uint64_t sendStalls, receiveStalls, creditWaits, sends, sendBytes, receives, receiveBytes, netSends, netSendBytes, netReceives,
-  netReceiveBytes, sessions, heartbeatsSent, heartbeatsHeard, silenceNs, resumes, resends, reposts; } ncclMeshStatsLink_t;
+typedef struct { uint64_t sendStalls, receiveStalls, creditWaits, netSends, netSendBytes, netReceives, netReceiveBytes, sessions,
+  heartbeatsSent, heartbeatsHeard, silenceNs, resumes, resends, reposts; } ncclMeshStatsLink_t;
 typedef struct { uint64_t evaluation, ns; uint32_t links, pid; uint64_t client[24]; ncclMeshStatsLink_t link[8]; } ncclMeshStats_t;
 ncclResult_t ncclMeshStats(uint64_t evaluation, uint64_t first, ncclMeshStats_t* out, int capacity, int* count, uint64_t* evaluations, uint32_t* lag);
 /* The counts of each call of this thread's last ended group, in issue order (at most `capacity`),

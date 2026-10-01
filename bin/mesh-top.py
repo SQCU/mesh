@@ -232,7 +232,7 @@ class Top:
                 spec = specs[index] if index < len(specs) else {}
                 peer = self.owner(spec.get("remote"))[0] or self.peer_by_rank(spec.get("peer")) or f"rank{spec.get('peer', '?')}"
                 delta = lambda *keys: max(0, sum(flow.get(k, 0) - was.get(k, 0) for k in keys))
-                self.series[(peer, node.name, "live")].append((float(sample["observed_at"]), dt, delta("receive_bytes", "net_receive_bytes"), delta("receives", "net_receives"), 0))
+                self.series[(peer, node.name, "live")].append((float(sample["observed_at"]), dt, delta("net_receive_bytes"), delta("net_receives"), 0))
             if any((x.get("log_size") or 0) - x.get("log_offset", 0) > 65536 for x in (old or {}, bridge)): continue
             for index, total in (bridge.get("census") or {}).items():
                 base = ((old or {}).get("census") or {}).get(index) or {}
@@ -307,7 +307,7 @@ class Top:
                 stat = b.get("stat") or {}
                 phases = "/".join(PHASES.get(p.get("phase"), "?") for p in stat.get("peers") or []) or ("up" if stat.get("up") else "no region")
                 session = "/".join(PHASES.get((p.get("session") or {}).get("phase"), "?") for p in stat.get("peers") or [])
-                state = f"{phases} call {stat['client']}" if stat.get("client") else f"idle, net {session}" if session else "idle"
+                state = f"net {session}" if session else "idle"
                 bridge = (f"{b['region']} pid {b['pid']} {state}" + (f" +{len(live) - 1}" if len(live) > 1 else ""), "ok" if "PAIRED" in phases or "PAIRED" in session else "warn")
             elif f.get("bridges"):
                 b = max(f["bridges"], key=lambda x: x["exited_at"])
@@ -368,9 +368,9 @@ class Top:
                 bridge, peer = self.bridge_link(node, iface) if node else (None, None)
                 probed = ((node.probe or {}).get("states") or {}).get("rdma_" + iface) if node else None
                 if bridge and not bridge.get("exited_at") and peer:
-                    phase, client = PHASES.get(peer.get("phase"), "?"), (bridge.get("stat") or {}).get("client")
-                    text = f"{phase}, port active" if phase == "PAIRED" else f"{phase} code {peer.get('code')} during call {client}" if client else "bridge idle between calls"
-                    segments.append((f"{node.name}:rdma_{iface} {text} (bridge {bridge['region']})   ", "ok" if phase == "PAIRED" else "warn" if client else "dim"))
+                    phase, code = PHASES.get(peer.get("phase"), "?"), (peer.get("session") or {}).get("code")
+                    text = f"session {phase}" + (f" code {code}" if code else "")
+                    segments.append((f"{node.name}:rdma_{iface} {text} (bridge {bridge['region']})   ", "ok" if phase == "PAIRED" else "warn"))
                 elif probed:
                     segments.append((f"{node.name}:rdma_{iface} {probed} (probe {time.strftime('%H:%M:%S', time.localtime(node.probe['at']))})   ", "ok" if probed == "PORT_ACTIVE" else "bad"))
                 else: segments.append((f"{node.name}:rdma_{iface} unmeasured (no bridge; p probes)   ", "dim"))
@@ -410,7 +410,6 @@ class Top:
                         f, p = live[int(index)], peers[int(index)] if int(index) < len(peers) else {}
                         session, regions = p.get("session") or {}, p.get("regions") or {}
                         reference.append(f"{node.name} bridge {bridge['region']} live: flow-control stalls send {f.get('send_stalls', 0)} receive {f.get('receive_stalls', 0)}, credit waits {f.get('credit_waits', 0)}; "
-                                         f"program {f.get('sends', 0)} SENDs {rate_text(f.get('send_bytes', 0)).replace('/s', '')}, {f.get('receives', 0)} RECVs {rate_text(f.get('receive_bytes', 0)).replace('/s', '')}; "
                                          f"communicators {f.get('net_sends', 0)} sent {rate_text(f.get('net_send_bytes', 0)).replace('/s', '')}, {f.get('net_receives', 0)} received {rate_text(f.get('net_receive_bytes', 0)).replace('/s', '')}; "
                                          f"session {PHASES.get(session.get('phase'), '?')} ({session.get('sessions', 0)} pairings, {session.get('chunk_frames', 0)} frames a chunk); {regions.get('wire', 0)} window regions, {rate_text((bridge.get('stat') or {}).get('client_bytes', 0)).replace('/s', '')} of the window communicators' memory")
             for text in reference: add(("      " + text, "dim"))

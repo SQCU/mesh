@@ -11,11 +11,10 @@ STAT="$(dirname "$BIN")/mesh-stat"; [ -x "$STAT" ] || STAT="$ROOT/rdma/mesh-stat
 case "$BIN" in *-wt/*|*/.build/*|/tmp/*|/private/tmp/*) echo "mesh-bridge: refusing to launch the bridge from a worktree, build or scratch path ($BIN); run make install-bridge" >&2; exit 65 ;; esac
 
 scope=gui; mesh_pct=; node=0; links=(); region=/mesh0; flags=()
-mesh_arena_pages=; mesh_block_pages=; mesh_qps=1
+mesh_arena_pages=; mesh_block_pages=
 
 if [ -f "$CONF" ]; then . "$CONF"; fi
 case "$region" in /mesh0) ;; *) LABEL="io.mesh.bridge.${region#/}" ;; esac
-mesh_qps="${MESH_QPS:-$mesh_qps}"
 mesh_arena_pages="${MESH_ARENA_PAGES:-$mesh_arena_pages}"
 mesh_block_pages="${MESH_BLOCK_PAGES:-$mesh_block_pages}"
 geometry=(-A "$mesh_arena_pages" -B "$mesh_block_pages")
@@ -26,7 +25,7 @@ geometry+=(${flags[@]+"${flags[@]}"})
 
 case "$scope" in
 system)
-  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" MESH_ARENA_PAGES="$mesh_arena_pages" MESH_BLOCK_PAGES="$mesh_block_pages" MESH_QPS="$mesh_qps" MESH_BIN="$BIN" MESH_LOG_DIR="${MESH_LOG_DIR:-}" MESH_LOG="${MESH_LOG:-}" MESH_LEDGER="${MESH_LEDGER:-}" "$0" "$@"; fi
+  if [ "$(id -u)" != 0 ]; then exec sudo -n MESH_CONF="$CONF" MESH_ARENA_PAGES="$mesh_arena_pages" MESH_BLOCK_PAGES="$mesh_block_pages" MESH_BIN="$BIN" MESH_LOG_DIR="${MESH_LOG_DIR:-}" MESH_LOG="${MESH_LOG:-}" "$0" "$@"; fi
   DOM=system; PLIST=/Library/LaunchDaemons/$LABEL.plist
   LOGDIR="${MESH_LOG_DIR:-/usr/local/mesh/log}" ;;
 gui)
@@ -61,7 +60,7 @@ $( for arg in ${link_args[@]+"${link_args[@]}"}; do printf '<string>%s</string>'
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>ThrottleInterval</key><integer>1</integer>
 <key>ExitTimeOut</key><integer>60</integer>
-<key>EnvironmentVariables</key><dict><key>MESH_LOG_DIR</key><string>$LOGDIR</string><key>MESH_QPS</key><string>$mesh_qps</string>$( [ -n "${MESH_LEDGER:-}" ] && printf '<key>MESH_LEDGER</key><string>%s</string>' "$MESH_LEDGER" )</dict>
+<key>EnvironmentVariables</key><dict><key>MESH_LOG_DIR</key><string>$LOGDIR</string></dict>
 <key>StandardOutPath</key><string>$LOG</string>
 <key>StandardErrorPath</key><string>$LOG</string>
 </dict></plist>
@@ -96,12 +95,12 @@ do_stop() {
 
 do_start() {
   if launchctl print "$DOM/$LABEL" >/dev/null 2>&1; then
-    have=$("$STAT" "$region" 2>/dev/null | tr ',' '\n' | grep -E '"(rows|block|qps|links)"' | tr -d '" ' | tr '\n' ' ')
-    want="rows:$mesh_arena_pages block:$mesh_block_pages qps:$mesh_qps links:${#links[@]}"
-    if [ -n "$(pid_of)" ] && echo "$have" | grep -q "rows:$mesh_arena_pages " && echo "$have" | grep -q "block:$mesh_block_pages " && echo "$have" | grep -q "qps:$mesh_qps " && echo "$have" | grep -q "links:${#links[@]} "; then
+    have=$("$STAT" "$region" 2>/dev/null | tr ',' '\n' | grep -E '"(pages|block|links)"' | tr -d '" ' | tr '\n' ' ')
+    want="pages:$mesh_arena_pages block:$mesh_block_pages links:${#links[@]}"
+    if [ -n "$(pid_of)" ] && echo "$have" | grep -q "pages:$mesh_arena_pages " && echo "$have" | grep -q "block:$mesh_block_pages " && echo "$have" | grep -q "links:${#links[@]} "; then
       echo "mesh-bridge: already running as $(pid_of) with $want"; return 0
     fi
-    if "$STAT" "$region" 2>/dev/null | grep -qE '"client":[1-9]'; then
+    if attached; then
       echo "mesh-bridge: running with other geometry ($have) and a client attached; not restarting" >&2; return 1
     fi
     echo "mesh-bridge: running with other geometry ($have); restarting for $want"

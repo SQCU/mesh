@@ -20,6 +20,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <stdarg.h>
+#include <os/os_sync_wait_on_address.h>
 #include "mesh-disk.h"
 
 /* A line of the bridge's log (its stderr): one write, made only as mesh-disk.h's log guard allows (past
@@ -36,8 +37,8 @@ __attribute__((format(printf, 1, 2))) static void say(const char *format, ...) {
 }
 
 #define QD 4095
-/* TN3205: a device's UC queue pairs (it reports max_qp 11, 10 usable); a link's session's and its prepared
-   program's, over every link of the device, are within them (mesh-flow.c) */
+/* TN3205: a device's UC queue pairs (it reports max_qp 11, 10 usable); the sessions' of every link of the device
+   are within them (mesh-flow.c) */
 #define MESH_DEVICE_QPS 10
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 /* tbt_post_recv loads only the low 32 address bits of an SGE, so no registration may cross a 4 GiB
@@ -56,45 +57,20 @@ struct mesh_device {
   const char *name;
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
   uint32_t region_count,frame_capacity;
-  char *wire; size_t extent,payload;
+  char *wire; size_t extent;
   char *discard; struct ibv_mr *discard_region;
   pthread_mutex_t setup;
 };
-/* design/prepared-machine.md#M09 */
-/* design/prepared-machine.md#M07 */
-/* The one copy of the wire-address arithmetic.  offset is a byte offset into the arena, which is a
-   byte offset into the registered window because the window begins at data_off.  No per-block span
-   array, no page-table mapping load, no startup loop over blocks: an arena of any size costs this
-   divide and nothing else. */
-static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t offset,uint64_t remaining){
-  uint64_t capacity=device->payload-offset%device->payload;
-  return (struct ibv_sge){.addr=(uintptr_t)device->wire+offset,
-    .length=(uint32_t)(remaining<capacity?remaining:capacity),
-    .lkey=device->regions[offset/device->extent]->lkey};
-}
-/* design/algorithm-sources.md#programcopy */
-/* A queue pair: its receives complete on `completion`, its SENDs on `sent`.  The device completes
-   every SEND, IBV_SEND_SIGNALED or not (the bridge's census: send completions equal requests), so a
-   SEND's completion is its queue's retirement and lands where the send thread polls it. */
-struct mesh_queue {
-  _Alignas(64) struct ibv_qp *pair;
-  struct ibv_cq *completion,*sent;
-  int (*poll)(struct ibv_cq *,int,struct ibv_wc *);
-  int (*send)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **);
-  int (*receive)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **);
-  uint32_t receive_capacity,send_capacity;
-};
-_Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
+/* A queue pair and the frames it takes posted (its receives complete on its provider's `completion`, its SENDs on
+   `sent`). */
+struct mesh_queue { struct ibv_qp *pair; uint32_t receive_capacity,send_capacity; };
 struct mesh_verbs {
   struct mesh_device *device; struct mesh_wire *wire;
   struct mesh_queue *queues; int qp_count,listener;
   struct ibv_cq *completion,*sent;
-  uint32_t peer,completion_entries[2];
+  uint32_t peer;
   uint64_t bandwidth;
-  const char *local_address,*remote_address,*service,*kind;
-  /* a prepared link's session's phase (mesh.h mesh_net_link): its pairing ends once that session's link is left */
-  _Atomic uint32_t *left;
-  uint32_t magic;
+  const char *local_address,*remote_address,*service;
 };
 /* design/prepared-machine.md#M07 */
 /* design/algorithm-sources.md#programtensor */
@@ -154,28 +130,25 @@ static void onsig(int s){ (void)s; stop++; }
 struct qpi { uint32_t xmagic, xsize; uint32_t pgsz; uint16_t lid; uint8_t gid[16]; uint32_t node,count; };
 #define XMAGIC 0x4d595048u
 
-/* A link's communicator session (mesh-flow.c net_session) pairs for the bridge's lifetime, not a client's. */
-#define MESH_NET_SESSION UINT64_MAX
-/* A pairing goes on until it pairs or an observed event ends it: this bridge stops, the prepared program's client
-   is another, or the link's session's peer left the mesh (`left`); never a clock.  The waits inside it poll at
-   PAIRING_POLL_MS, a pace for noticing those events. */
+/* A link's communicator session (mesh-flow.c net_session) pairs for the bridge's lifetime.  A pairing goes on
+   until it pairs or this bridge stops; never a clock.  The waits inside it poll at PAIRING_POLL_MS, a pace for
+   noticing the stop. */
 #define PAIRING_POLL_MS 10
 /* design/algorithm-sources.md#programcopy */
-static int pairing_active(struct hdr *m,uint64_t client,const struct mesh_verbs *provider){
-  if(stop || (client!=MESH_NET_SESSION && atomic_load_explicit(&m->client,memory_order_acquire)!=client)){errno=ECANCELED;return 0;}
-  if(provider->left && atomic_load_explicit(provider->left,memory_order_acquire)==MESH_LEFT){errno=ENETDOWN;return 0;}
+static int pairing_active(void){
+  if(stop){errno=ECANCELED;return 0;}
   return 1;
 }
 
 /* design/algorithm-sources.md#programcopy */
-static int dial(struct addrinfo *a,struct hdr *m,uint64_t client,const struct mesh_verbs *provider){
-  if(!pairing_active(m,client,provider))return -1;
+static int dial(struct addrinfo *a){
+  if(!pairing_active())return -1;
   int f=socket(a->ai_family,SOCK_STREAM,0); if(f<0) return -1;
   if(fcntl(f,F_SETFL,O_NONBLOCK)<0)goto failed;
   if(connect(f,a->ai_addr,a->ai_addrlen)==0)return f;
   if(errno!=EINPROGRESS)goto failed;
   struct pollfd ready={.fd=f,.events=POLLOUT};
-  while(pairing_active(m,client,provider)){
+  while(pairing_active()){
     int status=poll(&ready,1,PAIRING_POLL_MS);
     if(status<0 && errno==EINTR)continue;
     if(status<0)goto failed;
@@ -204,9 +177,9 @@ static int listener_up(struct mesh_verbs *provider){
   return 0; }
 
 /* design/algorithm-sources.md#programcopy */
-static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t receive_bytes,struct hdr *m,uint64_t client,const struct mesh_verbs *provider){
+static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t receive_bytes){
   size_t sent=0,got=0;
-  while(pairing_active(m,client,provider)){
+  while(pairing_active()){
     if(sent==send_bytes && got==receive_bytes)return 0;
     struct pollfd ready={.fd=f,.events=(short)((sent<send_bytes?POLLOUT:0)|(got<receive_bytes?POLLIN:0))};
     if(poll(&ready,1,PAIRING_POLL_MS)<0 && errno!=EINTR)return -1;
@@ -232,11 +205,11 @@ static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t re
    the moment it accepts, so a peer dialing for its next pairing is refused (and dials again) until this
    node's next pairing listens, instead of landing in a backlog that nobody accepts and that is reset when
    the link closes. */
-static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
-  if(!pairing_active(m,client,provider))return -1;
+static int oob(struct mesh_verbs *provider,struct hdr *m){
+  if(!pairing_active())return -1;
   if(m->node>provider->peer){
     if(provider->listener<0 && listener_up(provider))return -1;
-    while(pairing_active(m,client,provider)){
+    while(pairing_active()){
       struct pollfd waiting={.fd=provider->listener,.events=POLLIN};
       if(poll(&waiting,1,PAIRING_POLL_MS)<=0)continue;
       int f=accept(provider->listener,NULL,NULL);
@@ -253,9 +226,9 @@ static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
   if(getaddrinfo(provider->remote_address,provider->service,&hint,&addresses)){errno=EINVAL;return -1;}
   int socket=-1,error=EHOSTUNREACH;
   for(;;){
-    if(!pairing_active(m,client,provider)){error=errno;break;}
+    if(!pairing_active()){error=errno;break;}
     for(struct addrinfo *a=addresses;a;a=a->ai_next){
-      socket=dial(a,m,client,provider);error=errno;
+      socket=dial(a);error=errno;
       if(socket>=0 || error==ECANCELED || error==ENETDOWN)break;
     }
     if(socket>=0 || (error!=ECONNREFUSED && error!=ENETUNREACH && error!=EHOSTUNREACH))break;
@@ -319,7 +292,7 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
     free(device->regions);device->regions=NULL;device->extent=fallback;error=0;
   }
   size_t extent=device->extent,regions=device->region_count;
-  device->wire=wire->data;device->extent=extent;device->payload=stride;
+  device->wire=wire->data;device->extent=extent;
   if(!device->discard){
     char *reserved=mmap(NULL,MESH_DISCARD+MESH_BANK,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE,-1,0);
     if(reserved==MAP_FAILED){error=errno;goto done;}
@@ -343,20 +316,20 @@ done:
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M06 */
 /* design/prepared-machine.md#M08 */
-static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
+static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int),void *state){
   struct ibv_port_attr pa;
   if(device_up(provider->device,provider->wire,m,&pa))return -1;
   uint32_t frame_capacity=provider->device->frame_capacity;
   union ibv_gid gid;uint32_t psn=arc4random()&0xffffff;
-  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION+provider->magic,.xsize=sizeof mine,.lid=pa.lid,.pgsz=m->block*m->pgsz,.node=m->node,.count=(uint32_t)qps},you;
+  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.lid=pa.lid,.pgsz=m->block*m->pgsz,.node=m->node,.count=(uint32_t)qps},you;
   int f;
   /* A connection reset before the peers' first exchange is a peer's abandoned attempt, not this
      pairing's failure: the pairing connects again. */
   for(;;){
-    f=oob(provider,m,client);
+    f=oob(provider,m);
     if(f<0)return -1;
     /* A peer host that dies silently (power, panic) becomes an EOF on this control socket within
-       idle + interval x count seconds, a link event (mesh-flow.c link_run); UC queue pairs report
+       idle + interval x count seconds, the session's end (mesh-flow.c net_read); UC queue pairs report
        nothing (docs/elastic.md §1 in metal-microbench). */
     int on=1,idle=5,interval=1,count=3;
     if(setsockopt(f,SOL_SOCKET,SO_KEEPALIVE,&on,sizeof on) || setsockopt(f,IPPROTO_TCP,TCP_KEEPALIVE,&idle,sizeof idle) ||
@@ -374,28 +347,25 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
       if(!provider->sent){close(f);return -1;}
       for(int q=0;q<qps;q++){
         struct mesh_queue *queue=&provider->queues[q];
-        queue->completion=provider->completion;queue->sent=provider->sent;
-        queue->poll=provider->completion->context->ops.poll_cq;
-        struct ibv_qp_init_attr qi={.send_cq=queue->sent,
-          .recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
+        struct ibv_qp_init_attr qi={.send_cq=provider->sent,
+          .recv_cq=provider->completion,.qp_type=IBV_QPT_UC,
           .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
         queue->pair=ibv_create_qp(provider->device->domain,&qi);
         if(!queue->pair){close(f);return -1;}
-        queue->send=queue->pair->context->ops.post_send;queue->receive=queue->pair->context->ops.post_recv;
         provider->qp_count=q+1;
         struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
         if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
         queue->receive_capacity=actual.cap.max_recv_wr;queue->send_capacity=actual.cap.max_send_wr;
-        say("%s capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",provider->kind?provider->kind:"pair",q,
+        say("session capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",q,
           actual.cap.max_send_wr,actual.cap.max_recv_wr,
-          queue->completion->cqe);
+          provider->completion->cqe);
       }
       struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
       for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->queues[q].pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
       if(ibv_query_gid(provider->device->context,1,0,&gid)){ close(f); return -1; }
       memcpy(mine.gid,&gid,16);
     }
-    if(!exchange(f,&mine,&you,sizeof mine,sizeof you,m,client,provider))break;
+    if(!exchange(f,&mine,&you,sizeof mine,sizeof you))break;
     int error=errno;close(f);
     if(error!=ECONNRESET && error!=EPIPE && error!=ENOTCONN && error!=ECONNABORTED){say("exchange failed\n");errno=error;return -1;}
     say("exchange reset: %s; connecting again\n",strerror(error));
@@ -405,7 +375,7 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
     say("exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,provider->peer); close(f);errno=EPROTO;return -1; }
   for(int q=0;q<qps;q++){
     uint32_t local[2]={provider->queues[q].pair->qp_num,(psn+(uint32_t)q)&0xffffff},remote[2];
-    if(exchange(f,local,remote,sizeof local,sizeof remote,m,client,provider)){close(f);return -1;}
+    if(exchange(f,local,remote,sizeof local,sizeof remote)){close(f);return -1;}
     struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[1],
       .dest_qp_num=remote[0],.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
         .grh={.hop_limit=1,.sgid_index=0}}};
@@ -413,7 +383,7 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
     int rc=ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
     if(rc){say("rtr %d rc %d\n",q,rc);close(f);return -1;}
   }
-  if(configure(state,f,client)){int error=errno;close(f);errno=error;return -1;}
+  if(configure(state,f)){int error=errno;close(f);errno=error;return -1;}
   for(int q=0;q<qps;q++){
     struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(psn+(uint32_t)q)&0xffffff};
     int rc=ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
@@ -423,5 +393,5 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   static const uint64_t speeds[256]={[1]=2500000000,[2]=5000000000,[4]=10000000000,[8]=10000000000,[16]=14000000000,[32]=25000000000,[64]=50000000000,[128]=100000000000};
   static const uint8_t widths[256]={[1]=1,[2]=4,[4]=8,[8]=12};
   provider->bandwidth=speeds[pa.active_speed]*widths[pa.active_width];
-  say("%s up: %s node %d\n",provider->kind?provider->kind:"pair",ibv_get_device_name(provider->device->context->device),m->node);
+  say("session up: %s node %d\n",ibv_get_device_name(provider->device->context->device),m->node);
   return f; }

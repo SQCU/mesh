@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <os/os_sync_wait_on_address.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -257,9 +258,9 @@ int mesh_net_accept(void *listenComm,void **recvComm,void **recvDevComm){
   return MESH_NET_SUCCESS;
 }
 
-/* In place: memory in the region's registered window (mesh_net_mem_alloc's, or any section a client has
-   there) is named by the device's registered regions it lies in; the bridge registers nothing new, as a
-   receive lands only in memory registered before its queue pair was set up.  Other memory is refused. */
+/* In place: memory in the region's registered window (mesh_net_mem_alloc's) is named by the device's
+   registered regions it lies in; the bridge registers nothing new, as a receive lands only in memory
+   registered before its queue pair was set up.  Other memory is refused. */
 int mesh_net_reg_mr(void *comm,void *data,size_t size,int type,void **mhandle){
   (void)comm;
   if(!net.m)return net_result(EBUSY);

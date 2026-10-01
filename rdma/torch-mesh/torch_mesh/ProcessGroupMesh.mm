@@ -1606,9 +1606,9 @@ static pybind11::dict stats(uint64_t first) {
   static const char *const client[] = {"cpu_copy_bytes", "gpu_copy_bytes", "gpu_kernels", "host_waits", "input_waits", "sent_bytes", "received_bytes",
                                        "gpu_event_waits", "gpu_word_waits", "host_word_waits", "commits", "wakeups", "buffers", "sends", "grant_waits",
                                        "gates_opened", "spins_given_up"};
-  static const char *const link[] = {"send_stalls", "receive_stalls", "credit_waits", "sends", "send_bytes", "receives", "receive_bytes", "net_sends",
-                                     "net_send_bytes", "net_receives", "net_receive_bytes", "sessions", "heartbeats_sent", "heartbeats_heard",
-                                     "silence_ns", "resumes", "resends", "reposts"};
+  static const char *const link[] = {"send_stalls", "receive_stalls", "credit_waits", "net_sends", "net_send_bytes", "net_receives",
+                                     "net_receive_bytes", "sessions", "heartbeats_sent", "heartbeats_heard", "silence_ns", "resumes",
+                                     "resends", "reposts"};
   pybind11::list list;
   for (int i = 0; first && i < n; i++) {
     const ncclMeshStats_t &e = entries[i];
@@ -1622,7 +1622,7 @@ static pybind11::dict stats(uint64_t first) {
     for (uint32_t l = 0; l < e.links; l++) {
       pybind11::dict counts;
       const uint64_t *v = (const uint64_t *)&e.link[l];
-      for (int k = 0; k < 18; k++) counts[link[k]] = v[k];
+      for (int k = 0; k < 14; k++) counts[link[k]] = v[k];
       links.append(counts);
     }
     d["links"] = links;
