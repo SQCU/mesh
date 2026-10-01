@@ -947,9 +947,22 @@ ncclResult_t ncclMeshEncodeCopies(void* commandBuffer, int n, void* const* dst, 
    call revokes the communicator, and every later one fails at its start, setting its words, so the GPU work
    waiting on them goes on); the communicator makes no other call meanwhile.  ncclMeshPersistentCounts gives
    each call's counts of its last iteration (ncclMeshGroupCounts' terms), ncclMeshPersistentFree releases
-   their allocations. */
+   their allocations.
+     Persistent point-to-point calls [MPI-4's MPI_Send_init and MPI_Recv_init, §3.9]: a group of ncclSend and ncclRecv
+   calls with no stream, each of a window allocation sent or received in place, is one part, which the library gives
+   no GPU work: the caller's own GPU work publishes and reads the buffers.  Before each send is issued
+   ncclMeshPersistentNext names its ready word (its whole bytes one range, `fresh` unused), which the caller's GPU
+   work counts up once the iteration's bytes are written (stored system-coherent); before each receive
+   ncclMeshPersistentLanded names its landed word (8 bytes in a window allocation), into which the bridge stores the
+   receive's end each iteration (1 landed, 2 failed: a failed call sets every one not yet set), so the caller's GPU work
+   waits on it itself.  As an iteration opens each send's isend is posted held and each receive's irecv posted into its
+   buffer, each connection's in issue order (the caller opens an iteration only once the iteration before it is done
+   with the buffers); each isend is released once its ready word has counted up, and the part ends once every request
+   has, in whatever order (ncclMeshPersistentCounts: readyNs a send's release, arrivedNs a receive's end as the library
+   saw them).  The caller zeroes the landed words before an iteration opens. */
 ncclResult_t ncclMeshPersistentBegin(void);
 ncclResult_t ncclMeshPersistentNext(const uint64_t* ready, uint64_t range, uint64_t bytes, int fresh);
+ncclResult_t ncclMeshPersistentLanded(uint64_t* landed);
 ncclResult_t ncclMeshPersistentCut(int* cut, int* groups);
 ncclResult_t ncclMeshPersistentEnd(void** handle, int* calls);
 ncclResult_t ncclMeshPersistentStart(void* handle, void* event, uint64_t value, uint64_t stride, uint64_t count);
