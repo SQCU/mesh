@@ -900,6 +900,16 @@ static ncclResult_t posted_wait(struct ncclComm *c,struct call *k,uint32_t q){
    A pass reads each unreleased send's ready word and each receive's landed word (ARRIVED, as first seen), one load
    each, so a release follows its word within one short pass; the requests' ends are tested in issue order, which
    frees their ring slots in the order they were posted, and the part ends once every one has. */
+/* A failed persistent part of point-to-point calls: every landed word not yet set set (2), its receive posted or not
+   (the rings take an iteration's requests as earlier ones end, so some may never have reached the bridge, which
+   stores the posted ones' ends), so the caller's GPU work waiting on one ends and the caller reads the failure. */
+static void held_failed(struct item *it){
+  for(int i=0;i<it->n;i++){
+    struct call *k=it->calls+i;
+    uint64_t unset=0;
+    if(k->kind==K_RECV && k->words)atomic_compare_exchange_strong_explicit(k->words,&unset,2,memory_order_acq_rel,memory_order_relaxed);
+  }
+}
 static ncclResult_t run_held_p2p(struct ncclComm *c,struct item *it){
   const uint64_t iteration=persistent_iteration(it);
   unsigned char *state=calloc((size_t)it->n,1);  /* a send: 1 released; a receive: 1 its landed word seen */
@@ -943,6 +953,7 @@ static ncclResult_t run_held_p2p(struct ncclComm *c,struct item *it){
     if(!status && tested<it->n && stopped(c))status=stop_reason(c,"a persistent point-to-point call");
     if(!moved && !status)sched_yield();
   }
+  if(status)held_failed(it);
   free(state);
   return status;
 }
@@ -1246,6 +1257,7 @@ static void start(struct ncclComm *c,struct item *it){
   /* a persistent part of point-to-point calls: its requests posted ahead, run here to their ends */
   const int held=it->run && it->n && P2P(it->calls);
   if(held && !status){status=run_held_p2p(c,it);it->networked=1;}
+  else if(held)held_failed(it);
   int transfers=0;
   for(int i=0;i<it->n && !status && !held;i++){
     struct call *k=it->calls+i;
