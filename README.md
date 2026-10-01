@@ -498,7 +498,8 @@ Runs as root at boot with no login session. `KeepAlive` restarts it forever.
 
 The goal is Megatron TP2 with Goals A and B in [design/collective-goals.md](design/collective-goals.md).
 The retained substrate is `rdma/mesh-flow.c`, canonical page storage and buffer
-ownership. Ordinary bridge lifecycle commands are in `bin/mesh-bridge.sh`.
+ownership. A bridge is a child of the driver that uses it (metal-microbench
+`tools/mesh/run_pair.py`); no launchd job runs one.
 [design/async-collectives.md](design/async-collectives.md) describes the deleted
 Swift executor.
 No deleted Python API, numerical executor, solver or demonstration is a current
@@ -514,8 +515,7 @@ swiftc -O -parse-as-library -I /tmp/mesh-import-p1/rdma -L /tmp/mesh-import-p1/r
   /tmp/mesh-import-p1/examples/coreml-chain.swift -o /tmp/mesh-coreml-chain
 ```
 
-The configured bridge is started with `bin/mesh-bridge.sh start`. The caller needs
-no loader environment variables. Supply compiled Core ML functions and their
+The caller needs no loader environment variables. Supply compiled Core ML functions and their
 explicit placement through the [chain configuration](design/function-chain.md).
 For a reproducible four-block FFN residual chain, generate those artifacts once:
 

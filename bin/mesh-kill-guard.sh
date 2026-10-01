@@ -33,15 +33,13 @@ spelling, an absolute path, sh -c, xargs, a copy of the binary, or resetting PAT
 all reach the same driver and produce the same unkillable process and the same
 physical visit. Succeeding at that is the failure the guard exists to prevent.
 
-The sanctioned command exists and works:
+A bridge is a child of the driver that started it (metal-microbench
+tools/mesh/run_pair.py), and the driver ends it with SIGTERM:
 
-  bin/mesh-bridge.sh stop
-  bin/mesh-bridge.sh restart
-  bin/mesh-bridge.sh status
+  kill -TERM <pid>
 
-It goes through launchd, sends SIGTERM, waits 30s for the teardown handler to run
-ibv_destroy_qp / ibv_dereg_mr / ibv_dealloc_pd / ibv_close_device, and refuses to
-escalate to SIGKILL. SIGTERM is safe precisely because the handler runs. SIGKILL
+The teardown handler then runs ibv_destroy_qp / ibv_dereg_mr / ibv_dealloc_pd /
+ibv_close_device. SIGTERM is safe precisely because the handler runs. SIGKILL
 and SIGSTOP are not catchable, so nothing releases the device.
 
 If a human operator, holding the physical machine, has read all of this and still
@@ -54,7 +52,6 @@ M
 
 verbs_pids() {
   pgrep -f mesh-flow 2>/dev/null
-  launchctl print system/io.mesh.bridge 2>/dev/null | awk '/^	pid = /{print $3}'
 }
 
 targets_verbs() {

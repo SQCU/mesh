@@ -169,7 +169,7 @@ protection domain and queue pairs, `ibv_alloc_pd` then fails for every process o
 the node, all Thunderbolt ports read `PORT_DOWN` with the cable attached,
 `shutdown -r now` hangs, and the node is unreachable until a person walks to it
 and pulls the power. That is `RDMA-RULES.md`, observed, not projected. The guard
-withholds nothing: `bin/mesh-bridge.sh stop|restart` still stops the bridge, host
+withholds nothing: `kill -TERM` to the bridge's pid still stops the bridge, host
 `pkill` semantics are still available under the token below, and outside this
 directory nothing changes. If you are auditing for rejection filters, this is not
 one — deleting it removes the only thing standing between a reflex and a physical
@@ -202,13 +202,11 @@ hook and the zsh line check.
 
 `SIGTERM` to the bridge is correct and safe: the teardown handler runs
 `ibv_destroy_qp` / `ibv_dereg_mr` / `ibv_dealloc_pd` / `ibv_close_device` and the
-device is released. `bin/mesh-bridge.sh stop` does exactly that through launchd,
-waits 30s, and refuses to escalate. So `kill <pid>` and `kill -TERM|-INT|-HUP` are
+device is released; the driver that started a bridge stops it that way. So `kill <pid>` and `kill -TERM|-INT|-HUP` are
 allowed. What is blocked is anything uncatchable or unhandled: `-9`, `-KILL`,
 `-STOP`, `-17`, `launchctl kill KILL`, and — because a `pgrep -f mesh-flow` or a
 `launchctl print` makes a PID feel like a safe target — *any* non-TERM signal
-aimed at a PID that `pgrep -f mesh-flow` or `launchctl print system/io.mesh.bridge`
-says belongs to a live bridge. Name matching alone would have missed every
+aimed at a PID that `pgrep -f mesh-flow` says belongs to a live bridge. Name matching alone would have missed every
 PID-targeted form.
 
 ### What is intercepted

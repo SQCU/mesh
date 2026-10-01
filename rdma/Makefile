@@ -1,6 +1,5 @@
 BINS = mesh-flow mesh-stat libmesh.dylib libnccl-mesh.dylib
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
-MESH_PREFIX ?= /usr/local/mesh
 all: $(BINS)
 native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
 .build/%.s: %.c mesh.h mesh-verbs.h mesh-dataflow.h mesh-call.h Makefile
@@ -30,7 +29,3 @@ libnccl-mesh.dylib: nccl-mesh.c nccl-mesh-metal.m nccl.h mesh-collective.h mesh-
 clean:
 	rm -f $(BINS)
 .PHONY: all clean native-audit
-install-bridge: mesh-flow mesh-stat
-	install -d $(MESH_PREFIX)/bin
-	install -m 755 mesh-flow mesh-stat $(MESH_PREFIX)/bin/
-	codesign -dv $(MESH_PREFIX)/bin/mesh-flow 2>&1 | grep -E "^Identifier=io.mesh.bridge$$"
