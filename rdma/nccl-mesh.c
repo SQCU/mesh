@@ -895,48 +895,52 @@ static ncclResult_t posted_wait(struct ncclComm *c,struct call *k,uint32_t q){
 /* A persistent part of point-to-point calls (ncclMeshPersistentBegin): each call's one request was posted as its
    iteration opened (persistent_post: an isend held, an irecv into the caller's buffer whose end the bridge stores
    into the caller's landed word, which the caller's GPU work waits on); each isend is released once its ready word
-   has counted up this iteration (READIED, and whether its receiver had granted its first byte by then), and the part
-   ends once every request has, in whatever order they end: a send and a receive of one exchange fly together, and no
-   request waits for another's.  The requests' ends are tested here, which frees their ring slots (ARRIVED: a
-   receive's). */
+   has counted up this iteration (READIED, and whether its receiver had granted its first byte by then), in whatever
+   order the words count up: a send and a receive of one exchange fly together, and no request waits for another's.
+   A pass reads each unreleased send's ready word and each receive's landed word (ARRIVED, as first seen), one load
+   each, so a release follows its word within one short pass; the requests' ends are tested in issue order, which
+   frees their ring slots in the order they were posted, and the part ends once every one has. */
 static ncclResult_t run_held_p2p(struct ncclComm *c,struct item *it){
   const uint64_t iteration=persistent_iteration(it);
-  unsigned char *state=calloc((size_t)it->n,1);
+  unsigned char *state=calloc((size_t)it->n,1);  /* a send: 1 released; a receive: 1 its landed word seen */
   ncclResult_t status=state?ncclSuccess:FAIL(c,ncclSystemError,"allocation");
-  int left=it->n;
-  while(left && !status){
+  int tested=0;
+  while(tested<it->n && !status){
     int moved=0;
     progress(c);
     if((status=persistent_failure(c)))break;
-    for(int i=0;i<it->n && !status;i++){
+    for(int i=tested;i<it->n && !status;i++){
       struct call *k=it->calls+i;
-      if(state[i]==2)continue;
-      if(!state[i]){
-        if(!k->handles[0])continue;
-        if(k->kind==K_SEND){
-          if(atomic_load_explicit(k->ready,memory_order_acquire)<k->ready_base[0]+iteration+1)continue;
-          uint64_t granted=0;
-          int result=mesh_net_release(k->handles[0],&granted);
-          if(result){status=net_failure(c,result,"mesh_net_release");break;}
-          if(k->tally)k->tally[READIED]=now_ns();
-          count(k,SENDS,1);
-          if(!granted)count(k,GRANT_WAITS,1);
-        }
+      if(state[i] || !k->handles[0])continue;
+      if(k->kind==K_RECV){
+        if(!atomic_load_explicit(k->words,memory_order_acquire))continue;
+        if(k->tally)k->tally[ARRIVED]=now_ns();
         state[i]=1;moved=1;
+        continue;
       }
+      if(atomic_load_explicit(k->ready,memory_order_acquire)<k->ready_base[0]+iteration+1)continue;
+      uint64_t granted=0;
+      int result=mesh_net_release(k->handles[0],&granted);
+      if(result){status=net_failure(c,result,"mesh_net_release");break;}
+      if(k->tally)k->tally[READIED]=now_ns();
+      count(k,SENDS,1);
+      if(!granted)count(k,GRANT_WAITS,1);
+      state[i]=1;moved=1;
+    }
+    for(;tested<it->n && !status;tested++){
+      struct call *k=it->calls+tested;
+      if(!k->handles[0] || (k->kind==K_SEND && !state[tested]))break;
       int done=0,size=0,result=mesh_net_test(k->handles[0],&done,&size);
       if(result){status=net_failure(c,result,k->kind==K_SEND?"a persistent send":"a persistent receive");break;}
-      if(!done)continue;
-      state[i]=2;left--;moved=1;
+      if(!done)break;
+      moved=1;
       const size_t bytes=k->count*type_bytes[k->type];
       count(k,k->kind==K_SEND?SENT:RECEIVED,bytes);
-      if(k->kind==K_RECV){
-        if(k->tally)k->tally[ARRIVED]=now_ns();
-        if(bytes<=INT32_MAX && (size_t)size!=bytes)
-          status=FAIL(c,ncclInvalidUsage,"a persistent receive: %d bytes arrived, %zu expected (the peer's count or datatype differs)",size,bytes);
-      }
+      if(k->kind==K_RECV && k->tally && !state[tested])k->tally[ARRIVED]=now_ns();
+      if(k->kind==K_RECV && bytes<=INT32_MAX && (size_t)size!=bytes)
+        status=FAIL(c,ncclInvalidUsage,"a persistent receive: %d bytes arrived, %zu expected (the peer's count or datatype differs)",size,bytes);
     }
-    if(!status && left && stopped(c))status=stop_reason(c,"a persistent point-to-point call");
+    if(!status && tested<it->n && stopped(c))status=stop_reason(c,"a persistent point-to-point call");
     if(!moved && !status)sched_yield();
   }
   free(state);
