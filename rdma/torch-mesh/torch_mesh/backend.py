@@ -6,8 +6,9 @@ storage's MTLBuffer and byte offset (ncclMeshBuffer), so the work is ordered wit
 returns at once.  CPU tensors take the host path, a non-contiguous one staged through a contiguous copy.
 
 A rank's communicator is the clique's explicit configuration (MESH_LINKS, MESH_REGION; ncclGetUniqueId) over
-the bridges' nodes, and NODES (comma-separated, default 0,1,...) names the node of each torch rank: the
-communicator is that one split with torch's rank as key (ncclCommSplit), so ranks are torch's."""
+the bridges' nodes; each rank reads its node from its own bridge (mesh_observe on MESH_REGION) and the ranks
+exchange theirs through the group's store, so the communicator is that one split with torch's rank as key
+(ncclCommSplit), its ranks torch's."""
 import ctypes as C
 import os
 
@@ -18,6 +19,8 @@ from torch.futures import Future
 
 RDMA = os.environ.get('MESH_RDMA') or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LIB = C.CDLL(os.path.join(RDMA, 'libnccl-mesh.dylib'))
+MESH = C.CDLL(os.path.join(RDMA, 'libmesh.dylib'))
+MESH.mesh_observe.restype, MESH.mesh_observe.argtypes = C.c_int, [C.c_char_p, C.c_void_p, C.c_uint32, C.POINTER(C.c_uint32)]
 P, I, Z = C.c_void_p, C.c_int, C.c_size_t
 
 
@@ -132,7 +135,7 @@ def done(result):
 
 
 class ProcessGroupMesh(dist.ProcessGroup):
-    def __init__(self, rank, size):
+    def __init__(self, rank, size, store=None):
         super().__init__(rank, size)
         self._rank, self._size, self._pending = rank, size, None
         self._command, self._stream = MeshStream(), None
@@ -140,7 +143,13 @@ class ProcessGroupMesh(dist.ProcessGroup):
         if size == 1:
             check(LIB.ncclCommInitAll(C.byref(self.comm), 1, None))
             return
-        nodes = [int(v) for v in os.environ.get('NODES', ','.join(map(str, range(size)))).split(',')]
+        node = C.c_uint32()
+        observed = MESH.mesh_observe((os.environ.get('MESH_REGION') or '/mesh0').encode(), None, 0, C.byref(node))
+        if observed < 0:
+            raise RuntimeError(f'libmesh: the bridge of region {os.environ.get("MESH_REGION") or "/mesh0"}: '
+                               f'{os.strerror(-observed)}')
+        store.set(f'mesh/node/{rank}', str(node.value))
+        nodes = [int(store.get(f'mesh/node/{r}')) for r in range(size)]
         unique, base = UniqueId(), P()
         check(LIB.ncclGetUniqueId(C.byref(unique)))
         check(LIB.ncclCommInitRank(C.byref(base), size, unique, nodes[rank]))
@@ -353,7 +362,7 @@ def create(store, rank, size, timeout):
         from . import _mps, partition  # noqa: F401 (partition installs itself)
         _mps.register()
         _installed = True
-    return ProcessGroupMesh(rank, size)
+    return ProcessGroupMesh(rank, size, store)
 
 
 dist.Backend.register_backend('mesh', create, devices=['cpu', 'mps'])
