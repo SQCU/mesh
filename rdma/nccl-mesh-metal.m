@@ -5,7 +5,7 @@
 #include <stdlib.h>
 
 /* the kernels: `spin` is metal-microbench metal_recording.m's mesh_remote_wait (a system-scope fence before each
-   load of the completion word until it is nonzero; a cancelled word is ~0); a landed slot is read through volatile coherent(system) loads and a slot a SEND reads is written
+   load of the completion word until it reaches the expected cycle, M30; a cancelled word is ~0); a landed slot is read through volatile coherent(system) loads and a slot a SEND reads is written
    through coherent(system) stores, its cell released after a system-scope fence (metal-microbench
    metal_recording.m MetalPayloadRead and MetalPublicationStores); the arithmetic is the host's (nccl-mesh.c
    combine_into, premultiply, truncdiv): the small floating types in float32 rounded to nearest even, integers
@@ -47,7 +47,7 @@ static NSString *const SOURCE =
   "FLOATING(bf16, bfloat, ushort)\n"
   "kernel void publish(device uchar *cells [[buffer(0)]], constant args &p [[buffer(2)]]) { FENCE; *(SYS ulong *)(cells + p.dst) = p.scalar; FENCE; }\n"
   "kernel void spin(device uchar *words [[buffer(0)]], constant args &p [[buffer(2)]]) { SYS const ulong *word = (SYS const ulong *)(words + p.dst); "
-  "ulong status; do { FENCE; status = *word; } while (!status); }\n";
+  "ulong status; do { FENCE; status = *word; } while (status < p.n); }\n";
 
 /* ncclDataType_t's order: int8 uint8 int32 uint32 int64 uint64 float16 float32 float64 bfloat16 e4m3 e5m2 */
 static const char *const TYPE[12] = {"i8", "u8", "i32", "u32", "i64", "u64", "f16", "f32", NULL, "bf16", NULL, NULL};
@@ -167,8 +167,8 @@ int metal_publish(struct metal_program *program, void *cells, size_t offset, uin
   return dispatch(program, @"publish", cells, NULL, (struct args){offset, 0, 1, argument, 0, 0}, 1);
 }
 
-int metal_spin(struct metal_program *program, void *words, size_t offset) {
-  return dispatch(program, @"spin", words, NULL, (struct args){offset, 0, 1, 0, 0, 0}, 1);
+int metal_spin(struct metal_program *program, void *words, size_t offset, uint64_t expected) {
+  return dispatch(program, @"spin", words, NULL, (struct args){offset, 0, expected, 0, 0, 0}, 1);
 }
 
 void metal_wait(struct metal_program *program, void *event, uint64_t value) {

@@ -24,8 +24,8 @@
    to each peer of the communicator that opened it, rings of 2*NCCL_STEPS slots each way: NCCL_BUFFSIZE/NCCL_STEPS
    slots (NCCL_BUFFSIZE, default 4 MiB, read at attach) on the link's queue pair 0, and where the bridge has two
    queue pairs a link (MESH_QPS=2), a block's slots (16 KiB) on queue pair 1 for pieces of at most NCCL_STEPS
-   blocks, as NCCL picks a protocol by size; each for
-   MESH_POSITIONS invocations (default 8192; a group past the last renews the session).  A group (ncclGroupStart/End;
+   blocks, as NCCL picks a protocol by size; the session's program is cyclic (the transport's M30: positions
+   run without end over MESH_POSITIONS prepared invocations, default 8192).  A group (ncclGroupStart/End;
    a call outside one is a group of one) plans each call by mesh_collective_choose and
    mesh_collective_plan (a point-to-point call one SEND or COPY step) and streams its pieces through
    the rings, slot by slot, the receives combined on the host.

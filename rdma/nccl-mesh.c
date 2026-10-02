@@ -414,6 +414,10 @@ static pthread_cond_t progress_wake = PTHREAD_COND_INITIALIZER;
 static void *finished;
 static uint64_t issued;
 
+/* a position's completion word as M30 reads it: landed once at least 1 plus its cycle, ~0 its link cancelled */
+static uint64_t cycle_of(uint64_t at) { return at / session.positions; }
+static int landed(uint64_t word, uint64_t at) { return word != UINT64_MAX && word >= 1 + cycle_of(at); }
+
 static double now_s(void) {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
@@ -455,8 +459,8 @@ static void *progress_run(void *unused) {
       uint64_t at = from;
       for (; at < target; at++) {
         const uint64_t arrived = mesh_host_arrived(&session.context, ch->in, (uint32_t)at);
-        if (!arrived) { waiting = 1; break; }
         if (arrived == UINT64_MAX) { release_all(ncclRemoteError, "the link to node %u was cancelled", ch->node); break; }
+        if (!landed(arrived, at)) { waiting = 1; break; }
       }
       if (at > from && !atomic_load(&session.failed)) { atomic_store(&ch->signaled, at); moved = 1; }
     }
@@ -585,7 +589,7 @@ static int session_open(ncclComm_t comm, int *other) {
   session.slot = (setting("NCCL_BUFFSIZE", BUFFSIZE) / LAG + block - 1) / block * block;
   session.small = block;
   session.classes = m->qps >= 2 ? 2 : 1;
-  session.positions = (uint32_t)setting("MESH_POSITIONS", POSITIONS);
+  session.positions = (uint32_t)((setting("MESH_POSITIONS", POSITIONS) + DEPTH - 1) / DEPTH * DEPTH);
   session.bound = setting("MESH_REMOTE_BOUND", 0) ? (double)setting("MESH_REMOTE_BOUND", 0) : BOUND;
   if (!(session.channels = calloc(2 * (size_t)comm->nranks, sizeof *session.channels))) { session_close(0); return ENOMEM; }
   for (int r = 0; r < comm->nranks && !status; r++)
@@ -598,6 +602,7 @@ static int session_open(ncclComm_t comm, int *other) {
       if (!status) status = ring_bind(ch, 1, IDENTITY + 2 * ch->node + (uint32_t)large, &ch->in, &ch->receiving);
     }
   if (!status) status = mesh_transfers_prepare(&session.context, 1, session.positions, DEPTH);
+  if (!status) status = mesh_transfers_cyclic(&session.context);
   if (!status) status = mesh_metal_transport_create(&session.context, metal_device(), &session.transport);
   for (uint32_t h = 0; h < session.count && !status; h++) status = channel_metal(session.channels + h);
   if (!status && !finished && !(finished = metal_event())) status = ENOMEM;
@@ -804,8 +809,8 @@ static ncclResult_t run(struct schedule *plans) {
       struct schedule *p = plans + h;
       while (ch->consumed < ch->end) {
         const uint64_t at = ch->consumed, arrived = mesh_host_arrived(&session.context, ch->in, (uint32_t)at);
-        if (!arrived) break;
         if (arrived == UINT64_MAX) return fail(ncclRemoteError, "the link to node %u was cancelled", ch->node);
+        if (!landed(arrived, at)) break;
         struct message *m = p->in_at < p->ins ? p->in + p->in_at : NULL;
         if (m && at >= m->first) {
           struct steps *s = m->c->bound;
@@ -867,20 +872,10 @@ static ncclResult_t session_schedule(ncclComm_t comm, struct call *list, size_t 
         continue;
       }
     }
-    if (!(plans = calloc(session.count + 1, sizeof *plans))) return fail(ncclSystemError, "out of memory");
-    if ((result = schedule_group(list, n, plans))) { schedules_free(plans); return result; }
-    int fresh = 1, over = 0;
-    for (uint32_t h = 0; h < session.count; h++) {
-      fresh &= !session.channels[h].sent;
-      over |= session.channels[h].end > session.positions;
-    }
-    if (!over) break;
-    for (uint32_t h = 0; h < session.count; h++) session.channels[h].end = session.channels[h].sent;
-    schedules_free(plans);
-    if (fresh) return fail(ncclInvalidUsage, "a group past the session's %u positions of at most %zu bytes (MESH_POSITIONS, NCCL_BUFFSIZE)",
-                           session.positions, session.slot);
-    session_close(LINGER_S);
+    break;
   }
+  if (!(plans = calloc(session.count + 1, sizeof *plans))) return fail(ncclSystemError, "out of memory");
+  if ((result = schedule_group(list, n, plans))) { schedules_free(plans); return result; }
   *made = plans;
   return ncclSuccess;
 }
@@ -1012,7 +1007,8 @@ static ncclResult_t gpu(int status, const char *what) {
 static ncclResult_t arrive(struct metal_program *program, struct channel *ch, uint64_t count) {
   if (count <= ch->waited) return ncclSuccess;
   ch->waited = count;
-  return gpu(metal_spin(program, session.transport.inputs, ch->word + (count - 1) * ch->word_stride), "a spin");
+  const uint64_t at = count - 1;
+  return gpu(metal_spin(program, session.transport.inputs, ch->word + (at % session.positions) * ch->word_stride, 1 + cycle_of(at)), "a spin");
 }
 
 /* the group's positions in an order the GPU runs them in: a channel publishes its next position where it
@@ -1039,7 +1035,8 @@ static ncclResult_t emit(struct schedule *plans, struct metal_program *program) 
                                     s->gpu_own.offset + m->offset + offset, length), "a piece into its slot");
             if (at + 1 == m->first + m->pieces) p->out_at++;
           }
-          if (!result) result = gpu(metal_publish(program, session.transport.publication, ch->cell + at * sizeof(struct mesh_send), ch->argument),
+          if (!result) result = gpu(metal_publish(program, session.transport.publication, ch->cell + (at % session.positions) * sizeof(struct mesh_send),
+                                                  ch->argument + cycle_of(at)),
                                     "a publication");
           ch->sent++; published = moved = 1;
         }
