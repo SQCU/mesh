@@ -373,6 +373,7 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
 #define POSITIONS 8192
 #define IDENTITY 1
 #define RELEASED (UINT64_C(1) << 62)
+#define SPIN 16384                  /* a wait's polls before it parks on the event (MESH_SPIN) */
 
 /* a channel's Metal side: its rings as buffers, `event` the count of its positions landed (the progress
    thread's `signaled`, up to the `target` the encoded groups reach), its out ring's invocation-0 SEND cell in
@@ -384,7 +385,7 @@ struct channel {
   unsigned char *sending, *receiving;
   uint64_t sent, consumed, end, waited;
   void *ring_out, *ring_in, *event;
-  size_t cell;
+  size_t cell, word, word_stride;
   uint64_t argument;
   _Atomic uint64_t target, signaled;
 };
@@ -396,6 +397,7 @@ static struct {
   struct channel *channels;
   uint32_t count, positions;
   size_t slot;
+  uint64_t spin;
   int registered, running;
   struct mesh_metal_transport transport;
   pthread_t progress;
@@ -558,6 +560,11 @@ static int channel_metal(struct channel *ch) {
   mesh_publication_prepare(session.header, ch->out.first, &record);
   ch->cell = (size_t)(record.destination - ((uintptr_t)session.header + session.context.send_off));
   ch->argument = record.argument;
+  struct mesh_metal_input input;
+  const int status = mesh_metal_receive_prepare(&session.context, &session.transport, ch->in, &input);
+  if (status) return status;
+  metal_release(input.completion);
+  ch->word = input.offset; ch->word_stride = input.stride;
   ch->ring_out = metal_wrap(ch->sending, DEPTH * session.slot);
   ch->ring_in = metal_wrap(ch->receiving, DEPTH * session.slot);
   ch->event = metal_event();
@@ -573,6 +580,7 @@ static int session_open(ncclComm_t comm, int *other) {
   const size_t block = (size_t)m->pgsz * m->block;
   session.slot = (setting("NCCL_BUFFSIZE", BUFFSIZE) / LAG + block - 1) / block * block;
   session.positions = (uint32_t)setting("MESH_POSITIONS", POSITIONS);
+  session.spin = setting("MESH_SPIN", SPIN);
   if (!(session.channels = calloc((size_t)comm->nranks, sizeof *session.channels))) { session_close(0); return ENOMEM; }
   for (int r = 0; r < comm->nranks && !status; r++) {
     if (r == comm->rank) continue;
@@ -988,6 +996,16 @@ static ncclResult_t gpu(int status, const char *what) {
   return status ? fail(ncclSystemError, "%s on the GPU: %s", what, *metal_error() ? metal_error() : strerror(status)) : ncclSuccess;
 }
 
+/* the GPU waits until `count` of the channel's positions have landed: a spin on the last one's completion word
+   for the session's budget of polls, then its event (at once where the spin saw it land) */
+static ncclResult_t arrive(struct metal_program *program, struct channel *ch, uint64_t count) {
+  if (count <= ch->waited) return ncclSuccess;
+  const ncclResult_t result = gpu(metal_spin(program, session.transport.inputs, ch->word + (count - 1) * ch->word_stride, session.spin), "a spin");
+  metal_wait(program, ch->event, count);
+  ch->waited = count;
+  return result;
+}
+
 /* the group's positions in an order the GPU runs them in: a channel publishes its next position where it
    may (the peer's position t - LAG landed, every receive before the piece consumed), else consumes its next
    one; a publication is its piece copied into the slot and its cell released after a barrier, a consumption
@@ -1004,8 +1022,8 @@ static ncclResult_t emit(struct schedule *plans, struct metal_program *program) 
         const uint64_t at = ch->sent, need = at >= LAG ? at - LAG + 1 : 0;
         struct message *m = p->out_at < p->outs && at >= p->out[p->out_at].first ? p->out + p->out_at : NULL;
         if (ch->consumed >= need && !(m && at == m->first && !ready(m->c->bound, m->step))) {
-          if (need > ch->waited) { metal_wait(program, ch->event, need); ch->waited = need; }
-          if (m) {
+          if (!result) result = arrive(program, ch, need);
+          if (m && !result) {
             const struct steps *s = m->c->bound;
             const size_t offset = (at - m->first) * session.slot, length = m->bytes - offset < session.slot ? m->bytes - offset : session.slot;
             result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * session.slot, s->gpu_own.buffer,
@@ -1025,7 +1043,8 @@ static ncclResult_t emit(struct schedule *plans, struct metal_program *program) 
             struct steps *s = m->c->bound;
             const size_t offset = (at - m->first) * session.slot, length = m->bytes - offset < session.slot ? m->bytes - offset : session.slot;
             const size_t from = (at % DEPTH) * session.slot;
-            if (at + 1 > ch->waited) { metal_wait(program, ch->event, at + 1); ch->waited = at + 1; }
+            result = arrive(program, ch, at + 1);
+            if (result) break;
             if (s->steps[m->step].op == MESH_STEP_REDUCE)
               result = gpu(metal_combine(program, m->c->type, m->c->combine, s->gpu_total.buffer, s->gpu_total.offset + m->offset + offset,
                                          ch->ring_in, from, length / SIZE[m->c->type]), "a combine");
