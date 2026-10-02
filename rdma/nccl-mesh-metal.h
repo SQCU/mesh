@@ -18,7 +18,7 @@ void metal_signal(void *event, uint64_t value);
 uint64_t metal_signaled(void *event);
 void metal_release(void *object);
 
-struct metal_program *metal_begin(void *command_buffer);
+struct metal_program *metal_begin(void *command_buffer, void *encoder);
 int metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes);
 int metal_combine(struct metal_program *, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n);
 int metal_premultiply(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar);

@@ -644,7 +644,7 @@ struct call {
   unsigned char *result, *copy;
   int owned;
   cudaStream_t stream;
-  void *command;
+  void *command, *encoder, *(*workspace)(size_t, void *), *context;
   struct where send_at, recv_at, sum;
 };
 
@@ -1099,6 +1099,15 @@ static struct where where_of(const void *argument) {
   return b ? (struct where){b->buffer, b->offset} : (struct where){NULL, 0};
 }
 
+/* a group's scratch: the stream's workspace (the caller's allocator, ordered with its work), else a buffer the
+   program keeps until its end */
+static void *workspace(struct metal_program *program, const struct call *c, size_t bytes) {
+  if (c->workspace) return c->workspace(bytes ? bytes : 16, c->context);
+  void *made = metal_scratch(bytes);
+  if (made) { metal_keep(program, made); metal_release(made); }
+  return made;
+}
+
 /* a premultiplier as the kernels read it: a floating type's value as float32 bits, an integer's bits */
 static uint64_t scalar_bits(const struct call *c) {
   uint64_t bits = 0;
@@ -1121,10 +1130,11 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (reducing(list[i].what) && (result = reduction(list + i))) return result;
   }
   if (!list[0].command) return fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
+  if (list[0].encoder && !list[0].workspace) return fail(ncclInvalidArgument, "an ncclMeshStream with an encoder and no workspace");
   if ((result = plan_calls(comm, list, n))) return result;
   pthread_mutex_lock(&session_lock);
   if (finished) metal_collect(finished);
-  struct metal_program *program = metal_begin(list[0].command);
+  struct metal_program *program = metal_begin(list[0].command, list[0].encoder);
   if (!program) { pthread_mutex_unlock(&session_lock); return fail(ncclSystemError, "out of memory"); }
   const size_t r = (size_t)comm->rank;
   int remote = 0;
@@ -1143,9 +1153,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
                          (c->what == MESH_REDUCE && c->root == comm->rank);
     struct where own = recv;
     if (!in_place) {
-      void *scratch = metal_scratch(bytes);
+      void *scratch = workspace(program, c, bytes);
       if (!scratch) { result = fail(ncclSystemError, "out of GPU memory"); break; }
-      metal_keep(program, scratch); metal_release(scratch);
       own = (struct where){scratch, 0};
     }
     const struct where segment = {own.buffer, own.offset + (c->what == MESH_ALLGATHER ? r * c->count * z : 0)};
@@ -1156,9 +1165,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
                               reducing(c->what) ? bytes : c->count * z), "the operand");
     struct where total = own;
     if (!result && s && s->direct && reducing(c->what)) {
-      void *sums = metal_scratch(bytes);
+      void *sums = workspace(program, c, bytes);
       if (!sums) { result = fail(ncclSystemError, "out of GPU memory"); break; }
-      metal_keep(program, sums); metal_release(sums);
       total = (struct where){sums, 0};
       result = gpu(metal_copy(program, METAL_PLAIN, sums, 0, own.buffer, own.offset, bytes), "the result");
     }
@@ -1196,7 +1204,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     } else if ((c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER) && !same(sum, recv))
       result = gpu(metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, sum.buffer, sum.offset, elements(c) * z), "the result");
   }
-  metal_end(program, finished ? finished : (finished = metal_event()), ++issued);
+  if (list[0].encoder) metal_end(program, NULL, 0);
+  else metal_end(program, finished ? finished : (finished = metal_event()), ++issued);
   if (result && scheduled) release_all(result, "%s", last);
   pthread_mutex_unlock(&session_lock);
   return result;
@@ -1246,7 +1255,8 @@ ncclResult_t ncclMeshGroupPlans(int *algorithms, int *roots, int capacity, int *
 static ncclResult_t enqueue(struct call c) {
   if (!c.comm) return fail(ncclInvalidArgument, "comm is NULL");
   if (c.stream) {
-    c.command = ((const ncclMeshStream *)c.stream)->commandBuffer;
+    const ncclMeshStream *stream = c.stream;
+    c.command = stream->commandBuffer; c.encoder = stream->commandEncoder; c.workspace = stream->workspace; c.context = stream->context;
     c.send_at = where_of(c.send); c.recv_at = where_of(c.recv);
   }
   if ((unsigned)c.type >= ncclNumTypes) return fail(ncclInvalidArgument, "datatype %d", (int)c.type);

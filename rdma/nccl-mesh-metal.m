@@ -72,7 +72,7 @@ static const char *const TYPE[12] = {"i8", "u8", "i32", "u32", "i64", "u64", "f1
 static const char *const MODE[3] = {"plain", "land", "send"};
 
 struct args { uint64_t dst, src, n, scalar, aux; uint32_t op, unused; };
-struct metal_program { id<MTLCommandBuffer> buffer; id<MTLComputeCommandEncoder> encoder; NSMutableArray *kept; };
+struct metal_program { id<MTLCommandBuffer> buffer; id<MTLComputeCommandEncoder> encoder; NSMutableArray *kept; int borrowed; };
 
 static id<MTLDevice> device_;
 static id<MTLLibrary> library_;
@@ -124,17 +124,18 @@ void metal_signal(void *event, uint64_t value) { ((id<MTLSharedEvent>)event).sig
 uint64_t metal_signaled(void *event) { return ((id<MTLSharedEvent>)event).signaledValue; }
 void metal_release(void *object) { [(id)object release]; }
 
-struct metal_program *metal_begin(void *command_buffer) {
+struct metal_program *metal_begin(void *command_buffer, void *encoder) {
   struct metal_program *program = calloc(1, sizeof *program);
   if (!program) return NULL;
   program->buffer = [(id<MTLCommandBuffer>)command_buffer retain];
+  if (encoder) { program->encoder = [(id<MTLComputeCommandEncoder>)encoder retain]; program->borrowed = 1; }
   program->kept = [NSMutableArray new];
   return program;
 }
 
 static void close_encoder(struct metal_program *program) {
   if (!program->encoder) return;
-  [program->encoder endEncoding];
+  if (!program->borrowed) [program->encoder endEncoding];
   [program->encoder release];
   program->encoder = nil;
 }
@@ -229,11 +230,13 @@ void metal_wait(struct metal_program *program, void *event, uint64_t value) {
 void metal_keep(struct metal_program *program, void *object) { [program->kept addObject:(id)object]; }
 
 /* the program's end signals `event` to `value`; what it kept is released once the event has passed it
-   (metal_collect) */
+   (metal_collect); a program in a borrowed encoder (event NULL) signals nothing and keeps nothing */
 void metal_end(struct metal_program *program, void *event, uint64_t value) {
   close_encoder(program);
-  [program->buffer encodeSignalEvent:(id<MTLEvent>)event value:value];
-  @autoreleasepool { [retiring_ addObject:@[@(value), program->kept]]; }
+  if (event) {
+    [program->buffer encodeSignalEvent:(id<MTLEvent>)event value:value];
+    @autoreleasepool { [retiring_ addObject:@[@(value), program->kept]]; }
+  }
   [program->kept release];
   [program->buffer release];
   free(program);

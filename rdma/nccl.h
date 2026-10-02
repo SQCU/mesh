@@ -35,7 +35,10 @@
    returning once its group has run.
    A stream that is not NULL is an ncclMeshStream: the group's work is encoded into its Metal command buffer
    (the caller commits it) and every buffer argument is an ncclMeshBuffer, an id<MTLBuffer> and a byte offset
-   into it (an MPS tensor's storage and offset).  The pieces are copied into the slots and combined where they
+   into it (an MPS tensor's storage and offset).  With commandEncoder, the group's kernels are encoded into that
+   open compute encoder and it is left open (no encoder of the library's own, nothing signalled at the group's
+   end); then workspace gives the group its scratch (an id<MTLBuffer> of at least `bytes`, valid for the
+   stream's work), and the caller orders any later host-path group after the stream's work.  The pieces are copied into the slots and combined where they
    landed by Metal kernels; a wait for the peer's position is a kernel polling its completion word (the
    engine's mesh_remote_wait), and a progress thread cancels a link with positions pending that delivers none
    for MESH_REMOTE_BOUND seconds (default 10), ending every wait on it.  The Metal path carries the integer
@@ -71,7 +74,12 @@ extern "C" {
 /* The stream: not read (every call is synchronous, above). */
 typedef void *cudaStream_t;
 typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
-typedef struct { void *commandBuffer; } ncclMeshStream;
+typedef struct {
+  void *commandBuffer;
+  void *commandEncoder;
+  void *(*workspace)(size_t bytes, void *context);
+  void *context;
+} ncclMeshStream;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
 typedef void *cudaEvent_t;
 

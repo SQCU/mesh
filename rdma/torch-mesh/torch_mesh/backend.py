@@ -32,10 +32,6 @@ class MeshBuffer(C.Structure):
     _fields_ = [('buffer', C.c_void_p), ('offset', C.c_size_t)]
 
 
-class MeshStream(C.Structure):
-    _fields_ = [('commandBuffer', C.c_void_p)]
-
-
 for name, arguments in (
         ('ncclGetUniqueId', [C.POINTER(UniqueId)]), ('ncclCommInitRank', [C.POINTER(P), I, UniqueId, I]),
         ('ncclCommInitAll', [C.POINTER(P), I, P]), ('ncclCommSplit', [P, I, I, C.POINTER(P), P]),
@@ -135,10 +131,12 @@ def done(result):
 
 
 class ProcessGroupMesh(dist.ProcessGroup):
+    _streamed = False
+
     def __init__(self, rank, size, store=None):
         super().__init__(rank, size)
         self._rank, self._size, self._pending = rank, size, None
-        self._command, self._stream = MeshStream(), None
+        self._stream = None
         self.comm = P()
         if size == 1:
             check(LIB.ncclCommInitAll(C.byref(self.comm), 1, None))
@@ -170,9 +168,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
     pg_name = group_name
 
     def _group(self, issue, outputs, result=None):
-        """One NCCL group: `issue` makes its calls (their stream self._stream: torch's MPS stream's command
-        buffer where the operands are MPS tensors, else none), then every staged output is written back.  An MPS
-        group is committed at once, so its publications reach the peer while it computes on.  Between
+        """One NCCL group: `issue` makes its calls (their stream self._stream: torch's MPS stream, its open encoder
+        and allocator, where the operands are MPS tensors, else none), then every staged output is written back.
+        An MPS group is committed at once, so its publications reach the peer while it computes on; a host group
+        after MPS groups first waits for the stream, as the session's positions run in its order.  Between
         start_coalescing and end_coalescing the calls join the coalesced group instead."""
         if self._pending is not None:
             self._pending.append((issue, outputs, result))
@@ -180,8 +179,13 @@ class ProcessGroupMesh(dist.ProcessGroup):
         mps = on_mps(result)
         if mps:
             from . import _stream
-            self._command.commandBuffer = _stream.begin()
-        self._stream = C.addressof(self._command) if mps else None
+            self._stream = _stream.begin()
+            ProcessGroupMesh._streamed = True
+        else:
+            self._stream = None
+            if ProcessGroupMesh._streamed:
+                torch.mps.synchronize()
+                ProcessGroupMesh._streamed = False
         check(LIB.ncclGroupStart())
         try:
             issue()
