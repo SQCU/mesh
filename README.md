@@ -170,8 +170,7 @@ problem and is neither.
 Other limits worth knowing before writing against this, all from TN3205: send/receive
 only (`IBV_WR_SEND`, `IBV_ACCESS_LOCAL_WRITE`), 10 UC queue pairs per device, ~16 MB
 maximum message, sender and receiver must post the **same frame count**, no hardware
-ACK so integrity and retransmit are the application's job, and a per-controller IOMMU
-so a buffer is registered separately per device.
+ACK, and a per-controller IOMMU so a buffer is registered separately per device.
 
 RDMA never routes. It is point-to-point per cable, and the out-of-band GID/QPN
 exchange only needs a socket to the directly connected peer — which is why none of
