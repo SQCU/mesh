@@ -198,6 +198,15 @@ class ProcessGroupMesh(dist.ProcessGroup):
             output.back()
         return done(result)
 
+    def _direct(self, *tensors):
+        """torch's MPS stream, through the one-turn C++ calls (_stream.mm), where every tensor is a contiguous MPS
+        tensor and no coalesced group is open; else None."""
+        if self._pending is not None or not all(t.device.type == 'mps' and t.is_contiguous() for t in tensors):
+            return None
+        from . import _stream
+        ProcessGroupMesh._streamed = True
+        return _stream
+
     def start_coalescing(self, device):
         self._pending = []
 
@@ -207,6 +216,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
                            [r for _, _, r in pending])
 
     def allreduce(self, tensors, opts=dist.AllreduceOptions()):
+        if (s := self._direct(*tensors)) is not None:
+            for t in tensors:
+                check(s.allreduce(t, op(opts.reduceOp), self.comm.value))
+            return done(tensors)
         hosts = [operand(t) for t in tensors]
         return self._group(lambda: [check(LIB.ncclAllReduce(h.at(), h.at(), h.host.numel(), kind(h.host), op(opts.reduceOp),
                                                             self.comm, self._stream)) for h in hosts], hosts, tensors)
@@ -215,11 +228,19 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return self.allreduce(tensors, opts or dist.AllreduceOptions())
 
     def reduce(self, tensors, opts=dist.ReduceOptions()):
+        if (s := self._direct(*tensors)) is not None:
+            for t in tensors:
+                check(s.reduce(t, op(opts.reduceOp), opts.rootRank, self.comm.value))
+            return done(tensors)
         hosts = [operand(t) for t in tensors]
         return self._group(lambda: [check(LIB.ncclReduce(h.at(), h.at(), h.host.numel(), kind(h.host), op(opts.reduceOp),
                                                          opts.rootRank, self.comm, self._stream)) for h in hosts], hosts, tensors)
 
     def broadcast(self, tensors, opts=dist.BroadcastOptions()):
+        if (s := self._direct(*tensors)) is not None:
+            for t in tensors:
+                check(s.broadcast(t, opts.rootRank, self.comm.value))
+            return done(tensors)
         hosts = [operand(t) for t in tensors]
         return self._group(lambda: [check(LIB.ncclBroadcast(h.at(), h.at(), h.host.numel(), kind(h.host), opts.rootRank,
                                                             self.comm, self._stream)) for h in hosts], hosts, tensors)
@@ -228,6 +249,9 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return self.allreduce([torch.ones(1)])
 
     def all_gather_single(self, output, input, opts=None):
+        if (s := self._direct(output, input)) is not None:
+            check(s.allgather(output, input, self.comm.value))
+            return done(output)
         source, target = operand(input), operand(output, read=False)
         return self._group(lambda: check(LIB.ncclAllGather(source.at(), target.at(), source.host.numel(), kind(source.host),
                                                            self.comm, self._stream)), [target], output)
@@ -263,6 +287,9 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return self._group(issue, [t for out in targets for t in out], outputs)
 
     def reduce_scatter_single(self, output, input, opts=dist.ReduceScatterOptions()):
+        if (s := self._direct(output, input)) is not None:
+            check(s.reduce_scatter(output, input, op(opts.reduceOp), self.comm.value))
+            return done(output)
         source, target = operand(input), operand(output, read=False)
         return self._group(lambda: check(LIB.ncclReduceScatter(source.at(), target.at(), target.host.numel(), kind(source.host),
                                                                op(opts.reduceOp), self.comm, self._stream)), [target], output)
@@ -304,6 +331,12 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return self._group(issue, targets, outputs)
 
     def all_to_all_single(self, output, input, output_split_sizes, input_split_sizes, opts=None):
+        if (s := self._direct(output, input)) is not None:
+            width = input[0].numel() if input.dim() and input.shape[0] else 1
+            rows_in = list(input_split_sizes) or [input.shape[0] // self._size] * self._size
+            rows_out = list(output_split_sizes) or [output.shape[0] // self._size] * self._size
+            check(s.alltoall(output, input, [r * width for r in rows_in], [r * width for r in rows_out], self.comm.value))
+            return done(output)
         source, target = operand(input), operand(output, read=False)
         if not output_split_sizes and not input_split_sizes:
             return self._group(lambda: check(LIB.ncclAlltoAll(source.at(), target.at(), source.host.numel() // self._size,
@@ -345,11 +378,19 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return self._group(issue, [target], outputs)
 
     def send(self, tensors, dst, tag):
+        if (s := self._direct(*tensors)) is not None:
+            for t in tensors:
+                check(s.send(t, dst, self.comm.value))
+            return done(tensors)
         hosts = [operand(t) for t in tensors]
         return self._group(lambda: [check(LIB.ncclSend(h.at(), h.host.numel(), kind(h.host), dst, self.comm, self._stream))
                                     for h in hosts], [], tensors)
 
     def recv(self, tensors, src, tag):
+        if (s := self._direct(*tensors)) is not None:
+            for t in tensors:
+                check(s.recv(t, src, self.comm.value))
+            return done(tensors)
         hosts = [operand(t, read=False) for t in tensors]
         return self._group(lambda: [check(LIB.ncclRecv(h.at(), h.host.numel(), kind(h.host), src, self.comm, self._stream))
                                     for h in hosts], hosts, tensors)

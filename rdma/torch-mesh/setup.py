@@ -12,8 +12,10 @@ os.environ['TORCH_DEVICE_BACKEND_AUTOLOAD'] = '0'
 from setuptools import setup  # noqa: E402
 from torch.utils.cpp_extension import BuildExtension, CppExtension  # noqa: E402
 
-setup(name='torch-mesh', version='0.3', packages=['torch_mesh'],
-      ext_modules=[CppExtension('torch_mesh._stream', ['torch_mesh/_stream.mm'],
-                                extra_link_args=['-framework', 'Metal', '-framework', 'Foundation'])],
+RDMA = os.environ.get('MESH_RDMA') or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+setup(name='torch-mesh', version='0.4', packages=['torch_mesh'],
+      ext_modules=[CppExtension('torch_mesh._stream', ['torch_mesh/_stream.mm'], include_dirs=[RDMA], library_dirs=[RDMA],
+                                libraries=['nccl-mesh'],
+                                extra_link_args=[f'-Wl,-rpath,{RDMA}', '-framework', 'Metal', '-framework', 'Foundation'])],
       cmdclass={'build_ext': BuildExtension},
       entry_points={'torch.backends': ['mesh = torch_mesh:_autoload']})
