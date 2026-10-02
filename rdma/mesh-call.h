@@ -8,10 +8,6 @@ struct mesh_section { uint32_t first,pages; size_t bytes; uint32_t count,stride;
 int mesh_transfer_bind(struct mesh_ctx *,uint32_t queue,int receive,uint32_t identity,struct mesh_section,uint32_t invocation_pages);
 int mesh_transfers_prepare(struct mesh_ctx *,uint32_t slots,uint32_t invocations,uint32_t depth);
 int mesh_transfers_start(struct mesh_ctx *);
-/* design/prepared-machine.md#M01 */
-void mesh_transfers_bank(struct mesh_ctx *,struct mesh_ctx *other);
-/* design/prepared-machine.md#M12 */
-int mesh_transfers_stop(struct mesh_ctx *);
 
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M09 */
