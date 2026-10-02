@@ -19,6 +19,11 @@ struct Stream {
 };
 
 static Stream stream_;
+// Command buffers this extension committed and those the GPU completed; compiled-graph regions open (batch) and
+// whether one left a collective in torch's open buffer.
+static std::atomic<int64_t> committed_{0}, completed_{0};
+static int batching_ = 0;
+static bool deferred_ = false;
 static std::vector<at::Tensor> held_;
 
 static void *workspace(size_t bytes, void *) {
@@ -37,10 +42,24 @@ static int64_t begin() {
   return (int64_t)(uintptr_t)&stream_;
 }
 
+// On torch's queue: its open buffer committed, counted as it completes.
+static void committing(at::mps::MPSStream *stream) {
+  [stream->commandBuffer() addCompletedHandler:^(id<MTLCommandBuffer>) { completed_.fetch_add(1, std::memory_order_release); }];
+  committed_.fetch_add(1, std::memory_order_relaxed);
+  stream->synchronize(at::mps::SyncType::COMMIT);
+  deferred_ = false;
+}
+
 static void commit() {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  dispatch_sync(stream->queue(), ^{ stream->synchronize(at::mps::SyncType::COMMIT); });
+  dispatch_sync(stream->queue(), ^{ committing(stream); });
   held_.clear();
+}
+
+// A compiled graph's run (torch_mesh/_mps.py): +1 as it starts, -1 as it ends, when a collective left open is committed.
+static void batch(int64_t delta) {
+  batching_ += (int)delta;
+  if (!batching_ && deferred_) commit();
 }
 
 static bool moved(at::ScalarType type) {
@@ -76,7 +95,12 @@ static int64_t on_stream(ncclResult_t (^call)(ncclMeshStream *)) {
   dispatch_sync(stream->queue(), ^{
     stream_ = Stream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr};
     result = call((ncclMeshStream *)&stream_);
-    stream->synchronize(at::mps::SyncType::COMMIT);
+    // A collective outside a compiled graph is committed at once (the host may next block outside torch while
+    // a peer waits on it); within one, while two buffers are in flight it joins the open one.
+    if (!batching_ || committed_.load(std::memory_order_relaxed) - completed_.load(std::memory_order_acquire) < 2)
+      committing(stream);
+    else
+      deferred_ = true;
   });
   held_.clear();
   return result;
@@ -299,4 +323,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("send", &send_to);
   module.def("recv", &receive_from);
   module.def("attach", &attach);
+  module.def("batch", &batch);
 }

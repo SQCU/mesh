@@ -170,13 +170,39 @@ def _patch_transformers(utils):
             setattr(sys.modules[name], attribute, value)
 
 
-class _TransformersImport(importlib.abc.MetaPathFinder):
-    """transformers.distributed.utils patched as it is executed, whatever the order of a program's imports."""
+def _patch_inductor(output_code):
+    """A compiled graph's collectives share command buffers while it runs (_stream.mm, batch): its wrapper is
+    straight-line code, so a collective left in torch's open buffer is committed by a later one or as the graph ends."""
+    from . import backend
+    if backend._stream is None:
+        return
+    graph, batch = output_code.CompiledFxGraph, backend._stream.batch
+    call = graph.__call__
+
+    def __call__(self, inputs):
+        batch(1)
+        try:
+            return call(self, inputs)
+        finally:
+            batch(-1)
+    graph.__call__ = __call__
+
+
+_PATCHES = {"transformers.distributed.utils": _patch_transformers, "torch._inductor.output_code": _patch_inductor}
+
+
+class _PatchOnImport(importlib.abc.MetaPathFinder):
+    """The modules of _PATCHES patched as each is executed, whatever the order of a program's imports."""
+
+    def __init__(self, pending):
+        self.pending = pending
 
     def find_spec(self, name, path, target=None):
-        if name != "transformers.distributed.utils":
+        patch = self.pending.pop(name, None)
+        if patch is None:
             return None
-        sys.meta_path.remove(self)
+        if not self.pending:
+            sys.meta_path.remove(self)
         spec = importlib.util.find_spec(name)
         if spec is None or spec.loader is None:
             return spec
@@ -184,17 +210,23 @@ class _TransformersImport(importlib.abc.MetaPathFinder):
 
         def exec_module(module):
             run(module)
-            _patch_transformers(module)
+            patch(module)
         spec.loader.exec_module = exec_module
         return spec
 
 
 def install():
-    """transformers' tensor parallelism on MPS: patched now where transformers is loaded, else as it is."""
-    if "transformers.distributed.utils" in sys.modules:
-        _patch_transformers(sys.modules["transformers.distributed.utils"])
-    elif not any(isinstance(finder, _TransformersImport) for finder in sys.meta_path):
-        sys.meta_path.insert(0, _TransformersImport())
+    """Each module of _PATCHES patched now where it is loaded, else as it is."""
+    if any(isinstance(finder, _PatchOnImport) for finder in sys.meta_path):
+        return
+    pending = {}
+    for name, patch in _PATCHES.items():
+        if name in sys.modules:
+            patch(sys.modules[name])
+        else:
+            pending[name] = patch
+    if pending:
+        sys.meta_path.insert(0, _PatchOnImport(pending))
 
 
 def register():
