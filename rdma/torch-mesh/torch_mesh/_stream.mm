@@ -19,9 +19,11 @@ struct Stream {
 };
 
 static Stream stream_;
-// Command buffers this extension committed and those the GPU completed; compiled-graph regions open (batch) and
-// whether one left a collective in torch's open buffer.
-static std::atomic<int64_t> committed_{0}, completed_{0};
+// Within compiled-graph regions (batch): the command buffers committed, each signalling its count on retired_ as the
+// GPU reaches its end (a shared event's value is the GPU's progress at once; a completion handler runs 7-9 us
+// later, at the 99th percentile 20-60), and whether a collective was left in torch's open buffer.
+static id<MTLSharedEvent> retired_;
+static uint64_t committed_ = 0;
 static int batching_ = 0;
 static bool deferred_ = false;
 static std::vector<at::Tensor> held_;
@@ -42,10 +44,13 @@ static int64_t begin() {
   return (int64_t)(uintptr_t)&stream_;
 }
 
-// On torch's queue: its open buffer committed, counted as it completes.
+// On torch's queue: its open buffer committed (within a compiled graph, counted on retired_).
 static void committing(at::mps::MPSStream *stream) {
-  [stream->commandBuffer() addCompletedHandler:^(id<MTLCommandBuffer>) { completed_.fetch_add(1, std::memory_order_release); }];
-  committed_.fetch_add(1, std::memory_order_relaxed);
+  if (batching_) {
+    if (!retired_) retired_ = [stream->device() newSharedEvent];
+    stream->endKernelCoalescing();
+    [stream->commandBuffer() encodeSignalEvent:retired_ value:++committed_];
+  }
   stream->synchronize(at::mps::SyncType::COMMIT);
   deferred_ = false;
 }
@@ -97,7 +102,7 @@ static int64_t on_stream(ncclResult_t (^call)(ncclMeshStream *)) {
     result = call((ncclMeshStream *)&stream_);
     // A collective outside a compiled graph is committed at once (the host may next block outside torch while
     // a peer waits on it); within one, while two buffers are in flight it joins the open one.
-    if (!batching_ || committed_.load(std::memory_order_relaxed) - completed_.load(std::memory_order_acquire) < 2)
+    if (!batching_ || committed_ - retired_.signaledValue < 2)
       committing(stream);
     else
       deferred_ = true;
