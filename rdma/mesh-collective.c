@@ -486,19 +486,26 @@ int mesh_host_inputs(struct mesh_ctx *context){
 
 /* What the GPU publication kernel stores (M04/M10): each prepared cell's continuation, into the
    cell of invocation t, released after the caller's writes to the section. */
+/* design/prepared-machine.md#M30: running invocation T is the program's invocation T mod N in cycle T / N */
+static uint32_t program_invocations(struct mesh_ctx *context){
+  return ((struct mesh_tx *)mesh_events(context->M,mesh_notice_queue(context->M,context->client,0)))->invocations;
+}
+
 void mesh_host_publish(struct mesh_ctx *context,struct mesh_section section,uint32_t invocation){
-  uint32_t count=mesh_publication_prepare(context->M,section.first,NULL);
+  uint32_t count=mesh_publication_prepare(context->M,section.first,NULL),n=program_invocations(context);
   struct prepared_publication records[count?count:1];
   mesh_publication_prepare(context->M,section.first,records);
+  const uint32_t t=n?invocation%n:invocation,cycle=n?invocation/n:0;
   for(uint32_t i=0;i<count;i++)
-    atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)(records[i].destination+(uint64_t)invocation*sizeof(struct mesh_send)),
-      records[i].argument,memory_order_release);
+    atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)(records[i].destination+(uint64_t)t*sizeof(struct mesh_send)),
+      records[i].argument+cycle,memory_order_release);
 }
 
 /* The last chunk's word, as mesh_metal_receive_prepare reads it: chunks of one receive land in order. */
 uint64_t mesh_host_arrived(struct mesh_ctx *context,struct mesh_section section,uint32_t invocation){
   struct hdr *m=context->M;
   struct mesh_publication *delivery=mesh_publication_at(m,section.first+mesh_row_chunks(m,section.first,section.bytes)-1);
-  return atomic_load_explicit((_Atomic uint64_t *)((char *)m+delivery->device_input+(uint64_t)invocation*delivery->device_stride),
+  const uint32_t n=program_invocations(context),t=n?invocation%n:invocation;
+  return atomic_load_explicit((_Atomic uint64_t *)((char *)m+delivery->device_input+(uint64_t)t*delivery->device_stride),
     memory_order_acquire);
 }

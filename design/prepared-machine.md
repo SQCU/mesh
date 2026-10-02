@@ -198,3 +198,25 @@ The offline placement caller uses SciPy [nnls](https://docs.scipy.org/doc/scipy/
 M06 construction in engine `4ca3a03` records all 35 FFN SEND stores inside their original numerical consumer entries and the vocabulary SEND store inside its producer. `output_data/e2b-rdma-replay-20260919/whole-reflected-memory-capture/prepared.json` contains zero standalone publications and 1,107 decode commands, down from 1,142. Pipeline reflection removes unused inherited threadgroup allocations; the broader independent-work fusion cases are deleted. The ordinary `whole-reflected-memory-256/result.json` pair retires cleanly in 1.202660167 seconds for 255 measured steps, 212.029971 tokens/s. Adjacent matched solo takes 1.195895917 seconds, 213.229259 tokens/s: S = 0.994376.
 
 M27 alone records `whole-native-trace-64/movement-timing.{json,csv}`: 2,304 sends and receives per rank, both clients and diagnostic bridges retired cleanly. Numerical kernels contain no timing samples. After excluding warmup, the positive local interval from SEND return to incoming CQ observation sums to a mean 253.893/293.230 microseconds per step on M5/Mini; these rank sums overlap and are not added together. M5 layer 0 has a 28.625 microsecond median signed interval, versus 16.042/15.625/14.417 at layers 4/9/14. Those intervals include remote producer availability and transport, not isolated wire time. Per-layer median native SEND calls are about 42–84 ns. This identifies producer availability at those cuts as the next placement input; it adds no event-time decision or numerical instrumentation to ordinary execution.
+
+## Cyclic programs and programs within an attach
+
+<a id="M30"></a>**M30, cyclic invocation.** A client may declare its prepared program cyclic
+(`mesh_transfers_cyclic`, after `mesh_transfers_prepare`, before `mesh_transfers_start`; the header's
+`cyclic` word, zero for every one-pass program). Running invocation T is prepared invocation T mod N in
+cycle T / N, N the program's invocations; every transfer's ring depth divides N and every range covers
+the program. The producer releases T by storing the cell's argument plus the cycle into cell T mod N
+(`mesh_host_publish`, or the same store from a kernel); the send stream follows its last cell with its
+first and counts cycles, posting a cell whose ready word exceeds its cycle, and relinks each request after
+posting it. The receive ring's posted count runs on: record `posted mod count` in cycle `posted / count`,
+its span held under N so a record is posted again only after its previous posting completed (receive
+completions arrive in order); a landing stores 1 plus its cycle into the completion word. A reader of T
+waits for a word of at least 1 + T / N; `UINT64_MAX` (M12) still ends every wait. For a one-pass program
+the cycle is always 0 and every comparison is the one before M30. NCCL's FIFOs [NCCL `src/transport/net.cc`]
+and persistent communication buffers [PyTorch `torch/_inductor/comm_lowering.py`: "the same allocation, at the
+same offset, in every iteration"] are the users this serves.
+
+A client's program ends without ending its attach (`mesh_transfers_stop`): the client clears `configured`,
+the bridge's control loop stops and joins the links (`link_run` leaves its loop when `configured` no longer
+names the client) and clears `device_client`, and the client clears its transfer lists and its links'
+`prepared` words. Its allocations remain; another prepare and start pairs a new program for the same client.

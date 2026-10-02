@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* design/algorithm-sources.md#programtensor */
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
@@ -85,6 +86,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
      machine. */
   if(!depth || depth>invocations)depth=invocations;
   atomic_store_explicit(&m->depth,depth,memory_order_relaxed);
+  atomic_store_explicit(&m->cyclic,0,memory_order_relaxed);
   uint64_t cells=0;
   for(uint32_t q=0;q<m->links*m->qps;q++){
     /* design/prepared-machine.md#M08 */
@@ -183,6 +185,50 @@ int mesh_transfers_start(struct mesh_ctx *context){
     if(atomic_load_explicit(&port->phase,memory_order_relaxed)==MESH_STOPPED)
       return (int)atomic_load_explicit(&port->code,memory_order_relaxed);
   }
+  return 0;
+}
+
+/* design/prepared-machine.md#M30 */
+/* The prepared program runs without end: running invocation T is prepared invocation T mod N (N the
+   program's invocations) in cycle T / N.  A producer releases T by storing its argument plus the cycle
+   (mesh_host_publish), the bridge stores 1 plus the cycle in a landing's completion word, so a reader of T
+   waits for a word of at least 1 + T / N (mesh_host_arrived returns the word).  Every transfer's ring depth
+   divides N, so T's slot is (T - begin) mod depth in every cycle.  Called after mesh_transfers_prepare,
+   before mesh_transfers_start. */
+int mesh_transfers_cyclic(struct mesh_ctx *context){
+  struct hdr *m=context->M;
+  uint32_t invocations=((struct mesh_tx *)mesh_events(m,mesh_notice_queue(m,context->client,0)))->invocations;
+  uint32_t fallback=atomic_load_explicit(&m->depth,memory_order_relaxed);
+  if(!invocations)return EINVAL;
+  for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++){
+    struct mesh_transfer *transfers=mesh_transfers(m,context->client,q,d);
+    for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,d));i++){
+      uint32_t depth=transfers[i].depth?transfers[i].depth:fallback;
+      if(!depth || invocations%depth || transfers[i].begin || transfers[i].end<invocations)return EINVAL;
+    }
+  }
+  atomic_store_explicit(&m->cyclic,1,memory_order_release);
+  return 0;
+}
+
+/* design/prepared-machine.md#M12 */
+/* The client's program ends and the client stays attached: its allocations remain, its transfers are
+   cleared for another mesh_transfers_prepare and mesh_transfers_start.  The bridge stops the links when
+   `configured` no longer names the client (link_run) and clears device_client once they are joined; its
+   control loop then starts a program for the same client again.  ETIMEDOUT where the bridge has not
+   stopped within `seconds`. */
+int mesh_transfers_stop(struct mesh_ctx *context,double seconds){
+  struct hdr *m=context->M;
+  uint64_t client=context->client;
+  if(atomic_compare_exchange_strong_explicit(&m->configured,&client,0,memory_order_release,memory_order_relaxed)){
+    mesh_control_notify(m);
+    for(double waited=0;atomic_load_explicit(&m->device_client,memory_order_acquire)==context->client;waited+=1e-4){
+      if(waited>seconds)return ETIMEDOUT;
+      usleep(100);
+    }
+  }
+  for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(m,context->client,q,d),0,memory_order_release);
+  for(uint32_t p=0;p<m->links;p++)atomic_store_explicit(&mesh_links(m)[p].port.prepared,0,memory_order_release);
   return 0;
 }
 

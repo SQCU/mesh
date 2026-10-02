@@ -41,7 +41,7 @@ struct prepared_receive {
   _Atomic uint64_t *input;
   struct ibv_qp *pair;
   uint64_t argument;
-  uint32_t frames,invocation,queue;
+  uint32_t frames,invocation,queue,cycle;
 };
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
   offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,input)==48,"M08 M09");
@@ -67,7 +67,7 @@ struct send_gate {
 };
 /* A SEND stream's progress: its current cell, the next request of that cell's chain and the requests
    left. */
-struct send_stream { struct mesh_send *cell; struct ibv_send_wr *next; uint32_t remaining; };
+struct send_stream { struct mesh_send *cell,*first; struct ibv_send_wr *next; uint32_t remaining; uint64_t cycle; };
 /* design/prepared-machine.md#M27 */
 struct mesh_trace { _Alignas(32) uint64_t identity; uint64_t begin,middle,end; };
 _Static_assert(sizeof(struct mesh_trace)==32 && _Alignof(struct mesh_trace)==32,"M27");
@@ -79,7 +79,7 @@ struct mesh_link {
   union mesh_network_event network_event;
   char *configuration;
   _Atomic int progressing;
-  struct hdr *M;struct mesh_verbs provider;int qps;uint64_t client;
+  struct hdr *M;struct mesh_verbs provider;int qps,cyclic;uint64_t client;uint32_t invocations;
   struct prepared_receive *receive;
   size_t receive_count;
   struct receive_ring *rings;
@@ -172,12 +172,18 @@ static uint32_t transfer_row(struct hdr *m,const struct mesh_transfer *transfer,
 /* Posts the ring's next records while its queue has room and each is within the ring's span of the
    latest completed invocation.  Called once at configuration and at each receive completion: the
    refill is fired by the event. */
+/* design/prepared-machine.md#M30 */
+/* A cyclic program's ring wraps: its posted count runs on, record posted % count in cycle posted / count,
+   at running invocation invocation + cycle * N; the span is held under N, so a record is posted again only
+   after its last posting completed (completions arrive in order). */
 static int ring_advance(struct mesh_link *link,struct receive_ring *ring){
   int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=link->provider.queues[0].receive;
-  while(ring->posted<ring->count){
-    struct prepared_receive *record=ring->first+ring->posted;
-    if((int64_t)record->invocation>ring->completed+(int64_t)ring->span ||
+  while(ring->count && (link->cyclic || ring->posted<ring->count)){
+    struct prepared_receive *record=ring->first+ring->posted%ring->count;
+    uint64_t cycle=ring->posted/ring->count;
+    if((int64_t)(record->invocation+cycle*link->invocations)>ring->completed+(int64_t)ring->span ||
        ring->outstanding+record->frames>ring->capacity)break;
+    record->cycle=(uint32_t)cycle;
     struct ibv_recv_wr *bad;
     int error=post(record->pair,&record->request,&bad);
     if(error)return error<0?-error:error;
@@ -200,6 +206,7 @@ static int link_configure(void *state,int socket,uint64_t client){
   struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,client,link->index));
   uint32_t invocations=tx->invocations?tx->invocations:1,depth=atomic_load_explicit(&m->depth,memory_order_acquire);
   if(!depth||depth>invocations)depth=invocations;
+  link->cyclic=atomic_load_explicit(&m->cyclic,memory_order_acquire)!=0;link->invocations=invocations;
   int qps=link->qps;
   link->streams=calloc((size_t)qps,sizeof *link->streams);
   link->gates=aligned_alloc(64,(size_t)qps*sizeof *link->gates);
@@ -263,7 +270,9 @@ static int link_configure(void *state,int socket,uint64_t client){
       }
     }
   }
-  for(int q=0;q<qps;q++)if(last[q])last[q]->successor=(uintptr_t)terminal[q];
+  /* design/prepared-machine.md#M30: a cyclic program's last cell is followed by its first */
+  for(int q=0;q<qps;q++)if(last[q])last[q]->successor=link->cyclic?(uintptr_t)link->streams[q].cell:(uintptr_t)terminal[q];
+  for(int q=0;q<qps;q++){link->streams[q].first=link->streams[q].cell;link->streams[q].cycle=0;}
   link->stream_count=0;
   for(int q=0;q<qps;q++)if(link->streams[q].cell)link->streams[link->stream_count++]=link->streams[q];
   free(last);free(terminal);
@@ -310,6 +319,8 @@ static int link_configure(void *state,int socket,uint64_t client){
       }
     }
     r->count=(size_t)(link->receive+at-r->first);
+    /* design/prepared-machine.md#M30 */
+    if(link->cyclic)r->span=MIN(r->span,invocations>1?invocations-1:1);
     int error=ring_advance(link,r);
     if(error){errno=error;return -1;}
     fprintf(stderr,"receive ring=%d records=%zu posted=%zu frames=%u capacity=%u span=%u\n",
@@ -359,7 +370,7 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
     uint64_t observed=0;
     if(!stream->remaining){
       struct mesh_send *cell=stream->cell;
-      if(!atomic_load_explicit(&cell->ready,memory_order_acquire)){
+      if(atomic_load_explicit(&cell->ready,memory_order_acquire)<=stream->cycle){
         if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
         int error=send_retire(link);
         if(error){link_error(link,error,2);return NULL;}
@@ -386,11 +397,15 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
       request->send_flags=IBV_SEND_SIGNALED;request->wr_id=((uint64_t)cell->queue<<48)|(gate->posted&MESH_GATE_MASK);
       int error=post((struct ibv_qp *)cell->pair,request,&bad);
       if(error){link_error(link,error<0?-error:error,1);return NULL;}
+      request->next=following;
       stream->next=following;stream->remaining--;gate->requests++;
     }
     if(traced && observed && link->traced[MESH_SEND]<capacity)
       trace[link->traced[MESH_SEND]++]=(struct mesh_trace){(uintptr_t)cell,observed,posting,clock_gettime_nsec_np(CLOCK_UPTIME_RAW)};
-    if(!stream->remaining)stream->cell=(struct mesh_send *)cell->successor;
+    if(!stream->remaining){
+      stream->cell=(struct mesh_send *)cell->successor;
+      if(stream->cell==stream->first)stream->cycle++;
+    }
   }
 }
 
@@ -429,9 +444,9 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
     struct prepared_receive *record=(void *)(uintptr_t)completion->wr_id;
     struct receive_ring *ring=link->rings+record->queue;
     ring->landed++;ring->bytes+=completion->byte_len;
-    atomic_store_explicit(record->input,record->argument,memory_order_release);
+    atomic_store_explicit(record->input,record->argument+record->cycle,memory_order_release);
     uint64_t published=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
-    ring->outstanding-=record->frames;ring->completed=record->invocation;
+    ring->outstanding-=record->frames;ring->completed=(int64_t)(record->invocation+(uint64_t)record->cycle*link->invocations);
     int error=ring_advance(link,ring);
     if(error){link_error(link,error,1);return NULL;}
     /* design/prepared-machine.md#M27 */

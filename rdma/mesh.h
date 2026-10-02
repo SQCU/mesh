@@ -81,7 +81,8 @@ struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,qps,links;
   uint32_t orders,wire_pages;
   _Atomic uint32_t depth;
-  uint32_t padding;
+  /* design/prepared-machine.md#M30: nonzero, the client's program is cyclic (mesh_transfers_cyclic) */
+  _Atomic uint32_t cyclic;
   _Atomic uint64_t configured;
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,length_off,target_off,order_off,notice_off,data_off,length;
   uint64_t notice_bytes,target_stride;
