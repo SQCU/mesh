@@ -3,4 +3,4 @@ entry point loads it when torch is imported, so a program only names it: init_pr
 
 
 def _autoload():
-    from . import backend  # noqa: F401
+    from . import backend, partition  # noqa: F401 (partition before a program imports context_parallel_unshard by name)
