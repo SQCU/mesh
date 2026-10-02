@@ -1164,7 +1164,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       result = gpu(metal_copy(program, METAL_PLAIN, segment.buffer, segment.offset, send.buffer, send.offset,
                               reducing(c->what) ? bytes : c->count * z), "the operand");
     struct where total = own;
-    if (!result && s && s->direct && reducing(c->what)) {
+    /* a direct exchange's sums apart from the operand its SENDs read, except with one peer: each element is sent once,
+       copied into its slot before its landing combines into it (the walk publishes a position before consuming it) */
+    if (!result && s && s->direct && reducing(c->what) && comm->nranks > 2) {
       void *sums = workspace(program, c, bytes);
       if (!sums) { result = fail(ncclSystemError, "out of GPU memory"); break; }
       total = (struct where){sums, 0};
