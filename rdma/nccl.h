@@ -19,15 +19,17 @@
    configuration, so every rank makes the same unique id with no exchange: ncclGetUniqueId reads
    MESH_LINKS, an explicit link map over the communicator's ranks (mesh-collective.h; unset: every
    pair linked; a link line's third and fourth fields are the alpha-beta cost the planner weighs),
-   and MESH_REGION, the bridge's region (default /mesh0).  A group (ncclGroupStart/End; a call
-   outside one is a group of one) is one prepared program on the bridge: one attach, each call
-   planned by mesh_collective_choose and mesh_collective_plan and bound (mesh_collective_bind, a
-   point-to-point call one SEND or COPY step), one pairing, the SENDs published, the receives
-   awaited and each reduction's pieces combined on the host, then the attach retired.
+   and MESH_REGION, the bridge's region (default /mesh0).  A process attaches once, at its first
+   group that crosses a link, and keeps one prepared program on the bridge for its life (a session):
+   to each peer of the communicator that opened it, a ring of 2*NCCL_STEPS slots each way, each slot
+   NCCL_BUFFSIZE/NCCL_STEPS bytes (NCCL_BUFFSIZE, default 4 MiB, read at attach), for MESH_POSITIONS
+   invocations (default 8192; a group past the last renews the session).  A group (ncclGroupStart/End;
+   a call outside one is a group of one) plans each call by mesh_collective_choose and
+   mesh_collective_plan (a point-to-point call one SEND or COPY step) and streams its pieces through
+   the rings, slot by slot, the receives combined on the host.
    ncclCollConfig_t.algSelection names the planner's algorithms: "direct", "ring", "tree",
    "binomial" (comma-separated).  Buffers are host pointers (unified memory, e.g. an MTLBuffer's
-   contents), each staged through the group's registered sections.
-
+   contents), copied through the rings' registered slots.
    Every call is synchronous: it returns once its group has run.  The stream is not read.
 
    Not implemented (not exported): ncclCommRevoke, ncclCommShrink, ncclCommGetUniqueId,
