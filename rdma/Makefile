@@ -21,9 +21,11 @@ NCCL_API = ncclMemAlloc ncclMemFree ncclGetVersion ncclGetUniqueId ncclCommInitR
   ncclAllGather ncclAlltoAll ncclGather ncclScatter ncclAllReduceConfig ncclBroadcastConfig ncclReduceConfig \
   ncclAllGatherConfig ncclReduceScatterConfig ncclAlltoAllConfig ncclGatherConfig ncclScatterConfig ncclSend ncclRecv \
   ncclGroupStart ncclGroupEnd
-libnccl-mesh.dylib: nccl-mesh.c nccl.h mesh-collective.h mesh-call.h mesh-dataflow.h mesh.h libmesh.dylib Makefile
+libnccl-mesh.dylib: nccl-mesh.c nccl-mesh-metal.m nccl-mesh-metal.h mesh-metal.m mesh-metal.h nccl.h mesh-collective.h mesh-call.h \
+  mesh-dataflow.h mesh.h libmesh.dylib Makefile
 	cc -fblocks -O2 -Wall -Wextra -Werror -dynamiclib -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
-	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c -L. -lmesh
+	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c nccl-mesh-metal.m mesh-metal.m -L. -lmesh \
+	  -framework Metal -framework Foundation
 libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h Makefile
 	cc -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c -lobjc
 clean:

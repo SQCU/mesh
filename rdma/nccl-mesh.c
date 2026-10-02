@@ -6,6 +6,8 @@
 #include "nccl.h"
 #include "mesh-collective.h"
 #include "mesh.h"
+#include "mesh-metal.h"
+#include "nccl-mesh-metal.h"
 #include <errno.h>
 #include <math.h>
 #include <pthread.h>
@@ -370,12 +372,21 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
 #define BUFFSIZE ((size_t)1 << 22)  /* NCCL_BUFFSIZE's default */
 #define POSITIONS 8192
 #define IDENTITY 1
+#define RELEASED (UINT64_C(1) << 62)
 
+/* a channel's Metal side: its rings as buffers, `event` the count of its positions landed (the progress
+   thread's `signaled`, up to the `target` the encoded groups reach), its out ring's invocation-0 SEND cell in
+   the publication buffer and the producer argument a publication stores there; `waited`, the arrivals the
+   encoded GPU work already waits for */
 struct channel {
   uint32_t node;
   struct mesh_section out, in;
   unsigned char *sending, *receiving;
-  uint64_t sent, consumed, end;
+  uint64_t sent, consumed, end, waited;
+  void *ring_out, *ring_in, *event;
+  size_t cell;
+  uint64_t argument;
+  _Atomic uint64_t target, signaled;
 };
 
 static struct {
@@ -385,16 +396,125 @@ static struct {
   struct channel *channels;
   uint32_t count, positions;
   size_t slot;
-  int registered;
+  int registered, running;
+  struct mesh_metal_transport transport;
+  pthread_t progress;
+  _Atomic int stop, failed;
 } session;
-static pthread_mutex_t session_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t session_lock = PTHREAD_MUTEX_INITIALIZER, progress_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t progress_wake = PTHREAD_COND_INITIALIZER;
+static void *finished;
+static uint64_t issued;
+
+static double now_s(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return now.tv_sec + now.tv_nsec * 1e-9;
+}
+
+/* every encoded wait released (each event past any position) and the failure kept for the next group */
+static char failure[512];
+static void release_all(int result, const char *format, ...) {
+  int none = ncclSuccess;
+  if (atomic_compare_exchange_strong(&session.failed, &none, result)) {
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(failure, sizeof failure, format, arguments);
+    va_end(arguments);
+  }
+  for (uint32_t h = 0; h < session.count; h++) {
+    struct channel *ch = session.channels + h;
+    atomic_store(&ch->signaled, atomic_load(&ch->target));
+    if (ch->event) metal_signal(ch->event, RELEASED);
+  }
+}
+
+static int outstanding(void) {
+  for (uint32_t h = 0; h < session.count; h++)
+    if (atomic_load(&session.channels[h].signaled) < atomic_load(&session.channels[h].target)) return 1;
+  return 0;
+}
+
+/* the progress thread: each channel's positions landed, up to its target, signal its event in order; a
+   cancelled one (the bridge's ~0) or DEADLINE_S with none landing releases every wait */
+static void *progress_run(void *unused) {
+  (void)unused;
+  double idle = now_s() + DEADLINE_S;
+  while (!atomic_load(&session.stop)) {
+    int waiting = 0, moved = 0;
+    for (uint32_t h = 0; h < session.count && !atomic_load(&session.failed); h++) {
+      struct channel *ch = session.channels + h;
+      const uint64_t from = atomic_load(&ch->signaled), target = atomic_load(&ch->target);
+      uint64_t at = from;
+      for (; at < target; at++) {
+        const uint64_t arrived = mesh_host_arrived(&session.context, ch->in, (uint32_t)at);
+        if (!arrived) { waiting = 1; break; }
+        if (arrived == UINT64_MAX) { release_all(ncclRemoteError, "the link to node %u was cancelled", ch->node); break; }
+      }
+      if (at > from && !atomic_load(&session.failed)) { atomic_store(&ch->signaled, at); metal_signal(ch->event, at); moved = 1; }
+    }
+    if (moved) idle = now_s() + DEADLINE_S;
+    else if (waiting && now_s() > idle) release_all(ncclTimeout, "nothing landed from the peers in %.0f s", DEADLINE_S);
+    if (!waiting || atomic_load(&session.failed)) {
+      pthread_mutex_lock(&progress_lock);
+      while (!atomic_load(&session.stop) && (!outstanding() || atomic_load(&session.failed))) pthread_cond_wait(&progress_wake, &progress_lock);
+      pthread_mutex_unlock(&progress_lock);
+      idle = now_s() + DEADLINE_S;
+    }
+  }
+  return NULL;
+}
+
+static void progress_targets(void) {
+  pthread_mutex_lock(&progress_lock);
+  for (uint32_t h = 0; h < session.count; h++) atomic_store(&session.channels[h].target, session.channels[h].end);
+  pthread_cond_signal(&progress_wake);
+  pthread_mutex_unlock(&progress_lock);
+}
+
+/* every encoded GPU program finished (its end signals `finished`); DEADLINE_S with no program finishing and
+   no position landing releases the waits, a second ends the drain */
+static ncclResult_t drain(void) {
+  if (!finished) return ncclSuccess;
+  double idle = now_s() + DEADLINE_S;
+  int released = 0;
+  uint64_t last = metal_signaled(finished), landed = 0;
+  while (metal_signaled(finished) < issued) {
+    uint64_t now = 0;
+    for (uint32_t h = 0; h < session.count; h++) now += atomic_load(&session.channels[h].signaled);
+    if (metal_signaled(finished) != last || now != landed) { last = metal_signaled(finished); landed = now; idle = now_s() + DEADLINE_S; }
+    else if (now_s() > idle) {
+      if (released) return fail(ncclInternalError, "a GPU program of the session did not finish (its command buffer committed?)");
+      release_all(ncclTimeout, "the session's GPU programs waited %.0f s", DEADLINE_S);
+      released = 1;
+      idle = now_s() + DEADLINE_S;
+    }
+    usleep(50);
+  }
+  metal_collect(finished);
+  return ncclSuccess;
+}
 
 static void session_close(double linger) {
   if (!session.header) return;
+  drain();
+  if (session.running) {
+    pthread_mutex_lock(&progress_lock);
+    atomic_store(&session.stop, 1);
+    pthread_cond_signal(&progress_wake);
+    pthread_mutex_unlock(&progress_lock);
+    pthread_join(session.progress, NULL);
+    session.running = 0;
+  }
   if (linger > 0) usleep((useconds_t)(linger * 1e6));
+  for (uint32_t h = 0; h < session.count; h++) {
+    metal_release(session.channels[h].ring_out); metal_release(session.channels[h].ring_in); metal_release(session.channels[h].event);
+  }
+  mesh_metal_transport_destroy(&session.transport);
   mesh_detach(&session.context);
   free(session.channels);
   session.channels = NULL; session.header = NULL; session.count = 0;
+  atomic_store(&session.stop, 0); atomic_store(&session.failed, ncclSuccess);
 }
 
 static void session_exit(void) {
@@ -431,6 +551,19 @@ static int ring_bind(const struct channel *ch, int receive, uint32_t identity, s
                             identity, *section, (uint32_t)(session.slot / session.header->pgsz), 0, UINT32_MAX, DEPTH);
 }
 
+/* a channel's Metal side once its transfers are prepared: the rings wrapped, its event, its SEND cell */
+static int channel_metal(struct channel *ch) {
+  struct prepared_publication record;
+  if (mesh_publication_prepare(session.header, ch->out.first, NULL) != 1) return EINVAL;
+  mesh_publication_prepare(session.header, ch->out.first, &record);
+  ch->cell = (size_t)(record.destination - ((uintptr_t)session.header + session.context.send_off));
+  ch->argument = record.argument;
+  ch->ring_out = metal_wrap(ch->sending, DEPTH * session.slot);
+  ch->ring_in = metal_wrap(ch->receiving, DEPTH * session.slot);
+  ch->event = metal_event();
+  return ch->ring_out && ch->ring_in && ch->event ? 0 : ENOMEM;
+}
+
 static int session_open(ncclComm_t comm, int *other) {
   int status = mesh_attach(&session.context, comm->region);
   if (status) return status;
@@ -449,19 +582,27 @@ static int session_open(ncclComm_t comm, int *other) {
     if (!status) status = ring_bind(ch, 1, IDENTITY + ch->node, &ch->in, &ch->receiving);
   }
   if (!status) status = mesh_transfers_prepare(&session.context, 1, session.positions, DEPTH);
-  if (!status) status = mesh_host_inputs(&session.context);
+  if (!status) status = mesh_metal_transport_create(&session.context, metal_device(), &session.transport);
+  for (uint32_t h = 0; h < session.count && !status; h++) status = channel_metal(session.channels + h);
+  if (!status && !finished && !(finished = metal_event())) status = ENOMEM;
   if (!status) status = mesh_transfers_start(&session.context);
+  if (!status) status = pthread_create(&session.progress, NULL, progress_run, NULL);
   if (status) { session_close(0); return status; }
+  session.running = 1;
   if (!session.registered) session.registered = !atexit(session_exit);
   return 0;
 }
 
 /* -- a group ------------------------------------------------------------------------------------------- */
 
+/* where a step's operand is on the Metal path: a buffer and a byte offset into it */
+struct where { void *buffer; size_t offset; };
+
 struct steps {
   struct mesh_step *steps;
   uint32_t count;
   unsigned char *done, *own, *total;
+  struct where gpu_own, gpu_total;
   int direct, how, root;
 };
 
@@ -481,6 +622,8 @@ struct call {
   struct steps *bound;
   unsigned char *result, *copy;
   int owned;
+  const ncclMeshStream *stream;
+  struct where sum;
 };
 
 static _Thread_local int depth;
@@ -627,12 +770,6 @@ static int ready(const struct steps *s, uint32_t k) {
   return 1;
 }
 
-static double now_s(void) {
-  struct timespec now;
-  clock_gettime(CLOCK_MONOTONIC, &now);
-  return now.tv_sec + now.tv_nsec * 1e-9;
-}
-
 /* every channel's positions published and consumed: a SEND's piece copied into its slot, a REDUCE's
    combined into the result, a COPY's copied into the operand (and the result, where they differ: a direct
    exchange's sums go to a copy, as its SENDs read the operand) */
@@ -683,11 +820,18 @@ static ncclResult_t run(struct schedule *plans) {
   }
 }
 
-/* the group on the session: opened (or renewed: other peers, another region, or too few positions left),
-   scheduled and run; an error retires the session, and the next group opens another */
-static ncclResult_t session_run(ncclComm_t comm, struct call *list, size_t n) {
+/* the group on the session: opened (or renewed: other peers, another region, or too few positions left)
+   and scheduled; a failure the progress thread kept fails this group and retires the session, and the next
+   group opens another */
+static ncclResult_t session_schedule(ncclComm_t comm, struct call *list, size_t n, struct schedule **made) {
   struct schedule *plans = NULL;
   ncclResult_t result = ncclSuccess;
+  *made = NULL;
+  if (session.header && atomic_load(&session.failed)) {
+    result = fail((ncclResult_t)atomic_load(&session.failed), "%s", failure);
+    session_close(0);
+    return result;
+  }
   for (int attempt = 0;;) {
     if (!session_covers(comm)) {
       session_close(LINGER_S);
@@ -715,10 +859,26 @@ static ncclResult_t session_run(ncclComm_t comm, struct call *list, size_t n) {
                            session.positions, session.slot);
     session_close(LINGER_S);
   }
+  *made = plans;
+  return ncclSuccess;
+}
+
+/* the group on the host, after every GPU program: its positions landed are the events' too */
+static ncclResult_t session_run(ncclComm_t comm, struct call *list, size_t n) {
+  struct schedule *plans;
+  ncclResult_t result = drain();
+  if (!result) result = session_schedule(comm, list, n, &plans);
+  if (result) return result;
   result = run(plans);
   schedules_free(plans);
-  if (result) session_close(0);
-  return result;
+  if (result) { session_close(0); return result; }
+  for (uint32_t h = 0; h < session.count; h++) {
+    struct channel *ch = session.channels + h;
+    atomic_store(&ch->target, ch->end); atomic_store(&ch->signaled, ch->end);
+    ch->waited = ch->end;
+    metal_signal(ch->event, ch->end);
+  }
+  return ncclSuccess;
 }
 
 /* _stage: the call's contribution into its operand */
@@ -772,6 +932,7 @@ static ncclResult_t launch(struct call *list, size_t n) {
   ncclResult_t result = ncclSuccess;
   for (size_t i = 0; i < n; i++) {
     if (list[i].comm != comm) return fail(ncclInvalidUsage, "a group on several communicators");
+    if (list[i].stream) return fail(ncclInvalidUsage, "a group on several streams");
     if (reducing(list[i].what) && (result = reduction(list + i))) return result;
   }
   if ((result = plan_calls(comm, list, n))) return result;
@@ -820,6 +981,174 @@ static ncclResult_t launch(struct call *list, size_t n) {
   return result;
 }
 
+/* -- the Metal path ------------------------------------------------------------------------------------ */
+
+static ncclResult_t gpu(int status, const char *what) {
+  return status ? fail(ncclSystemError, "%s on the GPU: %s", what, *metal_error() ? metal_error() : strerror(status)) : ncclSuccess;
+}
+
+/* the group's positions in an order the GPU runs them in: a channel publishes its next position where it
+   may (the peer's position t - LAG landed, every receive before the piece consumed), else consumes its next
+   one; a publication is its piece copied into the slot and its cell released after a barrier, a consumption
+   waits for the position's landing (the channel's event) and combines or copies the piece where it landed */
+static ncclResult_t emit(struct schedule *plans, struct metal_program *program) {
+  ncclResult_t result = ncclSuccess;
+  for (;;) {
+    int moved = 0, open = 0;
+    for (uint32_t h = 0; h < session.count && !result; h++) {
+      struct channel *ch = session.channels + h;
+      struct schedule *p = plans + h;
+      int published = 0;
+      if (ch->sent < ch->end) {
+        const uint64_t at = ch->sent, need = at >= LAG ? at - LAG + 1 : 0;
+        struct message *m = p->out_at < p->outs && at >= p->out[p->out_at].first ? p->out + p->out_at : NULL;
+        if (ch->consumed >= need && !(m && at == m->first && !ready(m->c->bound, m->step))) {
+          if (need > ch->waited) { metal_wait(program, ch->event, need); ch->waited = need; }
+          if (m) {
+            const struct steps *s = m->c->bound;
+            const size_t offset = (at - m->first) * session.slot, length = m->bytes - offset < session.slot ? m->bytes - offset : session.slot;
+            result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * session.slot, s->gpu_own.buffer,
+                                    s->gpu_own.offset + m->offset + offset, length), "a piece into its slot");
+            if (at + 1 == m->first + m->pieces) p->out_at++;
+          }
+          if (!result) result = gpu(metal_publish(program, session.transport.publication, ch->cell + at * sizeof(struct mesh_send), ch->argument),
+                                    "a publication");
+          ch->sent++; published = moved = 1;
+        }
+      }
+      if (!published && !result && ch->consumed < ch->end) {
+        const uint64_t at = ch->consumed;
+        struct message *m = p->in_at < p->ins && at >= p->in[p->in_at].first ? p->in + p->in_at : NULL;
+        if (!(m && at == m->first && !ready(m->c->bound, m->step))) {
+          if (m) {
+            struct steps *s = m->c->bound;
+            const size_t offset = (at - m->first) * session.slot, length = m->bytes - offset < session.slot ? m->bytes - offset : session.slot;
+            const size_t from = (at % DEPTH) * session.slot;
+            if (at + 1 > ch->waited) { metal_wait(program, ch->event, at + 1); ch->waited = at + 1; }
+            if (s->steps[m->step].op == MESH_STEP_REDUCE)
+              result = gpu(metal_combine(program, m->c->type, m->c->combine, s->gpu_total.buffer, s->gpu_total.offset + m->offset + offset,
+                                         ch->ring_in, from, length / SIZE[m->c->type]), "a combine");
+            else {
+              result = gpu(metal_copy(program, METAL_LAND, s->gpu_own.buffer, s->gpu_own.offset + m->offset + offset, ch->ring_in, from, length), "a landing");
+              if (!result && (s->gpu_total.buffer != s->gpu_own.buffer || s->gpu_total.offset != s->gpu_own.offset))
+                result = gpu(metal_copy(program, METAL_LAND, s->gpu_total.buffer, s->gpu_total.offset + m->offset + offset, ch->ring_in, from, length),
+                             "a landing");
+            }
+            if (at + 1 == m->first + m->pieces) { s->done[m->step] = 1; p->in_at++; }
+          }
+          ch->consumed++; moved = 1;
+        }
+      }
+      open |= ch->sent < ch->end || ch->consumed < ch->end;
+    }
+    if (result) return result;
+    if (!open) return ncclSuccess;
+    if (!moved) return fail(ncclInternalError, "the group's positions admit no order");
+  }
+}
+
+static int on_gpu(ncclDataType_t t) { return t != ncclFloat64 && t != ncclFloat8e4m3 && t != ncclFloat8e5m2; }
+static struct where where_of(const void *argument) {
+  const ncclMeshBuffer *b = argument;
+  return b ? (struct where){b->buffer, b->offset} : (struct where){NULL, 0};
+}
+
+/* a premultiplier as the kernels read it: a floating type's value as float32 bits, an integer's bits */
+static uint64_t scalar_bits(const struct call *c) {
+  uint64_t bits = 0;
+  if (floating(c->type)) { const float f = (float)load(c->type, c->pre); uint32_t u; memcpy(&u, &f, 4); return u; }
+  memcpy(&bits, c->pre, SIZE[c->type]);
+  return bits;
+}
+
+/* _launch on the stream's command buffer: each collective staged into a scratch operand, the group's
+   positions, the results into recvbuff; the program's end signals `finished` */
+static ncclResult_t launch_metal(struct call *list, size_t n) {
+  const ncclComm_t comm = list[0].comm;
+  ncclResult_t result = ncclSuccess;
+  for (size_t i = 0; i < n; i++) {
+    if (list[i].comm != comm) return fail(ncclInvalidUsage, "a group on several communicators");
+    if (list[i].stream != list[0].stream) return fail(ncclInvalidUsage, "a group on several streams");
+    if (!on_gpu(list[i].type)) return fail(ncclInvalidArgument, "datatype %d on the Metal path (no float64 or float8 there)", (int)list[i].type);
+    if (reducing(list[i].what) && (result = reduction(list + i))) return result;
+  }
+  if (!list[0].stream->commandBuffer) return fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
+  if ((result = plan_calls(comm, list, n))) return result;
+  pthread_mutex_lock(&session_lock);
+  if (finished) metal_collect(finished);
+  struct metal_program *program = metal_begin(list[0].stream->commandBuffer);
+  if (!program) { pthread_mutex_unlock(&session_lock); return fail(ncclSystemError, "out of memory"); }
+  const size_t r = (size_t)comm->rank;
+  int remote = 0;
+  for (size_t i = 0; i < n && !result; i++) {
+    struct call *c = list + i;
+    struct steps *s = c->bound;
+    const size_t z = SIZE[c->type], bytes = elements(c) * z, all = elements(c);
+    const struct where send = where_of(c->send);
+    remote |= s != NULL;
+    if (p2p(c)) {
+      if (s) s->gpu_own = s->gpu_total = c->what == WHAT_SEND ? send : where_of(c->recv);
+      continue;
+    }
+    void *scratch = metal_scratch(bytes);
+    if (!scratch) { result = fail(ncclSystemError, "out of GPU memory"); break; }
+    metal_keep(program, scratch); metal_release(scratch);
+    const struct where own = {scratch, 0};
+    if (reducing(c->what))
+      result = gpu(c->premultiplied ? metal_premultiply(program, c->type, own.buffer, 0, send.buffer, send.offset, all, scalar_bits(c))
+                                    : metal_copy(program, METAL_PLAIN, own.buffer, 0, send.buffer, send.offset, bytes), "the operand");
+    else if (c->what == MESH_BROADCAST && c->root == comm->rank)
+      result = gpu(metal_copy(program, METAL_PLAIN, own.buffer, 0, send.buffer, send.offset, c->count * z), "the operand");
+    else if (c->what == MESH_ALLGATHER)
+      result = gpu(metal_copy(program, METAL_PLAIN, own.buffer, r * c->count * z, send.buffer, send.offset, c->count * z), "the operand");
+    struct where total = own;
+    if (!result && s && s->direct) {
+      void *sums = metal_scratch(bytes);
+      if (!sums) { result = fail(ncclSystemError, "out of GPU memory"); break; }
+      metal_keep(program, sums); metal_release(sums);
+      total = (struct where){sums, 0};
+      result = gpu(metal_copy(program, METAL_PLAIN, sums, 0, own.buffer, 0, bytes), "the result");
+    }
+    c->sum = total;
+    if (s) { s->gpu_own = own; s->gpu_total = total; }
+  }
+  int scheduled = 0;
+  if (!result && remote) {
+    struct schedule *plans;
+    result = session_schedule(comm, list, n, &plans);
+    if (!result) {
+      scheduled = 1;
+      result = emit(plans, program);
+      schedules_free(plans);
+      if (!result) progress_targets();
+    }
+  }
+  size_t self = 0;
+  for (size_t i = 0; i < n && !result; i++) {
+    const struct call *c = list + i;
+    const size_t z = SIZE[c->type], count = c->count;
+    const struct where recv = where_of(c->recv), sum = c->sum;
+    if (c->what == WHAT_RECV && c->peer == comm->rank) {
+      while (self < n && !(list[self].what == WHAT_SEND && list[self].peer == comm->rank)) self++;
+      if (self < n) {
+        const struct where from = where_of(list[self].send);
+        result = gpu(metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, from.buffer, from.offset, count * z), "a copy to itself");
+        self++;
+      }
+    } else if (p2p(c)) continue;
+    else if (c->what == MESH_ALLREDUCE || (c->what == MESH_REDUCE && c->root == comm->rank) || c->what == MESH_REDUCE_SCATTER) {
+      const size_t at = sum.offset + (c->what == MESH_REDUCE_SCATTER ? r * count * z : 0);
+      result = gpu(c->post ? metal_truncdiv(program, c->type, recv.buffer, recv.offset, sum.buffer, at, count, (uint64_t)comm->nranks)
+                           : metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, sum.buffer, at, count * z), "the result");
+    } else if (c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER)
+      result = gpu(metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, sum.buffer, sum.offset, elements(c) * z), "the result");
+  }
+  metal_end(program, finished ? finished : (finished = metal_event()), ++issued);
+  if (result && scheduled) release_all(result, "%s", last);
+  pthread_mutex_unlock(&session_lock);
+  return result;
+}
+
 static void plans_record(const struct call *list, size_t n) {
   free(plan_how); free(plan_root);
   plan_how = calloc(n + 1, sizeof *plan_how); plan_root = calloc(n + 1, sizeof *plan_root);
@@ -838,7 +1167,7 @@ ncclResult_t ncclGroupEnd(void) {
   struct call *list = calls;
   const size_t n = call_count;
   calls = NULL; call_count = call_capacity = 0;
-  ncclResult_t result = n ? launch(list, n) : ncclSuccess;
+  ncclResult_t result = !n ? ncclSuccess : list[0].stream ? launch_metal(list, n) : launch(list, n);
   plans_record(list, n);
   for (size_t i = 0; i < n; i++) {
     steps_free(list[i].bound);
@@ -882,16 +1211,16 @@ static ncclResult_t enqueue(struct call c) {
 }
 
 static ncclResult_t collective(int what, const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op,
-                               int root, ncclComm_t comm, const ncclCollConfig_t *config) {
-  struct call c = {.what = what, .root = root, .send = sendbuff, .recv = recvbuff, .count = count, .type = datatype, .op = op, .comm = comm};
+                               int root, ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t *config) {
+  struct call c = {.what = what, .root = root, .send = sendbuff, .recv = recvbuff, .count = count, .type = datatype, .op = op, .comm = comm,
+                   .stream = stream};
   if (selection(config, &c.how, &c.force)) return ncclInvalidArgument;
   return enqueue(c);
 }
 
 ncclResult_t ncclAllReduceConfig(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op,
                                  ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t *config) {
-  (void)stream;
-  return collective(MESH_ALLREDUCE, sendbuff, recvbuff, count, datatype, op, 0, comm, config);
+  return collective(MESH_ALLREDUCE, sendbuff, recvbuff, count, datatype, op, 0, comm, stream, config);
 }
 ncclResult_t ncclAllReduce(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op,
                            ncclComm_t comm, cudaStream_t stream) {
@@ -900,8 +1229,7 @@ ncclResult_t ncclAllReduce(const void *sendbuff, void *recvbuff, size_t count, n
 
 ncclResult_t ncclReduceConfig(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, int root,
                               ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t *config) {
-  (void)stream;
-  return collective(MESH_REDUCE, sendbuff, recvbuff, count, datatype, op, root, comm, config);
+  return collective(MESH_REDUCE, sendbuff, recvbuff, count, datatype, op, root, comm, stream, config);
 }
 ncclResult_t ncclReduce(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, int root,
                         ncclComm_t comm, cudaStream_t stream) {
@@ -910,8 +1238,7 @@ ncclResult_t ncclReduce(const void *sendbuff, void *recvbuff, size_t count, nccl
 
 ncclResult_t ncclBroadcastConfig(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, int root,
                                  ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t *config) {
-  (void)stream;
-  return collective(MESH_BROADCAST, sendbuff, recvbuff, count, datatype, ncclSum, root, comm, config);
+  return collective(MESH_BROADCAST, sendbuff, recvbuff, count, datatype, ncclSum, root, comm, stream, config);
 }
 ncclResult_t ncclBroadcast(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, int root,
                            ncclComm_t comm, cudaStream_t stream) {
@@ -923,8 +1250,7 @@ ncclResult_t ncclBcast(void *buff, size_t count, ncclDataType_t datatype, int ro
 
 ncclResult_t ncclReduceScatterConfig(const void *sendbuff, void *recvbuff, size_t recvcount, ncclDataType_t datatype, ncclRedOp_t op,
                                      ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t *config) {
-  (void)stream;
-  return collective(MESH_REDUCE_SCATTER, sendbuff, recvbuff, recvcount, datatype, op, 0, comm, config);
+  return collective(MESH_REDUCE_SCATTER, sendbuff, recvbuff, recvcount, datatype, op, 0, comm, stream, config);
 }
 ncclResult_t ncclReduceScatter(const void *sendbuff, void *recvbuff, size_t recvcount, ncclDataType_t datatype, ncclRedOp_t op,
                                ncclComm_t comm, cudaStream_t stream) {
@@ -933,8 +1259,7 @@ ncclResult_t ncclReduceScatter(const void *sendbuff, void *recvbuff, size_t recv
 
 ncclResult_t ncclAllGatherConfig(const void *sendbuff, void *recvbuff, size_t sendcount, ncclDataType_t datatype,
                                  ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t *config) {
-  (void)stream;
-  return collective(MESH_ALLGATHER, sendbuff, recvbuff, sendcount, datatype, ncclSum, 0, comm, config);
+  return collective(MESH_ALLGATHER, sendbuff, recvbuff, sendcount, datatype, ncclSum, 0, comm, stream, config);
 }
 ncclResult_t ncclAllGather(const void *sendbuff, void *recvbuff, size_t sendcount, ncclDataType_t datatype,
                            ncclComm_t comm, cudaStream_t stream) {
@@ -942,12 +1267,19 @@ ncclResult_t ncclAllGather(const void *sendbuff, void *recvbuff, size_t sendcoun
 }
 
 ncclResult_t ncclSend(const void *sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {
-  (void)stream;
-  return enqueue((struct call){.what = WHAT_SEND, .peer = peer, .send = sendbuff, .count = count, .type = datatype, .comm = comm});
+  return enqueue((struct call){.what = WHAT_SEND, .peer = peer, .send = sendbuff, .count = count, .type = datatype, .comm = comm, .stream = stream});
 }
 ncclResult_t ncclRecv(void *recvbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {
-  (void)stream;
-  return enqueue((struct call){.what = WHAT_RECV, .peer = peer, .recv = recvbuff, .count = count, .type = datatype, .comm = comm});
+  return enqueue((struct call){.what = WHAT_RECV, .peer = peer, .recv = recvbuff, .count = count, .type = datatype, .comm = comm, .stream = stream});
+}
+
+/* a buffer `bytes` on: a host pointer's, or (on the Metal path) an ncclMeshBuffer's made in `made` */
+#define MAX_RANKS 64
+static const void *piece(cudaStream_t stream, const void *buffer, size_t bytes, ncclMeshBuffer *made) {
+  if (!stream) return (const unsigned char *)buffer + bytes;
+  const ncclMeshBuffer *b = buffer;
+  *made = (ncclMeshBuffer){b->buffer, b->offset + bytes};
+  return made;
 }
 
 /* NCCL 2.32's own lowering of these three (src/enqueue/task_prep/task_classify.cc
@@ -955,10 +1287,12 @@ ncclResult_t ncclRecv(void *recvbuff, size_t count, ncclDataType_t datatype, int
 ncclResult_t ncclAlltoAll(const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
   if (!comm || (unsigned)datatype >= ncclNumTypes) return fail(ncclInvalidArgument, "comm or datatype");
   const size_t z = count * SIZE[datatype];
+  ncclMeshBuffer at[2 * MAX_RANKS];
+  if (stream && comm->nranks > MAX_RANKS) return fail(ncclInvalidUsage, "%d ranks on the Metal path's lowering", comm->nranks);
   ncclResult_t result = ncclGroupStart();
   for (int r = 0; r < comm->nranks && !result; r++) {
-    result = ncclSend((const unsigned char *)sendbuff + r * z, count, datatype, r, comm, stream);
-    if (!result) result = ncclRecv((unsigned char *)recvbuff + r * z, count, datatype, r, comm, stream);
+    result = ncclSend(piece(stream, sendbuff, r * z, at + 2 * r), count, datatype, r, comm, stream);
+    if (!result) result = ncclRecv((void *)piece(stream, recvbuff, r * z, at + 2 * r + 1), count, datatype, r, comm, stream);
   }
   const ncclResult_t ended = ncclGroupEnd();
   return result ? result : ended;
@@ -973,10 +1307,12 @@ ncclResult_t ncclGather(const void *sendbuff, void *recvbuff, size_t count, nccl
                         cudaStream_t stream) {
   if (!comm || (unsigned)datatype >= ncclNumTypes) return fail(ncclInvalidArgument, "comm or datatype");
   const size_t z = count * SIZE[datatype];
+  ncclMeshBuffer at[MAX_RANKS];
+  if (stream && comm->nranks > MAX_RANKS) return fail(ncclInvalidUsage, "%d ranks on the Metal path's lowering", comm->nranks);
   ncclResult_t result = ncclGroupStart();
   if (!result) result = ncclSend(sendbuff, count, datatype, root, comm, stream);
   for (int r = 0; comm->rank == root && r < comm->nranks && !result; r++)
-    result = ncclRecv((unsigned char *)recvbuff + r * z, count, datatype, r, comm, stream);
+    result = ncclRecv((void *)piece(stream, recvbuff, r * z, at + r), count, datatype, r, comm, stream);
   const ncclResult_t ended = ncclGroupEnd();
   return result ? result : ended;
 }
@@ -990,9 +1326,11 @@ ncclResult_t ncclScatter(const void *sendbuff, void *recvbuff, size_t count, ncc
                          cudaStream_t stream) {
   if (!comm || (unsigned)datatype >= ncclNumTypes) return fail(ncclInvalidArgument, "comm or datatype");
   const size_t z = count * SIZE[datatype];
+  ncclMeshBuffer at[MAX_RANKS];
+  if (stream && comm->nranks > MAX_RANKS) return fail(ncclInvalidUsage, "%d ranks on the Metal path's lowering", comm->nranks);
   ncclResult_t result = ncclGroupStart();
   for (int r = 0; comm->rank == root && r < comm->nranks && !result; r++)
-    result = ncclSend((const unsigned char *)sendbuff + r * z, count, datatype, r, comm, stream);
+    result = ncclSend(piece(stream, sendbuff, r * z, at + r), count, datatype, r, comm, stream);
   if (!result) result = ncclRecv(recvbuff, count, datatype, root, comm, stream);
   const ncclResult_t ended = ncclGroupEnd();
   return result ? result : ended;

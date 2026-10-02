@@ -42,3 +42,5 @@ xonotic/.tmp/
 xonotic/solver/strat/runs/
 build/
 *.egg-info/
+rdma/torch-mesh/torch_mesh/*.so
+rdma/torch-mesh/build/

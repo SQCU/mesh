@@ -29,8 +29,14 @@
    the rings, slot by slot, the receives combined on the host.
    ncclCollConfig_t.algSelection names the planner's algorithms: "direct", "ring", "tree",
    "binomial" (comma-separated).  Buffers are host pointers (unified memory, e.g. an MTLBuffer's
-   contents), copied through the rings' registered slots.
-   Every call is synchronous: it returns once its group has run.  The stream is not read.
+   contents), copied through the rings' registered slots; with a NULL stream every call is synchronous,
+   returning once its group has run.
+   A stream that is not NULL is an ncclMeshStream: the group's work is encoded into its Metal command buffer
+   (the caller commits it) and every buffer argument is an ncclMeshBuffer, an id<MTLBuffer> and a byte offset
+   into it (an MPS tensor's storage and offset).  The pieces are copied into the slots and combined where they
+   landed by Metal kernels; the command buffer waits on an MTLSharedEvent a progress thread signals as the
+   peer's positions land (no kernel polls the network).  The Metal path carries the integer types, float16,
+   float32 and bfloat16.
 
    Not implemented (not exported): ncclCommRevoke, ncclCommShrink, ncclCommGetUniqueId,
    ncclCommGrow, ncclCommInitRankScalable, ncclCommSuspend, ncclCommResume, ncclCommMemStats,
@@ -61,6 +67,8 @@ extern "C" {
 
 /* The stream: not read (every call is synchronous, above). */
 typedef void *cudaStream_t;
+typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
+typedef struct { void *commandBuffer; } ncclMeshStream;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
 typedef void *cudaEvent_t;
 
