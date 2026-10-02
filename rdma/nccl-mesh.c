@@ -372,19 +372,18 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
 #define BUFFSIZE ((size_t)1 << 22)  /* NCCL_BUFFSIZE's default */
 #define POSITIONS 8192
 #define IDENTITY 1
-#define RELEASED (UINT64_C(1) << 62)
-#define SPIN 16384                  /* a wait's polls before it parks on the event (MESH_SPIN) */
+#define BOUND 10.0                  /* metal-microbench configs/e2b-programs.json remote_bound_seconds (MESH_REMOTE_BOUND) */
 
-/* a channel's Metal side: its rings as buffers, `event` the count of its positions landed (the progress
-   thread's `signaled`, up to the `target` the encoded groups reach), its out ring's invocation-0 SEND cell in
-   the publication buffer and the producer argument a publication stores there; `waited`, the arrivals the
-   encoded GPU work already waits for */
+/* a channel's Metal side: its rings as buffers, its out ring's invocation-0 SEND cell in the publication buffer
+   and the producer argument a publication stores there, its in ring's invocation-0 completion word and the
+   words' stride in the transport's inputs; `waited`, the arrivals the encoded GPU work already waits for;
+   `signaled`, the positions landed that the progress thread has seen, up to the `target` the groups reach */
 struct channel {
   uint32_t node;
   struct mesh_section out, in;
   unsigned char *sending, *receiving;
   uint64_t sent, consumed, end, waited;
-  void *ring_out, *ring_in, *event;
+  void *ring_out, *ring_in;
   size_t cell, word, word_stride;
   uint64_t argument;
   _Atomic uint64_t target, signaled;
@@ -397,7 +396,7 @@ static struct {
   struct channel *channels;
   uint32_t count, positions;
   size_t slot;
-  uint64_t spin;
+  double bound;
   int registered, running;
   struct mesh_metal_transport transport;
   pthread_t progress;
@@ -414,7 +413,8 @@ static double now_s(void) {
   return now.tv_sec + now.tv_nsec * 1e-9;
 }
 
-/* every encoded wait released (each event past any position) and the failure kept for the next group */
+/* every link with pending words cancelled (mesh_cancel: each pending word ~0, so every spin on it ends) and the
+   failure kept for the next group */
 static char failure[512];
 static void release_all(int result, const char *format, ...) {
   int none = ncclSuccess;
@@ -424,11 +424,8 @@ static void release_all(int result, const char *format, ...) {
     vsnprintf(failure, sizeof failure, format, arguments);
     va_end(arguments);
   }
-  for (uint32_t h = 0; h < session.count; h++) {
-    struct channel *ch = session.channels + h;
-    atomic_store(&ch->signaled, atomic_load(&ch->target));
-    if (ch->event) metal_signal(ch->event, RELEASED);
-  }
+  for (uint32_t l = 0; session.transport.cancel && l < session.header->links; l++) mesh_cancel(session.header, session.transport.cancel, l);
+  for (uint32_t h = 0; h < session.count; h++) atomic_store(&session.channels[h].signaled, atomic_load(&session.channels[h].target));
 }
 
 static int outstanding(void) {
@@ -437,11 +434,12 @@ static int outstanding(void) {
   return 0;
 }
 
-/* the progress thread: each channel's positions landed, up to its target, signal its event in order; a
-   cancelled one (the bridge's ~0) or DEADLINE_S with none landing releases every wait */
+/* the progress thread, mesh_rank.m's silent-link detector: it follows each channel's landings up to its target,
+   and a channel with positions pending that sees none land for the bound (MESH_REMOTE_BOUND seconds) has its
+   link cancelled, as does a landing the bridge cancelled (~0) */
 static void *progress_run(void *unused) {
   (void)unused;
-  double idle = now_s() + DEADLINE_S;
+  double idle = now_s() + session.bound;
   while (!atomic_load(&session.stop)) {
     int waiting = 0, moved = 0;
     for (uint32_t h = 0; h < session.count && !atomic_load(&session.failed); h++) {
@@ -453,15 +451,15 @@ static void *progress_run(void *unused) {
         if (!arrived) { waiting = 1; break; }
         if (arrived == UINT64_MAX) { release_all(ncclRemoteError, "the link to node %u was cancelled", ch->node); break; }
       }
-      if (at > from && !atomic_load(&session.failed)) { atomic_store(&ch->signaled, at); metal_signal(ch->event, at); moved = 1; }
+      if (at > from && !atomic_load(&session.failed)) { atomic_store(&ch->signaled, at); moved = 1; }
     }
-    if (moved) idle = now_s() + DEADLINE_S;
-    else if (waiting && now_s() > idle) release_all(ncclTimeout, "nothing landed from the peers in %.0f s", DEADLINE_S);
+    if (moved) idle = now_s() + session.bound;
+    else if (waiting && now_s() > idle) release_all(ncclRemoteError, "no landing from the peers in %.1f s: the links cancelled as silent", session.bound);
     if (!waiting || atomic_load(&session.failed)) {
       pthread_mutex_lock(&progress_lock);
       while (!atomic_load(&session.stop) && (!outstanding() || atomic_load(&session.failed))) pthread_cond_wait(&progress_wake, &progress_lock);
       pthread_mutex_unlock(&progress_lock);
-      idle = now_s() + DEADLINE_S;
+      idle = now_s() + session.bound;
     }
   }
   return NULL;
@@ -487,7 +485,7 @@ static ncclResult_t drain(void) {
     if (metal_signaled(finished) != last || now != landed) { last = metal_signaled(finished); landed = now; idle = now_s() + DEADLINE_S; }
     else if (now_s() > idle) {
       if (released) return fail(ncclInternalError, "a GPU program of the session did not finish (its command buffer committed?)");
-      release_all(ncclTimeout, "the session's GPU programs waited %.0f s", DEADLINE_S);
+      release_all(ncclTimeout, "the session's GPU programs ran %.0f s with nothing landing", DEADLINE_S);
       released = 1;
       idle = now_s() + DEADLINE_S;
     }
@@ -510,7 +508,7 @@ static void session_close(double linger) {
   }
   if (linger > 0) usleep((useconds_t)(linger * 1e6));
   for (uint32_t h = 0; h < session.count; h++) {
-    metal_release(session.channels[h].ring_out); metal_release(session.channels[h].ring_in); metal_release(session.channels[h].event);
+    metal_release(session.channels[h].ring_out); metal_release(session.channels[h].ring_in);
   }
   mesh_metal_transport_destroy(&session.transport);
   mesh_detach(&session.context);
@@ -553,7 +551,7 @@ static int ring_bind(const struct channel *ch, int receive, uint32_t identity, s
                             identity, *section, (uint32_t)(session.slot / session.header->pgsz), 0, UINT32_MAX, DEPTH);
 }
 
-/* a channel's Metal side once its transfers are prepared: the rings wrapped, its event, its SEND cell */
+/* a channel's Metal side once its transfers are prepared: the rings wrapped, its SEND cell, its completion words */
 static int channel_metal(struct channel *ch) {
   struct prepared_publication record;
   if (mesh_publication_prepare(session.header, ch->out.first, NULL) != 1) return EINVAL;
@@ -567,8 +565,7 @@ static int channel_metal(struct channel *ch) {
   ch->word = input.offset; ch->word_stride = input.stride;
   ch->ring_out = metal_wrap(ch->sending, DEPTH * session.slot);
   ch->ring_in = metal_wrap(ch->receiving, DEPTH * session.slot);
-  ch->event = metal_event();
-  return ch->ring_out && ch->ring_in && ch->event ? 0 : ENOMEM;
+  return ch->ring_out && ch->ring_in ? 0 : ENOMEM;
 }
 
 static int session_open(ncclComm_t comm, int *other) {
@@ -580,7 +577,7 @@ static int session_open(ncclComm_t comm, int *other) {
   const size_t block = (size_t)m->pgsz * m->block;
   session.slot = (setting("NCCL_BUFFSIZE", BUFFSIZE) / LAG + block - 1) / block * block;
   session.positions = (uint32_t)setting("MESH_POSITIONS", POSITIONS);
-  session.spin = setting("MESH_SPIN", SPIN);
+  session.bound = setting("MESH_REMOTE_BOUND", 0) ? (double)setting("MESH_REMOTE_BOUND", 0) : BOUND;
   if (!(session.channels = calloc((size_t)comm->nranks, sizeof *session.channels))) { session_close(0); return ENOMEM; }
   for (int r = 0; r < comm->nranks && !status; r++) {
     if (r == comm->rank) continue;
@@ -872,7 +869,7 @@ static ncclResult_t session_schedule(ncclComm_t comm, struct call *list, size_t 
   return ncclSuccess;
 }
 
-/* the group on the host, after every GPU program: its positions landed are the events' too */
+/* the group on the host, after every GPU program; its positions count as landed for the progress thread */
 static ncclResult_t session_run(ncclComm_t comm, struct call *list, size_t n) {
   struct schedule *plans;
   ncclResult_t result = drain();
@@ -885,7 +882,6 @@ static ncclResult_t session_run(ncclComm_t comm, struct call *list, size_t n) {
     struct channel *ch = session.channels + h;
     atomic_store(&ch->target, ch->end); atomic_store(&ch->signaled, ch->end);
     ch->waited = ch->end;
-    metal_signal(ch->event, ch->end);
   }
   return ncclSuccess;
 }
@@ -996,20 +992,17 @@ static ncclResult_t gpu(int status, const char *what) {
   return status ? fail(ncclSystemError, "%s on the GPU: %s", what, *metal_error() ? metal_error() : strerror(status)) : ncclSuccess;
 }
 
-/* the GPU waits until `count` of the channel's positions have landed: a spin on the last one's completion word
-   for the session's budget of polls, then its event (at once where the spin saw it land) */
+/* the GPU waits until `count` of the channel's positions have landed: a spin on the last one's completion word */
 static ncclResult_t arrive(struct metal_program *program, struct channel *ch, uint64_t count) {
   if (count <= ch->waited) return ncclSuccess;
-  const ncclResult_t result = gpu(metal_spin(program, session.transport.inputs, ch->word + (count - 1) * ch->word_stride, session.spin), "a spin");
-  metal_wait(program, ch->event, count);
   ch->waited = count;
-  return result;
+  return gpu(metal_spin(program, session.transport.inputs, ch->word + (count - 1) * ch->word_stride), "a spin");
 }
 
 /* the group's positions in an order the GPU runs them in: a channel publishes its next position where it
    may (the peer's position t - LAG landed, every receive before the piece consumed), else consumes its next
-   one; a publication is its piece copied into the slot and its cell released after a barrier, a consumption
-   waits for the position's landing (the channel's event) and combines or copies the piece where it landed */
+   one; a publication is its piece copied into the slot and its cell released, a consumption waits for the
+   position's landing (a spin on its completion word) and combines or copies the piece where it landed */
 static ncclResult_t emit(struct schedule *plans, struct metal_program *program) {
   ncclResult_t result = ncclSuccess;
   for (;;) {

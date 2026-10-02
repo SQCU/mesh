@@ -34,9 +34,10 @@
    A stream that is not NULL is an ncclMeshStream: the group's work is encoded into its Metal command buffer
    (the caller commits it) and every buffer argument is an ncclMeshBuffer, an id<MTLBuffer> and a byte offset
    into it (an MPS tensor's storage and offset).  The pieces are copied into the slots and combined where they
-   landed by Metal kernels; the command buffer waits on an MTLSharedEvent a progress thread signals as the
-   peer's positions land (no kernel polls the network).  The Metal path carries the integer types, float16,
-   float32 and bfloat16.
+   landed by Metal kernels; a wait for the peer's position is a kernel polling its completion word (the
+   engine's mesh_remote_wait), and a progress thread cancels a link with positions pending that delivers none
+   for MESH_REMOTE_BOUND seconds (default 10), ending every wait on it.  The Metal path carries the integer
+   types, float16, float32 and bfloat16.
 
    Not implemented (not exported): ncclCommRevoke, ncclCommShrink, ncclCommGetUniqueId,
    ncclCommGrow, ncclCommInitRankScalable, ncclCommSuspend, ncclCommResume, ncclCommMemStats,

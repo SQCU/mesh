@@ -131,12 +131,7 @@ def done(result):
     return _create_work_from_future(future)
 
 
-COMMIT = os.environ.get('MESH_COMMIT') == 'call'
-
-
 class ProcessGroupMesh(dist.ProcessGroup):
-    _uncommitted = False
-
     def __init__(self, rank, size):
         super().__init__(rank, size)
         self._rank, self._size, self._pending = rank, size, None
@@ -168,28 +163,22 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def _group(self, issue, outputs, result=None):
         """One NCCL group: `issue` makes its calls (their stream self._stream: torch's MPS stream's command
         buffer where the operands are MPS tensors, else none), then every staged output is written back.  An MPS
-        group is left in torch's command buffer for torch to commit (at its own points, a synchronize at the
-        latest), as NCCL leaves a stream's work; a host group first commits what MPS groups left, so nothing it
-        waits for is uncommitted.  Between start_coalescing and end_coalescing the calls join the coalesced
-        group instead."""
+        group is committed at once, so its publications reach the peer while it computes on.  Between
+        start_coalescing and end_coalescing the calls join the coalesced group instead."""
         if self._pending is not None:
             self._pending.append((issue, outputs, result))
             return done(result)
-        from . import _stream
         mps = on_mps(result)
         if mps:
+            from . import _stream
             self._command.commandBuffer = _stream.begin()
-            ProcessGroupMesh._uncommitted = True
-        elif ProcessGroupMesh._uncommitted:
-            _stream.commit()
-            ProcessGroupMesh._uncommitted = False
         self._stream = C.addressof(self._command) if mps else None
         check(LIB.ncclGroupStart())
         try:
             issue()
         finally:
             ended = LIB.ncclGroupEnd()
-            if mps and COMMIT:
+            if mps:
                 _stream.commit()
             check(ended)
         for output in outputs:
