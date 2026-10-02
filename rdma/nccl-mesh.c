@@ -1099,6 +1099,24 @@ static struct where where_of(const void *argument) {
   return b ? (struct where){b->buffer, b->offset} : (struct where){NULL, 0};
 }
 
+/* whether a plan combines in its operand: every SEND that reads an element runs before a landing combines into it.
+   A ring's or a tree's does by causality (mesh-collective.h: what a REDUCE brings in was caused by the arrival of
+   every earlier SEND of those elements); a direct exchange's does where each element's SENDs and REDUCE share
+   one peer, since the walk publishes a position before it consumes that position; otherwise its sums go apart */
+static int combines_in_place(const struct steps *s) {
+  if (!s->direct) return 1;
+  for (uint32_t k = 0; k < s->count; k++) {
+    const struct mesh_step *r = s->steps + k;
+    if (r->op != MESH_STEP_REDUCE) continue;
+    for (uint32_t j = 0; j < s->count; j++) {
+      const struct mesh_step *w = s->steps + j;
+      if (w->op == MESH_STEP_SEND && w->peer != r->peer && w->first < r->first + r->piece.elements && r->first < w->first + w->piece.elements)
+        return 0;
+    }
+  }
+  return 1;
+}
+
 /* a group's scratch: the stream's workspace (the caller's allocator, ordered with its work), else a buffer the
    program keeps until its end */
 static void *workspace(struct metal_program *program, const struct call *c, size_t bytes) {
@@ -1164,9 +1182,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       result = gpu(metal_copy(program, METAL_PLAIN, segment.buffer, segment.offset, send.buffer, send.offset,
                               reducing(c->what) ? bytes : c->count * z), "the operand");
     struct where total = own;
-    /* a direct exchange's sums apart from the operand its SENDs read, except with one peer: each element is sent once,
-       copied into its slot before its landing combines into it (the walk publishes a position before consuming it) */
-    if (!result && s && s->direct && reducing(c->what) && comm->nranks > 2) {
+    if (!result && s && reducing(c->what) && !combines_in_place(s)) {
       void *sums = workspace(program, c, bytes);
       if (!sums) { result = fail(ncclSystemError, "out of GPU memory"); break; }
       total = (struct where){sums, 0};
