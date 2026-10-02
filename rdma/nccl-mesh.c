@@ -622,8 +622,9 @@ struct call {
   struct steps *bound;
   unsigned char *result, *copy;
   int owned;
-  const ncclMeshStream *stream;
-  struct where sum;
+  cudaStream_t stream;
+  void *command;
+  struct where send_at, recv_at, sum;
 };
 
 static _Thread_local int depth;
@@ -1068,15 +1069,15 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   ncclResult_t result = ncclSuccess;
   for (size_t i = 0; i < n; i++) {
     if (list[i].comm != comm) return fail(ncclInvalidUsage, "a group on several communicators");
-    if (list[i].stream != list[0].stream) return fail(ncclInvalidUsage, "a group on several streams");
+    if (list[i].command != list[0].command) return fail(ncclInvalidUsage, "a group on several command buffers");
     if (!on_gpu(list[i].type)) return fail(ncclInvalidArgument, "datatype %d on the Metal path (no float64 or float8 there)", (int)list[i].type);
     if (reducing(list[i].what) && (result = reduction(list + i))) return result;
   }
-  if (!list[0].stream->commandBuffer) return fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
+  if (!list[0].command) return fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
   if ((result = plan_calls(comm, list, n))) return result;
   pthread_mutex_lock(&session_lock);
   if (finished) metal_collect(finished);
-  struct metal_program *program = metal_begin(list[0].stream->commandBuffer);
+  struct metal_program *program = metal_begin(list[0].command);
   if (!program) { pthread_mutex_unlock(&session_lock); return fail(ncclSystemError, "out of memory"); }
   const size_t r = (size_t)comm->rank;
   int remote = 0;
@@ -1084,10 +1085,10 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     struct call *c = list + i;
     struct steps *s = c->bound;
     const size_t z = SIZE[c->type], bytes = elements(c) * z, all = elements(c);
-    const struct where send = where_of(c->send);
+    const struct where send = c->send_at;
     remote |= s != NULL;
     if (p2p(c)) {
-      if (s) s->gpu_own = s->gpu_total = c->what == WHAT_SEND ? send : where_of(c->recv);
+      if (s) s->gpu_own = s->gpu_total = c->what == WHAT_SEND ? send : c->recv_at;
       continue;
     }
     void *scratch = metal_scratch(bytes);
@@ -1127,11 +1128,11 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   for (size_t i = 0; i < n && !result; i++) {
     const struct call *c = list + i;
     const size_t z = SIZE[c->type], count = c->count;
-    const struct where recv = where_of(c->recv), sum = c->sum;
+    const struct where recv = c->recv_at, sum = c->sum;
     if (c->what == WHAT_RECV && c->peer == comm->rank) {
       while (self < n && !(list[self].what == WHAT_SEND && list[self].peer == comm->rank)) self++;
       if (self < n) {
-        const struct where from = where_of(list[self].send);
+        const struct where from = list[self].send_at;
         result = gpu(metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, from.buffer, from.offset, count * z), "a copy to itself");
         self++;
       }
@@ -1187,8 +1188,15 @@ ncclResult_t ncclMeshGroupPlans(int *algorithms, int *roots, int capacity, int *
   return ncclSuccess;
 }
 
+/* a call on the Metal path keeps its command buffer and its buffers' MTLBuffers and offsets, so neither the
+   stream nor the ncclMeshBuffers need outlive the call (a lowering's are its own, gone before an enclosing
+   group ends) */
 static ncclResult_t enqueue(struct call c) {
   if (!c.comm) return fail(ncclInvalidArgument, "comm is NULL");
+  if (c.stream) {
+    c.command = ((const ncclMeshStream *)c.stream)->commandBuffer;
+    c.send_at = where_of(c.send); c.recv_at = where_of(c.recv);
+  }
   if ((unsigned)c.type >= ncclNumTypes) return fail(ncclInvalidArgument, "datatype %d", (int)c.type);
   const ncclComm_t comm = c.comm;
   if (reducing(c.what)) {
