@@ -130,9 +130,6 @@ def done(result):
     return _create_work_from_future(future)
 
 
-COMMIT = os.environ.get('MESH_COMMIT', 'call') == 'call'
-
-
 class ProcessGroupMesh(dist.ProcessGroup):
     _streamed = False
 
@@ -195,7 +192,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         finally:
             ended = LIB.ncclGroupEnd()
             if mps:
-                _stream.commit(COMMIT)
+                _stream.commit()
             check(ended)
         for output in outputs:
             output.back()
