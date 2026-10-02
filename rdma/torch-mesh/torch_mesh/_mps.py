@@ -25,6 +25,9 @@ capacity blocks, each source's keys past their valid extents masked, the block c
 either device.  Under torch.compile the handler is a graph break (_ring).  With gradient, SDPA on MPS
 decomposes into matmul and softmax before the dispatcher sees it, and CP's backward handlers are CUDA's
 too: forward only."""
+import math
+import sys
+
 import torch
 from torch._subclasses.fake_tensor import FakeTensor, UnsupportedOperatorException
 from torch.distributed.tensor import DTensor, Shard
@@ -107,11 +110,52 @@ def _linear_backward(op_call, args, kwargs):
             rows.sum(0) if mask[2] else None)
 
 
+def _initialize_distributed_mesh(distributed_config):
+    """transformers.distributed.utils.initialize_distributed_mesh (transformers 5.18) without its refusal of MPS
+    ("Tensor parallelism is not supported on MPS devices"): with the mesh backend initialized, its mesh is made on
+    MPS as on any other accelerator."""
+    import transformers.distributed.utils as utils
+    names = [name for name, size in (("pp", distributed_config.pp_size), ("fsdp", distributed_config.fsdp_size),
+                                     ("tp", distributed_config.tp_size)) if size > 1]
+    shape = [getattr(distributed_config, f"{name}_size") for name in names]
+    if not shape:
+        return None, None
+    if not (torch.distributed.is_initialized() and torch.distributed.get_backend() == "mesh"
+            and torch._C._get_accelerator().type == "mps"):
+        return _transformers_mesh(distributed_config)
+    if math.prod(shape) != torch.distributed.get_world_size():
+        raise RuntimeError(f"The parallel mesh requires {math.prod(shape)} processes, but world_size is "
+                           f"{torch.distributed.get_world_size()}.")
+    utils._ensure_torch_distributed("mps")
+    mesh = torch.distributed.init_device_mesh("mps", tuple(shape), mesh_dim_names=tuple(names))
+    if len(names) > 1:
+        mesh._flatten("_".join(names))
+    return torch.device("mps", 0), mesh
+
+
+_transformers_mesh = None
+
+
+def _transformers():
+    """transformers' own tensor parallelism (from_pretrained(tp_plan=...)) on MPS: its mesh made where it
+    refuses MPS, in the modules that call it; a program that imported transformers before its process group."""
+    global _transformers_mesh
+    if "transformers" not in sys.modules or _transformers_mesh is not None:
+        return
+    import transformers.distributed.mixin as mixin
+    import transformers.distributed.utils as utils
+    _transformers_mesh = utils.initialize_distributed_mesh
+    utils.initialize_distributed_mesh = mixin.initialize_distributed_mesh = _initialize_distributed_mesh
+
+
 def register():
-    """torch.mps.is_initialized; DTensor's linear_backward; the SDPA handlers among those context_parallel
-    installs while it is active."""
+    """torch.mps.is_initialized and set_device (one Metal device); DTensor's linear_backward; the SDPA handlers
+    among those context_parallel installs while it is active; transformers' tensor parallelism on MPS."""
     if not hasattr(torch.mps, "is_initialized"):
         torch.mps.is_initialized = torch.backends.mps.is_available
+    if not hasattr(torch.mps, "set_device"):
+        torch.mps.set_device = lambda device: None
+    _transformers()
     DTensor._op_dispatcher._custom_op_handlers[aten.linear_backward.default] = _linear_backward
     for op in _BLOCKS:
         _attention.custom_ops[op] = _ring
