@@ -1028,16 +1028,22 @@ static ncclResult_t emit(struct schedule *plans, struct metal_program *program) 
         struct message *m = p->out_at < p->outs && at >= p->out[p->out_at].first ? p->out + p->out_at : NULL;
         if (ch->consumed >= need && !(m && at == m->first && !ready(m->c->bound, m->step))) {
           if (!result) result = arrive(program, ch, need);
+          const size_t cell = ch->cell + (at % session.positions) * sizeof(struct mesh_send);
+          const uint64_t value = ch->argument + cycle_of(at);
+          int released = 0;
           if (m && !result) {
             const struct steps *s = m->c->bound;
             const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
-            result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * ch->slot, s->gpu_own.buffer,
-                                    s->gpu_own.offset + m->offset + offset, length), "a piece into its slot");
+            if (!ch->large) {
+              result = gpu(metal_send_small(program, ch->ring_out, (at % DEPTH) * ch->slot, s->gpu_own.buffer, s->gpu_own.offset + m->offset + offset,
+                                            length, session.transport.publication, cell, value), "a piece into its slot and its release");
+              released = 1;
+            } else
+              result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * ch->slot, s->gpu_own.buffer,
+                                      s->gpu_own.offset + m->offset + offset, length), "a piece into its slot");
             if (at + 1 == m->first + m->pieces) p->out_at++;
           }
-          if (!result) result = gpu(metal_publish(program, session.transport.publication, ch->cell + (at % session.positions) * sizeof(struct mesh_send),
-                                                  ch->argument + cycle_of(at)),
-                                    "a publication");
+          if (!result && !released) result = gpu(metal_publish(program, session.transport.publication, cell, value), "a publication");
           ch->sent++; published = moved = 1;
         }
       }
@@ -1049,9 +1055,22 @@ static ncclResult_t emit(struct schedule *plans, struct metal_program *program) 
             struct steps *s = m->c->bound;
             const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
             const size_t from = (at % DEPTH) * ch->slot;
+            const int reduce = s->steps[m->step].op == MESH_STEP_REDUCE;
+            if (!ch->large && (reduce || (s->gpu_total.buffer == s->gpu_own.buffer && s->gpu_total.offset == s->gpu_own.offset))) {
+              const struct where to = reduce ? s->gpu_total : s->gpu_own;
+              result = gpu(metal_land(program, reduce ? (int)m->c->type : -1, m->c->combine, to.buffer, to.offset + m->offset + offset, ch->ring_in, from,
+                                      reduce ? length / SIZE[m->c->type] : length, session.transport.inputs,
+                                      ch->word + (at % session.positions) * ch->word_stride, 1 + cycle_of(at)), "a landing");
+              if (at + 1 > ch->waited) ch->waited = at + 1;
+              if (result) break;
+              if (at + 1 == m->first + m->pieces) { s->done[m->step] = 1; p->in_at++; }
+              ch->consumed++; moved = 1;
+              open |= ch->sent < ch->end || ch->consumed < ch->end;
+              continue;
+            }
             result = arrive(program, ch, at + 1);
             if (result) break;
-            if (s->steps[m->step].op == MESH_STEP_REDUCE)
+            if (reduce)
               result = gpu(metal_combine(program, m->c->type, m->c->combine, s->gpu_total.buffer, s->gpu_total.offset + m->offset + offset,
                                          ch->ring_in, from, length / SIZE[m->c->type]), "a combine");
             else {

@@ -25,6 +25,12 @@ int metal_premultiply(struct metal_program *, int type, void *dst, size_t dst_of
 int metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t divisor);
 int metal_publish(struct metal_program *, void *cells, size_t offset, uint64_t argument);
 int metal_spin(struct metal_program *, void *words, size_t offset, uint64_t expected);
+/* a block's piece in one kernel: copied into its slot and its cell released (send), or awaited and combined (an
+   ncclDataType_t, op as combine_into) or copied (type -1, n bytes) where it landed (land) */
+int metal_send_small(struct metal_program *, void *slot, size_t slot_offset, void *src, size_t src_offset, size_t bytes,
+                     void *cells, size_t cell_offset, uint64_t value);
+int metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, void *slot, size_t slot_offset, size_t n,
+               void *words, size_t word_offset, uint64_t expected);
 void metal_wait(struct metal_program *, void *event, uint64_t value);
 void metal_keep(struct metal_program *, void *object);
 void metal_end(struct metal_program *, void *event, uint64_t value);

@@ -16,7 +16,7 @@ static NSString *const SOURCE =
   "using namespace metal;\n"
   "#define SYS volatile coherent(system) device\n"
   "#define FENCE atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3))\n"
-  "struct args { ulong dst, src, n, scalar; uint op, unused; };\n"
+  "struct args { ulong dst, src, n, scalar, aux; uint op, unused; };\n"
   "#define HEAD(name) kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]])\n"
   "#define LOOP for (ulong k = i; k < p.n; k += g)\n"
   "#define COPY(name, W, TO, FROM) HEAD(name) { TO W *x = (TO W *)(d + p.dst); FROM const W *y = (FROM const W *)(s + p.src); LOOP x[k] = y[k]; }\n"
@@ -46,6 +46,24 @@ static NSString *const SOURCE =
   "FLOATING(f32, float, uint)\n"
   "FLOATING(bf16, bfloat, ushort)\n"
   "kernel void publish(device uchar *cells [[buffer(0)]], constant args &p [[buffer(2)]]) { FENCE; *(SYS ulong *)(cells + p.dst) = p.scalar; FENCE; }\n"
+  "#define GROUP(name) kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], device uchar *a [[buffer(3)]], uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]])\n"
+  "#define AWAIT if (i == 0) { SYS const ulong *w = (SYS const ulong *)(a + p.aux); ulong st; do { FENCE; st = *w; } while (st < p.scalar); } threadgroup_barrier(mem_flags::mem_device); FENCE;\n"
+  "GROUP(send_small) { SYS uchar *x = (SYS uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); for (ulong k = i; k < p.n; k += g) x[k] = y[k]; "
+  "threadgroup_barrier(mem_flags::mem_device); if (i == 0) { FENCE; *(SYS ulong *)(a + p.aux) = p.scalar; FENCE; } }\n"
+  "GROUP(land_copy) { AWAIT device uchar *x = d + p.dst; SYS const uchar *y = (SYS const uchar *)(s + p.src); for (ulong k = i; k < p.n; k += g) x[k] = y[k]; }\n"
+  "#define LANDI(name, T, W, U) GROUP(land_##name) { AWAIT device T *x = (device T *)(d + p.dst); SYS const W *y = (SYS const W *)(s + p.src); for (ulong k = i; k < p.n; k += g) { W w = y[k]; T a = x[k], b = as_type<T>(w); "
+  "if (p.op == 0) x[k] = T(U(a) + U(b)); else if (p.op == 1) x[k] = T(U(a) * U(b)); else if (p.op == 2) { if (b > a) x[k] = b; } else if (b < a) x[k] = b; } }\n"
+  "#define LANDF(name, T, W) GROUP(land_##name) { AWAIT device T *x = (device T *)(d + p.dst); SYS const W *y = (SYS const W *)(s + p.src); for (ulong k = i; k < p.n; k += g) { W w = y[k]; float a = float(x[k]), b = float(as_type<T>(w)); "
+  "if (p.op == 0) x[k] = T(a + b); else if (p.op == 1) x[k] = T(a * b); else if (p.op == 2) { if (b > a) x[k] = as_type<T>(w); } else if (b < a) x[k] = as_type<T>(w); } }\n"
+  "LANDI(i8, char, uchar, uint)\n"
+  "LANDI(u8, uchar, uchar, uint)\n"
+  "LANDI(i32, int, uint, uint)\n"
+  "LANDI(u32, uint, uint, uint)\n"
+  "LANDI(i64, long, ulong, ulong)\n"
+  "LANDI(u64, ulong, ulong, ulong)\n"
+  "LANDF(f16, half, ushort)\n"
+  "LANDF(f32, float, uint)\n"
+  "LANDF(bf16, bfloat, ushort)\n"
   "kernel void spin(device uchar *words [[buffer(0)]], constant args &p [[buffer(2)]]) { SYS const ulong *word = (SYS const ulong *)(words + p.dst); "
   "ulong status; do { FENCE; status = *word; } while (status < p.n); }\n";
 
@@ -53,7 +71,7 @@ static NSString *const SOURCE =
 static const char *const TYPE[12] = {"i8", "u8", "i32", "u32", "i64", "u64", "f16", "f32", NULL, "bf16", NULL, NULL};
 static const char *const MODE[3] = {"plain", "land", "send"};
 
-struct args { uint64_t dst, src, n, scalar; uint32_t op, unused; };
+struct args { uint64_t dst, src, n, scalar, aux; uint32_t op, unused; };
 struct metal_program { id<MTLCommandBuffer> buffer; id<MTLComputeCommandEncoder> encoder; NSMutableArray *kept; };
 
 static id<MTLDevice> device_;
@@ -141,7 +159,7 @@ static int dispatch(struct metal_program *program, NSString *name, void *d, void
 int metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes) {
   const int words = !((dst_offset | src_offset | bytes) & 3);
   NSString *name = [NSString stringWithFormat:@"copy_%s_%d", MODE[mode], words ? 4 : 1];
-  return dispatch(program, name, dst, src, (struct args){dst_offset, src_offset, words ? bytes / 4 : bytes, 0, 0, 0}, words ? bytes / 4 : bytes);
+  return dispatch(program, name, dst, src, (struct args){.dst = dst_offset, .src = src_offset, .n = words ? bytes / 4 : bytes}, words ? bytes / 4 : bytes);
 }
 
 static NSString *typed(const char *what, int type) {
@@ -150,25 +168,57 @@ static NSString *typed(const char *what, int type) {
 
 int metal_combine(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n) {
   NSString *name = typed("combine", type);
-  return name ? dispatch(program, name, dst, src, (struct args){dst_offset, src_offset, n, 0, (uint32_t)op, 0}, n) : EINVAL;
+  return name ? dispatch(program, name, dst, src, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op}, n) : EINVAL;
 }
 
 int metal_premultiply(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar) {
   NSString *name = typed("premul", type);
-  return name ? dispatch(program, name, dst, src, (struct args){dst_offset, src_offset, n, scalar, 0, 0}, n) : EINVAL;
+  return name ? dispatch(program, name, dst, src, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = scalar}, n) : EINVAL;
 }
 
 int metal_truncdiv(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t divisor) {
   NSString *name = type <= 5 ? typed("truncdiv", type) : nil;
-  return name ? dispatch(program, name, dst, src, (struct args){dst_offset, src_offset, n, divisor, 0, 0}, n) : EINVAL;
+  return name ? dispatch(program, name, dst, src, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = divisor}, n) : EINVAL;
 }
 
 int metal_publish(struct metal_program *program, void *cells, size_t offset, uint64_t argument) {
-  return dispatch(program, @"publish", cells, NULL, (struct args){offset, 0, 1, argument, 0, 0}, 1);
+  return dispatch(program, @"publish", cells, NULL, (struct args){.dst = offset, .n = 1, .scalar = argument}, 1);
 }
 
 int metal_spin(struct metal_program *program, void *words, size_t offset, uint64_t expected) {
-  return dispatch(program, @"spin", words, NULL, (struct args){offset, 0, expected, 0, 0, 0}, 1);
+  return dispatch(program, @"spin", words, NULL, (struct args){.dst = offset, .n = expected}, 1);
+}
+
+/* one threadgroup over a block's piece: `a` the cells (send) or the completion words (land) at aux */
+static int dispatch_group(struct metal_program *program, NSString *name, void *d, void *s, void *a, struct args p) {
+  id<MTLComputePipelineState> state = pipeline(name);
+  if (!state) return EINVAL;
+  @autoreleasepool {
+    if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
+    id<MTLComputeCommandEncoder> encoder = program->encoder;
+    [encoder setComputePipelineState:state];
+    [encoder setBuffer:(id<MTLBuffer>)d offset:0 atIndex:0];
+    [encoder setBuffer:(id<MTLBuffer>)(s ? s : d) offset:0 atIndex:1];
+    [encoder setBytes:&p length:sizeof p atIndex:2];
+    [encoder setBuffer:(id<MTLBuffer>)a offset:0 atIndex:3];
+    const NSUInteger width = state.maxTotalThreadsPerThreadgroup < 1024 ? state.maxTotalThreadsPerThreadgroup : 1024;
+    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+  }
+  return 0;
+}
+
+int metal_send_small(struct metal_program *program, void *slot, size_t slot_offset, void *src, size_t src_offset, size_t bytes,
+                     void *cells, size_t cell_offset, uint64_t value) {
+  return dispatch_group(program, @"send_small", slot, src, cells,
+                        (struct args){.dst = slot_offset, .src = src_offset, .n = bytes, .scalar = value, .aux = cell_offset});
+}
+
+int metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *slot, size_t slot_offset, size_t n,
+               void *words, size_t word_offset, uint64_t expected) {
+  NSString *name = type < 0 ? @"land_copy" : typed("land", type);
+  return name ? dispatch_group(program, name, dst, slot, words, (struct args){.dst = dst_offset, .src = slot_offset, .n = n, .scalar = expected,
+                                                                             .aux = word_offset, .op = (uint32_t)op})
+              : EINVAL;
 }
 
 void metal_wait(struct metal_program *program, void *event, uint64_t value) {
