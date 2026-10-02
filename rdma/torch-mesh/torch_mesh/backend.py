@@ -174,15 +174,26 @@ class ProcessGroupMesh(dist.ProcessGroup):
     allgather_into_tensor_coalesced = all_gather_single_coalesced
 
     def allgather(self, outputs, inputs, opts=None):
-        sources = [Host(i) for i in inputs]
-        flats = [torch.empty(self._size * s.host.numel(), dtype=s.host.dtype) for s in sources]
+        """Each input gathered into its list of outputs; outputs of unequal sizes (an Allgatherv in torch's
+        spelling) as ProcessGroupNCCL takes them: one broadcast rooted at each rank, in one group."""
+        if all(len({t.numel() for t in out}) == 1 for out in outputs):
+            sources = [Host(i) for i in inputs]
+            flats = [torch.empty(self._size * s.host.numel(), dtype=s.host.dtype) for s in sources]
 
-        def back():
-            for out, flat in zip(outputs, flats):
-                for r, piece in enumerate(flat.chunk(self._size)):
-                    out[r].copy_(piece.view(out[r].shape))
-        return self._group(lambda: [check(LIB.ncclAllGather(s.at(), f.data_ptr(), s.host.numel(), kind(s.host), self.comm, None))
-                                    for s, f in zip(sources, flats)], [After(back)], outputs)
+            def back():
+                for out, flat in zip(outputs, flats):
+                    for r, piece in enumerate(flat.chunk(self._size)):
+                        out[r].copy_(piece.view(out[r].shape))
+            return self._group(lambda: [check(LIB.ncclAllGather(s.at(), f.data_ptr(), s.host.numel(), kind(s.host), self.comm, None))
+                                        for s, f in zip(sources, flats)], [After(back)], outputs)
+        sources, targets = [Host(i) for i in inputs], [[Host(t, read=False) for t in out] for out in outputs]
+
+        def issue():
+            for source, out in zip(sources, targets):
+                for r, target in enumerate(out):
+                    sent = source if r == self._rank else target
+                    check(LIB.ncclBroadcast(sent.at(), target.at(), target.host.numel(), kind(target.host), r, self.comm, None))
+        return self._group(issue, [t for out in targets for t in out], outputs)
 
     def reduce_scatter_single(self, output, input, opts=dist.ReduceScatterOptions()):
         source, target = Host(input), Host(output, read=False)
@@ -197,11 +208,24 @@ class ProcessGroupMesh(dist.ProcessGroup):
     reduce_scatter_tensor_coalesced = reduce_scatter_single_coalesced
 
     def reduce_scatter(self, outputs, inputs, opts=dist.ReduceScatterOptions()):
-        flats = [torch.cat([x.detach().to('cpu').reshape(-1) for x in parts]) for parts in inputs]
-        targets = [Host(o, read=False) for o in outputs]
-        return self._group(lambda: [check(LIB.ncclReduceScatter(f.data_ptr(), t.at(), t.host.numel(), kind(t.host),
-                                                                op(opts.reduceOp), self.comm, None))
-                                    for f, t in zip(flats, targets)], targets, outputs)
+        """Each list of inputs reduced, rank r's block left at rank r; blocks of unequal sizes (a
+        Reduce_scatter of a list in torch's spelling) as ProcessGroupNCCL takes them: one reduce rooted at
+        each rank, in one group."""
+        if all(len({t.numel() for t in parts}) == 1 for parts in inputs):
+            flats = [torch.cat([x.detach().to('cpu').reshape(-1) for x in parts]) for parts in inputs]
+            targets = [Host(o, read=False) for o in outputs]
+            return self._group(lambda: [check(LIB.ncclReduceScatter(f.data_ptr(), t.at(), t.host.numel(), kind(t.host),
+                                                                    op(opts.reduceOp), self.comm, None))
+                                        for f, t in zip(flats, targets)], targets, outputs)
+        sources, targets = [[Host(x) for x in parts] for parts in inputs], [Host(o, read=False) for o in outputs]
+
+        def issue():
+            for parts, target in zip(sources, targets):
+                for r, source in enumerate(parts):
+                    received = target if r == self._rank else source
+                    check(LIB.ncclReduce(source.at(), received.at(), source.host.numel(), kind(source.host), op(opts.reduceOp),
+                                         r, self.comm, None))
+        return self._group(issue, targets, outputs)
 
     def alltoall(self, outputs, inputs, opts=None):
         sources, targets = [Host(i) for i in inputs], [Host(o, read=False) for o in outputs]
@@ -230,22 +254,28 @@ class ProcessGroupMesh(dist.ProcessGroup):
         return self._group(issue, [target], output)
 
     def gather(self, outputs, inputs, opts=dist.GatherOptions()):
+        """Every rank's input to the root's list of outputs, any sizes: grouped sends and receives, as
+        ProcessGroupNCCL's gather."""
         source = Host(inputs[0])
-        flat = torch.empty(self._size * source.host.numel(), dtype=source.host.dtype)
+        targets = [Host(t, read=False) for t in outputs[0]] if self._rank == opts.rootRank else []
 
-        def back():
-            if self._rank == opts.rootRank:
-                for r, piece in enumerate(flat.chunk(self._size)):
-                    outputs[0][r].copy_(piece.view(outputs[0][r].shape))
-        return self._group(lambda: check(LIB.ncclGather(source.at(), flat.data_ptr(), source.host.numel(), kind(source.host),
-                                                        opts.rootRank, self.comm, None)), [After(back)], outputs)
+        def issue():
+            check(LIB.ncclSend(source.at(), source.host.numel(), kind(source.host), opts.rootRank, self.comm, None))
+            for r, target in enumerate(targets):
+                check(LIB.ncclRecv(target.at(), target.host.numel(), kind(target.host), r, self.comm, None))
+        return self._group(issue, targets, outputs)
 
     def scatter(self, outputs, inputs, opts=dist.ScatterOptions()):
+        """The root's list of inputs, one to each rank, any sizes (a Scatterv in torch's spelling): grouped sends
+        and receives, as ProcessGroupNCCL's scatter."""
         target = Host(outputs[0], read=False)
-        flat = (torch.cat([x.detach().to('cpu').reshape(-1) for x in inputs[0]]) if self._rank == opts.rootRank
-                else torch.empty(self._size * target.host.numel(), dtype=target.host.dtype))
-        return self._group(lambda: check(LIB.ncclScatter(flat.data_ptr(), target.at(), target.host.numel(), kind(target.host),
-                                                         opts.rootRank, self.comm, None)), [target], outputs)
+        sources = [Host(t) for t in inputs[0]] if self._rank == opts.rootRank else []
+
+        def issue():
+            for r, source in enumerate(sources):
+                check(LIB.ncclSend(source.at(), source.host.numel(), kind(source.host), r, self.comm, None))
+            check(LIB.ncclRecv(target.at(), target.host.numel(), kind(target.host), opts.rootRank, self.comm, None))
+        return self._group(issue, [target], outputs)
 
     def send(self, tensors, dst, tag):
         hosts = [Host(t) for t in tensors]
