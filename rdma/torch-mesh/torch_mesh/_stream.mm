@@ -3,8 +3,12 @@
 // torch's caching allocator, held until commit(), then reused in the stream's order); commit() commits the work
 // without waiting.
 #include <torch/extension.h>
+#include <torch/library.h>
 #include <ATen/mps/MPSStream.h>
 #include <ATen/native/mps/OperationUtils.h>
+#include <torch/csrc/distributed/c10d/GroupRegistry.hpp>
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
+#include <unordered_map>
 #include <vector>
 #include "nccl.h"
 
@@ -37,6 +41,14 @@ static void commit() {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   dispatch_sync(stream->queue(), ^{ stream->synchronize(at::mps::SyncType::COMMIT); });
   held_.clear();
+}
+
+static bool moved(at::ScalarType type) {
+  switch (type) {
+  case at::kChar: case at::kByte: case at::kBool: case at::kInt: case at::kLong: case at::kHalf: case at::kFloat: case at::kBFloat16:
+    return true;
+  default: return false;
+  }
 }
 
 static ncclDataType_t kind(at::ScalarType type) {
@@ -72,54 +84,74 @@ static int64_t on_stream(ncclResult_t (^call)(ncclMeshStream *)) {
 
 static ncclComm_t communicator(int64_t comm) { return (ncclComm_t)(uintptr_t)comm; }
 
+// A contiguous tensor as an operand, with ProcessGroupNCCL's dtype semantics: a collective that moves data moves any
+// dtype (one NCCL lacks as its bytes); a reduction reduces a complex tensor as its real view (sum and average) and a bool
+// tensor's sum and product as max and min.
+struct Operand {
+  ncclMeshBuffer buffer;
+  size_t count;
+  ncclDataType_t type;
+};
+
+static Operand moving(const at::Tensor &tensor) {
+  if (moved(tensor.scalar_type())) return {located(tensor), (size_t)tensor.numel(), kind(tensor.scalar_type())};
+  return {located(tensor), (size_t)tensor.nbytes(), ncclUint8};
+}
+
+static Operand reducing(const at::Tensor &tensor, int64_t &op) {
+  if (tensor.scalar_type() == at::kBool) {
+    TORCH_CHECK(op != ncclAvg, "a bool tensor has no average");
+    op = op == ncclSum ? ncclMax : op == ncclProd ? ncclMin : op;
+  }
+  if (tensor.is_complex()) {
+    TORCH_CHECK(op == ncclSum || op == ncclAvg, "a complex tensor reduces by sum and average alone");
+    const at::Tensor real = at::view_as_real(tensor);
+    return {located(tensor), (size_t)real.numel(), kind(real.scalar_type())};
+  }
+  return {located(tensor), (size_t)tensor.numel(), kind(tensor.scalar_type())};
+}
+
 static int64_t allreduce(const at::Tensor &tensor, int64_t op, int64_t comm) {
-  const ncclMeshBuffer buffer = located(tensor);
-  const size_t count = tensor.numel();
-  const ncclDataType_t type = kind(tensor.scalar_type());
-  return on_stream(^(ncclMeshStream *s) { return ncclAllReduce(&buffer, (void *)&buffer, count, type, (ncclRedOp_t)op, communicator(comm), s); });
+  const Operand o = reducing(tensor, op);
+  return on_stream(^(ncclMeshStream *s) { return ncclAllReduce(&o.buffer, (void *)&o.buffer, o.count, o.type, (ncclRedOp_t)op, communicator(comm), s); });
 }
 
 static int64_t reduce(const at::Tensor &tensor, int64_t op, int64_t root, int64_t comm) {
-  const ncclMeshBuffer buffer = located(tensor);
-  const size_t count = tensor.numel();
-  const ncclDataType_t type = kind(tensor.scalar_type());
-  return on_stream(^(ncclMeshStream *s) { return ncclReduce(&buffer, (void *)&buffer, count, type, (ncclRedOp_t)op, (int)root, communicator(comm), s); });
+  const Operand o = reducing(tensor, op);
+  return on_stream(^(ncclMeshStream *s) {
+    return ncclReduce(&o.buffer, (void *)&o.buffer, o.count, o.type, (ncclRedOp_t)op, (int)root, communicator(comm), s);
+  });
 }
 
 static int64_t broadcast(const at::Tensor &tensor, int64_t root, int64_t comm) {
-  const ncclMeshBuffer buffer = located(tensor);
-  const size_t count = tensor.numel();
-  const ncclDataType_t type = kind(tensor.scalar_type());
-  return on_stream(^(ncclMeshStream *s) { return ncclBroadcast(&buffer, (void *)&buffer, count, type, (int)root, communicator(comm), s); });
+  const Operand o = moving(tensor);
+  return on_stream(^(ncclMeshStream *s) { return ncclBroadcast(&o.buffer, (void *)&o.buffer, o.count, o.type, (int)root, communicator(comm), s); });
 }
 
 static int64_t allgather(const at::Tensor &output, const at::Tensor &input, int64_t comm) {
-  const ncclMeshBuffer from = located(input), to = located(output);
-  const size_t count = input.numel();
-  const ncclDataType_t type = kind(input.scalar_type());
-  return on_stream(^(ncclMeshStream *s) { return ncclAllGather(&from, (void *)&to, count, type, communicator(comm), s); });
+  const Operand from = moving(input), to = moving(output);
+  return on_stream(^(ncclMeshStream *s) { return ncclAllGather(&from.buffer, (void *)&to.buffer, from.count, from.type, communicator(comm), s); });
 }
 
 static int64_t reduce_scatter(const at::Tensor &output, const at::Tensor &input, int64_t op, int64_t comm) {
-  const ncclMeshBuffer from = located(input), to = located(output);
-  const size_t count = output.numel();
-  const ncclDataType_t type = kind(input.scalar_type());
-  return on_stream(^(ncclMeshStream *s) { return ncclReduceScatter(&from, (void *)&to, count, type, (ncclRedOp_t)op, communicator(comm), s); });
+  const Operand from = reducing(input, op), to = reducing(output, op);
+  return on_stream(^(ncclMeshStream *s) {
+    return ncclReduceScatter(&from.buffer, (void *)&to.buffer, to.count, from.type, (ncclRedOp_t)op, communicator(comm), s);
+  });
 }
 
 // all-to-all with each rank's elements (NCCL's own lowering: each rank's sends and receives in one group)
 static int64_t alltoall(const at::Tensor &output, const at::Tensor &input, std::vector<int64_t> sends, std::vector<int64_t> receives,
                         int64_t comm) {
-  const ncclMeshBuffer from = located(input), to = located(output);
-  const ncclDataType_t type = kind(input.scalar_type());
-  const size_t size = input.element_size();
+  const Operand from = moving(input), to = moving(output);
+  const size_t per = input.numel() ? from.count / input.numel() : 1, size = input.element_size() / per;
   return on_stream(^(ncclMeshStream *s) {
     ncclResult_t result = ncclGroupStart();
     size_t in = 0, out = 0;
     for (size_t r = 0; r < sends.size() && !result; r++) {
-      ncclMeshBuffer send = {from.buffer, from.offset + in * size}, receive = {to.buffer, to.offset + out * size};
-      result = ncclSend(&send, (size_t)sends[r], type, (int)r, communicator(comm), s);
-      if (!result) result = ncclRecv(&receive, (size_t)receives[r], type, (int)r, communicator(comm), s);
+      ncclMeshBuffer send = {from.buffer.buffer, from.buffer.offset + in * per * size}, receive = {to.buffer.buffer, to.buffer.offset + out * per * size};
+      result = ncclSend(&send, (size_t)sends[r] * per, from.type, (int)r, communicator(comm), s);
+      if (!result) result = ncclRecv(&receive, (size_t)receives[r] * per, from.type, (int)r, communicator(comm), s);
       in += sends[r]; out += receives[r];
     }
     const ncclResult_t ended = ncclGroupEnd();
@@ -127,18 +159,132 @@ static int64_t alltoall(const at::Tensor &output, const at::Tensor &input, std::
   });
 }
 
-static int64_t send(const at::Tensor &tensor, int64_t peer, int64_t comm) {
-  const ncclMeshBuffer buffer = located(tensor);
-  const size_t count = tensor.numel();
-  const ncclDataType_t type = kind(tensor.scalar_type());
-  return on_stream(^(ncclMeshStream *s) { return ncclSend(&buffer, count, type, (int)peer, communicator(comm), s); });
+static int64_t send_to(const at::Tensor &tensor, int64_t peer, int64_t comm) {
+  const Operand o = moving(tensor);
+  return on_stream(^(ncclMeshStream *s) { return ncclSend(&o.buffer, o.count, o.type, (int)peer, communicator(comm), s); });
 }
 
-static int64_t recv(const at::Tensor &tensor, int64_t peer, int64_t comm) {
-  const ncclMeshBuffer buffer = located(tensor);
-  const size_t count = tensor.numel();
-  const ncclDataType_t type = kind(tensor.scalar_type());
-  return on_stream(^(ncclMeshStream *s) { return ncclRecv((void *)&buffer, count, type, (int)peer, communicator(comm), s); });
+static int64_t receive_from(const at::Tensor &tensor, int64_t peer, int64_t comm) {
+  const Operand o = moving(tensor);
+  return on_stream(^(ncclMeshStream *s) { return ncclRecv((void *)&o.buffer, o.count, o.type, (int)peer, communicator(comm), s); });
+}
+
+// torch's functional collectives (_c10d_functional, what DTensor and a compiled graph call) on MPS tensors: kernels
+// for the MPS dispatch key, as torch/csrc/distributed/c10d/Functional.cpp implements them for every device but
+// calling libnccl-mesh directly, the group's communicator found by the group (attach) with no Python between.
+// A group the map does not hold (another backend's, or a mesh group since destroyed) takes torch's own kernel.
+static std::unordered_map<const c10d::ProcessGroup *, std::pair<c10::weak_intrusive_ptr<c10d::ProcessGroup>, int64_t>> communicators_;
+
+static void attach(const c10::intrusive_ptr<c10d::ProcessGroup> &group, int64_t comm) {
+  communicators_.insert_or_assign(group.get(), std::make_pair(c10::weak_intrusive_ptr<c10d::ProcessGroup>(group), comm));
+}
+
+static int64_t communicator_of(const c10::IValue &name) {
+  auto group = c10d::resolve_process_group(name.toStringRef());
+  auto found = communicators_.find(group.get());
+  if (found == communicators_.end()) return 0;
+  if (found->second.first.lock() != group) {
+    communicators_.erase(found);
+    return 0;
+  }
+  return found->second.second;
+}
+
+static at::Tensor contiguous_alias(const at::Tensor &tensor) { return tensor.is_contiguous() ? tensor : tensor.contiguous(); }
+
+static void written_back(const at::Tensor &target, const at::Tensor &written) {
+  if (!written.is_same(target)) target.copy_(written);
+}
+
+static int64_t reduction(const std::string &op) {
+  if (op == "sum") return ncclSum;
+  if (op == "avg") return ncclAvg;
+  if (op == "product") return ncclProd;
+  if (op == "max") return ncclMax;
+  if (op == "min") return ncclMin;
+  TORCH_CHECK(false, "the mesh backend reduces by sum, avg, product, max and min, not ", op);
+}
+
+static void checked(int64_t result) {
+  TORCH_CHECK(!result, "libnccl-mesh: ", ncclGetErrorString((ncclResult_t)result), ": ", ncclGetLastError(nullptr));
+}
+
+static int group_argument(const std::string &name) {
+  if (name == "all_reduce" || name == "all_reduce_" || name == "broadcast" || name == "broadcast_" || name == "all_gather_into_tensor" ||
+      name == "all_gather_into_tensor_out")
+    return 2;
+  return 3;
+}
+
+static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) {
+  const std::string name = op.schema().name().substr(sizeof "_c10d_functional::" - 1) +
+                           (op.schema().overload_name().empty() || op.schema().overload_name() == "default" ? "" : "." + op.schema().overload_name());
+  const size_t count = op.schema().arguments().size();
+  auto arguments = torch::jit::last(*stack, count);
+  const at::Tensor input = arguments[0].toTensor();
+  const int64_t comm = communicator_of(arguments[group_argument(name)]);
+  if (!comm) {
+    op.redispatchBoxed(c10::DispatchKeySet(c10::DispatchKey::CPU), stack);
+    return;
+  }
+  at::Tensor result;
+  if (name == "all_reduce" || name == "all_reduce_") {
+    result = name == "all_reduce_" ? input : input.clone(at::MemoryFormat::Contiguous);
+    const at::Tensor operand = contiguous_alias(result);
+    checked(allreduce(operand, reduction(arguments[1].toStringRef()), comm));
+    written_back(result, operand);
+  } else if (name == "broadcast" || name == "broadcast_") {
+    result = name == "broadcast_" ? input : input.clone(at::MemoryFormat::Contiguous);
+    const at::Tensor operand = contiguous_alias(result);
+    checked(broadcast(operand, arguments[1].toInt(), comm));
+    written_back(result, operand);
+  } else if (name == "all_gather_into_tensor" || name == "all_gather_into_tensor_out") {
+    const at::Tensor from = contiguous_alias(input);
+    std::vector<int64_t> shape = from.sizes().vec();
+    TORCH_CHECK(!shape.empty(), "all_gather_into_tensor of a 0-dim tensor");
+    shape[0] *= arguments[1].toInt();
+    result = name == "all_gather_into_tensor_out" ? arguments[3].toTensor() : at::empty(shape, from.options());
+    TORCH_CHECK(result.numel() == from.numel() * arguments[1].toInt(), "all_gather_into_tensor_out: out holds ", result.numel(),
+                " elements, not ", from.numel() * arguments[1].toInt());
+    const at::Tensor to = contiguous_alias(result);
+    checked(allgather(to, from, comm));
+    written_back(result, to);
+  } else if (name == "reduce_scatter_tensor") {
+    const at::Tensor from = contiguous_alias(input);
+    const int64_t ranks = arguments[2].toInt();
+    std::vector<int64_t> shape = from.sizes().vec();
+    TORCH_CHECK(!shape.empty() && shape[0] % ranks == 0, "reduce_scatter_tensor: dim 0 of ", from.sizes(), " is not divisible by ", ranks);
+    shape[0] /= ranks;
+    result = at::empty(shape, from.options());
+    checked(reduce_scatter(result, from, reduction(arguments[1].toStringRef()), comm));
+  } else {
+    const at::Tensor from = contiguous_alias(input);
+    std::vector<int64_t> outs, ins;
+    for (const auto &v : arguments[1].toListRef()) outs.push_back(v.toInt());
+    for (const auto &v : arguments[2].toListRef()) ins.push_back(v.toInt());
+    int ranks = 0;
+    checked(ncclCommCount(communicator(comm), &ranks));
+    TORCH_CHECK(!from.sizes().empty(), "all_to_all_single of a 0-dim tensor");
+    if (outs.empty()) outs.assign(ranks, from.size(0) / ranks);
+    if (ins.empty()) ins.assign(ranks, from.size(0) / ranks);
+    const int64_t width = from.size(0) ? from.numel() / from.size(0) : 1;
+    std::vector<int64_t> shape = from.sizes().vec();
+    shape[0] = 0;
+    for (auto r : outs) shape[0] += r;
+    result = at::empty(shape, from.options());
+    std::vector<int64_t> sends, receives;
+    for (auto r : ins) sends.push_back(r * width);
+    for (auto r : outs) receives.push_back(r * width);
+    checked(alltoall(result, from, sends, receives, comm));
+  }
+  torch::jit::drop(*stack, count);
+  torch::jit::push(*stack, result);
+}
+
+TORCH_LIBRARY_IMPL(_c10d_functional, MPS, m) {
+  for (const char *name : {"all_reduce", "all_reduce_", "broadcast", "broadcast_", "all_gather_into_tensor", "all_gather_into_tensor_out",
+                           "reduce_scatter_tensor", "all_to_all_single"})
+    m.impl(name, torch::CppFunction::makeFromBoxedFunction<&functional>());
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
@@ -150,6 +296,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("allgather", &allgather);
   module.def("reduce_scatter", &reduce_scatter);
   module.def("alltoall", &alltoall);
-  module.def("send", &send);
-  module.def("recv", &recv);
+  module.def("send", &send_to);
+  module.def("recv", &receive_from);
+  module.def("attach", &attach);
 }

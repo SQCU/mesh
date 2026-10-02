@@ -17,6 +17,10 @@ import torch.distributed as dist
 from torch._C._distributed_c10d import ReduceOp, _create_work_from_future
 from torch.futures import Future
 
+_stream = None
+if torch.backends.mps.is_available():
+    from . import _stream  # its kernels for torch's functional collectives on MPS register as it loads
+
 RDMA = os.environ.get('MESH_RDMA') or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LIB = C.CDLL(os.path.join(RDMA, 'libnccl-mesh.dylib'))
 MESH = C.CDLL(os.path.join(RDMA, 'libmesh.dylib'))
@@ -140,7 +144,12 @@ class ProcessGroupMesh(dist.ProcessGroup):
         self.comm = P()
         if size == 1:
             check(LIB.ncclCommInitAll(C.byref(self.comm), 1, None))
-            return
+        else:
+            self._join(rank, size, store)
+        if _stream is not None:
+            _stream.attach(self, self.comm.value)
+
+    def _join(self, rank, size, store):
         node = C.c_uint32()
         observed = MESH.mesh_observe((os.environ.get('MESH_REGION') or '/mesh0').encode(), None, 0, C.byref(node))
         if observed < 0:
@@ -178,7 +187,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
             return done(result)
         mps = on_mps(result)
         if mps:
-            from . import _stream
             self._stream = _stream.begin()
             ProcessGroupMesh._streamed = True
         else:
@@ -201,9 +209,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
     def _direct(self, *tensors):
         """torch's MPS stream, through the one-turn C++ calls (_stream.mm), where every tensor is a contiguous MPS
         tensor and no coalesced group is open; else None."""
-        if self._pending is not None or not all(t.device.type == 'mps' and t.is_contiguous() for t in tensors):
+        if self._pending is not None or _stream is None or not all(t.device.type == 'mps' and t.is_contiguous() for t in tensors):
             return None
-        from . import _stream
         ProcessGroupMesh._streamed = True
         return _stream
 
