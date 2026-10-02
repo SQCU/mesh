@@ -21,9 +21,10 @@
    pair linked; a link line's third and fourth fields are the alpha-beta cost the planner weighs),
    and MESH_REGION, the bridge's region (default /mesh0).  A process attaches once, at its first
    group that crosses a link, and keeps one prepared program on the bridge for its life (a session):
-   to each peer of the communicator that opened it, a ring of 2*NCCL_STEPS slots each way, each slot
-   NCCL_BUFFSIZE/NCCL_STEPS bytes (NCCL_BUFFSIZE, default 4 MiB, read at attach), for MESH_POSITIONS
-   invocations (default 8192; a group past the last renews the session).  A group (ncclGroupStart/End;
+   to each peer of the communicator that opened it, two rings of 2*NCCL_STEPS slots each way: one of a
+   block's slots (16 KiB) for pieces of at most NCCL_STEPS blocks, one of NCCL_BUFFSIZE/NCCL_STEPS slots
+   (NCCL_BUFFSIZE, default 4 MiB, read at attach) for larger ones, as NCCL picks a protocol by size; each for
+   MESH_POSITIONS invocations (default 8192; a group past the last renews the session).  A group (ncclGroupStart/End;
    a call outside one is a group of one) plans each call by mesh_collective_choose and
    mesh_collective_plan (a point-to-point call one SEND or COPY step) and streams its pieces through
    the rings, slot by slot, the receives combined on the host.

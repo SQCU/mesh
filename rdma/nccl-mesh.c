@@ -374,12 +374,16 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
 #define IDENTITY 1
 #define BOUND 10.0                  /* metal-microbench configs/e2b-programs.json remote_bound_seconds (MESH_REMOTE_BOUND) */
 
-/* a channel's Metal side: its rings as buffers, its out ring's invocation-0 SEND cell in the publication buffer
+/* a channel: one class of a peer's pieces (`large`: past a small ring's flight, LAG slots of one block, so a
+   small piece pays one block on the wire, a large one NCCL_BUFFSIZE/NCCL_STEPS slots, as NCCL picks its
+   protocol by size), its rings of `slot` bytes; its Metal side: its rings as buffers, its out ring's invocation-0 SEND cell in the publication buffer
    and the producer argument a publication stores there, its in ring's invocation-0 completion word and the
    words' stride in the transport's inputs; `waited`, the arrivals the encoded GPU work already waits for;
    `signaled`, the positions landed that the progress thread has seen, up to the `target` the groups reach */
 struct channel {
   uint32_t node;
+  int large;
+  size_t slot;
   struct mesh_section out, in;
   unsigned char *sending, *receiving;
   uint64_t sent, consumed, end, waited;
@@ -395,7 +399,7 @@ static struct {
   char region[64];
   struct channel *channels;
   uint32_t count, positions;
-  size_t slot;
+  size_t slot, small;
   double bound;
   int registered, running;
   struct mesh_metal_transport transport;
@@ -543,12 +547,12 @@ static size_t setting(const char *name, size_t otherwise) {
 }
 
 static int ring_bind(const struct channel *ch, int receive, uint32_t identity, struct mesh_section *section, unsigned char **memory) {
-  const int status = mesh_section_create(&session.context, DEPTH * session.slot, 1, 1, section);
+  const int status = mesh_section_create(&session.context, DEPTH * ch->slot, 1, 1, section);
   if (status) return status;
   *memory = mesh_section_address(&session.context, *section, 0);
-  section->bytes = session.slot;
+  section->bytes = ch->slot;
   return mesh_transfer_bind(&session.context, mesh_peer_channel(&session.context, ch->node, 0), receive ? MESH_RECEIVE : MESH_SEND,
-                            identity, *section, (uint32_t)(session.slot / session.header->pgsz), 0, UINT32_MAX, DEPTH);
+                            identity, *section, (uint32_t)(ch->slot / session.header->pgsz), 0, UINT32_MAX, DEPTH);
 }
 
 /* a channel's Metal side once its transfers are prepared: the rings wrapped, its SEND cell, its completion words */
@@ -563,8 +567,8 @@ static int channel_metal(struct channel *ch) {
   if (status) return status;
   metal_release(input.completion);
   ch->word = input.offset; ch->word_stride = input.stride;
-  ch->ring_out = metal_wrap(ch->sending, DEPTH * session.slot);
-  ch->ring_in = metal_wrap(ch->receiving, DEPTH * session.slot);
+  ch->ring_out = metal_wrap(ch->sending, DEPTH * ch->slot);
+  ch->ring_in = metal_wrap(ch->receiving, DEPTH * ch->slot);
   return ch->ring_out && ch->ring_in ? 0 : ENOMEM;
 }
 
@@ -576,16 +580,19 @@ static int session_open(ncclComm_t comm, int *other) {
   if ((uint32_t)comm->members[comm->rank] != m->node) { *other = (int)m->node; session_close(0); return EINVAL; }
   const size_t block = (size_t)m->pgsz * m->block;
   session.slot = (setting("NCCL_BUFFSIZE", BUFFSIZE) / LAG + block - 1) / block * block;
+  session.small = block;
   session.positions = (uint32_t)setting("MESH_POSITIONS", POSITIONS);
   session.bound = setting("MESH_REMOTE_BOUND", 0) ? (double)setting("MESH_REMOTE_BOUND", 0) : BOUND;
-  if (!(session.channels = calloc((size_t)comm->nranks, sizeof *session.channels))) { session_close(0); return ENOMEM; }
-  for (int r = 0; r < comm->nranks && !status; r++) {
-    if (r == comm->rank) continue;
-    struct channel *ch = session.channels + session.count++;
-    ch->node = (uint32_t)comm->members[r];
-    status = ring_bind(ch, 0, IDENTITY + m->node, &ch->out, &ch->sending);
-    if (!status) status = ring_bind(ch, 1, IDENTITY + ch->node, &ch->in, &ch->receiving);
-  }
+  if (!(session.channels = calloc(2 * (size_t)comm->nranks, sizeof *session.channels))) { session_close(0); return ENOMEM; }
+  for (int r = 0; r < comm->nranks && !status; r++)
+    for (int large = 0; large < 2 && r != comm->rank && !status; large++) {
+      struct channel *ch = session.channels + session.count++;
+      ch->node = (uint32_t)comm->members[r];
+      ch->large = large;
+      ch->slot = large ? session.slot : session.small;
+      status = ring_bind(ch, 0, IDENTITY + 2 * m->node + (uint32_t)large, &ch->out, &ch->sending);
+      if (!status) status = ring_bind(ch, 1, IDENTITY + 2 * ch->node + (uint32_t)large, &ch->in, &ch->receiving);
+    }
   if (!status) status = mesh_transfers_prepare(&session.context, 1, session.positions, DEPTH);
   if (!status) status = mesh_metal_transport_create(&session.context, metal_device(), &session.transport);
   for (uint32_t h = 0; h < session.count && !status; h++) status = channel_metal(session.channels + h);
@@ -708,10 +715,15 @@ struct schedule { struct message *out, *in; size_t outs, ins, out_at, in_at; };
 
 static uint32_t node_of(const struct call *c, const struct mesh_step *step) { return (uint32_t)c->comm->members[step->peer]; }
 
-static void place(struct schedule *p, struct call *c, uint32_t k, uint64_t *at) {
+static size_t piece_bytes(const struct mesh_step *step) { return step->piece.elements * step->piece.element_bytes; }
+static int on(const struct channel *ch, const struct call *c, const struct mesh_step *step) {
+  return node_of(c, step) == ch->node && (piece_bytes(step) > LAG * session.small) == ch->large;
+}
+
+static void place(const struct channel *ch, struct schedule *p, struct call *c, uint32_t k, uint64_t *at) {
   const struct mesh_step *step = c->bound->steps + k;
-  const size_t bytes = step->piece.elements * step->piece.element_bytes;
-  const struct message m = {c, k, *at, (bytes + session.slot - 1) / session.slot, step->first * step->piece.element_bytes, bytes};
+  const size_t bytes = piece_bytes(step);
+  const struct message m = {c, k, *at, (bytes + ch->slot - 1) / ch->slot, step->first * step->piece.element_bytes, bytes};
   if (!m.pieces) { if (step->op != MESH_STEP_SEND) c->bound->done[k] = 1; return; }
   if (step->op == MESH_STEP_SEND) p->out[p->outs++] = m; else p->in[p->ins++] = m;
   *at += m.pieces;
@@ -735,25 +747,25 @@ static ncclResult_t schedule_group(struct call *list, size_t n, struct schedule 
       struct call *c = list + i;
       if (!c->bound) continue;
       if (p2p(c)) {
-        if (node_of(c, c->bound->steps) == ch->node) { if (c->what == WHAT_SEND) sends[s++] = i; else receives[r++] = i; }
+        if (on(ch, c, c->bound->steps)) { if (c->what == WHAT_SEND) sends[s++] = i; else receives[r++] = i; }
         continue;
       }
       uint32_t rounds = 0;
       for (uint32_t k = 0; k < c->bound->count; k++)
-        if (node_of(c, c->bound->steps + k) == ch->node && c->bound->steps[k].round + 1 > rounds) rounds = c->bound->steps[k].round + 1;
+        if (on(ch, c, c->bound->steps + k) && c->bound->steps[k].round + 1 > rounds) rounds = c->bound->steps[k].round + 1;
       for (uint32_t round = 0; round < rounds; round++) {
         uint64_t out = at, in = at;
         for (uint32_t k = 0; k < c->bound->count; k++) {
           const struct mesh_step *step = c->bound->steps + k;
-          if (node_of(c, step) == ch->node && step->round == round) place(p, c, k, step->op == MESH_STEP_SEND ? &out : &in);
+          if (on(ch, c, step) && step->round == round) place(ch, p, c, k, step->op == MESH_STEP_SEND ? &out : &in);
         }
         at = out > in ? out : in;
       }
     }
     for (size_t j = 0; j < s || j < r; j++) {
       uint64_t out = at, in = at;
-      if (j < s) place(p, list + sends[j], 0, &out);
-      if (j < r) place(p, list + receives[j], 0, &in);
+      if (j < s) place(ch, p, list + sends[j], 0, &out);
+      if (j < r) place(ch, p, list + receives[j], 0, &in);
       at = out > in ? out : in;
     }
     ch->end = at;
@@ -794,8 +806,8 @@ static ncclResult_t run(struct schedule *plans) {
         if (m && at >= m->first) {
           struct steps *s = m->c->bound;
           if (at == m->first && !ready(s, m->step)) break;
-          const size_t offset = (at - m->first) * session.slot, length = m->bytes - offset < session.slot ? m->bytes - offset : session.slot;
-          const unsigned char *from = ch->receiving + (at % DEPTH) * session.slot;
+          const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
+          const unsigned char *from = ch->receiving + (at % DEPTH) * ch->slot;
           if (s->steps[m->step].op == MESH_STEP_REDUCE)
             combine_into(m->c->type, m->c->combine, s->total + m->offset + offset, from, length / SIZE[m->c->type]);
           else {
@@ -811,8 +823,8 @@ static ncclResult_t run(struct schedule *plans) {
         struct message *m = p->out_at < p->outs ? p->out + p->out_at : NULL;
         if (m && at >= m->first) {
           if (at == m->first && !ready(m->c->bound, m->step)) break;
-          const size_t offset = (at - m->first) * session.slot, length = m->bytes - offset < session.slot ? m->bytes - offset : session.slot;
-          memcpy(ch->sending + (at % DEPTH) * session.slot, m->c->bound->own + m->offset + offset, length);
+          const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
+          memcpy(ch->sending + (at % DEPTH) * ch->slot, m->c->bound->own + m->offset + offset, length);
           if (at + 1 == m->first + m->pieces) p->out_at++;
         }
         mesh_host_publish(&session.context, ch->out, (uint32_t)at);
@@ -861,7 +873,7 @@ static ncclResult_t session_schedule(ncclComm_t comm, struct call *list, size_t 
     if (!over) break;
     for (uint32_t h = 0; h < session.count; h++) session.channels[h].end = session.channels[h].sent;
     schedules_free(plans);
-    if (fresh) return fail(ncclInvalidUsage, "a group past the session's %u positions of %zu bytes (MESH_POSITIONS, NCCL_BUFFSIZE)",
+    if (fresh) return fail(ncclInvalidUsage, "a group past the session's %u positions of at most %zu bytes (MESH_POSITIONS, NCCL_BUFFSIZE)",
                            session.positions, session.slot);
     session_close(LINGER_S);
   }
@@ -1018,8 +1030,8 @@ static ncclResult_t emit(struct schedule *plans, struct metal_program *program) 
           if (!result) result = arrive(program, ch, need);
           if (m && !result) {
             const struct steps *s = m->c->bound;
-            const size_t offset = (at - m->first) * session.slot, length = m->bytes - offset < session.slot ? m->bytes - offset : session.slot;
-            result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * session.slot, s->gpu_own.buffer,
+            const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
+            result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * ch->slot, s->gpu_own.buffer,
                                     s->gpu_own.offset + m->offset + offset, length), "a piece into its slot");
             if (at + 1 == m->first + m->pieces) p->out_at++;
           }
@@ -1034,8 +1046,8 @@ static ncclResult_t emit(struct schedule *plans, struct metal_program *program) 
         if (!(m && at == m->first && !ready(m->c->bound, m->step))) {
           if (m) {
             struct steps *s = m->c->bound;
-            const size_t offset = (at - m->first) * session.slot, length = m->bytes - offset < session.slot ? m->bytes - offset : session.slot;
-            const size_t from = (at % DEPTH) * session.slot;
+            const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
+            const size_t from = (at % DEPTH) * ch->slot;
             result = arrive(program, ch, at + 1);
             if (result) break;
             if (s->steps[m->step].op == MESH_STEP_REDUCE)
