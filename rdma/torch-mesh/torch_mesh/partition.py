@@ -369,22 +369,46 @@ def _empty(shape, like):
     return torch.empty(shape, dtype=like.dtype, device=like.device)
 
 
-def _allgatherv(x, dim, sizes, group):
-    """The blocks gathered out of place from x's block (contiguous along dim): the backend reads it in place
-    and copies it into its place in the output while the transfers run."""
+@torch.library.custom_op('torch_mesh::allgatherv', mutates_args=())
+def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> torch.Tensor:
+    """The blocks gathered out of place from x's block (contiguous along dim), an opaque op, so a compiled
+    graph calls it as torch's functional collectives are called."""
     y = x.movedim(dim, 0).contiguous()
     out = _empty((sum(sizes),) + y.shape[1:], y)
-    dist.all_gather(list(out.split(sizes)), y, group=group)
-    return out.movedim(0, dim)
+    dist.all_gather(list(out.split(sizes)), y, group=dist.distributed_c10d._resolve_process_group(group_name))
+    return out.movedim(0, dim).contiguous()
+
+
+@torch.library.custom_op('torch_mesh::reduce_scatterv', mutates_args=())
+def reduce_scatterv(x: torch.Tensor, dim: int, sizes: list[int], rank: int, op: str, group_name: str) -> torch.Tensor:
+    """The blocks reduce-scattered out of place from x (contiguous along dim), this rank's block, an opaque op."""
+    y = x.movedim(dim, 0).contiguous()
+    out = _empty((sizes[rank],) + y.shape[1:], y)
+    dist.reduce_scatter(out, list(y.split(sizes)), op=getattr(dist.ReduceOp, op.upper()),
+                        group=dist.distributed_c10d._resolve_process_group(group_name))
+    return out.movedim(0, dim).contiguous()
+
+
+@allgatherv.register_fake
+def _(x, dim, sizes, group_name):
+    shape = list(x.shape)
+    shape[dim] = sum(sizes)
+    return x.new_empty(shape)
+
+
+@reduce_scatterv.register_fake
+def _(x, dim, sizes, rank, op, group_name):
+    shape = list(x.shape)
+    shape[dim] = sizes[rank]
+    return x.new_empty(shape)
+
+
+def _allgatherv(x, dim, sizes, group):
+    return allgatherv(x, dim, list(sizes), group.group_name)
 
 
 def _reduce_scatterv(x, dim, sizes, rank, op, group):
-    """The blocks reduce-scattered out of place from x (contiguous along dim): the backend reads it in
-    place, leaves it as it is, and writes this rank's block."""
-    y = x.movedim(dim, 0).contiguous()
-    out = _empty((sizes[rank],) + y.shape[1:], y)
-    dist.reduce_scatter(out, list(y.split(sizes)), op=getattr(dist.ReduceOp, op.upper()), group=group)
-    return out.movedim(0, dim).contiguous()
+    return reduce_scatterv(x, dim, list(sizes), rank, op, group.group_name)
 
 
 # Shard (torch/distributed/tensor/placement_types.py).
