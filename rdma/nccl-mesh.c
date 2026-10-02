@@ -1049,6 +1049,7 @@ static ncclResult_t emit(struct schedule *plans, struct metal_program *program) 
 }
 
 static int on_gpu(ncclDataType_t t) { return t != ncclFloat64 && t != ncclFloat8e4m3 && t != ncclFloat8e5m2; }
+static int same(struct where a, struct where b) { return a.buffer == b.buffer && a.offset == b.offset; }
 static struct where where_of(const void *argument) {
   const ncclMeshBuffer *b = argument;
   return b ? (struct where){b->buffer, b->offset} : (struct where){NULL, 0};
@@ -1062,8 +1063,10 @@ static uint64_t scalar_bits(const struct call *c) {
   return bits;
 }
 
-/* _launch on the stream's command buffer: each collective staged into a scratch operand, the group's
-   positions, the results into recvbuff; the program's end signals `finished` */
+/* _launch on the stream's command buffer: each collective's operand recvbuff itself where it holds the whole
+   operand (an all-reduce's, a root's reduce, a broadcast's, an all-gather's), else a scratch one (a
+   reduce-scatter's, a non-root's reduce); a direct exchange's sums apart; then the group's positions and the
+   results into recvbuff; the program's end signals `finished` */
 static ncclResult_t launch_metal(struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
   ncclResult_t result = ncclSuccess;
@@ -1091,24 +1094,29 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       if (s) s->gpu_own = s->gpu_total = c->what == WHAT_SEND ? send : c->recv_at;
       continue;
     }
-    void *scratch = metal_scratch(bytes);
-    if (!scratch) { result = fail(ncclSystemError, "out of GPU memory"); break; }
-    metal_keep(program, scratch); metal_release(scratch);
-    const struct where own = {scratch, 0};
-    if (reducing(c->what))
-      result = gpu(c->premultiplied ? metal_premultiply(program, c->type, own.buffer, 0, send.buffer, send.offset, all, scalar_bits(c))
-                                    : metal_copy(program, METAL_PLAIN, own.buffer, 0, send.buffer, send.offset, bytes), "the operand");
-    else if (c->what == MESH_BROADCAST && c->root == comm->rank)
-      result = gpu(metal_copy(program, METAL_PLAIN, own.buffer, 0, send.buffer, send.offset, c->count * z), "the operand");
-    else if (c->what == MESH_ALLGATHER)
-      result = gpu(metal_copy(program, METAL_PLAIN, own.buffer, r * c->count * z, send.buffer, send.offset, c->count * z), "the operand");
+    const struct where recv = c->recv_at;
+    const int in_place = c->what == MESH_ALLREDUCE || c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER ||
+                         (c->what == MESH_REDUCE && c->root == comm->rank);
+    struct where own = recv;
+    if (!in_place) {
+      void *scratch = metal_scratch(bytes);
+      if (!scratch) { result = fail(ncclSystemError, "out of GPU memory"); break; }
+      metal_keep(program, scratch); metal_release(scratch);
+      own = (struct where){scratch, 0};
+    }
+    const struct where segment = {own.buffer, own.offset + (c->what == MESH_ALLGATHER ? r * c->count * z : 0)};
+    if (reducing(c->what) && c->premultiplied)
+      result = gpu(metal_premultiply(program, c->type, own.buffer, own.offset, send.buffer, send.offset, all, scalar_bits(c)), "the operand");
+    else if ((reducing(c->what) || (c->what == MESH_BROADCAST && c->root == comm->rank) || c->what == MESH_ALLGATHER) && !same(segment, send))
+      result = gpu(metal_copy(program, METAL_PLAIN, segment.buffer, segment.offset, send.buffer, send.offset,
+                              reducing(c->what) ? bytes : c->count * z), "the operand");
     struct where total = own;
-    if (!result && s && s->direct) {
+    if (!result && s && s->direct && reducing(c->what)) {
       void *sums = metal_scratch(bytes);
       if (!sums) { result = fail(ncclSystemError, "out of GPU memory"); break; }
       metal_keep(program, sums); metal_release(sums);
       total = (struct where){sums, 0};
-      result = gpu(metal_copy(program, METAL_PLAIN, sums, 0, own.buffer, 0, bytes), "the result");
+      result = gpu(metal_copy(program, METAL_PLAIN, sums, 0, own.buffer, own.offset, bytes), "the result");
     }
     c->sum = total;
     if (s) { s->gpu_own = own; s->gpu_total = total; }
@@ -1138,10 +1146,10 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       }
     } else if (p2p(c)) continue;
     else if (c->what == MESH_ALLREDUCE || (c->what == MESH_REDUCE && c->root == comm->rank) || c->what == MESH_REDUCE_SCATTER) {
-      const size_t at = sum.offset + (c->what == MESH_REDUCE_SCATTER ? r * count * z : 0);
-      result = gpu(c->post ? metal_truncdiv(program, c->type, recv.buffer, recv.offset, sum.buffer, at, count, (uint64_t)comm->nranks)
-                           : metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, sum.buffer, at, count * z), "the result");
-    } else if (c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER)
+      const struct where from = {sum.buffer, sum.offset + (c->what == MESH_REDUCE_SCATTER ? r * count * z : 0)};
+      if (c->post) result = gpu(metal_truncdiv(program, c->type, recv.buffer, recv.offset, from.buffer, from.offset, count, (uint64_t)comm->nranks), "the result");
+      else if (!same(from, recv)) result = gpu(metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, from.buffer, from.offset, count * z), "the result");
+    } else if ((c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER) && !same(sum, recv))
       result = gpu(metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, sum.buffer, sum.offset, elements(c) * z), "the result");
   }
   metal_end(program, finished ? finished : (finished = metal_event()), ++issued);
