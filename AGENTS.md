@@ -147,8 +147,7 @@ Operator instruction, 2026-09-05:
 > a priori you're allowed to restart any mesh machine without a userspace or active service running without any consideration
 
 Verify actual user sessions and workloads, then perform the ordinary restart
-without another approval request when the node is idle. Preserve intentionally
-suspended workloads across reboot and verify the new boot and recovered service.
+without another approval request when the node is idle.
 This authorization applies to every mesh machine. It does not authorize
 uncatchable signals to verbs owners; retain the teardown procedure below.
 
@@ -267,8 +266,7 @@ The operator instructed on September 6, 2026: "delete all tests. tests aren't
 specification". The complete instruction is preserved in
 [design/SPECIFICATION.md §24](design/SPECIFICATION.md#24-whole-program-review-and-deletion-of-tests-september-6-2026).
 Repository-owned tests and verification harnesses have been removed. Review the complete data and execution flow
-against the user instructions and explicit algebra. Compilation and operational
-measurements provide evidence about implementation, not authority over the specification.
+against the user instructions and explicit algebra.
 
 ## Source workflow
 
