@@ -25,7 +25,10 @@ capacity blocks, each source's keys past their valid extents masked, the block c
 either device.  Under torch.compile the handler is a graph break (_ring).  With gradient, SDPA on MPS
 decomposes into matmul and softmax before the dispatcher sees it, and CP's backward handlers are CUDA's
 too: forward only."""
+import importlib.abc
+import importlib.util
 import math
+import os
 import sys
 
 import torch
@@ -111,41 +114,87 @@ def _linear_backward(op_call, args, kwargs):
 
 
 def _initialize_distributed_mesh(distributed_config):
-    """transformers.distributed.utils.initialize_distributed_mesh (transformers 5.18) without its refusal of MPS
-    ("Tensor parallelism is not supported on MPS devices"): with the mesh backend initialized, its mesh is made on
-    MPS as on any other accelerator."""
-    import transformers.distributed.utils as utils
+    """transformers.distributed.utils.initialize_distributed_mesh (transformers 5.18) on MPS: where it refuses MPS
+    ("Tensor parallelism is not supported on MPS devices") and, creating the process group itself, would put MPS on
+    CPU (_ensure_torch_distributed: "Falling back to CPU"), the group is the mesh backend's (as it gives CUDA NCCL's)
+    and the mesh is on MPS."""
+    if torch._C._get_accelerator().type != "mps":
+        return _transformers["initialize_distributed_mesh"](distributed_config)
     names = [name for name, size in (("pp", distributed_config.pp_size), ("fsdp", distributed_config.fsdp_size),
                                      ("tp", distributed_config.tp_size)) if size > 1]
     shape = [getattr(distributed_config, f"{name}_size") for name in names]
     if not shape:
         return None, None
-    if not (torch.distributed.is_initialized() and torch.distributed.get_backend() == "mesh"
-            and torch._C._get_accelerator().type == "mps"):
-        return _transformers_mesh(distributed_config)
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group(backend="mesh", rank=int(os.environ["RANK"]),
+                                             world_size=int(os.environ["WORLD_SIZE"]))
     if math.prod(shape) != torch.distributed.get_world_size():
         raise RuntimeError(f"The parallel mesh requires {math.prod(shape)} processes, but world_size is "
                            f"{torch.distributed.get_world_size()}.")
-    utils._ensure_torch_distributed("mps")
     mesh = torch.distributed.init_device_mesh("mps", tuple(shape), mesh_dim_names=tuple(names))
     if len(names) > 1:
         mesh._flatten("_".join(names))
     return torch.device("mps", 0), mesh
 
 
-_transformers_mesh = None
+def _initialize_tensor_parallelism(tp_plan, tp_size=None, device_mesh=None, device_map=None):
+    """transformers' deprecated initialize_tensor_parallelism on MPS: its mesh on MPS (it falls back to CPU)."""
+    if torch._C._get_accelerator().type != "mps" or device_mesh is not None or tp_plan is None:
+        return _transformers["initialize_tensor_parallelism"](tp_plan, tp_size, device_mesh, device_map)
+    if device_map is not None:
+        raise ValueError("`tp_plan` and `device_map` are mutually exclusive. Choose either one for parallelization.")
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group(backend="mesh", rank=int(os.environ["RANK"]),
+                                             world_size=int(os.environ["WORLD_SIZE"]))
+    size = tp_size or torch.distributed.get_world_size()
+    return torch.device("mps", 0), torch.distributed.init_device_mesh("mps", (size,))
 
 
-def _transformers():
-    """transformers' own tensor parallelism (from_pretrained(tp_plan=...)) on MPS: its mesh made where it
-    refuses MPS, in the modules that call it; a program that imported transformers before its process group."""
-    global _transformers_mesh
-    if "transformers" not in sys.modules or _transformers_mesh is not None:
+_transformers = {}
+
+
+def _patch_transformers(utils):
+    """transformers.distributed.utils's two mesh makers replaced on its module, before the modules that import
+    them by name (transformers.distributed.mixin, transformers.integrations.tensor_parallel) are loaded, or in
+    them too where they already are."""
+    if _transformers:
         return
-    import transformers.distributed.mixin as mixin
-    import transformers.distributed.utils as utils
-    _transformers_mesh = utils.initialize_distributed_mesh
-    utils.initialize_distributed_mesh = mixin.initialize_distributed_mesh = _initialize_distributed_mesh
+    _transformers.update(initialize_distributed_mesh=utils.initialize_distributed_mesh,
+                         initialize_tensor_parallelism=utils.initialize_tensor_parallelism)
+    utils.initialize_distributed_mesh = _initialize_distributed_mesh
+    utils.initialize_tensor_parallelism = _initialize_tensor_parallelism
+    for name, attribute, value in (("transformers.distributed.mixin", "initialize_distributed_mesh", _initialize_distributed_mesh),
+                                   ("transformers.integrations.tensor_parallel", "initialize_tensor_parallelism",
+                                    _initialize_tensor_parallelism)):
+        if name in sys.modules:
+            setattr(sys.modules[name], attribute, value)
+
+
+class _TransformersImport(importlib.abc.MetaPathFinder):
+    """transformers.distributed.utils patched as it is executed, whatever the order of a program's imports."""
+
+    def find_spec(self, name, path, target=None):
+        if name != "transformers.distributed.utils":
+            return None
+        sys.meta_path.remove(self)
+        spec = importlib.util.find_spec(name)
+        if spec is None or spec.loader is None:
+            return spec
+        run = spec.loader.exec_module
+
+        def exec_module(module):
+            run(module)
+            _patch_transformers(module)
+        spec.loader.exec_module = exec_module
+        return spec
+
+
+def install():
+    """transformers' tensor parallelism on MPS: patched now where transformers is loaded, else as it is."""
+    if "transformers.distributed.utils" in sys.modules:
+        _patch_transformers(sys.modules["transformers.distributed.utils"])
+    elif not any(isinstance(finder, _TransformersImport) for finder in sys.meta_path):
+        sys.meta_path.insert(0, _TransformersImport())
 
 
 def register():
@@ -155,7 +204,7 @@ def register():
         torch.mps.is_initialized = torch.backends.mps.is_available
     if not hasattr(torch.mps, "set_device"):
         torch.mps.set_device = lambda device: None
-    _transformers()
+    install()
     DTensor._op_dispatcher._custom_op_handlers[aten.linear_backward.default] = _linear_backward
     for op in _BLOCKS:
         _attention.custom_ops[op] = _ring
