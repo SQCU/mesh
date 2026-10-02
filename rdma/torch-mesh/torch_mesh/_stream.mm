@@ -1,7 +1,7 @@
 // torch's current MPS stream as libnccl-mesh's ncclMeshStream (nccl.h): begin() gives the stream's command buffer,
 // its open compute encoder (the group's kernels join torch's own) and a workspace allocator (MPS tensors from
 // torch's caching allocator, held until commit(), then reused in the stream's order); commit() commits the work
-// without waiting.
+// without waiting (MESH_COMMIT=call), or leaves it to torch's own commits (MESH_COMMIT=torch).
 #include <torch/extension.h>
 #include <ATen/mps/MPSStream.h>
 #include <ATen/native/mps/OperationUtils.h>
@@ -32,9 +32,9 @@ static int64_t begin() {
   return (int64_t)(uintptr_t)&stream_;
 }
 
-static void commit() {
+static void commit(bool now) {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  dispatch_sync(stream->queue(), ^{ stream->synchronize(at::mps::SyncType::COMMIT); });
+  if (now) dispatch_sync(stream->queue(), ^{ stream->synchronize(at::mps::SyncType::COMMIT); });
   held_.clear();
 }
 
