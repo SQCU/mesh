@@ -10,12 +10,19 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 104u
+#define MESH_VERSION 106u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
 #define MESH_QPS 8
-struct mesh_transfer { uint32_t local_row,binding,count,stride,invocation_pages,first; uint64_t bytes; };
-_Static_assert(sizeof(struct mesh_transfer)==32,"M08 prepared transfer");
+/* A prepared transfer: `count` slots of `bytes` from `local_row`, bound for the invocations [begin, end)
+   that use it (end past the call's invocations: every one), invocation t addressing its ring slot
+   (t - begin) mod depth (0: the header's depth) at `invocation_pages` a slot. */
+struct mesh_transfer { uint32_t local_row,binding,count,stride,invocation_pages,first,begin,end,depth; uint64_t bytes; };
+_Static_assert(sizeof(struct mesh_transfer)==48,"M08 prepared transfer");
+static inline uint32_t mesh_transfer_active(const struct mesh_transfer *transfer,uint32_t invocations){
+  uint32_t end=transfer->end<invocations?transfer->end:invocations;
+  return transfer->stride?(end>transfer->begin?end-transfer->begin:0):(transfer->begin<invocations?1:0);
+}
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_FREE, MESH_PLANES };
@@ -41,15 +48,20 @@ _Static_assert(sizeof(struct mesh_page_entry)==32 && _Alignof(struct mesh_page_e
 enum { MESH_SEND, MESH_RECEIVE };
 #define MESH_NOTICE_BANKS 2
 /* design/prepared-machine.md#M04 */
+/* One publication's SEND cell of one invocation: `ready`, released by its producer, then the chain
+   of `chunks` requests from `request` the bridge posts, `successor` the stream's next cell (the
+   bridge's, prepared per invocation). */
 struct mesh_send {
   _Alignas(128) _Atomic uint64_t ready;
   uintptr_t pair;
   _Alignas(32) struct ibv_sge span;
   struct ibv_send_wr request;
+  uintptr_t successor;
+  uint32_t chunks,queue;
 };
 struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells; };
 _Static_assert(sizeof(struct mesh_send)==256 && _Alignof(struct mesh_send)==128 &&
-  offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 &&
+  offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 && offsetof(struct mesh_send,queue)+4<=256 &&
   offsetof(struct mesh_send,request.send_flags)+sizeof(unsigned int)<=128,"M04/M29");
 _Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && sizeof(struct mesh_tx)==32,"M04/M12");
 struct mesh_target { uint64_t stream; uint32_t count,stride; };

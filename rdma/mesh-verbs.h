@@ -6,6 +6,7 @@
 #include <sys/sysctl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -22,9 +23,13 @@
 #define QD 4095
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 /* tbt_post_recv loads only the low 32 address bits of an SGE, so no registration may cross a 4 GiB
-   virtual-address boundary.  The window is mapped at a bank-aligned base and is required to fit in
-   one bank, which makes every region cut interior to that bank and a straddle impossible. */
+   virtual-address boundary.  The window is mapped at a bank-aligned base and cut into regions of
+   MESH_REGION bytes, which divides the bank: every region lies inside one bank, however many banks
+   the window spans.  1 GiB is the registration the provider takes (the RCA's 32 GiB and 6 GiB windows
+   in 1 GiB regions; its advertised max_mr_size, 16.4 MB, is not enforced), so max_mr regions of it
+   are the device's registrable memory. */
 #define MESH_BANK ((size_t)1<<32)
+#define MESH_REGION ((size_t)1<<30)
 struct mesh_wire { char *data; size_t length; };
 struct mesh_device {
   const char *name;
@@ -46,19 +51,22 @@ static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t
     .lkey=device->regions[offset/device->extent]->lkey};
 }
 /* design/algorithm-sources.md#programcopy */
+/* A queue pair: its receives complete on `completion`, its SENDs on `sent`.  The device completes
+   every SEND, IBV_SEND_SIGNALED or not (the bridge's census: send completions equal requests), so a
+   SEND's completion is its queue's retirement and lands where the send thread polls it. */
 struct mesh_queue {
   _Alignas(64) struct ibv_qp *pair;
-  struct ibv_cq *completion;
+  struct ibv_cq *completion,*sent;
   int (*poll)(struct ibv_cq *,int,struct ibv_wc *);
   int (*send)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **);
   int (*receive)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **);
-  uint32_t receive_capacity;
+  uint32_t receive_capacity,send_capacity;
 };
 _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
 struct mesh_verbs {
   struct mesh_device *device; struct mesh_wire *wire;
   struct mesh_queue *queues; int qp_count,listener;
-  struct ibv_cq *completion;
+  struct ibv_cq *completion,*sent;
   uint32_t peer,completion_entries[2];
   uint64_t bandwidth;
   const char *local_address,*remote_address,*service;
@@ -71,7 +79,6 @@ struct mesh_verbs {
 static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
   wire->length=(size_t)m->wire_pages*m->pgsz;
   wire->data=NULL;
-  if(wire->length>MESH_BANK){errno=ENOMEM;return -1;}
   char *reserved=mmap(NULL,wire->length+MESH_BANK,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE,-1,0);
   if(reserved==MAP_FAILED)return -1;
   char *base=(char *)(((uintptr_t)reserved+MESH_BANK-1)&~(uintptr_t)(MESH_BANK-1));
@@ -92,6 +99,10 @@ static int down_pair(struct mesh_verbs *provider){
   if(provider->completion){
     if(ibv_destroy_cq(provider->completion))return 0;
     provider->completion=NULL;
+  }
+  if(provider->sent){
+    if(ibv_destroy_cq(provider->sent))return 0;
+    provider->sent=NULL;
   }
   free(provider->queues);provider->queues=NULL;
   return 1;
@@ -229,32 +240,42 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
   if(!device->domain)device->domain=ibv_alloc_pd(device->context);
   if(!device->domain){error=errno;goto done;}
   /* design/prepared-machine.md#M09 */
-  /* Registered memory is the declared window, not the arena: it is what an SGE names, it is wired
-     1:1 by the provider, and it is the only thing the MR table has to cover.  The addressable arena
-     grows without it. */
+  /* Registered memory is the declared window (by default the whole arena): what an SGE names, wired
+     1:1 by the provider, in regions of MESH_REGION bytes.  A provider that refuses a region that size
+     is registered in regions of its advertised max_mr_size instead, at most max_mr of them. */
   size_t stride=(size_t)m->block*m->pgsz,span=wire->length;
-  size_t extent=(capabilities.max_mr_size<span?capabilities.max_mr_size:span)/stride*stride;
-  size_t regions=extent?(span+extent-1)/extent:0;
-  /* extent is a whole number of blocks and the window is one bank, so no region cut falls inside a
-     block and no region crosses a 4 GiB boundary: wire_span's divide is the only addressing form. */
-  if(!extent || regions>(size_t)capabilities.max_mr || span>MESH_BANK ||
-     ((uintptr_t)wire->data&(MESH_BANK-1))+span>MESH_BANK){
-    error=ENOMEM;
-    fprintf(stderr,"register %s window=%zu extent=%zu regions=%zu base=%p max_mr_size=%llu max_mr=%d\n",
-      device->name,span,extent,regions,(void *)wire->data,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr);
-    goto done;
-  }
-  if(!device->regions)device->regions=calloc(regions,sizeof *device->regions);
-  if(!device->regions){error=ENOMEM;goto done;}
-  while(device->region_count<regions){
-    size_t offset=(size_t)device->region_count*extent,end=offset+extent;
-    device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
-    if(!device->regions[device->region_count]){
-      error=errno;fprintf(stderr,"register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
-        device->name,offset,(end<span?end:span)-offset,span,extent,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));goto done;
+  if(!device->extent)device->extent=(MESH_REGION<span?MESH_REGION:(span+stride-1))/stride*stride;
+  for(;;){
+    size_t extent=device->extent,regions=extent?(span+extent-1)/extent:0;
+    if(!extent || regions>(size_t)capabilities.max_mr || (MESH_BANK%extent && span>MESH_BANK)){
+      error=ENOMEM;
+      fprintf(stderr,"register %s window=%zu extent=%zu regions=%zu base=%p max_mr_size=%llu max_mr=%d\n",
+        device->name,span,extent,regions,(void *)wire->data,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr);
+      goto done;
     }
-    device->region_count++;
+    if(!device->regions)device->regions=calloc(regions,sizeof *device->regions);
+    if(!device->regions){error=ENOMEM;goto done;}
+    int refused=0;
+    while(device->region_count<regions){
+      size_t offset=(size_t)device->region_count*extent,end=offset+extent;
+      device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
+      if(!device->regions[device->region_count]){
+        error=errno;fprintf(stderr,"register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
+          device->name,offset,(end<span?end:span)-offset,span,extent,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));
+        refused=1;break;
+      }
+      device->region_count++;
+    }
+    if(!refused)break;
+    size_t fallback=capabilities.max_mr_size/stride*stride;
+    if(!fallback || fallback>=extent)goto done;
+    while(device->region_count){
+      if(ibv_dereg_mr(device->regions[device->region_count-1]))goto done;
+      device->region_count--;
+    }
+    free(device->regions);device->regions=NULL;device->extent=fallback;error=0;
   }
+  size_t extent=device->extent,regions=device->region_count;
   device->wire=wire->data;device->extent=extent;device->payload=stride;
   fprintf(stderr,"register %s window=%zu bytes extent=%zu regions=%zu arena=%llu bytes\n",
     device->name,span,extent,regions,(unsigned long long)mesh_arena_pages(m)*(uint64_t)m->pgsz);
@@ -275,6 +296,14 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+UINT64_C(30000000000);
   int f=oob(provider,m,client);
   if(f<0)return -1;
+  /* A peer host that dies silently (power, panic) becomes an EOF on this control socket within
+     idle + interval x count seconds, a link event (mesh-flow.c link_run); UC queue pairs report
+     nothing (docs/elastic.md §1 in metal-microbench). */
+  int on=1,idle=5,interval=1,count=3;
+  if(setsockopt(f,SOL_SOCKET,SO_KEEPALIVE,&on,sizeof on) || setsockopt(f,IPPROTO_TCP,TCP_KEEPALIVE,&idle,sizeof idle) ||
+     setsockopt(f,IPPROTO_TCP,TCP_KEEPINTVL,&interval,sizeof interval) || setsockopt(f,IPPROTO_TCP,TCP_KEEPCNT,&count,sizeof count)){
+    int error=errno;close(f);errno=error;return -1;
+  }
   uint32_t frame_capacity=provider->device->frame_capacity;
   /* design/prepared-machine.md#M11 */
   provider->queues=calloc((size_t)qps,sizeof *provider->queues);
@@ -282,11 +311,13 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   provider->completion=ibv_create_cq(provider->device->context,
     (int)(frame_capacity+1),NULL,NULL,0);
   if(!provider->completion){close(f);return -1;}
+  provider->sent=ibv_create_cq(provider->device->context,(int)(frame_capacity+1),NULL,NULL,0);
+  if(!provider->sent){close(f);return -1;}
   for(int q=0;q<qps;q++){
     struct mesh_queue *queue=&provider->queues[q];
-    queue->completion=provider->completion;
+    queue->completion=provider->completion;queue->sent=provider->sent;
     queue->poll=provider->completion->context->ops.poll_cq;
-    struct ibv_qp_init_attr qi={.send_cq=queue->completion,
+    struct ibv_qp_init_attr qi={.send_cq=queue->sent,
       .recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
       .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
     queue->pair=ibv_create_qp(provider->device->domain,&qi);
@@ -295,7 +326,7 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
     provider->qp_count=q+1;
     struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
     if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
-    queue->receive_capacity=actual.cap.max_recv_wr;
+    queue->receive_capacity=actual.cap.max_recv_wr;queue->send_capacity=actual.cap.max_send_wr;
     fprintf(stderr,"pair capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",q,
       actual.cap.max_send_wr,actual.cap.max_recv_wr,
       queue->completion->cqe);

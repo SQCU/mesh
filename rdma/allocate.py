@@ -20,31 +20,15 @@ back, so the next call's configuration is one more value in the dataflow: no roo
 3. A projected online gradient step preconditioned by b [Zinkevich 2003]:
    s'_i = s_i - eta (g_i - mu) / (b_i kappa'), mu keeping sum s' = W.  It is equal_finish below
    with a_i = eta g_i - b_i kappa' s_i and T = eta mu; eta = 1 is the equal-finish solve.
-4. c_i = low_i + g floor((s'_i - low_i) / g), then each leftover grain to the rank finishing
-   earliest with it, a_i + b_i (c_i + g), ties to the lower rank [Beaumont et al. 2001, Alg. 3.1]:
-   the least largest finish on the grain, which the largest remainders are not (W 12, b (1, 2.4):
-   [8, 4] finishes at 9.6, [9, 3] at 9).  s' stays the iterate; c is the next call's operand and
-   regressor.
+4. c_i = low_i + g floor((s'_i - low_i) / g), the leftover grains to the largest remainders,
+   ties to the lower rank.  s' stays the iterate; c is the next call's operand and regressor.
 
 equal_finish(W, g, low, high, a, b) is steps 3-4 alone: rank i finishing at a_i + b_i s_i, the
 shares s_i = (T - a_i) / b_i with sum s = W; ranks outside their bounds are held at them and T
 re-solved, the side with the larger total violation first [Bitran & Hax 1981].  The mesh's
 programs take config_t0 from it (metal-microbench tools/mesh/programs.py).
 
-min_max(W, g, low, high, cost, shared) is step 4 for any nondecreasing finish cost[i](c_i): each
-grain in turn to the rank finishing earliest with it, optimal for the largest finish [Ibaraki &
-Katoh 1988]; shared(c), when given, is the time of the collectives the shares wait for, priced
-by the largest share: the same fill under each cap m on the largest share, the least
-max cost + shared kept [HAP, EuroSys 2024, §2.4].  A rank's high bound is what it can hold
-(its window over its bytes per unit).
-
-capacity(W, g, low, high) is each rank's largest share of W at grain g within [low_i, high_i]: its
-high bound, or W less every other rank's low bound, whichever is less.  A partitioned dimension's
-local buffers are shaped to it, so that any parts the bounds allow fit without a shape change
-(torch_mesh/partition.py; design/heterogeneity.md R14).
-
-O(n) plain floats in a fixed order (min_max O((W/g)^2 n)): identical inputs give identical
-shares on every rank.
+O(n) plain floats in a fixed order: identical inputs give identical shares on every rank.
 """
 import math
 
@@ -117,34 +101,9 @@ def equal_finish(total, grain, low, high, a, b):
         else:
             held.update((i, float(high[i])) for i in above)
     c = [low[i] + grain * math.floor((s[i] - low[i]) / grain) for i in range(n)]
-    c, _ = min_max(total, grain, c, high, [lambda x, i=i: a[i] + b[i] * x for i in range(n)])
-    return c, s, T
-
-
-def min_max(total, grain, low, high, cost, shared=None):
-    """Shares of `total` units at `grain` within [low_i, high_i] (multiples of grain) over ranks
-    finishing at cost[i](c_i), nondecreasing, plus shared(c) when given: (c, T), T the largest
-    finish (above).  Grains that fit no rank are left unplaced."""
-    n = len(low)
-
-    def fill(cap):
-        c = list(low)
-        for _ in range((total - sum(low)) // grain):
-            fits = [i for i in range(n) if c[i] + grain <= min(high[i], cap)]
-            if not fits:
-                break
-            i = min(fits, key=lambda i: (cost[i](c[i] + grain), i))
+    left = (total - sum(c)) // grain  # fewer than n: each floor drops less than one grain
+    for i in sorted(range(n), key=lambda i: (c[i] - s[i], i)):
+        if left and c[i] + grain <= high[i]:
             c[i] += grain
-        return c, max(cost[i](c[i]) for i in range(n))
-
-    if shared is None:
-        return fill(math.inf)
-    fills = [fill(cap) for cap in range(max(low), total + 1, grain)]
-    c, t = min((f for f in fills if sum(f[0]) == sum(fills[-1][0])), key=lambda f: f[1] + shared(f[0]))
-    return c, t + shared(c)
-
-
-def capacity(total, grain, low, high):
-    """Each rank's largest share of `total` units at `grain` within [low_i, high_i] (multiples of
-    grain): min(high_i, total - sum of the other ranks' low bounds)."""
-    return [min(high[i], total - sum(low) + low[i]) // grain * grain for i in range(len(low))]
+            left -= 1
+    return c, s, T

@@ -11,17 +11,22 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
     options:MTLResourceStorageModeShared deallocator:nil];
   struct hdr *m=context->M;
   struct mesh_section stop,words;
-  uint64_t inputs=0;
+  /* design/prepared-machine.md#M07 */
+  /* Each link's words: every receive transfer's, from its `first` (mesh_transfers_prepare), one per
+     slot and chunk an invocation of its range; a chunk's word for the transfer's invocation u is
+     first + (u*count + slot)*chunks + chunk, its stride count*chunks words. */
+  uint64_t inputs=0,frames[m->links?m->links:1];
   for(uint32_t p=0;p<m->links;p++){
     inputs=(inputs+15)&~UINT64_C(15);
     struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,context->client,p));
+    frames[p]=0;
     for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
       struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
       for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
-        inputs+=mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*tx->invocations;
+        frames[p]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*mesh_transfer_active(in+i,tx->invocations);
     }
+    inputs+=frames[p];
   }
-  /* design/prepared-machine.md#M07 */
   /* completion words are written by the host after a completion and read by the GPU; never an SGE target */
   int status=mesh_section_create(context,sizeof(_Atomic uint64_t)*(inputs?inputs:1),1,0,&words);
   if(status){mesh_metal_transport_destroy(transport);return status;}
@@ -37,14 +42,8 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
     first=(first+15)&~UINT64_C(15);
     struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,context->client,p));
     tx->cancel=(uintptr_t)address-(uintptr_t)m;
-    uint64_t frames=0;
-    for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
-      struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
-        frames+=mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count;
-    }
     /* design/prepared-machine.md#M12 */
-    address->ranges[p]=(struct mesh_cancel_range){.offset=(uintptr_t)input-(uintptr_t)m+first*sizeof(_Atomic uint64_t),.count=frames*tx->invocations};
+    address->ranges[p]=(struct mesh_cancel_range){.offset=(uintptr_t)input-(uintptr_t)m+first*sizeof(_Atomic uint64_t),.count=frames[p]};
     /* design/prepared-machine.md#M07 */
     for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
       struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
@@ -52,12 +51,12 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
         uint32_t chunks=mesh_row_chunks(m,in[i].local_row,in[i].bytes);
         for(uint32_t s=0;s<in[i].count;s++)for(uint32_t k=0;k<chunks;k++){
           struct mesh_publication *delivery=mesh_publication_at(m,in[i].local_row+s*in[i].stride+k);
-          delivery->device_input=(uintptr_t)input-(uintptr_t)m+sizeof(_Atomic uint64_t)*(first+in[i].first+s*chunks+k);
-          delivery->device_stride=sizeof(_Atomic uint64_t)*frames;
+          delivery->device_input=(uintptr_t)input-(uintptr_t)m+sizeof(_Atomic uint64_t)*(first+in[i].first+(uint64_t)s*chunks+k);
+          delivery->device_stride=sizeof(_Atomic uint64_t)*(uint64_t)in[i].count*chunks;
         }
       }
     }
-    first+=frames*tx->invocations;
+    first+=frames[p];
   }
   transport->cancel=address;
   if(!transport->publication||!transport->inputs){mesh_metal_transport_destroy(transport);return ENOMEM;}
