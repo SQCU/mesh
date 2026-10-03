@@ -91,10 +91,14 @@ static void trace(const char *format, ...) {
   static int on = -1;
   if (on < 0) on = getenv("MESH_HOST_TRACE") && atoi(getenv("MESH_HOST_TRACE")) > 0;
   if (!on) return;
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  char line[256];
   va_list arguments;
   va_start(arguments, format);
-  vfprintf(stderr, format, arguments);
+  vsnprintf(line, sizeof line, format, arguments);
   va_end(arguments);
+  fprintf(stderr, "%lld.%06ld %s", (long long)t.tv_sec, t.tv_nsec / 1000, line);
 }
 
 void *metal_device(void) { return (void *)1; }
@@ -172,7 +176,10 @@ int metal_spin(struct metal_program *program, void *words, size_t offset, uint64
   (void)program;
   _Atomic uint64_t *word = (_Atomic uint64_t *)at(words, offset);
   trace("spin %p+%zu %llu seen %llu\n", words, offset, (unsigned long long)expected, (unsigned long long)atomic_load(word));
-  return await(word, expected, "a wait for a landing");
+  const double start = now_s();
+  const int status = await(word, expected, "a wait for a landing");
+  if (now_s() - start > 1e-3) trace("spun %p+%zu %.3f s, %llu\n", words, offset, now_s() - start, (unsigned long long)atomic_load(word));
+  return status;
 }
 
 int metal_send_small(struct metal_program *program, void *slot, size_t slot_offset, void *src, size_t src_offset, size_t bytes,
