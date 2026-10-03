@@ -283,6 +283,9 @@ ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
   return comm_make(comm, NULL, 1, NULL, 0, region_of_process());
 }
 
+static ncclResult_t session_relaying(ncclComm_t comm);
+/* a communicator over `topology`; where it leaves a pair of ranks unlinked, its session opened now (every rank calls this
+   together), so the rank forwards routed messages for others whether or not it calls anything */
 ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int rank, const struct mesh_link_map *topology, const int *node, const char *region) {
   static const char *const kinds[] = {"mesh", "ring", "tree", "graph"};
   if (!comm || !topology) return fail(ncclInvalidArgument, "comm or topology is NULL");
@@ -290,7 +293,10 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int rank, const struct mesh_
   if (mesh_link_map_check(topology))
     return fail(ncclInvalidArgument, "the topology (%s of %u ranks, %u links) is not one its algorithms can run on (mesh-plan.h)",
                 topology->kind <= MESH_LINKS_GRAPH ? kinds[topology->kind] : "unknown kind", topology->nodes, topology->links);
-  return comm_make(comm, topology, (int)topology->nodes, node, rank, region && *region ? region : "/mesh0");
+  ncclResult_t result = comm_make(comm, topology, (int)topology->nodes, node, rank, region && *region ? region : "/mesh0");
+  if (!result) result = session_relaying(*comm);
+  if (result) { ncclCommDestroy(*comm); *comm = NULL; }
+  return result;
 }
 
 ncclResult_t ncclCommFinalize(ncclComm_t comm) { return comm ? ncclSuccess : fail(ncclInvalidArgument, "comm is NULL"); }
@@ -386,6 +392,8 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
 #define BUFFSIZE ((size_t)1 << 22)  /* NCCL_BUFFSIZE's default */
 #define POSITIONS 8192
 #define IDENTITY 1
+#define RELAY (1u << 20)            /* a routed pair's transfers: RELAY + 2 * (from * NODES + to) + large */
+#define NODES 1024
 #define BOUND 10.0                  /* metal-microbench configs/e2b-programs.json remote_bound_seconds (MESH_REMOTE_BOUND) */
 
 /* a channel: one class of a peer's pieces on a queue pair of its own (a queue pair's receives are posted
@@ -397,7 +405,7 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
    words' stride in the transport's inputs; `waited`, the arrivals the encoded GPU work already waits for;
    `signaled`, the positions landed that the progress thread has seen, up to the `target` the groups reach */
 struct channel {
-  uint32_t node;
+  uint32_t node, hop;
   int large;
   size_t slot;
   struct mesh_section out, in;
@@ -408,6 +416,10 @@ struct channel {
   uint64_t argument;
   _Atomic uint64_t target, signaled;
 };
+
+/* a routed pair's messages through this node (NCCL's PXN proxy): what lands from the route's previous node is published,
+   from the slot it landed in, to the next, by the progress thread, with no call of this rank's */
+struct relay { uint32_t from, to; struct mesh_section ring; uint64_t forwarded; };
 
 static struct {
   struct mesh_ctx context;
@@ -420,6 +432,8 @@ static struct {
   double bound;
   int registered, running;
   struct mesh_metal_transport transport;
+  struct relay *relays;
+  uint32_t relaying;
   pthread_t progress;
   _Atomic int stop, failed;
 } session;
@@ -468,11 +482,27 @@ static int outstanding(void) {
 /* the progress thread, mesh_rank.m's silent-link detector: it follows each channel's landings up to its target,
    and a channel with positions pending that sees none land for the bound (MESH_REMOTE_BOUND seconds) has its
    link cancelled, as does a landing the bridge cancelled (~0) */
+/* every routed piece that has landed here published to the route's next node, from where it landed */
+static int forward(void) {
+  int moved = 0;
+  for (uint32_t i = 0; i < session.relaying && !atomic_load(&session.failed); i++) {
+    struct relay *rl = session.relays + i;
+    for (;;) {
+      const uint64_t arrived = mesh_host_arrived(&session.context, rl->ring, (uint32_t)rl->forwarded);
+      if (arrived == UINT64_MAX) { release_all(ncclRemoteError, "a link of the route from node %u to node %u was cancelled", rl->from, rl->to); break; }
+      if (!landed(arrived, rl->forwarded)) break;
+      mesh_host_publish(&session.context, rl->ring, (uint32_t)rl->forwarded++);
+      moved = 1;
+    }
+  }
+  return moved;
+}
+
 static void *progress_run(void *unused) {
   (void)unused;
   double idle = now_s() + session.bound;
   while (!atomic_load(&session.stop)) {
-    int waiting = 0, moved = 0;
+    int waiting = 0, moved = forward();
     for (uint32_t h = 0; h < session.count && !atomic_load(&session.failed); h++) {
       struct channel *ch = session.channels + h;
       const uint64_t from = atomic_load(&ch->signaled), target = atomic_load(&ch->target);
@@ -486,7 +516,10 @@ static void *progress_run(void *unused) {
     }
     if (moved) idle = now_s() + session.bound;
     else if (waiting && now_s() > idle) release_all(ncclRemoteError, "no landing from the peers in %.1f s: the links cancelled as silent", session.bound);
-    if (!waiting || atomic_load(&session.failed)) {
+    if (!waiting && session.relaying && !atomic_load(&session.failed)) {
+      if (!moved) usleep(20);
+      idle = now_s() + session.bound;
+    } else if (!waiting || atomic_load(&session.failed)) {
       pthread_mutex_lock(&progress_lock);
       while (!atomic_load(&session.stop) && (!outstanding() || atomic_load(&session.failed))) pthread_cond_wait(&progress_wake, &progress_lock);
       pthread_mutex_unlock(&progress_lock);
@@ -545,8 +578,8 @@ static void session_close(double linger) {
   }
   mesh_metal_transport_destroy(&session.transport);
   mesh_detach(&session.context);
-  free(session.channels);
-  session.channels = NULL; session.header = NULL; session.count = 0;
+  free(session.channels); free(session.relays);
+  session.channels = NULL; session.header = NULL; session.count = 0; session.relays = NULL; session.relaying = 0;
   atomic_store(&session.stop, 0); atomic_store(&session.failed, ncclSuccess);
 }
 
@@ -575,14 +608,21 @@ static size_t setting(const char *name, size_t otherwise) {
   return x > 0 ? (size_t)x : otherwise;
 }
 
-static int ring_bind(const struct channel *ch, int receive, uint32_t identity, struct mesh_section *section, unsigned char **memory) {
-  const int status = mesh_section_create(&session.context, DEPTH * ch->slot, 1, 1, section);
+static int ring_make(size_t slot, struct mesh_section *section, unsigned char **memory) {
+  const int status = mesh_section_create(&session.context, DEPTH * slot, 1, 1, section);
   if (status) return status;
-  *memory = mesh_section_address(&session.context, *section, 0);
-  section->bytes = ch->slot;
-  return mesh_transfer_bind(&session.context, mesh_peer_channel(&session.context, ch->node, ch->large ? 0 : 1), receive ? MESH_RECEIVE : MESH_SEND,
-                            identity, *section, (uint32_t)(ch->slot / session.header->pgsz), 0, UINT32_MAX, DEPTH);
+  if (memory) *memory = mesh_section_address(&session.context, *section, 0);
+  section->bytes = slot;
+  return 0;
 }
+
+/* a ring's transfer on the link to `node` (its class's queue pair) */
+static int ring_bind(uint32_t node, int large, int receive, uint32_t identity, struct mesh_section section) {
+  return mesh_transfer_bind(&session.context, mesh_peer_channel(&session.context, node, large ? 0 : 1), receive ? MESH_RECEIVE : MESH_SEND,
+                            identity, section, (uint32_t)(section.bytes / session.header->pgsz), 0, UINT32_MAX, DEPTH);
+}
+
+static uint32_t relayed(uint32_t from, uint32_t to, int large) { return RELAY + 2 * (from * NODES + to) + (uint32_t)large; }
 
 /* a channel's Metal side once its transfers are prepared: the rings wrapped, its SEND cell, its completion words */
 static int channel_metal(struct channel *ch) {
@@ -613,16 +653,47 @@ static int session_open(ncclComm_t comm, int *other) {
   session.classes = m->qps >= 2 ? 2 : 1;
   session.positions = (uint32_t)((setting("MESH_POSITIONS", POSITIONS) + DEPTH - 1) / DEPTH * DEPTH);
   session.bound = setting("MESH_REMOTE_BOUND", 0) ? (double)setting("MESH_REMOTE_BOUND", 0) : BOUND;
-  if (!(session.channels = calloc(2 * (size_t)comm->nranks, sizeof *session.channels))) { session_close(0); return ENOMEM; }
-  for (int r = 0; r < comm->nranks && !status; r++)
-    for (int large = 2 - session.classes; large < 2 && r != comm->rank && !status; large++) {
+  const uint32_t N = (uint32_t)comm->nranks, me = (uint32_t)comm->rank;
+  uint32_t *path = calloc(N + 1, sizeof *path);
+  if (!path || !(session.channels = calloc(2 * (size_t)N, sizeof *session.channels))) { free(path); session_close(0); return ENOMEM; }
+  /* a channel to each rank: over the link to it, or to the first node of the route to it (mesh_route), its rings then
+     the routed pair's own transfers */
+  for (uint32_t r = 0; r < N && !status; r++)
+    for (int large = 2 - session.classes; large < 2 && r != me && !status; large++) {
       struct channel *ch = session.channels + session.count++;
       ch->node = (uint32_t)comm->members[r];
       ch->large = large;
       ch->slot = large ? session.slot : session.small;
-      status = ring_bind(ch, 0, IDENTITY + 2 * m->node + (uint32_t)large, &ch->out, &ch->sending);
-      if (!status) status = ring_bind(ch, 1, IDENTITY + 2 * ch->node + (uint32_t)large, &ch->in, &ch->receiving);
+      uint32_t out = IDENTITY + 2 * m->node + (uint32_t)large, in = IDENTITY + 2 * ch->node + (uint32_t)large;
+      ch->hop = ch->node;
+      if (!mesh_link_between(&comm->map, me, r)) {
+        if (mesh_route(&comm->map, me, r, path) < 3 || m->node >= NODES || ch->node >= NODES) { status = EHOSTUNREACH; break; }
+        ch->hop = (uint32_t)comm->members[path[1]];
+        out = relayed(m->node, ch->node, large); in = relayed(ch->node, m->node, large);
+      }
+      status = ring_make(ch->slot, &ch->out, &ch->sending);
+      if (!status) status = ring_bind(ch->hop, large, 0, out, ch->out);
+      if (!status) status = ring_make(ch->slot, &ch->in, &ch->receiving);
+      if (!status) status = ring_bind(ch->hop, large, 1, in, ch->in);
     }
+  /* the routes through this node: each a ring both received from the route's previous node and sent from to its next */
+  for (uint32_t from = 0; from < N && !status; from++)
+    for (uint32_t to = 0; to < N && !status; to++) {
+      const uint32_t hops = from == to || mesh_link_between(&comm->map, from, to) ? 0 : mesh_route(&comm->map, from, to, path);
+      for (uint32_t i = 1; i + 1 < hops && !status; i++)
+        for (int large = 2 - session.classes; path[i] == me && large < 2 && !status; large++) {
+          struct relay *grown = realloc(session.relays, (session.relaying + 1) * sizeof *grown);
+          if (!grown) { status = ENOMEM; break; }
+          session.relays = grown;
+          struct relay *rl = session.relays + session.relaying++;
+          *rl = (struct relay){(uint32_t)comm->members[from], (uint32_t)comm->members[to], {0}, 0};
+          const uint32_t identity = relayed(rl->from, rl->to, large);
+          status = ring_make(large ? session.slot : session.small, &rl->ring, NULL);
+          if (!status) status = ring_bind((uint32_t)comm->members[path[i - 1]], large, 1, identity, rl->ring);
+          if (!status) status = ring_bind((uint32_t)comm->members[path[i + 1]], large, 0, identity, rl->ring);
+        }
+    }
+  free(path);
   if (!status) status = mesh_transfers_prepare(&session.context, 1, session.positions, DEPTH);
   if (!status) status = mesh_transfers_cyclic(&session.context);
   if (!status) status = mesh_metal_transport_create(&session.context, metal_device(), &session.transport);
@@ -951,6 +1022,17 @@ static ncclResult_t session_ensure(ncclComm_t comm) {
     }
     return ncclSuccess;
   }
+}
+
+static ncclResult_t session_relaying(ncclComm_t comm) {
+  int partial = 0;
+  for (int a = 0; a < comm->nranks; a++)
+    for (int b = a + 1; b < comm->nranks; b++) partial |= !mesh_link_between(&comm->map, (uint32_t)a, (uint32_t)b);
+  if (!partial) return ncclSuccess;
+  pthread_mutex_lock(&session_lock);
+  const ncclResult_t result = session_ensure(comm);
+  pthread_mutex_unlock(&session_lock);
+  return result;
 }
 
 static ncclResult_t session_schedule(struct call *list, size_t n, struct schedule **made) {
