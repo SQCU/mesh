@@ -178,6 +178,23 @@ static void truncdiv(ncclDataType_t t, void *dst, const void *src, size_t count,
   }
 }
 
+#ifdef MESH_HOST_EXECUTOR
+/* the host's arithmetic, for nccl-mesh-host.c's executor of the walk's kernels on the CPU (a premultiplier as the
+   kernels take it: a floating type's value as float32 bits, an integer's bits) */
+__attribute__((visibility("hidden"))) void nccl_mesh_combine(int t, int combine, void *dst, const void *src, size_t n) {
+  combine_into((ncclDataType_t)t, combine, dst, src, n);
+}
+__attribute__((visibility("hidden"))) void nccl_mesh_premultiply(int t, void *dst, const void *src, uint64_t bits, size_t n) {
+  unsigned char scalar[8] = {0};
+  if (floating((ncclDataType_t)t)) { uint32_t u = (uint32_t)bits; float f; memcpy(&f, &u, 4); store((ncclDataType_t)t, scalar, f); }
+  else memcpy(scalar, &bits, SIZE[t]);
+  premultiply((ncclDataType_t)t, dst, src, scalar, n);
+}
+__attribute__((visibility("hidden"))) void nccl_mesh_truncdiv(int t, void *dst, const void *src, size_t n, uint64_t divisor) {
+  truncdiv((ncclDataType_t)t, dst, src, n, divisor);
+}
+#endif
+
 /* -- communicators -------------------------------------------------------------------------------- */
 
 struct premul { int used; ncclDataType_t type; unsigned char value[8]; };
