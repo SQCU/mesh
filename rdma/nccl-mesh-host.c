@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sched.h>
+#include <stdarg.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -83,6 +84,19 @@ static int await(_Atomic uint64_t *word, uint64_t expected, const char *what) {
 
 static unsigned char *at(void *buffer, size_t offset) { return (unsigned char *)buffer + offset; }
 
+/* MESH_HOST_TRACE=1: each kernel a line on stderr, as it runs (its buffers' addresses, offsets, sizes, a wait's word,
+   expected and seen values) */
+static void trace(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static void trace(const char *format, ...) {
+  static int on = -1;
+  if (on < 0) on = getenv("MESH_HOST_TRACE") && atoi(getenv("MESH_HOST_TRACE")) > 0;
+  if (!on) return;
+  va_list arguments;
+  va_start(arguments, format);
+  vfprintf(stderr, format, arguments);
+  va_end(arguments);
+}
+
 void *metal_device(void) { return (void *)1; }
 const char *metal_error(void) { return error_; }
 void *metal_wrap(void *address, size_t bytes) { (void)bytes; return address; }
@@ -119,6 +133,7 @@ struct metal_program *metal_begin(void *command_buffer, void *encoder) {
 
 int metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes) {
   (void)program;
+  trace("copy %d %p+%zu <- %p+%zu %zu\n", mode, dst, dst_offset, src, src_offset, bytes);
   if (mode == METAL_LAND) atomic_thread_fence(memory_order_acquire);
   memmove(at(dst, dst_offset), at(src, src_offset), bytes);
   if (mode == METAL_SEND) atomic_thread_fence(memory_order_release);
@@ -127,6 +142,7 @@ int metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_of
 
 int metal_combine(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n) {
   (void)program;
+  trace("combine %d %d %p+%zu <- %p+%zu %zu\n", type, op, dst, dst_offset, src, src_offset, n);
   atomic_thread_fence(memory_order_acquire);
   nccl_mesh_combine(type, op, at(dst, dst_offset), at(src, src_offset), n);
   return 0;
@@ -146,6 +162,7 @@ int metal_truncdiv(struct metal_program *program, int type, void *dst, size_t ds
 
 int metal_publish(struct metal_program *program, void *cells, size_t offset, uint64_t argument) {
   (void)program;
+  trace("publish %p+%zu %llu\n", cells, offset, (unsigned long long)argument);
   atomic_thread_fence(memory_order_release);
   atomic_store_explicit((_Atomic uint64_t *)at(cells, offset), argument, memory_order_release);
   return 0;
@@ -153,7 +170,9 @@ int metal_publish(struct metal_program *program, void *cells, size_t offset, uin
 
 int metal_spin(struct metal_program *program, void *words, size_t offset, uint64_t expected) {
   (void)program;
-  return await((_Atomic uint64_t *)at(words, offset), expected, "a wait for a landing");
+  _Atomic uint64_t *word = (_Atomic uint64_t *)at(words, offset);
+  trace("spin %p+%zu %llu seen %llu\n", words, offset, (unsigned long long)expected, (unsigned long long)atomic_load(word));
+  return await(word, expected, "a wait for a landing");
 }
 
 int metal_send_small(struct metal_program *program, void *slot, size_t slot_offset, void *src, size_t src_offset, size_t bytes,
