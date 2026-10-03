@@ -303,9 +303,12 @@ ncclResult_t ncclCommDestroy(ncclComm_t comm) {
 
 ncclResult_t ncclCommAbort(ncclComm_t comm) { return ncclCommDestroy(comm); }
 
+static ncclResult_t session_async(ncclComm_t comm);
+/* a launch's failure, else the failure of the session the communicator's groups run on (the progress thread's: a
+   link cancelled or silent), which a group that had already returned, its work enqueued, could not report */
 ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t *asyncError) {
   if (!comm || !asyncError) return fail(ncclInvalidArgument, "comm or asyncError is NULL");
-  *asyncError = comm->async;
+  *asyncError = comm->async ? comm->async : session_async(comm);
   return ncclSuccess;
 }
 
@@ -448,6 +451,12 @@ static void release_all(int result, const char *format, ...) {
   }
   for (uint32_t l = 0; session.transport.cancel && l < session.header->links; l++) mesh_cancel(session.header, session.transport.cancel, l);
   for (uint32_t h = 0; h < session.count; h++) atomic_store(&session.channels[h].signaled, atomic_load(&session.channels[h].target));
+}
+
+static ncclResult_t session_async(ncclComm_t comm) {
+  const ncclResult_t failed = (ncclResult_t)atomic_load(&session.failed);
+  if (!failed || !session.header || strcmp(session.region, comm->region)) return ncclSuccess;
+  return fail(failed, "%s", failure);
 }
 
 static int outstanding(void) {
