@@ -154,24 +154,32 @@ static void complete_all() { complete(UINT64_MAX); }
 
 // ProcessGroupGloo's future (torch's MPS has one stream and c10's Future carries only its events, so a consumer's
 // stream cannot be made to wait at fut.wait() as ProcessGroupNCCL's CUDA futures do): the group's rest runs on this
-// extension's own command queue (ncclMeshCompleteApart), and the future is marked completed, from a dispatch queue of
-// this extension's, as that command buffer completes; work encoded after fut.wait() returns reads its results.  The
-// ticket's workspace and the outputs are held until then.
+// extension's own command queue (ncclMeshCompleteApart), after a shared event torch's stream signals at the hand-over
+// (across queues an event, not a spin, makes the stream's writes visible), and the future is marked completed, from
+// a dispatch queue of this extension's, as that command buffer completes; work submitted after fut.wait() returns
+// reads its results.  The ticket's workspace and the outputs are held until then.
 static id<MTLCommandQueue> apart_;
+static id<MTLSharedEvent> handover_;
+static uint64_t handovers_ = 0;
 static dispatch_queue_t completions_;
 
 static void complete_apart(uint64_t ticket, c10::intrusive_ptr<c10::ivalue::Future> future, std::vector<at::Tensor> outputs) {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   if (!apart_) {
     apart_ = [stream->device() newCommandQueue];
+    handover_ = [stream->device() newSharedEvent];
     completions_ = dispatch_queue_create("torch_mesh.completions", DISPATCH_QUEUE_SERIAL);
   }
   id<MTLCommandBuffer> buffer = [apart_ commandBuffer];
+  const uint64_t handover = ++handovers_;
+  [buffer encodeWaitForEvent:handover_ value:handover];
   __block ncclResult_t result = ncclSuccess;
   __block int moved = 0;
   dispatch_sync(stream->queue(), ^{
     stream_ = Stream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr, nullptr};
     result = ncclMeshCompleteApart(ticket, (ncclMeshStream *)&stream_, (__bridge void *)buffer, &moved);
+    stream->endKernelCoalescing();
+    [stream->commandBuffer() encodeSignalEvent:handover_ value:handover];
     committing(stream);
   });
   auto held = std::make_shared<std::vector<at::Tensor>>(outputs);
@@ -192,6 +200,7 @@ static void complete_apart(uint64_t ticket, c10::intrusive_ptr<c10::ivalue::Futu
     const bool failed = done.status == MTLCommandBufferStatusError;
     std::string why = failed ? std::string(done.error.localizedDescription.UTF8String ?: "a command buffer failed") : std::string();
     dispatch_async(completions_, ^{
+      if (getenv("MESH_TRACE") && *getenv("MESH_TRACE") == '1') fprintf(stderr, "mesh-trace future %llu %s\n", (unsigned long long)ticket, failed ? "failed" : "completed");
       held->clear();
       if (failed)
         future->setError(std::make_exception_ptr(std::runtime_error("the collective's command buffer apart failed: " + why)));

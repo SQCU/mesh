@@ -424,21 +424,33 @@ static double now_s(void) {
   return now.tv_sec + now.tv_nsec * 1e-9;
 }
 
-/* groups completed apart (ncclMeshCompleteApart), on a command queue other than the one they were issued on: two
-   words in host memory both queues read and write coherently, `ready` (the issuing stream's work up to a group's
-   hand-over done) and `done` (the queue apart's work through a group done), each a count; `pending` while a later
-   publication on the issuing stream may need credit from positions the queue apart consumes, from `from` on each
-   channel, until `done` reaches `value` */
-enum { READY = 0, DONE = 16 };
+/* groups completed apart (ncclMeshCompleteApart), on a command queue other than the one they were issued on: a
+   word in host memory both queues read and write coherently, `done` (the queue apart's work through a group done,
+   a count); `pending` while a later publication on the issuing stream may need credit from positions the queue
+   apart consumes, from `from` on each channel, until `done` reaches `value` */
+enum { DONE = 16 };
 static _Atomic uint64_t *apart_words;
 static void *apart_buffer;
-static uint64_t apart_ready, apart_done;
+static uint64_t apart_done;
 static struct { int pending; uint64_t value, *from; } apart;
 
 static void apart_release(void) {
   if (!apart_words) return;
-  atomic_store(apart_words + READY, UINT64_MAX); atomic_store(apart_words + DONE, UINT64_MAX);
+  atomic_store(apart_words + DONE, UINT64_MAX);
   apart.pending = 0;
+}
+
+/* MESH_TRACE: each group's issue, completion and hand-over on stderr */
+static int tracing = -1;
+static void trace(const char *format, ...) {
+  if (tracing < 0) tracing = getenv("MESH_TRACE") && *getenv("MESH_TRACE") == '1';
+  if (!tracing) return;
+  char line[1024];
+  va_list arguments;
+  va_start(arguments, format);
+  vsnprintf(line, sizeof line, format, arguments);
+  va_end(arguments);
+  fprintf(stderr, "mesh-trace %s\n", line);
 }
 
 /* every link with pending words cancelled (mesh_cancel: each pending word ~0, so every spin on it ends) and the
@@ -1087,6 +1099,7 @@ static ncclResult_t join(struct metal_program *program, uint32_t h, uint64_t nee
   if (atomic_load(apart_words + DONE) >= apart.value) { apart.pending = 0; return ncclSuccess; }
   if (need <= apart.from[h]) return ncclSuccess;
   apart.pending = 0;
+  trace("join channel %u need %llu from %llu: spin done >= %llu", h, (unsigned long long)need, (unsigned long long)apart.from[h], (unsigned long long)apart.value);
   return gpu(metal_spin(program, apart_buffer, DONE * sizeof(uint64_t), apart.value), "a wait for the work apart");
 }
 
@@ -1175,6 +1188,11 @@ static ncclResult_t walk(struct metal_program *program, const struct inflight *i
   }
   for (uint32_t h = 0; through && h < session.count && !result; h++)
     if (session.channels[h].consumed < through->end[h]) result = fail(ncclInternalError, "the group's positions admit no order");
+  for (uint32_t h = 0; h < session.count; h++)
+    trace("walk %s %llu%s channel %u: sent %llu consumed %llu end %llu waited %llu", issuing ? "issue" : "complete",
+          (unsigned long long)(issuing ? issuing->ticket : through->ticket), apart_queue ? " apart" : "", h,
+          (unsigned long long)session.channels[h].sent, (unsigned long long)session.channels[h].consumed,
+          (unsigned long long)session.channels[h].end, (unsigned long long)session.channels[h].waited);
   return result;
 }
 
@@ -1405,11 +1423,11 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
 uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 
 /* ProcessGroupGloo's completion, on the GPU: the group of `ticket` completed on `commandBuffer`, a command buffer of a
-   queue apart from the stream it was issued on (the caller commits it, and knows the group complete as it
-   completes).  The groups in flight before it complete on `stream` first, and `stream` then publishes `ready`; the
-   queue apart's work waits for that (a spin, not an event: a shared event across queues costs 83-144 us), runs the
-   group's waits, landings, rounds and results and publishes `done`, and the stream's next publication that needs
-   credit from those positions waits for `done`.  A ticket already complete encodes nothing (*moved 0). */
+   queue apart from the stream it was issued on, which the caller orders after the stream's work so far (a shared
+   event: across queues it is what makes the stream's writes visible) and commits, and knows the group complete as
+   it completes.  The groups in flight before it complete on `stream` first.  The queue apart's work runs the group's
+   waits, landings, rounds and results and publishes `done`; the stream's next publication that needs credit from
+   those positions waits for `done` in a kernel.  A ticket already complete encodes nothing (*moved 0). */
 ncclResult_t ncclMeshCompleteApart(uint64_t ticket, const ncclMeshStream *stream, void *commandBuffer, int *moved) {
   if (moved) *moved = 0;
   if (!stream || !stream->commandBuffer || !commandBuffer) return fail(ncclInvalidArgument, "ncclMeshCompleteApart without its command buffers");
@@ -1433,25 +1451,27 @@ ncclResult_t ncclMeshCompleteApart(uint64_t ticket, const ncclMeshStream *stream
     if (!result) {
       int any = 0;
       if (finished) metal_collect(finished);
-      struct metal_program *issuing = metal_begin(stream->commandBuffer, stream->commandEncoder);
-      if (!issuing) result = fail(ncclSystemError, "out of memory");
-      else {
-        if (before) result = walk(issuing, NULL, before, &any, 0);
-        if (!result && before) result = retire(issuing);
-        if (!result) result = gpu(metal_publish(issuing, apart_buffer, READY * sizeof(uint64_t), ++apart_ready), "the issuing stream's readiness");
-        program_end(issuing, stream->commandEncoder != NULL);
+      if (before) {
+        struct metal_program *issuing = metal_begin(stream->commandBuffer, stream->commandEncoder);
+        if (!issuing) result = fail(ncclSystemError, "out of memory");
+        else {
+          result = walk(issuing, NULL, before, &any, 0);
+          if (!result) result = retire(issuing);
+          program_end(issuing, stream->commandEncoder != NULL);
+        }
       }
       struct metal_program *own = result ? NULL : metal_begin(commandBuffer, NULL);
       if (!result && !own) result = fail(ncclSystemError, "out of memory");
       if (own) {
-        result = gpu(metal_spin(own, apart_buffer, READY * sizeof(uint64_t), apart_ready), "a wait for the issuing stream");
-        if (!result && !apart.pending)
+        if (!apart.pending)
           for (uint32_t h = 0; h < session.count; h++) apart.from[h] = target->start[h];
-        if (!result) result = walk(own, NULL, target, &any, 1);
+        result = walk(own, NULL, target, &any, 1);
         if (!result) result = retire(own);
         if (!result) result = gpu(metal_publish(own, apart_buffer, DONE * sizeof(uint64_t), ++apart_done), "the work apart's completion");
         if (!result) { apart.pending = 1; apart.value = apart_done; if (moved) *moved = 1; }
         program_end(own, 0);
+        trace("apart %llu (before %llu): done %llu", (unsigned long long)ticket, (unsigned long long)(before ? before->ticket : 0),
+              (unsigned long long)apart_done);
       }
       if (result) { release_all(result, "%s", last); inflight_lose(); }
     }
