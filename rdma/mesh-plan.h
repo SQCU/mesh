@@ -37,6 +37,13 @@ int mesh_link_map_check(const struct mesh_link_map *);
      <a> <b> [<alpha> <beta>]          one link per line, with its cost; '#' starts a comment line */
 int mesh_link_map_read(const char *path,struct mesh_link_map *);
 void mesh_link_map_free(struct mesh_link_map *);
+/* Whether the map links a and b, either way (a mesh every pair). */
+int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
+/* The route a message between two nodes takes where the map does not link them: the nodes from `from` to `to` inclusive
+   on fewest links (path: room for `nodes`), breadth first from the lower of the two over its neighbours in increasing
+   order, the higher one's route the lower's reversed, so a pair's two directions cross the same links; the count of
+   nodes on it (2 where linked), 0 where the map does not join them. */
+uint32_t mesh_route(const struct mesh_link_map *,uint32_t from,uint32_t to,uint32_t *path);
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
 struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };

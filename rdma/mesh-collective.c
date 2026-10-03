@@ -116,6 +116,27 @@ static int mesh_linked(const struct mesh_link_map *map,uint32_t a,uint32_t b){
   return 0;
 }
 
+int mesh_link_between(const struct mesh_link_map *map,uint32_t a,uint32_t b){ return mesh_linked(map,a,b); }
+
+uint32_t mesh_route(const struct mesh_link_map *map,uint32_t from,uint32_t to,uint32_t *path){
+  const uint32_t n=map->nodes,low=from<to?from:to,high=from<to?to:from;
+  if(from>=n || to>=n)return 0;
+  if(from==to){path[0]=from;return 1;}
+  uint32_t *up=malloc((size_t)n*sizeof *up),*order=malloc((size_t)n*sizeof *order),reached=1,count=0;
+  if(!up || !order){free(up);free(order);return 0;}
+  for(uint32_t v=0;v<n;v++)up[v]=n;
+  up[low]=low;order[0]=low;
+  for(uint32_t head=0;head<reached && up[high]==n;head++)
+    for(uint32_t v=0;v<n;v++)
+      if(up[v]==n && mesh_linked(map,order[head],v)){up[v]=order[head];order[reached++]=v;}
+  if(up[high]<n){
+    for(uint32_t v=high;;v=up[v]){order[count++]=v;if(v==low)break;}
+    for(uint32_t i=0;i<count;i++)path[i]=from==high?order[i]:order[count-1-i];
+  }
+  free(up);free(order);
+  return count;
+}
+
 /* The beta of the link between a and b, the map's where it gives one, else 0. */
 static double mesh_link_beta(const struct mesh_link_map *map,uint32_t a,uint32_t b){
   for(uint32_t l=0;map->cost && l<map->links;l++)
