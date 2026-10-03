@@ -647,6 +647,13 @@ struct steps {
   unsigned char *done, *own, *total;
   struct where gpu_own, gpu_total;
   int direct, how, root;
+  struct mesh_collective chosen;
+  struct mesh_operand operand;
+  /* each step's positions as schedule_group places them (its channel, first position, pieces), and the receive before
+     it (by round, then plan order) that has any, or -1 */
+  uint32_t *channel;
+  uint64_t *first, *pieces;
+  int32_t *before;
 };
 
 struct call {
@@ -685,7 +692,7 @@ static size_t elements(const struct call *c) {
 
 static void steps_free(struct steps *s) {
   if (!s) return;
-  free(s->steps); free(s->done); free(s);
+  free(s->steps); free(s->done); free(s->channel); free(s->first); free(s->pieces); free(s->before); free(s);
 }
 
 static int selection(const ncclCollConfig_t *config, uint32_t *how, int *force) {
@@ -714,13 +721,15 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     struct call *c = list + i;
     if ((p2p(c) && c->peer == comm->rank) || !c->count || comm->nranks < 2) continue;
     struct steps *s = calloc(1, sizeof *s);
-    if (!s || !(s->steps = calloc(mesh_collective_steps(nodes) + 1, sizeof *s->steps)) ||
-        !(s->done = calloc(mesh_collective_steps(nodes) + 1, 1))) {
+    const size_t most = mesh_collective_steps(nodes) + 1;
+    if (!s || !(s->steps = calloc(most, sizeof *s->steps)) || !(s->done = calloc(most, 1)) || !(s->channel = calloc(most, sizeof *s->channel)) ||
+        !(s->first = calloc(most, sizeof *s->first)) || !(s->pieces = calloc(most, sizeof *s->pieces)) || !(s->before = calloc(most, sizeof *s->before))) {
       steps_free(s);
       return fail(ncclSystemError, "out of memory");
     }
     c->bound = s;
     const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], elements(c)};
+    s->operand = operand;
     if (p2p(c)) {
       s->steps[0] = (struct mesh_step){c->what == WHAT_SEND ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)c->peer, 0, 0, 0, operand};
       s->count = 1; s->how = -1; s->root = 0;
@@ -735,6 +744,7 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
       return fail(ncclInvalidArgument, "no algorithm of %#x carries collective %d of %llu elements on this map", c->how, c->what,
                   (unsigned long long)operand.elements);
     s->count = mesh_collective_plan(&comm->map, (uint32_t)comm->rank, chosen, operand, s->steps);
+    s->chosen = chosen;
     s->direct = chosen.how == MESH_DIRECT;
     s->how = (int)chosen.how; s->root = (int)chosen.root;
   }
@@ -745,64 +755,109 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
 struct message { struct call *c; uint32_t step; uint64_t first, pieces; size_t offset, bytes; };
 struct schedule { struct message *out, *in; size_t outs, ins, out_at, in_at; };
 
-static uint32_t node_of(const struct call *c, const struct mesh_step *step) { return (uint32_t)c->comm->members[step->peer]; }
-
 static size_t piece_bytes(const struct mesh_step *step) { return step->piece.elements * step->piece.element_bytes; }
-static int on(const struct channel *ch, const struct call *c, const struct mesh_step *step) {
-  return node_of(c, step) == ch->node && (session.classes == 1 || (piece_bytes(step) > LAG * session.small) == ch->large);
+static int in_class(const struct mesh_step *step, int large) {
+  return session.classes == 1 || (piece_bytes(step) > LAG * session.small) == large;
 }
 
-static void place(const struct channel *ch, struct schedule *p, struct call *c, uint32_t k, uint64_t *at) {
-  const struct mesh_step *step = c->bound->steps + k;
-  const size_t bytes = piece_bytes(step);
-  const struct message m = {c, k, *at, (bytes + ch->slot - 1) / ch->slot, step->first * step->piece.element_bytes, bytes};
-  if (!m.pieces) { if (step->op != MESH_STEP_SEND) c->bound->done[k] = 1; return; }
-  if (step->op == MESH_STEP_SEND) p->out[p->outs++] = m; else p->in[p->ins++] = m;
-  *at += m.pieces;
+/* the comm's rank on a channel's node (-1: none) */
+static int rank_of(ncclComm_t comm, uint32_t node) {
+  for (int r = 0; r < comm->nranks; r++)
+    if (r != comm->rank && (uint32_t)comm->members[r] == node) return r;
+  return -1;
 }
 
-/* each channel's positions for the group, from the last scheduled one's end: each collective's rounds in call order, then
-   the point-to-point calls, this end's j-th SEND to the peer beside its j-th receive from it */
+/* a message as one end of a channel has it: its call and step, whether it is that end's SEND, its first position from
+   the channel's start for the group, and its pieces */
+struct placing { uint32_t call, step; int send; uint64_t first, pieces; };
+
+/* the positions a rank's messages take on its channel to rank `peer` of class `large` for the group, from 0: each
+   collective's rounds in call order (a round's SENDs and receives side by side from where the last round ended), then
+   its point-to-point calls, its j-th SEND to the peer beside its j-th receive from it; steps[i] and counts[i] are its
+   steps of call i (a point-to-point call's only for this rank).  The count of positions; `made` gets the messages (no
+   zero-piece step), *count of them */
+static uint64_t lay(const struct call *list, size_t n, struct mesh_step *const *steps, const uint32_t *counts, int peer, int large,
+                    size_t slot, struct placing *made, size_t *count) {
+  uint64_t at = 0;
+  *count = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (p2p(list + i)) continue;
+    uint32_t rounds = 0;
+    for (uint32_t k = 0; k < counts[i]; k++)
+      if ((int)steps[i][k].peer == peer && in_class(steps[i] + k, large) && steps[i][k].round + 1 > rounds) rounds = steps[i][k].round + 1;
+    for (uint32_t round = 0; round < rounds; round++) {
+      uint64_t out = at, in = at;
+      for (uint32_t k = 0; k < counts[i]; k++) {
+        const struct mesh_step *step = steps[i] + k;
+        const uint64_t pieces = (piece_bytes(step) + slot - 1) / slot;
+        if ((int)step->peer != peer || !in_class(step, large) || step->round != round || !pieces) continue;
+        uint64_t *cursor = step->op == MESH_STEP_SEND ? &out : &in;
+        made[(*count)++] = (struct placing){(uint32_t)i, k, step->op == MESH_STEP_SEND, *cursor, pieces};
+        *cursor += pieces;
+      }
+      at = out > in ? out : in;
+    }
+  }
+  for (size_t s = 0, r = 0;; s++, r++) {
+    while (s < n && !(p2p(list + s) && counts[s] && list[s].what == WHAT_SEND && (int)steps[s][0].peer == peer && in_class(steps[s], large))) s++;
+    while (r < n && !(p2p(list + r) && counts[r] && list[r].what == WHAT_RECV && (int)steps[r][0].peer == peer && in_class(steps[r], large))) r++;
+    if (s >= n && r >= n) break;
+    uint64_t out = at, in = at;
+    if (s < n && piece_bytes(steps[s])) { made[(*count)++] = (struct placing){(uint32_t)s, 0, 1, out, (piece_bytes(steps[s]) + slot - 1) / slot}; out += made[*count - 1].pieces; }
+    if (r < n && piece_bytes(steps[r])) { made[(*count)++] = (struct placing){(uint32_t)r, 0, 0, in, (piece_bytes(steps[r]) + slot - 1) / slot}; in += made[*count - 1].pieces; }
+    at = out > in ? out : in;
+  }
+  return at;
+}
+
+/* the receive before step k (by round, then plan order) with positions (pieces[j] > 0), or -1 */
+static int32_t before_of(const struct mesh_step *steps, uint32_t count, const uint64_t *pieces, uint32_t k) {
+  int32_t best = -1;
+  for (uint32_t j = 0; j < count; j++)
+    if (steps[j].op != MESH_STEP_SEND && pieces[j] && (steps[j].round < steps[k].round || (steps[j].round == steps[k].round && j < k)) &&
+        (best < 0 || steps[j].round > steps[best].round || (steps[j].round == steps[best].round && (int32_t)j > best)))
+      best = (int32_t)j;
+  return best;
+}
+
+/* each channel's positions for the group, from the last scheduled one's end (lay); each step's positions and the receive
+   before it kept, a receive with none done */
 static ncclResult_t schedule_group(struct call *list, size_t n, struct schedule *plans) {
+  const ncclComm_t comm = list[0].comm;
   size_t total = 1;
   for (size_t i = 0; i < n; i++) total += list[i].bound ? list[i].bound->count : 0;
-  size_t *sends = malloc(n * sizeof *sends + 1), *receives = malloc(n * sizeof *receives + 1);
-  ncclResult_t result = sends && receives ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  struct mesh_step **steps = calloc(n + 1, sizeof *steps);
+  uint32_t *counts = calloc(n + 1, sizeof *counts);
+  struct placing *made = calloc(total, sizeof *made);
+  ncclResult_t result = steps && counts && made ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  for (size_t i = 0; i < n && !result; i++)
+    if (list[i].bound) {
+      steps[i] = list[i].bound->steps; counts[i] = list[i].bound->count;
+      memset(list[i].bound->pieces, 0, counts[i] * sizeof *list[i].bound->pieces);
+    }
   for (uint32_t h = 0; h < session.count && !result; h++) {
     struct channel *ch = session.channels + h;
     struct schedule *p = plans + h;
     *p = (struct schedule){calloc(total, sizeof *p->out), calloc(total, sizeof *p->in), 0, 0, 0, 0};
     if (!p->out || !p->in) { result = fail(ncclSystemError, "out of memory"); break; }
-    uint64_t at = ch->end;
-    size_t s = 0, r = 0;
-    for (size_t i = 0; i < n; i++) {
-      struct call *c = list + i;
-      if (!c->bound) continue;
-      if (p2p(c)) {
-        if (on(ch, c, c->bound->steps)) { if (c->what == WHAT_SEND) sends[s++] = i; else receives[r++] = i; }
-        continue;
-      }
-      uint32_t rounds = 0;
-      for (uint32_t k = 0; k < c->bound->count; k++)
-        if (on(ch, c, c->bound->steps + k) && c->bound->steps[k].round + 1 > rounds) rounds = c->bound->steps[k].round + 1;
-      for (uint32_t round = 0; round < rounds; round++) {
-        uint64_t out = at, in = at;
-        for (uint32_t k = 0; k < c->bound->count; k++) {
-          const struct mesh_step *step = c->bound->steps + k;
-          if (on(ch, c, step) && step->round == round) place(ch, p, c, k, step->op == MESH_STEP_SEND ? &out : &in);
-        }
-        at = out > in ? out : in;
-      }
+    size_t count;
+    const uint64_t positions = lay(list, n, steps, counts, rank_of(comm, ch->node), ch->large, ch->slot, made, &count);
+    for (size_t k = 0; k < count; k++) {
+      struct call *c = list + made[k].call;
+      const struct mesh_step *step = c->bound->steps + made[k].step;
+      const struct message m = {c, made[k].step, ch->end + made[k].first, made[k].pieces, step->first * step->piece.element_bytes, piece_bytes(step)};
+      if (made[k].send) p->out[p->outs++] = m; else p->in[p->ins++] = m;
+      c->bound->channel[m.step] = h; c->bound->first[m.step] = m.first; c->bound->pieces[m.step] = m.pieces;
     }
-    for (size_t j = 0; j < s || j < r; j++) {
-      uint64_t out = at, in = at;
-      if (j < s) place(ch, p, list + sends[j], 0, &out);
-      if (j < r) place(ch, p, list + receives[j], 0, &in);
-      at = out > in ? out : in;
-    }
-    ch->end = at;
+    ch->end += positions;
   }
-  free(sends); free(receives);
+  for (size_t i = 0; i < n && !result; i++)
+    for (uint32_t k = 0; list[i].bound && k < list[i].bound->count; k++) {
+      struct steps *st = list[i].bound;
+      st->before[k] = before_of(st->steps, st->count, st->pieces, k);
+      if (st->steps[k].op != MESH_STEP_SEND && !st->pieces[k]) st->done[k] = 1;
+    }
+  free(steps); free(counts); free(made);
   return result;
 }
 
@@ -1043,13 +1098,21 @@ static ncclResult_t arrive(struct metal_program *program, struct channel *ch, ui
 
 /* a group issued and not complete: its calls, its schedule and its positions [start, end) on each channel; the
    groups in flight in issue order hold consecutive positions on every channel */
+/* one of this rank's publications in its group's order (order_group): its level, channel and position */
+struct event { uint64_t level; uint32_t h; uint64_t at; };
+
+/* a group issued and not complete: its calls, its schedule and its positions [start, end) on each channel, its
+   publications in order (`next` the first the walk has not completed); the groups in flight in issue order hold
+   consecutive positions on every channel */
 struct inflight {
   uint64_t ticket;
   struct call *list;
   size_t n;
   struct schedule *plans;
   uint64_t *start, *end;
-  struct inflight *next;
+  struct event *order;
+  size_t events, next;
+  struct inflight *next_group;
 };
 static struct inflight *inflight_last;
 static uint64_t tickets, lost_from = 1, lost_to;
@@ -1067,6 +1130,7 @@ static void calls_free(struct call *list, size_t n) {
 static void inflight_free(struct inflight *g) {
   schedules_free(g->plans);
   free(g->start);
+  free(g->order);
   calls_free(g->list, g->n);
   free(g);
 }
@@ -1075,93 +1139,299 @@ static void inflight_free(struct inflight *g) {
 static void inflight_lose(void) {
   if (!inflight) return;
   lost_from = inflight->ticket; lost_to = inflight_last->ticket;
-  while (inflight) { struct inflight *g = inflight; inflight = g->next; inflight_free(g); }
+  while (inflight) { struct inflight *g = inflight; inflight = g->next_group; inflight_free(g); }
   inflight_last = NULL;
   atomic_store(&retired, lost_to);
 }
 
 static struct inflight *inflight_at(uint32_t h, uint64_t at) {
-  for (struct inflight *g = inflight; g; g = g->next)
+  for (struct inflight *g = inflight; g; g = g->next_group)
     if (at < g->end[h]) return at >= g->start[h] ? g : NULL;
   return NULL;
 }
 
-/* the positions in flight in an order the GPU runs them in: a channel publishes its next position where it may
-   (the peer's position t - LAG landed, every receive before the piece consumed), else consumes its next one; a
-   publication is its piece copied into the slot and its cell released, a consumption waits for the position's
-   landing (a spin on its completion word) and combines or copies the piece where it landed.  Issuing a group,
-   the walk publishes up to its last position and consumes only earlier groups' positions, where a publication
-   of the channel waits on them, so it encodes no wait on its own; completing through a group, it consumes every
-   position up to that group's last and publishes any group's next position where it may. */
-static ncclResult_t walk(struct metal_program *program, const struct inflight *issuing, const struct inflight *through, int *published) {
-  ncclResult_t result = ncclSuccess;
-  for (int moved = 1; moved && !result;) {
-    moved = 0;
-    for (uint32_t h = 0; h < session.count && !result; h++) {
-      struct channel *ch = session.channels + h;
-      const uint64_t publish_to = issuing ? issuing->end[h] : ch->end, consume_to = issuing ? issuing->start[h] : through->end[h];
-      int sent = 0;
-      if (ch->sent < publish_to) {
-        const uint64_t at = ch->sent, need = at >= LAG ? at - LAG + 1 : 0;
-        struct schedule *p = inflight_at(h, at)->plans + h;
-        struct message *m = p->out_at < p->outs && at >= p->out[p->out_at].first ? p->out + p->out_at : NULL;
-        if (ch->consumed >= need && !(m && at == m->first && !ready(m->c->bound, m->step))) {
-          result = arrive(program, ch, need);
-          const size_t cell = ch->cell + (at % session.positions) * sizeof(struct mesh_send);
-          const uint64_t value = ch->argument + cycle_of(at);
-          int released = 0;
-          if (m && !result) {
-            const struct steps *st = m->c->bound;
-            const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
-            if (!ch->large) {
-              result = gpu(metal_send_small(program, ch->ring_out, (at % DEPTH) * ch->slot, st->gpu_own.buffer, st->gpu_own.offset + m->offset + offset,
-                                            length, session.transport.publication, cell, value), "a piece into its slot and its release");
-              released = 1;
-            } else
-              result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * ch->slot, st->gpu_own.buffer,
-                                      st->gpu_own.offset + m->offset + offset, length), "a piece into its slot");
-            if (at + 1 == m->first + m->pieces) p->out_at++;
-          }
-          if (!result && !released) result = gpu(metal_publish(program, session.transport.publication, cell, value), "a publication");
-          ch->sent++; sent = moved = 1; *published = 1;
-        }
+static int event_order(const void *x, const void *y) {
+  const struct event *a = x, *b = y;
+  if (a->level != b->level) return a->level < b->level ? -1 : 1;
+  if (a->h != b->h) return a->h < b->h ? -1 : 1;
+  return (a->at > b->at) - (a->at < b->at);
+}
+
+/* the group's publications in the one order every rank's walk keeps (MSCCLang's: a topological order of the dependency
+   graph over every rank, so no rank's wait is on what another encodes after a wait of its own).  Every rank's plan of
+   each collective laid out on every channel (lay), each end's publication of each position and its consumption are
+   the nodes: a publication after its channel's previous one, the peer's publication LAG positions back (whose landing
+   frees the slot it fills) and its own consumption of that position, a SEND's first piece after the consumption of the
+   receive before it; a consumption after its channel's previous one, the peer's publication where a piece lands, a
+   receive's first piece after the receive before it.  A publication's level is one more than its predecessors'
+   largest, a consumption's that largest.  This rank's publications go to g->order by level; the walk encodes a
+   consumption only where a publication (or the group's end) needs it, so a wait is on a publication of a level below
+   the next one encoded, and the lowest level not yet published always can be */
+static ncclResult_t order_group(ncclComm_t comm, struct inflight *g) {
+  const int N = comm->nranks, me = comm->rank;
+  const size_t n = g->n, S = mesh_collective_steps((uint32_t)N) + 1, E = (size_t)N * (N - 1);
+  struct call *list = g->list;
+  struct mesh_step **steps = calloc((size_t)N * n + 1, sizeof *steps), *planned = calloc((size_t)N * n * S + 1, sizeof *planned);
+  uint32_t *counts = calloc((size_t)N * n + 1, sizeof *counts), *lane = calloc((size_t)N * n * S + 1, sizeof *lane);
+  uint64_t *first = calloc((size_t)N * n * S + 1, sizeof *first), *pieces = calloc((size_t)N * n * S + 1, sizeof *pieces);
+  uint64_t *length = calloc(2 * E + 1, sizeof *length), *offset = calloc(E + 1, sizeof *offset);
+  struct placing *made = calloc(n * S + 1, sizeof *made);
+  ncclResult_t result = steps && planned && counts && lane && first && pieces && length && offset && made ? ncclSuccess : fail(ncclSystemError, "out of memory");
+  /* a channel: the pair a < b (its index among the pairs) and the class; an end's side 0 for a, 1 for b */
+#define CHANNEL(a, b, large) ((((size_t)(a) * (2 * N - (a) - 1) / 2 + ((b) - (a) - 1))) * 2 + (size_t)(large))
+#define AT(r, i, k) (((size_t)(r) * n + (i)) * S + (k))
+  for (int r = 0; r < N && !result; r++)
+    for (size_t i = 0; i < n && !result; i++) {
+      const struct steps *own = list[i].bound;
+      if (!own) continue;
+      if (r == me) { steps[r * n + i] = own->steps; counts[r * n + i] = own->count; }
+      else if (!p2p(list + i)) {
+        steps[r * n + i] = planned + AT(r, i, 0);
+        counts[r * n + i] = mesh_collective_plan(&comm->map, (uint32_t)r, own->chosen, own->operand, steps[r * n + i]);
       }
-      if (sent || result || ch->consumed >= consume_to || (issuing && ch->sent >= publish_to)) continue;
-      const uint64_t at = ch->consumed;
-      struct schedule *p = inflight_at(h, at)->plans + h;
-      struct message *m = p->in_at < p->ins && at >= p->in[p->in_at].first ? p->in + p->in_at : NULL;
-      if (m && at == m->first && !ready(m->c->bound, m->step)) continue;
-      if (m) {
-        struct steps *st = m->c->bound;
-        const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
-        const size_t from = (at % DEPTH) * ch->slot;
-        const int reduce = st->steps[m->step].op == MESH_STEP_REDUCE;
-        if (!ch->large && (reduce || (st->gpu_total.buffer == st->gpu_own.buffer && st->gpu_total.offset == st->gpu_own.offset))) {
-          const struct where to = reduce ? st->gpu_total : st->gpu_own;
-          result = gpu(metal_land(program, reduce ? (int)m->c->type : -1, m->c->combine, to.buffer, to.offset + m->offset + offset, ch->ring_in, from,
-                                  reduce ? length / SIZE[m->c->type] : length, session.transport.inputs,
-                                  ch->word + (at % session.positions) * ch->word_stride, 1 + cycle_of(at)), "a landing");
-          if (at + 1 > ch->waited) ch->waited = at + 1;
-        } else {
-          result = arrive(program, ch, at + 1);
-          if (!result && reduce)
-            result = gpu(metal_combine(program, m->c->type, m->c->combine, st->gpu_total.buffer, st->gpu_total.offset + m->offset + offset,
-                                       ch->ring_in, from, length / SIZE[m->c->type]), "a combine");
-          else if (!result) {
-            result = gpu(metal_copy(program, METAL_LAND, st->gpu_own.buffer, st->gpu_own.offset + m->offset + offset, ch->ring_in, from, length), "a landing");
-            if (!result && (st->gpu_total.buffer != st->gpu_own.buffer || st->gpu_total.offset != st->gpu_own.offset))
-              result = gpu(metal_copy(program, METAL_LAND, st->gpu_total.buffer, st->gpu_total.offset + m->offset + offset, ch->ring_in, from, length),
-                           "a landing");
-          }
-        }
-        if (result) break;
-        if (at + 1 == m->first + m->pieces) { st->done[m->step] = 1; p->in_at++; }
-      }
-      ch->consumed++; moved = 1;
     }
+  for (int r = 0; r < N && !result; r++)
+    for (int q = 0; q < N; q++)
+      for (int large = 2 - session.classes; q != r && large < 2; large++) {
+        size_t count;
+        const size_t e = r < q ? CHANNEL(r, q, large) : CHANNEL(q, r, large);
+        length[2 * e + (r > q)] = lay(list, n, steps + (size_t)r * n, counts + (size_t)r * n, q, large, large ? session.slot : session.small, made, &count);
+        for (size_t m = 0; m < count; m++) {
+          lane[AT(r, made[m].call, made[m].step)] = (uint32_t)e;
+          first[AT(r, made[m].call, made[m].step)] = made[m].first;
+          pieces[AT(r, made[m].call, made[m].step)] = made[m].pieces;
+        }
+      }
+  size_t T = 0;
+  for (size_t e = 0; e < E && !result; e++) {
+    offset[e] = T;
+    T += length[2 * e] > length[2 * e + 1] ? length[2 * e] : length[2 * e + 1];
   }
-  for (uint32_t h = 0; through && h < session.count && !result; h++)
-    if (session.channels[h].consumed < through->end[h]) result = fail(ncclInternalError, "the group's positions admit no order");
+  /* per end and position: the consumption a publication's first piece and a receive's first piece wait on (node + 1, 0
+     none), whether a piece leaves (sends) and arrives (lands) there */
+  uint64_t *after_send = calloc(2 * T + 1, sizeof *after_send), *after_receive = calloc(2 * T + 1, sizeof *after_receive);
+  unsigned char *sends = calloc(2 * T + 1, 1), *lands = calloc(2 * T + 1, 1);
+  if (!result && (!after_send || !after_receive || !sends || !lands)) result = fail(ncclSystemError, "out of memory");
+#define NODE(e, t, kind) (4 * (offset[e] + (t)) + (kind))
+  for (int r = 0; r < N && !result; r++)
+    for (size_t i = 0; i < n; i++)
+      for (uint32_t k = 0; k < counts[r * n + i]; k++) {
+        if (!pieces[AT(r, i, k)]) continue;
+        const size_t e = lane[AT(r, i, k)], side = (size_t)(r > (int)steps[r * n + i][k].peer), at = offset[e] + first[AT(r, i, k)];
+        const int send = steps[r * n + i][k].op == MESH_STEP_SEND;
+        uint64_t *pieces_of = pieces + AT(r, i, 0);
+        const int32_t j = before_of(steps[r * n + i], counts[r * n + i], pieces_of, k);
+        uint64_t wait = 0;
+        if (j >= 0) {
+          const size_t ej = lane[AT(r, i, j)], sj = (size_t)(r > (int)steps[r * n + i][j].peer);
+          wait = 1 + 4 * (offset[ej] + first[AT(r, i, j)] + pieces[AT(r, i, j)] - 1) + 2 + sj;
+        }
+        (send ? after_send : after_receive)[2 * at + side] = wait;
+        for (uint64_t t = 0; t < pieces[AT(r, i, k)]; t++) (send ? sends : lands)[2 * (at + t) + side] = 1;
+      }
+  /* the nodes, their predecessors (at most four), Kahn's order */
+  uint64_t *pred = calloc(16 * T + 1, sizeof *pred), *level = calloc(4 * T + 1, sizeof *level), *queue = calloc(4 * T + 1, sizeof *queue);
+  uint32_t *degree = calloc(4 * T + 1, sizeof *degree), *successors = calloc(4 * T + 2, sizeof *successors);
+  uint64_t *edge = calloc(16 * T + 1, sizeof *edge);
+  if (!result && (!pred || !level || !queue || !degree || !successors || !edge)) result = fail(ncclSystemError, "out of memory");
+  for (size_t e = 0; e < E && !result; e++) {
+    const uint64_t positions = (e + 1 < E ? offset[e + 1] : T) - offset[e];
+    for (uint64_t t = 0; t < positions; t++)
+      for (size_t side = 0; side < 2; side++) {
+        const size_t o = offset[e] + t;
+        uint64_t *pp = pred + 4 * NODE(e, t, side), *pc = pred + 4 * NODE(e, t, 2 + side);
+        if (t) { pp[0] = 1 + NODE(e, t - 1, side); pc[0] = 1 + NODE(e, t - 1, 2 + side); }
+        if (t >= LAG) { pp[1] = 1 + NODE(e, t - LAG, 1 - side); pp[2] = 1 + NODE(e, t - LAG, 2 + side); }
+        pp[3] = after_send[2 * o + side];
+        if (lands[2 * o + side] || sends[2 * o + 1 - side]) pc[1] = 1 + NODE(e, t, 1 - side);
+        pc[2] = after_receive[2 * o + side];
+      }
+  }
+  for (uint64_t v = 0; v < 4 * T && !result; v++)
+    for (int k = 0; k < 4; k++)
+      if (pred[4 * v + k]) { degree[v]++; successors[pred[4 * v + k] - 1 + 1]++; }
+  for (uint64_t v = 0; v < 4 * T && !result; v++) successors[v + 1] += successors[v];
+  for (uint64_t v = 0; v < 4 * T && !result; v++)
+    for (int k = 0; k < 4; k++)
+      if (pred[4 * v + k]) edge[successors[pred[4 * v + k] - 1]++] = v;
+  for (uint64_t v = 4 * T; v > 0 && !result; v--) successors[v] = successors[v - 1];
+  if (!result) successors[0] = 0;
+  size_t head = 0, tail = 0;
+  for (uint64_t v = 0; v < 4 * T && !result; v++)
+    if (!degree[v]) queue[tail++] = v;
+  while (head < tail && !result) {
+    const uint64_t v = queue[head++];
+    uint64_t most = 0;
+    for (int k = 0; k < 4; k++)
+      if (pred[4 * v + k] && level[pred[4 * v + k] - 1] > most) most = level[pred[4 * v + k] - 1];
+    level[v] = most + ((v & 3) < 2);
+    for (uint32_t x = successors[v]; x < successors[v + 1]; x++)
+      if (!--degree[edge[x]]) queue[tail++] = edge[x];
+  }
+  if (!result && tail != 4 * T) result = fail(ncclInternalError, "the group's positions admit no order (%zu of %llu nodes)", tail, (unsigned long long)(4 * T));
+  size_t events = 0;
+  for (uint32_t h = 0; h < session.count; h++) events += g->end[h] - g->start[h];
+  if (!result && !(g->order = calloc(events + 1, sizeof *g->order))) result = fail(ncclSystemError, "out of memory");
+  for (uint32_t h = 0; h < session.count && !result; h++) {
+    const struct channel *ch = session.channels + h;
+    const int q = rank_of(comm, ch->node);
+    if (g->end[h] == g->start[h]) continue;
+    if (q < 0) { result = fail(ncclInternalError, "channel %u has positions and no rank", h); break; }
+    const size_t e = me < q ? CHANNEL(me, q, ch->large) : CHANNEL(q, me, ch->large), side = (size_t)(me > q);
+    if (length[2 * e + side] != g->end[h] - g->start[h]) { result = fail(ncclInternalError, "the group's positions on channel %u disagree", h); break; }
+    for (uint64_t t = 0; t < g->end[h] - g->start[h]; t++) g->order[g->events++] = (struct event){level[NODE(e, t, side)], h, g->start[h] + t};
+  }
+#undef NODE
+#undef AT
+#undef CHANNEL
+  if (!result) qsort(g->order, g->events, sizeof *g->order, event_order);
+  free(steps); free(planned); free(counts); free(lane); free(first); free(pieces); free(length); free(offset); free(made);
+  free(after_send); free(after_receive); free(sends); free(lands); free(pred); free(level); free(queue); free(degree); free(successors); free(edge);
+  return result;
+}
+
+/* channel h's positions consumed up to `end`, in order: a piece's landing awaited and combined or copied where it
+   belongs (an empty position needs nothing), a receive's first piece after the receive before it */
+static ncclResult_t consume(struct metal_program *program, uint32_t h, uint64_t end) {
+  struct channel *ch = session.channels + h;
+  ncclResult_t result = ncclSuccess;
+  while (ch->consumed < end && !result) {
+    const uint64_t at = ch->consumed;
+    struct inflight *g = inflight_at(h, at);
+    if (!g) return fail(ncclInternalError, "position %llu of channel %u is in no group", (unsigned long long)at, h);
+    struct schedule *p = g->plans + h;
+    struct message *m = p->in_at < p->ins && at >= p->in[p->in_at].first ? p->in + p->in_at : NULL;
+    if (m && at == m->first && m->c->bound->before[m->step] >= 0) {
+      const struct steps *prior = m->c->bound;
+      const int32_t j = prior->before[m->step];
+      result = consume(program, prior->channel[j], prior->first[j] + prior->pieces[j]);
+      if (result) break;
+    }
+    if (m) {
+      struct steps *st = m->c->bound;
+      const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
+      const size_t from = (at % DEPTH) * ch->slot;
+      const int reduce = st->steps[m->step].op == MESH_STEP_REDUCE;
+      if (!ch->large && (reduce || (st->gpu_total.buffer == st->gpu_own.buffer && st->gpu_total.offset == st->gpu_own.offset))) {
+        const struct where to = reduce ? st->gpu_total : st->gpu_own;
+        result = gpu(metal_land(program, reduce ? (int)m->c->type : -1, m->c->combine, to.buffer, to.offset + m->offset + offset, ch->ring_in, from,
+                                reduce ? length / SIZE[m->c->type] : length, session.transport.inputs,
+                                ch->word + (at % session.positions) * ch->word_stride, 1 + cycle_of(at)), "a landing");
+        if (at + 1 > ch->waited) ch->waited = at + 1;
+      } else {
+        result = arrive(program, ch, at + 1);
+        if (!result && reduce)
+          result = gpu(metal_combine(program, m->c->type, m->c->combine, st->gpu_total.buffer, st->gpu_total.offset + m->offset + offset,
+                                     ch->ring_in, from, length / SIZE[m->c->type]), "a combine");
+        else if (!result) {
+          result = gpu(metal_copy(program, METAL_LAND, st->gpu_own.buffer, st->gpu_own.offset + m->offset + offset, ch->ring_in, from, length), "a landing");
+          if (!result && (st->gpu_total.buffer != st->gpu_own.buffer || st->gpu_total.offset != st->gpu_own.offset))
+            result = gpu(metal_copy(program, METAL_LAND, st->gpu_total.buffer, st->gpu_total.offset + m->offset + offset, ch->ring_in, from, length),
+                         "a landing");
+        }
+      }
+      if (result) break;
+      if (at + 1 == m->first + m->pieces) { st->done[m->step] = 1; p->in_at++; }
+    }
+    ch->consumed++;
+  }
+  return result;
+}
+
+/* channel h's next position published, after the landing of the peer's position LAG back, whose slot it fills: its
+   piece copied into its slot and its cell released, or the cell alone (an empty position) */
+static ncclResult_t publish(struct metal_program *program, uint32_t h, int *published) {
+  struct channel *ch = session.channels + h;
+  const uint64_t at = ch->sent, need = at >= LAG ? at - LAG + 1 : 0;
+  struct inflight *g = inflight_at(h, at);
+  if (!g) return fail(ncclInternalError, "position %llu of channel %u is in no group", (unsigned long long)at, h);
+  struct schedule *p = g->plans + h;
+  struct message *m = p->out_at < p->outs && at >= p->out[p->out_at].first ? p->out + p->out_at : NULL;
+  ncclResult_t result;
+  result = arrive(program, ch, need);
+  const size_t cell = ch->cell + (at % session.positions) * sizeof(struct mesh_send);
+  const uint64_t value = ch->argument + cycle_of(at);
+  int released = 0;
+  if (m && !result) {
+    const struct steps *st = m->c->bound;
+    const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
+    if (!ch->large) {
+      result = gpu(metal_send_small(program, ch->ring_out, (at % DEPTH) * ch->slot, st->gpu_own.buffer, st->gpu_own.offset + m->offset + offset,
+                                    length, session.transport.publication, cell, value), "a piece into its slot and its release");
+      released = 1;
+    } else
+      result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * ch->slot, st->gpu_own.buffer,
+                              st->gpu_own.offset + m->offset + offset, length), "a piece into its slot");
+    if (at + 1 == m->first + m->pieces) p->out_at++;
+  }
+  if (!result && !released) result = gpu(metal_publish(program, session.transport.publication, cell, value), "a publication");
+  if (!result) { ch->sent++; *published = 1; }
+  return result;
+}
+
+static struct message *sending(struct inflight *g, uint32_t h, uint64_t at) {
+  struct schedule *p = g->plans + h;
+  return p->out_at < p->outs && at >= p->out[p->out_at].first ? p->out + p->out_at : NULL;
+}
+
+/* a group completed: its publications in its order, each after the consumptions it needs (the positions LAG back on
+   its channel; a SEND's first piece, the receive before it), then every position of it consumed */
+static ncclResult_t complete_group(struct metal_program *program, struct inflight *g, int *published) {
+  ncclResult_t result = ncclSuccess;
+  for (; g->next < g->events && !result; g->next++) {
+    const struct event v = g->order[g->next];
+    const struct channel *ch = session.channels + v.h;
+    if (v.at < ch->sent) continue;
+    if (v.at != ch->sent) return fail(ncclInternalError, "the group's positions admit no order");
+    result = consume(program, v.h, v.at >= LAG ? v.at - LAG + 1 : 0);
+    const struct message *m = result ? NULL : sending(g, v.h, v.at);
+    if (m && v.at == m->first && m->c->bound->before[m->step] >= 0) {
+      const struct steps *prior = m->c->bound;
+      const int32_t j = prior->before[m->step];
+      result = consume(program, prior->channel[j], prior->first[j] + prior->pieces[j]);
+    }
+    if (!result) result = publish(program, v.h, published);
+  }
+  for (uint32_t h = 0; h < session.count && !result; h++) result = consume(program, h, g->end[h]);
+  return result;
+}
+
+/* a group's publications that need no wait, in its order: its channel's earlier positions published, the positions LAG
+   back consumed (empty ones freely) and the peer's landing there awaited before, a SEND's receives before it consumed */
+static ncclResult_t issue_group(struct metal_program *program, struct inflight *g, int *published) {
+  ncclResult_t result = ncclSuccess;
+  for (size_t e = g->next; e < g->events && !result; e++) {
+    const struct event v = g->order[e];
+    struct channel *ch = session.channels + v.h;
+    const uint64_t need = v.at >= LAG ? v.at - LAG + 1 : 0;
+    if (v.at != ch->sent || need > ch->waited) continue;
+    while (ch->consumed < need) {
+      struct inflight *at = inflight_at(v.h, ch->consumed);
+      struct schedule *p = at ? at->plans + v.h : NULL;
+      if (!p || (p->in_at < p->ins && ch->consumed >= p->in[p->in_at].first)) break;
+      ch->consumed++;
+    }
+    const struct message *m = sending(g, v.h, v.at);
+    if (ch->consumed < need || (m && v.at == m->first && !ready(m->c->bound, m->step))) continue;
+    result = publish(program, v.h, published);
+  }
+  return result;
+}
+
+/* the groups in flight, in the order every rank's walk keeps (order_group): completing through a group, each group up
+   to it completed, then any later group's publications that need no wait; issuing a group, its publications that need
+   no wait, so a group issued encodes no wait at all */
+static ncclResult_t walk(struct metal_program *program, struct inflight *issuing, struct inflight *through, int *published) {
+  ncclResult_t result = ncclSuccess;
+  struct inflight *g = issuing;
+  if (through) {
+    for (g = inflight; g && !result; g = g->next_group) {
+      result = complete_group(program, g, published);
+      if (g == through) break;
+    }
+    g = g ? g->next_group : NULL;
+  }
+  for (; g && !result; g = g->next_group) result = issue_group(program, g, published);
   return result;
 }
 
@@ -1253,7 +1523,7 @@ static ncclResult_t retire(struct metal_program *program) {
     for (uint32_t h = 0; h < session.count; h++)
       if (session.channels[h].consumed < g->end[h]) return ncclSuccess;
     result = epilogue(program, g->list, g->n);
-    inflight = g->next;
+    inflight = g->next_group;
     if (!inflight) inflight_last = NULL;
     atomic_store(&retired, g->ticket);
     inflight_free(g);
@@ -1342,11 +1612,12 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       else {
         for (uint32_t h = 0; h < session.count; h++) g->end[h] = session.channels[h].end;
         g->list = list; g->n = n; g->ticket = ticket = ++tickets; owned = 0;
-        if (inflight_last) inflight_last->next = g; else inflight = g;
+        if (inflight_last) inflight_last->next_group = g; else inflight = g;
         inflight_last = g;
         scheduled = 1;
+        result = order_group(comm, g);
         progress_targets();
-        result = walk(program, issue ? g : NULL, issue ? NULL : g, &published);
+        if (!result) result = walk(program, issue ? g : NULL, issue ? NULL : g, &published);
         if (!result) result = retire(program);
       }
     }
@@ -1373,7 +1644,7 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
     inflight_lose();
   } else if (inflight && ticket >= inflight->ticket) {
     struct inflight *through = inflight;
-    while (through->next && through->next->ticket <= ticket) through = through->next;
+    while (through->next_group && through->next_group->ticket <= ticket) through = through->next_group;
     if (finished) metal_collect(finished);
     struct metal_program *program = metal_begin(stream->commandBuffer, stream->commandEncoder);
     if (!program) result = fail(ncclSystemError, "out of memory");
