@@ -152,98 +152,20 @@ static void complete(uint64_t ticket) {
 
 static void complete_all() { complete(UINT64_MAX); }
 
-// ProcessGroupGloo's future (torch's MPS has one stream and c10's Future carries only its events, so a consumer's
-// stream cannot be made to wait at fut.wait() as ProcessGroupNCCL's CUDA futures do): the group's rest runs on this
-// extension's own command queue (ncclMeshCompleteApart), after a shared event torch's stream signals at the hand-over
-// (across queues an event, not a spin, makes the stream's writes visible), and the future is marked completed, from
-// a dispatch queue of this extension's, as that command buffer completes; work submitted after fut.wait() returns
-// reads its results.  The ticket's workspace and the outputs are held until then.
-static id<MTLCommandQueue> apart_;
-static id<MTLSharedEvent> handover_;
-static uint64_t handovers_ = 0;
-static dispatch_queue_t completions_;
-
-static void complete_apart(uint64_t ticket, c10::intrusive_ptr<c10::ivalue::Future> future, std::vector<at::Tensor> outputs) {
-  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
-  if (!apart_) {
-    apart_ = [stream->device() newCommandQueue];
-    handover_ = [stream->device() newSharedEvent];
-    completions_ = dispatch_queue_create("torch_mesh.completions", DISPATCH_QUEUE_SERIAL);
-  }
-  id<MTLCommandBuffer> buffer = [apart_ commandBuffer];
-  const uint64_t handover = ++handovers_;
-  [buffer encodeWaitForEvent:handover_ value:handover];
-  __block ncclResult_t result = ncclSuccess;
-  __block int moved = 0;
-  dispatch_sync(stream->queue(), ^{
-    stream_ = Stream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr, nullptr};
-    result = ncclMeshCompleteApart(ticket, (ncclMeshStream *)&stream_, (__bridge void *)buffer, &moved);
-    stream->endKernelCoalescing();
-    [stream->commandBuffer() encodeSignalEvent:handover_ value:handover];
-    committing(stream);
-  });
-  auto held = std::make_shared<std::vector<at::Tensor>>(outputs);
-  for (auto it = holders_.begin(); it != holders_.end() && it->first <= ticket;) {
-    for (auto &t : it->second) held->push_back(std::move(t));
-    it = holders_.erase(it);
-  }
-  release();
-  if (result) {
-    future->setError(std::make_exception_ptr(std::runtime_error(std::string("libnccl-mesh: ") + ncclGetErrorString(result) + ": " + ncclGetLastError(nullptr))));
-    return;
-  }
-  if (!moved) {
-    future->markCompleted(c10::IValue(outputs));
-    return;
-  }
-  [buffer addCompletedHandler:^(id<MTLCommandBuffer> done) {
-    const bool failed = done.status == MTLCommandBufferStatusError;
-    std::string why = failed ? std::string(done.error.localizedDescription.UTF8String ?: "a command buffer failed") : std::string();
-    dispatch_async(completions_, ^{
-      if (getenv("MESH_TRACE") && *getenv("MESH_TRACE") == '1') fprintf(stderr, "mesh-trace future %llu %s\n", (unsigned long long)ticket, failed ? "failed" : "completed");
-      held->clear();
-      if (failed)
-        future->setError(std::make_exception_ptr(std::runtime_error("the collective's command buffer apart failed: " + why)));
-      else
-        future->markCompleted(c10::IValue(outputs));
-    });
-  }];
-  [buffer commit];
-}
-
-// c10d's Work for a group issued and not completed: waiting (or synchronizing, or asking whether it completed)
-// encodes the rest on torch's current stream, where every later kernel reads its results (ProcessGroupNCCL's
-// stream-ordered wait); its future completes it apart (complete_apart), and a wait after that waits for the future.
+// c10d's Work for a group issued and not completed: waiting (or synchronizing, asking whether it completed, or
+// asking for its future) encodes the rest on torch's current stream, where every later kernel reads its results
 class MeshWork : public c10d::Work {
  public:
   MeshWork(uint64_t ticket, std::vector<at::Tensor> outputs) : c10d::Work(-1, c10d::OpType::UNKNOWN), ticket_(ticket), outputs_(std::move(outputs)) {}
-  bool isCompleted() override {
-    if (future_) return future_->completed();
-    finish();
-    return true;
-  }
-  bool isSuccess() const override { return future_ ? future_->completed() && !future_->hasError() : finished_; }
-  bool wait(std::chrono::milliseconds) override {
-    if (future_) {
-      future_->wait();
-      if (future_->hasError()) std::rethrow_exception(future_->exception_ptr());
-      return true;
-    }
-    finish();
-    return true;
-  }
-  void synchronize() override { wait(kNoTimeout); }
+  bool isCompleted() override { finish(); return true; }
+  bool isSuccess() const override { return finished_; }
+  bool wait(std::chrono::milliseconds) override { finish(); return true; }
+  void synchronize() override { finish(); }
   c10::intrusive_ptr<c10::ivalue::Future> getFuture() override {
-    if (future_) return future_;
-    future_ = c10::make_intrusive<c10::ivalue::Future>(c10::ListType::create(c10::TensorType::get()));
-    if (finished_ || ncclMeshRetired() >= ticket_) {
-      finished_ = true;
-      future_->markCompleted(c10::IValue(outputs_));
-    } else {
-      finished_ = true;
-      complete_apart(ticket_, future_, outputs_);
-    }
-    return future_;
+    finish();
+    auto future = c10::make_intrusive<c10::ivalue::Future>(c10::ListType::create(c10::TensorType::get()));
+    future->markCompleted(c10::IValue(outputs_));
+    return future;
   }
 
  private:
@@ -255,7 +177,6 @@ class MeshWork : public c10d::Work {
   uint64_t ticket_;
   std::vector<at::Tensor> outputs_;
   bool finished_ = false;
-  c10::intrusive_ptr<c10::ivalue::Future> future_;
 };
 
 static c10::intrusive_ptr<c10d::Work> work_of(uint64_t ticket, std::vector<at::Tensor> outputs) {

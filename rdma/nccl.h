@@ -773,14 +773,6 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int
 /* The highest ticket through which every issued group is complete (or lost with a failed session): its
    workspace may be reused in the stream's order. */
 uint64_t ncclMeshRetired(void);
-/* The group of `ticket` completed on `commandBuffer`, a command buffer of a queue apart from `stream`, the stream it
-   was issued on (ProcessGroupGloo's completion: torch's Work.get_future).  The caller orders `commandBuffer` after the
-   stream's work up to this call (a shared event signalled on the stream, waited for before the library's work in
-   `commandBuffer`), commits both, and knows the group complete as `commandBuffer` completes.  Groups in flight
-   before it complete on `stream`; the stream's later publications that need credit from the group's positions wait
-   in a kernel for the queue apart's work.  *moved (may be NULL) is 0 where the group was already complete and
-   nothing was encoded apart. */
-ncclResult_t ncclMeshCompleteApart(uint64_t ticket, const ncclMeshStream* stream, void* commandBuffer, int* moved);
 
 #ifdef __cplusplus
 } // end extern "C"
