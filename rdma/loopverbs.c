@@ -19,8 +19,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-enum { LOOP_QPS = 128, LOOP_DEVICES = 32 };
-#define LOOP_RING ((uint64_t)2 << 20)
+enum { LOOP_QPS = 1024, LOOP_DEVICES = 32 };
+#define LOOP_RING ((uint64_t)1 << 20)
 
 /* a queue pair's incoming SENDs: `head` the bytes written, `tail` the bytes consumed, each record an 8-byte length
    then the payload rounded up to 8 bytes */

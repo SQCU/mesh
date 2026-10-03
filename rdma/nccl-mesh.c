@@ -616,10 +616,32 @@ static int ring_make(size_t slot, struct mesh_section *section, unsigned char **
   return 0;
 }
 
-/* a ring's transfer on the link to `node` (its class's queue pair) */
-static int ring_bind(uint32_t node, int large, int receive, uint32_t identity, struct mesh_section section) {
-  return mesh_transfer_bind(&session.context, mesh_peer_channel(&session.context, node, large ? 0 : 1), receive ? MESH_RECEIVE : MESH_SEND,
+/* a ring's transfer on the link to `node`, its queue pair `queue` (a queue pair's SENDs, and the receives its peer
+   posts, run invocation by invocation through every transfer on it, so rings that advance apart need queue pairs apart) */
+static int ring_bind(uint32_t node, uint32_t queue, int receive, uint32_t identity, struct mesh_section section) {
+  if (queue >= session.header->qps) return ERANGE;
+  return mesh_transfer_bind(&session.context, mesh_peer_channel(&session.context, node, queue), receive ? MESH_RECEIVE : MESH_SEND,
                             identity, section, (uint32_t)(section.bytes / session.header->pgsz), 0, UINT32_MAX, DEPTH);
+}
+
+/* the queue pair a pair of ranks' ring of a class takes on the link between u and v: a linked pair's 0 (large) and 1
+   (small), the k-th routed pair whose route crosses the link (pairs a < b in order) 2 + 2k and 3 + 2k (NCCL's PXN: a
+   connection of its own for each pair the proxy carries) */
+static uint32_t queue_of(const struct mesh_link_map *map, uint32_t u, uint32_t v, uint32_t from, uint32_t to, int large, uint32_t *path) {
+  const uint32_t class = session.classes == 2 && !large;
+  if ((from == u && to == v) || (from == v && to == u)) return class;
+  uint32_t k = 0;
+  for (uint32_t a = 0; a < map->nodes; a++)
+    for (uint32_t b = a + 1; b < map->nodes; b++) {
+      if (mesh_link_between(map, a, b)) continue;
+      const uint32_t hops = mesh_route(map, a, b, path);
+      int crosses = 0;
+      for (uint32_t i = 0; i + 1 < hops; i++) crosses |= (path[i] == u && path[i + 1] == v) || (path[i] == v && path[i + 1] == u);
+      if (!crosses) continue;
+      if ((a == from && b == to) || (a == to && b == from)) return 2 + 2 * k + class;
+      k++;
+    }
+  return UINT32_MAX;
 }
 
 static uint32_t relayed(uint32_t from, uint32_t to, int large) { return RELAY + 2 * (from * NODES + to) + (uint32_t)large; }
@@ -664,17 +686,19 @@ static int session_open(ncclComm_t comm, int *other) {
       ch->node = (uint32_t)comm->members[r];
       ch->large = large;
       ch->slot = large ? session.slot : session.small;
-      uint32_t out = IDENTITY + 2 * m->node + (uint32_t)large, in = IDENTITY + 2 * ch->node + (uint32_t)large;
+      uint32_t out = IDENTITY + 2 * m->node + (uint32_t)large, in = IDENTITY + 2 * ch->node + (uint32_t)large, queue = session.classes == 2 && !large;
       ch->hop = ch->node;
       if (!mesh_link_between(&comm->map, me, r)) {
         if (mesh_route(&comm->map, me, r, path) < 3 || m->node >= NODES || ch->node >= NODES) { status = EHOSTUNREACH; break; }
-        ch->hop = (uint32_t)comm->members[path[1]];
+        const uint32_t next = path[1];
+        ch->hop = (uint32_t)comm->members[next];
         out = relayed(m->node, ch->node, large); in = relayed(ch->node, m->node, large);
+        queue = queue_of(&comm->map, me, next, me, r, large, path);
       }
       status = ring_make(ch->slot, &ch->out, &ch->sending);
-      if (!status) status = ring_bind(ch->hop, large, 0, out, ch->out);
+      if (!status) status = ring_bind(ch->hop, queue, 0, out, ch->out);
       if (!status) status = ring_make(ch->slot, &ch->in, &ch->receiving);
-      if (!status) status = ring_bind(ch->hop, large, 1, in, ch->in);
+      if (!status) status = ring_bind(ch->hop, queue, 1, in, ch->in);
     }
   /* the routes through this node: each a ring both received from the route's previous node and sent from to its next */
   for (uint32_t from = 0; from < N && !status; from++)
@@ -687,10 +711,14 @@ static int session_open(ncclComm_t comm, int *other) {
           session.relays = grown;
           struct relay *rl = session.relays + session.relaying++;
           *rl = (struct relay){(uint32_t)comm->members[from], (uint32_t)comm->members[to], {0}, 0};
-          const uint32_t identity = relayed(rl->from, rl->to, large);
+          const uint32_t identity = relayed(rl->from, rl->to, large), previous = path[i - 1], next = path[i + 1];
+          uint32_t *scratch = calloc(N + 1, sizeof *scratch);
+          const uint32_t in = scratch ? queue_of(&comm->map, previous, me, from, to, large, scratch) : UINT32_MAX;
+          const uint32_t out = scratch ? queue_of(&comm->map, me, next, from, to, large, scratch) : UINT32_MAX;
+          free(scratch);
           status = ring_make(large ? session.slot : session.small, &rl->ring, NULL);
-          if (!status) status = ring_bind((uint32_t)comm->members[path[i - 1]], large, 1, identity, rl->ring);
-          if (!status) status = ring_bind((uint32_t)comm->members[path[i + 1]], large, 0, identity, rl->ring);
+          if (!status) status = ring_bind((uint32_t)comm->members[previous], in, 1, identity, rl->ring);
+          if (!status) status = ring_bind((uint32_t)comm->members[next], out, 0, identity, rl->ring);
         }
     }
   free(path);
@@ -1013,6 +1041,10 @@ static ncclResult_t session_ensure(ncclComm_t comm) {
       int other = -1;
       const int status = session_open(comm, &other);
       if (other >= 0) return fail(ncclInvalidUsage, "rank %d runs on the bridge of node %d", comm->rank, other);
+      if (status == ERANGE)
+        return fail(ncclInvalidUsage, "the bridges' links have too few queue pairs for the routes across them (MESH_QPS: 2, and 2 for each "
+                                      "routed pair crossing the busiest link)");
+      if (status == EHOSTUNREACH) return fail(ncclInvalidUsage, "a pair of ranks has no route on the map, or a node number is %d or more", NODES);
       if (status) {
         const ncclResult_t result = fail(ncclSystemError, "the session's transfers did not start: %s", strerror(status));
         if (++attempt == ATTEMPTS) return result;

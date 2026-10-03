@@ -13,7 +13,7 @@
 #define MESH_VERSION 106u
 #define MESH_ABSENT UINT32_MAX
 /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
-#define MESH_QPS 8
+#define MESH_QPS 64
 /* A prepared transfer: `count` slots of `bytes` from `local_row`, bound for the invocations [begin, end)
    that use it (end past the call's invocations: every one), invocation t addressing its ring slot
    (t - begin) mod depth (0: the header's depth) at `invocation_pages` a slot. */
