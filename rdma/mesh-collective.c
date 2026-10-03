@@ -116,20 +116,61 @@ static int mesh_linked(const struct mesh_link_map *map,uint32_t a,uint32_t b){
   return 0;
 }
 
-/* The ring a ring all-reduce runs on: a ring map's own cycle, from its first link's first node;
-   else rank order 0, 1, ..., nodes-1 where the map links each node to the next (a mesh does).
-   0 where the map has neither. */
+/* The beta of the link between a and b, the map's where it gives one, else 0. */
+static double mesh_link_beta(const struct mesh_link_map *map,uint32_t a,uint32_t b){
+  for(uint32_t l=0;map->cost && l<map->links;l++)
+    if(((map->link[l][0]==a && map->link[l][1]==b) || (map->link[l][0]==b && map->link[l][1]==a)) && !isnan(map->cost[l][1]))return map->cost[l][1];
+  return 0;
+}
+
+/* A Hamiltonian cycle of the map's links through every node from node 0, depth first with neighbours in node order:
+   among those the search reaches within its budget, the one whose slowest link (largest beta) is fastest, as a ring's
+   time is its slowest link's [Patarasuk & Yuan 2009] and NCCL's ring search maximises the ring's bandwidth; the same
+   cycle on every node, the search being the map's alone.  0 where it reaches none. */
+enum { MESH_RING_SEARCH = 200000 };
+struct mesh_ring_search { const struct mesh_link_map *map; uint32_t n,*path,*best; unsigned char *used; double slowest,best_slowest; uint32_t budget; int found; };
+static void mesh_ring_extend(struct mesh_ring_search *s,uint32_t depth,double slowest){
+  if(!s->budget || (s->found && slowest>=s->best_slowest))return;
+  s->budget--;
+  const uint32_t at=s->path[depth-1];
+  if(depth==s->n){
+    if(!mesh_linked(s->map,at,s->path[0]))return;
+    const double closing=mesh_link_beta(s->map,at,s->path[0]),bottleneck=closing>slowest?closing:slowest;
+    if(!s->found || bottleneck<s->best_slowest){s->found=1;s->best_slowest=bottleneck;memcpy(s->best,s->path,s->n*sizeof *s->path);}
+    return;
+  }
+  for(uint32_t v=0;v<s->n;v++)if(!s->used[v] && mesh_linked(s->map,at,v)){
+    const double beta=mesh_link_beta(s->map,at,v);
+    s->used[v]=1;s->path[depth]=v;
+    mesh_ring_extend(s,depth+1,beta>slowest?beta:slowest);
+    s->used[v]=0;
+  }
+}
+
+/* The ring a ring all-reduce runs on: a ring map's own cycle, from its first link's first node; else rank order 0, 1,
+   ..., nodes-1 where the map links each node to the next and gives no costs (a mesh does); else a Hamiltonian cycle of
+   its links (mesh_ring_extend: the fastest slowest link).  0 where the map has none. */
 static int mesh_ring_order(const struct mesh_link_map *map,uint32_t *next,uint32_t *previous,uint32_t *first){
+  const uint32_t n=map->nodes;
   if(map->kind==MESH_LINKS_RING){
     for(uint32_t l=0;l<map->links;l++){next[map->link[l][0]]=map->link[l][1];previous[map->link[l][1]]=map->link[l][0];}
     *first=map->link[0][0];
     return 1;
   }
-  for(uint32_t v=0;v<map->nodes;v++){
-    if(!mesh_linked(map,v,(v+1)%map->nodes))return 0;
-    next[v]=(v+1)%map->nodes;previous[(v+1)%map->nodes]=v;
+  int ordered=!map->cost;
+  for(uint32_t v=0;v<n && ordered;v++)ordered=mesh_linked(map,v,(v+1)%n);
+  uint32_t path[n],best[n];
+  unsigned char used[n];
+  if(ordered)for(uint32_t v=0;v<n;v++)best[v]=v;
+  else{
+    memset(used,0,sizeof used);
+    struct mesh_ring_search search={map,n,path,best,used,0,0,MESH_RING_SEARCH,0};
+    path[0]=0;used[0]=1;
+    mesh_ring_extend(&search,1,0);
+    if(!search.found)return 0;
   }
-  *first=0;
+  for(uint32_t i=0;i<n;i++){next[best[i]]=best[(i+1)%n];previous[best[(i+1)%n]]=best[i];}
+  *first=best[0];
   return 1;
 }
 
