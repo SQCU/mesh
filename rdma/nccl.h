@@ -15,11 +15,12 @@
    Build and link (the mesh repo's rdma/):
      make -C rdma libmesh.dylib libnccl-mesh.dylib
      cc app.c -I rdma -L rdma -lnccl-mesh -Wl,-rpath,<rdma>
-   A rank is a process on a node whose bridge (mesh-flow) is up.  A clique is its explicit
-   configuration, so every rank makes the same unique id with no exchange: ncclGetUniqueId reads
-   MESH_LINKS, an explicit link map over the communicator's ranks (mesh-collective.h; unset: every
-   pair linked; a link line's third and fourth fields are the alpha-beta cost the planner weighs),
-   and MESH_REGION, the bridge's region (default /mesh0).  A process attaches once, at its first
+   A rank is a process on a node whose bridge (mesh-flow) is up.  A communicator's topology is an operand:
+   ncclMeshCommInitRank takes its ranks' link map (mesh-plan.h: a kind, the links and each link's alpha-beta
+   cost, the planner's input), each rank's node and this rank's bridge region.  An NCCL program's
+   ncclCommInitRank takes every pair linked at no cost, rank r on node r, and the region of the process's
+   MESH_REGION (default /mesh0), which ncclGetUniqueId puts in the id; every rank makes the same id with no
+   exchange.  ncclCommSplit keeps the links among the ranks it takes, each with its cost.  A process attaches once, at its first
    group that crosses a link, and keeps one prepared program on the bridge for its life (a session):
    to each peer of the communicator that opened it, rings of 2*NCCL_STEPS slots each way: NCCL_BUFFSIZE/NCCL_STEPS
    slots (NCCL_BUFFSIZE, default 4 MiB, read at attach) on the link's queue pair 0, and where the bridge has two
@@ -79,6 +80,7 @@ extern "C" {
 #include <limits.h>
 #include <stdint.h>
 #include <stddef.h>
+#include "mesh-plan.h"
 
 /* The stream: not read (every call is synchronous, above). */
 typedef void *cudaStream_t;
@@ -766,6 +768,10 @@ ncclResult_t pncclGroupEnd(void);
    order (at most `capacity`): 0 direct, 1 ring, 2 tree, 3 binomial (mesh-collective.h MESH_*),
    -1 a point-to-point call or a one-rank communicator's local copy; `roots` the tree's root. */
 ncclResult_t ncclMeshGroupPlans(int* algorithms, int* roots, int capacity, int* count);
+/* A communicator over `topology`, its ranks' link map (mesh-plan.h: refused where mesh_link_map_check refuses
+   it), this process its rank `rank`, rank r on the bridge of node node[r] (NULL: node r), this rank's bridge at
+   `region` (NULL: /mesh0).  Every rank passes the same topology and nodes. */
+ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int rank, const struct mesh_link_map* topology, const int* node, const char* region);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
    commandEncoder; issue and workspace not read); *published (may be NULL) whether a publication was encoded.  A
    ticket already complete encodes nothing; one whose session failed returns the failure. */

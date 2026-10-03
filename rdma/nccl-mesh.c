@@ -181,44 +181,37 @@ static void truncdiv(ncclDataType_t t, void *dst, const void *src, size_t count,
 /* -- communicators -------------------------------------------------------------------------------- */
 
 struct premul { int used; ncclDataType_t type; unsigned char value[8]; };
+/* a communicator: its ranks' link map (mesh-plan.h; each link's cost its own), rank r on the bridge of node
+   members[r], this rank's bridge region */
 struct ncclComm {
   struct mesh_link_map map;
   int nranks, rank, *members;
   char region[64];
-  double alpha, beta;
   struct premul ops[OPS];
   ncclResult_t async;
 };
 
-static ncclResult_t comm_make(ncclComm_t *made, uint32_t kind, int nranks, const uint32_t (*links)[2], uint32_t count,
-                              const int *members, int rank, const char *region, double alpha, double beta) {
+/* a communicator over `map` (NULL: every pair linked, no cost), its links and costs copied */
+static ncclResult_t comm_make(ncclComm_t *made, const struct mesh_link_map *map, int nranks, const int *members, int rank, const char *region) {
   struct ncclComm *comm = calloc(1, sizeof *comm);
   if (!comm) return fail(ncclSystemError, "out of memory");
-  comm->map.kind = kind; comm->map.nodes = (uint32_t)nranks; comm->map.links = count;
+  const uint32_t count = map ? map->links : 0;
+  const int costed = map && map->cost;
+  comm->map = (struct mesh_link_map){map ? map->kind : MESH_LINKS_MESH, (uint32_t)nranks, count, NULL, NULL};
   comm->map.link = calloc(count ? count : 1, sizeof *comm->map.link);
+  if (costed) comm->map.cost = calloc(count ? count : 1, sizeof *comm->map.cost);
   comm->members = calloc((size_t)nranks, sizeof *comm->members);
-  if (!comm->map.link || !comm->members) { free(comm->map.link); free(comm->members); free(comm); return fail(ncclSystemError, "out of memory"); }
-  if (count) memcpy(comm->map.link, links, count * sizeof *links);
+  if (!comm->map.link || (costed && !comm->map.cost) || !comm->members) {
+    free(comm->map.link); free(comm->map.cost); free(comm->members); free(comm);
+    return fail(ncclSystemError, "out of memory");
+  }
+  if (count) memcpy(comm->map.link, map->link, count * sizeof *map->link);
+  if (count && costed) memcpy(comm->map.cost, map->cost, count * sizeof *map->cost);
   for (int r = 0; r < nranks; r++) comm->members[r] = members ? members[r] : r;
-  comm->nranks = nranks; comm->rank = rank; comm->alpha = alpha; comm->beta = beta;
+  comm->nranks = nranks; comm->rank = rank;
   snprintf(comm->region, sizeof comm->region, "%s", region);
   *made = comm;
   return ncclSuccess;
-}
-
-/* the first link line's cost "a b alpha beta" (mesh_link_map_read reads its first two fields) */
-static void map_cost(const char *path, double *alpha, double *beta) {
-  *alpha = *beta = 0;
-  FILE *file = fopen(path, "r");
-  if (!file) return;
-  char line[512];
-  while (fgets(line, sizeof line, file)) {
-    unsigned a, b;
-    double x, y;
-    char rest[2];
-    if (sscanf(line, " %u %u %lf %lf %1s", &a, &b, &x, &y, rest) == 4) { *alpha = x; *beta = y; break; }
-  }
-  fclose(file);
 }
 
 ncclResult_t ncclGetVersion(int *version) {
@@ -236,38 +229,30 @@ const char *ncclGetErrorString(ncclResult_t result) {
 
 const char *ncclGetLastError(ncclComm_t comm) { (void)comm; return last; }
 
+/* An NCCL program's communicator: every pair of its ranks linked, no cost (ncclMeshCommInitRank takes the
+   topology), rank r on the bridge of node r, its region the process's MESH_REGION (default /mesh0), which the
+   unique id carries, as NCCL's carries its bootstrap address. */
+static const char *region_of_process(void) {
+  const char *region = getenv("MESH_REGION");
+  return region && *region ? region : "/mesh0";
+}
+
 ncclResult_t ncclGetUniqueId(ncclUniqueId *id) {
   if (!id) return fail(ncclInvalidArgument, "uniqueId is NULL");
-  const char *links = getenv("MESH_LINKS"), *region = getenv("MESH_REGION");
-  links = links ? links : "";
-  region = region && *region ? region : "/mesh0";
-  if (strlen(links) + strlen(region) + 2 > sizeof id->internal)
-    return fail(ncclInvalidArgument, "MESH_LINKS and MESH_REGION exceed the unique id's %zu bytes", sizeof id->internal);
+  const char *region = region_of_process();
+  if (strlen(region) + 1 > sizeof id->internal) return fail(ncclInvalidArgument, "MESH_REGION exceeds the unique id's %zu bytes", sizeof id->internal);
   memset(id->internal, 0, sizeof id->internal);
-  strcpy(id->internal, links);
-  strcpy(id->internal + strlen(links) + 1, region);
+  strcpy(id->internal, region);
   return ncclSuccess;
 }
 
 ncclResult_t ncclCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank) {
   if (!comm || nranks < 1 || rank < 0 || rank >= nranks) return fail(ncclInvalidArgument, "rank %d of %d", rank, nranks);
-  char id[sizeof commId.internal + 1];
-  memcpy(id, commId.internal, sizeof commId.internal);
-  id[sizeof commId.internal] = 0;
-  const char *path = id, *region = id + strlen(id) + 1;
+  char region[sizeof commId.internal + 1];
+  memcpy(region, commId.internal, sizeof commId.internal);
+  region[sizeof commId.internal] = 0;
   if (!*region) return fail(ncclInvalidArgument, "the unique id names no region (ncclGetUniqueId)");
-  if (!*path) return comm_make(comm, MESH_LINKS_MESH, nranks, NULL, 0, NULL, rank, region, 0, 0);
-  struct mesh_link_map read;
-  if (mesh_link_map_read(path, &read)) return fail(ncclInvalidArgument, "%s: not a link map (mesh-collective.h)", path);
-  if ((int)read.nodes != nranks) {
-    mesh_link_map_free(&read);
-    return fail(ncclInvalidArgument, "%s has %u nodes, not %d", path, read.nodes, nranks);
-  }
-  double alpha, beta;
-  map_cost(path, &alpha, &beta);
-  ncclResult_t result = comm_make(comm, read.kind, nranks, (const uint32_t (*)[2])read.link, read.links, NULL, rank, region, alpha, beta);
-  mesh_link_map_free(&read);
-  return result;
+  return comm_make(comm, NULL, nranks, NULL, rank, region);
 }
 
 ncclResult_t ncclCommInitRankConfig(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank, ncclConfig_t *config) {
@@ -278,15 +263,24 @@ ncclResult_t ncclCommInitRankConfig(ncclComm_t *comm, int nranks, ncclUniqueId c
 ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
   (void)devlist;
   if (ndev != 1) return fail(ncclInvalidArgument, "a node has one Metal device: ndev %d", ndev);
-  const char *region = getenv("MESH_REGION");
-  return comm_make(comm, MESH_LINKS_MESH, 1, NULL, 0, NULL, 0, region && *region ? region : "/mesh0", 0, 0);
+  return comm_make(comm, NULL, 1, NULL, 0, region_of_process());
+}
+
+ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int rank, const struct mesh_link_map *topology, const int *node, const char *region) {
+  static const char *const kinds[] = {"mesh", "ring", "tree", "graph"};
+  if (!comm || !topology) return fail(ncclInvalidArgument, "comm or topology is NULL");
+  if (rank < 0 || (uint32_t)rank >= topology->nodes) return fail(ncclInvalidArgument, "rank %d of %u", rank, topology->nodes);
+  if (mesh_link_map_check(topology))
+    return fail(ncclInvalidArgument, "the topology (%s of %u ranks, %u links) is not one its algorithms can run on (mesh-plan.h)",
+                topology->kind <= MESH_LINKS_GRAPH ? kinds[topology->kind] : "unknown kind", topology->nodes, topology->links);
+  return comm_make(comm, topology, (int)topology->nodes, node, rank, region && *region ? region : "/mesh0");
 }
 
 ncclResult_t ncclCommFinalize(ncclComm_t comm) { return comm ? ncclSuccess : fail(ncclInvalidArgument, "comm is NULL"); }
 
 ncclResult_t ncclCommDestroy(ncclComm_t comm) {
   if (!comm) return ncclSuccess;
-  free(comm->map.link); free(comm->members); free(comm);
+  free(comm->map.link); free(comm->map.cost); free(comm->members); free(comm);
   return ncclSuccess;
 }
 
@@ -694,8 +688,8 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     struct call *c = list + i;
     if ((p2p(c) && c->peer == comm->rank) || !c->count || comm->nranks < 2) continue;
     struct steps *s = calloc(1, sizeof *s);
-    if (!s || !(s->steps = calloc(MESH_COLLECTIVE_STEPS(nodes) + 1, sizeof *s->steps)) ||
-        !(s->done = calloc(MESH_COLLECTIVE_STEPS(nodes) + 1, 1))) {
+    if (!s || !(s->steps = calloc(mesh_collective_steps(nodes) + 1, sizeof *s->steps)) ||
+        !(s->done = calloc(mesh_collective_steps(nodes) + 1, 1))) {
       steps_free(s);
       return fail(ncclSystemError, "out of memory");
     }
@@ -707,10 +701,10 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
       continue;
     }
     struct mesh_collective chosen = mesh_collective_choose(&comm->map, (struct mesh_collective){(uint32_t)c->what, c->how, (uint32_t)c->root, 0, NULL},
-                                                           operand, comm->alpha, comm->beta);
+                                                           operand, 0, 0);
     if (chosen.how >= MESH_UNAVAILABLE && c->how && !c->force)
       chosen = mesh_collective_choose(&comm->map, (struct mesh_collective){(uint32_t)c->what, 0, (uint32_t)c->root, 0, NULL},
-                                      operand, comm->alpha, comm->beta);
+                                      operand, 0, 0);
     if (chosen.how >= MESH_UNAVAILABLE)
       return fail(ncclInvalidArgument, "no algorithm of %#x carries collective %d of %llu elements on this map", c->how, c->what,
                   (unsigned long long)operand.elements);
@@ -1560,8 +1554,9 @@ ncclResult_t ncclScatterConfig(const void *sendbuff, void *recvbuff, size_t coun
 }
 
 /* ncclCommSplit: every rank's (color, key) all-gathered on comm, the ranks of this color ordered by key,
-   then rank; the new map is comm's links among them, relabelled: the same kind where every rank stays, a
-   mesh where every pair is linked (one rank alone) */
+   then rank; the new map is comm's links among them, relabelled, each with its cost: the same kind where every
+   rank stays, a mesh where every pair of them is linked, else a graph (refused where those links do not connect
+   them) */
 ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newcomm, ncclConfig_t *config) {
   (void)config;
   if (!comm || !newcomm) return fail(ncclInvalidArgument, "comm or newcomm is NULL");
@@ -1570,8 +1565,9 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
   int64_t mine[2] = {color, key}, *every = calloc(2 * (size_t)n, sizeof *every);
   int *ranks = calloc((size_t)n, sizeof *ranks), *index = calloc((size_t)n, sizeof *index), *members = calloc((size_t)n, sizeof *members);
   uint32_t (*linked)[2] = calloc(comm->map.links + 1, sizeof *linked);
-  ncclResult_t result = !every || !ranks || !index || !members || !linked ? fail(ncclSystemError, "out of memory")
-                                                                         : ncclAllGather(mine, every, 2, ncclInt64, comm, NULL);
+  double (*priced)[2] = calloc(comm->map.links + 1, sizeof *priced);
+  ncclResult_t result = !every || !ranks || !index || !members || !linked || !priced ? fail(ncclSystemError, "out of memory")
+                                                                                     : ncclAllGather(mine, every, 2, ncclInt64, comm, NULL);
   *newcomm = NULL;
   if (!result && color != NCCL_SPLIT_NOCOLOR) {
     int count = 0;
@@ -1583,7 +1579,11 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
     uint32_t links = 0;
     for (uint32_t l = 0; l < comm->map.links; l++) {
       const int a = index[comm->map.link[l][0]], b = index[comm->map.link[l][1]];
-      if (a >= 0 && b >= 0) { linked[links][0] = (uint32_t)a; linked[links][1] = (uint32_t)b; links++; }
+      if (a >= 0 && b >= 0) {
+        linked[links][0] = (uint32_t)a; linked[links][1] = (uint32_t)b;
+        if (comm->map.cost) { priced[links][0] = comm->map.cost[l][0]; priced[links][1] = comm->map.cost[l][1]; }
+        links++;
+      }
     }
     int every_pair = comm->map.kind == MESH_LINKS_MESH;
     for (int a = 0; !every_pair && a < count; a++)
@@ -1594,14 +1594,12 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
         if (!found) goto checked;
       }
     every_pair = 1;
-  checked:
-    if (count == n && comm->map.kind != MESH_LINKS_MESH)
-      result = comm_make(newcomm, comm->map.kind, count, (const uint32_t (*)[2])linked, links, members, index[comm->rank], comm->region,
-                         comm->alpha, comm->beta);
-    else if (every_pair)
-      result = comm_make(newcomm, MESH_LINKS_MESH, count, NULL, 0, members, index[comm->rank], comm->region, comm->alpha, comm->beta);
-    else result = fail(ncclInvalidUsage, "a split to some ranks that are not every pair linked");
+  checked:;
+    const struct mesh_link_map restricted = {count == n ? comm->map.kind : every_pair ? MESH_LINKS_MESH : MESH_LINKS_GRAPH, (uint32_t)count, links,
+                                             linked, comm->map.cost ? priced : NULL};
+    if (count > 1 && mesh_link_map_check(&restricted)) result = fail(ncclInvalidUsage, "a split to ranks whose links do not connect them");
+    else result = comm_make(newcomm, &restricted, count, members, index[comm->rank], comm->region);
   }
-  free(every); free(ranks); free(index); free(members); free(linked);
+  free(every); free(ranks); free(index); free(members); free(linked); free(priced);
   return result;
 }

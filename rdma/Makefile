@@ -31,3 +31,9 @@ libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-coll
 clean:
 	rm -f $(BINS)
 .PHONY: all clean native-audit
+
+# _mesh_c: the headers as one Python module (mesh_c_build.py), for the interpreter that imports it
+PYTHON ?= $(HOME)/.venv-mesh-uv/bin/python
+mesh-c: mesh_c_build.py mesh-plan.h nccl.h libmesh.dylib libnccl-mesh.dylib
+	$(PYTHON) mesh_c_build.py
+.PHONY: mesh-c

@@ -1,16 +1,18 @@
 """torch.distributed's "mesh" backend: a ProcessGroup (torch's Python form of one, as
 torch/testing/_internal/distributed/multi_threaded_pg.py's) whose every collective is one NCCL group of
-../../libnccl-mesh.dylib (nccl.h on the bridges' prepared transfers).  MPS tensors take the library's Metal
-path: the group is encoded on torch's MPS stream (_stream.mm) and committed, each tensor passed as its
-storage's MTLBuffer and byte offset (ncclMeshBuffer), so the work is ordered with torch's own and the call
-returns at once.  CPU tensors take the host path, a non-contiguous one staged through a contiguous copy.
+../../libnccl-mesh.dylib (nccl.h on the bridges' prepared transfers), called through _mesh_c (the headers' own
+declarations, compiled against them: ../../mesh_c_build.py).  MPS tensors take the library's Metal path: the group
+is encoded on torch's MPS stream (_stream.mm) and committed, each tensor passed as its storage's MTLBuffer and byte
+offset (ncclMeshBuffer), so the work is ordered with torch's own and the call returns at once.  CPU tensors take the
+host path, a non-contiguous one staged through a contiguous copy.
 
-A rank's communicator is the clique's explicit configuration (MESH_LINKS, MESH_REGION; ncclGetUniqueId) over
-the bridges' nodes; each rank reads its node from its own bridge (mesh_observe on MESH_REGION) and the ranks
-exchange theirs through the group's store, so the communicator is that one split with torch's rank as key
-(ncclCommSplit), its ranks torch's."""
-import ctypes as C
+A group's communicator is over its topology, an operand (Options, torch's pg_options of init_process_group and
+new_group): its ranks' link map (mesh.LinkMap, mesh-plan.h's: a kind, the links, each one's cost), each rank's bridge
+node and this rank's bridge region.  Without one, the topology is what the bridges report (observe)."""
+import json
 import os
+import sys
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
@@ -22,41 +24,71 @@ if torch.backends.mps.is_available():
     from . import _stream  # its kernels for torch's functional collectives on MPS register as it loads
 
 RDMA = os.environ.get('MESH_RDMA') or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-LIB = C.CDLL(os.path.join(RDMA, 'libnccl-mesh.dylib'))
-MESH = C.CDLL(os.path.join(RDMA, 'libmesh.dylib'))
-MESH.mesh_observe.restype, MESH.mesh_observe.argtypes = C.c_int, [C.c_char_p, C.c_void_p, C.c_uint32, C.POINTER(C.c_uint32)]
-P, I, Z = C.c_void_p, C.c_int, C.c_size_t
+if RDMA not in sys.path:
+    sys.path.insert(0, RDMA)
+import mesh  # noqa: E402  (rdma/mesh.py: the planner's values, and _mesh_c)
+
+ffi, LIB = mesh.ffi, mesh.lib
+TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
+         torch.uint32: LIB.ncclUint32, torch.int64: LIB.ncclInt64, torch.uint64: LIB.ncclUint64, torch.float16: LIB.ncclFloat16,
+         torch.float32: LIB.ncclFloat32, torch.float64: LIB.ncclFloat64, torch.bfloat16: LIB.ncclBfloat16,
+         torch.float8_e4m3fn: LIB.ncclFloat8e4m3, torch.float8_e5m2: LIB.ncclFloat8e5m2}
+OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.MAX, LIB.ncclMax), (ReduceOp.MIN, LIB.ncclMin),
+       (ReduceOp.AVG, LIB.ncclAvg))
+# an observed link's alpha: the TB5 crossing's one-way latency through the bridges (metal-microbench
+# docs/measurement.md: the 3 KB host round trip 10.29 us); its beta is its port's bandwidth's
+ALPHA_US = 5.0
 
 
-class UniqueId(C.Structure):
-    _fields_ = [('internal', C.c_char * 128)]
+@dataclass
+class Options:
+    """A group's topology, torch's pg_options: `topology` its ranks' link map (mesh.link_map; None: observed),
+    `node` each rank's bridge node (None: observed, or rank r on node r with a topology given), `region` this
+    rank's bridge region (None: MESH_REGION, else /mesh0)."""
+    topology: mesh.LinkMap | None = None
+    node: list | None = None
+    region: str | None = None
 
 
-class MeshBuffer(C.Structure):
-    _fields_ = [('buffer', C.c_void_p), ('offset', C.c_size_t)]
+def link_map(kind, ranks, pairs, cost=None):
+    """A topology's link map over `ranks` (mesh.link_map: kind mesh, ring, tree or graph; each link's (alpha us,
+    beta ns a byte) in `cost`)."""
+    return mesh.link_map(kind, ranks, pairs, cost)
 
 
-for name, arguments in (
-        ('ncclGetUniqueId', [C.POINTER(UniqueId)]), ('ncclCommInitRank', [C.POINTER(P), I, UniqueId, I]),
-        ('ncclCommInitAll', [C.POINTER(P), I, P]), ('ncclCommSplit', [P, I, I, C.POINTER(P), P]),
-        ('ncclCommDestroy', [P]), ('ncclGroupStart', []), ('ncclGroupEnd', []),
-        ('ncclAllReduce', [P, P, Z, I, I, P, P]), ('ncclReduce', [P, P, Z, I, I, I, P, P]),
-        ('ncclBroadcast', [P, P, Z, I, I, P, P]), ('ncclAllGather', [P, P, Z, I, P, P]),
-        ('ncclReduceScatter', [P, P, Z, I, I, P, P]), ('ncclSend', [P, Z, I, I, P, P]), ('ncclRecv', [P, Z, I, I, P, P]),
-        ('ncclAlltoAll', [P, P, Z, I, P, P]), ('ncclGather', [P, P, Z, I, I, P, P]), ('ncclScatter', [P, P, Z, I, I, P, P])):
-    getattr(LIB, name).restype, getattr(LIB, name).argtypes = I, arguments
-LIB.ncclGetErrorString.restype, LIB.ncclGetErrorString.argtypes = C.c_char_p, [I]
-LIB.ncclGetLastError.restype, LIB.ncclGetLastError.argtypes = C.c_char_p, [P]
-
-TYPES = {torch.int8: 0, torch.uint8: 1, torch.bool: 1, torch.int32: 2, torch.uint32: 3, torch.int64: 4,
-         torch.uint64: 5, torch.float16: 6, torch.float32: 7, torch.float64: 8, torch.bfloat16: 9,
-         torch.float8_e4m3fn: 10, torch.float8_e5m2: 11}
-OPS = ((ReduceOp.SUM, 0), (ReduceOp.PRODUCT, 1), (ReduceOp.MAX, 2), (ReduceOp.MIN, 3), (ReduceOp.AVG, 4))
+def observe(store, rank, size, region):
+    """The group's topology as its bridges report it: each rank's node and links (mesh_observe), exchanged through
+    the group's store; ranks linked where their nodes are, each link at ALPHA_US and its port's bandwidth; every pair
+    linked a mesh, else a graph."""
+    views, node = ffi.new('struct mesh_link_view[]', 64), ffi.new('uint32_t *')
+    count = LIB.mesh_observe(region.encode(), views, 64, node)
+    if count < 0:
+        raise RuntimeError(f'libmesh: the bridge of region {region}: {os.strerror(-count)}')
+    store.set(f'mesh/observed/{rank}', json.dumps({'node': node[0], 'links': [[views[i].peer, views[i].bandwidth] for i in range(min(count, 64))]}))
+    reports = [json.loads(store.get(f'mesh/observed/{r}')) for r in range(size)]
+    nodes = [report['node'] for report in reports]
+    if len(set(nodes)) < size:
+        raise RuntimeError(f'ranks share a node ({nodes}): one rank a node is what the session carries yet')
+    bandwidth = {}
+    for report in reports:
+        for peer, bits in report['links']:
+            key = frozenset((report['node'], peer))
+            bandwidth[key] = max(bandwidth.get(key, 0), bits)
+    pairs, cost = [], []
+    for a in range(size):
+        for b in range(a + 1, size):
+            bits = bandwidth.get(frozenset((nodes[a], nodes[b])))
+            if bits is not None:
+                pairs.append((a, b))
+                cost.append((ALPHA_US, 8e9 / bits if bits else float('nan')))
+    every = len(pairs) == size * (size - 1) // 2
+    return mesh.link_map('mesh' if every else 'graph', size, pairs, cost), nodes
 
 
 def check(result):
     if result:
-        raise RuntimeError(f'libnccl-mesh: {LIB.ncclGetErrorString(result).decode()}: {LIB.ncclGetLastError(None).decode()}')
+        raise RuntimeError(f'libnccl-mesh: {ffi.string(LIB.ncclGetErrorString(result)).decode()}: '
+                           f'{ffi.string(LIB.ncclGetLastError(ffi.NULL)).decode()}')
 
 
 def op(reduce_op):
@@ -83,7 +115,7 @@ class Host:
                                                 else torch.empty(tensor.shape, dtype=tensor.dtype))
 
     def at(self, elements=0):
-        return self.host.data_ptr() + elements * self.host.element_size()
+        return ffi.cast('void *', self.host.data_ptr() + elements * self.host.element_size())
 
     def back(self):
         if not self.direct:
@@ -102,9 +134,11 @@ class Device:
         self.made = []
 
     def at(self, elements=0):
-        made = MeshBuffer(self.host.untyped_storage().data_ptr(), (self.host.storage_offset() + elements) * self.host.element_size())
+        made = ffi.new('ncclMeshBuffer *')
+        made.buffer = ffi.cast('void *', self.host.untyped_storage().data_ptr())
+        made.offset = (self.host.storage_offset() + elements) * self.host.element_size()
         self.made.append(made)
-        return C.addressof(made)
+        return made
 
     def back(self):
         if not self.direct:
@@ -151,31 +185,25 @@ def done(result):
 class ProcessGroupMesh(dist.ProcessGroup):
     _streamed = False
 
-    def __init__(self, rank, size, store=None):
+    def __init__(self, rank, size, store=None, options=None):
         super().__init__(rank, size)
+        options = options or Options()
         self._rank, self._size, self._pending = rank, size, None
-        self._stream = None
-        self.comm = P()
-        if size == 1:
-            check(LIB.ncclCommInitAll(C.byref(self.comm), 1, None))
-        else:
-            self._join(rank, size, store)
+        self._stream = ffi.NULL
+        region = options.region or os.environ.get('MESH_REGION') or '/mesh0'
+        topology, node = options.topology, options.node
+        if topology is None and size > 1:
+            topology, node = observe(store, rank, size, region)
+        elif topology is None:
+            topology = mesh.link_map('mesh', 1, [])
+        if topology.nodes != size:
+            raise ValueError(f'a topology of {topology.nodes} ranks for a group of {size}')
+        made, nodes = ffi.new('ncclComm_t *'), ffi.new('int[]', list(node)) if node is not None else ffi.NULL
+        check(LIB.ncclMeshCommInitRank(made, rank, topology.c, nodes, region.encode()))
+        self.comm, self.topology, self.node = made[0], topology, node
+        self.handle = int(ffi.cast('uintptr_t', self.comm))
         if _stream is not None:
-            _stream.attach(self, self.comm.value)
-
-    def _join(self, rank, size, store):
-        node = C.c_uint32()
-        observed = MESH.mesh_observe((os.environ.get('MESH_REGION') or '/mesh0').encode(), None, 0, C.byref(node))
-        if observed < 0:
-            raise RuntimeError(f'libmesh: the bridge of region {os.environ.get("MESH_REGION") or "/mesh0"}: '
-                               f'{os.strerror(-observed)}')
-        store.set(f'mesh/node/{rank}', str(node.value))
-        nodes = [int(store.get(f'mesh/node/{r}')) for r in range(size)]
-        unique, base = UniqueId(), P()
-        check(LIB.ncclGetUniqueId(C.byref(unique)))
-        check(LIB.ncclCommInitRank(C.byref(base), size, unique, nodes[rank]))
-        check(LIB.ncclCommSplit(base, 0, rank, C.byref(self.comm), None))
-        check(LIB.ncclCommDestroy(base))
+            _stream.attach(self, self.handle)
 
     def size(self):
         return self._size
@@ -202,10 +230,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
             return done(result)
         mps = on_mps(result)
         if mps:
-            self._stream = _stream.begin()
+            self._stream = ffi.cast('void *', _stream.begin())
             ProcessGroupMesh._streamed = True
         else:
-            self._stream = None
+            self._stream = ffi.NULL
             if ProcessGroupMesh._streamed:
                 _stream.complete_all()
                 torch.mps.synchronize()
@@ -240,7 +268,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def allreduce(self, tensors, opts=dist.AllreduceOptions()):
         if (s := self._direct(*tensors)) is not None:
-            return issued([s.allreduce(t, op(opts.reduceOp), self.comm.value, asynchronous(opts)) for t in tensors], tensors)
+            return issued([s.allreduce(t, op(opts.reduceOp), self.handle, asynchronous(opts)) for t in tensors], tensors)
         hosts = [operand(t) for t in tensors]
         return self._group(lambda: [check(LIB.ncclAllReduce(h.at(), h.at(), h.host.numel(), kind(h.host), op(opts.reduceOp),
                                                             self.comm, self._stream)) for h in hosts], hosts, tensors)
@@ -250,14 +278,14 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def reduce(self, tensors, opts=dist.ReduceOptions()):
         if (s := self._direct(*tensors)) is not None:
-            return issued([s.reduce(t, op(opts.reduceOp), opts.rootRank, self.comm.value, asynchronous(opts)) for t in tensors], tensors)
+            return issued([s.reduce(t, op(opts.reduceOp), opts.rootRank, self.handle, asynchronous(opts)) for t in tensors], tensors)
         hosts = [operand(t) for t in tensors]
         return self._group(lambda: [check(LIB.ncclReduce(h.at(), h.at(), h.host.numel(), kind(h.host), op(opts.reduceOp),
                                                          opts.rootRank, self.comm, self._stream)) for h in hosts], hosts, tensors)
 
     def broadcast(self, tensors, opts=dist.BroadcastOptions()):
         if (s := self._direct(*tensors)) is not None:
-            return issued([s.broadcast(t, opts.rootRank, self.comm.value, asynchronous(opts)) for t in tensors], tensors)
+            return issued([s.broadcast(t, opts.rootRank, self.handle, asynchronous(opts)) for t in tensors], tensors)
         hosts = [operand(t) for t in tensors]
         return self._group(lambda: [check(LIB.ncclBroadcast(h.at(), h.at(), h.host.numel(), kind(h.host), opts.rootRank,
                                                             self.comm, self._stream)) for h in hosts], hosts, tensors)
@@ -267,7 +295,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def all_gather_single(self, output, input, opts=None):
         if (s := self._direct(output, input)) is not None:
-            return issued([s.allgather(output, input, self.comm.value, asynchronous(opts))], output)
+            return issued([s.allgather(output, input, self.handle, asynchronous(opts))], output)
         source, target = operand(input), operand(output, read=False)
         return self._group(lambda: check(LIB.ncclAllGather(source.at(), target.at(), source.host.numel(), kind(source.host),
                                                            self.comm, self._stream)), [target], output)
@@ -304,7 +332,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def reduce_scatter_single(self, output, input, opts=dist.ReduceScatterOptions()):
         if (s := self._direct(output, input)) is not None:
-            return issued([s.reduce_scatter(output, input, op(opts.reduceOp), self.comm.value, asynchronous(opts))], output)
+            return issued([s.reduce_scatter(output, input, op(opts.reduceOp), self.handle, asynchronous(opts))], output)
         source, target = operand(input), operand(output, read=False)
         return self._group(lambda: check(LIB.ncclReduceScatter(source.at(), target.at(), target.host.numel(), kind(source.host),
                                                                op(opts.reduceOp), self.comm, self._stream)), [target], output)
@@ -350,7 +378,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
             width = input[0].numel() if input.dim() and input.shape[0] else 1
             rows_in = list(input_split_sizes) or [input.shape[0] // self._size] * self._size
             rows_out = list(output_split_sizes) or [output.shape[0] // self._size] * self._size
-            return issued([s.alltoall(output, input, [r * width for r in rows_in], [r * width for r in rows_out], self.comm.value,
+            return issued([s.alltoall(output, input, [r * width for r in rows_in], [r * width for r in rows_out], self.handle,
                                       asynchronous(opts))], output)
         source, target = operand(input), operand(output, read=False)
         if not output_split_sizes and not input_split_sizes:
@@ -394,14 +422,14 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def send(self, tensors, dst, tag):
         if (s := self._direct(*tensors)) is not None:
-            return issued([s.send(t, dst, self.comm.value, True) for t in tensors], tensors)
+            return issued([s.send(t, dst, self.handle, True) for t in tensors], tensors)
         hosts = [operand(t) for t in tensors]
         return self._group(lambda: [check(LIB.ncclSend(h.at(), h.host.numel(), kind(h.host), dst, self.comm, self._stream))
                                     for h in hosts], [], tensors)
 
     def recv(self, tensors, src, tag):
         if (s := self._direct(*tensors)) is not None:
-            return issued([s.recv(t, src, self.comm.value, True) for t in tensors], tensors)
+            return issued([s.recv(t, src, self.handle, True) for t in tensors], tensors)
         hosts = [operand(t, read=False) for t in tensors]
         return self._group(lambda: [check(LIB.ncclRecv(h.at(), h.host.numel(), kind(h.host), src, self.comm, self._stream))
                                     for h in hosts], hosts, tensors)
@@ -410,15 +438,18 @@ class ProcessGroupMesh(dist.ProcessGroup):
 _installed = False
 
 
-def create(store, rank, size, timeout):
-    """The group; the first one also completes what PyTorch's parallelism APIs need of MPS tensors (_mps.py)
-    and installs the partition header (partition.py)."""
+def create(opts, options):
+    """The group (torch's extended creator: `opts` its store, rank and size, `options` the caller's pg_options, an
+    Options); the first one also completes what PyTorch's parallelism APIs need of MPS tensors (_mps.py) and
+    installs the partition header (partition.py)."""
     global _installed
     if not _installed:
         from . import _mps, partition  # noqa: F401 (partition installs itself)
         _mps.register()
         _installed = True
-    return ProcessGroupMesh(rank, size, store)
+    if options is not None and not isinstance(options, Options):
+        raise TypeError(f'the mesh backend takes torch_mesh.Options as pg_options, not {type(options).__name__}')
+    return ProcessGroupMesh(opts.group_rank, opts.group_size, opts.store, options)
 
 
-dist.Backend.register_backend('mesh', create, devices=['cpu', 'mps'])
+dist.Backend.register_backend('mesh', create, devices=['cpu', 'mps'], extended_api=True)

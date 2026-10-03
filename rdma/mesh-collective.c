@@ -1,61 +1,85 @@
 #include "mesh-collective.h"
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* The link map is configuration, read as written: the MLX JACCL hostfile idea
-   (github.com/ml-explore/mlx docs/src/usage/distributed.rst) reduced to a kind, a node count and links. */
-int mesh_link_map_read(const char *path,struct mesh_link_map *map){
-  static const char *const kinds[]={"mesh","ring","tree"};
-  FILE *file=fopen(path,"r");
-  if(!file)return errno;
-  char line[128],kind[8]="";
-  uint32_t a,b,capacity=0;
-  *map=(struct mesh_link_map){.kind=UINT32_MAX};
-  while(fgets(line,sizeof line,file)){
-    if(sscanf(line,"%u %u",&a,&b)==2){
-      if(map->links==capacity){
-        uint32_t (*grown)[2]=realloc(map->link,(size_t)(capacity=capacity?2*capacity:64)*sizeof *map->link);
-        if(!grown){fclose(file);mesh_link_map_free(map);return ENOMEM;}
-        map->link=grown;
-      }
-      map->link[map->links][0]=a;map->link[map->links++][1]=b;
-    }else if(map->kind==UINT32_MAX && sscanf(line,"%7s %u",kind,&a)==2)
-      for(uint32_t k=0;k<3;k++)if(!strcmp(kind,kinds[k])){map->kind=k;map->nodes=a;}
-  }
-  fclose(file);
-  /* Refuse a map its algorithm cannot run, instead of indexing past the planner's arrays or
-     walking a broken ring forever: every node < nodes and at most one link into it; a ring is one
-     cycle through every node; a tree has nodes-1 links and every node reaches the root. */
-  uint32_t n=map->nodes,at,steps;
-  if(map->kind==UINT32_MAX || !n)return EINVAL;
+int mesh_link_map_check(const struct mesh_link_map *map){
+  const uint32_t n=map->nodes;
+  uint32_t at,steps;
+  if(map->kind>MESH_LINKS_GRAPH || !n || (map->links && !map->link))return EINVAL;
+  for(uint32_t l=0;l<map->links;l++)if(map->link[l][0]>=n || map->link[l][1]>=n || map->link[l][0]==map->link[l][1])return EINVAL;
   if(map->kind==MESH_LINKS_MESH)return 0;
-  uint32_t *up=malloc((size_t)n*sizeof *up);
-  if(!up)return ENOMEM;
+  uint32_t *up=malloc((size_t)n*sizeof *up),*order=malloc((size_t)n*sizeof *order);
+  if(!up || !order){free(up);free(order);return ENOMEM;}
   int result=0;
-  for(uint32_t v=0;v<n;v++)up[v]=n;
-  for(uint32_t l=0;l<map->links && !result;l++){
-    if(map->link[l][0]>=n || map->link[l][1]>=n || up[map->link[l][1]]<n)result=EINVAL;
-    else up[map->link[l][1]]=map->link[l][0];
-  }
-  if(!result && map->kind==MESH_LINKS_RING){
-    at=0;steps=0;
-    do{at=up[at];steps++;}while(at<n && at && steps<n);
-    result=at==0 && steps==n?0:EINVAL;
-  } else if(!result){
-    if(map->links!=n-1)result=EINVAL;
-    for(uint32_t v=0;v<n && !result;v++){
-      for(at=v,steps=0;up[at]<n && steps<n;steps++)at=up[at];
-      if(up[at]<n)result=EINVAL;
+  if(map->kind==MESH_LINKS_GRAPH){
+    /* connected: breadth first from node 0 over the links either way */
+    uint32_t reached=1;
+    for(uint32_t v=0;v<n;v++)up[v]=n;
+    up[0]=0;order[0]=0;
+    for(uint32_t head=0;head<reached;head++)for(uint32_t l=0;l<map->links;l++)for(uint32_t e=0;e<2;e++)
+      if(map->link[l][e]==order[head] && up[map->link[l][1-e]]==n){up[map->link[l][1-e]]=order[head];order[reached++]=map->link[l][1-e];}
+    result=reached==n?0:EINVAL;
+  }else{
+    for(uint32_t v=0;v<n;v++)up[v]=n;
+    for(uint32_t l=0;l<map->links && !result;l++){
+      if(up[map->link[l][1]]<n)result=EINVAL;
+      else up[map->link[l][1]]=map->link[l][0];
+    }
+    if(!result && map->kind==MESH_LINKS_RING){
+      at=0;steps=0;
+      do{at=up[at];steps++;}while(at<n && at && steps<n);
+      result=at==0 && steps==n?0:EINVAL;
+    }else if(!result){
+      if(map->links!=n-1)result=EINVAL;
+      for(uint32_t v=0;v<n && !result;v++){
+        for(at=v,steps=0;up[at]<n && steps<n;steps++)at=up[at];
+        if(up[at]<n)result=EINVAL;
+      }
     }
   }
-  free(up);
+  free(up);free(order);
+  return result;
+}
+
+/* The text form: the MLX JACCL hostfile idea (github.com/ml-explore/mlx docs/src/usage/distributed.rst) reduced to a
+   kind, a node count and links with their costs; refused where mesh_link_map_check refuses it. */
+int mesh_link_map_read(const char *path,struct mesh_link_map *map){
+  static const char *const kinds[]={"mesh","ring","tree","graph"};
+  FILE *file=fopen(path,"r");
+  if(!file)return errno;
+  char line[256],kind[8]="",rest[2];
+  uint32_t a,b,capacity=0,costed=0;
+  double alpha,beta;
+  *map=(struct mesh_link_map){.kind=UINT32_MAX};
+  while(fgets(line,sizeof line,file)){
+    const int fields=sscanf(line," %u %u %lf %lf %1s",&a,&b,&alpha,&beta,rest);
+    if(fields>=2){
+      if(map->links==capacity){
+        capacity=capacity?2*capacity:64;
+        uint32_t (*grown)[2]=realloc(map->link,(size_t)capacity*sizeof *map->link);
+        double (*priced)[2]=grown?realloc(map->cost,(size_t)capacity*sizeof *map->cost):NULL;
+        if(grown)map->link=grown;
+        if(priced)map->cost=priced;
+        if(!grown || !priced){fclose(file);mesh_link_map_free(map);return ENOMEM;}
+      }
+      map->link[map->links][0]=a;map->link[map->links][1]=b;
+      map->cost[map->links][0]=fields==4?alpha:NAN;map->cost[map->links][1]=fields==4?beta:NAN;
+      costed+=fields==4;map->links++;
+    }else if(map->kind==UINT32_MAX && sscanf(line,"%7s %u",kind,&a)==2)
+      for(uint32_t k=0;k<4;k++)if(!strcmp(kind,kinds[k])){map->kind=k;map->nodes=a;}
+  }
+  fclose(file);
+  if(!costed){free(map->cost);map->cost=NULL;}
+  int result=map->kind==UINT32_MAX?EINVAL:mesh_link_map_check(map);
+  if(result)mesh_link_map_free(map);
   return result;
 }
 
 void mesh_link_map_free(struct mesh_link_map *map){
-  free(map->link);map->link=NULL;map->links=0;
+  free(map->link);free(map->cost);map->link=NULL;map->cost=NULL;map->links=0;
 }
 
 /* Whether node `v` contributes to `c`: a broadcast's root; an all-reduce's contributors, every node
@@ -83,7 +107,7 @@ static struct mesh_operand mesh_accumulated(struct mesh_operand operand,struct m
   return operand;
 }
 
-/* Whether the map links a and b, either way (a mesh links every pair). */
+/* Whether the map links a and b, either way (a mesh links every pair; a ring, a tree or a graph its links). */
 static int mesh_linked(const struct mesh_link_map *map,uint32_t a,uint32_t b){
   if(a==b || a>=map->nodes || b>=map->nodes)return 0;
   if(map->kind==MESH_LINKS_MESH)return 1;
@@ -318,6 +342,8 @@ static uint32_t mesh_direct_collective(const struct mesh_link_map *map,uint32_t 
   return count;
 }
 
+uint32_t mesh_collective_steps(uint32_t nodes){return 4*nodes;}
+
 uint32_t mesh_collective_plan(const struct mesh_link_map *map,uint32_t rank,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *steps){
   if(map->nodes<2 || rank>=map->nodes)return 0;
   switch(c.how){
@@ -330,17 +356,26 @@ uint32_t mesh_collective_plan(const struct mesh_link_map *map,uint32_t rank,stru
   }
 }
 
+/* The cost of the link between a and b: its own where the map gives one, else alpha and beta. */
+static void mesh_link_cost(const struct mesh_link_map *map,uint32_t a,uint32_t b,double alpha,double beta,double *link_alpha,double *link_beta){
+  *link_alpha=alpha;*link_beta=beta;
+  for(uint32_t l=0;map->cost && l<map->links;l++)
+    if(((map->link[l][0]==a && map->link[l][1]==b) || (map->link[l][0]==b && map->link[l][1]==a)) && !isnan(map->cost[l][0])){
+      *link_alpha=map->cost[l][0];*link_beta=map->cost[l][1];return;
+    }
+}
+
 /* Every node's plan, then its time under the alpha-beta model [Hockney 1994] with a node's sends
    sharing its outgoing port and its receives its incoming one, as Thakur, Rabenseifner and Gropp
    cost these algorithms: each node takes its steps in order; a SEND leaves when the node has
-   reached it and its port is free, and arrives alpha after its bytes x beta; a REDUCE or COPY
+   reached it and its port is free, and arrives its link's alpha after its bytes x its link's beta; a REDUCE or COPY
    waits for its SEND's arrival and its port.  The time is the last node's; negative where a node
    has no plan, a receive has no matching SEND of the same piece (a mismatched schedule), the
    schedule stops (a deadlock).  A step combines any number of receives: a kernel past its
    buffer slots chains its combine (metal-microbench decode_crossings.swift). */
 static double mesh_collective_evaluate(const struct mesh_link_map *map,struct mesh_collective c,struct mesh_operand operand,
   double alpha,double beta){
-  const uint32_t n=map->nodes,capacity=MESH_COLLECTIVE_STEPS(n);
+  const uint32_t n=map->nodes,capacity=mesh_collective_steps(n);
   if(n<2)return 0;
   struct mesh_step *steps=calloc((size_t)n*capacity,sizeof *steps);
   double *arrival=calloc((size_t)n*capacity,sizeof *arrival),result=-1;
@@ -356,10 +391,12 @@ static double mesh_collective_evaluate(const struct mesh_link_map *map,struct me
     for(uint32_t r=0;r<n;r++)while(cursor[r]<count[r]){
       const struct mesh_step *step=steps+(size_t)r*capacity+cursor[r];
       const double bytes=(double)step->piece.elements*step->piece.element_bytes;
+      double link_alpha,link_beta;
+      mesh_link_cost(map,r,step->peer,alpha,beta,&link_alpha,&link_beta);
       if(step->op==MESH_STEP_SEND){
         const double start=clock[r]>out_free[r]?clock[r]:out_free[r];
-        out_free[r]=start+bytes*beta/1e3;
-        arrival[(size_t)r*capacity+cursor[r]++]=out_free[r]+alpha;
+        out_free[r]=start+bytes*link_beta/1e3;
+        arrival[(size_t)r*capacity+cursor[r]++]=out_free[r]+link_alpha;
         progress=1;
         continue;
       }
@@ -373,7 +410,7 @@ static double mesh_collective_evaluate(const struct mesh_link_map *map,struct me
       const struct mesh_step *send=steps+(size_t)p*capacity+k;
       if(k==count[p] || send->piece.elements!=step->piece.elements || send->piece.element_bytes!=step->piece.element_bytes)goto done;
       if(cursor[p]<=k)break;
-      double complete=in_free[r]+bytes*beta/1e3;
+      double complete=in_free[r]+bytes*link_beta/1e3;
       if(arrival[(size_t)p*capacity+k]>complete)complete=arrival[(size_t)p*capacity+k];
       in_free[r]=complete;
       if(complete>clock[r])clock[r]=complete;

@@ -14,14 +14,8 @@
 #include <vector>
 #include "nccl.h"
 
-struct Stream {
-  void *commandBuffer, *commandEncoder;
-  void *(*workspace)(size_t, void *);
-  void *context;
-  ncclMeshIssue *issue;
-};
 
-static Stream stream_;
+static ncclMeshStream stream_;
 // Within compiled-graph regions (batch): the command buffers committed, each signalling its count on progress_ as the
 // GPU reaches its end (a shared event's value is the GPU's progress at once; a completion handler runs 7-9 us
 // later, at the 99th percentile 20-60), and whether a collective was left in torch's open buffer.
@@ -50,7 +44,7 @@ static int64_t begin() {
     buffer = (__bridge void *)stream->commandBuffer();
     encoder = (__bridge void *)stream->commandEncoder();
   });
-  stream_ = Stream{buffer, encoder, workspace, nullptr, nullptr};
+  stream_ = ncclMeshStream{buffer, encoder, workspace, nullptr, nullptr};
   return (int64_t)(uintptr_t)&stream_;
 }
 
@@ -124,8 +118,8 @@ static uint64_t on_stream(ncclResult_t (^call)(ncclMeshStream *), bool split) {
   __block ncclResult_t result = ncclSuccess;
   __block ncclMeshIssue issue = {0, 0};
   dispatch_sync(stream->queue(), ^{
-    stream_ = Stream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr, split ? &issue : nullptr};
-    result = call((ncclMeshStream *)&stream_);
+    stream_ = ncclMeshStream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr, split ? &issue : nullptr};
+    result = call(&stream_);
     if (!split || issue.published) publishing(stream);
   });
   if (issue.ticket && !result) holders_[issue.ticket] = std::move(held_);
@@ -141,9 +135,9 @@ static void complete(uint64_t ticket) {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   __block ncclResult_t result = ncclSuccess;
   dispatch_sync(stream->queue(), ^{
-    stream_ = Stream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr, nullptr};
+    stream_ = ncclMeshStream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr, nullptr};
     int published = 0;
-    result = ncclMeshComplete(ticket, (ncclMeshStream *)&stream_, &published);
+    result = ncclMeshComplete(ticket, &stream_, &published);
     if (published) publishing(stream);
   });
   release();

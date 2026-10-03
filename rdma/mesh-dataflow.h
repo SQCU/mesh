@@ -1,13 +1,11 @@
 #ifndef MESH_DATAFLOW_H
 #define MESH_DATAFLOW_H
 #include "mesh.h"
+#include "mesh-plan.h"
 #include <errno.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
 struct mesh_range { uint32_t first,count; };
 struct mesh_ctx { struct hdr *M; size_t len; uint64_t client,send_off,send_bytes; uint32_t rows,arena,wire,shared_pages,row_cursor,wire_cursor,bulk_cursor; int fd; };
-struct mesh_link_view { uint32_t peer,phase; char device[32]; uint64_t bandwidth; };
-/* design/algorithm-sources.md#meshobserve */
-int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
 /* design/prepared-machine.md#M09 */
 /* The two arena ranges.  [0,wire_pages) is the registered window and the only memory an SGE may
    name; [wire_pages,arena) is addressable and never registered.  An undeclared window is the whole

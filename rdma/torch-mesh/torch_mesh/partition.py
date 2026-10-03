@@ -299,26 +299,12 @@ _init, _size, _shape = DeviceMesh.__init__, DeviceMesh.size, DeviceMesh.shape.fg
 _hash_key, _eq, _flatten, _unflatten = DeviceMesh._hash_key, DeviceMesh.__eq__, DeviceMesh._create_flatten_mesh, DeviceMesh._unflatten
 
 
-def _environment():
-    """MESH_PARTITION="tp=5,11 cp=21,43": the parts of each named mesh dimension (ab8ff58's operand), each
-    coordinate's capacity its part; the same on every rank."""
-    named = {}
-    for item in os.environ.get('MESH_PARTITION', '').split():
-        name, _, parts = item.partition('=')
-        named[name] = tuple(int(p) for p in parts.split(','))
-    return named
-
-
 def _mesh_init(self, *args, **kwargs):
     _init(self, *args, **kwargs)
     root = kwargs.get('_root_mesh')
     named = {name: key for name, key in (_named(root) if root is not None else {}).items() if name in (self.mesh_dim_names or ())}
     if named:
         _attach(self, named)
-    elif root is None:
-        stated = {name: (parts, parts) for name, parts in _environment().items() if name in (self.mesh_dim_names or ())}
-        if stated:
-            attach(self, **stated)
 
 
 def _mesh_size(self, mesh_dim=None):
