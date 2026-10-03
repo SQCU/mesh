@@ -1,13 +1,15 @@
 // torch's current MPS stream as libnccl-mesh's ncclMeshStream (nccl.h): begin() gives the stream's command buffer,
 // its open compute encoder (the group's kernels join torch's own) and a workspace allocator (MPS tensors from
-// torch's caching allocator, held until commit(), then reused in the stream's order); commit() commits the work
-// without waiting.
+// torch's caching allocator, held until the group is complete, then reused in the stream's order); commit() commits
+// the work without waiting.  A collective issued and not completed (an async op, a functional collective) is a
+// MeshWork: its wait encodes the rest (its landings, later rounds and results) on the stream where it is waited.
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <ATen/mps/MPSStream.h>
 #include <ATen/native/mps/OperationUtils.h>
 #include <torch/csrc/distributed/c10d/GroupRegistry.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
+#include <map>
 #include <unordered_map>
 #include <vector>
 #include "nccl.h"
@@ -16,17 +18,25 @@ struct Stream {
   void *commandBuffer, *commandEncoder;
   void *(*workspace)(size_t, void *);
   void *context;
+  ncclMeshIssue *issue;
 };
 
 static Stream stream_;
-// Within compiled-graph regions (batch): the command buffers committed, each signalling its count on retired_ as the
+// Within compiled-graph regions (batch): the command buffers committed, each signalling its count on progress_ as the
 // GPU reaches its end (a shared event's value is the GPU's progress at once; a completion handler runs 7-9 us
 // later, at the 99th percentile 20-60), and whether a collective was left in torch's open buffer.
-static id<MTLSharedEvent> retired_;
+static id<MTLSharedEvent> progress_;
 static uint64_t committed_ = 0;
 static int batching_ = 0;
 static bool deferred_ = false;
 static std::vector<at::Tensor> held_;
+// each issued group's workspace, by ticket, until the library has retired it
+static std::map<uint64_t, std::vector<at::Tensor>> holders_;
+
+static void release() {
+  const uint64_t retired = ncclMeshRetired();
+  holders_.erase(holders_.begin(), holders_.upper_bound(retired));
+}
 
 static void *workspace(size_t bytes, void *) {
   held_.push_back(at::empty({(int64_t)bytes}, at::TensorOptions().dtype(at::kByte).device(at::kMPS)));
@@ -40,25 +50,35 @@ static int64_t begin() {
     buffer = (__bridge void *)stream->commandBuffer();
     encoder = (__bridge void *)stream->commandEncoder();
   });
-  stream_ = Stream{buffer, encoder, workspace, nullptr};
+  stream_ = Stream{buffer, encoder, workspace, nullptr, nullptr};
   return (int64_t)(uintptr_t)&stream_;
 }
 
-// On torch's queue: its open buffer committed (within a compiled graph, counted on retired_).
+// On torch's queue: its open buffer committed (within a compiled graph, counted on progress_).
 static void committing(at::mps::MPSStream *stream) {
   if (batching_) {
-    if (!retired_) retired_ = [stream->device() newSharedEvent];
+    if (!progress_) progress_ = [stream->device() newSharedEvent];
     stream->endKernelCoalescing();
-    [stream->commandBuffer() encodeSignalEvent:retired_ value:++committed_];
+    [stream->commandBuffer() encodeSignalEvent:progress_ value:++committed_];
   }
   stream->synchronize(at::mps::SyncType::COMMIT);
   deferred_ = false;
+}
+
+// Work the peers wait on (a publication): committed at once outside a compiled graph (the host may next block
+// outside torch while a peer waits on it); within one, while two buffers are in flight it joins the open one.
+static void publishing(at::mps::MPSStream *stream) {
+  if (!batching_ || committed_ - progress_.signaledValue < 2)
+    committing(stream);
+  else
+    deferred_ = true;
 }
 
 static void commit() {
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   dispatch_sync(stream->queue(), ^{ committing(stream); });
   held_.clear();
+  release();
 }
 
 // A compiled graph's run (torch_mesh/_mps.py): +1 as it starts, -1 as it ends, when a collective left open is committed.
@@ -92,23 +112,76 @@ static ncclMeshBuffer located(const at::Tensor &tensor) {
   return {(__bridge void *)at::native::mps::getMTLBufferStorage(tensor), (size_t)(tensor.storage_offset() * tensor.element_size())};
 }
 
-// One collective (or one group of NCCL's lowering) on contiguous MPS tensors in one turn of torch's stream queue: its command buffer and open encoder,
-// the call encoded into them, the work committed.
-static int64_t on_stream(ncclResult_t (^call)(ncclMeshStream *)) {
+static void checked(int64_t result) {
+  TORCH_CHECK(!result, "libnccl-mesh: ", ncclGetErrorString((ncclResult_t)result), ": ", ncclGetLastError(nullptr));
+}
+
+// One collective (or one group of NCCL's lowering) on contiguous MPS tensors in one turn of torch's stream queue: its
+// command buffer and open encoder, the call encoded into them, and committed where it published.  Split, it is
+// issued and not completed: its ticket (0: complete at once), its workspace held until the library retires it.
+static uint64_t on_stream(ncclResult_t (^call)(ncclMeshStream *), bool split) {
+  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+  __block ncclResult_t result = ncclSuccess;
+  __block ncclMeshIssue issue = {0, 0};
+  dispatch_sync(stream->queue(), ^{
+    stream_ = Stream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr, split ? &issue : nullptr};
+    result = call((ncclMeshStream *)&stream_);
+    if (!split || issue.published) publishing(stream);
+  });
+  if (issue.ticket && !result) holders_[issue.ticket] = std::move(held_);
+  held_.clear();
+  release();
+  checked(result);
+  return issue.ticket;
+}
+
+// every issued group through `ticket` completed on torch's stream where it is waited
+static void complete(uint64_t ticket) {
+  if (ncclMeshRetired() >= ticket) return release();
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   __block ncclResult_t result = ncclSuccess;
   dispatch_sync(stream->queue(), ^{
-    stream_ = Stream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr};
-    result = call((ncclMeshStream *)&stream_);
-    // A collective outside a compiled graph is committed at once (the host may next block outside torch while
-    // a peer waits on it); within one, while two buffers are in flight it joins the open one.
-    if (!batching_ || committed_ - retired_.signaledValue < 2)
-      committing(stream);
-    else
-      deferred_ = true;
+    stream_ = Stream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr, nullptr};
+    int published = 0;
+    result = ncclMeshComplete(ticket, (ncclMeshStream *)&stream_, &published);
+    if (published) publishing(stream);
   });
-  held_.clear();
-  return result;
+  release();
+  checked(result);
+}
+
+static void complete_all() { complete(UINT64_MAX); }
+
+// c10d's Work for a group issued and not completed: waiting (or synchronizing, asking whether it completed, or
+// asking for its future) encodes the rest on torch's current stream, where every later kernel reads its results
+class MeshWork : public c10d::Work {
+ public:
+  MeshWork(uint64_t ticket, std::vector<at::Tensor> outputs) : c10d::Work(-1, c10d::OpType::UNKNOWN), ticket_(ticket), outputs_(std::move(outputs)) {}
+  bool isCompleted() override { finish(); return true; }
+  bool isSuccess() const override { return finished_; }
+  bool wait(std::chrono::milliseconds) override { finish(); return true; }
+  void synchronize() override { finish(); }
+  c10::intrusive_ptr<c10::ivalue::Future> getFuture() override {
+    finish();
+    auto future = c10::make_intrusive<c10::ivalue::Future>(c10::ListType::create(c10::TensorType::get()));
+    future->markCompleted(c10::IValue(outputs_));
+    return future;
+  }
+
+ private:
+  void finish() {
+    if (finished_) return;
+    finished_ = true;
+    complete(ticket_);
+  }
+  uint64_t ticket_;
+  std::vector<at::Tensor> outputs_;
+  bool finished_ = false;
+};
+
+static c10::intrusive_ptr<c10d::Work> work_of(uint64_t ticket, std::vector<at::Tensor> outputs) {
+  if (!ticket) return {};
+  return c10::make_intrusive<MeshWork>(ticket, std::move(outputs));
 }
 
 static ncclComm_t communicator(int64_t comm) { return (ncclComm_t)(uintptr_t)comm; }
@@ -140,38 +213,38 @@ static Operand reducing(const at::Tensor &tensor, int64_t &op) {
   return {located(tensor), (size_t)tensor.numel(), kind(tensor.scalar_type())};
 }
 
-static int64_t allreduce(const at::Tensor &tensor, int64_t op, int64_t comm) {
+static uint64_t allreduce(const at::Tensor &tensor, int64_t op, int64_t comm, bool split) {
   const Operand o = reducing(tensor, op);
-  return on_stream(^(ncclMeshStream *s) { return ncclAllReduce(&o.buffer, (void *)&o.buffer, o.count, o.type, (ncclRedOp_t)op, communicator(comm), s); });
+  return on_stream(^(ncclMeshStream *s) { return ncclAllReduce(&o.buffer, (void *)&o.buffer, o.count, o.type, (ncclRedOp_t)op, communicator(comm), s); }, split);
 }
 
-static int64_t reduce(const at::Tensor &tensor, int64_t op, int64_t root, int64_t comm) {
+static uint64_t reduce(const at::Tensor &tensor, int64_t op, int64_t root, int64_t comm, bool split) {
   const Operand o = reducing(tensor, op);
   return on_stream(^(ncclMeshStream *s) {
     return ncclReduce(&o.buffer, (void *)&o.buffer, o.count, o.type, (ncclRedOp_t)op, (int)root, communicator(comm), s);
-  });
+  }, split);
 }
 
-static int64_t broadcast(const at::Tensor &tensor, int64_t root, int64_t comm) {
+static uint64_t broadcast(const at::Tensor &tensor, int64_t root, int64_t comm, bool split) {
   const Operand o = moving(tensor);
-  return on_stream(^(ncclMeshStream *s) { return ncclBroadcast(&o.buffer, (void *)&o.buffer, o.count, o.type, (int)root, communicator(comm), s); });
+  return on_stream(^(ncclMeshStream *s) { return ncclBroadcast(&o.buffer, (void *)&o.buffer, o.count, o.type, (int)root, communicator(comm), s); }, split);
 }
 
-static int64_t allgather(const at::Tensor &output, const at::Tensor &input, int64_t comm) {
+static uint64_t allgather(const at::Tensor &output, const at::Tensor &input, int64_t comm, bool split) {
   const Operand from = moving(input), to = moving(output);
-  return on_stream(^(ncclMeshStream *s) { return ncclAllGather(&from.buffer, (void *)&to.buffer, from.count, from.type, communicator(comm), s); });
+  return on_stream(^(ncclMeshStream *s) { return ncclAllGather(&from.buffer, (void *)&to.buffer, from.count, from.type, communicator(comm), s); }, split);
 }
 
-static int64_t reduce_scatter(const at::Tensor &output, const at::Tensor &input, int64_t op, int64_t comm) {
+static uint64_t reduce_scatter(const at::Tensor &output, const at::Tensor &input, int64_t op, int64_t comm, bool split) {
   const Operand from = reducing(input, op), to = reducing(output, op);
   return on_stream(^(ncclMeshStream *s) {
     return ncclReduceScatter(&from.buffer, (void *)&to.buffer, to.count, from.type, (ncclRedOp_t)op, communicator(comm), s);
-  });
+  }, split);
 }
 
 // all-to-all with each rank's elements (NCCL's own lowering: each rank's sends and receives in one group)
-static int64_t alltoall(const at::Tensor &output, const at::Tensor &input, std::vector<int64_t> sends, std::vector<int64_t> receives,
-                        int64_t comm) {
+static uint64_t alltoall(const at::Tensor &output, const at::Tensor &input, std::vector<int64_t> sends, std::vector<int64_t> receives,
+                         int64_t comm, bool split) {
   const Operand from = moving(input), to = moving(output);
   const size_t per = input.numel() ? from.count / input.numel() : 1, size = input.element_size() / per;
   return on_stream(^(ncclMeshStream *s) {
@@ -185,17 +258,17 @@ static int64_t alltoall(const at::Tensor &output, const at::Tensor &input, std::
     }
     const ncclResult_t ended = ncclGroupEnd();
     return result ? result : ended;
-  });
+  }, split);
 }
 
-static int64_t send_to(const at::Tensor &tensor, int64_t peer, int64_t comm) {
+static uint64_t send_to(const at::Tensor &tensor, int64_t peer, int64_t comm, bool split) {
   const Operand o = moving(tensor);
-  return on_stream(^(ncclMeshStream *s) { return ncclSend(&o.buffer, o.count, o.type, (int)peer, communicator(comm), s); });
+  return on_stream(^(ncclMeshStream *s) { return ncclSend(&o.buffer, o.count, o.type, (int)peer, communicator(comm), s); }, split);
 }
 
-static int64_t receive_from(const at::Tensor &tensor, int64_t peer, int64_t comm) {
+static uint64_t receive_from(const at::Tensor &tensor, int64_t peer, int64_t comm, bool split) {
   const Operand o = moving(tensor);
-  return on_stream(^(ncclMeshStream *s) { return ncclRecv((void *)&o.buffer, o.count, o.type, (int)peer, communicator(comm), s); });
+  return on_stream(^(ncclMeshStream *s) { return ncclRecv((void *)&o.buffer, o.count, o.type, (int)peer, communicator(comm), s); }, split);
 }
 
 // torch's functional collectives (_c10d_functional, what DTensor and a compiled graph call) on MPS tensors: kernels
@@ -234,10 +307,6 @@ static int64_t reduction(const std::string &op) {
   TORCH_CHECK(false, "the mesh backend reduces by sum, avg, product, max and min, not ", op);
 }
 
-static void checked(int64_t result) {
-  TORCH_CHECK(!result, "libnccl-mesh: ", ncclGetErrorString((ncclResult_t)result), ": ", ncclGetLastError(nullptr));
-}
-
 static int group_argument(const std::string &name) {
   if (name == "all_reduce" || name == "all_reduce_" || name == "broadcast" || name == "broadcast_" || name == "all_gather_into_tensor" ||
       name == "all_gather_into_tensor_out")
@@ -256,16 +325,19 @@ static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) 
     op.redispatchBoxed(c10::DispatchKeySet(c10::DispatchKey::CPU), stack);
     return;
   }
+  // issued and not completed where the result is the operand itself: torch's wait_tensor (its work registry) waits
+  // for it; a non-contiguous result, written back from a contiguous operand, completes at once
   at::Tensor result;
+  uint64_t ticket = 0;
   if (name == "all_reduce" || name == "all_reduce_") {
     result = name == "all_reduce_" ? input : input.clone(at::MemoryFormat::Contiguous);
     const at::Tensor operand = contiguous_alias(result);
-    checked(allreduce(operand, reduction(arguments[1].toStringRef()), comm));
+    ticket = allreduce(operand, reduction(arguments[1].toStringRef()), comm, operand.is_same(result));
     written_back(result, operand);
   } else if (name == "broadcast" || name == "broadcast_") {
     result = name == "broadcast_" ? input : input.clone(at::MemoryFormat::Contiguous);
     const at::Tensor operand = contiguous_alias(result);
-    checked(broadcast(operand, arguments[1].toInt(), comm));
+    ticket = broadcast(operand, arguments[1].toInt(), comm, operand.is_same(result));
     written_back(result, operand);
   } else if (name == "all_gather_into_tensor" || name == "all_gather_into_tensor_out") {
     const at::Tensor from = contiguous_alias(input);
@@ -276,7 +348,7 @@ static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) 
     TORCH_CHECK(result.numel() == from.numel() * arguments[1].toInt(), "all_gather_into_tensor_out: out holds ", result.numel(),
                 " elements, not ", from.numel() * arguments[1].toInt());
     const at::Tensor to = contiguous_alias(result);
-    checked(allgather(to, from, comm));
+    ticket = allgather(to, from, comm, to.is_same(result));
     written_back(result, to);
   } else if (name == "reduce_scatter_tensor") {
     const at::Tensor from = contiguous_alias(input);
@@ -285,7 +357,7 @@ static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) 
     TORCH_CHECK(!shape.empty() && shape[0] % ranks == 0, "reduce_scatter_tensor: dim 0 of ", from.sizes(), " is not divisible by ", ranks);
     shape[0] /= ranks;
     result = at::empty(shape, from.options());
-    checked(reduce_scatter(result, from, reduction(arguments[1].toStringRef()), comm));
+    ticket = reduce_scatter(result, from, reduction(arguments[1].toStringRef()), comm, true);
   } else {
     const at::Tensor from = contiguous_alias(input);
     std::vector<int64_t> outs, ins;
@@ -304,8 +376,9 @@ static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) 
     std::vector<int64_t> sends, receives;
     for (auto r : ins) sends.push_back(r * width);
     for (auto r : outs) receives.push_back(r * width);
-    checked(alltoall(result, from, sends, receives, comm));
+    ticket = alltoall(result, from, sends, receives, comm, true);
   }
+  if (ticket) c10d::register_work(result, work_of(ticket, {result}));
   torch::jit::drop(*stack, count);
   torch::jit::push(*stack, result);
 }
@@ -316,17 +389,23 @@ TORCH_LIBRARY_IMPL(_c10d_functional, MPS, m) {
     m.impl(name, torch::CppFunction::makeFromBoxedFunction<&functional>());
 }
 
+// The ProcessGroup's calls: split (an async op), a MeshWork to wait on, else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("begin", &begin);
   module.def("commit", &commit);
-  module.def("allreduce", &allreduce);
-  module.def("reduce", &reduce);
-  module.def("broadcast", &broadcast);
-  module.def("allgather", &allgather);
-  module.def("reduce_scatter", &reduce_scatter);
-  module.def("alltoall", &alltoall);
-  module.def("send", &send_to);
-  module.def("recv", &receive_from);
+  module.def("complete_all", &complete_all);
+  module.def("allreduce", [](const at::Tensor &t, int64_t op, int64_t comm, bool split) { return work_of(allreduce(t, op, comm, split), {t}); });
+  module.def("reduce", [](const at::Tensor &t, int64_t op, int64_t root, int64_t comm, bool split) { return work_of(reduce(t, op, root, comm, split), {t}); });
+  module.def("broadcast", [](const at::Tensor &t, int64_t root, int64_t comm, bool split) { return work_of(broadcast(t, root, comm, split), {t}); });
+  module.def("allgather", [](const at::Tensor &o, const at::Tensor &i, int64_t comm, bool split) { return work_of(allgather(o, i, comm, split), {o}); });
+  module.def("reduce_scatter", [](const at::Tensor &o, const at::Tensor &i, int64_t op, int64_t comm, bool split) {
+    return work_of(reduce_scatter(o, i, op, comm, split), {o});
+  });
+  module.def("alltoall", [](const at::Tensor &o, const at::Tensor &i, std::vector<int64_t> sends, std::vector<int64_t> receives, int64_t comm, bool split) {
+    return work_of(alltoall(o, i, std::move(sends), std::move(receives), comm, split), {o});
+  });
+  module.def("send", [](const at::Tensor &t, int64_t peer, int64_t comm, bool split) { return work_of(send_to(t, peer, comm, split), {t}); });
+  module.def("recv", [](const at::Tensor &t, int64_t peer, int64_t comm, bool split) { return work_of(receive_from(t, peer, comm, split), {t}); });
   module.def("attach", &attach);
   module.def("batch", &batch);
 }

@@ -506,8 +506,10 @@ static ncclResult_t drain(void) {
   return ncclSuccess;
 }
 
+static void inflight_lose(void);
 static void session_close(double linger) {
   if (!session.header) return;
+  inflight_lose();
   drain();
   if (session.running) {
     pthread_mutex_lock(&progress_lock);
@@ -645,6 +647,7 @@ struct call {
   int owned;
   cudaStream_t stream;
   void *command, *encoder, *(*workspace)(size_t, void *), *context;
+  ncclMeshIssue *issue;
   struct where send_at, recv_at, sum;
 };
 
@@ -738,7 +741,7 @@ static void place(const struct channel *ch, struct schedule *p, struct call *c, 
   *at += m.pieces;
 }
 
-/* each channel's positions for the group, from its next one: each collective's rounds in call order, then
+/* each channel's positions for the group, from the last scheduled one's end: each collective's rounds in call order, then
    the point-to-point calls, this end's j-th SEND to the peer beside its j-th receive from it */
 static ncclResult_t schedule_group(struct call *list, size_t n, struct schedule *plans) {
   size_t total = 1;
@@ -750,7 +753,7 @@ static ncclResult_t schedule_group(struct call *list, size_t n, struct schedule 
     struct schedule *p = plans + h;
     *p = (struct schedule){calloc(total, sizeof *p->out), calloc(total, sizeof *p->in), 0, 0, 0, 0};
     if (!p->out || !p->in) { result = fail(ncclSystemError, "out of memory"); break; }
-    uint64_t at = ch->sent;
+    uint64_t at = ch->end;
     size_t s = 0, r = 0;
     for (size_t i = 0; i < n; i++) {
       struct call *c = list + i;
@@ -847,34 +850,39 @@ static ncclResult_t run(struct schedule *plans) {
   }
 }
 
-/* the group on the session: opened (or renewed: other peers, another region, or too few positions left)
-   and scheduled; a failure the progress thread kept fails this group and retires the session, and the next
-   group opens another */
-static ncclResult_t session_schedule(ncclComm_t comm, struct call *list, size_t n, struct schedule **made) {
-  struct schedule *plans = NULL;
-  ncclResult_t result = ncclSuccess;
-  *made = NULL;
+/* the session made to cover the communicator: opened (or renewed: other peers or another region, never while
+   groups are in flight); a failure the progress thread kept fails this group and retires the session, and the
+   next group opens another */
+static struct inflight *inflight;
+static ncclResult_t session_ensure(ncclComm_t comm) {
   if (session.header && atomic_load(&session.failed)) {
-    result = fail((ncclResult_t)atomic_load(&session.failed), "%s", failure);
+    const ncclResult_t result = fail((ncclResult_t)atomic_load(&session.failed), "%s", failure);
     session_close(0);
     return result;
   }
   for (int attempt = 0;;) {
     if (!session_covers(comm)) {
+      if (inflight) return fail(ncclInvalidUsage, "a group on other peers while groups are issued and not complete");
       session_close(LINGER_S);
       int other = -1;
       const int status = session_open(comm, &other);
       if (other >= 0) return fail(ncclInvalidUsage, "rank %d runs on the bridge of node %d", comm->rank, other);
       if (status) {
-        result = fail(ncclSystemError, "the session's transfers did not start: %s", strerror(status));
+        const ncclResult_t result = fail(ncclSystemError, "the session's transfers did not start: %s", strerror(status));
         if (++attempt == ATTEMPTS) return result;
         fprintf(stderr, "%s; again\n", last);
         continue;
       }
     }
-    break;
+    return ncclSuccess;
   }
-  if (!(plans = calloc(session.count + 1, sizeof *plans))) return fail(ncclSystemError, "out of memory");
+}
+
+static ncclResult_t session_schedule(struct call *list, size_t n, struct schedule **made) {
+  struct schedule *plans = calloc(session.count + 1, sizeof *plans);
+  ncclResult_t result;
+  *made = NULL;
+  if (!plans) return fail(ncclSystemError, "out of memory");
   if ((result = schedule_group(list, n, plans))) { schedules_free(plans); return result; }
   *made = plans;
   return ncclSuccess;
@@ -883,8 +891,10 @@ static ncclResult_t session_schedule(ncclComm_t comm, struct call *list, size_t 
 /* the group on the host, after every GPU program; its positions count as landed for the progress thread */
 static ncclResult_t session_run(ncclComm_t comm, struct call *list, size_t n) {
   struct schedule *plans;
+  if (inflight) return fail(ncclInvalidUsage, "a host-path group while GPU groups are issued and not complete (ncclMeshComplete)");
   ncclResult_t result = drain();
-  if (!result) result = session_schedule(comm, list, n, &plans);
+  if (!result) result = session_ensure(comm);
+  if (!result) result = session_schedule(list, n, &plans);
   if (result) return result;
   result = run(plans);
   schedules_free(plans);
@@ -1011,85 +1021,128 @@ static ncclResult_t arrive(struct metal_program *program, struct channel *ch, ui
   return gpu(metal_spin(program, session.transport.inputs, ch->word + (at % session.positions) * ch->word_stride, 1 + cycle_of(at)), "a spin");
 }
 
-/* the group's positions in an order the GPU runs them in: a channel publishes its next position where it
-   may (the peer's position t - LAG landed, every receive before the piece consumed), else consumes its next
-   one; a publication is its piece copied into the slot and its cell released, a consumption waits for the
-   position's landing (a spin on its completion word) and combines or copies the piece where it landed */
-static ncclResult_t emit(struct schedule *plans, struct metal_program *program) {
+/* a group issued and not complete: its calls, its schedule and its positions [start, end) on each channel; the
+   groups in flight in issue order hold consecutive positions on every channel */
+struct inflight {
+  uint64_t ticket;
+  struct call *list;
+  size_t n;
+  struct schedule *plans;
+  uint64_t *start, *end;
+  struct inflight *next;
+};
+static struct inflight *inflight_last;
+static uint64_t tickets, lost_from = 1, lost_to;
+static _Atomic uint64_t retired;
+
+static void calls_free(struct call *list, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    steps_free(list[i].bound);
+    if (list[i].owned) free(list[i].result);
+    free(list[i].copy);
+  }
+  free(list);
+}
+
+static void inflight_free(struct inflight *g) {
+  schedules_free(g->plans);
+  free(g->start);
+  calls_free(g->list, g->n);
+  free(g);
+}
+
+/* every group in flight lost with its session: a later completion of one returns the failure */
+static void inflight_lose(void) {
+  if (!inflight) return;
+  lost_from = inflight->ticket; lost_to = inflight_last->ticket;
+  while (inflight) { struct inflight *g = inflight; inflight = g->next; inflight_free(g); }
+  inflight_last = NULL;
+  atomic_store(&retired, lost_to);
+}
+
+static struct inflight *inflight_at(uint32_t h, uint64_t at) {
+  for (struct inflight *g = inflight; g; g = g->next)
+    if (at < g->end[h]) return at >= g->start[h] ? g : NULL;
+  return NULL;
+}
+
+/* the positions in flight in an order the GPU runs them in: a channel publishes its next position where it may
+   (the peer's position t - LAG landed, every receive before the piece consumed), else consumes its next one; a
+   publication is its piece copied into the slot and its cell released, a consumption waits for the position's
+   landing (a spin on its completion word) and combines or copies the piece where it landed.  Issuing a group,
+   the walk publishes up to its last position and consumes only earlier groups' positions, where a publication
+   of the channel waits on them, so it encodes no wait on its own; completing through a group, it consumes every
+   position up to that group's last and publishes any group's next position where it may. */
+static ncclResult_t walk(struct metal_program *program, const struct inflight *issuing, const struct inflight *through, int *published) {
   ncclResult_t result = ncclSuccess;
-  for (;;) {
-    int moved = 0, open = 0;
+  for (int moved = 1; moved && !result;) {
+    moved = 0;
     for (uint32_t h = 0; h < session.count && !result; h++) {
       struct channel *ch = session.channels + h;
-      struct schedule *p = plans + h;
-      int published = 0;
-      if (ch->sent < ch->end) {
+      const uint64_t publish_to = issuing ? issuing->end[h] : ch->end, consume_to = issuing ? issuing->start[h] : through->end[h];
+      int sent = 0;
+      if (ch->sent < publish_to) {
         const uint64_t at = ch->sent, need = at >= LAG ? at - LAG + 1 : 0;
+        struct schedule *p = inflight_at(h, at)->plans + h;
         struct message *m = p->out_at < p->outs && at >= p->out[p->out_at].first ? p->out + p->out_at : NULL;
         if (ch->consumed >= need && !(m && at == m->first && !ready(m->c->bound, m->step))) {
-          if (!result) result = arrive(program, ch, need);
+          result = arrive(program, ch, need);
           const size_t cell = ch->cell + (at % session.positions) * sizeof(struct mesh_send);
           const uint64_t value = ch->argument + cycle_of(at);
           int released = 0;
           if (m && !result) {
-            const struct steps *s = m->c->bound;
+            const struct steps *st = m->c->bound;
             const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
             if (!ch->large) {
-              result = gpu(metal_send_small(program, ch->ring_out, (at % DEPTH) * ch->slot, s->gpu_own.buffer, s->gpu_own.offset + m->offset + offset,
+              result = gpu(metal_send_small(program, ch->ring_out, (at % DEPTH) * ch->slot, st->gpu_own.buffer, st->gpu_own.offset + m->offset + offset,
                                             length, session.transport.publication, cell, value), "a piece into its slot and its release");
               released = 1;
             } else
-              result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * ch->slot, s->gpu_own.buffer,
-                                      s->gpu_own.offset + m->offset + offset, length), "a piece into its slot");
+              result = gpu(metal_copy(program, METAL_SEND, ch->ring_out, (at % DEPTH) * ch->slot, st->gpu_own.buffer,
+                                      st->gpu_own.offset + m->offset + offset, length), "a piece into its slot");
             if (at + 1 == m->first + m->pieces) p->out_at++;
           }
           if (!result && !released) result = gpu(metal_publish(program, session.transport.publication, cell, value), "a publication");
-          ch->sent++; published = moved = 1;
+          ch->sent++; sent = moved = 1; *published = 1;
         }
       }
-      if (!published && !result && ch->consumed < ch->end) {
-        const uint64_t at = ch->consumed;
-        struct message *m = p->in_at < p->ins && at >= p->in[p->in_at].first ? p->in + p->in_at : NULL;
-        if (!(m && at == m->first && !ready(m->c->bound, m->step))) {
-          if (m) {
-            struct steps *s = m->c->bound;
-            const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
-            const size_t from = (at % DEPTH) * ch->slot;
-            const int reduce = s->steps[m->step].op == MESH_STEP_REDUCE;
-            if (!ch->large && (reduce || (s->gpu_total.buffer == s->gpu_own.buffer && s->gpu_total.offset == s->gpu_own.offset))) {
-              const struct where to = reduce ? s->gpu_total : s->gpu_own;
-              result = gpu(metal_land(program, reduce ? (int)m->c->type : -1, m->c->combine, to.buffer, to.offset + m->offset + offset, ch->ring_in, from,
-                                      reduce ? length / SIZE[m->c->type] : length, session.transport.inputs,
-                                      ch->word + (at % session.positions) * ch->word_stride, 1 + cycle_of(at)), "a landing");
-              if (at + 1 > ch->waited) ch->waited = at + 1;
-              if (result) break;
-              if (at + 1 == m->first + m->pieces) { s->done[m->step] = 1; p->in_at++; }
-              ch->consumed++; moved = 1;
-              open |= ch->sent < ch->end || ch->consumed < ch->end;
-              continue;
-            }
-            result = arrive(program, ch, at + 1);
-            if (result) break;
-            if (reduce)
-              result = gpu(metal_combine(program, m->c->type, m->c->combine, s->gpu_total.buffer, s->gpu_total.offset + m->offset + offset,
-                                         ch->ring_in, from, length / SIZE[m->c->type]), "a combine");
-            else {
-              result = gpu(metal_copy(program, METAL_LAND, s->gpu_own.buffer, s->gpu_own.offset + m->offset + offset, ch->ring_in, from, length), "a landing");
-              if (!result && (s->gpu_total.buffer != s->gpu_own.buffer || s->gpu_total.offset != s->gpu_own.offset))
-                result = gpu(metal_copy(program, METAL_LAND, s->gpu_total.buffer, s->gpu_total.offset + m->offset + offset, ch->ring_in, from, length),
-                             "a landing");
-            }
-            if (at + 1 == m->first + m->pieces) { s->done[m->step] = 1; p->in_at++; }
+      if (sent || result || ch->consumed >= consume_to || (issuing && ch->sent >= publish_to)) continue;
+      const uint64_t at = ch->consumed;
+      struct schedule *p = inflight_at(h, at)->plans + h;
+      struct message *m = p->in_at < p->ins && at >= p->in[p->in_at].first ? p->in + p->in_at : NULL;
+      if (m && at == m->first && !ready(m->c->bound, m->step)) continue;
+      if (m) {
+        struct steps *st = m->c->bound;
+        const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
+        const size_t from = (at % DEPTH) * ch->slot;
+        const int reduce = st->steps[m->step].op == MESH_STEP_REDUCE;
+        if (!ch->large && (reduce || (st->gpu_total.buffer == st->gpu_own.buffer && st->gpu_total.offset == st->gpu_own.offset))) {
+          const struct where to = reduce ? st->gpu_total : st->gpu_own;
+          result = gpu(metal_land(program, reduce ? (int)m->c->type : -1, m->c->combine, to.buffer, to.offset + m->offset + offset, ch->ring_in, from,
+                                  reduce ? length / SIZE[m->c->type] : length, session.transport.inputs,
+                                  ch->word + (at % session.positions) * ch->word_stride, 1 + cycle_of(at)), "a landing");
+          if (at + 1 > ch->waited) ch->waited = at + 1;
+        } else {
+          result = arrive(program, ch, at + 1);
+          if (!result && reduce)
+            result = gpu(metal_combine(program, m->c->type, m->c->combine, st->gpu_total.buffer, st->gpu_total.offset + m->offset + offset,
+                                       ch->ring_in, from, length / SIZE[m->c->type]), "a combine");
+          else if (!result) {
+            result = gpu(metal_copy(program, METAL_LAND, st->gpu_own.buffer, st->gpu_own.offset + m->offset + offset, ch->ring_in, from, length), "a landing");
+            if (!result && (st->gpu_total.buffer != st->gpu_own.buffer || st->gpu_total.offset != st->gpu_own.offset))
+              result = gpu(metal_copy(program, METAL_LAND, st->gpu_total.buffer, st->gpu_total.offset + m->offset + offset, ch->ring_in, from, length),
+                           "a landing");
           }
-          ch->consumed++; moved = 1;
         }
+        if (result) break;
+        if (at + 1 == m->first + m->pieces) { st->done[m->step] = 1; p->in_at++; }
       }
-      open |= ch->sent < ch->end || ch->consumed < ch->end;
+      ch->consumed++; moved = 1;
     }
-    if (result) return result;
-    if (!open) return ncclSuccess;
-    if (!moved) return fail(ncclInternalError, "the group's positions admit no order");
   }
+  for (uint32_t h = 0; through && h < session.count && !result; h++)
+    if (session.channels[h].consumed < through->end[h]) result = fail(ncclInternalError, "the group's positions admit no order");
+  return result;
 }
 
 static int on_gpu(ncclDataType_t t) { return t != ncclFloat64 && t != ncclFloat8e4m3 && t != ncclFloat8e5m2; }
@@ -1134,74 +1187,21 @@ static uint64_t scalar_bits(const struct call *c) {
   return bits;
 }
 
-/* _launch on the stream's command buffer: each collective's operand recvbuff itself where it holds the whole
-   operand (an all-reduce's, a root's reduce, a broadcast's, an all-gather's), else a scratch one (a
-   reduce-scatter's, a non-root's reduce); a direct exchange's sums apart; then the group's positions and the
-   results into recvbuff; the program's end signals `finished` */
-static ncclResult_t launch_metal(struct call *list, size_t n) {
+static void plans_record(const struct call *list, size_t n) {
+  free(plan_how); free(plan_root);
+  plan_how = calloc(n + 1, sizeof *plan_how); plan_root = calloc(n + 1, sizeof *plan_root);
+  plan_count = plan_how && plan_root ? n : 0;
+  for (size_t i = 0; i < plan_count; i++) {
+    plan_how[i] = list[i].bound ? list[i].bound->how : -1;
+    plan_root[i] = list[i].bound ? list[i].bound->root : 0;
+  }
+}
+
+/* a group's results into recvbuff, once its positions are consumed (a self-addressed SEND's copy among them) */
+static ncclResult_t epilogue(struct metal_program *program, const struct call *list, size_t n) {
   const ncclComm_t comm = list[0].comm;
-  ncclResult_t result = ncclSuccess;
-  for (size_t i = 0; i < n; i++) {
-    if (list[i].comm != comm) return fail(ncclInvalidUsage, "a group on several communicators");
-    if (list[i].command != list[0].command) return fail(ncclInvalidUsage, "a group on several command buffers");
-    if (!on_gpu(list[i].type)) return fail(ncclInvalidArgument, "datatype %d on the Metal path (no float64 or float8 there)", (int)list[i].type);
-    if (reducing(list[i].what) && (result = reduction(list + i))) return result;
-  }
-  if (!list[0].command) return fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
-  if (list[0].encoder && !list[0].workspace) return fail(ncclInvalidArgument, "an ncclMeshStream with an encoder and no workspace");
-  if ((result = plan_calls(comm, list, n))) return result;
-  pthread_mutex_lock(&session_lock);
-  if (finished) metal_collect(finished);
-  struct metal_program *program = metal_begin(list[0].command, list[0].encoder);
-  if (!program) { pthread_mutex_unlock(&session_lock); return fail(ncclSystemError, "out of memory"); }
   const size_t r = (size_t)comm->rank;
-  int remote = 0;
-  for (size_t i = 0; i < n && !result; i++) {
-    struct call *c = list + i;
-    struct steps *s = c->bound;
-    const size_t z = SIZE[c->type], bytes = elements(c) * z, all = elements(c);
-    const struct where send = c->send_at;
-    remote |= s != NULL;
-    if (p2p(c)) {
-      if (s) s->gpu_own = s->gpu_total = c->what == WHAT_SEND ? send : c->recv_at;
-      continue;
-    }
-    const struct where recv = c->recv_at;
-    const int in_place = c->what == MESH_ALLREDUCE || c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER ||
-                         (c->what == MESH_REDUCE && c->root == comm->rank);
-    struct where own = recv;
-    if (!in_place) {
-      void *scratch = workspace(program, c, bytes);
-      if (!scratch) { result = fail(ncclSystemError, "out of GPU memory"); break; }
-      own = (struct where){scratch, 0};
-    }
-    const struct where segment = {own.buffer, own.offset + (c->what == MESH_ALLGATHER ? r * c->count * z : 0)};
-    if (reducing(c->what) && c->premultiplied)
-      result = gpu(metal_premultiply(program, c->type, own.buffer, own.offset, send.buffer, send.offset, all, scalar_bits(c)), "the operand");
-    else if ((reducing(c->what) || (c->what == MESH_BROADCAST && c->root == comm->rank) || c->what == MESH_ALLGATHER) && !same(segment, send))
-      result = gpu(metal_copy(program, METAL_PLAIN, segment.buffer, segment.offset, send.buffer, send.offset,
-                              reducing(c->what) ? bytes : c->count * z), "the operand");
-    struct where total = own;
-    if (!result && s && reducing(c->what) && !combines_in_place(s)) {
-      void *sums = workspace(program, c, bytes);
-      if (!sums) { result = fail(ncclSystemError, "out of GPU memory"); break; }
-      total = (struct where){sums, 0};
-      result = gpu(metal_copy(program, METAL_PLAIN, sums, 0, own.buffer, own.offset, bytes), "the result");
-    }
-    c->sum = total;
-    if (s) { s->gpu_own = own; s->gpu_total = total; }
-  }
-  int scheduled = 0;
-  if (!result && remote) {
-    struct schedule *plans;
-    result = session_schedule(comm, list, n, &plans);
-    if (!result) {
-      scheduled = 1;
-      result = emit(plans, program);
-      schedules_free(plans);
-      if (!result) progress_targets();
-    }
-  }
+  ncclResult_t result = ncclSuccess;
   size_t self = 0;
   for (size_t i = 0; i < n && !result; i++) {
     const struct call *c = list + i;
@@ -1222,22 +1222,154 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     } else if ((c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER) && !same(sum, recv))
       result = gpu(metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, sum.buffer, sum.offset, elements(c) * z), "the result");
   }
-  if (list[0].encoder) metal_end(program, NULL, 0);
-  else metal_end(program, finished ? finished : (finished = metal_event()), ++issued);
-  if (result && scheduled) release_all(result, "%s", last);
-  pthread_mutex_unlock(&session_lock);
   return result;
 }
 
-static void plans_record(const struct call *list, size_t n) {
-  free(plan_how); free(plan_root);
-  plan_how = calloc(n + 1, sizeof *plan_how); plan_root = calloc(n + 1, sizeof *plan_root);
-  plan_count = plan_how && plan_root ? n : 0;
-  for (size_t i = 0; i < plan_count; i++) {
-    plan_how[i] = list[i].bound ? list[i].bound->how : -1;
-    plan_root[i] = list[i].bound ? list[i].bound->root : 0;
+/* the groups in flight whose positions are all consumed, in issue order: their results, and they are complete */
+static ncclResult_t retire(struct metal_program *program) {
+  ncclResult_t result = ncclSuccess;
+  while (inflight && !result) {
+    struct inflight *g = inflight;
+    for (uint32_t h = 0; h < session.count; h++)
+      if (session.channels[h].consumed < g->end[h]) return ncclSuccess;
+    result = epilogue(program, g->list, g->n);
+    inflight = g->next;
+    if (!inflight) inflight_last = NULL;
+    atomic_store(&retired, g->ticket);
+    inflight_free(g);
   }
+  return result;
 }
+
+static void program_end(struct metal_program *program, int borrowed) {
+  if (borrowed) metal_end(program, NULL, 0);
+  else metal_end(program, finished ? finished : (finished = metal_event()), ++issued);
+}
+
+/* _launch on the stream's command buffer, taking the group's calls: each collective's operand recvbuff itself where
+   it holds the whole operand (an all-reduce's, a root's reduce, a broadcast's, an all-gather's), else a scratch one
+   (a reduce-scatter's, a non-root's reduce); a direct exchange's sums apart; then the group in flight after the
+   others, issued (with issue) or completed with every group before it; its results into recvbuff as it completes;
+   the program's end signals `finished` where the library made its encoder */
+static ncclResult_t launch_metal(struct call *list, size_t n) {
+  const ncclComm_t comm = list[0].comm;
+  ncclMeshIssue *const issue = list[0].issue;
+  ncclResult_t result = ncclSuccess;
+  if (issue) *issue = (ncclMeshIssue){0, 0};
+  for (size_t i = 0; i < n && !result; i++) {
+    if (list[i].comm != comm) result = fail(ncclInvalidUsage, "a group on several communicators");
+    else if (list[i].command != list[0].command) result = fail(ncclInvalidUsage, "a group on several command buffers");
+    else if (!on_gpu(list[i].type)) result = fail(ncclInvalidArgument, "datatype %d on the Metal path (no float64 or float8 there)", (int)list[i].type);
+    else if (reducing(list[i].what)) result = reduction(list + i);
+  }
+  if (!result && !list[0].command) result = fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
+  if (!result && list[0].encoder && !list[0].workspace) result = fail(ncclInvalidArgument, "an ncclMeshStream with an encoder and no workspace");
+  if (!result) result = plan_calls(comm, list, n);
+  plans_record(list, n);
+  if (result) { calls_free(list, n); return result; }
+  pthread_mutex_lock(&session_lock);
+  if (finished) metal_collect(finished);
+  struct metal_program *program = metal_begin(list[0].command, list[0].encoder);
+  if (!program) { pthread_mutex_unlock(&session_lock); calls_free(list, n); return fail(ncclSystemError, "out of memory"); }
+  const size_t r = (size_t)comm->rank;
+  int remote = 0;
+  for (size_t i = 0; i < n && !result; i++) {
+    struct call *c = list + i;
+    struct steps *st = c->bound;
+    const size_t z = SIZE[c->type], bytes = elements(c) * z, all = elements(c);
+    const struct where send = c->send_at;
+    remote |= st != NULL;
+    if (p2p(c)) {
+      if (st) st->gpu_own = st->gpu_total = c->what == WHAT_SEND ? send : c->recv_at;
+      continue;
+    }
+    const struct where recv = c->recv_at;
+    const int in_place = c->what == MESH_ALLREDUCE || c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER ||
+                         (c->what == MESH_REDUCE && c->root == comm->rank);
+    struct where own = recv;
+    if (!in_place) {
+      void *scratch = workspace(program, c, bytes);
+      if (!scratch) { result = fail(ncclSystemError, "out of GPU memory"); break; }
+      own = (struct where){scratch, 0};
+    }
+    const struct where segment = {own.buffer, own.offset + (c->what == MESH_ALLGATHER ? r * c->count * z : 0)};
+    if (reducing(c->what) && c->premultiplied)
+      result = gpu(metal_premultiply(program, c->type, own.buffer, own.offset, send.buffer, send.offset, all, scalar_bits(c)), "the operand");
+    else if ((reducing(c->what) || (c->what == MESH_BROADCAST && c->root == comm->rank) || c->what == MESH_ALLGATHER) && !same(segment, send))
+      result = gpu(metal_copy(program, METAL_PLAIN, segment.buffer, segment.offset, send.buffer, send.offset,
+                              reducing(c->what) ? bytes : c->count * z), "the operand");
+    struct where total = own;
+    if (!result && st && reducing(c->what) && !combines_in_place(st)) {
+      void *sums = workspace(program, c, bytes);
+      if (!sums) { result = fail(ncclSystemError, "out of GPU memory"); break; }
+      total = (struct where){sums, 0};
+      result = gpu(metal_copy(program, METAL_PLAIN, sums, 0, own.buffer, own.offset, bytes), "the result");
+    }
+    c->sum = total;
+    if (st) { st->gpu_own = own; st->gpu_total = total; }
+  }
+  int scheduled = 0, published = 0, owned = 1;
+  uint64_t ticket = 0;
+  if (!result && remote) result = session_ensure(comm);
+  if (!result && remote) {
+    struct inflight *g = calloc(1, sizeof *g);
+    if (!g || !(g->start = calloc(2 * (size_t)session.count + 1, sizeof *g->start))) { free(g); result = fail(ncclSystemError, "out of memory"); }
+    else {
+      g->end = g->start + session.count;
+      for (uint32_t h = 0; h < session.count; h++) g->start[h] = session.channels[h].end;
+      result = session_schedule(list, n, &g->plans);
+      if (result) { free(g->start); free(g); }
+      else {
+        for (uint32_t h = 0; h < session.count; h++) g->end[h] = session.channels[h].end;
+        g->list = list; g->n = n; g->ticket = ticket = ++tickets; owned = 0;
+        if (inflight_last) inflight_last->next = g; else inflight = g;
+        inflight_last = g;
+        scheduled = 1;
+        progress_targets();
+        result = walk(program, issue ? g : NULL, issue ? NULL : g, &published);
+        if (!result) result = retire(program);
+      }
+    }
+  } else if (!result)
+    result = epilogue(program, list, n);
+  program_end(program, list[0].encoder != NULL);
+  if (result && scheduled) { release_all(result, "%s", last); inflight_lose(); }
+  if (issue && !result) { issue->ticket = ticket > atomic_load(&retired) ? ticket : 0; issue->published = published; }
+  pthread_mutex_unlock(&session_lock);
+  if (owned) calls_free(list, n);
+  if (result) comm->async = result;
+  return result;
+}
+
+ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int *published) {
+  int any = 0;
+  if (published) *published = 0;
+  if (!stream || !stream->commandBuffer) return fail(ncclInvalidArgument, "ncclMeshComplete without a command buffer");
+  pthread_mutex_lock(&session_lock);
+  ncclResult_t result = ncclSuccess;
+  if (ticket >= lost_from && ticket <= lost_to) result = fail(ncclRemoteError, "the group was lost with its session: %s", failure);
+  else if (inflight && ticket >= inflight->ticket && atomic_load(&session.failed)) {
+    result = fail((ncclResult_t)atomic_load(&session.failed), "%s", failure);
+    inflight_lose();
+  } else if (inflight && ticket >= inflight->ticket) {
+    struct inflight *through = inflight;
+    while (through->next && through->next->ticket <= ticket) through = through->next;
+    if (finished) metal_collect(finished);
+    struct metal_program *program = metal_begin(stream->commandBuffer, stream->commandEncoder);
+    if (!program) result = fail(ncclSystemError, "out of memory");
+    else {
+      result = walk(program, NULL, through, &any);
+      if (!result) result = retire(program);
+      program_end(program, stream->commandEncoder != NULL);
+      if (result) { release_all(result, "%s", last); inflight_lose(); }
+    }
+  }
+  pthread_mutex_unlock(&session_lock);
+  if (published) *published = any;
+  return result;
+}
+
+uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 
 ncclResult_t ncclGroupStart(void) { depth++; return ncclSuccess; }
 
@@ -1247,15 +1379,12 @@ ncclResult_t ncclGroupEnd(void) {
   struct call *list = calls;
   const size_t n = call_count;
   calls = NULL; call_count = call_capacity = 0;
-  ncclResult_t result = !n ? ncclSuccess : list[0].stream ? launch_metal(list, n) : launch(list, n);
+  if (!n) { free(list); return ncclSuccess; }
+  if (list[0].stream) return launch_metal(list, n);
+  const ncclResult_t result = launch(list, n);
   plans_record(list, n);
-  for (size_t i = 0; i < n; i++) {
-    steps_free(list[i].bound);
-    if (list[i].owned) free(list[i].result);
-    free(list[i].copy);
-  }
-  if (result && n) list[0].comm->async = result;
-  free(list);
+  if (result) list[0].comm->async = result;
+  calls_free(list, n);
   return result;
 }
 
@@ -1275,6 +1404,7 @@ static ncclResult_t enqueue(struct call c) {
   if (c.stream) {
     const ncclMeshStream *stream = c.stream;
     c.command = stream->commandBuffer; c.encoder = stream->commandEncoder; c.workspace = stream->workspace; c.context = stream->context;
+    c.issue = stream->issue;
     c.send_at = where_of(c.send); c.recv_at = where_of(c.recv);
   }
   if ((unsigned)c.type >= ncclNumTypes) return fail(ncclInvalidArgument, "datatype %d", (int)c.type);

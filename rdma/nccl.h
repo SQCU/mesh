@@ -38,7 +38,16 @@
    into it (an MPS tensor's storage and offset).  With commandEncoder, the group's kernels are encoded into that
    open compute encoder and it is left open (no encoder of the library's own, nothing signalled at the group's
    end); then workspace gives the group its scratch (an id<MTLBuffer> of at least `bytes`, valid for the
-   stream's work), and the caller orders any later host-path group after the stream's work.  The pieces are copied into the slots and combined where they
+   stream's work until the group is complete), and the caller orders any later host-path group after the stream's
+   work.  With issue, the group is issued and not completed (NCCL's work on its own stream, waited for later): its
+   operands staged and every publication its flow control allows encoded, with no wait for a peer; issue->ticket
+   names it (0: it completed at once) and issue->published says whether anything was published (the caller commits
+   then, so the peers' waits progress).  ncclMeshComplete encodes, into a later stream of the same queue, every
+   issued group through a ticket that is not complete: its waits, landings, later rounds and results (a group's
+   completion also completes the groups issued before it, whose positions precede its own; its operands are not
+   to be touched until it is complete).  A group without issue completes at once, with every group before it.
+   The issue pointer must be valid until ncclGroupEnd returns; a host-path group fails while groups are issued
+   and not complete.  The pieces are copied into the slots and combined where they
    landed by Metal kernels; a wait for the peer's position is a kernel polling its completion word (the
    engine's mesh_remote_wait), and a progress thread cancels a link with positions pending that delivers none
    for MESH_REMOTE_BOUND seconds (default 10), ending every wait on it.  The Metal path carries the integer
@@ -74,11 +83,13 @@ extern "C" {
 /* The stream: not read (every call is synchronous, above). */
 typedef void *cudaStream_t;
 typedef struct { void *buffer; size_t offset; } ncclMeshBuffer;
+typedef struct { uint64_t ticket; int published; } ncclMeshIssue;
 typedef struct {
   void *commandBuffer;
   void *commandEncoder;
   void *(*workspace)(size_t bytes, void *context);
   void *context;
+  ncclMeshIssue *issue;
 } ncclMeshStream;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
 typedef void *cudaEvent_t;
@@ -755,6 +766,13 @@ ncclResult_t pncclGroupEnd(void);
    order (at most `capacity`): 0 direct, 1 ring, 2 tree, 3 binomial (mesh-collective.h MESH_*),
    -1 a point-to-point call or a one-rank communicator's local copy; `roots` the tree's root. */
 ncclResult_t ncclMeshGroupPlans(int* algorithms, int* roots, int capacity, int* count);
+/* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
+   commandEncoder; issue and workspace not read); *published (may be NULL) whether a publication was encoded.  A
+   ticket already complete encodes nothing; one whose session failed returns the failure. */
+ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int* published);
+/* The highest ticket through which every issued group is complete (or lost with a failed session): its
+   workspace may be reused in the stream's order. */
+uint64_t ncclMeshRetired(void);
 
 #ifdef __cplusplus
 } // end extern "C"
