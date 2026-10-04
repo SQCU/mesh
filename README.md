@@ -97,16 +97,21 @@ was actually asked for. Each of these is open to revisiting:
 `mesh-peers` emits facts as it learns them and never waits to prove a negative:
 
 ```
-node <addr> via=<iface>     emitted from the kernel routing table, at t=0
-info <addr> name=... ...    emitted when that node answers, in arrival order
+node <name> self|peer               every node advertising _meshnode._tcp (Bonjour), at the browse's end
+path <name> kind=<kind> addr=<a>    each address the node advertises: lan, lan-v6, fabric-adjacent (a link-local
+                                    on one of this node's RDMA ports), fabric-routed (its fd6d:6573:68:: identity),
+                                    fabric-v4ll
+info <name> via=<a> name=... ...    its record from io.mesh.nodeinfo (port 8099, else the user shim's 8100),
+                                    in arrival order; partial where the record came short
 ```
 
-The `node` lines are the traversal result and they are already complete — babeld did
-that work, and reading the table costs microseconds. The `info` lines are best-effort
-enrichment that streams in unordered. A node that never answers simply has no `info`
-line; its absence is the signal, and observing it costs nothing.
+Discovery is the shared LAN's mDNS (git 1587656: control traffic needs no fabric, and discovery that waited on
+fabric convergence was a regression), so it is not limited to one cable hop; a node on no shared LAN is found only
+over its own cables. The `info` lines are best-effort enrichment that streams in unordered. A node that never
+answers simply has no `info` line; its absence is the signal, and observing it costs nothing.
 
-`MESH_DEADLINE` (default 2s) is a horizon, not a per-node timeout. It does not grow
+`MESH_DEADLINE` (default 3 s) is the browse's horizon and `MESH_PROBE_DEADLINE` (default 4 s) bounds each record's
+connect; neither is a per-node timeout. It does not grow
 with the fleet: a hundred nodes still finish in one deadline, and one dead node slows
 nothing. The consumer reads a stream and deals with out-of-order arrival. There is no
 mode that buffers into an aligned table, because aligning columns means waiting for
@@ -145,14 +150,10 @@ userspace shim.
 connection, closes it, and never runs the program (`runs = 0`), while the socket looks
 perfectly healthy. Hence a plain listener under `KeepAlive` instead.
 
-### Discovery does not require routing
+### Reaching a node does not require routing
 
-`mesh-peers` also reads `ndp` for each fabric port and emits its neighbours:
-
-```
-neigh fe80::34b5:96ff:feb2:55c8%en2 on=en2
-info  fe80::34b5:96ff:feb2:55c8%en2 name=Ms-Mac-mini model=Mac16,11 ...
-```
+`mesh-run` takes its targets from the routing table (each `fd6d:6573:68::` identity babeld learned) and from `ndp`'s
+neighbours on each fabric port, and probes each for its record.
 
 Adjacency is knowable from the kernel with no protocol involved, so a node is findable
 over a cable even if it never advertises a routable address. Relaying is independent of
@@ -394,7 +395,7 @@ Nothing else in the stack needs a toolchain either. `uv` is a prebuilt binary li
 only system frameworks, and `uv python list` offers prebuilt CPython, so Python is
 available on a virgin node with no compiler at all.
 
-## Routing, and why the node list comes from the routing table
+## Routing
 
 With the bridge gone, each Thunderbolt port is its own point-to-point link. Bonjour
 and link-local reach exactly one cable hop, so multicast discovery stops describing
@@ -411,9 +412,9 @@ So every node takes a routable identity address and the fabric is routed:
   next-hops. It is designed for topologies that churn, reconverges on replug with no
   per-node configuration, and uses every link rather than blocking one the way a
   spanning tree would — which is the whole reason to cable a ring.
-- **Enumeration**: `mesh-peers` reads the routing table. Every node babeld knows about
-  is a node, at any hop count and any fleet size, with no central registry and no
-  multicast.
+- **Enumeration**: `mesh-peers` browses the shared LAN (above), and each node's record lists its routes, so the
+  fabric's graph is reconstructed from what every node reports; `mesh-run` reaches a node over the LAN or its
+  routed identity address, at any hop count.
 
 babeld is vendored as a prebuilt arm64 binary — see [vendor/PROVENANCE.md](vendor/PROVENANCE.md)
 for the source, hashes, and the one-line build fix. A node must never need a
@@ -426,11 +427,15 @@ cables directly, point to point.
 
 ## Names, traversal, and running things
 
-`mesh-peers` shows what the fabric is, not just which addresses exist:
+`mesh-peers` shows what the fabric is, not just which addresses exist (the Mini, 2026-10-04, abridged):
 
 ```
-  NODE               MODEL        CORES MEM    RDMA      ADDRESS                                VIA
-  Ms-Mac-mini        Mac16,11     12    24G    enabled   fd6d:6573:68:3af8:1a3c:9700:3034:715d  self
+node Ms-Mac-mini self
+node Ms-MacBook-Pro peer
+path Ms-MacBook-Pro kind=lan addr=192.168.1.181
+path Ms-MacBook-Pro kind=fabric-adjacent addr=fe80:0:0:0:3494:9dff:fee4:fd88%en4
+path Ms-Mac-mini kind=fabric-routed addr=fd6d:6573:68:3af8:1a3c:9700:3034:715d
+info Ms-MacBook-Pro via=192.168.1.181 name=Ms-MacBook-Pro node_id=D7377D82-... boot_id=... ula=fd6d:6573:68:b5d5:...
 ```
 
 That comes from `io.mesh.nodeinfo`, a Python service on port 8099 (8100 for the user
@@ -455,8 +460,8 @@ mesh-run Ms-Mac-mini 'ls /usr/local/mesh'
 ```
 
 Job submission needs no new machinery. Every node already runs sshd and trusts the
-operator roster; the only missing piece was knowing which nodes exist, which the
-routing table answers.
+operator roster; the only missing piece was knowing which nodes exist, which `mesh-peers` (the LAN) and `mesh-run`
+(the routing table and the neighbour cache) answer.
 
 > If you write a plist to `/Library/LaunchDaemons` with `inetdCompatibility`, do not
 > also set `StandardOutPath`. It overrides the socket launchd dups onto stdout, and
