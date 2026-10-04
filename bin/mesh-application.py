@@ -102,7 +102,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('operation', choices=('deploy', 'activate', 'launch', 'run'))
     parser.add_argument('--source', default=str(ROOT))
-    parser.add_argument('--checkout', default='/Users/mdot/mesh')
+    parser.add_argument('--checkout', default='mesh', help='the remote checkout, relative to its home (ssh starts there)')
     parser.add_argument('--target', required=True)
     parser.add_argument('--host')
     parser.add_argument('--ssh-command', default=shlex.join(SSH))
