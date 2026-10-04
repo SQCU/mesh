@@ -31,7 +31,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   - Rank 0 is a member other than the driver, and the rank-to-node table is printed.
   - Each rank reads its node from its bridge, and the links and their costs from `MESH_LINK_MAP`.
 - A bidirectional exchange with one peer goes in one batch: `dist.batch_isend_irecv`, or a coalescing manager.
-  Separate `isend`/`irecv` calls in the same order on both sides do not pair.
+  Separate `isend`/`irecv` calls in the same order on both sides do not pair; the library reports it, and on MPS
+  tensors the next call raises.
 - Make subgroups (`new_group`, `DeviceMesh`) after the world group, as torch does: they run on its session, and
   members the cables do not join are joined through the world's other nodes.
 - The group's `timeout` is how long a link may stay silent before the library cancels it (`MESH_REMOTE_BOUND`

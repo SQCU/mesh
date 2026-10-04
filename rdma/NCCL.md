@@ -98,8 +98,11 @@ refuses those messages by name; every collective still runs.
 
 - One rank a node.
 - A bidirectional exchange with one peer is one group (`ncclGroupStart`/`End`; torch's `batch_isend_irecv`).
-  Separate send then receive calls in the same order on both sides do not pair, and the result is undefined (a
-  hang, or a stale buffer): a channel has one position axis for both directions.
+  Separate send then receive calls in the same order on both sides do not pair: a channel has one position axis for
+  both directions. The library reports it as `ncclInvalidUsage` ("calls that do not pair"), as it does unequal counts
+  and different collectives on two ranks: a position where a rank sends nothing carries a stamp, and the receiver
+  checks every position. The host path fails the call. The Metal path finds it on the GPU and fails the session: the
+  communicator's asynchronous error (`ncclCommGetAsyncError`), and the next call.
 - Make the world communicator first. A process's session opens over the widest communicator alive among whose ranks
   a group's are, so subgroups made after it never reopen it.
 - One process holds one session for its life. `NCCL_BUFFSIZE` and `MESH_POSITIONS` are read when it opens.

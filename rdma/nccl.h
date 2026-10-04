@@ -34,7 +34,11 @@
    slots (NCCL_BUFFSIZE, default 4 MiB, read at attach) on the link's queue pair 0, and where the bridge has two
    queue pairs a link (MESH_QPS=2), a block's slots (16 KiB) on queue pair 1 for pieces of at most NCCL_STEPS
    blocks, as NCCL picks a protocol by size; the session's program is cyclic (the transport's M30: positions
-   run without end over MESH_POSITIONS prepared invocations, default 8192).  A group (ncclGroupStart/End;
+   run without end over MESH_POSITIONS prepared invocations, default 8192); a position where a rank sends nothing
+   carries its stamp in its slot, and every position a rank receives on is checked against its role, so calls that
+   do not pair (a separate send and receive in the same order on two ranks, unequal counts, different collectives)
+   are ncclInvalidUsage: on the host path from the group, on the Metal path the session's failure (the
+   communicator's asynchronous error).  A group (ncclGroupStart/End;
    a call outside one is a group of one) runs each call's compiled program (mesh_program_steps; a
    point-to-point call one SEND or COPY step) and streams its pieces through the rings, slot by slot, the
    receives combined on the host.  ncclCollConfig_t.algSelection is not read: the programs are the choice.  Buffers are host pointers (unified memory, e.g. an MTLBuffer's
