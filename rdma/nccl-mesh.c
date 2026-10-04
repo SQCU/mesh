@@ -669,7 +669,7 @@ struct channel {
   void *cells_buffer, *words_buffer;
   struct mesh_section region;
   unsigned char *cells, *words;
-  uint64_t forwarded;
+  uint64_t forwarded, checked;
   _Atomic uint64_t target, signaled;
 };
 
@@ -709,6 +709,8 @@ static struct {
   struct relay *relays;
   uint32_t relaying, *route;
   int routes, routing;
+  void *violation_buffer;
+  _Atomic uint64_t *violation;
   pthread_t progress;
   _Atomic int stop, failed;
 } session;
@@ -878,10 +880,23 @@ static int forward(void) {
   return moved;
 }
 
+/* a position whose role the two ends disagree on: a filler's slot carries its position's stamp (metal_stamp), which a
+   receiver checks where it receives a piece (absent) and where it receives nothing (present) */
+#define MISMATCH "position %llu on the channel to node %u: this rank receives %s there and its peer sent %s (send and " \
+                 "receive calls that do not pair: an ncclSend and an ncclRecv issued separately in the same order on both " \
+                 "ranks, or different counts or peers; or different collectives on the two ranks)"
+
 static void *progress_run(void *unused) {
   (void)unused;
   double idle = now_s() + session.bound;
   while (!atomic_load(&session.stop)) {
+    const uint64_t violated = session.violation ? atomic_load_explicit(session.violation, memory_order_acquire) : 0;
+    if (violated && !atomic_load(&session.failed)) {
+      const uint64_t where = atomic_load_explicit(session.violation + 1, memory_order_relaxed);
+      const uint32_t h = (uint32_t)(where >> 1);
+      release_all(ncclInvalidUsage, MISMATCH, (unsigned long long)(violated - 1), h < session.count ? session.channels[h].node : UINT32_MAX,
+                  where & 1 ? "a piece" : "nothing", where & 1 ? "nothing" : "a piece");
+    }
     int waiting = 0, moved = forward();
     for (uint32_t h = 0; h < session.count && !atomic_load(&session.failed); h++) {
       struct channel *ch = session.channels + h;
@@ -960,6 +975,9 @@ static void session_close(double linger) {
   }
   for (uint32_t i = 0; i < session.relaying; i++)
     while (session.relays[i].head) { struct pending *done = session.relays[i].head; session.relays[i].head = done->next; free(done); }
+  if (session.violation_buffer) metal_release(session.violation_buffer);
+  free((void *)session.violation);
+  session.violation_buffer = NULL; session.violation = NULL;
   mesh_metal_transport_destroy(&session.transport);
   mesh_detach(&session.context);
   free(session.channels); free(session.relays); free(session.route);
@@ -1114,6 +1132,13 @@ static int session_open(ncclComm_t comm, int *other) {
   if (!status) status = mesh_transfers_cyclic(&session.context);
   if (!status) status = mesh_metal_transport_create(&session.context, metal_device(), &session.transport);
   for (uint32_t h = 0; h < session.count && !status; h++) status = channel_metal(session.channels + h);
+  void *violation = NULL;
+  if (!status && posix_memalign(&violation, (size_t)getpagesize(), (size_t)getpagesize())) status = ENOMEM;
+  if (!status) {
+    memset(violation, 0, (size_t)getpagesize());
+    session.violation = violation;
+    if (!(session.violation_buffer = metal_wrap(violation, (size_t)getpagesize()))) status = ENOMEM;
+  }
   if (!status && !finished && !(finished = metal_event())) status = ENOMEM;
   if (!status) status = mesh_transfers_start(&session.context);
   if (!status) status = pthread_create(&session.progress, NULL, progress_run, NULL);
@@ -1365,7 +1390,12 @@ static ncclResult_t run(struct schedule *plans) {
         if (arrived == UINT64_MAX) return fail(ncclRemoteError, "the link to node %u was cancelled", ch->node);
         if (!landed(arrived, at)) break;
         struct message *m = p->in_at < p->ins ? p->in + p->in_at : NULL;
-        if (m && at >= m->first) {
+        const int data = m && at >= m->first;
+        uint64_t seen;
+        memcpy(&seen, ch->receiving + (at % DEPTH) * ch->slot, sizeof seen);
+        if (data == (seen == metal_stamp(at)))
+          return fail(ncclInvalidUsage, MISMATCH, (unsigned long long)at, ch->node, data ? "a piece" : "nothing", data ? "nothing" : "a piece");
+        if (data) {
           struct steps *s = m->c->bound;
           if (at == m->first && !ready(s, m->step)) break;
           const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
@@ -1385,6 +1415,9 @@ static ncclResult_t run(struct schedule *plans) {
           const size_t offset = (at - m->first) * ch->slot, length = m->bytes - offset < ch->slot ? m->bytes - offset : ch->slot;
           memcpy(ch->sending + (at % DEPTH) * ch->slot, m->c->bound->host[m->c->bound->steps[m->step].buffer] + m->offset + offset, length);
           if (at + 1 == m->first + m->pieces) p->out_at++;
+        } else {
+          const uint64_t stamp = metal_stamp(at);
+          memcpy(ch->sending + (at % DEPTH) * ch->slot, &stamp, sizeof stamp);
         }
         channel_publish(ch, at);
         ch->sent++; busy = 1;
@@ -1571,11 +1604,27 @@ static ncclResult_t gpu(int status, const char *what) {
 }
 
 /* the GPU waits until `count` of the channel's positions have landed: a spin on the last one's completion word */
+static int receives_at(uint32_t h, uint64_t at);
+
+/* the positions of channel `ch` up to `count` not yet checked, each slot against its role once a wait covers it (its
+   slot stays until this rank publishes the position LAG past it, which waits on the position after it first) */
+static struct metal_check check_of(struct channel *ch, uint64_t count) {
+  const uint32_t h = (uint32_t)(ch - session.channels);
+  uint64_t first = ch->checked < count ? ch->checked : count;
+  if (count - first > DEPTH) first = count - DEPTH;
+  struct metal_check check = {ch->ring_in, session.violation_buffer, ch->slot, first, (uint32_t)(count - first), 0, h, DEPTH};
+  for (uint64_t t = first; t < count; t++)
+    if (receives_at(h, t)) check.mask |= 1u << (t - first);
+  if (count > ch->checked) ch->checked = count;
+  return check;
+}
+
 static ncclResult_t arrive(struct metal_program *program, struct channel *ch, uint64_t count) {
   if (count <= ch->waited) return ncclSuccess;
   ch->waited = count;
   const uint64_t at = count - 1;
-  return gpu(metal_spin(program, ch->words_buffer, ch->word + (at % session.positions) * ch->word_stride, 1 + cycle_of(at)), "a spin");
+  const struct metal_check check = check_of(ch, count);
+  return gpu(metal_spin(program, ch->words_buffer, ch->word + (at % session.positions) * ch->word_stride, 1 + cycle_of(at), &check), "a spin");
 }
 
 /* a group issued and not complete: its calls, its schedule and its positions [start, end) on each channel; the
@@ -1630,6 +1679,17 @@ static struct inflight *inflight_at(uint32_t h, uint64_t at) {
   for (struct inflight *g = inflight; g; g = g->next_group)
     if (at < g->end[h]) return at >= g->start[h] ? g : NULL;
   return NULL;
+}
+
+/* whether this rank receives a piece at position `at` of channel h: a position of no group in flight is an empty one
+   (each group's receives are awaited, and checked, before it completes) */
+static int receives_at(uint32_t h, uint64_t at) {
+  const struct inflight *g = inflight_at(h, at);
+  if (!g) return 0;
+  const struct schedule *p = g->plans + h;
+  for (size_t k = 0; k < p->ins; k++)
+    if (at >= p->in[k].first && at < p->in[k].first + p->in[k].pieces) return 1;
+  return 0;
 }
 
 static int event_order(const void *x, const void *y) {
@@ -1799,9 +1859,10 @@ static ncclResult_t consume(struct metal_program *program, uint32_t h, uint64_t 
       const int reduce = st->steps[m->step].op == MESH_STEP_REDUCE;
       const struct where to = st->gpu[st->steps[m->step].buffer];
       if (!ch->large) {
+        const struct metal_check check = check_of(ch, at + 1);
         result = gpu(metal_land(program, reduce ? (int)m->c->type : -1, m->c->combine, to.buffer, to.offset + m->offset + offset, ch->ring_in, from,
                                 reduce ? length / SIZE[m->c->type] : length, ch->words_buffer,
-                                ch->word + (at % session.positions) * ch->word_stride, 1 + cycle_of(at)), "a landing");
+                                ch->word + (at % session.positions) * ch->word_stride, 1 + cycle_of(at), &check), "a landing");
         if (at + 1 > ch->waited) ch->waited = at + 1;
       } else {
         result = arrive(program, ch, at + 1);
@@ -1847,7 +1908,9 @@ static ncclResult_t publish(struct metal_program *program, uint32_t h, int *publ
                               st->gpu[st->steps[m->step].buffer].offset + m->offset + offset, length), "a piece into its slot");
     if (at + 1 == m->first + m->pieces) p->out_at++;
   }
-  if (!result && !released) result = gpu(metal_publish(program, ch->cells_buffer, cell, value), "a publication");
+  if (!result && !released && m) result = gpu(metal_publish(program, ch->cells_buffer, cell, value), "a publication");
+  else if (!result && !released)
+    result = gpu(metal_publish_filler(program, ch->cells_buffer, cell, value, ch->ring_out, (at % DEPTH) * ch->slot, at), "an empty publication");
   if (!result) { ch->sent++; *published = 1; }
   return result;
 }

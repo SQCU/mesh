@@ -164,6 +164,31 @@ int metal_truncdiv(struct metal_program *program, int type, void *dst, size_t ds
   return 0;
 }
 
+uint64_t metal_stamp(uint64_t position) { return 0x6d6573682d66696cULL ^ (position * 0x9e3779b97f4a7c15ULL); }
+
+/* the positions a landed wait covers, each slot against its role (nccl-mesh-metal.h struct metal_check) */
+static void check_roles(const struct metal_check *check, uint64_t word) {
+  if (!check || !check->count || word == UINT64_MAX) return;
+  atomic_thread_fence(memory_order_acquire);
+  _Atomic uint64_t *violation = check->violation;
+  for (uint32_t c = 0; c < check->count; c++) {
+    const uint64_t t = check->first + c, data = (check->mask >> c) & 1;
+    uint64_t seen;
+    memcpy(&seen, at(check->ring, (t % check->depth) * check->slot), sizeof seen);
+    if (data == (seen == metal_stamp(t)) && !atomic_load_explicit(violation, memory_order_relaxed)) {
+      atomic_store_explicit(violation + 1, (uint64_t)check->channel * 2 + data, memory_order_relaxed);
+      atomic_store_explicit(violation, t + 1, memory_order_release);
+    }
+  }
+}
+
+int metal_publish_filler(struct metal_program *program, void *cells, size_t offset, uint64_t argument, void *slot, size_t slot_offset,
+                         uint64_t position) {
+  const uint64_t stamp = metal_stamp(position);
+  memcpy(at(slot, slot_offset), &stamp, sizeof stamp);
+  return metal_publish(program, cells, offset, argument);
+}
+
 int metal_publish(struct metal_program *program, void *cells, size_t offset, uint64_t argument) {
   (void)program;
   trace("publish %p+%zu %llu\n", cells, offset, (unsigned long long)argument);
@@ -172,13 +197,14 @@ int metal_publish(struct metal_program *program, void *cells, size_t offset, uin
   return 0;
 }
 
-int metal_spin(struct metal_program *program, void *words, size_t offset, uint64_t expected) {
+int metal_spin(struct metal_program *program, void *words, size_t offset, uint64_t expected, const struct metal_check *check) {
   (void)program;
   _Atomic uint64_t *word = (_Atomic uint64_t *)at(words, offset);
   trace("spin %p+%zu %llu seen %llu\n", words, offset, (unsigned long long)expected, (unsigned long long)atomic_load(word));
   const double start = now_s();
   const int status = await(word, expected, "a wait for a landing");
   if (now_s() - start > 1e-3) trace("spun %p+%zu %.3f s, %llu\n", words, offset, now_s() - start, (unsigned long long)atomic_load(word));
+  if (!status) check_roles(check, atomic_load_explicit(word, memory_order_acquire));
   return status;
 }
 
@@ -189,8 +215,8 @@ int metal_send_small(struct metal_program *program, void *slot, size_t slot_offs
 }
 
 int metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *slot, size_t slot_offset, size_t n,
-               void *words, size_t word_offset, uint64_t expected) {
-  int status = metal_spin(program, words, word_offset, expected);
+               void *words, size_t word_offset, uint64_t expected, const struct metal_check *check) {
+  int status = metal_spin(program, words, word_offset, expected, check);
   if (status) return status;
   if (type < 0) return metal_copy(program, METAL_LAND, dst, dst_offset, slot, slot_offset, n);
   return metal_combine(program, type, op, dst, dst_offset, slot, slot_offset, n);
