@@ -1,5 +1,5 @@
-"""The mesh from Python.  The planner (mesh-plan.h: link maps, operands, collectives, steps, their planning and
-pricing) is the header's own, through _mesh_c (mesh_c_build.py compiles the header's declarations against it, so
+"""The mesh from Python.  The planner (mesh-plan.h: link maps, the trees every collective and message take, operands,
+collectives, steps, their planning and pricing) is the header's own, through _mesh_c (mesh_c_build.py compiles the header's declarations against it, so
 no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The host transfers
 (Mesh, Steps, AllReduce: mesh.h's attach, sections and prepared transfers) are bound below by ctypes, mesh.h not
 being a header a binder takes as written."""
@@ -7,6 +7,7 @@ import ctypes as C
 import os
 import sys
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -32,7 +33,6 @@ def _named(prefix, names):
 
 KINDS = _named('MESH_LINKS_', ('mesh', 'ring', 'tree', 'graph'))
 WHATS = _named('MESH_', ('allreduce', 'broadcast', 'reduce', 'reduce_scatter', 'allgather'))
-ALGORITHMS = _named('MESH_', ('direct', 'ring', 'tree', 'binomial'))  # MESH_UNAVAILABLE after them
 SEND, REDUCE, COPY = lib.MESH_STEP_SEND, lib.MESH_STEP_REDUCE, lib.MESH_STEP_COPY
 ALLREDUCE, BROADCAST = lib.MESH_ALLREDUCE, lib.MESH_BROADCAST
 CANCELLED = 2 ** 64 - 1
@@ -81,47 +81,58 @@ def operand(type, element_bytes, elements):
     return made
 
 
-class Choice:
-    """A collective (mesh-plan.h's struct mesh_collective, `c`) and the contributors' bit set it points at."""
+def trees(nodes, root, parent, log_weight):
+    """mesh-plan.h's struct mesh_trees over the given trees (root[t], parent[t][v], log_weight[t]): plain data, `c` the
+    struct's pointer and the arrays it points at kept beside it."""
+    count = len(root)
+    roots, parents = ffi.new('uint32_t[]', list(root) or [0]), ffi.new('uint32_t[]', [int(v) for p in parent for v in p] or [0])
+    weights = ffi.new('double[]', [float(w) for w in log_weight] or [0.0])
+    made = ffi.new('struct mesh_trees *', {'nodes': nodes, 'count': count, 'root': roots, 'parent': parents, 'log_weight': weights})
+    return SimpleNamespace(c=made, nodes=nodes, count=count, root=list(root), parent=[list(p) for p in parent],
+                           log_weight=list(log_weight), keep=(roots, parents, weights))
 
-    def __init__(self, c, keep=None):
-        self.c, self._keep = c, keep
-        self.what, self.how, self.root, self.accumulator_bytes = c.what, c.how, c.root, c.accumulator_bytes
+
+def pack(lmap, eps=0.1, most=4):
+    """mesh_trees_pack: every node's trees packed into lmap's links (Garg-Konemann), at most `most` a root, as trees()."""
+    n = lmap.nodes
+    root, parent, weight = ffi.new('uint32_t[]', n * most), ffi.new('uint32_t[]', n * n * most), ffi.new('double[]', n * most)
+    count = lib.mesh_trees_pack(lmap.c, eps, most, root, parent, weight)
+    if not count:
+        raise ValueError(f'mesh_trees_pack: no trees on this map ({lmap.kind} of {n})')
+    return trees(n, [root[t] for t in range(count)], [[parent[t * n + v] for v in range(n)] for t in range(count)],
+                 [weight[t] for t in range(count)])
 
 
-def choose(lmap, what, piece, alpha=0.0, beta=0.0, how=0, root=0, accumulator_bytes=0, contributors=None):
-    """mesh_collective_choose: the collective `what` (WHATS index) of least time for `piece` on `lmap` among the
-    algorithms of the bit set `how` (0: every one), every link at its own cost or alpha and beta; `contributors`
-    the nodes an all-reduce combines (None: every one).  Its `how` is len(ALGORITHMS) where the map carries none."""
-    template = ffi.new('struct mesh_collective *')
-    template.what, template.how, template.root, template.accumulator_bytes = what, how, root, accumulator_bytes
+def path(routes, a, b):
+    """mesh_trees_path: the nodes a message from a to b crosses, a and b included ([] where b roots no tree)."""
+    made = ffi.new('uint32_t[]', routes.nodes)
+    return [made[i] for i in range(lib.mesh_trees_path(routes.c, a, b, made))]
+
+
+def collective(what, root=0, accumulator_bytes=0, contributors=None, nodes=0):
+    """mesh-plan.h's struct mesh_collective (`c`, a pointer; c[0] the struct a function takes) and the contributors' bit
+    set it points at (None: every node)."""
+    made = ffi.new('struct mesh_collective *')
+    made.what, made.root, made.accumulator_bytes = what, root, accumulator_bytes
     words = None
     if contributors is not None:
-        words = ffi.new('uint64_t[]', max(1, -(-lmap.nodes // 64)))
+        words = ffi.new('uint64_t[]', max(1, -(-max(nodes, max(contributors, default=0) + 1) // 64)))
         for m in contributors:
             words[m // 64] |= 1 << (m % 64)
-        template.contributors = words
-    return Choice(lib.mesh_collective_choose(lmap.c, template[0], piece[0], alpha, beta), words)
+        made.contributors = words
+    return SimpleNamespace(c=made, what=what, root=root, keep=words)
 
 
-def collective(what, how, root=0, accumulator_bytes=0):
-    """A collective as given, for plan and time (no choice made)."""
-    made = ffi.new('struct mesh_collective *')
-    made.what, made.how, made.root, made.accumulator_bytes = what, how, root, accumulator_bytes
-    return Choice(made[0], made)
-
-
-def plan(lmap, rank, chosen, piece):
-    """mesh_collective_plan: rank's steps of `chosen` (a Choice), in its order."""
-    steps = ffi.new('struct mesh_step[]', lib.mesh_collective_steps(lmap.nodes))
-    count = lib.mesh_collective_plan(lmap.c, rank, chosen.c, piece[0], steps)
+def plan(routes, rank, chosen, piece):
+    """mesh_collective_plan: rank's steps of the collective `chosen` (collective()) along `routes` (trees()), in its order."""
+    steps = ffi.new('struct mesh_step[]', lib.mesh_collective_steps(routes.c))
+    count = lib.mesh_collective_plan(routes.c, rank, chosen.c[0], piece[0], steps)
     return [ffi.new('struct mesh_step *', steps[i]) for i in range(count)]
 
 
-def time_of(lmap, chosen, piece, alpha=0.0, beta=0.0):
-    """mesh_collective_time: every node's plan of `chosen` run in the alpha-beta model, in us (negative where it
-    stops or mismatches)."""
-    return lib.mesh_collective_time(lmap.c, chosen.c, piece[0], alpha, beta)
+def time_of(lmap, routes, chosen, piece, alpha=0.0, beta=0.0):
+    """mesh_collective_time: every node's plan run in the alpha-beta model, in us (negative where it stops or mismatches)."""
+    return lib.mesh_collective_time(lmap.c, routes.c, chosen.c[0], piece[0], alpha, beta)
 
 
 class Context(C.Structure):
@@ -166,14 +177,16 @@ class Mesh:
     and exchange bound on it (collective, bind), in the same order on every rank, prepared for
     `invocations` calls, storage ringing over `depth` slots, and started by `start` (an NCCL group is
     one).  `links` is a LinkMap (or a link map file's path, read_link_map); its node v is the bridge's node
-    members[v] (default v), and this rank is the map node of this bridge's.  Each collective takes the transfer
-    identities from `identity` on, mesh_collective_steps(nodes) of them."""
+    members[v] (default v), and this rank is the map node of this bridge's.  `routes` are the trees every
+    collective takes (trees(); None: pack(links), made once here).  Each collective takes the transfer
+    identities from `identity` on, mesh_collective_steps(routes) of them."""
 
-    def __init__(self, links, invocations=1, depth=4, region=None, identity=1, members=None):
+    def __init__(self, links, invocations=1, depth=4, region=None, identity=1, members=None, routes=None):
         self.context = Context()
         check(LIB.mesh_attach(C.byref(self.context), os.fsencode(region) if region else None))
         self.header = Header.from_address(self.context.M)
         self.map = links if isinstance(links, LinkMap) else read_link_map(links)
+        self.routes = routes if routes is not None else pack(self.map)
         self.nodes, self.members = self.map.nodes, list(members or range(self.map.nodes))
         self.rank = self.members.index(self.header.node)
         self.invocations, self.depth, self.identity = invocations, min(depth, invocations), identity
@@ -189,22 +202,17 @@ class Mesh:
             LIB.mesh_section_address(C.byref(self.context), section, 0))
         return section, pages, np.frombuffer(memory, np.uint8).reshape(self.depth, -1)
 
-    def collective(self, what, shape, dtype, root=0, op=np.add, how=0, alpha=0.0, beta=0.0):
-        """This rank's part of the collective `what` (WHATS) of a `shape` array of `dtype`, planned by
-        mesh_collective_choose among the algorithms of the bit set `how` (0: every one) that the map
-        carries, at a link cost of alpha us + beta ns a byte (0, 0: the first carried), and bound;
-        `op` combines what a REDUCE brings in (any binary ufunc of the dtype)."""
+    def collective(self, what, shape, dtype, root=0, op=np.add):
+        """This rank's part of the collective `what` (WHATS) of a `shape` array of `dtype` along this Mesh's trees
+        (mesh_collective_plan), bound; `op` combines what a REDUCE brings in (any binary ufunc of the dtype)."""
         dtype = np.dtype(dtype)
         piece = operand(ord(dtype.char), dtype.itemsize, int(np.prod(shape)))
-        chosen = choose(self.map, WHATS.index(what), piece, alpha, beta, how=how, root=root)
-        if chosen.how >= len(ALGORITHMS):
-            raise ValueError(f'no algorithm of {how:#x} carries {what} of {piece.elements} elements on this map')
-        return Steps(self, plan(self.map, self.rank, chosen, piece), shape, dtype, op, chosen)
+        return Steps(self, plan(self.routes, self.rank, collective(WHATS.index(what), root), piece), shape, dtype, op)
 
     def bind(self, steps, shape, dtype, identity=None):
         """The caller's own steps over one `shape` array of `dtype` (a point-to-point SEND or COPY),
         bound under transfer identity `identity` + each step's round (default the next collective's)."""
-        return Steps(self, steps, shape, np.dtype(dtype), np.add, None, identity)
+        return Steps(self, steps, shape, np.dtype(dtype), np.add, identity)
 
     def start(self):
         """Prepares every bound transfer for the invocations, gives each receive its completion words
@@ -225,12 +233,11 @@ class Steps:
     (mesh_collective_bind): the operand's ring of slots, and one received section a REDUCE, placed at
     its SEND piece's offset within a block so that both ends cut the piece in the same chunks."""
 
-    def __init__(self, mesh, steps, shape, dtype, op, chosen, identity=None):
+    def __init__(self, mesh, steps, shape, dtype, op, identity=None):
         self.mesh, self.rank, self.shape, self.dtype, self.op = mesh, mesh.rank, tuple(shape), dtype, op
-        self.steps, self.chosen = list(steps), chosen
-        self.direct = chosen is not None and chosen.how == ALGORITHMS.index('direct')
+        self.steps = list(steps)
         if identity is None:
-            identity, mesh.identity = mesh.identity, mesh.identity + lib.mesh_collective_steps(mesh.nodes)
+            identity, mesh.identity = mesh.identity, mesh.identity + lib.mesh_collective_steps(mesh.routes.c)
         context = C.byref(mesh.context)
         self.bytes = int(np.prod(shape)) * dtype.itemsize
         self.operand, pages, self.slots = mesh.ring(self.bytes)
@@ -255,13 +262,10 @@ class Steps:
         return self.slots[invocation % self.mesh.depth, :self.bytes].view(self.dtype).reshape(self.shape)
 
     def __call__(self, invocation, deadline=float('inf')):
-        """Runs this rank's steps in plan order and returns the result: each SEND published, each
-        receive awaited, a REDUCE's piece combined into the result by `op`.  A direct exchange
-        combines into a copy, because its SEND may still be reading the slot, and copies each COPY's
-        piece into it; a ring or tree works in place."""
-        own = self.slot(invocation)
-        total = own.copy() if self.direct else own
-        flat, mine, received = total.reshape(-1), own.reshape(-1), iter(self.received)
+        """Runs this rank's steps in plan order and returns the result, in place: each SEND published, each
+        receive awaited, a REDUCE's piece combined into the result by `op`."""
+        total = self.slot(invocation)
+        flat, received = total.reshape(-1), iter(self.received)
         context, row = C.byref(self.mesh.context), invocation % self.mesh.depth
         for step, piece in zip(self.steps, self.pieces):
             if step.op == SEND:
@@ -276,8 +280,6 @@ class Steps:
             if step.op == REDUCE:
                 slots, offset, size = next(received)
                 self.op(flat[span], slots[row, offset:offset + size].view(self.dtype), out=flat[span])
-            elif total is not own:
-                flat[span] = mine[span]
         return total
 
     def close(self, linger=0.5):
@@ -286,9 +288,8 @@ class Steps:
 
 
 def AllReduce(shape, dtype, links, invocations, depth=4, identity=1, region=None):
-    """One rank's all-reduce of a typed array over an explicit link map (the Xonotic planner's), by
-    the first algorithm the map carries (mesh_collective_choose at no cost: the direct exchange, a
-    ring, a tree), prepared once for `invocations` calls and started: a Mesh of one collective."""
+    """One rank's all-reduce of a typed array over an explicit link map (the Xonotic planner's), along the map's
+    packed trees, prepared once for `invocations` calls and started: a Mesh of one collective."""
     mesh = Mesh(links, invocations, depth, region, identity)
     steps = mesh.collective('allreduce', shape, dtype)
     mesh.start()
