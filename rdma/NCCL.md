@@ -18,7 +18,8 @@ On a node, metal-microbench's `tools/mesh/node-setup.sh` does all of it (docs/no
 ## Run
 
 A rank is a process on a node whose bridge is up. Bridges are started per call by a driver, never by launchd.
-metal-microbench's launcher starts them on a membership and runs any command on every node:
+metal-microbench's launcher (the operator's repository; without it, [by hand](#starting-bridges-by-hand)) starts them
+on a membership and runs any command on every node:
 
 ```
 ~/.venv-mesh-uv/bin/python tools/mesh/grid.py run --members 0,2,3 -- '{python} my_program.py'
@@ -39,6 +40,30 @@ other than the driver (the store listens there), and the launcher prints the ran
 makes its own communicator passes its node as its rank (`{node}`, or `ncclMeshCommInitRank` with a `node` table). The
 bridges stop by SIGTERM afterwards.
 Its functions are `grid.ranks_up`, `ranks_run` and `ranks_down`, for drivers of their own.
+
+## Starting bridges by hand
+
+What the launcher does, for a driver of your own. Number the membership's nodes 0..N-1 in a link map (below) and on
+each node start one bridge:
+
+```
+MESH_QPS=4 ~/mesh/rdma/mesh-flow -I 2 -A 131072 -B 1 -R 524288 -O 4096 -s /ranks \
+  --link 'rdma_en3,1,fe80::a%en3,fe80::b%en3,18612' --link 'rdma_en5,3,fe80::c%en5,fe80::d%en5,18614'
+```
+
+- `-I` this node's number in the map; `-s` the region the ranks attach to (their `MESH_REGION`). `-A` arena pages,
+  `-B` pages a block, `-R` page-table rows, `-O` transfer-list entries: the values above are the launcher's (a 2 GiB
+  arena of 16 KiB pages).
+- One `--link` a cable: the RDMA device of the port (`ibv_devinfo`: `rdma_en<k>`), the peer's node number, this end's
+  and the peer's IPv6 link-local addresses on that port (`ifconfig en<k>`, the `fe80::` line) with its scope, and a
+  TCP port both ends give alike (one a cable; the higher-numbered node listens). Which port reaches which peer:
+  `ping6` the peer's link-local over each port.
+- `MESH_QPS`: 4 where the map leaves any pair unlinked, else 2. `MESH_PAIR_SECONDS`: how long a link may take to pair
+  (default 30).
+- A bridge prints `bridge node <n>:` to its stderr once it is up, and `pair up:` per link. Then start a rank on each
+  node with `MESH_REGION=/ranks`, `MESH_LINK_MAP` the map file, and torchrun's `RANK`, `WORLD_SIZE`, `MASTER_ADDR`,
+  `MASTER_PORT` for torch (RANK may be any order: each rank reads its node from its bridge).
+- Afterwards SIGTERM each bridge's pid, never SIGKILL.
 
 ## Communicators
 

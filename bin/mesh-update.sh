@@ -11,6 +11,8 @@ ts(){ date '+%F %T'; }
 BRANCH=$(cat /usr/local/mesh/branch 2>/dev/null)
 [ -n "$BRANCH" ] || BRANCH=$(awk '{print $1}' /usr/local/mesh/revision 2>/dev/null)
 BRANCH=${BRANCH:-main}
-echo "[$(ts)] converging from $BRANCH"
-curl -fsSL "https://raw.githubusercontent.com/SQCU/mesh/$BRANCH/bootstrap.sh" \
-  | MESH_BRANCH="$BRANCH" bash
+REPO=$(cat /usr/local/mesh/repo 2>/dev/null)
+REPO=${REPO:-SQCU/mesh}
+echo "[$(ts)] converging from $REPO@$BRANCH"
+curl -fsSL "https://raw.githubusercontent.com/$REPO/$BRANCH/bootstrap.sh" \
+  | MESH_REPO="$REPO" MESH_BRANCH="$BRANCH" bash

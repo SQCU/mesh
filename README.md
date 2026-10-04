@@ -52,6 +52,17 @@ Hands-on, once, ~5 minutes:
 
 Everything after that is remote: `ssh node.local` and re-run `sudo install.sh`.
 
+**Nodes of your own.** The roster every node trusts is `keys/authorized_keys` (public keys, each labeled
+`owner:machine`). Fork this repository, append your public key to it, and bootstrap from the fork:
+
+```
+curl -fsSL https://raw.githubusercontent.com/<you>/mesh/main/bootstrap.sh | sudo MESH_REPO=<you>/mesh bash
+```
+
+A node remembers the repository it was bootstrapped from (`/usr/local/mesh/repo`) and converges from it
+(`mesh-update`). The compute layer's launcher (metal-microbench `tools/mesh/grid.py`) is the operator's;
+`rdma/NCCL.md` "Starting bridges by hand" runs the library without it.
+
 > The failure to guard against here is not "the wrong code ran" — that is answered by
 > replacing the machine. It is a bootstrap that half-completes and leaves the node
 > unreachable. That is why `bootstrap.sh` opens sshd *before* it fetches anything:

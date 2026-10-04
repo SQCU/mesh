@@ -49,4 +49,4 @@ case "$KEEP" in
 esac
 
 echo "==> 3/3  provisioning"
-MESH_BRANCH="$BRANCH" exec bash "$SOURCE/install.sh"
+MESH_REPO="$REPO" MESH_BRANCH="$BRANCH" exec bash "$SOURCE/install.sh"
