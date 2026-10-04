@@ -10,8 +10,7 @@ reports which: one rank a node), the communicator over that map (ncclMeshCommIni
 compiled defaults.  Every call is libnccl-mesh's host path: contiguous arrays at host pointers, a NULL stream, the call
 complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast, Allgather, Reduce_scatter_block,
 Alltoall, Send, Recv, Barrier, allreduce (a Python number), Free; IN_PLACE as a send buffer.  A message to a rank the
-map does not link takes routes through intermediates, and is refused where the bridges' queue pairs do not carry them
-(rdma/NCCL.md "Routes").  The host path works on any node; it is not the measured path (GPU tensors take the Metal
+map does not link is forwarded by the nodes between (rdma/NCCL.md "Routes between unlinked ranks").  The host path works on any node; it is not the measured path (GPU tensors take the Metal
 path through torch-mesh)."""
 import os
 

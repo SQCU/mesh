@@ -1347,8 +1347,8 @@ static ncclResult_t session_ensure(ncclComm_t comm) {
       const int status = session_open(widest(comm), &other);
       if (other >= 0) return fail(ncclInvalidUsage, "rank %d runs on the bridge of node %d", comm->rank, other);
       if (status == ERANGE)
-        return fail(ncclInvalidUsage, "the bridges' links have too few queue pairs for the routes across them (MESH_QPS: 2, and 2 for each "
-                                      "routed pair crossing the busiest link)");
+        return fail(ncclInvalidUsage, "the bridges' links have too few queue pairs for the relay rings (MESH_QPS 4 where the map leaves a "
+                                      "pair unlinked)");
       if (status == EHOSTUNREACH) return fail(ncclInvalidUsage, "a pair of ranks has no route on the map, or a node number is %d or more", NODES);
       if (status) {
         const ncclResult_t result = fail(ncclSystemError, "the session's transfers did not start: %s", strerror(status));

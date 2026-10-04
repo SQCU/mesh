@@ -33,7 +33,7 @@ Validated: two nodes on TB5 with GPUs, and three to eight on one host's loopback
 
 It reads the link map (default `configs/links/pair-ring.txt`, or `MESH_LINK_MAP`; `--links` another). It keeps the
 links the members hold and probes only those links. It starts one bridge per node, with the queue pairs the routes
-need (below). Each rank gets `RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`, `MESH_REGION` and `MESH_LINK_MAP`
+need (below: 4 where any pair is unlinked, else 2). Each rank gets `RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`, `MESH_REGION` and `MESH_LINK_MAP`
 (the membership's map, its nodes numbered from 0), as torchrun sets them. `RANK` is the launcher's: rank 0 is a member
 other than the driver (the store listens there), and the launcher prints the rank-to-node table. A program that
 makes its own communicator passes its node as its rank (`{node}`, or `ncclMeshCommInitRank` with a `node` table). The
@@ -78,15 +78,17 @@ Ops: sum, prod, max, min, avg; premul-sum takes a host immediate.
 ## Routes between unlinked ranks
 
 Collectives run on linked ranks alone, so they need no routes. A message between ranks the map does not link
-(send/recv, all-to-all, gather and scatter, which are grouped sends) is forwarded by the nodes between them on
-queue pairs of its own: `2 + 2 x` the routed pairs crossing the busiest link.
+(send/recv, all-to-all, gather and scatter, which are grouped sends) takes the shortest path, and each node between
+forwards it (NCCL's PXN proxy) on the link's relay rings:
 
-A TB5 device has 10 usable queue pairs a link. Where the routes need more, the launcher starts the bridges at 2
-queue pairs, and the library refuses those messages with the numbers. Every collective still runs.
+- One relay ring a class (large and small) each way, on queue pairs 2 and 3. Every routed pair crossing the link
+  shares it, so a map of any size and shape needs 4 queue pairs a link; a TB5 device has 10.
+- Each message carries its ends and position. A node delivers what is addressed to it into its channel, and queues
+  the rest for the next link, so a ring never waits on another.
+- A ring's slots are credited back by its receiver, on the messages going the other way or alone.
 
-- On a complete graph, no routes are needed.
-- A ring or star of 5 fits the budget.
-- A line of 5 or more, or a ring of 6 or more, does not.
+The launcher starts the bridges at 4 queue pairs where any pair of members is unlinked, else 2. With 2, the library
+refuses those messages by name; every collective still runs.
 
 ## Rules a program keeps
 
@@ -118,7 +120,7 @@ Recover across calls: make the communicators again, on the nodes that remain.
 | `MESH_REMOTE_BOUND` | library | seconds a link may stay silent with positions pending |
 | `NCCL_BUFFSIZE` | library | bytes of a large ring's slots together (default 4 MiB) |
 | `MESH_POSITIONS` | library | the session's cyclic invocations (default 8192) |
-| `MESH_QPS` | bridge | queue pairs a link (the launcher's: 2, or what the routes need) |
+| `MESH_QPS` | bridge | queue pairs a link (the launcher's: 4 where any pair is unlinked, else 2) |
 | `MESH_LEDGER` | bridge | each link's crossing times written to its log at teardown |
 | `MESH_PAIR_SECONDS` | bridge | how long a link may take to pair from its start (default 30; the launcher passes it) |
 | `MESH_HOST_TRACE` | host executor | a timed trace of the walk in the rank's log |

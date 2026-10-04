@@ -35,9 +35,9 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - Make subgroups (`new_group`, `DeviceMesh`) after the world group, as torch does: they run on its session.
 - The group's `timeout` is how long a link may stay silent before the library cancels it (`MESH_REMOTE_BOUND`
   overrides it).
-- Collectives run on any cable graph. Messages between ranks the map does not link (p2p, `all_to_all`, `gather`,
-  `scatter`) need routes the bridges' queue pairs carry ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks));
-  otherwise they are refused with the numbers.
+- Everything runs on any connected cable graph. Messages between ranks the map does not link (p2p, `all_to_all`,
+  `gather`, `scatter`) are forwarded by the nodes between them
+  ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)); the launcher gives the bridges the queue pairs for it.
 
 ## What works
 
