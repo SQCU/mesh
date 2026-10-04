@@ -30,9 +30,11 @@ Independent values use their configured distinct storage. The bridge does not
 interpret a model graph, choose tensor placement, or invoke application kernels.
 
 SIGINT and SIGTERM request orderly teardown of device resources. The operational
-rules are in [RDMA-RULES.md](../RDMA-RULES.md). The bridge is a supervised service, as
-it has been since the first pairing loop: `bin/mesh-bridge.sh` loads it as a launchd job
-that is started again whenever it exits other than 0. A bridge stopped with clients
+rules are in [RDMA-RULES.md](../RDMA-RULES.md). (Superseded 2026-10-01, git 67f959b: a bridge is no longer a launchd
+service; the driver that uses it starts it per call and stops it with SIGTERM, `rdma/NCCL.md` "Run". What follows
+describes the service it was.) The bridge was a supervised service, as
+it had been since the first pairing loop: `bin/mesh-bridge.sh` (deleted) loaded it as a launchd job
+that was started again whenever it exited other than 0. A bridge stopped with clients
 attached exits EX_TEMPFAIL, and its successor takes the region it kept for them and
 resumes them; one stopped with none, or that leaves the mesh (SIGUSR2), exits 0, and
 none is started. The launcher stops a bridge with SIGTERM and boots its job out only
