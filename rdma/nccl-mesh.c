@@ -319,7 +319,7 @@ static ncclResult_t comm_routes(struct ncclComm *comm, const struct mesh_trees *
     memcpy(weight, paths->log_weight, trees * sizeof *weight);
     comm->paths.count = trees;
   } else if (!(comm->paths.count = mesh_trees_shortest(&comm->map, root, parent, weight)))
-    return fail(ncclInvalidArgument, "the topology's links do not join every rank");
+    return fail(ncclInvalidArgument, "the topology's links do not join every rank, and no wider communicator alive over its ranks joins them");
   if (programs) {
     if (!(comm->entries = calloc((size_t)count + 1, sizeof *comm->entries))) return fail(ncclSystemError, "out of memory");
     for (int e = 0; e < count; e++) {
@@ -532,7 +532,10 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int rank, const struct mesh_
   static const char *const kinds[] = {"mesh", "ring", "tree", "graph"};
   if (!comm || !topology) return fail(ncclInvalidArgument, "comm or topology is NULL");
   if (rank < 0 || (uint32_t)rank >= topology->nodes) return fail(ncclInvalidArgument, "rank %d of %u", rank, topology->nodes);
-  if (mesh_link_map_check(topology))
+  int apart = topology->kind == MESH_LINKS_GRAPH && !paths;
+  for (uint32_t l = 0; apart && l < topology->links; l++)
+    apart = topology->link[l][0] != topology->link[l][1] && topology->link[l][0] < topology->nodes && topology->link[l][1] < topology->nodes;
+  if (mesh_link_map_check(topology) && !apart)
     return fail(ncclInvalidArgument, "the topology (%s of %u ranks, %u links) is not one its algorithms can run on (mesh-plan.h)",
                 topology->kind <= MESH_LINKS_GRAPH ? kinds[topology->kind] : "unknown kind", topology->nodes, topology->links);
   if (count < 0 || (count && !programs)) return fail(ncclInvalidArgument, "programs is NULL with count %d", count);
