@@ -21,7 +21,7 @@
    rank's moves, made ahead of time), each rank's node and this rank's bridge region.  An NCCL program's
    ncclCommInitRank takes the link map MESH_LINK_MAP names (its node count the communicator's; without it every pair
    linked at no cost) and that map's default programs, rank r on node r, and the region of the process's MESH_REGION
-   (default /mesh0), which ncclGetUniqueId puts in the id; every rank makes the same id with no exchange.  ncclCommSplit keeps the links among the ranks it takes, each with its cost, and compiles their default programs.  A process attaches once, at its first
+   (default /mesh0), which ncclGetUniqueId puts in the id; every rank makes the same id with no exchange.  ncclCommSplit keeps the links among the ranks it takes, each with its cost, joins them where they leave its ranks apart (as ncclMeshCommInitRank does), and compiles their default programs.  A process attaches once, at its first
    group that crosses a link, and keeps one prepared program on the bridge for its life (a session):
    to each rank of the widest communicator alive in the process among whose ranks the group's are (a subgroup made
    after its world finds its channels open), over the link to it, else over the first link of its path, each node
@@ -775,7 +775,9 @@ ncclResult_t pncclGroupEnd(void);
    copy), `roots` the call's root. */
 ncclResult_t ncclMeshGroupPlans(int* steps, int* roots, int capacity, int* count);
 /* A communicator over `topology`, its ranks' link map (mesh-plan.h: refused where mesh_link_map_check refuses
-   it); `paths` the trees a message between ranks the map does not link takes (mesh_trees_path; NULL: the map's
+   it, except a graph whose links leave its ranks apart, a subgroup's, where `paths` is NULL and a wider communicator
+   alive in the process holds them all: its parts joined along that communicator's paths, the cheapest first, each
+   priced as its path's links summed, whose messages its routes carry); `paths` the trees a message between ranks the map does not link takes (mesh_trees_path; NULL: the map's
    shortest-path trees); `programs` the compiled collectives it runs (mesh-plan.h struct mesh_program, made ahead of
    time, copied here), `count` of them: a call runs the first whose collective (and root, a rooted one's) is the
    call's and whose `below` its operand's bytes are under (0: any size); NULL (count 0): the declared default, compiled

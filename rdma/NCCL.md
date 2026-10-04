@@ -52,6 +52,10 @@ Its functions are `grid.ranks_up`, `ranks_run` and `ranks_down`, for drivers of 
   - `node`: each rank's bridge node. NULL means rank r runs on node r.
   - Every rank passes the same values.
 - `ncclCommSplit`: keeps the links among the ranks it takes.
+- A subgroup whose members the cables do not join (a split, or `ncclMeshCommInitRank` with a graph that leaves its
+  ranks apart, as torch's `new_group` makes) is joined along the paths of the widest communicator alive over its
+  members: the cheapest path between two parts first, until one part remains. Its programs cross those paths through
+  the other members' nodes.
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
 MSCCL-IR). The default table:

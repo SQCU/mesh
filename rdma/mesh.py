@@ -41,9 +41,11 @@ CANCELLED = 2 ** 64 - 1
 class LinkMap:
     """mesh-plan.h's struct mesh_link_map (`c`, a pointer to it) of `kind` (KINDS) over `nodes`, the links `pairs`
     and each one's (alpha us, beta ns a byte) in `cost` (None: the caller's alpha and beta for every link), the
-    storage held here; refused where mesh_link_map_check refuses it."""
+    storage held here; refused where mesh_link_map_check refuses it, except that with `apart` a graph whose links
+    leave its nodes apart is kept (a subgroup's: the library joins it along the paths of the widest communicator alive
+    over its ranks, nccl.h)."""
 
-    def __init__(self, kind, nodes, pairs, cost=None):
+    def __init__(self, kind, nodes, pairs, cost=None, apart=False):
         pairs = [tuple(p) for p in pairs]
         self.kind, self.nodes, self.pairs, self.cost = kind, nodes, pairs, None if cost is None else [tuple(c) for c in cost]
         self._link = ffi.new('uint32_t[][2]', [list(p) for p in pairs] or [[0, 0]])
@@ -51,13 +53,15 @@ class LinkMap:
         self.c = ffi.new('struct mesh_link_map *')
         self.c.kind, self.c.nodes, self.c.links, self.c.link, self.c.cost = KINDS.index(kind), nodes, len(pairs), self._link, self._cost
         status = lib.mesh_link_map_check(self.c)
+        if status and apart and kind == 'graph' and all(a != b and max(a, b) < nodes for a, b in pairs):
+            status = 0
         if status:
             raise ValueError(f'a {kind} of {nodes} nodes with links {pairs} is not one its algorithms run on: {os.strerror(status)}')
 
 
-def link_map(kind, nodes, pairs, cost=None):
+def link_map(kind, nodes, pairs, cost=None, apart=False):
     """A LinkMap (above)."""
-    return LinkMap(kind, nodes, pairs, cost)
+    return LinkMap(kind, nodes, pairs, cost, apart)
 
 
 def read_link_map(path):

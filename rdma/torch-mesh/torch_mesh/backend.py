@@ -68,7 +68,8 @@ def observe(store, rank, size, region):
     store; its links and their costs from the link map MESH_LINK_MAP names, whose node ids are the bridges' (the
     launcher's: metal-microbench tools/mesh/grid.py ranks_run), else as the bridges report them, each link at ALPHA_US
     and its port's bandwidth (no costs at all while a port's is unknown: the library's defaults); every pair linked a
-    mesh, else a graph."""
+    mesh, else a graph, whose links may leave a subgroup's ranks apart (the library joins them along the world's
+    paths)."""
     views, node = ffi.new('struct mesh_link_view[]', 64), ffi.new('uint32_t *')
     count = LIB.mesh_observe(region.encode(), views, 64, node)
     if count < 0:
@@ -97,7 +98,7 @@ def observe(store, rank, size, region):
     pairs = sorted(tuple(sorted(key)) for key in costs)
     cost = [costs[frozenset(p)] for p in pairs]
     every = len(pairs) == size * (size - 1) // 2
-    return mesh.link_map('mesh' if every else 'graph', size, pairs, None if None in cost else cost), nodes
+    return mesh.link_map('mesh' if every else 'graph', size, pairs, None if None in cost else cost, apart=True), nodes
 
 
 def check(result):

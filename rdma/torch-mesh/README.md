@@ -32,7 +32,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   - Each rank reads its node from its bridge, and the links and their costs from `MESH_LINK_MAP`.
 - A bidirectional exchange with one peer goes in one batch: `dist.batch_isend_irecv`, or a coalescing manager.
   Separate `isend`/`irecv` calls in the same order on both sides do not pair.
-- Make subgroups (`new_group`, `DeviceMesh`) after the world group, as torch does: they run on its session.
+- Make subgroups (`new_group`, `DeviceMesh`) after the world group, as torch does: they run on its session, and
+  members the cables do not join are joined through the world's other nodes.
 - The group's `timeout` is how long a link may stay silent before the library cancels it (`MESH_REMOTE_BOUND`
   overrides it).
 - Everything runs on any connected cable graph. Messages between ranks the map does not link (p2p, `all_to_all`,
