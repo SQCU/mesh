@@ -1,8 +1,8 @@
 # mesh
 
-The [collective goal](design/collective-goals.md) is Megatron-LM TP2 through one
-simple distributed collective, with interleaved execution of the two nodes' work,
-measured by Goal A (FFN period) and Goal B (E2B decoded tokens/s over solo).
+The [collective goal](GOAL.md): the lowest attainable overhead collective operations for
+arbitrary programs on any number of Macs in any cabling ([rdma/NCCL.md](rdma/NCCL.md)). No ordering or
+routing is committed to ahead of the hardware.
 
 Provisioning for a fabric of Apple Silicon Macs wired together with Thunderbolt and
 talking RDMA. The invariant: **a node may never become unreachable, and may never

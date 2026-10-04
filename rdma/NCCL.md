@@ -82,8 +82,7 @@ Collectives run on linked ranks alone, so they need no routes. A message between
 queue pairs of its own: `2 + 2 x` the routed pairs crossing the busiest link.
 
 A TB5 device has 10 usable queue pairs a link. Where the routes need more, the launcher starts the bridges at 2
-queue pairs, and the library refuses those messages with the numbers. Every collective still runs. Cable the pairs
-that exchange messages, or run those calls on linked ranks.
+queue pairs, and the library refuses those messages with the numbers. Every collective still runs.
 
 - On a complete graph, no routes are needed.
 - A ring or star of 5 fits the budget.

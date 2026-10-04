@@ -1122,7 +1122,7 @@ static ncclResult_t schedule_group(struct call *list, size_t n, struct schedule 
       const int peer = (int)list[i].bound->steps[k].peer;
       if (peer != list[i].comm->rank && !channel_of((uint32_t)list[i].comm->members[peer]))
         return fail(ncclInvalidUsage, "rank %d and rank %d share no link, and the bridges' %u queue pairs a link do not carry "
-                    "the routes between unlinked ranks (MESH_QPS %u): cable them, or run the call on linked ranks",
+                    "the routes between unlinked ranks (MESH_QPS %u)",
                     list[i].comm->rank, peer, session.header->qps, 2 + 2 * session.routed);
     }
   size_t total = 1;

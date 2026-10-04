@@ -1,5 +1,8 @@
 # Goal — Megatron TP2 over one simple collective
 
+> Historical: the two-node targets of September 2026. The task now is [GOAL.md](../GOAL.md): any number of Macs,
+> any cabling, no ordering or routing committed to ahead of the hardware.
+
 Operator, 2026-09-22, verbatim:
 
 > try to avoid inventing distractions or reasons to focus on anything besides

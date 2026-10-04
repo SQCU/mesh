@@ -88,9 +88,9 @@ struct mesh_move { uint32_t op,peer,round,buffer,part,parts; };
 struct mesh_program { uint32_t what,root,nodes,parts,scratch,padding; const uint32_t *segment; const double *log_weight;
                       const uint32_t *first; const struct mesh_move *move; };
 
-/* Shortest-path trees: each node's in-tree over the map's links on fewest links (a node's parent its lowest-numbered
-   neighbour one link nearer the root), one tree a node at log weight 0; writes nodes trees, returns their count (0
-   where the map is not connected). */
+/* Shortest-path trees: each node's in-tree over the map's links on fewest links (a node's parent, of its neighbours
+   one link nearer the root, the one over the cheapest link: its alpha, then its beta, then the lowest-numbered), one
+   tree a node at log weight 0; writes nodes trees, returns their count (0 where the map is not connected). */
 uint32_t mesh_trees_shortest(const struct mesh_link_map *,uint32_t *root,uint32_t *parent,double *log_weight);
 /* The room mesh_compile needs: parts and moves. */
 void mesh_compile_room(const struct mesh_trees *,uint32_t *parts,uint32_t *moves);
@@ -116,8 +116,9 @@ int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole
 /* A rank's steps of a program for an operand, a step a move (none where its elements are none), at most first[rank +
    1] - first[rank]; their count. */
 uint32_t mesh_program_steps(const struct mesh_program *,uint32_t rank,struct mesh_operand,struct mesh_step *steps);
-/* A program's time in microseconds, every rank's steps run in the alpha-beta model [Hockney 1994] (a node's sends
-   sharing one port, its receives another; alpha in us, beta in ns a byte, a link's own cost where the map gives one);
+/* A program's time in microseconds, every rank's steps run in the alpha-beta model [Hockney 1994] (each link its own
+   ports, one message at a time each way: a node sends and receives on all its links at once; alpha in us, beta in ns
+   a byte, a link's own cost where the map gives one);
    negative where a receive has no SEND of its piece or the schedule stops. */
 double mesh_program_time(const struct mesh_link_map *,const struct mesh_program *,struct mesh_operand,double alpha,double beta);
 

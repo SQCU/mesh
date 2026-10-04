@@ -181,9 +181,17 @@ uint32_t mesh_trees_shortest(const struct mesh_link_map *map,uint32_t *root,uint
     }
     if(tail<n){made=0;break;}
     root[r]=r;log_weight[r]=0;
+    /* a node's parent: of its neighbours one link nearer the root, the one over the cheapest link (its alpha, then
+       its beta), the lowest-numbered of equals: the trees follow the map's costs, the ids only break ties */
     for(uint32_t v=0;v<n;v++){
       uint32_t up=v;
-      for(uint32_t w=0;v!=r && w<n;w++)if(distance[w]+1==distance[v] && mesh_linked(map,v,w)){up=w;break;}
+      double best_alpha=0,best_beta=0;
+      for(uint32_t w=0;v!=r && w<n;w++){
+        if(distance[w]+1!=distance[v] || !mesh_linked(map,v,w))continue;
+        double a,b;
+        mesh_link_cost(map,v,w,0,0,&a,&b);
+        if(up==v || a<best_alpha || (a==best_alpha && b<best_beta)){up=w;best_alpha=a;best_beta=b;}
+      }
       parent[(size_t)r*n+v]=v==r?r:up;
     }
   }
@@ -526,9 +534,12 @@ double mesh_program_time(const struct mesh_link_map *map,const struct mesh_progr
   struct mesh_step *steps=calloc((size_t)n*capacity,sizeof *steps);
   double *arrival=calloc((size_t)n*capacity,sizeof *arrival),result=-1;
   uint32_t count[n],cursor[n];
-  double clock[n],out_free[n],in_free[n];
-  memset(cursor,0,sizeof cursor);memset(clock,0,sizeof clock);memset(out_free,0,sizeof out_free);memset(in_free,0,sizeof in_free);
-  if(!steps||!arrival)goto done;
+  double clock[n];
+  /* each link its own ports: a node sends on every cable at once and receives on every cable at once, one message at
+     a time each way of each link */
+  double *out_free=calloc((size_t)n*n,sizeof *out_free),*in_free=calloc((size_t)n*n,sizeof *in_free);
+  memset(cursor,0,sizeof cursor);memset(clock,0,sizeof clock);
+  if(!steps||!arrival||!out_free||!in_free)goto done;
   for(uint32_t r=0;r<n;r++)count[r]=mesh_program_steps(program,r,operand,steps+(size_t)r*capacity);
   for(int progress=1;progress;){
     progress=0;
@@ -538,9 +549,10 @@ double mesh_program_time(const struct mesh_link_map *map,const struct mesh_progr
       double link_alpha,link_beta;
       mesh_link_cost(map,r,step->peer,alpha,beta,&link_alpha,&link_beta);
       if(step->op==MESH_STEP_SEND){
-        const double start=clock[r]>out_free[r]?clock[r]:out_free[r];
-        out_free[r]=start+bytes*link_beta/1e3;
-        arrival[(size_t)r*capacity+cursor[r]++]=out_free[r]+link_alpha;
+        double *port=out_free+(size_t)r*n+step->peer;
+        const double start=clock[r]>*port?clock[r]:*port;
+        *port=start+bytes*link_beta/1e3;
+        arrival[(size_t)r*capacity+cursor[r]++]=*port+link_alpha;
         progress=1;
         continue;
       }
@@ -558,9 +570,10 @@ double mesh_program_time(const struct mesh_link_map *map,const struct mesh_progr
       if(k==count[p] || send->first!=step->first || send->piece.elements!=step->piece.elements ||
          send->piece.element_bytes!=step->piece.element_bytes)goto done;
       if(cursor[p]<=k)break;
-      double complete=in_free[r]+bytes*link_beta/1e3;
+      double *port=in_free+(size_t)r*n+p;
+      double complete=*port+bytes*link_beta/1e3;
       if(arrival[(size_t)p*capacity+k]>complete)complete=arrival[(size_t)p*capacity+k];
-      in_free[r]=complete;
+      *port=complete;
       if(complete>clock[r])clock[r]=complete;
       cursor[r]++;
       progress=1;
@@ -572,7 +585,7 @@ double mesh_program_time(const struct mesh_link_map *map,const struct mesh_progr
     if(clock[r]>result)result=clock[r];
   }
 done:
-  free(steps);free(arrival);
+  free(steps);free(arrival);free(out_free);free(in_free);
   return result;
 }
 
