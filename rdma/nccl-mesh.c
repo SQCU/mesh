@@ -1353,6 +1353,9 @@ static ncclResult_t schedule_group(struct call *list, size_t n, struct schedule 
       const struct mesh_step *step = c->bound->steps + made[k].step;
       const struct message m = {c, made[k].step, ch->end + made[k].first, made[k].pieces, step->first * step->piece.element_bytes, piece_bytes(step)};
       if (made[k].send) p->out[p->outs++] = m; else p->in[p->ins++] = m;
+      if (getenv("MESH_CHECK_TRACE"))
+        fprintf(stderr, "schedule channel %u (node %u) %s positions %llu..%llu step %u\n", h, ch->node, made[k].send ? "send" : "receive",
+                (unsigned long long)m.first, (unsigned long long)(m.first + m.pieces), m.step);
       c->bound->channel[m.step] = h; c->bound->first[m.step] = m.first; c->bound->pieces[m.step] = m.pieces;
     }
     ch->end += positions;
@@ -1623,6 +1626,9 @@ static struct metal_check check_of(struct channel *ch, uint64_t count) {
   for (uint64_t t = first; t < count; t++)
     if (receives_at(h, t)) check.mask |= 1u << (t - first);
   if (count > ch->checked) ch->checked = count;
+  if (getenv("MESH_CHECK_TRACE"))
+    fprintf(stderr, "check channel %u (node %u, %s) positions %llu..%llu mask %x\n", h, ch->node, ch->large ? "large" : "small",
+            (unsigned long long)first, (unsigned long long)count, check.mask);
   return check;
 }
 
