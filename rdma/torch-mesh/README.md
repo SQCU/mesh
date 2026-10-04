@@ -26,7 +26,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - `"nccl"` becomes `"mesh"` (or omit it); `"cuda"` becomes `"mps"`; drop `torch.cuda.set_device`. `device_id`
   needs its index (`mps:0`).
 - One rank a node. Launch with metal-microbench's `~/.venv-mesh-uv/bin/python tools/mesh/grid.py run --members ...
-  -- '{python} prog.py'`. The program runs from each node's `~/metal-microbench`, so commit and pull it first.
+  -- '{python} prog.py'` (without it: [NCCL.md](../NCCL.md#starting-bridges-by-hand)). The program runs from each
+  node's `~/metal-microbench`, so commit and pull it first (metal-microbench docs/nodes.md "Running").
   - It gets torchrun's environment with the bridges up.
   - Rank 0 is a member other than the driver, and the rank-to-node table is printed.
   - Each rank reads its node from its bridge, and the links and their costs from `MESH_LINK_MAP`.
@@ -43,11 +44,13 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 
 ## What works
 
-Run on two GPUs (`tools/torch_parallel/collectives.py` checks each):
+Run on the pair's two GPUs, each row checked by one of metal-microbench's `tools/torch_parallel/{collectives,tp,dp,ep,cp}.py`
+against one device (2026-10-04); 3 to 6 ranks with CPU tensors on loopback:
 
 | works | notes |
 |---|---|
-| all_reduce | sum, prod, max, min, avg |
+| all_reduce | sum, prod, max, min, avg on int8, uint8, int32, int64, float16, bfloat16 and float32; a non-contiguous view |
+| all_gather_object, all_to_all of lists, blocking send/recv | |
 | broadcast, reduce | |
 | all_gather (list and into a tensor) | |
 | reduce_scatter (list and tensor) | |
@@ -66,7 +69,12 @@ metal-microbench. `pair.py --programs tp,dp,ep,cp,collectives` runs them on a li
 ## What does not
 
 - FSDP2 (`fully_shard`): torch's MPS has no streams or `current_device`, and its copy-in ops have no MPS kernel.
-  The project does not shard parameters (FSDP is a last resort among the parallelisms).
+  The project does not shard parameters (FSDP is a last resort among the parallelisms): port to DDP, tensor or
+  expert parallelism, or shard optimizer state by hand over `reduce_scatter_tensor` and `all_gather_into_tensor`.
+- Streams: torch's MPS has one queue and no `torch.mps.Stream`, so CUDA-stream overlap (DeepSpeed `overlap_comm`,
+  Megatron's overlapped gradient reduction, side streams) does not port as written. What overlaps here: an
+  `async_op=True` collective waited after the compute it may overlap, or a compiled graph of functional
+  collectives (metal-microbench `tools/torch_parallel/crossing.py OVERLAP=1` reads it).
 - ReduceOp PREMUL_SUM and the bitwise ops; `monitored_barrier` (it needs a CPU device type the group does not
   list); `split_group`. One call mixing MPS and CPU tensors.
 - More than one rank a node.
