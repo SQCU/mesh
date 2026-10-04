@@ -68,7 +68,7 @@ struct send_gate {
 /* A SEND stream's progress: its current cell, the next request of that cell's chain and the requests
    left. */
 struct send_stream { struct mesh_send *cell,*first; struct ibv_send_wr *next; uint32_t remaining; uint64_t cycle; };
-/* design/prepared-machine.md#M27 */
+/* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
 struct mesh_trace { _Alignas(32) uint64_t identity; uint64_t begin,middle,end; };
 _Static_assert(sizeof(struct mesh_trace)==32 && _Alignof(struct mesh_trace)==32,"M27");
 struct mesh_link {
@@ -90,7 +90,7 @@ struct mesh_link {
   struct mesh_send *publications;
   struct ibv_wc *completion;
   struct mesh_cancellation *cancel;
-  /* design/prepared-machine.md#M27 */
+  /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
   struct mesh_trace *trace[2];
   size_t traced[2],trace_capacity[2];
   int ledger;
@@ -147,7 +147,7 @@ static int link_prepare(struct mesh_link *link){
   link->requests=requests?aligned_alloc(128,requests*sizeof *link->requests):NULL;
   if(requests&&!link->requests)return ENOMEM;
   link->request_count=requests;link->receive_count=records;
-  /* design/prepared-machine.md#M27 */
+  /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
   const char *ledger=getenv("MESH_LEDGER");
   link->ledger=ledger && ledger[0] && !(ledger[0]=='0' && !ledger[1]);
   size_t events[2]={(size_t)link->publication_count*(tx->invocations?tx->invocations:1),records};
@@ -232,7 +232,7 @@ static int link_configure(void *state,int socket,uint64_t client){
       for(uint32_t slot=0;slot<out[i].count;slot++){
         uint32_t row=out[i].local_row+slot*out[i].stride,chunks=mesh_row_chunks(m,row,out[i].bytes),stream=q*tx->slots+slot;
         struct mesh_send *cells=link->publications+out[i].first+(size_t)slot*column;
-        /* design/prepared-machine.md#M27 */
+        /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
         if(link->ledger)fprintf(stderr,"{\"trace_binding\":%u,\"rank\":%u,\"direction\":0,\"binding\":%u,\"slot\":%u,\"begin\":%u,\"active\":%u,\"cells\":%llu}\n",
           link->index,m->node,out[i].binding,slot,out[i].begin,active,(unsigned long long)(uintptr_t)cells);
         for(uint32_t u=0;u<active;u++){
@@ -293,7 +293,7 @@ static int link_configure(void *state,int socket,uint64_t client){
          the ring's span is held a slot short of the ring; a transfer whose every invocation has its
          own slot bounds nothing */
       if(own<active)r->span=MIN(r->span,own>1?own-1:1);
-      /* design/prepared-machine.md#M27 */
+      /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
       if(link->ledger)fprintf(stderr,"{\"trace_binding\":%u,\"rank\":%u,\"direction\":1,\"ring\":%d,\"binding\":%u,\"slot\":%u,\"begin\":%u,\"active\":%u,\"chunks\":%u}\n",
         link->index,m->node,ring,in[i].binding,slot,in[i].begin,active,mesh_row_chunks(m,in[i].local_row+slot*in[i].stride,in[i].bytes));
     }
@@ -328,7 +328,7 @@ static int link_configure(void *state,int socket,uint64_t client){
   }
   if(at)link->receive[at]=link->receive[at-1];
   uint32_t posted=1,peer_posted;
-  /* design/prepared-machine.md#M27 */
+  /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
   if(link->ledger)fprintf(stderr,"{\"trace_layout\":%u,\"rank\":%u,\"send_base\":%llu,\"receive_base\":%llu,\"invocations\":%u,\"send_capacity\":%zu,\"receive_capacity\":%zu}\n",
     link->index,m->node,(unsigned long long)(uintptr_t)link->publications,(unsigned long long)(uintptr_t)link->receive,
     invocations,link->trace_capacity[MESH_SEND],link->trace_capacity[MESH_RECEIVE]);
@@ -362,7 +362,7 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
   uint32_t count=link->stream_count;
   struct ibv_send_wr *bad;
   int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **)=link->provider.queues[0].send;
-  /* design/prepared-machine.md#M27 */
+  /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
   struct mesh_trace *trace=traced?link->trace[MESH_SEND]:NULL;
   size_t capacity=traced?link->trace_capacity[MESH_SEND]:0;
   for(uint32_t s=0;;s=s+1==count?0:s+1){
@@ -414,7 +414,7 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
 static void *link_send_progress(void *argument){
   struct mesh_link *link=argument;
   pthread_setname_np("mesh.rdma.send");
-  /* design/prepared-machine.md#M27 */
+  /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
   if(link->trace[MESH_SEND])return link_send_drain(link,1);
   return link_send_drain(link,0);
 }
@@ -426,7 +426,7 @@ static void *link_send_progress(void *argument){
 static __attribute__((always_inline)) inline void *link_receive_drain(struct mesh_link *link,int traced){
   struct mesh_queue queue=link->provider.queues[0];
   struct ibv_wc *completion=link->completion;
-  /* design/prepared-machine.md#M27 */
+  /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
   struct mesh_trace *trace=traced?link->trace[MESH_RECEIVE]:NULL;
   size_t capacity=traced?link->trace_capacity[MESH_RECEIVE]:0;
   for(;;){
@@ -449,7 +449,7 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
     ring->outstanding-=record->frames;ring->completed=(int64_t)(record->invocation+(uint64_t)record->cycle*link->invocations);
     int error=ring_advance(link,ring);
     if(error){link_error(link,error,1);return NULL;}
-    /* design/prepared-machine.md#M27 */
+    /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
     if(traced && link->traced[MESH_RECEIVE]<capacity)
       trace[link->traced[MESH_RECEIVE]++]=(struct mesh_trace){(uintptr_t)record,polled,published,clock_gettime_nsec_np(CLOCK_UPTIME_RAW)};
   }
@@ -460,7 +460,7 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct mes
 static void *link_receive_progress(void *argument){
   struct mesh_link *link=argument;
   pthread_setname_np("mesh.rdma.receive");
-  /* design/prepared-machine.md#M27 */
+  /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
   if(link->trace[MESH_RECEIVE])return link_receive_drain(link,1);
   return link_receive_drain(link,0);
 }
@@ -473,7 +473,7 @@ static void link_close(struct mesh_link *link,int *control){
   if(*control>=0)shutdown(*control,SHUT_RDWR);
   while(link->worker_count)pthread_join(link->workers[--link->worker_count],NULL);
   if(link->cancel)mesh_cancel(link->M,link->cancel,link->index);
-  /* design/prepared-machine.md#M27 */
+  /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
   for(int d=0;d<2;d++){
     for(size_t i=0;i<link->traced[d];i++){
       struct mesh_trace t=link->trace[d][i];

@@ -21,19 +21,29 @@ A rank is a process on a node whose bridge is up. Bridges are started per call b
 metal-microbench's launcher starts them on a membership and runs any command on every node:
 
 ```
-tools/mesh/grid.py run --members 0,2,3 -- '{python} my_program.py'
+~/.venv-mesh-uv/bin/python tools/mesh/grid.py run --members 0,2,3 -- '{python} my_program.py'
 ```
+
+Drivers run under `~/.venv-mesh-uv` (the bindings are built for it). Each node runs the command from its own
+`~/metal-microbench`, so a program must be committed and pulled there first. Each rank's output is in
+`output_data/grid-run/<tag>/run-rank<r>.log`. In the command, `{python}` is the node's venv, `{node}` the node's
+place in the membership's map, and `{jsonl}` a file of the rank's own.
+
+Validated: two nodes on TB5 with GPUs, and three to eight on one host's loopback (metal-microbench docs/nodes.md).
 
 It reads the link map (default `configs/links/pair-ring.txt`, or `MESH_LINK_MAP`; `--links` another). It keeps the
 links the members hold and probes only those links. It starts one bridge per node, with the queue pairs the routes
 need (below). Each rank gets `RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`, `MESH_REGION` and `MESH_LINK_MAP`
-(the membership's map, its nodes numbered from 0), as torchrun sets them. The bridges stop by SIGTERM afterwards.
+(the membership's map, its nodes numbered from 0), as torchrun sets them. `RANK` is the launcher's: rank 0 is a member
+other than the driver (the store listens there), and the launcher prints the rank-to-node table. A program that
+makes its own communicator passes its node as its rank (`{node}`, or `ncclMeshCommInitRank` with a `node` table). The
+bridges stop by SIGTERM afterwards.
 Its functions are `grid.ranks_up`, `ranks_run` and `ranks_down`, for drivers of their own.
 
 ## Communicators
 
-- `ncclCommInitRank(comm, n, id, rank)`: NCCL's. Every pair is linked, rank r runs on node r, and the region is
-  `MESH_REGION`. Use it only where every pair of nodes is cabled.
+- `ncclCommInitRank(comm, n, id, rank)`: NCCL's. Rank r runs on node r, the region is `MESH_REGION`, and the links
+  are `MESH_LINK_MAP`'s (every pair linked without it).
 - `ncclMeshCommInitRank(comm, rank, topology, paths, programs, count, node, region)`: the topology is an operand.
   - `topology`: a link map (`mesh-plan.h`: kind `mesh`, `ring`, `tree` or `graph`; links; each link's alpha in
     microseconds and beta in nanoseconds a byte). `mesh_link_map_read` reads the text form.
@@ -83,7 +93,8 @@ that exchange messages, or run those calls on linked ranks.
 
 - One rank a node.
 - A bidirectional exchange with one peer is one group (`ncclGroupStart`/`End`; torch's `batch_isend_irecv`).
-  Separate send then receive calls on both sides do not pair: a channel has one position axis for both directions.
+  Separate send then receive calls in the same order on both sides do not pair, and the result is undefined (a
+  hang, or a stale buffer): a channel has one position axis for both directions.
 - Make the world communicator first. A process's session opens over the widest communicator alive among whose ranks
   a group's are, so subgroups made after it never reopen it.
 - One process holds one session for its life. `NCCL_BUFFSIZE` and `MESH_POSITIONS` are read when it opens.
@@ -91,7 +102,8 @@ that exchange messages, or run those calls on linked ranks.
 ## Failures
 
 A link with positions pending that delivers nothing for `MESH_REMOTE_BOUND` seconds is cancelled (default 10;
-torch-mesh sets it to the group's timeout). Every wait on that link ends. The failure is returned:
+torch-mesh sets it to the group's timeout, at most 60 s: a wait on the Metal path is a kernel polling on the GPU).
+Every wait on that link ends, and a host-path group with nothing landing for as long fails. The failure is returned:
 
 - by the group, or
 - by `ncclCommGetAsyncError` for work already enqueued.
@@ -103,7 +115,7 @@ Recover across calls: make the communicators again, on the nodes that remain.
 | variable | read by | meaning |
 |---|---|---|
 | `MESH_REGION` | library, torch-mesh, mesh_mpi | this rank's bridge region (default `/mesh0`) |
-| `MESH_LINK_MAP` | torch-mesh, mesh_mpi | the link map file (the launcher's: the membership's) |
+| `MESH_LINK_MAP` | library (ncclCommInitRank), torch-mesh, mesh_mpi | the link map file (the launcher's: the membership's) |
 | `MESH_REMOTE_BOUND` | library | seconds a link may stay silent with positions pending |
 | `NCCL_BUFFSIZE` | library | bytes of a large ring's slots together (default 4 MiB) |
 | `MESH_POSITIONS` | library | the session's cyclic invocations (default 8192) |

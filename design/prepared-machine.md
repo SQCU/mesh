@@ -1,5 +1,10 @@
 # Prepared machine
 
+> Status: written for the prepared machine of 2026-09-17 to 09-28. Rows whose code is gone keep their history:
+> `tools/e2b_replay.m` is now metal-microbench's `litert_program.m`, and `tools/mesh/solve_placement.py` is gone
+> (placement is `programs.py derive`). Rows removed from this file (M22, M27, M39) are cited by the commit before
+> their removal. The collectives now: `rdma/NCCL.md`.
+
 ## Reference baseline
 
 The task is Megatron TP2 over one simple collective with interleaved execution of the two nodes' work; Goal B is pair decoded tokens/s at least 1.035x the solo at heads [7,1] and FFN 7:1 ([collective-goals.md](collective-goals.md)). The divisor is the engine's own solo measured with the pair. The existing executor is not a preservation constraint. Source structure and compilation alone do not establish the speedup.

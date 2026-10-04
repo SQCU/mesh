@@ -25,9 +25,11 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 
 - `"nccl"` becomes `"mesh"` (or omit it); `"cuda"` becomes `"mps"`; drop `torch.cuda.set_device`. `device_id`
   needs its index (`mps:0`).
-- One rank a node. Launch with metal-microbench's `tools/mesh/grid.py run --members ... -- '{python} prog.py'`
-  (torchrun's environment, the bridges up, rank 0 on a node other than the driver). Each rank reads its node from
-  its bridge and the links and their costs from `MESH_LINK_MAP`.
+- One rank a node. Launch with metal-microbench's `~/.venv-mesh-uv/bin/python tools/mesh/grid.py run --members ...
+  -- '{python} prog.py'`. The program runs from each node's `~/metal-microbench`, so commit and pull it first.
+  - It gets torchrun's environment with the bridges up.
+  - Rank 0 is a member other than the driver, and the rank-to-node table is printed.
+  - Each rank reads its node from its bridge, and the links and their costs from `MESH_LINK_MAP`.
 - A bidirectional exchange with one peer goes in one batch: `dist.batch_isend_irecv`, or a coalescing manager.
   Separate `isend`/`irecv` calls in the same order on both sides do not pair.
 - Make subgroups (`new_group`, `DeviceMesh`) after the world group, as torch does: they run on its session.
@@ -79,7 +81,12 @@ partition.write(mesh, tp=(7, 9))                 # new parts between calls: no r
 ```
 
 The parts come from each node's rates (`rdma/allocate.py` `equal_finish`); see
-[design/heterogeneity.md](../../design/heterogeneity.md). `tp.py` takes them from `PARTITION=5,11`.
+[design/heterogeneity.md](../../design/heterogeneity.md). Parts are indexed by rank, not by node: the group's nodes
+in rank order are `dist.distributed_c10d._get_default_group().node`.
+
+On the pair, `tp.py` takes them from the environment: `pair.py --programs tp SP=0 PARTITION=5,11` (sequence
+parallelism off with uneven parts) gives rank 0 five sixteenths and rank 1 eleven. Rank 0 is the Mini, so the M5
+holds the larger part.
 
 ## Performance
 
