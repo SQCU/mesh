@@ -1404,6 +1404,7 @@ static ncclResult_t run(struct schedule *plans) {
         memcpy(&seen, ch->receiving + (at % DEPTH) * ch->slot, sizeof seen);
         if (data == (seen == metal_stamp(at)))
           return fail(ncclInvalidUsage, MISMATCH, (unsigned long long)at, ch->node, data ? "a piece" : "nothing", data ? "nothing" : "a piece");
+        if (at + 1 > ch->checked) ch->checked = at + 1;
         if (data) {
           struct steps *s = m->c->bound;
           if (at == m->first && !ready(s, m->step)) break;
