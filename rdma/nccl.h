@@ -19,9 +19,9 @@
    ncclMeshCommInitRank takes its ranks' link map (mesh-plan.h: a kind, the links and each link's alpha-beta
    cost), the paths its messages take and the compiled collectives it runs (mesh-plan.h struct mesh_program: every
    rank's moves, made ahead of time), each rank's node and this rank's bridge region.  An NCCL program's
-   ncclCommInitRank takes every pair linked at no cost and that map's default programs, rank r on node r, and the region of the process's
-   MESH_REGION (default /mesh0), which ncclGetUniqueId puts in the id; every rank makes the same id with no
-   exchange.  ncclCommSplit keeps the links among the ranks it takes, each with its cost, and compiles their default programs.  A process attaches once, at its first
+   ncclCommInitRank takes the link map MESH_LINK_MAP names (its node count the communicator's; without it every pair
+   linked at no cost) and that map's default programs, rank r on node r, and the region of the process's MESH_REGION
+   (default /mesh0), which ncclGetUniqueId puts in the id; every rank makes the same id with no exchange.  ncclCommSplit keeps the links among the ranks it takes, each with its cost, and compiles their default programs.  A process attaches once, at its first
    group that crosses a link, and keeps one prepared program on the bridge for its life (a session):
    to each rank of the widest communicator alive in the process among whose ranks the group's are (a subgroup made
    after its world finds its channels open), over the link to it, else over the first link of its path, each node

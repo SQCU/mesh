@@ -76,9 +76,15 @@ proportional to each node's speed, in buffers whose shapes stay fixed:
 
 ```python
 from torch_mesh import partition
-partition.attach(mesh, tp=((15, 15), (5, 11)))   # (capacities, parts) of each coordinate along "tp"
-partition.write(mesh, tp=(7, 9))                 # new parts between calls: no reshape, recompile or reallocation
+partition.attach(mesh, tp=((5, 11), (5, 11)))    # (capacities, parts) of each coordinate along "tp"
 ```
+
+A coordinate's capacity is its local buffer's size, and stock kernels compute over all of it, padding included. So
+a capacity above the part costs compute: give each coordinate the largest part it will hold. `partition.write(mesh,
+tp=parts)` changes the parts between calls within the capacities (no reshape, recompile or reallocation).
+
+A program on raw tensors, not DTensor, splits by its own counts and uses the list collectives with unequal sizes
+(`all_gather(list)`, `reduce_scatter(out, list)`, `all_to_all_single` with splits).
 
 The parts come from each node's rates (`rdma/allocate.py` `equal_finish`); see
 [design/heterogeneity.md](../../design/heterogeneity.md). Parts are indexed by rank, not by node: the group's nodes
