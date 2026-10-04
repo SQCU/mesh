@@ -19,7 +19,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-enum { LOOP_QPS = 1024, LOOP_DEVICES = 32 };
+enum { LOOP_QPS = 1024, LOOP_DEVICES = 32, LOOP_DEVICE_QPS = 10 };  /* a TB5 device's queue pairs: max_qp 11, 10 usable (RDMA-FIRST.md) */
 #define LOOP_RING ((uint64_t)1 << 20)
 
 /* a queue pair's incoming SENDs: `head` the bytes written, `tail` the bytes consumed, each record an 8-byte length
@@ -207,6 +207,16 @@ void ibv_free_device_list(struct ibv_device **list) { (void)list; }
 
 const char *ibv_get_device_name(struct ibv_device *device) { return device->name; }
 
+/* each open device's queue pairs, refused past LOOP_DEVICE_QPS as the TB5 device refuses them */
+static struct { struct ibv_context *context; int qps; } opened_[LOOP_DEVICES * 4];
+static int *device_qps(struct ibv_context *context) {
+  for (size_t i = 0; i < sizeof opened_ / sizeof *opened_; i++)
+    if (opened_[i].context == context) return &opened_[i].qps;
+  for (size_t i = 0; i < sizeof opened_ / sizeof *opened_; i++)
+    if (!opened_[i].context) { opened_[i].context = context; opened_[i].qps = 0; return &opened_[i].qps; }
+  return NULL;
+}
+
 struct ibv_context *ibv_open_device(struct ibv_device *device) {
   if (!fabric()) return NULL;
   struct ibv_context *context = calloc(1, sizeof *context);
@@ -220,6 +230,10 @@ struct ibv_context *ibv_open_device(struct ibv_device *device) {
 }
 
 int ibv_close_device(struct ibv_context *context) {
+  pthread_mutex_lock(&lock_);
+  for (size_t i = 0; i < sizeof opened_ / sizeof *opened_; i++)
+    if (opened_[i].context == context) opened_[i].context = NULL;
+  pthread_mutex_unlock(&lock_);
   pthread_mutex_destroy(&context->mutex);
   free(context);
   return 0;
@@ -229,7 +243,7 @@ int ibv_query_device(struct ibv_context *context, struct ibv_device_attr *attrib
   (void)context;
   memset(attributes, 0, sizeof *attributes);
   attributes->max_mr_size = (uint64_t)1 << 30;
-  attributes->max_qp = LOOP_QPS;
+  attributes->max_qp = LOOP_DEVICE_QPS + 1;
   attributes->max_qp_wr = 4095;
   attributes->max_sge = 1;
   attributes->max_cq = 64;
@@ -327,6 +341,14 @@ struct ibv_qp *ibv_create_qp(struct ibv_pd *pd, struct ibv_qp_init_attr *init) {
   q->qp.qp_type = init->qp_type;
   q->qp.state = IBV_QPS_RESET;
   pthread_mutex_lock(&lock_);
+  int *held = device_qps(pd->context);
+  if (!held || *held >= LOOP_DEVICE_QPS) {
+    pthread_mutex_unlock(&lock_);
+    free(q->posted); free(q->pending); free(q);
+    errno = ENOMEM;
+    return NULL;
+  }
+  ++*held;
   q->qp.qp_num = atomic_fetch_add(&fabric_->next, 1) % LOOP_QPS;
   struct loop_ring *ring = &fabric_->rings[q->qp.qp_num];
   atomic_store(&ring->head, 0);
@@ -365,6 +387,8 @@ int ibv_destroy_qp(struct ibv_qp *qp) {
   pthread_mutex_lock(&lock_);
   for (struct loop_qp **at = &qps_; *at; at = &(*at)->next)
     if (*at == q) { *at = q->next; break; }
+  int *held = device_qps(q->qp.context);
+  if (held && *held) --*held;
   pthread_mutex_unlock(&lock_);
   free(q->posted);
   free(q->pending);

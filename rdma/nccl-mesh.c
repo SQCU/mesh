@@ -602,7 +602,8 @@ static struct {
   int registered, running;
   struct mesh_metal_transport transport;
   struct relay *relays;
-  uint32_t relaying;
+  uint32_t relaying, routed;
+  int routes;
   pthread_t progress;
   _Atomic int stop, failed;
 } session;
@@ -767,8 +768,29 @@ static struct channel *channel_of(uint32_t node) {
 static int session_covers(ncclComm_t comm) {
   if (!session.header || strcmp(session.region, comm->region)) return 0;
   for (int r = 0; r < comm->nranks; r++)
-    if (r != comm->rank && !channel_of((uint32_t)comm->members[r])) return 0;
+    if (r != comm->rank && !channel_of((uint32_t)comm->members[r]) &&
+        (session.routes || mesh_link_between(&comm->map, (uint32_t)comm->rank, (uint32_t)r)))
+      return 0;
   return 1;
+}
+
+/* the most unlinked pairs of a communicator whose paths (mesh_trees_path) cross one link one way: each takes the
+   link's queue pairs 2 + 2k and 3 + 2k (queue_of) */
+static uint32_t routed_across(ncclComm_t comm, uint32_t *path) {
+  const uint32_t N = (uint32_t)comm->nranks;
+  uint32_t most = 0, *across = calloc((size_t)N * N, sizeof *across);
+  if (!across) return UINT32_MAX;
+  for (uint32_t a = 0; a < N; a++)
+    for (uint32_t b = 0; b < N; b++) {
+      if (a == b || mesh_link_between(&comm->map, a, b)) continue;
+      const uint32_t hops = mesh_trees_path(&comm->paths, a, b, path);
+      for (uint32_t i = 0; i + 1 < hops; i++) {
+        const uint32_t k = ++across[path[i] * N + path[i + 1]];
+        if (k > most) most = k;
+      }
+    }
+  free(across);
+  return most;
 }
 
 static size_t setting(const char *name, size_t otherwise) {
@@ -848,10 +870,15 @@ static int session_open(ncclComm_t comm, int *other) {
   const uint32_t N = (uint32_t)comm->nranks, me = (uint32_t)comm->rank;
   uint32_t *path = calloc(N + 1, sizeof *path);
   if (!path || !(session.channels = calloc(2 * (size_t)N, sizeof *session.channels))) { free(path); session_close(0); return ENOMEM; }
+  /* the routes between unlinked ranks only where the bridges' queue pairs carry them all: every compiled collective
+     runs on linked ranks alone, and a message to an unlinked rank is refused without them (schedule_group) */
+  session.routed = routed_across(comm, path);
+  session.routes = session.routed == 0 || (session.routed != UINT32_MAX && m->qps >= 2 + 2 * session.routed);
   /* a channel to each rank: over the link to it, else its out ring over the first link of the path to it and its in ring
      over the last link of the path from it (mesh_trees_path), the routed pair's own transfers */
   for (uint32_t r = 0; r < N && !status; r++)
-    for (int large = 2 - session.classes; large < 2 && r != me && !status; large++) {
+    for (int large = 2 - session.classes; large < 2 && r != me && !status &&
+                                          (session.routes || mesh_link_between(&comm->map, me, r)); large++) {
       struct channel *ch = session.channels + session.count++;
       ch->node = (uint32_t)comm->members[r];
       ch->large = large;
@@ -874,7 +901,7 @@ static int session_open(ncclComm_t comm, int *other) {
       if (!status) status = ring_bind(back, queue_in, 1, in, ch->in);
     }
   /* the routes through this node: each a ring both received from the route's previous node and sent from to its next */
-  for (uint32_t from = 0; from < N && !status; from++)
+  for (uint32_t from = 0; from < N && !status && session.routes; from++)
     for (uint32_t to = 0; to < N && !status; to++) {
       const uint32_t hops = from == to || mesh_link_between(&comm->map, from, to) ? 0 : mesh_trees_path(&comm->paths, from, to, path);
       for (uint32_t i = 1; i + 1 < hops && !status; i++)
@@ -1076,6 +1103,14 @@ static int32_t before_of(const struct mesh_step *steps, uint32_t count, const ui
    before it kept, a receive with none done */
 static ncclResult_t schedule_group(struct call *list, size_t n, struct schedule *plans) {
   const ncclComm_t comm = list[0].comm;
+  for (size_t i = 0; i < n; i++)
+    for (uint32_t k = 0; list[i].bound && k < list[i].bound->count; k++) {
+      const int peer = (int)list[i].bound->steps[k].peer;
+      if (peer != list[i].comm->rank && !channel_of((uint32_t)list[i].comm->members[peer]))
+        return fail(ncclInvalidUsage, "rank %d and rank %d share no link, and the bridges' %u queue pairs a link do not carry "
+                    "the routes between unlinked ranks (MESH_QPS %u): cable them, or run the call on linked ranks",
+                    list[i].comm->rank, peer, session.header->qps, 2 + 2 * session.routed);
+    }
   size_t total = 1;
   for (size_t i = 0; i < n; i++) total += list[i].bound ? list[i].bound->count : 0;
   struct mesh_step **steps = calloc(n + 1, sizeof *steps);
