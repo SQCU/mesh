@@ -391,14 +391,15 @@ static __attribute__((always_inline)) inline void *link_send_drain(struct mesh_l
         if(error){link_error(link,error,2);return NULL;}
         break;
       }
-      struct ibv_send_wr *following=request->next;
-      request->next=NULL;
       gate->posted+=frames;
-      request->send_flags=IBV_SEND_SIGNALED;request->wr_id=((uint64_t)cell->queue<<48)|(gate->posted&MESH_GATE_MASK);
-      int error=post((struct ibv_qp *)cell->pair,request,&bad);
+      /* posted as a copy: the cell's first request keeps the producer's argument in its wr_id (mesh_transfers_prepare),
+         which a host producer reads at every publication (mesh_host_publish), and the copy's names the gate */
+      struct ibv_send_wr posting=*request;
+      posting.next=NULL;posting.send_flags=IBV_SEND_SIGNALED;
+      posting.wr_id=((uint64_t)cell->queue<<48)|(gate->posted&MESH_GATE_MASK);
+      int error=post((struct ibv_qp *)cell->pair,&posting,&bad);
       if(error){link_error(link,error<0?-error:error,1);return NULL;}
-      request->next=following;
-      stream->next=following;stream->remaining--;gate->requests++;
+      stream->next=request->next;stream->remaining--;gate->requests++;
     }
     if(traced && observed && link->traced[MESH_SEND]<capacity)
       trace[link->traced[MESH_SEND]++]=(struct mesh_trace){(uintptr_t)cell,observed,posting,clock_gettime_nsec_np(CLOCK_UPTIME_RAW)};

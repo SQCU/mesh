@@ -99,13 +99,18 @@ struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; uint32_t pad
 _Static_assert(sizeof(struct mesh_cancel_range)==32 && sizeof(struct mesh_cancellation)==32 && offsetof(struct mesh_cancellation,ranges)==32,"M12");
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M12 */
+/* design/prepared-machine.md#M30: a cyclic program's landed word holds 1 plus its cycle, which a reader of a later
+   cycle still waits past, so every word of the link is cancelled */
 static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,uint32_t link){
   _Atomic uint64_t *words=(void *)((char *)m+cancel->ranges[link].offset);
-  for(uint64_t j=0;j<cancel->ranges[link].count;j++)
-    if(!atomic_load_explicit(words+j,memory_order_relaxed)){
+  const int cyclic=atomic_load_explicit(&m->cyclic,memory_order_acquire)!=0;
+  for(uint64_t j=0;j<cancel->ranges[link].count;j++){
+    const uint64_t word=atomic_load_explicit(words+j,memory_order_relaxed);
+    if(!word || (cyclic && word!=UINT64_MAX)){
       atomic_store_explicit(&cancel->requested,1,memory_order_release);
       atomic_store_explicit(words+j,UINT64_MAX,memory_order_release);
     }
+  }
 }
 /* design/algorithm-sources.md#meshresult */
 /* design/prepared-machine.md#M26 */
