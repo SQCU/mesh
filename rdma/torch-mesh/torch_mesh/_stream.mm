@@ -362,7 +362,8 @@ static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) 
     TORCH_CHECK(!from.sizes().empty(), "all_to_all_single of a 0-dim tensor");
     if (outs.empty()) outs.assign(ranks, from.size(0) / ranks);
     if (ins.empty()) ins.assign(ranks, from.size(0) / ranks);
-    const int64_t width = from.size(0) ? from.numel() / from.size(0) : 1;
+    int64_t width = 1;
+    for (int64_t d = 1; d < from.dim(); d++) width *= from.size(d);
     std::vector<int64_t> shape = from.sizes().vec();
     shape[0] = 0;
     for (auto r : outs) shape[0] += r;

@@ -10,6 +10,7 @@ A group's communicator is over its topology, an operand (Options, torch's pg_opt
 new_group): its ranks' link map (mesh.LinkMap, mesh-plan.h's: a kind, the links, each one's cost), each rank's bridge
 node and this rank's bridge region.  Without one, the topology is what the bridges report (observe)."""
 import json
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -61,9 +62,11 @@ def link_map(kind, ranks, pairs, cost=None):
 
 
 def observe(store, rank, size, region):
-    """The group's topology as its bridges report it: each rank's node and links (mesh_observe), exchanged through
-    the group's store; ranks linked where their nodes are, each link at ALPHA_US and its port's bandwidth; every pair
-    linked a mesh, else a graph."""
+    """The group's topology: each rank's node as its bridge reports it (mesh_observe), exchanged through the group's
+    store; its links and their costs from the link map MESH_LINK_MAP names, whose node ids are the bridges' (the
+    launcher's: metal-microbench tools/mesh/grid.py ranks_run), else as the bridges report them, each link at ALPHA_US
+    and its port's bandwidth (no costs at all while a port's is unknown: the library's defaults); every pair linked a
+    mesh, else a graph."""
     views, node = ffi.new('struct mesh_link_view[]', 64), ffi.new('uint32_t *')
     count = LIB.mesh_observe(region.encode(), views, 64, node)
     if count < 0:
@@ -73,20 +76,26 @@ def observe(store, rank, size, region):
     nodes = [report['node'] for report in reports]
     if len(set(nodes)) < size:
         raise RuntimeError(f'ranks share a node ({nodes}): one rank a node is what the session carries yet')
-    bandwidth = {}
-    for report in reports:
-        for peer, bits in report['links']:
-            key = frozenset((report['node'], peer))
-            bandwidth[key] = max(bandwidth.get(key, 0), bits)
-    pairs, cost = [], []
-    for a in range(size):
-        for b in range(a + 1, size):
-            bits = bandwidth.get(frozenset((nodes[a], nodes[b])))
-            if bits is not None:
-                pairs.append((a, b))
-                cost.append((ALPHA_US, 8e9 / bits if bits else float('nan')))
+    place = {n: r for r, n in enumerate(nodes)}
+    costs = {}
+    if os.environ.get('MESH_LINK_MAP'):
+        given = mesh.read_link_map(os.environ['MESH_LINK_MAP'])
+        listed = dict(zip(map(frozenset, given.pairs), given.cost or [None] * len(given.pairs)))
+        every = [frozenset((a, b)) for a in range(given.nodes) for b in range(a + 1, given.nodes)]
+        for key in (every if given.kind == 'mesh' else listed):
+            if key <= set(place):
+                costs[frozenset(place[n] for n in key)] = listed.get(key)
+    else:
+        for report in reports:
+            for peer, bits in report['links']:
+                if peer in place:
+                    key = frozenset((place[report['node']], place[peer]))
+                    known = costs.get(key)
+                    costs[key] = (ALPHA_US, 8e9 / bits) if bits and (known is None or 8e9 / bits < known[1]) else known
+    pairs = sorted(tuple(sorted(key)) for key in costs)
+    cost = [costs[frozenset(p)] for p in pairs]
     every = len(pairs) == size * (size - 1) // 2
-    return mesh.link_map('mesh' if every else 'graph', size, pairs, cost), nodes
+    return mesh.link_map('mesh' if every else 'graph', size, pairs, None if None in cost else cost), nodes
 
 
 def check(result):
@@ -188,6 +197,13 @@ def done(result):
 
 class ProcessGroupMesh(dist.ProcessGroup):
     _streamed = False
+    supports_coalescing = True
+    supports_splitting = False
+
+    def _get_backend(self, device):
+        """The group itself, its one backend on every device it runs (torch asks a group's backend by device:
+        batch_isend_irecv coalesces through it, init_process_group's device_id reads it)."""
+        return self
 
     def __init__(self, rank, size, store=None, options=None):
         super().__init__(rank, size)
@@ -226,17 +242,18 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     pg_name = group_name
 
-    def _group(self, issue, outputs, result=None):
+    def _group(self, issue, outputs, result=None, inputs=None):
         """One NCCL group: `issue` makes its calls (their stream self._stream: torch's MPS stream, its open encoder
-        and allocator, where the operands are MPS tensors, else none), then every staged output is written back.
+        and allocator, where the operands, `result` and `inputs`, are MPS tensors, else none), then every staged
+        output is written back.
         An MPS group is committed at once, so its publications reach the peer while it computes on; a host group
         after MPS groups first completes every group issued and not completed and waits for the stream, as the
         session's positions run in its order.  Between
         start_coalescing and end_coalescing the calls join the coalesced group instead."""
         if self._pending is not None:
-            self._pending.append((issue, outputs, result))
+            self._pending.append((issue, outputs, result, inputs))
             return done(result)
-        mps = on_mps(result)
+        mps = on_mps(result) or on_mps(inputs)
         if mps:
             self._stream = ffi.cast('void *', _stream.begin())
             ProcessGroupMesh._streamed = True
@@ -271,8 +288,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def end_coalescing(self, device):
         pending, self._pending = self._pending, None
-        return self._group(lambda: [issue() for issue, _, _ in pending], [o for _, outputs, _ in pending for o in outputs],
-                           [r for _, _, r in pending])
+        return self._group(lambda: [issue() for issue, _, _, _ in pending], [o for _, outputs, _, _ in pending for o in outputs],
+                           [r for _, _, r, _ in pending], [i for _, _, _, i in pending])
 
     def allreduce(self, tensors, opts=dist.AllreduceOptions()):
         if (s := self._direct(*tensors)) is not None:
@@ -383,7 +400,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def all_to_all_single(self, output, input, output_split_sizes, input_split_sizes, opts=None):
         if (s := self._direct(output, input)) is not None:
-            width = input[0].numel() if input.dim() and input.shape[0] else 1
+            width = math.prod(input.shape[1:])
             rows_in = list(input_split_sizes) or [input.shape[0] // self._size] * self._size
             rows_out = list(output_split_sizes) or [output.shape[0] // self._size] * self._size
             return issued([s.alltoall(output, input, [r * width for r in rows_in], [r * width for r in rows_out], self.handle,
@@ -394,7 +411,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
                                                               kind(source.host), self.comm, self._stream)), [target], output)
         rows_in = list(input_split_sizes) or [input.shape[0] // self._size] * self._size
         rows_out = list(output_split_sizes) or [output.shape[0] // self._size] * self._size
-        width = input[0].numel() if input.dim() and input.shape[0] else 1
+        width = math.prod(input.shape[1:])
 
         def issue():
             at_in = at_out = 0
@@ -414,7 +431,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
             check(LIB.ncclSend(source.at(), source.host.numel(), kind(source.host), opts.rootRank, self.comm, self._stream))
             for r, target in enumerate(targets):
                 check(LIB.ncclRecv(target.at(), target.host.numel(), kind(target.host), r, self.comm, self._stream))
-        return self._group(issue, targets, outputs)
+        return self._group(issue, targets, outputs, inputs)
 
     def scatter(self, outputs, inputs, opts=dist.ScatterOptions()):
         """The root's list of inputs, one to each rank, any sizes (a Scatterv in torch's spelling): grouped sends
@@ -461,3 +478,4 @@ def create(opts, options):
 
 
 dist.Backend.register_backend('mesh', create, devices=['cpu', 'mps'], extended_api=True)
+dist.Backend.default_device_backend_map['mps'] = 'mesh'  # init_process_group() without a backend: MPS tensors on the mesh
