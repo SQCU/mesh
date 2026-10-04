@@ -474,6 +474,10 @@ def create(opts, options):
         _installed = True
     if options is not None and not isinstance(options, Options):
         raise TypeError(f'the mesh backend takes torch_mesh.Options as pg_options, not {type(options).__name__}')
+    if not os.environ.get('MESH_REMOTE_BOUND') and opts.timeout:
+        # the group's timeout (init_process_group's, torch's contract for a collective's wait) is how long a link may
+        # stay silent with positions pending before the library cancels it, unless MESH_REMOTE_BOUND says otherwise
+        os.environ['MESH_REMOTE_BOUND'] = str(max(1, int(opts.timeout.total_seconds())))
     return ProcessGroupMesh(opts.group_rank, opts.group_size, opts.store, options)
 
 
