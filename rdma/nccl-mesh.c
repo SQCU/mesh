@@ -609,7 +609,11 @@ struct channel {
    it, so a link takes two queue pairs for routes whatever the map): each slot a header block and one channel slot.
    `sent` and `consumed` are this node's ends; `acked`, the peer's consumption of what this node sent (each header
    coming back carries it); `reported`, this node's consumption as last told the peer.  A message waiting for credit
-   is held in order (`head`, `tail`): an arrival is always consumed, so no ring waits on another. */
+   is held in order (`head`, `tail`): an arrival is always consumed, so no ring waits on another.  A consumption of
+   LAG or more not yet told goes back alone, whether or not data is held: data leaves the last slot to it, so with
+   both ends' data held for credit it still frees them.  The two ends cannot both stay full: an end's last slot holds an
+   acknowledgement newer than every report it sent before, and the other end filled its own window on an older one,
+   so it reads the newer and frees. */
 enum { RELAY_DATA = 1, RELAY_ACK = 2 };
 struct relay_header { uint32_t kind, from, to, large; uint64_t position, acked; };
 struct pending { struct pending *next; struct relay_header header; unsigned char payload[]; };
@@ -798,7 +802,7 @@ static int forward(void) {
       free(done);
       moved = 1;
     }
-    if (!r->head && r->consumed - r->reported >= LAG) {
+    if (r->consumed - r->reported >= LAG) {
       const struct relay_header ack = {RELAY_ACK, me, r->node, (uint32_t)r->large, 0, 0};
       moved |= relay_post(r, &ack, NULL);
     }
