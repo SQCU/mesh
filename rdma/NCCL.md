@@ -155,6 +155,8 @@ tools/mesh/numpy_power.py'`).
   where no firewall prompts for listeners (the Mini).
   - `--device` runs the Metal path's walk on the host executor (`make -C rdma host`). Several ranks' GPU kernels
     on one GPU have no forward-progress guarantee.
+  - `MESH_POSITIONS=256` before the command makes every channel and relay ring cross the session's cycle of positions
+    within seconds, which a default session reaches only after 8192 positions on one channel.
 
 ## Not implemented
 
