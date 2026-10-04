@@ -753,7 +753,9 @@ static void release_all(int result, const char *format, ...) {
   }
 }
 
+static void violated(void);
 static ncclResult_t session_async(ncclComm_t comm) {
+  if (session.header && !strcmp(session.region, comm->region)) violated();
   const ncclResult_t failed = (ncclResult_t)atomic_load(&session.failed);
   if (!failed || !session.header || strcmp(session.region, comm->region)) return ncclSuccess;
   return fail(failed, "%s", failure);
@@ -886,17 +888,21 @@ static int forward(void) {
                  "receive calls that do not pair: an ncclSend and an ncclRecv issued separately in the same order on both " \
                  "ranks, or different counts or peers; or different collectives on the two ranks)"
 
+/* a violation the Metal path's walk recorded (struct metal_check), made the session's failure */
+static void violated(void) {
+  const uint64_t at = session.violation ? atomic_load_explicit(session.violation, memory_order_acquire) : 0;
+  if (!at || atomic_load(&session.failed)) return;
+  const uint64_t where = atomic_load_explicit(session.violation + 1, memory_order_relaxed);
+  const uint32_t h = (uint32_t)(where >> 1);
+  release_all(ncclInvalidUsage, MISMATCH, (unsigned long long)(at - 1), h < session.count ? session.channels[h].node : UINT32_MAX,
+              where & 1 ? "a piece" : "nothing", where & 1 ? "nothing" : "a piece");
+}
+
 static void *progress_run(void *unused) {
   (void)unused;
   double idle = now_s() + session.bound;
   while (!atomic_load(&session.stop)) {
-    const uint64_t violated = session.violation ? atomic_load_explicit(session.violation, memory_order_acquire) : 0;
-    if (violated && !atomic_load(&session.failed)) {
-      const uint64_t where = atomic_load_explicit(session.violation + 1, memory_order_relaxed);
-      const uint32_t h = (uint32_t)(where >> 1);
-      release_all(ncclInvalidUsage, MISMATCH, (unsigned long long)(violated - 1), h < session.count ? session.channels[h].node : UINT32_MAX,
-                  where & 1 ? "a piece" : "nothing", where & 1 ? "nothing" : "a piece");
-    }
+    violated();
     int waiting = 0, moved = forward();
     for (uint32_t h = 0; h < session.count && !atomic_load(&session.failed); h++) {
       struct channel *ch = session.channels + h;
@@ -1435,6 +1441,7 @@ static ncclResult_t run(struct schedule *plans) {
    next group opens another */
 static struct inflight *inflight;
 static ncclResult_t session_ensure(ncclComm_t comm) {
+  violated();
   if (session.header && atomic_load(&session.failed)) {
     const ncclResult_t result = fail((ncclResult_t)atomic_load(&session.failed), "%s", failure);
     session_close(0);
