@@ -121,6 +121,7 @@ Recover across calls: make the communicators again, on the nodes that remain.
 | `MESH_POSITIONS` | library | the session's cyclic invocations (default 8192) |
 | `MESH_QPS` | bridge | queue pairs a link (the launcher's: 2, or what the routes need) |
 | `MESH_LEDGER` | bridge | each link's crossing times written to its log at teardown |
+| `MESH_PAIR_SECONDS` | bridge | how long a link may take to pair from its start (default 30; the launcher passes it) |
 | `MESH_HOST_TRACE` | host executor | a timed trace of the walk in the rank's log |
 | `MESH_LOOP_FABRIC` | loopback bridges | the shared-memory fabric of one host's bridges |
 | `MESH_RDMA` | torch-mesh | the rdma directory (default the package's own) |

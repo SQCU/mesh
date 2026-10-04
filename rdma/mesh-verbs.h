@@ -290,10 +290,17 @@ done:
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M06 */
 /* design/prepared-machine.md#M08 */
+/* how long a link may take to pair from its start: MESH_PAIR_SECONDS (default 30), wider where members load their parts
+   at very different speeds */
+static uint64_t pair_window_ns(void){
+  const char *given=getenv("MESH_PAIR_SECONDS");
+  const double seconds=given?atof(given):0.0;
+  return (uint64_t)((seconds>0.0?seconds:30.0)*1e9);
+}
 static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
   struct ibv_port_attr pa;
   if(device_up(provider->device,provider->wire,m,&pa))return -1;
-  provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+UINT64_C(30000000000);
+  provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+pair_window_ns();
   int f=oob(provider,m,client);
   if(f<0)return -1;
   /* A peer host that dies silently (power, panic) becomes an EOF on this control socket within
