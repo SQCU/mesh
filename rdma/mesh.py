@@ -109,30 +109,51 @@ def path(routes, a, b):
     return [made[i] for i in range(lib.mesh_trees_path(routes.c, a, b, made))]
 
 
-def collective(what, root=0, accumulator_bytes=0, contributors=None, nodes=0):
-    """mesh-plan.h's struct mesh_collective (`c`, a pointer; c[0] the struct a function takes) and the contributors' bit
-    set it points at (None: every node)."""
-    made = ffi.new('struct mesh_collective *')
-    made.what, made.root, made.accumulator_bytes = what, root, accumulator_bytes
+def shortest(lmap):
+    """mesh_trees_shortest: each node's in-tree on fewest links, as trees()."""
+    n = lmap.nodes
+    root, parent, weight = ffi.new('uint32_t[]', n), ffi.new('uint32_t[]', n * n), ffi.new('double[]', n)
+    if not lib.mesh_trees_shortest(lmap.c, root, parent, weight):
+        raise ValueError(f'mesh_trees_shortest: the map ({lmap.kind} of {n}) is not connected')
+    return trees(n, [root[t] for t in range(n)], [[parent[t * n + v] for v in range(n)] for t in range(n)], [weight[t] for t in range(n)])
+
+
+def compile(routes, what, root=0, whole=False, contributors=None):
+    """mesh_compile: the collective `what` (WHATS index) along `routes` (trees()), a program: plain data, `c` the struct's
+    pointer and the arrays it points at, `moves` every rank's moves as tuples (op, peer, round, buffer, part, parts)."""
+    n, parts, moves = routes.nodes, ffi.new('uint32_t *'), ffi.new('uint32_t *')
+    lib.mesh_compile_room(routes.c, parts, moves)
+    segment, weight = ffi.new('uint32_t[]', parts[0]), ffi.new('double[]', parts[0])
+    first, move = ffi.new('uint32_t[]', n + 1), ffi.new('struct mesh_move[]', moves[0])
     words = None
     if contributors is not None:
-        words = ffi.new('uint64_t[]', max(1, -(-max(nodes, max(contributors, default=0) + 1) // 64)))
+        words = ffi.new('uint64_t[]', max(1, -(-n // 64)))
         for m in contributors:
             words[m // 64] |= 1 << (m % 64)
-        made.contributors = words
-    return SimpleNamespace(c=made, what=what, root=root, keep=words)
+    made = ffi.new('struct mesh_program *')
+    if lib.mesh_compile(routes.c, what, root, int(whole), words if words is not None else ffi.NULL, made, segment, weight, first, move):
+        raise ValueError(f'mesh_compile refused {WHATS[what]} root {root} whole {whole}')
+    return SimpleNamespace(c=made, what=what, root=root, nodes=n, scratch=made.scratch,
+                           moves=[[(m.op, m.peer, m.round, m.buffer, m.part, m.parts) for m in (move[k] for k in range(first[r], first[r + 1]))]
+                                  for r in range(n)],
+                           keep=(segment, weight, first, move, words, routes))
 
 
-def plan(routes, rank, chosen, piece):
-    """mesh_collective_plan: rank's steps of the collective `chosen` (collective()) along `routes` (trees()), in its order."""
-    steps = ffi.new('struct mesh_step[]', lib.mesh_collective_steps(routes.c))
-    count = lib.mesh_collective_plan(routes.c, rank, chosen.c[0], piece[0], steps)
-    return [ffi.new('struct mesh_step *', steps[i]) for i in range(count)]
+def steps(program, rank, piece):
+    """mesh_program_steps: rank's steps of `program` for the operand `piece`, in its order."""
+    made = ffi.new('struct mesh_step[]', max(1, program.c.first[program.nodes]))
+    count = lib.mesh_program_steps(program.c, rank, piece[0], made)
+    return [ffi.new('struct mesh_step *', made[i]) for i in range(count)]
 
 
-def time_of(lmap, routes, chosen, piece, alpha=0.0, beta=0.0):
-    """mesh_collective_time: every node's plan run in the alpha-beta model, in us (negative where it stops or mismatches)."""
-    return lib.mesh_collective_time(lmap.c, routes.c, chosen.c[0], piece[0], alpha, beta)
+def depth(program):
+    """The program's dependent crossings: its last round plus one (a round's receives wait on lower rounds' SENDs)."""
+    return 1 + max((m[2] for moves in program.moves for m in moves), default=-1)
+
+
+def program_time(lmap, program, piece, alpha=0.0, beta=0.0):
+    """mesh_program_time: every rank's steps run in the alpha-beta model, in us (negative where it stops or mismatches)."""
+    return lib.mesh_program_time(lmap.c, program.c, piece[0], alpha, beta)
 
 
 class Context(C.Structure):
@@ -177,9 +198,9 @@ class Mesh:
     and exchange bound on it (collective, bind), in the same order on every rank, prepared for
     `invocations` calls, storage ringing over `depth` slots, and started by `start` (an NCCL group is
     one).  `links` is a LinkMap (or a link map file's path, read_link_map); its node v is the bridge's node
-    members[v] (default v), and this rank is the map node of this bridge's.  `routes` are the trees every
-    collective takes (trees(); None: pack(links), made once here).  Each collective takes the transfer
-    identities from `identity` on, mesh_collective_steps(routes) of them."""
+    members[v] (default v), and this rank is the map node of this bridge's.  `routes` are the trees its collectives
+    are compiled along (trees(); None: pack(links), made once here).  Each collective takes the transfer identities
+    from `identity` on, as many as its program has moves."""
 
     def __init__(self, links, invocations=1, depth=4, region=None, identity=1, members=None, routes=None):
         self.context = Context()
@@ -203,11 +224,13 @@ class Mesh:
         return section, pages, np.frombuffer(memory, np.uint8).reshape(self.depth, -1)
 
     def collective(self, what, shape, dtype, root=0, op=np.add):
-        """This rank's part of the collective `what` (WHATS) of a `shape` array of `dtype` along this Mesh's trees
-        (mesh_collective_plan), bound; `op` combines what a REDUCE brings in (any binary ufunc of the dtype)."""
+        """This rank's part of the collective `what` (WHATS) of a `shape` array of `dtype`, compiled along this Mesh's
+        trees (compile; reduce-scatter + all-gather for an all-reduce, which binds one operand), bound; `op` combines
+        what a REDUCE brings in (any binary ufunc of the dtype)."""
         dtype = np.dtype(dtype)
         piece = operand(ord(dtype.char), dtype.itemsize, int(np.prod(shape)))
-        return Steps(self, plan(self.routes, self.rank, collective(WHATS.index(what), root), piece), shape, dtype, op)
+        program = compile(self.routes, WHATS.index(what), root)
+        return Steps(self, steps(program, self.rank, piece), shape, dtype, op, identity=None, moves=program.c.first[self.nodes])
 
     def bind(self, steps, shape, dtype, identity=None):
         """The caller's own steps over one `shape` array of `dtype` (a point-to-point SEND or COPY),
@@ -233,11 +256,11 @@ class Steps:
     (mesh_collective_bind): the operand's ring of slots, and one received section a REDUCE, placed at
     its SEND piece's offset within a block so that both ends cut the piece in the same chunks."""
 
-    def __init__(self, mesh, steps, shape, dtype, op, identity=None):
+    def __init__(self, mesh, steps, shape, dtype, op, identity=None, moves=None):
         self.mesh, self.rank, self.shape, self.dtype, self.op = mesh, mesh.rank, tuple(shape), dtype, op
         self.steps = list(steps)
         if identity is None:
-            identity, mesh.identity = mesh.identity, mesh.identity + lib.mesh_collective_steps(mesh.routes.c)
+            identity, mesh.identity = mesh.identity, mesh.identity + (moves or len(self.steps)) + 1
         context = C.byref(mesh.context)
         self.bytes = int(np.prod(shape)) * dtype.itemsize
         self.operand, pages, self.slots = mesh.ring(self.bytes)

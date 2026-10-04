@@ -43,11 +43,13 @@ ALPHA_US = 5.0
 @dataclass
 class Options:
     """A group's topology, torch's pg_options: `topology` its ranks' link map (mesh.link_map; None: observed),
-    `routes` the trees every collective and message take (mesh.trees(); None: the library packs the topology's,
-    once, at the group's creation), `node` each rank's bridge node (None: observed, or rank r on node r with a
-    topology given), `region` this rank's bridge region (None: MESH_REGION, else /mesh0)."""
+    `paths` the trees a message between unlinked ranks takes (mesh.trees(); None: the topology's shortest-path
+    trees), `programs` the compiled collectives the group runs ([(mesh.compile(), below bytes)]; None: the library's
+    declared default, compiled once at the group's creation), `node` each rank's bridge node (None: observed, or rank r
+    on node r with a topology given), `region` this rank's bridge region (None: MESH_REGION, else /mesh0)."""
     topology: mesh.LinkMap | None = None
-    routes: object = None
+    paths: object = None
+    programs: list | None = None
     node: list | None = None
     region: str | None = None
 
@@ -201,8 +203,11 @@ class ProcessGroupMesh(dist.ProcessGroup):
         if topology.nodes != size:
             raise ValueError(f'a topology of {topology.nodes} ranks for a group of {size}')
         made, nodes = ffi.new('ncclComm_t *'), ffi.new('int[]', list(node)) if node is not None else ffi.NULL
-        routes = options.routes.c if options.routes is not None else ffi.NULL
-        check(LIB.ncclMeshCommInitRank(made, rank, topology.c, routes, nodes, region.encode()))
+        paths = options.paths.c if options.paths is not None else ffi.NULL
+        table = (ffi.new('ncclMeshProgram[]', [{'program': p.c, 'below': below} for p, below in options.programs])
+                 if options.programs else ffi.NULL)
+        self._programs = (options.paths, options.programs, table)
+        check(LIB.ncclMeshCommInitRank(made, rank, topology.c, paths, table, len(options.programs or []), nodes, region.encode()))
         self.comm, self.topology, self.node = made[0], topology, node
         self.handle = int(ffi.cast('uintptr_t', self.comm))
         if _stream is not None:

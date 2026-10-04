@@ -64,42 +64,62 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *,double eps,uint32_t most,u
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
 struct mesh_operand { uint32_t type,element_bytes; uint64_t elements; };
-/* One step of one rank's collective, in that rank's dependency order.
-   SEND   publishes operand elements [first, first+piece.elements) to peer.
-   REDUCE receives that typed piece from peer into the next caller-supplied received section;
-          the caller's supplied reduction adds it into the operand at `first` before any later
-          step that reads those elements.  In place is safe: in a tree whatever a REDUCE or COPY
-          brings in was caused by the arrival of every earlier SEND of those elements, and two
-          trees carry disjoint elements.
-   COPY   receives that typed piece from peer directly into the operand at `first`.
-   round  is the step's position in the algorithm; sender and receiver agree on it. */
+/* One step of one rank's part of a collective, in that rank's order (a compiled program's moves made elements,
+   mesh_program_steps).
+   SEND   publishes elements [first, first + piece.elements) of `buffer` to peer.
+   REDUCE receives that typed piece from peer and combines it into `buffer` at `first`.
+   COPY   receives that typed piece from peer into `buffer` at `first`.
+   buffer 0 is the operand, the result made in place; b >= 1 the rank's scratch b, a copy of the operand made at the
+   call's start.  round is the step's position: sender and receiver agree on it, and a rank's k-th SEND to a peer
+   in a round is that peer's k-th receive from it in the round. */
 enum { MESH_STEP_SEND, MESH_STEP_REDUCE, MESH_STEP_COPY };
-struct mesh_step { uint32_t op,peer,round,padding; uint64_t first; struct mesh_operand piece; };
+struct mesh_step { uint32_t op,peer,round,buffer; uint64_t first; struct mesh_operand piece; };
 
-/* A collective of one typed operand along trees (metal-microbench docs/kernels.md Collectives).  what:
-   MESH_REDUCE_SCATTER leaves at node v the combination of its segment v, reduced up v's trees;
-   MESH_ALLGATHER gives every node every node's segment v, broadcast down v's trees; MESH_ALLREDUCE is the
-   reduce-scatter and then the all-gather, combining only the nodes of the bit set `contributors` (a bit a
-   node, 64 a word; NULL: every node); MESH_REDUCE combines the whole operand at `root` up root's trees;
-   MESH_BROADCAST gives every node root's operand down root's trees.  Node v's segment is the v-th of the
-   operand's elements cut in `nodes` parts, the first elements%nodes of them one element longer.  Going up a
-   tree a node sends to its parent at round its height, after its children (each at its own height); coming
-   down a node at depth d receives at round base + d - 1 and sends at base + d, base the reduce's last round
-   plus one.  A round's SENDs come before its receives, so a SEND waits on lower rounds alone.  A partial
-   combination a node sends on (an interior node going up) is typed at `accumulator_bytes` an element (0: the
-   operand's): half partials summed in float cross as float.  A step combines any number of receives. */
+/* A compiled collective, the operand a call runs: every rank's moves, as MSCCL-IR is the program the MSCCL runtime
+   interprets [Cowan et al., ASPLOS 2023].  `what` it computes (MESH_*), its `root` (a reduce's or a broadcast's) and
+   `nodes`; its operand cut into `parts` parts in order, part p within segment segment[p] at log_weight[p], its share
+   there (the operand cut in as many segments as the parts name, the first elements % segments one element longer, so
+   that a reduce-scatter's and an all-gather's segment s is node s's NCCL segment; within a segment each part the floor
+   of its share, the first ones one element more for the remainder).  Rank r's moves are move[first[r]] ..
+   move[first[r + 1] - 1], each over parts [part, part + parts) of a buffer (struct mesh_step's); `scratch` is the most
+   scratch buffers a rank uses.  Every rank runs the same program; nothing about it is decided where it runs. */
 enum { MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER };
-struct mesh_collective { uint32_t what,root,accumulator_bytes,padding; const uint64_t *contributors; };
-/* The most steps a rank's plan has along `trees` (the storage mesh_collective_plan's steps need). */
-uint32_t mesh_collective_steps(const struct mesh_trees *);
-/* The rank's steps in its dependency order (at most mesh_collective_steps), each SEND's piece typed
-   as the receiving step's; 0 where the trees have fewer than two nodes or the rank is not one. */
-uint32_t mesh_collective_plan(const struct mesh_trees *,uint32_t rank,struct mesh_collective,struct mesh_operand,struct mesh_step *steps);
-/* Its time in microseconds, every node's plan run in the alpha-beta model [Hockney 1994] with a
-   node's sends sharing one port and its receives another (alpha in us, beta in ns a byte, a link's
-   own cost where the map gives one); negative where a node has no plan, a receive has no SEND of its
-   piece, or the schedule stops. */
-double mesh_collective_time(const struct mesh_link_map *,const struct mesh_trees *,struct mesh_collective,struct mesh_operand,double alpha,double beta);
+struct mesh_move { uint32_t op,peer,round,buffer,part,parts; };
+struct mesh_program { uint32_t what,root,nodes,parts,scratch,padding; const uint32_t *segment; const double *log_weight;
+                      const uint32_t *first; const struct mesh_move *move; };
+
+/* Shortest-path trees: each node's in-tree over the map's links on fewest links (a node's parent its lowest-numbered
+   neighbour one link nearer the root), one tree a node at log weight 0; writes nodes trees, returns their count (0
+   where the map is not connected). */
+uint32_t mesh_trees_shortest(const struct mesh_link_map *,uint32_t *root,uint32_t *parent,double *log_weight);
+/* The room mesh_compile needs: parts and moves. */
+void mesh_compile_room(const struct mesh_trees *,uint32_t *parts,uint32_t *moves);
+/* A collective compiled along `trees` into `program` (arrays of mesh_compile_room's room: segment and log_weight a
+   part, first nodes + 1, move a move):
+     MESH_REDUCE           the whole operand up root's trees, a part a tree (its weight);
+     MESH_BROADCAST        the whole operand down root's trees;
+     MESH_REDUCE_SCATTER   segment s up s's trees;  MESH_ALLGATHER  segment s down s's trees;
+     MESH_ALLREDUCE        whole 0: the reduce-scatter and then the all-gather (each link a share once each way; its
+                           dependent crossings twice the trees' heights) [Patarasuk & Yuan 2009; Blink];
+                           whole 1: the whole operand reduced toward every node at once, up that node's heaviest tree,
+                           a node forwarding its partial for another from a scratch buffer of its own and its own
+                           operand from a copy (its dependent crossings the trees' height: the graph's eccentricity
+                           along shortest-path trees, 1 where every pair is linked, the direct exchange; each node
+                           sends the whole operand once for every other) [single-phase all-reduce: Trivance 2026].
+   Going up a tree a node sends at round its height, after its children; coming down, a node at depth d receives at
+   base + d - 1 and sends at base + d, base the reduce-scatter's last round plus one; a round's SENDs come before its
+   receives, so a SEND waits on lower rounds alone.  A message is coalesced with the next between the same two nodes
+   in the same round where their parts adjoin and each end's buffer and step are the same.  `contributors` (a bit a
+   node, 64 a word; NULL: every node) are the nodes whose operands an all-reduce combines.  0, or EINVAL. */
+int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole,const uint64_t *contributors,
+                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move);
+/* A rank's steps of a program for an operand, a step a move (none where its elements are none), at most first[rank +
+   1] - first[rank]; their count. */
+uint32_t mesh_program_steps(const struct mesh_program *,uint32_t rank,struct mesh_operand,struct mesh_step *steps);
+/* A program's time in microseconds, every rank's steps run in the alpha-beta model [Hockney 1994] (a node's sends
+   sharing one port, its receives another; alpha in us, beta in ns a byte, a link's own cost where the map gives one);
+   negative where a receive has no SEND of its piece or the schedule stops. */
+double mesh_program_time(const struct mesh_link_map *,const struct mesh_program *,struct mesh_operand,double alpha,double beta);
 
 #ifdef __cplusplus
 }

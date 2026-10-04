@@ -82,23 +82,8 @@ void mesh_link_map_free(struct mesh_link_map *map){
   free(map->link);free(map->cost);map->link=NULL;map->cost=NULL;map->links=0;
 }
 
-/* Whether node `v` contributes to `c`: a broadcast's root; an all-reduce's contributors, every node
-   without a set. */
-static int mesh_contributes(struct mesh_collective c,uint32_t v){
-  if(c.what==MESH_BROADCAST)return v==c.root;
-  return !c.contributors || (c.contributors[v/64]>>(v%64)&1);
-}
-
-static struct mesh_step mesh_piece(uint32_t op,uint32_t peer,uint32_t round,uint64_t first,uint64_t elements,struct mesh_operand operand){
-  operand.elements=elements;
-  return (struct mesh_step){.op=op,.peer=peer,.round=round,.first=first,.piece=operand};
-}
-
-/* The operand as a partial combination crosses: at the collective's accumulator, where it has one. */
-static struct mesh_operand mesh_accumulated(struct mesh_operand operand,struct mesh_collective c){
-  if(c.accumulator_bytes)operand.element_bytes=c.accumulator_bytes;
-  return operand;
-}
+/* Whether node v is in a bit set of nodes (a bit a node, 64 a word; NULL: every node). */
+static int mesh_member(const uint64_t *set,uint32_t v){ return !set || (set[v/64]>>(v%64)&1); }
 
 /* Whether the map links a and b, either way (a mesh links every pair; a ring, a tree or a graph its links). */
 static int mesh_linked(const struct mesh_link_map *map,uint32_t a,uint32_t b){
@@ -182,32 +167,34 @@ uint32_t mesh_trees_path(const struct mesh_trees *trees,uint32_t from,uint32_t t
   return 0;
 }
 
-/* The elements [*first, *first + *count) of `elements` from `base` that tree t carries of its root's: the root's trees
-   in order, each the floor of its share and the first ones one more for the remainder */
-static void mesh_trees_share(const struct mesh_trees *trees,uint32_t t,uint64_t base,uint64_t elements,uint64_t *first,uint64_t *count){
-  const uint32_t r=trees->root[t];
-  double most=-INFINITY,total=0;
-  for(uint32_t u=0;u<trees->count;u++)if(trees->root[u]==r && trees->log_weight[u]>most)most=trees->log_weight[u];
-  for(uint32_t u=0;u<trees->count;u++)if(trees->root[u]==r)total+=mesh_exp(trees->log_weight[u]-most);
-  uint64_t floors=0;
-  for(uint32_t u=0;u<trees->count;u++)
-    if(trees->root[u]==r)floors+=(uint64_t)floor((double)elements*mesh_exp(trees->log_weight[u]-most)/total);
-  uint64_t remainder=floors<elements?elements-floors:0,at=base;
-  for(uint32_t u=0;u<trees->count;u++){
-    if(trees->root[u]!=r)continue;
-    uint64_t share=(uint64_t)floor((double)elements*mesh_exp(trees->log_weight[u]-most)/total);
-    if(remainder && at+share<base+elements){share++;remainder--;}
-    if(at+share>base+elements)share=base+elements-at;
-    if(u==t){*first=at;*count=share;return;}
-    at+=share;
+uint32_t mesh_trees_shortest(const struct mesh_link_map *map,uint32_t *root,uint32_t *parent,double *log_weight){
+  const uint32_t n=map->nodes;
+  uint32_t *distance=malloc((n+1)*sizeof *distance),*queue=malloc((n+1)*sizeof *queue),made=n;
+  if(!distance || !queue){free(distance);free(queue);return 0;}
+  for(uint32_t r=0;r<n && made;r++){
+    for(uint32_t v=0;v<n;v++)distance[v]=UINT32_MAX;
+    uint32_t head=0,tail=0;
+    distance[r]=0;queue[tail++]=r;
+    while(head<tail){
+      const uint32_t at=queue[head++];
+      for(uint32_t w=0;w<n;w++)if(distance[w]==UINT32_MAX && mesh_linked(map,at,w)){distance[w]=distance[at]+1;queue[tail++]=w;}
+    }
+    if(tail<n){made=0;break;}
+    root[r]=r;log_weight[r]=0;
+    for(uint32_t v=0;v<n;v++){
+      uint32_t up=v;
+      for(uint32_t w=0;v!=r && w<n;w++)if(distance[w]+1==distance[v] && mesh_linked(map,v,w)){up=w;break;}
+      parent[(size_t)r*n+v]=v==r?r:up;
+    }
   }
-  *first=base;*count=0;
+  free(distance);free(queue);
+  return made;
 }
 
 /* A tree's shape: each node's height (its longest path up from a leaf below it), depth, whether its subtree holds a
    contributor (`live`) and whether a child's does (`inner`) */
 struct mesh_shape { uint32_t height,depth; int live,inner; };
-static void mesh_tree_shape(const struct mesh_trees *trees,uint32_t t,struct mesh_collective c,struct mesh_shape *shape){
+static void mesh_tree_shape(const struct mesh_trees *trees,uint32_t t,const uint64_t *contributors,struct mesh_shape *shape){
   const uint32_t n=trees->nodes,r=trees->root[t],*parent=trees->parent+(size_t)t*n;
   for(uint32_t v=0;v<n;v++)shape[v]=(struct mesh_shape){0,0,0,0};
   for(uint32_t v=0;v<n;v++){
@@ -220,57 +207,178 @@ static void mesh_tree_shape(const struct mesh_trees *trees,uint32_t t,struct mes
     shape[v].depth=k;
   }
   for(uint32_t v=0;v<n;v++)
-    if(mesh_contributes(c,v))for(uint32_t at=v,k=0;k<=n;at=parent[at],k++){shape[at].live=1;if(at==r)break;}
+    if(mesh_member(contributors,v))for(uint32_t at=v,k=0;k<=n;at=parent[at],k++){shape[at].live=1;if(at==r)break;}
   for(uint32_t v=0;v<n;v++)if(v!=r && shape[v].live)shape[parent[v]].inner=1;
 }
 
-uint32_t mesh_collective_steps(const struct mesh_trees *trees){return 2*trees->count*trees->nodes+2;}
+/* Whether u is the first of w's live children in tree t (by height, then number): a node outside the contributors
+   takes its first child's partial as it comes (COPY) and combines the rest */
+static int mesh_first_child(const struct mesh_trees *trees,uint32_t t,const struct mesh_shape *shape,uint32_t w,uint32_t u){
+  const uint32_t n=trees->nodes,r=trees->root[t],*parent=trees->parent+(size_t)t*n;
+  for(uint32_t c=0;c<n;c++)
+    if(c!=r && c!=u && parent[c]==w && shape[c].live &&
+       (shape[c].height<shape[u].height || (shape[c].height==shape[u].height && c<u)))return 0;
+  return 1;
+}
 
-uint32_t mesh_collective_plan(const struct mesh_trees *trees,uint32_t rank,struct mesh_collective c,struct mesh_operand operand,struct mesh_step *out){
+/* A message the compile places: from -> to in a round over parts [part, part + parts), the sender's buffer, the
+   receiver's buffer and step, and its order among the pair's messages of the round */
+struct mesh_message { uint32_t from,to,round,part,parts,out,in,op,key; };
+static int mesh_message_order(const void *a,const void *b){
+  const struct mesh_message *x=a,*y=b;
+  const uint32_t l[5]={x->from,x->to,x->round,x->key,x->part},r[5]={y->from,y->to,y->round,y->key,y->part};
+  for(int i=0;i<5;i++)if(l[i]!=r[i])return l[i]<r[i]?-1:1;
+  return 0;
+}
+/* a rank's move with its order: by round, a round's SENDs first, then by peer and the message's order */
+struct mesh_ordered { uint32_t rank,round,receive,peer,key; struct mesh_move move; };
+static int mesh_move_order(const void *a,const void *b){
+  const struct mesh_ordered *x=a,*y=b;
+  const uint32_t l[6]={x->rank,x->round,x->receive,x->peer,x->key,x->move.part},r[6]={y->rank,y->round,y->receive,y->peer,y->key,y->move.part};
+  for(int i=0;i<6;i++)if(l[i]!=r[i])return l[i]<r[i]?-1:1;
+  return 0;
+}
+
+void mesh_compile_room(const struct mesh_trees *trees,uint32_t *parts,uint32_t *moves){
   const uint32_t n=trees->nodes,T=trees->count;
-  if(n<2 || rank>=n || !T)return 0;
-  const int up=c.what==MESH_ALLREDUCE || c.what==MESH_REDUCE || c.what==MESH_REDUCE_SCATTER;
-  const int down=c.what==MESH_ALLREDUCE || c.what==MESH_BROADCAST || c.what==MESH_ALLGATHER;
-  const int whole=c.what==MESH_REDUCE || c.what==MESH_BROADCAST;
-  struct mesh_shape *shape=malloc((size_t)T*n*sizeof *shape);
-  uint64_t *first=malloc(T*sizeof *first),*count=malloc(T*sizeof *count);
-  unsigned char *got=calloc(T,1);
-  uint32_t k=0,base=0;
-  if(!shape || !first || !count || !got)goto done;
-  for(uint32_t t=0;t<T;t++){
-    const uint32_t r=trees->root[t];
-    mesh_tree_shape(trees,t,c,shape+(size_t)t*n);
-    first[t]=count[t]=0;
-    if(whole && r!=c.root)continue;
-    const uint64_t size=operand.elements/n,residual=operand.elements%n;
-    if(whole)mesh_trees_share(trees,t,0,operand.elements,first+t,count+t);
-    else mesh_trees_share(trees,t,r*size+(r<residual?r:residual),size+(r<residual),first+t,count+t);
-    if(up && count[t] && shape[(size_t)t*n+r].height>base)base=shape[(size_t)t*n+r].height;
-  }
-  const struct mesh_operand partial=mesh_accumulated(operand,c);
-  for(uint32_t round=0;round<base+n;round++)for(int receive=0;receive<2;receive++)for(uint32_t t=0;t<T;t++){
-    if(!count[t])continue;
-    const uint32_t r=trees->root[t],*parent=trees->parent+(size_t)t*n;
-    const struct mesh_shape *s=shape+(size_t)t*n;
-    if(up && round<base){
-      if(!receive && rank!=r && s[rank].live && s[rank].height==round)
-        out[k++]=mesh_piece(MESH_STEP_SEND,parent[rank],round,first[t],count[t],s[rank].inner?partial:operand);
-      for(uint32_t u=0;receive && u<n;u++)
-        if(u!=r && parent[u]==rank && s[u].live && s[u].height==round){
-          out[k++]=mesh_piece(!got[t] && !mesh_contributes(c,rank)?MESH_STEP_COPY:MESH_STEP_REDUCE,u,round,first[t],count[t],
-                              s[u].inner?partial:operand);
-          got[t]=1;
-        }
+  *parts=T>1?T:1;
+  *moves=4*T*n+2*n*n+2;
+}
+
+int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,int whole,const uint64_t *contributors,
+                 struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move){
+  const uint32_t n=trees->nodes,T=trees->count;
+  if(!n || what>MESH_ALLGATHER || ((what==MESH_REDUCE || what==MESH_BROADCAST) && root>=n))return EINVAL;
+  uint32_t room_parts,room;
+  mesh_compile_room(trees,&room_parts,&room);
+  const uint64_t *mine=what==MESH_ALLREDUCE?contributors:NULL;
+  struct mesh_shape *shape=malloc(((size_t)T*n+1)*sizeof *shape);
+  struct mesh_message *message=malloc((room+1)*sizeof *message);
+  struct mesh_ordered *ordered=malloc((2*(size_t)room+1)*sizeof *ordered);
+  uint32_t *part_of=malloc((T+1)*sizeof *part_of),*buffer=calloc((size_t)n*n+1,sizeof *buffer);
+  uint32_t messages=0,parts=0,scratch=0;
+  int status=EINVAL;
+  if(!shape || !message || !ordered || !part_of || !buffer)goto done;
+  for(uint32_t t=0;t<T;t++){mesh_tree_shape(trees,t,mine,shape+(size_t)t*n);part_of[t]=UINT32_MAX;}
+  if(what==MESH_ALLREDUCE && whole){
+    /* the whole operand toward every node v up v's heaviest tree: u's partial for v from scratch of its own where it
+       has children there, else its own operand from its copy (scratch 1), which nothing changes */
+    parts=1;segment[0]=0;log_weight[0]=0;
+    for(uint32_t u=0;u<n;u++){
+      uint32_t next=2;
+      for(uint32_t v=0;v<n;v++){
+        const uint32_t t=mesh_trees_heaviest(trees,v);
+        if(t==T)goto done;
+        if(u!=v && shape[(size_t)t*n+u].inner)buffer[(size_t)u*n+v]=next++;
+      }
+      if(next-1>scratch)scratch=next-1;
     }
-    if(down && round>=base){
-      const uint32_t d=round-base;
-      for(uint32_t u=0;!receive && u<n;u++)
-        if(u!=r && parent[u]==rank && s[rank].depth==d)out[k++]=mesh_piece(MESH_STEP_SEND,u,round,first[t],count[t],operand);
-      if(receive && rank!=r && s[rank].depth==d+1)out[k++]=mesh_piece(MESH_STEP_COPY,parent[rank],round,first[t],count[t],operand);
+    for(uint32_t v=0;v<n;v++){
+      const uint32_t t=mesh_trees_heaviest(trees,v),*parent=trees->parent+(size_t)t*n;
+      const struct mesh_shape *s=shape+(size_t)t*n;
+      for(uint32_t u=0;u<n;u++){
+        if(u==v || !s[u].live)continue;
+        const uint32_t w=parent[u],op=!mesh_member(mine,w) && mesh_first_child(trees,t,s,w,u)?MESH_STEP_COPY:MESH_STEP_REDUCE;
+        message[messages++]=(struct mesh_message){u,w,s[u].height,0,1,s[u].inner?buffer[(size_t)u*n+v]:1,w==v?0:buffer[(size_t)w*n+v],op,v};
+      }
+    }
+  }else{
+    /* the parts: a rooted collective's root's trees, else each segment's own node's, each a part at its weight */
+    const int rooted=what==MESH_REDUCE || what==MESH_BROADCAST;
+    for(uint32_t g=0;g<(rooted?1:n);g++)
+      for(uint32_t t=0;t<T;t++)
+        if(trees->root[t]==(rooted?root:g)){part_of[t]=parts;segment[parts]=rooted?0:g;log_weight[parts]=trees->log_weight[t];parts++;}
+    if(!parts)goto done;
+    const int up=what==MESH_ALLREDUCE || what==MESH_REDUCE || what==MESH_REDUCE_SCATTER;
+    const int down=what==MESH_ALLREDUCE || what==MESH_BROADCAST || what==MESH_ALLGATHER;
+    uint32_t base=0;
+    for(uint32_t t=0;up && down && t<T;t++)
+      if(part_of[t]!=UINT32_MAX && shape[(size_t)t*n+trees->root[t]].height>base)base=shape[(size_t)t*n+trees->root[t]].height;
+    for(uint32_t t=0;t<T;t++){
+      if(part_of[t]==UINT32_MAX)continue;
+      const uint32_t r=trees->root[t],*parent=trees->parent+(size_t)t*n,p=part_of[t];
+      const struct mesh_shape *s=shape+(size_t)t*n;
+      for(uint32_t u=0;up && u<n;u++){
+        if(u==r || !s[u].live)continue;
+        const uint32_t w=parent[u],op=!mesh_member(mine,w) && mesh_first_child(trees,t,s,w,u)?MESH_STEP_COPY:MESH_STEP_REDUCE;
+        message[messages++]=(struct mesh_message){u,w,s[u].height,p,1,0,0,op,p};
+      }
+      for(uint32_t u=0;down && u<n;u++)
+        if(u!=r)message[messages++]=(struct mesh_message){parent[u],u,base+s[u].depth-1,p,1,0,0,MESH_STEP_COPY,p};
     }
   }
+  /* coalesced: a message joins the one before it between the same two nodes in the same round where their parts adjoin
+     and each end's buffer and step are the same */
+  qsort(message,messages,sizeof *message,mesh_message_order);
+  uint32_t kept=0;
+  for(uint32_t i=0;i<messages;i++){
+    struct mesh_message *last=kept?message+kept-1:NULL;
+    const struct mesh_message *m=message+i;
+    if(last && last->from==m->from && last->to==m->to && last->round==m->round && last->part+last->parts==m->part &&
+       last->out==m->out && last->in==m->in && last->op==m->op)last->parts+=m->parts;
+    else message[kept++]=*m;
+  }
+  /* each rank's moves: its SENDs and its receives, in order */
+  uint32_t moves=0;
+  for(uint32_t i=0;i<kept;i++){
+    const struct mesh_message *m=message+i;
+    ordered[moves++]=(struct mesh_ordered){m->from,m->round,0,m->to,m->key,{MESH_STEP_SEND,m->to,m->round,m->out,m->part,m->parts}};
+    ordered[moves++]=(struct mesh_ordered){m->to,m->round,1,m->from,m->key,{m->op,m->from,m->round,m->in,m->part,m->parts}};
+  }
+  qsort(ordered,moves,sizeof *ordered,mesh_move_order);
+  for(uint32_t r=0,k=0;r<=n;r++){
+    while(k<moves && ordered[k].rank<r)k++;
+    first[r]=k;
+  }
+  for(uint32_t k=0;k<moves;k++)move[k]=ordered[k].move;
+  *program=(struct mesh_program){what,root,n,parts,scratch,0,segment,log_weight,first,move};
+  status=0;
 done:
-  free(shape);free(first);free(count);free(got);
+  free(shape);free(message);free(ordered);free(part_of);free(buffer);
+  return status;
+}
+
+/* Each part's elements of an operand: [lo[p], lo[p] + count[p]) */
+static void mesh_program_ranges(const struct mesh_program *program,uint64_t elements,uint64_t *lo,uint64_t *count){
+  uint32_t segments=1;
+  for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]+1>segments)segments=program->segment[p]+1;
+  const uint64_t size=elements/segments,residual=elements%segments;
+  for(uint32_t g=0;g<segments;g++){
+    const uint64_t base=g*size+(g<residual?g:residual),length=size+(g<residual);
+    double most=-INFINITY,total=0;
+    for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g && program->log_weight[p]>most)most=program->log_weight[p];
+    for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g)total+=mesh_exp(program->log_weight[p]-most);
+    uint64_t floors=0;
+    for(uint32_t p=0;p<program->parts;p++)
+      if(program->segment[p]==g)floors+=(uint64_t)floor((double)length*mesh_exp(program->log_weight[p]-most)/total);
+    uint64_t remainder=floors<length?length-floors:0,at=base;
+    for(uint32_t p=0;p<program->parts;p++){
+      if(program->segment[p]!=g)continue;
+      uint64_t share=(uint64_t)floor((double)length*mesh_exp(program->log_weight[p]-most)/total);
+      if(remainder && at+share<base+length){share++;remainder--;}
+      if(at+share>base+length)share=base+length-at;
+      lo[p]=at;count[p]=share;at+=share;
+    }
+  }
+}
+
+uint32_t mesh_program_steps(const struct mesh_program *program,uint32_t rank,struct mesh_operand operand,struct mesh_step *steps){
+  if(rank>=program->nodes || !program->parts)return 0;
+  uint64_t *lo=malloc(program->parts*sizeof *lo),*count=malloc(program->parts*sizeof *count);
+  uint32_t k=0;
+  if(lo && count){
+    mesh_program_ranges(program,operand.elements,lo,count);
+    for(uint32_t i=program->first[rank];i<program->first[rank+1];i++){
+      const struct mesh_move *m=program->move+i;
+      const uint32_t last=m->part+m->parts-1;
+      const uint64_t elements=lo[last]+count[last]-lo[m->part];
+      if(!elements)continue;
+      struct mesh_operand piece=operand;
+      piece.elements=elements;
+      steps[k++]=(struct mesh_step){m->op,m->peer,m->round,m->buffer,lo[m->part],piece};
+    }
+  }
+  free(lo);free(count);
   return k;
 }
 
@@ -406,16 +514,14 @@ done:
   return written;
 }
 
-/* Every node's plan, then its time under the alpha-beta model [Hockney 1994] with a node's sends
-   sharing its outgoing port and its receives its incoming one, as Thakur, Rabenseifner and Gropp
-   cost these algorithms: each node takes its steps in order; a SEND leaves when the node has
-   reached it and its port is free, and arrives its link's alpha after its bytes x its link's beta; a REDUCE or COPY
-   waits for its SEND's arrival and its port.  The time is the last node's; negative where a node
-   has no plan, a receive has no matching SEND of the same piece (a mismatched schedule), the
-   schedule stops (a deadlock). */
-double mesh_collective_time(const struct mesh_link_map *map,const struct mesh_trees *trees,struct mesh_collective c,struct mesh_operand operand,
-  double alpha,double beta){
-  const uint32_t n=trees->nodes,capacity=mesh_collective_steps(trees);
+/* Every rank's steps of a program, then its time under the alpha-beta model [Hockney 1994] with a node's sends sharing
+   its outgoing port and its receives its incoming one, as Thakur, Rabenseifner and Gropp cost these algorithms: each
+   node takes its steps in order; a SEND leaves when the node has reached it and its port is free, and arrives its
+   link's alpha after its bytes x its link's beta; a receive waits for its SEND (the sender's k-th to it in the round
+   is its k-th from the sender) and its port.  The time is the last node's; negative where a receive has no SEND of
+   its piece, or the schedule stops. */
+double mesh_program_time(const struct mesh_link_map *map,const struct mesh_program *program,struct mesh_operand operand,double alpha,double beta){
+  const uint32_t n=program->nodes,capacity=program->first[n]+1;
   if(n<2)return 0;
   struct mesh_step *steps=calloc((size_t)n*capacity,sizeof *steps);
   double *arrival=calloc((size_t)n*capacity,sizeof *arrival),result=-1;
@@ -423,7 +529,7 @@ double mesh_collective_time(const struct mesh_link_map *map,const struct mesh_tr
   double clock[n],out_free[n],in_free[n];
   memset(cursor,0,sizeof cursor);memset(clock,0,sizeof clock);memset(out_free,0,sizeof out_free);memset(in_free,0,sizeof in_free);
   if(!steps||!arrival)goto done;
-  for(uint32_t r=0;r<n;r++)count[r]=mesh_collective_plan(trees,r,c,operand,steps+(size_t)r*capacity);
+  for(uint32_t r=0;r<n;r++)count[r]=mesh_program_steps(program,r,operand,steps+(size_t)r*capacity);
   for(int progress=1;progress;){
     progress=0;
     for(uint32_t r=0;r<n;r++)while(cursor[r]<count[r]){
@@ -439,14 +545,18 @@ double mesh_collective_time(const struct mesh_link_map *map,const struct mesh_tr
         continue;
       }
       const uint32_t p=step->peer;
-      uint32_t k=0;
-      while(k<count[p]){
+      uint32_t ordinal=0,k=0,seen=0;
+      for(uint32_t i=0;i<cursor[r];i++){
+        const struct mesh_step *s=steps+(size_t)r*capacity+i;
+        if(s->op!=MESH_STEP_SEND && s->peer==p && s->round==step->round)ordinal++;
+      }
+      for(;k<count[p];k++){
         const struct mesh_step *s=steps+(size_t)p*capacity+k;
-        if(s->op==MESH_STEP_SEND && s->peer==r && s->round==step->round && s->first==step->first)break;
-        k++;
+        if(s->op==MESH_STEP_SEND && s->peer==r && s->round==step->round && seen++==ordinal)break;
       }
       const struct mesh_step *send=steps+(size_t)p*capacity+k;
-      if(k==count[p] || send->piece.elements!=step->piece.elements || send->piece.element_bytes!=step->piece.element_bytes)goto done;
+      if(k==count[p] || send->first!=step->first || send->piece.elements!=step->piece.elements ||
+         send->piece.element_bytes!=step->piece.element_bytes)goto done;
       if(cursor[p]<=k)break;
       double complete=in_free[r]+bytes*link_beta/1e3;
       if(arrival[(size_t)p*capacity+k]>complete)complete=arrival[(size_t)p*capacity+k];
@@ -471,6 +581,7 @@ done:
 int mesh_collective_bind(struct mesh_ctx *context,const struct mesh_step *steps,uint32_t count,uint32_t identity,
   struct mesh_section operand,const struct mesh_section *received,uint32_t invocations,uint32_t invocation_pages,
   struct mesh_section *pieces){
+  for(uint32_t i=0;i<count;i++)if(steps[i].buffer)return EINVAL;  /* the host transfers bind one operand: no scratch */
   for(uint32_t i=0,reduced=0;i<count;i++){
     const struct mesh_step *step=steps+i;
     struct mesh_section piece;
