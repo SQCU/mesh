@@ -371,6 +371,70 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
 
 /* a communicator over `map` (NULL: every pair linked, no cost), its links and costs copied, its messages along `paths`
    and its collectives the table `programs` (NULL: comm_routes's defaults) */
+static int link_of(const struct mesh_link_map *map, uint32_t a, uint32_t b) {
+  for (uint32_t l = 0; l < map->links; l++)
+    if ((map->link[l][0] == a && map->link[l][1] == b) || (map->link[l][0] == b && map->link[l][1] == a)) return (int)l;
+  return -1;
+}
+
+static uint32_t part_of(uint32_t *part, uint32_t v) {
+  while (part[v] != v) v = part[v] = part[part[v]];
+  return v;
+}
+
+/* a map whose links leave its ranks apart (a subgroup whose members the cables do not join) joined along the paths of
+   the widest communicator alive over them, through its other ranks, whose channels between them the session routes:
+   every pair across two parts priced as its path's links summed (a link without a cost at the defaults), the cheapest
+   joined first until one part remains [Kruskal 1956]; a map that joins its ranks, or with no such communicator, as
+   given (comm_routes refuses one that does not) */
+static ncclResult_t comm_join(struct ncclComm *comm) {
+  const uint32_t n = (uint32_t)comm->nranks;
+  if (comm->map.kind != MESH_LINKS_GRAPH || n < 2 || !mesh_link_map_check(&comm->map)) return ncclSuccess;
+  const ncclComm_t parent = widest(comm);
+  if (parent == comm || mesh_link_map_check(&parent->map)) return ncclSuccess;
+  uint32_t *part = calloc(n, sizeof *part), *at = calloc(n, sizeof *at), *path = calloc((size_t)parent->nranks + 1, sizeof *path);
+  uint32_t (*link)[2] = realloc(comm->map.link, (comm->map.links + n) * sizeof *link);
+  double (*cost)[2] = calloc(comm->map.links + n, sizeof *cost);
+  if (link) comm->map.link = link;
+  if (!part || !at || !path || !link || !cost) { free(part); free(at); free(path); free(cost); return fail(ncclSystemError, "out of memory"); }
+  for (uint32_t l = 0; l < comm->map.links; l++) {
+    cost[l][0] = comm->map.cost ? comm->map.cost[l][0] : DEFAULT_ALPHA;
+    cost[l][1] = comm->map.cost ? comm->map.cost[l][1] : DEFAULT_BETA;
+  }
+  for (uint32_t v = 0; v < n; v++) {
+    part[v] = v;
+    for (int j = 0; j < parent->nranks; j++) if (parent->members[j] == comm->members[v]) at[v] = (uint32_t)j;
+  }
+  for (uint32_t l = 0; l < comm->map.links; l++) part[part_of(part, link[l][0])] = part_of(part, link[l][1]);
+  for (;;) {
+    uint32_t best[2] = {0, 0};
+    double priced[2] = {0, 0};
+    int found = 0;
+    for (uint32_t a = 0; a < n; a++)
+      for (uint32_t b = a + 1; b < n; b++) {
+        if (part_of(part, a) == part_of(part, b)) continue;
+        const uint32_t hops = mesh_trees_path(&parent->paths, at[a], at[b], path);
+        double sum[2] = {0, 0};
+        for (uint32_t h = 0; h + 1 < hops; h++) {
+          const int l = link_of(&parent->map, path[h], path[h + 1]);
+          sum[0] += l >= 0 && parent->map.cost ? parent->map.cost[l][0] : DEFAULT_ALPHA;
+          sum[1] += l >= 0 && parent->map.cost ? parent->map.cost[l][1] : DEFAULT_BETA;
+        }
+        if (hops >= 2 && (!found || sum[0] < priced[0] || (sum[0] == priced[0] && sum[1] < priced[1]))) {
+          best[0] = a; best[1] = b; priced[0] = sum[0]; priced[1] = sum[1]; found = 1;
+        }
+      }
+    if (!found) break;
+    const uint32_t l = comm->map.links++;
+    link[l][0] = best[0]; link[l][1] = best[1]; cost[l][0] = priced[0]; cost[l][1] = priced[1];
+    part[part_of(part, best[0])] = part_of(part, best[1]);
+  }
+  free(comm->map.cost);
+  comm->map.cost = cost;
+  free(part); free(at); free(path);
+  return ncclSuccess;
+}
+
 static ncclResult_t comm_make(ncclComm_t *made, const struct mesh_link_map *map, const struct mesh_trees *paths, const ncclMeshProgram *programs,
                               int listed, int nranks, const int *members, int rank, const char *region) {
   struct ncclComm *comm = calloc(1, sizeof *comm);
@@ -390,7 +454,8 @@ static ncclResult_t comm_make(ncclComm_t *made, const struct mesh_link_map *map,
   for (int r = 0; r < nranks; r++) comm->members[r] = members ? members[r] : r;
   comm->nranks = nranks; comm->rank = rank;
   snprintf(comm->region, sizeof comm->region, "%s", region);
-  const ncclResult_t result = comm_routes(comm, paths, programs, listed);
+  ncclResult_t result = paths ? ncclSuccess : comm_join(comm);
+  if (!result) result = comm_routes(comm, paths, programs, listed);
   if (result) { comm_free(comm); return result; }
   alive_add(comm);
   *made = comm;
@@ -2290,8 +2355,7 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
   checked:;
     const struct mesh_link_map restricted = {count == n ? comm->map.kind : every_pair ? MESH_LINKS_MESH : MESH_LINKS_GRAPH, (uint32_t)count, links,
                                              linked, comm->map.cost ? priced : NULL};
-    if (count > 1 && mesh_link_map_check(&restricted)) result = fail(ncclInvalidUsage, "a split to ranks whose links do not connect them");
-    else result = comm_make(newcomm, &restricted, NULL, NULL, 0, count, members, index[comm->rank], comm->region);
+    result = comm_make(newcomm, &restricted, NULL, NULL, 0, count, members, index[comm->rank], comm->region);
   }
   free(every); free(ranks); free(index); free(members); free(linked); free(priced);
   return result;
