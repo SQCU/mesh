@@ -218,7 +218,47 @@ static void program_free(struct mesh_program *program) {
   free((void *)program->segment); free((void *)program->log_weight); free((void *)program->first); free((void *)program->move);
 }
 
+/* the communicators alive in this process (comm_make to comm_free): a session opens over the widest one among whose
+   ranks' nodes a group's are, so a subgroup's collectives find their channels open (torch makes its world group first) */
+static struct { pthread_mutex_t lock; ncclComm_t comm[64]; int count; } alive = {PTHREAD_MUTEX_INITIALIZER, {0}, 0};
+
+static void alive_add(ncclComm_t comm) {
+  pthread_mutex_lock(&alive.lock);
+  if (alive.count < 64) alive.comm[alive.count++] = comm;
+  pthread_mutex_unlock(&alive.lock);
+}
+
+static void alive_remove(ncclComm_t comm) {
+  pthread_mutex_lock(&alive.lock);
+  for (int i = 0; i < alive.count; i++)
+    if (alive.comm[i] == comm) { alive.comm[i] = alive.comm[--alive.count]; break; }
+  pthread_mutex_unlock(&alive.lock);
+}
+
+static int among(ncclComm_t wide, ncclComm_t comm) {
+  for (int r = 0; r < comm->nranks; r++) {
+    int found = 0;
+    for (int w = 0; w < wide->nranks && !found; w++) found = wide->members[w] == comm->members[r];
+    if (!found) return 0;
+  }
+  return 1;
+}
+
+static ncclComm_t widest(ncclComm_t comm) {
+  ncclComm_t best = comm;
+  pthread_mutex_lock(&alive.lock);
+  for (int i = 0; i < alive.count; i++) {
+    const ncclComm_t c = alive.comm[i];
+    if (c->nranks > best->nranks && !strcmp(c->region, comm->region) && c->members[c->rank] == comm->members[comm->rank] &&
+        among(c, comm))
+      best = c;
+  }
+  pthread_mutex_unlock(&alive.lock);
+  return best;
+}
+
 static void comm_free(struct ncclComm *comm) {
+  alive_remove(comm);
   free(comm->map.link); free(comm->map.cost); free(comm->members);
   free((void *)comm->paths.root); free((void *)comm->paths.parent); free((void *)comm->paths.log_weight);
   for (uint32_t e = 0; e < comm->programs; e++) program_free(&comm->entries[e].program);
@@ -352,6 +392,7 @@ static ncclResult_t comm_make(ncclComm_t *made, const struct mesh_link_map *map,
   snprintf(comm->region, sizeof comm->region, "%s", region);
   const ncclResult_t result = comm_routes(comm, paths, programs, listed);
   if (result) { comm_free(comm); return result; }
+  alive_add(comm);
   *made = comm;
   return ncclSuccess;
 }
@@ -1148,7 +1189,7 @@ static ncclResult_t session_ensure(ncclComm_t comm) {
       if (inflight) return fail(ncclInvalidUsage, "a group on other peers while groups are issued and not complete");
       session_close(LINGER_S);
       int other = -1;
-      const int status = session_open(comm, &other);
+      const int status = session_open(widest(comm), &other);
       if (other >= 0) return fail(ncclInvalidUsage, "rank %d runs on the bridge of node %d", comm->rank, other);
       if (status == ERANGE)
         return fail(ncclInvalidUsage, "the bridges' links have too few queue pairs for the routes across them (MESH_QPS: 2, and 2 for each "
