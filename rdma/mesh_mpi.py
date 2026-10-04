@@ -97,7 +97,7 @@ class Comm:
         self.Allreduce(IN_PLACE, np.zeros(1, np.int32))
 
     def allreduce(self, value, op=SUM):
-        box = np.array([value], np.float64 if isinstance(value, float) else np.int64)
+        box = np.array([value], value.dtype if isinstance(value, np.generic) else np.float64 if isinstance(value, float) else np.int64)
         self.Allreduce(IN_PLACE, box, op)
         return box[0].item()
 

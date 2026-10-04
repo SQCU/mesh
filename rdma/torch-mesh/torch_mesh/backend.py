@@ -39,6 +39,8 @@ OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.
 # an observed link's alpha: the TB5 crossing's one-way latency through the bridges (metal-microbench
 # docs/measurement.md: the 3 KB host round trip 10.29 us); its beta is its port's bandwidth's
 ALPHA_US = 5.0
+# the longest a link may stay silent before the library cancels it, whatever a group's timeout (seconds)
+WAIT_BOUND = 60
 
 
 @dataclass
@@ -475,9 +477,11 @@ def create(opts, options):
     if options is not None and not isinstance(options, Options):
         raise TypeError(f'the mesh backend takes torch_mesh.Options as pg_options, not {type(options).__name__}')
     if not os.environ.get('MESH_REMOTE_BOUND') and opts.timeout:
-        # the group's timeout (init_process_group's, torch's contract for a collective's wait) is how long a link may
-        # stay silent with positions pending before the library cancels it, unless MESH_REMOTE_BOUND says otherwise
-        os.environ['MESH_REMOTE_BOUND'] = str(max(1, int(opts.timeout.total_seconds())))
+        # the group's timeout (init_process_group's, torch's contract for a collective's wait), at most WAIT_BOUND, is how
+        # long a link may stay silent with positions pending before the library cancels it: a wait on the Metal path is a
+        # kernel polling on the GPU, which no peer's silence may hold for torch's default half hour (MESH_REMOTE_BOUND
+        # sets any other bound)
+        os.environ['MESH_REMOTE_BOUND'] = str(max(1, min(WAIT_BOUND, int(opts.timeout.total_seconds()))))
     return ProcessGroupMesh(opts.group_rank, opts.group_size, opts.store, options)
 
 

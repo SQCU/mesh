@@ -435,7 +435,17 @@ ncclResult_t ncclCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId,
   memcpy(region, commId.internal, sizeof commId.internal);
   region[sizeof commId.internal] = 0;
   if (!*region) return fail(ncclInvalidArgument, "the unique id names no region (ncclGetUniqueId)");
-  return comm_make(comm, NULL, NULL, NULL, 0, nranks, NULL, rank, region);
+  const char *path = getenv("MESH_LINK_MAP");
+  if (!path || !*path) return comm_make(comm, NULL, NULL, NULL, 0, nranks, NULL, rank, region);
+  struct mesh_link_map map;
+  if (mesh_link_map_read(path, &map)) return fail(ncclInvalidArgument, "MESH_LINK_MAP %s is not a link map", path);
+  if ((int)map.nodes != nranks) {
+    mesh_link_map_free(&map);
+    return fail(ncclInvalidArgument, "MESH_LINK_MAP %s has %d nodes for %d ranks", path, (int)map.nodes, nranks);
+  }
+  const ncclResult_t result = comm_make(comm, &map, NULL, NULL, 0, nranks, NULL, rank, region);
+  mesh_link_map_free(&map);
+  return result;
 }
 
 ncclResult_t ncclCommInitRankConfig(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank, ncclConfig_t *config) {
@@ -616,6 +626,10 @@ static uint64_t issued;
 static uint64_t cycle_of(uint64_t at) { return at / session.positions; }
 static int landed(uint64_t word, uint64_t at) { return word != UINT64_MAX && word >= 1 + cycle_of(at); }
 
+static double now_s(void);
+/* how long nothing may land before a wait fails: the session's silent-link bound (MESH_REMOTE_BOUND) */
+static double quiet(void) { return session.bound > 0 ? session.bound : DEADLINE_S; }
+
 static double now_s(void) {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
@@ -706,22 +720,22 @@ static void progress_targets(void) {
   pthread_mutex_unlock(&progress_lock);
 }
 
-/* every encoded GPU program finished (its end signals `finished`); DEADLINE_S with no program finishing and
+/* every encoded GPU program finished (its end signals `finished`); quiet() seconds with no program finishing and
    no position landing releases the waits, a second ends the drain */
 static ncclResult_t drain(void) {
   if (!finished) return ncclSuccess;
-  double idle = now_s() + DEADLINE_S;
+  double idle = now_s() + quiet();
   int released = 0;
   uint64_t last = metal_signaled(finished), landed = 0;
   while (metal_signaled(finished) < issued) {
     uint64_t now = 0;
     for (uint32_t h = 0; h < session.count; h++) now += atomic_load(&session.channels[h].signaled);
-    if (metal_signaled(finished) != last || now != landed) { last = metal_signaled(finished); landed = now; idle = now_s() + DEADLINE_S; }
+    if (metal_signaled(finished) != last || now != landed) { last = metal_signaled(finished); landed = now; idle = now_s() + quiet(); }
     else if (now_s() > idle) {
       if (released) return fail(ncclInternalError, "a GPU program of the session did not finish (its command buffer committed?)");
-      release_all(ncclTimeout, "the session's GPU programs ran %.0f s with nothing landing", DEADLINE_S);
+      release_all(ncclTimeout, "the session's GPU programs ran %.0f s with nothing landing", quiet());
       released = 1;
-      idle = now_s() + DEADLINE_S;
+      idle = now_s() + quiet();
     }
     usleep(50);
   }
@@ -1166,7 +1180,7 @@ static int ready(const struct steps *s, uint32_t k) {
    combined into the result, a COPY's copied into the operand (and the result, where they differ: a direct
    exchange's sums go to a copy, as its SENDs read the operand) */
 static ncclResult_t run(struct schedule *plans) {
-  double idle = now_s() + DEADLINE_S;
+  double idle = now_s() + quiet();
   for (;;) {
     int busy = 0, open = 0;
     for (uint32_t h = 0; h < session.count; h++) {
@@ -1204,8 +1218,8 @@ static ncclResult_t run(struct schedule *plans) {
       open |= ch->sent < ch->end || ch->consumed < ch->end;
     }
     if (!open) return ncclSuccess;
-    if (busy) idle = now_s() + DEADLINE_S;
-    else if (now_s() > idle) return fail(ncclTimeout, "nothing landed from the peers in %.0f s", DEADLINE_S);
+    if (busy) idle = now_s() + quiet();
+    else if (now_s() > idle) return fail(ncclTimeout, "nothing landed from the peers in %.0f s", quiet());
   }
 }
 
