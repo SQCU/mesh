@@ -4,6 +4,11 @@ How to get from *"RDMA is a fast socket"* to writing for what this hardware actu
 is. Every number below was measured on `Mac16,11` and `Mac17,6` over one TB5 cable,
 not taken from a datasheet.
 
+> Status: the hardware's measured facts stand (the ledger, frames, queue pairs, registration). Sections on the
+> bridge's internals before 2026-09-27 (the 16-byte wire header, LISSEN/APPREL/APPSUB/CENSUS, the path bits,
+> `rdma/mesh-client.c`) describe code that is gone: the bridge is `rdma/mesh-flow.c` (`mesh.h`), and the
+> collectives are `rdma/NCCL.md`.
+
 ## The ledger
 
 | resource | measured | what it means |

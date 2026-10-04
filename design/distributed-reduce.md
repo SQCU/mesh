@@ -1,5 +1,8 @@
 # Distributed reduction
 
+> Historical: written for the deleted Swift executor ([async-collectives.md](async-collectives.md)). The
+> collectives now are [rdma/NCCL.md](../rdma/NCCL.md).
+
 The [asynchronous collective contract](async-collectives.md) is the complete scope.
 The caller configures placement and the numerical reduction. Mesh binds the
 corresponding values and executable functions before invocation.

@@ -200,7 +200,7 @@ static int ring_advance(struct mesh_link *link,struct receive_ring *ring){
    invocation by invocation, the publications of each in binding order, as the peer's ring posts its
    receives: TN3205's credit flow control holds a SEND until its matching receive is posted, so any
    number of records an invocation streams through a ring of the queue's capacity, refilled by the
-   completions (metal-microbench docs/kernels.md Transport). */
+   completions (metal-microbench docs/kernels.md Transport (git 7300d1e^)). */
 static int link_configure(void *state,int socket,uint64_t client){
   struct mesh_link *link=state;struct hdr *m=link->M;
   struct mesh_tx *tx=(void *)mesh_events(m,mesh_notice_queue(m,client,link->index));
