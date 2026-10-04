@@ -2,8 +2,9 @@
 
 Orientation for anyone, developer or agent, who splits work over nodes of different speeds or
 moves it over links of different costs: `rdma/torch-mesh/torch_mesh/partition.py` (the partition
-operand), `rdma/allocate.py` (the derivation), `rdma/mesh-collective.c` (the planner) and the
-programs that use them. The operator:
+operand), `rdma/allocate.py` (the shares), `rdma/mesh-plan.h` and `mesh-collective.c` (the compiled
+collectives), metal-microbench `tools/mesh/calibrate.py` (the rates and link costs) and the programs that
+use them. The operator:
 
 > "it'll take a little bit of orientation for developers (agents as well) to handle heterogenous
 > links ontologically (since this is so different) and without lots of clumsy erratic
@@ -21,9 +22,10 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
   shape. It is written on the node's line of the link map as that class's constants, in the form
   the map's node-line comment gives (metal-microbench `configs/links/pair-ring.txt`: `proj=u,v`, u ns
   per weight byte plus v ns per weight element per row, for the engine's fp16 projections;
-  `attn=u,v`, u + v·bs ns per byte of one cached position read at batch bs; `mm32=` ns per fp32 FMA
-  of an MPS matmul and `sdpa32=` ns per score of torch_mesh's MPS attention block, for
-  `tools/torch_parallel`'s fp32 programs). A node has one rate per class and dtype, never one speed.
+  `attn=u,v`, u + v·bs ns per byte of one cached position read at batch bs). `calibrate.py node`
+  writes a node's line from its probes. A class the map does not carry (a program's fp32 MPS matmul,
+  its attention) is measured on each node and added as its own class (R3). A node has one rate per
+  class and dtype, never one speed.
 - **Link**: the cost of one direction of one pair of nodes, α (µs) per message plus β (ns) per byte.
   It is written on a link line of the link map.
 - **Parts**: a mesh dimension's integers p_r ≥ 1, one per coordinate, of P = Σp units.
@@ -39,8 +41,8 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 
 | Fact | Written in | Read by | Decides |
 |---|---|---|---|
-| Node rates | the link map's node lines | the derivation (`allocate.min_max`) | the parts: what each node computes |
-| Links | the link map's link lines | the planner (`mesh_collective_choose`; libnccl-mesh through the bridge's link table, `ncclMeshConfig_t`); the derivation, only to price collectives (R7) | direct, ring or tree: how operands travel |
+| Node rates | the link map's node lines | the derivation (`allocate.equal_finish`; this repository's models: metal-microbench `programs.py derive`) | the parts: what each node computes |
+| Links | the link map's link lines, each with its own cost | the compiled collectives (`mesh_compile` along shortest-path or packed trees, the trees packed by each link's cost; libnccl-mesh's default table or a program's own, `ncclMeshCommInitRank`, torch-mesh `Options`); the derivation, only to price collectives (R7) | the single-phase all-reduce or reduce-scatter and all-gather, and their trees: how operands travel |
 
 - Rates decide the parts. The link map decides the algorithm.
 - A link's cost never becomes a node's rate, and a node's rate never selects an algorithm.
@@ -65,11 +67,11 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 | R7 | The collectives a share waits for are priced inside the derivation, at the largest share. | communication time depends on the largest shard; even ratios win "when communication is the bottleneck", and since layers differ in computation-to-communication ratio, the optimal ratios may vary for each layer [HAP 2024, §2.4]; the ring's irregular all-gather is dominated by the largest block [Träff et al. 2010] | compute-proportional shares on communication-bound work |
 | R8 | Equal counts run the regular collective. Unequal counts run the v-collective with each block at its own size, never padded to the largest. | Gatherv, Scatterv, Allgatherv, Alltoallv, Reduce_scatter [MPI 4.1 §6.5-6.10]; regular ⪯ irregular [Hunold & Carpen-Amarie 2017, GL4, GL8, GL12, GL18, GL22]; pad or per-rank broadcast [HAP 2024, §2.5.1; pytorch#198344] | padding's wasted bytes and window memory; the v-form's overhead on even splits |
 | R9 | What a node can hold is a hard upper bound on its share. A share that exceeds it is clamped and the rest is solved again. | memory-bounded load balance [Whale 2022; Metis 2024]; GPU memory limits the batch [LB-BSP 2020]; bounded variables held at their bound and the rest re-solved [Bitran & Hax 1981] | a share the fast node cannot hold, which pages and makes the fast node slow |
-| R10 | Nonlinear work is balanced on its own cost function (`min_max` takes any nondecreasing cost). Causal attention's work depends on where a share lies in the sequence; head-tail pairing makes it depend on the share alone. | causal ring attention's imbalance [Striped Attention 2023]; [Lastovetsky & Reddy 2007] | linear weights on quadratic work |
+| R10 | Nonlinear work is balanced on its own cost function (`equal_finish` takes affine costs a + b·s; a nonlinear cost needs its own nondecreasing-cost solver, not built). Causal attention's work depends on where a share lies in the sequence; head-tail pairing makes it depend on the share alone. | causal ring attention's imbalance [Striped Attention 2023]; [Lastovetsky & Reddy 2007] | linear weights on quadratic work |
 | R11 | Parts change with the configuration, not per step. An online loop follows its sources: it predicts robustly and reduces its step once it oscillates, stops at a relative accuracy, and rebalances only when the gain exceeds the cost. `allocate.Allocator` has a forgetting factor and a step η in (0, 1] (η = 1 is the equal-finish solve), and none of the rest. | static distributions avoid redistribution and control overhead [Beaumont et al. 2001, §2.2]; prediction robust to non-deterministic perturbation "to avoid over-reaction or oscillation" [LB-BSP 2020, §3.2.1], an observation window and a smaller step once oscillation is detected [LB-BSP 2020, §3.3.2]; stop at a relative accuracy ε [DFPA 2011]; invoke the balancer when the gain exceeds its cost [Meta-Balancer 2012] | ping-pong after one noisy step; re-sharding weights because of jitter |
 | R12 | Balance comes before overlap. Overlap hides a collective behind independent work, but it shortens a rank's own finish, not its wait for a slower rank. Decomposed pieces follow the counts, and k pieces cost k·α. | overlap by decomposition [Wang et al. 2023; Domino 2024; FLUX 2024]; balance first because the step ends at the largest finish time (§1); k·α in the α-β model [Hockney 1994] | using overlap to cure an imbalance |
 | R13 | Anything the partition cannot express falls back to stock's own fallback, or raises the same error on every rank. Nothing silently computes a wrong shape or value. | `AGENTS.md`: "A branch that quietly does less is worse than one that fails loudly" | silent numerics, such as a mean of unequal shards averaged as if the shards were equal |
-| R14 | Parts change without shapes changing. Each rank's local buffer is shaped to the largest share the bounds allow it (`allocate.capacity`); the parts are a tensor operand read when the ops run. Padding holds the identity of its next consumer: sources write it (weights zero-padded at load, collectives the identity past the valid extent), and before any op that reduces or contracts over a partitioned dimension the shard is re-masked to that op's identity (0 for sums and contractions, -inf for max and masked softmax); attention masks keys past the valid extents; count-dependent ops divide masked sums by the valid count. Kernels are stock: they compute garbage in padding that nothing reads unmasked. | uneven partitioning: pad to the shards' size and mask the padding to the identity of the next operation wherever it could leak into valid results [GSPMD 2021, §3.3] | shapes that follow the parts, so every change of parts recompiles, re-records and reallocates a program |
+| R14 | Parts change without shapes changing. Each rank's local buffer is shaped to the largest share the bounds allow it (its capacity, stated with the parts); the parts are a tensor operand read when the ops run. Padding holds the identity of its next consumer: sources write it (weights zero-padded at load, collectives the identity past the valid extent), and before any op that reduces or contracts over a partitioned dimension the shard is re-masked to that op's identity (0 for sums and contractions, -inf for max and masked softmax); attention masks keys past the valid extents; count-dependent ops divide masked sums by the valid count. Kernels are stock: they compute garbage in padding that nothing reads unmasked. | uneven partitioning: pad to the shards' size and mask the padding to the identity of the next operation wherever it could leak into valid results [GSPMD 2021, §3.3] | shapes that follow the parts, so every change of parts recompiles, re-records and reallocates a program |
 
 ## 4. The operand in use
 
@@ -101,38 +103,27 @@ The module docstring (`torch_mesh/partition.py`) is the API. This section is onl
 or identically on every rank:
 1. For each mesh dimension, fix its grain (P), the operator classes it runs (a TP dimension runs the
    QKV and output projections, the FFN and attention), and each class's work per unit at the call's
-   shape. These are stated for the program, never read from the ops it dispatches
-   (metal-microbench `tools/torch_parallel/parts.py`).
-2. `cost[r](c)` is the sum, over those classes, of each class's model on rank r's node evaluated at
-   the work of c units, so a fixed term counts once, not c times. It may be nonlinear in c (R10).
-   Rank r's node is stated with the launch (`tools/torch_parallel/pair.py` `RANKS`), never found by
-   host name or assumed to be node r.
+   shape. These are stated for the program, never read from the ops it dispatches.
+2. Each rank's time for c units is a_r + b_r·c: b_r the sum over those classes of the class's rate on
+   rank r's node times its work per unit, a_r the fixed terms counted once. The group's nodes in rank
+   order are the process group's `node` (torch-mesh reads each rank's from its bridge); never infer a
+   node from a host name or assume rank r is node r.
    - If the map has no rate for a class at the program's dtype and shape, measure it on each node
      and add it to the node lines as its own class, with the record it came from, before deriving.
      Never borrow another class's rate. The first weighted run on the pair derived fp32 MPS
      programs' parts from the engine's fp16 projection rates (4.1x per FMA between the nodes, where
      these programs' matmuls run 2.6x), and the wait moved to the slower node (metal-microbench
-     `docs/measurement.md` ledger, 2026-09-28); the map now states `mm32` and `sdpa32`.
-3. `shared(c)` is the time of the collectives on the dimension's critical path at the largest
-   share: α + β·bytes for each, or `mesh_collective_time` with `segments` (`rdma/mesh.py`) where the
-   map is more than a pair.
-4. Call `allocate.min_max(P, 1, [1] * n, high, cost, shared)`, where `high[r]` is what the node can
-   hold: its window over its bytes per unit.
-5. Give every rank the parts and the capacities (`allocate.capacity` of the same bounds) to attach.
+     `docs/measurement.md` ledger, 2026-09-28).
+3. Add to a_r the time of the collectives on the dimension's critical path at the largest share: the
+   compiled program's time on the map, `mesh.program_time(map, program, operand)` (R7).
+4. `allocate.equal_finish(P, 1, low, high, a, b)` gives the integer parts, `high[r]` what the node can
+   hold (its memory over its bytes a unit, R9).
+5. Give every rank the parts and the capacities to attach (`partition.attach(mesh, tp=(capacity,
+   parts))`); metal-microbench `tools/torch_parallel/tp.py` takes them as `PARTITION`.
 
-The rates go into the link map once, from a recorded run that the map cites. They change when the
-configuration changes (R11), not with each run's timings.
-
-**Links' beta, estimated.** With the bridges' estimator on (`mesh-flow -E`), the link table has a third
-writer beside the bridge's up and the stated configuration: the node a link leads into fits t = a + b·x to
-its receives' busy periods (from a chunk's grant, when both ends are ready, to the last landing; x at
-least 1 MB) by recursive least squares with forgetting, its prior the stated alpha and beta, and moves the
-table's beta only where its estimate leaves a band of 10 % around it, by a step that halves each time the
-moves change direction; every bridge takes the newest estimate of each link from that link's node, so the
-tables agree and the planner's choices with them. This is R11 for links: a robust online loop with a
-smaller step once it oscillates, a relative accuracy it stops at, and a move only where the modelled time
-changes by more than the band. It writes links' costs from the wire alone, never a node's rate (R2); the
-derivation of the parts still reads the stated map.
+The rates and the link costs go into the link map once, from recorded runs the map cites
+(`calibrate.py node` and `calibrate.py links`). They change when the configuration changes (R11), not
+with each run's timings.
 
 **What stays uniform.**
 - No operand, or equal parts: stock PyTorch.

@@ -493,13 +493,11 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/io.mesh.job-<name>.plist
 
 Runs as root at boot with no login session. `KeepAlive` restarts it forever.
 
-## Collective implementation
+## Collectives
 
-The goal is Megatron TP2 with Goals A and B in [design/collective-goals.md](design/collective-goals.md).
-The retained substrate is `rdma/mesh-flow.c`, canonical page storage and buffer
-ownership. A bridge is a child of the driver that uses it (metal-microbench
-`tools/mesh/run_pair.py`); no launchd job runs one.
-[design/async-collectives.md](design/async-collectives.md) describes the deleted
-Swift executor.
-No deleted Python API, numerical executor, solver or demonstration is a current
-implementation dependency.
+The mesh's collectives are NCCL's API over the bridges: [rdma/NCCL.md](rdma/NCCL.md) (libnccl-mesh, the C
+library; `rdma/mesh_mpi.py` for NumPy), [rdma/torch-mesh/README.md](rdma/torch-mesh/README.md)
+(torch.distributed's `mesh` backend) and [design/heterogeneity.md](design/heterogeneity.md) (nodes of
+different speeds, links of different costs). A bridge (`rdma/mesh-flow`) is a child of the driver that uses
+it (metal-microbench `tools/mesh/grid.py`: `run` for any program, `call` for its model programs); no launchd
+job runs one. Adding a node: metal-microbench `docs/nodes.md`.

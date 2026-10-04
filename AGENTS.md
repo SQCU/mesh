@@ -256,9 +256,10 @@ lives in `bin/` for the same reason.
 ## Collectives and tensor parallelism
 
 Read `../../metal-microbench/docs/principles.md` (from this repo's root; on the Mini,
-`~/metal-microbench/docs/principles.md`) and its `docs/measurement.md`. Collectives are transcribed
-from the literature (`rdma/mesh-collective.c`) and selected from an explicit link map. Where nodes or
-links differ, read `design/heterogeneity.md`.
+`~/metal-microbench/docs/principles.md`) and its `docs/measurement.md`. A collective is a compiled program
+made ahead of time along trees of an explicit link map (`rdma/mesh-plan.h`, `rdma/mesh-collective.c`). Using
+the library: `rdma/NCCL.md`; PyTorch programs: `rdma/torch-mesh/README.md`; NumPy: `rdma/mesh_mpi.py`; where
+nodes or links differ: `design/heterogeneity.md`; adding a node: metal-microbench `docs/nodes.md`.
 
 ## Tests and specification
 

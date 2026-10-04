@@ -8,8 +8,8 @@ attached with the mesh: attach(mesh, tp=((15, 15), (4, 12))).  An extent N that 
 raises ValueError, on every rank alike) is split N p_r / P per coordinate in rank order, as the logical
 tensor reads, and rank r holds its share in a local buffer of c_r N / P along that dimension: its
 N p_r / P valid elements first, padding after.  Every shape follows the capacities, fixed for the
-attach (a coordinate's capacity is the largest share the configuration allows it: rdma/allocate.py
-capacity).  The parts are a tensor operand (operand(mesh, "tp").parts), written between calls by
+attach (a coordinate's capacity is the largest share the configuration allows it, stated with the
+parts: design/heterogeneity.md §4).  The parts are a tensor operand (operand(mesh, "tp").parts), written between calls by
 write(mesh, tp=(5, 11)) and read by the ops below when they run, so a program recorded or compiled once
 is replayed across parts with no shape change, recompile or reallocation.  relay(t, full) writes a
 sharded tensor's local buffer from its logical value under the current parts (a program's weights,

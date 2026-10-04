@@ -23,8 +23,13 @@
    MESH_REGION (default /mesh0), which ncclGetUniqueId puts in the id; every rank makes the same id with no
    exchange.  ncclCommSplit keeps the links among the ranks it takes, each with its cost, and compiles their default programs.  A process attaches once, at its first
    group that crosses a link, and keeps one prepared program on the bridge for its life (a session):
-   to each rank of the communicator that opened it (over the link to it, else over the first link of its path, each node between forwarding what lands from the path's previous node to its next on queue pairs
-   of the pair's own, NCCL's PXN proxy), rings of 2*NCCL_STEPS slots each way: NCCL_BUFFSIZE/NCCL_STEPS
+   to each rank of the widest communicator alive in the process among whose ranks the group's are (a subgroup made
+   after its world finds its channels open), over the link to it, else over the first link of its path, each node
+   between forwarding what lands from the path's previous node to its next on queue pairs of the pair's own (NCCL's
+   PXN proxy) where the bridges' queue pairs carry every such route (MESH_QPS at least 2 + 2 x the routed pairs
+   crossing the busiest link; a TB5 device carries 10); without them a message to a rank the map does not link is
+   refused, and every compiled collective, which runs on linked ranks alone, runs as before; rings of 2*NCCL_STEPS
+   slots each way: NCCL_BUFFSIZE/NCCL_STEPS
    slots (NCCL_BUFFSIZE, default 4 MiB, read at attach) on the link's queue pair 0, and where the bridge has two
    queue pairs a link (MESH_QPS=2), a block's slots (16 KiB) on queue pair 1 for pieces of at most NCCL_STEPS
    blocks, as NCCL picks a protocol by size; the session's program is cyclic (the transport's M30: positions
