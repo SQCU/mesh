@@ -9,7 +9,10 @@ Comm() is the world: this process's rank is its node in the link map MESH_LINK_M
 reports which: one rank a node), the communicator over that map (ncclMeshCommInitRank), its collectives the library's
 compiled defaults.  Every call is libnccl-mesh's host path: contiguous arrays at host pointers, a NULL stream, the call
 complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast, Allgather, Reduce_scatter_block,
-Alltoall, Send, Recv, Barrier, allreduce (a Python number), Free; IN_PLACE as a send buffer.  A message to a rank the
+Alltoall, Gather, Scatter, Send, Recv, Sendrecv (one group, so both directions pair), Barrier, allreduce (a Python
+number), Free; IN_PLACE as a send buffer, None for a buffer a rank does not use (Gather's off the root, Scatter's send
+off it).  COMM_WORLD is Comm(), made at first use.  Not here: nonblocking calls, the v-collectives, Split, object
+(pickled) collectives; separately issued Send and Recv that do not pair are reported (rdma/NCCL.md "Rules").  A message to a rank the
 map does not link is forwarded by the nodes between (rdma/NCCL.md "Routes between unlinked ranks").  The host path works on any node; it is not the measured path (GPU tensors take the Metal
 path through torch-mesh)."""
 import os
@@ -33,6 +36,8 @@ def check(result):
 
 
 def at(array):
+    if array is None:
+        return ffi.NULL
     if not isinstance(array, np.ndarray) or not array.flags.c_contiguous:
         raise ValueError('a buffer is a C-contiguous numpy array')
     if array.dtype not in TYPES:
@@ -86,6 +91,26 @@ class Comm:
     def Alltoall(self, sendbuf, recvbuf):
         check(lib.ncclAlltoAll(at(sendbuf), at(recvbuf), sendbuf.size // self.size, TYPES[sendbuf.dtype], self.comm, ffi.NULL))
 
+    def Gather(self, sendbuf, recvbuf, root=0):
+        count = (recvbuf.size // self.size) if sendbuf is IN_PLACE else sendbuf.size
+        dtype = (recvbuf if sendbuf is IN_PLACE else sendbuf).dtype
+        send = recvbuf[self.rank * count:][:count] if sendbuf is IN_PLACE else sendbuf
+        check(lib.ncclGather(at(send), at(recvbuf if self.rank == root else None), count, TYPES[dtype], root, self.comm, ffi.NULL))
+
+    def Scatter(self, sendbuf, recvbuf, root=0):
+        count = (sendbuf.size // self.size) if recvbuf is IN_PLACE else recvbuf.size
+        dtype = (sendbuf if recvbuf is IN_PLACE else recvbuf).dtype
+        target = sendbuf[self.rank * count:][:count] if recvbuf is IN_PLACE else recvbuf
+        check(lib.ncclScatter(at(sendbuf if self.rank == root else None), at(target), count, TYPES[dtype], root, self.comm, ffi.NULL))
+
+    def Sendrecv(self, sendbuf, dest, recvbuf, source):
+        check(lib.ncclGroupStart())
+        try:
+            check(lib.ncclSend(at(sendbuf), sendbuf.size, TYPES[sendbuf.dtype], dest, self.comm, ffi.NULL))
+            check(lib.ncclRecv(at(recvbuf), recvbuf.size, TYPES[recvbuf.dtype], source, self.comm, ffi.NULL))
+        finally:
+            check(lib.ncclGroupEnd())
+
     def Send(self, buf, dest):
         check(lib.ncclSend(at(buf), buf.size, TYPES[buf.dtype], dest, self.comm, ffi.NULL))
 
@@ -102,3 +127,14 @@ class Comm:
 
     def Free(self):
         check(lib.ncclCommDestroy(self.comm))
+
+
+_world = None
+
+
+def __getattr__(name):
+    global _world
+    if name == 'COMM_WORLD':
+        _world = _world or Comm()
+        return _world
+    raise AttributeError(name)
