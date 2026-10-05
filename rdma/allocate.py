@@ -226,3 +226,55 @@ def _median_points(points):
     for d, t in points:
         by.setdefault(d, []).append(t)
     return [(d, statistics.median(ts)) for d, ts in by.items()]
+
+
+class Balancer:
+    """One share decision balanced on the calls' evidence (design/heterogeneity.md R3, R5, R10, R11): `parts` the
+    units each rank holds now (multiples of `grain`; their sum the decision's units), within [low_i, high_i] (default
+    0 and the units: a partition operand's are 1 and its capacities).  After a call, `observe` takes each rank's
+    times of the call's steps at those parts (seconds, one a step; None or [] where it held none) and returns the
+    parts to hold next, one DFPA iteration (`dfpa`) on the points it has kept: the same parts until the evidence
+    moves them, and the same again once they stand.  Its resolution is twice the largest relative standard error
+    of the ranks' medians (1.2533 x 1.4826 MAD / sqrt(steps): a tail of slow steps does not inflate it), at least
+    1 %.  Every rank given the same times gets the same parts (R4).  `state()` and `Balancer.of(state)` carry it
+    between processes."""
+
+    def __init__(self, parts, grain=1, low=None, high=None, prior=None, window=3):
+        n = len(parts)
+        self.parts, self.grain, self.window, self.prior = [int(p) for p in parts], int(grain), int(window), prior
+        self.total = sum(self.parts)
+        self.low = [int(v) for v in (low if low is not None else [0] * n)]
+        self.high = [int(v) for v in (high if high is not None else [self.total] * n)]
+        if any(p % self.grain or not lo <= p <= hi for p, lo, hi in zip(self.parts, self.low, self.high)):
+            raise ValueError(f'balancer: parts {self.parts} on the grain {self.grain} within {self.low} and {self.high}')
+        self.points, self.before, self.stands = [[] for _ in range(n)], None, False
+
+    def observe(self, samples):
+        import statistics
+        medians, errors = [], []
+        for own, part in zip(samples, self.parts):
+            own = [float(t) for t in (own or ()) if t is not None]
+            if not part or not own:
+                medians.append(None)
+                continue
+            med = statistics.median(own)
+            mad = statistics.median(abs(t - med) for t in own)
+            medians.append(med)
+            errors.append(1.2533 * 1.4826 * mad / math.sqrt(len(own)) / med if med > 0 else 0.0)
+        epsilon = max(0.01, 2 * max(errors, default=0.0))
+        nxt, self.points, self.stands = dfpa(self.total, self.grain, self.low, self.high, self.parts, medians, self.points,
+                                             epsilon, self.before, self.prior, self.window)
+        self.before = nxt if self.stands else self.parts
+        self.parts = list(nxt)
+        return list(self.parts)
+
+    def state(self):
+        return {'parts': self.parts, 'grain': self.grain, 'low': self.low, 'high': self.high, 'prior': self.prior,
+                'window': self.window, 'points': self.points, 'before': self.before, 'stands': self.stands}
+
+    @classmethod
+    def of(cls, state):
+        b = cls(state['parts'], state['grain'], state['low'], state['high'], state.get('prior'), state.get('window', 3))
+        b.points = [[tuple(p) for p in own] for own in state['points']]
+        b.before, b.stands = state.get('before'), state.get('stands', False)
+        return b

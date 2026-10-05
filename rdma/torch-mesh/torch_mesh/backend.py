@@ -463,6 +463,16 @@ class ProcessGroupMesh(dist.ProcessGroup):
                                     for h in hosts], hosts, tensors)
 
 
+# torch_mesh/evidence.py: a watched group's collectives marked, each rank's own work between them the evidence
+# partition.rebalance balances on
+from . import evidence  # noqa: E402
+for _name in ('allreduce', 'allreduce_coalesced', 'reduce', 'broadcast', 'all_gather_single', 'all_gather_single_coalesced',
+              'allgather', 'reduce_scatter_single', 'reduce_scatter_single_coalesced', 'reduce_scatter', 'alltoall',
+              'all_to_all_single', 'gather', 'scatter', 'send', 'recv'):
+    setattr(ProcessGroupMesh, _name, evidence.measured(getattr(ProcessGroupMesh, _name)))
+ProcessGroupMesh.end_coalescing = evidence.measured(ProcessGroupMesh.end_coalescing, issues=True)
+ProcessGroupMesh.allgather_into_tensor_coalesced = ProcessGroupMesh.all_gather_single_coalesced
+
 _installed = False
 
 

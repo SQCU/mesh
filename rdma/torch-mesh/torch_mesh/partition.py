@@ -273,6 +273,42 @@ def relay(tensor, full):
     tensor._local_tensor.copy_(value)
 
 
+_BALANCING = {}
+
+
+def rebalance(mesh, name='tp', every=8):
+    """The parts of partitioned mesh dimension `name` that the evidence of its last `every` steps gives
+    (design/heterogeneity.md R3, R5, R10, R11): call it once a step, after the step is issued, on every rank of the
+    mesh alike.  The first call watches the dimension's group (torch_mesh.evidence: each rank's own work between its
+    collectives there); every `every` steps after it the ranks' work of each step is gathered to every rank and one
+    DFPA iteration (the mesh repo's rdma/allocate.py Balancer, the same on every rank: R4) gives the parts, each at
+    least 1 and at most its capacity, which it writes where they moved.  Returns (parts, moved); where moved, the
+    program relays the tensors it partitions (relay) before its next step: their layout follows the parts, their
+    shapes do not (R14).  The parts stand once the evidence promises no gain past its resolution."""
+    import allocate
+    from . import evidence
+    o = operand(mesh, name)
+    group = mesh.get_group(name)
+    held = _BALANCING.get(o.key)
+    if held is None:
+        n = len(o.capacity)
+        _BALANCING[o.key] = {'balancer': allocate.Balancer(o.parts.tolist(), 1, [1] * n, list(o.capacity)), 'steps': 0}
+        evidence.watch(group, mesh.device_type)
+        return tuple(o.parts.tolist()), False
+    evidence.step(group)
+    held['steps'] += 1
+    if held['steps'] < every:
+        return tuple(o.parts.tolist()), False
+    held['steps'] = 0
+    everyone = [None] * dist.get_world_size(group)
+    dist.all_gather_object(everyone, evidence.work(group), group=group)
+    parts = held['balancer'].observe(everyone)
+    moved = parts != o.parts.tolist()
+    if moved:
+        o.write(parts)
+    return tuple(parts), moved
+
+
 def _attach(mesh, keys):
     partition = {}
     for name, key in keys.items():
