@@ -61,6 +61,8 @@ against one device (2026-10-04); 3 to 6 ranks with CPU tensors on loopback:
 | functional collectives under torch.compile | one graph: TP, EP |
 | DTensor redistribution, DDP, tensor parallelism | |
 | context parallelism | ring attention, forward only |
+| pipeline parallelism | torch.distributed.pipelining, GPipe and 1F1B, gradients checked |
+| 2-D device meshes | pipeline times context (ring attention), expert or tensor parallelism (`mesh2d.py`) |
 | expert parallelism | all_to_all_single |
 
 Examples, each checked against one device: `tools/torch_parallel/{tp,dp,ep,cp,collectives}.py` in
