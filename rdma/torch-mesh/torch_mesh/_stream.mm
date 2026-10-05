@@ -117,6 +117,7 @@ static void checked(int64_t result) {
 static std::unordered_map<int64_t, std::vector<std::pair<int64_t, int64_t>>> marks_;
 
 static void mark(int64_t comm, int64_t kind) {
+  if (marks_.empty()) return;
   auto found = marks_.find(comm);
   if (found == marks_.end()) return;
   auto pool = at::mps::getMPSEventPool();

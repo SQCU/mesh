@@ -14,7 +14,8 @@ boundary, returns the closed steps' seconds and forgets them.  Two marks with no
 timed apart; that interval counts zero.  An MPS collective issued through a coalesced group (start_coalescing) is
 not marked.
 
-An unwatched group pays one lookup a collective; a watched one two events."""
+An unwatched program pays nothing in Python and one empty-map test a collective in C++; a watched group two marks a
+collective."""
 import time
 
 _WATCHED = {}
@@ -30,6 +31,23 @@ def _stream():
     return s
 
 
+_METHODS = ('allreduce', 'allreduce_coalesced', 'reduce', 'broadcast', 'all_gather_single', 'all_gather_single_coalesced',
+            'allgather', 'reduce_scatter_single', 'reduce_scatter_single_coalesced', 'reduce_scatter', 'alltoall',
+            'all_to_all_single', 'gather', 'scatter', 'send', 'recv')
+
+
+def _install(cls):
+    """The backend's host collectives marked (once, as a host group is first watched: an unwatched program's calls
+    pass through nothing)."""
+    if getattr(cls, '_evidence', False):
+        return
+    for name in _METHODS:
+        setattr(cls, name, measured(getattr(cls, name)))
+    cls.end_coalescing = measured(cls.end_coalescing, issues=True)
+    cls.allgather_into_tensor_coalesced = cls.all_gather_single_coalesced
+    cls._evidence = True
+
+
 def watch(group, device):
     """Marks `group`'s collectives from now on (device 'mps' or 'cpu': where its tensors live); the first step
     begins here."""
@@ -40,6 +58,7 @@ def watch(group, device):
         _stream().watch(w.handle)
         _stream().mark(w.handle, 2)
     else:
+        _install(type(group))
         w.last = time.monotonic()
 
 
