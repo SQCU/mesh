@@ -5,6 +5,7 @@
 // MeshWork: its wait encodes the rest (its landings, later rounds and results) on the stream where it is waited.
 #include <torch/extension.h>
 #include <torch/library.h>
+#include <ATen/mps/MPSEvent.h>
 #include <ATen/mps/MPSStream.h>
 #include <ATen/native/mps/OperationUtils.h>
 #include <torch/csrc/distributed/c10d/GroupRegistry.hpp>
@@ -110,10 +111,25 @@ static void checked(int64_t result) {
   TORCH_CHECK(!result, "libnccl-mesh: ", ncclGetErrorString((ncclResult_t)result), ": ", ncclGetLastError(nullptr));
 }
 
+// The evidence torch_mesh/evidence.py reads (design/heterogeneity.md R2, R3): on a watched communicator, a timing
+// event of torch's pool recorded on its stream as each collective is issued (0: the GPU has finished the work before
+// it) and once its wait is encoded (1: the GPU has passed it), and at each step's boundary (2), in order.
+static std::unordered_map<int64_t, std::vector<std::pair<int64_t, int64_t>>> marks_;
+
+static void mark(int64_t comm, int64_t kind) {
+  auto found = marks_.find(comm);
+  if (found == marks_.end()) return;
+  auto pool = at::mps::getMPSEventPool();
+  const auto id = pool->acquireEvent(true);
+  pool->recordEvent(id, false);
+  found->second.emplace_back(kind, (int64_t)id);
+}
+
 // One collective (or one group of NCCL's lowering) on contiguous MPS tensors in one turn of torch's stream queue: its
 // command buffer and open encoder, the call encoded into them, and committed where it published.  Split, it is
 // issued and not completed: its ticket (0: complete at once), its workspace held until the library retires it.
-static uint64_t on_stream(ncclResult_t (^call)(ncclMeshStream *), bool split) {
+static uint64_t on_stream(ncclResult_t (^call)(ncclMeshStream *), bool split, int64_t comm) {
+  mark(comm, 0);
   at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
   __block ncclResult_t result = ncclSuccess;
   __block ncclMeshIssue issue = {0, 0};
@@ -126,6 +142,7 @@ static uint64_t on_stream(ncclResult_t (^call)(ncclMeshStream *), bool split) {
   held_.clear();
   release();
   checked(result);
+  if (!issue.ticket) mark(comm, 1);
   return issue.ticket;
 }
 
@@ -150,7 +167,8 @@ static void complete_all() { complete(UINT64_MAX); }
 // asking for its future) encodes the rest on torch's current stream, where every later kernel reads its results
 class MeshWork : public c10d::Work {
  public:
-  MeshWork(uint64_t ticket, std::vector<at::Tensor> outputs) : c10d::Work(-1, c10d::OpType::UNKNOWN), ticket_(ticket), outputs_(std::move(outputs)) {}
+  MeshWork(uint64_t ticket, std::vector<at::Tensor> outputs, int64_t comm)
+      : c10d::Work(-1, c10d::OpType::UNKNOWN), ticket_(ticket), outputs_(std::move(outputs)), comm_(comm) {}
   bool isCompleted() override { finish(); return true; }
   bool isSuccess() const override { return finished_; }
   bool wait(std::chrono::milliseconds) override { finish(); return true; }
@@ -167,15 +185,17 @@ class MeshWork : public c10d::Work {
     if (finished_) return;
     finished_ = true;
     complete(ticket_);
+    mark(comm_, 1);
   }
   uint64_t ticket_;
   std::vector<at::Tensor> outputs_;
+  int64_t comm_;
   bool finished_ = false;
 };
 
-static c10::intrusive_ptr<c10d::Work> work_of(uint64_t ticket, std::vector<at::Tensor> outputs) {
+static c10::intrusive_ptr<c10d::Work> work_of(uint64_t ticket, std::vector<at::Tensor> outputs, int64_t comm) {
   if (!ticket) return {};
-  return c10::make_intrusive<MeshWork>(ticket, std::move(outputs));
+  return c10::make_intrusive<MeshWork>(ticket, std::move(outputs), comm);
 }
 
 static ncclComm_t communicator(int64_t comm) { return (ncclComm_t)(uintptr_t)comm; }
@@ -209,31 +229,31 @@ static Operand reducing(const at::Tensor &tensor, int64_t &op) {
 
 static uint64_t allreduce(const at::Tensor &tensor, int64_t op, int64_t comm, bool split) {
   const Operand o = reducing(tensor, op);
-  return on_stream(^(ncclMeshStream *s) { return ncclAllReduce(&o.buffer, (void *)&o.buffer, o.count, o.type, (ncclRedOp_t)op, communicator(comm), s); }, split);
+  return on_stream(^(ncclMeshStream *s) { return ncclAllReduce(&o.buffer, (void *)&o.buffer, o.count, o.type, (ncclRedOp_t)op, communicator(comm), s); }, split, comm);
 }
 
 static uint64_t reduce(const at::Tensor &tensor, int64_t op, int64_t root, int64_t comm, bool split) {
   const Operand o = reducing(tensor, op);
   return on_stream(^(ncclMeshStream *s) {
     return ncclReduce(&o.buffer, (void *)&o.buffer, o.count, o.type, (ncclRedOp_t)op, (int)root, communicator(comm), s);
-  }, split);
+  }, split, comm);
 }
 
 static uint64_t broadcast(const at::Tensor &tensor, int64_t root, int64_t comm, bool split) {
   const Operand o = moving(tensor);
-  return on_stream(^(ncclMeshStream *s) { return ncclBroadcast(&o.buffer, (void *)&o.buffer, o.count, o.type, (int)root, communicator(comm), s); }, split);
+  return on_stream(^(ncclMeshStream *s) { return ncclBroadcast(&o.buffer, (void *)&o.buffer, o.count, o.type, (int)root, communicator(comm), s); }, split, comm);
 }
 
 static uint64_t allgather(const at::Tensor &output, const at::Tensor &input, int64_t comm, bool split) {
   const Operand from = moving(input), to = moving(output);
-  return on_stream(^(ncclMeshStream *s) { return ncclAllGather(&from.buffer, (void *)&to.buffer, from.count, from.type, communicator(comm), s); }, split);
+  return on_stream(^(ncclMeshStream *s) { return ncclAllGather(&from.buffer, (void *)&to.buffer, from.count, from.type, communicator(comm), s); }, split, comm);
 }
 
 static uint64_t reduce_scatter(const at::Tensor &output, const at::Tensor &input, int64_t op, int64_t comm, bool split) {
   const Operand from = reducing(input, op), to = reducing(output, op);
   return on_stream(^(ncclMeshStream *s) {
     return ncclReduceScatter(&from.buffer, (void *)&to.buffer, to.count, from.type, (ncclRedOp_t)op, communicator(comm), s);
-  }, split);
+  }, split, comm);
 }
 
 // all-to-all with each rank's elements (NCCL's own lowering: each rank's sends and receives in one group)
@@ -252,17 +272,17 @@ static uint64_t alltoall(const at::Tensor &output, const at::Tensor &input, std:
     }
     const ncclResult_t ended = ncclGroupEnd();
     return result ? result : ended;
-  }, split);
+  }, split, comm);
 }
 
 static uint64_t send_to(const at::Tensor &tensor, int64_t peer, int64_t comm, bool split) {
   const Operand o = moving(tensor);
-  return on_stream(^(ncclMeshStream *s) { return ncclSend(&o.buffer, o.count, o.type, (int)peer, communicator(comm), s); }, split);
+  return on_stream(^(ncclMeshStream *s) { return ncclSend(&o.buffer, o.count, o.type, (int)peer, communicator(comm), s); }, split, comm);
 }
 
 static uint64_t receive_from(const at::Tensor &tensor, int64_t peer, int64_t comm, bool split) {
   const Operand o = moving(tensor);
-  return on_stream(^(ncclMeshStream *s) { return ncclRecv((void *)&o.buffer, o.count, o.type, (int)peer, communicator(comm), s); }, split);
+  return on_stream(^(ncclMeshStream *s) { return ncclRecv((void *)&o.buffer, o.count, o.type, (int)peer, communicator(comm), s); }, split, comm);
 }
 
 // torch's functional collectives (_c10d_functional, what DTensor and a compiled graph call) on MPS tensors: kernels
@@ -373,7 +393,7 @@ static void functional(const c10::OperatorHandle &op, torch::jit::Stack *stack) 
     for (auto r : outs) receives.push_back(r * width);
     ticket = alltoall(result, from, sends, receives, comm, true);
   }
-  if (ticket) c10d::register_work(result, work_of(ticket, {result}));
+  if (ticket) c10d::register_work(result, work_of(ticket, {result}, comm));
   torch::jit::drop(*stack, count);
   torch::jit::push(*stack, result);
 }
@@ -387,20 +407,29 @@ TORCH_LIBRARY_IMPL(_c10d_functional, MPS, m) {
 // The ProcessGroup's calls: split (an async op), a MeshWork to wait on, else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("begin", &begin);
+  module.def("watch", [](int64_t comm) { marks_.try_emplace(comm); });
+  module.def("unwatch", [](int64_t comm) { marks_.erase(comm); });
+  module.def("mark", &mark);
+  module.def("take", [](int64_t comm) {
+    auto found = marks_.find(comm);
+    std::vector<std::pair<int64_t, int64_t>> out;
+    if (found != marks_.end()) out.swap(found->second);
+    return out;
+  });
   module.def("commit", &commit);
   module.def("complete_all", &complete_all);
-  module.def("allreduce", [](const at::Tensor &t, int64_t op, int64_t comm, bool split) { return work_of(allreduce(t, op, comm, split), {t}); });
-  module.def("reduce", [](const at::Tensor &t, int64_t op, int64_t root, int64_t comm, bool split) { return work_of(reduce(t, op, root, comm, split), {t}); });
-  module.def("broadcast", [](const at::Tensor &t, int64_t root, int64_t comm, bool split) { return work_of(broadcast(t, root, comm, split), {t}); });
-  module.def("allgather", [](const at::Tensor &o, const at::Tensor &i, int64_t comm, bool split) { return work_of(allgather(o, i, comm, split), {o}); });
+  module.def("allreduce", [](const at::Tensor &t, int64_t op, int64_t comm, bool split) { return work_of(allreduce(t, op, comm, split), {t}, comm); });
+  module.def("reduce", [](const at::Tensor &t, int64_t op, int64_t root, int64_t comm, bool split) { return work_of(reduce(t, op, root, comm, split), {t}, comm); });
+  module.def("broadcast", [](const at::Tensor &t, int64_t root, int64_t comm, bool split) { return work_of(broadcast(t, root, comm, split), {t}, comm); });
+  module.def("allgather", [](const at::Tensor &o, const at::Tensor &i, int64_t comm, bool split) { return work_of(allgather(o, i, comm, split), {o}, comm); });
   module.def("reduce_scatter", [](const at::Tensor &o, const at::Tensor &i, int64_t op, int64_t comm, bool split) {
-    return work_of(reduce_scatter(o, i, op, comm, split), {o});
+    return work_of(reduce_scatter(o, i, op, comm, split), {o}, comm);
   });
   module.def("alltoall", [](const at::Tensor &o, const at::Tensor &i, std::vector<int64_t> sends, std::vector<int64_t> receives, int64_t comm, bool split) {
-    return work_of(alltoall(o, i, std::move(sends), std::move(receives), comm, split), {o});
+    return work_of(alltoall(o, i, std::move(sends), std::move(receives), comm, split), {o}, comm);
   });
-  module.def("send", [](const at::Tensor &t, int64_t peer, int64_t comm, bool split) { return work_of(send_to(t, peer, comm, split), {t}); });
-  module.def("recv", [](const at::Tensor &t, int64_t peer, int64_t comm, bool split) { return work_of(receive_from(t, peer, comm, split), {t}); });
+  module.def("send", [](const at::Tensor &t, int64_t peer, int64_t comm, bool split) { return work_of(send_to(t, peer, comm, split), {t}, comm); });
+  module.def("recv", [](const at::Tensor &t, int64_t peer, int64_t comm, bool split) { return work_of(receive_from(t, peer, comm, split), {t}, comm); });
   module.def("attach", &attach);
   module.def("batch", &batch);
 }

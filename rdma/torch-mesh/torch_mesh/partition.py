@@ -289,6 +289,8 @@ def rebalance(mesh, name='tp', every=8):
     from . import evidence
     o = operand(mesh, name)
     group = mesh.get_group(name)
+    if mesh.device_type == 'mps' and not getattr(group, 'handle', 0):
+        raise ValueError(f'mesh: rebalance {name}: its group is not the mesh backend\'s (no communicator to watch)')
     held = _BALANCING.get(o.key)
     if held is None:
         n = len(o.capacity)
@@ -302,11 +304,21 @@ def rebalance(mesh, name='tp', every=8):
     held['steps'] = 0
     everyone = [None] * dist.get_world_size(group)
     dist.all_gather_object(everyone, evidence.work(group), group=group)
+    held['work'] = [sorted(w)[len(w) // 2] if w else None for w in everyone]
     parts = held['balancer'].observe(everyone)
     moved = parts != o.parts.tolist()
     if moved:
         o.write(parts)
     return tuple(parts), moved
+
+
+def balancing(mesh, name='tp'):
+    """What rebalance last saw of partitioned dimension `name`: {'parts', 'stands', 'work': each rank's median
+    step work (seconds) in the last window}, None before its first window."""
+    held = _BALANCING.get(operand(mesh, name).key)
+    if not held or 'work' not in held:
+        return None
+    return {'parts': list(held['balancer'].parts), 'stands': held['balancer'].stands, 'work': held['work']}
 
 
 def _attach(mesh, keys):

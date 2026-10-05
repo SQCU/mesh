@@ -2,69 +2,69 @@
 (design/heterogeneity.md R2, R3, R11: a rank's time never holds its collectives; the evidence partition.rebalance
 balances on).
 
-While a group is watched (`watch`), every collective it runs is marked just before it is issued and just after: on
-torch's MPS stream a timing event (torch.mps.Event: it records where the GPU reaches it, so the mark before a
-collective is when the GPU finished the work before it, and the mark after is when the GPU has passed its wait), on
-the host the monotonic clock (a host collective completes in the call).  A step's work on the rank is the sum, over
-its collectives, of the time from the mark after the previous collective (the previous step's last, or the step's
-boundary for the first) to the mark before this one: the same stretch the engine's ledgers time (metal-microbench
-tools/mesh/rates.py).  `step` closes a step; `work` returns the closed steps' seconds and forgets them.  Two marks with
-no GPU work between them cannot be timed apart (the event pool orders them as one); that interval counts zero.
+While a group is watched (`watch`), every collective it runs is marked as it is issued and once it has completed. On
+MPS tensors the marks are timing events of torch's pool recorded on its stream by the backend's C++ path
+(torch_mesh/_stream.mm: DTensor's functional collectives and the group's direct calls), so the mark at issue is
+where the GPU finished the work before the collective and the mark at completion where the GPU has passed its wait;
+on host tensors the monotonic clock around the group's call (a host collective completes in the call).  A step's
+work on the rank is the sum, over its collectives, of the time from the mark after the previous collective (the
+previous step's last, or the step's boundary for the first) to the mark at this one's issue: the stretch the
+engine's ledgers time (metal-microbench tools/mesh/rates.py).  `step` closes a step; `work`, taken at a step's
+boundary, returns the closed steps' seconds and forgets them.  Two marks with no GPU work between them cannot be
+timed apart; that interval counts zero.  An MPS collective issued through a coalesced group (start_coalescing) is
+not marked.
 
-Unwatched groups pay one dictionary lookup a collective; a watched group two marks."""
+An unwatched group pays one lookup a collective; a watched one two events."""
 import time
 
 _WATCHED = {}
 
 
 class _Watch:
-    def __init__(self, device):
-        self.device, self.marks, self.steps, self.last = device, [], [], None
+    def __init__(self, device, handle):
+        self.device, self.handle, self.marks, self.steps, self.last = device, handle, [], [], None
 
-    def mark(self):
-        if self.device == 'mps':
-            import torch
-            event = torch.mps.Event(enable_timing=True)
-            event.record()
-            return event
-        return time.monotonic()
 
-    def seconds(self, start, end):
-        if self.device != 'mps':
-            return end - start
-        try:
-            return max(0.0, start.elapsed_time(end) / 1e3)
-        except RuntimeError:
-            return 0.0
+def _stream():
+    from . import _stream as s
+    return s
 
 
 def watch(group, device):
     """Marks `group`'s collectives from now on (device 'mps' or 'cpu': where its tensors live); the first step
     begins here."""
-    w = _WATCHED.setdefault(id(group), _Watch(device))
-    if w.last is None:
-        w.last = w.mark()
+    if id(group) in _WATCHED:
+        return
+    w = _WATCHED[id(group)] = _Watch(device, getattr(group, 'handle', 0))
+    if device == 'mps':
+        _stream().watch(w.handle)
+        _stream().mark(w.handle, 2)
+    else:
+        w.last = time.monotonic()
 
 
 def unwatch(group):
-    _WATCHED.pop(id(group), None)
+    w = _WATCHED.pop(id(group), None)
+    if w is not None and w.device == 'mps':
+        _stream().unwatch(w.handle)
 
 
 def mark(group, before):
     w = _WATCHED.get(id(group))
-    if w is None:
-        return
-    w.marks.append((before, w.mark()))
+    if w is not None and w.device != 'mps':
+        w.marks.append((0 if before else 1, time.monotonic()))
 
 
 def step(group):
-    """Closes the group's current step (its marks so far)."""
+    """Closes the group's current step."""
     w = _WATCHED.get(id(group))
-    if w is not None:
-        w.steps.append(w.marks)
+    if w is None:
+        return
+    if w.device == 'mps':
+        _stream().mark(w.handle, 2)
+    else:
+        w.steps.append(w.marks + [(2, time.monotonic())])
         w.marks = []
-        boundary = w.mark()
-        w.steps[-1].append((None, boundary))
 
 
 def work(group):
@@ -72,27 +72,46 @@ def work(group):
     w = _WATCHED.get(id(group))
     if w is None:
         return []
-    if w.device == 'mps':
-        import torch
-        torch.mps.synchronize()
-    out = []
-    for marks in w.steps:
-        total, last = 0.0, w.last
-        for before, m in marks:
-            if before:
-                total += w.seconds(last, m)
-            last = m
-        w.last = last
-        out.append(total)
-    w.steps = []
+    if w.device != 'mps':
+        out = []
+        for marks in w.steps:
+            total = 0.0
+            for kind, t in marks:
+                if kind == 0:
+                    total += t - w.last
+                w.last = t
+            out.append(total)
+        w.steps = []
+        return out
+    import torch
+    torch.mps.synchronize()
+    out, total, done = [], 0.0, []
+    for kind, event in _stream().take(w.handle):
+        if w.last is None:
+            w.last = event
+            continue
+        if kind == 0:
+            try:
+                total += max(0.0, torch._C._mps_elapsedTimeOfEvents(w.last, event) / 1e3)
+            except RuntimeError:
+                pass
+        done.append(w.last)
+        w.last = event
+        if kind == 2:
+            out.append(total)
+            total = 0.0
+    for event in done:
+        torch._C._mps_releaseEvent(event)
     return out
 
 
 def measured(method, issues=False):
-    """`method` of a process group, marked while the group is watched; a call inside a coalesced group is marked
-    where the coalesced group is issued (`issues`: end_coalescing)."""
+    """`method` of a process group, marked on the host while the group is watched on host tensors (the MPS path is
+    marked in _stream.mm); a call inside a coalesced group is marked where the coalesced group is issued (`issues`:
+    end_coalescing)."""
     def call(self, *args, **kwargs):
-        if id(self) not in _WATCHED or (not issues and getattr(self, '_pending', None) is not None):
+        w = _WATCHED.get(id(self))
+        if w is None or w.device == 'mps' or (not issues and getattr(self, '_pending', None) is not None):
             return method(self, *args, **kwargs)
         mark(self, True)
         try:
