@@ -282,40 +282,47 @@ def rebalance(mesh, name='tp', every=8):
     mesh alike.  The first call watches the dimension's group (torch_mesh.evidence: each rank's own work between its
     collectives there); every `every` steps after it the ranks' work of each step is gathered to every rank and one
     DFPA iteration (the mesh repo's rdma/allocate.py Balancer, the same on every rank: R4) gives the parts, each at
-    least 1 and at most its capacity, which it writes where they moved.  Returns (parts, moved); where moved, the
-    program relays the tensors it partitions (relay) before its next step: their layout follows the parts, their
-    shapes do not (R14).  The parts stand once the evidence promises no gain past its resolution."""
+    least 1, at most the units less one a peer.
+
+    A rank computes its whole buffer, its capacity, padding and all (R14: stock kernels), so its work follows its
+    capacity: the evidence measures parts where they are the capacities, and parts that move within capacities set
+    only what is valid.  Returns (parts, written): written where the parts moved and fit the capacities (then written
+    here, and the program relays its tensors, relay); parts that moved past a capacity are the program's to attach a
+    new mesh at (capacities and parts both: the shapes change, the one cost R11 weighs), whose dimension's group
+    keeps this balancer.  The parts stand once the evidence promises no gain past its resolution."""
     import allocate
     from . import evidence
     o = operand(mesh, name)
     group = mesh.get_group(name)
     if mesh.device_type == 'mps' and not getattr(group, 'handle', 0):
         raise ValueError(f'mesh: rebalance {name}: its group is not the mesh backend\'s (no communicator to watch)')
-    held = _BALANCING.get(o.key)
+    where = (id(group), name)
+    held = _BALANCING.get(where)
     if held is None:
         n = len(o.capacity)
-        _BALANCING[o.key] = {'balancer': allocate.Balancer(o.parts.tolist(), 1, [1] * n, list(o.capacity)), 'steps': 0}
+        _BALANCING[where] = {'balancer': allocate.Balancer(o.parts.tolist(), 1, [1] * n, [o.units - n + 1] * n), 'steps': 0}
         evidence.watch(group, mesh.device_type)
         return tuple(o.parts.tolist()), False
     evidence.step(group)
     held['steps'] += 1
     if held['steps'] < every:
-        return tuple(o.parts.tolist()), False
+        return tuple(held['balancer'].parts), False
     held['steps'] = 0
     everyone = [None] * dist.get_world_size(group)
     dist.all_gather_object(everyone, evidence.work(group), group=group)
     held['work'] = [sorted(w)[len(w) // 2] if w else None for w in everyone]
+    held['balancer'].parts = o.parts.tolist()
     parts = held['balancer'].observe(everyone)
-    moved = parts != o.parts.tolist()
-    if moved:
+    written = parts != o.parts.tolist() and all(p <= c for p, c in zip(parts, o.capacity))
+    if written:
         o.write(parts)
-    return tuple(parts), moved
+    return tuple(parts), written
 
 
 def balancing(mesh, name='tp'):
     """What rebalance last saw of partitioned dimension `name`: {'parts', 'stands', 'work': each rank's median
     step work (seconds) in the last window}, None before its first window."""
-    held = _BALANCING.get(operand(mesh, name).key)
+    held = _BALANCING.get((id(mesh.get_group(name)), name))
     if not held or 'work' not in held:
         return None
     return {'parts': list(held['balancer'].parts), 'stands': held['balancer'].stands, 'work': held['work']}
