@@ -41,14 +41,17 @@ struct prepared_receive {
   _Atomic uint64_t *input;
   struct ibv_qp *pair;
   uint64_t argument;
-  uint32_t frames,invocation,queue,cycle;
+  uint32_t frames,invocation,queue,cycle,behind;
 };
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
   offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,input)==48,"M08 M09");
 /* design/prepared-machine.md#M08 */
 /* A queue pair's receive ring: its records in invocation, binding, chunk order; `posted` the next to
    post, `outstanding` the frames posted and not completed, within the queue's `capacity`; a record is
-   posted once its invocation is within `span` of the latest completed (the ring slots' margin). */
+   posted once the record `behind` it in the ring's running order has landed: its transfer's and chunk's
+   record `span` invocations before (the ring slots' margin), or in a cyclic program its own previous
+   posting where none is; a record with none is posted at once.  A transfer's slots are its own, so a ring
+   whose transfers begin late, or leave invocations between them, posts each transfer's first records. */
 struct receive_ring {
   struct prepared_receive *first;
   size_t count,posted;
@@ -169,19 +172,20 @@ static uint32_t transfer_row(struct hdr *m,const struct mesh_transfer *transfer,
 }
 
 /* design/prepared-machine.md#M08 */
-/* Posts the ring's next records while its queue has room and each is within the ring's span of the
-   latest completed invocation.  Called once at configuration and at each receive completion: the
-   refill is fired by the event. */
+/* Posts the ring's next records while its queue has room and the record behind each has landed (its
+   transfer's `span` invocations before: the ring's records land in the order posted, so `landed` counts
+   them).  Called once at configuration and at each receive completion: the refill is fired by the event. */
 /* design/prepared-machine.md#M30 */
 /* A cyclic program's ring wraps: its posted count runs on, record posted % count in cycle posted / count,
-   at running invocation invocation + cycle * N; the span is held under N, so a record is posted again only
-   after its last posting completed (completions arrive in order). */
+   at running invocation invocation + cycle * N; the span is held under N and a record with no record of
+   its transfer behind it waits on its own previous posting, so a record is posted again only after its
+   last posting completed (completions arrive in order). */
 static int ring_advance(struct mesh_link *link,struct receive_ring *ring){
   int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=link->provider.queues[0].receive;
   while(ring->count && (link->cyclic || ring->posted<ring->count)){
     struct prepared_receive *record=ring->first+ring->posted%ring->count;
     uint64_t cycle=ring->posted/ring->count;
-    if((int64_t)(record->invocation+cycle*link->invocations)>ring->completed+(int64_t)ring->span ||
+    if((record->behind && ring->posted>=record->behind && ring->landed<=ring->posted-record->behind) ||
        ring->outstanding+record->frames>ring->capacity)break;
     record->cycle=(uint32_t)cycle;
     struct ibv_recv_wr *bad;
@@ -286,6 +290,10 @@ static int link_configure(void *state,int socket,uint64_t client){
     struct mesh_transfer *in=mesh_transfers(m,client,channel,MESH_RECEIVE);
     struct receive_ring *r=link->rings+ring;
     r->first=link->receive+at;
+    size_t *base=calloc((size_t)count+1,sizeof *base),*firsts=NULL;
+    for(uint32_t i=0;base&&i<count;i++)base[i+1]=base[i]+(slot<in[i].count?mesh_transfer_active(in+i,invocations):0);
+    if(base)firsts=malloc((base[count]+1)*sizeof *firsts);
+    if(!base||!firsts){free(base);free(firsts);errno=ENOMEM;return -1;}
     for(uint32_t i=0;i<count;i++){
       if(slot>=in[i].count)continue;
       uint32_t active=mesh_transfer_active(in+i,invocations),own=in[i].depth?in[i].depth:depth;
@@ -313,6 +321,7 @@ static int link_configure(void *state,int socket,uint64_t client){
         if(delivery->device_input)input=(uintptr_t)m+delivery->device_input+(uintptr_t)delivery->device_stride*u;
         else if(delivery->sends)input=(uintptr_t)m+delivery->targets[0].stream+sizeof(struct mesh_send)*(size_t)u;
         struct prepared_receive *record=link->receive+at++;
+        if(!k)firsts[base[i]+u]=(size_t)(record-r->first);
         *record=(struct prepared_receive){.request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
           .span=span,.input=(_Atomic uint64_t *)input,.pair=link->provider.queues[ring].pair,.argument=1,
           .frames=(span.length+4095)/4096,.invocation=t,.queue=(uint32_t)ring};
@@ -321,6 +330,19 @@ static int link_configure(void *state,int socket,uint64_t client){
     r->count=(size_t)(link->receive+at-r->first);
     /* design/prepared-machine.md#M30 */
     if(link->cyclic)r->span=MIN(r->span,invocations>1?invocations-1:1);
+    for(uint32_t i=0;i<count;i++){
+      uint32_t active=(uint32_t)(base[i+1]-base[i]);
+      if(!active)continue;
+      uint32_t chunks=mesh_row_chunks(m,in[i].local_row+slot*in[i].stride,in[i].bytes);
+      for(uint32_t u=0;u<active;u++){
+        size_t here=firsts[base[i]+u],behind=0;
+        if(u>=r->span)behind=here-firsts[base[i]+u-r->span];
+        else if(link->cyclic&&u+active>=r->span)behind=here+r->count-firsts[base[i]+u+active-r->span];
+        else if(link->cyclic)behind=r->count;
+        for(uint32_t k=0;k<chunks;k++)r->first[here+k].behind=(uint32_t)behind;
+      }
+    }
+    free(base);free(firsts);
     int error=ring_advance(link,r);
     if(error){errno=error;return -1;}
     fprintf(stderr,"receive ring=%d records=%zu posted=%zu frames=%u capacity=%u span=%u\n",
