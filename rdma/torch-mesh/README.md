@@ -98,13 +98,43 @@ tp=parts)` changes the parts between calls within the capacities (no reshape, re
 A program on raw tensors, not DTensor, splits by its own counts and uses the list collectives with unequal sizes
 (`all_gather(list)`, `reduce_scatter(out, list)`, `all_to_all_single` with splits).
 
-The parts come from each node's rates (`rdma/allocate.py` `equal_finish`); see
+The first parts can come from each node's rates (`rdma/allocate.py` `equal_finish`); later ones from the run itself
+(below); see
 [design/heterogeneity.md](../../design/heterogeneity.md). Parts are indexed by rank, not by node: the group's nodes
 in rank order are `dist.distributed_c10d._get_default_group().node`.
 
 On the pair, `tp.py` takes them from the environment: `pair.py --programs tp SP=0 PARTITION=5,11` (sequence
 parallelism off with uneven parts) gives rank 0 five sixteenths and rank 1 eleven. Rank 0 is the Mini, so the M5
 holds the larger part.
+
+### Parts from the run's own evidence
+
+Nobody needs to know the parts in advance. Call `partition.rebalance` once a step, on every rank alike:
+
+```python
+parts, written = partition.rebalance(mesh, "tp", every=8)
+if list(parts) != partition.operand(mesh, "tp").parts.tolist():   # moved past the capacities
+    mesh = DeviceMesh(device, list(range(world)), mesh_dim_names=("tp",))
+    partition.attach(mesh, tp=(parts, parts))                      # attach again at them, and shard again
+elif written:
+    ...                                                            # moved within them: partition.relay the shards
+```
+
+- The first call watches the dimension's group. Every collective on it is then marked as it is issued and once its
+  wait has run: on MPS by timing events on torch's stream (in `_stream.mm`, so DTensor's functional collectives are
+  included), on CPU by the host clock (`torch_mesh/evidence.py`). A rank's work in a step is the time between its
+  collectives, never inside them, so a slow peer never reads as a slow rank.
+- Every `every` steps the ranks' work is gathered to all of them, and each runs the same step of
+  `rdma/allocate.py` `Balancer`, so all get the same parts. That step is DFPA: the ranks' measured points, the
+  grains given to whoever finishes earliest with them, and a stop once the measurements promise no gain past their
+  own resolution. The parts then stand, so jitter does not reshard.
+- A rank computes its whole buffer, so its work follows its capacity. Attach with the capacities equal to the
+  parts, and attach again when the parts move; that costs one step.
+- `partition.balancing(mesh, "tp")` returns what the last window saw.
+
+On the pair (`tools/torch_parallel/tp.py REBALANCE=4`, 16 heads from 8/8), the parts moved to 3/13 and then 4/12,
+and stood after two windows. Steps went from 365 to about 248 ms, and the output and gradients still matched one
+device.
 
 ## Performance
 

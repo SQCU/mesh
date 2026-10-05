@@ -122,8 +122,16 @@ or identically on every rank:
    parts))`); metal-microbench `tools/torch_parallel/tp.py` takes them as `PARTITION`.
 
 The rates and the link costs go into the link map once, from recorded runs the map cites
-(`calibrate.py node` and `calibrate.py links`). They change when the configuration changes (R11), not
-with each run's timings.
+(`calibrate.py node` and `calibrate.py links`). They give the first parts only.
+
+**Parts from the run's evidence (R3, R10, R11).** `partition.rebalance(mesh, name, every)`, called once a step on
+every rank, watches the dimension's group (`torch_mesh/evidence.py`: each rank's own work between its collectives,
+timed on torch's MPS stream or the host clock, never a collective's wait, R2). Every `every` steps it gathers the
+ranks' work to all of them and runs one step of `allocate.Balancer` (DFPA on the measured points), identically on
+every rank (R4). Its parts stand once the evidence promises no gain past its resolution, so they change with the
+configuration and not with jitter (R11). A rank's work follows its capacity (R14: stock kernels compute the
+padding), so parts that move past the capacities are attached again at them; that is the one cost R11 weighs.
+metal-microbench's engine calls run the same Balancer on their bridges' ledgers (`tools/mesh/rates.py`).
 
 **What stays uniform.**
 - No operand, or equal parts: stock PyTorch.
