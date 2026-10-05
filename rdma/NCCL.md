@@ -172,8 +172,11 @@ comm.Allreduce(local, total, op=SUM)    # Allgather, Bcast, Reduce, Reduce_scatt
 best = comm.allreduce(x.max(), op=MAX)  # Barrier; IN_PLACE as a send buffer
 ```
 
+Subcommunicators are `Split(color, key)` and a Cartesian grid: `grid = comm.Create_cart([2, 2])`, `grid.Sub([False,
+True])` its row, `grid.Shift(0, 1)` the neighbours, as mpi4py spells them.
+
 metal-microbench `tools/mesh/numpy_power.py` is a ported power iteration (`grid.py run -- '{python}
-tools/mesh/numpy_power.py'`).
+tools/mesh/numpy_power.py'`), and `tools/mesh/numpy_summa.py` SUMMA on a 2-D grid (row and column broadcasts).
 
 ## On one host
 
