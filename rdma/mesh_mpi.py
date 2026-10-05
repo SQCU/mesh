@@ -11,10 +11,14 @@ compiled defaults.  Every call is libnccl-mesh's host path: contiguous arrays at
 complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast, Allgather, Reduce_scatter_block,
 Alltoall, Gather, Scatter, Send, Recv, Sendrecv (one group, so both directions pair), Barrier, allreduce (a Python
 number), Free; IN_PLACE as a send buffer, None for a buffer a rank does not use (Gather's off the root, Scatter's send
-off it).  COMM_WORLD is Comm(), made at first use.  Not here: nonblocking calls, the v-collectives, Split, object
-(pickled) collectives; separately issued Send and Recv that do not pair are reported (rdma/NCCL.md "Rules").  A message to a rank the
+off it).  COMM_WORLD is Comm(), made at first use.  Subcommunicators: Split(color, key) (ncclCommSplit; UNDEFINED
+for none), and a Cartesian process grid, Create_cart(dims) with Get_coords, Get_cart_rank, Shift and Sub(remain_dims),
+each sub-grid a Split of it (a 2-D mesh's rows and columns), whose members the cables need not join.  Not here:
+nonblocking calls, the v-collectives, object (pickled) collectives; separately issued Send and Recv that do not pair
+are reported (rdma/NCCL.md "Rules").  A message to a rank the
 map does not link is forwarded by the nodes between (rdma/NCCL.md "Routes between unlinked ranks").  The host path works on any node; it is not the measured path (GPU tensors take the Metal
 path through torch-mesh)."""
+import math
 import os
 
 import numpy as np
@@ -23,7 +27,7 @@ import mesh
 
 ffi, lib = mesh.ffi, mesh.lib
 SUM, PROD, MAX, MIN, AVG = lib.ncclSum, lib.ncclProd, lib.ncclMax, lib.ncclMin, lib.ncclAvg
-IN_PLACE = object()
+IN_PLACE, UNDEFINED = object(), -32766
 TYPES = {np.dtype(np.int8): lib.ncclInt8, np.dtype(np.uint8): lib.ncclUint8, np.dtype(np.int32): lib.ncclInt32,
          np.dtype(np.uint32): lib.ncclUint32, np.dtype(np.int64): lib.ncclInt64, np.dtype(np.uint64): lib.ncclUint64,
          np.dtype(np.float16): lib.ncclFloat16, np.dtype(np.float32): lib.ncclFloat32, np.dtype(np.float64): lib.ncclFloat64}
@@ -61,6 +65,28 @@ class Comm:
         made = ffi.new('ncclComm_t *')
         check(lib.ncclMeshCommInitRank(made, node[0], topology.c, ffi.NULL, ffi.NULL, 0, ffi.NULL, region.encode()))
         self.rank, self.size, self.comm, self.topology = int(node[0]), topology.nodes, made[0], topology
+
+    @classmethod
+    def _of(cls, handle, parent):
+        made = cls.__new__(cls)
+        count, rank = ffi.new('int *'), ffi.new('int *')
+        check(lib.ncclCommCount(handle, count))
+        check(lib.ncclCommUserRank(handle, rank))
+        made.rank, made.size, made.comm, made.topology = rank[0], count[0], handle, parent.topology
+        return made
+
+    def Split(self, color=0, key=0):
+        """The ranks of `color`, ordered by `key` then rank; None for UNDEFINED (ncclCommSplit)."""
+        made = ffi.new('ncclComm_t *')
+        check(lib.ncclCommSplit(self.comm, -1 if color == UNDEFINED else color, key, made, ffi.NULL))
+        return Comm._of(made[0], self) if made[0] != ffi.NULL else None
+
+    def Create_cart(self, dims, periods=None, reorder=False):
+        """This communicator's ranks as a process grid of shape `dims` (row-major: the last dimension varies
+        fastest); `periods` (default every dimension) where Shift wraps."""
+        if math.prod(dims) != self.size:
+            raise ValueError(f'a grid {list(dims)} of {math.prod(dims)} ranks over {self.size}')
+        return Cartcomm(self, list(dims), list(periods) if periods is not None else [True] * len(dims))
 
     def Get_rank(self):
         return self.rank
@@ -127,6 +153,49 @@ class Comm:
 
     def Free(self):
         check(lib.ncclCommDestroy(self.comm))
+
+
+class Cartcomm(Comm):
+    """A process grid over a communicator's ranks (Comm.Create_cart)."""
+
+    def __init__(self, base, dims, periods):
+        self.rank, self.size, self.comm, self.topology = base.rank, base.size, base.comm, base.topology
+        self.dims, self.periods = dims, periods
+
+    def Get_coords(self, rank):
+        coords = []
+        for d in reversed(self.dims):
+            coords.append(rank % d)
+            rank //= d
+        return coords[::-1]
+
+    def Get_cart_rank(self, coords):
+        rank = 0
+        for c, d in zip(coords, self.dims):
+            rank = rank * d + c
+        return rank
+
+    def Shift(self, direction, disp):
+        """(source, dest): the ranks `disp` back and on along `direction`, None past a non-periodic edge."""
+        coords, d = self.Get_coords(self.rank), self.dims[direction]
+
+        def at(offset):
+            c = coords[direction] + offset
+            if not self.periods[direction] and not 0 <= c < d:
+                return None
+            moved = list(coords)
+            moved[direction] = c % d
+            return self.Get_cart_rank(moved)
+        return at(-disp), at(disp)
+
+    def Sub(self, remain_dims):
+        """The sub-grid through this rank that keeps the dimensions where `remain_dims` is true (a row of a 2-D
+        grid: [False, True]); a Split of this grid by the coordinates it drops."""
+        coords = self.Get_coords(self.rank)
+        color = self.Get_cart_rank([0 if keep else c for keep, c in zip(remain_dims, coords)])
+        sub = self.Split(color, self.rank)
+        return Cartcomm(sub, [d for keep, d in zip(remain_dims, self.dims) if keep],
+                        [p for keep, p in zip(remain_dims, self.periods) if keep])
 
 
 _world = None
