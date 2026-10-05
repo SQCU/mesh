@@ -23,6 +23,22 @@ back, so the next call's configuration is one more value in the dataflow: no roo
 4. c_i = low_i + g floor((s'_i - low_i) / g), the leftover grains to the largest remainders,
    ties to the lower rank.  s' stays the iterate; c is the next call's operand and regressor.
 
+Measured, not modelled (design/heterogeneity.md R3, R10, R11): `dfpa` is one iteration of DFPA [Lastovetsky & Reddy
+2010, Distributed data partitioning for heterogeneous processors based on partial estimation of their functional
+performance models]: each rank's model is the points it measured, (units, seconds) at the parts it ran (`time`: DFPA
+interpolates the speed d / t and holds it constant past the points; here the time, nondecreasing, which keeps a
+rank whose time is flat at small parts from reading as slow at large ones); the next parts are `min_max`'s on those
+times, each grain to the rank finishing earliest with it [Ibaraki & Katoh 1988; Beaumont et al. 2001, Alg. 3.1].  The
+parts stay where the models promise less than the relative accuracy epsilon under the measured largest finish
+[Meta-Balancer 2012: rebalance only when the gain exceeds the
+cost: here, the measured finishes' agreement within epsilon [DFPA] is the case of no gain], and once a part moves
+back the way it came every part moves half as far [LB-BSP 2020, §3.3.2].  A part grows
+at most to twice the largest it was measured at, a trust region [Conn, Gould & Toint 2000] over the model's
+extrapolation past its points; the gain is the models' optimum's, unbounded, since a step inside the region can
+leave the largest finish where it was (a rank whose time is flat in its part).  A rank's point at a
+part it ran before replaces that point, and where the two differ by more than epsilon its older points go (its
+performance changed [Clarke, Lastovetsky & Rychkov 2011]).
+
 equal_finish(W, g, low, high, a, b) is steps 3-4 alone: rank i finishing at a_i + b_i s_i, the
 shares s_i = (T - a_i) / b_i with sum s = W; ranks outside their bounds are held at them and T
 re-solved, the side with the larger total violation first [Bitran & Hax 1981].  The mesh's
@@ -107,3 +123,106 @@ def equal_finish(total, grain, low, high, a, b):
             c[i] += grain
             left -= 1
     return c, s, T
+
+
+def min_max(total, grain, low, high, cost):
+    """Shares of `total` units at `grain` within [low_i, high_i] (multiples of grain) minimising the largest of
+    cost[i](c_i), each nondecreasing (a cost is taken as the largest it has reached, so a dip is never a reason to
+    give a rank more): each grain in turn to the rank finishing earliest with it, ties to the lower rank
+    [Ibaraki & Katoh 1988; Beaumont et al. 2001, Alg. 3.1].  (c, T); grains no rank can hold are left unplaced."""
+    import heapq
+    n = len(low)
+    c = list(low)
+    reached = [cost[i](c[i]) for i in range(n)]
+    heap = [(max(reached[i], cost[i](c[i] + grain)), i) for i in range(n) if c[i] + grain <= high[i]]
+    heapq.heapify(heap)
+    for _ in range((total - sum(low)) // grain):
+        if not heap:
+            break
+        t, i = heapq.heappop(heap)
+        c[i] += grain
+        reached[i] = t
+        if c[i] + grain <= high[i]:
+            heapq.heappush(heap, (max(t, cost[i](c[i] + grain)), i))
+    return c, max(reached)
+
+
+def time(points, prior=None):
+    """A rank's time for d units from its partial model: its measured points [(units, seconds)], made nondecreasing
+    in units (pool adjacent violators [Ayer et al. 1955]: more units never take less time), the time interpolated
+    linearly between them and extended along the line through the two nearest past either end (between none and
+    the first's time below it); with one point, in proportion below it and its own time above (the least a
+    nondecreasing time can be there: optimism where nothing is known [Auer et al. 2002], which the trust region
+    bounds); with none, `prior` (a, b): a + b d, or d itself."""
+    blocks = []
+    for d, t in sorted((d, t) for d, t in points if d > 0 and t > 0):
+        blocks.append([[d], t])
+        while len(blocks) > 1 and blocks[-2][1] > blocks[-1][1]:
+            ds1, t1 = blocks.pop()
+            ds0, t0 = blocks.pop()
+            blocks.append([ds0 + ds1, (t0 * len(ds0) + t1 * len(ds1)) / (len(ds0) + len(ds1))])
+    known = [(d, t) for ds, t in blocks for d in ds]
+
+    def at(d):
+        if d <= 0:
+            return 0.0
+        if not known:
+            return prior[0] + prior[1] * d if prior else float(d)
+        if len(known) == 1:
+            return known[0][1] * min(d / known[0][0], 1.0)
+        if d <= known[0][0]:
+            (d0, t0), (d1, t1) = known[0], known[1]
+            return min(t0, max(0.0, t0 - (t1 - t0) / (d1 - d0) * (d0 - d)))
+        if d >= known[-1][0]:
+            (d0, t0), (d1, t1) = known[-2], known[-1]
+            return t1 + (t1 - t0) / (d1 - d0) * (d - d1)
+        for (d0, t0), (d1, t1) in zip(known, known[1:]):
+            if d0 <= d <= d1:
+                return t0 + (t1 - t0) * (d - d0) / (d1 - d0)
+    return at
+
+
+def dfpa(total, grain, low, high, parts, times, points, epsilon, before=None, prior=None, window=3):
+    """One DFPA iteration after a call that ran `parts` (each rank's units, multiples of grain) and measured `times`
+    (each rank's seconds at its part, None where it ran none): `points` each rank's earlier [(units, seconds)], up to
+    `window` at a part, its time their median [LB-BSP 2020, §3.2.1: prediction robust to non-deterministic
+    perturbation]; `before` the parts of the call before it (equal to `parts` where they stood); `prior` each rank's
+    (a, b) for a rank with no point.  A rank's performance changed where its median at its part moved by more than
+    epsilon: its points at other parts go [Clarke, Lastovetsky & Rychkov 2011].  Parts that stood stand while no
+    rank's performance changed.  Returns (the next parts, each rank's points, whether the parts stand)."""
+    import statistics
+    n = len(parts)
+    kept, changed, medians = [], False, []
+    for i in range(n):
+        own = list(points[i])
+        if times[i] is not None and parts[i] > 0:
+            earlier = [t for d, t in own if d == parts[i]][-window:]
+            now = (earlier + [times[i]])[-window:]
+            old, new = (statistics.median(earlier) if earlier else None), statistics.median(now)
+            if old is not None and abs(new - old) > epsilon * max(new, old):
+                own, changed = [], True
+            own = [(d, t) for d, t in own if d != parts[i]] + [(parts[i], t) for t in now]
+            medians.append(new)
+        kept.append(own)
+    if not medians or (before is not None and list(before) == list(parts) and not changed):
+        return list(parts), kept, True
+    model = [time(_median_points(kept[i]), prior[i] if prior else None) for i in range(n)]
+    if min_max(total, grain, low, high, model)[1] >= max(medians) * (1 - epsilon):
+        return list(parts), kept, True
+    reach = [min(high[i], max(2 * max((d for d, _ in kept[i]), default=0), grain)) if kept[i] else high[i] for i in range(n)]
+    nxt, _ = min_max(total, grain, low, reach, model)
+    if sum(nxt) < total:
+        nxt, _ = min_max(total, grain, low, high, model)
+    if before is not None and any((c - p) * (p - b) < 0 for c, p, b in zip(nxt, parts, before)):
+        half = [(p + c) / 2 for c, p in zip(nxt, parts)]
+        nxt, _ = min_max(sum(nxt), grain, [math.floor(h / grain) * grain for h in half],
+                         [math.ceil(h / grain) * grain for h in half], model)
+    return nxt, kept, False
+
+
+def _median_points(points):
+    import statistics
+    by = {}
+    for d, t in points:
+        by.setdefault(d, []).append(t)
+    return [(d, statistics.median(ts)) for d, ts in by.items()]
