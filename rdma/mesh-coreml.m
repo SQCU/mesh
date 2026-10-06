@@ -19,13 +19,15 @@
 
 static NSMutableArray *models_;
 static NSMutableArray *names_;
+static NSMutableArray *compiled_;
+static NSMutableArray *units_;
 static char error_[2048];
 
 const char *mesh_coreml_error(void) { return error_; }
 
 long mesh_coreml_load(const char *package, const char *input, const char *output, int units) {
   @autoreleasepool {
-    if (!models_) { models_ = [NSMutableArray new]; names_ = [NSMutableArray new]; }
+    if (!models_) { models_ = [NSMutableArray new]; names_ = [NSMutableArray new]; compiled_ = [NSMutableArray new]; units_ = [NSMutableArray new]; }
     NSError *error = nil;
     NSURL *compiled = [MLModel compileModelAtURL:[NSURL fileURLWithPath:@(package)] error:&error];
     if (!compiled) { snprintf(error_, sizeof error_, "compile: %s", error.localizedDescription.UTF8String); return -1; }
@@ -35,6 +37,8 @@ long mesh_coreml_load(const char *package, const char *input, const char *output
     if (!model) { snprintf(error_, sizeof error_, "load: %s", error.localizedDescription.UTF8String); return -1; }
     [models_ addObject:model];
     [names_ addObject:@[@(input), @(output)]];
+    [compiled_ addObject:compiled];
+    [units_ addObject:@(configuration.computeUnits)];
     return (long)models_.count - 1;
   }
 }
@@ -74,5 +78,41 @@ int mesh_coreml_predict(long handle, void *in, const int64_t *in_shape, int in_r
     }];
     if (!copied) { snprintf(error_, sizeof error_, "output: %ld elements, %lld expected", (long)got.count, (long long)count); return -1; }
     return 0;
+  }
+}
+
+/* Where Core ML places each operation of a loaded model (MLComputePlan): "operator=device" a line, the device cpu, gpu,
+   ane or unknown, written to `out` (at most `size` bytes); the operations' count, or -1.  Placement is Core ML's own
+   choice within the compute units the model was loaded on: an operation on the CPU shares the performance cores with
+   anything else running there. */
+long mesh_coreml_placement(long handle, char *out, size_t size) {
+  @autoreleasepool {
+    if (handle < 0 || handle >= (long)models_.count) { snprintf(error_, sizeof error_, "no model %ld", handle); return -1; }
+    if (@available(macOS 14.4, *)) {
+      MLModelConfiguration *configuration = [MLModelConfiguration new];
+      configuration.computeUnits = (MLComputeUnits)[units_[handle] integerValue];
+      dispatch_semaphore_t done = dispatch_semaphore_create(0);
+      __block MLComputePlan *plan = nil;
+      __block NSError *failure = nil;
+      [MLComputePlan loadContentsOfURL:compiled_[handle] configuration:configuration
+                     completionHandler:^(MLComputePlan *loaded, NSError *error) { plan = loaded; failure = error; dispatch_semaphore_signal(done); }];
+      dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+      if (!plan) { snprintf(error_, sizeof error_, "compute plan: %s", failure.localizedDescription.UTF8String); return -1; }
+      MLModelStructureProgramFunction *main = plan.modelStructure.program.functions[@"main"];
+      NSMutableString *text = [NSMutableString string];
+      long count = 0;
+      for (MLModelStructureProgramOperation *op in main.block.operations) {
+        id<MLComputeDeviceProtocol> device = [plan computeDeviceUsageForMLProgramOperation:op].preferredComputeDevice;
+        NSString *where = [device isKindOfClass:[MLNeuralEngineComputeDevice class]] ? @"ane"
+                        : [device isKindOfClass:[MLGPUComputeDevice class]] ? @"gpu"
+                        : [device isKindOfClass:[MLCPUComputeDevice class]] ? @"cpu" : @"unknown";
+        [text appendFormat:@"%@=%@\n", op.operatorName, where];
+        count++;
+      }
+      snprintf(out, size, "%s", text.UTF8String);
+      return count;
+    }
+    snprintf(error_, sizeof error_, "MLComputePlan needs macOS 14.4");
+    return -1;
   }
 }

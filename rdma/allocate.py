@@ -517,11 +517,13 @@ class Coupled:
     The parts.  The model's minimum over the whole lattice (every allocation of the units in grains within the bounds,
     enumerated: a node's few members give hundreds to thousands of points), so no member's move is judged by the
     others' stale models and none conflicts with another's.  Until each member's coefficients are determined, the
-    next allocations are a design about the start: each member in turn given a step from the next, then giving it one
-    [a two-level design about a centre point, Box, Hunter & Hunter 2005, ch. 5].  An allocation runs `window` calls
+    next allocations are a design about the start: each member given a step from each other, every pair both ways
+    [a two-level design about a centre point, Box, Hunter & Hunter 2005, ch. 5]; a member excluded or a pair forbidden
+    lays the design out again about the allocation moved to.  An allocation runs `window` calls
     before it counts.  The model's minimum, unmeasured, runs next; measured, the parts stand there, unless an
     allocation measured better by more than the resolution (twice its call time's relative standard error, at least
-    1 %), where they stand instead: a measurement outranks the model's prediction.  A standing allocation whose call
+    1 %), where they stand instead: a measurement outranks the model's prediction.  Members that occupy one physical
+    unit are forbidden to hold units together (`forbid`), so no allocation time-shares a unit between two of them.  A standing allocation whose call
     time moves past the resolution from the median it stood at is solved again (its performance changed [Clarke,
     Lastovetsky & Rychkov 2011]).
 
@@ -534,17 +536,53 @@ class Coupled:
         self.low, self.high = [int(v) for v in low], [int(v) for v in high]
         self.parts, self.start = tuple(int(p) for p in parts), tuple(int(p) for p in parts)
         self.able = [i for i, h in enumerate(self.high) if h > 0]
+        self.seen, self.stands, self.stood, self.forbidden = {}, False, None, set()
+        self.design = self._design(self.start)
+
+    def _partners(self, i):
+        """The able members allowed to hold units beside member i."""
+        return [j for j in self.able if j != i and (min(i, j), max(i, j)) not in self.forbidden]
+
+    def _design(self, start):
+        """The design about `start`, each able member identifiable among the allocations allowed: for each member a
+        base (`start` with its forbidden partners' units given to it, and a step from the largest partner where it held
+        none) and the base with a step of units moved each way between it and each allowed partner, every allocation
+        within the bounds."""
         step = max(self.grain, self.grain * round(self.total / self.grain / 8))
-        self.design = [self.start]
-        for k, i in enumerate(self.able if len(self.able) > 1 else []):
-            j = self.able[(k + 1) % len(self.able)]
-            for sign in (1, -1):
-                p = list(self.start)
-                p[i] += sign * step
-                p[j] -= sign * step
-                if all(lo <= v <= hi for v, lo, hi in zip(p, self.low, self.high)) and tuple(p) not in self.design:
-                    self.design.append(tuple(p))
-        self.seen, self.stands, self.stood = {}, False, None
+        inside = lambda p: all(lo <= v <= hi for v, lo, hi in zip(p, self.low, self.high)) and self.allowed(p)
+        design = [start] if inside(start) else []
+        for i in self.able:
+            base = list(start)
+            for j in self.able:
+                if j != i and j not in self._partners(i):
+                    base[i], base[j] = base[i] + base[j], 0
+            if base[i] == 0:
+                donor = max(self._partners(i) or [j for j in self.able if j != i], key=lambda j: (base[j], -j), default=None)
+                if donor is None or base[donor] < step:
+                    continue
+                base[i], base[donor] = step, base[donor] - step
+            for p in [base] + [[v + (step if k == a else -step if k == b else 0) for k, v in enumerate(base)]
+                               for j in self._partners(i) for a, b in ((i, j), (j, i))]:
+                if inside(p) and tuple(p) not in design:
+                    design.append(tuple(p))
+        return design
+
+    def allowed(self, p):
+        """Whether allocation p gives units to no two members forbidden to run together."""
+        return not any(p[i] > 0 and p[j] > 0 for i, j in self.forbidden)
+
+    def forbid(self, i, j):
+        """Members i and j never hold units together from now on (they occupy one physical unit, which running at once
+        would time-share: two engines on the CPU's cores, two programs on one GPU): every allocation giving both units
+        leaves the lattice, the design and the evidence's candidates; the current one, where it gives both, moves j's
+        units to i, and the decision is solved again."""
+        self.forbidden.add((min(i, j), max(i, j)))
+        if not self.allowed(self.parts):
+            parts = list(self.parts)
+            parts[i], parts[j] = parts[i] + parts[j], 0
+            self.parts, self.start, self.stands = tuple(parts), tuple(parts), False
+        self.design = self._design(self.parts)
+        return list(self.parts)
 
     def exclude(self, i):
         """Member i holds no units from now on (it failed a requirement the times do not show: an operation's
@@ -558,7 +596,7 @@ class Coupled:
         parts[target], parts[i] = parts[target] + parts[i], 0
         self.parts, self.start, self.stands = tuple(parts), tuple(parts), False
         self.seen = {p: e for p, e in self.seen.items() if p[i] == 0}
-        self.design = [self.start]
+        self.design = self._design(self.start)
         return list(self.parts)
 
     def observe(self, times, calls):
@@ -591,7 +629,7 @@ class Coupled:
         models = {}
         for i in self.able:
             rows = [(p, self._median(e['members'][i])) for p, e in self._measured().items() if p[i] > 0 and e['members'][i]]
-            others = [j for j in self.able if j != i]
+            others = self._partners(i)
             if len({p for p, _ in rows}) < 2 + len(others):
                 return None
             features = [self._features(p, i, others) for p, _ in rows]
@@ -617,7 +655,6 @@ class Coupled:
 
     def predict(self, p, fitted):
         models, overhead = fitted
-        scale = float(self.total)
         active = frozenset(i for i in range(len(p)) if p[i] > 0)
         times = []
         for i in active:
@@ -636,12 +673,13 @@ class Coupled:
             if abs(now - self.stood) <= max(0.01, 2 * self._error(e['calls'])) * self.stood:
                 return self.parts
             self.stands, e['calls'], e['members'] = False, e['calls'][-self.window:], [m[-self.window:] for m in e['members']]
-        pending = [p for p in self.design if p not in measured]
+        pending = [p for p in self.design if p not in measured and self.allowed(p)]
         fitted = self.fit()
         if fitted is None:
             return pending[0] if pending else self.parts
-        best = min(measured, key=lambda p: self._median(measured[p]['calls']))
-        proposal = min(_lattice(self.total, self.grain, self.low, self.high), key=lambda p: (self.predict(p, fitted), p))
+        best = min((p for p in measured if self.allowed(p)), key=lambda p: self._median(measured[p]['calls']))
+        proposal = min((p for p in _lattice(self.total, self.grain, self.low, self.high) if self.allowed(p)),
+                       key=lambda p: (self.predict(p, fitted), p))
         if proposal not in measured:
             return proposal
         chosen = proposal

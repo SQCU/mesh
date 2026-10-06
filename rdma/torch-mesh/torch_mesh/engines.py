@@ -26,6 +26,12 @@ measured by timing events on torch's stream (its span, and the GPU's share where
 ms of host time, so once a decision's allocation stands one call in `sample` (default 16) is measured, enough to see its
 time move.
 
+Engines never time-share a physical unit.  Each states what it occupies (`Engine.occupies`: the GPU; the CPU's cores;
+the Neural Engine, and whatever units Core ML places a Neural Engine share's operations on, read from its compute
+plan), and two engines occupying one unit never hold units of a decision together (allocate.Coupled.forbid): running
+both at once would time-share it (two APIs on the same arithmetic units, contending for registers and switching
+between them) rather than add capacity.
+
 Nothing is implicit.  An operation takes its engines as an operand (`Engines`), from the program or from the
 configuration the program names (`Engines.configured()`: MESH_ENGINES, e.g. "mps,cpu,ane:tile=128"); without
 one it is torch's own operation on its input's device.  An engine the configuration names and the node lacks is an
@@ -99,6 +105,8 @@ def _coreml():
             lib.mesh_coreml_predict.argtypes = [ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
                                                 ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int]
             lib.mesh_coreml_error.restype = ctypes.c_char_p
+            lib.mesh_coreml_placement.restype = ctypes.c_long
+            lib.mesh_coreml_placement.argtypes = [ctypes.c_long, ctypes.c_char_p, ctypes.c_size_t]
             _CORE_ML = lib
         except (OSError, subprocess.CalledProcessError):
             _CORE_ML = False
@@ -115,7 +123,7 @@ class Engine:
     prepare_<kind> (its resident shard of units [start, end)) and run_<kind> (its share into `out`, its seconds or
     None where the GPU's events time it)."""
     name, limits = None, {'dtypes': (torch.float16, torch.bfloat16, torch.float32), 'constants': False, 'tile': 1}
-    host_side = True
+    host_side, occupies = True, frozenset()
 
     def __init__(self, **options):
         self.options = options
@@ -141,7 +149,7 @@ class Engine:
 
 class Mps(Engine):
     """torch's MPS queue: the share enqueued as the GPU's own products, timed by events on its stream."""
-    name, host_side = 'mps', False
+    name, host_side, occupies = 'mps', False, frozenset({'gpu'})
 
     @classmethod
     def missing(cls):
@@ -165,7 +173,7 @@ class Mps(Engine):
 class Cpu(Engine):
     """The CPU's matrix units through torch's fp32 CPU products (Accelerate): the input read in place as fp32 (the
     GPU's prologue converts it), the fp32 shard resident in host memory, the output written in place in fp32."""
-    name = 'cpu'
+    name, occupies = 'cpu', frozenset({'cpu'})
 
     def out_dtype(self, dtype):
         return torch.float32
@@ -217,6 +225,7 @@ class Ane(Engine):
     def __init__(self, **options):
         super().__init__(**options)
         self.limits = {**self.limits, 'tile': int(options.get('tile', 128))}
+        self.occupies = frozenset({'ane'})
 
     @classmethod
     def missing(cls):
@@ -278,6 +287,11 @@ class Ane(Engine):
             handle = native.mesh_coreml_load(str(package).encode(), inputs.encode(), outputs.encode(), 0)
             if handle < 0:
                 raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
+            placed = ctypes.create_string_buffer(1 << 20)
+            if native.mesh_coreml_placement(handle, placed, len(placed)) >= 0:
+                devices = {line.split('=')[1] for line in placed.value.decode().split('\n') if '=' in line}
+                shard.placement = sorted(devices - {'unknown'})
+                self.occupies = self.occupies | frozenset(devices - {'unknown'})
         shard.models[rows] = (model, inputs, outputs, handle, n)
         warm = torch.zeros(rows, width, dtype=torch.float16)
         self._predict(shard, warm, torch.empty(rows, n, dtype=torch.float16))
@@ -338,6 +352,7 @@ class Engines:
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
         self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1), initializer=_interactive)
         self.operations, self.decisions, self.evidence, self.solvers, self.last, self.excluded = [], {}, {}, {}, {}, {}
+        self.separated = {}
 
     @classmethod
     def configured(cls, variable='MESH_ENGINES'):
@@ -460,6 +475,7 @@ class Operation:
             y = y.to(dtype)
         if self.tolerance is not None and first:
             self._verify(key, held, bounds, shards, x2, prologue, outs)
+        self._separate(key)
         y = self.finish(y)
         if measured:
             span[1].record()
@@ -470,6 +486,26 @@ class Operation:
 
     def finish(self, y):
         return y
+
+    def _solver(self, key):
+        solver = self.engines.solvers.get(key)
+        if solver is None:
+            import allocate
+            d = self.engines.decisions[key]
+            solver = self.engines.solvers[key] = allocate.Coupled(d['units'], d['grain'], d['low'], d['high'], d['parts'],
+                                                                  window=self.engines.window)
+        return solver
+
+    def _separate(self, key):
+        """No two engines occupying one physical unit (`Engine.occupies`, a Neural Engine share's from Core ML's
+        placement of its operations) hold units of this decision together: they would time-share it."""
+        engines = self.engines.engines
+        for i in range(len(engines)):
+            for j in range(i + 1, len(engines)):
+                pair = (i, j)
+                if engines[i].occupies & engines[j].occupies and pair not in self.engines.separated.setdefault(key, set()):
+                    self.engines.separated[key].add(pair)
+                    self.engines.decisions[key]['parts'] = self._solver(key).forbid(i, j)
 
     def _verify(self, key, held, bounds, shards, x2, prologue, outs):
         """An allocation's first call: each share an engine other than the GPU computed, against the same share on the
@@ -485,13 +521,7 @@ class Operation:
             got, want = outs[i].float(), reference.float()
             error = float((got - want).norm() / want.norm().clamp_min(1e-30))
             if error > self.tolerance:
-                solver = self.engines.solvers.get(key)
-                if solver is None:
-                    import allocate
-                    d = self.engines.decisions[key]
-                    solver = self.engines.solvers[key] = allocate.Coupled(d['units'], d['grain'], d['low'], d['high'], d['parts'],
-                                                                          window=self.engines.window)
-                self.engines.decisions[key]['parts'] = solver.exclude(i)
+                self.engines.decisions[key]['parts'] = self._solver(key).exclude(i)
                 self.engines.decisions[key]['high'][i] = 0
                 self.engines.excluded.setdefault(key, {})[engines[i].name] = round(error, 6)
 
