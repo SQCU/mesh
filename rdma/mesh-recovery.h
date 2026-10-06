@@ -11,7 +11,8 @@
    socket's keepalive, the farewell) and its protocol (the landed counts' exchange, the barrier), and reaches the
    transport only through struct mesh_recovery_transport: a link's threads halted and its landed receives taken, its
    sockets and queue pairs released, a pairing again on new queue pairs, whether the call abandoned the link, and its
-   threads restarted.  It includes mesh-verbs.h for the pairing layer's exchange. */
+   threads restarted; and tells the first pairing when a refusal may be tried again.  It includes mesh-verbs.h for the
+   pairing layer's exchange. */
 #ifndef MESH_RECOVERY_H
 #define MESH_RECOVERY_H
 #include "mesh-verbs.h"
@@ -26,6 +27,20 @@ static uint64_t mesh_recovery_window_ns(void){
   const double seconds=given?atof(given):10.0;
   return seconds>0?(uint64_t)(seconds*1e9):0;
 }
+
+/* design/recovery.md#pause */
+/* The pause before every pairing again (and between first pairings a down port refuses): the pause a lost session
+   took before pairing again (mesh be9731b), since failed completions, queue-pair teardown and immediate re-pairing
+   preceded the 2026-09-05 kernel panic.  MESH_RECOVERY_PAUSE_MS, default 3000. */
+static int mesh_recovery_pause_ms(void){
+  const char *given=getenv("MESH_RECOVERY_PAUSE_MS");
+  return given?atoi(given):3000;
+}
+
+/* design/recovery.md#first */
+/* Whether a first pairing that failed may try again within its pairing window: its port was not active (ENETDOWN,
+   device_up, before any queue pair was made), as a link down at a call's start is (Q4). */
+static int mesh_recovery_first_again(int error){ return error==ENETDOWN; }
 
 /* design/recovery.md#detection */
 /* The control socket's keepalive: a side whose own link stays up (its peer's interface went down, its peer's host
@@ -120,8 +135,10 @@ static int mesh_recovery_resume(struct mesh_recovery *recovery,const struct mesh
   if(error)return error;
   for(;;){
     if(transport->abandoned(transport->link))return ECANCELED;
+    if(clock_gettime_nsec_np(CLOCK_MONOTONIC)+(uint64_t)mesh_recovery_pause_ms()*1000000ull>=deadline)return ETIMEDOUT;
+    poll(NULL,0,mesh_recovery_pause_ms());
+    if(transport->abandoned(transport->link))return ECANCELED;
     const uint64_t now=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-    if(now>=deadline)return ETIMEDOUT;
     int f=transport->pair(transport->link,deadline-now);
     if(f>=0){
       error=mesh_recovery_keepalive(f);
@@ -130,7 +147,6 @@ static int mesh_recovery_resume(struct mesh_recovery *recovery,const struct mesh
     }
     error=transport->release(transport->link,control);
     if(error)return error;
-    poll(NULL,0,20);
   }
   error=transport->watch(transport->link,*control);
   if(error)return error;

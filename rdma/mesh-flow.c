@@ -665,7 +665,19 @@ static void *link_run(void *argument){
   }
   if(!error && transfers){
     atomic_store_explicit(&port->phase,MESH_PAIRING,memory_order_release);
-    control=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
+    /* design/recovery.md#first: a port not yet active (a link down at the call's start) is tried again, a pause
+       apart, within the pairing window */
+    const uint64_t window=clock_gettime_nsec_np(CLOCK_MONOTONIC)+(link->provider.window?link->provider.window:pair_window_ns());
+    for(;;){
+      link->provider.window=window-clock_gettime_nsec_np(CLOCK_MONOTONIC);
+      control=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
+      if(control>=0 || !mesh_recovery_first_again(errno) || stop ||
+         atomic_load_explicit(&m->client,memory_order_acquire)!=link->client ||
+         clock_gettime_nsec_np(CLOCK_MONOTONIC)+(uint64_t)mesh_recovery_pause_ms()*1000000ull>=window)break;
+      fprintf(stderr,"link %u: port not active at pairing; again in %d ms\n",link->index,mesh_recovery_pause_ms());
+      poll(NULL,0,mesh_recovery_pause_ms());
+    }
+    link->provider.window=0;
     /* design/recovery.md#detection */
     if(control>=0 && (error=mesh_recovery_keepalive(control))){close(control);control=-1;errno=error;}
     if(control<0)link_error(link,errno?errno:EIO,1);
