@@ -710,7 +710,7 @@ static void *link_run(void *argument){
     if(atomic_load_explicit(&link->lost,memory_order_acquire) && !stop &&
        atomic_load_explicit(&m->client,memory_order_acquire)==link->client){
       if(!link_resume(link,&control))continue;
-      link_error(link,atomic_load(&link->lost),link->lost_domain);
+      link_error(link,atomic_exchange(&link->lost,0),link->lost_domain);
     }
     if(!atomic_load_explicit(&link->progressing,memory_order_acquire))link_close(link,&control);
     if(stop || atomic_load_explicit(&m->client,memory_order_acquire)!=link->client ||
