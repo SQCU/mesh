@@ -457,6 +457,8 @@ class Balancer:
     @classmethod
     def of(cls, state):
         b = cls({}, state.get('window', 3))
-        b.decisions = {name: {**d, 'groups': d.get('groups') or [[i] for i in range(len(d['parts']))]} for name, d in state['decisions'].items()}
-        b.points = {(d, s, int(i)): [tuple(p) for p in own] for d, s, i, own in state['points']}
+        b.decisions = {name: {'grain': 1, 'low': [0] * len(d['parts']), 'high': [sum(d['parts'])] * len(d['parts']), 'before': None,
+                              'stands': False, **d, 'groups': d.get('groups') or [[i] for i in range(len(d['parts']))]}
+                       for name, d in state['decisions'].items()}
+        b.points = {(d, s, int(i)): [tuple(p) for p in own] for d, s, i, own in state.get('points', [])}
         return b
