@@ -23,7 +23,7 @@ static inline uint32_t mesh_transfer_active(const struct mesh_transfer *transfer
   uint32_t end=transfer->end<invocations?transfer->end:invocations;
   return transfer->stride?(end>transfer->begin?end-transfer->begin:0):(transfer->begin<invocations?1:0);
 }
-enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
+enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED, MESH_SUSPENDED };
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_FREE, MESH_PLANES };
 /* design/algorithm-sources.md#programtensor */
