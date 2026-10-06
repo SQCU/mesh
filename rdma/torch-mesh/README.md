@@ -138,39 +138,47 @@ On the pair (`tools/torch_parallel/tp.py REBALANCE=4`, 16 heads from 8/8), the p
 
 ## Uneven engines within a node
 
-A node's engines are uneven too, and which is fastest depends on the operation's shape: on an M4 Pro the GPU (MPS,
-about 6 TFLOP/s at fp16 and fp32 alike), the CPU's matrix units (fp32 products through Accelerate, about 3 TFLOP/s)
-and the Neural Engine (Core ML's static convolutions, about the GPU's rate on a 1024-row projection) are all worth
-using; on an M5 the GPU alone is. `torch_mesh/engines.py` resolves an operation's backend as the mesh resolves a
-dimension's parts: a column-separable `Linear`'s outputs shared among the node's configured engines, each holding its
-shard of the weights resident, the shares running at once on unified memory (inputs and outputs read and written in
-place in torch's shared MPS memory), and `allocate.Balancer` moving the shares on the calls' own times, one decision an
-(operation, row count): a prefill chunk and a decode step resolve apart.
+A node's engines are uneven too, which is fastest depends on the operation's shape, and engines running at once slow
+each other. `torch_mesh/engines.py` resolves an operation's backend as one joint decision: its units shared among the
+node's configured engines (`mps`: torch's GPU queue; `cpu`: fp32 products through Accelerate, the CPU's matrix units;
+`ane`: the Neural Engine, Core ML graphs of 1x1 convolutions with constant weights through `rdma/mesh-coreml.m`, which
+predicts on torch's shared MPS memory with no CPU copy), each holding its shard of the weights resident, the shares
+running at once on unified memory, and `allocate.Coupled` choosing the allocation: each engine's time a fitted
+function of every engine's share (its own work, slowed multiplicatively by each co-runner's), the call's the slowest
+engine's plus its set's measured overhead, minimised over the whole lattice of allocations (no per-engine moves to
+conflict), a design about the start until the model is determined, a measured allocation outranking the model.
 
 ```python
 from torch_mesh import engines
-pool = engines.Engines.configured()           # MESH_ENGINES="mps,cpu,ane"; None where the configuration names none
-lin = engines.Linear(weight, engines=pool, name="ffn.up")   # without engines: torch's own linear
-y = lin(x)
-engines.rebalance(pool)                        # every few calls
+pool = engines.Engines.configured()                       # MESH_ENGINES="mps,cpu,ane"; None where none is named
+ffn = engines.FFN(gate, up, down, engines=pool, name="ffn", tolerance=1e-2)   # without engines: torch's own
+y = ffn(x)
+engines.rebalance(pool)                                    # every few steps
 ```
 
+- Operations: `Linear` shares its output features (they concatenate), `FFN` its intermediate neurons (each engine a
+  partial of the whole output; they sum: Megatron's split), the Neural Engine's FFN share one fused graph. A decision
+  is an (operation name, row count): a stack's layers of one name share it and pool their evidence, measured where
+  the program runs them, between its other operations.
+- Engines never time-share a physical unit: each states what it occupies (the GPU, the CPU's cores, the Neural
+  Engine, and whatever units Core ML's compute plan places a Neural Engine share's operations on), and two engines
+  occupying one unit never hold units of a decision together (`Coupled.forbid`). On both nodes Core ML places every
+  computational operation of the shares on the Neural Engine.
+- An operation's `tolerance` is checked on each allocation's first call (every non-GPU share against the same share on
+  the GPU); an engine that misses it holds none of the decision. The Neural Engine's outputs carry an absolute error
+  floor (about 3e-4 RMS for a 3840-wide contraction): accurate on normalized activations (an FFN 1.5e-3), not on small
+  ones.
 - Nothing is implicit: an operation without an `Engines` operand is torch's own; an engine the configuration names and
-  the node lacks is an error. An engine's limits are data: its dtypes, whether its weights must be constants (the
-  Neural Engine compiles its share: `Linear(constant=True)`), the row counts it takes (the Neural Engine's whole tiles
-  of 128); an engine that cannot take a call's rows or dtype holds none of that decision. A share of nothing leaves an
-  engine out, so the resolution can be one engine.
-- A call that prepares a share (copies a shard, compiles and loads a Neural Engine model) or first runs it at its row
-  count is no evidence.
-- On the pair (metal-microbench `tools/torch_parallel/engines.py`, 1024 x 3840 x 3456 fp16, within 2.6e-4 of
-  float64): the M5 resolves to the GPU alone within two steps; the M4 Pro holds GPU, CPU and Neural Engine shares
-  ([1920, 768, 768] of 3456 outputs) at 3.20-3.35 ms against 4.88 for the GPU alone (1.46-1.53x), each engine alone
-  4.9 (GPU), 8.7 (CPU) and 4.8 ms (Neural Engine).
-- Open: concurrent engines slow each other (power and the performance cores are shared): the GPU's share at fixed
-  parts took 2.6 to 4.6 ms with the others running, and that spread widens the ratio test enough that a worse move can
-  stand; the Balancer's models treat each engine's time as its own units' alone, where here it is not. The Neural
-  Engine's coremltools binding copies its input and output; operations beyond `Linear` (a fused FFN graph, which the
-  Neural Engine runs far faster than three projections) are not yet engines' operations.
+  the node lacks is an error; an engine's limits (dtypes, constant weights, row tiles) are data. A share's preparation
+  and first run at a row count are no evidence; once an allocation stands, one call in 16 is measured.
+- On the pair (metal-microbench `tools/torch_parallel/engines.py`: four layers of a GPU projection, an RMS norm and the
+  shared operation, 1024 rows, hidden 3840, 3456 neurons; steady steps compared in alternating blocks): the M5 resolves
+  to the GPU alone (its steps within 1-4 % of all-GPU); the M4 Pro's FFN stack stands at GPU and Neural Engine
+  [1024, 0, 2432] neurons, a step 59.2 ms against 81.5 all-GPU (1.38x; the FFN 5.3 ms against about 14.7), its linear
+  stack at [2048, 0, 1792], 41.0 against 44.2 ms.
+- What took the most finding: through coremltools each Neural Engine prediction copied its input and output on the
+  CPU, and beside a busy GPU the CPU's performance cores clocked down to 1.3-2.8 GHz (powermetrics), so a 3 ms
+  prediction became 9 after a few seconds; no allocation could repair it. The native binding holds 1.44 ms steadily.
 
 ## Performance
 
