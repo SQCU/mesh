@@ -165,8 +165,17 @@ class Ane(Engine):
             model = ct.convert(program, convert_to='mlprogram', compute_units=ct.ComputeUnit.CPU_AND_NE,
                                compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS15)
             spec = model.get_spec().description
+            import numpy as np
+            model.predict({spec.input[0].name: np.zeros((1, k, 1, rows), np.float16)})
             self.models[key] = (model, spec.input[0].name, spec.output[0].name)
         return self.models[key]
+
+    def ready(self, shard, rows):
+        """Whether the share's model for these rows is compiled and loaded (else this call prepares it)."""
+        return (hashlib.sha1(shard.tobytes()).hexdigest(), rows) in self.models
+
+    def load(self, shard, rows):
+        self._model(shard, rows)
 
     def run(self, shard, x, prologue, out):
         began = time.perf_counter()
@@ -196,7 +205,7 @@ class Engines:
         self.names = names
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
         self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1))
-        self.operations, self.evidence, self.balancer = [], {}, None
+        self.operations, self.evidence, self.balancer, self.last = [], {}, None, {}
 
     @classmethod
     def configured(cls, variable='MESH_ENGINES'):
@@ -242,12 +251,19 @@ class Linear:
                                    'high': [n if a else 0 for a in able]}
         return key
 
-    def _shard(self, engine, start, end):
+    def _shard(self, engine, start, end, rows):
+        """The engine's resident shard of outputs [start, end), prepared (and, for an engine that compiles a share,
+        compiled and loaded for these rows) where it is not; (shard, whether this call prepared it)."""
         key = (engine.name, start, end)
-        if key not in self.shards:
+        prepared = key not in self.shards
+        if prepared:
             self.shards = {k: v for k, v in self.shards.items() if k[0] != engine.name}
             self.shards[key] = engine.prepare(self.weight, start, end)
-        return self.shards[key]
+        shard = self.shards[key]
+        if hasattr(engine, 'ready') and not engine.ready(shard, rows):
+            engine.load(shard, rows)
+            prepared = True
+        return shard, prepared
 
     def __call__(self, x):
         if self.engines is None:
@@ -270,22 +286,25 @@ class Linear:
                                dtype=torch.float32 if engines[i].name == 'cpu' else x2.dtype) for i in held}
         ready = torch.mps.Event(enable_timing=False)
         ready.record()
+        shards = {i: self._shard(engines[i], bounds[i], bounds[i + 1], rows) for i in held}
+        prepared = any(p for _, p in shards.values())
         marks = {}
         for i in (i for i in held if engines[i].name == 'mps'):
             begin, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
             begin.record()
-            engines[i].run(self._shard(engines[i], bounds[i], bounds[i + 1]), x2, prologue, outs[i])
+            engines[i].run(shards[i][0], x2, prologue, outs[i])
             end.record()
             marks[i] = (begin, end)
         ready.synchronize()
-        futures = {i: self.engines.workers.submit(engines[i].run, self._shard(engines[i], bounds[i], bounds[i + 1]),
-                                                   x2, prologue, outs[i]) for i in held if engines[i].name != 'mps'}
+        futures = {i: self.engines.workers.submit(engines[i].run, shards[i][0], x2, prologue, outs[i])
+                   for i in held if engines[i].name != 'mps'}
         seconds = {i: f.result() for i, f in futures.items()}
         pieces = [outs[i].T if engines[i].name == 'ane' else outs[i] for i in held]
         y = torch.cat([p.to(x2.dtype) for p in pieces], dim=1) if len(pieces) > 1 else pieces[0].to(x2.dtype)
         if self.bias is not None:
             y = y + self.bias
-        self.engines.evidence.setdefault(key, []).append((marks, seconds, len(engines)))
+        if not prepared:
+            self.engines.evidence.setdefault(key, []).append((marks, seconds, len(engines)))
         return y.reshape(*lead, -1)
 
 
@@ -297,7 +316,7 @@ def rebalance(engines):
     decisions = {k: d for op in engines.operations for k, d in op.decisions.items()}
     if engines.balancer is None or set(engines.balancer.decisions) != set(decisions):
         engines.balancer = allocate.Balancer({k: dict(d) for k, d in decisions.items()})
-    stretches = {}
+    stretches, engines.last = {}, {}
     for key, calls in engines.evidence.items():
         width = calls[0][2]
         times = [[] for _ in range(width)]
@@ -307,6 +326,7 @@ def rebalance(engines):
             for i, s in seconds.items():
                 times[i].append(s)
         stretches[key] = {'scales': {key: [1.0] * width}, 'times': [t or None for t in times]}
+        engines.last[key] = [round(sorted(t)[len(t) // 2] * 1e3, 3) if t else None for t in times]
     engines.evidence = {}
     if stretches:
         engines.balancer.observe(stretches)
@@ -320,4 +340,5 @@ def rebalance(engines):
 
 def balancing(engines):
     """Each decision's parts and whether they stand."""
-    return {k: {'parts': list(v), 'stands': engines.balancer.stands(k)} for k, v in (engines.balancer.parts if engines.balancer else {}).items()}
+    return {k: {'parts': list(v), 'stands': engines.balancer.stands(k), 'ms': getattr(engines, 'last', {}).get(k)}
+            for k, v in (engines.balancer.parts if engines.balancer else {}).items()}
