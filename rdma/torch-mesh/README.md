@@ -136,6 +136,42 @@ elif written:
 On the pair (`tools/torch_parallel/tp.py REBALANCE=4`, 16 heads from 8/8), the parts moved to 1/15, 3/13 and then
 4/12, and stood. Steps went from 365 to 243-245 ms, and the output and gradients still matched one device.
 
+## Uneven engines within a node
+
+A node's engines are uneven too, and which is fastest depends on the operation's shape: on an M4 Pro the GPU (MPS,
+about 6 TFLOP/s at fp16 and fp32 alike), the CPU's matrix units (fp32 products through Accelerate, about 3 TFLOP/s)
+and the Neural Engine (Core ML's static convolutions, about the GPU's rate on a 1024-row projection) are all worth
+using; on an M5 the GPU alone is. `torch_mesh/engines.py` resolves an operation's backend as the mesh resolves a
+dimension's parts: a column-separable `Linear`'s outputs shared among the node's configured engines, each holding its
+shard of the weights resident, the shares running at once on unified memory (inputs and outputs read and written in
+place in torch's shared MPS memory), and `allocate.Balancer` moving the shares on the calls' own times, one decision an
+(operation, row count): a prefill chunk and a decode step resolve apart.
+
+```python
+from torch_mesh import engines
+pool = engines.Engines.configured()           # MESH_ENGINES="mps,cpu,ane"; None where the configuration names none
+lin = engines.Linear(weight, engines=pool, name="ffn.up")   # without engines: torch's own linear
+y = lin(x)
+engines.rebalance(pool)                        # every few calls
+```
+
+- Nothing is implicit: an operation without an `Engines` operand is torch's own; an engine the configuration names and
+  the node lacks is an error. An engine's limits are data: its dtypes, whether its weights must be constants (the
+  Neural Engine compiles its share: `Linear(constant=True)`), the row counts it takes (the Neural Engine's whole tiles
+  of 128); an engine that cannot take a call's rows or dtype holds none of that decision. A share of nothing leaves an
+  engine out, so the resolution can be one engine.
+- A call that prepares a share (copies a shard, compiles and loads a Neural Engine model) or first runs it at its row
+  count is no evidence.
+- On the pair (metal-microbench `tools/torch_parallel/engines.py`, 1024 x 3840 x 3456 fp16, within 2.6e-4 of
+  float64): the M5 resolves to the GPU alone within two steps; the M4 Pro holds GPU, CPU and Neural Engine shares
+  ([1920, 768, 768] of 3456 outputs) at 3.20-3.35 ms against 4.88 for the GPU alone (1.46-1.53x), each engine alone
+  4.9 (GPU), 8.7 (CPU) and 4.8 ms (Neural Engine).
+- Open: concurrent engines slow each other (power and the performance cores are shared): the GPU's share at fixed
+  parts took 2.6 to 4.6 ms with the others running, and that spread widens the ratio test enough that a worse move can
+  stand; the Balancer's models treat each engine's time as its own units' alone, where here it is not. The Neural
+  Engine's coremltools binding copies its input and output; operations beyond `Linear` (a fused FFN graph, which the
+  Neural Engine runs far faster than three projections) are not yet engines' operations.
+
 ## Performance
 
 - The MPS path is the measured path. An eager collective costs about 17 us on the pair; collectives compiled into a
