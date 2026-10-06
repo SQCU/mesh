@@ -124,11 +124,14 @@ or identically on every rank:
 The rates and the link costs go into the link map once, from recorded runs the map cites
 (`calibrate.py node` and `calibrate.py links`). They give the first parts only.
 
-**Parts from the run's evidence (R3, R10, R11).** `partition.rebalance(mesh, name, every)`, called once a step on
-every rank, watches the dimension's group (`torch_mesh/evidence.py`: each rank's own work between its collectives,
-timed on torch's MPS stream or the host clock, never a collective's wait, R2). Every `every` steps it gathers the
-ranks' work to all of them and runs one step of `allocate.Balancer` (DFPA on the measured points), identically on
-every rank (R4). Its parts stand once the evidence promises no gain past its resolution, so they change with the
+**Parts from the run's evidence (R3, R10, R11).** `allocate.Balancer` balances any program of collectives: its
+decisions are partitioned dimensions, its stretches each rank's own work between two consecutive collectives
+(never a collective's wait, R2), and each decision's parts minimise its stretches' part of the call's time, the sum
+over stretches of the slowest rank's (DFPA on the measured points). `partition.rebalance(mesh, name, every)`, called
+once a step on every rank, watches the dimension's group (`torch_mesh/evidence.py`: a stretch a collective, timed on
+torch's MPS stream or the host clock); every `every` steps it gathers the ranks' stretches to all of them and runs
+one Balancer step, identically on every rank (R4). A prepared call's stretches come from its bridges' ledgers
+(`ledger.py`). Its parts stand once the evidence promises no gain past its resolution, so they change with the
 configuration and not with jitter (R11). A rank's work follows its capacity (R14: stock kernels compute the
 padding), so parts that move past the capacities are attached again at them; that is the one cost R11 weighs.
 metal-microbench's engine calls run the same Balancer on their bridges' ledgers (`tools/mesh/rates.py`).

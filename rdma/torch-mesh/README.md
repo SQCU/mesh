@@ -124,17 +124,17 @@ elif written:
   wait has run: on MPS by timing events on torch's stream (in `_stream.mm`, so DTensor's functional collectives are
   included), on CPU by the host clock (`torch_mesh/evidence.py`). A rank's work in a step is the time between its
   collectives, never inside them, so a slow peer never reads as a slow rank.
-- Every `every` steps the ranks' work is gathered to all of them, and each runs the same step of
-  `rdma/allocate.py` `Balancer`, so all get the same parts. That step is DFPA: the ranks' measured points, the
+- Every `every` steps the ranks' stretches (one a collective) are gathered to all of them, and each runs the same
+  step of `rdma/allocate.py` `Balancer`, so all get the same parts. It minimises the steps' time, the sum over the
+  stretches of the slowest rank's, not the ranks' totals, which can agree while every collective still waits. That step is DFPA: the ranks' measured points, the
   grains given to whoever finishes earliest with them, and a stop once the measurements promise no gain past their
   own resolution. The parts then stand, so jitter does not reshard.
 - A rank computes its whole buffer, so its work follows its capacity. Attach with the capacities equal to the
   parts, and attach again when the parts move; that costs one step.
 - `partition.balancing(mesh, "tp")` returns what the last window saw.
 
-On the pair (`tools/torch_parallel/tp.py REBALANCE=4`, 16 heads from 8/8), the parts moved to 3/13 and then 4/12,
-and stood after two windows. Steps went from 365 to about 248 ms, and the output and gradients still matched one
-device.
+On the pair (`tools/torch_parallel/tp.py REBALANCE=4`, 16 heads from 8/8), the parts moved to 1/15, 3/13 and then
+4/12, and stood. Steps went from 365 to 243-245 ms, and the output and gradients still matched one device.
 
 ## Performance
 
