@@ -45,8 +45,11 @@ in its time).
   engines.rebalance(pool)   # the joint solver on the calls since the last: each (operation, rows)'s allocation"""
 import concurrent.futures
 import ctypes
+import hashlib
 import os
+import subprocess
 import time
+from pathlib import Path
 
 import torch
 
@@ -74,6 +77,32 @@ def host(t):
     nbytes = t.numel() * t.element_size()
     raw = (ctypes.c_uint8 * nbytes).from_address(base + t.storage_offset() * t.element_size())
     return torch.frombuffer(raw, dtype=t.dtype, count=t.numel()).view(t.shape) if nbytes else torch.empty(t.shape, dtype=t.dtype)
+
+
+_CORE_ML = None
+
+
+def _coreml():
+    """The native Core ML binding (rdma/mesh-coreml.m: predictions on caller memory, no copies on the CPU), built where
+    missing; None where it cannot load."""
+    global _CORE_ML
+    if _CORE_ML is None:
+        rdma = Path(__file__).resolve().parents[2]
+        path = rdma / 'libmesh-coreml.dylib'
+        try:
+            if not path.exists():
+                subprocess.run(['make', '-s', '-C', str(rdma), 'libmesh-coreml.dylib'], check=True)
+            lib = ctypes.CDLL(str(path))
+            lib.mesh_coreml_load.restype = ctypes.c_long
+            lib.mesh_coreml_load.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+            lib.mesh_coreml_predict.restype = ctypes.c_int
+            lib.mesh_coreml_predict.argtypes = [ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
+                                                ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int]
+            lib.mesh_coreml_error.restype = ctypes.c_char_p
+            _CORE_ML = lib
+        except (OSError, subprocess.CalledProcessError):
+            _CORE_ML = False
+    return _CORE_ML or None
 
 
 def _gelu(x):
@@ -174,7 +203,10 @@ class Ane(Engine):
     one; an FFN's gate and up, the activation, their product and down, fused), rows in tiles of `tile` (default 128,
     metal-microbench docs/soc_compute_backends.md: the tiled graph's measured geometry), its input and output
     row-major (the transposes to and from channels-first inside the graph: on an M4 Pro 4.5 ms against 5.9 with them
-    on the GPU), compiled and loaded once a share and row count; fp16 operands and activation.  Its outputs carry an
+    on the GPU), compiled and loaded once a share and row count, its package kept in ~/.cache/mesh-engines; its
+    predictions through rdma/mesh-coreml.m on the operands' own memory (no CPU copy on its critical path: through
+    coremltools' copies a 3 ms prediction took 9 once the CPU clocked down beside a busy GPU), coremltools' own where
+    that binding cannot load; fp16 operands and activation.  Its outputs carry an
     absolute error floor (on an M4 Pro and an M5 Max about 3e-4 RMS for a 3840-wide contraction, whatever the input's
     scale; above unit-scale activations its error is fp16's relative 2e-4): accurate on normalized activations,
     inaccurate on small ones (a sixteenth-scale input's linear 5e-3 relative), which an operation's `tolerance`
@@ -233,14 +265,41 @@ class Ane(Engine):
         model = ct.convert(program, convert_to='mlprogram', compute_units=ct.ComputeUnit.CPU_AND_NE,
                            compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS15)
         spec = model.get_spec().description
-        model.predict({spec.input[0].name: np.zeros((rows, width), np.float16)})
-        shard.models[rows] = (model, spec.input[0].name, spec.output[0].name)
+        inputs, outputs = spec.input[0].name, spec.output[0].name
+        n = shard.arrays[0].shape[0] if shard.kind == 'linear' else shard.arrays[2].shape[0]
+        native = _coreml()
+        handle = None
+        if native:
+            digest = hashlib.sha1(b''.join(a.tobytes() for a in shard.arrays) + f'{shard.kind} {rows} {tile}'.encode()).hexdigest()
+            package = Path(os.path.expanduser('~/.cache/mesh-engines')) / f'{digest}.mlpackage'
+            if not package.exists():
+                package.parent.mkdir(parents=True, exist_ok=True)
+                model.save(str(package))
+            handle = native.mesh_coreml_load(str(package).encode(), inputs.encode(), outputs.encode(), 0)
+            if handle < 0:
+                raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
+        shard.models[rows] = (model, inputs, outputs, handle, n)
+        warm = torch.zeros(rows, width, dtype=torch.float16)
+        self._predict(shard, warm, torch.empty(rows, n, dtype=torch.float16))
+
+    def _predict(self, shard, source, target):
+        """One prediction from `source` into `target` (CPU tensors over the operands' memory): natively on that memory
+        where the binding loads, else through coremltools (a copy each way)."""
+        model, name, output, handle, n = shard.models[source.shape[0]]
+        if handle is None:
+            target.copy_(torch.from_numpy(model.predict({name: source.numpy()})[output]))
+            return
+        shape_in = (ctypes.c_int64 * 2)(*source.shape)
+        shape_out = (ctypes.c_int64 * 2)(*target.shape)
+        native = _coreml()
+        backed = native.mesh_coreml_predict(handle, source.data_ptr(), shape_in, 2, target.data_ptr(), shape_out, 2)
+        if backed < 0:
+            raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
+        self.backed = backed
 
     def _run(self, shard, x, out):
         began = time.perf_counter()
-        model, name, output = shard.models[x.shape[0]]
-        result = model.predict({name: host(x).numpy()})[output]
-        host(out).copy_(torch.from_numpy(result))
+        self._predict(shard, host(x), host(out))
         return time.perf_counter() - began
 
     def run_linear(self, op, shard, x, prologue, out):

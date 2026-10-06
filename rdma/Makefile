@@ -1,4 +1,4 @@
-BINS = mesh-flow mesh-stat libmesh.dylib libnccl-mesh.dylib
+BINS = mesh-flow mesh-stat libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 all: $(BINS)
 native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
@@ -26,6 +26,9 @@ libnccl-mesh.dylib: nccl-mesh.c nccl-mesh-metal.m nccl-mesh-metal.h mesh-metal.m
 	cc -fblocks -O2 -Wall -Wextra -Werror -dynamiclib -Wl,-install_name,@rpath/libnccl-mesh.dylib -Wl,-rpath,@loader_path \
 	  $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c nccl-mesh-metal.m mesh-metal.m -L. -lmesh \
 	  -framework Metal -framework Foundation
+libmesh-coreml.dylib: mesh-coreml.m Makefile
+	cc -fobjc-arc -O2 -Wall -Wextra -Werror -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m \
+	  -framework CoreML -framework Foundation
 libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h Makefile
 	cc -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c -lobjc
 clean:
