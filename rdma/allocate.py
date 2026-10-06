@@ -466,3 +466,173 @@ class Balancer:
                        for name, d in state['decisions'].items()}
         b.points = {(d, s, int(i)): [tuple(p) for p in own] for d, s, i, own in state.get('points', [])}
         return b
+
+
+def _solve(matrix, vector):
+    """x with matrix x = vector (a small symmetric positive definite system), by Gaussian elimination with partial
+    pivoting; None where it is singular."""
+    n = len(vector)
+    m = [list(map(float, row)) + [float(v)] for row, v in zip(matrix, vector)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(m[r][col]))
+        if abs(m[pivot][col]) < 1e-12:
+            return None
+        m[col], m[pivot] = m[pivot], m[col]
+        for r in range(n):
+            if r != col:
+                f = m[r][col] / m[col][col]
+                m[r] = [a - f * b for a, b in zip(m[r], m[col])]
+    return [m[i][n] / m[i][i] for i in range(n)]
+
+
+def _lattice(total, grain, low, high):
+    """Every allocation of `total` units in grains within [low_i, high_i]."""
+    n = len(low)
+
+    def place(i, left):
+        if i == n - 1:
+            if low[i] <= left <= high[i]:
+                yield (left,)
+            return
+        for p in range(low[i], min(high[i], left) + 1, grain):
+            for rest in place(i + 1, left - p):
+                yield (p,) + rest
+    return list(place(0, total))
+
+
+class Coupled:
+    """A decision among members that run at once and slow each other (a node's engines, sharing its power, cores and
+    memory: torch_mesh/engines.py), solved jointly and globally rather than member by member.
+
+    Model.  Member i, holding units (p_i > 0), takes t_i(p) = d_i + a_i p_i + sum_{j != i} c_ij p_i p_j: a fixed cost,
+    its own work, and its work slowed in proportion to each co-runner's (power, cores and memory shared while both
+    run: a multiplicative slowing, which an additive term in p_j alone cannot state and which, the units summing to the
+    total, would be collinear with 1 and p_i); a member holding none takes nothing.  The call takes T(p) = max_{i: p_i > 0} t_i(p) + g(S), S = {i: p_i > 0},
+    g(S) the call's measured time past its slowest member for that set (a prologue, the combine; a set not yet
+    measured at none, optimism under uncertainty [Auer et al. 2002]: a set is tried where it promises better, and kept
+    only where it measures better).  Each member's coefficients are the least-squares fit, with a small ridge on the interference terms
+    toward none [Hoerl & Kennard 1970], to the median times of every allocation it ran, every allocation kept (one run
+    again pools with its earlier calls); a_i is at least a tenth of its smallest measured time a unit.
+
+    The parts.  The model's minimum over the whole lattice (every allocation of the units in grains within the bounds,
+    enumerated: a node's few members give hundreds to thousands of points), so no member's move is judged by the
+    others' stale models and none conflicts with another's.  Until each member's coefficients are determined, the
+    next allocations are a design about the start: each member in turn given a step from the next, then giving it one
+    [a two-level design about a centre point, Box, Hunter & Hunter 2005, ch. 5].  An allocation runs `window` calls
+    before it counts.  The model's minimum, unmeasured, runs next; measured, the parts stand there, unless an
+    allocation measured better by more than the resolution (twice its call time's relative standard error, at least
+    1 %), where they stand instead: a measurement outranks the model's prediction.  A standing allocation whose call
+    time moves past the resolution from the median it stood at is solved again (its performance changed [Clarke,
+    Lastovetsky & Rychkov 2011]).
+
+      c = Coupled(3456, 128, [0, 0, 0], [3456, 3456, 3456], [1152, 1152, 1152])
+      c.observe([[t, ...], [t, ...], [t, ...]], [call, ...])   # each member's seconds, the calls' seconds
+      c.parts -> the next allocation"""
+
+    def __init__(self, total, grain, low, high, parts, window=3, ridge=1e-3):
+        self.total, self.grain, self.window, self.ridge = int(total), int(grain), int(window), float(ridge)
+        self.low, self.high = [int(v) for v in low], [int(v) for v in high]
+        self.parts, self.start = tuple(int(p) for p in parts), tuple(int(p) for p in parts)
+        self.able = [i for i, h in enumerate(self.high) if h > 0]
+        step = max(self.grain, self.grain * round(self.total / self.grain / 8))
+        self.design = [self.start]
+        for k, i in enumerate(self.able if len(self.able) > 1 else []):
+            j = self.able[(k + 1) % len(self.able)]
+            for sign in (1, -1):
+                p = list(self.start)
+                p[i] += sign * step
+                p[j] -= sign * step
+                if all(lo <= v <= hi for v, lo, hi in zip(p, self.low, self.high)) and tuple(p) not in self.design:
+                    self.design.append(tuple(p))
+        self.seen, self.stands, self.stood = {}, False, None
+
+    def observe(self, times, calls):
+        """The calls at the current parts: `times` each member's seconds a call (empty where it holds nothing),
+        `calls` the calls' seconds."""
+        entry = self.seen.setdefault(self.parts, {'members': [[] for _ in self.low], 'calls': []})
+        for i, ts in enumerate(times):
+            entry['members'][i].extend(float(t) for t in ts or [])
+        entry['calls'].extend(float(t) for t in calls or [])
+        self.parts = self._next()
+        return list(self.parts)
+
+    def _median(self, values):
+        values = sorted(values)
+        return values[len(values) // 2] if values else None
+
+    def _error(self, values):
+        if len(values) < 2:
+            return 1.0
+        mean = sum(values) / len(values)
+        sd = math.sqrt(sum((v - mean) ** 2 for v in values) / (len(values) - 1))
+        return sd / math.sqrt(len(values)) / mean if mean else 1.0
+
+    def _measured(self):
+        return {p: e for p, e in self.seen.items() if len(e['calls']) >= self.window}
+
+    def fit(self):
+        """Each able member's coefficients (d, a, [c_ij]) and g(S), or None where a member's are undetermined."""
+        n, scale = len(self.low), float(self.total)
+        models = {}
+        for i in self.able:
+            rows = [(p, self._median(e['members'][i])) for p, e in self._measured().items() if p[i] > 0 and e['members'][i]]
+            others = [j for j in self.able if j != i]
+            if len({p for p, _ in rows}) < 2 + len(others):
+                return None
+            features = [self._features(p, i, others) for p, _ in rows]
+            k = len(features[0])
+            normal = [[sum(f[a] * f[b] for f in features) + (self.ridge if a == b and a >= 2 else 0.0) for b in range(k)] for a in range(k)]
+            target = [sum(f[a] * t for f, (_, t) in zip(features, rows)) for a in range(k)]
+            x = _solve(normal, target)
+            if x is None:
+                return None
+            floor = min(t / (p[i] / scale) for p, t in rows) / 10
+            x[1] = max(x[1], floor)
+            models[i] = (x, others)
+        overhead = {}
+        for p, e in self._measured().items():
+            members = [self._median(e['members'][i]) for i in range(n) if p[i] > 0 and e['members'][i]]
+            if members:
+                overhead.setdefault(frozenset(i for i in range(n) if p[i] > 0), []).append(self._median(e['calls']) - max(members))
+        return models, {s: self._median(v) for s, v in overhead.items()}
+
+    def _features(self, p, i, others):
+        scale = float(self.total)
+        return [1.0, p[i] / scale] + [p[i] * p[j] / scale ** 2 for j in others]
+
+    def predict(self, p, fitted):
+        models, overhead = fitted
+        scale = float(self.total)
+        active = frozenset(i for i in range(len(p)) if p[i] > 0)
+        times = []
+        for i in active:
+            x, others = models[i]
+            times.append(sum(c * f for c, f in zip(x, self._features(p, i, others))))
+        g = overhead.get(active, 0.0)
+        return max(times) + g
+
+    def _next(self):
+        measured = self._measured()
+        if self.parts not in measured:
+            return self.parts
+        if self.stands:
+            e = measured[self.parts]
+            now = self._median(e['calls'][-self.window:])
+            if abs(now - self.stood) <= max(0.01, 2 * self._error(e['calls'])) * self.stood:
+                return self.parts
+            self.stands, e['calls'], e['members'] = False, e['calls'][-self.window:], [m[-self.window:] for m in e['members']]
+        pending = [p for p in self.design if p not in measured]
+        fitted = self.fit()
+        if fitted is None:
+            return pending[0] if pending else self.parts
+        best = min(measured, key=lambda p: self._median(measured[p]['calls']))
+        proposal = min(_lattice(self.total, self.grain, self.low, self.high), key=lambda p: (self.predict(p, fitted), p))
+        if proposal not in measured:
+            return proposal
+        chosen = proposal
+        best_time, proposal_time = self._median(measured[best]['calls']), self._median(measured[proposal]['calls'])
+        resolution = max(0.01, 2 * self._error(measured[proposal]['calls']))
+        if proposal_time - best_time > resolution * best_time:
+            chosen = best
+        self.stands, self.stood = True, self._median(measured[chosen]['calls'])
+        return chosen

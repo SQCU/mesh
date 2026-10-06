@@ -1,23 +1,30 @@
-"""A node's compute engines as members of one tensor operation: its units shared among them by evidence
-(design/heterogeneity.md: raggedness within a node is the raggedness between nodes; metal-microbench
+"""A node's compute engines as members of one tensor operation: its units shared among them, solved jointly on the
+calls' own evidence (design/heterogeneity.md: raggedness within a node is the raggedness between nodes; metal-microbench
 docs/soc_compute_backends.md for the engines' measured envelopes).
 
 An Apple SoC holds several matrix engines with their own rates by shape, dtype and operand form: the GPU (torch's MPS
 queue; on an M4 Pro about 6 TFLOP/s at fp16 and fp32 alike, on an M5 its neural accelerators), the CPU's matrix units
 (SME/AMX, one a cluster, reached through Accelerate by torch's fp32 CPU products: about 3 TFLOP/s on an M4 Pro's two
-performance clusters) and the Neural Engine (Core ML's static graphs; a 1x1 convolution with constant weights, rows in
-tiles, about 6 TFLOP/s with Python's copies on an M4 Pro and faster where bound natively).  No one engine is fastest
-for every operation, and the fastest set changes with the shape, so the operation's final backend is resolved here,
-per operation and row count, from what each engine measures: a column-separable operation's output units (a
-linear's output features) are shared among the configured engines like a mesh dimension among ranks, each engine
-holding its shard of the weights resident, the shares running at once on unified memory, and one
-rdma/allocate.py Balancer moving the shares on the calls' own times (an engine's time is its share's; the
-operation's is the slowest engine's, as a collective's is its slowest rank's).  A share of nothing leaves that engine
-out: the resolution can be one engine.
+performance clusters) and the Neural Engine (Core ML's static graphs of 1x1 convolutions with constant weights, rows
+in tiles).  No one engine is fastest for every operation, the fastest set changes with the shape, and engines running
+at once slow each other (power, performance cores and memory shared), so an operation's final backend is resolved
+here, per operation and row count, as one joint decision: its units shared among the configured engines like a mesh
+dimension among ranks, each engine holding its shard of the weights resident, the shares running at once on unified
+memory, and rdma/allocate.py `Coupled` choosing the allocation that minimises the call's time under a model of every
+engine's time as a function of every engine's share (its own work, slowed by its co-runners'), fitted to every
+allocation measured and minimised over the whole lattice of allocations.  A share of nothing leaves that engine out:
+the resolution can be one engine.
+
+An operation states how its shares combine, the mesh's crossing rule for its split axis (tools/mesh/programs.py
+points): `Linear` (y = x W^T + b) shares its output features, which concatenate; `FFN` (y = down(act(x Wg^T) *
+(x Wu^T)), Megatron's column-then-row split) shares its intermediate neurons, each engine giving a partial of the whole
+output, which sum.  Each engine lowers each kind its own way (the Neural Engine an FFN share as one fused graph).
 
 A call that prepares a share (copies a shard, compiles and loads a Neural Engine model) or first runs it at its row
-count (torch's MPS builds a graph a shape; Core ML's first predictions after a load are slow) is no evidence: a move
-is judged on the shares' running times.
+count (torch's MPS builds a graph a shape; Core ML's first predictions after a load are slow) is no evidence.  A call is
+measured by timing events on torch's stream (its span, and the GPU's share where others run beside it), each about 0.1
+ms of host time, so once a decision's allocation stands one call in `sample` (default 16) is measured, enough to see its
+time move.
 
 Nothing is implicit.  An operation takes its engines as an operand (`Engines`), from the program or from the
 configuration the program names (`Engines.configured()`: MESH_ENGINES, e.g. "mps,cpu,ane:tile=128"); without
@@ -29,18 +36,17 @@ Engine's whole tiles); a row count an engine cannot take gives it no units for t
 The data path is zero-copy where the memory allows: torch's MPS tensors live in shared Metal memory, so the CPU and
 Neural Engine shares read their inputs in place (the GPU's prologue converts the input to fp32 for the CPU's products;
 the Neural Engine's graph reads it row-major as it is) and write their outputs into MPS tensors in place; the GPU
-combines the shares.  The Neural Engine's binding through coremltools copies its input and output once each (counted in its
-time).
+combines the shares.  The Neural Engine's binding through coremltools copies its input and output once each (counted
+in its time).
 
-  lin = engines.Linear(weight, engines=engines.Engines.configured(), name='ffn.up')
-  y = lin(x)                      # x [..., K] on MPS: every configured engine its share of the N outputs
-  engines.rebalance(lin.engines)  # a Balancer step on the calls since the last: each (operation, rows)'s parts"""
+  pool = engines.Engines.configured()
+  ffn = engines.FFN(gate, up, down, engines=pool, name='layer3.ffn')
+  y = ffn(x)                # x [..., H] on MPS: every configured engine its share of the neurons
+  engines.rebalance(pool)   # the joint solver on the calls since the last: each (operation, rows)'s allocation"""
 import concurrent.futures
 import ctypes
-import hashlib
 import os
 import time
-from pathlib import Path
 
 import torch
 
@@ -70,10 +76,17 @@ def host(t):
     return torch.frombuffer(raw, dtype=t.dtype, count=t.numel()).view(t.shape) if nbytes else torch.empty(t.shape, dtype=t.dtype)
 
 
+def _gelu(x):
+    return torch.nn.functional.gelu(x, approximate='tanh')
+
+
 class Engine:
     """One engine of the node.  `limits`: dtypes (the operand dtypes it takes), constants (its weights must be
-    constants), tile (the row counts it takes are whole multiples of it)."""
+    constants), tile (the row counts it takes are whole multiples of it).  It lowers each operation kind by its
+    prepare_<kind> (its resident shard of units [start, end)) and run_<kind> (its share into `out`, its seconds or
+    None where the GPU's events time it)."""
     name, limits = None, {'dtypes': (torch.float16, torch.bfloat16, torch.float32), 'constants': False, 'tile': 1}
+    host_side = True
 
     def __init__(self, **options):
         self.options = options
@@ -83,61 +96,85 @@ class Engine:
         """Why the node lacks this engine, or None."""
         return None
 
-    def takes(self, rows, dtype):
-        return dtype in self.limits['dtypes'] and rows % self.limits['tile'] == 0 and rows >= self.limits['tile']
+    def takes(self, op, rows, dtype):
+        return (hasattr(self, 'run_' + op.kind) and dtype in self.limits['dtypes'] and rows % self.limits['tile'] == 0
+                and rows >= self.limits['tile'])
 
-    def prepare(self, weight, start, end):
-        """The engine's resident shard of `weight`'s output rows [start, end)."""
-        raise NotImplementedError
+    def out_dtype(self, dtype):
+        return dtype
 
-    def run(self, shard, x, prologue, out):
-        """Its share: `out` [rows, end - start] (an MPS tensor) from `x` [rows, K] and the prologue's operands; its
-        seconds, or None where the GPU's events time it."""
-        raise NotImplementedError
+    def prepare(self, op, start, end):
+        return getattr(self, 'prepare_' + op.kind)(op, start, end)
+
+    def run(self, op, shard, x, prologue, out):
+        return getattr(self, 'run_' + op.kind)(op, shard, x, prologue, out)
 
 
 class Mps(Engine):
-    """torch's MPS queue: the share enqueued as the GPU's own product, timed by events on its stream."""
-    name = 'mps'
+    """torch's MPS queue: the share enqueued as the GPU's own products, timed by events on its stream."""
+    name, host_side = 'mps', False
 
     @classmethod
     def missing(cls):
         return None if torch.backends.mps.is_available() else 'no MPS device'
 
-    def prepare(self, weight, start, end):
-        return weight[start:end]
+    def prepare_linear(self, op, start, end):
+        return op.weight[start:end]
 
-    def run(self, shard, x, prologue, out):
+    def run_linear(self, op, shard, x, prologue, out):
         torch.mm(x, shard.T, out=out)
-        return None
+
+    def prepare_ffn(self, op, start, end):
+        return op.gate[start:end], op.up[start:end], op.down[:, start:end].contiguous()
+
+    def run_ffn(self, op, shard, x, prologue, out):
+        gate, up, down = shard
+        h = (_gelu(torch.mm(x, gate.T).float()) * torch.mm(x, up.T).float()).to(x.dtype)
+        torch.mm(h, down.T, out=out)
 
 
 class Cpu(Engine):
     """The CPU's matrix units through torch's fp32 CPU products (Accelerate): the input read in place as fp32 (the
-    GPU's prologue converts it), the fp32 shard resident in host memory, the output written in place."""
-    name, limits = 'cpu', {'dtypes': (torch.float16, torch.bfloat16, torch.float32), 'constants': False, 'tile': 1}
+    GPU's prologue converts it), the fp32 shard resident in host memory, the output written in place in fp32."""
+    name = 'cpu'
 
-    def prepare(self, weight, start, end):
-        return weight[start:end].detach().float().cpu().contiguous()
+    def out_dtype(self, dtype):
+        return torch.float32
 
-    def run(self, shard, x, prologue, out):
+    def prepare_linear(self, op, start, end):
+        return op.weight[start:end].detach().float().cpu().contiguous()
+
+    def run_linear(self, op, shard, x, prologue, out):
         began = time.perf_counter()
         torch.mm(host(prologue['fp32']), shard.T, out=host(out))
         return time.perf_counter() - began
 
+    def prepare_ffn(self, op, start, end):
+        cpu = lambda t: t.detach().float().cpu().contiguous()
+        return cpu(op.gate[start:end]), cpu(op.up[start:end]), cpu(op.down[:, start:end])
+
+    def run_ffn(self, op, shard, x, prologue, out):
+        began = time.perf_counter()
+        gate, up, down = shard
+        x32 = host(prologue['fp32'])
+        h = _gelu(torch.mm(x32, gate.T)).mul_(torch.mm(x32, up.T))
+        torch.mm(h, down.T, out=host(out))
+        return time.perf_counter() - began
+
 
 class _Compiled:
-    """A Neural Engine share: its fp16 weights and their compiled models by row count."""
+    """A Neural Engine share: its operation kind, its fp16 weights and their compiled models by row count."""
 
-    def __init__(self, array):
-        self.array, self.models = array, {}
+    def __init__(self, kind, arrays):
+        self.kind, self.arrays, self.models = kind, arrays, {}
 
 
 class Ane(Engine):
-    """The Neural Engine through Core ML: the share a 1x1 convolution with its weights constant, rows in tiles of
-    `tile` (default 128, metal-microbench docs/soc_compute_backends.md: the tiled graph's measured geometry), its
-    input and output row-major (the transposes to and from channels-first inside the graph: on an M4 Pro 4.5 ms
-    against 5.9 with them on the GPU), compiled and loaded once a share and row count; fp16 operands."""
+    """The Neural Engine through Core ML: a share a graph of 1x1 convolutions with its weights constant (a linear's
+    one; an FFN's gate and up, the activation, their product and down, fused), rows in tiles of `tile` (default 128,
+    metal-microbench docs/soc_compute_backends.md: the tiled graph's measured geometry), its input and output
+    row-major (the transposes to and from channels-first inside the graph: on an M4 Pro 4.5 ms against 5.9 with them
+    on the GPU), compiled and loaded once a share and row count; fp16 operands and activation."""
     name, limits = 'ane', {'dtypes': (torch.float16,), 'constants': True, 'tile': 128}
 
     def __init__(self, **options):
@@ -152,8 +189,12 @@ class Ane(Engine):
             return 'coremltools is not installed (rdma/requirements.txt)'
         return None
 
-    def prepare(self, weight, start, end):
-        return _Compiled(weight[start:end].detach().to('cpu', torch.float16).numpy())
+    def prepare_linear(self, op, start, end):
+        return _Compiled('linear', (op.weight[start:end].detach().to('cpu', torch.float16).numpy(),))
+
+    def prepare_ffn(self, op, start, end):
+        numpy = lambda t: t.detach().to('cpu', torch.float16).contiguous().numpy()
+        return _Compiled('ffn', (numpy(op.gate[start:end]), numpy(op.up[start:end]), numpy(op.down[:, start:end])))
 
     def ready(self, shard, rows):
         return rows in shard.models
@@ -163,29 +204,44 @@ class Ane(Engine):
         import numpy as np
         from coremltools.converters.mil import Builder as mb
         from coremltools.converters.mil.mil import types
-        n, k = shard.array.shape
         tile = self.limits['tile']
+        width = shard.arrays[0].shape[1]
+        conv = lambda array: mb.const(val=array.reshape(array.shape[0], array.shape[1], 1, 1))
 
-        @mb.program(input_specs=[mb.TensorSpec(shape=(rows, k), dtype=types.fp16)], opset_version=ct.target.macOS15)
+        @mb.program(input_specs=[mb.TensorSpec(shape=(rows, width), dtype=types.fp16)], opset_version=ct.target.macOS15)
         def program(x):
-            w = mb.const(val=shard.array.reshape(n, k, 1, 1))
-            channels = mb.reshape(x=mb.transpose(x=x, perm=[1, 0]), shape=[1, k, 1, rows])
+            weights = [conv(a) for a in shard.arrays[:2]] + ([conv(np.ascontiguousarray(shard.arrays[2]))] if shard.kind == 'ffn' else [])
+            channels = mb.reshape(x=mb.transpose(x=x, perm=[1, 0]), shape=[1, width, 1, rows])
             pieces = mb.split(x=channels, num_splits=rows // tile, axis=3) if rows > tile else [channels]
-            outputs = [mb.conv(x=p, weight=w) for p in pieces]
+            outputs = []
+            for p in pieces:
+                if shard.kind == 'linear':
+                    outputs.append(mb.conv(x=p, weight=weights[0]))
+                else:
+                    h = mb.mul(x=mb.gelu(x=mb.conv(x=p, weight=weights[0]), mode='TANH_APPROXIMATION'),
+                               y=mb.conv(x=p, weight=weights[1]))
+                    outputs.append(mb.conv(x=h, weight=weights[2]))
             y = mb.concat(values=outputs, axis=3) if len(outputs) > 1 else outputs[0]
+            n = shard.arrays[0].shape[0] if shard.kind == 'linear' else shard.arrays[2].shape[0]
             return mb.transpose(x=mb.reshape(x=y, shape=[n, rows]), perm=[1, 0])
         model = ct.convert(program, convert_to='mlprogram', compute_units=ct.ComputeUnit.CPU_AND_NE,
                            compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS15)
         spec = model.get_spec().description
-        model.predict({spec.input[0].name: np.zeros((rows, k), np.float16)})
+        model.predict({spec.input[0].name: np.zeros((rows, width), np.float16)})
         shard.models[rows] = (model, spec.input[0].name, spec.output[0].name)
 
-    def run(self, shard, x, prologue, out):
+    def _run(self, shard, x, out):
         began = time.perf_counter()
         model, name, output = shard.models[x.shape[0]]
         result = model.predict({name: host(x).numpy()})[output]
         host(out).copy_(torch.from_numpy(result))
         return time.perf_counter() - began
+
+    def run_linear(self, op, shard, x, prologue, out):
+        return self._run(shard, x, out)
+
+    def run_ffn(self, op, shard, x, prologue, out):
+        return self._run(shard, x, out)
 
 
 ENGINES = {e.name: e for e in (Mps, Cpu, Ane)}
@@ -203,9 +259,9 @@ def _interactive():
 
 class Engines:
     """The engines one node's operations may share their units among, in order (the order of their shares along an
-    operation's units), each with its options; the evidence of the operations using them; their Balancer."""
+    operation's units), each with its options; the evidence of the operations using them; their joint solvers."""
 
-    def __init__(self, names, **options):
+    def __init__(self, names, window=3, sample=16, **options):
         names = [names] if isinstance(names, str) else list(names)
         unknown = [n for n in names if n not in ENGINES]
         if unknown:
@@ -213,10 +269,10 @@ class Engines:
         lacking = {n: ENGINES[n].missing() for n in names if ENGINES[n].missing()}
         if lacking:
             raise RuntimeError(f'engines: this node lacks {lacking}')
-        self.names = names
+        self.names, self.window, self.sample = names, int(window), int(sample)
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
         self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1), initializer=_interactive)
-        self.operations, self.evidence, self.balancer, self.last = [], {}, None, {}
+        self.operations, self.evidence, self.solvers, self.last = [], {}, {}, {}
 
     @classmethod
     def configured(cls, variable='MESH_ENGINES'):
@@ -232,44 +288,44 @@ class Engines:
         return cls(names, **options)
 
 
-class Linear:
-    """y = x W^T (+ b), W [N, K]: its N outputs shared among `engines` (Engines; None: torch's own linear), in grains
-    of `grain` outputs, a decision a row count (the shares a prefill chunk and a decode step take differ); `constant`
-    states that W does not change (an engine whose weights are constants takes a share only then)."""
+class Operation:
+    """A column-separable operation: `units` shared among `engines` (Engines; None: torch's own) in grains of `grain`,
+    a decision a row count; its shares concatenate (`combine` 'concat', the shared axis the output's) or sum ('sum',
+    the shared axis contracted); `constant` states that its weights do not change (an engine whose weights are
+    constants takes a share only then)."""
+    kind = combine = None
 
-    def __init__(self, weight, bias=None, engines=None, name=None, grain=64, constant=True):
-        self.weight, self.bias, self.engines, self.grain, self.constant = weight, bias, engines, grain, constant
-        self.name = name or f'linear{id(self):x}'
-        self.decisions, self.shards, self.warm = {}, {}, set()
+    def __init__(self, units, width, engines, name, grain, constant):
+        self.units, self.width, self.engines, self.grain, self.constant = units, width, engines, grain, constant
+        self.name = name or f'{self.kind}{id(self):x}'
+        self.decisions, self.shards, self.warm, self.calls = {}, {}, set(), {}
         if engines is not None:
-            if weight.shape[0] % grain:
-                raise ValueError(f'{self.name}: {weight.shape[0]} outputs in grains of {grain}')
+            if units % grain:
+                raise ValueError(f'{self.name}: {units} units in grains of {grain}')
             engines.operations.append(self)
 
+    def torch(self, x):
+        raise NotImplementedError
+
     def _decision(self, rows, dtype):
-        """The (operation, rows) decision: its parts, its engines' bounds (an engine that cannot take these rows or
-        this dtype, or needs constant weights the operation does not promise, holds nothing)."""
         key = f'{self.name}@{rows}'
         if key not in self.decisions:
-            n = self.weight.shape[0]
-            able = [e.takes(rows, dtype) and (self.constant or not e.limits['constants']) for e in self.engines.engines]
+            able = [e.takes(self, rows, dtype) and (self.constant or not e.limits['constants']) for e in self.engines.engines]
             if not any(able):
                 raise ValueError(f'{key}: no configured engine takes {rows} rows of {dtype}')
-            share = (n // self.grain) // sum(able)
+            share = (self.units // self.grain) // sum(able)
             parts = [share * self.grain if a else 0 for a in able]
-            parts[able.index(True)] += n - sum(parts)
+            parts[able.index(True)] += self.units - sum(parts)
             self.decisions[key] = {'parts': parts, 'grain': self.grain, 'low': [0] * len(able),
-                                   'high': [n if a else 0 for a in able]}
+                                   'high': [self.units if a else 0 for a in able]}
         return key
 
     def _shard(self, engine, start, end, rows):
-        """The engine's resident shard of outputs [start, end), prepared (and, for an engine that compiles a share,
-        compiled and loaded for these rows) where it is not; (shard, whether this call prepared it)."""
         key = (engine.name, start, end)
         prepared = key not in self.shards
         if prepared:
             self.shards = {k: v for k, v in self.shards.items() if k[0] != engine.name}
-            self.shards[key] = engine.prepare(self.weight, start, end)
+            self.shards[key] = engine.prepare(self, start, end)
         shard = self.shards[key]
         if hasattr(engine, 'ready') and not engine.ready(shard, rows):
             engine.load(shard, rows)
@@ -278,77 +334,127 @@ class Linear:
 
     def __call__(self, x):
         if self.engines is None:
-            return torch.nn.functional.linear(x, self.weight, self.bias)
+            return self.torch(x)
         lead = x.shape[:-1]
         x2 = x.reshape(-1, x.shape[-1]).contiguous()
-        rows = x2.shape[0]
-        key = self._decision(rows, x2.dtype)
+        rows, dtype, engines = x2.shape[0], x2.dtype, self.engines.engines
+        key = self._decision(rows, dtype)
         parts = self.decisions[key]['parts']
-        engines = self.engines.engines
         bounds = [sum(parts[:i]) for i in range(len(parts) + 1)]
         held = [i for i, p in enumerate(parts) if p]
-        prologue = {}
-        if any(engines[i].name == 'cpu' for i in held):
-            prologue['fp32'] = x2.float()
-        outs = {i: torch.empty(rows, parts[i], device=x2.device, dtype=torch.float32 if engines[i].name == 'cpu' else x2.dtype)
-                for i in held}
-        ready = torch.mps.Event(enable_timing=False)
-        ready.record()
         shards = {i: self._shard(engines[i], bounds[i], bounds[i + 1], rows) for i in held}
         first = {(engines[i].name, bounds[i], bounds[i + 1], rows) for i in held} - self.warm
         prepared = any(p for _, p in shards.values()) or bool(first)
         self.warm |= first
+        solver = self.engines.solvers.get(key)
+        self.calls[key] = self.calls.get(key, 0) + 1
+        measured = not prepared and (solver is None or not solver.stands or self.calls[key] % self.engines.sample == 0)
+        alone = len(held) == 1 and not engines[held[0]].host_side
+        if measured:
+            span = (torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True))
+            span[0].record()
+        prologue = {'fp32': x2.float()} if any(engines[i].name == 'cpu' for i in held) else {}
+        outs = {i: torch.empty(rows, parts[i] if self.combine == 'concat' else self.width, device=x2.device,
+                               dtype=engines[i].out_dtype(dtype)) for i in held}
+        hosted = [i for i in held if engines[i].host_side]
+        if hosted:
+            ready = torch.mps.Event(enable_timing=False)
+            ready.record()
         marks = {}
-        for i in (i for i in held if engines[i].name == 'mps'):
-            begin, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
-            begin.record()
-            engines[i].run(shards[i][0], x2, prologue, outs[i])
-            end.record()
-            marks[i] = (begin, end)
-        ready.synchronize()
-        futures = {i: self.engines.workers.submit(engines[i].run, shards[i][0], x2, prologue, outs[i])
-                   for i in held if engines[i].name != 'mps'}
+        for i in (i for i in held if not engines[i].host_side):
+            timing = measured and not alone
+            if timing:
+                begin, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
+                begin.record()
+            engines[i].run(self, shards[i][0], x2, prologue, outs[i])
+            if timing:
+                end.record()
+                marks[i] = (begin, end)
+        if hosted:
+            ready.synchronize()
+        futures = {i: self.engines.workers.submit(engines[i].run, self, shards[i][0], x2, prologue, outs[i]) for i in hosted}
         seconds = {i: f.result() for i, f in futures.items()}
         pieces = [outs[i] for i in held]
-        y = torch.cat([p.to(x2.dtype) for p in pieces], dim=1) if len(pieces) > 1 else pieces[0].to(x2.dtype)
-        if self.bias is not None:
-            y = y + self.bias
-        if not prepared:
-            self.engines.evidence.setdefault(key, []).append((marks, seconds, len(engines)))
+        if self.combine == 'concat':
+            y = torch.cat([p.to(dtype) for p in pieces], dim=1) if len(pieces) > 1 else pieces[0].to(dtype)
+        else:
+            y = pieces[0].float() if len(pieces) > 1 else pieces[0].to(dtype)
+            for p in pieces[1:]:
+                y = y + p.float()
+            y = y.to(dtype)
+        y = self.finish(y)
+        if measured:
+            span[1].record()
+            if alone:
+                marks[held[0]] = span
+            self.engines.evidence.setdefault(key, []).append((marks, seconds, span))
         return y.reshape(*lead, -1)
+
+    def finish(self, y):
+        return y
+
+
+class Linear(Operation):
+    """y = x W^T (+ b), W [N, K]: its N outputs shared (they concatenate)."""
+    kind, combine = 'linear', 'concat'
+
+    def __init__(self, weight, bias=None, engines=None, name=None, grain=64, constant=True):
+        self.weight, self.bias = weight, bias
+        super().__init__(weight.shape[0], weight.shape[0], engines, name, grain, constant)
+
+    def torch(self, x):
+        return torch.nn.functional.linear(x, self.weight, self.bias)
+
+    def finish(self, y):
+        return y if self.bias is None else y + self.bias
+
+
+class FFN(Operation):
+    """y = down(gelu_tanh(x Wg^T) * (x Wu^T)), Wg and Wu [I, H], Wd [H, I]: its I intermediate neurons shared, each
+    engine's share a partial of the whole output (they sum): Megatron's column-then-row split [Shoeybi et al. 2019]."""
+    kind, combine = 'ffn', 'sum'
+
+    def __init__(self, gate, up, down, engines=None, name=None, grain=128, constant=True):
+        self.gate, self.up, self.down = gate, up, down
+        super().__init__(gate.shape[0], down.shape[0], engines, name, grain, constant)
+
+    def torch(self, x):
+        h = (_gelu(torch.nn.functional.linear(x, self.gate).float()) * torch.nn.functional.linear(x, self.up).float())
+        return torch.nn.functional.linear(h.to(x.dtype), self.down)
 
 
 def rebalance(engines):
-    """One Balancer step over the operations' decisions on their calls since the last (each call's engines' times,
-    the GPU's from its events): the next parts, written into the operations.  {decision: parts}."""
+    """The joint solver (allocate.Coupled) of each (operation, rows) decision on its calls since the last: each
+    engine's share times (the GPU's from its events) and the calls' spans on the GPU's timeline; the next allocation,
+    written into the operations.  {decision: parts}."""
     import allocate
     torch.mps.synchronize()
-    decisions = {k: d for op in engines.operations for k, d in op.decisions.items()}
-    if engines.balancer is None or set(engines.balancer.decisions) != set(decisions):
-        engines.balancer = allocate.Balancer({k: dict(d) for k, d in decisions.items()})
-    stretches, engines.last = {}, {}
-    for key, calls in engines.evidence.items():
-        width = calls[0][2]
-        times = [[] for _ in range(width)]
-        for marks, seconds, _ in calls:
-            for i, (begin, end) in marks.items():
-                times[i].append(begin.elapsed_time(end) / 1e3)
-            for i, s in seconds.items():
-                times[i].append(s)
-        stretches[key] = {'scales': {key: [1.0] * width}, 'times': [t or None for t in times]}
-        engines.last[key] = [round(sorted(t)[len(t) // 2] * 1e3, 3) if t else None for t in times]
-    engines.evidence = {}
-    if stretches:
-        engines.balancer.observe(stretches)
-    parts = engines.balancer.parts
+    out, engines.last = {}, {}
     for op in engines.operations:
-        for key in op.decisions:
-            if key in parts:
-                op.decisions[key]['parts'] = list(parts[key])
-    return parts
+        for key, d in op.decisions.items():
+            calls = engines.evidence.pop(key, [])
+            solver = engines.solvers.get(key)
+            if solver is None:
+                solver = engines.solvers[key] = allocate.Coupled(op.units, d['grain'], d['low'], d['high'], d['parts'],
+                                                                 window=engines.window)
+            if not calls:
+                continue
+            width = len(engines.engines)
+            times, spans = [[] for _ in range(width)], []
+            for marks, seconds, span in calls:
+                whole = span[0].elapsed_time(span[1]) / 1e3
+                for i, pair in marks.items():
+                    times[i].append(whole if pair is span else pair[0].elapsed_time(pair[1]) / 1e3)
+                for i, s in seconds.items():
+                    times[i].append(s)
+                spans.append(whole)
+            engines.last[key] = {'ms': [round(sorted(t)[len(t) // 2] * 1e3, 3) if t else None for t in times],
+                                 'call_ms': round(sorted(spans)[len(spans) // 2] * 1e3, 3)}
+            d['parts'] = solver.observe(times, spans)
+            out[key] = list(d['parts'])
+    return out
 
 
 def balancing(engines):
-    """Each decision's parts and whether they stand."""
-    return {k: {'parts': list(v), 'stands': engines.balancer.stands(k), 'ms': getattr(engines, 'last', {}).get(k)}
-            for k, v in (engines.balancer.parts if engines.balancer else {}).items()}
+    """Each decision's parts, whether they stand, and the last window's share and call times."""
+    return {k: {'parts': list(s.parts), 'stands': s.stands, **engines.last.get(k, {})} for k, s in engines.solvers.items()}
