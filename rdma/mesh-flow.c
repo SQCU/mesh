@@ -509,10 +509,12 @@ static void *link_receive_progress(void *argument){
 
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#meshresult */
+#define MESH_FAREWELL 0x46
 static void link_close(struct mesh_link *link,int *control){
   atomic_store_explicit(&link->progressing,0,memory_order_release);
   if(link->network>=0){close(link->network);link->network=-1;}
-  if(*control>=0)shutdown(*control,SHUT_RDWR);
+  /* an orderly end tells the peer so (MESH_FAREWELL), which a lost link cannot: the peer stops rather than resumes */
+  if(*control>=0){const char farewell=MESH_FAREWELL;send(*control,&farewell,1,MSG_DONTWAIT);shutdown(*control,SHUT_RDWR);}
   while(link->worker_count)pthread_join(link->workers[--link->worker_count],NULL);
   if(link->cancel)mesh_cancel(link->M,link->cancel,link->index);
   /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
@@ -733,8 +735,12 @@ static void *link_run(void *argument){
           }
         }
       }
-    } else if(event.filter==EVFILT_READ)
-      link_lost(link,event.flags&EV_EOF?(event.fflags?event.fflags:ECONNRESET):EPROTO,4);
+    } else if(event.filter==EVFILT_READ){
+      /* the control socket: the peer's farewell is an orderly end, its silence or reset a loss */
+      char said=0;
+      if(recv((int)event.ident,&said,1,MSG_DONTWAIT)==1 && said==MESH_FAREWELL)link_error(link,ECONNRESET,4);
+      else link_lost(link,event.flags&EV_EOF?(event.fflags?event.fflags:ECONNRESET):EPROTO,4);
+    }
   }
   link_close(link,&control);
   EV_SET64(&event,(uint32_t)link->client,EVFILT_PROC,EV_DELETE,0,0,0,0,0);
