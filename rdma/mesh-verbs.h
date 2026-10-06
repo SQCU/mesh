@@ -203,6 +203,9 @@ static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
         int error=errno;close(f);errno=error;return -1;
       }
       if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
+      /* design/recovery.md (Risk 6): wait for the peer's dial on the listener, not on a spinning core */
+      struct pollfd ready={provider->listener,POLLIN,0};
+      poll(&ready,1,10);
     }
     return -1;
   }
