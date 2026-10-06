@@ -274,8 +274,9 @@ class Balancer:
     where the models'
     unbounded optimum promises less than its resolution under the measured sum [DFPA; Meta-Balancer 2012], and stay
     standing while none of its models changed; once a part moves back the way it came, every part of the decision
-    moves half as far [LB-BSP 2020, §3.3.2].  The resolution is twice the largest relative standard error of the
-    decision's measured medians (from each stretch's invocations), at least 1 %; the ratio test, which compares two
+    moves half as far [LB-BSP 2020, §3.3.2].  The resolution is twice the measured sum's relative standard error (each
+    stretch's slowest rank's median's, from its invocations, in quadrature), at least 1 %; a model changed where its
+    window's median moved past that and past three of its own standard errors; the ratio test, which compares two
     calls, takes at least twice the spread of the measured sums of repeated calls at the same parts (what changes
     between calls, a peer program's load on a GPU, which no one call shows), so a peer's load does not reject a move.  Every rank given the same evidence gets the same
     parts (R4).
@@ -316,7 +317,8 @@ class Balancer:
             if not mine:
                 continue
             measured = sum(c * max(med for med, _ in r.values()) for c, r, _ in mine.values())
-            within = max([0.01] + [2 * se / med for _, r, _ in mine.values() for med, se in r.values() if med > 0])
+            slowest = [(c, max(r.values())) for c, r, _ in mine.values()]
+            within = max(0.01, 2 * math.sqrt(sum((c * se) ** 2 for c, (_, se) in slowest)) / measured if measured else 0.0)
             history = d.setdefault('history', {})
             key = ','.join(map(str, d['parts']))
             history[key] = (history.get(key, []) + [measured])[-5:]
@@ -325,7 +327,7 @@ class Balancer:
             last, d['last'] = d.get('last'), [list(d['parts']), measured]
             changed = False
             for s, (c, ranks, scales) in mine.items():
-                for i, (med, _) in ranks.items():
+                for i, (med, se) in ranks.items():
                     units = d['parts'][i]
                     if not units:
                         continue
@@ -336,7 +338,7 @@ class Balancer:
                     earlier = [t for u, t in own if u == units][-self.window:]
                     now = (earlier + [share])[-self.window:]
                     old, new = (statistics.median(earlier) if earlier else None), statistics.median(now)
-                    if old is not None and abs(new - old) > epsilon * max(new, old):
+                    if old is not None and abs(new - old) > max(epsilon, 3 * se / med if med > 0 else 0.0) * max(new, old):
                         own, changed = [], True
                     self.points[(name, s, i)] = [(u, t) for u, t in own if u != units] + [(units, t) for t in now]
             if last and last[0] != d['parts'] and measured > last[1] * (1 + between):
