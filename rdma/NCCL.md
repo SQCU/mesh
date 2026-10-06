@@ -101,7 +101,9 @@ runs.
   - torch-mesh runs MPS tensors here.
   - A group can be issued and completed later (`issue`, `ncclMeshComplete`).
 
-Types: the Metal path moves the integer types, float16, float32 and bfloat16; the host path adds float64 and fp8.
+Types: the Metal path moves the integer types, float16, float32, bfloat16 and fp8 (e4m3fn, e5m2: decoded, combined in
+float32 and encoded to nearest even as the host does, overflow to NaN or infinity; metal-microbench docs/kernels.md
+Float8); the host path adds float64.
 Ops: sum, prod, max, min, avg; premul-sum takes a host immediate.
 
 ## Routes between unlinked ranks

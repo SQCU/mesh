@@ -1995,7 +1995,7 @@ static ncclResult_t walk(struct metal_program *program, struct inflight *issuing
   return result;
 }
 
-static int on_gpu(ncclDataType_t t) { return t != ncclFloat64 && t != ncclFloat8e4m3 && t != ncclFloat8e5m2; }
+static int on_gpu(ncclDataType_t t) { return t != ncclFloat64; }
 static int same(struct where a, struct where b) { return a.buffer == b.buffer && a.offset == b.offset; }
 static struct where where_of(const void *argument) {
   const ncclMeshBuffer *b = argument;
@@ -2091,7 +2091,7 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   for (size_t i = 0; i < n && !result; i++) {
     if (list[i].comm != comm) result = fail(ncclInvalidUsage, "a group on several communicators");
     else if (list[i].command != list[0].command) result = fail(ncclInvalidUsage, "a group on several command buffers");
-    else if (!on_gpu(list[i].type)) result = fail(ncclInvalidArgument, "datatype %d on the Metal path (no float64 or float8 there)", (int)list[i].type);
+    else if (!on_gpu(list[i].type)) result = fail(ncclInvalidArgument, "datatype %d on the Metal path (no float64 there)", (int)list[i].type);
     else if (reducing(list[i].what)) result = reduction(list + i);
   }
   if (!result && !list[0].command) result = fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");

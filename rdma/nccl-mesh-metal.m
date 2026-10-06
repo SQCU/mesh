@@ -8,8 +8,9 @@
    load of the completion word until it reaches the expected cycle, M30; a cancelled word is ~0); a landed slot is read through volatile coherent(system) loads and a slot a SEND reads is written
    through coherent(system) stores, its cell released after a system-scope fence (metal-microbench
    metal_recording.m MetalPayloadRead and MetalPublicationStores); the arithmetic is the host's (nccl-mesh.c
-   combine_into, premultiply, truncdiv): the small floating types in float32 rounded to nearest even, integers
-   wrapping */
+   combine_into, premultiply, truncdiv): the small floating types in float32 rounded to nearest even, float8 decoded
+   and encoded by f8_to and f8_from line for line (metal-microbench tools/fp8.py checks both against the float8
+   contract), integers wrapping */
 static NSString *const SOURCE =
   @"#include <metal_stdlib>\n"
   "#pragma METAL internals : enable\n"
@@ -40,6 +41,20 @@ static NSString *const SOURCE =
   "HEAD(combine_##name) { device T *x = (device T *)(d + p.dst); SYS const W *y = (SYS const W *)(s + p.src); LOOP { W w = y[k]; float a = float(x[k]), b = float(as_type<T>(w)); "
   "if (p.op == 0) x[k] = T(a + b); else if (p.op == 1) x[k] = T(a * b); else if (p.op == 2) { if (b > a) x[k] = as_type<T>(w); } else if (b < a) x[k] = as_type<T>(w); } } "
   "HEAD(premul_##name) { device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = T(float(y[k]) * c); }\n"
+  "float f8_to(uchar v, bool e5) { int mbits = e5 ? 2 : 3, bias = e5 ? 15 : 7; int expf = (v >> mbits) & (e5 ? 31 : 15), mant = v & ((1 << mbits) - 1); float r; "
+  "if (e5 && expf == 31) r = as_type<float>(mant ? 0x7fc00000u : 0x7f800000u); else if (!e5 && expf == 15 && mant == 7) r = as_type<float>(0x7fc00000u); "
+  "else if (!expf) r = ldexp(float(mant), 1 - bias - mbits); else r = ldexp(1.0f + float(mant) / float(1 << mbits), expf - bias); return (v & 0x80) ? -r : r; }\n"
+  "uchar f8_from(float x, bool e5) { int mbits = e5 ? 2 : 3, bias = e5 ? 15 : 7; uint u = as_type<uint>(x), a = u & 0x7fffffffu; uchar sign = (u >> 31) ? 0x80 : 0; "
+  "if (a > 0x7f800000u) return sign | 0x7f; if (a == 0x7f800000u) return e5 ? (sign | 0x7c) : (sign | 0x7f); if (a == 0) return sign; "
+  "int e = max(int(a >> 23) - 127, 1 - bias); float n = rint(ldexp(as_type<float>(a), mbits - e)); if (n >= float(1 << (mbits + 1))) { n *= 0.5f; e += 1; } "
+  "int expf, mant; if (n < float(1 << mbits)) { expf = 0; mant = int(n); } else { expf = e + bias; mant = int(n) - (1 << mbits); } "
+  "if (e5 ? expf >= 31 : (expf > 15 || (expf == 15 && mant == 7))) return e5 ? (sign | 0x7c) : (sign | 0x7f); return sign | uchar(expf << mbits) | uchar(mant); }\n"
+  "#define FLOAT8(name, E5) "
+  "HEAD(combine_##name) { device uchar *x = (device uchar *)(d + p.dst); SYS const uchar *y = (SYS const uchar *)(s + p.src); LOOP { uchar w = y[k]; float a = f8_to(x[k], E5), b = f8_to(w, E5); "
+  "if (p.op == 0) x[k] = f8_from(a + b, E5); else if (p.op == 1) x[k] = f8_from(a * b, E5); else if (p.op == 2) { if (b > a) x[k] = w; } else if (b < a) x[k] = w; } } "
+  "HEAD(premul_##name) { device uchar *x = (device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = f8_from(f8_to(y[k], E5) * c, E5); }\n"
+  "FLOAT8(e4m3, false)\n"
+  "FLOAT8(e5m2, true)\n"
   "INTEGER(i8, char, uchar, uint, true)\n"
   "INTEGER(u8, uchar, uchar, uint, false)\n"
   "INTEGER(i32, int, uint, uint, true)\n"
@@ -71,12 +86,16 @@ static NSString *const SOURCE =
   "LANDF(f16, half, ushort)\n"
   "LANDF(f32, float, uint)\n"
   "LANDF(bf16, bfloat, ushort)\n"
+  "#define LAND8(name, E5) GROUP(land_##name) { AWAIT device uchar *x = (device uchar *)(d + p.dst); SYS const uchar *y = (SYS const uchar *)(s + p.src); for (ulong k = i; k < p.n; k += g) { uchar w = y[k]; float a = f8_to(x[k], E5), b = f8_to(w, E5); "
+  "if (p.op == 0) x[k] = f8_from(a + b, E5); else if (p.op == 1) x[k] = f8_from(a * b, E5); else if (p.op == 2) { if (b > a) x[k] = w; } else if (b < a) x[k] = w; } }\n"
+  "LAND8(e4m3, false)\n"
+  "LAND8(e5m2, true)\n"
   "kernel void spin(device uchar *words [[buffer(0)]], device uchar *ring [[buffer(1)]], constant args &p [[buffer(2)]], device uchar *vb [[buffer(3)]]) { "
   "SYS const ulong *word = (SYS const ulong *)(words + p.dst); ulong status; do { FENCE; status = *word; } while (status < p.n); "
   "SYS ulong *v = (SYS ulong *)vb; CHECK(ring, status) }\n";
 
 /* ncclDataType_t's order: int8 uint8 int32 uint32 int64 uint64 float16 float32 float64 bfloat16 e4m3 e5m2 */
-static const char *const TYPE[12] = {"i8", "u8", "i32", "u32", "i64", "u64", "f16", "f32", NULL, "bf16", NULL, NULL};
+static const char *const TYPE[12] = {"i8", "u8", "i32", "u32", "i64", "u64", "f16", "f32", NULL, "bf16", "e4m3", "e5m2"};
 static const char *const MODE[3] = {"plain", "land", "send"};
 
 struct args { uint64_t dst, src, n, scalar, aux; uint32_t op, unused; uint64_t first, slot; uint32_t count, mask, channel, depth; };
