@@ -546,6 +546,21 @@ class Coupled:
                     self.design.append(tuple(p))
         self.seen, self.stands, self.stood = {}, False, None
 
+    def exclude(self, i):
+        """Member i holds no units from now on (it failed a requirement the times do not show: an operation's
+        accuracy): its bound goes to 0, its units to the member that measured fastest a unit beside it, the
+        allocations it held leave the evidence, and the decision is solved again."""
+        self.high[i], self.able = 0, [j for j in self.able if j != i]
+        parts = list(self.parts)
+        rate = {j: min((self._median(e['members'][j]) / p[j] for p, e in self._measured().items() if p[j] > 0 and e['members'][j]),
+                       default=math.inf) for j in self.able}
+        target = min(self.able, key=lambda j: (rate[j], j))
+        parts[target], parts[i] = parts[target] + parts[i], 0
+        self.parts, self.start, self.stands = tuple(parts), tuple(parts), False
+        self.seen = {p: e for p, e in self.seen.items() if p[i] == 0}
+        self.design = [self.start]
+        return list(self.parts)
+
     def observe(self, times, calls):
         """The calls at the current parts: `times` each member's seconds a call (empty where it holds nothing),
         `calls` the calls' seconds."""

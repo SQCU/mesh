@@ -174,7 +174,12 @@ class Ane(Engine):
     one; an FFN's gate and up, the activation, their product and down, fused), rows in tiles of `tile` (default 128,
     metal-microbench docs/soc_compute_backends.md: the tiled graph's measured geometry), its input and output
     row-major (the transposes to and from channels-first inside the graph: on an M4 Pro 4.5 ms against 5.9 with them
-    on the GPU), compiled and loaded once a share and row count; fp16 operands and activation."""
+    on the GPU), compiled and loaded once a share and row count; fp16 operands and activation.  Its outputs carry an
+    absolute error floor (on an M4 Pro and an M5 Max about 3e-4 RMS for a 3840-wide contraction, whatever the input's
+    scale; above unit-scale activations its error is fp16's relative 2e-4): accurate on normalized activations,
+    inaccurate on small ones (a sixteenth-scale input's linear 5e-3 relative), which an operation's `tolerance`
+    checks.  (Its compiler folds a constant scaling of the weights into the convolution, so no rescaling in the
+    graph moves the floor.)"""
     name, limits = 'ane', {'dtypes': (torch.float16,), 'constants': True, 'tile': 128}
 
     def __init__(self, **options):
@@ -206,6 +211,7 @@ class Ane(Engine):
         from coremltools.converters.mil.mil import types
         tile = self.limits['tile']
         width = shard.arrays[0].shape[1]
+
         conv = lambda array: mb.const(val=array.reshape(array.shape[0], array.shape[1], 1, 1))
 
         @mb.program(input_specs=[mb.TensorSpec(shape=(rows, width), dtype=types.fp16)], opset_version=ct.target.macOS15)
@@ -272,7 +278,7 @@ class Engines:
         self.names, self.window, self.sample = names, int(window), int(sample)
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
         self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1), initializer=_interactive)
-        self.operations, self.evidence, self.solvers, self.last = [], {}, {}, {}
+        self.operations, self.decisions, self.evidence, self.solvers, self.last, self.excluded = [], {}, {}, {}, {}, {}
 
     @classmethod
     def configured(cls, variable='MESH_ENGINES'):
@@ -290,15 +296,20 @@ class Engines:
 
 class Operation:
     """A column-separable operation: `units` shared among `engines` (Engines; None: torch's own) in grains of `grain`,
-    a decision a row count; its shares concatenate (`combine` 'concat', the shared axis the output's) or sum ('sum',
+    a decision a name and row count (operations of one name, a stack's layers of one shape, share it and pool their
+    evidence: the allocation is measured where the program runs it, between its other operations); its shares concatenate (`combine` 'concat', the shared axis the output's) or sum ('sum',
     the shared axis contracted); `constant` states that its weights do not change (an engine whose weights are
-    constants takes a share only then)."""
+    constants takes a share only then); `tolerance` (relative), where given, is checked on each allocation's first
+    call: every share an engine other than the GPU computes against the same share on the GPU, an engine off by more
+    holding none of the decision after (an engine's accuracy is part of choosing it: the Neural Engine's absolute
+    error floor)."""
     kind = combine = None
 
-    def __init__(self, units, width, engines, name, grain, constant):
+    def __init__(self, units, width, engines, name, grain, constant, tolerance=None):
         self.units, self.width, self.engines, self.grain, self.constant = units, width, engines, grain, constant
+        self.tolerance = tolerance
         self.name = name or f'{self.kind}{id(self):x}'
-        self.decisions, self.shards, self.warm, self.calls = {}, {}, set(), {}
+        self.shards, self.warm, self.calls = {}, set(), {}
         if engines is not None:
             if units % grain:
                 raise ValueError(f'{self.name}: {units} units in grains of {grain}')
@@ -307,17 +318,23 @@ class Operation:
     def torch(self, x):
         raise NotImplementedError
 
+    @property
+    def decisions(self):
+        """The decisions this operation's name holds (shared by every operation of its name: its layers')."""
+        prefix = self.name + '@'
+        return {k: d for k, d in (self.engines.decisions if self.engines else {}).items() if k.startswith(prefix)}
+
     def _decision(self, rows, dtype):
         key = f'{self.name}@{rows}'
-        if key not in self.decisions:
+        if key not in self.engines.decisions:
             able = [e.takes(self, rows, dtype) and (self.constant or not e.limits['constants']) for e in self.engines.engines]
             if not any(able):
                 raise ValueError(f'{key}: no configured engine takes {rows} rows of {dtype}')
             share = (self.units // self.grain) // sum(able)
             parts = [share * self.grain if a else 0 for a in able]
             parts[able.index(True)] += self.units - sum(parts)
-            self.decisions[key] = {'parts': parts, 'grain': self.grain, 'low': [0] * len(able),
-                                   'high': [self.units if a else 0 for a in able]}
+            self.engines.decisions[key] = {'parts': parts, 'grain': self.grain, 'low': [0] * len(able),
+                                           'high': [self.units if a else 0 for a in able], 'units': self.units}
         return key
 
     def _shard(self, engine, start, end, rows):
@@ -339,7 +356,7 @@ class Operation:
         x2 = x.reshape(-1, x.shape[-1]).contiguous()
         rows, dtype, engines = x2.shape[0], x2.dtype, self.engines.engines
         key = self._decision(rows, dtype)
-        parts = self.decisions[key]['parts']
+        parts = self.engines.decisions[key]['parts']
         bounds = [sum(parts[:i]) for i in range(len(parts) + 1)]
         held = [i for i, p in enumerate(parts) if p]
         shards = {i: self._shard(engines[i], bounds[i], bounds[i + 1], rows) for i in held}
@@ -382,6 +399,8 @@ class Operation:
             for p in pieces[1:]:
                 y = y + p.float()
             y = y.to(dtype)
+        if self.tolerance is not None and first:
+            self._verify(key, held, bounds, shards, x2, prologue, outs)
         y = self.finish(y)
         if measured:
             span[1].record()
@@ -393,14 +412,38 @@ class Operation:
     def finish(self, y):
         return y
 
+    def _verify(self, key, held, bounds, shards, x2, prologue, outs):
+        """An allocation's first call: each share an engine other than the GPU computed, against the same share on the
+        GPU (torch's MPS, its own products); an engine whose share is off by more than the operation's `tolerance`
+        (relative) holds none of this decision from now on."""
+        engines = self.engines.engines
+        gpu = next((e for e in engines if e.name == 'mps'), None) or Mps()
+        for i in held:
+            if engines[i].name == 'mps':
+                continue
+            reference = torch.empty(outs[i].shape, device=x2.device, dtype=x2.dtype)
+            gpu.run(self, gpu.prepare(self, bounds[i], bounds[i + 1]), x2, prologue, reference)
+            got, want = outs[i].float(), reference.float()
+            error = float((got - want).norm() / want.norm().clamp_min(1e-30))
+            if error > self.tolerance:
+                solver = self.engines.solvers.get(key)
+                if solver is None:
+                    import allocate
+                    d = self.engines.decisions[key]
+                    solver = self.engines.solvers[key] = allocate.Coupled(d['units'], d['grain'], d['low'], d['high'], d['parts'],
+                                                                          window=self.engines.window)
+                self.engines.decisions[key]['parts'] = solver.exclude(i)
+                self.engines.decisions[key]['high'][i] = 0
+                self.engines.excluded.setdefault(key, {})[engines[i].name] = round(error, 6)
+
 
 class Linear(Operation):
     """y = x W^T (+ b), W [N, K]: its N outputs shared (they concatenate)."""
     kind, combine = 'linear', 'concat'
 
-    def __init__(self, weight, bias=None, engines=None, name=None, grain=64, constant=True):
+    def __init__(self, weight, bias=None, engines=None, name=None, grain=64, constant=True, tolerance=None):
         self.weight, self.bias = weight, bias
-        super().__init__(weight.shape[0], weight.shape[0], engines, name, grain, constant)
+        super().__init__(weight.shape[0], weight.shape[0], engines, name, grain, constant, tolerance)
 
     def torch(self, x):
         return torch.nn.functional.linear(x, self.weight, self.bias)
@@ -414,9 +457,9 @@ class FFN(Operation):
     engine's share a partial of the whole output (they sum): Megatron's column-then-row split [Shoeybi et al. 2019]."""
     kind, combine = 'ffn', 'sum'
 
-    def __init__(self, gate, up, down, engines=None, name=None, grain=128, constant=True):
+    def __init__(self, gate, up, down, engines=None, name=None, grain=128, constant=True, tolerance=None):
         self.gate, self.up, self.down = gate, up, down
-        super().__init__(gate.shape[0], down.shape[0], engines, name, grain, constant)
+        super().__init__(gate.shape[0], down.shape[0], engines, name, grain, constant, tolerance)
 
     def torch(self, x):
         h = (_gelu(torch.nn.functional.linear(x, self.gate).float()) * torch.nn.functional.linear(x, self.up).float())
@@ -430,28 +473,27 @@ def rebalance(engines):
     import allocate
     torch.mps.synchronize()
     out, engines.last = {}, {}
-    for op in engines.operations:
-        for key, d in op.decisions.items():
-            calls = engines.evidence.pop(key, [])
-            solver = engines.solvers.get(key)
-            if solver is None:
-                solver = engines.solvers[key] = allocate.Coupled(op.units, d['grain'], d['low'], d['high'], d['parts'],
-                                                                 window=engines.window)
-            if not calls:
-                continue
-            width = len(engines.engines)
-            times, spans = [[] for _ in range(width)], []
-            for marks, seconds, span in calls:
-                whole = span[0].elapsed_time(span[1]) / 1e3
-                for i, pair in marks.items():
-                    times[i].append(whole if pair is span else pair[0].elapsed_time(pair[1]) / 1e3)
-                for i, s in seconds.items():
-                    times[i].append(s)
-                spans.append(whole)
-            engines.last[key] = {'ms': [round(sorted(t)[len(t) // 2] * 1e3, 3) if t else None for t in times],
-                                 'call_ms': round(sorted(spans)[len(spans) // 2] * 1e3, 3)}
-            d['parts'] = solver.observe(times, spans)
-            out[key] = list(d['parts'])
+    for key, d in engines.decisions.items():
+        calls = engines.evidence.pop(key, [])
+        solver = engines.solvers.get(key)
+        if solver is None:
+            solver = engines.solvers[key] = allocate.Coupled(d['units'], d['grain'], d['low'], d['high'], d['parts'],
+                                                             window=engines.window)
+        if not calls:
+            continue
+        width = len(engines.engines)
+        times, spans = [[] for _ in range(width)], []
+        for marks, seconds, span in calls:
+            whole = span[0].elapsed_time(span[1]) / 1e3
+            for i, pair in marks.items():
+                times[i].append(whole if pair is span else pair[0].elapsed_time(pair[1]) / 1e3)
+            for i, s in seconds.items():
+                times[i].append(s)
+            spans.append(whole)
+        engines.last[key] = {'ms': [round(sorted(t)[len(t) // 2] * 1e3, 3) if t else None for t in times],
+                             'call_ms': round(sorted(spans)[len(spans) // 2] * 1e3, 3)}
+        d['parts'] = solver.observe(times, spans)
+        out[key] = list(d['parts'])
     return out
 
 
