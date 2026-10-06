@@ -280,9 +280,10 @@ def rebalance(mesh, name='tp', every=8):
     """The parts of partitioned mesh dimension `name` that the evidence of its last `every` steps gives
     (design/heterogeneity.md R3, R5, R10, R11): call it once a step, after the step is issued, on every rank of the
     mesh alike.  The first call watches the dimension's group (torch_mesh.evidence: each rank's own work between its
-    collectives there); every `every` steps after it the ranks' work of each step is gathered to every rank and one
-    DFPA iteration (the mesh repo's rdma/allocate.py Balancer, the same on every rank: R4) gives the parts, each at
-    least 1, at most the units less one a peer.
+    collectives there, one stretch a collective); every `every` steps after it the ranks' stretches are gathered to
+    every rank and one step of the mesh repo's rdma/allocate.py Balancer (the same on every rank: R4) gives the parts,
+    each at least 1, at most the units less one a peer, minimising the steps' time: the sum over their stretches of
+    the slowest rank's, every stretch scaling with this dimension's parts.
 
     A rank computes its whole buffer, its capacity, padding and all (R14: stock kernels), so its work follows its
     capacity: the evidence measures parts where they are the capacities, and parts that move within capacities set
@@ -298,21 +299,26 @@ def rebalance(mesh, name='tp', every=8):
         raise ValueError(f'mesh: rebalance {name}: its group is not the mesh backend\'s (no communicator to watch)')
     where = (id(group), name)
     held = _BALANCING.get(where)
+    n = len(o.capacity)
     if held is None:
-        n = len(o.capacity)
-        _BALANCING[where] = {'balancer': allocate.Balancer(o.parts.tolist(), 1, [1] * n, [o.units - n + 1] * n), 'steps': 0}
+        _BALANCING[where] = {'balancer': allocate.Balancer({name: {'parts': o.parts.tolist(), 'low': [1] * n,
+                                                                   'high': [o.units - n + 1] * n}}), 'steps': 0}
         evidence.watch(group, mesh.device_type)
         return tuple(o.parts.tolist()), False
     evidence.step(group)
     held['steps'] += 1
     if held['steps'] < every:
-        return tuple(held['balancer'].parts), False
+        return tuple(held['balancer'].parts[name]), False
     held['steps'] = 0
     everyone = [None] * dist.get_world_size(group)
     dist.all_gather_object(everyone, evidence.work(group), group=group)
-    held['work'] = [sorted(w)[len(w) // 2] if w else None for w in everyone]
-    held['balancer'].parts = o.parts.tolist()
-    parts = held['balancer'].observe(everyone)
+    held['work'] = [sorted(sum(step) for step in steps)[len(steps) // 2] if steps else None for steps in everyone]
+    positions = max((len(step) for steps in everyone if steps for step in steps), default=0)
+    stretches = {f'step:{k}': {'scales': {name: [1.0] * n},
+                               'times': [[step[k] for step in steps if len(step) > k] if steps else None for steps in everyone]}
+                 for k in range(positions)}
+    held['balancer'].decisions[name]['parts'] = o.parts.tolist()
+    parts = held['balancer'].observe(stretches)[name]
     written = parts != o.parts.tolist() and all(p <= c for p, c in zip(parts, o.capacity))
     if written:
         o.write(parts)
@@ -321,11 +327,11 @@ def rebalance(mesh, name='tp', every=8):
 
 def balancing(mesh, name='tp'):
     """What rebalance last saw of partitioned dimension `name`: {'parts', 'stands', 'work': each rank's median
-    step work (seconds) in the last window}, None before its first window."""
+    step work (seconds, its stretches summed) in the last window}, None before its first window."""
     held = _BALANCING.get((id(mesh.get_group(name)), name))
     if not held or 'work' not in held:
         return None
-    return {'parts': list(held['balancer'].parts), 'stands': held['balancer'].stands, 'work': held['work']}
+    return {'parts': held['balancer'].parts[name], 'stands': held['balancer'].stands(name), 'work': held['work']}
 
 
 def _attach(mesh, keys):

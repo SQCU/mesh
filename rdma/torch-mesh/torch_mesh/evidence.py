@@ -9,8 +9,8 @@ where the GPU finished the work before the collective and the mark at completion
 on host tensors the monotonic clock around the group's call (a host collective completes in the call).  A step's
 work on the rank is the sum, over its collectives, of the time from the mark after the previous collective (the
 previous step's last, or the step's boundary for the first) to the mark at this one's issue: the stretch the
-engine's ledgers time (metal-microbench tools/mesh/rates.py).  `step` closes a step; `work`, taken at a step's
-boundary, returns the closed steps' seconds and forgets them.  Two marks with no GPU work between them cannot be
+bridges' ledgers time for a prepared call (rdma/ledger.py).  `step` closes a step; `work`, taken at a step's
+boundary, returns each closed step's stretches (seconds, one a collective in issue order) and forgets them.  Two marks with no GPU work between them cannot be
 timed apart; that interval counts zero.  An MPS collective issued through a coalesced group (start_coalescing) is
 not marked.
 
@@ -87,38 +87,39 @@ def step(group):
 
 
 def work(group):
-    """The rank's work in each closed step of `group` (seconds), the steps then forgotten."""
+    """The rank's stretches in each closed step of `group` ([seconds, one a collective in issue order] a step), the
+    steps then forgotten."""
     w = _WATCHED.get(id(group))
     if w is None:
         return []
     if w.device != 'mps':
         out = []
         for marks in w.steps:
-            total = 0.0
+            each = []
             for kind, t in marks:
                 if kind == 0:
-                    total += t - w.last
+                    each.append(t - w.last)
                 w.last = t
-            out.append(total)
+            out.append(each)
         w.steps = []
         return out
     import torch
     torch.mps.synchronize()
-    out, total, done = [], 0.0, []
+    out, each, done = [], [], []
     for kind, event in _stream().take(w.handle):
         if w.last is None:
             w.last = event
             continue
         if kind == 0:
             try:
-                total += max(0.0, torch._C._mps_elapsedTimeOfEvents(w.last, event) / 1e3)
+                each.append(max(0.0, torch._C._mps_elapsedTimeOfEvents(w.last, event) / 1e3))
             except RuntimeError:
-                pass
+                each.append(0.0)
         done.append(w.last)
         w.last = event
         if kind == 2:
-            out.append(total)
-            total = 0.0
+            out.append(each)
+            each = []
     for event in done:
         torch._C._mps_releaseEvent(event)
     return out

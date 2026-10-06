@@ -182,42 +182,13 @@ def time(points, prior=None):
     return at
 
 
-def dfpa(total, grain, low, high, parts, times, points, epsilon, before=None, prior=None, window=3):
-    """One DFPA iteration after a call that ran `parts` (each rank's units, multiples of grain) and measured `times`
-    (each rank's seconds at its part, None where it ran none): `points` each rank's earlier [(units, seconds)], up to
-    `window` at a part, its time their median [LB-BSP 2020, §3.2.1: prediction robust to non-deterministic
-    perturbation]; `before` the parts of the call before it (equal to `parts` where they stood); `prior` each rank's
-    (a, b) for a rank with no point.  A rank's performance changed where its median at its part moved by more than
-    epsilon: its points at other parts go [Clarke, Lastovetsky & Rychkov 2011].  Parts that stood stand while no
-    rank's performance changed.  Returns (the next parts, each rank's points, whether the parts stand)."""
+def _robust(samples):
+    """(median, its standard error) of seconds an invocation: 1.2533 x 1.4826 MAD / sqrt(n), which a tail of slow
+    invocations does not inflate."""
     import statistics
-    n = len(parts)
-    kept, changed, medians = [], False, []
-    for i in range(n):
-        own = list(points[i])
-        if times[i] is not None and parts[i] > 0:
-            earlier = [t for d, t in own if d == parts[i]][-window:]
-            now = (earlier + [times[i]])[-window:]
-            old, new = (statistics.median(earlier) if earlier else None), statistics.median(now)
-            if old is not None and abs(new - old) > epsilon * max(new, old):
-                own, changed = [], True
-            own = [(d, t) for d, t in own if d != parts[i]] + [(parts[i], t) for t in now]
-            medians.append(new)
-        kept.append(own)
-    if not medians or (before is not None and list(before) == list(parts) and not changed):
-        return list(parts), kept, True
-    model = [time(_median_points(kept[i]), prior[i] if prior else None) for i in range(n)]
-    if min_max(total, grain, low, high, model)[1] >= max(medians) * (1 - epsilon):
-        return list(parts), kept, True
-    reach = [min(high[i], max(2 * max((d for d, _ in kept[i]), default=0), grain)) if kept[i] else high[i] for i in range(n)]
-    nxt, _ = min_max(total, grain, low, reach, model)
-    if sum(nxt) < total:
-        nxt, _ = min_max(total, grain, low, high, model)
-    if before is not None and any((c - p) * (p - b) < 0 for c, p, b in zip(nxt, parts, before)):
-        half = [(p + c) / 2 for c, p in zip(nxt, parts)]
-        nxt, _ = min_max(sum(nxt), grain, [math.floor(h / grain) * grain for h in half],
-                         [math.ceil(h / grain) * grain for h in half], model)
-    return nxt, kept, False
+    med = statistics.median(samples)
+    mad = statistics.median(abs(t - med) for t in samples)
+    return med, 1.2533 * 1.4826 * mad / math.sqrt(len(samples))
 
 
 def _median_points(points):
@@ -228,53 +199,196 @@ def _median_points(points):
     return [(d, statistics.median(ts)) for d, ts in by.items()]
 
 
-class Balancer:
-    """One share decision balanced on the calls' evidence (design/heterogeneity.md R3, R5, R10, R11): `parts` the
-    units each rank holds now (multiples of `grain`; their sum the decision's units), within [low_i, high_i] (default
-    0 and the units: a partition operand's are 1 and its capacities).  After a call, `observe` takes each rank's
-    times of the call's steps at those parts (seconds, one a step; None or [] where it held none) and returns the
-    parts to hold next, one DFPA iteration (`dfpa`) on the points it has kept: the same parts until the evidence
-    moves them, and the same again once they stand.  Its resolution is twice the largest relative standard error
-    of the ranks' medians (1.2533 x 1.4826 MAD / sqrt(steps): a tail of slow steps does not inflate it), at least
-    1 %.  Every rank given the same times gets the same parts (R4).  `state()` and `Balancer.of(state)` carry it
-    between processes."""
-
-    def __init__(self, parts, grain=1, low=None, high=None, prior=None, window=3):
-        n = len(parts)
-        self.parts, self.grain, self.window, self.prior = [int(p) for p in parts], int(grain), int(window), prior
-        self.total = sum(self.parts)
-        self.low = [int(v) for v in (low if low is not None else [0] * n)]
-        self.high = [int(v) for v in (high if high is not None else [self.total] * n)]
-        if any(p % self.grain or not lo <= p <= hi for p, lo, hi in zip(self.parts, self.low, self.high)):
-            raise ValueError(f'balancer: parts {self.parts} on the grain {self.grain} within {self.low} and {self.high}')
-        self.points, self.before, self.stands = [[] for _ in range(n)], None, False
-
-    def observe(self, samples):
-        import statistics
-        medians, errors = [], []
-        for own, part in zip(samples, self.parts):
-            own = [float(t) for t in (own or ()) if t is not None]
-            if not part or not own:
-                medians.append(None)
+def least(total, grain, low, high, stretches):
+    """Units of `total` at `grain` within [low_i, high_i] minimising sum_s c_s max_i f_si(u_i) over `stretches`
+    [(c_s, [f_si, nondecreasing])]: one stretch by min_max (exact [Ibaraki & Katoh 1988]); two ranks by trying
+    every split (exact); more, each grain to the rank that adds least, then a grain moved between two ranks while
+    that lowers the sum.  (units, the sum.)"""
+    n = len(low)
+    if len(stretches) == 1:
+        c, fs = stretches[0]
+        units, top = min_max(total, grain, low, high, fs)
+        return units, c * top
+    value = lambda u: sum(c * max(fs[i](u[i]) for i in range(n)) for c, fs in stretches)
+    if n == 2:
+        best = None
+        for a in range(max(low[0], total - high[1]), min(high[0], total - low[1]) + 1, grain):
+            u = [a, total - a]
+            v = value(u)
+            if best is None or v < best[1]:
+                best = (u, v)
+        return best if best else (list(low), value(low))
+    u = list(low)
+    held = [[fs[i](u[i]) for i in range(n)] for _, fs in stretches]
+    for _ in range((total - sum(low)) // grain):
+        choice = None
+        for i in range(n):
+            if u[i] + grain > high[i]:
                 continue
-            med = statistics.median(own)
-            mad = statistics.median(abs(t - med) for t in own)
-            medians.append(med)
-            errors.append(1.2533 * 1.4826 * mad / math.sqrt(len(own)) / med if med > 0 else 0.0)
-        epsilon = max(0.01, 2 * max(errors, default=0.0))
-        nxt, self.points, self.stands = dfpa(self.total, self.grain, self.low, self.high, self.parts, medians, self.points,
-                                             epsilon, self.before, self.prior, self.window)
-        self.before = nxt if self.stands else self.parts
-        self.parts = list(nxt)
-        return list(self.parts)
+            v = sum(c * max(max(h[:i] + h[i + 1:], default=0.0), fs[i](u[i] + grain)) for (c, fs), h in zip(stretches, held))
+            if choice is None or v < choice[1]:
+                choice = (i, v)
+        if choice is None:
+            break
+        i = choice[0]
+        u[i] += grain
+        for (c, fs), h in zip(stretches, held):
+            h[i] = fs[i](u[i])
+    v = value(u)
+    for _ in range(4 * n * n):
+        moved = False
+        for i in range(n):
+            for j in range(n):
+                if i != j and u[i] - grain >= low[i] and u[j] + grain <= high[j]:
+                    w = list(u)
+                    w[i] -= grain
+                    w[j] += grain
+                    x = value(w)
+                    if x < v:
+                        u, v, moved = w, x, True
+        if not moved:
+            break
+    return u, v
+
+
+class Balancer:
+    """A program's partitioned dimensions (`decisions`) balanced on its own evidence (design/heterogeneity.md R3,
+    R5, R10, R11), whatever the program computes.
+
+    A call runs stretches: a rank's own work between two consecutive collectives (never inside one: R2), named by
+    the program (its sequence of collectives and the place in it), each run some count of invocations a call.  A
+    stretch's time on a rank scales with the units the rank holds of the decisions the program names for it.  The
+    call's time is the sum over its stretches of their count times the slowest rank's time, and each decision's
+    parts minimise its stretches' part of that sum, a stretch's time on a rank divided among its decisions by the
+    weights the program gives (any units: its own estimate of each one's work there).
+
+    The models are DFPA's [Lastovetsky & Reddy 2010, partial estimation of functional performance models]: each
+    (decision, stretch, rank)'s measured points (units, seconds an invocation), up to `window` at a part, their median
+    [LB-BSP 2020, §3.2.1]; the time interpolated between them, nondecreasing (`time`), within a doubling trust region
+    past the largest part measured [Conn, Gould & Toint 2000]; a rank with none at a stretch read at the measured
+    ranks' median time a unit.  A model's median at a part moving by more than the resolution drops its other points
+    (its performance changed [Clarke, Lastovetsky & Rychkov 2011]).  A move the next call measures worse by more than
+    the resolution is rejected: the parts go back, the trust region halves and the measurement stays in the models
+    (a trust-region method's ratio test [Conn, Gould & Toint 2000, §6.1]); it doubles again, to twice, after a move
+    that held.  A decision's parts stand
+    where the models'
+    unbounded optimum promises less than its resolution under the measured sum [DFPA; Meta-Balancer 2012], and stay
+    standing while none of its models changed; once a part moves back the way it came, every part of the decision
+    moves half as far [LB-BSP 2020, §3.3.2].  The resolution is twice the largest relative standard error of the
+    decision's measured medians (from each stretch's invocations), at least 1 %; the ratio test, which compares two
+    calls, takes at least twice the spread of the measured sums of repeated calls at the same parts (what changes
+    between calls, a peer program's load on a GPU, which no one call shows), so a peer's load does not reject a move.  Every rank given the same evidence gets the same
+    parts (R4).
+
+      Balancer({'tp': {'parts': [8, 8], 'grain': 1, 'low': [1, 1], 'high': [15, 15]}})
+      .observe({'step:3': {'scales': {'tp': [1.0, 1.0]}, 'times': [[s, ...], [s, ...]]}, ...}) -> {'tp': [5, 11]}
+
+    `state()` and `Balancer.of(state)` carry it between processes."""
+
+    def __init__(self, decisions, window=3):
+        self.window, self.decisions, self.points = int(window), {}, {}
+        for name, d in decisions.items():
+            parts = [int(p) for p in d['parts']]
+            n, grain = len(parts), int(d.get('grain', 1))
+            low = [int(v) for v in d.get('low') or [0] * n]
+            high = [int(v) for v in d.get('high') or [sum(parts)] * n]
+            if any(p % grain or not lo <= p <= hi for p, lo, hi in zip(parts, low, high)):
+                raise ValueError(f'balancer: {name}: parts {parts} on the grain {grain} within {low} and {high}')
+            self.decisions[name] = {'parts': parts, 'grain': grain, 'low': low, 'high': high, 'before': None, 'stands': False}
+
+    @property
+    def parts(self):
+        return {name: list(d['parts']) for name, d in self.decisions.items()}
+
+    def stands(self, name):
+        return self.decisions[name]['stands']
+
+    def observe(self, stretches):
+        import statistics
+        seen = {}
+        for s, obs in stretches.items():
+            scales = {d: w for d, w in (obs.get('scales') or {}).items() if d in self.decisions}
+            ranks = {i: _robust([float(t) for t in ts]) for i, ts in enumerate(obs['times']) if ts}
+            if scales and ranks:
+                seen[s] = (max(len(ts) for ts in obs['times'] if ts), ranks, scales)
+        for name, d in self.decisions.items():
+            mine = {s: v for s, v in seen.items() if name in v[2]}
+            if not mine:
+                continue
+            measured = sum(c * max(med for med, _ in r.values()) for c, r, _ in mine.values())
+            within = max([0.01] + [2 * se / med for _, r, _ in mine.values() for med, se in r.values() if med > 0])
+            history = d.setdefault('history', {})
+            key = ','.join(map(str, d['parts']))
+            history[key] = (history.get(key, []) + [measured])[-5:]
+            spread = [abs(f / statistics.median(fs) - 1) for fs in history.values() if len(fs) > 1 for f in fs]
+            epsilon, between = within, max(within, 2 * 1.4826 * statistics.median(spread) if len(spread) > 2 else 0.0)
+            last, d['last'] = d.get('last'), [list(d['parts']), measured]
+            changed = False
+            for s, (c, ranks, scales) in mine.items():
+                for i, (med, _) in ranks.items():
+                    units = d['parts'][i]
+                    if not units:
+                        continue
+                    weights = {e: max(0.0, float(w[i] or 0.0)) * bool(self.decisions[e]['parts'][i]) for e, w in scales.items()}
+                    total = sum(weights.values())
+                    share = med * (weights[name] / total if total else 1.0 / len(weights))
+                    own = self.points.get((name, s, i), [])
+                    earlier = [t for u, t in own if u == units][-self.window:]
+                    now = (earlier + [share])[-self.window:]
+                    old, new = (statistics.median(earlier) if earlier else None), statistics.median(now)
+                    if old is not None and abs(new - old) > epsilon * max(new, old):
+                        own, changed = [], True
+                    self.points[(name, s, i)] = [(u, t) for u, t in own if u != units] + [(units, t) for t in now]
+            if last and last[0] != d['parts'] and measured > last[1] * (1 + between):
+                d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
+                d['before'], d['parts'], d['stands'], d['last'] = None, list(last[0]), False, last
+                continue
+            if last and last[0] != d['parts']:
+                d['reach'] = min(2.0, d.get('reach', 2.0) * 2)
+            if d['before'] is not None and d['before'] == d['parts'] and not changed:
+                d['stands'] = True
+                continue
+            n = len(d['parts'])
+            built = []
+            for s, (c, ranks, scales) in mine.items():
+                fs = []
+                per_unit = [self._model(name, s, i)(d['parts'][i]) / d['parts'][i] for i in ranks if d['parts'][i]]
+                per_unit = sorted(per_unit)[len(per_unit) // 2] if per_unit else 0.0
+                for i in range(n):
+                    rest = ranks[i][0] - self._model(name, s, i)(d['parts'][i]) if i in ranks and d['parts'][i] else 0.0
+                    if (name, s, i) in self.points:
+                        fs.append(lambda u, m=self._model(name, s, i), r=rest: m(u) + r if u else r)
+                    else:
+                        fs.append(lambda u, r=rest, k=per_unit: k * u + r)
+                built.append((c, fs))
+            total = sum(d['parts'])
+            if least(total, d['grain'], d['low'], d['high'], built)[1] >= measured * (1 - epsilon):
+                d['before'], d['stands'] = list(d['parts']), True
+                continue
+            grow = d.get('reach', 2.0)
+            reach = [min(d['high'][i], max(d['grain'] * math.ceil(grow * max((u for s in mine for u, _ in self.points.get((name, s, i), [])), default=0) / d['grain']),
+                                           d['grain']))
+                     if any((name, s, i) in self.points for s in mine) else d['high'][i] for i in range(n)]
+            nxt, _ = least(total, d['grain'], d['low'], reach, built)
+            if sum(nxt) < total:
+                nxt, _ = least(total, d['grain'], d['low'], d['high'], built)
+            if d['before'] is not None and any((c - p) * (p - b) < 0 for c, p, b in zip(nxt, d['parts'], d['before'])):
+                half = [(p + c) / 2 for c, p in zip(nxt, d['parts'])]
+                nxt, _ = least(total, d['grain'], [math.floor(h / d['grain']) * d['grain'] for h in half],
+                               [math.ceil(h / d['grain']) * d['grain'] for h in half], built)
+            d['before'], d['parts'], d['stands'] = list(d['parts']), list(nxt), False
+        return self.parts
+
+    def _model(self, name, s, i):
+        return time(_median_points(self.points.get((name, s, i), [])))
 
     def state(self):
-        return {'parts': self.parts, 'grain': self.grain, 'low': self.low, 'high': self.high, 'prior': self.prior,
-                'window': self.window, 'points': self.points, 'before': self.before, 'stands': self.stands}
+        return {'window': self.window, 'decisions': self.decisions,
+                'points': [[d, s, i, own] for (d, s, i), own in self.points.items()]}
 
     @classmethod
     def of(cls, state):
-        b = cls(state['parts'], state['grain'], state['low'], state['high'], state.get('prior'), state.get('window', 3))
-        b.points = [[tuple(p) for p in own] for own in state['points']]
-        b.before, b.stands = state.get('before'), state.get('stands', False)
+        b = cls({}, state.get('window', 3))
+        b.decisions = {name: dict(d) for name, d in state['decisions'].items()}
+        b.points = {(d, s, int(i)): [tuple(p) for p in own] for d, s, i, own in state['points']}
         return b
