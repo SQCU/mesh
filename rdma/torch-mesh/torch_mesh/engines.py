@@ -23,9 +23,9 @@ weights must be constants (the Neural Engine's: a share there is compiled), and 
 Engine's whole tiles); a row count an engine cannot take gives it no units for that decision.
 
 The data path is zero-copy where the memory allows: torch's MPS tensors live in shared Metal memory, so the CPU and
-Neural Engine shares read the GPU's prologue (the input as fp32 for the CPU's products, transposed channels-first
-for the Neural Engine's convolution) in place and write their outputs into MPS tensors in place; the GPU combines the
-shares.  The Neural Engine's binding through coremltools copies its input and output once each (counted in its
+Neural Engine shares read their inputs in place (the GPU's prologue converts the input to fp32 for the CPU's products;
+the Neural Engine's graph reads it row-major as it is) and write their outputs into MPS tensors in place; the GPU
+combines the shares.  The Neural Engine's binding through coremltools copies its input and output once each (counted in its
 time).
 
   lin = engines.Linear(weight, engines=engines.Engines.configured(), name='ffn.up')
@@ -118,23 +118,27 @@ class Cpu(Engine):
 
     def run(self, shard, x, prologue, out):
         began = time.perf_counter()
-        source, target = host(prologue['fp32']), host(out)
-        result = torch.mm(source, shard.T)
-        target.copy_(result)
+        torch.mm(host(prologue['fp32']), shard.T, out=host(out))
         return time.perf_counter() - began
 
 
+class _Compiled:
+    """A Neural Engine share: its fp16 weights and their compiled models by row count."""
+
+    def __init__(self, array):
+        self.array, self.models = array, {}
+
+
 class Ane(Engine):
-    """The Neural Engine through Core ML: the shard a 1x1 convolution with its weights constant, the input
-    channels-first [1, K, 1, rows] (the GPU's prologue transposes it) split into row tiles of `tile` (default 128,
-    metal-microbench docs/soc_compute_backends.md: the tiled graph's measured geometry), compiled once a (weight
-    shard, rows) and cached; fp16 operands."""
+    """The Neural Engine through Core ML: the share a 1x1 convolution with its weights constant, rows in tiles of
+    `tile` (default 128, metal-microbench docs/soc_compute_backends.md: the tiled graph's measured geometry), its
+    input and output row-major (the transposes to and from channels-first inside the graph: on an M4 Pro 4.5 ms
+    against 5.9 with them on the GPU), compiled and loaded once a share and row count; fp16 operands."""
     name, limits = 'ane', {'dtypes': (torch.float16,), 'constants': True, 'tile': 128}
 
     def __init__(self, **options):
         super().__init__(**options)
         self.limits = {**self.limits, 'tile': int(options.get('tile', 128))}
-        self.models = {}
 
     @classmethod
     def missing(cls):
@@ -145,49 +149,52 @@ class Ane(Engine):
         return None
 
     def prepare(self, weight, start, end):
-        return weight[start:end].detach().to('cpu', torch.float16).numpy()
-
-    def _model(self, shard, rows):
-        key = (hashlib.sha1(shard.tobytes()).hexdigest(), rows)
-        if key not in self.models:
-            import coremltools as ct
-            from coremltools.converters.mil import Builder as mb
-            from coremltools.converters.mil.mil import types
-            n, k = shard.shape
-            tile = self.limits['tile']
-
-            @mb.program(input_specs=[mb.TensorSpec(shape=(1, k, 1, rows), dtype=types.fp16)], opset_version=ct.target.macOS15)
-            def program(x):
-                w = mb.const(val=shard.reshape(n, k, 1, 1))
-                pieces = mb.split(x=x, num_splits=rows // tile, axis=3) if rows > tile else [x]
-                outputs = [mb.conv(x=p, weight=w) for p in pieces]
-                return mb.concat(values=outputs, axis=3) if len(outputs) > 1 else outputs[0]
-            model = ct.convert(program, convert_to='mlprogram', compute_units=ct.ComputeUnit.CPU_AND_NE,
-                               compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS15)
-            spec = model.get_spec().description
-            import numpy as np
-            model.predict({spec.input[0].name: np.zeros((1, k, 1, rows), np.float16)})
-            self.models[key] = (model, spec.input[0].name, spec.output[0].name)
-        return self.models[key]
+        return _Compiled(weight[start:end].detach().to('cpu', torch.float16).numpy())
 
     def ready(self, shard, rows):
-        """Whether the share's model for these rows is compiled and loaded (else this call prepares it)."""
-        return (hashlib.sha1(shard.tobytes()).hexdigest(), rows) in self.models
+        return rows in shard.models
 
     def load(self, shard, rows):
-        self._model(shard, rows)
+        import coremltools as ct
+        import numpy as np
+        from coremltools.converters.mil import Builder as mb
+        from coremltools.converters.mil.mil import types
+        n, k = shard.array.shape
+        tile = self.limits['tile']
+
+        @mb.program(input_specs=[mb.TensorSpec(shape=(rows, k), dtype=types.fp16)], opset_version=ct.target.macOS15)
+        def program(x):
+            w = mb.const(val=shard.array.reshape(n, k, 1, 1))
+            channels = mb.reshape(x=mb.transpose(x=x, perm=[1, 0]), shape=[1, k, 1, rows])
+            pieces = mb.split(x=channels, num_splits=rows // tile, axis=3) if rows > tile else [channels]
+            outputs = [mb.conv(x=p, weight=w) for p in pieces]
+            y = mb.concat(values=outputs, axis=3) if len(outputs) > 1 else outputs[0]
+            return mb.transpose(x=mb.reshape(x=y, shape=[n, rows]), perm=[1, 0])
+        model = ct.convert(program, convert_to='mlprogram', compute_units=ct.ComputeUnit.CPU_AND_NE,
+                           compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS15)
+        spec = model.get_spec().description
+        model.predict({spec.input[0].name: np.zeros((rows, k), np.float16)})
+        shard.models[rows] = (model, spec.input[0].name, spec.output[0].name)
 
     def run(self, shard, x, prologue, out):
         began = time.perf_counter()
-        rows, n = x.shape[0], shard.shape[0]
-        model, name, output = self._model(shard, rows)
-        channels = host(prologue['channels'])
-        result = model.predict({name: channels.numpy().reshape(1, -1, 1, rows)})[output]
-        host(out).copy_(torch.from_numpy(result.reshape(n, rows)))
+        model, name, output = shard.models[x.shape[0]]
+        result = model.predict({name: host(x).numpy()})[output]
+        host(out).copy_(torch.from_numpy(result))
         return time.perf_counter() - began
 
 
 ENGINES = {e.name: e for e in (Mps, Cpu, Ane)}
+
+
+def _interactive():
+    """A worker thread at user-interactive QoS: the scheduler keeps it, Core ML's host work and Accelerate's
+    products on the performance cores (at the default QoS a Core ML prediction took 5.2 ms against 4.7 on an M4
+    Pro)."""
+    try:
+        ctypes.CDLL(None).pthread_set_qos_class_self_np(0x21, 0)
+    except (OSError, AttributeError):
+        pass
 
 
 class Engines:
@@ -204,7 +211,7 @@ class Engines:
             raise RuntimeError(f'engines: this node lacks {lacking}')
         self.names = names
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
-        self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1))
+        self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1), initializer=_interactive)
         self.operations, self.evidence, self.balancer, self.last = [], {}, None, {}
 
     @classmethod
@@ -279,11 +286,8 @@ class Linear:
         prologue = {}
         if any(engines[i].name == 'cpu' for i in held):
             prologue['fp32'] = x2.float()
-        if any(engines[i].name == 'ane' for i in held):
-            prologue['channels'] = x2.T.contiguous()
-        shapes = {'ane': lambda p: (p, rows)}
-        outs = {i: torch.empty(*shapes.get(engines[i].name, lambda p: (rows, p))(parts[i]), device=x2.device,
-                               dtype=torch.float32 if engines[i].name == 'cpu' else x2.dtype) for i in held}
+        outs = {i: torch.empty(rows, parts[i], device=x2.device, dtype=torch.float32 if engines[i].name == 'cpu' else x2.dtype)
+                for i in held}
         ready = torch.mps.Event(enable_timing=False)
         ready.record()
         shards = {i: self._shard(engines[i], bounds[i], bounds[i + 1], rows) for i in held}
@@ -299,7 +303,7 @@ class Linear:
         futures = {i: self.engines.workers.submit(engines[i].run, shards[i][0], x2, prologue, outs[i])
                    for i in held if engines[i].name != 'mps'}
         seconds = {i: f.result() for i, f in futures.items()}
-        pieces = [outs[i].T if engines[i].name == 'ane' else outs[i] for i in held]
+        pieces = [outs[i] for i in held]
         y = torch.cat([p.to(x2.dtype) for p in pieces], dim=1) if len(pieces) > 1 else pieces[0].to(x2.dtype)
         if self.bias is not None:
             y = y + self.bias
