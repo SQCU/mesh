@@ -1,4 +1,4 @@
-#include "mesh-verbs.h"
+#include "mesh-recovery.h"
 #include "mesh-call.h"
 #include <pthread.h>
 #include <sys/event.h>
@@ -97,10 +97,8 @@ struct mesh_link {
   struct mesh_trace *trace[2];
   size_t traced[2],trace_capacity[2];
   int ledger;
-  /* a loss the link is to survive (link_lost): its code and domain, and the link's resumptions */
-  _Atomic int64_t lost;
-  uint32_t lost_domain;
-  uint64_t resumes;
+  /* design/recovery.md: the link's loss and resumptions (mesh-recovery.h) */
+  struct mesh_recovery recovery;
 };
 /* design/prepared-machine.md#M26 */
 static _Atomic(struct hdr *) control_memory;
@@ -127,20 +125,10 @@ static __attribute__((noinline)) void link_error(struct mesh_link *link,int64_t 
   atomic_store_explicit(&port->prepared,link->client,memory_order_release);
   link_stop(link);
 }
-/* How long a link that dropped (its cable, its peer's link, its control socket, a failed completion) may take to pair
-   again before it stops: MESH_RESUME_SECONDS (default 10, the ranks' silent bound, past which they cancel it); 0 stops
-   it at once, as before. */
-static uint64_t resume_ns(void){
-  const char *given=getenv("MESH_RESUME_SECONDS");
-  const double seconds=given?atof(given):10.0;
-  return seconds>0?(uint64_t)(seconds*1e9):0;
-}
-/* A loss the link may survive: it is suspended and pairs again (link_resume) where resume_ns allows, else it stops. */
+/* design/recovery.md#loss: a loss the link may survive suspends it (mesh_recovery_resume, in link_run), else it stops. */
 static void link_lost(struct mesh_link *link,int64_t code,uint32_t domain){
-  if(!resume_ns()){link_error(link,code,domain);return;}
-  int64_t none=0;
-  if(atomic_compare_exchange_strong(&link->lost,&none,code?code:EIO))link->lost_domain=domain;
-  link_stop(link);
+  if(mesh_recovery_lose(&link->recovery,code,domain))link_stop(link);
+  else link_error(link,code,domain);
 }
 /* design/prepared-machine.md#M04 */
 /* design/prepared-machine.md#M06 */
@@ -509,12 +497,11 @@ static void *link_receive_progress(void *argument){
 
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#meshresult */
-#define MESH_FAREWELL 0x46
 static void link_close(struct mesh_link *link,int *control){
   atomic_store_explicit(&link->progressing,0,memory_order_release);
   if(link->network>=0){close(link->network);link->network=-1;}
-  /* an orderly end tells the peer so (MESH_FAREWELL), which a lost link cannot: the peer stops rather than resumes */
-  if(*control>=0){const char farewell=MESH_FAREWELL;send(*control,&farewell,1,MSG_DONTWAIT);shutdown(*control,SHUT_RDWR);}
+  /* design/recovery.md#farewell */
+  if(*control>=0){mesh_recovery_farewell(*control);shutdown(*control,SHUT_RDWR);}
   while(link->worker_count)pthread_join(link->workers[--link->worker_count],NULL);
   if(link->cancel)mesh_cancel(link->M,link->cancel,link->index);
   /* design/prepared-machine.md#M27 (mesh git e9b9a08^) */
@@ -558,20 +545,20 @@ static int link_workers(struct mesh_link *link){
   return error;
 }
 
-#define MESH_RESUME 0x4d524553554d45ull
-/* A paired link's resumption on new queue pairs (verbs_up's configuration, link_resume): every record and request
+/* design/recovery.md#resumption */
+/* A paired link's resumption on new queue pairs (verbs_up's configuration, link_pair): every record and request
    stays where link_configure laid it.  Each ring's records landed in the order posted, so the peer's SENDs on a queue
    pair resume at the record its ring landed last, and this link's at the peer's: each side tells the other its rings'
-   landed counts, posts its rings again from their own, and moves each SEND stream back to the peer's count of its
-   queue pair, mid-cell where a cell's chain had landed in part (its producer released it); the barrier after the
-   posting holds every SEND until the peer's receives are posted.  0, or -1 with errno. */
+   landed counts (mesh_recovery_exchange), posts its rings again from their own, and moves each SEND stream back to
+   the peer's count of its queue pair, mid-cell where a cell's chain had landed in part (its producer released it);
+   the barrier after the posting (mesh_recovery_barrier) holds every SEND until the peer's receives are posted.  0, or
+   -1 with errno. */
 static int link_reconfigure(void *state,int socket,uint64_t client){
   struct mesh_link *link=state;struct hdr *m=link->M;
   int qps=link->qps;
   uint32_t receives=(uint32_t)link->provider.completion->cqe/(uint32_t)qps,sends=(uint32_t)link->provider.sent->cqe/(uint32_t)qps;
-  uint64_t *mine=calloc((size_t)qps+1,sizeof *mine),*peer=calloc((size_t)qps+1,sizeof *peer);
+  uint64_t *mine=calloc((size_t)qps,sizeof *mine),*peer=calloc((size_t)qps,sizeof *peer);
   if(!mine||!peer){free(mine);free(peer);errno=ENOMEM;return -1;}
-  mine[0]=MESH_RESUME;
   for(int q=0;q<qps;q++){
     struct send_gate *gate=link->gates+q;
     gate->posted=gate->retired=0;gate->capacity=MIN(link->provider.queues[q].send_capacity,sends);
@@ -579,15 +566,13 @@ static int link_reconfigure(void *state,int socket,uint64_t client){
     for(size_t i=0;i<ring->count;i++)ring->first[i].pair=link->provider.queues[q].pair;
     ring->posted=ring->landed;ring->outstanding=0;
     ring->capacity=MIN(link->provider.queues[q].receive_capacity,receives);
-    mine[1+q]=ring->landed;
+    mine[q]=ring->landed;
   }
-  if(exchange(socket,mine,peer,((size_t)qps+1)*sizeof *mine,((size_t)qps+1)*sizeof *peer,m,client,link->provider.deadline)){
-    int error=errno;free(mine);free(peer);errno=error;return -1;}
-  if(peer[0]!=MESH_RESUME){free(mine);free(peer);errno=EPROTO;return -1;}
+  if(mesh_recovery_exchange(socket,qps,mine,peer,m,client,link->provider.deadline)){int error=errno;free(mine);free(peer);errno=error;return -1;}
   for(uint32_t s=0;s<link->stream_count;s++){
     struct send_stream *stream=link->streams+s;
     struct mesh_send *cell=stream->first;
-    uint64_t left=peer[1+cell->queue],cycle=0;
+    uint64_t left=peer[cell->queue],cycle=0;
     while(left && left>=cell->chunks){
       left-=cell->chunks;cell=(struct mesh_send *)cell->successor;
       if(cell==stream->first)cycle++;
@@ -600,23 +585,16 @@ static int link_reconfigure(void *state,int socket,uint64_t client){
     }
   }
   fprintf(stderr,"link %u resumes:",link->index);
-  for(int q=0;q<qps;q++)fprintf(stderr," queue %d landed %llu, the peer's %llu",q,(unsigned long long)mine[1+q],(unsigned long long)peer[1+q]);
+  for(int q=0;q<qps;q++)fprintf(stderr," queue %d landed %llu, the peer's %llu",q,(unsigned long long)mine[q],(unsigned long long)peer[q]);
   fprintf(stderr,"\n");
   free(mine);free(peer);
   for(int q=0;q<qps;q++){int error=ring_advance(link,link->rings+q);if(error){errno=error;return -1;}}
-  uint32_t posted=1,peer_posted;
-  return exchange(socket,&posted,&peer_posted,sizeof posted,sizeof peer_posted,m,client,link->provider.deadline);
+  return mesh_recovery_barrier(socket,m,client,link->provider.deadline);
 }
 
-/* A link that dropped (link_lost) suspended and paired again: its progress threads stopped, the receives that landed
-   before the loss taken (their completion words stored), its queue pairs and control socket closed, then verbs_up
-   again until it pairs on new ones (link_reconfigure) or MESH_RESUME_SECONDS pass, the call's client exits or a rank
-   cancels the link (its silent bound).  The ranks' reads wait meanwhile.  0, resumed; else the reason. */
-static int link_resume(struct mesh_link *link,int *control){
-  struct hdr *m=link->M;struct mesh_port_info *port=&mesh_links(m)[link->index].port;
-  const uint64_t began=clock_gettime_nsec_np(CLOCK_MONOTONIC),deadline=began+resume_ns();
-  atomic_store_explicit(&port->phase,MESH_SUSPENDED,memory_order_release);
-  fprintf(stderr,"link %u suspended: code %lld domain %u\n",link->index,(long long)atomic_load(&link->lost),link->lost_domain);
+/* design/recovery.md#suspension: the transport's side of a resumption (struct mesh_recovery_transport) */
+static void link_halt(void *state){
+  struct mesh_link *link=state;
   while(link->worker_count)pthread_join(link->workers[--link->worker_count],NULL);
   struct ibv_wc done[16];int count;
   while(link->provider.completion && (count=ibv_poll_cq(link->provider.completion,16,done))>0)
@@ -627,37 +605,38 @@ static int link_resume(struct mesh_link *link,int *control){
       ring->landed++;ring->bytes+=done[i].byte_len;
       atomic_store_explicit(record->input,record->argument+record->cycle,memory_order_release);
     }
+}
+static int link_release(void *state,int *control){
+  struct mesh_link *link=state;
   if(*control>=0){close(*control);*control=-1;}
   if(link->provider.listener>=0){close(link->provider.listener);link->provider.listener=-1;}
-  if(!down_pair(&link->provider))return EIO;
-  const pid_t client=(pid_t)(uint32_t)link->client;
-  for(;;){
-    if(stop || atomic_load_explicit(&m->client,memory_order_acquire)!=link->client || kill(client,0))return ECANCELED;
-    if(link->cancel && atomic_load_explicit(&link->cancel->requested,memory_order_acquire))return ECANCELED;
-    const uint64_t now=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-    if(now>=deadline)return ETIMEDOUT;
-    link->provider.window=deadline-now;
-    int f=verbs_up(&link->provider,m,link->qps,link_reconfigure,link,link->client);
-    link->provider.window=0;
-    if(f>=0){*control=f;break;}
-    if(!down_pair(&link->provider))return EIO;
-    if(link->provider.listener>=0){close(link->provider.listener);link->provider.listener=-1;}
-    poll(NULL,0,20);
-  }
+  return down_pair(&link->provider)?0:EIO;
+}
+static int link_pair(void *state,uint64_t window){
+  struct mesh_link *link=state;
+  link->provider.window=window;
+  int f=verbs_up(&link->provider,link->M,link->qps,link_reconfigure,link,link->client);
+  link->provider.window=0;
+  return f;
+}
+static int link_abandoned(void *state){
+  struct mesh_link *link=state;struct hdr *m=link->M;
+  return stop || atomic_load_explicit(&m->client,memory_order_acquire)!=link->client || kill((pid_t)(uint32_t)link->client,0) ||
+    (link->cancel && atomic_load_explicit(&link->cancel->requested,memory_order_acquire));
+}
+static int link_watch(void *state,int control){
+  struct mesh_link *link=state;
   struct kevent64_s event;
-  EV_SET64(&event,*control,EVFILT_READ,EV_ADD|EV_CLEAR,0,0,0,0,0);
+  EV_SET64(&event,control,EVFILT_READ,EV_ADD|EV_CLEAR,0,0,0,0,0);
   if(kevent64(link->events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL))return errno;
   /* the link's events of the outage are past: the port is active again */
   while(link->network>=0 && recv(link->network,link->network_event.bytes,sizeof link->network_event,0)>0){}
-  atomic_store_explicit(&link->lost,0,memory_order_release);
-  atomic_store_explicit(&link->progressing,1,memory_order_release);
-  int error=link_workers(link);
-  if(error)return error;
-  link->resumes++;
-  atomic_store_explicit(&port->phase,MESH_PAIRED,memory_order_release);
-  fprintf(stderr,"link %u resumed after %.3f s (resumption %llu)\n",link->index,
-    (double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-began)/1e9,(unsigned long long)link->resumes);
   return 0;
+}
+static int link_restart(void *state){
+  struct mesh_link *link=state;
+  atomic_store_explicit(&link->progressing,1,memory_order_release);
+  return link_workers(link);
 }
 
 /* design/prepared-machine.md#M04 */
@@ -687,6 +666,8 @@ static void *link_run(void *argument){
   if(!error && transfers){
     atomic_store_explicit(&port->phase,MESH_PAIRING,memory_order_release);
     control=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
+    /* design/recovery.md#detection */
+    if(control>=0 && (error=mesh_recovery_keepalive(control))){close(control);control=-1;errno=error;}
     if(control<0)link_error(link,errno?errno:EIO,1);
     else {
       EV_SET64(&event,control,EVFILT_READ,EV_ADD|EV_CLEAR,0,0,0,0,0);
@@ -707,10 +688,11 @@ static void *link_run(void *argument){
     atomic_store_explicit(&link->progressing,0,memory_order_release);
   }
   for(;;){
-    if(atomic_load_explicit(&link->lost,memory_order_acquire) && !stop &&
-       atomic_load_explicit(&m->client,memory_order_acquire)==link->client){
-      if(!link_resume(link,&control))continue;
-      link_error(link,atomic_exchange(&link->lost,0),link->lost_domain);
+    /* design/recovery.md#suspension */
+    if(mesh_recovery_pending(&link->recovery) && !stop && atomic_load_explicit(&m->client,memory_order_acquire)==link->client){
+      const struct mesh_recovery_transport transport={link,link_halt,link_release,link_pair,link_abandoned,link_watch,link_restart};
+      if(!mesh_recovery_resume(&link->recovery,&transport,&port->phase,link->index,&control))continue;
+      link_error(link,mesh_recovery_taken(&link->recovery),link->recovery.domain);
     }
     if(!atomic_load_explicit(&link->progressing,memory_order_acquire))link_close(link,&control);
     if(stop || atomic_load_explicit(&m->client,memory_order_acquire)!=link->client ||
@@ -736,9 +718,8 @@ static void *link_run(void *argument){
         }
       }
     } else if(event.filter==EVFILT_READ){
-      /* the control socket: the peer's farewell is an orderly end, its silence or reset a loss */
-      char said=0;
-      if(recv((int)event.ident,&said,1,MSG_DONTWAIT)==1 && said==MESH_FAREWELL)link_error(link,ECONNRESET,4);
+      /* design/recovery.md#farewell: the control socket: the peer's farewell is an orderly end, its silence or reset a loss */
+      if(mesh_recovery_parted((int)event.ident))link_error(link,ECONNRESET,4);
       else link_lost(link,event.flags&EV_EOF?(event.fflags?event.fflags:ECONNRESET):EPROTO,4);
     }
   }

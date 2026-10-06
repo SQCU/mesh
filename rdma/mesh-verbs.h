@@ -303,15 +303,7 @@ static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*conf
   provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+(provider->window?provider->window:pair_window_ns());
   int f=oob(provider,m,client);
   if(f<0)return -1;
-  /* A peer host that dies silently (power, panic) or a link that drops becomes an EOF on this control socket
-     within idle + interval x count seconds, a link event (mesh-flow.c link_run); UC queue pairs report
-     nothing (docs/elastic.md §1 in metal-microbench).  A link that drops suspends and pairs again within
-     MESH_RESUME_SECONDS (mesh-flow.c link_resume), so the loss is told within three. */
-  int on=1,idle=1,interval=1,count=2;
-  if(setsockopt(f,SOL_SOCKET,SO_KEEPALIVE,&on,sizeof on) || setsockopt(f,IPPROTO_TCP,TCP_KEEPALIVE,&idle,sizeof idle) ||
-     setsockopt(f,IPPROTO_TCP,TCP_KEEPINTVL,&interval,sizeof interval) || setsockopt(f,IPPROTO_TCP,TCP_KEEPCNT,&count,sizeof count)){
-    int error=errno;close(f);errno=error;return -1;
-  }
+  /* the control socket's loss detection is the recovery module's (mesh-recovery.h mesh_recovery_keepalive) */
   uint32_t frame_capacity=provider->device->frame_capacity;
   /* design/prepared-machine.md#M11 */
   provider->queues=calloc((size_t)qps,sizeof *provider->queues);

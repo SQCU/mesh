@@ -5,7 +5,7 @@ native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
 .build/%.s: %.c mesh.h mesh-verbs.h mesh-dataflow.h mesh-call.h Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
-mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-dataflow.h mesh-call.h mesh-dataflow.c Makefile
+mesh-flow: mesh-flow.c mesh-verbs.h mesh-recovery.h mesh.h mesh-dataflow.h mesh-call.h mesh-dataflow.c Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -o .build/$@ mesh-flow.c mesh-dataflow.c -lrdma
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
@@ -40,7 +40,7 @@ mesh-c: mesh_c_build.py mesh-plan.h nccl.h libmesh.dylib libnccl-mesh.dylib
 
 # mesh-flow-loop: the bridge over loopverbs.c (shared memory between the bridges of one machine, each a node), for
 # running N nodes on one host; never a production bridge (no RDMA, ad-hoc signed)
-mesh-flow-loop: mesh-flow.c mesh-verbs.h mesh.h mesh-dataflow.h mesh-call.h mesh-dataflow.c loopverbs.c Makefile
+mesh-flow-loop: mesh-flow.c mesh-verbs.h mesh-recovery.h mesh.h mesh-dataflow.h mesh-call.h mesh-dataflow.c loopverbs.c Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Wno-unused-parameter -o .build/$@ mesh-flow.c mesh-dataflow.c loopverbs.c
 	codesign --force --sign - --identifier io.mesh.bridge.loop .build/$@
