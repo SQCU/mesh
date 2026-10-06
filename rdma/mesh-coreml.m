@@ -116,3 +116,19 @@ long mesh_coreml_placement(long handle, char *out, size_t size) {
     return -1;
   }
 }
+
+/* A model package compiled (MLModel compileModelAtURL) into `destination` (a .mlmodelc, replaced where present), so a
+   process loads it without compiling: 0, or -1. */
+int mesh_coreml_compile(const char *package, const char *destination) {
+  @autoreleasepool {
+    NSError *error = nil;
+    NSURL *compiled = [MLModel compileModelAtURL:[NSURL fileURLWithPath:@(package)] error:&error];
+    if (!compiled) { snprintf(error_, sizeof error_, "compile: %s", error.localizedDescription.UTF8String); return -1; }
+    NSURL *target = [NSURL fileURLWithPath:@(destination)];
+    [[NSFileManager defaultManager] removeItemAtURL:target error:nil];
+    if (![[NSFileManager defaultManager] moveItemAtURL:compiled toURL:target error:&error]) {
+      snprintf(error_, sizeof error_, "move: %s", error.localizedDescription.UTF8String); return -1;
+    }
+    return 0;
+  }
+}

@@ -107,6 +107,8 @@ def _coreml():
             lib.mesh_coreml_error.restype = ctypes.c_char_p
             lib.mesh_coreml_placement.restype = ctypes.c_long
             lib.mesh_coreml_placement.argtypes = [ctypes.c_long, ctypes.c_char_p, ctypes.c_size_t]
+            lib.mesh_coreml_compile.restype = ctypes.c_int
+            lib.mesh_coreml_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
             _CORE_ML = lib
         except (OSError, subprocess.CalledProcessError):
             _CORE_ML = False
@@ -246,33 +248,10 @@ class Ane(Engine):
         return rows in shard.models
 
     def load(self, shard, rows):
-        import coremltools as ct
         import numpy as np
-        from coremltools.converters.mil import Builder as mb
-        from coremltools.converters.mil.mil import types
         tile = self.limits['tile']
+        model = neural_engine_model(shard.kind, shard.arrays, rows, tile)
         width = shard.arrays[0].shape[1]
-
-        conv = lambda array: mb.const(val=array.reshape(array.shape[0], array.shape[1], 1, 1))
-
-        @mb.program(input_specs=[mb.TensorSpec(shape=(rows, width), dtype=types.fp16)], opset_version=ct.target.macOS15)
-        def program(x):
-            weights = [conv(a) for a in shard.arrays[:2]] + ([conv(np.ascontiguousarray(shard.arrays[2]))] if shard.kind == 'ffn' else [])
-            channels = mb.reshape(x=mb.transpose(x=x, perm=[1, 0]), shape=[1, width, 1, rows])
-            pieces = mb.split(x=channels, num_splits=rows // tile, axis=3) if rows > tile else [channels]
-            outputs = []
-            for p in pieces:
-                if shard.kind == 'linear':
-                    outputs.append(mb.conv(x=p, weight=weights[0]))
-                else:
-                    h = mb.mul(x=mb.gelu(x=mb.conv(x=p, weight=weights[0]), mode='TANH_APPROXIMATION'),
-                               y=mb.conv(x=p, weight=weights[1]))
-                    outputs.append(mb.conv(x=h, weight=weights[2]))
-            y = mb.concat(values=outputs, axis=3) if len(outputs) > 1 else outputs[0]
-            n = shard.arrays[0].shape[0] if shard.kind == 'linear' else shard.arrays[2].shape[0]
-            return mb.transpose(x=mb.reshape(x=y, shape=[n, rows]), perm=[1, 0])
-        model = ct.convert(program, convert_to='mlprogram', compute_units=ct.ComputeUnit.CPU_AND_NE,
-                           compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS15)
         spec = model.get_spec().description
         inputs, outputs = spec.input[0].name, spec.output[0].name
         n = shard.arrays[0].shape[0] if shard.kind == 'linear' else shard.arrays[2].shape[0]
@@ -321,6 +300,38 @@ class Ane(Engine):
 
     def run_ffn(self, op, shard, x, prologue, out):
         return self._run(shard, x, out)
+
+
+def neural_engine_model(kind, arrays, rows, tile=128):
+    """A Neural Engine share as a Core ML program (coremltools; fp16): `kind` 'linear' (arrays: W [N, K]) or 'ffn'
+    (arrays: Wg, Wu [I, K], Wd [K, I]: down(gelu_tanh(x Wg^T) * (x Wu^T))), its input x [rows, K] and output [rows, N or
+    K] row-major, the transposes to and from channels-first inside the graph, rows in tiles of `tile`, each tile one 1x1
+    convolution a matrix with its weights constant.  The one statement of the graph: this module's Ane engine and the
+    metal-microbench engine's prepared shares (tools/mesh/neural_engine.py) both build it here."""
+    import coremltools as ct
+    import numpy as np
+    from coremltools.converters.mil import Builder as mb
+    from coremltools.converters.mil.mil import types
+    width = arrays[0].shape[1]
+    conv = lambda array: mb.const(val=array.reshape(array.shape[0], array.shape[1], 1, 1))
+
+    @mb.program(input_specs=[mb.TensorSpec(shape=(rows, width), dtype=types.fp16)], opset_version=ct.target.macOS15)
+    def program(x):
+        weights = [conv(a) for a in arrays[:2]] + ([conv(np.ascontiguousarray(arrays[2]))] if kind == 'ffn' else [])
+        channels = mb.reshape(x=mb.transpose(x=x, perm=[1, 0]), shape=[1, width, 1, rows])
+        pieces = mb.split(x=channels, num_splits=rows // tile, axis=3) if rows > tile else [channels]
+        outputs = []
+        for p in pieces:
+            if kind == 'linear':
+                outputs.append(mb.conv(x=p, weight=weights[0]))
+            else:
+                h = mb.mul(x=mb.gelu(x=mb.conv(x=p, weight=weights[0]), mode='TANH_APPROXIMATION'), y=mb.conv(x=p, weight=weights[1]))
+                outputs.append(mb.conv(x=h, weight=weights[2]))
+        y = mb.concat(values=outputs, axis=3) if len(outputs) > 1 else outputs[0]
+        n = arrays[0].shape[0] if kind == 'linear' else arrays[2].shape[0]
+        return mb.transpose(x=mb.reshape(x=y, shape=[n, rows]), perm=[1, 0])
+    return ct.convert(program, convert_to='mlprogram', compute_units=ct.ComputeUnit.CPU_AND_NE,
+                      compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS15)
 
 
 ENGINES = {e.name: e for e in (Mps, Cpu, Ane)}
