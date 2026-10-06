@@ -291,11 +291,15 @@ int mesh_compile(const struct mesh_trees *trees,uint32_t what,uint32_t root,int 
       }
     }
   }else{
-    /* the parts: a rooted collective's root's trees, else each segment's own node's, each a part at its weight */
+    /* the parts: a rooted collective's root's trees, else each segment's own node's, each a part at its weight; an
+       all-gather's segments its contributors' alone, in node order */
     const int rooted=what==MESH_REDUCE || what==MESH_BROADCAST;
-    for(uint32_t g=0;g<(rooted?1:n);g++)
+    for(uint32_t g=0,index=0;g<(rooted?1:n);g++){
+      if(what==MESH_ALLGATHER && !mesh_member(contributors,g))continue;
       for(uint32_t t=0;t<T;t++)
-        if(trees->root[t]==(rooted?root:g)){part_of[t]=parts;segment[parts]=rooted?0:g;log_weight[parts]=trees->log_weight[t];parts++;}
+        if(trees->root[t]==(rooted?root:g)){part_of[t]=parts;segment[parts]=rooted?0:index;log_weight[parts]=trees->log_weight[t];parts++;}
+      index++;
+    }
     if(!parts)goto done;
     const int up=what==MESH_ALLREDUCE || what==MESH_REDUCE || what==MESH_REDUCE_SCATTER;
     const int down=what==MESH_ALLREDUCE || what==MESH_BROADCAST || what==MESH_ALLGATHER;

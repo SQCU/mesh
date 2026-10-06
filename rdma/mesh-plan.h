@@ -110,7 +110,9 @@ void mesh_compile_room(const struct mesh_trees *,uint32_t *parts,uint32_t *moves
    base + d - 1 and sends at base + d, base the reduce-scatter's last round plus one; a round's SENDs come before its
    receives, so a SEND waits on lower rounds alone.  A message is coalesced with the next between the same two nodes
    in the same round where their parts adjoin and each end's buffer and step are the same.  `contributors` (a bit a
-   node, 64 a word; NULL: every node) are the nodes whose operands an all-reduce combines.  0, or EINVAL. */
+   node, 64 a word; NULL: every node) are the nodes whose operands an all-reduce combines, and the nodes whose
+   segments an all-gather gathers: the operand is theirs in node order, each down its node's trees to every node,
+   the others holding none.  0, or EINVAL. */
 int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole,const uint64_t *contributors,
                  struct mesh_program *program,uint32_t *segment,double *log_weight,uint32_t *first,struct mesh_move *move);
 /* A rank's steps of a program for an operand, a step a move (none where its elements are none), at most first[rank +
