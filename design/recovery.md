@@ -74,13 +74,13 @@ Each with its source and its status as of 2026-10-06: **met** (on evidence named
 
 | id | requirement | source | status |
 |---|---|---|---|
-| Q1 | A short drop of a direct link costs the outage, not the call | mandate 1 | met for a pair, interface down 3-5 s (`#suspension`); evidence weak (Evidence) |
+| Q1 | A short drop of a direct link costs the outage, not the call | mandate 1 | met for a pair, interface down 3-8 s (`#suspension`); exact: the collectives matrix, 1548/1548 calls equal to their expected values through a 5 s and a 3 s drop, one resumption re-sending 256 records |
 | Q2 | A long drop costs no more than the work the remaining members could not do | mandate 1, 4 | partial: survivors continue alone; readmission costs two call setups (23-33 s each) |
 | Q3 | Recovery between NFEs only; none promised inside one | mandates 2, 3 | conflict: resumption works inside an NFE |
-| Q4 | A link down at a call's first pairing is retried within the pairing window | mandate 1, 4 | unmet: device_up's ENETDOWN fails the link at once (the 2026-10-05 call 99) |
+| Q4 | A link down at a call's first pairing is retried within the pairing window | mandate 1, 4 | built (`#first`, a pause apart); a drop as the bridges start rode through (the dials waited), the port-down path itself not yet hit live |
 | Q5 | Peer identity independent of the link: (node, boot nonce, program epoch) plus a connection index | deliverables R1 | unmet: no instance identity; a restarted peer bridge answers EPROTO |
 | Q6 | Loss is observed at the completion queue and the control socket, never by a data-path timer | deliverables R2 | partial: the control socket's keepalive is a timer on the control path, not the data path |
-| Q7 | A bounded loop pairs again while the bridge is up: devices enumerated again, the neighbour cache warmed, one deadline an attempt, a fixed pause, the listener reopened | deliverables R3 | partial: bounded by the window; listener reopened; no re-enumeration, no neighbour warm-up, a 20 ms pause (see Risks) |
+| Q7 | A bounded loop pairs again while the bridge is up: devices enumerated again, the neighbour cache warmed, one deadline an attempt, a fixed pause, the listener reopened | deliverables R3 | partial: bounded by the window; listener reopened; a fixed 3 s pause (`#pause`); no re-enumeration, no neighbour warm-up |
 | Q8 | A realized program survives link loss without being realized again | deliverables R4 | met for a pair within the window |
 | Q9 | A port move needs no configuration: the configuration names peers, not devices | deliverables R5 | unmet: a link is its device; a moved cable gives up to the call |
 | Q10 | A partition of more than two nodes is a topology change, not an error storm | deliverables R6 | unreachable: two nodes on hardware; loopback has no fault injection |
@@ -90,9 +90,9 @@ Each with its source and its status as of 2026-10-06: **met** (on evidence named
 | Q14 | Every blocking call bounded; no unbounded completion-queue poll | RDMA-RULES.md | met by reading (window, pairing deadline, `link_halt` drains what is queued) |
 | Q15 | Port loss retires all device state; an ordinary reconnection keeps context, PD and registrations | RDMA-KERNEL-RECOVERY.md | unmet: a link-off keeps context, PD and registrations (see Risks) |
 | Q16 | No cross-queue GPU spin; every spun-on word in a canceller's set | memory no_cross_queue_gpu_spins | met: a link's words stay in the rank's cancel set through a suspension |
-| Q17 | A rank does not cancel a link its bridge is resuming within the window | consistency of `#window` | unmet: the detector ignores MESH_SUSPENDED; it fires 10-20 s after the last landing, the window is 10 s from the loss: outages near 5-10 s race (untested) |
-| Q18 | The driver forwards the recovery window to every bridge | consistency | unmet: grid.py passes MESH_PAIR_SECONDS, not MESH_RESUME_SECONDS (the default rules) |
-| Q19 | A readmitted link that answers ICMP but not RDMA does not flap at call level | mandate 1 | unmet: no hysteresis; each readmission costs a call setup |
+| Q17 | A rank does not cancel a link its bridge is resuming within the window | consistency of `#window` | met: the detector passes a MESH_SUSPENDED link (mb mesh_rank.m); an 8 s drop: one call, resumed after 6.1 and 8.7 s |
+| Q18 | The driver forwards the recovery window to every bridge | consistency | met: grid.py forwards MESH_RESUME_SECONDS and MESH_RECOVERY_PAUSE_MS |
+| Q19 | A readmitted link that answers ICMP but not RDMA does not flap at call level | mandate 1 | partial: a link failing within 30 s of its readmission is probed at twice its delay (to 60 s); the probe pings interfaces whose port is active; untested |
 | Q20 | Algorithms total over every membership and topology (ring, star, relays, uncabled pairs) | mandate 6 | unreachable on hardware (two nodes); untested on loopback |
 
 ## The module as built
@@ -132,7 +132,18 @@ answers a fresh pairing (a restarted bridge) is EPROTO: no resumption.
 `mesh_recovery_resume`: the phase `MESH_SUSPENDED`; the transport halted (threads joined, the receives that landed
 taken) and released (control socket, listener, queue pairs); then `verbs_up` again until it pairs, the window
 passes, or the call abandons the link (the bridge stopped, its client exited, another client took the region, a
-rank cancelled the link), 20 ms between attempts; then watched, restarted, `MESH_PAIRED`.
+rank cancelled the link), a pause before every attempt; then watched, restarted, `MESH_PAIRED`.
+
+### pause
+
+`MESH_RECOVERY_PAUSE_MS` (default 3000) before every pairing again: the pause a lost session took after the
+2026-09-05 panic (mesh be9731b: "failed completions, queue-pair teardown and immediate re-pairing preceded the Sep 5
+kernel panic"). A listener waits for its peer's dial on poll, not a spinning core.
+
+### first
+
+A first pairing whose port is not active (ENETDOWN, before any queue pair exists) tries again a pause apart within
+its pairing window, so a link down as a call starts does not fail it.
 
 ### the driver's side
 
@@ -143,20 +154,25 @@ revokes the call running without it. A failed call also sends the Balancer's par
 
 1. **Immediate re-pairing and the September panic.** mesh be9731b (2026-09-28): "A lost session waits 3 s before
    pairing again: failed completions, queue-pair teardown and immediate re-pairing preceded the Sep 5 kernel panic."
-   The resumption retries every 20 ms. Not yet a failure here; a hazard history names.
+   Answered by `#pause` (3 s); the cause of the panic itself is not established.
 2. **Device state on port loss.** RDMA-KERNEL-RECOVERY.md: port loss retires all device state (QP, CQ, MR, PD,
    context, in that order); the resumption keeps context, PD and registrations across a link-off. Worked for an
    interface down/up; untested for a pull, a detach (`KEV_DL_IF_DETACHED`) or a moved port.
 3. **Neighbour cache after a replug.** RDMA-RULES.md: after any replug both sides fail RTR unless the neighbour cache
    is warmed. Not done; `ifconfig` did not need it; a pull may.
-4. **The data-validity argument is unproven.** Moving a SEND stream back assumes the source slot still holds what was
-   published: a producer cannot pass a peer it waits on by the ring's depth. Argued for decode's lock-step crossings;
-   not shown for send-only transfers, pipeline stages, prefill chunks or cyclic sessions.
-5. **The evidence is degenerate.** Every flap run's 4096 tokens were equal to the undisturbed run's, but the prompt's
-   answer ends at step 24 and steps 28 onward are one repeated token: equality past there tests almost nothing. The
-   measure the mandates ask for is a divergence on non-degenerate output, or an exact collective check (Venues).
-6. **The rank's detector races the window** (Q17); **the window is not forwarded** (Q18); **no readmission hysteresis**
-   (Q19); **the accept loop spins** without sleeping while pairing (CPU).
+4. **The data-validity condition.** A transfer's payload slot for invocation t is reused at t + depth (M01's ring,
+   depth 2 on the pair). Ordinary operation needs the slot intact until the NIC reads it; a resumption re-sends from
+   it, so it needs the slot intact until the peer *landed* it. That holds where the producer of t + depth waits,
+   directly or through its own receives, on a word the peer publishes only after landing t: every lock-step program
+   (a decode step's crossings both ways; a session whose calls need the peer's data of the call before). It is not
+   shown for a producer that can run ahead of its consumer by the depth (a pipeline's prefill chunks, a one-way
+   stream): there a lost, unlanded record's slot may hold a later invocation, and the resumption would re-send it.
+   Evidence for lock-step: the matrix's second resumption moved a stream back 256 records and every call matched.
+5. **The token evidence was degenerate.** The first flap runs' 4096 tokens equal the undisturbed run's, but the
+   prompt's answer ends at step 24 and steps 28 onward repeat one token. The exact check is now the collectives
+   matrix (Venues); a divergence on non-degenerate generation is still owed.
+6. Answered 2026-10-06: the rank's detector racing the window (Q17), the window not forwarded (Q18), the accept
+   loop spinning (poll). Partly: readmission hysteresis (Q19).
 7. **Stale statements elsewhere**: mb docs/shelf.md and elastic.md call the beacon "the one source of membership
    events", which `Probes` contradicts; design/algorithm-sources.md ("not detected by inventing a timer") against the
    keepalive and the silent bound.
@@ -169,7 +185,7 @@ cabling open); **U** uncabled pairs routed through relay rings (queue pairs 2-3)
 
 | # | failure | as built | P | R/U/H/Q |
 |---|---|---|---|---|
-| F1 | a direct link down briefly (< window) mid-call | both ends suspend and resume | done: `ifconfig` 3-5 s | untested |
+| F1 | a direct link down briefly (< window) mid-call | both ends suspend and resume | done: `ifconfig` 3-8 s; exact under the matrix | Q: done (2 queue pairs) |
 | F2 | a direct link down past the window | gives up; survivors continue; probe readmits | done: 20 s | untested |
 | F3 | a link down at first pairing | fails at once (Q4) | seen 2026-10-05 | untested |
 | F4 | a second drop while pairing again | the same window continues | untested | untested |
@@ -184,7 +200,7 @@ cabling open); **U** uncabled pairs routed through relay rings (queue pairs 2-3)
 | F13 | one link of several drops | each link recovers alone; collectives across it wait | unreachable | loopback with injection; Studios |
 | F14 | a relay on an uncabled pair's route drops | per-link resumption; routes undefined | unreachable | Studios |
 | F15 | a cable moved to another port or peer | gives up (Q9); the driver finds interfaces afresh | untested | Studios |
-| F16 | a cyclic session (M30) | landed counts run on across cycles | untested (E2B calls are not cyclic) | torch path |
+| F16 | a cyclic session (M30) | landed counts run on across cycles | done: the matrix's sessions, exact | — |
 | F17 | an outage longer than a GPU wait may be held | the window bounds it | untested past 10 s in-call | — |
 | F18 | the driver's own node fails | the stream stops (one driver) | by design | — |
 
@@ -192,9 +208,10 @@ cabling open); **U** uncabled pairs routed through relay rings (queue pairs 2-3)
 
 - **Live pair**: the Mini's passwordless sudo takes its Thunderbolt interface down and up (`ifconfig en3`, ssh on the
   LAN); metal-microbench `output_data/segment-20261006/flaps.sh OUT step:seconds ...`.
-- **Exact checks under drops** (to do): the collectives matrix (metal-microbench `tools/nccl_demo.py pair`, every
-  call checked against its expected values, cyclic, several queue pairs) with drops injected; and a non-degenerate
-  generation's divergence against the undisturbed run.
+- **Exact checks under drops**: the collectives matrix (metal-microbench `tools/nccl_demo.py pair`: every call
+  checked against its expected values, cyclic sessions, two queue pairs) with drops injected:
+  `output_data/recovery-20261006/matrix-flaps.sh TAG t:d ...`; undisturbed and with a 5 s and a 3 s drop, 1548/1548
+  calls pass. Still owed: a non-degenerate generation's divergence against the undisturbed run.
 - **Loopback** (to build): `mesh-flow-loop` over `loopverbs.c` runs N bridges on one host over any link-map family;
   a per-link fault in the fabric (drop, one direction, stall, sever) would reach F4-F14 and Q10, Q20 without hardware.
 - **Hardware not yet here**: a physical pull and replug (Q11), port moves (F15), three or more nodes on TB5 (Studios),
