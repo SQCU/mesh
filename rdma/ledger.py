@@ -3,9 +3,10 @@ own work between its collectives, the evidence allocate.Balancer balances on (de
 
 A bridge's log holds, per link, its receive records' layout (trace_layout), each transfer's binding (trace_binding:
 its begin, the invocations it is active, its chunks or SEND cells) and every SEND observed and receive landed
-(native_trace).  Bindings are the call's crossings in the caller's order (mesh_transfers_prepare), so a program's
-crossings list, each with the point it serves and the rank publishing it, names every event: `events` gives, per
-invocation and point, the rank's publication (its first SEND's observation) and its landing (its last chunk's).
+(native_trace).  A crossing of r ranges takes r consecutive binding identities in the call's crossing order (the rank
+library's rule: metal-microbench mesh_rank.m MeshRankCrossing), so the call's crossings list, each with the point it
+serves and its ranges, names every event: `events` gives, per invocation and point, the rank's publication (its
+first SEND's observation) and its landing (its last chunk's).
 
 A call runs one or more programs (sequences of crossings), each over its invocations; `stretches` gives each of the
 rank's publications' stretch, from the latest of its own events at the program's earlier points in that invocation
@@ -19,8 +20,11 @@ SEND = 256    # sizeof(struct mesh_send) (mesh.h), the stride of a transfer's SE
 
 
 def events(text, crossings):
-    """{(invocation, point): {'send': ns, 'receive': ns}} of one rank's bridge log, `crossings` the call's in binding
-    order (each with its 'point')."""
+    """{(invocation, point): {'send': ns, 'receive': ns}} of one rank's bridge log, `crossings` the call's in order
+    (each with its 'point' and 'ranges')."""
+    point = []
+    for c in crossings:
+        point += [c['point']] * int(c.get('ranges', 1) or 1)
     lines = [json.loads(line) for line in text.splitlines() if line.startswith('{"trace_') or line.startswith('{"native_trace"')]
     base = {r['trace_layout']: r['receive_base'] for r in lines if 'trace_layout' in r}
     total = {r['trace_layout']: r['invocations'] for r in lines if 'trace_layout' in r}
@@ -46,13 +50,13 @@ def events(text, crossings):
             continue
         if r['direction'] == 0:
             for link, first, begin, active, binding in cells:
-                if link == r['native_trace'] and first <= r['identity'] < first + (active + 1) * SEND and binding < len(crossings):
-                    at = out[begin + (r['identity'] - first) // SEND, crossings[binding]['point']]
+                if link == r['native_trace'] and first <= r['identity'] < first + (active + 1) * SEND and binding < len(point):
+                    at = out[begin + (r['identity'] - first) // SEND, point[binding]]
                     at['send'] = min(at.get('send', r['ns'][0]), r['ns'][0])
         else:
             found = record.get((r['native_trace'], (r['identity'] - base[r['native_trace']]) // RECORD))
-            if found and found[1] < len(crossings):
-                at = out[found[0], crossings[found[1]]['point']]
+            if found and found[1] < len(point):
+                at = out[found[0], point[found[1]]]
                 at['receive'] = max(at.get('receive', r['ns'][1]), r['ns'][1])
     return out
 
