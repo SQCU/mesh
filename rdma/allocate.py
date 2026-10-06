@@ -437,6 +437,16 @@ class Balancer:
                 d['before'], d['parts'], d['stands'] = list(d['parts']), list(value), False
         return self.parts
 
+    def reject(self):
+        """The call at the current parts did not complete (a placement a program cannot run): every decision that moved
+        goes back to its last measured parts and its trust region halves, as a move measured worse does."""
+        for d in self.decisions.values():
+            last = d.get('last')
+            if last and last[0] != d['parts']:
+                d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
+                d['before'], d['parts'], d['stands'] = None, list(last[0]), False
+        return self.parts
+
     def _model(self, name, s, i):
         return time(_median_points(self.points.get((name, s, i), [])))
 
