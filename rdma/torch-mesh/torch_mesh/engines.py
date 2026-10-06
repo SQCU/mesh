@@ -15,6 +15,10 @@ rdma/allocate.py Balancer moving the shares on the calls' own times (an engine's
 operation's is the slowest engine's, as a collective's is its slowest rank's).  A share of nothing leaves that engine
 out: the resolution can be one engine.
 
+A call that prepares a share (copies a shard, compiles and loads a Neural Engine model) or first runs it at its row
+count (torch's MPS builds a graph a shape; Core ML's first predictions after a load are slow) is no evidence: a move
+is judged on the shares' running times.
+
 Nothing is implicit.  An operation takes its engines as an operand (`Engines`), from the program or from the
 configuration the program names (`Engines.configured()`: MESH_ENGINES, e.g. "mps,cpu,ane:tile=128"); without
 one it is torch's own operation on its input's device.  An engine the configuration names and the node lacks is an
@@ -236,7 +240,7 @@ class Linear:
     def __init__(self, weight, bias=None, engines=None, name=None, grain=64, constant=True):
         self.weight, self.bias, self.engines, self.grain, self.constant = weight, bias, engines, grain, constant
         self.name = name or f'linear{id(self):x}'
-        self.decisions, self.shards = {}, {}
+        self.decisions, self.shards, self.warm = {}, {}, set()
         if engines is not None:
             if weight.shape[0] % grain:
                 raise ValueError(f'{self.name}: {weight.shape[0]} outputs in grains of {grain}')
@@ -291,7 +295,9 @@ class Linear:
         ready = torch.mps.Event(enable_timing=False)
         ready.record()
         shards = {i: self._shard(engines[i], bounds[i], bounds[i + 1], rows) for i in held}
-        prepared = any(p for _, p in shards.values())
+        first = {(engines[i].name, bounds[i], bounds[i + 1], rows) for i in held} - self.warm
+        prepared = any(p for _, p in shards.values()) or bool(first)
+        self.warm |= first
         marks = {}
         for i in (i for i in held if engines[i].name == 'mps'):
             begin, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
