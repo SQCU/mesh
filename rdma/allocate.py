@@ -260,7 +260,13 @@ class Balancer:
     stretch's time on a rank scales with the units the rank holds of the decisions the program names for it.  The
     call's time is the sum over its stretches of their count times the slowest rank's time, and each decision's
     parts minimise its stretches' part of that sum, a stretch's time on a rank divided among its decisions by the
-    weights the program gives (any units: its own estimate of each one's work there).
+    weights the program gives (any units: its own estimate of each one's work there), less the work it names no
+    decision for (`fixed`, the same units).  A decision's parts are its groups' (`groups`, the ranks holding each part,
+    default one rank a part): a part some coordinate's ranks hold together (a pipeline stage's layers), its time a
+    stretch their slowest's; a rank in none of its groups is constant to it, as is a rank holding none of it, and a
+    part none of whose ranks run a stretch is no part of that stretch.  A stretch a decision has seen and no rank now
+    runs (its parts' ranks hold none: an emptied stage) stays in its models at the count, remainders and floor it
+    last had, so a move back is priced on what it measured.
 
     The models are DFPA's [Lastovetsky & Reddy 2010, partial estimation of functional performance models]: each
     (decision, stretch, rank)'s measured points (units, seconds an invocation), up to `window` at a part, their median
@@ -270,7 +276,9 @@ class Balancer:
     (its performance changed [Clarke, Lastovetsky & Rychkov 2011]).  A move the next call measures worse by more than
     the resolution is rejected: the parts go back, the trust region halves and the measurement stays in the models
     (a trust-region method's ratio test [Conn, Gould & Toint 2000, §6.1]); it doubles again, to twice, after a move
-    that held.  A decision's parts stand
+    that held.  Of the decisions sharing a stretch one moves a call, a rejection's return first, else the one whose
+    models promise the most (block coordinate descent [Tseng 2001]): another's move would change the stretches its
+    ratio test and its models read.  A decision's parts stand
     where the models'
     unbounded optimum promises less than its resolution under the measured sum [DFPA; Meta-Balancer 2012], and stay
     standing while none of its models changed; once a part moves back the way it came, every part of the decision
@@ -282,7 +290,8 @@ class Balancer:
     parts (R4).
 
       Balancer({'tp': {'parts': [8, 8], 'grain': 1, 'low': [1, 1], 'high': [15, 15]}})
-      .observe({'step:3': {'scales': {'tp': [1.0, 1.0]}, 'times': [[s, ...], [s, ...]]}, ...}) -> {'tp': [5, 11]}
+      .observe({'step:3': {'scales': {'tp': [1.0, 1.0]}, 'fixed': [0.2, 0.1], 'times': [[s, ...], [s, ...]]}, ...})
+      -> {'tp': [5, 11]}
 
     `state()` and `Balancer.of(state)` carry it between processes."""
 
@@ -293,9 +302,11 @@ class Balancer:
             n, grain = len(parts), int(d.get('grain', 1))
             low = [int(v) for v in d.get('low') or [0] * n]
             high = [int(v) for v in d.get('high') or [sum(parts)] * n]
-            if any(p % grain or not lo <= p <= hi for p, lo, hi in zip(parts, low, high)):
-                raise ValueError(f'balancer: {name}: parts {parts} on the grain {grain} within {low} and {high}')
-            self.decisions[name] = {'parts': parts, 'grain': grain, 'low': low, 'high': high, 'before': None, 'stands': False}
+            groups = [[int(i) for i in g] for g in d.get('groups') or [[i] for i in range(n)]]
+            if len(groups) != n or any(p % grain or not lo <= p <= hi for p, lo, hi in zip(parts, low, high)):
+                raise ValueError(f'balancer: {name}: parts {parts} of {groups} on the grain {grain} within {low} and {high}')
+            self.decisions[name] = {'parts': parts, 'grain': grain, 'low': low, 'high': high, 'groups': groups,
+                                    'before': None, 'stands': False}
 
     @property
     def parts(self):
@@ -304,6 +315,13 @@ class Balancer:
     def stands(self, name):
         return self.decisions[name]['stands']
 
+    def _groups(self, d):
+        return d.get('groups') or [[i] for i in range(len(d['parts']))]
+
+    def _holds(self, e, i):
+        d = self.decisions[e]
+        return next((p for p, g in zip(d['parts'], self._groups(d)) if i in g), 0)
+
     def observe(self, stretches):
         import statistics
         seen = {}
@@ -311,13 +329,28 @@ class Balancer:
             scales = {d: w for d, w in (obs.get('scales') or {}).items() if d in self.decisions}
             ranks = {i: _robust([float(t) for t in ts]) for i, ts in enumerate(obs['times']) if ts}
             if scales and ranks:
-                seen[s] = (max(len(ts) for ts in obs['times'] if ts), ranks, scales)
+                seen[s] = (max(len(ts) for ts in obs['times'] if ts), ranks, scales, list(obs.get('fixed') or []))
+        proposals, runs = [], {}
         for name, d in self.decisions.items():
-            mine = {s: v for s, v in seen.items() if name in v[2]}
+            groups = self._groups(d)
+            mine = {}
+            for s, (c, ranks, scales, fixed) in seen.items():
+                if name not in scales:
+                    continue
+                view = {}
+                for g, members in enumerate(groups):
+                    present = [i for i in members if i in ranks]
+                    if present:
+                        i = max(present, key=lambda i: ranks[i][0])
+                        view[g] = (ranks[i], i)
+                outside = [ranks[i][0] for i in ranks if not any(i in g for g in groups)]
+                if view:
+                    mine[s] = (c, ranks, scales, fixed, view, max(outside, default=0.0))
             if not mine:
                 continue
-            measured = sum(c * max(med for med, _ in r.values()) for c, r, _ in mine.values())
-            slowest = [(c, max(r.values())) for c, r, _ in mine.values()]
+            runs[name] = set(mine)
+            measured = sum(c * max(med for med, _ in r.values()) for c, r, *_ in mine.values())
+            slowest = [(c, max(r.values())) for c, r, *_ in mine.values()]
             within = max(0.01, 2 * math.sqrt(sum((c * se) ** 2 for c, (_, se) in slowest)) / measured if measured else 0.0)
             history = d.setdefault('history', {})
             key = ','.join(map(str, d['parts']))
@@ -326,24 +359,23 @@ class Balancer:
             epsilon, between = within, max(within, 2 * 1.4826 * statistics.median(spread) if len(spread) > 2 else 0.0)
             last, d['last'] = d.get('last'), [list(d['parts']), measured]
             changed = False
-            for s, (c, ranks, scales) in mine.items():
-                for i, (med, se) in ranks.items():
-                    units = d['parts'][i]
+            for s, (c, ranks, scales, fixed, view, _) in mine.items():
+                for g, ((med, se), i) in view.items():
+                    units = d['parts'][g]
                     if not units:
                         continue
-                    weights = {e: max(0.0, float(w[i] or 0.0)) * bool(self.decisions[e]['parts'][i]) for e, w in scales.items()}
-                    total = sum(weights.values())
+                    weights = {e: max(0.0, float(w[i] or 0.0)) * bool(self._holds(e, i)) for e, w in scales.items()}
+                    total = sum(weights.values()) + max(0.0, float(fixed[i] if i < len(fixed) else 0.0))
                     share = med * (weights[name] / total if total else 1.0 / len(weights))
-                    own = self.points.get((name, s, i), [])
+                    own = self.points.get((name, s, g), [])
                     earlier = [t for u, t in own if u == units][-self.window:]
                     now = (earlier + [share])[-self.window:]
                     old, new = (statistics.median(earlier) if earlier else None), statistics.median(now)
                     if old is not None and abs(new - old) > max(epsilon, 3 * se / med if med > 0 else 0.0) * max(new, old):
                         own, changed = [], True
-                    self.points[(name, s, i)] = [(u, t) for u, t in own if u != units] + [(units, t) for t in now]
+                    self.points[(name, s, g)] = [(u, t) for u, t in own if u != units] + [(units, t) for t in now]
             if last and last[0] != d['parts'] and measured > last[1] * (1 + between):
-                d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
-                d['before'], d['parts'], d['stands'], d['last'] = None, list(last[0]), False, last
+                proposals.append((math.inf, name, last))
                 continue
             if last and last[0] != d['parts']:
                 d['reach'] = min(2.0, d.get('reach', 2.0) * 2)
@@ -351,34 +383,58 @@ class Balancer:
                 d['stands'] = True
                 continue
             n = len(d['parts'])
-            built = []
-            for s, (c, ranks, scales) in mine.items():
+            built, remembered = [], d.setdefault('seen', {})
+            for s, (c, rests, other) in remembered.items():
+                if s in mine:
+                    continue
+                rests = dict((int(g), r) for g, r in rests)
+                built.append((c, [(lambda u, o=other: o) if d['parts'][g] or g not in rests else
+                                  (lambda u, m=self._model(name, s, g), r=rests[g], o=other: max(o, m(u) + r) if u else o)
+                                  for g in range(n)]))
+            for s, (c, ranks, scales, fixed, view, other) in mine.items():
                 fs = []
-                per_unit = [self._model(name, s, i)(d['parts'][i]) / d['parts'][i] for i in ranks if d['parts'][i]]
+                per_unit = [self._model(name, s, g)(d['parts'][g]) / d['parts'][g] for g in view if d['parts'][g]]
                 per_unit = sorted(per_unit)[len(per_unit) // 2] if per_unit else 0.0
-                for i in range(n):
-                    rest = ranks[i][0] - self._model(name, s, i)(d['parts'][i]) if i in ranks and d['parts'][i] else 0.0
-                    if (name, s, i) in self.points:
-                        fs.append(lambda u, m=self._model(name, s, i), r=rest: m(u) + r if u else r)
+                for g in range(n):
+                    if g not in view and d['parts'][g]:
+                        fs.append(lambda u, o=other: o)
+                        continue
+                    med = view[g][0][0] if g in view else 0.0
+                    rest = (med - self._model(name, s, g)(d['parts'][g]) if d['parts'][g] else med) if g in view else 0.0
+                    if (name, s, g) in self.points:
+                        fs.append(lambda u, m=self._model(name, s, g), r=rest, o=other: max(o, m(u) + r if u else r))
                     else:
-                        fs.append(lambda u, r=rest, k=per_unit: k * u + r)
+                        fs.append(lambda u, r=rest, k=per_unit, o=other: max(o, k * u + r))
+                remembered[s] = [c, [[g, view[g][0][0] - self._model(name, s, g)(d['parts'][g])] for g in view if d['parts'][g]], other]
                 built.append((c, fs))
             total = sum(d['parts'])
             if least(total, d['grain'], d['low'], d['high'], built)[1] >= measured * (1 - epsilon):
                 d['before'], d['stands'] = list(d['parts']), True
                 continue
             grow = d.get('reach', 2.0)
-            reach = [min(d['high'][i], max(d['grain'] * math.ceil(grow * max((u for s in mine for u, _ in self.points.get((name, s, i), [])), default=0) / d['grain']),
+            reach = [min(d['high'][g], max(d['grain'] * math.ceil(grow * max((u for s in mine for u, _ in self.points.get((name, s, g), [])), default=0) / d['grain']),
                                            d['grain']))
-                     if any((name, s, i) in self.points for s in mine) else d['high'][i] for i in range(n)]
-            nxt, _ = least(total, d['grain'], d['low'], reach, built)
+                     if any((name, s, g) in self.points for s in mine) else d['high'][g] for g in range(n)]
+            nxt, promise = least(total, d['grain'], d['low'], reach, built)
             if sum(nxt) < total:
-                nxt, _ = least(total, d['grain'], d['low'], d['high'], built)
+                nxt, promise = least(total, d['grain'], d['low'], d['high'], built)
             if d['before'] is not None and any((c - p) * (p - b) < 0 for c, p, b in zip(nxt, d['parts'], d['before'])):
                 half = [(p + c) / 2 for c, p in zip(nxt, d['parts'])]
-                nxt, _ = least(total, d['grain'], [math.floor(h / d['grain']) * d['grain'] for h in half],
-                               [math.ceil(h / d['grain']) * d['grain'] for h in half], built)
-            d['before'], d['parts'], d['stands'] = list(d['parts']), list(nxt), False
+                nxt, promise = least(total, d['grain'], [math.floor(h / d['grain']) * d['grain'] for h in half],
+                                     [math.ceil(h / d['grain']) * d['grain'] for h in half], built)
+            proposals.append(((measured - promise) / measured if measured else 0.0, name, nxt))
+        taken = set()
+        for gain, name, value in sorted(proposals, key=lambda p: -p[0]):
+            d, reverting = self.decisions[name], gain == math.inf
+            if runs[name] & taken and not reverting:
+                d['stands'] = False
+                continue
+            taken |= runs[name]
+            if reverting:
+                d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
+                d['before'], d['parts'], d['stands'], d['last'] = None, list(value[0]), False, value
+            else:
+                d['before'], d['parts'], d['stands'] = list(d['parts']), list(value), False
         return self.parts
 
     def _model(self, name, s, i):
@@ -391,6 +447,6 @@ class Balancer:
     @classmethod
     def of(cls, state):
         b = cls({}, state.get('window', 3))
-        b.decisions = {name: dict(d) for name, d in state['decisions'].items()}
+        b.decisions = {name: {**d, 'groups': d.get('groups') or [[i] for i in range(len(d['parts']))]} for name, d in state['decisions'].items()}
         b.points = {(d, s, int(i)): [tuple(p) for p in own] for d, s, i, own in state['points']}
         return b
