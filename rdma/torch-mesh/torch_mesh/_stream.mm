@@ -5,6 +5,7 @@
 // MeshWork: its wait encodes the rest (its landings, later rounds and results) on the stream where it is waited.
 #include <torch/extension.h>
 #include <torch/library.h>
+#include <ATen/mps/MPSDevice.h>
 #include <ATen/mps/MPSEvent.h>
 #include <ATen/mps/MPSStream.h>
 #include <ATen/native/mps/OperationUtils.h>
@@ -405,8 +406,56 @@ TORCH_LIBRARY_IMPL(_c10d_functional, MPS, m) {
     m.impl(name, torch::CppFunction::makeFromBoxedFunction<&functional>());
 }
 
+// The mesh library's own kernels on torch's stream (torch_mesh/sparse.py): a kernel compiled from its source at Metal
+// 4.0 (tensor operations), and a dispatch of it encoded in torch's open compute encoder on its queue, ordered with
+// torch's own work and waited on by no host: buffers by index (a tensor's storage at its offset), 32-bit constants at
+// one index, the grid in threadgroups.
+static std::vector<id<MTLComputePipelineState>> pipelines_;
+
+static int64_t pipeline(const std::string &source, const std::string &name) {
+  id<MTLDevice> device = at::mps::MPSDevice::getInstance()->device();
+  MTLCompileOptions *options = [MTLCompileOptions new];
+  options.languageVersion = MTLLanguageVersion4_0;
+  NSError *error = nil;
+  id<MTLLibrary> library = [device newLibraryWithSource:@(source.c_str()) options:options error:&error];
+  if (!library) throw std::runtime_error(std::string("kernel source: ") + error.localizedDescription.UTF8String);
+  id<MTLFunction> function = [library newFunctionWithName:@(name.c_str())];
+  if (!function) throw std::runtime_error("kernel source: no function " + name);
+  id<MTLComputePipelineState> state = [device newComputePipelineStateWithFunction:function error:&error];
+  if (!state) throw std::runtime_error(std::string("kernel pipeline: ") + error.localizedDescription.UTF8String);
+  pipelines_.push_back(state);
+  return (int64_t)pipelines_.size() - 1;
+}
+
+static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers, const std::vector<int64_t> &constants,
+                   int64_t at, int64_t gx, int64_t gy, int64_t threads) {
+  if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("encode: no kernel " + std::to_string(handle));
+  id<MTLComputePipelineState> state = pipelines_[handle];
+  std::vector<id<MTLBuffer>> bound(buffers.size(), nil);
+  std::vector<NSUInteger> offsets(buffers.size(), 0);
+  for (size_t i = 0; i < buffers.size(); i++)
+    if (buffers[i]) {
+      const at::Tensor &t = *buffers[i];
+      if (!t.is_mps()) throw std::runtime_error("encode: buffer " + std::to_string(i) + " is not an MPS tensor");
+      bound[i] = at::native::mps::getMTLBufferStorage(t);
+      offsets[i] = (NSUInteger)(t.storage_offset() * t.element_size());
+    }
+  std::vector<uint32_t> words(constants.begin(), constants.end());
+  at::mps::MPSStream *stream = at::mps::getCurrentMPSStream();
+  dispatch_sync(stream->queue(), ^{
+    id<MTLComputeCommandEncoder> encoder = stream->commandEncoder();
+    [encoder setComputePipelineState:state];
+    for (size_t i = 0; i < bound.size(); i++)
+      if (bound[i]) [encoder setBuffer:bound[i] offset:offsets[i] atIndex:i];
+    [encoder setBytes:words.data() length:words.size() * sizeof(uint32_t) atIndex:(NSUInteger)at];
+    [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
+  });
+}
+
 // The ProcessGroup's calls: split (an async op), a MeshWork to wait on, else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  module.def("pipeline", &pipeline);
+  module.def("encode", &encode);
   module.def("begin", &begin);
   module.def("watch", [](int64_t comm) { marks_.try_emplace(comm); });
   module.def("unwatch", [](int64_t comm) { marks_.erase(comm); });
