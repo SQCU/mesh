@@ -452,10 +452,47 @@ static void encode(int64_t handle, const std::vector<std::optional<at::Tensor>> 
   });
 }
 
+// The same dispatch in a command buffer of its own on torch's queue, committed and waited `repeats` times: each one's
+// GPU time (GPUEndTime - GPUStartTime), the measure the engine's kernel harness reports.  Torch's stream is synchronized
+// by the caller first.
+static std::vector<double> timed(int64_t handle, const std::vector<std::optional<at::Tensor>> &buffers,
+                                 const std::vector<int64_t> &constants, int64_t at, int64_t gx, int64_t gy, int64_t threads,
+                                 int64_t repeats) {
+  if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("timed: no kernel " + std::to_string(handle));
+  id<MTLComputePipelineState> state = pipelines_[handle];
+  std::vector<id<MTLBuffer>> bound(buffers.size(), nil);
+  std::vector<NSUInteger> offsets(buffers.size(), 0);
+  for (size_t i = 0; i < buffers.size(); i++)
+    if (buffers[i]) {
+      const at::Tensor &t = *buffers[i];
+      bound[i] = at::native::mps::getMTLBufferStorage(t);
+      offsets[i] = (NSUInteger)(t.storage_offset() * t.element_size());
+    }
+  std::vector<uint32_t> words(constants.begin(), constants.end());
+  id<MTLCommandQueue> queue = at::mps::getCurrentMPSStream()->commandQueue();
+  std::vector<double> out;
+  for (int64_t r = 0; r < repeats; r++) {
+    id<MTLCommandBuffer> buffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [buffer computeCommandEncoder];
+    [encoder setComputePipelineState:state];
+    for (size_t i = 0; i < bound.size(); i++)
+      if (bound[i]) [encoder setBuffer:bound[i] offset:offsets[i] atIndex:i];
+    [encoder setBytes:words.data() length:words.size() * sizeof(uint32_t) atIndex:(NSUInteger)at];
+    [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
+    [encoder endEncoding];
+    [buffer commit];
+    [buffer waitUntilCompleted];
+    if (buffer.error) throw std::runtime_error(std::string("timed: ") + buffer.error.localizedDescription.UTF8String);
+    out.push_back(buffer.GPUEndTime - buffer.GPUStartTime);
+  }
+  return out;
+}
+
 // The ProcessGroup's calls: split (an async op), a MeshWork to wait on, else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline", &pipeline);
   module.def("encode", &encode);
+  module.def("timed", &timed);
   module.def("begin", &begin);
   module.def("watch", [](int64_t comm) { marks_.try_emplace(comm); });
   module.def("unwatch", [](int64_t comm) { marks_.erase(comm); });
