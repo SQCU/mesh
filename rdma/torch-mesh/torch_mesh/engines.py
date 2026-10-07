@@ -222,7 +222,7 @@ class Ane(Engine):
     absolute error floor (on an M4 Pro and an M5 Max about 3e-4 RMS for a 3840-wide contraction, whatever the input's
     scale; above unit-scale activations its error is fp16's relative 2e-4): accurate on normalized activations,
     inaccurate on small ones (a sixteenth-scale input's linear 5e-3 relative), which an operation's `tolerance`
-    checks.  (Its compiler folds a constant scaling of the weights into the convolution, so no rescaling in the
+    measures (conditioning, not routing, answers it).  (Its compiler folds a constant scaling of the weights into the convolution, so no rescaling in the
     graph moves the floor.)"""
     name, limits = 'ane', {'dtypes': (torch.float16,), 'constants': True, 'tile': 128}
 
@@ -428,6 +428,7 @@ class Engines:
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
         self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1), initializer=_interactive)
         self.operations, self.decisions, self.evidence, self.solvers, self.last, self.excluded = [], {}, {}, {}, {}, {}
+        self.errors = {}
         self.separated = {}
 
     @classmethod
@@ -449,10 +450,10 @@ class Operation:
     a decision a name and row count (operations of one name, a stack's layers of one shape, share it and pool their
     evidence: the allocation is measured where the program runs it, between its other operations); its shares concatenate (`combine` 'concat', the shared axis the output's) or sum ('sum',
     the shared axis contracted); `constant` states that its weights do not change (an engine whose weights are
-    constants takes a share only then); `tolerance` (relative), where given, is checked on each allocation's first
-    call: every share an engine other than the GPU computes against the same share on the GPU, an engine off by more
-    holding none of the decision after (an engine's accuracy is part of choosing it: the Neural Engine's absolute
-    error floor)."""
+    constants takes a share only then); `tolerance` (relative), where given, is measured on each allocation's first
+    call: every share an engine other than the GPU computes against the same share on the GPU, its error recorded
+    (`Engines.errors`; past the tolerance also `excluded`, by name), never a routing input: the allocation follows
+    the times alone."""
     kind = combine = None
 
     def __init__(self, units, width, engines, name, grain, constant, tolerance=None):
@@ -584,9 +585,10 @@ class Operation:
                     self.engines.decisions[key]['parts'] = self._solver(key).forbid(i, j)
 
     def _verify(self, key, held, bounds, shards, x2, prologue, outs):
-        """An allocation's first call: each share an engine other than the GPU computed, against the same share on the
-        GPU (torch's MPS, its own products); an engine whose share is off by more than the operation's `tolerance`
-        (relative) holds none of this decision from now on."""
+        """An allocation's first call, where the operation names a `tolerance`: each share an engine other than the GPU
+        computed, against the same share on the GPU (torch's MPS, its own products), its relative error recorded
+        (`Engines.errors`, those past the tolerance in `excluded` by name).  A measurement, not a routing input: an
+        engine's numerics are conditioned where they matter (scaling, a normalization), not excluded."""
         engines = self.engines.engines
         gpu = next((e for e in engines if e.name == 'mps'), None) or Mps()
         for i in held:
@@ -596,9 +598,8 @@ class Operation:
             gpu.run(self, gpu.prepare(self, bounds[i], bounds[i + 1]), x2, prologue, reference)
             got, want = outs[i].float(), reference.float()
             error = float((got - want).norm() / want.norm().clamp_min(1e-30))
+            self.engines.errors.setdefault(key, {})[engines[i].name] = round(error, 6)
             if error > self.tolerance:
-                self.engines.decisions[key]['parts'] = self._solver(key).exclude(i)
-                self.engines.decisions[key]['high'][i] = 0
                 self.engines.excluded.setdefault(key, {})[engines[i].name] = round(error, 6)
 
 
