@@ -9,7 +9,8 @@ preserves norms, singular values and the other side's singular vectors exactly: 
 components and spectrum with its output directions random, E . R^T the converse, R1 . E . R2^T its spectrum alone,
 none of them decomposing E.  The same seed gives the same rotation, so a kernel can regenerate it rather than store it.
 
-  rotation(n, seed) -> Rotation; .rows(x) rotates each row of x [m, n]; .columns(x) each column of x [n, k]"""
+  Rotation(n, seed); .rows(x) rotates each row of x [m, n] (x R^T); .columns(x) each column of x [n, k] (R x);
+  .rows_inverse(y) undoes .rows (y R)"""
 from pathlib import Path
 
 import torch
@@ -43,6 +44,7 @@ class Rotation:
         self.signs = [(torch.randint(0, 2, (n,), generator=g) * 2 - 1).float().to(device) for _ in range(rounds)]
         self.mixes = [torch.linalg.qr(torch.randn(self.B, self.B, generator=g, dtype=torch.float64))[0].float().to(device)
                       for _ in range(rounds)]
+        self.ones = None
 
     def rows(self, x):
         """Each row of x [m, n] rotated (x R^T)."""
@@ -59,6 +61,22 @@ class Rotation:
         """Each column of x [n, k] rotated (R x)."""
         return self.rows(x.T.contiguous()).T
 
+    def rows_inverse(self, y):
+        """Each row of y [m, n] rotated back (y R): the rounds undone in reverse, each block's transform its own
+        inverse (H_N / sqrt N is symmetric and orthogonal), then the signs."""
+        y = y.float().contiguous()
+        m = y.shape[0]
+        if self.ones is None:
+            self.ones = torch.ones(self.n, device=y.device)
+        for sign, mix in reversed(list(zip(self.signs, self.mixes))):
+            if self.B > 1:
+                y = torch.einsum('bc,mbn->mcn', mix, y.view(m, self.B, self.N)).reshape(m, self.n).contiguous()
+            x = torch.empty_like(y)
+            threads = min(1024, max(32, self.N // 2))
+            _stream.encode(_kernel(), [y, x, self.ones], [self.N, self.B, 0, 0], 3, m * self.B, 1, threads)
+            y = x * sign
+        return y
+
 
 def _check():
     torch.manual_seed(0)
@@ -68,7 +86,7 @@ def _check():
         y = R.rows(x)
         eye = R.rows(torch.eye(n, device='mps')[:256])
         gram = eye @ eye.T
-        print(n, 'norms kept', float((y.norm(dim=1) / x.norm(dim=1) - 1).abs().max()),
+        print(n, 'inverse', float((R.rows_inverse(y) - x).abs().max()), 'norms kept', float((y.norm(dim=1) / x.norm(dim=1) - 1).abs().max()),
               'orthogonality', float((gram - torch.eye(256, device='mps')).abs().max()),
               'mixed (max |R_ij| * sqrt n)', round(float(eye.abs().max()) * n ** 0.5, 2))
 
