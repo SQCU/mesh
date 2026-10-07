@@ -539,14 +539,21 @@ class Coupled:
       c.observe([[t, ...], [t, ...], [t, ...]], [call, ...])   # each member's seconds, the calls' seconds
       c.parts -> the next allocation
       c.resize(4096) -> the next allocation of 4096 units
-      Coupled.of(c.state()) -> the same solver (JSON between processes)"""
+      Coupled.of(c.state()) -> the same solver (JSON between processes)
 
-    def __init__(self, total, grain, low, high, parts, window=3, ridge=1e-3):
+    Shape.  Where a decision states its rows and each member's tile (`rows`, `tiles`: an engine computes whole tiles), a
+    member's work is its whole tiles' units, not its units, and the fit pools other decisions' measured allocations
+    of the same members and tiles (`pool`, their `entries`: other totals, rows or configurations): one model of the
+    node's operation, not one memo an identity, so a decision at a new shape starts at the model's minimum (`prior`)
+    and its own measurements then outrank it."""
+
+    def __init__(self, total, grain, low, high, parts, window=3, ridge=1e-3, rows=None, tiles=None):
         self.total, self.grain, self.window, self.ridge = int(total), int(grain), int(window), float(ridge)
         self.low, self.high = [int(v) for v in low], [int(v) for v in high]
         self.parts, self.start = tuple(int(p) for p in parts), tuple(int(p) for p in parts)
         self.able = [i for i, h in enumerate(self.high) if h > 0]
         self.seen, self.stands, self.stood, self.forbidden = {}, False, None, set()
+        self.rows, self.tiles, self.pool = rows, [list(t) for t in tiles] if tiles else None, []
         self.design = self._design(self.start)
 
     def state(self):
@@ -554,7 +561,8 @@ class Coupled:
         return {'total': self.total, 'grain': self.grain, 'window': self.window, 'ridge': self.ridge, 'low': self.low,
                 'high': self.high, 'parts': list(self.parts), 'start': list(self.start), 'able': self.able,
                 'stands': self.stands, 'stood': self.stood, 'forbidden': sorted(self.forbidden),
-                'seen': [[list(p), e] for p, e in self.seen.items()], 'design': [list(p) for p in self.design]}
+                'seen': [[list(p), e] for p, e in self.seen.items()], 'design': [list(p) for p in self.design],
+                'rows': self.rows, 'tiles': self.tiles}
 
     @classmethod
     def of(cls, state):
@@ -566,7 +574,37 @@ class Coupled:
         c.forbidden = {tuple(f) for f in state['forbidden']}
         c.seen = {tuple(p): e for p, e in state['seen']}
         c.design = [tuple(p) for p in state['design']]
+        c.rows, c.tiles, c.pool = state.get('rows'), state.get('tiles'), []
         return c
+
+    def work(self, i, units, rows=None):
+        """Member i's work holding `units` at `rows` rows: its units, or, where the decision states each member's tile
+        (`tiles`: [rows, units] a member), the units of its whole tiles, rows and units padded up (an engine computes
+        whole tiles: what a share costs follows its tiles, not its units)."""
+        if not self.tiles or units <= 0:
+            return float(units)
+        rows = self.rows if rows is None else rows
+        along, across = self.tiles[i]
+        return float(-(-rows // along) * along * -(-units // across) * across) / float(self.rows or rows)
+
+    def entries(self):
+        """This decision's measured allocations as evidence another decision of the same members and tiles pools in
+        (`pool`): each its rows, parts, members' medians and the call's median."""
+        return [{'rows': self.rows, 'parts': list(p), 'members': [self._median(m) if m else None for m in e['members']],
+                 'call': self._median(e['calls'])} for p, e in self._measured().items()]
+
+    def prior(self):
+        """Where this decision has measured nothing and the evidence it pools determines a model: its parts the
+        model's minimum over its lattice (a decision at a new total, row count or configuration starts where the
+        node's evidence of the same operation puts it); the parts."""
+        if self.seen:
+            return list(self.parts)
+        fitted = self.fit()
+        lattice = [p for p in _lattice(self.total, self.grain, self.low, self.high) if self.allowed(p)]
+        if fitted is not None and lattice:
+            self.parts = self.start = min(lattice, key=lambda p: (self.predict(p, fitted), p))
+            self.design = self._design(self.start)
+        return list(self.parts)
 
     def resize(self, total):
         """The total moved to `total` units (a multiple of the grain): each bound that was the whole total becomes the
@@ -699,35 +737,45 @@ class Coupled:
     def _measured(self):
         return {p: e for p, e in self.seen.items() if len(e['calls']) >= self.window}
 
+    def _evidence(self):
+        """Every measured allocation this decision fits: its own (at its rows) and those it pools (`pool`, other
+        decisions' entries: the same members and tiles at other totals, rows or configurations), each (rows, parts,
+        members' medians, call's median)."""
+        own = [(self.rows, p, [self._median(m) if m else None for m in e['members']], self._median(e['calls']))
+               for p, e in self._measured().items()]
+        return own + [(x['rows'], tuple(x['parts']), x['members'], x['call']) for x in self.pool]
+
     def fit(self):
-        """Each able member's coefficients (d, a, [c_ij]) and g(S), or None where a member's are undetermined."""
-        n, scale = len(self.low), float(self.total)
+        """Each able member's coefficients (d, a, [c_ij]) and g(S), or None where a member's are undetermined: least
+        squares over the evidence (its own and pooled), each member's time a line in its work and its partners'."""
+        n, evidence = len(self.low), self._evidence()
         models = {}
         for i in self.able:
-            rows = [(p, self._median(e['members'][i])) for p, e in self._measured().items() if p[i] > 0 and e['members'][i]]
+            rows = [(r, p, m[i]) for r, p, m, _ in evidence if p[i] > 0 and m[i] is not None]
             others = self._partners(i)
-            if len({p for p, _ in rows}) < 2 + len(others):
+            if len({(r, p) for r, p, _ in rows}) < 2 + len(others):
                 return None
-            features = [self._features(p, i, others) for p, _ in rows]
+            features = [self._features(p, i, others, r) for r, p, _ in rows]
             k = len(features[0])
             normal = [[sum(f[a] * f[b] for f in features) + (self.ridge if a == b and a >= 2 else 0.0) for b in range(k)] for a in range(k)]
-            target = [sum(f[a] * t for f, (_, t) in zip(features, rows)) for a in range(k)]
+            target = [sum(f[a] * t for f, (_, _, t) in zip(features, rows)) for a in range(k)]
             x = _solve(normal, target)
             if x is None:
                 return None
-            floor = min(t / (p[i] / scale) for p, t in rows) / 10
+            floor = min(t / f[1] for f, (_, _, t) in zip(features, rows) if f[1] > 0) / 10
             x[1] = max(x[1], floor)
             models[i] = (x, others)
         overhead = {}
-        for p, e in self._measured().items():
-            members = [self._median(e['members'][i]) for i in range(n) if p[i] > 0 and e['members'][i]]
-            if members:
-                overhead.setdefault(frozenset(i for i in range(n) if p[i] > 0), []).append(self._median(e['calls']) - max(members))
+        for r, p, members, call in evidence:
+            held = [members[i] for i in range(n) if p[i] > 0 and members[i] is not None]
+            if held and call is not None:
+                overhead.setdefault(frozenset(i for i in range(n) if p[i] > 0), []).append(call - max(held))
         return models, {s: self._median(v) for s, v in overhead.items()}
 
-    def _features(self, p, i, others):
+    def _features(self, p, i, others, rows=None):
         scale = float(self.total)
-        return [1.0, p[i] / scale] + [p[i] * p[j] / scale ** 2 for j in others]
+        w = [self.work(j, p[j], rows) / scale for j in range(len(p))]
+        return [1.0, w[i]] + [w[i] * w[j] for j in others]
 
     def predict(self, p, fitted):
         models, overhead = fitted
