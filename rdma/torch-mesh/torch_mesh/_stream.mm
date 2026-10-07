@@ -488,11 +488,51 @@ static std::vector<double> timed(int64_t handle, const std::vector<std::optional
   return out;
 }
 
+// `count` dispatches of one kernel in one command buffer on torch's queue, each after a buffer barrier, dispatch i bound to
+// sets[i % sets.size()]: the command buffer's GPU time over `count`, the measure tools/native_bench (metal-microbench
+// 3a2f72a) takes of the recorded LiteRT kernels, so weights rotated over sets totalling more than the system cache are
+// read from DRAM by every dispatch.  Torch's stream is synchronized by the caller first.
+static double sequence(int64_t handle, const std::vector<std::vector<std::optional<at::Tensor>>> &sets,
+                       const std::vector<int64_t> &constants, int64_t at, int64_t gx, int64_t gy, int64_t threads, int64_t count) {
+  if (handle < 0 || handle >= (int64_t)pipelines_.size()) throw std::runtime_error("sequence: no kernel " + std::to_string(handle));
+  if (sets.empty() || count < 1) throw std::runtime_error("sequence: no buffer sets or dispatches");
+  std::vector<std::vector<id<MTLBuffer>>> bound;
+  std::vector<std::vector<NSUInteger>> offsets;
+  for (const auto &set : sets) {
+    bound.emplace_back(set.size(), nil);
+    offsets.emplace_back(set.size(), 0);
+    for (size_t i = 0; i < set.size(); i++)
+      if (set[i]) {
+        bound.back()[i] = at::native::mps::getMTLBufferStorage(*set[i]);
+        offsets.back()[i] = (NSUInteger)(set[i]->storage_offset() * set[i]->element_size());
+      }
+  }
+  std::vector<uint32_t> words(constants.begin(), constants.end());
+  id<MTLCommandQueue> queue = at::mps::getCurrentMPSStream()->commandQueue();
+  id<MTLCommandBuffer> buffer = [queue commandBuffer];
+  id<MTLComputeCommandEncoder> encoder = [buffer computeCommandEncoder];
+  [encoder setComputePipelineState:pipelines_[handle]];
+  [encoder setBytes:words.data() length:words.size() * sizeof(uint32_t) atIndex:(NSUInteger)at];
+  for (int64_t r = 0; r < count; r++) {
+    const size_t s = (size_t)r % bound.size();
+    for (size_t i = 0; i < bound[s].size(); i++)
+      if (bound[s][i]) [encoder setBuffer:bound[s][i] offset:offsets[s][i] atIndex:i];
+    [encoder dispatchThreadgroups:MTLSizeMake((NSUInteger)gx, (NSUInteger)gy, 1) threadsPerThreadgroup:MTLSizeMake((NSUInteger)threads, 1, 1)];
+    [encoder memoryBarrierWithScope:MTLBarrierScopeBuffers];
+  }
+  [encoder endEncoding];
+  [buffer commit];
+  [buffer waitUntilCompleted];
+  if (buffer.error) throw std::runtime_error(std::string("sequence: ") + buffer.error.localizedDescription.UTF8String);
+  return (buffer.GPUEndTime - buffer.GPUStartTime) / (double)count;
+}
+
 // The ProcessGroup's calls: split (an async op), a MeshWork to wait on, else None (complete).
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("pipeline", &pipeline);
   module.def("encode", &encode);
   module.def("timed", &timed);
+  module.def("sequence", &sequence);
   module.def("begin", &begin);
   module.def("watch", [](int64_t comm) { marks_.try_emplace(comm); });
   module.def("unwatch", [](int64_t comm) { marks_.erase(comm); });
