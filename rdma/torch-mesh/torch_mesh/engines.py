@@ -302,31 +302,45 @@ class Ane(Engine):
         return self._run(shard, x, out)
 
 
-def neural_engine_model(kind, arrays, rows, tile=128):
+def neural_engine_model(kind, arrays, rows, tile=128, block=None):
     """A Neural Engine share as a Core ML program (coremltools; fp16): `kind` 'linear' (arrays: W [N, K]) or 'ffn'
     (arrays: Wg, Wu [I, K], Wd [K, I]: down(gelu_tanh(x Wg^T) * (x Wu^T))), its input x [rows, K] and output [rows, N or
     K] row-major, the transposes to and from channels-first inside the graph, rows in tiles of `tile`, each tile one 1x1
-    convolution a matrix with its weights constant.  The one statement of the graph: this module's Ane engine and the
-    metal-microbench engine's prepared shares (tools/mesh/neural_engine.py) both build it here."""
+    convolution a matrix with its weights constant, the units (N outputs, I neurons) in blocks of at most `block` (each
+    block its own convolutions; a linear's blocks concatenated, an FFN's down partials summed), so no convolution's
+    weights pass what the Neural Engine's compiler takes (neural_engine_block).  The one statement of the graph: this
+    module's Ane engine and the metal-microbench engine's prepared shares (tools/mesh/neural_engine.py) both build it
+    here."""
     import coremltools as ct
     import numpy as np
     from coremltools.converters.mil import Builder as mb
     from coremltools.converters.mil.mil import types
     width = arrays[0].shape[1]
-    conv = lambda array: mb.const(val=array.reshape(array.shape[0], array.shape[1], 1, 1))
+    units = arrays[0].shape[0]
+    block = units if not block or block >= units else int(block)
+    spans = [(b, min(b + block, units)) for b in range(0, units, block)]
+    conv = lambda array: mb.const(val=np.ascontiguousarray(array).reshape(array.shape[0], array.shape[1], 1, 1))
 
     @mb.program(input_specs=[mb.TensorSpec(shape=(rows, width), dtype=types.fp16)], opset_version=ct.target.macOS15)
     def program(x):
-        weights = [conv(a) for a in arrays[:2]] + ([conv(np.ascontiguousarray(arrays[2]))] if kind == 'ffn' else [])
+        if kind == 'linear':
+            weights = [(conv(arrays[0][a:b]),) for a, b in spans]
+        else:
+            weights = [(conv(arrays[0][a:b]), conv(arrays[1][a:b]), conv(arrays[2][:, a:b])) for a, b in spans]
         channels = mb.reshape(x=mb.transpose(x=x, perm=[1, 0]), shape=[1, width, 1, rows])
         pieces = mb.split(x=channels, num_splits=rows // tile, axis=3) if rows > tile else [channels]
         outputs = []
         for p in pieces:
             if kind == 'linear':
-                outputs.append(mb.conv(x=p, weight=weights[0]))
+                parts = [mb.conv(x=p, weight=w[0]) for w in weights]
+                outputs.append(mb.concat(values=parts, axis=1) if len(parts) > 1 else parts[0])
             else:
-                h = mb.mul(x=mb.gelu(x=mb.conv(x=p, weight=weights[0]), mode='TANH_APPROXIMATION'), y=mb.conv(x=p, weight=weights[1]))
-                outputs.append(mb.conv(x=h, weight=weights[2]))
+                total = None
+                for g, u, d in weights:
+                    h = mb.mul(x=mb.gelu(x=mb.conv(x=p, weight=g), mode='TANH_APPROXIMATION'), y=mb.conv(x=p, weight=u))
+                    part = mb.conv(x=h, weight=d)
+                    total = part if total is None else mb.add(x=total, y=part)
+                outputs.append(total)
         y = mb.concat(values=outputs, axis=3) if len(outputs) > 1 else outputs[0]
         n = arrays[0].shape[0] if kind == 'linear' else arrays[2].shape[0]
         return mb.transpose(x=mb.reshape(x=y, shape=[n, rows]), perm=[1, 0])
