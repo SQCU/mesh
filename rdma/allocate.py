@@ -527,9 +527,19 @@ class Coupled:
     time moves past the resolution from the median it stood at is solved again (its performance changed [Clarke,
     Lastovetsky & Rychkov 2011]).
 
+    The total.  A decision whose total is another decision's part (a member's units of a decision among members,
+    divided among the member's engines) follows it (`resize`): the model is in units, so every allocation measured at
+    any total stays evidence, and the parts at the new total are the model's minimum over its lattice (the design about
+    the parts scaled to it, where the model is undetermined).  Only allocations of the current total are candidates
+    (the measured best, the standing).  The member's time at each part the other decision tries is then its best
+    division's, which is all that decision's time depends on: the two solve the joint problem exactly, the division
+    being the member's alone.
+
       c = Coupled(3456, 128, [0, 0, 0], [3456, 3456, 3456], [1152, 1152, 1152])
       c.observe([[t, ...], [t, ...], [t, ...]], [call, ...])   # each member's seconds, the calls' seconds
-      c.parts -> the next allocation"""
+      c.parts -> the next allocation
+      c.resize(4096) -> the next allocation of 4096 units
+      Coupled.of(c.state()) -> the same solver (JSON between processes)"""
 
     def __init__(self, total, grain, low, high, parts, window=3, ridge=1e-3):
         self.total, self.grain, self.window, self.ridge = int(total), int(grain), int(window), float(ridge)
@@ -538,6 +548,50 @@ class Coupled:
         self.able = [i for i, h in enumerate(self.high) if h > 0]
         self.seen, self.stands, self.stood, self.forbidden = {}, False, None, set()
         self.design = self._design(self.start)
+
+    def state(self):
+        """The solver as JSON data (Coupled.of)."""
+        return {'total': self.total, 'grain': self.grain, 'window': self.window, 'ridge': self.ridge, 'low': self.low,
+                'high': self.high, 'parts': list(self.parts), 'start': list(self.start), 'able': self.able,
+                'stands': self.stands, 'stood': self.stood, 'forbidden': sorted(self.forbidden),
+                'seen': [[list(p), e] for p, e in self.seen.items()], 'design': [list(p) for p in self.design]}
+
+    @classmethod
+    def of(cls, state):
+        c = cls.__new__(cls)
+        c.total, c.grain, c.window, c.ridge = state['total'], state['grain'], state['window'], state['ridge']
+        c.low, c.high, c.able = list(state['low']), list(state['high']), list(state['able'])
+        c.parts, c.start = tuple(state['parts']), tuple(state['start'])
+        c.stands, c.stood = state['stands'], state['stood']
+        c.forbidden = {tuple(f) for f in state['forbidden']}
+        c.seen = {tuple(p): e for p, e in state['seen']}
+        c.design = [tuple(p) for p in state['design']]
+        return c
+
+    def resize(self, total):
+        """The total moved to `total` units (a multiple of the grain): each bound that was the whole total becomes the
+        new one; the next allocation is the model's minimum over the new lattice, or, undetermined, the parts scaled to
+        it and the design about them."""
+        total = int(total)
+        if total == self.total:
+            return list(self.parts)
+        if total % self.grain:
+            raise ValueError(f'coupled: total {total} is not in grains of {self.grain}')
+        old, self.total = self.total, total
+        self.high = [total if h >= old else min(h, total) for h in self.high]
+        self.low = [min(lo, total) for lo in self.low]
+        scaled = [self.grain * round(p * total / old / self.grain) if old else 0 for p in self.parts]
+        biggest = max(self.able, key=lambda i: (scaled[i], -i))
+        scaled[biggest] += total - sum(scaled)
+        self.start, self.stands, self.stood = tuple(scaled), False, None
+        self.design = self._design(self.start)
+        fitted = self.fit()
+        lattice = [p for p in _lattice(self.total, self.grain, self.low, self.high) if self.allowed(p)]
+        if fitted is not None and lattice:
+            self.parts = min(lattice, key=lambda p: (self.predict(p, fitted), p))
+        else:
+            self.parts = self.start if self.start in lattice else (self.design[0] if self.design else lattice[0])
+        return list(self.parts)
 
     def _partners(self, i):
         """The able members allowed to hold units beside member i."""
@@ -677,7 +731,7 @@ class Coupled:
         fitted = self.fit()
         if fitted is None:
             return pending[0] if pending else self.parts
-        best = min((p for p in measured if self.allowed(p)), key=lambda p: self._median(measured[p]['calls']))
+        best = min((p for p in measured if self.allowed(p) and sum(p) == self.total), key=lambda p: self._median(measured[p]['calls']))
         proposal = min((p for p in _lattice(self.total, self.grain, self.low, self.high) if self.allowed(p)),
                        key=lambda p: (self.predict(p, fitted), p))
         if proposal not in measured:
