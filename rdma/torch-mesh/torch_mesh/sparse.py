@@ -177,6 +177,39 @@ def expand(mask, tile, shape):
     return mask.to('cpu').repeat_interleave(tile, 0).repeat_interleave(tile, 1)[:shape[0], :shape[1]]
 
 
+def tile_energy(w, tile):
+    """Each tile's squared norm, [N/tile, K/tile]."""
+    n, k = w.shape
+    return w.reshape(n // tile, tile, k // tile, tile).square().sum((1, 3))
+
+
+def project(w, tile, keep):
+    """The support P keeps (a learned support's projection, metal-microbench docs/kernels.md "Learning the support"):
+    the `keep` fraction of each output tile row's tiles by energy (ties to the lower index)."""
+    energy = tile_energy(w, tile)
+    count = max(1, round(keep * energy.shape[1]))
+    order = energy.argsort(dim=1, descending=True, stable=True)
+    mask = torch.zeros_like(energy, dtype=torch.bool)
+    mask.scatter_(1, order[:, :count], True)
+    return mask
+
+
+def projection_distance(w, mask, tile):
+    """R(W) = ||W outside the support||^2 / ||W||^2, its denominator held: a differentiable loss whose gradient is the
+    dropped tiles' 2 W / ||W||^2 (exact almost everywhere)."""
+    dropped = (~mask.to(w.device)).repeat_interleave(tile, 0).repeat_interleave(tile, 1)
+    return (w * dropped).square().sum() / w.detach().square().sum().clamp_min(torch.finfo(torch.float32).tiny)
+
+
+def tile_scores(x, dy, w, tile):
+    """Each tile's first-order effect <W_t, (dY^T . X)_t> and its gradient's energy over every tile, dense: what a
+    dropped tile would contribute, read every few steps to let it return [RigL: Evci et al. 2020]."""
+    n, k = w.shape
+    g = weight_grad(x, dy, named('all', tile), n, k)
+    blocks = lambda t: t.float().reshape(n // tile, tile, k // tile, tile)
+    return (blocks(w) * blocks(g)).sum((1, 3)), blocks(g).square().sum((1, 3))
+
+
 def contributions(w, x, tile):
     """Each tile's contribution to the product x . w^T on the rows x: the squared norm of its own term, [N/tile, K/tile]
     (float32, on w's device)."""
