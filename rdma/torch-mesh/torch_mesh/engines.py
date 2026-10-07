@@ -52,7 +52,9 @@ in its time).
 import concurrent.futures
 import ctypes
 import hashlib
+import json
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -250,20 +252,14 @@ class Ane(Engine):
     def load(self, shard, rows):
         import numpy as np
         tile = self.limits['tile']
-        model = neural_engine_model(shard.kind, shard.arrays, rows, tile)
         width = shard.arrays[0].shape[1]
-        spec = model.get_spec().description
-        inputs, outputs = spec.input[0].name, spec.output[0].name
         n = shard.arrays[0].shape[0] if shard.kind == 'linear' else shard.arrays[2].shape[0]
         native = _coreml()
-        handle = None
+        handle, model = None, None
         if native:
-            digest = hashlib.sha1(b''.join(a.tobytes() for a in shard.arrays) + f'{shard.kind} {rows} {tile}'.encode()).hexdigest()
-            package = Path(os.path.expanduser('~/.cache/mesh-engines')) / f'{digest}.mlpackage'
-            if not package.exists():
-                package.parent.mkdir(parents=True, exist_ok=True)
-                model.save(str(package))
-            handle = native.mesh_coreml_load(str(package).encode(), inputs.encode(), outputs.encode(), 0)
+            compiled, shard.block, _ = neural_engine_share(shard.kind, shard.arrays, rows, tile)
+            inputs, outputs = '', ''
+            handle = native.mesh_coreml_load(str(compiled).encode(), b'', b'', 0)
             if handle < 0:
                 raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
             placed = ctypes.create_string_buffer(1 << 20)
@@ -271,6 +267,10 @@ class Ane(Engine):
                 devices = {line.split('=')[1] for line in placed.value.decode().split('\n') if '=' in line}
                 shard.placement = sorted(devices - {'unknown'})
                 self.occupies = self.occupies | frozenset(devices - {'unknown'})
+        else:
+            model = neural_engine_model(shard.kind, shard.arrays, rows, tile)
+            spec = model.get_spec().description
+            inputs, outputs = spec.input[0].name, spec.output[0].name
         shard.models[rows] = (model, inputs, outputs, handle, n)
         warm = torch.zeros(rows, width, dtype=torch.float16)
         self._predict(shard, warm, torch.empty(rows, n, dtype=torch.float16))
@@ -346,6 +346,57 @@ def neural_engine_model(kind, arrays, rows, tile=128, block=None):
         return mb.transpose(x=mb.reshape(x=y, shape=[n, rows]), perm=[1, 0])
     return ct.convert(program, convert_to='mlprogram', compute_units=ct.ComputeUnit.CPU_AND_NE,
                       compute_precision=ct.precision.FLOAT16, minimum_deployment_target=ct.target.macOS15)
+
+
+def neural_engine_share(kind, arrays, rows, tile=128, grain=1):
+    """A Neural Engine share compiled where its every operation runs on the Neural Engine: built
+    (neural_engine_model), compiled once into ~/.cache/mesh-engines by content (the arrays, kind, rows, tile and block),
+    its compute plan read (coremltools MLComputePlan), and built again in halved blocks of `grain` units while any
+    operation is placed elsewhere: the Neural Engine's compiler refuses a convolution past a weight size (on an M4 Pro
+    between 7680 and 8192 units of a 1536-wide input in fp16: 22.5 to 24 MiB), and Core ML then runs the whole program
+    on the CPU, 20 to 60 times slower.  The largest block that placed is kept for the node by input width
+    (~/.cache/mesh-engines/blocks.json) and tried first.  (compiled .mlmodelc path, block, its operations' devices)."""
+    import collections
+    import coremltools as ct
+    import numpy as np
+    from coremltools.models.compute_plan import MLComputePlan
+    cache = Path(os.path.expanduser('~/.cache/mesh-engines'))
+    cache.mkdir(parents=True, exist_ok=True)
+    known_path = cache / 'blocks.json'
+    try:
+        known = json.loads(known_path.read_text())
+    except (OSError, ValueError):
+        known = {}
+    units, width = arrays[0].shape[0], arrays[0].shape[1]
+    digest = hashlib.sha1(b''.join(np.ascontiguousarray(a).tobytes() for a in arrays) + f'{kind} {rows} {tile}'.encode()).hexdigest()
+    native = _coreml()
+    if native is None:
+        raise RuntimeError('Neural Engine share: rdma/libmesh-coreml.dylib does not load')
+    block = min(units, int(known.get(str(width), units)))
+    while True:
+        compiled = cache / f'{digest}-b{block}.mlmodelc'
+        if not compiled.exists():
+            package = cache / f'{digest}-b{block}.mlpackage'
+            neural_engine_model(kind, arrays, rows, tile, block).save(str(package))
+            failed = native.mesh_coreml_compile(str(package).encode(), str(compiled).encode())
+            shutil.rmtree(package, ignore_errors=True)
+            if failed:
+                raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
+        plan = MLComputePlan.load_from_path(path=str(compiled), compute_units=ct.ComputeUnit.CPU_AND_NE)
+        devices = collections.Counter()
+        for op in plan.model_structure.program.functions['main'].block.operations:
+            usage = plan.get_compute_device_usage_for_mlprogram_operation(op)
+            if usage is not None:
+                name = type(usage.preferred_compute_device).__name__
+                devices['ane' if 'NeuralEngine' in name else 'gpu' if 'GPU' in name else 'cpu' if 'CPU' in name else 'unknown'] += 1
+        if set(devices) <= {'ane'} or block <= grain:
+            if set(devices) <= {'ane'} and block > int(known.get(str(width), 0)) and block < units:
+                known[str(width)] = block
+                known_path.write_text(json.dumps(known) + '\n')
+            return compiled, block, dict(devices)
+        shutil.rmtree(compiled, ignore_errors=True)
+        known[str(width)] = min(int(known.get(str(width), units)), max(grain, (block // 2) // grain * grain))
+        block = known[str(width)]
 
 
 ENGINES = {e.name: e for e in (Mps, Cpu, Ane)}

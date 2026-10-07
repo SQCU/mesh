@@ -6,8 +6,9 @@
    GPU (1.3-2.8 GHz from 4.3 on an M4 Pro), a 3 ms prediction took 9.  Called through ctypes, which releases the
    interpreter while it runs.
 
-   mesh_coreml_load(package, input, output, units): compiles a model package (MLModel compileModelAtURL) and loads it
-   on `units` (0 CPU and Neural Engine, 1 all, 2 CPU only); its handle, or -1 (mesh_coreml_error).
+   mesh_coreml_load(package, input, output, units): compiles a model package (MLModel compileModelAtURL; a compiled
+   .mlmodelc loads as it is) and loads it on `units` (0 CPU and Neural Engine, 1 all, 2 CPU only), its input and output
+   named (empty: the model's own first); its handle, or -1 (mesh_coreml_error).
    mesh_coreml_predict(handle, in, in_shape, in_rank, out, out_shape, out_rank): one prediction, the input read from
    `in` and the output written to `out` (row-major float16 of those shapes); 1 where Core ML wrote the output into
    `out` itself, 0 where it was copied there from Core ML's own, -1 on an error. */
@@ -29,14 +30,18 @@ long mesh_coreml_load(const char *package, const char *input, const char *output
   @autoreleasepool {
     if (!models_) { models_ = [NSMutableArray new]; names_ = [NSMutableArray new]; compiled_ = [NSMutableArray new]; units_ = [NSMutableArray new]; }
     NSError *error = nil;
-    NSURL *compiled = [MLModel compileModelAtURL:[NSURL fileURLWithPath:@(package)] error:&error];
+    NSURL *given = [NSURL fileURLWithPath:@(package)];
+    NSURL *compiled = [given.pathExtension isEqualToString:@"mlmodelc"] ? given : [MLModel compileModelAtURL:given error:&error];
     if (!compiled) { snprintf(error_, sizeof error_, "compile: %s", error.localizedDescription.UTF8String); return -1; }
     MLModelConfiguration *configuration = [MLModelConfiguration new];
     configuration.computeUnits = units == 1 ? MLComputeUnitsAll : units == 2 ? MLComputeUnitsCPUOnly : MLComputeUnitsCPUAndNeuralEngine;
     MLModel *model = [MLModel modelWithContentsOfURL:compiled configuration:configuration error:&error];
     if (!model) { snprintf(error_, sizeof error_, "load: %s", error.localizedDescription.UTF8String); return -1; }
+    NSString *in = strlen(input) ? @(input) : model.modelDescription.inputDescriptionsByName.allKeys.firstObject;
+    NSString *out = strlen(output) ? @(output) : model.modelDescription.outputDescriptionsByName.allKeys.firstObject;
+    if (!in || !out) { snprintf(error_, sizeof error_, "load: the model names no input or output"); return -1; }
     [models_ addObject:model];
-    [names_ addObject:@[@(input), @(output)]];
+    [names_ addObject:@[in, out]];
     [compiled_ addObject:compiled];
     [units_ addObject:@(configuration.computeUnits)];
     return (long)models_.count - 1;

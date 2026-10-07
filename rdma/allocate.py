@@ -638,6 +638,28 @@ class Coupled:
         self.design = self._design(self.parts)
         return list(self.parts)
 
+    def bound(self, i, high):
+        """Member i holds at most `high` units from now on (an allocation giving it more failed a requirement the times
+        do not show: an operation's accuracy, a share that overran its wait, either growing with its units): the
+        allocations past it leave the evidence and the lattice, the current parts give their excess to the member that
+        measured fastest a unit beside it, and the decision is solved again; a bound of none excludes it."""
+        high = int(high) // self.grain * self.grain
+        if high <= 0:
+            return self.exclude(i)
+        self.high[i] = min(self.high[i], high)
+        self.seen = {p: e for p, e in self.seen.items() if p[i] <= self.high[i]}
+        parts = list(self.parts)
+        if parts[i] > self.high[i]:
+            others = [j for j in self.able if j != i]
+            rate = {j: min((self._median(e['members'][j]) / p[j] for p, e in self._measured().items() if p[j] > 0 and e['members'][j]),
+                           default=math.inf) for j in others}
+            target = min(others, key=lambda j: (rate[j], j))
+            parts[target] += parts[i] - self.high[i]
+            parts[i] = self.high[i]
+        self.parts, self.start, self.stands = tuple(parts), tuple(parts), False
+        self.design = self._design(self.start)
+        return list(self.parts)
+
     def exclude(self, i):
         """Member i holds no units from now on (it failed a requirement the times do not show: an operation's
         accuracy): its bound goes to 0, its units to the member that measured fastest a unit beside it, the
