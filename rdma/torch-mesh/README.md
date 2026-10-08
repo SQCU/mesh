@@ -223,14 +223,14 @@ w = s["lm_head"].to("cpu")                        # decoded
   two dispatches fewer than a cast each way. A backward's gradients lie far below fp16's normal range: cast as they
   are, E2B's loss gradient at its input embeddings (64 tokens, every matrix coded, a bf16 model) was 0.140 relative to
   the float32 model's a position (median); scaled, 0.050-0.054 (1e-3 relative noise on the float32 model's weights:
-  0.01). In HF's eager decode step (dispatch-bound: 15,660 aten calls a token with the casts) the scaling in torch's
-  own operations cost 10,000 more calls, 3.8 ms; in the kernels the step takes 12,613.
+  0.01). The scaling and the caller's dtype take one dispatch before the product and none after (the finish writes
+  that dtype).
 - The codes are constants: no gradient reaches them, only through them.
 - A coded tensor shards as a DTensor: torch's own `parallelize_module` places it (`ColwiseParallel`,
   `RowwiseParallel`, forward and backward) with `src_data_rank=None`, each rank cutting its share from its own copy of
-  the codes (its storage is no dense buffer to scatter). metal-microbench `tools/torch_parallel/e2b.py` CODES=: HF's
-  Gemma-4 E2B with every coded matrix its weight and each layer's FFN parallelized so on the pair, its greedy tokens
-  the one-device run's for 24 of 24.
+  the codes (its storage is no dense buffer to scatter). A correctness check, not a measure of speed:
+  metal-microbench `tools/torch_parallel/e2b.py` CODES= (Gemma-4 E2B, every coded matrix its weight, each layer's FFN
+  parallelized so on the pair), its greedy tokens the one-device run's for 24 of 24.
 
 `python -m torch_mesh.streamed check EXPORT [NAME ...]` checks the decode against `model_code.py`'s reference decode,
 the products and their input gradients and the FFN (fused, composed, its gradient) against the decoded matrices (E2B and
