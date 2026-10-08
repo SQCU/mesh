@@ -180,6 +180,30 @@ engines.rebalance(pool)                                    # every few steps
   CPU, and beside a busy GPU the CPU's performance cores clocked down to 1.3-2.8 GHz (powermetrics), so a 3 ms
   prediction became 9 after a few seconds; no allocation could repair it. The native binding holds 1.44 ms steadily.
 
+## Streamed coded weights
+
+`torch_mesh/streamed.metal` is the decompression of a coded matrix (metal-microbench `tools/model_code.py` exports:
+32 x 32 tiles, each its own width and step, row and column orders and scales, a rotation for some) as a producer whose
+consumer is an operand: `streamed_pairs` hands each decoded pair of a lane's tile row to a function, `streamed_panels`
+decodes a 32 x 256 panel in threadgroup memory and then runs a function on the threadgroup, `streamed_value` and
+`streamed_rows` read a product's output (its K shares summed and scaled, or the plain values a crossing summed), and
+`streamed_put` writes a product's input in its column order and scale. Every kernel there is an instantiation (the
+one-row product, the 16- and 128-row panels on the matrix units, the finish, the input gather and rotation, the GELU of
+gate and up, the dense decode), its constants one `streamed_dims` block at buffer 15; metal-microbench's engine
+compiles the same source.
+
+```python
+from torch_mesh import streamed
+s = streamed.Streamed("gemma-4-E2B-it-streamed.safetensors")
+y = s["model.language_model.layers.3.mlp.down_proj"].linear(x)            # x [n, 6144] fp16, any n
+h = streamed.ffn(x, *(s[f"model.language_model.layers.3.mlp.{p}_proj"] for p in ("gate", "up", "down")))
+w = s["lm_head"].dense()                                                  # decoded, in the matrix's coordinates
+```
+
+`python -m torch_mesh.streamed check EXPORT [NAME ...]` checks the decode against `model_code.py`'s reference decode
+and the products and the FFN against the dense ones (E2B and E4B: decode 3e-6 to 3e-4, products at 1, 8 and 300 rows
+3e-4 to 5e-4, the FFN 5e-4 to 8e-4 relative).
+
 ## Performance
 
 - The MPS path is the measured path. An eager collective costs about 17 us on the pair; collectives compiled into a
