@@ -19,6 +19,12 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// A kernel's type for the recorder that composes kernels (metal-microbench docs/kernels.md#one-kernel-interface):
+// MESH_KERNEL(row) before a kernel declares a threadgroup a row, touching only its own row of every binding.
+#ifndef MESH_KERNEL
+#define MESH_KERNEL(kind)
+#endif
+
 // Every kernel's constants, one block at buffer 15 (a caller sets the fields its kernel reads): tiles a 32-row block
 // (columns / 32), a matrix's outputs (rows), input rows, panels a threadgroup, a row or share stride, shares to sum and
 // their stride (split), whether a panel finishes, an element count, a width, inputs written, a softcap, an RMS epsilon.
