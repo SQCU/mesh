@@ -39,10 +39,10 @@ def _pipeline(name):
 
 
 def _dims(tiles=0, outputs=0, rows=0, per=0, stride=0, shares=0, split=0, finish=0, count=0, columns=0, inputs=0,
-          cap=0.0, eps=0.0):
+          cap=0.0, eps=0.0, flags=0, layer=0):
     """streamed_dims, field for field: its words as the constant block _stream.encode binds at buffer 15."""
     floats = [struct.unpack('<i', struct.pack('<f', v))[0] for v in (cap, eps)]
-    return [tiles, outputs, rows, per, stride, shares, split, finish, count, columns, inputs, *floats]
+    return [tiles, outputs, rows, per, stride, shares, split, finish, count, columns, inputs, *floats, flags, layer]
 
 
 def _encode(name, buffers, dims, gx, gy, threads):

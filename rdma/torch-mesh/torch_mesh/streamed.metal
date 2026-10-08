@@ -20,15 +20,24 @@
 using namespace metal;
 
 // A kernel's type for the recorder that composes kernels (metal-microbench docs/kernels.md#one-kernel-interface):
-// MESH_KERNEL(row) before a kernel declares a threadgroup a row, touching only its own row of every binding.
+// MESH_KERNEL(row) before a kernel declares a threadgroup a row, touching only its own row of every binding;
+// MESH_KERNEL(product) a K split: threadgroup (x, y) writes share y of output block x (the 32 outputs [32x, 32x + 32) of
+// every input row) and nothing else of its output; MESH_KERNEL(finish) a thread an element of a product's output,
+// reading only the shares of that element (streamed_block_element enumerates block x's elements).
 #ifndef MESH_KERNEL
 #define MESH_KERNEL(kind)
 #endif
 
 // Every kernel's constants, one block at buffer 15 (a caller sets the fields its kernel reads): tiles a 32-row block
 // (columns / 32), a matrix's outputs (rows), input rows, panels a threadgroup, a row or share stride, shares to sum and
-// their stride (split), whether a panel finishes, an element count, a width, inputs written, a softcap, an RMS epsilon.
-struct streamed_dims { uint tiles, outputs, rows, per, stride, shares, split, finish, count, columns, inputs; float cap, eps; };
+// their stride (split), whether a panel finishes, an element count, a width, inputs written, a softcap, an RMS epsilon,
+// a consumer's flags and its layer.
+struct streamed_dims { uint tiles, outputs, rows, per, stride, shares, split, finish, count, columns, inputs; float cap, eps; uint flags, layer; };
+
+// A finish's elements of output block x, the shares product threadgroups (x, y) wrote: element k of
+// streamed_block_elements(d) is streamed_block_element(x, k, d), its thread position in the finish's grid.
+static inline uint streamed_block_elements(constant streamed_dims &d) { return 32u * (d.count / d.outputs); }
+static inline uint streamed_block_element(uint x, uint k, constant streamed_dims &d) { return (k / 32u) * d.outputs + 32u * x + k % 32u; }
 
 struct Coded {
     device const uint *bits;
@@ -151,8 +160,10 @@ static inline void streamed_panels(Coded c, uint block, uint first, uint last, u
 }
 
 // A product's sum for input row n at coded output row r over its shares (K splits of a dispatch; members' shares after
-// a crossing), the row's scale applied: what every consumer of a product reads.
-static inline float streamed_value(device const float *partials, ulong at, uint shares, uint stride, float scale) {
+// a crossing), the row's scale applied: what every consumer of a product reads. P is the partials' pointer type: a
+// consumer run inside the product's last arriving threadgroup reads them coherent(device).
+template <typename P>
+static inline float streamed_value(P partials, ulong at, uint shares, uint stride, float scale) {
     float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
     uint s = 0;
     for (; s + 4 <= shares; s += 4) {
@@ -186,7 +197,8 @@ static inline float streamed_sum(float s, threadgroup float *partial, uint t, ui
 // coded row r of [first, first + count) lands at order[r] - first, its shares summed and scaled) or, where a crossing
 // has summed it into plain values, from `plain` (shares == 0, row stride `rows`). The row order permutes within the
 // range. Ends with a threadgroup barrier.
-static inline void streamed_rows(device const float *partials, device const half *plain, device const int *order,
+template <typename P>
+static inline void streamed_rows(P partials, device const half *plain, device const int *order,
                                  device const float *scale, uint n, uint first, uint count, uint rows, uint shares,
                                  uint stride, threadgroup float *vals, uint t, uint threads) {
     for (uint i = t; i < count; i += threads) {
@@ -207,6 +219,7 @@ static inline void streamed_put(device half *input, device const int *order, dev
 // A product's outputs finished into plain values of T: y[n * stride + order[r]], over the row's factor (inputs > 0: its
 // input row scaled by streamed_scale_rows), capped (cap > 0).
 template <typename T>
+MESH_KERNEL(finish)
 kernel void streamed_finish(device const float *partials [[buffer(0)]], device T *y [[buffer(1)]],
                             device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
                             device const float *factor [[buffer(4)]], constant streamed_dims &d [[buffer(15)]],
@@ -317,6 +330,7 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
 
 // The GELU FFN's middle: hidden = GELU(gate) * up from the gate and up products' partials, in their (shared) coded
 // row order, which the down product's columns follow.
+MESH_KERNEL(finish)
 kernel void streamed_gelu(device const float *gate [[buffer(0)]], device const float *up [[buffer(1)]],
                           device const float *gateScale [[buffer(2)]], device const float *upScale [[buffer(3)]],
                           device half *hidden [[buffer(4)]], constant streamed_dims &d [[buffer(15)]],
@@ -353,6 +367,7 @@ kernel void streamed_dense(device const uint *bits [[buffer(0)]], device const u
 // threadgroup memory into partials[share][n][row] (coded row order, the row scale not applied). Rows past d.rows repeat
 // the last row's loads (no branch on a load) and are not written.
 template <uint R, uint T>
+MESH_KERNEL(product)
 kernel void streamed_direct(device const uint *bits [[buffer(0)]], device const uchar *widths [[buffer(1)]],
                             device const float *steps [[buffer(2)]], device const uint *offsets [[buffer(3)]],
                             device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
@@ -549,6 +564,7 @@ kernel void streamed_panel(device const uint *bits [[buffer(0)]], device const u
 // operation on it, no threadgroup barrier between tiles; the simdgroups' accumulators reduced in threadgroup memory into
 // partials[share][n][row] (coded row order, the row scale not applied).
 template <uint R, uint T>
+MESH_KERNEL(product)
 kernel void streamed_tiles(device const uint *bits [[buffer(0)]], device const uchar *widths [[buffer(1)]],
                            device const float *steps [[buffer(2)]], device const uint *offsets [[buffer(3)]],
                            device half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
