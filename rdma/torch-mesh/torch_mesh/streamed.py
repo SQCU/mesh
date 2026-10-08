@@ -11,8 +11,9 @@ for some a rotation (int8, its scale a column: the matrix's columns are rotated 
   Matrix.linear(x)                    x A^T: the input transform (gather, or rotation), the product, its finish
   ffn(x, gate, up, down)              the GELU FFN: gate and up products, GELU(gate) * up (streamed_gelu), down
 
-A product of one row is streamed_product (a lane a tile row, a simdgroup a tile); of 2 to 16 rows the 16-row panel; of
-more the 128-row panel, which finishes its own outputs. Products of up to 16 rows leave partials (a share a K split)
+A product of one row is streamed_product (a lane a tile row, a simdgroup a tile, 16 simdgroups a K split, as the
+engine runs it); of 2 to 16 rows the 16-row panel (8 simdgroups decode a 256-column panel); of more the 128-row panel,
+which finishes its own outputs. Products of up to 16 rows leave partials (a share a K split)
 that their consumer sums (streamed_finish, streamed_gelu).
 
   python -m torch_mesh.streamed check EXPORT [NAME ...]   decode against model_code's reference decode, products and
@@ -28,7 +29,7 @@ from . import _stream
 
 SOURCE = Path(__file__).with_name('streamed.metal').read_text()
 _PIPELINES = {}
-SIMDGROUPS = 8
+PRODUCT_SIMDGROUPS = 16
 
 
 def _pipeline(name):
@@ -68,8 +69,9 @@ class Matrix:
         return [self.codes, self.widths, self.steps, self.offsets]
 
     def splits(self, rows):
-        per = self.per(rows)
-        return -(-self.tiles // (SIMDGROUPS * per))
+        if rows == 1:
+            return -(-self.tiles // PRODUCT_SIMDGROUPS)
+        return -(-self.tiles // (8 * self.per(rows)))
 
     def per(self, rows):
         return 4 if 1 < rows <= 16 and self.tiles >= 64 else 1
@@ -119,7 +121,7 @@ class Matrix:
         partials = torch.empty(shares, n, self.rows, dtype=torch.float32, device='mps')
         if n == 1:
             _encode('streamed_product', self._code() + [xt, partials],
-                    _dims(tiles=self.tiles, outputs=self.rows, split=n * self.rows), self.rows // 32, shares, SIMDGROUPS * 32)
+                    _dims(tiles=self.tiles, outputs=self.rows, split=n * self.rows), self.rows // 32, shares, PRODUCT_SIMDGROUPS * 32)
         else:
             _encode('streamed_panel_16', self._code() + [xt, partials, None, None, None, None, None, xt, self.row_order, self.row_scale],
                     _dims(tiles=self.tiles, outputs=self.rows, rows=n, per=self.per(n), split=n * self.rows),
