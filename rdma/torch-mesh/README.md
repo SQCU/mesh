@@ -226,6 +226,11 @@ w = s["lm_head"].to("cpu")                        # decoded
   0.01). In HF's eager decode step (dispatch-bound: 15,660 aten calls a token with the casts) the scaling in torch's
   own operations cost 10,000 more calls, 3.8 ms; in the kernels the step takes 12,613.
 - The codes are constants: no gradient reaches them, only through them.
+- A coded tensor shards as a DTensor: torch's own `parallelize_module` places it (`ColwiseParallel`,
+  `RowwiseParallel`, forward and backward) with `src_data_rank=None`, each rank cutting its share from its own copy of
+  the codes (its storage is no dense buffer to scatter). metal-microbench `tools/torch_parallel/e2b.py` CODES=: HF's
+  Gemma-4 E2B with every coded matrix its weight and each layer's FFN parallelized so on the pair, its greedy tokens
+  the one-device run's for 24 of 24.
 
 `python -m torch_mesh.streamed check EXPORT [NAME ...]` checks the decode against `model_code.py`'s reference decode,
 the products and their input gradients and the FFN (fused, composed, its gradient) against the decoded matrices (E2B and
