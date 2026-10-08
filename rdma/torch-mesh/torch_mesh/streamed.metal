@@ -414,6 +414,74 @@ template [[host_name("streamed_direct_2_1")]] [[kernel]] decltype(streamed_direc
 template [[host_name("streamed_direct_4_1")]] [[kernel]] decltype(streamed_direct<4, 1>) streamed_direct<4, 1>;
 template [[host_name("streamed_direct_8_1")]] [[kernel]] decltype(streamed_direct<8, 1>) streamed_direct<8, 1>;
 
+// The gate and up products of up to R input rows paired, GELU(gate) * up between them (metal-microbench
+// docs/kernels.md "Streaming the code into the matmul": the study's gate_up_mm): a threadgroup is a band of 32 hidden
+// rows of both matrices over their whole K (no split: the GELU needs both whole sums), each simdgroup taking tiles
+// simd, simd + simds, ...: both tiles' words loaded, then each row's x pairs into registers and the producer's pairs
+// through one FMA chain a row and matrix. The simdgroups' sums reduced in threadgroup memory: hidden[n][r] =
+// GELU(gateScale[r] g) * upScale[r] u, in the hidden's code order (down's coded input). Rows past d.rows repeat the
+// last row's loads and are not written.
+template <uint R>
+kernel void streamed_gate_up(device const uint *gateBits [[buffer(0)]], device const uchar *gateWidths [[buffer(1)]],
+                             device const float *gateSteps [[buffer(2)]], device const uint *gateOffsets [[buffer(3)]],
+                             device const uint *upBits [[buffer(4)]], device const uchar *upWidths [[buffer(5)]],
+                             device const float *upSteps [[buffer(6)]], device const uint *upOffsets [[buffer(7)]],
+                             device const half *gx [[buffer(8)]], device const half *ux [[buffer(9)]],
+                             device const float *gateScale [[buffer(10)]], device const float *upScale [[buffer(11)]],
+                             device half *hidden [[buffer(12)]], constant streamed_dims &d [[buffer(15)]],
+                             uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+                             uint lane [[thread_index_in_simdgroup]], uint simds [[simdgroups_per_threadgroup]],
+                             uint thread_id [[thread_index_in_threadgroup]]) {
+    threadgroup float sums[8][2][R][32];
+    const uint tiles = d.tiles, rows = d.rows, band = group.x;
+    const Coded g = coded(gateBits, gateWidths, gateSteps, gateOffsets, tiles), u = coded(upBits, upWidths, upSteps, upOffsets, tiles);
+    float ga[R], ua[R];
+#pragma clang loop unroll(full)
+    for (uint n = 0; n < R; n++) { ga[n] = 0.0f; ua[n] = 0.0f; }
+    for (uint t = simd; t < tiles; t += simds) {
+        const uint at = band * tiles + t;
+        uint gw[12], uw[12];
+        const uint gb = streamed_words(g, at, lane, gw), ub = streamed_words(u, at, lane, uw);
+        half2 xg[R][16], xu[R][16];
+#pragma clang loop unroll(full)
+        for (uint n = 0; n < R; n++) {
+            device const half2 *pg = (device const half2 *)(gx + ulong(min(n, rows - 1)) * tiles * 32 + t * 32);
+            device const half2 *pu = (device const half2 *)(ux + ulong(min(n, rows - 1)) * tiles * 32 + t * 32);
+#pragma clang loop unroll(full)
+            for (uint j = 0; j < 16; j++) { xg[n][j] = pg[j]; xu[n][j] = pu[j]; }
+        }
+        float gt[R], ut[R];
+#pragma clang loop unroll(full)
+        for (uint n = 0; n < R; n++) { gt[n] = 0.0f; ut[n] = 0.0f; }
+        if (gb) streamed_decode(gw, gb, [&](uint j, float2 v) {
+#pragma clang loop unroll(full)
+            for (uint n = 0; n < R; n++) gt[n] = fma(v.x, float(xg[n][j].x), fma(v.y, float(xg[n][j].y), gt[n]));
+        });
+        if (ub) streamed_decode(uw, ub, [&](uint j, float2 v) {
+#pragma clang loop unroll(full)
+            for (uint n = 0; n < R; n++) ut[n] = fma(v.x, float(xu[n][j].x), fma(v.y, float(xu[n][j].y), ut[n]));
+        });
+        const float gstep = 0.5f * gateSteps[at], ustep = 0.5f * upSteps[at];
+#pragma clang loop unroll(full)
+        for (uint n = 0; n < R; n++) { ga[n] = fma(gt[n], gstep, ga[n]); ua[n] = fma(ut[n], ustep, ua[n]); }
+    }
+#pragma clang loop unroll(full)
+    for (uint n = 0; n < R; n++) { sums[simd][0][n][lane] = ga[n]; sums[simd][1][n][lane] = ua[n]; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = thread_id; i < R * 32; i += simds * 32) {
+        const uint n = i / 32, r = i % 32;
+        if (n >= rows) continue;
+        float gs = 0.0f, us = 0.0f;
+        for (uint s = 0; s < simds; s++) { gs += sums[s][0][n][r]; us += sums[s][1][n][r]; }
+        const uint row = band * 32 + r;
+        hidden[ulong(n) * d.outputs + row] = half(streamed_gelu_of(gateScale[row] * gs, upScale[row] * us));
+    }
+}
+
+template [[host_name("streamed_gate_up_1")]] [[kernel]] decltype(streamed_gate_up<1>) streamed_gate_up<1>;
+template [[host_name("streamed_gate_up_2")]] [[kernel]] decltype(streamed_gate_up<2>) streamed_gate_up<2>;
+template [[host_name("streamed_gate_up_4")]] [[kernel]] decltype(streamed_gate_up<4>) streamed_gate_up<4>;
+
 #if __METAL_VERSION__ >= 400
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 

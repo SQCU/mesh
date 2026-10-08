@@ -276,12 +276,17 @@ class Matrix(torch.Tensor):
     def ffn(x, gate, up, down):
         """The fused GELU FFN couple down(GELU(x gate^T) * (x up^T)) of coded matrices sharing the hidden order (gate's
         and up's rows, down's columns: Streamed's FFNs), x [n, columns]: the input rotated or gathered once for gate and
-        up, their products' partials consumed by streamed_gelu into down's coded input, down's product finished."""
+        up; at one row gate and up paired in one kernel with the GELU in its reduction (streamed_gate_up), else their
+        products' partials consumed by streamed_gelu; down's coded input, down's product finished."""
         x16 = x.half().contiguous()
         n = x16.shape[0]
         gx, ux = gate.coded_input(x16, (up,))
-        g, u = gate.product(gx), up.product(ux)
         hidden = _half(n, gate.rows)
+        if n == 1:
+            _encode('streamed_gate_up_1', gate._code() + up._code() + [gx, ux, gate.row_scale, up.row_scale, hidden],
+                    _dims(tiles=gate.tiles, outputs=gate.rows, rows=n), gate.rows // 32, 1, 256)
+            return down.apply(hidden).to(x.dtype)
+        g, u = gate.product(gx), up.product(ux)
         _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
                 _dims(outputs=gate.rows, shares=g.shape[0], split=n * gate.rows, count=n * gate.rows), -(-(n * gate.rows) // 256), 1, 256)
         return down.apply(hidden).to(x.dtype)
