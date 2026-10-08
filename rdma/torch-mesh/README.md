@@ -190,7 +190,8 @@ consumer is an operand: `streamed_pairs` hands each decoded pair of a lane's til
 decodes a 32 x 256 panel in threadgroup memory and then runs a function on the threadgroup, `streamed_value` and
 `streamed_rows` read a product's output (its K shares summed and scaled, or the plain values a crossing summed), and
 `streamed_put` writes a product's input in its column order and scale. Every kernel there is an instantiation (the
-one-row product, the 16- and 128-row panels and their transposed consumer on the matrix units, the finish, the input
+products of 1 to 8 rows on the ALUs (`streamed_direct`) and 9 to 16 on each simdgroup's tensor operation
+(`streamed_tiles`), the 128-row panel and its transposed consumer on the matrix units, the finish, the input
 gather and rotation, the GELU of gate and up, the dense decode), its constants one `streamed_dims` block at buffer 15;
 metal-microbench's engine compiles the same source.
 
@@ -210,7 +211,7 @@ w = s["lm_head"].to("cpu")                        # decoded
 ```
 
 - `x @ m` is one pipeline whichever way `m` is transposed: the input side's order and scale (and rotation), the
-  product contracting the coded rows (the one-row product, the 16- and 128-row panels) or the coded columns
+  product contracting the coded rows (`streamed_direct`, `streamed_tiles`, the 128-row panel) or the coded columns
   (`streamed_panel_t`: the same decoded panels consumed the other way, its operand band-major because a tensor
   operation's strides past 2^16 elements corrupt its rows past the first), the output side's order and scale. So
   `F.linear` and `mm` and their backward (`linear_backward`, `mm` against the untransposed matrix) need nothing else.
