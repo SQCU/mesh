@@ -283,18 +283,19 @@ kernel void streamed_gather(device const half *x [[buffer(0)]], device half *fir
 
 // The coded inputs of up to two products of a rotated basis (int8 rotation stored transposed: row c rotated
 // coordinate c, scaled by rotationScale[c]); with eps > 0 the RMS norm of x times gamma folds in (the rotation is
-// linear). Four coded columns a simdgroup, 16 bytes a load.
+// linear). Four coded columns a simdgroup, each summed within it, 16 bytes a load: a threadgroup of s simdgroups
+// covers 4s columns.
 kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                             device half *second [[buffer(2)]], device const int *order [[buffer(3)]],
                             device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                             device const char *rotation [[buffer(6)]], device const float *rotationScale [[buffer(7)]],
                             device const half *gamma [[buffer(11)]], constant streamed_dims &d [[buffer(15)]],
                             uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
-                            uint lane [[thread_index_in_simdgroup]]) {
+                            uint lane [[thread_index_in_simdgroup]], uint simds [[simdgroups_per_threadgroup]]) {
     constexpr uint C = 4;
     const uint columns = d.columns, rows = d.rows, outputs = d.inputs;
     const float eps = d.eps;
-    const uint j0 = (group * 4 + simd) * C;
+    const uint j0 = (group * simds + simd) * C;
     if (j0 >= columns) return;
     device const half4 *gamma4 = (device const half4 *)gamma;
     const uint words = columns / 16;
