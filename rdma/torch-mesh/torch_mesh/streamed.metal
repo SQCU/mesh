@@ -19,6 +19,11 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// Every kernel's constants, one block at buffer 15 (a caller sets the fields its kernel reads): tiles a 32-row block
+// (columns / 32), a matrix's outputs (rows), input rows, panels a threadgroup, a row or share stride, shares to sum and
+// their stride (split), whether a panel finishes, an element count, a width, inputs written, a softcap, an RMS epsilon.
+struct streamed_dims { uint tiles, outputs, rows, per, stride, shares, split, finish, count, columns, inputs; float cap, eps; };
+
 struct Coded {
     device const uint *bits;
     device const uchar *widths;
@@ -183,29 +188,25 @@ static inline void streamed_put(device half *input, device const int *order, dev
 // A product's outputs finished into plain values: y[n * stride + order[r]], capped (cap > 0).
 kernel void streamed_finish(device const float *partials [[buffer(0)]], device half *y [[buffer(1)]],
                             device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
-                            constant uint &outputs [[buffer(4)]], constant uint &stride [[buffer(5)]],
-                            constant uint &count [[buffer(6)]], constant float &cap [[buffer(7)]],
-                            constant uint &shares [[buffer(8)]], constant uint &shareStride [[buffer(9)]],
-                            uint i [[thread_position_in_grid]]) {
-    if (i >= count) return;
-    const uint n = i / outputs, r = i % outputs;
-    const float value = streamed_value(partials, i, shares, shareStride, scale[r]);
-    y[n * stride + uint(order[r])] = half(cap > 0.0f ? tanh(value / cap) * cap : value);
+                            constant streamed_dims &d [[buffer(15)]], uint i [[thread_position_in_grid]]) {
+    if (i >= d.count) return;
+    const uint n = i / d.outputs, r = i % d.outputs;
+    const float value = streamed_value(partials, i, d.shares, d.split, scale[r]);
+    y[n * d.stride + uint(order[r])] = half(d.cap > 0.0f ? tanh(value / d.cap) * d.cap : value);
 }
 
 // The coded inputs of up to three products sharing a column order, from plain rows x (grid: columns x rows).
 kernel void streamed_gather(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                             device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
-                            constant uint &columns [[buffer(4)]], device half *second [[buffer(5)]],
-                            device half *third [[buffer(6)]], device const float *secondScale [[buffer(7)]],
-                            device const float *thirdScale [[buffer(8)]], constant uint &outputs [[buffer(9)]],
-                            uint2 i [[thread_position_in_grid]]) {
-    if (i.x >= columns) return;
-    const ulong at = ulong(i.y) * columns + i.x;
-    const float v = float(x[ulong(i.y) * columns + uint(order[i.x])]);
+                            device half *second [[buffer(5)]], device half *third [[buffer(6)]],
+                            device const float *secondScale [[buffer(7)]], device const float *thirdScale [[buffer(8)]],
+                            constant streamed_dims &d [[buffer(15)]], uint2 i [[thread_position_in_grid]]) {
+    if (i.x >= d.columns) return;
+    const ulong at = ulong(i.y) * d.columns + i.x;
+    const float v = float(x[ulong(i.y) * d.columns + uint(order[i.x])]);
     first[at] = half(scale[i.x] * v);
-    if (outputs > 1) second[at] = half(secondScale[i.x] * v);
-    if (outputs > 2) third[at] = half(thirdScale[i.x] * v);
+    if (d.inputs > 1) second[at] = half(secondScale[i.x] * v);
+    if (d.inputs > 2) third[at] = half(thirdScale[i.x] * v);
 }
 
 // The coded inputs of up to two products of a rotated basis (int8 rotation stored transposed: row c rotated
@@ -215,12 +216,12 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
                             device half *second [[buffer(2)]], device const int *order [[buffer(3)]],
                             device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                             device const char *rotation [[buffer(6)]], device const float *rotationScale [[buffer(7)]],
-                            constant uint &columns [[buffer(8)]], constant uint &rows [[buffer(9)]],
-                            constant uint &outputs [[buffer(10)]], device const half *gamma [[buffer(11)]],
-                            constant float &eps [[buffer(12)]],
+                            device const half *gamma [[buffer(11)]], constant streamed_dims &d [[buffer(15)]],
                             uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]]) {
     constexpr uint C = 4;
+    const uint columns = d.columns, rows = d.rows, outputs = d.inputs;
+    const float eps = d.eps;
     const uint j0 = (group * 4 + simd) * C;
     if (j0 >= columns) return;
     device const half4 *gamma4 = (device const half4 *)gamma;
@@ -259,13 +260,12 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
 // row order, which the down product's columns follow.
 kernel void streamed_gelu(device const float *gate [[buffer(0)]], device const float *up [[buffer(1)]],
                           device const float *gateScale [[buffer(2)]], device const float *upScale [[buffer(3)]],
-                          device half *hidden [[buffer(4)]], constant uint &width [[buffer(5)]],
-                          constant uint &count [[buffer(6)]], constant uint &shares [[buffer(7)]],
-                          constant uint &shareStride [[buffer(8)]], uint i [[thread_position_in_grid]]) {
-    if (i >= count) return;
-    const uint r = i % width;
-    hidden[i] = half(streamed_gelu_of(streamed_value(gate, i, shares, shareStride, gateScale[r]),
-                                      streamed_value(up, i, shares, shareStride, upScale[r])));
+                          device half *hidden [[buffer(4)]], constant streamed_dims &d [[buffer(15)]],
+                          uint i [[thread_position_in_grid]]) {
+    if (i >= d.count) return;
+    const uint r = i % d.outputs;
+    hidden[i] = half(streamed_gelu_of(streamed_value(gate, i, d.shares, d.split, gateScale[r]),
+                                      streamed_value(up, i, d.shares, d.split, upScale[r])));
 }
 
 // The matrix decoded to dense values in its row and column orders: dense[order[r]][columns[j]] = rowScale[r] *
@@ -273,9 +273,10 @@ kernel void streamed_gelu(device const float *gate [[buffer(0)]], device const f
 kernel void streamed_dense(device const uint *bits [[buffer(0)]], device const uchar *widths [[buffer(1)]],
                            device const float *steps [[buffer(2)]], device const uint *offsets [[buffer(3)]],
                            device half *dense [[buffer(4)]], device const int *order [[buffer(5)]],
-                           device const float *rowScale [[buffer(6)]], constant uint &tiles [[buffer(7)]],
-                           device const int *columns [[buffer(8)]], device const float *colScale [[buffer(9)]],
+                           device const float *rowScale [[buffer(6)]], device const int *columns [[buffer(8)]],
+                           device const float *colScale [[buffer(9)]], constant streamed_dims &d [[buffer(15)]],
                            uint2 group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint tiles = d.tiles;
     const Coded c = coded(bits, widths, steps, offsets, tiles);
     const uint r = group.x * 32 + lane, at = group.x * tiles + group.y, j0 = group.y * 32;
     const float scale = 0.5f * steps[at] * rowScale[r];
@@ -292,12 +293,12 @@ kernel void streamed_dense(device const uint *bits [[buffer(0)]], device const u
 kernel void streamed_product(device const uint *bits [[buffer(0)]], device const uchar *widths [[buffer(1)]],
                              device const float *steps [[buffer(2)]], device const uint *offsets [[buffer(3)]],
                              device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
-                             constant uint &tiles [[buffer(6)]], constant uint &rows [[buffer(7)]],
-                             constant uint &stride [[buffer(8)]],
+                             constant streamed_dims &d [[buffer(15)]],
                              uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                              uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]],
                              uint sgs [[simdgroups_per_threadgroup]], uint2 tpg [[threads_per_threadgroup]]) {
     threadgroup float sums[16][32];
+    const uint tiles = d.tiles, stride = d.split;
     const Coded c = coded(bits, widths, steps, offsets, tiles);
     const uint t = group.y * sgs + simd, at = group.x * tiles + min(t, tiles - 1);
     half2 x[16];
@@ -327,14 +328,14 @@ template <uint M>
 kernel void streamed_panel(device const uint *bits [[buffer(0)]], device const uchar *widths [[buffer(1)]],
                            device const float *steps [[buffer(2)]], device const uint *offsets [[buffer(3)]],
                            device half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
-                           constant uint &tiles [[buffer(6)]], constant uint &outputs [[buffer(7)]],
-                           constant uint &rows [[buffer(8)]], constant uint &per [[buffer(9)]],
-                           constant uint &stride [[buffer(10)]], device half *ys [[buffer(11)]],
-                           device const int *order [[buffer(12)]], device const float *rowScale [[buffer(13)]],
-                           constant float &cap [[buffer(14)]], constant uint &finish [[buffer(15)]],
+                           device half *ys [[buffer(11)]], device const int *order [[buffer(12)]],
+                           device const float *rowScale [[buffer(13)]], constant streamed_dims &d [[buffer(15)]],
                            uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                            uint lane [[thread_index_in_simdgroup]]) {
     using namespace mpp::tensor_ops;
+    const uint tiles = d.tiles, outputs = d.outputs, rows = d.rows, per = d.per, finish = d.finish;
+    const uint stride = d.finish ? d.stride : d.split;
+    const float cap = d.cap;
     threadgroup half panel[32 * 264];
     const Coded c = coded(bits, widths, steps, offsets, tiles);
     const uint blocks = (rows + M - 1) / M, row0 = (group.y % blocks) * M, share = group.y / blocks;
