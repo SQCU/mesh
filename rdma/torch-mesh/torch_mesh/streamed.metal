@@ -108,7 +108,7 @@ static inline uint streamed_row(Coded c, uint at, uint lane, float factor, threa
 }
 
 // A threadgroup's eight simdgroups decode panels of 8 tiles (32 x 256, row stride 264) of block `block`, panels
-// [first, last), then f(t0, panel) runs on the whole threadgroup.
+// [first, last), then f(t0, panel) runs on the whole threadgroup; a panel past the last tile is zero there.
 template <typename F>
 static inline void streamed_panels(Coded c, uint block, uint first, uint last, uint simd, uint lane,
                                    threadgroup half *panel, F f) {
@@ -116,7 +116,9 @@ static inline void streamed_panels(Coded c, uint block, uint first, uint last, u
         const uint t0 = p * 8;
         if (t0 >= c.tiles) break;
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        streamed_row(c, block * c.tiles + t0 + simd, lane, 1.0f, (threadgroup half2 *)(panel + lane * 264 + simd * 32));
+        threadgroup half2 *row = (threadgroup half2 *)(panel + lane * 264 + simd * 32);
+        if (t0 + simd < c.tiles) streamed_row(c, block * c.tiles + t0 + simd, lane, 1.0f, row);
+        else for (uint j = 0; j < 16; j++) row[j] = half2(0.0h);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         f(t0, panel);
     }
@@ -196,7 +198,7 @@ kernel void streamed_panel(device const uint *bits [[buffer(0)]], device const u
     for (uint i = 0; i < acc.get_capacity(); ++i) acc[i] = 0;
     streamed_panels(c, group.x, share * per, share * per + per, simd, lane, panel, [&](uint t0, threadgroup half *) {
         auto weights = W.slice<256, 32>(0, 0);
-        if (row0 + M <= rows) {
+        if (row0 + M <= rows && t0 + 8 <= tiles) {
             auto a = X.slice<256, M>(int(t0 * 32), int(row0));
             op.run(a, weights, acc);
         } else {
