@@ -65,8 +65,43 @@ class Matrix:
             self.rotation = tensors[f'{name}.rotation'].T.contiguous().to('mps')
             self.rotation_scale = get('rotation_scale')
 
+    @property
+    def shape(self):
+        return self.rows, self.columns
+
     def _code(self):
         return [self.codes, self.widths, self.steps, self.offsets]
+
+    def slice(self, rows=None, columns=None, local_rows=False, local_columns=False):
+        """Coded rows [a, b) and columns [c, d) (multiples of 32) as a matrix of their own, the tiles' codes repacked;
+        an order within the range kept (shifted), or with local_* the range's own positions (a slice whose consumer
+        keeps the code order: an FFN share's hidden)."""
+        a, b = rows or (0, self.rows)
+        c, d = columns or (0, self.columns)
+        assert all(v % 32 == 0 for v in (a, b, c, d)) and (self.rotation is None or (c, d) == (0, self.columns))
+        widths = self.widths[a // 32:b // 32, c // 32:d // 32].contiguous()
+        old = (self.offsets[a // 32:b // 32, c // 32:d // 32].long() & 0xFFFFFFFF).reshape(-1)
+        sizes = 32 * widths.reshape(-1).long()
+        starts = torch.cumsum(sizes, 0) - sizes
+        tile = torch.repeat_interleave(torch.arange(len(sizes), device='mps'), sizes)
+        index = old[tile] + torch.arange(int(sizes.sum()), device='mps') - starts[tile]
+        out = Matrix.__new__(Matrix)
+        out.name = f'{self.name}[{a}:{b}, {c}:{d}]'
+        out.codes = torch.cat([self.codes[index], torch.zeros(2, dtype=self.codes.dtype, device='mps')])
+        out.widths, out.offsets = widths, starts.to(torch.int32).reshape(widths.shape)
+        out.steps = self.steps[a // 32:b // 32, c // 32:d // 32].contiguous()
+        out.row_scale, out.col_scale = self.row_scale[a:b].contiguous(), self.col_scale[c:d].contiguous()
+
+        def order(values, lo, hi, local):
+            if local:
+                return torch.arange(hi - lo, dtype=torch.int32, device='mps')
+            shifted = values[lo:hi] - lo
+            assert bool(((shifted >= 0) & (shifted < hi - lo)).all()), f'{self.name}: the order leaves [{lo}, {hi})'
+            return shifted.contiguous()
+        out.row_order, out.col_order = order(self.row_order, a, b, local_rows), order(self.col_order, c, d, local_columns)
+        out.rows, out.columns, out.tiles = b - a, d - c, (d - c) // 32
+        out.rotation, out.rotation_scale = self.rotation, self.rotation_scale
+        return out
 
     def splits(self, rows):
         if rows == 1:
@@ -115,11 +150,16 @@ class Matrix:
         return outs
 
     def product(self, xt):
-        """The product of coded inputs xt [n, columns]: partials [shares, n, rows] (n <= 16)."""
+        """The product of coded inputs xt [n, columns]: partials [shares, n, rows] in coded row order, unscaled (past 16
+        rows one share, the 128-row panel's)."""
         n = xt.shape[0]
-        shares = self.splits(n)
+        shares = self.splits(n) if n <= 16 else 1
         partials = torch.empty(shares, n, self.rows, dtype=torch.float32, device='mps')
-        if n == 1:
+        if n > 16:
+            _encode('streamed_panel_128', self._code() + [xt, partials, None, None, None, None, None, xt, self.row_order, self.row_scale],
+                    _dims(tiles=self.tiles, outputs=self.rows, rows=n, per=-(-self.tiles // 8), split=n * self.rows),
+                    self.rows // 32, -(-n // 128), 256)
+        elif n == 1:
             _encode('streamed_product', self._code() + [xt, partials],
                     _dims(tiles=self.tiles, outputs=self.rows, split=n * self.rows), self.rows // 32, shares, PRODUCT_SIMDGROUPS * 32)
         else:
@@ -147,10 +187,14 @@ class Matrix:
                 self.rows // 32, -(-n // 128), 256)
         return y
 
+    def apply(self, xt, cap=0.0):
+        """The product of coded inputs xt [n, columns] finished: y [n, rows] fp16 at its logical rows."""
+        return self.finish(self.product(xt), cap=cap) if xt.shape[0] <= 16 else self.panel(xt, cap=cap)
+
     def linear(self, x, cap=0.0):
         """x [n, columns] fp16 (the matrix's own input coordinates) times A^T: y [n, rows] fp16."""
         xt, = self.coded_input(x.half().contiguous())
-        return self.finish(self.product(xt), cap=cap) if x.shape[0] <= 16 else self.panel(xt, cap=cap)
+        return self.apply(xt, cap=cap)
 
 
 def ffn(x, gate, up, down):
@@ -159,17 +203,11 @@ def ffn(x, gate, up, down):
     x = x.half().contiguous()
     n = x.shape[0]
     gx, ux = gate.coded_input(x, (up,))
-    identity = torch.arange(gate.rows, dtype=torch.int32, device='mps')
-    if n <= 16:
-        g, u = gate.product(gx), up.product(ux)
-        hidden = torch.empty(n, gate.rows, dtype=torch.float16, device='mps')
-        _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
-                _dims(outputs=gate.rows, shares=g.shape[0], split=n * gate.rows, count=n * gate.rows), -(-(n * gate.rows) // 256), 1, 256)
-        return down.finish(down.product(hidden))
-    g, u = gate.panel(gx, order=identity), up.panel(ux, order=identity)
-    a = 0.7978845608 * (g.float() + 0.044715 * g.float() ** 3)
-    hidden = (0.5 * g.float() * (1 + torch.tanh(a.clamp(-20, 20))) * u.float()).half()
-    return down.panel(hidden)
+    g, u = gate.product(gx), up.product(ux)
+    hidden = torch.empty(n, gate.rows, dtype=torch.float16, device='mps')
+    _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
+            _dims(outputs=gate.rows, shares=g.shape[0], split=n * gate.rows, count=n * gate.rows), -(-(n * gate.rows) // 256), 1, 256)
+    return down.apply(hidden)
 
 
 class Streamed:

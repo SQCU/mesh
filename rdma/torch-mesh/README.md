@@ -157,7 +157,9 @@ engines.rebalance(pool)                                    # every few steps
 ```
 
 - Operations: `Linear` shares its output features (they concatenate), `FFN` its intermediate neurons (each engine a
-  partial of the whole output; they sum: Megatron's split), the Neural Engine's FFN share one fused graph. A decision
+  partial of the whole output; they sum: Megatron's split), the Neural Engine's FFN share one fused graph. An `FFN`'s
+  operands may be coded matrices ("Streamed coded weights"): a share is then neurons in the code's hidden order, the
+  GPU's the coded FFN on its slice of the codes, the CPU's and the Neural Engine's that slice decoded. A decision
   is an (operation name, row count): a stack's layers of one name share it and pool their evidence, measured where
   the program runs them, between its other operations.
 - Engines never time-share a physical unit: each states what it occupies (the GPU, the CPU's cores, the Neural
@@ -198,7 +200,13 @@ s = streamed.Streamed("gemma-4-E2B-it-streamed.safetensors")
 y = s["model.language_model.layers.3.mlp.down_proj"].linear(x)            # x [n, 6144] fp16, any n
 h = streamed.ffn(x, *(s[f"model.language_model.layers.3.mlp.{p}_proj"] for p in ("gate", "up", "down")))
 w = s["lm_head"].dense()                                                  # decoded, in the matrix's coordinates
+ffn = engines.FFN(*(s[f"model.language_model.layers.3.mlp.{p}_proj"] for p in ("gate", "up", "down")), engines=pool)
 ```
+
+A product of 1 to 16 rows leaves partials (its K shares, coded row order, unscaled), past 16 the 128-row panel's one
+share; a consumer reads them (`finish`, `streamed_gelu`), so the FFN is the same four kernels at every row count: the
+input rotated or gathered, gate's and up's products, GELU(gate) * up into down's coded input, down's product finished.
+`Matrix.slice` cuts a matrix's codes by rows and columns (multiples of 32), which is how an FFN's neurons are shared.
 
 `python -m torch_mesh.streamed check EXPORT [NAME ...]` checks the decode against `model_code.py`'s reference decode
 and the products and the FFN against the dense ones (E2B and E4B: decode 3e-6 to 3e-4, products at 1, 8 and 300 rows
