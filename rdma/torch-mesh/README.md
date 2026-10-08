@@ -218,10 +218,13 @@ w = s["lm_head"].to("cpu")                        # decoded
   decodes. `Streamed` holds an FFN's hidden in its code order (one permutation of its neurons, the FFN unchanged), so
   neurons [a, b) are code rows [a, b): `engines.FFN`'s shares and the Neural Engine share builder slice it as they slice
   a checkpoint. An operation the tensor lacks is an error naming the ones it has.
-- Operands are fp16. Another dtype's rows are scaled by powers of two into fp16's range and back (exact): a backward's
-  gradients lie far below fp16's normal range, and cast as they are, E2B's loss gradient at its input embeddings
-  (64 tokens, every matrix coded, a bf16 model) was 0.140 relative to the float32 model's a position (median); scaled,
-  0.050 (1e-3 relative noise on the float32 model's weights: 0.01).
+- Operands are fp16. Another dtype's rows are scaled by powers of two into fp16's range (`streamed_scale_rows`, which
+  reads the caller's dtype) and the products finished over the scale in that dtype (`streamed_finish<T>`): exact, and
+  two dispatches fewer than a cast each way. A backward's gradients lie far below fp16's normal range: cast as they
+  are, E2B's loss gradient at its input embeddings (64 tokens, every matrix coded, a bf16 model) was 0.140 relative to
+  the float32 model's a position (median); scaled, 0.050-0.054 (1e-3 relative noise on the float32 model's weights:
+  0.01). In HF's eager decode step (dispatch-bound: 15,660 aten calls a token with the casts) the scaling in torch's
+  own operations cost 10,000 more calls, 3.8 ms; in the kernels the step takes 12,613.
 - The codes are constants: no gradient reaches them, only through them.
 
 `python -m torch_mesh.streamed check EXPORT [NAME ...]` checks the decode against `model_code.py`'s reference decode,

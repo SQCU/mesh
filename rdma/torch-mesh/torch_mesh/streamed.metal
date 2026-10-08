@@ -186,15 +186,52 @@ static inline void streamed_put(device half *input, device const int *order, dev
     for (uint j = t; j < columns; j += threads) input[ulong(n) * columns + j] = half(scale[j] * f(uint(order[j])));
 }
 
-// A product's outputs finished into plain values: y[n * stride + order[r]], capped (cap > 0).
-kernel void streamed_finish(device const float *partials [[buffer(0)]], device half *y [[buffer(1)]],
+// A product's outputs finished into plain values of T: y[n * stride + order[r]], over the row's factor (inputs > 0: its
+// input row scaled by streamed_scale_rows), capped (cap > 0).
+template <typename T>
+kernel void streamed_finish(device const float *partials [[buffer(0)]], device T *y [[buffer(1)]],
                             device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
-                            constant streamed_dims &d [[buffer(15)]], uint i [[thread_position_in_grid]]) {
+                            device const float *factor [[buffer(4)]], constant streamed_dims &d [[buffer(15)]],
+                            uint i [[thread_position_in_grid]]) {
     if (i >= d.count) return;
     const uint n = i / d.outputs, r = i % d.outputs;
-    const float value = streamed_value(partials, i, d.shares, d.split, scale[r]);
-    y[n * d.stride + uint(order[r])] = half(d.cap > 0.0f ? tanh(value / d.cap) * d.cap : value);
+    float value = streamed_value(partials, i, d.shares, d.split, scale[r]);
+    if (d.inputs) value /= factor[n];
+    y[n * d.stride + uint(order[r])] = T(d.cap > 0.0f ? tanh(value / d.cap) * d.cap : value);
 }
+
+template [[host_name("streamed_finish")]] [[kernel]] decltype(streamed_finish<half>) streamed_finish<half>;
+template [[host_name("streamed_finish_float")]] [[kernel]] decltype(streamed_finish<float>) streamed_finish<float>;
+
+// Rows x [n][d.columns] of T to fp16, each scaled by a power of two to largest magnitude in [0.5, 1) (exact: a
+// product of a row is the scaled row's product over its factor; a backward's gradients lie far below fp16's normal
+// range): out the scaled rows, factor[n] the scale. A threadgroup a row.
+template <typename T>
+kernel void streamed_scale_rows(device const T *x [[buffer(0)]], device half *out [[buffer(1)]],
+                                device float *factor [[buffer(2)]], constant streamed_dims &d [[buffer(15)]],
+                                uint2 group [[threadgroup_position_in_grid]], uint2 local [[thread_position_in_threadgroup]],
+                                uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float most[8];
+    const ulong base = ulong(group.x) * d.columns;
+    float m = 0.0f;
+    for (uint j = local.x; j < d.columns; j += 256) m = max(m, fabs(float(x[base + j])));
+    m = simd_max(m);
+    if (lane == 0) most[simd] = m;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    m = most[0];
+    for (uint s = 1; s < 8; s++) m = max(m, most[s]);
+    int e = 0;
+    frexp(m, e);
+    const float scale = m > 0.0f ? ldexp(1.0f, -e) : 1.0f;
+    if (local.x == 0) factor[group.x] = scale;
+    for (uint j = local.x; j < d.columns; j += 256) out[base + j] = half(float(x[base + j]) * scale);
+}
+
+template [[host_name("streamed_scale_rows_float")]] [[kernel]] decltype(streamed_scale_rows<float>) streamed_scale_rows<float>;
+#if __METAL_VERSION__ >= 310
+template [[host_name("streamed_finish_bfloat")]] [[kernel]] decltype(streamed_finish<bfloat>) streamed_finish<bfloat>;
+template [[host_name("streamed_scale_rows_bfloat")]] [[kernel]] decltype(streamed_scale_rows<bfloat>) streamed_scale_rows<bfloat>;
+#endif
 
 // The coded inputs of up to three products sharing a column order, from plain rows x (grid: columns x rows); with
 // stride s > 0 written in blocks of s columns, block-major ([columns / s][rows][s], rows = d.rows: a tensor operation's

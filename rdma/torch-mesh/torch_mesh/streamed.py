@@ -14,8 +14,8 @@ for some a rotation (int8, its scale a column: the matrix's columns are rotated 
 x @ m is one pipeline whichever way m is transposed: the input side's order and scale (a rotation where it lies there),
 the product contracting the coded rows (streamed_product, the 16- and 128-row panels) or the coded columns
 (streamed_panel_t: the same decoded panels, consumed the other way), the output side's order and scale (and rotation).
-Operands are fp16 on the GPU (another dtype's rows scaled into its range by powers of two, results in the caller's
-dtype); the codes are constants (no gradient reaches them, only through them). An operation a coded matrix lacks is an error naming the ones it has.
+Operands are fp16 on the GPU (another dtype's rows scaled into its range by powers of two, results finished in the
+caller's dtype); the codes are constants (no gradient reaches them, only through them). An operation a coded matrix lacks is an error naming the ones it has.
 
   python -m torch_mesh.streamed check EXPORT [NAME ...]   the decode against model_code's reference decode; products,
                                                           their gradients and the FFN against the decoded matrices"""
@@ -53,6 +53,9 @@ def _encode(name, buffers, dims, gx, gy, threads):
 
 def _half(n, width):
     return torch.empty(n, width, dtype=torch.float16, device='mps')
+
+
+_TYPES = {torch.float16: '', torch.float32: '_float', torch.bfloat16: '_bfloat'}
 
 
 class Matrix(torch.Tensor):
@@ -218,14 +221,15 @@ class Matrix(torch.Tensor):
                 -(-self.tiles // 8), -(-n // m) * shares, 256)
         return partials
 
-    def finish(self, partials, order=None, scale=None):
-        """Partials [shares, n, k] finished into y [n, k] fp16 at their logical positions (`order` and `scale`, default
-        the row side's)."""
+    def finish(self, partials, order=None, scale=None, factor=None, dtype=torch.float16):
+        """Partials [shares, n, k] finished into y [n, k] of `dtype` at their logical positions (`order` and `scale`,
+        default the row side's), each row over its `factor` where given (streamed_scale_rows's)."""
         shares, n, k = partials.shape
-        y = _half(n, k)
-        _encode('streamed_finish', [partials, y, self.row_order if order is None else order,
-                                    self.row_scale if scale is None else scale],
-                _dims(outputs=k, stride=k, shares=shares, split=n * k, count=n * k), -(-(n * k) // 256), 1, 256)
+        y = torch.empty(n, k, dtype=dtype, device='mps')
+        _encode('streamed_finish' + _TYPES[dtype], [partials, y, self.row_order if order is None else order,
+                                                   self.row_scale if scale is None else scale, factor],
+                _dims(outputs=k, stride=k, shares=shares, split=n * k, count=n * k, inputs=int(factor is not None)),
+                -(-(n * k) // 256), 1, 256)
         return y
 
     def apply(self, xt):
@@ -241,24 +245,25 @@ class Matrix(torch.Tensor):
 
     def times(self, x):
         """x [n, k] @ this matrix as its shape stands, in x's dtype: x A^T where transposed, else x A. Another dtype's
-        rows are each scaled by a power of two to largest magnitude in [1, 2) before the fp16 operand and back after
-        (exact; a backward's gradients are far below fp16's normal range, and cast as they are they lose their bits:
-        a whole model's gradient 0.44 relative to the float32 model's, 0.021 scaled)."""
-        if x.dtype != torch.float16:
-            amax = x.detach().abs().amax(-1, keepdim=True).float().clamp_min(1e-30)
-            scale = torch.exp2(torch.floor(torch.log2(1.0 / amax)))
-            return (self.times((x.float() * scale).half()).float() / scale).to(x.dtype)
+        rows are scaled into fp16's range by streamed_scale_rows and the products finished over the scale in that
+        dtype (a backward's gradients lie far below fp16's normal range: cast as they are, a whole model's gradient a
+        position 0.140 relative to the float32 model's, median; scaled 0.050)."""
+        n, factor, dtype = x.shape[0], None, x.dtype
         x16 = x.contiguous()
+        if dtype != torch.float16:
+            x16, factor = _half(n, x.shape[1]), torch.empty(n, dtype=torch.float32, device='mps')
+            _encode('streamed_scale_rows' + _TYPES[dtype], [x.contiguous(), x16, factor], _dims(columns=x.shape[1]), n, 1, 256)
         if self.transposed:
-            return self.apply(self.coded_input(x16)[0]).to(x.dtype)
-        n = x16.shape[0]
+            xt = self.coded_input(x16)[0]
+            return self.apply(xt) if factor is None else self.finish(self.product(xt), factor=factor, dtype=dtype)
         xt = _half(n, self.rows)
         _encode('streamed_gather', [x16, xt, self.row_order, self.row_scale],
                 _dims(columns=self.rows, rows=n, stride=32, inputs=1), -(-self.rows // 256), n, 256)
-        y = self.finish(self.product_t(xt), self.col_order, self.col_scale)
-        if self.rotation is not None:
-            y = y.float() @ self._v().T
-        return y.to(x.dtype)
+        partials = self.product_t(xt)
+        if self.rotation is None:
+            return self.finish(partials, self.col_order, self.col_scale, factor, dtype)
+        z = self.finish(partials, self.col_order, self.col_scale, factor, torch.float32)
+        return (z @ self._v().T).to(dtype)
 
     @staticmethod
     def ffn(x, gate, up, down):
