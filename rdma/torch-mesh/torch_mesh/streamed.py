@@ -1,23 +1,24 @@
-"""Streamed coded weights in the mesh library (streamed.metal): a matrix stored as tile codes, its products run by the
-decompression producer with their consumers as operands, encoded on torch's own stream (_stream.encode).
+"""Streamed coded weights in the mesh library (streamed.metal): a matrix stored as tile codes, a torch tensor whose
+operations are the decompression producer with their consumers as operands, encoded on torch's own stream.
 
 An export (metal-microbench tools/model_code.py `code ...+export=`) holds, a matrix: 32 x 32 tiles, each a width
 (bits a value, 0 to 12), a step and a word offset into `codes` (a lane a tile row, two values a word); its row order
 and scale and column order and scale (A[row_order[r], col_order[j]] = value[r][j] * row_scale[r] * col_scale[j]); and
 for some a rotation (int8, its scale a column: the matrix's columns are rotated coordinates, A_orig = A V^T).
 
-  Streamed(path)                      every coded matrix of an export, by name
-  Matrix.dense()                      the matrix decoded, in its own coordinates (streamed_dense, the rotation applied)
-  Matrix.linear(x)                    x A^T: the input transform (gather, or rotation), the product, its finish
-  ffn(x, gate, up, down)              the GELU FFN: gate and up products, GELU(gate) * up (streamed_gelu), down
+  Streamed(path)[name]                a coded matrix, a torch.Tensor of the matrix's shape: an nn.Linear weight as it is
+  F.linear(x, m), x @ m.T, x @ m      the library's kernels, forward and backward (torch's autograd derives the graph)
+  m[a:b], m[:, c:d]                   its codes cut (multiples of 32); m.to('cpu') or m.dense() decodes it
+  Matrix.ffn(x, gate, up, down)       the fused GELU FFN couple (torch_mesh.engines.ffn runs it where no gradient is due)
 
-A product of one row is streamed_product (a lane a tile row, a simdgroup a tile, 16 simdgroups a K split, as the
-engine runs it); of 2 to 16 rows the 16-row panel (8 simdgroups decode a 256-column panel); of more the 128-row panel,
-which finishes its own outputs. Products of up to 16 rows leave partials (a share a K split)
-that their consumer sums (streamed_finish, streamed_gelu).
+x @ m is one pipeline whichever way m is transposed: the input side's order and scale (a rotation where it lies there),
+the product contracting the coded rows (streamed_product, the 16- and 128-row panels) or the coded columns
+(streamed_panel_t: the same decoded panels, consumed the other way), the output side's order and scale (and rotation).
+Operands are fp16 on the GPU (another dtype's rows scaled into its range by powers of two, results in the caller's
+dtype); the codes are constants (no gradient reaches them, only through them). An operation a coded matrix lacks is an error naming the ones it has.
 
-  python -m torch_mesh.streamed check EXPORT [NAME ...]   decode against model_code's reference decode, products and
-                                                          the FFN against the dense ones"""
+  python -m torch_mesh.streamed check EXPORT [NAME ...]   the decode against model_code's reference decode; products,
+                                                          their gradients and the FFN against the decoded matrices"""
 import argparse
 import struct
 import sys
@@ -25,14 +26,14 @@ from pathlib import Path
 
 import torch
 
-from . import _stream
-
 SOURCE = Path(__file__).with_name('streamed.metal').read_text()
 _PIPELINES = {}
 PRODUCT_SIMDGROUPS = 16
+aten = torch.ops.aten
 
 
 def _pipeline(name):
+    from . import _stream
     if name not in _PIPELINES:
         _PIPELINES[name] = _stream.pipeline(SOURCE, name)
     return _PIPELINES[name]
@@ -46,61 +47,95 @@ def _dims(tiles=0, outputs=0, rows=0, per=0, stride=0, shares=0, split=0, finish
 
 
 def _encode(name, buffers, dims, gx, gy, threads):
+    from . import _stream
     _stream.encode(_pipeline(name), list(buffers) + [None] * (15 - len(buffers)), dims, 15, gx, gy, threads)
 
 
-class Matrix:
-    """One coded matrix of an export (module docstring), its tensors on the GPU."""
+def _half(n, width):
+    return torch.empty(n, width, dtype=torch.float16, device='mps')
 
-    def __init__(self, tensors, name):
+
+class Matrix(torch.Tensor):
+    """One coded matrix (module docstring) as a tensor: `rows` x `columns` the coded matrix's, its shape theirs or,
+    `transposed`, swapped."""
+    FIELDS = ('codes', 'widths', 'offsets', 'steps', 'row_scale', 'col_scale', 'row_order', 'col_order', 'rotation',
+              'rotation_scale')
+    __torch_function__ = torch._C._disabled_torch_function_impl
+
+    @staticmethod
+    def __new__(cls, fields, name='', transposed=False, dtype=torch.float16):
+        rows, columns = fields['widths'].shape[0] * 32, fields['widths'].shape[1] * 32
+        out = torch.Tensor._make_wrapper_subclass(cls, (columns, rows) if transposed else (rows, columns), dtype=dtype,
+                                                  device=fields['codes'].device)
+        for k in cls.FIELDS:
+            setattr(out, k, fields.get(k))
+        out.label, out.transposed, out.rows, out.columns, out.tiles = name, transposed, rows, columns, columns // 32
+        return out
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    @classmethod
+    def load(cls, tensors, name):
+        """The matrix `name` of an export's tensors."""
         get = lambda k: tensors[f'{name}.{k}'].to('mps')
-        self.name = name
-        self.codes, self.widths, self.offsets = get('codes'), get('widths'), get('offsets')
-        self.steps, self.row_scale, self.col_scale = get('steps'), get('row_scale'), get('col_scale')
-        self.row_order, self.col_order = get('row_order'), get('col_order')
-        self.rows, self.columns = self.widths.shape[0] * 32, self.widths.shape[1] * 32
-        self.tiles = self.columns // 32
-        self.rotation = self.rotation_scale = None
+        fields = {k: get(k) for k in cls.FIELDS[:8]}
         if f'{name}.rotation' in tensors:
-            self.rotation = tensors[f'{name}.rotation'].T.contiguous().to('mps')
-            self.rotation_scale = get('rotation_scale')
+            fields['rotation'] = tensors[f'{name}.rotation'].T.contiguous().to('mps')
+            fields['rotation_scale'] = get('rotation_scale')
+        return cls(fields, name)
 
-    @property
-    def shape(self):
-        return self.rows, self.columns
+    def like(self, transposed=None, dtype=None, **fields):
+        return Matrix({**{k: getattr(self, k) for k in self.FIELDS}, **fields}, self.label,
+                      self.transposed if transposed is None else transposed, dtype or self.dtype)
+
+    def __repr__(self):
+        return (f'Matrix({self.label} [{self.rows} x {self.columns}]{" rotated" if self.rotation is not None else ""}'
+                f'{" transposed" if self.transposed else ""}, {self.dtype})')
+
+    def __tensor_flatten__(self):
+        return [k for k in self.FIELDS if getattr(self, k) is not None], (self.label, self.transposed, self.dtype)
+
+    @staticmethod
+    def __tensor_unflatten__(inner, context, outer_size, outer_stride):
+        return Matrix(dict(inner), *context)
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        operation = _OPERATIONS.get(func)
+        if operation is None:
+            raise NotImplementedError(f'a coded matrix has no {func}; it has {", ".join(sorted(map(str, _OPERATIONS)))}')
+        return operation(*args, **(kwargs or {}))
 
     def _code(self):
         return [self.codes, self.widths, self.steps, self.offsets]
 
-    def slice(self, rows=None, columns=None, local_rows=False, local_columns=False):
-        """Coded rows [a, b) and columns [c, d) (multiples of 32) as a matrix of their own, the tiles' codes repacked;
-        an order within the range kept (shifted), or with local_* the range's own positions (a slice whose consumer
-        keeps the code order: an FFN share's hidden)."""
+    def cut(self, rows=None, columns=None):
+        """Coded rows [a, b) and columns [c, d) (multiples of 32, each order keeping its range: they are then the
+        logical rows and columns [a, b) and [c, d)) as a matrix of their own, the tiles' codes repacked."""
         a, b = rows or (0, self.rows)
         c, d = columns or (0, self.columns)
-        assert all(v % 32 == 0 for v in (a, b, c, d)) and (self.rotation is None or (c, d) == (0, self.columns))
+        if (a, b, c, d) == (0, self.rows, 0, self.columns):
+            return self.like()
+        assert all(v % 32 == 0 for v in (a, b, c, d)), f'{self.label}: a cut in multiples of 32, not [{a}:{b}, {c}:{d}]'
+        assert self.rotation is None or (c, d) == (0, self.columns), f'{self.label}: rotated columns are not cut'
         widths = self.widths[a // 32:b // 32, c // 32:d // 32].contiguous()
         old = (self.offsets[a // 32:b // 32, c // 32:d // 32].long() & 0xFFFFFFFF).reshape(-1)
         sizes = 32 * widths.reshape(-1).long()
         starts = torch.cumsum(sizes, 0) - sizes
         tile = torch.repeat_interleave(torch.arange(len(sizes), device='mps'), sizes)
         index = old[tile] + torch.arange(int(sizes.sum()), device='mps') - starts[tile]
-        out = Matrix.__new__(Matrix)
-        out.name = f'{self.name}[{a}:{b}, {c}:{d}]'
-        out.codes = torch.cat([self.codes[index], torch.zeros(2, dtype=self.codes.dtype, device='mps')])
-        out.widths, out.offsets = widths, starts.to(torch.int32).reshape(widths.shape)
-        out.steps = self.steps[a // 32:b // 32, c // 32:d // 32].contiguous()
-        out.row_scale, out.col_scale = self.row_scale[a:b].contiguous(), self.col_scale[c:d].contiguous()
 
-        def order(values, lo, hi, local):
-            if local:
-                return torch.arange(hi - lo, dtype=torch.int32, device='mps')
+        def order(values, lo, hi):
             shifted = values[lo:hi] - lo
-            assert bool(((shifted >= 0) & (shifted < hi - lo)).all()), f'{self.name}: the order leaves [{lo}, {hi})'
+            assert bool(((shifted >= 0) & (shifted < hi - lo)).all()), f'{self.label}: the order leaves [{lo}, {hi})'
             return shifted.contiguous()
-        out.row_order, out.col_order = order(self.row_order, a, b, local_rows), order(self.col_order, c, d, local_columns)
-        out.rows, out.columns, out.tiles = b - a, d - c, (d - c) // 32
-        out.rotation, out.rotation_scale = self.rotation, self.rotation_scale
+        out = self.like(codes=torch.cat([self.codes[index], torch.zeros(2, dtype=self.codes.dtype, device='mps')]),
+                        widths=widths, offsets=starts.to(torch.int32).reshape(widths.shape),
+                        steps=self.steps[a // 32:b // 32, c // 32:d // 32].contiguous(),
+                        row_scale=self.row_scale[a:b].contiguous(), col_scale=self.col_scale[c:d].contiguous(),
+                        row_order=order(self.row_order, a, b), col_order=order(self.col_order, c, d))
+        out.label = f'{self.label}[{a}:{b}, {c}:{d}]'
         return out
 
     def splits(self, rows):
@@ -112,26 +147,28 @@ class Matrix:
         return 4 if 1 < rows <= 16 and self.tiles >= 64 else 1
 
     def dense(self):
-        """The matrix in its own coordinates, fp16: decoded with its row and column orders and scales; a rotated
-        matrix decoded in its rotated coordinates, then times V^T."""
-        out = torch.empty(self.rows, self.columns, dtype=torch.float16, device='mps')
+        """The matrix decoded in its own coordinates, its shape and dtype (a rotated matrix decoded in its rotated
+        coordinates, then times V^T)."""
+        out = _half(self.rows, self.columns)
         identity = torch.arange(self.columns, dtype=torch.int32, device='mps')
         columns = identity if self.rotation is not None else self.col_order
         _encode('streamed_dense', self._code() + [out, self.row_order, self.row_scale, None, columns, self.col_scale],
                 _dims(tiles=self.tiles), self.rows // 32, self.tiles, 32)
-        if self.rotation is None:
-            return out
-        rotated = torch.zeros_like(out, dtype=torch.float32)
-        rotated[:, self.col_order.long()] = out.float()
-        v = self.rotation.T.float() * self.rotation_scale[None, :]
-        return (rotated @ v.T).half()
+        if self.rotation is not None:
+            rotated = torch.zeros_like(out, dtype=torch.float32)
+            rotated[:, self.col_order.long()] = out.float()
+            out = rotated @ self._v().T
+        return (out.T if self.transposed else out).contiguous().to(self.dtype)
+
+    def _v(self):
+        return self.rotation.T.float() * self.rotation_scale[None, :]
 
     def coded_input(self, x, others=()):
         """x [n, columns] fp16 in this matrix's coded input coordinates (and those of up to two matrices sharing its
         column order and rotation): gathered and scaled, or rotated."""
         n = x.shape[0]
         matrices = [self, *others]
-        outs = [torch.empty(n, self.columns, dtype=torch.float16, device='mps') for _ in matrices]
+        outs = [_half(n, self.columns) for _ in matrices]
         if self.rotation is None:
             pad = outs + [outs[0]] * (3 - len(outs))
             scales = [m.col_scale for m in matrices] + [self.col_scale] * (3 - len(matrices))
@@ -143,8 +180,7 @@ class Matrix:
                                         (others[0] if others else self).col_scale, self.rotation, self.rotation_scale],
                     _dims(rows=n, columns=self.columns, inputs=len(matrices)), -(-self.columns // 16), 1, 128)
         else:
-            v = self.rotation.T.float() * self.rotation_scale[None, :]
-            rotated = (x.float() @ v)[:, self.col_order.long()]
+            rotated = (x.float() @ self._v())[:, self.col_order.long()]
             for m, out in zip(matrices, outs):
                 out.copy_((rotated * m.col_scale[None, :]).half())
         return outs
@@ -168,90 +204,197 @@ class Matrix:
                     self.rows // 32, shares, 256)
         return partials
 
-    def finish(self, partials, order=None, cap=0.0):
-        """Partials [shares, n, rows] finished into y [n, rows] at their logical rows (`order`, default the row order)."""
-        shares, n, rows = partials.shape
-        y = torch.empty(n, rows, dtype=torch.float16, device='mps')
-        _encode('streamed_finish', [partials, y, self.row_order if order is None else order, self.row_scale],
-                _dims(outputs=rows, stride=rows, shares=shares, split=n * rows, count=n * rows, cap=cap),
-                -(-(n * rows) // 256), 1, 256)
+    def product_t(self, xt):
+        """The transposed product of coded rows xt (n rows of `rows`, gathered and scaled, band-major [rows / 32][n][32]):
+        partials [shares, n, columns] in coded column order, unscaled (bands of the coded rows a share, as the forward's
+        panels)."""
+        n, bands = xt.numel() // self.rows, self.rows // 32
+        m = 16 if n <= 16 else 64
+        per = (4 if bands >= 64 else 1) if n <= 16 else bands
+        shares = -(-bands // per)
+        partials = torch.empty(shares, n, self.columns, dtype=torch.float32, device='mps')
+        _encode(f'streamed_panel_t_{m}', self._code() + [xt, partials],
+                _dims(tiles=self.tiles, outputs=self.rows, rows=n, per=per, split=n * self.columns),
+                -(-self.tiles // 8), -(-n // m) * shares, 256)
+        return partials
+
+    def finish(self, partials, order=None, scale=None):
+        """Partials [shares, n, k] finished into y [n, k] fp16 at their logical positions (`order` and `scale`, default
+        the row side's)."""
+        shares, n, k = partials.shape
+        y = _half(n, k)
+        _encode('streamed_finish', [partials, y, self.row_order if order is None else order,
+                                    self.row_scale if scale is None else scale],
+                _dims(outputs=k, stride=k, shares=shares, split=n * k, count=n * k), -(-(n * k) // 256), 1, 256)
         return y
 
-    def panel(self, xt, order=None, cap=0.0):
-        """The product of more than 16 coded input rows, finished by the 128-row panel into y [n, rows]."""
+    def apply(self, xt):
+        """The product of coded inputs xt [n, columns] finished: y [n, rows] fp16 at its logical rows."""
         n = xt.shape[0]
-        y = torch.empty(n, self.rows, dtype=torch.float16, device='mps')
-        _encode('streamed_panel_128', self._code() + [xt, None, None, None, None, None, None, y,
-                                                      self.row_order if order is None else order, self.row_scale],
-                _dims(tiles=self.tiles, outputs=self.rows, rows=n, per=-(-self.tiles // 8), stride=self.rows, finish=1, cap=cap),
+        if n <= 16:
+            return self.finish(self.product(xt))
+        y = _half(n, self.rows)
+        _encode('streamed_panel_128', self._code() + [xt, None, None, None, None, None, None, y, self.row_order, self.row_scale],
+                _dims(tiles=self.tiles, outputs=self.rows, rows=n, per=-(-self.tiles // 8), stride=self.rows, finish=1),
                 self.rows // 32, -(-n // 128), 256)
         return y
 
-    def apply(self, xt, cap=0.0):
-        """The product of coded inputs xt [n, columns] finished: y [n, rows] fp16 at its logical rows."""
-        return self.finish(self.product(xt), cap=cap) if xt.shape[0] <= 16 else self.panel(xt, cap=cap)
+    def times(self, x):
+        """x [n, k] @ this matrix as its shape stands, in x's dtype: x A^T where transposed, else x A. Another dtype's
+        rows are each scaled by a power of two to largest magnitude in [1, 2) before the fp16 operand and back after
+        (exact; a backward's gradients are far below fp16's normal range, and cast as they are they lose their bits:
+        a whole model's gradient 0.44 relative to the float32 model's, 0.021 scaled)."""
+        if x.dtype != torch.float16:
+            amax = x.detach().abs().amax(-1, keepdim=True).float().clamp_min(1e-30)
+            scale = torch.exp2(torch.floor(torch.log2(1.0 / amax)))
+            return (self.times((x.float() * scale).half()).float() / scale).to(x.dtype)
+        x16 = x.contiguous()
+        if self.transposed:
+            return self.apply(self.coded_input(x16)[0]).to(x.dtype)
+        n = x16.shape[0]
+        xt = _half(n, self.rows)
+        _encode('streamed_gather', [x16, xt, self.row_order, self.row_scale],
+                _dims(columns=self.rows, rows=n, stride=32, inputs=1), -(-self.rows // 256), n, 256)
+        y = self.finish(self.product_t(xt), self.col_order, self.col_scale)
+        if self.rotation is not None:
+            y = y.float() @ self._v().T
+        return y.to(x.dtype)
 
-    def linear(self, x, cap=0.0):
-        """x [n, columns] fp16 (the matrix's own input coordinates) times A^T: y [n, rows] fp16."""
-        xt, = self.coded_input(x.half().contiguous())
-        return self.apply(xt, cap=cap)
+    @staticmethod
+    def ffn(x, gate, up, down):
+        """The fused GELU FFN couple down(GELU(x gate^T) * (x up^T)) of coded matrices sharing the hidden order (gate's
+        and up's rows, down's columns: Streamed's FFNs), x [n, columns]: the input rotated or gathered once for gate and
+        up, their products' partials consumed by streamed_gelu into down's coded input, down's product finished."""
+        x16 = x.half().contiguous()
+        n = x16.shape[0]
+        gx, ux = gate.coded_input(x16, (up,))
+        g, u = gate.product(gx), up.product(ux)
+        hidden = _half(n, gate.rows)
+        _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
+                _dims(outputs=gate.rows, shares=g.shape[0], split=n * gate.rows, count=n * gate.rows), -(-(n * gate.rows) // 256), 1, 256)
+        return down.apply(hidden).to(x.dtype)
 
 
-def ffn(x, gate, up, down):
-    """The GELU FFN down(GELU(x gate^T) * (x up^T)) of coded matrices sharing the hidden order (the export's: gate's and
-    up's rows and down's columns in one order, down's column scale folded into up's rows)."""
-    x = x.half().contiguous()
-    n = x.shape[0]
-    gx, ux = gate.coded_input(x, (up,))
-    g, u = gate.product(gx), up.product(ux)
-    hidden = torch.empty(n, gate.rows, dtype=torch.float16, device='mps')
-    _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
-            _dims(outputs=gate.rows, shares=g.shape[0], split=n * gate.rows, count=n * gate.rows), -(-(n * gate.rows) // 256), 1, 256)
-    return down.apply(hidden)
+def _flip(m):
+    return m.like(transposed=not m.transposed)
+
+
+def _mm(a, b):
+    if isinstance(b, Matrix):
+        return b.times(a)
+    return _flip(a).times(b.T.contiguous()).T.contiguous()
+
+
+def _slice(m, dim=0, start=None, end=None, step=1):
+    assert step == 1, 'a coded matrix is cut in unit steps'
+    size = m.shape[dim]
+    start = 0 if start is None else start + size if start < 0 else min(start, size)
+    end = size if end is None else end + size if end < 0 else min(end, size)
+    span = (start, end)
+    return m.cut(rows=span) if (dim % 2) == int(m.transposed) else m.cut(columns=span)
+
+
+def _to_copy(m, dtype=None, layout=None, device=None, pin_memory=None, non_blocking=False, memory_format=None):
+    if device is not None and torch.device(device).type != m.device.type:
+        return m.dense().to(device=device, dtype=dtype or m.dtype)
+    return m.like(dtype=dtype)
+
+
+def _linear(x, weight, bias=None):
+    y = _flip(weight).times(x.reshape(-1, x.shape[-1])).reshape(*x.shape[:-1], weight.shape[0])
+    return y if bias is None else y + bias
+
+
+def _linear_backward(x, grad, weight, mask):
+    assert not mask[1], f'{weight.label}: a coded matrix is a constant (no gradient for its codes)'
+    flat = grad.reshape(-1, grad.shape[-1])
+    return (weight.times(flat).reshape(x.shape) if mask[0] else None, None, flat.sum(0) if mask[2] else None)
+
+
+_OPERATIONS = {
+    aten.t.default: _flip,
+    aten.numpy_T.default: _flip,
+    aten.transpose.int: lambda m, a, b: m.like() if a % 2 == b % 2 else _flip(m),
+    aten.permute.default: lambda m, dims: m.like() if [d % 2 for d in dims] == [0, 1] else _flip(m),
+    aten.detach.default: lambda m: m.like(),
+    aten.alias.default: lambda m: m.like(),
+    aten.clone.default: lambda m, memory_format=None: m.like(),
+    aten._to_copy.default: _to_copy,
+    aten.slice.Tensor: _slice,
+    aten.mm.default: _mm,
+    aten.mm.out: lambda a, b, out: out.copy_(_mm(a, b)),
+    aten.addmm.default: lambda bias, a, b, beta=1, alpha=1: beta * bias + alpha * _mm(a, b),
+    aten.linear.default: _linear,
+    aten.linear_backward.default: _linear_backward,
+}
 
 
 class Streamed:
-    """Every coded matrix of an export, by name."""
+    """Every coded matrix of an export, by name: an FFN's hidden in its code order (gate's and up's rows, down's
+    columns: one permutation of the neurons, so the FFN is unchanged), so its neurons [a, b) are its codes' rows or
+    columns [a, b)."""
 
     def __init__(self, path):
         from safetensors.torch import load_file
         tensors = load_file(str(path))
         names = sorted({k.rsplit('.', 1)[0] for k in tensors if k.endswith('.codes')})
-        self.matrices = {name: Matrix(tensors, name) for name in names}
+        self.matrices = {name: Matrix.load(tensors, name) for name in names}
         self.tensors = tensors
+        for name in names:
+            if not name.endswith('.mlp.gate_proj'):
+                continue
+            base = name[:-len('gate_proj')]
+            gate, up, down = (self.matrices[base + p] for p in ('gate_proj', 'up_proj', 'down_proj'))
+            assert torch.equal(gate.row_order, up.row_order) and torch.equal(gate.row_order, down.col_order), base
+            identity = torch.arange(gate.rows, dtype=torch.int32, device='mps')
+            self.matrices[base + 'gate_proj'] = gate.like(row_order=identity)
+            self.matrices[base + 'up_proj'] = up.like(row_order=identity)
+            self.matrices[base + 'down_proj'] = down.like(col_order=identity)
 
     def __getitem__(self, name):
         return self.matrices[name]
 
 
 def _relative(a, b):
-    return float((a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-30))
+    return float((a.detach().float() - b.detach().float()).norm() / b.detach().float().norm().clamp_min(1e-30))
 
 
 def _check(args):
     sys.path.insert(0, str(Path(args.tools).expanduser()))
     from model_code import decode_layout
+    from . import engines
+    F = torch.nn.functional
     streamed = Streamed(args.export)
     names = args.names or [n for n in streamed.matrices if '.layers.0.' in n or n == 'lm_head'][:8]
     torch.manual_seed(0)
     for name in names:
-        m = streamed[name]
+        m = Matrix.load(streamed.tensors, name)
         reference = decode_layout(streamed.tensors, name).half()
-        dense = m.dense()
+        dense = m.dense().float()
         line = f'{name} [{m.rows} x {m.columns}]{" rotated" if m.rotation is not None else ""}: decode {_relative(dense.cpu(), reference):.2e}'
         for n in (1, 8, 300):
-            x = torch.randn(n, m.columns, device='mps').half()
-            line += f', {n} rows {_relative(m.linear(x), x.float() @ dense.float().T):.2e}'
+            x = torch.randn(n, m.columns, device='mps').half().requires_grad_()
+            w = torch.randn(n, m.rows, device='mps')
+            y = F.linear(x, m)
+            (y.float() * w).sum().backward()
+            line += f', {n} rows {_relative(y, x.float() @ dense.T):.2e} gradient {_relative(x.grad, w @ dense):.2e}'
         print(line, flush=True)
     base = names[0].split('.mlp.')[0] + '.mlp.' if '.mlp.' in names[0] else 'model.language_model.layers.0.mlp.'
     gate, up, down = (streamed[base + p] for p in ('gate_proj', 'up_proj', 'down_proj'))
-    gd, ud, dd = gate.dense().float(), up.dense().float(), down.dense().float()
+    gd, ud, dd = (t.dense().float().requires_grad_(False) for t in (gate, up, down))
     for n in (1, 8, 300):
         x = torch.randn(n, gate.columns, device='mps').half()
-        g, u = x.float() @ gd.T, x.float() @ ud.T
-        a = 0.7978845608 * (g + 0.044715 * g ** 3)
-        y = (0.5 * g * (1 + torch.tanh(a.clamp(-20, 20))) * u) @ dd.T
-        print(f'{base}ffn {n} rows: {_relative(ffn(x, gate, up, down), y):.2e}', flush=True)
+        with torch.no_grad():
+            fused = engines.ffn(x, gate, up, down)
+        x.requires_grad_()
+        composed = engines.ffn(x, gate, up, down)
+        w = torch.randn_like(composed, dtype=torch.float32)
+        (composed.float() * w).sum().backward()
+        xf = x.detach().float().requires_grad_()
+        y = F.linear(F.gelu(F.linear(xf, gd), approximate='tanh') * F.linear(xf, ud), dd)
+        (y * w).sum().backward()
+        print(f'{base}ffn {n} rows: fused {_relative(fused, y):.2e}, composed {_relative(composed, y):.2e} '
+              f'gradient {_relative(x.grad, xf.grad):.2e}', flush=True)
 
 
 def main():

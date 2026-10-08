@@ -117,24 +117,20 @@ def _coreml():
     return _CORE_ML or None
 
 
-def _coded(t):
-    """Whether an operand is a coded matrix (torch_mesh.streamed.Matrix)."""
-    from torch_mesh.streamed import Matrix
-    return isinstance(t, Matrix)
-
-
-def _neurons(op, start, end, dense=False):
-    """An FFN's neurons [start, end) as (gate, up, down): coded operands sliced in their code order (the hidden order
-    gate, up and down share), decoded where `dense`; dense operands their rows and columns."""
-    if not _coded(op.gate):
-        return op.gate[start:end], op.up[start:end], op.down[:, start:end]
-    share = (op.gate.slice(rows=(start, end), local_rows=True), op.up.slice(rows=(start, end), local_rows=True),
-             op.down.slice(columns=(start, end), local_columns=True))
-    return tuple(m.dense() for m in share) if dense else share
-
-
 def _gelu(x):
     return torch.nn.functional.gelu(x, approximate='tanh')
+
+
+def ffn(x, gate, up, down, out=None):
+    """down(gelu_tanh(x gate^T) * (x up^T)) for x [n, H], whatever the operands are: where their type has a fused
+    couple (`ffn`, as a coded matrix's) and no gradient is due, that; else torch's own products, which autograd
+    differentiates."""
+    fused = getattr(type(gate), 'ffn', None)
+    if fused is not None and not (torch.is_grad_enabled() and x.requires_grad):
+        y = fused(x, gate, up, down)
+        return y if out is None else out.copy_(y)
+    h = (_gelu(torch.mm(x, gate.T).float()) * torch.mm(x, up.T).float()).to(x.dtype)
+    return torch.mm(h, down.T) if out is None else torch.mm(h, down.T, out=out)
 
 
 class Engine:
@@ -182,17 +178,10 @@ class Mps(Engine):
         torch.mm(x, shard.T, out=out)
 
     def prepare_ffn(self, op, start, end):
-        gate, up, down = _neurons(op, start, end)
-        return (gate, up, down) if _coded(gate) else (gate, up, down.contiguous())
+        return op.gate[start:end], op.up[start:end], op.down[:, start:end].contiguous()
 
     def run_ffn(self, op, shard, x, prologue, out):
-        gate, up, down = shard
-        if _coded(gate):
-            from torch_mesh import streamed
-            out.copy_(streamed.ffn(x, gate, up, down))
-            return
-        h = (_gelu(torch.mm(x, gate.T).float()) * torch.mm(x, up.T).float()).to(x.dtype)
-        torch.mm(h, down.T, out=out)
+        ffn(x, *shard, out=out)
 
 
 class Cpu(Engine):
@@ -213,7 +202,7 @@ class Cpu(Engine):
 
     def prepare_ffn(self, op, start, end):
         cpu = lambda t: t.detach().float().cpu().contiguous()
-        return tuple(cpu(t) for t in _neurons(op, start, end, dense=True))
+        return cpu(op.gate[start:end]), cpu(op.up[start:end]), cpu(op.down[:, start:end])
 
     def run_ffn(self, op, shard, x, prologue, out):
         began = time.perf_counter()
@@ -265,7 +254,7 @@ class Ane(Engine):
 
     def prepare_ffn(self, op, start, end):
         numpy = lambda t: t.detach().to('cpu', torch.float16).contiguous().numpy()
-        return _Compiled('ffn', tuple(numpy(t) for t in _neurons(op, start, end, dense=True)))
+        return _Compiled('ffn', (numpy(op.gate[start:end]), numpy(op.up[start:end]), numpy(op.down[:, start:end])))
 
     def ready(self, shard, rows):
         return rows in shard.models
@@ -642,9 +631,8 @@ class Linear(Operation):
 class FFN(Operation):
     """y = down(gelu_tanh(x Wg^T) * (x Wu^T)), Wg and Wu [I, H], Wd [H, I]: its I intermediate neurons shared, each
     engine's share a partial of the whole output (they sum): Megatron's column-then-row split [Shoeybi et al. 2019].
-    The three may be coded matrices (torch_mesh.streamed.Matrix, an export's sharing one hidden order): a share is then
-    neurons in that order, the GPU's run by the library's coded FFN on its slice of the codes, another engine's decoded
-    from the same slice (grain a multiple of 32)."""
+    The operands are any tensors: coded matrices (torch_mesh.streamed) share their neurons as their codes' rows and
+    columns (grain a multiple of 32), the GPU's share their fused couple, another engine's share decoded."""
     kind, combine = 'ffn', 'sum'
 
     def __init__(self, gate, up, down, engines=None, name=None, grain=128, constant=True, tolerance=None):
@@ -652,12 +640,7 @@ class FFN(Operation):
         super().__init__(gate.shape[0], down.shape[0], engines, name, grain, constant, tolerance)
 
     def torch(self, x):
-        if _coded(self.gate):
-            from torch_mesh import streamed
-            lead = x.shape[:-1]
-            return streamed.ffn(x.reshape(-1, x.shape[-1]), self.gate, self.up, self.down).to(x.dtype).reshape(*lead, -1)
-        h = (_gelu(torch.nn.functional.linear(x, self.gate).float()) * torch.nn.functional.linear(x, self.up).float())
-        return torch.nn.functional.linear(h.to(x.dtype), self.down)
+        return ffn(x.reshape(-1, x.shape[-1]), self.gate, self.up, self.down).reshape(*x.shape[:-1], -1)
 
 
 def rebalance(engines):

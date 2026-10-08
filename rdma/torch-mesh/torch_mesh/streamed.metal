@@ -196,14 +196,17 @@ kernel void streamed_finish(device const float *partials [[buffer(0)]], device h
     y[n * d.stride + uint(order[r])] = half(d.cap > 0.0f ? tanh(value / d.cap) * d.cap : value);
 }
 
-// The coded inputs of up to three products sharing a column order, from plain rows x (grid: columns x rows).
+// The coded inputs of up to three products sharing a column order, from plain rows x (grid: columns x rows); with
+// stride s > 0 written in blocks of s columns, block-major ([columns / s][rows][s], rows = d.rows: a tensor operation's
+// operand rows s apart whatever the width).
 kernel void streamed_gather(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                             device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
                             device half *second [[buffer(5)]], device half *third [[buffer(6)]],
                             device const float *secondScale [[buffer(7)]], device const float *thirdScale [[buffer(8)]],
                             constant streamed_dims &d [[buffer(15)]], uint2 i [[thread_position_in_grid]]) {
     if (i.x >= d.columns) return;
-    const ulong at = ulong(i.y) * d.columns + i.x;
+    const ulong at = d.stride ? (ulong(i.x / d.stride) * d.rows + i.y) * d.stride + i.x % d.stride
+                              : ulong(i.y) * d.columns + i.x;
     const float v = float(x[ulong(i.y) * d.columns + uint(order[i.x])]);
     first[at] = half(scale[i.x] * v);
     if (d.inputs > 1) second[at] = half(secondScale[i.x] * v);
@@ -382,5 +385,54 @@ kernel void streamed_panel(device const uint *bits [[buffer(0)]], device const u
 
 template [[host_name("streamed_panel_16")]] [[kernel]] decltype(streamed_panel<16>) streamed_panel<16>;
 template [[host_name("streamed_panel_128")]] [[kernel]] decltype(streamed_panel<128>) streamed_panel<128>;
+
+// The transposed product, the same panels consumed the other way: partials[share][n][j] = sum over the coded rows r of
+// the share's bands of x[n][r] * value(r, j) (x fp16 in coded row order, its scale applied, band-major: xs
+// [outputs / 32][rows][32], so an operand's rows are 32 apart whatever the matrix's height (a tensor operation's
+// strides past 2^16 elements corrupt its rows past the first); j a coded column). A threadgroup is a 256-column panel
+// (group.x) and M input rows; its bands of 32 coded rows [share * per, share * per + per) are decoded by
+// streamed_panels and consumed by a tensor operation, the band's block of xs times the panel. Columns past the matrix's
+// are not written.
+template <uint M>
+kernel void streamed_panel_t(device const uint *bits [[buffer(0)]], device const uchar *widths [[buffer(1)]],
+                             device const float *steps [[buffer(2)]], device const uint *offsets [[buffer(3)]],
+                             device half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
+                             constant streamed_dims &d [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
+                             uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    using namespace mpp::tensor_ops;
+    const uint tiles = d.tiles, outputs = d.outputs, rows = d.rows, per = d.per, columns = tiles * 32;
+    threadgroup half panel[32 * 264];
+    const Coded c = coded(bits, widths, steps, offsets, tiles);
+    const uint blocks = (rows + M - 1) / M, row0 = (group.y % blocks) * M, share = group.y / blocks;
+    auto W = tensor(panel, dextents<int, 2>{256, 32}, array<int, 2>{1, 264});
+    using Operand = decltype(tensor(xs, dextents<int, 2>{32, int(rows)}, array<int, 2>{1, 32}));
+    constexpr auto descriptor = matmul2d_descriptor(M, 256, 32, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<descriptor, execution_simdgroups<8>> op;
+    auto acc = op.template get_destination_cooperative_tensor<Operand, decltype(W), float>();
+    for (uint i = 0; i < acc.get_capacity(); ++i) acc[i] = 0;
+    const uint last = min(outputs / 32, share * per + per);
+    for (uint band = share * per; band < last; band++) {
+        auto X = tensor(xs + ulong(band) * rows * 32, dextents<int, 2>{32, int(rows)}, array<int, 2>{1, 32});
+        streamed_panels(c, band, group.x, group.x + 1, simd, lane, panel, [&](uint, threadgroup half *) {
+            auto weights = W.slice<256, 32>(0, 0);
+            if (row0 + M <= rows) {
+                auto a = X.slice<32, M>(0, int(row0));
+                op.run(a, weights, acc);
+            } else {
+                auto a = X.slice(0, int(row0));
+                op.run(a, weights, acc);
+            }
+        });
+    }
+    for (uint i = 0; i < acc.get_capacity(); ++i) {
+        if (!acc.is_valid_element(i)) continue;
+        auto e = acc.get_multidimensional_index(i);
+        const uint n = row0 + uint(e[1]), j = group.x * 256 + uint(e[0]);
+        if (n < rows && j < columns) partials[ulong(share) * d.split + ulong(n) * columns + j] = acc[i];
+    }
+}
+
+template [[host_name("streamed_panel_t_16")]] [[kernel]] decltype(streamed_panel_t<16>) streamed_panel_t<16>;
+template [[host_name("streamed_panel_t_64")]] [[kernel]] decltype(streamed_panel_t<64>) streamed_panel_t<64>;
 #endif
 #endif
