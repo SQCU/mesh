@@ -11,7 +11,9 @@
 //                                      then f(t0, panel)
 //
 // and the products' sums reach their own consumers through streamed_value (a K split's or a member's partials summed,
-// the row's scale applied). Include after <metal_stdlib>; the tensor-op kernels need Metal 4.
+// the row's scale applied), whole rows through streamed_rows (partials, or plain values a crossing summed), and a
+// product's input is written through streamed_put (a function of the logical position, the column order and scale
+// applied). Include after <metal_stdlib>; the tensor-op kernels need Metal 4.
 #ifndef TORCH_MESH_STREAMED
 #define TORCH_MESH_STREAMED
 #include <metal_stdlib>
@@ -137,6 +139,152 @@ static inline float streamed_value(device const float *partials, ulong at, uint 
     }
     for (; s < shares; s++) a0 += partials[at + ulong(s) * stride];
     return scale * ((a0 + a1) + (a2 + a3));
+}
+
+// The GELU of a gate value times an up value (tanh form, its inner term clamped to [-20, 20]).
+static inline float streamed_gelu_of(float g, float u) {
+    const float inner = clamp(0.7978845608f * (g + 0.044715f * g * g * g), -20.0f, 20.0f);
+    return 0.5f * g * (1.0f + tanh(inner)) * u;
+}
+
+static inline float streamed_sum(float s, threadgroup float *partial, uint t, uint threads) {
+    s = simd_sum(s);
+    if (threads <= 32) return s;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if ((t & 31u) == 0) partial[t >> 5] = s;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float total = 0.0f;
+    for (uint i = 0; i < threads / 32; i++) total += partial[i];
+    return total;
+}
+
+// A product's output row n at logical positions [first, first + count) into vals: from its partials (shares > 0:
+// coded row r of [first, first + count) lands at order[r] - first, its shares summed and scaled) or, where a crossing
+// has summed it into plain values, from `plain` (shares == 0, row stride `rows`). The row order permutes within the
+// range. Ends with a threadgroup barrier.
+static inline void streamed_rows(device const float *partials, device const half *plain, device const int *order,
+                                 device const float *scale, uint n, uint first, uint count, uint rows, uint shares,
+                                 uint stride, threadgroup float *vals, uint t, uint threads) {
+    for (uint i = t; i < count; i += threads) {
+        if (shares == 0) { vals[i] = float(plain[ulong(n) * rows + first + i]); continue; }
+        const uint r = first + i;
+        vals[uint(order[r]) - first] = streamed_value(partials, ulong(n) * rows + r, shares, stride, scale[r]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// A product's input row n: coded column j is scale[j] * f(order[j]), f a value at a logical position.
+template <typename F>
+static inline void streamed_put(device half *input, device const int *order, device const float *scale, uint n,
+                                uint columns, uint t, uint threads, F f) {
+    for (uint j = t; j < columns; j += threads) input[ulong(n) * columns + j] = half(scale[j] * f(uint(order[j])));
+}
+
+// A product's outputs finished into plain values: y[n * stride + order[r]], capped (cap > 0).
+kernel void streamed_finish(device const float *partials [[buffer(0)]], device half *y [[buffer(1)]],
+                            device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
+                            constant uint &outputs [[buffer(4)]], constant uint &stride [[buffer(5)]],
+                            constant uint &count [[buffer(6)]], constant float &cap [[buffer(7)]],
+                            constant uint &shares [[buffer(8)]], constant uint &shareStride [[buffer(9)]],
+                            uint i [[thread_position_in_grid]]) {
+    if (i >= count) return;
+    const uint n = i / outputs, r = i % outputs;
+    const float value = streamed_value(partials, i, shares, shareStride, scale[r]);
+    y[n * stride + uint(order[r])] = half(cap > 0.0f ? tanh(value / cap) * cap : value);
+}
+
+// The coded inputs of up to three products sharing a column order, from plain rows x (grid: columns x rows).
+kernel void streamed_gather(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
+                            device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
+                            constant uint &columns [[buffer(4)]], device half *second [[buffer(5)]],
+                            device half *third [[buffer(6)]], device const float *secondScale [[buffer(7)]],
+                            device const float *thirdScale [[buffer(8)]], constant uint &outputs [[buffer(9)]],
+                            uint2 i [[thread_position_in_grid]]) {
+    if (i.x >= columns) return;
+    const ulong at = ulong(i.y) * columns + i.x;
+    const float v = float(x[ulong(i.y) * columns + uint(order[i.x])]);
+    first[at] = half(scale[i.x] * v);
+    if (outputs > 1) second[at] = half(secondScale[i.x] * v);
+    if (outputs > 2) third[at] = half(thirdScale[i.x] * v);
+}
+
+// The coded inputs of up to two products of a rotated basis (int8 rotation stored transposed: row c rotated
+// coordinate c, scaled by rotationScale[c]); with eps > 0 the RMS norm of x times gamma folds in (the rotation is
+// linear). Four coded columns a simdgroup, 16 bytes a load.
+kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
+                            device half *second [[buffer(2)]], device const int *order [[buffer(3)]],
+                            device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
+                            device const char *rotation [[buffer(6)]], device const float *rotationScale [[buffer(7)]],
+                            constant uint &columns [[buffer(8)]], constant uint &rows [[buffer(9)]],
+                            constant uint &outputs [[buffer(10)]], device const half *gamma [[buffer(11)]],
+                            constant float &eps [[buffer(12)]],
+                            uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
+                            uint lane [[thread_index_in_simdgroup]]) {
+    constexpr uint C = 4;
+    const uint j0 = (group * 4 + simd) * C;
+    if (j0 >= columns) return;
+    device const half4 *gamma4 = (device const half4 *)gamma;
+    const uint words = columns / 16;
+    for (uint n = 0; n < rows; n++) {
+        device const half4 *xr = (device const half4 *)(x + ulong(n) * columns);
+        float acc[C];
+        for (uint c = 0; c < C; c++) acc[c] = 0.0f;
+        float squares = 0.0f;
+        for (uint w = lane; w < words; w += 32) {
+            float4 xv[4];
+            for (uint k = 0; k < 4; k++) {
+                xv[k] = float4(xr[4 * w + k]);
+                if (eps > 0.0f) { squares += dot(xv[k], xv[k]); xv[k] *= float4(gamma4[4 * w + k]); }
+            }
+            for (uint c = 0; c < C; c++) {
+                const uint4 bits = ((device const uint4 *)(rotation + ulong(order[min(j0 + c, columns - 1)]) * columns))[w];
+                acc[c] += dot(float4(as_type<char4>(bits.x)), xv[0]) + dot(float4(as_type<char4>(bits.y)), xv[1])
+                        + dot(float4(as_type<char4>(bits.z)), xv[2]) + dot(float4(as_type<char4>(bits.w)), xv[3]);
+            }
+        }
+        const float rms = eps > 0.0f ? rsqrt(simd_sum(squares) / float(columns) + eps) : 1.0f;
+        for (uint c = 0; c < C; c++) {
+            const float total = simd_sum(acc[c]) * rms;
+            const uint j = j0 + c;
+            if (lane == 0 && j < columns) {
+                const float value = total * rotationScale[order[j]];
+                first[ulong(n) * columns + j] = half(scale[j] * value);
+                if (outputs > 1) second[ulong(n) * columns + j] = half(secondScale[j] * value);
+            }
+        }
+    }
+}
+
+// The GELU FFN's middle: hidden = GELU(gate) * up from the gate and up products' partials, in their (shared) coded
+// row order, which the down product's columns follow.
+kernel void streamed_gelu(device const float *gate [[buffer(0)]], device const float *up [[buffer(1)]],
+                          device const float *gateScale [[buffer(2)]], device const float *upScale [[buffer(3)]],
+                          device half *hidden [[buffer(4)]], constant uint &width [[buffer(5)]],
+                          constant uint &count [[buffer(6)]], constant uint &shares [[buffer(7)]],
+                          constant uint &shareStride [[buffer(8)]], uint i [[thread_position_in_grid]]) {
+    if (i >= count) return;
+    const uint r = i % width;
+    hidden[i] = half(streamed_gelu_of(streamed_value(gate, i, shares, shareStride, gateScale[r]),
+                                      streamed_value(up, i, shares, shareStride, upScale[r])));
+}
+
+// The matrix decoded to dense values in its row and column orders: dense[order[r]][columns[j]] = rowScale[r] *
+// colScale[j] * value of coded row r, coded column j (a threadgroup a tile, a lane a row).
+kernel void streamed_dense(device const uint *bits [[buffer(0)]], device const uchar *widths [[buffer(1)]],
+                           device const float *steps [[buffer(2)]], device const uint *offsets [[buffer(3)]],
+                           device half *dense [[buffer(4)]], device const int *order [[buffer(5)]],
+                           device const float *rowScale [[buffer(6)]], constant uint &tiles [[buffer(7)]],
+                           device const int *columns [[buffer(8)]], device const float *colScale [[buffer(9)]],
+                           uint2 group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    const Coded c = coded(bits, widths, steps, offsets, tiles);
+    const uint r = group.x * 32 + lane, at = group.x * tiles + group.y, j0 = group.y * 32;
+    const float scale = 0.5f * steps[at] * rowScale[r];
+    device half *out = dense + ulong(order[r]) * tiles * 32;
+    if (streamed_pairs(c, at, lane, [&](uint j, float2 d) {
+            out[columns[j0 + 2 * j]] = half(d.x * scale * colScale[j0 + 2 * j]);
+            out[columns[j0 + 2 * j + 1]] = half(d.y * scale * colScale[j0 + 2 * j + 1]);
+        }) == 0)
+        for (uint j = 0; j < 32; j++) out[columns[j0 + j]] = half(0.0h);
 }
 
 // One input row: lane a tile row, simdgroup a tile, a threadgroup's simdgroups a K split (grid y) of a 32-row block
