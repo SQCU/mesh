@@ -280,6 +280,10 @@ class Matrix(torch.Tensor):
         return down.apply(hidden).to(x.dtype)
 
 
+def _no(m, what):
+    raise NotImplementedError(f'{m.label}: a coded matrix has no {what}')
+
+
 def _flip(m):
     return m.like(transposed=not m.transposed)
 
@@ -290,6 +294,12 @@ def _mm(a, b):
     return _flip(a).times(b.T.contiguous()).T.contiguous()
 
 
+def _matmul(a, b):
+    if isinstance(a, Matrix) or a.dim() == 2:
+        return _mm(a, b)
+    return _mm(a.reshape(-1, a.shape[-1]), b).reshape(*a.shape[:-1], b.shape[-1])
+
+
 def _slice(m, dim=0, start=None, end=None, step=1):
     assert step == 1, 'a coded matrix is cut in unit steps'
     size = m.shape[dim]
@@ -297,6 +307,14 @@ def _slice(m, dim=0, start=None, end=None, step=1):
     end = size if end is None else end + size if end < 0 else min(end, size)
     span = (start, end)
     return m.cut(rows=span) if (dim % 2) == int(m.transposed) else m.cut(columns=span)
+
+
+def _split(m, sizes, dim=0):
+    sizes = sizes if isinstance(sizes, (list, tuple)) else [sizes] * -(-m.shape[dim] // sizes)
+    bounds = [0]
+    for size in sizes:
+        bounds.append(min(bounds[-1] + size, m.shape[dim]))
+    return [_slice(m, dim, a, b) for a, b in zip(bounds, bounds[1:])]
 
 
 def _to_copy(m, dtype=None, layout=None, device=None, pin_memory=None, non_blocking=False, memory_format=None):
@@ -322,11 +340,15 @@ _OPERATIONS = {
     aten.transpose.int: lambda m, a, b: m.like() if a % 2 == b % 2 else _flip(m),
     aten.permute.default: lambda m, dims: m.like() if [d % 2 for d in dims] == [0, 1] else _flip(m),
     aten.detach.default: lambda m: m.like(),
+    aten.view.default: lambda m, shape: m.like() if list(shape) in (list(m.shape), [-1, m.shape[1]], [m.shape[0], -1]) else _no(m, f'a view as {shape}'),
     aten.alias.default: lambda m: m.like(),
     aten.clone.default: lambda m, memory_format=None: m.like(),
     aten._to_copy.default: _to_copy,
     aten.slice.Tensor: _slice,
+    aten.split.Tensor: _split,
+    aten.split_with_sizes.default: _split,
     aten.mm.default: _mm,
+    aten.matmul.default: _matmul,
     aten.mm.out: lambda a, b, out: out.copy_(_mm(a, b)),
     aten.addmm.default: lambda bias, a, b, beta=1, alpha=1: beta * bias + alpha * _mm(a, b),
     aten.linear.default: _linear,
