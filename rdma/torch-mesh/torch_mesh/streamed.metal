@@ -115,7 +115,8 @@ static inline uint streamed_row(Coded c, uint at, uint lane, float factor, threa
 }
 
 // A threadgroup's eight simdgroups decode panels of 8 tiles (32 x 256, row stride 264) of block `block`, panels
-// [first, last), then f(t0, panel) runs on the whole threadgroup; a panel past the last tile is zero there.
+// [first, last), then f(t0, panel) runs on the whole threadgroup; a panel past the last tile is zero there (its
+// consumer reads its operand only within the matrix's width: a tensor operation's slice past it is not clipped).
 template <typename F>
 static inline void streamed_panels(Coded c, uint block, uint first, uint last, uint simd, uint lane,
                                    threadgroup half *panel, F f) {
@@ -345,9 +346,22 @@ kernel void streamed_panel(device const uint *bits [[buffer(0)]], device const u
     matmul2d<descriptor, execution_simdgroups<8>> op;
     auto acc = op.template get_destination_cooperative_tensor<decltype(X), decltype(W), float>();
     for (uint i = 0; i < acc.get_capacity(); ++i) acc[i] = 0;
-    streamed_panels(c, group.x, share * per, share * per + per, simd, lane, panel, [&](uint t0, threadgroup half *) {
+    streamed_panels(c, group.x, share * per, share * per + per, simd, lane, panel, [&](uint t0, threadgroup half *p) {
         auto weights = W.slice<256, 32>(0, 0);
-        if (row0 + M <= rows && t0 + 8 <= tiles) {
+        if (t0 + 8 > tiles) {
+            const uint width = (tiles - t0) * 32;
+            for (uint i = 0; i < acc.get_capacity(); ++i) {
+                if (!acc.is_valid_element(i)) continue;
+                auto e = acc.get_multidimensional_index(i);
+                const uint n = row0 + uint(e[1]);
+                if (n >= rows) continue;
+                device const half *x = xs + ulong(n) * tiles * 32 + t0 * 32;
+                threadgroup const half *w = p + uint(e[0]) * 264;
+                float sum = 0.0f;
+                for (uint k = 0; k < width; k++) sum = fma(float(x[k]), float(w[k]), sum);
+                acc[i] += sum;
+            }
+        } else if (row0 + M <= rows) {
             auto a = X.slice<256, M>(int(t0 * 32), int(row0));
             op.run(a, weights, acc);
         } else {
