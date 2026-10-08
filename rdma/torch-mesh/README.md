@@ -158,8 +158,8 @@ engines.rebalance(pool)                                    # every few steps
 
 - Operations: `Linear` shares its output features (they concatenate), `FFN` its intermediate neurons (each engine a
   partial of the whole output; they sum: Megatron's split), the Neural Engine's FFN share one fused graph. An `FFN`'s
-  operands may be coded matrices ("Streamed coded weights"): a share is then neurons in the code's hidden order, the
-  GPU's the coded FFN on its slice of the codes, the CPU's and the Neural Engine's that slice decoded. A decision
+  operands may be any tensors, coded matrices among them ("Streamed coded weights"): a share is a slice, the GPU's
+  run by `engines.ffn` (an operand type's fused couple where no gradient is due), another engine's decoded by its copy. A decision
   is an (operation name, row count): a stack's layers of one name share it and pool their evidence, measured where
   the program runs them, between its other operations.
 - Engines never time-share a physical unit: each states what it occupies (the GPU, the CPU's cores, the Neural
@@ -190,27 +190,44 @@ consumer is an operand: `streamed_pairs` hands each decoded pair of a lane's til
 decodes a 32 x 256 panel in threadgroup memory and then runs a function on the threadgroup, `streamed_value` and
 `streamed_rows` read a product's output (its K shares summed and scaled, or the plain values a crossing summed), and
 `streamed_put` writes a product's input in its column order and scale. Every kernel there is an instantiation (the
-one-row product, the 16- and 128-row panels on the matrix units, the finish, the input gather and rotation, the GELU of
-gate and up, the dense decode), its constants one `streamed_dims` block at buffer 15; metal-microbench's engine
-compiles the same source.
+one-row product, the 16- and 128-row panels and their transposed consumer on the matrix units, the finish, the input
+gather and rotation, the GELU of gate and up, the dense decode), its constants one `streamed_dims` block at buffer 15;
+metal-microbench's engine compiles the same source.
+
+`torch_mesh/streamed.py` makes a coded matrix a torch tensor (a wrapper subclass whose aten operations are those
+kernels), so a program is written once in torch and queried for what it needs: evaluated, or differentiated by torch's
+own autograd, which derives the backward from the forward the program ran.
 
 ```python
-from torch_mesh import streamed
+from torch_mesh import engines, streamed
 s = streamed.Streamed("gemma-4-E2B-it-streamed.safetensors")
-y = s["model.language_model.layers.3.mlp.down_proj"].linear(x)            # x [n, 6144] fp16, any n
-h = streamed.ffn(x, *(s[f"model.language_model.layers.3.mlp.{p}_proj"] for p in ("gate", "up", "down")))
-w = s["lm_head"].dense()                                                  # decoded, in the matrix's coordinates
-ffn = engines.FFN(*(s[f"model.language_model.layers.3.mlp.{p}_proj"] for p in ("gate", "up", "down")), engines=pool)
+layer.mlp.down_proj.weight = torch.nn.Parameter(s["model.language_model.layers.3.mlp.down_proj"], requires_grad=False)
+y = F.linear(x, s["lm_head"])                     # forward; y.backward(...) runs the transposed consumer
+gate, up, down = (s[f"model.language_model.layers.3.mlp.{p}_proj"] for p in ("gate", "up", "down"))
+h = engines.ffn(x, gate, up, down)                # the fused couple where no gradient is due, else torch's products
+ffn = engines.FFN(gate, up, down, engines=pool)   # neurons shared among engines: gate[a:b], down[:, a:b]
+w = s["lm_head"].to("cpu")                        # decoded
 ```
 
-A product of 1 to 16 rows leaves partials (its K shares, coded row order, unscaled), past 16 the 128-row panel's one
-share; a consumer reads them (`finish`, `streamed_gelu`), so the FFN is the same four kernels at every row count: the
-input rotated or gathered, gate's and up's products, GELU(gate) * up into down's coded input, down's product finished.
-`Matrix.slice` cuts a matrix's codes by rows and columns (multiples of 32), which is how an FFN's neurons are shared.
+- `x @ m` is one pipeline whichever way `m` is transposed: the input side's order and scale (and rotation), the
+  product contracting the coded rows (the one-row product, the 16- and 128-row panels) or the coded columns
+  (`streamed_panel_t`: the same decoded panels consumed the other way, its operand band-major because a tensor
+  operation's strides past 2^16 elements corrupt its rows past the first), the output side's order and scale. So
+  `F.linear` and `mm` and their backward (`linear_backward`, `mm` against the untransposed matrix) need nothing else.
+- Slicing cuts the codes (rows and columns in multiples of 32, each order keeping its range); a copy off the GPU
+  decodes. `Streamed` holds an FFN's hidden in its code order (one permutation of its neurons, the FFN unchanged), so
+  neurons [a, b) are code rows [a, b): `engines.FFN`'s shares and the Neural Engine share builder slice it as they slice
+  a checkpoint. An operation the tensor lacks is an error naming the ones it has.
+- Operands are fp16. Another dtype's rows are scaled by powers of two into fp16's range and back (exact): a backward's
+  gradients lie far below fp16's normal range, and cast as they are, E2B's loss gradient at its input embeddings
+  (64 tokens, every matrix coded, a bf16 model) was 0.140 relative to the float32 model's a position (median); scaled,
+  0.050 (1e-3 relative noise on the float32 model's weights: 0.01).
+- The codes are constants: no gradient reaches them, only through them.
 
-`python -m torch_mesh.streamed check EXPORT [NAME ...]` checks the decode against `model_code.py`'s reference decode
-and the products and the FFN against the dense ones (E2B and E4B: decode 3e-6 to 3e-4, products at 1, 8 and 300 rows
-3e-4 to 5e-4, the FFN 5e-4 to 8e-4 relative).
+`python -m torch_mesh.streamed check EXPORT [NAME ...]` checks the decode against `model_code.py`'s reference decode,
+the products and their input gradients and the FFN (fused, composed, its gradient) against the decoded matrices (E2B and
+E4B: decode 3e-6 to 3e-4; products at 1, 8 and 300 rows 3e-4 to 5e-4, their gradients 5e-4 to 6e-4; the FFN 5e-4 to
+8e-4, its gradient 1e-3).
 
 ## Performance
 
