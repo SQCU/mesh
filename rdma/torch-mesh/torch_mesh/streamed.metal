@@ -341,35 +341,6 @@ kernel void streamed_dense(device const uint *bits [[buffer(0)]], device const u
         for (uint j = 0; j < 32; j++) out[columns[j0 + j]] = half(0.0h);
 }
 
-// One input row: lane a tile row, simdgroup a tile, a threadgroup's simdgroups a K split (grid y) of a 32-row block
-// (grid x); the split's sums its share of `partials`.
-kernel void streamed_product(device const uint *bits [[buffer(0)]], device const uchar *widths [[buffer(1)]],
-                             device const float *steps [[buffer(2)]], device const uint *offsets [[buffer(3)]],
-                             device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
-                             constant streamed_dims &d [[buffer(15)]],
-                             uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
-                             uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]],
-                             uint sgs [[simdgroups_per_threadgroup]], uint2 tpg [[threads_per_threadgroup]]) {
-    threadgroup float sums[16][32];
-    const uint tiles = d.tiles, stride = d.split;
-    const Coded c = coded(bits, widths, steps, offsets, tiles);
-    const uint t = group.y * sgs + simd, at = group.x * tiles + min(t, tiles - 1);
-    half2 x[16];
-    device const half2 *xp = (device const half2 *)(xs + min(t, tiles - 1) * 32);
-    for (uint j = 0; j < 16; j++) x[j] = xp[j];
-    float a = 0.0f;
-    const uint b = t < tiles ? streamed_pairs(c, at, lane, [&](uint j, float2 d) {
-        a = fma(d.x, float(x[j].x), fma(d.y, float(x[j].y), a));
-    }) : 0u;
-    sums[simd][lane] = b ? a * 0.5f * steps[at] : 0.0f;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint i = thread_id; i < 32; i += tpg.x) {
-        float total = 0.0f;
-        for (uint s = 0; s < sgs; s++) total += sums[s][i];
-        partials[ulong(group.y) * stride + group.x * 32 + i] = total;
-    }
-}
-
 // Up to R input rows on the ALUs (metal-microbench docs/kernels.md "Against LiteRT's kernels"; the study's direct_mv):
 // a simdgroup T tiles of the threadgroup's d.per, every tile's words loaded before anything else, then each row's x
 // pairs straight into registers, the producer's pairs consumed by one FMA chain a row; the simdgroups' sums reduced in
@@ -440,7 +411,7 @@ template [[host_name("streamed_direct_8_1")]] [[kernel]] decltype(streamed_direc
 #if __METAL_VERSION__ >= 400
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 
-// Up to M input rows on the matrix units: streamed_panels feeding one threadgroup matmul2d (M x 32 x 256) a panel,
+// More than 16 input rows on the matrix units: streamed_panels feeding one threadgroup matmul2d (M x 32 x 256) a panel,
 // `per` panels a threadgroup along K. Unfinished (finish == 0): the threadgroup's share to `partials`; finished (its
 // panels cover K): each value with its row's scale, capped (cap > 0), stored at row order[r] of `ys` (row stride
 // `stride`).
@@ -559,7 +530,6 @@ kernel void streamed_tiles(device const uint *bits [[buffer(0)]], device const u
 
 template [[host_name("streamed_tiles_16_4")]] [[kernel]] decltype(streamed_tiles<16, 4>) streamed_tiles<16, 4>;
 
-template [[host_name("streamed_panel_16")]] [[kernel]] decltype(streamed_panel<16>) streamed_panel<16>;
 template [[host_name("streamed_panel_128")]] [[kernel]] decltype(streamed_panel<128>) streamed_panel<128>;
 
 // The transposed product, the same panels consumed the other way: partials[share][n][j] = sum over the coded rows r of
