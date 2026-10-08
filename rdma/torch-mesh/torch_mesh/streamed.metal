@@ -74,17 +74,29 @@ static inline void streamed_pairs_of(thread const uint *w, F f) {
     f(12, streamed_float<B, 12>(w)); f(13, streamed_float<B, 13>(w)); f(14, streamed_float<B, 14>(w)); f(15, streamed_float<B, 15>(w));
 }
 
-// lane's row of tile `at`, its pairs as odd integers to f(j, pair); returns the tile's width (0: nothing decoded)
-template <typename F>
-static inline uint streamed_pairs(Coded c, uint at, uint lane, F f) {
+// lane's row of tile `at` loaded into w (its words, zero past them); returns the tile's width
+static inline uint streamed_words(Coded c, uint at, uint lane, thread uint *w) {
     const uint b = c.widths[at];
-    if (b == 0) return 0;
-    uint w[12];
     device const uint *source = c.bits + c.offsets[at] + lane * b;
+#pragma clang loop unroll(full)
     for (uint i = 0; i < 12; i++) w[i] = i < b ? source[i] : 0u;
+    return b;
+}
+
+// loaded words of width b, their pairs as odd integers to f(j, pair)
+template <typename F>
+static inline void streamed_decode(thread const uint *w, uint b, F f) {
 #define STREAMED_PAIRS(B) streamed_pairs_of<B>(w, f)
     STREAMED_WIDTHS(STREAMED_PAIRS)
 #undef STREAMED_PAIRS
+}
+
+// lane's row of tile `at`, its pairs as odd integers to f(j, pair); returns the tile's width (0: nothing decoded)
+template <typename F>
+static inline uint streamed_pairs(Coded c, uint at, uint lane, F f) {
+    uint w[12];
+    const uint b = streamed_words(c, at, lane, w);
+    if (b) streamed_decode(w, b, f);
     return b;
 }
 
@@ -358,6 +370,73 @@ kernel void streamed_product(device const uint *bits [[buffer(0)]], device const
     }
 }
 
+// Up to R input rows on the ALUs (metal-microbench docs/kernels.md "Against LiteRT's kernels"; the study's direct_mv):
+// a simdgroup T tiles of the threadgroup's d.per, every tile's words loaded before anything else, then each row's x
+// pairs straight into registers, the producer's pairs consumed by one FMA chain a row; the simdgroups' sums reduced in
+// threadgroup memory into partials[share][n][row] (coded row order, the row scale not applied). Rows past d.rows repeat
+// the last row's loads (no branch on a load) and are not written.
+template <uint R, uint T>
+kernel void streamed_direct(device const uint *bits [[buffer(0)]], device const uchar *widths [[buffer(1)]],
+                            device const float *steps [[buffer(2)]], device const uint *offsets [[buffer(3)]],
+                            device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
+                            constant streamed_dims &d [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
+                            uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                            uint simds [[simdgroups_per_threadgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
+    threadgroup float sums[8][R][32];
+    const uint tiles = d.tiles, rows = d.rows, first = group.y * d.per, span = min(tiles, first + d.per) - first;
+    const Coded c = coded(bits, widths, steps, offsets, tiles);
+    uint w[T][12], b[T];
+    float step[T];
+#pragma clang loop unroll(full)
+    for (uint i = 0; i < T; i++) {
+        const uint t = simd + i * simds, at = group.x * tiles + first + t;
+        b[i] = 0;
+        step[i] = 0.0f;
+        if (t < span) {
+            b[i] = streamed_words(c, at, lane, w[i]);
+            step[i] = 0.5f * steps[at];
+        }
+    }
+    half2 x[T][R][16];
+#pragma clang loop unroll(full)
+    for (uint i = 0; i < T; i++) {
+        device const half2 *xp = (device const half2 *)(xs + (first + min(simd + i * simds, span - 1)) * 32);
+#pragma clang loop unroll(full)
+        for (uint n = 0; n < R; n++)
+#pragma clang loop unroll(full)
+            for (uint j = 0; j < 16; j++) x[i][n][j] = xp[min(n, rows - 1) * (tiles * 16) + j];
+    }
+    float acc[R];
+#pragma clang loop unroll(full)
+    for (uint n = 0; n < R; n++) acc[n] = 0.0f;
+#pragma clang loop unroll(full)
+    for (uint i = 0; i < T; i++) {
+        if (b[i] == 0) continue;
+        float tile[R];
+#pragma clang loop unroll(full)
+        for (uint n = 0; n < R; n++) tile[n] = 0.0f;
+        streamed_decode(w[i], b[i], [&](uint j, float2 v) {
+#pragma clang loop unroll(full)
+            for (uint n = 0; n < R; n++) tile[n] = fma(v.x, float(x[i][n][j].x), fma(v.y, float(x[i][n][j].y), tile[n]));
+        });
+#pragma clang loop unroll(full)
+        for (uint n = 0; n < R; n++) acc[n] = fma(tile[n], step[i], acc[n]);
+    }
+    for (uint n = 0; n < R; n++) sums[simd][n][lane] = acc[n];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = thread_id; i < R * 32; i += simds * 32) {
+        if (i / 32 >= rows) continue;
+        float total = 0.0f;
+        for (uint s = 0; s < simds; s++) total += sums[s][i / 32][i % 32];
+        partials[ulong(group.y) * d.split + (i / 32) * d.outputs + group.x * 32 + i % 32] = total;
+    }
+}
+
+template [[host_name("streamed_direct_1_2")]] [[kernel]] decltype(streamed_direct<1, 2>) streamed_direct<1, 2>;
+template [[host_name("streamed_direct_2_1")]] [[kernel]] decltype(streamed_direct<2, 1>) streamed_direct<2, 1>;
+template [[host_name("streamed_direct_4_1")]] [[kernel]] decltype(streamed_direct<4, 1>) streamed_direct<4, 1>;
+template [[host_name("streamed_direct_8_1")]] [[kernel]] decltype(streamed_direct<8, 1>) streamed_direct<8, 1>;
+
 #if __METAL_VERSION__ >= 400
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 
@@ -419,6 +498,66 @@ kernel void streamed_panel(device const uint *bits [[buffer(0)]], device const u
         ys[ulong(n) * stride + uint(order[r])] = half(cap > 0.0f ? tanh(value / cap) * cap : value);
     }
 }
+
+// Up to R input rows on the matrix units a simdgroup (the study's paired_mm): each simdgroup decodes its T tiles of the
+// threadgroup's d.per one at a time into its own 32 x 32 scratch (streamed_row) and runs its own R x 32 x 32 tensor
+// operation on it, no threadgroup barrier between tiles; the simdgroups' accumulators reduced in threadgroup memory into
+// partials[share][n][row] (coded row order, the row scale not applied).
+template <uint R, uint T>
+kernel void streamed_tiles(device const uint *bits [[buffer(0)]], device const uchar *widths [[buffer(1)]],
+                           device const float *steps [[buffer(2)]], device const uint *offsets [[buffer(3)]],
+                           device half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
+                           constant streamed_dims &d [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
+                           uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                           uint thread_id [[thread_index_in_threadgroup]]) {
+    using namespace mpp::tensor_ops;
+    threadgroup half scratch[8][32 * 40];
+    threadgroup float reduce[4][R * 32];
+    const uint tiles = d.tiles, rows = d.rows, first = group.y * d.per, span = min(tiles, first + d.per) - first;
+    const Coded c = coded(bits, widths, steps, offsets, tiles);
+    auto X = tensor(xs, dextents<int, 2>{int(tiles * 32), int(rows)}, array<int, 2>{1, int(tiles * 32)});
+    auto W = tensor(&scratch[simd][0], dextents<int, 2>{32, 32}, array<int, 2>{1, 40});
+    constexpr auto descriptor = matmul2d_descriptor(R, 32, 32, false, true, false, matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<descriptor, execution_simdgroup> op;
+    auto acc = op.template get_destination_cooperative_tensor<decltype(X), decltype(W), float>();
+    for (uint i = 0; i < acc.get_capacity(); ++i) acc[i] = 0;
+    for (uint i = 0; i < T; i++) {
+        const uint t = simd + i * 8;
+        if (t >= span) break;
+        if (streamed_row(c, group.x * tiles + first + t, lane, 1.0f, (threadgroup half2 *)&scratch[simd][lane * 40]) == 0) continue;
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+        auto weights = W.slice<32, 32>(0, 0);
+        if (rows >= R) {
+            auto a = X.slice<32, R>(int((first + t) * 32), 0);
+            op.run(a, weights, acc);
+        } else {
+            auto a = X.slice(int((first + t) * 32), 0);
+            op.run(a, weights, acc);
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (simd < 4)
+        for (uint i = 0; i < acc.get_capacity(); ++i)
+            if (acc.is_valid_element(i)) {
+                auto e = acc.get_multidimensional_index(i);
+                reduce[simd][uint(e[1]) * 32 + uint(e[0])] = acc[i];
+            }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simd >= 4)
+        for (uint i = 0; i < acc.get_capacity(); ++i)
+            if (acc.is_valid_element(i)) {
+                auto e = acc.get_multidimensional_index(i);
+                reduce[simd - 4][uint(e[1]) * 32 + uint(e[0])] += acc[i];
+            }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = thread_id; i < R * 32; i += 256) {
+        if (i / 32 >= rows) continue;
+        const float total = (reduce[0][i] + reduce[1][i]) + (reduce[2][i] + reduce[3][i]);
+        partials[ulong(group.y) * d.split + (i / 32) * d.outputs + group.x * 32 + i % 32] = total;
+    }
+}
+
+template [[host_name("streamed_tiles_16_4")]] [[kernel]] decltype(streamed_tiles<16, 4>) streamed_tiles<16, 4>;
 
 template [[host_name("streamed_panel_16")]] [[kernel]] decltype(streamed_panel<16>) streamed_panel<16>;
 template [[host_name("streamed_panel_128")]] [[kernel]] decltype(streamed_panel<128>) streamed_panel<128>;

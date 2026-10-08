@@ -12,7 +12,7 @@ for some a rotation (int8, its scale a column: the matrix's columns are rotated 
   Matrix.ffn(x, gate, up, down)       the fused GELU FFN couple (torch_mesh.engines.ffn runs it where no gradient is due)
 
 x @ m is one pipeline whichever way m is transposed: the input side's order and scale (a rotation where it lies there),
-the product contracting the coded rows (streamed_product, the 16- and 128-row panels) or the coded columns
+the product contracting the coded rows (streamed_direct, streamed_tiles, the 128-row panel) or the coded columns
 (streamed_panel_t: the same decoded panels, consumed the other way), the output side's order and scale (and rotation).
 Operands are fp16 on the GPU (another dtype's rows scaled into its range by powers of two, results finished in the
 caller's dtype); the codes are constants (no gradient reaches them, only through them). An operation a coded matrix lacks is an error naming the ones it has.
@@ -28,7 +28,6 @@ import torch
 
 SOURCE = Path(__file__).with_name('streamed.metal').read_text()
 _PIPELINES = {}
-PRODUCT_SIMDGROUPS = 16
 aten = torch.ops.aten
 
 
@@ -152,13 +151,21 @@ class Matrix(torch.Tensor):
         out.label = f'{self.label}[{a}:{b}, {c}:{d}]'
         return out
 
-    def splits(self, rows):
-        if rows == 1:
-            return -(-self.tiles // PRODUCT_SIMDGROUPS)
-        return -(-self.tiles // (8 * self.per(rows)))
-
-    def per(self, rows):
-        return 4 if 1 < rows <= 16 and self.tiles >= 64 else 1
+    def dispatch(self, rows):
+        """The product of `rows` coded input rows as metal-microbench docs/kernels.md "Against LiteRT's kernels" measured
+        it fastest: up to 8 rows streamed_direct (2 tiles a simdgroup at one row, 1 above; 8 simdgroups to 4 rows, 4
+        above), 9 to 16 streamed_tiles (4 tiles a simdgroup), more the 128-row panel. (kernel, threadgroups x and y,
+        threads, tiles a threadgroup, shares)."""
+        if rows > 16:
+            return 'streamed_panel_128', self.rows // 32, -(-rows // 128), 256, self.tiles, 1
+        if rows > 8:
+            name, simds, t = 'streamed_tiles_16_4', 8, 4
+        else:
+            r = 1 if rows == 1 else 2 if rows == 2 else 4 if rows <= 4 else 8
+            name, simds, t = f'streamed_direct_{r}_{2 if r == 1 else 1}', 8 if r <= 4 else 4, 2 if r == 1 else 1
+        per = simds * t
+        shares = -(-self.tiles // per)
+        return name, self.rows // 32, shares, simds * 32, per, shares
 
     def dense(self):
         """The matrix decoded in its own coordinates, its shape and dtype (a rotated matrix decoded in its coded
@@ -200,19 +207,11 @@ class Matrix(torch.Tensor):
         """The product of coded inputs xt [n, columns]: partials [shares, n, rows] in coded row order, unscaled (past 16
         rows one share, the 128-row panel's)."""
         n = xt.shape[0]
-        shares = self.splits(n) if n <= 16 else 1
+        name, gx, gy, threads, per, shares = self.dispatch(n)
         partials = torch.empty(shares, n, self.rows, dtype=torch.float32, device='mps')
-        if n > 16:
-            _encode('streamed_panel_128', self._code() + [xt, partials, None, None, None, None, None, xt, self.row_order, self.row_scale],
-                    _dims(tiles=self.tiles, outputs=self.rows, rows=n, per=-(-self.tiles // 8), split=n * self.rows),
-                    self.rows // 32, -(-n // 128), 256)
-        elif n == 1:
-            _encode('streamed_product', self._code() + [xt, partials],
-                    _dims(tiles=self.tiles, outputs=self.rows, split=n * self.rows), self.rows // 32, shares, PRODUCT_SIMDGROUPS * 32)
-        else:
-            _encode('streamed_panel_16', self._code() + [xt, partials, None, None, None, None, None, xt, self.row_order, self.row_scale],
-                    _dims(tiles=self.tiles, outputs=self.rows, rows=n, per=self.per(n), split=n * self.rows),
-                    self.rows // 32, shares, 256)
+        buffers = self._code() + [xt, partials] + ([None] * 5 + [xt, self.row_order, self.row_scale] if n > 16 else [])
+        _encode(name, buffers, _dims(tiles=self.tiles, outputs=self.rows, rows=n, per=-(-per // 8) if n > 16 else per,
+                                     split=n * self.rows), gx, gy, threads)
         return partials
 
     def product_t(self, xt):
