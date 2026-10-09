@@ -290,9 +290,9 @@ class Balancer:
     every other rank's has ended and crossed, so where the slower rank alternates between consecutive stretches the
     call is the cross cycle (one rank's stretch, a crossing, the other's, a crossing) that the sum misses.  Each
     decision's parts minimise its stretches' part of that time (its programs' whole paths where priced, every
-    decision on one path then moving alone in a call), a stretch's time on a rank divided among its decisions by the
-    weights the program gives (any units: its own estimate of each one's work there), less the work it names no
-    decision for (`fixed`, the same units).  A decision's parts are its groups' (`groups`, the ranks holding each part,
+    decision on one path then moving alone in a call, its gain weighed against its own stretches' sum), a stretch's
+    time on a rank divided among its decisions by the weights the program gives (any units: its own estimate of each
+    one's work there), less the work it names no decision for (`fixed`, the same units).  A decision's parts are its groups' (`groups`, the ranks holding each part,
     default one rank a part): a part some coordinate's ranks hold together (a pipeline stage's layers), its time a
     stretch their slowest's; a rank in none of its groups is constant to it, as is a rank holding none of it, and a
     part none of whose ranks run a stretch is no part of that stretch.  A stretch a decision has seen and no rank now
@@ -313,7 +313,7 @@ class Balancer:
     (a rank holding none of a decision publishes nothing where it did), so the moved decision's own stretches are no
     measure of it.  Of the decisions sharing a stretch one moves a call, a rejection's return first, else the one whose
     models promise the most (block coordinate descent [Tseng 2001]): another's move would change the stretches its
-    ratio test and its models read.  A decision's parts stand
+    ratio test and its models read; one that waits is weighed again at the next call, not read as standing.  A decision's parts stand
     where the models'
     unbounded optimum promises less than its resolution under the measured sum [DFPA; Meta-Balancer 2012], and stay
     standing while none of its models changed; once a part moves back the way it came, every part of the decision
@@ -396,11 +396,11 @@ class Balancer:
             if not mine:
                 continue
             path = {s for s, v in seen.items() if priced and v[4] is not None and any(seen[t][4] and seen[t][4][0] == v[4][0] for t in mine)}
-            runs[name] = set(mine) | path
-            counted = set(mine) | path
-            measured = _path(rows(medians, counted)) if path else sum(c * max(med for med, _ in r.values()) for c, r, *_ in mine.values())
-            slowest = [(seen[s][0], max(seen[s][1].values())) for s in counted]
+            counted = runs[name] = set(mine) | path
+            measured = sum(c * max(med for med, _ in r.values()) for c, r, *_ in mine.values())
+            slowest = [(c, max(r.values())) for c, r, *_ in mine.values()]
             within = max(0.01, 2 * math.sqrt(sum((c * se) ** 2 for c, (_, se) in slowest)) / measured if measured else 0.0)
+            base = _path(rows(medians, counted)) if path else measured
             history = d.setdefault('history', {})
             changed = d.get('measure', 'sum') != measure
             if changed:
@@ -476,7 +476,7 @@ class Balancer:
                                 for i in range(n)]
                     return _path(rows(at, counted)) + sum(c * max(f(u[g]) for g, f in enumerate(fs)) for c, fs in kept)
             total = sum(d['parts'])
-            if least(total, d['grain'], d['low'], d['high'], [] if value else built, value)[1] >= measured * (1 - epsilon):
+            if least(total, d['grain'], d['low'], d['high'], [] if value else built, value)[1] >= base - epsilon * measured:
                 d['before'], d['stands'] = list(d['parts']), True
                 continue
             grow = d.get('reach', 2.0)
@@ -490,12 +490,12 @@ class Balancer:
                 half = [(p + c) / 2 for c, p in zip(nxt, d['parts'])]
                 nxt, promise = least(total, d['grain'], [math.floor(h / d['grain']) * d['grain'] for h in half],
                                      [math.ceil(h / d['grain']) * d['grain'] for h in half], [] if value else built, value)
-            proposals.append(((measured - promise) / measured if measured else 0.0, name, nxt))
+            proposals.append(((base - promise) / measured if measured else 0.0, name, nxt))
         taken = set()
         for gain, name, value in sorted(proposals, key=lambda p: -p[0]):
             d, reverting = self.decisions[name], gain == math.inf
             if runs[name] & taken and not reverting:
-                d['stands'] = False
+                d['before'], d['stands'] = None, False
                 continue
             taken |= runs[name]
             if reverting:
