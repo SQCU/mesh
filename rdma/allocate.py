@@ -480,12 +480,15 @@ class Balancer:
                 d['before'], d['stands'] = list(d['parts']), True
                 continue
             grow = d.get('reach', 2.0)
+            failed = d.get('failed') or [None] * n
             reach = [min(d['high'][g], max(d['grain'] * math.ceil(grow * u / d['grain']), u + d['grain']))
                      if any((name, s, g) in self.points for s in mine) else d['high'][g] for g in range(n)
                      for u in [max((u for s in mine for u, _ in self.points.get((name, s, g), [])), default=0)]]
+            reach = [r if f is None else max(min(r, f - d['grain']), d['parts'][g]) for g, (r, f) in enumerate(zip(reach, failed))]
             nxt, promise = least(total, d['grain'], d['low'], reach, [] if value else built, value)
             if sum(nxt) < total:
-                nxt, promise = least(total, d['grain'], d['low'], d['high'], [] if value else built, value)
+                nxt, promise = least(total, d['grain'], d['low'], [d['high'][g] if f is None else max(f - d['grain'], d['parts'][g])
+                                                                  for g, f in enumerate(failed)], [] if value else built, value)
             if d['before'] is not None and any((c - p) * (p - b) < 0 for c, p, b in zip(nxt, d['parts'], d['before'])):
                 half = [(p + c) / 2 for c, p in zip(nxt, d['parts'])]
                 nxt, promise = least(total, d['grain'], [math.floor(h / d['grain']) * d['grain'] for h in half],
@@ -507,10 +510,13 @@ class Balancer:
 
     def reject(self):
         """The call at the current parts did not complete (a placement a program cannot run): every decision that moved
-        goes back to its last measured parts and its trust region halves, as a move measured worse does."""
+        goes back to its last measured parts and its trust region halves, as a move measured worse does, and each
+        part that grew past its last measured one is held below where it failed (`failed`), which the region's grain
+        past the measured parts would otherwise propose again."""
         for d in self.decisions.values():
             last = d.get('last')
             if last and last[0] != d['parts']:
+                d['failed'] = [p if p > q else None for p, q in zip(d['parts'], last[0])]
                 d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
                 d['before'], d['parts'], d['stands'] = None, list(last[0]), False
         return self.parts
