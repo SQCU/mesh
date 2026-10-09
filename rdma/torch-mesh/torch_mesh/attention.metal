@@ -19,16 +19,16 @@
 #include <metal_stdlib>
 using namespace metal;
 
-static inline float mesh_lanes_max(float v) { return v; }
-static inline float mesh_lanes_max(float4 v) { return max(max(v.x, v.y), max(v.z, v.w)); }
-static inline float mesh_lanes_sum(float v) { return v; }
-static inline float mesh_lanes_sum(float4 v) { return v.x + v.y + v.z + v.w; }
+__attribute__((always_inline)) static inline float mesh_lanes_max(float v) { return v; }
+__attribute__((always_inline)) static inline float mesh_lanes_max(float4 v) { return max(max(v.x, v.y), max(v.z, v.w)); }
+__attribute__((always_inline)) static inline float mesh_lanes_sum(float v) { return v; }
+__attribute__((always_inline)) static inline float mesh_lanes_sum(float4 v) { return v.x + v.y + v.z + v.w; }
 
 // One chunk's online softmax of R rows: every lane's masked scores sc[r], the chunk's maxima and sums through `words`
 // (2 R NSG floats), each row's probabilities to put(r, p) after the first barrier, and each row's running maximum m, sum
 // l and accumulator acc rescaled after the second.
 template <uint R, uint NSG, typename S, typename B, typename Put>
-static inline void mesh_softmax_chunk(thread S *sc, B in, thread float *m, thread float *l, thread float4 *acc,
+__attribute__((always_inline)) static inline void mesh_softmax_chunk(thread S *sc, B in, thread float *m, thread float *l, thread float4 *acc,
                                       threadgroup float *words, uint s, uint lane, Put put) {
     for (uint r = 0; r < R; r++) {
         const float top = simd_max(mesh_lanes_max(sc[r]));
@@ -59,7 +59,7 @@ static inline void mesh_softmax_chunk(thread S *sc, B in, thread float *m, threa
 // The G position groups' accumulators of R rows summed into group 0 (thread: channel slice d of group g), RC rows a round
 // through `red` ((G - 1) RC DS float4s); a round begins with a barrier unless Fresh holds for the first.
 template <uint R, uint RC, uint DS, uint G, bool Fresh>
-static inline void mesh_position_groups(thread const float4 *acc, thread float4 *o, threadgroup float4 *red, uint d, uint g) {
+__attribute__((always_inline)) static inline void mesh_position_groups(thread const float4 *acc, thread float4 *o, threadgroup float4 *red, uint d, uint g) {
     for (uint r = 0; r < R; r++) o[r] = acc[r];
     if (G == 1) return;
     for (uint r0 = 0; r0 < R; r0 += RC) {
@@ -75,7 +75,7 @@ static inline void mesh_position_groups(thread const float4 *acc, thread float4 
 
 // The task over its chunks: their scores, softmax and value products, the groups' sum, the KV type's finish.
 template <typename A>
-static inline void mesh_attention(thread A &a) {
+__attribute__((always_inline)) static inline void mesh_attention(thread A &a) {
     constexpr uint R = A::rows;
     float m[R], l[R];
     float4 acc[R];
