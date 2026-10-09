@@ -350,7 +350,7 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
     constexpr uint P = 16, V = 4, R = 3, KM = 20, QM = 10;
     threadgroup float v[5120];
     threadgroup float partial[32];
-    threadgroup uint masks[KM];
+    threadgroup uint masks[20];
     const uint columns = d.columns, N = d.per, shift = ctz(N), K = columns >> shift, W = N / 32;
     const float eps = d.eps;
     device const half *row = x + ulong(n) * columns;
