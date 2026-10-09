@@ -206,7 +206,9 @@ pointer type, so a finish run inside its product reads them `coherent(device)`.
 (the KV type's scores of each lane's positions, the chunk's online softmax of R rows, the KV type's value product), the
 position groups' sum and the KV type's finish (its parts' merge and store). metal-microbench's engine instantiates it over
 its fp16 pages (`decode_paged`) and its recorder over LiteRT's int8 window (`k7_window`, K7); a new KV layout is a new type
-(metal-microbench docs/kernels.md#decode-attention).
+(metal-microbench docs/kernels.md#decode-attention). `torch_mesh/argmax.metal` is a row's greatest candidate in one order
+(`mesh_argmax`: the greater value, then the lower key; one candidate or four channels a thread; a row's threadgroups merged
+by the last to arrive), the engine's vocabulary argmax and LiteRT's native ARG_MAX its instances.
 
 `torch_mesh/streamed.py` makes a coded matrix a torch tensor (a wrapper subclass whose aten operations are those
 kernels), so a program is written once in torch and queried for what it needs: evaluated, or differentiated by torch's
