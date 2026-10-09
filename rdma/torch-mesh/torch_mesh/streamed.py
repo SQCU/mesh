@@ -4,7 +4,9 @@ operations are the decompression producer with their consumers as operands, enco
 An export (metal-microbench tools/model_code.py `code ...+export=`) holds, a matrix: 32 x 32 tiles, each a width
 (bits a value, 0 to 12), a step and a word offset into `codes` (a lane a tile row, two values a word); its row order
 and scale and column order and scale (A[row_order[r], col_order[j]] = value[r][j] * row_scale[r] * col_scale[j]); and
-for some a rotation (int8, its scale a column: the matrix's columns are rotated coordinates, A_orig = A V^T).
+for some a basis of its input, the matrix's columns rotated coordinates (A_orig = A V^T): a rotation (int8, its scale a
+column), or a randomized Hadamard transform, V^T = T = (H_K (x) H_N) diag(signs) / sqrt(K N) from its signs (int8, one
+an input column) and H_K (`hadamard`, int8 K x K; H_N Sylvester's), run as a butterfly (streamed_hadamard).
 
   Streamed(path)[name]                a coded matrix, a torch.Tensor of the matrix's shape: an nn.Linear weight as it is
   F.linear(x, m), x @ m.T, x @ m      the library's kernels, forward and backward (torch's autograd derives the graph)
@@ -66,11 +68,20 @@ def _identity(k):
 _TYPES = {torch.float16: '', torch.float32: '_float', torch.bfloat16: '_bfloat'}
 
 
+def _hadamard(signs, mix):
+    """T = (H_K (x) H_N) diag(signs) / sqrt(K N) (float32, on the CPU): the rows its rotated coordinates."""
+    k, K = signs.shape[0], mix.shape[0]
+    H = torch.ones(1, 1)
+    while H.shape[0] < k // K:
+        H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)])
+    return torch.kron(mix.float().cpu(), H) * signs.float().cpu()[None, :] / k ** 0.5
+
+
 class Matrix(torch.Tensor):
     """One coded matrix (module docstring) as a tensor: `rows` x `columns` the coded matrix's, its shape theirs or,
     `transposed`, swapped."""
     FIELDS = ('codes', 'widths', 'offsets', 'steps', 'row_scale', 'col_scale', 'row_order', 'col_order', 'rotation',
-              'rotation_scale', 'folded')
+              'rotation_scale', 'folded', 'signs', 'hadamard')
     __torch_function__ = torch._C._disabled_torch_function_impl
 
     @staticmethod
@@ -96,6 +107,9 @@ class Matrix(torch.Tensor):
             fields['rotation_scale'] = get('rotation_scale')
             order = fields['col_order'].long()
             fields['folded'] = (fields['rotation'][order].float() * fields['rotation_scale'][order, None]).half()
+        if f'{name}.signs' in tensors:
+            fields['signs'], fields['hadamard'] = get('signs'), get('hadamard')
+            fields['folded'] = _hadamard(tensors[f'{name}.signs'], tensors[f'{name}.hadamard'])[tensors[f'{name}.col_order'].long()].half().to('mps')
         return cls(fields, name)
 
     def like(self, transposed=None, dtype=None, **fields):
@@ -103,7 +117,7 @@ class Matrix(torch.Tensor):
                       self.transposed if transposed is None else transposed, dtype or self.dtype)
 
     def __repr__(self):
-        return (f'Matrix({self.label} [{self.rows} x {self.columns}]{" rotated" if self.rotation is not None else ""}'
+        return (f'Matrix({self.label} [{self.rows} x {self.columns}]{" rotated" if self.folded is not None else ""}'
                 f'{" transposed" if self.transposed else ""}, {self.dtype})')
 
     def __tensor_flatten__(self):
@@ -131,7 +145,7 @@ class Matrix(torch.Tensor):
         if (a, b, c, d) == (0, self.rows, 0, self.columns):
             return self.like()
         assert all(v % 32 == 0 for v in (a, b, c, d)), f'{self.label}: a cut in multiples of 32, not [{a}:{b}, {c}:{d}]'
-        assert self.rotation is None or (c, d) == (0, self.columns), f'{self.label}: rotated columns are not cut'
+        assert self.folded is None or (c, d) == (0, self.columns), f'{self.label}: rotated columns are not cut'
         widths = self.widths[a // 32:b // 32, c // 32:d // 32].contiguous()
         old = (self.offsets[a // 32:b // 32, c // 32:d // 32].long() & 0xFFFFFFFF).reshape(-1)
         sizes = 32 * widths.reshape(-1).long()
@@ -171,10 +185,10 @@ class Matrix(torch.Tensor):
         """The matrix decoded in its own coordinates, its shape and dtype (a rotated matrix decoded in its coded
         columns, then times `folded`: the rotation V^T in coded column order, its scale applied)."""
         out = _half(self.rows, self.columns)
-        columns = _identity(self.columns) if self.rotation is not None else self.col_order
+        columns = _identity(self.columns) if self.folded is not None else self.col_order
         _encode('streamed_dense', self._code() + [out, self.row_order, self.row_scale, None, columns, self.col_scale],
                 _dims(tiles=self.tiles), self.rows // 32, self.tiles, 32)
-        if self.rotation is not None:
+        if self.folded is not None:
             out = torch.mm(out, self.folded)
         return (out.T if self.transposed else out).contiguous().to(self.dtype)
 
@@ -184,11 +198,17 @@ class Matrix(torch.Tensor):
         n = x.shape[0]
         matrices = [self, *others]
         outs = [_half(n, self.columns) for _ in matrices]
-        if self.rotation is None:
+        if self.folded is None:
             pad = outs + [outs[0]] * (3 - len(outs))
             scales = [m.col_scale for m in matrices] + [self.col_scale] * (3 - len(matrices))
             _encode('streamed_gather', [x, pad[0], self.col_order, scales[0], None, pad[1], pad[2], scales[1], scales[2]],
                     _dims(columns=self.columns, inputs=len(matrices)), -(-self.columns // 256), n, 256)
+        elif self.signs is not None and len(outs) <= 2:
+            second = outs[1] if len(outs) > 1 else outs[0]
+            _encode('streamed_hadamard', [x, outs[0], second, self.col_order, self.col_scale,
+                                          (others[0] if others else self).col_scale, self.signs, self.hadamard],
+                    _dims(rows=n, columns=self.columns, per=self.columns // self.hadamard.shape[0], inputs=len(matrices)),
+                    n, 1, 256)
         elif n <= 16:
             second = outs[1] if len(outs) > 1 else outs[0]
             _encode('streamed_rotate', [x, outs[0], second, self.col_order, self.col_scale,
@@ -267,7 +287,7 @@ class Matrix(torch.Tensor):
         _encode('streamed_gather', [x16, xt, self.row_order, self.row_scale],
                 _dims(columns=self.rows, rows=n, stride=32, inputs=1), -(-self.rows // 256), n, 256)
         partials = self.product_t(xt)
-        if self.rotation is None:
+        if self.folded is None:
             return self.finish(partials, self.col_order, self.col_scale, factor, dtype)
         y = torch.mm(self.finish(partials, _identity(self.columns), self.col_scale), self.folded)
         return y if factor is None else (y.float() / factor[:, None]).to(dtype)
@@ -387,8 +407,11 @@ class Streamed:
             assert torch.equal(gate.row_order, up.row_order) and torch.equal(gate.row_order, down.col_order), base
             identity = torch.arange(gate.rows, dtype=torch.int32, device='mps')
             self.matrices[base + 'gate_proj'] = gate.like(row_order=identity)
-            shared = gate.rotation is not None and torch.equal(gate.rotation, up.rotation) and torch.equal(gate.col_order, up.col_order)
-            self.matrices[base + 'up_proj'] = up.like(row_order=identity, **({'rotation': gate.rotation, 'folded': gate.folded} if shared else {}))
+            basis = [(getattr(gate, k), getattr(up, k)) for k in ('rotation', 'signs', 'hadamard')]
+            shared = gate.folded is not None and torch.equal(gate.col_order, up.col_order) and all(
+                (a is None) == (b is None) and (a is None or torch.equal(a, b)) for a, b in basis)
+            self.matrices[base + 'up_proj'] = up.like(row_order=identity, **({k: getattr(gate, k) for k in ('rotation', 'signs', 'hadamard', 'folded')}
+                                                                             if shared else {}))
             self.matrices[base + 'down_proj'] = down.like(col_order=identity)
 
     def __getitem__(self, name):
@@ -411,7 +434,7 @@ def _check(args):
         m = Matrix.load(streamed.tensors, name)
         reference = decode_layout(streamed.tensors, name).half()
         dense = m.dense().float()
-        line = f'{name} [{m.rows} x {m.columns}]{" rotated" if m.rotation is not None else ""}: decode {_relative(dense.cpu(), reference):.2e}'
+        line = f'{name} [{m.rows} x {m.columns}]{" rotated" if m.folded is not None else ""}: decode {_relative(dense.cpu(), reference):.2e}'
         for n in (1, 8, 300):
             x = torch.randn(n, m.columns, device='mps').half().requires_grad_()
             w = torch.randn(n, m.rows, device='mps')

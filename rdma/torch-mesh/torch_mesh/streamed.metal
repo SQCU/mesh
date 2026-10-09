@@ -329,6 +329,52 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
     }
 }
 
+// The coded inputs of up to two products of a randomized Hadamard basis (QuIP#, QuaRot): rotated coordinate c = a N + j
+// of T x = (H_K (x) H_N) diag(signs) x / sqrt(K N), N = d.per a power of two and K N = d.columns <= 4096. H_N is
+// Sylvester's, structured.metal's butterfly run on every block of N at once in threadgroup memory; H_K (int8, +-1, K x
+// K, row-major: Paley's for E2B's K = 12) mixes the blocks as each coordinate is put. With eps > 0 the RMS norm of x
+// times gamma folds in, as in streamed_rotate. A threadgroup a row.
+MESH_KERNEL(row)
+kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
+                              device half *second [[buffer(2)]], device const int *order [[buffer(3)]],
+                              device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
+                              device const char *signs [[buffer(6)]], device const char *mix [[buffer(7)]],
+                              device const half *gamma [[buffer(11)]], constant streamed_dims &d [[buffer(15)]],
+                              uint n [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
+                              uint threads [[threads_per_threadgroup]]) {
+    threadgroup float v[4096];
+    threadgroup float partial[32];
+    const uint columns = d.columns, N = d.per, shift = ctz(N), K = columns >> shift;
+    const float eps = d.eps;
+    device const half *row = x + ulong(n) * columns;
+    float squares = 0.0f;
+    for (uint i = t; i < columns; i += threads) {
+        const float value = float(row[i]);
+        squares += value * value;
+        v[i] = (eps > 0.0f ? value * float(gamma[i]) : value) * float(signs[i]);
+    }
+    float factor = rsqrt(float(columns));
+    if (eps > 0.0f) factor *= rsqrt(streamed_sum(squares, partial, t, threads) / float(columns) + eps);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint h = 1; h < N; h <<= 1) {
+        for (uint i = t; i < columns / 2; i += threads) {
+            const uint p = i & (N / 2 - 1), j = ((i >> (shift - 1)) << shift) | ((p & ~(h - 1)) << 1) | (p & (h - 1));
+            const float a = v[j], b = v[j + h];
+            v[j] = a + b;
+            v[j + h] = a - b;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint j = t; j < columns; j += threads) {
+        const uint c = uint(order[j]), a = c >> shift, within = c & (N - 1);
+        float value = 0.0f;
+        for (uint b = 0; b < K; b++) value += float(mix[a * K + b]) * v[(b << shift) | within];
+        value *= factor;
+        first[ulong(n) * columns + j] = half(scale[j] * value);
+        if (d.inputs > 1) second[ulong(n) * columns + j] = half(secondScale[j] * value);
+    }
+}
+
 // The GELU FFN's middle: hidden = GELU(gate) * up from the gate and up products' partials, in their (shared) coded
 // row order, which the down product's columns follow.
 MESH_KERNEL(finish)

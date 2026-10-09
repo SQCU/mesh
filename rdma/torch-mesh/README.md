@@ -185,14 +185,17 @@ engines.rebalance(pool)                                    # every few steps
 ## Streamed coded weights
 
 `torch_mesh/streamed.metal` is the decompression of a coded matrix (metal-microbench `tools/model_code.py` exports:
-32 x 32 tiles, each its own width and step, row and column orders and scales, a rotation for some) as a producer whose
+32 x 32 tiles, each its own width and step, row and column orders and scales, for some a basis of the input: an int8
+rotation, or a randomized Hadamard transform's signs and H_K, `.signs` and `.hadamard`) as a producer whose
 consumer is an operand: `streamed_pairs` hands each decoded pair of a lane's tile row to a function, `streamed_panels`
 decodes a 32 x 256 panel in threadgroup memory and then runs a function on the threadgroup, `streamed_value` and
 `streamed_rows` read a product's output (its K shares summed and scaled, or the plain values a crossing summed), and
 `streamed_put` writes a product's input in its column order and scale. Every kernel there is an instantiation (the
 products of 1 to 8 rows on the ALUs (`streamed_direct`) and 9 to 16 on each simdgroup's tensor operation
 (`streamed_tiles`), the 128-row panel and its transposed consumer on the matrix units, the finish, the input
-gather and rotation, the GELU of gate and up, the dense decode), its constants one `streamed_dims` block at buffer 15;
+gather, rotation and Hadamard butterfly (`streamed_hadamard`, a threadgroup a row: H_N by structured.metal's stages on
+every block at once, H_K mixing the blocks as each coordinate is put, the RMS norm foldable), the GELU of gate and up,
+the dense decode), its constants one `streamed_dims` block at buffer 15;
 metal-microbench's engine compiles the same source. `MESH_KERNEL(kind)` before a kernel (empty here) declares its type
 to that engine's recorder, which composes kernels by it (metal-microbench docs/kernels.md#one-kernel-interface):
 `product` (a K split's shares a block of 32 outputs), `finish` (an element of a product's output from its shares,
