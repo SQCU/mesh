@@ -447,13 +447,16 @@ kernel void streamed_dense(device const uint *bits [[buffer(0)]], device const u
 // Up to R input rows on the ALUs (metal-microbench docs/kernels.md "Against LiteRT's kernels"; the study's direct_mv):
 // a simdgroup T tiles of the threadgroup's d.per, every tile's words loaded before anything else, then each row's x
 // pairs straight into registers, the producer's pairs consumed by one FMA chain a row; the simdgroups' sums reduced in
-// threadgroup memory into partials[share][n][row] (coded row order, the row scale not applied). Rows past d.rows repeat
+// threadgroup memory into partials[share][n][row] (coded row order, the row scale not applied), or, finished (d.finish:
+// one share covers K), each with its row's scale at row order[r] of ys (row stride d.stride). Rows past d.rows repeat
 // the last row's loads (no branch on a load) and are not written.
 template <uint R, uint T>
 MESH_KERNEL(product)
 kernel void streamed_direct(device const uint *bits [[buffer(0)]], device const uchar *widths [[buffer(1)]],
                             device const float *steps [[buffer(2)]], device const uint *offsets [[buffer(3)]],
                             device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
+                            device half *ys [[buffer(11)]], device const int *order [[buffer(12)]],
+                            device const float *rowScale [[buffer(13)]],
                             constant streamed_dims &d [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
                             uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                             uint simds [[simdgroups_per_threadgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
@@ -503,7 +506,9 @@ kernel void streamed_direct(device const uint *bits [[buffer(0)]], device const 
         if (i / 32 >= rows) continue;
         float total = 0.0f;
         for (uint s = 0; s < simds; s++) total += sums[s][i / 32][i % 32];
-        partials[ulong(group.y) * d.split + (i / 32) * d.outputs + group.x * 32 + i % 32] = total;
+        const uint r = group.x * 32 + i % 32;
+        if (d.finish) ys[ulong(i / 32) * d.stride + uint(order[r])] = half(rowScale[r] * total);
+        else partials[ulong(group.y) * d.split + (i / 32) * d.outputs + r] = total;
     }
 }
 
