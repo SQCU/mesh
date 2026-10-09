@@ -193,7 +193,11 @@ decodes a 32 x 256 panel in threadgroup memory and then runs a function on the t
 products of 1 to 8 rows on the ALUs (`streamed_direct`) and 9 to 16 on each simdgroup's tensor operation
 (`streamed_tiles`), the 128-row panel and its transposed consumer on the matrix units, the finish, the input
 gather and rotation, the GELU of gate and up, the dense decode), its constants one `streamed_dims` block at buffer 15;
-metal-microbench's engine compiles the same source.
+metal-microbench's engine compiles the same source. `MESH_KERNEL(kind)` before a kernel (empty here) declares its type
+to that engine's recorder, which composes kernels by it (metal-microbench docs/kernels.md#one-kernel-interface):
+`product` (a K split's shares a block of 32 outputs), `finish` (an element of a product's output from its shares,
+`streamed_block_element` enumerating a block's), `row`; `streamed_value` and `streamed_rows` take the partials as any
+pointer type, so a finish run inside its product reads them `coherent(device)`.
 
 `torch_mesh/streamed.py` makes a coded matrix a torch tensor (a wrapper subclass whose aten operations are those
 kernels), so a program is written once in torch and queried for what it needs: evaluated, or differentiated by torch's
