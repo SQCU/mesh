@@ -199,17 +199,17 @@ def _median_points(points):
     return [(d, statistics.median(ts)) for d, ts in by.items()]
 
 
-def least(total, grain, low, high, stretches):
+def least(total, grain, low, high, stretches, value=None):
     """Units of `total` at `grain` within [low_i, high_i] minimising sum_s c_s max_i f_si(u_i) over `stretches`
-    [(c_s, [f_si, nondecreasing])]: one stretch by min_max (exact [Ibaraki & Katoh 1988]); two ranks by trying
-    every split (exact); more, each grain to the rank that adds least, then a grain moved between two ranks while
-    that lowers the sum.  (units, the sum.)"""
+    [(c_s, [f_si, nondecreasing])], or `value(u)` where given (a call's latency path, _path): one stretch by min_max
+    (exact [Ibaraki & Katoh 1988]); two ranks by trying every split (exact); more, each grain to the rank that adds
+    least, then a grain moved between two ranks while that lowers the sum.  (units, the sum.)"""
     n = len(low)
-    if len(stretches) == 1:
+    if len(stretches) == 1 and value is None:
         c, fs = stretches[0]
         units, top = min_max(total, grain, low, high, fs)
         return units, c * top
-    value = lambda u: sum(c * max(fs[i](u[i]) for i in range(n)) for c, fs in stretches)
+    value = value or (lambda u: sum(c * max(fs[i](u[i]) for i in range(n)) for c, fs in stretches))
     if n == 2:
         best = None
         for a in range(max(low[0], total - high[1]), min(high[0], total - low[1]) + 1, grain):
@@ -225,7 +225,8 @@ def least(total, grain, low, high, stretches):
         for i in range(n):
             if u[i] + grain > high[i]:
                 continue
-            v = sum(c * max(max(h[:i] + h[i + 1:], default=0.0), fs[i](u[i] + grain)) for (c, fs), h in zip(stretches, held))
+            v = (sum(c * max(max(h[:i] + h[i + 1:], default=0.0), fs[i](u[i] + grain)) for (c, fs), h in zip(stretches, held))
+                 if stretches else value(u[:i] + [u[i] + grain] + u[i + 1:]))
             if choice is None or v < choice[1]:
                 choice = (i, v)
         if choice is None:
@@ -251,6 +252,31 @@ def least(total, grain, low, high, stretches):
     return u, v
 
 
+def _path(rows):
+    """A call's time from its stretches `rows` [(c, order, latency, [a rank's seconds, None where it publishes none])]:
+    each program's stretches (order: (program, place)) in place order as a longest path [the dependency graph's
+    critical path; Baccelli, Cohen, Olsder & Quadrat 1992, max-plus], a stretch starting on a rank once its own
+    previous one has ended and every other rank that published there has ended and crossed (the previous stretch's
+    latency, seconds), the program's count times its end and its last crossing; a stretch without an order its count
+    times its slowest rank.  With every latency 0 it is the sum of each stretch's slowest rank."""
+    total, programs = 0.0, {}
+    for c, order, latency, times in rows:
+        if order is None:
+            total += c * max((t for t in times if t is not None), default=0.0)
+        else:
+            programs.setdefault(order[0], []).append((order[1], c, latency, times))
+    for seq in programs.values():
+        seq.sort(key=lambda r: r[0])
+        n = max(len(r[3]) for r in seq)
+        end, crossed, sent = [0.0] * n, 0.0, [False] * n
+        for _, _, latency, times in seq:
+            done = sorted(((end[j] + crossed, j) for j in range(n) if sent[j]), reverse=True)[:2]
+            end = [max([end[i]] + [t for t, j in done if j != i][:1]) + (times[i] or 0.0) for i in range(n)]
+            sent, crossed = [t is not None for t in times], latency or 0.0
+        total += max(c for _, c, _, _ in seq) * (max(end) + crossed)
+    return total
+
+
 class Balancer:
     """A program's partitioned dimensions (`decisions`) balanced on its own evidence (design/heterogeneity.md R3,
     R5, R10, R11), whatever the program computes.
@@ -258,8 +284,13 @@ class Balancer:
     A call runs stretches: a rank's own work between two consecutive collectives (never inside one: R2), named by
     the program (its sequence of collectives and the place in it), each run some count of invocations a call.  A
     stretch's time on a rank scales with the units the rank holds of the decisions the program names for it.  The
-    call's time is the sum over its stretches of their count times the slowest rank's time, and each decision's
-    parts minimise its stretches' part of that sum, a stretch's time on a rank divided among its decisions by the
+    call's time is the sum over its stretches of their count times the slowest rank's time, or, where the stretches
+    carry their place in their program (`order`: program, place) and their crossing's latency (`latency`, seconds),
+    each program's longest path (`_path`): a stretch starts on a rank once its own previous stretch has ended and
+    every other rank's has ended and crossed, so where the slower rank alternates between consecutive stretches the
+    call is the cross cycle (one rank's stretch, a crossing, the other's, a crossing) that the sum misses.  Each
+    decision's parts minimise its stretches' part of that time (its programs' whole paths where priced, every
+    decision on one path then moving alone in a call), a stretch's time on a rank divided among its decisions by the
     weights the program gives (any units: its own estimate of each one's work there), less the work it names no
     decision for (`fixed`, the same units).  A decision's parts are its groups' (`groups`, the ranks holding each part,
     default one rank a part): a part some coordinate's ranks hold together (a pipeline stage's layers), its time a
@@ -271,7 +302,9 @@ class Balancer:
     The models are DFPA's [Lastovetsky & Reddy 2010, partial estimation of functional performance models]: each
     (decision, stretch, rank)'s measured points (units, seconds an invocation), up to `window` at a part, their median
     [LB-BSP 2020, §3.2.1]; the time interpolated between them, nondecreasing (`time`), within a doubling trust region
-    past the largest part measured [Conn, Gould & Toint 2000]; a rank with none at a stretch read at the measured
+    past the largest part measured, never less than a grain past it (a region that has halved to the measured parts
+    cannot move them, and a decision whose models promise a gain then stood without a step) [Conn, Gould & Toint
+    2000]; a rank with none at a stretch read at the measured
     ranks' median time a unit.  A model's median at a part moving by more than the resolution drops its other points
     (its performance changed [Clarke, Lastovetsky & Rychkov 2011]).  A move the next call measures worse by more than
     the resolution is rejected: the parts go back, the trust region halves and the measurement stays in the models
@@ -331,14 +364,24 @@ class Balancer:
             scales = {d: w for d, w in (obs.get('scales') or {}).items() if d in self.decisions}
             ranks = {i: _robust([float(t) for t in ts]) for i, ts in enumerate(obs['times']) if ts}
             if scales and ranks:
-                seen[s] = (max(len(ts) for ts in obs['times'] if ts), ranks, scales, list(obs.get('fixed') or []))
-        proposals, runs = [], {}
-        call = sum(c * max(med for med, _ in r.values()) for c, r, *_ in seen.values())
+                order = tuple(obs['order']) if obs.get('order') is not None else None
+                seen[s] = (max(len(ts) for ts in obs['times'] if ts), ranks, scales, list(obs.get('fixed') or []), order,
+                           float(obs.get('latency') or 0.0), len(obs['times']))
+        priced = any(v[4] is not None for v in seen.values())
+        measure = 'path' if priced else 'sum'
+
+        def rows(times, keep=None):
+            return [(c, order, latency, times(s, ranks, n)) for s, (c, ranks, _, _, order, latency, n) in seen.items()
+                    if keep is None or s in keep]
+
+        medians = lambda s, ranks, n: [ranks[i][0] if i in ranks else None for i in range(n)]
+        call = _path(rows(medians))
         whole = max(0.01, 2 * math.sqrt(sum((c * max(r.values())[1]) ** 2 for c, r, *_ in seen.values())) / call if call else 0.0)
+        proposals, runs = [], {}
         for name, d in self.decisions.items():
             groups = self._groups(d)
             mine = {}
-            for s, (c, ranks, scales, fixed) in seen.items():
+            for s, (c, ranks, scales, fixed, *_) in seen.items():
                 if name not in scales:
                     continue
                 view = {}
@@ -352,17 +395,23 @@ class Balancer:
                     mine[s] = (c, ranks, scales, fixed, view, max(outside, default=0.0))
             if not mine:
                 continue
-            runs[name] = set(mine)
-            measured = sum(c * max(med for med, _ in r.values()) for c, r, *_ in mine.values())
-            slowest = [(c, max(r.values())) for c, r, *_ in mine.values()]
+            path = {s for s, v in seen.items() if priced and v[4] is not None and any(seen[t][4] and seen[t][4][0] == v[4][0] for t in mine)}
+            runs[name] = set(mine) | path
+            counted = set(mine) | path
+            measured = _path(rows(medians, counted)) if path else sum(c * max(med for med, _ in r.values()) for c, r, *_ in mine.values())
+            slowest = [(seen[s][0], max(seen[s][1].values())) for s in counted]
             within = max(0.01, 2 * math.sqrt(sum((c * se) ** 2 for c, (_, se) in slowest)) / measured if measured else 0.0)
             history = d.setdefault('history', {})
+            changed = d.get('measure', 'sum') != measure
+            if changed:
+                history.clear()
+                d['last'] = None
+            d['measure'] = measure
             key = ','.join(map(str, d['parts']))
             history[key] = (history.get(key, []) + [call])[-5:]
             spread = [abs(f / statistics.median(fs) - 1) for fs in history.values() if len(fs) > 1 for f in fs]
             epsilon, between = within, max(whole, 2 * 1.4826 * statistics.median(spread) if len(spread) > 2 else 0.0)
             last, d['last'] = d.get('last'), [list(d['parts']), call]
-            changed = False
             for s, (c, ranks, scales, fixed, view, _) in mine.items():
                 for g, ((med, se), i) in view.items():
                     units = d['parts'][g]
@@ -387,16 +436,17 @@ class Balancer:
                 d['stands'] = True
                 continue
             n = len(d['parts'])
-            built, remembered = [], d.setdefault('seen', {})
+            kept, remembered, ranked = [], d.setdefault('seen', {}), {}
             for s, (c, rests, other) in remembered.items():
                 if s in mine:
                     continue
                 rests = dict((int(g), r) for g, r in rests)
-                built.append((c, [(lambda u, o=other: o) if d['parts'][g] or g not in rests else
-                                  (lambda u, m=self._model(name, s, g), r=rests[g], o=other: max(o, m(u) + r) if u else o)
-                                  for g in range(n)]))
+                kept.append((c, [(lambda u, o=other: o) if d['parts'][g] or g not in rests else
+                                 (lambda u, m=self._model(name, s, g), r=rests[g], o=other: max(o, m(u) + r) if u else o)
+                                 for g in range(n)]))
+            built = list(kept)
             for s, (c, ranks, scales, fixed, view, other) in mine.items():
-                fs = []
+                fs, gs = [], {}
                 per_unit = [self._model(name, s, g)(d['parts'][g]) / d['parts'][g] for g in view if d['parts'][g]]
                 per_unit = sorted(per_unit)[len(per_unit) // 2] if per_unit else 0.0
                 for g in range(n):
@@ -406,26 +456,40 @@ class Balancer:
                     med = view[g][0][0] if g in view else 0.0
                     rest = (med - self._model(name, s, g)(d['parts'][g]) if d['parts'][g] else med) if g in view else 0.0
                     if (name, s, g) in self.points:
-                        fs.append(lambda u, m=self._model(name, s, g), r=rest, o=other: max(o, m(u) + r if u else r))
+                        gs[g] = lambda u, m=self._model(name, s, g), r=rest: m(u) + r if u else r
                     else:
-                        fs.append(lambda u, r=rest, k=per_unit, o=other: max(o, k * u + r))
+                        gs[g] = lambda u, r=rest, k=per_unit: k * u + r
+                    fs.append(lambda u, f=gs[g], o=other: max(o, f(u)))
                 remembered[s] = [c, [[g, view[g][0][0] - self._model(name, s, g)(d['parts'][g])] for g in view if d['parts'][g]], other]
                 built.append((c, fs))
+                ranked[s] = gs
+            value = None
+            if path:
+                member = {i: g for g, members in enumerate(groups) for i in members}
+
+                def value(u, ranked=ranked, member=member, kept=kept, counted=counted):
+                    def at(s, ranks, n):
+                        if s not in ranked:
+                            return medians(s, ranks, n)
+                        return [(ranked[s][member[i]](u[member[i]]) if i in ranks or u[member[i]] else None)
+                                if member.get(i) in ranked[s] else (ranks[i][0] if i in ranks and i not in member else None)
+                                for i in range(n)]
+                    return _path(rows(at, counted)) + sum(c * max(f(u[g]) for g, f in enumerate(fs)) for c, fs in kept)
             total = sum(d['parts'])
-            if least(total, d['grain'], d['low'], d['high'], built)[1] >= measured * (1 - epsilon):
+            if least(total, d['grain'], d['low'], d['high'], [] if value else built, value)[1] >= measured * (1 - epsilon):
                 d['before'], d['stands'] = list(d['parts']), True
                 continue
             grow = d.get('reach', 2.0)
-            reach = [min(d['high'][g], max(d['grain'] * math.ceil(grow * max((u for s in mine for u, _ in self.points.get((name, s, g), [])), default=0) / d['grain']),
-                                           d['grain']))
-                     if any((name, s, g) in self.points for s in mine) else d['high'][g] for g in range(n)]
-            nxt, promise = least(total, d['grain'], d['low'], reach, built)
+            reach = [min(d['high'][g], max(d['grain'] * math.ceil(grow * u / d['grain']), u + d['grain']))
+                     if any((name, s, g) in self.points for s in mine) else d['high'][g] for g in range(n)
+                     for u in [max((u for s in mine for u, _ in self.points.get((name, s, g), [])), default=0)]]
+            nxt, promise = least(total, d['grain'], d['low'], reach, [] if value else built, value)
             if sum(nxt) < total:
-                nxt, promise = least(total, d['grain'], d['low'], d['high'], built)
+                nxt, promise = least(total, d['grain'], d['low'], d['high'], [] if value else built, value)
             if d['before'] is not None and any((c - p) * (p - b) < 0 for c, p, b in zip(nxt, d['parts'], d['before'])):
                 half = [(p + c) / 2 for c, p in zip(nxt, d['parts'])]
                 nxt, promise = least(total, d['grain'], [math.floor(h / d['grain']) * d['grain'] for h in half],
-                                     [math.ceil(h / d['grain']) * d['grain'] for h in half], built)
+                                     [math.ceil(h / d['grain']) * d['grain'] for h in half], [] if value else built, value)
             proposals.append(((measured - promise) / measured if measured else 0.0, name, nxt))
         taken = set()
         for gain, name, value in sorted(proposals, key=lambda p: -p[0]):
