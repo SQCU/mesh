@@ -202,6 +202,12 @@ to that engine's recorder, which composes kernels by it (metal-microbench docs/k
 `streamed_block_element` enumerating a block's), `row`; `streamed_value` and `streamed_rows` take the partials as any
 pointer type, so a finish run inside its product reads them `coherent(device)`.
 
+`torch_mesh/attention.metal` is decode attention as one algorithm over a KV type (`mesh_attention<A>`): a task's chunks
+(the KV type's scores of each lane's positions, the chunk's online softmax of R rows, the KV type's value product), the
+position groups' sum and the KV type's finish (its parts' merge and store). metal-microbench's engine instantiates it over
+its fp16 pages (`decode_paged`) and its recorder over LiteRT's int8 window (`k7_window`, K7); a new KV layout is a new type
+(metal-microbench docs/kernels.md#decode-attention).
+
 `torch_mesh/streamed.py` makes a coded matrix a torch tensor (a wrapper subclass whose aten operations are those
 kernels), so a program is written once in torch and queried for what it needs: evaluated, or differentiated by torch's
 own autograd, which derives the backward from the forward the program ran.
