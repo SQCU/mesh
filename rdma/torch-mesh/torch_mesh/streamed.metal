@@ -330,10 +330,14 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
 }
 
 // The coded inputs of up to two products of a randomized Hadamard basis (QuIP#, QuaRot): rotated coordinate c = a N + j
-// of T x = (H_K (x) H_N) diag(signs) x / sqrt(K N), N = d.per a power of two and K N = d.columns <= 4096. H_N is
-// Sylvester's, structured.metal's butterfly run on every block of N at once in threadgroup memory; H_K (int8, +-1, K x
-// K, row-major: Paley's for E2B's K = 12) mixes the blocks as each coordinate is put. With eps > 0 the RMS norm of x
-// times gamma folds in, as in streamed_rotate. A threadgroup a row.
+// of T x = (H_K (x) H_N) diag(signs) x / sqrt(K N), H_N Sylvester's and H_K (int8, +-1, K x K, row-major: Paley's for
+// E2B's K = 12) mixing the blocks; with eps > 0 the RMS norm of x times gamma folds in, as in streamed_rotate. A
+// threadgroup a row, latency-bound, so every dependent load is issued first: the puts' order and scales, H_K's rows as
+// sign masks. Simdgroup s takes blocks s, s + S, ...: a lane holds W = N / 32 consecutive values of a block, H_N is
+// structured.metal's butterfly with its stages below W in registers and the five above as lane shuffles; then column j
+// of the K blocks is read into registers by threads (g, j), g < threads / N, each mixing its K / (threads / N) rows
+// into a second region, which the puts read in their column order. Two barriers. N in {32, 64, 128}, K <= 20 and a
+// multiple of threads / N, K <= 3 S, columns <= 16 threads and <= 2560.
 MESH_KERNEL(row)
 kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                               device half *second [[buffer(2)]], device const int *order [[buffer(3)]],
@@ -341,37 +345,69 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
                               device const char *signs [[buffer(6)]], device const char *mix [[buffer(7)]],
                               device const half *gamma [[buffer(11)]], constant streamed_dims &d [[buffer(15)]],
                               uint n [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
-                              uint threads [[threads_per_threadgroup]]) {
-    threadgroup float v[4096];
+                              uint threads [[threads_per_threadgroup]], uint simd [[simdgroup_index_in_threadgroup]],
+                              uint lane [[thread_index_in_simdgroup]], uint simds [[simdgroups_per_threadgroup]]) {
+    constexpr uint P = 16, V = 4, R = 3, KM = 20, QM = 10;
+    threadgroup float v[5120];
     threadgroup float partial[32];
-    const uint columns = d.columns, N = d.per, shift = ctz(N), K = columns >> shift;
+    threadgroup uint masks[KM];
+    const uint columns = d.columns, N = d.per, shift = ctz(N), K = columns >> shift, W = N / 32;
     const float eps = d.eps;
     device const half *row = x + ulong(n) * columns;
+    uint place[P];
+    float firstScale[P], otherScale[P];
+    for (uint p = 0; p < P; p++) {
+        const uint j = t + p * threads;
+        if (j < columns) { place[p] = uint(order[j]); firstScale[p] = scale[j]; otherScale[p] = secondScale[j]; }
+    }
+    if (t < K) {
+        uint m = 0;
+        for (uint b = 0; b < KM; b++) if (b < K && mix[t * K + b] < 0) m |= 1u << b;
+        masks[t] = m;
+    }
     float squares = 0.0f;
-    for (uint i = t; i < columns; i += threads) {
-        const float value = float(row[i]);
-        squares += value * value;
-        v[i] = (eps > 0.0f ? value * float(gamma[i]) : value) * float(signs[i]);
-    }
-    float factor = rsqrt(float(columns));
-    if (eps > 0.0f) factor *= rsqrt(streamed_sum(squares, partial, t, threads) / float(columns) + eps);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint h = 1; h < N; h <<= 1) {
-        for (uint i = t; i < columns / 2; i += threads) {
-            const uint p = i & (N / 2 - 1), j = ((i >> (shift - 1)) << shift) | ((p & ~(h - 1)) << 1) | (p & (h - 1));
-            const float a = v[j], b = v[j + h];
-            v[j] = a + b;
-            v[j + h] = a - b;
+    for (uint q = 0; q < R; q++) {
+        const uint b = simd + q * simds;
+        if (b >= K) break;
+        float r[V];
+        for (uint u = 0; u < V; u++) if (u < W) {
+            const uint i = (b << shift) + lane * W + u;
+            const float value = float(row[i]);
+            squares += value * value;
+            r[u] = (eps > 0.0f ? value * float(gamma[i]) : value) * float(signs[i]);
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint h = 1; h < V; h <<= 1) if (h < W)
+            for (uint u = 0; u < V; u++) if (u < W && !(u & h)) { const float a0 = r[u], a1 = r[u + h]; r[u] = a0 + a1; r[u + h] = a0 - a1; }
+        for (uint h = 1; h < 32; h <<= 1)
+            for (uint u = 0; u < V; u++) if (u < W) { const float other = simd_shuffle_xor(r[u], h); r[u] = (lane & h) ? other - r[u] : r[u] + other; }
+        for (uint u = 0; u < V; u++) if (u < W) v[(b << shift) + lane * W + u] = r[u];
     }
-    for (uint j = t; j < columns; j += threads) {
-        const uint c = uint(order[j]), a = c >> shift, within = c & (N - 1);
-        float value = 0.0f;
-        for (uint b = 0; b < K; b++) value += float(mix[a * K + b]) * v[(b << shift) | within];
-        value *= factor;
-        first[ulong(n) * columns + j] = half(scale[j] * value);
-        if (d.inputs > 1) second[ulong(n) * columns + j] = half(secondScale[j] * value);
+    squares = simd_sum(squares);
+    if (lane == 0) partial[simd] = squares;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float factor = rsqrt(float(columns));
+    if (eps > 0.0f) {
+        float total = 0.0f;
+        for (uint s = 0; s < simds; s++) total += partial[s];
+        factor *= rsqrt(total / float(columns) + eps);
+    }
+    const uint j = t & (N - 1), g = t >> shift, Q = K / (threads >> shift);
+    threadgroup float *mixed = v + columns;
+    float column[KM];
+    for (uint b = 0; b < KM; b++) if (b < K) column[b] = v[(b << shift) | j];
+    for (uint q = 0; q < QM; q++) if (q < Q) {
+        const uint m = masks[g * Q + q];
+        float sum = 0.0f;
+        for (uint b = 0; b < KM; b++) if (b < K) sum += ((m >> b) & 1u) ? -column[b] : column[b];
+        mixed[((g * Q + q) << shift) | j] = sum * factor;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint p = 0; p < P; p++) {
+        const uint at = t + p * threads;
+        if (at >= columns) break;
+        const float value = mixed[place[p]];
+        first[ulong(n) * columns + at] = half(firstScale[p] * value);
+        if (d.inputs > 1) second[ulong(n) * columns + at] = half(otherScale[p] * value);
     }
 }
 

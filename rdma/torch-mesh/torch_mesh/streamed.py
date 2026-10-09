@@ -109,6 +109,8 @@ class Matrix(torch.Tensor):
             fields['folded'] = (fields['rotation'][order].float() * fields['rotation_scale'][order, None]).half()
         if f'{name}.signs' in tensors:
             fields['signs'], fields['hadamard'] = get('signs'), get('hadamard')
+            k, K = fields['signs'].shape[0], fields['hadamard'].shape[0]
+            assert k // K in (32, 64, 128) and K <= 20 and K % (256 // (k // K)) == 0 and k <= 2560, f'{name}: a Hadamard basis streamed_hadamard runs'
             fields['folded'] = _hadamard(tensors[f'{name}.signs'], tensors[f'{name}.hadamard'])[tensors[f'{name}.col_order'].long()].half().to('mps')
         return cls(fields, name)
 
