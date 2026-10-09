@@ -366,8 +366,9 @@ kernel void streamed_dense(device const uint *bits [[buffer(0)]], device const u
 // a simdgroup T tiles of the threadgroup's d.per, every tile's words loaded before anything else, then each row's x
 // pairs straight into registers, the producer's pairs consumed by one FMA chain a row; the simdgroups' sums reduced in
 // threadgroup memory into partials[share][n][row] (coded row order, the row scale not applied). Rows past d.rows repeat
-// the last row's loads (no branch on a load) and are not written.
-template <uint R, uint T>
+// the last row's loads (no branch on a load) and are not written. S bounds the threadgroup's simdgroups (8, or 16 for
+// a 512-lane threadgroup, whose d.per is twice its tiles).
+template <uint R, uint T, uint S>
 MESH_KERNEL(product)
 kernel void streamed_direct(device const uint *bits [[buffer(0)]], device const uchar *widths [[buffer(1)]],
                             device const float *steps [[buffer(2)]], device const uint *offsets [[buffer(3)]],
@@ -375,7 +376,7 @@ kernel void streamed_direct(device const uint *bits [[buffer(0)]], device const 
                             constant streamed_dims &d [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
                             uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                             uint simds [[simdgroups_per_threadgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
-    threadgroup float sums[8][R][32];
+    threadgroup float sums[S][R][32];
     const uint tiles = d.tiles, rows = d.rows, first = group.y * d.per, span = min(tiles, first + d.per) - first;
     const Coded c = coded(bits, widths, steps, offsets, tiles);
     uint w[T][12], b[T];
@@ -425,10 +426,11 @@ kernel void streamed_direct(device const uint *bits [[buffer(0)]], device const 
     }
 }
 
-template [[host_name("streamed_direct_1_2")]] [[kernel]] decltype(streamed_direct<1, 2>) streamed_direct<1, 2>;
-template [[host_name("streamed_direct_2_1")]] [[kernel]] decltype(streamed_direct<2, 1>) streamed_direct<2, 1>;
-template [[host_name("streamed_direct_4_1")]] [[kernel]] decltype(streamed_direct<4, 1>) streamed_direct<4, 1>;
-template [[host_name("streamed_direct_8_1")]] [[kernel]] decltype(streamed_direct<8, 1>) streamed_direct<8, 1>;
+template [[host_name("streamed_direct_1_2")]] [[kernel]] decltype(streamed_direct<1, 2, 8>) streamed_direct<1, 2, 8>;
+template [[host_name("streamed_direct_2_1")]] [[kernel]] decltype(streamed_direct<2, 1, 8>) streamed_direct<2, 1, 8>;
+template [[host_name("streamed_direct_4_1")]] [[kernel]] decltype(streamed_direct<4, 1, 8>) streamed_direct<4, 1, 8>;
+template [[host_name("streamed_direct_8_1")]] [[kernel]] decltype(streamed_direct<8, 1, 8>) streamed_direct<8, 1, 8>;
+template [[host_name("streamed_direct_1_2_16")]] [[kernel]] decltype(streamed_direct<1, 2, 16>) streamed_direct<1, 2, 16>;
 
 // The gate and up products of up to R input rows paired, GELU(gate) * up between them (metal-microbench
 // docs/kernels.md "Streaming the code into the matmul": the study's gate_up_mm): a threadgroup is a band of 32 hidden
@@ -436,8 +438,8 @@ template [[host_name("streamed_direct_8_1")]] [[kernel]] decltype(streamed_direc
 // simd, simd + simds, ...: both tiles' words loaded, then each row's x pairs into registers and the producer's pairs
 // through one FMA chain a row and matrix. The simdgroups' sums reduced in threadgroup memory: hidden[n][r] =
 // GELU(gateScale[r] g) * upScale[r] u, in the hidden's code order (down's coded input). Rows past d.rows repeat the
-// last row's loads and are not written.
-template <uint R>
+// last row's loads and are not written. S bounds the threadgroup's simdgroups (8, or 16 for a 512-lane threadgroup).
+template <uint R, uint S>
 kernel void streamed_gate_up(device const uint *gateBits [[buffer(0)]], device const uchar *gateWidths [[buffer(1)]],
                              device const float *gateSteps [[buffer(2)]], device const uint *gateOffsets [[buffer(3)]],
                              device const uint *upBits [[buffer(4)]], device const uchar *upWidths [[buffer(5)]],
@@ -448,7 +450,7 @@ kernel void streamed_gate_up(device const uint *gateBits [[buffer(0)]], device c
                              uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                              uint lane [[thread_index_in_simdgroup]], uint simds [[simdgroups_per_threadgroup]],
                              uint thread_id [[thread_index_in_threadgroup]]) {
-    threadgroup float sums[8][2][R][32];
+    threadgroup float sums[S][2][R][32];
     const uint tiles = d.tiles, rows = d.rows, band = group.x;
     const Coded g = coded(gateBits, gateWidths, gateSteps, gateOffsets, tiles), u = coded(upBits, upWidths, upSteps, upOffsets, tiles);
     float ga[R], ua[R];
@@ -494,9 +496,10 @@ kernel void streamed_gate_up(device const uint *gateBits [[buffer(0)]], device c
     }
 }
 
-template [[host_name("streamed_gate_up_1")]] [[kernel]] decltype(streamed_gate_up<1>) streamed_gate_up<1>;
-template [[host_name("streamed_gate_up_2")]] [[kernel]] decltype(streamed_gate_up<2>) streamed_gate_up<2>;
-template [[host_name("streamed_gate_up_4")]] [[kernel]] decltype(streamed_gate_up<4>) streamed_gate_up<4>;
+template [[host_name("streamed_gate_up_1")]] [[kernel]] decltype(streamed_gate_up<1, 8>) streamed_gate_up<1, 8>;
+template [[host_name("streamed_gate_up_2")]] [[kernel]] decltype(streamed_gate_up<2, 8>) streamed_gate_up<2, 8>;
+template [[host_name("streamed_gate_up_4")]] [[kernel]] decltype(streamed_gate_up<4, 8>) streamed_gate_up<4, 8>;
+template [[host_name("streamed_gate_up_1_16")]] [[kernel]] decltype(streamed_gate_up<1, 16>) streamed_gate_up<1, 16>;
 
 #if __METAL_VERSION__ >= 400
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
