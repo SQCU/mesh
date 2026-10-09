@@ -176,6 +176,12 @@ revokes the call running without it. A failed call also sends the Balancer's par
 7. **Stale statements elsewhere**: mb docs/shelf.md and elastic.md call the beacon "the one source of membership
    events", which `Probes` contradicts; design/algorithm-sources.md ("not detected by inventing a timer") against the
    keepalive and the silent bound.
+8. **Arrival counts reset by their last arriver** (mb docs/kernels.md#decode-attention, 2026-10-08): the last-arrival
+   merges (the engine's decode attention and argmax, the recorder's joins, LiteRT's native kernels) leave a count nonzero
+   when a dispatch is cut, and a later run of the same program merges wrongly without failing. No path here runs a
+   program again after a cut: suspension and resumption stop no GPU command, a cancelled wait runs its kernel to the end,
+   a failed window ends the call and its rank process, and shrink, extend and readmission are new processes whose
+   counts start at zero. Within-call recovery that ran a failed window again (Q3) would have to make them again.
 
 ## Failures by kind and topology
 
