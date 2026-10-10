@@ -251,7 +251,7 @@ kernel void mesh_draft_candidates(device const half *base [[buffer(0)]], device 
     for (uint u = 1; u < T / 32; u++) { top = max(top, part[u]); low = min(low, as_type<float>(counts[u])); }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float lo = low, hi = top;
-    for (uint it = 0; it < 24; it++) {
+    for (uint it = 0; it < 16; it++) {
         const float mid = 0.5f * (lo + hi);
         uint n = 0;
         for (uint u = 0; u < N; u++) n += v[u] >= mid;
