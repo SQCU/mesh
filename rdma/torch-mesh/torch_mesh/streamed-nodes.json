@@ -22,7 +22,7 @@
   {"op": "product", "rows": 1048576, "kernel": "panel", "M": 64}
  ],
  "Apple M4 Pro": [
-  {"op": "product", "rows": 1, "max_weights": 4194304, "kernel": "alu", "R": 1, "SK": 8, "bands": 1, "share": 16, "F": 2},
+  {"op": "product", "rows": 1, "max_weights": 2097152, "kernel": "alu", "R": 1, "SK": 8, "bands": 1, "share": 16, "F": 2},
   {"op": "product", "rows": 1, "kernel": "alu", "R": 1, "SK": 4, "bands": 1, "share": 32, "F": 2},
   {"op": "couple", "rows": 1, "kernel": "couple", "SK": 8, "F": 1},
   {"op": "head", "rows": 1, "kernel": "alu", "R": 1, "SK": 2, "bands": 4, "shares": 1, "lut": 1, "F": 2},
