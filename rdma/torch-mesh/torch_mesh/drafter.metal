@@ -11,7 +11,7 @@
 //
 // The walk (2ndgenMTP's DFLASH2_HEAD, greedy): slot k's score of candidate v is softcap(base_k[v]) + (A e(prev) * H h_k)
 // . P[v], P = B E (the draft vocabulary's rows, precomputed), over the C greatest base scores of the slot; prev the anchor,
-// then the slot before's choice.
+// then the slot before's choice (A E precomputed over the draft vocabulary, A e(anchor) by its own pass).
 #ifndef TORCH_MESH_DRAFTER
 #define TORCH_MESH_DRAFTER
 #include <metal_stdlib>
@@ -54,20 +54,22 @@ kernel void mesh_draft_conv(device const half *x [[buffer(0)]], device const hal
 }
 
 // Rows' per-head RMS norms and the proportional rotary (rope_theta, the first ROT frequencies of HD / 2, channel i paired
-// with i + HD / 2): threadgroup (h, row) of HD threads; h < H a query head of q into qo, h = H the row's K = V line: K
-// normed by kw and rotated, V normed without a weight, both at the row's position in the caches: a block row's (BLOCK, grid
-// H + 1 by rows) at state[1] + row, a context row's (grid 1 by rows, its line alone) at positions[row].
+// with i + HD / 2): threadgroup (h, row) of HD threads; h < H a query head of q (row stride qs) into qo, h = H the row's
+// K = V line (k + ko, row stride ks): K normed by kw and rotated, V normed without a weight, both at the row's position in
+// the caches: a block row's (BLOCK, grid H + 1 by rows) at state[1] + row, a context row's (grid 1 by rows, its line alone)
+// at positions[row].
 template <uint HD, uint H, uint ROT, bool BLOCK>
 kernel void mesh_draft_heads(device const half *q [[buffer(0)]], device const half *k [[buffer(1)]], device const half *qw [[buffer(2)]],
                              device const half *kw [[buffer(3)]], device half *qo [[buffer(4)]], device half *keys [[buffer(5)]],
                              device half *values [[buffer(6)]], device const uint *state [[buffer(7)]], device const uint *positions [[buffer(8)]],
-                             constant float &theta [[buffer(9)]], uint2 tg [[threadgroup_position_in_grid]], uint i [[thread_index_in_threadgroup]],
+                             constant float &theta [[buffer(9)]], constant uint &qs [[buffer(10)]], constant uint &ks [[buffer(11)]],
+                             constant uint &ko [[buffer(12)]], uint2 tg [[threadgroup_position_in_grid]], uint i [[thread_index_in_threadgroup]],
                              uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
     threadgroup float part[HD / 32];
     threadgroup float row[HD];
     const uint h = BLOCK ? tg.x : H, r = tg.y;
     const uint position = BLOCK ? state[1] + r : positions[r];
-    const float x = h < H ? float(q[(ulong(r) * H + h) * HD + i]) : float(k[ulong(r) * HD + i]);
+    const float x = h < H ? float(q[ulong(r) * qs + h * HD + i]) : float(k[ulong(r) * ks + ko + i]);
     const float s = simd_sum(x * x);
     if (lane == 0) part[sg] = s;
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -201,19 +203,22 @@ kernel void mesh_draft_norm_add(device const half *y [[buffer(0)]], device const
         x[r * D + c] = half((float(x[r * D + c]) + float(y[r * D + c]) * inv * float(gamma[c])) * ls);
 }
 
-// The FFN's hidden: GELU (tanh form) of gate times up.
-kernel void mesh_draft_gelu(device const half *gate [[buffer(0)]], device const half *up [[buffer(1)]], device half *out [[buffer(2)]],
-                            constant uint &count [[buffer(3)]], uint i [[thread_position_in_grid]]) {
+// The FFN's hidden: GELU (tanh form) of gate times up, each row's gate and up the halves of its gate|up row (width F each).
+kernel void mesh_draft_gelu(device const half *gu [[buffer(0)]], device half *out [[buffer(1)]], constant uint &count [[buffer(2)]],
+                            constant uint &width [[buffer(3)]], uint i [[thread_position_in_grid]]) {
     if (i >= count) return;
-    const float g = float(gate[i]), inner = clamp(0.7978845608f * (g + 0.044715f * g * g * g), -20.0f, 20.0f);
-    out[i] = half(0.5f * g * (1.0f + tanh(inner)) * float(up[i]));
+    const uint r = i / width, c = i % width;
+    const float g = float(gu[ulong(r) * 2 * width + c]), inner = clamp(0.7978845608f * (g + 0.044715f * g * g * g), -20.0f, 20.0f);
+    out[i] = half(0.5f * g * (1.0f + tanh(inner)) * float(gu[ulong(r) * 2 * width + width + c]));
 }
 
-// Each slot's C candidates: the C greatest softcapped base scores of its row (the threshold by bisection over the row's
-// range, then the positions at or above it in index order), into cand (index into the draft vocabulary) and score.
+// Each slot's C candidates: the C greatest softcapped base scores of its row (V of a row of `stride`; the threshold by
+// bisection over the row's range, then the positions at or above it in index order), into cand (index into the draft
+// vocabulary) and score.
 template <uint V, uint C, uint T>
 kernel void mesh_draft_candidates(device const half *base [[buffer(0)]], device uint *cand [[buffer(1)]], device float *score [[buffer(2)]],
-                                  constant float &cap [[buffer(3)]], uint k [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
+                                  constant float &cap [[buffer(3)]], constant uint &stride [[buffer(4)]], uint k [[threadgroup_position_in_grid]],
+                                  uint t [[thread_index_in_threadgroup]],
                                   uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
     constexpr uint N = V / T;
     threadgroup float part[T / 32];
@@ -222,7 +227,7 @@ kernel void mesh_draft_candidates(device const half *base [[buffer(0)]], device 
     float v[N];
     float top = -3.0e38f, low = 3.0e38f;
     for (uint u = 0; u < N; u++) {
-        const float z = float(base[ulong(k) * V + u * T + t]);
+        const float z = float(base[ulong(k) * stride + u * T + t]);
         v[u] = cap > 0.0f ? tanh(z / cap) * cap : z;
         top = max(top, v[u]);
         low = min(low, v[u]);
@@ -266,32 +271,40 @@ kernel void mesh_draft_candidates(device const half *base [[buffer(0)]], device 
     for (uint e = offsets[T / 32] + t; e < C; e += T) { cand[k * C + e] = 0; score[k * C + e] = -3.0e38f; }
 }
 
-// The selector's walk over S slots in one threadgroup of T threads: slot k's predecessor's embedding row e (the target's
-// table, unscaled), p = (A e) * gate_k (rank RK), each candidate's score plus p . P[candidate], the greatest (the first
-// candidate on a tie) its proposal, drafts[k + 1] = ids[that candidate]; drafts[0] the anchor. Sampling (inverse > 0):
-// the scores over the temperature plus the Gumbel noise the target's row at p0 + k draws its token with (argmax.metal
+// The predecessor projection of the anchor: pa = A e(anchor) (rank RK, the target's table unscaled), RK / 8 threadgroups of
+// 8 simdgroups, a simdgroup an output.
+template <uint D, uint RK>
+kernel void mesh_draft_anchor(device const half *table [[buffer(0)]], device const half *A [[buffer(1)]], device const uint *state [[buffer(2)]],
+                              device float *pa [[buffer(3)]], uint tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
+                              uint sg [[simdgroup_index_in_threadgroup]]) {
+    const uint j = tg * 8 + sg;
+    const ulong anchor = state[8];
+    float s = 0.0f;
+    for (uint c = lane; c < D; c += 32) s += float(A[ulong(j) * D + c]) * float(table[anchor * D + c]);
+    s = simd_sum(s);
+    if (lane == 0) pa[j] = s;
+}
+
+// The selector's walk over S slots in one threadgroup of T threads: slot k's predecessor projection (pa for the anchor, then
+// the row of AE = A E for the slot before's choice, E the draft vocabulary's rows of the target's table) times gate_k (h_gate
+// of the slot's hidden row, row stride gs), each candidate's score plus that . P[candidate] (P = B E), the greatest (the
+// first candidate on a tie) its proposal, drafts[k + 1] = ids[that candidate]; drafts[0] the anchor. Sampling (inverse >
+// 0): the scores over the temperature plus the Gumbel noise the target's row at p0 + k draws its token with (argmax.metal
 // mesh_gumbel), so a draft is the token the target samples wherever the two distributions' arg maxima meet.
-template <uint D, uint RK, uint C, uint S, uint T>
-kernel void mesh_draft_select(device const half *table [[buffer(0)]], device const half *A [[buffer(1)]], device const half *gate [[buffer(2)]],
+template <uint RK, uint C, uint S, uint T>
+kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const half *ae [[buffer(1)]], device const half *gate [[buffer(2)]],
                               device const half *projected [[buffer(3)]], device const uint *cand [[buffer(4)]], device const float *score [[buffer(5)]],
                               device const int *ids [[buffer(6)]], device const uint *state [[buffer(7)]], device uint *drafts [[buffer(8)]],
-                              constant float &inverse [[buffer(9)]], constant uint &seed [[buffer(10)]], uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+                              constant float &inverse [[buffer(9)]], constant uint &seed [[buffer(10)]], constant uint &gs [[buffer(11)]],
+                              uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
     constexpr uint NSG = T / 32;
-    threadgroup float e[D];
     threadgroup float p[RK];
     threadgroup float best[C];
     threadgroup uint previous;
-    if (t == 0) { previous = state[8]; drafts[0] = state[8]; }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (t == 0) drafts[0] = state[8];
     for (uint k = 0; k < S; k++) {
-        for (uint c = t; c < D; c += T) e[c] = float(table[ulong(previous) * D + c]);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint j = sg; j < RK; j += NSG) {
-            float s = 0.0f;
-            for (uint c = lane; c < D; c += 32) s += float(A[ulong(j) * D + c]) * e[c];
-            s = simd_sum(s);
-            if (lane == 0) p[j] = s * float(gate[k * RK + j]);
-        }
+        for (uint j = t; j < RK; j += T)
+            p[j] = (k == 0 ? pa[j] : float(ae[ulong(previous) * RK + j])) * float(gate[k * gs + j]);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (uint c = sg; c < C; c += NSG) {
             float s = 0.0f;
@@ -305,8 +318,8 @@ kernel void mesh_draft_select(device const half *table [[buffer(0)]], device con
         if (t == 0) {
             uint pick = 0;
             for (uint c = 1; c < C; c++) if (best[c] > best[pick]) pick = c;
-            previous = uint(ids[cand[k * C + pick]]);
-            drafts[k + 1] = previous;
+            previous = cand[k * C + pick];
+            drafts[k + 1] = uint(ids[previous]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
