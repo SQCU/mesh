@@ -145,6 +145,15 @@ kernel panic"). A listener waits for its peer's dial on poll, not a spinning cor
 A first pairing whose port is not active (ENETDOWN, before any queue pair exists) tries again a pause apart within
 its pairing window, so a link down as a call starts does not fail it.
 
+A first pairing waits for its peer's first contact (the dial answered, or a dial accepted) until `MESH_PEER_SECONDS`
+(default 600, inside a call's deadline), and its pairing window (`MESH_PAIR_SECONDS`, default 30) counts from that
+contact: the members start their links when each has prepared its programs, at its own speed. With the window from
+each link's own start, a member that started more than 30 s after its peer found the peer's window passed, and both
+stopped at `mesh_transfers_start` (ETIMEDOUT, phase 3): on the pair, the engine's calls whose instances the Mini
+compiled at load for longer than the M5 (metal-microbench docs/measurement.md 2026-10-10, the verify step), and the
+corner placement's calls (heads [8, 0], 2026-10-09 and 2026-10-10), which pair with the window counted from contact.
+A pairing again (`#suspension`) keeps its window from its start.
+
 ### the driver's side
 
 A failed link is probed every 2 s (`Probes`: the pair's interfaces pinged) and readmitted once it answers, which

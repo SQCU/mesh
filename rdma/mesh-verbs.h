@@ -70,7 +70,7 @@ struct mesh_verbs {
   uint32_t peer,completion_entries[2];
   uint64_t bandwidth;
   const char *local_address,*remote_address,*service;
-  uint64_t deadline,window;
+  uint64_t deadline,window,arrival;
 };
 /* design/prepared-machine.md#M07 */
 /* design/algorithm-sources.md#programtensor */
@@ -192,14 +192,22 @@ static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t re
 
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M08 */
+static uint64_t pair_window_ns(void);
+/* design/recovery.md#first: a first pairing waits for its peer's first contact until `arrival` (the members prepare
+   their programs at their own speeds), and its pairing window counts from that contact */
+static int contacted(struct mesh_verbs *provider,int f){
+  if(f>=0 && provider->arrival)provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+pair_window_ns();
+  return f;
+}
 static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
-  if(!pairing_active(m,client,provider->deadline))return -1;
+  const uint64_t until=provider->arrival>provider->deadline?provider->arrival:provider->deadline;
+  if(!pairing_active(m,client,until))return -1;
   if(m->node>provider->peer){
     if(provider->listener<0 && listener_up(provider))return -1;
-    while(pairing_active(m,client,provider->deadline)){
+    while(pairing_active(m,client,until)){
       int f=accept(provider->listener,NULL,NULL);
       if(f>=0){
-        if(fcntl(f,F_SETFL,O_NONBLOCK)==0)return f;
+        if(fcntl(f,F_SETFL,O_NONBLOCK)==0)return contacted(provider,f);
         int error=errno;close(f);errno=error;return -1;
       }
       if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
@@ -213,15 +221,15 @@ static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
   if(getaddrinfo(provider->remote_address,provider->service,&hint,&addresses)){errno=EINVAL;return -1;}
   int socket=-1,error=EHOSTUNREACH;
   for(;;){
-    if(!pairing_active(m,client,provider->deadline)){error=errno;break;}
+    if(!pairing_active(m,client,until)){error=errno;break;}
     for(struct addrinfo *a=addresses;a;a=a->ai_next){
-      socket=dial(a,m,client,provider->deadline);error=errno;
+      socket=dial(a,m,client,until);error=errno;
       if(socket>=0 || error==ECANCELED || error==ETIMEDOUT)break;
     }
     if(socket>=0 || (error!=ECONNREFUSED && error!=ENETUNREACH && error!=EHOSTUNREACH))break;
     poll(NULL,0,1);
   }
-  freeaddrinfo(addresses);errno=error;return socket;
+  freeaddrinfo(addresses);errno=error;return contacted(provider,socket);
 }
 
 /* design/algorithm-sources.md#programcopy */
@@ -293,12 +301,18 @@ done:
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M06 */
 /* design/prepared-machine.md#M08 */
-/* how long a link may take to pair from its start: MESH_PAIR_SECONDS (default 30), wider where members load their parts
-   at very different speeds */
+/* how long a link may take to pair from its peer's first contact: MESH_PAIR_SECONDS (default 30) */
 static uint64_t pair_window_ns(void){
   const char *given=getenv("MESH_PAIR_SECONDS");
   const double seconds=given?atof(given):0.0;
   return (uint64_t)((seconds>0.0?seconds:30.0)*1e9);
+}
+/* design/recovery.md#first: how long a first pairing waits for its peer's first contact: MESH_PEER_SECONDS (default
+   600, within a call's deadline) */
+static uint64_t peer_window_ns(void){
+  const char *given=getenv("MESH_PEER_SECONDS");
+  const double seconds=given?atof(given):0.0;
+  return (uint64_t)((seconds>0.0?seconds:600.0)*1e9);
 }
 static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
   struct ibv_port_attr pa;

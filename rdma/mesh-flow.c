@@ -668,6 +668,8 @@ static void *link_run(void *argument){
     /* design/recovery.md#first: a port not yet active (a link down at the call's start) is tried again, a pause
        apart, within the pairing window */
     const uint64_t window=clock_gettime_nsec_np(CLOCK_MONOTONIC)+(link->provider.window?link->provider.window:pair_window_ns());
+    /* design/recovery.md#first */
+    link->provider.arrival=clock_gettime_nsec_np(CLOCK_MONOTONIC)+peer_window_ns();
     for(;;){
       link->provider.window=window-clock_gettime_nsec_np(CLOCK_MONOTONIC);
       control=verbs_up(&link->provider,m,link->qps,link_configure,link,link->client);
@@ -678,6 +680,7 @@ static void *link_run(void *argument){
       poll(NULL,0,mesh_recovery_pause_ms());
     }
     link->provider.window=0;
+    link->provider.arrival=0;
     /* design/recovery.md#detection */
     if(control>=0 && (error=mesh_recovery_keepalive(control))){close(control);control=-1;errno=error;}
     if(control<0)link_error(link,errno?errno:EIO,1);
