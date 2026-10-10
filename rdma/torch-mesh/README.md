@@ -201,9 +201,13 @@ tables) and Hadamard butterfly (`streamed_hadamard`, a threadgroup a row: H_N by
 block at once, H_K mixing the blocks as each coordinate is put, the RMS norm foldable), the GELU of gate and up, the
 dense decode and a range prefetch (`streamed_touch`). `streamed_value` and `streamed_rows` read a product's output (its
 K shares summed and scaled, or the plain values a crossing summed), and `streamed_put` writes a product's input in its
-column order and scale; the constants are one `streamed_dims` block at buffer 15. Which instance a regime takes on a
-node (its simdgroups, bands, K shares, tiles in flight, tables) is data, `torch_mesh/streamed-nodes.json`, read by
-`streamed.py` and by metal-microbench's engine, which compiles the same source. `MESH_KERNEL(kind)` before a kernel
+column order and scale; the constants are one `streamed_dims` block at buffer 15. Which instance a slice takes at its
+rows on a node (its kernel, simdgroups, bands, K shares, tiles in flight, tables; the couple or the products apart) is
+the instance fit's choice (`streamed.py`, metal-microbench docs/kernels.md#the-instance-fit): the argmin of a model of
+the node's times over each candidate's units, its coefficients fitted to the node's observations (its evidence file,
+MESH_INSTANCES or `~/.cache/mesh/instances.json`; `python -m torch_mesh.streamed fit`), read by `Matrix.dispatch` and,
+as a table of a member's slices (`python -m torch_mesh.streamed resolve`), by metal-microbench's engine, which compiles
+the same source. `MESH_KERNEL(kind)` before a kernel
 (empty here) declares its type to that engine's recorder, which composes kernels by it (metal-microbench
 docs/kernels.md#one-kernel-interface): `product` (a K split's shares a block of 32 outputs), `finish` (an element of a
 product's output from its shares, `streamed_block_element` enumerating a block's), `row`; `streamed_value` and
@@ -257,7 +261,7 @@ w = s["lm_head"].to("cpu")                        # decoded
   parallelized so on the pair), its greedy tokens the one-device run's for 24 of 24.
 
 `python -m torch_mesh.streamed check EXPORT [NAME ...]` checks the decode against `model_code.py`'s reference decode,
-the node's cooperative slots, each regime's product (1, 2, 4, 8, 16 and 300 rows) and its input gradient against
+the node's cooperative slots, each chosen instance's product (1, 2, 4, 8, 16 and 300 rows; the head's at 1, 2 and 4) and its input gradient against
 float64 products of the reference decode, the head's tables, and the FFN (fused, composed, its gradient) against the
 decoded matrices (E2B: decode 2e-4 to 4e-4, the fp16 dense copy; products 2e-4 to 4.6e-4, gradients 4e-4 to 5.3e-4; the
 FFN 5e-4 to 7e-4, its gradient 8e-4).

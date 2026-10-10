@@ -19,18 +19,37 @@ H_N Sylvester's), run as a butterfly (streamed_hadamard).
 x @ m is one pipeline whichever way m is transposed: the input side's order and scale (a rotation where it lies there),
 the product contracting the coded rows (streamed_alu, streamed_coop, streamed_panel) or the coded columns
 (streamed_panel_t: the same decoded tiles consumed the other way), the output side's order and scale (and rotation).
-Each product is an instance with literal sizes, the matrix's widths and the node's choice for its rows
-(streamed-nodes.json: the node's instance, simdgroups, bands and K shares a regime; the cooperative tensor's slots read
+Each product is an instance with literal sizes, the matrix's widths and the node's choice for its rows (the instance
+fit, below: the argmin of a model of the node's times over the instances' units; the cooperative tensor's slots read
 from the node by streamed_coopmap), compiled on first use. Operands are fp16 on the GPU (another dtype's rows scaled
 into its range by powers of two, results finished in the caller's dtype); the codes are constants (no gradient reaches
 them, only through them). An operation a coded matrix lacks is an error naming the ones it has.
 
   python -m torch_mesh.streamed check EXPORT [NAME ...]   the decode against model_code's reference decode; products,
                                                           their gradients and the FFN against the decoded matrices;
-                                                          each regime's instance against float64
+                                                          each chosen instance against float64
+
+The instance fit (metal-microbench docs/kernels.md#the-instance-fit): an instance's time on a slice is a model of its
+units, t = c0 + smooth max(throughput, chain, bytes / bandwidth), the throughput the slice's tile visits, row work,
+planes, simdgroups, partials and register pressure over the node's cores, the chain a simdgroup's dependent steps over
+the waves the node holds; one set of coefficients a kernel family (streamed_alu with streamed_couple, streamed_coop,
+streamed_panel) a node, fitted by least squares in log space with a ridge toward the prior from the node's
+observations (each probe's and profile's measured instance: rows of the evidence file, MESH_INSTANCES or
+~/.cache/mesh/instances.json, which holds the coefficients too; a node without evidence prices by the prior). A
+choice is the argmin over the admissible instances of a slice at its rows; a measurement moves the coefficients and
+never stands for its key.
+
+  python -m torch_mesh.streamed fit OBSERVATIONS.json ... --gbps G   this node's evidence fitted (each file a probe's
+                                                                      record: rows of instance, slice units, rows_in,
+                                                                      best_us)
+  python -m torch_mesh.streamed resolve EXPORT [--program RECORD --rank R] [--classes 1,2,4,8,16,256] --out TABLE
+                                                                      each slice's chosen instance at each rows class:
+                                                                      the table an engine reads (LM_STREAMED_INSTANCES)
 """
 import argparse
 import json
+import math
+import os
 import struct
 import sys
 from pathlib import Path
@@ -38,7 +57,6 @@ from pathlib import Path
 import torch
 
 SOURCE = Path(__file__).with_name('streamed.metal').read_text()
-NODES = json.loads(Path(__file__).with_name('streamed-nodes.json').read_text())
 _PIPELINES = {}
 aten = torch.ops.aten
 
@@ -75,17 +93,201 @@ def node():
     return _PIPELINES['node']
 
 
-def regime(rows, op='product', bands_per_core=0.0, weights=0):
-    """The node's choice for a product of `rows` input rows (op product, couple or head): the first of its regimes
-    (streamed-nodes.json, the node's or the default's) covering the rows (and, where it states them, the bands a core
-    and the matrix's weights), the op's own where it has one."""
-    entries = NODES.get(node()[0], NODES['default'])
-    for wanted in (op, 'product'):
-        for entry in entries:
-            if (entry['op'] == wanted and rows <= entry['rows'] and bands_per_core <= entry.get('bands_per_core', float('inf'))
-                    and weights <= entry.get('max_weights', float('inf'))):
-                return entry
-    raise ValueError(f'no regime for {rows} rows')
+FIT_FEATURES = ('tiles', 'rowwork', 'planes', 'sg', 'partials', 'bytes', 'steps', 'chain_rows', 'passes', 'pressure')
+FIT_TERMS = ('c0', 'tile', 'row', 'plane', 'sg', 'part', 'lat', 'latr', 'occ', 'press')
+FIT_PRIOR = dict(c0=2.0, tile=0.02, row=0.01, plane=0.004, sg=0.01, part=0.002, lat=0.3, latr=0.15, occ=24.0, press=0.001)
+FAMILIES = ('alu', 'coop', 'panel')
+PERS = (8, 16, 24, 32, 48)
+
+
+def evidence_path():
+    return Path(os.environ.get('MESH_INSTANCES') or Path.home() / '.cache/mesh/instances.json')
+
+
+def slice_units(m):
+    """A slice's units: outputs, columns, tiles, nonzero tiles, planes (the sum of the widths), 1-bit tiles, bytes."""
+    words = m.tiles.long() & 0xFFFFFFFF
+    widths = (words >> 12) & 15
+    return dict(outputs=m.rows, columns=m.columns, tiles=int(widths.numel()), nonzero=int((widths > 0).sum()),
+                planes=int(widths.sum()), ones=int((widths == 1).sum()),
+                bytes=int(widths.sum()) * 128 + 4 * words.numel() + 4 * m.bands.numel())
+
+
+def instance_units(spec, s, rows):
+    """The units of instance `spec` ({kernel: alu, coop, couple or panel; R or M, SK, BANDS, J, F, LUT, APART}) on slice
+    units `s` at `rows` input rows (a couple's slice the sum of its two matrices')."""
+    T, kernel = s['columns'] // 32, spec['kernel']
+    nz, P, N = s['nonzero'], s['planes'], s['outputs']
+    if kernel == 'panel':
+        M = spec['M']
+        panels = -(-rows // M)
+        return dict(tiles=nz * panels, rowwork=nz * panels * M / 8, planes=P * panels, sg=(N // 32) * panels * 8,
+                    partials=0, bytes=s['bytes'] * panels, steps=-(-T // 8), chain_rows=M / 8, passes=1,
+                    pressure=nz * panels * (M / 64) ** 2)
+    J, SK = spec['J'], spec['SK']
+    pair = 2 if kernel == 'couple' else 1
+    apart = spec.get('APART', 0)
+    steps = -(-(-(-T // J)) // SK) * (1 if apart or pair == 1 else 2)
+    sg = (N // 32) * J * SK * (2 if apart else 1)
+    if kernel == 'coop':
+        M = spec['M']
+        return dict(tiles=nz, rowwork=nz * M / 8, planes=P, sg=sg, partials=J * rows * N / 32, bytes=s['bytes'] + 8 * J * rows * N,
+                    steps=steps, chain_rows=M / 8, passes=1, pressure=nz * (M / 8) ** 2)
+    R, ones = spec['R'], s.get('ones', 0) if spec.get('LUT') else 0
+    live = R * (8 + 4 * spec['F']) * (2 if pair == 2 and not apart else 1)
+    return dict(tiles=nz, rowwork=(nz - ones) * R + 0.5 * ones * R, planes=P - ones, sg=sg, partials=J * R * N / 32 * pair,
+                bytes=s['bytes'] + (8 * J * min(rows, R) * N if pair == 1 else 0), steps=steps, chain_rows=R, passes=1,
+                pressure=nz * live ** 2 / 144)
+
+
+def _family(spec):
+    return 'alu' if spec['kernel'] == 'couple' else spec['kernel']
+
+
+class Fit:
+    """A node's model of its instances' times (us): one coefficient vector a family, log-parametrized."""
+
+    def __init__(self, cores, gbps, coefficients=None, factors=None):
+        self.cores, self.gbps = cores, gbps
+        self.theta = {f: torch.tensor([math.log((coefficients or {}).get(f, FIT_PRIOR)[k]) for k in FIT_TERMS], dtype=torch.float64)
+                      for f in FAMILIES}
+        self.factors = dict(factors or {})
+
+    @classmethod
+    def node(cls):
+        """This node's fit from its evidence file, else the prior at its cores and the bandwidth the file names; its
+        configurations the instance shapes the evidence observed (none: every admissible one)."""
+        path = evidence_path()
+        known = json.loads(path.read_text()) if path.exists() else {}
+        made = cls(node()[1], known.get('gbps', 200.0), known.get('coefficients'), known.get('factors'))
+        made.configurations = {tuple(c) for c in known.get('configurations', [])} or None
+        return made
+
+    configurations = None
+
+    def _predict(self, family, X, theta=None, p=6.0):
+        c0, tile, row, plane, sg, part, lat, latr, occ, press = torch.exp(self.theta[family] if theta is None else theta)
+        f = dict(zip(FIT_FEATURES, X.T))
+        thru = (tile * f['tiles'] + row * f['rowwork'] + plane * f['planes'] + sg * f['sg'] + part * f['partials']
+                + press * f['pressure']) / self.cores
+        waves = torch.clamp(f['sg'] / (self.cores * occ), min=1.0)
+        chain = f['passes'] * lat * f['steps'] * (1 + latr * f['chain_rows']) * waves
+        mem = f['bytes'] / self.gbps / 1e3
+        return c0 * f['passes'] + (thru ** p + chain ** p + mem ** p) ** (1 / p)
+
+    def time(self, spec, s, rows):
+        u = instance_units(spec, s, rows)
+        X = torch.tensor([[float(u[k]) for k in FIT_FEATURES]], dtype=torch.float64)
+        return float(self._predict(_family(spec), X)[0]) * math.exp(self.factors.get(factor_key(spec), 0.0))
+
+    def fit(self, observations, iters=900, ridge=0.02, spread=0.01):
+        """Least squares in log space over observations (spec, slice units, rows, us): the families' coefficients with a
+        ridge toward the prior, and a factor a configuration and rows class (factor_key) with a ridge toward 1 (the
+        shape of a kernel's own efficiency, pooled over every slice it ran on)."""
+        prior = torch.tensor([math.log(FIT_PRIOR[k]) for k in FIT_TERMS], dtype=torch.float64)
+        keys = sorted({factor_key(spec) for spec, _, _, _ in observations})
+        index = {k: i for i, k in enumerate(keys)}
+        groups = {}
+        for spec, s, rows, us in observations:
+            u = instance_units(spec, s, rows)
+            g = groups.setdefault(_family(spec), ([], [], []))
+            g[0].append([float(u[k]) for k in FIT_FEATURES])
+            g[1].append(math.log(us))
+            g[2].append(index[factor_key(spec)])
+        theta = {f: v.clone().requires_grad_() for f, v in self.theta.items()}
+        factors = torch.zeros(len(keys), dtype=torch.float64, requires_grad=True)
+        opt = torch.optim.Adam(list(theta.values()) + [factors], lr=0.05)
+        data = {f: (torch.tensor(X, dtype=torch.float64), torch.tensor(y, dtype=torch.float64), torch.tensor(k))
+                for f, (X, y, k) in groups.items()}
+        count = sum(len(y) for _, y, _ in data.values())
+        with torch.enable_grad():
+            for _ in range(iters):
+                opt.zero_grad()
+                loss = sum(((torch.log(self._predict(f, X, theta[f])) + factors[k] - y) ** 2).sum() for f, (X, y, k) in data.items()) / count
+                loss = loss + ridge * sum(((v - prior) ** 2).sum() for v in theta.values()) + (factors ** 2).sum() * spread / len(keys)
+                loss.backward()
+                opt.step()
+        self.theta = {f: v.detach() for f, v in theta.items()}
+        self.factors = {k: float(v) for k, v in zip(keys, factors.detach().tolist())}
+        return float(loss.detach())
+
+    def coefficients(self):
+        return {f: dict(zip(FIT_TERMS, torch.exp(v).tolist())) for f, v in self.theta.items()}
+
+
+def candidates(s, rows, op='product', tables=False):
+    """The admissible instances of slice units `s` at `rows` input rows: rows <= 4 on the ALUs (R the rows' class)
+    or the cooperative tensor (M 8); 8 or 16 rows the cooperative tensor (M 8 or 16); past 16 the panel (M 64, 128);
+    shares of 8 to 48 tiles, simdgroups 2, 4 or 8 a band (the head's four bands of two too), one or two tiles in
+    flight, a 1-bit tile by tables where the head's input writes them; `op` couple: the gate and up products together
+    (its slice their units summed)."""
+    T, out = s['columns'] // 32, []
+    js = sorted({-(-T // -(-T // max(1, -(-T // per)))) for per in PERS})
+    if op == 'couple' and rows > 4:
+        return []
+    if rows > 16:
+        return [dict(kernel='panel', M=M) for M in (64, 128)]
+    if op == 'couple':
+        R = 1 if rows <= 1 else 2 if rows <= 2 else 4
+        return [dict(kernel='couple', R=R, SK=sk, BANDS=1, J=1, F=F, LUT=0, APART=apart) for sk in (2, 4, 8) for F in (1, 2)
+                for apart in (0, 1)]
+    if rows <= 4:
+        R = 1 if rows <= 1 else 2 if rows <= 2 else 4
+        shapes = [(sk, 1) for sk in (2, 4, 8)] + ([(2, 4)] if op == 'head' else [])
+        for sk, bands in shapes:
+            if (s['outputs'] // 32) % bands:
+                continue
+            for J in js:
+                for F in (1, 2):
+                    for lut in ((0, 1) if tables else (0,)):
+                        out.append(dict(kernel='alu', R=R, SK=sk, BANDS=bands, J=J, F=F, LUT=lut))
+    if rows >= 2:
+        M = 8 if rows <= 8 else 16
+        for sk, bands in ((2, 2), (1, 4), (1, 1)):
+            if (s['outputs'] // 32) % bands == 0:
+                out += [dict(kernel='coop', M=M, SK=sk, BANDS=bands, J=J) for J in js]
+    return out
+
+
+def factor_key(spec):
+    """A configuration and its rows class (an ALU's or couple's R, the tensor operation's M), as one string."""
+    return '/'.join(str(v) for v in configuration(spec) + (spec.get('R', spec.get('M')),))
+
+
+def configuration(spec):
+    """An instance's shape apart from its K shares and rows: what an observation says of the instances near it."""
+    k = spec['kernel']
+    if k == 'panel':
+        return (k, spec['M'])
+    if k == 'coop':
+        return (k, spec['SK'], spec['BANDS'])
+    if k == 'couple':
+        return (k, spec['SK'], spec['F'], spec['APART'])
+    return (k, spec['SK'], spec['BANDS'], spec['F'], spec['LUT'])
+
+
+def choose(fit, s, rows, op='product', tables=False):
+    """The fit's argmin over the candidates of the configurations its evidence observed (None where there is none),
+    and its predicted us."""
+    allowed = fit.configurations
+    priced = [(fit.time(c, s, rows), i, c) for i, c in enumerate(candidates(s, rows, op, tables))
+              if allowed is None or configuration(c) in allowed]
+    if not priced:
+        return None, None
+    t, _, best = min(priced)
+    return best, t
+
+
+def spec_instance(spec, T, widths, finish=False):
+    """An instance's host name and instantiation, threadgroups' x and y, threads and K shares (rows: the slice's bands)."""
+    kernel = spec['kernel']
+    if kernel == 'panel':
+        return instance('streamed_panel', spec['M'], T, widths)
+    if kernel == 'coop':
+        return instance('streamed_coop', spec['M'], spec['SK'], spec['BANDS'], spec['J'], T, widths, coop_slots())
+    if kernel == 'couple':
+        return instance('streamed_couple', spec['R'], spec['SK'], T, widths, spec['F'], spec['APART'])
+    return instance('streamed_alu', spec['R'], spec['SK'], spec['BANDS'], spec['J'], T, widths, int(finish), spec['LUT'], spec['F'])
 
 
 def coop_slots():
@@ -272,23 +474,15 @@ class Matrix(torch.Tensor):
         return out
 
     def dispatch(self, rows, op='product'):
-        """The instance of a product of `rows` coded input rows on this node (regime): its name and instantiation,
-        threadgroups x and y, threads, K shares."""
-        entry, T = regime(rows, op, weights=self.rows * self.columns), self.tiles_
-        if entry['kernel'] == 'panel':
-            name, line = instance('streamed_panel', entry['M'], T, self.widths)
-            return name, line, self.rows // 32, -(-rows // entry['M']), 256, 1
-        J = max(1, min(entry.get('shares') or -(-T // entry['share']), T))
-        J = -(-T // -(-T // J))
-        bands = entry['bands'] if (self.rows // 32) % entry['bands'] == 0 else 1
-        sk, r = entry['SK'], entry.get('R')
-        if entry['kernel'] == 'coop':
-            if coop_slots() is not None:
-                name, line = instance('streamed_coop', entry['M'], sk, bands, J, T, self.widths, coop_slots())
-                return name, line, self.rows // 32 // bands, J, 32 * sk * bands, J
-            r, sk, bands = (8 if rows <= 8 else 16), 8, 1
-        name, line = instance('streamed_alu', r, sk, bands, J, T, self.widths, 0, entry.get('lut', 0) if op == 'head' else 0, entry.get('F', 1))
-        return name, line, self.rows // 32 // bands, J, 32 * sk * bands, J
+        """The instance of a product of `rows` coded input rows on this node (the instance fit's choice): its name and
+        instantiation, threadgroups x and y, threads, K shares."""
+        spec, _ = choose(Fit.node(), slice_units(self), rows, op, tables=op == 'head' and self.folded is not None)
+        if spec['kernel'] == 'coop' and coop_slots() is None:
+            spec = dict(kernel='alu', R=min(rows, 4), SK=8, BANDS=1, J=spec['J'], F=1, LUT=0)
+        name, line = spec_instance(spec, self.tiles_, self.widths)
+        if spec['kernel'] == 'panel':
+            return name, line, self.rows // 32, -(-rows // spec['M']), 256, 1
+        return name, line, self.rows // 32 // spec['BANDS'], spec['J'], 32 * spec['SK'] * spec['BANDS'], spec['J']
 
     def dense(self):
         """The matrix decoded in its own coordinates, its shape and dtype (a rotated matrix decoded in its coded
@@ -409,25 +603,35 @@ class Matrix(torch.Tensor):
     def ffn(x, gate, up, down):
         """The fused GELU FFN couple down(GELU(x gate^T) * (x up^T)) of coded matrices sharing the hidden order (gate's
         and up's rows, down's columns: Streamed's FFNs), x [n, columns]: the input rotated or gathered once for gate and
-        up; at one row gate and up together in one kernel with the GELU in its reduction (streamed_couple) where the
-        node's regime for its bands a core says so, else their products' partials consumed by streamed_gelu; down's coded input,
-        down's product finished."""
+        up; gate and up together in one kernel with the GELU in its reduction (streamed_couple) where the fit prices it
+        below their two products and streamed_gelu (couple), else those; down's coded input, down's product finished."""
         x16 = x.half().contiguous()
         n = x16.shape[0]
         gx, ux = gate.coded_input(x16, (up,))
         hidden = _half(n, gate.rows)
-        entry = regime(n, 'couple', gate.rows / 32 / node()[1])
-        if n == 1 and entry['kernel'] == 'couple':
-            apart = entry.get('apart', 0)
-            name, line = instance('streamed_couple', 1, entry['SK'], gate.tiles_, gate.widths | up.widths, entry.get('F', 1), apart)
+        spec = couple(Fit.node(), gate, up, n)
+        if spec is not None:
+            name, line = spec_instance(spec, gate.tiles_, gate.widths | up.widths)
             _encode(name, gate._code() + [None, gx, None] + up._code() + [ux, up.row_scale, hidden, None, gate.row_scale],
                     _dims(tiles=gate.tiles_, outputs=gate.rows, rows=n, pitch=gate.pitch), gate.rows // 32, 1,
-                    (64 if apart else 32) * entry['SK'], line)
+                    (64 if spec['APART'] else 32) * spec['SK'], line)
             return down.apply(hidden).to(x.dtype)
         g, u = gate.product(gx), up.product(ux)
         _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
                 _dims(outputs=gate.rows, shares=g.shape[0], split=n * gate.rows, count=n * gate.rows), -(-(n * gate.rows) // 256), 1, 256)
         return down.apply(hidden).to(x.dtype)
+
+
+def couple(fit, gate, up, rows):
+    """The couple instance of gate and up at `rows` where the fit prices it below their own products and the GELU's
+    dispatch (a dispatch's fixed cost), else None."""
+    sg, su = slice_units(gate), slice_units(up)
+    pair = {k: (sg[k] + su[k] if k not in ('outputs', 'columns') else sg[k]) for k in sg}
+    spec, t = choose(fit, pair, rows, 'couple')
+    if spec is None:
+        return None
+    apart = sum(choose(fit, u, rows)[1] for u in (sg, su)) + fit.coefficients()['alu']['c0']
+    return spec if t < apart else None
 
 
 def _no(m, what):
@@ -563,11 +767,14 @@ def _check(args):
             exact = x.detach().cpu().double() @ reference.T
             line += f', {n}: {_relative(y.cpu(), exact):.2e} {m.dispatch(n)[0].split("_")[1]} grad {_relative(x.grad.cpu(), w.cpu().double() @ reference):.2e}'
         if name == 'lm_head' and m.folded is not None:
-            x = torch.randn(1, m.columns, device='mps').half()
-            tables = torch.empty(1, m.tiles_, 8, 16, dtype=torch.float32, device='mps')
-            xt = m.coded_input(x, tables=tables)[0]
-            y = m.finish(m.product(xt, op='head', tables=tables))
-            line += f', head with tables {_relative(y.cpu(), x.cpu().double() @ reference.T):.2e} ({m.dispatch(1, "head")[0]})'
+            for n in (1, 2, 4):
+                x = torch.randn(n, m.columns, device='mps').half()
+                chosen = m.dispatch(n, 'head')[0]
+                tables = (torch.empty(n, m.tiles_, 8, 16, dtype=torch.float32, device='mps')
+                          if chosen.startswith('streamed_alu') and chosen.split('_')[-2] == '1' else None)
+                xt = m.coded_input(x, tables=tables)[0]
+                y = m.finish(m.product(xt, op='head', tables=tables))
+                line += f', head {n}: {_relative(y.cpu(), x.cpu().double() @ reference.T):.2e} ({chosen})'
         print(line, flush=True)
     base = names[0].split('.mlp.')[0] + '.mlp.' if '.mlp.' in names[0] else 'model.language_model.layers.0.mlp.'
     gate, up, down = (streamed[base + p] for p in ('gate_proj', 'up_proj', 'down_proj'))
@@ -587,6 +794,142 @@ def _check(args):
               f'gradient {_relative(x.grad, xf.grad):.2e}', flush=True)
 
 
+def parse_instance(name):
+    """An instance's spec from its host name (instance)."""
+    parts = name.replace('streamed_', '').split('_')
+    kernel, a = parts[0], [int(v) for v in parts[1:]]
+    if kernel == 'alu':
+        return dict(kernel='alu', R=a[0], SK=a[1], BANDS=a[2], J=a[3], F=a[8], LUT=a[7])
+    if kernel == 'coop':
+        return dict(kernel='coop', M=a[0], SK=a[1], BANDS=a[2], J=a[3])
+    if kernel == 'couple':
+        return dict(kernel='couple', R=a[0], SK=a[1], BANDS=1, J=1, F=a[4], LUT=0, APART=a[5])
+    if kernel == 'panel':
+        return dict(kernel='panel', M=a[0])
+    raise ValueError(name)
+
+
+UNITS = ('outputs', 'columns', 'tiles', 'nonzero', 'planes', 'ones', 'bytes')
+
+
+def observations(paths):
+    """The admissible instances' observations of probe records (rows of instance, units, rows_in, best_us)."""
+    out = []
+    for path in paths:
+        for row in json.loads(Path(path).read_text())['rows']:
+            spec = parse_instance(row['instance'])
+            if spec['kernel'] == 'alu' and spec['R'] > 4:
+                continue
+            out.append((spec, {k: row[k] for k in UNITS}, row['rows_in'], row['best_us'], row['form'].split(' R')[0]))
+    return out
+
+
+def _fit(args):
+    obs = observations(args.observations)
+    fit = Fit(node()[1], args.gbps)
+    loss = fit.fit([o[:4] for o in obs])
+    errors = sorted(abs(math.log(fit.time(spec, s, n) / t)) for spec, s, n, t, _ in obs)
+    held, regrets = [], []
+    for shape in sorted({o[4] for o in obs}):
+        other = Fit(node()[1], args.gbps)
+        other.fit([o[:4] for o in obs if o[4] != shape], iters=600)
+        for n in sorted({o[2] for o in obs if o[4] == shape}):
+            seen = [(other.time(spec, s, n), t) for spec, s, nn, t, sh in obs if sh == shape and nn == n]
+            held += [abs(math.log(p / t)) for p, t in seen]
+            regrets.append(min(seen)[1] / min(t for _, t in seen) - 1)
+    held.sort(); regrets.sort()
+    record = {'node': node()[0], 'cores': node()[1], 'gbps': args.gbps, 'observations': [str(Path(p).resolve()) for p in args.observations],
+              'configurations': sorted({configuration(o[0]) for o in obs}),
+              'count': len(obs), 'loss': loss, 'median_log_error': errors[len(errors) // 2],
+              'held_out': {'median_log_error': held[len(held) // 2], 'median_regret': regrets[len(regrets) // 2],
+                           'worst_regret': regrets[-1]}, 'coefficients': fit.coefficients(), 'factors': fit.factors}
+    path = evidence_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=1) + '\n')
+    print(json.dumps({k: v for k, v in record.items() if k != 'coefficients'}))
+
+
+def role(name):
+    last = name.split('.')[-1]
+    return 'gate_proj' if last == 'up_proj' else last
+
+
+def slices(streamed, program=None, rank=None):
+    """Each coded matrix's slice a rank holds (its record's slices: a tensor's output ranges are rows, its input range
+    columns; the head's rows its vocabulary), every matrix whole without a record: (name, matrix)."""
+    part = json.loads(Path(program).read_text())['ranks'][rank] if program else None
+    out = []
+    for name, m in streamed.matrices.items():
+        if part is None:
+            out.append((name, m))
+            continue
+        if name == 'lm_head':
+            v = part.get('vocabulary')
+            if v:
+                out.append((name, m.cut(rows=tuple(v))))
+            continue
+        cut = (part.get('slices') or {}).get(name + '.weight')
+        if cut is None:
+            continue
+        rows = tuple(cut['output'][0]) if cut.get('output') else None
+        columns = tuple(cut['input']) if cut.get('input') else None
+        if (rows and rows[0] == rows[1]) or (columns and columns[0] == columns[1]):
+            continue
+        out.append((name, m.cut(rows=rows, columns=columns)))
+    return out
+
+
+def _resolve(args):
+    streamed = Streamed(args.export)
+    widths = {}
+    for name, m in streamed.matrices.items():
+        widths[role(name)] = widths.get(role(name), 0) | (m.widths & ~1)
+    fit, classes = Fit.node(), [int(c) for c in args.classes.split(',')]
+    held = slices(streamed, args.program, args.rank)
+    keyed = {}
+    for name, m in held:
+        op = 'head' if name == 'lm_head' else 'product'
+        key = (op, m.rows, m.columns, widths[role(name)], op == 'head' and m.folded is not None)
+        keyed.setdefault(key, []).append(slice_units(m))
+        if name.endswith('.mlp.gate_proj'):
+            up = dict(held).get(name[:-len('gate_proj')] + 'up_proj')
+            if up is not None:
+                keyed.setdefault(('couple', m.rows, m.columns, widths['gate_proj'], False), []).append((slice_units(m), slice_units(up)))
+    entries = []
+    mean = lambda units: {k: round(sum(u[k] for u in units) / len(units)) for k in UNITS}
+    for (op, outputs, columns, mask, tables), units in sorted(keyed.items(), key=lambda kv: kv[0]):
+        if op == 'couple':
+            sg, su = mean([u[0] for u in units]), mean([u[1] for u in units])
+            s = {k: (sg[k] + su[k] if k not in ('outputs', 'columns') else sg[k]) for k in UNITS}
+        else:
+            s = mean(units)
+        for rows in classes:
+            if op == 'couple':
+                spec, t = choose(fit, s, rows, 'couple')
+                if spec is None or t >= choose(fit, sg, rows)[1] + choose(fit, su, rows)[1] + fit.coefficients()['alu']['c0']:
+                    continue
+            else:
+                spec, t = choose(fit, s, rows, op, tables)
+            if spec['kernel'] == 'coop' and coop_slots() is None:
+                continue
+            name, _ = spec_instance(spec, columns // 32, mask)
+            kernel = name.split('_')[1]
+            args_ = [int(v) for v in name.split('_')[2:]]
+            if spec['kernel'] == 'panel':
+                grid, threads, shares = [outputs // 32, -(-rows // spec['M'])], 256, 1
+            elif spec['kernel'] == 'couple':
+                grid, threads, shares = [outputs // 32, 1], (64 if spec['APART'] else 32) * spec['SK'], 1
+            else:
+                grid, threads, shares = [outputs // 32 // spec['BANDS'], spec['J']], 32 * spec['SK'] * spec['BANDS'], spec['J']
+            entries.append({'op': op, 'outputs': outputs, 'columns': columns, 'widths': mask, 'rows': rows, 'kernel': kernel,
+                            'args': args_, 'grid': grid, 'threads': threads, 'shares': shares, 'lut': int(spec.get('LUT', 0)),
+                            'us': round(t, 2)})
+    table = {'node': node()[0], 'cores': node()[1], 'evidence': str(evidence_path()), 'export': str(args.export),
+             'program': args.program, 'rank': args.rank, 'classes': classes, 'instances': entries}
+    Path(args.out).write_text(json.dumps(table, indent=1) + '\n')
+    print(f'{args.out}: {len(entries)} instances, {len(keyed)} slices, classes {classes}')
+
+
 def main():
     parser = argparse.ArgumentParser(prog='python -m torch_mesh.streamed')
     sub = parser.add_subparsers(dest='command', required=True)
@@ -594,8 +937,17 @@ def main():
     check.add_argument('export')
     check.add_argument('names', nargs='*')
     check.add_argument('--tools', default='~/metal-microbench/tools')
+    fit = sub.add_parser('fit')
+    fit.add_argument('observations', nargs='+')
+    fit.add_argument('--gbps', type=float, required=True, help="the node's DRAM read bandwidth, GB/s")
+    resolve = sub.add_parser('resolve')
+    resolve.add_argument('export')
+    resolve.add_argument('--program', default=None)
+    resolve.add_argument('--rank', type=int, default=None)
+    resolve.add_argument('--classes', default='1,2,4,8,16,32,64,128,256,512')
+    resolve.add_argument('--out', required=True)
     args = parser.parse_args()
-    {'check': _check}[args.command](args)
+    {'check': _check, 'fit': _fit, 'resolve': _resolve}[args.command](args)
 
 
 if __name__ == '__main__':
