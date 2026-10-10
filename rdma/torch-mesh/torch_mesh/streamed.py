@@ -396,10 +396,12 @@ _TYPES = {torch.float16: '', torch.float32: '_float', torch.bfloat16: '_bfloat'}
 
 
 def widths_of(tiles):
-    """The widths a matrix's (or a slice's) tile words hold, as a mask (bit b for width b > 0): its instances' WIDTHS, and
-    the engine's key for its instance (streamed_weights.swift streamedWidths, from the same words)."""
-    present = ((tiles.cpu().long() & 0xFFFFFFFF) >> 12) & 15
-    return sum(1 << b for b in present.unique().tolist() if b > 0)
+    """A matrix's (or a slice's) widths as its instances' WIDTHS mask: every width from 1 to the least of 4, 8 and 12 at
+    least the widest its tile words hold (bits 1 ... c), so slices of one class share instances (the export's width caps
+    are 8 and 12); the engine's key for the slice's instance is the same mask from the same words
+    (streamed_weights.swift streamedWidths)."""
+    widest = int((((tiles.cpu().long() & 0xFFFFFFFF) >> 12) & 15).max()) if tiles.numel() else 0
+    return (1 << (next(c for c in (4, 8, 12, 15) if c >= widest) + 1)) - 2 if widest else 0
 
 
 def _hadamard(signs, mix):
