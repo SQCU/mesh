@@ -6,7 +6,8 @@ docs/kernels.md#fragment-tiles) holds, a matrix: its codes (bands of 32 rows, ea
 the lanes of matmul2d's right-input cooperative tensor), a tile word a tile (its offset from its band's base, width 0
 to 12 and fp16 step) and a base a band; its row order and scale and column order and scale (A[row_order[r],
 col_order[j]] = value[r][j] * row_scale[r] * col_scale[j]); and for some a basis of its input, the matrix's columns
-rotated coordinates (A_orig = A V^T): a rotation (int8, its scale a column), or a randomized Hadamard transform, V^T =
+rotated coordinates (A_orig = A V^T): a rotation (int8, in coded column order: row j the basis vector of coded column
+j, its scale rotation_scale[j]; metadata basis_layout code-order), or a randomized Hadamard transform, V^T =
 T = (H_K (x) H_N) diag(signs) / sqrt(K N) from its signs (int8, one an input column) and H_K (`hadamard`, int8 K x K;
 H_N Sylvester's), run as a butterfly (streamed_hadamard).
 
@@ -412,10 +413,8 @@ class Matrix(torch.Tensor):
         fields = {'codes': codes.view(torch.int32).to('mps'), 'tiles': words('tiles'), 'bands': words('bands'),
                   **{k: get(k) for k in cls.FIELDS[3:7]}}
         if f'{name}.rotation' in tensors:
-            fields['rotation'] = tensors[f'{name}.rotation'].T.contiguous().to('mps')
-            fields['rotation_scale'] = get('rotation_scale')
-            order = fields['col_order'].long()
-            fields['folded'] = (fields['rotation'][order].float() * fields['rotation_scale'][order, None]).half()
+            fields['rotation'], fields['rotation_scale'] = get('rotation'), get('rotation_scale')
+            fields['folded'] = (fields['rotation'].float() * fields['rotation_scale'][:, None]).half()
         if f'{name}.signs' in tensors:
             fields['signs'], fields['hadamard'] = get('signs'), get('hadamard')
             k, K = fields['signs'].shape[0], fields['hadamard'].shape[0]
@@ -515,7 +514,7 @@ class Matrix(torch.Tensor):
                     n, 1, 256)
         elif n <= 16:
             second = outs[1] if len(outs) > 1 else outs[0]
-            _encode('streamed_rotate', [x, outs[0], second, self.col_order, self.col_scale,
+            _encode('streamed_rotate', [x, outs[0], second, None, self.col_scale,
                                         (others[0] if others else self).col_scale, self.rotation, self.rotation_scale, tables],
                     _dims(rows=n, columns=self.columns, inputs=len(matrices), flags=int(tables is not None)),
                     -(-self.columns // 32), 1, 256)
@@ -716,8 +715,13 @@ class Streamed:
     columns [a, b)."""
 
     def __init__(self, path):
+        from safetensors import safe_open
         from safetensors.torch import load_file
         tensors = {k: v for k, v in load_file(str(path)).items() if not k.startswith('__pad_')}
+        with safe_open(str(path), 'pt') as f:
+            layout = (f.metadata() or {}).get('basis_layout')
+        assert layout == 'code-order' or not any(k.endswith('.rotation') for k in tensors), \
+            f'{path}: its rotations are not in coded column order (metal-microbench tools/model_code.py repack rewrites them)'
         names = sorted({k.rsplit('.', 1)[0] for k in tensors if k.endswith('.codes')})
         self.matrices = {name: Matrix.load(tensors, name) for name in names}
         self.tensors = tensors

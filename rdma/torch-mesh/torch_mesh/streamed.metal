@@ -507,14 +507,15 @@ kernel void streamed_gather(device const half *x [[buffer(0)]], device half *fir
     if (d.inputs > 2) third[at] = half(thirdScale[i.x] * v);
 }
 
-// The coded inputs of up to two products of a rotated basis (int8 rotation stored transposed: row c rotated
-// coordinate c, scaled by rotationScale[c]); with eps > 0 the RMS norm of x times gamma folds in (the rotation is
+// The coded inputs of up to two products of a rotated basis (int8, stored in coded column order: row j the basis
+// vector of coded column j, scaled by rotationScale[j], as the export writes it); with eps > 0 the RMS norm of x times
+// gamma folds in (the rotation is
 // linear). Four coded columns a simdgroup, each summed within it, 16 bytes a load: a threadgroup of s simdgroups
 // covers 4s columns. With flags bit 0 (eight simdgroups: a threadgroup a tile column t) it also writes the first
 // product's tables for 1-bit tiles, tables[n][t][kb][m] = the sum over j in m of its coded input kb + 8 j of the tile
 // (fp32, from the fp16 values it stored).
 kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
-                            device half *second [[buffer(2)]], device const int *order [[buffer(3)]],
+                            device half *second [[buffer(2)]],
                             device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                             device const char *rotation [[buffer(6)]], device const float *rotationScale [[buffer(7)]],
                             device float *tables [[buffer(8)]],
@@ -543,7 +544,7 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
                 if (eps > 0.0f) { squares += dot(xv[k], xv[k]); xv[k] *= float4(gamma4[4 * w + k]); }
             }
             for (uint c = 0; c < C; c++) {
-                const uint4 bits = ((device const uint4 *)(rotation + ulong(order[min(j0 + c, columns - 1)]) * columns))[w];
+                const uint4 bits = ((device const uint4 *)(rotation + ulong(min(j0 + c, columns - 1)) * columns))[w];
                 acc[c] += dot(float4(as_type<char4>(bits.x)), xv[0]) + dot(float4(as_type<char4>(bits.y)), xv[1])
                         + dot(float4(as_type<char4>(bits.z)), xv[2]) + dot(float4(as_type<char4>(bits.w)), xv[3]);
             }
@@ -553,7 +554,7 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
             const float total = simd_sum(acc[c]) * rms;
             const uint j = j0 + c;
             if (lane == 0 && j < columns) {
-                const float value = total * rotationScale[order[j]];
+                const float value = total * rotationScale[j];
                 const half put = half(scale[j] * value);
                 first[ulong(n) * columns + j] = put;
                 if (tabled) values[simd * C + c] = float(put);
