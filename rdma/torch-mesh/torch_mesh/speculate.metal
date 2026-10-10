@@ -4,9 +4,12 @@
 //
 // The stream's state (words): step (invocations begun), p0 (row 0's position this step), length (tokens in the
 // history), flags (bit 0 pending: the first step's row 0 is the previous phase's selection, appended to the history;
-// bit 1 stopped: the context or the teacher is spent and the rows repeat their positions), order (the drafter's match
-// this step), n (the drafts the previous step accepted), then the R tokens of this step's rows. The history is the
-// stream's tokens, the prompt's and every committed one.
+// bit 1 stopped: the context or the teacher is spent and the rows repeat their positions; bit 2 given: this step's rows
+// replay the history), order (the drafter's match this step), n (the drafts the previous step accepted), given (the
+// history's positions below it are given: a step whose R rows all lie below it takes them from the history, accepts
+// and appends nothing and moves p0 on by R, and leaves step at 0, so a program whose drafter reads the target's own
+// rows computes them for a prompt's last positions before its first draft: metal-microbench litert_program.m), then the
+// R tokens of this step's rows. The history is the stream's tokens, the prompt's and every committed one.
 //
 // Accept (greedy verification): row i's selected token y_i is the target's next token after row i's; the drafts d_1 ..
 // d_{R-1} (rows 1 ..) are accepted while d_{i+1} = y_i, n of them; y_0 .. y_n are committed (the drafts accepted and the
@@ -20,7 +23,7 @@
 // mesh_spec_drafts): the rows repeat the last token (any token verifies exactly).
 //
 // Each row's step words (token, position p0 + r, length p0 + r + 1, KV-write skip 0) for the step's own apply, and the
-// step's record: p0, n, the order (bit 8 stopped), the R row tokens.
+// step's record: p0, n, the order (bit 8 stopped, bit 9 given), the R row tokens.
 #ifndef TORCH_MESH_SPECULATE
 #define TORCH_MESH_SPECULATE
 #include <metal_stdlib>
@@ -34,8 +37,10 @@ __attribute__((always_inline)) static inline void mesh_spec_step(device uint *st
                                                                  device uint *words, uint stride, device uint *record,
                                                                  threadgroup uint *shared, uint lane) {
     if (lane == 0) {
-        uint step = state[0], p0 = state[1], length = state[2], flags = state[3], n = 0;
-        if (step == 0) {
+        uint step = state[0], p0 = state[1], length = state[2], flags = state[3] & ~4u, n = 0;
+        if (p0 + R <= state[6]) {
+            flags |= 4u;
+        } else if (step == 0) {
             if ((flags & 1u) != 0u) { history[length] = selected[0]; length += 1u; }
             flags &= ~1u;
         } else if ((flags & 2u) == 0u) {
@@ -57,8 +62,9 @@ __attribute__((always_inline)) static inline void mesh_spec_step(device uint *st
     }
     threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
     const uint t = shared[0], p0 = shared[1];
+    const bool given = (shared[3] & 4u) != 0u;
     uint best = 0;
-    if (R > 1 && ORDER > 0) {
+    if (R > 1 && ORDER > 0 && !given) {
         for (uint p = lane; p + 2u <= t; p += T) {
             uint m = 0;
             for (uint k = 0; k < ORDER && k <= p; k++) {
@@ -79,8 +85,8 @@ __attribute__((always_inline)) static inline void mesh_spec_step(device uint *st
     }
     if (lane < R) {
         const uint last = history[t - 1u];
-        uint token = last;
-        if (lane > 0u && best != 0u) {
+        uint token = given ? history[p0 + lane] : last;
+        if (!given && lane > 0u && best != 0u) {
             const uint p = best & 0xffffffu, period = t - 1u - p;
             token = history[p + 1u + (lane - 1u) % period];
         }
@@ -94,9 +100,10 @@ __attribute__((always_inline)) static inline void mesh_spec_step(device uint *st
     if (lane == 0) {
         record[0] = p0;
         record[1] = shared[2];
-        record[2] = (best >> 24) | ((shared[3] & 2u) << 7);
-        state[0] += 1u;
+        record[2] = (best >> 24) | ((shared[3] & 6u) << 7);
+        state[0] += given ? 0u : 1u;
         state[4] = best >> 24;
+        if (given) state[1] = p0 + R;
     }
 }
 #endif

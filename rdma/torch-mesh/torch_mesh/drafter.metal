@@ -19,13 +19,16 @@ using namespace metal;
 
 constant constexpr uint MESH_DRAFT_GROUP = 16;
 
-// A tap: the target's hidden rows after one of its tap layers into slot `slot` of each row's taps (TAPS a row).
+// A tap: the target's hidden rows after one of its tap layers into slot `slot` of each row's taps (TAPS a row). The rows
+// lie row after row (`interleaved` 0), or four channels of every row a slice, slice after slice over `interleaved` rows
+// (a LiteRT delegate's tensor: metal-microbench tools/prepare_e2b.py prefill_mask).
 template <uint D, uint TAPS>
 kernel void mesh_draft_tap(device const half *hidden [[buffer(0)]], device half *taps [[buffer(1)]], constant uint &slot [[buffer(2)]],
-                           uint2 at [[thread_position_in_grid]]) {
+                           constant uint &interleaved [[buffer(3)]], uint2 at [[thread_position_in_grid]]) {
     const uint c = at.x, r = at.y;
     if (c >= D / 4) return;
-    ((device half4 *)taps)[(r * TAPS + slot) * (D / 4) + c] = ((device const half4 *)hidden)[r * (D / 4) + c];
+    ((device half4 *)taps)[(r * TAPS + slot) * (D / 4) + c] =
+        ((device const half4 *)hidden)[interleaved == 0u ? r * (D / 4) + c : c * interleaved + r];
 }
 
 // The block's input rows: the anchor's embedding row times scale (the target's table), then the mask row.
@@ -338,13 +341,13 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
 }
 
 // Every member's step rows from the drafts (after their crossing): rows 1 .. R - 1 the proposals, unless the stream
-// stopped (spec_step's flags bit 1: its rows repeat their positions) or, with `hybrid` > 0, the prompt lookup's match this
-// step (spec_step's state word 4) reached `hybrid` tokens: its rows stand.
+// stopped (spec_step's flags bit 1: its rows repeat their positions), given (bit 2: its rows replay the history) or, with
+// `hybrid` > 0, the prompt lookup's match this step (spec_step's state word 4) reached `hybrid` tokens: its rows stand.
 template <uint R>
 kernel void mesh_spec_drafts(device uint *state [[buffer(0)]], device const uint *drafts [[buffer(1)]], device uint *words [[buffer(2)]],
                              device uint *record [[buffer(3)]], constant uint &stride [[buffer(4)]], constant uint &hybrid [[buffer(5)]],
                              uint r [[thread_position_in_grid]]) {
-    if (r == 0 || r >= R || (state[3] & 2u) != 0u || (hybrid > 0u && state[4] >= hybrid)) return;
+    if (r == 0 || r >= R || (state[3] & 6u) != 0u || (hybrid > 0u && state[4] >= hybrid)) return;
     words[r * stride] = drafts[r];
     state[8 + r] = drafts[r];
     record[3 + r] = drafts[r];
