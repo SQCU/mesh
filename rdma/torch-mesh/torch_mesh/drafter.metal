@@ -184,23 +184,35 @@ kernel void mesh_draft_merge(device const float *mp [[buffer(0)]], device const 
     ((device half4 *)O)[i * (HD / 4) + d] = half4(total > 0.0f ? sum / total : float4(0.0f));
 }
 
-// x = (x + gamma rms(y)) * scale, a threadgroup a row (scale: the layer scalar where SCALED).
+// The convolution after attention or the FFN, its norm and the residual add as one row (a threadgroup a row, in fp32):
+// x = (x + gamma rms(c)) * scale, c = (a_k + a0) y_k + (b_k + b0) y_{k-1} the two-tap convolution of y (scale the layer
+// scalar where SCALED). A trained post-FFN convolution's output passes fp16's range (its norm undoes any scale; 2ndgenMTP
+// trains in bf16), so it is never stored.
 template <uint D, bool SCALED>
-kernel void mesh_draft_norm_add(device const half *y [[buffer(0)]], device const half *gamma [[buffer(1)]], device half *x [[buffer(2)]],
-                                device const half *scalar [[buffer(3)]], uint r [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
-                                uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]],
-                                uint threads [[threads_per_threadgroup]]) {
+kernel void mesh_draft_conv_norm_add(device const half *y [[buffer(0)]], device const half *taps [[buffer(1)]], device const half *bias [[buffer(2)]],
+                                     device const half *gamma [[buffer(3)]], device half *x [[buffer(4)]], device const half *scalar [[buffer(5)]],
+                                     uint r [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
+                                     uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]],
+                                     uint threads [[threads_per_threadgroup]]) {
+    constexpr uint G = D / MESH_DRAFT_GROUP;
+    threadgroup float vals[D];
     threadgroup float part[32];
+    const uint p = r > 0 ? r - 1 : 0;
     float s = 0.0f;
-    for (uint c = t; c < D; c += threads) { const float v = float(y[r * D + c]); s += v * v; }
+    for (uint c = t; c < D; c += threads) {
+        const uint g = c / MESH_DRAFT_GROUP;
+        const float a = float(taps[r * 2 * G + g]) + float(bias[g]), b = float(taps[r * 2 * G + G + g]) + float(bias[G + g]);
+        const float v = a * float(y[r * D + c]) + b * float(y[p * D + c]);
+        vals[c] = v;
+        s += v * v;
+    }
     s = simd_sum(s);
     if (lane == 0) part[sg] = s;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float total = 0.0f;
     for (uint u = 0; u < (threads + 31) / 32; u++) total += part[u];
     const float inv = rsqrt(total / float(D) + 1e-6f), ls = SCALED ? float(scalar[0]) : 1.0f;
-    for (uint c = t; c < D; c += threads)
-        x[r * D + c] = half((float(x[r * D + c]) + float(y[r * D + c]) * inv * float(gamma[c])) * ls);
+    for (uint c = t; c < D; c += threads) x[r * D + c] = half((float(x[r * D + c]) + vals[c] * inv * float(gamma[c])) * ls);
 }
 
 // The FFN's hidden: GELU (tanh form) of gate times up, each row's gate and up the halves of its gate|up row (width F each).
