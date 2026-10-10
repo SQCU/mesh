@@ -800,11 +800,10 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
                            constant streamed_dims &d [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
                            uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     using namespace mpp::tensor_ops;
-    constexpr uint KN = 40;
-    const uint outputs = d.outputs, rows = d.rows, per = d.per, finish = d.finish, pitch = d.pitch ? d.pitch : TILES;
+    const uint KN = 40, outputs = d.outputs, rows = d.rows, per = d.per, finish = d.finish, pitch = d.pitch ? d.pitch : TILES;
     const uint stride = finish ? d.stride : d.split;
     const float cap = d.cap;
-    threadgroup half panel[256 * KN];
+    threadgroup half panel[256 * 40];
     const uint blocks = (rows + M - 1) / M, row0 = (group.y % blocks) * M, share = group.y / blocks;
     auto X = tensor(xs, dextents<int, 2>{int(TILES * 32), int(rows)}, array<int, 2>{1, int(TILES * 32)});
     auto W = tensor(panel, dextents<int, 2>{32, 256}, array<int, 2>{1, int(KN)});
@@ -865,9 +864,8 @@ kernel void streamed_panel_t(device const uint *codes [[buffer(0)]], device cons
                              uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                              uint lane [[thread_index_in_simdgroup]]) {
     using namespace mpp::tensor_ops;
-    constexpr uint NK = 264, COLUMNS = TILES * 32;
-    const uint outputs = d.outputs, rows = d.rows, per = d.per, pitch = d.pitch ? d.pitch : TILES;
-    threadgroup half panel[32 * NK];
+    const uint NK = 264, COLUMNS = TILES * 32, outputs = d.outputs, rows = d.rows, per = d.per, pitch = d.pitch ? d.pitch : TILES;
+    threadgroup half panel[32 * 264];
     const uint blocks = (rows + M - 1) / M, row0 = (group.y % blocks) * M, share = group.y / blocks;
     auto W = tensor(panel, dextents<int, 2>{256, 32}, array<int, 2>{1, int(NK)});
     using Operand = decltype(tensor(xs, dextents<int, 2>{32, int(rows)}, array<int, 2>{1, 32}));
