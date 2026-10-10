@@ -326,11 +326,13 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
 }
 
 // Every member's step rows from the drafts (after their crossing): rows 1 .. R - 1 the proposals, unless the stream
-// stopped (spec_step's flags bit 1: its rows repeat their positions).
+// stopped (spec_step's flags bit 1: its rows repeat their positions) or, with `hybrid` > 0, the prompt lookup's match this
+// step (spec_step's state word 4) reached `hybrid` tokens: its rows stand.
 template <uint R>
 kernel void mesh_spec_drafts(device uint *state [[buffer(0)]], device const uint *drafts [[buffer(1)]], device uint *words [[buffer(2)]],
-                             device uint *record [[buffer(3)]], constant uint &stride [[buffer(4)]], uint r [[thread_position_in_grid]]) {
-    if (r == 0 || r >= R || (state[3] & 2u) != 0u) return;
+                             device uint *record [[buffer(3)]], constant uint &stride [[buffer(4)]], constant uint &hybrid [[buffer(5)]],
+                             uint r [[thread_position_in_grid]]) {
+    if (r == 0 || r >= R || (state[3] & 2u) != 0u || (hybrid > 0u && state[4] >= hybrid)) return;
     words[r * stride] = drafts[r];
     state[8 + r] = drafts[r];
     record[3 + r] = drafts[r];
