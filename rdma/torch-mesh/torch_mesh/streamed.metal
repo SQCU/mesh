@@ -25,7 +25,7 @@
 //       sums (x times half the step: 4 R loads of x a tile); 1-bit tiles by tables of x sums where LUT (T[t][kb][m] =
 //       sum over j in m of x[32 t + kb + 8 j], fp32: streamed_rotate writes them); OUT 0 partials [share][row][output],
 //       1 finished
-//   streamed_couple<R, SK, TILES, WIDTHS, F>                  gate's and up's products together, GELU(gate) * up
+//   streamed_couple<R, SK, TILES, WIDTHS, F, APART>           gate's and up's products together, GELU(gate) * up
 //   streamed_coop<M, SK, BANDS, J, TILES, WIDTHS, COOP>       8 to 16 rows: a tile decoded exactly into the right-input
 //       cooperative tensor of matmul2d<M, 32, 32> at the node's slots (COOP), one operation a tile
 //   streamed_panel<M, TILES, WIDTHS>, streamed_panel_t<M, TILES, WIDTHS>   prefill and the transposed product: eight
@@ -340,10 +340,12 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
 }
 
 // The gate and up products of up to R input rows together, GELU(gate) * up between them (the study's gate_up_mm): a
-// threadgroup a band of 32 hidden rows of both matrices over their whole K (the GELU needs both whole sums), SK
-// simdgroups along K, F steps (1 or 2: 2F tiles) a simdgroup in flight: hidden[n][r] = GELU(gateScale[r] g) * upScale[r] u, in the hidden's code order (down's coded
-// input). Rows past d.rows repeat the last row's loads and are not written.
-template <uint R, uint SK, uint TILES, uint WIDTHS, uint F>
+// threadgroup a band of 32 hidden rows of both matrices over their whole K (the GELU needs both whole sums): APART 0,
+// SK simdgroups along K each walking both matrices in lock step (2F tiles in flight); APART 1, SK simdgroups of each
+// matrix (the first SK gate's, the rest up's: one walk's code for both, F tiles in flight). hidden[n][r] =
+// GELU(gateScale[r] g) * upScale[r] u, in the hidden's code order (down's coded input). Rows past d.rows repeat the
+// last row's loads and are not written.
+template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART>
 kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device const uint *gateTiles [[buffer(1)]],
                             device const uint *gateBands [[buffer(2)]], device const half *gx [[buffer(4)]],
                             device const uint *upCodes [[buffer(6)]], device const uint *upTiles [[buffer(7)]],
@@ -352,35 +354,47 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
                             device const float *gateScale [[buffer(13)]], constant streamed_dims &d [[buffer(15)]],
                             uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
-    constexpr uint STEPS = (TILES + SK - 1) / SK, COLUMNS = TILES * 32;
+    constexpr uint STEPS = (TILES + SK - 1) / SK, COLUMNS = TILES * 32, THREADS = (APART ? 64 : 32) * SK;
     threadgroup float sums[2][SK][R][32];
-    const uint band = group.x, rows = d.rows, pitch = d.pitch ? d.pitch : TILES, kb = fragment_kb(lane);
-    device const uint *gw = gateTiles + band * pitch, *uw = upTiles + band * pitch;
-    const uint gheld = fragment_words<SK, STEPS>(gw, TILES, simd, lane), uheld = fragment_words<SK, STEPS>(uw, TILES, simd, lane);
-    device const uint *gp = gateCodes + (gateBands[band] << 5) + lane, *up = upCodes + (upBands[band] << 5) + lane;
-    float gacc[R][8], uacc[R][8], gcorr[R], ucorr[R], gout[R], uout[R];
-    for (uint n = 0; n < R; n++) for (uint q = 0; q < 8; q++) { gacc[n][q] = 0.0f; uacc[n][q] = 0.0f; }
-    for (uint i = 0; i < STEPS; i += F) {
-        const uint k = (simd + i * SK) * 32 + kb;
-        fragment_tile<R, FRAGMENT_MAX(WIDTHS)> g, u, g1, u1;
-        fragment_fetch<R, WIDTHS, 0>(g, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i), gp, gx, COLUMNS, rows, k);
-        fragment_fetch<R, WIDTHS, 0>(u, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i), up, ux, COLUMNS, rows, k);
-        if (F > 1) {
-            fragment_fetch<R, WIDTHS, 0>(g1, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i + 1), gp, gx, COLUMNS, rows, k + 32 * SK);
-            fragment_fetch<R, WIDTHS, 0>(u1, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i + 1), up, ux, COLUMNS, rows, k + 32 * SK);
+    const uint band = group.x, rows = d.rows, pitch = d.pitch ? d.pitch : TILES;
+    if (APART) {
+        const uint matrix = simd / SK, part = simd % SK;
+        const bool up = matrix != 0;
+        float acc[R][8], out[R];
+        fragment_walk<R, SK, STEPS, WIDTHS, 0, F>(up ? upCodes : gateCodes, (up ? upTiles : gateTiles) + band * pitch,
+                                                 (up ? upBands : gateBands)[band], nullptr, up ? ux : gx, COLUMNS, rows, 0,
+                                                 TILES, part, lane, acc);
+        const uint row = fragment_reduce<R>(acc, lane, out);
+        for (uint n = 0; n < R; n++) sums[matrix][part][n][row] = out[n];
+    } else {
+        const uint kb = fragment_kb(lane);
+        device const uint *gw = gateTiles + band * pitch, *uw = upTiles + band * pitch;
+        const uint gheld = fragment_words<SK, STEPS>(gw, TILES, simd, lane), uheld = fragment_words<SK, STEPS>(uw, TILES, simd, lane);
+        device const uint *gp = gateCodes + (gateBands[band] << 5) + lane, *up = upCodes + (upBands[band] << 5) + lane;
+        float gacc[R][8], uacc[R][8], gcorr[R], ucorr[R], gout[R], uout[R];
+        for (uint n = 0; n < R; n++) for (uint q = 0; q < 8; q++) { gacc[n][q] = 0.0f; uacc[n][q] = 0.0f; }
+        for (uint i = 0; i < STEPS; i += F) {
+            const uint k = (simd + i * SK) * 32 + kb;
+            fragment_tile<R, FRAGMENT_MAX(WIDTHS)> g, u, g1, u1;
+            fragment_fetch<R, WIDTHS, 0>(g, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i), gp, gx, COLUMNS, rows, k);
+            fragment_fetch<R, WIDTHS, 0>(u, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i), up, ux, COLUMNS, rows, k);
+            if (F > 1) {
+                fragment_fetch<R, WIDTHS, 0>(g1, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i + 1), gp, gx, COLUMNS, rows, k + 32 * SK);
+                fragment_fetch<R, WIDTHS, 0>(u1, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i + 1), up, ux, COLUMNS, rows, k + 32 * SK);
+            }
+            fragment_use<R, WIDTHS, 0>(g, nullptr, 0, gacc, gcorr);
+            fragment_use<R, WIDTHS, 0>(u, nullptr, 0, uacc, ucorr);
+            if (F > 1) {
+                fragment_use<R, WIDTHS, 0>(g1, nullptr, 0, gacc, gcorr);
+                fragment_use<R, WIDTHS, 0>(u1, nullptr, 0, uacc, ucorr);
+            }
         }
-        fragment_use<R, WIDTHS, 0>(g, nullptr, 0, gacc, gcorr);
-        fragment_use<R, WIDTHS, 0>(u, nullptr, 0, uacc, ucorr);
-        if (F > 1) {
-            fragment_use<R, WIDTHS, 0>(g1, nullptr, 0, gacc, gcorr);
-            fragment_use<R, WIDTHS, 0>(u1, nullptr, 0, uacc, ucorr);
-        }
+        const uint row = fragment_reduce<R>(gacc, lane, gout);
+        fragment_reduce<R>(uacc, lane, uout);
+        for (uint n = 0; n < R; n++) { sums[0][simd][n][row] = gout[n]; sums[1][simd][n][row] = uout[n]; }
     }
-    const uint row = fragment_reduce<R>(gacc, lane, gout);
-    fragment_reduce<R>(uacc, lane, uout);
-    for (uint n = 0; n < R; n++) { sums[0][simd][n][row] = gout[n]; sums[1][simd][n][row] = uout[n]; }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint i = thread_id; i < R * 32; i += SK * 32) {
+    for (uint i = thread_id; i < R * 32; i += THREADS) {
         const uint n = i / 32, r = i % 32;
         if (n >= rows) continue;
         float gs = 0.0f, us = 0.0f;

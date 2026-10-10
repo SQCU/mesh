@@ -418,10 +418,11 @@ class Matrix(torch.Tensor):
         hidden = _half(n, gate.rows)
         entry = regime(n, 'couple', gate.rows / 32 / node()[1])
         if n == 1 and entry['kernel'] == 'couple':
-            name, line = instance('streamed_couple', 1, entry['SK'], gate.tiles_, gate.widths | up.widths, entry.get('F', 1))
+            apart = entry.get('apart', 0)
+            name, line = instance('streamed_couple', 1, entry['SK'], gate.tiles_, gate.widths | up.widths, entry.get('F', 1), apart)
             _encode(name, gate._code() + [None, gx, None] + up._code() + [ux, up.row_scale, hidden, None, gate.row_scale],
                     _dims(tiles=gate.tiles_, outputs=gate.rows, rows=n, pitch=gate.pitch), gate.rows // 32, 1,
-                    32 * entry['SK'], line)
+                    (64 if apart else 32) * entry['SK'], line)
             return down.apply(hidden).to(x.dtype)
         g, u = gate.product(gx), up.product(ux)
         _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
