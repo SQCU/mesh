@@ -184,23 +184,31 @@ engines.rebalance(pool)                                    # every few steps
 
 ## Streamed coded weights
 
-`torch_mesh/streamed.metal` is the decompression of a coded matrix (metal-microbench `tools/model_code.py` exports:
-32 x 32 tiles, each its own width and step, row and column orders and scales, for some a basis of the input: an int8
-rotation, or a randomized Hadamard transform's signs and H_K, `.signs` and `.hadamard`) as a producer whose
-consumer is an operand: `streamed_pairs` hands each decoded pair of a lane's tile row to a function, `streamed_panels`
-decodes a 32 x 256 panel in threadgroup memory and then runs a function on the threadgroup, `streamed_value` and
-`streamed_rows` read a product's output (its K shares summed and scaled, or the plain values a crossing summed), and
-`streamed_put` writes a product's input in its column order and scale. Every kernel there is an instantiation (the
-products of 1 to 8 rows on the ALUs (`streamed_direct`) and 9 to 16 on each simdgroup's tensor operation
-(`streamed_tiles`), the 128-row panel and its transposed consumer on the matrix units, the finish, the input
-gather, rotation and Hadamard butterfly (`streamed_hadamard`, a threadgroup a row: H_N by structured.metal's stages on
-every block at once, H_K mixing the blocks as each coordinate is put, the RMS norm foldable), the GELU of gate and up,
-the dense decode), its constants one `streamed_dims` block at buffer 15;
-metal-microbench's engine compiles the same source. `MESH_KERNEL(kind)` before a kernel (empty here) declares its type
-to that engine's recorder, which composes kernels by it (metal-microbench docs/kernels.md#one-kernel-interface):
-`product` (a K split's shares a block of 32 outputs), `finish` (an element of a product's output from its shares,
-`streamed_block_element` enumerating a block's), `row`; `streamed_value` and `streamed_rows` take the partials as any
-pointer type, so a finish run inside its product reads them `coherent(device)`.
+`torch_mesh/streamed.metal` is the decompression of a coded matrix (metal-microbench `tools/model_code.py` exports,
+format fragment-1, metal-microbench docs/kernels.md#fragment-tiles: 32 x 32 tiles, each its own width and step, in
+bands of 32 rows; a tile's codes are word planes in the lanes of matmul2d's right-input cooperative tensor, a tile word
+its offset, width and fp16 step, a band word its base; row and column orders and scales; for some a basis of the input:
+an int8 rotation, or a randomized Hadamard transform's signs and H_K, `.signs` and `.hadamard`) as a producer whose
+consumer is an operand. One decode (`fragment_values`: a lane's 16 pairs of a tile as odd integers) serves every
+instance, each with literal sizes and the matrix's widths as template arguments (a caller appends the explicit
+instantiations of its shapes to the source): `streamed_alu` (1 to 4 rows on the ALUs: BANDS bands a threadgroup, SK
+simdgroups a band, J shares of K, F tiles a simdgroup in flight, 8 independent sums a lane, 1-bit tiles by tables of
+x's sums where LUT), `streamed_couple` (gate and up with the GELU between), `streamed_coop` (8 to 16 rows: each tile
+decoded into the right-input cooperative tensor of matmul2d<M, 32, 32> at the node's slots, read once by
+`streamed_coopmap`), `streamed_panel` and `streamed_panel_t` (prefill and the transposed product: eight tiles decoded
+into threadgroup memory, one operation a 256-wide panel); and the finish, the input gather, rotation (writing the 1-bit
+tables) and Hadamard butterfly (`streamed_hadamard`, a threadgroup a row: H_N by structured.metal's stages on every
+block at once, H_K mixing the blocks as each coordinate is put, the RMS norm foldable), the GELU of gate and up, the
+dense decode and a range prefetch (`streamed_touch`). `streamed_value` and `streamed_rows` read a product's output (its
+K shares summed and scaled, or the plain values a crossing summed), and `streamed_put` writes a product's input in its
+column order and scale; the constants are one `streamed_dims` block at buffer 15. Which instance a regime takes on a
+node (its simdgroups, bands, K shares, tiles in flight, tables) is data, `torch_mesh/streamed-nodes.json`, read by
+`streamed.py` and by metal-microbench's engine, which compiles the same source. `MESH_KERNEL(kind)` before a kernel
+(empty here) declares its type to that engine's recorder, which composes kernels by it (metal-microbench
+docs/kernels.md#one-kernel-interface): `product` (a K split's shares a block of 32 outputs), `finish` (an element of a
+product's output from its shares, `streamed_block_element` enumerating a block's), `row`; `streamed_value` and
+`streamed_rows` take the partials as any pointer type, so a finish run inside its product reads them
+`coherent(device)`.
 
 `torch_mesh/attention.metal` is decode attention as one algorithm over a KV type (`mesh_attention<A>`): a task's chunks
 (the KV type's scores of each lane's positions, the chunk's online softmax of R rows, the KV type's value product), the
@@ -226,12 +234,12 @@ w = s["lm_head"].to("cpu")                        # decoded
 ```
 
 - `x @ m` is one pipeline whichever way `m` is transposed: the input side's order and scale (and rotation), the
-  product contracting the coded rows (`streamed_direct`, `streamed_tiles`, the 128-row panel) or the coded columns
-  (`streamed_panel_t`: the same decoded panels consumed the other way, its operand band-major because a tensor
+  product contracting the coded rows (`streamed_alu`, `streamed_coop`, `streamed_panel`) or the coded columns
+  (`streamed_panel_t`: the same decoded tiles consumed the other way, its operand band-major because a tensor
   operation's strides past 2^16 elements corrupt its rows past the first), the output side's order and scale. So
   `F.linear` and `mm` and their backward (`linear_backward`, `mm` against the untransposed matrix) need nothing else.
-- Slicing cuts the codes (rows and columns in multiples of 32, each order keeping its range); a copy off the GPU
-  decodes. `Streamed` holds an FFN's hidden in its code order (one permutation of its neurons, the FFN unchanged), so
+- Slicing takes a range of bands (rows) or of each band's tile words (columns, `streamed_dims.pitch`), in multiples of
+  32, each order keeping its range; the codes stay where they are. A copy off the GPU decodes. `Streamed` holds an FFN's hidden in its code order (one permutation of its neurons, the FFN unchanged), so
   neurons [a, b) are code rows [a, b): `engines.FFN`'s shares and the Neural Engine share builder slice it as they slice
   a checkpoint. An operation the tensor lacks is an error naming the ones it has.
 - Operands are fp16. Another dtype's rows are scaled by powers of two into fp16's range (`streamed_scale_rows`, which
@@ -249,9 +257,10 @@ w = s["lm_head"].to("cpu")                        # decoded
   parallelized so on the pair), its greedy tokens the one-device run's for 24 of 24.
 
 `python -m torch_mesh.streamed check EXPORT [NAME ...]` checks the decode against `model_code.py`'s reference decode,
-the products and their input gradients and the FFN (fused, composed, its gradient) against the decoded matrices (E2B and
-E4B: decode 3e-6 to 3e-4; products at 1, 8 and 300 rows 3e-4 to 5e-4, their gradients 5e-4 to 6e-4; the FFN 5e-4 to
-8e-4, its gradient 1e-3).
+the node's cooperative slots, each regime's product (1, 2, 4, 8, 16 and 300 rows) and its input gradient against
+float64 products of the reference decode, the head's tables, and the FFN (fused, composed, its gradient) against the
+decoded matrices (E2B: decode 2e-4 to 4e-4, the fp16 dense copy; products 2e-4 to 4.6e-4, gradients 4e-4 to 5.3e-4; the
+FFN 5e-4 to 7e-4, its gradient 8e-4).
 
 ## Performance
 
