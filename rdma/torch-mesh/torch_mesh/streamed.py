@@ -40,12 +40,24 @@ observations (each probe's and profile's measured instance: rows of the evidence
 choice is the argmin over the admissible instances of a slice at its rows; a measurement moves the coefficients and
 never stands for its key.
 
-  python -m torch_mesh.streamed fit OBSERVATIONS.json ... --gbps G   this node's evidence fitted (each file a probe's
-                                                                      record: rows of instance, slice units, rows_in,
-                                                                      best_us)
+  python -m torch_mesh.streamed fit OBSERVATIONS ... --gbps G   this node's evidence fitted (each file a probe's record:
+                                                                rows of instance, slice units, rows_in, best_us; or
+                                                                JSON lines: observe's, and the decode attention plans'
+                                                                rows of plan and KV bytes read, kind attention)
   python -m torch_mesh.streamed resolve EXPORT [--program RECORD --rank R] [--classes 1,2,4,8,16,256] --out TABLE
-                                                                      each slice's chosen instance at each rows class:
-                                                                      the table an engine reads (LM_STREAMED_INSTANCES)
+                                                                each slice's chosen instance at each rows class (a slice's
+                                                                key its own widths; a product whose input row folds into
+                                                                it priced with that row's dispatch at other threads,
+                                                                --folds), each argument named, and each attention class's
+                                                                plan: the table an engine reads (LM_STREAMED_INSTANCES)
+  python -m torch_mesh.streamed observe PROFILE EXPORT [--program RECORD --rank R] --out ROWS
+                                                                a direct step's profile (LM_PROFILE_DECODE) as observations
+                                                                of its instances, appended to ROWS (JSON lines)
+
+A factor of the fit (a configuration's efficiency at a rows class) rests on two slice shapes at least; one seen on a
+single shape takes its family's model. A decode attention plan (metal-microbench docs/kernels.md#decode-attention: the
+vector form, a task a query head and row; the tile plan, a task 8 of one KV head's rows) is priced c0 + c1 MB of the KV
+it reads, one line a plan a node, from the attention probe's rows.
 """
 import argparse
 import json
@@ -182,19 +194,23 @@ class Fit:
         return float(self._predict(_family(spec), X)[0]) * math.exp(self.factors.get(factor_key(spec), 0.0))
 
     def fit(self, observations, iters=900, ridge=0.02, spread=0.01):
-        """Least squares in log space over observations (spec, slice units, rows, us): the families' coefficients with a
-        ridge toward the prior, and a factor a configuration and rows class (factor_key) with a ridge toward 1 (the
-        shape of a kernel's own efficiency, pooled over every slice it ran on)."""
+        """Least squares in log space over observations (spec, slice units, rows, us, shape): the families' coefficients
+        with a ridge toward the prior, and a factor a configuration and rows class (factor_key) with a ridge toward 1 (the
+        shape of a kernel's own efficiency, pooled over every slice it ran on) where two shapes at least observed it; a
+        configuration seen on one shape takes its family's model (its factor 0: one shape is no evidence of a shape)."""
         prior = torch.tensor([math.log(FIT_PRIOR[k]) for k in FIT_TERMS], dtype=torch.float64)
-        keys = sorted({factor_key(spec) for spec, _, _, _ in observations})
+        shapes = {}
+        for spec, s, _, _, shape in observations:
+            shapes.setdefault(factor_key(spec), set()).add((s['outputs'], s['columns']))
+        keys = sorted(k for k, seen in shapes.items() if len(seen) > 1)
         index = {k: i for i, k in enumerate(keys)}
         groups = {}
-        for spec, s, rows, us in observations:
+        for spec, s, rows, us, _ in observations:
             u = instance_units(spec, s, rows)
             g = groups.setdefault(_family(spec), ([], [], []))
             g[0].append([float(u[k]) for k in FIT_FEATURES])
             g[1].append(math.log(us))
-            g[2].append(index[factor_key(spec)])
+            g[2].append(index.get(factor_key(spec), len(keys)))
         theta = {f: v.clone().requires_grad_() for f, v in self.theta.items()}
         factors = torch.zeros(len(keys), dtype=torch.float64, requires_grad=True)
         opt = torch.optim.Adam(list(theta.values()) + [factors], lr=0.05)
@@ -204,8 +220,9 @@ class Fit:
         with torch.enable_grad():
             for _ in range(iters):
                 opt.zero_grad()
-                loss = sum(((torch.log(self._predict(f, X, theta[f])) + factors[k] - y) ** 2).sum() for f, (X, y, k) in data.items()) / count
-                loss = loss + ridge * sum(((v - prior) ** 2).sum() for v in theta.values()) + (factors ** 2).sum() * spread / len(keys)
+                pooled = torch.cat([factors, factors.new_zeros(1)])
+                loss = sum(((torch.log(self._predict(f, X, theta[f])) + pooled[k] - y) ** 2).sum() for f, (X, y, k) in data.items()) / count
+                loss = loss + ridge * sum(((v - prior) ** 2).sum() for v in theta.values()) + (factors ** 2).sum() * spread / max(1, len(keys))
                 loss.backward()
                 opt.step()
         self.theta = {f: v.detach() for f, v in theta.items()}
@@ -267,11 +284,16 @@ def configuration(spec):
     return (k, spec['SK'], spec['BANDS'], spec['F'], spec['LUT'])
 
 
-def choose(fit, s, rows, op='product', tables=False):
+def choose(fit, s, rows, op='product', tables=False, fold=None, level=0.0):
     """The fit's argmin over the candidates of the configurations its evidence observed (None where there is none),
-    and its predicted us."""
+    and its predicted us; where the product's input row folds into it at `fold` threads, a candidate at other threads
+    is priced with the row's own dispatch (`level`)."""
     allowed = fit.configurations
-    priced = [(fit.time(c, s, rows), i, c) for i, c in enumerate(candidates(s, rows, op, tables))
+
+    def price(c):
+        threads = 256 if c['kernel'] == 'panel' else 32 * c['SK'] * c.get('BANDS', 1) * (2 if c.get('APART') else 1)
+        return fit.time(c, s, rows) + (level if fold and threads != fold else 0.0)
+    priced = [(price(c), i, c) for i, c in enumerate(candidates(s, rows, op, tables))
               if allowed is None or configuration(c) in allowed]
     if not priced:
         return None, None
@@ -373,6 +395,13 @@ def _identity(k):
 _TYPES = {torch.float16: '', torch.float32: '_float', torch.bfloat16: '_bfloat'}
 
 
+def widths_of(tiles):
+    """The widths a matrix's (or a slice's) tile words hold, as a mask (bit b for width b > 0): its instances' WIDTHS, and
+    the engine's key for its instance (streamed_weights.swift streamedWidths, from the same words)."""
+    present = ((tiles.cpu().long() & 0xFFFFFFFF) >> 12) & 15
+    return sum(1 << b for b in present.unique().tolist() if b > 0)
+
+
 def _hadamard(signs, mix):
     """T = (H_K (x) H_N) diag(signs) / sqrt(K N) (float32, on the CPU): the rows its rotated coordinates."""
     k, K = signs.shape[0], mix.shape[0]
@@ -397,7 +426,7 @@ class Matrix(torch.Tensor):
         for k in cls.FIELDS:
             setattr(out, k, fields.get(k))
         out.label, out.transposed, out.rows, out.columns, out.tiles_ = name, transposed, rows, columns, columns // 32
-        out.widths = widths if widths is not None else sum(1 << b for b in ((fields['tiles'].cpu().long() >> 12) & 15).unique().tolist())
+        out.widths = widths if widths is not None else widths_of(fields['tiles'])
         return out
 
     def __init__(self, *args, **kwargs):
@@ -470,6 +499,7 @@ class Matrix(torch.Tensor):
                         row_scale=self.row_scale[a:b].contiguous(), col_scale=self.col_scale[c:d].contiguous(),
                         row_order=order(self.row_order, a, b), col_order=order(self.col_order, c, d))
         out.label = f'{self.label}[{a}:{b}, {c}:{d}]'
+        out.widths = widths_of(out.tiles)
         return out
 
     def dispatch(self, rows, op='product'):
@@ -617,7 +647,8 @@ class Matrix(torch.Tensor):
             return down.apply(hidden).to(x.dtype)
         g, u = gate.product(gx), up.product(ux)
         _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
-                _dims(outputs=gate.rows, shares=g.shape[0], split=n * gate.rows, count=n * gate.rows), -(-(n * gate.rows) // 256), 1, 256)
+                _dims(outputs=gate.rows, shares=g.shape[0], inputs=u.shape[0], split=n * gate.rows, count=n * gate.rows),
+                -(-(n * gate.rows) // 256), 1, 256)
         return down.apply(hidden).to(x.dtype)
 
 
@@ -798,45 +829,92 @@ def _check(args):
               f'gradient {_relative(x.grad, xf.grad):.2e}', flush=True)
 
 
+ARGUMENTS = {'alu': ('R', 'SK', 'BANDS', 'J', 'TILES', 'WIDTHS', 'OUT', 'LUT', 'F'),
+             'coop': ('M', 'SK', 'BANDS', 'J', 'TILES', 'WIDTHS', 'COOP'),
+             'couple': ('R', 'SK', 'TILES', 'WIDTHS', 'F', 'APART'),
+             'panel': ('M', 'TILES', 'WIDTHS')}
+
+
 def parse_instance(name):
-    """An instance's spec from its host name (instance)."""
+    """An instance's spec from its host name (instance): its template arguments by name (ARGUMENTS)."""
     parts = name.replace('streamed_', '').split('_')
-    kernel, a = parts[0], [int(v) for v in parts[1:]]
-    if kernel == 'alu':
-        return dict(kernel='alu', R=a[0], SK=a[1], BANDS=a[2], J=a[3], F=a[8], LUT=a[7])
-    if kernel == 'coop':
-        return dict(kernel='coop', M=a[0], SK=a[1], BANDS=a[2], J=a[3])
+    kernel = parts[0]
+    if kernel not in ARGUMENTS:
+        raise ValueError(name)
+    spec = dict(zip(ARGUMENTS[kernel], (int(v) for v in parts[1:])), kernel=kernel)
     if kernel == 'couple':
-        return dict(kernel='couple', R=a[0], SK=a[1], BANDS=1, J=1, F=a[4], LUT=0, APART=a[5])
-    if kernel == 'panel':
-        return dict(kernel='panel', M=a[0])
-    raise ValueError(name)
+        spec.update(BANDS=1, J=1, LUT=0)
+    return spec
 
 
 UNITS = ('outputs', 'columns', 'tiles', 'nonzero', 'planes', 'ones', 'bytes')
 
 
+def _records(path):
+    """A record's rows: a probe's JSON ({rows: [...]}) or JSON lines (observe's, the attention probe's)."""
+    text = Path(path).read_text()
+    if text.lstrip().startswith('{"rows"') or text.lstrip().startswith('{\n'):
+        return json.loads(text)['rows']
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
 def observations(paths):
-    """The admissible instances' observations of probe records (rows of instance, units, rows_in, best_us)."""
-    out = []
+    """The admissible instances' observations of probe and profile records (rows of instance, units, rows_in, best_us:
+    (spec, units, rows, us, shape)), and the attention plans' rows (kind attention)."""
+    out, attention = [], []
     for path in paths:
-        for row in json.loads(Path(path).read_text())['rows']:
+        for row in _records(path):
+            if row.get('kind') == 'attention':
+                attention.append(row)
+                continue
             spec = parse_instance(row['instance'])
             if spec['kernel'] == 'alu' and spec['R'] > 4:
                 continue
-            out.append((spec, {k: row[k] for k in UNITS}, row['rows_in'], row['best_us'], row['form'].split(' R')[0]))
+            out.append((spec, {k: row[k] for k in UNITS}, row['rows_in'], row['best_us'], row.get('form', row['instance']).split(' R')[0]))
+    return out, attention
+
+
+PLANS = ('vector', 'tile')
+
+
+def attention_reads(plan, dims, rows, heads, positions):
+    """The KV bytes a decode attention plan reads (metal-microbench docs/kernels.md#decode-attention): the vector form's
+    tasks each one query head of one row, the tile plan's each 8 of them, every task its K and V at `positions`."""
+    tasks = rows * heads if plan == 'vector' else -(-rows * heads // 8)
+    return tasks * positions * dims * 4
+
+
+def attention_fit(rows):
+    """Each plan's time on the node as c0 + c1 MB of KV read, by least squares on relative error, with its median error."""
+    import numpy as np
+    out = {}
+    for plan in PLANS:
+        seen = [r for r in rows if r['plan'] == plan]
+        if len(seen) < 2:
+            continue
+        X = np.array([[1.0, r['reads'] / 1e6] for r in seen])
+        y = np.array([r['best_us'] for r in seen])
+        c = np.linalg.lstsq(X / y[:, None], np.ones(len(y)), rcond=None)[0]
+        out[plan] = {'c0': float(c[0]), 'mb': float(c[1]), 'count': len(seen),
+                     'median_log_error': float(np.median(np.abs(np.log((X @ c) / y))))}
     return out
 
 
+def attention_plan(model, dims, rows, heads, positions):
+    """The plan the node's model prices least at (dims, rows, heads, positions), with each plan's price (us)."""
+    priced = {plan: m['c0'] + m['mb'] * attention_reads(plan, dims, rows, heads, positions) / 1e6 for plan, m in (model or {}).items()}
+    return (min(priced, key=priced.get) if priced else 'vector'), priced
+
+
 def _fit(args):
-    obs = observations(args.observations)
+    obs, attention = observations(args.observations)
     fit = Fit(node()[1], args.gbps)
-    loss = fit.fit([o[:4] for o in obs])
+    loss = fit.fit(obs)
     errors = sorted(abs(math.log(fit.time(spec, s, n) / t)) for spec, s, n, t, _ in obs)
     held, regrets = [], []
     for shape in sorted({o[4] for o in obs}):
         other = Fit(node()[1], args.gbps)
-        other.fit([o[:4] for o in obs if o[4] != shape], iters=600)
+        other.fit([o for o in obs if o[4] != shape], iters=600)
         for n in sorted({o[2] for o in obs if o[4] == shape}):
             seen = [(other.time(spec, s, n), t) for spec, s, nn, t, sh in obs if sh == shape and nn == n]
             held += [abs(math.log(p / t)) for p, t in seen]
@@ -846,16 +924,43 @@ def _fit(args):
               'configurations': sorted({configuration(o[0]) for o in obs}),
               'count': len(obs), 'loss': loss, 'median_log_error': errors[len(errors) // 2],
               'held_out': {'median_log_error': held[len(held) // 2], 'median_regret': regrets[len(regrets) // 2],
-                           'worst_regret': regrets[-1]}, 'coefficients': fit.coefficients(), 'factors': fit.factors}
+                           'worst_regret': regrets[-1]}, 'coefficients': fit.coefficients(), 'factors': fit.factors,
+              'attention': attention_fit(attention)}
     path = evidence_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=1) + '\n')
     print(json.dumps({k: v for k, v in record.items() if k != 'coefficients'}))
 
 
-def role(name):
-    last = name.split('.')[-1]
-    return 'gate_proj' if last == 'up_proj' else last
+def _observe(args):
+    """A direct step's profile (forward_graph LM_PROFILE_DECODE: a line a pipeline label, its microseconds a step and
+    dispatches a step) as observations of its instances: each label's slices the export's of its shape and widths
+    (their units' mean), its time a dispatch less the profile's floor (the least time a dispatch of any label)."""
+    import re
+    streamed = Streamed(args.export)
+    held = slices(streamed, args.program, args.rank)
+    shapes = {}
+    for _, m in held:
+        shapes.setdefault((m.rows, m.columns, m.widths), []).append(slice_units(m))
+    text = Path(args.profile).read_text()
+    rows = int(re.search(r'decode step, (\d+) rows', text).group(1))
+    lines = re.findall(r'^\s+(\S+)(?: (\d+)x(\d+))?\s+([0-9.]+) us a step\s+(\d+) dispatches a step', text, re.M)
+    floor = min(float(us) / int(n) for _, _, _, us, n in lines)
+    out = []
+    for label, outputs, columns, us, n in lines:
+        if not label.startswith(('streamed_alu', 'streamed_coop', 'streamed_panel')) or not outputs:
+            continue
+        spec = parse_instance(label)
+        units = shapes.get((int(outputs), int(columns), spec['WIDTHS']))
+        if not units:
+            continue
+        mean = {k: round(sum(u[k] for u in units) / len(units)) for k in UNITS}
+        out.append({'instance': label, 'rows_in': rows, 'best_us': max(float(us) / int(n) - floor, 0.1), 'form': f'profile {outputs}x{columns} R{rows}',
+                    'source': str(Path(args.profile).resolve()), **mean})
+    with open(args.out, 'a') as f:
+        for row in out:
+            f.write(json.dumps(row) + '\n')
+    print(f'{args.out}: {len(out)} observations from {args.profile} (floor {floor:.2f} us a dispatch)')
 
 
 def slices(streamed, program=None, rank=None):
@@ -891,37 +996,69 @@ def slices(streamed, program=None, rank=None):
     return out
 
 
+def _attention(export, part, ctx, classes, fit_model):
+    """The decode attention plan a rank takes for each class of its layers (head dimension, window, its query heads) at
+    each rows class to 16 (docs/kernels.md#decode-attention): the node's model's least at the class's positions (the
+    window, else the call's context)."""
+    from safetensors import safe_open
+    with safe_open(str(export), 'pt') as f:
+        model = Path((f.metadata() or {}).get('model', ''))
+    config = json.loads((model / 'config.json').read_text()) if (model / 'config.json').exists() else {}
+    text = config.get('text_config', config)
+    kinds = text.get('layer_types') or []
+    heads = text.get('num_attention_heads')
+    if not kinds or not heads:
+        return []
+    out = {}
+    for L, kind in enumerate(kinds):
+        layer = ((part or {}).get('layers') or [None] * len(kinds))[L]
+        held = (layer['heads'][1] - layer['heads'][0]) if layer and layer.get('heads') else (0 if part else heads)
+        if held <= 0:
+            continue
+        sliding = kind == 'sliding_attention'
+        dims = text['head_dim'] if sliding else text.get('global_head_dim') or text['head_dim']
+        window = text.get('sliding_window', 0) if sliding else 0
+        for rows in (c for c in classes if c <= 16):
+            plan, priced = attention_plan(fit_model, dims, rows, held, window or ctx)
+            out[(dims, window, held, rows)] = {'dims': dims, 'window': window, 'heads': held, 'rows': rows, 'plan': plan,
+                                               'us': {k: round(v, 2) for k, v in priced.items()}}
+    return [out[k] for k in sorted(out)]
+
+
 def _resolve(args):
     streamed = Streamed(args.export)
-    widths = {}
-    for name, m in streamed.matrices.items():
-        widths[role(name)] = widths.get(role(name), 0) | (m.widths & ~1)
     fit, classes = Fit.node(), [int(c) for c in args.classes.split(',')]
+    folds = dict((k, int(v)) for k, v in (f.split('=') for f in args.folds.split(',') if f))
     held = slices(streamed, args.program, args.rank)
-    keyed = {}
+    keyed, folded = {}, {}
     for name, m in held:
         op = 'head' if name == 'lm_head' else 'product'
-        key = (op, m.rows, m.columns, widths[role(name)], op == 'head' and m.folded is not None)
+        key = (op, m.rows, m.columns, m.widths, op == 'head' and m.folded is not None)
         keyed.setdefault(key, []).append(slice_units(m))
+        for role_, lanes in folds.items():
+            if name.endswith('.' + role_):
+                folded[key] = lanes
         if name.endswith('.mlp.gate_proj'):
             up = next((u for n, u in held if n == name[:-len('gate_proj')] + 'up_proj' and u.rows == m.rows), None)
             if up is not None:
-                keyed.setdefault(('couple', m.rows, m.columns, widths['gate_proj'], False), []).append((slice_units(m), slice_units(up)))
+                keyed.setdefault(('couple', m.rows, m.columns, m.widths | up.widths, False), []).append((slice_units(m), slice_units(up)))
     entries = []
     mean = lambda units: {k: round(sum(u[k] for u in units) / len(units)) for k in UNITS}
+    level = fit.coefficients()['alu']['c0']
     for (op, outputs, columns, mask, tables), units in sorted(keyed.items(), key=lambda kv: kv[0]):
         if op == 'couple':
             sg, su = mean([u[0] for u in units]), mean([u[1] for u in units])
             s = {k: (sg[k] + su[k] if k not in ('outputs', 'columns') else sg[k]) for k in UNITS}
         else:
             s = mean(units)
+        lanes = folded.get((op, outputs, columns, mask, tables))
         for rows in classes:
             if op == 'couple':
                 spec, t = choose(fit, s, rows, 'couple')
-                if spec is None or t >= choose(fit, sg, rows)[1] + choose(fit, su, rows)[1] + fit.coefficients()['alu']['c0']:
+                if spec is None or t >= choose(fit, sg, rows)[1] + choose(fit, su, rows)[1] + level:
                     continue
             else:
-                spec, t = choose(fit, s, rows, op, tables)
+                spec, t = choose(fit, s, rows, op, tables, fold=lanes, level=level)
             if spec['kernel'] == 'coop' and coop_slots() is None:
                 continue
             name, _ = spec_instance(spec, columns // 32, mask)
@@ -934,12 +1071,17 @@ def _resolve(args):
             else:
                 grid, threads, shares = [outputs // 32 // spec['BANDS'], spec['J']], 32 * spec['SK'] * spec['BANDS'], spec['J']
             entries.append({'op': op, 'outputs': outputs, 'columns': columns, 'widths': mask, 'rows': rows, 'kernel': kernel,
-                            'args': args_, 'grid': grid, 'threads': threads, 'shares': shares, 'lut': int(spec.get('LUT', 0)),
-                            'us': round(t, 2)})
+                            'args': args_, 'names': list(ARGUMENTS[kernel]), 'grid': grid, 'threads': threads, 'shares': shares,
+                            'lut': int(spec.get('LUT', 0)), 'us': round(t, 2)})
+    record = json.loads(Path(args.program).read_text()) if args.program else {}
+    ctx = args.ctx or record.get('ctx_mean') or 1024
+    known = json.loads(evidence_path().read_text()) if evidence_path().exists() else {}
+    part = record['ranks'][args.rank] if args.program else None
+    attention = _attention(args.export, part, ctx, classes, known.get('attention'))
     table = {'node': node()[0], 'cores': node()[1], 'evidence': str(evidence_path()), 'export': str(args.export),
-             'program': args.program, 'rank': args.rank, 'classes': classes, 'instances': entries}
+             'program': args.program, 'rank': args.rank, 'classes': classes, 'ctx': ctx, 'instances': entries, 'attention': attention}
     Path(args.out).write_text(json.dumps(table, indent=1) + '\n')
-    print(f'{args.out}: {len(entries)} instances, {len(keyed)} slices, classes {classes}')
+    print(f'{args.out}: {len(entries)} instances, {len(keyed)} slices, {len(attention)} attention classes, classes {classes}')
 
 
 def main():
@@ -957,9 +1099,18 @@ def main():
     resolve.add_argument('--program', default=None)
     resolve.add_argument('--rank', type=int, default=None)
     resolve.add_argument('--classes', default='1,2,4,8,16,32,64,128,256,512')
+    resolve.add_argument('--ctx', type=int, default=0, help="the positions a global layer's attention is priced at (default: the record's ctx_mean, else 1024)")
+    resolve.add_argument('--folds', default='per_layer_projection=256',
+                         help="NAME=LANES,...: a matrix whose input row the recorder folds into its product where the product's threads are LANES (the engine's streamed_ple)")
     resolve.add_argument('--out', required=True)
+    observe = sub.add_parser('observe')
+    observe.add_argument('profile')
+    observe.add_argument('export')
+    observe.add_argument('--program', default=None)
+    observe.add_argument('--rank', type=int, default=None)
+    observe.add_argument('--out', required=True)
     args = parser.parse_args()
-    {'check': _check, 'fit': _fit, 'resolve': _resolve}[args.command](args)
+    {'check': _check, 'fit': _fit, 'resolve': _resolve, 'observe': _observe}[args.command](args)
 
 
 if __name__ == '__main__':

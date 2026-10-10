@@ -657,7 +657,8 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
 }
 
 // The GELU FFN's middle: hidden = GELU(gate) * up from the gate and up products' partials, in their (shared) coded
-// row order, which the down product's columns follow.
+// row order, which the down product's columns follow: gate's d.shares shares, up's d.inputs (each product its own
+// instance's).
 MESH_KERNEL(finish)
 kernel void streamed_gelu(device const float *gate [[buffer(0)]], device const float *up [[buffer(1)]],
                           device const float *gateScale [[buffer(2)]], device const float *upScale [[buffer(3)]],
@@ -666,7 +667,7 @@ kernel void streamed_gelu(device const float *gate [[buffer(0)]], device const f
     if (i >= d.count) return;
     const uint r = i % d.outputs;
     hidden[i] = half(streamed_gelu_of(streamed_value(gate, i, d.shares, d.split, gateScale[r]),
-                                      streamed_value(up, i, d.shares, d.split, upScale[r])));
+                                      streamed_value(up, i, d.inputs, d.split, upScale[r])));
 }
 
 #if __METAL_VERSION__ >= 400

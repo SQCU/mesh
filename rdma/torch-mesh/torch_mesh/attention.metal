@@ -91,4 +91,100 @@ __attribute__((always_inline)) static inline void mesh_attention(thread A &a) {
     mesh_position_groups<R, A::grouprows, A::slices, A::groups, (A::fresh != 0)>(acc, o, a.red, a.d, a.g);
     a.finish(m, l, o);
 }
+
+// The Tile plan (metal-microbench docs/kernels.md#decode-attention, the verify plan; FlashInfer's tensor-core decode for
+// grouped queries, llama.cpp's kernel_flash_attn_ext): a task is 8 query rows of one KV head (a stream's rows times the
+// query heads that read it) over part j of the KV range, its scores and value products 8 x 8 simdgroup matrices. Each
+// chunk is one page a simdgroup (A::simdgroups pages, C = 16 A::simdgroups positions): the page's scores S = Q K^T (two
+// 8 x 8 blocks over D / 8 products), the rows' online softmax (8 / A::simdgroups rows a simdgroup, C / 32 positions a
+// lane), the accumulators rescaled by the diagonal of the rows' factors, and O += P V over the chunk's pages, each
+// simdgroup holding the 8 x 8 blocks of every (A::simdgroups)th column block. The operand A:
+//
+//   A::dims (D), A::simdgroups; members qs (8 D halves, the rows' queries: load_q writes them and ends with a barrier),
+//   ss (8 C floats), ps (8 C halves), diag (64 floats), places (A::simdgroups ulongs), scale (the scores' factor), stride
+//   (elements from a position's K or V line to the next's), s, lane, t; chunk(i): whether the task holds chunk i; page(i,
+//   w, k, v): page w of chunk i, the addresses of its K and V lines (false where the task reads none of it); first(i, w):
+//   the page's first position;
+//   live(r, position): whether row r attends the position; finish(o, m, l): the parts' merge and the store, o the
+//   simdgroup's column blocks, m and l its rows'.
+template <typename A>
+__attribute__((always_inline)) static inline void mesh_attention_tile(thread A &a) {
+    constexpr uint D = A::dims, NSG = A::simdgroups, PAGE = 16, C = NSG * PAGE, DB = D / 8, OB = DB / NSG, RS = 8 / NSG > 0 ? 8 / NSG : 1;
+    const uint s = a.s, lane = a.lane, stride = a.stride;
+    for (uint e = a.t; e < 64; e += NSG * 32) a.diag[e] = 0.0f;
+    a.load_q();
+    float m[RS], l[RS];
+    for (uint k = 0; k < RS; k++) { m[k] = -3.0e38f; l[k] = 0.0f; }
+    simdgroup_float8x8 o[OB];
+    for (uint b = 0; b < OB; b++) o[b] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+    for (uint i = 0; a.chunk(i); i++) {
+        ulong kq = 0ul, vq = 0ul;
+        const bool cached = a.page(i, s, kq, vq);
+        device const half *kp = (device const half *)kq;
+        simdgroup_float8x8 s0 = make_filled_simdgroup_matrix<float, 8, 8>(0.0f), s1 = s0, s2 = s0, s3 = s0;
+        if (cached)
+            for (uint d0 = 0; d0 < DB; d0 += 8) {
+                simdgroup_half8x8 k[16];
+                for (uint u = 0; u < 8; u++) {
+                    simdgroup_load(k[2 * u], kp + 8 * (d0 + u), stride);
+                    simdgroup_load(k[2 * u + 1], kp + 8 * stride + 8 * (d0 + u), stride);
+                }
+                for (uint u = 0; u < 8; u += 2) {
+                    simdgroup_half8x8 q0, q1;
+                    simdgroup_load(q0, a.qs + 8 * (d0 + u), D, ulong2(0, 0), true);
+                    simdgroup_load(q1, a.qs + 8 * (d0 + u) + 8, D, ulong2(0, 0), true);
+                    simdgroup_multiply_accumulate(s0, k[2 * u], q0, s0);
+                    simdgroup_multiply_accumulate(s1, k[2 * u + 1], q0, s1);
+                    simdgroup_multiply_accumulate(s2, k[2 * u + 2], q1, s2);
+                    simdgroup_multiply_accumulate(s3, k[2 * u + 3], q1, s3);
+                }
+            }
+        s0.thread_elements() += s2.thread_elements();
+        s1.thread_elements() += s3.thread_elements();
+        simdgroup_store(s0, a.ss + s * PAGE, C, ulong2(0, 0), true);
+        simdgroup_store(s1, a.ss + s * PAGE + 8, C, ulong2(0, 0), true);
+        if (lane == 0) a.places[s] = cached ? vq : 0ul;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint k = 0; k < RS && s * RS + k < 8; k++) {
+            const uint r = s * RS + k;
+            float x[C / 32];
+            bool in[C / 32];
+            float top = -3.0e38f;
+            for (uint u = 0; u < C / 32; u++) {
+                const uint c = lane + 32 * u, w = c / PAGE;
+                in[u] = a.places[w] != 0ul && a.live(r, a.first(i, w) + c % PAGE);
+                x[u] = in[u] ? a.ss[r * C + c] * a.scale : -3.0e38f;
+                top = max(top, x[u]);
+            }
+            const float mn = max(m[k], simd_max(top));
+            float sum = 0.0f;
+            for (uint u = 0; u < C / 32; u++) {
+                const float p = in[u] ? exp(x[u] - mn) : 0.0f;
+                a.ps[r * C + lane + 32 * u] = half(p);
+                sum += p;
+            }
+            const float alpha = exp(m[k] - mn);
+            l[k] = l[k] * alpha + simd_sum(sum);
+            m[k] = mn;
+            if (lane == 0) a.diag[9 * r] = alpha;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        simdgroup_float8x8 scale;
+        simdgroup_load(scale, a.diag, 8);
+        for (uint b = 0; b < OB; b++) simdgroup_multiply(o[b], scale, o[b]);
+        for (uint w = 0; w < NSG; w++) {
+            const ulong place = a.places[w];
+            if (place == 0ul) continue;
+            device const half *v = (device const half *)place;
+            for (uint h = 0; h < 2; h++) {
+                simdgroup_half8x8 p, vm[OB];
+                simdgroup_load(p, a.ps + w * PAGE + 8 * h, C);
+                for (uint b = 0; b < OB; b++) simdgroup_load(vm[b], v + 8 * h * stride + 8 * (b * NSG + s), stride);
+                for (uint b = 0; b < OB; b++) simdgroup_multiply_accumulate(o[b], p, vm[b], o[b]);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    a.finish(o, m, l);
+}
 #endif
