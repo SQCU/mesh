@@ -9,6 +9,21 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// Sampling as an argmax (metal-microbench docs/kernels.md#speculative-decoding, sampling): argmax_v z_v / T + g(seed,
+// position, v) is a sample of softmax(z / T) [Gumbel 1954; the Gumbel-max trick, Maddison, Tarlow & Minka 2014], g the
+// Gumbel noise of a hash of the three words (murmur3's finalizer, a bijection of 32 bits, folded over them) to a uniform
+// u in (0, 1), g = -log(-log u). Keyed by the position a row predicts from, a row computed again draws the same token.
+__attribute__((always_inline)) static inline uint mesh_mix(uint h) {
+    h ^= h >> 16; h *= 0x85ebca6bu; h ^= h >> 13; h *= 0xc2b2ae35u; h ^= h >> 16;
+    return h;
+}
+
+__attribute__((always_inline)) static inline float mesh_gumbel(uint seed, uint position, uint token) {
+    const uint h = mesh_mix(token + mesh_mix(position + mesh_mix(seed)));
+    const float u = (float(h >> 8) + 0.5f) * (1.0f / 16777216.0f);
+    return -precise::log(-precise::log(u));
+}
+
 __attribute__((always_inline)) static inline void mesh_take(thread float &v, thread uint &k, float ov, uint ok) {
     if (ov > v || (ov == v && ok < k)) { v = ov; k = ok; }
 }

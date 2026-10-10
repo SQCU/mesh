@@ -1036,6 +1036,8 @@ def _resolve(args):
     fit, classes = Fit.node(), [int(c) for c in args.classes.split(',')]
     folds = dict((k, int(v)) for k, v in (f.split('=') for f in args.folds.split(',') if f))
     held = slices(streamed, args.program, args.rank)
+    for draft in args.draft:
+        held += list(Streamed(draft).matrices.items())
     keyed, folded = {}, {}
     for name, m in held:
         op = 'head' if name == 'lm_head' else 'product'
@@ -1108,6 +1110,8 @@ def main():
     resolve.add_argument('--ctx', type=int, default=0, help="the positions a global layer's attention is priced at (default: the record's ctx_mean, else 1024)")
     resolve.add_argument('--folds', default='per_layer_projection=256',
                          help="NAME=LANES,...: a matrix whose input row the recorder folds into its product where the product's threads are LANES (the engine's streamed_ple)")
+    resolve.add_argument('--draft', action='append', default=[],
+                         help="a drafter's export whose matrices the member runs whole (metal-microbench tools/draft/dflash2.py export)")
     resolve.add_argument('--out', required=True)
     observe = sub.add_parser('observe')
     observe.add_argument('profile')

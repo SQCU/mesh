@@ -16,7 +16,8 @@
 // Draft (prompt lookup [Saxena 2023]: an n-gram transition table over the stream's own tokens, the most recent earlier
 // occurrence of the longest suffix of at most ORDER tokens): the scan scores each end position p <= t - 2 of the
 // history's t tokens by (its match length, p), the greatest wins; its continuation is copied, extended periodically
-// past the history's end (period t - 1 - p). No match: the rows repeat the last token (any token verifies exactly).
+// past the history's end (period t - 1 - p). No match, or ORDER 0 (a network drafter's rows replace them: drafter.metal
+// mesh_spec_drafts): the rows repeat the last token (any token verifies exactly).
 //
 // Each row's step words (token, position p0 + r, length p0 + r + 1, KV-write skip 0) for the step's own apply, and the
 // step's record: p0, n, the order (bit 8 stopped), the R row tokens.
@@ -57,7 +58,7 @@ __attribute__((always_inline)) static inline void mesh_spec_step(device uint *st
     threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
     const uint t = shared[0], p0 = shared[1];
     uint best = 0;
-    if (R > 1) {
+    if (R > 1 && ORDER > 0) {
         for (uint p = lane; p + 2u <= t; p += T) {
             uint m = 0;
             for (uint k = 0; k < ORDER && k <= p; k++) {
