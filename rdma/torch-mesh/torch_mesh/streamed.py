@@ -856,9 +856,17 @@ def role(name):
 
 def slices(streamed, program=None, rank=None):
     """Each coded matrix's slice a rank holds (its record's slices: a tensor's output ranges are rows, its input range
-    columns; the head's rows its vocabulary), every matrix whole without a record: (name, matrix)."""
+    columns; the head's rows its vocabulary; and each layer's FFN neurons its GPU computes in a phase of their own, its
+    engines' gpu range and its prefill columns), every matrix whole without a record: (name, matrix)."""
     part = json.loads(Path(program).read_text())['ranks'][rank] if program else None
     out = []
+    for L, layer in enumerate((part or {}).get('layers') or []):
+        for span in ((layer.get('engines') or {}).get('gpu'), (layer.get('prefill') or {}).get('columns')):
+            base = f'model.language_model.layers.{L}.mlp.'
+            if span and span[1] > span[0] and base + 'gate_proj' in streamed.matrices:
+                for p in ('gate_proj', 'up_proj'):
+                    out.append((base + p, streamed[base + p].cut(rows=tuple(span))))
+                out.append((base + 'down_proj', streamed[base + 'down_proj'].cut(columns=tuple(span))))
     for name, m in streamed.matrices.items():
         if part is None:
             out.append((name, m))
@@ -892,7 +900,7 @@ def _resolve(args):
         key = (op, m.rows, m.columns, widths[role(name)], op == 'head' and m.folded is not None)
         keyed.setdefault(key, []).append(slice_units(m))
         if name.endswith('.mlp.gate_proj'):
-            up = dict(held).get(name[:-len('gate_proj')] + 'up_proj')
+            up = next((u for n, u in held if n == name[:-len('gate_proj')] + 'up_proj' and u.rows == m.rows), None)
             if up is not None:
                 keyed.setdefault(('couple', m.rows, m.columns, widths['gate_proj'], False), []).append((slice_units(m), slice_units(up)))
     entries = []
