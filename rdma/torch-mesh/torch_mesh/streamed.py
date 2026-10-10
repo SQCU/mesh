@@ -57,7 +57,7 @@ never stands for its key.
 A factor of the fit (a configuration's efficiency at a rows class) rests on two slice shapes at least; one seen on a
 single shape takes its family's model. A decode attention plan (metal-microbench docs/kernels.md#decode-attention: the
 vector form, a task a query head and row; the tile plan, a task 8 of one KV head's rows) is priced c0 + c1 MB of the KV
-it reads, one line a plan a node, from the attention probe's rows.
+it reads, one line a plan and head dimension a node, from the attention probe's rows.
 """
 import argparse
 import json
@@ -887,25 +887,29 @@ def attention_reads(plan, dims, rows, heads, positions):
 
 
 def attention_fit(rows):
-    """Each plan's time on the node as c0 + c1 MB of KV read, by least squares on relative error, with its median error."""
+    """Each plan's time on the node at each head dimension as c0 + c1 MB of KV read, by least squares on relative error,
+    with its median error: keys 'plan dims'."""
     import numpy as np
     out = {}
     for plan in PLANS:
-        seen = [r for r in rows if r['plan'] == plan]
-        if len(seen) < 2:
-            continue
-        X = np.array([[1.0, r['reads'] / 1e6] for r in seen])
-        y = np.array([r['best_us'] for r in seen])
-        c = np.linalg.lstsq(X / y[:, None], np.ones(len(y)), rcond=None)[0]
-        out[plan] = {'c0': float(c[0]), 'mb': float(c[1]), 'count': len(seen),
-                     'median_log_error': float(np.median(np.abs(np.log((X @ c) / y))))}
+        for dims in sorted({r['dims'] for r in rows}):
+            seen = [r for r in rows if r['plan'] == plan and r['dims'] == dims]
+            if len(seen) < 2:
+                continue
+            X = np.array([[1.0, r['reads'] / 1e6] for r in seen])
+            y = np.array([r['best_us'] for r in seen])
+            c = np.linalg.lstsq(X / y[:, None], np.ones(len(y)), rcond=None)[0]
+            out[f'{plan} {dims}'] = {'c0': float(c[0]), 'mb': float(c[1]), 'count': len(seen),
+                                     'median_log_error': float(np.median(np.abs(np.log((X @ c) / y))))}
     return out
 
 
 def attention_plan(model, dims, rows, heads, positions):
-    """The plan the node's model prices least at (dims, rows, heads, positions), with each plan's price (us)."""
-    priced = {plan: m['c0'] + m['mb'] * attention_reads(plan, dims, rows, heads, positions) / 1e6 for plan, m in (model or {}).items()}
-    return (min(priced, key=priced.get) if priced else 'vector'), priced
+    """The plan the node's model prices least at (dims, rows, heads, positions), with each plan's price (us); the vector
+    form where the model has no line for both plans at `dims`."""
+    priced = {plan: model[f'{plan} {dims}']['c0'] + model[f'{plan} {dims}']['mb'] * attention_reads(plan, dims, rows, heads, positions) / 1e6
+              for plan in PLANS if f'{plan} {dims}' in (model or {})}
+    return (min(priced, key=priced.get) if len(priced) == len(PLANS) else 'vector'), priced
 
 
 def _fit(args):
