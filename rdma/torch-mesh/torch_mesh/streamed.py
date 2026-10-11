@@ -648,8 +648,8 @@ class Matrix(torch.Tensor):
             xt = self.coded_input(x16)[0]
             return self.apply(xt) if factor is None else self.finish(self.product(xt), factor=factor, dtype=dtype)
         xt = _half(n, self.rows)
-        _encode('streamed_gather', [x16, xt, self.row_order, self.row_scale],
-                _dims(columns=self.rows, rows=n, stride=32, inputs=1), n, 1, 256)
+        _encode('streamed_gather_32', [x16, xt, self.row_order, self.row_scale],
+                _dims(columns=self.rows, rows=n, inputs=1), n, 1, 256)
         partials = self.product_t(xt)
         if self.folded is None:
             return self.finish(partials, self.col_order, self.col_scale, factor, dtype)

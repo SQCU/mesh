@@ -543,9 +543,10 @@ template [[host_name("streamed_scale_rows_bfloat")]] [[kernel]] decltype(streame
 // The coded inputs of up to three products sharing a column order (d.inputs of them) from plain rows x, a threadgroup a
 // row (metal-microbench docs/kernels.md#one-kernel-interface, typed rows): with Normed the row's RMS norm (eps d.eps)
 // times gamma first; the row staged in threadgroup memory where WIDTH > 0 (d.columns at most WIDTH), else read in place;
-// four coded columns a thread; with stride s > 0 written in blocks of s columns, block-major ([columns / s][rows][s],
-// rows = d.rows: a tensor operation's operand rows s apart whatever the width).
-template <bool Normed, uint WIDTH>
+// four coded columns a thread; with STRIDE s > 0 (a literal: a run-time stride's division cost every row its time)
+// written in blocks of s columns, block-major ([columns / s][rows][s], rows = d.rows: a tensor operation's operand rows
+// s apart whatever the width).
+template <bool Normed, uint WIDTH, uint STRIDE>
 MESH_KERNEL(row)
 kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                                 device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
@@ -575,14 +576,15 @@ kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half 
         const int4 o = ((device const int4 *)order)[q];
         const float4 v = WIDTH > 0 ? float4(values[o.x], values[o.y], values[o.z], values[o.w])
                                    : float4(float(in[o.x]), float(in[o.y]), float(in[o.z]), float(in[o.w]));
-        const ulong at = d.stride ? (ulong(4 * q / d.stride) * d.rows + n) * d.stride + 4 * q % d.stride : ulong(n) * columns + 4 * q;
+        const ulong at = STRIDE ? (ulong(4 * q / max(STRIDE, 1u)) * d.rows + n) * STRIDE + 4 * q % max(STRIDE, 1u) : ulong(n) * columns + 4 * q;
         *(device half4 *)(first + at) = half4(((device const float4 *)scale)[q] * v);
         if (d.inputs > 1) *(device half4 *)(second + at) = half4(((device const float4 *)secondScale)[q] * v);
         if (d.inputs > 2) *(device half4 *)(third + at) = half4(((device const float4 *)thirdScale)[q] * v);
     }
 }
 
-template [[host_name("streamed_gather")]] [[kernel]] decltype(streamed_row_gather<false, 0>) streamed_row_gather<false, 0>;
+template [[host_name("streamed_gather")]] [[kernel]] decltype(streamed_row_gather<false, 0, 0>) streamed_row_gather<false, 0, 0>;
+template [[host_name("streamed_gather_32")]] [[kernel]] decltype(streamed_row_gather<false, 0, 32>) streamed_row_gather<false, 0, 32>;
 
 // The coded inputs of up to two products of a rotated basis (int8, stored in coded column order: row j the basis
 // vector of coded column j, scaled by rotationScale[j], as the export writes it); with eps > 0 the RMS norm of x times
