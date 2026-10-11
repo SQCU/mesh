@@ -229,7 +229,7 @@ kernel void mesh_draft_anchor(device const half *table [[buffer(0)]], device con
 // The selector's walk over S slots in one threadgroup of T threads: slot k's predecessor projection (pa for the anchor, then
 // the row of AE = A E for the slot before's choice, E the draft vocabulary's rows of the target's table) times gate_k (h_gate
 // of the slot's hidden row, row stride gs), each candidate's score plus that . P[candidate] (P = B E), the greatest (the
-// first candidate on a tie) its proposal, drafts[k + 1] = ids[that candidate]; drafts[0] the anchor. Sampling (inverse >
+// first candidate on a tie: argmax.metal mesh_argmax over the threadgroup) its proposal, drafts[k + 1] = ids[that candidate]; drafts[0] the anchor. Sampling (inverse >
 // 0): the scores over the temperature plus the Gumbel noise the target's row at p0 + k draws its token with (argmax.metal
 // mesh_gumbel), so a draft is the token the target samples wherever the two distributions' arg maxima meet.
 template <uint RK, uint C, uint S, uint T>
@@ -241,6 +241,8 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
     constexpr uint NSG = T / 32;
     threadgroup float p[RK];
     threadgroup float best[C];
+    threadgroup float tv[NSG];
+    threadgroup uint tk[NSG];
     threadgroup uint previous;
     if (t == 0) drafts[0] = state[8];
     for (uint k = 0; k < S; k++) {
@@ -256,9 +258,10 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
                                                     : score[k * C + c] + s;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (t == 0) {
-            uint pick = 0;
-            for (uint c = 1; c < C; c++) if (best[c] > best[pick]) pick = c;
+        float top = -INFINITY;
+        uint pick = 0xFFFFFFFFu;
+        for (uint c = t; c < C; c += T) mesh_take(top, pick, best[c], c);
+        if (mesh_argmax<T, float, uint>(top, pick, t, tv, tk, nullptr, nullptr, nullptr, 0u, 1u)) {
             previous = cand[k * C + pick];
             drafts[k + 1] = uint(ids[previous]);
         }
