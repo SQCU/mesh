@@ -302,16 +302,22 @@ def choose(fit, s, rows, op='product', tables=False):
 
 
 def spec_arguments(spec, T, widths, finish=False):
-    """An instance's kernel and template arguments (ARGUMENTS) on a slice of T tile columns and width class `widths`: its
-    WIDTHS the class's widths 1 ... c as a mask."""
-    kernel, mask = spec['kernel'], (1 << (widths + 1)) - 2 if widths else 0
-    if kernel in ('panel', 'panel_t'):
-        return kernel, (spec['M'], T, mask)
+    """An instance's kernel and template arguments in ARGUMENTS' order on a slice of T tile columns and width class
+    `widths`: its WIDTHS the class's widths 1 ... c as a mask (width_mask)."""
+    kernel = spec['kernel']
+    values = dict(spec, TILES=T, WIDTHS=width_mask(widths), OUT=int(finish))
     if kernel == 'coop':
-        return kernel, (spec['M'], spec['SK'], spec['BANDS'], spec['J'], T, mask, coop_slots())
-    if kernel == 'couple':
-        return kernel, (spec['R'], spec['SK'], T, mask, spec['F'], spec['APART'])
-    return kernel, (spec['R'], spec['SK'], spec['BANDS'], spec['J'], T, mask, int(finish), spec['LUT'], spec['F'])
+        values['COOP'] = coop_slots()
+    return kernel, tuple(values[name] for name in ARGUMENTS['panel' if kernel == 'panel_t' else kernel])
+
+
+def width_mask(widths):
+    """Width class c's WIDTHS mask, the widths 1 ... c (0 for none); width_class its inverse."""
+    return (1 << (widths + 1)) - 2 if widths else 0
+
+
+def width_class(mask):
+    return max(0, mask.bit_length() - 1)
 
 
 def spec_instance(spec, T, widths, finish=False):
@@ -983,10 +989,10 @@ def _observe(args):
         if not label.startswith(('streamed_alu', 'streamed_coop', 'streamed_panel')) or not outputs:
             continue
         spec = parse_instance(label)
-        units = shapes.get((int(outputs), int(columns), max(0, spec['WIDTHS'].bit_length() - 1)))
+        units = shapes.get((int(outputs), int(columns), width_class(spec['WIDTHS'])))
         if not units:
             continue
-        mean = {k: round(sum(u[k] for u in units) / len(units)) for k in UNITS}
+        mean = mean_units(units)
         out.append({'instance': label, 'rows_in': rows, 'best_us': max(float(us) / int(n) - floor, 0.1), 'form': f'profile {outputs}x{columns} R{rows}',
                     'source': str(Path(args.profile).resolve()), **mean})
     with open(args.out, 'a') as f:
