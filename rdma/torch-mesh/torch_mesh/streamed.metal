@@ -117,6 +117,12 @@ static inline float streamed_sum(float s, threadgroup float *partial, uint t, ui
     return total;
 }
 
+// The RMS norm's factor of a row of `count` elements whose squares the threadgroup's threads hold `s` of: rsqrt(the mean
+// square + eps), the squares summed by streamed_sum.
+static inline float streamed_rms(float s, uint count, float eps, threadgroup float *partial, uint t, uint threads) {
+    return rsqrt(streamed_sum(s, partial, t, threads) / float(count) + eps);
+}
+
 // A product's output row n at logical positions [first, first + count) into vals: from its partials (shares > 0:
 // coded row r of [first, first + count) lands at order[r] - first, its shares summed and scaled) or, where a crossing
 // has summed it into plain values, from `plain` (shares == 0, row stride `rows`). The row order permutes within the
@@ -167,7 +173,7 @@ static inline void mesh_head(P partials, device const half *plain, device const 
     streamed_rows(partials, plain, order, scale, n, first, D, rows, shares, stride, vals, t, threads);
     float s = 0.0f;
     for (uint i = t; i < D; i += threads) s += vals[i] * vals[i];
-    const float rms = rsqrt(streamed_sum(s, partial, t, threads) / float(D) + 1e-6f);
+    const float rms = streamed_rms(s, D, 1e-6f, partial, t, threads);
     for (uint i = t; i < D; i += threads) {
         const uint p = i < D / 2 ? i : i - D / 2, other = i < D / 2 ? i + D / 2 : i - D / 2;
         const float x = vals[i] * rms * gs[i];
@@ -559,7 +565,7 @@ kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half 
             s += dot(v, v);
         }
         if (Normed) {
-            const float rms = rsqrt(streamed_sum(s, partial, t, threads) / float(columns) + d.eps);
+            const float rms = streamed_rms(s, columns, d.eps, partial, t, threads);
             for (uint q = t; q < columns / 4; q += threads) ((threadgroup float4 *)values)[q] *= rms * float4(((device const half4 *)gamma)[q]);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);

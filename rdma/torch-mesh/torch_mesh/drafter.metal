@@ -149,7 +149,7 @@ kernel void mesh_draft_conv_norm_add(device const half *y [[buffer(0)]], device 
         vals[c] = mesh_draft_conv_value<D>(y, taps, bias, r, c);
         s += vals[c] * vals[c];
     }
-    const float inv = rsqrt(streamed_sum(s, part, t, threads) / float(D) + 1e-6f), ls = SCALED ? float(scalar[0]) : 1.0f;
+    const float inv = streamed_rms(s, D, 1e-6f, part, t, threads), ls = SCALED ? float(scalar[0]) : 1.0f;
     for (uint c = t; c < D; c += threads) x[r * D + c] = half((float(x[r * D + c]) + vals[c] * inv * float(gamma[c])) * ls);
 }
 
