@@ -46,10 +46,11 @@ never stands for its key.
                                                                 rows of plan and KV bytes read, kind attention)
   python -m torch_mesh.streamed resolve EXPORT [--program RECORD --rank R] [--classes 1,2,4,8,16,256] --out TABLE
                                                                 each slice's chosen instance at each rows class (a slice's
-                                                                key its own widths; a product whose input row folds into
-                                                                it priced with that row's dispatch at other threads,
-                                                                --folds), each argument named, and each attention class's
-                                                                plan: the table an engine reads (LM_STREAMED_INSTANCES)
+                                                                key its width class, WIDTH_CLASSES, which the table names;
+                                                                a product whose input row folds into it priced with that
+                                                                row's dispatch at other threads, --folds), each argument
+                                                                named, and each layer's attention plan at each rows class
+                                                                to 16: the table an engine reads (LM_STREAMED_INSTANCES)
   python -m torch_mesh.streamed observe PROFILE EXPORT [--program RECORD --rank R] --out ROWS
                                                                 a direct step's profile (LM_PROFILE_DECODE) as observations
                                                                 of its instances, appended to ROWS (JSON lines)
@@ -111,6 +112,7 @@ FIT_TERMS = ('c0', 'tile', 'row', 'plane', 'sg', 'part', 'lat', 'latr', 'occ', '
 FIT_PRIOR = dict(c0=2.0, tile=0.02, row=0.01, plane=0.004, sg=0.01, part=0.002, lat=0.3, latr=0.15, occ=24.0, press=0.001)
 FAMILIES = ('alu', 'coop', 'panel')
 PERS = (8, 16, 24, 32, 48)
+WIDTH_CLASSES = (4, 8, 12, 15)
 
 
 def evidence_path():
@@ -302,15 +304,16 @@ def choose(fit, s, rows, op='product', tables=False, fold=None, level=0.0):
 
 
 def spec_instance(spec, T, widths, finish=False):
-    """An instance's host name and instantiation, threadgroups' x and y, threads and K shares (rows: the slice's bands)."""
-    kernel = spec['kernel']
-    if kernel == 'panel':
-        return instance('streamed_panel', spec['M'], T, widths)
+    """An instance's host name and instantiation on a slice of T tile columns and width class `widths`: its WIDTHS argument
+    the class's widths 1 ... c as a mask."""
+    kernel, mask = spec['kernel'], (1 << (widths + 1)) - 2 if widths else 0
+    if kernel in ('panel', 'panel_t'):
+        return instance('streamed_' + kernel, spec['M'], T, mask)
     if kernel == 'coop':
-        return instance('streamed_coop', spec['M'], spec['SK'], spec['BANDS'], spec['J'], T, widths, coop_slots())
+        return instance('streamed_coop', spec['M'], spec['SK'], spec['BANDS'], spec['J'], T, mask, coop_slots())
     if kernel == 'couple':
-        return instance('streamed_couple', spec['R'], spec['SK'], T, widths, spec['F'], spec['APART'])
-    return instance('streamed_alu', spec['R'], spec['SK'], spec['BANDS'], spec['J'], T, widths, int(finish), spec['LUT'], spec['F'])
+        return instance('streamed_couple', spec['R'], spec['SK'], T, mask, spec['F'], spec['APART'])
+    return instance('streamed_alu', spec['R'], spec['SK'], spec['BANDS'], spec['J'], T, mask, int(finish), spec['LUT'], spec['F'])
 
 
 def coop_slots():
@@ -396,12 +399,12 @@ _TYPES = {torch.float16: '', torch.float32: '_float', torch.bfloat16: '_bfloat'}
 
 
 def widths_of(tiles):
-    """A matrix's (or a slice's) widths as its instances' WIDTHS mask: every width from 1 to the least of 4, 8 and 12 at
-    least the widest its tile words hold (bits 1 ... c), so slices of one class share instances (the export's width caps
-    are 8 and 12); the engine's key for the slice's instance is the same mask from the same words
-    (streamed_weights.swift streamedWidths)."""
+    """A matrix's (or a slice's) width class: the least of WIDTH_CLASSES at least the widest width its tile words hold (0
+    where none), so slices of one class share instances (the export's width caps are 8 and 12). The table names the
+    classes (width_classes) and the engine takes a slice's class from them by this rule (streamed_weights.swift
+    streamedWidths)."""
     widest = int((((tiles.cpu().long() & 0xFFFFFFFF) >> 12) & 15).max()) if tiles.numel() else 0
-    return (1 << (next(c for c in (4, 8, 12, 15) if c >= widest) + 1)) - 2 if widest else 0
+    return next(c for c in WIDTH_CLASSES if c >= widest) if widest else 0
 
 
 def _hadamard(signs, mix):
@@ -504,10 +507,15 @@ class Matrix(torch.Tensor):
         out.widths = widths_of(out.tiles)
         return out
 
+    def tabled(self, op):
+        """Whether this matrix's `op` products may read 1-bit tiles by tables: the head's, its input pass (streamed_rotate,
+        a rotation basis) writing them."""
+        return op == 'head' and self.rotation is not None
+
     def dispatch(self, rows, op='product'):
         """The instance of a product of `rows` coded input rows on this node (the instance fit's choice): its name and
         instantiation, threadgroups x and y, threads, K shares."""
-        spec, _ = choose(Fit.node(), slice_units(self), rows, op, tables=op == 'head' and self.folded is not None)
+        spec, _ = choose(Fit.node(), slice_units(self), rows, op, tables=self.tabled(op))
         if spec['kernel'] == 'coop' and coop_slots() is None:
             spec = dict(kernel='alu', R=min(rows, 4), SK=8, BANDS=1, J=spec['J'], F=1, LUT=0)
         name, line = spec_instance(spec, self.tiles_, self.widths)
@@ -579,7 +587,7 @@ class Matrix(torch.Tensor):
         per = (4 if bands >= 64 else 1) if n <= 16 else bands
         shares = -(-bands // per)
         partials = torch.empty(shares, n, self.columns, dtype=torch.float32, device='mps')
-        name, line = instance('streamed_panel_t', m, self.tiles_, self.widths)
+        name, line = spec_instance(dict(kernel='panel_t', M=m), self.tiles_, self.widths)
         _encode(name, self._code() + [None, xt, partials],
                 _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=per, split=n * self.columns, pitch=self.pitch),
                 -(-self.tiles_ // 8), -(-n // m) * shares, 256, line)
@@ -642,7 +650,7 @@ class Matrix(torch.Tensor):
         hidden = _half(n, gate.rows)
         spec = couple(Fit.node(), gate, up, n)
         if spec is not None:
-            name, line = spec_instance(spec, gate.tiles_, gate.widths | up.widths)
+            name, line = spec_instance(spec, gate.tiles_, max(gate.widths, up.widths))
             _encode(name, gate._code() + [None, gx, None] + up._code() + [ux, up.row_scale, hidden, None, gate.row_scale],
                     _dims(tiles=gate.tiles_, outputs=gate.rows, rows=n, pitch=gate.pitch), gate.rows // 32, 1,
                     (64 if spec['APART'] else 32) * spec['SK'], line)
@@ -957,7 +965,7 @@ def _observe(args):
         if not label.startswith(('streamed_alu', 'streamed_coop', 'streamed_panel')) or not outputs:
             continue
         spec = parse_instance(label)
-        units = shapes.get((int(outputs), int(columns), spec['WIDTHS']))
+        units = shapes.get((int(outputs), int(columns), max(0, spec['WIDTHS'].bit_length() - 1)))
         if not units:
             continue
         mean = {k: round(sum(u[k] for u in units) / len(units)) for k in UNITS}
@@ -1003,9 +1011,9 @@ def slices(streamed, program=None, rank=None):
 
 
 def _attention(export, part, ctx, classes, fit_model):
-    """The decode attention plan a rank takes for each class of its layers (head dimension, window, its query heads) at
-    each rows class to 16 (docs/kernels.md#decode-attention): the node's model's least at the class's positions (the
-    window, else the call's context)."""
+    """The decode attention plan a rank takes for each of its layers (its head dimension, window and query heads) at each
+    rows class to 16 (docs/kernels.md#decode-attention): the node's model's least at the layer's positions (the window,
+    else the call's context)."""
     from safetensors import safe_open
     with safe_open(str(export), 'pt') as f:
         model = Path((f.metadata() or {}).get('model', ''))
@@ -1015,7 +1023,7 @@ def _attention(export, part, ctx, classes, fit_model):
     heads = text.get('num_attention_heads')
     if not kinds or not heads:
         return []
-    out = {}
+    out = []
     for L, kind in enumerate(kinds):
         layer = ((part or {}).get('layers') or [None] * len(kinds))[L]
         held = (layer['heads'][1] - layer['heads'][0]) if layer and layer.get('heads') else (0 if part else heads)
@@ -1026,9 +1034,8 @@ def _attention(export, part, ctx, classes, fit_model):
         window = text.get('sliding_window', 0) if sliding else 0
         for rows in (c for c in classes if c <= 16):
             plan, priced = attention_plan(fit_model, dims, rows, held, window or ctx)
-            out[(dims, window, held, rows)] = {'dims': dims, 'window': window, 'heads': held, 'rows': rows, 'plan': plan,
-                                               'us': {k: round(v, 2) for k, v in priced.items()}}
-    return [out[k] for k in sorted(out)]
+            out.append({'layer': L, 'rows': rows, 'plan': plan, 'us': {k: round(v, 2) for k, v in priced.items()}})
+    return out
 
 
 def _resolve(args):
@@ -1041,7 +1048,7 @@ def _resolve(args):
     keyed, folded = {}, {}
     for name, m in held:
         op = 'head' if name == 'lm_head' else 'product'
-        key = (op, m.rows, m.columns, m.widths, op == 'head' and m.folded is not None)
+        key = (op, m.rows, m.columns, m.widths, m.tabled(op))
         keyed.setdefault(key, []).append(slice_units(m))
         for role_, lanes in folds.items():
             if name.endswith('.' + role_):
@@ -1049,7 +1056,7 @@ def _resolve(args):
         if name.endswith('.mlp.gate_proj'):
             up = next((u for n, u in held if n == name[:-len('gate_proj')] + 'up_proj' and u.rows == m.rows), None)
             if up is not None:
-                keyed.setdefault(('couple', m.rows, m.columns, m.widths | up.widths, False), []).append((slice_units(m), slice_units(up)))
+                keyed.setdefault(('couple', m.rows, m.columns, max(m.widths, up.widths), False), []).append((slice_units(m), slice_units(up)))
     entries = []
     mean = lambda units: {k: round(sum(u[k] for u in units) / len(units)) for k in UNITS}
     level = fit.coefficients()['alu']['c0']
@@ -1087,9 +1094,10 @@ def _resolve(args):
     part = record['ranks'][args.rank] if args.program else None
     attention = _attention(args.export, part, ctx, classes, known.get('attention'))
     table = {'node': node()[0], 'cores': node()[1], 'evidence': str(evidence_path()), 'export': str(args.export),
-             'program': args.program, 'rank': args.rank, 'classes': classes, 'ctx': ctx, 'instances': entries, 'attention': attention}
+             'program': args.program, 'rank': args.rank, 'classes': classes, 'width_classes': list(WIDTH_CLASSES), 'ctx': ctx,
+             'instances': entries, 'attention': attention}
     Path(args.out).write_text(json.dumps(table, indent=1) + '\n')
-    print(f'{args.out}: {len(entries)} instances, {len(keyed)} slices, {len(attention)} attention classes, classes {classes}')
+    print(f'{args.out}: {len(entries)} instances, {len(keyed)} slices, {len(attention)} attention plans, classes {classes}')
 
 
 def main():
