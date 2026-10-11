@@ -234,6 +234,11 @@ class Fit:
         return {f: dict(zip(FIT_TERMS, torch.exp(v).tolist())) for f, v in self.theta.items()}
 
 
+def rows_class(rows):
+    """The ALUs' rows class R of `rows` input rows (to 4): 1, 2 or 4."""
+    return 1 if rows <= 1 else 2 if rows <= 2 else 4
+
+
 def candidates(s, rows, op='product', tables=False):
     """The admissible instances of slice units `s` at `rows` input rows: rows <= 4 on the ALUs (R the rows' class)
     or the cooperative tensor (M 8); 8 or 16 rows the cooperative tensor (M 8 or 16); past 16 the panel (M 64, 128);
@@ -247,11 +252,10 @@ def candidates(s, rows, op='product', tables=False):
     if rows > 16:
         return [dict(kernel='panel', M=M) for M in (64, 128)]
     if op == 'couple':
-        R = 1 if rows <= 1 else 2 if rows <= 2 else 4
-        return [dict(kernel='couple', R=R, SK=sk, BANDS=1, J=1, F=F, LUT=0, APART=apart) for sk in (2, 4, 8) for F in (1, 2)
+        return [dict(kernel='couple', R=rows_class(rows), SK=sk, BANDS=1, J=1, F=F, LUT=0, APART=apart) for sk in (2, 4, 8) for F in (1, 2)
                 for apart in (0, 1)]
     if rows <= 4:
-        R = 1 if rows <= 1 else 2 if rows <= 2 else 4
+        R = rows_class(rows)
         shapes = [(sk, 1) for sk in (2, 4, 8)] + ([(2, 4)] if op == 'head' else [])
         for sk, bands in shapes:
             if (s['outputs'] // 32) % bands:
@@ -297,17 +301,32 @@ def choose(fit, s, rows, op='product', tables=False):
     return best, t
 
 
-def spec_instance(spec, T, widths, finish=False):
-    """An instance's host name and instantiation on a slice of T tile columns and width class `widths`: its WIDTHS argument
-    the class's widths 1 ... c as a mask."""
+def spec_arguments(spec, T, widths, finish=False):
+    """An instance's kernel and template arguments (ARGUMENTS) on a slice of T tile columns and width class `widths`: its
+    WIDTHS the class's widths 1 ... c as a mask."""
     kernel, mask = spec['kernel'], (1 << (widths + 1)) - 2 if widths else 0
     if kernel in ('panel', 'panel_t'):
-        return instance('streamed_' + kernel, spec['M'], T, mask)
+        return kernel, (spec['M'], T, mask)
     if kernel == 'coop':
-        return instance('streamed_coop', spec['M'], spec['SK'], spec['BANDS'], spec['J'], T, mask, coop_slots())
+        return kernel, (spec['M'], spec['SK'], spec['BANDS'], spec['J'], T, mask, coop_slots())
     if kernel == 'couple':
-        return instance('streamed_couple', spec['R'], spec['SK'], T, mask, spec['F'], spec['APART'])
-    return instance('streamed_alu', spec['R'], spec['SK'], spec['BANDS'], spec['J'], T, mask, int(finish), spec['LUT'], spec['F'])
+        return kernel, (spec['R'], spec['SK'], T, mask, spec['F'], spec['APART'])
+    return kernel, (spec['R'], spec['SK'], spec['BANDS'], spec['J'], T, mask, int(finish), spec['LUT'], spec['F'])
+
+
+def spec_instance(spec, T, widths, finish=False):
+    """An instance's host name and instantiation (spec_arguments)."""
+    kernel, arguments = spec_arguments(spec, T, widths, finish)
+    return instance('streamed_' + kernel, *arguments)
+
+
+def launch(spec, outputs, rows):
+    """An instance's threadgroups (x, y), threads and K shares on a slice of `outputs` coded rows at `rows` input rows."""
+    if spec['kernel'] == 'panel':
+        return (outputs // 32, -(-rows // spec['M'])), 256, 1
+    if spec['kernel'] == 'couple':
+        return (outputs // 32, 1), (64 if spec['APART'] else 32) * spec['SK'], 1
+    return (outputs // 32 // spec['BANDS'], spec['J']), 32 * spec['SK'] * spec['BANDS'], spec['J']
 
 
 def coop_slots():
@@ -402,12 +421,13 @@ def widths_of(tiles):
 
 
 def _hadamard(signs, mix):
-    """T = (H_K (x) H_N) diag(signs) / sqrt(K N) (float32, on the CPU): the rows its rotated coordinates."""
+    """T = (H_K (x) H_N) diag(signs) / sqrt(K N) (computed in float64, float32, on the CPU): the rows its rotated
+    coordinates (metal-microbench tools/model_code.py decode_layout's too)."""
     k, K = signs.shape[0], mix.shape[0]
-    H = torch.ones(1, 1)
+    H = torch.ones(1, 1, dtype=torch.float64)
     while H.shape[0] < k // K:
         H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)])
-    return torch.kron(mix.float().cpu(), H) * signs.float().cpu()[None, :] / k ** 0.5
+    return (torch.kron(mix.double().cpu(), H) * signs.double().cpu()[None, :] / k ** 0.5).float()
 
 
 class Matrix(torch.Tensor):
@@ -507,15 +527,13 @@ class Matrix(torch.Tensor):
         return op == 'head' and self.rotation is not None
 
     def dispatch(self, rows, op='product'):
-        """The instance of a product of `rows` coded input rows on this node (the instance fit's choice): its name and
+        """The instance of a product of `rows` coded input rows on this node (the instance fit's choice): its spec, name and
         instantiation, threadgroups x and y, threads, K shares."""
         spec, _ = choose(Fit.node(), slice_units(self), rows, op, tables=self.tabled(op))
         if spec['kernel'] == 'coop' and coop_slots() is None:
-            spec = dict(kernel='alu', R=min(rows, 4), SK=8, BANDS=1, J=spec['J'], F=1, LUT=0)
-        name, line = spec_instance(spec, self.tiles_, self.widths)
-        if spec['kernel'] == 'panel':
-            return name, line, self.rows // 32, -(-rows // spec['M']), 256, 1
-        return name, line, self.rows // 32 // spec['BANDS'], spec['J'], 32 * spec['SK'] * spec['BANDS'], spec['J']
+            spec = dict(kernel='alu', R=rows_class(rows), SK=8, BANDS=1, J=spec['J'], F=1, LUT=0)
+        (gx, gy), threads, shares = launch(spec, self.rows, rows)
+        return (spec, *spec_instance(spec, self.tiles_, self.widths), gx, gy, threads, shares)
 
     def dense(self):
         """The matrix decoded in its own coordinates, its shape and dtype (a rotated matrix decoded in its coded
@@ -565,8 +583,8 @@ class Matrix(torch.Tensor):
         """The product of coded inputs xt [n, columns]: partials [shares, n, rows] in coded row order, unscaled (past 16
         rows one share, the panel's); `tables` (coded_input's) where the instance reads 1-bit tiles by tables."""
         n = xt.shape[0]
-        name, line, gx, gy, threads, shares = self.dispatch(n, op)
-        assert (tables is not None) == (name.startswith('streamed_alu') and name.split('_')[-2] == '1'), f'{name}: tables where it reads them'
+        spec, name, line, gx, gy, threads, shares = self.dispatch(n, op)
+        assert (tables is not None) == bool(spec.get('LUT')), f'{name}: tables where it reads them'
         partials = torch.empty(shares, n, self.rows, dtype=torch.float32, device='mps')
         buffers = self._code() + [tables, xt, partials] + ([None] * 5 + [xt, self.row_order, self.row_scale] if n > 16 else [])
         _encode(name, buffers, _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // 8), split=n * self.rows,
@@ -603,7 +621,7 @@ class Matrix(torch.Tensor):
         n = xt.shape[0]
         if n <= 16:
             return self.finish(self.product(xt))
-        name, line, gx, gy, threads, _ = self.dispatch(n)
+        _, name, line, gx, gy, threads, _ = self.dispatch(n)
         y = _half(n, self.rows)
         _encode(name, self._code() + [None, xt, None, None, None, None, None, None, y, self.row_order, self.row_scale],
                 _dims(tiles=self.tiles_, outputs=self.rows, rows=n, per=-(-self.tiles_ // 8), stride=self.rows, finish=1,
@@ -642,12 +660,12 @@ class Matrix(torch.Tensor):
         n = x16.shape[0]
         gx, ux = gate.coded_input(x16, (up,))
         hidden = _half(n, gate.rows)
-        spec = couple(Fit.node(), gate, up, n)
+        spec, _ = couple(Fit.node(), slice_units(gate), slice_units(up), n)
         if spec is not None:
             name, line = spec_instance(spec, gate.tiles_, max(gate.widths, up.widths))
+            (groups, _), threads, _ = launch(spec, gate.rows, n)
             _encode(name, gate._code() + [None, gx, None] + up._code() + [ux, up.row_scale, hidden, None, gate.row_scale],
-                    _dims(tiles=gate.tiles_, outputs=gate.rows, rows=n, pitch=gate.pitch), gate.rows // 32, 1,
-                    (64 if spec['APART'] else 32) * spec['SK'], line)
+                    _dims(tiles=gate.tiles_, outputs=gate.rows, rows=n, pitch=gate.pitch), groups, 1, threads, line)
             return down.apply(hidden).to(x.dtype)
         g, u = gate.product(gx), up.product(ux)
         _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
@@ -656,16 +674,23 @@ class Matrix(torch.Tensor):
         return down.apply(hidden).to(x.dtype)
 
 
-def couple(fit, gate, up, rows):
-    """The couple instance of gate and up at `rows` where the fit prices it below their own products and the GELU's
-    dispatch (a dispatch's fixed cost), else None."""
-    sg, su = slice_units(gate), slice_units(up)
-    pair = {k: (sg[k] + su[k] if k not in ('outputs', 'columns') else sg[k]) for k in sg}
-    spec, t = choose(fit, pair, rows, 'couple')
-    if spec is None:
-        return None
-    apart = sum(choose(fit, u, rows)[1] for u in (sg, su)) + fit.coefficients()['alu']['c0']
-    return spec if t < apart else None
+def pair_units(sg, su):
+    """A couple's slice units: gate's and up's summed, its outputs and columns gate's."""
+    return {k: (sg[k] + su[k] if k not in ('outputs', 'columns') else sg[k]) for k in sg}
+
+
+def mean_units(units):
+    """The mean of slices' units (each rounded)."""
+    return {k: round(sum(u[k] for u in units) / len(units)) for k in UNITS}
+
+
+def couple(fit, sg, su, rows):
+    """The couple instance of gate and up (slice units sg and su) at `rows` and its predicted us where the fit prices it
+    below their own products and the GELU's dispatch (a dispatch's fixed cost), else (None, None)."""
+    spec, t = choose(fit, pair_units(sg, su), rows, 'couple')
+    if spec is None or t >= sum(choose(fit, u, rows)[1] for u in (sg, su)) + fit.coefficients()['alu']['c0']:
+        return None, None
+    return spec, t
 
 
 def _no(m, what):
@@ -804,13 +829,12 @@ def _check(args):
             y = F.linear(x, m)
             (y.float() * w).sum().backward()
             exact = x.detach().cpu().double() @ reference.T
-            line += f', {n}: {_relative(y.cpu(), exact):.2e} {m.dispatch(n)[0].split("_")[1]} grad {_relative(x.grad.cpu(), w.cpu().double() @ reference):.2e}'
+            line += f', {n}: {_relative(y.cpu(), exact):.2e} {m.dispatch(n)[0]["kernel"]} grad {_relative(x.grad.cpu(), w.cpu().double() @ reference):.2e}'
         if name == 'lm_head' and m.folded is not None:
             for n in (1, 2, 4):
                 x = torch.randn(n, m.columns, device='mps').half()
-                chosen = m.dispatch(n, 'head')[0]
-                tables = (torch.empty(n, m.tiles_, 8, 16, dtype=torch.float32, device='mps')
-                          if chosen.startswith('streamed_alu') and chosen.split('_')[-2] == '1' else None)
+                spec, chosen = m.dispatch(n, 'head')[:2]
+                tables = torch.empty(n, m.tiles_, 8, 16, dtype=torch.float32, device='mps') if spec.get('LUT') else None
                 xt = m.coded_input(x, tables=tables)[0]
                 y = m.finish(m.product(xt, op='head', tables=tables))
                 line += f', head {n}: {_relative(y.cpu(), x.cpu().double() @ reference.T):.2e} ({chosen})'
@@ -1048,35 +1072,17 @@ def _resolve(args):
             if up is not None:
                 keyed.setdefault(('couple', m.rows, m.columns, max(m.widths, up.widths), False), []).append((slice_units(m), slice_units(up)))
     entries = []
-    mean = lambda units: {k: round(sum(u[k] for u in units) / len(units)) for k in UNITS}
-    level = fit.coefficients()['alu']['c0']
-    for (op, outputs, columns, mask, tables), units in sorted(keyed.items(), key=lambda kv: kv[0]):
-        if op == 'couple':
-            sg, su = mean([u[0] for u in units]), mean([u[1] for u in units])
-            s = {k: (sg[k] + su[k] if k not in ('outputs', 'columns') else sg[k]) for k in UNITS}
-        else:
-            s = mean(units)
+    for (op, outputs, columns, widths, tables), units in sorted(keyed.items(), key=lambda kv: kv[0]):
+        pair = op == 'couple' and (mean_units([u[0] for u in units]), mean_units([u[1] for u in units]))
         for rows in classes:
-            if op == 'couple':
-                spec, t = choose(fit, s, rows, 'couple')
-                if spec is None or t >= choose(fit, sg, rows)[1] + choose(fit, su, rows)[1] + level:
-                    continue
-            else:
-                spec, t = choose(fit, s, rows, op, tables)
-            if spec['kernel'] == 'coop' and coop_slots() is None:
+            spec, t = couple(fit, *pair, rows) if pair else choose(fit, mean_units(units), rows, op, tables)
+            if spec is None or spec['kernel'] == 'coop' and coop_slots() is None:
                 continue
-            name, _ = spec_instance(spec, columns // 32, mask)
-            kernel = name.split('_')[1]
-            args_ = [int(v) for v in name.split('_')[2:]]
-            if spec['kernel'] == 'panel':
-                grid, threads, shares = [outputs // 32, -(-rows // spec['M'])], 256, 1
-            elif spec['kernel'] == 'couple':
-                grid, threads, shares = [outputs // 32, 1], (64 if spec['APART'] else 32) * spec['SK'], 1
-            else:
-                grid, threads, shares = [outputs // 32 // spec['BANDS'], spec['J']], 32 * spec['SK'] * spec['BANDS'], spec['J']
-            entries.append({'op': op, 'outputs': outputs, 'columns': columns, 'widths': mask, 'rows': rows, 'kernel': kernel,
-                            'args': args_, 'names': list(ARGUMENTS[kernel]), 'grid': grid, 'threads': threads, 'shares': shares,
-                            'lut': int(spec.get('LUT', 0)), 'us': round(t, 2)})
+            kernel, arguments = spec_arguments(spec, columns // 32, widths)
+            grid, threads, shares = launch(spec, outputs, rows)
+            entries.append({'op': op, 'outputs': outputs, 'columns': columns, 'widths': widths, 'rows': rows, 'kernel': kernel,
+                            'args': list(arguments), 'names': list(ARGUMENTS[kernel]), 'grid': list(grid), 'threads': threads,
+                            'shares': shares, 'lut': int(spec.get('LUT', 0)), 'us': round(t, 2)})
     record = json.loads(Path(args.program).read_text()) if args.program else {}
     ctx = args.ctx or record.get('ctx_mean') or 1024
     known = json.loads(evidence_path().read_text()) if evidence_path().exists() else {}
