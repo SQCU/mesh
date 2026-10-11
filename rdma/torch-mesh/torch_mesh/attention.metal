@@ -99,7 +99,7 @@ __attribute__((always_inline)) static inline void mesh_attention(thread A &a) {
 // after a barrier; the G part-groups (thread (d, g): channel slice d of DS) read the accumulators 8 at a time and sum
 // through `red` ((G - 1) DS float4s); group 0 calls store(M, sum_j w_j l_j, sum_j w_j o_j). Scheduled Single (a
 // threadgroup a row: mesh_merge_row and the hosts' kernels) or LastArrival (the last of a row's parts to arrive:
-// mesh_last_arrival, the merge, then mesh_arrival_reset).
+// argmax.metal's mesh_last_arrival, the merge, then mesh_arrival_reset).
 template <typename F, typename F4, uint DS>
 struct mesh_split_parts {
     F ms;
@@ -153,23 +153,6 @@ __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, ui
         if (g == 0) for (uint e = 1; e < G; ++e) sum += red[(e - 1) * DS + d];
     }
     if (g == 0) store(Shared ? scalars[1] : top, Shared ? scalars[0] : total, sum);
-}
-
-// LastArrival: each of a row's J threadgroups fences its stores and counts its arrival in word `slot`; true in the last to
-// arrive, after a fence. The last makes the word 0 again for the dispatch's next run once its merge is done
-// (mesh_arrival_reset: metal-microbench docs/kernels.md, counts left by a cut dispatch), off the merge's path.
-__attribute__((always_inline)) static inline bool mesh_last_arrival(device atomic_uint *arrivals, uint slot, uint J, uint t, threadgroup uint &last) {
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
-    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-    if (t == 0) last = atomic_fetch_add_explicit(&arrivals[slot], 1u, memory_order_relaxed) == J - 1 ? 1u : 0u;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (last == 0u) return false;
-    atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
-    return true;
-}
-
-__attribute__((always_inline)) static inline void mesh_arrival_reset(device atomic_uint *arrivals, uint slot, uint t) {
-    if (t == 0) atomic_store_explicit(&arrivals[slot], 0u, memory_order_relaxed);
 }
 
 // The gathered store (metal-microbench docs/kernels.md#decode-attention, the epilogue): a thread's four outputs from `out`

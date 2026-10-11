@@ -245,6 +245,7 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
     threadgroup float tv[T / 32];
     threadgroup uint tk[T / 32];
     threadgroup uint previous;
+    threadgroup uint last;
     if (t == 0) drafts[0] = state[8];
     for (uint k = 0; k < S; k++) {
         for (uint j = t; j < RK; j += T)
@@ -262,7 +263,7 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
         float top = -INFINITY;
         uint pick = 0xFFFFFFFFu;
         for (uint c = t; c < C; c += T) mesh_take(top, pick, best[c], c);
-        if (mesh_argmax<T, float, uint>(top, pick, t, tv, tk, nullptr, nullptr, nullptr, 0u, 1u)) {
+        if (mesh_argmax<T, float, uint>(top, pick, t, tv, tk, nullptr, nullptr, nullptr, 0u, 1u, last)) {
             previous = cand[k * C + pick];
             drafts[k + 1] = uint(ids[previous]);
         }
