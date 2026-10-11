@@ -241,8 +241,8 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
     constexpr uint NSG = T / 32;
     threadgroup float p[RK];
     threadgroup float best[C];
-    threadgroup float tv[NSG];
-    threadgroup uint tk[NSG];
+    threadgroup float tv[T / 32];
+    threadgroup uint tk[T / 32];
     threadgroup uint previous;
     if (t == 0) drafts[0] = state[8];
     for (uint k = 0; k < S; k++) {
