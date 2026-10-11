@@ -161,15 +161,6 @@ kernel void mesh_draft_conv_norm_add(device const half *y [[buffer(0)]], device 
     for (uint c = t; c < D; c += threads) x[r * D + c] = half((float(x[r * D + c]) + vals[c] * inv * float(gamma[c])) * ls);
 }
 
-// The FFN's hidden: GELU (tanh form) of gate times up, each row's gate and up the halves of its gate|up row (width F each).
-kernel void mesh_draft_gelu(device const half *gu [[buffer(0)]], device half *out [[buffer(1)]], constant uint &count [[buffer(2)]],
-                            constant uint &width [[buffer(3)]], uint i [[thread_position_in_grid]]) {
-    if (i >= count) return;
-    const uint r = i / width, c = i % width;
-    const float g = float(gu[ulong(r) * 2 * width + c]), inner = clamp(0.7978845608f * (g + 0.044715f * g * g * g), -20.0f, 20.0f);
-    out[i] = half(0.5f * g * (1.0f + tanh(inner)) * float(gu[ulong(r) * 2 * width + width + c]));
-}
-
 // Each slot's C candidates: the C greatest softcapped base scores of its row (V of a row of `stride`; the threshold by
 // bisection over the row's range, then the positions at or above it in index order), into cand (index into the draft
 // vocabulary) and score.
