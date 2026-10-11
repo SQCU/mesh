@@ -94,10 +94,12 @@ __attribute__((always_inline)) static inline void mesh_attention(thread A &a) {
 
 // The parts' merge (Flash-Decoding's [Dao et al. 2023]; FlashInfer's state merge): the J parts of one row, each its maximum
 // m_j, sum l_j and unnormalized accumulator o_j (P::m(j), P::l(j), P::o(j, d)), weighed e^(m_j - M) over the parts with
-// l_j > 0. Each part's weight is held by lane j % 32 of every simdgroup (J <= 64) and shuffled; the G part-groups (thread
-// (d, g): channel slice d of DS) read the accumulators 8 at a time and sum through `red` ((G - 1) DS float4s); group 0
-// calls store(M, sum_j w_j l_j, sum_j w_j o_j). Scheduled Single (a threadgroup a row: mesh_merge_rows and the engine's
-// wrappers) or LastArrival (the last of a row's parts to arrive: mesh_last_arrival, then the merge).
+// l_j > 0. Each part's weight is held by lane j % 32 of every simdgroup (J <= 64) and shuffled, or with Shared computed
+// by the first simdgroup into `weights` (J floats; the total and M into `scalars`) and read from there after a barrier;
+// the G part-groups (thread (d, g): channel slice d of DS) read the accumulators 8 at a time and sum through `red` ((G -
+// 1) DS float4s); group 0 calls store(M, sum_j w_j l_j, sum_j w_j o_j). Scheduled Single (a threadgroup a row:
+// mesh_merge_row and the hosts' kernels) or LastArrival (the last of a row's parts to arrive: mesh_last_arrival, then the
+// merge).
 template <typename F, typename F4, uint DS>
 struct mesh_split_parts {
     F ms;
@@ -111,27 +113,36 @@ struct mesh_split_parts {
 
 __attribute__((always_inline)) static inline float4 mesh_merged(float total, float4 sum) { return total > 0.0f ? sum / total : float4(0.0f); }
 
-template <uint DS, uint G, typename P, typename Store>
-__attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, uint d, uint g, uint lane, threadgroup float4 *red, Store store) {
+template <uint DS, uint G, bool Shared = false, typename P, typename Store>
+__attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, uint d, uint g, uint lane, threadgroup float4 *red, Store store,
+                                                            threadgroup float *weights = nullptr, threadgroup float *scalars = nullptr) {
     static_assert(DS % 32 == 0, "a simdgroup's lanes hold one part-group");
-    float top = -3.0e38f;
-    for (uint p = lane; p < J; p += 32) if (parts.l(p) > 0.0f) top = max(top, parts.m(p));
-    top = simd_max(top);
-    float w[2], total = 0.0f;
-    for (uint k = 0; k < 2; ++k) {
-        const uint p = lane + 32 * k;
-        const float le = p < J ? parts.l(p) : 0.0f, me = p < J ? parts.m(p) : 0.0f;
-        w[k] = le > 0.0f ? exp(me - top) : 0.0f;
-        total += w[k] * le;
+    float top = -3.0e38f, w[2] = {0.0f, 0.0f}, total = 0.0f;
+    if (!Shared || g * DS + d < 32) {
+        for (uint p = lane; p < J; p += 32) if (parts.l(p) > 0.0f) top = max(top, parts.m(p));
+        top = simd_max(top);
+        for (uint k = 0; k < 2; ++k) {
+            const uint p = lane + 32 * k;
+            const float le = p < J ? parts.l(p) : 0.0f, me = p < J ? parts.m(p) : 0.0f;
+            w[k] = le > 0.0f ? exp(me - top) : 0.0f;
+            total += w[k] * le;
+            if (Shared && p < J) weights[p] = w[k];
+        }
+        total = simd_sum(total);
+        if (Shared && lane == 0) { scalars[0] = total; scalars[1] = top; }
     }
-    total = simd_sum(total);
+    if (Shared) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        total = scalars[0];
+        top = scalars[1];
+    }
     float4 sum = float4(0.0f);
     for (uint p = g; p < J; p += 8 * G) {
         float4 y[8];
         for (uint u = 0; u < 8; ++u) y[u] = p + u * G < J ? parts.o(p + u * G, d) : float4(0.0f);
         for (uint u = 0; u < 8; ++u) {
             const uint q = p + u * G;
-            sum += (q < J ? simd_shuffle(w[q / 32], ushort(q % 32)) : 0.0f) * y[u];
+            sum += (q < J ? (Shared ? weights[q] : simd_shuffle(w[q / 32], ushort(q % 32))) : 0.0f) * y[u];
         }
     }
     if (G > 1) {
@@ -178,16 +189,13 @@ __attribute__((always_inline)) static inline void mesh_gathered_store(device hal
     for (uint i = 0; i < 4; ++i) O[dst[i]] = half(scale[i] * value[i]);
 }
 
-// Single over plain rows: threadgroup i (D / 4 threads) merges the J parts of row (i / heads) all + first + i % heads
-// (parts at row J + j) into row i of O.
+// Single over plain rows: row `row`'s J parts (at row J + j) merged into `out`, a threadgroup of D / 4 threads a row (thread
+// d its float4 d). A host's kernel calls it (no kernel is defined here: a source including this file stays one kernel's).
 template <uint D>
-kernel void mesh_merge_rows(device const float *m [[buffer(0)]], device const float *l [[buffer(1)]], device const float4 *o [[buffer(2)]],
-                            device half *O [[buffer(3)]], constant uint &J [[buffer(4)]], constant uint &heads [[buffer(5)]],
-                            constant uint &all [[buffer(6)]], constant uint &first [[buffer(7)]], uint i [[threadgroup_position_in_grid]],
-                            uint d [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-    const ulong row = ulong(i / heads) * all + first + i % heads;
+__attribute__((always_inline)) static inline void mesh_merge_row(device const float *m, device const float *l, device const float4 *o, ulong row,
+                                                                uint J, device half4 *out, uint d, uint lane) {
     mesh_merge<D / 4, 1>(mesh_split_parts<device const float *, device const float4 *, D / 4>{m, l, o, row * J}, J, d, 0u, lane, nullptr,
-                         [&](float, float total, float4 sum) { ((device half4 *)O)[ulong(i) * (D / 4) + d] = half4(mesh_merged(total, sum)); });
+                         [&](float, float total, float4 sum) { out[d] = half4(mesh_merged(total, sum)); });
 }
 
 // The Tile plan (metal-microbench docs/kernels.md#decode-attention, the verify plan; FlashInfer's tensor-core decode for

@@ -1,7 +1,7 @@
 // Speculative decoding's drafter on the device (metal-microbench docs/kernels.md#the-drafter): DFlash2 [2ndgenMTP's
 // parallel-block drafter; Chen et al. 2026, DFlash], one pass of K block rows [anchor, MASK x (K - 1)] at positions p0 ..
 // p0 + K - 1 over the target's hidden states, its products the streamed family's instances, its attention a Tile plan
-// operand (attention.metal) merged by mesh_merge_rows, and its proposals the selector's walk.
+// operand (attention.metal) merged by mesh_merge_row, and its proposals the selector's walk.
 //
 // The context: every position p before the anchor holds, in each draft layer's flat cache (one K = V head of HD
 // channels a position), k_norm(rope(k(c_p))) and v_norm(k(c_p)), c_p = hidden_norm(fc(the target's taps of position p)),
@@ -169,6 +169,14 @@ kernel void mesh_draft_attention(device const half *Q [[buffer(0)]], device cons
     task.base = task.lo / 16;
     task.pages = (task.limit + 15) / 16 - task.base;
     mesh_attention_tile(task);
+}
+
+// The parts' merge of each query row (attention.metal mesh_merge_row), into O [K H HD] half.
+template <uint HD, uint J>
+kernel void mesh_draft_merge(device const float *mp [[buffer(0)]], device const float *lp [[buffer(1)]], device const float4 *op [[buffer(2)]],
+                             device half *O [[buffer(3)]], uint i [[threadgroup_position_in_grid]], uint d [[thread_index_in_threadgroup]],
+                             uint lane [[thread_index_in_simdgroup]]) {
+    mesh_merge_row<HD>(mp, lp, op, i, J, (device half4 *)O + ulong(i) * (HD / 4), d, lane);
 }
 
 // The convolution after attention or the FFN, its norm and the residual add as one row (a threadgroup a row, in fp32):
