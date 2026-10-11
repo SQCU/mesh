@@ -44,16 +44,19 @@ kernel void mesh_draft_embed(device const half *table [[buffer(0)]], device cons
 }
 
 // y_k = (a_k + a0) x_k + (b_k + b0) x_{k-1} (x_{-1} = x_0), a_k | b_k the tap generator's product of row k (2 D / 16 channels),
-// a0 | b0 its bias, one coefficient a group of 16 channels.
+// a0 | b0 its bias, one coefficient a group of 16 channels: channel c of row k, in fp32.
+template <uint D>
+static inline float mesh_draft_conv_value(device const half *x, device const half *taps, device const half *bias, uint k, uint c) {
+    constexpr uint G = D / MESH_DRAFT_GROUP;
+    const uint g = c / MESH_DRAFT_GROUP, p = k > 0 ? k - 1 : 0;
+    const float a = float(taps[k * 2 * G + g]) + float(bias[g]), b = float(taps[k * 2 * G + G + g]) + float(bias[G + g]);
+    return a * float(x[k * D + c]) + b * float(x[p * D + c]);
+}
+
 template <uint D>
 kernel void mesh_draft_conv(device const half *x [[buffer(0)]], device const half *taps [[buffer(1)]], device const half *bias [[buffer(2)]],
                             device half *y [[buffer(3)]], uint2 at [[thread_position_in_grid]]) {
-    constexpr uint G = D / MESH_DRAFT_GROUP;
-    const uint c = at.x, k = at.y;
-    if (c >= D) return;
-    const uint g = c / MESH_DRAFT_GROUP, p = k > 0 ? k - 1 : 0;
-    const float a = float(taps[k * 2 * G + g]) + float(bias[g]), b = float(taps[k * 2 * G + G + g]) + float(bias[G + g]);
-    y[k * D + c] = half(a * float(x[k * D + c]) + b * float(x[p * D + c]));
+    if (at.x < D) y[at.y * D + at.x] = half(mesh_draft_conv_value<D>(x, taps, bias, at.y, at.x));
 }
 
 // Rows' heads finished (streamed.metal mesh_head over plain rows, precise trigonometry): threadgroup (h, row) of HD
@@ -138,26 +141,15 @@ template <uint D, bool SCALED>
 kernel void mesh_draft_conv_norm_add(device const half *y [[buffer(0)]], device const half *taps [[buffer(1)]], device const half *bias [[buffer(2)]],
                                      device const half *gamma [[buffer(3)]], device half *x [[buffer(4)]], device const half *scalar [[buffer(5)]],
                                      uint r [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
-                                     uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]],
                                      uint threads [[threads_per_threadgroup]]) {
-    constexpr uint G = D / MESH_DRAFT_GROUP;
     threadgroup float vals[D];
     threadgroup float part[32];
-    const uint p = r > 0 ? r - 1 : 0;
     float s = 0.0f;
     for (uint c = t; c < D; c += threads) {
-        const uint g = c / MESH_DRAFT_GROUP;
-        const float a = float(taps[r * 2 * G + g]) + float(bias[g]), b = float(taps[r * 2 * G + G + g]) + float(bias[G + g]);
-        const float v = a * float(y[r * D + c]) + b * float(y[p * D + c]);
-        vals[c] = v;
-        s += v * v;
+        vals[c] = mesh_draft_conv_value<D>(y, taps, bias, r, c);
+        s += vals[c] * vals[c];
     }
-    s = simd_sum(s);
-    if (lane == 0) part[sg] = s;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float total = 0.0f;
-    for (uint u = 0; u < (threads + 31) / 32; u++) total += part[u];
-    const float inv = rsqrt(total / float(D) + 1e-6f), ls = SCALED ? float(scalar[0]) : 1.0f;
+    const float inv = rsqrt(streamed_sum(s, part, t, threads) / float(D) + 1e-6f), ls = SCALED ? float(scalar[0]) : 1.0f;
     for (uint c = t; c < D; c += threads) x[r * D + c] = half((float(x[r * D + c]) + vals[c] * inv * float(gamma[c])) * ls);
 }
 

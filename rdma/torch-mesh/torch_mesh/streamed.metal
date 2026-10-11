@@ -86,9 +86,9 @@ static inline float2 streamed_float(Words w) {
 // A product's sum for input row n at coded output row r over its shares (K splits of a dispatch; members' shares after
 // a crossing), the row's scale applied: what every consumer of a product reads. P is the partials' pointer type: a
 // consumer run inside the product's last arriving threadgroup reads them coherent(device).
-template <typename P>
-static inline float streamed_value(P partials, ulong at, uint shares, uint stride, float scale) {
-    float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+template <typename T = float, typename P>
+static inline T streamed_value(P partials, ulong at, uint shares, uint stride, T scale) {
+    T a0 = T(0.0f), a1 = T(0.0f), a2 = T(0.0f), a3 = T(0.0f);
     uint s = 0;
     for (; s + 4 <= shares; s += 4) {
         a0 += partials[at + ulong(s) * stride];
@@ -120,15 +120,26 @@ static inline float streamed_sum(float s, threadgroup float *partial, uint t, ui
 // A product's output row n at logical positions [first, first + count) into vals: from its partials (shares > 0:
 // coded row r of [first, first + count) lands at order[r] - first, its shares summed and scaled) or, where a crossing
 // has summed it into plain values, from `plain` (shares == 0, row stride `rows`). The row order permutes within the
-// range. Ends with a threadgroup barrier.
-template <typename P>
+// range. V elements a thread (1, or 4: float4 partials, int4 orders and float4 scales; first, count, rows and stride
+// multiples of 4). Ends with a threadgroup barrier.
+template <uint V = 1, typename P>
 static inline void streamed_rows(P partials, device const half *plain, device const int *order,
                                  device const float *scale, uint n, uint first, uint count, uint rows, uint shares,
                                  uint stride, threadgroup float *vals, uint t, uint threads) {
-    for (uint i = t; i < count; i += threads) {
-        if (shares == 0) { vals[i] = float(plain[ulong(n) * rows + first + i]); continue; }
-        const uint r = first + i;
-        vals[uint(order[r]) - first] = streamed_value(partials, ulong(n) * rows + r, shares, stride, scale[r]);
+    if (V == 4) {
+        for (uint q = t; q < count / 4; q += threads) {
+            const ulong at = (ulong(n) * rows + first) / 4 + q;
+            if (shares == 0) { ((threadgroup float4 *)vals)[q] = float4(((device const half4 *)plain)[at]); continue; }
+            const int4 o = ((device const int4 *)order)[first / 4 + q] - int(first);
+            const float4 v = streamed_value((device const float4 *)partials, at, shares, stride / 4, ((device const float4 *)scale)[first / 4 + q]);
+            vals[o.x] = v.x; vals[o.y] = v.y; vals[o.z] = v.z; vals[o.w] = v.w;
+        }
+    } else {
+        for (uint i = t; i < count; i += threads) {
+            if (shares == 0) { vals[i] = float(plain[ulong(n) * rows + first + i]); continue; }
+            const uint r = first + i;
+            vals[uint(order[r]) - first] = streamed_value(partials, ulong(n) * rows + r, shares, stride, scale[r]);
+        }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 }
@@ -523,22 +534,49 @@ template [[host_name("streamed_finish_bfloat")]] [[kernel]] decltype(streamed_fi
 template [[host_name("streamed_scale_rows_bfloat")]] [[kernel]] decltype(streamed_scale_rows<bfloat>) streamed_scale_rows<bfloat>;
 #endif
 
-// The coded inputs of up to three products sharing a column order, from plain rows x (grid: columns x rows); with
-// stride s > 0 written in blocks of s columns, block-major ([columns / s][rows][s], rows = d.rows: a tensor operation's
-// operand rows s apart whatever the width).
-kernel void streamed_gather(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
-                            device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
-                            device half *second [[buffer(5)]], device half *third [[buffer(6)]],
-                            device const float *secondScale [[buffer(7)]], device const float *thirdScale [[buffer(8)]],
-                            constant streamed_dims &d [[buffer(15)]], uint2 i [[thread_position_in_grid]]) {
-    if (i.x >= d.columns) return;
-    const ulong at = d.stride ? (ulong(i.x / d.stride) * d.rows + i.y) * d.stride + i.x % d.stride
-                              : ulong(i.y) * d.columns + i.x;
-    const float v = float(x[ulong(i.y) * d.columns + uint(order[i.x])]);
-    first[at] = half(scale[i.x] * v);
-    if (d.inputs > 1) second[at] = half(secondScale[i.x] * v);
-    if (d.inputs > 2) third[at] = half(thirdScale[i.x] * v);
+// The coded inputs of up to three products sharing a column order (d.inputs of them) from plain rows x, a threadgroup a
+// row (metal-microbench docs/kernels.md#one-kernel-interface, typed rows): with Normed the row's RMS norm (eps d.eps)
+// times gamma first; the row staged in threadgroup memory where WIDTH > 0 (d.columns at most WIDTH), else read in place;
+// four coded columns a thread; with stride s > 0 written in blocks of s columns, block-major ([columns / s][rows][s],
+// rows = d.rows: a tensor operation's operand rows s apart whatever the width).
+template <bool Normed, uint WIDTH>
+MESH_KERNEL(row)
+kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
+                                device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
+                                device const half *gamma [[buffer(4)]], device half *second [[buffer(5)]], device half *third [[buffer(6)]],
+                                device const float *secondScale [[buffer(7)]], device const float *thirdScale [[buffer(8)]],
+                                constant streamed_dims &d [[buffer(15)]], uint n [[threadgroup_position_in_grid]],
+                                uint t [[thread_index_in_threadgroup]], uint threads [[threads_per_threadgroup]]) {
+    threadgroup float values[WIDTH > 0 ? WIDTH : 1];
+    threadgroup float partial[32];
+    const uint columns = d.columns;
+    if (WIDTH > 0) {
+        device const half4 *row = (device const half4 *)(x + ulong(n) * columns);
+        float s = 0.0f;
+        for (uint q = t; q < columns / 4; q += threads) {
+            const float4 v = float4(row[q]);
+            ((threadgroup float4 *)values)[q] = v;
+            s += dot(v, v);
+        }
+        if (Normed) {
+            const float rms = rsqrt(streamed_sum(s, partial, t, threads) / float(columns) + d.eps);
+            for (uint q = t; q < columns / 4; q += threads) ((threadgroup float4 *)values)[q] *= rms * float4(((device const half4 *)gamma)[q]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    device const half *in = x + ulong(n) * columns;
+    for (uint q = t; q < columns / 4; q += threads) {
+        const int4 o = ((device const int4 *)order)[q];
+        const float4 v = WIDTH > 0 ? float4(values[o.x], values[o.y], values[o.z], values[o.w])
+                                   : float4(float(in[o.x]), float(in[o.y]), float(in[o.z]), float(in[o.w]));
+        const ulong at = d.stride ? (ulong(4 * q / d.stride) * d.rows + n) * d.stride + 4 * q % d.stride : ulong(n) * columns + 4 * q;
+        *(device half4 *)(first + at) = half4(((device const float4 *)scale)[q] * v);
+        if (d.inputs > 1) *(device half4 *)(second + at) = half4(((device const float4 *)secondScale)[q] * v);
+        if (d.inputs > 2) *(device half4 *)(third + at) = half4(((device const float4 *)thirdScale)[q] * v);
+    }
 }
+
+template [[host_name("streamed_gather")]] [[kernel]] decltype(streamed_row_gather<false, 0>) streamed_row_gather<false, 0>;
 
 // The coded inputs of up to two products of a rotated basis (int8, stored in coded column order: row j the basis
 // vector of coded column j, scaled by rotationScale[j], as the export writes it); with eps > 0 the RMS norm of x times

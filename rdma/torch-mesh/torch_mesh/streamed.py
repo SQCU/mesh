@@ -537,7 +537,7 @@ class Matrix(torch.Tensor):
             pad = outs + [outs[0]] * (3 - len(outs))
             scales = [m.col_scale for m in matrices] + [self.col_scale] * (3 - len(matrices))
             _encode('streamed_gather', [x, pad[0], self.col_order, scales[0], None, pad[1], pad[2], scales[1], scales[2]],
-                    _dims(columns=self.columns, inputs=len(matrices)), -(-self.columns // 256), n, 256)
+                    _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256)
         elif self.signs is not None and len(outs) <= 2:
             second = outs[1] if len(outs) > 1 else outs[0]
             _encode('streamed_hadamard', [x, outs[0], second, self.col_order, self.col_scale,
@@ -556,7 +556,7 @@ class Matrix(torch.Tensor):
             scales = [m.col_scale for m in matrices] + [self.col_scale] * (3 - len(matrices))
             _encode('streamed_gather', [rotated, pad[0], _identity(self.columns), scales[0], None, pad[1], pad[2],
                                         scales[1], scales[2]],
-                    _dims(columns=self.columns, inputs=len(matrices)), -(-self.columns // 256), n, 256)
+                    _dims(columns=self.columns, inputs=len(matrices)), n, 1, 256)
         return outs
 
     def product(self, xt, op='product', tables=None):
@@ -623,7 +623,7 @@ class Matrix(torch.Tensor):
             return self.apply(xt) if factor is None else self.finish(self.product(xt), factor=factor, dtype=dtype)
         xt = _half(n, self.rows)
         _encode('streamed_gather', [x16, xt, self.row_order, self.row_scale],
-                _dims(columns=self.rows, rows=n, stride=32, inputs=1), -(-self.rows // 256), n, 256)
+                _dims(columns=self.rows, rows=n, stride=32, inputs=1), n, 1, 256)
         partials = self.product_t(xt)
         if self.folded is None:
             return self.finish(partials, self.col_order, self.col_scale, factor, dtype)
