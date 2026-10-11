@@ -46,11 +46,10 @@ never stands for its key.
                                                                 rows of plan and KV bytes read, kind attention)
   python -m torch_mesh.streamed resolve EXPORT [--program RECORD --rank R] [--classes 1,2,4,8,16,256] --out TABLE
                                                                 each slice's chosen instance at each rows class (a slice's
-                                                                key its width class, WIDTH_CLASSES, which the table names;
-                                                                a product whose input row folds into it priced with that
-                                                                row's dispatch at other threads, --folds), each argument
-                                                                named, and each layer's attention plan at each rows class
-                                                                to 16: the table an engine reads (LM_STREAMED_INSTANCES)
+                                                                key its width class, WIDTH_CLASSES, which the table names),
+                                                                each argument named, and each layer's attention plan at
+                                                                each rows class to 16: the table an engine reads
+                                                                (LM_STREAMED_INSTANCES)
   python -m torch_mesh.streamed observe PROFILE EXPORT [--program RECORD --rank R] --out ROWS
                                                                 a direct step's profile (LM_PROFILE_DECODE) as observations
                                                                 of its instances, appended to ROWS (JSON lines)
@@ -286,16 +285,11 @@ def configuration(spec):
     return (k, spec['SK'], spec['BANDS'], spec['F'], spec['LUT'])
 
 
-def choose(fit, s, rows, op='product', tables=False, fold=None, level=0.0):
+def choose(fit, s, rows, op='product', tables=False):
     """The fit's argmin over the candidates of the configurations its evidence observed (None where there is none),
-    and its predicted us; where the product's input row folds into it at `fold` threads, a candidate at other threads
-    is priced with the row's own dispatch (`level`)."""
+    and its predicted us."""
     allowed = fit.configurations
-
-    def price(c):
-        threads = 256 if c['kernel'] == 'panel' else 32 * c['SK'] * c.get('BANDS', 1) * (2 if c.get('APART') else 1)
-        return fit.time(c, s, rows) + (level if fold and threads != fold else 0.0)
-    priced = [(price(c), i, c) for i, c in enumerate(candidates(s, rows, op, tables))
+    priced = [(fit.time(c, s, rows), i, c) for i, c in enumerate(candidates(s, rows, op, tables))
               if allowed is None or configuration(c) in allowed]
     if not priced:
         return None, None
@@ -1041,18 +1035,14 @@ def _attention(export, part, ctx, classes, fit_model):
 def _resolve(args):
     streamed = Streamed(args.export)
     fit, classes = Fit.node(), [int(c) for c in args.classes.split(',')]
-    folds = dict((k, int(v)) for k, v in (f.split('=') for f in args.folds.split(',') if f))
     held = slices(streamed, args.program, args.rank)
     for draft in args.draft:
         held += list(Streamed(draft).matrices.items())
-    keyed, folded = {}, {}
+    keyed = {}
     for name, m in held:
         op = 'head' if name == 'lm_head' else 'product'
         key = (op, m.rows, m.columns, m.widths, m.tabled(op))
         keyed.setdefault(key, []).append(slice_units(m))
-        for role_, lanes in folds.items():
-            if name.endswith('.' + role_):
-                folded[key] = lanes
         if name.endswith('.mlp.gate_proj'):
             up = next((u for n, u in held if n == name[:-len('gate_proj')] + 'up_proj' and u.rows == m.rows), None)
             if up is not None:
@@ -1066,14 +1056,13 @@ def _resolve(args):
             s = {k: (sg[k] + su[k] if k not in ('outputs', 'columns') else sg[k]) for k in UNITS}
         else:
             s = mean(units)
-        lanes = folded.get((op, outputs, columns, mask, tables))
         for rows in classes:
             if op == 'couple':
                 spec, t = choose(fit, s, rows, 'couple')
                 if spec is None or t >= choose(fit, sg, rows)[1] + choose(fit, su, rows)[1] + level:
                     continue
             else:
-                spec, t = choose(fit, s, rows, op, tables, fold=lanes, level=level)
+                spec, t = choose(fit, s, rows, op, tables)
             if spec['kernel'] == 'coop' and coop_slots() is None:
                 continue
             name, _ = spec_instance(spec, columns // 32, mask)
@@ -1116,8 +1105,6 @@ def main():
     resolve.add_argument('--rank', type=int, default=None)
     resolve.add_argument('--classes', default='1,2,4,8,16,32,64,128,256,512')
     resolve.add_argument('--ctx', type=int, default=0, help="the positions a global layer's attention is priced at (default: the record's ctx_mean, else 1024)")
-    resolve.add_argument('--folds', default='per_layer_projection=256',
-                         help="NAME=LANES,...: a matrix whose input row the recorder folds into its product where the product's threads are LANES (the engine's streamed_ple)")
     resolve.add_argument('--draft', action='append', default=[],
                          help="a drafter's export whose matrices the member runs whole (metal-microbench tools/draft/dflash2.py export)")
     resolve.add_argument('--out', required=True)
