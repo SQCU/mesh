@@ -133,6 +133,40 @@ static inline void streamed_rows(P partials, device const half *plain, device co
     threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
+// The rotary embedding of channel value x paired with y (channel i with i + dims / 2, `low` for the first half) at
+// frequency pair `pair` of a head of `dims` channels: theta^(-2 pair / dims) radians a position. Precise takes the
+// precise trigonometry (the drafter's training), else the fast.
+template <bool Precise>
+static inline float mesh_rope(float x, float y, bool low, uint pair, uint dims, uint position, float theta) {
+    const float angle = float(position) * exp2(-float(2 * pair) / float(dims) * log2(theta));
+    const float c = Precise ? precise::cos(angle) : cos(angle), sn = Precise ? precise::sin(angle) : sin(angle);
+    return low ? x * c - y * sn : x * c + y * sn;
+}
+
+// One head of D channels of row n finished (metal-microbench docs/kernels.md#decode-attention, the heads): its values
+// from streamed_rows (a product's partials, or plain rows: shares 0, row stride `rows`, from channel `first`), their RMS
+// norm (streamed_sum, eps 1e-6), times gamma where given (staged in `gs` before the reductions), the rotary embedding over
+// its first `pairs` frequency pairs at `position`, stored to `out` and to `line` (a KV line), each where given.
+template <bool Precise, typename P>
+static inline void mesh_head(P partials, device const half *plain, device const int *order, device const float *scale, uint n, uint first,
+                             uint D, uint rows, uint shares, uint stride, device const half *gamma, uint pairs, uint position, float theta,
+                             device half *out, device half *line, threadgroup float *vals, threadgroup float *gs, threadgroup float *partial,
+                             uint t, uint threads) {
+    for (uint i = t; i < D; i += threads) gs[i] = gamma ? float(gamma[i]) : 1.0f;
+    streamed_rows(partials, plain, order, scale, n, first, D, rows, shares, stride, vals, t, threads);
+    float s = 0.0f;
+    for (uint i = t; i < D; i += threads) s += vals[i] * vals[i];
+    const float rms = rsqrt(streamed_sum(s, partial, t, threads) / float(D) + 1e-6f);
+    for (uint i = t; i < D; i += threads) {
+        const uint p = i % (D / 2), other = i < D / 2 ? i + D / 2 : i - D / 2;
+        const float x = vals[i] * rms * gs[i];
+        const float y = vals[other] * rms * gs[other];
+        const half value = half(p < pairs ? mesh_rope<Precise>(x, y, i < D / 2, p, D, position, theta) : x);
+        if (out) out[i] = value;
+        if (line) line[i] = value;
+    }
+}
+
 // A product's input row n: coded column j is scale[j] * f(order[j]), f a value at a logical position.
 template <typename F>
 static inline void streamed_put(device half *input, device const int *order, device const float *scale, uint n,

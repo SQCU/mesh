@@ -56,42 +56,33 @@ kernel void mesh_draft_conv(device const half *x [[buffer(0)]], device const hal
     y[k * D + c] = half(a * float(x[k * D + c]) + b * float(x[p * D + c]));
 }
 
-// Rows' per-head RMS norms and the proportional rotary (rope_theta, the first ROT frequencies of HD / 2, channel i paired
-// with i + HD / 2): threadgroup (h, row) of HD threads; h < H a query head of q (row stride qs) into qo, h = H the row's
-// K = V line (k + ko, row stride ks): K normed by kw and rotated, V normed without a weight, both at the row's position in
-// the caches: a block row's (BLOCK, grid H + 1 by rows) at state[1] + row, a context row's (grid 1 by rows, its line alone)
-// at positions[row].
+// Rows' heads finished (streamed.metal mesh_head over plain rows, precise trigonometry): threadgroup (h, row) of HD
+// threads; h < H a query head of q (row stride qs) into qo, normed by qw and rotated over the first ROT frequency pairs;
+// h = H the row's K = V line (k + ko, row stride ks) into both caches at the row's position: V normed without a weight, K
+// normed by kw and rotated. A block row's (BLOCK, grid H + 1 by rows) position is state[1] + row, a context row's (grid 1
+// by rows, its line alone) positions[row].
 template <uint HD, uint H, uint ROT, bool BLOCK>
 kernel void mesh_draft_heads(device const half *q [[buffer(0)]], device const half *k [[buffer(1)]], device const half *qw [[buffer(2)]],
                              device const half *kw [[buffer(3)]], device half *qo [[buffer(4)]], device half *keys [[buffer(5)]],
                              device half *values [[buffer(6)]], device const uint *state [[buffer(7)]], device const uint *positions [[buffer(8)]],
                              constant float &theta [[buffer(9)]], constant uint &qs [[buffer(10)]], constant uint &ks [[buffer(11)]],
-                             constant uint &ko [[buffer(12)]], uint2 tg [[threadgroup_position_in_grid]], uint i [[thread_index_in_threadgroup]],
-                             uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-    threadgroup float part[HD / 32];
-    threadgroup float row[HD];
+                             constant uint &ko [[buffer(12)]], uint2 tg [[threadgroup_position_in_grid]], uint i [[thread_index_in_threadgroup]]) {
+    threadgroup float vals[HD];
+    threadgroup float gs[HD];
+    threadgroup float partial[32];
     const uint h = BLOCK ? tg.x : H, r = tg.y;
     const uint position = BLOCK ? state[1] + r : positions[r];
-    const float x = h < H ? float(q[ulong(r) * qs + h * HD + i]) : float(k[ulong(r) * ks + ko + i]);
-    const float s = simd_sum(x * x);
-    if (lane == 0) part[sg] = s;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float total = 0.0f;
-    for (uint u = 0; u < HD / 32; u++) total += part[u];
-    const float inv = rsqrt(total / float(HD) + 1e-6f);
-    const float normed = x * inv;
-    if (h == H) values[ulong(position) * HD + i] = half(normed);
-    row[i] = normed * float(h < H ? qw[i] : kw[i]);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    const uint f = i % (HD / 2);
-    float out = row[i];
-    if (f < ROT) {
-        const float angle = float(position) * exp2(-float(2 * f) / float(HD) * log2(theta));
-        const float c = precise::cos(angle), sn = precise::sin(angle);
-        out = i < HD / 2 ? row[i] * c - row[i + HD / 2] * sn : row[i] * c + row[i - HD / 2] * sn;
+    device const float *none = nullptr;
+    if (h < H) {
+        mesh_head<true>(none, q, nullptr, nullptr, r, h * HD, HD, qs, 0, 0, qw, ROT, position, theta, qo + (ulong(r) * H + h) * HD, nullptr,
+                        vals, gs, partial, i, HD);
+        return;
     }
-    if (h < H) qo[(ulong(r) * H + h) * HD + i] = half(out);
-    else keys[ulong(position) * HD + i] = half(out);
+    mesh_head<true>(none, k, nullptr, nullptr, r, ko, HD, ks, 0, 0, nullptr, 0, position, theta, nullptr, values + ulong(position) * HD,
+                    vals, gs, partial, i, HD);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    mesh_head<true>(none, k, nullptr, nullptr, r, ko, HD, ks, 0, 0, kw, ROT, position, theta, nullptr, keys + ulong(position) * HD,
+                    vals, gs, partial, i, HD);
 }
 
 // The Tile plan's KV over a flat cache (attention.metal mesh_tile): page p the 16 lines from position 16 p of the one K = V
