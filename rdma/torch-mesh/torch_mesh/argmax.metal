@@ -29,6 +29,11 @@ __attribute__((always_inline)) static inline void mesh_take(thread float &v, thr
     if (ov > v || (ov == v && ok < k)) { v = ov; k = ok; }
 }
 
+// A candidate packed as a crossing carries it: (its value's bits, its key).
+__attribute__((always_inline)) static inline void mesh_take(thread float &v, thread uint &k, uint2 packed) {
+    mesh_take(v, k, as_type<float>(packed.x), packed.y);
+}
+
 __attribute__((always_inline)) static inline void mesh_take(thread float4 &v, thread uint4 &k, float4 ov, uint4 ok) {
     for (int c = 0; c < 4; c++)
         if (ov[c] > v[c] || (ov[c] == v[c] && ok[c] < k[c])) { v[c] = ov[c]; k[c] = ok[c]; }
