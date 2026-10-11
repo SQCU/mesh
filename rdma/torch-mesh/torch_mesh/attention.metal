@@ -95,11 +95,11 @@ __attribute__((always_inline)) static inline void mesh_attention(thread A &a) {
 // The parts' merge (Flash-Decoding's [Dao et al. 2023]; FlashInfer's state merge): the J parts of one row, each its maximum
 // m_j, sum l_j and unnormalized accumulator o_j (P::m(j), P::l(j), P::o(j, d)), weighed e^(m_j - M) over the parts with
 // l_j > 0. Each part's weight is held by lane j % 32 of every simdgroup (J <= 64) and shuffled, or with Shared computed
-// by the first simdgroup into `weights` (J floats; the total and M into `scalars`) and read from there after a barrier;
-// the G part-groups (thread (d, g): channel slice d of DS) read the accumulators 8 at a time and sum through `red` ((G -
-// 1) DS float4s); group 0 calls store(M, sum_j w_j l_j, sum_j w_j o_j). Scheduled Single (a threadgroup a row:
-// mesh_merge_row and the hosts' kernels) or LastArrival (the last of a row's parts to arrive: mesh_last_arrival, then the
-// merge).
+// by the first simdgroup into `weights` (J floats; the total and M into `scalars`, read by the store) and read from there
+// after a barrier; the G part-groups (thread (d, g): channel slice d of DS) read the accumulators 8 at a time and sum
+// through `red` ((G - 1) DS float4s); group 0 calls store(M, sum_j w_j l_j, sum_j w_j o_j). Scheduled Single (a
+// threadgroup a row: mesh_merge_row and the hosts' kernels) or LastArrival (the last of a row's parts to arrive:
+// mesh_last_arrival, the merge, then mesh_arrival_reset).
 template <typename F, typename F4, uint DS>
 struct mesh_split_parts {
     F ms;
@@ -121,21 +121,23 @@ __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, ui
     if (!Shared || g * DS + d < 32) {
         for (uint p = lane; p < J; p += 32) if (parts.l(p) > 0.0f) top = max(top, parts.m(p));
         top = simd_max(top);
-        for (uint k = 0; k < 2; ++k) {
-            const uint p = lane + 32 * k;
-            const float le = p < J ? parts.l(p) : 0.0f, me = p < J ? parts.m(p) : 0.0f;
-            w[k] = le > 0.0f ? exp(me - top) : 0.0f;
-            total += w[k] * le;
-            if (Shared && p < J) weights[p] = w[k];
-        }
+        if (Shared)
+            for (uint p = lane; p < J; p += 32) {
+                const float le = parts.l(p), we = le > 0.0f ? exp(parts.m(p) - top) : 0.0f;
+                weights[p] = we;
+                total += we * le;
+            }
+        else
+            for (uint k = 0; k < 2; ++k) {
+                const uint p = lane + 32 * k;
+                const float le = p < J ? parts.l(p) : 0.0f, me = p < J ? parts.m(p) : 0.0f;
+                w[k] = le > 0.0f ? exp(me - top) : 0.0f;
+                total += w[k] * le;
+            }
         total = simd_sum(total);
         if (Shared && lane == 0) { scalars[0] = total; scalars[1] = top; }
     }
-    if (Shared) {
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        total = scalars[0];
-        top = scalars[1];
-    }
+    if (Shared) threadgroup_barrier(mem_flags::mem_threadgroup);
     float4 sum = float4(0.0f);
     for (uint p = g; p < J; p += 8 * G) {
         float4 y[8];
@@ -150,42 +152,46 @@ __attribute__((always_inline)) static inline void mesh_merge(P parts, uint J, ui
         threadgroup_barrier(mem_flags::mem_threadgroup);
         if (g == 0) for (uint e = 1; e < G; ++e) sum += red[(e - 1) * DS + d];
     }
-    if (g == 0) store(top, total, sum);
+    if (g == 0) store(Shared ? scalars[1] : top, Shared ? scalars[0] : total, sum);
 }
 
 // LastArrival: each of a row's J threadgroups fences its stores and counts its arrival in word `slot`; true in the last to
-// arrive, after a fence, with the word made 0 again for the dispatch's next run (metal-microbench docs/kernels.md, counts
-// left by a cut dispatch).
+// arrive, after a fence. The last makes the word 0 again for the dispatch's next run once its merge is done
+// (mesh_arrival_reset: metal-microbench docs/kernels.md, counts left by a cut dispatch), off the merge's path.
 __attribute__((always_inline)) static inline bool mesh_last_arrival(device atomic_uint *arrivals, uint slot, uint J, uint t, threadgroup uint &last) {
     atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-    if (t == 0) {
-        last = atomic_fetch_add_explicit(&arrivals[slot], 1u, memory_order_relaxed) == J - 1 ? 1u : 0u;
-        if (last != 0u) atomic_store_explicit(&arrivals[slot], 0u, memory_order_relaxed);
-    }
+    if (t == 0) last = atomic_fetch_add_explicit(&arrivals[slot], 1u, memory_order_relaxed) == J - 1 ? 1u : 0u;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (last == 0u) return false;
     atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, thread_scope_device);
     return true;
 }
 
-// The gathered store (metal-microbench docs/kernels.md#decode-attention, the epilogue): a thread's four outputs from `out`
-// at their places in o's gathered input (O[n columns + inverse[c]] = scale[inverse[c]] value) where `columns` is nonzero,
-// else in place.
-__attribute__((always_inline)) static inline void mesh_gathered_places(ulong out, device const int *inverse, device const float *scale, uint columns,
-                                                                      thread ulong *dst, thread float4 &cs) {
-    cs = float4(1.0f);
-    for (uint i = 0; i < 4; ++i) dst[i] = out + i;
-    if (columns != 0)
-        for (uint i = 0; i < 4; ++i) {
-            const uint c = uint((out + i) % columns), to = uint(inverse[c]);
-            dst[i] = out + i - c + to;
-            cs[i] = scale[to];
-        }
+__attribute__((always_inline)) static inline void mesh_arrival_reset(device atomic_uint *arrivals, uint slot, uint t) {
+    if (t == 0) atomic_store_explicit(&arrivals[slot], 0u, memory_order_relaxed);
 }
 
-__attribute__((always_inline)) static inline void mesh_gathered_store(device half *O, thread const ulong *dst, float4 scale, uint columns, float4 value) {
-    if (columns == 0) { *(device half4 *)(O + dst[0]) = half4(value); return; }
+// The gathered store (metal-microbench docs/kernels.md#decode-attention, the epilogue): a thread's four outputs from `out`
+// at their places in o's gathered input (O[n columns + inverse[c]] = scale[inverse[c]] value) where `columns` is nonzero,
+// else in place. The places are 32-bit element indices (an operand of fewer than 2^32 elements; out and columns multiples
+// of 4, so one column c for the four), held from the task's start to its store.
+__attribute__((always_inline)) static inline void mesh_gathered_places(uint out, device const int *inverse, device const float *scale, uint columns,
+                                                                      thread uint4 &dst, thread float4 &cs) {
+    dst = uint4(out) + uint4(0, 1, 2, 3);
+    cs = float4(1.0f);
+    if (columns != 0) {
+        const uint c = out % columns;
+        for (uint i = 0; i < 4; ++i) {
+            const uint to = uint(inverse[c + i]);
+            dst[i] = out - c + to;
+            cs[i] = scale[to];
+        }
+    }
+}
+
+__attribute__((always_inline)) static inline void mesh_gathered_store(device half *O, uint4 dst, float4 scale, uint columns, float4 value) {
+    if (columns == 0) { *(device half4 *)(O + dst.x) = half4(value); return; }
     for (uint i = 0; i < 4; ++i) O[dst[i]] = half(scale[i] * value[i]);
 }
 
