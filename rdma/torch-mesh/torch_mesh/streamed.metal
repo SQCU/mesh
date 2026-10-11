@@ -106,10 +106,16 @@ static inline float streamed_gelu_of(float g, float u) {
     return 0.5f * g * (1.0f + tanh(inner)) * u;
 }
 
+// The logit softcap: cap tanh(x / cap) where cap > 0, else x.
+static inline float streamed_capped(float x, float cap) { return cap > 0.0f ? tanh(x / cap) * cap : x; }
+
+// The threadgroup's sum of each thread's s (its simdgroups' through `partial`); Fresh where nothing reads `partial` before
+// the call (the first barrier, which keeps a former sum's readers ahead of the writes, left out).
+template <bool Fresh = false>
 static inline float streamed_sum(float s, threadgroup float *partial, uint t, uint threads) {
     s = simd_sum(s);
     if (threads <= 32) return s;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (!Fresh) threadgroup_barrier(mem_flags::mem_threadgroup);
     if ((t & 31u) == 0) partial[t >> 5] = s;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     float total = 0.0f;
@@ -119,8 +125,9 @@ static inline float streamed_sum(float s, threadgroup float *partial, uint t, ui
 
 // The RMS norm's factor of a row of `count` elements whose squares the threadgroup's threads hold `s` of: rsqrt(the mean
 // square + eps), the squares summed by streamed_sum.
+template <bool Fresh = false>
 static inline float streamed_rms(float s, uint count, float eps, threadgroup float *partial, uint t, uint threads) {
-    return rsqrt(streamed_sum(s, partial, t, threads) / float(count) + eps);
+    return rsqrt(streamed_sum<Fresh>(s, partial, t, threads) / float(count) + eps);
 }
 
 // A product's output row n at logical positions [first, first + count) into vals: from its partials (shares > 0:
@@ -385,7 +392,7 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
         const uint output = (group.x * BANDS + at) * 32 + r;
         if (OUT == 0) { partials[ulong(group.y) * d.split + n * d.outputs + output] = total; continue; }
         const float value = rowScale[output] * total;
-        ys[ulong(n) * d.stride + uint(order[output])] = half(d.cap > 0.0f ? tanh(value / d.cap) * d.cap : value);
+        ys[ulong(n) * d.stride + uint(order[output])] = half(streamed_capped(value, d.cap));
     }
 }
 
@@ -504,7 +511,7 @@ kernel void streamed_finish(device const float *partials [[buffer(0)]], device T
     const uint n = i / d.outputs, r = i % d.outputs;
     float value = streamed_value(partials, i, d.shares, d.split, scale[r]);
     if (d.inputs) value /= factor[n];
-    y[n * d.stride + uint(order[r])] = T(d.cap > 0.0f ? tanh(value / d.cap) * d.cap : value);
+    y[n * d.stride + uint(order[r])] = T(streamed_capped(value, d.cap));
 }
 
 template [[host_name("streamed_finish")]] [[kernel]] decltype(streamed_finish<half>) streamed_finish<half>;
@@ -628,7 +635,7 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
                         + dot(float4(as_type<char4>(bits.z)), xv[2]) + dot(float4(as_type<char4>(bits.w)), xv[3]);
             }
         }
-        const float rms = eps > 0.0f ? rsqrt(simd_sum(squares) / float(columns) + eps) : 1.0f;
+        const float rms = eps > 0.0f ? streamed_rms(squares, columns, eps, nullptr, lane, 32) : 1.0f;
         for (uint c = 0; c < C; c++) {
             const float total = simd_sum(acc[c]) * rms;
             const uint j = j0 + c;
@@ -706,15 +713,8 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
             for (uint u = 0; u < V; u++) if (u < W) { const float other = simd_shuffle_xor(r[u], h); r[u] = (lane & h) ? other - r[u] : r[u] + other; }
         for (uint u = 0; u < V; u++) if (u < W) v[(b << shift) + lane * W + u] = r[u];
     }
-    squares = simd_sum(squares);
-    if (lane == 0) partial[simd] = squares;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float factor = rsqrt(float(columns));
-    if (eps > 0.0f) {
-        float total = 0.0f;
-        for (uint s = 0; s < simds; s++) total += partial[s];
-        factor *= rsqrt(total / float(columns) + eps);
-    }
+    const float rms = streamed_rms<true>(squares, columns, eps, partial, t, threads);
+    const float factor = rsqrt(float(columns)) * (eps > 0.0f ? rms : 1.0f);
     const uint j = t & (N - 1), g = t >> shift, Q = K / (threads >> shift);
     threadgroup float *mixed = v + columns;
     float column[KM];
@@ -946,7 +946,7 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
         if (n >= rows) continue;
         if (finish == 0) { partials[ulong(share) * stride + ulong(n) * outputs + r] = acc[i]; continue; }
         const float value = rowScale[r] * acc[i];
-        ys[ulong(n) * stride + uint(order[r])] = half(cap > 0.0f ? tanh(value / cap) * cap : value);
+        ys[ulong(n) * stride + uint(order[r])] = half(streamed_capped(value, cap));
     }
 }
 

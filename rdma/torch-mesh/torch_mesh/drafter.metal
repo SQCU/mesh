@@ -89,7 +89,8 @@ kernel void mesh_draft_heads(device const half *q [[buffer(0)]], device const ha
 }
 
 // The Tile plan's KV over a flat cache (attention.metal mesh_tile): page p the 16 lines from position 16 p of the one K = V
-// head; 8 query rows (block row i / H, head i % H) a task, part j of J over the pages of [lo, limit) (lo the anchor less the
+// head; 8 query rows (block row i / H, head i % H) a task, part j of J over the pages of [lo, limit) (mesh_keys of the block
+// [state[1], state[1] + K) as rows attending each other, its window W + 1 from the block's first row: lo the anchor less the
 // window W, limit state[1] + K), every row reading every position there.
 template <uint HD>
 struct mesh_draft_kv {
@@ -115,11 +116,11 @@ kernel void mesh_draft_attention(device const half *Q [[buffer(0)]], device cons
     tile task{{keys, values}, Q, mp, lp, op};
     task.layout(region, diag, places);
     task.scale = 1.0f; task.stride = HD; task.s = sg; task.lane = lane; task.t = t; task.j = tg.y; task.parts = J;
-    const uint limit = state[1] + K, low = state[1] > W ? state[1] - W : 0u;
+    const uint2 bounds = mesh_keys(state[1], state[1] + K, W + 1, state[1], state[1] + K);
     for (uint r = 0; r < 8; ++r) {
         task.rows[r] = 8 * tg.x + r < K * H ? 8 * tg.x + r : 0xFFFFFFFFu;
-        task.lo[r] = low;
-        task.hi[r] = limit;
+        task.lo[r] = bounds.x;
+        task.hi[r] = bounds.y;
     }
     task.span(J, true);
     mesh_attention_tile(task);
@@ -169,7 +170,7 @@ kernel void mesh_draft_candidates(device const half *base [[buffer(0)]], device 
     float top = -3.0e38f, low = 3.0e38f;
     for (uint u = 0; u < N; u++) {
         const float z = float(base[ulong(k) * stride + u * T + t]);
-        v[u] = cap > 0.0f ? tanh(z / cap) * cap : z;
+        v[u] = streamed_capped(z, cap);
         top = max(top, v[u]);
         low = min(low, v[u]);
     }
