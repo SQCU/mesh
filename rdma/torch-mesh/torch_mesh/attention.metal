@@ -200,7 +200,8 @@ __attribute__((always_inline)) static inline void mesh_merge_row(device const fl
 
 // The Tile plan (metal-microbench docs/kernels.md#decode-attention, the verify plan; FlashInfer's tensor-core decode for
 // grouped queries, llama.cpp's kernel_flash_attn_ext): a task is 8 query rows of one KV head (a stream's rows times the
-// query heads that read it) over part j of the KV range, its scores and value products 8 x 8 simdgroup matrices. Each
+// query heads that read it) over part j of the KV range, its scores and value products 8 x 8 simdgroup matrices; its one
+// operand is mesh_tile (below) over a KV type. Each
 // chunk is one page a simdgroup (A::simdgroups pages, C = 16 A::simdgroups positions): the page's scores S = Q K^T (two
 // 8 x 8 blocks over D / 8 products), the rows' online softmax (8 / A::simdgroups rows a simdgroup, C / 32 positions a
 // lane), the accumulators rescaled by the diagonal of the rows' factors, and O += P V over the chunk's pages, each
@@ -293,4 +294,87 @@ __attribute__((always_inline)) static inline void mesh_attention_tile(thread A &
     }
     a.finish(o, m, l);
 }
+
+// The keys a query row attends, an interval [lo, hi) of logical positions (FlexAttention's mask over one index; metal-microbench
+// docs/kernels.md#decode-attention, the tile operand): k <= q (Causal), or both q and k in a block [b0, b1) of rows that
+// attend each other both ways (Block, a soft item's rows), k < len (End), and with a window W > 0, k + W > q (Window). A
+// sliding layer's rows are (Causal or Block) and Window and End; a global layer's Causal and End (b0 = b1).
+__attribute__((always_inline)) static inline uint2 mesh_keys(uint q, uint len, uint window, uint b0, uint b1) {
+    const uint upper = min(len, q >= b0 && q < b1 ? max(q + 1, b1) : q + 1), lower = window > 0 && q + 1 > window ? q + 1 - window : 0u;
+    return uint2(min(lower, upper), upper);
+}
+
+// The Tile plan's operand over a KV type KV (KV::at(p, k, v): logical page p's K and V line addresses of the task's KV head,
+// false where it holds none): 8 query rows, row r Q's row rows[r] (~0u for none) attending [lo[r], hi[r]); part j of J over
+// the pages [base, base + pages) of the rows' union, each part's (m, l, O) at Q's row times `parts` plus j. layout() places
+// the threadgroup memory a wrapper declares (region floats, 64 diag floats, simdgroups places) and span() the pages and J.
+template <uint D, typename KV>
+struct mesh_tile {
+    enum : uint { dims = D, simdgroups = 4, region = 8 * D > 4 * D + 12 * 64 ? 8 * D : 4 * D + 12 * 64 };
+    KV kv;
+    device const half *Q;
+    device float *mp;
+    device float *lp;
+    device float4 *op;
+    threadgroup half *qs;
+    threadgroup float *ss;
+    threadgroup half *ps;
+    threadgroup float *diag;
+    threadgroup ulong *places;
+    threadgroup float *stage;
+    float scale;
+    uint stride, s, lane, t, J, j, base, pages, parts;
+    uint rows[8], lo[8], hi[8];
+
+    __attribute__((always_inline)) void layout(threadgroup float *region, threadgroup float *d, threadgroup ulong *p) {
+        qs = (threadgroup half *)region; ss = region + 4 * D; ps = (threadgroup half *)(region + 4 * D + 8 * 64);
+        diag = d; places = p; stage = region;
+    }
+
+    __attribute__((always_inline)) void span(uint splits, bool every) {
+        uint low = 0xFFFFFFFFu, high = 0u;
+        for (uint r = 0; r < 8; ++r)
+            if (rows[r] != 0xFFFFFFFFu && hi[r] > lo[r]) { low = min(low, lo[r]); high = max(high, hi[r]); }
+        if (high == 0u) low = 0u;
+        base = low / 16;
+        pages = (high + 15) / 16 - base;
+        J = every ? splits : max(min(splits, (pages + simdgroups - 1) / simdgroups), 1u);
+    }
+
+    __attribute__((always_inline)) void load_q() {
+        for (uint e = t; e < 2 * D; e += 32 * simdgroups) {
+            const uint i = rows[e / (D / 4)];
+            ((threadgroup half4 *)qs)[e] = i != 0xFFFFFFFFu ? ((device const half4 *)Q)[ulong(i) * (D / 4) + e % (D / 4)] : half4(0.0h);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    __attribute__((always_inline)) bool chunk(uint i) { return j + J * simdgroups * i < pages; }
+
+    __attribute__((always_inline)) bool page(uint i, uint w, thread ulong &k, thread ulong &v) {
+        const uint p = j + J * (simdgroups * i + w);
+        return p < pages && kv.at(base + p, k, v);
+    }
+
+    __attribute__((always_inline)) uint first(uint i, uint w) { return (base + j + J * (simdgroups * i + w)) * 16; }
+
+    __attribute__((always_inline)) bool live(uint r, uint position) { return position >= lo[r] && position < hi[r]; }
+
+    __attribute__((always_inline)) void finish(thread simdgroup_float8x8 *o, thread const float *m, thread const float *l) {
+        constexpr uint NSG = simdgroups, OB = D / 8 / NSG, RS = 8 / NSG, D4 = D / 4;
+        for (uint b = 0; b < OB; b++) simdgroup_store(o[b], stage + 8 * (b * NSG + s), D);
+        if (lane == 0)
+            for (uint k = 0; k < RS; k++) {
+                const uint i = rows[s * RS + k];
+                if (i == 0xFFFFFFFFu) continue;
+                mp[ulong(i) * parts + j] = l[k] > 0.0f ? m[k] : -INFINITY;
+                lp[ulong(i) * parts + j] = l[k];
+            }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint e = t; e < 2 * D; e += 32 * NSG) {
+            const uint i = rows[e / D4];
+            if (i != 0xFFFFFFFFu) op[(ulong(i) * parts + j) * D4 + e % D4] = ((threadgroup const float4 *)stage)[e];
+        }
+    }
+};
 #endif

@@ -94,59 +94,17 @@ kernel void mesh_draft_heads(device const half *q [[buffer(0)]], device const ha
     else keys[ulong(position) * HD + i] = half(out);
 }
 
-// The Tile plan's operand over a flat cache: 8 query rows (block row i / H, head i % H) of the one K = V head, part j of J
-// over the pages of [lo, limit) (lo the anchor less the window W, limit state[1] + K), every row reading every position
-// there.
+// The Tile plan's KV over a flat cache (attention.metal mesh_tile): page p the 16 lines from position 16 p of the one K = V
+// head; 8 query rows (block row i / H, head i % H) a task, part j of J over the pages of [lo, limit) (lo the anchor less the
+// window W, limit state[1] + K), every row reading every position there.
 template <uint HD>
-struct mesh_draft_tile {
-    enum : uint { dims = HD, simdgroups = 4 };
+struct mesh_draft_kv {
     device const half *keys;
     device const half *values;
-    device const half *Q;
-    device float *mp;
-    device float *lp;
-    device float4 *op;
-    threadgroup half *qs;
-    threadgroup float *ss;
-    threadgroup half *ps;
-    threadgroup float *diag;
-    threadgroup ulong *places;
-    threadgroup float *stage;
-    float scale;
-    uint stride, s, lane, t, row0, total, J, j, base, pages, lo, limit;
-
-    __attribute__((always_inline)) void load_q() {
-        for (uint e = t; e < 2 * HD; e += 32 * simdgroups) {
-            const uint i = row0 + e / (HD / 4);
-            ((threadgroup half4 *)qs)[e] = i < total ? ((device const half4 *)Q)[ulong(i) * (HD / 4) + e % (HD / 4)] : half4(0.0h);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-    __attribute__((always_inline)) bool chunk(uint i) { return j + J * simdgroups * i < pages; }
-    __attribute__((always_inline)) bool page(uint i, uint w, thread ulong &k, thread ulong &v) {
-        const uint p = j + J * (simdgroups * i + w);
-        if (p >= pages) return false;
-        k = ulong(keys + ulong(base + p) * 16 * HD);
-        v = ulong(values + ulong(base + p) * 16 * HD);
+    __attribute__((always_inline)) bool at(uint p, thread ulong &k, thread ulong &v) {
+        k = ulong(keys + ulong(p) * 16 * HD);
+        v = ulong(values + ulong(p) * 16 * HD);
         return true;
-    }
-    __attribute__((always_inline)) uint first(uint i, uint w) { return (base + j + J * (simdgroups * i + w)) * 16; }
-    __attribute__((always_inline)) bool live(uint, uint position) { return position >= lo && position < limit; }
-    __attribute__((always_inline)) void finish(thread simdgroup_float8x8 *o, thread const float *m, thread const float *l) {
-        constexpr uint NSG = simdgroups, OB = HD / 8 / NSG, RS = 8 / NSG, D4 = HD / 4;
-        for (uint b = 0; b < OB; b++) simdgroup_store(o[b], stage + 8 * (b * NSG + s), HD);
-        if (lane == 0)
-            for (uint k = 0; k < RS; k++) {
-                const uint i = row0 + s * RS + k;
-                if (i >= total) continue;
-                mp[ulong(i) * J + j] = l[k] > 0.0f ? m[k] : -INFINITY;
-                lp[ulong(i) * J + j] = l[k];
-            }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint e = t; e < 2 * HD; e += 32 * NSG) {
-            const uint i = row0 + e / D4;
-            if (i < total) op[(ulong(i) * J + j) * D4 + e % D4] = ((threadgroup const float4 *)stage)[e];
-        }
     }
 };
 
@@ -156,18 +114,20 @@ kernel void mesh_draft_attention(device const half *Q [[buffer(0)]], device cons
                                  device const uint *state [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]],
                                  uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                                  uint sg [[simdgroup_index_in_threadgroup]]) {
-    constexpr uint NSG = mesh_draft_tile<HD>::simdgroups, C = 16 * NSG;
-    threadgroup float region[8 * HD > 4 * HD + 12 * C ? 8 * HD : 4 * HD + 12 * C];
+    typedef mesh_tile<HD, mesh_draft_kv<HD>> tile;
+    threadgroup float region[tile::region];
     threadgroup float diag[64];
-    threadgroup ulong places[NSG];
-    mesh_draft_tile<HD> task{keys, values, Q, mp, lp, op, (threadgroup half *)region, region + 4 * HD,
-                             (threadgroup half *)(region + 4 * HD + 8 * C), diag, places, region};
-    task.scale = 1.0f; task.stride = HD; task.s = sg; task.lane = lane; task.t = t; task.j = tg.y; task.J = J;
-    task.row0 = 8 * tg.x; task.total = K * H;
-    task.limit = state[1] + K;
-    task.lo = state[1] > W ? state[1] - W : 0u;
-    task.base = task.lo / 16;
-    task.pages = (task.limit + 15) / 16 - task.base;
+    threadgroup ulong places[tile::simdgroups];
+    tile task{{keys, values}, Q, mp, lp, op};
+    task.layout(region, diag, places);
+    task.scale = 1.0f; task.stride = HD; task.s = sg; task.lane = lane; task.t = t; task.j = tg.y; task.parts = J;
+    const uint limit = state[1] + K, low = state[1] > W ? state[1] - W : 0u;
+    for (uint r = 0; r < 8; ++r) {
+        task.rows[r] = 8 * tg.x + r < K * H ? 8 * tg.x + r : 0xFFFFFFFFu;
+        task.lo[r] = low;
+        task.hi[r] = limit;
+    }
+    task.span(J, true);
     mesh_attention_tile(task);
 }
 
