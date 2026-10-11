@@ -160,8 +160,7 @@ static inline void mesh_head(P partials, device const half *plain, device const 
     for (uint i = t; i < D; i += threads) {
         const uint p = i % (D / 2), other = i < D / 2 ? i + D / 2 : i - D / 2;
         const float x = vals[i] * rms * gs[i];
-        const float y = vals[other] * rms * gs[other];
-        const half value = half(p < pairs ? mesh_rope<Precise>(x, y, i < D / 2, p, D, position, theta) : x);
+        const half value = half(p < pairs ? mesh_rope<Precise>(x, vals[other] * rms * gs[other], i < D / 2, p, D, position, theta) : x);
         if (out) out[i] = value;
         if (line) line[i] = value;
     }
