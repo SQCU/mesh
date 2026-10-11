@@ -1030,8 +1030,8 @@ def slices(streamed, program=None, rank=None):
 
 def _attention(export, part, ctx, classes, fit_model):
     """The decode attention plan a rank takes for each of its layers (its head dimension, window and query heads) at each
-    rows class to 16 (docs/kernels.md#decode-attention): the node's model's least at the layer's positions (the window,
-    else the call's context)."""
+    rows class the table serves (docs/kernels.md#decode-attention): the node's model's least at the layer's positions (the
+    window, else the call's context)."""
     from safetensors import safe_open
     with safe_open(str(export), 'pt') as f:
         model = Path((f.metadata() or {}).get('model', ''))
@@ -1050,7 +1050,7 @@ def _attention(export, part, ctx, classes, fit_model):
         sliding = kind == 'sliding_attention'
         dims = text['head_dim'] if sliding else text.get('global_head_dim') or text['head_dim']
         window = text.get('sliding_window', 0) if sliding else 0
-        for rows in (c for c in classes if c <= 16):
+        for rows in classes:
             plan, priced = attention_plan(fit_model, dims, rows, held, window or ctx)
             out.append({'layer': L, 'rows': rows, 'plan': plan, 'us': {k: round(v, 2) for k, v in priced.items()}})
     return out
