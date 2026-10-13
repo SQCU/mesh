@@ -21,6 +21,8 @@ printf 'rdma=%s\n' "$(rdma_ctl status 2>&1)"
 printf 'sdk=%s\n' "$([ -f "$(xcrun --show-sdk-path 2>/dev/null)/usr/include/infiniband/verbs.h" ] && echo yes || echo no)"
 printf 'branch=%s\n' "$(awk '{print $1}' /usr/local/mesh/revision 2>/dev/null || echo unknown)"
 printf 'converged=%s\n' "$(awk '{print $2}' /usr/local/mesh/revision 2>/dev/null || echo unknown)"
+grep -E '^(disk_free_gib|idle_blockers)=' /var/run/mesh-health 2>/dev/null
+printf 'health_warnings=%s\n' "$([ -f /var/run/mesh-health ] && awk '/^warn=/{n++} END{print n+0}' /var/run/mesh-health || echo unmeasured)"
 printf 'uptime=%s\n' "$(uptime | sed 's/.*up //;s/,[^,]*users.*//' | tr -d ' ')"
 for p in $ports; do
   iface=$(ifconfig "$p" 2>/dev/null)

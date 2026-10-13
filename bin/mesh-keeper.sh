@@ -49,5 +49,11 @@ pgrep -qf /usr/local/mesh/bin/babeld || {
   echo "[$(ts)] DRIFT babeld down"; launchctl kickstart -k system/io.mesh.router >/dev/null 2>&1; drift=1; }
 [ "$(rdma_ctl status 2>&1)" = enabled ] || {
   echo "[$(ts)] ALARM rdma disabled, physical Recovery OS visit required"; drift=1; }
+/usr/local/mesh/bin/mesh-health.sh 2>/dev/null | sed -n 's/^warn=//p' > /var/run/mesh-health.warn
+if ! cmp -s /var/run/mesh-health.warn /var/run/mesh-health.warned || [ $(( $(date +%s) - $(stat -f %m /var/run/mesh-health.warned 2>/dev/null || echo 0) )) -gt 3600 ]; then
+  while read -r w; do echo "[$(ts)] WARN $w"; logger -p user.warning -t io.mesh.keeper "$w"; done < /var/run/mesh-health.warn
+  [ -s /var/run/mesh-health.warn ] || [ ! -s /var/run/mesh-health.warned ] || { echo "[$(ts)] health clear"; logger -t io.mesh.keeper "health clear"; }
+  cp /var/run/mesh-health.warn /var/run/mesh-health.warned
+fi
 [ "$drift" -eq 0 ] || echo "[$(ts)] pass complete"
 exit 0
