@@ -18,6 +18,15 @@ reboots itself on an internal policy. Correcting that default is the only work
 that justifies a human being physically present. See [THREAT-MODEL.md](THREAT-MODEL.md)
 before changing settings that look wrong.
 
+A node stays awake by its power policy (`sleep 0`, `standby 0`, `autopoweroff 0`, `autorestart 1`, re-asserted by
+the keeper), never by a process holding assertions. Until 2026-10-13 `io.mesh.caffeinate` ran `caffeinate -dimsu`,
+which kept the display on and declared the user active forever, so `dasd` never found the node idle and never ran
+the system's own idle maintenance: on the M4 Pro the Neural Engine daemon's compiled-model cache, which SIP lets only
+`aned`'s garbage collection delete (`com.apple.aned.danglingModelsGC`, `com.apple.aned.modelCacheGC`, refused 7,750
+times in two weeks on "Device Activity Policy"), grew to about 390 GB of its 460 GB disk. A full disk is the false
+negative this fleet exists to prevent; the display sleeps after 10 minutes so the node can be idle by macOS's
+definition while it keeps computing.
+
 ## The one step that cannot be automated
 
 `rdma_ctl enable` only runs from Recovery OS:

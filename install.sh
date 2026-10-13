@@ -51,14 +51,14 @@ ln -sf "$MESH_ROOT/bin/mesh-observe.py" /usr/local/bin/mesh-observe
 ln -sf "$MESH_ROOT/bin/mesh-top.py" /usr/local/bin/mesh-top
 ln -sf "$MESH_ROOT/bin/mesh-python" /usr/local/bin/mesh-python
 ok "$MESH_ROOT; mesh-status, mesh-peers, mesh-observe and mesh-top on PATH"
-printf 'sleep 0\ndisplaysleep 0\ndisksleep 0\nstandby 0\nautorestart 1\nwomp 1\npowermode 2\nfirewall off\n' > "$MESH_ROOT/policy.default"
+printf 'sleep 0\ndisplaysleep 10\ndisksleep 0\nstandby 0\nautorestart 1\nwomp 1\npowermode 2\nfirewall off\n' > "$MESH_ROOT/policy.default"
 cp "$MESH_ROOT/policy.default" "$MESH_ROOT/policy"
 ok "policy: uniform fleet default"
 printf '%s\n' "${MESH_BRANCH:-main}" > "$MESH_ROOT/branch"
 printf '%s\n' "${MESH_REPO:-SQCU/mesh}" > "$MESH_ROOT/repo"
 
 sec "2. Power"
-for kv in sleep=0 displaysleep=0 disksleep=0 standby=0 autopoweroff=0 hibernatemode=0 \
+for kv in sleep=0 displaysleep=10 disksleep=0 standby=0 autopoweroff=0 hibernatemode=0 \
           powernap=0 autorestart=1 womp=1 tcpkeepalive=1 ttyskeepawake=1 powermode=2; do
   try "$kv" pmset -a "${kv%%=*}" "${kv##*=}"
 done
@@ -148,9 +148,7 @@ $3
 PL
   chmod 644 "/Library/LaunchDaemons/$1.plist"
 }
-mkplist io.mesh.caffeinate "<string>/usr/bin/caffeinate</string><string>-dimsu</string>" \
-  "  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>10</integer>"
+launchctl bootout system/io.mesh.caffeinate >/dev/null 2>&1; rm -f /Library/LaunchDaemons/io.mesh.caffeinate.plist
 mkplist io.mesh.beacon "<string>$MESH_ROOT/bin/mesh-beacon.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>"
@@ -181,7 +179,7 @@ mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" " 
 mkplist io.mesh.update "<string>$MESH_ROOT/bin/mesh-update.sh</string>" "  <key>StartInterval</key><integer>900</integer>"
 mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
 ADMIN_UID=$(id -u "$ADMIN_USER")
-for L in io.mesh.caffeinate io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.nodeinfo io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper; do
+for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.nodeinfo io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper; do
   launchctl enable system/$L >/dev/null 2>&1
   if launchctl print "system/$L" >/dev/null 2>&1; then
     retained=$((retained+1)); ok "$L retained; launchd definition refresh pending"
