@@ -38,14 +38,19 @@ else
   for mesh_file in pyproject.toml uv.lock .python-version; do
     [ -f "$mesh_source/$mesh_file" ] && install -m 644 "$mesh_source/$mesh_file" "$mesh_stage/"
   done
-  # UV_NO_MODIFY_PATH: the installer appends no line to the user's shell profiles (it had, one a runtime)
-  /usr/bin/curl -LsSf "https://astral.sh/uv/$mesh_uv_version/install.sh" | env UV_INSTALL_DIR="$mesh_stage/bin" UV_NO_MODIFY_PATH=1 /bin/sh >/dev/null 2>&1 || echo "UV download failed; trying installed UV"
-  mesh_uv="$mesh_target/bin/uv"
-  for mesh_uv_candidate in "$mesh_stage/bin/uv" "$mesh_target/bin/uv" /usr/local/mesh/bin/uv /opt/homebrew/bin/uv /usr/local/bin/uv "${HOME:-}/.local/bin/uv"; do
-    [ -x "$mesh_uv_candidate" ] || continue
-    mesh_uv="$mesh_uv_candidate"
-    "$mesh_uv" --version | grep -q "$mesh_uv_version" && break
+  mesh_uv=
+  for mesh_uv_candidate in "$mesh_target/bin/uv" /usr/local/mesh/bin/uv /opt/homebrew/bin/uv /usr/local/bin/uv "${HOME:-}/.local/bin/uv"; do
+    [ -x "$mesh_uv_candidate" ] && "$mesh_uv_candidate" --version 2>/dev/null | grep -q "$mesh_uv_version" && { mesh_uv="$mesh_uv_candidate"; break; }
   done
+  # an installed uv at the pinned version is used; only without one is the pinned uv downloaded (UV_NO_MODIFY_PATH:
+  # the installer appends no line to the user's shell profiles, as it had, one a runtime)
+  if [ -z "$mesh_uv" ]; then
+    /usr/bin/curl -LsSf "https://astral.sh/uv/$mesh_uv_version/install.sh" | env UV_INSTALL_DIR="$mesh_stage/bin" UV_NO_MODIFY_PATH=1 /bin/sh >/dev/null 2>&1 || echo "UV download failed; trying installed UV"
+    for mesh_uv_candidate in "$mesh_stage/bin/uv" "$mesh_target/bin/uv" /usr/local/mesh/bin/uv /opt/homebrew/bin/uv /usr/local/bin/uv "${HOME:-}/.local/bin/uv"; do
+      [ -x "$mesh_uv_candidate" ] && { mesh_uv="$mesh_uv_candidate"; break; }
+    done
+  fi
+  mesh_uv=${mesh_uv:-$mesh_target/bin/uv}
   if UV_PROJECT_ENVIRONMENT="$mesh_stage/.venv" "$mesh_uv" sync --project "$mesh_stage" --frozen --no-dev --managed-python --python "$mesh_python_version" \
       && "$mesh_stage/.venv/bin/python" -c 'import mlx.core,numpy; print("mesh runtime ready")'; then
     ln -s "$mesh_stage" "$mesh_stage/current"
