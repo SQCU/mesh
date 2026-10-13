@@ -30,7 +30,8 @@ definition while it keeps computing.
 Each keeper pass runs `bin/mesh-health.sh`, which writes `/var/run/mesh-health`: disk free, used and floor, the trend of
 free space over the last day, any process holding a user-activity or display assertion for over an hour (what keeps
 `dasd` from finding the node idle), and when aned's cache GC last completed and how often `dasd` refused it. Below
-twice the floor it also measures what `du` can read against what is used (the rest is space only the OS accounts
+twice the floor those two become warnings (an attended machine may keep its display on for good, and starved
+housekeeping only matters once space runs short), and it also measures what `du` can read against what is used (the rest is space only the OS accounts
 for) and the largest directories under /Users. Each condition worth attention is a `warn=` line; the keeper writes
 new or changed warnings, and every warning again each hour, to `keeper.log` and to the unified log (`log show --last
 1d --predicate 'process == "logger"'`, which is written even when the disk is under the floor and the keeper's own log
