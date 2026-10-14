@@ -219,8 +219,9 @@ product's output from its shares, `streamed_block_element` enumerating a block's
 position groups' sum and the KV type's finish (its parts' merge and store). metal-microbench's engine instantiates it over
 its fp16 pages (`decode_paged`) and its recorder over LiteRT's int8 window (`k7_window`, K7); a new KV layout is a new type
 (metal-microbench docs/kernels.md#decode-attention). `torch_mesh/argmax.metal` is a row's greatest candidate in one order
-(`mesh_argmax`: the greater value, then the lower key; one candidate or four channels a thread; a row's threadgroups merged
-by the last to arrive), the engine's vocabulary argmax and LiteRT's native ARG_MAX its instances.
+(`mesh_argmax`: the greater value, then the lower key; a row's threadgroups merged by the last to arrive), and the
+selection is its draw at temperature 1 (`mesh_draw`: the greatest logit plus the Gumbel noise of the row's seed, key and
+token), metal-microbench's engine's and its LiteRT program's one selection.
 
 `torch_mesh/streamed.py` makes a coded matrix a torch tensor (a wrapper subclass whose aten operations are those
 kernels), so a program is written once in torch and queried for what it needs: evaluated, or differentiated by torch's
@@ -258,7 +259,8 @@ w = s["lm_head"].to("cpu")                        # decoded
   `RowwiseParallel`, forward and backward) with `src_data_rank=None`, each rank cutting its share from its own copy of
   the codes (its storage is no dense buffer to scatter). A correctness check, not a measure of speed:
   metal-microbench `tools/torch_parallel/e2b.py` CODES= (Gemma-4 E2B, every coded matrix its weight, each layer's FFN
-  parallelized so on the pair), its greedy tokens the one-device run's for 24 of 24.
+  parallelized so on the pair), each token drawn at temperature 1 (Gumbel noise keyed by the position, the same on every
+  rank).
 
 `python -m torch_mesh.streamed check EXPORT [NAME ...]` checks the decode against `model_code.py`'s reference decode,
 the node's cooperative slots, each chosen instance's product (1, 2, 4, 8, 16 and 300 rows; the head's at 1, 2 and 4) and its input gradient against
