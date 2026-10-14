@@ -1,15 +1,12 @@
-"""The mesh from Python.  The planner (mesh-plan.h: link maps, the trees every collective and message take, operands,
-collectives, steps, their planning and pricing) is the header's own, through _mesh_c (mesh_c_build.py compiles the header's declarations against it, so
-no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The host transfers
-(Mesh, Steps: mesh.h's attach, sections and prepared transfers) are bound below by ctypes, mesh.h not
-being a header a binder takes as written."""
-import ctypes as C
+"""The mesh from Python: mesh-plan.h through _mesh_c (mesh_c_build.py compiles the header's declarations against it, so
+no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The read side is the
+node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's serial (mesh_map_wait).  The planner is
+the header's own: link maps, the trees every collective and message take, operands, collectives, steps, their
+planning and pricing.  Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch)."""
+import errno
 import os
 import sys
-import time
 from types import SimpleNamespace
-
-import numpy as np
 
 RDMA = os.path.dirname(os.path.abspath(__file__))
 if RDMA not in sys.path:
@@ -19,8 +16,6 @@ try:
 except ImportError as missing:
     raise ImportError(f'_mesh_c is not built for {sys.executable} (Python {sys.version.split()[0]}): '
                       f'make -C {RDMA} mesh-c PYTHON={sys.executable}') from missing
-
-U, Q, Z = C.c_uint32, C.c_uint64, C.c_size_t
 
 
 def _named(prefix, names):
@@ -33,19 +28,16 @@ def _named(prefix, names):
 
 KINDS = _named('MESH_LINKS_', ('mesh', 'ring', 'tree', 'graph'))
 WHATS = _named('MESH_', ('allreduce', 'broadcast', 'reduce', 'reduce_scatter', 'allgather'))
-SEND, REDUCE, COPY = lib.MESH_STEP_SEND, lib.MESH_STEP_REDUCE, lib.MESH_STEP_COPY
+SEND, REDUCE = lib.MESH_STEP_SEND, lib.MESH_STEP_REDUCE
 ALLREDUCE, BROADCAST = lib.MESH_ALLREDUCE, lib.MESH_BROADCAST
-CANCELLED = 2 ** 64 - 1
 
 
 class LinkMap:
     """mesh-plan.h's struct mesh_link_map (`c`, a pointer to it) of `kind` (KINDS) over `nodes`, the links `pairs`
     and each one's (alpha us, beta ns a byte) in `cost` (None: the caller's alpha and beta for every link), the
-    storage held here; refused where mesh_link_map_check refuses it, except that with `apart` a graph whose links
-    leave its nodes apart is kept (a subgroup's: the library joins it along the paths of the widest communicator alive
-    over its ranks, nccl.h)."""
+    storage held here; refused where mesh_link_map_check refuses it."""
 
-    def __init__(self, kind, nodes, pairs, cost=None, apart=False):
+    def __init__(self, kind, nodes, pairs, cost=None):
         pairs = [tuple(p) for p in pairs]
         self.kind, self.nodes, self.pairs, self.cost = kind, nodes, pairs, None if cost is None else [tuple(c) for c in cost]
         self._link = ffi.new('uint32_t[][2]', [list(p) for p in pairs] or [[0, 0]])
@@ -53,30 +45,44 @@ class LinkMap:
         self.c = ffi.new('struct mesh_link_map *')
         self.c.kind, self.c.nodes, self.c.links, self.c.link, self.c.cost = KINDS.index(kind), nodes, len(pairs), self._link, self._cost
         status = lib.mesh_link_map_check(self.c)
-        if status and apart and kind == 'graph' and all(a != b and max(a, b) < nodes for a, b in pairs):
-            status = 0
         if status:
             raise ValueError(f'a {kind} of {nodes} nodes with links {pairs} is not one its algorithms run on: {os.strerror(status)}')
 
 
-def link_map(kind, nodes, pairs, cost=None, apart=False):
+def link_map(kind, nodes, pairs, cost=None):
     """A LinkMap (above)."""
-    return LinkMap(kind, nodes, pairs, cost, apart)
+    return LinkMap(kind, nodes, pairs, cost)
 
 
-def join(reports, apart=False):
-    """mesh_link_map_join: the LinkMap the bridges' records give the members, `reports` [(node, [(peer, phase,
-    bandwidth) a port]) a member, in member order], each link at its cost; `apart` as LinkMap's."""
-    n = len(reports)
-    held = [ffi.new('struct mesh_link_view[]', [{'peer': p, 'phase': phase, 'bandwidth': w} for p, phase, w in views] or 1)
-            for _, views in reports]
-    room = max(1, n * (n - 1) // 2)
-    link, cost = ffi.new('uint32_t[][2]', room), ffi.new('double[][2]', room)
-    made = ffi.new('struct mesh_link_map *', {'link': link, 'cost': cost})
-    lib.mesh_link_map_join(n, ffi.new('uint32_t[]', [node for node, _ in reports] or 1), ffi.new('struct mesh_link_view *[]', held or 1),
-                           ffi.new('uint32_t[]', [len(views) for _, views in reports] or 1), made)
-    return LinkMap(KINDS[made.kind], n, [(link[l][0], link[l][1]) for l in range(made.links)],
-                   [(cost[l][0], cost[l][1]) for l in range(made.links)], apart)
+def wait(serial=0, seconds=0.0):
+    """mesh_map_wait: the serial of the map this node's bridge keeps once it differs from `serial` (0: at once), else
+    `serial` when `seconds` pass first.  OSError naming the bridge where it is unreachable."""
+    made = ffi.new('uint64_t *', serial)
+    status = lib.mesh_map_wait(made, int(seconds * 1e9))
+    if status and status != errno.ETIMEDOUT:
+        raise OSError(status, f"this node's bridge is unreachable: {os.strerror(status)}")
+    return made[0]
+
+
+def current(members=None):
+    """mesh_map: the map this node's bridge keeps as of `serial` (wait()'s), over `members` (bridge node numbers, map
+    node v the bridge node members[v]; None: every node its records hold): `map` the LinkMap, `nodes` and `names` each
+    map node's bridge node and name.  OSError naming the bridge where it is unreachable; ValueError (LinkMap's) where
+    no route reaches a member."""
+    serial, asked = wait(), list(members or ())
+    room = ffi.new('struct mesh_link_map *', {'nodes': len(asked), 'links': len(asked) * (len(asked) - 1) // 2})
+    while True:
+        node, name = ffi.new('uint32_t[]', max(1, room.nodes)), ffi.new(f'char[][{lib.MESH_NAME_BYTES}]', max(1, room.nodes))
+        link, cost = ffi.new('uint32_t[][2]', max(1, room.links)), ffi.new('double[][2]', max(1, room.links))
+        made = ffi.new('struct mesh_link_map *', {'nodes': room.nodes, 'links': room.links, 'link': link, 'cost': cost})
+        count = lib.mesh_map(ffi.new('uint32_t[]', asked) if asked else ffi.NULL, len(asked), node, name, made)
+        if count != -errno.ENOSPC:
+            break
+        room = made
+    if count < 0:
+        raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
+    return SimpleNamespace(map=LinkMap(KINDS[made.kind], count, link[0:made.links], cost[0:made.links]), nodes=list(node[0:count]),
+                           names=[ffi.string(n).decode() for n in name[0:count]], serial=serial)
 
 
 def operand(type, element_bytes, elements):
@@ -159,157 +165,3 @@ def depth(program):
 def program_time(lmap, program, piece, alpha=0.0, beta=0.0):
     """mesh_program_time: every rank's steps run in the alpha-beta model, in us (negative where it stops or mismatches)."""
     return lib.mesh_program_time(lmap.c, program.c, piece[0], alpha, beta)
-
-
-class Context(C.Structure):
-    _fields_ = [('M', C.c_void_p), ('len', Z), *((k, Q) for k in ('client', 'send_off', 'send_bytes', 'inputs_off', 'inputs_bytes')),
-                *((k, U) for k in ('row_cursor', 'arena_cursor')),
-                ('fd', C.c_int)]
-
-
-class Header(C.Structure):
-    _fields_ = [(k, U) for k in ('magic', 'version', 'pgsz', 'block', 'rows', 'node', 'links', 'clients')]
-
-
-class Section(C.Structure):
-    _fields_ = [('first', U), ('pages', U), ('bytes', Z), ('count', U), ('stride', U)]
-
-
-LIB = C.CDLL(os.path.join(RDMA, 'libmesh.dylib'))
-CONTEXT = C.POINTER(Context)
-for name, result, arguments in (
-        ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
-        ('mesh_detach', C.c_int, [CONTEXT]),
-        ('mesh_section_create', C.c_int, [CONTEXT, Z, U, C.POINTER(Section)]),
-        ('mesh_section_slice', C.c_int, [CONTEXT, Section, Z, Z, U, U, C.POINTER(Section)]),
-        ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),
-        ('mesh_collective_bind', C.c_int, [CONTEXT, C.c_void_p, U, U, Section, C.POINTER(Section), U, U, C.POINTER(Section)]),
-        ('mesh_transfers_prepare', C.c_int, [CONTEXT, U, U, U]),
-        ('mesh_host_inputs', C.c_int, [CONTEXT]),
-        ('mesh_transfers_start', C.c_int, [CONTEXT]),
-        ('mesh_host_publish', None, [CONTEXT, Section, U]),
-        ('mesh_host_arrived', Q, [CONTEXT, Section, U])):
-    function = getattr(LIB, name)
-    function.restype, function.argtypes = result, arguments
-
-
-def check(status):
-    if status:
-        raise OSError(status, os.strerror(status))
-
-
-class Mesh:
-    """One client of this node's bridge and the one program prepared on it: every collective
-    and exchange bound on it (collective, bind), in the same order on every rank, prepared for
-    `invocations` calls, storage ringing over `depth` slots, and started by `start` (an NCCL group is
-    one); `name` the execution's, the same on every rank.  `links` is a LinkMap; its node v is the bridge's node
-    members[v] (default v), and this rank is the map node of this bridge's.  `routes` are the trees its collectives
-    are compiled along (trees(); None: pack(links), made once here).  Each collective takes the transfer identities
-    from `identity` on, as many as its program has moves."""
-
-    def __init__(self, links, invocations=1, depth=4, name='mesh', identity=1, members=None, routes=None):
-        self.context = Context()
-        check(LIB.mesh_attach(C.byref(self.context), os.fsencode(name)))
-        self.header = Header.from_address(self.context.M)
-        self.map = links
-        self.routes = routes if routes is not None else pack(self.map)
-        self.nodes, self.members = self.map.nodes, list(members or range(self.map.nodes))
-        self.rank = self.members.index(self.header.node)
-        self.invocations, self.depth, self.identity = invocations, min(depth, invocations), identity
-        self.block = self.header.pgsz * self.header.block
-
-    def ring(self, nbytes, offset=0):
-        """A section of `depth` slots of `offset` + `nbytes` in whole blocks: the section, a slot's pages, and the slots
-        as bytes."""
-        pages = -(-(offset + nbytes) // self.block) * self.header.block
-        section = Section()
-        check(LIB.mesh_section_create(C.byref(self.context), self.depth * pages * self.header.pgsz, 1, C.byref(section)))
-        memory = (C.c_char * (self.depth * pages * self.header.pgsz)).from_address(
-            LIB.mesh_section_address(C.byref(self.context), section, 0))
-        return section, pages, np.frombuffer(memory, np.uint8).reshape(self.depth, -1)
-
-    def collective(self, what, shape, dtype, root=0, op=np.add):
-        """This rank's part of the collective `what` (WHATS) of a `shape` array of `dtype`, compiled along this Mesh's
-        trees (compile; reduce-scatter + all-gather for an all-reduce, which binds one operand), bound; `op` combines
-        what a REDUCE brings in (any binary ufunc of the dtype)."""
-        dtype = np.dtype(dtype)
-        piece = operand(ord(dtype.char), dtype.itemsize, int(np.prod(shape)))
-        program = compile(self.routes, WHATS.index(what), root)
-        return Steps(self, steps(program, self.rank, piece), shape, dtype, op, identity=None, moves=program.c.first[self.nodes])
-
-    def bind(self, steps, shape, dtype, identity=None):
-        """The caller's own steps over one `shape` array of `dtype` (a point-to-point SEND or COPY),
-        bound under transfer identity `identity` + each step's round (default the next collective's)."""
-        return Steps(self, steps, shape, np.dtype(dtype), np.add, identity)
-
-    def start(self):
-        """Prepares every bound transfer for the invocations, gives each receive its completion words
-        and starts the transfers: the peers' bridges pair."""
-        context = C.byref(self.context)
-        check(LIB.mesh_transfers_prepare(context, 1, self.invocations, self.depth))
-        check(LIB.mesh_host_inputs(context))
-        check(LIB.mesh_transfers_start(context))
-
-    def close(self, linger=0.5):
-        """Holds the pair open while the peer's last receive lands, then retires this client."""
-        time.sleep(linger)
-        return LIB.mesh_detach(C.byref(self.context))
-
-
-class Steps:
-    """One rank's steps of one collective or exchange over one typed operand, bound on its Mesh
-    (mesh_collective_bind): the operand's ring of slots, and one received section a REDUCE, placed at
-    its SEND piece's offset within a block so that both ends cut the piece in the same chunks."""
-
-    def __init__(self, mesh, steps, shape, dtype, op, identity=None, moves=None):
-        self.mesh, self.rank, self.shape, self.dtype, self.op = mesh, mesh.rank, tuple(shape), dtype, op
-        self.steps = list(steps)
-        if identity is None:
-            identity, mesh.identity = mesh.identity, mesh.identity + (moves or len(self.steps)) + 1
-        context = C.byref(mesh.context)
-        self.bytes = int(np.prod(shape)) * dtype.itemsize
-        self.operand, pages, self.slots = mesh.ring(self.bytes)
-        received, self.received = [], []
-        for step in self.steps:
-            if step.op == REDUCE:
-                size, offset = step.piece.elements * step.piece.element_bytes, step.first * step.piece.element_bytes % mesh.block
-                section, step_pages, slots = mesh.ring(size, offset)
-                received.append(Section())
-                check(LIB.mesh_section_slice(context, section, offset, size, mesh.depth, step_pages, C.byref(received[-1])))
-                self.received.append((slots, offset, size))
-        bound = ffi.new('struct mesh_step[]', max(1, len(self.steps)))
-        for i, s in enumerate(self.steps):
-            bound[i] = s[0]
-            bound[i].peer = mesh.members[s.peer]
-        self.pieces = (Section * max(1, len(self.steps)))()
-        check(LIB.mesh_collective_bind(context, int(ffi.cast('uintptr_t', bound)), len(self.steps), identity, self.operand,
-                                      (Section * max(1, len(received)))(*received), mesh.depth, pages, self.pieces))
-
-    def slot(self, invocation):
-        """Where this rank writes its contribution to `invocation`."""
-        return self.slots[invocation % self.mesh.depth, :self.bytes].view(self.dtype).reshape(self.shape)
-
-    def __call__(self, invocation, deadline=float('inf')):
-        """Runs this rank's steps in plan order and returns the result, in place: each SEND published, each
-        receive awaited, a REDUCE's piece combined into the result by `op`."""
-        total = self.slot(invocation)
-        flat, received = total.reshape(-1), iter(self.received)
-        context, row = C.byref(self.mesh.context), invocation % self.mesh.depth
-        for step, piece in zip(self.steps, self.pieces):
-            if step.op == SEND:
-                LIB.mesh_host_publish(context, piece, invocation)
-                continue
-            while not (arrived := LIB.mesh_host_arrived(context, piece, invocation)):
-                if time.monotonic() > deadline:
-                    raise TimeoutError(f'invocation {invocation} step {step.op} from {step.peer}')
-            if arrived == CANCELLED:
-                raise ConnectionAbortedError(f'invocation {invocation} cancelled on the link to {step.peer}')
-            span = slice(step.first, step.first + step.piece.elements)
-            if step.op == REDUCE:
-                slots, offset, size = next(received)
-                self.op(flat[span], slots[row, offset:offset + size].view(self.dtype), out=flat[span])
-        return total
-
-    def close(self, linger=0.5):
-        """Closes this collective's Mesh."""
-        return self.mesh.close(linger)
