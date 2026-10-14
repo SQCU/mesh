@@ -64,7 +64,7 @@ against one device (2026-10-04); 3 to 6 ranks with CPU tensors on loopback:
 | expert parallelism | all_to_all_single |
 
 Examples, each checked against one device: `tools/torch_parallel/{tp,dp,ep,cp,collectives}.py` in
-metal-microbench. `pair.py --programs tp,dp,ep,cp,collectives` runs them on a link map's nodes.
+metal-microbench. `pair.py --programs tp,dp,ep,cp,collectives` runs them on the mesh's nodes.
 
 ## What does not
 

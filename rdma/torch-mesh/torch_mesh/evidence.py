@@ -9,7 +9,7 @@ where the GPU finished the work before the collective and the mark at completion
 on host tensors the monotonic clock around the group's call (a host collective completes in the call).  A step's
 work on the rank is the sum, over its collectives, of the time from the mark after the previous collective (the
 previous step's last, or the step's boundary for the first) to the mark at this one's issue: the stretch the
-bridges' ledgers time for a prepared call (rdma/ledger.py).  `step` closes a step; `work`, taken at a step's
+ranks' ledgers time for a prepared call (rdma/ledger.py).  `step` closes a step; `work`, taken at a step's
 boundary, returns each closed step's stretches (seconds, one a collective in issue order) and forgets them.  Two marks with no GPU work between them cannot be
 timed apart; that interval counts zero.  An MPS collective issued through a coalesced group (start_coalescing) is
 not marked.
