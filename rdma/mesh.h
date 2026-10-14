@@ -11,11 +11,12 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 108u
+#define MESH_VERSION 109u
 #define MESH_ABSENT UINT32_MAX
-/* design/bridge-and-ipc.md#region */
+/* design/bridge-and-ipc.md#region: the node's ports, its client slots and each client's destination nodes */
 #define MESH_PORTS 8
 #define MESH_CLIENTS 64
+#define MESH_DESTINATIONS 64
 #define MESH_QUEUES 4
 #define MESH_ORDERS 4096
 #define MESH_RETIRING (UINT64_C(1)<<63)
@@ -25,6 +26,8 @@
 #define MESH_PAUSE_NS UINT64_C(3000000000)
 #define MESH_PEER_NS UINT64_C(600000000000)
 #define MESH_PAIR_NS UINT64_C(30000000000)
+/* design/recovery.md#detection: a destination with positions pending that lands none for this long is cancelled (mesh_cancel) */
+#define MESH_SILENT_NS UINT64_C(10000000000)
 /* A prepared transfer: `count` slots of `bytes` from `local_row`, bound for the invocations [begin, end)
    that use it (end past the call's invocations: every one), invocation t addressing its ring slot
    (t - begin) mod depth (0: the client's depth) at `invocation_pages` a slot. */
@@ -36,17 +39,14 @@ static inline uint32_t mesh_transfer_active(const struct mesh_transfer *transfer
 }
 /* design/algorithm-sources.md#programtensor */
 enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_FREE, MESH_PLANES };
-/* design/algorithm-sources.md#programtensor */
-/* design/prepared-machine.md#M01 */
-/* design/prepared-machine.md#M02 */
+/* design/algorithm-sources.md#programtensor; design/prepared-machine.md#M01, #M02 */
 struct mesh_buffer {
   _Alignas(32) _Atomic uint64_t owner;
   _Atomic uint32_t closed;
   uint32_t pages,constant;
 };
 _Static_assert(sizeof(struct mesh_buffer)==32 && _Alignof(struct mesh_buffer)==32,"mesh_buffer");
-/* design/algorithm-sources.md#programtensor */
-/* design/prepared-machine.md#M10 */
+/* design/algorithm-sources.md#programtensor; design/prepared-machine.md#M10 */
 struct mesh_page_entry {
   _Alignas(16) _Atomic uint64_t mapping;
   _Atomic uintptr_t address;
@@ -68,52 +68,55 @@ struct mesh_send {
   uintptr_t successor;
   uint32_t chunks,queue;
 };
-/* design/bridge-and-ipc.md#region: a client's program on one link: its SEND cells, its cancellation words, its
-   transfer lists (MESH_QUEUES queues each way, MESH_ORDERS entries a list), its trace (0: none) and the peer node they
-   were bound to */
-struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells,orders,trace; uint32_t peer,padding[3]; };
-/* design/prepared-machine.md#M27: a program's trace on one link, each way: a SEND observed (its cell's region offset,
-   the times its producer released it, its post began and ended) or a receive landed (its record's index, the times it
-   was polled, published and its next posted), on the bridge's CLOCK_UPTIME_RAW, `count` of `capacity` */
+/* design/bridge-and-ipc.md#region: a client's program to one destination node (`node`, 0 while the slot is vacant),
+   which the bridge carries over its ports to that node or along a route through others: its SEND cells, its
+   cancellation words, its transfer lists (MESH_QUEUES queues each way, MESH_ORDERS entries a list, `length` entries in
+   each) and its trace (0: none) */
+struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells,orders,trace; uint32_t node; _Atomic uint32_t length[MESH_QUEUES*2]; };
+/* design/prepared-machine.md#M27: a program's trace to one destination, each way: a SEND observed (its cell's region
+   offset, the times its producer released it, its post began and ended) or a receive landed (its record's index, the
+   times it was polled, published and its next posted), on the bridge's CLOCK_UPTIME_RAW, `count` of `capacity` */
 struct mesh_trace { _Alignas(32) uint64_t identity; uint64_t begin,middle,end; };
 struct mesh_trace_ring { _Alignas(32) _Atomic uint64_t count; uint64_t capacity,padding[2]; struct mesh_trace records[]; };
 _Static_assert(sizeof(struct mesh_send)==256 && _Alignof(struct mesh_send)==128 &&
   offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 && offsetof(struct mesh_send,queue)+4<=256 &&
   offsetof(struct mesh_send,request.send_flags)+sizeof(unsigned int)<=128,"M04/M29");
-_Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && sizeof(struct mesh_tx)==64,"M04/M12");
+_Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24,"M04/M12");
 _Static_assert(sizeof(struct mesh_trace)==32 && sizeof(struct mesh_trace_ring)==32,"M27");
 struct mesh_target { uint64_t stream; uint32_t count,stride; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
-/* design/algorithm-sources.md#index-hand-off */
-/* design/prepared-machine.md#M10 */
+/* design/algorithm-sources.md#index-hand-off; design/prepared-machine.md#M10 */
 struct mesh_publication { _Alignas(64) uint32_t sends; _Atomic uint64_t argument; uint64_t device_input,device_stride; struct mesh_target targets[]; };
 _Static_assert(sizeof(struct mesh_publication)==64 && _Alignof(struct mesh_publication)==64 && offsetof(struct mesh_publication,argument)==8 && offsetof(struct mesh_publication,device_input)==16 && offsetof(struct mesh_publication,device_stride)==24 && offsetof(struct mesh_publication,targets)==32,"mesh_publication");
 /* design/prepared-machine.md#M13 */
 struct prepared_publication { _Alignas(16) uint64_t destination; uint64_t argument,padding[2]; };
 _Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepared_publication)==16 && offsetof(struct prepared_publication,argument)==8,"M13");
-/* design/bridge-and-ipc.md#region: a client's program on one link (phase, the failure's code and domain, `prepared`
-   the owner once the bridge paired or failed it) and a port of the node, by the index the bridge gave it (its peer
-   node while paired, its phase, MESH_UNKNOWN where the bridge has no such port, the pairings it made) */
-struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; _Atomic uint64_t prepared; };
-struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atomic uint64_t bandwidth,connection; };
+/* design/bridge-and-ipc.md#region: a client's program to one destination as the bridge tells it (its phase, the
+   failure's code and domain, `failed` the node where it failed: the destination's, or the relay's on its route, and
+   `prepared` the owner once the bridge paired or failed it); a port of the node, by the index the bridge gave it (its
+   peer node while paired, its phase, MESH_UNKNOWN where the bridge has no such port, the code it last stopped with, its
+   bandwidth and the pairings it made); and a node's record, the newest of which every bridge floods to the mesh (its
+   node, name and boot, the record's sequence in that boot, and its `ports` ports by index) */
+struct mesh_port_info { _Atomic uint32_t phase,domain,failed; _Atomic int64_t code; _Atomic uint64_t prepared; };
+struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atomic uint64_t bandwidth,pairings; };
+struct mesh_record { uint32_t node,ports; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; struct mesh_link_info port[MESH_PORTS]; };
 /* design/bridge-and-ipc.md#region: a client slot: its attach (`owner`, 0 vacant), its program once started
    (`configured`, the owner), the execution it belongs to (`key`, the same on every member), its ring depth, whether it
-   is cyclic, and each link's transfer list lengths, program and status */
+   is cyclic, and its program to each destination and that destination's status.  A client writes its own slot's
+   other words and its leased rows alone; the bridge writes the statuses, the ports and the map */
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
   _Atomic uint64_t configured;
   uint64_t key;
   _Atomic uint32_t depth,cyclic;
-  _Atomic uint32_t length[MESH_PORTS*MESH_QUEUES*2];
-  struct mesh_tx tx[MESH_PORTS];
-  struct mesh_port_info port[MESH_PORTS];
+  struct mesh_tx tx[MESH_DESTINATIONS];
+  struct mesh_port_info status[MESH_DESTINATIONS];
 };
-/* design/prepared-machine.md#M01 */
-/* design/prepared-machine.md#M09 */
+/* design/prepared-machine.md#M01, #M09 */
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,links,clients;
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,client_off,target_off,data_off,length,target_stride,boot;
-  _Atomic uint64_t bridge_pid,serial,control;
+  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes;
 };
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
@@ -123,13 +126,12 @@ _Static_assert(sizeof(_Atomic uint64_t)==8 && _Alignof(_Atomic uint64_t)==8,"M07
 struct mesh_cancel_range { _Alignas(32) uint64_t offset; uint64_t count,padding[2]; };
 struct mesh_cancellation { _Alignas(32) _Atomic uint32_t requested; uint32_t cyclic,padding[6]; struct mesh_cancel_range ranges[]; };
 _Static_assert(sizeof(struct mesh_cancel_range)==32 && sizeof(struct mesh_cancellation)==32 && offsetof(struct mesh_cancellation,ranges)==32,"M12");
-/* design/algorithm-sources.md#meshresult */
-/* design/prepared-machine.md#M12 */
+/* design/algorithm-sources.md#meshresult; design/prepared-machine.md#M12 */
 /* design/prepared-machine.md#M30: a cyclic program's landed word holds 1 plus its cycle, which a reader of a later
-   cycle still waits past, so every word of the link is cancelled */
-static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,uint32_t link){
-  _Atomic uint64_t *words=(void *)((char *)m+cancel->ranges[link].offset);
-  for(uint64_t j=0;j<cancel->ranges[link].count;j++){
+   cycle still waits past, so every word of the destination is cancelled */
+static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,uint32_t destination){
+  _Atomic uint64_t *words=(void *)((char *)m+cancel->ranges[destination].offset);
+  for(uint64_t j=0;j<cancel->ranges[destination].count;j++){
     const uint64_t word=atomic_load_explicit(words+j,memory_order_relaxed);
     if(!word || (cancel->cyclic && word!=UINT64_MAX)){
       atomic_store_explicit(&cancel->requested,1,memory_order_release);
@@ -137,24 +139,39 @@ static inline void mesh_cancel(struct hdr *m,struct mesh_cancellation *cancel,ui
     }
   }
 }
-/* design/algorithm-sources.md#meshresult */
-/* design/prepared-machine.md#M26 */
-static inline void mesh_control_notify(struct hdr *m){
-  atomic_fetch_add_explicit(&m->control,1,memory_order_release);
-  os_sync_wake_by_address_all(&m->control,sizeof m->control,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+/* design/algorithm-sources.md#meshresult; design/prepared-machine.md#M26: a shared word (`control`, `map`) bumped and
+   its waiters woken, the writes after it ordered behind it */
+static inline void mesh_notify(_Atomic uint64_t *word){
+  atomic_fetch_add_explicit(word,1,memory_order_release);
+  atomic_thread_fence(memory_order_release);
+  os_sync_wake_by_address_all(word,sizeof *word,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
+}
+/* design/bridge-and-ipc.md#region: the map, `map_nodes` records at `map_off` in arena pages the bridge leases for
+   itself, and leases again larger as the mesh grows; the bridge notifies `map`, its serial, before and after each
+   change (odd while it writes; its own record is in before the region opens, so a client never reads 0), and a
+   reader's copy is whole where `map` read (acquired) before it was even and is unchanged after it */
+static inline struct mesh_record *mesh_records(struct hdr *m){ return (struct mesh_record *)((char *)m+atomic_load_explicit(&m->map_off,memory_order_relaxed)); }
+static inline int mesh_map_whole(struct hdr *m,uint64_t before){
+  atomic_thread_fence(memory_order_acquire);
+  return !(before&1) && atomic_load_explicit(&m->map,memory_order_relaxed)==before;
 }
 /* design/algorithm-sources.md#programcopy */
 static inline struct mesh_link_info *mesh_links(struct hdr *m){return (struct mesh_link_info *)((char *)m+m->link_off);}
 /* design/bridge-and-ipc.md#region: an owner word is its generation, slot and process: (generation << 38) | (slot << 32) | pid */
 static inline struct mesh_client *mesh_client_at(struct hdr *m,uint64_t owner){return (struct mesh_client *)((char *)m+m->client_off)+((owner>>32)&(MESH_CLIENTS-1));}
+/* design/bridge-and-ipc.md#clients: a client's slot for destination `node`, the one bound for it, else the first vacant
+   one (slots are bound in order); MESH_DESTINATIONS where every slot is bound for another node */
+static inline uint32_t mesh_destination(const struct mesh_client *client,uint32_t node){
+  uint32_t d=0;
+  while(d<MESH_DESTINATIONS && client->tx[d].node && client->tx[d].node!=node)d++;
+  return d;
+}
 /* design/algorithm-sources.md#index-hand-off */
 static inline struct mesh_publication *mesh_publication_at(struct hdr *m,uint32_t row){return (struct mesh_publication *)((char *)m+m->target_off+(size_t)row*m->target_stride);}
 static inline uint32_t mesh_rows(const struct hdr *m){ return m->rows; }
 static inline uint32_t mesh_words(const struct hdr *m){ return (mesh_rows(m)+63)/64; }
-/* design/prepared-machine.md#M09 */
-static inline uint32_t mesh_blocks(const struct hdr *m){ return (uint32_t)((m->length-m->data_off)/((uint64_t)m->block*m->pgsz)); }
-/* design/pages-and-functions.md#what-the-page-table-is */
-static inline uint32_t mesh_arena_pages(const struct hdr *m){ return mesh_blocks(m)*m->block; }
+/* design/prepared-machine.md#M09; design/pages-and-functions.md#what-the-page-table-is */
+static inline uint32_t mesh_arena_pages(const struct hdr *m){ return (uint32_t)((m->length-m->data_off)/((uint64_t)m->block*m->pgsz))*m->block; }
 static inline _Atomic uint64_t *mesh_plane(struct hdr *m,int plane){ return (_Atomic uint64_t*)((unsigned char*)m+m->planes_off)+(size_t)plane*mesh_words(m); }
 /* design/prepared-machine.md#M01 */
 /* the arena occupancy bitmap is indexed by arena page and sized by arena pages: it is not a row plane */
@@ -162,19 +179,18 @@ static inline _Atomic uint64_t *mesh_arena_bits(struct hdr *m){ return (_Atomic 
 static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct mesh_page_entry*)((unsigned char*)m+m->page_off); }
 /* design/algorithm-sources.md#programtensor */
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }
-/* ledger D5: a client's lists of one link, queue and direction: channel = link x MESH_QUEUES + queue */
+/* ledger D5: a client's lists of one destination, queue and direction: channel = destination x MESH_QUEUES + queue */
 static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,uint32_t channel,int direction){
   return (struct mesh_transfer*)((unsigned char*)m+mesh_client_at(m,owner)->tx[channel/MESH_QUEUES].orders)+((size_t)(channel%MESH_QUEUES)*2+(uint32_t)direction)*MESH_ORDERS;
 }
-static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t channel,int direction){ return mesh_client_at(m,owner)->length+(size_t)channel*2+(uint32_t)direction; }
-static inline uint32_t mesh_link_transfers(struct hdr *m,uint64_t owner,uint32_t link){
+static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t channel,int direction){ return mesh_client_at(m,owner)->tx[channel/MESH_QUEUES].length+(channel%MESH_QUEUES)*2+(uint32_t)direction; }
+static inline uint32_t mesh_destination_transfers(struct hdr *m,uint64_t owner,uint32_t destination){
   uint32_t transfers=0;
-  for(uint32_t q=link*MESH_QUEUES;q<(link+1)*MESH_QUEUES;q++)for(int d=0;d<2;d++)transfers+=atomic_load_explicit(mesh_order_length(m,owner,q,d),memory_order_acquire);
+  for(uint32_t q=0;q<MESH_QUEUES*2;q++)transfers+=atomic_load_explicit(mesh_client_at(m,owner)->tx[destination].length+q,memory_order_acquire);
   return transfers;
 }
 static inline unsigned char *mesh_at(struct hdr *m,uint32_t page){ return (unsigned char*)m+m->data_off+(size_t)page*m->pgsz; }
-/* design/algorithm-sources.md#programcopy */
-/* design/prepared-machine.md#M08 */
+/* design/algorithm-sources.md#programcopy; design/prepared-machine.md#M08 */
 static inline uint32_t mesh_row_chunks(struct hdr *m,uint32_t row,uint64_t bytes){
   uint64_t block=(uint64_t)m->block*m->pgsz;
   uint64_t offset=atomic_load_explicit(&mesh_page(m)[row].address,memory_order_relaxed)-m->data_off;
@@ -194,10 +210,11 @@ static inline void mesh_bits_clear(_Atomic uint64_t *p,uint32_t first,uint32_t c
   for(uint32_t w=first/64;count && w<=(first+count-1)/64;w++) atomic_fetch_and_explicit(&p[w],~mesh_word_mask(first,count,w),memory_order_acq_rel);
 }
 
-/* design/algorithm-sources.md#programkernel_call */
-/* design/prepared-machine.md#M01 */
+/* design/algorithm-sources.md#programkernel_call; design/prepared-machine.md#M01 */
 /* design/bridge-and-ipc.md#region: the node's region, laid out from the node's memory: `pages` arena pages of `block`
-   pages a block, a page-table row a block, the node's links and the client slots; every page registers on demand */
+   pages a block, a page-table row a block, the node's ports, the client slots and each row's publication targets, one
+   a destination; the map's records are no part of it but a lease the bridge takes from the arena (mesh_records), and
+   every page registers on demand */
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t pages){
   uint32_t arena=pages/block*block,rows=arena/block;
   uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz,words=((uint64_t)rows+63)/64;
@@ -208,7 +225,7 @@ static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,ui
   h->buffer_off=at; at+=(uint64_t)rows*sizeof(struct mesh_buffer); at=(at+pgsz-1)/pgsz*pgsz;
   h->link_off=at; at+=(uint64_t)MESH_PORTS*sizeof(struct mesh_link_info); at=(at+pgsz-1)/pgsz*pgsz;
   h->client_off=at; at+=(uint64_t)MESH_CLIENTS*sizeof(struct mesh_client); at=(at+pgsz-1)/pgsz*pgsz;
-  h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)MESH_PORTS*sizeof(struct mesh_target)+63)&~UINT64_C(63);
+  h->target_stride=(offsetof(struct mesh_publication,targets)+(uint64_t)MESH_DESTINATIONS*sizeof(struct mesh_target)+63)&~UINT64_C(63);
   h->target_off=at; at+=(uint64_t)rows*h->target_stride;
   uint64_t bytes=(uint64_t)block*pgsz; at=(at+bytes-1)/bytes*bytes;
   h->data_off=at; at+=(uint64_t)arena*pgsz;
