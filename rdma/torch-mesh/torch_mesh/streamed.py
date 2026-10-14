@@ -37,8 +37,9 @@ the waves the node holds; one set of coefficients a kernel family (streamed_alu 
 streamed_panel) a node, fitted by least squares in log space with a ridge toward the prior from the node's
 observations (each probe's and profile's measured instance: rows of the evidence file, MESH_INSTANCES or
 ~/.cache/mesh/instances.json, which holds the coefficients too; a node without evidence prices by the prior). A
-choice is the argmin over the admissible instances of a slice at its rows; a measurement moves the coefficients and
-never stands for its key.
+choice is the argmin over the admissible instances of a slice at its rows: of the instances the evidence read at that
+slice and rows (each its readings' median) where there are any, a measurement at a shape outranking the model there,
+else of the fit's prices (a measurement moves the coefficients for every other shape).
 
   python -m torch_mesh.streamed fit OBSERVATIONS ... --gbps G   this node's evidence fitted (each file a probe's record:
                                                                 rows of instance, slice units, rows_in, best_us; or
@@ -55,15 +56,16 @@ never stands for its key.
                                                                 tools/reading.py) as observations of its instances,
                                                                 appended to ROWS (JSON lines)
   python -m torch_mesh.streamed epilogue FUSED SEPARATE --rows NAME=LABEL ...
-                                                                two served readings' epilogues (their products with
-                                                                each epilogue against the products and the row it
-                                                                replaces) into the evidence file, whose rows classes the
-                                                                table names (epilogues)
+                                                                two served readings' epilogues (each product with an
+                                                                epilogue against the product and the row it replaces)
+                                                                into the evidence file, whose rows classes each table
+                                                                entry names (epilogues)
 
 A factor of the fit (a configuration's efficiency at a rows class) rests on two slice shapes at least; one seen on a
 single shape takes its family's model. A decode attention plan (metal-microbench docs/kernels.md#decode-attention: the
 vector form, a task a query head and row; the tile plan, a task 8 of one KV head's rows) is priced c0 + c1 MB of the KV
-it reads, one line a plan and head dimension a node, from the attention probe's rows.
+it reads (c1 at least 0), one line a plan and head dimension a node, from the attention rows; a plan read at a layer's
+shape and rows is priced at its reading.
 """
 import argparse
 import json
@@ -317,17 +319,33 @@ def configuration(spec):
     return (k, spec['SK'], spec['BANDS'], spec['F'], spec['LUT'])
 
 
-def choose(fit, s, rows, op='product', tables=False):
-    """The fit's argmin over the candidates of the configurations its evidence observed (None where there is none), or
-    at a rows class the fit explores, of the configurations named for it (measured once, in the next profile), and its
-    predicted us."""
+def choose(fit, s, rows, op='product', tables=False, read=None):
+    """The argmin over the candidates of the configurations its evidence observed (None where there is none), or at a
+    rows class the fit explores, of the configurations named for it (measured once, in the next profile), and its price
+    (us): where candidates were `read` at the slice and rows (read_key: their readings' median), the least read (a
+    measurement at a shape outranks the model there), else the fit's argmin."""
     allowed = fit.explore.get(rows, fit.configurations)
     priced = [(fit.time(c, s, rows), i, c) for i, c in enumerate(candidates(s, rows, op, tables))
               if allowed is None or configuration(c) in allowed]
+    read = [(read[read_key(c)], i, c) for _, i, c in priced if read_key(c) in (read or {})] if rows not in fit.explore else []
     if not priced:
         return None, None
-    t, _, best = min(priced)
+    t, _, best = min(read or priced)
     return best, t
+
+
+def read_key(spec):
+    """An instance's identity among the readings: its kernel and template arguments but the slice's (TILES, WIDTHS) and
+    the engine's (OUT, COOP)."""
+    return (spec['kernel'],) + tuple(spec.get(k, 0) for k in ARGUMENTS[spec['kernel']] if k not in ('TILES', 'WIDTHS', 'OUT', 'COOP'))
+
+
+def readings(obs):
+    """Each slice's (outputs, columns, width class, rows) read instances (read_key) and their observations' median us."""
+    out = {}
+    for spec, s, rows, us, _ in obs:
+        out.setdefault((s['outputs'], s['columns'], width_class(spec['WIDTHS']), rows), {}).setdefault(read_key(spec), []).append(us)
+    return {k: {c: sorted(v)[len(v) // 2] for c, v in read.items()} for k, read in out.items()}
 
 
 def spec_arguments(spec, T, widths, finish=False):
@@ -717,13 +735,15 @@ def mean_units(units):
     return {k: round(sum(u[k] for u in units) / len(units)) for k in UNITS}
 
 
-def couple(fit, sg, su, rows):
-    """The couple instance of gate and up (slice units sg and su) at `rows` and its predicted us where the fit prices it
-    below their own products and the GELU's dispatch (a dispatch's fixed cost), else (None, None)."""
-    spec, t = choose(fit, pair_units(sg, su), rows, 'couple')
-    if spec is None or t >= sum(choose(fit, u, rows)[1] for u in (sg, su)) + fit.coefficients()['alu']['c0']:
+def couple(fit, sg, su, rows, read=None):
+    """The couple instance of gate and up (slice units sg and su) at `rows` and its price (choose: `read` its readings)
+    where it was read at the slice and rows, or the fit prices its argmin below their own products and the GELU's
+    dispatch (a dispatch's fixed cost); else (None, None)."""
+    pair = pair_units(sg, su)
+    _, t = choose(fit, pair, rows, 'couple')
+    if not read and (t is None or t >= sum(choose(fit, u, rows)[1] for u in (sg, su)) + fit.coefficients()['alu']['c0']):
         return None, None
-    return spec, t
+    return choose(fit, pair, rows, 'couple', read=read)
 
 
 def _no(m, what):
@@ -951,7 +971,8 @@ def attention_reads(plan, dims, rows, heads, positions):
 
 
 def attention_fit(rows):
-    """Each plan's time on the node at each head dimension as c0 + c1 MB of KV read, by least squares on relative error,
+    """Each plan's time on the node at each head dimension as c0 + c1 MB of KV read, by least squares on relative error
+    (c1 at least 0: a plan's time does not fall with the bytes it reads; c0 alone where the free line's c1 is negative),
     with its median error: keys 'plan dims'."""
     import numpy as np
     out = {}
@@ -963,16 +984,21 @@ def attention_fit(rows):
             X = np.array([[1.0, r['reads'] / 1e6] for r in seen])
             y = np.array([r['best_us'] for r in seen])
             c = np.linalg.lstsq(X / y[:, None], np.ones(len(y)), rcond=None)[0]
+            if c[1] < 0:
+                c = np.array([np.sum(1 / y) / np.sum(1 / y ** 2), 0.0])
             out[f'{plan} {dims}'] = {'c0': float(c[0]), 'mb': float(c[1]), 'count': len(seen),
                                      'median_log_error': float(np.median(np.abs(np.log((X @ c) / y))))}
     return out
 
 
-def attention_plan(model, dims, rows, heads, positions):
-    """The plan the node's model prices least at (dims, rows, heads, positions), with each plan's price (us); the vector
-    form where the model has no line for both plans at `dims`."""
-    priced = {plan: model[f'{plan} {dims}']['c0'] + model[f'{plan} {dims}']['mb'] * attention_reads(plan, dims, rows, heads, positions) / 1e6
-              for plan in PLANS if f'{plan} {dims}' in (model or {})}
+def attention_plan(model, dims, rows, heads, positions, read=None):
+    """The plan priced least at (dims, rows, heads, positions), with each plan's price (us): its reading where `read`
+    holds one (plan, dims, rows, heads, positions: the readings' median), else the node's model; the vector form where
+    neither prices both plans."""
+    read = read or {}
+    priced = {plan: read[(plan, dims, rows, heads, positions)] if (plan, dims, rows, heads, positions) in read else
+              model[f'{plan} {dims}']['c0'] + model[f'{plan} {dims}']['mb'] * attention_reads(plan, dims, rows, heads, positions) / 1e6
+              for plan in PLANS if (plan, dims, rows, heads, positions) in read or f'{plan} {dims}' in (model or {})}
     return (min(priced, key=priced.get) if len(priced) == len(PLANS) else 'vector'), priced
 
 
@@ -1054,44 +1080,43 @@ def _observe(args):
 
 
 def epilogue_ratios(fused, separate, rows_of):
-    """Each epilogue's log time ratio at each decode class two served readings profiled (metal-microbench
-    docs/kernels.md#stacked-products, the epilogues): its products run with it (a label naming it after the instance's
-    arguments) against the same instances without it and the row kernel it replaces (`rows_of`: the epilogue's name to
-    the row's label), each a tick's least-time sum."""
-    one, two = (json.loads(Path(p).read_text())['engine']['profile'] for p in (fused, separate))
+    """Each epilogue's log time ratio for each product (its label's OUTPUTSxCOLUMNS) at each decode class two served
+    readings profiled (metal-microbench docs/kernels.md#stacked-products, the epilogues): the instance run with it (a
+    label naming it after the instance's arguments) against the same instance without it and the row kernel it replaces
+    (`rows_of`: the epilogue's name to the row's label), least us a dispatch."""
+    one, two = (json.loads(Path(p).read_text())['engine']['profile']['commands'] for p in (fused, separate))
     out = {}
-    for cls in sorted(set(one['commands']) & set(two['commands'])):
-        a, b, ticks = one['commands'][cls], two['commands'][cls], one['ticks'][cls]['ticks']
+    for cls in sorted(set(one) & set(two)):
+        a, b = one[cls], two[cls]
         for kind, row in rows_of.items() if cls.startswith('decode') else ():
-            labels = [l for l in a if l.split()[0].endswith('_' + kind)]
-            plain = [l.replace('_' + kind + ' ', ' ') for l in labels]
-            if not labels or row not in b or any(p not in b for p in plain):
-                continue
-            count = sum(a[l]['count'] for l in labels)
-            fused_us = sum(a[l]['least_us'] * a[l]['count'] for l in labels)
-            separate_us = sum(b[p]['least_us'] * a[l]['count'] for p, l in zip(plain, labels)) + b[row]['least_us'] * count
-            out.setdefault(kind, {})[cls.split()[1]] = math.log(fused_us / separate_us)
+            for label in (l for l in a if l.split()[0].endswith('_' + kind)):
+                plain = label.replace('_' + kind + ' ', ' ')
+                if row in b and plain in b:
+                    out.setdefault(kind, {}).setdefault(label.split()[1], {})[cls.split()[1]] = math.log(
+                        a[label]['least_us'] / (b[plain]['least_us'] + b[row]['least_us']))
     return out
 
 
 def epilogue_classes(ratios, classes):
-    """Each epilogue's rows classes where it runs: a class read where it was the faster, one not read where the classes
-    read nearest below and above it both were."""
+    """Each epilogue's rows classes for each product where it runs: a class read where it was the faster, one not read
+    where the classes read nearest below and above it both were."""
     out = {}
-    for kind, read in ratios.items():
-        read = {int(c): r for c, r in read.items()}
-        below = lambda c: [k for k in read if k < c]
-        above = lambda c: [k for k in read if k > c]
-        out[kind] = [c for c in classes if (read[c] < 0 if c in read else
-                                            bool(below(c) and above(c)) and read[max(below(c))] < 0 and read[min(above(c))] < 0)]
+    for kind, shapes in ratios.items():
+        for shape, read in shapes.items():
+            read = {int(c): r for c, r in read.items()}
+            below = lambda c: [k for k in read if k < c]
+            above = lambda c: [k for k in read if k > c]
+            out.setdefault(kind, {})[shape] = [c for c in classes if (read[c] < 0 if c in read else bool(below(c) and above(c))
+                                                                      and read[max(below(c))] < 0 and read[min(above(c))] < 0)]
     return out
 
 
 def _epilogue(args):
     path = evidence_path()
     known = json.loads(path.read_text()) if path.exists() else {}
-    for kind, classes in epilogue_ratios(args.fused, args.separate, dict(r.split('=', 1) for r in args.rows)).items():
-        known.setdefault('epilogues', {}).setdefault(kind, {}).update(classes)
+    for kind, shapes in epilogue_ratios(args.fused, args.separate, dict(r.split('=', 1) for r in args.rows)).items():
+        for shape, classes in shapes.items():
+            known.setdefault('epilogues', {}).setdefault(kind, {}).setdefault(shape, {}).update(classes)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(known, indent=1) + '\n')
     print(json.dumps(known.get('epilogues', {})))
@@ -1139,10 +1164,10 @@ def _text_config(export):
     return config.get('text_config', config)
 
 
-def _attention(export, part, ctx, classes, fit_model):
+def _attention(export, part, ctx, classes, fit_model, read):
     """The decode attention plan a rank takes for each of its layers (its head dimension, window and query heads) at each
-    rows class the table serves (docs/kernels.md#decode-attention): the node's model's least at the layer's positions (the
-    window, else the call's context)."""
+    rows class the table serves (docs/kernels.md#decode-attention): the least priced (attention_plan: its readings `read`,
+    else the node's model) at the layer's positions (the window, else the call's context)."""
     text = _text_config(export)
     kinds = text.get('layer_types') or []
     heads = text.get('num_attention_heads')
@@ -1158,7 +1183,7 @@ def _attention(export, part, ctx, classes, fit_model):
         dims = text['head_dim'] if sliding else text.get('global_head_dim') or text['head_dim']
         window = text.get('sliding_window', 0) if sliding else 0
         for rows in classes:
-            plan, priced = attention_plan(fit_model, dims, rows, held, window or ctx)
+            plan, priced = attention_plan(fit_model, dims, rows, held, window or ctx, read)
             out.append({'layer': L, 'rows': rows, 'plan': plan, 'us': {k: round(v, 2) for k, v in priced.items()}})
     return out
 
@@ -1186,27 +1211,34 @@ def _resolve(args):
             if len(parts) > 1:
                 keyed.setdefault(('product', sum(p.rows for p in parts), m.columns, max(p.widths for p in parts), False), []).append(
                     {k: sum(u[k] for u in map(slice_units, parts)) if k != 'columns' else m.columns for k in UNITS})
+    known = json.loads(evidence_path().read_text()) if evidence_path().exists() else {}
+    obs, attended = observations([p for p in known.get('observations', []) if Path(p).exists()])
+    read, epilogues = readings(obs), epilogue_classes(known.get('epilogues', {}), [c for c in classes if c <= 16])
+    attention_read = {}
+    for r in attended:
+        attention_read.setdefault((r['plan'], r['dims'], r['rows'], r['heads'], r['positions']), []).append(r['best_us'])
+    attention_read = {k: sorted(v)[len(v) // 2] for k, v in attention_read.items()}
     entries = []
     for (op, outputs, columns, widths, tables), units in sorted(keyed.items(), key=lambda kv: kv[0]):
         pair = op == 'couple' and (mean_units([u[0] for u in units]), mean_units([u[1] for u in units]))
         for rows in classes:
-            spec, t = couple(fit, *pair, rows) if pair else choose(fit, mean_units(units), rows, op, tables)
+            spec, t = (couple(fit, *pair, rows, read.get((outputs, columns, widths, rows))) if pair
+                       else choose(fit, mean_units(units), rows, op, tables, read.get((outputs, columns, widths, rows))))
             if spec is None or spec['kernel'] == 'coop' and coop_slots() is None:
                 continue
             kernel, arguments = spec_arguments(spec, columns // 32, widths)
             grid, threads, shares = launch(spec, outputs, rows)
             entries.append({'op': op, 'outputs': outputs, 'columns': columns, 'widths': widths, 'rows': rows, 'kernel': kernel,
                             'args': list(arguments), 'names': list(ARGUMENTS[kernel]), 'grid': list(grid), 'threads': threads,
-                            'shares': shares, 'lut': int(spec.get('LUT', 0)), 'us': round(t, 2)})
+                            'shares': shares, 'lut': int(spec.get('LUT', 0)), 'us': round(t, 2),
+                            'epilogues': sorted(k for k, shapes in epilogues.items() if op == 'product' and rows in shapes.get(f'{outputs}x{columns}', []))})
     record = json.loads(Path(args.program).read_text()) if args.program else {}
     ctx = args.ctx or record.get('ctx_mean') or 1024
-    known = json.loads(evidence_path().read_text()) if evidence_path().exists() else {}
     part = record['ranks'][args.rank] if args.program else None
-    attention = _attention(args.export, part, ctx, classes, known.get('attention'))
+    attention = _attention(args.export, part, ctx, classes, known.get('attention'), attention_read)
     table = {'node': node()[0], 'cores': node()[1], 'evidence': str(evidence_path()), 'export': str(args.export),
              'program': args.program, 'rank': args.rank, 'classes': classes, 'width_class': WIDTH_CLASS, 'ctx': ctx,
-             'instances': entries, 'attention': attention,
-             'epilogues': epilogue_classes(known.get('epilogues', {}), [c for c in classes if c <= 16])}
+             'instances': entries, 'attention': attention}
     Path(args.out).write_text(json.dumps(table, indent=1) + '\n')
     print(f'{args.out}: {len(entries)} instances, {len(keyed)} slices, {len(attention)} attention plans, classes {classes}')
 
