@@ -135,7 +135,7 @@ def observation(body: str) -> dict:
             ports.append(fields)
         elif "bridge_link" in fields:
             links.append(dict(device=fields["bridge_link"], peer=int(fields.get("peer_node", 0)), phase=int(fields.get("phase", 0)),
-                              bandwidth=int(fields.get("bandwidth", 0))))
+                              bandwidth=int(fields.get("bandwidth", 0)), connection=int(fields.get("connection", 0))))
         elif "route" in fields:
             address = fields["route"].split("/", 1)[0].split("%", 1)[0]
             if classify(address) == "fabric-routed":
@@ -177,7 +177,8 @@ PAIRED = 2
 def topology(observations: list[dict], max_age: float = 10.0) -> dict:
     """The mesh's map as its bridges record it: each node by its bridge's node number (its name, boot and capabilities
     beside), and a link between two nodes where each one's bridge holds a port paired with the other (several cables
-    between one pair are one link at the greatest port bandwidth)."""
+    between one pair are one link at the greatest port bandwidth), each edge (a, b, bandwidth, the pairings its ports
+    made: it grows each time the bridges pair it again)."""
     nodes, errors = {}, []
     for item in sorted(observations, key=lambda item: float(item['facts'].get('sample_age', 0)), reverse=True):
         f = item["facts"]
@@ -197,8 +198,9 @@ def topology(observations: list[dict], max_age: float = 10.0) -> dict:
                     back["peer"] == a and back["phase"] == PAIRED for back in nodes[b]["links"]):
                 continue
             key = (min(a, b), max(a, b))
-            edges[key] = max(edges.get(key, 0), link["bandwidth"])
-    return dict(nodes=sorted(nodes.values(), key=lambda n: n["identity"]), edges=sorted((a, b, w) for (a, b), w in edges.items()),
+            width, pairings = edges.get(key, (0, 0))
+            edges[key] = (max(width, link["bandwidth"]), pairings + link["connection"])
+    return dict(nodes=sorted(nodes.values(), key=lambda n: n["identity"]), edges=sorted((a, b, w, p) for (a, b), (w, p) in edges.items()),
                 errors=errors)
 
 def reachable(addr: str, port: int = 22, timeout: float = 2.0) -> bool:

@@ -1,7 +1,9 @@
-"""A prepared call's stretches from its bridges' ledgers (mesh-flow.c M27, a call run with MESH_LEDGER=1): each rank's
-own work between its collectives, the evidence allocate.Balancer balances on (design/heterogeneity.md R2, R3).
+"""A prepared call's stretches from its ranks' ledgers (design/prepared-machine.md M27: each program's trace, which
+its bridge writes into the program's memory as it runs, mesh_transfers_trace, and the program prints,
+mesh_transfers_ledger): each rank's own work between its collectives, the evidence allocate.Balancer balances on
+(design/heterogeneity.md R2, R3).
 
-A bridge's log holds, per link, its receive records' layout (trace_layout), each transfer's binding (trace_binding:
+A rank's ledger holds, per link, its receive records' layout (trace_layout), each transfer's binding (trace_binding:
 its begin, the invocations it is active, its chunks or SEND cells) and every SEND observed and receive landed
 (native_trace).  A crossing of r ranges takes r consecutive binding identities in the call's crossing order (the rank
 library's rule: metal-microbench mesh_rank.m MeshRankCrossing), so the call's crossings list, each with the point it
@@ -15,12 +17,12 @@ rank's publications' stretch, from the latest of its own events at the program's
 import collections
 import json
 
-RECORD = 128  # sizeof(struct prepared_receive) (mesh-flow.c), the stride of a link's receive records
+RECORD = 128  # sizeof(struct prepared_receive) (mesh-flow.c), the stride of a link's receive records in the trace
 SEND = 256    # sizeof(struct mesh_send) (mesh.h), the stride of a transfer's SEND cells
 
 
 def events(text, crossings):
-    """{(invocation, point): {'send': ns, 'receive': ns}} of one rank's bridge log, `crossings` the call's in order
+    """{(invocation, point): {'send': ns, 'receive': ns}} of one rank's ledger, `crossings` the call's in order
     (each with its 'point' and 'ranges')."""
     point = []
     for c in crossings:

@@ -14,6 +14,9 @@ int mesh_transfers_prepare(struct mesh_ctx *,uint32_t slots,uint32_t invocations
 int mesh_transfers_start(struct mesh_ctx *);
 int mesh_transfers_stop(struct mesh_ctx *context,double seconds);
 int mesh_transfers_cyclic(struct mesh_ctx *context);
+/* design/prepared-machine.md#M27 */
+int mesh_transfers_trace(struct mesh_ctx *context);
+void mesh_transfers_ledger(struct mesh_ctx *context);
 
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M09 */

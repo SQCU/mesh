@@ -200,6 +200,68 @@ int mesh_transfers_start(struct mesh_ctx *context){
   return 0;
 }
 
+/* design/prepared-machine.md#M27 */
+/* The program's trace on every link it binds, each way one record an event of one cycle of its invocations (each SEND
+   cell posted, each receive record landed), which the bridge writes as the program runs and mesh_transfers_ledger
+   prints.  Called after mesh_transfers_prepare, before mesh_transfers_start. */
+int mesh_transfers_trace(struct mesh_ctx *context){
+  struct hdr *m=context->M;
+  struct mesh_client *client=mesh_client_at(m,context->client);
+  for(uint32_t p=0;p<m->links;p++){
+    struct mesh_tx *tx=&client->tx[p];
+    if(!mesh_link_transfers(m,context->client,p))continue;
+    uint64_t events[2]={(uint64_t)(tx->count*tx->slots+tx->once)*(tx->invocations?tx->invocations:1),0};
+    for(uint32_t q=p*MESH_QUEUES;q<(p+1)*MESH_QUEUES;q++){
+      struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
+      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
+        events[1]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*mesh_transfer_active(in+i,tx->invocations);
+    }
+    struct mesh_section section;
+    int status=mesh_section_create(context,2*sizeof(struct mesh_trace_ring)+(events[0]+events[1])*sizeof(struct mesh_trace),1,0,&section);
+    if(status)return status;
+    struct mesh_trace_ring *sent=mesh_section_address(context,section,0),*landed=(void *)(sent->records+events[0]);
+    sent->capacity=events[0];landed->capacity=events[1];
+    tx->trace=(uint64_t)((char *)sent-(char *)m);
+  }
+  return 0;
+}
+
+/* design/prepared-machine.md#M27: the program's trace as JSON lines on stdout, each link's: its layout (trace_layout),
+   each transfer's binding (trace_binding: its SEND cells, or its receive ring and chunks) and every event
+   (native_trace), which mesh rdma/ledger.py reads */
+void mesh_transfers_ledger(struct mesh_ctx *context){
+  struct hdr *m=context->M;
+  struct mesh_client *client=mesh_client_at(m,context->client);
+  for(uint32_t p=0;p<m->links;p++){
+    struct mesh_tx *tx=&client->tx[p];
+    if(!tx->trace)continue;
+    struct mesh_trace_ring *ring[2]={(void *)((char *)m+tx->trace),NULL};
+    ring[1]=(void *)(ring[0]->records+ring[0]->capacity);
+    printf("{\"trace_layout\":%u,\"receive_base\":0,\"invocations\":%u}\n",p,tx->invocations);
+    for(uint32_t q=0;q<MESH_QUEUES;q++){
+      uint32_t channel=p*MESH_QUEUES+q;
+      struct mesh_transfer *out=mesh_transfers(m,context->client,channel,MESH_SEND),*in=mesh_transfers(m,context->client,channel,MESH_RECEIVE);
+      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,channel,MESH_SEND));i++){
+        uint32_t active=mesh_transfer_active(out+i,tx->invocations);
+        for(uint32_t slot=0;slot<out[i].count;slot++)
+          printf("{\"trace_binding\":%u,\"direction\":0,\"binding\":%u,\"slot\":%u,\"begin\":%u,\"active\":%u,\"cells\":%llu}\n",p,out[i].binding,slot,
+            out[i].begin,active,(unsigned long long)(tx->cells+(out[i].first+(uint64_t)slot*(active+1))*sizeof(struct mesh_send)));
+      }
+      for(uint32_t slot=0;slot<tx->slots;slot++)for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,channel,MESH_RECEIVE));i++)
+        if(slot<in[i].count)
+          printf("{\"trace_binding\":%u,\"direction\":1,\"ring\":%u,\"binding\":%u,\"slot\":%u,\"begin\":%u,\"active\":%u,\"chunks\":%u}\n",p,
+            q*tx->slots+slot,in[i].binding,slot,in[i].begin,mesh_transfer_active(in+i,tx->invocations),
+            mesh_row_chunks(m,in[i].local_row+slot*in[i].stride,in[i].bytes));
+    }
+    for(int d=0;d<2;d++)for(uint64_t k=0;k<atomic_load_explicit(&ring[d]->count,memory_order_acquire);k++){
+      struct mesh_trace t=ring[d]->records[k];
+      printf("{\"native_trace\":%u,\"direction\":%d,\"event\":%llu,\"identity\":%llu,\"ns\":[%llu,%llu,%llu]}\n",p,d,(unsigned long long)k,
+        (unsigned long long)t.identity,(unsigned long long)t.begin,(unsigned long long)t.middle,(unsigned long long)t.end);
+    }
+  }
+  fflush(stdout);
+}
+
 /* design/prepared-machine.md#M30 */
 /* The prepared program runs without end: running invocation T is prepared invocation T mod N (N the
    program's invocations) in cycle T / N.  A producer releases T by storing its argument plus the cycle

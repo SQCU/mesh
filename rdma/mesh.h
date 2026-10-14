@@ -63,12 +63,19 @@ struct mesh_send {
   uint32_t chunks,queue;
 };
 /* design/bridge-and-ipc.md#region: a client's program on one link: its SEND cells, its cancellation words, its
-   transfer lists (MESH_QUEUES queues each way, MESH_ORDERS entries a list) and the peer node they were bound to */
-struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells,orders; uint32_t peer,padding; };
+   transfer lists (MESH_QUEUES queues each way, MESH_ORDERS entries a list), its trace (0: none) and the peer node they
+   were bound to */
+struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells,orders,trace; uint32_t peer,padding[3]; };
+/* design/prepared-machine.md#M27: a program's trace on one link, each way: a SEND observed (its cell's region offset,
+   the times its producer released it, its post began and ended) or a receive landed (its record's index x 128, the
+   times it was polled, published and its next posted), on the bridge's CLOCK_UPTIME_RAW, `count` of `capacity` */
+struct mesh_trace { _Alignas(32) uint64_t identity; uint64_t begin,middle,end; };
+struct mesh_trace_ring { _Alignas(32) _Atomic uint64_t count; uint64_t capacity,padding[2]; struct mesh_trace records[]; };
 _Static_assert(sizeof(struct mesh_send)==256 && _Alignof(struct mesh_send)==128 &&
   offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 && offsetof(struct mesh_send,queue)+4<=256 &&
   offsetof(struct mesh_send,request.send_flags)+sizeof(unsigned int)<=128,"M04/M29");
-_Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && sizeof(struct mesh_tx)==48,"M04/M12");
+_Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && sizeof(struct mesh_tx)==64,"M04/M12");
+_Static_assert(sizeof(struct mesh_trace)==32 && sizeof(struct mesh_trace_ring)==32,"M27");
 struct mesh_target { uint64_t stream; uint32_t count,stride; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off */

@@ -108,6 +108,8 @@ struct flow {
   struct mesh_send *publications;
   struct ibv_wc completion;
   struct mesh_cancellation *cancel;
+  /* design/prepared-machine.md#M27: the program's trace, where it asked for one (mesh_transfers_trace) */
+  struct mesh_trace_ring *trace[2];
 };
 /* design/bridge-and-ipc.md#ports: a port, its link and the programs on it */
 struct pending { uint64_t key,until; uint32_t count; };
@@ -153,6 +155,7 @@ static int link_prepare(struct flow *link){
   struct mesh_tx *tx=&mesh_client_at(m,link->client)->tx[link->index];
   /* design/prepared-machine.md#M12 */
   link->cancel=tx->cancel?(void *)((char *)m+tx->cancel):NULL;
+  if(tx->trace){link->trace[MESH_SEND]=(void *)((char *)m+tx->trace);link->trace[MESH_RECEIVE]=(void *)(link->trace[MESH_SEND]->records+link->trace[MESH_SEND]->capacity);}
   link->publications=(void *)((char *)m+tx->cells);
   link->publication_count=tx->count*tx->slots+tx->once;
   uint32_t queues=0;
@@ -383,21 +386,28 @@ static __attribute__((always_inline)) inline int send_retire(struct flow *link){
   return 0;
 }
 
+/* design/prepared-machine.md#M27 */
+static __attribute__((always_inline)) inline void trace_record(struct mesh_trace_ring *ring,uint64_t identity,uint64_t begin,uint64_t middle){
+  uint64_t n=atomic_load_explicit(&ring->count,memory_order_relaxed);
+  if(n>=ring->capacity)return;
+  ring->records[n]=(struct mesh_trace){identity,begin,middle,clock_gettime_nsec_np(CLOCK_UPTIME_RAW)};
+  atomic_store_explicit(&ring->count,n+1,memory_order_release);
+}
+
 /* design/prepared-machine.md#M08 */
 /* design/algorithm-sources.md#independent-native-queues */
 /* Each stream's cells in order: a cell released by its producer posts its chain's requests while its
    queue pair holds their frames (the gate: frames posted less those its SEND completions retired;
    ibv_post_send accepts past the queue's frames and corrupts later, so the gate is the caller's).
    The thread takes its completions when a stream waits for its producer or its gate. */
-static void *link_send_progress(void *argument){
-  struct flow *link=argument;
-  pthread_setname_np("mesh.rdma.send");
+static __attribute__((always_inline)) inline void *link_send_drain(struct flow *link,int traced){
   struct send_stream *streams=link->streams;
   uint32_t count=link->stream_count;
   struct ibv_send_wr *bad;
   int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **)=link->provider.queues[0].send;
   for(uint32_t s=0;;s=s+1==count?0:s+1){
     struct send_stream *stream=streams+s;
+    uint64_t observed=0;
     if(!stream->remaining){
       struct mesh_send *cell=stream->cell;
       if(atomic_load_explicit(&cell->ready,memory_order_acquire)<=stream->cycle){
@@ -406,10 +416,12 @@ static void *link_send_progress(void *argument){
         if(error){flow_lost(link,error,2);return NULL;}
         continue;
       }
+      observed=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
       stream->next=&cell->request;stream->remaining=cell->chunks;
     }
     struct mesh_send *cell=stream->cell;
     struct send_gate *gate=link->gates+cell->queue;
+    uint64_t posting=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
     while(stream->remaining){
       struct ibv_send_wr *request=stream->next;
       uint32_t frames=(request->sg_list->length+4095)/4096;
@@ -429,20 +441,24 @@ static void *link_send_progress(void *argument){
       if(error){flow_lost(link,error<0?-error:error,1);return NULL;}
       stream->next=request->next;stream->remaining--;gate->requests++;
     }
+    if(traced && observed)trace_record(link->trace[MESH_SEND],(uint64_t)((char *)cell-(char *)link->M),observed,posting);
     if(!stream->remaining){
       stream->cell=(struct mesh_send *)cell->successor;
       if(stream->cell==stream->first)stream->cycle++;
     }
   }
 }
+static void *link_send_progress(void *argument){
+  struct flow *link=argument;
+  pthread_setname_np("mesh.rdma.send");
+  return link->trace[MESH_SEND]?link_send_drain(link,1):link_send_drain(link,0);
+}
 
 /* design/prepared-machine.md#M08 */
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#programcopy */
 /* The link's receive completions: each stores its completion word and posts the ring's next records. */
-static void *link_receive_progress(void *argument){
-  struct flow *link=argument;
-  pthread_setname_np("mesh.rdma.receive");
+static __attribute__((always_inline)) inline void *link_receive_drain(struct flow *link,int traced){
   struct mesh_queue queue=link->provider.queues[0];
   struct ibv_wc *completion=&link->completion;
   for(;;){
@@ -456,14 +472,22 @@ static void *link_receive_progress(void *argument){
     memcpy(&status_opcode,&completion->status,sizeof status_opcode);
     if((uint32_t)status_opcode){flow_lost(link,(uint32_t)status_opcode,2);return NULL;}
     if(!((status_opcode>>32)&IBV_WC_RECV))continue;
+    uint64_t polled=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
     struct prepared_receive *record=(void *)(uintptr_t)completion->wr_id;
     struct receive_ring *ring=link->rings+record->queue;
     ring->landed++;ring->bytes+=completion->byte_len;
     atomic_store_explicit(record->input,record->argument+record->cycle,memory_order_release);
+    uint64_t published=traced?clock_gettime_nsec_np(CLOCK_UPTIME_RAW):0;
     ring->outstanding-=record->frames;ring->completed=(int64_t)(record->invocation+(uint64_t)record->cycle*link->invocations);
     int error=ring_advance(link,ring);
     if(error){flow_lost(link,error,1);return NULL;}
+    if(traced)trace_record(link->trace[MESH_RECEIVE],(uint64_t)(record-link->receive)*sizeof *record,polled,published);
   }
+}
+static void *link_receive_progress(void *argument){
+  struct flow *link=argument;
+  pthread_setname_np("mesh.rdma.receive");
+  return link->trace[MESH_RECEIVE]?link_receive_drain(link,1):link_receive_drain(link,0);
 }
 
 /* design/prepared-machine.md#M08 */

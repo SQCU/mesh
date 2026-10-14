@@ -33,7 +33,7 @@ install -m 644 -o root -g wheel "$REPO"/rdma/mesh_disk.py "$REPO"/rdma/mesh-disk
 install -m 644 -o root -g wheel "$REPO"/etc/newsyslog-mesh.conf /etc/newsyslog.d/io.mesh.conf
 install -m 755 -o root -g wheel "$REPO"/user/mesh-telemetry.py "$MESH_ROOT/bin/mesh-telemetry.py"
 install -m 644 -o root -g wheel "$REPO"/etc/mesh-capacity.json "$MESH_ROOT/etc/mesh-capacity.json"
-install -m 644 -o root -g wheel "$REPO"/etc/mesh-nodes.json "$MESH_ROOT/etc/mesh-nodes.json"
+install -m 644 -o root -g wheel "$REPO"/etc/mesh-nodes.json "$REPO"/etc/mesh-store.json "$MESH_ROOT/etc/"
 install -m 644 -o root -g wheel "$REPO"/etc/io.mesh.telemetry.plist /Library/LaunchDaemons/io.mesh.telemetry.plist
 install -m 644 -o root -g wheel "$REPO"/keys/authorized_keys "$MESH_ROOT/etc/authorized_keys"
 install -m 755 -o root -g wheel "$REPO"/viz/serve.py "$MESH_ROOT/viz/serve.py"
