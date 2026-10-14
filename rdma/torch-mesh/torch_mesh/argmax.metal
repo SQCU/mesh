@@ -9,8 +9,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Sampling as an argmax (metal-microbench docs/kernels.md#speculative-decoding, sampling): argmax_v z_v / T + g(seed,
-// position, v) is a sample of softmax(z / T) [Gumbel 1954; the Gumbel-max trick, Maddison, Tarlow & Minka 2014], g the
+// Sampling as an argmax (metal-microbench docs/kernels.md#speculative-decoding, sampling): argmax_v z_v + g(seed,
+// position, v) is a sample of softmax(z) [Gumbel 1954; the Gumbel-max trick, Maddison, Tarlow & Minka 2014], g the
 // Gumbel noise of a hash of the three words (murmur3's finalizer, a bijection of 32 bits, folded over them) to a uniform
 // u in (0, 1) of 23 bits (its greatest, 1 - 2^-24, an fp32 value below 1; 24 bits had rounded it to 1 and g to +inf),
 // g = -log(-log u). Keyed by the position a row predicts from, a row computed again draws the same token.

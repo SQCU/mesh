@@ -10,9 +10,10 @@
 // again before an anchor past it reads it). The block writes its own rows' lines at p0 .. p0 + K - 1, so DFlash's relation
 // (the context before the anchor and the whole block) is the length p0 + K for every block row.
 //
-// The walk (2ndgenMTP's DFLASH2_HEAD, greedy): slot k's score of candidate v is softcap(base_k[v]) + (A e(prev) * H h_k)
+// The walk (2ndgenMTP's DFLASH2_HEAD): slot k's score of candidate v is softcap(base_k[v]) + (A e(prev) * H h_k)
 // . P[v], P = B E (the draft vocabulary's rows, precomputed), over the C greatest base scores of the slot; prev the anchor,
-// then the slot before's choice (A E precomputed over the draft vocabulary, A e(anchor) by its own pass).
+// then the slot before's choice (A E precomputed over the draft vocabulary, A e(anchor) by its own pass); its choice the
+// draw of the scores at temperature 1 with the target's own Gumbel noise (mesh_draft_select).
 #ifndef TORCH_MESH_DRAFTER
 #define TORCH_MESH_DRAFTER
 #include <metal_stdlib>
@@ -223,14 +224,15 @@ kernel void mesh_draft_anchor(device const half *table [[buffer(0)]], device con
 // The selector's walk over S slots in one threadgroup of T threads: slot k's predecessor projection (pa for the anchor, then
 // the row of AE = A E for the slot before's choice, E the draft vocabulary's rows of the target's table) times gate_k (h_gate
 // of the slot's hidden row, row stride gs), each candidate's score plus that . P[candidate] (P = B E), the greatest (the
-// first candidate on a tie: argmax.metal mesh_argmax over the threadgroup) its proposal, drafts[k + 1] = ids[that candidate]; drafts[0] the anchor. Sampling (inverse >
-// 0): the scores over the temperature plus the Gumbel noise the target's row at p0 + k draws its token with (argmax.metal
-// mesh_gumbel), so a draft is the token the target samples wherever the two distributions' arg maxima meet.
+// first candidate on a tie: argmax.metal mesh_argmax over the threadgroup) of the score plus the Gumbel noise the target's
+// row at p0 + k draws its token with (argmax.metal mesh_gumbel; `seed` the stream's selection word) its proposal,
+// drafts[k + 1] = ids[that candidate]; drafts[0] the anchor. The drafter's draw and the target's share their noise, so a
+// draft is the token the target samples wherever the two draws meet.
 template <uint RK, uint C, uint S, uint T>
 kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const half *ae [[buffer(1)]], device const half *gate [[buffer(2)]],
                               device const half *projected [[buffer(3)]], device const uint *cand [[buffer(4)]], device const float *score [[buffer(5)]],
                               device const int *ids [[buffer(6)]], device const uint *state [[buffer(7)]], device uint *drafts [[buffer(8)]],
-                              constant float &inverse [[buffer(9)]], constant uint &seed [[buffer(10)]], constant uint &gs [[buffer(11)]],
+                              device const uint &seed [[buffer(9)]], constant uint &gs [[buffer(10)]],
                               uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
     constexpr uint NSG = T / 32;
     threadgroup float p[RK];
@@ -248,8 +250,7 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
             const uint v = cand[k * C + c];
             for (uint j = lane; j < RK; j += 32) s += p[j] * float(projected[ulong(v) * RK + j]);
             s = simd_sum(s);
-            if (lane == 0) best[c] = inverse > 0.0f ? (score[k * C + c] + s) * inverse + mesh_gumbel(seed, state[1] + k, uint(ids[v]))
-                                                    : score[k * C + c] + s;
+            if (lane == 0) best[c] = score[k * C + c] + s + mesh_gumbel(seed, state[1] + k, uint(ids[v]));
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         float top = -INFINITY;
