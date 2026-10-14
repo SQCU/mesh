@@ -760,7 +760,7 @@ static void network_heard(void){
 /* design/bridge-and-ipc.md#clients: every client slot read: a client whose process exited is retired; a program that
    ended (stopped, its client gone) leaves its ports; a program started is taken onto each port it binds.  Rows of a
    retired client are released once no port holds a program of a client gone. */
-static uint64_t owners[MESH_CLIENTS];
+static uint64_t owners[MESH_CLIENTS],accepted[MESH_CLIENTS];
 static int unreleased;
 static void clients_turn(int liveness){
   int changed=0,zombie=0;
@@ -769,7 +769,7 @@ static void clients_turn(int liveness){
     uint64_t owner=atomic_load(&client->owner);
     if(liveness && owner && !(owner&MESH_RETIRING) && kill((pid_t)(uint32_t)owner,0) && errno==ESRCH){mesh_retire(M,owner);owner=atomic_load(&client->owner);}
     changed|=owner!=owners[s];owners[s]=owner;
-    uint64_t configured=atomic_load(&client->configured),released=atomic_load(&client->released);
+    uint64_t configured=atomic_load_explicit(&client->configured,memory_order_acquire);
     int held=0;
     for(uint32_t p=0;p<port_count;p++){
       struct flow *flow=ports[p].flows[s];
@@ -777,10 +777,9 @@ static void clients_turn(int liveness){
       held|=ports[p].flows[s]!=NULL;
       zombie|=ports[p].flows[s] && ports[p].flows[s]->client!=owner;
     }
-    if(released && released!=configured && !held)atomic_store(&client->released,0);
-    if(!owner || (owner&MESH_RETIRING) || configured!=owner || released==owner || held)continue;
-    atomic_store_explicit(&client->released,owner,memory_order_seq_cst);
-    if(atomic_load_explicit(&client->configured,memory_order_seq_cst)!=owner){atomic_store(&client->released,0);continue;}
+    if(accepted[s] && (accepted[s]!=owner || configured!=owner) && !held)accepted[s]=0;
+    if(!owner || (owner&MESH_RETIRING) || configured!=owner || accepted[s]==owner || held)continue;
+    accepted[s]=owner;
     struct kevent64_s event;EV_SET64(&event,(uint32_t)owner,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,s,0,0);
     kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
     for(uint32_t p=0;p<MESH_PORTS;p++){

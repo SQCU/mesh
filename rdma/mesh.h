@@ -90,12 +90,12 @@ _Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepar
    it made) */
 struct mesh_port_info { _Atomic uint32_t phase,domain; _Atomic int64_t code; _Atomic uint64_t prepared; };
 struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atomic uint64_t bandwidth,connection; char device[32]; };
-/* design/bridge-and-ipc.md#region: a client slot: its attach (`owner`, 0 vacant), its program while it runs
-   (`configured`, the owner) and the bridge's hold on that program (`released`, the owner until the bridge has let it
-   go), the execution it belongs to (`key`, the same on every member), its ring depth, whether it is cyclic, and each
-   link's transfer list lengths, program and status */
+/* design/bridge-and-ipc.md#region: a client slot: its attach (`owner`, 0 vacant), its program once started
+   (`configured`, the owner), the execution it belongs to (`key`, the same on every member), its ring depth, whether it
+   is cyclic, and each link's transfer list lengths, program and status */
 struct mesh_client {
-  _Alignas(64) _Atomic uint64_t owner,configured,released;
+  _Alignas(64) _Atomic uint64_t owner;
+  _Atomic uint64_t configured;
   uint64_t key;
   _Atomic uint32_t depth,cyclic;
   _Atomic uint32_t length[MESH_PORTS*MESH_QUEUES*2];

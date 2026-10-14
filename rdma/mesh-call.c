@@ -286,27 +286,6 @@ int mesh_transfers_cyclic(struct mesh_ctx *context){
   return 0;
 }
 
-/* design/prepared-machine.md#M12 */
-/* The client's program ends and the client stays attached: its allocations remain, its transfers are
-   cleared for another mesh_transfers_prepare and mesh_transfers_start.  The bridge takes the program off its
-   ports once `configured` no longer names the client and then clears `released`.  ETIMEDOUT where the bridge
-   has not let it go within `seconds`. */
-int mesh_transfers_stop(struct mesh_ctx *context,double seconds){
-  struct hdr *m=context->M;
-  struct mesh_client *client=mesh_client_at(m,context->client);
-  uint64_t owner=context->client;
-  if(atomic_compare_exchange_strong_explicit(&client->configured,&owner,0,memory_order_seq_cst,memory_order_relaxed)){
-    mesh_control_notify(m);
-    for(double waited=0;atomic_load_explicit(&client->released,memory_order_seq_cst)==context->client;waited+=1e-4){
-      if(waited>seconds)return ETIMEDOUT;
-      usleep(100);
-    }
-  }
-  for(uint32_t q=0;q<m->links*MESH_QUEUES*2;q++)atomic_store_explicit(client->length+q,0,memory_order_release);
-  for(uint32_t p=0;p<m->links;p++){atomic_store_explicit(&client->port[p].prepared,0,memory_order_release);client->tx[p].peer=0;}
-  return 0;
-}
-
 /* design/algorithm-sources.md#programtensor */
 int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int wire,struct mesh_section *section){
   struct hdr *m=context->M;

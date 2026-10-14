@@ -34,8 +34,7 @@ a call: arena pages, page-table rows and transfer lists are a client's lease, ta
 refused as a value where the node cannot give them.
 
 A client slot (`struct mesh_client`) holds one client: its owner word (the client's generation, slot and process), its
-execution's key, its program while it runs (`configured`), the bridge's hold on that program (`released`), its ring
-depth and whether it is cyclic, and for each link the transfer lists' lengths, the program on that link
+execution's key, its program once started (`configured`), its ring depth and whether it is cyclic, and for each link the transfer lists' lengths, the program on that link
 (`struct mesh_tx`: its SEND cells, its cancellation words, its transfer lists, the peer node it was bound for) and the
 link's status for it (`struct mesh_port_info`: phase, code, domain, `prepared`). Every word a client writes is its own
 slot's or its own rows'; no client reads, waits for or names another client's.
@@ -65,9 +64,8 @@ bridge is gone.
 A program is bound (`mesh_transfer_bind`: a link's lists are leased at its first transfer, its peer recorded),
 prepared (`mesh_transfers_prepare`, `mesh_host_inputs` or the Metal transport) and started (`mesh_transfers_start`),
 which returns once the bridge has paired the program on every link it binds, or with the failure the link's status
-names. `mesh_transfers_stop` gives the program back; the bridge takes it off its ports and clears `released`.
-`mesh_detach`, or the client's process exiting, retires the slot: its rows are closed, and the bridge releases them
-once no port still holds a program of a client gone.
+names. `mesh_detach`, or the client's process exiting, retires the slot and ends its program: its rows are closed, and
+the bridge releases them once no port still holds a program of a client gone.
 
 ## protocol
 
