@@ -112,6 +112,7 @@ FIT_PRIOR = dict(c0=2.0, tile=0.02, row=0.01, plane=0.004, sg=0.01, part=0.002, 
 FAMILIES = ('alu', 'coop', 'panel')
 PERS = (8, 16, 24, 32, 48)
 WIDTH_CLASSES = (4, 8, 12, 15)
+WIDTH_CLASS = [0] + [next(c for c in WIDTH_CLASSES if c >= w) for w in range(1, 16)]
 
 
 def evidence_path():
@@ -419,11 +420,9 @@ _TYPES = {torch.float16: '', torch.float32: '_float', torch.bfloat16: '_bfloat'}
 
 def widths_of(tiles):
     """A matrix's (or a slice's) width class: the least of WIDTH_CLASSES at least the widest width its tile words hold (0
-    where none), so slices of one class share instances (the export's width caps are 8 and 12). The table names the
-    classes (width_classes) and the engine takes a slice's class from them by this rule (streamed_weights.swift
-    streamedWidths)."""
-    widest = int((((tiles.cpu().long() & 0xFFFFFFFF) >> 12) & 15).max()) if tiles.numel() else 0
-    return next(c for c in WIDTH_CLASSES if c >= widest) if widest else 0
+    where none), so slices of one class share instances (the export's width caps are 8 and 12): WIDTH_CLASS[widest], the
+    table's width_class, which the engine reads for its slices (streamed_weights.swift streamedWidths)."""
+    return WIDTH_CLASS[int((((tiles.cpu().long() & 0xFFFFFFFF) >> 12) & 15).max()) if tiles.numel() else 0]
 
 
 def _hadamard(signs, mix):
@@ -1095,7 +1094,7 @@ def _resolve(args):
     part = record['ranks'][args.rank] if args.program else None
     attention = _attention(args.export, part, ctx, classes, known.get('attention'))
     table = {'node': node()[0], 'cores': node()[1], 'evidence': str(evidence_path()), 'export': str(args.export),
-             'program': args.program, 'rank': args.rank, 'classes': classes, 'width_classes': list(WIDTH_CLASSES), 'ctx': ctx,
+             'program': args.program, 'rank': args.rank, 'classes': classes, 'width_class': WIDTH_CLASS, 'ctx': ctx,
              'instances': entries, 'attention': attention}
     Path(args.out).write_text(json.dumps(table, indent=1) + '\n')
     print(f'{args.out}: {len(entries)} instances, {len(keyed)} slices, {len(attention)} attention plans, classes {classes}')
