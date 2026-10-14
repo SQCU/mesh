@@ -37,9 +37,9 @@ the waves the node holds; one set of coefficients a kernel family (streamed_alu 
 streamed_panel) a node, fitted by least squares in log space with a ridge toward the prior from the node's
 observations (each probe's and profile's measured instance: rows of the evidence file, MESH_INSTANCES or
 ~/.cache/mesh/instances.json, which holds the coefficients too; a node without evidence prices by the prior). A
-choice is the argmin over the admissible instances of a slice at its rows: of the instances the evidence read at that
-slice and rows (each its readings' median) where there are any, a measurement at a shape outranking the model there,
-else of the fit's prices (a measurement moves the coefficients for every other shape).
+choice is the argmin over the admissible instances of a slice at its rows: of the instances served readings read at that
+slice and rows (observe's rows, each its readings' median) where there are any, a measurement at a shape outranking the
+model there, else of the fit's prices (every measurement, a probe's too, moves the coefficients for every other shape).
 
   python -m torch_mesh.streamed fit OBSERVATIONS ... --gbps G   this node's evidence fitted (each file a probe's record:
                                                                 rows of instance, slice units, rows_in, best_us; or
@@ -341,10 +341,12 @@ def read_key(spec):
 
 
 def readings(obs):
-    """Each slice's (outputs, columns, width class, rows) read instances (read_key) and their observations' median us."""
+    """Each slice's (outputs, columns, width class, rows) instances read in served profiles (observe's rows: the step's
+    own conditions, not a probe's) by read_key, and their readings' median us."""
     out = {}
-    for spec, s, rows, us, _ in obs:
-        out.setdefault((s['outputs'], s['columns'], width_class(spec['WIDTHS']), rows), {}).setdefault(read_key(spec), []).append(us)
+    for spec, s, rows, us, shape in obs:
+        if shape.startswith('profile'):
+            out.setdefault((s['outputs'], s['columns'], width_class(spec['WIDTHS']), rows), {}).setdefault(read_key(spec), []).append(us)
     return {k: {c: sorted(v)[len(v) // 2] for c, v in read.items()} for k, read in out.items()}
 
 
