@@ -1,12 +1,12 @@
 #!/usr/bin/env mesh-python
-import argparse, collections, concurrent.futures, curses, html, json, os, re, signal, socket, subprocess, sys, threading, time
+import argparse, collections, concurrent.futures, curses, html, json, os, signal, socket, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 TELEMETRY_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
-RESIDENT = ("beacon", "router", "nodeinfo", "telemetry", "observer")
+RESIDENT = ("beacon", "bridge", "router", "nodeinfo", "telemetry", "observer")
 SPARK = " ▁▂▃▄▅▆▇█"
 PHASES = {0: "UNKNOWN", 1: "PAIRING", 2: "PAIRED", 3: "STOPPED"}
-USAGE = "mesh-top [-n SECONDS] [--window SECONDS] [--nodes A,B] [--probe] [--once | --html FILE]   keys: q quit, p probe idle RDMA ports once (ibv_devinfo), j/k scroll"
+USAGE = "mesh-top [-n SECONDS] [--window SECONDS] [--nodes A,B] [--once | --html FILE]   keys: q quit, j/k scroll"
 
 def first_file(paths):
     return next((path for path in paths if path and os.path.isfile(os.path.expanduser(path))), None)
@@ -38,7 +38,7 @@ class Node:
     def __init__(self, spec):
         self.spec, self.name = spec, spec["name"]
         self.sample, self.info, self.info_at, self.error, self.transport, self.rtt = None, {}, 0.0, None, None, None
-        self.sequence, self.previous, self.probe, self.probing, self.retry_at, self.address = None, None, None, False, 0.0, None
+        self.sequence, self.previous, self.retry_at, self.address = None, None, 0.0, None
 
     def hosts(self):
         if self.spec.get("self"): return ["127.0.0.1"]
@@ -124,16 +124,6 @@ def fetch(node):
         text = nodeinfo_text(node.address) if node.transport[0] == "http" else ssh(node.transport[1], "printf x | nc -G 2 -w 2 ::1 8099 || printf x | nc -G 2 -w 2 ::1 8100", 8).stdout.split("\n", 1)[-1]
         if text: node.info, node.info_at = parse_info(text), time.time()
 
-def probe(node):
-    command = "pgrep -x ibv_devinfo >/dev/null && echo MESH_TOP_BUSY || /usr/bin/ibv_devinfo 2>&1"
-    try:
-        text = run(["/bin/sh", "-c", command], 10).stdout if node.spec.get("self") else ssh(node.ssh_hosts()[0], command, 15).stdout
-        states = {m.group(1): (re.search(r"state:\s*(PORT_\w+)", block) or [None, "?"])[1] for block in text.split("hca_id:")[1:] for m in [re.match(r"\s*(\S+)", block)] if m}
-        node.probe = {"at": time.time(), "states": states, "note": "an earlier ibv_devinfo is still running there" if "MESH_TOP_BUSY" in text else None}
-    except Exception as error:
-        node.probe = {"at": time.time(), "states": {}, "note": f"probe did not return: {type(error).__name__}; not retried while it runs"}
-    node.probing = False
-
 def fabric(node):
     return ((node.sample or {}).get("fabric") or {}) if isinstance((node.sample or {}).get("fabric"), dict) else {}
 
@@ -170,9 +160,14 @@ class Top:
         self.nodes = [Node(spec) for spec in sorted(roster(args.roster, args.nodes).values(), key=lambda s: s["name"])]
         self.series = collections.defaultdict(lambda: collections.deque(maxlen=240))
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(2, 2 * len(self.nodes)))
+        self.map, self.names = [], {}
 
     def refresh(self):
+        """Every node's telemetry, then the mesh's map: one running bridge's (mesh-stat's `map`, this node's first), its
+        records naming each node."""
         list(self.pool.map(fetch, self.nodes))
+        self.map = next((m for node in sorted(self.nodes, key=lambda n: not n.spec.get("self")) for m in [((self.live(node) or {}).get("stat") or {}).get("map")] if m), [])
+        self.names = {record.get("node"): record.get("name") for record in self.map}
         for node in self.nodes: self.account(node)
 
     def owner(self, address):
@@ -184,17 +179,13 @@ class Top:
                 if port.get("address", "").split("%")[0] == address: return node.name, port.get("port")
         return None, None
 
-    def peer_by_node(self, number):
-        return next((node.name for node in self.nodes if str(node.info.get("bridge_node")) == str(number)), None)
-
     def live(self, node):
         """The node's running bridge (its telemetry's), else None."""
         return next((b for b in fabric(node).get("bridges") or [] if not b.get("exited_at")), None)
 
     def toward(self, node, peer):
-        """The ports of `node`'s bridge whose link reaches node `peer` (mesh-stat's peers, by port index)."""
-        bridge = self.live(node) if node else None
-        return [p for p in ((bridge or {}).get("stat") or {}).get("peers") or [] if self.peer_by_node(p.get("node")) == peer]
+        """The ports of `node`'s running bridge (mesh-stat's peers, by port index) whose peer the map names `peer`."""
+        return [p for p in ((self.live(node) or {}).get("stat") or {}).get("peers") or [] if self.names.get(p.get("node")) == peer]
 
     def account(self, node):
         sample, previous = node.sample, node.previous
@@ -212,7 +203,7 @@ class Top:
                 base = ((old or {}).get("census") or {}).get(index) or {}
                 delta = {key: max(0, value - base.get(key, 0)) for key, value in total.items()}
                 port = next((p for p in peers if str(p.get("port")) == index), {})
-                peer = self.peer_by_node(port.get("node")) or f"node {port.get('node', '?')}"
+                peer = self.names.get(port.get("node")) or f"node {port.get('node', '?')}"
                 end = float(sample["observed_at"])
                 self.series[(peer, node.name, "recv")].append((end, dt, delta.get("bytes", 0), delta.get("landed", 0), delta.get("calls", 0)))
                 self.series[(node.name, peer, "send")].append((end, dt, delta.get("frames", 0) * 4096, delta.get("send_completions", 0), delta.get("calls", 0)))
@@ -267,8 +258,8 @@ class Top:
                 bridge = (f"pid {b['pid']} {phases} {stat.get('clients', 0)} clients", "ok" if "PAIRED" in phases else "warn")
             elif f.get("bridges"):
                 b = max(f["bridges"], key=lambda x: x["exited_at"])
-                bridge = (f"none (last exited {duration(now - b['exited_at'])} ago)", "dim")
-            else: bridge = ("none", "dim")
+                bridge = (f"none (last exited {duration(now - b['exited_at'])} ago)", "bad")
+            else: bridge = ("none", "bad")
             transport = f"{node.transport[0]} {node.transport[1]} {node.rtt * 1000:.0f}ms" if node.transport else "unreachable"
             add("  ", (f"{node.name:<17} ", "bold"), f"{chip:<14} {info.get('cores', '?'):>5}  {(str(round(mem / 2**30)) + 'G') if mem else info.get('memgb', '?') + 'G':<6} {up:<9} ",
                 (f"{bridge[0][:36]:<37}", bridge[1]), (transport, "dim" if node.transport else "bad"))
@@ -289,7 +280,6 @@ class Top:
                     (f"   keeper: {keeper['last'][:48]}" if keeper.get("last") else "", "dim"))
             if node.error: hints.append(("bad", f"{node.name}: no telemetry ({node.error})"))
             if f.get("error"): hints.append(("warn", f"{node.name}: telemetry fabric section failed: {f['error']}"))
-            if (node.probe or {}).get("note"): hints.append(("warn", f"{node.name}: RDMA port probe {node.probe['note']}"))
             if node.sample and not isinstance(node.sample.get("fabric"), dict): hints.append(("warn", f"{node.name}: its io.mesh.telemetry predates the fabric section; links show nodeinfo only until it converges"))
             if info.get("planes") and info.get("planes") != "2": hints.append(("warn", f"{node.name}: DEGRADED, {info['planes']} of 2 planes (lan={info.get('lan')} fabric={info.get('fabric')})"))
             for alarm in keeper.get("alarms") or []:
@@ -319,20 +309,13 @@ class Top:
                 "   IP ", both(lambda p: p.get("ip"), "active"), "  nbr ", both(lambda p: ",".join(n["state"] for n in p.get("neighbors") or []) or "none"),
                 "   RDMA dev ", both(lambda p: {2: "on", 0: "off"}.get(p.get("rdma_power"), p.get("rdma_power")), "on"))
             segments = [("      RDMA port ", "dim")]
-            for node, iface, p, other in ((na, ai, pa, b), (nb, bi, pb, a)):
+            for node, iface, other in ((na, ai, b), (nb, bi, a)):
                 ports = self.toward(node, other)
-                probed = ((node.probe or {}).get("states") or {}).get("rdma_" + iface) if node else None
                 if ports:
                     phases = "/".join(PHASES.get(q.get("phase"), "?") + (f" code {q['code']}" if q.get("code") else "") for q in ports)
                     segments.append((f"{node.name} toward {other}: port {'/'.join(str(q.get('port')) for q in ports)} {phases}   ", "ok" if "PAIRED" in phases else "warn"))
-                elif probed:
-                    segments.append((f"{node.name}:rdma_{iface} {probed} (probe {time.strftime('%H:%M:%S', time.localtime(node.probe['at']))})   ", "ok" if probed == "PORT_ACTIVE" else "bad"))
-                else: segments.append((f"{node.name}:rdma_{iface} unmeasured (no bridge; p probes)   ", "dim"))
-                ip_up = p and p.get("ip") == "active" and p.get("neighbors")
-                if ip_up and probed and probed != "PORT_ACTIVE":
-                    hints.append(("bad", f"{node.name} rdma_{iface} is {probed} while IP over {iface} is up: reseat the Thunderbolt cable (post-reboot / link-flap quirk; no sudo needed)"))
-                elif ip_up and p.get("rdma_power") not in (2, None) and not probed:
-                    hints.append(("warn", f"{node.name} rdma_{iface}: IP over {iface} is up but the RDMA device reports power state {p.get('rdma_power')}; likely PORT_DOWN (post-reboot quirk): press p to confirm, then reseat the cable"))
+                elif self.live(node): segments.append((f"{node.name}:rdma_{iface} no port of its bridge reaches {other}   ", "warn"))
+                else: segments.append((f"{node.name}:rdma_{iface} no bridge   ", "bad"))
             add(*segments)
             for src, dst in ((a, b), (b, a)):
                 recv, send = self.rates((src, dst, "recv"), W), self.rates((src, dst, "send"), W)
@@ -351,7 +334,7 @@ class Top:
                 for port in self.toward(node, other):
                     total = (bridge.get("census") or {}).get(str(port.get("port")))
                     if total:
-                        reference.append(f"{node.name} port {port.get('port')}: {total['calls']} programs, {rate_text(total['bytes']).replace('/s', '')} landed, {port.get('connection', 0)} pairings, {bridge.get('errors', 0)} errors, unretired SEND frames {total['frames'] - total['retired']}")
+                        reference.append(f"{node.name} port {port.get('port')}: {total['calls']} programs, {rate_text(total['bytes']).replace('/s', '')} landed, {port.get('pairings', 0)} pairings, {bridge.get('errors', 0)} errors, unretired SEND frames {total['frames'] - total['retired']}")
             for text in reference: add(("      " + text, "dim"))
         add()
         add(("TOPOLOGY", "head"))
@@ -359,10 +342,10 @@ class Top:
         edges = {frozenset(x for x, _ in key) for key in cables}
         order = lambda edge: sorted(edge)
         if names: add(f"  cabled    {shape(names, edges)}: " + "  ".join(" <-> ".join(order(e)) for e in edges), ("   (Thunderbolt IP adjacency, ndp)", "dim"))
-        paired = {frozenset((node.name, self.peer_by_node(p.get("node")) or f"node {p.get('node')}")) for node in self.nodes
-                  for p in ((self.live(node) or {}).get("stat") or {}).get("peers") or [] if p.get("phase") == 2}
-        if paired: add(f"  paired    {shape(sorted({x for e in paired for x in e}), paired)}: " + "  ".join(" <-> ".join(sorted(e)) for e in paired), ("   (the bridges' paired ports)", "dim"))
-        else: add(("  paired    no bridge holds a paired port", "dim"))
+        paired = {frozenset((record.get("name"), self.names[p.get("node")])) for record in self.map for p in record.get("ports") or []
+                  if p.get("phase") == 2 and p.get("node") in self.names}
+        if paired: add(f"  paired    {shape(sorted({x for e in paired for x in e}), paired)}: " + "  ".join(" <-> ".join(sorted(e)) for e in paired), ("   (the map: each bridge's paired ports)", "dim"))
+        else: add(("  paired    " + ("no bridge in the map holds a paired port" if self.map else "no running bridge gave its map"), "dim" if self.map else "bad"))
         hints = list(dict.fromkeys(hints)) or [("ok", "none")]
         return lines[:2] + [[("HINTS", "head")]] + [[("  " + ("! " if style != "ok" else "") + text, style)] for style, text in hints] + [[]] + lines[2:]
 
@@ -394,7 +377,6 @@ def interactive(screen, top):
         if time.monotonic() >= due:
             top.refresh()
             lines, due = top.frame(), time.monotonic() + top.args.interval
-            if any(node.probing for node in top.nodes): lines.insert(1, [("  probing RDMA ports ...", "warn")])
             height, width = screen.getmaxyx()
             screen.erase()
             for row, line in enumerate(lines[offset:offset + height - 1]):
@@ -409,18 +391,6 @@ def interactive(screen, top):
         if key in (ord("q"), 27): return
         if key == ord("j"): offset, due = min(offset + 1, max(0, len(lines) - 2)), 0
         if key == ord("k"): offset, due = max(0, offset - 1), 0
-        if key == ord("p"): start_probe(top); due = 0
-
-def start_probe(top):
-    for node in top.nodes:
-        f = fabric(node)
-        busy = [b for b in f.get("bridges") or [] if not b.get("exited_at")]
-        wedged = [h for p in f.get("ports") or [] for h in p.get("holders") or [] if str(h.get("stat") or "").startswith("U")]
-        if node.probing or busy or wedged or node.error:
-            node.probe = {"at": time.time(), "states": (node.probe or {}).get("states", {}), "note": "not probed: " + ("a bridge runs there (its link phase is the port state)" if busy else "a verbs process is in U" if wedged else "unreachable" if node.error else "a probe is outstanding")}
-            continue
-        node.probing = True
-        threading.Thread(target=probe, args=(node,), daemon=True).start()
 
 def main():
     parser = argparse.ArgumentParser(prog="mesh-top", usage=USAGE, description="Live connectivity and observed RDMA bandwidth between mesh nodes, read from each node's io.mesh.telemetry (:8788) and io.mesh.nodeinfo; sends no traffic of its own.")
@@ -428,7 +398,6 @@ def main():
     parser.add_argument("--window", type=float, default=5.0)
     parser.add_argument("--roster", default=first_file([os.environ.get("MESH_NODES"), os.path.join(HERE, "..", "etc", "mesh-nodes.json"), "~/.local/mesh/etc/mesh-nodes.json", "/usr/local/mesh/etc/mesh-nodes.json"]))
     parser.add_argument("--nodes", type=lambda text: [x for x in text.split(",") if x], default=None)
-    parser.add_argument("--probe", action="store_true")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--html")
     args = parser.parse_args()
@@ -436,10 +405,6 @@ def main():
     top = Top(args)
     if args.once or args.html:
         top.refresh()
-        if args.probe:
-            start_probe(top)
-            deadline = time.monotonic() + 20
-            while any(node.probing for node in top.nodes) and time.monotonic() < deadline: time.sleep(0.2)
         for _ in range(max(2, int(args.window / args.interval) + 1)):
             time.sleep(args.interval)
             top.refresh()
@@ -450,7 +415,6 @@ def main():
             mesh_disk.write(args.html, page(lines), f"mesh-top's page {args.html}")
         if args.once or not args.html: print(ansi(lines, sys.stdout.isatty()))
         return
-    if args.probe: start_probe(top)
     curses.wrapper(interactive, top)
 
 if __name__ == "__main__":
