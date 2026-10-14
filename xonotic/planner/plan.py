@@ -9,7 +9,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'rdma'))
 from allocate import Allocator
-from mesh import AllReduce
+from mesh import Mesh, link_map
+import peers
 
 TEAMS = 5
 EXPERTS = 8
@@ -48,7 +49,6 @@ def main():
     parser.add_argument('--width', type=int, default=256)
     parser.add_argument('--columns', default=','.join(map(str, split['columns'])),
                         help="config_t0: each rank's expert columns, in rank order (default: split.json)")
-    parser.add_argument('--links', default=str(ROOT / 'examples/links-pair.conf'))
     parser.add_argument('--depth', type=int, default=4)
     parser.add_argument('--seconds', type=float, default=150)
     args = parser.parse_args()
@@ -62,7 +62,14 @@ def main():
     # elsewhere, so the reduction sums it exactly and every rank reads every rank's time from the
     # tick's result: the allocator (rdma/allocate.py) is duplicated on every rank and steps on
     # identical inputs, and its shares are the next tick's configuration operand.
-    reduce = AllReduce((args.bots + 1, args.width), np.float32, args.links, args.ticks, args.depth)
+    # the mesh as its bridges record it: its nodes by their bridges' node numbers, the links they hold paired
+    graph = peers.topology(list(peers.observe_mesh()['observations'].values()))
+    members = [n['identity'] for n in graph['nodes']]
+    pairs = [(members.index(a), members.index(b)) for a, b, *_ in graph['edges']]
+    whole = len(pairs) == len(members) * (len(members) - 1) // 2
+    mesh = Mesh(link_map('mesh' if whole else 'graph', len(members), [] if whole else pairs), args.ticks, args.depth, members=members)
+    reduce = mesh.collective('allreduce', (args.bots + 1, args.width), np.float32)
+    mesh.start()
     allocate = Allocator(columns, split['grain'], split['low'], split['prior'], split['floor'],
                          split['forget'], split['step'])
     route, up, down, objective = model(args.width)

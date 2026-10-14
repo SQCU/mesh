@@ -44,44 +44,6 @@ int mesh_link_map_check(const struct mesh_link_map *map){
   return result;
 }
 
-/* The text form: the MLX JACCL hostfile idea (github.com/ml-explore/mlx docs/src/usage/distributed.rst) reduced to a
-   kind, a node count and links with their costs; refused where mesh_link_map_check refuses it. */
-int mesh_link_map_read(const char *path,struct mesh_link_map *map){
-  static const char *const kinds[]={"mesh","ring","tree","graph"};
-  FILE *file=fopen(path,"r");
-  if(!file)return errno;
-  char line[256],kind[8]="",rest[2];
-  uint32_t a,b,capacity=0,costed=0;
-  double alpha,beta;
-  *map=(struct mesh_link_map){.kind=UINT32_MAX};
-  while(fgets(line,sizeof line,file)){
-    const int fields=sscanf(line," %u %u %lf %lf %1s",&a,&b,&alpha,&beta,rest);
-    if(fields>=2){
-      if(map->links==capacity){
-        capacity=capacity?2*capacity:64;
-        uint32_t (*grown)[2]=realloc(map->link,(size_t)capacity*sizeof *map->link);
-        double (*priced)[2]=grown?realloc(map->cost,(size_t)capacity*sizeof *map->cost):NULL;
-        if(grown)map->link=grown;
-        if(priced)map->cost=priced;
-        if(!grown || !priced){fclose(file);mesh_link_map_free(map);return ENOMEM;}
-      }
-      map->link[map->links][0]=a;map->link[map->links][1]=b;
-      map->cost[map->links][0]=fields==4?alpha:NAN;map->cost[map->links][1]=fields==4?beta:NAN;
-      costed+=fields==4;map->links++;
-    }else if(map->kind==UINT32_MAX && sscanf(line,"%7s %u",kind,&a)==2)
-      for(uint32_t k=0;k<4;k++)if(!strcmp(kind,kinds[k])){map->kind=k;map->nodes=a;}
-  }
-  fclose(file);
-  if(!costed){free(map->cost);map->cost=NULL;}
-  int result=map->kind==UINT32_MAX?EINVAL:mesh_link_map_check(map);
-  if(result)mesh_link_map_free(map);
-  return result;
-}
-
-void mesh_link_map_free(struct mesh_link_map *map){
-  free(map->link);free(map->cost);map->link=NULL;map->cost=NULL;map->links=0;
-}
-
 /* Whether node v is in a bit set of nodes (a bit a node, 64 a word; NULL: every node). */
 static int mesh_member(const uint64_t *set,uint32_t v){ return !set || (set[v/64]>>(v%64)&1); }
 

@@ -26,18 +26,13 @@ int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,u
                        among them, unoriented)
    cost (NULL: the caller's alpha and beta for every link) is link i's alpha (us a message) and beta (ns a byte)
    either way [Hockney 1994]; a pair the map links without a cost takes the caller's.  `link` and `cost` are the
-   caller's storage, or mesh_link_map_read's (freed by mesh_link_map_free). */
+   caller's storage. */
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
 struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; double (*cost)[2]; };
 /* 0 where a map's algorithm can run on it, else EINVAL: every node < nodes; a ring one cycle through every node
    with one link into each; a tree nodes-1 links, one into each node but the root, every node reaching the root; a
    graph connected. */
 int mesh_link_map_check(const struct mesh_link_map *);
-/* A map written as text, for programs that keep one in a file (metal-microbench's engine drivers):
-     <kind> <nodes>                    kind is mesh, ring, tree or graph
-     <a> <b> [<alpha> <beta>]          one link per line, with its cost; '#' starts a comment line */
-int mesh_link_map_read(const char *path,struct mesh_link_map *);
-void mesh_link_map_free(struct mesh_link_map *);
 /* Whether the map links a and b, either way (a mesh every pair). */
 int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
 

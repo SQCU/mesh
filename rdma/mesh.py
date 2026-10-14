@@ -1,7 +1,7 @@
 """The mesh from Python.  The planner (mesh-plan.h: link maps, the trees every collective and message take, operands,
 collectives, steps, their planning and pricing) is the header's own, through _mesh_c (mesh_c_build.py compiles the header's declarations against it, so
 no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The host transfers
-(Mesh, Steps, AllReduce: mesh.h's attach, sections and prepared transfers) are bound below by ctypes, mesh.h not
+(Mesh, Steps: mesh.h's attach, sections and prepared transfers) are bound below by ctypes, mesh.h not
 being a header a binder takes as written."""
 import ctypes as C
 import os
@@ -62,20 +62,6 @@ class LinkMap:
 def link_map(kind, nodes, pairs, cost=None, apart=False):
     """A LinkMap (above)."""
     return LinkMap(kind, nodes, pairs, cost, apart)
-
-
-def read_link_map(path):
-    """The link map a text file holds (mesh-plan.h's text form), as a LinkMap."""
-    made = ffi.new('struct mesh_link_map *')
-    status = lib.mesh_link_map_read(os.fsencode(str(path)), made)
-    if status:
-        raise ValueError(f'{path}: not a link map: {os.strerror(status)}')
-    try:
-        pairs = [(made.link[i][0], made.link[i][1]) for i in range(made.links)]
-        cost = [(made.cost[i][0], made.cost[i][1]) for i in range(made.links)] if made.cost != ffi.NULL else None
-        return LinkMap(KINDS[made.kind], made.nodes, pairs, cost)
-    finally:
-        lib.mesh_link_map_free(made)
 
 
 def operand(type, element_bytes, elements):
@@ -201,7 +187,7 @@ class Mesh:
     """One client of this node's bridge and the one program prepared on it: every collective
     and exchange bound on it (collective, bind), in the same order on every rank, prepared for
     `invocations` calls, storage ringing over `depth` slots, and started by `start` (an NCCL group is
-    one); `name` the execution's, the same on every rank.  `links` is a LinkMap (or a link map file's path, read_link_map); its node v is the bridge's node
+    one); `name` the execution's, the same on every rank.  `links` is a LinkMap; its node v is the bridge's node
     members[v] (default v), and this rank is the map node of this bridge's.  `routes` are the trees its collectives
     are compiled along (trees(); None: pack(links), made once here).  Each collective takes the transfer identities
     from `identity` on, as many as its program has moves."""
@@ -210,7 +196,7 @@ class Mesh:
         self.context = Context()
         check(LIB.mesh_attach(C.byref(self.context), os.fsencode(name)))
         self.header = Header.from_address(self.context.M)
-        self.map = links if isinstance(links, LinkMap) else read_link_map(links)
+        self.map = links
         self.routes = routes if routes is not None else pack(self.map)
         self.nodes, self.members = self.map.nodes, list(members or range(self.map.nodes))
         self.rank = self.members.index(self.header.node)
@@ -310,14 +296,5 @@ class Steps:
         return total
 
     def close(self, linger=0.5):
-        """Closes this collective's Mesh (the one of AllReduce)."""
+        """Closes this collective's Mesh."""
         return self.mesh.close(linger)
-
-
-def AllReduce(shape, dtype, links, invocations, depth=4, identity=1, name='mesh'):
-    """One rank's all-reduce of a typed array over an explicit link map (the Xonotic planner's), along the map's
-    packed trees, prepared once for `invocations` calls and started: a Mesh of one collective."""
-    mesh = Mesh(links, invocations, depth, name, identity)
-    steps = mesh.collective('allreduce', shape, dtype)
-    mesh.start()
-    return steps
