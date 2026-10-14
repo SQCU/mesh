@@ -689,6 +689,7 @@ static void port_turn(struct port *port){
   }
   if(port->control>=0 || now<port->next)return;
   port->next=now+PAUSE_NS;
+  port->interface=if_nametoindex(port->name);
   if(port->retiring){
     for(uint32_t s=0;s<MESH_CLIENTS;s++)if(port->flows[s] && port->flows[s]->provider.qp_count)return;
     if(!down_device(&port->device)){fprintf(stderr,"link %u (%s): device retirement: %s\n",port->index,port->name,strerror(errno));return;}
@@ -796,6 +797,24 @@ static void clients_turn(int liveness){
   if(unreleased && !zombie){unreleased=0;mesh_retired_release(M);}
 }
 
+/* design/bridge-and-ipc.md#ports: every RDMA device of the node a port, those found since the bridge's start added */
+static void ports_found(void){
+  struct ibv_device **list=ibv_get_device_list(NULL);
+  for(int i=0;list && list[i] && port_count<MESH_PORTS;i++){
+    const char *name=ibv_get_device_name(list[i]);
+    uint32_t known=0;
+    for(uint32_t p=0;p<port_count;p++)known|=!strcmp(ports[p].device.name,name);
+    if(known || strncmp(name,"rdma_",5))continue;
+    struct port *port=ports+port_count;
+    *port=(struct port){.index=port_count,.control=-1};
+    snprintf(port->device.name,sizeof port->device.name,"%s",name);snprintf(port->name,sizeof port->name,"%s",name+5);
+    snprintf(mesh_links(M)[port_count].device,sizeof mesh_links(M)[port_count].device,"%s",name);
+    atomic_store(&mesh_links(M)[port_count].phase,MESH_STOPPED);
+    port_count++;
+  }
+  if(list)ibv_free_device_list(list);
+}
+
 /* design/prepared-machine.md#M26: the clients' control word, watched for the event loop */
 static void *control_watch(void *unused){
   (void)unused;
@@ -833,18 +852,7 @@ int main(int argc,char **argv){
   for(uint32_t r=0;r<mesh_rows(M);r++)atomic_store_explicit(&mesh_page(M)[r].mapping,MESH_ABSENT,memory_order_relaxed);
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
-  struct ibv_device **list=ibv_get_device_list(NULL);
-  for(int i=0;list && list[i] && port_count<MESH_PORTS;i++){
-    const char *name=ibv_get_device_name(list[i]);
-    if(strncmp(name,"rdma_",5))continue;
-    struct port *port=ports+port_count;
-    *port=(struct port){.index=port_count,.control=-1,.interface=if_nametoindex(name+5)};
-    snprintf(port->device.name,sizeof port->device.name,"%s",name);snprintf(port->name,sizeof port->name,"%s",name+5);
-    snprintf(mesh_links(M)[port_count].device,sizeof mesh_links(M)[port_count].device,"%s",name);
-    atomic_store(&mesh_links(M)[port_count].phase,MESH_STOPPED);
-    port_count++;
-  }
-  if(list)ibv_free_device_list(list);
+  ports_found();
   events=kqueue();
   struct kevent64_s event;
   int on=1;
@@ -879,6 +887,7 @@ int main(int argc,char **argv){
     int alive=now>=liveness;
     if(alive){
       liveness=now+PAUSE_NS;
+      ports_found();
       if(binary.st_ino && (stat(argv[0],&current) || current.st_ino!=binary.st_ino || current.st_mtimespec.tv_sec!=binary.st_mtimespec.tv_sec))stop=1;
     }
     clients_turn(alive);
