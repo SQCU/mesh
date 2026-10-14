@@ -32,42 +32,6 @@ int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transp
 }
 
 /* design/algorithm-sources.md#resident-metal */
-/* design/prepared-machine.md#M04 */
-/* design/prepared-machine.md#M10 */
-int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  const struct mesh_section *sections,uint32_t ranges,uint32_t invocations,struct mesh_metal_publication *publication){
-  uint32_t count=mesh_publication_prepare(context->M,sections[0].first,NULL);
-  *publication=(struct mesh_metal_publication){.count=count*ranges,.stride=sizeof(struct mesh_send)};
-  if(!count)return 0;
-  struct mesh_section records;
-  /* design/prepared-machine.md#M10 */
-  int status=mesh_section_create(context,count*ranges*sizeof(struct prepared_publication),1,&records);
-  if(status)return status;
-  struct prepared_publication *prepared=mesh_section_address(context,records,0);
-  for(uint32_t j=0;j<ranges;j++)mesh_publication_prepare(context->M,sections[j].first,prepared+j*count);
-  /* design/prepared-machine.md#M17 */
-  id<MTLBuffer> memory=transport->publication;
-  for(uint32_t i=0;i<count*ranges;i++)prepared[i].destination-=((uintptr_t)context->M+context->send_off);
-  id<MTLDevice> device=memory.device;
-  publication->records=[device newBufferWithBytesNoCopy:prepared length:records.pages*context->M->pgsz
-    options:MTLResourceStorageModeShared deallocator:nil];
-  /* design/prepared-machine.md#M28 */
-  if(invocations && sections[0].bytes<=UINT32_MAX){
-    struct mesh_section words;
-    /* design/prepared-machine.md#M28 */
-    status=mesh_section_create(context,sizeof(struct mesh_output_status)*(uint64_t)(invocations+1)*ranges,1,&words);
-    if(status){[(id)publication->records release];return status;}
-    struct mesh_output_status *address=mesh_section_address(context,words,0);
-    for(uint32_t j=0;j<ranges;j++)for(uint32_t t=0;t<=invocations;t++)
-      address[(uint64_t)j*(invocations+1)+t]=(struct mesh_output_status){.remaining=(uint32_t)sections[j].bytes};
-    publication->completion=[device newBufferWithBytesNoCopy:address length:words.pages*context->M->pgsz
-      options:MTLResourceStorageModeShared deallocator:nil];
-    if(!publication->completion){[(id)publication->records release];return ENOMEM;}
-  }
-  return publication->records?0:ENOMEM;
-}
-
-/* design/algorithm-sources.md#resident-metal */
 void mesh_metal_transport_destroy(struct mesh_metal_transport *transport){
   [(id)transport->publication release];[(id)transport->inputs release];
   *transport=(struct mesh_metal_transport){0};
