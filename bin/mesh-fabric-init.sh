@@ -19,13 +19,13 @@ done
 now=$(date +%s)
 rids=$(ioreg -l -w0 -r -c AppleThunderboltRDMAInterface 2>/dev/null | awk '/\+-o rdma_/{n=substr($2,6)} /"RID" =/{print n, $NF}')
 peers=" $(ioreg -l -w0 -r -c AppleThunderboltRDMAPeerInterface 2>/dev/null | awk '/"RID" =/{printf "%s ", $NF}')"
-: > /var/run/mesh-fabric.tmp
+: > /var/run/mesh-fabric.$$
 for p in $ports; do
   f=/var/run/mesh-link.$p
   link=$(ifconfig "$p" 2>/dev/null | awk '/status:/{print $2}')
   rid=$(echo "$rids" | awk -v p="$p" '$1==p{print $2}')
   case "$peers" in *" ${rid:-none} "*) peer=present ;; *) peer=absent ;; esac
-  echo "port=$p link=${link:-unknown} rdma_peer=$peer" >> /var/run/mesh-fabric.tmp
+  echo "port=$p link=${link:-unknown} rdma_peer=$peer" >> /var/run/mesh-fabric.$$
   if [ "$link" != active ] || [ "$peer" = present ]; then
     [ -f "$f" ] && { read -r t0 n tb < "$f"
       [ "$peer" = present ] && { echo "[$(ts)] RECOVERED $p rdma_peer=present after $((now - ${t0:-$now})) s, ${n:-0} bounces"
@@ -55,6 +55,6 @@ done
 [ "$(sysctl -n net.inet6.ip6.forwarding 2>/dev/null)" = 1 ] || {
   echo "[$(ts)] DRIFT ip6 forwarding off"
   sysctl -w net.inet6.ip6.forwarding=1 >/dev/null 2>&1; drift=1; }
-mv -f /var/run/mesh-fabric.tmp /var/run/mesh-fabric; chmod 644 /var/run/mesh-fabric
+mv -f /var/run/mesh-fabric.$$ /var/run/mesh-fabric; chmod 644 /var/run/mesh-fabric
 [ "$drift" -eq 0 ] || echo "[$(ts)] fabric converged"
 exit 0
