@@ -298,16 +298,17 @@ __attribute__((always_inline)) static inline uint2 mesh_keys(uint q, uint len, u
 
 // The Tile plan's operand over a KV type KV (KV::at(p, k, v): logical page p's K and V line addresses of the task's KV head,
 // false where it holds none): 8 query rows, row r Q's row rows[r] (~0u for none) attending [lo[r], hi[r]); part j of J over
-// the pages [base, base + pages) of the rows' union, each part's (m, l, O) at Q's row times `parts` plus j. layout() places
+// the pages [base, base + pages) of the rows' union, each part's (m, l, O) at Q's row times `parts` plus j, through F and F4
+// (coherent(device) pointers where the last of a row's parts to arrive merges them in the same dispatch). layout() places
 // the threadgroup memory a wrapper declares (region floats, 64 diag floats, simdgroups places) and span() the pages and J.
-template <uint D, typename KV>
+template <uint D, typename KV, typename F = device float *, typename F4 = device float4 *>
 struct mesh_tile {
     enum : uint { dims = D, simdgroups = 4, region = 8 * D > 4 * D + 12 * 64 ? 8 * D : 4 * D + 12 * 64 };
     KV kv;
     device const half *Q;
-    device float *mp;
-    device float *lp;
-    device float4 *op;
+    F mp;
+    F lp;
+    F4 op;
     threadgroup half *qs;
     threadgroup float *ss;
     threadgroup half *ps;
