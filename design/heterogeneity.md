@@ -22,11 +22,11 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
   shape. It is the node's record in the mesh's store (rdma/store.py) as that class's constants:
   `proj=u,v`, u ns per weight byte plus v ns per weight element per row, for the engine's fp16
   projections; `attn=u,v`, u + v·bs ns per byte of one cached position read at batch bs.
-  metal-microbench `calibrate.py node` writes a node's record from its probes. A class the map does not carry (a program's fp32 MPS matmul,
+  metal-microbench `calibrate.py node` writes a node's record from its probes. A class the store does not carry (a program's fp32 MPS matmul,
   its attention) is measured on each node and added as its own class (R3). A node has one rate per
   class and dtype, never one speed.
-- **Link**: the cost of one direction of one pair of nodes, α (µs) per message plus β (ns) per byte.
-  It is written on a link line of the link map.
+- **Link**: the cost of one direction of one pair of nodes, α (µs) per message plus β (ns) per byte. The bridges'
+  map holds the links (mesh-plan.h `mesh_map`); a link's measured cost is the store's record, else its ports' bandwidth.
 - **Parts**: a mesh dimension's integers p_r ≥ 1, one per coordinate, of P = Σp units.
 - **Share**: rank r's part of an extent N, N·p_r/P.
 - **Grain**: N/P, the unit a share is counted in (a head, an expert, a tile). A program chooses the
@@ -40,10 +40,10 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 
 | Fact | Written in | Read by | Decides |
 |---|---|---|---|
-| Node rates | the link map's node lines | the derivation (`allocate.equal_finish`; this repository's models: metal-microbench `programs.py derive`) | the parts: what each node computes |
-| Links | the link map's link lines, each with its own cost | the compiled collectives (`mesh_compile` along shortest-path or packed trees, the trees packed by each link's cost; libnccl-mesh's default table or a program's own, `ncclMeshCommInitRank`, torch-mesh `Options`); the derivation, only to price collectives (R7) | the single-phase all-reduce or reduce-scatter and all-gather, and their trees: how operands travel |
+| Node rates | the store's node records | the derivation (`allocate.equal_finish`; this repository's models: metal-microbench `programs.py derive`) | the parts: what each node computes |
+| Links | the bridges' map, each link's cost the store's measured record | the compiled collectives (`mesh_compile` along shortest-path or packed trees, the trees packed by each link's cost; libnccl-mesh's default table or a program's own, `ncclMeshCommInitRank`, torch-mesh `Options`); the derivation, only to price collectives (R7) | the single-phase all-reduce or reduce-scatter and all-gather, and their trees: how operands travel |
 
-- Rates decide the parts. The link map decides the algorithm.
+- Rates decide the parts. The map decides the algorithm.
 - A link's cost never becomes a node's rate, and a node's rate never selects an algorithm.
 - The one coupling is R7: the derivation prices the collectives a share waits for, and they cost
   most at the largest share, so where communication dominates the shares move toward even
@@ -59,7 +59,7 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 |---|---|---|---|
 | R1 | No operand means stock PyTorch, bit for bit. Equal parts also mean stock, including `torch.chunk`'s ceil sizes (10 over 4 is 3,3,3,1, not largest remainder's 3,3,2,2). | [torch.chunk]; the regular operation is the irregular one's special case and no slower than it [Träff, Gropp & Thakur 2010; Hunold & Carpen-Amarie 2017, GL4] | a second "uniform" rule that silently changes programs that never set an operand |
 | R2 | What each node computes follows from the nodes' rates. How operands travel follows from the link map. The only coupling is R7's price of the collectives. | metal-microbench `docs/principles.md` §4; link-aware collectives [MagPIe 1999; BlueConnect 2019; Blink 2020] | a node's rate measured with its collectives inside it, so a slow link reads as a slow node; reshaping collectives to "fix" a slow node |
-| R3 | Rates are per node **and per operator class** at the program's dtype, taken at the call's shape (bytes and operations), from a functional model. | functional performance model [Lastovetsky & Reddy 2007]; [Roofline 2009]; per-device memory bandwidth and FLOPS in the cost model [HexGen 2024, App. B] | one speed per node applied to every operator; bandwidth-bound (decode) rates applied to compute-bound work; another class's or dtype's rate borrowed where the map has none |
+| R3 | Rates are per node **and per operator class** at the program's dtype, taken at the call's shape (bytes and operations), from a functional model. | functional performance model [Lastovetsky & Reddy 2007]; [Roofline 2009]; per-device memory bandwidth and FLOPS in the cost model [HexGen 2024, App. B] | one speed per node applied to every operator; bandwidth-bound (decode) rates applied to compute-bound work; another class's or dtype's rate borrowed where the store has none |
 | R4 | Counts are derived once per configuration, from shared configuration, by one deterministic procedure, so they are identical on every rank. | counts agree across ranks: recvcounts are the same on all members [MPI 4.1 §6.7, §6.10.2]; the distribution follows from a declared performance model [HeteroMPI 2006] | counts from each rank's own timing: ranks that disagree hang or corrupt |
 | R5 | Integer rounding minimises the largest finish time: each grain goes to the rank that finishes earliest with it. | [Beaumont et al. 2001, Alg. 3.1]; greedy allocation is optimal for nondecreasing costs [Ibaraki & Katoh 1988] | largest remainder rounding the slow rank up by a whole grain |
 | R6 | Tensors that meet in one operation split their shared extent alike, and every rank can invert its own split from its local extent and the capacities (`from_local`: global = local·P/c_r, R14). | the first GEMM's column split is the second's row split [Megatron-LM 2019, §3]; the literature's ratios are per tensor, `RaggedShard(local_units)` on each placement [pytorch#169320], and per layer [HAP 2024, §2.4] | rounding each extent separately, or splitting an extent the parts do not divide by `torch.chunk`: views and the inverse break, and ranks infer different global shapes |
@@ -98,8 +98,7 @@ The module docstring (`torch_mesh/partition.py`) is the API. This section is onl
   mesh dimensions outer first, and an outer split's shares can differ by coordinate, so ranks would
   disagree about P dividing them. To partition an inner dimension, order the mesh with it first.
 
-**Derivation from the link map.** It runs once per configuration, by one procedure, on the driver
-or identically on every rank:
+**Derivation.** It runs once per configuration, by one procedure, on the driver or identically on every rank:
 1. For each mesh dimension, fix its grain (P), the operator classes it runs (a TP dimension runs the
    QKV and output projections, the FFN and attention), and each class's work per unit at the call's
    shape. These are stated for the program, never read from the ops it dispatches.
@@ -107,8 +106,8 @@ or identically on every rank:
    rank r's node times its work per unit, a_r the fixed terms counted once. The group's nodes in rank
    order are the process group's `node` (torch-mesh reads each rank's from its bridge); never infer a
    node from a host name or assume rank r is node r.
-   - If the map has no rate for a class at the program's dtype and shape, measure it on each node
-     and add it to the node lines as its own class, with the record it came from, before deriving.
+   - If the store has no rate for a class at the program's dtype and shape, measure it on each node
+     and add it to the node's record as its own class, with the record it came from, before deriving.
      Never borrow another class's rate. The first weighted run on the pair derived fp32 MPS
      programs' parts from the engine's fp16 projection rates (4.1x per FMA between the nodes, where
      these programs' matmuls run 2.6x), and the wait moved to the slower node (metal-microbench
@@ -120,8 +119,8 @@ or identically on every rank:
 5. Give every rank the parts and the capacities to attach (`partition.attach(mesh, tp=(capacity,
    parts))`); metal-microbench `tools/torch_parallel/tp.py` takes them as `PARTITION`.
 
-The rates and the link costs go into the link map once, from recorded runs the map cites
-(`calibrate.py node` and `calibrate.py links`). They give the first parts only.
+Node rates are the store's records (`calibrate.py node`, else the records of the node's model), links are the
+bridges' map, and a link's measured cost is the store's record (`calibrate.py links`). They give the first parts only.
 
 **Parts from the run's evidence (R3, R10, R11).** `allocate.Balancer` balances any program of collectives: its
 decisions are partitioned dimensions, its stretches each rank's own work between two consecutive collectives

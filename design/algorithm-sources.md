@@ -839,33 +839,23 @@ before execution, so its lookup is not transport or numerical work.
 
 The rdma-core authors' [queue-pair creation](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_create_qp.3)
 and [memory registration](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_reg_mr.3)
-associate QPs and registered memory with a protection domain. Mesh now keeps
-those device resources once per named device while realizing a separate connection
-and TX/RX progress pair for every configured link. Configured peer identities,
-channels and operand row ranges are resolved at setup. Publication scatters its
-row index to those links' queues through a precomputed membership bitset, independent
-of collective verb and peer count. Multiple links register the same canonical
-payload backing through their selected devices; they do not create operand copies.
-The [configured-peer description](async-collectives.md#configured-peers) records
-setup, per-link preposting, shared registration, retirement and configuration.
+associate QPs and registered memory with a protection domain. The bridge keeps
+those device resources once per port it found (design/bridge-and-ipc.md#ports) and
+realizes a separate flow, with its own queue pairs and progress threads, for every
+program on a paired port. A peer is the node a port found; a program's destination
+nodes, queues and operand row ranges are resolved at setup. Publication scatters its
+row index to those flows' queues through a precomputed membership bitset, independent
+of collective verb and peer count. Several ports register the same canonical
+payload backing through their own devices; they do not create operand copies.
 
-One pairing attempt has a single 30-second monotonic deadline, created in
-`verbs_up` after device registration. `pairing_active` checks that deadline and
-the existing cancellation state. The nonblocking `accept`, `connect`, `read` and
-`write` paths share it across endpoint metadata, every queue's descriptors and
-the initial receive-posting exchange; receiving a byte does not renew it.
-Apple's BSD [connect](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/connect.2.html)
+A program's pairing on a port has one monotonic deadline, the pairing window
+(mesh.h `MESH_PAIR_NS`, 30 s from both programs' start), and its wait for its
+peer's start the peer window (`MESH_PEER_NS`). A port's control connection is dialed
+nonblocking to the link-local address its peer's hello came from, so pairing performs
+no host or service lookup. Apple's BSD [connect](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/connect.2.html)
 and [accept](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/accept.2.html)
-contracts supply the nonblocking socket mechanism. Every socket's `O_NONBLOCK`
-assignment must succeed before using it. Expiry returns `ETIMEDOUT` through the
-existing link error and QP cleanup owner; it does not terminate the bridge or
-reduce its configured capacity.
-
-The configured control endpoints are numeric IPv4/IPv6 addresses and TCP ports.
-`getaddrinfo` uses `AI_NUMERICHOST | AI_NUMERICSERV`, so pairing performs no host or
-service lookup. Apple's [getaddrinfo](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/getaddrinfo.3.html)
-contract specifies numeric host parsing; the macOS SDK's `netdb.h` specifies the
-corresponding numeric-service flag. Scope-qualified IPv6 addresses remain valid.
+contracts supply the nonblocking socket mechanism. Expiry fails the flow with
+`ETIMEDOUT`; it does not end the bridge.
 The deadline is setup state only: TX, RX, numerical publication and consumer
 completion contain no clock check. As [RDMA-RULES.md](../RDMA-RULES.md) explains,
 userspace deadlines cannot unwind a driver call already blocked in kernel sleep.
@@ -1031,12 +1021,6 @@ this runtime achieves the paper's bandwidth bound.
 
 `Topology.links(between:_:)`: the [graph representation above](#topology) represents a missing edge by an empty list; dictionary subscripts remain optional.
 
-### Topology.merging
-
-`Topology.merging`: the [graph representation above](#topology) uses node-set union and per-pair list concatenation; the caller supplies observations and mesh exchanges none.
-Concatenation preserves repeated observations, including both endpoint descriptions
-of the same physical link; this operation does not deduplicate them.
-
 ### Link
 
 `Link`: Dotan Barak, rdma-core's [ibv_query_port manual](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_query_port.3), supplies observed port speed and width.
@@ -1044,21 +1028,26 @@ Bandwidth is bits per second: speed codes 1/2/4/8/16/32/64/128 mean
 2.5/5/10/10/14/25/50/100 Gb/s per lane; width codes 1/2/4/8 mean 1/4/8/12 lanes.
 Unrecognized codes yield zero (unavailable), without withholding the link.
 The bridge publishes bandwidth before the paired phase; atomic scalar access also
-covers re-pairing. Device names come from the configured link. Latency is optional
-seconds and remains nil in observations until the bridge records a measurement.
-Port bandwidth is an attribute, not measured payload throughput.
+covers re-pairing. A link is named by its port's index; no device name leaves the
+bridge. Latency is optional seconds and nil in observations: a measured link cost is
+the store's record (rdma/store.py). Port bandwidth is an attribute, not measured
+payload throughput.
 
 ### Mesh.observe
 
-`Mesh.observe` and `mesh_observe`: Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of bridge pairing metadata.
-The C function returns the link count or negative errno, copies up to capacity into
-plain `mesh_link_view` records, and closes/unmaps without attaching a client.
-Swift resizes if a replacement region has more links, then includes only paired
-links and their peers alongside the local node. Header/layout validation prevents
-invalid reads; it changes no bridge state. Per-link phase reads are acquired
-individually, not a simultaneous fleet snapshot. Before a client configures
-transfers the current bridge has no paired links. Explicit forwarding is described
-under `Placement`; idle pairing and latency measurement remain separate deliverables.
+`Mesh.observe`, `mesh_observe`, `mesh_map` and `mesh_map_wait`, the bridge's map reader: Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of the node's bridge's region, without attaching a client or changing the bridge's state.
+`mesh_observe` copies the node's port table into plain `mesh_link_view` records, a
+port by its index, and returns the port count or negative errno. `mesh_map` copies
+the bridge's map (design/bridge-and-ipc.md#region), every node's newest record, as
+the seqlock's reader (Boehm, MSPC 2012): the serial read with acquire, the records
+copied, the copy kept where the serial was even and is unchanged (`mesh_map_whole`),
+else copied again. From that copy it makes the link map, two nodes linked where each
+one's record holds a port paired with the other, and joins members the links leave
+apart, the cheapest route first [Kruskal 1956], each along the whole mesh's path on
+fewest links, which the bridges forward along. `mesh_map_wait` waits on the serial, within its bound, so a loop of executions
+takes the next map. The bridges keep their links paired with or without a client, so
+the map is current whether or not anything runs (design/recovery.md, mandate 14).
+Swift's `Mesh.observe` is that map as a `Topology`.
 
 ## Program.write
 
@@ -1135,14 +1124,12 @@ creation. The ordinary specialization does not poll Mesh or load page metadata.
 The indexed partials pass uses the existing [resident presence mechanism](#resident-metal);
 subsequent passes use their existing command-buffer dependencies.
 
-The implemented engine binding has every rank project its caller-configured
-vocabulary columns, with peers sending directly to rank 0's existing sampler.
-Rank 0 reads both its own and remote logits in canonical storage. It retains the
-existing temperature, global min-p, arbitrary logit biases, Philox/CDF draw,
-tie-breaking and logprob algorithms. No local top-k truncation substitutes for
-categorical sampling. This is an intermediate implementation: E1d's replicated
-sampling and per-rank vocabulary pushes remain open, as do its payload/floor
-checks and E8's complete-forward latency measurement. The engine account is
+The engine binding's selection is each member's draw over its own vocabulary
+columns at temperature 1 (argmax.metal `mesh_draw`: the greatest z + g, g the Gumbel
+noise of the row's seed, position and token) and the select collective, the take of
+the members' (z + g, token) pairs (`mesh_take`). Min-p's cutoff is m + log min_p, m
+the greatest z from the members' value-only maxima (`mesh_normaliser`), so no member
+computes or keeps a token other than the draw's. The engine account is
 [here](../../../metal-microbench/docs/async_collectives.md#distributed-vocabulary-projection).
 
 The same column decomposition now applies over explicit input-row scopes. Setup

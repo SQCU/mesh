@@ -35,8 +35,7 @@ housekeeping only matters once space runs short), and it also measures what `du`
 for) and the largest directories under /Users. Each condition worth attention is a `warn=` line; the keeper writes
 new or changed warnings, and every warning again each hour, to `keeper.log` and to the unified log (`log show --last
 1d --predicate 'process == "logger"'`, which is written even when the disk is under the floor and the keeper's own log
-is not). `mesh-status` prints the report, the node-info responder carries its numbers and `health_warnings`, and
-metal-microbench's `grid.py call` prints every member's warnings before a call.
+is not). `mesh-status` prints the report, and the node-info responder carries its numbers and `health_warnings`.
 
 ## The one step that cannot be automated
 
@@ -537,5 +536,7 @@ The mesh's collectives are NCCL's API over the bridges: [rdma/NCCL.md](rdma/NCCL
 library; `rdma/mesh_mpi.py` for NumPy), [rdma/torch-mesh/README.md](rdma/torch-mesh/README.md)
 (torch.distributed's `mesh` backend) and [design/heterogeneity.md](design/heterogeneity.md) (nodes of
 different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the launchd
-job `io.mesh.bridge` (design/bridge-and-ipc.md): it finds its ports and peers, keeps its links paired and serves every
-program of the node at once.
+job `io.mesh.bridge` (design/bridge-and-ipc.md). It finds its ports and peers and keeps its links paired; it serves
+every client at once, the node's processes and its neighbours; it keeps the mesh's map, each bridge's record of its
+ports flooded to every bridge (`mesh-plan.h` `mesh_map`, `mesh-stat`); and it forwards programs along their routes for
+members the cables do not join.

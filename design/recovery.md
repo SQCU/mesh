@@ -19,10 +19,10 @@ Recovery is everything between a loss and the mesh doing its work again, at ever
 
 | layer | owns | where |
 |---|---|---|
-| bridge (link) | detection, failing the programs on a lost link, retiring a lost port's device, pairing again a pause apart | `rdma/mesh-flow.c`, `rdma/mesh-verbs.h` |
-| rank | the silent-link detector, cancelling a link's waits, a failed window ending the call | metal-microbench `mesh_rank.m` `await_window` |
-| driver (calls) | revoke, agree, shrink, extend, on the map the bridges record | metal-microbench `tools/mesh/grid.py`, `docs/elastic.md` |
-| collectives library (sessions) | `MESH_REMOTE_BOUND`, a session retired and opened again | `rdma/nccl-mesh.c`, `rdma/NCCL.md` |
+| bridge (link) | detection, failing the programs on a lost link, retiring a lost port's device, pairing again a pause apart; the mesh's map; forwarding programs along their routes | `rdma/mesh-flow.c`, `rdma/mesh-verbs.h` |
+| rank | no silent-link detector of its own: the library's bound ends its waits, and a failed window ends the call | metal-microbench `mesh_rank.m` |
+| driver (calls) | a call is a request to resident members, on the bridge's map taken at its start; a revoke is a cancel request; shrink and extend run on the bridges' map | metal-microbench `tools/mesh/grid.py`, `docs/elastic.md` |
+| collectives library (sessions) | mesh.h `MESH_SILENT_NS`, the library's one bound; a session retired and opened again | `rdma/nccl-mesh.c`, `rdma/NCCL.md` |
 | port (physical) | a fabric port whose cable link is up with no RDMA peer: bounced with backoff, logged | `bin/mesh-fabric-init.sh` (every keeper pass) |
 
 ## Mandates
@@ -101,10 +101,10 @@ Each with its source and its status as of 2026-10-14, read from source (no runti
 | Q11 | A cable pull and replug, three times, with time to repair and to the first completed execution recorded | deliverables R7 | unmet: not run |
 | Q12 | Recovery costs nothing on the healthy path | mandate 7 | built: the data path reads no recovery state |
 | Q13 | No per-transfer TCP; TCP at pairing only | mandate 8 | built: the control socket carries a program's pairing messages and nothing per transfer |
-| Q14 | Every blocking call bounded; no unbounded completion-queue poll | RDMA-RULES.md, mandate 12 | built: the bridge's loop waits 250 ms at most; pairing has its windows; sends wait 1 s; a teardown that fails keeps its handles for the next turn; a client's start waits at most the peer and pairing windows and a pause (`MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS`, ETIMEDOUT) and ends at once where the bridge is gone (ESRCH). The one exception: a kernel verbs call (opening a device, reading the device list, querying a port, making or destroying a queue pair, registering memory) cannot be bounded from user space, since it can sleep uninterruptibly in the driver (RDMA-RULES.md); the bridge makes them only to open, find, pair and tear down a port's device, never per transfer: a paired port makes none, a port with no link opens and queries its device once a turn (a pause apart) until its port is active, and the node's device list is read again only when an interface attaches or its link comes on (`network_heard`); a client's start, which waits on none of them, still ends at its own bound |
+| Q14 | Every blocking call bounded; no unbounded completion-queue poll | RDMA-RULES.md, mandate 12 | built: the bridge's loop waits 250 ms at most; pairing has its windows; sends wait 1 s; a teardown that fails keeps its handles for the next turn; a client's start waits at most the peer and pairing windows and a pause (`MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS`, ETIMEDOUT) and ends at once where the bridge is gone (ESRCH). The one exception: a kernel verbs call (opening a device, reading the device list, querying a port, making or destroying a queue pair, registering memory) cannot be bounded from user space, since it can sleep uninterruptibly in the driver (RDMA-RULES.md): the bridge makes them only to open, find, pair and tear down a port's device, never per transfer, and one blocks only its own port's thread; the event loop, the other ports and clients' starts go on (design/bridge-and-ipc.md#flows) |
 | Q15 | Port loss retires all device state; an ordinary reconnection keeps context, PD and registrations | RDMA-KERNEL-RECOVERY.md | built: a link off or a detached interface retires the device, and no hello or connection reaches the port (`port_at`) until its turn has retired the device and opened it again |
 | Q16 | No cross-queue GPU spin; every spun-on word in a canceller's set | memory no_cross_queue_gpu_spins | met: a failed flow cancels its client's words on the link |
-| Q19 | A link that answers its peer's hello but not RDMA does not flap at call level | mandate 1 | partial: such a link fails its executions' pairing (ETIMEDOUT within the pairing window) |
+| Q19 | A link that answers its peer's hello but not RDMA does not flap at call level | mandate 1 | partial: such a link fails its executions' pairing (ETIMEDOUT within the pairing window), or the library's silent bound fails a paired one's; the bridge exchanges nothing of its own over RDMA to tell it |
 | Q20 | Algorithms total over every membership and topology (ring, star, relays, uncabled pairs) | mandate 6 | unreachable on hardware (two nodes) |
 
 ## The module as built
@@ -140,13 +140,13 @@ A program started on a link that is not paired fails at once (ENETDOWN). A progr
 start at most 600 s (members prepare their programs at their own speeds: metal-microbench docs/measurement.md
 2026-10-10, the verify step), and for its queue pairs to pair at most 30 s from then. The client's own wait for its
 start is bounded by the same windows and a pause (mesh.h `MESH_PEER_NS`, `MESH_PAIR_NS`, `MESH_PAUSE_NS`, their one
-definition), so a bridge that never answers ends it as ETIMEDOUT. A program on a client slot whose earlier program
-still holds queue pairs its device has not released is refused at once (EBUSY).
+definition), so a bridge that never answers ends it as ETIMEDOUT. A program toward a node the map gives no route fails
+at once (EHOSTUNREACH).
 
 ### the driver's side
 
-The driver derives each call's membership and map from what the bridges record (no probes, no bridges of its own); a
-link the bridges pair again is in the next call's map.
+Each execution reads its node's bridge's map at its start (mesh-plan.h `mesh_map`; no probes, no bridges of its own);
+a link the bridges pair again, or a route through other nodes, is in the next execution's map.
 
 ### port
 
@@ -174,7 +174,7 @@ recovery with its duration and count, goes to `fabric.log` and the unified log, 
 ## Failures by kind and topology
 
 Topologies: **P** the TB5 pair; **R** a ring or complete mesh of 3-6 nodes (Studios: four M5 Ultra arriving, cabling
-open); **U** uncabled pairs routed through relay rings; **H** heterogeneous links (TB5, TB4, Ethernet); **Q** links of
+open); **U** uncabled pairs routed through other nodes' bridges; **H** heterogeneous links (TB5, TB4, Ethernet); **Q** links of
 several queue pairs (the torch/NCCL sessions: four).
 
 | # | failure | as built |
@@ -185,11 +185,11 @@ several queue pairs (the torch/NCCL sessions: four).
 | F7 | the peer's program fails or ends | END or FAIL: this side's program on the link fails |
 | F8 | the peer node reboots or loses power | the keepalive or the link-off: the executions fail, the port's device retired on a link-off |
 | F9 | the control plane (LAN, ssh, mDNS) lost, the cable up | the bridges' links are unaffected; the driver's reach is |
-| F10 | the data path dead, the control socket alive | the rank's silent bound, call fails |
+| F10 | the data path dead, the control socket alive | the library's silent bound (`MESH_SILENT_NS`) cancels the destination; the execution fails |
 | F11 | one direction lost | undefined |
 | F12 | a link degrades (speed, errors) | the Balancer on evidence |
 | F13 | one link of several drops | the executions on it fail; the others' links are untouched |
-| F14 | a relay on an uncabled pair's route drops | the executions on its links fail; the next execution's routes are its map's |
+| F14 | a relay bridge on a route drops | the programs routed through it fail, naming the relay node; the next execution's route is the current map's |
 | F15 | a cable moved to another port or peer | the old port's executions fail; the new port pairs with whatever node it reaches |
 | F18 | the driver's own node fails | the stream stops (one driver) |
 
