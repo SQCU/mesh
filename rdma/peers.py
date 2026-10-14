@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import ipaddress
-import json
 import socket
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 BROWSE_SERVICE = "_meshnode._tcp"
@@ -122,81 +120,12 @@ def nodeinfo(address: str, timeout: float = 2.0, limit: int = 1 << 20) -> str:
     raise OSError("; ".join(errors))
 
 def observation(body: str) -> dict:
-    facts, ports, links, routes = {}, [], [], []
+    facts = {}
     for line in body.splitlines():
         fields = dict(word.split("=", 1) for word in line.split() if "=" in word)
-        if "port" in fields:
-            fields["address"] = fields.get("address", fields.get("gid", "none")).split("%", 1)[0].lower()
-            fields["peer"] = fields.get("peer", "none").split("%", 1)[0].lower()
-            fields["active"] = fields.get("link", fields.get("state")) in ("active", "PORT_ACTIVE")
-            for key in ("address", "peer"):
-                if fields[key] != "none":
-                    fields[key] = str(ipaddress.IPv6Address(fields[key]))
-            ports.append(fields)
-        elif "bridge_link" in fields:
-            links.append(dict(port=int(fields["bridge_link"]), peer=int(fields.get("peer_node", 0)), phase=int(fields.get("phase", 0)),
-                              bandwidth=int(fields.get("bandwidth", 0)), connection=int(fields.get("connection", 0))))
-        elif "route" in fields:
-            address = fields["route"].split("/", 1)[0].split("%", 1)[0]
-            if classify(address) == "fabric-routed":
-                routes.append(address)
-        else:
+        if not fields.keys() & {"port", "route"}:
             facts.update(fields)
-    return dict(facts=facts, ports=ports, links=links, routes=sorted(set(routes)))
-
-def observe_mesh(seeds: list[str] | None = None, timeout: float = 2.0, max_nodes: int = 256) -> dict:
-    """Every node's node-info: the nodes `seeds` names (addresses or names) alone, in one parallel wave; without seeds,
-    the mesh discovered (its beacons, each node's fabric routes and this node's fabric neighbours)."""
-    pending = set(seeds or ["::1"])
-    if seeds is None:
-        pending.update(address for node in discover(timeout) for _, address in node.ranked())
-    visited, observations, errors = set(), {}, {}
-    def fetch(address):
-        try:
-            return address, observation(nodeinfo(address, timeout)), None
-        except (OSError, ValueError) as error:
-            return address, None, str(error)
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        while pending and len(visited) < max_nodes:
-            wave = sorted(pending - visited)[:max_nodes - len(visited)]
-            if not wave:
-                break
-            visited.update(wave)
-            for address, result, error in pool.map(fetch, wave):
-                if error:
-                    errors[address] = error
-                else:
-                    observations[address] = result
-                    if seeds is None:
-                        pending.update(result["routes"])
-                    if seeds is None and address == "::1":
-                        pending.update(f"{p['peer']}%{p['port']}" for p in result["ports"] if p["active"] and p["peer"] != "none")
-            pending.difference_update(visited)
-    return dict(observations=observations, errors=errors, unvisited=sorted(pending))
-
-def topology(observations: list[dict], max_age: float = 10.0) -> dict:
-    """The mesh's map as its bridges record it: each node by its bridge's node number (its name, boot, capabilities and
-    its bridge's ports beside), in that order, and the map their records give (mesh.join: a link between two nodes where
-    each one's bridge holds a port paired with the other, at its cost), each edge (a, b, (alpha us, beta ns a byte), the
-    pairings its ports made: it grows each time the bridges pair it again)."""
-    import mesh
-    nodes, errors = {}, []
-    for item in sorted(observations, key=lambda item: float(item['facts'].get('sample_age', 0)), reverse=True):
-        f = item["facts"]
-        if not str(f.get("bridge_node", "")).isdigit():
-            errors.append({"node": f.get("name"), "error": "no bridge"})
-            continue
-        if float(f.get("sample_age", 0)) > max_age:
-            errors.append({"node": f.get("name"), "error": "stale observation", "sample_age": f["sample_age"]})
-        identity = int(f["bridge_node"])
-        nodes[identity] = dict(identity=identity, name=f.get("name"), boot=f.get("boot_id"), links=item.get("links", []),
-                               capabilities={key: f[key] for key in ("model", "cores", "memgb", "macos", "sdk", "rdma") if key in f})
-    order = sorted(nodes)
-    joined = mesh.join([(n, [(l["peer"], l["phase"], l["bandwidth"]) for l in nodes[n]["links"]]) for n in order])
-    edges = [(order[i], order[j], cost, sum(l["connection"] for x, y in ((order[i], order[j]), (order[j], order[i]))
-                                            for l in nodes[x]["links"] if l["peer"] == y and l["phase"] == mesh.lib.MESH_PAIRED))
-             for (i, j), cost in zip(joined.pairs, joined.cost)]
-    return dict(nodes=[nodes[n] for n in order], map=joined, edges=edges, errors=errors)
+    return facts
 
 def reachable(addr: str, port: int = 22, timeout: float = 2.0) -> bool:
     try:
@@ -238,11 +167,6 @@ def ssh_argv(pattern: str, *command: str, identity: str | None = None,
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "observe":
-        observed = observe_mesh(sys.argv[2:] or None)
-        graph = topology(list(observed["observations"].values()))
-        print(json.dumps({**observed, "topology": {**graph, "map": graph["map"].kind}}, indent=2))
-        sys.exit(0)
     if len(sys.argv) > 1:
         a = resolve(sys.argv[1])
         print(a if a else "", end="\n" if a else "")
