@@ -43,9 +43,9 @@ __attribute__((always_inline)) static inline void mesh_take(thread float4 &v, th
 // mesh_argmax's blocks, metal-microbench native_projection.metal's K parts, its recorder's publishing parts and Neural
 // Engine shares): each fences its stores (at the device's scope, or with System at the system's: a reader off the GPU)
 // and counts its arrival in word `slot`; true, after a fence, in every thread of the last to arrive where `last` (a
-// threadgroup word) is given, else in its thread 0 alone. The last makes the word 0 again for the dispatch's next run once
-// its merge is done (mesh_arrival_reset: metal-microbench docs/kernels.md, counts left by a cut dispatch), off the merge's
-// path.
+// threadgroup word) is given, else (nullptr) in its thread 0 alone. The last makes the word 0 again for the dispatch's
+// next run once its merge is done (mesh_arrival_reset: metal-microbench docs/kernels.md, counts left by a cut dispatch),
+// off the merge's path.
 template <bool System = false>
 __attribute__((always_inline)) static inline void mesh_arrival_fence() {
     if constexpr (System) atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));
@@ -54,7 +54,7 @@ __attribute__((always_inline)) static inline void mesh_arrival_fence() {
 
 template <bool System = false>
 __attribute__((always_inline)) static inline bool mesh_last_arrival(device atomic_uint *arrivals, uint slot, uint J, uint t,
-                                                                   threadgroup uint *last = nullptr) {
+                                                                   threadgroup uint *last) {
     mesh_arrival_fence<System>();
     threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
     bool mine = t == 0 && atomic_fetch_add_explicit(&arrivals[slot], 1u, memory_order_relaxed) == J - 1;
@@ -74,11 +74,12 @@ __attribute__((always_inline)) static inline void mesh_arrival_reset(device atom
 
 // The threadgroup's candidates into thread 0's (with All, into every thread's), and with `blocks` > 1 every block's into
 // the last arriver's thread 0 (slot: row * blocks + block of the records pv, pk; arrival: the row's word). True for the
-// threads holding the row's greatest.
+// threads holding the row's greatest. (No default arguments: metal-microbench's recorder reads a parameter's pointer
+// default as a store when it follows a published binding into the call.)
 template <uint T, bool All = false, typename V, typename K>
 __attribute__((always_inline)) static inline bool mesh_argmax(thread V &v, thread K &k, uint lid, threadgroup V *tv, threadgroup K *tk,
-                                                              coherent(device) device V *pv = nullptr, coherent(device) device K *pk = nullptr,
-                                                              device atomic_uint *arrival = nullptr, uint slot = 0, uint blocks = 1) {
+                                                              coherent(device) device V *pv, coherent(device) device K *pk,
+                                                              device atomic_uint *arrival, uint slot, uint blocks) {
     for (ushort d = 16; d > 0; d /= 2) mesh_take(v, k, simd_shuffle_down(v, d), simd_shuffle_down(k, d));
     if (T > 32) {
         if (lid % 32 == 0) { tv[lid / 32] = v; tk[lid / 32] = k; }
@@ -96,10 +97,17 @@ __attribute__((always_inline)) static inline bool mesh_argmax(thread V &v, threa
     }
     if (blocks <= 1) return lid == 0;
     if (lid == 0) { pv[slot] = v; pk[slot] = k; }
-    if (!mesh_last_arrival(arrival, 0u, blocks, lid)) return false;
+    if (!mesh_last_arrival(arrival, 0u, blocks, lid, nullptr)) return false;
     const uint first = slot - slot % blocks;
     for (uint b = 0; b < blocks; b++) mesh_take(v, k, pv[first + b], pk[first + b]);
     mesh_arrival_reset(arrival, 0u, lid);
     return true;
+}
+
+// A row in one threadgroup.
+template <uint T, bool All = false, typename V, typename K>
+__attribute__((always_inline)) static inline bool mesh_argmax(thread V &v, thread K &k, uint lid, threadgroup V *tv, threadgroup K *tk) {
+    return mesh_argmax<T, All>(v, k, lid, tv, tk, (coherent(device) device V *)nullptr, (coherent(device) device K *)nullptr,
+                               (device atomic_uint *)nullptr, 0u, 1u);
 }
 #endif
