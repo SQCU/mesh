@@ -8,7 +8,7 @@ host path, a non-contiguous one staged through a contiguous copy.
 
 A group's communicator is over its topology, an operand (Options, torch's pg_options of init_process_group and
 new_group): its ranks' link map (mesh.LinkMap, mesh-plan.h's: a kind, the links, each one's cost), each rank's bridge
-node and this rank's bridge region.  Without one, the topology is what the bridges report (observe)."""
+node and the group's name.  Without one, the topology is what the bridges report (observe)."""
 import json
 import math
 import os
@@ -24,7 +24,7 @@ _stream = None
 if torch.backends.mps.is_available():
     from . import _stream  # its kernels for torch's functional collectives on MPS register as it loads
 
-RDMA = os.environ.get('MESH_RDMA') or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+RDMA = os.environ.get('MESH_RDMA') or '/usr/local/mesh/rdma'
 if RDMA not in sys.path:
     sys.path.insert(0, RDMA)
 import mesh  # noqa: E402  (rdma/mesh.py: the planner's values, and _mesh_c)
@@ -49,12 +49,12 @@ class Options:
     `paths` the trees a message between unlinked ranks takes (mesh.trees(); None: the topology's shortest-path
     trees), `programs` the compiled collectives the group runs ([(mesh.compile(), below bytes)]; None: the library's
     declared default, compiled once at the group's creation), `node` each rank's bridge node (None: observed, or rank r
-    on node r with a topology given), `region` this rank's bridge region (None: MESH_REGION, else /mesh0)."""
+    on node r with a topology given), `name` the group's, the same on every rank (None: rank 0's, through the store)."""
     topology: mesh.LinkMap | None = None
     paths: object = None
     programs: list | None = None
     node: list | None = None
-    region: str | None = None
+    name: str | None = None
 
 
 def link_map(kind, ranks, pairs, cost=None):
@@ -63,38 +63,29 @@ def link_map(kind, ranks, pairs, cost=None):
     return mesh.link_map(kind, ranks, pairs, cost)
 
 
-def observe(store, rank, size, region):
-    """The group's topology: each rank's node as its bridge reports it (mesh_observe), exchanged through the group's
-    store; its links and their costs from the link map MESH_LINK_MAP names, whose node ids are the bridges' (the
-    launcher's: metal-microbench tools/mesh/grid.py ranks_run), else as the bridges report them, each link at ALPHA_US
-    and its port's bandwidth (no costs at all while a port's is unknown: the library's defaults); every pair linked a
-    mesh, else a graph, whose links may leave a subgroup's ranks apart (the library joins them along the world's
-    paths)."""
+def observe(store, rank, size):
+    """The group's topology: each rank's node and links as its bridge records them now (mesh_observe: the links paired),
+    exchanged through the group's store, each link at ALPHA_US and its port's bandwidth (no costs at all while a port's
+    is unknown: the library's defaults); every pair linked a mesh, else a graph, whose links may leave a subgroup's
+    ranks apart (the library joins them along the world's paths)."""
     views, node = ffi.new('struct mesh_link_view[]', 64), ffi.new('uint32_t *')
-    count = LIB.mesh_observe(region.encode(), views, 64, node)
+    count = LIB.mesh_observe(ffi.NULL, views, 64, node)
     if count < 0:
-        raise RuntimeError(f'libmesh: the bridge of region {region}: {os.strerror(-count)}')
-    store.set(f'mesh/observed/{rank}', json.dumps({'node': node[0], 'links': [[views[i].peer, views[i].bandwidth] for i in range(min(count, 64))]}))
+        raise RuntimeError(f'libmesh: this node\'s bridge: {os.strerror(-count)}')
+    store.set(f'mesh/observed/{rank}', json.dumps({'node': node[0], 'links': [[views[i].peer, views[i].bandwidth] for i in range(min(count, 64))
+                                                                         if views[i].phase == LIB.MESH_PAIRED]}))
     reports = [json.loads(store.get(f'mesh/observed/{r}')) for r in range(size)]
     nodes = [report['node'] for report in reports]
     if len(set(nodes)) < size:
         raise RuntimeError(f'ranks share a node ({nodes}): one rank a node is what the session carries yet')
     place = {n: r for r, n in enumerate(nodes)}
     costs = {}
-    if os.environ.get('MESH_LINK_MAP'):
-        given = mesh.read_link_map(os.environ['MESH_LINK_MAP'])
-        listed = dict(zip(map(frozenset, given.pairs), given.cost or [None] * len(given.pairs)))
-        every = [frozenset((a, b)) for a in range(given.nodes) for b in range(a + 1, given.nodes)]
-        for key in (every if given.kind == 'mesh' else listed):
-            if key <= set(place):
-                costs[frozenset(place[n] for n in key)] = listed.get(key)
-    else:
-        for report in reports:
-            for peer, bits in report['links']:
-                if peer in place:
-                    key = frozenset((place[report['node']], place[peer]))
-                    known = costs.get(key)
-                    costs[key] = (ALPHA_US, 8e9 / bits) if bits and (known is None or 8e9 / bits < known[1]) else known
+    for report in reports:
+        for peer, bits in report['links']:
+            if peer in place:
+                key = frozenset((place[report['node']], place[peer]))
+                known = costs.get(key)
+                costs[key] = (ALPHA_US, 8e9 / bits) if bits and (known is None or 8e9 / bits < known[1]) else known
     pairs = sorted(tuple(sorted(key)) for key in costs)
     cost = [costs[frozenset(p)] for p in pairs]
     every = len(pairs) == size * (size - 1) // 2
@@ -213,10 +204,13 @@ class ProcessGroupMesh(dist.ProcessGroup):
         options = options or Options()
         self._rank, self._size, self._pending = rank, size, None
         self._stream = ffi.NULL
-        region = options.region or os.environ.get('MESH_REGION') or '/mesh0'
-        topology, node = options.topology, options.node
+        topology, node, name = options.topology, options.node, options.name
+        if name is None and store is not None and size > 1:
+            if rank == 0:
+                store.set('mesh/name', os.urandom(16).hex())
+            name = store.get('mesh/name').decode()
         if topology is None and size > 1:
-            topology, node = observe(store, rank, size, region)
+            topology, node = observe(store, rank, size)
         elif topology is None:
             topology = mesh.link_map('mesh', 1, [])
         if topology.nodes != size:
@@ -226,7 +220,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
         table = (ffi.new('ncclMeshProgram[]', [{'program': p.c, 'below': below} for p, below in options.programs])
                  if options.programs else ffi.NULL)
         self._programs = (options.paths, options.programs, table)
-        check(LIB.ncclMeshCommInitRank(made, rank, topology.c, paths, table, len(options.programs or []), nodes, region.encode()))
+        check(LIB.ncclMeshCommInitRank(made, rank, topology.c, paths, table, len(options.programs or []), nodes,
+                                       (name or os.urandom(16).hex()).encode()))
         self.comm, self.topology, self.node = made[0], topology, node
         self.handle = int(ffi.cast('uintptr_t', self.comm))
         if _stream is not None:

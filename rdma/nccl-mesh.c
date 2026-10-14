@@ -17,6 +17,10 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <netdb.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 enum { WHAT_SEND = 16, WHAT_RECV };
 enum { COMBINE_SUM, COMBINE_PROD, COMBINE_MAX, COMBINE_MIN };
@@ -178,28 +182,12 @@ static void truncdiv(ncclDataType_t t, void *dst, const void *src, size_t count,
   }
 }
 
-#ifdef MESH_HOST_EXECUTOR
-/* the host's arithmetic, for nccl-mesh-host.c's executor of the walk's kernels on the CPU (a premultiplier as the
-   kernels take it: a floating type's value as float32 bits, an integer's bits) */
-__attribute__((visibility("hidden"))) void nccl_mesh_combine(int t, int combine, void *dst, const void *src, size_t n) {
-  combine_into((ncclDataType_t)t, combine, dst, src, n);
-}
-__attribute__((visibility("hidden"))) void nccl_mesh_premultiply(int t, void *dst, const void *src, uint64_t bits, size_t n) {
-  unsigned char scalar[8] = {0};
-  if (floating((ncclDataType_t)t)) { uint32_t u = (uint32_t)bits; float f; memcpy(&f, &u, 4); store((ncclDataType_t)t, scalar, f); }
-  else memcpy(scalar, &bits, SIZE[t]);
-  premultiply((ncclDataType_t)t, dst, src, scalar, n);
-}
-__attribute__((visibility("hidden"))) void nccl_mesh_truncdiv(int t, void *dst, const void *src, size_t n, uint64_t divisor) {
-  truncdiv((ncclDataType_t)t, dst, src, n, divisor);
-}
-#endif
 
 /* -- communicators -------------------------------------------------------------------------------- */
 
 struct premul { int used; ncclDataType_t type; unsigned char value[8]; };
 /* a communicator: its ranks' link map (mesh-plan.h; each link's cost its own), rank r on the bridge of node
-   members[r], this rank's bridge region */
+   members[r], its name */
 /* a compiled collective the communicator runs for the calls it fits (ncclMeshProgram), its own copy */
 struct entry { uint64_t below; struct mesh_program program; };
 
@@ -209,7 +197,7 @@ struct ncclComm {
   struct entry *entries;
   uint32_t programs;
   int nranks, rank, *members;
-  char region[64];
+  char name[NCCL_UNIQUE_ID_BYTES + 1];
   struct premul ops[OPS];
   ncclResult_t async;
 };
@@ -249,7 +237,7 @@ static ncclComm_t widest(ncclComm_t comm) {
   pthread_mutex_lock(&alive.lock);
   for (int i = 0; i < alive.count; i++) {
     const ncclComm_t c = alive.comm[i];
-    if (c->nranks > best->nranks && !strcmp(c->region, comm->region) && c->members[c->rank] == comm->members[comm->rank] &&
+    if (c->nranks > best->nranks && !strcmp(c->name, comm->name) && c->members[c->rank] == comm->members[comm->rank] &&
         among(c, comm))
       best = c;
   }
@@ -436,7 +424,7 @@ static ncclResult_t comm_join(struct ncclComm *comm) {
 }
 
 static ncclResult_t comm_make(ncclComm_t *made, const struct mesh_link_map *map, const struct mesh_trees *paths, const ncclMeshProgram *programs,
-                              int listed, int nranks, const int *members, int rank, const char *region) {
+                              int listed, int nranks, const int *members, int rank, const char *name) {
   struct ncclComm *comm = calloc(1, sizeof *comm);
   if (!comm) return fail(ncclSystemError, "out of memory");
   const uint32_t count = map ? map->links : 0;
@@ -453,7 +441,7 @@ static ncclResult_t comm_make(ncclComm_t *made, const struct mesh_link_map *map,
   if (count && costed) memcpy(comm->map.cost, map->cost, count * sizeof *map->cost);
   for (int r = 0; r < nranks; r++) comm->members[r] = members ? members[r] : r;
   comm->nranks = nranks; comm->rank = rank;
-  snprintf(comm->region, sizeof comm->region, "%s", region);
+  snprintf(comm->name, sizeof comm->name, "%s", name);
   ncclResult_t result = paths ? ncclSuccess : comm_join(comm);
   if (!result) result = comm_routes(comm, paths, programs, listed);
   if (result) { comm_free(comm); return result; }
@@ -477,39 +465,143 @@ const char *ncclGetErrorString(ncclResult_t result) {
 
 const char *ncclGetLastError(ncclComm_t comm) { (void)comm; return last; }
 
-/* An NCCL program's communicator: every pair of its ranks linked, no cost (ncclMeshCommInitRank takes the
-   topology), rank r on the bridge of node r, its region the process's MESH_REGION (default /mesh0), which the
-   unique id carries, as NCCL's carries its bootstrap address. */
-static const char *region_of_process(void) {
-  const char *region = getenv("MESH_REGION");
-  return region && *region ? region : "/mesh0";
-}
+/* NCCL's bootstrap (NVIDIA/nccl src/bootstrap.cc): the unique id is the root's address, host:port (NCCL_COMM_ID where
+   set, else a listener this process opens); rank 0 takes every rank's report there and sends each the whole table.  A
+   rank's report is its node and its bridge's links as the bridge records them (mesh_observe), so the communicator's
+   map is the bridges' record of the cabling, read when the communicator is made.  The id is also the communicator's
+   execution name, which its sessions take on every member (mesh_attach). */
+static double now_s(void);
+struct report { int32_t rank; uint32_t node; int32_t count; struct mesh_link_view links[MESH_PORTS]; };
+static struct { int fd; char id[NCCL_UNIQUE_ID_BYTES]; } root = {-1, {0}};
 
 ncclResult_t ncclGetUniqueId(ncclUniqueId *id) {
   if (!id) return fail(ncclInvalidArgument, "uniqueId is NULL");
-  const char *region = region_of_process();
-  if (strlen(region) + 1 > sizeof id->internal) return fail(ncclInvalidArgument, "MESH_REGION exceeds the unique id's %zu bytes", sizeof id->internal);
   memset(id->internal, 0, sizeof id->internal);
-  strcpy(id->internal, region);
+  const char *given = getenv("NCCL_COMM_ID");
+  if (given && *given) { snprintf(id->internal, sizeof id->internal, "%s", given); return ncclSuccess; }
+  struct sockaddr_in6 any = {.sin6_len = sizeof any, .sin6_family = AF_INET6, .sin6_addr = IN6ADDR_ANY_INIT};
+  socklen_t length = sizeof any;
+  char host[256] = {0};
+  if (root.fd >= 0) close(root.fd);
+  root.fd = socket(AF_INET6, SOCK_STREAM, 0);
+  if (root.fd < 0 || bind(root.fd, (struct sockaddr *)&any, sizeof any) || listen(root.fd, 64) ||
+      getsockname(root.fd, (struct sockaddr *)&any, &length) || gethostname(host, sizeof host - 1))
+    return fail(ncclSystemError, "the bootstrap root's listener: %s", strerror(errno));
+  snprintf(id->internal, sizeof id->internal, "%s:%u", host, ntohs(any.sin6_port));
+  memcpy(root.id, id->internal, sizeof root.id);
   return ncclSuccess;
+}
+
+static int whole(int fd, void *bytes, size_t size, int sending) {
+  for (size_t done = 0; done < size;) {
+    const ssize_t moved = sending ? send(fd, (char *)bytes + done, size - done, 0) : recv(fd, (char *)bytes + done, size - done, 0);
+    if (moved <= 0) return moved ? errno : ECONNRESET;
+    done += (size_t)moved;
+  }
+  return 0;
+}
+
+static ncclResult_t bootstrap(const char *id, int nranks, int rank, struct report *reports) {
+  struct report *mine = reports + rank;
+  uint32_t node = 0;
+  mine->rank = rank;
+  mine->count = mesh_observe(NULL, mine->links, MESH_PORTS, &node);
+  mine->node = node;
+  if (mine->count < 0) return fail(ncclSystemError, "this node's bridge: %s", strerror(-mine->count));
+  if (nranks == 1) return ncclSuccess;
+  char host[NCCL_UNIQUE_ID_BYTES];
+  snprintf(host, sizeof host, "%s", id);
+  char *colon = strrchr(host, ':');
+  if (!colon) return fail(ncclInvalidArgument, "the unique id %s is no host:port", id);
+  *colon = 0;
+  struct timeval bound = {(time_t)DEADLINE_S, 0};
+  const double deadline = now_s() + DEADLINE_S;
+  int status = 0;
+  if (rank == 0) {
+    int listener = !strcmp(root.id, id) ? root.fd : -1;
+    if (listener < 0) {
+      struct sockaddr_in6 any = {.sin6_len = sizeof any, .sin6_family = AF_INET6, .sin6_addr = IN6ADDR_ANY_INIT,
+                                 .sin6_port = htons((uint16_t)atoi(colon + 1))};
+      int on = 1;
+      listener = socket(AF_INET6, SOCK_STREAM, 0);
+      if (listener < 0 || setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on) ||
+          bind(listener, (struct sockaddr *)&any, sizeof any) || listen(listener, 64))
+        return fail(ncclSystemError, "the bootstrap root at %s: %s", id, strerror(errno));
+    }
+    int *peers = calloc((size_t)nranks, sizeof *peers);
+    for (int r = 1; peers && r < nranks && !status; r++) {
+      struct pollfd ready = {listener, POLLIN, 0};
+      const int left = (int)((deadline - now_s()) * 1000);
+      int fd = left > 0 && poll(&ready, 1, left) == 1 ? accept(listener, NULL, NULL) : -1;
+      struct report heard;
+      if (fd < 0 || setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &bound, sizeof bound) || setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &bound, sizeof bound) ||
+          (status = whole(fd, &heard, sizeof heard, 0)) || heard.rank <= 0 || heard.rank >= nranks || peers[heard.rank]) {
+        status = status ? status : ETIMEDOUT;
+        if (fd >= 0) close(fd);
+        break;
+      }
+      peers[heard.rank] = fd;
+      reports[heard.rank] = heard;
+    }
+    for (int r = 1; peers && r < nranks; r++) {
+      if (!status && peers[r]) status = whole(peers[r], reports, (size_t)nranks * sizeof *reports, 1);
+      if (peers[r]) close(peers[r]);
+    }
+    close(listener);
+    if (listener == root.fd) root.fd = -1;
+    free(peers);
+    if (!peers) return fail(ncclSystemError, "out of memory");
+  } else {
+    struct addrinfo hint = {.ai_socktype = SOCK_STREAM}, *addresses = NULL;
+    int fd = -1;
+    while (fd < 0 && now_s() < deadline) {
+      if (!getaddrinfo(host, colon + 1, &hint, &addresses)) {
+        for (struct addrinfo *a = addresses; a && fd < 0; a = a->ai_next) {
+          fd = socket(a->ai_family, SOCK_STREAM, 0);
+          if (fd >= 0 && connect(fd, a->ai_addr, a->ai_addrlen)) { close(fd); fd = -1; }
+        }
+        freeaddrinfo(addresses);
+      }
+      if (fd < 0) usleep(100000);
+    }
+    if (fd < 0) status = ETIMEDOUT;
+    if (!status && (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &bound, sizeof bound) || setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &bound, sizeof bound)))
+      status = errno;
+    struct report kept = *mine;
+    if (!status) status = whole(fd, mine, sizeof *mine, 1);
+    if (!status) status = whole(fd, reports, (size_t)nranks * sizeof *reports, 0);
+    if (fd >= 0) close(fd);
+    reports[rank] = kept;
+  }
+  return status ? fail(ncclRemoteError, "the bootstrap at %s: %s", id, strerror(status)) : ncclSuccess;
 }
 
 ncclResult_t ncclCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId, int rank) {
   if (!comm || nranks < 1 || rank < 0 || rank >= nranks) return fail(ncclInvalidArgument, "rank %d of %d", rank, nranks);
-  char region[sizeof commId.internal + 1];
-  memcpy(region, commId.internal, sizeof commId.internal);
-  region[sizeof commId.internal] = 0;
-  if (!*region) return fail(ncclInvalidArgument, "the unique id names no region (ncclGetUniqueId)");
-  const char *path = getenv("MESH_LINK_MAP");
-  if (!path || !*path) return comm_make(comm, NULL, NULL, NULL, 0, nranks, NULL, rank, region);
-  struct mesh_link_map map;
-  if (mesh_link_map_read(path, &map)) return fail(ncclInvalidArgument, "MESH_LINK_MAP %s is not a link map", path);
-  if ((int)map.nodes != nranks) {
-    mesh_link_map_free(&map);
-    return fail(ncclInvalidArgument, "MESH_LINK_MAP %s has %d nodes for %d ranks", path, (int)map.nodes, nranks);
+  char id[sizeof commId.internal + 1];
+  memcpy(id, commId.internal, sizeof commId.internal);
+  id[sizeof commId.internal] = 0;
+  if (!*id) return fail(ncclInvalidArgument, "the unique id is empty (ncclGetUniqueId)");
+  struct report *reports = calloc((size_t)nranks, sizeof *reports);
+  int *members = calloc((size_t)nranks, sizeof *members);
+  uint32_t (*link)[2] = calloc((size_t)nranks * (size_t)nranks + 1, sizeof *link);
+  double (*cost)[2] = calloc((size_t)nranks * (size_t)nranks + 1, sizeof *cost);
+  ncclResult_t result = reports && members && link && cost ? bootstrap(id, nranks, rank, reports) : fail(ncclSystemError, "out of memory");
+  struct mesh_link_map map = {MESH_LINKS_GRAPH, (uint32_t)nranks, 0, link, cost};
+  for (int a = 0; !result && a < nranks; a++) {
+    members[a] = (int)reports[a].node;
+    for (int b = a + 1; b < nranks; b++)
+      for (int i = 0; i < reports[a].count && i < MESH_PORTS; i++) {
+        const struct mesh_link_view *view = reports[a].links + i;
+        if (view->peer != reports[b].node || view->phase != MESH_PAIRED) continue;
+        link[map.links][0] = (uint32_t)a; link[map.links][1] = (uint32_t)b;
+        cost[map.links][0] = DEFAULT_ALPHA; cost[map.links][1] = view->bandwidth ? 8e9 / (double)view->bandwidth : DEFAULT_BETA;
+        map.links++;
+        break;
+      }
   }
-  const ncclResult_t result = comm_make(comm, &map, NULL, NULL, 0, nranks, NULL, rank, region);
-  mesh_link_map_free(&map);
+  if (!result) result = comm_make(comm, nranks > 1 ? &map : NULL, NULL, NULL, 0, nranks, members, rank, id);
+  free(reports); free(members); free(link); free(cost);
   return result;
 }
 
@@ -521,14 +613,16 @@ ncclResult_t ncclCommInitRankConfig(ncclComm_t *comm, int nranks, ncclUniqueId c
 ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
   (void)devlist;
   if (ndev != 1) return fail(ncclInvalidArgument, "a node has one Metal device: ndev %d", ndev);
-  return comm_make(comm, NULL, NULL, NULL, 0, 1, NULL, 0, region_of_process());
+  ncclUniqueId id;
+  const ncclResult_t result = ncclGetUniqueId(&id);
+  return result ? result : ncclCommInitRank(comm, 1, id, 0);
 }
 
 static ncclResult_t session_relaying(ncclComm_t comm);
 /* a communicator over `topology`; where it leaves a pair of ranks unlinked, its session opened now (every rank calls this
    together), so the rank forwards routed messages for others whether or not it calls anything */
 ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int rank, const struct mesh_link_map *topology, const struct mesh_trees *paths,
-                                  const ncclMeshProgram *programs, int count, const int *node, const char *region) {
+                                  const ncclMeshProgram *programs, int count, const int *node, const char *name) {
   static const char *const kinds[] = {"mesh", "ring", "tree", "graph"};
   if (!comm || !topology) return fail(ncclInvalidArgument, "comm or topology is NULL");
   if (rank < 0 || (uint32_t)rank >= topology->nodes) return fail(ncclInvalidArgument, "rank %d of %u", rank, topology->nodes);
@@ -540,7 +634,7 @@ ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int rank, const struct mesh_
                 topology->kind <= MESH_LINKS_GRAPH ? kinds[topology->kind] : "unknown kind", topology->nodes, topology->links);
   if (count < 0 || (count && !programs)) return fail(ncclInvalidArgument, "programs is NULL with count %d", count);
   ncclResult_t result = comm_make(comm, topology, paths, count ? programs : NULL, count, (int)topology->nodes, node, rank,
-                                  region && *region ? region : "/mesh0");
+                                  name && *name ? name : "nccl");
   if (!result) result = session_relaying(*comm);
   if (result) { ncclCommDestroy(*comm); *comm = NULL; }
   return result;
@@ -640,7 +734,7 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
 #define POSITIONS 8192
 #define IDENTITY 1
 #define RELAY (1u << 20)            /* a routed pair's transfers: RELAY + 2 * (from * NODES + to) + large */
-#define NODES 1024
+#define NODES 1024u
 #define BOUND 10.0                  /* metal-microbench configs/e2b-programs.json remote_bound_seconds (MESH_REMOTE_BOUND) */
 
 /* a channel: one class of a peer's pieces on a queue pair of its own (a queue pair's receives are posted
@@ -698,7 +792,7 @@ struct relay {
 static struct {
   struct mesh_ctx context;
   struct hdr *header;
-  char region[64];
+  char name[NCCL_UNIQUE_ID_BYTES + 1];
   struct channel *channels;
   uint32_t count, positions;
   size_t slot, small;
@@ -707,8 +801,9 @@ static struct {
   int registered, running;
   struct mesh_metal_transport transport;
   struct relay *relays;
-  uint32_t relaying, *route;
-  int routes, routing;
+  uint32_t relaying, relayed;
+  struct hop { uint32_t node, next; } *route;
+  int routing;
   void *violation_buffer;
   _Atomic uint64_t *violation;
   pthread_t progress;
@@ -755,9 +850,9 @@ static void release_all(int result, const char *format, ...) {
 
 static void violated(void);
 static ncclResult_t session_async(ncclComm_t comm) {
-  if (session.header && !strcmp(session.region, comm->region)) violated();
+  if (session.header && !strcmp(session.name, comm->name)) violated();
   const ncclResult_t failed = (ncclResult_t)atomic_load(&session.failed);
-  if (!failed || !session.header || strcmp(session.region, comm->region)) return ncclSuccess;
+  if (!failed || !session.header || strcmp(session.name, comm->name)) return ncclSuccess;
   return fail(failed, "%s", failure);
 }
 
@@ -787,7 +882,9 @@ static uint64_t channel_arrived(struct channel *ch, uint64_t at) {
 }
 
 static struct relay *relay_toward(uint32_t node, int large) {
-  const uint32_t next = node < NODES ? session.route[node] : UINT32_MAX;
+  uint32_t next = UINT32_MAX;
+  for (uint32_t i = 0; i < session.relayed; i++)
+    if (session.route[i].node == node) next = session.route[i].next;
   for (uint32_t i = 0; i < session.relaying; i++)
     if (session.relays[i].node == next && session.relays[i].large == large) return session.relays + i;
   return NULL;
@@ -988,7 +1085,7 @@ static void session_close(double linger) {
   mesh_detach(&session.context);
   free(session.channels); free(session.relays); free(session.route);
   session.channels = NULL; session.header = NULL; session.count = 0; session.relays = NULL; session.relaying = 0;
-  session.route = NULL; session.routing = 0;
+  session.route = NULL; session.routing = 0; session.relayed = 0;
   atomic_store(&session.stop, 0); atomic_store(&session.failed, ncclSuccess);
 }
 
@@ -1005,11 +1102,9 @@ static struct channel *channel_of(uint32_t node) {
 }
 
 static int session_covers(ncclComm_t comm) {
-  if (!session.header || strcmp(session.region, comm->region)) return 0;
+  if (!session.header || strcmp(session.name, comm->name)) return 0;
   for (int r = 0; r < comm->nranks; r++)
-    if (r != comm->rank && !channel_of((uint32_t)comm->members[r]) &&
-        (session.routes || mesh_link_between(&comm->map, (uint32_t)comm->rank, (uint32_t)r)))
-      return 0;
+    if (r != comm->rank && !channel_of((uint32_t)comm->members[r])) return 0;
   return 1;
 }
 
@@ -1030,7 +1125,7 @@ static int ring_make(size_t slot, struct mesh_section *section, unsigned char **
 /* a ring's transfer on the link to `node`, its queue pair `queue` (a queue pair's SENDs, and the receives its peer
    posts, run invocation by invocation through every transfer on it, so rings that advance apart need queue pairs apart) */
 static int ring_bind(uint32_t node, uint32_t queue, int receive, uint32_t identity, struct mesh_section section) {
-  if (queue >= session.header->qps) return ERANGE;
+  if (queue >= MESH_QUEUES) return ERANGE;
   return mesh_transfer_bind(&session.context, mesh_peer_channel(&session.context, node, queue), receive ? MESH_RECEIVE : MESH_SEND,
                             identity, section, (uint32_t)(section.bytes / session.header->pgsz), 0, UINT32_MAX, DEPTH);
 }
@@ -1062,40 +1157,36 @@ static int channel_metal(struct channel *ch) {
 }
 
 static int session_open(ncclComm_t comm, int *other) {
-  int status = mesh_attach(&session.context, comm->region);
+  int status = mesh_attach(&session.context, comm->name);
   if (status) return status;
   const struct hdr *m = session.header = session.context.M;
-  snprintf(session.region, sizeof session.region, "%s", comm->region);
+  snprintf(session.name, sizeof session.name, "%s", comm->name);
   if ((uint32_t)comm->members[comm->rank] != m->node) { *other = (int)m->node; session_close(0); return EINVAL; }
   const size_t block = (size_t)m->pgsz * m->block;
   session.slot = (setting("NCCL_BUFFSIZE", BUFFSIZE) / LAG + block - 1) / block * block;
   session.small = block;
-  session.classes = m->qps >= 2 ? 2 : 1;
+  session.classes = 2;
   session.positions = (uint32_t)((setting("MESH_POSITIONS", POSITIONS) + DEPTH - 1) / DEPTH * DEPTH);
   session.bound = setting("MESH_REMOTE_BOUND", 0) ? (double)setting("MESH_REMOTE_BOUND", 0) : BOUND;
   const uint32_t N = (uint32_t)comm->nranks, me = (uint32_t)comm->rank;
   uint32_t *path = calloc(N + 1, sizeof *path);
   if (!path || !(session.channels = calloc(2 * (size_t)N, sizeof *session.channels))) { free(path); session_close(0); return ENOMEM; }
   /* routes between unlinked ranks: two queue pairs a link past the channels' (a relay ring each class each way, every
-     routed pair crossing the link sharing it), whatever the map; a bridge with fewer carries no routes, and a message to
-     an unlinked rank is refused (schedule_group) while every compiled collective, on linked ranks alone, runs */
+     routed pair crossing the link sharing it), whatever the map */
   int partial = 0;
   for (uint32_t a = 0; a < N; a++)
     for (uint32_t b = a + 1; b < N; b++) partial |= !mesh_link_between(&comm->map, a, b);
-  session.routing = partial && m->qps >= 2 * (uint32_t)session.classes && m->node < NODES;
-  session.routes = !partial || session.routing;
-  if (session.routing && !(session.route = calloc(NODES, sizeof *session.route))) status = ENOMEM;
-  for (uint32_t v = 0; session.route && v < NODES; v++) session.route[v] = UINT32_MAX;
+  session.routing = partial;
+  if (session.routing && !(session.route = calloc(N, sizeof *session.route))) status = ENOMEM;
   /* a channel to each rank: over the link to it; to a rank the map does not link, routed (its next node the first of
      the path to it, mesh_trees_path, along which every node between sends it on) */
   for (uint32_t r = 0; r < N && !status; r++) {
     const int linked = mesh_link_between(&comm->map, me, r);
     if (r == me || (!linked && !session.routing)) continue;
-    if ((uint32_t)comm->members[r] >= NODES) { status = EHOSTUNREACH; break; }
     if (session.routing) {
       const uint32_t hops = linked ? 2 : mesh_trees_path(&comm->paths, me, r, path);
       if (hops < 2) { status = EHOSTUNREACH; break; }
-      session.route[comm->members[r]] = (uint32_t)comm->members[linked ? r : path[1]];
+      session.route[session.relayed++] = (struct hop){(uint32_t)comm->members[r], (uint32_t)comm->members[linked ? r : path[1]]};
     }
     for (int large = 2 - session.classes; large < 2 && !status; large++) {
       struct channel *ch = session.channels + session.count++;
@@ -1326,9 +1417,7 @@ static ncclResult_t schedule_group(struct call *list, size_t n, struct schedule 
     for (uint32_t k = 0; list[i].bound && k < list[i].bound->count; k++) {
       const int peer = (int)list[i].bound->steps[k].peer;
       if (peer != list[i].comm->rank && !channel_of((uint32_t)list[i].comm->members[peer]))
-        return fail(ncclInvalidUsage, "rank %d and rank %d share no link, and the bridges' %u queue pairs a link do not carry "
-                    "the routes between unlinked ranks (MESH_QPS %u)",
-                    list[i].comm->rank, peer, session.header->qps, 2 * (uint32_t)session.classes);
+        return fail(ncclInvalidUsage, "rank %d and rank %d share no link and no route of the session's map", list[i].comm->rank, peer);
     }
   size_t total = 1;
   for (size_t i = 0; i < n; i++) total += list[i].bound ? list[i].bound->count : 0;
@@ -1458,10 +1547,7 @@ static ncclResult_t session_ensure(ncclComm_t comm) {
       int other = -1;
       const int status = session_open(widest(comm), &other);
       if (other >= 0) return fail(ncclInvalidUsage, "rank %d runs on the bridge of node %d", comm->rank, other);
-      if (status == ERANGE)
-        return fail(ncclInvalidUsage, "the bridges' links have too few queue pairs for the relay rings (MESH_QPS 4 where the map leaves a "
-                                      "pair unlinked)");
-      if (status == EHOSTUNREACH) return fail(ncclInvalidUsage, "a pair of ranks has no route on the map, or a node number is %d or more", NODES);
+      if (status == EHOSTUNREACH) return fail(ncclInvalidUsage, "a pair of ranks has no route on the map, or no link of this node reaches its peer now");
       if (status) {
         const ncclResult_t result = fail(ncclSystemError, "the session's transfers did not start: %s", strerror(status));
         if (++attempt == ATTEMPTS) return result;
@@ -2435,7 +2521,7 @@ ncclResult_t ncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *newc
   checked:;
     const struct mesh_link_map restricted = {count == n ? comm->map.kind : every_pair ? MESH_LINKS_MESH : MESH_LINKS_GRAPH, (uint32_t)count, links,
                                              linked, comm->map.cost ? priced : NULL};
-    result = comm_make(newcomm, &restricted, NULL, NULL, 0, count, members, index[comm->rank], comm->region);
+    result = comm_make(newcomm, &restricted, NULL, NULL, 0, count, members, index[comm->rank], comm->name);
   }
   free(every); free(ranks); free(index); free(members); free(linked); free(priced);
   return result;

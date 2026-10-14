@@ -2,15 +2,15 @@ BINS = mesh-flow mesh-stat libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 all: $(BINS)
 native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
-.build/%.s: %.c mesh.h mesh-verbs.h mesh-dataflow.h mesh-call.h Makefile
+.build/%.s: %.c mesh.h mesh-plan.h mesh-verbs.h mesh-dataflow.h mesh-call.h Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
-mesh-flow: mesh-flow.c mesh-verbs.h mesh-recovery.h mesh.h mesh-dataflow.h mesh-call.h mesh-dataflow.c Makefile
+mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h mesh-dataflow.c Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -o .build/$@ mesh-flow.c mesh-dataflow.c -lrdma
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
 	mv -f .build/$@ $@
-mesh-stat: mesh-stat.c mesh.h
+mesh-stat: mesh-stat.c mesh.h mesh-plan.h
 	cc -O2 -o $@ mesh-stat.c
 # NCCL's API (nccl.h) on the prepared transfers and the collective planner of libmesh.dylib; every function also
 # under its pncclX profiling name, as NCCL exports both
@@ -40,20 +40,3 @@ PYTHON ?= $(HOME)/.venv-mesh-uv/bin/python
 mesh-c: mesh_c_build.py mesh-plan.h nccl.h libmesh.dylib libnccl-mesh.dylib
 	$(PYTHON) mesh_c_build.py
 .PHONY: mesh-c
-
-# mesh-flow-loop: the bridge over loopverbs.c (shared memory between the bridges of one machine, each a node), for
-# running N nodes on one host; never a production bridge (no RDMA, ad-hoc signed)
-mesh-flow-loop: mesh-flow.c mesh-verbs.h mesh-recovery.h mesh.h mesh-dataflow.h mesh-call.h mesh-dataflow.c loopverbs.c Makefile
-	mkdir -p .build
-	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Wno-unused-parameter -o .build/$@ mesh-flow.c mesh-dataflow.c loopverbs.c
-	codesign --force --sign - --identifier io.mesh.bridge.loop .build/$@
-	mv -f .build/$@ $@
-
-# host: libnccl-mesh with the walk's kernels on the CPU (nccl-mesh-host.c), the GPU library's install name, so a process
-# takes it with DYLD_LIBRARY_PATH=$(CURDIR)/.build/host; for running N ranks on one host over mesh-flow-loop
-host: .build/host/libnccl-mesh.dylib
-.build/host/libnccl-mesh.dylib: nccl-mesh.c nccl-mesh-host.c nccl-mesh-metal.h mesh-metal.h nccl.h mesh-collective.h mesh-call.h mesh-plan.h libmesh.dylib Makefile
-	mkdir -p .build/host
-	cc -fblocks -O2 -Wall -Wextra -Werror -DMESH_HOST_EXECUTOR -dynamiclib -Wl,-install_name,@rpath/libnccl-mesh.dylib \
-	  -Wl,-rpath,@loader_path/../.. $(foreach f,$(NCCL_API),-Wl,-alias,_$(f),_p$(f)) -o $@ nccl-mesh.c nccl-mesh-host.c -L. -lmesh
-.PHONY: host

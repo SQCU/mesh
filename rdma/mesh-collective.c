@@ -594,7 +594,7 @@ done:
 }
 
 /* Each step becomes one prepared transfer: a section over the typed piece, the peer's channel on
-   queue identity%qps, and the same identity on the sending and the receiving rank. */
+   queue identity % MESH_QUEUES, and the same identity on the sending and the receiving rank. */
 int mesh_collective_bind(struct mesh_ctx *context,const struct mesh_step *steps,uint32_t count,uint32_t identity,
   struct mesh_section operand,const struct mesh_section *received,uint32_t invocations,uint32_t invocation_pages,
   struct mesh_section *pieces){
@@ -610,26 +610,30 @@ int mesh_collective_bind(struct mesh_ctx *context,const struct mesh_step *steps,
     }
     if(pieces)pieces[i]=piece;
     uint32_t transfer=identity+step->round;
-    int status=mesh_transfer_bind(context,mesh_peer_channel(context,step->peer,transfer%context->M->qps),
+    int status=mesh_transfer_bind(context,mesh_peer_channel(context,step->peer,transfer%MESH_QUEUES),
       step->op==MESH_STEP_SEND?MESH_SEND:MESH_RECEIVE,transfer,piece,piece.pages,0,UINT32_MAX,0);
     if(status)return status;
   }
   return 0;
 }
 
-/* The word layout and cancellation ranges of mesh_metal_transport_create, without the Metal
-   buffers: link p's words follow link p-1's, invocation-major, one per received chunk in the
-   frame order mesh_transfers_prepare assigned. */
+/* design/prepared-machine.md#M07 */
+/* design/prepared-machine.md#M12 */
+/* Each link's completion words and the cancellation ranges over them: link p's words follow link p-1's (16-word
+   aligned), one per received chunk an invocation of each receive transfer's range, in the frame order
+   mesh_transfers_prepare assigned (a chunk's word for the transfer's invocation u is first + (u*count + slot)*chunks
+   + chunk, its stride count*chunks words); the words in context->inputs_off, inputs_bytes. */
 int mesh_host_inputs(struct mesh_ctx *context){
   struct hdr *m=context->M;
-  uint64_t frames[m->links?m->links:1],words=0;
+  struct mesh_client *client=mesh_client_at(m,context->client);
+  uint64_t frames[MESH_PORTS],words=0;
   for(uint32_t p=0;p<m->links;p++){
-    struct mesh_tx *tx=mesh_events(m,mesh_notice_queue(m,context->client,p));
+    words=(words+15)&~UINT64_C(15);
     frames[p]=0;
-    for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
+    for(uint32_t q=p*MESH_QUEUES;q<(p+1)*MESH_QUEUES;q++){
       struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
       for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
-        frames[p]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*mesh_transfer_active(in+i,tx->invocations);
+        frames[p]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*mesh_transfer_active(in+i,client->tx[p].invocations);
     }
     words+=frames[p];
   }
@@ -640,22 +644,25 @@ int mesh_host_inputs(struct mesh_ctx *context){
   uint64_t *word=mesh_section_address(context,input,0);
   struct mesh_cancellation *cancel=mesh_section_address(context,stop,0);
   memset(word,0,input.bytes);memset(cancel,0,stop.bytes);
+  cancel->cyclic=atomic_load(&client->cyclic);
+  context->inputs_off=(uint64_t)((char *)word-(char *)m);context->inputs_bytes=(uint64_t)input.pages*m->pgsz;
+  uint64_t first=0;
   for(uint32_t p=0;p<m->links;p++){
-    struct mesh_tx *tx=mesh_events(m,mesh_notice_queue(m,context->client,p));
-    tx->cancel=(uintptr_t)cancel-(uintptr_t)m;
-    cancel->ranges[p]=(struct mesh_cancel_range){.offset=(uintptr_t)word-(uintptr_t)m,.count=frames[p]};
-    for(uint32_t q=p*m->qps;q<(p+1)*m->qps;q++){
+    first=(first+15)&~UINT64_C(15);
+    client->tx[p].cancel=(uint64_t)((char *)cancel-(char *)m);
+    cancel->ranges[p]=(struct mesh_cancel_range){.offset=(uint64_t)((char *)(word+first)-(char *)m),.count=frames[p]};
+    for(uint32_t q=p*MESH_QUEUES;q<(p+1)*MESH_QUEUES;q++){
       struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
       for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++){
         uint32_t chunks=mesh_row_chunks(m,in[i].local_row,in[i].bytes);
         for(uint32_t s=0;s<in[i].count;s++)for(uint32_t k=0;k<chunks;k++){
           struct mesh_publication *delivery=mesh_publication_at(m,in[i].local_row+s*in[i].stride+k);
-          delivery->device_input=(uintptr_t)(word+in[i].first+(uint64_t)s*chunks+k)-(uintptr_t)m;
+          delivery->device_input=(uint64_t)((char *)(word+first+in[i].first+(uint64_t)s*chunks+k)-(char *)m);
           delivery->device_stride=sizeof(uint64_t)*(uint64_t)in[i].count*chunks;
         }
       }
     }
-    word+=frames[p];
+    first+=frames[p];
   }
   return 0;
 }
@@ -664,7 +671,7 @@ int mesh_host_inputs(struct mesh_ctx *context){
    cell of invocation t, released after the caller's writes to the section. */
 /* design/prepared-machine.md#M30: running invocation T is the program's invocation T mod N in cycle T / N */
 static uint32_t program_invocations(struct mesh_ctx *context){
-  return ((struct mesh_tx *)mesh_events(context->M,mesh_notice_queue(context->M,context->client,0)))->invocations;
+  return mesh_client_at(context->M,context->client)->tx[0].invocations;
 }
 
 void mesh_host_publish(struct mesh_ctx *context,struct mesh_section section,uint32_t invocation){

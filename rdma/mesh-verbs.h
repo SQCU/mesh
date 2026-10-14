@@ -4,51 +4,48 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <limits.h>
 #include <pthread.h>
 #include <time.h>
 
 #define QD 4095
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 /* tbt_post_recv loads only the low 32 address bits of an SGE, so no registration may cross a 4 GiB
-   virtual-address boundary.  The window is mapped at a bank-aligned base and cut into regions of
-   MESH_REGION bytes, which divides the bank: every region lies inside one bank, however many banks
-   the window spans.  1 GiB is the registration the provider takes (the RCA's 32 GiB and 6 GiB windows
-   in 1 GiB regions; its advertised max_mr_size, 16.4 MB, is not enforced), so max_mr regions of it
-   are the device's registrable memory. */
+   virtual-address boundary.  The window is mapped at a bank-aligned base and registered in extents of
+   MESH_REGION bytes, which divides the bank: every extent lies inside one bank, however many banks the
+   window spans.  1 GiB is the registration the provider takes, so max_mr extents are the device's
+   registrable memory. */
 #define MESH_BANK ((size_t)1<<32)
 #define MESH_REGION ((size_t)1<<30)
 struct mesh_wire { char *data; size_t length; };
+/* design/bridge-and-ipc.md#ports: a port's device: its context, protection domain and the window's extents
+   registered on it so far (an extent registers when a program first names a page of it), the queue pairs it
+   holds against max_qp */
 struct mesh_device {
-  const char *name;
+  char name[32];
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
-  uint32_t region_count,frame_capacity;
-  char *wire; size_t extent,payload;
-  pthread_mutex_t setup;
+  uint32_t extents,frame_capacity,pairs,max_pairs,max_regions,registered;
+  char *wire;
+  struct ibv_port_attr port;
+  union ibv_gid gid;
 };
 /* design/prepared-machine.md#M09 */
 /* design/prepared-machine.md#M07 */
 /* The one copy of the wire-address arithmetic.  offset is a byte offset into the arena, which is a
-   byte offset into the registered window because the window begins at data_off.  No per-block span
-   array, no page-table mapping load, no startup loop over blocks: an arena of any size costs this
-   divide and nothing else. */
-static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t offset,uint64_t remaining){
-  uint64_t capacity=device->payload-offset%device->payload;
+   byte offset into the registered window because the window begins at data_off; a span never crosses
+   a block, so it never crosses an extent. */
+static inline struct ibv_sge wire_span(const struct mesh_device *device,uint64_t payload,uint64_t offset,uint64_t remaining){
+  uint64_t capacity=payload-offset%payload;
   return (struct ibv_sge){.addr=(uintptr_t)device->wire+offset,
     .length=(uint32_t)(remaining<capacity?remaining:capacity),
-    .lkey=device->regions[offset/device->extent]->lkey};
+    .lkey=device->regions[offset/MESH_REGION]->lkey};
 }
 /* design/algorithm-sources.md#programcopy */
 /* A queue pair: its receives complete on `completion`, its SENDs on `sent`.  The device completes
@@ -63,15 +60,8 @@ struct mesh_queue {
   uint32_t receive_capacity,send_capacity;
 };
 _Static_assert(sizeof(struct mesh_queue)==64 && _Alignof(struct mesh_queue)==64,"mesh_queue native dispatch");
-struct mesh_verbs {
-  struct mesh_device *device; struct mesh_wire *wire;
-  struct mesh_queue *queues; int qp_count,listener;
-  struct ibv_cq *completion,*sent;
-  uint32_t peer,completion_entries[2];
-  uint64_t bandwidth;
-  const char *local_address,*remote_address,*service;
-  uint64_t deadline,window,arrival;
-};
+/* a program's queue pairs on one port and their two completion queues */
+struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int qp_count,count; struct ibv_cq *completion,*sent; uint32_t psn; };
 /* design/prepared-machine.md#M07 */
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M09 */
@@ -87,296 +77,131 @@ static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
   if(tail)munmap(base+wire->length,tail);
   wire->data=mmap(base,wire->length,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_FIXED,file,(off_t)m->data_off);
   if(wire->data==MAP_FAILED){wire->data=NULL;return -1;}
-  fprintf(stderr,"wire window=%zu bytes base=%p bank=%llu offset_in_bank=%llu\n",wire->length,(void *)wire->data,
-    (unsigned long long)((uintptr_t)wire->data>>32),(unsigned long long)((uintptr_t)wire->data&(MESH_BANK-1)));
   return 0;
 }
 static const char *shm; static _Atomic sig_atomic_t stop;
 /* design/prepared-machine.md#M11 */
-/* design/algorithm-sources.md#programcopy */
+/* design/RDMA-KERNEL-RECOVERY.md: queue pairs, then completion queues; a failed destruction keeps its handle for the
+   next retirement turn.  1 once nothing is held. */
 static int down_pair(struct mesh_verbs *provider){
-  while(provider->qp_count){ struct ibv_qp *q=provider->queues[provider->qp_count-1].pair; if(q && ibv_destroy_qp(q))return 0; provider->queues[--provider->qp_count].pair=NULL; }
-  if(provider->completion){
-    if(ibv_destroy_cq(provider->completion))return 0;
-    provider->completion=NULL;
+  while(provider->qp_count){
+    struct ibv_qp *q=provider->queues[provider->qp_count-1].pair;
+    if(q && ibv_destroy_qp(q))return 0;
+    provider->queues[--provider->qp_count].pair=NULL;
+    if(q)provider->device->pairs--;
   }
-  if(provider->sent){
-    if(ibv_destroy_cq(provider->sent))return 0;
-    provider->sent=NULL;
-  }
-  free(provider->queues);provider->queues=NULL;
+  if(provider->completion){if(ibv_destroy_cq(provider->completion))return 0;provider->completion=NULL;}
+  if(provider->sent){if(ibv_destroy_cq(provider->sent))return 0;provider->sent=NULL;}
+  free(provider->queues);provider->queues=NULL;provider->count=0;
   return 1;
 }
-/* design/algorithm-sources.md#programcopy */
+/* design/RDMA-KERNEL-RECOVERY.md: registrations, protection domain, context, each kept where its release fails */
 static int down_device(struct mesh_device *device){
-  while(device->region_count){
-    if(ibv_dereg_mr(device->regions[device->region_count-1]))return 0;
-    device->region_count--;
+  for(uint32_t e=0;e<device->extents;e++){
+    if(device->regions[e] && ibv_dereg_mr(device->regions[e]))return 0;
+    device->regions[e]=NULL;
   }
-  free(device->regions);device->regions=NULL;
+  device->registered=0;
   if(device->domain){if(ibv_dealloc_pd(device->domain))return 0;device->domain=NULL;}
   if(device->context){if(ibv_close_device(device->context))return 0;device->context=NULL;}
+  device->frame_capacity=0;
   return 1;
 }
 static void down(void){ if(shm)shm_unlink(shm); }
 static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
-static void onsig(int s){ (void)s; stop++; }
-
-/* design/collective-dependency-ledger.md#d13-connection-metadata-is-setup-work */
-struct qpi { uint32_t xmagic, xsize; uint32_t pgsz; uint16_t lid; uint8_t gid[16]; uint32_t node,count; };
-#define XMAGIC 0x4d595048u
-
-/* design/algorithm-sources.md#programcopy */
-static int pairing_active(struct hdr *m,uint64_t client,uint64_t deadline){
-  if(stop || atomic_load_explicit(&m->client,memory_order_acquire)!=client){errno=ECANCELED;return 0;}
-  if(clock_gettime_nsec_np(CLOCK_MONOTONIC)>=deadline){errno=ETIMEDOUT;return 0;}
-  return 1;
-}
-
-/* design/algorithm-sources.md#programcopy */
-static int dial(struct addrinfo *a,struct hdr *m,uint64_t client,uint64_t deadline){
-  if(!pairing_active(m,client,deadline))return -1;
-  int f=socket(a->ai_family,SOCK_STREAM,0); if(f<0) return -1;
-  if(fcntl(f,F_SETFL,O_NONBLOCK)<0)goto failed;
-  if(connect(f,a->ai_addr,a->ai_addrlen)==0)return f;
-  if(errno!=EINPROGRESS)goto failed;
-  struct pollfd ready={.fd=f,.events=POLLOUT};
-  while(pairing_active(m,client,deadline)){
-    int status=poll(&ready,1,0);
-    if(status<0 && errno==EINTR)continue;
-    if(status<0)goto failed;
-    if(!status)continue;
-    int error=0;socklen_t length=sizeof error;
-    if(getsockopt(f,SOL_SOCKET,SO_ERROR,&error,&length))error=errno;
-    if(!error)return f;
-    errno=error;goto failed;
-  }
-failed:;
-  int error=errno;close(f);errno=error;return -1;
-}
-
-/* design/algorithm-sources.md#programcopy */
-static int listener_up(struct mesh_verbs *provider){
-  struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC,.ai_flags=AI_PASSIVE|AI_NUMERICHOST|AI_NUMERICSERV},*r;
-  if(getaddrinfo(provider->local_address,provider->service,&hint,&r)){errno=EINVAL;return -1;}
-  provider->listener=socket(r->ai_family,SOCK_STREAM,0);
-  if(provider->listener<0){int error=errno;freeaddrinfo(r);errno=error;return -1;}
-  int on=1,off=0;
-  setsockopt(provider->listener,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on);
-  if(r->ai_family==AF_INET6)setsockopt(provider->listener,IPPROTO_IPV6,IPV6_V6ONLY,&off,sizeof off);
-  int error=fcntl(provider->listener,F_SETFL,O_NONBLOCK)<0 || bind(provider->listener,r->ai_addr,r->ai_addrlen) || listen(provider->listener,4),code=errno;
-  freeaddrinfo(r);
-  if(error){ close(provider->listener); provider->listener=-1;errno=code;return -1; }
-  return 0; }
-
-/* design/algorithm-sources.md#programcopy */
-static int exchange(int f,const void *mine,void *you,size_t send_bytes,size_t receive_bytes,struct hdr *m,uint64_t client,uint64_t deadline){
-  size_t sent=0,got=0;
-  while(pairing_active(m,client,deadline)){
-    if(sent==send_bytes && got==receive_bytes)return 0;
-    if(sent<send_bytes){
-      ssize_t n=write(f,(const char*)mine+sent,send_bytes-sent);
-      if(n>0)sent+=(size_t)n;
-      else if(!n){errno=ECONNRESET;return -1;}
-      else if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
-    }
-    if(got<receive_bytes){
-      ssize_t n=read(f,(char*)you+got,receive_bytes-got);
-      if(n>0)got+=(size_t)n;
-      else if(!n){errno=ECONNRESET;return -1;}
-      else if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
-    }
-  }
-  return -1;
-}
-
-/* design/algorithm-sources.md#programcopy */
-/* design/prepared-machine.md#M08 */
-static uint64_t pair_window_ns(void);
-/* design/recovery.md#first: a first pairing waits for its peer's first contact until `arrival` (the members prepare
-   their programs at their own speeds), and its pairing window counts from that contact */
-static int contacted(struct mesh_verbs *provider,int f){
-  if(f>=0 && provider->arrival)provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+pair_window_ns();
-  return f;
-}
-static int oob(struct mesh_verbs *provider,struct hdr *m,uint64_t client){
-  const uint64_t until=provider->arrival>provider->deadline?provider->arrival:provider->deadline;
-  if(!pairing_active(m,client,until))return -1;
-  if(m->node>provider->peer){
-    if(provider->listener<0 && listener_up(provider))return -1;
-    while(pairing_active(m,client,until)){
-      int f=accept(provider->listener,NULL,NULL);
-      if(f>=0){
-        if(fcntl(f,F_SETFL,O_NONBLOCK)==0)return contacted(provider,f);
-        int error=errno;close(f);errno=error;return -1;
-      }
-      if(errno!=EAGAIN && errno!=EWOULDBLOCK && errno!=EINTR)return -1;
-      /* design/recovery.md (Risk 6): wait for the peer's dial on the listener, not on a spinning core */
-      struct pollfd ready={provider->listener,POLLIN,0};
-      poll(&ready,1,10);
-    }
-    return -1;
-  }
-  struct addrinfo hint={.ai_socktype=SOCK_STREAM,.ai_family=AF_UNSPEC,.ai_flags=AI_NUMERICHOST|AI_NUMERICSERV},*addresses;
-  if(getaddrinfo(provider->remote_address,provider->service,&hint,&addresses)){errno=EINVAL;return -1;}
-  int socket=-1,error=EHOSTUNREACH;
-  for(;;){
-    if(!pairing_active(m,client,until)){error=errno;break;}
-    for(struct addrinfo *a=addresses;a;a=a->ai_next){
-      socket=dial(a,m,client,until);error=errno;
-      if(socket>=0 || error==ECANCELED || error==ETIMEDOUT)break;
-    }
-    if(socket>=0 || (error!=ECONNREFUSED && error!=ENETUNREACH && error!=EHOSTUNREACH))break;
-    poll(NULL,0,1);
-  }
-  freeaddrinfo(addresses);errno=error;return contacted(provider,socket);
-}
 
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M09 */
-static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hdr *m,struct ibv_port_attr *port){
-  int error=0;
-  pthread_mutex_lock(&device->setup);
+/* design/bridge-and-ipc.md#ports: the port's device opened (by its name, the device list read again) and its port
+   active, its protection domain and capacities read once a context.  0, or -1 with errno (ENETDOWN: the port is not
+   active; ENODEV: no such device now). */
+static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hdr *m){
   if(!device->context){
     struct ibv_device **list=ibv_get_device_list(NULL);
     for(int i=0;list && list[i];i++)if(!strcmp(device->name,ibv_get_device_name(list[i]))){device->context=ibv_open_device(list[i]);break;}
     if(list)ibv_free_device_list(list);
-    if(!device->context){error=errno?errno:ENODEV;goto done;}
+    if(!device->context){errno=ENODEV;return -1;}
   }
-  if(ibv_query_port(device->context,1,port)){error=errno;goto done;}
-  if(port->state!=IBV_PORT_ACTIVE){error=ENETDOWN;goto done;}
-  if(device->frame_capacity)goto done;
+  if(ibv_query_port(device->context,1,&device->port))return -1;
+  if(device->port.state!=IBV_PORT_ACTIVE){errno=ENETDOWN;return -1;}
+  if(device->frame_capacity)return 0;
   struct ibv_device_attr capabilities;
-  if(ibv_query_device(device->context,&capabilities)){error=errno;goto done;}
-  if(!device->domain)device->domain=ibv_alloc_pd(device->context);
-  if(!device->domain){error=errno;goto done;}
-  /* design/prepared-machine.md#M09 */
-  /* Registered memory is the declared window (by default the whole arena): what an SGE names, wired
-     1:1 by the provider, in regions of MESH_REGION bytes.  A provider that refuses a region that size
-     is registered in regions of its advertised max_mr_size instead, at most max_mr of them. */
-  size_t stride=(size_t)m->block*m->pgsz,span=wire->length;
-  if(!device->extent)device->extent=(MESH_REGION<span?MESH_REGION:(span+stride-1))/stride*stride;
-  for(;;){
-    size_t extent=device->extent,regions=extent?(span+extent-1)/extent:0;
-    if(!extent || regions>(size_t)capabilities.max_mr || (MESH_BANK%extent && span>MESH_BANK)){
-      error=ENOMEM;
-      fprintf(stderr,"register %s window=%zu extent=%zu regions=%zu base=%p max_mr_size=%llu max_mr=%d\n",
-        device->name,span,extent,regions,(void *)wire->data,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr);
-      goto done;
-    }
-    if(!device->regions)device->regions=calloc(regions,sizeof *device->regions);
-    if(!device->regions){error=ENOMEM;goto done;}
-    int refused=0;
-    while(device->region_count<regions){
-      size_t offset=(size_t)device->region_count*extent,end=offset+extent;
-      device->regions[device->region_count]=ibv_reg_mr(device->domain,wire->data+offset,(end<span?end:span)-offset,IBV_ACCESS_LOCAL_WRITE);
-      if(!device->regions[device->region_count]){
-        error=errno;fprintf(stderr,"register %s offset=%zu bytes=%zu window=%zu extent=%zu max_mr_size=%llu max_mr=%d: %s\n",
-          device->name,offset,(end<span?end:span)-offset,span,extent,(unsigned long long)capabilities.max_mr_size,capabilities.max_mr,strerror(error));
-        refused=1;break;
-      }
-      device->region_count++;
-    }
-    if(!refused)break;
-    size_t fallback=capabilities.max_mr_size/stride*stride;
-    if(!fallback || fallback>=extent)goto done;
-    while(device->region_count){
-      if(ibv_dereg_mr(device->regions[device->region_count-1]))goto done;
-      device->region_count--;
-    }
-    free(device->regions);device->regions=NULL;device->extent=fallback;error=0;
-  }
-  size_t extent=device->extent,regions=device->region_count;
-  device->wire=wire->data;device->extent=extent;device->payload=stride;
-  fprintf(stderr,"register %s window=%zu bytes extent=%zu regions=%zu arena=%llu bytes\n",
-    device->name,span,extent,regions,(unsigned long long)mesh_arena_pages(m)*(uint64_t)m->pgsz);
+  if(ibv_query_device(device->context,&capabilities))return -1;
+  if(!device->domain && !(device->domain=ibv_alloc_pd(device->context)))return -1;
+  uint32_t extents=(uint32_t)((wire->length+MESH_REGION-1)/MESH_REGION);
+  if(!device->regions && !(device->regions=calloc(extents?extents:1,sizeof *device->regions))){errno=ENOMEM;return -1;}
+  device->extents=extents;device->wire=wire->data;
+  device->max_pairs=(uint32_t)capabilities.max_qp;device->max_regions=(uint32_t)capabilities.max_mr;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
-  if(capabilities.max_cqe<=1 || !capacity){error=EOPNOTSUPP;goto done;}
+  if(capabilities.max_cqe<=1 || !capacity){errno=EOPNOTSUPP;return -1;}
   device->frame_capacity=capacity>=(uint32_t)capabilities.max_cqe?(uint32_t)capabilities.max_cqe-1:capacity;
-done:
-  pthread_mutex_unlock(&device->setup);
-  if(error){errno=error;return -1;}
+  (void)m;
   return 0;
 }
-/* design/algorithm-sources.md#programcopy */
-/* design/prepared-machine.md#M06 */
-/* design/prepared-machine.md#M08 */
-/* how long a link may take to pair from its peer's first contact: MESH_PAIR_SECONDS (default 30) */
-static uint64_t pair_window_ns(void){
-  const char *given=getenv("MESH_PAIR_SECONDS");
-  const double seconds=given?atof(given):0.0;
-  return (uint64_t)((seconds>0.0?seconds:30.0)*1e9);
+/* design/prepared-machine.md#M09: the extent holding `offset` registered on the device, where it is not yet: 0, or
+   the error (ENOMEM past the device's max_mr) */
+static int device_register(struct mesh_device *device,uint64_t offset,size_t length){
+  uint32_t e=(uint32_t)(offset/MESH_REGION);
+  if(e>=device->extents)return EINVAL;
+  if(device->regions[e])return 0;
+  if(device->registered>=device->max_regions)return ENOMEM;
+  size_t first=(size_t)e*MESH_REGION,bytes=length-first<MESH_REGION?length-first:MESH_REGION;
+  device->regions[e]=ibv_reg_mr(device->domain,device->wire+first,bytes,IBV_ACCESS_LOCAL_WRITE);
+  if(!device->regions[e])return errno?errno:ENOMEM;
+  device->registered++;
+  return 0;
 }
-/* design/recovery.md#first: how long a first pairing waits for its peer's first contact: MESH_PEER_SECONDS (default
-   600, within a call's deadline) */
-static uint64_t peer_window_ns(void){
-  const char *given=getenv("MESH_PEER_SECONDS");
-  const double seconds=given?atof(given):0.0;
-  return (uint64_t)((seconds>0.0?seconds:600.0)*1e9);
-}
-static int verbs_up(struct mesh_verbs *provider,struct hdr *m,int qps,int (*configure)(void *,int,uint64_t),void *state,uint64_t client){
-  struct ibv_port_attr pa;
-  if(device_up(provider->device,provider->wire,m,&pa))return -1;
-  provider->deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+(provider->window?provider->window:pair_window_ns());
-  int f=oob(provider,m,client);
-  if(f<0)return -1;
-  /* the control socket's loss detection is the recovery module's (mesh-recovery.h mesh_recovery_keepalive) */
-  uint32_t frame_capacity=provider->device->frame_capacity;
-  /* design/prepared-machine.md#M11 */
-  provider->queues=calloc((size_t)qps,sizeof *provider->queues);
-  if(!provider->queues){close(f);return -1;}
-  provider->completion=ibv_create_cq(provider->device->context,
-    (int)(frame_capacity+1),NULL,NULL,0);
-  if(!provider->completion){close(f);return -1;}
-  provider->sent=ibv_create_cq(provider->device->context,(int)(frame_capacity+1),NULL,NULL,0);
-  if(!provider->sent){close(f);return -1;}
-  for(int q=0;q<qps;q++){
+/* design/prepared-machine.md#M11 */
+/* `count` UC queue pairs and their two completion queues, in INIT, against the device's max_qp.  0, or the error
+   (ENOSPC: the device holds no more queue pairs). */
+static int pair_up(struct mesh_verbs *provider,int count){
+  struct mesh_device *device=provider->device;
+  if(device->pairs+(uint32_t)count>device->max_pairs)return ENOSPC;
+  uint32_t frames=device->frame_capacity;
+  provider->queues=calloc((size_t)count,sizeof *provider->queues);
+  if(!provider->queues)return ENOMEM;
+  provider->count=count;provider->psn=arc4random()&0xffffff;
+  if(!(provider->completion=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
+  if(!(provider->sent=ibv_create_cq(device->context,(int)(frames+1),NULL,NULL,0)))return errno?errno:EIO;
+  for(int q=0;q<count;q++){
     struct mesh_queue *queue=&provider->queues[q];
     queue->completion=provider->completion;queue->sent=provider->sent;
     queue->poll=provider->completion->context->ops.poll_cq;
-    struct ibv_qp_init_attr qi={.send_cq=queue->sent,
-      .recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
-      .cap={.max_send_wr=frame_capacity,.max_recv_wr=frame_capacity,.max_send_sge=1,.max_recv_sge=1}};
-    queue->pair=ibv_create_qp(provider->device->domain,&qi);
-    if(!queue->pair){close(f);return -1;}
+    struct ibv_qp_init_attr qi={.send_cq=queue->sent,.recv_cq=queue->completion,.qp_type=IBV_QPT_UC,
+      .cap={.max_send_wr=frames,.max_recv_wr=frames,.max_send_sge=1,.max_recv_sge=1}};
+    if(!(queue->pair=ibv_create_qp(device->domain,&qi)))return errno?errno:EIO;
+    device->pairs++;provider->qp_count=q+1;
     queue->send=queue->pair->context->ops.post_send;queue->receive=queue->pair->context->ops.post_recv;
-    provider->qp_count=q+1;
     struct ibv_qp_attr queried;struct ibv_qp_init_attr actual;
-    if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual)){close(f);return -1;}
+    if(ibv_query_qp(queue->pair,&queried,IBV_QP_CAP,&actual))return errno?errno:EIO;
     queue->receive_capacity=actual.cap.max_recv_wr;queue->send_capacity=actual.cap.max_send_wr;
-    fprintf(stderr,"pair capacity queue=%d send_frames=%u receive_frames=%u cq_entries=%d\n",q,
-      actual.cap.max_send_wr,actual.cap.max_recv_wr,
-      queue->completion->cqe);
+    struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
+    if(ibv_modify_qp(queue->pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS))return errno?errno:EIO;
   }
-  struct ibv_qp_attr a={.qp_state=IBV_QPS_INIT,.port_num=1};
-  for(int q=0;q<qps;q++) if(ibv_modify_qp(provider->queues[q].pair,&a,IBV_QP_STATE|IBV_QP_PKEY_INDEX|IBV_QP_PORT|IBV_QP_ACCESS_FLAGS)){ close(f); return -1; }
-  union ibv_gid gid; if(ibv_query_gid(provider->device->context,1,0,&gid)){ close(f); return -1; }
-  uint32_t psn=arc4random()&0xffffff;
-  struct qpi mine={.xmagic=XMAGIC+MESH_VERSION,.xsize=sizeof mine,.lid=pa.lid,.pgsz=m->block*m->pgsz,.node=m->node,.count=(uint32_t)qps},you;
-  memcpy(mine.gid,&gid,16);
-  if(exchange(f,&mine,&you,sizeof mine,sizeof you,m,client,provider->deadline)){ int error=errno;close(f);fprintf(stderr,"exchange failed\n");errno=error;return -1; }
-  /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
-  if(you.xmagic!=mine.xmagic || you.xsize!=sizeof you || you.pgsz!=mine.pgsz || you.count!=mine.count || you.node!=provider->peer){
-    fprintf(stderr,"exchange mismatch: local=%u,%u,%u,%u,%u peer=%u,%u,%u,%u,%u expected_node=%d\n",mine.xmagic,mine.xsize,mine.pgsz,mine.count,mine.node,you.xmagic,you.xsize,you.pgsz,you.count,you.node,provider->peer); close(f);errno=EPROTO;return -1; }
-  for(int q=0;q<qps;q++){
-    uint32_t local[2]={provider->queues[q].pair->qp_num,(psn+(uint32_t)q)&0xffffff},remote[2];
-    if(exchange(f,local,remote,sizeof local,sizeof remote,m,client,provider->deadline)){close(f);return -1;}
-    struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[1],
-      .dest_qp_num=remote[0],.ah_attr={.dlid=you.lid,.port_num=1,.is_global=1,
-        .grh={.hop_limit=1,.sgid_index=0}}};
-    memcpy(&r.ah_attr.grh.dgid,you.gid,16);
-    int rc=ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN);
-    if(rc){fprintf(stderr,"rtr %d rc %d\n",q,rc);close(f);return -1;}
+  return 0;
+}
+/* design/algorithm-sources.md#programcopy */
+/* each queue pair ready to receive from the peer's (`remote`: its queue pair numbers and first sequence numbers), the
+   peer's port at `lid` and `gid` */
+static int pair_receive(struct mesh_verbs *provider,const uint32_t (*remote)[2],uint16_t lid,const uint8_t *gid){
+  for(int q=0;q<provider->count;q++){
+    struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[q][1],.dest_qp_num=remote[q][0],
+      .ah_attr={.dlid=lid,.port_num=1,.is_global=1,.grh={.hop_limit=1,.sgid_index=0}}};
+    memcpy(&r.ah_attr.grh.dgid,gid,16);
+    if(ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN))return errno?errno:EIO;
   }
-  if(configure(state,f,client)){int error=errno;close(f);errno=error;return -1;}
-  for(int q=0;q<qps;q++){
-    struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(psn+(uint32_t)q)&0xffffff};
-    int rc=ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN);
-    if(rc){ fprintf(stderr,"rts %d rc %d, failed\n",q,rc); close(f); return -1; }
+  return 0;
+}
+static int pair_send(struct mesh_verbs *provider){
+  for(int q=0;q<provider->count;q++){
+    struct ibv_qp_attr t={.qp_state=IBV_QPS_RTS,.sq_psn=(provider->psn+(uint32_t)q)&0xffffff};
+    if(ibv_modify_qp(provider->queues[q].pair,&t,IBV_QP_STATE|IBV_QP_SQ_PSN))return errno?errno:EIO;
   }
-  /* design/algorithm-sources.md#link */
+  return 0;
+}
+/* design/algorithm-sources.md#link */
+static uint64_t port_bandwidth(const struct ibv_port_attr *port){
   static const uint64_t speeds[256]={[1]=2500000000,[2]=5000000000,[4]=10000000000,[8]=10000000000,[16]=14000000000,[32]=25000000000,[64]=50000000000,[128]=100000000000};
   static const uint8_t widths[256]={[1]=1,[2]=4,[4]=8,[8]=12};
-  provider->bandwidth=speeds[pa.active_speed]*widths[pa.active_width];
-  fprintf(stderr,"pair up: %s node %d\n",ibv_get_device_name(provider->device->context->device),m->node);
-  return f; }
+  return speeds[port->active_speed]*widths[port->active_width];
+}

@@ -11,6 +11,8 @@
 static void mesh_reclaim(struct hdr *);
 
 /* design/algorithm-sources.md#meshobserve */
+/* design/bridge-and-ipc.md#ports: each port of the node's bridge: its peer node while paired (0 else), its phase, its
+   device and bandwidth */
 int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,uint32_t *node){
   int file=shm_open(name?name:MESH_NAME,O_RDONLY,0);
   if(file<0)return -errno;
@@ -22,25 +24,30 @@ int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,u
   if(m==MAP_FAILED)return -error;
   int result=-EINVAL;
   if(m->magic==MESH_MAGIC && m->version==MESH_VERSION && m->length<=(uint64_t)info.st_size &&
-     m->link_off>=sizeof *m && m->link_off<=m->length && m->links<=INT_MAX && m->links<=(m->length-m->link_off)/sizeof(struct mesh_link_info)){
-    *node=m->node;result=(int)m->links;
-    for(uint32_t i=0;i<m->links && i<capacity;i++){
+     m->link_off>=sizeof *m && m->link_off<=m->length && m->links<=(m->length-m->link_off)/sizeof(struct mesh_link_info)){
+    *node=m->node;result=0;
+    for(uint32_t i=0;i<m->links;i++){
       struct mesh_link_info *link=&mesh_links(m)[i];
-      out[i]=(struct mesh_link_view){.peer=link->peer,.phase=atomic_load_explicit(&link->port.phase,memory_order_acquire)};
-      out[i].bandwidth=__atomic_load_n(&link->bandwidth,__ATOMIC_RELAXED);
-      memcpy(out[i].device,link->device,sizeof out[i].device);out[i].device[sizeof out[i].device-1]=0;
+      if(!link->device[0])continue;
+      if((uint32_t)result<capacity){
+        out[result]=(struct mesh_link_view){.peer=atomic_load_explicit(&link->peer,memory_order_relaxed),
+          .phase=atomic_load_explicit(&link->phase,memory_order_acquire),.bandwidth=atomic_load_explicit(&link->bandwidth,memory_order_relaxed)};
+        memcpy(out[result].device,link->device,sizeof out[result].device);out[result].device[sizeof out[result].device-1]=0;
+      }
+      result++;
     }
   }
   munmap(m,(size_t)info.st_size);return result;
 }
 
 /* design/algorithm-sources.md#programtensor */
+/* design/bridge-and-ipc.md#clients: a client's slot given up (by its detach, by an attach or the bridge where its
+   process is gone): its program stopped, its rows closed for the bridge to release once its programs left the ports */
 void mesh_retire(struct hdr *m,uint64_t client){
-  uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&UINT64_C(0x7fffffff);
-  uint64_t retiring=(client&(UINT64_C(1)<<63))|(generation<<32)|(uint32_t)getpid();
-  if(!atomic_compare_exchange_strong_explicit(&m->client,&client,retiring,memory_order_seq_cst,memory_order_acquire))return;
-  atomic_store_explicit(&m->configured,0,memory_order_release);
-  for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(m,client,q,d),0,memory_order_release);
+  struct mesh_client *slot=mesh_client_at(m,client);
+  if(!client || (client&MESH_RETIRING) || !atomic_compare_exchange_strong(&slot->owner,&client,client|MESH_RETIRING))return;
+  atomic_store_explicit(&slot->configured,0,memory_order_release);
+  for(uint32_t q=0;q<MESH_PORTS*MESH_QUEUES*2;q++)atomic_store_explicit(slot->length+q,0,memory_order_release);
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     if(atomic_load_explicit(&buffer->owner,memory_order_acquire)==client){
@@ -48,37 +55,47 @@ void mesh_retire(struct hdr *m,uint64_t client){
       mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,1);
     }
   }
-  atomic_store_explicit(&m->client,0,memory_order_release);
+  atomic_store_explicit(&slot->owner,0,memory_order_release);
   /* design/prepared-machine.md#M26 */
   mesh_control_notify(m);
 }
 
+static uint64_t mesh_key(const char *name){
+  uint64_t key=UINT64_C(0xcbf29ce484222325);
+  for(const char *p=name;p && *p;p++)key=(key^(unsigned char)*p)*UINT64_C(0x100000001b3);
+  return name && *name?key:0;
+}
+
 int mesh_attach(struct mesh_ctx *c,const char *name){
   if(c->M) return 0;
-  if(!name) name=getenv("MESH_REGION");
-  if(!name) name=MESH_NAME;
-  int file=shm_open(name,O_RDWR,MESH_MODE);
+  int file=shm_open(MESH_NAME,O_RDWR,MESH_MODE);
   if(file<0) return errno;
   struct stat info;
   if(fstat(file,&info)){ int error=errno; close(file); return error; }
   struct hdr *memory=mmap(NULL,(size_t)info.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,file,0);
   int error=errno;
   if(memory==MAP_FAILED){ close(file); return error; }
-  if((size_t)info.st_size<sizeof *memory || memory->magic!=MESH_MAGIC || memory->version!=MESH_VERSION || memory->length>(uint64_t)info.st_size){
-    munmap(memory,(size_t)info.st_size); close(file); return EINVAL;
+  pid_t bridge=(size_t)info.st_size<sizeof *memory?0:(pid_t)atomic_load(&memory->bridge_pid);
+  error=(size_t)info.st_size<sizeof *memory || memory->magic!=MESH_MAGIC || memory->version!=MESH_VERSION ||
+    memory->length>(uint64_t)info.st_size?EINVAL:!bridge || (kill(bridge,0) && errno==ESRCH)?ESRCH:EBUSY;
+  uint64_t generation=error==EBUSY?(atomic_fetch_add_explicit(&memory->serial,1,memory_order_relaxed)+1)&((UINT64_C(1)<<25)-1):0;
+  for(uint32_t s=0;error==EBUSY && s<MESH_CLIENTS;s++){
+    struct mesh_client *slot=(struct mesh_client *)((char *)memory+memory->client_off)+s;
+    uint64_t owner=(generation<<38)|((uint64_t)s<<32)|(uint32_t)getpid(),vacant=atomic_load(&slot->owner);
+    if(vacant && !(vacant&MESH_RETIRING) && kill((pid_t)(uint32_t)vacant,0) && errno==ESRCH){mesh_retire(memory,vacant);vacant=atomic_load(&slot->owner);}
+    if(vacant || !atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
+    slot->key=mesh_key(name);
+    atomic_store(&slot->depth,0);atomic_store(&slot->cyclic,0);
+    memset(slot->tx,0,sizeof slot->tx);
+    for(uint32_t p=0;p<MESH_PORTS;p++){
+      atomic_store(&slot->port[p].phase,0);atomic_store(&slot->port[p].domain,0);atomic_store(&slot->port[p].code,0);
+      atomic_store(&slot->port[p].prepared,0);
+    }
+    *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.client=owner,.fd=file};
+    return 0;
   }
-  uint64_t client=(((atomic_fetch_add_explicit(&memory->serial,1,memory_order_relaxed)+1)&UINT64_C(0x7fffffff))<<32)|(uint32_t)getpid(),vacant=0;
-  while(!atomic_compare_exchange_strong_explicit(&memory->client,&vacant,client,memory_order_seq_cst,memory_order_acquire)){
-    if(!vacant || !kill((pid_t)(uint32_t)vacant,0) || errno!=ESRCH){ munmap(memory,(size_t)info.st_size); close(file); return EADDRINUSE; }
-    mesh_retire(memory,vacant);
-    vacant=0;
-  }
-  uint64_t device=atomic_load_explicit(&memory->device_client,memory_order_seq_cst);
-  client|=(~device)&(UINT64_C(1)<<63);
-  for(uint32_t q=0;q<memory->links*memory->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(memory,client,q,d),0,memory_order_relaxed);
-  atomic_store_explicit(&memory->client,client,memory_order_release);
-  *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.client=client,.fd=file};
-  return 0;
+  munmap(memory,(size_t)info.st_size); close(file);
+  return error;
 }
 
 int mesh_detach(struct mesh_ctx *c){
@@ -221,14 +238,15 @@ void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
 
 /* design/algorithm-sources.md#index-hand-off */
 /* design/prepared-machine.md#M18 */
-struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t queue){
+/* a row's publication target on link `link`: until mesh_transfers_prepare lays its cells, the client's program on that
+   link names it */
+struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t link){
   struct hdr *m=c->M;
   struct mesh_publication *publication=mesh_publication_at(m,row);
   uint32_t *count=&publication->sends;
   struct mesh_target *targets=publication->targets;
-  uint32_t destination=mesh_notice_queue(m,c->client,queue);
-  uint64_t first=m->notice_off+(uint64_t)destination*m->notice_bytes;
-  for(uint32_t i=0;i<*count;i++)if(targets[i].stream>=first && targets[i].stream<first+m->notice_bytes)return &targets[i];
+  uint64_t first=(uint64_t)((char *)&mesh_client_at(m,c->client)->tx[link]-(char *)m);
+  for(uint32_t i=0;i<*count;i++)if(targets[i].stream==first)return &targets[i];
   struct mesh_target *target=&targets[(*count)++];
   *target=(struct mesh_target){.stream=first};
   return target;

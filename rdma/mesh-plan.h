@@ -10,9 +10,11 @@ extern "C" {
    extension includes it, Python binds it through mesh_c_build.py (cffi, compiled against this file).  Plain C:
    declarations and integer constants only. */
 
-/* A node's links as its bridge reports them (design/algorithm-sources.md#meshobserve): the peer node, the link's
-   phase, its device and its port's bandwidth in bits a second (the RDMA port's active speed and width); returns
-   the node's link count (at most `capacity` written) and its node, or -errno. */
+/* A node's links as its resident bridge records them now (design/algorithm-sources.md#meshobserve), one a port: the
+   peer node while the link is paired (0 else), the link's phase, its device and its port's bandwidth in bits a second
+   (the RDMA port's active speed and width); returns the node's port count (at most `capacity` written) and its node,
+   or -errno.  `name` NULL: the node's bridge. */
+enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 struct mesh_link_view { uint32_t peer,phase; char device[32]; uint64_t bandwidth; };
 int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
 

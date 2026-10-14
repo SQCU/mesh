@@ -15,25 +15,24 @@
    Build and link (the mesh repo's rdma/):
      make -C rdma libmesh.dylib libnccl-mesh.dylib
      cc app.c -I rdma -L rdma -lnccl-mesh -Wl,-rpath,<rdma>
-   A rank is a process on a node whose bridge (mesh-flow) is up.  A communicator's topology is an operand:
-   ncclMeshCommInitRank takes its ranks' link map (mesh-plan.h: a kind, the links and each link's alpha-beta
+   A rank is a process on a node, a client of its node's resident bridge (mesh-flow).  A communicator's topology is an
+   operand: ncclMeshCommInitRank takes its ranks' link map (mesh-plan.h: a kind, the links and each link's alpha-beta
    cost), the paths its messages take and the compiled collectives it runs (mesh-plan.h struct mesh_program: every
-   rank's moves, made ahead of time), each rank's node and this rank's bridge region.  An NCCL program's
-   ncclCommInitRank takes the link map MESH_LINK_MAP names (its node count the communicator's; without it every pair
-   linked at no cost) and that map's default programs, rank r on node r, and the region of the process's MESH_REGION
-   (default /mesh0), which ncclGetUniqueId puts in the id; every rank makes the same id with no exchange.  ncclCommSplit keeps the links among the ranks it takes, each with its cost, joins them where they leave its ranks apart (as ncclMeshCommInitRank does), and compiles their default programs.  A process attaches once, at its first
+   rank's moves, made ahead of time), each rank's node and the communicator's name, the same on every rank.  An NCCL
+   program's ncclCommInitRank takes NCCL's bootstrap: the unique id is the root's host:port (NCCL_COMM_ID, else a
+   listener ncclGetUniqueId opens), every rank's node and links as its bridge records them meet there, and the
+   communicator's map is the links among its ranks' nodes that their bridges hold paired now, each priced by its
+   port's bandwidth; the id is its name.  ncclCommSplit keeps the links among the ranks it takes, each with its cost, joins them where they leave its ranks apart (as ncclMeshCommInitRank does), and compiles their default programs.  A process attaches once, at its first
    group that crosses a link, and keeps one prepared program on the bridge for its life (a session):
    to each rank of the widest communicator alive in the process among whose ranks the group's are (a subgroup made
    after its world finds its channels open), over the link to it, else over the first link of its path, each node
    between forwarding what lands from the path's previous node to its next (NCCL's PXN proxy) on the link's relay
    rings: one a class each way on queue pairs 2 and 3, which every routed pair crossing the link shares, each message
    headed with its ends and position, each ring's slots credited back by its receiver, so a map of any size and shape
-   needs four queue pairs a link (MESH_QPS=4; a TB5 device carries 10); with two a message to a rank the map does not
-   link is refused, and every compiled collective, which runs on linked ranks alone, runs as before; rings of 2*NCCL_STEPS
-   slots each way: NCCL_BUFFSIZE/NCCL_STEPS
-   slots (NCCL_BUFFSIZE, default 4 MiB, read at attach) on the link's queue pair 0, and where the bridge has two
-   queue pairs a link (MESH_QPS=2), a block's slots (16 KiB) on queue pair 1 for pieces of at most NCCL_STEPS
-   blocks, as NCCL picks a protocol by size; the session's program is cyclic (the transport's M30: positions
+   needs four queue pairs a link (a TB5 device carries 10, which the bridge leases to the node's programs and refuses
+   past); rings of 2*NCCL_STEPS slots each way: NCCL_BUFFSIZE/NCCL_STEPS
+   slots (NCCL_BUFFSIZE, default 4 MiB, read at attach) on the link's queue pair 0, and a block's slots (16 KiB) on
+   queue pair 1 for pieces of at most NCCL_STEPS blocks, as NCCL picks a protocol by size; the session's program is cyclic (the transport's M30: positions
    run without end over MESH_POSITIONS prepared invocations, default 8192); a position where a rank sends nothing
    carries its stamp in its slot, and every position a rank receives on is checked against its role, so calls that
    do not pair (a separate send and receive in the same order on two ranks, unequal counts, different collectives)
@@ -788,11 +787,11 @@ ncclResult_t ncclMeshGroupPlans(int* steps, int* roots, int capacity, int* count
    here once (the single-phase all-reduce along the shortest-path trees below the size at which the reduce-scatter and
    all-gather along the map's packed trees is faster in the alpha-beta model, at every size on two ranks; then those
    packed trees' all-reduce, reduce-scatter, all-gather, and each root's reduce and broadcast); this process its rank
-   `rank`, rank r on the bridge of node node[r] (NULL: node r), this rank's bridge at `region` (NULL: /mesh0).  Every
-   rank passes the same topology, paths, programs and nodes. */
+   `rank`, rank r on the bridge of node node[r] (NULL: node r), `name` the communicator's (NULL: "nccl"), which its
+   sessions pair under on every member.  Every rank passes the same topology, paths, programs, nodes and name. */
 typedef struct { const struct mesh_program* program; uint64_t below; } ncclMeshProgram;
 ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int rank, const struct mesh_link_map* topology, const struct mesh_trees* paths,
-                                  const ncclMeshProgram* programs, int count, const int* node, const char* region);
+                                  const ncclMeshProgram* programs, int count, const int* node, const char* name);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
    commandEncoder; issue and workspace not read); *published (may be NULL) whether a publication was encoded.  A
    ticket already complete encodes nothing; one whose session failed returns the failure. */

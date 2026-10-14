@@ -5,9 +5,9 @@ by its import (rdma/NCCL.md "NumPy"):
     comm = Comm()
     comm.Allreduce(local, total, op=SUM)
 
-Comm() is the world: this process's rank is its node in the link map MESH_LINK_MAP names (its bridge, at MESH_REGION,
-reports which: one rank a node), the communicator over that map (ncclMeshCommInitRank), its collectives the library's
-compiled defaults.  Every call is libnccl-mesh's host path: contiguous arrays at host pointers, a NULL stream, the call
+Comm() is the world: this process is rank RANK of WORLD_SIZE (the variables torchrun and the launchers set), its
+communicator made by NCCL's bootstrap at NCCL_COMM_ID, else MASTER_ADDR:MASTER_PORT (ncclCommInitRank: the map is the
+links among the ranks' nodes their bridges hold paired), its collectives the library's compiled defaults.  Every call is libnccl-mesh's host path: contiguous arrays at host pointers, a NULL stream, the call
 complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast, Allgather, Reduce_scatter_block,
 Alltoall, Gather, Scatter, Send, Recv, Sendrecv (one group, so both directions pair), Barrier, allreduce (a Python
 number), Free; IN_PLACE as a send buffer, None for a buffer a rank does not use (Gather's off the root, Scatter's send
@@ -50,21 +50,15 @@ def at(array):
 
 
 class Comm:
-    """The world over the link map `links` (default MESH_LINK_MAP), this rank's bridge at `region` (default
-    MESH_REGION, else /mesh0)."""
+    """The world (the module's docstring)."""
 
-    def __init__(self, links=None, region=None):
-        region = region or os.environ.get('MESH_REGION') or '/mesh0'
-        path = links or os.environ.get('MESH_LINK_MAP')
-        if not path:
-            raise RuntimeError('no link map: MESH_LINK_MAP names it (metal-microbench tools/mesh/grid.py run sets it)')
-        topology = mesh.read_link_map(path)
-        views, node = ffi.new('struct mesh_link_view[]', 64), ffi.new('uint32_t *')
-        if lib.mesh_observe(region.encode(), views, 64, node) < 0:
-            raise RuntimeError(f'no bridge at region {region}')
-        made = ffi.new('ncclComm_t *')
-        check(lib.ncclMeshCommInitRank(made, node[0], topology.c, ffi.NULL, ffi.NULL, 0, ffi.NULL, region.encode()))
-        self.rank, self.size, self.comm, self.topology = int(node[0]), topology.nodes, made[0], topology
+    def __init__(self):
+        rank, size = int(os.environ.get('RANK', '0')), int(os.environ.get('WORLD_SIZE', '1'))
+        address = os.environ.get('NCCL_COMM_ID') or f"{os.environ.get('MASTER_ADDR', '127.0.0.1')}:{os.environ.get('MASTER_PORT', '29500')}"
+        unique, made = ffi.new('ncclUniqueId *'), ffi.new('ncclComm_t *')
+        ffi.memmove(unique.internal, address.encode(), len(address.encode()))
+        check(lib.ncclCommInitRank(made, size, unique[0], rank))
+        self.rank, self.size, self.comm = rank, size, made[0]
 
     @classmethod
     def _of(cls, handle, parent):
@@ -72,7 +66,7 @@ class Comm:
         count, rank = ffi.new('int *'), ffi.new('int *')
         check(lib.ncclCommCount(handle, count))
         check(lib.ncclCommUserRank(handle, rank))
-        made.rank, made.size, made.comm, made.topology = rank[0], count[0], handle, parent.topology
+        made.rank, made.size, made.comm = rank[0], count[0], handle
         return made
 
     def Split(self, color=0, key=0):
@@ -159,7 +153,7 @@ class Cartcomm(Comm):
     """A process grid over a communicator's ranks (Comm.Create_cart)."""
 
     def __init__(self, base, dims, periods):
-        self.rank, self.size, self.comm, self.topology = base.rank, base.size, base.comm, base.topology
+        self.rank, self.size, self.comm = base.rank, base.size, base.comm
         self.dims, self.periods = dims, periods
 
     def Get_coords(self, rank):

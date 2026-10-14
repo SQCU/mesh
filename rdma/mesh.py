@@ -161,13 +161,13 @@ def program_time(lmap, program, piece, alpha=0.0, beta=0.0):
 
 
 class Context(C.Structure):
-    _fields_ = [('M', C.c_void_p), ('len', Z), *((k, Q) for k in ('client', 'send_off', 'send_bytes')),
+    _fields_ = [('M', C.c_void_p), ('len', Z), *((k, Q) for k in ('client', 'send_off', 'send_bytes', 'inputs_off', 'inputs_bytes')),
                 *((k, U) for k in ('rows', 'arena', 'wire', 'shared_pages', 'row_cursor', 'wire_cursor', 'bulk_cursor')),
                 ('fd', C.c_int)]
 
 
 class Header(C.Structure):
-    _fields_ = [(k, U) for k in ('magic', 'version', 'pgsz', 'block', 'rows', 'node', 'qps', 'links')]
+    _fields_ = [(k, U) for k in ('magic', 'version', 'pgsz', 'block', 'rows', 'node', 'links', 'clients')]
 
 
 class Section(C.Structure):
@@ -198,17 +198,17 @@ def check(status):
 
 
 class Mesh:
-    """One attach to this node's bridge region and the one program prepared on it: every collective
+    """One client of this node's bridge and the one program prepared on it: every collective
     and exchange bound on it (collective, bind), in the same order on every rank, prepared for
     `invocations` calls, storage ringing over `depth` slots, and started by `start` (an NCCL group is
-    one).  `links` is a LinkMap (or a link map file's path, read_link_map); its node v is the bridge's node
+    one); `name` the execution's, the same on every rank.  `links` is a LinkMap (or a link map file's path, read_link_map); its node v is the bridge's node
     members[v] (default v), and this rank is the map node of this bridge's.  `routes` are the trees its collectives
     are compiled along (trees(); None: pack(links), made once here).  Each collective takes the transfer identities
     from `identity` on, as many as its program has moves."""
 
-    def __init__(self, links, invocations=1, depth=4, region=None, identity=1, members=None, routes=None):
+    def __init__(self, links, invocations=1, depth=4, name='mesh', identity=1, members=None, routes=None):
         self.context = Context()
-        check(LIB.mesh_attach(C.byref(self.context), os.fsencode(region) if region else None))
+        check(LIB.mesh_attach(C.byref(self.context), os.fsencode(name)))
         self.header = Header.from_address(self.context.M)
         self.map = links if isinstance(links, LinkMap) else read_link_map(links)
         self.routes = routes if routes is not None else pack(self.map)
@@ -314,10 +314,10 @@ class Steps:
         return self.mesh.close(linger)
 
 
-def AllReduce(shape, dtype, links, invocations, depth=4, identity=1, region=None):
+def AllReduce(shape, dtype, links, invocations, depth=4, identity=1, name='mesh'):
     """One rank's all-reduce of a typed array over an explicit link map (the Xonotic planner's), along the map's
     packed trees, prepared once for `invocations` calls and started: a Mesh of one collective."""
-    mesh = Mesh(links, invocations, depth, region, identity)
+    mesh = Mesh(links, invocations, depth, name, identity)
     steps = mesh.collective('allreduce', shape, dtype)
     mesh.start()
     return steps

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 
 /* design/algorithm-sources.md#programtensor */
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
@@ -30,23 +31,27 @@ static int mesh_section_wired(struct hdr *m,struct mesh_section section){
 int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint32_t identity,struct mesh_section section,uint32_t invocation_pages,
   uint32_t begin,uint32_t end,uint32_t depth){
   struct hdr *m=context->M;
-  if(queue>=m->links*m->qps || end<=begin)return EINVAL;
+  if(queue==MESH_ABSENT)return EHOSTUNREACH;
+  if(queue>=m->links*MESH_QUEUES || end<=begin)return EINVAL;
   if(!section.count || (uint64_t)section.first+mesh_section_rows(section)>mesh_rows(m))return EINVAL;
   /* design/prepared-machine.md#M09 */
-  if(!mesh_section_wired(m,section)){
-    fprintf(stderr,"transfer binding %u queue %u %s outside the registered window: rows %u+%u*%u, window %llu bytes\n",
-      identity,queue,receive?"receive":"send",section.first,section.stride,section.count,
-      (unsigned long long)mesh_wire_bytes(m));
-    return EINVAL;
+  if(!mesh_section_wired(m,section))return EINVAL;
+  /* design/bridge-and-ipc.md#clients: the link's lists, allocated at its first transfer, and the peer the link
+     reaches, which every transfer on it is bound for */
+  uint32_t link=queue/MESH_QUEUES,peer=atomic_load_explicit(&mesh_links(m)[link].peer,memory_order_relaxed);
+  struct mesh_tx *tx=&mesh_client_at(m,context->client)->tx[link];
+  if(tx->peer && tx->peer!=peer)return EHOSTUNREACH;
+  tx->peer=peer;
+  if(!tx->orders){
+    struct mesh_section lists;
+    int status=mesh_section_create(context,(size_t)MESH_QUEUES*2*MESH_ORDERS*sizeof(struct mesh_transfer),1,0,&lists);
+    if(status)return status;
+    tx->orders=(uint64_t)((char *)mesh_section_address(context,lists,0)-(char *)m);
   }
   _Atomic uint32_t *length=mesh_order_length(m,context->client,queue,receive);
   uint32_t index=atomic_load_explicit(length,memory_order_relaxed);
-  if(index==m->orders)return ENOSPC;
-  if(!receive)for(uint32_t value=0;value<section.count;value++){
-    uint32_t row=mesh_section_row(section,value);
-    uint32_t link=queue/m->qps;
-    mesh_publish_bind(context,row,link)->count++;
-  }
+  if(index==MESH_ORDERS)return ENOSPC;
+  if(!receive)for(uint32_t value=0;value<section.count;value++)mesh_publish_bind(context,mesh_section_row(section,value),link)->count++;
   mesh_transfers(m,context->client,queue,receive)[index]=(struct mesh_transfer){.local_row=section.first,.binding=identity,
     .count=section.count,.stride=section.stride,.invocation_pages=invocation_pages,.begin=begin,.end=end,.depth=depth,
     .bytes=section.bytes};
@@ -85,10 +90,11 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
      hands the client to the bridge; a transfer may state its own.  depth==invocations is the unrung
      machine. */
   if(!depth || depth>invocations)depth=invocations;
-  atomic_store_explicit(&m->depth,depth,memory_order_relaxed);
-  atomic_store_explicit(&m->cyclic,0,memory_order_relaxed);
+  struct mesh_client *client=mesh_client_at(m,context->client);
+  atomic_store_explicit(&client->depth,depth,memory_order_relaxed);
+  atomic_store_explicit(&client->cyclic,0,memory_order_relaxed);
   uint64_t cells=0;
-  for(uint32_t q=0;q<m->links*m->qps;q++){
+  for(uint32_t q=0;q<m->links*MESH_QUEUES;q++){
     /* design/prepared-machine.md#M08 */
     for(int d=0;d<2;d++)qsort(mesh_transfers(m,context->client,q,d),
       atomic_load(mesh_order_length(m,context->client,q,d)),sizeof(struct mesh_transfer),mesh_binding_order);
@@ -109,26 +115,26 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   uint64_t first=context->send_off;
   /* design/prepared-machine.md#M04 */
   for(uint32_t p=0;p<m->links;p++){
-    uint64_t base=m->notice_off+(uint64_t)mesh_notice_queue(m,context->client,p)*m->notice_bytes;
-    struct mesh_tx *tx=(void *)((char *)m+base);
+    struct mesh_tx *tx=&client->tx[p];
+    uint64_t base=(uint64_t)((char *)tx-(char *)m);
     uint32_t count=0,once=0,length=0,incoming=0;
-    for(uint32_t q=0;q<m->qps;q++){
-      length+=atomic_load_explicit(mesh_order_length(m,context->client,p*m->qps+q,MESH_SEND),memory_order_relaxed);
-      incoming+=atomic_load_explicit(mesh_order_length(m,context->client,p*m->qps+q,MESH_RECEIVE),memory_order_relaxed);
+    for(uint32_t q=0;q<MESH_QUEUES;q++){
+      length+=atomic_load_explicit(mesh_order_length(m,context->client,p*MESH_QUEUES+q,MESH_SEND),memory_order_relaxed);
+      incoming+=atomic_load_explicit(mesh_order_length(m,context->client,p*MESH_QUEUES+q,MESH_RECEIVE),memory_order_relaxed);
     }
     uint32_t capacity=length>incoming?length:incoming;
     struct mesh_transfer **ordered=malloc((capacity?capacity:1)*sizeof *ordered);
     if(!ordered)return ENOMEM;
     uint32_t position=0;
-    for(uint32_t q=0;q<m->qps;q++){
-      struct mesh_transfer *out=mesh_transfers(m,context->client,p*m->qps+q,MESH_SEND);
-      uint32_t length=atomic_load_explicit(mesh_order_length(m,context->client,p*m->qps+q,MESH_SEND),memory_order_relaxed);
+    for(uint32_t q=0;q<MESH_QUEUES;q++){
+      struct mesh_transfer *out=mesh_transfers(m,context->client,p*MESH_QUEUES+q,MESH_SEND);
+      uint32_t length=atomic_load_explicit(mesh_order_length(m,context->client,p*MESH_QUEUES+q,MESH_SEND),memory_order_relaxed);
       for(uint32_t i=0;i<length;i++){
         ordered[position++]=out+i;
         if(out[i].stride)count++;else once++;
       }
     }
-    *tx=(struct mesh_tx){.count=count,.slots=slots,.once=once,.invocations=invocations,.cells=first};
+    tx->count=count;tx->slots=slots;tx->once=once;tx->invocations=invocations;tx->cells=first;
     qsort(ordered,length,sizeof *ordered,mesh_transfer_compare);
     uint64_t cell=0;
     for(uint32_t i=0;i<length;i++){
@@ -150,9 +156,9 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
     first+=cell*sizeof(struct mesh_send);
     /* design/prepared-machine.md#M07 */
     position=0;
-    for(uint32_t q=0;q<m->qps;q++){
-      struct mesh_transfer *in=mesh_transfers(m,context->client,p*m->qps+q,MESH_RECEIVE);
-      uint32_t count=atomic_load_explicit(mesh_order_length(m,context->client,p*m->qps+q,MESH_RECEIVE),memory_order_relaxed);
+    for(uint32_t q=0;q<MESH_QUEUES;q++){
+      struct mesh_transfer *in=mesh_transfers(m,context->client,p*MESH_QUEUES+q,MESH_RECEIVE);
+      uint32_t count=atomic_load_explicit(mesh_order_length(m,context->client,p*MESH_QUEUES+q,MESH_RECEIVE),memory_order_relaxed);
       for(uint32_t i=0;i<count;i++)ordered[position++]=in+i;
     }
     qsort(ordered,position,sizeof *ordered,mesh_transfer_compare);
@@ -169,19 +175,25 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
 
 /* design/prepared-machine.md#M06 */
 /* design/algorithm-sources.md#programcopy */
+/* design/bridge-and-ipc.md#clients: the program handed to the node's bridge, which pairs it with the members' on each
+   link it binds, or fails it (the link's status names the failure: its peer's program never started, a link lost, a
+   lease the node cannot give): 0 once every link is paired, else the failure; ESRCH where the bridge is gone */
 int mesh_transfers_start(struct mesh_ctx *context){
   struct hdr *m=context->M;
+  struct mesh_client *client=mesh_client_at(m,context->client);
   /* design/prepared-machine.md#M12 */
   uint64_t idle=0;
-  if(!atomic_compare_exchange_strong_explicit(&m->configured,&idle,context->client,memory_order_release,memory_order_relaxed))return ECANCELED;
+  if(!atomic_compare_exchange_strong_explicit(&client->configured,&idle,context->client,memory_order_release,memory_order_relaxed))return ECANCELED;
   /* design/prepared-machine.md#M26 */
   mesh_control_notify(m);
   for(uint32_t p=0;p<m->links;p++){
-    uint32_t transfers=0;
-    for(uint32_t q=0;q<m->qps;q++)for(int d=0;d<2;d++)transfers+=atomic_load(mesh_order_length(m,context->client,p*m->qps+q,d));
-    if(!transfers)continue;
-    struct mesh_port_info *port=&mesh_links(m)[p].port;
-    while(atomic_load_explicit(&port->prepared,memory_order_acquire)!=context->client){}
+    if(!mesh_link_transfers(m,context->client,p))continue;
+    struct mesh_port_info *port=&client->port[p];
+    while(atomic_load_explicit(&port->prepared,memory_order_acquire)!=context->client){
+      pid_t bridge=(pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_relaxed);
+      if(!bridge || (kill(bridge,0) && errno==ESRCH))return ESRCH;
+      usleep(1000);
+    }
     if(atomic_load_explicit(&port->phase,memory_order_relaxed)==MESH_STOPPED)
       return (int)atomic_load_explicit(&port->code,memory_order_relaxed);
   }
@@ -197,38 +209,39 @@ int mesh_transfers_start(struct mesh_ctx *context){
    before mesh_transfers_start. */
 int mesh_transfers_cyclic(struct mesh_ctx *context){
   struct hdr *m=context->M;
-  uint32_t invocations=((struct mesh_tx *)mesh_events(m,mesh_notice_queue(m,context->client,0)))->invocations;
-  uint32_t fallback=atomic_load_explicit(&m->depth,memory_order_relaxed);
+  struct mesh_client *client=mesh_client_at(m,context->client);
+  uint32_t invocations=client->tx[0].invocations;
+  uint32_t fallback=atomic_load_explicit(&client->depth,memory_order_relaxed);
   if(!invocations)return EINVAL;
-  for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++){
+  for(uint32_t q=0;q<m->links*MESH_QUEUES;q++)for(int d=0;d<2;d++){
     struct mesh_transfer *transfers=mesh_transfers(m,context->client,q,d);
     for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,d));i++){
       uint32_t depth=transfers[i].depth?transfers[i].depth:fallback;
       if(!depth || invocations%depth || transfers[i].begin || transfers[i].end<invocations)return EINVAL;
     }
   }
-  atomic_store_explicit(&m->cyclic,1,memory_order_release);
+  atomic_store_explicit(&client->cyclic,1,memory_order_release);
   return 0;
 }
 
 /* design/prepared-machine.md#M12 */
 /* The client's program ends and the client stays attached: its allocations remain, its transfers are
-   cleared for another mesh_transfers_prepare and mesh_transfers_start.  The bridge stops the links when
-   `configured` no longer names the client (link_run) and clears device_client once they are joined; its
-   control loop then starts a program for the same client again.  ETIMEDOUT where the bridge has not
-   stopped within `seconds`. */
+   cleared for another mesh_transfers_prepare and mesh_transfers_start.  The bridge takes the program off its
+   ports once `configured` no longer names the client and then clears `released`.  ETIMEDOUT where the bridge
+   has not let it go within `seconds`. */
 int mesh_transfers_stop(struct mesh_ctx *context,double seconds){
   struct hdr *m=context->M;
-  uint64_t client=context->client;
-  if(atomic_compare_exchange_strong_explicit(&m->configured,&client,0,memory_order_release,memory_order_relaxed)){
+  struct mesh_client *client=mesh_client_at(m,context->client);
+  uint64_t owner=context->client;
+  if(atomic_compare_exchange_strong_explicit(&client->configured,&owner,0,memory_order_seq_cst,memory_order_relaxed)){
     mesh_control_notify(m);
-    for(double waited=0;atomic_load_explicit(&m->device_client,memory_order_acquire)==context->client;waited+=1e-4){
+    for(double waited=0;atomic_load_explicit(&client->released,memory_order_seq_cst)==context->client;waited+=1e-4){
       if(waited>seconds)return ETIMEDOUT;
       usleep(100);
     }
   }
-  for(uint32_t q=0;q<m->links*m->qps;q++)for(int d=0;d<2;d++)atomic_store_explicit(mesh_order_length(m,context->client,q,d),0,memory_order_release);
-  for(uint32_t p=0;p<m->links;p++)atomic_store_explicit(&mesh_links(m)[p].port.prepared,0,memory_order_release);
+  for(uint32_t q=0;q<m->links*MESH_QUEUES*2;q++)atomic_store_explicit(client->length+q,0,memory_order_release);
+  for(uint32_t p=0;p<m->links;p++){atomic_store_explicit(&client->port[p].prepared,0,memory_order_release);client->tx[p].peer=0;}
   return 0;
 }
 

@@ -2,10 +2,9 @@
 
 Read `THREAT-MODEL.md` first. This file is the operational rule that follows from it.
 
-**Recovery is critical priority and unsettled.** Loss detection, suspension, pairing again, resumption and
-readmission (`rdma/mesh-recovery.h`, the bridge's side in `rdma/mesh-flow.c`, the driver's in metal-microbench
-`tools/mesh/grid.py`) are unfinished, unsettled and not properly reviewed; they run as built in the interim. Read
-`design/recovery.md` (its mandates, requirements, open conflict and risks) before changing any of it.
+**Recovery is critical priority.** An execution that loses a link or an operand fails, returning an error, and is
+never resumed; the node's resident bridge (`rdma/mesh-flow.c`, design/bridge-and-ipc.md) pairs its links again with or
+without a client. Read `design/recovery.md` (its mandates, requirements and risks) before changing any of it.
 
 ## The contract
 
