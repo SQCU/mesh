@@ -5,6 +5,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define STR(...) #__VA_ARGS__
+#define XSTR(...) STR(__VA_ARGS__)
+/* a kernel's arguments, one layout for the host and the kernels */
+#define ARGS(U64, U32) struct args { U64 dst, src, n, scalar, aux; U32 op, unused; U64 first, slot; U32 count, mask, channel, depth; }
+
 /* the kernels, after rdma/mesh.metal (its text embedded at build: .build/mesh_metal.h): a wait on a completion word is
    its mesh_remote_wait, a landed slot's read its mesh_payload and a cell's release its mesh_publish; the filler protocol
    (STAMP, CHECK) is this library's.  Each operator's arithmetic is written once (op_int, op_float, op_f8), a landing
@@ -13,8 +18,8 @@
    line, integers wrapping */
 static NSString *const KERNELS =
   @"\nusing namespace metal;\n"
-  "struct args { ulong dst, src, n, scalar, aux; uint op, unused; ulong first, slot; uint count, mask, channel, depth; };\n"
-  "#define STAMP(t) (0x6d6573682d66696cUL ^ ((t) * 0x9e3779b97f4a7c15UL))\n"
+  XSTR(ARGS(ulong, uint)) ";\n"
+  "#define STAMP(t) " XSTR(METAL_STAMP(t)) "\n"
   "#define CHECK(ring, status) if (status != ~0UL) for (uint c = 0; c < p.count; c++) { ulong t = p.first + c; "
   "ulong seen = mesh_payload((volatile coherent(system) device const ulong *)(ring + (t % p.depth) * p.slot)); bool data = (p.mask >> c) & 1u; "
   "if (data == (seen == STAMP(t)) && v[0] == 0) { v[1] = (ulong(p.channel) << 1) | ulong(data); mesh_publish(v, t + 1); } }\n"
@@ -70,7 +75,7 @@ static NSString *const KERNELS =
   "GROUP(send_small) { volatile coherent(system) device uchar *x = (volatile coherent(system) device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); LOOP x[k] = y[k]; "
   "threadgroup_barrier(mem_flags::mem_device); if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(a + p.aux), p.scalar); }\n"
   "GROUP(land_copy) { AWAIT device uchar *x = d + p.dst; volatile coherent(system) device const uchar *y = (volatile coherent(system) device const uchar *)(s + p.src); LOOP x[k] = mesh_payload(y + k); }\n"
-  "kernel void spin(device uchar *words [[buffer(0)]], device uchar *ring [[buffer(1)]], constant args &p [[buffer(2)]], device uchar *vb [[buffer(3)]]) { "
+  "kernel void spin(device uchar *words [[buffer(0)]], device uchar *ring [[buffer(1)]], constant args &p [[buffer(2)]], device uchar *vb [[buffer(4)]]) { "
   "ulong status = mesh_remote_wait((volatile coherent(system) device const ulong *)(words + p.dst), p.n); "
   "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; CHECK(ring, status) }\n";
 
@@ -78,7 +83,7 @@ static NSString *const KERNELS =
 static const char *const TYPE[12] = {"i8", "u8", "i32", "u32", "i64", "u64", "f16", "f32", NULL, "bf16", "e4m3", "e5m2"};
 static const char *const MODE[3] = {"plain", "land", "send"};
 
-struct args { uint64_t dst, src, n, scalar, aux; uint32_t op, unused; uint64_t first, slot; uint32_t count, mask, channel, depth; };
+ARGS(uint64_t, uint32_t);
 struct metal_program { id<MTLCommandBuffer> buffer; id<MTLComputeCommandEncoder> encoder; NSMutableArray *kept; int borrowed; };
 
 static id<MTLDevice> device_;
@@ -129,6 +134,7 @@ void *metal_scratch(size_t bytes) {
 
 void *metal_event(void) { return [(id<MTLDevice>)metal_device() newSharedEvent]; }
 uint64_t metal_signaled(void *event) { return ((id<MTLSharedEvent>)event).signaledValue; }
+int metal_wait(void *event, uint64_t value, uint64_t ns) { return [(id<MTLSharedEvent>)event waitUntilSignaledValue:value timeoutMS:ns / 1000000]; }
 void metal_release(void *object) { [(id)object release]; }
 
 struct metal_program *metal_begin(void *command_buffer, void *encoder) {
@@ -147,7 +153,10 @@ static void close_encoder(struct metal_program *program) {
   program->encoder = nil;
 }
 
-static int dispatch(struct metal_program *program, NSString *name, void *d, void *s, void *v, struct args a, uint64_t units) {
+/* kernel `name` on buffers d, s, a and v (0, 1, 3 and 4; an absent one d) and the arguments p (2): a GROUP kernel (`a`
+   given, the cells or the completion words) as one threadgroup of up to 1024 threads over a block's piece, any other
+   over `units` threads */
+static int dispatch(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p, uint64_t units) {
   if (!units) return 0;
   id<MTLComputePipelineState> state = pipeline(name);
   if (!state) return EINVAL;
@@ -157,10 +166,12 @@ static int dispatch(struct metal_program *program, NSString *name, void *d, void
     [encoder setComputePipelineState:state];
     [encoder setBuffer:(id<MTLBuffer>)d offset:0 atIndex:0];
     [encoder setBuffer:(id<MTLBuffer>)(s ? s : d) offset:0 atIndex:1];
-    [encoder setBytes:&a length:sizeof a atIndex:2];
-    [encoder setBuffer:(id<MTLBuffer>)(v ? v : d) offset:0 atIndex:3];
-    const NSUInteger width = state.maxTotalThreadsPerThreadgroup < 256 ? state.maxTotalThreadsPerThreadgroup : 256;
-    [encoder dispatchThreads:MTLSizeMake(units < (1u << 20) ? (NSUInteger)units : (1u << 20), 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+    [encoder setBytes:&p length:sizeof p atIndex:2];
+    [encoder setBuffer:(id<MTLBuffer>)(a ? a : d) offset:0 atIndex:3];
+    [encoder setBuffer:(id<MTLBuffer>)(v ? v : d) offset:0 atIndex:4];
+    const NSUInteger most = a ? 1024 : 256, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
+    if (a) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+    else [encoder dispatchThreads:MTLSizeMake(units < (1u << 20) ? (NSUInteger)units : (1u << 20), 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
   }
   return 0;
 }
@@ -168,7 +179,7 @@ static int dispatch(struct metal_program *program, NSString *name, void *d, void
 int metal_copy(struct metal_program *program, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes) {
   const int words = !((dst_offset | src_offset | bytes) & 3);
   NSString *name = [NSString stringWithFormat:@"copy_%s_%d", MODE[mode], words ? 4 : 1];
-  return dispatch(program, name, dst, src, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = words ? bytes / 4 : bytes}, words ? bytes / 4 : bytes);
+  return dispatch(program, name, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = words ? bytes / 4 : bytes}, words ? bytes / 4 : bytes);
 }
 
 static NSString *typed(const char *what, int type) {
@@ -177,20 +188,18 @@ static NSString *typed(const char *what, int type) {
 
 int metal_combine(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n) {
   NSString *name = typed("combine", type);
-  return name ? dispatch(program, name, dst, src, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op}, n) : EINVAL;
+  return name ? dispatch(program, name, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .op = (uint32_t)op}, n) : EINVAL;
 }
 
 int metal_premultiply(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar) {
   NSString *name = typed("premul", type);
-  return name ? dispatch(program, name, dst, src, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = scalar}, n) : EINVAL;
+  return name ? dispatch(program, name, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = scalar}, n) : EINVAL;
 }
 
 int metal_truncdiv(struct metal_program *program, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t divisor) {
   NSString *name = type <= 5 ? typed("truncdiv", type) : nil;
-  return name ? dispatch(program, name, dst, src, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = divisor}, n) : EINVAL;
+  return name ? dispatch(program, name, dst, src, NULL, NULL, (struct args){.dst = dst_offset, .src = src_offset, .n = n, .scalar = divisor}, n) : EINVAL;
 }
-
-uint64_t metal_stamp(uint64_t position) { return 0x6d6573682d66696cULL ^ (position * 0x9e3779b97f4a7c15ULL); }
 
 static struct args checked(struct args a, const struct metal_check *check) {
   if (check) { a.first = check->first; a.slot = check->slot; a.count = check->count; a.mask = check->mask; a.channel = check->channel; a.depth = check->depth; }
@@ -198,51 +207,32 @@ static struct args checked(struct args a, const struct metal_check *check) {
 }
 
 int metal_publish(struct metal_program *program, void *cells, size_t offset, uint64_t argument) {
-  return dispatch(program, @"publish", cells, NULL, NULL, (struct args){.dst = offset, .n = 1, .scalar = argument}, 1);
+  return dispatch(program, @"publish", cells, NULL, NULL, NULL, (struct args){.dst = offset, .n = 1, .scalar = argument}, 1);
 }
 
 int metal_publish_filler(struct metal_program *program, void *cells, size_t offset, uint64_t argument, void *slot, size_t slot_offset,
                          uint64_t position) {
-  return dispatch(program, @"publish_filler", cells, slot, NULL,
+  return dispatch(program, @"publish_filler", cells, slot, NULL, NULL,
                   (struct args){.dst = offset, .src = slot_offset, .n = 1, .scalar = argument, .first = position}, 1);
 }
 
 int metal_spin(struct metal_program *program, void *words, size_t offset, uint64_t cycle, const struct metal_check *check) {
-  return dispatch(program, @"spin", words, check ? check->ring : NULL, check ? check->violation : NULL,
+  return dispatch(program, @"spin", words, check ? check->ring : NULL, NULL, check ? check->violation : NULL,
                   checked((struct args){.dst = offset, .n = cycle}, check), 1);
-}
-
-/* one threadgroup over a block's piece: `a` the cells (send) or the completion words (land) at aux */
-static int dispatch_group(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p) {
-  id<MTLComputePipelineState> state = pipeline(name);
-  if (!state) return EINVAL;
-  @autoreleasepool {
-    if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
-    id<MTLComputeCommandEncoder> encoder = program->encoder;
-    [encoder setComputePipelineState:state];
-    [encoder setBuffer:(id<MTLBuffer>)d offset:0 atIndex:0];
-    [encoder setBuffer:(id<MTLBuffer>)(s ? s : d) offset:0 atIndex:1];
-    [encoder setBytes:&p length:sizeof p atIndex:2];
-    [encoder setBuffer:(id<MTLBuffer>)a offset:0 atIndex:3];
-    [encoder setBuffer:(id<MTLBuffer>)(v ? v : d) offset:0 atIndex:4];
-    const NSUInteger width = state.maxTotalThreadsPerThreadgroup < 1024 ? state.maxTotalThreadsPerThreadgroup : 1024;
-    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-  }
-  return 0;
 }
 
 int metal_send_small(struct metal_program *program, void *slot, size_t slot_offset, void *src, size_t src_offset, size_t bytes,
                      void *cells, size_t cell_offset, uint64_t value) {
-  return dispatch_group(program, @"send_small", slot, src, cells, NULL,
-                        (struct args){.dst = slot_offset, .src = src_offset, .n = bytes, .scalar = value, .aux = cell_offset});
+  return dispatch(program, @"send_small", slot, src, cells, NULL,
+                  (struct args){.dst = slot_offset, .src = src_offset, .n = bytes, .scalar = value, .aux = cell_offset}, 1);
 }
 
 int metal_land(struct metal_program *program, int type, int op, void *dst, size_t dst_offset, void *slot, size_t slot_offset, size_t n,
                void *words, size_t word_offset, uint64_t cycle, const struct metal_check *check) {
   NSString *name = type < 0 ? @"land_copy" : typed("land", type);
-  return name ? dispatch_group(program, name, dst, slot, words, check ? check->violation : NULL,
-                               checked((struct args){.dst = dst_offset, .src = slot_offset, .n = n, .scalar = cycle, .aux = word_offset,
-                                                     .op = (uint32_t)op}, check))
+  return name ? dispatch(program, name, dst, slot, words, check ? check->violation : NULL,
+                         checked((struct args){.dst = dst_offset, .src = slot_offset, .n = n, .scalar = cycle, .aux = word_offset,
+                                               .op = (uint32_t)op}, check), 1)
               : EINVAL;
 }
 

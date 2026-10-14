@@ -15,6 +15,8 @@ void *metal_wrap(void *address, size_t bytes);
 void *metal_scratch(size_t bytes);
 void *metal_event(void);
 uint64_t metal_signaled(void *event);
+/* 1 once `event` reaches `value`, 0 where `ns` pass first */
+int metal_wait(void *event, uint64_t value, uint64_t ns);
 void metal_release(void *object);
 
 struct metal_program *metal_begin(void *command_buffer, void *encoder);
@@ -28,7 +30,8 @@ int metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offse
    The first position found otherwise is written to violation[0] (1 + it) and violation[1] (channel x 2 + its bit),
    where violation[0] is still 0. */
 struct metal_check { void *ring, *violation; size_t slot; uint64_t first; uint32_t count, mask, channel, depth; };
-uint64_t metal_stamp(uint64_t position);
+/* a filler's stamp at position t, the host's and the kernels' one definition */
+#define METAL_STAMP(t) (0x6d6573682d66696cUL ^ ((t) * 0x9e3779b97f4a7c15UL))
 int metal_publish(struct metal_program *, void *cells, size_t offset, uint64_t argument);
 /* an empty position's publication: its slot's first eight bytes the position's stamp, then its cell released */
 int metal_publish_filler(struct metal_program *, void *cells, size_t offset, uint64_t argument, void *slot, size_t slot_offset,

@@ -22,13 +22,10 @@ int mesh_metal_transport_create(struct mesh_ctx *context,void *device,struct mes
 
 /* design/algorithm-sources.md#resident-metal */
 /* design/prepared-machine.md#M07 */
-int mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,
-  struct mesh_section operand,struct mesh_metal_input *input){
+struct mesh_metal_input mesh_metal_receive_prepare(struct mesh_ctx *context,struct mesh_metal_transport *transport,struct mesh_section operand){
   struct mesh_publication *delivery=mesh_publication_at(context->M,operand.first+mesh_row_chunks(context->M,operand.first,operand.bytes)-1);
-  id<MTLBuffer> memory=transport->inputs;
-  *input=(struct mesh_metal_input){.completion=[memory retain],
-    .offset=(uintptr_t)context->M+delivery->device_input-(uintptr_t)memory.contents,.stride=delivery->device_stride};
-  return 0;
+  return (struct mesh_metal_input){(uintptr_t)context->M+delivery->device_input-(uintptr_t)((id<MTLBuffer>)transport->inputs).contents,
+    delivery->device_stride};
 }
 
 /* design/algorithm-sources.md#resident-metal */
