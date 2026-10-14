@@ -881,6 +881,9 @@ def parse_instance(name):
 
 
 UNITS = ('outputs', 'columns', 'tiles', 'nonzero', 'planes', 'ones', 'bytes')
+# Products sharing an input that an engine stacks into one (metal-microbench docs/kernels.md#stacked-products): a slice of
+# their summed units, its outputs theirs.
+STACKS = (('self_attn.q_proj', ('self_attn.k_proj', 'self_attn.v_proj')), ('mlp.gate_proj', ('mlp.up_proj',)))
 
 
 def _records(path):
@@ -1067,7 +1070,7 @@ def _resolve(args):
     held = slices(streamed, args.program, args.rank)
     for draft in args.draft:
         held += list(Streamed(draft).matrices.items())
-    keyed = {}
+    keyed, named = {}, dict(held)
     for name, m in held:
         op = 'head' if name == 'lm_head' else 'product'
         key = (op, m.rows, m.columns, m.widths, m.tabled(op))
@@ -1076,6 +1079,11 @@ def _resolve(args):
             up = next((u for n, u in held if n == name[:-len('gate_proj')] + 'up_proj' and u.rows == m.rows), None)
             if up is not None:
                 keyed.setdefault(('couple', m.rows, m.columns, max(m.widths, up.widths), False), []).append((slice_units(m), slice_units(up)))
+        for first, rest in STACKS:
+            parts = [m] + [named[n] for n in (name[:-len(first)] + r for r in rest) if n in named and named[n].columns == m.columns] if name.endswith(first) else []
+            if len(parts) > 1:
+                keyed.setdefault(('product', sum(p.rows for p in parts), m.columns, max(p.widths for p in parts), False), []).append(
+                    {k: sum(u[k] for u in map(slice_units, parts)) if k != 'columns' else m.columns for k in UNITS})
     entries = []
     for (op, outputs, columns, widths, tables), units in sorted(keyed.items(), key=lambda kv: kv[0]):
         pair = op == 'couple' and (mean_units([u[0] for u in units]), mean_units([u[1] for u in units]))
