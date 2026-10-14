@@ -223,11 +223,11 @@ kernel void mesh_draft_anchor(device const half *table [[buffer(0)]], device con
 
 // The selector's walk over S slots in one threadgroup of T threads: slot k's predecessor projection (pa for the anchor, then
 // the row of AE = A E for the slot before's choice, E the draft vocabulary's rows of the target's table) times gate_k (h_gate
-// of the slot's hidden row, row stride gs), each candidate's score plus that . P[candidate] (P = B E), the greatest (the
-// first candidate on a tie: argmax.metal mesh_argmax over the threadgroup) of the score plus the Gumbel noise the target's
-// row at p0 + k draws its token with (argmax.metal mesh_gumbel; `seed` the stream's selection word) its proposal,
-// drafts[k + 1] = ids[that candidate]; drafts[0] the anchor. The drafter's draw and the target's share their noise, so a
-// draft is the token the target samples wherever the two draws meet.
+// of the slot's hidden row, row stride gs), each candidate's score plus that . P[candidate] (P = B E), and its proposal
+// the draw of those scores at temperature 1 (argmax.metal mesh_draw over the C candidates, candidate c's token
+// ids[cand[c]], keyed as the target's row at p0 + k; `seed` the stream's selection word): drafts[k + 1] = ids[the drawn
+// candidate]; drafts[0] the anchor. The drafter's draw and the target's share their noise, so a draft is the token the
+// target samples wherever the two draws meet.
 template <uint RK, uint C, uint S, uint T>
 kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const half *ae [[buffer(1)]], device const half *gate [[buffer(2)]],
                               device const half *projected [[buffer(3)]], device const uint *cand [[buffer(4)]], device const float *score [[buffer(5)]],
@@ -250,13 +250,13 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
             const uint v = cand[k * C + c];
             for (uint j = lane; j < RK; j += 32) s += p[j] * float(projected[ulong(v) * RK + j]);
             s = simd_sum(s);
-            if (lane == 0) best[c] = score[k * C + c] + s + mesh_gumbel(seed, state[1] + k, uint(ids[v]));
+            if (lane == 0) best[c] = score[k * C + c] + s;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        float top = -INFINITY;
-        uint pick = 0xFFFFFFFFu;
-        for (uint c = t; c < C; c += T) mesh_take(top, pick, best[c], c);
-        if (mesh_argmax<T>(top, pick, t, tv, tk)) {
+        float top;
+        uint pick;
+        if (mesh_draw<T>(top, pick, [&](uint c) { return best[c]; }, seed, state[1] + k, [&](uint c) { return uint(ids[cand[k * C + c]]); },
+                         -INFINITY, 0, C, t, tv, tk)) {
             previous = cand[k * C + pick];
             drafts[k + 1] = uint(ids[previous]);
         }
