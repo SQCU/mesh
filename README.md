@@ -21,9 +21,9 @@ before changing settings that look wrong.
 A node stays awake by its power policy (`sleep 0`, `standby 0`, `autopoweroff 0`, `autorestart 1`, re-asserted by
 the keeper), never by a process holding assertions. Until 2026-10-13 `io.mesh.caffeinate` ran `caffeinate -dimsu`,
 which kept the display on and declared the user active forever, so `dasd` never found the node idle and never ran
-the system's own idle maintenance: on the M4 Pro the Neural Engine daemon's compiled-model cache, which SIP lets only
+the system's own idle maintenance: the Neural Engine daemon's compiled-model cache, which SIP lets only
 `aned`'s garbage collection delete (`com.apple.aned.danglingModelsGC`, `com.apple.aned.modelCacheGC`, refused 7,750
-times in two weeks on "Device Activity Policy"), grew to about 390 GB of its 460 GB disk. A full disk is the false
+times in two weeks on "Device Activity Policy"), grew to about 390 GB of a 460 GB disk. A full disk is the false
 negative this fleet exists to prevent; the display sleeps after 10 minutes so the node can be idle by macOS's
 definition while it keeps computing.
 
@@ -221,7 +221,7 @@ tempting to call the first a control plane and the second a data plane. That is
 backwards, and the label hides a real dependency:
 
 - **Wi-Fi is opportunistic.** Whether a network exists is a property of the room, not
-  of the node. A MacBook cannot host one for the minis, so a venue with no Wi-Fi means
+  of the node. A node cannot host one for the others, so a venue with no Wi-Fi means
   no Wi-Fi, and nothing on the node can change that.
 - **The fabric is the dependable one.** Copper, point to point, between two machines
   we own. It needs no infrastructure that anyone else controls.
@@ -244,11 +244,9 @@ LINKS
   redundant: 2 of 2
 ```
 
-`mesh-nodeinfo` carries `planes=N lan=<iface> fabric=<0|1> fabric_source=ifconfig`.
-Its fabric value measures IP carrier on the RDMA-capable interfaces; it does not
-assert that the RDMA bridge is paired. The keeper logs
-`DEGRADED` every pass while only one remains. Do not run anything that can disrupt the
-remaining link while degraded.
+The plane count is the keeper's: the LAN, and a fabric port whose cable link is up with an RDMA peer
+(`/var/run/mesh-fabric`, the fabric init's). The keeper logs `DEGRADED` every pass while only one remains, and
+`mesh-top` shows that line. Do not run anything that can disrupt the remaining link while degraded.
 
 ### The list has to have more than one entry
 
@@ -446,38 +444,36 @@ cables directly, point to point.
 
 ## Names, traversal, and running things
 
-`mesh-peers` shows what the fabric is, not just which addresses exist (the Mini, 2026-10-04, abridged):
+`mesh-peers` shows what the fabric is, not just which addresses exist (abridged):
 
 ```
-node Ms-Mac-mini self
-node Ms-MacBook-Pro peer
-path Ms-MacBook-Pro kind=lan addr=192.168.1.181
-path Ms-MacBook-Pro kind=fabric-adjacent addr=fe80:0:0:0:3494:9dff:fee4:fd88%en4
-path Ms-Mac-mini kind=fabric-routed addr=fd6d:6573:68:3af8:1a3c:9700:3034:715d
-info Ms-MacBook-Pro via=192.168.1.181 name=Ms-MacBook-Pro node_id=D7377D82-... boot_id=... ula=fd6d:6573:68:b5d5:...
+node <self> self
+node <peer> peer
+path <peer> kind=lan addr=<a>
+path <peer> kind=fabric-adjacent addr=fe80::<b>%<port>
+path <self> kind=fabric-routed addr=fd6d:6573:68:<c>
+info <peer> via=<a> name=<peer> node_id=... boot_id=... ula=fd6d:6573:68:<d>
 ```
 
 That comes from `io.mesh.nodeinfo`, a Python service on port 8099 (8100 for the user
 service). One sampler runs `mesh-nodeinfo.sh` independently of incoming requests.
 Clients receive its current output with `sample_status` and `sample_updated`, even
 while sampling is incomplete. Requests never start or kill device probes.
-Each node reports its name, hardware, macOS, RDMA enablement and SDK state, every
-fabric port's IP carrier, link-local address and observed neighbor, and its routes.
-Discovery uses `ifconfig`, `ndp` and the IORegistry rather than opening verbs devices. Per-port
-`rdma_peer=present|absent` is whether the registry holds an `AppleThunderboltRDMAPeerInterface` for the port's
-RDMA interface (its `RID`), as the fabric init last read it; it is not a verbs port measurement, though on every
-port read so far it was present exactly when the verbs port was `PORT_ACTIVE`.
+Each node reports its name, hardware, macOS, RDMA enablement and SDK state, its health report's numbers, each fabric
+port's line as the fabric init last wrote it (`port=<port> link=<status> rdma_peer=present|absent`), and its routes.
+`rdma_peer` is whether the IORegistry holds an `AppleThunderboltRDMAPeerInterface` for the port's RDMA interface (its
+`RID`); it is not a verbs port measurement, though on every port read so far it was present exactly when the verbs
+port was `PORT_ACTIVE`. A port's address and neighbours are telemetry's (`io.mesh.telemetry`, its fabric section).
 
-That last part is what makes the topology discoverable. Ask each node what it can see
-and you can reconstruct the whole graph — no central registry, no multicast, no
-hop limit.
+The RDMA graph is the bridges' map: each bridge floods its ports' record to every other, so every node holds the
+whole graph (`mesh-plan.h` `mesh_map`) — no central registry, no multicast, no hop limit.
 
 Running work anywhere:
 
 ```
 mesh-run all      'sysctl -n hw.model'
 mesh-run others   'uptime'
-mesh-run Ms-Mac-mini 'ls /usr/local/mesh'
+mesh-run <name>   'ls /usr/local/mesh'
 ```
 
 Job submission needs no new machinery. Every node already runs sshd and trusts the
