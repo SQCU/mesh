@@ -10,13 +10,13 @@ extern "C" {
    extension includes it, Python binds it through mesh_c_build.py (cffi, compiled against this file).  Plain C:
    declarations and integer constants only. */
 
-/* A node's links as its resident bridge records them now (design/algorithm-sources.md#meshobserve), one a port: the
-   peer node while the link is paired (0 else), the link's phase, its device and its port's bandwidth in bits a second
-   (the RDMA port's active speed and width); returns the node's port count (at most `capacity` written) and its node,
-   or -errno.  `name` NULL: the node's bridge. */
+/* A node's links as its resident bridge records them now (design/algorithm-sources.md#meshobserve), one a port, view i
+   the port the bridge gave index i: the peer node while the link is paired (0 else), the link's phase and its port's
+   bandwidth in bits a second (the RDMA port's active speed and width); returns the node's port count (at most
+   `capacity` written) and its node, or -errno. */
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
-struct mesh_link_view { uint32_t peer,phase; char device[32]; uint64_t bandwidth; };
-int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
+struct mesh_link_view { uint32_t peer,phase; uint64_t bandwidth; };
+int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
 
 /* A link map, an operand: `nodes` nodes and `links` links of a kind.
      MESH_LINKS_MESH   every pair is linked (`link` lists only the pairs given costs, if any)
@@ -33,6 +33,18 @@ struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; double (*
    with one link into each; a tree nodes-1 links, one into each node but the root, every node reaching the root; a
    graph connected. */
 int mesh_link_map_check(const struct mesh_link_map *);
+/* A link's cost where nothing measured it: alpha the TB5 crossing's one-way latency through the bridges (us a message;
+   metal-microbench docs/measurement.md, the 3 KB host round trip 10.29 us), beta where its ports' bandwidth is unknown
+   (ns a byte). */
+#define MESH_ALPHA_US 5.0
+#define MESH_BETA_NS 0.1
+/* The map the bridges' records give `nodes` members (design/bridge-and-ipc.md#ports), member i's bridge node node[i]
+   and its ports' views views[i][0 .. count[i]) (mesh_observe's): members a and b linked where each one's bridge holds a
+   port paired with the other's node, a link's cost MESH_ALPHA_US and 8e9 over the widest such port's bandwidth
+   (MESH_BETA_NS where none is known); the kind MESH_LINKS_MESH where every pair is linked, else MESH_LINKS_GRAPH.  The
+   caller's map->link and map->cost hold nodes x (nodes - 1) / 2 links; returns the links. */
+uint32_t mesh_link_map_join(uint32_t nodes,const uint32_t *node,const struct mesh_link_view *const *views,const uint32_t *count,
+                            struct mesh_link_map *map);
 /* Whether the map links a and b, either way (a mesh every pair). */
 int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
 

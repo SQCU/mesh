@@ -101,8 +101,8 @@ Each with its source and its status as of 2026-10-14, read from source (no runti
 | Q11 | A cable pull and replug, three times, with time to repair and to the first completed execution recorded | deliverables R7 | unmet: not run |
 | Q12 | Recovery costs nothing on the healthy path | mandate 7 | built: the data path reads no recovery state |
 | Q13 | No per-transfer TCP; TCP at pairing only | mandate 8 | built: the control socket carries a program's pairing messages and nothing per transfer |
-| Q14 | Every blocking call bounded; no unbounded completion-queue poll | RDMA-RULES.md, mandate 12 | built: the bridge's loop waits 250 ms at most; pairing has its windows; sends wait 1 s; a teardown that fails keeps its handles for the next turn; a client's start waits on the bridge, which bounds it, and on the bridge's life |
-| Q15 | Port loss retires all device state; an ordinary reconnection keeps context, PD and registrations | RDMA-KERNEL-RECOVERY.md | built: a link off or a detached interface retires the device before the port opens it again |
+| Q14 | Every blocking call bounded; no unbounded completion-queue poll | RDMA-RULES.md, mandate 12 | built: the bridge's loop waits 250 ms at most; pairing has its windows; sends wait 1 s; a teardown that fails keeps its handles for the next turn; a client's start waits at most the peer and pairing windows and a pause (`MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS`, ETIMEDOUT) and ends at once where the bridge is gone (ESRCH). The one exception: a kernel verbs call (opening a device, reading the device list, querying a port, making or destroying a queue pair, registering memory) cannot be bounded from user space, since it can sleep uninterruptibly in the driver (RDMA-RULES.md); the bridge makes them only to open, find, pair and tear down a port's device, never per transfer: a paired port makes none, a port with no link opens and queries its device once a turn (a pause apart) until its port is active, and the node's device list is read again only when an interface attaches or its link comes on (`network_heard`); a client's start, which waits on none of them, still ends at its own bound |
+| Q15 | Port loss retires all device state; an ordinary reconnection keeps context, PD and registrations | RDMA-KERNEL-RECOVERY.md | built: a link off or a detached interface retires the device, and no hello or connection reaches the port (`port_at`) until its turn has retired the device and opened it again |
 | Q16 | No cross-queue GPU spin; every spun-on word in a canceller's set | memory no_cross_queue_gpu_spins | met: a failed flow cancels its client's words on the link |
 | Q19 | A link that answers its peer's hello but not RDMA does not flap at call level | mandate 1 | partial: such a link fails its executions' pairing (ETIMEDOUT within the pairing window) |
 | Q20 | Algorithms total over every membership and topology (ring, star, relays, uncabled pairs) | mandate 6 | unreachable on hardware (two nodes) |
@@ -138,7 +138,10 @@ No setting changes it.
 
 A program started on a link that is not paired fails at once (ENETDOWN). A program waits for its peer's program to
 start at most 600 s (members prepare their programs at their own speeds: metal-microbench docs/measurement.md
-2026-10-10, the verify step), and for its queue pairs to pair at most 30 s from then.
+2026-10-10, the verify step), and for its queue pairs to pair at most 30 s from then. The client's own wait for its
+start is bounded by the same windows and a pause (mesh.h `MESH_PEER_NS`, `MESH_PAIR_NS`, `MESH_PAUSE_NS`, their one
+definition), so a bridge that never answers ends it as ETIMEDOUT. A program on a client slot whose earlier program
+still holds queue pairs its device has not released is refused at once (EBUSY).
 
 ### the driver's side
 

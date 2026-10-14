@@ -3,12 +3,12 @@ its bridge writes into the program's memory as it runs, mesh_transfers_trace, an
 mesh_transfers_ledger): each rank's own work between its collectives, the evidence allocate.Balancer balances on
 (design/heterogeneity.md R2, R3).
 
-A rank's ledger holds, per link, its receive records' layout (trace_layout), each transfer's binding (trace_binding:
-its begin, the invocations it is active, its chunks or SEND cells) and every SEND observed and receive landed
-(native_trace).  A crossing of r ranges takes r consecutive binding identities in the call's crossing order (the rank
-library's rule: metal-microbench mesh_rank.m MeshRankCrossing), so the call's crossings list, each with the point it
-serves and its ranges, names every event: `events` gives, per invocation and point, the rank's publication (its
-first SEND's observation) and its landing (its last chunk's).
+A rank's ledger holds, per link, its invocations (trace_layout), each transfer's binding (trace_binding: its begin, the
+invocations it is active, its chunks or SEND cells) and every SEND observed (its cell's offset) and receive landed (its
+record's index) (native_trace).  A crossing of r ranges takes r consecutive binding identities in the call's crossing
+order (the rank library's rule: metal-microbench mesh_rank.m MeshRankCrossing), so the call's crossings list, each with
+the point it serves and its ranges, names every event: `events` gives, per invocation and point, the rank's
+publication (its first SEND's observation) and its landing (its last chunk's).
 
 A call runs one or more programs (sequences of crossings), each over its invocations; `stretches` gives each of the
 rank's publications' stretch, from the latest of its own events at the program's earlier points in that invocation
@@ -17,8 +17,34 @@ rank's publications' stretch, from the latest of its own events at the program's
 import collections
 import json
 
-RECORD = 128  # sizeof(struct prepared_receive) (mesh-flow.c), the stride of a link's receive records in the trace
-SEND = 256    # sizeof(struct mesh_send) (mesh.h), the stride of a transfer's SEND cells
+SEND = 256  # sizeof(struct mesh_send) (mesh.h), the stride of a transfer's SEND cells
+
+
+def lines(text):
+    """A ledger's trace lines (trace_layout, trace_binding, native_trace), parsed."""
+    return [json.loads(line) for line in text.splitlines() if line.startswith('{"trace_') or line.startswith('{"native_trace"')]
+
+
+def records(traced):
+    """{(link, receive record index): (invocation, binding)} of every receive record a ledger's layout and bindings
+    describe (`traced`, its lines): each queue pair's ring invocation by invocation, each transfer bound to it and active
+    then its chunks' records in turn."""
+    total = {r['trace_layout']: r['invocations'] for r in traced if 'trace_layout' in r}
+    rings = collections.defaultdict(lambda: collections.defaultdict(list))
+    for r in traced:
+        if 'trace_binding' in r and r['direction'] == 1:
+            rings[r['trace_binding']][r['ring']].append((r['begin'], r['active'], r['chunks'], r['binding']))
+    out = {}
+    for link, by_ring in rings.items():
+        index = 0
+        for ring in sorted(by_ring):
+            for t in range(total[link]):
+                for begin, active, chunks, binding in by_ring[ring]:
+                    if begin <= t < begin + active:
+                        for _ in range(chunks):
+                            out[link, index] = (t, binding)
+                            index += 1
+    return out
 
 
 def events(text, crossings):
@@ -27,27 +53,11 @@ def events(text, crossings):
     point = []
     for c in crossings:
         point += [c['point']] * int(c.get('ranges', 1) or 1)
-    lines = [json.loads(line) for line in text.splitlines() if line.startswith('{"trace_') or line.startswith('{"native_trace"')]
-    base = {r['trace_layout']: r['receive_base'] for r in lines if 'trace_layout' in r}
-    total = {r['trace_layout']: r['invocations'] for r in lines if 'trace_layout' in r}
-    cells = [(r['trace_binding'], r['cells'], r['begin'], r['active'], r['binding']) for r in lines
+    traced = lines(text)
+    cells = [(r['trace_binding'], r['cells'], r['begin'], r['active'], r['binding']) for r in traced
              if 'trace_binding' in r and r['direction'] == 0]
-    rings = collections.defaultdict(lambda: collections.defaultdict(list))
-    for r in lines:
-        if 'trace_binding' in r and r['direction'] == 1:
-            rings[r['trace_binding']][r['ring']].append((r['begin'], r['active'], r['chunks'], r['binding']))
-    record = {}
-    for link, by_ring in rings.items():
-        index = 0
-        for ring in sorted(by_ring):
-            for t in range(total[link]):
-                for begin, active, chunks, binding in by_ring[ring]:
-                    if begin <= t < begin + active:
-                        for _ in range(chunks):
-                            record[link, index] = (t, binding)
-                            index += 1
-    out = collections.defaultdict(dict)
-    for r in lines:
+    record, out = records(traced), collections.defaultdict(dict)
+    for r in traced:
         if 'native_trace' not in r:
             continue
         if r['direction'] == 0:
@@ -56,7 +66,7 @@ def events(text, crossings):
                     at = out[begin + (r['identity'] - first) // SEND, point[binding]]
                     at['send'] = min(at.get('send', r['ns'][0]), r['ns'][0])
         else:
-            found = record.get((r['native_trace'], (r['identity'] - base[r['native_trace']]) // RECORD))
+            found = record.get((r['native_trace'], r['identity']))
             if found and found[1] < len(point):
                 at = out[found[0], point[found[1]]]
                 at['receive'] = max(at.get('receive', r['ns'][1]), r['ns'][1])

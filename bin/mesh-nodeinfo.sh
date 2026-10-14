@@ -36,8 +36,8 @@ bridge=$(mktemp); /usr/local/mesh/bin/mesh-stat > "$bridge" 2>/dev/null
 [ "$(plutil -extract up raw -o - "$bridge" 2>/dev/null)" = true ] || : > "$bridge"
 printf 'bridge_node=%s\n' "$(plutil -extract node raw -o - "$bridge" 2>/dev/null || echo none)"
 i=0
-while device=$(plutil -extract "peers.$i.device" raw -o - "$bridge" 2>/dev/null); do
-  printf 'bridge_link=%s peer_node=%s phase=%s bandwidth=%s connection=%s\n' "$device" "$(plutil -extract "peers.$i.node" raw -o - "$bridge")" \
+while port=$(plutil -extract "peers.$i.port" raw -o - "$bridge" 2>/dev/null); do
+  printf 'bridge_link=%s peer_node=%s phase=%s bandwidth=%s connection=%s\n' "$port" "$(plutil -extract "peers.$i.node" raw -o - "$bridge")" \
     "$(plutil -extract "peers.$i.phase" raw -o - "$bridge")" "$(plutil -extract "peers.$i.bandwidth" raw -o - "$bridge")" \
     "$(plutil -extract "peers.$i.connection" raw -o - "$bridge")"
   i=$((i+1))

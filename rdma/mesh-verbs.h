@@ -4,7 +4,6 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
-#include <poll.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -67,7 +66,7 @@ struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int q
 /* design/prepared-machine.md#M09 */
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
 static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
-  wire->length=(size_t)m->wire_pages*m->pgsz;
+  wire->length=(size_t)mesh_arena_pages(m)*m->pgsz;
   wire->data=NULL;
   char *reserved=mmap(NULL,wire->length+MESH_BANK,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE,-1,0);
   if(reserved==MAP_FAILED)return -1;
@@ -115,7 +114,7 @@ static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 /* design/bridge-and-ipc.md#ports: the port's device opened (by its name, the device list read again) and its port
    active, its protection domain and capacities read once a context.  0, or -1 with errno (ENETDOWN: the port is not
    active; ENODEV: no such device now). */
-static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hdr *m){
+static int device_up(struct mesh_device *device,struct mesh_wire *wire){
   if(!device->context){
     struct ibv_device **list=ibv_get_device_list(NULL);
     for(int i=0;list && list[i];i++)if(!strcmp(device->name,ibv_get_device_name(list[i]))){device->context=ibv_open_device(list[i]);break;}
@@ -135,7 +134,6 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,struct hd
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity){errno=EOPNOTSUPP;return -1;}
   device->frame_capacity=capacity>=(uint32_t)capabilities.max_cqe?(uint32_t)capabilities.max_cqe-1:capacity;
-  (void)m;
   return 0;
 }
 /* design/prepared-machine.md#M09: the extent holding `offset` registered on the device, where it is not yet: 0, or

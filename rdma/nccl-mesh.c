@@ -285,8 +285,6 @@ static int compile_entry(struct ncclComm *comm, const struct mesh_trees *trees, 
   return 0;
 }
 
-#define DEFAULT_ALPHA 5.0   /* us a message, ns a byte: a link's cost where the map gives none (torch-mesh observe's) */
-#define DEFAULT_BETA 0.1
 
 /* The communicator's message paths (the caller's, else the map's shortest-path trees) and its programs (the caller's
    table, else the declared default, compiled here once): the single-phase all-reduce along the shortest-path trees for
@@ -332,8 +330,8 @@ static ncclResult_t comm_routes(struct ncclComm *comm, const struct mesh_trees *
     result = fail(ncclInternalError, "the default all-reduce does not compile");
   for (int k = 10; !result && k <= 34; k++) {
     const struct mesh_operand operand = {0, 4, ((uint64_t)1 << k) / 4};
-    if (mesh_program_time(&comm->map, &comm->entries[1].program, operand, DEFAULT_ALPHA, DEFAULT_BETA) <
-        mesh_program_time(&comm->map, &comm->entries[0].program, operand, DEFAULT_ALPHA, DEFAULT_BETA)) {
+    if (mesh_program_time(&comm->map, &comm->entries[1].program, operand, MESH_ALPHA_US, MESH_BETA_NS) <
+        mesh_program_time(&comm->map, &comm->entries[0].program, operand, MESH_ALPHA_US, MESH_BETA_NS)) {
       comm->entries[0].below = (uint64_t)1 << k;
       break;
     }
@@ -386,8 +384,8 @@ static ncclResult_t comm_join(struct ncclComm *comm) {
   if (link) comm->map.link = link;
   if (!part || !at || !path || !link || !cost) { free(part); free(at); free(path); free(cost); return fail(ncclSystemError, "out of memory"); }
   for (uint32_t l = 0; l < comm->map.links; l++) {
-    cost[l][0] = comm->map.cost ? comm->map.cost[l][0] : DEFAULT_ALPHA;
-    cost[l][1] = comm->map.cost ? comm->map.cost[l][1] : DEFAULT_BETA;
+    cost[l][0] = comm->map.cost ? comm->map.cost[l][0] : MESH_ALPHA_US;
+    cost[l][1] = comm->map.cost ? comm->map.cost[l][1] : MESH_BETA_NS;
   }
   for (uint32_t v = 0; v < n; v++) {
     part[v] = v;
@@ -405,8 +403,8 @@ static ncclResult_t comm_join(struct ncclComm *comm) {
         double sum[2] = {0, 0};
         for (uint32_t h = 0; h + 1 < hops; h++) {
           const int l = link_of(&parent->map, path[h], path[h + 1]);
-          sum[0] += l >= 0 && parent->map.cost ? parent->map.cost[l][0] : DEFAULT_ALPHA;
-          sum[1] += l >= 0 && parent->map.cost ? parent->map.cost[l][1] : DEFAULT_BETA;
+          sum[0] += l >= 0 && parent->map.cost ? parent->map.cost[l][0] : MESH_ALPHA_US;
+          sum[1] += l >= 0 && parent->map.cost ? parent->map.cost[l][1] : MESH_BETA_NS;
         }
         if (hops >= 2 && (!found || sum[0] < priced[0] || (sum[0] == priced[0] && sum[1] < priced[1]))) {
           best[0] = a; best[1] = b; priced[0] = sum[0]; priced[1] = sum[1]; found = 1;
@@ -505,7 +503,7 @@ static ncclResult_t bootstrap(const char *id, int nranks, int rank, struct repor
   struct report *mine = reports + rank;
   uint32_t node = 0;
   mine->rank = rank;
-  mine->count = mesh_observe(NULL, mine->links, MESH_PORTS, &node);
+  mine->count = mesh_observe(mine->links, MESH_PORTS, &node);
   mine->node = node;
   if (mine->count < 0) return fail(ncclSystemError, "this node's bridge: %s", strerror(-mine->count));
   if (nranks == 1) return ncclSuccess;
@@ -584,24 +582,21 @@ ncclResult_t ncclCommInitRank(ncclComm_t *comm, int nranks, ncclUniqueId commId,
   if (!*id) return fail(ncclInvalidArgument, "the unique id is empty (ncclGetUniqueId)");
   struct report *reports = calloc((size_t)nranks, sizeof *reports);
   int *members = calloc((size_t)nranks, sizeof *members);
+  uint32_t *nodes = calloc((size_t)nranks, sizeof *nodes), *count = calloc((size_t)nranks, sizeof *count);
+  const struct mesh_link_view **views = calloc((size_t)nranks, sizeof *views);
   uint32_t (*link)[2] = calloc((size_t)nranks * (size_t)nranks + 1, sizeof *link);
   double (*cost)[2] = calloc((size_t)nranks * (size_t)nranks + 1, sizeof *cost);
-  ncclResult_t result = reports && members && link && cost ? bootstrap(id, nranks, rank, reports) : fail(ncclSystemError, "out of memory");
+  ncclResult_t result = reports && members && nodes && count && views && link && cost ? bootstrap(id, nranks, rank, reports)
+                                                                                       : fail(ncclSystemError, "out of memory");
   struct mesh_link_map map = {MESH_LINKS_GRAPH, (uint32_t)nranks, 0, link, cost};
   for (int a = 0; !result && a < nranks; a++) {
-    members[a] = (int)reports[a].node;
-    for (int b = a + 1; b < nranks; b++)
-      for (int i = 0; i < reports[a].count && i < MESH_PORTS; i++) {
-        const struct mesh_link_view *view = reports[a].links + i;
-        if (view->peer != reports[b].node || view->phase != MESH_PAIRED) continue;
-        link[map.links][0] = (uint32_t)a; link[map.links][1] = (uint32_t)b;
-        cost[map.links][0] = DEFAULT_ALPHA; cost[map.links][1] = view->bandwidth ? 8e9 / (double)view->bandwidth : DEFAULT_BETA;
-        map.links++;
-        break;
-      }
+    members[a] = (int)(nodes[a] = reports[a].node);
+    views[a] = reports[a].links;
+    count[a] = reports[a].count < 0 ? 0 : reports[a].count > MESH_PORTS ? MESH_PORTS : (uint32_t)reports[a].count;
   }
+  if (!result) mesh_link_map_join((uint32_t)nranks, nodes, views, count, &map);
   if (!result) result = comm_make(comm, nranks > 1 ? &map : NULL, NULL, NULL, 0, nranks, members, rank, id);
-  free(reports); free(members); free(link); free(cost);
+  free(reports); free(members); free(nodes); free(count); free(views); free(link); free(cost);
   return result;
 }
 
@@ -732,9 +727,8 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
 #define DEPTH (2 * LAG)
 #define BUFFSIZE ((size_t)1 << 22)  /* NCCL_BUFFSIZE's default */
 #define POSITIONS 8192
-#define IDENTITY 1
-#define RELAY (1u << 20)            /* a routed pair's transfers: RELAY + 2 * (from * NODES + to) + large */
-#define NODES 1024u
+#define IDENTITY 1                  /* a channel's transfers: IDENTITY + 2 * its sender's rank + large */
+#define RELAY (1u << 20)            /* a link's relay rings: RELAY + 2 * (from's rank * ranks + to's) + large */
 #define BOUND 10.0                  /* metal-microbench configs/e2b-programs.json remote_bound_seconds (MESH_REMOTE_BOUND) */
 
 /* a channel: one class of a peer's pieces on a queue pair of its own (a queue pair's receives are posted
@@ -1115,7 +1109,7 @@ static size_t setting(const char *name, size_t otherwise) {
 }
 
 static int ring_make(size_t slot, struct mesh_section *section, unsigned char **memory) {
-  const int status = mesh_section_create(&session.context, DEPTH * slot, 1, 1, section);
+  const int status = mesh_section_create(&session.context, DEPTH * slot, 1, section);
   if (status) return status;
   if (memory) *memory = mesh_section_address(&session.context, *section, 0);
   section->bytes = slot;
@@ -1129,8 +1123,6 @@ static int ring_bind(uint32_t node, uint32_t queue, int receive, uint32_t identi
   return mesh_transfer_bind(&session.context, mesh_peer_channel(&session.context, node, queue), receive ? MESH_RECEIVE : MESH_SEND,
                             identity, section, (uint32_t)(section.bytes / session.header->pgsz), 0, UINT32_MAX, DEPTH);
 }
-
-static uint32_t relayed(uint32_t from, uint32_t to, int large) { return RELAY + 2 * (from * NODES + to) + (uint32_t)large; }
 
 /* a channel's Metal side once its transfers are prepared: the rings wrapped, its SEND cell, its completion words */
 static int channel_metal(struct channel *ch) {
@@ -1197,10 +1189,10 @@ static int session_open(ncclComm_t comm, int *other) {
       const uint32_t queue = session.classes == 2 && !large;
       status = ring_make(ch->slot, &ch->out, &ch->sending);
       if (!status) status = ring_make(ch->slot, &ch->in, &ch->receiving);
-      if (!status && linked) status = ring_bind(ch->node, queue, 0, IDENTITY + 2 * m->node + (uint32_t)large, ch->out);
-      if (!status && linked) status = ring_bind(ch->node, queue, 1, IDENTITY + 2 * ch->node + (uint32_t)large, ch->in);
+      if (!status && linked) status = ring_bind(ch->node, queue, 0, IDENTITY + 2 * me + (uint32_t)large, ch->out);
+      if (!status && linked) status = ring_bind(ch->node, queue, 1, IDENTITY + 2 * r + (uint32_t)large, ch->in);
       if (!status && !linked) {
-        status = mesh_section_create(&session.context, (size_t)session.positions * (sizeof(struct mesh_send) + 8), 1, 0, &ch->region);
+        status = mesh_section_create(&session.context, (size_t)session.positions * (sizeof(struct mesh_send) + 8), 1, &ch->region);
         if (!status) {
           ch->cells = mesh_section_address(&session.context, ch->region, 0);
           ch->words = ch->cells + (size_t)session.positions * sizeof(struct mesh_send);
@@ -1221,8 +1213,8 @@ static int session_open(ncclComm_t comm, int *other) {
       const uint32_t queue = (uint32_t)session.classes + (session.classes == 2 && !large);
       status = ring_make(rl->slot, &rl->out, &rl->sending);
       if (!status) status = ring_make(rl->slot, &rl->in, &rl->receiving);
-      if (!status) status = ring_bind(rl->node, queue, 0, relayed(m->node, rl->node, large), rl->out);
-      if (!status) status = ring_bind(rl->node, queue, 1, relayed(rl->node, m->node, large), rl->in);
+      if (!status) status = ring_bind(rl->node, queue, 0, RELAY + 2 * (me * N + r) + (uint32_t)large, rl->out);
+      if (!status) status = ring_bind(rl->node, queue, 1, RELAY + 2 * (r * N + me) + (uint32_t)large, rl->in);
     }
   free(path);
   if (!status) status = mesh_transfers_prepare(&session.context, 1, session.positions, DEPTH);

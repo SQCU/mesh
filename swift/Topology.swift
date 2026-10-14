@@ -2,13 +2,13 @@ import CMesh
 import Foundation
 
 public struct Link {
-    public let device: String
+    public let port: Int
     public let bandwidth: UInt64
     public let latency: Double?
 
     // design/algorithm-sources.md#link
-    public init(device: String, bandwidth: UInt64, latency: Double? = nil) {
-        self.device = device; self.bandwidth = bandwidth; self.latency = latency
+    public init(port: Int, bandwidth: UInt64, latency: Double? = nil) {
+        self.port = port; self.bandwidth = bandwidth; self.latency = latency
     }
 }
 
@@ -37,11 +37,11 @@ public struct Topology {
 
 extension Mesh {
     // design/algorithm-sources.md#meshobserve
-    public static func observe(region: String = "/mesh0") throws -> Topology {
+    public static func observe() throws -> Topology {
         var node: UInt32 = 0
         var views: [mesh_link_view] = []
         while true {
-            let count = mesh_observe(region, &views, UInt32(views.count), &node)
+            let count = mesh_observe(&views, UInt32(views.count), &node)
             if count < 0 { throw POSIXError(POSIXErrorCode(rawValue: -count) ?? .EIO) }
             if count > views.count {
                 views = Array(repeating: mesh_link_view(), count: Int(count))
@@ -49,10 +49,9 @@ extension Mesh {
             }
             var nodes: Set<Int> = [Int(node)]
             var links: [Topology.Pair: [Link]] = [:]
-            for var view in views.prefix(Int(count)) where view.phase == MESH_PAIRED {
+            for (port, view) in views.prefix(Int(count)).enumerated() where view.phase == MESH_PAIRED {
                 nodes.insert(Int(view.peer))
-                let device = withUnsafeBytes(of: &view.device) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
-                links[Topology.Pair(Int(node), Int(view.peer)), default: []].append(Link(device: device, bandwidth: view.bandwidth))
+                links[Topology.Pair(Int(node), Int(view.peer)), default: []].append(Link(port: port, bandwidth: view.bandwidth))
             }
             return Topology(nodes: nodes, links: links)
         }

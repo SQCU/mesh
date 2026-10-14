@@ -12,7 +12,6 @@ node and the group's name.  Without one, the topology is what the bridges report
 import json
 import math
 import os
-import sys
 from dataclasses import dataclass
 
 import torch
@@ -24,10 +23,7 @@ _stream = None
 if torch.backends.mps.is_available():
     from . import _stream  # its kernels for torch's functional collectives on MPS register as it loads
 
-RDMA = os.environ.get('MESH_RDMA') or '/usr/local/mesh/rdma'
-if RDMA not in sys.path:
-    sys.path.insert(0, RDMA)
-import mesh  # noqa: E402  (rdma/mesh.py: the planner's values, and _mesh_c)
+import mesh  # noqa: E402  (rdma/mesh.py, on the path the mesh's install gives the environment: the planner's values, and _mesh_c)
 
 ffi, LIB = mesh.ffi, mesh.lib
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
@@ -36,9 +32,6 @@ TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.n
          torch.float8_e4m3fn: LIB.ncclFloat8e4m3, torch.float8_e5m2: LIB.ncclFloat8e5m2}
 OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.MAX, LIB.ncclMax), (ReduceOp.MIN, LIB.ncclMin),
        (ReduceOp.AVG, LIB.ncclAvg))
-# an observed link's alpha: the TB5 crossing's one-way latency through the bridges (metal-microbench
-# docs/measurement.md: the 3 KB host round trip 10.29 us); its beta is its port's bandwidth's
-ALPHA_US = 5.0
 # the longest a link may stay silent before the library cancels it, whatever a group's timeout (seconds)
 WAIT_BOUND = 60
 
@@ -64,32 +57,20 @@ def link_map(kind, ranks, pairs, cost=None):
 
 
 def observe(store, rank, size):
-    """The group's topology: each rank's node and links as its bridge records them now (mesh_observe: the links paired),
-    exchanged through the group's store, each link at ALPHA_US and its port's bandwidth (no costs at all while a port's
-    is unknown: the library's defaults); every pair linked a mesh, else a graph, whose links may leave a subgroup's
-    ranks apart (the library joins them along the world's paths)."""
+    """The group's topology: each rank's node and its bridge's ports as the bridge records them now (mesh_observe),
+    exchanged through the group's store and joined into the map they give (mesh.join), whose links may leave a
+    subgroup's ranks apart (the library joins them along the world's paths)."""
     views, node = ffi.new('struct mesh_link_view[]', 64), ffi.new('uint32_t *')
-    count = LIB.mesh_observe(ffi.NULL, views, 64, node)
+    count = LIB.mesh_observe(views, 64, node)
     if count < 0:
         raise RuntimeError(f'libmesh: this node\'s bridge: {os.strerror(-count)}')
-    store.set(f'mesh/observed/{rank}', json.dumps({'node': node[0], 'links': [[views[i].peer, views[i].bandwidth] for i in range(min(count, 64))
-                                                                         if views[i].phase == LIB.MESH_PAIRED]}))
+    store.set(f'mesh/observed/{rank}', json.dumps({'node': node[0], 'ports': [[views[i].peer, views[i].phase, views[i].bandwidth]
+                                                                         for i in range(min(count, 64))]}))
     reports = [json.loads(store.get(f'mesh/observed/{r}')) for r in range(size)]
     nodes = [report['node'] for report in reports]
     if len(set(nodes)) < size:
         raise RuntimeError(f'ranks share a node ({nodes}): one rank a node is what the session carries yet')
-    place = {n: r for r, n in enumerate(nodes)}
-    costs = {}
-    for report in reports:
-        for peer, bits in report['links']:
-            if peer in place:
-                key = frozenset((place[report['node']], place[peer]))
-                known = costs.get(key)
-                costs[key] = (ALPHA_US, 8e9 / bits) if bits and (known is None or 8e9 / bits < known[1]) else known
-    pairs = sorted(tuple(sorted(key)) for key in costs)
-    cost = [costs[frozenset(p)] for p in pairs]
-    every = len(pairs) == size * (size - 1) // 2
-    return mesh.link_map('mesh' if every else 'graph', size, pairs, None if None in cost else cost, apart=True), nodes
+    return mesh.join([(report['node'], report['ports']) for report in reports], apart=True), nodes
 
 
 def check(result):

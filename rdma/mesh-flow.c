@@ -75,11 +75,6 @@ struct send_gate {
    left. */
 struct send_stream { struct mesh_send *cell,*first; struct ibv_send_wr *next; uint32_t remaining; uint64_t cycle; };
 
-/* design/recovery.md#pause, #first: the pause between pairings, how long a program waits for its peer's to start, and
-   how long the queue pairs of two started programs take to pair */
-#define PAUSE_NS UINT64_C(3000000000)
-#define PEER_NS UINT64_C(600000000000)
-#define PAIR_NS UINT64_C(30000000000)
 #define MESH_PAIRS 16
 /* design/bridge-and-ipc.md#protocol */
 enum { HELLO=1, READY, PAIRS, POSTED, END, FAIL, FAREWELL };
@@ -481,7 +476,7 @@ static __attribute__((always_inline)) inline void *link_receive_drain(struct flo
     ring->outstanding-=record->frames;ring->completed=(int64_t)(record->invocation+(uint64_t)record->cycle*link->invocations);
     int error=ring_advance(link,ring);
     if(error){flow_lost(link,error,1);return NULL;}
-    if(traced)trace_record(link->trace[MESH_RECEIVE],(uint64_t)(record-link->receive)*sizeof *record,polled,published);
+    if(traced)trace_record(link->trace[MESH_RECEIVE],(uint64_t)(record-link->receive),polled,published);
   }
 }
 static void *link_receive_progress(void *argument){
@@ -568,7 +563,7 @@ static void flow_pair(struct flow *flow,uint32_t count){
   uint32_t pairs[MESH_PAIRS][2];
   for(int q=0;q<flow->qps;q++){pairs[q][0]=flow->provider.queues[q].pair->qp_num;pairs[q][1]=(flow->provider.psn+(uint32_t)q)&0xffffff;}
   port_say(flow->port,PAIRS,flow->key,(uint32_t)flow->qps,0,(const uint32_t (*)[2])pairs);
-  flow->state=PAIRING_QUEUES;flow->deadline=now+PAIR_NS;
+  flow->state=PAIRING_QUEUES;flow->deadline=now+MESH_PAIR_NS;
 }
 static void flow_announce(struct flow *flow){
   struct port *port=flow->port;
@@ -586,7 +581,7 @@ static void flow_create(struct port *port,uint32_t slot,uint64_t owner){
   struct flow *flow=calloc(1,sizeof *flow);
   if(!flow)return;
   *flow=(struct flow){.index=port->index,.slot=slot,.client=owner,.key=mesh_client_at(M,owner)->key,.M=M,.port=port,
-    .deadline=now+PEER_NS,.provider={.device=&port->device}};
+    .deadline=now+MESH_PEER_NS,.provider={.device=&port->device}};
   port->flows[slot]=flow;
   struct mesh_port_info *status=flow_status(flow);
   atomic_store_explicit(&status->phase,MESH_PAIRING,memory_order_relaxed);
@@ -618,7 +613,7 @@ static void port_heard(struct port *port,const struct message *heard){
   if(heard->kind==READY){
     if(flow && flow->state==READIED)flow_pair(flow,heard->count);
     else if(!flow)for(uint32_t i=0;i<MESH_CLIENTS;i++)if(!port->pending[i].until || port->pending[i].until<now){
-      port->pending[i]=(struct pending){heard->key,now+PEER_NS,heard->count};
+      port->pending[i]=(struct pending){heard->key,now+MESH_PEER_NS,heard->count};
       break;
     }
   } else if(heard->kind==PAIRS && flow && flow->state==PAIRING_QUEUES){
@@ -653,7 +648,7 @@ static void port_lost(struct port *port,int64_t code,int retire){
   }
   memset(port->pending,0,sizeof port->pending);
   port->greeted=port->parted=port->connecting=0;port->peer=0;port->held=0;
-  port->retiring|=retire;port->next=now+PAUSE_NS;
+  port->retiring|=retire;port->next=now+MESH_PAUSE_NS;
   struct mesh_link_info *link=&mesh_links(M)[port->index];
   atomic_store_explicit(&link->peer,0,memory_order_relaxed);atomic_store_explicit(&link->code,code,memory_order_relaxed);
   atomic_store_explicit(&link->phase,retire?MESH_STOPPED:MESH_PAIRING,memory_order_release);
@@ -674,8 +669,11 @@ static void port_greet(struct port *port){
   port_watch(port,EVFILT_READ);
   port_say(port,HELLO,0,0,0,NULL);
 }
+/* design/bridge-and-ipc.md#ports: the port a link-local peer reached, by its interface; none for a scope of 0 (no
+   interface: a LAN address, or the index of an interface that is gone), nor for a port whose device is retiring, which
+   its turn alone opens again (design/RDMA-KERNEL-RECOVERY.md) */
 static struct port *port_at(uint32_t interface){
-  for(uint32_t p=0;p<port_count;p++)if(ports[p].interface==interface)return ports+p;
+  for(uint32_t p=0;interface && p<port_count;p++)if(ports[p].interface==interface)return ports[p].retiring?NULL:ports+p;
   return NULL;
 }
 /* design/bridge-and-ipc.md#ports: a port's turn: its device retired where its port went away, else opened, and while
@@ -688,7 +686,7 @@ static void port_turn(struct port *port){
     else if(flow && flow->state!=FAILED && atomic_load(&flow->failed))flow_fail(flow,atomic_load(&flow->failed),atomic_load(&flow->domain),1);
   }
   if(port->control>=0 || now<port->next)return;
-  port->next=now+PAUSE_NS;
+  port->next=now+MESH_PAUSE_NS;
   port->interface=if_nametoindex(port->name);
   if(port->retiring){
     for(uint32_t s=0;s<MESH_CLIENTS;s++)if(port->flows[s] && port->flows[s]->provider.qp_count)return;
@@ -696,7 +694,7 @@ static void port_turn(struct port *port){
     port->retiring=0;
   }
   struct mesh_link_info *link=&mesh_links(M)[port->index];
-  if(device_up(&port->device,&wire,M) || ibv_query_gid(port->device.context,1,0,&port->device.gid)){
+  if(device_up(&port->device,&wire) || ibv_query_gid(port->device.context,1,0,&port->device.gid)){
     port->retiring=port->device.context && errno!=ENETDOWN;
     atomic_store_explicit(&link->code,errno,memory_order_relaxed);atomic_store_explicit(&link->phase,MESH_STOPPED,memory_order_release);
     return;
@@ -726,7 +724,7 @@ static void hello_heard(void){
     port->control=socket(AF_INET6,SOCK_STREAM,0);
     if(port->control<0 || fcntl(port->control,F_SETFL,O_NONBLOCK) ||
        (connect(port->control,(struct sockaddr *)&from,sizeof from) && errno!=EINPROGRESS)){port_lost(port,errno,0);continue;}
-    port->peer=heard.node;port->connecting=1;port->next=now+PAIR_NS;
+    port->peer=heard.node;port->connecting=1;port->next=now+MESH_PAIR_NS;
     port_watch(port,EVFILT_WRITE);
   }
 }
@@ -743,25 +741,40 @@ static void control_heard(struct port *port){
     if(port->control<0)return;
   }
 }
-/* design/prepared-machine.md#M24: a port's link off or its interface detached */
+/* design/prepared-machine.md#M24: a port's link off or its interface detached; an interface that attached or whose link
+   came on and is no port yet: the node's devices read again (ports_found) */
+static void ports_found(void);
 static void network_heard(void){
   union mesh_network_event event;
+  int unknown=0;
   while(recv(network,event.bytes,sizeof event,0)>=(ssize_t)(KEV_MSG_HEADER_SIZE+sizeof(struct net_event_data))){
     const struct net_event_data *interface=(const void *)(event.bytes+KEV_MSG_HEADER_SIZE);
+    const uint32_t code=event.header.event_code;
     char name[IFNAMSIZ+16];
     snprintf(name,sizeof name,"%.*s%u",(int)sizeof interface->if_name,interface->if_name,interface->if_unit);
+    int known=0;
     for(uint32_t p=0;p<port_count;p++)if(!strcmp(name,ports[p].name)){
-      if(event.header.event_code==KEV_DL_LINK_OFF || event.header.event_code==KEV_DL_IF_DETACHED)port_lost(ports+p,ENETDOWN,1);
-      else if(event.header.event_code==KEV_DL_LINK_ON)ports[p].next=now;
+      known=1;
+      if(code==KEV_DL_LINK_OFF || code==KEV_DL_IF_DETACHED)port_lost(ports+p,ENETDOWN,1);
+      else if(code==KEV_DL_LINK_ON || code==KEV_DL_IF_ATTACHED)ports[p].next=now;
     }
+    unknown|=!known && (code==KEV_DL_LINK_ON || code==KEV_DL_IF_ATTACHED);
   }
+  if(unknown)ports_found();
 }
 
 /* design/bridge-and-ipc.md#clients: every client slot read: a client whose process exited is retired; a program that
-   ended (stopped, its client gone) leaves its ports; a program started is taken onto each port it binds.  Rows of a
-   retired client are released once no port holds a program of a client gone. */
+   ended (stopped, its client gone) leaves its ports; a program started is taken onto each port it binds, or refused
+   on it as a value: ENODEV where the node has no such port, EBUSY where the slot's earlier program still holds queue
+   pairs its device has not released.  Rows of a retired client are released once no port holds a program of a
+   client gone. */
 static uint64_t owners[MESH_CLIENTS],accepted[MESH_CLIENTS];
 static int unreleased;
+static void program_refuse(struct mesh_client *client,uint32_t p,uint64_t owner,int64_t code){
+  struct mesh_port_info *status=&client->port[p];
+  atomic_store(&status->code,code);atomic_store(&status->domain,4);atomic_store(&status->phase,MESH_STOPPED);
+  atomic_store_explicit(&status->prepared,owner,memory_order_release);
+}
 static void clients_turn(int liveness){
   int changed=0,zombie=0;
   for(uint32_t s=0;s<MESH_CLIENTS;s++){
@@ -777,26 +790,23 @@ static void clients_turn(int liveness){
       held|=ports[p].flows[s]!=NULL;
       zombie|=ports[p].flows[s] && ports[p].flows[s]->client!=owner;
     }
-    if(accepted[s] && (accepted[s]!=owner || configured!=owner) && !held)accepted[s]=0;
-    if(!owner || (owner&MESH_RETIRING) || configured!=owner || accepted[s]==owner || held)continue;
+    if(accepted[s] && accepted[s]!=owner && !held)accepted[s]=0;
+    if(!owner || (owner&MESH_RETIRING) || configured!=owner || accepted[s]==owner)continue;
     accepted[s]=owner;
     struct kevent64_s event;EV_SET64(&event,(uint32_t)owner,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,s,0,0);
     kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
     for(uint32_t p=0;p<MESH_PORTS;p++){
       if(!mesh_link_transfers(M,owner,p))continue;
-      if(p<port_count)flow_create(ports+p,s,owner);
-      else {
-        struct mesh_port_info *status=&client->port[p];
-        atomic_store(&status->code,ENODEV);atomic_store(&status->domain,4);atomic_store(&status->phase,MESH_STOPPED);
-        atomic_store_explicit(&status->prepared,owner,memory_order_release);
-      }
+      if(p>=port_count || held)program_refuse(client,p,owner,p>=port_count?ENODEV:EBUSY);
+      else flow_create(ports+p,s,owner);
     }
   }
   unreleased|=changed;
   if(unreleased && !zombie){unreleased=0;mesh_retired_release(M);}
 }
 
-/* design/bridge-and-ipc.md#ports: every RDMA device of the node a port, those found since the bridge's start added */
+/* design/bridge-and-ipc.md#ports: every RDMA device of the node a port, in the order found, those found since the
+   bridge's start added (at its start, and where an interface attached or its link came on that no port has) */
 static void ports_found(void){
   struct ibv_device **list=ibv_get_device_list(NULL);
   for(int i=0;list && list[i] && port_count<MESH_PORTS;i++){
@@ -807,7 +817,6 @@ static void ports_found(void){
     struct port *port=ports+port_count;
     *port=(struct port){.index=port_count,.control=-1};
     snprintf(port->device.name,sizeof port->device.name,"%s",name);snprintf(port->name,sizeof port->name,"%s",name+5);
-    snprintf(mesh_links(M)[port_count].device,sizeof mesh_links(M)[port_count].device,"%s",name);
     atomic_store(&mesh_links(M)[port_count].phase,MESH_STOPPED);
     port_count++;
   }
@@ -885,8 +894,7 @@ int main(int argc,char **argv){
     }
     int alive=now>=liveness;
     if(alive){
-      liveness=now+PAUSE_NS;
-      ports_found();
+      liveness=now+MESH_PAUSE_NS;
       if(binary.st_ino && (stat(argv[0],&current) || current.st_ino!=binary.st_ino || current.st_mtimespec.tv_sec!=binary.st_mtimespec.tv_sec))stop=1;
     }
     clients_turn(alive);
@@ -906,7 +914,7 @@ int main(int argc,char **argv){
         while((accepted=accept(listener,(struct sockaddr *)&from,&size))>=0){
           struct port *port=port_at(from.sin6_scope_id);size=sizeof from;
           if(!port || port->control>=0 || !port->device.frame_capacity){close(accepted);continue;}
-          port->control=accepted;port->next=now+PAIR_NS;
+          port->control=accepted;port->next=now+MESH_PAIR_NS;
           port_greet(port);
         }
       }

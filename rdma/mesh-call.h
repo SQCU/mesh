@@ -18,9 +18,7 @@ int mesh_transfers_trace(struct mesh_ctx *context);
 void mesh_transfers_ledger(struct mesh_ctx *context);
 
 /* design/algorithm-sources.md#programtensor */
-/* design/prepared-machine.md#M09 */
-/* wire selects the registered window; everything a peer never reads belongs outside it */
-int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,int wire,struct mesh_section *);
+int mesh_section_create(struct mesh_ctx *,size_t bytes,uint32_t count,struct mesh_section *);
 /* design/algorithm-sources.md#programtensor */
 int mesh_section_slice(struct mesh_ctx *,struct mesh_section,size_t offset,size_t bytes,uint32_t invocations,uint32_t invocation_pages,struct mesh_section *);
 void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index);

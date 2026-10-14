@@ -141,7 +141,6 @@ def bridge():
     return {"up": False, "error": "mesh-stat unavailable"}
 
 CENSUS = re.compile(r"link (\d+) census queue=(\d+) requests=(\d+) frames=(\d+) retired=(\d+) send_completions=(\d+) records=(\d+) posted=(\d+) landed=(\d+) bytes=(\d+)")
-RECEIVE_RING = re.compile(r"receive ring=\d+ records=(\d+) posted=(\d+)")
 INFO = ("bridge node ",)
 COUNTS = ("requests", "frames", "retired", "send_completions", "records", "posted", "landed", "bytes")
 FABRIC_KEEP = float(os.environ.get("MESH_FABRIC_KEEP", "600"))
@@ -176,17 +175,13 @@ def bridge_log(entry, final=False):
                 total[key] += value
                 entry["last_call"].setdefault(link, dict.fromkeys(COUNTS, 0))[key] += value
             continue
-        if line.startswith("receive ring="):
-            entry["rings"] += 1
-            match = RECEIVE_RING.match(line)
-            if match and int(match.group(1)) > int(match.group(2)): entry["credit_limited"] += 1
-        elif ": paired with node " in line: entry["pairs"] += 1
+        if ": paired with node " in line: entry["pairs"] += 1
         elif line.strip() and not line.startswith(INFO) and ": paired with node " not in line:
             entry["errors"] += 1
             entry["last_error"] = line[:240]
 
 def bridge_counters():
-    return {"log_offset": 0, "census": {}, "last_call": {}, "rings": 0, "credit_limited": 0, "pairs": 0, "errors": 0, "last_error": None}
+    return {"log_offset": 0, "census": {}, "last_call": {}, "pairs": 0, "errors": 0, "last_error": None}
 
 def processes(pids):
     table = {}
@@ -204,14 +199,10 @@ def fabric_bridges(now):
         entry = BRIDGES.get(pid)
         if entry is None:
             log = next((line[1:] for line in output(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "2", "-Fn"]).splitlines() if line.startswith("n/")), None)
-            entry = BRIDGES[pid] = {"pid": pid, "region": "/mesh0", "log": log, "log_size": None, **bridge_counters()}
+            entry = BRIDGES[pid] = {"pid": pid, "log": log, "log_size": None, **bridge_counters()}
         entry.update({"state": process["stat"], "elapsed": process["elapsed"], "exited_at": None})
         try: entry["stat"] = json.loads(run([stat], 3, True).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
         except Exception as error: entry["stat"] = {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
-        entry["rank"] = entry["stat"].get("node")
-        entry["links"] = [{"device": peer.get("device"), "peer": peer.get("node")} for peer in entry["stat"].get("peers") or []]
-        entry["flow"] = [{"node": peer.get("node"), "session": (peer.get("session") or {}).get("phase"), **(peer.get("flow") or {})} for peer in entry["stat"].get("peers") or []]
-        entry["communicators"] = entry["stat"].get("communicators") or []
         if entry["log"]: bridge_log(entry)
     for pid, entry in list(BRIDGES.items()):
         if pid in table: continue

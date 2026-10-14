@@ -11,10 +11,11 @@
 static void mesh_reclaim(struct hdr *);
 
 /* design/algorithm-sources.md#meshobserve */
-/* design/bridge-and-ipc.md#ports: each port of the node's bridge: its peer node while paired (0 else), its phase, its
-   device and bandwidth */
-int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,uint32_t *node){
-  int file=shm_open(name?name:MESH_NAME,O_RDONLY,0);
+/* design/bridge-and-ipc.md#ports: each port of the node's bridge, by its index: its peer node while paired (0 else), its
+   phase and bandwidth; a port is one the bridge found (its phase not MESH_UNKNOWN), and the bridge finds them in index
+   order */
+int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node){
+  int file=shm_open(MESH_NAME,O_RDONLY,0);
   if(file<0)return -errno;
   struct stat info;
   if(fstat(file,&info)){int error=errno;close(file);return -error;}
@@ -28,12 +29,10 @@ int mesh_observe(const char *name,struct mesh_link_view *out,uint32_t capacity,u
     *node=m->node;result=0;
     for(uint32_t i=0;i<m->links;i++){
       struct mesh_link_info *link=&mesh_links(m)[i];
-      if(!link->device[0])continue;
-      if((uint32_t)result<capacity){
-        out[result]=(struct mesh_link_view){.peer=atomic_load_explicit(&link->peer,memory_order_relaxed),
-          .phase=atomic_load_explicit(&link->phase,memory_order_acquire),.bandwidth=atomic_load_explicit(&link->bandwidth,memory_order_relaxed)};
-        memcpy(out[result].device,link->device,sizeof out[result].device);out[result].device[sizeof out[result].device-1]=0;
-      }
+      uint32_t phase=atomic_load_explicit(&link->phase,memory_order_acquire);
+      if(phase==MESH_UNKNOWN)break;
+      if((uint32_t)result<capacity)out[result]=(struct mesh_link_view){.peer=atomic_load_explicit(&link->peer,memory_order_relaxed),
+        .phase=phase,.bandwidth=atomic_load_explicit(&link->bandwidth,memory_order_relaxed)};
       result++;
     }
   }
@@ -111,7 +110,23 @@ int mesh_detach(struct mesh_ctx *c){
 /* design/algorithm-sources.md#programkernel_call */
 /* One first-fit scan over an explicit pair of bitmaps and an explicit range.  The caller names the
    bitmaps because the arena bitmap is indexed by arena page and the row planes by row: they are two
-   index spaces and sharing one sizing is what forced rows >= pages. */
+   index spaces and sharing one sizing is what forced rows >= pages.  A range found clear is claimed
+   word by word with a compare-exchange that expects its bits clear; where another client claimed one
+   first, the words taken are given back and the scan goes on from there, so two clients never hold
+   one range.  A claimed range still `hot` (released, not yet reclaimed) is given back likewise. */
+static int mesh_claim(_Atomic uint64_t *own,_Atomic uint64_t *hot,uint32_t first,uint32_t count){
+  uint32_t last=(first+count-1)/64,w=first/64;
+  for(;w<=last;w++){
+    uint64_t mask=mesh_word_mask(first,count,w),word=atomic_load_explicit(&own[w],memory_order_acquire);
+    while(!(word&mask) && !atomic_compare_exchange_weak_explicit(&own[w],&word,word|mask,memory_order_acq_rel,memory_order_acquire));
+    if(word&mask)break;
+  }
+  int held=w>last;
+  for(uint32_t v=first/64;held && hot!=own && v<=last;v++)held=!(atomic_load_explicit(&hot[v],memory_order_acquire)&mesh_word_mask(first,count,v));
+  if(held)return 1;
+  for(uint32_t v=first/64;v<w;v++)atomic_fetch_and_explicit(&own[v],~mesh_word_mask(first,count,v),memory_order_acq_rel);
+  return 0;
+}
 static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t end,
                           _Atomic uint64_t *own,_Atomic uint64_t *hot){
   for(uint32_t first=(begin+align-1)/align*align;first<=end && count<=end-first;){
@@ -120,8 +135,8 @@ static uint32_t mesh_scan(uint32_t count,uint32_t align,uint32_t begin,uint32_t 
       uint64_t occupied=(atomic_load_explicit(&own[w],memory_order_acquire)|atomic_load_explicit(&hot[w],memory_order_acquire))&mesh_word_mask(first,count,w);
       if(occupied) next=w*64+64-(uint32_t)__builtin_clzll(occupied);
     }
-    if(next==first){ mesh_bits_set(own,first,count); return first; }
-    first=(next+align-1)/align*align;
+    if(next==first && mesh_claim(own,hot,first,count)) return first;
+    if(next>first) first=(next+align-1)/align*align;
   }
   return MESH_ABSENT;
 }
@@ -156,24 +171,17 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
     atomic_store_explicit(&publication->argument,0,memory_order_relaxed);
     atomic_store_explicit(&buffer->owner,c->client,memory_order_release);
   }
-  c->rows+=count;
   return first;
 }
 
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M09 */
-/* Two ranges over one arena and one bitmap: [0,wire_pages) is registered and is the only memory an
-   SGE may name; [wire_pages,arena) is addressable by every client and by the GPU and is never
-   registered, so it costs virtual memory and neither wired pages nor an MR slot. */
-uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align,int wire){
-  struct hdr *m=c->M;
+/* The arena's pages: every one addressable by every client and by the GPU, and registered on a port's device the
+   first time a program names it there (mesh-verbs.h device_register). */
+uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
-  struct mesh_range range=mesh_arena_range(m,wire);
-  _Atomic uint64_t *bits=mesh_arena_bits(m);
-  uint32_t first=mesh_allocate(c,pages,align,range.first,range.first+range.count,bits,bits,
-    wire?&c->wire_cursor:&c->bulk_cursor);
-  if(first!=MESH_ABSENT){ c->arena+=pages; if(wire)c->wire+=pages; }
-  return first;
+  _Atomic uint64_t *bits=mesh_arena_bits(c->M);
+  return mesh_allocate(c,pages,align,0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
 }
 
 /* design/algorithm-sources.md#programtensor */

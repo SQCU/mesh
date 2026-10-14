@@ -64,6 +64,21 @@ def link_map(kind, nodes, pairs, cost=None, apart=False):
     return LinkMap(kind, nodes, pairs, cost, apart)
 
 
+def join(reports, apart=False):
+    """mesh_link_map_join: the LinkMap the bridges' records give the members, `reports` [(node, [(peer, phase,
+    bandwidth) a port]) a member, in member order], each link at its cost; `apart` as LinkMap's."""
+    n = len(reports)
+    held = [ffi.new('struct mesh_link_view[]', [{'peer': p, 'phase': phase, 'bandwidth': w} for p, phase, w in views] or 1)
+            for _, views in reports]
+    room = max(1, n * (n - 1) // 2)
+    link, cost = ffi.new('uint32_t[][2]', room), ffi.new('double[][2]', room)
+    made = ffi.new('struct mesh_link_map *', {'link': link, 'cost': cost})
+    lib.mesh_link_map_join(n, ffi.new('uint32_t[]', [node for node, _ in reports] or 1), ffi.new('struct mesh_link_view *[]', held or 1),
+                           ffi.new('uint32_t[]', [len(views) for _, views in reports] or 1), made)
+    return LinkMap(KINDS[made.kind], n, [(link[l][0], link[l][1]) for l in range(made.links)],
+                   [(cost[l][0], cost[l][1]) for l in range(made.links)], apart)
+
+
 def operand(type, element_bytes, elements):
     """mesh-plan.h's struct mesh_operand (a pointer that owns it; [0] is the struct a function takes)."""
     made = ffi.new('struct mesh_operand *')
@@ -148,7 +163,7 @@ def program_time(lmap, program, piece, alpha=0.0, beta=0.0):
 
 class Context(C.Structure):
     _fields_ = [('M', C.c_void_p), ('len', Z), *((k, Q) for k in ('client', 'send_off', 'send_bytes', 'inputs_off', 'inputs_bytes')),
-                *((k, U) for k in ('rows', 'arena', 'wire', 'shared_pages', 'row_cursor', 'wire_cursor', 'bulk_cursor')),
+                *((k, U) for k in ('row_cursor', 'arena_cursor')),
                 ('fd', C.c_int)]
 
 
@@ -165,7 +180,7 @@ CONTEXT = C.POINTER(Context)
 for name, result, arguments in (
         ('mesh_attach', C.c_int, [CONTEXT, C.c_char_p]),
         ('mesh_detach', C.c_int, [CONTEXT]),
-        ('mesh_section_create', C.c_int, [CONTEXT, Z, U, C.c_int, C.POINTER(Section)]),
+        ('mesh_section_create', C.c_int, [CONTEXT, Z, U, C.POINTER(Section)]),
         ('mesh_section_slice', C.c_int, [CONTEXT, Section, Z, Z, U, U, C.POINTER(Section)]),
         ('mesh_section_address', C.c_void_p, [CONTEXT, Section, U]),
         ('mesh_collective_bind', C.c_int, [CONTEXT, C.c_void_p, U, U, Section, C.POINTER(Section), U, U, C.POINTER(Section)]),
@@ -204,11 +219,11 @@ class Mesh:
         self.block = self.header.pgsz * self.header.block
 
     def ring(self, nbytes, offset=0):
-        """A registered section of `depth` slots of `offset` + `nbytes` in whole blocks: the section, a
-        slot's pages, and the slots as bytes."""
+        """A section of `depth` slots of `offset` + `nbytes` in whole blocks: the section, a slot's pages, and the slots
+        as bytes."""
         pages = -(-(offset + nbytes) // self.block) * self.header.block
         section = Section()
-        check(LIB.mesh_section_create(C.byref(self.context), self.depth * pages * self.header.pgsz, 1, 1, C.byref(section)))
+        check(LIB.mesh_section_create(C.byref(self.context), self.depth * pages * self.header.pgsz, 1, C.byref(section)))
         memory = (C.c_char * (self.depth * pages * self.header.pgsz)).from_address(
             LIB.mesh_section_address(C.byref(self.context), section, 0))
         return section, pages, np.frombuffer(memory, np.uint8).reshape(self.depth, -1)
@@ -271,7 +286,7 @@ class Steps:
                                       (Section * max(1, len(received)))(*received), mesh.depth, pages, self.pieces))
 
     def slot(self, invocation):
-        """Where this rank writes its contribution to `invocation`, in registered pages."""
+        """Where this rank writes its contribution to `invocation`."""
         return self.slots[invocation % self.mesh.depth, :self.bytes].view(self.dtype).reshape(self.shape)
 
     def __call__(self, invocation, deadline=float('inf')):

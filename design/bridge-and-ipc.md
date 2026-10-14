@@ -41,13 +41,17 @@ slot's or its own rows'; no client reads, waits for or names another client's.
 
 ## ports
 
-A port is an RDMA device of the node (`rdma_enN`, its interface `enN`). Every port is the bridge's from its start. On
-its turn (every 3 s, design/recovery.md#pause), a port without a link opens its device (a context, a protection
-domain), and while its port is active it sends a hello (its node and boot) to every node on its link (the link-local
-all-nodes group, UDP `MESH_PORT`). Of two nodes that hear each other, the lower node dials the higher's listener on the
-address it heard, and the two exchange their link hellos (node, boot, the port's LID and GID, the block size) over that
-connection, its control socket, which the bridge keeps with a keepalive. The link is then paired: the region's link
-table names the peer node, the phase `MESH_PAIRED`, the port's bandwidth and the pairing's index.
+A port is an RDMA device of the node (`rdma_enN`, its interface `enN`), given an index in the order the bridge finds
+it: at its start, and again when an interface attaches or its link comes on that no port has (`ports_found`). On its
+turn (every 3 s, design/recovery.md#pause), a port without a link opens its device (a context, a protection domain),
+and while its port is active it sends a hello (its node and boot) to every node on its link (the link-local all-nodes
+group, UDP `MESH_PORT`). Of two nodes that hear each other, the lower node dials the higher's listener on the address
+it heard, and the two exchange their link hellos (node, boot, the port's LID and GID, the block size) over that
+connection, its control socket, which the bridge keeps with a keepalive. A port whose device is retiring takes no
+hello and no connection until its turn has retired the device and opened it again. The link is then paired: the
+region's link table names the peer node, the phase `MESH_PAIRED`, the port's bandwidth and the pairing's index. The
+table holds no device name or address: those stay in the bridge, and a reader names a port by its index
+(`mesh_observe`, mesh-plan.h), joining the members' records into a map with `mesh_link_map_join`.
 
 A node is its bridge's node number, a 31-bit fold of the host's UUID (`gethostuuid`). A cable moved to another port, a
 cable added, a peer that restarted: each is a port that finds its peer again, with no configuration (there is none)
@@ -56,7 +60,9 @@ and no restart. Several cables between one pair of nodes are several ports, told
 ## clients
 
 A process attaches with `mesh_attach(context, name)`: it takes a vacant slot (or one whose process is gone, which it
-retires) with one compare-exchange, and never waits for any other client. `name` is its execution's: every member of
+retires) with one compare-exchange, and never waits for any other client. Its rows and arena pages are claimed with a
+compare-exchange on each bitmap word that expects them clear (`mesh_scan`), so two clients preparing at once never hold
+the same rows or pages. `name` is its execution's: every member of
 one execution names it alike (an NCCL communicator's unique id, a call's name), and the bridges pair a program with the
 members' programs of the same name. An attach is refused (EBUSY) when every slot is held, and ESRCH when the node's
 bridge is gone.
@@ -64,7 +70,8 @@ bridge is gone.
 A program is bound (`mesh_transfer_bind`: a link's lists are leased at its first transfer, its peer recorded),
 prepared (`mesh_transfers_prepare`, `mesh_host_inputs` or the Metal transport) and started (`mesh_transfers_start`),
 which returns once the bridge has paired the program on every link it binds, or with the failure the link's status
-names. `mesh_detach`, or the client's process exiting, retires the slot and ends its program: its rows are closed, and
+names (ENODEV: no such port; EBUSY: the slot's earlier program still holds queue pairs), or ETIMEDOUT past the bridge's
+own windows (design/recovery.md#first). `mesh_detach`, or the client's process exiting, retires the slot and ends its program: its rows are closed, and
 the bridge releases them once no port still holds a program of a client gone.
 
 ## protocol

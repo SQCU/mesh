@@ -2,12 +2,12 @@
 
 The game's numerical caller is `planner/plan.py`, the routed-expert bot planner. Each
 rank holds a block of every expert's columns (Megatron-LM tensor parallelism), and one
-all-reduce per tick from `rdma/mesh-collective.h` completes the expert output over an
-explicit link map (`examples/links-pair.conf` for the pair). `rdma/mesh.py` binds it
-(`AllReduce`). With the bridges up on the region, run the same command on every node
-from the repository root:
+all-reduce per tick from `rdma/mesh-collective.h` completes the expert output over the map
+the bridges record (`rdma/peers.py` topology). `rdma/mesh.py` binds it (`Mesh`). Each
+node's bridge is its resident service; run the same command on every node from the
+repository root:
 
-    MESH_REGION=<region> PYTHONPATH=xonotic:rdma bin/mesh-python -B -m planner.plan [ticks] [bots]
+    PYTHONPATH=xonotic:rdma bin/mesh-python -B -m planner.plan [ticks] [bots]
 
 Pair run, 2026-09-23 (mesh aa36138; bridges on /xonrdma; M5 rank 0 with 1408 of each
 expert's 2048 columns, M4 rank 1 with 640; 2000 ticks of 480 bots, width 256, 8 experts):

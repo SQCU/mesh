@@ -8,8 +8,10 @@ how to run it. PyTorch programs use it through [torch-mesh](torch-mesh/README.md
 ## Build and run
 
 A node's mesh installation (`install.sh`, kept current by `io.mesh.update`) builds the bridge, the libraries and the
-Python bindings, installs the library under `/usr/local/mesh/rdma`, and runs the bridge as the node's service
-(`io.mesh.bridge`, design/bridge-and-ipc.md). A program links or imports the installed library:
+Python bindings, installs the library (its headers, libraries and modules) under `/usr/local/mesh/rdma`, keeps the
+node's torch environment with torch-mesh and the library on its path (`~/.venv-mesh-uv`, `bin/mesh-venv.sh`), and runs
+the bridge as the node's service (`io.mesh.bridge`, design/bridge-and-ipc.md). A program links or imports the
+installed library:
 
 ```
 cc app.c -I /usr/local/mesh/rdma -L /usr/local/mesh/rdma -lnccl-mesh -Wl,-rpath,/usr/local/mesh/rdma
@@ -22,11 +24,12 @@ map is what the ranks' bridges record when it is made.
 ## Communicators
 
 - `ncclCommInitRank(comm, n, id, rank)`: NCCL's, with NCCL's bootstrap: the id is the root's `host:port`
-  (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens); each rank's node and its bridge's links meet there, and
-  the map is the links among the ranks' nodes their bridges hold paired, each priced by its port's bandwidth.
+  (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens); each rank's node and its bridge's ports meet there, and
+  the map is their join (`mesh_link_map_join`): a link where both ranks' bridges hold a port paired with the other,
+  priced by the widest such port's bandwidth.
 - `ncclMeshCommInitRank(comm, rank, topology, paths, programs, count, node, name)`: the topology is an operand.
   - `topology`: a link map (`mesh-plan.h`: kind `mesh`, `ring`, `tree` or `graph`; links; each link's alpha in
-    microseconds and beta in nanoseconds a byte). `mesh_link_map_read` reads the text form.
+    microseconds and beta in nanoseconds a byte).
   - `paths`: the trees messages between unlinked ranks take. NULL means shortest paths.
   - `programs`: the compiled collectives, a table of `ncclMeshProgram` entries. NULL means the declared default.
   - `node`: each rank's bridge node. NULL means rank r runs on node r.
@@ -53,7 +56,7 @@ runs.
 - **Host path.** A NULL stream: host pointers, and each call is synchronous. It works for any array on any node
   (NumPy, CPU tensors). It is functional, not the measured path.
 - **Metal path.** An `ncclMeshStream`: the group is encoded into a Metal command buffer, and every buffer is an
-  `ncclMeshBuffer` (an `MTLBuffer` and a byte offset). Zero copies into the bridge's registered memory.
+  `ncclMeshBuffer` (an `MTLBuffer` and a byte offset). Zero copies into the bridge's region.
   - torch-mesh runs MPS tensors here.
   - A group can be issued and completed later (`issue`, `ncclMeshComplete`).
 
@@ -110,7 +113,7 @@ nodes that remain.
 | `NCCL_BUFFSIZE` | library | bytes of a large ring's slots together (default 4 MiB) |
 | `MESH_POSITIONS` | library | the session's cyclic invocations (default 8192) |
 | `MESH_CHECK_TRACE` | library | each group's scheduled messages and each position check (the pairing report's inputs) in the rank's log |
-| `MESH_RDMA` | torch-mesh | the rdma directory (default the package's own) |
+| `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against (default its parent; the mesh's install passes `/usr/local/mesh/rdma`) |
 
 ## NumPy
 

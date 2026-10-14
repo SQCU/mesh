@@ -41,7 +41,7 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
   if(!count)return 0;
   struct mesh_section records;
   /* design/prepared-machine.md#M10 */
-  int status=mesh_section_create(context,count*ranges*sizeof(struct prepared_publication),1,0,&records);
+  int status=mesh_section_create(context,count*ranges*sizeof(struct prepared_publication),1,&records);
   if(status)return status;
   struct prepared_publication *prepared=mesh_section_address(context,records,0);
   for(uint32_t j=0;j<ranges;j++)mesh_publication_prepare(context->M,sections[j].first,prepared+j*count);
@@ -55,7 +55,7 @@ int mesh_metal_publication_prepare(struct mesh_ctx *context,struct mesh_metal_tr
   if(invocations && sections[0].bytes<=UINT32_MAX){
     struct mesh_section words;
     /* design/prepared-machine.md#M28 */
-    status=mesh_section_create(context,sizeof(struct mesh_output_status)*(uint64_t)(invocations+1)*ranges,1,0,&words);
+    status=mesh_section_create(context,sizeof(struct mesh_output_status)*(uint64_t)(invocations+1)*ranges,1,&words);
     if(status){[(id)publication->records release];return status;}
     struct mesh_output_status *address=mesh_section_address(context,words,0);
     for(uint32_t j=0;j<ranges;j++)for(uint32_t t=0;t<=invocations;t++)

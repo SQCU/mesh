@@ -4,26 +4,13 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <time.h>
 
 /* design/algorithm-sources.md#programtensor */
 static uint32_t mesh_section_row(struct mesh_section section,uint32_t index){return section.first+index*section.stride;}
 
-/* design/prepared-machine.md#M09 */
-/* A bound row is an SGE target, so it must lie in the registered window.  Refusing it here is the
-   whole enforcement of the split: an operand allocated out of the unregistered arena fails at bind
-   with EINVAL instead of reaching the wire with a lkey that does not cover it. */
 static uint64_t mesh_section_rows(struct mesh_section section){
   return section.stride?(uint64_t)section.stride*section.count:1;
-}
-static int mesh_section_wired(struct hdr *m,struct mesh_section section){
-  uint64_t block=(uint64_t)m->block*m->pgsz,rows=mesh_section_rows(section);
-  for(uint64_t i=0;i<rows;i++){
-    struct mesh_page_entry *entry=&mesh_page(m)[section.first+i];
-    if(atomic_load_explicit(&entry->mapping,memory_order_relaxed)==MESH_ABSENT)continue;
-    uint64_t offset=atomic_load_explicit(&entry->address,memory_order_relaxed)-m->data_off;
-    if(!mesh_wired(m,offset,block-offset%block))return 0;
-  }
-  return 1;
 }
 
 /* design/prepared-machine.md#M08 */
@@ -34,8 +21,6 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
   if(queue==MESH_ABSENT)return EHOSTUNREACH;
   if(queue>=m->links*MESH_QUEUES || end<=begin)return EINVAL;
   if(!section.count || (uint64_t)section.first+mesh_section_rows(section)>mesh_rows(m))return EINVAL;
-  /* design/prepared-machine.md#M09 */
-  if(!mesh_section_wired(m,section))return EINVAL;
   /* design/bridge-and-ipc.md#clients: the link's lists, allocated at its first transfer, and the peer the link
      reaches, which every transfer on it is bound for */
   uint32_t link=queue/MESH_QUEUES,peer=atomic_load_explicit(&mesh_links(m)[link].peer,memory_order_relaxed);
@@ -44,7 +29,7 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t queue,int receive,uint3
   tx->peer=peer;
   if(!tx->orders){
     struct mesh_section lists;
-    int status=mesh_section_create(context,(size_t)MESH_QUEUES*2*MESH_ORDERS*sizeof(struct mesh_transfer),1,0,&lists);
+    int status=mesh_section_create(context,(size_t)MESH_QUEUES*2*MESH_ORDERS*sizeof(struct mesh_transfer),1,&lists);
     if(status)return status;
     tx->orders=(uint64_t)((char *)mesh_section_address(context,lists,0)-(char *)m);
   }
@@ -104,9 +89,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   }
   struct mesh_section storage;
   /* design/prepared-machine.md#M04 */
-  /* The SEND cell array is read by the provider and written by the GPU; it never appears in an
-     SGE, so it is allocated outside the registered window. */
-  int status=mesh_section_create(context,(cells?cells:1)*sizeof(struct mesh_send),1,0,&storage);
+  int status=mesh_section_create(context,(cells?cells:1)*sizeof(struct mesh_send),1,&storage);
   if(status)return status;
   void *address=mesh_section_address(context,storage,0);
   memset(address,0,storage.bytes);
@@ -177,7 +160,8 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
 /* design/algorithm-sources.md#programcopy */
 /* design/bridge-and-ipc.md#clients: the program handed to the node's bridge, which pairs it with the members' on each
    link it binds, or fails it (the link's status names the failure: its peer's program never started, a link lost, a
-   lease the node cannot give): 0 once every link is paired, else the failure; ESRCH where the bridge is gone */
+   lease the node cannot give): 0 once every link is paired, else the failure; ESRCH where the bridge is gone, and
+   ETIMEDOUT where it answers within none of its own windows (design/recovery.md#first) */
 int mesh_transfers_start(struct mesh_ctx *context){
   struct hdr *m=context->M;
   struct mesh_client *client=mesh_client_at(m,context->client);
@@ -186,12 +170,14 @@ int mesh_transfers_start(struct mesh_ctx *context){
   if(!atomic_compare_exchange_strong_explicit(&client->configured,&idle,context->client,memory_order_release,memory_order_relaxed))return ECANCELED;
   /* design/prepared-machine.md#M26 */
   mesh_control_notify(m);
+  const uint64_t deadline=clock_gettime_nsec_np(CLOCK_MONOTONIC)+MESH_PEER_NS+MESH_PAIR_NS+MESH_PAUSE_NS;
   for(uint32_t p=0;p<m->links;p++){
     if(!mesh_link_transfers(m,context->client,p))continue;
     struct mesh_port_info *port=&client->port[p];
     while(atomic_load_explicit(&port->prepared,memory_order_acquire)!=context->client){
       pid_t bridge=(pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_relaxed);
       if(!bridge || (kill(bridge,0) && errno==ESRCH))return ESRCH;
+      if(clock_gettime_nsec_np(CLOCK_MONOTONIC)>deadline)return ETIMEDOUT;
       usleep(1000);
     }
     if(atomic_load_explicit(&port->phase,memory_order_relaxed)==MESH_STOPPED)
@@ -217,7 +203,7 @@ int mesh_transfers_trace(struct mesh_ctx *context){
         events[1]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*mesh_transfer_active(in+i,tx->invocations);
     }
     struct mesh_section section;
-    int status=mesh_section_create(context,2*sizeof(struct mesh_trace_ring)+(events[0]+events[1])*sizeof(struct mesh_trace),1,0,&section);
+    int status=mesh_section_create(context,2*sizeof(struct mesh_trace_ring)+(events[0]+events[1])*sizeof(struct mesh_trace),1,&section);
     if(status)return status;
     struct mesh_trace_ring *sent=mesh_section_address(context,section,0),*landed=(void *)(sent->records+events[0]);
     sent->capacity=events[0];landed->capacity=events[1];
@@ -237,7 +223,7 @@ void mesh_transfers_ledger(struct mesh_ctx *context){
     if(!tx->trace)continue;
     struct mesh_trace_ring *ring[2]={(void *)((char *)m+tx->trace),NULL};
     ring[1]=(void *)(ring[0]->records+ring[0]->capacity);
-    printf("{\"trace_layout\":%u,\"receive_base\":0,\"invocations\":%u}\n",p,tx->invocations);
+    printf("{\"trace_layout\":%u,\"invocations\":%u}\n",p,tx->invocations);
     for(uint32_t q=0;q<MESH_QUEUES;q++){
       uint32_t channel=p*MESH_QUEUES+q;
       struct mesh_transfer *out=mesh_transfers(m,context->client,channel,MESH_SEND),*in=mesh_transfers(m,context->client,channel,MESH_RECEIVE);
@@ -287,12 +273,10 @@ int mesh_transfers_cyclic(struct mesh_ctx *context){
 }
 
 /* design/algorithm-sources.md#programtensor */
-int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int wire,struct mesh_section *section){
+int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,struct mesh_section *section){
   struct hdr *m=context->M;
   if(!bytes || !count)return EINVAL;
-  size_t quantum=(size_t)m->block*m->pgsz;
-  /* design/prepared-machine.md#M09 */
-  size_t capacity=mesh_arena_range(m,wire).count;
+  size_t quantum=(size_t)m->block*m->pgsz,capacity=mesh_arena_pages(m);
   if(bytes>capacity*(size_t)m->pgsz)return ENOMEM;
   size_t span=(bytes+quantum-1)/quantum*m->block;
   if(span>capacity/count)return ENOMEM;
@@ -306,13 +290,7 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,int
   mesh_bits_set(mesh_plane(m,MESH_ROW_HOT),first,rows);
   /* design/prepared-machine.md#M01 */
   /* design/prepared-machine.md#M03 */
-  uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,m->block,wire);
-  /* design/prepared-machine.md#M01 */
-  /* Registration wires its pages eagerly, so until now every operand was resident by the time the
-     bridge came up.  Unregistered pages are not, and their first fault would land in the measured
-     region; touch the span here, at preparation, where it costs nothing that is being timed. */
-  if(!wire && page!=MESH_ABSENT)
-    for(uint32_t p=0;p<(uint32_t)span*count;p++)*(volatile unsigned char *)mesh_at(m,page+p)=0;
+  uint32_t page=mesh_arena_alloc(context,(uint32_t)span*count,m->block);
   if(page==MESH_ABSENT){
     int error=errno;
     mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),first,rows);

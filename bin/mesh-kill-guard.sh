@@ -33,10 +33,10 @@ spelling, an absolute path, sh -c, xargs, a copy of the binary, or resetting PAT
 all reach the same driver and produce the same unkillable process and the same
 physical visit. Succeeding at that is the failure the guard exists to prevent.
 
-A bridge is a child of the driver that started it (metal-microbench
-tools/mesh/run_pair.py), and the driver ends it with SIGTERM:
+A bridge is the node's resident service, the launchd job io.mesh.bridge, and
+launchd ends it with SIGTERM (it starts again by KeepAlive):
 
-  kill -TERM <pid>
+  sudo launchctl kill TERM system/io.mesh.bridge
 
 The teardown handler then runs ibv_destroy_qp / ibv_dereg_mr / ibv_dealloc_pd /
 ibv_close_device. SIGTERM is safe precisely because the handler runs. SIGKILL

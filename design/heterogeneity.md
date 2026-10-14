@@ -19,11 +19,10 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 ## 1. Vocabulary
 
 - **Rate**: a node's time model for one operator class at one dtype, a function of the call's
-  shape. It is written on the node's line of the link map as that class's constants, in the form
-  the map's node-line comment gives (metal-microbench `configs/links/pair-ring.txt`: `proj=u,v`, u ns
-  per weight byte plus v ns per weight element per row, for the engine's fp16 projections;
-  `attn=u,v`, u + v·bs ns per byte of one cached position read at batch bs). `calibrate.py node`
-  writes a node's line from its probes. A class the map does not carry (a program's fp32 MPS matmul,
+  shape. It is the node's record in the mesh's store (rdma/store.py) as that class's constants:
+  `proj=u,v`, u ns per weight byte plus v ns per weight element per row, for the engine's fp16
+  projections; `attn=u,v`, u + v·bs ns per byte of one cached position read at batch bs.
+  metal-microbench `calibrate.py node` writes a node's record from its probes. A class the map does not carry (a program's fp32 MPS matmul,
   its attention) is measured on each node and added as its own class (R3). A node has one rate per
   class and dtype, never one speed.
 - **Link**: the cost of one direction of one pair of nodes, α (µs) per message plus β (ns) per byte.

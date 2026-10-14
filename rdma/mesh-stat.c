@@ -29,11 +29,10 @@ int main(int argc,char **argv){
   for(uint32_t s=0;s<h->clients;s++)clients+=atomic_load(&((struct mesh_client *)((char *)h+h->client_off))[s].owner)!=0;
   printf("{\"up\":%s,\"ready\":%s,\"paired\":%s,\"bridge_pid\":%llu,\"clients\":%u,\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"rows\":%u,\"links\":%u,\"paired_links\":%u,\"peers\":[",
     alive?"true":"false",alive?"true":"false",paired?"true":"false",(unsigned long long)pid,clients,h->version,h->node,h->pgsz,h->block,h->rows,h->links,paired);
-  for(uint32_t i=0,listed=0;i<h->links;i++){
+  for(uint32_t i=0;i<h->links && atomic_load(&mesh_links(h)[i].phase)!=MESH_UNKNOWN;i++){
     struct mesh_link_info *link=&mesh_links(h)[i];
-    if(!link->device[0])continue;
-    printf("%s{\"node\":%u,\"phase\":%u,\"code\":%lld,\"device\":\"%s\",\"bandwidth\":%llu,\"connection\":%llu}",listed++?",":"",atomic_load(&link->peer),
-      atomic_load(&link->phase),(long long)atomic_load(&link->code),link->device,(unsigned long long)atomic_load(&link->bandwidth),(unsigned long long)atomic_load(&link->connection));
+    printf("%s{\"port\":%u,\"node\":%u,\"phase\":%u,\"code\":%lld,\"bandwidth\":%llu,\"connection\":%llu}",i?",":"",i,atomic_load(&link->peer),
+      atomic_load(&link->phase),(long long)atomic_load(&link->code),(unsigned long long)atomic_load(&link->bandwidth),(unsigned long long)atomic_load(&link->connection));
   }
   printf("]}\n");
   munmap(h,bytes); close(f); return readiness && !alive;

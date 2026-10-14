@@ -9,7 +9,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'rdma'))
 from allocate import Allocator
-from mesh import Mesh, link_map
+from mesh import Mesh
 import peers
 
 TEAMS = 5
@@ -64,10 +64,7 @@ def main():
     # identical inputs, and its shares are the next tick's configuration operand.
     # the mesh as its bridges record it: its nodes by their bridges' node numbers, the links they hold paired
     graph = peers.topology(list(peers.observe_mesh()['observations'].values()))
-    members = [n['identity'] for n in graph['nodes']]
-    pairs = [(members.index(a), members.index(b)) for a, b, *_ in graph['edges']]
-    whole = len(pairs) == len(members) * (len(members) - 1) // 2
-    mesh = Mesh(link_map('mesh' if whole else 'graph', len(members), [] if whole else pairs), args.ticks, args.depth, members=members)
+    mesh = Mesh(graph['map'], args.ticks, args.depth, members=[n['identity'] for n in graph['nodes']])
     reduce = mesh.collective('allreduce', (args.bots + 1, args.width), np.float32)
     mesh.start()
     allocate = Allocator(columns, split['grain'], split['low'], split['prior'], split['floor'],

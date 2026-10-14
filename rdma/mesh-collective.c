@@ -45,6 +45,31 @@ int mesh_link_map_check(const struct mesh_link_map *map){
 }
 
 /* Whether node v is in a bit set of nodes (a bit a node, 64 a word; NULL: every node). */
+/* design/bridge-and-ipc.md#ports */
+static uint64_t mesh_paired_toward(const struct mesh_link_view *views,uint32_t count,uint32_t peer,int *paired){
+  uint64_t widest=0;
+  for(uint32_t i=0;i<count;i++)if(views[i].phase==MESH_PAIRED && views[i].peer==peer){
+    *paired=1;
+    if(views[i].bandwidth>widest)widest=views[i].bandwidth;
+  }
+  return widest;
+}
+uint32_t mesh_link_map_join(uint32_t nodes,const uint32_t *node,const struct mesh_link_view *const *views,const uint32_t *count,
+                            struct mesh_link_map *map){
+  map->nodes=nodes;map->links=0;
+  for(uint32_t a=0;a<nodes;a++)for(uint32_t b=a+1;b<nodes;b++){
+    int there=0,back=0;
+    uint64_t one=mesh_paired_toward(views[a],count[a],node[b],&there),other=mesh_paired_toward(views[b],count[b],node[a],&back);
+    if(!there || !back)continue;
+    uint64_t widest=one>other?one:other;
+    map->link[map->links][0]=a;map->link[map->links][1]=b;
+    map->cost[map->links][0]=MESH_ALPHA_US;map->cost[map->links][1]=widest?8e9/(double)widest:MESH_BETA_NS;
+    map->links++;
+  }
+  map->kind=(uint64_t)map->links*2==(uint64_t)nodes*(nodes-1)?MESH_LINKS_MESH:MESH_LINKS_GRAPH;
+  return map->links;
+}
+
 static int mesh_member(const uint64_t *set,uint32_t v){ return !set || (set[v/64]>>(v%64)&1); }
 
 /* Whether the map links a and b, either way (a mesh links every pair; a ring, a tree or a graph its links). */
@@ -600,8 +625,8 @@ int mesh_host_inputs(struct mesh_ctx *context){
     words+=frames[p];
   }
   struct mesh_section input,stop;
-  int status=mesh_section_create(context,sizeof(uint64_t)*(words?words:1),1,0,&input);
-  if(!status)status=mesh_section_create(context,sizeof(struct mesh_cancellation)+m->links*sizeof(struct mesh_cancel_range),1,0,&stop);
+  int status=mesh_section_create(context,sizeof(uint64_t)*(words?words:1),1,&input);
+  if(!status)status=mesh_section_create(context,sizeof(struct mesh_cancellation)+m->links*sizeof(struct mesh_cancel_range),1,&stop);
   if(status)return status;
   uint64_t *word=mesh_section_address(context,input,0);
   struct mesh_cancellation *cancel=mesh_section_address(context,stop,0);
