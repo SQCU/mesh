@@ -50,9 +50,10 @@ never stands for its key.
                                                                 each argument named, and each layer's attention plan at
                                                                 each rows class to 16: the table an engine reads
                                                                 (LM_STREAMED_INSTANCES)
-  python -m torch_mesh.streamed observe PROFILE EXPORT [--program RECORD --rank R] --out ROWS
-                                                                a direct step's profile (LM_PROFILE_DECODE) as observations
-                                                                of its instances, appended to ROWS (JSON lines)
+  python -m torch_mesh.streamed observe READING EXPORT [--loads L] [--program RECORD --rank R] --out ROWS
+                                                                a served reading's profile (metal-microbench
+                                                                tools/reading.py) as observations of its instances,
+                                                                appended to ROWS (JSON lines)
 
 A factor of the fit (a configuration's efficiency at a rows class) rests on two slice shapes at least; one seen on a
 single shape takes its family's model. A decode attention plan (metal-microbench docs/kernels.md#decode-attention: the
@@ -193,14 +194,26 @@ class Fit:
     def time(self, spec, s, rows):
         u = instance_units(spec, s, rows)
         X = torch.tensor([[float(u[k]) for k in FIT_FEATURES]], dtype=torch.float64)
-        return float(self._predict(_family(spec), X)[0]) * math.exp(self.factors.get(factor_key(spec), 0.0))
+        loads = self.factors.get(loads_key(spec), 0.0) if spec.get('LOADS') else 0.0
+        return float(self._predict(_family(spec), X)[0]) * math.exp(self.factors.get(factor_key(spec), 0.0) + loads)
 
     def fit(self, observations, iters=900, ridge=0.02, spread=0.01):
         """Least squares in log space over observations (spec, slice units, rows, us, shape): the families' coefficients
         with a ridge toward the prior, and a factor a configuration and rows class (factor_key) with a ridge toward 1 (the
         shape of a kernel's own efficiency, pooled over every slice it ran on) where two shapes at least observed it; a
-        configuration seen on one shape takes its family's model (its factor 0: one shape is no evidence of a shape)."""
+        configuration seen on one shape takes its family's model (its factor 0: one shape is no evidence of a shape). The
+        loads' factor (loads_key) is the mean log ratio of the instances read in both forms on the same shape and rows,
+        whose readings measure the form and not the coefficients."""
         prior = torch.tensor([math.log(FIT_PRIOR[k]) for k in FIT_TERMS], dtype=torch.float64)
+        forms, ratios = {}, {}
+        for spec, s, rows, us, shape in observations:
+            same = (tuple(sorted((k, v) for k, v in spec.items() if k != 'LOADS')), shape, rows)
+            forms.setdefault(same, {}).setdefault(spec.get('LOADS', 0), []).append(us)
+        for (same, _, _), read in forms.items():
+            if len(read) == 2:
+                ratios.setdefault(loads_key(dict(same)), []).append(math.log(min(read[1]) / min(read[0])))
+        loads = {k: sum(v) / len(v) for k, v in ratios.items()}
+        observations = [o for o in observations if len(forms[(tuple(sorted((k, v) for k, v in o[0].items() if k != 'LOADS')), o[4], o[2])]) < 2]
         shapes = {}
         for spec, s, _, _, shape in observations:
             shapes.setdefault(factor_key(spec), set()).add((s['outputs'], s['columns']))
@@ -228,7 +241,7 @@ class Fit:
                 loss.backward()
                 opt.step()
         self.theta = {f: v.detach() for f, v in theta.items()}
-        self.factors = {k: float(v) for k, v in zip(keys, factors.detach().tolist())}
+        self.factors = {**{k: float(v) for k, v in zip(keys, factors.detach().tolist())}, **loads}
         return float(loss.detach())
 
     def coefficients(self):
@@ -244,17 +257,17 @@ def candidates(s, rows, op='product', tables=False):
     """The admissible instances of slice units `s` at `rows` input rows: rows <= 4 on the ALUs (R the rows' class)
     or the cooperative tensor (M 8); 8 or 16 rows the cooperative tensor (M 8 or 16); past 16 the panel (M 64, 128);
     shares of 8 to 48 tiles, simdgroups 2, 4 or 8 a band (the head's four bands of two too), one or two tiles in
-    flight, a 1-bit tile by tables where the head's input writes them; `op` couple: the gate and up products together
-    (its slice their units summed)."""
+    flight, a 1-bit tile by tables where the head's input writes them, either loads (LOADS: fragment_load's); `op` couple:
+    the gate and up products together (its slice their units summed)."""
     T, out = s['columns'] // 32, []
     js = sorted({-(-T // -(-T // max(1, -(-T // per)))) for per in PERS})
     if op == 'couple' and rows > 4:
         return []
     if rows > 16:
-        return [dict(kernel='panel', M=M) for M in (64, 128)]
+        return [dict(kernel='panel', M=M, LOADS=loads) for M in (64, 128) for loads in (0, 1)]
     if op == 'couple':
-        return [dict(kernel='couple', R=rows_class(rows), SK=sk, BANDS=1, J=1, F=F, LUT=0, APART=apart) for sk in (2, 4, 8) for F in (1, 2)
-                for apart in (0, 1)]
+        return [dict(kernel='couple', R=rows_class(rows), SK=sk, BANDS=1, J=1, F=F, LUT=0, APART=apart, LOADS=loads) for sk in (2, 4, 8)
+                for F in (1, 2) for apart in (0, 1) for loads in (0, 1)]
     if rows <= 4:
         R = rows_class(rows)
         shapes = [(sk, 1) for sk in (2, 4, 8)] + ([(2, 4)] if op == 'head' else [])
@@ -264,13 +277,18 @@ def candidates(s, rows, op='product', tables=False):
             for J in js:
                 for F in (1, 2):
                     for lut in ((0, 1) if tables else (0,)):
-                        out.append(dict(kernel='alu', R=R, SK=sk, BANDS=bands, J=J, F=F, LUT=lut))
+                        out += [dict(kernel='alu', R=R, SK=sk, BANDS=bands, J=J, F=F, LUT=lut, LOADS=loads) for loads in (0, 1)]
     if rows >= 2:
         M = 8 if rows <= 8 else 16
         for sk, bands in ((2, 2), (1, 4), (1, 1)):
             if (s['outputs'] // 32) % bands == 0:
-                out += [dict(kernel='coop', M=M, SK=sk, BANDS=bands, J=J) for J in js]
+                out += [dict(kernel='coop', M=M, SK=sk, BANDS=bands, J=J, LOADS=loads) for J in js for loads in (0, 1)]
     return out
+
+
+def loads_key(spec):
+    """The loads' factor's key: a family and its rows class (streamed.metal fragment_load's LOADS 1 against 0)."""
+    return f"loads/{_family(spec)}/{spec.get('R', spec.get('M'))}"
 
 
 def factor_key(spec):
@@ -306,7 +324,7 @@ def spec_arguments(spec, T, widths, finish=False):
     """An instance's kernel and template arguments in ARGUMENTS' order on a slice of T tile columns and width class
     `widths`: its WIDTHS the class's widths 1 ... c as a mask (width_mask)."""
     kernel = spec['kernel']
-    values = dict(spec, TILES=T, WIDTHS=width_mask(widths), OUT=int(finish))
+    values = dict({'LOADS': 0}, **spec, TILES=T, WIDTHS=width_mask(widths), OUT=int(finish))
     if kernel == 'coop':
         values['COOP'] = coop_slots()
     return kernel, tuple(values[name] for name in ARGUMENTS['panel' if kernel == 'panel_t' else kernel])
@@ -862,19 +880,21 @@ def _check(args):
               f'gradient {_relative(x.grad, xf.grad):.2e}', flush=True)
 
 
-ARGUMENTS = {'alu': ('R', 'SK', 'BANDS', 'J', 'TILES', 'WIDTHS', 'OUT', 'LUT', 'F'),
-             'coop': ('M', 'SK', 'BANDS', 'J', 'TILES', 'WIDTHS', 'COOP'),
-             'couple': ('R', 'SK', 'TILES', 'WIDTHS', 'F', 'APART'),
-             'panel': ('M', 'TILES', 'WIDTHS')}
+ARGUMENTS = {'alu': ('R', 'SK', 'BANDS', 'J', 'TILES', 'WIDTHS', 'OUT', 'LUT', 'F', 'LOADS'),
+             'coop': ('M', 'SK', 'BANDS', 'J', 'TILES', 'WIDTHS', 'COOP', 'LOADS'),
+             'couple': ('R', 'SK', 'TILES', 'WIDTHS', 'F', 'APART', 'LOADS'),
+             'panel': ('M', 'TILES', 'WIDTHS', 'LOADS')}
 
 
-def parse_instance(name):
-    """An instance's spec from its host name (instance): its template arguments by name (ARGUMENTS)."""
+def parse_instance(name, loads=0):
+    """An instance's spec from its host name (instance): its template arguments by name (ARGUMENTS); a name without its
+    LOADS (named before the loads were an argument) takes `loads`, the form its library had (0 before mesh 290449d)."""
     parts = name.replace('streamed_', '').split('_')
     kernel = parts[0]
     if kernel not in ARGUMENTS:
         raise ValueError(name)
-    spec = dict(zip(ARGUMENTS[kernel], (int(v) for v in parts[1:])), kernel=kernel)
+    values = [int(v) for v in parts[1:]]
+    spec = dict(zip(ARGUMENTS[kernel], values + [loads] * (len(ARGUMENTS[kernel]) - len(values))), kernel=kernel)
     if kernel == 'couple':
         spec.update(BANDS=1, J=1, LUT=0)
     return spec
@@ -973,34 +993,39 @@ def _fit(args):
 
 
 def _observe(args):
-    """A direct step's profile (forward_graph LM_PROFILE_DECODE: a line a pipeline label, its microseconds a step and
-    dispatches a step) as observations of its instances: each label's slices the export's of its shape and widths
-    (their units' mean), its time a dispatch less the profile's floor (the least time a dispatch of any label)."""
+    """A served reading's profile (metal-microbench tools/reading.py read --profile: per class, per command label its least
+    us a dispatch) as observations of its instances: each label's slices the export's (and its stacks') of its shape and
+    widths (their units' mean), its time less the class's floor (its least command), a label without its LOADS taking
+    --loads (the form the reading's library had)."""
     import re
     streamed = Streamed(args.export)
     held = slices(streamed, args.program, args.rank)
-    shapes = {}
-    for _, m in held:
+    shapes, named = {}, dict(held)
+    for name, m in held:
         shapes.setdefault((m.rows, m.columns, m.widths), []).append(slice_units(m))
-    text = Path(args.profile).read_text()
-    rows = int(re.search(r'decode step, (\d+) rows', text).group(1))
-    lines = re.findall(r'^\s+(\S+)(?: (\d+)x(\d+))?\s+([0-9.]+) us a step\s+(\d+) dispatches a step', text, re.M)
-    floor = min(float(us) / int(n) for _, _, _, us, n in lines)
+        for first, rest in STACKS:
+            parts = [m] + [named[n] for n in (name[:-len(first)] + r for r in rest) if n in named] if name.endswith(first) else []
+            if len(parts) > 1:
+                shapes.setdefault((sum(p.rows for p in parts), m.columns, max(p.widths for p in parts)), []).append(
+                    {k: sum(u[k] for u in map(slice_units, parts)) if k != 'columns' else m.columns for k in UNITS})
     out = []
-    for label, outputs, columns, us, n in lines:
-        if not label.startswith(('streamed_alu', 'streamed_coop', 'streamed_panel')) or not outputs:
-            continue
-        spec = parse_instance(label)
-        units = shapes.get((int(outputs), int(columns), width_class(spec['WIDTHS'])))
-        if not units:
-            continue
-        mean = mean_units(units)
-        out.append({'instance': label, 'rows_in': rows, 'best_us': max(float(us) / int(n) - floor, 0.1), 'form': f'profile {outputs}x{columns} R{rows}',
-                    'source': str(Path(args.profile).resolve()), **mean})
+    for cls, commands in json.loads(Path(args.reading).read_text())['engine']['profile']['commands'].items():
+        rows, floor = int(cls.split()[1]), min(c['least_us'] for c in commands.values())
+        for label, c in commands.items():
+            found = re.fullmatch(r'streamed_(alu|coop|panel)_(\S+) (\d+)x(\d+)', label)
+            if not found:
+                continue
+            spec = parse_instance(label.split()[0], args.loads)
+            outputs, columns = int(found.group(3)), int(found.group(4))
+            units, n = shapes.get((outputs, columns, width_class(spec['WIDTHS']))), min(rows, spec.get('R', rows))
+            if units:
+                out.append({'instance': '_'.join(['streamed_' + spec['kernel']] + [str(spec[k]) for k in ARGUMENTS[spec['kernel']]]),
+                            'rows_in': n, 'best_us': max(c['least_us'] - floor, 0.1), 'form': f'profile {outputs}x{columns} R{n}',
+                            'source': str(Path(args.reading).resolve()), **mean_units(units)})
     with open(args.out, 'a') as f:
         for row in out:
             f.write(json.dumps(row) + '\n')
-    print(f'{args.out}: {len(out)} observations from {args.profile} (floor {floor:.2f} us a dispatch)')
+    print(f'{args.out}: {len(out)} observations from {args.reading}')
 
 
 def slices(streamed, program=None, rank=None):
@@ -1128,7 +1153,8 @@ def main():
                          help="a drafter's export whose matrices the member runs whole (metal-microbench tools/draft/dflash2.py export)")
     resolve.add_argument('--out', required=True)
     observe = sub.add_parser('observe')
-    observe.add_argument('profile')
+    observe.add_argument('reading')
+    observe.add_argument('--loads', type=int, default=1, help="the LOADS of labels that do not name it (0 before mesh 290449d)")
     observe.add_argument('export')
     observe.add_argument('--program', default=None)
     observe.add_argument('--rank', type=int, default=None)

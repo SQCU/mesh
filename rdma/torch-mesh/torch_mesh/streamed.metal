@@ -261,12 +261,25 @@ static inline __attribute__((always_inline)) void fragment_values(W w, F f) {
 #define FRAGMENT_MAX(W) ((W) >= 4096u ? 12u : (W) >= 2048u ? 11u : (W) >= 1024u ? 10u : (W) >= 512u ? 9u : (W) >= 256u ? 8u : \
     (W) >= 128u ? 7u : (W) >= 64u ? 6u : (W) >= 32u ? 5u : (W) >= 16u ? 4u : (W) >= 8u ? 3u : (W) >= 4u ? 2u : 1u)
 
-// A tile's planes at `at`, width b, into w: the widest width's loads, each predicated on the tile's width, issued before
-// the width's decode is chosen (metal-microbench docs/kernels.md#stacked-products: the products' sum a step 3 % less at
-// one row, at par at four and eight).
-template <uint WIDTHS, uint N>
+// A tile's B planes at `at` into w, a straight run of loads.
+template <uint B, uint N>
+static inline __attribute__((always_inline)) void fragment_run(device const uint *at, thread uint (&w)[N]) {
+    for (uint i = 0; i < B; i++) w[i] = at[32 * i];
+}
+
+// A tile's planes at `at`, width b, into w (metal-microbench docs/kernels.md#stacked-products, the loads): LOADS 1 the
+// widest width's loads, each predicated on the tile's width, issued before the width's decode is chosen; LOADS 0 a
+// straight run of b loads in a switch on the width (a decode's own case where the decode follows at once). Which a
+// product takes is its instance's (the fit's loads factor).
+template <uint WIDTHS, uint LOADS, uint N>
 static inline __attribute__((always_inline)) void fragment_load(device const uint *at, uint b, thread uint (&w)[N]) {
-    for (uint i = 0; i < N; i++) if (i < b) w[i] = at[32 * i];
+    if (LOADS) {
+        for (uint i = 0; i < N; i++) if (i < b) w[i] = at[32 * i];
+        return;
+    }
+#define FRAGMENT_RUN(B) fragment_run<B>(at, w)
+    FRAGMENT_WIDTHS(WIDTHS, FRAGMENT_RUN)
+#undef FRAGMENT_RUN
 }
 
 // acc[n][2p], acc[n][2p + 1] += pair P = 4p + j of loaded words w times x[n][j] (x already times half the step).
@@ -336,7 +349,7 @@ static inline uint fragment_word(uint held, device const uint *words, uint span,
 }
 
 // A tile's planes and x loaded (nothing for an empty or absent tile; a 1-bit tile read by tables only its word).
-template <uint R, uint WIDTHS, uint LUT>
+template <uint R, uint WIDTHS, uint LUT, uint LOADS>
 static inline __attribute__((always_inline)) void fragment_fetch(thread fragment_tile<R, FRAGMENT_MAX(WIDTHS)> &f, uint word, device const uint *planes,
         device const half *xs, uint columns, uint rows, uint k) {
     const uint b = (word >> 12) & 15u;
@@ -345,7 +358,7 @@ static inline __attribute__((always_inline)) void fragment_fetch(thread fragment
     if (b == 0) return;
     device const uint *at = planes + ((word & 0xFFFu) << 5);
     if (LUT && b == 1) { f.w[0] = at[0]; return; }
-    fragment_load<WIDTHS>(at, b, f.w);
+    fragment_load<WIDTHS, LOADS>(at, b, f.w);
     const float h = 0.5f * f.step;
     for (uint n = 0; n < R; n++) {
         device const half *xr = xs + ulong(min(n, rows - 1)) * columns + k;
@@ -367,7 +380,7 @@ static inline __attribute__((always_inline)) void fragment_use(thread const frag
 // A simdgroup's walk over its tiles of one band (share [first, first + span), tiles part, part + SK, ...), F (1 or 2)
 // tiles in flight: their planes and x loaded before either is decoded. Each lane's 8 R sums (the rows past `rows` repeat the last
 // row's loads).
-template <uint R, uint SK, uint STEPS, uint WIDTHS, uint LUT, uint F>
+template <uint R, uint SK, uint STEPS, uint WIDTHS, uint LUT, uint F, uint LOADS>
 static inline __attribute__((always_inline)) void fragment_walk(device const uint *codes, device const uint *words, uint base,
         device const float *tables, device const half *xs, uint columns, uint rows, uint first, uint span, uint part,
         uint lane, thread float (&acc)[R][8]) {
@@ -378,9 +391,9 @@ static inline __attribute__((always_inline)) void fragment_walk(device const uin
     for (uint i = 0; i < STEPS; i += F) {
         const uint ta = first + part + i * SK, tc = ta + SK;
         fragment_tile<R, FRAGMENT_MAX(WIDTHS)> a, c;
-        fragment_fetch<R, WIDTHS, LUT>(a, fragment_word<SK, STEPS>(held, words, span, part, i), planes, xs, columns, rows, ta * 32 + kb);
+        fragment_fetch<R, WIDTHS, LUT, LOADS>(a, fragment_word<SK, STEPS>(held, words, span, part, i), planes, xs, columns, rows, ta * 32 + kb);
         if (F > 1)
-            fragment_fetch<R, WIDTHS, LUT>(c, fragment_word<SK, STEPS>(held, words, span, part, i + 1), planes, xs, columns, rows, tc * 32 + kb);
+            fragment_fetch<R, WIDTHS, LUT, LOADS>(c, fragment_word<SK, STEPS>(held, words, span, part, i + 1), planes, xs, columns, rows, tc * 32 + kb);
         fragment_use<R, WIDTHS, LUT>(a, tables + (ta * 8 + kb) * 16, columns * 4, acc, corr);
         if (F > 1) fragment_use<R, WIDTHS, LUT>(c, tables + (tc * 8 + kb) * 16, columns * 4, acc, corr);
     }
@@ -394,8 +407,8 @@ static inline __attribute__((always_inline)) void fragment_walk(device const uin
 // each band's sums reduced over its
 // lanes and simdgroups into partials[share][n][row] (OUT 0: coded row order, the row scale not applied) or finished
 // (OUT 1, one share covering K: each with its row's scale, capped where cap > 0, at row order[r] of ys, row stride
-// d.stride). Rows past d.rows repeat the last row's loads and are not written.
-template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F>
+// d.stride). Rows past d.rows repeat the last row's loads and are not written. LOADS: fragment_load's.
+template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F, uint LOADS>
 MESH_KERNEL(product)
 kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                          device const uint *bands [[buffer(2)]], device const float *tables [[buffer(3)]],
@@ -410,7 +423,7 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
     const uint local = simd / SK, part = simd % SK, band = group.x * BANDS + local, rows = d.rows;
     const uint first = group.y * PER, span = min(TILES, first + PER) - first, pitch = d.pitch ? d.pitch : TILES, word = bands[band];
     float acc[R][8], out[R];
-    fragment_walk<R, SK, STEPS, WIDTHS, LUT, F>(codes, tiles + band * pitch + first, streamed_base(word), tables,
+    fragment_walk<R, SK, STEPS, WIDTHS, LUT, F, LOADS>(codes, tiles + band * pitch + first, streamed_base(word), tables,
                                              xs + streamed_slab(word, d.inputs, COLUMNS), COLUMNS, rows, first, span, part, lane, acc);
     const uint row = fragment_reduce<R>(acc, lane, out);
     for (uint n = 0; n < R; n++) sums[local][part][n][row] = out[n];
@@ -433,7 +446,7 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
 // matrix (the first SK gate's, the rest up's: one walk's code for both, F tiles in flight). hidden[n][r] =
 // GELU(gateScale[r] g) * upScale[r] u, in the hidden's code order (down's coded input). Rows past d.rows repeat the
 // last row's loads and are not written.
-template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART>
+template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART, uint LOADS>
 kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device const uint *gateTiles [[buffer(1)]],
                             device const uint *gateBands [[buffer(2)]], device const half *gx [[buffer(4)]],
                             device const uint *upCodes [[buffer(6)]], device const uint *upTiles [[buffer(7)]],
@@ -450,7 +463,7 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
         const uint matrix = simd / SK, part = simd % SK;
         const bool up = matrix != 0;
         float acc[R][8], out[R];
-        fragment_walk<R, SK, STEPS, WIDTHS, 0, F>(up ? upCodes : gateCodes, (up ? upTiles : gateTiles) + band * pitch,
+        fragment_walk<R, SK, STEPS, WIDTHS, 0, F, LOADS>(up ? upCodes : gateCodes, (up ? upTiles : gateTiles) + band * pitch,
                                                  streamed_base((up ? upBands : gateBands)[band]), nullptr, up ? ux : gx, COLUMNS,
                                                  rows, 0, TILES, part, lane, acc);
         const uint row = fragment_reduce<R>(acc, lane, out);
@@ -465,11 +478,11 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
         for (uint i = 0; i < STEPS; i += F) {
             const uint k = (simd + i * SK) * 32 + kb;
             fragment_tile<R, FRAGMENT_MAX(WIDTHS)> g, u, g1, u1;
-            fragment_fetch<R, WIDTHS, 0>(g, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i), gp, gx, COLUMNS, rows, k);
-            fragment_fetch<R, WIDTHS, 0>(u, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i), up, ux, COLUMNS, rows, k);
+            fragment_fetch<R, WIDTHS, 0, LOADS>(g, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i), gp, gx, COLUMNS, rows, k);
+            fragment_fetch<R, WIDTHS, 0, LOADS>(u, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i), up, ux, COLUMNS, rows, k);
             if (F > 1) {
-                fragment_fetch<R, WIDTHS, 0>(g1, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i + 1), gp, gx, COLUMNS, rows, k + 32 * SK);
-                fragment_fetch<R, WIDTHS, 0>(u1, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i + 1), up, ux, COLUMNS, rows, k + 32 * SK);
+                fragment_fetch<R, WIDTHS, 0, LOADS>(g1, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i + 1), gp, gx, COLUMNS, rows, k + 32 * SK);
+                fragment_fetch<R, WIDTHS, 0, LOADS>(u1, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i + 1), up, ux, COLUMNS, rows, k + 32 * SK);
             }
             fragment_use<R, WIDTHS, 0>(g, nullptr, 0, gacc, gcorr);
             fragment_use<R, WIDTHS, 0>(u, nullptr, 0, uacc, ucorr);
@@ -513,7 +526,7 @@ kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const 
     };
     if (b == 0) { for (uint P = 0; P < 16; P++) put(P, float2(0.0f)); return; }
     uint w[12];
-    fragment_load<0x1FFEu>(at, b, w);
+    fragment_load<0x1FFEu, 1>(at, b, w);
 #define FRAGMENT_DENSE(B) fragment_values<B>(w, put)
     FRAGMENT_WIDTHS(0x1FFEu, FRAGMENT_DENSE)
 #undef FRAGMENT_DENSE
@@ -834,7 +847,7 @@ static inline __attribute__((always_inline)) void fragment_coop(W w, half h, thr
 // of J along K; each tile decoded into the right-input cooperative tensor of matmul2d<M, 32, 32> and multiplied by its
 // 32 columns of x, one operation a tile; a band's simdgroups' sums reduced in threadgroup memory into
 // partials[share][n][row] (coded row order, the row scale not applied).
-template <uint M, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint COOP>
+template <uint M, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint COOP, uint LOADS>
 MESH_KERNEL(product)
 kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                           device const uint *bands [[buffer(2)]], device half *xs [[buffer(4)]],
@@ -863,8 +876,8 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
         const half h = half(0.5f * fragment_step(word));
         auto rb = op.template get_right_input_cooperative_tensor<half, half, float>();
         uint w[FRAGMENT_MAX(WIDTHS)];
-        fragment_load<WIDTHS>(at, b, w);
-#define FRAGMENT_COOP(B) fragment_coop<B, COOP>(w, h, rb)
+        if (LOADS) fragment_load<WIDTHS, 1>(at, b, w);
+#define FRAGMENT_COOP(B) { if (!LOADS) fragment_run<B>(at, w); fragment_coop<B, COOP>(w, h, rb); }
         FRAGMENT_WIDTHS(WIDTHS, FRAGMENT_COOP)
 #undef FRAGMENT_COOP
         if (rows >= M) {
@@ -923,7 +936,7 @@ template [[host_name("streamed_coopmap_16")]] [[kernel]] decltype(streamed_coopm
 // Eight tiles of band `band`, tiles [t0, t0 + 8) (zero past TILES), decoded by the threadgroup's eight simdgroups into
 // panel: natural order with value (k, n) at panel[k * KN + n] (Rows) or at panel[n * NK + k] (transposed), times half
 // each tile's step, fp16.
-template <uint TILES, uint WIDTHS, bool ROWS>
+template <uint TILES, uint WIDTHS, bool ROWS, uint LOADS>
 static inline __attribute__((always_inline)) void fragment_panel(device const uint *codes, device const uint *tiles, uint base,
         uint t0, uint simd, uint lane, threadgroup half *panel, uint stride) {
     const uint t = t0 + simd, c = fragment_c(lane), kb = fragment_kb(lane);
@@ -938,8 +951,8 @@ static inline __attribute__((always_inline)) void fragment_panel(device const ui
     if (b == 0) { for (uint P = 0; P < 16; P++) put(P, float2(0.0f)); return; }
     device const uint *at = codes + ((base + (word & 0xFFFu)) << 5) + lane;
     uint w[FRAGMENT_MAX(WIDTHS)];
-    fragment_load<WIDTHS>(at, b, w);
-#define FRAGMENT_PANEL(B) fragment_values<B>(w, put)
+    if (LOADS) fragment_load<WIDTHS, 1>(at, b, w);
+#define FRAGMENT_PANEL(B) { if (!LOADS) fragment_run<B>(at, w); fragment_values<B>(w, put); }
     FRAGMENT_WIDTHS(WIDTHS, FRAGMENT_PANEL)
 #undef FRAGMENT_PANEL
 }
@@ -950,7 +963,7 @@ static inline __attribute__((always_inline)) void fragment_panel(device const ui
 // panels cover K): each value with its row's scale, capped (cap > 0), at row order[r] of ys (row stride d.stride). A
 // last panel past the matrix's width adds its tail element by element (a tensor operation's slice past its operand is
 // not clipped).
-template <uint M, uint TILES, uint WIDTHS>
+template <uint M, uint TILES, uint WIDTHS, uint LOADS>
 kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                            device const uint *bands [[buffer(2)]], device half *xs [[buffer(4)]],
                            device float *partials [[buffer(5)]], device half *ys [[buffer(11)]],
@@ -977,7 +990,7 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
         const uint t0 = p * 8;
         if (t0 >= TILES) break;
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        fragment_panel<TILES, WIDTHS, true>(codes, words, base, t0, simd, lane, panel, KN);
+        fragment_panel<TILES, WIDTHS, true, LOADS>(codes, words, base, t0, simd, lane, panel, KN);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         auto weights = W.slice<32, 256>(0, 0);
         if (t0 + 8 > TILES) {
@@ -1017,7 +1030,7 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
 // strides past 2^16 elements corrupt its rows past the first); j a coded column). A threadgroup is a 256-column panel
 // (group.x) and M input rows; its bands [share * per, share * per + per) each decoded into the panel (rows the band's 32)
 // and multiplied by the band's block of xs. Columns past the matrix's are not written.
-template <uint M, uint TILES, uint WIDTHS>
+template <uint M, uint TILES, uint WIDTHS, uint LOADS>
 kernel void streamed_panel_t(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                              device const uint *bands [[buffer(2)]], device half *xs [[buffer(4)]],
                              device float *partials [[buffer(5)]], constant streamed_dims &dims [[buffer(15)]],
@@ -1038,7 +1051,7 @@ kernel void streamed_panel_t(device const uint *codes [[buffer(0)]], device cons
     for (uint band = share * per; band < last; band++) {
         auto X = tensor(xs + ulong(band) * rows * 32, dextents<int, 2>{32, int(rows)}, array<int, 2>{1, 32});
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        fragment_panel<TILES, WIDTHS, false>(codes, tiles + band * pitch, streamed_base(bands[band]), group.x * 8, simd, lane, panel, NK);
+        fragment_panel<TILES, WIDTHS, false, LOADS>(codes, tiles + band * pitch, streamed_base(bands[band]), group.x * 8, simd, lane, panel, NK);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         auto weights = W.slice<256, 32>(0, 0);
         if (row0 + M <= rows) {
