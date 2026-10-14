@@ -22,22 +22,21 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   needs its index (`mps:0`).
 - One rank a node, launched as torchrun launches one (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`); each node's
   bridge is its resident service, so a launch starts no bridge.
-  - Each rank reads its node and its links from its bridge (the links paired now), and the group's ranks exchange
-    them through the group's store when the group is made.
+- A group is made by NCCL's init (`ncclCommInitRank`, its unique id passed through the group's store): the ranks
+  exchange their nodes alone, and each session of the group reads the map its bridge keeps when the session opens.
 - A bidirectional exchange with one peer goes in one batch: `dist.batch_isend_irecv`, or a coalescing manager.
   Separate `isend`/`irecv` calls in the same order on both sides do not pair; the library reports it, and on MPS
   tensors the next call raises.
-- Make subgroups (`new_group`, `DeviceMesh`) after the world group, as torch does: they run on its session, and
-  members the cables do not join are joined through the world's other nodes.
-- The group's `timeout` is how long a link may stay silent before the library cancels it (`MESH_REMOTE_BOUND`
-  overrides it).
+- A subgroup (`new_group`) is a communicator of its own, made in any order, before or after the world group.
+- A link that lands nothing for the library's one bound (`mesh.h` `MESH_SILENT_NS`, 10 s) is cancelled, and the
+  collective waiting on it fails; the group's `timeout` is not the library's to read.
 - Everything runs on any connected cable graph. Messages between ranks the map does not link (p2p, `all_to_all`,
-  `gather`, `scatter`) are forwarded by the nodes between them
-  ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)), on queue pairs the session leases from its bridges.
+  `gather`, `scatter`, a collective's crossings) are forwarded by the bridges on their route
+  ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
 
 ## What works
 
-Run on the pair's two GPUs, each row checked by one of metal-microbench's `tools/torch_parallel/{collectives,tp,dp,ep,cp}.py`
+Run on the pair's two GPUs, each row checked by one of metal-microbench's `tools/torch_parallel/{collectives,dp,ep,pp}.py`
 against one device (2026-10-04); 3 to 6 ranks with CPU tensors on loopback:
 
 | works | notes |
@@ -51,15 +50,11 @@ against one device (2026-10-04); 3 to 6 ranks with CPU tensors on loopback:
 | all_to_all, all_to_all_single | uneven splits, empty inputs |
 | send, recv, isend, irecv, batch_isend_irecv | |
 | barrier, async_op works, coalescing | |
-| functional collectives under torch.compile | one graph: TP, EP |
-| DTensor redistribution, DDP, tensor parallelism | |
-| context parallelism | ring attention, forward only |
+| functional collectives under torch.compile | one graph |
+| DDP | |
+| ring attention | `torch_mesh._mps.ring(group, q, k, v)` on the sequence shards, forward only |
 | pipeline parallelism | torch.distributed.pipelining, GPipe and 1F1B, gradients checked |
-| 2-D device meshes | pipeline times context (ring attention), expert or tensor parallelism (`mesh2d.py`) |
 | expert parallelism | all_to_all_single |
-
-Examples, each checked against one device: `tools/torch_parallel/{tp,dp,ep,cp,collectives}.py` in
-metal-microbench. `pair.py --programs tp,dp,ep,cp,collectives` runs them on the mesh's nodes.
 
 ## What does not
 
@@ -70,64 +65,52 @@ metal-microbench. `pair.py --programs tp,dp,ep,cp,collectives` runs them on the 
   Megatron's overlapped gradient reduction, side streams) does not port as written. What overlaps here: an
   `async_op=True` collective waited after the compute it may overlap, or a compiled graph of functional
   collectives (metal-microbench `tools/torch_parallel/crossing.py OVERLAP=1` reads it).
+- `DeviceMesh("mps")`, so DTensor, tensor and context parallelism and 2-D meshes on MPS: torch 2.14's DeviceMesh
+  calls `torch.mps.is_initialized` and `set_device`, which torch's MPS module does not have, and DTensor has no
+  sharding of MPS's `linear_backward` or SDPA. torch-mesh patches none of them.
 - ReduceOp PREMUL_SUM and the bitwise ops; `monitored_barrier` (it needs a CPU device type the group does not
   list); `split_group`. One call mixing MPS and CPU tensors.
 - More than one rank a node.
 
 ## Uneven nodes
 
-Stock PyTorch splits every sharded extent equally. `torch_mesh.partition` splits a mesh dimension by parts
-proportional to each node's speed, in buffers whose shapes stay fixed:
+Stock PyTorch splits every sharded extent equally. `torch_mesh.partition` is a partition operand on raw tensors: a
+mesh dimension's extents split among its ranks by parts proportional to each node's speed, the program holding its
+share and calling the list collectives with unequal sizes (`all_gather(list)`, `reduce_scatter(out, list)`,
+`all_to_all_single` with splits: MPI's v-collectives). DTensor shards as stock torch does.
 
 ```python
 from torch_mesh import partition
 partition.attach(mesh, tp=((5, 11), (5, 11)))    # (capacities, parts) of each coordinate along "tp"
+blocks = partition.split(mesh, "tp", N)          # each rank's block of an extent N, in rank order
 ```
 
-A coordinate's capacity is its local buffer's size, and stock kernels compute over all of it, padding included. So
-a capacity above the part costs compute: give each coordinate the largest part it will hold. `partition.write(mesh,
-tp=parts)` changes the parts between calls within the capacities (no reshape, recompile or reallocation).
-
-A program on raw tensors, not DTensor, splits by its own counts and uses the list collectives with unequal sizes
-(`all_gather(list)`, `reduce_scatter(out, list)`, `all_to_all_single` with splits).
-
-The first parts can come from each node's rates (`rdma/allocate.py` `equal_finish`); later ones from the run itself
-(below); see
-[design/heterogeneity.md](../../design/heterogeneity.md). Parts are indexed by rank, not by node: the group's nodes
-in rank order are `dist.distributed_c10d._get_default_group().node`.
-
-On the pair, `tp.py` takes them from the environment: `pair.py --programs tp SP=0 PARTITION=5,11` (sequence
-parallelism off with uneven parts) gives rank 0 five sixteenths and rank 1 eleven. Rank 0 is the Mini, so the M5
-holds the larger part.
+- A coordinate's capacity is the most it holds; a rank that keeps its share in a buffer of its capacity, its valid
+  elements first, keeps its shapes while the parts move within the capacities. `partition.write(mesh, tp=parts)`
+  changes the parts between calls, the same on every rank.
+- The first parts can come from each node's rates (`rdma/allocate.py` `equal_finish`), later ones from the run itself
+  (below); see [design/heterogeneity.md](../../design/heterogeneity.md). Parts are indexed by rank, not by node.
 
 ### Parts from the run's own evidence
 
 Nobody needs to know the parts in advance. Call `partition.rebalance` once a step, on every rank alike:
 
 ```python
-parts, written = partition.rebalance(mesh, "tp", every=8)
-if list(parts) != partition.operand(mesh, "tp").parts.tolist():   # moved past the capacities
-    mesh = DeviceMesh(device, list(range(world)), mesh_dim_names=("tp",))
-    partition.attach(mesh, tp=(parts, parts))                      # attach again at them, and shard again
-elif written:
-    ...                                                            # moved within them: partition.relay the shards
+parts, written = partition.rebalance(mesh, "tp", every=8)   # written: moved within the capacities
 ```
 
 - The first call watches the dimension's group. Every collective on it is then marked as it is issued and once its
-  wait has run: on MPS by timing events on torch's stream (in `_stream.mm`, so DTensor's functional collectives are
-  included), on CPU by the host clock (`torch_mesh/evidence.py`). A rank's work in a step is the time between its
-  collectives, never inside them, so a slow peer never reads as a slow rank.
+  wait has run: on MPS by timing events on torch's stream (in `_stream.mm`, functional collectives included), on CPU
+  by the host clock (`torch_mesh/evidence.py`). A rank's work in a step is the time between its collectives, never
+  inside them, so a slow peer never reads as a slow rank.
 - Every `every` steps the ranks' stretches (one a collective) are gathered to all of them, and each runs the same
   step of `rdma/allocate.py` `Balancer`, so all get the same parts. It minimises the steps' time, the sum over the
-  stretches of the slowest rank's, not the ranks' totals, which can agree while every collective still waits. That step is DFPA: the ranks' measured points, the
-  grains given to whoever finishes earliest with them, and a stop once the measurements promise no gain past their
-  own resolution. The parts then stand, so jitter does not reshard.
-- A rank computes its whole buffer, so its work follows its capacity. Attach with the capacities equal to the
-  parts, and attach again when the parts move; that costs one step.
+  stretches of the slowest rank's, not the ranks' totals, which can agree while every collective still waits. That
+  step is DFPA: the ranks' measured points, the grains given to whoever finishes earliest with them, and a stop once
+  the measurements promise no gain past their own resolution. The parts then stand, so jitter does not reshard.
+- Parts that move past a capacity are the program's to attach again (capacities and parts both), at the cost of its
+  buffers' new shapes.
 - `partition.balancing(mesh, "tp")` returns what the last window saw.
-
-On the pair (`tools/torch_parallel/tp.py REBALANCE=4`, 16 heads from 8/8), the parts moved to 1/15, 3/13 and then
-4/12, and stood. Steps went from 365 to 243-245 ms, and the output and gradients still matched one device.
 
 ## Uneven engines within a node
 
@@ -211,10 +194,13 @@ product's output from its shares, `streamed_block_element` enumerating a block's
 (the KV type's scores of each lane's positions, the chunk's online softmax of R rows, the KV type's value product), the
 position groups' sum and the KV type's finish (its parts' merge and store). metal-microbench's engine instantiates it over
 its fp16 pages (`decode_paged`) and its recorder over LiteRT's int8 window (`k7_window`, K7); a new KV layout is a new type
-(metal-microbench docs/kernels.md#decode-attention). `torch_mesh/argmax.metal` is a row's greatest candidate in one order
-(`mesh_argmax`: the greater value, then the lower key; a row's threadgroups merged by the last to arrive), and the
-selection is its draw at temperature 1 (`mesh_draw`: the greatest logit plus the Gumbel noise of the row's seed, key and
-token), metal-microbench's engine's and its LiteRT program's one selection.
+(metal-microbench docs/kernels.md#decode-attention). `torch_mesh/argmax.metal` is the library's selection: the draw at temperature 1
+(`mesh_draw`: the greatest of each candidate's logit plus its Gumbel noise, keyed by the row's seed, key and token), the
+normaliser (`mesh_normaliser`: a row's greatest logit and its sum of exponentials, log Z) and the retained set
+(`mesh_retain`: a head of the 2^k greatest logits and a tail of 2^m of the rest drawn as the draw is, with log Z), each a
+row's split reduction finished by the last threadgroup to arrive (`mesh_argmax`'s merge). metal-microbench's engine and
+its LiteRT program draw by it; torch programs reach it through `torch_mesh/argmax.py`: `draw(z, seed, keys)` each row's
+token, `retain(z, seed, positions, head, tail)` each row's retained set.
 
 `torch_mesh/streamed.py` makes a coded matrix a torch tensor (a wrapper subclass whose aten operations are those
 kernels), so a program is written once in torch and queried for what it needs: evaluated, or differentiated by torch's
@@ -248,12 +234,6 @@ w = s["lm_head"].to("cpu")                        # decoded
   0.01). The scaling and the caller's dtype take one dispatch before the product and none after (the finish writes
   that dtype).
 - The codes are constants: no gradient reaches them, only through them.
-- A coded tensor shards as a DTensor: torch's own `parallelize_module` places it (`ColwiseParallel`,
-  `RowwiseParallel`, forward and backward) with `src_data_rank=None`, each rank cutting its share from its own copy of
-  the codes (its storage is no dense buffer to scatter). A correctness check, not a measure of speed:
-  metal-microbench `tools/torch_parallel/e2b.py` CODES= (Gemma-4 E2B, every coded matrix its weight, each layer's FFN
-  parallelized so on the pair), each token drawn at temperature 1 (Gumbel noise keyed by the position, the same on every
-  rank).
 
 `python -m torch_mesh.streamed check EXPORT [NAME ...]` checks the decode against `model_code.py`'s reference decode,
 the node's cooperative slots, each chosen instance's product (1, 2, 4, 8, 16 and 300 rows; the head's at 1, 2 and 4) and its input gradient against
@@ -263,7 +243,7 @@ FFN 5e-4 to 7e-4, its gradient 8e-4).
 
 ## Performance
 
-- The MPS path is the measured path. An eager collective costs about 17 us on the pair; collectives compiled into a
-  graph cost about 13 us; async ops hide the crossing behind compute.
+- The MPS path is the measured path. An eager collective costs about 17 us on the pair; async ops hide the crossing
+  behind compute.
 - On two ranks every all-reduce is the direct exchange: one crossing.
 - Readings and their records: metal-microbench `docs/measurement.md`.
