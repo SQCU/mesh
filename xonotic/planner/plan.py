@@ -9,8 +9,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'rdma'))
 from allocate import Allocator
-from mesh import Mesh
-import peers
+from mesh_mpi import Comm
 
 TEAMS = 5
 EXPERTS = 8
@@ -49,24 +48,20 @@ def main():
     parser.add_argument('--width', type=int, default=256)
     parser.add_argument('--columns', default=','.join(map(str, split['columns'])),
                         help="config_t0: each rank's expert columns, in rank order (default: split.json)")
-    parser.add_argument('--depth', type=int, default=4)
-    parser.add_argument('--seconds', type=float, default=150)
     args = parser.parse_args()
     columns = [int(value) for value in args.columns.split(',')]
     if sum(columns) != FF:
         parser.error(f'--columns must sum to {FF}')
     if args.width < len(columns):
         parser.error('--width must hold one segment time per rank')
-    deadline = time.monotonic() + args.seconds
     # The operand's last row carries each rank's segment time in its own column and zeros
     # elsewhere, so the reduction sums it exactly and every rank reads every rank's time from the
     # tick's result: the allocator (rdma/allocate.py) is duplicated on every rank and steps on
     # identical inputs, and its shares are the next tick's configuration operand.
-    # the mesh as its bridges record it: its nodes by their bridges' node numbers, the links they hold paired
-    graph = peers.topology(list(peers.observe_mesh()['observations'].values()))
-    mesh = Mesh(graph['map'], args.ticks, args.depth, members=[n['identity'] for n in graph['nodes']])
-    reduce = mesh.collective('allreduce', (args.bots + 1, args.width), np.float32)
-    mesh.start()
+    comm = Comm()
+    rank = comm.Get_rank()
+    local = np.zeros((args.bots + 1, args.width), np.float32)
+    total = np.empty_like(local)
     allocate = Allocator(columns, split['grain'], split['low'], split['prior'], split['floor'],
                          split['forget'], split['step'])
     route, up, down, objective = model(args.width)
@@ -74,21 +69,20 @@ def main():
     positions[:, 0] = np.arange(args.bots)
     objectives = np.full(args.bots, -1)
     switches = collective = solving = 0
-    print(json.dumps({'event': 'planner_started', 'rank': reduce.rank, 'bots': args.bots, 'width': args.width,
-                      'experts': EXPERTS, 'columns': columns[reduce.rank], 'steps': len(reduce.steps)}), flush=True)
+    print(json.dumps({'event': 'planner_started', 'rank': rank, 'bots': args.bots, 'width': args.width,
+                      'experts': EXPERTS, 'columns': columns[rank]}), flush=True)
     start = ready = time.monotonic()
     for tick in range(args.ticks):
         began = time.monotonic()
-        low = sum(allocate.shares[:reduce.rank])
-        share = slice(low, low + allocate.shares[reduce.rank])
-        slot = reduce.slot(tick)
-        solve(positions, route, up[:, :, share], down[:, share], slot[:args.bots])
+        low = sum(allocate.shares[:rank])
+        share = slice(low, low + allocate.shares[rank])
+        solve(positions, route, up[:, :, share], down[:, share], local[:args.bots])
         solving += time.monotonic() - began
         # this rank's segment: from the last reduction's return to entering this one
-        slot[args.bots] = 0
-        slot[args.bots, reduce.rank] = 1e3 * (time.monotonic() - ready)
+        local[args.bots] = 0
+        local[args.bots, rank] = 1e3 * (time.monotonic() - ready)
         began = time.monotonic()
-        total = reduce(tick, deadline)
+        comm.Allreduce(local, total)
         ready = time.monotonic()
         collective += ready - began
         if tick >= split['warmup']:
@@ -100,8 +94,8 @@ def main():
         positions[:, 1:] += .35 * objective[1:, picks].T
         positions[:, 1:] *= .98
     elapsed = time.monotonic() - start
-    reduce.close()
-    print(json.dumps({'event': 'planner_finished', 'rank': reduce.rank, 'ticks': args.ticks,
+    comm.Free()
+    print(json.dumps({'event': 'planner_finished', 'rank': rank, 'ticks': args.ticks,
                       'bot_plans': args.ticks * args.bots, 'seconds': elapsed, 'tick_ms': 1e3 * elapsed / args.ticks,
                       'solve_ms': 1e3 * solving / args.ticks, 'collective_ms': 1e3 * collective / args.ticks,
                       'switches': switches,

@@ -2,12 +2,13 @@
 
 The game's numerical caller is `planner/plan.py`, the routed-expert bot planner. Each
 rank holds a block of every expert's columns (Megatron-LM tensor parallelism), and one
-all-reduce per tick from `rdma/mesh-collective.h` completes the expert output over the map
-the bridges record (`rdma/peers.py` topology). `rdma/mesh.py` binds it (`Mesh`). Each
-node's bridge is its resident service; run the same command on every node from the
-repository root:
+all-reduce per tick completes the expert output: `mesh_mpi`'s `Comm().Allreduce` on
+libnccl-mesh (`rdma/NCCL.md`), over the map the bridges keep (`mesh.current`). Each node's
+bridge is its resident service. The planner is a `mesh_mpi` world, one rank a node: on
+every node, from the repository root, with that node's rank and rank 0's address,
 
-    PYTHONPATH=xonotic:rdma bin/mesh-python -B -m planner.plan [ticks] [bots]
+    RANK=r WORLD_SIZE=n MASTER_ADDR=host0 MASTER_PORT=29500 \
+        PYTHONPATH=xonotic:rdma bin/mesh-python -B -m planner.plan [ticks] [bots]
 
 Pair run, 2026-09-23 (mesh aa36138; bridges on /xonrdma; M5 rank 0 with 1408 of each
 expert's 2048 columns, M4 rank 1 with 640; 2000 ticks of 480 bots, width 256, 8 experts):
@@ -25,11 +26,8 @@ arriving a median 0.03 ms before the M5's instead of 1.25 ms; both ranks again e
 objective split `[0, 332, 148, 0, 0]` and 353,792 switches. Records: metal-microbench
 `output_data/native-20260923-xonotic-{ledger,split}`.
 
-The old persistent-policy runtime, learner/responder, curriculum, frame runtime and
-distributed launcher scripts were removed; they are not alternative entry points.
-
-The game engine, payload, rendering and telemetry/viewer source remain.
-Build the payload from this directory with `payload/build.sh`.
+This directory also holds the game engine, payload, rendering and telemetry/viewer source.
+Build the payload from it with `payload/build.sh`.
 
 ## Telemetry and retained viewer
 
