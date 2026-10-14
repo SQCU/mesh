@@ -44,7 +44,7 @@ never stands for its key.
                                                                 rows of instance, slice units, rows_in, best_us; or
                                                                 JSON lines: observe's, and the decode attention plans'
                                                                 rows of plan and KV bytes read, kind attention)
-  python -m torch_mesh.streamed resolve EXPORT [--program RECORD --rank R] [--classes 1,2,4,8,16,256] --out TABLE
+  python -m torch_mesh.streamed resolve EXPORT [--program RECORD --rank R] [--classes 1,2,4,8,16,256] [--explore R=C,...] --out TABLE
                                                                 each slice's chosen instance at each rows class (a slice's
                                                                 key its width class, WIDTH_CLASSES, which the table names),
                                                                 each argument named, and each layer's attention plan at
@@ -54,6 +54,11 @@ never stands for its key.
                                                                 a served reading's profile (metal-microbench
                                                                 tools/reading.py) as observations of its instances,
                                                                 appended to ROWS (JSON lines)
+  python -m torch_mesh.streamed epilogue FUSED SEPARATE --rows NAME=LABEL ...
+                                                                two served readings' epilogues (their products with
+                                                                each epilogue against the products and the row it
+                                                                replaces) into the evidence file, whose rows classes the
+                                                                table names (epilogues)
 
 A factor of the fit (a configuration's efficiency at a rows class) rests on two slice shapes at least; one seen on a
 single shape takes its family's model. A decode attention plan (metal-microbench docs/kernels.md#decode-attention: the
@@ -168,6 +173,7 @@ class Fit:
         self.theta = {f: torch.tensor([math.log((coefficients or {}).get(f, FIT_PRIOR)[k]) for k in FIT_TERMS], dtype=torch.float64)
                       for f in FAMILIES}
         self.factors = dict(factors or {})
+        self.explore = {}
 
     @classmethod
     def node(cls):
@@ -249,13 +255,17 @@ class Fit:
 
 
 def rows_class(rows):
-    """The ALUs' rows class R of `rows` input rows (to 4): 1, 2 or 4."""
-    return 1 if rows <= 1 else 2 if rows <= 2 else 4
+    """The ALUs' rows class R of `rows` input rows (to 8): 1, 2, 4 or 8."""
+    return 1 if rows <= 1 else 2 if rows <= 2 else 4 if rows <= 4 else 8
+
+
+SMALL = 512
 
 
 def candidates(s, rows, op='product', tables=False):
     """The admissible instances of slice units `s` at `rows` input rows: rows <= 4 on the ALUs (R the rows' class)
-    or the cooperative tensor (M 8); 8 or 16 rows the cooperative tensor (M 8 or 16); past 16 the panel (M 64, 128);
+    or the cooperative tensor (M 8); 8 or 16 rows the cooperative tensor (M 8 or 16), and at 8 the ALUs too where the
+    slice has at most SMALL outputs or columns (the ceiling round's small matrices); past 16 the panel (M 64, 128);
     shares of 8 to 48 tiles, simdgroups 2, 4 or 8 a band (the head's four bands of two too), one or two tiles in
     flight, a 1-bit tile by tables where the head's input writes them, either loads (LOADS: fragment_load's); `op` couple:
     the gate and up products together (its slice their units summed)."""
@@ -268,7 +278,7 @@ def candidates(s, rows, op='product', tables=False):
     if op == 'couple':
         return [dict(kernel='couple', R=rows_class(rows), SK=sk, BANDS=1, J=1, F=F, LUT=0, APART=apart, LOADS=loads) for sk in (2, 4, 8)
                 for F in (1, 2) for apart in (0, 1) for loads in (0, 1)]
-    if rows <= 4:
+    if rows <= 4 or rows <= 8 and min(s['outputs'], s['columns']) <= SMALL:
         R = rows_class(rows)
         shapes = [(sk, 1) for sk in (2, 4, 8)] + ([(2, 4)] if op == 'head' else [])
         for sk, bands in shapes:
@@ -309,9 +319,10 @@ def configuration(spec):
 
 
 def choose(fit, s, rows, op='product', tables=False):
-    """The fit's argmin over the candidates of the configurations its evidence observed (None where there is none),
-    and its predicted us."""
-    allowed = fit.configurations
+    """The fit's argmin over the candidates of the configurations its evidence observed (None where there is none), or
+    at a rows class the fit explores, of the configurations named for it (measured once, in the next profile), and its
+    predicted us."""
+    allowed = fit.explore.get(rows, fit.configurations)
     priced = [(fit.time(c, s, rows), i, c) for i, c in enumerate(candidates(s, rows, op, tables))
               if allowed is None or configuration(c) in allowed]
     if not priced:
@@ -924,8 +935,6 @@ def observations(paths):
                 attention.append(row)
                 continue
             spec = parse_instance(row['instance'])
-            if spec['kernel'] == 'alu' and spec['R'] > 4:
-                continue
             out.append((spec, {k: row[k] for k in UNITS}, row['rows_in'], row['best_us'], row.get('form', row['instance']).split(' R')[0]))
     return out, attention
 
@@ -987,6 +996,7 @@ def _fit(args):
                            'worst_regret': regrets[-1]}, 'coefficients': fit.coefficients(), 'factors': fit.factors,
               'attention': attention_fit(attention)}
     path = evidence_path()
+    record['epilogues'] = (json.loads(path.read_text()) if path.exists() else {}).get('epilogues', {})
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=1) + '\n')
     print(json.dumps({k: v for k, v in record.items() if k != 'coefficients'}))
@@ -1012,7 +1022,7 @@ def _observe(args):
     for cls, commands in json.loads(Path(args.reading).read_text())['engine']['profile']['commands'].items():
         rows, floor = int(cls.split()[1]), min(c['least_us'] for c in commands.values())
         for label, c in commands.items():
-            found = re.fullmatch(r'streamed_(alu|coop|couple|panel)_(\S+) (\d+)x(\d+)', label)
+            found = re.fullmatch(r'streamed_(alu|coop|couple|panel)_([0-9_]+) (\d+)x(\d+)', label)
             if not found:
                 continue
             spec = parse_instance(label.split()[0], args.loads)
@@ -1026,6 +1036,50 @@ def _observe(args):
         for row in out:
             f.write(json.dumps(row) + '\n')
     print(f'{args.out}: {len(out)} observations from {args.reading}')
+
+
+def epilogue_ratios(fused, separate, rows_of):
+    """Each epilogue's log time ratio at each decode class two served readings profiled (metal-microbench
+    docs/kernels.md#stacked-products, the epilogues): its products run with it (a label naming it after the instance's
+    arguments) against the same instances without it and the row kernel it replaces (`rows_of`: the epilogue's name to
+    the row's label), each a tick's least-time sum."""
+    one, two = (json.loads(Path(p).read_text())['engine']['profile'] for p in (fused, separate))
+    out = {}
+    for cls in sorted(set(one['commands']) & set(two['commands'])):
+        a, b, ticks = one['commands'][cls], two['commands'][cls], one['ticks'][cls]['ticks']
+        for kind, row in rows_of.items() if cls.startswith('decode') else ():
+            labels = [l for l in a if l.split()[0].endswith('_' + kind)]
+            plain = [l.replace('_' + kind + ' ', ' ') for l in labels]
+            if not labels or row not in b or any(p not in b for p in plain):
+                continue
+            count = sum(a[l]['count'] for l in labels)
+            fused_us = sum(a[l]['least_us'] * a[l]['count'] for l in labels)
+            separate_us = sum(b[p]['least_us'] * a[l]['count'] for p, l in zip(plain, labels)) + b[row]['least_us'] * count
+            out.setdefault(kind, {})[cls.split()[1]] = math.log(fused_us / separate_us)
+    return out
+
+
+def epilogue_classes(ratios, classes):
+    """Each epilogue's rows classes where it runs: a class read where it was the faster, one not read where the classes
+    read nearest below and above it both were."""
+    out = {}
+    for kind, read in ratios.items():
+        read = {int(c): r for c, r in read.items()}
+        below = lambda c: [k for k in read if k < c]
+        above = lambda c: [k for k in read if k > c]
+        out[kind] = [c for c in classes if (read[c] < 0 if c in read else
+                                            bool(below(c) and above(c)) and read[max(below(c))] < 0 and read[min(above(c))] < 0)]
+    return out
+
+
+def _epilogue(args):
+    path = evidence_path()
+    known = json.loads(path.read_text()) if path.exists() else {}
+    for kind, classes in epilogue_ratios(args.fused, args.separate, dict(r.split('=', 1) for r in args.rows)).items():
+        known.setdefault('epilogues', {}).setdefault(kind, {}).update(classes)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(known, indent=1) + '\n')
+    print(json.dumps(known.get('epilogues', {})))
 
 
 def slices(streamed, program=None, rank=None):
@@ -1092,6 +1146,9 @@ def _attention(export, part, ctx, classes, fit_model):
 def _resolve(args):
     streamed = Streamed(args.export)
     fit, classes = Fit.node(), [int(c) for c in args.classes.split(',')]
+    for e in args.explore:
+        rows, named = e.split('=', 1)
+        fit.explore[int(rows)] = {tuple(int(v) if v.isdigit() else v for v in c.split('/')) for c in named.split(',')}
     held = slices(streamed, args.program, args.rank)
     for draft in args.draft:
         held += list(Streamed(draft).matrices.items())
@@ -1128,7 +1185,8 @@ def _resolve(args):
     attention = _attention(args.export, part, ctx, classes, known.get('attention'))
     table = {'node': node()[0], 'cores': node()[1], 'evidence': str(evidence_path()), 'export': str(args.export),
              'program': args.program, 'rank': args.rank, 'classes': classes, 'width_class': WIDTH_CLASS, 'ctx': ctx,
-             'instances': entries, 'attention': attention}
+             'instances': entries, 'attention': attention,
+             'epilogues': epilogue_classes(known.get('epilogues', {}), [c for c in classes if c <= 16])}
     Path(args.out).write_text(json.dumps(table, indent=1) + '\n')
     print(f'{args.out}: {len(entries)} instances, {len(keyed)} slices, {len(attention)} attention plans, classes {classes}')
 
@@ -1151,6 +1209,8 @@ def main():
     resolve.add_argument('--ctx', type=int, default=0, help="the positions a global layer's attention is priced at (default: the record's ctx_mean, else 1024)")
     resolve.add_argument('--draft', action='append', default=[],
                          help="a drafter's export whose matrices the member runs whole (metal-microbench tools/draft/dflash2.py export)")
+    resolve.add_argument('--explore', action='append', default=[],
+                         help="a rows class whose slices take the fit's argmin over the named configurations alone, ROWS=KIND/ARGS,...")
     resolve.add_argument('--out', required=True)
     observe = sub.add_parser('observe')
     observe.add_argument('reading')
@@ -1159,8 +1219,12 @@ def main():
     observe.add_argument('--program', default=None)
     observe.add_argument('--rank', type=int, default=None)
     observe.add_argument('--out', required=True)
+    epilogue = sub.add_parser('epilogue')
+    epilogue.add_argument('fused')
+    epilogue.add_argument('separate')
+    epilogue.add_argument('--rows', action='append', default=[], help="an epilogue's name and the row kernel's label it replaces, NAME=LABEL")
     args = parser.parse_args()
-    {'check': _check, 'fit': _fit, 'resolve': _resolve, 'observe': _observe}[args.command](args)
+    {'check': _check, 'fit': _fit, 'resolve': _resolve, 'observe': _observe, 'epilogue': _epilogue}[args.command](args)
 
 
 if __name__ == '__main__':

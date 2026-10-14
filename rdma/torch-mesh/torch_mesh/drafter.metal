@@ -131,7 +131,8 @@ template <uint HD, uint J>
 kernel void mesh_draft_merge(device const float *mp [[buffer(0)]], device const float *lp [[buffer(1)]], device const float4 *op [[buffer(2)]],
                              device half *O [[buffer(3)]], uint i [[threadgroup_position_in_grid]], uint d [[thread_index_in_threadgroup]],
                              uint lane [[thread_index_in_simdgroup]]) {
-    mesh_merge_row<HD>(mp, lp, op, i, J, (device half4 *)O + ulong(i) * (HD / 4), d, lane);
+    mesh_merge_row<HD>(mesh_split_parts<device const float *, device const float4 *, HD / 4>{mp, lp, op, ulong(i) * J}, i, J, d, lane, O, nullptr, nullptr,
+                       0u);
 }
 
 // The convolution after attention or the FFN, its norm and the residual add as one row (a threadgroup a row, in fp32):

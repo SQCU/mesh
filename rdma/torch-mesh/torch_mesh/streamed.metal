@@ -34,8 +34,10 @@
 // and the products' sums reach their own consumers through streamed_value (a K split's or a member's partials summed,
 // the row's scale applied), whole rows through streamed_rows (partials, or plain values a crossing summed), and a
 // product's input is written through streamed_gather (a row's values at the column order, each column's scale
-// applied). Include after <metal_stdlib>; the tensor-op kernels need Metal 4. The sizes are template arguments, so a
-// caller appends the explicit instantiations of its shapes (streamed_instance) to this source.
+// applied); streamed_alu and streamed_coop take a consumer of their partials as their last template argument E, an
+// epilogue run in the dispatch (streamed_plain: none). Include after <metal_stdlib>; the tensor-op kernels need Metal 4.
+// The sizes are template arguments, so a caller appends the explicit instantiations of its shapes (streamed_instance) to
+// this source.
 #ifndef TORCH_MESH_STREAMED
 #define TORCH_MESH_STREAMED
 #include <metal_stdlib>
@@ -132,6 +134,21 @@ static inline T streamed_value(P partials, ulong at, uint shares, uint stride, T
     return scale * ((a0 + a1) + (a2 + a3));
 }
 
+// A product's epilogue (metal-microbench docs/kernels.md#stacked-products, the epilogues): a consumer of the product's
+// partials run in its own dispatch, its operand E bound at buffer 16 and its arrival words at buffer 14. After a
+// threadgroup has stored its share of output rows [first, first + width), every thread calls E::after with the partials
+// (stored through E::partials: coherent(device) where another threadgroup of the dispatch reads them), the rows' order and
+// scales, the K shares and E::stage floats of threadgroup memory (the product's own, past its reduction); E decides which
+// threadgroup consumes what (the last to arrive of the threadgroups holding the rows it reads). streamed_plain consumes
+// nothing: the partials are the product's output.
+struct streamed_plain {
+    enum : uint { stage = 1 };
+    typedef device float *partials;
+    template <typename P>
+    void after(P, device const int *, device const float *, device atomic_uint *, streamed_dims, uint, uint, uint, threadgroup float *, uint,
+               uint) constant {}
+};
+
 // The GELU of a gate value times an up value (tanh form, its inner term clamped to [-20, 20]).
 static inline float streamed_gelu_of(float g, float u) {
     const float inner = clamp(0.7978845608f * (g + 0.044715f * g * g * g), -20.0f, 20.0f);
@@ -162,6 +179,10 @@ static inline float streamed_rms(float s, uint count, float eps, threadgroup flo
     return rsqrt(streamed_sum<Fresh>(s, partial, t, threads) / float(count) + eps);
 }
 
+// A partials pointer read four floats at a time, its coherence kept.
+template <typename P> struct streamed_fours { typedef device const float4 *type; };
+template <> struct streamed_fours<coherent(device) device float *> { typedef coherent(device) device const float4 *type; };
+
 // A product's output row n at logical positions [first, first + count) into vals: from its partials (shares > 0:
 // coded row r of [first, first + count) lands at order[r] - first, its shares summed and scaled) or, where a crossing
 // has summed it into plain values, from `plain` (shares == 0, row stride `rows`). The row order permutes within the
@@ -176,7 +197,7 @@ static inline void streamed_rows(P partials, device const half *plain, device co
             const ulong at = (ulong(n) * rows + first) / 4 + q;
             if (shares == 0) { ((threadgroup float4 *)vals)[q] = float4(((device const half4 *)plain)[at]); continue; }
             const int4 o = ((device const int4 *)order)[first / 4 + q] - int(first);
-            const float4 v = streamed_value((device const float4 *)partials, at, shares, stride / 4, ((device const float4 *)scale)[first / 4 + q]);
+            const float4 v = streamed_value((typename streamed_fours<P>::type)partials, at, shares, stride / 4, ((device const float4 *)scale)[first / 4 + q]);
             vals[o.x] = v.x; vals[o.y] = v.y; vals[o.z] = v.z; vals[o.w] = v.w;
         }
     } else {
@@ -398,21 +419,25 @@ static inline __attribute__((always_inline)) void fragment_walk(device const uin
 // Up to R input rows on the ALUs (docs/kernels.md#fragment-tiles): a threadgroup BANDS bands of SK simdgroups each,
 // share group.y of J along K (TILES / J tiles, x and the tables of the matrix's own K), F tiles a simdgroup in flight;
 // each band's sums reduced over its
-// lanes and simdgroups into partials[share][n][row] (OUT 0: coded row order, the row scale not applied) or finished
-// (OUT 1, one share covering K: each with its row's scale, capped where cap > 0, at row order[r] of ys, row stride
-// d.stride). Rows past d.rows repeat the last row's loads and are not written. LOADS: fragment_load's.
-template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F, uint LOADS>
+// lanes and simdgroups into partials[share][n][row] (OUT 0: coded row order, the row scale not applied, then consumed by
+// the epilogue E) or finished (OUT 1, one share covering K: each with its row's scale, capped where cap > 0, at row
+// order[r] of ys, row stride d.stride). Rows past d.rows repeat the last row's loads and are not written. LOADS:
+// fragment_load's.
+template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F, uint LOADS, typename E = streamed_plain>
 MESH_KERNEL(product)
 kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                          device const uint *bands [[buffer(2)]], device const float *tables [[buffer(3)]],
                          device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
                          device half *ys [[buffer(11)]], device const int *order [[buffer(12)]],
-                         device const float *rowScale [[buffer(13)]], constant streamed_dims &dims [[buffer(15)]],
+                         device const float *rowScale [[buffer(13)]], device atomic_uint *arrivals [[buffer(14)]],
+                         constant streamed_dims &dims [[buffer(15)]], constant E &epilogue [[buffer(16)]],
                          uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                          uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
-    constexpr uint PER = (TILES + J - 1) / J, STEPS = (PER + SK - 1) / SK, COLUMNS = TILES * 32;
-    threadgroup float sums[BANDS][SK][R][32];
+    constexpr uint PER = (TILES + J - 1) / J, STEPS = (PER + SK - 1) / SK, COLUMNS = TILES * 32, SUMS = BANDS * SK * R * 32;
+    threadgroup float region[SUMS > E::stage ? SUMS : E::stage];
+    threadgroup float (*sums)[SK][R][32] = (threadgroup float (*)[SK][R][32])region;
+    const typename E::partials stores = (typename E::partials)partials;
     const uint local = simd / SK, part = simd % SK, band = group.x * BANDS + local, rows = d.rows;
     const uint first = group.y * PER, span = min(TILES, first + PER) - first, pitch = d.pitch ? d.pitch : TILES, word = bands[band];
     float acc[R][8], out[R];
@@ -427,10 +452,11 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
         float total = 0.0f;
         for (uint s = 0; s < SK; s++) total += sums[at][s][n][r];
         const uint output = (group.x * BANDS + at) * 32 + r;
-        if (OUT == 0) { partials[ulong(group.y) * d.split + n * d.outputs + output] = total; continue; }
+        if (OUT == 0) { stores[ulong(group.y) * d.split + n * d.outputs + output] = total; continue; }
         const float value = rowScale[output] * total;
         ys[ulong(n) * d.stride + uint(order[output])] = half(streamed_capped(value, d.cap));
     }
+    if (OUT == 0) epilogue.after(stores, order, rowScale, arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32);
 }
 
 // The gate and up products of up to R input rows together, GELU(gate) * up between them (the study's gate_up_mm): a
@@ -795,7 +821,8 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
 // The GELU FFN's middle: hidden = GELU(gate) * up in the gate and up products' (shared) coded row order, which the down
 // product's columns follow: from their partials (gate's d.shares shares, up's d.inputs, each product its own
 // instance's, its row scale applied) or, where they are 0, from their finished rows (T half); a row's values d.stride
-// apart (0: d.outputs; gate|up stacked: twice it, up's from gate's d.outputs on); four outputs a thread.
+// apart (0: d.outputs; gate|up stacked: twice it, up's from gate's d.outputs on), up's finished rows d.columns apart where
+// nonzero (a per-layer table's); four outputs a thread.
 template <typename T>
 kernel void streamed_gelu(device const T *gate [[buffer(0)]], device const T *up [[buffer(1)]],
                           device const float *gateScale [[buffer(2)]], device const float *upScale [[buffer(3)]],
@@ -807,7 +834,7 @@ kernel void streamed_gelu(device const T *gate [[buffer(0)]], device const T *up
     for (uint r = first; r < min(first + 4, d.outputs); ++r)
         hidden[ulong(n) * d.outputs + r] = half(streamed_gelu_of(
             d.shares ? streamed_value(gate, row + r, d.shares, d.split, gateScale[r]) : float(gate[row + r]),
-            d.inputs ? streamed_value(up, row + r, d.inputs, d.split, upScale[r]) : float(up[row + r])));
+            d.inputs ? streamed_value(up, row + r, d.inputs, d.split, upScale[r]) : float(up[(d.columns ? ulong(n) * d.columns : row) + r])));
 }
 
 template [[host_name("streamed_gelu")]] [[kernel]] decltype(streamed_gelu<float>) streamed_gelu<float>;
@@ -843,19 +870,24 @@ static inline __attribute__((always_inline)) void fragment_coop(W w, half h, thr
 
 // M input rows (8 or 16) on the matrix units a simdgroup: a threadgroup BANDS bands of SK simdgroups each, share group.y
 // of J along K; each tile decoded into the right-input cooperative tensor of matmul2d<M, 32, 32> and multiplied by its
-// 32 columns of x, one operation a tile; a band's simdgroups' sums reduced in threadgroup memory into
-// partials[share][n][row] (coded row order, the row scale not applied).
-template <uint M, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint COOP, uint LOADS>
+// 32 columns of x, one operation a tile; a band's simdgroups' sums reduced in threadgroup memory (SK 1, a simdgroup a band:
+// stored from the destination as it lies, the ceiling round's sk form) into partials[share][n][row] (coded row order, the
+// row scale not applied), then consumed by the epilogue E.
+template <uint M, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint COOP, uint LOADS, typename E = streamed_plain>
 MESH_KERNEL(product)
 kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                           device const uint *bands [[buffer(2)]], device half *xs [[buffer(4)]],
-                          device float *partials [[buffer(5)]], constant streamed_dims &dims [[buffer(15)]],
+                          device float *partials [[buffer(5)]], device const int *order [[buffer(12)]],
+                          device const float *rowScale [[buffer(13)]], device atomic_uint *arrivals [[buffer(14)]],
+                          constant streamed_dims &dims [[buffer(15)]], constant E &epilogue [[buffer(16)]],
                           uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                           uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
     using namespace mpp::tensor_ops;
-    constexpr uint PER = (TILES + J - 1) / J, STEPS = (PER + SK - 1) / SK;
-    threadgroup float sums[BANDS][SK][M * 32];
+    constexpr uint PER = (TILES + J - 1) / J, STEPS = (PER + SK - 1) / SK, SUMS = BANDS * SK * M * 32;
+    threadgroup float region[SUMS > E::stage ? SUMS : E::stage];
+    threadgroup float (*sums)[SK][M * 32] = (threadgroup float (*)[SK][M * 32])region;
+    const typename E::partials stores = (typename E::partials)partials;
     const uint local = simd / SK, part = simd % SK, band = group.x * BANDS + local, rows = d.rows;
     const uint first = group.y * PER, span = min(TILES, first + PER) - first, pitch = d.pitch ? d.pitch : TILES;
     const uint bw = bands[band];
@@ -886,19 +918,28 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
             op.run(a, rb, acc);
         }
     }
-    for (uint i = 0; i < acc.get_capacity(); ++i)
-        if (acc.is_valid_element(i)) {
-            auto e = acc.get_multidimensional_index(i);
-            sums[local][part][uint(e[1]) * 32 + fragment_row<COOP>(uint(e[0]))] = acc[i];
+    if (SK == 1) {
+        for (uint i = 0; i < acc.get_capacity(); ++i)
+            if (acc.is_valid_element(i)) {
+                auto e = acc.get_multidimensional_index(i);
+                if (uint(e[1]) < rows) stores[ulong(group.y) * d.split + uint(e[1]) * d.outputs + band * 32 + fragment_row<COOP>(uint(e[0]))] = acc[i];
+            }
+    } else {
+        for (uint i = 0; i < acc.get_capacity(); ++i)
+            if (acc.is_valid_element(i)) {
+                auto e = acc.get_multidimensional_index(i);
+                sums[local][part][uint(e[1]) * 32 + fragment_row<COOP>(uint(e[0]))] = acc[i];
+            }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint i = thread_id; i < BANDS * M * 32; i += BANDS * SK * 32) {
+            const uint at = i / (M * 32), n = (i / 32) % M, r = i % 32;
+            if (n >= rows) continue;
+            float total = 0.0f;
+            for (uint s = 0; s < SK; s++) total += sums[at][s][n * 32 + r];
+            stores[ulong(group.y) * d.split + n * d.outputs + (group.x * BANDS + at) * 32 + r] = total;
         }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint i = thread_id; i < BANDS * M * 32; i += BANDS * SK * 32) {
-        const uint at = i / (M * 32), n = (i / 32) % M, r = i % 32;
-        if (n >= rows) continue;
-        float total = 0.0f;
-        for (uint s = 0; s < SK; s++) total += sums[at][s][n * 32 + r];
-        partials[ulong(group.y) * d.split + n * d.outputs + (group.x * BANDS + at) * 32 + r] = total;
     }
+    epilogue.after(stores, order, rowScale, arrivals, d, group.x * BANDS * 32, BANDS * 32, J, region, thread_id, BANDS * SK * 32);
 }
 
 // The right-input and destination element maps of matmul2d<M, 32, 32> at one simdgroup (fp16 operands, fp32

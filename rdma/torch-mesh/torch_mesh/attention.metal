@@ -181,13 +181,16 @@ __attribute__((always_inline)) static inline void mesh_gathered_store(device hal
     for (uint i = 0; i < 4; ++i) O[dst[i]] = half(scale[i] * value[i]);
 }
 
-// Single over plain rows: row `row`'s J parts (at row J + j) merged into `out`, a threadgroup of D / 4 threads a row (thread
-// d its float4 d). A host's kernel calls it (no kernel is defined here: a source including this file stays one kernel's).
-template <uint D>
-__attribute__((always_inline)) static inline void mesh_merge_row(device const float *m, device const float *l, device const float4 *o, ulong row,
-                                                                uint J, device half4 *out, uint d, uint lane) {
-    mesh_merge<D / 4, 1>(mesh_split_parts<device const float *, device const float4 *, D / 4>{m, l, o, row * J}, J, d, 0u, lane, nullptr,
-                         [&](float, float total, float4 sum) { out[d] = half4(mesh_merged(total, sum)); });
+// Single, a threadgroup of D / 4 threads a row (thread d its float4 d): a row's J parts (P, mesh_split_parts) merged into
+// row i of O, gathered (mesh_gathered_store: o's input, `columns` its width) or plain (columns 0). A host's kernel calls it
+// (no kernel is defined here: a source including this file stays one kernel's).
+template <uint D, typename P>
+__attribute__((always_inline)) static inline void mesh_merge_row(P parts, uint i, uint J, uint d, uint lane, device half *O, device const int *inverse,
+                                                                device const float *scale, uint columns) {
+    uint4 dst;
+    float4 cs;
+    mesh_gathered_places(i * D + 4 * d, inverse, scale, columns, dst, cs);
+    mesh_merge<D / 4, 1>(parts, J, d, 0u, lane, nullptr, [&](float, float total, float4 sum) { mesh_gathered_store(O, dst, cs, columns, mesh_merged(total, sum)); });
 }
 
 // The Tile plan (metal-microbench docs/kernels.md#decode-attention, the verify plan; FlashInfer's tensor-core decode for
