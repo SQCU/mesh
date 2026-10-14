@@ -1,39 +1,38 @@
 #include "mesh.h"
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdio.h>
 #include <errno.h>
-#include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-/* design/algorithm-sources.md#programcopy */
-int main(int argc,char **argv){
-  int readiness=argc>1 && !strcmp(argv[1],"--ready");
-  int f=shm_open(MESH_NAME,O_RDONLY,MESH_MODE);
-  struct stat info;
-  size_t bytes=sizeof(struct hdr);
-  struct hdr *h=MAP_FAILED;
-  if(f>=0 && !fstat(f,&info) && info.st_size>=(off_t)bytes){bytes=(size_t)info.st_size;h=mmap(NULL,bytes,PROT_READ,MAP_SHARED,f,0);}
-  if(h==MAP_FAILED || h->magic!=MESH_MAGIC || h->version!=MESH_VERSION){
-    printf("{\"up\":false,\"ready\":false}\n");
-    if(h!=MAP_FAILED) munmap(h,bytes);
-    if(f>=0) close(f);
-    return readiness?1:0;
+/* design/bridge-and-ipc.md#ports: the node's bridge as libmesh reads it (mesh-plan.h), one JSON line: whether it answers
+   (`up`, else the errno), its node, its ports by index (mesh_observe: each port's peer node, phase and bandwidth) and the
+   mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
+   numbers with its alpha and beta) */
+int main(void){
+  struct mesh_link_view port[MESH_PORTS];
+  uint32_t node=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
+  double (*cost)[2]=NULL;
+  const int ports=mesh_observe(port,MESH_PORTS,&node);
+  if(ports<0){printf("{\"up\":false,\"errno\":%d}\n",-ports);return 0;}
+  struct mesh_link_map map={0};
+  int count=-ENOSPC;
+  while(count==-ENOSPC){
+    nodes=realloc(nodes,(room+1)*sizeof *nodes);link=realloc(link,(links+1)*sizeof *link);cost=realloc(cost,(links+1)*sizeof *cost);
+    if(!nodes || !link || !cost)return 1;
+    map=(struct mesh_link_map){0,room,links,link,cost};
+    count=mesh_map(NULL,0,nodes,&map);
+    room=map.nodes;links=map.links;
   }
-  uint64_t pid=atomic_load(&h->bridge_pid);
-  int alive=pid && (!kill((pid_t)pid,0) || errno==EPERM);
-  uint32_t paired=0,clients=0;
-  for(uint32_t i=0;i<h->links;i++)paired+=alive && atomic_load(&mesh_links(h)[i].phase)==MESH_PAIRED;
-  for(uint32_t s=0;s<h->clients;s++)clients+=atomic_load(&((struct mesh_client *)((char *)h+h->client_off))[s].owner)!=0;
-  printf("{\"up\":%s,\"ready\":%s,\"paired\":%s,\"bridge_pid\":%llu,\"clients\":%u,\"version\":%u,\"node\":%u,\"pgsz\":%u,\"block\":%u,\"rows\":%u,\"links\":%u,\"paired_links\":%u,\"peers\":[",
-    alive?"true":"false",alive?"true":"false",paired?"true":"false",(unsigned long long)pid,clients,h->version,h->node,h->pgsz,h->block,h->rows,h->links,paired);
-  for(uint32_t i=0;i<h->links && atomic_load(&mesh_links(h)[i].phase)!=MESH_UNKNOWN;i++){
-    struct mesh_link_info *link=&mesh_links(h)[i];
-    printf("%s{\"port\":%u,\"node\":%u,\"phase\":%u,\"code\":%lld,\"bandwidth\":%llu,\"connection\":%llu}",i?",":"",i,atomic_load(&link->peer),
-      atomic_load(&link->phase),(long long)atomic_load(&link->code),(unsigned long long)atomic_load(&link->bandwidth),(unsigned long long)atomic_load(&link->connection));
+  printf("{\"up\":true,\"node\":%u,\"peers\":[",node);
+  for(int i=0;i<ports && i<MESH_PORTS;i++)
+    printf("%s{\"port\":%d,\"node\":%u,\"phase\":%u,\"bandwidth\":%llu}",i?",":"",i,port[i].peer,port[i].phase,(unsigned long long)port[i].bandwidth);
+  if(count<0)printf("],\"map\":{\"errno\":%d}}\n",-count);
+  else{
+    printf("],\"map\":{\"nodes\":[");
+    for(int i=0;i<count;i++)printf("%s%u",i?",":"",nodes[i]);
+    printf("],\"links\":[");
+    for(uint32_t l=0;l<map.links;l++)
+      printf("%s[%u,%u,%g,%g]",l?",":"",nodes[map.link[l][0]],nodes[map.link[l][1]],map.cost[l][0],map.cost[l][1]);
+    printf("]}}\n");
   }
-  printf("]}\n");
-  munmap(h,bytes); close(f); return readiness && !alive;
+  free(nodes);free(link);free(cost);
+  return 0;
 }
