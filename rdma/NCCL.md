@@ -18,15 +18,12 @@ cc app.c -I /usr/local/mesh/rdma -L /usr/local/mesh/rdma -lnccl-mesh -Wl,-rpath,
 ```
 
 A rank is a process on a node, a client of that node's bridge; it starts no bridge and names no device, address, port
-or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`); the communicator's
-map is what the ranks' bridges record when it is made.
+or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`).
 
 ## Communicators
 
 - `ncclCommInitRank(comm, n, id, rank)`: NCCL's, with NCCL's bootstrap: the id is the root's `host:port`
-  (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens); each rank's node and its bridge's ports meet there, and
-  the map is their join (`mesh_link_map_join`): a link where both ranks' bridges hold a port paired with the other,
-  priced by the widest such port's bandwidth.
+  (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens), where each rank's node meets the others'.
 - `ncclMeshCommInitRank(comm, rank, topology, paths, programs, count, node, name)`: the topology is an operand.
   - `topology`: a link map (`mesh-plan.h`: kind `mesh`, `ring`, `tree` or `graph`; links; each link's alpha in
     microseconds and beta in nanoseconds a byte).
@@ -35,11 +32,13 @@ map is what the ranks' bridges record when it is made.
   - `node`: each rank's bridge node. NULL means rank r runs on node r.
   - `name`: the communicator's, which its sessions pair under on every member.
   - Every rank passes the same values.
-- `ncclCommSplit`: keeps the links among the ranks it takes.
-- A subgroup whose members the cables do not join (a split, or `ncclMeshCommInitRank` with a graph that leaves its
-  ranks apart, as torch's `new_group` makes) is joined along the paths of the widest communicator alive over its
-  members: the cheapest path between two parts first, until one part remains. Its programs cross those paths through
-  the other members' nodes.
+- `ncclCommSplit` takes the ranks of a color; `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those
+  that departed, so a loop goes on with the ranks that remain and no new bootstrap.
+
+Each session takes its node's bridge's map when it opens (`mesh-plan.h` `mesh_map` over the communicator's nodes): two
+ranks are linked where their bridges hold a port paired with each other, and ranks the cables leave apart are linked
+along a route through other nodes, members or not, which the bridges forward along. A later session reads the map
+again, so a recabling, a link that paired again or a node gone reaches the next session with no edit and no restart.
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
 MSCCL-IR). The default table:
@@ -65,18 +64,17 @@ float32 and encoded to nearest even as the host does, overflow to NaN or infinit
 Float8); the host path adds float64.
 Ops: sum, prod, max, min, avg; premul-sum takes a host immediate.
 
+Memory: `ncclMemAlloc` is page-aligned host memory (`ncclMemFree` frees it); `ncclCommRegister`'s handle is the buffer
+itself, and `ncclCommDeregister` releases nothing.
+
 ## Routes between unlinked ranks
 
-Collectives run on linked ranks alone, so they need no routes. A message between ranks the map does not link
-(send/recv, all-to-all, gather and scatter, which are grouped sends) takes the shortest path, and each node between
-forwards it (NCCL's PXN proxy) on the link's relay rings:
-
-- One relay ring a class (large and small) each way, on queue pairs 2 and 3. Every routed pair crossing the link
-  shares it, so a map of any size and shape needs 4 queue pairs a link; a TB5 device has 10, which the bridge leases to
-  its node's programs and refuses past (ENOSPC).
-- Each message carries its ends and position. A node delivers what is addressed to it into its channel, and queues
-  the rest for the next link, so a ring never waits on another.
-- A ring's slots are credited back by its receiver, on the messages going the other way or alone.
+A message between ranks the map does not link (send/recv, all-to-all, gather and scatter, which are grouped sends, and
+a collective's crossing between ranks the map joins by a route) is one program toward its destination node. The
+sending node's bridge carries it over the first link of the route, and each bridge on the route forwards it to the
+next node the route names, landing each record in rows it leases and sending it on from there, zero copy
+(design/bridge-and-ipc.md#flows). The session keeps no relay rings and takes no queue pairs a link beyond its own
+programs'.
 
 ## Rules a program keeps
 
@@ -87,31 +85,29 @@ forwards it (NCCL's PXN proxy) on the link's relay rings:
   and different collectives on two ranks: a position where a rank sends nothing carries a stamp, and the receiver
   checks every position. The host path fails the call. The Metal path finds it on the GPU and fails the session: the
   communicator's asynchronous error (`ncclCommGetAsyncError`), and the next call.
-- Make the world communicator first. A process's session opens over the widest communicator alive among whose ranks
-  a group's are, so subgroups made after it never reopen it.
-- One process holds one session for its life. `NCCL_BUFFSIZE` and `MESH_POSITIONS` are read when it opens.
+- Each communicator is its own client of its node's bridge, under its own name; communicators in one process know
+  nothing of one another.
 
 ## Failures
 
-A link with positions pending that delivers nothing for `MESH_REMOTE_BOUND` seconds is cancelled (default 10;
-torch-mesh sets it to the group's timeout, at most 60 s: a wait on the Metal path is a kernel polling on the GPU).
-Every wait on that link ends, and a host-path group with nothing landing for as long fails. The failure is returned:
+A destination with positions pending that lands nothing for `mesh.h` `MESH_SILENT_NS` (10 s, the library's one silent
+bound, with no setting) is cancelled: every wait on it ends, and a host-path group with nothing landing for as long
+fails. The failure is returned:
 
 - by the group, or
-- by `ncclCommGetAsyncError` for work already enqueued.
+- by `ncclCommGetAsyncError` for work already enqueued,
 
-A link lost under a group fails the group (its program on that link ends; nothing resumes it), and the next group
-opens a session again on the links as they are then. Recover across calls: make the communicators again, on the
-nodes that remain.
+and `ncclGetLastError` names the node where it failed: the destination's, or a relay's on its route. A link or a relay
+lost under a group fails the group (its program toward that node ends; nothing resumes it), and the next group opens a
+session again on the map as it is then. A rank that departed is left out with `ncclCommShrink`.
 
 ## Environment
 
 | variable | read by | meaning |
 |---|---|---|
 | `NCCL_COMM_ID` | library (ncclGetUniqueId) | the bootstrap root's `host:port` |
-| `MESH_REMOTE_BOUND` | library | seconds a link may stay silent with positions pending |
-| `NCCL_BUFFSIZE` | library | bytes of a large ring's slots together (default 4 MiB) |
-| `MESH_POSITIONS` | library | the session's cyclic invocations (default 8192) |
+| `NCCL_BUFFSIZE` | library | bytes of a large ring's slots together (default 4 MiB), read when a session opens |
+| `MESH_POSITIONS` | library | the session's cyclic invocations (default 8192), read when a session opens |
 | `MESH_CHECK_TRACE` | library | each group's scheduled messages and each position check (the pairing report's inputs) in the rank's log |
 | `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against (default its parent; the mesh's install passes `/usr/local/mesh/rdma`) |
 
@@ -140,6 +136,6 @@ CPU only, about 2 s.
 
 ## Not implemented
 
-ncclCommRevoke, ncclCommShrink, ncclCommGrow, ncclCommInitRankScalable, ncclCommSuspend/Resume, the window and
-signal functions (TB5 RDMA has no one-sided write), ncclGroupSimulateEnd, ncclSetEncryption, the ncclParam
-functions (`nccl.h`).
+ncclCommRevoke, ncclCommGetUniqueId, ncclCommGrow, ncclCommInitRankScalable, ncclCommSuspend/Resume,
+ncclCommMemStats, the window and signal functions (TB5 RDMA has no one-sided write), ncclGroupSimulateEnd,
+ncclSetEncryption, the ncclParam functions (`nccl.h`).
