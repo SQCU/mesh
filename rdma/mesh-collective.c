@@ -1,7 +1,6 @@
 #include "mesh-collective.h"
 #include <errno.h>
 #include <math.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -45,31 +44,6 @@ int mesh_link_map_check(const struct mesh_link_map *map){
 }
 
 /* Whether node v is in a bit set of nodes (a bit a node, 64 a word; NULL: every node). */
-/* design/bridge-and-ipc.md#ports */
-static uint64_t mesh_paired_toward(const struct mesh_link_view *views,uint32_t count,uint32_t peer,int *paired){
-  uint64_t widest=0;
-  for(uint32_t i=0;i<count;i++)if(views[i].phase==MESH_PAIRED && views[i].peer==peer){
-    *paired=1;
-    if(views[i].bandwidth>widest)widest=views[i].bandwidth;
-  }
-  return widest;
-}
-uint32_t mesh_link_map_join(uint32_t nodes,const uint32_t *node,const struct mesh_link_view *const *views,const uint32_t *count,
-                            struct mesh_link_map *map){
-  map->nodes=nodes;map->links=0;
-  for(uint32_t a=0;a<nodes;a++)for(uint32_t b=a+1;b<nodes;b++){
-    int there=0,back=0;
-    uint64_t one=mesh_paired_toward(views[a],count[a],node[b],&there),other=mesh_paired_toward(views[b],count[b],node[a],&back);
-    if(!there || !back)continue;
-    uint64_t widest=one>other?one:other;
-    map->link[map->links][0]=a;map->link[map->links][1]=b;
-    map->cost[map->links][0]=MESH_ALPHA_US;map->cost[map->links][1]=widest?8e9/(double)widest:MESH_BETA_NS;
-    map->links++;
-  }
-  map->kind=(uint64_t)map->links*2==(uint64_t)nodes*(nodes-1)?MESH_LINKS_MESH:MESH_LINKS_GRAPH;
-  return map->links;
-}
-
 static int mesh_member(const uint64_t *set,uint32_t v){ return !set || (set[v/64]>>(v%64)&1); }
 
 /* Whether the map links a and b, either way (a mesh links every pair; a ring, a tree or a graph its links). */
@@ -580,53 +554,30 @@ done:
   return result;
 }
 
-/* Each step becomes one prepared transfer: a section over the typed piece, the peer's channel on
-   queue identity % MESH_QUEUES, and the same identity on the sending and the receiving rank. */
-int mesh_collective_bind(struct mesh_ctx *context,const struct mesh_step *steps,uint32_t count,uint32_t identity,
-  struct mesh_section operand,const struct mesh_section *received,uint32_t invocations,uint32_t invocation_pages,
-  struct mesh_section *pieces){
-  for(uint32_t i=0;i<count;i++)if(steps[i].buffer)return EINVAL;  /* the host transfers bind one operand: no scratch */
-  for(uint32_t i=0,reduced=0;i<count;i++){
-    const struct mesh_step *step=steps+i;
-    struct mesh_section piece;
-    if(step->op==MESH_STEP_REDUCE)piece=received[reduced++];
-    else{
-      int status=mesh_section_slice(context,operand,step->first*step->piece.element_bytes,
-        step->piece.elements*step->piece.element_bytes,invocations,invocation_pages,&piece);
-      if(status)return status;
-    }
-    if(pieces)pieces[i]=piece;
-    uint32_t transfer=identity+step->round;
-    int status=mesh_transfer_bind(context,mesh_peer_channel(context,step->peer,transfer%MESH_QUEUES),
-      step->op==MESH_STEP_SEND?MESH_SEND:MESH_RECEIVE,transfer,piece,piece.pages,0,UINT32_MAX,0);
-    if(status)return status;
-  }
-  return 0;
-}
-
 /* design/prepared-machine.md#M07 */
 /* design/prepared-machine.md#M12 */
-/* Each link's completion words and the cancellation ranges over them: link p's words follow link p-1's (16-word
-   aligned), one per received chunk an invocation of each receive transfer's range, in the frame order
+/* Each destination's completion words and the cancellation ranges over them: destination d's words follow d-1's
+   (16-word aligned), one per received chunk an invocation of each receive transfer's range, in the frame order
    mesh_transfers_prepare assigned (a chunk's word for the transfer's invocation u is first + (u*count + slot)*chunks
    + chunk, its stride count*chunks words); the words in context->inputs_off, inputs_bytes. */
 int mesh_host_inputs(struct mesh_ctx *context){
   struct hdr *m=context->M;
   struct mesh_client *client=mesh_client_at(m,context->client);
-  uint64_t frames[MESH_PORTS],words=0;
-  for(uint32_t p=0;p<m->links;p++){
+  uint64_t frames[MESH_DESTINATIONS],words=0;
+  const uint32_t destinations=mesh_destinations(client);
+  for(uint32_t d=0;d<destinations;d++){
     words=(words+15)&~UINT64_C(15);
-    frames[p]=0;
-    for(uint32_t q=p*MESH_QUEUES;q<(p+1)*MESH_QUEUES;q++){
+    frames[d]=0;
+    for(uint32_t q=d*MESH_QUEUES;q<(d+1)*MESH_QUEUES;q++){
       struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
       for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
-        frames[p]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*mesh_transfer_active(in+i,client->tx[p].invocations);
+        frames[d]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*mesh_transfer_active(in+i,client->tx[d].invocations);
     }
-    words+=frames[p];
+    words+=frames[d];
   }
   struct mesh_section input,stop;
   int status=mesh_section_create(context,sizeof(uint64_t)*(words?words:1),1,&input);
-  if(!status)status=mesh_section_create(context,sizeof(struct mesh_cancellation)+m->links*sizeof(struct mesh_cancel_range),1,&stop);
+  if(!status)status=mesh_section_create(context,sizeof(struct mesh_cancellation)+(destinations?destinations:1)*sizeof(struct mesh_cancel_range),1,&stop);
   if(status)return status;
   uint64_t *word=mesh_section_address(context,input,0);
   struct mesh_cancellation *cancel=mesh_section_address(context,stop,0);
@@ -634,11 +585,11 @@ int mesh_host_inputs(struct mesh_ctx *context){
   cancel->cyclic=atomic_load(&client->cyclic);
   context->inputs_off=(uint64_t)((char *)word-(char *)m);context->inputs_bytes=(uint64_t)input.pages*m->pgsz;
   uint64_t first=0;
-  for(uint32_t p=0;p<m->links;p++){
+  for(uint32_t d=0;d<destinations;d++){
     first=(first+15)&~UINT64_C(15);
-    client->tx[p].cancel=(uint64_t)((char *)cancel-(char *)m);
-    cancel->ranges[p]=(struct mesh_cancel_range){.offset=(uint64_t)((char *)(word+first)-(char *)m),.count=frames[p]};
-    for(uint32_t q=p*MESH_QUEUES;q<(p+1)*MESH_QUEUES;q++){
+    client->tx[d].cancel=(uint64_t)((char *)cancel-(char *)m);
+    cancel->ranges[d]=(struct mesh_cancel_range){.offset=(uint64_t)((char *)(word+first)-(char *)m),.count=frames[d]};
+    for(uint32_t q=d*MESH_QUEUES;q<(d+1)*MESH_QUEUES;q++){
       struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
       for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++){
         uint32_t chunks=mesh_row_chunks(m,in[i].local_row,in[i].bytes);
@@ -649,7 +600,7 @@ int mesh_host_inputs(struct mesh_ctx *context){
         }
       }
     }
-    first+=frames[p];
+    first+=frames[d];
   }
   return 0;
 }

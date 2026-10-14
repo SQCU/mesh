@@ -6,26 +6,42 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <limits.h>
+#include <time.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
 static void mesh_reclaim(struct hdr *);
+
+/* design/bridge-and-ipc.md#region: the node's region mapped, `writable` (a client's) or read-only (a reader's, which
+   attaches no client and changes nothing of the bridge's), its descriptor kept in *fd where one is asked for: 0, EINVAL
+   where it is no region of this version, ESRCH where its bridge is gone, else the errno */
+static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
+  int file=shm_open(MESH_NAME,writable?O_RDWR:O_RDONLY,0);
+  if(file<0)return errno;
+  struct stat info;
+  if(fstat(file,&info)){int error=errno;close(file);return error;}
+  if(info.st_size<(off_t)sizeof(struct hdr)){close(file);return EINVAL;}
+  struct hdr *m=mmap(NULL,(size_t)info.st_size,PROT_READ|(writable?PROT_WRITE:0),MAP_SHARED,file,0);
+  int error=errno;
+  if(m==MAP_FAILED){close(file);return error;}
+  pid_t bridge=(pid_t)atomic_load(&m->bridge_pid);
+  error=m->magic!=MESH_MAGIC || m->version!=MESH_VERSION || m->length>(uint64_t)info.st_size?EINVAL:
+    !bridge || (kill(bridge,0) && errno==ESRCH)?ESRCH:0;
+  if(error || !fd)close(file);
+  if(error){munmap(m,(size_t)info.st_size);return error;}
+  *out=m;*length=(size_t)info.st_size;
+  if(fd)*fd=file;
+  return 0;
+}
 
 /* design/algorithm-sources.md#meshobserve */
 /* design/bridge-and-ipc.md#ports: each port of the node's bridge, by its index: its peer node while paired (0 else), its
    phase and bandwidth; a port is one the bridge found (its phase not MESH_UNKNOWN), and the bridge finds them in index
    order */
 int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node){
-  int file=shm_open(MESH_NAME,O_RDONLY,0);
-  if(file<0)return -errno;
-  struct stat info;
-  if(fstat(file,&info)){int error=errno;close(file);return -error;}
-  if(info.st_size<(off_t)sizeof(struct hdr)){close(file);return -EINVAL;}
-  struct hdr *m=mmap(NULL,(size_t)info.st_size,PROT_READ,MAP_SHARED,file,0);
-  int error=errno;close(file);
-  if(m==MAP_FAILED)return -error;
+  struct hdr *m;size_t length;
+  int error=mesh_open(0,&m,&length,NULL);
+  if(error)return -error;
   int result=-EINVAL;
-  if(m->magic==MESH_MAGIC && m->version==MESH_VERSION && m->length<=(uint64_t)info.st_size &&
-     m->link_off>=sizeof *m && m->link_off<=m->length && m->links<=(m->length-m->link_off)/sizeof(struct mesh_link_info)){
+  if(m->link_off>=sizeof *m && m->link_off<=m->length && m->links<=(m->length-m->link_off)/sizeof(struct mesh_link_info)){
     *node=m->node;result=0;
     for(uint32_t i=0;i<m->links;i++){
       struct mesh_link_info *link=&mesh_links(m)[i];
@@ -36,17 +52,196 @@ int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node){
       result++;
     }
   }
-  munmap(m,(size_t)info.st_size);return result;
+  munmap(m,length);return result;
+}
+
+/* design/bridge-and-ipc.md#region: the map's records as one serial left them, the seqlock's reader (mesh_map_whole): a
+   copy in *out the caller frees and its count, or -errno (ESRCH: the bridge went while its write was open) */
+static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **out){
+  for(;;){
+    uint64_t before=atomic_load_explicit(&m->map,memory_order_acquire);
+    if(before&1){
+      if(os_sync_wait_on_address_with_timeout(&m->map,before,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
+           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS)<0 && errno==ETIMEDOUT){
+        pid_t bridge=(pid_t)atomic_load(&m->bridge_pid);
+        if(!bridge || (kill(bridge,0) && errno==ESRCH))return -ESRCH;
+      }
+      continue;
+    }
+    uint64_t count=atomic_load_explicit(&m->map_nodes,memory_order_relaxed),at=atomic_load_explicit(&m->map_off,memory_order_relaxed);
+    int fits=at<=length && count<=(length-at)/sizeof(struct mesh_record);
+    struct mesh_record *copy=fits?malloc((count?count:1)*sizeof *copy):NULL;
+    if(copy)memcpy(copy,(char *)m+at,count*sizeof *copy);
+    if(mesh_map_whole(m,before)){
+      if(!copy)return fits?-ENOMEM:-EINVAL;
+      *out=copy;return (int)count;
+    }
+    free(copy);
+  }
+}
+
+/* design/bridge-and-ipc.md#ports: the one join of two nodes' records */
+static uint64_t mesh_paired(struct mesh_record *record,uint32_t node){
+  uint64_t widest=0;
+  for(uint32_t i=0;i<record->ports && i<MESH_PORTS;i++)
+    if(atomic_load_explicit(&record->port[i].phase,memory_order_relaxed)==MESH_PAIRED &&
+       atomic_load_explicit(&record->port[i].peer,memory_order_relaxed)==node){
+      uint64_t bandwidth=atomic_load_explicit(&record->port[i].bandwidth,memory_order_relaxed)+1;
+      if(bandwidth>widest)widest=bandwidth;
+    }
+  return widest;
+}
+int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
+  uint64_t one=mesh_paired(a,b->node),other=mesh_paired(b,a->node),widest=(one>other?one:other)-1;
+  if(!one || !other)return 0;
+  *beta=widest?8e9/(double)widest:MESH_BETA_NS;
+  return 1;
+}
+
+/* The records' whole map, its nodes ascending (the records sorted by node), a link where two join, at MESH_ALPHA_US and
+   the join's beta, and its shortest-path trees (mesh-collective.c mesh_trees_shortest: tree r rooted at node r) */
+struct mesh_whole { uint32_t n,(*link)[2],*root,*parent; double (*cost)[2],*weight; struct mesh_link_map map; uint32_t trees; };
+static int mesh_node_order(const void *a,const void *b){
+  uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
+  return (x>y)-(x<y);
+}
+static void mesh_whole_free(struct mesh_whole *w){free(w->link);free(w->cost);free(w->root);free(w->parent);free(w->weight);}
+static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w){
+  qsort(r,n,sizeof *r,mesh_node_order);
+  size_t pairs=(size_t)n*(n?n-1:0)/2+1;
+  *w=(struct mesh_whole){.n=n,.link=malloc(pairs*sizeof *w->link),.cost=malloc(pairs*sizeof *w->cost),
+    .root=malloc(((size_t)n+1)*sizeof *w->root),.parent=malloc(((size_t)n*n+1)*sizeof *w->parent),.weight=malloc(((size_t)n+1)*sizeof *w->weight)};
+  if(!w->link || !w->cost || !w->root || !w->parent || !w->weight)return ENOMEM;
+  uint32_t links=0;
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)if(mesh_joined(r+a,r+b,&w->cost[links][1])){
+    w->link[links][0]=a;w->link[links][1]=b;w->cost[links][0]=MESH_ALPHA_US;links++;
+  }
+  w->map=(struct mesh_link_map){.kind=MESH_LINKS_GRAPH,.nodes=n,.links=links,.link=w->link,.cost=w->cost};
+  w->trees=n?mesh_trees_shortest(&w->map,w->root,w->parent,w->weight):0;
+  return 0;
+}
+/* The route between whole-map nodes a and b on fewest links: the lower's path up the higher's tree (mesh_trees_path),
+   from a to b; its node count (0: none, the map not connected) */
+static uint32_t mesh_whole_route(const struct mesh_whole *w,uint32_t a,uint32_t b,uint32_t *path){
+  if(a>=w->n || b>=w->n || a==b || w->trees!=w->n)return 0;
+  const struct mesh_trees trees={.nodes=w->n,.count=w->trees,.root=w->root,.parent=w->parent,.log_weight=w->weight};
+  uint32_t count=mesh_trees_path(&trees,a<b?a:b,a<b?b:a,path);
+  for(uint32_t i=0;a>b && i<count/2;i++){uint32_t t=path[i];path[i]=path[count-1-i];path[count-1-i]=t;}
+  return count;
+}
+/* a route's cost: its links' alphas summed, and their betas */
+static void mesh_whole_cost(const struct mesh_whole *w,const uint32_t *path,uint32_t count,double *alpha,double *beta){
+  *alpha=*beta=0;
+  for(uint32_t i=0;i+1<count;i++)for(uint32_t l=0;l<w->map.links;l++)
+    if((w->link[l][0]==path[i] && w->link[l][1]==path[i+1]) || (w->link[l][0]==path[i+1] && w->link[l][1]==path[i])){
+      *alpha+=w->cost[l][0];*beta+=w->cost[l][1];break;
+    }
+}
+static uint32_t mesh_part(uint32_t *part,uint32_t v){
+  while(part[v]!=v)v=part[v]=part[part[v]];
+  return v;
+}
+
+/* design/algorithm-sources.md#meshobserve: mesh-plan.h mesh_map over a copy of the records */
+static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t *members,uint32_t n,uint32_t *node,
+                            struct mesh_link_map *map){
+  struct mesh_whole w;
+  int error=mesh_whole_make(r,count,&w);
+  const uint32_t N=n?n:count,room=map->links;
+  uint32_t *at=malloc(((size_t)N+1)*sizeof *at),*place=malloc(((size_t)count+1)*sizeof *place),*part=malloc(((size_t)N+1)*sizeof *part),
+    *path=malloc(((size_t)count+1)*sizeof *path),links=0;
+  if(!error && (!at || !place || !part || !path))error=ENOMEM;
+  /* map node i is record at[i] (count: none), record k map node place[k] (N: none) */
+  for(uint32_t k=0;!error && k<count;k++)place[k]=n?N:k;
+  for(uint32_t i=0;!error && i<N;i++){
+    at[i]=n?count:i;part[i]=i;
+    for(uint32_t k=0;n && k<count;k++)if(r[k].node==members[i]){at[i]=k;place[k]=i;}
+  }
+  /* the map nodes' own links, as the whole map holds them */
+  for(uint32_t l=0;!error && l<w.map.links;l++){
+    const uint32_t a=place[w.link[l][0]],b=place[w.link[l][1]];
+    if(a==N || b==N)continue;
+    if(links<room){map->link[links][0]=a;map->link[links][1]=b;map->cost[links][0]=w.cost[l][0];map->cost[links][1]=w.cost[l][1];}
+    links++;part[mesh_part(part,a)]=mesh_part(part,b);
+  }
+  /* members left in parts: the routed pair of least cost across two parts linked at its route's cost, until one part
+     remains or no route joins two [Kruskal 1956] */
+  for(uint32_t best[2]={0,0};!error && n && best[0]<N;){
+    double least[2]={0,0};
+    best[0]=N;
+    for(uint32_t a=0;a<N;a++)for(uint32_t b=a+1;b<N;b++){
+      uint32_t hops=mesh_part(part,a)==mesh_part(part,b)?0:mesh_whole_route(&w,at[a],at[b],path);
+      double alpha,beta;
+      if(hops<2)continue;
+      mesh_whole_cost(&w,path,hops,&alpha,&beta);
+      if(best[0]==N || alpha<least[0] || (alpha==least[0] && beta<least[1])){best[0]=a;best[1]=b;least[0]=alpha;least[1]=beta;}
+    }
+    if(best[0]==N)break;
+    if(links<room){map->link[links][0]=best[0];map->link[links][1]=best[1];map->cost[links][0]=least[0];map->cost[links][1]=least[1];}
+    links++;part[mesh_part(part,best[0])]=mesh_part(part,best[1]);
+  }
+  if(!error && (map->nodes<N || room<links)){map->nodes=N;map->links=links;error=ENOSPC;}
+  else if(!error){
+    for(uint32_t i=0;node && i<N;i++)node[i]=n?members[i]:r[i].node;
+    map->nodes=N;map->links=links;
+    map->kind=(uint64_t)links*2==(uint64_t)N*(N-1)?MESH_LINKS_MESH:MESH_LINKS_GRAPH;
+  }
+  free(at);free(place);free(part);free(path);mesh_whole_free(&w);
+  return error?-error:(int)N;
+}
+
+int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map){
+  struct hdr *m;size_t length;struct mesh_record *r=NULL;
+  int error=mesh_open(0,&m,&length,NULL);
+  if(error)return -error;
+  int count=mesh_records_read(m,length,&r);
+  munmap(m,length);
+  if(count<0)return count;
+  int result=mesh_records_map(r,(uint32_t)count,members,n,node,map);
+  free(r);
+  return result;
+}
+
+int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
+  struct hdr *m;size_t length;
+  int error=mesh_open(0,&m,&length,NULL);
+  if(error)return error;
+  const uint64_t until=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+bound_ns;
+  uint64_t seen=atomic_load_explicit(&m->map,memory_order_acquire);
+  for(uint64_t at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);seen==*serial && at<until;at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)){
+    os_sync_wait_on_address_with_timeout(&m->map,seen,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,until-at);
+    seen=atomic_load_explicit(&m->map,memory_order_acquire);
+  }
+  error=seen!=*serial?0:ETIMEDOUT;
+  *serial=seen;
+  munmap(m,length);
+  return error;
+}
+
+uint32_t mesh_route(struct hdr *m,uint32_t from,uint32_t to,uint32_t **path){
+  struct mesh_record *r=NULL;
+  int count=mesh_records_read(m,m->length,&r);
+  uint32_t hops=0,a=UINT32_MAX,b=UINT32_MAX,*nodes=count>0?malloc(((size_t)count+1)*sizeof *nodes):NULL;
+  struct mesh_whole w={0};
+  if(nodes && !mesh_whole_make(r,(uint32_t)count,&w)){
+    for(uint32_t k=0;k<(uint32_t)count;k++){if(r[k].node==from)a=k;if(r[k].node==to)b=k;}
+    hops=mesh_whole_route(&w,a,b,nodes);
+    for(uint32_t i=0;i<hops;i++)nodes[i]=r[nodes[i]].node;
+  }
+  mesh_whole_free(&w);free(r);
+  if(!hops){free(nodes);nodes=NULL;}
+  *path=nodes;
+  return hops;
 }
 
 /* design/algorithm-sources.md#programtensor */
-/* design/bridge-and-ipc.md#clients: a client's slot given up (by its detach, by an attach or the bridge where its
-   process is gone): its program stopped, its rows closed for the bridge to release once its programs left the ports */
+/* design/bridge-and-ipc.md#clients: a client's slot given up (by its detach, or by the bridge where its process is
+   gone): its program stopped, its rows closed for the bridge to release once its programs left the ports */
 void mesh_retire(struct hdr *m,uint64_t client){
   struct mesh_client *slot=mesh_client_at(m,client);
   if(!client || (client&MESH_RETIRING) || !atomic_compare_exchange_strong(&slot->owner,&client,client|MESH_RETIRING))return;
   atomic_store_explicit(&slot->configured,0,memory_order_release);
-  for(uint32_t q=0;q<MESH_PORTS*MESH_QUEUES*2;q++)atomic_store_explicit(slot->length+q,0,memory_order_release);
+  for(uint32_t d=0;d<MESH_DESTINATIONS;d++)for(uint32_t q=0;q<MESH_QUEUES*2;q++)atomic_store_explicit(slot->tx[d].length+q,0,memory_order_release);
   for(uint32_t row=0;row<mesh_rows(m);row++){
     struct mesh_buffer *buffer=&mesh_buffers(m)[row];
     if(atomic_load_explicit(&buffer->owner,memory_order_acquire)==client){
@@ -56,7 +251,7 @@ void mesh_retire(struct hdr *m,uint64_t client){
   }
   atomic_store_explicit(&slot->owner,0,memory_order_release);
   /* design/prepared-machine.md#M26 */
-  mesh_control_notify(m);
+  mesh_notify(&m->control);
 }
 
 static uint64_t mesh_key(const char *name){
@@ -65,35 +260,29 @@ static uint64_t mesh_key(const char *name){
   return name && *name?key:0;
 }
 
-int mesh_attach(struct mesh_ctx *c,const char *name){
-  if(c->M) return 0;
-  int file=shm_open(MESH_NAME,O_RDWR,MESH_MODE);
-  if(file<0) return errno;
-  struct stat info;
-  if(fstat(file,&info)){ int error=errno; close(file); return error; }
-  struct hdr *memory=mmap(NULL,(size_t)info.st_size,PROT_READ|PROT_WRITE,MAP_SHARED,file,0);
-  int error=errno;
-  if(memory==MAP_FAILED){ close(file); return error; }
-  pid_t bridge=(size_t)info.st_size<sizeof *memory?0:(pid_t)atomic_load(&memory->bridge_pid);
-  error=(size_t)info.st_size<sizeof *memory || memory->magic!=MESH_MAGIC || memory->version!=MESH_VERSION ||
-    memory->length>(uint64_t)info.st_size?EINVAL:!bridge || (kill(bridge,0) && errno==ESRCH)?ESRCH:EBUSY;
-  uint64_t generation=error==EBUSY?(atomic_fetch_add_explicit(&memory->serial,1,memory_order_relaxed)+1)&((UINT64_C(1)<<25)-1):0;
-  for(uint32_t s=0;error==EBUSY && s<MESH_CLIENTS;s++){
-    struct mesh_client *slot=(struct mesh_client *)((char *)memory+memory->client_off)+s;
-    uint64_t owner=(generation<<38)|((uint64_t)s<<32)|(uint32_t)getpid(),vacant=atomic_load(&slot->owner);
-    if(vacant && !(vacant&MESH_RETIRING) && kill((pid_t)(uint32_t)vacant,0) && errno==ESRCH){mesh_retire(memory,vacant);vacant=atomic_load(&slot->owner);}
-    if(vacant || !atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
-    slot->key=mesh_key(name);
+int mesh_slot_take(struct mesh_ctx *c,struct hdr *m,uint64_t key){
+  uint64_t generation=(atomic_fetch_add_explicit(&m->serial,1,memory_order_relaxed)+1)&((UINT64_C(1)<<25)-1);
+  for(uint32_t s=0;s<MESH_CLIENTS;s++){
+    struct mesh_client *slot=(struct mesh_client *)((char *)m+m->client_off)+s;
+    uint64_t vacant=0,owner=(generation<<38)|((uint64_t)s<<32)|(uint32_t)getpid();
+    if(!atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
+    slot->key=key;
     atomic_store(&slot->depth,0);atomic_store(&slot->cyclic,0);
-    memset(slot->tx,0,sizeof slot->tx);
-    for(uint32_t p=0;p<MESH_PORTS;p++){
-      atomic_store(&slot->port[p].phase,0);atomic_store(&slot->port[p].domain,0);atomic_store(&slot->port[p].code,0);
-      atomic_store(&slot->port[p].prepared,0);
-    }
-    *c=(struct mesh_ctx){.M=memory,.len=(size_t)info.st_size,.client=owner,.fd=file};
+    memset(slot->tx,0,sizeof slot->tx);memset(slot->status,0,sizeof slot->status);
+    *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};
     return 0;
   }
-  munmap(memory,(size_t)info.st_size); close(file);
+  return EBUSY;
+}
+
+int mesh_attach(struct mesh_ctx *c,const char *name){
+  if(c->M) return 0;
+  struct hdr *m;size_t length;int file;
+  int error=mesh_open(1,&m,&length,&file);
+  if(error)return error;
+  *c=(struct mesh_ctx){.len=length,.fd=file};
+  error=mesh_slot_take(c,m,mesh_key(name));
+  if(error){munmap(m,length);close(file);*c=(struct mesh_ctx){0};}
   return error;
 }
 
@@ -165,7 +354,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
     atomic_store_explicit(&mesh_page(c->M)[r].mapping,MESH_ABSENT,memory_order_release);
     struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
     atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
-    buffer->pages=buffer->constant=0;
+    buffer->pages=0;
     struct mesh_publication *publication=mesh_publication_at(c->M,r);
     publication->sends=publication->device_input=publication->device_stride=0;
     atomic_store_explicit(&publication->argument,0,memory_order_relaxed);
@@ -246,14 +435,14 @@ void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
 
 /* design/algorithm-sources.md#index-hand-off */
 /* design/prepared-machine.md#M18 */
-/* a row's publication target on link `link`: until mesh_transfers_prepare lays its cells, the client's program on that
-   link names it */
-struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t link){
+/* a row's publication target toward destination `destination`: until mesh_transfers_prepare lays its cells, the
+   client's program toward that destination names it */
+struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t destination){
   struct hdr *m=c->M;
   struct mesh_publication *publication=mesh_publication_at(m,row);
   uint32_t *count=&publication->sends;
   struct mesh_target *targets=publication->targets;
-  uint64_t first=(uint64_t)((char *)&mesh_client_at(m,c->client)->tx[link]-(char *)m);
+  uint64_t first=(uint64_t)((char *)&mesh_client_at(m,c->client)->tx[destination]-(char *)m);
   for(uint32_t i=0;i<*count;i++)if(targets[i].stream==first)return &targets[i];
   struct mesh_target *target=&targets[(*count)++];
   *target=(struct mesh_target){.stream=first};
