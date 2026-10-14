@@ -1006,7 +1006,9 @@ def _observe(args):
     """A served reading's profile (metal-microbench tools/reading.py read --profile: per class, per command label its least
     us a dispatch) as observations of its instances: each label's slices the export's (and its stacks') of its shape and
     widths (their units' mean; a couple's its gate's), its time less the class's floor (its least command), a label
-    without its LOADS taking --loads (the form the reading's library had)."""
+    without its LOADS taking --loads (the form the reading's library had); and each decode class's attention plans (a
+    dimension's vector form, or its tile with its merge stage) as the attention probe's rows, at the window or --ctx
+    positions."""
     import re
     streamed = Streamed(args.export)
     held = slices(streamed, args.program, args.rank)
@@ -1032,6 +1034,18 @@ def _observe(args):
                 out.append({'instance': '_'.join(['streamed_' + spec['kernel']] + [str(spec[k]) for k in ARGUMENTS[spec['kernel']]]),
                             'rows_in': n, 'best_us': max(c['least_us'] - floor, 0.1), 'form': f'profile {outputs}x{columns} R{n}',
                             'source': str(Path(args.reading).resolve()), **mean_units(units)})
+    text = _text_config(args.export)
+    heads, windows = text.get('num_attention_heads', 8), {text['head_dim']: text.get('sliding_window', 0), text.get('global_head_dim') or text['head_dim']: 0}
+    for cls, commands in json.loads(Path(args.reading).read_text())['engine']['profile']['commands'].items():
+        for dims, window in windows.items() if cls.startswith('decode') else ():
+            for plan, labels in (('vector', [f'decode_attention_{dims}', f'decode_attention_{dims}_2']), ('tile', [f'decode_attention_tile_{dims}'])):
+                seen = [commands[l]['least_us'] for l in labels if l in commands]
+                if seen:
+                    merge = commands.get(f'decode_attention_merge_{dims}', {}).get('least_us', 0.0) if plan == 'tile' else 0.0
+                    rows, positions = int(cls.split()[1]), window or args.ctx
+                    out.append({'kind': 'attention', 'plan': plan, 'dims': dims, 'rows': rows, 'heads': heads, 'positions': positions, 'window': window,
+                                'reads': attention_reads(plan, dims, rows, heads, positions), 'best_us': min(seen) + merge,
+                                'source': str(Path(args.reading).resolve())})
     with open(args.out, 'a') as f:
         for row in out:
             f.write(json.dumps(row) + '\n')
@@ -1115,15 +1129,20 @@ def slices(streamed, program=None, rank=None):
     return out
 
 
-def _attention(export, part, ctx, classes, fit_model):
-    """The decode attention plan a rank takes for each of its layers (its head dimension, window and query heads) at each
-    rows class the table serves (docs/kernels.md#decode-attention): the node's model's least at the layer's positions (the
-    window, else the call's context)."""
+def _text_config(export):
+    """The text model's configuration an export names (its metadata's model directory)."""
     from safetensors import safe_open
     with safe_open(str(export), 'pt') as f:
         model = Path((f.metadata() or {}).get('model', ''))
     config = json.loads((model / 'config.json').read_text()) if (model / 'config.json').exists() else {}
-    text = config.get('text_config', config)
+    return config.get('text_config', config)
+
+
+def _attention(export, part, ctx, classes, fit_model):
+    """The decode attention plan a rank takes for each of its layers (its head dimension, window and query heads) at each
+    rows class the table serves (docs/kernels.md#decode-attention): the node's model's least at the layer's positions (the
+    window, else the call's context)."""
+    text = _text_config(export)
     kinds = text.get('layer_types') or []
     heads = text.get('num_attention_heads')
     if not kinds or not heads:
@@ -1218,6 +1237,7 @@ def main():
     observe.add_argument('export')
     observe.add_argument('--program', default=None)
     observe.add_argument('--rank', type=int, default=None)
+    observe.add_argument('--ctx', type=int, default=1024, help="the positions a global layer's attention read")
     observe.add_argument('--out', required=True)
     epilogue = sub.add_parser('epilogue')
     epilogue.add_argument('fused')
