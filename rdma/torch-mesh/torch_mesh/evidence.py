@@ -6,7 +6,8 @@ While a group is watched (`watch`), every collective it runs is marked as it is 
 MPS tensors the marks are timing events of torch's pool recorded on its stream by the backend's C++ path
 (torch_mesh/_stream.mm: DTensor's functional collectives and the group's direct calls), so the mark at issue is
 where the GPU finished the work before the collective and the mark at completion where the GPU has passed its wait;
-on host tensors the monotonic clock around the group's call (a host collective completes in the call).  A step's
+on host tensors the monotonic clock around the group's call, which the backend's group takes itself
+(ProcessGroupMesh._group: a host collective completes in the call).  A step's
 work on the rank is the sum, over its collectives, of the time from the mark after the previous collective (the
 previous step's last, or the step's boundary for the first) to the mark at this one's issue: the stretch the
 ranks' ledgers time for a prepared call (rdma/ledger.py).  `step` closes a step; `work`, taken at a step's
@@ -14,8 +15,8 @@ boundary, returns each closed step's stretches (seconds, one a collective in iss
 timed apart; that interval counts zero.  An MPS collective issued through a coalesced group (start_coalescing) is
 not marked.
 
-An unwatched program pays nothing in Python and one empty-map test a collective in C++; a watched group two marks a
-collective."""
+An unwatched program pays one dictionary lookup a host collective in Python and one empty-map test a collective in C++;
+a watched group two marks a collective."""
 import time
 
 _WATCHED = {}
@@ -31,23 +32,6 @@ def _stream():
     return s
 
 
-_METHODS = ('allreduce', 'allreduce_coalesced', 'reduce', 'broadcast', 'all_gather_single', 'all_gather_single_coalesced',
-            'allgather', 'reduce_scatter_single', 'reduce_scatter_single_coalesced', 'reduce_scatter', 'alltoall',
-            'all_to_all_single', 'gather', 'scatter', 'send', 'recv')
-
-
-def _install(cls):
-    """The backend's host collectives marked (once, as a host group is first watched: an unwatched program's calls
-    pass through nothing)."""
-    if getattr(cls, '_evidence', False):
-        return
-    for name in _METHODS:
-        setattr(cls, name, measured(getattr(cls, name)))
-    cls.end_coalescing = measured(cls.end_coalescing, issues=True)
-    cls.allgather_into_tensor_coalesced = cls.all_gather_single_coalesced
-    cls._evidence = True
-
-
 def watch(group, device):
     """Marks `group`'s collectives from now on (device 'mps' or 'cpu': where its tensors live); the first step
     begins here."""
@@ -58,7 +42,6 @@ def watch(group, device):
         _stream().watch(w.handle)
         _stream().mark(w.handle, 2)
     else:
-        _install(type(group))
         w.last = time.monotonic()
 
 
@@ -123,20 +106,3 @@ def work(group):
     for event in done:
         torch._C._mps_releaseEvent(event)
     return out
-
-
-def measured(method, issues=False):
-    """`method` of a process group, marked on the host while the group is watched on host tensors (the MPS path is
-    marked in _stream.mm); a call inside a coalesced group is marked where the coalesced group is issued (`issues`:
-    end_coalescing)."""
-    def call(self, *args, **kwargs):
-        w = _WATCHED.get(id(self))
-        if w is None or w.device == 'mps' or (not issues and getattr(self, '_pending', None) is not None):
-            return method(self, *args, **kwargs)
-        mark(self, True)
-        try:
-            return method(self, *args, **kwargs)
-        finally:
-            mark(self, False)
-    call.__name__, call.__doc__, call.__wrapped__ = method.__name__, method.__doc__, method
-    return call
