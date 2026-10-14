@@ -11,9 +11,11 @@
 // rows computes them for a prompt's last positions before its first draft: metal-microbench litert_program.m), the
 // stream's table row (0 on a pair's members; a served stream's own row), then the R tokens of this step's rows. The history is the stream's tokens, the prompt's and every committed one.
 //
-// Accept (greedy verification): row i's selected token y_i is the target's next token after row i's; the drafts d_1 ..
-// d_{R-1} (rows 1 ..) are accepted while d_{i+1} = y_i, n of them; y_0 .. y_n are committed (the drafts accepted and the
-// target's own next token), and the next step's row 0 is y_n at p0 + n + 1. A teacher (taught > 0 tokens by position)
+// Accept (verification against the target's draws): row i's selected token y_i is the target's own draw after row i's
+// (its selection at temperature 1, keyed by row i's position: argmax.metal mesh_gumbel), so a row computed again draws the
+// same token; the drafts d_1 .. d_{R-1} (rows 1 ..) are accepted while d_{i+1} = y_i, n of them; y_0 .. y_n are committed
+// (the drafts accepted and the target's own next draw: exact samples of the target, the tokens a decode of one row a step
+// draws with the same seed), and the next step's row 0 is y_n at p0 + n + 1. A teacher (taught > 0 tokens by position)
 // replaces y_i by the teacher's token at p0 + 1 + i (docs/measurement.md, the pair's divergence).
 //
 // Draft (prompt lookup [Saxena 2023]: an n-gram transition table over the stream's own tokens, the most recent earlier
