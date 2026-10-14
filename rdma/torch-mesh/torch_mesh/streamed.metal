@@ -30,6 +30,7 @@
 //       cooperative tensor of matmul2d<M, 32, 32> at the node's slots (COOP), one operation a tile
 //   streamed_panel<M, TILES, WIDTHS>, streamed_panel_t<M, TILES, WIDTHS>   prefill and the transposed product: eight
 //       tiles decoded into threadgroup memory in natural order, one operation a 256-wide panel
+//   streamed_panel8<M, TILES, WIDTHS, F>   the int8 panel: two bands, int8 x int8 past K's F leading tiles
 //
 // and the products' sums reach their own consumers through streamed_value (a K split's or a member's partials summed,
 // the row's scale applied), whole rows through streamed_rows (partials, or plain values a crossing summed), and a
@@ -940,6 +941,42 @@ static inline __attribute__((always_inline)) void fragment_panel(device const ui
 #undef FRAGMENT_PANEL
 }
 
+// A tile word's step exponent (E8M0: the fp16 step's biased exponent, 2^(e - 15)) and whether the step is one (no
+// mantissa: an export's e8m0 steps).
+static inline uint fragment_exponent(uint word) { return (word >> 26) & 31u; }
+static inline bool fragment_e8m0(uint word) { return ((word >> 16) & 0x3FFu) == 0; }
+
+// A tile of width B as int8, each odd code (2c + 1 - 2^B) shifted left by `shift`: the panel's steps aligned to its least
+// (the export's widths and steps make (2^B - 1) << shift fit in 127 for all but a few panels: docs/kernels.md#the-int8-panel).
+template <uint B, uint P, typename W>
+static inline char2 fragment_int8(W w, uint shift) {
+    const short2 s = as_type<short2>(streamed_bits<B, P>(w) | 0x00010001u) - short2(short(1u << B));
+    return char2(s << short(shift));
+}
+
+// The int8 panel (docs/kernels.md#the-int8-panel): eight tiles of band `band`, tiles [t0, t0 + 8), decoded by the
+// threadgroup's eight simdgroups into panel8 (value (k, n) at panel8[k * stride + n]) as int8 at the band's least step
+// exponent `low`.
+template <uint TILES, uint WIDTHS>
+static inline __attribute__((always_inline)) void fragment_panel8(device const uint *codes, device const uint *tiles, uint base,
+        uint t0, uint low, uint simd, uint lane, threadgroup char *panel8, uint stride) {
+    const uint t = t0 + simd, c = fragment_c(lane), kb = fragment_kb(lane);
+    const uint word = t < TILES ? tiles[t] : 0u, b = (word >> 12) & 15u, shift = fragment_exponent(word) - low;
+    auto put = [&](uint P, char2 v) { *(threadgroup char2 *)(panel8 + (32 * simd + kb + 8 * (P & 3u)) * stride + 8 * c + 2 * (P >> 2)) = v; };
+    if (b == 0) { for (uint P = 0; P < 16; P++) put(P, char2(0)); return; }
+    device const uint *at = codes + ((base + (word & 0xFFFu)) << 5) + lane;
+    uint w[7];
+#define FRAGMENT_PANEL8(B) { for (uint i = 0; i < B; i++) w[i] = at[32 * i]; \
+        put(0, fragment_int8<B, 0>(w, shift)); put(1, fragment_int8<B, 1>(w, shift)); put(2, fragment_int8<B, 2>(w, shift)); \
+        put(3, fragment_int8<B, 3>(w, shift)); put(4, fragment_int8<B, 4>(w, shift)); put(5, fragment_int8<B, 5>(w, shift)); \
+        put(6, fragment_int8<B, 6>(w, shift)); put(7, fragment_int8<B, 7>(w, shift)); put(8, fragment_int8<B, 8>(w, shift)); \
+        put(9, fragment_int8<B, 9>(w, shift)); put(10, fragment_int8<B, 10>(w, shift)); put(11, fragment_int8<B, 11>(w, shift)); \
+        put(12, fragment_int8<B, 12>(w, shift)); put(13, fragment_int8<B, 13>(w, shift)); put(14, fragment_int8<B, 14>(w, shift)); \
+        put(15, fragment_int8<B, 15>(w, shift)); }
+    FRAGMENT_WIDTHS(WIDTHS & 0xFEu, FRAGMENT_PANEL8)
+#undef FRAGMENT_PANEL8
+}
+
 // More than 16 input rows on the matrix units: a threadgroup a band and M input rows (group.y: its blocks of M within
 // share group.y / blocks), the band's tiles of the share (d.per panels) eight at a time decoded into threadgroup
 // memory and multiplied by one matmul2d (M x 32 x 256). Unfinished (finish 0): the share to partials; finished (its
@@ -1005,6 +1042,129 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
         const float value = rowScale[r] * acc[i];
         ys[ulong(n) * stride + uint(order[r])] = half(streamed_capped(value, cap));
     }
+}
+
+// The int8 panel (docs/kernels.md#the-int8-panel), two bands a threadgroup (the M5's int8 operations reach their rate at
+// 64 output columns, not at 32: 95-114 TOP/s at 64 x 64 and 128 x 64 against fp16's 54 TF): K's F leading tiles (the
+// export's outlier channels) half x int8, the rest int8 x int8 (x8, the input quantized by streamed_quantize, an E8M0
+// step a row and panel in `steps`) into int32, rescaled once a panel. Each band's eight tiles of a panel are decoded as
+// int8 at that band's least step exponent; a panel either band of which does not fit int8 runs as fp16 in two 128-deep
+// halves. Otherwise streamed_panel's shares, finish and outputs (group.x a pair of bands).
+template <uint M, uint TILES, uint WIDTHS, uint F>
+kernel void streamed_panel8(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
+                            device const uint *bands [[buffer(2)]], device half *xs [[buffer(4)]],
+                            device float *partials [[buffer(5)]], device char *x8 [[buffer(6)]], device const float *steps [[buffer(7)]],
+                            device half *ys [[buffer(11)]], device const int *order [[buffer(12)]], device const float *rowScale [[buffer(13)]],
+                            constant streamed_dims &dims [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
+                            uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const streamed_dims d = dims_of(dims);
+    using namespace mpp::tensor_ops;
+    static_assert(F <= 8 && TILES % 8 == 0, "the outlier tiles lie in the first panel; K is whole panels");
+    constexpr uint FO = F > 0 ? F : 1, KN = 72;
+    const uint outputs = d.outputs, rows = d.rows, per = d.per, finish = d.finish, pitch = d.pitch ? d.pitch : TILES;
+    const uint stride = finish ? d.stride : d.split;
+    threadgroup half panel[128 * 72];
+    threadgroup char *panel8 = (threadgroup char *)panel;
+    const uint blocks = (rows + M - 1) / M, row0 = (group.y % blocks) * M, share = group.y / blocks, pair = 2 * group.x;
+    const ulong slab = streamed_slab(bands[pair], d.inputs, TILES * 32);
+    xs += slab;
+    auto X = tensor(xs, dextents<int, 2>{int(TILES * 32), int(rows)}, array<int, 2>{1, int(TILES * 32)});
+    auto X8 = tensor((device int8_t *)(x8 + slab), dextents<int, 2>{int(TILES * 32), int(rows)}, array<int, 2>{1, int(TILES * 32)});
+    auto W = tensor(panel, dextents<int, 2>{64, 128}, array<int, 2>{1, int(KN)});
+    auto W8 = tensor((threadgroup int8_t *)panel8, dextents<int, 2>{64, 256}, array<int, 2>{1, int(KN)});
+    constexpr auto halves = matmul2d_descriptor(M, 64, 128, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
+    constexpr auto integral = matmul2d_descriptor(M, 64, 256, false, false, false, matmul2d_descriptor::mode::multiply);
+    constexpr auto outlying = matmul2d_descriptor(M, 64, 32 * FO, false, false, false, matmul2d_descriptor::mode::multiply);
+    matmul2d<halves, execution_simdgroups<8>> op;
+    matmul2d<integral, execution_simdgroups<8>> op8;
+    matmul2d<outlying, execution_simdgroups<8>> oph;
+    auto acc = op.template get_destination_cooperative_tensor<decltype(X), decltype(W), float>();
+    for (uint i = 0; i < acc.get_capacity(); ++i) acc[i] = 0;
+    const bool whole = row0 + M <= rows;
+    for (uint p = share * per; p < min(share * per + per, TILES / 8); p++) {
+        const uint t0 = p * 8;
+        uint low[2] = {31u, 31u}, fit = uint(whole);
+        for (uint j = 0; j < 16; j++) {
+            const uint w = tiles[(pair + j / 8) * pitch + t0 + j % 8];
+            if ((w >> 12) & 15u) low[j / 8] = min(low[j / 8], fragment_exponent(w));
+        }
+        for (uint j = 0; j < 16; j++) {
+            const uint w = tiles[(pair + j / 8) * pitch + t0 + j % 8], b = (w >> 12) & 15u;
+            if (b) fit &= uint(b <= 7u && fragment_e8m0(w) && (((1u << b) - 1u) << (fragment_exponent(w) - low[j / 8])) <= 127u);
+        }
+        if (fit) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint q = 0; q < 2; q++)
+                fragment_panel8<TILES, WIDTHS>(codes, tiles + (pair + q) * pitch, streamed_base(bands[pair + q]), t0, low[q], simd, lane,
+                                               panel8 + 32 * q, KN);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            const float h0 = exp2(float(int(low[0]) - 16)), h1 = exp2(float(int(low[1]) - 16));
+            if (F > 0 && p == 0) {
+                auto tmp = oph.template get_destination_cooperative_tensor<decltype(X), decltype(W8), float>();
+                auto xo = X.slice<32 * FO, M>(0, int(row0));
+                auto wo = W8.slice<64, 32 * FO>(0, 0);
+                oph.run(xo, wo, tmp);
+                for (uint i = 0; i < acc.get_capacity(); ++i) {
+                    if (!tmp.is_valid_element(i)) continue;
+                    acc[i] += tmp[i] * (tmp.get_multidimensional_index(i)[0] < 32 ? h0 : h1);
+                }
+            }
+            auto dst = op8.template get_destination_cooperative_tensor<decltype(X8), decltype(W8), int32_t>();
+            auto a8 = X8.slice<256, M>(int(t0 * 32), int(row0));
+            auto w8 = W8.slice<64, 256>(0, 0);
+            op8.run(a8, w8, dst);
+            for (uint i = 0; i < acc.get_capacity(); ++i) {
+                if (!dst.is_valid_element(i)) continue;
+                auto e = dst.get_multidimensional_index(i);
+                acc[i] += float(dst[i]) * (e[0] < 32 ? h0 : h1) * steps[(slab / (TILES * 32) + row0 + uint(e[1])) * (TILES / 8) + p];
+            }
+            continue;
+        }
+        for (uint k = 0; k < 2; k++) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            fragment_panel<TILES, WIDTHS, true>(codes, tiles + (pair + simd / 4) * pitch, streamed_base(bands[pair + simd / 4]), t0 + 4 * k,
+                                                simd % 4, lane, panel + 32 * (simd / 4), KN);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            auto weights = W.slice<64, 128>(0, 0);
+            if (whole) {
+                auto a = X.slice<128, M>(int(t0 * 32 + 128 * k), int(row0));
+                op.run(a, weights, acc);
+            } else {
+                auto a = X.slice(int(t0 * 32 + 128 * k), int(row0));
+                op.run(a, weights, acc);
+            }
+        }
+    }
+    for (uint i = 0; i < acc.get_capacity(); ++i) {
+        if (!acc.is_valid_element(i)) continue;
+        auto e = acc.get_multidimensional_index(i);
+        const uint n = row0 + uint(e[1]), r = pair * 32 + uint(e[0]);
+        if (n >= rows) continue;
+        if (finish == 0) { partials[ulong(share) * stride + ulong(n) * outputs + r] = acc[i]; continue; }
+        ys[ulong(n) * stride + uint(order[r])] = half(streamed_capped(rowScale[r] * acc[i], d.cap));
+    }
+}
+
+// The input of an int8 panel (docs/kernels.md#the-int8-panel): rows of x (slab z at z * d.inputs rows, d.columns
+// columns) to int8 with one E8M0 step a row and 256-column panel, the least power of two at least the panel's
+// greatest magnitude over 127 (x8 = rint(x / step)), the columns before d.per (the outlier tiles, which the panel reads
+// in fp16) written 0 and left out of the step. A simdgroup a (panel, row, slab).
+kernel void streamed_quantize(device const half *x [[buffer(0)]], device char *x8 [[buffer(1)]], device float *steps [[buffer(2)]],
+                              constant streamed_dims &dims [[buffer(15)]], uint3 group [[threadgroup_position_in_grid]],
+                              uint lane [[thread_index_in_simdgroup]]) {
+    const streamed_dims d = dims_of(dims);
+    const uint K = d.columns, p = group.x;
+    const ulong row = ulong(group.z) * d.inputs + group.y, at = row * K + p * 256;
+    float v[8], most = 0.0f;
+    for (uint i = 0; i < 8; i++) {
+        const uint k = p * 256 + lane + 32 * i;
+        v[i] = k < d.per ? 0.0f : float(x[at + lane + 32 * i]);
+        most = max(most, fabs(v[i]));
+    }
+    most = simd_max(most);
+    const float step = most > 0.0f ? exp2(ceil(log2(most / 127.0f))) : 1.0f;
+    for (uint i = 0; i < 8; i++) x8[at + lane + 32 * i] = char(rint(v[i] / step));
+    if (lane == 0) steps[row * (K / 256) + p] = step;
 }
 
 // The transposed product, the same panels consumed the other way: partials[share][n][j] = sum over the coded rows r of
