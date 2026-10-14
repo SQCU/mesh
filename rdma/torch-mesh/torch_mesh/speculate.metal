@@ -8,8 +8,8 @@
 // replay the history), order (the drafter's match this step), n (the drafts the previous step accepted), given (the
 // history's positions below it are given: a step whose R rows all lie below it takes them from the history, accepts
 // and appends nothing and moves p0 on by R, and leaves step at 0, so a program whose drafter reads the target's own
-// rows computes them for a prompt's last positions before its first draft: metal-microbench litert_program.m), then the
-// R tokens of this step's rows. The history is the stream's tokens, the prompt's and every committed one.
+// rows computes them for a prompt's last positions before its first draft: metal-microbench litert_program.m), the
+// stream's table row (0 on a pair's members; a served stream's own row), then the R tokens of this step's rows. The history is the stream's tokens, the prompt's and every committed one.
 //
 // Accept (greedy verification): row i's selected token y_i is the target's next token after row i's; the drafts d_1 ..
 // d_{R-1} (rows 1 ..) are accepted while d_{i+1} = y_i, n of them; y_0 .. y_n are committed (the drafts accepted and the
@@ -22,7 +22,7 @@
 // past the history's end (period t - 1 - p). No match, or ORDER 0 (a network drafter's rows replace them: drafter.metal
 // mesh_spec_drafts): the rows repeat the last token (any token verifies exactly).
 //
-// Each row's descriptor words (token, position p0 + r, table row 0, word 7: stream 0, live, writing its KV, selecting; metal-microbench
+// Each row's descriptor words (token, position p0 + r, the stream's table row, word 7: stream 0, live, writing its KV, selecting; metal-microbench
 // docs/serving.md#the-batch-descriptor) for the step's own apply, and the step's record: p0, n, the order (bit 8 stopped, bit 9 given),
 // the R row tokens.
 #ifndef TORCH_MESH_SPECULATE
@@ -93,7 +93,7 @@ __attribute__((always_inline)) static inline void mesh_spec_step(device uint *st
         }
         words[lane * stride + 0u] = token;
         words[lane * stride + 1u] = p0 + lane;
-        words[lane * stride + 2u] = 0u;
+        words[lane * stride + 2u] = state[7];
         words[lane * stride + 3u] = 7u;
         state[MESH_SPEC_STATE + lane] = token;
         record[3u + lane] = token;
