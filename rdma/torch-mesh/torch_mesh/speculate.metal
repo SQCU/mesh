@@ -22,8 +22,9 @@
 // past the history's end (period t - 1 - p). No match, or ORDER 0 (a network drafter's rows replace them: drafter.metal
 // mesh_spec_drafts): the rows repeat the last token (any token verifies exactly).
 //
-// Each row's step words (token, position p0 + r, length p0 + r + 1, KV-write skip 0) for the step's own apply, and the
-// step's record: p0, n, the order (bit 8 stopped, bit 9 given), the R row tokens.
+// Each row's descriptor words (token, position p0 + r, table row 0, word 7: stream 0, live, writing its KV, selecting; metal-microbench
+// docs/serving.md#the-batch-descriptor) for the step's own apply, and the step's record: p0, n, the order (bit 8 stopped, bit 9 given),
+// the R row tokens.
 #ifndef TORCH_MESH_SPECULATE
 #define TORCH_MESH_SPECULATE
 #include <metal_stdlib>
@@ -92,8 +93,8 @@ __attribute__((always_inline)) static inline void mesh_spec_step(device uint *st
         }
         words[lane * stride + 0u] = token;
         words[lane * stride + 1u] = p0 + lane;
-        words[lane * stride + 2u] = p0 + lane + 1u;
-        words[lane * stride + 3u] = 0u;
+        words[lane * stride + 2u] = 0u;
+        words[lane * stride + 3u] = 7u;
         state[MESH_SPEC_STATE + lane] = token;
         record[3u + lane] = token;
     }
