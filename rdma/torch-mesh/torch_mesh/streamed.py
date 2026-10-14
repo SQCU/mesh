@@ -307,20 +307,9 @@ def spec_arguments(spec, T, widths, finish=False):
     `widths`: its WIDTHS the class's widths 1 ... c as a mask (width_mask)."""
     kernel = spec['kernel']
     values = dict(spec, TILES=T, WIDTHS=width_mask(widths), OUT=int(finish))
-    values.setdefault('F', T)
     if kernel == 'coop':
         values['COOP'] = coop_slots()
-    return kernel, tuple(values[name] for name in ARGUMENTS[kernel])
-
-
-# The int8 panel's half x int8 tiles where the node's GPU multiplies int8 x int8 (the M5's neural accelerators; the M4
-# Pro has no int8 rate of its own): K's leading tiles, the export's outlier channels by its energy column order, the
-# rest int8 x int8 (metal-microbench docs/kernels.md#the-int8-panel). Elsewhere the fp16 panel.
-OUTLIERS = 1
-
-
-def int8_tensor():
-    return ' M5' in node()[0]
+    return kernel, tuple(values[name] for name in ARGUMENTS['panel' if kernel == 'panel_t' else kernel])
 
 
 def width_mask(widths):
@@ -340,8 +329,8 @@ def spec_instance(spec, T, widths, finish=False):
 
 def launch(spec, outputs, rows):
     """An instance's threadgroups (x, y), threads and K shares on a slice of `outputs` coded rows at `rows` input rows."""
-    if spec['kernel'] in ('panel', 'panel8'):
-        return (outputs // (64 if spec['kernel'] == 'panel8' else 32), -(-rows // spec['M'])), 256, 1
+    if spec['kernel'] == 'panel':
+        return (outputs // 32, -(-rows // spec['M'])), 256, 1
     if spec['kernel'] == 'couple':
         return (outputs // 32, 1), (64 if spec['APART'] else 32) * spec['SK'], 1
     return (outputs // 32 // spec['BANDS'], spec['J']), 32 * spec['SK'] * spec['BANDS'], spec['J']
@@ -876,7 +865,7 @@ def _check(args):
 ARGUMENTS = {'alu': ('R', 'SK', 'BANDS', 'J', 'TILES', 'WIDTHS', 'OUT', 'LUT', 'F'),
              'coop': ('M', 'SK', 'BANDS', 'J', 'TILES', 'WIDTHS', 'COOP'),
              'couple': ('R', 'SK', 'TILES', 'WIDTHS', 'F', 'APART'),
-             'panel': ('M', 'TILES', 'WIDTHS'), 'panel_t': ('M', 'TILES', 'WIDTHS'), 'panel8': ('M', 'TILES', 'WIDTHS', 'F')}
+             'panel': ('M', 'TILES', 'WIDTHS')}
 
 
 def parse_instance(name):
@@ -1102,8 +1091,6 @@ def _resolve(args):
             spec, t = couple(fit, *pair, rows) if pair else choose(fit, mean_units(units), rows, op, tables)
             if spec is None or spec['kernel'] == 'coop' and coop_slots() is None:
                 continue
-            if spec['kernel'] == 'panel' and int8_tensor() and op != 'head' and outputs % 64 == 0 and columns % 256 == 0:
-                spec = dict(spec, kernel='panel8', F=min(OUTLIERS, columns // 32))
             kernel, arguments = spec_arguments(spec, columns // 32, widths)
             grid, threads, shares = launch(spec, outputs, rows)
             entries.append({'op': op, 'outputs': outputs, 'columns': columns, 'widths': widths, 'rows': rows, 'kernel': kernel,
