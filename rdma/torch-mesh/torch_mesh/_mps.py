@@ -14,13 +14,12 @@ aten = torch.ops.aten
 SCORES = 1 << 26
 
 
-def _cpu_block(query, key, value, is_causal=False, scale=None, **_):
+def _cpu_block(query, key, value, is_causal=False, scale=None):
     return aten._scaled_dot_product_flash_attention_for_cpu(query, key, value, is_causal=is_causal, scale=scale)
 
 
-def mps_block(query, key, value, is_causal=False, scale=None, key_valid=None, **_):
-    """softmax(q k^T scale) v and each query row's logsumexp, SCORES scores at a time; keys where
-    key_valid (a bool per key) is False are masked."""
+def mps_block(query, key, value, is_causal=False, scale=None):
+    """softmax(q k^T scale) v and each query row's logsumexp, SCORES scores at a time."""
     scale = query.shape[-1] ** -0.5 if scale is None else scale
     rows, keys = query.shape[-2], key.shape[-2]
     step = max(1, SCORES // (query[..., 0, 0].numel() * keys))
@@ -31,8 +30,6 @@ def mps_block(query, key, value, is_causal=False, scale=None, key_valid=None, **
         scores = (query[..., at:at + step, :] @ kt).float() * scale
         if is_causal:
             scores.masked_fill_(positions > torch.arange(at, min(at + step, rows), device=query.device)[:, None], float("-inf"))
-        if key_valid is not None:
-            scores.masked_fill_(~key_valid, float("-inf"))
         top = torch.logsumexp(scores, -1, keepdim=True)
         lse[..., at:at + step] = top.squeeze(-1)
         out[..., at:at + step, :] = torch.exp(scores - top).to(value.dtype) @ value

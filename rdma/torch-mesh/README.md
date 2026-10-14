@@ -36,9 +36,6 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 
 ## What works
 
-Run on the pair's two GPUs, each row checked by one of metal-microbench's `tools/torch_parallel/{collectives,dp,ep,pp}.py`
-against one device (2026-10-04); 3 to 6 ranks with CPU tensors on loopback:
-
 | works | notes |
 |---|---|
 | all_reduce | sum, prod, max, min, avg on int8, uint8, int32, int64, float16, bfloat16 and float32; a non-contiguous view |
@@ -52,7 +49,7 @@ against one device (2026-10-04); 3 to 6 ranks with CPU tensors on loopback:
 | barrier, async_op works, coalescing | |
 | functional collectives under torch.compile | one graph |
 | DDP | |
-| ring attention | `torch_mesh._mps.ring(group, q, k, v)` on the sequence shards, forward only |
+| ring attention | `torch_mesh._mps.ring(group, q, k, v)` on the sequence shards, forward only, in place of `context_parallel` |
 | pipeline parallelism | torch.distributed.pipelining, GPipe and 1F1B, gradients checked |
 | expert parallelism | all_to_all_single |
 
@@ -64,7 +61,7 @@ against one device (2026-10-04); 3 to 6 ranks with CPU tensors on loopback:
 - Streams: torch's MPS has one queue and no `torch.mps.Stream`, so CUDA-stream overlap (DeepSpeed `overlap_comm`,
   Megatron's overlapped gradient reduction, side streams) does not port as written. What overlaps here: an
   `async_op=True` collective waited after the compute it may overlap, or a compiled graph of functional
-  collectives (metal-microbench `tools/torch_parallel/crossing.py OVERLAP=1` reads it).
+  collectives.
 - `DeviceMesh("mps")`, so DTensor, tensor and context parallelism and 2-D meshes on MPS: torch 2.14's DeviceMesh
   calls `torch.mps.is_initialized` and `set_device`, which torch's MPS module does not have, and DTensor has no
   sharding of MPS's `linear_backward` or SDPA. torch-mesh patches none of them.
@@ -140,8 +137,7 @@ engines.rebalance(pool)                                    # every few steps
   the program runs them, between its other operations.
 - Engines never time-share a physical unit: each states what it occupies (the GPU, the CPU's cores, the Neural
   Engine, and whatever units Core ML's compute plan places a Neural Engine share's operations on), and two engines
-  occupying one unit never hold units of a decision together (`Coupled.forbid`). On both nodes Core ML places every
-  computational operation of the shares on the Neural Engine.
+  occupying one unit never hold units of a decision together (`Coupled.forbid`).
 - An operation's `tolerance` is checked on each allocation's first call (every non-GPU share against the same share on
   the GPU); an engine that misses it holds none of the decision. The Neural Engine's outputs carry an absolute error
   floor (about 3e-4 RMS for a 3840-wide contraction): accurate on normalized activations (an FFN 1.5e-3), not on small
@@ -149,14 +145,6 @@ engines.rebalance(pool)                                    # every few steps
 - Nothing is implicit: an operation without an `Engines` operand is torch's own; an engine the configuration names and
   the node lacks is an error; an engine's limits (dtypes, constant weights, row tiles) are data. A share's preparation
   and first run at a row count are no evidence; once an allocation stands, one call in 16 is measured.
-- On the pair (metal-microbench `tools/torch_parallel/engines.py`: four layers of a GPU projection, an RMS norm and the
-  shared operation, 1024 rows, hidden 3840, 3456 neurons; steady steps compared in alternating blocks): the M5 resolves
-  to the GPU alone (its steps within 1-4 % of all-GPU); the M4 Pro's FFN stack stands at GPU and Neural Engine
-  [1024, 0, 2432] neurons, a step 59.2 ms against 81.5 all-GPU (1.38x; the FFN 5.3 ms against about 14.7), its linear
-  stack at [2048, 0, 1792], 41.0 against 44.2 ms.
-- What took the most finding: through coremltools each Neural Engine prediction copied its input and output on the
-  CPU, and beside a busy GPU the CPU's performance cores clocked down to 1.3-2.8 GHz (powermetrics), so a 3 ms
-  prediction became 9 after a few seconds; no allocation could repair it. The native binding holds 1.44 ms steadily.
 
 ## Streamed coded weights
 
@@ -228,22 +216,13 @@ w = s["lm_head"].to("cpu")                        # decoded
   a checkpoint. An operation the tensor lacks is an error naming the ones it has.
 - Operands are fp16. Another dtype's rows are scaled by powers of two into fp16's range (`streamed_scale_rows`, which
   reads the caller's dtype) and the products finished over the scale in that dtype (`streamed_finish<T>`): exact, and
-  two dispatches fewer than a cast each way. A backward's gradients lie far below fp16's normal range: cast as they
-  are, E2B's loss gradient at its input embeddings (64 tokens, every matrix coded, a bf16 model) was 0.140 relative to
-  the float32 model's a position (median); scaled, 0.050-0.054 (1e-3 relative noise on the float32 model's weights:
-  0.01). The scaling and the caller's dtype take one dispatch before the product and none after (the finish writes
-  that dtype).
+  two dispatches fewer than a cast each way; a backward's gradients, far below fp16's normal range, keep their
+  precision by it. The scaling and the caller's dtype take one dispatch before the product and none after (the finish
+  writes that dtype).
 - The codes are constants: no gradient reaches them, only through them.
-
-`python -m torch_mesh.streamed check EXPORT [NAME ...]` checks the decode against `model_code.py`'s reference decode,
-the node's cooperative slots, each chosen instance's product (1, 2, 4, 8, 16 and 300 rows; the head's at 1, 2 and 4) and its input gradient against
-float64 products of the reference decode, the head's tables, and the FFN (fused, composed, its gradient) against the
-decoded matrices (E2B: decode 2e-4 to 4e-4, the fp16 dense copy; products 2e-4 to 4.6e-4, gradients 4e-4 to 5.3e-4; the
-FFN 5e-4 to 7e-4, its gradient 8e-4).
 
 ## Performance
 
-- The MPS path is the measured path. An eager collective costs about 17 us on the pair; async ops hide the crossing
-  behind compute.
+- The MPS path is the measured path; async ops hide the crossing behind compute.
 - On two ranks every all-reduce is the direct exchange: one crossing.
 - Readings and their records: metal-microbench `docs/measurement.md`.
