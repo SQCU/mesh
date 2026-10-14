@@ -2,20 +2,19 @@
 (design/heterogeneity.md R2, R3, R11: a rank's time never holds its collectives; the evidence partition.rebalance
 balances on).
 
-While a group is watched (`watch`), every collective it runs is marked as it is issued and once it has completed. On
-MPS tensors the marks are timing events of torch's pool recorded on its stream by the backend's C++ path
-(torch_mesh/_stream.mm: DTensor's functional collectives and the group's direct calls), so the mark at issue is
-where the GPU finished the work before the collective and the mark at completion where the GPU has passed its wait;
-on host tensors the monotonic clock around the group's call, which the backend's group takes itself
-(ProcessGroupMesh._group: a host collective completes in the call).  A step's
-work on the rank is the sum, over its collectives, of the time from the mark after the previous collective (the
-previous step's last, or the step's boundary for the first) to the mark at this one's issue: the stretch the
-ranks' ledgers time for a prepared call (rdma/ledger.py).  `step` closes a step; `work`, taken at a step's
-boundary, returns each closed step's stretches (seconds, one a collective in issue order) and forgets them.  Two marks with no GPU work between them cannot be
-timed apart; that interval counts zero.  An MPS collective issued through a coalesced group (start_coalescing) is
-not marked.
+While a group is watched (`watch`), every collective it runs is marked as it is issued and once it has completed, by
+`mark` alone: the backend's group (ProcessGroupMesh._group, every coalesced group among them) takes it around its call,
+and the C++ path (torch_mesh/_stream.mm: DTensor's functional collectives and the group's direct calls) takes the same
+mark on the same stream.  On MPS tensors a mark is a timing event of torch's pool recorded on its stream, so the mark
+at issue is where the GPU finished the work before the collective and the mark at completion where the GPU has passed
+its wait; on host tensors the monotonic clock (a host collective completes in the call).  A step's work on the rank is
+the sum, over its collectives, of the time from the mark after the previous collective (the previous step's last, or
+the step's boundary for the first) to the mark at this one's issue: the stretch the ranks' ledgers time for a prepared
+call (rdma/ledger.py).  `step` closes a step; `work`, taken at a step's boundary, returns each closed step's stretches
+(seconds, one a collective in issue order) and forgets them.  Two marks with no GPU work between them cannot be timed
+apart; that interval counts zero.
 
-An unwatched program pays one dictionary lookup a host collective in Python and one empty-map test a collective in C++;
+An unwatched program pays one dictionary lookup a group call in Python and one empty-map test a collective in C++;
 a watched group two marks a collective."""
 import time
 
@@ -45,15 +44,14 @@ def watch(group, device):
         w.last = time.monotonic()
 
 
-def unwatch(group):
-    w = _WATCHED.pop(id(group), None)
-    if w is not None and w.device == 'mps':
-        _stream().unwatch(w.handle)
-
-
 def mark(group, before):
+    """The group's mark at a collective's issue (`before`) or completion."""
     w = _WATCHED.get(id(group))
-    if w is not None and w.device != 'mps':
+    if w is None:
+        return
+    if w.device == 'mps':
+        _stream().mark(w.handle, 0 if before else 1)
+    else:
         w.marks.append((0 if before else 1, time.monotonic()))
 
 

@@ -7,11 +7,9 @@ offset (ncclMeshBuffer), so the work is ordered with torch's own and the call re
 host path, a non-contiguous one staged through a contiguous copy.
 
 A group's communicator is NCCL's bootstrap's (ncclCommInitRank, rank 0's ncclGetUniqueId passed through the group's
-store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep when it opens; a group given a topology
-(Options, torch's pg_options of init_process_group and new_group) is over that operand (ncclMeshCommInitRank).  The
-silent-link bound is the library's (nccl.h)."""
+store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep when it opens; it takes no pg_options.
+The silent-link bound is the library's (nccl.h)."""
 import math
-from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
@@ -24,7 +22,7 @@ _stream = None
 if torch.backends.mps.is_available():
     from . import _stream  # its kernels for torch's functional collectives on MPS register as it loads
 
-import mesh  # noqa: E402  (rdma/mesh.py, on the path the mesh's install gives the environment: the planner's values, and _mesh_c)
+import mesh  # noqa: E402  (rdma/mesh.py, on the path the mesh's install gives the environment: its _mesh_c)
 
 ffi, LIB = mesh.ffi, mesh.lib
 TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.ncclUint8, torch.int32: LIB.ncclInt32,
@@ -33,20 +31,6 @@ TYPES = {torch.int8: LIB.ncclInt8, torch.uint8: LIB.ncclUint8, torch.bool: LIB.n
          torch.float8_e4m3fn: LIB.ncclFloat8e4m3, torch.float8_e5m2: LIB.ncclFloat8e5m2}
 OPS = ((ReduceOp.SUM, LIB.ncclSum), (ReduceOp.PRODUCT, LIB.ncclProd), (ReduceOp.MAX, LIB.ncclMax), (ReduceOp.MIN, LIB.ncclMin),
        (ReduceOp.AVG, LIB.ncclAvg))
-
-
-@dataclass
-class Options:
-    """A group's topology operand, torch's pg_options (nccl.h ncclMeshCommInitRank; None: NCCL's bootstrap): `topology`
-    its ranks' link map (mesh.link_map), `paths` the trees a message between unlinked ranks takes (mesh.trees(); None:
-    the topology's shortest-path trees), `programs` the compiled collectives the group runs ([(mesh.compile(), below
-    bytes)]; None: the library's default), `node` each rank's bridge node (None: rank r on node r), `name` the
-    communicator's, the same on every rank (None: the library's)."""
-    topology: mesh.LinkMap | None = None
-    paths: object = None
-    programs: list | None = None
-    node: list | None = None
-    name: str | None = None
 
 
 def check(result):
@@ -156,30 +140,17 @@ class ProcessGroupMesh(dist.ProcessGroup):
         batch_isend_irecv coalesces through it, init_process_group's device_id reads it)."""
         return self
 
-    def __init__(self, rank, size, store, options=None):
+    def __init__(self, rank, size, store):
         super().__init__(rank, size)
-        options = options or Options()
         self._rank, self._size, self._pending = rank, size, None
         self._stream = ffi.NULL
-        made, topology = ffi.new('ncclComm_t *'), options.topology
-        if topology is None:
-            unique = ffi.new('ncclUniqueId *')
-            if rank == 0:
-                check(LIB.ncclGetUniqueId(unique))
-                store.set('mesh/unique', bytes(ffi.buffer(unique)))
-            else:
-                ffi.memmove(unique, store.get('mesh/unique'), ffi.sizeof('ncclUniqueId'))
-            check(LIB.ncclCommInitRank(made, size, unique[0], rank))
+        made, unique = ffi.new('ncclComm_t *'), ffi.new('ncclUniqueId *')
+        if rank == 0:
+            check(LIB.ncclGetUniqueId(unique))
+            store.set('mesh/unique', bytes(ffi.buffer(unique)))
         else:
-            if topology.nodes != size:
-                raise ValueError(f'a topology of {topology.nodes} ranks for a group of {size}')
-            paths = options.paths.c if options.paths is not None else ffi.NULL
-            nodes = ffi.new('int[]', list(options.node)) if options.node is not None else ffi.NULL
-            table = (ffi.new('ncclMeshProgram[]', [{'program': p.c, 'below': below} for p, below in options.programs])
-                     if options.programs else ffi.NULL)
-            self._programs = (options.paths, options.programs, table)
-            check(LIB.ncclMeshCommInitRank(made, rank, topology.c, paths, table, len(options.programs or []), nodes,
-                                           options.name.encode() if options.name else ffi.NULL))
+            ffi.memmove(unique, store.get('mesh/unique'), ffi.sizeof('ncclUniqueId'))
+        check(LIB.ncclCommInitRank(made, size, unique[0], rank))
         self.comm = made[0]
         self.handle = int(ffi.cast('uintptr_t', self.comm))
         if _stream is not None:
@@ -419,11 +390,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
 
 def create(opts, options):
-    """The group (torch's extended creator: `opts` its store, rank and size, `options` the caller's pg_options, an
-    Options)."""
-    if options is not None and not isinstance(options, Options):
-        raise TypeError(f'the mesh backend takes torch_mesh.Options as pg_options, not {type(options).__name__}')
-    return ProcessGroupMesh(opts.group_rank, opts.group_size, opts.store, options)
+    """The group (torch's extended creator: `opts` its store, rank and size, `options` the caller's pg_options)."""
+    if options is not None:
+        raise TypeError("the mesh backend takes no pg_options: a group's map is its bridges'")
+    return ProcessGroupMesh(opts.group_rank, opts.group_size, opts.store)
 
 
 dist.Backend.register_backend('mesh', create, devices=['cpu', 'mps'], extended_api=True)

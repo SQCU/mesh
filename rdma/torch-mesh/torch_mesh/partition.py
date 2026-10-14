@@ -1,5 +1,5 @@
-"""A partition operand: a mesh dimension's extents split among its ranks by parts that vary between calls
-(design/heterogeneity.md §4 and R14), a program's own operand on raw tensors; DTensor shards as stock torch does.
+"""A partition operand (design/heterogeneity.md §4): a mesh dimension's extents split among its ranks by parts that
+vary between calls, a program's own operand on raw tensors.
 
 A mesh dimension carries a capacity c_r >= 1 per coordinate and parts p_r (1 <= p_r <= c_r) of P = sum(p) units,
 attached with the mesh: attach(mesh, tp=((15, 15), (4, 12))), the same on every rank.  The parts are a tensor operand
@@ -8,7 +8,7 @@ raises ValueError, on every rank alike) is split N p_r / P per coordinate in ran
 split(mesh, "tp", N), the blocks the list collectives take (dist.all_gather into a list of unequal outputs,
 dist.reduce_scatter of a list of unequal inputs: MPI's v-collectives in torch's spelling, the backend's Allgatherv and
 Reduce_scatter).  A rank that holds its share in a buffer of its capacity, c_r N / P, its valid elements first, keeps
-its shapes while the parts move within the capacities.
+its shapes while the parts move within the capacities and masks its own padding (R14).
 
 rebalance(mesh, name, every) moves the parts by the evidence of the program's steps (allocate.Balancer)."""
 import torch
