@@ -1,9 +1,8 @@
 // The greatest of each row's candidates in one total order, greater value first and then the lower key (metal-microbench
 // docs/kernels.md#one-kernel-interface, argmax): a row's range split over B threadgroups of T threads, each thread's
 // candidates the caller's scan, the simdgroups' met by shuffles, the threadgroup's through threadgroup memory, and the
-// blocks' by the last threadgroup to arrive (mesh_last_arrival, then mesh_arrival_reset). V and K are one candidate (float, uint) or
-// four independent channels (float4, uint4). metal-microbench's engine instantiates it over a row of logits
-// (argmax_partial) and its recorder over LiteRT's ARG_MAX channels (native_argmax.metal).
+// blocks' by the last threadgroup to arrive (mesh_last_arrival, then mesh_arrival_reset). V and K are one candidate (float, uint).
+// The selection (mesh_draw, below) instantiates it over a row's logits.
 #ifndef TORCH_MESH_ARGMAX
 #define TORCH_MESH_ARGMAX
 #include <metal_stdlib>
@@ -32,11 +31,6 @@ __attribute__((always_inline)) static inline void mesh_take(thread float &v, thr
 // A candidate packed as a crossing carries it: (its value's bits, its key).
 __attribute__((always_inline)) static inline void mesh_take(thread float &v, thread uint &k, uint2 packed) {
     mesh_take(v, k, as_type<float>(packed.x), packed.y);
-}
-
-__attribute__((always_inline)) static inline void mesh_take(thread float4 &v, thread uint4 &k, float4 ov, uint4 ok) {
-    for (int c = 0; c < 4; c++)
-        if (ov[c] > v[c] || (ov[c] == v[c] && ok[c] < k[c])) { v[c] = ov[c]; k[c] = ok[c]; }
 }
 
 // LastArrival, a split reduction's finish by the last of its J threadgroups to arrive (attention.metal's parts' merge,
@@ -109,5 +103,22 @@ template <uint T, bool All = false, typename V, typename K>
 __attribute__((always_inline)) static inline bool mesh_argmax(thread V &v, thread K &k, uint lid, threadgroup V *tv, threadgroup K *tk) {
     return mesh_argmax<T, All>(v, k, lid, tv, tk, (coherent(device) device V *)nullptr, (coherent(device) device K *)nullptr,
                                (device atomic_uint *)nullptr, 0u, 1u);
+}
+
+// The selection, a row's draw at temperature 1 (metal-microbench docs/kernels.md#speculative-decoding, sampling): over its
+// candidates c in [lo, hi), the greatest z(c) + g(seed, key, first + c), a candidate whose z is below `cutoff` (min-p's,
+// else -inf) never taken; k the candidate (c), the blocks as mesh_argmax's. metal-microbench's engine selects with it
+// (argmax_partial) and LiteRT's program (its tools/prepare_e2b.py `selection`).
+template <uint T, typename Z>
+__attribute__((always_inline)) static inline bool mesh_draw(thread float &v, thread uint &k, Z z, uint seed, uint key, uint first, float cutoff,
+                                                            uint lo, uint hi, uint lid, threadgroup float *tv, threadgroup uint *tk,
+                                                            coherent(device) device float *pv, coherent(device) device uint *pk,
+                                                            device atomic_uint *arrival, uint slot, uint blocks) {
+    v = -INFINITY; k = 0xffffffffu;
+    for (uint c = lo + lid; c < hi; c += T) {
+        const float x = z(c);
+        mesh_take(v, k, x < cutoff ? -INFINITY : x + mesh_gumbel(seed, key, first + c), c);
+    }
+    return mesh_argmax<T>(v, k, lid, tv, tk, pv, pk, arrival, slot, blocks);
 }
 #endif
