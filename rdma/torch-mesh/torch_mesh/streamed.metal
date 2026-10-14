@@ -262,7 +262,8 @@ static inline __attribute__((always_inline)) void fragment_values(W w, F f) {
     (W) >= 128u ? 7u : (W) >= 64u ? 6u : (W) >= 32u ? 5u : (W) >= 16u ? 4u : (W) >= 8u ? 3u : (W) >= 4u ? 2u : 1u)
 
 // A tile's planes at `at`, width b, into w: the widest width's loads, each predicated on the tile's width, issued before
-// the width's decode is chosen (docs/kernels.md#fragment-tiles: a switch on the load path cost an ALU instance 3.5-4.8 us).
+// the width's decode is chosen (metal-microbench docs/kernels.md#stacked-products: the products' sum a step 3 % less at
+// one row, at par at four and eight).
 template <uint WIDTHS, uint N>
 static inline __attribute__((always_inline)) void fragment_load(device const uint *at, uint b, thread uint (&w)[N]) {
     for (uint i = 0; i < N; i++) if (i < b) w[i] = at[32 * i];
