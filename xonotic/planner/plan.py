@@ -8,7 +8,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'rdma'))
-from allocate import Allocator
+from allocate import Balancer
 from mesh_mpi import Comm
 
 TEAMS = 5
@@ -22,7 +22,7 @@ SPLIT = Path(__file__).with_name('split.json')
 # applies its block of every expert's up-projection columns and the same rows of its down
 # projection, so its expert output is a partial sum that one all-reduce completes.  Router and
 # objective basis are small and replicated.  Every rank holds every column, so the blocks are a
-# run-time operand: each tick slices them by the shares the allocator wrote on the tick before.
+# run-time operand: each tick slices them by the shares the balancer gave on the tick before.
 def model(width):
     rng = np.random.default_rng(SEED)
     return tuple(rng.standard_normal(shape).astype(np.float32) / np.sqrt(shape[-2])
@@ -56,14 +56,14 @@ def main():
         parser.error('--width must hold one segment time per rank')
     # The operand's last row carries each rank's segment time in its own column and zeros
     # elsewhere, so the reduction sums it exactly and every rank reads every rank's time from the
-    # tick's result: the allocator (rdma/allocate.py) is duplicated on every rank and steps on
-    # identical inputs, and its shares are the next tick's configuration operand.
+    # tick's result: the balancer (rdma/allocate.py Balancer) is duplicated on every rank and
+    # observes identical inputs, and its shares are the next tick's configuration operand.
     comm = Comm()
     rank = comm.Get_rank()
     local = np.zeros((args.bots + 1, args.width), np.float32)
     total = np.empty_like(local)
-    allocate = Allocator(columns, split['grain'], split['low'], split['prior'], split['floor'],
-                         split['forget'], split['step'])
+    balancer = Balancer({'columns': {'parts': columns, 'grain': split['grain'], 'low': split['low']}})
+    shares = columns
     route, up, down, objective = model(args.width)
     positions = np.random.default_rng(7).standard_normal((args.bots, args.width)).astype(np.float32) * .1
     positions[:, 0] = np.arange(args.bots)
@@ -74,8 +74,8 @@ def main():
     start = ready = time.monotonic()
     for tick in range(args.ticks):
         began = time.monotonic()
-        low = sum(allocate.shares[:rank])
-        share = slice(low, low + allocate.shares[rank])
+        low = sum(shares[:rank])
+        share = slice(low, low + shares[rank])
         solve(positions, route, up[:, :, share], down[:, share], local[:args.bots])
         solving += time.monotonic() - began
         # this rank's segment: from the last reduction's return to entering this one
@@ -86,7 +86,8 @@ def main():
         ready = time.monotonic()
         collective += ready - began
         if tick >= split['warmup']:
-            allocate([float(value) for value in total[args.bots, :len(columns)]])
+            shares = balancer.observe({'tick': {'scales': {'columns': [1.0] * len(columns)},
+                                                'times': [[float(t) / 1e3] for t in total[args.bots, :len(columns)]]}})['columns']
         experts = total[:args.bots]
         picks = np.argmax(experts @ objective, axis=1)
         switches += int(np.count_nonzero(objectives != picks))
@@ -100,7 +101,7 @@ def main():
                       'solve_ms': 1e3 * solving / args.ticks, 'collective_ms': 1e3 * collective / args.ticks,
                       'switches': switches,
                       'objective_split': np.bincount(objectives, minlength=TEAMS).tolist(),
-                      'shares': allocate.shares, 'b_ms_per_column': allocate.b}), flush=True)
+                      'shares': shares}), flush=True)
 
 
 if __name__ == '__main__':
