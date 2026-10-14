@@ -32,8 +32,6 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 /* design/prepared-machine.md#M09 */
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
-/* design/algorithm-sources.md#device-operands */
-void mesh_device_bind(struct mesh_ctx *,uint32_t row,uint64_t address);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 /* design/algorithm-sources.md#index-hand-off */
 struct mesh_target *mesh_publish_bind(struct mesh_ctx *,uint32_t row,uint32_t destination);

@@ -350,7 +350,6 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
   uint32_t first=mesh_allocate(c,count,1,0,mesh_rows(c->M),mesh_plane(c->M,MESH_ROW_OWN),mesh_plane(c->M,MESH_ROW_HOT),&c->row_cursor);
   if(first==MESH_ABSENT) return first;
   for(uint32_t r=first;r<first+count;r++){
-    atomic_store_explicit(&mesh_page(c->M)[r].device,0,memory_order_relaxed);
     atomic_store_explicit(&mesh_page(c->M)[r].mapping,MESH_ABSENT,memory_order_release);
     struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
     atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
@@ -380,11 +379,6 @@ void mesh_backing_bind(struct mesh_ctx *c,uint32_t first,uint32_t pages,uint32_t
     atomic_store_explicit(&entry->mapping,((uint64_t)index<<32)|(page+offset),memory_order_relaxed);
     atomic_store_explicit(&entry->address,(uintptr_t)mesh_at(c->M,page+offset)-(uintptr_t)c->M,memory_order_relaxed);
   }
-}
-
-/* design/algorithm-sources.md#device-operands */
-void mesh_device_bind(struct mesh_ctx *c,uint32_t row,uint64_t address){
-  if(row!=MESH_ABSENT)atomic_store_explicit(&mesh_page(c->M)[row].device,address,memory_order_relaxed);
 }
 
 /* design/algorithm-sources.md#programtensor */

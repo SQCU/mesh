@@ -308,29 +308,6 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,str
   *section=(struct mesh_section){first,(uint32_t)span,bytes,count,stride};
   return 0;
 }
-/* design/algorithm-sources.md#programtensor */
-/* design/prepared-machine.md#M01 */
-/* design/prepared-machine.md#M02 */
-int mesh_section_slice(struct mesh_ctx *context,struct mesh_section source,size_t offset,size_t bytes,
-  uint32_t invocations,uint32_t invocation_pages,struct mesh_section *section){
-  struct hdr *m=context->M;
-  uint64_t block=(uint64_t)m->block*m->pgsz,span=(uint64_t)invocation_pages*m->pgsz;
-  if(!bytes || !invocations || !invocation_pages || invocation_pages%m->block ||
-     offset>span || bytes>span-offset || (uint64_t)invocations*invocation_pages>source.pages)return EINVAL;
-  uint32_t chunks=(uint32_t)((offset%block+bytes+block-1)/block);
-  uint64_t stride=(uint64_t)chunks*invocations;
-  if(stride*source.count>mesh_rows(m))return ENOMEM;
-  uint32_t first=mesh_rows_alloc(context,(uint32_t)stride*source.count);
-  if(first==MESH_ABSENT)return errno;
-  for(uint32_t s=0;s<source.count;s++)for(uint32_t t=0;t<invocations;t++)for(uint32_t k=0;k<chunks;k++){
-    struct mesh_page_entry *from=&mesh_page(m)[source.first+s*source.stride+(uint64_t)t*invocation_pages/m->block+offset/block+k];
-    struct mesh_page_entry *to=&mesh_page(m)[first+s*stride+(uint64_t)t*chunks+k];
-    atomic_store_explicit(&to->mapping,atomic_load_explicit(&from->mapping,memory_order_relaxed),memory_order_relaxed);
-    atomic_store_explicit(&to->address,atomic_load_explicit(&from->address,memory_order_relaxed)+(k?0:offset%block),memory_order_relaxed);
-  }
-  *section=(struct mesh_section){first,chunks*m->block,bytes,source.count,(uint32_t)stride};
-  return 0;
-}
 
 /* design/algorithm-sources.md#programtensor */
 void *mesh_section_address(struct mesh_ctx *context,struct mesh_section section,uint32_t index){return (char *)context->M+atomic_load_explicit(&mesh_page(context->M)[mesh_section_row(section,index)].address,memory_order_relaxed);}

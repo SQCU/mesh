@@ -47,15 +47,13 @@ int mesh_link_map_check(const struct mesh_link_map *map){
 static int mesh_member(const uint64_t *set,uint32_t v){ return !set || (set[v/64]>>(v%64)&1); }
 
 /* Whether the map links a and b, either way (a mesh links every pair; a ring, a tree or a graph its links). */
-static int mesh_linked(const struct mesh_link_map *map,uint32_t a,uint32_t b){
+int mesh_link_between(const struct mesh_link_map *map,uint32_t a,uint32_t b){
   if(a==b || a>=map->nodes || b>=map->nodes)return 0;
   if(map->kind==MESH_LINKS_MESH)return 1;
   for(uint32_t l=0;l<map->links;l++)
     if((map->link[l][0]==a && map->link[l][1]==b) || (map->link[l][0]==b && map->link[l][1]==a))return 1;
   return 0;
 }
-
-int mesh_link_between(const struct mesh_link_map *map,uint32_t a,uint32_t b){ return mesh_linked(map,a,b); }
 
 /* The cost of the link between a and b: its own where the map gives one, else alpha and beta. */
 static void mesh_link_cost(const struct mesh_link_map *map,uint32_t a,uint32_t b,double alpha,double beta,double *link_alpha,double *link_beta){
@@ -100,7 +98,7 @@ int mesh_trees_check(const struct mesh_link_map *map,const struct mesh_trees *tr
     const uint32_t r=trees->root[t],*parent=trees->parent+(size_t)t*n;
     if(r>=n || parent[r]!=r || !isfinite(trees->log_weight[t]))return EINVAL;
     for(uint32_t v=0;v<n;v++){
-      if(v!=r && !mesh_linked(map,v,parent[v]))return EINVAL;
+      if(v!=r && !mesh_link_between(map,v,parent[v]))return EINVAL;
       uint32_t at=v,hops=0;
       while(at!=r && hops<n){at=parent[at];hops++;}
       if(at!=r)return EINVAL;
@@ -138,7 +136,7 @@ uint32_t mesh_trees_shortest(const struct mesh_link_map *map,uint32_t *root,uint
     distance[r]=0;queue[tail++]=r;
     while(head<tail){
       const uint32_t at=queue[head++];
-      for(uint32_t w=0;w<n;w++)if(distance[w]==UINT32_MAX && mesh_linked(map,at,w)){distance[w]=distance[at]+1;queue[tail++]=w;}
+      for(uint32_t w=0;w<n;w++)if(distance[w]==UINT32_MAX && mesh_link_between(map,at,w)){distance[w]=distance[at]+1;queue[tail++]=w;}
     }
     if(tail<n){made=0;break;}
     root[r]=r;log_weight[r]=0;
@@ -148,7 +146,7 @@ uint32_t mesh_trees_shortest(const struct mesh_link_map *map,uint32_t *root,uint
       uint32_t up=v;
       double best_alpha=0,best_beta=0;
       for(uint32_t w=0;v!=r && w<n;w++){
-        if(distance[w]+1!=distance[v] || !mesh_linked(map,v,w))continue;
+        if(distance[w]+1!=distance[v] || !mesh_link_between(map,v,w))continue;
         double a,b;
         mesh_link_cost(map,v,w,0,0,&a,&b);
         if(up==v || a<best_alpha || (a==best_alpha && b<best_beta)){up=w;best_alpha=a;best_beta=b;}
@@ -419,7 +417,7 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,double eps,uint32_t mos
   if(n<2 || !most || mesh_link_map_check(map))return 0;
   if(!(eps>0 && eps<1))eps=0.1;
   uint32_t m=0;
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++)m+=mesh_linked(map,a,b);
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++)m+=mesh_link_between(map,a,b);
   uint32_t *from=malloc((m+1)*sizeof *from),*to=malloc((m+1)*sizeof *to),*index=malloc((size_t)n*n*sizeof *index);
   double *capacity=malloc((m+1)*sizeof *capacity),*length=malloc((m+1)*sizeof *length);
   int32_t *chosen=malloc(n*sizeof *chosen);
@@ -429,7 +427,7 @@ uint32_t mesh_trees_pack(const struct mesh_link_map *map,double eps,uint32_t mos
   if(!from || !to || !index || !capacity || !length || !chosen)goto done;
   /* arc v -> w (v's parent w): edge e, from[e] = w, to[e] = v; its capacity 1/beta of the link's cost */
   m=0;
-  for(uint32_t v=0;v<n;v++)for(uint32_t w=0;w<n;w++)if(mesh_linked(map,v,w)){
+  for(uint32_t v=0;v<n;v++)for(uint32_t w=0;w<n;w++)if(mesh_link_between(map,v,w)){
     double alpha,beta;
     mesh_link_cost(map,v,w,0,1,&alpha,&beta);
     from[m]=w;to[m]=v;capacity[m]=beta>0 && isfinite(beta)?1/beta:1;index[(size_t)v*n+w]=m;m++;
