@@ -55,7 +55,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import time
 from pathlib import Path
 
@@ -91,16 +90,13 @@ _CORE_ML = None
 
 
 def _coreml():
-    """The native Core ML binding (rdma/mesh-coreml.m: predictions on caller memory, no copies on the CPU), built where
-    missing; None where it cannot load."""
+    """The native Core ML binding (rdma/mesh-coreml.m: predictions on caller memory, no copies on the CPU), the mesh's
+    installed library beside mesh.py; None where it cannot load."""
     global _CORE_ML
     if _CORE_ML is None:
-        rdma = Path(__file__).resolve().parents[2]
-        path = rdma / 'libmesh-coreml.dylib'
+        from mesh import RDMA
         try:
-            if not path.exists():
-                subprocess.run(['make', '-s', '-C', str(rdma), 'libmesh-coreml.dylib'], check=True)
-            lib = ctypes.CDLL(str(path))
+            lib = ctypes.CDLL(os.path.join(RDMA, 'libmesh-coreml.dylib'))
             lib.mesh_coreml_load.restype = ctypes.c_long
             lib.mesh_coreml_load.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
             lib.mesh_coreml_predict.restype = ctypes.c_int
@@ -112,7 +108,7 @@ def _coreml():
             lib.mesh_coreml_compile.restype = ctypes.c_int
             lib.mesh_coreml_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
             _CORE_ML = lib
-        except (OSError, subprocess.CalledProcessError):
+        except OSError:
             _CORE_ML = False
     return _CORE_ML or None
 

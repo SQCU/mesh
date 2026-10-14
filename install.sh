@@ -38,12 +38,14 @@ install -m 644 -o root -g wheel "$REPO"/etc/io.mesh.telemetry.plist /Library/Lau
 install -m 644 -o root -g wheel "$REPO"/keys/authorized_keys "$MESH_ROOT/etc/authorized_keys"
 install -m 755 -o root -g wheel "$REPO"/viz/serve.py "$MESH_ROOT/viz/serve.py"
 install -m 644 -o root -g wheel "$REPO"/viz/index.html "$MESH_ROOT/viz/index.html"
-try "bridge and libraries built" make -C "$REPO/rdma" mesh-flow mesh-stat libmesh.dylib libnccl-mesh.dylib
-try "Python bindings built" make -C "$REPO/rdma" mesh-c PYTHON="$MESH_ROOT/runtime-current/.venv/bin/python"
+try "bridge and libraries built" make -C "$REPO/rdma" all
 for f in mesh-flow mesh-stat; do
   cmp -s "$REPO/rdma/$f" "$MESH_ROOT/bin/$f" || try "$f installed" install -S -m 755 -o root -g wheel "$REPO/rdma/$f" "$MESH_ROOT/bin/$f"
 done
-try "library installed: $MESH_ROOT/rdma" rsync -rlc --delete --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r,+X --exclude .build --exclude __pycache__ --exclude '*.o' "$REPO/rdma/" "$MESH_ROOT/rdma/"
+try "library installed: $MESH_ROOT/rdma" rsync -rlc --delete --prune-empty-dirs --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r,+X --exclude .build --exclude __pycache__ --exclude build --exclude '*.egg-info' --exclude 'torch-mesh/**.py' \
+  --include '*/' --include '*.h' --include module.modulemap --include '*.py' --include '*.metal' --include '*.dylib' --exclude '*' "$REPO/rdma/" "$MESH_ROOT/rdma/"
+try "Python bindings built" "$MESH_ROOT/runtime-current/.venv/bin/python" "$MESH_ROOT/rdma/mesh_c_build.py"
+try "Python environment of $ADMIN_USER: ~/.venv-mesh-uv with torch-mesh and the library" sudo -u "$ADMIN_USER" -H "$MESH_ROOT/bin/mesh-venv.sh" "$REPO"
 try "memory bandwidth sampler built" xcrun clang -fobjc-arc -framework Foundation -lIOReport "$REPO/user/mesh-bandwidth.m" -o "$REPO/user/mesh-bandwidth"
 try "memory bandwidth sampler installed" install -m 755 -o root -g wheel "$REPO/user/mesh-bandwidth" "$MESH_ROOT/bin/mesh-bandwidth"
 install -m 755 -o root -g wheel "$REPO"/vendor/babeld-arm64 "$MESH_ROOT/bin/babeld"
