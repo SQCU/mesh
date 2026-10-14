@@ -6,7 +6,7 @@ TELEMETRY_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 RESIDENT = ("beacon", "router", "nodeinfo", "telemetry", "observer")
 SPARK = " ▁▂▃▄▅▆▇█"
 PHASES = {0: "UNKNOWN", 1: "PAIRING", 2: "PAIRED", 3: "STOPPED"}
-USAGE = "mesh-top [-n SECONDS] [--window SECONDS] [--links MAP] [--nodes A,B] [--probe] [--once | --html FILE]   keys: q quit, p probe idle RDMA ports once (ibv_devinfo), j/k scroll"
+USAGE = "mesh-top [-n SECONDS] [--window SECONDS] [--nodes A,B] [--probe] [--once | --html FILE]   keys: q quit, p probe idle RDMA ports once (ibv_devinfo), j/k scroll"
 
 def first_file(paths):
     return next((path for path in paths if path and os.path.isfile(os.path.expanduser(path))), None)
@@ -25,28 +25,10 @@ def local_name():
     try: return run(["/usr/sbin/scutil", "--get", "LocalHostName"], 2).stdout.strip() or socket.gethostname().split(".")[0]
     except Exception: return socket.gethostname().split(".")[0]
 
-def link_map(path):
-    result = {"path": path, "kind": None, "count": 0, "links": [], "costs": {}, "nodes": {}}
-    if not path: return result
-    for line in open(os.path.expanduser(path)).read().splitlines():
-        field = line.split()
-        if not field or field[0].startswith("#"): continue
-        if field[0] == "node" and len(field) >= 5: result["nodes"][int(field[1])] = {"host": field[2], "beacon": field[4]}
-        elif field[0] in ("mesh", "ring", "tree", "star") and result["kind"] is None: result["kind"], result["count"] = field[0], int(field[1])
-        elif len(field) in (2, 4) and field[0].isdigit() and field[1].isdigit():
-            pair = tuple(sorted((int(field[0]), int(field[1]))))
-            if pair not in result["links"]: result["links"].append(pair)
-            if len(field) == 4: result["costs"][pair] = (float(field[2]), float(field[3]))
-    return result
-
-def roster(path, links, only):
+def roster(path, only):
     nodes = {}
     if path:
         for name, node in json.load(open(path)).get("nodes", {}).items(): nodes[name] = {"name": name, "via": node.get("via"), "aliases": list(node.get("aliases") or ())}
-    for rank, node in links["nodes"].items():
-        entry = nodes.setdefault(node["beacon"], {"name": node["beacon"], "via": None, "aliases": []})
-        entry["rank"] = rank
-        if node["host"] != "local" and node["host"] not in entry["aliases"]: entry["aliases"].append(node["host"])
     me = local_name()
     nodes.setdefault(me, {"name": me, "via": None, "aliases": []})["self"] = True
     if only: nodes = {name: node for name, node in nodes.items() if name in only or set(node["aliases"]) & set(only)}
@@ -193,8 +175,7 @@ def shape(nodes, edges):
 class Top:
     def __init__(self, args):
         self.args = args
-        self.links = link_map(args.links)
-        self.nodes = [Node(spec) for spec in sorted(roster(args.roster, self.links, args.nodes).values(), key=lambda s: (s.get("rank") is None, s.get("rank") or 0, s["name"]))]
+        self.nodes = [Node(spec) for spec in sorted(roster(args.roster, args.nodes).values(), key=lambda s: (s.get("rank") is None, s.get("rank") or 0, s["name"]))]
         self.series = collections.defaultdict(lambda: collections.deque(maxlen=240))
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(2, 2 * len(self.nodes)))
 
@@ -215,7 +196,7 @@ class Top:
         return next((n.rank for n in self.nodes if n.name == name and n.rank is not None), 1 << 30)
 
     def peer_by_rank(self, rank):
-        return (self.links["nodes"].get(int(rank)) or {}).get("beacon") if str(rank).isdigit() else None
+        return next((node.name for node in self.nodes if str(node.info.get("bridge_node")) == str(rank)), None)
 
     def account(self, node):
         sample, previous = node.sample, node.previous
@@ -291,8 +272,7 @@ class Top:
         lines, hints = [], []
         now = time.time()
         add = lambda *segments: lines.append([s if isinstance(s, tuple) else (s, "") for s in segments])
-        add((f"mesh top  {time.strftime('%Y-%m-%d %H:%M:%S')}", "head"), (f"   every {self.args.interval:g}s, rates over {W:g}s   ", "dim"),
-            (f"link map {self.links['path'] or 'none'}" + (f" ({self.links['kind']} {self.links['count']})" if self.links["kind"] else ""), "dim"))
+        add((f"mesh top  {time.strftime('%Y-%m-%d %H:%M:%S')}", "head"), (f"   every {self.args.interval:g}s, rates over {W:g}s", "dim"))
         add()
         add(("NODES", "head"))
         add(("  rank node              chip           cores  mem    up        bridge                               telemetry", "dim"))
@@ -354,7 +334,6 @@ class Top:
             (a, ai), (b, bi) = sorted(key, key=lambda end: (self.rank_of(end[0]), end[0]))
             na, pa = self.port(a, ai)
             nb, pb = self.port(b, bi)
-            ranks = tuple(sorted(n.rank for n in (na, nb) if n and n.rank is not None))
             def both(getter, good=None):
                 values = [getter(p) if p else "?" for p in (pa, pb)]
                 style = "ok" if good and all(v == good for v in values) else "warn" if good else ""
@@ -380,31 +359,26 @@ class Top:
                 elif ip_up and p.get("rdma_power") not in (2, None) and not probed:
                     hints.append(("warn", f"{node.name} rdma_{iface}: IP over {iface} is up but the RDMA device reports power state {p.get('rdma_power')}; likely PORT_DOWN (post-reboot quirk): press p to confirm, then reseat the cable"))
             add(*segments)
-            declared = 1e9 / self.links["costs"][ranks][1] if ranks in self.links["costs"] else None
             for src, dst in ((a, b), (b, a)):
                 recv, send = self.rates((src, dst, "recv"), W), self.rates((src, dst, "send"), W)
                 spark = "".join(SPARK[min(8, int(8 * v / recv["peak"]))] if recv and recv["peak"] else " " for v in (recv or {}).get("spark", []))
                 row = [("      ", ""), (f"{src[:14]}->{dst[:14]}", "accent"), "  "]
                 if recv:
-                    row += [(f"{rate_text(recv['now']):>11} last", "ok" if recv["now"] else ""), f"  {rate_text(recv['avg']):>11} {W:g}s" + (f" {100 * recv['avg'] / declared:3.0f}%" if declared else ""), f"  peak {rate_text(recv['peak']):>10}  ", (f"{spark:<32}", "accent"),
+                    row += [(f"{rate_text(recv['now']):>11} last", "ok" if recv["now"] else ""), f"  {rate_text(recv['avg']):>11} {W:g}s", f"  peak {rate_text(recv['peak']):>10}  ", (f"{spark:<32}", "accent"),
                             f"  RECV {count_text(recv['avg_ops'])}/s", f"  SEND {count_text((send or {}).get('avg_ops'))}/s", f"  calls {recv['calls']}"]
                 else: row.append(("no census yet (rates start after two samples of a node running a bridge)", "dim"))
                 live = self.rates((src, dst, "live"), W)
                 if live: row += [("   live ", "dim"), (f"{rate_text(live['now'])}", "ok" if live["now"] else ""), f" ({count_text(live['now_ops'])} RECV/s, bridge counters)"]
                 add(*row)
             reference = []
-            if ranks in self.links["costs"]:
-                alpha, beta = self.links["costs"][ranks]
-                reference.append(f"declared a={alpha:g}us b={beta:g}ns/B = {rate_text(1e9 / beta)} ({os.path.basename(self.links['path'])})")
             speed = (pa or pb or {}).get("speed")
             if speed: reference.append(f"nominal {speed / 1e9:g} Gb/s = {rate_text(speed / 8)} (IOLinkSpeed)")
             for node, iface in ((na, ai), (nb, bi)):
                 for bridge in fabric(node).get("bridges") or [] if node else []:
                     index = next((str(i) for i, spec in enumerate(bridge.get("links") or []) if spec.get("device") == "rdma_" + iface), None)
-                    total, last = (bridge.get("census") or {}).get(index), (bridge.get("last_call") or {}).get(index) or {}
-                    if last.get("span_ns"): reference.append(f"{node.name} last call (MESH_LEDGER): {last['bytes']} bytes landed over {last['span_ns'] / 1e3:.0f} us of crossings = {rate_text(last['bytes'] * 1e9 / last['span_ns'])}")
+                    total = (bridge.get("census") or {}).get(index)
                     if total and not bridge.get("exited_at"):
-                        reference.append(f"{node.name} bridge {bridge['region']}: {total['calls']} calls, {rate_text(total['bytes']).replace('/s', '')} landed, {bridge.get('pairs', 0)} pairings, {bridge.get('retries', 0)} pairing retries, {bridge.get('resets', 0)} pairing resets reconnected, {bridge.get('credit_limited', 0)} credit-limited calls, {bridge.get('errors', 0)} errors, unretired SEND frames {total['frames'] - total['retired']}")
+                        reference.append(f"{node.name} bridge {bridge['region']}: {total['calls']} calls, {rate_text(total['bytes']).replace('/s', '')} landed, {bridge.get('pairs', 0)} pairings, {bridge.get('credit_limited', 0)} credit-limited calls, {bridge.get('errors', 0)} errors, unretired SEND frames {total['frames'] - total['retired']}")
                     live, peers = flows(bridge), (bridge.get("stat") or {}).get("peers") or []
                     if index is not None and int(index) < len(live) and not bridge.get("exited_at"):
                         f, p = live[int(index)], peers[int(index)] if int(index) < len(peers) else {}
@@ -430,7 +404,6 @@ class Top:
         if not shown: add(("  none open", "dim"))
         add()
         add(("TOPOLOGY", "head"))
-        if self.links["kind"]: add(f"  declared  {self.links['kind']} {self.links['count']}: " + "  ".join(f"{x}-{y}" for x, y in self.links["links"]), (f"   ({self.links['path']})", "dim"))
         names = sorted({x for key in cables for x, _ in key})
         edges = {frozenset(x for x, _ in key) for key in cables}
         order = lambda edge: sorted(edge, key=lambda x: (self.rank_of(x), x))
@@ -509,14 +482,12 @@ def main():
     parser = argparse.ArgumentParser(prog="mesh-top", usage=USAGE, description="Live connectivity and observed RDMA bandwidth between mesh nodes, read from each node's io.mesh.telemetry (:8788) and io.mesh.nodeinfo; sends no traffic of its own.")
     parser.add_argument("-n", "--interval", type=float, default=1.0)
     parser.add_argument("--window", type=float, default=5.0)
-    parser.add_argument("--links", default=first_file([os.environ.get("MESH_LINK_MAP"), "~/metal-microbench/configs/links/pair-ring.txt"]))
     parser.add_argument("--roster", default=first_file([os.environ.get("MESH_NODES"), os.path.join(HERE, "..", "etc", "mesh-nodes.json"), "~/.local/mesh/etc/mesh-nodes.json", "/usr/local/mesh/etc/mesh-nodes.json"]))
     parser.add_argument("--nodes", type=lambda text: [x for x in text.split(",") if x], default=None)
     parser.add_argument("--probe", action="store_true")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--html")
     args = parser.parse_args()
-    if args.links: args.links = os.path.expanduser(args.links)
     if args.roster: args.roster = os.path.expanduser(args.roster)
     top = Top(args)
     if args.once or args.html:

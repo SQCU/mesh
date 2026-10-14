@@ -80,8 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/<you>/mesh/main/bootstrap.sh | sudo
 ```
 
 A node remembers the repository it was bootstrapped from (`/usr/local/mesh/repo`) and converges from it
-(`mesh-update`). The compute layer's launcher (metal-microbench `tools/mesh/grid.py`) is the operator's;
-`rdma/NCCL.md` "Starting bridges by hand" runs the library without it.
+(`mesh-update`), the bridge and the library with it (`rdma/NCCL.md` "Build and run").
 
 > The failure to guard against here is not "the wrong code ran" — that is answered by
 > replacing the machine. It is a bootstrap that half-completes and leaves the node
@@ -537,6 +536,6 @@ Runs as root at boot with no login session. `KeepAlive` restarts it forever.
 The mesh's collectives are NCCL's API over the bridges: [rdma/NCCL.md](rdma/NCCL.md) (libnccl-mesh, the C
 library; `rdma/mesh_mpi.py` for NumPy), [rdma/torch-mesh/README.md](rdma/torch-mesh/README.md)
 (torch.distributed's `mesh` backend) and [design/heterogeneity.md](design/heterogeneity.md) (nodes of
-different speeds, links of different costs). A bridge (`rdma/mesh-flow`) is a child of the driver that uses
-it (metal-microbench `tools/mesh/grid.py`: `run` for any program, `call` for its model programs); no launchd
-job runs one. Adding a node: metal-microbench `docs/nodes.md`.
+different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the launchd
+job `io.mesh.bridge` (design/bridge-and-ipc.md): it finds its ports and peers, keeps its links paired and serves every
+program of the node at once.

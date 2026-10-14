@@ -32,5 +32,15 @@ for p in $ports; do
   rp=$(awk -v p="port=$p" '$1==p{sub(/rdma_peer=/,"",$3); print $3}' /var/run/mesh-fabric 2>/dev/null)
   printf 'port=%s link=%s address=%s peer=%s rdma_peer=%s\n' "$p" "${st:-unknown}" "${address:-none}" "${peer:-none}" "${rp:-unmeasured}"
 done
+bridge=$(mktemp); /usr/local/mesh/bin/mesh-stat > "$bridge" 2>/dev/null
+[ "$(plutil -extract up raw -o - "$bridge" 2>/dev/null)" = true ] || : > "$bridge"
+printf 'bridge_node=%s\n' "$(plutil -extract node raw -o - "$bridge" 2>/dev/null || echo none)"
+i=0
+while device=$(plutil -extract "peers.$i.device" raw -o - "$bridge" 2>/dev/null); do
+  printf 'bridge_link=%s peer_node=%s phase=%s bandwidth=%s\n' "$device" "$(plutil -extract "peers.$i.node" raw -o - "$bridge")" \
+    "$(plutil -extract "peers.$i.phase" raw -o - "$bridge")" "$(plutil -extract "peers.$i.bandwidth" raw -o - "$bridge")"
+  i=$((i+1))
+done
+rm -f "$bridge"
 netstat -rn -f inet6 2>/dev/null | awk -v p="$PREFIX" '$1 ~ "^"p":" && $NF!="lo0"{split($1,f,"%"); print "route="f[1]" via="$NF}' | sort -u
 printf 'end\n'

@@ -142,8 +142,7 @@ def bridge():
 
 CENSUS = re.compile(r"link (\d+) census queue=(\d+) requests=(\d+) frames=(\d+) retired=(\d+) send_completions=(\d+) records=(\d+) posted=(\d+) landed=(\d+) bytes=(\d+)")
 RECEIVE_RING = re.compile(r"receive ring=\d+ records=(\d+) posted=(\d+)")
-TRACE = re.compile(r'\{"native_trace":(\d+),.*"ns":\[(\d+),\d+,(\d+)\]')
-INFO = ("wire window=", "bridge node ", "pair capacity ", "pair up: ", '{"trace_', "session link ", "session capacity ", "session up: ")
+INFO = ("bridge node ",)
 COUNTS = ("requests", "frames", "retired", "send_completions", "records", "posted", "landed", "bytes")
 FABRIC_KEEP = float(os.environ.get("MESH_FABRIC_KEEP", "600"))
 FABRIC_READ = int(os.environ.get("MESH_FABRIC_READ", str(16 << 20)))
@@ -172,31 +171,22 @@ def bridge_log(entry, final=False):
             total = entry["census"].setdefault(link, dict.fromkeys(("calls",) + COUNTS, 0))
             if queue == 0:
                 total["calls"] += 1
-                span = entry["spans"].pop(link, None)
-                entry["last_call"][link] = {**dict.fromkeys(COUNTS, 0), "span_ns": span[1] - span[0] if span else None}
+                entry["last_call"][link] = dict.fromkeys(COUNTS, 0)
             for key, value in zip(COUNTS, values):
                 total[key] += value
                 entry["last_call"].setdefault(link, dict.fromkeys(COUNTS, 0))[key] += value
             continue
-        match = TRACE.match(line)
-        if match:
-            span = entry["spans"].get(match.group(1))
-            begin, end_ns = int(match.group(2)), int(match.group(3))
-            entry["spans"][match.group(1)] = (min(begin, span[0]), max(end_ns, span[1])) if span else (begin, end_ns)
-            entry["traces"] += 1
-        elif line.startswith("receive ring="):
+        if line.startswith("receive ring="):
             entry["rings"] += 1
             match = RECEIVE_RING.match(line)
             if match and int(match.group(1)) > int(match.group(2)): entry["credit_limited"] += 1
-        elif line.startswith("pair up: "): entry["pairs"] += 1
-        elif line.startswith("exchange failed"): entry["retries"] += 1
-        elif line.startswith("exchange reset"): entry["resets"] += 1
-        elif line.strip() and not line.startswith(INFO) and not (line.startswith("register ") and ": " not in line):
+        elif ": paired with node " in line: entry["pairs"] += 1
+        elif line.strip() and not line.startswith(INFO) and ": paired with node " not in line:
             entry["errors"] += 1
             entry["last_error"] = line[:240]
 
 def bridge_counters():
-    return {"log_offset": 0, "census": {}, "last_call": {}, "spans": {}, "traces": 0, "rings": 0, "credit_limited": 0, "pairs": 0, "retries": 0, "resets": 0, "errors": 0, "last_error": None}
+    return {"log_offset": 0, "census": {}, "last_call": {}, "rings": 0, "credit_limited": 0, "pairs": 0, "errors": 0, "last_error": None}
 
 def processes(pids):
     table = {}
@@ -213,13 +203,13 @@ def fabric_bridges(now):
         if os.path.basename(argv[0]) != "mesh-flow": continue
         entry = BRIDGES.get(pid)
         if entry is None:
-            option = lambda flag, default=None: next((argv[i + 1] for i in range(len(argv) - 1) if argv[i] == flag), default)
-            links = [dict(zip(("device", "peer", "local", "remote", "service", "net_service"), argv[i + 1].split(","))) for i in range(len(argv) - 1) if argv[i] == "--link"]
             log = next((line[1:] for line in output(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "2", "-Fn"]).splitlines() if line.startswith("n/")), None)
-            entry = BRIDGES[pid] = {"pid": pid, "rank": option("-I"), "region": option("-s", "/mesh0"), "links": links, "log": log, "log_size": None, **bridge_counters()}
+            entry = BRIDGES[pid] = {"pid": pid, "region": "/mesh0", "log": log, "log_size": None, **bridge_counters()}
         entry.update({"state": process["stat"], "elapsed": process["elapsed"], "exited_at": None})
-        try: entry["stat"] = json.loads(run([stat, entry["region"]], 3, True).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
+        try: entry["stat"] = json.loads(run([stat], 3, True).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
         except Exception as error: entry["stat"] = {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
+        entry["rank"] = entry["stat"].get("node")
+        entry["links"] = [{"device": peer.get("device"), "peer": peer.get("node")} for peer in entry["stat"].get("peers") or []]
         entry["flow"] = [{"node": peer.get("node"), "session": (peer.get("session") or {}).get("phase"), **(peer.get("flow") or {})} for peer in entry["stat"].get("peers") or []]
         entry["communicators"] = entry["stat"].get("communicators") or []
         if entry["log"]: bridge_log(entry)
@@ -229,7 +219,7 @@ def fabric_bridges(now):
             entry.update({"exited_at": now, "state": "exited"})
             if entry["log"]: bridge_log(entry, True)
         elif now - entry["exited_at"] > FABRIC_KEEP: BRIDGES.pop(pid)
-    return [copy.deepcopy({key: value for key, value in entry.items() if key != "spans"}) for entry in BRIDGES.values()]
+    return [copy.deepcopy(entry) for entry in BRIDGES.values()]
 
 def fabric_ports():
     try: tree = plistlib.loads(run(["/usr/sbin/ioreg", "-r", "-c", "AppleThunderboltIPPort", "-l", "-a"]))

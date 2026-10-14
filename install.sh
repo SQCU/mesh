@@ -38,8 +38,12 @@ install -m 644 -o root -g wheel "$REPO"/etc/io.mesh.telemetry.plist /Library/Lau
 install -m 644 -o root -g wheel "$REPO"/keys/authorized_keys "$MESH_ROOT/etc/authorized_keys"
 install -m 755 -o root -g wheel "$REPO"/viz/serve.py "$MESH_ROOT/viz/serve.py"
 install -m 644 -o root -g wheel "$REPO"/viz/index.html "$MESH_ROOT/viz/index.html"
-try "mesh-stat built" make -C "$REPO/rdma" mesh-stat
-try "mesh-stat installed" install -m 755 -o root -g wheel "$REPO/rdma/mesh-stat" "$MESH_ROOT/bin/mesh-stat"
+try "bridge and libraries built" make -C "$REPO/rdma" mesh-flow mesh-stat libmesh.dylib libnccl-mesh.dylib
+try "Python bindings built" make -C "$REPO/rdma" mesh-c PYTHON="$MESH_ROOT/runtime-current/.venv/bin/python"
+for f in mesh-flow mesh-stat; do
+  cmp -s "$REPO/rdma/$f" "$MESH_ROOT/bin/$f" || try "$f installed" install -S -m 755 -o root -g wheel "$REPO/rdma/$f" "$MESH_ROOT/bin/$f"
+done
+try "library installed: $MESH_ROOT/rdma" rsync -rlc --delete --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r,+X --exclude .build --exclude __pycache__ --exclude '*.o' "$REPO/rdma/" "$MESH_ROOT/rdma/"
 try "memory bandwidth sampler built" xcrun clang -fobjc-arc -framework Foundation -lIOReport "$REPO/user/mesh-bandwidth.m" -o "$REPO/user/mesh-bandwidth"
 try "memory bandwidth sampler installed" install -m 755 -o root -g wheel "$REPO/user/mesh-bandwidth" "$MESH_ROOT/bin/mesh-bandwidth"
 install -m 755 -o root -g wheel "$REPO"/vendor/babeld-arm64 "$MESH_ROOT/bin/babeld"
@@ -176,10 +180,14 @@ mkplist io.mesh.router "<string>$MESH_ROOT/bin/mesh-router-init.sh</string>" \
   "  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>"
 mkplist io.mesh.rdma-init "<string>$MESH_ROOT/bin/mesh-rdma-init.sh</string>" "  <key>KeepAlive</key><false/>"
+mkplist io.mesh.bridge "<string>$MESH_ROOT/bin/mesh-flow</string>" \
+  "  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ExitTimeOut</key><integer>60</integer>"
 mkplist io.mesh.update "<string>$MESH_ROOT/bin/mesh-update.sh</string>" "  <key>StartInterval</key><integer>900</integer>"
 mkplist io.mesh.keeper "<string>$MESH_ROOT/bin/mesh-keeper.sh</string>" "  <key>StartInterval</key><integer>60</integer>"
 ADMIN_UID=$(id -u "$ADMIN_USER")
-for L in io.mesh.beacon io.mesh.fabric io.mesh.router io.mesh.nodeinfo io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper; do
+for L in io.mesh.beacon io.mesh.fabric io.mesh.bridge io.mesh.router io.mesh.nodeinfo io.mesh.telemetry io.mesh.observer io.mesh.rdma-init io.mesh.update io.mesh.keeper; do
   launchctl enable system/$L >/dev/null 2>&1
   if launchctl print "system/$L" >/dev/null 2>&1; then
     retained=$((retained+1)); ok "$L retained; launchd definition refresh pending"

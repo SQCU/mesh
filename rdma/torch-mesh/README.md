@@ -6,16 +6,16 @@ run on the host path.
 
 ## Install
 
-On a node, metal-microbench's `tools/mesh/node-setup.sh` does it. By hand:
+The node's mesh installation builds and installs the library and its Python bindings under `/usr/local/mesh/rdma`
+(rdma/NCCL.md "Build and run"). Into a torch environment:
 
 ```
-make -C ~/mesh/rdma all mesh-c PYTHON=~/.venv-mesh-uv/bin/python
-uv pip install --python ~/.venv-mesh-uv/bin/python -r ~/mesh/rdma/requirements.txt
-uv pip install --python ~/.venv-mesh-uv/bin/python --no-build-isolation -e ~/mesh/rdma/torch-mesh
+uv pip install --python <venv>/bin/python -r /usr/local/mesh/rdma/requirements.txt
+uv pip install --python <venv>/bin/python --no-build-isolation /usr/local/mesh/rdma/torch-mesh
 ```
 
-The working set is torch 2.14.0 on CPython 3.12.14 (`rdma/requirements.txt`). Rebuild the extension (the last line)
-after every pull.
+The working set is torch 2.14.0 on CPython 3.12.14 (`rdma/requirements.txt`). Install the package again after the
+node's library changes.
 
 ## Porting a CUDA/NCCL program
 
@@ -25,12 +25,10 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 
 - `"nccl"` becomes `"mesh"` (or omit it); `"cuda"` becomes `"mps"`; drop `torch.cuda.set_device`. `device_id`
   needs its index (`mps:0`).
-- One rank a node. Launch with metal-microbench's `~/.venv-mesh-uv/bin/python tools/mesh/grid.py run --members ...
-  -- '{python} prog.py'` (without it: [NCCL.md](../NCCL.md#starting-bridges-by-hand)). The program runs from each
-  node's `~/metal-microbench`, so commit and pull it first (metal-microbench docs/nodes.md "Running").
-  - It gets torchrun's environment with the bridges up.
-  - Rank 0 is a member other than the driver, and the rank-to-node table is printed.
-  - Each rank reads its node from its bridge, and the links and their costs from `MESH_LINK_MAP`.
+- One rank a node, launched as torchrun launches one (`RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT`); each node's
+  bridge is its resident service, so a launch starts no bridge.
+  - Each rank reads its node and its links from its bridge (the links paired now), and the group's ranks exchange
+    them through the group's store when the group is made.
 - A bidirectional exchange with one peer goes in one batch: `dist.batch_isend_irecv`, or a coalescing manager.
   Separate `isend`/`irecv` calls in the same order on both sides do not pair; the library reports it, and on MPS
   tensors the next call raises.
@@ -40,7 +38,7 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   overrides it).
 - Everything runs on any connected cable graph. Messages between ranks the map does not link (p2p, `all_to_all`,
   `gather`, `scatter`) are forwarded by the nodes between them
-  ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)); the launcher gives the bridges the queue pairs for it.
+  ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)), on queue pairs the session leases from its bridges.
 
 ## What works
 
