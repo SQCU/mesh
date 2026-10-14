@@ -1,11 +1,13 @@
-"""The mesh's store of what it measures about its nodes, links and calls (design/heterogeneity.md): each node's rates and
-each link's alpha-beta cost, keyed by node name (node-info's `name`), and the state of each call configuration
-(allocate.py's Balancer and its evidence), kept across calls in one JSON file on the node that drives them
-(~/.local/share/mesh/store.json: a driver uses its own node's store).  Every change is one read, change and write of the
-whole file under an exclusive lock on the file beside it (`changing`), so drivers and tools on one node never lose each
-other's records.  Its first records are the mesh's own (etc/mesh-store.json, installed beside the library).  A node's
-facts are not its records: its model is the roster's (etc/mesh-nodes.json) or node-info's, its GPU cores its model's
-(etc/mesh-capacity.json).  A node with no record starts from the records of its model's nodes, else of every node."""
+"""The mesh's store of what it measures about its nodes, links and calls (design/heterogeneity.md), kept across calls
+in one JSON file on the node that drives them (~/.local/share/mesh/store.json: a driver uses its own node's store):
+'nodes', each node's rates (RATES) with the model (node-info's) and GPU cores they were measured on, keyed by its name
+(node-info's `name`); 'links', each measured link's (alpha us, beta ns a byte), keyed 'a b' (its names sorted);
+'configurations', each call configuration's state (allocate.py's Balancer and the evidence it moves on, each call's
+program trace, ledger.py).  Every change is one read, change and write of the whole file under an exclusive lock on the
+file beside it (`changing`), so drivers and tools on one node never lose each other's records.  Its first records are
+the mesh's own (etc/mesh-store.json, installed beside the library).  A node with no record starts from the records of
+its model's nodes, else of every node; a link with no record costs what the bridges' join gives it (mesh.join: its
+ports' bandwidth), never a consumer's probe."""
 import contextlib
 import fcntl
 import json
@@ -15,7 +17,7 @@ import tempfile
 from pathlib import Path
 
 PATH = Path.home() / '.local/share/mesh/store.json'
-ETC = Path(__file__).resolve().parent.parent / 'etc'
+FIRST = Path(__file__).resolve().parent.parent / 'etc/mesh-store.json'
 RATES = ('proj', 'attn', 'prim', 'edge')
 
 
@@ -40,23 +42,24 @@ def changing():
 
 
 def records(section):
-    return {**load(ETC / 'mesh-store.json').get(section, {}), **load().get(section, {})}
+    """A section's records: the first records, under this node's."""
+    return {**load(FIRST).get(section, {}), **load().get(section, {})}
 
 
-def facts(name, model=None):
-    """Node `name`'s model (the roster's, else `model`) and its GPU cores (its model's)."""
-    model = load(ETC / 'mesh-nodes.json').get('nodes', {}).get(name, {}).get('model') or model
-    return {'model': model, 'cores': load(ETC / 'mesh-capacity.json').get('models', {}).get(model, {}).get('gpu_cores')}
+def record(section, key, value):
+    """A record of `section` ('nodes', 'links' or 'configurations') written."""
+    with changing() as state:
+        state.setdefault(section, {})[key] = value
 
 
 def node(name, model=None):
-    """Node `name`'s rates ({'proj', 'attn', 'prim', 'edge'}) and facts, else its start: the mean of the records of its
-    model's nodes, else of every node's."""
-    known, mine = records('nodes'), facts(name, model)
+    """Node `name`'s record, else its start: its model (`model`, node-info's) and each rate the mean of the records of
+    that model's nodes, else of every node's."""
+    known = records('nodes')
     if name in known:
-        return {**known[name], **mine}
-    alike = [r for n, r in known.items() if facts(n)['model'] == mine['model']] or list(known.values())
-    start = dict(mine)
+        return known[name]
+    alike = [r for r in known.values() if r.get('model') == model] or list(known.values())
+    start = {'model': model}
     for key in RATES:
         if alike and all(key in r for r in alike):
             start[key] = [statistics.mean(values) for values in zip(*(r[key] for r in alike))]
@@ -64,13 +67,6 @@ def node(name, model=None):
 
 
 def link(a, b):
-    """The link between nodes `a` and `b` as measured: its (alpha us, beta ns a byte), None where it is not (its cost is
-    then the map's, mesh.join)."""
+    """The link between nodes `a` and `b` as measured: its (alpha us, beta ns a byte), None where it is not."""
     known = records('links').get(' '.join(sorted((a, b))))
     return tuple(known) if known else None
-
-
-def record(section, key, value):
-    """A record of `section` ('nodes', 'links' keyed 'a b', 'configurations') written."""
-    with changing() as state:
-        state.setdefault(section, {})[key] = value
