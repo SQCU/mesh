@@ -236,11 +236,9 @@ static inline uint fragment_c(uint lane) { return (lane & 1u) | (((lane >> 3) & 
 // The step of a tile word.
 static inline float fragment_step(uint word) { return float(as_type<half>(ushort(word >> 16))); }
 
-// A lane's pairs of a tile of width B at `at` (its first plane's word), as odd integers to f(P, pair).
-template <uint B, typename F>
-static inline __attribute__((always_inline)) void fragment_values(device const uint *at, F f) {
-    uint w[B];
-    for (uint i = 0; i < B; i++) w[i] = at[32 * i];
+// A lane's pairs of a tile of width B from its loaded planes w (fragment_load), as odd integers to f(P, pair).
+template <uint B, typename W, typename F>
+static inline __attribute__((always_inline)) void fragment_values(W w, F f) {
     f(0, streamed_float<B, 0>(w)); f(1, streamed_float<B, 1>(w)); f(2, streamed_float<B, 2>(w)); f(3, streamed_float<B, 3>(w));
     f(4, streamed_float<B, 4>(w)); f(5, streamed_float<B, 5>(w)); f(6, streamed_float<B, 6>(w)); f(7, streamed_float<B, 7>(w));
     f(8, streamed_float<B, 8>(w)); f(9, streamed_float<B, 9>(w)); f(10, streamed_float<B, 10>(w)); f(11, streamed_float<B, 11>(w));
@@ -263,12 +261,11 @@ static inline __attribute__((always_inline)) void fragment_values(device const u
 #define FRAGMENT_MAX(W) ((W) >= 4096u ? 12u : (W) >= 2048u ? 11u : (W) >= 1024u ? 10u : (W) >= 512u ? 9u : (W) >= 256u ? 8u : \
     (W) >= 128u ? 7u : (W) >= 64u ? 6u : (W) >= 32u ? 5u : (W) >= 16u ? 4u : (W) >= 8u ? 3u : (W) >= 4u ? 2u : 1u)
 
-// A tile's planes at `at`, width b, into w: a straight run of b loads for each width of WIDTHS.
+// A tile's planes at `at`, width b, into w: the widest width's loads, each predicated on the tile's width, issued before
+// the width's decode is chosen (docs/kernels.md#fragment-tiles: a switch on the load path cost an ALU instance 3.5-4.8 us).
 template <uint WIDTHS, uint N>
 static inline __attribute__((always_inline)) void fragment_load(device const uint *at, uint b, thread uint (&w)[N]) {
-#define FRAGMENT_LOAD(B) for (uint i = 0; i < B; i++) w[i] = at[32 * i]
-    FRAGMENT_WIDTHS(WIDTHS, FRAGMENT_LOAD)
-#undef FRAGMENT_LOAD
+    for (uint i = 0; i < N; i++) if (i < b) w[i] = at[32 * i];
 }
 
 // acc[n][2p], acc[n][2p + 1] += pair P = 4p + j of loaded words w times x[n][j] (x already times half the step).
@@ -514,7 +511,9 @@ kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const 
         dense[ulong(order[r + 1]) * width + uint(columns[k])] = half(v.y * h * rowScale[r + 1] * colScale[k]);
     };
     if (b == 0) { for (uint P = 0; P < 16; P++) put(P, float2(0.0f)); return; }
-#define FRAGMENT_DENSE(B) fragment_values<B>(at, put)
+    uint w[12];
+    fragment_load<0x1FFEu>(at, b, w);
+#define FRAGMENT_DENSE(B) fragment_values<B>(w, put)
     FRAGMENT_WIDTHS(0x1FFEu, FRAGMENT_DENSE)
 #undef FRAGMENT_DENSE
 }
@@ -821,9 +820,9 @@ static inline uint fragment_row(uint n) {
 }
 
 // A tile of width B into the right-input cooperative tensor rb, times half its step (exact for a power-of-two step).
-template <uint B, uint COOP, typename T>
-static inline __attribute__((always_inline)) void fragment_coop(device const uint *at, half h, thread T &rb) {
-    fragment_values<B>(at, [&](uint P, float2 v) {
+template <uint B, uint COOP, typename W, typename T>
+static inline __attribute__((always_inline)) void fragment_coop(W w, half h, thread T &rb) {
+    fragment_values<B>(w, [&](uint P, float2 v) {
         const half2 value = B <= 9 ? half2(v) * half2(h) : half2(v * float(h));
         rb[fragment_element<COOP>(P)] = value.x;
         rb[fragment_element<COOP>(P) + 1] = value.y;
@@ -862,7 +861,9 @@ kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const u
         device const uint *at = planes + ((word & 0xFFFu) << 5);
         const half h = half(0.5f * fragment_step(word));
         auto rb = op.template get_right_input_cooperative_tensor<half, half, float>();
-#define FRAGMENT_COOP(B) fragment_coop<B, COOP>(at, h, rb)
+        uint w[FRAGMENT_MAX(WIDTHS)];
+        fragment_load<WIDTHS>(at, b, w);
+#define FRAGMENT_COOP(B) fragment_coop<B, COOP>(w, h, rb)
         FRAGMENT_WIDTHS(WIDTHS, FRAGMENT_COOP)
 #undef FRAGMENT_COOP
         if (rows >= M) {
@@ -935,7 +936,9 @@ static inline __attribute__((always_inline)) void fragment_panel(device const ui
     };
     if (b == 0) { for (uint P = 0; P < 16; P++) put(P, float2(0.0f)); return; }
     device const uint *at = codes + ((base + (word & 0xFFFu)) << 5) + lane;
-#define FRAGMENT_PANEL(B) fragment_values<B>(at, put)
+    uint w[FRAGMENT_MAX(WIDTHS)];
+    fragment_load<WIDTHS>(at, b, w);
+#define FRAGMENT_PANEL(B) fragment_values<B>(w, put)
     FRAGMENT_WIDTHS(WIDTHS, FRAGMENT_PANEL)
 #undef FRAGMENT_PANEL
 }
