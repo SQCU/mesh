@@ -20,20 +20,20 @@
 // Every product is an instance of one decode with literal sizes, its widths the matrix's (WIDTHS, a mask: bit b for
 // width b; a simdgroup-uniform switch over them a tile), its consumer an operand:
 //
-//   streamed_alu<R, SK, BANDS, J, TILES, WIDTHS, OUT, LUT, F>   1 to 4 rows on the ALUs: a threadgroup BANDS bands, SK
+//   streamed_alu<R, SK, BANDS, J, TILES, WIDTHS, OUT, LUT, F, LOADS>   1 to 4 rows on the ALUs: a threadgroup BANDS bands, SK
 //       simdgroups a band, a K share of J (TILES / J tiles), F tiles a simdgroup in flight; each lane 8 R independent
 //       sums (x times half the step: 4 R loads of x a tile); 1-bit tiles by tables of x sums where LUT (T[t][kb][m] =
 //       sum over j in m of x[32 t + kb + 8 j], fp32: streamed_rotate writes them); OUT 0 partials [share][row][output],
-//       1 finished
-//   streamed_couple<R, SK, TILES, WIDTHS, F, APART>           gate's and up's products together, GELU(gate) * up
-//   streamed_coop<M, SK, BANDS, J, TILES, WIDTHS, COOP>       8 to 16 rows: a tile decoded exactly into the right-input
+//       1 finished; LOADS a tile's loads (fragment_load), every product's
+//   streamed_couple<R, SK, TILES, WIDTHS, F, APART, LOADS>         gate's and up's products together, GELU(gate) * up
+//   streamed_coop<M, SK, BANDS, J, TILES, WIDTHS, COOP, LOADS>     8 to 16 rows: a tile decoded exactly into the right-input
 //       cooperative tensor of matmul2d<M, 32, 32> at the node's slots (COOP), one operation a tile
-//   streamed_panel<M, TILES, WIDTHS>, streamed_panel_t<M, TILES, WIDTHS>   prefill and the transposed product: eight
+//   streamed_panel<M, TILES, WIDTHS, LOADS>, streamed_panel_t<M, TILES, WIDTHS, LOADS>   prefill and the transposed product: eight
 //       tiles decoded into threadgroup memory in natural order, one operation a 256-wide panel
 //
 // and the products' sums reach their own consumers through streamed_value (a K split's or a member's partials summed,
 // the row's scale applied), whole rows through streamed_rows (partials, or plain values a crossing summed), and a
-// product's input is written through streamed_put (a function of the logical position, the column order and scale
+// product's input is written through streamed_gather (a row's values at the column order, each column's scale
 // applied). Include after <metal_stdlib>; the tensor-op kernels need Metal 4. The sizes are template arguments, so a
 // caller appends the explicit instantiations of its shapes (streamed_instance) to this source.
 #ifndef TORCH_MESH_STREAMED
@@ -220,13 +220,6 @@ static inline void mesh_head(P partials, device const half *plain, device const 
         if (out) out[i] = value;
         if (line) line[i] = value;
     }
-}
-
-// A product's input row n: coded column j is scale[j] * f(order[j]), f a value at a logical position.
-template <typename F>
-static inline void streamed_put(device half *input, device const int *order, device const float *scale, uint n,
-                                uint columns, uint t, uint threads, F f) {
-    for (uint j = t; j < columns; j += threads) input[ulong(n) * columns + j] = half(scale[j] * f(uint(order[j])));
 }
 
 // A lane's k (kb(l) + 8 j) and rows (8 c(l) + q) in every tile.
@@ -799,11 +792,13 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
     }
 }
 
-// The GELU FFN's middle: hidden = GELU(gate) * up from the gate and up products' partials, in their (shared) coded
-// row order, which the down product's columns follow: gate's d.shares shares, up's d.inputs (each product its own
-// instance's), a row's partials d.stride apart (0: d.outputs; gate|up stacked: twice it, up's from gate's d.outputs on).
+// The GELU FFN's middle: hidden = GELU(gate) * up in the gate and up products' (shared) coded row order, which the down
+// product's columns follow: from their partials (gate's d.shares shares, up's d.inputs, each product its own
+// instance's, its row scale applied) or, where they are 0, from their finished rows (T half); a row's values d.stride
+// apart (0: d.outputs; gate|up stacked: twice it, up's from gate's d.outputs on).
+template <typename T>
 MESH_KERNEL(finish)
-kernel void streamed_gelu(device const float *gate [[buffer(0)]], device const float *up [[buffer(1)]],
+kernel void streamed_gelu(device const T *gate [[buffer(0)]], device const T *up [[buffer(1)]],
                           device const float *gateScale [[buffer(2)]], device const float *upScale [[buffer(3)]],
                           device half *hidden [[buffer(4)]], constant streamed_dims &dims [[buffer(15)]],
                           uint i [[thread_position_in_grid]]) {
@@ -811,9 +806,12 @@ kernel void streamed_gelu(device const float *gate [[buffer(0)]], device const f
     if (i >= d.count) return;
     const uint n = i / d.outputs, r = i % d.outputs;
     const ulong at = ulong(n) * (d.stride ? d.stride : d.outputs) + r;
-    hidden[i] = half(streamed_gelu_of(streamed_value(gate, at, d.shares, d.split, gateScale[r]),
-                                      streamed_value(up, at, d.inputs, d.split, upScale[r])));
+    hidden[i] = half(streamed_gelu_of(d.shares ? streamed_value(gate, at, d.shares, d.split, gateScale[r]) : float(gate[at]),
+                                      d.inputs ? streamed_value(up, at, d.inputs, d.split, upScale[r]) : float(up[at])));
 }
+
+template [[host_name("streamed_gelu")]] [[kernel]] decltype(streamed_gelu<float>) streamed_gelu<float>;
+template [[host_name("streamed_gelu_rows")]] [[kernel]] decltype(streamed_gelu<half>) streamed_gelu<half>;
 
 #if __METAL_VERSION__ >= 400
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
