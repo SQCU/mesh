@@ -56,6 +56,30 @@ using namespace metal;
 // a consumer's flags and its layer, and tile words a band (pitch; 0: the matrix's own tiles).
 struct streamed_dims { uint tiles, outputs, rows, per, stride, shares, split, finish, count, columns, inputs; float cap, eps; uint flags, layer, pitch; };
 
+// Literal parts in a library compiled with MESH_LITERAL (metal-microbench docs/kernels.md#one-kernel-interface: the served
+// engine's classes): a pipeline specialized at its command's block (function constants 200-203, sixteen words) and lane
+// count (204) reads them as literals, so the compiler folds every size; unspecialized, and in a library without
+// MESH_LITERAL (a recorded program's: its parts take their literals from the recorder), the bound block and the builtin.
+#if MESH_LITERAL
+constant uint4 mesh_literal_0 [[function_constant(200)]];
+constant uint4 mesh_literal_1 [[function_constant(201)]];
+constant uint4 mesh_literal_2 [[function_constant(202)]];
+constant uint4 mesh_literal_3 [[function_constant(203)]];
+constant uint mesh_literal_lanes [[function_constant(204)]];
+template <typename T> static inline T dims_of(constant T &bound) {
+    if (!is_function_constant_defined(mesh_literal_0)) return bound;
+    const uint4 words[4] = {mesh_literal_0, mesh_literal_1, mesh_literal_2, mesh_literal_3};
+    T made;
+    thread uint *w = reinterpret_cast<thread uint *>(&made);
+    for (uint i = 0; i < sizeof(T) / 4; i++) w[i] = words[i / 4][i % 4];
+    return made;
+}
+static inline uint lanes_of(uint builtin) { return is_function_constant_defined(mesh_literal_lanes) ? mesh_literal_lanes : builtin; }
+#else
+template <typename T> static inline T dims_of(constant T &bound) { return bound; }
+static inline uint lanes_of(uint builtin) { return builtin; }
+#endif
+
 // A finish's elements of output block x, the shares product threadgroups (x, y) wrote: element k of
 // streamed_block_elements(d) is streamed_block_element(x, k, d), its thread position in the finish's grid.
 static inline uint streamed_block_elements(constant streamed_dims &d) { return 32u * (d.count / d.outputs); }
@@ -371,9 +395,10 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
                          device const uint *bands [[buffer(2)]], device const float *tables [[buffer(3)]],
                          device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
                          device half *ys [[buffer(11)]], device const int *order [[buffer(12)]],
-                         device const float *rowScale [[buffer(13)]], constant streamed_dims &d [[buffer(15)]],
+                         device const float *rowScale [[buffer(13)]], constant streamed_dims &dims [[buffer(15)]],
                          uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                          uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
+    const streamed_dims d = dims_of(dims);
     constexpr uint PER = (TILES + J - 1) / J, STEPS = (PER + SK - 1) / SK, COLUMNS = TILES * 32;
     threadgroup float sums[BANDS][SK][R][32];
     const uint local = simd / SK, part = simd % SK, band = group.x * BANDS + local, rows = d.rows;
@@ -408,9 +433,10 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
                             device const uint *upCodes [[buffer(6)]], device const uint *upTiles [[buffer(7)]],
                             device const uint *upBands [[buffer(8)]], device const half *ux [[buffer(9)]],
                             device const float *upScale [[buffer(10)]], device half *hidden [[buffer(11)]],
-                            device const float *gateScale [[buffer(13)]], constant streamed_dims &d [[buffer(15)]],
+                            device const float *gateScale [[buffer(13)]], constant streamed_dims &dims [[buffer(15)]],
                             uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
+    const streamed_dims d = dims_of(dims);
     constexpr uint STEPS = (TILES + SK - 1) / SK, COLUMNS = TILES * 32, THREADS = (APART ? 64 : 32) * SK;
     threadgroup float sums[2][SK][R][32];
     const uint band = group.x, rows = d.rows, pitch = d.pitch ? d.pitch : TILES;
@@ -467,8 +493,9 @@ kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const 
                            device const uint *bands [[buffer(2)]], device half *dense [[buffer(4)]],
                            device const int *order [[buffer(5)]], device const float *rowScale [[buffer(6)]],
                            device const int *columns [[buffer(8)]], device const float *colScale [[buffer(9)]],
-                           constant streamed_dims &d [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
+                           constant streamed_dims &dims [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
                            uint lane [[thread_index_in_simdgroup]]) {
+    const streamed_dims d = dims_of(dims);
     const uint T = d.tiles, pitch = d.pitch ? d.pitch : T, word = tiles[group.x * pitch + group.y], b = (word >> 12) & 15u;
     const uint row0 = group.x * 32 + 8 * fragment_c(lane), k0 = group.y * 32 + fragment_kb(lane), width = T * 32;
     const float h = 0.5f * fragment_step(word);
@@ -488,8 +515,9 @@ kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const 
 // at 0) by the grid's threads, folded into one word stored only where it equals d.flags: a prefetch into the system
 // cache, no spin.
 kernel void streamed_touch(device const uint4 *data [[buffer(0)]], device const uint *ranges [[buffer(1)]],
-                           device uint *sink [[buffer(2)]], constant streamed_dims &d [[buffer(15)]],
+                           device uint *sink [[buffer(2)]], constant streamed_dims &dims [[buffer(15)]],
                            uint i [[thread_position_in_grid]], uint threads [[threads_per_grid]]) {
+    const streamed_dims d = dims_of(dims);
     uint4 folded = uint4(0u);
     for (uint r = 0; r < d.count; r++) {
         const uint first = ranges[2 * r], count = ranges[2 * r + 1];
@@ -505,8 +533,9 @@ template <typename T>
 MESH_KERNEL(finish)
 kernel void streamed_finish(device const float *partials [[buffer(0)]], device T *y [[buffer(1)]],
                             device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
-                            device const float *factor [[buffer(4)]], constant streamed_dims &d [[buffer(15)]],
+                            device const float *factor [[buffer(4)]], constant streamed_dims &dims [[buffer(15)]],
                             uint i [[thread_position_in_grid]]) {
+    const streamed_dims d = dims_of(dims);
     if (i >= d.count) return;
     const uint n = i / d.outputs, r = i % d.outputs;
     float value = streamed_value(partials, i, d.shares, d.split, scale[r]);
@@ -522,9 +551,10 @@ template [[host_name("streamed_finish_float")]] [[kernel]] decltype(streamed_fin
 // range): out the scaled rows, factor[n] the scale. A threadgroup a row.
 template <typename T>
 kernel void streamed_scale_rows(device const T *x [[buffer(0)]], device half *out [[buffer(1)]],
-                                device float *factor [[buffer(2)]], constant streamed_dims &d [[buffer(15)]],
+                                device float *factor [[buffer(2)]], constant streamed_dims &dims [[buffer(15)]],
                                 uint2 group [[threadgroup_position_in_grid]], uint2 local [[thread_position_in_threadgroup]],
                                 uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const streamed_dims d = dims_of(dims);
     threadgroup float most[8];
     const ulong base = ulong(group.x) * d.columns;
     float m = 0.0f;
@@ -559,8 +589,10 @@ kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half 
                                 device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
                                 device const half *gamma [[buffer(4)]], device half *second [[buffer(5)]], device half *third [[buffer(6)]],
                                 device const float *secondScale [[buffer(7)]], device const float *thirdScale [[buffer(8)]],
-                                constant streamed_dims &d [[buffer(15)]], uint n [[threadgroup_position_in_grid]],
-                                uint t [[thread_index_in_threadgroup]], uint threads [[threads_per_threadgroup]]) {
+                                constant streamed_dims &dims [[buffer(15)]], uint n [[threadgroup_position_in_grid]],
+                                uint t [[thread_index_in_threadgroup]], uint lanes [[threads_per_threadgroup]]) {
+    const streamed_dims d = dims_of(dims);
+    const uint threads = lanes_of(lanes);
     threadgroup float values[WIDTH > 0 ? WIDTH : 1];
     threadgroup float partial[32];
     const uint columns = d.columns;
@@ -605,10 +637,11 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
                             device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                             device const char *rotation [[buffer(6)]], device const float *rotationScale [[buffer(7)]],
                             device float *tables [[buffer(8)]],
-                            device const half *gamma [[buffer(11)]], constant streamed_dims &d [[buffer(15)]],
+                            device const half *gamma [[buffer(11)]], constant streamed_dims &dims [[buffer(15)]],
                             uint group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]], uint simds [[simdgroups_per_threadgroup]],
                             uint thread_id [[thread_index_in_threadgroup]]) {
+    const streamed_dims d = dims_of(dims);
     constexpr uint C = 4;
     threadgroup float values[32];
     const uint columns = d.columns, rows = d.rows, outputs = d.inputs;
@@ -674,10 +707,12 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
                               device half *second [[buffer(2)]], device const int *order [[buffer(3)]],
                               device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
                               device const char *signs [[buffer(6)]], device const char *mix [[buffer(7)]],
-                              device const half *gamma [[buffer(11)]], constant streamed_dims &d [[buffer(15)]],
+                              device const half *gamma [[buffer(11)]], constant streamed_dims &dims [[buffer(15)]],
                               uint n [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
-                              uint threads [[threads_per_threadgroup]], uint simd [[simdgroup_index_in_threadgroup]],
+                              uint lanes [[threads_per_threadgroup]], uint simd [[simdgroup_index_in_threadgroup]],
                               uint lane [[thread_index_in_simdgroup]], uint simds [[simdgroups_per_threadgroup]]) {
+    const streamed_dims d = dims_of(dims);
+    const uint threads = lanes_of(lanes);
     constexpr uint P = 16, V = 4, R = 3, KM = 20, QM = 10;
     threadgroup float v[5120];
     threadgroup float partial[32];
@@ -741,8 +776,9 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
 MESH_KERNEL(finish)
 kernel void streamed_gelu(device const float *gate [[buffer(0)]], device const float *up [[buffer(1)]],
                           device const float *gateScale [[buffer(2)]], device const float *upScale [[buffer(3)]],
-                          device half *hidden [[buffer(4)]], constant streamed_dims &d [[buffer(15)]],
+                          device half *hidden [[buffer(4)]], constant streamed_dims &dims [[buffer(15)]],
                           uint i [[thread_position_in_grid]]) {
+    const streamed_dims d = dims_of(dims);
     if (i >= d.count) return;
     const uint r = i % d.outputs;
     hidden[i] = half(streamed_gelu_of(streamed_value(gate, i, d.shares, d.split, gateScale[r]),
@@ -785,9 +821,10 @@ template <uint M, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint COO
 MESH_KERNEL(product)
 kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                           device const uint *bands [[buffer(2)]], device half *xs [[buffer(4)]],
-                          device float *partials [[buffer(5)]], constant streamed_dims &d [[buffer(15)]],
+                          device float *partials [[buffer(5)]], constant streamed_dims &dims [[buffer(15)]],
                           uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                           uint lane [[thread_index_in_simdgroup]], uint thread_id [[thread_index_in_threadgroup]]) {
+    const streamed_dims d = dims_of(dims);
     using namespace mpp::tensor_ops;
     constexpr uint PER = (TILES + J - 1) / J, STEPS = (PER + SK - 1) / SK;
     threadgroup float sums[BANDS][SK][M * 32];
@@ -896,8 +933,9 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
                            device const uint *bands [[buffer(2)]], device half *xs [[buffer(4)]],
                            device float *partials [[buffer(5)]], device half *ys [[buffer(11)]],
                            device const int *order [[buffer(12)]], device const float *rowScale [[buffer(13)]],
-                           constant streamed_dims &d [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
+                           constant streamed_dims &dims [[buffer(15)]], uint2 group [[threadgroup_position_in_grid]],
                            uint simd [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const streamed_dims d = dims_of(dims);
     using namespace mpp::tensor_ops;
     const uint KN = 40, outputs = d.outputs, rows = d.rows, per = d.per, finish = d.finish, pitch = d.pitch ? d.pitch : TILES;
     const uint stride = finish ? d.stride : d.split;
@@ -959,9 +997,10 @@ kernel void streamed_panel(device const uint *codes [[buffer(0)]], device const 
 template <uint M, uint TILES, uint WIDTHS>
 kernel void streamed_panel_t(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                              device const uint *bands [[buffer(2)]], device half *xs [[buffer(4)]],
-                             device float *partials [[buffer(5)]], constant streamed_dims &d [[buffer(15)]],
+                             device float *partials [[buffer(5)]], constant streamed_dims &dims [[buffer(15)]],
                              uint2 group [[threadgroup_position_in_grid]], uint simd [[simdgroup_index_in_threadgroup]],
                              uint lane [[thread_index_in_simdgroup]]) {
+    const streamed_dims d = dims_of(dims);
     using namespace mpp::tensor_ops;
     const uint NK = 264, COLUMNS = TILES * 32, outputs = d.outputs, rows = d.rows, per = d.per, pitch = d.pitch ? d.pitch : TILES;
     threadgroup half panel[32 * 264];
