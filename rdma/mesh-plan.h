@@ -5,15 +5,16 @@
 extern "C" {
 #endif
 
-/* The mesh's topology and collective planning (libmesh: mesh-collective.c, mesh-dataflow.c), one header that every
-   consumer uses as written: C and Objective-C include it, Swift imports it (module.modulemap), torch-mesh's
+/* The mesh's read side and its collective planning (libmesh: mesh-dataflow.c, mesh-collective.c), one header that
+   every consumer uses as written: C and Objective-C include it, Swift imports it (module.modulemap), torch-mesh's
    extension includes it, Python binds it through mesh_c_build.py (cffi, compiled against this file).  Plain C:
-   declarations and integer constants only. */
+   declarations and integer constants only.  Every execution reads its node's bridge here when it starts, and no
+   consumer gathers, parses or joins bridge records itself. */
 
-/* A node's links as its resident bridge records them now (design/algorithm-sources.md#meshobserve), one a port, view i
-   the port the bridge gave index i: the peer node while the link is paired (0 else), the link's phase and its port's
-   bandwidth in bits a second (the RDMA port's active speed and width); returns the node's port count (at most
-   `capacity` written) and its node, or -errno. */
+/* This node's bridge (design/algorithm-sources.md#meshobserve): its node, and its ports, view i the port it gave index
+   i: the peer node while the link is paired (0 else), the link's phase and the port's bandwidth in bits a second (the
+   RDMA port's active speed and width); returns the port count (at most `capacity` written; 0: the node alone), or
+   -errno where the bridge is unreachable. */
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 struct mesh_link_view { uint32_t peer,phase; uint64_t bandwidth; };
 int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
@@ -38,13 +39,22 @@ int mesh_link_map_check(const struct mesh_link_map *);
    (ns a byte). */
 #define MESH_ALPHA_US 5.0
 #define MESH_BETA_NS 0.1
-/* The map the bridges' records give `nodes` members (design/bridge-and-ipc.md#ports), member i's bridge node node[i]
-   and its ports' views views[i][0 .. count[i]) (mesh_observe's): members a and b linked where each one's bridge holds a
-   port paired with the other's node, a link's cost MESH_ALPHA_US and 8e9 over the widest such port's bandwidth
-   (MESH_BETA_NS where none is known); the kind MESH_LINKS_MESH where every pair is linked, else MESH_LINKS_GRAPH.  The
-   caller's map->link and map->cost hold nodes x (nodes - 1) / 2 links; returns the links. */
-uint32_t mesh_link_map_join(uint32_t nodes,const uint32_t *node,const struct mesh_link_view *const *views,const uint32_t *count,
-                            struct mesh_link_map *map);
+/* The map of the node's bridge (design/bridge-and-ipc.md#ports) as of one map serial, from its records of every node's
+   ports (mesh_observe's views), so the same records give every member the same map: two nodes linked where each one's
+   bridge holds a port paired with the other, at MESH_ALPHA_US and 8e9 over the widest such port's bandwidth
+   (MESH_BETA_NS where none is known); node[i] (node NULL: none) map node i's bridge.  n 0: the whole mesh, every node
+   the records hold, ascending.  n members (distinct bridges): map node i members[i]; while their links leave them in
+   parts, of the pairs across two parts a route joins, the one whose route costs least (its links' alphas summed, then
+   betas; the lowest-numbered of equals) is linked at that cost [Kruskal 1956], its route the whole mesh's path from
+   the lower to the higher on fewest links (mesh_trees_shortest's parent rule), which the bridges forward along.  The
+   kind MESH_LINKS_MESH where every pair is linked, else MESH_LINKS_GRAPH.  On entry map->nodes and map->links are the
+   room of `node` and of map->link and map->cost (n and n x (n - 1) / 2 suffice for members); returns the map's nodes,
+   or -errno (ENOSPC: the room is short, map->nodes and map->links then the room needed). */
+int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map);
+/* The bridge's map serial (never 0; it changes with the records): waits until it differs from *serial or bound_ns
+   passes and writes it there; 0 where it differs, ETIMEDOUT where the bound passed, else an unreachable bridge's errno.
+   Read (*serial 0) before mesh_map, it makes a later change end the next wait at once. */
+int mesh_map_wait(uint64_t *serial,uint64_t bound_ns);
 /* Whether the map links a and b, either way (a mesh every pair). */
 int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
 
