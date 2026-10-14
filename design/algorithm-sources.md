@@ -139,15 +139,6 @@ Metal buffers cover each operand's page-aligned window, using Apple's
 [no-copy buffer API](https://developer.apple.com/documentation/metal/mtldevice/makebuffer(bytesnocopy:length:options:deallocator:)).
 The whole-arena Metal buffer and transport-capacity query have been removed.
 
-## MeshError
-
-Saltzer, Reed and Clark's end-to-end argument, cited below, places recovery with
-the caller. The current `MeshError` reports native link/function failures and
-admission status. Its setup error `partialOperand` was deleted at `3bd1eaa`;
-the [restored L5 requirement](deliverables.md#l--library-core) remains unimplemented.
-The end-to-end argument does not authorize removing that requirement. See the
-[algebra and implementation account](distributed-reduce.md#l5-same-function-different-operand-scopes).
-
 ## Mesh.result
 
 Saltzer, Reed and Clark, [End-to-End Arguments in System Design](https://web.mit.edu/Saltzer/www/publications/endtoend/endtoend.pdf)
@@ -806,10 +797,9 @@ The receive completion publishes before that drain, so accumulated return work
 cannot precede publication of the already polled completion. TX still offers
 ready sends before processing its completion cleanup.
 
-`Mesh.send` expands [explicit placement routes](#placement) before binding these
-transfers. At an intermediate rank the received section itself is retained by
-the onward SEND. No additional function, operand copy or runtime route lookup
-is introduced.
+A section crosses intermediate nodes along the map's route ([placement](#placement)):
+at each, the landed section itself is the onward SEND's. No additional function,
+operand copy or runtime route lookup is introduced.
 
 Dotan Barak's rdma-core [work-completion contract](https://man7.org/linux/man-pages/man3/ibv_poll_cq.3.html)
 defines the valid fields of an unsuccessful completion as its work-request id,
@@ -978,64 +968,38 @@ the row-to-page lookup inside `mesh_publish` as well.
 
 Pitch Patarasuk and Xin Yuan,
 [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf)
-(2009), motivate supporting sparse connected topologies. `Placement` and its
-directed `Edge` keys represent caller-selected paths; the library does not run
-the paper's route-selection or all-reduce algorithm. A route lists the subsequent
-ranks through its destination, so `Edge(0, 2): [1, 2]` means `0 → 1 → 2`.
-The reverse direction has its own key. `owners` is the caller's section-owner
-list; callers still pass ownership explicitly to tensor and function declarations.
-The same value retains the existing work, traffic, cut and path inputs to `bounds`.
+(2009), motivate sparse connected topologies. A route is the map's: `mesh_map` (mesh-plan.h) joins members the
+links leave apart along the whole mesh's path on fewest links (`mesh_trees_shortest`'s parent rule), and the bridges
+forward a program along it (design/bridge-and-ipc.md#flows). No route is chosen by a caller or guessed from rank
+count.
 
-`Mesh.send` walks the supplied path during declaration and registers each directed
-leg through the existing send binding. With no path entry, it requests the direct
-edge. A missing configured physical edge reports the existing setup error; no
-route is guessed from rank count or topology. The queue argument applies to each
-leg's selected pair. Existing identical-leg deduplication remains in effect.
-`Mesh.start` discards its route dictionary before workers run.
-
-For a section s on `v0 → v1 → … → vk`, each intermediate receive section is the
-actual source of the next SEND. Its receive completion publishes that section;
-the existing send-use metadata queues onward transport. The intermediate owns
-one producer reference until receive publication and one transport reference
-until onward SEND completion. It has no extra numerical function or consumer
-stamp. Setup starts compute threads only for workers with declared functions.
-For the distinct realized legs E and a cut C, payload traffic is
+For a section s on `v0 → v1 → … → vk`, each intermediate node's bridge holds a relay's two flows, the one's receive
+rows the other's SEND rows: a record landed from `v(i-1)` releases the SEND cell that carries it to `v(i+1)`
+(prepared-machine.md M08), with no numerical function, consumer stamp or payload copy, and no process of that node
+takes part. For the distinct realized legs E and a cut C, payload traffic is
 `B(C) = sum(bytes(s) * count(s) for (u,v,s) in E crossing C)`.
-Transport framing remains the separate S3 mechanism. This source construction
-does not establish measured forwarding latency or repair W1–W6.
 
 ## Topology
 
-`Topology`: MLX authors' [JACCL hostfile](https://github.com/ml-explore/mlx/blob/main/docs/src/usage/distributed.rst#defining-a-mesh) supplies the full-mesh special case; Patarasuk–Yuan, [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf) (2009), supplies tree-connectivity sufficiency.
-The value stores a node set and lists of parallel links on unordered pairs. Trees,
-rings with spurs, tori and full meshes use the same representation. The paper's
-tree algorithm motivates admitting sparse connected graphs; source forwarding
-is implemented through explicit `Placement` routes. Neither establishes that
-this runtime achieves the paper's bandwidth bound.
-
-### Topology.Pair
-
-`Topology.Pair`: the [graph representation above](#topology), with the smaller endpoint first, gives both endpoint orders the same dictionary key.
-
-### Topology.links
-
-`Topology.links(between:_:)`: the [graph representation above](#topology) represents a missing edge by an empty list; dictionary subscripts remain optional.
+`struct mesh_link_map` (mesh-plan.h): MLX authors' [JACCL hostfile](https://github.com/ml-explore/mlx/blob/main/docs/src/usage/distributed.rst#defining-a-mesh) supplies the full-mesh special case; Patarasuk–Yuan, [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf) (2009), supplies tree-connectivity sufficiency.
+A map is an operand: its kind (mesh, ring, tree, graph), its nodes, its links and each link's cost (α, β; Hockney
+1994). Trees, rings with spurs, tori and full meshes are graphs of one representation, and `mesh_link_map_check`
+admits any connected one. Neither source establishes that this runtime achieves the paper's bandwidth bound.
 
 ### Link
 
-`Link`: Dotan Barak, rdma-core's [ibv_query_port manual](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_query_port.3), supplies observed port speed and width.
+`port_bandwidth` (mesh-verbs.h): Dotan Barak, rdma-core's [ibv_query_port manual](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_query_port.3), supplies observed port speed and width.
 Bandwidth is bits per second: speed codes 1/2/4/8/16/32/64/128 mean
 2.5/5/10/10/14/25/50/100 Gb/s per lane; width codes 1/2/4/8 mean 1/4/8/12 lanes.
 Unrecognized codes yield zero (unavailable), without withholding the link.
 The bridge publishes bandwidth before the paired phase; atomic scalar access also
 covers re-pairing. A link is named by its port's index; no device name leaves the
-bridge. Latency is optional seconds and nil in observations: a measured link cost is
-the store's record (rdma/store.py). Port bandwidth is an attribute, not measured
-payload throughput.
+bridge. Port bandwidth is an attribute, not measured payload throughput; a link's
+cost is `mesh_map`'s from it (mesh-plan.h `MESH_ALPHA_US`, `MESH_BETA_NS`).
 
 ### Mesh.observe
 
-`Mesh.observe`, `mesh_observe`, `mesh_map` and `mesh_map_wait`, the bridge's map reader: Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of the node's bridge's region, without attaching a client or changing the bridge's state.
+`mesh_observe`, `mesh_map` and `mesh_map_wait`, the bridge's map reader (mesh-plan.h, mesh-dataflow.c): Apple's [shared mmap mechanism](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/mmap.2) supplies a read-only view of the node's bridge's region, without attaching a client or changing the bridge's state.
 `mesh_observe` copies the node's port table into plain `mesh_link_view` records, a
 port by its index, and returns the port count or negative errno. `mesh_map` copies
 the bridge's map (design/bridge-and-ipc.md#region), every node's newest record, as
@@ -1047,7 +1011,6 @@ apart, the cheapest route first [Kruskal 1956], each along the whole mesh's path
 fewest links, which the bridges forward along. `mesh_map_wait` waits on the serial, within its bound, so a loop of executions
 takes the next map. The bridges keep their links paired with or without a client, so
 the map is current whether or not anything runs (design/recovery.md, mandate 14).
-Swift's `Mesh.observe` is that map as a `Topology`.
 
 ## Program.write
 
@@ -1114,11 +1077,13 @@ reuses its existing packed, transposed GEMV, and matrix launch paths with a
 weight offset/stride or a matrix subview. The selected backend is unchanged.
 
 The [Pallas operand representation](#programtensor) supplies the contiguous
-sampling scopes. Setup prepares each 1024-token sampling tile's canonical page
-array, element offset, presence address and invocation address. The existing
-sampling kernels resolve a contiguous pointer once per tile; logprob candidate
-merging retains its two per-thread pointers across the candidate loop. This is
-ordinary indexed operand access, not a second sampler or a tensor allocation.
+selection scopes. Setup prepares each vocabulary tile's canonical page array,
+element offset, presence address and invocation address, and the selection's
+kernels (argmax.metal) resolve a contiguous pointer once per tile. A record kept
+for divergence is the retained set (`mesh_retain`: a head of the greatest z and a
+tail of the greatest z + g outside it, (id, z) each, beside the row's (m, l)),
+never candidate tokens with their logprobs. This is ordinary indexed operand
+access, not a second selection or a tensor allocation.
 A Metal function constant selects indexed versus ordinary inputs at pipeline
 creation. The ordinary specialization does not poll Mesh or load page metadata.
 The indexed partials pass uses the existing [resident presence mechanism](#resident-metal);
@@ -1134,15 +1099,15 @@ computes or keeps a token other than the draw's. The engine account is
 
 The same column decomposition now applies over explicit input-row scopes. Setup
 partitions each vocabulary shard into packed rectangles of at most 120 KiB, on
-1024-token sampler boundaries, and binds row offsets in all three existing
+selection-tile boundaries, and binds row offsets in all three existing
 projection backends. Larger batches use multiple row scopes. Each completed
 projection is published from its existing resident command buffer before the
 next projection; the sampler's precomputed operand records name each tile's own
 presence word and local offset. There is no full-shard completion prerequisite
 or dense logit assembly. The [bounded-publication account](../../../metal-microbench/docs/async_collectives.md#bounded-vocabulary-publication)
-records added publication/dispatch work and metadata capacity. Replicated
-sampling, sampling-policy distribution, the full 35+1-push contract and the floor
-latency remain open; per-tile payload bounds do not establish them.
+records added publication/dispatch work and metadata capacity. The full 35+1-push
+contract and the floor latency remain open; per-tile payload bounds do not
+establish them.
 
 The engine now records the entire supplied projection/publication list using
 Apple's [native Metal program](#native-metal-program). Each output scope carries
@@ -1214,22 +1179,6 @@ Mesh gains no arithmetic kernel or transport behavior from this engine change.
 The MPI Forum's [communication completion](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node74.htm):
 explicit completion operations. The user requested an explicit counterexample;
 no default collective may invoke it.
-
-## bounds
-
-`bounds` and its plain value types (`Topology`, `Program`, `Placement`, `Bounds`) follow
-Hockney (1994, `t0 + n/r∞`), Alexandrov et al., [LogGP](https://doi.org/10.1145/215399.215427)
-(1995, startup and per-byte gap), Kwasniewski et al., [COSMA](https://arxiv.org/abs/1908.09606)
-(2019, I/O lower bound), and the four-lower-bounds paragraph of
-`metal-microbench/docs/amdahl_superiority.md`: aggregate and per-node work over
-sustained rate, aggregate and per-node traffic over bandwidth, bytes across each cut
-over that cut's summed bandwidth, and the dependency path's summed startup and
-transfer time; "their maximum is a lower bound, not an exact execution-time formula".
-The caller supplies the placement; `bounds` evaluates it and never chooses one
-(`examples/bounds-table.swift` supplies the proportional placement of the ten-minute table).
-Zero work or traffic takes zero time; positive work or traffic at zero capacity
-yields infinity. Missing nodes and links contribute zero capacity. These rules
-come from the existing `seconds` function; its prose comments now live here.
 
 ## report statistics
 

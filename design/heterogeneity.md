@@ -3,8 +3,7 @@
 Orientation for anyone, developer or agent, who splits work over nodes of different speeds or
 moves it over links of different costs: `rdma/torch-mesh/torch_mesh/partition.py` (the partition
 operand), `rdma/allocate.py` (the shares), `rdma/mesh-plan.h` and `mesh-collective.c` (the compiled
-collectives), metal-microbench `tools/mesh/calibrate.py` (the rates and link costs) and the programs that
-use them. The operator:
+collectives), metal-microbench `tools/mesh/calibrate.py` (the rates) and the programs that use them. The operator:
 
 > "it'll take a little bit of orientation for developers (agents as well) to handle heterogenous
 > links ontologically (since this is so different) and without lots of clumsy erratic
@@ -26,7 +25,8 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
   its attention) is measured on each node and added as its own class (R3). A node has one rate per
   class and dtype, never one speed.
 - **Link**: the cost of one direction of one pair of nodes, α (µs) per message plus β (ns) per byte. The bridges'
-  map holds the links (mesh-plan.h `mesh_map`); a link's measured cost is the store's record, else its ports' bandwidth.
+  map holds the links and their costs (mesh-plan.h `mesh_map`: `MESH_ALPHA_US`, and 8e9 over the widest paired
+  port's bandwidth, else `MESH_BETA_NS`).
 - **Parts**: a mesh dimension's integers p_r ≥ 1, one per coordinate, of P = Σp units.
 - **Share**: rank r's part of an extent N, N·p_r/P.
 - **Grain**: N/P, the unit a share is counted in (a head, an expert, a tile). A program chooses the
@@ -41,7 +41,7 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 | Fact | Written in | Read by | Decides |
 |---|---|---|---|
 | Node rates | the store's node records | the derivation (`allocate.equal_finish`; this repository's models: metal-microbench `programs.py derive`) | the parts: what each node computes |
-| Links | the bridges' map, each link's cost the store's measured record | the compiled collectives (`mesh_compile` along shortest-path or packed trees, the trees packed by each link's cost; libnccl-mesh's default table or a program's own, `ncclMeshCommInitRank`, torch-mesh `Options`); the derivation, only to price collectives (R7) | the single-phase all-reduce or reduce-scatter and all-gather, and their trees: how operands travel |
+| Links | the bridges' map, with each link's cost (`mesh_map`) | the compiled collectives (`mesh_compile` along shortest-path or packed trees, the trees packed by each link's cost; libnccl-mesh's default table or a program's own, `ncclMeshCommInitRank`, torch-mesh `Options`); the derivation, only to price collectives (R7) | the single-phase all-reduce or reduce-scatter and all-gather, and their trees: how operands travel |
 
 - Rates decide the parts. The map decides the algorithm.
 - A link's cost never becomes a node's rate, and a node's rate never selects an algorithm.
@@ -119,8 +119,8 @@ The module docstring (`torch_mesh/partition.py`) is the API. This section is onl
 5. Give every rank the parts and the capacities to attach (`partition.attach(mesh, tp=(capacity,
    parts))`); metal-microbench `tools/torch_parallel/tp.py` takes them as `PARTITION`.
 
-Node rates are the store's records (`calibrate.py node`, else the records of the node's model), links are the
-bridges' map, and a link's measured cost is the store's record (`calibrate.py links`). They give the first parts only.
+Node rates are the store's records (`calibrate.py node`, else the records of the node's model), and links and their
+costs are the bridges' map. They give the first parts only.
 
 **Parts from the run's evidence (R3, R10, R11).** `allocate.Balancer` balances any program of collectives: its
 decisions are partitioned dimensions, its stretches each rank's own work between two consecutive collectives

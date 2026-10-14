@@ -73,8 +73,7 @@ Operator, 2026-09-15, verbatim:
 > test suite in a codebase which, dan luu style, *prohibits* unit tests and hand-written
 > tests.
 
-This matrix is history and backlog. The goal is Megatron TP2 with Goals A and B in
-[collective-goals.md](collective-goals.md); no row, invariant or check here gates it.
+No row, invariant or check here is an assignment or a gate.
 
 Operator clarification, 2026-09-15, superseding the former I17/I18 and X3 wording:
 
@@ -205,8 +204,9 @@ ranges; nothing else about a partial exists at runtime.
 
 ## 0. Status of this document
 
-History and backlog. Rows are not assignments and gate nothing; the goal is in
-[collective-goals.md](collective-goals.md).
+The operator's words above govern. Rows are requirements, not assignments, and gate nothing. Where a row's subject
+has a document of its own, that document holds its end state: the bridge, [bridge-and-ipc.md](bridge-and-ipc.md);
+recovery, [recovery.md](recovery.md); the collectives' API, [rdma/NCCL.md](../rdma/NCCL.md).
 
 ## 1. Invariants (design reference; the check column gates nothing)
 
@@ -238,33 +238,7 @@ History and backlog. Rows are not assignments and gate nothing; the goal is in
 | I24 | The existence of a crossover does not justify any overhead (operator 2026-09-17). The divisor is the engine's own solo measured next to the pair; there is no reference-class refusal. | — |
 | I25 | Latency minimization is the specification; duplicated computation is free, a serial hop is not. The cost of a layer is the number of serial pushes on its critical path times the floor of one push (~12 µs), plus the split compute; bytes moved and FLOPs repeated are not costs until they exceed that. Therefore: (a) **one serial push per layer** on the decode path — every node computes in full (duplicated) everything whose duplicated cost is below one hop (norms, residual adds, embeddings, attention at short context, sampling), computes its slice of what is split (FFN columns; the vocabulary tiles, since the lm_head at 0.8 GB is 1.3 ms and is split, its slice's logits/top-k pushed in the same single hop), and **pushes its partial directly to every consumer** (Definition: a codomain-shaped term, summed locally on arrival, in any order); (b) reduce-scatter + all-gather (two hops) is used only where `(N−1)·bytes / 10 GB/s` exceeds one hop latency, i.e. prefill-class tiles, and then pipelined per tile (F3) so the exposed cost is one hop per layer; the choice is made at `start()` from bytes and `N`, never at runtime; (c) "avoid duplicate computation" is not a specification anywhere in this document and a hop added to avoid a duplication smaller than a hop is a defect; (d) the demand is a net improvement on the pair we have: Goal B, pair decoded tokens/s ≥ 1.035× solo at heads [7,1] and FFN 7:1. Head-split attention adds one o_proj collective per attention block (standard Megatron); duplicated versus head-split attention is the caller's placement choice. | the plan shows one direct push per projection pair on the critical path, and RS+AG only above ~120 KiB |
 
-## 2. Public surface (closed)
-
-The importable library is the Swift module `Mesh` (`swift/Mesh.swift`) over the C
-runtime (`rdma/mesh-call.c`, `mesh-dataflow.c`, `mesh-flow.c`, `mesh-verbs.h`, `mesh.h`):
-
-```
-Mesh(region:, rank:, size:, workers:, inFlight:, placement:) // resident capacity; N1 bounds remain open
-Placement(owners:, routes:, work:, bytes:, cuts:, path:)  // explicit ownership, directed routes, optional bound inputs
-Placement.Edge(source, destination)                     // ordered endpoints; route excludes source and includes destination
-Mesh.tensor(on:sections:) -> [TensorPart]                 // storage of one term T_i or block Q'_j T(X) (Definition): contiguous sections, each with a rank
-Mesh.constant(on:bytes:initialize:) -> TensorPart
-TensorFunction.cpu / .metal(device) / .prediction(model) // supplied numerics; input/output view factories
-mesh_operand.load(at:as:)                                // logical element indexing through canonical backing
-Mesh.call(function, inputs:, outputs:, on:, worker:)
-Mesh.map(function, inputs: [[TensorPart]], outputs:, …)
-Mesh.send(part, to:, queue:) -> TensorPart
-Mesh.broadcast / scatter / allScatter / gather / allGather / allToAll
-Mesh.reduce(parts, to:, using:) / reduceScatter(contributions, to:, using:) / allReduce(…)
-Mesh.start()                                              // realize storage, bindings, receives, links
-Mesh.submit(index) -> Result<Void, MeshError>              // immediate admission result
-Mesh.result(index) -> Result<Void, MeshError>              // N2: one status load; busy until conclusion
-MeshError.busy / .link(peer:code:) / .function(call:code:)
-Mesh.syncOnRemoteFill(parts, index:)                      // explicit, diegetic, never default
-bounds(program, placement, topology) -> Bounds            // pure lower bounds; never picks a placement
-```
-
-## 3. References to cross-implement from
+## 2. References to cross-implement from
 
 | Construct | Reference | What to copy |
 |---|---|---|
@@ -280,76 +254,29 @@ bounds(program, placement, topology) -> Bounds            // pure lower bounds; 
 | topology/bounds | Patarasuk–Yuan (spanning tree suffices); Hockney; LogGP; COSMA | routes over any graph; cut/path lower bounds |
 | legitimacy | Amdahl 1967; Karp–Flatt 1990; Pope et al. 2023 | measured serial fraction; TP decode/prefill bound |
 
-## 4. Deliverables
+## 3. Deliverables
 
 Each: **Signature** · **Reference** · **Check** · **Not it**.
 
 ### S — substrate
 
-**S1. Links are a configured list; a bridge serves them all.** `etc/bridge.conf` `links=('device,peer,local,remote[,service]' …)`; `mesh_peer_channel(ctx, peer, queue)`. Ref: JACCL hostfile. Check: a 3-link configuration on one node realizes 3 independent link controllers (status shows each link's phase); the same program runs at world size 2 and 3 with only the config changed. Not it: a hostfile assuming full mesh.
+**S1. The bridge finds its ports and serves them all.** Nothing is configured: the bridge gives each RDMA device it finds an index, and its hellos find the node each one reaches ([bridge-and-ipc.md#ports](bridge-and-ipc.md#ports)). Ref: JACCL hostfile (the full-mesh case of what the map holds). Check: a node with three cabled ports pairs three links (the port table shows each one's phase); the same program runs at world size 2 and 3 with nothing changed. Not it: a hostfile, or a configured peer list.
 
 **S2. TX/RX per link on dedicated threads; drain and refill immediately.** `rdma/mesh-flow.c` `tx_thread(link)`, `rx_thread(link)`; RX reposts before delivering. Ref: NCCL proxy; JACCL per-wire polling. Check: I6. Not it: a progress loop that also runs numerical callbacks.
 
 **S3. Chunked transport, invisible.** `mesh_section_create(ctx, bytes, count, receive, &section)`; internal `C`, `K = ceil(N/C)`. Ref: TN3205 frame matching; llama.cpp PR #26421 (128 KiB stride cost). Check: I10.
 
-**S4. Out-of-band pairing once; versioned exchange; every syscall bounded.** `verbs_up(link)` with `XMAGIC+MESH_VERSION`; `accept/connect/read` each with a deadline. Ref: TN3205; `RDMA-RULES.md`. Check: each of those calls in `rdma/mesh-verbs.h` is followed by a timeout.
-
-### L — library core
-
-**L1. Partial tensor storage = sections with ranks.** A `TensorPart(rank, bytes)` is the storage of one term `T_i = T(Q_i X)` (layout `P`) or one block `Q'_j T(X)` (layout `S`) of the Definition; `Mesh.tensor(on:sections:)`. The partial itself is the mathematical term; the storage never carries more than its coordinates. Ref: Pallas BlockSpec. Check: a section is contiguous locally, addressable globally by `(rank, section)`; no hidden dense copy (I4); I23.
-
-**L2. Supplied function over sections.** `TensorFunction.cpu/.metal/.prediction`; `Mesh.call/map`. Ref: Pallas `pallas_call`; StarPU codelets. Check: I7; a CPU, a Metal and a Core ML function each bound through the same `call`. Not it: an expression compiler; a kernel zoo.
-
-**L3. Publish on visibility, fire on presence.** completion → `mesh_publish(row)` → for each consumer in the row's contiguous use range: decrement its pending count; zero enqueues it on its worker. No consumer evaluates "are my inputs present". Ref: Monsoon; Realm; TensorFlow Send/Recv; Naiad occurrence counts. Check: I2, I3, I17; `mesh_publish` walks one contiguous range and performs one decrement per use.
-
-**L4. Ten collective verbs as movement + supplied combine.** §2 list; `reduce*` take `using: TensorFunction`. Ref: MPI-4.1 ch. 5; Rabenseifner/Patarasuk–Yuan; Gloo. Check: every verb is `send` + `call(combine)`; movement does no arithmetic; explicit destinations at every world size. Not it: gather-everything-then-sum; any verb inferred from `size`.
-
-
-**L6. Combine is any associative supplied function.** `reduce(…, using:)`; explicit binary tree. A *partial tensor* (Definition) has combine `+` and the exactness of I23; another associative combine is movement plus a supplied function and carries no claim beyond associativity. Ref: `MPI_Op`; Blelloch. Check: no special case for `+` in the movement.
-
-**L7. Lifetime without explicit free.** internal `mesh_buffer_retain/release`; uses count down on numerical completion, TX completion, destruction; the free pool returns pages unzeroed. Ref: RCU; Disruptor. Check: I5.
-
-**L8. Explicit sync as a library call with its counterexample.** `Mesh.syncOnRemoteFill`; `examples/sync-on-remote-fill.swift` `parallel|serial|deadlock`. Check: I11.
-
-### G — genericity
-
-**G1. Contraction is a two-operand `call`; K-partials are `reduceScatter` inputs.** caller: `call(dot, inputs:[x_k, w_k], outputs:[c_k])` per K-panel; `reduceScatter([[c_k]…], to:, using: add)`. Ref: SUMMA. Check: Gram `R(RᵀZ)` and FFN down-projection are the same calls with different operands; the Gram output feeds the next `call` with no copy. Not it: `nn.linear` inside mesh.
-
-**G2. Indices as data.** `Mesh.map(function, inputs: [[x], [idx]], …)`; `idx` is a `TensorPart` whose presence gates the map; the supplied function does the indexed read. Ref: Pallas scalar prefetch; `jax.lax.gather`; Megablox. Check: routed-expert and neighbourhood callers exist outside mesh using only `map`; no routing code in mesh.
-
-**G3. Two callers, zero specialization.** `metal-microbench` and `xonotic/solver` both `import Mesh`; mesh imports neither. Check: I8; both build against the same module.
-
-### N — instances and lifecycle
-
-**N1. Realize once, submit per instance, unbounded.** `Mesh(…, inFlight:)`; `submit(index) -> Result<Void, MeshError>`; the arena is sized at `start()` as inFlight × bytes-per-instance (SDF balance); an instance's pages return to a per-worker free list when its reference count reaches zero (an event, X5), and `submit` when no instance slot is free returns `MeshError.busy` immediately — never waits, never checks readers. Ref: MPI-4 persistent collectives; Pathways; CUDA graphs. Check: `submit(inFlight + k)` is legal and returns a value; `start()` prints bytes per in-flight instance; no allocation, no reader query, no wait inside `submit`.
-
-**N2. Early conclusion as a value.** `Mesh.result(index) -> Result<Void, MeshError>` is one load of the instance's status word (no scan, no poll loop); `MeshError.link(peer, code)`, `.function(call, code)`. Ref: fail-stop; end-to-end argument. Check: I12; the Core ML chain concludes early on a killed peer and the driver re-realizes.
+**S4. Out-of-band pairing on the control socket; every syscall bounded.** The link hello (node, boot, LID, GID, block size), then each program's READY, PAIRS and POSTED ([bridge-and-ipc.md#protocol](bridge-and-ipc.md#protocol)); `accept/connect/read` each with a deadline ([recovery.md](recovery.md) Q14). Ref: TN3205; `RDMA-RULES.md`. Check: each of those calls in `rdma/mesh-flow.c` has a deadline.
 
 ### T — topology and fleet
 
-**T1. Topology is a graph value, observed.** `Topology(nodes:, links: [(a,b): [Link(device, bandwidth, latency)]])`; `Mesh.observe() -> Topology` from live pairings. Ref: JACCL hostfile as the full-mesh case. Check: tree, ring+spurs and full mesh run the same caller with only config changed; no code path assumes `links[(a,b)]` exists.
+**T1. The map is a graph value, observed.** `mesh-plan.h` `struct mesh_link_map` from `mesh_map`: the bridges' records of every node's ports, flooded to every bridge, two nodes linked where each holds a port paired with the other ([bridge-and-ipc.md#ports](bridge-and-ipc.md#ports)). Ref: JACCL hostfile as the full-mesh case; OSPF flooding (RFC 2328 §13). Check: a tree, a ring with spurs and a full mesh run the same program with nothing configured; no code path assumes a link exists.
 
-**T2. Routes belong to placement; mesh forwards on presence.** `Placement(owners:, routes: [(src,dst): [hop…]])`; `send` on a non-adjacent pair is one SEND per hop through canonical intermediate pages. Ref: Patarasuk–Yuan (spanning tree suffices); Pathways; Monsoon. Check: leaf→leaf on a star is two SENDs with no hub wait; per-cut bytes equal declared traffic.
+**T2. Routes are the map's; the bridges forward.** `mesh_map` joins members the links leave apart along the whole mesh's path on fewest links; on each node of the route the program is a relay's two flows, a landed record releasing the next hop's SEND cell ([bridge-and-ipc.md#flows](bridge-and-ipc.md#flows)). Ref: Patarasuk–Yuan (spanning tree suffices); Monsoon. Check: leaf→leaf on a star is two SENDs with no process of the hub taking part; per-cut bytes equal declared traffic.
 
-**T3. Multi-link striping per pair.** `send(part, to:, queue:)` where `queue` selects among a pair's links; chunks round-robin when `queue == .all`. Ref: JACCL `ring_impl` wires; TN3205 10 QPs/device. Check: equal bytes per link of a pair in `report`.
+**T5. A change of the map fails the executions it cuts; the next reads the map.** A lost link or relay fails each program across it, its status naming the node; nothing is resumed; the next execution's start reads the map as it is then ([recovery.md](recovery.md), mandates 11 and 13). Ref: fail-stop; Dean–Ghemawat; `RDMA-RULES.md`. Check: pull one cable mid-run on a ring: the failure names the node, the next execution completes on the remaining links, and the replug is in a later map.
 
-**T4. Bounds before runs.** `bounds(program, placement, topology, capability) -> {compute, memory, cut: {cut: s}, path: s, max}`, pure; `topology` is the T1 value (links, observed), `capability: [node: Capability(rate, bandwidth)]` the caller's sustained rates. Ref: `docs/amdahl_superiority.md` four lower bounds; Hockney; LogGP; COSMA. Check: reproduces the ten-minute table (1+3, 2+17, 1+1).
-
-**T5. Retopology is a `Result`; the driver re-realizes.** Library backlog; not a gate for Goal A/B. `MeshError.topology(lost:, gained:)`; driver: `observe(); Mesh(topology, placement.restrict(topology)).start()`. Ref: fail-stop; Dean–Ghemawat; `RDMA-RULES.md`. Check: pull one cable mid-run on a ring: early conclusion names the link; re-realized program completes on the spanning tree; re-plug is visible to the next `observe()`.
-
-**T6. Replicas are placement, not protocol.** `Placement(…, replicas: [section: [rank, rank]])`: a replicated section is produced on every listed rank as an ordinary extra output edge; each consumer is bound at `start()` to ONE replica (the placement's primary for that consumer); loss of the primary's link is a T5 retopology event whose re-realization binds the next replica. No read-time choice, no "first present" branch. Ref: Legion physical instances; end-to-end. Check: no runtime conditional selects among replicas; losing a link changes `bounds()` and triggers T5, not a branch.
-
-**T7. Multi-tenant fabric by lease.** bridge serves N clients; `Mesh(…, lease: Lease(qpsPerLink:, arenaBytes:))`; setup returns errno when the lease exceeds `max_qp`/arena. Ref: NCCL communicator per job; PMIx. Check: two users' programs run on disjoint QPs/arena; `kill -TERM` of one leaves the other untouched; no `SIGKILL` path.
-
-### X — execution-shape typings (supplanted 2026-09-16 by group H)
-
-The X rows were read charitably: "indexed receive matching", "completion supplies the
-indexed mapping used by consumers", "an asynchronous placement operation using canonical
-operand storage", "Mesh resolves backing through the canonical page table", "dense stamp
-array … plus the range walk", "a per-worker free list … allocation pops" — each of these
-sentences licensed one more dependent load between a completion and a post or a read
-(measured: publish→post 8 → 10, completion→first byte 14 → 21). Group H replaces them
-with the data structure and the data flow, and with counts.
+**T7. Many clients, by lease.** The node's bridge serves every client at once, none aware of another ([bridge-and-ipc.md#clients](bridge-and-ipc.md#clients)): rows and arena pages claimed by compare-exchange, an attach refused (EBUSY) where no slot is vacant, a lease refused as a value (ENOMEM, ENOSPC) where the node cannot give it. Ref: NCCL communicator per job; PMIx. Check: two users' programs run on disjoint rows and queue pairs; one client's exit leaves the other untouched; no `SIGKILL` path.
 
 ### H — hot and cold data flow (the transport, as the machine executes it)
 
@@ -488,28 +415,8 @@ symbols has a runtime reader.
 
 ### R — segmentation recovery (cable pulls, replugs, port moves; between NFEs only)
 
-Library backlog; not a prerequisite or gate for Goal A/B.
-
-Facts this group is written against: TB5 RDMA device names follow the interface, so a
-replug can present the same peer on a new `rdma_enN`; the neighbour cache is empty after
-a replug (`RDMA-RULES.md`); a send completion is not delivery (D12); UC has no repair
-(transport-boundary.md); a wedged verbs call is unkillable. The operator's rule: a peer
-pair that loses its link is the same two peers with a new indexed connection; they
-re-establish who they are and what they will do; nothing inside an NFE is recovered.
-
-**R1. Peer identity is independent of the link.** Signature: the pairing exchange carries `(node, boot_nonce, program_epoch)`; a re-pair with the same `node` on any device is the same peer with a new `connection_index`; `Topology.Link` gains `connection: Int`. Ref: TN3205 out-of-band metadata; `RDMA-RULES.md` versioned exchange. Check: `observe()` after a port move shows the same peer node with a new device and `connection+1`; no code path keys a peer by device name or GID.
-
-**R2. Loss is observed at the completion queue and the control socket, never by a data-path timer.** Signature: a failed work completion or a control-socket error puts the link in `MESH_STOPPED` with the errno in `port.code`; every instance whose plan uses that link concludes `Result.link(peer:code:)` on its next `result()` (one load); its slots are released by the ordinary refcount events (no leak, X5). Ref: fail-stop; end-to-end; I12. Check: the source audit finds no clock read on any data-path function (only the pairing exchange reads time); the killed-peer run (row 16) concludes within one completion.
-
-**R3. Re-pairing is a bounded loop that runs while the bridge is up, regardless of clients** (subsumes 19j). Signature: the link controller repeats `{re-enumerate devices matching the configured peer, warm the neighbour cache (`ping6 ff02::1%iface`), re-create QP/CQ if the device context was lost, exchange (R1), post the planned receives}` with one bounded deadline per attempt and a fixed pause between attempts; the control listener is closed and reopened per attempt (no stale backlog). Ref: `RDMA-RULES.md` (bound every syscall; never SIGKILL); TN3205. Check: `link_run` has no `if(!transfers) return`; a follower started 5 minutes before rank 0 pairs when rank 0 attaches; `bin/mesh-status.sh` shows `attempt` counts.
-
-**R4. A realized program survives a link loss.** Signature: after `MESH_STOPPED → MESH_PAIRED` on the same peer, `Mesh.submit(next)` succeeds with no new `Mesh(…)`, no `start()`, no re-registration by the client: sections, bindings, planned pages and send-edge tables are unchanged; the bridge re-posts the planned receives for the new connection from the same tables. Instances in flight at the loss are the ones that concluded in R2. Ref: MPI-4 persistent collectives (a persistent request outlives a failed start); Pathways. Check: the driver's recovery path performs no re-realization (read it); the demonstration in R7 shows `submit` succeeding after re-pair with the same program object.
-
-**R5. Port moves are configuration-free.** Signature: the bridge config names peers, not devices: `links=('*,1,…')` or a device list per peer; at attempt time the controller selects any `PORT_ACTIVE` device whose neighbour table contains the peer's link-local address. Placement routes (T2) name pairs, never devices. Ref: `RDMA-RULES.md` "warm the neighbour cache before RTR". Check: moving the cable to another port on either node re-pairs with no config edit and `observe()` shows the new device.
-
-**R6. Partition with P > 2 is a topology change, not an error storm.** Signature: each side's `Result.topology(lost:, gained:)` (T5) names exactly the peers it lost; instances needing a lost peer conclude failed; the driver re-realizes on `observe()`'s reachable subgraph between NFEs; ownership never migrates on its own (I9). Check: T5's cable-pull run on a ring names one link on each side and nothing else.
-
-**R7. Demonstration and number.** Signature: on the pair, pull the cable during an NFE: the NFE concludes `Result.link` within one completion on both sides; replug (same or other port): the next `submit` completes with no process restart, no bridge exit, no U-state process; report time-to-repair (cable in → paired) and time-to-first-completed-NFE-after-repair. Check: bridge pids unchanged before/after; both numbers in `output_data/mesh_recovery/`; repeated three times.
+Its definition is [recovery.md](recovery.md): its Q5-Q11 are this group's R1-R7 at their end state, R4 (a realized
+program surviving a link loss) dropped by mandate 13.
 
 **X9. Presence stamps are device-readable; consumers may be resident kernels.** Optional. Signature: `TensorPart.stamp` — the address (in the same shared mapping the GPU sees via `bytesNoCopy`) of the section's per-instance presence word; the bridge/worker writes it with a release store after the data is visible (X1). A supplied `TensorFunction.metal` may encode one command buffer for a whole local step and wait *inside the kernel* on the stamps of the sections it consumes (device-scope atomic load loop), or use a Metal 4 queue-side `waitForEvent` that the RX thread signals — either way the dependent work is resident before the tile lands and the crossing costs the wire only. The in-kernel wait is the X2 firing rule executed on the device: presence only, no data-dependent branch, no retry; the GPU watchdog is the fail-stop (`Result.function` on timeout, I12/I19). Ref: MLX `fence_wait` (`MLX_METAL_FAST_SYNCH`); NCCL LL flags; MSCCL++ device semaphores; Gupta et al. 2012 persistent threads; Anukari (spin to keep the Apple GPU clocked). Check: `TensorPart.stamp` exists and `mesh_publish` stores it release-ordered after the payload; a caller example encodes one command buffer per step with in-kernel waits and completes with command buffers per step = O(segments), not O(tiles) or O(layers); measured µs-class arrival-to-consume on the pair.
 
@@ -538,39 +445,19 @@ serialization of one tile's vector; `T_f` the split sublayer's leader-alone time
 
 **F9. Memory per node is constant in N.** `arena_i = instances × Σ_sections bytes(tile)`; weights: the split sublayer's slice (`share_i`) plus the replicated remainder. Satisfied when: `start()` prints the arena and it is independent of `N`; the registered span fits the 4 GiB bank rule.
 
-**F10. Failure is per tile-instance and between NFEs.** Library backlog; not a gate for Goal A/B. Link loss concludes the tile-instances in flight over that link (`Result.link`) and nothing else; the program survives (R4); resumption is the next `submit`. Satisfied when: R7's cable pull shows only the in-flight tiles failing and the bridge pids unchanged.
+**F10. Failure is per execution and between NFEs.** A link's loss fails the executions in flight over it, naming the node, and nothing else; nothing is resumed, and the next execution runs on the map as it is then ([recovery.md](recovery.md) Q1, Q3). Satisfied when: Q11's cable pull shows only those executions failing and the bridge pids unchanged.
 
 **X10 (superseded by H2/H3; kept for the record shapes).** Signature: `struct mesh_send_record` (per transfer chunk, indexed by the TX ring slot / `wr_id`): `{page, bytes, queue, tag[4], release_row}`; `struct mesh_receive_record` (per posted RECV, indexed by `wr_id`): `{row, stamp_index, use_first, use_count, publish_last_chunk}`; `struct mesh_use_record` (per consumer edge, contiguous per row): `{call, pending_address}`; `struct mesh_call_record` (per (call, instance)): `{operand_array_address, worker, pending, output_rows[k]}`; `struct mesh_instance_record`: `{status_word, first_row, row_count}`. Each `_Alignas(32)`, `sizeof ≤ 32` (or ≤ 64 documented), filled at `start()`, read once per event, never mutated except the counters they name. The receive completion is: `rec = receive_records[wr_id]; store presence[rec.stamp_index]; for u in uses[rec.use_first ..< +rec.use_count]: if(!--*u.pending_address) enqueue(u.call)` — one metadata line, one contiguous use range, one countdown. The send is: `rec = send_records[slot]; ibv_post_send(&rec.wr)` with the WR and SGE pre-built inside the record. Ref: LMAX Disruptor (preallocated ring of fixed records), Monsoon token store (presence next to the operand), Kalia ATC'16 (cache-line-sized WQEs, doorbell batching), NCCL LL (flag co-located with data). Check: the ontology audit's dependent-load count per event equals 1 metadata record + payload on every runtime path; `sizeof` and alignment of every runtime record asserted at compile time; a trace shows completion→consume within the wire + one record load.
 
 **F11. Sequence-split attention is a partial with an associative combine.** Not a requirement (countermanded 2026-09-22). Signature: for a query and a range of KV positions `[p_i, p_{i+1})`, the supplied attention kernel produces, per head, `(m_i, l_i, O_i)` — running max, running sum, unnormalized output — over its positions only; `reduce(parts, to:, using: lseCombine)` with `m = max_i m_i`, `l = Σ_i l_i·e^{m_i−m}`, `O = Σ_i O_i·e^{m_i−m} / l` (flash-decoding split-K; associative, exact in fp32). KV positions are placed **once, when written** (prefill writes each node's positions to that node), proportional to memory bandwidth; K and V never move at decode. On E2B (7 global layers reading full-length caches; 28 sliding layers stay local): crossings per decoded token = 7, bytes per crossing per sequence = 8 heads × (512 + 2) × 4 B = 16.4 KiB, KV bytes read per node per token = its shard. Ref: flash-decoding (Dao et al. 2023); ring/sequence attention (Liu et al. 2023) for the placement; [crossover note §5](e2b-crossover-2026-09-16.md). Check: the plan printed at `start()` shows per node exactly its positions' KV bytes and 7 `reduce` calls per token with 16.4 KiB parts; no `allGather` of K or V anywhere; `T_mesh(B, L) − T_w` in the trace equals `B·L·14 KiB/Σ BW + 7·c` within 15%. Not it: head split on an MQA model (every node would read the whole KV); replicating KV; gathering K/V to the leader.
 
-### E — engine integration and measurement
-
-**E1. The serving step calls Mesh at the Megatron points.** in `metal-microbench`, one file ≤ 300 lines: a Gemma-4 layer where `o_proj` and `down_proj` partials go `call(dot) → reduceScatter(using: add) → call(norm+residual) → allGather`; every other op is `call` on the rank's head/column range with existing kernels bound as `TensorFunction.metal`. Ref: Megatron f/g; Korthikanti 2022; MLX `shard_linear`; Pallas collective matmul (reuse the local kernel). Check: the realized plan for one layer has exactly two collective points (count them in the printed plan); no kernel arithmetic rewritten (kernel files unchanged); solo and n-node are the same binary.
-
-**E2. Measurement.** Pair and solo rates are reported side by side (Goal A period, Goal B decoded tokens/s). Capability sums, bounds and Karp–Flatt are context, never a verdict.
-
-**E3. Depthwise chain at prefill shapes.** Backlog: an optional prefill measurement through E1's segments. Decode TP on the pair is Goal B.
-
-**E4. Rate-proportional placement is the caller's contract.** Signature: the placement file is generated from measured sustained rates (`report.py --rate` values or `bounds()` capability), giving each rank a share of FFN columns and attention heads ≈ `rate_i / Σ rate` (rounded to the kernel groupings: columns % 4, heads % 8 full / % 2 sliding, whole layers where a head count cannot split — E2B full layers stay on the leader); rows split the same way for the residual sections. Ref: HexGen (asymmetric TP shards), Amdahl doc "capability 27 + capability 23", the 09-08 result (11,904/3,456 neurons M5/M4 = 0.78 share gave 1.28× on the 4096-row FFN). Check: `tools/mesh/placement.py --rate m5=27 --rate m4=23 --ratio 0.13 --model E2B` writes the files and prints the resulting shares.
-
-**E5. Prefill through the same binding.** Signature: the E3 graph is realized a second time with `rows = qLen × B` (prompt rows) and the same `bindMeshLayer`, so a prefill NFE runs the FFN/attention TP at the row count where it pays; the prompt broadcast (E3 part 2) feeds it; decode continues on the decode graph. Check: `LM_MESH_PREFILL=1` routes prefill through Mesh; TTFT on a 2048-token prompt is the measured T(2) vs the solo TTFT; the same binary.
-
-**E7. The decode crossover, measured.** Not a requirement (countermanded 2026-09-22). Signature: `report.py --compare --decode --context L --batch B` over the public endpoint, solo on the M5 Max vs the mesh with F11 placement, at `L ∈ {4k, 16k, 64k, 128k} × B ∈ {1, 8}` (prompts of exactly `L` uncached tokens, ≥ 256 decoded tokens timed after the first, V ≥ 2 streams in flight for the mesh); prints, per `(B, L)`: `T_solo`, `T_mesh`, `c` (per-crossing cost from the trace, wire included), the predicted crossover `B·L×(c) = 7c / (14 KiB·(1/BW_leader − 1/Σ BW))`, and `S = T_solo/T_mesh`. Ref: [crossover note](e2b-crossover-2026-09-16.md) §5 table (`c` = 0.28 ms → B·L× = 272k; 25 µs → 24k; 5 µs → 4.9k). Check (I24): solo at reference class or refused; `S(B, L) ≥ 1` at every `(B, L)` with `B·L ≥ B·L×(c)`, and `S(B, L)` within 15% of the model `T_solo/(T_w + B·L·14 KiB/Σ BW + 7c)` everywhere (a mismatch is a hidden mechanism, not noise); `c ≤ 15 µs` — the wire (8–12 µs measured one-way on this stack for ≤ 32 KiB) plus ≤ 2 µs of ours: ≤ 0.5 µs last-GPU-store→spinner, ≤ 200 ns store→doorbell, ≤ 100 ns CQ→stamp, ≤ 1 µs stamp→resident kernel ([budget](e2b-crossover-2026-09-16.md#4-how-fast-a-transaction-should-be--the-floor-stage-by-stage)); a run that clears the crossover with a larger `c` is an H7/F7 failure. Not it: a run at one `(B, L)` chosen past the crossover; a solo baseline from a slow run; per-layer TP decode at small B on an asymmetric pair (I21).
-
-**E1d. The decode layer has one push.** Signature: `bindMeshDecodeLayer(mesh, w, layer:, placement:)` in `metal-microbench`, replacing E1's two-collective layer on the decode path: every rank runs the full attention (all heads, full KV — duplicated) or its head slice, per the caller's placement, the norms, the residual adds and the PLE path in full; runs gate/up/down on its own FFN column slice (`columns_i ∝ BW_i`, E4); its `down_proj` output is a codomain-shaped partial (Definition) which it `send`s directly to every other rank (`3 KiB × B` per push); each rank sums the arriving partials into its residual with a supplied `add` as they land (any order) and proceeds. The lm_head is split by vocabulary tile the same way, each rank pushing its tile's logits (or its local top-k under the sampler's rule) in the same single hop. No `reduceScatter` or `allGather` on the decode path; a head-split attention placement (Goal B's heads [7,1]) adds its one o_proj collective per attention block. Optionally, a rank's step is one resident command buffer (X9/F5) whose consuming kernels spin on the presence stamps of the `N−1` incoming partials. Ref: I25; Megatron FFN column split; MLX `shard_linear` (the local kernel is reused unchanged); NCCL LL (flag co-located with data). Check: the printed plan shows one push per projection pair per layer plus the vocabulary push, each ≤ 120 KiB; attention and norm kernels are the existing ones, run on every rank. Not it: E1's `reduceScatter → norm → allGather` on the decode path; a hop added to avoid running a norm twice.
-
-**E8. Net improvement on the pair at B = 1 decode = Goal B.** Pair decoded tokens/s ≥ 1.035× solo at heads [7,1] and FFN 7:1, with the solo measured next to the pair. The former `S ≥ 1.10`, 0.44 placement, 0.5 ms overhead, 200 µs idle-gap, reference-class and 256-token clauses are countermanded (2026-09-22).
-
 ### P — packaging
 
-**P1. Importable and run.** `import Mesh` from a Swift target outside the repo builds with `make -C rdma all` and no environment variables; `bin/mesh-bridge.sh start` is the only prerequisite; the Core ML chain runs on the pair at ABI 43. Ref: MLX `mx.distributed.init()`. Check: a fresh clone on the Mini builds and runs the example by the README command.
-
-**P3. Stable identity, fixed path, one listener.** `rdma/Makefile`: `codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge` (default identity `Mesh Bridge`, created once per node by `bin/mesh-codesign-identity.sh` in the System keychain; ad-hoc only as a fallback that the check flags); `make -C rdma install-bridge` installs to `$(MESH_PREFIX)/bin` (`/usr/local/mesh/bin`) in place; `bin/mesh-bridge.sh` launches only from there and refuses worktree/build/scratch paths; `install.sh` adds the installed path to the Application Firewall once. Ref: Apple code signing (designated requirement stays constant across builds for a persistent identity); `socketfilterfw`. Check: I20 on both nodes; a rebuild + `mesh-bridge.sh start` produces no firewall or Local Network dialog and no new `socketfilterfw --listapps` entry.
+**P3. Stable identity, fixed path, one listener.** `rdma/Makefile`: `codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge` (default identity `Mesh Bridge`, created once per node by `bin/mesh-codesign-identity.sh` in the System keychain; ad-hoc only as a fallback that the check flags); `install.sh` installs `mesh-flow` to `/usr/local/mesh/bin` when it differs, and launchd's `io.mesh.bridge` runs it from there. Ref: Apple code signing (designated requirement stays constant across builds for a persistent identity); `socketfilterfw`. Check: I20 on every node; an update produces no firewall or Local Network dialog and no new `socketfilterfw --listapps` entry.
 
 **P2. Pushed.** `git log @{u}..HEAD` empty on both repositories at the end of every turn.
 
-## 5. Not part of the library
+## 4. Not part of the library
 
 
 - An expression compiler, kernel zoo, scalar DSL, or any numerics inside mesh (I7).

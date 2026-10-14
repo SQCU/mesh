@@ -82,39 +82,41 @@ bridge (no bridges or probes per call).
 
 ## Requirements
 
-Each with its source and its status as of 2026-10-14, read from source (no runtime: the operator's prohibition of
-2026-10-14): **built** (in source, not yet run), **met** (on evidence named), **partial**, **unmet**, **unreachable**
-(no live test can reach it until a condition exists).
+Each with its source and the mechanism that meets it at the end state (design/bridge-and-ipc.md, rdma/mesh.h,
+rdma/mesh-plan.h, rdma/nccl.h); **open** where none is decided. Which of them source holds, and what has run, is
+git's and output_data's to say (AGENTS.md: assignments expire), not this table's.
 
-| id | requirement | source | status |
+| id | requirement | source | mechanism |
 |---|---|---|---|
-| Q1 | A drop of a direct link costs the executions on it, which fail as values; the next pairs on the link again | mandates 1, 11, 13 | built: a loss fails each flow on the link (`#loss`), the port pairs again a pause later (`#pause`) |
-| Q2 | A long drop costs no more than the work the remaining members could not do | mandates 1, 4 | partial: survivors continue alone on the map the bridges record |
-| Q3 | Recovery between executions only; none inside one | mandates 2, 3, 13 | built: no suspension or resumption exists |
-| Q4 | A link down when a program starts fails the program at once; the link pairs again on its own | mandates 1, 4 | built: a flow on an unpaired port fails ENETDOWN (`#first`) |
-| Q5 | Peer identity independent of the link: the node, its bridge's boot, and the pairing's index | deliverables R1 | built: the hello carries node and boot; the link table counts pairings |
-| Q6 | Loss is observed at the completion queue and the control socket, never by a data-path timer | deliverables R2 | partial: the control socket's keepalive is a timer on the control path, not the data path |
-| Q7 | A bounded loop pairs again while the bridge is up, whether or not a client is attached | deliverables R3, mandate 14 | built: every port's turn, a pause apart, for the bridge's life (`#pause`); no neighbour warm-up |
-| Q8 | A realized program survives link loss without being realized again | deliverables R4 | dropped by mandate 13: the execution fails and is run again |
-| Q9 | A port move needs no configuration | deliverables R5, mandate 11 | built: the bridge finds each port's peer itself (design/bridge-and-ipc.md#ports) |
-| Q10 | A partition of more than two nodes is a topology change, not an error storm | deliverables R6 | unreachable: two nodes on hardware |
-| Q11 | A cable pull and replug, three times, with time to repair and to the first completed execution recorded | deliverables R7 | unmet: not run |
-| Q12 | Recovery costs nothing on the healthy path | mandate 7 | built: the data path reads no recovery state |
-| Q13 | No per-transfer TCP; TCP at pairing only | mandate 8 | built: the control socket carries a program's pairing messages and nothing per transfer |
-| Q14 | Every blocking call bounded; no unbounded completion-queue poll | RDMA-RULES.md, mandate 12 | built: the bridge's loop waits 250 ms at most; pairing has its windows; sends wait 1 s; a teardown that fails keeps its handles for the next turn; a client's start waits at most the peer and pairing windows and a pause (`MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS`, ETIMEDOUT) and ends at once where the bridge is gone (ESRCH). The one exception: a kernel verbs call (opening a device, reading the device list, querying a port, making or destroying a queue pair, registering memory) cannot be bounded from user space, since it can sleep uninterruptibly in the driver (RDMA-RULES.md): the bridge makes them only to open, find, pair and tear down a port's device, never per transfer, and one blocks only its own port's thread; the event loop, the other ports and clients' starts go on (design/bridge-and-ipc.md#flows) |
-| Q15 | Port loss retires all device state; an ordinary reconnection keeps context, PD and registrations | RDMA-KERNEL-RECOVERY.md | built: a link off or a detached interface retires the device, and no hello or connection reaches the port (`port_at`) until its turn has retired the device and opened it again |
-| Q16 | No cross-queue GPU spin; every spun-on word in a canceller's set | memory no_cross_queue_gpu_spins | met: a failed flow cancels its client's words on the link |
-| Q19 | A link that answers its peer's hello but not RDMA does not flap at call level | mandate 1 | partial: such a link fails its executions' pairing (ETIMEDOUT within the pairing window), or the library's silent bound fails a paired one's; the bridge exchanges nothing of its own over RDMA to tell it |
-| Q20 | Algorithms total over every membership and topology (ring, star, relays, uncabled pairs) | mandate 6 | unreachable on hardware (two nodes) |
+| Q1 | A drop of a direct link costs the executions on it, which fail as values; the next pairs on the link again | mandates 1, 11, 13 | a loss fails each flow on the link (`#loss`); the port pairs again a pause later (`#pause`) |
+| Q2 | A long drop costs no more than the work the remaining members could not do | mandates 1, 4 | open: the survivors' next executions run on the map without the lost node |
+| Q3 | Recovery between executions only; none inside one | mandates 2, 3, 13 | a failed flow is never resumed; the next program is a new flow on the map as it is then (design/bridge-and-ipc.md#flows) |
+| Q4 | A link down when a program starts fails the program at once; the link pairs again on its own | mandates 1, 4 | `#first` (ENETDOWN, EHOSTUNREACH); the port's turns (`#pause`) |
+| Q5 | Peer identity independent of the link: the node, its bridge's boot, and the pairing's index | mandate 3 | the hello carries node and boot; the port table counts pairings (design/bridge-and-ipc.md#ports) |
+| Q6 | Loss is observed at the completion queue and the control socket, never by a data-path timer | mandates 3, 8 | open: the control socket's keepalive is a timer on the control path, and the library's silent bound (`#detection`) one on landed positions |
+| Q7 | A bounded loop pairs again while the bridge is up, whether or not a client is attached | mandates 3, 14 | every port's turn, a pause apart, for the bridge's life (`#pause`); no neighbour warm-up |
+| Q8 | A realized program survives link loss without being realized again | mandate 3 | dropped by mandate 13: the execution fails and is run again |
+| Q9 | A port move needs no configuration | mandates 3, 5, 11 | the bridge finds each port's peer itself (design/bridge-and-ipc.md#ports) |
+| Q10 | A partition of more than two nodes is a topology change, not an error storm | mandates 1, 6 | each side's executions across the cut fail once, naming the node (`#loss`); each side's next runs on its map (`#the-drivers-side`) |
+| Q11 | A cable pull and replug, three times, with time to repair and to the first completed execution recorded | mandates 1, 3, 10 | a measurement on hardware, its record in output_data |
+| Q12 | Recovery costs nothing on the healthy path | mandate 7 | the data path reads no recovery state |
+| Q13 | No per-transfer TCP; TCP at pairing only | mandate 8 | the control socket carries a program's pairing messages and the map's records, nothing per transfer |
+| Q14 | Every blocking call bounded; no unbounded completion-queue poll | RDMA-RULES.md, mandate 12 | the bridge's loop waits 250 ms at most; pairing has its windows; sends wait 1 s; a teardown that fails keeps its handles for the next turn; a client's start waits at most the peer and pairing windows and a pause (`MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS`, ETIMEDOUT) and ends at once where the bridge is gone (ESRCH). The one exception: a kernel verbs call (opening a device, reading the device list, querying a port, making or destroying a queue pair, registering memory) cannot be bounded from user space, since it can sleep uninterruptibly in the driver (RDMA-RULES.md): the bridge makes them only to open, find, pair and tear down a port's device, never per transfer, each on that port's own thread, so one blocks only that port; the event loop, the other ports and clients' starts go on (design/bridge-and-ipc.md#flows) |
+| Q15 | Port loss retires all device state; an ordinary reconnection keeps context, PD and registrations | RDMA-KERNEL-RECOVERY.md | a link off or a detached interface retires the device, and no hello or connection reaches the port until its turn has retired the device and opened it again (design/bridge-and-ipc.md#ports) |
+| Q16 | No cross-queue GPU spin; every spun-on word in a canceller's set | memory no_cross_queue_gpu_spins | a failed flow cancels its client's words toward the node (prepared-machine.md M12) |
+| Q19 | A link that answers its peer's hello but not RDMA does not flap at call level | mandate 1 | open: such a link fails its executions' pairing (ETIMEDOUT within the pairing window), or the library's silent bound fails a paired one's (`#detection`); the bridge exchanges nothing of its own over RDMA to tell it |
+| Q20 | Algorithms total over every membership and topology (ring, star, relays, uncabled pairs) | mandate 6 | the map is every algorithm's operand (mesh-plan.h `struct mesh_link_map`), and members its links leave apart are joined along routes the bridges forward (`mesh_map`) |
 
-## The module as built
+## The module
 
 ### detection
 
 A loss is a link-off or detach of the port's own interface (M24), the control socket ending (a farewell before its end
 makes it an orderly one), its keepalive failing, or a send on it failing. A failed completion, post or poll is its
 flow's alone. The control socket's keepalive (1 s idle, 1 s interval, 2 probes) tells a side whose own interface stays
-up (its peer's went down, its peer's host died): UC queue pairs report nothing.
+up (its peer's went down, its peer's host died): UC queue pairs report nothing. A destination with positions pending
+that lands none for `MESH_SILENT_NS` (mesh.h, 10 s) is cancelled (`mesh_cancel`), ending every wait on it: the
+library's one bound, its session's progress thread the watcher (rdma/nccl.h).
 
 ### loss
 
@@ -168,16 +170,13 @@ recovery with its duration and count, goes to `fabric.log` and the unified log, 
    merges leave a count nonzero when a dispatch is cut, and a later run of the same program merges wrongly without
    failing. No path here runs a program again after a cut: a failed execution's process prepares its programs again,
    their counts starting at zero.
-4. **Nothing here has run.** The resident bridge (2026-10-14) is source only, under the operator's prohibition of
-   runtime until the acceptance checklist is attained (metal-microbench docs/acceptance-20261014.md).
 
 ## Failures by kind and topology
 
-Topologies: **P** the TB5 pair; **R** a ring or complete mesh of 3-6 nodes (Studios: four M5 Ultra arriving, cabling
-open); **U** uncabled pairs routed through other nodes' bridges; **H** heterogeneous links (TB5, TB4, Ethernet); **Q** links of
+Topologies: **P** the TB5 pair; **R** a ring or complete mesh of 3-6 nodes; **U** uncabled pairs routed through other nodes' bridges; **H** heterogeneous links (TB5, TB4, Ethernet); **Q** links of
 several queue pairs (the torch/NCCL sessions: four).
 
-| # | failure | as built |
+| # | failure | what happens |
 |---|---|---|
 | F1 | a direct link down mid-call | the executions on it fail; the link pairs again a pause after it is back |
 | F3 | a link down when a program starts | the program fails at once (ENETDOWN) |
@@ -196,4 +195,4 @@ several queue pairs (the torch/NCCL sessions: four).
 ## The review this asks for
 
 1. The device-state and pause rules (Risks 1-2) checked with a pull and replug on hardware, once runtime is allowed.
-2. Q2, Q6, Q10, Q11, Q19 and Q20 decided and built or dropped; F1-F15 run where they can be.
+2. Q2, Q6 and Q19 decided, or dropped; Q11 and F1-F15 run where they can be.
