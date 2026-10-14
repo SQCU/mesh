@@ -148,63 +148,19 @@ kernel void mesh_draft_conv_norm_add(device const half *y [[buffer(0)]], device 
     for (uint c = t; c < D; c += threads) x[r * D + c] = half((float(x[r * D + c]) + vals[c] * inv * float(gamma[c])) * ls);
 }
 
-// Each slot's C candidates: the C greatest softcapped base scores of its row (V of a row of `stride`; the threshold by
-// bisection over the row's range, then the positions at or above it in index order), into cand (index into the draft
-// vocabulary) and score.
+// Each slot's C candidates: the C greatest softcapped base scores of its row (V of a row of `stride`) by argmax.metal
+// mesh_top, in ascending index order, into cand (index into the draft vocabulary) and score; an absent one (0, -inf).
 template <uint V, uint C, uint T>
 kernel void mesh_draft_candidates(device const half *base [[buffer(0)]], device uint *cand [[buffer(1)]], device float *score [[buffer(2)]],
                                   constant float &cap [[buffer(3)]], constant uint &stride [[buffer(4)]], uint k [[threadgroup_position_in_grid]],
-                                  uint t [[thread_index_in_threadgroup]],
-                                  uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-    constexpr uint N = V / T;
-    threadgroup float part[T / 32];
-    threadgroup uint counts[T / 32];
-    threadgroup uint offsets[T / 32 + 1];
-    float v[N];
-    float top = -3.0e38f, low = 3.0e38f;
-    for (uint u = 0; u < N; u++) {
-        const float z = float(base[ulong(k) * stride + u * T + t]);
-        v[u] = streamed_capped(z, cap);
-        top = max(top, v[u]);
-        low = min(low, v[u]);
-    }
-    top = simd_max(top); low = simd_min(low);
-    if (lane == 0) { part[sg] = top; counts[sg] = as_type<uint>(low); }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    top = part[0]; low = as_type<float>(counts[0]);
-    for (uint u = 1; u < T / 32; u++) { top = max(top, part[u]); low = min(low, as_type<float>(counts[u])); }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    float lo = low, hi = top;
-    for (uint it = 0; it < 16; it++) {
-        const float mid = 0.5f * (lo + hi);
-        uint n = 0;
-        for (uint u = 0; u < N; u++) n += v[u] >= mid;
-        n = simd_sum(n);
-        if (lane == 0) counts[sg] = n;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        uint all = 0;
-        for (uint u = 0; u < T / 32; u++) all += counts[u];
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (all >= C) lo = mid; else hi = mid;
-    }
-    uint n = 0;
-    for (uint u = 0; u < N; u++) n += v[u] >= lo;
-    const uint before = simd_prefix_exclusive_sum(n), within = simd_sum(n);
-    if (lane == 0) counts[sg] = within;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (t == 0) {
-        uint run = 0;
-        for (uint u = 0; u < T / 32; u++) { offsets[u] = run; run += counts[u]; }
-        offsets[T / 32] = run;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    uint at = offsets[sg] + before;
-    for (uint u = 0; u < N; u++)
-        if (v[u] >= lo) {
-            if (at < C) { cand[k * C + at] = u * T + t; score[k * C + at] = v[u]; }
-            at++;
-        }
-    for (uint e = offsets[T / 32] + t; e < C; e += T) { cand[k * C + e] = 0; score[k * C + e] = -3.0e38f; }
+                                  uint t [[thread_index_in_threadgroup]]) {
+    threadgroup uint w[260 + T / 32];
+    const float limit = cap;
+    device const half *row = base + ulong(k) * stride;
+    device uint *ci = cand + k * C;
+    device float *si = score + k * C;
+    auto z = [&](uint c) { return streamed_capped(float(row[c]), limit); };
+    mesh_top<T>(z, 0, V, C, t, w, [&](uint i, uint c) { ci[i] = c == 0xffffffffu ? 0u : c; si[i] = c == 0xffffffffu ? -INFINITY : z(c); });
 }
 
 // The predecessor projection of the anchor: pa = A e(anchor) (rank RK, the target's table unscaled), RK / 8 threadgroups of
