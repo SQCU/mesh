@@ -260,9 +260,10 @@ def rows_class(rows):
 
 
 def candidates(s, rows, op='product', tables=False):
-    """The admissible instances of slice units `s` at `rows` input rows: rows <= 4 on the ALUs (R the rows' class)
-    or the cooperative tensor (M 8); 8 or 16 rows the cooperative tensor (M 8 or 16; the ALUs at eight rows, read on the
-    small slices, took 1.4 to 2.6 times the coop's time: metal-microbench docs/kernels.md#stacked-products); past 16 the
+    """The admissible instances of slice units `s` at `rows` input rows: rows <= 4 on the ALUs (R the rows' class); 8 or
+    16 rows the cooperative tensor (M 8 or 16), the ceiling round's instance family (the coop's M 8 work, read at eight rows,
+    at or above the ALUs' four-row time on every served slice of the Mini and all but one of the M5's, and the ALUs at eight
+    rows on the small slices 1.4 to 2.6 times the coop's: metal-microbench docs/kernels.md#stacked-products); past 16 the
     panel (M 64, 128);
     shares of 8 to 48 tiles, simdgroups 2, 4 or 8 a band (the head's four bands of two too), one or two tiles in
     flight, a 1-bit tile by tables where the head's input writes them, either loads (LOADS: fragment_load's); `op` couple:
@@ -286,7 +287,7 @@ def candidates(s, rows, op='product', tables=False):
                 for F in (1, 2):
                     for lut in ((0, 1) if tables else (0,)):
                         out += [dict(kernel='alu', R=R, SK=sk, BANDS=bands, J=J, F=F, LUT=lut, LOADS=loads) for loads in (0, 1)]
-    if rows >= 2:
+    if rows > 4:
         M = 8 if rows <= 8 else 16
         for sk, bands in ((2, 2), (1, 4), (1, 1)):
             if (s['outputs'] // 32) % bands == 0:
