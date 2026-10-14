@@ -38,11 +38,12 @@ pgrep -qf "dns-sd -R" || {
   echo "[$(ts)] DRIFT ntp off"; systemsetup -setusingnetworktime on >/dev/null 2>&1; drift=1; }
 _lan=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
 _lanok=0; [ -n "$_lan" ] && [ -n "$(ipconfig getifaddr "$_lan" 2>/dev/null)" ] && _lanok=1
-_fab=0
+_fab=0 _rdma=0
 for _d in $(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{print $1}'); do
-  [ "$(ifconfig "${_d#rdma_}" 2>/dev/null | awk '/status:/{print $2}')" = active ] && _fab=1
+  [ "$(ifconfig "${_d#rdma_}" 2>/dev/null | awk '/status:/{print $2}')" = active ] || continue
+  _fab=1; grep -q "^port=${_d#rdma_} .* rdma_peer=present" /var/run/mesh-fabric 2>/dev/null && _rdma=1
 done
-[ $((_lanok+_fab)) -lt 2 ] && { echo "[$(ts)] DEGRADED planes=$((_lanok+_fab)) lan=$_lanok fabric_link=$_fab rdma_state=unmeasured"; drift=1; }
+[ $((_lanok+_rdma)) -lt 2 ] && { echo "[$(ts)] DEGRADED planes=$((_lanok+_rdma)) lan=$_lanok fabric_link=$_fab rdma_peer=$_rdma"; drift=1; }
 [ -x /usr/local/mesh/bin/mesh-networks.sh ] && /usr/local/mesh/bin/mesh-networks.sh
 [ -x /usr/local/mesh/bin/mesh-fabric-init.sh ] && /usr/local/mesh/bin/mesh-fabric-init.sh
 pgrep -qf /usr/local/mesh/bin/babeld || {

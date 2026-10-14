@@ -386,7 +386,7 @@ the node's uplink.
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
 | `bin/mesh-nodeinfo.sh` | socket-activated node identity + topology responder on 8099. |
 | `bin/mesh-run.sh` | run a command on one node, `all`, or `others`. Installed as `mesh-run`. |
-| `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding. Idempotent; run at boot and every keeper pass. |
+| `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`, and bounce a port whose cable link is up with no RDMA peer (design/recovery.md, port). Idempotent; run at boot and every keeper pass. |
 | `bin/mesh-rdma-init.sh` | boot-time fabric verification. Verify-only by necessity. |
 | `keys/authorized_keys` | the pubkey roster every node trusts. Public keys only. |
 | `templates/` | LaunchDaemon template for workloads. Boot-time, KeepAlive, no login needed. |
@@ -465,8 +465,10 @@ Clients receive its current output with `sample_status` and `sample_updated`, ev
 while sampling is incomplete. Requests never start or kill device probes.
 Each node reports its name, hardware, macOS, RDMA enablement and SDK state, every
 fabric port's IP carrier, link-local address and observed neighbor, and its routes.
-Discovery uses `ifconfig` and `ndp` rather than opening verbs devices. Per-port
-`rdma_state=unmeasured` distinguishes that observation from a verbs port measurement.
+Discovery uses `ifconfig`, `ndp` and the IORegistry rather than opening verbs devices. Per-port
+`rdma_peer=present|absent` is whether the registry holds an `AppleThunderboltRDMAPeerInterface` for the port's
+RDMA interface (its `RID`), as the fabric init last read it; it is not a verbs port measurement, though on every
+port read so far it was present exactly when the verbs port was `PORT_ACTIVE`.
 
 That last part is what makes the topology discoverable. Ask each node what it can see
 and you can reconstruct the whole graph — no central registry, no multicast, no

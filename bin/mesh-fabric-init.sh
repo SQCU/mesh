@@ -16,6 +16,32 @@ for br in $(ifconfig -l | tr ' ' '\n' | grep '^bridge'); do
   for m in $mem; do ifconfig "$br" deletem "$m" >/dev/null 2>&1; done
   ifconfig "$br" destroy >/dev/null 2>&1; drift=1
 done
+now=$(date +%s)
+rids=$(ioreg -l -w0 -r -c AppleThunderboltRDMAInterface 2>/dev/null | awk '/\+-o rdma_/{n=substr($2,6)} /"RID" =/{print n, $NF}')
+peers=" $(ioreg -l -w0 -r -c AppleThunderboltRDMAPeerInterface 2>/dev/null | awk '/"RID" =/{printf "%s ", $NF}')"
+: > /var/run/mesh-fabric.tmp
+for p in $ports; do
+  f=/var/run/mesh-link.$p
+  link=$(ifconfig "$p" 2>/dev/null | awk '/status:/{print $2}')
+  rid=$(echo "$rids" | awk -v p="$p" '$1==p{print $2}')
+  case "$peers" in *" ${rid:-none} "*) peer=present ;; *) peer=absent ;; esac
+  echo "port=$p link=${link:-unknown} rdma_peer=$peer" >> /var/run/mesh-fabric.tmp
+  if [ "$link" != active ] || [ "$peer" = present ]; then
+    [ -f "$f" ] && { read -r t0 n tb < "$f"
+      [ "$peer" = present ] && { echo "[$(ts)] RECOVERED $p rdma_peer=present after $((now - ${t0:-$now})) s, ${n:-0} bounces"
+        logger -p user.warning -t io.mesh.fabric "$p RDMA peer present again after $((now - ${t0:-$now})) s, ${n:-0} interface bounces"; }
+      rm -f "$f"; }
+    continue
+  fi
+  [ -f "$f" ] || { echo "$now 0 0" > "$f"; echo "[$(ts)] DOWN $p link=active rdma_peer=absent"; drift=1; continue; }
+  read -r t0 n tb < "$f"; t0=${t0:-$now} n=${n:-0} tb=${tb:-0}
+  w=$n; [ "$w" -gt 5 ] && w=5; wait=$((60 << w)); [ "$wait" -gt 1800 ] && wait=1800
+  [ $((now - t0)) -ge 60 ] && [ $((now - tb)) -ge "$wait" ] || continue
+  n=$((n + 1)); echo "$t0 $n $now" > "$f"
+  echo "[$(ts)] BOUNCE $p ($n) link=active rdma_peer=absent for $((now - t0)) s"
+  logger -p user.warning -t io.mesh.fabric "$p cable link up but no RDMA peer for $((now - t0)) s: interface bounced ($n)"
+  ifconfig "$p" down; sleep 2; ifconfig "$p" up; drift=1
+done
 for p in $ports; do
   mac=$(ifconfig "$p" 2>/dev/null | awk '/ether/{print $2}')
   [ -n "$mac" ] || continue
@@ -29,5 +55,6 @@ done
 [ "$(sysctl -n net.inet6.ip6.forwarding 2>/dev/null)" = 1 ] || {
   echo "[$(ts)] DRIFT ip6 forwarding off"
   sysctl -w net.inet6.ip6.forwarding=1 >/dev/null 2>&1; drift=1; }
+mv -f /var/run/mesh-fabric.tmp /var/run/mesh-fabric; chmod 644 /var/run/mesh-fabric
 [ "$drift" -eq 0 ] || echo "[$(ts)] fabric converged"
 exit 0

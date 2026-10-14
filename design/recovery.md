@@ -23,6 +23,7 @@ Recovery is everything between a loss and the mesh doing its work again, at ever
 | rank | the silent-link detector, cancelling a link's waits, a failed window ending the call | metal-microbench `mesh_rank.m` `await_window` |
 | driver (calls) | revoke, agree, shrink, extend; probing failed links; preparing ahead | metal-microbench `tools/mesh/grid.py`, `docs/elastic.md` |
 | collectives library (sessions) | `MESH_REMOTE_BOUND`, a session retired and opened again | `rdma/nccl-mesh.c`, `rdma/NCCL.md` |
+| port (physical) | a fabric port whose cable link is up with no RDMA peer: bounced with backoff, logged | `bin/mesh-fabric-init.sh` (every keeper pass) |
 
 ## Mandates
 
@@ -58,6 +59,9 @@ sources; the ones that bear on what is built are first.
    that the sent memory has been sent (even though the rdma api itself gives you this feedback at the driver level)".
 9. **Measurement** (mb docs/measurement.md): "token equality is not important nor is anything like logit equality. we
    measure divergences"; no investigation above 10 s of intensive workload unless asked.
+10. **Recovery is required** (2026-10-14, after the M5's RDMA port stayed down for hours under a live cable link): "connection
+   recovery on spotty hardware (rdma over thunderbolt is NOT trustworthy at the physical substrate level) is required,
+   rather than optional".
 
 **The tension, unresolved.** Mandates 2 and 3 place recovery between calls or between NFEs, with no guarantee inside
 one; mandate 1 asks that segmentation never affect aggregate performance. What is built resumes a link *inside* an
@@ -158,6 +162,17 @@ A pairing again (`#suspension`) keeps its window from its start.
 
 A failed link is probed every 2 s (`Probes`: the pair's interfaces pinged) and readmitted once it answers, which
 revokes the call running without it. A failed call also sends the Balancer's parts back (`rates.reject`).
+
+### port
+
+A Thunderbolt port can come back from a peer's reboot or a link flap with its cable link up and its RDMA port down
+(PORT_DOWN on the M5 for hours on 2026-09-23 and 2026-10-14; a reseat fixed the first). Every keeper pass, the fabric
+init reads each port's link and whether the IORegistry holds an `AppleThunderboltRDMAPeerInterface` for it, never
+opening a verbs context (RDMA-KERNEL-RECOVERY.md). A port with its link up and no peer for 60 s is bounced (interface
+down, 2 s, up), again after 2, 4, 8 and 16 min and then every 30 min, until the peer appears; each bounce, and the
+recovery with its duration and count, goes to `fabric.log` and the unified log, and `mesh-health` warns while it lasts.
+A bounce takes the physical link down, so both ends train again. Which bounce clears which state is read from those
+logs; that the registry's peer goes absent in the stuck state is the reading the next incident settles.
 
 ## Risks and defects found in review so far
 

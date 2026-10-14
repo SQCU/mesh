@@ -29,7 +29,8 @@ for p in $ports; do
   st=$(printf '%s\n' "$iface" | awk '/status:/{print $2}')
   address=$(printf '%s\n' "$iface" | awk '$1=="inet6" && $2 ~ /^fe80:/{print $2;exit}')
   peer=$(ndp -an 2>/dev/null | awk -v i="$p" -v a="$address" '$3==i && $1!=a && $1 !~ /ff02|^$/ && $2 != "(incomplete)"{print $1;exit}')
-  printf 'port=%s link=%s address=%s peer=%s rdma_state=unmeasured\n' "$p" "${st:-unknown}" "${address:-none}" "${peer:-none}"
+  rp=$(awk -v p="port=$p" '$1==p{sub(/rdma_peer=/,"",$3); print $3}' /var/run/mesh-fabric 2>/dev/null)
+  printf 'port=%s link=%s address=%s peer=%s rdma_peer=%s\n' "$p" "${st:-unknown}" "${address:-none}" "${peer:-none}" "${rp:-unmeasured}"
 done
 netstat -rn -f inet6 2>/dev/null | awk -v p="$PREFIX" '$1 ~ "^"p":" && $NF!="lo0"{split($1,f,"%"); print "route="f[1]" via="$NF}' | sort -u
 printf 'end\n'

@@ -44,6 +44,10 @@ fi
   [ "$DAYS" != none ] && [ "${DAYS%.*}" -lt 7 ] && echo "warn=disk: free space falling ${TREND} GiB a day, the floor in ${DAYS} days at this rate"
   [ "$STATE" != ok ] && [ -n "$HOLDERS" ] && echo "warn=idle: $HOLDERS held over an hour; while a process declares the user active or keeps the display on, dasd runs no idle maintenance and aned's SIP-protected model cache is never collected (README.md, power)"
   [ "$STATE" != ok ] && [ "$GCLAST" = none ] && [ "${GCREFUSED:-0}" -gt 0 ] && echo "warn=idle: dasd refused aned's cache GC $GCREFUSED times in 26 h and it has not completed there; its cache only shrinks when the node is idle (pmset -g assertions)"
+  for f in /var/run/mesh-link.*; do
+    [ -f "$f" ] || continue; read -r t0 n tb < "$f"
+    echo "warn=link: ${f#/var/run/mesh-link.} cable link up but no RDMA peer in the IORegistry, for $((NOW - ${t0:-$NOW})) s; the fabric init has bounced the interface ${n:-0} times, with backoff to 30 min (fabric.log)"
+  done
 } > "$OUT.tmp"
 mv -f "$OUT.tmp" "$OUT"
 chmod 644 "$OUT"

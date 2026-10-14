@@ -17,7 +17,7 @@ for _d in $(ibv_devices 2>/dev/null | awk 'NR>2 && $1!=""{print $1}'); do
   [ "$(ifconfig "${_d#rdma_}" 2>/dev/null | awk '/status:/{print $2}')" = active ] && _fab=1
 done
 printf "  wifi/lan     : %s\n" "$([ $_lanok = 1 ] && echo "up via $_lan" || echo DOWN)"
-printf "  fabric link  : %s (ifconfig; RDMA state unmeasured)\n" "$([ $_fab = 1 ] && echo "up" || echo DOWN)"
+printf "  fabric link  : %s (ifconfig; RDMA peers from the IORegistry in the RDMA section)\n" "$([ $_fab = 1 ] && echo "up" || echo DOWN)"
 if [ $((_lanok+_fab)) -lt 2 ]; then
   printf "  \033[31mDEGRADED: %s of 2 planes. One more failure strands this node.\033[0m\n" "$((_lanok+_fab))"
   printf "  \033[31mRepair before running anything that can disrupt the remaining plane.\033[0m\n"
@@ -25,8 +25,10 @@ else printf "  redundant: 2 of 2\n"; fi
 
 b "RDMA"; echo "  rdma_ctl: $(/usr/bin/rdma_ctl status 2>&1)   nvram: $(nvram rdma-enable 2>/dev/null | awk '{print $2}')"
 for d in $(/usr/bin/ibv_devices 2>/dev/null | awk 'NR>2&&$1!=""{print $1}'); do
-  printf '  %-10s link=%s rdma_state=unmeasured\n' "$d" \
-    "$(ifconfig "${d#rdma_}" 2>/dev/null | awk '/status:/{print $2}')"
+  printf '  %-10s link=%s rdma_peer=%s%s\n' "$d" \
+    "$(ifconfig "${d#rdma_}" 2>/dev/null | awk '/status:/{print $2}')" \
+    "$(awk -v p="port=${d#rdma_}" '$1==p{sub(/rdma_peer=/,"",$3); print $3}' /var/run/mesh-fabric 2>/dev/null)" \
+    "$([ -f /var/run/mesh-link.${d#rdma_} ] && read -r t0 n tb < /var/run/mesh-link.${d#rdma_} && echo " (no peer for $(( $(date +%s) - t0 )) s, $n bounces)")"
 done
 b "THUNDERBOLT"; system_profiler SPThunderboltDataType 2>/dev/null | awk '/Device Name:|Speed:|Status:/{gsub(/^ +/,"");print "  "$0}' | head -12
 b "DAEMONS"; for spec in io.mesh.beacon:resident io.mesh.keeper:periodic io.mesh.fabric:oneshot io.mesh.router:resident io.mesh.nodeinfo:socket io.mesh.rdma-init:oneshot io.mesh.update:periodic; do
