@@ -36,8 +36,8 @@
 // product's input is written through streamed_gather (a row's values at the column order, each column's scale
 // applied); streamed_alu and streamed_coop take a consumer of their partials as their last template argument E, an
 // epilogue run in the dispatch (streamed_plain: none). Include after <metal_stdlib>; the tensor-op kernels need Metal 4.
-// The sizes are template arguments, so a caller appends the explicit instantiations of its shapes (streamed_instance) to
-// this source.
+// The sizes are template arguments, so a caller appends the explicit instantiations of its shapes (streamed.py instance)
+// to this source.
 #ifndef TORCH_MESH_STREAMED
 #define TORCH_MESH_STREAMED
 #include <metal_stdlib>
@@ -172,8 +172,8 @@ static inline float streamed_sum(float s, threadgroup float *partial, uint t, ui
     return total;
 }
 
-// The RMS norm's factor of a row of `count` elements whose squares the threadgroup's threads hold `s` of: rsqrt(the mean
-// square + eps), the squares summed by streamed_sum.
+// The one Metal RMS norm (the host's: torch.nn.functional.rms_norm): the factor of a row of `count` elements whose
+// squares the threadgroup's threads hold `s` of, rsqrt(the mean square + eps), the squares summed by streamed_sum.
 template <bool Fresh = false>
 static inline float streamed_rms(float s, uint count, float eps, threadgroup float *partial, uint t, uint threads) {
     return rsqrt(streamed_sum<Fresh>(s, partial, t, threads) / float(count) + eps);
@@ -222,7 +222,7 @@ static inline float mesh_rope(float x, float y, bool low, uint pair, uint dims, 
 
 // One head of D channels of row n finished (metal-microbench docs/kernels.md#decode-attention, the heads): its values
 // from streamed_rows (a product's partials, or plain rows: shares 0, row stride `rows`, from channel `first`), their RMS
-// norm (streamed_sum, eps 1e-6), times gamma where given (staged in `gs` before the reductions), the rotary embedding over
+// norm (streamed_rms, eps 1e-6), times gamma where given (staged in `gs` before the reductions), the rotary embedding over
 // its first `pairs` frequency pairs at `position`, stored to `out` and to `line` (a KV line), each where given.
 template <bool Precise, typename P>
 static inline void mesh_head(P partials, device const half *plain, device const int *order, device const float *scale, uint n, uint first,
