@@ -795,19 +795,19 @@ kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *f
 // The GELU FFN's middle: hidden = GELU(gate) * up in the gate and up products' (shared) coded row order, which the down
 // product's columns follow: from their partials (gate's d.shares shares, up's d.inputs, each product its own
 // instance's, its row scale applied) or, where they are 0, from their finished rows (T half); a row's values d.stride
-// apart (0: d.outputs; gate|up stacked: twice it, up's from gate's d.outputs on).
+// apart (0: d.outputs; gate|up stacked: twice it, up's from gate's d.outputs on); four outputs a thread.
 template <typename T>
-MESH_KERNEL(finish)
 kernel void streamed_gelu(device const T *gate [[buffer(0)]], device const T *up [[buffer(1)]],
                           device const float *gateScale [[buffer(2)]], device const float *upScale [[buffer(3)]],
                           device half *hidden [[buffer(4)]], constant streamed_dims &dims [[buffer(15)]],
-                          uint i [[thread_position_in_grid]]) {
+                          uint2 g [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
     const streamed_dims d = dims_of(dims);
-    if (i >= d.count) return;
-    const uint n = i / d.outputs, r = i % d.outputs;
-    const ulong at = ulong(n) * (d.stride ? d.stride : d.outputs) + r;
-    hidden[i] = half(streamed_gelu_of(d.shares ? streamed_value(gate, at, d.shares, d.split, gateScale[r]) : float(gate[at]),
-                                      d.inputs ? streamed_value(up, at, d.inputs, d.split, upScale[r]) : float(up[at])));
+    const uint n = g.y, first = (g.x * 256 + t) * 4;
+    const ulong row = ulong(n) * (d.stride ? d.stride : d.outputs);
+    for (uint r = first; r < min(first + 4, d.outputs); ++r)
+        hidden[ulong(n) * d.outputs + r] = half(streamed_gelu_of(
+            d.shares ? streamed_value(gate, row + r, d.shares, d.split, gateScale[r]) : float(gate[row + r]),
+            d.inputs ? streamed_value(up, row + r, d.inputs, d.split, upScale[r]) : float(up[row + r])));
 }
 
 template [[host_name("streamed_gelu")]] [[kernel]] decltype(streamed_gelu<float>) streamed_gelu<float>;

@@ -692,8 +692,8 @@ class Matrix(torch.Tensor):
             return down.apply(hidden).to(x.dtype)
         g, u = gate.product(gx), up.product(ux)
         _encode('streamed_gelu', [g, u, gate.row_scale, up.row_scale, hidden],
-                _dims(outputs=gate.rows, shares=g.shape[0], inputs=u.shape[0], split=n * gate.rows, count=n * gate.rows),
-                -(-(n * gate.rows) // 256), 1, 256)
+                _dims(outputs=gate.rows, shares=g.shape[0], inputs=u.shape[0], split=n * gate.rows),
+                -(-gate.rows // 1024), n, 256)
         return down.apply(hidden).to(x.dtype)
 
 
