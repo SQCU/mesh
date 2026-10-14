@@ -11,10 +11,6 @@ __pycache__/
 .venv/
 .build/
 cmux-assets/
-xonotic/payload-build/run*/
-xonotic/payload-build/.tmp/
-xonotic/payload-build/extract/
-xonotic/payload-build/userdir/
 xonotic/progs.dat
 xonotic/csprogs.dat
 xonotic/menu.dat

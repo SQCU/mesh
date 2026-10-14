@@ -15,7 +15,7 @@ not taken from a datasheet.
 | memory bandwidth | 238 GB/s mini · 362 GB/s MacBook | shared with the workload; a copy costs 2N of it |
 | scatter-gather | `max_sge: 1` | a record cannot be split across SGEs |
 | queue pairs | `max_qp: 11` (10 usable), `max_srq: 0` | no shared receive queue |
-| hardware threads | 12 mini (8P+4E) · 18 MacBook (6P+12E) | no SMT; this is the agent budget |
+| hardware threads | 12 mini (8P+4E) · 18 MacBook (6P+12E) | no SMT; a running program's flow holds two |
 
 ## Expensive
 
@@ -33,13 +33,14 @@ moments serialize agents that had no reason to be coupled.
 
 ## Cheap
 
-**Pages and indices.** A 16-byte descriptor per 64 KB page is 0.024% overhead. Page
-assignment, free lists, refcounts: index arithmetic, tens of nanoseconds, no data
-movement.
+**Pages and indices.** A page is the node's (`getpagesize()`, 16 KiB), and its region entry,
+32 bytes (`rdma/mesh.h` `struct mesh_page_entry`), is 0.2% of it. A lease claims rows and pages
+by compare-exchange on bitmap words (`rdma/mesh-call.h`), and an address is index arithmetic:
+tens of nanoseconds, no data movement.
 
 **Arithmetic on the side.** Welford's algorithm is ~5 flops per sample. At full page
-turnover (136k pages/s/port) that is under a megaflop per second on a machine that
-does billions. Running statistics are free.
+turnover (the link's 70.9 Gbit/s in 16 KiB pages, about 540k pages/s/port) that is under three
+megaflops per second on a machine that does billions. Running statistics are free.
 
 **Telemetry.** This is the one people do not believe:
 
@@ -53,11 +54,11 @@ A kilohertz of node health costs one part in seventy thousand of a single link. 
 is no budget argument against full observability. This is a property of the era, not
 of cleverness: nobody writing for a microcontroller ever had this ratio available.
 
-**Sparse in-channel agreement.** Control can time-share the copper. The cost is a
-ratio, not a principle: agreement amortized per *stream* is invisible (10–20 µs
-against a 112 ms gigabyte), agreement per *page* is over 200% overhead. Amortize per
-stream and in-channel is fine — a separate control QP keeps stream identity as the
-discriminator, so the data path still never inspects bytes.
+**Sparse in-channel agreement.** Control can time-share the copper. The cost is a ratio, not a
+principle: agreement amortized per *program* is invisible (10–20 µs against a 112 ms gigabyte),
+agreement per *page* is over 200% overhead. So a port's two bridges agree once per program over
+the port's one TCP control stream (`rdma/mesh-flow.c`, design/bridge-and-ipc.md#protocol), READY,
+PAIRS and POSTED as it starts and END or FAIL as it ends, and the data path never inspects bytes.
 
 ## The queue does not enforce its own depth
 
@@ -93,7 +94,7 @@ from 31.91 to **45.81 Gbit/s each way, zero errors, zero gaps**. Trying to keep 
 outstanding than the queue allows does not pretend the link is faster; it makes it
 slower.
 
-## The frame constraint (measured, and it forces the page size)
+## The frame constraint (measured)
 
 TN3205 says sender and receiver must post the same number of frames. It does not say
 that **multi-frame messages are only safe at shallow pipeline depth**, which is what
@@ -112,13 +113,14 @@ the hardware actually does:
 in flight. That is not a protocol we can copy: depth ≤ 2 is a handshake in all but
 name, and each round trip is 89 KB of wire.
 
-So **the page size is 4096 — one frame — and throughput scales by adding queue pairs,
-not by enlarging pages.** With `max_qp: 11` (10 usable) and 12–18 hardware threads,
-the scaling axis is parallel QPs on parallel threads, each owning its own page pool
-shared-nothing.
-
-This also retires an earlier misdiagnosis: a "2 frames hangs, 1 frame works" symptom
-was blamed on a flapping link. It was real, and it was this.
+The bridge does not follow this table. A record is one block of the node's page (`getpagesize()`,
+16 KiB: four frames), and a queue pair takes another only while its posted frames,
+`(length + 4095) / 4096` a record, stay within its queue's granted capacity (`rdma/mesh-flow.c`):
+1023 four-frame records at 4095. That figure is calculated (design/actual-frame-capacity-2026-09-13.md),
+never measured, and the 64 KB rows above stalled at depth 8 with 128 frames posted, well inside
+the budget; until a run at 16 KiB and depth settles it, the measurement and the bridge's rule
+disagree. A link's throughput is a program's queue pairs (its highest queue toward the node times
+its slots, within `max_qp`; design/bridge-and-ipc.md#flows) over the one arena window (below).
 
 ## What follows
 
@@ -141,7 +143,7 @@ costume. A ring is a good topology precisely because an orbit *is* the synchroni
 negotiated, the only way anyone knows what the graph is doing is to watch it. The bridge's
 region carries each port's peer, phase, last code, bandwidth and pairings, and each client's
 status toward each destination (`rdma/mesh.h`); a program that asks for it has its trace, every
-send and landing with its times (design/prepared-machine.md#M27).
+send and landing with its times (`rdma/mesh-call.h` `mesh_transfers_trace`).
 
 ## The invariant core
 
@@ -169,18 +171,18 @@ spins nothing.
 
 ## Routing is a compiled path, not a table
 
-RDMA never routes: a queue pair joins two ports over one cable. A program bound for a node its
-own node is not linked to carries its route, the path of nodes from the one to the other,
-computed once from the current map by whatever sets the program up (`rdma/mesh-plan.h`
-`mesh_trees_path`, in the destination's heaviest tree of trees made ahead of time; the map's
-shortest-path trees where none are given). Its node's bridge sends it over the path's first
-link, and each bridge on the path forwards it to the next node the path names, a member of the
-execution or not; it ends at the path's last node.
+RDMA never routes: a queue pair joins two ports over one cable. A program names only its member
+node (`rdma/mesh-call.h` `mesh_transfer_bind`). Where the two are not linked, the node's bridge
+computes the route once, as the program starts, from its own map (`rdma/mesh-plan.h`
+`mesh_trees_path` in the destination's heaviest tree, `mesh_trees_shortest` where none are packed;
+EHOSTUNREACH where there is no path), and sends READY with it over the first link; each bridge on
+the path relays the program and sends READY on with the rest of the route to the next node it
+names, a member of the execution or not (design/bridge-and-ipc.md#protocol, #flows).
 
 A next-hop table would be O(N) memory per node *and* a fleet-wide agreement problem: 2048
 entries per node at 2048 nodes, a million entries and distributed consensus at a million. The
-path is computed once per program by whatever sets it up, and after that every hop reads the
-next name. The mesh can be arbitrarily large and the data plane never learns how large.
+path is computed once per program, by the bridge that starts it, and after that every hop reads
+the next name. The mesh can be arbitrarily large and the data plane never learns how large.
 
 ## What the transport is not
 
@@ -228,13 +230,10 @@ the extents are equal, an address maps to its region by division: `(addr - base)
 There is no table to search, no address that can miss, and no lookup that can fail, so no
 call site needs a branch for the case where it does.
 
-This is worth stating because the obvious reference implementations do it differently, and
-for a good reason that does not apply here. Production transfer engines register arbitrary
-user buffers at arbitrary addresses, so they keep an ordered map and find the containing
-region by `upper_bound` and a bounds check. Copying that shape into this bridge imported a
-sorted table, a binary search, a null return and a validity test at every use, to answer a
-question that division answers exactly. The extent is a constant, the registration the provider
-takes, not a device query: `max_mr_size` is not the real limit (the ledger).
+Production transfer engines register arbitrary user buffers at arbitrary addresses, so they keep
+an ordered map and search it (`upper_bound` and a bounds check). Here the extent is a constant,
+the registration the provider takes, not a device query (`max_mr_size` is not the real limit, the
+ledger), and division answers exactly.
 
 Setup may fail and says so. The data path may not, and so nothing in the data path asks.
 
@@ -244,7 +243,7 @@ A sleep in a data path is a latency injection with a number attached, and a slee
 loop is a wait for a condition dressed up as a wait for a clock. Neither is a schedule; both
 are a missing primitive being papered over.
 
-**The data path spins.** A `usleep(50)` when a poll finds no completions injects 50 µs into a
+**The bridge's data path spins.** A `usleep(50)` when a poll finds no completions injects 50 µs into a
 link whose round trip is about 10 µs: five times the link latency, added to avoid spinning. A
 program's data path has two event sources: its completion queues, and the ready words of its
 sends, which its producers release. Verbs offers a real blocking wait for the first —
@@ -253,18 +252,18 @@ The second is shared memory and has no descriptor to wait on, so no primitive wa
 Blocking on the completion queue alone would stall a producer's first release indefinitely. The
 correct resolution for a kernel-bypass data plane is to spin, which is what such transports do
 by design and why they are given a core. Sleeping pretends the choice does not have to be made,
-and buys a latency floor in exchange.
+and buys a latency floor in exchange. A wait on a shared word has one form, its address wait
+(`rdma/mesh.h` `mesh_notify`; the bridge's `os_sync_wait_on_address` on `control`).
 
-**Still present, with direct measurements.**
+**Still present.**
 
-| where | measured state |
+| where | state |
 |---|---|
+| `rdma/mesh-call.c` `mesh_transfers_start` | Sleeps 1 ms a turn until the bridge stores the program's `prepared` word, probing the bridge with `kill(pid, 0)` each turn. The bridge stores the word without waking it, so the client cannot wait on it; were it woken, the start would wait on the word to its deadline. |
+| `rdma/nccl-mesh.c` progress thread | `usleep(20)` on each pass of a routing session that moved nothing: twice the link's round trip. |
+| `rdma/nccl-mesh.c` `drain` | `usleep(50)` on each pass while the session's GPU programs finish. |
+| `rdma/nccl-mesh.c` bootstrap connect | `usleep(100000)` between attempts to reach the root, to its deadline. |
+| `rdma/nccl-mesh.c` `session_close` | Sleeps `LINGER_S` (1 s) before releasing the rings, on exit and before a session for other peers opens. |
 | `bin/mesh-peers.sh` | Partly fixed. The browse now ends when the reply stream goes quiet instead of after a fixed three seconds, using a 50 ms poll period. The per-node `dns-sd -t` resolve and the `nc -G` info probe still run to a deadline and dominate the wall time, so the script returns no faster than before. Saying it is fixed would be false. |
 | `bin/mesh-rdma-init.sh`, `install.sh` (two), `install-user.sh` (two) | Waiting on launchd to settle. Each should poll the condition it actually wants. |
 | `xonotic/ipcbench/bench.c` | Same habit, game-side, inherited from the build workflow and not yet cleaned. |
-| `viz/serve.py`, `time.sleep(PERIOD)` | Defensible. This is a poll period — a scheduling decision about how often to sample — not a stall standing in for a wait. |
-| `bench/orth.py`, `time.sleep(...)` | Defensible. Thermal duty cycling in a benchmark, deliberate. |
-| `xonotic/darkplaces-work/**` | Vendored upstream. Not ours to clean. |
-
-`pmset sleep 0` and the `displaysleep`/`disksleep` keys in `install.sh` are uniform
-fleet power policy, not delays, and are unrelated.
