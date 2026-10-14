@@ -255,17 +255,15 @@ class Fit:
 
 
 def rows_class(rows):
-    """The ALUs' rows class R of `rows` input rows (to 8): 1, 2, 4 or 8."""
-    return 1 if rows <= 1 else 2 if rows <= 2 else 4 if rows <= 4 else 8
-
-
-SMALL = 512
+    """The ALUs' rows class R of `rows` input rows (to 4): 1, 2 or 4."""
+    return 1 if rows <= 1 else 2 if rows <= 2 else 4
 
 
 def candidates(s, rows, op='product', tables=False):
     """The admissible instances of slice units `s` at `rows` input rows: rows <= 4 on the ALUs (R the rows' class)
-    or the cooperative tensor (M 8); 8 or 16 rows the cooperative tensor (M 8 or 16), and at 8 the ALUs too where the
-    slice has at most SMALL outputs or columns (the ceiling round's small matrices); past 16 the panel (M 64, 128);
+    or the cooperative tensor (M 8); 8 or 16 rows the cooperative tensor (M 8 or 16; the ALUs at eight rows, read on the
+    small slices, took 1.4 to 2.6 times the coop's time: metal-microbench docs/kernels.md#stacked-products); past 16 the
+    panel (M 64, 128);
     shares of 8 to 48 tiles, simdgroups 2, 4 or 8 a band (the head's four bands of two too), one or two tiles in
     flight, a 1-bit tile by tables where the head's input writes them, either loads (LOADS: fragment_load's); `op` couple:
     the gate and up products together (its slice their units summed)."""
@@ -278,7 +276,7 @@ def candidates(s, rows, op='product', tables=False):
     if op == 'couple':
         return [dict(kernel='couple', R=rows_class(rows), SK=sk, BANDS=1, J=1, F=F, LUT=0, APART=apart, LOADS=loads) for sk in (2, 4, 8)
                 for F in (1, 2) for apart in (0, 1) for loads in (0, 1)]
-    if rows <= 4 or rows <= 8 and min(s['outputs'], s['columns']) <= SMALL:
+    if rows <= 4:
         R = rows_class(rows)
         shapes = [(sk, 1) for sk in (2, 4, 8)] + ([(2, 4)] if op == 'head' else [])
         for sk, bands in shapes:
@@ -935,6 +933,8 @@ def observations(paths):
                 attention.append(row)
                 continue
             spec = parse_instance(row['instance'])
+            if spec['kernel'] == 'alu' and spec['R'] > 4:
+                continue
             out.append((spec, {k: row[k] for k in UNITS}, row['rows_in'], row['best_us'], row.get('form', row['instance']).split(' R')[0]))
     return out, attention
 
