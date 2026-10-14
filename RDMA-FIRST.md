@@ -4,11 +4,6 @@ How to get from *"RDMA is a fast socket"* to writing for what this hardware actu
 is. Every number below was measured on `Mac16,11` and `Mac17,6` over one TB5 cable,
 not taken from a datasheet.
 
-> Status: the hardware's measured facts stand (the ledger, frames, queue pairs, registration). Sections on the
-> bridge's internals before 2026-09-27 (the 16-byte wire header, LISSEN/APPREL/APPSUB/CENSUS, the path bits,
-> `rdma/mesh-client.c`) describe code that is gone: the bridge is `rdma/mesh-flow.c` (`mesh.h`), and the
-> collectives are `rdma/NCCL.md`.
-
 ## The ledger
 
 | resource | measured | what it means |
@@ -127,67 +122,26 @@ was blamed on a flapping link. It was real, and it was this.
 
 ## What follows
 
-**Do not build a backpressure protocol.** The mechanism already exists, twice over. The
-hardware will not process a send until the receiver has posted a matching receive —
-that is pre-granted credit, feed-forward, free. And the pool is finite: if a yeller
-cannot drain, pages do not return to the free list; if the free list is empty, no
-receives are posted; if no receives are posted, the upstream peer's credits stop
-replenishing and it stops sending. Backpressure propagates backwards through the graph
-with **zero messages exchanged**. A credit protocol layered on top would add round
-trips — 89 KB of wire each — to re-derive a signal the pool already carries.
+**Do not build a backpressure protocol.** The mechanism already exists. The hardware will not
+process a send until the receiver has posted a matching receive — that is pre-granted credit,
+feed-forward, free. A receiver that posts no receive stops its sender, and a sender whose queue
+pair holds no more frames stops posting: backpressure propagates backwards through the graph
+with **zero messages exchanged**. A credit protocol layered on top would add round trips — 89 KB
+of wire each — to re-derive a signal the posted receives already carry.
 
-**Never block; poll and yield.** An agent that finds an empty free list does dispatch
-or transform work and checks again. Non-blocking is achievable here because the only
-shared state is a queue you inspect, never a permission you await.
-
-**A completion queue reserves one ACK slot per send.** The application ACK ring
-returns ownership of arena pages; it is not a second network protocol. An earlier bridge
-drained submissions whenever the QP had room and pushed completions without reserving an ACK
-slot. A sustained application could therefore fill the ACK ring, lose later completion
-descriptors, and leave successfully transmitted pages permanently marked in flight. The
-reservation preserves `ack_depth + outstanding_sends < ring_capacity`. The hardware QP remains 4,095
-entries while the shared software rings hold 65,536 descriptors, so an application polling
-interval does not turn hardware concurrency into an unrelated burst limit. A software-ring
-overflow increments `bad`; it is never silently recycled. The client owns one dynamic queue
-and cycles every arena page through that invariant. A 26,000-frame fixture crosses a
-24,576-page arena, completes every frame, and returns every page without an application-sized
-window.
+**Never block; poll.** A progress thread that finds no completion and no released send polls
+again. Non-blocking is achievable here because the only shared state is a word or a queue you
+inspect, never a permission you await.
 
 **Feedback has exactly two legitimate granularities**: a job completing, or data
 completing one orbit of a cycle in the graph. Anything finer is a handshake wearing a
 costume. A ring is a good topology precisely because an orbit *is* the synchronisation.
 
 **Telemetry is mandatory, not optional.** Since backpressure is structural rather than
-negotiated, the only way anyone knows what the graph is doing is to watch it. Stream
-the page-table state space:
-
-- `V` — pages by state: free, posted, filled, dispatched, sending
-- `dV/dt` — rates, as deltas against the last sample
-- `dV/V` — relative rate, dimensionless, comparable across nodes with different pools
-- variance of each, via Welford
-
-That is enough to distinguish a node that is draining steadily from one that is
-hysteretic (high variance, mean near zero) from one that cannot drain (sending
-monotonically increasing) from one that is crashing out (free → 0, sustained
-negative). A few floats per peer per second and the whole graph knows what the whole
-graph is doing.
-
-## There was software loss repair here, and it is gone
-
-An earlier version implemented receiver-driven NACKs over the same queue pair, a miss
-bitmap, a retransmit window held in the page pool, and a sweep that re-armed requests by
-sequence progress rather than by a clock. Several sections of this document used to explain
-its tuning in detail.
-
-All of it is deleted, and the reasoning that replaced it is in **There is no repair in the
-transport**, below. The short version: ARQ is a property of the RC transport, implemented in
-the NIC with packet sequence numbers and a sender-side hardware buffer. Reimplementing it in
-userspace over UC, without that buffer, produced a mechanism that invented 7.3 million
-phantom gaps in five seconds on a link losing nothing, drove its own retransmit traffic from
-them, corrupted the page accounting, and ended in a kernel panic inside the vendor driver.
-
-This section is kept as a marker rather than removed outright, because the tuning it once
-described was persuasive and someone will be tempted to rebuild it.
+negotiated, the only way anyone knows what the graph is doing is to watch it. The bridge's
+region carries each port's peer, phase, last code, bandwidth and pairings, and each client's
+status toward each destination (`rdma/mesh.h`); a program that asks for it has its trace, every
+send and landing with its times (design/prepared-machine.md#M27).
 
 ## The invariant core
 
@@ -195,98 +149,38 @@ described was persuasive and someone will be tempted to rebuild it.
 against the identity function, and that is not a figure of speech: routing *is* the identity
 case, so a core that is correct for `id` is correct for every workload.
 
-An earlier version enforced that by compiling the workload into the transport —
-`make F=f-yourthing.c` linked a `mesh_f` callback into `mesh-flow`. That is deleted, and the
-reason is worth keeping. Every workload was then its own binary, which meant its own
-out-of-band socket, its own verbs device, its own queue pairs against a per-device budget of
-ten, and its own identity to the host firewall. It also inverted control: the transport called
-the application, so the application could not be a thing that already existed, like a game
-server. One bridge per node owns the queue pairs because the hardware permits nothing else.
+No workload is compiled into the transport. Were it, every workload would be its own binary,
+with its own out-of-band socket, its own verbs device, its own queue pairs against a per-device
+budget of ten, and its own identity to the host firewall; and the transport would call the
+application, so the application could not be a thing that already existed, like a game server.
+One bridge per node owns the queue pairs because the hardware permits nothing else.
 
-The boundary is now a process boundary. The bridge is one binary that never changes.
-Applications are separate processes that attach to its shared region and speak in pages
-through three functions, documented in `README.md` under **Using the mesh**. Nothing about a
-workload can reach the data plane except the bytes it puts in a page and the node it names.
+The boundary is a process boundary. The bridge is the node's one resident binary
+(design/bridge-and-ipc.md). Applications are separate processes, any number at once and none
+aware of another, that attach to its shared region, lease pages in it, and ask the bridge to
+carry them to member nodes (`rdma/mesh-call.h`). Nothing about a workload can reach the data
+plane except the bytes it puts in its pages and the node it names.
 
-The loop has five stages and no others:
+A program's data path is its own two progress threads (design/bridge-and-ipc.md#flows): one
+posts each send its producer released while its queue pair holds the frames, the other drains
+receive completions, publishes each landed record and posts the ring's next receives. Neither
+waits on anything but a word or a completion queue it polls, and a link with no program running
+spins nothing.
 
-```
-each turn, unconditionally:
-  LISSEN   every free page to ibv_post_recv, until the hardware declines
-  APPREL   pages the application released return to the pool
-  APPSUB   pages the application submitted go to ibv_post_send, until it declines
-  POLL     drain completions; a received page is delivered or forwarded where it lies
-  CENSUS   sample the page table; gates nothing
-```
+## Routing is a compiled path, not a table
 
-There is no stage that waits, no stage gated on a computed target, and no queue whose depth
-is consulted before acting. What bounds the loop is the hardware refusing work.
+RDMA never routes: a queue pair joins two ports over one cable. A program bound for a node its
+own node is not linked to carries its route, the path of nodes from the one to the other,
+computed once from the current map by whatever sets the program up (`rdma/mesh-plan.h`
+`mesh_trees_path`, in the destination's heaviest tree of trees made ahead of time; the map's
+shortest-path trees where none are given). Its node's bridge sends it over the path's first
+link, and each bridge on the path forwards it to the next node the path names, a member of the
+execution or not; it ends at the path's last node.
 
-## Addressing and routing
-
-The wire header is 16 bytes, 0.39% of a 4096 page, leaving 4080 usable:
-
-```c
-struct wire { uint32_t magic, bytes; uint16_t src, dst; uint8_t hops, pad[3]; };
-```
-
-`src` and `dst` are node indices — *this page is from node A, for node B*. There is no
-authentication and none is wanted: the topology is cables we plugged in ourselves, so this is
-a routing tag, not a credential. `hops` bounds a forwarded page. `bytes` is the payload length,
-clamped to the page on receipt.
-
-It was 24 bytes, then briefly 28 when `bytes` was widened, and carried `path`, `stream`, `seq`
-and a `flags` byte with
-`F_FIRST`/`F_LAST`/`F_META`/`F_NACK`. Every one of those served span reassembly, sequence
-tracking or the NACK protocol, and all three are gone; nothing read them. A field on the wire
-that no receiver reads is not free — it is payload the application does not get, on every page
-forever, plus a thing the next reader has to work out is vestigial.
-
-An earlier revision of this section described `F_META` as "the whole of the is-this-for-us
-question", distinguishing graph metadata every peer should observe from opaque payload no hop
-may interpret. That distinction was never implemented, and the bit it depended on no longer
-exists. The question is answered by `dst` alone.
-
-### Routing is a compiled path, not a table
-
-`path` holds the route as **2 bits per hop** — a node has at most three fabric ports,
-so an egress port is two bits. Each hop reads the low bits, shifts right, forwards. A
-`uint32` therefore carries 16 hops:
-
-| field | hops | nodes reachable at degree 3 |
-|---|---|---|
-| `uint32 path` | 16 | 43,046,721 |
-| `uint64 path` | 32 | 1.85 × 10^15 |
-
-Per-hop cost is a mask, a shift and a store, inside the bytes the header already
-occupies — no extra bandwidth, no lookup, no memory.
-
-A next-hop table would be O(N) memory per node *and* a fleet-wide agreement problem:
-2048 entries per node at 2048 nodes, a million entries and distributed consensus at a
-million. The path is computed once per stream by whatever sets the stream up, and
-after that every hop is a shift. The mesh can be arbitrarily large and the data plane
-never learns how large.
-
-Termination is `dst == node_idx`, with a hop-count ceiling so a corrupted `path` dies
-rather than circulating. Measured on two nodes: a page addressed to the peer is
-delivered and terminates there, at **69.45 Gbit/s one-way — 98% of the 70.9 Gbit/s
-ceiling**.
-
-## The shape
-
-Agents that never wait, over one page table of refcounted pages:
-
-```
-free list ─▶ LISSEN ─▶ [ring] ─▶ DISPATCH ─▶ [per-peer queues] ─▶ YELLER ─▶ free list
-               ▲                                                              │
-               └────────────────── refcount hits 0 ───────────────────────────┘
-```
-
-Dispatch is always present — forwarding unchanged is a decision that must be made per
-page, not the absence of one — and its cheapest case is a stream→destination lookup
-that touches no payload. Pages are refcounted because one arrival may go to several
-peers. Nothing in the data path branches on content; the transform is the one place
-bytes are read, deliberately, paying the 2N.
+A next-hop table would be O(N) memory per node *and* a fleet-wide agreement problem: 2048
+entries per node at 2048 nodes, a million entries and distributed consensus at a million. The
+path is computed once per program by whatever sets it up, and after that every hop reads the
+next name. The mesh can be arbitrarily large and the data plane never learns how large.
 
 ## What the transport is not
 
@@ -296,9 +190,8 @@ there is no offset at which a header reliably lives, and a header in the first l
 page says nothing about the ten-thousandth. Deserialization happens once, at the
 endpoint, over the ordered page list, in place.
 
-Which is why a Quake match and a pipelined tensor algorithm are the same program: a
-stream of opaque bytes with a fixed destination, differing only in whether `f` at a
-hop is the identity.
+Which is why a Quake match and a pipelined tensor algorithm are the same program: a stream of
+opaque bytes with a fixed destination.
 
 
 ## There is no repair in the transport
@@ -315,23 +208,23 @@ is simply gone. The transport delivers what arrived. Anything missing is the app
 notice and send again, because the application is the only layer that knows what it asked
 for.
 
-An earlier version of this bridge implemented sequence tracking, a miss bitmap, NACK
-generation, a retransmit window and a sweep — a software imitation of hardware ARQ, at the
-wrong layer, without the hardware buffer that makes it work. It generated 7.3 million phantom
-gaps in five seconds on a link losing nothing, drove its own retransmit traffic from them,
-corrupted the page accounting, and ended in a kernel panic inside the vendor driver. All of
-it is deleted. The controller lost 43% of its code and gained the ability to run bidirectional
-traffic without falling over.
+A software imitation of hardware ARQ, at the wrong layer and without the hardware buffer that
+makes it work (sequence tracking, a miss bitmap, NACK generation, a retransmit window and a
+sweep), generated 7.3 million phantom gaps in five seconds on a link losing nothing, drove its
+own retransmit traffic from them, corrupted the page accounting, and ended in a kernel panic
+inside the vendor driver. Nothing of the kind is built.
 
-What remains is the whole job: post receives into free pages, drain completions, hand each
-arrived page to the application or forward it, send what the application submits, and take
-back what it releases.
+What remains is the whole job: post each program's receives, drain completions and publish what
+landed, post the sends its producers release, and when a link or a peer's program is lost, fail
+the program with an error naming the node, which its caller may retry at once
+(design/recovery.md).
 
 
 ## Registration is arithmetic, not a lookup
 
-The region is one contiguous span cut into equal chunks, one memory region per chunk. Because
-the chunks are equal, an address maps to its region by division: `(addr - base) / chunk`.
+The arena is one contiguous window registered in equal 1 GiB extents, one memory region per
+extent, each registered on a port's device the first time a program names a page of it. Because
+the extents are equal, an address maps to its region by division: `(addr - base) / extent`.
 There is no table to search, no address that can miss, and no lookup that can fail, so no
 call site needs a branch for the case where it does.
 
@@ -340,114 +233,34 @@ for a good reason that does not apply here. Production transfer engines register
 user buffers at arbitrary addresses, so they keep an ordered map and find the containing
 region by `upper_bound` and a bounds check. Copying that shape into this bridge imported a
 sorted table, a binary search, a null return and a validity test at every use, to answer a
-question that division answers exactly. The chunk size is a constant, not a device query, for
-the reasons under `max_mr_size` above.
+question that division answers exactly. The extent is a constant, the registration the provider
+takes, not a device query: `max_mr_size` is not the real limit (the ledger).
 
 Setup may fail and says so. The data path may not, and so nothing in the data path asks.
-
-## One way to give a page back
-
-A page belongs to exactly one holder. It is on the free list, with the hardware as a posted
-receive or a send in flight, with the application because it was delivered, or in the arena,
-which the application owns outright and the bridge never reclaims.
-
-There is a single operation that returns a page to the pool and it takes no decisions. A page
-the bridge does not own is never passed to it: an arena page is recognised by its index, and a
-delivered page is not tracked at all until the application returns it through the release
-ring. An earlier version had a `held` flag that meant two different things — delivered, and
-held for retransmit — which is why freeing a page needed three branches and why 55,335 double
-frees were possible in a five second run.
-
-A page's address is arithmetic and is not stored. Its state is not stored either, because the
-completion says what the page was doing.
-
-The pool invariant is `free + posted + pool-in-flight + with-app`, and it must equal the pool
-size exactly. Pool-in-flight is not the same as the send count: the send count includes arena
-pages the application owns, which are not pool pages. Conflating them produced a figure that
-only balanced when nothing happened to be in flight at the moment of sampling, and it was
-quoted as proof of correctness four times before a viewer plotted it and the error showed.
-
-## The census is not a queue depth
-
-What is published once a second is a census of the page table and its variance. It is
-deliberately not the depth of a queue at an instant.
-
-A depth read at an instant is a sample of something the program should never be waiting to
-look at. Receives go to lissen and sends go to yell the moment they exist; there is no point
-in the loop where it is correct to stop and ask how full something is, and an implementation
-that gates on a computed target rather than on the hardware refusing the work has invented a
-throttle nobody asked for. Both gates existed here and are removed: LISSEN posts every free
-page until `ibv_post_recv` declines, and the send path drains what the application submitted
-until `ibv_post_send` declines.
-
-The variance is per interval, not per run. A lifetime variance is dominated by the step from
-idle to running and reports a number that grows for reasons unrelated to what the pool is
-doing now. Each published sample describes its own second, so an evenly breathing pool reads
-near zero and a starved or flooded one does not. The estimator is Welford: one pass, constant
-memory, and it does not lose the variance to cancellation once the mean is large, which it is
-here because these count pages and there are millions of them.
-
-Sampling it costs something, so it is sampled, not computed on every turn of the loop. An
-earlier version ran eight Welford updates and a clock read per iteration of the data path.
-
-## A dead application does not strand its pages
-
-An application that exits while pages sit in its delivery ring, or that took pages and never
-released them, used to strand them permanently: the bridge forgets a delivered page by design,
-so nothing knew they existed and the pool shrank by up to the delivery ring's capacity — 4096
-pages — per death.
-
-The bridge keeps a bitmap of delivered pages, one bit each, `npages/8` bytes. On the census
-tick it checks whether the attached client still exists, and if `kill(pid, 0)` reports `ESRCH`
-it returns every marked page to the pool, resets the three ring cursors so no stale descriptor
-survives, and clears the client. Clearing is a compare-exchange against the dead PID. A
-replacement application may register between the census's PID load and its liveness check;
-the compare-exchange then fails and preserves the replacement instead of silently detaching
-it. This race was observed by restarting the cross-RDMA Xonotic strategy responder: the first
-replacement attached but received zero frames, while a later replacement worked. The check is
-once a second and outside the data path.
-
-Measured: an application exiting with pages outstanding leaves `held=4055`, and one tick later
-`held=0` with the census closing exactly at 244140/244140.
-
-This is why the census is published. A conservation figure nobody reads is decoration; this
-one named a real leak and then confirmed the repair.
 
 ## Sleeps, and where they crept in
 
 A sleep in a data path is a latency injection with a number attached, and a sleep in a poll
 loop is a wait for a condition dressed up as a wait for a clock. Neither is a schedule; both
-are a missing primitive being papered over. This is an audit of every one in code this repo
-owns.
+are a missing primitive being papered over.
 
-**Deleted.**
-
-| where | what it cost |
-|---|---|
-| `rdma/mesh-flow.c`, `usleep(50)` when a poll found no completions | 50 us injected into the data plane on a link whose round trip is about 10 us. Five times the link latency, added by us, to avoid spinning. |
-| `rdma/mesh-client.c`, `usleep(20000)` in a 500-iteration attach retry | Ten seconds of blind waiting, reporting nothing. Replaced, then partly restored: `mesh_open` now polls for the region at 10 ms for at most 2 s. Removing the wait entirely made an application started alongside its bridge fail instantly, which is a demotion under the accessibility contract; 2 s is a bounded poll period, not a stall standing in for a wait. |
-| `bin/mesh-bridge.sh`, `sleep 0.5` then `sleep 0.01` in the stop poll | Teardown measures 0.045 s. Half-second granularity reported it after 0.5 s, an eleven-fold penalty for nothing. |
-| `bin/mesh-bridge.sh`, `sleep 1` in the start poll | One-second granularity to observe a process that appears in about 45 ms. |
-
-The replacement in the shell is a bounded spin on `kill -0`, which is a shell builtin and forks
-nothing. `stop` now returns in 0.042 s.
-
-**Why the data-path one existed, since the reason is not embarrassing and the fix is not
-obvious.** The loop has two event sources: the completion queue, and the application's
-submission ring. Verbs offers a real blocking wait for the first — `ibv_create_comp_channel`,
-`ibv_req_notify_cq`, `ibv_get_cq_event` all exist on this platform. The second is shared
-memory and has no descriptor to wait on, so no primitive waits on both. Blocking on the
-completion queue alone would stall an application's first submission indefinitely. The correct
-resolution for a kernel-bypass data plane is to spin, which is what such transports do by
-design and why they are given a core. Sleeping was a way of pretending the choice did not
-have to be made, and it bought a latency floor in exchange.
+**The data path spins.** A `usleep(50)` when a poll finds no completions injects 50 µs into a
+link whose round trip is about 10 µs: five times the link latency, added to avoid spinning. A
+program's data path has two event sources: its completion queues, and the ready words of its
+sends, which its producers release. Verbs offers a real blocking wait for the first —
+`ibv_create_comp_channel`, `ibv_req_notify_cq`, `ibv_get_cq_event` all exist on this platform.
+The second is shared memory and has no descriptor to wait on, so no primitive waits on both.
+Blocking on the completion queue alone would stall a producer's first release indefinitely. The
+correct resolution for a kernel-bypass data plane is to spin, which is what such transports do
+by design and why they are given a core. Sleeping pretends the choice does not have to be made,
+and buys a latency floor in exchange.
 
 **Still present, with direct measurements.**
 
 | where | measured state |
 |---|---|
 | `bin/mesh-peers.sh` | Partly fixed. The browse now ends when the reply stream goes quiet instead of after a fixed three seconds, using a 50 ms poll period. The per-node `dns-sd -t` resolve and the `nc -G` info probe still run to a deadline and dominate the wall time, so the script returns no faster than before. Saying it is fixed would be false. |
-| `bin/mesh-rdma-init.sh`, `install.sh` (three), `install-user.sh` (two) | Waiting on launchd to settle. Each should poll the condition it actually wants. |
+| `bin/mesh-rdma-init.sh`, `install.sh` (two), `install-user.sh` (two) | Waiting on launchd to settle. Each should poll the condition it actually wants. |
 | `xonotic/ipcbench/bench.c` | Same habit, game-side, inherited from the build workflow and not yet cleaned. |
 | `viz/serve.py`, `time.sleep(PERIOD)` | Defensible. This is a poll period — a scheduling decision about how often to sample — not a stall standing in for a wait. |
 | `bench/orth.py`, `time.sleep(...)` | Defensible. Thermal duty cycling in a benchmark, deliberate. |
