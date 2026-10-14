@@ -200,7 +200,7 @@ into threadgroup memory, one operation a 256-wide panel); and the finish, the in
 tables) and Hadamard butterfly (`streamed_hadamard`, a threadgroup a row: H_N by structured.metal's stages on every
 block at once, H_K mixing the blocks as each coordinate is put, the RMS norm foldable), the GELU of gate and up, the
 dense decode and a range prefetch (`streamed_touch`). `streamed_value` and `streamed_rows` read a product's output (its
-K shares summed and scaled, or the plain values a crossing summed), and `streamed_put` writes a product's input in its
+K shares summed and scaled, or the plain values a crossing summed), and `streamed_gather` writes a product's input in its
 column order and scale; the constants are one `streamed_dims` block at buffer 15. Which instance a slice takes at its
 rows on a node (its kernel, simdgroups, bands, K shares, tiles in flight, tables; the couple or the products apart) is
 the instance fit's choice (`streamed.py`, metal-microbench docs/kernels.md#the-instance-fit): the argmin of a model of

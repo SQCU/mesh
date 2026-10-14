@@ -1216,8 +1216,8 @@ This is the same indexed gather for ordinary embeddings and E2B per-layer inputs
 One grid replaces the layer-by-layer host dispatch loop. Row/section/component
 storage also lets the engine use one existing matrix contraction for the full
 model projection, by concatenating the per-layer weight columns. Layer consumers
-bind their component slice using an offset and row stride; the existing `gelu_mul`
-specializes the second operand's stride at setup. The
+bind their component slice using an offset and row stride; the GELU (`streamed_gelu_rows`)
+reads the second operand at its own row stride. The
 [projection algebra and consumer addresses](../../../metal-microbench/docs/compute_execution.md#per-layer-inputs)
 account for all row counts and the removed 34 projection launches on E2B.
 Mesh gains no arithmetic kernel or transport behavior from this engine change.
