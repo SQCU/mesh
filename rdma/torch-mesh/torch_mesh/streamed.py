@@ -287,8 +287,8 @@ def candidates(s, rows, op='product', tables=False):
 
 
 def loads_key(spec):
-    """The loads' factor's key: a family and its rows class (streamed.metal fragment_load's LOADS 1 against 0)."""
-    return f"loads/{_family(spec)}/{spec.get('R', spec.get('M'))}"
+    """The loads' factor's key: a configuration and its rows class (streamed.metal fragment_load's LOADS 1 against 0)."""
+    return 'loads/' + factor_key(spec)
 
 
 def factor_key(spec):
@@ -995,8 +995,8 @@ def _fit(args):
 def _observe(args):
     """A served reading's profile (metal-microbench tools/reading.py read --profile: per class, per command label its least
     us a dispatch) as observations of its instances: each label's slices the export's (and its stacks') of its shape and
-    widths (their units' mean), its time less the class's floor (its least command), a label without its LOADS taking
-    --loads (the form the reading's library had)."""
+    widths (their units' mean; a couple's its gate's), its time less the class's floor (its least command), a label
+    without its LOADS taking --loads (the form the reading's library had)."""
     import re
     streamed = Streamed(args.export)
     held = slices(streamed, args.program, args.rank)
@@ -1012,7 +1012,7 @@ def _observe(args):
     for cls, commands in json.loads(Path(args.reading).read_text())['engine']['profile']['commands'].items():
         rows, floor = int(cls.split()[1]), min(c['least_us'] for c in commands.values())
         for label, c in commands.items():
-            found = re.fullmatch(r'streamed_(alu|coop|panel)_(\S+) (\d+)x(\d+)', label)
+            found = re.fullmatch(r'streamed_(alu|coop|couple|panel)_(\S+) (\d+)x(\d+)', label)
             if not found:
                 continue
             spec = parse_instance(label.split()[0], args.loads)
