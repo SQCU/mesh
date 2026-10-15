@@ -62,6 +62,7 @@ cp "$MESH_ROOT/policy.default" "$MESH_ROOT/policy"
 ok "policy: uniform fleet default"
 printf '%s\n' "${MESH_BRANCH:-main}" > "$MESH_ROOT/branch"
 printf '%s\n' "${MESH_REPO:-SQCU/mesh}" > "$MESH_ROOT/repo"
+printf '%s\n' "$ADMIN_USER" > "$MESH_ROOT/admin-user"
 
 sec "2. Power"
 for kv in sleep=0 displaysleep=10 disksleep=0 standby=0 autopoweroff=0 hibernatemode=0 \

@@ -375,7 +375,7 @@ the node's uplink.
 | `bin/mesh-status.sh` | one-screen health report. Installed as `mesh-status`. |
 | `bin/mesh-peers.sh` | enumerate live nodes on the fabric. Installed as `mesh-peers`. Absence is the alarm. |
 | `bin/mesh-beacon.sh` | continuous `_meshnode._tcp` announcement. Must never exit voluntarily. |
-| `bin/mesh-keeper.sh` | 60s watchdog: re-asserts power policy, re-bootstraps sshd/screen sharing/beacon, logs health warnings. |
+| `bin/mesh-keeper.sh` | 60s watchdog: re-asserts power policy, re-bootstraps sshd/screen sharing/beacon, logs health warnings; on a node with no console session, loads the admin user's own LaunchAgents into its user domain (what a login would), so a headless node's user services run from boot with nobody at it. |
 | `bin/mesh-health.sh` | the node's health report (`/var/run/mesh-health`): disk against the floor, idle blockers, aned's cache GC. |
 | `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on `lo0`, babeld across every fabric port. Resident; keeper restarts it. |
