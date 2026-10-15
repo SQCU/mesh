@@ -24,12 +24,12 @@ or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR
 
 - `ncclCommInitRank(comm, n, id, rank)`: NCCL's, with NCCL's bootstrap: the id is the root's `host:port`
   (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens), where each rank's node meets the others'.
-- `ncclMeshCommInitRank(comm, rank, topology, paths, programs, count, node, name)`: the topology is an operand.
-  - `topology`: a link map (`mesh-plan.h`: kind `mesh`, `ring`, `tree` or `graph`; links; each link's alpha in
-    microseconds and beta in nanoseconds a byte).
-  - `paths`: the trees messages between unlinked ranks take. NULL means shortest paths.
-  - `programs`: the compiled collectives, a table of `ncclMeshProgram` entries. NULL means the declared default.
-  - `node`: each rank's bridge node. NULL means rank r runs on node r.
+- `ncclMeshCommInitRank(comm, nranks, rank, paths, programs, count, node, name)`: the collectives are operands; the
+  map is the bridges' (below).
+  - `paths`: the trees the default single-phase all-reduce is compiled along, checked against the map each session
+    reads. NULL means the map's shortest-path trees.
+  - `programs`: the compiled collectives, a table of `ncclMeshProgram` entries. NULL means the default (below).
+  - `node`: each rank's bridge node.
   - `name`: the communicator's, which its sessions pair under on every member.
   - Every rank passes the same values.
 - `ncclCommSplit` takes the ranks of a color; `ncclCommShrink` (NCCL's signature) leaves out the ranks named, those
