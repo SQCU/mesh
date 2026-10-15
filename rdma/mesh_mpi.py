@@ -12,7 +12,8 @@ complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast
 Alltoall, Gather, Scatter, Send, Recv, Sendrecv (one group, so both directions pair), Barrier, allreduce (a Python
 number), Free; IN_PLACE as a send buffer, None for a buffer a rank does not use (Gather's off the root, Scatter's send
 off it).  COMM_WORLD is Comm(), made at first use.  Subcommunicators: Split(color, key) (ncclCommSplit; UNDEFINED
-for none), and a Cartesian process grid, Create_cart(dims) with Get_coords, Get_cart_rank, Shift and Sub(remain_dims),
+for none), Shrink(exclude) (ncclCommShrink), Grow(size) and Comm.joining (ncclCommGrow), Revoke() (ncclCommRevoke), and
+a Cartesian process grid, Create_cart(dims) with Get_coords, Get_cart_rank, Shift and Sub(remain_dims),
 each sub-grid a Split of it (a 2-D mesh's rows and columns), whose members the cables need not join.  Not here:
 nonblocking calls, the v-collectives, object (pickled) collectives; separately issued Send and Recv that do not pair
 are reported (rdma/NCCL.md "Rules").  A message to a rank the
@@ -31,6 +32,12 @@ IN_PLACE, UNDEFINED = object(), -32766
 TYPES = {np.dtype(np.int8): lib.ncclInt8, np.dtype(np.uint8): lib.ncclUint8, np.dtype(np.int32): lib.ncclInt32,
          np.dtype(np.uint32): lib.ncclUint32, np.dtype(np.int64): lib.ncclInt64, np.dtype(np.uint64): lib.ncclUint64,
          np.dtype(np.float16): lib.ncclFloat16, np.dtype(np.float32): lib.ncclFloat32, np.dtype(np.float64): lib.ncclFloat64}
+try:
+    import ml_dtypes
+    TYPES.update({np.dtype(ml_dtypes.bfloat16): lib.ncclBfloat16, np.dtype(ml_dtypes.float8_e4m3fn): lib.ncclFloat8e4m3,
+                  np.dtype(ml_dtypes.float8_e5m2): lib.ncclFloat8e5m2})
+except ImportError:
+    pass
 
 
 def check(result):
@@ -74,6 +81,33 @@ class Comm:
         made = ffi.new('ncclComm_t *')
         check(lib.ncclCommSplit(self.comm, -1 if color == UNDEFINED else color, key, made, ffi.NULL))
         return Comm._of(made[0], self) if made[0] != ffi.NULL else None
+
+    def Shrink(self, exclude, abort=False):
+        """This communicator without the ranks `exclude`, each kept rank's order kept (ncclCommShrink; `abort` revokes
+        this one's groups in flight first, NCCL_SHRINK_ABORT)."""
+        made, ranks = ffi.new('ncclComm_t *'), ffi.new('int[]', list(exclude) or [0])
+        check(lib.ncclCommShrink(self.comm, ranks, len(exclude), made, ffi.NULL, 1 if abort else 0))
+        return Comm._of(made[0], self)
+
+    def Grow(self, size):
+        """This communicator's ranks and `size` - its size more, which join with Comm.joining at the id its root
+        gives (ncclCommGetUniqueId), returned on the root to hand to them (ncclCommGrow)."""
+        made, unique = ffi.new('ncclComm_t *'), ffi.new('ncclUniqueId *')
+        if self.rank == 0:
+            check(lib.ncclCommGetUniqueId(self.comm, unique))
+        check(lib.ncclCommGrow(self.comm, size, unique, -1, made, ffi.NULL))
+        return Comm._of(made[0], self), unique[0] if self.rank == 0 else None
+
+    @classmethod
+    def joining(cls, size, unique, rank):
+        """A process joining a grown communicator of `size` ranks as `rank`, at the root's id `unique` (ncclCommGrow)."""
+        made = ffi.new('ncclComm_t *')
+        check(lib.ncclCommGrow(ffi.NULL, size, ffi.new('ncclUniqueId *', unique), rank, made, ffi.NULL))
+        return cls._of(made[0], None)
+
+    def Revoke(self):
+        """This communicator's groups in flight end with an error and none is issued after it (ncclCommRevoke)."""
+        check(lib.ncclCommRevoke(self.comm, 0))
 
     def Create_cart(self, dims, periods=None, reorder=False):
         """This communicator's ranks as a process grid of shape `dims` (row-major: the last dimension varies
