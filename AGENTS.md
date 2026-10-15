@@ -273,6 +273,8 @@ specification". The complete instruction is preserved in
 Repository-owned tests and verification harnesses have been removed. Review the complete data and execution flow
 against the user instructions and explicit algebra.
 
+Runtime testing of any code is prohibited until every item of metal-microbench `docs/acceptance-20261014.md` is attained in source; its `docs/principles.md` section 5 quotes the operator's prohibition (T9).
+
 ## Source workflow
 
 Operator instruction, September 9, 2026: use commits and checkouts, and use
