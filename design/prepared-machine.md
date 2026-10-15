@@ -75,6 +75,16 @@ doctrinal components to the code as it was 1 week ago because they seemed mutabl
 share is the September bridge's form (`bin/mesh-bridge.sh`'s `mesh_pct`, mesh 67f959b^); a fixed 2 GiB window sized to
 the client slots (mesh 6bd04a6) is gone.
 
+At the nodes' September settings (2026-10-15) the M5 (128 GiB, `mesh_pct=25` in `~/.mesh-bridge.conf`) registers 32
+extents in 3.9 s, its wired memory 16.8 GiB before and 48.5 GiB after; the Mini (24 GiB, `mesh_pct=40` in
+`/usr/local/mesh/bridge.conf`) 9 extents in 0.41 s (0.10 s after a boot), 10.2 GiB wired before and 17.2 GiB after.
+Registered memory is wired, so whatever a client keeps outside the window competes with it: the first pair call on
+these windows (metal-microbench output_data/grid-run/share1.json) had the Mini's resident rank load its part of the
+dense model (its weights mlocked, its 4.8 GB KV pool, both outside the window) beside the 9 GiB window, and the Mini's
+userspace starved until the watchdog reset it ("no checkins from watchdogd in 91 seconds", 14:09:51); it booted, its
+bridge registered the window and paired again unattended. A client that sizes its buffers into the window is the
+operator's division of the work; one that holds its own beside a large window has only what the window left.
+
 The lazy form this replaced (`device_register`, one extent registered at a program's first page, mesh 3c004b4 to
 e2b875c) registered after the program's queue pairs were made and ready to receive (`flow_work`: `pair_up`, then
 `pair_receive`, then the extent in `receives_configure`). Every pair call through it on 2026-10-15 failed at its first
