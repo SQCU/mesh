@@ -1,9 +1,9 @@
 [project]
 name = "mesh-runtime"
 version = "0.3.0"
-description = "The mesh services' Python runtime (bin/mesh-runtime-install.sh): numpy, mlx and cffi (the headers' bindings, rdma/mesh_c_build.py) under .python-version"
+description = "The mesh services' Python runtime (bin/mesh-runtime-install.sh): numpy, mlx, and cffi with the setuptools its compile needs on Python 3.12 (the headers' bindings, rdma/mesh_c_build.py) under .python-version"
 requires-python = ">=3.12"
-dependencies = ["numpy==2.5.2", "mlx==0.32.2", "cffi==2.1.1"]
+dependencies = ["numpy==2.5.2", "mlx==0.32.2", "cffi==2.1.1", "setuptools==84.0.0"]
 
 [tool.uv]
 package = false
