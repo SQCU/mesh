@@ -11,7 +11,7 @@ launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null
 ADMIN_USER="${MESH_USER:-${SUDO_USER:-$(stat -f%Su /dev/console)}}"
 id "$ADMIN_USER" >/dev/null 2>&1 || ADMIN_USER=$(stat -f%Su /dev/console)
 { [ "$ADMIN_USER" = root ] || ! id "$ADMIN_USER" >/dev/null 2>&1; } && ADMIN_USER=$(dscl . -read /Groups/admin GroupMembership \
-  | tr ' ' '\n' | grep -v 'GroupMembership:\|^root$\|^_\|^$' | head -1)
+  | tr ' ' '\n' | grep -v -E 'GroupMembership:|^root$|^_|^$' | head -1)
 
 sec(){ printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 ok(){  printf '  \033[32mOK  \033[0m %s\n' "$*"; }
