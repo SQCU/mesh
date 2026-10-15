@@ -16,7 +16,7 @@ echo "==> 2/3  fetching $REPO@$BRANCH"
 mkdir -p "$DEST/generations"
 SOURCE="$DEST/current"
 [ -f "$SOURCE/install.sh" ] || SOURCE="$DEST"
-STAGE=$(mktemp -d "$DEST/generations/source.XXXXXX")
+STAGE=$(mktemp -d "$DEST/generations/source.XXXXXX") && chmod 755 "$STAGE"
 if [ -n "$STAGE" ] && curl -fsSL "https://codeload.github.com/$REPO/tar.gz/$BRANCH" -o "$STAGE/source.tgz"; then
   if cmp -s "$STAGE/source.tgz" "$SOURCE/source.tgz"; then
     rm -f "$STAGE/source.tgz"; rmdir "$STAGE"
