@@ -18,13 +18,6 @@
 
 
 static ncclMeshStream stream_;
-// Within compiled-graph regions (batch): the command buffers committed, each signalling its count on progress_ as the
-// GPU reaches its end (a shared event's value is the GPU's progress at once; a completion handler runs 7-9 us
-// later, at the 99th percentile 20-60), and whether a collective was left in torch's open buffer.
-static id<MTLSharedEvent> progress_;
-static uint64_t committed_ = 0;
-static int batching_ = 0;
-static bool deferred_ = false;
 static std::vector<at::Tensor> held_;
 // each issued group's workspace, by ticket, until the library has retired it
 static std::map<uint64_t, std::vector<at::Tensor>> holders_;
@@ -50,24 +43,10 @@ static int64_t begin() {
   return (int64_t)(uintptr_t)&stream_;
 }
 
-// On torch's queue: its open buffer committed (within a compiled graph, counted on progress_).
+// On torch's queue: its open buffer committed.  Work the peers wait on (a publication) is committed at once, since the
+// host may next block outside torch while a peer waits on it.
 static void committing(at::mps::MPSStream *stream) {
-  if (batching_) {
-    if (!progress_) progress_ = [stream->device() newSharedEvent];
-    stream->endKernelCoalescing();
-    [stream->commandBuffer() encodeSignalEvent:progress_ value:++committed_];
-  }
   stream->synchronize(at::mps::SyncType::COMMIT);
-  deferred_ = false;
-}
-
-// Work the peers wait on (a publication): committed at once outside a compiled graph (the host may next block
-// outside torch while a peer waits on it); within one, while two buffers are in flight it joins the open one.
-static void publishing(at::mps::MPSStream *stream) {
-  if (!batching_ || committed_ - progress_.signaledValue < 2)
-    committing(stream);
-  else
-    deferred_ = true;
 }
 
 static void commit() {
@@ -77,11 +56,6 @@ static void commit() {
   release();
 }
 
-// A compiled graph's run (torch_mesh/_mps.py): +1 as it starts, -1 as it ends, when a collective left open is committed.
-static void batch(int64_t delta) {
-  batching_ += (int)delta;
-  if (!batching_ && deferred_) commit();
-}
 
 static bool moved(at::ScalarType type) {
   switch (type) {
@@ -138,7 +112,7 @@ static uint64_t on_stream(ncclResult_t (^call)(ncclMeshStream *), bool split, in
   dispatch_sync(stream->queue(), ^{
     stream_ = ncclMeshStream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr, split ? &issue : nullptr};
     result = call(&stream_);
-    if (!split || issue.published) publishing(stream);
+    if (!split || issue.published) committing(stream);
   });
   if (issue.ticket && !result) holders_[issue.ticket] = std::move(held_);
   held_.clear();
@@ -157,7 +131,7 @@ static void complete(uint64_t ticket) {
     stream_ = ncclMeshStream{(__bridge void *)stream->commandBuffer(), (__bridge void *)stream->commandEncoder(), workspace, nullptr, nullptr};
     int published = 0;
     result = ncclMeshComplete(ticket, &stream_, &published);
-    if (published) publishing(stream);
+    if (published) committing(stream);
   });
   release();
   checked(result);
@@ -535,7 +509,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("sequence", &sequence);
   module.def("begin", &begin);
   module.def("watch", [](int64_t comm) { marks_.try_emplace(comm); });
-  module.def("unwatch", [](int64_t comm) { marks_.erase(comm); });
   module.def("mark", &mark);
   module.def("take", [](int64_t comm) {
     auto found = marks_.find(comm);
@@ -558,5 +531,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("send", [](const at::Tensor &t, int64_t peer, int64_t comm, bool split) { return work_of(send_to(t, peer, comm, split), {t}, comm); });
   module.def("recv", [](const at::Tensor &t, int64_t peer, int64_t comm, bool split) { return work_of(receive_from(t, peer, comm, split), {t}, comm); });
   module.def("attach", &attach);
-  module.def("batch", &batch);
 }

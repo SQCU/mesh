@@ -1,13 +1,11 @@
-"""The mesh's store of what it measures about its nodes, links and calls (design/heterogeneity.md), kept across calls
-in one JSON file on the node that drives them (~/.local/share/mesh/store.json: a driver uses its own node's store):
-'nodes', each node's rates (RATES) with the model (node-info's) and GPU cores they were measured on, keyed by its name
-(node-info's `name`); 'links', each measured link's (alpha us, beta ns a byte), keyed 'a b' (its names sorted);
-'configurations', each call configuration's state (allocate.py's Balancer and the evidence it moves on, each call's
-program trace, ledger.py).  Every change is one read, change and write of the whole file under an exclusive lock on the
-file beside it (`changing`), so drivers and tools on one node never lose each other's records.  Its first records are
-the mesh's own (etc/mesh-store.json, installed beside the library).  A node with no record starts from the records of
-its model's nodes, else of every node; a link with no record costs what the bridges' join gives it (mesh.join: its
-ports' bandwidth), never a consumer's probe."""
+"""The mesh's store of what it measures about its nodes and calls (design/heterogeneity.md), kept across calls in one
+JSON file on the node that drives them (~/.local/share/mesh/store.json: a driver uses its own node's store): 'nodes',
+each node's rates (RATES) with the model (node-info's) and GPU cores they were measured on, keyed by its name
+(node-info's `name`); 'configurations', each call configuration's state (allocate.py's Balancer and the evidence it
+moves on).  Every change is one read, change and write of the whole file under an exclusive lock on the file beside it
+(`changing`), so drivers and tools on one node never lose each other's records.  Its first records are the mesh's own
+(etc/mesh-store.json, installed beside the library).  A node with no record starts from the records of its model's
+nodes, else of every node.  A link's cost is the bridges' map's (mesh-plan.h mesh_map), never a record here."""
 import contextlib
 import fcntl
 import json
@@ -47,7 +45,7 @@ def records(section):
 
 
 def record(section, key, value):
-    """A record of `section` ('nodes', 'links' or 'configurations') written."""
+    """A record of `section` ('nodes' or 'configurations') written."""
     with changing() as state:
         state.setdefault(section, {})[key] = value
 
@@ -65,8 +63,3 @@ def node(name, model=None):
             start[key] = [statistics.mean(values) for values in zip(*(r[key] for r in alike))]
     return start
 
-
-def link(a, b):
-    """The link between nodes `a` and `b` as measured: its (alpha us, beta ns a byte), None where it is not."""
-    known = records('links').get(' '.join(sorted((a, b))))
-    return tuple(known) if known else None

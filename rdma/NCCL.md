@@ -99,7 +99,9 @@ fails. The failure is returned:
 
 and `ncclGetLastError` names the node where it failed: the destination's, or a relay's on its route. A link or a relay
 lost under a group fails the group (its program toward that node ends; nothing resumes it), and the next group opens a
-session again on the map as it is then. A rank that departed is left out with `ncclCommShrink`.
+session again on the map as it is then; a session also opens again at its next group once the bridge's map serial has
+moved. A rank that departed is left out with `ncclCommShrink`, a joining one taken in with `ncclCommGetUniqueId` and
+`ncclCommGrow`, and `ncclCommRevoke` ends a communicator's groups in flight.
 
 ## Environment
 
@@ -107,8 +109,6 @@ session again on the map as it is then. A rank that departed is left out with `n
 |---|---|---|
 | `NCCL_COMM_ID` | library (ncclGetUniqueId) | the bootstrap root's `host:port` |
 | `NCCL_BUFFSIZE` | library | bytes of a large ring's slots together (default 4 MiB), read when a session opens |
-| `MESH_POSITIONS` | library | the session's cyclic invocations (default 8192), read when a session opens |
-| `MESH_CHECK_TRACE` | library | each group's scheduled messages and each position check (the pairing report's inputs) in the rank's log |
 | `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against (default its parent; the mesh's install passes `/usr/local/mesh/rdma`) |
 
 ## NumPy
@@ -131,11 +131,11 @@ metal-microbench `tools/mesh/numpy_power.py` is a ported power iteration, and `t
 
 ## On one host
 
-`tools/nccl_demo.py plans` (metal-microbench): every compiled program on data, over every family of maps n = 2..8.
-CPU only, about 2 s.
+`tools/nccl_demo.py plans` (metal-microbench): every compiled program on data, over rings and stars of n = 3..8, priced
+at the mean cost of the links of this node's bridge's map.
 
 ## Not implemented
 
-ncclCommRevoke, ncclCommGetUniqueId, ncclCommGrow, ncclCommInitRankScalable, ncclCommSuspend/Resume,
+ncclCommInitRankScalable, ncclCommSuspend/Resume,
 ncclCommMemStats, the window and signal functions (TB5 RDMA has no one-sided write), ncclGroupSimulateEnd,
 ncclSetEncryption, the ncclParam functions (`nccl.h`).

@@ -674,6 +674,7 @@ struct session {
   _Atomic int stop, failed;
   char failure[512];
   struct session *next;
+  uint64_t serial;
 };
 static struct session *sessions;
 static int registered;
@@ -885,13 +886,16 @@ static ncclResult_t start_failure(struct session *s, int status) {
               s->comm->name, strerror(status));
 }
 
-/* the communicator's session opened: on the bridges' map as it is now (comm_read), a channel of each class to every
-   other member, its transfers prepared and started, its progress thread */
+/* the communicator's session opened: on the bridges' map as it is now (comm_read, at the map serial read before it), a
+   channel of each class to every other member, its transfers prepared and started, its progress thread */
 static ncclResult_t session_open(ncclComm_t comm) {
+  uint64_t serial = 0;
+  mesh_map_wait(&serial, 0);
   ncclResult_t result = comm_read(comm);
   if (result) return result;
   struct session *s = calloc(1, sizeof *s);
   if (!s) return fail(ncclSystemError, "out of memory");
+  s->serial = serial;
   int status = mesh_attach(&s->context, comm->name);
   if (status) {
     free(s);
@@ -1217,9 +1221,11 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
   }
 }
 
-/* the communicator's session, opened where it has none on the map current now; a failure its progress thread kept fails
-   this group and closes the session, and the caller's next group opens another (no group is tried again here) */
+/* the communicator's session, opened where it has none, or opened again where the bridge's map serial moved since it
+   opened and none of its groups is in flight, on the map current now; a failure its progress thread kept fails this
+   group and closes the session, and the caller's next group opens another (no group is tried again here) */
 static struct inflight *inflight;
+static int session_issued(const struct session *s);
 static ncclResult_t session_ensure(ncclComm_t comm) {
   struct session *s = comm->session;
   if (s) violated(s);
@@ -1227,6 +1233,10 @@ static ncclResult_t session_ensure(ncclComm_t comm) {
     const ncclResult_t result = fail((ncclResult_t)atomic_load(&s->failed), "%s", s->failure);
     session_close(s);
     return result;
+  }
+  if (s && atomic_load_explicit(&s->header->map, memory_order_acquire) != s->serial && !session_issued(s)) {
+    session_close(s);
+    s = NULL;
   }
   return s ? ncclSuccess : session_open(comm);
 }
@@ -1427,6 +1437,12 @@ static void inflight_free(struct inflight *g) {
 
 /* every group in flight on session s lost with it: a later completion through one returns the session's failure (or
    its closing); every earlier group is complete or lost */
+static int session_issued(const struct session *s) {
+  for (const struct inflight *g = inflight; g; g = g->next_group)
+    if (g->session == s) return 1;
+  return 0;
+}
+
 static void inflight_lose(struct session *s) {
   const ncclResult_t failed = (ncclResult_t)atomic_load(&s->failed);
   inflight_last = NULL;
