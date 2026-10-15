@@ -67,9 +67,10 @@ def wait(serial=0, seconds=0.0):
 def current(members=None):
     """mesh_map: the map this node's bridge keeps as of `serial` (wait()'s), over `members` (bridge node numbers, map
     node v the bridge node members[v]; None: every node its records hold): `map` the LinkMap, `nodes` and `names` each
-    map node's bridge node and name.  OSError naming the bridge where it is unreachable; ValueError (LinkMap's) where
-    no route reaches a member."""
-    serial, asked = wait(), list(members or ())
+    map node's bridge node and name, `node` this node's bridge's (mesh_observe).  OSError naming the bridge where it is
+    unreachable; ValueError (LinkMap's) where no route reaches a member."""
+    serial, asked, own = wait(), list(members or ()), ffi.new('uint32_t *')
+    lib.mesh_observe(ffi.NULL, 0, own)
     room = ffi.new('struct mesh_link_map *', {'nodes': len(asked), 'links': len(asked) * (len(asked) - 1) // 2})
     while True:
         node, name = ffi.new('uint32_t[]', max(1, room.nodes)), ffi.new(f'char[][{lib.MESH_NAME_BYTES}]', max(1, room.nodes))
@@ -82,7 +83,7 @@ def current(members=None):
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
     return SimpleNamespace(map=LinkMap(KINDS[made.kind], count, link[0:made.links], cost[0:made.links]), nodes=list(node[0:count]),
-                           names=[ffi.string(n).decode() for n in name[0:count]], serial=serial)
+                           names=[ffi.string(n).decode() for n in name[0:count]], node=own[0], serial=serial)
 
 
 def operand(type, element_bytes, elements):
