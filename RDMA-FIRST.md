@@ -142,8 +142,7 @@ costume. A ring is a good topology precisely because an orbit *is* the synchroni
 **Telemetry is mandatory, not optional.** Since backpressure is structural rather than
 negotiated, the only way anyone knows what the graph is doing is to watch it. The bridge's
 region carries each port's peer, phase, last code, bandwidth and pairings, and each client's
-status toward each destination (`rdma/mesh.h`); a program that asks for it has its trace, every
-send and landing with its times (`rdma/mesh-call.h` `mesh_transfers_trace`).
+status toward each destination (`rdma/mesh.h`).
 
 ## The invariant core
 

@@ -9,8 +9,8 @@ mark on the same stream.  On MPS tensors a mark is a timing event of torch's poo
 at issue is where the GPU finished the work before the collective and the mark at completion where the GPU has passed
 its wait; on host tensors the monotonic clock (a host collective completes in the call).  A step's work on the rank is
 the sum, over its collectives, of the time from the mark after the previous collective (the previous step's last, or
-the step's boundary for the first) to the mark at this one's issue: the stretch the ranks' ledgers time for a prepared
-call (rdma/ledger.py).  `step` closes a step; `work`, taken at a step's boundary, returns each closed step's stretches
+the step's boundary for the first) to the mark at this one's issue: the stretch a prepared call's rank times at each
+crossing it issues (metal-microbench mesh_rank.m).  `step` closes a step; `work`, taken at a step's boundary, returns each closed step's stretches
 (seconds, one a collective in issue order) and forgets them.  Two marks with no GPU work between them cannot be timed
 apart; that interval counts zero.
 
