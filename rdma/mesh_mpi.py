@@ -17,7 +17,7 @@ a Cartesian process grid, Create_cart(dims) with Get_coords, Get_cart_rank, Shif
 each sub-grid a Split of it (a 2-D mesh's rows and columns), whose members the cables need not join.  Not here:
 nonblocking calls, the v-collectives, object (pickled) collectives; separately issued Send and Recv that do not pair
 are reported (rdma/NCCL.md "Rules").  A message to a rank the
-map does not link is forwarded by the nodes between (rdma/NCCL.md "Routes between unlinked ranks").  The host path works on any node; it is not the measured path (GPU tensors take the Metal
+map does not link is forwarded by the nodes between (rdma/NCCL.md "Routes between unlinked ranks").  The host path works on any node whose bridge runs (a communicator, a lone rank's too, is a client of its node's bridge: rdma/NCCL.md "Communicators"); it is not the measured path (GPU tensors take the Metal
 path through torch-mesh).  Memory: empty(shape, dtype) is an array in this node's bridge's window (ncclMemAlloc, the
 role mpi4py's MPI.Alloc_mem plays), the memory a program hands the collectives (rdma/NCCL.md "Memory"); the module's
 own temporaries are such arrays."""
@@ -154,9 +154,8 @@ class Comm:
         check(lib.ncclBroadcast(at(buf), at(buf), buf.size, TYPES[buf.dtype], root, self.comm, ffi.NULL))
 
     def Allgather(self, sendbuf, recvbuf):
-        send = recvbuf[self.rank * (recvbuf.size // self.size):][:recvbuf.size // self.size] if sendbuf is IN_PLACE else sendbuf
-        check(lib.ncclAllGather(at(window(send)), at(recvbuf), recvbuf.size // self.size, TYPES[recvbuf.dtype],
-                                self.comm, ffi.NULL))
+        send = window(recvbuf[self.rank * (recvbuf.size // self.size):][:recvbuf.size // self.size] if sendbuf is IN_PLACE else sendbuf)
+        check(lib.ncclAllGather(at(send), at(recvbuf), recvbuf.size // self.size, TYPES[recvbuf.dtype], self.comm, ffi.NULL))
 
     def Reduce_scatter_block(self, sendbuf, recvbuf, op=SUM):
         check(lib.ncclReduceScatter(at(sendbuf), at(recvbuf), recvbuf.size, TYPES[recvbuf.dtype], op, self.comm, ffi.NULL))
