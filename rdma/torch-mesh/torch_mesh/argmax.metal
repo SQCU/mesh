@@ -49,7 +49,7 @@ __attribute__((always_inline)) static inline void mesh_take(thread float &m, thr
 }
 
 // LastArrival, a split reduction's finish by the last of its J threadgroups to arrive (mesh_argmax's blocks,
-// attention.metal's parts' merge, metal-microbench native_projection.metal's K parts and Neural Engine shares): each
+// attention.metal's parts' merge, metal-microbench's row epilogues, metal/rows.metal, and Neural Engine shares): each
 // fences its stores (at the device's scope, or with System at the system's: a reader off the GPU) and counts its arrival
 // in word `slot`; true, after a fence, in every thread of the last to arrive where `last` (a threadgroup word) is given,
 // else (nullptr) in its thread 0 alone. The last makes the word 0 again for the dispatch's next run once its merge is

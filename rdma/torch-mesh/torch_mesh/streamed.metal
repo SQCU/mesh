@@ -43,15 +43,6 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// A kernel's type for the recorder that composes kernels (metal-microbench docs/kernels.md#one-kernel-interface):
-// MESH_KERNEL(row) before a kernel declares a threadgroup a row, touching only its own row of every binding;
-// MESH_KERNEL(product) a K split: threadgroup (x, y) writes share y of output block x (the 32 outputs [32x, 32x + 32) of
-// every input row) and nothing else of its output; MESH_KERNEL(finish) a thread an element of a product's output,
-// reading only the shares of that element (streamed_block_element enumerates block x's elements).
-#ifndef MESH_KERNEL
-#define MESH_KERNEL(kind)
-#endif
-
 // Every kernel's constants, one block at buffer 15 (a caller sets the fields its kernel reads): tiles a 32-row block
 // (columns / 32), a matrix's outputs (rows), input rows, panels a threadgroup, a row or share stride, shares to sum and
 // their stride (split), whether a panel finishes, an element count, a width, inputs written (a product's: the rows of
@@ -68,8 +59,8 @@ static inline ulong streamed_slab(uint word, uint rows, uint columns) { return u
 
 // Literal parts in a library compiled with MESH_LITERAL (metal-microbench docs/kernels.md#one-kernel-interface: the served
 // engine's classes): a pipeline specialized at its command's block (function constants 200-203, sixteen words) and lane
-// count (204) reads them as literals, so the compiler folds every size; unspecialized, and in a library without
-// MESH_LITERAL (a recorded program's: its parts take their literals from the recorder), the bound block and the builtin.
+// count (204) reads them as literals, so the compiler folds every size; unspecialized, and in a library compiled without
+// MESH_LITERAL (torch-mesh's own, LiteRT's stages), the bound block and the builtin.
 #if MESH_LITERAL
 constant uint4 mesh_literal_0 [[function_constant(200)]];
 constant uint4 mesh_literal_1 [[function_constant(201)]];
@@ -424,7 +415,6 @@ static inline __attribute__((always_inline)) void fragment_walk(device const uin
 // order[r] of ys, row stride d.stride). Rows past d.rows repeat the last row's loads and are not written. LOADS:
 // fragment_load's.
 template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F, uint LOADS, typename E = streamed_plain>
-MESH_KERNEL(product)
 kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                          device const uint *bands [[buffer(2)]], device const float *tables [[buffer(3)]],
                          device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
@@ -570,7 +560,6 @@ kernel void streamed_touch(device const uint4 *data [[buffer(0)]], device const 
 // A product's outputs finished into plain values of T: y[n * stride + order[r]], over the row's factor (inputs > 0: its
 // input row scaled by streamed_scale_rows), capped (cap > 0).
 template <typename T>
-MESH_KERNEL(finish)
 kernel void streamed_finish(device const float *partials [[buffer(0)]], device T *y [[buffer(1)]],
                             device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
                             device const float *factor [[buffer(4)]], constant streamed_dims &dims [[buffer(15)]],
@@ -642,7 +631,6 @@ static inline void streamed_gather(V values, float factor, device const int *ord
 // (eps d.eps; a norm's gamma folded into the products' column scales: docs/kernels.md#stacked-products); the row staged
 // in threadgroup memory where WIDTH > 0 (d.columns at most WIDTH), else read in place (streamed_gather).
 template <bool Normed, uint WIDTH, uint STRIDE>
-MESH_KERNEL(row)
 kernel void streamed_row_gather(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                                 device const int *order [[buffer(2)]], device const float *scale [[buffer(3)]],
                                 device half *second [[buffer(5)]], device half *third [[buffer(6)]],
@@ -750,7 +738,6 @@ kernel void streamed_rotate(device const half *x [[buffer(0)]], device half *fir
 // of the K blocks is read into registers by threads (g, j), g < threads / N, each mixing its K / (threads / N) rows
 // into a second region, which the puts read in their column order. Two barriers. N in {32, 64, 128}, K <= 20 and a
 // multiple of threads / N, K <= 3 S, columns <= 16 threads and <= 2560.
-MESH_KERNEL(row)
 kernel void streamed_hadamard(device const half *x [[buffer(0)]], device half *first [[buffer(1)]],
                               device half *second [[buffer(2)]], device const int *order [[buffer(3)]],
                               device const float *scale [[buffer(4)]], device const float *secondScale [[buffer(5)]],
@@ -874,7 +861,6 @@ static inline __attribute__((always_inline)) void fragment_coop(W w, half h, thr
 // stored from the destination as it lies, the ceiling round's sk form) into partials[share][n][row] (coded row order, the
 // row scale not applied), then consumed by the epilogue E.
 template <uint M, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint COOP, uint LOADS, typename E = streamed_plain>
-MESH_KERNEL(product)
 kernel void streamed_coop(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                           device const uint *bands [[buffer(2)]], device half *xs [[buffer(4)]],
                           device float *partials [[buffer(5)]], device const int *order [[buffer(12)]],

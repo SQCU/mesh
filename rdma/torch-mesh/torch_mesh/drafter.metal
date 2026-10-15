@@ -232,4 +232,7 @@ kernel void mesh_spec_drafts(device uint *state [[buffer(0)]], device const uint
     state[8 + r] = drafts[r];
     record[3 + r] = drafts[r];
 }
+#ifdef MESH_SPEC_ROWS
+template [[host_name("mesh_spec_drafts_rows")]] [[kernel]] decltype(mesh_spec_drafts<MESH_SPEC_ROWS>) mesh_spec_drafts<MESH_SPEC_ROWS>;
+#endif
 #endif

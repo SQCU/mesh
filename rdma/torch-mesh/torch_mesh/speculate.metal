@@ -109,4 +109,19 @@ __attribute__((always_inline)) static inline void mesh_spec_step(device uint *st
         if (given) state[1] = p0 + R;
     }
 }
+
+// The step as a kernel, one threadgroup of T lanes: metal-microbench's engine instantiates it (decode_crossings.swift
+// specStepCommand), LiteRT's program by MESH_SPEC_ROWS and MESH_SPEC_ORDER (litert_program.m).
+template <uint R, uint ORDER, uint T>
+kernel void mesh_spec_steps(device uint *state [[buffer(0)]], device uint *history [[buffer(1)]], device const uint *selected [[buffer(2)]],
+                            device const uint *teacher [[buffer(3)]], device uint *words [[buffer(4)]], device uint *record [[buffer(5)]],
+                            constant uint &taught [[buffer(6)]], constant uint &capacity [[buffer(7)]], constant uint &context [[buffer(8)]],
+                            constant uint &stride [[buffer(9)]], uint lane [[thread_index_in_threadgroup]]) {
+    threadgroup uint shared[4 + T / 32];
+    mesh_spec_step<R, ORDER, T>(state, history, selected, teacher, taught, capacity, context, words, stride, record, shared, lane);
+}
+#ifdef MESH_SPEC_ROWS
+template [[host_name("mesh_spec_steps_rows")]] [[kernel]] decltype(mesh_spec_steps<MESH_SPEC_ROWS, MESH_SPEC_ORDER, 1024>)
+    mesh_spec_steps<MESH_SPEC_ROWS, MESH_SPEC_ORDER, 1024>;
+#endif
 #endif

@@ -171,12 +171,8 @@ the instance fit's choice (`streamed.py`, metal-microbench docs/kernels.md#the-i
 the node's times over each candidate's units, its coefficients fitted to the node's observations (its evidence file,
 MESH_INSTANCES or `~/.cache/mesh/instances.json`; `python -m torch_mesh.streamed fit`), read by `Matrix.dispatch` and,
 as a table of a member's slices (`python -m torch_mesh.streamed resolve`), by metal-microbench's engine, which compiles
-the same source. `MESH_KERNEL(kind)` before a kernel
-(empty here) declares its type to that engine's recorder, which composes kernels by it (metal-microbench
-docs/kernels.md#one-kernel-interface): `product` (a K split's shares a block of 32 outputs), `finish` (an element of a
-product's output from its shares, `streamed_block_element` enumerating a block's), `row`; `streamed_value` and
-`streamed_rows` take the partials as any pointer type, so a finish run inside its product reads them
-`coherent(device)`.
+the same source. `streamed_value` and `streamed_rows` take the partials as any pointer type, so a finish run inside its
+product reads them `coherent(device)`.
 
 `torch_mesh/attention.metal` is decode attention as one algorithm over a KV type (`mesh_attention<A>`): a task's chunks
 (the KV type's scores of each lane's positions, the chunk's online softmax of R rows, the KV type's value product), the
