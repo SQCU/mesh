@@ -14,8 +14,8 @@
    its mesh_remote_wait, a landed slot's read its mesh_payload and a cell's release its mesh_publish; the filler protocol
    (STAMP, CHECK) is this library's.  Each operator's arithmetic is written once (op_int, op_float, op_f8), a landing
    being the wait and then the combine's body; it is the host's (nccl-mesh.c combine_into, premultiply, truncdiv): the
-   small floating types in float32 rounded to nearest even, float8 decoded and encoded by f8_to and f8_from line for
-   line, integers wrapping */
+   small floating types in float32 rounded to nearest even, float8 decoded and encoded by mesh.metal's f8_to and
+   f8_from, integers wrapping */
 static NSString *const KERNELS =
   @"\nusing namespace metal;\n"
   XSTR(ARGS(ulong, uint)) ";\n"
@@ -37,14 +37,6 @@ static NSString *const KERNELS =
   "COPY(1, uchar)\n"
   "template <typename T> T op_int(T a, T b, uint op) { return op == 0 ? T(ulong(a) + ulong(b)) : op == 1 ? T(ulong(a) * ulong(b)) : (op == 2 ? b > a : b < a) ? b : a; }\n"
   "template <typename T> T op_float(T a, T b, uint op) { float x = float(a), y = float(b); return op == 0 ? T(x + y) : op == 1 ? T(x * y) : (op == 2 ? y > x : y < x) ? b : a; }\n"
-  "float f8_to(uchar v, bool e5) { int mbits = e5 ? 2 : 3, bias = e5 ? 15 : 7; int expf = (v >> mbits) & (e5 ? 31 : 15), mant = v & ((1 << mbits) - 1); float r; "
-  "if (e5 && expf == 31) r = as_type<float>(mant ? 0x7fc00000u : 0x7f800000u); else if (!e5 && expf == 15 && mant == 7) r = as_type<float>(0x7fc00000u); "
-  "else if (!expf) r = ldexp(float(mant), 1 - bias - mbits); else r = ldexp(1.0f + float(mant) / float(1 << mbits), expf - bias); return (v & 0x80) ? -r : r; }\n"
-  "uchar f8_from(float x, bool e5) { int mbits = e5 ? 2 : 3, bias = e5 ? 15 : 7; uint u = as_type<uint>(x), a = u & 0x7fffffffu; uchar sign = (u >> 31) ? 0x80 : 0; "
-  "if (a > 0x7f800000u) return sign | 0x7f; if (a == 0x7f800000u) return e5 ? (sign | 0x7c) : (sign | 0x7f); if (a == 0) return sign; "
-  "int e = max(int(a >> 23) - 127, 1 - bias); float n = rint(ldexp(as_type<float>(a), mbits - e)); if (n >= float(1 << (mbits + 1))) { n *= 0.5f; e += 1; } "
-  "int expf, mant; if (n < float(1 << mbits)) { expf = 0; mant = int(n); } else { expf = e + bias; mant = int(n) - (1 << mbits); } "
-  "if (e5 ? expf >= 31 : (expf > 15 || (expf == 15 && mant == 7))) return e5 ? (sign | 0x7c) : (sign | 0x7f); return sign | uchar(expf << mbits) | uchar(mant); }\n"
   "template <bool E5> uchar op_f8(uchar a, uchar b, uint op) { float x = f8_to(a, E5), y = f8_to(b, E5); "
   "return op == 0 ? f8_from(x + y, E5) : op == 1 ? f8_from(x * y, E5) : (op == 2 ? y > x : y < x) ? b : a; }\n"
   "#define BODY(T, OP) device T *x = (device T *)(d + p.dst); volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); "

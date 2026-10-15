@@ -1,8 +1,10 @@
-// The GPU side of the words mesh-metal.m prepares (design/prepared-machine.md M04, M07, M10, M12, M30), defined once:
-// a kernel that waits on a word, reads a landed slot or releases a cell includes this file and calls these from its own
-// source, and no source splices them into another kernel's text (metal-microbench docs/acceptance-20261014.md A40).
+// The GPU side of the words mesh-metal.m prepares (design/prepared-machine.md M04, M07, M10, M12, M30), and of the wire's
+// one small float format (FP8, nccl.h ncclFloat8e4m3 and ncclFloat8e5m2), defined once: a kernel that waits on a word,
+// reads a landed slot, releases a cell or decodes FP8 includes this file and calls these from its own source, and no
+// source splices them into another kernel's text (metal-microbench docs/acceptance-20261014.md A40, A54).
 // libnccl-mesh's kernels include it, and so does every kernel that hands words to another agent (the host, a Neural
-// Engine partner's thread). install.sh installs it with the library ($MESH_ROOT/rdma/mesh.metal).
+// Engine partner's thread) or reads FP8 (metal-microbench dsv41.swift). install.sh installs it with the library
+// ($MESH_ROOT/rdma/mesh.metal).
 #ifndef MESH_METAL
 #define MESH_METAL
 #pragma METAL internals : enable
@@ -53,5 +55,34 @@ template <typename W>
 __attribute__((always_inline)) static inline void mesh_publish(volatile coherent(system) device W *cell, ulong value) {
     metal::atomic_thread_fence(metal::mem_flags::mem_device, metal::memory_order_seq_cst, static_cast<metal::thread_scope>(3));
     *cell = W(value);
+}
+
+// FP8 E4M3 (fn: no infinity, S.1111.111 NaN) and, with e5, E5M2 (IEEE-like) [OCP 8-bit floating point, 2023]: a byte's
+// value, and a float rounded to nearest even, saturating E4M3 to NaN and E5M2 to infinity past their largest; the host's
+// codec is nccl-mesh.c's f8_to and f8_from, line for line.
+static inline float f8_to(uchar v, bool e5) {
+    const int mbits = e5 ? 2 : 3, bias = e5 ? 15 : 7, expf = (v >> mbits) & (e5 ? 31 : 15), mant = v & ((1 << mbits) - 1);
+    float r;
+    if (e5 && expf == 31) r = metal::as_type<float>(mant ? 0x7fc00000u : 0x7f800000u);
+    else if (!e5 && expf == 15 && mant == 7) r = metal::as_type<float>(0x7fc00000u);
+    else if (!expf) r = metal::ldexp(float(mant), 1 - bias - mbits);
+    else r = metal::ldexp(1.0f + float(mant) / float(1 << mbits), expf - bias);
+    return (v & 0x80) ? -r : r;
+}
+
+static inline uchar f8_from(float x, bool e5) {
+    const int mbits = e5 ? 2 : 3, bias = e5 ? 15 : 7;
+    const uint u = metal::as_type<uint>(x), a = u & 0x7fffffffu;
+    const uchar sign = (u >> 31) ? 0x80 : 0;
+    if (a > 0x7f800000u) return sign | 0x7f;
+    if (a == 0x7f800000u) return e5 ? (sign | 0x7c) : (sign | 0x7f);
+    if (a == 0) return sign;
+    int e = metal::max(int(a >> 23) - 127, 1 - bias);
+    float n = metal::rint(metal::ldexp(metal::as_type<float>(a), mbits - e));
+    if (n >= float(1 << (mbits + 1))) { n *= 0.5f; e += 1; }
+    int expf, mant;
+    if (n < float(1 << mbits)) { expf = 0; mant = int(n); } else { expf = e + bias; mant = int(n) - (1 << mbits); }
+    if (e5 ? expf >= 31 : (expf > 15 || (expf == 15 && mant == 7))) return e5 ? (sign | 0x7c) : (sign | 0x7f);
+    return sign | uchar(expf << mbits) | uchar(mant);
 }
 #endif
