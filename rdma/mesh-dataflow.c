@@ -355,8 +355,8 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
 
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M09 */
-/* The arena's pages: every one addressable by every client and by the GPU, and registered on a port's device the
-   first time a program names it there (mesh-verbs.h device_register). */
+/* The arena's pages: every one addressable by every client and by the GPU, and registered on every port's device
+   since that device came up (mesh-verbs.h device_up); a lease the window cannot meet is refused (ENOMEM). */
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   _Atomic uint64_t *bits=mesh_arena_bits(c->M);

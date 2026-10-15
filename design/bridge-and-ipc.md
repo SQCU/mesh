@@ -27,12 +27,14 @@ new one. SIGTERM (launchd's stop) ends it by the same teardown. A bridge never r
 ## region
 
 The node's one region is the shared memory object `/mesh0` (mesh.h `MESH_NAME`), made by the bridge at its start and
-laid out from the node's memory (`mesh_layout`): an arena of every page of the node's memory, a page-table row a
-block, the node's ports (`MESH_PORTS`), the client slots (`MESH_CLIENTS`) and each row's publication targets, one a
-destination. The arena is address space; a page costs memory once something writes it, and it is registered with a
-port's device the first time a program names it on that port (`device_register`, one 1 GiB extent at a time, never
-past the device's max_mr). Nothing in the region is sized by a call: arena pages, page-table rows and transfer lists
-are a lease, taken as a program asks for them and refused as a value where the node cannot give them.
+laid out (`mesh_layout`): an arena of `MESH_WINDOW` bytes (2 GiB: what executions put there, crossing rings, SEND
+cells, completion words and transfer lists, never weights; design/prepared-machine.md#M09), a page-table row a block,
+the node's ports (`MESH_PORTS`), the client slots (`MESH_CLIENTS`) and each row's publication targets, one a
+destination. The arena is the registered window: every port's device registers it whole when the device comes up,
+before any queue pair exists (`device_up`), and deregisters it only when the device retires (`down_device`), so no
+program's start or run changes a device's mappings while DMA may be live (the operator's rule, quoted at M09). Nothing
+in the region is sized by a call: arena pages, page-table rows and transfer lists are a lease, taken as a program asks
+for them and refused as a value naming the execution where the window cannot give them, never by growing the window.
 
 The map is the bridge's table of records, one a node (`struct mesh_record`): its node number, name and boot, the
 record's sequence in that boot, and its ports by index, each port's peer, phase, code, bandwidth and pairings. Its
@@ -54,9 +56,10 @@ the ports and the map. No client reads, waits for or names another client's.
 
 A port is an RDMA device of the node (`rdma_enN`, its interface `enN`), given an index in the order the bridge finds
 it: at its start, and again when an interface attaches or its link comes on that no port has (`ports_found`). On its
-turn (every 3 s, design/recovery.md#pause), a port without a link opens its device (a context, a protection domain),
-and while its port is active it sends a hello (its node and boot) to every node on its link (the link-local all-nodes
-group, UDP `MESH_PORT`). Of two nodes that hear each other, the lower node dials the higher's listener on the address
+turn (every 3 s, design/recovery.md#pause), a port without a link opens its device (a context, a protection domain
+and, once its port is active, the whole window registered: design/prepared-machine.md#M09), and while its port is
+active it sends a hello (its node and boot) to every node on its link (the link-local all-nodes group, UDP
+`MESH_PORT`). Of two nodes that hear each other, the lower node dials the higher's listener on the address
 it heard, and the two exchange their link hellos (node, boot, the port's LID and GID, the block size) over that
 connection, its control socket, which the bridge keeps with a keepalive. A port whose device is retiring takes no
 hello and no connection until its turn has retired the device and opened it again. The link is then paired: the

@@ -3,7 +3,6 @@
 #include <infiniband/verbs.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/sysctl.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -19,18 +18,16 @@
 /* tbt_post_recv loads only the low 32 address bits of an SGE, so no registration may cross a 4 GiB
    virtual-address boundary.  The window is mapped at a bank-aligned base and registered in extents of
    MESH_REGION bytes, which divides the bank: every extent lies inside one bank, however many banks the
-   window spans.  1 GiB is the registration the provider takes, so max_mr extents are the device's
-   registrable memory. */
+   window spans.  1 GiB is the registration the provider takes. */
 #define MESH_BANK ((size_t)1<<32)
 #define MESH_REGION ((size_t)1<<30)
 struct mesh_wire { char *data; size_t length; };
-/* design/bridge-and-ipc.md#ports: a port's device: its context, protection domain and the window's extents
-   registered on it so far (an extent registers when a program first names a page of it), the queue pairs it
-   holds against max_qp */
+/* design/bridge-and-ipc.md#ports: a port's device: its context, protection domain and the whole window's extents
+   registered on it (design/prepared-machine.md#M09), the queue pairs it holds against max_qp */
 struct mesh_device {
   char name[32];
-  struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
-  uint32_t extents,frame_capacity,pairs,max_pairs,max_regions,registered;
+  struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr *regions[(MESH_WINDOW+MESH_REGION-1)/MESH_REGION];
+  uint32_t frame_capacity,pairs,max_pairs;
   char *wire;
   struct ibv_port_attr port;
   union ibv_gid gid;
@@ -94,13 +91,13 @@ static int down_pair(struct mesh_verbs *provider){
   free(provider->queues);provider->queues=NULL;provider->count=0;
   return 1;
 }
-/* design/RDMA-KERNEL-RECOVERY.md: registrations, protection domain, context, each kept where its release fails */
+/* design/RDMA-KERNEL-RECOVERY.md: registrations, protection domain, context, each kept where its release fails; a
+   device's registrations go only here, at its retirement (design/prepared-machine.md#M09) */
 static int down_device(struct mesh_device *device){
-  for(uint32_t e=0;e<device->extents;e++){
+  for(size_t e=0;e<sizeof device->regions/sizeof *device->regions;e++){
     if(device->regions[e] && ibv_dereg_mr(device->regions[e]))return 0;
     device->regions[e]=NULL;
   }
-  device->registered=0;
   if(device->domain){if(ibv_dealloc_pd(device->domain))return 0;device->domain=NULL;}
   if(device->context){if(ibv_close_device(device->context))return 0;device->context=NULL;}
   device->frame_capacity=0;
@@ -112,8 +109,9 @@ static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M09 */
 /* design/bridge-and-ipc.md#ports: the port's device opened (by its name, the device list read again) and its port
-   active, its protection domain and capacities read once a context.  0, or -1 with errno (ENETDOWN: the port is not
-   active; ENODEV: no such device now). */
+   active, its protection domain, the whole window registered on it and its capacities read once a context, before any
+   queue pair exists (design/prepared-machine.md#M09).  0, or -1 with errno (ENETDOWN: the port is not active; ENODEV:
+   no such device now; a registration's refusal, the device then not up). */
 static int device_up(struct mesh_device *device,struct mesh_wire *wire){
   if(!device->context){
     struct ibv_device **list=ibv_get_device_list(NULL);
@@ -127,26 +125,15 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire){
   struct ibv_device_attr capabilities;
   if(ibv_query_device(device->context,&capabilities))return -1;
   if(!device->domain && !(device->domain=ibv_alloc_pd(device->context)))return -1;
-  uint32_t extents=(uint32_t)((wire->length+MESH_REGION-1)/MESH_REGION);
-  if(!device->regions && !(device->regions=calloc(extents?extents:1,sizeof *device->regions))){errno=ENOMEM;return -1;}
-  device->extents=extents;device->wire=wire->data;
-  device->max_pairs=(uint32_t)capabilities.max_qp;device->max_regions=(uint32_t)capabilities.max_mr;
+  if(wire->length>MESH_WINDOW){errno=EINVAL;return -1;}
+  for(size_t first=0,e=0;first<wire->length;first+=MESH_REGION,e++){
+    size_t bytes=wire->length-first<MESH_REGION?wire->length-first:MESH_REGION;
+    if(!device->regions[e] && !(device->regions[e]=ibv_reg_mr(device->domain,wire->data+first,bytes,IBV_ACCESS_LOCAL_WRITE)))return -1;
+  }
+  device->wire=wire->data;device->max_pairs=(uint32_t)capabilities.max_qp;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity){errno=EOPNOTSUPP;return -1;}
   device->frame_capacity=capacity>=(uint32_t)capabilities.max_cqe?(uint32_t)capabilities.max_cqe-1:capacity;
-  return 0;
-}
-/* design/prepared-machine.md#M09: the extent holding `offset` registered on the device, where it is not yet: 0, or
-   the error (ENOMEM past the device's max_mr) */
-static int device_register(struct mesh_device *device,uint64_t offset,size_t length){
-  uint32_t e=(uint32_t)(offset/MESH_REGION);
-  if(e>=device->extents)return EINVAL;
-  if(device->regions[e])return 0;
-  if(device->registered>=device->max_regions)return ENOMEM;
-  size_t first=(size_t)e*MESH_REGION,bytes=length-first<MESH_REGION?length-first:MESH_REGION;
-  device->regions[e]=ibv_reg_mr(device->domain,device->wire+first,bytes,IBV_ACCESS_LOCAL_WRITE);
-  if(!device->regions[e])return errno?errno:ENOMEM;
-  device->registered++;
   return 0;
 }
 /* design/prepared-machine.md#M11 */

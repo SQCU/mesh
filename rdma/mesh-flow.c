@@ -195,13 +195,14 @@ static uint32_t transfer_row(struct hdr *m,uint32_t fallback,const struct mesh_t
   return row+(uint32_t)((size_t)((invocation-transfer->begin)%depth)*transfer->invocation_pages/m->block)+chunk;
 }
 
-/* design/prepared-machine.md#M09: a chunk's span, its extent registered on the port's device first */
+/* design/prepared-machine.md#M09: a chunk's span in the window its port's device registered when it came up; 0, or
+   EINVAL for a page outside the window */
 static int chunk_span(struct flow *link,uint32_t address,uint64_t remaining,struct ibv_sge *span){
   struct hdr *m=link->M;
   uint64_t offset=atomic_load_explicit(&mesh_page(m)[address].address,memory_order_relaxed)-m->data_off;
-  int error=device_register(link->provider.device,offset,wire.length);
-  if(!error)*span=wire_span(link->provider.device,(uint64_t)m->block*m->pgsz,offset,remaining);
-  return error;
+  if(offset>=wire.length)return EINVAL;
+  *span=wire_span(link->provider.device,(uint64_t)m->block*m->pgsz,offset,remaining);
+  return 0;
 }
 
 /* design/prepared-machine.md#M07, #M08: the word a landed chunk of invocation u stores: its row's completion word
@@ -1182,7 +1183,7 @@ static void flows_turn(void){
     }
     if(f->state==FAILED)continue;
     const int64_t failed=atomic_load(&f->failed);
-    if(failed)flow_fail(f,failed,atomic_load(&f->domain),FAIL,f->port->peer,M->node);
+    if(failed)flow_fail(f,failed,atomic_load(&f->domain),FAIL,M->node,M->node);
     else if(f->state!=RUNNING && now>f->deadline)flow_fail(f,ETIMEDOUT,4,FAIL,f->far,f->far);
   }
 }
@@ -1212,12 +1213,11 @@ int main(int argc,char **argv){
   if(!local || !CFStringGetCString(local,host,sizeof host,kCFStringEncodingUTF8))gethostname(host,sizeof host);
   if(local)CFRelease(local);
   host[sizeof host-1]=0;
-  uint64_t ram=0;size_t rl=sizeof ram;sysctlbyname("hw.memsize",&ram,&rl,NULL,0);
   const uint32_t pg=(uint32_t)getpagesize();
   /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
   if((uint64_t)pg+4096>16773120)die("transport chunk exceeds native request capacity");
   struct hdr geometry={0};
-  uint64_t length=mesh_layout(&geometry,pg,1,(uint32_t)(ram/pg));
+  uint64_t length=mesh_layout(&geometry,pg,1,(uint32_t)(MESH_WINDOW/pg));
   signal(SIGPIPE,SIG_IGN);signal(SIGINT,SIG_IGN);signal(SIGTERM,SIG_IGN);signal(SIGHUP,SIG_IGN);
   atexit(down);
   shm_unlink(MESH_NAME);int fd=shm_open(MESH_NAME,O_CREAT|O_RDWR,MESH_MODE);if(fd<0)die("shm");

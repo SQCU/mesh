@@ -19,6 +19,14 @@
 #define MESH_DESTINATIONS 64
 #define MESH_QUEUES 4
 #define MESH_ORDERS 4096
+/* design/prepared-machine.md#M09: the arena, the window every port's device registers whole when it comes up: what
+   executions put there (crossing rings, SEND cells, completion words, transfer lists; never weights).  A libnccl-mesh
+   session's lease toward one peer is 24.1 MiB: its two rings each way (DEPTH 16 slots of NCCL_BUFFSIZE / LAG, 512 KiB,
+   and of one 16 KiB block), 16.5 MiB; the SEND cells of its two transfers, (POSITIONS + 1) x 256 bytes each, 4.0 MiB;
+   its 270336 completion words, 2.1 MiB; its transfer lists, MESH_QUEUES x 2 x MESH_ORDERS entries, 1.5 MiB.  Every
+   client slot holding one, MESH_CLIENTS x 24.1 MiB = 1.5 GiB: the window is the power of two above it, two 1 GiB
+   extents of one 4 GiB bank. */
+#define MESH_WINDOW ((uint64_t)1<<31)
 #define MESH_RETIRING (UINT64_C(1)<<63)
 /* design/recovery.md#pause, #first: the pause between a port's pairings, how long a program waits for its peer's to
    start, and how long the queue pairs of two started programs take to pair; a client's start waits on its bridge at
@@ -204,10 +212,10 @@ static inline void mesh_bits_clear(_Atomic uint64_t *p,uint32_t first,uint32_t c
 }
 
 /* design/algorithm-sources.md#programkernel_call; design/prepared-machine.md#M01 */
-/* design/bridge-and-ipc.md#region: the node's region, laid out from the node's memory: `pages` arena pages of `block`
-   pages a block, a page-table row a block, the node's ports, the client slots and each row's publication targets, one
-   a destination; the map's records are no part of it but a lease the bridge takes from the arena (mesh_records), and
-   every page registers on demand */
+/* design/bridge-and-ipc.md#region: the node's region: `pages` arena pages of `block` pages a block (the bridge's
+   MESH_WINDOW), a page-table row a block, the node's ports, the client slots and each row's publication targets, one a
+   destination; the map's records are no part of it but a lease the bridge takes from the arena (mesh_records), and the
+   arena is registered whole on every port's device before any queue pair exists (mesh-verbs.h device_up) */
 static inline uint64_t mesh_layout(struct hdr *h,uint32_t pgsz,uint32_t block,uint32_t pages){
   uint32_t arena=pages/block*block,rows=arena/block;
   uint64_t at=(sizeof *h+pgsz-1)/pgsz*pgsz,words=((uint64_t)rows+63)/64;
