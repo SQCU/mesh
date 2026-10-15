@@ -49,7 +49,7 @@ done
 _user=$(cat /usr/local/mesh/admin-user 2>/dev/null); _uid=$(id -u "$_user" 2>/dev/null)
 if [ -n "$_uid" ]; then
   for _p in "/Users/$_user/Library/LaunchAgents/"*.plist; do
-    [ -f "$_p" ] || continue; _l=$(basename "$_p" .plist)
+    [ -f "$_p" ] && [ "$(plutil -extract LimitLoadToSessionType raw "$_p" 2>/dev/null)" = Background ] || continue; _l=$(basename "$_p" .plist)
     launchctl print "user/$_uid/$_l" >/dev/null 2>&1 && continue
     launchctl bootstrap "user/$_uid" "$_p" 2>/dev/null && { echo "[$(ts)] DRIFT $_user's agent $_l loaded in its user domain"; drift=1; }
   done

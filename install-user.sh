@@ -49,7 +49,7 @@ install -m 644 "$R/keys/authorized_keys" "$D/etc/authorized_keys"
 install -m 755 "$R/viz/serve.py" "$D/viz/serve.py"
 install -m 644 "$R/viz/index.html" "$D/viz/index.html"
 try "mesh-stat built" make -C "$R/rdma" mesh-stat
-try "mesh-stat installed" install -m 755 "$R/rdma/mesh-stat" "$D/bin/mesh-stat"
+try "mesh-stat installed" install -m 755 "$R/rdma/mesh-stat" "$R/rdma/libmesh.dylib" "$D/bin/"
 try "memory bandwidth sampler built" xcrun clang -fobjc-arc -framework Foundation -lIOReport "$R/user/mesh-bandwidth.m" -o "$R/user/mesh-bandwidth"
 try "memory bandwidth sampler installed" install -m 755 "$R/user/mesh-bandwidth" "$D/bin/mesh-bandwidth"
 install -m 755 "$R/bin/mesh-runtime-install.sh" "$D/bin/mesh-runtime-install.sh"
