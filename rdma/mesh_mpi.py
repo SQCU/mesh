@@ -18,7 +18,9 @@ each sub-grid a Split of it (a 2-D mesh's rows and columns), whose members the c
 nonblocking calls, the v-collectives, object (pickled) collectives; separately issued Send and Recv that do not pair
 are reported (rdma/NCCL.md "Rules").  A message to a rank the
 map does not link is forwarded by the nodes between (rdma/NCCL.md "Routes between unlinked ranks").  The host path works on any node; it is not the measured path (GPU tensors take the Metal
-path through torch-mesh)."""
+path through torch-mesh).  Memory: empty(shape, dtype) is an array in this node's bridge's window (ncclMemAlloc, the
+role mpi4py's MPI.Alloc_mem plays), the memory a program hands the collectives (rdma/NCCL.md "Memory"); the module's
+own temporaries are such arrays."""
 import math
 import os
 
@@ -44,6 +46,23 @@ def check(result):
     if result:
         raise RuntimeError(f'libnccl-mesh: {ffi.string(lib.ncclGetErrorString(result)).decode()}: '
                            f'{ffi.string(lib.ncclGetLastError(ffi.NULL)).decode()}')
+
+
+def empty(shape, dtype=np.float64):
+    """An uninitialized C-contiguous array of `shape` and `dtype` in this node's bridge's window (mesh.lease), its pages
+    returned when it and every view of it are gone."""
+    dtype = np.dtype(dtype)
+    count = math.prod(shape) if isinstance(shape, (tuple, list)) else int(shape)
+    return np.frombuffer(mesh.lease(count * dtype.itemsize), dtype, count=count).reshape(shape)
+
+
+def window(array):
+    """`array` where it is C-contiguous, else its copy in the window (empty)."""
+    if array.flags.c_contiguous:
+        return array
+    made = empty(array.shape, array.dtype)
+    made[...] = array
+    return made
 
 
 def at(array):
@@ -128,7 +147,7 @@ class Comm:
 
     def Reduce(self, sendbuf, recvbuf, op=SUM, root=0):
         send = recvbuf if sendbuf is IN_PLACE else sendbuf
-        target = recvbuf if recvbuf is not None else np.empty_like(send)
+        target = recvbuf if recvbuf is not None else empty(send.shape, send.dtype)
         check(lib.ncclReduce(at(send), at(target), send.size, TYPES[send.dtype], op, root, self.comm, ffi.NULL))
 
     def Bcast(self, buf, root=0):
@@ -136,7 +155,7 @@ class Comm:
 
     def Allgather(self, sendbuf, recvbuf):
         send = recvbuf[self.rank * (recvbuf.size // self.size):][:recvbuf.size // self.size] if sendbuf is IN_PLACE else sendbuf
-        check(lib.ncclAllGather(at(np.ascontiguousarray(send)), at(recvbuf), recvbuf.size // self.size, TYPES[recvbuf.dtype],
+        check(lib.ncclAllGather(at(window(send)), at(recvbuf), recvbuf.size // self.size, TYPES[recvbuf.dtype],
                                 self.comm, ffi.NULL))
 
     def Reduce_scatter_block(self, sendbuf, recvbuf, op=SUM):
@@ -172,10 +191,13 @@ class Comm:
         check(lib.ncclRecv(at(buf), buf.size, TYPES[buf.dtype], source, self.comm, ffi.NULL))
 
     def Barrier(self):
-        self.Allreduce(IN_PLACE, np.zeros(1, np.int32))
+        box = empty(1, np.int32)
+        box[0] = 0
+        self.Allreduce(IN_PLACE, box)
 
     def allreduce(self, value, op=SUM):
-        box = np.array([value], value.dtype if isinstance(value, np.generic) else np.float64 if isinstance(value, float) else np.int64)
+        box = empty(1, value.dtype if isinstance(value, np.generic) else np.float64 if isinstance(value, float) else np.int64)
+        box[0] = value
         self.Allreduce(IN_PLACE, box, op)
         return box[0].item()
 

@@ -52,15 +52,26 @@ def kind(tensor):
     return TYPES[tensor.dtype]
 
 
+def blank(shape, dtype, device):
+    """An uninitialized contiguous tensor the backend hands a collective: a CPU one in this node's bridge's window (a
+    lease, mesh.lease: rdma/NCCL.md "Memory"); an MPS one is torch's (the Metal path copies it into the window's
+    rings)."""
+    if torch.device(device).type != 'cpu':
+        return torch.empty(shape, dtype=dtype, device=device)
+    count, element = math.prod(shape), torch.empty(0, dtype=dtype).element_size()
+    return torch.frombuffer(mesh.lease(max(count, 1) * element), dtype=dtype, count=max(count, 1))[:count].view(shape)
+
+
 class Host:
-    """A tensor's host image: the tensor itself where it is a contiguous CPU tensor, else a contiguous CPU copy
-    (`read` its contents, else uninitialized) that `back` writes into it."""
+    """A tensor's host image: the tensor itself where it is a contiguous CPU tensor, else a contiguous copy in the window
+    (blank; `read` its contents, else uninitialized) that `back` writes into it."""
 
     def __init__(self, tensor, read=True):
         self.tensor = tensor
         self.direct = tensor.device.type == 'cpu' and tensor.is_contiguous()
-        self.host = tensor if self.direct else (tensor.detach().to('cpu').contiguous() if read
-                                                else torch.empty(tensor.shape, dtype=tensor.dtype))
+        self.host = tensor if self.direct else blank(tensor.shape, tensor.dtype, 'cpu')
+        if read and not self.direct:
+            self.host.copy_(tensor.detach())
 
     def at(self, elements=0):
         return ffi.cast('void *', self.host.data_ptr() + elements * self.host.element_size())
@@ -281,7 +292,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
                                                             self.comm, self._stream)) for h in hosts], hosts, tensors)
 
     def barrier(self, opts=None):
-        return self.allreduce([torch.ones(1)])
+        return self.allreduce([blank((1,), torch.float32, 'cpu').fill_(1)])
 
     def all_gather_single(self, output, input, opts=None):
         if (s := self._direct(output, input)) is not None:
@@ -302,7 +313,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
         spelling) as ProcessGroupNCCL takes them: one broadcast rooted at each rank, in one group."""
         if all(len({t.numel() for t in out}) == 1 for out in outputs):
             sources = [operand(i) for i in inputs]
-            flats = [operand(torch.empty(self._size * s.host.numel(), dtype=s.host.dtype, device=s.host.device), read=False)
+            flats = [operand(blank((self._size * s.host.numel(),), s.host.dtype, s.host.device), read=False)
                      for s in sources]
 
             def back():
@@ -339,7 +350,8 @@ class ProcessGroupMesh(dist.ProcessGroup):
         Reduce_scatter of a list in torch's spelling) as ProcessGroupNCCL takes them: one reduce rooted at
         each rank, in one group."""
         if all(len({t.numel() for t in parts}) == 1 for parts in inputs):
-            flats = [operand(torch.cat([x.detach().reshape(-1) for x in parts])) for parts in inputs]
+            flats = [operand(torch.cat([x.detach().reshape(-1) for x in parts],
+                                       out=blank((sum(x.numel() for x in parts),), parts[0].dtype, parts[0].device))) for parts in inputs]
             targets = [operand(o, read=False) for o in outputs]
             return self._group(lambda: [check(LIB.ncclReduceScatter(f.at(), t.at(), t.host.numel(), kind(t.host),
                                                                     op(opts.reduceOp), self.comm, self._stream))

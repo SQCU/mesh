@@ -9,7 +9,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'rdma'))
 from allocate import Balancer
-from mesh_mpi import Comm
+from mesh_mpi import Comm, empty
 
 TEAMS = 5
 EXPERTS = 8
@@ -60,8 +60,9 @@ def main():
     # observes identical inputs, and its shares are the next tick's configuration operand.
     comm = Comm()
     rank = comm.Get_rank()
-    local = np.zeros((args.bots + 1, args.width), np.float32)
-    total = np.empty_like(local)
+    local = empty((args.bots + 1, args.width), np.float32)
+    local[...] = 0
+    total = empty(local.shape, local.dtype)
     balancer = Balancer({'columns': {'parts': columns, 'grain': split['grain'], 'low': split['low']}})
     shares = columns
     route, up, down, objective = model(args.width)

@@ -32,6 +32,11 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - Everything runs on any connected cable graph. Messages between ranks the map does not link (p2p, `all_to_all`,
   `gather`, `scatter`, a collective's crossings) are forwarded by the bridges on their route
   ([NCCL.md](../NCCL.md#routes-between-unlinked-ranks)).
+- Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a non-contiguous CPU tensor's contiguous copy, a
+  barrier's tensor, the flattened operands of the list `all_gather` and `reduce_scatter`) are leases of the node's
+  bridge's window (`backend.blank`, over `mesh.lease`). A program's CPU tensor in the window is
+  `torch.frombuffer(mesh.lease(nbytes), dtype=...)`. MPS tensors are torch's MPS allocator's; the Metal path copies
+  them into the window's rings, and placing them in the window is not done here.
 
 ## What works
 
