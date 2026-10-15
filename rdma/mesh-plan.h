@@ -49,14 +49,20 @@ int mesh_link_map_check(const struct mesh_link_map *);
    the lower to the higher on fewest links (mesh_trees_shortest's parent rule), which the bridges forward along.  The
    kind MESH_LINKS_MESH where every pair is linked, else MESH_LINKS_GRAPH.  On entry map->nodes and map->links are the
    room of `node` and of map->link and map->cost (n and n x (n - 1) / 2 suffice for members); returns the map's nodes,
-   or -errno (ENOSPC: the room is short, map->nodes and map->links then the room needed). */
-int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map);
+   or -errno (ENOSPC: the room is short, map->nodes and map->links then the room needed).  name[i] (name NULL: none)
+   map node i's host name as its bridge's record holds it, NUL-terminated ("" for a node with no record); its room is
+   map->nodes, as node's.  MESH_NAME_BYTES: a LocalHostName of up to 63 bytes and its NUL, the record's name field
+   (mesh.h struct mesh_record). */
+#define MESH_NAME_BYTES 64
+int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH_NAME_BYTES],struct mesh_link_map *map);
 /* The bridge's map serial (never 0; it changes with the records): waits until it differs from *serial or bound_ns
    passes and writes it there; 0 where it differs, ETIMEDOUT where the bound passed, else an unreachable bridge's errno.
    Read (*serial 0) before mesh_map, it makes a later change end the next wait at once. */
 int mesh_map_wait(uint64_t *serial,uint64_t bound_ns);
 /* Whether the map links a and b, either way (a mesh every pair). */
 int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
+/* The link a-b's own cost where the map gives one (either way), else alpha and beta. */
+void mesh_link_cost(const struct mesh_link_map *,uint32_t a,uint32_t b,double alpha,double beta,double *link_alpha,double *link_beta);
 
 /* Spanning trees over a map's nodes: the routes every collective and every message take (Blink's tree packing
    [Wang et al., MLSys 2020]; ForestColl [Zhao et al. 2024]).  Tree t is rooted at root[t]; node v's parent in it is

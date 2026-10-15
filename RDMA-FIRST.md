@@ -34,7 +34,7 @@ moments serialize agents that had no reason to be coupled.
 ## Cheap
 
 **Pages and indices.** A page is the node's (`getpagesize()`, 16 KiB), and its region entry,
-32 bytes (`rdma/mesh.h` `struct mesh_page_entry`), is 0.2% of it. A lease claims rows and pages
+16 bytes (`rdma/mesh.h` `struct mesh_page_entry`: its mapping and address), is 0.1% of it. A lease claims rows and pages
 by compare-exchange on bitmap words (`rdma/mesh-call.h`), and an address is index arithmetic:
 tens of nanoseconds, no data movement.
 

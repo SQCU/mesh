@@ -334,7 +334,7 @@ static ncclResult_t comm_read(struct ncclComm *comm) {
   routes_free(comm, 0);
   comm->map = (struct mesh_link_map){MESH_LINKS_GRAPH, n, room, calloc(room, sizeof *comm->map.link), calloc(room, sizeof *comm->map.cost)};
   if (!comm->map.link || !comm->map.cost) return fail(ncclSystemError, "out of memory");
-  const int read = mesh_map(comm->members, n, NULL, &comm->map);
+  const int read = mesh_map(comm->members, n, NULL, NULL, &comm->map);
   if (read < 0) return fail(ncclRemoteError, "the map of this node's bridge over the %u members of %s: %s", n, comm->name, strerror(-read));
   for (uint32_t r = 0; n > 1 && r < n; r++) {
     int linked = 0;

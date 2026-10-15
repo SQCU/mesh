@@ -19,21 +19,22 @@
 
    Communicators.  ncclCommInitRank is NCCL's bootstrap: the unique id is the root's host:port (NCCL_COMM_ID, else the
    listener ncclGetUniqueId opens; the bindings take MASTER_ADDR:MASTER_PORT and RANK of WORLD_SIZE, as torchrun sets
-   them), every rank's node and its bridge's links (mesh_observe) meet there, and the communicator's map is their join
-   (mesh_link_map_join), made again at each communicator; the id is its name.  ncclMeshCommInitRank (below) is for a
-   program that passes its own topology operand.  ncclCommSplit and ncclCommShrink keep the links among the ranks they
-   take, each with its cost, join them along the widest live communicator's paths where they leave those ranks apart
-   (the cheapest first, each priced as its path's links summed), and compile their default programs.
+   them), every rank's node (mesh_observe) meets there; the id is its name.  Every communicator reads its bridge's map
+   over its members (mesh-plan.h mesh_map) each time its session opens, and compiles its default programs on it.
+   ncclMeshCommInitRank (below) is for a program that passes its own programs or paths.  ncclCommSplit and
+   ncclCommShrink make communicators of the ranks they take, on the bridges' map like any other; Shrink makes no
+   exchange.  ncclCommGrow meets at the bootstrap of the id that ncclCommGetUniqueId gives comm's root, which the root
+   broadcasts on comm.  ncclCommRevoke closes comm's session, its groups in flight lost.
 
-   Programs.  A communicator compiles its collectives once, when it is made (mesh-plan.h mesh_compile): a program's own
-   table (ncclMeshCommInitRank) or the default, the single-phase all-reduce along the shortest-path trees below the size
+   Programs.  A communicator compiles its default collectives each time its session opens, on the map read then
+   (mesh-plan.h mesh_compile): a program's own table (ncclMeshCommInitRank) or the default, the single-phase all-reduce along the shortest-path trees below the size
    at which the reduce-scatter and all-gather along the map's packed trees is faster (mesh_program_time; at every size
    on two ranks), then those packed trees' all-reduce, and their reduce-scatter, all-gather and each root's reduce and
    broadcast.  A call runs the first of its collective whose size bound its operand is under;
    ncclCollConfig_t.algSelection is not read.  A group (ncclGroupStart/End; a call outside one is a group of one) walks
-   each call's program (mesh_program_steps; a point-to-point call one step) on its process's session: one prepared
-   program on the bridge, attached at the process's first group that crosses a link, over the widest communicator alive
-   among whose ranks the group's are, and kept for the process's life.  A message to a rank the map does not link takes
+   each call's program (mesh_program_steps; a point-to-point call one step) on its communicator's session: its own
+   client of its node's bridge, attached under its name at its first group that crosses a link and again after a
+   failure.  A message to a rank the map does not link takes
    the first link of its path, and the bridges forward it along the rest.  Every position a rank receives on is checked
    against its role, so calls that do not pair (a separate send and receive in the same order on two ranks, unequal
    counts, different collectives) are ncclInvalidUsage.
@@ -60,7 +61,7 @@
    path finds after its group returned (calls that do not pair, too) is the communicator's asynchronous error
    (ncclCommGetAsyncError) and the next group's result.
 
-   Not implemented (not exported): ncclCommRevoke, ncclCommGetUniqueId, ncclCommGrow, ncclCommInitRankScalable,
+   Not implemented (not exported): ncclCommInitRankScalable,
    ncclCommSuspend, ncclCommResume, ncclCommMemStats, ncclCommWindowRegister, ncclCommWindowDeregister,
    ncclWinGetUserPtr, ncclPutSignal, ncclSignal, ncclWaitSignal (TB5 RDMA has no one-sided write), ncclGroupSimulateEnd,
    ncclSetEncryption, the ncclParam* functions.  ncclCommInitAll takes one device and ncclCommCuDevice returns 0 (a node
@@ -404,6 +405,17 @@ ncclResult_t pncclCommSplit(ncclComm_t comm, int color, int key, ncclComm_t *new
  * The flag enables NCCL to adapt to various states of the parent communicator, see NCCL_SHRINK flags.*/
 ncclResult_t  ncclCommShrink(ncclComm_t comm, int* excludeRanksList, int excludeRanksCount, ncclComm_t* newcomm, ncclConfig_t* config, int shrinkFlags);
 ncclResult_t pncclCommShrink(ncclComm_t comm, int* excludeRanksList, int excludeRanksCount, ncclComm_t* newcomm, ncclConfig_t* config, int shrinkFlags);
+
+/* Revoke: comm's operations in flight end with an error and none is issued after it (NCCL 2.29). */
+ncclResult_t  ncclCommRevoke(ncclComm_t comm, int revokeFlags);
+ncclResult_t pncclCommRevoke(ncclComm_t comm, int revokeFlags);
+
+/* Grow: the unique id comm's root gives the ranks joining (ncclCommGetUniqueId), and the communicator of comm's ranks
+   and nRanks - comm's count more, made at that id's bootstrap (NCCL 2.29). */
+ncclResult_t  ncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId* uniqueId);
+ncclResult_t pncclCommGetUniqueId(ncclComm_t comm, ncclUniqueId* uniqueId);
+ncclResult_t  ncclCommGrow(ncclComm_t comm, int nRanks, const ncclUniqueId* uniqueId, int rank, ncclComm_t* newcomm, ncclConfig_t* config);
+ncclResult_t pncclCommGrow(ncclComm_t comm, int nRanks, const ncclUniqueId* uniqueId, int rank, ncclComm_t* newcomm, ncclConfig_t* config);
 
 /* Returns a string for each error code. */
 const char*  ncclGetErrorString(ncclResult_t result);
@@ -775,21 +787,15 @@ ncclResult_t pncclGroupStart(void);
 ncclResult_t  ncclGroupEnd(void);
 ncclResult_t pncclGroupEnd(void);
 
-/* This thread's last ended group's plans, a call each in issue order (at most `capacity`): the
-   steps this rank's plan of it took (-1 a one-rank communicator's or a self-addressed call's local
-   copy), `roots` the call's root. */
-ncclResult_t ncclMeshGroupPlans(int* steps, int* roots, int capacity, int* count);
-/* A communicator over a program's own topology operand: `topology` its ranks' link map (mesh-plan.h; refused where
-   mesh_link_map_check refuses it, except a graph whose links leave its ranks apart with `paths` NULL, joined as a
-   split's is); `paths` the routes the bridges forward a message along between ranks the map does not link
-   (mesh_trees_path; NULL: the map's shortest-path trees); `programs` its compiled collectives (mesh-plan.h struct
-   mesh_program, made ahead of time, copied here), `count` of them: a call runs the first whose collective (and a
-   rooted one's root) is the call's and whose `below` its operand's bytes are under (0: any size); NULL (count 0): the
-   default (above); this process its rank `rank`, rank r on the bridge of node node[r] (NULL: node r); `name` the
-   communicator's (NULL: "nccl"), under which its sessions pair on every member, each session reading the current
-   map.  Every rank passes the same topology, paths, programs, nodes and name. */
+/* A communicator over a program's own operands: `programs` its compiled collectives (mesh-plan.h struct mesh_program,
+   copied, kept for its life; a call runs the first whose collective, and a rooted one's root, is the call's and whose
+   `below` its bytes are under, 0 any size), or with none (count 0) the default (above), whose single-phase all-reduce
+   runs along `paths` (NULL: the map's shortest-path trees), checked against the map at each session; rank r of
+   `nranks` on the bridge of node node[r]; `name` the communicator's (NULL: "nccl").  Like every communicator, it reads
+   the bridges' map at each opening of its session.  Every rank passes the same nranks, paths, programs, nodes and
+   name. */
 typedef struct { const struct mesh_program* program; uint64_t below; } ncclMeshProgram;
-ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int rank, const struct mesh_link_map* topology, const struct mesh_trees* paths,
+ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, int rank, const struct mesh_trees* paths,
                                   const ncclMeshProgram* programs, int count, const int* node, const char* name);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
    commandEncoder; issue and workspace not read); *published (may be NULL) whether a publication was encoded.  A

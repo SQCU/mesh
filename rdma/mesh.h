@@ -43,17 +43,16 @@ enum { MESH_ROW_OWN, MESH_ROW_HOT, MESH_FREE, MESH_PLANES };
 struct mesh_buffer {
   _Alignas(32) _Atomic uint64_t owner;
   _Atomic uint32_t closed;
-  uint32_t pages,constant;
+  uint32_t pages;
 };
 _Static_assert(sizeof(struct mesh_buffer)==32 && _Alignof(struct mesh_buffer)==32,"mesh_buffer");
 /* design/algorithm-sources.md#programtensor; design/prepared-machine.md#M10 */
 struct mesh_page_entry {
   _Alignas(16) _Atomic uint64_t mapping;
   _Atomic uintptr_t address;
-  _Atomic uint64_t device;
 };
-_Static_assert(sizeof(struct mesh_page_entry)==32 && _Alignof(struct mesh_page_entry)==16 &&
-  offsetof(struct mesh_page_entry,address)==8 && offsetof(struct mesh_page_entry,device)==16,"mesh_page_entry");
+_Static_assert(sizeof(struct mesh_page_entry)==16 && _Alignof(struct mesh_page_entry)==16 &&
+  offsetof(struct mesh_page_entry,address)==8,"mesh_page_entry");
 /* design/collective-dependency-ledger.md#d5-receive-consumption-has-per-queue-fifo-order */
 enum { MESH_SEND, MESH_RECEIVE };
 /* design/prepared-machine.md#M04 */
@@ -70,19 +69,13 @@ struct mesh_send {
 };
 /* design/bridge-and-ipc.md#region: a client's program to one destination node (`node`, 0 while the slot is vacant),
    which the bridge carries over its ports to that node or along a route through others: its SEND cells, its
-   cancellation words, its transfer lists (MESH_QUEUES queues each way, MESH_ORDERS entries a list, `length` entries in
-   each) and its trace (0: none) */
-struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells,orders,trace; uint32_t node; _Atomic uint32_t length[MESH_QUEUES*2]; };
-/* design/prepared-machine.md#M27: a program's trace to one destination, each way: a SEND observed (its cell's region
-   offset, the times its producer released it, its post began and ended) or a receive landed (its record's index, the
-   times it was polled, published and its next posted), on the bridge's CLOCK_UPTIME_RAW, `count` of `capacity` */
-struct mesh_trace { _Alignas(32) uint64_t identity; uint64_t begin,middle,end; };
-struct mesh_trace_ring { _Alignas(32) _Atomic uint64_t count; uint64_t capacity,padding[2]; struct mesh_trace records[]; };
+   cancellation words and its transfer lists (MESH_QUEUES queues each way, MESH_ORDERS entries a list, `length` entries
+   in each) */
+struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells,orders; uint32_t node; _Atomic uint32_t length[MESH_QUEUES*2]; };
 _Static_assert(sizeof(struct mesh_send)==256 && _Alignof(struct mesh_send)==128 &&
   offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 && offsetof(struct mesh_send,queue)+4<=256 &&
   offsetof(struct mesh_send,request.send_flags)+sizeof(unsigned int)<=128,"M04/M29");
 _Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24,"M04/M12");
-_Static_assert(sizeof(struct mesh_trace)==32 && sizeof(struct mesh_trace_ring)==32,"M27");
 struct mesh_target { uint64_t stream; uint32_t count,stride; };
 _Static_assert(sizeof(struct mesh_target)==16,"mesh_target");
 /* design/algorithm-sources.md#index-hand-off; design/prepared-machine.md#M10 */
