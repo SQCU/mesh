@@ -62,6 +62,17 @@ refused at its start as a value naming it (`mesh_section_create`'s ENOMEM, which
 of <communicator> on this node's bridge"), never met by growing the window (metal-microbench
 docs/acceptance-20261014.md A45).
 
+The lazy form this replaced (`device_register`, one extent registered at a program's first page, mesh 3c004b4 to
+e2b875c) registered after the program's queue pairs were made and ready to receive (`flow_work`: `pair_up`, then
+`pair_receive`, then the extent in `receives_configure`). Every pair call through it on 2026-10-15 failed at its first
+receive: the Thunderbolt provider logged "Message overflowed receive buffer, setting ring to error state" and completed
+the receive with status 4 (its status for a frame the hardware flags), nothing landed on either node, and the queue
+pairs' teardown failed four ring unmaps (IOConnectUnmapMemory 0xe00002bc); once a registration fell between a queue
+pair's RTR and RTS, the provider aborted the bridge (`darwin_mmap_region_extended`: region_id != 0). A node whose extent
+an earlier program had registered before its queue pairs existed completed its SENDs. With the window registered when
+the device comes up, the same call (metal-microbench `grid.py call`, e2b-engine on the M5 and the Mini, 10 steps,
+output_data/grid-run/eager1.json) committed every step, each side landing all 5130 SENDs its peer posted.
+
 The [released cache-update parser](https://github.com/google-ai-edge/LiteRT/blob/v2.2.0/ml_drift_delegate/delegate/composite/add_values_to_cache_parser.cc) uses three of its seven inputs and writes native byte-format KV outputs in place. Its other inputs support the CPU decomposition and are not read by GPU execution. The original signature still supplies them during setup, using host tensor handles over canonical pages. No floating KV conversion is inserted. Runtime replay uses the native cache output bindings directly. The engine caller aliases corresponding KV input/output names from the upstream signature at setup.
 
 The external WebGPU binding imports the actual M01 pages through Dawn's host-mapped buffer extension. Each canonical operand has one WebGPU buffer, shared by all LiteRT views. Native numerical commands use that object's Metal buffer through the pinned provider's [Buffer::GetMTLBuffer](https://dawn.googlesource.com/dawn/+/refs/heads/main/src/dawn/native/metal/BufferMTL.mm) accessor. That accessor is setup-only and is not a stable public Dawn ABI. The reference library supplies the numerical kernels.
