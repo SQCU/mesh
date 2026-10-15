@@ -5,7 +5,7 @@
 /* design/bridge-and-ipc.md#ports: the node's bridge as libmesh reads it (mesh-plan.h), one JSON line: whether it answers
    (`up`, else the errno), its node, its ports by index (mesh_observe: each port's peer node, phase and bandwidth) and the
    mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
-   numbers with its alpha and beta) */
+   numbers with its alpha and beta), and its window in bytes with the bytes no lease holds (mesh_window) */
 int main(void){
   struct mesh_link_view port[MESH_PORTS];
   uint32_t node=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
@@ -21,7 +21,9 @@ int main(void){
     count=mesh_map(NULL,0,nodes,NULL,&map);
     room=map.nodes;links=map.links;
   }
-  printf("{\"up\":true,\"node\":%u,\"peers\":[",node);
+  uint64_t window=0,unleased=0;
+  if(mesh_window(&window,&unleased))window=unleased=0;
+  printf("{\"up\":true,\"node\":%u,\"window\":%llu,\"unleased\":%llu,\"peers\":[",node,(unsigned long long)window,(unsigned long long)unleased);
   for(int i=0;i<ports && i<MESH_PORTS;i++)
     printf("%s{\"port\":%d,\"node\":%u,\"phase\":%u,\"bandwidth\":%llu}",i?",":"",i,port[i].peer,port[i].phase,(unsigned long long)port[i].bandwidth);
   if(count<0)printf("],\"map\":{\"errno\":%d}}\n",-count);

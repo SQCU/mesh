@@ -8,6 +8,7 @@ printf 'ula=%s\n' "$(ifconfig lo0 2>/dev/null | awk -v p="$PREFIX" '$1=="inet6" 
 printf 'model=%s\n' "$(sysctl -n hw.model 2>/dev/null)"
 printf 'cores=%s\n' "$(sysctl -n hw.ncpu 2>/dev/null)"
 printf 'memgb=%s\n' "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))"
+/usr/local/mesh/bin/mesh-stat 2>/dev/null | sed -n 's/.*"window":\([1-9][0-9]*\).*/window=\1/p'
 printf 'macos=%s\n' "$(sw_vers -productVersion 2>/dev/null)"
 printf 'rdma=%s\n' "$(rdma_ctl status 2>&1)"
 printf 'sdk=%s\n' "$([ -f "$(xcrun --show-sdk-path 2>/dev/null)/usr/include/infiniband/verbs.h" ] && echo yes || echo no)"

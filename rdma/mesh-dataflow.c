@@ -53,6 +53,15 @@ int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node){
   munmap(m,length);return result;
 }
 
+/* design/bridge-and-ipc.md#region */
+int mesh_window(uint64_t *bytes,uint64_t *unleased){
+  struct hdr *m;size_t length;
+  int error=mesh_open(0,&m,&length,NULL);
+  if(error)return -error;
+  *bytes=(uint64_t)mesh_arena_pages(m)*m->pgsz;*unleased=(uint64_t)mesh_arena_free(m)*m->pgsz;
+  munmap(m,length);return 0;
+}
+
 /* design/bridge-and-ipc.md#region: the map's records as one serial left them, the seqlock's reader (mesh_map_whole): a
    copy in *out the caller frees and its count, or -errno (ESRCH: the bridge went while its write was open) */
 static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **out){

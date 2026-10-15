@@ -18,6 +18,9 @@ extern "C" {
 enum { MESH_UNKNOWN, MESH_PAIRING, MESH_PAIRED, MESH_STOPPED };
 struct mesh_link_view { uint32_t peer,phase; uint64_t bandwidth; };
 int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
+/* The node's bridge's window as its region holds it: its bytes (the arena its configuration registered at device up) and
+   the bytes no lease holds now; 0, or -errno where the bridge is unreachable. */
+int mesh_window(uint64_t *bytes,uint64_t *unleased);
 
 /* A link map, an operand: `nodes` nodes and `links` links of a kind.
      MESH_LINKS_MESH   every pair is linked (`link` lists only the pairs given costs, if any)
