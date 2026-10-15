@@ -64,8 +64,50 @@ float32 and encoded to nearest even as the host does, overflow to NaN or infinit
 Float8); the host path adds float64.
 Ops: sum, prod, max, min, avg; premul-sum takes a host immediate.
 
-Memory: `ncclMemAlloc` is page-aligned host memory (`ncclMemFree` frees it); `ncclCommRegister`'s handle is the buffer
-itself, and `ncclCommDeregister` releases nothing.
+## Memory
+
+The node's bridge registers its window, its configuration's share of the node's memory (etc/bridge/README.md), on
+every device when the device comes up, before any queue pair exists, and never again while the device is up
+(design/prepared-machine.md#M09). The operator, 2026-10-15: "the bridge's job is to allocate essentially all of the
+memory on the entire device so that there are large already 'pinned' buffers which are ready to receive surprise
+transfers in whatever order they happen from whatever peers and links are operational ... ontologically it must be
+the responsibility of client programs to know how much allocation they need ... the bridge is there to behave like a
+system call".
+
+- The process is one client of its node's bridge: one attach of the node's region, made at its first `ncclMemAlloc` or
+  communicator. Its slot owns the process's leases, and each communicator's session takes its program's own slot on
+  it, under the communicator's name (a slot is one execution's program).
+- `ncclMemAlloc(ptr, size)` is the lease, the system call: whole pages of the window covering `size` (one page for 0),
+  already registered; a lease registers nothing. Its bookkeeping is the region's (the lease's rows are owned by the
+  client's slot), so when the process exits or dies its bridge returns the pages as it returns every retired client's
+  rows.
+- A lease the window cannot meet is `ncclSystemError` naming the bytes asked and the pages free. On a node whose bridge
+  does not run, it is `ncclSystemError` naming the requirement: the node's bridge runs with a configuration whose
+  window holds the client's footprint. Nothing falls back to other memory.
+- `ncclMemFree(ptr)` returns the lease's pages at once.
+- `ncclCommRegister` takes a buffer in the window (its handle is the buffer itself) and refuses any other with
+  `ncclInvalidArgument` (lease it with `ncclMemAlloc`). `ncclCommDeregister` releases nothing.
+- A bridge that stops takes its region with it: the next lease, communicator or session attaches to the next bridge's.
+  A lease of the old region stays readable until it is freed, but it is no longer registered memory, and
+  `ncclCommRegister` refuses it.
+
+The client sizes the window on each node it runs on, and on the nodes it peers or streams with: weights, KV and every
+buffer a peer reads are leases. The operator, 2026-10-15: "why would weights or kv be outside of the memory pinned
+pool? being outside of it means that they cannot be zero copy passed to peers. ... pipeline parallelism, context
+parallelism, and megatron column parallelism are all required. ... you can't defend against this; it's *your code*
+you're pretending you need to defend against; you can write it right all along."
+
+Porting:
+
+- An NCCL program takes its collectives' buffers from `ncclMemAlloc` (NCCL's allocator for the buffers it registers), and
+  its node's bridge configuration's window holds them.
+- A NumPy program takes them from `mesh_mpi.empty(shape, dtype)`, the role mpi4py's `MPI.Alloc_mem` plays; `mesh_mpi`'s
+  own temporaries are such arrays.
+- Python's lease is `mesh.lease(nbytes)`: a writable buffer for `numpy.frombuffer` or `torch.frombuffer`, returned to
+  the window when it and everything over it are gone.
+- torch-mesh's own CPU staging and temporaries are leases ([torch-mesh](torch-mesh/README.md)).
+- The host path copies any host pointer into the session's rings, so an operand outside the window still runs there.
+  It is not zero copy, and `ncclCommRegister` refuses it.
 
 ## Routes between unlinked ranks
 
@@ -85,8 +127,8 @@ programs'.
   and different collectives on two ranks: a position where a rank sends nothing carries a stamp, and the receiver
   checks every position. The host path fails the call. The Metal path finds it on the GPU and fails the session: the
   communicator's asynchronous error (`ncclCommGetAsyncError`), and the next call.
-- Each communicator is its own client of its node's bridge, under its own name; communicators in one process know
-  nothing of one another.
+- Each communicator's session is its own program on the process's client of its node's bridge, under its own name;
+  communicators in one process know nothing of one another.
 
 ## Failures
 

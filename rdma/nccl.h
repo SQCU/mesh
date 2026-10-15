@@ -32,9 +32,9 @@
    on two ranks), then those packed trees' all-reduce, and their reduce-scatter, all-gather and each root's reduce and
    broadcast.  A call runs the first of its collective whose size bound its operand is under;
    ncclCollConfig_t.algSelection is not read.  A group (ncclGroupStart/End; a call outside one is a group of one) walks
-   each call's program (mesh_program_steps; a point-to-point call one step) on its communicator's session: its own
-   client of its node's bridge, attached under its name at its first group that crosses a link and again after a
-   failure.  A message to a rank the map does not link takes
+   each call's program (mesh_program_steps; a point-to-point call one step) on its communicator's session: its program's
+   own slot on the process's client of its node's bridge (Memory, below), taken under its name at its first group that
+   crosses a link and again after a failure.  A message to a rank the map does not link takes
    the first link of its path, and the bridges forward it along the rest.  Every position a rank receives on is checked
    against its role, so calls that do not pair (a separate send and receive in the same order on two ranks, unequal
    counts, different collectives) are ncclInvalidUsage.
@@ -54,6 +54,21 @@
    once, with every group before it; a host-path group fails while groups are issued and not complete.  A wait is a
    kernel polling its position's completion word (rdma/mesh.metal mesh_remote_wait).
 
+   Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
+   ncclMemAlloc or communicator, whose slot owns the process's leases and on which each communicator's session takes
+   its program's own slot under the communicator's name (a slot is one execution's program).  ncclMemAlloc is the lease,
+   the call the operator's division of the work makes of the bridge ("the bridge is there to behave like a system
+   call"): whole pages of the window covering size, which the bridge registered on every device when the device came up,
+   before any queue pair existed; a lease registers nothing.  The client sizes its leases ("ontologically it must be the
+   responsibility of client programs to know how much allocation they need"): a lease the window cannot meet is
+   ncclSystemError naming the bytes asked and the pages free, and a node whose bridge does not run is ncclSystemError
+   naming the requirement, a bridge whose configuration's window holds the client's footprint (etc/bridge/README.md);
+   nothing falls back to other memory.  ncclMemFree returns the pages; the leases of a process gone are returned by its
+   bridge, as every retired client's rows are.  ncclCommRegister takes a buffer in the window, its handle the buffer
+   itself, and refuses any other (ncclInvalidArgument: lease it with ncclMemAlloc); ncclCommDeregister releases nothing.
+   Weights, KV and every buffer a peer reads are leases: "why would weights or kv be outside of the memory pinned pool?
+   being outside of it means that they cannot be zero copy passed to peers."  Design: design/prepared-machine.md#M09.
+
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and the
    group after a failure is returned opens a session again, on the current map.  The session's progress thread is the
    one silent-link watcher: a link with positions pending that delivers none for mesh.h MESH_SILENT_NS is cancelled,
@@ -65,8 +80,7 @@
    ncclCommSuspend, ncclCommResume, ncclCommMemStats, ncclCommWindowRegister, ncclCommWindowDeregister,
    ncclWinGetUserPtr, ncclPutSignal, ncclSignal, ncclWaitSignal (TB5 RDMA has no one-sided write), ncclGroupSimulateEnd,
    ncclSetEncryption, the ncclParam* functions.  ncclCommInitAll takes one device and ncclCommCuDevice returns 0 (a node
-   has one Metal device); ncclRedOpCreatePreMulSum takes ncclScalarHostImmediate; ncclCommRegister's handle is the
-   buffer itself and ncclCommDeregister releases nothing; ncclMemAlloc is page-aligned host memory. */
+   has one Metal device); ncclRedOpCreatePreMulSum takes ncclScalarHostImmediate. */
 
 #ifndef NCCL_H_
 #define NCCL_H_

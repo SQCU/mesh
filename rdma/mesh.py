@@ -2,7 +2,8 @@
 no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The read side is the
 node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's serial (mesh_map_wait).  The planner is
 the header's own: link maps, the trees every collective and message take, operands, collectives, steps, their
-planning and pricing.  Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch)."""
+planning and pricing.  Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its
+ncclMemAlloc, the memory they move taken from the node's bridge's window (rdma/NCCL.md "Memory")."""
 import errno
 import os
 import sys
@@ -84,6 +85,19 @@ def current(members=None):
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
     return SimpleNamespace(map=LinkMap(KINDS[made.kind], count, link[0:made.links], cost[0:made.links]), nodes=list(node[0:count]),
                            names=[ffi.string(n).decode() for n in name[0:count]], node=own[0], serial=serial)
+
+
+def lease(nbytes):
+    """ncclMemAlloc: `nbytes` (at least one) of this node's bridge's window, whole pages already registered on its
+    devices (design/prepared-machine.md#M09), as a writable buffer (numpy.frombuffer and torch.frombuffer take it),
+    returned to the window (ncclMemFree) once it and every object over it are gone.  RuntimeError with the library's
+    reason where the window cannot meet it (the bytes asked and the pages free) or the node runs no bridge."""
+    held, size = ffi.new('void **'), max(1, nbytes)
+    result = lib.ncclMemAlloc(held, size)
+    if result:
+        raise RuntimeError(f'libnccl-mesh: {ffi.string(lib.ncclGetErrorString(result)).decode()}: '
+                           f'{ffi.string(lib.ncclGetLastError(ffi.NULL)).decode()}')
+    return ffi.buffer(ffi.gc(ffi.cast('char *', held[0]), lib.ncclMemFree), size)
 
 
 def operand(type, element_bytes, elements):

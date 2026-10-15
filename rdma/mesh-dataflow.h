@@ -13,6 +13,12 @@ struct mesh_ctx { struct hdr *M; size_t len; uint64_t client,send_off,send_bytes
    is vacant, ESRCH where the node's bridge is gone */
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_slot_take(struct mesh_ctx *,struct hdr *,uint64_t key);
+/* design/bridge-and-ipc.md#clients: a program's slot under its execution `name` on a client's attach (`client`, a
+   mesh_attach's), sharing its mapping: a slot is one execution's program, so a client running several takes one each
+   on its one attach.  0, EBUSY where none is vacant, ESRCH where the client's bridge is gone */
+int mesh_program_attach(struct mesh_ctx *program,const struct mesh_ctx *client,const char *name);
+/* the slot retired (mesh_retire), and the region unmapped where the context mapped it (mesh_attach's; a program's slot
+   leaves its client's mapping alone) */
 int mesh_detach(struct mesh_ctx *);
 /* design/bridge-and-ipc.md#region: a process gone (its slot's or the bridge's pid; 0: none) */
 static inline int mesh_gone(pid_t process){ return !process || (kill(process,0) && errno==ESRCH); }
@@ -37,6 +43,12 @@ uint32_t mesh_route(struct hdr *m,uint32_t from,uint32_t to,uint32_t **path);
 uint32_t mesh_rows_alloc(struct mesh_ctx *,uint32_t count);
 /* design/prepared-machine.md#M09 */
 uint32_t mesh_arena_alloc(struct mesh_ctx *,uint32_t pages,uint32_t align);
+/* design/prepared-machine.md#M09: the window's arena pages no lease holds */
+uint32_t mesh_arena_free(struct hdr *);
+/* design/prepared-machine.md#M09: a lease its client returns while it holds it (mesh-call.h mesh_section_create's
+   section of one slot, headed at `row`): its rows released and its rows and arena pages reclaimed by the reclaim a
+   retired client's rows take once the bridge releases them; 0, EINVAL where the client holds no lease headed there */
+int mesh_lease_return(struct mesh_ctx *,uint32_t row);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
 /* design/algorithm-sources.md#index-hand-off */

@@ -1,8 +1,9 @@
-/* libnccl-mesh (nccl.h): NCCL's API on the bridges' prepared transfers.  Each communicator holds a session on its
-   node's bridge (its own attach under its name, a ring of slots each way to every other member, which the bridges
-   carry along the map's route where no link joins the two), opened at its first group that crosses a link, on the map
-   current then, and opened again after a failure; a group's calls are planned by the one collective planner and
-   streamed through the rings, the receives combined on the host or the GPU. */
+/* libnccl-mesh (nccl.h): NCCL's API on the bridges' prepared transfers.  The process is one client of its node's
+   bridge (an attach, whose slot owns the process's leases of the window: ncclMemAlloc).  Each communicator holds a
+   session on it (its program's own slot on that attach under the communicator's name, a ring of slots each way to
+   every other member, which the bridges carry along the map's route where no link joins the two), opened at its first
+   group that crosses a link, on the map current then, and opened again after a failure; a group's calls are planned by
+   the one collective planner and streamed through the rings, the receives combined on the host or the GPU. */
 #include "nccl.h"
 #include "mesh-collective.h"
 #include "mesh.h"
@@ -314,9 +315,75 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
   return NULL;
 }
 
+/* -- the process's client of its node's bridge (design/bridge-and-ipc.md#clients, design/prepared-machine.md#M09):
+   one attach of the node's region (mesh_attach), made at the process's first lease or first communicator, whichever
+   comes first.  Its slot owns every lease the process takes (ncclMemAlloc: a section of the window, mesh-call.h
+   mesh_section_create, whose rows' owner is the slot), and each communicator's session takes its program's slot on
+   it (mesh_program_attach: a slot is one execution's program, under the communicator's name).  The leases' bookkeeping
+   is the region's, where the bridge sees it: the bridge retires the slot of a process gone and returns its leases'
+   pages as it returns every retired client's rows; `leases` is this process's index of them by address.  A bridge
+   that stops takes its region with it: the next lease, communicator or session attaches to the next bridge's, and the
+   attach of a bridge gone stays mapped while a lease of it is held or a session on it is open, then is detached. --- */
+
+struct lease { void *address; uint32_t row; };
+struct attach {
+  struct mesh_ctx context;
+  struct lease *leases;
+  size_t count, room;
+  uint64_t sessions;
+  struct attach *next;
+};
+/* the attaches, the newest (the one a lease or session takes while its bridge lives) first, under attach_lock */
+static struct attach *attaches;
+static pthread_mutex_t attach_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int attach_live(const struct attach *a) { return !mesh_gone((pid_t)atomic_load(&a->context.M->bridge_pid)); }
+
+/* every attach whose bridge is gone, with no lease held and no session open, detached */
+static void attaches_prune(void) {
+  for (struct attach **at = &attaches; *at;) {
+    struct attach *a = *at;
+    if (a->count || a->sessions || attach_live(a)) { at = &a->next; continue; }
+    *at = a->next;
+    mesh_detach(&a->context);
+    free(a->leases);
+    free(a);
+  }
+}
+
+/* the attach whose bridge lives, made where there is none: 0, or mesh_attach's refusal */
+static int attach_current(struct attach **out) {
+  attaches_prune();
+  if (attaches && attach_live(attaches)) { *out = attaches; return 0; }
+  struct attach *a = calloc(1, sizeof *a);
+  if (!a) return ENOMEM;
+  const int status = mesh_attach(&a->context, NULL);
+  if (status) { free(a); return status; }
+  a->next = attaches;
+  attaches = a;
+  *out = a;
+  return 0;
+}
+
+static int lease_room(struct attach *a) {
+  const size_t room = a->room ? 2 * a->room : 64;
+  struct lease *grown = realloc(a->leases, room * sizeof *grown);
+  if (!grown) return ENOMEM;
+  a->leases = grown;
+  a->room = room;
+  return 0;
+}
+
 /* a communicator of `nranks` ranks named `name`, rank r on the bridge of node members[r], its map read at each opening of
-   its session (comm_read) */
+   its session (comm_read); the process's client attached where it has none */
 static ncclResult_t comm_make(ncclComm_t *made, int nranks, const uint32_t *members, int rank, const char *name) {
+  pthread_mutex_lock(&attach_lock);
+  struct attach *a = NULL;
+  const int status = attach_current(&a);
+  pthread_mutex_unlock(&attach_lock);
+  if (status)
+    return fail(status == ESRCH ? ncclRemoteError : ncclSystemError, "communicator %s: this node's bridge, attaching the process's "
+                "client: %s", name, strerror(status));
   struct ncclComm *comm = calloc(1, sizeof *comm);
   if (comm) comm->members = calloc((size_t)nranks, sizeof *comm->members);
   if (!comm || !comm->members) { free(comm); return fail(ncclSystemError, "out of memory"); }
@@ -362,7 +429,7 @@ const char *ncclGetLastError(ncclComm_t comm) { (void)comm; return last; }
 /* NCCL's bootstrap (NVIDIA/nccl src/bootstrap.cc): the unique id is the root's address, host:port (NCCL_COMM_ID where
    set, else a listener this process opens); rank 0 takes every rank's report there and sends each the whole table.  A
    rank's report is its node (mesh_observe); the links are the bridges', read at each session (comm_read).  The id is
-   also the communicator's execution name, which its sessions take on every member (mesh_attach). */
+   also the communicator's execution name, which its sessions take on every member (mesh_program_attach). */
 static double now_s(void);
 struct report { int32_t rank; uint32_t node; };
 static struct { int fd; char id[NCCL_UNIQUE_ID_BYTES]; } root = {-1, {0}};
@@ -577,9 +644,17 @@ ncclResult_t ncclCommUserRank(const ncclComm_t comm, int *rank) {
   return ncclSuccess;
 }
 
+/* a buffer in the window of this node's bridge (a lease's): its handle the buffer, the window registered on every
+   device of the bridge at device up; any other buffer is refused */
 ncclResult_t ncclCommRegister(const ncclComm_t comm, void *buff, size_t size, void **handle) {
-  (void)size;
   if (!comm || !handle) return fail(ncclInvalidArgument, "comm or handle is NULL");
+  pthread_mutex_lock(&attach_lock);
+  const struct hdr *m = attaches && attach_live(attaches) ? attaches->context.M : NULL;
+  const uintptr_t at = (uintptr_t)buff, first = m ? (uintptr_t)m + m->data_off : 0, end = m ? (uintptr_t)m + m->length : 0;
+  pthread_mutex_unlock(&attach_lock);
+  if (!m || at < first || at > end || size > end - at)
+    return fail(ncclInvalidArgument, "ncclCommRegister of %zu bytes at %p: not in the window of this node's bridge; a buffer "
+                "collectives move is leased from the window (ncclMemAlloc)", size, buff);
   *handle = buff;
   return ncclSuccess;
 }
@@ -589,13 +664,58 @@ ncclResult_t ncclCommDeregister(const ncclComm_t comm, void *handle) {
   return comm ? ncclSuccess : fail(ncclInvalidArgument, "comm is NULL");
 }
 
+/* a lease of the window: its whole pages covering `size` (one page for 0), already registered on every device of the
+   node's bridge, owned by the process's client; never other memory */
 ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
   if (!ptr) return fail(ncclInvalidArgument, "ptr is NULL");
-  if (posix_memalign(ptr, (size_t)getpagesize(), size ? size : 1)) return fail(ncclSystemError, "%zu bytes: out of memory", size);
-  return ncclSuccess;
+  pthread_mutex_lock(&attach_lock);
+  struct attach *a = NULL;
+  struct mesh_section lease = {0};
+  const size_t bytes = size ? size : 1;
+  ncclResult_t result = ncclSuccess;
+  int status = attach_current(&a);
+  if (status == EBUSY)
+    result = fail(ncclSystemError, "ncclMemAlloc of %zu bytes: every client slot of this node's bridge is held (mesh.h MESH_CLIENTS)", size);
+  else if (status)
+    result = fail(ncclSystemError, "ncclMemAlloc of %zu bytes: no region of this node's bridge to lease from (%s); the node's bridge "
+                  "must run, with a configuration whose window holds this client's footprint (etc/bridge/README.md)", size, strerror(status));
+  else if (a->count == a->room && lease_room(a))
+    result = fail(ncclSystemError, "out of memory");
+  else if ((status = mesh_section_create(&a->context, bytes, 1, &lease))) {
+    const struct hdr *m = a->context.M;
+    const size_t quantum = (size_t)m->block * m->pgsz;
+    result = fail(ncclSystemError, "ncclMemAlloc of %zu bytes (%zu pages of %u bytes): the window of this node's bridge has %u of "
+                  "its %u pages free (%s); a client sizes its leases to the window its node's bridge configuration states "
+                  "(etc/bridge/README.md)", size, (bytes + quantum - 1) / quantum * m->block, m->pgsz, mesh_arena_free(a->context.M),
+                  mesh_arena_pages(m), strerror(status));
+  } else {
+    *ptr = mesh_section_address(&a->context, lease, 0);
+    a->leases[a->count++] = (struct lease){*ptr, lease.first};
+  }
+  pthread_mutex_unlock(&attach_lock);
+  return result;
 }
 
-ncclResult_t ncclMemFree(void *ptr) { free(ptr); return ncclSuccess; }
+/* the lease at `ptr` returned to the window (mesh_lease_return): its pages free for any client's next lease */
+ncclResult_t ncclMemFree(void *ptr) {
+  if (!ptr) return ncclSuccess;
+  pthread_mutex_lock(&attach_lock);
+  int found = 0, status = 0;
+  uint32_t row = 0;
+  for (struct attach *a = attaches; a && !found; a = a->next)
+    for (size_t i = 0; i < a->count && !found; i++)
+      if (a->leases[i].address == ptr) {
+        found = 1;
+        row = a->leases[i].row;
+        status = mesh_lease_return(&a->context, row);
+        a->leases[i] = a->leases[--a->count];
+      }
+  attaches_prune();
+  pthread_mutex_unlock(&attach_lock);
+  if (!found) return fail(ncclInvalidArgument, "ncclMemFree of %p: no lease of this process (ncclMemAlloc)", ptr);
+  if (status) return fail(ncclInternalError, "ncclMemFree of %p: row %u of this node's region heads no lease of this process", ptr, row);
+  return ncclSuccess;
+}
 
 ncclResult_t ncclRedOpCreatePreMulSum(ncclRedOp_t *op, void *scalar, ncclDataType_t datatype, ncclScalarResidence_t residence,
                                       ncclComm_t comm) {
@@ -655,11 +775,13 @@ struct channel {
   _Atomic uint64_t target, signaled;
 };
 
-/* a communicator's session: its client of the node's bridge, its channels, its progress thread and its failure once one
-   is kept (`failed`, `failure`); `next`, the process's other sessions, closed at its exit */
+/* a communicator's session: its program's slot on the process's client of the node's bridge (`context` on `attach`), its
+   channels, its progress thread and its failure once one is kept (`failed`, `failure`); `next`, the process's other
+   sessions, closed at its exit */
 struct session {
   struct ncclComm *comm;
   struct mesh_ctx context;
+  struct attach *attach;
   struct hdr *header;
   struct channel *channels;
   uint32_t count;
@@ -803,8 +925,8 @@ static ncclResult_t drain(struct session *s) {
 }
 
 static void inflight_lose(struct session *s);
-/* the session ended: its groups in flight lost, every GPU program finished, its progress thread joined, its client
-   detached */
+/* the session ended: its groups in flight lost, every GPU program finished, its progress thread joined, its program's
+   slot retired (the process's attach left it, detached where its bridge is gone and nothing else holds it) */
 static void session_close(struct session *s) {
   if (!s) return;
   inflight_lose(s);
@@ -821,6 +943,10 @@ static void session_close(struct session *s) {
   free((void *)s->violation);
   mesh_metal_transport_destroy(&s->transport);
   mesh_detach(&s->context);
+  pthread_mutex_lock(&attach_lock);
+  s->attach->sessions--;
+  attaches_prune();
+  pthread_mutex_unlock(&attach_lock);
   for (struct session **at = &sessions; *at; at = &(*at)->next)
     if (*at == s) { *at = s->next; break; }
   s->comm->session = NULL;
@@ -896,7 +1022,12 @@ static ncclResult_t session_open(ncclComm_t comm) {
   struct session *s = calloc(1, sizeof *s);
   if (!s) return fail(ncclSystemError, "out of memory");
   s->serial = serial;
-  int status = mesh_attach(&s->context, comm->name);
+  pthread_mutex_lock(&attach_lock);
+  struct attach *a = NULL;
+  int status = attach_current(&a);
+  if (!status) status = mesh_program_attach(&s->context, &a->context, comm->name);
+  if (!status) { a->sessions++; s->attach = a; }
+  pthread_mutex_unlock(&attach_lock);
   if (status) {
     free(s);
     return fail(status == ESRCH ? ncclRemoteError : ncclSystemError, "this node's bridge, attaching %s: %s", comm->name, strerror(status));

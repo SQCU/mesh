@@ -63,7 +63,8 @@ node's RDMA devices register (`max_mr`, read at its start, `window_registrable`)
 registered whole on each device as it comes up (its last extent the window's remainder). How much of it an execution
 needs is the execution's to know, on its own node and on the nodes it peers or streams with; a lease the window cannot
 meet is refused at its start as a value naming it (`mesh_section_create`'s ENOMEM, which libnccl-mesh reports as "the
-session of <communicator> on this node's bridge"), and the window never grows (metal-microbench
+session of <communicator> on this node's bridge", and `ncclMemAlloc` as the bytes asked and the window's pages free;
+see the leases below), and the window never grows (metal-microbench
 docs/acceptance-20261014.md A45). The mesh ships two didactic examples, `etc/bridge/example-1pct.json` and
 `etc/bridge/example-10pct.yaml`, and the E2B pair's node configurations, `etc/bridge/m4pro-headless.toml` (16 GiB) and
 `etc/bridge/m5-low.toml` (14 GiB, below the Mini's), each file's purpose stating its arithmetic; those two size the
@@ -98,6 +99,33 @@ dense model (its weights mlocked, its 4.8 GB KV pool, both outside the window) b
 userspace starved until the watchdog reset it ("no checkins from watchdogd in 91 seconds", 14:09:51); it booted, its
 bridge registered the window and paired again unattended. A client that sizes its buffers into the window is the
 operator's division of the work; one that holds its own beside a large window has only what the window left.
+
+The client's call for its buffers is the lease, libnccl-mesh's `ncclMemAlloc` (rdma/NCCL.md "Memory"), the system
+call of the operator's words above. A process is one client of its node's bridge: one attach of the region
+(`mesh_attach`), made at its first lease or communicator, whose slot owns the process's leases; each communicator's
+session takes its program's own slot on that attach under the communicator's name (`mesh_program_attach`; a slot is
+one execution's program, design/bridge-and-ipc.md#clients). A lease is a section of one slot (`mesh_section_create`):
+whole arena pages covering its bytes, already registered on every device since the device came up, so a lease
+registers nothing (the operator, 2026-10-15: "Registration is eager: the window is registered whole on every device at
+device up, before any queue pair exists (mesh 6bd04a6). A lease never registers memory; it hands out pages already
+registered."). Its bookkeeping is the region's, where
+the bridge sees it: the section's rows are owned by the client's slot (`owner`, `pages`; its arena bits set), so when
+the client retires (it exits or dies, and the bridge retires its slot) its rows are closed, released once no flow of
+the client remains (`mesh_retired_release`) and reclaimed with their pages at the next lease that needs room
+(`mesh_buffer_reclaim`), as every retired client's rows are. `ncclMemFree` returns a lease at once (`mesh_lease_return`:
+its rows disowned and released while they stay hot, then reclaimed by the same `mesh_buffer_reclaim`). A lease the
+window cannot meet fails as `ncclSystemError` naming the bytes asked and the pages free (`mesh_arena_free`); a node whose
+bridge does not run fails naming the requirement, a bridge whose configuration's window holds the client's footprint
+(etc/bridge/README.md). Nothing falls back to other memory ("you can't defend against this; it's *your code* you're
+pretending you need to defend against; you can write it right all along"; and, on the code: "Tech debt goes down: one
+implementation per computation, no fallbacks that hide a missing requirement, no monkeypatching, no shims").
+`ncclCommRegister` takes a buffer in the window and refuses any other (`ncclInvalidArgument`, naming the lease).
+Weights and KV are leases ("why would weights or kv be outside of the memory pinned pool? being outside of it means
+that they cannot be zero copy passed to peers"). A lease is an operand of the window it was taken from: a bridge that
+stops takes its region with it, the process's next lease, communicator or session attaches to the next bridge's, and
+the old attach stays mapped (its leases readable, no longer registered) until its last lease is freed and its last
+session closed (the recovery doctrine: "a call may fail and return an error the caller may retry; servers survive
+operand invalidation; no within-call resumption").
 
 The lazy form this replaced (`device_register`, one extent registered at a program's first page, mesh 3c004b4 to
 e2b875c) registered after the program's queue pairs were made and ready to receive (`flow_work`: `pair_up`, then
@@ -143,6 +171,7 @@ the cycle is always 0 and every comparison is the one before M30. NCCL's FIFOs [
 and persistent communication buffers [PyTorch `torch/_inductor/comm_lowering.py`: "the same allocation, at the
 same offset, in every iteration"] are the users this serves.
 
-A client's program ends with its attach: `mesh_detach`, or the client's process exiting, retires its slot, and the
-bridge ends the program on every port (design/bridge-and-ipc.md#clients). A client that runs another program attaches
-again.
+A program ends with its slot: `mesh_detach` of the program's slot, or the client's process exiting, retires the slot,
+and the bridge ends the program on every port (design/bridge-and-ipc.md#clients). A client that runs another program
+takes another slot on its attach (`mesh_program_attach`); its leases, owned by its attach's slot, are not the
+program's and stay.

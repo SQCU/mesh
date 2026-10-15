@@ -83,13 +83,29 @@ between one pair of nodes are several ports, told apart by the port index.
 
 ## clients
 
-A process attaches with `mesh_attach(context, name)`: it takes a vacant slot with one compare-exchange, never retires
-another's and never waits for any other client; a slot whose process is gone is the bridge's to retire, on its turn.
-Its rows and arena pages are claimed with a compare-exchange on each bitmap word that expects them clear (`mesh_scan`),
-so two clients preparing at once never hold the same rows or pages. `name` is its execution's: every member of one
-execution names it alike (an NCCL communicator's unique id, a call's name), and the bridges pair a program with the
-members' programs of the same name. An attach is refused (EBUSY) when every slot is held, and ESRCH when the node's
-bridge is gone.
+A process attaches with `mesh_attach(context, name)`: it maps the region and takes a vacant slot with one
+compare-exchange, never retires another's and never waits for any other client; a slot whose process is gone is the
+bridge's to retire, on its turn. Its rows and arena pages are claimed with a compare-exchange on each bitmap word that
+expects them clear (`mesh_scan`), so two clients preparing at once never hold the same rows or pages. A slot is one
+execution's program: `name` is its execution's, every member of one execution names it alike (an NCCL communicator's
+unique id, a call's name), and the bridges pair a program with the members' programs of the same name. A client that
+runs several programs takes a slot for each on its one attach (`mesh_program_attach(program, client, name)`, sharing
+the client's mapping). An attach is refused (EBUSY) when every slot is held, and ESRCH when the node's bridge is gone.
+
+A client's memory is its leases, the system call the bridge is to its clients. The operator, 2026-10-15: "the bridge's
+job is to allocate essentially all of the memory on the entire device so that there are large already 'pinned'
+buffers which are ready to receive surprise transfers in whatever order they happen from whatever peers and links are
+operational ... ontologically it must be the responsibility of client programs to know how much allocation they need
+... the bridge is there to behave like a system call". A lease is a section of the window (`mesh_section_create`):
+rows the client's slot owns and whole arena pages, registered on every device since the device came up, so a lease
+registers nothing and no lease changes a device's mappings. libnccl-mesh makes the process one client: one attach,
+made at its first `ncclMemAlloc` or communicator, whose slot owns every lease the process takes (`ncclMemAlloc`) and
+on which each communicator's session takes its program's slot (rdma/NCCL.md "Memory"). The client sizes its leases:
+one the window cannot meet is refused naming the bytes asked and the pages free, and the window never grows. Weights,
+KV and every buffer a peer reads are leases: "why would weights or kv be outside of the memory pinned pool? being
+outside of it means that they cannot be zero copy passed to peers." A lease the client returns (`mesh_lease_return`,
+`ncclMemFree`) is reclaimed at once by the reclaim a retired client's rows take; a client that exits or dies has its
+leases closed with its slot and returned by the bridge (below).
 
 A program is bound (`mesh_transfer_bind`: a transfer names its member node and queue, never a port; the destination's
 lists are leased at its first transfer), prepared (`mesh_transfers_prepare`, `mesh_host_inputs` or the Metal transport)
@@ -98,8 +114,11 @@ each node it binds, over a port paired with that node or along the map's route t
 start returns once every destination is paired, or with the failure that destination's status names with its node
 (EHOSTUNREACH where the map has no route to the node; ETIMEDOUT past the bridge's own windows, design/recovery.md#first;
 the others mesh-call.h lists). A later loss fails the program alike, and the next start reads the map again.
-`mesh_detach`, or the client's process exiting, retires the slot and ends its program: its rows are closed, and once no
-port still holds a flow of the client the bridge releases them and the slot is vacant again.
+`mesh_detach`, or the client's process exiting, retires the slot and ends its program: its rows (a program's, or the
+leases of a lease-owning slot) are closed, and once no port still holds a flow of the client the bridge releases them
+(`mesh_retired_release`), the slot is vacant again, and their pages return to the window at the next lease that needs
+room (`mesh_buffer_reclaim`). A process that exits without detaching is retired by the bridge's turn once its pid is
+gone.
 
 ## protocol
 

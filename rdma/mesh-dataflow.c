@@ -277,12 +277,18 @@ int mesh_attach(struct mesh_ctx *c,const char *name){
   return error;
 }
 
+int mesh_program_attach(struct mesh_ctx *program,const struct mesh_ctx *client,const char *name){
+  *program=(struct mesh_ctx){.fd=-1};
+  int error=mesh_gone((pid_t)atomic_load(&client->M->bridge_pid))?ESRCH:mesh_slot_take(program,client->M,mesh_key(name));
+  if(error)*program=(struct mesh_ctx){0};
+  return error;
+}
+
 int mesh_detach(struct mesh_ctx *c){
   if(!c->M) return 0;
   mesh_retire(c->M,c->client);
-  int status=munmap(c->M,c->len);
-  int error=status?errno:0;
-  if(close(c->fd) && !error) error=errno;
+  int error=(c->fd>=0 && munmap(c->M,c->len))?errno:0;
+  if(c->fd>=0 && close(c->fd) && !error) error=errno;
   *c=(struct mesh_ctx){0};
   return error;
 }
@@ -356,11 +362,22 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
 /* design/prepared-machine.md#M01 */
 /* design/prepared-machine.md#M09 */
 /* The arena's pages: every one addressable by every client and by the GPU, and registered on every port's device
-   since that device came up (mesh-verbs.h device_up); a lease the window cannot meet is refused (ENOMEM). */
+   since that device came up (mesh-verbs.h device_up); a lease the window cannot meet is refused (ENOMEM).  The bits
+   name no owner: a client's lease takes its pages with rows its slot owns (mesh-call.h mesh_section_create), which
+   carry them back at its retirement (mesh_buffer_reclaim) or its return (mesh_lease_return). */
 uint32_t mesh_arena_alloc(struct mesh_ctx *c,uint32_t pages,uint32_t align){
   if(!pages || !align){ errno=EINVAL; return MESH_ABSENT; }
   _Atomic uint64_t *bits=mesh_arena_bits(c->M);
   return mesh_allocate(c,pages,align,0,mesh_arena_pages(c->M),bits,bits,&c->arena_cursor);
+}
+
+/* design/prepared-machine.md#M09 */
+uint32_t mesh_arena_free(struct hdr *m){
+  const uint32_t pages=mesh_arena_pages(m),words=(uint32_t)(((uint64_t)pages+63)/64);
+  uint32_t held=0;
+  for(uint32_t w=0;w<words;w++)
+    held+=(uint32_t)__builtin_popcountll(atomic_load_explicit(&mesh_arena_bits(m)[w],memory_order_relaxed)&mesh_word_mask(0,pages,w));
+  return pages-held;
 }
 
 /* design/algorithm-sources.md#programtensor */
@@ -411,6 +428,21 @@ void mesh_retired_release(struct hdr *m){
     }
   }
 
+}
+
+/* design/prepared-machine.md#M09: the lease's rows other than its head disowned and every one of its rows released
+   while they stay hot, then the head reclaimed (mesh_buffer_reclaim: its pages' arena bits, then its rows' hot bits),
+   so no client claims a row or page of it before it is whole again */
+int mesh_lease_return(struct mesh_ctx *c,uint32_t row){
+  struct hdr *m=c->M;
+  struct mesh_buffer *buffer=row<mesh_rows(m)?&mesh_buffers(m)[row]:NULL;
+  const uint32_t rows=buffer?buffer->pages/m->block:0;
+  if(!rows || rows>mesh_rows(m)-row || atomic_load_explicit(&buffer->owner,memory_order_acquire)!=c->client ||
+     atomic_load_explicit(&buffer->closed,memory_order_acquire))return EINVAL;
+  for(uint32_t r=row+1;r<row+rows;r++)atomic_store_explicit(&mesh_buffers(m)[r].owner,0,memory_order_relaxed);
+  mesh_bits_clear(mesh_plane(m,MESH_ROW_OWN),row,rows);
+  mesh_buffer_reclaim(m,row);
+  return 0;
 }
 
 /* design/algorithm-sources.md#program */
