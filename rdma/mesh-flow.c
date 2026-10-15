@@ -1199,15 +1199,38 @@ static void *control_watch(void *unused){
   return NULL;
 }
 
-/* design/bridge-and-ipc.md: the node's resident bridge; -M its window's share of the node's memory, in percent (the
-   node's setting, bin/mesh-user.sh) */
+/* design/prepared-machine.md#M09: the bridge's configuration, the canonical property list bin/mesh-user.sh writes from
+   the consumer's document (rdma/bridge_configuration.py): its name and its window in bytes; NULL, or why it is refused */
+static const char *configuration_read(const char *path,char *name,size_t room,uint64_t *window){
+  FILE *file=fopen(path,"rb");
+  if(!file)return strerror(errno);
+  unsigned char bytes[65536];
+  const size_t length=fread(bytes,1,sizeof bytes,file);
+  const int whole=feof(file);
+  fclose(file);
+  if(!whole)return "not a configuration property list (too long)";
+  CFDataRef data=CFDataCreate(NULL,bytes,(CFIndex)length);
+  CFPropertyListRef list=data?CFPropertyListCreateWithData(NULL,data,kCFPropertyListImmutable,NULL,NULL):NULL;
+  if(data)CFRelease(data);
+  const char *refused=NULL;
+  CFTypeRef named=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("name")):NULL;
+  CFTypeRef sized=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("window")):NULL;
+  int64_t value=0;
+  if(!list || CFGetTypeID(list)!=CFDictionaryGetTypeID())refused="not a property list of a configuration (rdma/bridge_configuration.py writes it)";
+  else if(!named || CFGetTypeID(named)!=CFStringGetTypeID() || !CFStringGetCString(named,name,(CFIndex)room,kCFStringEncodingUTF8))refused="its name is missing";
+  else if(!sized || CFGetTypeID(sized)!=CFNumberGetTypeID() || !CFNumberGetValue(sized,kCFNumberSInt64Type,&value) || value<=0)
+    refused="its window, a positive number of bytes, is missing";
+  if(list)CFRelease(list);
+  *window=(uint64_t)value;
+  return refused;
+}
+
+/* design/bridge-and-ipc.md: the node's resident bridge; its one operand the path of its configuration (no default) */
 int main(int argc,char **argv){
-  double share=0;
-  for(int i=1;i<argc;i++){
-    if(!strcmp(argv[i],"-M") && i+1<argc)share=atof(argv[++i]);
-    else die("usage: mesh-flow -M percent");
-  }
-  if(!(share>0 && share<=100))die("the window's share of the node's memory (-M) is a percentage in (0, 100]");
+  if(argc!=2)die("usage: mesh-flow CONFIGURATION: the canonical property list bin/mesh-user.sh writes from the node's bridge configuration document (etc/bridge/README.md); the bridge has no default and does not start without one");
+  char name[256];uint64_t window;
+  const char *refused=configuration_read(argv[1],name,sizeof name,&window);
+  if(refused){fprintf(stderr,"bridge configuration %s refused: %s\n",argv[1],refused);exit(1);}
   struct stat binary,current;
   if(stat(argv[0],&binary))memset(&binary,0,sizeof binary);
   uuid_t uuid;struct timespec bound={5,0};
@@ -1222,12 +1245,15 @@ int main(int argc,char **argv){
   const uint32_t pg=(uint32_t)getpagesize();
   /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
   if((uint64_t)pg+4096>16773120)die("transport chunk exceeds native request capacity");
-  uint32_t cap,extents=window_extents(share,&cap);
-  if(cap)fprintf(stderr,"bridge: the window is capped at %u extents of %zu bytes, the most the node's RDMA devices register (max_mr), below %g%% of the node's memory\n",
-    cap,MESH_REGION,share);
-  if(!extents)die("the window's share of the node's memory is less than one registration extent");
+  const uint64_t extents=(window+MESH_REGION-1)/MESH_REGION,registrable=window_registrable();
+  if(extents>registrable){
+    fprintf(stderr,"bridge configuration %s refused: its window of %llu bytes is %llu extents of %zu bytes, past the %llu the node's RDMA devices register (max_mr)\n",
+      name,(unsigned long long)window,(unsigned long long)extents,MESH_REGION,(unsigned long long)registrable);
+    exit(1);
+  }
+  if(window<pg || window/pg>UINT32_MAX){fprintf(stderr,"bridge configuration %s refused: its window of %llu bytes is not between one page and 2^32 pages\n",name,(unsigned long long)window);exit(1);}
   struct hdr geometry={0};
-  uint64_t length=mesh_layout(&geometry,pg,1,(uint32_t)((uint64_t)extents*MESH_REGION/pg));
+  uint64_t length=mesh_layout(&geometry,pg,1,(uint32_t)(window/pg));
   signal(SIGPIPE,SIG_IGN);signal(SIGINT,SIG_IGN);signal(SIGTERM,SIG_IGN);signal(SIGHUP,SIG_IGN);
   atexit(down);
   shm_unlink(MESH_NAME);int fd=shm_open(MESH_NAME,O_CREAT|O_RDWR,MESH_MODE);if(fd<0)die("shm");
@@ -1266,8 +1292,8 @@ int main(int argc,char **argv){
   pthread_t watcher;
   if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
   ports_find();
-  fprintf(stderr,"bridge node %u (%s): window %u extents (%g%% of the node's memory), arena %llu pages, rows %u\n",node,host,extents,share,
-    (unsigned long long)mesh_arena_pages(M),M->rows);
+  fprintf(stderr,"bridge node %u (%s): configuration %s, window %llu bytes, arena %llu pages, rows %u\n",node,host,name,
+    (unsigned long long)window,(unsigned long long)mesh_arena_pages(M),M->rows);
   uint64_t liveness=0;
   while(!stop){
     now=clock_ns();

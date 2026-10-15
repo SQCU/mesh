@@ -1,0 +1,2 @@
+purpose = "The M5 Max (128 GiB) as a userspace workstation in the E2B pair under test, below the Mini's window (more flops and bandwidth, less to gain from memoization): the least that holds its rank's buffers (its part's dense weights, at most 7.82 GB measured; the 4.79 GB KV pool; 25 MB of crossing leases: 11.8 GiB) with 2.2 GiB to spare; no power of two lies between 11.8 GiB and the Mini's 16."
+window_gib = 14

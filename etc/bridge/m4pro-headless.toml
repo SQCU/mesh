@@ -1,0 +1,2 @@
+purpose = "The Mac mini (M4 Pro, 24 GiB, headless) in the E2B pair under test, a flops- and bandwidth-starved peer that benefits from memoization: the window holds its rank's buffers (its part's dense weights, at most 7.13 GB measured; the 4.79 GB KV pool; 25 MB of crossing leases: 11.1 GiB) with 4.9 GiB to spare, and leaves the node 24 - 16 - 1.6 (base wired) - 1.5 (macOS anonymous) - 0.9 (the rank's process beside its buffers) = 4.0 GiB, past a 2 GiB margin."
+window_gib = 16

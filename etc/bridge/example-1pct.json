@@ -1,0 +1,4 @@
+{
+  "purpose": "Didactic: one percent of the node's memory pinned, room for small streaming transfers (a libnccl-mesh session toward one peer leases 24 MiB) and not for programs that stage large operands in the window (README.md).",
+  "window_percent": 1
+}

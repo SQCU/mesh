@@ -27,9 +27,10 @@ new one. SIGTERM (launchd's stop) ends it by the same teardown. A bridge never r
 ## region
 
 The node's one region is the shared memory object `/mesh0` (mesh.h `MESH_NAME`), made by the bridge at its start and
-laid out (`mesh_layout`): an arena, the window, of the node's configured share of its memory (`mesh_pct`, the bridge's
-`-M`, 75 percent by default, in whole 1 GiB extents up to what its RDMA devices register; design/prepared-machine.md#M09,
-with the operator's words: the window is the bridge's, its sizing for an execution the client's), a page-table row a block,
+laid out (`mesh_layout`): an arena, the window, of the size its configuration states (the bridge's one operand, a
+document its consumer writes in JSON, TOML or YAML, etc/bridge/README.md; no default, and refused past what its RDMA
+devices register; design/prepared-machine.md#M09, with the operator's words: the window is the bridge's, its sizing for
+an execution the client's), a page-table row a block,
 the node's ports (`MESH_PORTS`), the client slots (`MESH_CLIENTS`) and each row's publication targets, one a
 destination. The arena is the registered window: every port's device registers it whole when the device comes up,
 before any queue pair exists (`device_up`), and deregisters it only when the device retires (`down_device`), so no

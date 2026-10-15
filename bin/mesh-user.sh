@@ -1,11 +1,17 @@
 #!/bin/bash
 # The substrate as its user's (design/bridge-and-ipc.md): the user's mesh checkout built (the bridge, the library and its
 # Python bindings), ~/.venv-mesh-uv with torch-mesh and the checkout's library on its path, and the bridge as the user's
-# agent io.mesh.bridge, run from the checkout with its window's share of the node's memory (-M): the node's setting,
-# mesh_pct in /usr/local/mesh/bridge.conf, else in ~/.mesh-bridge.conf, else 75 percent (design/prepared-machine.md#M09).
-# Run as the user, again after every pull:  mesh-user.sh [CHECKOUT]  (~/mesh)
+# agent io.mesh.bridge, run from the checkout with the node's bridge configuration, the operand CONFIGURATION (a JSON,
+# TOML or YAML document, etc/bridge/README.md): rdma/bridge_configuration.py writes its canonical form, which the agent's
+# definition names, so the keeper's load at boot keeps it.  There is no default configuration.
+# Run as the user, again after every pull:  mesh-user.sh CONFIGURATION [CHECKOUT]  (~/mesh)
 set -u
-source=$(cd "${1:-$HOME/mesh}" && pwd -P) || exit 1
+if [ $# -lt 1 ] || [ ! -f "$1" ]; then
+  echo "mesh-user.sh CONFIGURATION [CHECKOUT]: the node's bridge configuration document (JSON, TOML or YAML; etc/bridge/README.md) is required; the bridge has no default" >&2
+  exit 64
+fi
+document=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
+source=$(cd "${2:-$HOME/mesh}" && pwd -P) || exit 1
 venv=$HOME/.venv-mesh-uv
 uv=$(command -v uv || echo /usr/local/mesh/bin/uv)
 make -C "$source/rdma" all >/dev/null || exit 1
@@ -22,14 +28,14 @@ if [ "$(cat "$venv/torch-mesh.sum" 2>/dev/null)" != "$sum" ]; then
   [ "$status" = 0 ] || exit "$status"
   printf '%s\n' "$sum" > "$venv/torch-mesh.sum"
 fi
-conf=/usr/local/mesh/bridge.conf; [ -f "$conf" ] || conf=$HOME/.mesh-bridge.conf
-share=$( [ -f "$conf" ] && . "$conf" >/dev/null 2>&1; echo "${mesh_pct:-75}" )
+configuration="$HOME/Library/Application Support/io.mesh.bridge/configuration.plist"
+"$venv/bin/python" "$source/rdma/bridge_configuration.py" "$document" "$configuration" || exit 1
 agents=$HOME/Library/LaunchAgents; mkdir -p "$agents" "$HOME/Library/Logs"
 cat > "$agents/io.mesh.bridge.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- mesh-flow $(shasum -a 256 "$source/rdma/mesh-flow" | cut -d' ' -f1) -->
+<!-- mesh-flow $(shasum -a 256 "$source/rdma/mesh-flow" | cut -d' ' -f1), configuration $(shasum -a 256 "$configuration" | cut -d' ' -f1) from $document -->
 <plist version="1.0"><dict><key>Label</key><string>io.mesh.bridge</string>
-<key>ProgramArguments</key><array><string>$source/rdma/mesh-flow</string><string>-M</string><string>$share</string></array>
+<key>ProgramArguments</key><array><string>$source/rdma/mesh-flow</string><string>$configuration</string></array>
 <key>LimitLoadToSessionType</key><string>Background</string>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>ExitTimeOut</key><integer>60</integer>
 <key>StandardErrorPath</key><string>$HOME/Library/Logs/io.mesh.bridge.log</string></dict></plist>

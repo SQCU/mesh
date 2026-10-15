@@ -3,7 +3,6 @@
 #include <infiniband/verbs.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/sysctl.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -76,13 +75,10 @@ static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
   if(wire->data==MAP_FAILED){wire->data=NULL;return -1;}
   return 0;
 }
-/* design/prepared-machine.md#M09: the window's extents, the node's `share` percent of its memory in whole extents,
-   capped at the fewest any RDMA device of the node registers (its max_mr), read before any device is up; *cap the cap
-   where it binds, else 0 */
-static uint32_t window_extents(double share,uint32_t *cap){
-  uint64_t memory=0;size_t size=sizeof memory;
-  sysctlbyname("hw.memsize",&memory,&size,NULL,0);
-  uint64_t extents=(uint64_t)((double)memory*share/100.0)/MESH_REGION,registrable=UINT32_MAX;
+/* design/prepared-machine.md#M09: the most extents every RDMA device of the node registers (the least max_mr among
+   them), read before any device is up; UINT64_MAX where the node has none yet */
+static uint64_t window_registrable(void){
+  uint64_t registrable=UINT64_MAX;
   struct ibv_device **list=ibv_get_device_list(NULL);
   for(int i=0;list && list[i];i++){
     if(strncmp(ibv_get_device_name(list[i]),"rdma_",5))continue;
@@ -92,8 +88,7 @@ static uint32_t window_extents(double share,uint32_t *cap){
     if(context)ibv_close_device(context);
   }
   if(list)ibv_free_device_list(list);
-  *cap=extents>registrable?(uint32_t)registrable:0;
-  return (uint32_t)(extents>registrable?registrable:extents);
+  return registrable;
 }
 static const char *shm; static _Atomic sig_atomic_t stop;
 /* design/prepared-machine.md#M11 */
@@ -146,12 +141,16 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire){
   struct ibv_device_attr capabilities;
   if(ibv_query_device(device->context,&capabilities))return -1;
   if(!device->domain && !(device->domain=ibv_alloc_pd(device->context)))return -1;
-  if(!device->regions && !(device->regions=calloc(wire->length/MESH_REGION,sizeof *device->regions))){errno=ENOMEM;return -1;}
-  device->extents=(uint32_t)(wire->length/MESH_REGION);
+  const uint32_t extents=(uint32_t)((wire->length+MESH_REGION-1)/MESH_REGION);
+  if(!device->regions && !(device->regions=calloc(extents,sizeof *device->regions))){errno=ENOMEM;return -1;}
+  device->extents=extents;
   const uint64_t began=clock_gettime_nsec_np(CLOCK_MONOTONIC);
-  for(uint32_t e=0;e<device->extents;e++)
-    if(!device->regions[e] && !(device->regions[e]=ibv_reg_mr(device->domain,wire->data+(size_t)e*MESH_REGION,MESH_REGION,IBV_ACCESS_LOCAL_WRITE)))return -1;
-  fprintf(stderr,"%s: window of %u extents registered in %.3f s\n",device->name,device->extents,(double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-began)/1e9);
+  for(size_t e=0,first=0;e<extents;e++,first+=MESH_REGION){
+    const size_t bytes=wire->length-first<MESH_REGION?wire->length-first:MESH_REGION;
+    if(!device->regions[e] && !(device->regions[e]=ibv_reg_mr(device->domain,wire->data+first,bytes,IBV_ACCESS_LOCAL_WRITE)))return -1;
+  }
+  fprintf(stderr,"%s: window of %zu bytes (%u extents) registered in %.3f s\n",device->name,wire->length,device->extents,
+    (double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-began)/1e9);
   device->wire=wire->data;device->max_pairs=(uint32_t)capabilities.max_qp;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity){errno=EOPNOTSUPP;return -1;}
