@@ -35,15 +35,24 @@ their mesh.
 
 ## The E2B pair under test
 
-These two are written for the state in which the rank keeps its weights and KV pool in the window. They are not
-deployed while the rank still allocates them outside it; there they would overcommit the Mini (see M09: at a 9 GiB
-window the Mini's userspace starved and its watchdog reset it).
+These two are written for the source as it stands (metal-microbench 622748a): the rank leases its weights, its KV
+pool and every buffer a crossing takes from the window (metal-microbench docs/placement.md#memory; the operator,
+2026-10-15: "why would weights or kv be outside of the memory pinned pool? being outside of it means that they cannot
+be zero copy passed to peers"). Until metal-microbench 773cead the rank kept them outside it, and a window beside them
+overcommitted the Mini (M09: at a 9 GiB window its userspace starved and its watchdog reset it).
 
-- `m4pro-headless.toml`: the Mac mini, 16 GiB.
-- `m5-low.toml`: the M5 Max, 14 GiB, below the Mini's.
+- `m4pro-headless.toml`: the Mac mini, 16 GiB, the most that leaves it a 2 GiB margin.
+- `m5-low.toml`: the M5 Max, 14 GiB, below the Mini's: the least whole GiB that holds its rank's leases.
 
-Each file's `purpose` states its arithmetic from the measured parts: weights, KV pool, crossing leases, the node's
-base wired and macOS memory, and a 2 GiB margin.
+Each file's `purpose` states its arithmetic from the source and the pair's heads programs of 2026-10-15
+(2057c7fae8c1930a and d5a4040e726d5b44, the member's part in each): its weights, its Neural Engine shares' GPU
+columns, the KV pool at the engine's whole page geometry (16000 pages and the strip; a call leases its own pages, 36 MiB
+for each 2048 positions of a row), the crossed capacity and per-layer inputs, its communicator's session, and the whole
+model alone. Beside the window: the region's row tables (1136 bytes a window page, its page-table entry, buffer record
+and publication targets, rdma/mesh.h `mesh_layout`; touched as rows are leased, 1.11 GiB at 16 GiB), the node's base
+wired and macOS memory, the rank's process, the Neural Engine's own copy of its columns, and a 2 GiB margin. A served
+engine (metal-microbench server/bridge.py) leases its model and pool from its node's window too; neither file holds
+one.
 
 ## The operator's words
 

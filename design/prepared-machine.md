@@ -68,7 +68,7 @@ see the leases below), and the window never grows (metal-microbench
 docs/acceptance-20261014.md A45). The mesh ships two didactic examples, `etc/bridge/example-1pct.json` and
 `etc/bridge/example-10pct.yaml`, and the E2B pair's node configurations, `etc/bridge/m4pro-headless.toml` (16 GiB) and
 `etc/bridge/m5-low.toml` (14 GiB, below the Mini's), each file's purpose stating its arithmetic; those two size the
-window to hold the rank's weights, KV pool and crossing buffers, the state the rank is to reach. The operator,
+window to hold the rank's weights, KV pool and crossing buffers (leases since metal-microbench 773cead). The operator,
 2026-10-15, on configuration and on default files, is quoted in etc/bridge/README.md; on the rank's buffers: "why would
 weights or kv be outside of the memory pinned pool? being outside of it means that they cannot be zero copy passed to
 peers. but the rquiremetns for this project already mad eit clear that pipelien parallelism, context parallelism, and
