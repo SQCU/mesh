@@ -436,7 +436,7 @@ void mesh_retired_release(struct hdr *m){
       atomic_store_explicit(&buffer->owner,owner,memory_order_release);
     }
   }
-
+  mesh_reclaim(m);
 }
 
 /* design/prepared-machine.md#M09: the lease's rows other than its head disowned and every one of its rows released

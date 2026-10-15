@@ -121,8 +121,9 @@ start returns once every destination is paired, or with the failure that destina
 the others mesh-call.h lists). A later loss fails the program alike, and the next start reads the map again.
 `mesh_detach`, or the client's process exiting, retires the slot (vacant at once, `mesh_retire`) and ends its program:
 its rows (a program's, or the leases of a lease-owning slot) are closed; once no port holds a flow of the client the
-bridge releases them (`mesh_retired_release`), and their pages return to the window at the next lease that needs room
-(`mesh_buffer_reclaim`). The bridge watches each slot's process from the turn it first sees the slot (a kqueue
+bridge releases them and returns their pages to the window in the same turn (`mesh_retired_release`, then
+`mesh_reclaim`'s `mesh_buffer_reclaim`), so the window's unleased bytes (`mesh_window`, node-info) count them free as
+soon as the client is gone; a lease that finds no room reclaims again before it fails, as a backstop. The bridge watches each slot's process from the turn it first sees the slot (a kqueue
 `NOTE_EXIT` on its pid, registered again for each new slot of the process, since the kernel keeps one watch per pid;
 a pid already gone at that turn is retired then), and a process's exit retires every slot it holds, its lease slot
 and its programs' slots alike; the liveness turn (every 3 s) retires any slot whose process is gone that the watch

@@ -110,8 +110,8 @@ eager, mesh 6bd04a6: the window is registered whole on every device at device up
 lease never registers memory; it hands out pages already registered. Its bookkeeping is the region's, where
 the bridge sees it: the section's rows are owned by the client's slot (`owner`, `pages`; its arena bits set), so when
 the client retires (it exits or dies, and the bridge retires its slot) its rows are closed, released once no flow of
-the client remains (`mesh_retired_release`) and reclaimed with their pages at the next lease that needs room
-(`mesh_buffer_reclaim`), as every retired client's rows are. The bridge watches each slot's process from the turn it
+the client remains (`mesh_retired_release`) and reclaimed with their pages in the same turn (`mesh_reclaim`), as every
+retired client's rows are: a process's memory is the window's again when it is gone, as a system call's would be. The bridge watches each slot's process from the turn it
 first sees the slot (a kqueue `NOTE_EXIT` on its pid), so a process's exit retires every slot it holds, its lease slot
 and its programs' slots alike, at once; the bridge's liveness turn (every 3 s) retires any it missed. `ncclMemFree`
 returns a lease at once (`mesh_lease_return`: its rows disowned and released while they stay hot, then reclaimed by the
