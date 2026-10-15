@@ -1199,9 +1199,15 @@ static void *control_watch(void *unused){
   return NULL;
 }
 
-/* design/bridge-and-ipc.md: the node's resident bridge */
+/* design/bridge-and-ipc.md: the node's resident bridge; -M its window's share of the node's memory, in percent (the
+   node's setting, bin/mesh-user.sh) */
 int main(int argc,char **argv){
-  (void)argc;
+  double share=0;
+  for(int i=1;i<argc;i++){
+    if(!strcmp(argv[i],"-M") && i+1<argc)share=atof(argv[++i]);
+    else die("usage: mesh-flow -M percent");
+  }
+  if(!(share>0 && share<=100))die("the window's share of the node's memory (-M) is a percentage in (0, 100]");
   struct stat binary,current;
   if(stat(argv[0],&binary))memset(&binary,0,sizeof binary);
   uuid_t uuid;struct timespec bound={5,0};
@@ -1216,8 +1222,12 @@ int main(int argc,char **argv){
   const uint32_t pg=(uint32_t)getpagesize();
   /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
   if((uint64_t)pg+4096>16773120)die("transport chunk exceeds native request capacity");
+  uint32_t cap,extents=window_extents(share,&cap);
+  if(cap)fprintf(stderr,"bridge: the window is capped at %u extents of %zu bytes, the most the node's RDMA devices register (max_mr), below %g%% of the node's memory\n",
+    cap,MESH_REGION,share);
+  if(!extents)die("the window's share of the node's memory is less than one registration extent");
   struct hdr geometry={0};
-  uint64_t length=mesh_layout(&geometry,pg,1,(uint32_t)(MESH_WINDOW/pg));
+  uint64_t length=mesh_layout(&geometry,pg,1,(uint32_t)((uint64_t)extents*MESH_REGION/pg));
   signal(SIGPIPE,SIG_IGN);signal(SIGINT,SIG_IGN);signal(SIGTERM,SIG_IGN);signal(SIGHUP,SIG_IGN);
   atexit(down);
   shm_unlink(MESH_NAME);int fd=shm_open(MESH_NAME,O_CREAT|O_RDWR,MESH_MODE);if(fd<0)die("shm");
@@ -1256,7 +1266,8 @@ int main(int argc,char **argv){
   pthread_t watcher;
   if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
   ports_find();
-  fprintf(stderr,"bridge node %u (%s): arena %llu pages, rows %u\n",node,host,(unsigned long long)mesh_arena_pages(M),M->rows);
+  fprintf(stderr,"bridge node %u (%s): window %u extents (%g%% of the node's memory), arena %llu pages, rows %u\n",node,host,extents,share,
+    (unsigned long long)mesh_arena_pages(M),M->rows);
   uint64_t liveness=0;
   while(!stop){
     now=clock_ns();

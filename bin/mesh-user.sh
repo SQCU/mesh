@@ -1,7 +1,9 @@
 #!/bin/bash
 # The substrate as its user's (design/bridge-and-ipc.md): the user's mesh checkout built (the bridge, the library and its
 # Python bindings), ~/.venv-mesh-uv with torch-mesh and the checkout's library on its path, and the bridge as the user's
-# agent io.mesh.bridge, run from the checkout.  Run as the user, again after every pull:  mesh-user.sh [CHECKOUT]  (~/mesh)
+# agent io.mesh.bridge, run from the checkout with its window's share of the node's memory (-M): the node's setting,
+# mesh_pct in /usr/local/mesh/bridge.conf, else in ~/.mesh-bridge.conf, else 75 percent (design/prepared-machine.md#M09).
+# Run as the user, again after every pull:  mesh-user.sh [CHECKOUT]  (~/mesh)
 set -u
 source=$(cd "${1:-$HOME/mesh}" && pwd -P) || exit 1
 venv=$HOME/.venv-mesh-uv
@@ -20,12 +22,14 @@ if [ "$(cat "$venv/torch-mesh.sum" 2>/dev/null)" != "$sum" ]; then
   [ "$status" = 0 ] || exit "$status"
   printf '%s\n' "$sum" > "$venv/torch-mesh.sum"
 fi
+conf=/usr/local/mesh/bridge.conf; [ -f "$conf" ] || conf=$HOME/.mesh-bridge.conf
+share=$( [ -f "$conf" ] && . "$conf" >/dev/null 2>&1; echo "${mesh_pct:-75}" )
 agents=$HOME/Library/LaunchAgents; mkdir -p "$agents" "$HOME/Library/Logs"
 cat > "$agents/io.mesh.bridge.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- mesh-flow $(shasum -a 256 "$source/rdma/mesh-flow" | cut -d' ' -f1) -->
 <plist version="1.0"><dict><key>Label</key><string>io.mesh.bridge</string>
-<key>ProgramArguments</key><array><string>$source/rdma/mesh-flow</string></array>
+<key>ProgramArguments</key><array><string>$source/rdma/mesh-flow</string><string>-M</string><string>$share</string></array>
 <key>LimitLoadToSessionType</key><string>Background</string>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>ExitTimeOut</key><integer>60</integer>
 <key>StandardErrorPath</key><string>$HOME/Library/Logs/io.mesh.bridge.log</string></dict></plist>
