@@ -56,7 +56,7 @@ int mesh_link_between(const struct mesh_link_map *map,uint32_t a,uint32_t b){
 }
 
 /* The cost of the link between a and b: its own where the map gives one, else alpha and beta. */
-static void mesh_link_cost(const struct mesh_link_map *map,uint32_t a,uint32_t b,double alpha,double beta,double *link_alpha,double *link_beta){
+void mesh_link_cost(const struct mesh_link_map *map,uint32_t a,uint32_t b,double alpha,double beta,double *link_alpha,double *link_beta){
   *link_alpha=alpha;*link_beta=beta;
   for(uint32_t l=0;map->cost && l<map->links;l++)
     if(((map->link[l][0]==a && map->link[l][1]==b) || (map->link[l][0]==b && map->link[l][1]==a)) && !isnan(map->cost[l][0])){
@@ -562,14 +562,13 @@ int mesh_host_inputs(struct mesh_ctx *context){
   struct hdr *m=context->M;
   struct mesh_client *client=mesh_client_at(m,context->client);
   uint64_t frames[MESH_DESTINATIONS],words=0;
-  const uint32_t destinations=mesh_destinations(client);
+  const uint32_t destinations=mesh_destination(client,0);
   for(uint32_t d=0;d<destinations;d++){
     words=(words+15)&~UINT64_C(15);
     frames[d]=0;
     for(uint32_t q=d*MESH_QUEUES;q<(d+1)*MESH_QUEUES;q++){
       struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
-        frames[d]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*mesh_transfer_active(in+i,client->tx[d].invocations);
+      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)frames[d]+=mesh_transfer_frames(m,in+i,client->tx[d].invocations);
     }
     words+=frames[d];
   }

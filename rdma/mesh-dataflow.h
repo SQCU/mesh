@@ -3,6 +3,7 @@
 #include "mesh.h"
 #include "mesh-plan.h"
 #include <errno.h>
+#include <signal.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
 struct mesh_ctx { struct hdr *M; size_t len; uint64_t client,send_off,send_bytes,inputs_off,inputs_bytes; uint32_t row_cursor,arena_cursor; int fd; };
 /* design/bridge-and-ipc.md#clients: a client slot of this node's one region, its execution `name` (the same on every
@@ -13,11 +14,16 @@ struct mesh_ctx { struct hdr *M; size_t len; uint64_t client,send_off,send_bytes
 int mesh_attach(struct mesh_ctx *,const char *name);
 int mesh_slot_take(struct mesh_ctx *,struct hdr *,uint64_t key);
 int mesh_detach(struct mesh_ctx *);
-/* design/bridge-and-ipc.md#clients: the destinations a slot bound, in order (they are bound in order) */
-static inline uint32_t mesh_destinations(const struct mesh_client *client){
-  uint32_t destinations=0;
-  while(destinations<MESH_DESTINATIONS && client->tx[destinations].node)destinations++;
-  return destinations;
+/* design/bridge-and-ipc.md#region: a process gone (its slot's or the bridge's pid; 0: none) */
+static inline int mesh_gone(pid_t process){ return !process || (kill(process,0) && errno==ESRCH); }
+/* design/prepared-machine.md#M07, #M08: a receive transfer's frames, a record and a completion word a chunk of a slot
+   of an invocation of its range; design/prepared-machine.md#M04: a SEND transfer's cells, a column of its invocations
+   and a terminal cell a slot */
+static inline uint64_t mesh_transfer_frames(struct hdr *m,const struct mesh_transfer *in,uint32_t invocations){
+  return (uint64_t)mesh_row_chunks(m,in->local_row,in->bytes)*in->count*mesh_transfer_active(in,invocations);
+}
+static inline uint64_t mesh_transfer_cells(const struct mesh_transfer *out,uint32_t slots,uint32_t invocations){
+  return (uint64_t)(out->stride?slots:1)*(mesh_transfer_active(out,invocations)+1);
 }
 /* design/algorithm-sources.md#programtensor */
 void mesh_retire(struct hdr *,uint64_t client);

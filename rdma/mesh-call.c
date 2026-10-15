@@ -1,8 +1,6 @@
 #include "mesh-call.h"
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h>
 #include <time.h>
 
 /* design/algorithm-sources.md#programtensor */
@@ -79,14 +77,13 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   atomic_store_explicit(&client->depth,depth,memory_order_relaxed);
   atomic_store_explicit(&client->cyclic,0,memory_order_relaxed);
   uint64_t cells=0;
-  const uint32_t destinations=mesh_destinations(client);
+  const uint32_t destinations=mesh_destination(client,0);
   for(uint32_t q=0;q<destinations*MESH_QUEUES;q++){
     /* design/prepared-machine.md#M08 */
     for(int d=0;d<2;d++)qsort(mesh_transfers(m,context->client,q,d),
       atomic_load(mesh_order_length(m,context->client,q,d)),sizeof(struct mesh_transfer),mesh_binding_order);
     struct mesh_transfer *out=mesh_transfers(m,context->client,q,MESH_SEND);
-    for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_SEND));i++)
-      cells+=(uint64_t)(out[i].stride?slots:1)*(mesh_transfer_active(out+i,invocations)+1);
+    for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_SEND));i++)cells+=mesh_transfer_cells(out+i,slots,invocations);
   }
   struct mesh_section storage;
   /* design/prepared-machine.md#M04 */
@@ -135,7 +132,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
           publication->targets[j].stride=column;
         }
       }
-      cell+=(uint64_t)(out->stride?slots:1)*column;
+      cell+=mesh_transfer_cells(out,slots,invocations);
     }
     first+=cell*sizeof(struct mesh_send);
     /* design/prepared-machine.md#M07 */
@@ -147,10 +144,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
     }
     qsort(ordered,position,sizeof *ordered,mesh_transfer_compare);
     uint64_t word=0;
-    for(uint32_t i=0;i<position;i++){
-      ordered[i]->first=(uint32_t)word;
-      word+=(uint64_t)mesh_row_chunks(m,ordered[i]->local_row,ordered[i]->bytes)*ordered[i]->count*mesh_transfer_active(ordered[i],invocations);
-    }
+    for(uint32_t i=0;i<position;i++){ordered[i]->first=(uint32_t)word;word+=mesh_transfer_frames(m,ordered[i],invocations);}
     free(ordered);
   }
 
@@ -172,14 +166,13 @@ int mesh_transfers_start(struct mesh_ctx *context){
   /* design/prepared-machine.md#M26 */
   mesh_notify(&m->control);
   const uint64_t deadline=clock_gettime_nsec_np(CLOCK_UPTIME_RAW)+MESH_PEER_NS+MESH_PAIR_NS+MESH_PAUSE_NS;
-  const uint32_t destinations=mesh_destinations(client);
+  const uint32_t destinations=mesh_destination(client,0);
   int failed=0;
   for(uint32_t d=0;d<destinations;d++){
     if(!mesh_destination_transfers(m,context->client,d))continue;
     struct mesh_port_info *status=&client->status[d];
     for(uint64_t seen;(seen=atomic_load_explicit(&status->prepared,memory_order_acquire))!=context->client;){
-      pid_t bridge=(pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_relaxed);
-      if(!bridge || (kill(bridge,0) && errno==ESRCH))return ESRCH;
+      if(mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_relaxed)))return ESRCH;
       uint64_t at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
       if(at>deadline)return ETIMEDOUT;
       os_sync_wait_on_address_with_timeout(&status->prepared,seen,sizeof seen,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
@@ -189,69 +182,6 @@ int mesh_transfers_start(struct mesh_ctx *context){
       failed=(int)atomic_load_explicit(&status->code,memory_order_relaxed);
   }
   return failed;
-}
-
-/* design/prepared-machine.md#M27 */
-/* The program's trace toward every destination it binds, each way one record an event of one cycle of its invocations
-   (each SEND cell posted, each receive record landed), which the bridge writes as the program runs and
-   mesh_transfers_ledger prints.  Called after mesh_transfers_prepare, before mesh_transfers_start. */
-int mesh_transfers_trace(struct mesh_ctx *context){
-  struct hdr *m=context->M;
-  struct mesh_client *client=mesh_client_at(m,context->client);
-  for(uint32_t d=0;d<mesh_destinations(client);d++){
-    struct mesh_tx *tx=&client->tx[d];
-    if(!mesh_destination_transfers(m,context->client,d))continue;
-    uint64_t events[2]={(uint64_t)(tx->count*tx->slots+tx->once)*(tx->invocations?tx->invocations:1),0};
-    for(uint32_t q=d*MESH_QUEUES;q<(d+1)*MESH_QUEUES;q++){
-      struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++)
-        events[1]+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*mesh_transfer_active(in+i,tx->invocations);
-    }
-    struct mesh_section section;
-    int status=mesh_section_create(context,2*sizeof(struct mesh_trace_ring)+(events[0]+events[1])*sizeof(struct mesh_trace),1,&section);
-    if(status)return status;
-    struct mesh_trace_ring *sent=mesh_section_address(context,section,0),*landed=(void *)(sent->records+events[0]);
-    sent->capacity=events[0];landed->capacity=events[1];
-    tx->trace=(uint64_t)((char *)sent-(char *)m);
-  }
-  return 0;
-}
-
-/* design/prepared-machine.md#M27: the program's trace as JSON lines on stdout, each destination's, keyed by its node: its
-   layout (trace_layout), each transfer's binding (trace_binding: its SEND cells, or its receive ring and chunks) and
-   every event (native_trace), which mesh rdma/ledger.py reads */
-void mesh_transfers_ledger(struct mesh_ctx *context){
-  struct hdr *m=context->M;
-  struct mesh_client *client=mesh_client_at(m,context->client);
-  for(uint32_t d=0;d<mesh_destinations(client);d++){
-    struct mesh_tx *tx=&client->tx[d];
-    if(!tx->trace)continue;
-    const uint32_t node=tx->node;
-    struct mesh_trace_ring *ring[2]={(void *)((char *)m+tx->trace),NULL};
-    ring[1]=(void *)(ring[0]->records+ring[0]->capacity);
-    printf("{\"trace_layout\":%u,\"invocations\":%u}\n",node,tx->invocations);
-    for(uint32_t q=0;q<MESH_QUEUES;q++){
-      uint32_t channel=d*MESH_QUEUES+q;
-      struct mesh_transfer *out=mesh_transfers(m,context->client,channel,MESH_SEND),*in=mesh_transfers(m,context->client,channel,MESH_RECEIVE);
-      for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,channel,MESH_SEND));i++){
-        uint32_t active=mesh_transfer_active(out+i,tx->invocations);
-        for(uint32_t slot=0;slot<out[i].count;slot++)
-          printf("{\"trace_binding\":%u,\"direction\":0,\"binding\":%u,\"slot\":%u,\"begin\":%u,\"active\":%u,\"cells\":%llu}\n",node,out[i].binding,slot,
-            out[i].begin,active,(unsigned long long)(tx->cells+(out[i].first+(uint64_t)slot*(active+1))*sizeof(struct mesh_send)));
-      }
-      for(uint32_t slot=0;slot<tx->slots;slot++)for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,channel,MESH_RECEIVE));i++)
-        if(slot<in[i].count)
-          printf("{\"trace_binding\":%u,\"direction\":1,\"ring\":%u,\"binding\":%u,\"slot\":%u,\"begin\":%u,\"active\":%u,\"chunks\":%u}\n",node,
-            q*tx->slots+slot,in[i].binding,slot,in[i].begin,mesh_transfer_active(in+i,tx->invocations),
-            mesh_row_chunks(m,in[i].local_row+slot*in[i].stride,in[i].bytes));
-    }
-    for(int way=0;way<2;way++)for(uint64_t k=0;k<atomic_load_explicit(&ring[way]->count,memory_order_acquire);k++){
-      struct mesh_trace t=ring[way]->records[k];
-      printf("{\"native_trace\":%u,\"direction\":%d,\"event\":%llu,\"identity\":%llu,\"ns\":[%llu,%llu,%llu]}\n",node,way,(unsigned long long)k,
-        (unsigned long long)t.identity,(unsigned long long)t.begin,(unsigned long long)t.middle,(unsigned long long)t.end);
-    }
-  }
-  fflush(stdout);
 }
 
 /* design/prepared-machine.md#M30 */
@@ -267,7 +197,7 @@ int mesh_transfers_cyclic(struct mesh_ctx *context){
   uint32_t invocations=client->tx[0].invocations;
   uint32_t fallback=atomic_load_explicit(&client->depth,memory_order_relaxed);
   if(!invocations)return EINVAL;
-  for(uint32_t q=0;q<mesh_destinations(client)*MESH_QUEUES;q++)for(int d=0;d<2;d++){
+  for(uint32_t q=0;q<mesh_destination(client,0)*MESH_QUEUES;q++)for(int d=0;d<2;d++){
     struct mesh_transfer *transfers=mesh_transfers(m,context->client,q,d);
     for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,d));i++){
       uint32_t depth=transfers[i].depth?transfers[i].depth:fallback;

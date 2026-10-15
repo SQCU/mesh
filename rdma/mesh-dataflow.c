@@ -1,4 +1,3 @@
-#include <signal.h>
 #include "mesh-dataflow.h"
 #include <stdlib.h>
 #include <string.h>
@@ -22,9 +21,8 @@ static int mesh_open(int writable,struct hdr **out,size_t *length,int *fd){
   struct hdr *m=mmap(NULL,(size_t)info.st_size,PROT_READ|(writable?PROT_WRITE:0),MAP_SHARED,file,0);
   int error=errno;
   if(m==MAP_FAILED){close(file);return error;}
-  pid_t bridge=(pid_t)atomic_load(&m->bridge_pid);
   error=m->magic!=MESH_MAGIC || m->version!=MESH_VERSION || m->length>(uint64_t)info.st_size?EINVAL:
-    !bridge || (kill(bridge,0) && errno==ESRCH)?ESRCH:0;
+    mesh_gone((pid_t)atomic_load(&m->bridge_pid))?ESRCH:0;
   if(error || !fd)close(file);
   if(error){munmap(m,(size_t)info.st_size);return error;}
   *out=m;*length=(size_t)info.st_size;
@@ -62,10 +60,7 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
     uint64_t before=atomic_load_explicit(&m->map,memory_order_acquire);
     if(before&1){
       if(os_sync_wait_on_address_with_timeout(&m->map,before,sizeof m->map,OS_SYNC_WAIT_ON_ADDRESS_SHARED,
-           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS)<0 && errno==ETIMEDOUT){
-        pid_t bridge=(pid_t)atomic_load(&m->bridge_pid);
-        if(!bridge || (kill(bridge,0) && errno==ESRCH))return -ESRCH;
-      }
+           OS_CLOCK_MACH_ABSOLUTE_TIME,MESH_PAUSE_NS)<0 && errno==ETIMEDOUT && mesh_gone((pid_t)atomic_load(&m->bridge_pid)))return -ESRCH;
       continue;
     }
     uint64_t count=atomic_load_explicit(&m->map_nodes,memory_order_relaxed),at=atomic_load_explicit(&m->map_off,memory_order_relaxed);
@@ -129,14 +124,6 @@ static uint32_t mesh_whole_route(const struct mesh_whole *w,uint32_t a,uint32_t 
   for(uint32_t i=0;a>b && i<count/2;i++){uint32_t t=path[i];path[i]=path[count-1-i];path[count-1-i]=t;}
   return count;
 }
-/* a route's cost: its links' alphas summed, and their betas */
-static void mesh_whole_cost(const struct mesh_whole *w,const uint32_t *path,uint32_t count,double *alpha,double *beta){
-  *alpha=*beta=0;
-  for(uint32_t i=0;i+1<count;i++)for(uint32_t l=0;l<w->map.links;l++)
-    if((w->link[l][0]==path[i] && w->link[l][1]==path[i+1]) || (w->link[l][0]==path[i+1] && w->link[l][1]==path[i])){
-      *alpha+=w->cost[l][0];*beta+=w->cost[l][1];break;
-    }
-}
 static uint32_t mesh_part(uint32_t *part,uint32_t v){
   while(part[v]!=v)v=part[v]=part[part[v]];
   return v;
@@ -144,7 +131,7 @@ static uint32_t mesh_part(uint32_t *part,uint32_t v){
 
 /* design/algorithm-sources.md#meshobserve: mesh-plan.h mesh_map over a copy of the records */
 static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t *members,uint32_t n,uint32_t *node,
-                            struct mesh_link_map *map){
+                            char (*name)[MESH_NAME_BYTES],struct mesh_link_map *map){
   struct mesh_whole w;
   int error=mesh_whole_make(r,count,&w);
   const uint32_t N=n?n:count,room=map->links;
@@ -164,16 +151,16 @@ static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t 
     if(links<room){map->link[links][0]=a;map->link[links][1]=b;map->cost[links][0]=w.cost[l][0];map->cost[links][1]=w.cost[l][1];}
     links++;part[mesh_part(part,a)]=mesh_part(part,b);
   }
-  /* members left in parts: the routed pair of least cost across two parts linked at its route's cost, until one part
-     remains or no route joins two [Kruskal 1956] */
+  /* members left in parts: the routed pair of least cost across two parts linked at its route's cost (its links'
+     alphas summed, and their betas), until one part remains or no route joins two [Kruskal 1956] */
   for(uint32_t best[2]={0,0};!error && n && best[0]<N;){
     double least[2]={0,0};
     best[0]=N;
     for(uint32_t a=0;a<N;a++)for(uint32_t b=a+1;b<N;b++){
       uint32_t hops=mesh_part(part,a)==mesh_part(part,b)?0:mesh_whole_route(&w,at[a],at[b],path);
-      double alpha,beta;
+      double alpha=0,beta=0,link[2];
       if(hops<2)continue;
-      mesh_whole_cost(&w,path,hops,&alpha,&beta);
+      for(uint32_t h=0;h+1<hops;h++){mesh_link_cost(&w.map,path[h],path[h+1],MESH_ALPHA_US,MESH_BETA_NS,link,link+1);alpha+=link[0];beta+=link[1];}
       if(best[0]==N || alpha<least[0] || (alpha==least[0] && beta<least[1])){best[0]=a;best[1]=b;least[0]=alpha;least[1]=beta;}
     }
     if(best[0]==N)break;
@@ -182,7 +169,11 @@ static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t 
   }
   if(!error && (map->nodes<N || room<links)){map->nodes=N;map->links=links;error=ENOSPC;}
   else if(!error){
-    for(uint32_t i=0;node && i<N;i++)node[i]=n?members[i]:r[i].node;
+    for(uint32_t i=0;i<N;i++){
+      if(node)node[i]=n?members[i]:r[i].node;
+      if(name && at[i]<count)memcpy(name[i],r[at[i]].name,MESH_NAME_BYTES);
+      else if(name)name[i][0]=0;
+    }
     map->nodes=N;map->links=links;
     map->kind=(uint64_t)links*2==(uint64_t)N*(N-1)?MESH_LINKS_MESH:MESH_LINKS_GRAPH;
   }
@@ -190,14 +181,14 @@ static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t 
   return error?-error:(int)N;
 }
 
-int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,struct mesh_link_map *map){
+int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH_NAME_BYTES],struct mesh_link_map *map){
   struct hdr *m;size_t length;struct mesh_record *r=NULL;
   int error=mesh_open(0,&m,&length,NULL);
   if(error)return -error;
   int count=mesh_records_read(m,length,&r);
   munmap(m,length);
   if(count<0)return count;
-  int result=mesh_records_map(r,(uint32_t)count,members,n,node,map);
+  int result=mesh_records_map(r,(uint32_t)count,members,n,node,name,map);
   free(r);
   return result;
 }

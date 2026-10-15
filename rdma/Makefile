@@ -2,12 +2,12 @@ BINS = mesh-flow mesh-stat libmesh.dylib libnccl-mesh.dylib libmesh-coreml.dylib
 MESH_CODESIGN_IDENTITY ?= Mesh Bridge
 all: $(BINS)
 native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
-.build/%.s: %.c mesh.h mesh-plan.h mesh-verbs.h mesh-dataflow.h mesh-call.h mesh-collective.h Makefile
+.build/%.s: %.c mesh.h mesh-plan.h mesh-verbs.h mesh-dataflow.h mesh-call.h Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Werror -S -o $@ $<
 # the bridge and mesh-stat read the region through libmesh: beside them here, and at ../rdma from $MESH_ROOT/bin
 LIBMESH = -L. -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
-mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h mesh-collective.h libmesh.dylib Makefile
+mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h libmesh.dylib Makefile
 	mkdir -p .build
 	cc $(CPPFLAGS) -fblocks -O2 -o .build/$@ mesh-flow.c $(LIBMESH) -lrdma -framework SystemConfiguration -framework CoreFoundation
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
