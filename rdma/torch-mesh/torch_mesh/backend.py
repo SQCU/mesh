@@ -142,8 +142,6 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def __init__(self, rank, size, store):
         super().__init__(rank, size)
-        self._rank, self._size, self._pending = rank, size, None
-        self._stream = ffi.NULL
         made, unique = ffi.new('ncclComm_t *'), ffi.new('ncclUniqueId *')
         if rank == 0:
             check(LIB.ncclGetUniqueId(unique))
@@ -151,10 +149,48 @@ class ProcessGroupMesh(dist.ProcessGroup):
         else:
             ffi.memmove(unique, store.get('mesh/unique'), ffi.sizeof('ncclUniqueId'))
         check(LIB.ncclCommInitRank(made, size, unique[0], rank))
-        self.comm = made[0]
+        self._held(rank, size, made[0])
+
+    def _held(self, rank, size, comm):
+        self._rank, self._size, self._pending, self._stream = rank, size, None, ffi.NULL
+        self.comm = comm
         self.handle = int(ffi.cast('uintptr_t', self.comm))
         if _stream is not None:
             _stream.attach(self, self.handle)
+
+    @classmethod
+    def _of(cls, comm):
+        """A group over a communicator libnccl-mesh made (a shrink's or a grow's), with no bootstrap of its own."""
+        count, rank = ffi.new('int *'), ffi.new('int *')
+        check(LIB.ncclCommCount(comm, count))
+        check(LIB.ncclCommUserRank(comm, rank))
+        made = cls.__new__(cls)
+        dist.ProcessGroup.__init__(made, rank[0], count[0])
+        made._held(rank[0], count[0], comm)
+        return made
+
+    def shrink(self, exclude, abort=False):
+        """This group without the ranks `exclude`, the kept ranks in their order (ncclCommShrink; `abort` revokes this
+        group's work in flight first)."""
+        made, ranks = ffi.new('ncclComm_t *'), ffi.new('int[]', list(exclude) or [0])
+        check(LIB.ncclCommShrink(self.comm, ranks, len(exclude), made, ffi.NULL, 1 if abort else 0))
+        return ProcessGroupMesh._of(made[0])
+
+    def grow(self, size, unique=None, rank=-1):
+        """This group's ranks and `size` - its size more (ncclCommGrow), met at the id this group's root gives
+        (ncclCommGetUniqueId, `unique` None on its ranks); a joining process passes the root's id and its `rank` on a
+        None group: ProcessGroupMesh.grow(None, size, unique, rank)."""
+        made, held = ffi.new('ncclComm_t *'), ffi.new('ncclUniqueId *')
+        if self is not None and self._rank == 0:
+            check(LIB.ncclCommGetUniqueId(self.comm, held))
+        elif unique is not None:
+            ffi.memmove(held, unique, ffi.sizeof('ncclUniqueId'))
+        check(LIB.ncclCommGrow(ffi.NULL if self is None else self.comm, size, held, rank, made, ffi.NULL))
+        return ProcessGroupMesh._of(made[0]), bytes(ffi.buffer(held))
+
+    def revoke(self):
+        """This group's work in flight ends with an error and none is issued after it (ncclCommRevoke)."""
+        check(LIB.ncclCommRevoke(self.comm, 0))
 
     def size(self):
         return self._size
