@@ -24,7 +24,10 @@
    ncclMeshCommInitRank (below) is for a program that passes its own programs or paths.  ncclCommSplit and
    ncclCommShrink make communicators of the ranks they take, on the bridges' map like any other; Shrink makes no
    exchange.  ncclCommGrow meets at the bootstrap of the id that ncclCommGetUniqueId gives comm's root, which the root
-   broadcasts on comm.  ncclCommRevoke closes comm's session, its groups in flight lost.
+   broadcasts on comm.  ncclCommRevoke closes comm's session, its groups in flight lost.  Making a communicator (a lone
+   rank's too) attaches the process's client of its node's bridge where it has none, so it needs the node's bridge
+   running and fails as ncclMemAlloc does (Memory, below): every client slot held, no region of a bridge that runs, or
+   a lease of a bridge that stopped still held.
 
    Programs.  A communicator compiles its default collectives each time its session opens, on the map read then
    (mesh-plan.h mesh_compile): a program's own table (ncclMeshCommInitRank) or the default, the single-phase all-reduce along the shortest-path trees below the size
@@ -61,13 +64,22 @@
    call"): whole pages of the window covering size, which the bridge registered on every device when the device came up,
    before any queue pair existed; a lease registers nothing.  The client sizes its leases ("ontologically it must be the
    responsibility of client programs to know how much allocation they need"): a lease the window cannot meet is
-   ncclSystemError naming the bytes asked and the pages free, and a node whose bridge does not run is ncclSystemError
-   naming the requirement, a bridge whose configuration's window holds the client's footprint (etc/bridge/README.md);
-   nothing falls back to other memory.  ncclMemFree returns the pages; the leases of a process gone are returned by its
-   bridge, as every retired client's rows are.  ncclCommRegister takes a buffer in the window, its handle the buffer
-   itself, and refuses any other (ncclInvalidArgument: lease it with ncclMemAlloc); ncclCommDeregister releases nothing.
-   Weights, KV and every buffer a peer reads are leases: "why would weights or kv be outside of the memory pinned pool?
-   being outside of it means that they cannot be zero copy passed to peers."  Design: design/prepared-machine.md#M09.
+   ncclSystemError naming the bytes asked and the pages free, one while every client slot is held ncclSystemError naming
+   mesh.h MESH_CLIENTS, and one where the process attaches no region of a bridge that runs names the requirement, a
+   bridge whose configuration's window holds the client's footprint (etc/bridge/README.md; ncclRemoteError where the
+   bridge stopped, else ncclSystemError); nothing falls back to other memory.  ncclMemFree returns the pages; the leases
+   of a process gone are returned by its bridge, as every retired client's rows are.  ncclCommRegister takes a buffer in
+   the window, its handle the buffer itself, and refuses any other (ncclInvalidArgument: lease it with ncclMemAlloc);
+   ncclCommDeregister releases nothing.  A lease is an operand of the window it came from: once its bridge stops its
+   pages are no longer registered, and while the process holds such a lease its next ncclMemAlloc, communicator,
+   session (a communicator's next group that crosses a link) and ncclCommRegister fail with ncclRemoteError naming it,
+   as ncclMeshMemLive (below) does, until the process has freed every one (ncclMemFree); it then leases from the bridge
+   that runs, so a process never holds leases of two regions (design/recovery.md mandates 12 and 13).  Weights, KV and
+   every buffer a peer reads are leases: "why would weights or kv be outside of the memory pinned pool? being outside of
+   it means that they cannot be zero copy passed to peers."  Both paths copy every operand, a lease or not, through the
+   session's rings: no libnccl-mesh collective crosses a caller's buffer without a copy yet.  The window is where a
+   program that binds its own section (mesh-call.h mesh_transfer_bind) crosses without one, and ncclCommRegister refuses
+   a buffer outside it.  Design: design/prepared-machine.md#M09.
 
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and the
    group after a failure is returned opens a session again, on the current map.  The session's progress thread is the
@@ -818,6 +830,10 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int
 /* The highest ticket through which every issued group is complete (or lost with a failed session): its
    workspace may be reused in the stream's order. */
 uint64_t ncclMeshRetired(void);
+/* Every lease this process holds (ncclMemAlloc) is of its node's bridge that runs: ncclSuccess, or ncclRemoteError
+   where one is of a bridge that stopped, its pages no longer registered (Memory, above).  A process that holds leases
+   and makes no other call (a server between calls) reads it to know its leases are to be freed and taken again. */
+ncclResult_t ncclMeshMemLive(void);
 
 #ifdef __cplusplus
 } // end extern "C"

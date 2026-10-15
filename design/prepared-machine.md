@@ -105,27 +105,41 @@ call of the operator's words above. A process is one client of its node's bridge
 (`mesh_attach`), made at its first lease or communicator, whose slot owns the process's leases; each communicator's
 session takes its program's own slot on that attach under the communicator's name (`mesh_program_attach`; a slot is
 one execution's program, design/bridge-and-ipc.md#clients). A lease is a section of one slot (`mesh_section_create`):
-whole arena pages covering its bytes, already registered on every device since the device came up, so a lease
-registers nothing (the operator, 2026-10-15: "Registration is eager: the window is registered whole on every device at
-device up, before any queue pair exists (mesh 6bd04a6). A lease never registers memory; it hands out pages already
-registered."). Its bookkeeping is the region's, where
+whole arena pages covering its bytes, already registered on every device since the device came up (registration is
+eager, mesh 6bd04a6: the window is registered whole on every device at device up, before any queue pair exists), so a
+lease never registers memory; it hands out pages already registered. Its bookkeeping is the region's, where
 the bridge sees it: the section's rows are owned by the client's slot (`owner`, `pages`; its arena bits set), so when
 the client retires (it exits or dies, and the bridge retires its slot) its rows are closed, released once no flow of
 the client remains (`mesh_retired_release`) and reclaimed with their pages at the next lease that needs room
-(`mesh_buffer_reclaim`), as every retired client's rows are. `ncclMemFree` returns a lease at once (`mesh_lease_return`:
-its rows disowned and released while they stay hot, then reclaimed by the same `mesh_buffer_reclaim`). A lease the
-window cannot meet fails as `ncclSystemError` naming the bytes asked and the pages free (`mesh_arena_free`); a node whose
-bridge does not run fails naming the requirement, a bridge whose configuration's window holds the client's footprint
-(etc/bridge/README.md). Nothing falls back to other memory ("you can't defend against this; it's *your code* you're
-pretending you need to defend against; you can write it right all along"; and, on the code: "Tech debt goes down: one
-implementation per computation, no fallbacks that hide a missing requirement, no monkeypatching, no shims").
-`ncclCommRegister` takes a buffer in the window and refuses any other (`ncclInvalidArgument`, naming the lease).
-Weights and KV are leases ("why would weights or kv be outside of the memory pinned pool? being outside of it means
-that they cannot be zero copy passed to peers"). A lease is an operand of the window it was taken from: a bridge that
-stops takes its region with it, the process's next lease, communicator or session attaches to the next bridge's, and
-the old attach stays mapped (its leases readable, no longer registered) until its last lease is freed and its last
-session closed (the recovery doctrine: "a call may fail and return an error the caller may retry; servers survive
-operand invalidation; no within-call resumption").
+(`mesh_buffer_reclaim`), as every retired client's rows are. The bridge watches each slot's process from the turn it
+first sees the slot (a kqueue `NOTE_EXIT` on its pid), so a process's exit retires every slot it holds, its lease slot
+and its programs' slots alike, at once; the bridge's liveness turn (every 3 s) retires any it missed. `ncclMemFree`
+returns a lease at once (`mesh_lease_return`: its rows disowned and released while they stay hot, then reclaimed by the
+same `mesh_buffer_reclaim`). A lease the window cannot meet fails as `ncclSystemError` naming the bytes asked and the
+pages free (`mesh_arena_free`); its rows are disowned before they are released (`mesh_section_create`), so the slot's
+later retirement touches no row another client has claimed since. A node whose bridge does not run fails naming the
+requirement, a bridge whose configuration's window holds the client's footprint (etc/bridge/README.md). Nothing falls
+back to other memory ("you can't defend against this; it's *your code* you're pretending you need to defend against;
+you can write it right all along"), and the library's own buffers in a session (its rings, its violation words) are
+sections of the window too: one implementation per computation, no fallback that hides a missing requirement. `ncclCommRegister` takes a buffer in
+the window and refuses any other (`ncclInvalidArgument`, naming the lease). Weights and KV are leases ("why would
+weights or kv be outside of the memory pinned pool? being outside of it means that they cannot be zero copy passed to
+peers"). libnccl-mesh's collectives still copy every operand, a lease or not, through the session's rings (the host
+path with `memcpy`, the Metal path with its kernels); a program that binds its own section of the window
+(`mesh_transfer_bind`) is what crosses with no copy.
+
+A lease is an operand of the window it was taken from, and a bridge that stops takes its region with it: the lease's
+pages stay mapped and readable but are no longer registered on any device. While the process holds such a lease, its
+next `ncclMemAlloc`, communicator, session (a communicator's next group that crosses a link closes a session whose
+bridge stopped and opens another) and `ncclCommRegister` fail with `ncclRemoteError` naming it, and
+`ncclMeshMemLive` says so for a process that makes no other call; once it has freed every such lease, its next call
+attaches to the bridge that runs then. A process never holds leases of two regions, and the old attach is unmapped
+when its last lease is freed and its last session closed. This is the recovery doctrine (design/recovery.md, mandates
+12 and 13, the operator, 2026-10-14): "functions can fail from any one operand becoming invalidatd, servers should not
+fail when any operand is invalidated (ideally)"; "within call failures cannot be resume and instead must return an
+error (which a caller can presumably retry against immediately if that's what they want)". A server that holds its
+weights and KV as leases survives the restart by reading `ncclMeshMemLive` (or the failure of its next call), freeing
+its leases and taking them again from the new window.
 
 The lazy form this replaced (`device_register`, one extent registered at a program's first page, mesh 3c004b4 to
 e2b875c) registered after the program's queue pairs were made and ready to receive (`flow_work`: `pair_up`, then

@@ -103,9 +103,14 @@ made at its first `ncclMemAlloc` or communicator, whose slot owns every lease th
 on which each communicator's session takes its program's slot (rdma/NCCL.md "Memory"). The client sizes its leases:
 one the window cannot meet is refused naming the bytes asked and the pages free, and the window never grows. Weights,
 KV and every buffer a peer reads are leases: "why would weights or kv be outside of the memory pinned pool? being
-outside of it means that they cannot be zero copy passed to peers." A lease the client returns (`mesh_lease_return`,
-`ncclMemFree`) is reclaimed at once by the reclaim a retired client's rows take; a client that exits or dies has its
-leases closed with its slot and returned by the bridge (below).
+outside of it means that they cannot be zero copy passed to peers." libnccl-mesh's collectives copy every operand, a
+lease or not, through the session's rings, so none crosses a caller's buffer without a copy yet; a program that binds
+its own section of the window (`mesh_transfer_bind`) crosses with none. A lease the client returns
+(`mesh_lease_return`, `ncclMemFree`) is reclaimed at once by the reclaim a retired client's rows take; a client that
+exits or dies has its leases closed with its slot and returned by the bridge (below). A lease is an operand of the
+region it came from: when the bridge stops, its region goes with it, and a process holding a lease of it has its next
+lease, communicator, session and `ncclCommRegister` fail (`ncclRemoteError`), as `ncclMeshMemLive` does, until it has
+freed them all; it then attaches to the next bridge's region, never holding leases of two (rdma/NCCL.md "Memory").
 
 A program is bound (`mesh_transfer_bind`: a transfer names its member node and queue, never a port; the destination's
 lists are leased at its first transfer), prepared (`mesh_transfers_prepare`, `mesh_host_inputs` or the Metal transport)
@@ -114,11 +119,14 @@ each node it binds, over a port paired with that node or along the map's route t
 start returns once every destination is paired, or with the failure that destination's status names with its node
 (EHOSTUNREACH where the map has no route to the node; ETIMEDOUT past the bridge's own windows, design/recovery.md#first;
 the others mesh-call.h lists). A later loss fails the program alike, and the next start reads the map again.
-`mesh_detach`, or the client's process exiting, retires the slot and ends its program: its rows (a program's, or the
-leases of a lease-owning slot) are closed, and once no port still holds a flow of the client the bridge releases them
-(`mesh_retired_release`), the slot is vacant again, and their pages return to the window at the next lease that needs
-room (`mesh_buffer_reclaim`). A process that exits without detaching is retired by the bridge's turn once its pid is
-gone.
+`mesh_detach`, or the client's process exiting, retires the slot (vacant at once, `mesh_retire`) and ends its program:
+its rows (a program's, or the leases of a lease-owning slot) are closed; once no port holds a flow of the client the
+bridge releases them (`mesh_retired_release`), and their pages return to the window at the next lease that needs room
+(`mesh_buffer_reclaim`). The bridge watches each slot's process from the turn it first sees the slot (a kqueue
+`NOTE_EXIT` on its pid, registered again for each new slot of the process, since the kernel keeps one watch per pid;
+a pid already gone at that turn is retired then), and a process's exit retires every slot it holds, its lease slot
+and its programs' slots alike; the liveness turn (every 3 s) retires any slot whose process is gone that the watch
+missed.
 
 ## protocol
 

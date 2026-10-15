@@ -230,7 +230,7 @@ int mesh_section_create(struct mesh_ctx *context,size_t bytes,uint32_t count,str
   if(page==MESH_ABSENT){
     int error=errno;
     mesh_bits_clear(mesh_plane(m,MESH_ROW_HOT),first,rows);
-    for(uint32_t r=first;r<first+rows;r+=stride)mesh_buffers(m)[r].pages=0;
+    for(uint32_t r=first;r<first+rows;r++){mesh_buffers(m)[r].pages=0;atomic_store_explicit(&mesh_buffers(m)[r].owner,0,memory_order_release);}
     mesh_rows_release(context,first,rows);return error;
   }
   for(uint32_t slot=0;slot<count;slot++)

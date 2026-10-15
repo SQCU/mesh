@@ -1137,10 +1137,11 @@ static void program_take(struct mesh_client *client,uint64_t owner,uint32_t d){
   }
   free(route);
 }
-/* design/bridge-and-ipc.md#clients: every client slot read: a client whose process exited is retired; a program that
-   ended (stopped, its client gone) leaves its ports; a program started is taken toward each destination it binds, once
-   no flow of the slot's earlier client remains.  Rows of a retired client or lease are released once no flow of one
-   remains */
+/* design/bridge-and-ipc.md#clients: every client slot read: a slot's process watched from the turn its slot is first
+   seen (its exit retires every slot it holds, the event loop's EVFILT_PROC), one already gone retired at once, and on a
+   liveness turn any client whose process exited retired; a program that ended (stopped, its client gone) leaves its
+   ports; a program started is taken toward each destination it binds, once no flow of the slot's earlier client
+   remains.  Rows of a retired client or lease are released once no flow of one remains */
 static uint64_t owners[MESH_CLIENTS],accepted[MESH_CLIENTS];
 static void clients_turn(int liveness){
   const pid_t self=getpid();
@@ -1152,14 +1153,16 @@ static void clients_turn(int liveness){
     uint64_t owner=atomic_load(&client->owner);
     if(owner && (pid_t)(uint32_t)owner==self)continue;
     if(liveness && owner && !(owner&MESH_RETIRING) && mesh_gone((pid_t)(uint32_t)owner)){mesh_retire(M,owner);owner=atomic_load(&client->owner);}
+    if(owner && owner!=owners[s] && !(owner&MESH_RETIRING)){
+      struct kevent64_s watch;EV_SET64(&watch,(uint32_t)owner,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,s,0,0);
+      if(kevent64(events,&watch,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL)<0 && errno==ESRCH){mesh_retire(M,owner);owner=atomic_load(&client->owner);}
+    }
     changed|=owner!=owners[s];owners[s]=owner;
     if(!owner || (owner&MESH_RETIRING) || atomic_load_explicit(&client->configured,memory_order_acquire)!=owner || accepted[s]==owner)continue;
     int earlier=0;
     for(struct flow *f=flows;f;f=f->next)earlier|=f->owner && f->owner!=owner && ((f->owner>>32)&(MESH_CLIENTS-1))==s && (pid_t)(uint32_t)f->owner!=self;
     if(earlier)continue;
     accepted[s]=owner;
-    struct kevent64_s event;EV_SET64(&event,(uint32_t)owner,EVFILT_PROC,EV_ADD|EV_ONESHOT,NOTE_EXIT,0,s,0,0);
-    kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
     for(uint32_t d=0,n=mesh_destination(client,0);d<n;d++)if(mesh_destination_transfers(M,owner,d))program_take(client,owner,d);
   }
   for(struct flow *f=flows;f;f=f->next)
@@ -1318,9 +1321,11 @@ int main(int argc,char **argv){
     for(int i=0;i<count;i++){
       struct kevent64_s *e=ready+i;
       if(e->filter==EVFILT_SIGNAL)stop=1;
-      else if(e->filter==EVFILT_PROC && e->udata<MESH_CLIENTS){
-        uint64_t owner=atomic_load(&((struct mesh_client *)((char *)M+M->client_off))[e->udata].owner);
-        if((uint32_t)owner==(uint32_t)e->ident)mesh_retire(M,owner);
+      else if(e->filter==EVFILT_PROC){
+        for(uint32_t s=0;s<MESH_CLIENTS;s++){
+          uint64_t owner=atomic_load(&((struct mesh_client *)((char *)M+M->client_off))[s].owner);
+          if(owner && (uint32_t)owner==(uint32_t)e->ident)mesh_retire(M,owner);
+        }
       }
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)listener){
         struct sockaddr_in6 from;socklen_t size=sizeof from;int accepted;

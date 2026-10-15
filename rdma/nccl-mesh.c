@@ -321,9 +321,13 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
    mesh_section_create, whose rows' owner is the slot), and each communicator's session takes its program's slot on
    it (mesh_program_attach: a slot is one execution's program, under the communicator's name).  The leases' bookkeeping
    is the region's, where the bridge sees it: the bridge retires the slot of a process gone and returns its leases'
-   pages as it returns every retired client's rows; `leases` is this process's index of them by address.  A bridge
-   that stops takes its region with it: the next lease, communicator or session attaches to the next bridge's, and the
-   attach of a bridge gone stays mapped while a lease of it is held or a session on it is open, then is detached. --- */
+   pages as it returns every retired client's rows; `leases` is this process's index of them by address.  A lease is
+   an operand of the window it was taken from, and a bridge that stops takes its region with it: while the process
+   holds a lease of a bridge that stopped (no longer registered on any device), its next lease, communicator, session
+   and ncclCommRegister fail naming it (ESTALE, attach_fail), and ncclMeshMemLive says so, until the process has freed
+   every such lease; the next attaches to the bridge that runs then, so a process never holds leases of two regions.
+   The attach of a bridge gone stays mapped while a lease of it is held or a session on it is open (a session on it is
+   closed at its next group, session_ensure), then is detached. --- */
 
 struct lease { void *address; uint32_t row; };
 struct attach {
@@ -351,10 +355,20 @@ static void attaches_prune(void) {
   }
 }
 
-/* the attach whose bridge lives, made where there is none: 0, or mesh_attach's refusal */
+/* ESTALE where the process holds a lease of a bridge that stopped, else 0 */
+static int attaches_stale(void) {
+  for (const struct attach *a = attaches; a; a = a->next)
+    if (a->count && !attach_live(a)) return ESTALE;
+  return 0;
+}
+
+/* the attach whose bridge lives, made where there is none: 0; ESTALE where a lease of a bridge that stopped is still
+   held; or mesh_attach's refusal */
 static int attach_current(struct attach **out) {
   attaches_prune();
   if (attaches && attach_live(attaches)) { *out = attaches; return 0; }
+  const int stale = attaches_stale();
+  if (stale) return stale;
   struct attach *a = calloc(1, sizeof *a);
   if (!a) return ENOMEM;
   const int status = mesh_attach(&a->context, NULL);
@@ -374,6 +388,23 @@ static int lease_room(struct attach *a) {
   return 0;
 }
 
+/* the process's client refused (attach_current's or mesh_program_attach's status) for what `format` names: a lease of a
+   bridge that stopped still held (ESTALE), every slot of the bridge held (EBUSY), or no region of a bridge that runs */
+static ncclResult_t attach_fail(int status, const char *format, ...) {
+  char what[256];
+  va_list arguments;
+  va_start(arguments, format);
+  vsnprintf(what, sizeof what, format, arguments);
+  va_end(arguments);
+  if (status == ESTALE)
+    return fail(ncclRemoteError, "%s: this node's bridge stopped while this process holds leases of its window, which are no longer "
+                "registered memory; free every one (ncclMemFree) and lease again from the bridge that runs now", what);
+  if (status == EBUSY) return fail(ncclSystemError, "%s: every client slot of this node's bridge is held (mesh.h MESH_CLIENTS)", what);
+  return fail(status == ESRCH ? ncclRemoteError : ncclSystemError, "%s: this process attaches no region of this node's bridge "
+              "(%s); the node's bridge must run, with a configuration whose window holds this client's footprint "
+              "(etc/bridge/README.md)", what, strerror(status));
+}
+
 /* a communicator of `nranks` ranks named `name`, rank r on the bridge of node members[r], its map read at each opening of
    its session (comm_read); the process's client attached where it has none */
 static ncclResult_t comm_make(ncclComm_t *made, int nranks, const uint32_t *members, int rank, const char *name) {
@@ -381,9 +412,7 @@ static ncclResult_t comm_make(ncclComm_t *made, int nranks, const uint32_t *memb
   struct attach *a = NULL;
   const int status = attach_current(&a);
   pthread_mutex_unlock(&attach_lock);
-  if (status)
-    return fail(status == ESRCH ? ncclRemoteError : ncclSystemError, "communicator %s: this node's bridge, attaching the process's "
-                "client: %s", name, strerror(status));
+  if (status) return attach_fail(status, "communicator %s", name);
   struct ncclComm *comm = calloc(1, sizeof *comm);
   if (comm) comm->members = calloc((size_t)nranks, sizeof *comm->members);
   if (!comm || !comm->members) { free(comm); return fail(ncclSystemError, "out of memory"); }
@@ -645,13 +674,16 @@ ncclResult_t ncclCommUserRank(const ncclComm_t comm, int *rank) {
 }
 
 /* a buffer in the window of this node's bridge (a lease's): its handle the buffer, the window registered on every
-   device of the bridge at device up; any other buffer is refused */
+   device of the bridge at device up; any other buffer is refused, and every buffer while a lease of a bridge that
+   stopped is held */
 ncclResult_t ncclCommRegister(const ncclComm_t comm, void *buff, size_t size, void **handle) {
   if (!comm || !handle) return fail(ncclInvalidArgument, "comm or handle is NULL");
   pthread_mutex_lock(&attach_lock);
+  const int stale = attaches_stale();
   const struct hdr *m = attaches && attach_live(attaches) ? attaches->context.M : NULL;
   const uintptr_t at = (uintptr_t)buff, first = m ? (uintptr_t)m + m->data_off : 0, end = m ? (uintptr_t)m + m->length : 0;
   pthread_mutex_unlock(&attach_lock);
+  if (stale) return attach_fail(stale, "ncclCommRegister of %zu bytes at %p", size, buff);
   if (!m || at < first || at > end || size > end - at)
     return fail(ncclInvalidArgument, "ncclCommRegister of %zu bytes at %p: not in the window of this node's bridge; a buffer "
                 "collectives move is leased from the window (ncclMemAlloc)", size, buff);
@@ -674,11 +706,8 @@ ncclResult_t ncclMemAlloc(void **ptr, size_t size) {
   const size_t bytes = size ? size : 1;
   ncclResult_t result = ncclSuccess;
   int status = attach_current(&a);
-  if (status == EBUSY)
-    result = fail(ncclSystemError, "ncclMemAlloc of %zu bytes: every client slot of this node's bridge is held (mesh.h MESH_CLIENTS)", size);
-  else if (status)
-    result = fail(ncclSystemError, "ncclMemAlloc of %zu bytes: no region of this node's bridge to lease from (%s); the node's bridge "
-                  "must run, with a configuration whose window holds this client's footprint (etc/bridge/README.md)", size, strerror(status));
+  if (status)
+    result = attach_fail(status, "ncclMemAlloc of %zu bytes", size);
   else if (a->count == a->room && lease_room(a))
     result = fail(ncclSystemError, "out of memory");
   else if ((status = mesh_section_create(&a->context, bytes, 1, &lease))) {
@@ -715,6 +744,15 @@ ncclResult_t ncclMemFree(void *ptr) {
   if (!found) return fail(ncclInvalidArgument, "ncclMemFree of %p: no lease of this process (ncclMemAlloc)", ptr);
   if (status) return fail(ncclInternalError, "ncclMemFree of %p: row %u of this node's region heads no lease of this process", ptr, row);
   return ncclSuccess;
+}
+
+/* every lease the process holds of a bridge that runs: ncclSuccess, or ncclRemoteError where one is of a bridge that
+   stopped (attach_fail's ESTALE) */
+ncclResult_t ncclMeshMemLive(void) {
+  pthread_mutex_lock(&attach_lock);
+  const int stale = attaches_stale();
+  pthread_mutex_unlock(&attach_lock);
+  return stale ? attach_fail(stale, "ncclMeshMemLive") : ncclSuccess;
 }
 
 ncclResult_t ncclRedOpCreatePreMulSum(ncclRedOp_t *op, void *scalar, ncclDataType_t datatype, ncclScalarResidence_t residence,
@@ -926,7 +964,8 @@ static ncclResult_t drain(struct session *s) {
 
 static void inflight_lose(struct session *s);
 /* the session ended: its groups in flight lost, every GPU program finished, its progress thread joined, its program's
-   slot retired (the process's attach left it, detached where its bridge is gone and nothing else holds it) */
+   slot retired with its sections (its rings and violation words: the bridge releases them), the process's attach left
+   it (detached where its bridge is gone and nothing else holds it) */
 static void session_close(struct session *s) {
   if (!s) return;
   inflight_lose(s);
@@ -940,7 +979,6 @@ static void session_close(struct session *s) {
   }
   for (uint32_t h = 0; h < s->count; h++) { metal_release(s->channels[h].ring_out); metal_release(s->channels[h].ring_in); }
   if (s->violation_buffer) metal_release(s->violation_buffer);
-  free((void *)s->violation);
   mesh_metal_transport_destroy(&s->transport);
   mesh_detach(&s->context);
   pthread_mutex_lock(&attach_lock);
@@ -1030,7 +1068,7 @@ static ncclResult_t session_open(ncclComm_t comm) {
   pthread_mutex_unlock(&attach_lock);
   if (status) {
     free(s);
-    return fail(status == ESRCH ? ncclRemoteError : ncclSystemError, "this node's bridge, attaching %s: %s", comm->name, strerror(status));
+    return attach_fail(status, "the session of %s", comm->name);
   }
   pthread_mutex_init(&s->lock, NULL);
   pthread_cond_init(&s->wake, NULL);
@@ -1063,12 +1101,12 @@ static ncclResult_t session_open(ncclComm_t comm) {
   if (!status) status = mesh_transfers_cyclic(&s->context);
   if (!status) status = mesh_metal_transport_create(&s->context, metal_device(), &s->transport);
   for (uint32_t h = 0; h < s->count && !status; h++) status = channel_metal(s, s->channels + h);
-  void *violation = NULL;
-  if (!status && posix_memalign(&violation, (size_t)getpagesize(), (size_t)getpagesize())) status = ENOMEM;
+  struct mesh_section words = {0};
+  if (!status) status = mesh_section_create(&s->context, (size_t)getpagesize(), 1, &words);
   if (!status) {
-    memset(violation, 0, (size_t)getpagesize());
-    s->violation = violation;
-    if (!(s->violation_buffer = metal_wrap(violation, (size_t)getpagesize()))) status = ENOMEM;
+    s->violation = mesh_section_address(&s->context, words, 0);
+    memset((void *)s->violation, 0, (size_t)getpagesize());
+    if (!(s->violation_buffer = metal_wrap((void *)s->violation, (size_t)getpagesize()))) status = ENOMEM;
   }
   if (!status && !finished && !(finished = metal_event())) status = ENOMEM;
   if (status) result = fail(ncclSystemError, "the session of %s on this node's bridge: %s", comm->name, strerror(status));
@@ -1353,8 +1391,9 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
 }
 
 /* the communicator's session, opened where it has none, or opened again where the bridge's map serial moved since it
-   opened and none of its groups is in flight, on the map current now; a failure its progress thread kept fails this
-   group and closes the session, and the caller's next group opens another (no group is tried again here) */
+   opened or its bridge stopped, and none of its groups is in flight, on the map current now (attach_current: refused
+   while a lease of a bridge that stopped is held); a failure its progress thread kept fails this group and closes the
+   session, and the caller's next group opens another (no group is tried again here) */
 static struct inflight *inflight;
 static int session_issued(const struct session *s);
 static ncclResult_t session_ensure(ncclComm_t comm) {
@@ -1365,7 +1404,7 @@ static ncclResult_t session_ensure(ncclComm_t comm) {
     session_close(s);
     return result;
   }
-  if (s && atomic_load_explicit(&s->header->map, memory_order_acquire) != s->serial && !session_issued(s)) {
+  if (s && (atomic_load_explicit(&s->header->map, memory_order_acquire) != s->serial || !attach_live(s->attach)) && !session_issued(s)) {
     session_close(s);
     s = NULL;
   }

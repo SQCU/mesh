@@ -91,7 +91,8 @@ def lease(nbytes):
     """ncclMemAlloc: `nbytes` (at least one) of this node's bridge's window, whole pages already registered on its
     devices (design/prepared-machine.md#M09), as a writable buffer (numpy.frombuffer and torch.frombuffer take it),
     returned to the window (ncclMemFree) once it and every object over it are gone.  RuntimeError with the library's
-    reason where the window cannot meet it (the bytes asked and the pages free) or the node runs no bridge."""
+    reason where the window cannot meet it (the bytes asked and the pages free), the node runs no bridge, or this
+    process still holds a lease of a bridge that stopped (rdma/NCCL.md "Memory")."""
     held, size = ffi.new('void **'), max(1, nbytes)
     result = lib.ncclMemAlloc(held, size)
     if result:
