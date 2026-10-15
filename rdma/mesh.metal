@@ -3,8 +3,8 @@
 // reads a landed slot, releases a cell or decodes FP8 includes this file and calls these from its own source, and no
 // source splices them into another kernel's text (metal-microbench docs/acceptance-20261014.md A40, A54).
 // libnccl-mesh's kernels include it, and so does every kernel that hands words to another agent (the host, a Neural
-// Engine partner's thread) or reads FP8 (metal-microbench dsv41.swift). install.sh installs it with the library
-// ($MESH_ROOT/rdma/mesh.metal).
+// Engine partner's thread) or reads FP8 (metal-microbench dsv41.swift). It is read from the library
+// (the user's checkout, ~/mesh/rdma/mesh.metal).
 #ifndef MESH_METAL
 #define MESH_METAL
 #pragma METAL internals : enable

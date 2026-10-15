@@ -30,10 +30,6 @@ nc -z -G 2 127.0.0.1 5900 >/dev/null 2>&1 || {
   launchctl enable system/com.apple.screensharing >/dev/null 2>&1
   launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist >/dev/null 2>&1
   drift=1; }
-pgrep -qf /usr/local/mesh/bin/mesh-flow || {
-  echo "[$(ts)] DRIFT bridge down"
-  launchctl kickstart system/io.mesh.bridge >/dev/null 2>&1
-  drift=1; }
 pgrep -qf "dns-sd -R" || {
   echo "[$(ts)] DRIFT beacon down"
   launchctl kickstart -k system/io.mesh.beacon >/dev/null 2>&1

@@ -33,10 +33,10 @@ spelling, an absolute path, sh -c, xargs, a copy of the binary, or resetting PAT
 all reach the same driver and produce the same unkillable process and the same
 physical visit. Succeeding at that is the failure the guard exists to prevent.
 
-A bridge is the node's resident service, the launchd job io.mesh.bridge, and
-launchd ends it with SIGTERM (it starts again by KeepAlive):
+A bridge is the node's resident service, its user's launchd agent io.mesh.bridge,
+and launchd ends it with SIGTERM (it starts again by KeepAlive):
 
-  sudo launchctl kill TERM system/io.mesh.bridge
+  launchctl kill TERM gui/$(id -u)/io.mesh.bridge     (user/$(id -u)/... on a headless node)
 
 The teardown handler then runs ibv_destroy_qp / ibv_dereg_mr / ibv_dealloc_pd /
 ibv_close_device. SIGTERM is safe precisely because the handler runs. SIGKILL

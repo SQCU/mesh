@@ -1,4 +1,4 @@
-# ~/.venv-mesh-uv (CPython 3.12.14) on every node: the mesh's install.sh keeps it, with torch-mesh and the library on its path (bin/mesh-venv.sh).
+# ~/.venv-mesh-uv (CPython 3.12.14) on every node: the user's bin/mesh-user.sh keeps it, with torch-mesh and the checkout's library on its path.
 accelerate==1.15.0
 annotated-doc==0.0.5
 anyio==4.15.1

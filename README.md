@@ -535,8 +535,8 @@ Runs as root at boot with no login session. `KeepAlive` restarts it forever.
 The mesh's collectives are NCCL's API over the bridges: [rdma/NCCL.md](rdma/NCCL.md) (libnccl-mesh, the C
 library; `rdma/mesh_mpi.py` for NumPy), [rdma/torch-mesh/README.md](rdma/torch-mesh/README.md)
 (torch.distributed's `mesh` backend) and [design/heterogeneity.md](design/heterogeneity.md) (nodes of
-different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the launchd
-job `io.mesh.bridge` (design/bridge-and-ipc.md). It finds its ports and peers and keeps its links paired; it serves
+different speeds, links of different costs). A node's bridge (`rdma/mesh-flow`) is its resident service, the admin user's agent
+`io.mesh.bridge` run from the user's mesh checkout (`bin/mesh-user.sh`; design/bridge-and-ipc.md). It finds its ports and peers and keeps its links paired; it serves
 every client at once, the node's processes and its neighbours; it keeps the mesh's map, each bridge's record of its
 ports flooded to every bridge (`mesh-plan.h` `mesh_map`, `mesh-stat`); and it forwards programs along their routes for
 members the cables do not join.

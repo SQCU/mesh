@@ -6,9 +6,8 @@ run on the host path.
 
 ## Install
 
-The node's mesh installation builds and installs the library and its Python bindings under `/usr/local/mesh/rdma`
-(rdma/NCCL.md "Build and run"), and keeps the node's torch environment, `~/.venv-mesh-uv` of the node's user
-(`bin/mesh-venv.sh`): `rdma/requirements.txt` (torch 2.14.0 on CPython 3.12.14), this package built against the
+The user's mesh checkout holds the library and its Python bindings (`bin/mesh-user.sh`, rdma/NCCL.md "Build and run"),
+and the user's torch environment, `~/.venv-mesh-uv` (`bin/mesh-user.sh`): `rdma/requirements.txt` (torch 2.14.0 on CPython 3.12.14), this package built against the
 installed library whenever either changes, and the library's directory on the environment's path (`mesh.pth`), so a
 program imports `mesh`, `torch_mesh` and the mesh's modules with nothing of its own.
 

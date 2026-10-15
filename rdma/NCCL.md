@@ -7,14 +7,13 @@ how to run it. PyTorch programs use it through [torch-mesh](torch-mesh/README.md
 
 ## Build and run
 
-A node's mesh installation (`install.sh`, kept current by `io.mesh.update`) builds the bridge, the libraries and the
-Python bindings, installs the library (its headers, libraries and modules) under `/usr/local/mesh/rdma`, keeps the
-node's torch environment with torch-mesh and the library on its path (`~/.venv-mesh-uv`, `bin/mesh-venv.sh`), and runs
-the bridge as the node's service (`io.mesh.bridge`, design/bridge-and-ipc.md). A program links or imports the
-installed library:
+The node's user keeps the library in the user's mesh checkout (`~/mesh`): `bin/mesh-user.sh` builds the bridge, the
+libraries and the Python bindings there, keeps the user's torch environment with torch-mesh and the checkout's library on
+its path (`~/.venv-mesh-uv`), and runs the bridge as the user's agent (`io.mesh.bridge`, design/bridge-and-ipc.md); no
+part of it needs root. A program links or imports the checkout's library:
 
 ```
-cc app.c -I /usr/local/mesh/rdma -L /usr/local/mesh/rdma -lnccl-mesh -Wl,-rpath,/usr/local/mesh/rdma
+cc app.c -I ~/mesh/rdma -L ~/mesh/rdma -lnccl-mesh -Wl,-rpath,$HOME/mesh/rdma
 ```
 
 A rank is a process on a node, a client of that node's bridge; it starts no bridge and names no device, address, port
@@ -109,7 +108,7 @@ moved. A rank that departed is left out with `ncclCommShrink`, a joining one tak
 |---|---|---|
 | `NCCL_COMM_ID` | library (ncclGetUniqueId) | the bootstrap root's `host:port` |
 | `NCCL_BUFFSIZE` | library | bytes of a large ring's slots together (default 4 MiB), read when a session opens |
-| `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against (default its parent; the mesh's install passes `/usr/local/mesh/rdma`) |
+| `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against (default its parent; `bin/mesh-user.sh` passes the checkout's) |
 
 ## NumPy
 
@@ -117,7 +116,7 @@ moved. A rank that departed is left out with `ncclCommShrink`, a joining one tak
 by its import:
 
 ```python
-from mesh_mpi import Comm, SUM, MAX     # sys.path: /usr/local/mesh/rdma
+from mesh_mpi import Comm, SUM, MAX     # sys.path: ~/mesh/rdma
 comm = Comm()                           # RANK of WORLD_SIZE, NCCL's bootstrap at MASTER_ADDR:MASTER_PORT
 comm.Allreduce(local, total, op=SUM)    # Allgather, Bcast, Reduce, Reduce_scatter_block, Alltoall, Send, Recv,
 best = comm.allreduce(x.max(), op=MAX)  # Barrier; IN_PLACE as a send buffer
