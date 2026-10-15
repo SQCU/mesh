@@ -94,7 +94,7 @@ struct ready { uint32_t hops,slots,invocations,depth,cyclic,queue,step,lengths[M
    for its client, `hold`, has none until the client's program takes it), its queues queue + k x step for k < queues,
    `slots` queue pairs each, and on a relay its partner, the route's other flow.  Its verbs work runs on its port's
    queue, one job at a time (`job`, `done`); the event loop alone changes the rest, and a side whose lists arrive while
-   a job runs (`next`) between jobs */
+   a job runs (`pending`) between jobs */
 enum { READIED, PAIRING, POSTING, RUNNING, FAILED };
 enum { HEARD_READY=1, HEARD_PAIRS=2, HEARD_POSTED=4 };
 enum { JOB_PAIR=1, JOB_RECEIVE, JOB_RUN, JOB_CHANGE };
@@ -110,7 +110,7 @@ struct flow {
   _Atomic uint32_t domain;
   int state,job,result,stopping,hold,qps,cyclic;
   uint64_t key,owner,created,deadline,retry;
-  struct side side[2],next[2];
+  struct side side[2],pending[2];
   uint32_t pairs[MESH_PAIRS][2];
   struct hdr *M; struct port *port; struct mesh_verbs provider;
   struct prepared_receive *receive;
@@ -677,7 +677,7 @@ static void flow_free(struct flow *f){
   for(struct flow **at=&flows;*at;at=&(*at)->next)if(*at==f){*at=f->next;break;}
   if(f->partner)f->partner->partner=NULL;
   f->port->flows--;
-  for(int d=0;d<2;d++){lease_drop(f->side[d].lease);lease_drop(f->next[d].lease);}
+  for(int d=0;d<2;d++){lease_drop(f->side[d].lease);lease_drop(f->pending[d].lease);}
   free(f);
 }
 /* design/bridge-and-ipc.md#clients: a client program's status once every flow of it toward the node runs */
@@ -696,7 +696,7 @@ static void program_paired(struct flow *f){
    took it (POSTED sent), running once its POSTED is; a running relay whose side's lists arrived changes */
 static void flow_step(struct flow *f){
   if(f->state==FAILED || f->job || f->stopping)return;
-  for(int d=0;d<2;d++)if(f->next[d].owner && !f->side[d].owner){f->side[d]=f->next[d];f->next[d]=(struct side){0};}
+  for(int d=0;d<2;d++)if(f->pending[d].owner && !f->side[d].owner){f->side[d]=f->pending[d];f->pending[d]=(struct side){0};}
   if(f->state==READIED && (f->heard&(HEARD_READY|HEARD_PAIRS)))flow_job(f,JOB_PAIR);
   else if(f->state==PAIRING && (f->heard&HEARD_PAIRS) && !f->hold)flow_job(f,JOB_RECEIVE);
   else if(f->state==POSTING && (f->heard&HEARD_POSTED))flow_job(f,JOB_RUN);
@@ -789,11 +789,11 @@ static int relay_direction(struct flow *f,const struct ready *ready,const struct
   int error=mirror(lease,ready,list,f->far,g->far);
   if(error){lease_free(lease);return error;}
   struct mesh_client *client=mesh_client_at(M,lease->context.client);
-  f->next[MESH_RECEIVE]=(struct side){lease->context.client,mesh_destination(client,f->far),lease};
-  g->next[MESH_SEND]=(struct side){lease->context.client,mesh_destination(client,g->far),lease};
+  f->pending[MESH_RECEIVE]=(struct side){lease->context.client,mesh_destination(client,f->far),lease};
+  g->pending[MESH_SEND]=(struct side){lease->context.client,mesh_destination(client,g->far),lease};
   lease->users=2;
-  if(!f->owner)flow_program(f,f->next[MESH_RECEIVE].owner,f->next[MESH_RECEIVE].destination);
-  if(!g->owner)flow_program(g,g->next[MESH_SEND].owner,g->next[MESH_SEND].destination);
+  if(!f->owner)flow_program(f,f->pending[MESH_RECEIVE].owner,f->pending[MESH_RECEIVE].destination);
+  if(!g->owner)flow_program(g,g->pending[MESH_SEND].owner,g->pending[MESH_SEND].destination);
   flow_step(g);
   return 0;
 }
@@ -817,7 +817,7 @@ static void ready_heard(struct port *port,const struct message *heard,const unsi
   memcpy(list,payload+sizeof ready+(size_t)ready.hops*sizeof *route,transfers*sizeof *list);
   struct flow *f=flow_on(port,heard->key,heard->to,heard->from);
   if(f){
-    int error=f->partner && !f->side[MESH_RECEIVE].owner && !f->next[MESH_RECEIVE].owner?relay_direction(f,&ready,list):0;
+    int error=f->partner && !f->side[MESH_RECEIVE].owner && !f->pending[MESH_RECEIVE].owner?relay_direction(f,&ready,list):0;
     if(error)flow_fail(f,error,1,FAIL,M->node,M->node);
     else{f->heard|=HEARD_READY;flow_step(f);}
   }else if(route[0]!=M->node || route[ready.hops-1]!=heard->to || heard->from==M->node)ready_refuse(port,heard,EPROTO);
