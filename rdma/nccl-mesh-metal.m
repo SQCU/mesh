@@ -15,8 +15,9 @@
    form), its mesh_remote_wait_bounded, a word short of its target past the bound (TIMED) recorded in violation words [2]
    and [3]; a landed slot's read its mesh_payload and a cell's release its mesh_publish; the filler protocol (STAMP,
    CHECK) is this library's.  In the Metal 4 form every kernel first stores its record's sequence in `progress` (every
-   dispatch before it has finished: a barrier stands between each two) and does nothing where violation word [2] holds a
-   failure.  Each operator's arithmetic is written once (op_int, op_float, op_f8), a landing being the wait and then the
+   dispatch before it has finished: a barrier stands between each two), whether or not its program has violation words
+   (the classic form's sequence is 0, and it stores none), and, where it has them (p.polls), does nothing where violation
+   word [2] holds a failure.  Each operator's arithmetic is written once (op_int, op_float, op_f8), a landing being the wait and then the
    combine's body; it is the host's (nccl-mesh.c combine_into, premultiply, truncdiv): the small floating types in
    float32 rounded to nearest even, float8 decoded and encoded by mesh.metal's f8_to and f8_from, integers wrapping */
 static NSString *const KERNELS =
@@ -30,7 +31,7 @@ static NSString *const KERNELS =
   ": mesh_remote_wait((volatile coherent(system) device const ulong *)(word), cycle))\n"
   "#define TIMED(status, cycle) (p.polls && status != ~0UL && status < 1 + (cycle))\n"
   "#define RECORD(status, cycle, ring) if (TIMED(status, cycle)) { if (v[2] == 0) { v[3] = ulong(p.channel); mesh_publish(v + 2, p.at + 1); } } else CHECK(ring, status)\n"
-  "#define ENTER(first) if (p.polls) { if (first) *progress = p.sequence; if (((volatile device const ulong *)vb)[2]) return; }\n"
+  "#define ENTER(first) if (p.sequence && (first)) *progress = p.sequence; if (p.polls && ((volatile device const ulong *)vb)[2]) return;\n"
   "#define HEAD(name) kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]])\n"
   "#define GROUP(name) kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]])\n"
   "#define LOOP for (ulong k = i; k < p.n; k += g)\n"

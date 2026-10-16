@@ -21,20 +21,45 @@ static int mesh_joins(const struct mesh_link_map *map,uint32_t u,uint32_t x){
   return 0;
 }
 
-/* The cost of the links joining u and x (either way): each its own where the map gives one, else alpha and beta; several
-   such links (cables between one pair: design/bridge-and-ipc.md#cables, a program striped over them) one link of the
-   least alpha and their bandwidths summed, 1/beta = the sum of their 1/beta.  alpha and beta where none joins them. */
-static void mesh_hop_cost(const struct mesh_link_map *map,uint32_t u,uint32_t x,double alpha,double beta,double *link_alpha,double *link_beta){
-  double least=INFINITY,rate=0;
+/* The links joining u and x (either way), a pair's cables (design/bridge-and-ipc.md#cables): their count, the least of
+   their alphas and the greatest of their betas (each its own where the map gives one, else alpha and beta; alpha and
+   beta where none joins them) */
+static uint32_t mesh_cables(const struct mesh_link_map *map,uint32_t u,uint32_t x,double alpha,double beta,double *least,double *slowest){
+  uint32_t count=0;
+  *least=INFINITY;*slowest=0;
   for(uint32_t l=0;l<map->links;l++)
     if((map->link[l][0]==u && map->link[l][1]==x) || (map->link[l][0]==x && map->link[l][1]==u)){
       const int own=map->cost && !isnan(map->cost[l][0]);
       const double a=own?map->cost[l][0]:alpha,b=own?map->cost[l][1]:beta;
-      if(a<least)least=a;
-      rate+=b>0?1/b:INFINITY;
+      if(a<*least)*least=a;
+      if(b>*slowest)*slowest=b;
+      count++;
     }
-  *link_alpha=least<INFINITY?least:alpha;
-  *link_beta=rate>0?(isinf(rate)?0:1/rate):beta;
+  if(!count){*least=alpha;*slowest=beta;}
+  return count;
+}
+/* A pair's hop striped over its n cables (design/bridge-and-ipc.md#cables: a direct program's position t on cable t mod
+   n), so it carries n times the slowest one's bandwidth (its beta over n) at the least alpha */
+static void mesh_hop_cost(const struct mesh_link_map *map,uint32_t u,uint32_t x,double alpha,double beta,double *link_alpha,double *link_beta){
+  const uint32_t n=mesh_cables(map,u,x,alpha,beta,link_alpha,link_beta);
+  if(n>1)*link_beta/=n;
+}
+/* The stripes the bridges cut a program along a route of `count` nodes into (mesh-flow.c route_stripes): the least
+   common multiple of its segments' cable counts (each at most a node's ports, mesh.h MESH_PORTS), so each cable of
+   every segment carries an equal share, or past MESH_PORTS the fewest cables of a segment, each stripe on a cable of
+   its own on every segment; stripe j on cable (h + j) mod c of a segment of c cables (h the route's hash) */
+static uint32_t mesh_stripes(const struct mesh_link_map *map,const uint32_t *path,uint32_t count){
+  uint32_t stripes=1,fewest=MESH_PORTS;
+  for(uint32_t i=0;i+1<count;i++){
+    double a,b;
+    uint32_t c=mesh_cables(map,path[i],path[i+1],0,0,&a,&b);
+    c=c<1?1:c>MESH_PORTS?MESH_PORTS:c;
+    uint32_t x=stripes,y=c;
+    while(y){const uint32_t t=x%y;x=y;y=t;}
+    stripes=stripes/x*c>MESH_PORTS?MESH_PORTS+1:stripes/x*c;
+    if(c<fewest)fewest=c;
+  }
+  return stripes<=MESH_PORTS?stripes:fewest;
 }
 
 /* A node's mark (the map's, else its number) */
@@ -140,16 +165,20 @@ int mesh_link_between(const struct mesh_link_map *map,uint32_t a,uint32_t b){
   return count>=2;
 }
 
-/* The hop a-b's cost: its link's own where the map gives one, else alpha and beta; with a table, its route's links'
-   alphas summed and the greatest of their betas (a relay forwards each slot as it lands). */
+/* The hop a-b's cost: direct (no table, or a route of one link), its cables striped (mesh_hop_cost); through relays,
+   striped end to end (mesh_stripes), each segment of c cables carrying the stripes on min(stripes, c) of them at the
+   pace of its slowest, the segments' alphas summed and the greatest of their betas (a relay forwards each slot as it
+   lands). */
 void mesh_link_cost(const struct mesh_link_map *map,uint32_t a,uint32_t b,double alpha,double beta,double *link_alpha,double *link_beta){
   uint32_t path[mesh_all(map)+2];
   const uint32_t count=map->next?mesh_route_nodes(map,a,b,path):0;
-  if(count<2){mesh_hop_cost(map,a,b,alpha,beta,link_alpha,link_beta);return;}
+  if(count<3){mesh_hop_cost(map,a,b,alpha,beta,link_alpha,link_beta);return;}
+  const uint32_t stripes=mesh_stripes(map,path,count);
   *link_alpha=0;*link_beta=0;
   for(uint32_t i=0;i+1<count;i++){
     double x,y;
-    mesh_hop_cost(map,path[i],path[i+1],alpha,beta,&x,&y);
+    const uint32_t c=mesh_cables(map,path[i],path[i+1],alpha,beta,&x,&y),used=c<stripes?c:stripes;
+    if(used>1)y/=used;
     *link_alpha+=x;
     if(y>*link_beta)*link_beta=y;
   }
@@ -168,13 +197,6 @@ static uint64_t mesh_hash(uint32_t x,uint32_t y,uint32_t z){
 struct mesh_length { uint64_t hops,betas; };
 static int mesh_shorter(struct mesh_length a,struct mesh_length b){ return a.hops!=b.hops?a.hops<b.hops:a.betas<b.betas; }
 static int mesh_equal(struct mesh_length a,struct mesh_length b){ return a.hops==b.hops && a.betas==b.betas; }
-/* the nodes ordered for a root's in-tree: farther first, then by mark */
-struct mesh_far { struct mesh_length length; uint32_t mark,node; };
-static int mesh_farther(const void *x,const void *y){
-  const struct mesh_far *a=x,*b=y;
-  if(!mesh_equal(a->length,b->length))return mesh_shorter(a->length,b->length)?1:-1;
-  return (a->mark>b->mark)-(a->mark<b->mark);
-}
 
 /* A root's distances by Dijkstra [1959] in its dense form (every length an exact integer, so every node finds the same) */
 static void mesh_distances(uint32_t N,const unsigned char *joined,const uint64_t *beta,uint32_t b,struct mesh_length *length,unsigned char *done){
@@ -192,36 +214,21 @@ static void mesh_distances(uint32_t N,const unsigned char *joined,const uint64_t
     }
   }
 }
-/* `flow` routes put on (sign 1) or taken off (-1) the links of v's route up root b's in-tree */
-static void mesh_lay(uint32_t N,const uint32_t *next,uint64_t *load,uint32_t v,uint32_t b,uint64_t flow,int sign){
-  for(uint32_t at=v,hops=0;at!=b && hops<N && next[(size_t)at*N+b]!=at;hops++){
-    const uint32_t up=next[(size_t)at*N+b];
-    if(sign>0){load[(size_t)at*N+up]+=flow;load[(size_t)up*N+at]+=flow;}
-    else{load[(size_t)at*N+up]-=flow;load[(size_t)up*N+at]-=flow;}
-    at=up;
-  }
-}
-/* Each root's in-tree of shortest routes (fewest links, then the least betas): first each node's parent among those one
-   equal step nearer the least hash of the three marks; then MESH_ROUTE_PASSES passes of local search on the sum of the
-   squares of the links' loads (each the routes between two nodes that cross it: the potential of the congestion game
-   [Rosenthal 1973], which every move lowers), each root in mark order, each node farthest first: its flow (the routes
-   toward the root it carries: its own, where its mark is the lower, and its subtree's) taken off its route, then put
-   on through the parent whose route adds least to the potential (then the least hash); the table of the pass whose most
-   loaded link carries fewest routes kept (then the least potential, then the earliest).  Integers throughout. */
-#define MESH_ROUTE_PASSES 4
+/* Each root's in-tree of shortest routes (fewest links, then the least betas, a pair's cables striped,
+   mesh_hop_cost): each node's parent among those one equal step nearer the root, the least hash of its mark, the
+   parent's and the root's.  A node's parent reads its own candidates alone, so a route is a function of
+   the shortest routes between its ends.  Integers throughout. */
 int mesh_routes(const struct mesh_link_map *map,uint32_t *next){
   const uint32_t N=map->nodes+map->relays;
   if(!N || map->kind>MESH_LINKS_GRAPH || (map->links && !map->link) || (map->relays && map->kind==MESH_LINKS_MESH))return EINVAL;
   for(uint32_t l=0;l<map->links;l++)if(map->link[l][0]>=N || map->link[l][1]>=N || map->link[l][0]==map->link[l][1])return EINVAL;
   const size_t pairs=(size_t)N*N;
-  uint64_t *beta=calloc(pairs,sizeof *beta),*load=calloc(pairs,sizeof *load),*flow=calloc(N,sizeof *flow);
+  uint64_t *beta=calloc(pairs,sizeof *beta);
   unsigned char *joined=calloc(pairs,1),*done=malloc(N);
-  uint32_t *trial=malloc(pairs*sizeof *trial);
-  struct mesh_length *length=malloc(pairs*sizeof *length);
-  struct mesh_far *far=malloc(pairs*sizeof *far),*roots=malloc(N*sizeof *roots);
-  int status=beta && load && flow && joined && done && trial && length && far && roots?0:ENOMEM;
-  /* a pair's hop: joined where a link joins it (a mesh's every pair), at its links' beta together (mesh_hop_cost; a
-     link without a cost counts none) */
+  struct mesh_length *length=malloc(N*sizeof *length);
+  const int status=beta && joined && done && length?0:ENOMEM;
+  /* a pair's hop: joined where a link joins it (a mesh's every pair), at its cables' beta striped (a link without a
+     cost counts none) */
   for(uint32_t u=0;!status && map->kind==MESH_LINKS_MESH && u<N;u++)for(uint32_t x=0;x<N;x++)joined[(size_t)u*N+x]=u!=x;
   for(uint32_t l=0;!status && l<map->links;l++){
     const uint32_t u=map->link[l][0],x=map->link[l][1];
@@ -231,77 +238,36 @@ int mesh_routes(const struct mesh_link_map *map,uint32_t *next){
     beta[(size_t)u*N+x]=beta[(size_t)x*N+u]=q;
     joined[(size_t)u*N+x]=joined[(size_t)x*N+u]=1;
   }
-  for(uint32_t v=0;!status && v<N;v++)roots[v]=(struct mesh_far){{0,0},mesh_mark(map,v),v};
-  if(!status)qsort(roots,N,sizeof *roots,mesh_farther);
-  /* root k's distances at length + k N, and its nodes but itself farthest first at far + k N (`reached[k]` of them) */
-  uint32_t *reached=status?NULL:calloc(N,sizeof *reached);
-  if(!status && !reached)status=ENOMEM;
-  for(uint32_t k=0;!status && k<N;k++){
-    const uint32_t b=roots[k].node;
-    struct mesh_length *at=length+(size_t)k*N;
-    mesh_distances(N,joined,beta,b,at,done);
-    for(uint32_t v=0;v<N;v++)if(v!=b && at[v].hops!=UINT64_MAX)far[(size_t)k*N+reached[k]++]=(struct mesh_far){at[v],mesh_mark(map,v),v};
-    qsort(far+(size_t)k*N,reached[k],sizeof *far,mesh_farther);
-    for(uint32_t v=0;v<N;v++)trial[(size_t)v*N+b]=v;
-    for(uint32_t i=reached[k];i-->0;){
-      const uint32_t v=far[(size_t)k*N+i].node;
+  for(uint32_t b=0;!status && b<N;b++){
+    mesh_distances(N,joined,beta,b,length,done);
+    const uint32_t root=mesh_mark(map,b);
+    for(uint32_t v=0;v<N;v++){
       uint32_t up=v;
-      for(uint32_t u=0;u<N;u++)
-        if(joined[(size_t)v*N+u] && at[u].hops!=UINT64_MAX &&
-           mesh_equal((struct mesh_length){at[u].hops+1,at[u].betas+beta[(size_t)v*N+u]},at[v]) &&
-           (up==v || mesh_hash(mesh_mark(map,v),mesh_mark(map,u),roots[k].mark)<mesh_hash(mesh_mark(map,v),mesh_mark(map,up),roots[k].mark)))
+      for(uint32_t u=0;v!=b && length[v].hops!=UINT64_MAX && u<N;u++)
+        if(joined[(size_t)v*N+u] && length[u].hops!=UINT64_MAX &&
+           mesh_equal((struct mesh_length){length[u].hops+1,length[u].betas+beta[(size_t)v*N+u]},length[v]) &&
+           (up==v || mesh_hash(mesh_mark(map,v),mesh_mark(map,u),root)<mesh_hash(mesh_mark(map,v),mesh_mark(map,up),root)))
           up=u;
-      trial[(size_t)v*N+b]=up;
+      next[(size_t)v*N+b]=up;
     }
   }
-  for(uint32_t k=0;!status && k<N;k++)
-    for(uint32_t a=0;a<N;a++)if(mesh_mark(map,a)<roots[k].mark)mesh_lay(N,trial,load,a,roots[k].node,1,1);
-  uint64_t least=UINT64_MAX,least_potential=UINT64_MAX;
-  for(uint32_t pass=0;!status && pass<=MESH_ROUTE_PASSES;pass++){
-    for(uint32_t k=0;pass && k<N;k++){
-      const uint32_t b=roots[k].node;
-      const struct mesh_length *at=length+(size_t)k*N;
-      for(uint32_t v=0;v<N;v++)flow[v]=v!=b && mesh_mark(map,v)<roots[k].mark;
-      for(uint32_t i=0;i<reached[k];i++){
-        const uint32_t v=far[(size_t)k*N+i].node,f=(uint32_t)flow[v];
-        uint32_t up=trial[(size_t)v*N+b];
-        if(f){
-          mesh_lay(N,trial,load,v,b,f,-1);
-          uint64_t best=UINT64_MAX;
-          for(uint32_t u=0;u<N;u++){
-            if(!joined[(size_t)v*N+u] || at[u].hops==UINT64_MAX ||
-               !mesh_equal((struct mesh_length){at[u].hops+1,at[u].betas+beta[(size_t)v*N+u]},at[v]))continue;
-            uint64_t price=2*load[(size_t)v*N+u]*f+(uint64_t)f*f;
-            for(uint32_t x=u,hops=0;x!=b && hops<N;hops++){
-              const uint32_t y=trial[(size_t)x*N+b];
-              price+=2*load[(size_t)x*N+y]*f+(uint64_t)f*f;
-              x=y;
-            }
-            if(best==UINT64_MAX || price<best ||
-               (price==best && mesh_hash(mesh_mark(map,v),mesh_mark(map,u),roots[k].mark)<mesh_hash(mesh_mark(map,v),mesh_mark(map,up),roots[k].mark))){
-              best=price;up=u;
-            }
-          }
-          trial[(size_t)v*N+b]=up;
-          mesh_lay(N,trial,load,v,b,f,1);
-        }
-        flow[up]+=flow[v];
-      }
-    }
-    uint64_t most=0,potential=0;
-    for(size_t k=0;k<pairs;k++){if(load[k]>most)most=load[k];potential+=load[k]*load[k];}
-    if(most<least || (most==least && potential<least_potential)){least=most;least_potential=potential;memcpy(next,trial,pairs*sizeof *next);}
-  }
-  free(beta);free(load);free(flow);free(joined);free(done);free(trial);free(length);free(far);free(roots);free(reached);
+  free(beta);free(joined);free(done);free(length);
   return status;
 }
 
 int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,uint32_t n,uint32_t *whole_node,struct mesh_link_map *map){
   const uint32_t W=whole->nodes,N=n?n:W;
   if(whole->relays || (whole->links && !whole->link) || whole->kind>MESH_LINKS_GRAPH)return -EINVAL;
-  /* the whole map's links as listed, or a mesh's every pair (its listed cost where it has one) */
+  /* the whole map's links as listed, or a mesh's every pair: each of its listed links (cables) at its cost, one at
+     none where it lists none */
   const int every=whole->kind==MESH_LINKS_MESH;
-  const uint32_t L=every?W*(W?W-1:0)/2:whole->links;
+  uint32_t L=every?W*(W?W-1:0)/2:whole->links;
+  for(uint32_t a=0;every && a<W;a++)for(uint32_t b=a+1;b<W;b++){
+    uint32_t listed=0;
+    for(uint32_t k=0;k<whole->links;k++)
+      listed+=(whole->link[k][0]==a && whole->link[k][1]==b) || (whole->link[k][0]==b && whole->link[k][1]==a);
+    if(listed>1)L+=listed-1;
+  }
   uint32_t *place=malloc(((size_t)W+1)*sizeof *place),*at=malloc(((size_t)N+W+1)*sizeof *at),*made=NULL,relays=0;
   int error=place && at?0:ENOMEM;
   for(uint32_t k=0;!error && k<W;k++)place[k]=n?UINT32_MAX:k;
@@ -325,12 +291,18 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
   if(!error){
     uint32_t l=0;
     for(uint32_t a=0;every && a<W;a++)for(uint32_t b=a+1;b<W;b++){
-      double alpha=NAN,beta=NAN;
-      for(uint32_t k=0;whole->cost && k<whole->links;k++)
-        if((whole->link[k][0]==a && whole->link[k][1]==b) || (whole->link[k][0]==b && whole->link[k][1]==a)){alpha=whole->cost[k][0];beta=whole->cost[k][1];}
-      map->link[l][0]=place[a];map->link[l][1]=place[b];
-      if(map->cost){map->cost[l][0]=alpha;map->cost[l][1]=beta;}
-      l++;
+      const uint32_t from=l;
+      for(uint32_t k=0;k<whole->links;k++)
+        if((whole->link[k][0]==a && whole->link[k][1]==b) || (whole->link[k][0]==b && whole->link[k][1]==a)){
+          map->link[l][0]=place[a];map->link[l][1]=place[b];
+          if(map->cost){map->cost[l][0]=whole->cost?whole->cost[k][0]:NAN;map->cost[l][1]=whole->cost?whole->cost[k][1]:NAN;}
+          l++;
+        }
+      if(l==from){
+        map->link[l][0]=place[a];map->link[l][1]=place[b];
+        if(map->cost){map->cost[l][0]=NAN;map->cost[l][1]=NAN;}
+        l++;
+      }
     }
     for(uint32_t k=0;!every && k<L;k++){
       map->link[k][0]=place[whole->link[k][0]];map->link[k][1]=place[whole->link[k][1]];
@@ -340,8 +312,10 @@ int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,u
       map->next[(size_t)i*T+j]=at[i]<W && at[j]<W?place[table[(size_t)at[i]*W+at[j]]]:i;
     for(uint32_t i=0;whole_node && i<T;i++)whole_node[i]=at[i];
     for(uint32_t i=0;map->mark && i<T;i++)map->mark[i]=at[i]<W?mesh_mark(whole,at[i]):UINT32_MAX-i;
-    map->nodes=N;map->links=L;map->relays=relays;
-    map->kind=!relays && (uint64_t)L*2==(uint64_t)N*(N?N-1:0)?MESH_LINKS_MESH:MESH_LINKS_GRAPH;
+    map->nodes=N;map->links=L;map->relays=relays;map->kind=MESH_LINKS_GRAPH;
+    uint64_t linked=0;
+    for(uint32_t a=0;!relays && a<N;a++)for(uint32_t b=a+1;b<N;b++)linked+=mesh_joins(map,a,b);
+    map->kind=!relays && linked*2==(uint64_t)N*(N?N-1:0)?MESH_LINKS_MESH:MESH_LINKS_GRAPH;
   }
   free(place);free(at);free(made);
   return error?-error:(int)N;
@@ -409,26 +383,139 @@ uint32_t mesh_trees_path(const struct mesh_trees *trees,uint32_t from,uint32_t t
   return 0;
 }
 
+/* The tree set's members' hops: each linked pair's route on the map's table, its physical links (u N + x, the sender's
+   way) at hop[(a n + b) N ..] (count[a n + b]), and its length (its links, then its pairs' striped betas, as
+   mesh_routes measures) */
+struct mesh_hops { uint32_t n,N,*count,*hop; struct mesh_length *length; };
+/* a tree edge, member v's hop to its parent u, put on (sign 1) or taken off (-1) every physical link it crosses the way
+   from v to u: a reduction's part goes up each edge once and a broadcast's comes down it, so the loads down mirror the
+   loads up and balancing one balances the other */
+static void mesh_carry(const struct mesh_hops *h,uint64_t *load,uint32_t v,uint32_t u,int sign){
+  const size_t pair=(size_t)v*h->n+u;
+  for(uint32_t i=0;i<h->count[pair];i++){
+    if(sign>0)load[h->hop[pair*h->N+i]]++;
+    else load[h->hop[pair*h->N+i]]--;
+  }
+}
+/* the members farthest first from a root (its tree's lengths), then by mark */
+struct mesh_far { struct mesh_length length; uint32_t mark,node; };
+static int mesh_farther(const void *x,const void *y){
+  const struct mesh_far *a=x,*b=y;
+  if(!mesh_equal(a->length,b->length))return mesh_shorter(a->length,b->length)?1:-1;
+  return (a->mark>b->mark)-(a->mark<b->mark);
+}
+/* Each member's in-tree of shortest paths over the members' hops (two members linked where the table's route between
+   them crosses relays alone, a hop as long as that route), a member's parent among those one equal hop nearer the root:
+   first the least hash of its mark, the parent's and the root's; then MESH_TREE_PASSES passes of local search on the
+   sum of the squares of the physical links' loads, a load the tree edges (every tree's) whose hops cross the link one
+   way from child to parent, as each edge carries its tree's part once (the potential of the congestion game [Rosenthal
+   1973], which every move lowers), each root in mark order, each member farthest first: its edge taken off, then put on to the
+   parent whose hop adds least to the potential (then the least hash); the set of the pass whose most loaded link
+   carries fewest edges kept (then the least potential, then the earliest).  The tree set is the communicator's alone
+   (its members agree on it: nccl-mesh.c map_digest), so balancing it moves no route of the bridges'.  Integers
+   throughout. */
+#define MESH_TREE_PASSES 4
 uint32_t mesh_trees_shortest(const struct mesh_link_map *map,uint32_t *root,uint32_t *parent,double *log_weight){
   const uint32_t n=map->nodes,N=mesh_all(map);
   if(!n || (!map->next && map->relays))return 0;
   struct mesh_link_map with=*map;
-  uint32_t *made=map->next?NULL:malloc((size_t)N*N*sizeof *made),*path=malloc(((size_t)N+1)*sizeof *path),count=n;
+  uint32_t *made=map->next?NULL:malloc((size_t)N*N*sizeof *made),count=n;
   if(made && !mesh_routes(map,made))with.next=made;
-  if(!path || !with.next)count=0;
-  for(uint32_t r=0;r<n && count;r++){
-    root[r]=r;log_weight[r]=0;
-    /* a node's parent: the first of the map's nodes its route to r reaches (r itself across relays alone); each a
-       step of a shortest route, so the parents climb to r */
-    for(uint32_t v=0;v<n && count;v++){
+  const size_t pairs=(size_t)n*n;
+  struct mesh_hops h={n,N,calloc(pairs+1,sizeof *h.count),malloc((pairs*N+1)*sizeof *h.hop),malloc((pairs+1)*sizeof *h.length)};
+  uint32_t *path=malloc(((size_t)N+1)*sizeof *path),*trial=malloc((pairs+1)*sizeof *trial),*reached=calloc((size_t)n+1,sizeof *reached);
+  uint64_t *load=calloc((size_t)N*N+1,sizeof *load);
+  struct mesh_length *length=malloc((pairs+1)*sizeof *length);
+  struct mesh_far *far=malloc((pairs+1)*sizeof *far),*roots=malloc(((size_t)n+1)*sizeof *roots);
+  unsigned char *done=malloc((size_t)n+1),*linked=calloc(pairs+1,1);
+  uint64_t *beta=calloc(pairs+1,sizeof *beta);
+  if(!with.next || !h.count || !h.hop || !h.length || !path || !trial || !reached || !load || !length || !far || !roots || !done ||
+     !linked || !beta)count=0;
+  /* the hops: a linked pair's route, its physical links and its length */
+  for(uint32_t a=0;count && a<n;a++)for(uint32_t b=0;b<n;b++){
+    if(a==b || !mesh_link_between(&with,a,b))continue;
+    const uint32_t hops=mesh_route_nodes(&with,a,b,path);
+    uint64_t betas=0;
+    for(uint32_t i=0;i+1<hops;i++){
+      double x,y;
+      mesh_hop_cost(map,path[i],path[i+1],0,0,&x,&y);
+      betas+=y>0 && isfinite(y)?(uint64_t)llround(y*1e6):0;
+      h.hop[((size_t)a*n+b)*N+h.count[(size_t)a*n+b]++]=path[i]*N+path[i+1];
+    }
+    h.length[(size_t)a*n+b]=(struct mesh_length){hops-1,betas};
+    linked[(size_t)a*n+b]=1;
+    beta[(size_t)a*n+b]=betas;
+  }
+  /* each root's lengths over the hops (Dijkstra, mesh_distances' dense form on the members), its members farthest
+     first, and each member's parent the least hash among its equals */
+  for(uint32_t v=0;count && v<n;v++)roots[v]=(struct mesh_far){{0,0},mesh_mark(map,v),v};
+  if(count)qsort(roots,n,sizeof *roots,mesh_farther);
+  for(uint32_t k=0;count && k<n;k++){
+    const uint32_t r=roots[k].node;
+    struct mesh_length *at=length+(size_t)r*n;
+    for(uint32_t v=0;v<n;v++){at[v]=(struct mesh_length){UINT64_MAX,0};done[v]=0;}
+    at[r]=(struct mesh_length){0,0};
+    for(;;){
+      uint32_t x=n;
+      for(uint32_t v=0;v<n;v++)if(!done[v] && at[v].hops!=UINT64_MAX && (x==n || mesh_shorter(at[v],at[x])))x=v;
+      if(x==n)break;
+      done[x]=1;
+      for(uint32_t w=0;w<n;w++){
+        if(done[w] || !linked[(size_t)w*n+x])continue;
+        const struct mesh_length d={at[x].hops+h.length[(size_t)w*n+x].hops,at[x].betas+beta[(size_t)w*n+x]};
+        if(at[w].hops==UINT64_MAX || mesh_shorter(d,at[w]))at[w]=d;
+      }
+    }
+    for(uint32_t v=0;v<n;v++){
+      if(at[v].hops==UINT64_MAX){count=0;break;}
+      if(v!=r)far[(size_t)r*n+reached[r]++]=(struct mesh_far){at[v],mesh_mark(map,v),v};
+    }
+    if(!count)break;
+    qsort(far+(size_t)r*n,reached[r],sizeof *far,mesh_farther);
+    trial[(size_t)r*n+r]=r;
+    for(uint32_t i=0;i<reached[r];i++){
+      const uint32_t v=far[(size_t)r*n+i].node;
       uint32_t up=v;
-      const uint32_t hops=v==r?0:mesh_route_nodes(&with,v,r,path);
-      for(uint32_t i=1;i<hops;i++)if(path[i]<n){up=path[i];break;}
-      if(v!=r && up==v)count=0;
-      parent[(size_t)r*n+v]=v==r?r:up;
+      for(uint32_t u=0;u<n;u++)
+        if(linked[(size_t)v*n+u] && mesh_equal((struct mesh_length){at[u].hops+h.length[(size_t)v*n+u].hops,at[u].betas+beta[(size_t)v*n+u]},at[v]) &&
+           (up==v || mesh_hash(mesh_mark(map,v),mesh_mark(map,u),roots[k].mark)<mesh_hash(mesh_mark(map,v),mesh_mark(map,up),roots[k].mark)))
+          up=u;
+      trial[(size_t)r*n+v]=up;
     }
   }
-  free(made);free(path);
+  for(uint32_t r=0;count && r<n;r++)for(uint32_t v=0;v<n;v++)if(v!=r)mesh_carry(&h,load,v,trial[(size_t)r*n+v],1);
+  uint64_t least=UINT64_MAX,least_potential=UINT64_MAX;
+  for(uint32_t pass=0;count && pass<=MESH_TREE_PASSES;pass++){
+    for(uint32_t k=0;pass && k<n;k++){
+      const uint32_t r=roots[k].node;
+      uint32_t *tree=trial+(size_t)r*n;
+      const struct mesh_length *at=length+(size_t)r*n;
+      for(uint32_t i=0;i<reached[r];i++){
+        const uint32_t v=far[(size_t)r*n+i].node;
+        uint32_t up=tree[v];
+        mesh_carry(&h,load,v,up,-1);
+        uint64_t best=UINT64_MAX;
+        for(uint32_t u=0;u<n;u++){
+          if(!linked[(size_t)v*n+u] ||
+             !mesh_equal((struct mesh_length){at[u].hops+h.length[(size_t)v*n+u].hops,at[u].betas+beta[(size_t)v*n+u]},at[v]))continue;
+          uint64_t price=0;
+          for(uint32_t i2=0;i2<h.count[(size_t)v*n+u];i2++)price+=2*load[h.hop[((size_t)v*n+u)*N+i2]]+1;
+          if(best==UINT64_MAX || price<best ||
+             (price==best && mesh_hash(mesh_mark(map,v),mesh_mark(map,u),roots[k].mark)<mesh_hash(mesh_mark(map,v),mesh_mark(map,up),roots[k].mark))){
+            best=price;up=u;
+          }
+        }
+        tree[v]=up;
+        mesh_carry(&h,load,v,up,1);
+      }
+    }
+    uint64_t most=0,potential=0;
+    for(size_t x=0;x<(size_t)N*N;x++){if(load[x]>most)most=load[x];potential+=load[x]*load[x];}
+    if(most<least || (most==least && potential<least_potential)){least=most;least_potential=potential;memcpy(parent,trial,pairs*sizeof *parent);}
+  }
+  for(uint32_t r=0;count && r<n;r++){root[r]=r;log_weight[r]=0;}
+  free(made);free(h.count);free(h.hop);free(h.length);free(path);free(trial);free(reached);free(load);free(length);free(far);free(roots);
+  free(done);free(linked);free(beta);
   return count;
 }
 
@@ -787,120 +874,284 @@ done:
   return written;
 }
 
-/* A step's place among the messages between two ranks in a round: sender, receiver, round, its ordinal there, and its
-   index among every rank's steps */
-struct mesh_key { uint32_t from,to,round,ordinal,index; };
-static int mesh_key_order(const void *a,const void *b){
-  const struct mesh_key *x=a,*y=b;
-  const uint32_t l[5]={x->from,x->to,x->round,x->ordinal,x->index},r[5]={y->from,y->to,y->round,y->ordinal,y->index};
-  for(int i=0;i<5;i++)if(l[i]!=r[i])return l[i]<r[i]?-1:1;
+/* -- the wire: libnccl-mesh's rings, the positions a program takes on them and its time there -------------------- */
+
+void mesh_wire_of(uint64_t block,uint64_t buffsize,struct mesh_wire *wire){
+  const uint64_t b=block?block:1,slot=(buffsize/MESH_LAG+b-1)/b*b;
+  *wire=(struct mesh_wire){slot>b?slot:b,b,MESH_LAG,0};
+}
+int mesh_wire_large(const struct mesh_wire *wire,uint64_t bytes){ return bytes>(uint64_t)wire->lag*wire->small; }
+uint64_t mesh_wire_pieces(const struct mesh_wire *wire,uint64_t bytes){
+  const uint64_t slot=mesh_wire_large(wire,bytes)?wire->slot:wire->small;
+  return (bytes+slot-1)/slot;
+}
+static uint64_t mesh_step_bytes(const struct mesh_step *step){ return step->piece.elements*step->piece.element_bytes; }
+
+/* whether steps are in round order (mesh_program_steps' order: a compiled program's are) */
+static int mesh_rounds_sorted(const struct mesh_step *steps,uint32_t count){
+  for(uint32_t k=1;k<count;k++)if(steps[k].round<steps[k-1].round)return 0;
+  return 1;
+}
+
+uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int large,const struct mesh_wire *wire,uint64_t at,
+                  struct mesh_place *made,uint32_t *placed){
+  const int sorted=mesh_rounds_sorted(steps,count);
+  uint32_t rounds=0,round=UINT32_MAX;
+  uint64_t out=at,in=at;
+#define MESH_LAID(k) (steps[k].peer==peer && mesh_step_bytes(steps+(k)) && mesh_wire_large(wire,mesh_step_bytes(steps+(k)))==large)
+#define MESH_PLACE(k) do { \
+    uint64_t *cursor=steps[k].op==MESH_STEP_SEND?&out:&in; \
+    const uint64_t pieces=mesh_wire_pieces(wire,mesh_step_bytes(steps+(k))); \
+    made[(*placed)++]=(struct mesh_place){(k),steps[k].op==MESH_STEP_SEND,*cursor,pieces}; \
+    *cursor+=pieces; } while(0)
+  for(uint32_t k=0;!sorted && k<count;k++)if(MESH_LAID(k) && steps[k].round+1>rounds)rounds=steps[k].round+1;
+  for(uint32_t k=0;sorted && k<count;k++){
+    if(!MESH_LAID(k))continue;
+    if(steps[k].round!=round){at=out>in?out:in;out=in=at;round=steps[k].round;}
+    MESH_PLACE(k);
+  }
+  for(uint32_t r=0;!sorted && r<rounds;r++){
+    at=out>in?out:in;out=in=at;
+    for(uint32_t k=0;k<count;k++)if(MESH_LAID(k) && steps[k].round==r)MESH_PLACE(k);
+  }
+#undef MESH_PLACE
+#undef MESH_LAID
+  return out>in?out:in;
+}
+
+/* steps by round, then index */
+struct mesh_ranked { uint32_t round,index; };
+static int mesh_ranked_order(const void *a,const void *b){
+  const struct mesh_ranked *x=a,*y=b;
+  if(x->round!=y->round)return x->round<y->round?-1:1;
+  return (x->index>y->index)-(x->index<y->index);
+}
+int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *before){
+  struct mesh_ranked *order=mesh_rounds_sorted(steps,count)?NULL:malloc(((size_t)count+1)*sizeof *order);
+  if(!order && !mesh_rounds_sorted(steps,count))return ENOMEM;
+  for(uint32_t k=0;order && k<count;k++)order[k]=(struct mesh_ranked){steps[k].round,k};
+  if(order)qsort(order,count,sizeof *order,mesh_ranked_order);
+  int32_t last=-1;
+  for(uint32_t i=0;i<count;i++){
+    const uint32_t k=order?order[i].index:i;
+    before[k]=last;
+    if(steps[k].op!=MESH_STEP_SEND && mesh_step_bytes(steps+k))last=(int32_t)k;
+  }
+  free(order);
   return 0;
 }
 
-/* Every rank's steps of a program, then its time under the alpha-beta model [Hockney 1994] with a node's sends sharing
-   each outgoing port and its receives each incoming one, as Thakur, Rabenseifner and Gropp cost these algorithms: each
-   node takes its steps in order; a SEND leaves when the node has reached it, crossing each port of its route once that
-   port is free (a relay passes it on its link's alpha after it began to land, finishing no sooner than the port before
-   it plus that alpha), and arrives the last link's alpha after its last port finished; a receive waits for its SEND
-   (the sender's k-th to it in the round is its k-th from the sender) and its last port.  The time is the last node's;
-   negative where a receive has no SEND of its piece, or the schedule stops. */
-double mesh_program_time(const struct mesh_link_map *map,const struct mesh_program *program,struct mesh_operand operand,double alpha,double beta){
-  const uint32_t n=program->nodes,N=mesh_all(map),total=program->first[n];
-  if(n<2)return 0;
-  if(map->nodes!=n)return -1;
-  struct mesh_step *steps=calloc((size_t)total+1,sizeof *steps);
-  struct mesh_key *sends=malloc(((size_t)total+1)*sizeof *sends),*receives=malloc(((size_t)total+1)*sizeof *receives);
-  double *arrival=calloc((size_t)total+1,sizeof *arrival),result=-1;
-  int64_t *match=malloc(((size_t)total+1)*sizeof *match);
-  /* each rank pair's route: its ports (u x N + x, one way of the link u-x) and their links' alpha and beta */
-  uint32_t *hops=calloc((size_t)n*n,sizeof *hops),*hop=malloc(((size_t)n*n*N+1)*sizeof *hop),path[N+1];
-  double *hop_alpha=malloc(((size_t)n*n*N+1)*sizeof *hop_alpha),*hop_beta=malloc(((size_t)n*n*N+1)*sizeof *hop_beta);
-  double *out_free=calloc((size_t)N*N,sizeof *out_free),*in_free=calloc((size_t)N*N,sizeof *in_free);
-  uint32_t count[n],cursor[n],S=0,R=0;
-  double clock[n];
-  memset(cursor,0,sizeof cursor);memset(clock,0,sizeof clock);
-  if(!steps || !sends || !receives || !arrival || !match || !hops || !hop || !hop_alpha || !hop_beta || !out_free || !in_free)goto done;
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++){
-    const size_t pair=(size_t)a*n+b;
-    uint32_t h=a==b?0:mesh_route_nodes(map,a,b,path);
-    if(a!=b && h<2){path[0]=a;path[1]=b;h=2;}
-    for(uint32_t i=0;i+1<h;i++){
-      hop[pair*N+i]=path[i]*N+path[i+1];
-      mesh_hop_cost(map,path[i],path[i+1],alpha,beta,hop_alpha+pair*N+i,hop_beta+pair*N+i);
+/* A position on its way: when it lands, the channel it lands on (its receiver's) and its position there; the landings
+   a binary heap, the earliest first (then by channel and position, so every node takes them in one order) */
+struct mesh_landing { double time; uint32_t channel; uint64_t at; };
+static int mesh_sooner(const struct mesh_landing *a,const struct mesh_landing *b){
+  if(a->time!=b->time)return a->time<b->time;
+  if(a->channel!=b->channel)return a->channel<b->channel;
+  return a->at<b->at;
+}
+static void mesh_heap_push(struct mesh_landing *heap,size_t *size,struct mesh_landing x){
+  size_t at=(*size)++;
+  for(;at && mesh_sooner(&x,heap+(at-1)/2);at=(at-1)/2)heap[at]=heap[(at-1)/2];
+  heap[at]=x;
+}
+static struct mesh_landing mesh_heap_pop(struct mesh_landing *heap,size_t *size){
+  const struct mesh_landing top=heap[0],x=heap[--*size];
+  size_t at=0;
+  for(;;){
+    size_t child=2*at+1;
+    if(child>=*size)break;
+    if(child+1<*size && mesh_sooner(heap+child+1,heap+child))child++;
+    if(!mesh_sooner(heap+child,&x))break;
+    heap[at]=heap[child];at=child;
+  }
+  if(*size)heap[at]=x;
+  return top;
+}
+
+/* A rank's channel toward a peer of one class: its positions' end, its placed SENDs and receives (each list in position
+   order), its cursors and its positions' landings */
+struct mesh_lane { uint32_t rank,peer,outs,ins,out_at,in_at; struct mesh_place *out,*in; uint64_t end,sent,consumed; unsigned char *landed; };
+/* One segment of a rank pair's route: its ends, its cables (count, and the first of them in the pairs' cable lists;
+   none: a mesh's pair the map lists no link for) and, routed, the route's stripes and hash (a routed position t rides
+   stripe t mod stripes, on cable (hash + stripe) mod cables of each segment: the bridges' hash is the program's, the
+   model's its ends' marks') */
+struct mesh_segment { uint32_t from,to,cables,first,stripes,hash; };
+/* The time's state: the map, the program's steps, each step's receive before it and whether it is consumed, the lanes,
+   each rank pair's route, the ports' free times, the landings and the last consumption */
+struct mesh_timing {
+  const struct mesh_link_map *map;
+  const struct mesh_wire *wire;
+  double alpha,beta,last;
+  uint32_t n,N;
+  const uint32_t *first;
+  struct mesh_step *steps;
+  int32_t *before;
+  unsigned char *done;
+  struct mesh_lane *lanes;
+  uint32_t *hops,*cable;
+  struct mesh_segment *segment;
+  double *port;
+  struct mesh_landing *heap;
+  size_t heaped;
+};
+
+/* position t of lane c published at `now`: a whole slot of its class over each segment of its route, its landing kept */
+static void mesh_publish_at(struct mesh_timing *x,uint32_t c,uint64_t t,double now){
+  const struct mesh_lane *lane=x->lanes+c;
+  const size_t pair=(size_t)lane->rank*x->n+lane->peer;
+  const double bytes=(double)(c%2?x->wire->slot:x->wire->small);
+  double ready=now,before=0,end=0,alpha=0;
+  for(uint32_t i=0;i<x->hops[pair];i++){
+    const struct mesh_segment *s=x->segment+pair*x->N+i;
+    double a=x->alpha,b=x->beta;
+    size_t port=2*(size_t)x->map->links+(size_t)s->from*x->N+s->to;
+    if(s->cables){
+      const uint32_t l=x->cable[s->first+(x->hops[pair]==1?(uint32_t)(t%s->cables):(uint32_t)((s->hash+t%s->stripes)%s->cables))];
+      if(x->map->cost && !isnan(x->map->cost[l][0])){a=x->map->cost[l][0];b=x->map->cost[l][1];}
+      port=2*(size_t)l+(s->from!=x->map->link[l][0]);
     }
-    hops[pair]=h?h-1:0;
+    const double start=ready>x->port[port]?ready:x->port[port];
+    double finish=start+bytes*b/1e3;
+    if(i && finish<before+alpha)finish=before+alpha;
+    x->port[port]=finish;
+    ready=start+a;before=finish;alpha=a;end=finish;
   }
-  /* every receive's SEND: a step's ordinal among its rank's steps of its kind toward (from) its peer in its round */
-  for(uint32_t r=0;r<n;r++){
-    count[r]=mesh_program_steps(program,r,operand,steps+program->first[r]);
-    for(uint32_t k=0;k<count[r];k++){
-      const struct mesh_step *step=steps+program->first[r]+k;
-      const uint32_t index=program->first[r]+k;
-      if(step->op==MESH_STEP_SEND)sends[S++]=(struct mesh_key){r,step->peer,step->round,0,index};
-      else receives[R++]=(struct mesh_key){step->peer,r,step->round,0,index};
-    }
-  }
-  qsort(sends,S,sizeof *sends,mesh_key_order);qsort(receives,R,sizeof *receives,mesh_key_order);
-  for(uint32_t i=1;i<S;i++)if(sends[i].from==sends[i-1].from && sends[i].to==sends[i-1].to && sends[i].round==sends[i-1].round)sends[i].ordinal=sends[i-1].ordinal+1;
-  for(uint32_t i=1;i<R;i++)if(receives[i].from==receives[i-1].from && receives[i].to==receives[i-1].to && receives[i].round==receives[i-1].round)receives[i].ordinal=receives[i-1].ordinal+1;
-  for(uint32_t i=0;i<total;i++)match[i]=-1;
-  for(uint32_t i=0,j=0;i<R;i++){
-    while(j<S && mesh_key_order(&(struct mesh_key){sends[j].from,sends[j].to,sends[j].round,sends[j].ordinal,0},
-                                &(struct mesh_key){receives[i].from,receives[i].to,receives[i].round,receives[i].ordinal,0})<0)j++;
-    if(j<S && sends[j].from==receives[i].from && sends[j].to==receives[i].to && sends[j].round==receives[i].round &&
-       sends[j].ordinal==receives[i].ordinal)match[receives[i].index]=sends[j].index;
-  }
-  for(int progress=1;progress;){
-    progress=0;
-    for(uint32_t r=0;r<n;r++)while(cursor[r]<count[r]){
-      const uint32_t index=program->first[r]+cursor[r];
-      const struct mesh_step *step=steps+index;
-      const double bytes=(double)step->piece.elements*step->piece.element_bytes;
-      const size_t pair=step->op==MESH_STEP_SEND?(size_t)r*n+step->peer:(size_t)step->peer*n+r;
-      if(step->op==MESH_STEP_SEND){
-        double ready=clock[r],before=0,end=0;
-        for(uint32_t i=0;i<hops[pair];i++){
-          double *port=out_free+hop[pair*N+i];
-          const double start=ready>*port?ready:*port;
-          end=start+bytes*hop_beta[pair*N+i]/1e3;
-          if(i && end<before+hop_alpha[pair*N+i-1])end=before+hop_alpha[pair*N+i-1];
-          *port=end;
-          ready=start+hop_alpha[pair*N+i];
-          before=end;
-        }
-        arrival[index]=end+(hops[pair]?hop_alpha[pair*N+hops[pair]-1]:0);
-        cursor[r]++;
-        progress=1;
-        continue;
+  mesh_heap_push(x->heap,&x->heaped,(struct mesh_landing){end+alpha,(lane->peer*x->n+lane->rank)*2+c%2,t});
+}
+
+static int mesh_ready(const struct mesh_timing *x,uint32_t r,uint32_t k){
+  const int32_t j=x->before[x->first[r]+k];
+  return j<0 || x->done[x->first[r]+(uint32_t)j];
+}
+
+/* rank r at `now`: each of its channels' landed positions consumed in order and its next positions published, while any
+   of them moves */
+static void mesh_advance(struct mesh_timing *x,uint32_t r,double now){
+  for(int moved=1;moved;){
+    moved=0;
+    for(uint32_t c=r*x->n*2;c<(r+1)*x->n*2;c++){
+      struct mesh_lane *lane=x->lanes+c;
+      if(lane->peer==r || !lane->end)continue;
+      while(lane->consumed<lane->end && lane->landed[lane->consumed]){
+        const uint64_t t=lane->consumed;
+        const struct mesh_place *m=lane->in_at<lane->ins && t>=lane->in[lane->in_at].first?lane->in+lane->in_at:NULL;
+        if(m && t==m->first && !mesh_ready(x,r,m->step))break;
+        if(m && t+1==m->first+m->pieces){x->done[x->first[r]+m->step]=1;lane->in_at++;}
+        lane->consumed++;
+        if(now>x->last)x->last=now;
+        moved=1;
       }
-      const int64_t k=match[index];
-      const struct mesh_step *send=k<0?NULL:steps+k;
-      if(!send || send->first!=step->first || send->piece.elements!=step->piece.elements ||
-         send->piece.element_bytes!=step->piece.element_bytes)goto done;
-      if(program->first[step->peer]+cursor[step->peer]<=(uint64_t)k)break;
-      const uint32_t last=hops[pair]?hops[pair]-1:0;
-      double *port=in_free+(hops[pair]?hop[pair*N+last]:(size_t)step->peer*N+r);
-      double complete=*port+bytes*(hops[pair]?hop_beta[pair*N+last]:beta)/1e3;
-      if(arrival[k]>complete)complete=arrival[k];
-      *port=complete;
-      if(complete>clock[r])clock[r]=complete;
-      cursor[r]++;
-      progress=1;
+      while(lane->sent<lane->end && lane->sent<lane->consumed+x->wire->lag){
+        const uint64_t t=lane->sent;
+        const struct mesh_place *m=lane->out_at<lane->outs && t>=lane->out[lane->out_at].first?lane->out+lane->out_at:NULL;
+        if(m && t==m->first && !mesh_ready(x,r,m->step))break;
+        if(m && t+1==m->first+m->pieces)lane->out_at++;
+        mesh_publish_at(x,c,t,now);
+        lane->sent++;
+        moved=1;
+      }
     }
   }
-  result=0;
-  for(uint32_t r=0;r<n;r++){
-    if(cursor[r]<count[r]){result=-1;break;}
-    if(clock[r]>result)result=clock[r];
+}
+
+double mesh_program_time(const struct mesh_link_map *map,const struct mesh_program *program,struct mesh_operand operand,const struct mesh_wire *wire,
+                         double alpha,double beta){
+  const uint32_t n=program->nodes,N=mesh_all(map),total=program->first[n],L=map->links;
+  if(n<2)return 0;
+  if(map->nodes!=n || !wire || !wire->slot || !wire->small || !wire->lag)return -1;
+  struct mesh_timing x={.map=map,.wire=wire,.alpha=alpha,.beta=beta,.n=n,.N=N,.first=program->first};
+  uint32_t count[n],path[N+1];
+  double result=-1;
+  x.steps=calloc((size_t)total+1,sizeof *x.steps);
+  x.before=malloc(((size_t)total+1)*sizeof *x.before);
+  x.done=calloc((size_t)total+1,1);
+  x.lanes=calloc(2*(size_t)n*n,sizeof *x.lanes);
+  x.hops=calloc((size_t)n*n,sizeof *x.hops);
+  x.segment=calloc((size_t)n*n*N+1,sizeof *x.segment);
+  x.cable=malloc(((size_t)L+1)*sizeof *x.cable);
+  x.port=calloc(2*(size_t)L+(size_t)N*N,sizeof *x.port);
+  struct mesh_place *place=malloc(((size_t)total+1)*sizeof *place),*split=malloc(((size_t)total+1)*sizeof *split);
+  uint32_t *pair_first=calloc((size_t)N*N+1,sizeof *pair_first);
+  unsigned char *landed=NULL;
+  if(!x.steps || !x.before || !x.done || !x.lanes || !x.hops || !x.segment || !x.cable || !x.port || !place || !split || !pair_first)goto done;
+  /* each pair's cables, the links joining it (either way) in link order: pair u,x's at cable[pair_first[u N + x] ..] */
+  for(uint32_t l=0;l<L;l++){pair_first[(size_t)map->link[l][0]*N+map->link[l][1]+1]++;if(map->link[l][0]!=map->link[l][1])pair_first[(size_t)map->link[l][1]*N+map->link[l][0]+1]++;}
+  for(size_t k=1;k<=(size_t)N*N;k++)pair_first[k]+=pair_first[k-1];
+  uint32_t *filled=calloc((size_t)N*N+1,sizeof *filled),*cables=malloc((2*(size_t)L+1)*sizeof *cables);
+  if(!filled || !cables){free(filled);free(cables);goto done;}
+  for(uint32_t l=0;l<L;l++){
+    const uint32_t u=map->link[l][0],v=map->link[l][1];
+    cables[pair_first[(size_t)u*N+v]+filled[(size_t)u*N+v]++]=l;
+    cables[pair_first[(size_t)v*N+u]+filled[(size_t)v*N+u]++]=l;
   }
+  free(filled);free(x.cable);x.cable=cables;
+  /* each rank pair's route: its segments, a direct hop's cables striped, a routed one's ridden by the hash of its ends'
+     marks */
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++){
+    if(a==b)continue;
+    uint32_t h=map->next?mesh_route_nodes(map,a,b,path):0;
+    if(h<2){path[0]=a;path[1]=b;h=2;}
+    const uint32_t lo=mesh_mark(map,a)<mesh_mark(map,b)?mesh_mark(map,a):mesh_mark(map,b),hi=mesh_mark(map,a)<mesh_mark(map,b)?mesh_mark(map,b):mesh_mark(map,a);
+    x.hops[(size_t)a*n+b]=h-1;
+    const uint32_t stripes=mesh_stripes(map,path,h),hash=(uint32_t)(mesh_hash(lo,hi,0)%MESH_PORTS);
+    for(uint32_t i=0;i+1<h;i++){
+      const size_t k=(size_t)path[i]*N+path[i+1];
+      x.segment[((size_t)a*n+b)*N+i]=(struct mesh_segment){path[i],path[i+1],pair_first[k+1]-pair_first[k],pair_first[k],stripes,hash};
+    }
+  }
+  /* every rank's steps, each one's receive before it, and its channels' positions (mesh_lay) */
+  for(uint32_t r=0;r<n;r++){
+    count[r]=mesh_program_steps(program,r,operand,x.steps+program->first[r]);
+    if(mesh_steps_before(x.steps+program->first[r],count[r],x.before+program->first[r]))goto done;
+  }
+  uint64_t positions=0;
+  for(uint32_t r=0,used=0;r<n;r++){
+    used=program->first[r];
+    for(uint32_t p=0;p<n;p++)for(int large=0;p!=r && large<2;large++){
+      struct mesh_lane *lane=x.lanes+((size_t)r*n+p)*2+large;
+      const uint32_t from=used;
+      lane->rank=r;lane->peer=p;
+      lane->end=mesh_lay(x.steps+program->first[r],count[r],p,large,wire,0,place,&used);
+      lane->out=split+from;
+      for(uint32_t i=from;i<used;i++)if(place[i].send)lane->out[lane->outs++]=place[i];
+      lane->in=lane->out+lane->outs;
+      for(uint32_t i=from;i<used;i++)if(!place[i].send)lane->in[lane->ins++]=place[i];
+      positions+=lane->end;
+    }
+    for(uint32_t p=0;p<n;p++)if(p==r)x.lanes[((size_t)r*n+p)*2].peer=x.lanes[((size_t)r*n+p)*2+1].peer=r;
+  }
+  /* both ends of each channel lay the same positions, and each receive is its peer's SEND of the same piece */
+  for(uint32_t r=0;r<n;r++)for(uint32_t p=0;p<n;p++)for(int large=0;p!=r && large<2;large++){
+    const struct mesh_lane *in=x.lanes+((size_t)r*n+p)*2+large,*out=x.lanes+((size_t)p*n+r)*2+large;
+    if(in->end!=out->end || in->ins!=out->outs)goto done;
+    for(uint32_t i=0;i<in->ins;i++){
+      const struct mesh_step *a=x.steps+program->first[r]+in->in[i].step,*b=x.steps+program->first[p]+out->out[i].step;
+      if(in->in[i].first!=out->out[i].first || in->in[i].pieces!=out->out[i].pieces || a->first!=b->first ||
+         a->piece.elements!=b->piece.elements || a->piece.element_bytes!=b->piece.element_bytes)goto done;
+    }
+  }
+  landed=calloc(positions+1,1);
+  x.heap=malloc((positions+1)*sizeof *x.heap);
+  if(!landed || !x.heap)goto done;
+  for(uint64_t c=0,at=0;c<2*(uint64_t)n*n;c++){x.lanes[c].landed=landed+at;at+=x.lanes[c].end;}
+  for(uint32_t r=0;r<n;r++)mesh_advance(&x,r,0);
+  while(x.heaped){
+    const struct mesh_landing v=mesh_heap_pop(x.heap,&x.heaped);
+    x.lanes[v.channel].landed[v.at]=1;
+    mesh_advance(&x,x.lanes[v.channel].rank,v.time);
+  }
+  result=x.last;
+  for(uint64_t c=0;c<2*(uint64_t)n*n;c++)
+    if(x.lanes[c].sent<x.lanes[c].end || x.lanes[c].consumed<x.lanes[c].end)result=-1;
 done:
-  free(steps);free(sends);free(receives);free(arrival);free(match);free(hops);free(hop);free(hop_alpha);free(hop_beta);free(out_free);free(in_free);
+  free(x.steps);free(x.before);free(x.done);free(x.lanes);free(x.hops);free(x.segment);free(x.cable);free(x.port);free(x.heap);
+  free(place);free(split);free(pair_first);free(landed);
   return result;
 }
 
 /* A candidate's time: `what` along trees at chunks, compiled into rooms of its own and timed; 0, ENOMEM, or EINVAL */
 static int mesh_candidate(const struct mesh_link_map *map,const struct mesh_trees *trees,uint32_t what,uint32_t root,int whole,uint32_t chunks,
-                          struct mesh_operand operand,double alpha,double beta,double *time){
+                          struct mesh_operand operand,const struct mesh_wire *wire,double alpha,double beta,double *time){
   uint32_t parts,moves;
   mesh_compile_room(trees,chunks,&parts,&moves);
   uint32_t *segment=malloc((parts+1)*sizeof *segment),*first=malloc((trees->nodes+1)*sizeof *first);
@@ -909,26 +1160,23 @@ static int mesh_candidate(const struct mesh_link_map *map,const struct mesh_tree
   struct mesh_program program;
   int status=!segment || !first || !weight || !move?ENOMEM:
     mesh_compile(trees,what,root,whole,chunks,NULL,&program,segment,weight,first,move)?EINVAL:0;
-  if(!status)*time=mesh_program_time(map,&program,operand,alpha,beta);
+  if(!status)*time=mesh_program_time(map,&program,operand,wire,alpha,beta);
   if(!status && *time<0)status=EINVAL;
   free(segment);free(first);free(weight);free(move);
   return status;
 }
 
 int mesh_choose(const struct mesh_link_map *map,const struct mesh_trees *sets,uint32_t count,uint32_t what,uint32_t root,
-                struct mesh_operand operand,double alpha,double beta,struct mesh_choice *choice){
+                struct mesh_operand operand,const struct mesh_wire *wire,double alpha,double beta,struct mesh_choice *choice){
   int found=0;
-  for(uint32_t s=0;s<count;s++)for(int whole=0;whole<=(what==MESH_ALLREDUCE);whole++){
-    double last=INFINITY,time;
+  for(uint32_t s=0;s<count;s++)for(int whole=0;whole<=(what==MESH_ALLREDUCE);whole++)
     for(uint32_t chunks=1;chunks<=MESH_CHUNKS;chunks*=2){
-      const int status=mesh_candidate(map,sets+s,what,root,whole,chunks,operand,alpha,beta,&time);
+      double time;
+      const int status=mesh_candidate(map,sets+s,what,root,whole,chunks,operand,wire,alpha,beta,&time);
       if(status==ENOMEM)return ENOMEM;
       if(status)break;
-      if(!found || time<choice->time){*choice=(struct mesh_choice){s,(uint32_t)whole,chunks,0,time};found=1;}
-      if(!(time<last))break;
-      last=time;
+      if(!found || time<choice->time-choice->time*0x1p-30){*choice=(struct mesh_choice){s,(uint32_t)whole,chunks,0,time};found=1;}
     }
-  }
   return found?0:EINVAL;
 }
 

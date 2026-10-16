@@ -2,11 +2,12 @@
 no layout or prototype here is written by hand; `make mesh-c` builds it for this interpreter).  The read side is the
 node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's serial (mesh_map_wait).  The planner is
 the header's own: link maps, the trees every collective and message take, operands, collectives, steps, their
-planning and pricing.  Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its
+planning and pricing on the wire libnccl-mesh's sessions run (wire(), mesh_program_time: as the library runs a program,
+every position a whole slot).  Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its
 ncclMemAlloc, the memory they move taken from the node's bridge's window (rdma/NCCL.md "Memory")."""
 import errno
-import itertools
 import os
+import re
 import sys
 from types import SimpleNamespace
 
@@ -67,7 +68,8 @@ def link_map(kind, nodes, pairs, cost=None, relays=0, next=None, mark=None):
 
 def routes(lmap):
     """mesh_routes: the routing table of lmap's links by its marks (each node's in-tree of shortest routes, a parent
-    among equals the one whose link carries fewest routes so far), as a flat list N x N (LinkMap's `next`)."""
+    among equals the one of the least hash of its mark, the parent's and the root's: a route moves only where the
+    shortest routes between its ends change), as a flat list N x N (LinkMap's `next`)."""
     N = lmap.nodes + lmap.relays
     made = ffi.new('uint32_t[]', max(1, N * N))
     status = lib.mesh_routes(lmap.c, made)
@@ -109,12 +111,16 @@ def _members(whole, members, current):
     return count, lmap, list(node[0:N]), [ffi.string(n).decode() for n in name[0:N]]
 
 
-def members(whole, among):
+def members(whole, among, marks=None):
     """mesh_map_members: the map a communicator of the whole map's nodes `among` (map node i the whole map's among[i])
     reads, the whole map's other nodes its relays, its marks and table the whole map's (routes(whole) where it has
-    none; the bridges mark each node by its node number: link_map(..., mark=)), so two members are linked where their
-    route crosses no other member, at that route's cost: the rule mesh_map reads the bridges' records by, for a planner
-    pricing a record."""
+    none), so two members are linked where their route crosses no other member, at that route's cost: the rule mesh_map
+    reads the bridges' records by, for a planner pricing a record.  `marks` (None: the whole map's own) each whole-map
+    node's mark, as the bridges mark each node by its node number, so the table is the bridges' (a whole map given
+    links and costs alone, link_map('graph', N, links, costs), takes them here; its table, made by other marks, is made
+    again by these)."""
+    if marks is not None:
+        whole = LinkMap(whole.kind, whole.nodes, whole.pairs, whole.cost, whole.relays, None, marks)
     count, lmap, _, _ = _members(whole, among, False)
     if count < 0:
         raise ValueError(f'mesh_map_members over {list(among)}: {os.strerror(-count)}')
@@ -131,33 +137,42 @@ def wait(serial=0, seconds=0.0):
     return made[0]
 
 
-def hops(routed):
-    """A members' map's hops over its members alone (its nodes, no relays): a pair linked where its route crosses relays
-    alone (mesh_link_between), at that route's cost (mesh_link_cost: alphas summed, the greatest beta), a mesh where
-    every pair is; the view of a members' map as rank pairs (the relays' shared links are `routed`'s alone)."""
-    pairs, cost, x, y = [], [], ffi.new('double *'), ffi.new('double *')
-    for a, b in itertools.combinations(range(routed.nodes), 2):
-        if lib.mesh_link_between(routed.c, a, b):
-            lib.mesh_link_cost(routed.c, a, b, lib.MESH_ALPHA_US, lib.MESH_BETA_NS, x, y)
-            pairs.append((a, b))
-            cost.append((x[0], y[0]))
-    kind = 'mesh' if 2 * len(pairs) == routed.nodes * (routed.nodes - 1) else 'graph'
-    return LinkMap(kind, routed.nodes, pairs, cost)
-
-
 def current(members=None):
     """mesh_map: the map this node's bridge keeps as of `serial` (wait()'s), over `members` (bridge node numbers, map
-    node v the bridge node members[v], the other nodes its relays; None: every node its records hold): `routed` the
-    members' map as libnccl-mesh reads it (with its relays, marks and routing table: price a program on it), `map` its
-    hops over the members alone (hops()), `nodes` and `names` each map node's (then each relay's) bridge node and name,
-    `node` this node's bridge's (mesh_observe).  OSError naming the bridge where it is unreachable; ValueError (LinkMap's)
-    where no route reaches a member."""
+    node v the bridge node members[v], the other nodes its relays; None: every node its records hold, no relays):
+    `map` the members' map as libnccl-mesh reads it, the one map to price a program on (its relays, a link a cable, at
+    its cost, `mark` each node's bridge node number, `next` the routing table the bridges forward along; members(map,
+    ...) of the whole map is the map over any of them), `nodes` and `names` each map node's (then each relay's) bridge
+    node and name, `node` this node's bridge's (mesh_observe).  OSError naming the bridge where it is unreachable;
+    ValueError (LinkMap's) where no route reaches a member."""
     serial, own = wait(), ffi.new('uint32_t *')
     lib.mesh_observe(ffi.NULL, 0, own)
     count, lmap, nodes, names = _members(None, members, True)
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
-    return SimpleNamespace(map=hops(lmap), routed=lmap, nodes=nodes, names=names, node=own[0], serial=serial)
+    return SimpleNamespace(map=lmap, nodes=nodes, names=names, node=own[0], serial=serial)
+
+
+def wire(block=None, buffsize=None):
+    """mesh_wire_of: the rings a session of libnccl-mesh runs on (mesh-plan.h struct mesh_wire: `slot`, `small`, `lag`),
+    as this process's sessions make them: `block` (None: this machine's page, the block every bridge's region takes) and
+    `buffsize` (None: NCCL_BUFFSIZE as the library reads it, a positive integer, else NCCL's default MESH_BUFFSIZE)."""
+    if buffsize is None:
+        given = re.match(r'\s*([-+]?\d+)', os.environ.get('NCCL_BUFFSIZE', ''))
+        buffsize = int(given.group(1)) if given and int(given.group(1)) > 0 else lib.MESH_BUFFSIZE
+    made = ffi.new('struct mesh_wire *')
+    lib.mesh_wire_of(block if block is not None else os.sysconf('SC_PAGE_SIZE'), buffsize, made)
+    return made
+
+
+def session_bytes(peers, wire_=None):
+    """ncclMeshSessionBytes: the bytes of its node's window one communicator's session takes toward `peers` other members
+    on `wire_` (wire(): None, this process's): its rings, transfer lists, SEND cells, completion words and violation
+    page.  A session binds every other member of its communicator; a split's is its own."""
+    made = ffi.new('uint64_t *')
+    if lib.ncclMeshSessionBytes(peers, wire_ if wire_ is not None else wire(), made):
+        raise ValueError(f'ncclMeshSessionBytes of {peers} peers')
+    return made[0]
 
 
 def lease(nbytes):
@@ -241,27 +256,28 @@ def compile(trees, what, root=0, whole=False, contributors=None, chunks=1):
                            keep=(segment, weight, first, move, words, trees))
 
 
-def choose(lmap, sets, what, root, piece, alpha=lib.MESH_ALPHA_US, beta=lib.MESH_BETA_NS):
+def choose(lmap, sets, what, root, piece, alpha=lib.MESH_ALPHA_US, beta=lib.MESH_BETA_NS, wire_=None):
     """mesh_choose: the fastest of `what` (at `root`) along each tree set of `sets` (trees()), an all-reduce also whole,
-    cut into 1, 2, 4, ... chunks while its time falls, timed for `piece` (operand()): set (its index), whole, chunks and
-    time (us)."""
+    cut into 1, 2, 4, ... 64 chunks (every count timed), timed for `piece` (operand()) on `wire_` (wire(); None: this
+    process's): set (its index), whole, chunks and time (us)."""
     made = ffi.new('struct mesh_choice *')
     held = ffi.new('struct mesh_trees[]', [t.c[0] for t in sets])
-    status = lib.mesh_choose(lmap.c, held, len(sets), what, root, piece[0], alpha, beta, made)
+    status = lib.mesh_choose(lmap.c, held, len(sets), what, root, piece[0], wire_ if wire_ is not None else wire(), alpha, beta, made)
     if status:
         raise ValueError(f'mesh_choose of {WHATS[what]} root {root}: {os.strerror(status)}')
     return SimpleNamespace(set=made.set, whole=bool(made.whole), chunks=made.chunks, time=made.time)
 
 
-def chosen(lmap, what, root, nbytes, sets=None):
+def chosen(lmap, what, root, nbytes, sets=None, wire_=None):
     """The program libnccl-mesh's default table runs for a call of `nbytes` on lmap (nccl-mesh.c program_of): the
     choice (choose) at its size class, the least 2^k of at least nbytes (mesh-plan.h MESH_CLASS_LEAST ..
-    MESH_CLASS_MOST), among `sets` (None: the shortest-path and the packed trees), compiled (compile)."""
+    MESH_CLASS_MOST), among `sets` (None: the shortest-path and the packed trees), on `wire_` (None: this process's),
+    compiled (compile); price it with program_time on the same wire."""
     sets = sets or (shortest(lmap), pack(lmap))
     k = lib.MESH_CLASS_LEAST
     while k < lib.MESH_CLASS_MOST and (1 << k) < nbytes:
         k += 1
-    picked = choose(lmap, sets, what, root, operand(0, 4, (1 << k) // 4))
+    picked = choose(lmap, sets, what, root, operand(0, 4, (1 << k) // 4), wire_=wire_)
     return compile(sets[picked.set], what, root, picked.whole, chunks=picked.chunks)
 
 
@@ -277,6 +293,8 @@ def depth(program):
     return 1 + max((m[2] for moves in program.moves for m in moves), default=-1)
 
 
-def program_time(lmap, program, piece, alpha=0.0, beta=0.0):
-    """mesh_program_time: every rank's steps run in the alpha-beta model, in us (negative where it stops or mismatches)."""
-    return lib.mesh_program_time(lmap.c, program.c, piece[0], alpha, beta)
+def program_time(lmap, program, piece, alpha=0.0, beta=0.0, wire_=None):
+    """mesh_program_time: the program as libnccl-mesh runs it on `wire_` (wire(); None: this process's) over lmap's ports,
+    every rank's steps laid on its channels, every position a whole slot, in us (negative where it stops or
+    mismatches); alpha and beta those of a link lmap gives no cost."""
+    return lib.mesh_program_time(lmap.c, program.c, piece[0], wire_ if wire_ is not None else wire(), alpha, beta)

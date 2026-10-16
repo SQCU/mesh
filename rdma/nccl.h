@@ -24,31 +24,35 @@
    along) each time its session opens.  ncclMeshCommInitRank (below) is for a program that passes its own programs or
    paths.  ncclCommSplit and ncclCommShrink make communicators of the ranks they take, on the bridges' map like any
    other; Shrink makes no exchange.  ncclCommGrow meets at the bootstrap of the id that ncclCommGetUniqueId gives comm's
-   root, which the root broadcasts on comm.  ncclCommRevoke closes comm's session, its groups in flight lost, and ends a
-   session opening (its wait for its peers' programs, or for their agreement) from any thread: it takes no lock such a
-   wait holds.  Making a communicator (a lone rank's too) attaches the process's client of its node's bridge where it
+   root, which the root broadcasts on comm.  ncclCommRevoke revokes comm for good: its session's waits end, its groups
+   in flight fail, a session opening (its wait for its peers' programs, or for their agreement) ends and none opens
+   after it, and every later group on comm fails at once (ncclRemoteError), until ncclCommDestroy closes the session;
+   from any thread, under comm's own lock alone, never one a group of any communicator holds while it waits.  Making a
+   communicator (a lone rank's too) attaches the process's client of its node's bridge where it
    has none, so it needs the node's bridge running and fails as ncclMemAlloc does (Memory, below): every client slot
    held, no region of a bridge that runs, or a lease of a bridge that stopped still held.
 
    Programs.  A communicator's programs are made from the map its session read (mesh-plan.h): a program's own table
    (ncclMeshCommInitRank), or the default, chosen for each collective, root and size class (the least 2^k of at least
-   the call's bytes, mesh-plan.h MESH_CLASS_LEAST to MESH_CLASS_MOST) at its first call by mesh_choose: the fastest in
-   the alpha-beta model over the map's links (relayed hops sharing the links they cross) of the collective along the
-   shortest-path trees (or the caller's paths) and along the packed trees, an all-reduce also the single-phase one,
-   each cut into 1, 2, 4, ... chunks while that is faster (the trees pipelined).  A call runs the first of its
+   the call's bytes, mesh-plan.h MESH_CLASS_LEAST to MESH_CLASS_MOST) at its first call by mesh_choose: the fastest, as
+   this library runs it on its session's rings (mesh_program_time on mesh_wire: every position a whole slot, a filler's
+   too, the credit and each receive's order) over the map's links (relayed hops sharing the links they cross, a pair's
+   cables striped), of the collective along the shortest-path trees (or the caller's paths) and along the packed trees,
+   an all-reduce also the single-phase one, each cut into 1, 2, 4, ... chunks while that is faster (the trees
+   pipelined).  A call runs the first of its
    collective whose size bound its operand is under; ncclCollConfig_t.algSelection is not read.  The members agree
    before any group runs: each publishes its digest of what its programs are made from (the route between each two
-   members and the costs of the links it crosses, the planner's version, the caller's paths and programs) on every
-   channel at the session's opening and compares its peers', so members that read the map on either side of a change fail the session as a value naming the
-   disagreement (ncclRemoteError), never run programs of two maps, and the next group opens on the map then.  A group
+   members and the costs of the links it crosses, the planner's version, the session's wire, the tree sets, the
+   caller's paths and programs) on every channel at the session's opening and compares its peers', so members that read
+   the map on either side of a change fail the session as a value naming the disagreement (ncclRemoteError), never run
+   programs of two maps, and the next group opens on the map then.  A group
    (ncclGroupStart/End; a call outside one is a group of one) walks each call's program (mesh_program_steps; a
    point-to-point call one step) on its communicator's session: its program's own slot on the process's client of its
    node's bridge (Memory, below), taken under its name at its first group that crosses a link and again after a
-   failure.  A change of the map that leaves the session's routes and the costs of their links as they were (a link or
-   node elsewhere, a node joining) keeps the session; one that changes them (map_digest) opens it again at its next
-   group, so every group runs on the map current when it starts, a member that reopens first failing the group a peer
-   had in flight on the old session that once (a call may fail where the topology changed under it), the agreement
-   keeping every group on one map; a link or node a route crosses lost fails the session on every member.  A message to a rank the map does not link takes the first link of its
+   failure, never because the map moved: a session runs on the map its members agreed on until a link or node its
+   routes cross is lost, which fails it on every member, and each opens the next at its next group on the map then (a
+   change that leaves its routes working reaches the communicator's next session), so no member reopens at a group of
+   its own and fails a peer's group in flight.  A message to a rank the map does not link takes the first link of its
    route, and the bridges forward it along the rest.  Every position a rank receives on is checked against its role,
    so calls that do not pair (a separate send and receive in the same order on two ranks, unequal counts, different
    collectives) are ncclInvalidUsage.
@@ -95,9 +99,9 @@
    a buffer outside it.  Design: design/prepared-machine.md#M09.
 
    Failures are ncclResult_t values, ncclGetLastError naming what was lost; nothing resumes a failed group, and the
-   group after a failure is returned opens a session again, on the map current then.  The session's progress thread is the
-   one silent-link watcher: a link with positions pending that delivers none for mesh.h MESH_SILENT_NS is cancelled,
-   ending every wait on it.  A group on a cancelled, silent or lost link fails with ncclRemoteError; a failure the Metal
+   group after a failure is returned opens a session again, on the map current then (a revoked communicator's none).
+   The session's progress thread is the one silent-link watcher: a link with positions pending that delivers none for
+   mesh.h MESH_SILENT_NS is cancelled, ending every wait on it.  A group on a cancelled, silent or lost link fails with ncclRemoteError; a failure the Metal
    path finds after its group returned (calls that do not pair, too) is the communicator's asynchronous error
    (ncclCommGetAsyncError) and the next group's result.
 
@@ -845,6 +849,14 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int
 /* The highest ticket through which every issued group is complete (or lost with a failed session): its
    workspace may be reused in the stream's order. */
 uint64_t ncclMeshRetired(void);
+/* The bytes of its node's window one communicator's session takes there toward `peers` other members on `wire`
+   (mesh-plan.h mesh_wire: the session's, mesh_wire_of the bridge's block and NCCL_BUFFSIZE): its rings, its transfer
+   lists, SEND cells and completion words and its violation page, each a lease of whole blocks.  A session binds a
+   channel toward every other member of its communicator (a point-to-point call may name any, and its members' agreement
+   meets on them whatever map each read), and a split or shrink is a communicator of its own with a session of its own,
+   sharing none with its parent's.  The rows a relay's bridge leases for a route it forwards are the bridge's
+   (design/bridge-and-ipc.md#region), not counted here. */
+ncclResult_t ncclMeshSessionBytes(int peers, const struct mesh_wire* wire, uint64_t* bytes);
 /* The Metal 4 form of a crossing (a stream whose argumentTable is set; Metal path, above): an all-reduce of `count`
    elements of `type` by `op` from sendbuff to recvbuff (each an ncclMeshBuffer) on comm, encoded into the caller's
    id<MTL4ComputeCommandEncoder> `encoder` as compute dispatches between the commands before and after it, bound

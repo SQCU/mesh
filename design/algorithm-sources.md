@@ -972,10 +972,9 @@ the row-to-page lookup inside `mesh_publish` as well.
 
 Pitch Patarasuk and Xin Yuan,
 [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf)
-(2009), motivate sparse connected topologies. A route is the map's: `mesh_map` (mesh-plan.h) joins members the
-links leave apart along the whole mesh's path on fewest links (`mesh_trees_shortest`'s parent rule), and the bridges
-forward a program along it (design/bridge-and-ipc.md#flows). No route is chosen by a caller or guessed from rank
-count.
+(2009), motivate sparse connected topologies. A route is the map's: `mesh_map` (mesh-plan.h) links members the
+links leave apart along the routing table's route between them ([Topology](#topology)), and the bridges forward a
+program along it (design/bridge-and-ipc.md#flows). No route is chosen by a caller or guessed from rank count.
 
 For a section s on `v0 → v1 → … → vk`, each intermediate node's bridge holds a relay's two flows, the one's receive
 rows the other's SEND rows: a record landed from `v(i-1)` releases the SEND cell that carries it to `v(i+1)`
@@ -996,29 +995,50 @@ each node's mark (its bridge's node number) and the routing table, an operand: e
 (fewest links, then the least sum of betas). Two members are linked where their route crosses relays alone, that hop
 costed as the relayed path it is: its links' α summed and the greatest β, a relay forwarding each slot as it lands
 (mesh-flow.c receive_input), not the betas summed; and its bytes charged to every link it crosses, in the tree packing
-(a port's capacity shared by the hops whose routes cross it) and in `mesh_program_time` (a message crossing each port
+(a port's capacity shared by the hops whose routes cross it) and in `mesh_program_time` (a position crossing each port
 of its route once that port is free), so hops that share a cable share its time. Several cables between one pair are
-one link of their bandwidths summed (design/bridge-and-ipc.md#cables).
+links of their own, as the bridges carry them (design/bridge-and-ipc.md#cables): a program between the two is striped
+over them, position t on cable t mod n, so the hop runs at n times the slowest cable's bandwidth (round robin waits on
+the slowest), not at their bandwidths summed; a routed program is striped end to end (mesh-flow.c route_stripes: the
+least common multiple of its segments' cable counts, past a node's ports the fewest; stripe j on cable (h + j) mod c of
+each segment), each segment carrying it over min(stripes, c) of its cables at the pace of the slowest
+(`mesh_link_cost`, `mesh_program_time`, which puts each position on the cable the bridges would). The bridges' map
+lists a pair's cables as such, each at the slowest port's bandwidth at either end (mesh-dataflow.c mesh_joined).
 
-The table (`mesh_routes`): Dijkstra [1959] toward each node in its dense form, every length an exact integer so every
-bridge and member that holds the same records makes the same table; then a local search on the congestion game's
-potential, the sum of the squares of the links' loads (each the routes between two nodes that cross it) [Rosenthal,
-Int. J. Game Theory 1973], which every move lowers: each root's in-tree revisited farthest node first, a node's flow
-(the routes toward the root it carries) taken off its route and put on through the parent among its equals whose route
-adds least, ties to the least hash of the three nodes' marks [splitmix64's finalizer: Steele, Lea & Flood, OOPSLA
-2014]; the pass whose busiest link carries fewest routes is kept. The route between two nodes is the path up the
-higher-marked one's in-tree, so a route and its reverse are one path, as the bridges need (a READY carries its route,
-and each relay mirrors the far end's direction). It replaces the lowest-numbered parent among equals, which sent the
-ring of six's three antipodal routes through nodes 0 and 1 (12 queue pairs on one port, over the device's 11); over
-200 numberings of that ring the table's busiest link carries 5 routes in every one (metal-microbench
-output_data/library-20261015/sims/routes_sampled_after.json, relays_after.json).
+The table (`mesh_routes`): Dijkstra [1959] toward each node in its dense form, every length an exact integer (a
+pair's cables striped) so every bridge and member that holds the same records makes
+the same table, each node's parent among its equals the least hash of its mark, the parent's and the root's
+[splitmix64's finalizer: Steele, Lea & Flood, OOPSLA 2014], equal-cost multipath by a hash as ECMP spreads flows
+[Hopps, RFC 2992]. A node's parent reads its own candidates alone, so the route between two nodes is a function of the
+shortest routes between them: it moves only where those change (a link or node one of them crosses lost or its cost
+changed, a link joining or a cost falling that makes another as short), never for a link lost elsewhere or a node
+joining by its own cables. The route between two nodes is the path up the higher-marked one's in-tree, so a route and
+its reverse are one path, as the bridges need (a READY carries its route, and each relay mirrors the far end's
+direction). It replaces the lowest-numbered parent among equals, which sent the ring of six's three antipodal routes
+through nodes 0 and 1, and the round's first pass's global search on link loads, which balanced the table better (the
+ring of six's busiest link 5 routes in every numbering, 5 or 6 by the hash) but moved a membership's routes for a link
+lost elsewhere in up to 35 % of cases and for a node joining by one cable in up to 45 % (metal-microbench
+output_data/library-20261015/pass2/sims/routes_after.json: none by the hash). The balance the collectives need is
+their tree sets' own: `mesh_trees_shortest` builds each member's in-tree over the members' hops, a parent among equals
+chosen by a local search on the congestion game's potential, the sum of the squares of the physical links' loads,
+each the tree edges whose hops cross it child to parent [Rosenthal, Int. J. Game Theory 1973], which every move
+lowers, ties to the hash; a communicator's tree sets are its own (its members' digest carries them), so balancing
+them moves no route of the bridges'.
 
 The collectives (mesh-collective.c): along the packed trees [Garg & Konemann, FOCS 1998; Blink, Wang et al. MLSys
 2020], the shortest-path trees, and the single-phase all-reduce [Trivance, SIGCOMM 2026]; each tree's part cut into
 chunks, chunk j of every move at its round + j, so a node forwards a chunk as it arrives (the pipelined trees of
 NCCL's tree algorithm and of MSCCLang's chunks [Cowan et al., ASPLOS 2023]); and the program a call runs chosen by its
-time in the alpha-beta model (`mesh_choose`: every collective, root and size class, over both tree sets and the chunk
-counts) [Thakur, Rabenseifner & Gropp 2005; NCCL's tuner].
+time as libnccl-mesh runs it (`mesh_choose`: every collective, root and size class, over both tree sets and every chunk
+count 1 to 64) [Thakur, Rabenseifner & Gropp 2005; NCCL's tuner]. That time (`mesh_program_time` on `struct
+mesh_wire`) is the runtime's own rule, one implementation with it: every rank's steps laid on its channels by the
+layout libnccl-mesh lays them by (`mesh_lay`), each position a whole slot of its class on the wire (a filler's too), a
+position published once its sender has consumed the peer's position lag back (NCCL's Simple protocol's credit) and,
+a piece's first, once the receive before its step is consumed (`mesh_steps_before`), consumed in position order; ports
+as the alpha-beta model's [Hockney 1994], a relay cut through. An alpha-beta step model of the same programs priced
+chunks of less than a slot at their bytes, so it chose them where each costs a whole slot (metal-microbench
+output_data/libreview-20261015: up to 8.8 times off); this rule equals the review's position-level simulator of the host
+path to the last bit on 1,520 candidates (output_data/library-20261015/pass2/sims/model_vs_review.json).
 
 ### Link
 

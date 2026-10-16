@@ -40,8 +40,12 @@ int mesh_window(uint64_t *bytes,uint64_t *unleased);
    a table, two of the map's nodes are linked where the route between them crosses no other of them (relays alone):
    that hop costs its links' alphas summed and the greatest of their betas (a relay forwards each slot as it lands,
    mesh-flow.c receive_input), and its bytes cross every link of it (mesh_trees_pack, mesh_program_time).  Without one,
-   two nodes are linked where a link joins them.  Several links between one pair (cables) are one link of their
-   bandwidths summed (design/bridge-and-ipc.md#cables).  `link`, `cost`, `next` and `mark` are the caller's storage. */
+   two nodes are linked where a link joins them.  Several links between one pair are its cables, as the bridges carry
+   them (design/bridge-and-ipc.md#cables): a program between the two is striped over them, position t on cable t mod n,
+   so the hop runs at n times the slowest one's bandwidth (its beta the greatest of theirs over n, its alpha the
+   least), and a routed program is striped end to end (its stripes the least common multiple of its segments' cable
+   counts, past a node's ports the fewest; stripe j on cable (h + j) mod c of each segment), each segment carrying it
+   over min(stripes, c) of its cables.  `link`, `cost`, `next` and `mark` are the caller's storage. */
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
 struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; double (*cost)[2]; uint32_t relays; uint32_t *next,*mark; };
 /* 0 where a map's algorithm can run on it, else EINVAL: every link's nodes among its nodes and relays; a ring one
@@ -49,14 +53,16 @@ struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; double (*
    reaching the root; a graph connected; with a table (a graph's, where it has relays), its every entry a node or relay
    its row's node is linked to, or that node, and every route between two of the map's nodes reaching its end. */
 int mesh_link_map_check(const struct mesh_link_map *);
-/* The routing table of a map's links (into next, N x N as struct mesh_link_map's; map->next is not read): each node b's
-   in-tree of shortest routes toward it, by fewest links, then the least sum of their betas (in whole fs a byte; a link
-   without a cost counts none), each node's parent among its equals the one whose link carries fewest of the routes
-   the in-trees made so far lay on it (the in-trees made in their roots' mark order, each node's routes toward the root
-   from the nodes of lower mark it carries counted as it takes its parent, the farthest first), then the least hash of
-   the link's two marks and the root's: the routes spread over the links rather than piling onto the lowest-numbered
-   node [Fortz & Thorup, INFOCOM 2000, shortest-path routing balanced by its weights], and every bridge and member that
-   holds the same records makes the same table.  0, or EINVAL where a link names no node or relay, ENOMEM. */
+/* The routing table of a map's links (into next, N x N as struct mesh_link_map's; map->next is not read): each node
+   b's in-tree of shortest routes toward it, by fewest links, then the least sum of their betas (each pair's cables
+   striped; in whole fs a byte; a link without a cost counts none), each node's parent among its equals the one of
+   the least hash of its mark, the parent's and the root's (equal-cost multipath by a hash, as ECMP spreads flows
+   [RFC 2992]): routes of equal length spread over the links rather than piling onto the lowest-numbered node, every
+   bridge and member that holds the same records makes the same table, and a route between two nodes is a function of
+   the shortest routes between them alone, so it moves only where those change (a link or node one of them crosses
+   lost or its cost changed, a link joining or a cost falling that makes another as short): a link lost elsewhere, a
+   node joining by its own cables or a cost rising off them moves no route.  0, or EINVAL where a link names no node
+   or relay, ENOMEM. */
 int mesh_routes(const struct mesh_link_map *,uint32_t *next);
 /* The route between the map's nodes or relays a and b on its table (mesh_routes' where it has none: the trees of its
    links), a and b included, into path (room nodes + relays): its node count, 0 where none (a == b, or it does not
@@ -69,28 +75,30 @@ uint32_t mesh_route_path(const struct mesh_link_map *,uint32_t a,uint32_t b,uint
 #define MESH_BETA_NS 0.1
 /* The members' map of a whole map (one without relays: its nodes, marks, links, costs and table, NULL: the table
    mesh_routes makes of its links): map node i the whole map's node members[i] (one it does not hold is linked to
-   nothing), the whole map's other nodes its relays (numbered from n, ascending), each with its mark (the whole map's,
-   written where map->mark is given), its links every link of the whole map renumbered (a mesh's every pair, at its
-   listed cost or none), and its table the whole map's, written where map->next is given: so two members are linked
-   where their route crosses no other member, at that route's cost, and its bytes are charged to each link it crosses
-   (mesh_link_cost, mesh_trees_pack, mesh_program_time).  n 0: the whole map itself.  whole_node[i] (NULL: none) the
-   whole map's node map node i is (whole->nodes for a member it does not hold).  The kind MESH_LINKS_MESH where there
-   are no relays and every pair is linked, else MESH_LINKS_GRAPH.  On entry map->nodes and map->links are the room of
-   whole_node, mark and next's rows (the map's nodes and relays together), and of link and cost; returns the map's
-   nodes, map->relays its relays, or -errno (ENOSPC: the room is short, map->nodes and map->links then the room needed;
-   EINVAL: a member twice, relays and map->next or map->mark NULL, or a whole map with relays; ENOMEM).  The one rule
-   mesh_map reads the bridges' records by and a planner prices a record's members by. */
+   nothing), the whole map's other nodes its relays (numbered from n, ascending), each with its mark (the whole
+   map's, written where map->mark is given), its links every link of the whole map renumbered (a mesh's every pair,
+   at its listed cost or none), and its table the whole map's, written where map->next is given: so two members are
+   linked where their route crosses no other member, at that route's cost, and its bytes are charged to each link it
+   crosses (mesh_link_cost, mesh_trees_pack, mesh_program_time).  n 0: the whole map itself.  whole_node[i] (NULL:
+   none) the whole map's node map node i is (whole->nodes for a member it does not hold).  The kind MESH_LINKS_MESH
+   where there are no relays and a link joins every pair (several a pair's cables), else MESH_LINKS_GRAPH.  On entry
+   map->nodes and map->links are the room of whole_node, mark and next's rows (the map's nodes and relays together),
+   and of link and cost; returns the map's nodes, map->relays its relays, or -errno (ENOSPC: the room is short,
+   map->nodes and map->links then the room needed; EINVAL: a member twice, relays and map->next or map->mark NULL, or
+   a whole map with relays; ENOMEM).  The one rule mesh_map reads the bridges' records by and a planner prices a
+   record's members by. */
 int mesh_map_members(const struct mesh_link_map *whole,const uint32_t *members,uint32_t n,uint32_t *whole_node,struct mesh_link_map *map);
-/* The map of the node's bridge (design/bridge-and-ipc.md#ports) as of one map serial, from its records of every node's
-   ports (mesh_observe's views), so the same records give every member the same map: the whole map, its nodes the
-   records' ascending by bridge, two linked where each one's bridge holds ports paired with the other, at MESH_ALPHA_US
-   and 8e9 over the bandwidth of those cables together (the fewer of the two ends' sums; MESH_BETA_NS where none is
-   known: the bridge stripes a program between two nodes over every cable they share, design/bridge-and-ipc.md#cables),
-   each node marked by its bridge's number, its table mesh_routes' (the routes the bridges forward along,
-   mesh-dataflow.c mesh_route); then over `members` (bridge numbers; n 0: every node), mesh_map_members of it; node[i]
-   (node NULL: none) map node i's bridge.  Room and returns as mesh_map_members'.  name[i] (name NULL: none) map node i's
-   host name as its bridge's record holds it, NUL-terminated ("" for a node with no record).  MESH_NAME_BYTES: a
-   LocalHostName of up to 63 bytes and its NUL, the record's name field (mesh.h struct mesh_record). */
+/* The map of the node's bridge (design/bridge-and-ipc.md#ports) as of one map serial, from its records of every
+   node's ports (mesh_observe's views), so the same records give every member the same map: the whole map, its nodes
+   the records' ascending by bridge, two joined by a link a cable where each one's bridge holds ports paired with the
+   other (the fewer of the two ends' counts), each at MESH_ALPHA_US and 8e9 over the bandwidth of the slowest of
+   those ports at either end (MESH_BETA_NS for a port whose bandwidth is unknown; the bridge stripes a program
+   between the two over every cable, a routed one end to end, design/bridge-and-ipc.md#cables), each node marked by
+   its bridge's number, its table mesh_routes' (the routes the bridges forward along, mesh-dataflow.c mesh_route);
+   then over `members` (bridge numbers; n 0: every node), mesh_map_members of it; node[i] (node NULL: none) map node
+   i's bridge.  Room and returns as mesh_map_members'.  name[i] (name NULL: none) map node i's host name as its
+   bridge's record holds it, NUL-terminated ("" for a node with no record).  MESH_NAME_BYTES: a LocalHostName of up
+   to 63 bytes and its NUL, the record's name field (mesh.h struct mesh_record). */
 #define MESH_NAME_BYTES 64
 int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH_NAME_BYTES],struct mesh_link_map *map);
 /* The bridge's map serial (never 0; it changes with the records): waits until it differs from *serial or bound_ns
@@ -100,8 +108,10 @@ int mesh_map_wait(uint64_t *serial,uint64_t bound_ns);
 /* Whether the map links its nodes a and b, either way (a mesh every pair; with a table, their route crossing relays
    alone). */
 int mesh_link_between(const struct mesh_link_map *,uint32_t a,uint32_t b);
-/* The hop a-b's cost: its link's own where the map gives one (either way), else alpha and beta; with a table, its
-   route's links' alphas summed and the greatest of their betas. */
+/* The hop a-b's cost: its links' (either way; each its own where the map gives one, else alpha and beta) striped, the
+   least alpha and the greatest beta over their count (above); with a table and a route through relays, striped end to
+   end, each segment of c cables the greatest of their betas over min(stripes, c), the segments' alphas summed and the
+   greatest of their betas (a relay forwards each slot as it lands). */
 void mesh_link_cost(const struct mesh_link_map *,uint32_t a,uint32_t b,double alpha,double beta,double *link_alpha,double *link_beta);
 
 /* Spanning trees over a map's nodes: the routes every collective and every message take (Blink's tree packing
@@ -155,10 +165,13 @@ struct mesh_move { uint32_t op,peer,round,buffer,part,parts; };
 struct mesh_program { uint32_t what,root,nodes,parts,scratch,padding; const uint32_t *segment; const double *log_weight;
                       const uint32_t *first; const struct mesh_move *move; };
 
-/* Shortest-path trees: each node's in-tree of the map's routes, a node's parent the first of the map's nodes on its
-   route to the root (mesh_route_path on the map's table; without one, the table mesh_routes makes of its links), each
-   a step of a shortest route, so the parents climb to the root; one tree a node at log weight 0; writes nodes trees,
-   returns their count (0 where a route does not reach). */
+/* Shortest-path trees: each node's in-tree over the map's hops (two of its nodes linked where the route between them on
+   its table, mesh_routes' where it has none, crosses relays alone, the hop as long as that route), a node's parent one
+   hop nearer the root on a shortest path, chosen among equals so the tree set's edges spread over the physical links
+   (a local search on the sum of the squares of the links' loads, each the tree edges whose hops cross it [Rosenthal
+   1973], then the least hash of the marks), the parents climbing to the root; the set is a communicator's own and
+   moves no route; one tree a node at log weight 0; writes nodes trees, returns their count (0 where a hop path does not
+   reach). */
 uint32_t mesh_trees_shortest(const struct mesh_link_map *,uint32_t *root,uint32_t *parent,double *log_weight);
 /* The room mesh_compile needs at `chunks`: parts and moves. */
 void mesh_compile_room(const struct mesh_trees *,uint32_t chunks,uint32_t *parts,uint32_t *moves);
@@ -190,20 +203,58 @@ int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole
 /* A rank's steps of a program for an operand, a step a move (none where its elements are none), at most first[rank +
    1] - first[rank]; their count. */
 uint32_t mesh_program_steps(const struct mesh_program *,uint32_t rank,struct mesh_operand,struct mesh_step *steps);
-/* A program's time in microseconds, every rank's steps run in the alpha-beta model [Hockney 1994] over the map's
-   ports, a link's two ways (each its own: a node sends and receives on all its links at once, one message at a time
-   each way): a message crosses each port of its hop's route (with no table, its link) once the port is free, a relay
-   passing it on its alpha after it began to land and finishing no sooner than the port before it, so relayed hops
-   that share a link wait on one another; alpha in us, beta in ns a byte, a link's own cost where the map gives one;
+/* The wire a session's programs run on (libnccl-mesh's rings, nccl-mesh.c session_open): toward each other member two
+   channels, a channel a ring of 2 lag slots each way, slot t % (2 lag) carrying position t; a step's piece on the
+   `large` channel where it is more than lag small slots (else the small one) in pieces of its slot's bytes (`slot`,
+   NCCL_BUFFSIZE over lag rounded up to a block, or `small`, one block: the bridges' block, the page their window's rows
+   take, the same on every paired bridge); every position a whole slot on the wire, one where the end has nothing to
+   send a filler's; an end publishing position t once it has consumed its peer's t - lag (NCCL's Simple protocol, its
+   head credit the reverse direction's positions).  MESH_LAG is NCCL_STEPS and MESH_BUFFSIZE NCCL_BUFFSIZE's default,
+   in bytes; mesh_wire_of the rule for a block and an NCCL_BUFFSIZE. */
+#define MESH_LAG 8
+#define MESH_BUFFSIZE 4194304
+struct mesh_wire { uint64_t slot,small; uint32_t lag,padding; };
+void mesh_wire_of(uint64_t block,uint64_t buffsize,struct mesh_wire *wire);
+/* Whether a piece of `bytes` takes a wire's large channel, and its pieces there */
+int mesh_wire_large(const struct mesh_wire *,uint64_t bytes);
+uint64_t mesh_wire_pieces(const struct mesh_wire *,uint64_t bytes);
+/* A step's positions on one channel: its index among the rank's steps, whether it is the rank's SEND, its first
+   position and its pieces. */
+struct mesh_place { uint32_t step,send; uint64_t first,pieces; };
+/* The positions a rank's steps of one collective take on its channel toward `peer` of class `large` (mesh_wire_large),
+   from position `at`: each round's (in the steps' round order, a round's steps in their order) SENDs and receives side
+   by side from where the round before ended, a piece's pieces consecutive; the end, and each step it places (one with
+   no bytes none) in made[*placed ..], *placed counting them.  The one layout both ends of a channel make of their two
+   ranks' steps (libnccl-mesh lay, order_group; mesh_program_time). */
+uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int large,const struct mesh_wire *wire,uint64_t at,
+                  struct mesh_place *made,uint32_t *placed);
+/* Each step's receive before it (by round, then the steps' order) of any bytes, -1 where none: a step's first piece
+   waits until that receive is consumed, and so, by induction, every receive before it.  0, or ENOMEM. */
+int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *before);
+/* A program's time in microseconds as libnccl-mesh runs it on `wire` over the map's ports, a link's two ways each
+   its own (a node sends and receives on all its links at once, one message at a time each way): every rank's steps
+   laid on each channel (mesh_lay), every position of each channel a whole slot of its class (a filler's too)
+   published by its sender once the sender has consumed the peer's position lag back and, a piece's first, once the
+   receive before its step is consumed (mesh_steps_before), and consumed by its receiver in position order once it
+   has landed (a piece's first once the receive before it is consumed); a position crosses each port of its route
+   once the port is free, a relay passing it on its alpha after it began to land and finishing no sooner than the
+   port before it plus that alpha [Hockney 1994], a direct hop over several cables position t on cable t mod n at
+   that cable's cost, a routed position t on stripe t mod stripes, on cable (h + stripe) mod c of each segment (h the
+   hash of the route's ends' marks, as the bridges' is of the program's), at that cable's cost.  A rank's own work
+   takes no time.  alpha in us and beta in ns a byte where the map gives a link no cost; the last consumption's time,
    negative where a receive has no SEND of its piece or the schedule stops. */
-double mesh_program_time(const struct mesh_link_map *,const struct mesh_program *,struct mesh_operand,double alpha,double beta);
+double mesh_program_time(const struct mesh_link_map *,const struct mesh_program *,struct mesh_operand,const struct mesh_wire *wire,
+                         double alpha,double beta);
 /* A collective's program for one operand chosen by its time: `what` (root's, a rooted one's) compiled along each of
-   the `count` tree sets (an all-reduce also whole along each), cut into 1, 2, 4, ... chunks while its time falls (at
-   most MESH_CHUNKS), each timed by mesh_program_time at alpha and beta; *choice the fastest, the first of equals (in
-   set order, whole after not, fewer chunks first): its set's index, whole, chunks and time.  The literature's rule
-   that the best collective depends on the operand, the root and the map [Thakur, Rabenseifner & Gropp 2005; NCCL's
-   tuner] as one function, which the default table (libnccl-mesh) and a planner's pricing both call.  0, ENOMEM, or
-   EINVAL where nothing compiles or times. */
+   the `count` tree sets (an all-reduce also whole along each), cut into 1, 2, 4, ... MESH_CHUNKS chunks (each count
+   timed: a time need not fall or rise steadily with the chunks, a piece's class and its slot's waste moving with
+   them), each timed by mesh_program_time on `wire` at alpha and beta; *choice the fastest, the first of
+   equals (in set order, whole after not, fewer chunks first; a later one taken only where it is faster by more than
+   the rounding of a time's sums, 2^-30 of it): its set's index, whole, chunks and time.  The
+   literature's rule that the best collective depends on the operand, the root and the map [Thakur, Rabenseifner &
+   Gropp 2005; NCCL's tuner] as one function, which the default table (libnccl-mesh) and a planner's pricing both call:
+   its time is the runtime's, so a chunk that leaves a position's slot part empty is priced at its whole slot.  0,
+   ENOMEM, or EINVAL where nothing compiles or times. */
 #define MESH_CHUNKS 64u
 struct mesh_choice { uint32_t set,whole,chunks,padding; double time; };
 /* The size classes a default table chooses at: a call of b bytes runs the choice made at the least 2^k of at least b,
@@ -212,10 +263,11 @@ struct mesh_choice { uint32_t set,whole,chunks,padding; double time; };
 #define MESH_CLASS_LEAST 10
 #define MESH_CLASS_MOST 34
 int mesh_choose(const struct mesh_link_map *,const struct mesh_trees *sets,uint32_t count,uint32_t what,uint32_t root,
-                struct mesh_operand,double alpha,double beta,struct mesh_choice *choice);
-/* The planner's rules' version: the trees, routes, compiles and choices above (the library's session handshake carries
-   it with its map's digest, so members planning by different rules fail the session rather than run it). */
-#define MESH_PLAN_VERSION 1u
+                struct mesh_operand,const struct mesh_wire *wire,double alpha,double beta,struct mesh_choice *choice);
+/* The planner's rules' version: the trees, routes, compiles, wire and choices above (the library's session handshake
+   carries it with its digest of the members' map, tree sets and wire, so members planning by different rules fail the
+   session rather than run it). */
+#define MESH_PLAN_VERSION 2u
 
 /* design/recovery.md#diagnosis: a node's health as its bridge last sampled it, carried in its record to every bridge.
    `sampled` the wall clock of the sample and `booted` of the node's boot (ns since the epoch); `session` its boot session
@@ -233,9 +285,14 @@ struct mesh_health {
   int32_t charge,minutes;
   char session[40],shutdown[80];
 };
-struct mesh_node_health { uint32_t node; char name[MESH_NAME_BYTES]; struct mesh_health health; };
-/* Every node's health the bridge's records hold (mesh_map's nodes, this node's own among them): their count (at most
-   `capacity` written), or -errno where the bridge is unreachable. */
+/* A node's record as its bridge last sent it: its bridge's node and host name, its bridge's window (bytes), the node's
+   memory (hw.memsize) and model (hw.model, NUL-terminated, MESH_MODEL_BYTES with its NUL; mesh.h struct mesh_record),
+   and its health. */
+#define MESH_MODEL_BYTES 32
+struct mesh_node_health { uint32_t node; char name[MESH_NAME_BYTES]; uint64_t window,memory; char model[MESH_MODEL_BYTES];
+                          struct mesh_health health; };
+/* Every node's record the bridge holds (mesh_map's nodes, this node's own among them): their count (at most `capacity`
+   written), or -errno where the bridge is unreachable. */
 int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
 
 #ifdef __cplusplus
