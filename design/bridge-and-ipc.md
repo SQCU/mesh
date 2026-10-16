@@ -329,9 +329,15 @@ by credit flow control until then (the resumption of a held SEND is unmeasured).
 crossing: on the pair's coded ledger call (71 crossings a step at 17.26 ms, metal-microbench docs/measurement.md
 2026-10-15) 0.11 ms a step, 0.6 %; at the form the engine is building, Q5P's (141 crossings a step at 3.96 ms, each
 landing 5 to 18 us after its publication) 0.21 ms, 5.3 % of the step and up to a third of a crossing. That is why a
-direct program keeps queue pairs of its own where its devices have room, a second transport kept beside the lanes for
-the latency-bound path alone, until a crossing's landing is measured on each on the pair (unmeasured: the round of
-2026-10-15 ran nothing); where the lanes cost the pair's step nothing, the exclusive form is deleted.
+direct program kept queue pairs of its own where its devices had room, a second transport beside the lanes for the
+latency-bound path alone, until a crossing's landing was measured on each on the pair. Measured 2026-10-16 (mesh
+f4ba8792; metal-microbench docs/measurement.md 2026-10-16, coded17-21 against lanes1-3, the pair's one-row split, 71
+crossings a step): on the lanes the M5's FFN sum waits 14.4-16.8 us against 12.0-12.3 on its own queue pairs, the
+Mini's stream lands about 3.5 us later (45.4-46.4 against 42.2-42.9 us), a step 5.28-5.34 ms against 5.10-5.21 (2-3 %);
+a session's own start (nccl.h ncclMeshSessionWaits on the member that arrived last) 3.7-10.2 ms against 327-990 ms,
+the exclusive queue pairs' making and pairing each session. At a session a call (A28), the start outweighs the steps'
+cost below some 2,500 to 8,000 steps a call, so a direct program's flows ride the lanes; the exclusive form stays in
+the code for a flow a READY asks it of, and goes with the next change that touches it.
 
 A position is a whole slot on the wire (512 KiB of the library's large class, one block of its small one), a filler
 as much as a piece: TN3205 pairs a SEND with a receive of the same 4 KiB frames, and an exclusive ring posts its
