@@ -33,7 +33,19 @@ struct mesh_device {
   char *wire;
   struct ibv_port_attr port;
   union ibv_gid gid;
+  uint8_t gid_index;
 };
+/* the port's own address (its GID) and its index in the port's GID table, the first entry the table holds: a Thunderbolt
+   port's table does not always begin at index 0 (the Mini's en4 after its 2026-10-16 restart held its only entry at 1, and
+   index 0's empty address failed every queue pair's connection with EIO) */
+static int device_gid(struct mesh_device *device){
+  for(int i=0;i<device->port.gid_tbl_len && i<256;i++){
+    union ibv_gid g;
+    if(ibv_query_gid(device->context,1,i,&g))continue;
+    for(int b=0;b<16;b++)if(g.raw[b]){device->gid=g;device->gid_index=(uint8_t)i;return 0;}
+  }
+  return ENXIO;
+}
 /* design/prepared-machine.md#M09 */
 /* design/prepared-machine.md#M07 */
 /* The one copy of the wire-address arithmetic.  offset is a byte offset into the arena, which is a
@@ -206,7 +218,7 @@ static int pair_up(struct mesh_verbs *provider,int count){
 static int pair_receive(struct mesh_verbs *provider,const uint32_t (*remote)[2],uint16_t lid,const uint8_t *gid){
   for(int q=0;q<provider->count;q++){
     struct ibv_qp_attr r={.qp_state=IBV_QPS_RTR,.path_mtu=IBV_MTU_4096,.rq_psn=remote[q][1],.dest_qp_num=remote[q][0],
-      .ah_attr={.dlid=lid,.port_num=1,.is_global=1,.grh={.hop_limit=1,.sgid_index=0}}};
+      .ah_attr={.dlid=lid,.port_num=1,.is_global=1,.grh={.hop_limit=1,.sgid_index=provider->device->gid_index}}};
     memcpy(&r.ah_attr.grh.dgid,gid,16);
     if(ibv_modify_qp(provider->queues[q].pair,&r,IBV_QP_STATE|IBV_QP_AV|IBV_QP_PATH_MTU|IBV_QP_DEST_QPN|IBV_QP_RQ_PSN))return errno?errno:EIO;
   }

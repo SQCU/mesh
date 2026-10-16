@@ -2088,7 +2088,7 @@ static void port_turn(struct port *port){
   dispatch_async(port->work,^{
     int result=0,refused=0;
     if(retire && !down_device(&port->device))result=-(errno?errno:EBUSY);
-    else if(!(result=device_up(&port->device,&wire,&refused)) && ibv_query_gid(port->device.context,1,0,&port->device.gid))result=errno?errno:EIO;
+    else if(!(result=device_up(&port->device,&wire,&refused)))result=device_gid(&port->device);
     port->result=result;port->refused=refused;
     atomic_store_explicit(&port->done,1,memory_order_release);
     wake();
