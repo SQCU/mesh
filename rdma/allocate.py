@@ -698,6 +698,15 @@ class Balancer:
             target = base - epsilon * measured
             if least(total, d['grain'], d['low'], d['high'], [] if value else built, value, knots, stop=target,
                      budget=self.budget)[1] >= target:
+                joined = sum(c * sum(med * max(0.0, fixed[i] - (seen[s][7][i] if i < len(seen[s][7]) else 0.0)) / total_i
+                                     for i, (med, _) in ranks.items() if i < len(fixed)
+                                     for total_i in [sum(max(0.0, float(w[i] or 0.0)) for w in scales.values()) + max(0.0, fixed[i])] if total_i)
+                             for s, (c, ranks, scales, fixed, _, _) in mine.items())
+                vertex = self._vertex(d, history, value or (lambda u, built=built: sum(c * max(f(u[g]) for g, f in enumerate(fs))
+                                                                                     for c, fs in built)), joined)
+                if vertex:
+                    proposals.append(((base - vertex[1]) / measured if measured else 0.0, name, vertex[0]))
+                    continue
                 d['before'], d['stands'] = list(d['parts']), True
                 continue
             grow = d.get('reach', 2.0)
@@ -744,6 +753,29 @@ class Balancer:
                 d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
                 d['before'], d['parts'], d['stands'] = None, list(last[0]), False
         return self.parts
+
+    def _vertex(self, d, history, value, joined):
+        """A decision about to stand: the vertex where one group leaves it (its units to the others in proportion to
+        theirs) that no call at these parts' history measured, where the models price it within `joined` (the measured
+        time they attribute to the stretches' joined work, which a leaving group takes with it and a crossing no longer
+        joined costs no one: what interior points cannot price) of the parts', else None.  Such a vertex is measured
+        once, and the ratio test returns a worse one; a stretch's work changes in kind where a group leaves it (its
+        crossing goes), so the vertex is a design point of its own [Box, Hunter & Hunter 2005, the factorial's corner
+        points].  (parts, value.)"""
+        parts, grain, n = d['parts'], d['grain'], len(d['parts'])
+        best = None
+        for g in range(n):
+            others = sum(p for h, p in enumerate(parts) if h != g)
+            if not parts[g] or d['low'][g] > 0 or not others:
+                continue
+            moved = [0 if h == g else (p + parts[g] * p // others) // grain * grain for h, p in enumerate(parts)]
+            moved[max(range(n), key=lambda h: moved[h])] += sum(parts) - sum(moved)
+            if any(m > hi or m < lo for m, lo, hi in zip(moved, d['low'], d['high'])) or ','.join(map(str, moved)) in history:
+                continue
+            v = value(moved)
+            if best is None or v < best[1]:
+                best = (moved, v)
+        return best if best and best[1] <= value(parts) + joined else None
 
     def _fewest(self, d, nxt, promise, value, reach, knots):
         """Of the decision's moves whose value is the models' least within `reach` (nxt, its value `promise`), the one
