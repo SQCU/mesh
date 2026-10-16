@@ -528,6 +528,14 @@ class Balancer:
     decision's move is not a repeat), so a peer's load does not reject a move.  Every rank given the same evidence gets the same
     parts (R4).
 
+    A move costs the call that takes it its members' preparation of the placement it makes (metal-microbench
+    docs/placement.md#moves: S), which the gain must pay for: given `switch` (a move's measured cost) and `horizon` (the
+    calls a placement serves), observe takes a move only where `horizon` times its promised gain, less `confidence`
+    standard errors of a call, exceeds `switch` [Karlin, Manasse, Rudolph & Sleator 1988, rent or buy; the metrical
+    task system of Borodin, Linial & Saks 1992], and a taken move waits as `pending` until every member has prepared the
+    placement it makes, when `prepared` takes it (a move measured worse goes back at once: its placement was prepared
+    before).  Without them, as before, a move is taken at once.
+
       Balancer({'tp': {'parts': [8, 8], 'grain': 1, 'low': [1, 1], 'high': [15, 15]}})
       .observe({'step:3': {'scales': {'tp': [1.0, 1.0]}, 'fixed': [0.2, 0.1], 'times': [[s, ...], [s, ...]]}, ...})
       -> {'tp': [5, 11]}
@@ -574,7 +582,7 @@ class Balancer:
         d = self.decisions[e]
         return next((p for p, g in zip(d['parts'], self._groups(d)) if i in g), 0)
 
-    def observe(self, stretches, measured=None, measure_name='measured'):
+    def observe(self, stretches, measured=None, measure_name='measured', switch=None, horizon=None, confidence=1.0):
         import statistics
         seen = {}
         for s, obs in stretches.items():
@@ -640,7 +648,7 @@ class Balancer:
                         history.pop(next(iter(history)))
                     last, d['last'] = d.get('last'), [list(d['parts']), tested]
                     if last and last[0] != d['parts'] and tested > last[1] * (1 + between):
-                        proposals.append((math.inf, name, last))
+                        proposals.append((math.inf, name, last, math.inf))
                         runs[name] = set()
                 continue
             path = {s for s, v in seen.items() if priced and v[4] is not None and any(seen[t][4] and seen[t][4][0] == v[4][0] for t in mine)}
@@ -680,7 +688,7 @@ class Balancer:
             for s, (c, ranks, scales, fixed, view, other) in mine.items():
                 remembered[s] = [c, [[g, view[g][0][0] - self._model(name, s, g)(d['parts'][g])] for g in view if d['parts'][g]], other]
             if last and last[0] != d['parts'] and tested > last[1] * (1 + between):
-                proposals.append((math.inf, name, last))
+                proposals.append((math.inf, name, last, math.inf))
                 continue
             if last and last[0] != d['parts']:
                 d['reach'] = min(2.0, d.get('reach', 2.0) * 2)
@@ -744,7 +752,7 @@ class Balancer:
                 vertex = self._vertex(d, history, value or (lambda u, built=built: sum(c * max(f(u[g]) for g, f in enumerate(fs))
                                                                                      for c, fs in built)), joined + max(0.0, tested - call))
                 if vertex:
-                    proposals.append(((base - vertex[1]) / summed if summed else 0.0, name, vertex[0]))
+                    proposals.append(((base - vertex[1]) / summed if summed else 0.0, name, vertex[0], base - vertex[1]))
                     continue
                 d['before'], d['stands'], d['weighed'] = list(d['parts']), True, f'{key} {VERTEX_RULE}'
                 continue
@@ -770,9 +778,10 @@ class Balancer:
                 nxt, promise, _ = least(total, d['grain'], [math.floor(h / d['grain']) * d['grain'] for h in half],
                                         [math.ceil(h / d['grain']) * d['grain'] for h in half], [] if value else built, value, knots,
                                         budget=self.budget)
-            proposals.append(((base - promise) / summed if summed else 0.0, name, nxt))
+            proposals.append(((base - promise) / summed if summed else 0.0, name, nxt, base - promise))
         taken = set()
-        for gain, name, value in sorted(proposals, key=lambda p: -p[0]):
+        noise = between * tested / 2
+        for gain, name, value, seconds in sorted(proposals, key=lambda p: -p[0]):
             d, reverting = self.decisions[name], gain == math.inf
             if runs[name] & taken and not reverting:
                 d['before'], d['stands'] = None, False
@@ -780,9 +789,28 @@ class Balancer:
             taken |= runs[name]
             if reverting:
                 d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
-                d['before'], d['parts'], d['stands'], d['last'] = None, list(value[0]), False, value
-            else:
+                d['before'], d['parts'], d['stands'], d['last'], d['pending'] = None, list(value[0]), False, value, None
+            elif switch is None or horizon is None:
                 d['before'], d['parts'], d['stands'] = list(d['parts']), list(value), False
+            elif horizon * (seconds - confidence * noise) > switch:
+                d['pending'], d['stands'] = list(value), False
+            else:
+                d['pending'], d['worth'] = None, [list(value), seconds, noise, switch]
+        return self.parts
+
+    @property
+    def pending(self):
+        """Each decision's move taken and not yet prepared {name: parts} (observe with `switch`: a move pays where `horizon`
+        calls of its expected gain, less `confidence` standard errors of a call, exceed the move's measured cost `switch`;
+        it waits as `pending` until every member has prepared the placement it makes, then `prepared` takes it)."""
+        return {name: list(d['pending']) for name, d in self.decisions.items() if d.get('pending')}
+
+    def prepared(self, expected=None):
+        """Every pending move taken (where `expected`, {name: parts}, names the pending moves that were prepared: only
+        those still pending as prepared): the parts become the pending ones, as observe's move made them."""
+        for name, d in self.decisions.items():
+            if d.get('pending') and (expected is None or expected.get(name) == d['pending']):
+                d['before'], d['parts'], d['stands'], d['pending'] = list(d['parts']), list(d['pending']), False, None
         return self.parts
 
     def reject(self):
@@ -957,7 +985,7 @@ class Coupled:
         self.low, self.high = [int(v) for v in low], [int(v) for v in high]
         self.parts, self.start = tuple(int(p) for p in parts), tuple(int(p) for p in parts)
         self.able = [i for i, h in enumerate(self.high) if h > 0]
-        self.seen, self.stands, self.stood, self.forbidden = {}, False, None, set()
+        self.seen, self.stands, self.stood, self.forbidden, self.pending = {}, False, None, set(), None
         self.rows, self.tiles, self.pool = rows, [list(t) for t in tiles] if tiles else None, []
         self.design = self._design(self.start)
 
@@ -967,7 +995,7 @@ class Coupled:
                 'high': self.high, 'parts': list(self.parts), 'start': list(self.start), 'able': self.able,
                 'stands': self.stands, 'stood': self.stood, 'forbidden': sorted(self.forbidden),
                 'seen': [[list(p), e] for p, e in self.seen.items()], 'design': [list(p) for p in self.design],
-                'rows': self.rows, 'tiles': self.tiles}
+                'rows': self.rows, 'tiles': self.tiles, 'pending': list(self.pending) if self.pending else None}
 
     @classmethod
     def of(cls, state):
@@ -975,6 +1003,7 @@ class Coupled:
         c.total, c.grain, c.window, c.ridge = state['total'], state['grain'], state['window'], state['ridge']
         c.low, c.high, c.able = list(state['low']), list(state['high']), list(state['able'])
         c.parts, c.start = tuple(state['parts']), tuple(state['start'])
+        c.pending = tuple(state['pending']) if state.get('pending') else None
         c.stands, c.stood = state['stands'], state['stood']
         c.forbidden = {tuple(f) for f in state['forbidden']}
         c.seen = {tuple(p): e for p, e in state['seen']}
@@ -1118,14 +1147,34 @@ class Coupled:
         self.design = self._design(self.start)
         return list(self.parts)
 
-    def observe(self, times, calls):
+    def observe(self, times, calls, switch=None, horizon=None, confidence=1.0):
         """The calls at the current parts: `times` each member's seconds a call (empty where it holds nothing),
-        `calls` the calls' seconds."""
+        `calls` the calls' seconds.  With `switch` (a move's measured cost, seconds) and `horizon` (the calls a placement
+        serves), the next allocation waits as `pending` until `prepared`, and where the model is fitted it is taken only
+        where `horizon` calls of its predicted gain (a sample's, times the samples of a call), less `confidence` standard
+        errors of the measured median, exceed `switch`; before the model is fitted, its design points are taken
+        (exploration), still prepared first."""
         entry = self.seen.setdefault(self.parts, {'members': [[] for _ in self.low], 'calls': []})
         for i, ts in enumerate(times):
             entry['members'][i].extend(float(t) for t in ts or [])
         entry['calls'].extend(float(t) for t in calls or [])
-        self.parts = self._next()
+        chosen = self._next()
+        if switch is None or horizon is None or chosen == self.parts:
+            self.parts, self.pending = chosen, None
+            return list(self.parts)
+        fitted, held = self.fit(), self._measured().get(self.parts)
+        gain = noise = None
+        if fitted is not None and all(i in fitted[0] for i in range(len(chosen)) if chosen[i] > 0 or self.parts[i] > 0):
+            per = len(calls or []) or 1
+            gain = (self.predict(self.parts, fitted) - self.predict(chosen, fitted)) * per
+            noise = (self._error(held['calls']) * self._median(held['calls']) * per) if held else 0.0
+        self.pending = chosen if gain is None or horizon * (gain - confidence * noise) > switch else None
+        return list(self.parts)
+
+    def prepared(self, expected=None):
+        """The pending allocation taken (where `expected` names it: only that one)."""
+        if self.pending and (expected is None or tuple(expected) == tuple(self.pending)):
+            self.parts, self.pending = tuple(self.pending), None
         return list(self.parts)
 
     def _median(self, values):
