@@ -644,7 +644,7 @@ class Balancer:
                 continue
             if last and last[0] != d['parts']:
                 d['reach'] = min(2.0, d.get('reach', 2.0) * 2)
-            if d['before'] is not None and d['before'] == d['parts'] and not changed:
+            if d['before'] is not None and d['before'] == d['parts'] and not changed and (d.get('weighed') == key or not self._vertices(d, history)):
                 d['stands'] = True
                 continue
             n = len(d['parts'])
@@ -707,7 +707,7 @@ class Balancer:
                 if vertex:
                     proposals.append(((base - vertex[1]) / measured if measured else 0.0, name, vertex[0]))
                     continue
-                d['before'], d['stands'] = list(d['parts']), True
+                d['before'], d['stands'], d['weighed'] = list(d['parts']), True, key
                 continue
             grow = d.get('reach', 2.0)
             failed = d.get('failed') or [None] * n
@@ -762,20 +762,27 @@ class Balancer:
         once, and the ratio test returns a worse one; a stretch's work changes in kind where a group leaves it (its
         crossing goes), so the vertex is a design point of its own [Box, Hunter & Hunter 2005, the factorial's corner
         points].  (parts, value.)"""
-        parts, grain, n = d['parts'], d['grain'], len(d['parts'])
         best = None
+        for moved in self._vertices(d, history):
+            v = value(moved)
+            if best is None or v < best[1]:
+                best = (moved, v)
+        return best if best and best[1] <= value(d['parts']) + joined else None
+
+    @staticmethod
+    def _vertices(d, history):
+        """The decision's vertices no call at its history measured: each group's leaving it, its units to the others in
+        proportion to theirs on the grain, within the bounds."""
+        parts, grain, n, out = d['parts'], d['grain'], len(d['parts']), []
         for g in range(n):
             others = sum(p for h, p in enumerate(parts) if h != g)
             if not parts[g] or d['low'][g] > 0 or not others:
                 continue
             moved = [0 if h == g else (p + parts[g] * p // others) // grain * grain for h, p in enumerate(parts)]
             moved[max(range(n), key=lambda h: moved[h])] += sum(parts) - sum(moved)
-            if any(m > hi or m < lo for m, lo, hi in zip(moved, d['low'], d['high'])) or ','.join(map(str, moved)) in history:
-                continue
-            v = value(moved)
-            if best is None or v < best[1]:
-                best = (moved, v)
-        return best if best and best[1] <= value(parts) + joined else None
+            if not any(m > hi or m < lo for m, lo, hi in zip(moved, d['low'], d['high'])) and ','.join(map(str, moved)) not in history:
+                out.append(moved)
+        return out
 
     def _fewest(self, d, nxt, promise, value, reach, knots):
         """Of the decision's moves whose value is the models' least within `reach` (nxt, its value `promise`), the one
