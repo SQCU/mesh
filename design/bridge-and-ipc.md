@@ -46,7 +46,7 @@ in the region is sized by a call: arena pages, page-table rows, transfer lists a
 taken as a program asks for them and refused as a value naming the execution where the window cannot give them, never
 by growing the window. A destination's transfer lists are leased at its first transfer with room for the entries one
 block holds (42 a list at 16 KiB), and leased again twice as large, the entries copied and the old lease returned,
-when a list fills (`mesh_lists_grow`, at most `MESH_ORDERS` a list): through MESH_VERSION 113's first pass every
+when a list fills (`mesh_lists_grow`, at most `MESH_ORDERS` a list): through MESH_VERSION 113 every
 destination of every program, a relay's two of every relayed direction among them, leased room for 4,096 entries a
 list, 1.5 MiB, for the two to four transfers a session or a relay binds.
 
