@@ -20,12 +20,13 @@
 // Every product is an instance of one decode with literal sizes, its widths the matrix's (WIDTHS, a mask: bit b for
 // width b; a simdgroup-uniform switch over them a tile), its consumer an operand:
 //
-//   streamed_alu<R, SK, BANDS, J, TILES, WIDTHS, OUT, LUT, F, LOADS>   1 to 4 rows on the ALUs: a threadgroup BANDS bands, SK
+//   streamed_alu<R, SK, BANDS, J, TILES, WIDTHS, OUT, LUT, F, LOADS, H>   1 to 4 rows on the ALUs: a threadgroup BANDS bands, SK
 //       simdgroups a band, a K share of J (TILES / J tiles), F tiles a simdgroup in flight; each lane 8 R independent
 //       sums (x times half the step: 4 R loads of x a tile); 1-bit tiles by tables of x sums where LUT (T[t][kb][m] =
 //       sum over j in m of x[32 t + kb + 8 j], fp32: streamed_rotate writes them); OUT 0 partials [share][row][output],
-//       1 finished; LOADS a tile's loads (fragment_load), every product's
-//   streamed_couple<R, SK, TILES, WIDTHS, F, APART, LOADS>         gate's and up's products together, GELU(gate) * up
+//       1 finished; LOADS a tile's loads (fragment_load), every product's; H the sums (fragment_walk: fp32, or fp16 pair
+//       sums added into them every H tiles)
+//   streamed_couple<R, SK, TILES, WIDTHS, F, APART, LOADS, H>      gate's and up's products together, GELU(gate) * up
 //   streamed_coop<M, SK, BANDS, J, TILES, WIDTHS, COOP, LOADS>     8 to 16 rows: a tile decoded exactly into the right-input
 //       cooperative tensor of matmul2d<M, 32, 32> at the node's slots (COOP), one operation a tile
 //   streamed_panel<M, TILES, WIDTHS, LOADS>, streamed_panel_t<M, TILES, WIDTHS, LOADS>   prefill and the transposed product: eight
@@ -94,18 +95,12 @@ static inline uint streamed_bits(Words w) {
     return ((w[word] >> (shift - 1)) & (low << 1)) | ((w[word + 1] << (17 - shift)) & ((mask ^ low) << 1));
 }
 
-template <uint B, uint J, typename Words>
-static inline half2 streamed_half(Words w) {
+// Pair J of width B of a lane's loaded planes w, as odd integers: V float2 at every width, half2 exact to width 11.
+template <uint B, uint J, typename V = float2, typename Words>
+static inline V streamed_pair(Words w) {
     const uint value = streamed_bits<B, J>(w);
-    if (B <= 9) return as_type<half2>(value | 0x64016401u) - half2(half(1024.0f + float(1u << B)));
-    return half2(float2(float(value & 0xFFFFu), float(value >> 16)) + float2(1.0f - float(1u << B)));
-}
-
-template <uint B, uint J, typename Words>
-static inline float2 streamed_float(Words w) {
-    const uint value = streamed_bits<B, J>(w);
-    if (B <= 9) return float2(as_type<half2>(value | 0x64016401u) - half2(half(1024.0f + float(1u << B))));
-    return float2(float(value & 0xFFFFu), float(value >> 16)) + float2(1.0f - float(1u << B));
+    if (B <= 9) return V(as_type<half2>(value | 0x64016401u) - half2(half(1024.0f + float(1u << B))));
+    return V(float2(float(value & 0xFFFFu), float(value >> 16)) + float2(1.0f - float(1u << B)));
 }
 
 // A product's sum for input row n at coded output row r over its shares (K splits of a dispatch; members' shares after
@@ -244,10 +239,10 @@ static inline float fragment_step(uint word) { return float(as_type<half>(ushort
 // A lane's pairs of a tile of width B from its loaded planes w (fragment_load), as odd integers to f(P, pair).
 template <uint B, typename W, typename F>
 static inline __attribute__((always_inline)) void fragment_values(W w, F f) {
-    f(0, streamed_float<B, 0>(w)); f(1, streamed_float<B, 1>(w)); f(2, streamed_float<B, 2>(w)); f(3, streamed_float<B, 3>(w));
-    f(4, streamed_float<B, 4>(w)); f(5, streamed_float<B, 5>(w)); f(6, streamed_float<B, 6>(w)); f(7, streamed_float<B, 7>(w));
-    f(8, streamed_float<B, 8>(w)); f(9, streamed_float<B, 9>(w)); f(10, streamed_float<B, 10>(w)); f(11, streamed_float<B, 11>(w));
-    f(12, streamed_float<B, 12>(w)); f(13, streamed_float<B, 13>(w)); f(14, streamed_float<B, 14>(w)); f(15, streamed_float<B, 15>(w));
+    f(0, streamed_pair<B, 0>(w)); f(1, streamed_pair<B, 1>(w)); f(2, streamed_pair<B, 2>(w)); f(3, streamed_pair<B, 3>(w));
+    f(4, streamed_pair<B, 4>(w)); f(5, streamed_pair<B, 5>(w)); f(6, streamed_pair<B, 6>(w)); f(7, streamed_pair<B, 7>(w));
+    f(8, streamed_pair<B, 8>(w)); f(9, streamed_pair<B, 9>(w)); f(10, streamed_pair<B, 10>(w)); f(11, streamed_pair<B, 11>(w));
+    f(12, streamed_pair<B, 12>(w)); f(13, streamed_pair<B, 13>(w)); f(14, streamed_pair<B, 14>(w)); f(15, streamed_pair<B, 15>(w));
 }
 
 // The widths of a WIDTHS mask, a simdgroup-uniform switch: CALL(B) for the tile's width b where the mask holds it.
@@ -290,7 +285,7 @@ static inline __attribute__((always_inline)) void fragment_load(device const uin
 // acc[n][2p], acc[n][2p + 1] += pair P = 4p + j of loaded words w times x[n][j] (x already times half the step).
 template <uint B, uint R, uint N>
 static inline __attribute__((always_inline)) void fragment_fma(thread const uint (&w)[N], thread const float (&x)[R][4], thread float (&acc)[R][8]) {
-#define FRAGMENT_PAIR(P) { const float2 v = streamed_float<B, P>(w); \
+#define FRAGMENT_PAIR(P) { const float2 v = streamed_pair<B, P>(w); \
         for (uint n = 0; n < R; n++) { \
             acc[n][2 * (P >> 2)] = fma(v.x, x[n][P & 3u], acc[n][2 * (P >> 2)]); \
             acc[n][2 * (P >> 2) + 1] = fma(v.y, x[n][P & 3u], acc[n][2 * (P >> 2) + 1]); } }
@@ -298,6 +293,30 @@ static inline __attribute__((always_inline)) void fragment_fma(thread const uint
     FRAGMENT_PAIR(7) FRAGMENT_PAIR(8) FRAGMENT_PAIR(9) FRAGMENT_PAIR(10) FRAGMENT_PAIR(11) FRAGMENT_PAIR(12) FRAGMENT_PAIR(13)
     FRAGMENT_PAIR(14) FRAGMENT_PAIR(15)
 #undef FRAGMENT_PAIR
+}
+
+// t[n][p] += pair P = 4p + j of loaded words w times x[n][j] in fp16 (x already times half the step; t[n][p] rows 2p
+// and 2p + 1 of the lane's 8, a pair of rows one fused half2 multiply-add: metal-microbench docs/kernels.md#the-instance-fit,
+// the fp16 pair sums).
+template <uint B, uint R, uint N>
+static inline __attribute__((always_inline)) void fragment_hfma(thread const uint (&w)[N], thread const half (&x)[R][4], thread half2 (&t)[R][4]) {
+#define FRAGMENT_PAIR(P) { const half2 v = streamed_pair<B, P, half2>(w); \
+        for (uint n = 0; n < R; n++) t[n][P >> 2] = fma(v, half2(x[n][P & 3u]), t[n][P >> 2]); }
+    FRAGMENT_PAIR(0) FRAGMENT_PAIR(1) FRAGMENT_PAIR(2) FRAGMENT_PAIR(3) FRAGMENT_PAIR(4) FRAGMENT_PAIR(5) FRAGMENT_PAIR(6)
+    FRAGMENT_PAIR(7) FRAGMENT_PAIR(8) FRAGMENT_PAIR(9) FRAGMENT_PAIR(10) FRAGMENT_PAIR(11) FRAGMENT_PAIR(12) FRAGMENT_PAIR(13)
+    FRAGMENT_PAIR(14) FRAGMENT_PAIR(15)
+#undef FRAGMENT_PAIR
+}
+
+// The fp16 pair sums t added into the fp32 sums acc and cleared (every H tiles of a walk).
+template <uint R>
+static inline __attribute__((always_inline)) void fragment_flush(thread float (&acc)[R][8], thread half2 (&t)[R][4]) {
+    for (uint n = 0; n < R; n++)
+        for (uint p = 0; p < 4; p++) {
+            acc[n][2 * p] += float(t[n][p].x);
+            acc[n][2 * p + 1] += float(t[n][p].y);
+            t[n][p] = half2(0.0h);
+        }
 }
 
 // A 1-bit tile's word w by its tables (T the lane's 16 sums of its tile column, row n at T + n stride): row 2p's
@@ -329,13 +348,14 @@ static inline __attribute__((always_inline)) uint fragment_reduce(thread const f
     return 8 * fragment_c(lane) + 4 * uint(b1) + 2 * uint(b2) + uint(b4);
 }
 
-// A tile in flight: its width, step, loaded words (as many as the widest width) and x (times half the step).
-template <uint R, uint N>
+// A tile in flight: its width, step, loaded words (as many as the widest width) and x (times half the step; fp16 where
+// its sums are the fp16 pair sums, H > 0).
+template <uint R, uint N, uint H>
 struct fragment_tile {
     uint b;
     float step;
     uint w[N];
-    float x[R][4];
+    metal::conditional_t<(H > 0), half, float> x[R][4];
 };
 
 // The tile words of a simdgroup's walk (steps i at tiles part + i SK below span), lane i holding step i's: one load
@@ -354,8 +374,8 @@ static inline uint fragment_word(uint held, device const uint *words, uint span,
 }
 
 // A tile's planes and x loaded (nothing for an empty or absent tile; a 1-bit tile read by tables only its word).
-template <uint R, uint WIDTHS, uint LUT, uint LOADS>
-static inline __attribute__((always_inline)) void fragment_fetch(thread fragment_tile<R, FRAGMENT_MAX(WIDTHS)> &f, uint word, device const uint *planes,
+template <uint R, uint WIDTHS, uint LUT, uint LOADS, uint H>
+static inline __attribute__((always_inline)) void fragment_fetch(thread fragment_tile<R, FRAGMENT_MAX(WIDTHS), H> &f, uint word, device const uint *planes,
         device const half *xs, uint columns, uint rows, uint k) {
     const uint b = (word >> 12) & 15u;
     f.b = b;
@@ -367,40 +387,56 @@ static inline __attribute__((always_inline)) void fragment_fetch(thread fragment
     const float h = 0.5f * f.step;
     for (uint n = 0; n < R; n++) {
         device const half *xr = xs + ulong(min(n, rows - 1)) * columns + k;
-        for (uint j = 0; j < 4; j++) f.x[n][j] = float(xr[8 * j]) * h;
+        for (uint j = 0; j < 4; j++)
+            if (H) f.x[n][j] = xr[8 * j] * half(h);
+            else f.x[n][j] = float(xr[8 * j]) * h;
     }
 }
 
-// A fetched tile into the lane's sums (tables at T, row stride `stride`, where LUT reads its 1-bit tiles).
-template <uint R, uint WIDTHS, uint LUT>
-static inline __attribute__((always_inline)) void fragment_use(thread const fragment_tile<R, FRAGMENT_MAX(WIDTHS)> &f, device const float *T, uint stride,
-        thread float (&acc)[R][8], thread float (&corr)[R]) {
+// A fetched tile into the lane's sums (tables at T, row stride `stride`, where LUT reads its 1-bit tiles): fp32, or with
+// H > 0 the fp16 pair sums t (a 1-bit tile by tables into the fp32 sums).
+template <uint R, uint WIDTHS, uint LUT, uint H>
+static inline __attribute__((always_inline)) void fragment_use(thread const fragment_tile<R, FRAGMENT_MAX(WIDTHS), H> &f, device const float *T, uint stride,
+        thread float (&acc)[R][8], thread half2 (&t)[R][4], thread float (&corr)[R]) {
     const uint b = f.b;
     if (LUT && b == 1) { fragment_lut<R>(f.w[0], T, stride, f.step, acc, corr); return; }
-#define FRAGMENT_FMA(B) fragment_fma<B, R>(f.w, f.x, acc)
+    if (H) {
+#define FRAGMENT_HFMA(B) fragment_hfma<B, R>(f.w, (thread const half (&)[R][4])f.x, t)
+        FRAGMENT_WIDTHS(WIDTHS, FRAGMENT_HFMA)
+#undef FRAGMENT_HFMA
+        return;
+    }
+#define FRAGMENT_FMA(B) fragment_fma<B, R>(f.w, (thread const float (&)[R][4])f.x, acc)
     FRAGMENT_WIDTHS(WIDTHS, FRAGMENT_FMA)
 #undef FRAGMENT_FMA
 }
 
 // A simdgroup's walk over its tiles of one band (share [first, first + span), tiles part, part + SK, ...), F (1 or 2)
 // tiles in flight: their planes and x loaded before either is decoded. Each lane's 8 R sums (the rows past `rows` repeat the last
-// row's loads).
-template <uint R, uint SK, uint STEPS, uint WIDTHS, uint LUT, uint F, uint LOADS>
+// row's loads), fp32, or with H > 0 the fp16 pair sums added into them every H tiles.
+template <uint R, uint SK, uint STEPS, uint WIDTHS, uint LUT, uint F, uint LOADS, uint H>
 static inline __attribute__((always_inline)) void fragment_walk(device const uint *codes, device const uint *words, uint base,
         device const float *tables, device const half *xs, uint columns, uint rows, uint first, uint span, uint part,
         uint lane, thread float (&acc)[R][8]) {
+    static_assert(H % F == 0 && (H == 0 || FRAGMENT_MAX(WIDTHS) <= 11), "fp16 pair sums: whole steps of F, widths exact in half2");
     const uint kb = fragment_kb(lane), held = fragment_words<SK, STEPS>(words, span, part, lane);
     float corr[R];
-    for (uint n = 0; n < R; n++) { corr[n] = 0.0f; for (uint q = 0; q < 8; q++) acc[n][q] = 0.0f; }
+    half2 t[R][4];
+    for (uint n = 0; n < R; n++) {
+        corr[n] = 0.0f;
+        for (uint q = 0; q < 8; q++) acc[n][q] = 0.0f;
+        for (uint p = 0; p < 4; p++) t[n][p] = half2(0.0h);
+    }
     device const uint *planes = codes + (base << 5) + lane;
     for (uint i = 0; i < STEPS; i += F) {
         const uint ta = first + part + i * SK, tc = ta + SK;
-        fragment_tile<R, FRAGMENT_MAX(WIDTHS)> a, c;
-        fragment_fetch<R, WIDTHS, LUT, LOADS>(a, fragment_word<SK, STEPS>(held, words, span, part, i), planes, xs, columns, rows, ta * 32 + kb);
+        fragment_tile<R, FRAGMENT_MAX(WIDTHS), H> a, c;
+        fragment_fetch<R, WIDTHS, LUT, LOADS, H>(a, fragment_word<SK, STEPS>(held, words, span, part, i), planes, xs, columns, rows, ta * 32 + kb);
         if (F > 1)
-            fragment_fetch<R, WIDTHS, LUT, LOADS>(c, fragment_word<SK, STEPS>(held, words, span, part, i + 1), planes, xs, columns, rows, tc * 32 + kb);
-        fragment_use<R, WIDTHS, LUT>(a, tables + (ta * 8 + kb) * 16, columns * 4, acc, corr);
-        if (F > 1) fragment_use<R, WIDTHS, LUT>(c, tables + (tc * 8 + kb) * 16, columns * 4, acc, corr);
+            fragment_fetch<R, WIDTHS, LUT, LOADS, H>(c, fragment_word<SK, STEPS>(held, words, span, part, i + 1), planes, xs, columns, rows, tc * 32 + kb);
+        fragment_use<R, WIDTHS, LUT, H>(a, tables + (ta * 8 + kb) * 16, columns * 4, acc, t, corr);
+        if (F > 1) fragment_use<R, WIDTHS, LUT, H>(c, tables + (tc * 8 + kb) * 16, columns * 4, acc, t, corr);
+        if (H && ((i + F) % (H ? H : 1) == 0 || i + F >= STEPS)) fragment_flush<R>(acc, t);
     }
     if (LUT)
         for (uint n = 0; n < R; n++)
@@ -413,8 +449,8 @@ static inline __attribute__((always_inline)) void fragment_walk(device const uin
 // lanes and simdgroups into partials[share][n][row] (OUT 0: coded row order, the row scale not applied, then consumed by
 // the epilogue E) or finished (OUT 1, one share covering K: each with its row's scale, capped where cap > 0, at row
 // order[r] of ys, row stride d.stride). Rows past d.rows repeat the last row's loads and are not written. LOADS:
-// fragment_load's.
-template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F, uint LOADS, typename E = streamed_plain>
+// fragment_load's; H: fragment_walk's (0 the fp32 sums, else the fp16 pair sums added into them every H tiles).
+template <uint R, uint SK, uint BANDS, uint J, uint TILES, uint WIDTHS, uint OUT, uint LUT, uint F, uint LOADS, uint H, typename E = streamed_plain>
 kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
                          device const uint *bands [[buffer(2)]], device const float *tables [[buffer(3)]],
                          device const half *xs [[buffer(4)]], device float *partials [[buffer(5)]],
@@ -431,7 +467,7 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
     const uint local = simd / SK, part = simd % SK, band = group.x * BANDS + local, rows = d.rows;
     const uint first = group.y * PER, span = min(TILES, first + PER) - first, pitch = d.pitch ? d.pitch : TILES, word = bands[band];
     float acc[R][8], out[R];
-    fragment_walk<R, SK, STEPS, WIDTHS, LUT, F, LOADS>(codes, tiles + band * pitch + first, streamed_base(word), tables,
+    fragment_walk<R, SK, STEPS, WIDTHS, LUT, F, LOADS, H>(codes, tiles + band * pitch + first, streamed_base(word), tables,
                                              xs + streamed_slab(word, d.inputs, COLUMNS), COLUMNS, rows, first, span, part, lane, acc);
     const uint row = fragment_reduce<R>(acc, lane, out);
     for (uint n = 0; n < R; n++) sums[local][part][n][row] = out[n];
@@ -454,8 +490,8 @@ kernel void streamed_alu(device const uint *codes [[buffer(0)]], device const ui
 // SK simdgroups along K each walking both matrices in lock step (2F tiles in flight); APART 1, SK simdgroups of each
 // matrix (the first SK gate's, the rest up's: one walk's code for both, F tiles in flight). hidden[n][r] =
 // GELU(gateScale[r] g) * upScale[r] u, in the hidden's code order (down's coded input). Rows past d.rows repeat the
-// last row's loads and are not written.
-template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART, uint LOADS>
+// last row's loads and are not written. H: fragment_walk's.
+template <uint R, uint SK, uint TILES, uint WIDTHS, uint F, uint APART, uint LOADS, uint H>
 kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device const uint *gateTiles [[buffer(1)]],
                             device const uint *gateBands [[buffer(2)]], device const half *gx [[buffer(4)]],
                             device const uint *upCodes [[buffer(6)]], device const uint *upTiles [[buffer(7)]],
@@ -472,7 +508,7 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
         const uint matrix = simd / SK, part = simd % SK;
         const bool up = matrix != 0;
         float acc[R][8], out[R];
-        fragment_walk<R, SK, STEPS, WIDTHS, 0, F, LOADS>(up ? upCodes : gateCodes, (up ? upTiles : gateTiles) + band * pitch,
+        fragment_walk<R, SK, STEPS, WIDTHS, 0, F, LOADS, H>(up ? upCodes : gateCodes, (up ? upTiles : gateTiles) + band * pitch,
                                                  streamed_base((up ? upBands : gateBands)[band]), nullptr, up ? ux : gx, COLUMNS,
                                                  rows, 0, TILES, part, lane, acc);
         const uint row = fragment_reduce<R>(acc, lane, out);
@@ -483,22 +519,27 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
         const uint gheld = fragment_words<SK, STEPS>(gw, TILES, simd, lane), uheld = fragment_words<SK, STEPS>(uw, TILES, simd, lane);
         device const uint *gp = gateCodes + (streamed_base(gateBands[band]) << 5) + lane, *up = upCodes + (streamed_base(upBands[band]) << 5) + lane;
         float gacc[R][8], uacc[R][8], gcorr[R], ucorr[R], gout[R], uout[R];
-        for (uint n = 0; n < R; n++) for (uint q = 0; q < 8; q++) { gacc[n][q] = 0.0f; uacc[n][q] = 0.0f; }
+        half2 gt[R][4], ut[R][4];
+        for (uint n = 0; n < R; n++) {
+            for (uint q = 0; q < 8; q++) { gacc[n][q] = 0.0f; uacc[n][q] = 0.0f; }
+            for (uint p = 0; p < 4; p++) { gt[n][p] = half2(0.0h); ut[n][p] = half2(0.0h); }
+        }
         for (uint i = 0; i < STEPS; i += F) {
             const uint k = (simd + i * SK) * 32 + kb;
-            fragment_tile<R, FRAGMENT_MAX(WIDTHS)> g, u, g1, u1;
-            fragment_fetch<R, WIDTHS, 0, LOADS>(g, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i), gp, gx, COLUMNS, rows, k);
-            fragment_fetch<R, WIDTHS, 0, LOADS>(u, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i), up, ux, COLUMNS, rows, k);
+            fragment_tile<R, FRAGMENT_MAX(WIDTHS), H> g, u, g1, u1;
+            fragment_fetch<R, WIDTHS, 0, LOADS, H>(g, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i), gp, gx, COLUMNS, rows, k);
+            fragment_fetch<R, WIDTHS, 0, LOADS, H>(u, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i), up, ux, COLUMNS, rows, k);
             if (F > 1) {
-                fragment_fetch<R, WIDTHS, 0, LOADS>(g1, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i + 1), gp, gx, COLUMNS, rows, k + 32 * SK);
-                fragment_fetch<R, WIDTHS, 0, LOADS>(u1, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i + 1), up, ux, COLUMNS, rows, k + 32 * SK);
+                fragment_fetch<R, WIDTHS, 0, LOADS, H>(g1, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i + 1), gp, gx, COLUMNS, rows, k + 32 * SK);
+                fragment_fetch<R, WIDTHS, 0, LOADS, H>(u1, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i + 1), up, ux, COLUMNS, rows, k + 32 * SK);
             }
-            fragment_use<R, WIDTHS, 0>(g, nullptr, 0, gacc, gcorr);
-            fragment_use<R, WIDTHS, 0>(u, nullptr, 0, uacc, ucorr);
+            fragment_use<R, WIDTHS, 0, H>(g, nullptr, 0, gacc, gt, gcorr);
+            fragment_use<R, WIDTHS, 0, H>(u, nullptr, 0, uacc, ut, ucorr);
             if (F > 1) {
-                fragment_use<R, WIDTHS, 0>(g1, nullptr, 0, gacc, gcorr);
-                fragment_use<R, WIDTHS, 0>(u1, nullptr, 0, uacc, ucorr);
+                fragment_use<R, WIDTHS, 0, H>(g1, nullptr, 0, gacc, gt, gcorr);
+                fragment_use<R, WIDTHS, 0, H>(u1, nullptr, 0, uacc, ut, ucorr);
             }
+            if (H && ((i + F) % (H ? H : 1) == 0 || i + F >= STEPS)) { fragment_flush<R>(gacc, gt); fragment_flush<R>(uacc, ut); }
         }
         const uint row = fragment_reduce<R>(gacc, lane, gout);
         fragment_reduce<R>(uacc, lane, uout);

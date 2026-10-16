@@ -45,7 +45,8 @@ model there, else of the fit's prices (every measurement, a probe's too, moves t
                                                                 rows of instance, slice units, rows_in, best_us; or
                                                                 JSON lines: observe's, and the decode attention plans'
                                                                 rows of plan and KV bytes read, kind attention)
-  python -m torch_mesh.streamed resolve EXPORT [--program RECORD --rank R] [--classes 1,2,4,8,16,256] [--explore R=C,...] --out TABLE
+  python -m torch_mesh.streamed resolve EXPORT [--program RECORD --rank R] [--classes 1,2,4,8,16,256] [--explore R=C[/H<h>],...]
+                                [--plan R=PLAN] --out TABLE
                                                                 each slice's chosen instance at each rows class (a slice's
                                                                 key its width class, WIDTH_CLASSES, which the table names),
                                                                 each argument named, and each layer's attention plan at
@@ -58,11 +59,15 @@ model there, else of the fit's prices (every measurement, a probe's too, moves t
   python -m torch_mesh.streamed epilogue FUSED SEPARATE --rows NAME=LABEL ...
                                                                 two served readings' epilogues (each product with an
                                                                 epilogue against the product and the row it replaces)
-                                                                into the evidence file, whose rows classes each table
-                                                                entry names (epilogues)
+                                                                and finishes (a one-share product finishing its rows
+                                                                against its partials and streamed_finish) into the
+                                                                evidence file, whose rows classes each table entry
+                                                                names (epilogues, finish)
 
 A factor of the fit (a configuration's efficiency at a rows class) rests on two slice shapes at least; one seen on a
-single shape takes its family's model. A decode attention plan (metal-microbench docs/kernels.md#decode-attention: the
+single shape takes its family's model. An instance's forms (FORMS: LOADS, a tile's loads; H, the ALUs' fp16 pair sums)
+are priced by their own factors, each the mean log ratio of its readings against its form 0's on the same shapes and
+rows; a form never read in pairs is not taken. A decode attention plan (metal-microbench docs/kernels.md#decode-attention: the
 vector form, a task a query head and row; the tile plan, a task 8 of one KV head's rows) is priced c0 + c1 MB of the KV
 it reads (c1 at least 0), one line a plan and head dimension a node, from the attention rows; a plan read at a layer's
 shape and rows is priced at its reading.
@@ -118,6 +123,11 @@ FIT_FEATURES = ('tiles', 'rowwork', 'planes', 'sg', 'partials', 'bytes', 'steps'
 FIT_TERMS = ('c0', 'tile', 'row', 'plane', 'sg', 'part', 'lat', 'latr', 'occ', 'press')
 FIT_PRIOR = dict(c0=2.0, tile=0.02, row=0.01, plane=0.004, sg=0.01, part=0.002, lat=0.3, latr=0.15, occ=24.0, press=0.001)
 FAMILIES = ('alu', 'coop', 'panel')
+# An instance's forms, each read in pairs against its form 0 on the same shape, rows and configuration (a factor a
+# configuration and rows class, never the coefficients'): LOADS a tile's loads (streamed.metal fragment_load), H the sums
+# (fragment_walk: fp32, or fp16 pair sums added into them every H tiles, at the ALUs' widths to 11).
+FORMS = ('LOADS', 'H')
+HALVES = (4, 16)
 PERS = (8, 16, 24, 32, 48)
 WIDTH_CLASSES = (4, 8, 12, 15)
 WIDTH_CLASS = [0] + [next(c for c in WIDTH_CLASSES if c >= w) for w in range(1, 16)]
@@ -175,7 +185,7 @@ class Fit:
         self.theta = {f: torch.tensor([math.log((coefficients or {}).get(f, FIT_PRIOR)[k]) for k in FIT_TERMS], dtype=torch.float64)
                       for f in FAMILIES}
         self.factors = dict(factors or {})
-        self.explore = {}
+        self.explore, self.forms = {}, {}
 
     @classmethod
     def node(cls):
@@ -202,26 +212,32 @@ class Fit:
     def time(self, spec, s, rows):
         u = instance_units(spec, s, rows)
         X = torch.tensor([[float(u[k]) for k in FIT_FEATURES]], dtype=torch.float64)
-        loads = self.factors.get(loads_key(spec), 0.0) if spec.get('LOADS') else 0.0
-        return float(self._predict(_family(spec), X)[0]) * math.exp(self.factors.get(factor_key(spec), 0.0) + loads)
+        forms = sum(self.factors.get(form_key(spec, form), 0.0) for form in FORMS if spec.get(form))
+        return float(self._predict(_family(spec), X)[0]) * math.exp(self.factors.get(factor_key(spec), 0.0) + forms)
 
     def fit(self, observations, iters=900, ridge=0.02, spread=0.01):
         """Least squares in log space over observations (spec, slice units, rows, us, shape): the families' coefficients
         with a ridge toward the prior, and a factor a configuration and rows class (factor_key) with a ridge toward 1 (the
         shape of a kernel's own efficiency, pooled over every slice it ran on) where two shapes at least observed it; a
-        configuration seen on one shape takes its family's model (its factor 0: one shape is no evidence of a shape). The
-        loads' factor (loads_key) is the mean log ratio of the instances read in both forms on the same shape and rows,
-        whose readings measure the form and not the coefficients."""
+        configuration seen on one shape takes its family's model (its factor 0: one shape is no evidence of a shape). A
+        form's factor (form_key: FORMS) is the mean log ratio of the instances read in that form and in its form 0 on the
+        same shape and rows, whose readings measure the form and not the coefficients."""
         prior = torch.tensor([math.log(FIT_PRIOR[k]) for k in FIT_TERMS], dtype=torch.float64)
-        forms, ratios = {}, {}
-        for spec, s, rows, us, shape in observations:
-            same = (tuple(sorted((k, v) for k, v in spec.items() if k != 'LOADS')), shape, rows)
-            forms.setdefault(same, {}).setdefault(spec.get('LOADS', 0), []).append(us)
-        for (same, _, _), read in forms.items():
-            if len(read) == 2:
-                ratios.setdefault(loads_key(dict(same)), []).append(math.log(min(read[1]) / min(read[0])))
-        loads = {k: sum(v) / len(v) for k, v in ratios.items()}
-        observations = [o for o in observations if len(forms[(tuple(sorted((k, v) for k, v in o[0].items() if k != 'LOADS')), o[4], o[2])]) < 2]
+        ratios, paired = {}, set()
+        for form in FORMS:
+            read = {}
+            for i, (spec, s, rows, us, shape) in enumerate(observations):
+                same = (tuple(sorted((k, v) for k, v in spec.items() if k != form)), shape, rows)
+                read.setdefault(same, {}).setdefault(spec.get(form, 0), []).append((us, i))
+            for (same, _, _), seen in read.items():
+                if 0 not in seen or len(seen) < 2:
+                    continue
+                for value, taken in seen.items():
+                    paired.update(i for _, i in taken)
+                    if value:
+                        ratios.setdefault(form_key(dict(same, **{form: value}), form), []).append(math.log(min(taken)[0] / min(seen[0])[0]))
+        forms = {k: sum(v) / len(v) for k, v in ratios.items()}
+        observations = [o for i, o in enumerate(observations) if i not in paired]
         shapes = {}
         for spec, s, _, _, shape in observations:
             shapes.setdefault(factor_key(spec), set()).add((s['outputs'], s['columns']))
@@ -249,7 +265,7 @@ class Fit:
                 loss.backward()
                 opt.step()
         self.theta = {f: v.detach() for f, v in theta.items()}
-        self.factors = {**{k: float(v) for k, v in zip(keys, factors.detach().tolist())}, **loads}
+        self.factors = {**{k: float(v) for k, v in zip(keys, factors.detach().tolist())}, **forms}
         return float(loss.detach())
 
     def coefficients(self):
@@ -261,24 +277,27 @@ def rows_class(rows):
     return 1 if rows <= 1 else 2 if rows <= 2 else 4
 
 
-def candidates(s, rows, op='product', tables=False):
+def candidates(s, rows, op='product', tables=False, widths=15):
     """The admissible instances of slice units `s` at `rows` input rows: rows <= 4 on the ALUs (R the rows' class); 8 or
     16 rows the cooperative tensor (M 8 or 16), the ceiling round's instance family (the coop's M 8 work, read at eight rows,
     at or above the ALUs' four-row time on every served slice of the Mini and all but one of the M5's, and the ALUs at eight
     rows on the small slices 1.4 to 2.6 times the coop's: metal-microbench docs/kernels.md#stacked-products); past 16 the
     panel (M 64, 128);
     shares of 8 to 48 tiles, simdgroups 2, 4 or 8 a band (the head's four bands of two too), one or two tiles in
-    flight, a 1-bit tile by tables where the head's input writes them, either loads (LOADS: fragment_load's); `op` couple:
-    the gate and up products together (its slice their units summed)."""
+    flight, a 1-bit tile by tables where the head's input writes them, either loads (LOADS: fragment_load's), on the ALUs
+    either sums (H: fp32, or the fp16 pair sums every HALVES tiles, at widths exact in half2: width class 8 at most);
+    `op` couple: the gate and up products together (its slice their units summed). A form is taken where its factor
+    prices it below its form 0 (FORMS), each candidate listed after its form 0."""
     T, out = s['columns'] // 32, []
+    halves = (0,) + (HALVES if widths <= 8 else ())
     js = sorted({-(-T // -(-T // max(1, -(-T // per)))) for per in PERS})
     if op == 'couple' and rows > 4:
         return []
     if rows > 16:
         return [dict(kernel='panel', M=M, LOADS=loads) for M in (64, 128) for loads in (0, 1)]
     if op == 'couple':
-        return [dict(kernel='couple', R=rows_class(rows), SK=sk, BANDS=1, J=1, F=F, LUT=0, APART=apart, LOADS=loads) for sk in (2, 4, 8)
-                for F in (1, 2) for apart in (0, 1) for loads in (0, 1)]
+        return [dict(kernel='couple', R=rows_class(rows), SK=sk, BANDS=1, J=1, F=F, LUT=0, APART=apart, LOADS=loads, H=h) for sk in (2, 4, 8)
+                for F in (1, 2) for apart in (0, 1) for loads in (0, 1) for h in halves]
     if rows <= 4:
         R = rows_class(rows)
         shapes = [(sk, 1) for sk in (2, 4, 8)] + ([(2, 4)] if op == 'head' else [])
@@ -288,7 +307,7 @@ def candidates(s, rows, op='product', tables=False):
             for J in js:
                 for F in (1, 2):
                     for lut in ((0, 1) if tables else (0,)):
-                        out += [dict(kernel='alu', R=R, SK=sk, BANDS=bands, J=J, F=F, LUT=lut, LOADS=loads) for loads in (0, 1)]
+                        out += [dict(kernel='alu', R=R, SK=sk, BANDS=bands, J=J, F=F, LUT=lut, LOADS=loads, H=h) for loads in (0, 1) for h in halves]
     if rows > 4:
         M = 8 if rows <= 8 else 16
         for sk, bands in ((2, 2), (1, 4), (1, 1)):
@@ -297,9 +316,10 @@ def candidates(s, rows, op='product', tables=False):
     return out
 
 
-def loads_key(spec):
-    """The loads' factor's key: a configuration and its rows class (streamed.metal fragment_load's LOADS 1 against 0)."""
-    return 'loads/' + factor_key(spec)
+def form_key(spec, form):
+    """A form's factor's key (FORMS): the form and its value, a configuration and its rows class (LOADS 1 against 0:
+    'loads/'; H h against 0: 'H<h>/')."""
+    return ('loads/' if form == 'LOADS' else f'{form}{spec[form]}/') + factor_key(spec)
 
 
 def factor_key(spec):
@@ -319,14 +339,18 @@ def configuration(spec):
     return (k, spec['SK'], spec['BANDS'], spec['F'], spec['LUT'])
 
 
-def choose(fit, s, rows, op='product', tables=False, read=None):
+def choose(fit, s, rows, op='product', tables=False, read=None, widths=15):
     """The argmin over the candidates of the configurations its evidence observed (None where there is none), or at a
-    rows class the fit explores, of the configurations named for it (measured once, in the next profile), and its price
-    (us): where candidates were `read` at the slice and rows (read_key: their readings' median), the least read (a
-    measurement at a shape outranks the model there), else the fit's argmin."""
+    rows class the fit explores, of the configurations named for it (measured once, in the next profile; forms named with
+    them, H<h>, taken by every slice of that class that admits them), and its price (us): where candidates were `read` at
+    the slice and rows (read_key: their readings' median), the least read (a measurement at a shape outranks the model
+    there), else the fit's argmin."""
     allowed = fit.explore.get(rows, fit.configurations)
-    priced = [(fit.time(c, s, rows), i, c) for i, c in enumerate(candidates(s, rows, op, tables))
-              if allowed is None or configuration(c) in allowed]
+    forced = fit.forms.get(rows, {})
+    listed = candidates(s, rows, op, tables, widths)
+    if forced and any(all(c.get(k, 0) == v for k, v in forced.items()) for c in listed):
+        listed = [c for c in listed if all(c.get(k, 0) == v for k, v in forced.items())]
+    priced = [(fit.time(c, s, rows), i, c) for i, c in enumerate(listed) if allowed is None or configuration(c) in allowed]
     read = [(read[read_key(c)], i, c) for _, i, c in priced if read_key(c) in (read or {})] if rows not in fit.explore else []
     if not priced:
         return None, None
@@ -354,7 +378,7 @@ def spec_arguments(spec, T, widths, finish=False):
     """An instance's kernel and template arguments in ARGUMENTS' order on a slice of T tile columns and width class
     `widths`: its WIDTHS the class's widths 1 ... c as a mask (width_mask)."""
     kernel = spec['kernel']
-    values = dict({'LOADS': 0}, **spec, TILES=T, WIDTHS=width_mask(widths), OUT=int(finish))
+    values = dict({'LOADS': 0, 'H': 0}, **spec, TILES=T, WIDTHS=width_mask(widths), OUT=int(finish))
     if kernel == 'coop':
         values['COOP'] = coop_slots()
     return kernel, tuple(values[name] for name in ARGUMENTS['panel' if kernel == 'panel_t' else kernel])
@@ -582,7 +606,7 @@ class Matrix(torch.Tensor):
     def dispatch(self, rows, op='product'):
         """The instance of a product of `rows` coded input rows on this node (the instance fit's choice): its spec, name and
         instantiation, threadgroups x and y, threads, K shares."""
-        spec, _ = choose(Fit.node(), slice_units(self), rows, op, tables=self.tabled(op))
+        spec, _ = choose(Fit.node(), slice_units(self), rows, op, tables=self.tabled(op), widths=self.widths)
         if spec['kernel'] == 'coop' and coop_slots() is None:
             spec = dict(kernel='alu', R=rows_class(rows), SK=8, BANDS=1, J=spec['J'], F=1, LUT=0)
         (gx, gy), threads, shares = launch(spec, self.rows, rows)
@@ -713,7 +737,7 @@ class Matrix(torch.Tensor):
         n = x16.shape[0]
         gx, ux = gate.coded_input(x16, (up,))
         hidden = _half(n, gate.rows)
-        spec, _ = couple(Fit.node(), slice_units(gate), slice_units(up), n)
+        spec, _ = couple(Fit.node(), slice_units(gate), slice_units(up), n, widths=max(gate.widths, up.widths))
         if spec is not None:
             name, line = spec_instance(spec, gate.tiles_, max(gate.widths, up.widths))
             (groups, _), threads, _ = launch(spec, gate.rows, n)
@@ -737,15 +761,15 @@ def mean_units(units):
     return {k: round(sum(u[k] for u in units) / len(units)) for k in UNITS}
 
 
-def couple(fit, sg, su, rows, read=None):
-    """The couple instance of gate and up (slice units sg and su) at `rows` and its price (choose: `read` its readings)
-    where it was read at the slice and rows, or the fit prices its argmin below their own products and the GELU's
-    dispatch (a dispatch's fixed cost); else (None, None)."""
+def couple(fit, sg, su, rows, read=None, widths=15):
+    """The couple instance of gate and up (slice units sg and su, width class `widths`) at `rows` and its price (choose:
+    `read` its readings) where it was read at the slice and rows, or the fit prices its argmin below their own products
+    and the GELU's dispatch (a dispatch's fixed cost); else (None, None)."""
     pair = pair_units(sg, su)
-    _, t = choose(fit, pair, rows, 'couple')
-    if not read and (t is None or t >= sum(choose(fit, u, rows)[1] for u in (sg, su)) + fit.coefficients()['alu']['c0']):
+    _, t = choose(fit, pair, rows, 'couple', widths=widths)
+    if not read and (t is None or t >= sum(choose(fit, u, rows, widths=widths)[1] for u in (sg, su)) + fit.coefficients()['alu']['c0']):
         return None, None
-    return choose(fit, pair, rows, 'couple', read=read)
+    return choose(fit, pair, rows, 'couple', read=read, widths=widths)
 
 
 def _no(m, what):
@@ -912,21 +936,22 @@ def _check(args):
               f'gradient {_relative(x.grad, xf.grad):.2e}', flush=True)
 
 
-ARGUMENTS = {'alu': ('R', 'SK', 'BANDS', 'J', 'TILES', 'WIDTHS', 'OUT', 'LUT', 'F', 'LOADS'),
+ARGUMENTS = {'alu': ('R', 'SK', 'BANDS', 'J', 'TILES', 'WIDTHS', 'OUT', 'LUT', 'F', 'LOADS', 'H'),
              'coop': ('M', 'SK', 'BANDS', 'J', 'TILES', 'WIDTHS', 'COOP', 'LOADS'),
-             'couple': ('R', 'SK', 'TILES', 'WIDTHS', 'F', 'APART', 'LOADS'),
+             'couple': ('R', 'SK', 'TILES', 'WIDTHS', 'F', 'APART', 'LOADS', 'H'),
              'panel': ('M', 'TILES', 'WIDTHS', 'LOADS')}
 
 
 def parse_instance(name, loads=0):
     """An instance's spec from its host name (instance): its template arguments by name (ARGUMENTS); a name without its
-    LOADS (named before the loads were an argument) takes `loads`, the form its library had (0 before mesh 290449d)."""
+    LOADS (named before the loads were an argument) takes `loads`, the form its library had (0 before mesh 290449d), and
+    one without its H the fp32 sums (H 0: every name before the fp16 pair sums)."""
     parts = name.replace('streamed_', '').split('_')
     kernel = parts[0]
     if kernel not in ARGUMENTS:
         raise ValueError(name)
     values = [int(v) for v in parts[1:]]
-    spec = dict(zip(ARGUMENTS[kernel], values + [loads] * (len(ARGUMENTS[kernel]) - len(values))), kernel=kernel)
+    spec = dict(zip(ARGUMENTS[kernel], values + [loads if k == 'LOADS' else 0 for k in ARGUMENTS[kernel][len(values):]]), kernel=kernel)
     if kernel == 'couple':
         spec.update(BANDS=1, J=1, LUT=0)
     return spec
@@ -1025,7 +1050,8 @@ def _fit(args):
                            'worst_regret': regrets[-1]}, 'coefficients': fit.coefficients(), 'factors': fit.factors,
               'attention': attention_fit(attention)}
     path = evidence_path()
-    record['epilogues'] = (json.loads(path.read_text()) if path.exists() else {}).get('epilogues', {})
+    kept = json.loads(path.read_text()) if path.exists() else {}
+    record['epilogues'], record['finishes'] = kept.get('epilogues', {}), kept.get('finishes', {})
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=1) + '\n')
     print(json.dumps({k: v for k, v in record.items() if k != 'coefficients'}))
@@ -1113,15 +1139,60 @@ def epilogue_classes(ratios, classes):
     return out
 
 
+def finish_ratios(fused, separate):
+    """Each finished product's log time ratio at each decode class two served readings profiled (metal-microbench
+    docs/kernels.md#the-instance-fit, the finish an instance's): the one-share ALU instance finishing its rows (OUT 1)
+    against the same instance's partials (OUT 0) and streamed_finish, least us a dispatch, by its label's
+    OUTPUTSxCOLUMNS; a class read in three ticks at least in both (a reading's other classes are its first, cold ticks)."""
+    import re
+    profiles = [json.loads(Path(p).read_text())['engine']['profile'] for p in (fused, separate)]
+    one, two = (p['commands'] for p in profiles)
+    out = {}
+    for cls in sorted(set(one) & set(two)):
+        a, b = one[cls], two[cls]
+        if not cls.startswith('decode') or 'streamed_finish' not in b or min(p['ticks'].get(cls, {}).get('ticks', 0) for p in profiles) < 3:
+            continue
+        plain = {}
+        for label in b:
+            found = re.fullmatch(r'(streamed_alu_[0-9_]+) (\d+x\d+)', label)
+            if found:
+                spec = parse_instance(found.group(1))
+                plain[(found.group(2), read_key(spec))] = (spec['OUT'], b[label]['least_us'])
+        for label in a:
+            found = re.fullmatch(r'(streamed_alu_[0-9_]+) (\d+x\d+)', label)
+            if not found or parse_instance(found.group(1))['OUT'] != 1:
+                continue
+            seen = plain.get((found.group(2), read_key(parse_instance(found.group(1)))))
+            if seen and seen[0] == 0:
+                out.setdefault(found.group(2), {})[cls.split()[1]] = math.log(a[label]['least_us'] / (seen[1] + b['streamed_finish']['least_us']))
+    return out
+
+
+def finish_classes(ratios, classes):
+    """Each product's rows classes where it finishes its rows in its own dispatch: every class but those read slower
+    finished (ratio above 0) and those not read whose nearest read classes below and above both were (a class of a
+    product never read finishes in it, a dispatch fewer)."""
+    out = {}
+    for shape, read in ratios.items():
+        read = {int(c): r for c, r in read.items()}
+        below = lambda c: [k for k in read if k < c]
+        above = lambda c: [k for k in read if k > c]
+        out[shape] = [c for c in classes if not (read[c] > 0 if c in read else bool(below(c) and above(c))
+                                                 and read[max(below(c))] > 0 and read[min(above(c))] > 0)]
+    return out
+
+
 def _epilogue(args):
     path = evidence_path()
     known = json.loads(path.read_text()) if path.exists() else {}
     for kind, shapes in epilogue_ratios(args.fused, args.separate, dict(r.split('=', 1) for r in args.rows)).items():
         for shape, classes in shapes.items():
             known.setdefault('epilogues', {}).setdefault(kind, {}).setdefault(shape, {}).update(classes)
+    for shape, classes in finish_ratios(args.fused, args.separate).items():
+        known.setdefault('finishes', {}).setdefault(shape, {}).update(classes)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(known, indent=1) + '\n')
-    print(json.dumps(known.get('epilogues', {})))
+    print(json.dumps({k: known.get(k, {}) for k in ('epilogues', 'finishes')}))
 
 
 def slices(streamed, program=None, rank=None):
@@ -1166,10 +1237,11 @@ def _text_config(export):
     return config.get('text_config', config)
 
 
-def _attention(export, part, ctx, classes, fit_model, read):
+def _attention(export, part, ctx, classes, fit_model, read, explore=None):
     """The decode attention plan a rank takes for each of its layers (its head dimension, window and query heads) at each
     rows class the table serves (docs/kernels.md#decode-attention): the least priced (attention_plan: its readings `read`,
-    else the node's model) at the layer's positions (the window, else the call's context)."""
+    else the node's model) at the layer's positions (the window, else the call's context); at a rows class `explore`
+    names ({rows: plan}), that plan (read once, in the next profile)."""
     text = _text_config(export)
     kinds = text.get('layer_types') or []
     heads = text.get('num_attention_heads')
@@ -1186,6 +1258,7 @@ def _attention(export, part, ctx, classes, fit_model, read):
         window = text.get('sliding_window', 0) if sliding else 0
         for rows in classes:
             plan, priced = attention_plan(fit_model, dims, rows, held, window or ctx, read)
+            plan = (explore or {}).get(rows, plan)
             out.append({'layer': L, 'rows': rows, 'plan': plan, 'us': {k: round(v, 2) for k, v in priced.items()}})
     return out
 
@@ -1195,7 +1268,9 @@ def _resolve(args):
     fit, classes = Fit.node(), [int(c) for c in args.classes.split(',')]
     for e in args.explore:
         rows, named = e.split('=', 1)
-        fit.explore[int(rows)] = {tuple(int(v) if v.isdigit() else v for v in c.split('/')) for c in named.split(',')}
+        parts = [c.split('/') for c in named.split(',')]
+        fit.explore[int(rows)] = {tuple(int(v) if v.isdigit() else v for v in c if not (v[:1] == 'H' and v[1:].isdigit())) for c in parts}
+        fit.forms[int(rows)] = {v[0]: int(v[1:]) for c in parts for v in c if v[:1] == 'H' and v[1:].isdigit()}
     held = slices(streamed, args.program, args.rank)
     for draft in args.draft:
         held += list(Streamed(draft).matrices.items())
@@ -1216,6 +1291,7 @@ def _resolve(args):
     known = json.loads(evidence_path().read_text()) if evidence_path().exists() else {}
     obs, attended = observations([p for p in known.get('observations', []) if Path(p).exists()])
     read, epilogues = readings(obs), epilogue_classes(known.get('epilogues', {}), [c for c in classes if c <= 16])
+    finishes = finish_classes(known.get('finishes', {}), [c for c in classes if c <= 8])
     attention_read = {}
     for r in attended:
         attention_read.setdefault((r['plan'], r['dims'], r['rows'], r['heads'], r['positions']), []).append(r['best_us'])
@@ -1224,8 +1300,8 @@ def _resolve(args):
     for (op, outputs, columns, widths, tables), units in sorted(keyed.items(), key=lambda kv: kv[0]):
         pair = op == 'couple' and (mean_units([u[0] for u in units]), mean_units([u[1] for u in units]))
         for rows in classes:
-            spec, t = (couple(fit, *pair, rows, read.get((outputs, columns, widths, rows))) if pair
-                       else choose(fit, mean_units(units), rows, op, tables, read.get((outputs, columns, widths, rows))))
+            spec, t = (couple(fit, *pair, rows, read.get((outputs, columns, widths, rows)), widths) if pair
+                       else choose(fit, mean_units(units), rows, op, tables, read.get((outputs, columns, widths, rows)), widths))
             if spec is None or spec['kernel'] == 'coop' and coop_slots() is None:
                 continue
             kernel, arguments = spec_arguments(spec, columns // 32, widths)
@@ -1233,11 +1309,13 @@ def _resolve(args):
             entries.append({'op': op, 'outputs': outputs, 'columns': columns, 'widths': widths, 'rows': rows, 'kernel': kernel,
                             'args': list(arguments), 'names': list(ARGUMENTS[kernel]), 'grid': list(grid), 'threads': threads,
                             'shares': shares, 'lut': int(spec.get('LUT', 0)), 'us': round(t, 2),
+                            'finish': kernel == 'alu' and shares == 1 and rows <= 8 and rows in finishes.get(f'{outputs}x{columns}', [rows]),
                             'epilogues': sorted(k for k, shapes in epilogues.items() if op == 'product' and rows in shapes.get(f'{outputs}x{columns}', []))})
     record = json.loads(Path(args.program).read_text()) if args.program else {}
     ctx = args.ctx or record.get('ctx_mean') or 1024
     part = record['ranks'][args.rank] if args.program else None
-    attention = _attention(args.export, part, ctx, classes, known.get('attention'), attention_read)
+    attention = _attention(args.export, part, ctx, classes, known.get('attention'), attention_read,
+                           {int(r): plan for r, plan in (e.split('=', 1) for e in args.plan)})
     table = {'node': node()[0], 'cores': node()[1], 'evidence': str(evidence_path()), 'export': str(args.export),
              'program': args.program, 'rank': args.rank, 'classes': classes, 'width_class': WIDTH_CLASS, 'ctx': ctx,
              'instances': entries, 'attention': attention}
@@ -1264,7 +1342,10 @@ def main():
     resolve.add_argument('--draft', action='append', default=[],
                          help="a drafter's export whose matrices the member runs whole (metal-microbench tools/draft/dflash2.py export)")
     resolve.add_argument('--explore', action='append', default=[],
-                         help="a rows class whose slices take the fit's argmin over the named configurations alone, ROWS=KIND/ARGS,...")
+                         help="a rows class whose slices take the fit's argmin over the named configurations alone, ROWS=KIND/ARGS[/H<h>],...: "
+                              "a form named (H<h>, the fp16 pair sums) taken by every slice of the class that admits it")
+    resolve.add_argument('--plan', action='append', default=[],
+                         help="a rows class whose layers take the named decode attention plan (vector or tile), ROWS=PLAN, read once")
     resolve.add_argument('--out', required=True)
     observe = sub.add_parser('observe')
     observe.add_argument('reading')
