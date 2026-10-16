@@ -20,6 +20,21 @@ int metal_wait(void *event, uint64_t value, uint64_t ns);
 void metal_release(void *object);
 
 struct metal_program *metal_begin(void *command_buffer, void *encoder);
+/* The Metal 4 form: the kernels encoded into the caller's id<MTL4ComputeCommandEncoder> (left open, nothing committed,
+   nothing signalled), on pipelines of the residency set's device, every binding through the caller's id<MTL4ArgumentTable>
+   (each dispatch's arguments a record of the library's argument ring, never setBytes), each dispatch after the one
+   before it (an intra-encoder barrier, and one before the first and after the last, so the caller's commands on either
+   side are ordered with them), and every buffer of the library's the program touches made resident through the
+   caller's id<MTLResidencySet> (added, and the set committed, where it was not).  Its waits are bounded: at most
+   METAL_POLLS loads of a completion word (rdma/mesh.metal mesh_wait_bounded), past which the dispatch stores the
+   position and its channel in the session's `violation` words [2] and [3] (where [2] is still 0) and every later
+   dispatch of the program reads them and does nothing, so the host finds the failure there after the window
+   (nccl-mesh.c violated) and the call fails as a value.  NULL where memory runs out. */
+#define METAL_POLLS 65536u
+struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation);
+int metal_metal4(const struct metal_program *);
+/* A buffer of the program's made resident (the Metal 4 form; the classic form needs none). */
+void metal_resident(struct metal_program *, void *buffer);
 int metal_copy(struct metal_program *, int mode, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t bytes);
 int metal_combine(struct metal_program *, int type, int op, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n);
 int metal_premultiply(struct metal_program *, int type, void *dst, size_t dst_offset, void *src, size_t src_offset, size_t n, uint64_t scalar);
@@ -29,7 +44,7 @@ int metal_truncdiv(struct metal_program *, int type, void *dst, size_t dst_offse
    that position's filler stamp, clear where it receives nothing, whose slot must; a slot is ring + (t % depth) x slot.
    The first position found otherwise is written to violation[0] (1 + it) and violation[1] (channel x 2 + its bit),
    where violation[0] is still 0. */
-struct metal_check { void *ring, *violation; size_t slot; uint64_t first; uint32_t count, mask, channel, depth; };
+struct metal_check { void *ring, *violation; size_t slot; uint64_t first; uint32_t count, mask, channel, depth; uint64_t at; };
 /* a filler's stamp at position t, the host's and the kernels' one definition */
 #define METAL_STAMP(t) (0x6d6573682d66696cUL ^ ((t) * 0x9e3779b97f4a7c15UL))
 int metal_publish(struct metal_program *, void *cells, size_t offset, uint64_t argument);

@@ -37,20 +37,37 @@ or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR
 - Making a communicator, a lone rank's too, attaches the process's client of its node's bridge ([Memory](#memory)),
   so the node's bridge runs; it fails where `ncclMemAlloc` would.
 
-Each session takes its node's bridge's map when it opens (`mesh-plan.h` `mesh_map` over the communicator's nodes): two
-ranks are linked where their bridges hold a port paired with each other, and ranks the cables leave apart are linked
-along a route through other nodes, members or not, which the bridges forward along. A later session reads the map
-again, so a recabling, a link that paired again or a node gone reaches the next session with no edit and no restart.
+Each session takes its node's bridge's map when it opens (`mesh-plan.h` `mesh_map` over the communicator's nodes):
+every node the bridges' records hold, the members first and the others relays, every link two bridges pair (several
+cables between one pair one link of their bandwidths summed: the bridge stripes a program over them), and the routing
+table the bridges forward along (`mesh_routes`: each node's in-tree of shortest routes, a parent among equals the one
+whose link carries fewest of the routes so far, so routes of equal length spread rather than pile onto the
+lowest-numbered node; a route between two nodes the higher-marked one's in-tree path, one path both ways). Two ranks
+are linked where their route crosses no other rank: that hop costs its links' latencies summed and the slowest link's
+bandwidth (a relay forwards each slot as it lands), and its bytes are charged to every link it crosses, so hops that
+share a cable share its time. A later session reads the map again, so a recabling, a link that paired again or a node
+gone reaches the next session with no edit and no restart. The planner prices a record's members by the same function
+(`mesh_map_members`, Python `mesh.members`).
+
+Before any group runs, the members agree: each publishes its digest of what its programs are made from (its members'
+map, the planner's version `MESH_PLAN_VERSION`, the caller's paths and programs) on every channel, at the session's
+first position, and compares its peers'. Members that read the map on either side of a change fail the session as a
+value naming the disagreement (`ncclRemoteError`, "the members' maps differ") and open the next on the map then; no
+group runs on two maps.
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
-MSCCL-IR). The default table:
+MSCCL-IR). The default table chooses, for each collective, root and size class (the least power of two of at least the
+call's bytes, from 1 KiB to 16 GiB), at the class's first call, the fastest by `mesh_choose` in the alpha-beta model
+over the map's links:
 
-- All-reduce: single-phase along shortest-path trees (the map's diameter in dependent crossings) below the
-  alpha-beta crossover, then reduce-scatter and all-gather along packed spanning trees.
-- Broadcast, reduce, reduce-scatter and all-gather: along the packed trees, which pack by each link's own cost.
+- the collective along the shortest-path trees (or the caller's `paths`) and along the packed trees (Garg-Konemann
+  over the links, relayed hops charging each link they cross);
+- an all-reduce also the single-phase one (Trivance: the map's diameter in dependent crossings) along each;
+- each cut into 1, 2, 4, ... 64 chunks while that is faster: a tree's part moves chunk by chunk, a node forwarding a
+  chunk as it arrives (the trees pipelined).
 
-To choose otherwise, pass your own table (`mesh.compile` in Python). Nothing about routing is decided where a call
-runs.
+At two nodes this is the single-phase all-reduce and one tree a root, as before. To choose otherwise, pass your own
+table (`mesh.compile` in Python, `chunks` the cut). Nothing about routing is decided where a call runs.
 
 ## Two paths
 
@@ -61,6 +78,17 @@ runs.
   bridge's window and land what arrives from them, with no staging on the host.
   - torch-mesh runs MPS tensors here.
   - A group can be issued and completed later (`issue`, `ncclMeshComplete`).
+  - **Metal 4.** A stream whose `argumentTable` is set encodes into the caller's `MTL4ComputeCommandEncoder`
+    (`commandEncoder`) between the commands before and after it, every binding through that argument table (at least
+    six buffer bindings; each dispatch's arguments a record of the library's ring, never `setBytes`), on pipelines of
+    the caller's device, the library's buffers added to the caller's `residencySet`; nothing is committed or
+    signalled. `ncclMeshEncodeMetal4(comm, op, send, recv, count, type, encoder, table, residency)` is the all-reduce
+    spelled so; every collective and group takes the stream. Its waits are bounded (`nccl-mesh-metal.h`
+    `METAL_POLLS`, 2^16 loads of a completion word the bridge writes): one that reaches its bound records its position
+    in the session's words, every later dispatch of the session does nothing, and `ncclCommGetAsyncError` (or the next
+    group) returns the failure after the window. Without a workspace its scratch is the communicator's, so such a
+    group completes in its encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
+    (metal-microbench docs/kernels.md#any-program).
 
 Types: the Metal path moves the integer types, float16, float32, bfloat16 and fp8 (e4m3fn, e5m2: decoded, combined in
 float32 and encoded to nearest even as the host does, overflow to NaN or infinity; metal-microbench docs/kernels.md
@@ -154,9 +182,16 @@ fails. The failure is returned:
 
 and `ncclGetLastError` names the node where it failed: the destination's, or a relay's on its route. A link or a relay
 lost under a group fails the group (its program toward that node ends; nothing resumes it), and the next group opens a
-session again on the map as it is then; a session also opens again at its next group once the bridge's map serial has
-moved. A rank that departed is left out with `ncclCommShrink`, a joining one taken in with `ncclCommGetUniqueId` and
-`ncclCommGrow`, and `ncclCommRevoke` ends a communicator's groups in flight.
+session again on the map as it is then. A change of the map closes no session: a session runs on the map its members
+agreed on until a link or node its channels' routes cross is lost, which fails it on every member (the bridges fail
+its flows, and a member that closes ends its flows toward the others), so each member opens the next after its own
+failure, and a link that flaps elsewhere, a node that joins or a port's counters cost it nothing. A loop that wants a
+better map that appeared under a working session (a cable added) revokes the communicator at a point every member
+reaches (`ncclCommRevoke`, NCCL's), and its next group opens on the map then. A rank that departed is left out with
+`ncclCommShrink`, a joining one taken in with `ncclCommGetUniqueId` and `ncclCommGrow`, and `ncclCommRevoke` ends a
+communicator's groups in flight and a session opening, from any thread: a member waiting in its session's start for a
+peer that never comes (a member that failed to load) is ended by its revoke at once, the wait holding no lock the
+revoke takes.
 
 ## Environment
 

@@ -990,6 +990,36 @@ A map is an operand: its kind (mesh, ring, tree, graph), its nodes, its links an
 1994). Trees, rings with spurs, tori and full meshes are graphs of one representation, and `mesh_link_map_check`
 admits any connected one. Neither source establishes that this runtime achieves the paper's bandwidth bound.
 
+A members' map (`mesh_map_members`, which `mesh_map` reads the bridges' records by and a planner prices a record's
+members by) keeps every node of the whole map: the members first, the others relays that hold no rank, every link,
+each node's mark (its bridge's node number) and the routing table, an operand: each node's in-tree of shortest routes
+(fewest links, then the least sum of betas). Two members are linked where their route crosses relays alone, that hop
+costed as the relayed path it is: its links' α summed and the greatest β, a relay forwarding each slot as it lands
+(mesh-flow.c receive_input), not the betas summed; and its bytes charged to every link it crosses, in the tree packing
+(a port's capacity shared by the hops whose routes cross it) and in `mesh_program_time` (a message crossing each port
+of its route once that port is free), so hops that share a cable share its time. Several cables between one pair are
+one link of their bandwidths summed (design/bridge-and-ipc.md#cables).
+
+The table (`mesh_routes`): Dijkstra [1959] toward each node in its dense form, every length an exact integer so every
+bridge and member that holds the same records makes the same table; then a local search on the congestion game's
+potential, the sum of the squares of the links' loads (each the routes between two nodes that cross it) [Rosenthal,
+Int. J. Game Theory 1973], which every move lowers: each root's in-tree revisited farthest node first, a node's flow
+(the routes toward the root it carries) taken off its route and put on through the parent among its equals whose route
+adds least, ties to the least hash of the three nodes' marks [splitmix64's finalizer: Steele, Lea & Flood, OOPSLA
+2014]; the pass whose busiest link carries fewest routes is kept. The route between two nodes is the path up the
+higher-marked one's in-tree, so a route and its reverse are one path, as the bridges need (a READY carries its route,
+and each relay mirrors the far end's direction). It replaces the lowest-numbered parent among equals, which sent the
+ring of six's three antipodal routes through nodes 0 and 1 (12 queue pairs on one port, over the device's 11); over
+200 numberings of that ring the table's busiest link carries 5 routes in every one (metal-microbench
+output_data/library-20261015/sims/routes_sampled_after.json, relays_after.json).
+
+The collectives (mesh-collective.c): along the packed trees [Garg & Konemann, FOCS 1998; Blink, Wang et al. MLSys
+2020], the shortest-path trees, and the single-phase all-reduce [Trivance, SIGCOMM 2026]; each tree's part cut into
+chunks, chunk j of every move at its round + j, so a node forwards a chunk as it arrives (the pipelined trees of
+NCCL's tree algorithm and of MSCCLang's chunks [Cowan et al., ASPLOS 2023]); and the program a call runs chosen by its
+time in the alpha-beta model (`mesh_choose`: every collective, root and size class, over both tree sets and the chunk
+counts) [Thakur, Rabenseifner & Gropp 2005; NCCL's tuner].
+
 ### Link
 
 `port_bandwidth` (mesh-verbs.h): Dotan Barak, rdma-core's [ibv_query_port manual](https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/man/ibv_query_port.3), supplies observed port speed and width.
@@ -1009,10 +1039,10 @@ port by its index, and returns the port count or negative errno. `mesh_map` copi
 the bridge's map (design/bridge-and-ipc.md#region), every node's newest record, as
 the seqlock's reader (Boehm, MSPC 2012): the serial read with acquire, the records
 copied, the copy kept where the serial was even and is unchanged (`mesh_map_whole`),
-else copied again. From that copy it makes the link map, two nodes linked where each
-one's record holds a port paired with the other, and joins members the links leave
-apart, the cheapest route first [Kruskal 1956], each along the whole mesh's path on
-fewest links, which the bridges forward along. `mesh_map_wait` waits on the serial, within its bound, so a loop of executions
+else copied again. From that copy it makes the whole map, two nodes linked where each
+one's record holds ports paired with the other, its table the routes the bridges
+forward along, and over the members the members' map of it (#topology).
+`mesh_map_wait` waits on the serial, within its bound, so a loop of executions
 takes the next map. The bridges keep their links paired with or without a client, so
 the map is current whether or not anything runs (design/recovery.md, mandate 14).
 

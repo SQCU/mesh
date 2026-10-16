@@ -8,14 +8,17 @@
 #define STR(...) #__VA_ARGS__
 #define XSTR(...) STR(__VA_ARGS__)
 /* a kernel's arguments, one layout for the host and the kernels */
-#define ARGS(U64, U32) struct args { U64 dst, src, n, scalar, aux; U32 op, unused; U64 first, slot; U32 count, mask, channel, depth; }
+#define ARGS(U64, U32) struct args { U64 dst, src, n, scalar, aux; U32 op, polls; U64 first, slot, at, sequence; U32 count, mask, channel, depth; }
 
 /* the kernels, after rdma/mesh.metal (its text embedded at build: .build/mesh_metal.h): a wait on a completion word is
-   its mesh_remote_wait, a landed slot's read its mesh_payload and a cell's release its mesh_publish; the filler protocol
-   (STAMP, CHECK) is this library's.  Each operator's arithmetic is written once (op_int, op_float, op_f8), a landing
-   being the wait and then the combine's body; it is the host's (nccl-mesh.c combine_into, premultiply, truncdiv): the
-   small floating types in float32 rounded to nearest even, float8 decoded and encoded by mesh.metal's f8_to and
-   f8_from, integers wrapping */
+   its mesh_remote_wait (the classic form, which the progress thread's cancel ends) or, where p.polls is set (the Metal 4
+   form), its mesh_remote_wait_bounded, a word short of its target past the bound (TIMED) recorded in violation words [2]
+   and [3]; a landed slot's read its mesh_payload and a cell's release its mesh_publish; the filler protocol (STAMP,
+   CHECK) is this library's.  In the Metal 4 form every kernel first stores its record's sequence in `progress` (every
+   dispatch before it has finished: a barrier stands between each two) and does nothing where violation word [2] holds a
+   failure.  Each operator's arithmetic is written once (op_int, op_float, op_f8), a landing being the wait and then the
+   combine's body; it is the host's (nccl-mesh.c combine_into, premultiply, truncdiv): the small floating types in
+   float32 rounded to nearest even, float8 decoded and encoded by mesh.metal's f8_to and f8_from, integers wrapping */
 static NSString *const KERNELS =
   @"\nusing namespace metal;\n"
   XSTR(ARGS(ulong, uint)) ";\n"
@@ -23,16 +26,22 @@ static NSString *const KERNELS =
   "#define CHECK(ring, status) if (status != ~0UL) for (uint c = 0; c < p.count; c++) { ulong t = p.first + c; "
   "ulong seen = mesh_payload((volatile coherent(system) device const ulong *)(ring + (t % p.depth) * p.slot)); bool data = (p.mask >> c) & 1u; "
   "if (data == (seen == STAMP(t)) && v[0] == 0) { v[1] = (ulong(p.channel) << 1) | ulong(data); mesh_publish(v, t + 1); } }\n"
-  "#define HEAD(name) kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]])\n"
-  "#define GROUP(name) kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]])\n"
+  "#define WAIT(word, cycle) (p.polls ? mesh_remote_wait_bounded((volatile coherent(system) device const ulong *)(word), cycle, p.polls) "
+  ": mesh_remote_wait((volatile coherent(system) device const ulong *)(word), cycle))\n"
+  "#define TIMED(status, cycle) (p.polls && status != ~0UL && status < 1 + (cycle))\n"
+  "#define RECORD(status, cycle, ring) if (TIMED(status, cycle)) { if (v[2] == 0) { v[3] = ulong(p.channel); mesh_publish(v + 2, p.at + 1); } } else CHECK(ring, status)\n"
+  "#define ENTER(first) if (p.polls) { if (first) *progress = p.sequence; if (((volatile device const ulong *)vb)[2]) return; }\n"
+  "#define HEAD(name) kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_grid]], uint g [[threads_per_grid]])\n"
+  "#define GROUP(name) kernel void name(device uchar *d [[buffer(0)]], device uchar *s [[buffer(1)]], constant args &p [[buffer(2)]], device uchar *a [[buffer(3)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]], uint i [[thread_position_in_threadgroup]], uint g [[threads_per_threadgroup]])\n"
   "#define LOOP for (ulong k = i; k < p.n; k += g)\n"
-  "#define AWAIT if (i == 0) { ulong status = mesh_remote_wait((volatile coherent(system) device const ulong *)(a + p.aux), p.scalar); "
-  "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; CHECK(s, status) } threadgroup_barrier(mem_flags::mem_device); "
-  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3));\n"
+  "#define AWAIT if (i == 0) { ulong status = WAIT(a + p.aux, p.scalar); "
+  "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; RECORD(status, p.scalar, s) } threadgroup_barrier(mem_flags::mem_device); "
+  "atomic_thread_fence(mem_flags::mem_device, memory_order_seq_cst, static_cast<thread_scope>(3)); "
+  "if (p.polls && ((volatile device const ulong *)vb)[2]) return;\n"
   "#define COPY(Z, W) "
-  "HEAD(copy_plain_##Z) { device W *x = (device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src); LOOP x[k] = y[k]; } "
-  "HEAD(copy_land_##Z) { device W *x = (device W *)(d + p.dst); volatile coherent(system) device const W *y = (volatile coherent(system) device const W *)(s + p.src); LOOP x[k] = mesh_payload(y + k); } "
-  "HEAD(copy_send_##Z) { volatile coherent(system) device W *x = (volatile coherent(system) device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src); LOOP x[k] = y[k]; }\n"
+  "HEAD(copy_plain_##Z) { ENTER(i == 0) device W *x = (device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src); LOOP x[k] = y[k]; } "
+  "HEAD(copy_land_##Z) { ENTER(i == 0) device W *x = (device W *)(d + p.dst); volatile coherent(system) device const W *y = (volatile coherent(system) device const W *)(s + p.src); LOOP x[k] = mesh_payload(y + k); } "
+  "HEAD(copy_send_##Z) { ENTER(i == 0) volatile coherent(system) device W *x = (volatile coherent(system) device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src); LOOP x[k] = y[k]; }\n"
   "COPY(4, uint)\n"
   "COPY(1, uchar)\n"
   "template <typename T> T op_int(T a, T b, uint op) { return op == 0 ? T(ulong(a) + ulong(b)) : op == 1 ? T(ulong(a) * ulong(b)) : (op == 2 ? b > a : b < a) ? b : a; }\n"
@@ -41,15 +50,15 @@ static NSString *const KERNELS =
   "return op == 0 ? f8_from(x + y, E5) : op == 1 ? f8_from(x * y, E5) : (op == 2 ? y > x : y < x) ? b : a; }\n"
   "#define BODY(T, OP) device T *x = (device T *)(d + p.dst); volatile coherent(system) device const T *y = (volatile coherent(system) device const T *)(s + p.src); "
   "LOOP x[k] = OP(x[k], mesh_payload(y + k), p.op);\n"
-  "#define COMBINE(name, T, OP) HEAD(combine_##name) { BODY(T, OP) } GROUP(land_##name) { AWAIT BODY(T, OP) }\n"
+  "#define COMBINE(name, T, OP) HEAD(combine_##name) { ENTER(i == 0) BODY(T, OP) } GROUP(land_##name) { ENTER(i == 0) AWAIT BODY(T, OP) }\n"
   "#define INTEGER(name, T, SIGNED) COMBINE(name, T, op_int<T>) "
-  "HEAD(premul_##name) { device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); ulong c = ulong(T(p.scalar)); LOOP x[k] = T(ulong(y[k]) * c); } "
-  "HEAD(truncdiv_##name) { device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); LOOP { T v = y[k]; bool negative = SIGNED && v < T(0); "
+  "HEAD(premul_##name) { ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); ulong c = ulong(T(p.scalar)); LOOP x[k] = T(ulong(y[k]) * c); } "
+  "HEAD(truncdiv_##name) { ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); LOOP { T v = y[k]; bool negative = SIGNED && v < T(0); "
   "ulong m = negative ? 0UL - ulong(v) : ulong(v), q = m / p.scalar; x[k] = negative ? T(0UL - q) : T(q); } }\n"
   "#define FLOATING(name, T) COMBINE(name, T, op_float<T>) "
-  "HEAD(premul_##name) { device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = T(float(y[k]) * c); }\n"
+  "HEAD(premul_##name) { ENTER(i == 0) device T *x = (device T *)(d + p.dst); device const T *y = (device const T *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = T(float(y[k]) * c); }\n"
   "#define FLOAT8(name, E5) COMBINE(name, uchar, op_f8<E5>) "
-  "HEAD(premul_##name) { device uchar *x = (device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = f8_from(f8_to(y[k], E5) * c, E5); }\n"
+  "HEAD(premul_##name) { ENTER(i == 0) device uchar *x = (device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); float c = as_type<float>(uint(p.scalar)); LOOP x[k] = f8_from(f8_to(y[k], E5) * c, E5); }\n"
   "INTEGER(i8, char, true)\n"
   "INTEGER(u8, uchar, false)\n"
   "INTEGER(i32, int, true)\n"
@@ -61,26 +70,42 @@ static NSString *const KERNELS =
   "FLOATING(bf16, bfloat)\n"
   "FLOAT8(e4m3, false)\n"
   "FLOAT8(e5m2, true)\n"
-  "kernel void publish(device uchar *cells [[buffer(0)]], constant args &p [[buffer(2)]]) { mesh_publish((volatile coherent(system) device ulong *)(cells + p.dst), p.scalar); }\n"
-  "kernel void publish_filler(device uchar *cells [[buffer(0)]], device uchar *ring [[buffer(1)]], constant args &p [[buffer(2)]]) { "
-  "*(volatile coherent(system) device ulong *)(ring + p.src) = STAMP(p.first); mesh_publish((volatile coherent(system) device ulong *)(cells + p.dst), p.scalar); }\n"
-  "GROUP(send_small) { volatile coherent(system) device uchar *x = (volatile coherent(system) device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); LOOP x[k] = y[k]; "
+  "kernel void publish(device uchar *cells [[buffer(0)]], constant args &p [[buffer(2)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]]) { "
+  "ENTER(true) mesh_publish((volatile coherent(system) device ulong *)(cells + p.dst), p.scalar); }\n"
+  "kernel void publish_filler(device uchar *cells [[buffer(0)]], device uchar *ring [[buffer(1)]], constant args &p [[buffer(2)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]]) { "
+  "ENTER(true) *(volatile coherent(system) device ulong *)(ring + p.src) = STAMP(p.first); mesh_publish((volatile coherent(system) device ulong *)(cells + p.dst), p.scalar); }\n"
+  "GROUP(send_small) { ENTER(i == 0) volatile coherent(system) device uchar *x = (volatile coherent(system) device uchar *)(d + p.dst); device const uchar *y = (device const uchar *)(s + p.src); LOOP x[k] = y[k]; "
   "threadgroup_barrier(mem_flags::mem_device); if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(a + p.aux), p.scalar); }\n"
-  "GROUP(land_copy) { AWAIT device uchar *x = d + p.dst; volatile coherent(system) device const uchar *y = (volatile coherent(system) device const uchar *)(s + p.src); LOOP x[k] = mesh_payload(y + k); }\n"
-  "kernel void spin(device uchar *words [[buffer(0)]], device uchar *ring [[buffer(1)]], constant args &p [[buffer(2)]], device uchar *vb [[buffer(4)]]) { "
-  "ulong status = mesh_remote_wait((volatile coherent(system) device const ulong *)(words + p.dst), p.n); "
-  "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; CHECK(ring, status) }\n";
+  "GROUP(land_copy) { ENTER(i == 0) AWAIT device uchar *x = d + p.dst; volatile coherent(system) device const uchar *y = (volatile coherent(system) device const uchar *)(s + p.src); LOOP x[k] = mesh_payload(y + k); }\n"
+  "kernel void spin(device uchar *words [[buffer(0)]], device uchar *ring [[buffer(1)]], constant args &p [[buffer(2)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]]) { "
+  "ENTER(true) ulong status = WAIT(words + p.dst, p.n); "
+  "volatile coherent(system) device ulong *v = (volatile coherent(system) device ulong *)vb; RECORD(status, p.n, ring) }\n";
 
 /* ncclDataType_t's order: int8 uint8 int32 uint32 int64 uint64 float16 float32 float64 bfloat16 e4m3 e5m2 */
 static const char *const TYPE[12] = {"i8", "u8", "i32", "u32", "i64", "u64", "f16", "f32", NULL, "bf16", "e4m3", "e5m2"};
 static const char *const MODE[3] = {"plain", "land", "send"};
 
 ARGS(uint64_t, uint32_t);
-struct metal_program { id<MTLCommandBuffer> buffer; id<MTLComputeCommandEncoder> encoder; NSMutableArray *kept; int borrowed; };
+/* a program: the classic form's command buffer and compute encoder (made here, or the caller's: `borrowed`) and what it
+   keeps until the program's end; or the Metal 4 form's caller's encoder, argument table and residency set, the
+   session's violation words (NULL: none, the waits unbounded and nothing recorded), the device's argument ring, and
+   whether a buffer was made resident since the set's last commit */
+struct ring;
+struct metal_program { id<MTLCommandBuffer> buffer; id<MTLComputeCommandEncoder> encoder; NSMutableArray *kept; int borrowed;
+                       id<MTL4ComputeCommandEncoder> encoder4; id<MTL4ArgumentTable> table; id<MTLResidencySet> residency;
+                       id<MTLBuffer> violation; struct ring *ring; int added; };
+
+/* a device's kernels: its library and pipelines by name; and its argument ring (the Metal 4 form's arguments: RECORDS
+   records of RECORD bytes in `records`, the `next` one written, which the GPU's dispatch of sequence q reads from record
+   (q - 1) mod RECORDS, `progress` the sequence of the last dispatch the GPU began, every one before it finished) */
+#define RECORDS 65536u
+#define RECORD 128u
+struct ring { id<MTLBuffer> records, progress; uint64_t next; };
+struct kernels { id<MTLLibrary> library; NSMutableDictionary *pipelines; struct ring ring; };
+_Static_assert(sizeof(struct args) <= RECORD, "an argument record");
 
 static id<MTLDevice> device_;
-static id<MTLLibrary> library_;
-static NSMutableDictionary *pipelines_;
+static NSMutableDictionary *kernels_;
 static NSMutableArray *retiring_;
 static char error_[512];
 
@@ -92,28 +117,60 @@ void *metal_device(void) {
 
 const char *metal_error(void) { return error_; }
 
-static id<MTLComputePipelineState> pipeline(NSString *name) {
+/* `device`'s kernels, compiled at its first use */
+static struct kernels *kernels_of(id<MTLDevice> device) {
   @autoreleasepool {
-    if (!library_) {
-      MTLCompileOptions *options = [[MTLCompileOptions new] autorelease];
-      options.mathMode = MTLMathModeSafe;
-      NSError *error = nil;
-      NSString *primitives = [[[NSString alloc] initWithBytes:mesh_metal length:mesh_metal_len encoding:NSUTF8StringEncoding] autorelease];
-      library_ = [(id<MTLDevice>)metal_device() newLibraryWithSource:[primitives stringByAppendingString:KERNELS] options:options error:&error];
-      if (!library_) { snprintf(error_, sizeof error_, "the kernels: %s", error.localizedDescription.UTF8String); return nil; }
-      pipelines_ = [NSMutableDictionary new];
-      retiring_ = [NSMutableArray new];
-    }
-    id<MTLComputePipelineState> made = pipelines_[name];
-    if (made) return made;
-    id<MTLFunction> function = [[library_ newFunctionWithName:name] autorelease];
+    if (!kernels_) { kernels_ = [NSMutableDictionary new]; retiring_ = [NSMutableArray new]; }
+    NSValue *key = [NSValue valueWithPointer:(__bridge const void *)device];
+    NSValue *held = kernels_[key];
+    if (held) return held.pointerValue;
+    MTLCompileOptions *options = [[MTLCompileOptions new] autorelease];
+    options.mathMode = MTLMathModeSafe;
     NSError *error = nil;
-    made = function ? [device_ newComputePipelineStateWithFunction:function error:&error] : nil;
+    NSString *primitives = [[[NSString alloc] initWithBytes:mesh_metal length:mesh_metal_len encoding:NSUTF8StringEncoding] autorelease];
+    id<MTLLibrary> library = [device newLibraryWithSource:[primitives stringByAppendingString:KERNELS] options:options error:&error];
+    if (!library) { snprintf(error_, sizeof error_, "the kernels: %s", error.localizedDescription.UTF8String); return NULL; }
+    struct kernels *made = calloc(1, sizeof *made);
+    if (!made) { [library release]; return NULL; }
+    made->library = library;
+    made->pipelines = [NSMutableDictionary new];
+    [device retain];
+    kernels_[key] = [NSValue valueWithPointer:made];
+    return made;
+  }
+}
+
+static id<MTLComputePipelineState> pipeline(id<MTLDevice> device, NSString *name) {
+  @autoreleasepool {
+    struct kernels *k = kernels_of(device);
+    if (!k) return nil;
+    id<MTLComputePipelineState> made = k->pipelines[name];
+    if (made) return made;
+    id<MTLFunction> function = [[k->library newFunctionWithName:name] autorelease];
+    NSError *error = nil;
+    made = function ? [device newComputePipelineStateWithFunction:function error:&error] : nil;
     if (!made) { snprintf(error_, sizeof error_, "kernel %s: %s", name.UTF8String, error ? error.localizedDescription.UTF8String : "absent"); return nil; }
-    pipelines_[name] = made;
+    k->pipelines[name] = made;
     [made release];
     return made;
   }
+}
+
+/* `device`'s argument ring, made at its first Metal 4 program */
+static struct ring *ring_of(id<MTLDevice> device) {
+  struct kernels *k = kernels_of(device);
+  if (!k) return NULL;
+  if (!k->ring.records) {
+    k->ring.records = [device newBufferWithLength:(NSUInteger)RECORDS * RECORD options:MTLResourceStorageModeShared];
+    k->ring.progress = [device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+    if (!k->ring.records || !k->ring.progress) {
+      [k->ring.records release]; [k->ring.progress release]; k->ring.records = k->ring.progress = nil;
+      snprintf(error_, sizeof error_, "the argument ring of %u records", RECORDS);
+      return NULL;
+    }
+    memset(k->ring.progress.contents, 0, 64);
+  }
+  return &k->ring;
 }
 
 void *metal_wrap(void *address, size_t bytes) {
@@ -138,6 +195,31 @@ struct metal_program *metal_begin(void *command_buffer, void *encoder) {
   return program;
 }
 
+struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation) {
+  struct ring *ring = ring_of(((id<MTLResidencySet>)residency).device);
+  struct metal_program *program = ring ? calloc(1, sizeof *program) : NULL;
+  if (!program) return NULL;
+  program->encoder4 = [(id<MTL4ComputeCommandEncoder>)encoder retain];
+  program->table = [(id<MTL4ArgumentTable>)table retain];
+  program->residency = [(id<MTLResidencySet>)residency retain];
+  program->violation = [(id<MTLBuffer>)violation retain];
+  program->ring = ring;
+  program->borrowed = 1;
+  metal_resident(program, ring->records);
+  metal_resident(program, ring->progress);
+  metal_resident(program, violation);
+  [program->encoder4 barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+  return program;
+}
+
+int metal_metal4(const struct metal_program *program) { return program->encoder4 != nil; }
+
+void metal_resident(struct metal_program *program, void *buffer) {
+  if (!program->residency || !buffer || [program->residency containsAllocation:(id<MTLBuffer>)buffer]) return;
+  [program->residency addAllocation:(id<MTLBuffer>)buffer];
+  program->added = 1;
+}
+
 static void close_encoder(struct metal_program *program) {
   if (!program->encoder) return;
   if (!program->borrowed) [program->encoder endEncoding];
@@ -145,14 +227,49 @@ static void close_encoder(struct metal_program *program) {
   program->encoder = nil;
 }
 
-/* kernel `name` on buffers d, s, a and v (0, 1, 3 and 4; an absent one d) and the arguments p (2): a GROUP kernel (`a`
-   given, the cells or the completion words) as one threadgroup of up to 1024 threads over a block's piece, any other
-   over `units` threads */
+/* the Metal 4 form's dispatch: its arguments the ring's next record (refused where the GPU has not begun the dispatch
+   that read that record RECORDS dispatches ago: its command buffers not committed, or that far behind), every buffer
+   bound by address through the caller's table (the words a check names, else the program's session's, at 4: the waits
+   bounded and failures recorded where there are such words), then a barrier before the next */
+static int dispatch4(struct metal_program *program, id<MTLComputePipelineState> state, id<MTLBuffer> d, id<MTLBuffer> s, id<MTLBuffer> a,
+                     id<MTLBuffer> words, struct args p, uint64_t units, int group) {
+  struct ring *ring = program->ring;
+  const uint64_t begun = *(volatile uint64_t *)ring->progress.contents;
+  if (ring->next - begun >= RECORDS - 1) {
+    snprintf(error_, sizeof error_, "the GPU began none of the library's last %u dispatches (dispatch %llu written, %llu begun): their command "
+             "buffers are not committed, or that far behind", RECORDS - 1, (unsigned long long)ring->next, (unsigned long long)begun);
+    return EOVERFLOW;
+  }
+  id<MTLBuffer> v = words ? words : program->violation ? program->violation : d;
+  p.polls = v != d ? METAL_POLLS : 0;
+  p.sequence = ++ring->next;
+  memcpy((char *)ring->records.contents + ((p.sequence - 1) % RECORDS) * RECORD, &p, sizeof p);
+  for (id<MTLBuffer> b in @[d, s ? s : d, a ? a : d, v]) metal_resident(program, b);
+  [program->table setAddress:d.gpuAddress atIndex:0];
+  [program->table setAddress:(s ? s : d).gpuAddress atIndex:1];
+  [program->table setAddress:ring->records.gpuAddress + ((p.sequence - 1) % RECORDS) * RECORD atIndex:2];
+  [program->table setAddress:(a ? a : d).gpuAddress atIndex:3];
+  [program->table setAddress:v.gpuAddress atIndex:4];
+  [program->table setAddress:ring->progress.gpuAddress atIndex:5];
+  id<MTL4ComputeCommandEncoder> encoder = program->encoder4;
+  [encoder setComputePipelineState:state];
+  [encoder setArgumentTable:program->table];
+  const NSUInteger most = group ? 1024 : 256, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
+  if (group) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+  else [encoder dispatchThreads:MTLSizeMake(units < (1u << 20) ? (NSUInteger)units : (1u << 20), 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+  [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+  return 0;
+}
+
+/* kernel `name` on buffers d, s, a and v (0, 1, 3 and 4; an absent one d) and the arguments p (2), the progress word
+   (5; the classic form binds d there, which no kernel then writes): a GROUP kernel (`a` given, the cells or the
+   completion words) as one threadgroup of up to 1024 threads over a block's piece, any other over `units` threads */
 static int dispatch(struct metal_program *program, NSString *name, void *d, void *s, void *a, void *v, struct args p, uint64_t units) {
   if (!units) return 0;
-  id<MTLComputePipelineState> state = pipeline(name);
+  id<MTLComputePipelineState> state = pipeline(program->encoder4 ? program->residency.device : (id<MTLDevice>)metal_device(), name);
   if (!state) return EINVAL;
   @autoreleasepool {
+    if (program->encoder4) return dispatch4(program, state, (id<MTLBuffer>)d, (id<MTLBuffer>)s, (id<MTLBuffer>)a, (id<MTLBuffer>)v, p, units, a != NULL);
     if (!program->encoder) program->encoder = [[program->buffer computeCommandEncoder] retain];
     id<MTLComputeCommandEncoder> encoder = program->encoder;
     [encoder setComputePipelineState:state];
@@ -161,6 +278,7 @@ static int dispatch(struct metal_program *program, NSString *name, void *d, void
     [encoder setBytes:&p length:sizeof p atIndex:2];
     [encoder setBuffer:(id<MTLBuffer>)(a ? a : d) offset:0 atIndex:3];
     [encoder setBuffer:(id<MTLBuffer>)(v ? v : d) offset:0 atIndex:4];
+    [encoder setBuffer:(id<MTLBuffer>)d offset:0 atIndex:5];
     const NSUInteger most = a ? 1024 : 256, width = state.maxTotalThreadsPerThreadgroup < most ? state.maxTotalThreadsPerThreadgroup : most;
     if (a) [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
     else [encoder dispatchThreads:MTLSizeMake(units < (1u << 20) ? (NSUInteger)units : (1u << 20), 1, 1) threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
@@ -194,7 +312,10 @@ int metal_truncdiv(struct metal_program *program, int type, void *dst, size_t ds
 }
 
 static struct args checked(struct args a, const struct metal_check *check) {
-  if (check) { a.first = check->first; a.slot = check->slot; a.count = check->count; a.mask = check->mask; a.channel = check->channel; a.depth = check->depth; }
+  if (check) {
+    a.first = check->first; a.slot = check->slot; a.count = check->count; a.mask = check->mask; a.channel = check->channel;
+    a.depth = check->depth; a.at = check->at;
+  }
   return a;
 }
 
@@ -231,15 +352,18 @@ int metal_land(struct metal_program *program, int type, int op, void *dst, size_
 void metal_keep(struct metal_program *program, void *object) { [program->kept addObject:(id)object]; }
 
 /* the program's end signals `event` to `value`; what it kept is released once the event has passed it
-   (metal_collect); a program in a borrowed encoder (event NULL) signals nothing and keeps nothing */
+   (metal_collect); a program in a borrowed encoder (event NULL) signals nothing and keeps nothing; the Metal 4 form's
+   residency set committed where the program made a buffer resident */
 void metal_end(struct metal_program *program, void *event, uint64_t value) {
   close_encoder(program);
   if (event) {
     [program->buffer encodeSignalEvent:(id<MTLEvent>)event value:value];
     @autoreleasepool { [retiring_ addObject:@[@(value), program->kept]]; }
   }
+  if (program->added) [program->residency commit];
   [program->kept release];
   [program->buffer release];
+  [program->encoder4 release]; [program->table release]; [program->residency release]; [program->violation release];
   free(program);
 }
 

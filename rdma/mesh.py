@@ -5,6 +5,7 @@ the header's own: link maps, the trees every collective and message take, operan
 planning and pricing.  Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its
 ncclMemAlloc, the memory they move taken from the node's bridge's window (rdma/NCCL.md "Memory")."""
 import errno
+import itertools
 import os
 import sys
 from types import SimpleNamespace
@@ -35,24 +36,89 @@ ALLREDUCE, BROADCAST = lib.MESH_ALLREDUCE, lib.MESH_BROADCAST
 
 class LinkMap:
     """mesh-plan.h's struct mesh_link_map (`c`, a pointer to it) of `kind` (KINDS) over `nodes`, the links `pairs`
-    and each one's (alpha us, beta ns a byte) in `cost` (None: the caller's alpha and beta for every link), the
-    storage held here; refused where mesh_link_map_check refuses it."""
+    and each one's (alpha us, beta ns a byte) in `cost` (None: the caller's alpha and beta for every link; a NaN alpha:
+    that link's), with `relays` more nodes (numbered from `nodes`, holding no rank), each node's `mark` (None: its
+    number; the bridges mark a node by its node number) and the routing table `next` (each node b's in-tree, next[v * N
+    + b] v's parent in it, for N = nodes + relays; None: none), the storage held here; refused where
+    mesh_link_map_check refuses it."""
 
-    def __init__(self, kind, nodes, pairs, cost=None):
+    def __init__(self, kind, nodes, pairs, cost=None, relays=0, next=None, mark=None):
         pairs = [tuple(p) for p in pairs]
         self.kind, self.nodes, self.pairs, self.cost = kind, nodes, pairs, None if cost is None else [tuple(c) for c in cost]
+        self.relays = relays
+        self.next, self.mark = (None if x is None else [int(v) for v in x] for x in (next, mark))
         self._link = ffi.new('uint32_t[][2]', [list(p) for p in pairs] or [[0, 0]])
         self._cost = ffi.new('double[][2]', [list(c) for c in self.cost] or [[0.0, 0.0]]) if cost is not None else ffi.NULL
+        self._next = ffi.new('uint32_t[]', self.next) if self.next else ffi.NULL
+        self._mark = ffi.new('uint32_t[]', self.mark) if self.mark else ffi.NULL
         self.c = ffi.new('struct mesh_link_map *')
         self.c.kind, self.c.nodes, self.c.links, self.c.link, self.c.cost = KINDS.index(kind), nodes, len(pairs), self._link, self._cost
+        self.c.relays, self.c.next, self.c.mark = relays, self._next, self._mark
         status = lib.mesh_link_map_check(self.c)
         if status:
-            raise ValueError(f'a {kind} of {nodes} nodes with links {pairs} is not one its algorithms run on: {os.strerror(status)}')
+            raise ValueError(f'a {kind} of {nodes} nodes and {relays} relays with links {pairs} is not one its algorithms run on: '
+                             f'{os.strerror(status)}')
 
 
-def link_map(kind, nodes, pairs, cost=None):
+def link_map(kind, nodes, pairs, cost=None, relays=0, next=None, mark=None):
     """A LinkMap (above)."""
-    return LinkMap(kind, nodes, pairs, cost)
+    return LinkMap(kind, nodes, pairs, cost, relays, next, mark)
+
+
+def routes(lmap):
+    """mesh_routes: the routing table of lmap's links by its marks (each node's in-tree of shortest routes, a parent
+    among equals the one whose link carries fewest routes so far), as a flat list N x N (LinkMap's `next`)."""
+    N = lmap.nodes + lmap.relays
+    made = ffi.new('uint32_t[]', max(1, N * N))
+    status = lib.mesh_routes(lmap.c, made)
+    if status:
+        raise ValueError(f'mesh_routes: {os.strerror(status)}')
+    return [made[k] for k in range(N * N)]
+
+
+def route(lmap, a, b):
+    """mesh_route_path: the nodes a message between a and b crosses (the one from b to a reversed), a and b included
+    ([] where none)."""
+    made = ffi.new('uint32_t[]', lmap.nodes + lmap.relays + 1)
+    return [made[i] for i in range(lib.mesh_route_path(lmap.c, a, b, made))]
+
+
+def _members(whole, members, current):
+    """mesh_map_members (current False) or mesh_map (current True): the room grown until it fits."""
+    asked = list(members or ())
+    room = ffi.new('struct mesh_link_map *', {'nodes': max(1, len(asked)), 'links': max(1, len(asked) * (len(asked) - 1) // 2)})
+    while True:
+        node, name = ffi.new('uint32_t[]', max(1, room.nodes)), ffi.new(f'char[][{lib.MESH_NAME_BYTES}]', max(1, room.nodes))
+        link, cost = ffi.new('uint32_t[][2]', max(1, room.links)), ffi.new('double[][2]', max(1, room.links))
+        table, mark = ffi.new('uint32_t[]', max(1, room.nodes * room.nodes)), ffi.new('uint32_t[]', max(1, room.nodes))
+        made = ffi.new('struct mesh_link_map *', {'nodes': room.nodes, 'links': room.links, 'link': link, 'cost': cost,
+                                                  'next': table, 'mark': mark})
+        given = ffi.new('uint32_t[]', asked) if asked else ffi.NULL
+        if current:
+            count = lib.mesh_map(given, len(asked), node, name, made)
+        else:
+            count = lib.mesh_map_members(whole.c, given, len(asked), node, made)
+        if count != -errno.ENOSPC:
+            break
+        room = made
+    if count < 0:
+        return count, None, None, None
+    N = count + made.relays
+    lmap = LinkMap(KINDS[made.kind], count, link[0:made.links], [tuple(c) for c in cost[0:made.links]], made.relays,
+                   table[0:N * N], mark[0:N])
+    return count, lmap, list(node[0:N]), [ffi.string(n).decode() for n in name[0:N]]
+
+
+def members(whole, among):
+    """mesh_map_members: the map a communicator of the whole map's nodes `among` (map node i the whole map's among[i])
+    reads, the whole map's other nodes its relays, its marks and table the whole map's (routes(whole) where it has
+    none; the bridges mark each node by its node number: link_map(..., mark=)), so two members are linked where their
+    route crosses no other member, at that route's cost: the rule mesh_map reads the bridges' records by, for a planner
+    pricing a record."""
+    count, lmap, _, _ = _members(whole, among, False)
+    if count < 0:
+        raise ValueError(f'mesh_map_members over {list(among)}: {os.strerror(-count)}')
+    return lmap
 
 
 def wait(serial=0, seconds=0.0):
@@ -65,26 +131,33 @@ def wait(serial=0, seconds=0.0):
     return made[0]
 
 
+def hops(routed):
+    """A members' map's hops over its members alone (its nodes, no relays): a pair linked where its route crosses relays
+    alone (mesh_link_between), at that route's cost (mesh_link_cost: alphas summed, the greatest beta), a mesh where
+    every pair is; the view of a members' map as rank pairs (the relays' shared links are `routed`'s alone)."""
+    pairs, cost, x, y = [], [], ffi.new('double *'), ffi.new('double *')
+    for a, b in itertools.combinations(range(routed.nodes), 2):
+        if lib.mesh_link_between(routed.c, a, b):
+            lib.mesh_link_cost(routed.c, a, b, lib.MESH_ALPHA_US, lib.MESH_BETA_NS, x, y)
+            pairs.append((a, b))
+            cost.append((x[0], y[0]))
+    kind = 'mesh' if 2 * len(pairs) == routed.nodes * (routed.nodes - 1) else 'graph'
+    return LinkMap(kind, routed.nodes, pairs, cost)
+
+
 def current(members=None):
     """mesh_map: the map this node's bridge keeps as of `serial` (wait()'s), over `members` (bridge node numbers, map
-    node v the bridge node members[v]; None: every node its records hold): `map` the LinkMap, `nodes` and `names` each
-    map node's bridge node and name, `node` this node's bridge's (mesh_observe).  OSError naming the bridge where it is
-    unreachable; ValueError (LinkMap's) where no route reaches a member."""
-    serial, asked, own = wait(), list(members or ()), ffi.new('uint32_t *')
+    node v the bridge node members[v], the other nodes its relays; None: every node its records hold): `routed` the
+    members' map as libnccl-mesh reads it (with its relays, marks and routing table: price a program on it), `map` its
+    hops over the members alone (hops()), `nodes` and `names` each map node's (then each relay's) bridge node and name,
+    `node` this node's bridge's (mesh_observe).  OSError naming the bridge where it is unreachable; ValueError (LinkMap's)
+    where no route reaches a member."""
+    serial, own = wait(), ffi.new('uint32_t *')
     lib.mesh_observe(ffi.NULL, 0, own)
-    room = ffi.new('struct mesh_link_map *', {'nodes': len(asked), 'links': len(asked) * (len(asked) - 1) // 2})
-    while True:
-        node, name = ffi.new('uint32_t[]', max(1, room.nodes)), ffi.new(f'char[][{lib.MESH_NAME_BYTES}]', max(1, room.nodes))
-        link, cost = ffi.new('uint32_t[][2]', max(1, room.links)), ffi.new('double[][2]', max(1, room.links))
-        made = ffi.new('struct mesh_link_map *', {'nodes': room.nodes, 'links': room.links, 'link': link, 'cost': cost})
-        count = lib.mesh_map(ffi.new('uint32_t[]', asked) if asked else ffi.NULL, len(asked), node, name, made)
-        if count != -errno.ENOSPC:
-            break
-        room = made
+    count, lmap, nodes, names = _members(None, members, True)
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
-    return SimpleNamespace(map=LinkMap(KINDS[made.kind], count, link[0:made.links], cost[0:made.links]), nodes=list(node[0:count]),
-                           names=[ffi.string(n).decode() for n in name[0:count]], node=own[0], serial=serial)
+    return SimpleNamespace(map=hops(lmap), routed=lmap, nodes=nodes, names=names, node=own[0], serial=serial)
 
 
 def lease(nbytes):
@@ -137,7 +210,8 @@ def path(routes, a, b):
 
 
 def shortest(lmap):
-    """mesh_trees_shortest: each node's in-tree on fewest links, as trees()."""
+    """mesh_trees_shortest: each node's in-tree of the map's routes (its table, else routes()), a node's parent the first
+    of the map's nodes on its route to the root, as trees()."""
     n = lmap.nodes
     root, parent, weight = ffi.new('uint32_t[]', n), ffi.new('uint32_t[]', n * n), ffi.new('double[]', n)
     if not lib.mesh_trees_shortest(lmap.c, root, parent, weight):
@@ -145,11 +219,12 @@ def shortest(lmap):
     return trees(n, [root[t] for t in range(n)], [[parent[t * n + v] for v in range(n)] for t in range(n)], [weight[t] for t in range(n)])
 
 
-def compile(routes, what, root=0, whole=False, contributors=None):
-    """mesh_compile: the collective `what` (WHATS index) along `routes` (trees()), a program: plain data, `c` the struct's
-    pointer and the arrays it points at, `moves` every rank's moves as tuples (op, peer, round, buffer, part, parts)."""
-    n, parts, moves = routes.nodes, ffi.new('uint32_t *'), ffi.new('uint32_t *')
-    lib.mesh_compile_room(routes.c, parts, moves)
+def compile(trees, what, root=0, whole=False, contributors=None, chunks=1):
+    """mesh_compile: the collective `what` (WHATS index) along `trees` (trees()), each tree's part cut into `chunks`
+    (pipelined), a program: plain data, `c` the struct's pointer and the arrays it points at, `moves` every rank's moves
+    as tuples (op, peer, round, buffer, part, parts)."""
+    n, parts, moves = trees.nodes, ffi.new('uint32_t *'), ffi.new('uint32_t *')
+    lib.mesh_compile_room(trees.c, chunks, parts, moves)
     segment, weight = ffi.new('uint32_t[]', parts[0]), ffi.new('double[]', parts[0])
     first, move = ffi.new('uint32_t[]', n + 1), ffi.new('struct mesh_move[]', moves[0])
     words = None
@@ -158,12 +233,36 @@ def compile(routes, what, root=0, whole=False, contributors=None):
         for m in contributors:
             words[m // 64] |= 1 << (m % 64)
     made = ffi.new('struct mesh_program *')
-    if lib.mesh_compile(routes.c, what, root, int(whole), words if words is not None else ffi.NULL, made, segment, weight, first, move):
-        raise ValueError(f'mesh_compile refused {WHATS[what]} root {root} whole {whole}')
-    return SimpleNamespace(c=made, what=what, root=root, nodes=n, scratch=made.scratch,
+    if lib.mesh_compile(trees.c, what, root, int(whole), chunks, words if words is not None else ffi.NULL, made, segment, weight, first, move):
+        raise ValueError(f'mesh_compile refused {WHATS[what]} root {root} whole {whole} chunks {chunks}')
+    return SimpleNamespace(c=made, what=what, root=root, nodes=n, scratch=made.scratch, chunks=chunks,
                            moves=[[(m.op, m.peer, m.round, m.buffer, m.part, m.parts) for m in (move[k] for k in range(first[r], first[r + 1]))]
                                   for r in range(n)],
-                           keep=(segment, weight, first, move, words, routes))
+                           keep=(segment, weight, first, move, words, trees))
+
+
+def choose(lmap, sets, what, root, piece, alpha=lib.MESH_ALPHA_US, beta=lib.MESH_BETA_NS):
+    """mesh_choose: the fastest of `what` (at `root`) along each tree set of `sets` (trees()), an all-reduce also whole,
+    cut into 1, 2, 4, ... chunks while its time falls, timed for `piece` (operand()): set (its index), whole, chunks and
+    time (us)."""
+    made = ffi.new('struct mesh_choice *')
+    held = ffi.new('struct mesh_trees[]', [t.c[0] for t in sets])
+    status = lib.mesh_choose(lmap.c, held, len(sets), what, root, piece[0], alpha, beta, made)
+    if status:
+        raise ValueError(f'mesh_choose of {WHATS[what]} root {root}: {os.strerror(status)}')
+    return SimpleNamespace(set=made.set, whole=bool(made.whole), chunks=made.chunks, time=made.time)
+
+
+def chosen(lmap, what, root, nbytes, sets=None):
+    """The program libnccl-mesh's default table runs for a call of `nbytes` on lmap (nccl-mesh.c program_of): the
+    choice (choose) at its size class, the least 2^k of at least nbytes (mesh-plan.h MESH_CLASS_LEAST ..
+    MESH_CLASS_MOST), among `sets` (None: the shortest-path and the packed trees), compiled (compile)."""
+    sets = sets or (shortest(lmap), pack(lmap))
+    k = lib.MESH_CLASS_LEAST
+    while k < lib.MESH_CLASS_MOST and (1 << k) < nbytes:
+        k += 1
+    picked = choose(lmap, sets, what, root, operand(0, 4, (1 << k) // 4))
+    return compile(sets[picked.set], what, root, picked.whole, chunks=picked.chunks)
 
 
 def steps(program, rank, piece):

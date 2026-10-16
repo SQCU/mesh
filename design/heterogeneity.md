@@ -41,7 +41,7 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 | Fact | Written in | Read by | Decides |
 |---|---|---|---|
 | Node rates | the store's node records | the derivation (`allocate.equal_finish`; this repository's models: metal-microbench `programs.py derive`) | the parts: what each node computes |
-| Links | the bridges' map, with each link's cost (`mesh_map`) | the compiled collectives (`mesh_compile` along shortest-path or packed trees, the trees packed by each link's cost; libnccl-mesh's default table or a program's own, `ncclMeshCommInitRank`, torch-mesh `Options`); the derivation, only to price collectives (R7) | the single-phase all-reduce or reduce-scatter and all-gather, and their trees: how operands travel |
+| Links | the bridges' map, with each link's cost and the routing table (`mesh_map`; a communicator's members' map keeps the other nodes as relays, `mesh_map_members`) | the compiled collectives (`mesh_compile` along shortest-path or packed trees, cut into pipelined chunks, the trees packed by each link's cost; libnccl-mesh's default table, `mesh_choose`'s fastest per collective, root and size, or a program's own, `ncclMeshCommInitRank`, torch-mesh `Options`); the derivation, only to price collectives (R7), by the same functions | the collective's form, its trees and its chunks: how operands travel |
 
 - Rates decide the parts. The map decides the algorithm.
 - A link's cost never becomes a node's rate, and a node's rate never selects an algorithm.

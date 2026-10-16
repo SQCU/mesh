@@ -84,110 +84,78 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
   }
 }
 
-/* design/bridge-and-ipc.md#ports: the one join of two nodes' records */
-static uint64_t mesh_paired(struct mesh_record *record,uint32_t node){
-  uint64_t widest=0;
+/* design/bridge-and-ipc.md#ports, #cables: the one join of two nodes' records, the cables each holds paired with the
+   other together (a program between the two is striped over every one, mesh-flow.c stripe_of): the bandwidth of one
+   end's such ports summed, 1 more each, so a cable of unknown bandwidth counts */
+static uint64_t mesh_paired(struct mesh_record *record,uint32_t node,uint64_t *cables){
+  uint64_t sum=0;
+  *cables=0;
   for(uint32_t i=0;i<record->ports && i<MESH_PORTS;i++)
     if(atomic_load_explicit(&record->port[i].phase,memory_order_relaxed)==MESH_PAIRED &&
        atomic_load_explicit(&record->port[i].peer,memory_order_relaxed)==node){
-      uint64_t bandwidth=atomic_load_explicit(&record->port[i].bandwidth,memory_order_relaxed)+1;
-      if(bandwidth>widest)widest=bandwidth;
+      sum+=atomic_load_explicit(&record->port[i].bandwidth,memory_order_relaxed)+1;
+      (*cables)++;
     }
-  return widest;
+  return sum;
 }
 int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
-  uint64_t one=mesh_paired(a,b->node),other=mesh_paired(b,a->node),widest=(one>other?one:other)-1;
-  if(!one || !other)return 0;
-  *beta=widest?8e9/(double)widest:MESH_BETA_NS;
+  uint64_t ends[2],cables[2];
+  ends[0]=mesh_paired(a,b->node,cables);ends[1]=mesh_paired(b,a->node,cables+1);
+  if(!ends[0] || !ends[1])return 0;
+  const int fewer=ends[1]<ends[0];
+  const uint64_t bandwidth=ends[fewer]-cables[fewer];
+  *beta=bandwidth?8e9/(double)bandwidth:MESH_BETA_NS;
   return 1;
 }
 
 /* The records' whole map, its nodes ascending (the records sorted by node), a link where two join, at MESH_ALPHA_US and
-   the join's beta, and its shortest-path trees (mesh-collective.c mesh_trees_shortest: tree r rooted at node r) */
-struct mesh_whole { uint32_t n,(*link)[2],*root,*parent; double (*cost)[2],*weight; struct mesh_link_map map; uint32_t trees; };
+   the join's beta, and its routing table (mesh-collective.c mesh_routes, each node marked by its bridge's number, so
+   every bridge and member that holds the same records makes the same routes) */
+struct mesh_whole { uint32_t n,(*link)[2],*mark,*next; double (*cost)[2]; struct mesh_link_map map; };
 static int mesh_node_order(const void *a,const void *b){
   uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
   return (x>y)-(x<y);
 }
-static void mesh_whole_free(struct mesh_whole *w){free(w->link);free(w->cost);free(w->root);free(w->parent);free(w->weight);}
+static void mesh_whole_free(struct mesh_whole *w){free(w->link);free(w->cost);free(w->mark);free(w->next);}
 static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w){
   qsort(r,n,sizeof *r,mesh_node_order);
   size_t pairs=(size_t)n*(n?n-1:0)/2+1;
   *w=(struct mesh_whole){.n=n,.link=malloc(pairs*sizeof *w->link),.cost=malloc(pairs*sizeof *w->cost),
-    .root=malloc(((size_t)n+1)*sizeof *w->root),.parent=malloc(((size_t)n*n+1)*sizeof *w->parent),.weight=malloc(((size_t)n+1)*sizeof *w->weight)};
-  if(!w->link || !w->cost || !w->root || !w->parent || !w->weight)return ENOMEM;
+    .mark=malloc(((size_t)n+1)*sizeof *w->mark),.next=malloc(((size_t)n*n+1)*sizeof *w->next)};
+  if(!w->link || !w->cost || !w->mark || !w->next)return ENOMEM;
   uint32_t links=0;
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)if(mesh_joined(r+a,r+b,&w->cost[links][1])){
-    w->link[links][0]=a;w->link[links][1]=b;w->cost[links][0]=MESH_ALPHA_US;links++;
+  for(uint32_t a=0;a<n;a++){
+    w->mark[a]=r[a].node;
+    for(uint32_t b=a+1;b<n;b++)if(mesh_joined(r+a,r+b,&w->cost[links][1])){
+      w->link[links][0]=a;w->link[links][1]=b;w->cost[links][0]=MESH_ALPHA_US;links++;
+    }
   }
-  w->map=(struct mesh_link_map){.kind=MESH_LINKS_GRAPH,.nodes=n,.links=links,.link=w->link,.cost=w->cost};
-  w->trees=n?mesh_trees_shortest(&w->map,w->root,w->parent,w->weight):0;
-  return 0;
-}
-/* The route between whole-map nodes a and b on fewest links: the lower's path up the higher's tree (mesh_trees_path),
-   from a to b; its node count (0: none, the map not connected) */
-static uint32_t mesh_whole_route(const struct mesh_whole *w,uint32_t a,uint32_t b,uint32_t *path){
-  if(a>=w->n || b>=w->n || a==b || w->trees!=w->n)return 0;
-  const struct mesh_trees trees={.nodes=w->n,.count=w->trees,.root=w->root,.parent=w->parent,.log_weight=w->weight};
-  uint32_t count=mesh_trees_path(&trees,a<b?a:b,a<b?b:a,path);
-  for(uint32_t i=0;a>b && i<count/2;i++){uint32_t t=path[i];path[i]=path[count-1-i];path[count-1-i]=t;}
-  return count;
-}
-static uint32_t mesh_part(uint32_t *part,uint32_t v){
-  while(part[v]!=v)v=part[v]=part[part[v]];
-  return v;
+  w->map=(struct mesh_link_map){.kind=MESH_LINKS_GRAPH,.nodes=n,.links=links,.link=w->link,.cost=w->cost,.relays=0,.next=NULL,.mark=w->mark};
+  const int error=n?mesh_routes(&w->map,w->next):0;
+  if(!error)w->map.next=w->next;
+  return error;
 }
 
-/* design/algorithm-sources.md#meshobserve: mesh-plan.h mesh_map over a copy of the records */
+/* design/algorithm-sources.md#meshobserve: mesh-plan.h mesh_map over a copy of the records: the whole map's
+   mesh_map_members over the members' records (count: a member no record holds) */
 static int mesh_records_map(struct mesh_record *r,uint32_t count,const uint32_t *members,uint32_t n,uint32_t *node,
                             char (*name)[MESH_NAME_BYTES],struct mesh_link_map *map){
   struct mesh_whole w;
   int error=mesh_whole_make(r,count,&w);
-  const uint32_t N=n?n:count,room=map->links;
-  uint32_t *at=malloc(((size_t)N+1)*sizeof *at),*place=malloc(((size_t)count+1)*sizeof *place),*part=malloc(((size_t)N+1)*sizeof *part),
-    *path=malloc(((size_t)count+1)*sizeof *path),links=0;
-  if(!error && (!at || !place || !part || !path))error=ENOMEM;
-  /* map node i is record at[i] (count: none), record k map node place[k] (N: none) */
-  for(uint32_t k=0;!error && k<count;k++)place[k]=n?N:k;
-  for(uint32_t i=0;!error && i<N;i++){
-    at[i]=n?count:i;part[i]=i;
-    for(uint32_t k=0;n && k<count;k++)if(r[k].node==members[i]){at[i]=k;place[k]=i;}
+  uint32_t *index=malloc(((size_t)n+1)*sizeof *index),*whole=malloc(((size_t)map->nodes+1)*sizeof *whole);
+  if(!error && (!index || !whole))error=ENOMEM;
+  for(uint32_t i=0;!error && i<n;i++){
+    index[i]=count;
+    for(uint32_t k=0;k<count;k++)if(r[k].node==members[i])index[i]=k;
   }
-  /* the map nodes' own links, as the whole map holds them */
-  for(uint32_t l=0;!error && l<w.map.links;l++){
-    const uint32_t a=place[w.link[l][0]],b=place[w.link[l][1]];
-    if(a==N || b==N)continue;
-    if(links<room){map->link[links][0]=a;map->link[links][1]=b;map->cost[links][0]=w.cost[l][0];map->cost[links][1]=w.cost[l][1];}
-    links++;part[mesh_part(part,a)]=mesh_part(part,b);
+  int made=error?-error:mesh_map_members(&w.map,n?index:NULL,n,whole,map);
+  for(uint32_t i=0;made>=0 && i<(uint32_t)made+map->relays;i++){
+    if(node)node[i]=i<(uint32_t)made && n?members[i]:r[whole[i]].node;
+    if(name && whole[i]<count)memcpy(name[i],r[whole[i]].name,MESH_NAME_BYTES);
+    else if(name)name[i][0]=0;
   }
-  /* members left in parts: the routed pair of least cost across two parts linked at its route's cost (its links'
-     alphas summed, and their betas), until one part remains or no route joins two [Kruskal 1956] */
-  for(uint32_t best[2]={0,0};!error && n && best[0]<N;){
-    double least[2]={0,0};
-    best[0]=N;
-    for(uint32_t a=0;a<N;a++)for(uint32_t b=a+1;b<N;b++){
-      uint32_t hops=mesh_part(part,a)==mesh_part(part,b)?0:mesh_whole_route(&w,at[a],at[b],path);
-      double alpha=0,beta=0,link[2];
-      if(hops<2)continue;
-      for(uint32_t h=0;h+1<hops;h++){mesh_link_cost(&w.map,path[h],path[h+1],MESH_ALPHA_US,MESH_BETA_NS,link,link+1);alpha+=link[0];beta+=link[1];}
-      if(best[0]==N || alpha<least[0] || (alpha==least[0] && beta<least[1])){best[0]=a;best[1]=b;least[0]=alpha;least[1]=beta;}
-    }
-    if(best[0]==N)break;
-    if(links<room){map->link[links][0]=best[0];map->link[links][1]=best[1];map->cost[links][0]=least[0];map->cost[links][1]=least[1];}
-    links++;part[mesh_part(part,best[0])]=mesh_part(part,best[1]);
-  }
-  if(!error && (map->nodes<N || room<links)){map->nodes=N;map->links=links;error=ENOSPC;}
-  else if(!error){
-    for(uint32_t i=0;i<N;i++){
-      if(node)node[i]=n?members[i]:r[i].node;
-      if(name && at[i]<count)memcpy(name[i],r[at[i]].name,MESH_NAME_BYTES);
-      else if(name)name[i][0]=0;
-    }
-    map->nodes=N;map->links=links;
-    map->kind=(uint64_t)links*2==(uint64_t)N*(N-1)?MESH_LINKS_MESH:MESH_LINKS_GRAPH;
-  }
-  free(at);free(place);free(part);free(path);mesh_whole_free(&w);
-  return error?-error:(int)N;
+  free(index);free(whole);mesh_whole_free(&w);
+  return made;
 }
 
 int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH_NAME_BYTES],struct mesh_link_map *map){
@@ -250,9 +218,12 @@ uint32_t mesh_route(struct hdr *m,uint32_t from,uint32_t to,uint32_t **path){
   uint32_t hops=0,a=UINT32_MAX,b=UINT32_MAX,*nodes=count>0?malloc(((size_t)count+1)*sizeof *nodes):NULL;
   struct mesh_whole w={0};
   if(nodes && !mesh_whole_make(r,(uint32_t)count,&w)){
-    for(uint32_t k=0;k<(uint32_t)count;k++){if(r[k].node==from)a=k;if(r[k].node==to)b=k;}
-    hops=mesh_whole_route(&w,a,b,nodes);
+    const uint32_t n=(uint32_t)count;
+    for(uint32_t k=0;k<n;k++){if(r[k].node==from)a=k;if(r[k].node==to)b=k;}
+    /* the table's route between a and b (mesh-plan.h mesh_route_path: the one from b to a reversed) */
+    hops=a<n && b<n?mesh_route_path(&w.map,a,b,nodes):0;
     for(uint32_t i=0;i<hops;i++)nodes[i]=r[nodes[i]].node;
+    if(hops && nodes[hops-1]!=to)hops=0;
   }
   mesh_whole_free(&w);free(r);
   if(!hops){free(nodes);nodes=NULL;}
@@ -276,6 +247,10 @@ void mesh_retire(struct hdr *m,uint64_t client){
     }
   }
   atomic_store_explicit(&slot->owner,0,memory_order_release);
+  /* a start waiting on its destinations' status (mesh-call.c mesh_transfers_start) reads the slot gone at once: a
+     revoke from another thread of its process retires the program it waits for (nccl-mesh.c ncclCommRevoke) */
+  for(uint32_t d=0;d<MESH_DESTINATIONS && slot->tx[d].node;d++)
+    os_sync_wake_by_address_all(&slot->status[d].prepared,sizeof slot->status[d].prepared,OS_SYNC_WAKE_BY_ADDRESS_SHARED);
   /* design/prepared-machine.md#M26 */
   mesh_notify(&m->control);
 }

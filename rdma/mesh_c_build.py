@@ -4,8 +4,8 @@ module is compiled against the same headers, so no Python layout or prototype is
 runs it with the interpreter that will import it (torch-mesh's venv by default); the module lands beside the headers.
 Text the binder cannot take as written is left to the compiler: a C++-only block is skipped, an #include and a
 function-like #define are dropped, an object-like #define of an integer expression and an enum value written as an
-expression are `...` (the compiled module reads them from the header), and one of anything else (a string, a float,
-NULL, an initializer) is dropped."""
+expression are `...` and one of a floating literal a static const double (the compiled module reads them from the
+header), and one of anything else (a string, NULL, an initializer) is dropped."""
 import os
 import re
 import sys
@@ -15,6 +15,7 @@ import cffi
 RDMA = os.path.dirname(os.path.abspath(__file__))
 HEADERS = ('mesh-plan.h', 'nccl.h')
 LITERAL = r'-?(?:0x[0-9a-fA-F]+|\d+)[uUlL]*'
+FLOATING = r'-?\d+\.\d*(?:[eE][-+]?\d+)?'
 
 
 def declarations(text):
@@ -40,6 +41,8 @@ def declarations(text):
                 defined = re.match(r'define\s+([A-Za-z_]\w*)\s+(.+?)\s*$', directive)
                 if defined and re.fullmatch(LITERAL, defined.group(2)):
                     out.append(f'#define {defined.group(1)} {defined.group(2)}')
+                elif defined and re.fullmatch(FLOATING, defined.group(2)):
+                    out.append(f'static const double {defined.group(1)};')
                 elif defined and re.fullmatch(r'[\w\s()+\-*/<>|&~^]+', defined.group(2)) and defined.group(2) != 'NULL':
                     out.append(f'#define {defined.group(1)} ...')
             continue
