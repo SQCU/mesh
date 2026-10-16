@@ -52,6 +52,14 @@ that share a cable share its time. A later session reads the map again, so a rec
 node gone reaches the next session with no edit and no restart. The planner prices a record's members by the same
 function (`mesh_map_members`, Python `mesh.members`; `mesh.current().map` is the members' map itself).
 
+The bridges' records are a map whatever their cabling: while a cable is out, a node that still has a record may have
+no link, and the whole map (`mesh.current()` with no members, `mesh_map` over none, mesh-stat's `map`) holds it as it
+is. `mesh_link_map_check` refuses only what is no map; whether a map joins every two of its nodes is
+`mesh_link_map_joined` (Python `mesh.joined`, which names the first two it leaves apart). The trees, the collectives and
+a session run only on a map that joins its members: `mesh.current(members)` and `mesh.members` raise ValueError naming
+two members no route joins, and a session on such a map fails as a value naming them (`ncclRemoteError`, "has no
+route").
+
 Before any group runs, the members agree: each publishes its digest of what its programs are made from (the route
 between each two members and the costs of the links it crosses, the planner's version `MESH_PLAN_VERSION`, the
 session's wire, its tree sets, the caller's paths and programs) on every channel, at the session's first position, and
@@ -93,13 +101,39 @@ table (`mesh.compile` in Python, `chunks` the cut). Nothing about routing is dec
     (`commandEncoder`) between the commands before and after it, every binding through that argument table (at least
     six buffer bindings; each dispatch's arguments a record of the library's ring, never `setBytes`), on pipelines of
     the caller's device, the library's buffers added to the caller's `residencySet`; nothing is committed or
-    signalled. `ncclMeshEncodeMetal4(comm, op, send, recv, count, type, encoder, table, residency)` is the all-reduce
-    spelled so; every collective and group takes the stream. Its waits are bounded (`nccl-mesh-metal.h`
-    `METAL_POLLS`, 2^16 loads of a completion word the bridge writes): one that reaches its bound records its position
-    in the session's words, every later dispatch of the session does nothing, and `ncclCommGetAsyncError` (or the next
-    group) returns the failure after the window. Without a workspace its scratch is the communicator's, so such a
-    group completes in its encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
+    signalled. `ncclMeshEncodeMetal4(comm, op, send, recv, count, type, encoder, table, residency, polls)` is the
+    all-reduce spelled so; every collective and group takes the stream. Its waits are bounded by the stream's `polls`,
+    which it requires ([Bounded waits](#bounded-waits)). Without a workspace its scratch is the communicator's, so such
+    a group completes in its encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
     (metal-microbench docs/kernels.md#any-program).
+  - A wait is a kernel polling its position's completion word, a word of the session's that its canceller ends (a
+    link silent for `MESH_SILENT_NS`, a lost link, a revoke: design/recovery.md Q16), and the stream's `polls` bounds
+    it ([Bounded waits](#bounded-waits)).
+
+### Bounded waits
+
+`ncclMeshStream.polls` is the most loads of a completion word one wait of the group makes (`rdma/mesh.metal`
+`mesh_wait_bounded`): the caller's bound for the group's crossings, carried per crossing, not a constant of the
+library's. A wait that reaches it records its position, its channel and the bound in the session's violation words,
+every later dispatch of the session does nothing, and the group fails as a value after its command buffer
+(`ncclCommGetAsyncError`, or the communicator's next group: "landed nothing within N polls"). The Metal 4 form
+requires a bound (`ncclInvalidArgument` without one): a window the caller commits as one command buffer must not hold
+the GPU for a wait no plan expects. Elsewhere 0 leaves a wait to its landing or its cancellation, as torch-mesh's
+waits are. `ncclMeshComplete` bounds the completion's waits by the stream it is given.
+
+The caller derives the bound from its plan: the lag it expects at the crossing (the record's wait there, times the
+margin its plan names) over the period of one load on the node's GPU. That period, read on the idle Mini (M4 Pro,
+2026-10-16; metal-microbench output_data/library-20261015/round3 `poll_period.m`, a word nothing writes, waited on in
+both of the library's shapes, one thread and thread 0 of a 1,024-thread group, 256 to 65,536 polls a dispatch):
+
+| GPU | clock | ns a load |
+|---|---|---|
+| M4 Pro (Mini) | working (after ~4 ms of work; 65,536 polls in 16.4 to 16.8 ms) | 251 to 265 (fit 253 to 255) |
+| M4 Pro (Mini) | rising (an idle GPU's first ~4 ms of work) | 1,004 to 1,097 |
+| M5 Max | not read (its GPU runs the operator's work) | |
+
+So a bound stands for at least polls x 251 ns on the Mini (the time past which a late peer fails the call) and holds
+the GPU at most about polls x 1.1 us (a wait that never lands, before the canceller's 10 s).
 
 Types: the Metal path moves the integer types, float16, float32, bfloat16 and fp8 (e4m3fn, e5m2: decoded, combined in
 float32 and encoded to nearest even as the host does, overflow to NaN or infinity; metal-microbench docs/kernels.md
@@ -209,7 +243,11 @@ A session's footprint in its node's window is `ncclMeshSessionBytes(peers, wire,
 `mesh.session_bytes(peers)`): toward each other member its four rings (16 slots each way of each class) and its transfer
 lists, then its SEND cells, completion words, cancellation ranges and violation page. A session binds every other
 member of its communicator (a point-to-point call may name any, and its members' agreement meets on those channels
-whatever map each read); a split or shrink is a communicator of its own, with its own session.
+whatever map each read); a split or shrink is a communicator of its own, with its own session. A relay's is
+`ncclMeshRelayBytes(wire, &bytes)` (Python `mesh.relay_bytes()`): what its bridge leases for one direction of a session
+its route crosses (`mesh-flow.c` mirror: the direction's two rings, `mesh.h` `mesh_relay_slot`, the lists of its two
+destinations and its SEND cells and targets; 8,716,288 bytes on the default wire of a 16 KiB block), one lease and one
+client slot of that bridge a direction, both directions of every two members of a session whose route crosses it.
 
 ## Environment
 

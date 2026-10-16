@@ -987,7 +987,10 @@ takes part. For the distinct realized legs E and a cut C, payload traffic is
 `struct mesh_link_map` (mesh-plan.h): MLX authors' [JACCL hostfile](https://github.com/ml-explore/mlx/blob/main/docs/src/usage/distributed.rst#defining-a-mesh) supplies the full-mesh special case; Patarasuk–Yuan, [Bandwidth Optimal All-reduce Algorithms for Clusters of Workstations](https://www.cs.fsu.edu/~xyuan/paper/09jpdc.pdf) (2009), supplies tree-connectivity sufficiency.
 A map is an operand: its kind (mesh, ring, tree, graph), its nodes, its links and each link's cost (α, β; Hockney
 1994). Trees, rings with spurs, tori and full meshes are graphs of one representation, and `mesh_link_map_check`
-admits any connected one. Neither source establishes that this runtime achieves the paper's bandwidth bound.
+admits any of them, joined or not: the bridges' records while a cable is out are a map with a node no link joins.
+Whether a map joins its nodes is `mesh_link_map_joined`, and the trees, collectives and sessions run only on one that
+joins its members (the tree-connectivity the paper's sufficiency needs). Neither source establishes that this runtime
+achieves the paper's bandwidth bound.
 
 A members' map (`mesh_map_members`, which `mesh_map` reads the bridges' records by and a planner prices a record's
 members by) keeps every node of the whole map: the members first, the others relays that hold no rank, every link,

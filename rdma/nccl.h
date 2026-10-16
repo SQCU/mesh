@@ -70,9 +70,17 @@
    issue pointer stays valid until ncclGroupEnd returns.  ncclMeshComplete completes it, with every group issued before
    it, on a later stream of the same queue; its operands are not touched until then.  A group without issue completes at
    once, with every group before it; a host-path group fails while groups are issued and not complete.  A wait is a
-   kernel polling its position's completion word (rdma/mesh.metal mesh_remote_wait).  The Metal 4 form: a stream whose
-   argumentTable (an id<MTL4ArgumentTable>) is set, commandEncoder then an id<MTL4ComputeCommandEncoder> and residencySet
-   an id<MTLResidencySet> (commandBuffer not read): ncclMeshEncodeMetal4, below.
+   kernel polling its position's completion word (rdma/mesh.metal mesh_remote_wait), a word of the session's that its
+   canceller ends (design/recovery.md Q16: a lost or silent link, a revoke).  The stream's `polls` bounds it: the most
+   loads of the word a wait makes (mesh_wait_bounded), the caller's bound for the group's crossings, which it derives
+   from its plan (the lag it expects at them, over the period of one load on the node's GPU: rdma/NCCL.md "Bounded
+   waits"); a wait that reaches it leaves its position, its channel and its bound in the session's violation words, every
+   later dispatch of the session does nothing, and the group fails as a value after its command buffer
+   (ncclCommGetAsyncError, or the communicator's next group).  0: a wait ends only at its landing or its cancellation.
+   The Metal 4 form: a stream whose argumentTable (an id<MTL4ArgumentTable>) is set, commandEncoder then an
+   id<MTL4ComputeCommandEncoder> and residencySet an id<MTLResidencySet> (commandBuffer not read), and polls at least 1
+   (ncclInvalidArgument without: no window of the caller's runs a wait the bound does not end): ncclMeshEncodeMetal4,
+   below.
 
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and on which each communicator's session takes
@@ -143,6 +151,7 @@ typedef struct {
   ncclMeshIssue *issue;
   void *argumentTable;
   void *residencySet;
+  uint32_t polls;
 } ncclMeshStream;
 /* ncclCollConfig_t.launchCompletionEvent: not used; must be NULL. */
 typedef void *cudaEvent_t;
@@ -843,8 +852,9 @@ typedef struct { const struct mesh_program* program; uint64_t below; } ncclMeshP
 ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, int rank, const struct mesh_trees* paths,
                                   const ncclMeshProgram* programs, int count, const int* node, const char* name);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
-   commandEncoder; issue and workspace not read); *published (may be NULL) whether a publication was encoded.  A
-   ticket already complete encodes nothing; one whose session failed returns the failure. */
+   commandEncoder, or the Metal 4 form's, and its polls; issue and workspace not read); *published (may be NULL)
+   whether a publication was encoded.  A ticket already complete encodes nothing; one whose session failed returns the
+   failure. */
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream* stream, int* published);
 /* The highest ticket through which every issued group is complete (or lost with a failed session): its
    workspace may be reused in the stream's order. */
@@ -854,25 +864,31 @@ uint64_t ncclMeshRetired(void);
    lists, SEND cells and completion words and its violation page, each a lease of whole blocks.  A session binds a
    channel toward every other member of its communicator (a point-to-point call may name any, and its members' agreement
    meets on them whatever map each read), and a split or shrink is a communicator of its own with a session of its own,
-   sharing none with its parent's.  The rows a relay's bridge leases for a route it forwards are the bridge's
-   (design/bridge-and-ipc.md#region), not counted here. */
+   sharing none with its parent's.  What a relay's bridge leases for a route it forwards is ncclMeshRelayBytes's. */
 ncclResult_t ncclMeshSessionBytes(int peers, const struct mesh_wire* wire, uint64_t* bytes);
+/* The bytes of its node's window a relay's bridge leases for one direction of a session on `wire` that its route
+   crosses (mesh-flow.c mirror, design/bridge-and-ipc.md#routes): the direction's two rings mirrored (mesh.h
+   mesh_relay_slot), the lists of its two destinations and its SEND cells and targets, each a lease of whole blocks;
+   one such lease, and one client slot of the relay's bridge (mesh.h MESH_CLIENTS), a direction a route crosses, both
+   directions of every two members of a session whose route crosses the node, whatever their stripes. */
+ncclResult_t ncclMeshRelayBytes(const struct mesh_wire* wire, uint64_t* bytes);
 /* The Metal 4 form of a crossing (a stream whose argumentTable is set; Metal path, above): an all-reduce of `count`
    elements of `type` by `op` from sendbuff to recvbuff (each an ncclMeshBuffer) on comm, encoded into the caller's
    id<MTL4ComputeCommandEncoder> `encoder` as compute dispatches between the commands before and after it, bound
    through the caller's id<MTL4ArgumentTable> `table` (at least 6 buffer bindings; no setBytes, the arguments records
    of the library's ring), on pipelines of the caller's device (the residency set's), every buffer of the library's it
    touches added to the caller's id<MTLResidencySet> `residency` (committed where one was added).  Nothing is committed
-   or signalled: the caller commits its command buffer.  Its waits are bounded GPU polls (nccl-mesh-metal.h METAL_POLLS)
-   on the words the bridge writes, never a spin on another queue's work; one that reaches its bound leaves its position
-   in the session's words, every later dispatch of the session does nothing, and ncclCommGetAsyncError (or the
-   communicator's next group) returns the failure as a value after the window.  The group completes in the encoder:
-   with no workspace its scratch is the communicator's, reused in the encoder's order.  Total over any member set: comm
-   is any communicator (ncclMeshCommInitRank's: the engine's MeshRankGroup), its program the one its map chooses.  The
-   same as ncclAllReduce on an ncclMeshStream of {.commandEncoder = encoder, .argumentTable = table, .residencySet =
-   residency}, which every other collective and group also takes. */
+   or signalled: the caller commits its command buffer.  Its waits are GPU polls bounded by `polls` (at least 1: the
+   caller's bound for this crossing, the Metal path's `polls` above) on the words the bridge writes and the session's
+   canceller ends, never a spin on another queue's work; one that reaches its bound leaves its position in the
+   session's words, every later dispatch of the session does nothing, and ncclCommGetAsyncError (or the communicator's
+   next group) returns the failure as a value after the window.  The group completes in the encoder: with no workspace
+   its scratch is the communicator's, reused in the encoder's order.  Total over any member set: comm is any
+   communicator (ncclMeshCommInitRank's: the engine's MeshRankGroup), its program the one its map chooses.  The same as
+   ncclAllReduce on an ncclMeshStream of {.commandEncoder = encoder, .argumentTable = table, .residencySet = residency,
+   .polls = polls}, which every other collective and group also takes. */
 ncclResult_t ncclMeshEncodeMetal4(ncclComm_t comm, ncclRedOp_t op, const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t type,
-                                  void* encoder, void* table, void* residency);
+                                  void* encoder, void* table, void* residency, uint32_t polls);
 /* Every lease this process holds (ncclMemAlloc) is of its node's bridge that runs: ncclSuccess, or ncclRemoteError
    where one is of a bridge that stopped, its pages no longer registered (Memory, above).  A process that holds leases
    and makes no other call (a server between calls) reads it to know its leases are to be freed and taken again. */

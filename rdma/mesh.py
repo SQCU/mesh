@@ -3,7 +3,8 @@ no layout or prototype here is written by hand; `make mesh-c` builds it for this
 node's bridge's: current() is the map it keeps (mesh_map) and wait() the map's serial (mesh_map_wait).  The planner is
 the header's own: link maps, the trees every collective and message take, operands, collectives, steps, their
 planning and pricing on the wire libnccl-mesh's sessions run (wire(), mesh_program_time: as the library runs a program,
-every position a whole slot).  Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its
+every position a whole slot), and the window a session takes on each member and on each relay its routes cross
+(session_bytes, relay_bytes).  Collectives run through libnccl-mesh (mesh_mpi for NumPy, torch-mesh for torch); lease() is its
 ncclMemAlloc, the memory they move taken from the node's bridge's window (rdma/NCCL.md "Memory")."""
 import errno
 import os
@@ -41,7 +42,8 @@ class LinkMap:
     that link's), with `relays` more nodes (numbered from `nodes`, holding no rank), each node's `mark` (None: its
     number; the bridges mark a node by its node number) and the routing table `next` (each node b's in-tree, next[v * N
     + b] v's parent in it, for N = nodes + relays; None: none), the storage held here; refused where
-    mesh_link_map_check refuses it."""
+    mesh_link_map_check refuses it (no map).  A graph need not join its nodes (the bridges' records while a cable is
+    out); joined() says whether it does, and the trees and collectives run only where it does."""
 
     def __init__(self, kind, nodes, pairs, cost=None, relays=0, next=None, mark=None):
         pairs = [tuple(p) for p in pairs]
@@ -64,6 +66,26 @@ class LinkMap:
 def link_map(kind, nodes, pairs, cost=None, relays=0, next=None, mark=None):
     """A LinkMap (above)."""
     return LinkMap(kind, nodes, pairs, cost, relays, next, mark)
+
+
+def joined(lmap):
+    """mesh_link_map_joined: None where lmap joins every two of its nodes (a graph's links connect them; with a table
+    every route between two of them reaches), else the first two it does not join, (a, b), a the lower."""
+    apart = ffi.new('uint32_t[2]')
+    status = lib.mesh_link_map_joined(lmap.c, apart)
+    if status == errno.ENOTCONN:
+        return apart[0], apart[1]
+    if status:
+        raise ValueError(f'mesh_link_map_joined: {os.strerror(status)}')
+    return None
+
+
+def _apart(lmap, named, nodes):
+    """ValueError naming the first two of `nodes` (map node v's name nodes[v]) lmap does not join, where it does not:
+    the map a communicator of them reads, which no collective runs on."""
+    pair = joined(lmap)
+    if pair is not None:
+        raise ValueError(f'{named}: no route of the map joins {nodes[pair[0]]} and {nodes[pair[1]]}')
 
 
 def routes(lmap):
@@ -121,9 +143,11 @@ def members(whole, among, marks=None):
     again by these)."""
     if marks is not None:
         whole = LinkMap(whole.kind, whole.nodes, whole.pairs, whole.cost, whole.relays, None, marks)
-    count, lmap, _, _ = _members(whole, among, False)
+    among = None if among is None else list(among)
+    count, lmap, nodes, _ = _members(whole, among, False)
     if count < 0:
-        raise ValueError(f'mesh_map_members over {list(among)}: {os.strerror(-count)}')
+        raise ValueError(f'mesh_map_members over {among}: {os.strerror(-count)}')
+    _apart(lmap, f'mesh_map_members over {among}', [f'whole-map node {v}' for v in nodes])
     return lmap
 
 
@@ -143,13 +167,17 @@ def current(members=None):
     `map` the members' map as libnccl-mesh reads it, the one map to price a program on (its relays, a link a cable, at
     its cost, `mark` each node's bridge node number, `next` the routing table the bridges forward along; members(map,
     ...) of the whole map is the map over any of them), `nodes` and `names` each map node's (then each relay's) bridge
-    node and name, `node` this node's bridge's (mesh_observe).  OSError naming the bridge where it is unreachable;
-    ValueError (LinkMap's) where no route reaches a member."""
+    node and name, `node` this node's bridge's (mesh_observe).  The whole map (members None) is the records as they are,
+    a node no cable joins among its nodes (joined() names two it leaves apart).  OSError naming the bridge where it is
+    unreachable; ValueError naming two members no route joins, where `members` are given and the map leaves them apart
+    (no session runs on it: nccl-mesh.c comm_read)."""
     serial, own = wait(), ffi.new('uint32_t *')
     lib.mesh_observe(ffi.NULL, 0, own)
     count, lmap, nodes, names = _members(None, members, True)
     if count < 0:
         raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
+    if members:
+        _apart(lmap, f"the bridges' map over {list(members)}", [f'node {v} ({names[i] or "no record"})' for i, v in enumerate(nodes)])
     return SimpleNamespace(map=lmap, nodes=nodes, names=names, node=own[0], serial=serial)
 
 
@@ -172,6 +200,17 @@ def session_bytes(peers, wire_=None):
     made = ffi.new('uint64_t *')
     if lib.ncclMeshSessionBytes(peers, wire_ if wire_ is not None else wire(), made):
         raise ValueError(f'ncclMeshSessionBytes of {peers} peers')
+    return made[0]
+
+
+def relay_bytes(wire_=None):
+    """ncclMeshRelayBytes: the bytes of its node's window a relay's bridge leases for one direction of a session on
+    `wire_` (wire(): None, this process's) that its route crosses (mesh-flow.c mirror): one such lease, and one client
+    slot of its bridge (mesh.h MESH_CLIENTS), a direction of two members of a session whose route crosses the node,
+    whatever its stripes; session_bytes (above) is what each member's own bridge leases."""
+    made = ffi.new('uint64_t *')
+    if lib.ncclMeshRelayBytes(wire_ if wire_ is not None else wire(), made):
+        raise ValueError('ncclMeshRelayBytes')
     return made[0]
 
 

@@ -53,6 +53,19 @@ int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node){
   munmap(m,length);return result;
 }
 
+/* design/bridge-and-ipc.md#region: the flows and awaiting programs the bridge holds and the wall clock (ns) at which it
+   last held none (0 while it holds any).  The bridge stores idle_since before busy (mesh-flow.c busy_tell), and
+   idle_since is never 0 while it holds none (the region's boot from its start), so a read that meets it as it becomes
+   busy (busy 0 and idle_since 0: the old count, the new time) is a busy one and is told as one */
+int mesh_busy(uint64_t *busy,uint64_t *idle_since){
+  struct hdr *m;size_t length;
+  int error=mesh_open(0,&m,&length,NULL);
+  if(error)return -error;
+  *busy=atomic_load_explicit(&m->busy,memory_order_acquire);*idle_since=atomic_load_explicit(&m->idle_since,memory_order_acquire);
+  if(!*busy && !*idle_since)*busy=1;
+  munmap(m,length);return 0;
+}
+
 /* design/bridge-and-ipc.md#region */
 int mesh_window(uint64_t *bytes,uint64_t *unleased){
   struct hdr *m;size_t length;

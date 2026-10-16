@@ -113,42 +113,59 @@ int mesh_link_map_check(const struct mesh_link_map *map){
       const uint32_t to=map->next[(size_t)a*N+b];
       if(to>=N || (a==b && to!=a) || (to!=a && !mesh_joins(map,a,to)))return EINVAL;
     }
-    uint32_t path[N+1];
-    for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++)if(a!=b && !mesh_route_nodes(map,a,b,path))return EINVAL;
     return 0;
   }
-  if(map->kind==MESH_LINKS_MESH)return 0;
-  uint32_t *up=malloc((size_t)n*sizeof *up),*order=malloc((size_t)n*sizeof *order);
-  if(!up || !order){free(up);free(order);return ENOMEM;}
+  if(map->kind==MESH_LINKS_MESH || map->kind==MESH_LINKS_GRAPH)return 0;
+  uint32_t *up=malloc((size_t)n*sizeof *up);
+  if(!up)return ENOMEM;
   int result=0;
-  if(map->kind==MESH_LINKS_GRAPH){
-    /* connected: breadth first from node 0 over the links either way */
-    uint32_t reached=1;
-    for(uint32_t v=0;v<n;v++)up[v]=n;
-    up[0]=0;order[0]=0;
-    for(uint32_t head=0;head<reached;head++)for(uint32_t l=0;l<map->links;l++)for(uint32_t e=0;e<2;e++)
-      if(map->link[l][e]==order[head] && up[map->link[l][1-e]]==n){up[map->link[l][1-e]]=order[head];order[reached++]=map->link[l][1-e];}
-    result=reached==n?0:EINVAL;
-  }else{
-    for(uint32_t v=0;v<n;v++)up[v]=n;
-    for(uint32_t l=0;l<map->links && !result;l++){
-      if(up[map->link[l][1]]<n)result=EINVAL;
-      else up[map->link[l][1]]=map->link[l][0];
-    }
-    if(!result && map->kind==MESH_LINKS_RING){
-      at=0;steps=0;
-      do{at=up[at];steps++;}while(at<n && at && steps<n);
-      result=at==0 && steps==n?0:EINVAL;
-    }else if(!result){
-      if(map->links!=n-1)result=EINVAL;
-      for(uint32_t v=0;v<n && !result;v++){
-        for(at=v,steps=0;up[at]<n && steps<n;steps++)at=up[at];
-        if(up[at]<n)result=EINVAL;
-      }
+  for(uint32_t v=0;v<n;v++)up[v]=n;
+  for(uint32_t l=0;l<map->links && !result;l++){
+    if(up[map->link[l][1]]<n)result=EINVAL;
+    else up[map->link[l][1]]=map->link[l][0];
+  }
+  if(!result && map->kind==MESH_LINKS_RING){
+    at=0;steps=0;
+    do{at=up[at];steps++;}while(at<n && at && steps<n);
+    result=at==0 && steps==n?0:EINVAL;
+  }else if(!result){
+    if(map->links!=n-1)result=EINVAL;
+    for(uint32_t v=0;v<n && !result;v++){
+      for(at=v,steps=0;up[at]<n && steps<n;steps++)at=up[at];
+      if(up[at]<n)result=EINVAL;
     }
   }
-  free(up);free(order);
+  free(up);
   return result;
+}
+
+int mesh_link_map_joined(const struct mesh_link_map *map,uint32_t *apart){
+  const int form=mesh_link_map_check(map);
+  if(form)return form;
+  const uint32_t n=map->nodes;
+  if(map->next){
+    uint32_t path[mesh_all(map)+1];
+    for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)
+      if(!mesh_route_nodes(map,a,b,path)){
+        if(apart){apart[0]=a;apart[1]=b;}
+        return ENOTCONN;
+      }
+    return 0;
+  }
+  if(map->kind!=MESH_LINKS_GRAPH)return 0;
+  /* breadth first from node 0 over the links either way */
+  uint32_t *order=malloc((size_t)n*sizeof *order),reached=1;
+  unsigned char *seen=calloc(n,1);
+  if(!order || !seen){free(order);free(seen);return ENOMEM;}
+  order[0]=0;seen[0]=1;
+  for(uint32_t head=0;head<reached;head++)for(uint32_t l=0;l<map->links;l++)for(uint32_t e=0;e<2;e++)
+    if(map->link[l][e]==order[head] && !seen[map->link[l][1-e]]){seen[map->link[l][1-e]]=1;order[reached++]=map->link[l][1-e];}
+  uint32_t first=0;
+  while(first<n && seen[first])first++;
+  free(order);free(seen);
+  if(first==n)return 0;
+  if(apart){apart[0]=0;apart[1]=first;}
+  return ENOTCONN;
 }
 
 /* Whether node v is in a bit set of nodes (a bit a node, 64 a word; NULL: every node). */
@@ -785,7 +802,7 @@ static int mesh_packed_heavier(const void *a,const void *b){
 uint32_t mesh_trees_pack(const struct mesh_link_map *map,double eps,uint32_t most,uint32_t *root,uint32_t *parent,double *log_weight){
   const uint32_t n=map->nodes,N=mesh_all(map);
   if(n==1){root[0]=0;parent[0]=0;log_weight[0]=0;return 1;}
-  if(n<2 || !most || mesh_link_map_check(map))return 0;
+  if(n<2 || !most || mesh_link_map_joined(map,NULL))return 0;
   if(!(eps>0 && eps<1))eps=0.1;
   uint32_t m=0,P=0;
   for(uint32_t a=0;a<n;a++)for(uint32_t b=0;b<n;b++)m+=mesh_link_between(map,a,b);
@@ -1058,7 +1075,7 @@ double mesh_program_time(const struct mesh_link_map *map,const struct mesh_progr
                          double alpha,double beta){
   const uint32_t n=program->nodes,N=mesh_all(map),total=program->first[n],L=map->links;
   if(n<2)return 0;
-  if(map->nodes!=n || !wire || !wire->slot || !wire->small || !wire->lag)return -1;
+  if(map->nodes!=n || !wire || !wire->slot || !wire->small || !wire->lag || mesh_link_map_joined(map,NULL))return -1;
   struct mesh_timing x={.map=map,.wire=wire,.alpha=alpha,.beta=beta,.n=n,.N=N,.first=program->first};
   uint32_t count[n],path[N+1];
   double result=-1;

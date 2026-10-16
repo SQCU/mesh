@@ -21,6 +21,10 @@ int mesh_observe(struct mesh_link_view *out,uint32_t capacity,uint32_t *node);
 /* The node's bridge's window as its region holds it: its bytes (the arena its configuration registered at device up) and
    the bytes no lease holds now; 0, or -errno where the bridge is unreachable. */
 int mesh_window(uint64_t *bytes,uint64_t *unleased);
+/* The flows and awaiting programs the node's bridge holds (0 between calls) and the wall clock in ns at which it last
+   came to hold none (0 while it holds any; mesh.h struct hdr `busy`, `idle_since`, design/bridge-and-ipc.md#region; a
+   read that meets the bridge as it becomes busy is told busy, 1); 0, or -errno where the bridge is unreachable. */
+int mesh_busy(uint64_t *busy,uint64_t *idle_since);
 
 /* A link map, an operand: `nodes` nodes and `links` links of a kind.
      MESH_LINKS_MESH   every pair is linked (`link` lists only the pairs given costs, if any)
@@ -48,11 +52,18 @@ int mesh_window(uint64_t *bytes,uint64_t *unleased);
    over min(stripes, c) of its cables.  `link`, `cost`, `next` and `mark` are the caller's storage. */
 enum { MESH_LINKS_MESH, MESH_LINKS_RING, MESH_LINKS_TREE, MESH_LINKS_GRAPH };
 struct mesh_link_map { uint32_t kind,nodes,links; uint32_t (*link)[2]; double (*cost)[2]; uint32_t relays; uint32_t *next,*mark; };
-/* 0 where a map's algorithm can run on it, else EINVAL: every link's nodes among its nodes and relays; a ring one
-   cycle through every node with one link into each; a tree nodes-1 links, one into each node but the root, every node
-   reaching the root; a graph connected; with a table (a graph's, where it has relays), its every entry a node or relay
-   its row's node is linked to, or that node, and every route between two of the map's nodes reaching its end. */
+/* 0 where a map is one, else EINVAL: every link's nodes among its nodes and relays; a ring one cycle through every node
+   with one link into each; a tree nodes-1 links, one into each node but the root, every node reaching the root; with a
+   table (a graph's, where it has relays), its every entry a node or relay its row's node is linked to, or that node.  A
+   graph need not join its nodes: the bridges' records are a map while a cable is out, a node no link joins among its
+   nodes (mesh_map's whole map), and a planner or driver reads it as it is. */
 int mesh_link_map_check(const struct mesh_link_map *);
+/* 0 where a map (one mesh_link_map_check takes) joins every two of its nodes, else ENOTCONN, apart[0] and apart[1]
+   (apart NULL: none) the first two it does not join, the first the lower (EINVAL where it is no map): a graph's links
+   connect them, and with a table every route between two of them reaches its end; a ring, a tree and a mesh join
+   theirs by their form.  The maps a collective's trees and a communicator's session run on (mesh_trees_pack,
+   mesh_trees_shortest; nccl-mesh.c comm_read fails a session on a map that does not join its members, naming two). */
+int mesh_link_map_joined(const struct mesh_link_map *,uint32_t *apart);
 /* The routing table of a map's links (into next, N x N as struct mesh_link_map's; map->next is not read): each node
    b's in-tree of shortest routes toward it, by fewest links, then the least sum of their betas (each pair's cables
    striped; in whole fs a byte; a link without a cost counts none), each node's parent among its equals the one of
@@ -121,7 +132,7 @@ void mesh_link_cost(const struct mesh_link_map *,uint32_t a,uint32_t b,double al
    tree order, each the floor of its share and the first ones one element more for the remainder.  A reduction toward
    r runs up r's trees, a broadcast from r down them, a message to r along the path from its sender in r's heaviest
    tree (the lowest-numbered of equals).  The trees are an operand, made ahead of time (mesh_trees_pack, or the
-   caller's own) and changed only by making them again. */
+   caller's own) and changed only by making them again; they span a map that joins its nodes (mesh_link_map_joined). */
 struct mesh_trees { uint32_t nodes,count; const uint32_t *root,*parent; const double *log_weight; };
 /* 0 where the trees fit the map: each spans every node over the map's links and reaches its root, and every node
    roots at least one (a collective reduces toward and broadcasts from every node); else EINVAL. */
@@ -136,7 +147,8 @@ uint32_t mesh_trees_path(const struct mesh_trees *,uint32_t from,uint32_t to,uin
    cross one link charge it each (relayed hops share the links they cross); its length grows by (1 + eps x flow/capacity)
    and its capacity is 1/beta (1 where the map gives no cost).  A root's equal trees merged, its `most` heaviest kept
    and their weights its shares.  Writes root, parent (nodes a tree) and log_weight for at most nodes x most trees;
-   returns the count, 0 where the map is not connected.  At two nodes, each node's one tree. */
+   returns the count, 0 where the map does not join its nodes (mesh_link_map_joined).  At two nodes, each node's one
+   tree. */
 uint32_t mesh_trees_pack(const struct mesh_link_map *,double eps,uint32_t most,uint32_t *root,uint32_t *parent,double *log_weight);
 
 /* A typed operand: `type` is the caller's own element-type code, carried through untouched. */
@@ -242,7 +254,8 @@ int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *befo
    that cable's cost, a routed position t on stripe t mod stripes, on cable (h + stripe) mod c of each segment (h the
    hash of the route's ends' marks, as the bridges' is of the program's), at that cable's cost.  A rank's own work
    takes no time.  alpha in us and beta in ns a byte where the map gives a link no cost; the last consumption's time,
-   negative where a receive has no SEND of its piece or the schedule stops. */
+   negative where a receive has no SEND of its piece, the schedule stops or the map does not join its nodes
+   (mesh_link_map_joined: no program crosses a pair no route joins). */
 double mesh_program_time(const struct mesh_link_map *,const struct mesh_program *,struct mesh_operand,const struct mesh_wire *wire,
                          double alpha,double beta);
 /* A collective's program for one operand chosen by its time: `what` (root's, a rooted one's) compiled along each of

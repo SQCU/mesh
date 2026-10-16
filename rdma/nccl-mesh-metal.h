@@ -1,7 +1,9 @@
 /* libnccl-mesh's Metal half (nccl-mesh-metal.m): a group's work on the GPU, encoded into the caller's command
    buffer.  Buffers are id<MTLBuffer> handles with byte offsets.  A wait for a landing is rdma/mesh.metal's
-   mesh_remote_wait on its completion word at the position's cycle, ended by the landing or by the library's own silent
-   bound: the progress thread cancels a link that lands nothing for mesh.h MESH_SILENT_NS (the word ~0, mesh_cancel). */
+   mesh_remote_wait on its completion word at the position's cycle, ended by the landing or by the session's canceller
+   (every word a dispatch waits on is the session's, in its cancellation ranges: the progress thread cancels a link
+   that lands nothing for mesh.h MESH_SILENT_NS, a lost link's bridge and a revoke cancel theirs; the word ~0,
+   mesh_cancel), and, where its program is bounded (metal_begin's polls), by the bound. */
 #ifndef NCCL_MESH_METAL_H
 #define NCCL_MESH_METAL_H
 #include <stddef.h>
@@ -19,19 +21,25 @@ uint64_t metal_signaled(void *event);
 int metal_wait(void *event, uint64_t value, uint64_t ns);
 void metal_release(void *object);
 
-struct metal_program *metal_begin(void *command_buffer, void *encoder);
+/* A program's waits bounded where `polls` is set and a dispatch has violation words to record in (the session's,
+   `violation`, or those a wait's metal_check names): at most `polls` loads of a completion word (rdma/mesh.metal mesh_wait_bounded), past which the dispatch stores the position, its
+   channel and the bound in violation words [2], [3] and [4] (where [2] is still 0) and every later dispatch of the
+   program reads them and does nothing, so the host finds the failure there after the command buffer (nccl-mesh.c
+   violated) and the call fails as a value.  The bound is the caller's, carried per crossing (nccl.h ncclMeshStream
+   polls), not a constant of the library's.  A load's period, the time a bound stands for, is the node's GPU's: on the
+   M4 Pro (the Mini) 251 to 265 ns once the GPU's clock has risen, about 1.0 to 1.1 us while it rises (an idle GPU's
+   first ~4 ms of work), in either of the library's wait shapes (rdma/NCCL.md "Bounded waits"; metal-microbench
+   output_data/library-20261015/round3, 2026-10-16); the M5 Max's is not yet read.  polls 0: unbounded, as the classic
+   form's waits have always been. */
+struct metal_program *metal_begin(void *command_buffer, void *encoder, void *violation, uint32_t polls);
 /* The Metal 4 form: the kernels encoded into the caller's id<MTL4ComputeCommandEncoder> (left open, nothing committed,
    nothing signalled), on pipelines of the residency set's device, every binding through the caller's id<MTL4ArgumentTable>
    (each dispatch's arguments a record of the library's argument ring, never setBytes), each dispatch after the one
    before it (an intra-encoder barrier, and one before the first and after the last, so the caller's commands on either
    side are ordered with them), and every buffer of the library's the program touches made resident through the
-   caller's id<MTLResidencySet> (added, and the set committed, where it was not).  Its waits are bounded: at most
-   METAL_POLLS loads of a completion word (rdma/mesh.metal mesh_wait_bounded), past which the dispatch stores the
-   position and its channel in the session's `violation` words [2] and [3] (where [2] is still 0) and every later
-   dispatch of the program reads them and does nothing, so the host finds the failure there after the window
-   (nccl-mesh.c violated) and the call fails as a value.  NULL where memory runs out. */
-#define METAL_POLLS 65536u
-struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation);
+   caller's id<MTLResidencySet> (added, and the set committed, where it was not).  Its waits bounded by `polls` as
+   metal_begin's (nccl-mesh.c gives it at least 1 here).  NULL where memory runs out. */
+struct metal_program *metal_begin4(void *encoder, void *table, void *residency, void *violation, uint32_t polls);
 int metal_metal4(const struct metal_program *);
 /* A buffer of the program's made resident (the Metal 4 form; the classic form needs none). */
 void metal_resident(struct metal_program *, void *buffer);

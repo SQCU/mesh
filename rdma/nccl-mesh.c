@@ -567,16 +567,12 @@ static ncclResult_t comm_read(struct ncclComm *comm) {
   ncclResult_t result = map_read(comm, &comm->map);
   if (result) return result;
   comm->next = comm->map.next; comm->mark = comm->map.mark;
-  uint32_t *path = calloc((size_t)comm->map.nodes + comm->map.relays + 1, sizeof *path);
-  if (!path) return fail(ncclSystemError, "out of memory");
-  for (uint32_t a = 0; n > 1 && a < n; a++)
-    for (uint32_t b = 0; b < n; b++)
-      if (a != b && !mesh_route_path(&comm->map, a, b, path)) {
-        free(path);
-        return fail(ncclRemoteError, "node %u, rank %u of %s, has no route to node %u, rank %u, on the map of this node's bridge",
-                    comm->members[a], a, comm->name, comm->members[b], b);
-      }
-  free(path);
+  uint32_t apart[2] = {0, 0};
+  const int joined = n > 1 ? mesh_link_map_joined(&comm->map, apart) : 0;
+  if (joined == ENOTCONN)
+    return fail(ncclRemoteError, "node %u, rank %u of %s, has no route to node %u, rank %u, on the map of this node's bridge",
+                comm->members[apart[0]], apart[0], comm->name, comm->members[apart[1]], apart[1]);
+  if (joined) return fail(ncclInternalError, "the members' map of %s as this node's bridge gives it: %s", comm->name, strerror(joined));
   return comm_routes(comm);
 }
 
@@ -1055,15 +1051,16 @@ static int outstanding(struct session *s) {
                  "receive calls that do not pair: an ncclSend and an ncclRecv issued separately in the same order on both " \
                  "ranks, or different counts or peers; or different collectives on the two ranks)"
 
-/* a violation the Metal path's walk recorded (struct metal_check), or a wait of the Metal 4 form that reached its bound
-   (nccl-mesh-metal.h METAL_POLLS: words [2] and [3]), made the session's failure */
+/* a violation the Metal path's walk recorded (struct metal_check), or a wait that reached its stream's bound
+   (ncclMeshStream polls: words [2], [3] and [4], nccl-mesh-metal.h metal_begin), made the session's failure */
 static void violated(struct session *s) {
   const uint64_t timed = s->violation ? atomic_load_explicit(s->violation + 2, memory_order_acquire) : 0;
   if (timed && !atomic_load(&s->failed)) {
     const uint32_t h = (uint32_t)atomic_load_explicit(s->violation + 3, memory_order_relaxed);
-    release_all(s, ncclRemoteError, "position %llu on the channel to node %u landed nothing within %u polls of a GPU wait (the Metal 4 "
-                "form's bound, nccl-mesh-metal.h METAL_POLLS): the peer's work there began that much later, or its link was lost",
-                (unsigned long long)(timed - 1), h < s->count ? s->channels[h].node : UINT32_MAX, METAL_POLLS);
+    release_all(s, ncclRemoteError, "position %llu on the channel to node %u landed nothing within %llu polls of a GPU wait (its "
+                "stream's bound, ncclMeshStream polls): the peer's work there began that much later, or its link was lost",
+                (unsigned long long)(timed - 1), h < s->count ? s->channels[h].node : UINT32_MAX,
+                (unsigned long long)atomic_load_explicit(s->violation + 4, memory_order_relaxed));
     return;
   }
   const uint64_t at = s->violation ? atomic_load_explicit(s->violation, memory_order_acquire) : 0;
@@ -1271,32 +1268,57 @@ static ncclResult_t session_agree(struct session *s, uint64_t serial) {
   return ncclSuccess;
 }
 
-/* the window's bytes one session takes toward `peers` other members on `wire` (ncclMeshSessionBytes), each of its leases
-   a section of whole blocks (mesh-call.c mesh_section_create): toward each peer its four rings (ring_make: DEPTH slots
-   each, two of the large class and two of the small) and its destination's transfer lists (mesh-call.c
-   mesh_lists_grow: MESH_QUEUES each way, each first room for the transfers a block holds of them, a ring's one each
-   here); then its SEND cells and their targets in one lease
-   (mesh_transfers_prepare: a ring's POSITIONS invocations and its terminal cell a SEND ring, a target each), its
-   completion words (mesh_host_inputs: a word a received chunk of each of the POSITIONS invocations, each destination's
-   from a 16-word boundary), its cancellation ranges (one a destination) and its violation page */
+/* the window's bytes of one session's leases and of one relayed direction of it, each lease a section of whole blocks
+   (mesh-call.c mesh_section_create).  A ring: DEPTH slots (ring_make), bound as one transfer of DEPTH invocations of a
+   slot each (ring_bind), which a relay mirrors at mesh.h mesh_relay_slot's bytes (the same DEPTH slots; a slot is
+   whole blocks, so its pages counted in blocks are its bytes).  A destination's transfer lists: MESH_QUEUES each
+   way, each first room for the transfers a block holds of them (mesh-call.c mesh_lists_grow), a ring's one each here.
+   The SEND cells and targets of `sends` SEND transfers in one lease (mesh_transfers_prepare: POSITIONS invocations and
+   a terminal cell a transfer, a target each). */
+#define WHOLE(bytes, block) (((bytes) + (block) - 1) / (block) * (block))
+static uint64_t ring_bytes(uint64_t slot, const struct mesh_wire *wire) {
+  const struct mesh_transfer bound = {.count = 1, .invocation_pages = (uint32_t)(slot / wire->small), .depth = DEPTH, .bytes = slot};
+  return WHOLE(mesh_relay_slot(&bound, DEPTH, (uint32_t)wire->small), wire->small);
+}
+static uint64_t lists_bytes(const struct mesh_wire *wire) {
+  const uint64_t room = wire->small / (MESH_QUEUES * 2 * sizeof(struct mesh_transfer));
+  return WHOLE((uint64_t)MESH_QUEUES * 2 * (room ? room : 1) * sizeof(struct mesh_transfer), wire->small);
+}
+static uint64_t cells_bytes(uint64_t sends, const struct mesh_wire *wire) {
+  return WHOLE((sends ? sends * (POSITIONS + 1) : 1) * sizeof(struct mesh_send) + sends * sizeof(struct mesh_target), wire->small);
+}
+
+/* one session toward `peers` other members (ncclMeshSessionBytes): toward each peer its four rings (two of the large
+   class and two of the small, out and in) and its destination's lists; its SEND cells and targets (a ring of each
+   class out toward each peer); its completion words (mesh_host_inputs: a word a received chunk of each of the
+   POSITIONS invocations, each destination's from a 16-word boundary); its cancellation ranges (one a destination);
+   and its violation page */
 static uint64_t session_bytes(uint64_t peers, const struct mesh_wire *wire) {
   const uint64_t block = wire->small, page = (uint64_t)getpagesize();
-#define WHOLE(bytes) (((bytes) + block - 1) / block * block)
-  const uint64_t rings = 2 * WHOLE(DEPTH * wire->slot) + 2 * WHOLE(DEPTH * wire->small);
-  const uint64_t room = block / (MESH_QUEUES * 2 * sizeof(struct mesh_transfer));
-  const uint64_t lists = WHOLE((uint64_t)MESH_QUEUES * 2 * (room ? room : 1) * sizeof(struct mesh_transfer));
-  const uint64_t cells = peers * 2 * (POSITIONS + 1), frames = (wire->slot / block + 1) * POSITIONS;
+  const uint64_t rings = 2 * ring_bytes(wire->slot, wire) + 2 * ring_bytes(wire->small, wire);
+  const uint64_t frames = (wire->slot / block + 1) * POSITIONS;
   const uint64_t words = peers ? (peers - 1) * ((frames + 15) & ~UINT64_C(15)) + frames : 0;
-  const uint64_t bytes = peers * (rings + lists) + WHOLE((cells ? cells : 1) * sizeof(struct mesh_send) + peers * 2 * sizeof(struct mesh_target)) +
-                         WHOLE(sizeof(uint64_t) * (words ? words : 1)) +
-                         WHOLE(sizeof(struct mesh_cancellation) + (peers ? peers : 1) * sizeof(struct mesh_cancel_range)) + WHOLE(page);
-#undef WHOLE
-  return bytes;
+  return peers * (rings + lists_bytes(wire)) + cells_bytes(peers * 2, wire) + WHOLE(sizeof(uint64_t) * (words ? words : 1), block) +
+         WHOLE(sizeof(struct mesh_cancellation) + (peers ? peers : 1) * sizeof(struct mesh_cancel_range), block) + WHOLE(page, block);
 }
+
+/* one direction of a session a relay's bridge forwards (ncclMeshRelayBytes; mesh-flow.c mirror): the direction's
+   transfers, a ring of each class, mirrored; the lists of its two destinations, the sender and the receiver; and the
+   SEND cells and targets of its two transfers */
+static uint64_t relay_bytes(const struct mesh_wire *wire) {
+  return ring_bytes(wire->slot, wire) + ring_bytes(wire->small, wire) + 2 * lists_bytes(wire) + cells_bytes(2, wire);
+}
+#undef WHOLE
 
 ncclResult_t ncclMeshSessionBytes(int peers, const struct mesh_wire *wire, uint64_t *bytes) {
   if (peers < 0 || !wire || !wire->small || !wire->slot || !bytes) return fail(ncclInvalidArgument, "ncclMeshSessionBytes's arguments");
   *bytes = session_bytes((uint64_t)peers, wire);
+  return ncclSuccess;
+}
+
+ncclResult_t ncclMeshRelayBytes(const struct mesh_wire *wire, uint64_t *bytes) {
+  if (!wire || !wire->small || !wire->slot || !bytes) return fail(ncclInvalidArgument, "ncclMeshRelayBytes's arguments");
+  *bytes = relay_bytes(wire);
   return ncclSuccess;
 }
 
@@ -1435,6 +1457,7 @@ struct call {
   int owned;
   cudaStream_t stream;
   void *command, *encoder, *(*workspace)(size_t, void *), *context, *table, *residency;
+  uint32_t polls;
   ncclMeshIssue *issue;
   struct where send_at, recv_at, sum;
 };
@@ -2356,13 +2379,14 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     if (list[i].comm != comm) result = fail(ncclInvalidUsage, "a group on several communicators");
     else if (list[i].command != list[0].command || list[i].encoder != list[0].encoder)
       result = fail(ncclInvalidUsage, "a group on several command buffers or encoders");
+    else if (list[i].polls != list[0].polls) result = fail(ncclInvalidUsage, "a group of several bounds (ncclMeshStream polls)");
     else if (!on_gpu(list[i].type)) result = fail(ncclInvalidArgument, "datatype %d on the Metal path (no float64 there)", (int)list[i].type);
     else if (reducing(list[i].what)) result = reduction(list + i);
     remote |= crosses(list + i);
   }
   const int metal4 = list[0].table != NULL;
-  if (!result && metal4 && (!list[0].encoder || !list[0].residency))
-    result = fail(ncclInvalidArgument, "a Metal 4 ncclMeshStream (argumentTable) without its encoder or residency set");
+  if (!result && metal4 && (!list[0].encoder || !list[0].residency || !list[0].polls))
+    result = fail(ncclInvalidArgument, "a Metal 4 ncclMeshStream (argumentTable) without its encoder, residency set or polls (its waits' bound)");
   else if (!result && metal4 && issue && !list[0].workspace)
     result = fail(ncclInvalidUsage, "a Metal 4 group issued without a workspace (its scratch is the communicator's, free at its end)");
   else if (!result && !metal4 && !list[0].command) result = fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
@@ -2375,8 +2399,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   if (result) { pthread_mutex_unlock(&session_lock); calls_free(list, n); return result; }
   if (finished) metal_collect(finished);
   struct session *const s = comm->session;
-  struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, remote ? s->violation_buffer : NULL)
-                                         : metal_begin(list[0].command, list[0].encoder);
+  void *const violation = remote ? s->violation_buffer : NULL;
+  struct metal_program *program = metal4 ? metal_begin4(list[0].encoder, list[0].table, list[0].residency, violation, list[0].polls)
+                                         : metal_begin(list[0].command, list[0].encoder, violation, list[0].polls);
   if (!program) {
     pthread_mutex_unlock(&session_lock); calls_free(list, n);
     return fail(ncclSystemError, "%s", *metal_error() ? metal_error() : "out of memory");
@@ -2456,8 +2481,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int *published) {
   int any = 0;
   if (published) *published = 0;
-  if (!stream || (!stream->commandBuffer && !(stream->argumentTable && stream->commandEncoder && stream->residencySet)))
-    return fail(ncclInvalidArgument, "ncclMeshComplete without a command buffer or a Metal 4 encoder, argument table and residency set");
+  if (!stream || (!stream->commandBuffer && !(stream->argumentTable && stream->commandEncoder && stream->residencySet && stream->polls)))
+    return fail(ncclInvalidArgument, "ncclMeshComplete without a command buffer or a Metal 4 encoder, argument table, residency set and "
+                "polls (its waits' bound)");
   pthread_mutex_lock(&session_lock);
   const ncclResult_t loss = losses_through(ticket);
   ncclResult_t result = ncclSuccess;
@@ -2466,8 +2492,8 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
     while (through->next_group && through->next_group->ticket <= ticket) through = through->next_group;
     if (finished) metal_collect(finished);
     struct metal_program *program = stream->argumentTable
-      ? metal_begin4(stream->commandEncoder, stream->argumentTable, stream->residencySet, inflight->session->violation_buffer)
-      : metal_begin(stream->commandBuffer, stream->commandEncoder);
+      ? metal_begin4(stream->commandEncoder, stream->argumentTable, stream->residencySet, inflight->session->violation_buffer, stream->polls)
+      : metal_begin(stream->commandBuffer, stream->commandEncoder, inflight->session->violation_buffer, stream->polls);
     if (!program) result = fail(ncclSystemError, "%s", *metal_error() ? metal_error() : "out of memory");
     else {
       mesh_transfers_wake(&inflight->session->context);
@@ -2485,8 +2511,8 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
 uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 
 ncclResult_t ncclMeshEncodeMetal4(ncclComm_t comm, ncclRedOp_t op, const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t type,
-                                  void *encoder, void *table, void *residency) {
-  ncclMeshStream stream = {.commandEncoder = encoder, .argumentTable = table, .residencySet = residency};
+                                  void *encoder, void *table, void *residency, uint32_t polls) {
+  ncclMeshStream stream = {.commandEncoder = encoder, .argumentTable = table, .residencySet = residency, .polls = polls};
   return ncclAllReduce(sendbuff, recvbuff, count, type, op, comm, &stream);
 }
 
@@ -2514,7 +2540,7 @@ static ncclResult_t enqueue(struct call c) {
   if (c.stream) {
     const ncclMeshStream *stream = c.stream;
     c.command = stream->commandBuffer; c.encoder = stream->commandEncoder; c.workspace = stream->workspace; c.context = stream->context;
-    c.issue = stream->issue; c.table = stream->argumentTable; c.residency = stream->residencySet;
+    c.issue = stream->issue; c.table = stream->argumentTable; c.residency = stream->residencySet; c.polls = stream->polls;
     c.send_at = where_of(c.send); c.recv_at = where_of(c.recv);
   }
   if ((unsigned)c.type >= ncclNumTypes) return fail(ncclInvalidArgument, "datatype %d", (int)c.type);
