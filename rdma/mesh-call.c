@@ -105,6 +105,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   struct mesh_client *client=mesh_client_at(m,context->client);
   atomic_store_explicit(&client->depth,depth,memory_order_relaxed);
   atomic_store_explicit(&client->cyclic,0,memory_order_relaxed);
+  atomic_store_explicit(&client->digest,0,memory_order_relaxed);
   uint64_t cells=0,targets=0;
   const uint32_t destinations=mesh_destination(client,0);
   for(uint32_t q=0;q<destinations*MESH_QUEUES;q++){
@@ -250,6 +251,16 @@ int mesh_transfers_cyclic(struct mesh_ctx *context){
     }
   }
   atomic_store_explicit(&client->cyclic,1,memory_order_release);
+  return 0;
+}
+
+/* design/bridge-and-ipc.md#protocol: the digest of what the program is made from, which every READY of it carries and
+   every peer's program of its execution must name alike (0: none, compared with nothing; mesh_transfers_prepare sets
+   0).  Called after mesh_transfers_prepare, before mesh_transfers_start. */
+int mesh_transfers_digest(struct mesh_ctx *context,uint64_t digest){
+  struct mesh_client *client=mesh_client_at(context->M,context->client);
+  if(atomic_load_explicit(&client->configured,memory_order_acquire))return EBUSY;
+  atomic_store_explicit(&client->digest,digest,memory_order_relaxed);
   return 0;
 }
 

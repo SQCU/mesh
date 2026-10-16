@@ -11,7 +11,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 114u
+#define MESH_VERSION 115u
 #define MESH_ABSENT UINT32_MAX
 /* design/bridge-and-ipc.md#region: the node's ports, its client slots and each client's destination nodes */
 #define MESH_PORTS 8
@@ -109,9 +109,10 @@ struct mesh_record { uint32_t node,ports; uint64_t boot,sequence; char name[MESH
    (`configured`, the owner), the execution it belongs to (`key`, the same on every member), its ring depth, whether it
    is cyclic, its publications once prepared (`target_count` targets at region offset `targets`, after its SEND cells
    in their lease, sorted by row: mesh_row_targets), the ports its program's flows ride (`ports`, a bit a port index:
-   the bells mesh_transfers_wake rings), and its program to each destination and that destination's status.  A client
-   writes its own slot's other words and its leased rows alone; the bridge writes `ports`, the statuses, the ports and
-   the map */
+   the bells mesh_transfers_wake rings), the digest of what its program is made from (`digest`, 0 for none:
+   mesh-call.h mesh_transfers_digest; design/bridge-and-ipc.md#protocol, a peer's READY naming another fails both ends'
+   programs, ESTALE), and its program to each destination and that destination's status.  A client writes its own slot's other
+   words and its leased rows alone; the bridge writes `ports`, the statuses, the ports and the map */
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
   _Atomic uint64_t configured;
@@ -120,6 +121,7 @@ struct mesh_client {
   uint64_t targets;
   uint32_t target_count;
   _Atomic uint32_t ports;
+  _Atomic uint64_t digest;
   struct mesh_tx tx[MESH_DESTINATIONS];
   struct mesh_port_info status[MESH_DESTINATIONS];
 };

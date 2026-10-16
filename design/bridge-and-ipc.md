@@ -21,9 +21,9 @@ Operator, 2026-10-14 (D10): "clients are clients, bridge services are bridge ser
 about other clients on the same mesh. ... clients *ask*, bridges *do*". And (D3), on whether the bridge keeps links
 paired with no client attached: "this emerges from other requirements. required."
 
-The bridge is updated by the node's convergence (metal-microbench docs/nodes.md#convergence): its agent
-`io.metal-microbench.converge` pulls `~/mesh` once no call runs on the node and rebuilds the bridge there (`make -C
-rdma`, mesh-user.sh); a bridge whose binary changed stops on its own between calls, at the first liveness turn (3 s)
+The bridge is updated by the mesh's own convergence (README.md Convergence; bin/mesh-converge.sh): the admin user's
+agent `io.mesh.converge` builds the upstream revision in a stage, installs its images between calls once the node is
+quiet, and runs bin/mesh-user.sh on them; a bridge whose binary changed stops on its own between calls, at the first liveness turn (3 s)
 at which it holds no flow and no awaiting program (the region's `busy` word 0; it serves on until then, the binary it
 started from mapped), and launchd starts the new one. install.sh, the root layer, installs only `bin/mesh-stat`, the
 reader node-info runs, built beside the admin user's running bridge. SIGTERM (launchd's stop) ends the bridge by the
@@ -80,14 +80,16 @@ The region holds a `bell` a port, the word that port's progress threads park on 
 bells of the ports its program's flows ride (`mesh_transfers_wake`, a `mesh_notify` each; the slot's `ports`, a bit a
 port, which the bridge sets as it takes the program's flows) as a group of its program starts, so a thread that parked
 while nothing moved serves that group's first publication and landing at once, and no other port's threads wake. The
-region's `busy` word is the count of flows and awaiting programs the bridge holds, 0 between calls, and `idle_since`
-the wall clock (ns) at which it last came to 0 (0 while it is not): a node's idle test (the convergence's, bin/
-mesh-converge.sh, through mesh-stat's `idle` and `idle_since` once the library's reader prints them), and the
-bridge's own before it stops for a rebuilt binary.
+region's `busy` word is the count of flows and awaiting programs the bridge holds, relayed ones among them, 0 between
+calls, and `idle_since` the wall clock (ns) at which it last came to 0 (0 while it is not): a node's idle test (the
+convergence's, bin/mesh-converge.sh, through mesh-stat's `idle` and `idle_since`, which the library's reader
+mesh-plan.h `mesh_busy` reads), so a node that only relays another node's call is busy, and the bridge's own before
+it stops for a rebuilt binary.
 
 A client slot (`struct mesh_client`) holds one client: its owner word (the client's generation, slot and process), its
 execution's key, its program once started (`configured`), its ring depth and whether it is cyclic, its publication
-targets once prepared (`targets`, above), and its programs by destination node, `MESH_DESTINATIONS` of them
+targets once prepared (`targets`, above), the digest of what its program is made from (`digest`, 0 for none:
+mesh-call.h `mesh_transfers_digest`, `#protocol`), and its programs by destination node, `MESH_DESTINATIONS` of them
 (`mesh_destination`). Each is the destination's node, its `struct
 mesh_tx` (SEND cells, cancellation words, transfer lists of `MESH_QUEUES` queues each way, trace) and its status
 (`struct mesh_port_info`: phase, code, domain, `failed` the node where it failed, the destination or a relay on its
@@ -202,11 +204,11 @@ key:
 
 | message | sent when | the receiver |
 |---|---|---|
-| READY (queues and slots, the route, the stripe of the program's stripes, whether the sender's end takes queue pairs of its own) | a program starts toward a node (a routed pair's lower end; its higher end once the lower's READY reached it); the route is the nodes from the receiver to it | where the route ends at the receiver, pairs with its client's program of the key toward the sender (one awaiting it is given it at once), else holds the flow (`#flows`); where the route goes on, makes a relay's two flows and sends READY on with the rest of the route; on a relay's existing flow (the far end's READY coming back), mirrors that direction and sends the READY on toward the route's start (`#routes`) |
+| READY (queues and slots, the route, the stripe of the program's stripes, whether the sender's end takes queue pairs of its own, the digest of what the sender's program is made from) | a program starts toward a node (a routed pair's lower end; its higher end once the lower's READY reached it); the route is the nodes from the receiver to it | where the route ends at the receiver, pairs with its client's program of the key toward the sender (one awaiting it is given it at once), else holds the flow (`#flows`), or, where that program names another digest, fails both (ESTALE, below); where the route goes on, makes a relay's two flows and sends READY on with the rest of the route; on a relay's existing flow (the far end's READY coming back), mirrors that direction and sends the READY on toward the route's start (`#routes`) |
 | PAIRS (an exclusive flow's queue pair numbers and sequence numbers; a lane rider's index and generation in its port's table) | the flow paired: an exclusive flow's queue pairs made (INIT) | its queue pairs ready to receive (RTR) and its receives posted; or its records taking its lanes' headers (`#lanes`) |
 | POSTED | its receives posted; a relay's once its partner heard the next hop's POSTED | its queue pairs ready to send (RTS), served by its port's progress threads: the flow runs |
 | END | the program ended on this side | its flow fails (ECONNRESET, domain 4); a relay's goes on |
-| FAIL (code, node) | a flow failed, at the node named | its flow fails (ECANCELED, domain 4) naming that node; a relay's goes on |
+| FAIL (code, node) | a flow failed, at the node named | its flow fails (ECANCELED, domain 4) naming that node; a relay's goes on, its code kept; one of ESTALE fails the receiver's whole program alike (below) |
 | RECORD (a node's record) | the sender's port table changed, a newer record reached it, or the port paired | takes it where it is newer than the newest heard of its node, and sends it on (`#records`) |
 | LANES (the port's lanes' queue pairs and the frames a header may name; none and a code where they failed) | the port's lanes made, once the link paired | its lanes ready to receive and send, each listening for its first header: the lanes are up (`#lanes`) |
 | FAREWELL | the bridge stops | the link's end is orderly |
@@ -216,9 +218,39 @@ one routed program may share a port (`#cables`). No SEND of a program is posted 
 posted, TN3205; POSTED orders the two). POSTED is end to end: a relay tells it toward a route's end only once its
 partner heard it from the next hop, so a routed program's start returns once the far member's program has started and
 every relay between has posted, as a direct program's does (MESH_VERSION 112's relay posted at once, so a routed
-start returned before the far member had started and its first group failed at the library's silent bound). A
+start returned before the far member had started and its first group failed at the library's silent bound). A relay
+flow tries to tell it at the end of each of its own jobs and as its partner hears the next hop's POSTED, whichever
+comes last (`flow_tell`). Through MESH_VERSION 114 it tried at its own jobs' ends alone, so a relay whose jobs had all
+ended before the next hop's POSTED came never told it, and both ends' starts waited out their 630 s windows: no
+routed start had run on hardware, and a transcription of the code's control flow over chains, rings, stars and
+partial graphs of 3 to 6 nodes left 1,987 of 5,920 routed starts (74 routed pairs, 40 orders of their starts each)
+waiting so, none since, each returning within 63 ms of its own start (metal-microbench
+output_data/bridge-20261015/round3 relay_posted.py). A
 program waits for its peer's READY at most the peer window (600 s) and for its queue pairs to pair at most the pairing
 window (30 s), design/recovery.md#first; past either it fails (ETIMEDOUT).
+
+A program may name the digest of what it is made from (mesh-call.h `mesh_transfers_digest`, after it is prepared and
+before it starts; a session of libnccl-mesh's, its communicator's, the digest of its members, map and routes that its
+agreement compares, nccl-mesh.c `map_digest`), and each READY carries it (a relay's READY onward its lease's, which `mirror` names from the READY it
+mirrors). A READY whose end's program of its execution names another digest is refused, and both programs fail at once
+toward every destination they bind (ESTALE, naming the node whose program differs, in each destination's status:
+`program_stale`), whether the end's program has taken the READY's flow, awaits it, or starts later with the READY held
+for it (its acceptance compares every READY held for its execution first); each of their flows tells its peer FAIL with
+ESTALE naming that node (the refusing node, toward the node it names), which fails that peer's program alike and is
+never told back to its sender, so every member of an execution whose programs differ fails at start as a value rather
+than one waiting out the peer window for a READY no program of the other's takes. A program is compared only while it
+runs (started, and not yet failed toward every destination it binds: `program_runs`); a READY that meets one that
+ended or failed is held for the execution's next program, as one that meets none. A program that names none (0) is
+compared with nothing. A message names a flow by its execution, its two ends and its stripe, not by its program's
+generation, so a FAIL in flight from a program that failed can still fail its successor of the same execution where
+that successor starts first; it fails as a value and runs again on the map as it is then. Through MESH_VERSION 114 nothing was compared at the start: the library's agreement
+(its session's position 0) found differing digests only once a start returned, and a member whose program bound a
+member whose program did not bind it back waited 630 s, so the library bound a channel to every member; with one
+member's map a link short, over chains, rings, stars, complete and partial maps of 3 to 6 members with programs
+bound to the members they move with only, a member's start waited so in 808 of 1,868 cases (1,244 of 9,876 members),
+none since: each start returns, failed or paired, within 0.1 s of its own (the members start within 0.1 s), or is held
+by a peer whose program failed first until that peer's library opens its next session (output_data/bridge-20261015/
+round3 stale_digest.py).
 
 ## flows
 
@@ -282,8 +314,14 @@ or connected, are reset, never the link (`lanes_reset`, design/recovery.md#loss)
 the peer is told (a LANES of none and why) and resets its own where they were joined to these, and both make new lanes
 a pause later, the link paired and its exclusive flows running throughout; a flow still pairing waits for them within
 its pairing window. A peer's LANES that names new queue pairs while this end's lanes are joined to its old ones resets
-them alike (the TCP stream orders a peer's LANES of none before its new ones). A flow on the lanes is released once its
-records posted on them have landed, or the lanes it posted them on are gone.
+them alike (the TCP stream orders a peer's LANES of none before its new ones). Lanes are up (their `up` word, which the
+progress threads read) once the event loop takes their connect's end, never in the connect itself, so lanes reset while
+they connected stay down (through MESH_VERSION 114 the connect's job wrote `up` as it ended, after a reset the event
+loop had made meanwhile, and the progress threads served lanes joined to queue pairs the peer had destroyed until
+their teardown). A flow on the lanes is released once its records posted on them have landed, or the lanes' queue
+pairs that held them are destroyed (their generation moved): through MESH_VERSION 114 also once the lanes were merely
+down, so a relay's lease could be returned to the window, and leased by another client, while its records were still
+posted on lanes not yet torn down and a peer's SEND in flight could land in it.
 
 A lane costs its receiver a reaction a header that a ring posted ahead does not: the header's frame (4 KiB, 0.46 us
 at the link's 8.9 GB/s, RDMA-FIRST.md), the receive thread's turn and the records' posts, with the header's SENDs held
@@ -294,6 +332,19 @@ landing 5 to 18 us after its publication) 0.21 ms, 5.3 % of the step and up to a
 direct program keeps queue pairs of its own where its devices have room, a second transport kept beside the lanes for
 the latency-bound path alone, until a crossing's landing is measured on each on the pair (unmeasured: the round of
 2026-10-15 ran nothing); where the lanes cost the pair's step nothing, the exclusive form is deleted.
+
+A position is a whole slot on the wire (512 KiB of the library's large class, one block of its small one), a filler
+as much as a piece: TN3205 pairs a SEND with a receive of the same 4 KiB frames, and an exclusive ring posts its
+receives ahead of what lands, so a position shorter than its slot would leave its receives' frames unmatched and every
+later SEND of the ring a record off. A lane's header names the chunks and bytes of what follows it before its receives
+are posted, so a lane can carry a position's own bytes (the producer naming them with its release, the receiver
+posting that many frames and storing the words of the slot's records it skips at the last one's landing, a relay
+carrying them on with its hand-off), and the library could then price a position at its bytes where its programs move
+fillers or pieces short of a slot (at 16 MiB on six-node maps, up to twice a program's bytes). It is not built: the
+exclusive form, the latency path every direct program of the pair takes, cannot carry it, so a price at a position's
+bytes would be wrong on every exclusive flow, and the lanes' own path has not yet carried a crossing on hardware.
+Once a crossing's landing is measured on each and the exclusive form is deleted, the lanes carry every position at
+its own bytes and the library prices it so, one transport and one price (the library's request of 2026-10-15).
 
 A port's lanes hold two queue pairs whatever its programs, routes and communicators. Over the review's seven
 six-node cablings and 240 numberings each, one six-member communicator holds 4 queue pairs on the busiest device (its
@@ -380,7 +431,11 @@ sender runs flows elsewhere (one end saw a cable the other did not) is refused a
 values (EPROTO), rather than left to the peer window.
 
 A relay's flows ride its ports' lanes, so a route costs the relays it crosses no queue pairs. Each relayed direction
-leases its rows and a client slot of the relay (`mirror`; one lease and one slot whatever its stripes), from the
+(an execution's key, its sending end and its receiving end: a pair of an execution's members whose route crosses the
+node is two, one each way, and a pair of another execution, a split or shrink communicator of the same members, two
+more; never one a node pair across executions) leases its rows and a client slot of the relay (`mirror`; one lease and
+one slot whatever its stripes), its slots among the node's `MESH_CLIENTS` (64) with every slot its own processes hold
+(libnccl-mesh's attach one a process and one a session), from the
 window as a client's leases are (no reserve: the window is the clients' and the bridge's alike, and the planner counts
 a relay's leases on every node a member route crosses, members or not, metal-microbench programs.py `sessions`; a
 lease the window cannot give fails the relayed program as a value naming the relay): for each transfer the sender
@@ -390,4 +445,9 @@ lease (256 bytes a cell, a cell an invocation of each slot of each transfer and 
 rounded up to the block); and the lists of its two destinations, a block each. At the library's session (two
 classes, slots of 512 KiB and 16 KiB, ring depth 16, a cycle of 32 positions: nccl-mesh.c, `POSITIONS` 2 x `DEPTH`)
 a relayed direction is 8,716,288 bytes (8.3 MiB), where it was 16,007,168 with the cycle of 8,192 positions and lists
-of 4,096 entries (12,894,208 at that cycle with lists sized by use; output_data/bridge-20261015 footprint2.py).
+of 4,096 entries (12,894,208 at that cycle with lists sized by use; output_data/bridge-20261015 footprint2.py); the
+library states the same count for its own wire (nccl-mesh.c `relay_bytes`, ncclMeshRelayBytes), which a planner reads
+in place of a figure of its own (11,813,376, the planner's of 2026-10-15, is the first pass's count at the cycle of 32
+with lists of 4,096 entries). Beside the relays' leases a node's bridge holds its lanes' pages, 7 pages of 16 KiB a
+port the region has (`lanes_reserve`: `MESH_PORTS` 8 of them, 917,504 bytes a node at its start, whatever its cables;
+a port the window could not give them at the start takes them as its lanes are made), and its map's records.

@@ -105,7 +105,8 @@ Beside the window the region holds its tables (`mesh_layout`): a page-table row 
 bytes), its buffer (32) and its delivery (16: the address and per-invocation stride of the M07 word a landing on it
 stores), a bit in each of the three row planes
 and the arena's bit a page, and 0.5 MiB besides (the header with a bell a port, the port table and 64 client slots of
-7,744 bytes, 7,232 until MESH_VERSION 114 gave a destination its lists' room and lease row: 32 KiB more,
+7,744 bytes, 7,232 until MESH_VERSION 114 gave a destination its lists' room and lease row: 32 KiB more; MESH_VERSION
+115's program digest, a word of the slot, fits its alignment, moving the slot's destinations and the size of nothing,
 59,719,680 bytes beside 14 GiB, 68,173,824 beside 16 GiB, metal-microbench output_data/bridge-20261015
 layout/layout-second.json): 64.5 bytes a window page at the nodes' 16 KiB pages and block 1. Until MESH_VERSION 111 each row also carried room for a
 publication toward each of `MESH_DESTINATIONS` destinations (`struct mesh_publication`, 1,088 bytes a row), which only

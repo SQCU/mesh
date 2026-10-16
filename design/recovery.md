@@ -215,7 +215,11 @@ appears, and is refused at once (EHOSTUNREACH, naming the lower) where the lower
 never heard of, so a call toward a dead node fails within 30 s at either end; two ends whose maps differ at their
 starts still pair along one route; a routed program's start returns once every one of its stripes runs (design/bridge-and-ipc.md#cables). Two ends
 that disagree on whether a cable joins them (one sees it paired, the other not yet) fail at once as values (EPROTO,
-naming the node that refused) rather than wait out the peer window.
+naming the node that refused) rather than wait out the peer window. Members whose programs of an execution are made
+from different maps (their digests differ, mesh-call.h `mesh_transfers_digest`) fail at once, every destination of
+each as a value (ESTALE, naming the node whose program differs), wherever a READY of one reaches the other: none
+waits the peer window for a READY no program of the other's takes, so a caller may bind only the members its programs
+move with and run the execution again on the map as it is then (design/bridge-and-ipc.md#protocol).
 
 ### the driver's side
 
@@ -267,6 +271,8 @@ several queue pairs (the torch/NCCL sessions: four).
 | F20 | a link's lanes fail (a lane's completion error, a header out of step, a make or connect refused) | the lanes' alone (`#loss`): the flows that posted on them fail, both ends make new lanes a pause later, the link stays paired and its own queue pairs run on |
 | F21 | a device refuses the window's registration | logged with the extent; the port turns again 60 s later, doubling to 30 min (`#registration`) |
 | F22 | two ends of a routed pair start on maps a flap apart | both take the lower end's route (design/bridge-and-ipc.md#routes); a cable one end sees and the other does not fails both at once (EPROTO) |
+| F23 | members' programs of one execution made from maps a change apart | the READYs carry each program's digest: every member's program fails at start (ESTALE, `#first`), through MESH_VERSION 114 one bound to a member whose program did not bind it back waited 630 s |
+| F24 | a routed start whose relays' own jobs end before the next hop's POSTED | each relay tells POSTED as its partner hears it (design/bridge-and-ipc.md#protocol); through MESH_VERSION 114 such a relay never told it and both ends waited 630 s, in a third of the routed starts of a transcription of the code |
 
 ## The review this asks for
 

@@ -16,12 +16,17 @@ int mesh_transfer_bind(struct mesh_ctx *,uint32_t node,uint32_t queue,int direct
 int mesh_transfers_prepare(struct mesh_ctx *,uint32_t slots,uint32_t invocations,uint32_t depth);
 /* design/prepared-machine.md#M30 */
 int mesh_transfers_cyclic(struct mesh_ctx *);
+/* design/bridge-and-ipc.md#protocol: the digest of what the program is made from (0: none), named after
+   mesh_transfers_prepare and before mesh_transfers_start; a peer's program of the same execution that names another
+   fails both as values (ESTALE); EBUSY once started */
+int mesh_transfers_digest(struct mesh_ctx *,uint64_t digest);
 /* design/bridge-and-ipc.md#clients, design/recovery.md#first: 0 once the node's bridge has paired the program toward
    every node it binds, on its current map, directly or along its route through other nodes' bridges; else the failure,
    and that node's status in the client's slot names the node and the code: ESRCH the bridge gone, ETIMEDOUT past
    MESH_PEER_NS+MESH_PAIR_NS+MESH_PAUSE_NS, EHOSTUNREACH no cable or route reaches it, ENETDOWN, ECONNRESET,
-   ECANCELED a link or the peer's program lost, or this program's own slot retired while it waits (a revoke), ENOSPC,
-   ENOMEM a grant refused. A later loss fails the program alike; the next start rereads the map */
+   ECANCELED a link or the peer's program lost, or this program's own slot retired while it waits (a revoke), ESTALE a
+   member's program of the execution made from another digest (mesh_transfers_digest; every destination fails, naming
+   that member), ENOSPC, ENOMEM a grant refused. A later loss fails the program alike; the next start rereads the map */
 int mesh_transfers_start(struct mesh_ctx *);
 /* design/bridge-and-ipc.md#progress: the progress threads of the ports a started program's flows ride woken (each port's
    bell), a group of it about to publish or to wait on its landings (a thread parked after MESH_IDLE_NS of nothing looks
