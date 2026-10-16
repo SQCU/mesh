@@ -500,7 +500,8 @@ class Balancer:
     (its performance changed [Clarke, Lastovetsky & Rychkov 2011]).  A move the next call measures worse by more than
     the resolution is rejected: the parts go back, the trust region halves and the measurement stays in the models
     (a trust-region method's ratio test [Conn, Gould & Toint 2000, §6.1]); it doubles again, to twice, after a move
-    that held.  The test reads the whole call (`measured`, the call's own time where the caller gives it, else every
+    that held.  The test reads the whole call (`measured`, the call's own time where the caller gives it, `measure_name`
+    its kind: a new kind starts the decisions' histories again, as a new measure does; else every
     stretch's slowest rank on the models' path, which leaves out what no stretch times; a decision none of whose stretches
     the call ran, a move that left it no crossing, is tested on `measured` alone): a move can carry work across stretches
     (a rank holding none of a decision publishes nothing where it did), so the moved decision's own stretches are no
@@ -562,7 +563,7 @@ class Balancer:
         d = self.decisions[e]
         return next((p for p, g in zip(d['parts'], self._groups(d)) if i in g), 0)
 
-    def observe(self, stretches, measured=None):
+    def observe(self, stretches, measured=None, measure_name='measured'):
         import statistics
         seen = {}
         for s, obs in stretches.items():
@@ -578,7 +579,7 @@ class Balancer:
                            latency if callable(latency) else float(latency or 0.0), len(obs['times']), standing)
         priced = any(v[4] is not None for v in seen.values())
         measure = ('path' if priced else 'sum') + (' joined' if any(any(v[3][i] != (v[7][i] if i < len(v[7]) else 0.0) for i in range(len(v[3])))
-                                                                  for v in seen.values()) else '') + (' measured' if measured is not None else '')
+                                                                  for v in seen.values()) else '') + (f' {measure_name}' if measured is not None else '')
 
         def rows(times, keep=None):
             return [(c, order, latency, times(s, ranks, n)) for s, (c, ranks, _, _, order, latency, n, _) in seen.items()
