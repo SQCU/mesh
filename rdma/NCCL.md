@@ -102,8 +102,8 @@ table (`mesh.compile` in Python, `chunks` the cut). Nothing about routing is dec
     six buffer bindings; each dispatch's arguments a record of the library's ring, never `setBytes`), on pipelines of
     the caller's device, the library's buffers added to the caller's `residencySet`; nothing is committed or
     signalled. `ncclMeshEncodeMetal4(comm, op, send, recv, count, type, encoder, table, residency, polls)` is the
-    all-reduce spelled so; every collective and group takes the stream. Its waits are bounded by the stream's `polls`,
-    which it requires ([Bounded waits](#bounded-waits)). Without a workspace its scratch is the communicator's, so such
+    all-reduce spelled so; every collective and group takes the stream. Its waits are bounded by the stream's `polls`
+    as the classic form's are, 0 leaving a wait to its landing or its cancellation ([Bounded waits](#bounded-waits)). Without a workspace its scratch is the communicator's, so such
     a group completes in its encoder (no `issue`). A recorded program's replay calls it at each crossing it marks
     (metal-microbench docs/kernels.md#any-program).
   - A wait is a kernel polling its position's completion word, a word of the session's that its canceller ends (a
@@ -116,10 +116,10 @@ table (`mesh.compile` in Python, `chunks` the cut). Nothing about routing is dec
 `mesh_wait_bounded`): the caller's bound for the group's crossings, carried per crossing, not a constant of the
 library's. A wait that reaches it records its position, its channel and the bound in the session's violation words,
 every later dispatch of the session does nothing, and the group fails as a value after its command buffer
-(`ncclCommGetAsyncError`, or the communicator's next group: "landed nothing within N polls"). The Metal 4 form
-requires a bound (`ncclInvalidArgument` without one): a window the caller commits as one command buffer must not hold
-the GPU for a wait no plan expects. Elsewhere 0 leaves a wait to its landing or its cancellation, as torch-mesh's
-waits are. `ncclMeshComplete` bounds the completion's waits by the stream it is given.
+(`ncclCommGetAsyncError`, or the communicator's next group: "landed nothing within N polls"). 0, in either form,
+leaves a wait to its landing or its cancellation, as torch-mesh's waits are and the engine's encoded crossings are (a
+silent peer holds such a wait for at most `MESH_SILENT_NS`, when the canceller ends it; until a44b88e the Metal 4 form
+refused 0 with `ncclInvalidArgument`). `ncclMeshComplete` bounds the completion's waits by the stream it is given.
 
 The caller derives the bound from its plan: the lag it expects at the crossing (the record's wait there, times the
 margin its plan names) over the period of one load on the node's GPU. That period, read on the idle Mini (M4 Pro,
