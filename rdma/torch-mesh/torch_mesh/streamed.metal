@@ -335,15 +335,8 @@ static inline __attribute__((always_inline)) uint fragment_reduce(thread const f
     return 8 * fragment_c(lane) + 4 * uint(b1) + 2 * uint(b2) + uint(b4);
 }
 
-// A tile in flight: its width, step, loaded words (as many as the widest width) and x (times half the step; fp16 where
-// its sums are the fp16 pair sums, H > 0).
-template <uint R, uint N, uint H>
-struct fragment_tile {
-    uint b;
-    float step;
-    uint w[N];
-    metal::conditional_t<(H > 0), half, float> x[R][4];
-};
+// A tile's x element type: x times half the step in fp16 where its sums are the fp16 pair sums (H > 0), else fp32.
+template <uint H> using fragment_x = metal::conditional_t<(H > 0), half, float>;
 
 // The tile words of a simdgroup's walk (steps i at tiles part + i SK below span), lane i holding step i's: one load
 // (STEPS <= 32; past that each step loads its own).
@@ -360,53 +353,51 @@ static inline uint fragment_word(uint held, device const uint *words, uint span,
     return t < span ? words[t] : 0u;
 }
 
-// A tile's planes and x loaded (nothing for an empty or absent tile; a 1-bit tile read by tables only its word).
-template <uint R, uint WIDTHS, uint LUT, uint LOADS, uint H>
-static inline __attribute__((always_inline)) void fragment_fetch(thread fragment_tile<R, FRAGMENT_MAX(WIDTHS), H> &f, uint word, device const uint *planes,
-        device const half *xs, uint columns, uint rows, uint k) {
+// A tile of word `word` (width b > 0) loaded: its planes into w and x times half its step into x (a 1-bit tile read by
+// tables only its word).
+template <uint R, uint WIDTHS, uint LUT, uint LOADS, uint N, typename S>
+static inline __attribute__((always_inline)) void fragment_fetch(uint word, device const uint *planes, device const half *xs, uint columns,
+        uint rows, uint k, thread uint (&w)[N], thread S (&x)[R][4]) {
     const uint b = (word >> 12) & 15u;
-    f.b = b;
-    f.step = fragment_step(word);
-    if (b == 0) return;
     device const uint *at = planes + ((word & 0xFFFu) << 5);
-    if (LUT && b == 1) { f.w[0] = at[0]; return; }
-    fragment_load<WIDTHS, LOADS>(at, b, f.w);
-    const float h = 0.5f * f.step;
+    if (LUT && b == 1) { w[0] = at[0]; return; }
+    fragment_load<WIDTHS, LOADS>(at, b, w);
+    const S h = S(0.5f * fragment_step(word));
     for (uint n = 0; n < R; n++) {
         device const half *xr = xs + ulong(min(n, rows - 1)) * columns + k;
-        for (uint j = 0; j < 4; j++)
-            if constexpr (H > 0) f.x[n][j] = xr[8 * j] * half(h);
-            else f.x[n][j] = float(xr[8 * j]) * h;
+        for (uint j = 0; j < 4; j++) x[n][j] = S(xr[8 * j]) * h;
     }
 }
 
-// A fetched tile into the lane's sums (tables at T, row stride `stride`, where LUT reads its 1-bit tiles): fp32, or with
-// H > 0 the fp16 pair sums t (a 1-bit tile by tables into the fp32 sums).
-template <uint R, uint WIDTHS, uint LUT, uint H>
-static inline __attribute__((always_inline)) void fragment_use(thread const fragment_tile<R, FRAGMENT_MAX(WIDTHS), H> &f, device const float *T, uint stride,
-        thread float2 (&acc)[R][4], thread half2 (&t)[R][4], thread float (&corr)[R]) {
-    const uint b = f.b;
-    if (LUT && b == 1) { fragment_lut<R>(f.w[0], T, stride, f.step, acc, corr); return; }
+// A fetched tile (word `word`, width b > 0) into the lane's sums (tables at T, row stride `stride`, where LUT reads its
+// 1-bit tiles): fp32, or with H > 0 the fp16 pair sums t (a 1-bit tile by tables into the fp32 sums).
+template <uint R, uint WIDTHS, uint LUT, uint H, uint N, typename S>
+static inline __attribute__((always_inline)) void fragment_use(uint word, thread const uint (&w)[N], thread const S (&x)[R][4], device const float *T,
+        uint stride, thread float2 (&acc)[R][4], thread half2 (&t)[R][4], thread float (&corr)[R]) {
+    const uint b = (word >> 12) & 15u;
+    if (LUT && b == 1) { fragment_lut<R>(w[0], T, stride, fragment_step(word), acc, corr); return; }
     if constexpr (H > 0) {
-#define FRAGMENT_FMA(B) fragment_fma<B, R>(f.w, f.x, t)
+#define FRAGMENT_FMA(B) fragment_fma<B, R>(w, x, t)
         FRAGMENT_WIDTHS(WIDTHS, FRAGMENT_FMA)
 #undef FRAGMENT_FMA
     } else {
-#define FRAGMENT_FMA(B) fragment_fma<B, R>(f.w, f.x, acc)
+#define FRAGMENT_FMA(B) fragment_fma<B, R>(w, x, acc)
         FRAGMENT_WIDTHS(WIDTHS, FRAGMENT_FMA)
 #undef FRAGMENT_FMA
     }
 }
 
 // A simdgroup's walk over its tiles of one band (share [first, first + span), tiles part, part + SK, ...), F (1 or 2)
-// tiles in flight: their planes and x loaded before either is decoded. Each lane's 8 R sums (acc[n][p]: rows 2p and
-// 2p + 1; the rows past `rows` repeat the last row's loads), fp32, or with H > 0 the fp16 pair sums added into them every
-// H tiles and at the walk's end.
+// tiles in flight: their planes and x loaded before either is decoded (F 1: a tile's loads, x and decode in one region of
+// its nonzero width, the hfma2 probe's walk: docs/kernels.md#the-decode-steps-couples, the four-row couple). Each lane's
+// 8 R sums (acc[n][p]: rows 2p and 2p + 1; the rows past `rows` repeat the last row's loads), fp32, or with H > 0 the fp16
+// pair sums added into them every H tiles and at the walk's end.
 template <uint R, uint SK, uint STEPS, uint WIDTHS, uint LUT, uint F, uint LOADS, uint H>
 static inline __attribute__((always_inline)) void fragment_walk(device const uint *codes, device const uint *words, uint base,
         device const float *tables, device const half *xs, uint columns, uint rows, uint first, uint span, uint part,
         uint lane, thread float2 (&acc)[R][4]) {
     static_assert(H % F == 0 && (H == 0 || FRAGMENT_MAX(WIDTHS) <= 11), "fp16 pair sums: whole steps of F, widths exact in half2");
+    constexpr uint N = FRAGMENT_MAX(WIDTHS);
     const uint kb = fragment_kb(lane), held = fragment_words<SK, STEPS>(words, span, part, lane);
     float corr[R];
     half2 t[R][4];
@@ -416,16 +407,20 @@ static inline __attribute__((always_inline)) void fragment_walk(device const uin
     }
     device const uint *planes = codes + (base << 5) + lane;
     for (uint i = 0; i < STEPS; i += F) {
-        const uint ta = first + part + i * SK, tc = ta + SK;
-        fragment_tile<R, FRAGMENT_MAX(WIDTHS), H> a;
-        fragment_fetch<R, WIDTHS, LUT, LOADS, H>(a, fragment_word<SK, STEPS>(held, words, span, part, i), planes, xs, columns, rows, ta * 32 + kb);
+        const uint ta = first + part + i * SK, wa = fragment_word<SK, STEPS>(held, words, span, part, i);
+        uint w[N];
+        fragment_x<H> x[R][4];
         if constexpr (F > 1) {
-            fragment_tile<R, FRAGMENT_MAX(WIDTHS), H> c;
-            fragment_fetch<R, WIDTHS, LUT, LOADS, H>(c, fragment_word<SK, STEPS>(held, words, span, part, i + 1), planes, xs, columns, rows, tc * 32 + kb);
-            fragment_use<R, WIDTHS, LUT, H>(a, tables + (ta * 8 + kb) * 16, columns * 4, acc, t, corr);
-            fragment_use<R, WIDTHS, LUT, H>(c, tables + (tc * 8 + kb) * 16, columns * 4, acc, t, corr);
-        } else {
-            fragment_use<R, WIDTHS, LUT, H>(a, tables + (ta * 8 + kb) * 16, columns * 4, acc, t, corr);
+            const uint tc = ta + SK, wc = fragment_word<SK, STEPS>(held, words, span, part, i + 1);
+            uint w1[N];
+            fragment_x<H> x1[R][4];
+            if ((wa >> 12) & 15u) fragment_fetch<R, WIDTHS, LUT, LOADS>(wa, planes, xs, columns, rows, ta * 32 + kb, w, x);
+            if ((wc >> 12) & 15u) fragment_fetch<R, WIDTHS, LUT, LOADS>(wc, planes, xs, columns, rows, tc * 32 + kb, w1, x1);
+            if ((wa >> 12) & 15u) fragment_use<R, WIDTHS, LUT, H>(wa, w, x, tables + (ta * 8 + kb) * 16, columns * 4, acc, t, corr);
+            if ((wc >> 12) & 15u) fragment_use<R, WIDTHS, LUT, H>(wc, w1, x1, tables + (tc * 8 + kb) * 16, columns * 4, acc, t, corr);
+        } else if ((wa >> 12) & 15u) {
+            fragment_fetch<R, WIDTHS, LUT, LOADS>(wa, planes, xs, columns, rows, ta * 32 + kb, w, x);
+            fragment_use<R, WIDTHS, LUT, H>(wa, w, x, tables + (ta * 8 + kb) * 16, columns * 4, acc, t, corr);
         }
         if constexpr (H > 0)
             if ((i + F) % H == 0 || i + F >= STEPS) fragment_flush<R>(acc, t);
@@ -519,20 +514,24 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
             for (uint p = 0; p < 4; p++) { gacc[n][p] = float2(0.0f); uacc[n][p] = float2(0.0f); gt[n][p] = half2(0.0h); ut[n][p] = half2(0.0h); }
         for (uint i = 0; i < STEPS; i += F) {
             const uint k = (simd + i * SK) * 32 + kb;
-            fragment_tile<R, FRAGMENT_MAX(WIDTHS), H> g, u;
-            fragment_fetch<R, WIDTHS, 0, LOADS, H>(g, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i), gp, gx, COLUMNS, rows, k);
-            fragment_fetch<R, WIDTHS, 0, LOADS, H>(u, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i), up, ux, COLUMNS, rows, k);
+            const uint gw0 = fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i), uw0 = fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i);
+            uint g[FRAGMENT_MAX(WIDTHS)], u[FRAGMENT_MAX(WIDTHS)];
+            fragment_x<H> gxs[R][4], uxs[R][4];
+            if ((gw0 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(gw0, gp, gx, COLUMNS, rows, k, g, gxs);
+            if ((uw0 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(uw0, up, ux, COLUMNS, rows, k, u, uxs);
             if constexpr (F > 1) {
-                fragment_tile<R, FRAGMENT_MAX(WIDTHS), H> g1, u1;
-                fragment_fetch<R, WIDTHS, 0, LOADS, H>(g1, fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i + 1), gp, gx, COLUMNS, rows, k + 32 * SK);
-                fragment_fetch<R, WIDTHS, 0, LOADS, H>(u1, fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i + 1), up, ux, COLUMNS, rows, k + 32 * SK);
-                fragment_use<R, WIDTHS, 0, H>(g, nullptr, 0, gacc, gt, gcorr);
-                fragment_use<R, WIDTHS, 0, H>(u, nullptr, 0, uacc, ut, ucorr);
-                fragment_use<R, WIDTHS, 0, H>(g1, nullptr, 0, gacc, gt, gcorr);
-                fragment_use<R, WIDTHS, 0, H>(u1, nullptr, 0, uacc, ut, ucorr);
+                const uint gw1 = fragment_word<SK, STEPS>(gheld, gw, TILES, simd, i + 1), uw1 = fragment_word<SK, STEPS>(uheld, uw, TILES, simd, i + 1);
+                uint g1[FRAGMENT_MAX(WIDTHS)], u1[FRAGMENT_MAX(WIDTHS)];
+                fragment_x<H> gxs1[R][4], uxs1[R][4];
+                if ((gw1 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(gw1, gp, gx, COLUMNS, rows, k + 32 * SK, g1, gxs1);
+                if ((uw1 >> 12) & 15u) fragment_fetch<R, WIDTHS, 0, LOADS>(uw1, up, ux, COLUMNS, rows, k + 32 * SK, u1, uxs1);
+                if ((gw0 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(gw0, g, gxs, nullptr, 0, gacc, gt, gcorr);
+                if ((uw0 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(uw0, u, uxs, nullptr, 0, uacc, ut, ucorr);
+                if ((gw1 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(gw1, g1, gxs1, nullptr, 0, gacc, gt, gcorr);
+                if ((uw1 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(uw1, u1, uxs1, nullptr, 0, uacc, ut, ucorr);
             } else {
-                fragment_use<R, WIDTHS, 0, H>(g, nullptr, 0, gacc, gt, gcorr);
-                fragment_use<R, WIDTHS, 0, H>(u, nullptr, 0, uacc, ut, ucorr);
+                if ((gw0 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(gw0, g, gxs, nullptr, 0, gacc, gt, gcorr);
+                if ((uw0 >> 12) & 15u) fragment_use<R, WIDTHS, 0, H>(uw0, u, uxs, nullptr, 0, uacc, ut, ucorr);
             }
             if constexpr (H > 0)
                 if ((i + F) % H == 0 || i + F >= STEPS) { fragment_flush<R>(gacc, gt); fragment_flush<R>(uacc, ut); }
