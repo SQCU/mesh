@@ -297,7 +297,7 @@ six-node cablings and 240 numberings each, one six-member communicator holds 4 q
 lanes and its direct neighbour's exclusive flow; 6 to 18 at 112, refused on three cablings), and with four splits
 beside it 8 (12 to 36 at 112, refused on all seven); no direct flow had to ride the lanes, and a fifth communicator
 toward one neighbour would; the pair holds 4 where it held 2 (metal-microbench output_data/bridge-20261015
-qp_lanes.py, qp_lanes.json). The lanes' protocol, modelled with relays, stopped programs and reused table indices on
+qp_lanes.py, qp_lanes.json; at the budget of 10 alike, qp_lanes2.py). The lanes' protocol, modelled with relays, stopped programs and reused table indices on
 chains, rings, stars and a Studio K4, delivers every chunk to its record and completes every program that was not
 stopped, 480 of 480 runs; posting the next header's receive before a header's records, posting no discards, or
 reading no generation each misdeliver or desynchronise a lane in most runs (lanes_model.py, lanes_model.json).
@@ -346,7 +346,8 @@ hop's cables; on a relay a direction's stripes share one lease, each stripe's fl
 invocations of the lease's rows. At the round's first pass a routed or relayed program rode one cable a hop, priced
 as all of them: over doubled Studio rings, chains and stars 4 of 18 to 20 of 20 routed pairs were priced at twice
 what they could carry (metal-microbench output_data/bridgereview-20261015 routed_cables.py), and 12 of 20 on chains of
-mixed counts (2, 3, 2, 3, 1 cables; 3, 4, 5, 2, 1), none now; k routed programs over one doubled hop put 1.5, 2.25,
+mixed counts (2, 3, 2, 3, 1 cables; 3, 4, 5, 2, 1), and over 2,000 random connected six-node cablings of 1 to 3
+cables an edge 10,013 of 32,850 routed pairs, none now (routed_stripes_random.py); k routed programs over one doubled hop put 1.5, 2.25,
 2.75 and 3.95 on its busiest cable for k of 2, 3, 4 and 6, now k/2, as priced (output_data/bridge-20261015
 routed_stripes.py). A flow's receive ring posts its own invocations ahead by its share of
 the program's span, so a stripe count that does not divide a cyclic program's invocations stripes it unevenly rather

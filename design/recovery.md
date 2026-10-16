@@ -197,8 +197,9 @@ A program started on a link that is not paired fails at once (ENETDOWN). A progr
 start at most 600 s (members prepare their programs at their own speeds: metal-microbench docs/measurement.md
 2026-10-10, the verify step), and for its queue pairs to pair at most 30 s from then. The client's own wait for its
 start is bounded by the same windows and a pause (mesh.h `MESH_PEER_NS`, `MESH_PAIR_NS`, `MESH_PAUSE_NS`, their one
-definition), so a bridge that never answers ends it as ETIMEDOUT. A program toward a node the map gives no route fails
-at once (EHOSTUNREACH).
+definition), so a bridge that never answers ends it as ETIMEDOUT. A program toward a node its map gives no route fails
+at once (EHOSTUNREACH) where it is the pair's lower end; the higher end awaits the lower's route (below), its peer
+told of the lower's failure by none, so its wait ends at the peer window or at its own program's revoke.
 
 A routed program's start returns once the far member's program has started and every relay between has posted (POSTED
 is end to end, design/bridge-and-ipc.md#protocol), so a member that starts 25 s after its peer delays the peer's start,
