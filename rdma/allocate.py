@@ -491,11 +491,16 @@ class Balancer:
     The models are DFPA's [Lastovetsky & Reddy 2010, partial estimation of functional performance models]: each
     (decision, stretch, rank)'s measured points (units, seconds an invocation), up to `window` at a part, their median
     [LB-BSP 2020, §3.2.1]; the time interpolated between them, nondecreasing (`time`), within a doubling trust region
-    past the largest part measured, never less than a grain past it (a region that has halved to the measured parts
-    cannot move them, and a decision whose models promise a gain then stood without a step) [Conn, Gould & Toint
-    2000]; a rank with none at a stretch read at the measured
-    ranks' median time a unit.  A model's median at a part moving by more than the resolution drops its other points
-    (its performance changed [Clarke, Lastovetsky & Rychkov 2011]).  A move the next call measures worse by more than
+    past the largest part the holder was measured at in the stretches the call ran, else in any the decision has seen
+    (a part that moves the work into other stretches, a whole layer's onto one member, does not widen the region of the
+    stretches it left), else past none or its part (a holder never measured: a grain past it), never less
+    than a grain past it (a region that has halved to the measured parts cannot move them, and a decision whose models
+    promise a gain then stood without a step) [Conn, Gould & Toint 2000]; a rank with none at a stretch read at the
+    measured ranks' median time a unit.  Every stretch a decision observes is remembered (its count, each holder's
+    remainder and the outside ranks' time), the call a move is rejected at too, so a move measured worse is priced by
+    what it measured once its stretches are no longer run (a holder moved back to none publishes nowhere it did).  A
+    model's median at a part moving by more than the resolution drops its other points (its performance changed
+    [Clarke, Lastovetsky & Rychkov 2011]).  A move the next call measures worse by more than
     the resolution is rejected: the parts go back, the trust region halves and the measurement stays in the models
     (a trust-region method's ratio test [Conn, Gould & Toint 2000, §6.1]); it doubles again, to twice, after a move
     that held.  The test reads the whole call (every stretch's slowest rank): a move can carry work across stretches
@@ -509,9 +514,10 @@ class Balancer:
     moves half as far [LB-BSP 2020, §3.3.2].  The resolution is twice the measured sum's relative standard error (each
     stretch's slowest rank's median's, from its invocations, in quadrature), at least 1 %; a model changed where its
     window's median moved past that and past three of its own standard errors; the ratio test, which compares two
-    calls, takes at least twice the spread of the measured sums of repeated calls at the same parts (what changes
-    between calls, a peer program's load on a GPU, which no one call shows), so a peer's load does not reject a move.  Every rank given the same evidence gets the same
-    parts (R4).
+    calls, takes at least twice the spread of the measured sums of repeated calls at the same parts of every decision
+    (what changes between calls, a peer program's load on a GPU, which no one call shows; a call after another
+    decision's move is not a repeat), so a peer's load does not reject a move.  Every rank given the same evidence gets
+    the same parts (R4).
 
       Balancer({'tp': {'parts': [8, 8], 'grain': 1, 'low': [1, 1], 'high': [15, 15]}})
       .observe({'step:3': {'scales': {'tp': [1.0, 1.0]}, 'fixed': [0.2, 0.1], 'times': [[s, ...], [s, ...]]}, ...})
@@ -519,7 +525,8 @@ class Balancer:
 
     What a decision keeps is bounded, so nothing a call does grows with the calls before it (metal-microbench
     docs/acceptance-20261014.md A37): with `memory`, each model's points at its `memory` latest parts and the
-    measured calls of the decision's `memory` latest parts (the ratio test's spread), the older dropped; with `budget`,
+    measured calls of the `memory` latest placements (every decision's parts: the ratio test's spread, one for the
+    program), the older dropped; with `budget`,
     each search (least) makes at most that many boxes, past which it takes the best parts it found.
 
     Of the moves reaching the models' least, the one of fewest moved parts (_fewest: a neighbouring pair's split where
@@ -532,7 +539,7 @@ class Balancer:
 
     def __init__(self, decisions, window=3, memory=None, budget=None):
         self.window, self.memory, self.decisions, self.points = int(window), memory and int(memory), {}, {}
-        self.budget = budget and int(budget)
+        self.budget, self.measure, self.calls = budget and int(budget), 'sum', {}
         for name, d in decisions.items():
             parts = [int(p) for p in d['parts']]
             n, grain = len(parts), int(d.get('grain', 1))
@@ -569,6 +576,8 @@ class Balancer:
                 latency = obs.get('latency')
                 seen[s] = (max(len(ts) for ts in obs['times'] if ts), ranks, scales, list(obs.get('fixed') or []), order,
                            latency if callable(latency) else float(latency or 0.0), len(obs['times']))
+        if not seen:
+            return self.parts
         priced = any(v[4] is not None for v in seen.values())
         measure = 'path' if priced else 'sum'
 
@@ -579,6 +588,17 @@ class Balancer:
         medians = lambda s, ranks, n: [ranks[i][0] if i in ranks else None for i in range(n)]
         call = _path(rows(medians))
         whole = max(RESOLUTION, 2 * math.sqrt(sum((c * max(r.values())[1]) ** 2 for c, r, *_ in seen.values())) / call if call else 0.0)
+        placed = ';'.join(f'{name}:' + ','.join(map(str, d['parts'])) for name, d in sorted(self.decisions.items()))
+        moved = self.measure != measure
+        if moved:
+            self.calls.clear()
+        self.measure = measure
+        self.calls[placed] = (self.calls.pop(placed, []) + [call])[-5:]
+        while self.memory and len(self.calls) > self.memory:
+            self.calls.pop(next(iter(self.calls)))
+        spread = [abs(f / statistics.median(fs) - 1) for fs in self.calls.values() if len(fs) > 1 and statistics.median(fs) > 0
+                  for f in fs]
+        between = max(whole, 2 * 1.4826 * statistics.median(spread) if len(spread) > 2 else 0.0)
         proposals, runs = [], {}
         for name, d in self.decisions.items():
             groups = self._groups(d)
@@ -603,18 +623,9 @@ class Balancer:
             slowest = [(c, max(r.values())) for c, r, *_ in mine.values()]
             within = max(RESOLUTION, 2 * math.sqrt(sum((c * se) ** 2 for c, (_, se) in slowest)) / measured if measured else 0.0)
             base = _path(rows(medians, counted)) if path else measured
-            history = d.setdefault('history', {})
-            changed = d.get('measure', 'sum') != measure
-            if changed:
-                history.clear()
+            changed, epsilon = moved, within
+            if moved:
                 d['last'] = None
-            d['measure'] = measure
-            key = ','.join(map(str, d['parts']))
-            history[key] = (history.pop(key, []) + [call])[-5:]
-            while self.memory and len(history) > self.memory:
-                history.pop(next(iter(history)))
-            spread = [abs(f / statistics.median(fs) - 1) for fs in history.values() if len(fs) > 1 for f in fs]
-            epsilon, between = within, max(whole, 2 * 1.4826 * statistics.median(spread) if len(spread) > 2 else 0.0)
             last, d['last'] = d.get('last'), [list(d['parts']), call]
             for s, (c, ranks, scales, fixed, view, _) in mine.items():
                 for g, ((med, se), i) in view.items():
@@ -633,6 +644,9 @@ class Balancer:
                     kept = [(u, t) for u, t in own if u != units] + [(units, t) for t in now]
                     recent = list(dict.fromkeys(u for u, _ in reversed(kept)))[:self.memory] if self.memory else None
                     self.points[(name, s, g)] = [(u, t) for u, t in kept if recent is None or u in recent]
+            remembered = d.setdefault('seen', {})
+            for s, (c, ranks, scales, fixed, view, other) in mine.items():
+                remembered[s] = [c, [[g, view[g][0][0] - self._model(name, s, g)(d['parts'][g])] for g in view if d['parts'][g]], other]
             if last and last[0] != d['parts'] and call > last[1] * (1 + between):
                 proposals.append((math.inf, name, last))
                 continue
@@ -642,7 +656,7 @@ class Balancer:
                 d['stands'] = True
                 continue
             n = len(d['parts'])
-            kept, remembered, ranked = [], d.setdefault('seen', {}), {}
+            kept, ranked = [], {}
             for s, (c, rests, other) in remembered.items():
                 if s in mine:
                     continue
@@ -668,7 +682,6 @@ class Balancer:
                     else:
                         gs[g] = lambda u, r=rest, k=per_unit: k * u + r
                     fs.append(lambda u, f=gs[g], o=other: max(o, f(u)))
-                remembered[s] = [c, [[g, view[g][0][0] - self._model(name, s, g)(d['parts'][g])] for g in view if d['parts'][g]], other]
                 built.append((c, fs))
                 ranked[s] = gs
             value = None
@@ -695,9 +708,14 @@ class Balancer:
                 continue
             grow = d.get('reach', 2.0)
             failed = d.get('failed') or [None] * n
-            reach = [min(d['high'][g], max(d['grain'] * math.ceil(grow * u / d['grain']), u + d['grain']))
-                     if any((name, s, g) in self.points for s in mine) else d['high'][g] for g in range(n)
-                     for u in [max((u for s in mine for u, _ in self.points.get((name, s, g), [])), default=0)]]
+            here, anywhere = [None] * n, [None] * n
+            for (e, s, g), own in self.points.items():
+                if e == name and own:
+                    anywhere[g] = max([anywhere[g] or 0] + [u for u, _ in own])
+                    here[g] = max([here[g] or 0] + [u for u, _ in own]) if s in mine else here[g]
+            measured_ = [h if h is not None else a if a is not None else d['parts'][g] for g, (h, a) in enumerate(zip(here, anywhere))]
+            reach = [min(d['high'][g], max(d['parts'][g], d['grain'] * math.ceil(grow * u / d['grain']), u + d['grain']))
+                     for g, u in enumerate(measured_)]
             reach = [r if f is None else max(min(r, f - d['grain']), d['parts'][g]) for g, (r, f) in enumerate(zip(reach, failed))]
             nxt, promise, _ = least(total, d['grain'], d['low'], reach, [] if value else built, value, knots, budget=self.budget)
             if sum(nxt) < total:
@@ -766,15 +784,19 @@ class Balancer:
 
     def state(self):
         return {'window': self.window, 'memory': self.memory, 'budget': self.budget, 'decisions': self.decisions,
-                'points': [[d, s, i, own] for (d, s, i), own in self.points.items()]}
+                'points': [[d, s, i, own] for (d, s, i), own in self.points.items()], 'measure': self.measure,
+                'calls': self.calls}
 
     @classmethod
     def of(cls, state):
         b = cls({}, state.get('window', 3), state.get('memory'), state.get('budget'))
         b.decisions = {name: {'grain': 1, 'low': [0] * len(d['parts']), 'high': [sum(d['parts'])] * len(d['parts']), 'before': None,
-                              'stands': False, **d, 'groups': d.get('groups') or [[i] for i in range(len(d['parts']))]}
+                              'stands': False, **{k: v for k, v in d.items() if k not in ('history', 'measure')},
+                              'groups': d.get('groups') or [[i] for i in range(len(d['parts']))]}
                        for name, d in state['decisions'].items()}
         b.points = {(d, s, int(i)): [tuple(p) for p in own] for d, s, i, own in state.get('points', [])}
+        b.measure = state.get('measure') or next((d['measure'] for d in state['decisions'].values() if d.get('measure')), 'sum')
+        b.calls = {k: list(v) for k, v in (state.get('calls') or {}).items()}
         return b
 
 
