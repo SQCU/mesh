@@ -501,7 +501,8 @@ class Balancer:
     the resolution is rejected: the parts go back, the trust region halves and the measurement stays in the models
     (a trust-region method's ratio test [Conn, Gould & Toint 2000, §6.1]); it doubles again, to twice, after a move
     that held.  The test reads the whole call (`measured`, the call's own time where the caller gives it, else every
-    stretch's slowest rank on the models' path, which leaves out what no stretch times): a move can carry work across stretches
+    stretch's slowest rank on the models' path, which leaves out what no stretch times; a decision none of whose stretches
+    the call ran, a move that left it no crossing, is tested on `measured` alone): a move can carry work across stretches
     (a rank holding none of a decision publishes nothing where it did), so the moved decision's own stretches are no
     measure of it.  Of the decisions sharing a stretch one moves a call, a rejection's return first, else the one whose
     models promise the most (block coordinate descent [Tseng 2001]): another's move would change the stretches its
@@ -604,6 +605,15 @@ class Balancer:
                 if view:
                     mine[s] = (c, ranks, scales, fixed, view, max(outside, default=0.0))
             if not mine:
+                if measured is not None:
+                    history, key = d.setdefault('history', {}), ','.join(map(str, d['parts']))
+                    history[key] = (history.pop(key, []) + [tested])[-5:]
+                    spread = [abs(f / statistics.median(fs) - 1) for fs in history.values() if len(fs) > 1 for f in fs]
+                    between = max(RESOLUTION, 2 * 1.4826 * statistics.median(spread) if len(spread) > 2 else 0.0)
+                    last, d['last'] = d.get('last'), [list(d['parts']), tested]
+                    if last and last[0] != d['parts'] and tested > last[1] * (1 + between):
+                        proposals.append((math.inf, name, last))
+                        runs[name] = set()
                 continue
             path = {s for s, v in seen.items() if priced and v[4] is not None and any(seen[t][4] and seen[t][4][0] == v[4][0] for t in mine)}
             counted = runs[name] = set(mine) | path
