@@ -542,8 +542,10 @@ class Balancer:
 
     A move costs the call that takes it its members' preparation of the placement it makes (metal-microbench
     docs/placement.md#moves: S), unless they prepared it before: with `prepare`, a move observe takes waits as `pending`
-    until every member has prepared the placement it makes, when `prepared` takes it (a move measured worse goes back
-    at once: its placement was prepared before); without it a move is taken at once.  Every move the models propose is
+    until every member has prepared the placement it makes, when `prepared` takes it, a move measured worse going back
+    the same way (make before break [RFC 3209]: the placement it returns to need not be prepared still, its nested
+    divisions refitted to its parts, and a call never runs one that is not, which had cost a call 19.7 s of Neural Engine
+    shares built inside it); without it a move, and its return, is taken at once.  Every move the models propose is
     taken: no rule pricing a move against its gain (rent or buy, with blocking for the moves the models cannot price;
     a horizon's) dominated taking them on the simulated nodes, each higher in risk in 33 to 49 of 75 states
     (docs/placement.md#moves).
@@ -791,7 +793,10 @@ class Balancer:
                 d['before'], d['stands'] = None, False
                 continue
             taken |= runs[name]
-            if reverting:
+            if reverting and prepare:
+                d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
+                d['stands'], d['last'], d['pending'], d['reverting'] = False, value, list(value[0]), True
+            elif reverting:
                 d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
                 d['before'], d['parts'], d['stands'], d['last'], d['pending'] = None, list(value[0]), False, value, None
             elif not prepare or list(value) == d['parts']:
@@ -816,7 +821,8 @@ class Balancer:
         those still pending as prepared): the parts become the pending ones, as observe's move made them."""
         for name, d in self.decisions.items():
             if d.get('pending') and (expected is None or expected.get(name) == d['pending']):
-                d['before'], d['parts'], d['stands'], d['pending'] = list(d['parts']), list(d['pending']), False, None
+                d['before'] = None if d.pop('reverting', False) else list(d['parts'])
+                d['parts'], d['stands'], d['pending'] = list(d['pending']), False, None
         return self.parts
 
     def reject(self):
