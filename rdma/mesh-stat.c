@@ -47,7 +47,7 @@ int main(void){
     }
     printf("]}");
   }
-  static const char *resets[]={"unknown","supply","watchdog","other"},*powers[]={"unknown","AC","battery","UPS"};
+  static const char *resets[]={"unknown","supply","watchdog","other","sag"},*powers[]={"unknown","AC","battery","UPS"};
   struct mesh_node_health health[64];
   const int known=mesh_nodes_health(health,64);
   printf(",\"nodes\":[");
@@ -58,7 +58,7 @@ int main(void){
     printf("\",\"window\":%llu,\"memory\":%llu,\"model\":\"",(unsigned long long)health[i].window,(unsigned long long)health[i].memory);
     for(const char *c=health[i].model;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
     printf("\",\"sampled\":%llu,\"booted\":%llu,\"session\":\"%.36s\",\"reset\":\"%s\",\"shutdown\":\"",
-           (unsigned long long)h->sampled,(unsigned long long)h->booted,h->session,h->reset<4?resets[h->reset]:"unknown");
+           (unsigned long long)h->sampled,(unsigned long long)h->booted,h->session,h->reset<5?resets[h->reset]:"unknown");
     for(const char *c=h->shutdown;*c;c++)printf(*c=='"' || *c=='\\'?"\\%c":"%c",*c);
     printf("\",\"power\":\"%s\",\"charge\":%d,\"minutes\":%d,\"free\":%llu,\"wired\":%llu,\"pressure\":%u,\"thermal\":%u}",
            h->power<4?powers[h->power]:"unknown",h->charge,h->minutes,(unsigned long long)h->free,(unsigned long long)h->wired,

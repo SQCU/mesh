@@ -320,9 +320,10 @@ static int record_is(const char *record,size_t length,const char *class){
 /* design/recovery.md#diagnosis: why the node last restarted, from the power controller's ring (newest first): the
    reset's own records, the ring's from its newest up to the next that opens an earlier boot's (a `por,por_vddrtc` or
    `wdog` record after the first), written whole into `out` (as many as its room holds, none cut); the watchdog where
-   the newest is `wdog`, the supply where it is `por`, else other (none: unknown) */
+   the newest is `wdog`, a sag where any of the reset's own records is `uv` (the controller watched its rails fall: an
+   unplug or a supply under lockout), the supply cut where the newest is `por`, else other (none: unknown) */
 static uint32_t reset_read(const char *ring,char *out,size_t room){
-  uint32_t reset=MESH_RESET_UNKNOWN,records=0;
+  uint32_t reset=MESH_RESET_UNKNOWN,records=0,sagged=0;
   size_t used=0;
   int whole=1;
   out[0]=0;
@@ -331,10 +332,11 @@ static uint32_t reset_read(const char *ring,char *out,size_t room){
     const size_t length=strcspn(at," ");
     if(!length || (records && (record_is(at,length,"wdog") || (length>=14 && !strncmp(at,"por,por_vddrtc",14)))))break;
     if(!records++)reset=record_is(at,length,"wdog")?MESH_RESET_WATCHDOG:record_is(at,length,"por")?MESH_RESET_SUPPLY:MESH_RESET_OTHER;
+    sagged|=record_is(at,length,"uv");
     if(whole && used+(used?1:0)+length<room){if(used)out[used++]=' ';memcpy(out+used,at,length);used+=length;out[used]=0;}
     else whole=0;
   }
-  return reset;
+  return sagged && reset!=MESH_RESET_WATCHDOG?MESH_RESET_SAG:reset;
 }
 /* the boot's facts, read once: when the node booted, its boot session, and why it last restarted (reset_read) */
 static void health_init(void){
@@ -350,7 +352,7 @@ static void health_init(void){
   health_sample(&health);
 }
 static void health_text(const struct mesh_health *h,char *out,size_t room){
-  static const char *resets[]={"unknown","supply lost","watchdog","other"};
+  static const char *resets[]={"unknown","supply cut","watchdog","other","supply sagged"};
   static const char *thermals[]={"nominal","moderate","heavy","trapping","sleeping"};
   char power[64],thermal[16],when[32];
   if(h->power==MESH_POWER_AC && h->charge>=0)snprintf(power,sizeof power,"AC, battery %d%%",h->charge);
@@ -363,7 +365,7 @@ static void health_text(const struct mesh_health *h,char *out,size_t room){
   snprintf(out,room,"power %s; memory free %.2f GiB, wired %.2f GiB, pressure %s; thermal %s; booted %s (session %.36s), "
            "last restart %s (%.79s)",power,(double)h->free/1073741824.0,(double)h->wired/1073741824.0,
            h->pressure==4?"critical":h->pressure==2?"warning":h->pressure==1?"normal":"unread",thermal,when,h->session,
-           h->reset<4?resets[h->reset]:"unknown",h->shutdown);
+           h->reset<5?resets[h->reset]:"unknown",h->shutdown);
 }
 
 /* design/recovery.md#diagnosis; design/bridge-and-ipc.md#records: the nodes this bridge has heard of, when it last heard

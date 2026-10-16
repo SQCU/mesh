@@ -285,12 +285,13 @@ int mesh_choose(const struct mesh_link_map *,const struct mesh_trees *sets,uint3
 /* design/recovery.md#diagnosis: a node's health as its bridge last sampled it, carried in its record to every bridge.
    `sampled` the wall clock of the sample and `booted` of the node's boot (ns since the epoch); `session` its boot session
    (kern.bootsessionuuid); why it last restarted, `reset` (MESH_RESET_*) read from `shutdown`, the head of
-   kern.shutdownreason, its power controller's records newest first ("por,..." its supply was lost, "wdog,..." its
-   watchdog reset it); its power source (`power`, MESH_POWER_*, with `charge` percent and `minutes` to empty, -1 where
+   kern.shutdownreason, its power controller's records newest first ("wdog,..." its watchdog reset it; a "uv,..." record
+   among the reset's own, its supply sagged under the controller's watch, an unplug or a rail under lockout; else
+   "por,..." its supply was cut); its power source (`power`, MESH_POWER_*, with `charge` percent and `minutes` to empty, -1 where
    none is reported); its `free` and `wired` memory in bytes and the kernel's memory `pressure`
    (kern.memorystatus_vm_pressure_level: 1 normal, 2 warning, 4 critical); its thermal pressure (`thermal`,
    com.apple.system.thermalpressurelevel: 0 nominal, 1 moderate, 2 heavy, 3 trapping, 4 sleeping). */
-enum { MESH_RESET_UNKNOWN, MESH_RESET_SUPPLY, MESH_RESET_WATCHDOG, MESH_RESET_OTHER };
+enum { MESH_RESET_UNKNOWN, MESH_RESET_SUPPLY, MESH_RESET_WATCHDOG, MESH_RESET_OTHER, MESH_RESET_SAG };
 enum { MESH_POWER_UNKNOWN, MESH_POWER_AC, MESH_POWER_BATTERY, MESH_POWER_UPS };
 struct mesh_health {
   uint64_t sampled,booted,free,wired;
