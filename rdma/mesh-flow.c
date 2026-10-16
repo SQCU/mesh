@@ -169,8 +169,7 @@ struct flow {
    work in flight, else every MESH_PAUSE_NS */
 #define MESH_IDLE_NS UINT64_C(100000000)
 #define MESH_IDLE_POLL_NS UINT64_C(1000000)
-/* design/recovery.md#registration, #loss: a refused registration's first pause and its longest (doubling), which a
-   link whose lanes could not be made or connected takes too, from MESH_PAUSE_NS */
+/* design/recovery.md#registration: a refused registration's first pause and its longest (doubling) */
 #define MESH_REFUSED_NS UINT64_C(60000000000)
 #define MESH_REFUSED_MOST_NS UINT64_C(1800000000000)
 /* design/bridge-and-ipc.md#protocol: the most bytes a port holds unsent toward a peer that takes none */
@@ -179,9 +178,10 @@ struct flow {
    made and told, up, closing), the peer's queue pairs and the frames a header's records may hold (`room`), their pages
    (a lane's MESH_HEADERS send headers, two receive headers and its discard block, leased for every port the region has
    at the bridge's start: lanes_reserve), each lane's gate, the next header each way and the gate's frames once each
-   send header's SEND posted (`mark`), the receives a header posted and not landed (`records`, the receive thread's), the
-   pause a link whose lanes failed to be made or connected takes before it pairs again (`backoff`, design/recovery.md
-   #loss), and `generation` moved at each teardown; the progress threads read the lanes while `up` */
+   send header's SEND posted (`mark`), the receives a header posted and not landed (`records`, the receive thread's), when
+   lanes that failed are made again (`retry`, a pause after; design/recovery.md#loss) and why they last could not be
+   made (`code`, logged once a cause), and `generation` moved at each teardown; the progress threads read the lanes
+   while `up` */
 enum { LANES_DOWN, LANES_MAKING, LANES_MADE, LANES_CONNECTING, LANES_UP, LANES_CLOSING };
 struct lanes {
   struct mesh_verbs provider;
@@ -192,7 +192,8 @@ struct lanes {
   struct send_gate gate[MESH_LANES];
   uint64_t sent[MESH_LANES],received[MESH_LANES],mark[MESH_LANES][MESH_HEADERS],records;
   uint32_t cursor[MESH_LANES];
-  uint64_t retry,backoff;
+  uint64_t retry;
+  int64_t code;
 };
 /* design/bridge-and-ipc.md#ports: a port, its link, its control socket's queues each way, its verbs work's queue, a
    refused registration's pause (`backoff`), the queue pairs its flows and lanes hold or will (`committed`, of the
@@ -796,7 +797,7 @@ static struct ibv_sge lane_span(const struct port *port,uint64_t offset,uint64_t
 static struct ibv_qp *lane_pair(const struct flow *link,uint32_t lane){
   return link->port->lanes.provider.queues?link->port->lanes.provider.queues[lane].pair:NULL;
 }
-/* a lane's failure, the link's (taken by the event loop: lanes_turn) */
+/* a lane's failure, the lanes' (taken by the event loop: lanes_turn, lanes_reset) */
 static void lanes_lost(struct port *port,int64_t code){
   int64_t none=0;
   atomic_compare_exchange_strong(&port->lanes.failed,&none,code?code:EIO);
@@ -1243,9 +1244,10 @@ static void ready_say(struct flow *f,const uint32_t *route,uint32_t hops){
 }
 
 /* design/bridge-and-ipc.md#routes: a client program awaiting the READYs of its routed peer, the pair's lower node, whose
-   route both ends take: its `stripes` once the first came (#cables), the stripes it has taken (a bit each), and
-   `created`, which bounds the wait by the peer window */
-struct await { struct await *next; uint64_t key,owner,created,taken; uint32_t destination,far,stripes; };
+   route both ends take: its `stripes` once the first came (#cables), the stripes it has taken (a bit each), and its
+   `deadline`: the peer window from `created` where this end's map routes to the peer (`routed`), else the pairing
+   window from when the peer was last reachable (program_await) */
+struct await { struct await *next; uint64_t key,owner,created,taken,deadline; uint32_t destination,far,stripes,routed; };
 static struct await *awaits;
 static struct await *await_find(uint64_t key,uint32_t far){
   for(struct await *a=awaits;a;a=a->next)if(a->key==key && a->far==far)return a;
@@ -1470,7 +1472,8 @@ static uint64_t ready_shape(const struct ready *ready,const struct mesh_transfer
    from the same far end, whose partner sends toward the same far end; NULL where none has */
 static struct lease *relay_lease(const struct flow *f,const struct flow *g){
   for(struct flow *h=flows;h;h=h->next){
-    if(h==f || h->key!=f->key || h->far!=f->far || !h->partner || h->partner->far!=g->far || h->state==FAILED || h->stopping)continue;
+    if(h==f || h->key!=f->key || h->far!=f->far || h->stripes!=f->stripes || !h->partner || h->partner->far!=g->far || h->state==FAILED ||
+       h->stopping)continue;
     struct lease *lease=h->side[MESH_RECEIVE].lease?h->side[MESH_RECEIVE].lease:h->pending[MESH_RECEIVE].lease;
     if(lease)return lease;
   }
@@ -1605,7 +1608,7 @@ static void ready_heard(struct port *port,const struct message *heard,const unsi
       ready_refuse(port,heard,E2BIG);
     else{
       f->hold=1;f->heard=HEARD_READY;
-      if(a){flow_take(f,a->owner,a->destination);ready_say(f,&f->far,1);await_took(a,ready.stripe,ready.stripes);}
+      if(a){flow_take(f,a->owner,a->destination);await_took(a,ready.stripe,ready.stripes);ready_say(f,&f->far,1);}
       flow_step(f);
     }
   }else{
@@ -1832,23 +1835,28 @@ static uint32_t lanes_room(const struct lanes *l){
 static void port_step(struct port *port){
   for(struct flow *f=flows,*next;f;f=next){next=f->next;if(f->port==port)flow_step(f);}
 }
-/* design/recovery.md#loss: lanes that could not be made or connected are the link's loss, told the peer first (a
-   LANES of none and why): the port then takes no hello and no connection for a pause, MESH_PAUSE_NS doubling to
-   MESH_REFUSED_MOST_NS while its lanes keep failing, and pairs again after it with new lanes */
-static void lanes_refused(struct port *port,int code,const char *what){
+/* design/recovery.md#loss: lanes that failed (made, connected or run) or whose peer's did are the lanes' alone: the
+   flows that ride them and have posted on them fail (their records and SENDs went with them), the lanes are closed and
+   made again a pause later, and the peer is told (a LANES of none and why) where the failure is this end's; the link
+   stays paired, and its flows with queue pairs of their own and those still pairing run on */
+static void lanes_reset(struct port *port,int64_t code,const char *what,int tell){
   struct lanes *l=&port->lanes;
-  l->backoff=l->backoff?MIN(2*l->backoff,MESH_REFUSED_MOST_NS):MESH_PAUSE_NS;
-  say("link %u (%s): lanes %s toward node %u: %s; the link is lost and pairs again in %.0f s\n",port->index,port->name,what,
-      port->peer,strerror(code),(double)l->backoff/1e9);
-  port_say(port,(struct message){.kind=LANES,.count=0,.code=code},NULL,0);
-  port_lost(port,code,0);
-  port->open=0;port->next=now+l->backoff;
+  say("link %u (%s): lanes toward node %u %s: %s; made again in %.0f s, the link paired and its own queue pairs running on\n",
+      port->index,port->name,port->peer,what,strerror((int)code),(double)MESH_PAUSE_NS/1e9);
+  if(tell)port_say(port,(struct message){.kind=LANES,.count=0,.code=code},NULL,0);
+  atomic_store_explicit(&l->up,0,memory_order_release);
+  for(struct flow *f=flows;f;f=f->next)
+    if(f->port==port && !f->exclusive && f->state!=FAILED && (f->state>=POSTING || f->job==JOB_RECEIVE || f->job==JOB_RUN || f->job==JOB_CHANGE))
+      flow_fail(f,code,1,FAIL,M->node,M->node);
+  if(l->state!=LANES_DOWN)l->state=LANES_CLOSING;
+  l->heard=0;
 }
 /* design/bridge-and-ipc.md#lanes: the port's lanes' turn, on the event loop: a job's end taken (made: LANES told the
    peer, its queue pairs and its room; connected: up, and the port's flows stepped; closed: down, the device's queue
-   pairs given back; a make or connect that failed, the link's loss: lanes_refused); a lane's failure is the link's; the
-   lanes made once the port pairs (the device's room for them committed: flow_make counts it before), connected once
-   both ends made theirs, closed once the link went */
+   pairs given back; a make or connect that failed: lanes_reset); a lane's failure is the lanes' (lanes_reset); the lanes
+   made once the port pairs, or a pause after they failed, where the device has room for them (flow_make counts it
+   before any flow's own; else made at the first turn it has, the cause logged once), connected once both ends made
+   theirs, closed once the link went or they failed */
 static void lanes_turn(struct port *port){
   struct lanes *l=&port->lanes;
   if(l->job){
@@ -1859,41 +1867,49 @@ static void lanes_turn(struct port *port){
       if(result)say("link %u (%s): lanes teardown: %s\n",port->index,port->name,strerror(result));
       else{l->state=LANES_DOWN;if(l->committed)port->committed-=MESH_LANES;l->committed=0;}
     }else if(l->state==LANES_CLOSING){}
-    else if(result)lanes_refused(port,result,job==LANES_MAKING?"not made":"not connected");
+    else if(result)lanes_reset(port,result,job==LANES_MAKING?"not made":"not connected",1);
     else if(job==LANES_MAKING){
       l->state=LANES_MADE;l->room=lanes_room(l);
       struct message said={.kind=LANES,.count=MESH_LANES,.code=l->room};
       for(uint32_t lane=0;lane<MESH_LANES;lane++){said.pair[lane][0]=l->provider.queues[lane].pair->qp_num;said.pair[lane][1]=(l->provider.psn+lane)&0xffffff;}
       port_say(port,said,NULL,0);
     }else{
-      l->state=LANES_UP;l->backoff=0;
+      l->state=LANES_UP;l->code=0;
       say("link %u (%s): lanes up toward node %u: %u queue pairs, %u frames a header\n",port->index,port->name,port->peer,MESH_LANES,
           MIN(l->room,l->peer_room));
       port_step(port);
     }
   }
   const int64_t failed=atomic_exchange(&l->failed,0);
-  if(failed && port->greeted){
-    say("link %u (%s): a lane failed: %s\n",port->index,port->name,strerror((int)failed));
-    port_lost(port,failed,0);
-  }
+  if(failed && port->greeted && (l->state==LANES_UP || l->state==LANES_CONNECTING))lanes_reset(port,failed,"failed",1);
   if(l->job)return;
   if(l->state==LANES_CLOSING && now>=l->retry){l->retry=now+MESH_PAUSE_NS;lanes_job(port,LANES_CLOSING);}
-  else if(port->greeted && l->state==LANES_DOWN){
-    if(port->committed+MESH_LANES>port->device.max_pairs)lanes_refused(port,ENOSPC,"not made");
-    else{port->committed+=MESH_LANES;l->committed=1;l->state=LANES_MAKING;lanes_job(port,LANES_MAKING);}
+  else if(port->greeted && l->state==LANES_DOWN && now>=l->retry){
+    if(l->page==MESH_ABSENT && (l->page=mesh_arena_alloc(&bridge,l->pages,1))==MESH_ABSENT){
+      if(l->code!=ENOMEM)say("link %u (%s): lanes not made: the window holds no %u pages for them; made once it has\n",port->index,
+                             port->name,l->pages);
+      l->code=ENOMEM;l->retry=now+MESH_PAUSE_NS;
+    }else if(port->committed+MESH_LANES>port->device.max_pairs){
+      if(l->code!=ENOSPC)say("link %u (%s): lanes not made: the device holds %u of its %u usable queue pairs; made once it has room\n",
+                             port->index,port->name,port->committed,port->device.max_pairs);
+      l->code=ENOSPC;l->retry=now+MESH_PAUSE_NS;
+    }else{port->committed+=MESH_LANES;l->committed=1;l->state=LANES_MAKING;lanes_job(port,LANES_MAKING);}
   }
   else if(port->greeted && l->state==LANES_MADE && l->heard){l->state=LANES_CONNECTING;lanes_job(port,LANES_CONNECTING);}
 }
-/* a peer's LANES: its lanes' queue pairs and the frames a header may name, or (count 0) its lanes failed, with why: the
-   link's loss, which the peer takes too (lanes_refused) */
+/* a peer's LANES: its lanes' queue pairs and the frames a header may name, or (count 0) its lanes failed, with why:
+   lanes of this end that were connected, or connecting, to its old ones are reset (lanes_reset, untold: the peer knows),
+   and lanes made and not yet connected wait for its new ones.  A peer's new lanes heard while this end's are connected
+   to its old ones reset them alike, the new ones kept for the next connect */
 static void lanes_heard(struct port *port,const struct message *heard){
   struct lanes *l=&port->lanes;
+  const int joined=l->state==LANES_UP || l->state==LANES_CONNECTING;
   if(heard->count!=MESH_LANES){
-    say("link %u (%s): node %u's lanes failed: %s\n",port->index,port->name,port->peer,strerror((int)heard->code));
-    port_lost(port,heard->code?heard->code:EPROTO,0);
+    if(joined)lanes_reset(port,heard->code?heard->code:EPROTO,"failed at its peer",0);
+    else{say("link %u (%s): node %u's lanes failed: %s\n",port->index,port->name,port->peer,strerror((int)heard->code));l->heard=0;}
     return;
   }
+  if(joined)lanes_reset(port,EPROTO,"made again by its peer",0);
   memcpy(l->peer,heard->pair,sizeof l->peer);
   l->peer_room=(uint32_t)heard->code;l->heard=1;
   lanes_turn(port);
@@ -1952,11 +1968,12 @@ static void port_lost(struct port *port,int64_t code,int retire){
     else if(port->peer)say("link %u (%s): node %u lost: code %lld%s\n",port->index,port->name,port->peer,(long long)code,retired);
     else say("link %u (%s): lost: code %lld%s\n",port->index,port->name,(long long)code,retired);
   }
-  for(struct flow *f=flows;f;f=f->next)if(f->port==port)flow_fail(f,port->parted?ECONNRESET:code,4,0,port->peer,M->node);
-  /* #lanes: closed once its flows' stops (queued before) have run */
+  /* #lanes: read by no progress thread once the stops of its flows (queued after) settle the port's table, and closed
+     once those stops have run */
   atomic_store_explicit(&port->lanes.up,0,memory_order_release);
+  for(struct flow *f=flows;f;f=f->next)if(f->port==port)flow_fail(f,port->parted?ECONNRESET:code,4,0,port->peer,M->node);
   if(port->lanes.state!=LANES_DOWN)port->lanes.state=LANES_CLOSING;
-  port->lanes.heard=0;
+  port->lanes.heard=0;port->lanes.retry=0;
   port->greeted=port->parted=port->connecting=port->writing=0;port->farewell=0;port->peer=0;port->held=0;port->out_length=port->out_sent=0;
   port->retiring|=retire;port->open&=!retire;port->next=now+MESH_PAUSE_NS;
   link_set(port,0,retire?MESH_STOPPED:MESH_PAIRING,code);
@@ -2076,10 +2093,11 @@ static void control_heard(struct port *port){
   }
 }
 /* design/bridge-and-ipc.md#lanes: the lanes' pages of every port the region has, leased at the bridge's start beside the
-   map's, so a port found later (an interface attached once clients hold the window) has them */
+   map's, so a port found later (an interface attached once clients hold the window) has them; a port whose pages the
+   window could not give takes them when its lanes are made (lanes_turn) */
 static uint32_t lanes_page[MESH_PORTS];
 static void lanes_reserve(void){
-  for(uint32_t p=0;p<MESH_PORTS;p++)if((lanes_page[p]=mesh_arena_alloc(&bridge,lane_pages(),1))==MESH_ABSENT)die("the lanes' lease");
+  for(uint32_t p=0;p<MESH_PORTS;p++)lanes_page[p]=mesh_arena_alloc(&bridge,lane_pages(),1);
 }
 /* design/bridge-and-ipc.md#ports: every RDMA device of the node a port, in the order found, read on the finder's queue
    (at the start, and where an interface attached or its link came on that no port has) and added on the event loop */
@@ -2167,13 +2185,31 @@ static uint32_t route_stripes(const uint32_t *route,uint32_t hops,uint32_t first
   }
   return stripes<=MESH_STRIPES?stripes:fewest;
 }
+/* whether this end's map routes to `node` over a cable it holds paired now */
+static int route_held(uint32_t node){
+  uint32_t *route=NULL;
+  const uint32_t hops=mesh_route(M,M->node,node,&route);
+  struct port *next[MESH_PORTS];
+  const int held=hops>=2 && cables(route[1],next)>0;
+  free(route);
+  return held;
+}
+/* the newest record this node holds or held of `node` (its entry apart from the map; design/bridge-and-ipc.md#records);
+   NULL where it never heard of it */
+static const struct known *known_of(uint32_t node){
+  for(uint32_t i=0;i<known_count;i++)if(known[i].node==node)return known+i;
+  return NULL;
+}
 /* design/bridge-and-ipc.md#routes: the higher end of a routed pair awaits the lower's route, whatever its own map holds:
    the stripes the lower's READYs left held taken at once, the rest as they come (ready_heard), within the peer window
-   (flows_turn), a revoke of the client's program (its slot retired) or the lower's failure ending it sooner */
+   where its own map routes to the lower too, else within the pairing window from when the lower was last reachable
+   (its record pruned: a link of its route pairing again), and refused at once (EHOSTUNREACH, naming the lower) where it
+   has been unreachable longer or was never heard of; a revoke of the client's program (its slot retired) or the lower's
+   failure as a value ends it sooner.  Each take updates the await before the READY that may fail the program goes out */
 static void program_await(struct mesh_client *client,uint64_t owner,uint32_t d,uint32_t node,uint32_t queues,uint32_t slots){
   struct await *a=calloc(1,sizeof *a);
   if(!a){status_failed(&client->status[d],owner,ENOMEM,4,M->node);return;}
-  *a=(struct await){.next=awaits,.key=client->key,.owner=owner,.created=now,.destination=d,.far=node};
+  *a=(struct await){.next=awaits,.key=client->key,.owner=owner,.created=now,.destination=d,.far=node,.routed=1,.deadline=now+MESH_PEER_NS};
   awaits=a;await_count++;busy_tell();
   for(struct flow *h=flows;h;h=h->next){
     if(!flow_held(h,client->key,node))continue;
@@ -2182,8 +2218,19 @@ static void program_await(struct mesh_client *client,uint64_t owner,uint32_t d,u
       program_fail(owner,d,EPROTO,M->node);
       return;
     }
-    flow_take(h,owner,d);ready_say(h,&h->far,1);flow_step(h);
-    if(await_took(a,h->stripe,h->stripes))return;
+    flow_take(h,owner,d);
+    const int last=await_took(a,h->stripe,h->stripes);
+    ready_say(h,&h->far,1);flow_step(h);
+    if(last || (a=await_of(owner,d))==NULL)return;
+  }
+  if(a->taken || route_held(node))return;
+  const struct known *k=known_of(node);
+  const uint64_t since=record_held(node)?now:k && k->gone?k->gone:0;
+  a->routed=0;a->deadline=since+MESH_PAIR_NS;
+  if(!since || now>=a->deadline){
+    say("program %016llx: node %u, the lower end of its route, %s: refused\n",(unsigned long long)client->key,node,
+        since?"has been unreachable longer than the pairing window":"was never heard of");
+    program_fail(owner,d,EHOSTUNREACH,node);
   }
 }
 /* design/bridge-and-ipc.md#clients, #cables, #routes: a started program's destination taken onto its ports.  Over the
@@ -2222,6 +2269,7 @@ static void program_take(struct mesh_client *client,uint64_t owner,uint32_t d){
     flow_take(f,owner,d);
     ready_say(f,&node,1);
     flow_step(f);
+    if(f->state==FAILED)return;
   }
   if(n)return;
   if(M->node>node){program_await(client,owner,d,node,queues,slots);return;}
@@ -2237,6 +2285,7 @@ static void program_take(struct mesh_client *client,uint64_t owner,uint32_t d){
     flow_take(f,owner,d);
     ready_say(f,route+1,hops-1);
     flow_step(f);
+    if(f->state==FAILED)break;
   }
   free(route);
 }
@@ -2297,7 +2346,8 @@ static void flows_turn(void){
   for(struct await *a=awaits,*next;a;a=next){
     next=a->next;
     if(!owned(a->owner) || atomic_load(&mesh_client_at(M,a->owner)->configured)!=a->owner)await_drop(a);
-    else if(now>a->created+MESH_PEER_NS)program_fail(a->owner,a->destination,ETIMEDOUT,a->far);
+    else if(now>a->deadline && !a->routed && route_held(a->far)){a->routed=1;a->deadline=a->created+MESH_PEER_NS;}
+    else if(now>a->deadline)program_fail(a->owner,a->destination,a->routed?ETIMEDOUT:EHOSTUNREACH,a->far);
   }
 }
 
@@ -2353,18 +2403,37 @@ static void farewell_flush(struct port *port){
   }
 }
 
-/* design/bridge-and-ipc.md#ports: the node's name, its LocalHostName (else its host name), read at the start and on
-   each liveness turn: a renamed node's next record carries its new name (the map's label of it; a node is its number) */
-static void host_read(void){
-  char name[MESH_NAME_BYTES]={0};
+/* design/bridge-and-ipc.md#ports: the node's name, its LocalHostName (else its host name), read at the start and, on
+   each liveness turn, on the finder's queue (configd answers there, never on the event loop: host_read); the event loop
+   takes a change (host_taken), so a renamed node's next record carries its new name (the map's label of it; a node is
+   its number) */
+static void host_name(char *name){
   CFStringRef local=SCDynamicStoreCopyLocalHostName(NULL);
-  if(!local || !CFStringGetCString(local,name,sizeof name,kCFStringEncodingUTF8))gethostname(name,sizeof name);
+  if(!local || !CFStringGetCString(local,name,MESH_NAME_BYTES,kCFStringEncodingUTF8))gethostname(name,MESH_NAME_BYTES);
   if(local)CFRelease(local);
-  name[sizeof name-1]=0;
-  if(!strcmp(name,host))return;
-  if(*host)say("node %u: renamed %s to %s\n",M->node,host,name);
-  memcpy(host,name,sizeof host);
-  if(atomic_load(&M->map_nodes))record_changed();
+  name[MESH_NAME_BYTES-1]=0;
+}
+static char host_heard[MESH_NAME_BYTES];
+static _Atomic int host_reading,host_read_done;
+static void host_read(void){
+  if(atomic_load(&host_read_done) || atomic_exchange(&host_reading,1))return;
+  dispatch_async(finder,^{
+    char name[MESH_NAME_BYTES]={0};
+    host_name(name);
+    memcpy(host_heard,name,sizeof name);
+    atomic_store_explicit(&host_read_done,1,memory_order_release);
+    atomic_store(&host_reading,0);
+    wake();
+  });
+}
+static void host_taken(void){
+  if(!atomic_load_explicit(&host_read_done,memory_order_acquire))return;
+  if(strcmp(host_heard,host)){
+    say("node %u: renamed %s to %s\n",M->node,host,host_heard);
+    memcpy(host,host_heard,sizeof host);
+    record_changed();
+  }
+  atomic_store_explicit(&host_read_done,0,memory_order_release);
 }
 
 /* design/bridge-and-ipc.md: the node's resident bridge; its one operand the path of its configuration (no default) */
@@ -2398,7 +2467,7 @@ int main(int argc,char **argv){
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);
   bridge.M=M;
-  host_read();
+  host_name(host);
   finder=dispatch_queue_create("mesh.ports",DISPATCH_QUEUE_SERIAL);
   /* design/bridge-and-ipc.md#records: the node's memory and hardware model, which its record carries with its window */
   size_t size=sizeof memory;
@@ -2447,6 +2516,7 @@ int main(int argc,char **argv){
     }
     flows_turn();
     health_turn();
+    host_taken();
     int alive=now>=liveness;
     if(alive){
       liveness=now+MESH_PAUSE_NS;

@@ -262,7 +262,8 @@ so both pair alike), and rides the lanes where either has none: nothing is refus
 communicators or a program's queues and slots (a lane rider holds no queue pair a ring), and the pair's direct program
 keeps its queue pairs. The lanes' pages (their headers and discard blocks, 7 pages at 16 KiB) are leased for every
 port the region has at the bridge's start, beside the map's (`lanes_reserve`), so a port found later, once clients
-hold the window, has them.
+hold the window, has them; a port the window could not give them takes them as its lanes are made, and waits (logged
+once) where the window has none, as lanes wait for a device's room.
 
 TB5 has SEND and RECEIVE alone (no RDMA WRITE, no SEND with immediate: TN3205), and a queue pair's receives are taken
 in the order posted, so rings that advance apart cannot share one by posting ahead. A lane's sender therefore heads
@@ -276,12 +277,13 @@ take beside those in flight and the peer's receive room (its queue pair's and it
 queue, less the header's frame), a cell's chunks spanning headers where they must. An entry naming a flow that is no
 longer the one its index names, or no longer takes records (it stopped: its rows are no longer its own), is posted as
 discards of the same frames, so the lane stays in step; an entry whose frames are not its ring's records' fails that
-flow, a header out of sequence or past the room the lane told fails the lanes, and a lane's failure is its link's
-(design/recovery.md#loss), and so are lanes that could not be made or connected: the link is lost, told the peer
-first (a LANES of none and why), and pairs again with new lanes after a pause that doubles from 3 s to 30 min while
-its lanes keep failing (`lanes_refused`; at the round's first pass such lanes stayed failed while the link stayed
-paired in the map, so the library routed over a link whose every lane rider failed, until the link itself went). A
-flow on the lanes is released once its records posted on them have landed, or the lanes it posted them on are gone.
+flow, a header out of sequence or past the room the lane told fails the lanes. Lanes that failed, or could not be made
+or connected, are reset, never the link (`lanes_reset`, design/recovery.md#loss): the flows that posted on them fail,
+the peer is told (a LANES of none and why) and resets its own where they were joined to these, and both make new lanes
+a pause later, the link paired and its exclusive flows running throughout; a flow still pairing waits for them within
+its pairing window. A peer's LANES that names new queue pairs while this end's lanes are joined to its old ones resets
+them alike (the TCP stream orders a peer's LANES of none before its new ones). A flow on the lanes is released once its
+records posted on them have landed, or the lanes it posted them on are gone.
 
 A lane costs its receiver a reaction a header that a ring posted ahead does not: the header's frame (4 KiB, 0.46 us
 at the link's 8.9 GB/s, RDMA-FIRST.md), the receive thread's turn and the records' posts, with the header's SENDs held
@@ -362,11 +364,14 @@ least common multiple is kept.
 A routed pair's route is its lower node's: the lower end's program takes the route of its own map (mesh-dataflow.c
 `mesh_route`, the library's routing table, mesh-plan.h `mesh_routes`, the same table every bridge and member makes of
 the same records) and sends a READY a stripe along it; the higher end's program awaits those READYs whatever its own
-map holds (`program_await`: no route of its own is read, so a higher end that sees none, its peer's one cable pairing
-again in its view, still pairs on the lower's; at the round's first pass it was refused EHOSTUNREACH at once and the
-lower's start waited out its 630 s windows, metal-microbench output_data/bridgereview-20261015 higher_route.py), taking
-at once the stripes the lower's READYs left held and the rest as they come, its status paired once every stripe runs,
-bounded by the peer window, the lower's own failure as a value, or its program's revoke (the slot retired); each READY
+map holds (`program_await`: no route of its own is read to pair, so a higher end that sees none, its peer's one cable
+pairing again in its view, still pairs on the lower's; at the round's first pass it was refused EHOSTUNREACH at once
+and the lower's start waited out its 630 s windows, metal-microbench output_data/bridgereview-20261015
+higher_route.py), taking at once the stripes the lower's READYs left held and the rest as they come, each take told
+the await before its READY goes out, its status paired once every stripe runs; bounded by the peer window where its
+map routes to the lower, by the pairing window from when the lower was last reachable where it does not (the peer
+window once a route appears), refused at once (EHOSTUNREACH) where the lower has been unreachable longer or was never
+heard of, and ended sooner by the lower's own failure as a value or its program's revoke (the slot retired); each READY
 of its goes back along the relays the lower's made, each mirroring the direction it carries and sending it on, so
 every relay of the route carries both directions on one route (MESH_VERSION 112 routed each end on its own map: two
 maps a link flap apart left both programs held on different relays, and a route of two or more relays carried the far

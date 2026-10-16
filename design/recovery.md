@@ -122,13 +122,16 @@ library's one bound, its session's progress thread the watcher (rdma/nccl.h).
 
 A link's loss fails every flow on it: its client's pending words on the link cancelled, its status the loss's code
 (ECONNRESET where the peer said farewell), its queue pairs destroyed, and then the link's lanes (design/bridge-and-ipc.md
-#lanes), once neither progress thread reads them. A failed lane (a completion's error, a header out of step) is its
-link's loss: every flow on the link fails, and the link pairs again a pause later with new lanes. So are lanes that
-could not be made or connected (a verbs call's error: their pages are leased for every port at the bridge's start, and
-their two queue pairs counted before any flow's own, so neither room nor pages refuse them), told the peer first: the
-port then takes no hello and no connection for a pause, 3 s doubling to 30 min while its lanes keep failing, and pairs
-again after it with new lanes, so a link is never paired in the map with lanes that do not carry (at the round's first
-pass such lanes stayed failed, the link paired, until the link itself went). A loss of the port itself (link off, interface detached) also retires the port's
+#lanes), once neither progress thread reads them. A lane's failure (a completion's error, a header out of step) is
+its lanes' alone, and so are lanes that could not be made or connected (a verbs call's error; their pages are leased
+for every port at the bridge's start and their two queue pairs counted before any flow's own, and a device or window
+that has no room for them yet is waited for, never refused): the flows that ride them and have posted on them
+fail, the lanes are closed and made again a pause (3 s) later, the peer told (a LANES of none and why; its own lanes,
+joined to these, are reset alike), and the link stays paired, its flows with queue pairs of their own and those still
+pairing running on (`lanes_reset`). No link is lost for its lanes, and none is held unpaired: at the round's first
+pass failed lanes stayed failed until the link itself went, and its second pass's first commit (152cf86) lost the link
+and held its port for a pause doubling to 30 min, a demotion of an edge the mesh's contract forbids (AGENTS.md). A
+loss of the port itself (link off, interface detached) also retires the port's
 device: registrations, protection domain and context, once no flow and no lane holds a queue pair on it. A flow's own
 failure is told to the peer (FAIL), which fails its side.
 
@@ -205,9 +208,12 @@ A routed program's start returns once the far member's program has started and e
 is end to end, design/bridge-and-ipc.md#protocol), so a member that starts 25 s after its peer delays the peer's start,
 as over a direct cable, rather than failing its first group at the library's silent bound. Its route is its lower
 node's (design/bridge-and-ipc.md#routes): the higher end awaits the lower's READY within the peer window and fails
-ETIMEDOUT naming the lower past it, whatever its own map holds (it reads no route of its own, so a higher end that sees
-none at its start still pairs on the lower's), so two ends whose maps differ at their starts still pair along one
-route; a routed program's start returns once every one of its stripes runs (design/bridge-and-ipc.md#cables). Two ends
+ETIMEDOUT naming the lower past it, whatever its own map holds (it reads no route of its own to pair, so a higher end
+that sees none at its start still pairs on the lower's); where its map has no route to the lower, it waits the pairing
+window (30 s) from when the lower was last reachable (a link of the route pairing again), the peer window once a route
+appears, and is refused at once (EHOSTUNREACH, naming the lower) where the lower has been unreachable longer or was
+never heard of, so a call toward a dead node fails within 30 s at either end; two ends whose maps differ at their
+starts still pair along one route; a routed program's start returns once every one of its stripes runs (design/bridge-and-ipc.md#cables). Two ends
 that disagree on whether a cable joins them (one sees it paired, the other not yet) fail at once as values (EPROTO,
 naming the node that refused) rather than wait out the peer window.
 
@@ -258,7 +264,7 @@ several queue pairs (the torch/NCCL sessions: four).
 | F15 | a cable moved to another port or peer | the old port's executions fail; the new port pairs with whatever node it reaches |
 | F18 | the driver's own node fails | the stream stops (one driver) |
 | F19 | a node of several cables stops in a mesh whose survivors hold a cycle | its last record ends at the first bridge that has heard it (design/bridge-and-ipc.md#records); at MESH_VERSION 112 it circulated for good, reopening every session |
-| F20 | a link's lanes fail (a lane's completion error, a header out of step) | the link's loss (`#loss`): every flow on it fails, the link pairs again with new lanes |
+| F20 | a link's lanes fail (a lane's completion error, a header out of step, a make or connect refused) | the lanes' alone (`#loss`): the flows that posted on them fail, both ends make new lanes a pause later, the link stays paired and its own queue pairs run on |
 | F21 | a device refuses the window's registration | logged with the extent; the port turns again 60 s later, doubling to 30 min (`#registration`) |
 | F22 | two ends of a routed pair start on maps a flap apart | both take the lower end's route (design/bridge-and-ipc.md#routes); a cable one end sees and the other does not fails both at once (EPROTO) |
 
