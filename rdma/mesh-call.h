@@ -20,7 +20,8 @@ int mesh_transfers_cyclic(struct mesh_ctx *);
    every node it binds, on its current map, directly or along its route through other nodes' bridges; else the failure,
    and that node's status in the client's slot names the node and the code: ESRCH the bridge gone, ETIMEDOUT past
    MESH_PEER_NS+MESH_PAIR_NS+MESH_PAUSE_NS, EHOSTUNREACH no cable or route reaches it, ENETDOWN, ECONNRESET,
-   ECANCELED a link or the peer's program lost, ENOSPC, ENOMEM a grant refused. A later loss fails the program alike; the next start rereads the map */
+   ECANCELED a link or the peer's program lost, or this program's own slot retired while it waits (a revoke), ENOSPC,
+   ENOMEM a grant refused. A later loss fails the program alike; the next start rereads the map */
 int mesh_transfers_start(struct mesh_ctx *);
 /* design/bridge-and-ipc.md#progress: the node's bridge's progress threads woken, a group of a started program about to
    publish or to wait on its landings (a thread parked after MESH_IDLE_NS of nothing looks again within 1 ms anyway) */

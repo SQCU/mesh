@@ -170,7 +170,8 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
 /* design/bridge-and-ipc.md#clients: the program handed to the node's bridge, which pairs it toward each destination
    node, over a port paired with it or along the map's route, or fails it (that destination's status names the code and
    the node where it failed): 0 once every destination is paired, else the first failed destination's code; ESRCH where
-   the bridge is gone, and ETIMEDOUT where it answers within none of its own windows (design/recovery.md#first) */
+   the bridge is gone, ECANCELED once the program's own slot is retired while it waits (mesh_retire wakes it: a revoke,
+   nccl-mesh.c session_retire), and ETIMEDOUT where it answers within none of its own windows (design/recovery.md#first) */
 int mesh_transfers_start(struct mesh_ctx *context){
   struct hdr *m=context->M;
   struct mesh_client *client=mesh_client_at(m,context->client);
@@ -186,6 +187,7 @@ int mesh_transfers_start(struct mesh_ctx *context){
     if(!mesh_destination_transfers(m,context->client,d))continue;
     struct mesh_port_info *status=&client->status[d];
     for(uint64_t seen;(seen=atomic_load_explicit(&status->prepared,memory_order_acquire))!=context->client;){
+      if(atomic_load_explicit(&client->owner,memory_order_acquire)!=context->client)return ECANCELED;
       if(mesh_gone((pid_t)atomic_load_explicit(&m->bridge_pid,memory_order_relaxed)))return ESRCH;
       uint64_t at=clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
       if(at>deadline)return ETIMEDOUT;
