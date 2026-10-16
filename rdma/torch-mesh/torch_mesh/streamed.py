@@ -1101,7 +1101,7 @@ def _observe(args):
     dimension's layers at the class (0: the engine's own count, as in every table before part counts)."""
     import re
     streamed = Streamed(args.export)
-    held = slices(streamed, args.program, args.rank)
+    held = slices(streamed, json.loads(Path(args.program).read_text()) if args.program else None, args.rank)
     shapes, named = {}, dict(held)
     for name, m in held:
         shapes.setdefault((m.rows, m.columns, m.widths), []).append(slice_units(m))
@@ -1234,11 +1234,11 @@ def _admit(args):
     print(json.dumps(known['forms_at_bar']))
 
 
-def slices(streamed, program=None, rank=None):
+def slices(streamed, record=None, rank=None):
     """Each coded matrix's slice a rank holds (its record's slices: a tensor's output ranges are rows, its input range
     columns; the head's rows its vocabulary; and each layer's FFN neurons its GPU computes in a phase of their own, its
     engines' gpu range and its prefill columns), every matrix whole without a record: (name, matrix)."""
-    part = json.loads(Path(program).read_text())['ranks'][rank] if program else None
+    part = record['ranks'][rank] if record else None
     out = []
     for L, layer in enumerate((part or {}).get('layers') or []):
         for span in ((layer.get('engines') or {}).get('gpu'), (layer.get('prefill') or {}).get('columns')):
@@ -1330,7 +1330,8 @@ def _resolve(args):
         if not found or found.group(2) not in PLANS or found.group(3) and (found.group(2) != 'tile' or int(found.group(3)) < 1):
             raise SystemExit(f'--plan {e}: ROWS=PLAN[/PARTS][@sliding], PLAN one of {PLANS}, PARTS a positive count of the tile plan')
         plans[int(found.group(1))] = (found.group(2), int(found.group(3) or 0), bool(found.group(4)))
-    held = slices(streamed, args.program, args.rank)
+    record = json.loads(Path(args.program).read_text()) if args.program else {}
+    held = slices(streamed, record or None, args.rank)
     for draft in args.draft:
         held += list(Streamed(draft).matrices.items())
     keyed, named = {}, dict(held)
@@ -1371,7 +1372,6 @@ def _resolve(args):
                             'shares': shares, 'lut': int(spec.get('LUT', 0)), 'us': round(t, 2),
                             'finish': kernel == 'alu' and shares == 1 and rows <= 8 and rows not in args.apart and rows in fused.get('finish', {}).get(shape, [rows]),
                             'epilogues': sorted(k for k, shapes in fused.items() if k != 'finish' and op == 'product' and rows in shapes.get(shape, []))})
-    record = json.loads(Path(args.program).read_text()) if args.program else {}
     ctx = args.ctx or record.get('ctx_mean') or 1024
     part = record['ranks'][args.rank] if args.program else None
     attention = _attention(args.export, part, ctx, classes, known.get('attention'), attention_read, plans)
