@@ -5,7 +5,9 @@ by the same commands) follow their upstreams by themselves once the node has a c
 `bin/mesh-user.sh CONFIGURATION CHECKOUT CONVERGENCE` reads it with the mesh's one loader (`rdma/bridge_configuration.py`
 READERS: JSON, TOML or YAML), writes its canonical form (`~/Library/Application Support/io.mesh.converge/configuration.plist`),
 records its path beside it and writes the admin user's agent `io.mesh.converge` (README.md, Convergence). Without
-one, nothing moves the checkout but the next run of `mesh-user.sh`. There is no default.
+one, nothing moves the checkout but the next run of `mesh-user.sh`. There is no default. Whether a node converges is
+the operator's choice: `bin/mesh-converge.sh off` takes a node out again, removing the recorded document and every
+layer's agent once no pass runs.
 
 A document has six keys, each required:
 
@@ -18,7 +20,7 @@ A document has six keys, each required:
 - `notice_s`: seconds a turn is announced (node-info `converging`) before the node is checked idle again and changed, so
   a driver that reads node-info before it places a call leaves the node out.
 - `wait_s`: the most seconds a pass waits for `quiet_s` of idleness before it leaves the turn to the next pass (at least
-  `quiet_s`).
+  `quiet_s`), and the most its turn waits for the bridge to stop itself on a new binary and start again.
 - `gpu_percent`: the most GPU utilization (IOAccelerator "Device Utilization %") an idle node shows.
 
 `five-minutes.toml` is written for the headless nodes of the E2B pair and the Studios; its `purpose` states the

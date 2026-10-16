@@ -2,7 +2,8 @@
 # A node's user layers move to their upstreams between calls, each to images built and checked before its turn
 # (README.md, Convergence; design/recovery.md).  With no argument, the mesh's own pass, which the admin user's agent
 # io.mesh.converge runs (bin/mesh-user.sh writes it): the mesh checkout this script is in, built at its upstream in a
-# stage, its images and bindings installed and its bridge restarted in a turn once the node is quiet.  Its subcommands
+# stage, its images and bindings installed by rename in a turn once the node is quiet, the turn lasting until the bridge
+# has stopped itself on its new binary (a new libmesh is installed with the binary), within wait_s.  Its subcommands
 # are the node's convergence for any consumer's layer (metal-microbench tools/mesh/node-setup.sh converges its rank by
 # them):
 #   held CHECKOUT    prints why and succeeds where CHECKOUT has work its upstream lacks (nothing is fetched)
@@ -12,6 +13,8 @@
 #                    notice_s, then the node idle again; else prints why
 #   end LABEL        LABEL's turn ended
 #   stamp REVISION   what the mesh's layer converges to at REVISION: the revision and its recorded documents' digests
+#   off              the node out of convergence, the operator's choice: the recorded convergence document and every
+#                    layer's agent (<label>.converge) removed once no pass runs; mesh-user.sh's CONVERGENCE puts it back
 # The node's state is ~/.cache/mesh: hold/<name> (a hold: its first word the unix second it ends, the rest why; any
 # process that uses the node writes one, a driver for its calls, a measurement for its run), idle.d/<label> (a
 # consumer's probe: an executable that succeeds printing the pids of its resident processes where they serve no call,
@@ -25,7 +28,7 @@ export PATH=$PATH:/usr/local/mesh/bin:/usr/bin:/bin:/usr/sbin:/sbin
 S=$HOME/.cache/mesh; LABEL=io.mesh.bridge
 SUPPORT="$HOME/Library/Application Support"; CONF="$SUPPORT/io.mesh.converge/configuration.plist"
 M=${MESH_CHECKOUT:-$(cd "$(dirname "$0")/.." && pwd -P)}
-why=; configured=1; period_s=; quiet_s=; notice_s=; wait_s=; gpu_percent=
+why=; note=; configured=1; period_s=; quiet_s=; notice_s=; wait_s=; gpu_percent=
 for key in period_s quiet_s notice_s wait_s gpu_percent; do
   value=$(plutil -extract "$key" raw -o - "$CONF" 2>/dev/null) && [ -n "$value" ] || { configured=; break; }
   printf -v "$key" '%s' "$value"
@@ -154,20 +157,54 @@ outputs() {
 }
 
 swap() {
-  local st f doc conv
+  local st f doc conv bridge binary moved=
   st=$(cd "$S/stage/mesh" && pwd -P)
   doc=$(cat "$SUPPORT/io.mesh.bridge/document"); conv=$(cat "$SUPPORT/io.mesh.converge/document")
+  bridge=$(pgrep -nx -U "$(id -u)" mesh-flow); binary=$(stat -f %i "$M/rdma/mesh-flow" 2>/dev/null)
   git -C "$M" merge -q --ff-only "$1" || { why="$M does not fast-forward to $(short "$1")"; return 1; }
   for f in $(outputs "$st"); do
-    cmp -s "$st/$f" "$M/$f" && continue
+    if cmp -s "$st/$f" "$M/$f"; then [ "$f" = rdma/mesh-flow ] && [ -n "$moved" ] || continue
+    else [ "$f" != rdma/libmesh.dylib ] || moved=1; fi
     mkdir -p "$(dirname "$M/$f")"
     cp "$st/$f" "$M/$f.converge" && mv -f "$M/$f.converge" "$M/$f" || { why="$f not installed"; return 1; }
   done
   MESH_USER_BUILT=1 "$M/bin/mesh-user.sh" "$doc" "$M" "$conv" || { why="bin/mesh-user.sh failed on the installed images"; return 1; }
+  restarted "$bridge" "$binary"
+}
+
+restarted() {
+  local start
+  [ -n "$1" ] && [ "$(stat -f %i "$M/rdma/mesh-flow" 2>/dev/null)" != "$2" ] || return 0
+  start=$(date +%s)
+  while kill -0 "$1" 2>/dev/null; do
+    [ $(($(date +%s) - start)) -lt "$wait_s" ] || { note="the bridge still carries a call: it stops itself on its new binary once it carries none"; return 0; }
+    sleep 1
+  done
+  until "$M/bin/mesh-stat" 2>/dev/null | grep -q '^{"up":true'; do
+    [ $(($(date +%s) - start)) -lt "$wait_s" ] || { why="the bridge did not come up on its new binary within $wait_s s (~/Library/Logs/io.mesh.bridge.log)"; return 2; }
+    sleep 1
+  done
+}
+
+off() {
+  local p l d
+  rm -f "$CONF" "$SUPPORT/io.mesh.converge/document"
+  for p in "$HOME"/Library/LaunchAgents/*.converge.plist "$HOME"/Library/LaunchAgents/*.converge.plist.new; do
+    [ -f "$p" ] || continue
+    l=${p##*/}; l=${l%.new}; l=${l%.plist}
+    for d in "gui/$(id -u)" "user/$(id -u)"; do
+      ! launchctl print "$d/$l" 2>/dev/null | grep -q '^[[:space:]]*pid = ' || printf '%s: its pass runs; removed once it ends\n' "$l"
+      while launchctl print "$d/$l" 2>/dev/null | grep -q '^[[:space:]]*pid = '; do sleep 2; done
+      launchctl bootout "$d/$l" 2>/dev/null
+    done
+    rm -f "$p"; printf '%s removed\n' "${p##*/}"
+  done
+  for p in "$S"/converge/*.state; do [ ! -f "$p" ] || printf 'off\n' > "$p"; done
+  return 0
 }
 
 pass() {
-  local target inputs
+  local target inputs swapped
   configured || { report failed "$why"; return 0; }
   [ -f "$(cat "$SUPPORT/io.mesh.bridge/document" 2>/dev/null)" ] || { report failed "the bridge's recorded document is gone ($SUPPORT/io.mesh.bridge/document)"; return 0; }
   if held "$M"; then report held "$why"; return 0; fi
@@ -186,9 +223,11 @@ pass() {
   begin "$LABEL" $$ || { report busy "$why; mesh $(short "$target") staged"; return 0; }
   trap 'end "$LABEL"' EXIT
   report converging "mesh $(short "$target")"
-  if ! swap "$target"; then end "$LABEL"; report failed "mesh $(short "$target"): $why"; return 0; fi
+  swap "$target"; swapped=$?
   end "$LABEL"; trap - EXIT
-  report converged "mesh $(short "$target")"
+  [ "$swapped" != 2 ] || { rm -f "$S/converge/$LABEL"; printf '%s\n' "$inputs" > "$S/converge/$LABEL.failed"; }
+  [ "$swapped" = 0 ] || { report failed "mesh $(short "$target"): $why"; return 0; }
+  report converged "mesh $(short "$target")${note:+; $note}"
 }
 
 case ${1:-} in
@@ -198,6 +237,7 @@ case ${1:-} in
   begin) [ $# = 3 ] || exit 64; begin "$2" "$3" && exit 0; printf '%s\n' "$why"; exit 1 ;;
   end) [ $# = 2 ] || exit 64; end "$2" ;;
   stamp) [ $# = 2 ] || exit 64; stamp "$2" ;;
+  off) [ $# = 1 ] || exit 64; off ;;
   '') pass ;;
-  *) sed -n '2,13p' "$0" >&2; exit 64 ;;
+  *) sed -n '2,17p' "$0" >&2; exit 64 ;;
 esac

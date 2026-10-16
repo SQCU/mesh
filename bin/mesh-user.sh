@@ -7,8 +7,10 @@
 # node's convergence document (etc/converge/README.md), the checkout follows its upstream by itself: the user's agent
 # io.mesh.converge runs bin/mesh-converge.sh, which builds each upstream revision in a stage and runs this script again on
 # the staged images (MESH_USER_BUILT) in a turn between calls (README.md, Convergence).  Each document's path is recorded
-# beside its canonical form, so the convergence and the keeper keep the node's own.  The bridge's install records what it
-# runs (~/.cache/mesh/facts/io.mesh.bridge, which node-info publishes) and the inputs it converged to.
+# beside its canonical form, so the convergence and the keeper keep the node's own.  The bridge's definition names its
+# program and its configuration's path alone: a new binary, libmesh or configuration is installed by rename and the
+# bridge stops itself at its first liveness turn that carries no call (README.md, Convergence).  The install records
+# what it installed (~/.cache/mesh/facts/io.mesh.bridge, which node-info publishes) and the inputs it converged to.
 # Run as the user, again after every pull:  mesh-user.sh CONFIGURATION [CHECKOUT [CONVERGENCE]]  (~/mesh)
 set -u
 if [ $# -lt 1 ] || [ ! -f "$1" ] || { [ $# -ge 3 ] && [ ! -f "$3" ]; }; then
@@ -35,8 +37,10 @@ if [ "$(cat "$venv/torch-mesh.sum" 2>/dev/null)" != "$sum" ]; then
   [ "$status" = 0 ] || exit "$status"
   printf '%s\n' "$sum" > "$venv/torch-mesh.sum"
 fi
-configuration="$support/io.mesh.bridge/configuration.plist"
-"$venv/bin/python" "$source/rdma/bridge_configuration.py" "$document" "$configuration" || exit 1
+configuration="$support/io.mesh.bridge/configuration.plist"; renew=
+"$venv/bin/python" "$source/rdma/bridge_configuration.py" "$document" "$configuration.new" || exit 1
+if cmp -s "$configuration.new" "$configuration"; then rm -f "$configuration.new"
+else [ ! -f "$configuration" ] || renew=1; mv -f "$configuration.new" "$configuration" || exit 1; fi
 printf '%s\n' "$document" > "$support/io.mesh.bridge/document"
 if [ -n "$convergence" ]; then
   mkdir -p "$support/io.mesh.converge"
@@ -66,16 +70,21 @@ PY
 fi
 agents=$HOME/Library/LaunchAgents; mkdir -p "$agents" "$HOME/Library/Logs" "$state/facts" "$state/converge"
 images=$(cat "$source/rdma/mesh-flow" "$source/rdma/libmesh.dylib" | shasum -a 256 | cut -d' ' -f1)
+before=$(sed -n 's/^images=//p' "$state/facts/io.mesh.bridge" 2>/dev/null)
+[ -z "$renew" ] || { cp "$source/rdma/mesh-flow" "$source/rdma/mesh-flow.renew" && mv -f "$source/rdma/mesh-flow.renew" "$source/rdma/mesh-flow"; } || exit 1
 cat > "$agents/io.mesh.bridge.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- mesh-flow and libmesh $images, configuration $(shasum -a 256 "$configuration" | cut -d' ' -f1) from $document -->
+<!-- the node's bridge (bin/mesh-user.sh): a new binary or configuration is installed by rename, and the bridge stops itself at its first liveness turn that carries no call (README.md, Convergence) -->
 <plist version="1.0"><dict><key>Label</key><string>io.mesh.bridge</string>
 <key>ProgramArguments</key><array><string>$source/rdma/mesh-flow</string><string>$configuration</string></array>
 <key>LimitLoadToSessionType</key><string>Background</string>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>ExitTimeOut</key><integer>60</integer>
 <key>StandardErrorPath</key><string>$HOME/Library/Logs/io.mesh.bridge.log</string></dict></plist>
 PL
-"$source/bin/mesh-agent.sh" "$agents/io.mesh.bridge.plist.new" || exit 1
+loaded=$("$source/bin/mesh-agent.sh" "$agents/io.mesh.bridge.plist.new") || { printf '%s\n' "$loaded"; exit 1; }
+[ -z "$loaded" ] || printf '%s\n' "$loaded"
+[ -n "$loaded" ] || { [ -z "$renew" ] && [ "$before" = "$images" ]; } \
+  || echo "io.mesh.bridge: its new binary or configuration is installed; the bridge stops itself at its first liveness turn that carries no call and launchd starts it on them (node-info converging names it until then)"
 printf 'revision=%s\nimages=%s\n' "$(git -C "$source" rev-parse HEAD 2>/dev/null || echo unknown)" "$images" > "$state/facts/io.mesh.bridge"
 period=$(plutil -extract period_s raw -o - "$support/io.mesh.converge/configuration.plist" 2>/dev/null)
 if [ -n "$period" ]; then
