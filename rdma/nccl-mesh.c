@@ -2385,8 +2385,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     remote |= crosses(list + i);
   }
   const int metal4 = list[0].table != NULL;
-  if (!result && metal4 && (!list[0].encoder || !list[0].residency || !list[0].polls))
-    result = fail(ncclInvalidArgument, "a Metal 4 ncclMeshStream (argumentTable) without its encoder, residency set or polls (its waits' bound)");
+  if (!result && metal4 && (!list[0].encoder || !list[0].residency))
+    result = fail(ncclInvalidArgument, "a Metal 4 ncclMeshStream (argumentTable) without its encoder or residency set");
   else if (!result && metal4 && issue && !list[0].workspace)
     result = fail(ncclInvalidUsage, "a Metal 4 group issued without a workspace (its scratch is the communicator's, free at its end)");
   else if (!result && !metal4 && !list[0].command) result = fail(ncclInvalidArgument, "an ncclMeshStream without a command buffer");
@@ -2481,9 +2481,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
 ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int *published) {
   int any = 0;
   if (published) *published = 0;
-  if (!stream || (!stream->commandBuffer && !(stream->argumentTable && stream->commandEncoder && stream->residencySet && stream->polls)))
-    return fail(ncclInvalidArgument, "ncclMeshComplete without a command buffer or a Metal 4 encoder, argument table, residency set and "
-                "polls (its waits' bound)");
+  if (!stream || (!stream->commandBuffer && !(stream->argumentTable && stream->commandEncoder && stream->residencySet)))
+    return fail(ncclInvalidArgument, "ncclMeshComplete without a command buffer or a Metal 4 encoder, argument table and residency set");
   pthread_mutex_lock(&session_lock);
   const ncclResult_t loss = losses_through(ticket);
   ncclResult_t result = ncclSuccess;

@@ -78,9 +78,8 @@
    later dispatch of the session does nothing, and the group fails as a value after its command buffer
    (ncclCommGetAsyncError, or the communicator's next group).  0: a wait ends only at its landing or its cancellation.
    The Metal 4 form: a stream whose argumentTable (an id<MTL4ArgumentTable>) is set, commandEncoder then an
-   id<MTL4ComputeCommandEncoder> and residencySet an id<MTLResidencySet> (commandBuffer not read), and polls at least 1
-   (ncclInvalidArgument without: no window of the caller's runs a wait the bound does not end): ncclMeshEncodeMetal4,
-   below.
+   id<MTL4ComputeCommandEncoder> and residencySet an id<MTLResidencySet> (commandBuffer not read), its polls as the
+   classic form's: ncclMeshEncodeMetal4, below.
 
    Memory.  The process is one client of its node's bridge: one attach of the node's region, made at its first
    ncclMemAlloc or communicator, whose slot owns the process's leases and on which each communicator's session takes
@@ -878,11 +877,11 @@ ncclResult_t ncclMeshRelayBytes(const struct mesh_wire* wire, uint64_t* bytes);
    through the caller's id<MTL4ArgumentTable> `table` (at least 6 buffer bindings; no setBytes, the arguments records
    of the library's ring), on pipelines of the caller's device (the residency set's), every buffer of the library's it
    touches added to the caller's id<MTLResidencySet> `residency` (committed where one was added).  Nothing is committed
-   or signalled: the caller commits its command buffer.  Its waits are GPU polls bounded by `polls` (at least 1: the
-   caller's bound for this crossing, the Metal path's `polls` above) on the words the bridge writes and the session's
-   canceller ends, never a spin on another queue's work; one that reaches its bound leaves its position in the
-   session's words, every later dispatch of the session does nothing, and ncclCommGetAsyncError (or the communicator's
-   next group) returns the failure as a value after the window.  The group completes in the encoder: with no workspace
+   or signalled: the caller commits its command buffer.  Its waits poll the words the bridge writes, which the session's
+   canceller ends (a lost or silent link, a revoke), never a spin on another queue's work, as the classic form's: `polls`
+   0, a wait ends at its landing or its cancellation, as the in-stream crossings of 2026-10-13 (metal-microbench Q5P);
+   else the bound above.  A failure is a value: ncclCommGetAsyncError (or the communicator's next group) after the
+   window.  The group completes in the encoder: with no workspace
    its scratch is the communicator's, reused in the encoder's order.  Total over any member set: comm is any
    communicator (ncclMeshCommInitRank's: the engine's MeshRankGroup), its program the one its map chooses.  The same as
    ncclAllReduce on an ncclMeshStream of {.commandEncoder = encoder, .argumentTable = table, .residencySet = residency,
