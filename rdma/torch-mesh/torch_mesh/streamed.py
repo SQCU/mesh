@@ -77,9 +77,9 @@ model there, else of the fit's prices (every measurement, a probe's too, moves t
                                                                 streamed_finish) into the evidence file (fused), an
                                                                 epilogue keyed by the stack the member runs it in, whose
                                                                 rows classes each table entry names (epilogues, finish)
-  python -m torch_mesh.streamed admit KL_RECORD H<h>             a form whose numerics differ admitted on this node
+  python -m torch_mesh.streamed admit KL_RECORD H<h> BAR         a form whose numerics differ admitted on this node
                                                                 (forms_at_bar) by a decode KL record of the engine served
-                                                                with it, at or below LiteRT's pair KL bar (KL_BAR)
+                                                                with it, at or below the KL bar BAR the caller states
 
 A factor of the fit (a configuration's efficiency at a rows class) rests on two slice shapes at least; one seen on a
 single shape takes its family's model. An instance's forms (FORMS: LOADS, a tile's loads; H, the ALUs' fp16 pair sums,
@@ -150,10 +150,9 @@ FAMILIES = ('alu', 'coop', 'panel')
 # An instance's forms, each read in pairs against its form 0 on the same shape, rows and configuration (a factor a
 # configuration and rows class, never the coefficients'): LOADS a tile's loads (streamed.metal fragment_load), H the sums
 # (fragment_walk: fp32, or fp16 pair sums added into them every H tiles, at the ALUs' widths to 11: listed where the node
-# admitted it at LiteRT's pair KL bar, KL_BAR, or a resolve names it), RING the cooperative tensor's producer-consumer ring
+# admitted it at a KL bar, or a resolve names it), RING the cooperative tensor's producer-consumer ring
 # (streamed_coop).
 FORMS = ('LOADS', 'H', 'RING')
-KL_BAR = 0.7361
 PERS = (8, 16, 24, 32, 48)
 WIDTH_CLASSES = (4, 8, 12, 15)
 WIDTH_CLASS = [0] + [next(c for c in WIDTH_CLASSES if c >= w) for w in range(1, 16)]
@@ -1421,8 +1420,8 @@ def _epilogue(args):
 
 def _admit(args):
     """A form admitted on this node (forms_at_bar in its evidence: candidates lists it) by a decode KL record of the engine
-    served with it (metal-microbench tools/retained.py's JSON line: kl, positions), at or below LiteRT's pair KL bar
-    (KL_BAR; metal-microbench docs/measurement.md); a record above the bar is refused."""
+    served with it (metal-microbench tools/retained.py's JSON line: kl, positions), at or below the bar the caller
+    states (`bar`: the operator's, metal-microbench docs/measurement.md); a record above it is refused."""
     import re
     if not re.fullmatch(r'H[0-9]+', args.form):
         raise SystemExit(f'{args.form}: a form admitted at the bar is H<h> (the fp16 pair sums: FORMS), the forms whose numerics differ')
@@ -1430,11 +1429,12 @@ def _admit(args):
     if len(lines) != 1:
         raise SystemExit(f'{args.record}: one KL record (a JSON line of kl and positions), not {len(lines)}')
     record = lines[0]
-    if record['kl'] > KL_BAR:
-        raise SystemExit(f'{args.record}: KL {record["kl"]:.4f} above the bar {KL_BAR}; {args.form} not admitted')
+    if record['kl'] > args.bar:
+        raise SystemExit(f'{args.record}: KL {record["kl"]:.4f} above the bar {args.bar}; {args.form} not admitted')
     path = evidence_path()
     known = json.loads(path.read_text()) if path.exists() else {}
-    known.setdefault('forms_at_bar', {})[args.form] = {'kl': record['kl'], 'positions': record.get('positions'), 'record': str(Path(args.record).resolve())}
+    known.setdefault('forms_at_bar', {})[args.form] = {'kl': record['kl'], 'bar': args.bar, 'positions': record.get('positions'),
+                                                       'record': str(Path(args.record).resolve())}
     _write(path, known)
     print(json.dumps(known['forms_at_bar']))
 
@@ -1825,6 +1825,7 @@ def main():
     admit = sub.add_parser('admit')
     admit.add_argument('record', help="a decode KL record of the engine served with the form (metal-microbench tools/retained.py's JSON line)")
     admit.add_argument('form', help='the form, H<h>')
+    admit.add_argument('bar', type=float, help='the KL bar the record must be at or below (the operator\'s)')
     args = parser.parse_args()
     {'check': _check, 'bandwidth': _bandwidth, 'probe': _probe, 'fit': _fit, 'resolve': _resolve, 'observe': _observe,
      'epilogue': _epilogue, 'admit': _admit}[args.command](args)
