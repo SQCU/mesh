@@ -988,6 +988,21 @@ UNITS = ('outputs', 'columns', 'tiles', 'nonzero', 'planes', 'ones', 'bytes')
 STACKS = (('self_attn.q_proj', ('self_attn.k_proj', 'self_attn.v_proj')), ('mlp.gate_proj', ('mlp.up_proj',)))
 
 
+def stacked(held, name, first, rest, m):
+    """The slices a stack of `m` (held as `name`, ending `first`) takes: m, then each of `rest` of its prefix of m's
+    columns; of a tensor held more than once (a layer's FFN in its part and again in its engines' gpu range or its
+    prefill columns: slices) the one of m's rows, so a range's gate stacks with that range's up."""
+    if not name.endswith(first):
+        return []
+    out = [m]
+    for r in rest:
+        found = [u for n, u in held if n == name[:-len(first)] + r and u.columns == m.columns]
+        same = [u for u in found if u.rows == m.rows]
+        if len(same) == 1 or len(found) == 1:
+            out.append((same or found)[0])
+    return out
+
+
 def _records(path):
     """A record's rows: a probe's JSON ({rows: [...]}) or JSON lines (observe's, the attention probe's)."""
     text = Path(path).read_text()
@@ -1106,7 +1121,7 @@ def _observe(args):
     for name, m in held:
         shapes.setdefault((m.rows, m.columns, m.widths), []).append(slice_units(m))
         for first, rest in STACKS:
-            parts = [m] + [named[n] for n in (name[:-len(first)] + r for r in rest) if n in named] if name.endswith(first) else []
+            parts = stacked(held, name, first, rest, m)
             if len(parts) > 1:
                 shapes.setdefault((sum(p.rows for p in parts), m.columns, max(p.widths for p in parts)), []).append(
                     {k: sum(u[k] for u in map(slice_units, parts)) if k != 'columns' else m.columns for k in UNITS})
@@ -1344,7 +1359,7 @@ def _resolve(args):
             if up is not None:
                 keyed.setdefault(('couple', m.rows, m.columns, max(m.widths, up.widths), False), []).append((slice_units(m), slice_units(up)))
         for first, rest in STACKS:
-            parts = [m] + [named[n] for n in (name[:-len(first)] + r for r in rest) if n in named and named[n].columns == m.columns] if name.endswith(first) else []
+            parts = stacked(held, name, first, rest, m)
             if len(parts) > 1:
                 keyed.setdefault(('product', sum(p.rows for p in parts), m.columns, max(p.widths for p in parts), False), []).append(
                     {k: sum(u[k] for u in map(slice_units, parts)) if k != 'columns' else m.columns for k in UNITS})
