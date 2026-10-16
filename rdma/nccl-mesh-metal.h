@@ -13,6 +13,8 @@ enum { METAL_PLAIN, METAL_LAND, METAL_SEND };
 struct metal_program;
 
 void *metal_device(void);
+/* the default device's argument records encoded and the ring's capacity (nccl.h ncclMeshMetal4Records) */
+void metal_records(uint64_t *issued, uint64_t *capacity);
 void *metal_wrap(void *address, size_t bytes);
 void *metal_scratch(size_t bytes);
 void *metal_event(void);

@@ -888,6 +888,11 @@ ncclResult_t ncclMeshRelayBytes(const struct mesh_wire* wire, uint64_t* bytes);
    .polls = polls}, which every other collective and group also takes. */
 ncclResult_t ncclMeshEncodeMetal4(ncclComm_t comm, ncclRedOp_t op, const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t type,
                                   void* encoder, void* table, void* residency, uint32_t polls);
+/* The Metal 4 form's argument records this process has encoded on the default device (`issued`, counting from its first
+   program) and how many its ring holds unread by the GPU at most (`capacity`): an encode past that refuses with
+   EOVERFLOW mid-group (a failed group), so a caller that encodes several windows ahead bounds each window's records by it (the
+   records a step encodes, read across one step's encode). */
+void ncclMeshMetal4Records(uint64_t* issued, uint64_t* capacity);
 /* Every lease this process holds (ncclMemAlloc) is of its node's bridge that runs: ncclSuccess, or ncclRemoteError
    where one is of a bridge that stopped, its pages no longer registered (Memory, above).  A process that holds leases
    and makes no other call (a server between calls) reads it to know its leases are to be freed and taken again. */

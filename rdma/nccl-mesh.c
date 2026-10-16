@@ -1012,8 +1012,13 @@ static double now_s(void) {
   return now.tv_sec + now.tv_nsec * 1e-9;
 }
 
-/* every destination of the session with pending words cancelled (mesh_cancel: each pending word ~0, so every spin on
-   it ends) and the failure kept for its next group */
+/* every destination's pending words of the session ~0 (mesh_cancel), so every spin on them ends */
+static void cancel_all(struct session *s) {
+  struct mesh_client *client = mesh_client_at(s->header, s->context.client);
+  for (uint32_t d = 0; s->transport.cancel && d < MESH_DESTINATIONS && client->tx[d].node; d++) mesh_cancel(s->header, s->transport.cancel, d);
+}
+
+/* every destination of the session with pending words cancelled (cancel_all) and the failure kept for its next group */
 static void release_all(struct session *s, int result, const char *format, ...) {
   int none = ncclSuccess;
   if (atomic_compare_exchange_strong(&s->failed, &none, result)) {
@@ -1022,8 +1027,7 @@ static void release_all(struct session *s, int result, const char *format, ...) 
     vsnprintf(s->failure, sizeof s->failure, format, arguments);
     va_end(arguments);
   }
-  struct mesh_client *client = mesh_client_at(s->header, s->context.client);
-  for (uint32_t d = 0; s->transport.cancel && d < MESH_DESTINATIONS && client->tx[d].node; d++) mesh_cancel(s->header, s->transport.cancel, d);
+  cancel_all(s);
   for (uint32_t h = 0; h < s->count; h++) atomic_store(&s->channels[h].signaled, atomic_load(&s->channels[h].target));
 }
 
@@ -1074,6 +1078,9 @@ static void violated(struct session *s) {
 /* the progress thread, the session's one silent-link watcher: it follows each channel's landings up to its target, and
    where a channel has positions pending and none lands for mesh.h MESH_SILENT_NS, or a landing reads ~0 (the bridge
    cancelled it), every destination of the session is cancelled */
+/* how often a failed session's progress thread cancels its words again (progress_run) */
+#define RECANCEL_NS 10000000L
+
 static void *progress_run(void *argument) {
   struct session *s = argument;
   double idle = now_s() + SILENT_S;
@@ -1097,7 +1104,18 @@ static void *progress_run(void *argument) {
       release_all(s, ncclRemoteError, "node %u landed nothing in %.0f s (mesh.h MESH_SILENT_NS): its links cancelled", silent, SILENT_S);
     if (!waiting || atomic_load(&s->failed)) {
       pthread_mutex_lock(&s->lock);
-      while (!atomic_load(&s->stop) && (!outstanding(s) || atomic_load(&s->failed))) pthread_cond_wait(&s->wake, &s->lock);
+      while (!atomic_load(&s->stop) && (!outstanding(s) || atomic_load(&s->failed))) {
+        if (!atomic_load(&s->failed)) { pthread_cond_wait(&s->wake, &s->lock); continue; }
+        /* a failed session's words stay cancelled while it stands: a landing the bridge stores after the cancel
+           overwrites a word a committed window's wait spins on, and its caller closes the session only once that
+           window completes (design/recovery.md Q16) */
+        struct timespec until;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_nsec += RECANCEL_NS;
+        if (until.tv_nsec >= 1000000000L) { until.tv_sec += 1; until.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&s->wake, &s->lock, &until);
+        if (!atomic_load(&s->stop)) cancel_all(s);
+      }
       pthread_mutex_unlock(&s->lock);
       idle = now_s() + SILENT_S;
     }
@@ -2508,6 +2526,8 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
 }
 
 uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
+
+void ncclMeshMetal4Records(uint64_t *issued, uint64_t *capacity) { metal_records(issued, capacity); }
 
 ncclResult_t ncclMeshEncodeMetal4(ncclComm_t comm, ncclRedOp_t op, const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t type,
                                   void *encoder, void *table, void *residency, uint32_t polls) {
