@@ -152,6 +152,27 @@ uint32_t mesh_program_steps(const struct mesh_program *,uint32_t rank,struct mes
    negative where a receive has no SEND of its piece or the schedule stops. */
 double mesh_program_time(const struct mesh_link_map *,const struct mesh_program *,struct mesh_operand,double alpha,double beta);
 
+/* design/recovery.md#diagnosis: a node's health as its bridge last sampled it, carried in its record to every bridge.
+   `sampled` the wall clock of the sample and `booted` of the node's boot (ns since the epoch); `session` its boot session
+   (kern.bootsessionuuid); why it last restarted, `reset` (MESH_RESET_*) read from `shutdown`, the head of
+   kern.shutdownreason, its power controller's records newest first ("por,..." its supply was lost, "wdog,..." its
+   watchdog reset it); its power source (`power`, MESH_POWER_*, with `charge` percent and `minutes` to empty, -1 where
+   none is reported); its `free` and `wired` memory in bytes and the kernel's memory `pressure`
+   (kern.memorystatus_vm_pressure_level: 1 normal, 2 warning, 4 critical); its thermal pressure (`thermal`,
+   com.apple.system.thermalpressurelevel: 0 nominal, 1 moderate, 2 heavy, 3 trapping, 4 sleeping). */
+enum { MESH_RESET_UNKNOWN, MESH_RESET_SUPPLY, MESH_RESET_WATCHDOG, MESH_RESET_OTHER };
+enum { MESH_POWER_UNKNOWN, MESH_POWER_AC, MESH_POWER_BATTERY, MESH_POWER_UPS };
+struct mesh_health {
+  uint64_t sampled,booted,free,wired;
+  uint32_t reset,power,pressure,thermal;
+  int32_t charge,minutes;
+  char session[40],shutdown[80];
+};
+struct mesh_node_health { uint32_t node; char name[MESH_NAME_BYTES]; struct mesh_health health; };
+/* Every node's health the bridge's records hold (mesh_map's nodes, this node's own among them): their count (at most
+   `capacity` written), or -errno where the bridge is unreachable. */
+int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
+
 #ifdef __cplusplus
 }
 #endif

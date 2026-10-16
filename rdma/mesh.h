@@ -11,7 +11,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 109u
+#define MESH_VERSION 110u
 #define MESH_ABSENT UINT32_MAX
 /* design/bridge-and-ipc.md#region: the node's ports, its client slots and each client's destination nodes */
 #define MESH_PORTS 8
@@ -92,7 +92,8 @@ _Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepar
    node, name and boot, the record's sequence in that boot, and its `ports` ports by index) */
 struct mesh_port_info { _Atomic uint32_t phase,domain,failed; _Atomic int64_t code; _Atomic uint64_t prepared; };
 struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atomic uint64_t bandwidth,pairings; };
-struct mesh_record { uint32_t node,ports; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; struct mesh_link_info port[MESH_PORTS]; };
+struct mesh_record { uint32_t node,ports; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; struct mesh_link_info port[MESH_PORTS];
+  struct mesh_health health; };
 /* design/bridge-and-ipc.md#region: a client slot: its attach (`owner`, 0 vacant), its program once started
    (`configured`, the owner), the execution it belongs to (`key`, the same on every member), its ring depth, whether it
    is cyclic, and its program to each destination and that destination's status.  A client writes its own slot's
@@ -109,7 +110,7 @@ struct mesh_client {
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,links,clients;
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,client_off,target_off,data_off,length,target_stride,boot;
-  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes;
+  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health;
 };
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");

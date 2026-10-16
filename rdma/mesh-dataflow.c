@@ -202,6 +202,32 @@ int mesh_map(const uint32_t *members,uint32_t n,uint32_t *node,char (*name)[MESH
   return result;
 }
 
+/* design/recovery.md#diagnosis */
+int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity){
+  struct hdr *m;size_t length;struct mesh_record *r=NULL;
+  int error=mesh_open(0,&m,&length,NULL);
+  if(error)return -error;
+  /* the records under both serials: the map's (mesh_records_read) and the health's, which a health-only change moves
+     (mesh-flow.c health_put); a read that a health write overlapped is read again, at most 1024 times */
+  int count=-EAGAIN;
+  for(int tries=0;tries<1024;tries++){
+    const uint64_t before=atomic_load_explicit(&m->health,memory_order_acquire);
+    if(before&1)continue;
+    count=mesh_records_read(m,length,&r);
+    if(count<0 || atomic_load_explicit(&m->health,memory_order_acquire)==before)break;
+    free(r);r=NULL;count=-EAGAIN;
+  }
+  munmap(m,length);
+  if(count<0)return count;
+  for(int i=0;i<count && (uint32_t)i<capacity;i++){
+    out[i].node=r[i].node;memcpy(out[i].name,r[i].name,MESH_NAME_BYTES);out[i].name[MESH_NAME_BYTES-1]=0;
+    out[i].health=r[i].health;
+    out[i].health.session[sizeof out[i].health.session-1]=0;out[i].health.shutdown[sizeof out[i].health.shutdown-1]=0;
+  }
+  free(r);
+  return count;
+}
+
 int mesh_map_wait(uint64_t *serial,uint64_t bound_ns){
   struct hdr *m;size_t length;
   int error=mesh_open(0,&m,&length,NULL);

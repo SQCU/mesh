@@ -9,7 +9,7 @@ native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
 LIBMESH = -L. -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
 mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h libmesh.dylib Makefile
 	mkdir -p .build
-	cc $(CPPFLAGS) -fblocks -O2 -o .build/$@ mesh-flow.c $(LIBMESH) -lrdma -framework SystemConfiguration -framework CoreFoundation
+	cc $(CPPFLAGS) -fblocks -O2 -o .build/$@ mesh-flow.c $(LIBMESH) -lrdma -framework SystemConfiguration -framework CoreFoundation -framework IOKit
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
 	mv -f .build/$@ $@
 mesh-stat: mesh-stat.c mesh.h mesh-plan.h libmesh.dylib Makefile

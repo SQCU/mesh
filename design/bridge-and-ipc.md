@@ -39,12 +39,15 @@ in the region is sized by a call: arena pages, page-table rows and transfer list
 for them and refused as a value naming the execution where the window cannot give them, never by growing the window.
 
 The map is the bridge's table of records, one a node (`struct mesh_record`): its node number, name and boot, the
-record's sequence in that boot, and its ports by index, each port's peer, phase, code, bandwidth and pairings. Its
+record's sequence in that boot, its ports by index, each port's peer, phase, code, bandwidth and pairings, and its
+health (mesh-plan.h `struct mesh_health`, design/recovery.md#diagnosis). Its
 `map_nodes` records lie at `map_off` in arena pages the bridge leases for itself and leases again larger as the mesh
 grows (`mesh_records`), so no node count caps it. The map serial (`map`) is the bridge's to bump (`mesh_notify`)
 before and after each change, odd while it writes; its own record is in before the region opens. A reader copies the
 records and keeps its copy where the serial it read before was even and is unchanged after (`mesh_map_whole`), the
-seqlock's reader (Boehm, MSPC 2012): mesh-plan.h `mesh_map`, with `mesh_map_wait` for the next map.
+seqlock's reader (Boehm, MSPC 2012): mesh-plan.h `mesh_map`, with `mesh_map_wait` for the next map. A record whose
+links, name and boot are unchanged changes only its health and sequence, under the health serial (`health`), so the map
+serial moves only when the mesh does; `mesh_nodes_health` reads the records under both.
 
 A client slot (`struct mesh_client`) holds one client: its owner word (the client's generation, slot and process), its
 execution's key, its program once started (`configured`), its ring depth and whether it is cyclic, and its programs by

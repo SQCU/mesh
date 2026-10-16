@@ -12,6 +12,13 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <stdarg.h>
+#include <time.h>
+#include <notify.h>
+#include <mach/mach.h>
+#include <sys/sysctl.h>
+#include <IOKit/ps/IOPowerSources.h>
+#include <IOKit/ps/IOPSKeys.h>
 
 _Static_assert(sizeof(pthread_t)==8,"M17");
 
@@ -128,6 +135,7 @@ struct flow {
 struct port {
   struct mesh_device device;
   uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,retiring,open,flows;
+  int64_t farewell;
   char name[IFNAMSIZ];
   int control,job,result;
   _Atomic int done;
@@ -156,6 +164,110 @@ static uint32_t device_count;
 static const struct in6_addr everyone={{{0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,1}}};
 
 static uint64_t clock_ns(void){ return clock_gettime_nsec_np(CLOCK_MONOTONIC); }
+
+
+/* design/recovery.md#diagnosis: why this bridge stops, the code its FAREWELL carries (a signal's number; its binary
+   changed) */
+#define MESH_STOP_BINARY INT64_C(-1)
+static int64_t stop_reason;
+static void farewell_text(int64_t code,char *out,size_t room){
+  if(code==SIGTERM)snprintf(out,room,"SIGTERM: its agent was unloaded or restarted");
+  else if(code>0)snprintf(out,room,"signal %lld",(long long)code);
+  else if(code==MESH_STOP_BINARY)snprintf(out,room,"its binary changed");
+  else snprintf(out,room,"no reason given");
+}
+
+/* design/recovery.md#diagnosis: this node's health (mesh-plan.h struct mesh_health), sampled on the event loop from
+   cheap reads only: sysctl, the host's VM statistics and the notify states of thermal pressure and of the power
+   sources, whose description is read only when their notify state moved */
+static struct mesh_health health;
+static int power_token=-1,thermal_token=-1;
+static uint64_t health_sent;
+static mach_port_t host_port;
+#define MESH_HEALTH_NS UINT64_C(10000000000)
+static void sysctl_text(const char *name,char *out,size_t room){
+  size_t size=room;
+  if(sysctlbyname(name,out,&size,NULL,0))out[0]=0;
+  out[room-1]=0;
+}
+static void power_read(struct mesh_health *h){
+  h->power=MESH_POWER_UNKNOWN;h->charge=-1;h->minutes=-1;
+  CFTypeRef info=IOPSCopyPowerSourcesInfo();
+  if(!info)return;
+  CFStringRef providing=IOPSGetProvidingPowerSourceType(info);
+  if(providing && CFEqual(providing,CFSTR(kIOPMACPowerKey)))h->power=MESH_POWER_AC;
+  else if(providing && CFEqual(providing,CFSTR(kIOPMBatteryPowerKey)))h->power=MESH_POWER_BATTERY;
+  else if(providing && CFEqual(providing,CFSTR(kIOPMUPSPowerKey)))h->power=MESH_POWER_UPS;
+  CFArrayRef list=IOPSCopyPowerSourcesList(info);
+  for(CFIndex i=0;list && i<CFArrayGetCount(list);i++){
+    CFDictionaryRef source=IOPSGetPowerSourceDescription(info,CFArrayGetValueAtIndex(list,i));
+    if(!source)continue;
+    int current=-1,most=-1,empty=-1;CFNumberRef value;
+    if((value=CFDictionaryGetValue(source,CFSTR(kIOPSCurrentCapacityKey))))CFNumberGetValue(value,kCFNumberIntType,&current);
+    if((value=CFDictionaryGetValue(source,CFSTR(kIOPSMaxCapacityKey))))CFNumberGetValue(value,kCFNumberIntType,&most);
+    if((value=CFDictionaryGetValue(source,CFSTR(kIOPSTimeToEmptyKey))))CFNumberGetValue(value,kCFNumberIntType,&empty);
+    if(current>=0 && most>0){h->charge=current*100/most;h->minutes=empty;break;}
+  }
+  if(list)CFRelease(list);
+  CFRelease(info);
+}
+static void health_sample(struct mesh_health *h){
+  h->sampled=clock_gettime_nsec_np(CLOCK_REALTIME);
+  vm_statistics64_data_t vm;mach_msg_type_number_t count=HOST_VM_INFO64_COUNT;
+  if(host_statistics64(host_port,HOST_VM_INFO64,(host_info64_t)&vm,&count)==KERN_SUCCESS){
+    h->free=(uint64_t)vm.free_count*vm_kernel_page_size;h->wired=(uint64_t)vm.wire_count*vm_kernel_page_size;
+  }
+  int level=0;size_t size=sizeof level;
+  if(!sysctlbyname("kern.memorystatus_vm_pressure_level",&level,&size,NULL,0))h->pressure=(uint32_t)level;
+  uint64_t state=0;
+  if(thermal_token>=0 && notify_get_state(thermal_token,&state)==NOTIFY_STATUS_OK)h->thermal=(uint32_t)state;
+  int changed=0;
+  if(power_token>=0 && notify_check(power_token,&changed)==NOTIFY_STATUS_OK && changed)power_read(h);
+}
+/* the boot's facts, read once: when the node booted, its boot session, and why it last restarted (the head of
+   kern.shutdownreason, the power controller's records newest first) */
+static void health_init(void){
+  host_port=mach_host_self();
+  struct timeval booted;size_t size=sizeof booted;
+  if(!sysctlbyname("kern.boottime",&booted,&size,NULL,0))health.booted=(uint64_t)booted.tv_sec*1000000000u+(uint64_t)booted.tv_usec*1000u;
+  sysctl_text("kern.bootsessionuuid",health.session,sizeof health.session);
+  char reason[512];sysctl_text("kern.shutdownreason",reason,sizeof reason);
+  const char *newest=reason;while(*newest==' ')newest++;
+  snprintf(health.shutdown,sizeof health.shutdown,"%s",newest);
+  health.reset=!*newest?MESH_RESET_UNKNOWN:!strncmp(newest,"por",3)?MESH_RESET_SUPPLY:!strncmp(newest,"wdog",4)?MESH_RESET_WATCHDOG:MESH_RESET_OTHER;
+  notify_register_check(kIOPSNotifyAnyPowerSource,&power_token);
+  notify_register_check("com.apple.system.thermalpressurelevel",&thermal_token);
+  power_read(&health);
+  health_sample(&health);
+}
+static void health_text(const struct mesh_health *h,char *out,size_t room){
+  static const char *resets[]={"unknown","supply lost","watchdog","other"};
+  static const char *thermals[]={"nominal","moderate","heavy","trapping","sleeping"};
+  char power[64],thermal[16],when[32];
+  if(h->power==MESH_POWER_AC && h->charge>=0)snprintf(power,sizeof power,"AC, battery %d%%",h->charge);
+  else if(h->power==MESH_POWER_AC)snprintf(power,sizeof power,"AC");
+  else if(h->power==MESH_POWER_BATTERY || h->power==MESH_POWER_UPS)
+    snprintf(power,sizeof power,"%s %d%%, %d min to empty",h->power==MESH_POWER_UPS?"UPS battery":"battery",h->charge,h->minutes);
+  else snprintf(power,sizeof power,"unknown");
+  if(h->thermal<5)snprintf(thermal,sizeof thermal,"%s",thermals[h->thermal]);else snprintf(thermal,sizeof thermal,"%u",h->thermal);
+  time_t booted=(time_t)(h->booted/1000000000u);struct tm utc;gmtime_r(&booted,&utc);strftime(when,sizeof when,"%Y-%m-%dT%H:%M:%SZ",&utc);
+  snprintf(out,room,"power %s; memory free %.2f GiB, wired %.2f GiB, pressure %s; thermal %s; booted %s (session %.36s), "
+           "last restart %s (%.79s)",power,(double)h->free/1073741824.0,(double)h->wired/1073741824.0,
+           h->pressure==4?"critical":h->pressure==2?"warning":h->pressure==1?"normal":"unread",thermal,when,h->session,
+           h->reset<4?resets[h->reset]:"unknown",h->shutdown);
+}
+
+/* design/recovery.md#diagnosis: the nodes this bridge has heard of, when it last heard each one's record (this node's
+   clock), when it lost each, and the boot session it last knew, so that a node's return names a new boot */
+struct known { uint32_t node; uint64_t heard,gone; char session[40]; };
+static struct known known[256];
+static uint32_t known_count;
+static struct known *known_at(uint32_t node){
+  for(uint32_t i=0;i<known_count;i++)if(known[i].node==node)return known+i;
+  if(known_count==sizeof known/sizeof *known)return NULL;
+  known[known_count]=(struct known){.node=node};
+  return known+known_count++;
+}
 static void wake(void){
   struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,0,NOTE_TRIGGER,0,0,0,0);
   kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
@@ -560,7 +672,7 @@ static int flow_release(struct flow *flow){
   atomic_store_explicit(&flow->progressing,0,memory_order_release);
   while(flow->worker_count)pthread_join(flow->workers[--flow->worker_count],NULL);
   for(int q=0;flow->gates && flow->rings && q<flow->qps;q++)
-    fprintf(stderr,"link %u census queue=%d requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu\n",
+    say("link %u census queue=%d requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu\n",
       flow->port->index,q,(unsigned long long)flow->gates[q].requests,(unsigned long long)flow->gates[q].posted,
       (unsigned long long)flow->gates[q].retired,(unsigned long long)flow->gates[q].completions,
       flow->rings[q].count,flow->rings[q].posted,(unsigned long long)flow->rings[q].landed,(unsigned long long)flow->rings[q].bytes);
@@ -651,7 +763,7 @@ static void flow_fail(struct flow *f,int64_t code,uint32_t domain,uint32_t tell,
   if(f->state==FAILED)return;
   f->state=FAILED;
   if(tell)flow_say(f,tell,0,code,NULL,origin);
-  fprintf(stderr,"link %u: program %016llx toward node %u failed at node %u: code %lld domain %u\n",f->port->index,
+  say("link %u: program %016llx toward node %u failed at node %u: code %lld domain %u\n",f->port->index,
     (unsigned long long)f->key,f->far,where,(long long)code,domain);
   flow_stop(f,code,domain,where);
   if(f->partner)flow_fail(f->partner,code,domain,tell?tell:(uint32_t)(code==ECONNRESET?END:FAIL),origin,origin);
@@ -865,6 +977,8 @@ static void map_put(const struct mesh_record *record){
   mesh_notify(&M->map);
   uint64_t n=atomic_load(&M->map_nodes),i=0;
   while(i<n && mesh_records(M)[i].node!=record->node)i++;
+  const int fresh=i==n;
+  const uint64_t at=i;
   if(i<n || !map_grow(n+1)){
     memcpy(mesh_records(M)+i,record,sizeof *record);
     if(i==n)atomic_store(&M->map_nodes,n+1);
@@ -879,30 +993,85 @@ static void map_put(const struct mesh_record *record){
     uint32_t a=order[head++];double beta;
     for(uint64_t b=0;b<n;b++)if(!reached[b] && mesh_joined(r+a,r+b,&beta)){reached[b]=1;order[tail++]=(uint32_t)b;}
   }
+  /* design/recovery.md#diagnosis: a node the prune drops is logged with its last health first (one put now and never
+     reached yet is not a loss) */
+  for(uint64_t k=0;reached && order && k<n;k++)if(!reached[k] && !(fresh && k==at)){
+    struct known *gone=known_at(r[k].node);char text[768];health_text(&r[k].health,text,sizeof text);
+    say("node %u (%s) unreachable; its last health, heard %.1f s before: %s\n",r[k].node,r[k].name,
+        gone && gone->heard?(double)(now-gone->heard)/1e9:-1.0,text);
+    if(gone)gone->gone=now;
+  }
   uint64_t kept=0;
   for(uint64_t k=0;reached && order && k<n;k++)if(reached[k])memmove(r+kept++,r+k,sizeof *r);
   if(reached && order)atomic_store(&M->map_nodes,kept);
   free(reached);free(order);
   mesh_notify(&M->map);
 }
+/* design/recovery.md#diagnosis: a record whose links, name and boot are the held one's changes only its health and
+   sequence, written under the region's health serial and never the map's: a communicator's session opens again where
+   the map serial moved (nccl-mesh.c session_ensure), and a health sample is no change of the mesh */
+static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
+  return a->node==b->node && a->ports==b->ports && a->boot==b->boot && !memcmp(a->name,b->name,sizeof a->name) &&
+    !memcmp(a->port,b->port,sizeof a->port);
+}
+static void health_put(struct mesh_record *held,const struct mesh_record *record){
+  mesh_notify(&M->health);
+  held->sequence=record->sequence;held->health=record->health;
+  mesh_notify(&M->health);
+}
+static struct mesh_record *record_held(uint32_t node){
+  for(uint64_t i=0;i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node==node)return mesh_records(M)+i;
+  return NULL;
+}
 static void record_changed(void){
   struct mesh_record own={.node=M->node,.ports=port_count,.boot=M->boot,.sequence=++sequence};
   memcpy(own.name,host,sizeof own.name);
   memcpy(own.port,mesh_links(M),sizeof own.port);
-  map_put(&own);
+  own.health=health;
+  struct mesh_record *held=record_held(M->node);
+  if(held && record_links_same(held,&own))health_put(held,&own);
+  else map_put(&own);
   for(uint32_t p=0;p<port_count;p++)if(ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&own,sizeof own);
+}
+/* design/recovery.md#diagnosis: this node's health sampled each turn; a change of its power source, of its charge off
+   AC, or of its memory or thermal pressure is logged and sent at once, anything else with its record at most
+   MESH_HEALTH_NS later */
+static void health_turn(void){
+  struct mesh_health sampled=health;
+  health_sample(&sampled);
+  const int urgent=sampled.power!=health.power || (sampled.power!=MESH_POWER_AC && sampled.charge!=health.charge) ||
+    sampled.pressure!=health.pressure || sampled.thermal!=health.thermal;
+  health=sampled;
+  if(urgent){char text[768];health_text(&health,text,sizeof text);say("health: %s\n",text);}
+  if(urgent || now-health_sent>=MESH_HEALTH_NS){health_sent=now;record_changed();}
 }
 static void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes){
   struct mesh_record heard;
   if(bytes!=sizeof heard)return;
   memcpy(&heard,payload,sizeof heard);
   heard.name[sizeof heard.name-1]=0;
+  heard.health.session[sizeof heard.health.session-1]=0;heard.health.shutdown[sizeof heard.health.shutdown-1]=0;
   if(!heard.node || heard.node==M->node || heard.ports>MESH_PORTS)return;
-  for(uint64_t i=0;i<atomic_load(&M->map_nodes);i++){
-    struct mesh_record *held=mesh_records(M)+i;
-    if(held->node==heard.node && (heard.boot<held->boot || (heard.boot==held->boot && heard.sequence<=held->sequence)))return;
+  struct mesh_record *held=record_held(heard.node);
+  if(held && (heard.boot<held->boot || (heard.boot==held->boot && heard.sequence<=held->sequence)))return;
+  /* design/recovery.md#diagnosis: a node that joins or comes back, and a peer's urgent change, are logged here */
+  struct known *k=known_at(heard.node);
+  char text[768];
+  if(!held && k && (k->gone || !k->heard)){
+    health_text(&heard.health,text,sizeof text);
+    if(k->gone)say("node %u (%s) back after %.1f s, %s: %s\n",heard.node,heard.name,(double)(now-k->gone)/1e9,
+                   strncmp(k->session,heard.health.session,sizeof k->session)?"a new boot":"the same boot",text);
+    else say("node %u (%s) joined: %s\n",heard.node,heard.name,text);
   }
-  map_put(&heard);
+  if(held && (held->health.power!=heard.health.power || held->health.pressure!=heard.health.pressure ||
+              held->health.thermal!=heard.health.thermal ||
+              (heard.health.power!=MESH_POWER_AC && held->health.charge!=heard.health.charge))){
+    health_text(&heard.health,text,sizeof text);
+    say("node %u (%s) health: %s\n",heard.node,heard.name,text);
+  }
+  if(k){k->heard=now;k->gone=0;memcpy(k->session,heard.health.session,sizeof k->session);}
+  if(held && record_links_same(held,&heard))health_put(held,&heard);
+  else map_put(&heard);
   for(uint32_t p=0;p<port_count;p++)if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);
 }
 /* a port's link as the port table tells it; a change is a new record */
@@ -922,7 +1091,7 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
     struct mesh_link_info *link=&mesh_links(M)[port->index];
     atomic_store_explicit(&link->bandwidth,port->bandwidth,memory_order_relaxed);
     atomic_fetch_add_explicit(&link->pairings,1,memory_order_relaxed);
-    fprintf(stderr,"link %u (%s): paired with node %u\n",port->index,port->name,port->peer);
+    say("link %u (%s): paired with node %u\n",port->index,port->name,port->peer);
     link_set(port,port->peer,MESH_PAIRED,0);
     /* a port newly paired is sent every record the map holds, this node's first */
     for(uint64_t i=0;port->greeted && i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node!=M->node)
@@ -930,7 +1099,7 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
     return;
   }
   if(heard->kind==RECORD){record_heard(port,payload,heard->bytes);return;}
-  if(heard->kind==FAREWELL){port->parted=1;return;}
+  if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;return;}
   if(heard->kind==READY){ready_heard(port,heard,payload);return;}
   struct flow *f=flow_on(port,heard->key,heard->to,heard->from);
   if(!f)return;
@@ -948,9 +1117,18 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
    away */
 static void port_lost(struct port *port,int64_t code,int retire){
   if(port->control>=0){close(port->control);port->control=-1;}
-  if(port->greeted||port->connecting)fprintf(stderr,"link %u (%s): lost: code %lld%s\n",port->index,port->name,(long long)code,retire?", device retired":"");
+  /* design/recovery.md#diagnosis: the peer named, and a peer that said farewell told from one lost */
+  if(port->greeted||port->connecting){
+    const char *retired=retire?", device retired":"";
+    char reason[96];farewell_text(port->farewell,reason,sizeof reason);
+    if(stop)say("link %u (%s): closed toward node %u: this bridge is stopping%s\n",port->index,port->name,port->peer,retired);
+    else if(port->peer && port->parted)say("link %u (%s): node %u parted, its bridge stopping (%s): code %lld%s\n",port->index,port->name,
+                                            port->peer,reason,(long long)code,retired);
+    else if(port->peer)say("link %u (%s): node %u lost: code %lld%s\n",port->index,port->name,port->peer,(long long)code,retired);
+    else say("link %u (%s): lost: code %lld%s\n",port->index,port->name,(long long)code,retired);
+  }
   for(struct flow *f=flows;f;f=f->next)if(f->port==port)flow_fail(f,port->parted?ECONNRESET:code,4,0,port->peer,M->node);
-  port->greeted=port->parted=port->connecting=port->writing=0;port->peer=0;port->held=0;port->out_length=port->out_sent=0;
+  port->greeted=port->parted=port->connecting=port->writing=0;port->farewell=0;port->peer=0;port->held=0;port->out_length=port->out_sent=0;
   port->retiring|=retire;port->open&=!retire;port->next=now+MESH_PAUSE_NS;
   link_set(port,0,retire?MESH_STOPPED:MESH_PAIRING,code);
 }
@@ -993,7 +1171,7 @@ static void port_turn(struct port *port){
 static void port_opened(struct port *port){
   const int result=port->result;
   port->job=0;
-  if(result<0){fprintf(stderr,"link %u (%s): device retirement: %s\n",port->index,port->name,strerror(-result));return;}
+  if(result<0){say("link %u (%s): device retirement: %s\n",port->index,port->name,strerror(-result));return;}
   port->retiring=result && port->device.context && result!=ENETDOWN;
   if(result){port->open=0;if(port->control<0)link_set(port,0,MESH_STOPPED,result);return;}
   port->open=1;port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
@@ -1228,16 +1406,31 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
   return refused;
 }
 
+/* design/recovery.md#diagnosis: a stopping bridge's FAREWELL sent before its socket closes, waiting at most 200 ms on a
+   peer that does not read */
+static void farewell_flush(struct port *port){
+  if(port->control<0)return;
+  struct timeval bound={0,200000};
+  const int flags=fcntl(port->control,F_GETFL);
+  if(flags>=0)fcntl(port->control,F_SETFL,flags&~O_NONBLOCK);
+  setsockopt(port->control,SOL_SOCKET,SO_SNDTIMEO,&bound,sizeof bound);
+  while(port->out_sent<port->out_length){
+    const ssize_t sent=send(port->control,port->out+port->out_sent,port->out_length-port->out_sent,0);
+    if(sent<=0)break;
+    port->out_sent+=(size_t)sent;
+  }
+}
+
 /* design/bridge-and-ipc.md: the node's resident bridge; its one operand the path of its configuration (no default) */
 int main(int argc,char **argv){
   if(argc!=2)die("usage: mesh-flow CONFIGURATION: the canonical property list bin/mesh-user.sh writes from the node's bridge configuration document (etc/bridge/README.md); the bridge has no default and does not start without one");
   char name[256];uint64_t window;
   const char *refused=configuration_read(argv[1],name,sizeof name,&window);
-  if(refused){fprintf(stderr,"bridge configuration %s refused: %s\n",argv[1],refused);exit(1);}
+  if(refused){say("bridge configuration %s refused: %s\n",argv[1],refused);exit(1);}
   struct stat binary,current;
   if(stat(argv[0],&binary))memset(&binary,0,sizeof binary);
   uuid_t uuid;struct timespec bound={5,0};
-  if(gethostuuid(uuid,&bound)){fprintf(stderr,"host identity: %s; this bridge's node is drawn at random\n",strerror(errno));arc4random_buf(uuid,sizeof uuid);}
+  if(gethostuuid(uuid,&bound)){say("host identity: %s; this bridge's node is drawn at random\n",strerror(errno));arc4random_buf(uuid,sizeof uuid);}
   uint32_t node=0;
   for(int i=0;i<16;i++)node=(node*0x01000193u)^uuid[i];
   node=(node&0x7fffffffu)?node&0x7fffffffu:1;
@@ -1250,11 +1443,11 @@ int main(int argc,char **argv){
   if((uint64_t)pg+4096>16773120)die("transport chunk exceeds native request capacity");
   const uint64_t extents=(window+MESH_REGION-1)/MESH_REGION,registrable=window_registrable();
   if(extents>registrable){
-    fprintf(stderr,"bridge configuration %s refused: its window of %llu bytes is %llu extents of %zu bytes, past the %llu the node's RDMA devices register (max_mr)\n",
+    say("bridge configuration %s refused: its window of %llu bytes is %llu extents of %zu bytes, past the %llu the node's RDMA devices register (max_mr)\n",
       name,(unsigned long long)window,(unsigned long long)extents,MESH_REGION,(unsigned long long)registrable);
     exit(1);
   }
-  if(window<pg || window/pg>UINT32_MAX){fprintf(stderr,"bridge configuration %s refused: its window of %llu bytes is not between one page and 2^32 pages\n",name,(unsigned long long)window);exit(1);}
+  if(window<pg || window/pg>UINT32_MAX){say("bridge configuration %s refused: its window of %llu bytes is not between one page and 2^32 pages\n",name,(unsigned long long)window);exit(1);}
   struct hdr geometry={0};
   uint64_t length=mesh_layout(&geometry,pg,1,(uint32_t)(window/pg));
   signal(SIGPIPE,SIG_IGN);signal(SIGINT,SIG_IGN);signal(SIGTERM,SIG_IGN);signal(SIGHUP,SIG_IGN);
@@ -1271,6 +1464,7 @@ int main(int argc,char **argv){
   bridge.M=M;
   finder=dispatch_queue_create("mesh.ports",DISPATCH_QUEUE_SERIAL);
   events=kqueue();
+  health_init();
   record_changed();
   if(!atomic_load(&M->map_nodes))die("the map's lease");
   struct kevent64_s event;
@@ -1295,7 +1489,7 @@ int main(int argc,char **argv){
   pthread_t watcher;
   if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
   ports_find();
-  fprintf(stderr,"bridge node %u (%s): configuration %s, window %llu bytes, arena %llu pages, rows %u\n",node,host,name,
+  say("bridge node %u (%s): configuration %s, window %llu bytes, arena %llu pages, rows %u\n",node,host,name,
     (unsigned long long)window,(unsigned long long)mesh_arena_pages(M),M->rows);
   uint64_t liveness=0;
   while(!stop){
@@ -1308,10 +1502,11 @@ int main(int argc,char **argv){
       port_turn(port);
     }
     flows_turn();
+    health_turn();
     int alive=now>=liveness;
     if(alive){
       liveness=now+MESH_PAUSE_NS;
-      if(binary.st_ino && (stat(argv[0],&current) || current.st_ino!=binary.st_ino || current.st_mtimespec.tv_sec!=binary.st_mtimespec.tv_sec))stop=1;
+      if(binary.st_ino && (stat(argv[0],&current) || current.st_ino!=binary.st_ino || current.st_mtimespec.tv_sec!=binary.st_mtimespec.tv_sec)){stop=1;stop_reason=MESH_STOP_BINARY;}
     }
     clients_turn(alive);
     struct kevent64_s ready[16];
@@ -1320,7 +1515,7 @@ int main(int argc,char **argv){
     now=clock_ns();
     for(int i=0;i<count;i++){
       struct kevent64_s *e=ready+i;
-      if(e->filter==EVFILT_SIGNAL)stop=1;
+      if(e->filter==EVFILT_SIGNAL){stop=1;stop_reason=(int64_t)e->ident;}
       else if(e->filter==EVFILT_PROC){
         for(uint32_t s=0;s<MESH_CLIENTS;s++){
           uint64_t owner=atomic_load(&((struct mesh_client *)((char *)M+M->client_off))[s].owner);
@@ -1351,9 +1546,11 @@ int main(int argc,char **argv){
       }
     }
   }
-  fprintf(stderr,"bridge node %u: stopping\n",node);
+  char why[96];farewell_text(stop_reason,why,sizeof why);
+  say("bridge node %u: stopping (%s)\n",node,why);
   for(uint32_t p=0;p<port_count;p++){
-    port_say(ports+p,(struct message){.kind=FAREWELL},NULL,0);
+    port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
+    farewell_flush(ports+p);
     ports[p].parted=1;
     port_lost(ports+p,ESHUTDOWN,1);
   }
@@ -1361,7 +1558,7 @@ int main(int argc,char **argv){
     struct port *port=ports+p;
     dispatch_sync(port->work,^{
       for(struct flow *f=flows;f;f=f->next)if(f->port==port)flow_release(f);
-      if(!down_device(&port->device))fprintf(stderr,"link %u (%s): verbs teardown: %s\n",port->index,port->name,strerror(errno));
+      if(!down_device(&port->device))say("link %u (%s): verbs teardown: %s\n",port->index,port->name,strerror(errno));
     });
   }
   atomic_store(&M->bridge_pid,0);

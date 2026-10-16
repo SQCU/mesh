@@ -127,8 +127,42 @@ holds a queue pair on it. A flow's own failure is told to the peer (FAIL), which
 
 ### farewell
 
-A bridge that stops sends FAREWELL on every link before closing it; its peers' programs on those links fail with
-ECONNRESET (the propagation of an orderly end) and their links pair again when the bridge is back.
+A bridge that stops sends FAREWELL on every link before closing it, carrying why it stops (the signal it took, or its
+binary changed), and waits up to 200 ms for it to leave; its peers' programs on those links fail with ECONNRESET (the
+propagation of an orderly end), each peer logs the link "parted" with that reason (never "lost"), and their links pair
+again when the bridge is back.
+
+### diagnosis
+
+The operator, 2026-10-15, after the Mac mini restarted at 16:22 with nothing of ours running on it: "ensuring this class
+of error is diagnosable from mesh logs (e.g. we can sync critical importance events over the rdma link s.t. a failing
+node tells its neighbors along the mesh bridge *how* it is beefing it, if it is beefing it, even if it cannot
+self-diagnose or self-correct beefing-it-ness)", and "a crash could spread contagiously across a mesh by a computer
+shutting down for unknown reasons *during* a DMA operation, or cause kernel errors which persist across the lifespan
+of affected peer processes". Finding that restart's cause took an hour by hand: the bridge logs had no times, nothing
+on the M5 held the Mini's last state, and the reason was only in the Mini's power controller's record (a supply loss,
+`por,por_vddrtc`, shared with a GPU workstation on its circuit and two monitors).
+
+- Every bridge log line carries the wall clock (UTC, ms) and the node's uptime (mesh-flow.c `say`).
+- Each node's record carries its health (mesh-plan.h `struct mesh_health`): when it was sampled; the node's boot time
+  and boot session; why it last restarted, from `kern.shutdownreason` (its power controller's records newest first:
+  `por,...` its supply was lost, `wdog,...` its watchdog reset it; any other record is "other", none "unknown", never a
+  guess); its power source (AC, battery or UPS, with charge and minutes to empty: a USB UPS is a power source macOS
+  reports); free and wired memory and the kernel's memory pressure; thermal pressure. The bridge samples it each turn
+  from cheap reads (sysctl, VM statistics, notify states; the power sources' description only when their notify state
+  moved). A change of power source, of charge off AC, or of memory or thermal pressure is logged and sent at once; the
+  rest rides the record at most 10 s later.
+- Records flood as before (bridge-and-ipc.md), so every bridge holds every node's last health. A change of health
+  alone is written under the region's health serial (`hdr.health`), never the map serial, since a communicator's
+  session opens again where the map serial moved (nccl-mesh.c `session_ensure`): sampling is no change of the mesh.
+- A survivor logs, at the moment of loss, the node it lost (or that parted, with its reason), and, when the map drops a
+  node no paired path reaches, that node's last health and how long before it was heard. A node that comes back is
+  logged with its new health, whether it is a new boot (its boot session changed), and how long it was gone; a peer's
+  urgent change is logged as it arrives ("node N (name) health: ...").
+- `mesh-stat` prints every node's health (`nodes`), so the telemetry service and `mesh-top` carry it; node-info prints
+  `last_reset` (the newest power-controller record).
+- A supply loss gives the node itself no warning: its last words are the health its neighbours hold, and the reason is
+  read at its next boot. A UPS on its USB turns that into a warning the mesh hears (power UPS, its charge falling).
 
 ### pause
 

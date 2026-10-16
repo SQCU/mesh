@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <time.h>
@@ -120,7 +121,18 @@ static int down_device(struct mesh_device *device){
   return 1;
 }
 static void down(void){ if(shm)shm_unlink(shm); }
-static void die(const char*m){ fprintf(stderr,"%s\n",m); exit(1); }
+/* design/recovery.md#diagnosis: every line the bridge writes, stamped with the wall clock (UTC, to the millisecond) and
+   the node's uptime in seconds, in one write so that no thread splits another's line */
+static void say(const char *format,...){
+  struct timespec t;clock_gettime(CLOCK_REALTIME,&t);
+  struct tm utc;gmtime_r(&t.tv_sec,&utc);
+  char line[2048];
+  size_t n=strftime(line,sizeof line,"%Y-%m-%dT%H:%M:%S",&utc);
+  n+=(size_t)snprintf(line+n,sizeof line-n,".%03ldZ %.3f ",t.tv_nsec/1000000,(double)clock_gettime_nsec_np(CLOCK_MONOTONIC)/1e9);
+  va_list arguments;va_start(arguments,format);vsnprintf(line+n,sizeof line-n,format,arguments);va_end(arguments);
+  fputs(line,stderr);
+}
+static void die(const char*m){ say("%s\n",m); exit(1); }
 
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M09 */
@@ -149,7 +161,7 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire){
     const size_t bytes=wire->length-first<MESH_REGION?wire->length-first:MESH_REGION;
     if(!device->regions[e] && !(device->regions[e]=ibv_reg_mr(device->domain,wire->data+first,bytes,IBV_ACCESS_LOCAL_WRITE)))return -1;
   }
-  fprintf(stderr,"%s: window of %zu bytes (%u extents) registered in %.3f s\n",device->name,wire->length,device->extents,
+  say("%s: window of %zu bytes (%u extents) registered in %.3f s\n",device->name,wire->length,device->extents,
     (double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-began)/1e9);
   device->wire=wire->data;device->max_pairs=(uint32_t)capabilities.max_qp;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
