@@ -190,9 +190,8 @@ substrate/flood_storm.py; at 113, metal-microbench output_data/bridge-20261015/f
 
 A record carries its node's facts with its links: its bridge's window (the bytes its configuration registers), its
 memory and its hardware model. They are the driver's to read from its own bridge's map, every node's at once,
-rather than each node's node-info over ssh, once the library's reader copies them (mesh-plan.h `struct
-mesh_node_health`, `mesh_nodes_health`) and mesh-stat's `nodes` prints them: open at the round of 2026-10-15, whose
-bridge carries them and whose reader does not yet.
+rather than each node's node-info over ssh: the library's reader copies them (mesh-plan.h `struct mesh_node_health`,
+`mesh_nodes_health`) and mesh-stat prints them in each of its `nodes` (`window`, `memory`, `model`).
 
 ## protocol
 
@@ -382,6 +381,6 @@ sends, its slots of `mesh_relay_slot` bytes (its ring's depth less one slots of 
 its bytes or its pages, the more), each rounded up to the window's block; the program's SEND cells and targets in one
 lease (256 bytes a cell, a cell an invocation of each slot of each transfer and a terminal one, 16 bytes a target,
 rounded up to the block); and the lists of its two destinations, a block each. At the library's session (two
-classes, slots of 512 KiB and 16 KiB, ring depth 16, nccl-mesh.c) a relayed direction is 12,894,208 bytes (12.3 MiB)
-at its cycle of 8,192 positions and 8,716,288 (8.3 MiB) at 32, where it was 16,007,168 with lists of 4,096 entries
-(output_data/bridge-20261015 footprint.py).
+classes, slots of 512 KiB and 16 KiB, ring depth 16, a cycle of 32 positions: nccl-mesh.c, `POSITIONS` 2 x `DEPTH`)
+a relayed direction is 8,716,288 bytes (8.3 MiB), where it was 16,007,168 with the cycle of 8,192 positions and lists
+of 4,096 entries (12,894,208 at that cycle with lists sized by use; output_data/bridge-20261015 footprint2.py).

@@ -166,8 +166,8 @@ A port's data path is its two progress threads (design/bridge-and-ipc.md#progres
 program on the port: one posts each send its producer released while its queue pair (or its lane)
 holds the frames, the other drains receive completions, publishes each landed record and posts the
 ring's next receives (or a lane header's records). Neither waits on anything but a word or a
-completion queue it polls while anything moves, and after 100 ms of nothing each parks on the
-region's bell, which a program's group rings as it starts.
+completion queue it polls while anything moves, and after 100 ms of nothing each parks on its
+port's bell, which a program's group rings for the ports it rides as it starts.
 
 ## Routing is a compiled path, not a table
 

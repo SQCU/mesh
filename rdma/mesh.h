@@ -98,9 +98,8 @@ _Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepar
    bandwidth, the pairings it made, and the queue pairs its device holds against those it can use, `pairs` of
    `max_pairs`, its max_qp less one);
    and a node's record, the newest of which every bridge floods to the mesh (its node, name and boot, the record's
-   sequence in that boot, its bridge's window and the node's memory in bytes and hardware model (hw.model), and its
-   `ports` ports by index) */
-#define MESH_MODEL_BYTES 32
+   sequence in that boot, its bridge's window and the node's memory in bytes and hardware model (hw.model,
+   mesh-plan.h MESH_MODEL_BYTES with its NUL), and its `ports` ports by index) */
 struct mesh_port_info { _Atomic uint32_t phase,domain,failed; _Atomic int64_t code; _Atomic uint64_t prepared; };
 struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atomic uint64_t bandwidth,pairings; _Atomic uint32_t pairs,max_pairs; };
 _Static_assert(sizeof(struct mesh_link_info)==40,"mesh_link_info");
