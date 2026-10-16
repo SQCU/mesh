@@ -54,6 +54,13 @@ if [ -n "$_uid" ]; then
     launchctl bootstrap "user/$_uid" "$_p" 2>/dev/null && { echo "[$(ts)] DRIFT $_user's agent $_l loaded in its user domain"; drift=1; }
   done
 fi
+_new=/usr/local/mesh/jobs/io.mesh.update.plist.new
+if [ -f "$_new" ] && ! launchctl print system/io.mesh.update 2>/dev/null | grep -q '^[[:space:]]*pid = ' && ! pgrep -qf '/install\.sh'; then
+  _out=$(/usr/local/mesh/bin/mesh-agent.sh "$_new" system /Library/LaunchDaemons/io.mesh.update.plist) || _out="FAIL $_out"
+  [ -z "$_out" ] || { echo "[$(ts)] DRIFT io.mesh.update: $_out"; drift=1; }
+fi
+launchctl print system/io.mesh.update >/dev/null 2>&1 || {
+  echo "[$(ts)] DRIFT io.mesh.update not loaded"; launchctl bootstrap system /Library/LaunchDaemons/io.mesh.update.plist >/dev/null 2>&1; drift=1; }
 pgrep -qf /usr/local/mesh/bin/babeld || {
   echo "[$(ts)] DRIFT babeld down"; launchctl kickstart -k system/io.mesh.router >/dev/null 2>&1; drift=1; }
 [ "$(rdma_ctl status 2>&1)" = enabled ] || {

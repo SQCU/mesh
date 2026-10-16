@@ -5,18 +5,15 @@ set -u
 R="$(cd "$(dirname "$0")" && pwd)"
 D="$HOME/.local/mesh"; A="$HOME/Library/LaunchAgents"
 ok(){ printf '  \033[32mOK  \033[0m %s\n' "$*"; }
-failures=0; retained=0
+failures=0; retained=0; replaced=0
 bad(){ failures=$((failures+1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 try(){ d="$1"; shift; "$@" >/dev/null 2>&1 && ok "$d" || bad "$d"; }
 load(){
   label=$1
   launchctl enable "gui/$UID/$label" >/dev/null 2>&1
-  if launchctl print "gui/$UID/$label" >/dev/null 2>&1; then
-    retained=$((retained+1)); ok "$label retained; launchd definition refresh pending"
-    return
-  fi
-  for _ in 1 2 3; do launchctl bootstrap "gui/$UID" "$A/$label.plist" >/dev/null 2>&1; launchctl print "gui/$UID/$label" >/dev/null 2>&1 && break; sleep 1; done
-  launchctl print "gui/$UID/$label" >/dev/null 2>&1 && ok "$label" || bad "$label"
+  if out=$("$R/bin/mesh-agent.sh" "$A/$label.plist.new" "gui/$UID"); then
+    if [ -n "$out" ]; then replaced=$((replaced+1)); ok "$out"; else retained=$((retained+1)); ok "$label current"; fi
+  else bad "$label: $out"; fi
 }
 system_owns(){
   label=$1; port=$2; url=$3
@@ -27,6 +24,7 @@ system_owns(){
 provide_http(){
   label=$1; port=$2; url=$3
   if system_owns "$label" "$port" "$url"; then
+    mv -f "$A/$label.plist.new" "$A/$label.plist"
     retained=$((retained+1))
     ok "$label provided by system domain on :$port"
   else
@@ -42,14 +40,13 @@ install -m 755 "$R/bin/mesh-peers.sh" "$D/bin/mesh-peers.sh"
 install -m 755 "$R/bin/mesh-run.sh" "$D/bin/mesh-run.sh"
 install -m 755 "$R/bin/mesh-observe.py" "$D/bin/mesh-observe.py"
 install -m 755 "$R/bin/mesh-top.py" "$D/bin/mesh-top.py"
-install -m 644 "$R/rdma/mesh_disk.py" "$R/rdma/mesh-disk.h" "$D/bin/"
+install -m 644 "$R/rdma/mesh_disk.py" "$R/rdma/mesh-disk.h" "$R/rdma/peers.py" "$D/bin/"
 install -m 644 "$R/etc/mesh-capacity.json" "$D/etc/mesh-capacity.json"
 install -m 644 "$R/etc/mesh-nodes.json" "$D/etc/mesh-nodes.json"
 install -m 644 "$R/keys/authorized_keys" "$D/etc/authorized_keys"
 install -m 755 "$R/viz/serve.py" "$D/viz/serve.py"
 install -m 644 "$R/viz/index.html" "$D/viz/index.html"
-try "mesh-stat built" make -C "$R/rdma" mesh-stat
-try "mesh-stat installed" install -m 755 "$R/rdma/mesh-stat" "$R/rdma/libmesh.dylib" "$D/bin/"
+install -m 755 "$R/bin/mesh-stat" "$D/bin/mesh-stat" && rm -f "$D/bin/libmesh.dylib" || bad "mesh-stat installed"
 try "memory bandwidth sampler built" xcrun clang -fobjc-arc -framework Foundation -lIOReport "$R/user/mesh-bandwidth.m" -o "$R/user/mesh-bandwidth"
 try "memory bandwidth sampler installed" install -m 755 "$R/user/mesh-bandwidth" "$D/bin/mesh-bandwidth"
 install -m 755 "$R/bin/mesh-runtime-install.sh" "$D/bin/mesh-runtime-install.sh"
@@ -59,7 +56,7 @@ ln -sf "$D/bin/mesh-observe.py" "$HOME/.local/bin/mesh-observe"
 ln -sf "$D/bin/mesh-top.py" "$HOME/.local/bin/mesh-top"
 ok "$D/bin populated"
 PY=$D/bin/mesh-python
-cat > "$A/io.mesh.nodeinfo.plist" <<PL
+cat > "$A/io.mesh.nodeinfo.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -71,7 +68,7 @@ cat > "$A/io.mesh.nodeinfo.plist" <<PL
   <key>StandardErrorPath</key><string>$D/log/io.mesh.nodeinfo.err.log</string>
 </dict></plist>
 PL
-cat > "$A/io.mesh.telemetry.plist" <<PL
+cat > "$A/io.mesh.telemetry.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -88,7 +85,7 @@ cat > "$A/io.mesh.telemetry.plist" <<PL
   <key>StandardErrorPath</key><string>$D/log/io.mesh.telemetry.err.log</string>
 </dict></plist>
 PL
-cat > "$A/io.mesh.observer.plist" <<PL
+cat > "$A/io.mesh.observer.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -109,7 +106,7 @@ sleep 2
 printf x | nc -G 2 -w 2 ::1 8100 >/dev/null 2>&1 && ok "responder answering on :8100" || bad "responder not answering"
 curl -fsS --max-time 3 http://127.0.0.1:8788/v1/latest >/dev/null 2>&1 && ok "telemetry answering on :8788" || bad "telemetry not answering"
 curl -fsS --max-time 3 http://127.0.0.1:8787/latest.json >/dev/null 2>&1 && ok "observer answering on :8787" || bad "observer not answering"
-cat > "$A/io.mesh.update.user.plist" <<PL
+cat > "$A/io.mesh.update.user.plist.new" <<PL
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -118,10 +115,13 @@ cat > "$A/io.mesh.update.user.plist" <<PL
   <key>StartInterval</key><integer>900</integer>
 </dict></plist>
 PL
-load io.mesh.update.user
+if launchctl print "gui/$UID/io.mesh.update.user" >/dev/null 2>&1; then
+  mv -f "$A/io.mesh.update.user.plist.new" "$A/io.mesh.update.user.plist"
+  retained=$((retained+1)); ok "io.mesh.update.user runs this install; its definition is loaded at its next load"
+else load io.mesh.update.user; fi
 try "complete cartlane application realized" "$PY" "$R/bin/mesh-application.py" deploy --source "$R" --target "$D/applications/cartlane"
 ok "mesh-peers: $D/bin/mesh-peers.sh"
 printf '%s\n' "${MESH_BRANCH:-main}" > "$D/branch"
 printf '%s %s\n' "${MESH_BRANCH:-main}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$D/revision"
-printf 'reported_failures=%s retained_jobs=%s\n' "$failures" "$retained" > "$D/install-status"
-echo "installer completed: $failures reported failures; $retained loaded jobs retained; live-generation convergence not asserted"
+printf 'reported_failures=%s retained_jobs=%s replaced_jobs=%s\n' "$failures" "$retained" "$replaced" > "$D/install-status"
+echo "installer completed: $failures reported failures; $retained loaded jobs current, $replaced replaced"

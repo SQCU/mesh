@@ -1,0 +1,7 @@
+#!/bin/sh
+pid=$(/usr/bin/pgrep -nx -U "$(cat /usr/local/mesh/admin-user 2>/dev/null || echo root)" mesh-flow || /usr/bin/pgrep -nx mesh-flow)
+[ -n "$pid" ] || { printf '{"up":false,"errno":3}\n'; exit 0; }
+owner=$(/bin/ps -o user= -p "$pid"); bridge=$(/bin/ps -o comm= -p "$pid"); reader=${bridge%/*}/mesh-stat
+{ [ -x "$reader" ] && [ ! "$reader" -ef "$0" ] && [ "$(/usr/bin/stat -f %Su "$reader")" = "$owner" ]; } || { printf '{"up":false,"errno":2}\n'; exit 0; }
+[ "$(id -u)" != 0 ] || [ "$owner" = root ] || exec /usr/bin/sudo -n -u "$owner" "$reader" "$@"
+exec "$reader" "$@"

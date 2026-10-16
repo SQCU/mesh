@@ -143,7 +143,13 @@ prefixed with its node, streaming as it arrives.
 this existed, every fix required a human at a keyboard typing `sudo` on each node —
 which does not scale and is the same shape of problem as a node that cannot be
 reached. Now a push propagates to the fleet on its own. The node follows the branch
-recorded in `/usr/local/mesh/revision`, always at that branch's newest commit.
+recorded in `/usr/local/mesh/revision`, always at that branch's newest commit. Each pass
+stages every daemon's definition, which names the digest of the files its program
+arguments name, and `bin/mesh-agent.sh` replaces a loaded daemon whose definition or
+files changed, or whose loaded job runs other arguments, and leaves the rest running (the
+first pass that stamps them restarts each loaded daemon once);
+`io.mesh.update`, which runs the pass, is replaced by the keeper between its runs. The
+admin user is the one `/usr/local/mesh/admin-user` records (`MESH_USER` changes it).
 
 ## Joining without root
 
@@ -159,10 +165,9 @@ parts that change often do not need root:
 It installs a node-identity responder as a **user LaunchAgent** on port 8100 and puts
 `mesh-peers` / `mesh-run` in `~/.local/mesh/bin`. Nothing touches `/usr` or `/Library`.
 
-Port 8100 rather than 8099 because a stale system `io.mesh.nodeinfo` may already hold
-8099 in the root domain. `mesh-peers` probes 8099 first and falls back to 8100, so a
-node whose system responder is broken or outdated is still fully identified by its
-userspace shim.
+Port 8100 rather than 8099 because the system `io.mesh.nodeinfo` holds 8099 in the
+root domain; a node with no root install is identified by its userspace responder alone.
+`mesh-peers` probes both.
 
 `inetdCompatibility` does **not** work in the GUI/user domain — launchd accepts the
 connection, closes it, and never runs the program (`runs = 0`), while the socket looks
@@ -380,7 +385,9 @@ the node's uplink.
 | `bin/mesh-devtools-init.sh` | headless Command Line Tools install, so every node can build RDMA code. Idempotent. |
 | `bin/mesh-router-init.sh` | identity `/128` on `lo0`, babeld across every fabric port. Resident; keeper restarts it. |
 | `vendor/babeld-arm64` | prebuilt Babel daemon, so a node needs no toolchain. Provenance in `vendor/PROVENANCE.md`. |
-| `bin/mesh-nodeinfo.sh` | socket-activated node identity + topology responder on 8099. |
+| `bin/mesh-nodeinfo.sh` | the node's identity, facts and topology, sampled by `io.mesh.nodeinfo` (`user/mesh-nodeinfod.py`) and served on 8099. |
+| `bin/mesh-agent.sh` | `mesh-agent.sh NEW [DOMAIN [PLIST]]` makes a launchd job's staged definition NEW the loaded one in DOMAIN (default the user's background domain user/<uid>, which Local Network privacy does not hold) under PLIST (default NEW without `.new`). A definition that names no digest of its own (an XML comment) is stamped with the digest of the files its program arguments name. It is kept, with no restart, where it equals PLIST and the loaded job runs its program arguments; a definition that does not parse is refused and the loaded one kept; otherwise it replaces the loaded job, a job that is not KeepAlive first left to finish its run (up to 120 s). |
+| `bin/mesh-stat` | the bridge as its own build reads it: runs the `mesh-stat` built beside the admin user's running bridge (`/usr/local/mesh/admin-user`), a file that user owns, so a reader never meets a region of another MESH_VERSION; it runs no reader as root (`"errno":1`), and node-info and telemetry, as root, run it as that user. |
 | `bin/mesh-run.sh` | run a command on one node, `all`, or `others`. Installed as `mesh-run`. |
 | `bin/mesh-fabric-init.sh` | tear down the Thunderbolt bridge, address each fabric port, enable IPv6 forwarding; write each port's link and RDMA peer to `/var/run/mesh-fabric`, and bounce a port whose cable link is up with no RDMA peer (design/recovery.md, port). Idempotent; run at boot and every keeper pass. |
 | `bin/mesh-rdma-init.sh` | boot-time fabric verification. Verify-only by necessity. |
@@ -460,10 +467,14 @@ info <peer> via=<a> name=<peer> node_id=... boot_id=... ula=fd6d:6573:68:<d>
 ```
 
 That comes from `io.mesh.nodeinfo`, a Python service on port 8099 (8100 for the user
-service). One sampler runs `mesh-nodeinfo.sh` independently of incoming requests.
+service). One sampler runs `mesh-nodeinfo.sh` independently of incoming requests, as the
+admin user even where the responder runs as root (8099), so no root process runs the user's checkouts or bridge reader.
 Clients receive its current output with `sample_status` and `sample_updated`, even
 while sampling is incomplete. Requests never start or kill device probes.
-Each node reports its name, hardware, macOS, RDMA enablement and SDK state, its health report's numbers, each fabric
+Each node reports its name, hardware (its chip and GPU core count among it), macOS, RDMA enablement and SDK state, its
+bridge's window, its admin account, the maker of its instance evidence (`instances`, `<chip>/<cores>`), the revision of
+each of the admin user's Background agents' checkouts (`revisions`), the model files it holds (`models`,
+`<dir>/<file>:<bytes>` under `~/models`), its health report's numbers, each fabric
 port's line as the fabric init last wrote it (`port=<port> link=<status> rdma_peer=present|absent`), and its routes.
 `rdma_peer` is whether the IORegistry holds an `AppleThunderboltRDMAPeerInterface` for the port's RDMA interface (its
 `RID`); it is not a verbs port measurement, though on every port read so far it was present exactly when the verbs

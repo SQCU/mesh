@@ -1,6 +1,7 @@
 {
   "schema": 1,
   "source": "design/mesh-coprocessor-demo.md",
+  "derived_rule": "A model this table does not list (a node class that arrives after it was written, such as the M5 Ultra Studios) is shown by its node's telemetry (user/mesh-telemetry.py capacity) with its GPU's figures from its own GPU core count (ioreg gpu-core-count) at the per-core figures of the listed chip of its generation (the brand string's first two words, e.g. Apple M5) and that chip's fabric figure, kind 'derived'; its CPU and memory figures are absent until the model is characterized and listed here.",
   "models": {
     "Mac17,6": {
       "chip": "Apple M5 Max",

@@ -1,5 +1,5 @@
 #!/usr/bin/env mesh-python
-import collections, copy, ctypes, json, math, os, platform, plistlib, re, shutil, signal, socket, subprocess, sys, threading, time, urllib.parse
+import collections, copy, ctypes, json, math, os, platform, plistlib, pwd, re, shutil, signal, socket, subprocess, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -51,8 +51,17 @@ def parse(lines):
     if clusters: metrics["cpu_clusters"] = clusters
     return metrics
 
-def run(command, timeout=3, text=False):
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, start_new_session=True) as process:
+def account():
+    """The bridge's account (/usr/local/mesh/admin-user), as which a root process runs the bridge's reader: bin/mesh-stat
+    runs no reader as root."""
+    if os.geteuid() != 0: return {}
+    try:
+        with open("/usr/local/mesh/admin-user") as stream: entry = pwd.getpwnam(stream.read().strip())
+    except (OSError, KeyError): return {}
+    return {"user": entry.pw_uid, "group": entry.pw_gid, "extra_groups": []}
+
+def run(command, timeout=3, text=False, **as_account):
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, start_new_session=True, **as_account) as process:
         try: return process.communicate(timeout=timeout)[0]
         except BaseException:
             try: os.killpg(process.pid, signal.SIGTERM)
@@ -131,12 +140,12 @@ def bandwidth():
 def bridge():
     path = executable([
         os.environ.get("MESH_STAT", ""),
-        os.path.join(ROOT, "rdma", "mesh-stat"),
         os.path.join(HERE, "mesh-stat"),
+        os.path.join(ROOT, "bin", "mesh-stat"),
         "/usr/local/mesh/bin/mesh-stat",
     ])
     if path:
-        try: return json.loads(run([path], 3, True).splitlines()[-1])
+        try: return json.loads(run([path], 3, True, **account()).splitlines()[-1])
         except Exception as error: return {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
     return {"up": False, "error": "mesh-stat unavailable"}
 
@@ -192,7 +201,7 @@ def processes(pids):
 
 def fabric_bridges(now):
     table = processes([int(pid) for pid in output(["/usr/bin/pgrep", "-x", "mesh-flow"]).split()])
-    stat = executable([os.environ.get("MESH_STAT", ""), os.path.join(ROOT, "rdma", "mesh-stat"), os.path.join(HERE, "mesh-stat"), "/usr/local/mesh/bin/mesh-stat"])
+    stat = executable([os.environ.get("MESH_STAT", ""), os.path.join(HERE, "mesh-stat"), os.path.join(ROOT, "bin", "mesh-stat"), "/usr/local/mesh/bin/mesh-stat"])
     for pid, process in table.items():
         argv = process["argv"]
         if os.path.basename(argv[0]) != "mesh-flow": continue
@@ -201,7 +210,7 @@ def fabric_bridges(now):
             log = next((line[1:] for line in output(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "2", "-Fn"]).splitlines() if line.startswith("n/")), None)
             entry = BRIDGES[pid] = {"pid": pid, "log": log, "log_size": None, **bridge_counters()}
         entry.update({"state": process["stat"], "elapsed": process["elapsed"], "exited_at": None})
-        try: entry["stat"] = json.loads(run([stat], 3, True).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
+        try: entry["stat"] = json.loads(run([stat], 3, True, **account()).splitlines()[-1]) if stat else {"up": False, "error": "mesh-stat unavailable"}
         except Exception as error: entry["stat"] = {"up": False, "error": f"mesh-stat: {type(error).__name__}: {error}"}
         if entry["log"]: bridge_log(entry)
     for pid, entry in list(BRIDGES.items()):
@@ -440,19 +449,36 @@ class TelemetryRing:
             reset = latest is not None and since > latest
             return {"schema": 1, "capacity": self.records.maxlen, "since": since, "oldest_sequence": oldest, "latest_sequence": latest, "gap": gap, "reset": reset, "records": records}
 
+def capacity(doc, model, chip, cores):
+    """etc/mesh-capacity.json: the model's characterized figures, else, for a model it does not list (a node class that
+    arrived after the table was written), its GPU's from its own GPU core count at the per-core figures of the listed
+    chip of its generation (the brand's first two words), with the chip's fabric figure; its CPU and memory figures
+    stay absent until the model is characterized (the document's derived_rule)."""
+    models = (doc or {}).get("models") or {}
+    if model in models: return "characterized", models[model]
+    generation = " ".join(chip.split()[:2]) + " "
+    peer = next((m for m in models.values() if (m.get("chip") or "").startswith(generation) and m.get("gpu_cores")), None)
+    if not peer or not cores: return "characterized", None
+    scale = cores / peer["gpu_cores"]
+    return "derived", {"chip": chip, "gpu_cores": cores, "derived_from": peer["chip"], "fabric_gbs": peer.get("fabric_gbs"),
+                       **{k: round(peer[k] * scale, 1) for k in ("gpu_fp32_gflops", "gpu_bf16_gflops") if k in peer}}
+
 def host_facts():
     model = output(["/usr/sbin/sysctl", "-n", "hw.model"])
     memory = output(["/usr/sbin/sysctl", "-n", "hw.memsize"])
+    chip = output(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"])
+    cores = number(output(["/usr/sbin/ioreg", "-r", "-c", "AGXAccelerator", "-d", "1"]), r'"gpu-core-count" = (\d+)')
     name = output(["/usr/sbin/scutil", "--get", "LocalHostName"]) or socket.gethostname().split(".")[0]
     capacity_doc, capacity_path = document([
         os.environ.get("MESH_CAPACITY", ""),
         os.path.join(ROOT, "etc", "mesh-capacity.json"),
         "/usr/local/mesh/etc/mesh-capacity.json",
     ])
+    kind, metrics = capacity(capacity_doc, model, chip, int(cores) if cores else None)
     return {
         "name": name,
-        "host": {"model": model, "memory_bytes": int(memory) if memory.isdigit() else None, "system": platform.platform()},
-        "capacity": {"kind": "characterized", "source": (capacity_doc or {}).get("source"), "path": capacity_path, "metrics": ((capacity_doc or {}).get("models") or {}).get(model)},
+        "host": {"model": model, "chip": chip, "gpu_cores": int(cores) if cores else None, "memory_bytes": int(memory) if memory.isdigit() else None, "system": platform.platform()},
+        "capacity": {"kind": kind, "source": (capacity_doc or {}).get("source"), "path": capacity_path, "metrics": metrics},
     }
 
 def snapshot(store, facts=None):

@@ -66,6 +66,27 @@ program's targets now follow its SEND cells in their lease, design/prepared-mach
 memory, the rank's process, the Neural Engine's own copy of its columns, and a 2 GiB margin. A served engine (metal-microbench server/bridge.py) leases its model and pool
 from its node's window too; neither file holds one.
 
+## The Studios
+
+`m5ultra-low.toml` is written for the four Mac Studios (M5 Ultra, 96 GiB, headless) that join the pair, by the M5's rule:
+a node of more flops and bandwidth than the Mini has less to gain from memoization, so its window is the least whole GiB
+that holds the whole E2B model alone at the engine's whole page geometry, 14 GiB (13.27 GiB counted by programs.py `plans`
+of a membership of one from the model file's header; 10.56 on the streamed codes export), and any part of E2B on any
+membership holds in it. Beside it the node keeps 74.99 GiB: the region's tables (0.056 GiB), base wired (1.6, the Mini's
+figure until a Studio's is read), macOS's anonymous memory (1.5), the rank's process (0.9) and the Neural Engine's own copy
+(at most every FFN column at fp16, 2.95). The Mini's rule, the most that leaves a 2 GiB margin, gives 86 GiB. The larger
+models alone at a call's own pages take more than 14 GiB (12B 16.46 GiB at 4,096 positions, 26B-A4B 28.25 GiB): a Studio
+holds its part of them on memberships whose windows together hold the whole, and the planner fits each member's part to
+its window; at the engine's whole page geometry they take 97.18 GiB (12B) and 81.11 GiB (26B-A4B), more than the six
+windows at these documents hold together (four Studios at 14, the M5 at 14, the Mini at 16: 86 GiB). Counted with
+metal-microbench tools/mesh/programs.py under `MESH_MODEL=e2b-engine` (12b, 26b-a4b):
+`plans({'bs': 1, 'ctx_max': 256000}, structure(), pages=16000)[0]['total']`, and at a call's pages
+`pages=pool_request(1, 4096)` with `ctx_max` 4096 (metal-microbench output_data/lifecycle-20261015/studio_window.py).
+
+The window is the operator's decision; the document states the arithmetic it follows from. A Studio's base wired memory
+and its devices' `max_mr` are read when it arrives (the bridge reads `max_mr` at its start and refuses a window past it;
+the pair's devices register 100 one-GiB extents).
+
 ## The operator's words
 
 2026-10-15, on configuration: "in this situation we must learn to write configurations which are passed as operands by
