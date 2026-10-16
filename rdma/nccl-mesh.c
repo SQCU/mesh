@@ -1393,6 +1393,7 @@ static ncclResult_t session_open(ncclComm_t comm) {
       if (!status) status = ring_bind(s, ch->node, !large, 1, IDENTITY + 2 * r + large, ch->in);
     }
   if (!status) status = mesh_transfers_prepare(&s->context, 1, POSITIONS, DEPTH);
+  if (!status) status = mesh_transfers_digest(&s->context, comm->digest);
   if (!status) status = mesh_transfers_cyclic(&s->context);
   if (!status) status = mesh_metal_transport_create(&s->context, metal_device(), &s->transport);
   for (uint32_t h = 0; h < s->count && !status; h++) status = channel_metal(s, s->channels + h);
