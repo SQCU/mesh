@@ -4,9 +4,10 @@ A node's bridge (`rdma/mesh-flow`) starts from one operand, its configuration: a
 passes, in JSON, TOML or YAML. `bin/mesh-user.sh CONFIGURATION [CHECKOUT]` reads it with the mesh library's one
 loader (`rdma/bridge_configuration.py`), writes its canonical form (a property list of its name, purpose and window
 in bytes, `~/Library/Application Support/io.mesh.bridge/configuration.plist`) and names that in the bridge's agent
-definition, so the keeper's load at boot keeps it. metal-microbench's `tools/mesh/node-setup.sh` passes the node's
-document through (`MESH_BRIDGE_CONFIG`). There is no default anywhere in the code: without a configuration the
-bridge, `mesh-user.sh` and `node-setup.sh` refuse to start, naming what they need.
+definition, so the keeper's load at boot keeps it, and records the document's path beside it, so the node's
+convergence (`bin/mesh-converge.sh`, etc/converge/README.md) installs each upstream revision with the node's own. There
+is no default anywhere in the code: without a configuration the bridge and `mesh-user.sh` refuse to start, naming what
+they need.
 
 A document has two keys:
 
@@ -14,8 +15,11 @@ A document has two keys:
 - the window, exactly one of `window_gib` (GiB) or `window_percent` (of the node's physical memory).
 
 The window is the bridge's pinned memory (design/prepared-machine.md#M09). Every port's device registers all of it
-when the device comes up, before any queue pair exists, and deregisters it only when the device retires. A window
-of more extents than the node's RDMA devices register (`max_mr` 1 GiB extents) is refused, not clamped. Clients lease
+when the device comes up, before any queue pair exists, and deregisters it only when the device retires. Each device
+checks the window against its own `max_mr` (1 GiB extents) as it comes up, on its port's queue: a window of more
+extents than that device registers is refused for that port, logged with the extent, its bytes, the errno and the
+extents the device holds, and the port turns again 60 s later, doubling to 30 min, keeping its extents
+(design/recovery.md#registration). The bridge starts and serves the node either way; the window is never clamped. Clients lease
 from it; a lease that does not fit fails at its start with an error naming the execution, and the window never grows.
 How much an execution needs, on its own node and on the nodes it peers or streams with, is the client's to know.
 
@@ -68,7 +72,17 @@ from its node's window too; neither file holds one.
 
 ## The Studios
 
-`m5ultra-low.toml` is written for the four Mac Studios (M5 Ultra, 96 GiB, headless) that join the pair, by the M5's rule:
+Two documents are written for the four Mac Studios (M5 Ultra, 96 GiB, headless) that join the pair, one by each of the
+pair's rules; which a Studio runs is the operator's decision.
+
+`m5ultra-headless.toml`, by the Mini's rule (a headless node's memory is the mesh's; the operator, 2026-10-15: "allocate
+essentially all of the memory on the entire device"): the most whole GiB that leaves a 2 GiB margin, 86 GiB. Beside it
+the node keeps 2.71 GiB: the region's tables (0.339 GiB, 347.2 MiB), base wired (1.6), macOS's anonymous memory (1.5), the
+rank's process (0.9) and the Neural Engine's own copy (2.95); 87 GiB would leave 1.71. It holds 26B-A4B whole at the
+engine's whole page geometry (81.11 GiB) on one Studio and 12B's (97.18 GiB) on any two members, and the six windows
+(four Studios at 86, the M5 at 14, the Mini at 16) hold 374 GiB.
+
+`m5ultra-low.toml`, by the M5's rule:
 a node of more flops and bandwidth than the Mini has less to gain from memoization, so its window is the least whole GiB
 that holds the whole E2B model alone at the engine's whole page geometry, 14 GiB (13.27 GiB counted by programs.py `plans`
 of a membership of one from the model file's header; 10.56 on the streamed codes export), and any part of E2B on any
@@ -83,9 +97,11 @@ metal-microbench tools/mesh/programs.py under `MESH_MODEL=e2b-engine` (12b, 26b-
 `plans({'bs': 1, 'ctx_max': 256000}, structure(), pages=16000)[0]['total']`, and at a call's pages
 `pages=pool_request(1, 4096)` with `ctx_max` 4096 (metal-microbench output_data/lifecycle-20261015/studio_window.py).
 
-The window is the operator's decision; the document states the arithmetic it follows from. A Studio's base wired memory
-and its devices' `max_mr` are read when it arrives (the bridge reads `max_mr` at its start and refuses a window past it;
-the pair's devices register 100 one-GiB extents).
+The window is the operator's decision; each document states the arithmetic it follows from. A Studio's base wired
+memory and its devices' `max_mr` are read when it arrives: the pair's devices register 100 one-GiB extents, and a device
+that registers fewer than its window's extents pairs no port until the window is lowered (its refusal logged with the
+extent, above), never a clamped window. Each of a node's devices registers the whole window, so a Studio cabled on
+several ports registers it once a device.
 
 ## The operator's words
 

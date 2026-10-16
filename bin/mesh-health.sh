@@ -20,7 +20,7 @@ TREND=$(awk -v t0="$T0" -v f0="$F0" -v t="$NOW" -v f="$FREE" 'BEGIN{h=(t-t0)/360
 DAYS=$(awk -v r="$TREND" -v f="$FREE" -v fl="$FLOOR" 'BEGIN{if (r == "unmeasured" || r <= 0) print "none"; else printf "%.1f", (f-fl)/r}')
 HOLDERS=$(pmset -g assertions 2>/dev/null | awk '
   /^ +pid [0-9]+\(/ && /(UserIsActive|PreventUserIdleDisplaySleep) named/ {
-    match($0, /pid [0-9]+\([^)]*\)/); who=substr($0, RSTART+4, RLENGTH-4)
+    match($0, /pid [0-9]+\([^)]*\)/); who=substr($0, RSTART+4, RLENGTH-4); gsub(/[[:space:]]/, "_", who)
     s=0; n=split($0, f, " "); for (i=1; i<=n; i++) if (f[i] ~ /^[0-9]+:[0-9][0-9]:[0-9][0-9]$/) { split(f[i], t, ":"); s=t[1]*3600+t[2]*60+t[3]; kind=f[i+1] }
     if (s >= 3600) printf "%s%s:%s:%.1fh", (c++ ? "," : ""), who, kind, s/3600 }')
 if [ ! -f "$GC" ] || [ $((NOW - $(stat -f %m "$GC"))) -gt 3600 ]; then

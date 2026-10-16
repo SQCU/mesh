@@ -31,7 +31,7 @@ for d in $(/usr/bin/ibv_devices 2>/dev/null | awk 'NR>2&&$1!=""{print $1}'); do
     "$([ -f /var/run/mesh-link.${d#rdma_} ] && read -r t0 n tb < /var/run/mesh-link.${d#rdma_} && echo " (no peer for $(( $(date +%s) - t0 )) s, $n bounces)")"
 done
 b "THUNDERBOLT"; system_profiler SPThunderboltDataType 2>/dev/null | awk '/Device Name:|Speed:|Status:/{gsub(/^ +/,"");print "  "$0}' | head -12
-b "DAEMONS"; for spec in io.mesh.beacon:resident io.mesh.keeper:periodic io.mesh.fabric:oneshot io.mesh.router:resident io.mesh.nodeinfo:socket io.mesh.rdma-init:oneshot io.mesh.update:periodic; do
+b "DAEMONS"; for spec in io.mesh.beacon:resident io.mesh.keeper:periodic io.mesh.fabric:oneshot io.mesh.router:resident io.mesh.nodeinfo:resident io.mesh.rdma-init:oneshot io.mesh.update:periodic; do
   L=${spec%%:*}; kind=${spec##*:}
   info=$(launchctl print "system/$L" 2>/dev/null)
   pid=$(printf '%s' "$info" | awk -F'= ' '/^\tpid /{gsub(/ /,"",$2);print $2;exit}')

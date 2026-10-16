@@ -115,10 +115,7 @@ cat > "$A/io.mesh.update.user.plist.new" <<PL
   <key>StartInterval</key><integer>900</integer>
 </dict></plist>
 PL
-if launchctl print "gui/$UID/io.mesh.update.user" >/dev/null 2>&1; then
-  mv -f "$A/io.mesh.update.user.plist.new" "$A/io.mesh.update.user.plist"
-  retained=$((retained+1)); ok "io.mesh.update.user runs this install; its definition is loaded at its next load"
-else load io.mesh.update.user; fi
+load io.mesh.update.user
 try "complete cartlane application realized" "$PY" "$R/bin/mesh-application.py" deploy --source "$R" --target "$D/applications/cartlane"
 ok "mesh-peers: $D/bin/mesh-peers.sh"
 printf '%s\n' "${MESH_BRANCH:-main}" > "$D/branch"

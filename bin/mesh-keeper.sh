@@ -34,6 +34,13 @@ pgrep -qf "dns-sd -R" || {
   echo "[$(ts)] DRIFT beacon down"
   launchctl kickstart -k system/io.mesh.beacon >/dev/null 2>&1
   drift=1; }
+_named=$(scutil --get LocalHostName 2>/dev/null)
+_announced=$(ps -o args= -p "$(pgrep -f 'dns-sd -R .*_meshnode\._tcp' | head -1)" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "-R") {print $(i + 1); exit}}')
+[ -z "$_named" ] || [ -z "$_announced" ] || [ "$_named" = "$_announced" ] || [ "$(cat /var/run/mesh-beacon.renamed 2>/dev/null)" = "$_named" ] || {
+  echo "[$(ts)] DRIFT beacon announces $_announced, the node is named $_named"
+  printf '%s\n' "$_named" > /var/run/mesh-beacon.renamed
+  launchctl kickstart -k system/io.mesh.beacon >/dev/null 2>&1
+  drift=1; }
 [ "$(systemsetup -getusingnetworktime 2>/dev/null | awk '{print $NF}')" = On ] || {
   echo "[$(ts)] DRIFT ntp off"; systemsetup -setusingnetworktime on >/dev/null 2>&1; drift=1; }
 _lan=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
@@ -65,6 +72,16 @@ pgrep -qf /usr/local/mesh/bin/babeld || {
   echo "[$(ts)] DRIFT babeld down"; launchctl kickstart -k system/io.mesh.router >/dev/null 2>&1; drift=1; }
 [ "$(rdma_ctl status 2>&1)" = enabled ] || {
   echo "[$(ts)] ALARM rdma disabled, physical Recovery OS visit required"; drift=1; }
+if [ -n "$_uid" ]; then
+  for _n in "/Users/$_user/Library/LaunchAgents/"*.plist.new; do
+    [ -f "$_n" ] && [ ! -L "$_n" ] && [ "$(stat -f %Su "$_n")" = "$_user" ] && grep -q '<!--' "$_n" || continue; _l=$(basename "$_n" .plist.new); _d=
+    for _c in "gui/$_uid" "user/$_uid"; do launchctl print "$_c/$_l" >/dev/null 2>&1 && { _d=$_c; break; }; done
+    if [ -z "$_d" ]; then [ "$(plutil -extract LimitLoadToSessionType raw "$_n" 2>/dev/null)" = Background ] || continue; _d=user/$_uid; fi
+    launchctl print "$_d/$_l" 2>/dev/null | grep -q '^[[:space:]]*pid = ' && continue
+    _out=$(MESH_AGENT_NOWAIT=1 /usr/local/mesh/bin/mesh-agent.sh "$_n" "$_d") || _out="FAIL $_out"
+    [ -z "$_out" ] || { echo "[$(ts)] DRIFT $_user's agent $_l: $_out"; drift=1; }
+  done
+fi
 /usr/local/mesh/bin/mesh-health.sh 2>/dev/null | sed -n 's/^warn=//p' > /var/run/mesh-health.warn
 if ! cmp -s /var/run/mesh-health.warn /var/run/mesh-health.warned || [ $(( $(date +%s) - $(stat -f %m /var/run/mesh-health.warned 2>/dev/null || echo 0) )) -gt 3600 ]; then
   while read -r w; do echo "[$(ts)] WARN $w"; logger -p user.warning -t io.mesh.keeper "$w"; done < /var/run/mesh-health.warn
