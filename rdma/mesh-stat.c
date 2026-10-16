@@ -1,5 +1,6 @@
 #include "mesh.h"
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 /* design/bridge-and-ipc.md#ports: the node's bridge as libmesh reads it (mesh-plan.h), one JSON line: whether it answers
@@ -36,8 +37,14 @@ int main(void){
     printf("],\"map\":{\"nodes\":[");
     for(int i=0;i<count;i++)printf("%s%u",i?",":"",nodes[i]);
     printf("],\"links\":[");
-    for(uint32_t l=0;l<map.links;l++)
-      printf("%s[%u,%u,%g,%g]",l?",":"",nodes[map.link[l][0]],nodes[map.link[l][1]],map.cost[l][0],map.cost[l][1]);
+    for(uint32_t l=0;l<map.links;l++){
+      printf("%s[%u,%u",l?",":"",nodes[map.link[l][0]],nodes[map.link[l][1]]);
+      for(int c=0;c<2;c++){
+        if(isfinite(map.cost[l][c]))printf(",%.17g",map.cost[l][c]);
+        else printf(",null");
+      }
+      printf("]");
+    }
     printf("]}");
   }
   static const char *resets[]={"unknown","supply","watchdog","other"},*powers[]={"unknown","AC","battery","UPS"};
