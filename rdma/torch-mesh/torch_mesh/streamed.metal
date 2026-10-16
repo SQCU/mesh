@@ -551,6 +551,17 @@ kernel void streamed_couple(device const uint *gateCodes [[buffer(0)]], device c
     }
 }
 
+// The bandwidth read (metal-microbench docs/kernels.md#the-instance-fit, Evidence; streamed.py bandwidth): every thread
+// reads its stride of d.count 16-byte words and folds them, storing only where the fold is a value the read's filling never
+// folds to, so every read is kept and nothing is written.
+kernel void streamed_read(device const uint4 *in [[buffer(0)]], device uint *out [[buffer(1)]], constant streamed_dims &dims [[buffer(15)]],
+                          uint gid [[thread_position_in_grid]], uint grid [[threads_per_grid]]) {
+    const streamed_dims d = dims_of(dims);
+    uint4 acc = 0;
+    for (uint i = gid; i < d.count; i += grid) acc ^= in[i];
+    if ((acc.x ^ acc.y ^ acc.z ^ acc.w) == 0x9e3779b9u) out[gid & 1023u] = acc.x;
+}
+
 // The matrix decoded to dense values in its row and column orders: dense[order[r]][columns[j]] = rowScale[r] *
 // colScale[j] * value of coded row r, coded column j (a threadgroup a tile).
 kernel void streamed_dense(device const uint *codes [[buffer(0)]], device const uint *tiles [[buffer(1)]],
