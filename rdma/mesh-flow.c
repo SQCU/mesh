@@ -311,17 +311,39 @@ static void health_sample(struct mesh_health *h){
   int changed=0;
   if(power_token>=0 && notify_check(power_token,&changed)==NOTIFY_STATUS_OK && changed)power_read(h);
 }
-/* the boot's facts, read once: when the node booted, its boot session, and why it last restarted (the head of
-   kern.shutdownreason, the power controller's records newest first) */
+/* design/recovery.md#diagnosis: whether a power controller's record (`length` bytes of the ring kern.shutdownreason
+   holds) is of `class`, the text before its comma */
+static int record_is(const char *record,size_t length,const char *class){
+  const size_t n=strlen(class);
+  return length>=n && !strncmp(record,class,n) && (length==n || record[n]==',');
+}
+/* design/recovery.md#diagnosis: why the node last restarted, from the power controller's ring (newest first): the
+   reset's own records, the ring's from its newest up to the next that opens an earlier boot's (a `por,por_vddrtc` or
+   `wdog` record after the first), written whole into `out` (as many as its room holds, none cut); the watchdog where
+   the newest is `wdog`, the supply where it is `por`, else other (none: unknown) */
+static uint32_t reset_read(const char *ring,char *out,size_t room){
+  uint32_t reset=MESH_RESET_UNKNOWN,records=0;
+  size_t used=0;
+  int whole=1;
+  out[0]=0;
+  for(const char *at=ring;;at+=strcspn(at," ")){
+    at+=strspn(at," ");
+    const size_t length=strcspn(at," ");
+    if(!length || (records && (record_is(at,length,"wdog") || (length>=14 && !strncmp(at,"por,por_vddrtc",14)))))break;
+    if(!records++)reset=record_is(at,length,"wdog")?MESH_RESET_WATCHDOG:record_is(at,length,"por")?MESH_RESET_SUPPLY:MESH_RESET_OTHER;
+    if(whole && used+(used?1:0)+length<room){if(used)out[used++]=' ';memcpy(out+used,at,length);used+=length;out[used]=0;}
+    else whole=0;
+  }
+  return reset;
+}
+/* the boot's facts, read once: when the node booted, its boot session, and why it last restarted (reset_read) */
 static void health_init(void){
   host_port=mach_host_self();
   struct timeval booted;size_t size=sizeof booted;
   if(!sysctlbyname("kern.boottime",&booted,&size,NULL,0))health.booted=(uint64_t)booted.tv_sec*1000000000u+(uint64_t)booted.tv_usec*1000u;
   sysctl_text("kern.bootsessionuuid",health.session,sizeof health.session);
   char reason[512];sysctl_text("kern.shutdownreason",reason,sizeof reason);
-  const char *newest=reason;while(*newest==' ')newest++;
-  snprintf(health.shutdown,sizeof health.shutdown,"%s",newest);
-  health.reset=!*newest?MESH_RESET_UNKNOWN:!strncmp(newest,"por",3)?MESH_RESET_SUPPLY:!strncmp(newest,"wdog",4)?MESH_RESET_WATCHDOG:MESH_RESET_OTHER;
+  health.reset=reset_read(reason,health.shutdown,sizeof health.shutdown);
   notify_register_check(kIOPSNotifyAnyPowerSource,&power_token);
   notify_register_check("com.apple.system.thermalpressurelevel",&thermal_token);
   power_read(&health);

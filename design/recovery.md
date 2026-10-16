@@ -155,9 +155,15 @@ on the M5 held the Mini's last state, and the reason was only in the Mini's powe
 
 - Every bridge log line carries the wall clock (UTC, ms) and the node's uptime (mesh-flow.c `say`).
 - Each node's record carries its health (mesh-plan.h `struct mesh_health`): when it was sampled; the node's boot time
-  and boot session; why it last restarted, from `kern.shutdownreason` (its power controller's records newest first:
-  `por,...` its supply was lost, `wdog,...` its watchdog reset it; any other record is "other", none "unknown", never a
-  guess); its power source (AC, battery or UPS, with charge and minutes to empty: a USB UPS is a power source macOS
+  and boot session; why it last restarted, from `kern.shutdownreason` (its power controller's records newest first,
+  the 80 bytes the sysctl keeps: `por,...` its supply was lost, `wdog,...` its watchdog reset it; any other record is
+  "other", none "unknown", never a guess), and the reset's own records in `shutdown`, whole (the ring's from its newest
+  up to the next that opens an earlier boot's, a `por,por_vddrtc` or `wdog` record after the first: mesh-flow.c
+  `reset_read`; through MESH_VERSION 114 the ring's first 79 bytes, a record cut where they ended), so a sag reads in
+  them: an undervoltage record (`uv,...`) newest, the always-on rail holding (the Mac mini's reset of 2026-10-15 20:44,
+  `uv,por_warn uv,vdd_boost_uvlo por rst`, which read "other"), or after a boot's five `por,por_vddrtc` records, the
+  supply sagging before it was lost (the operator's reading: the records between a boot's five and the previous boot's
+  are how the supply went); the classes give a sag none of its own yet (mesh-plan.h `MESH_RESET_*`); its power source (AC, battery or UPS, with charge and minutes to empty: a USB UPS is a power source macOS
   reports); free and wired memory and the kernel's memory pressure; thermal pressure. The bridge samples it each turn
   from cheap reads (sysctl, VM statistics, notify states; the power sources' description only when their notify state
   moved). A change of power source, of charge off AC, or of memory or thermal pressure is logged and sent at once; the
