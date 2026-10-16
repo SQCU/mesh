@@ -2,7 +2,6 @@
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 PREFIX=fd6d:6573:68
 D=${MESH_DEADLINE:-2}
-U="${MESH_SSH_USER:-$(id -un)}"
 SSHID=()
 MESHROOT=$(cd "$(dirname "$0")/.." && pwd)
 KEYROSTER="$MESHROOT/keys/authorized_keys"
@@ -41,11 +40,11 @@ IFS='
 for a in $cand; do
   [ -n "$a" ] || continue
   k=$((k+1))
-  { i=$(probe "$a"); [ -n "$i" ] && printf '%s\t%s\t%s\n' "$(f ula "$i")" "$(f name "$i")" "$a" > "$T/$k"; } &
+  { i=$(probe "$a"); [ -n "$i" ] && printf '%s\t%s\t%s\t%s\n' "$(f ula "$i")" "$(f name "$i")" "$(f account "$i")" "$a" > "$T/$k"; } &
 done
 wait
 for row in $(cat "$T"/* 2>/dev/null | sort -u -k1,1); do
-  ula=${row%%	*}; rest=${row#*	}; name=${rest%%	*}; addr=${rest#*	}
+  ula=${row%%	*}; rest=${row#*	}; name=${rest%%	*}; rest=${rest#*	}; account=${rest%%	*}; addr=${rest#*	}
   case "$target" in
     all) ;;
     others) [ "$ula" = "$self" ] && continue ;;
@@ -54,6 +53,6 @@ for row in $(cat "$T"/* 2>/dev/null | sort -u -k1,1); do
   tag=${name:-$addr}
   if [ "$ula" = "$self" ]; then bash -c "$*" 2>&1 | sed "s|^|$tag |" &
   else ssh "${SSHID[@]}" -o BatchMode=yes -o ConnectTimeout="$D" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-         "$U@$addr" "$@" 2>&1 | sed "s|^|$tag |" & fi
+         "${MESH_SSH_USER:-${account:-$(id -un)}}@$addr" "$@" 2>&1 | sed "s|^|$tag |" & fi
 done
 wait
