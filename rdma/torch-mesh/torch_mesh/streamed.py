@@ -1281,7 +1281,7 @@ def _observe(args):
     table_path, table, made = served
     reading = json.loads(Path(args.reading).read_text())
     streamed = Streamed(args.export, 'cpu')
-    record = json.loads(Path(args.program).read_text()) if args.program else None
+    record = _record(args.program) if args.program else None
     keyed, _ = products(slices(streamed, record, args.rank))
     shapes = {}
     for (op, outputs, columns, widths, _), units in keyed.items():
@@ -1400,7 +1400,7 @@ def _epilogue(args):
     for reading in (args.fused, args.separate):
         if served_node(reading) != here:
             raise SystemExit(f'{reading}: read on {served_node(reading) or "no named node"} (its instance table\'s), not this {here[0]} ({here[1]} GPU cores)')
-    _, runs = products(slices(Streamed(args.export, 'cpu'), json.loads(Path(args.program).read_text()) if args.program else None, args.rank))
+    _, runs = products(slices(Streamed(args.export, 'cpu'), _record(args.program) if args.program else None, args.rank))
     path = evidence_path()
     known = json.loads(path.read_text()) if path.exists() else {}
     for kind, shapes in fused_ratios(args.fused, args.separate, dict(r.split('=', 1) for r in args.rows)).items():
@@ -1416,6 +1416,12 @@ def _epilogue(args):
             known.setdefault('fused', {}).setdefault(kind, {}).setdefault(shape, {}).update(classes)
     _write(path, known)
     print(json.dumps(known.get('fused', {})))
+
+
+def _record(source):
+    """A call's record: `source` a path, or "-" for the record on stdin (a resident caller's stream, never a file)."""
+    import sys
+    return json.loads(sys.stdin.read() if source == '-' else Path(source).read_text())
 
 
 def _admit(args):
@@ -1559,7 +1565,7 @@ def _probe(args):
     torch.set_grad_enabled(False)
     here, busy = list(node()), _gpu_busy()
     classes, slots = [int(c) for c in args.classes.split(',')], coop_slots()
-    held = slices(Streamed(args.export), json.loads(Path(args.program).read_text()) if args.program else None, args.rank)
+    held = slices(Streamed(args.export), _record(args.program) if args.program else None, args.rank)
     generator = torch.Generator().manual_seed(0)
     done, written = set(), 0
 
@@ -1729,7 +1735,7 @@ def _resolve(args):
         if not found or found.group(2) not in PLANS or found.group(3) and (found.group(2) != 'tile' or int(found.group(3)) < 1):
             raise SystemExit(f'--plan {e}: ROWS=PLAN[/PARTS][@sliding], PLAN one of {PLANS}, PARTS a positive count of the tile plan')
         plans[int(found.group(1))] = (found.group(2), int(found.group(3) or 0), bool(found.group(4)))
-    record = json.loads(Path(args.program).read_text()) if args.program else {}
+    record = _record(args.program) if args.program else {}
     held = slices(streamed, record or None, args.rank)
     for draft in args.draft:
         held += list(Streamed(draft, 'cpu').matrices.items())
