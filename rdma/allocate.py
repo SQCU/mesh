@@ -716,7 +716,7 @@ class Balancer:
                                      for total_i in [sum(max(0.0, float(w[i] or 0.0)) for w in scales.values()) + max(0.0, fixed[i])] if total_i)
                              for s, (c, ranks, scales, fixed, _, _) in mine.items())
                 vertex = self._vertex(d, history, value or (lambda u, built=built: sum(c * max(f(u[g]) for g, f in enumerate(fs))
-                                                                                     for c, fs in built)), joined)
+                                                                                     for c, fs in built)), joined + max(0.0, tested - call))
                 if vertex:
                     proposals.append(((base - vertex[1]) / measured if measured else 0.0, name, vertex[0]))
                     continue
@@ -771,7 +771,8 @@ class Balancer:
         """A decision about to stand: the vertex where one group leaves it (its units to the others in proportion to
         theirs) that no call at these parts' history measured, where the models price it within `joined` (the measured
         time they attribute to the stretches' joined work, which a leaving group takes with it and a crossing no longer
-        joined costs no one: what interior points cannot price) of the parts', else None.  Such a vertex is measured
+        joined costs no one, and the call's measured time their path leaves out, a session's start where a vertex leaves
+        the call no crossing: what interior points cannot price) of the parts', else None.  Such a vertex is measured
         once, and the ratio test returns a worse one; a stretch's work changes in kind where a group leaves it (its
         crossing goes), so the vertex is a design point of its own [Box, Hunter & Hunter 2005, the factorial's corner
         points].  (parts, value.)"""
