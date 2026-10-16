@@ -104,34 +104,47 @@ def sample(data: bytes, limit: int) -> str:
         raise ValueError("incomplete nodeinfo sample")
     return body.decode()
 
-def nodeinfo(address: str, timeout: float = 2.0, limit: int = 1 << 20, stagger: float = 0.25) -> str:
-    targets = [(family, kind, proto, (where[0], port, *where[2:]))
-               for family, kind, proto, _, where in socket.getaddrinfo(address, None, type=socket.SOCK_STREAM) for port in NODEINFO_PORTS]
-    deadline, chooser, pending, errors, started = time.monotonic() + timeout, selectors.DefaultSelector(), {}, [], 0.0
+def where(target: tuple) -> str:
+    """A socket address as address%interface:port (the interface where it has a scope)."""
+    scope = target[3] if len(target) > 3 else 0
+    return f"{target[0]}%{socket.if_indextoname(scope)}:{target[1]}" if scope else f"{target[0]}:{target[1]}"
+
+def nodeinfo(address: str, timeout: float = 2.0, limit: int = 1 << 20,
+             stagger: float = 0.25) -> tuple[str, str, list[str]]:
+    """A node's node-info sample from `address` (a name or an address): every port of NODEINFO_PORTS on an address at
+    once (ports are services on one path), the name's addresses in resolver order `stagger` seconds apart, or at once
+    when no attempt is pending; the first whole sample answers, and the reading ends `timeout` seconds past the last
+    address's turn, so every address has at least `timeout`.  (the sample, the address:port that gave it, why each
+    attempt that ended before it gave none); OSError, naming every attempt, where none gives one."""
+    addresses = [[(family, kind, proto, (sockaddr[0], port, *sockaddr[2:])) for port in NODEINFO_PORTS]
+                 for family, kind, proto, _, sockaddr in socket.getaddrinfo(address, None, type=socket.SOCK_STREAM)]
+    deadline = time.monotonic() + timeout + stagger * max(0, len(addresses) - 1)
+    chooser, pending, errors, started = selectors.DefaultSelector(), {}, [], 0.0
 
     def fail(client, why):
         chooser.unregister(client)
         target = pending.pop(client)[0]
-        errors.append(f"{target[0]}:{target[1]}: {why}")
+        errors.append(f"{where(target)}: {why}")
         client.close()
 
     try:
-        while time.monotonic() < deadline and (targets or pending):
-            if targets and (not pending or time.monotonic() >= started + stagger):
-                started, (family, kind, proto, target) = time.monotonic(), targets.pop(0)
-                client = socket.socket(family, kind, proto)
-                client.setblocking(False)
-                code = client.connect_ex(target)
-                if code in (0, errno.EINPROGRESS):
-                    pending[client] = [target, None]
-                    chooser.register(client, selectors.EVENT_WRITE)
-                else:
-                    errors.append(f"{target[0]}:{target[1]}: {os.strerror(code)}")
-                    client.close()
+        while time.monotonic() < deadline and (addresses or pending):
+            if addresses and (not pending or time.monotonic() >= started + stagger):
+                started = time.monotonic()
+                for family, kind, proto, target in addresses.pop(0):
+                    client = socket.socket(family, kind, proto)
+                    client.setblocking(False)
+                    code = client.connect_ex(target)
+                    if code in (0, errno.EINPROGRESS):
+                        pending[client] = [target, None]
+                        chooser.register(client, selectors.EVENT_WRITE)
+                    else:
+                        errors.append(f"{where(target)}: {os.strerror(code)}")
+                        client.close()
                 continue
             wait = deadline - time.monotonic()
-            for key, _ in chooser.select(max(0.0, min(wait, started + stagger - time.monotonic()) if targets else wait)):
-                client, data = key.fileobj, pending[key.fileobj][1]
+            for key, _ in chooser.select(max(0.0, min(wait, started + stagger - time.monotonic()) if addresses else wait)):
+                client, (target, data) = key.fileobj, pending[key.fileobj]
                 if data is None:
                     code = client.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
                     if code:
@@ -156,10 +169,10 @@ def nodeinfo(address: str, timeout: float = 2.0, limit: int = 1 << 20, stagger: 
                 if chunk and len(data) <= limit:
                     continue
                 try:
-                    return sample(bytes(data), limit)
+                    return sample(bytes(data), limit), where(target), errors
                 except ValueError as error:
                     fail(client, error)
-        errors += [f"{target[0]}:{target[1]}: no sample in {timeout} s" for target, _ in pending.values()]
+        errors += [f"{where(target)}: no sample in {timeout} s" for target, _ in pending.values()]
         raise OSError("; ".join(errors) or f"{address}: no address")
     finally:
         for client in pending:
@@ -214,6 +227,12 @@ def ssh_argv(pattern: str, *command: str, identity: str | None = None,
 
 if __name__ == "__main__":
     import sys
+    if sys.argv[1:2] == ["nodeinfo"] and len(sys.argv) == 3:
+        try:
+            print(nodeinfo(sys.argv[2])[0], end="")
+        except (OSError, ValueError) as error:
+            sys.exit(f"nodeinfo {sys.argv[2]}: {error}")
+        sys.exit(0)
     if len(sys.argv) > 1:
         a = resolve(sys.argv[1])
         print(a if a else "", end="\n" if a else "")

@@ -19,9 +19,10 @@ FIRST = Path(__file__).resolve().parent.parent / 'etc/mesh-store.json'
 RATES = ('proj', 'attn', 'prim', 'edge')
 
 
-def load(path=PATH):
+def load(path=None):
+    """The JSON at `path`, the store's (PATH, read when called) without one; {} where it is missing or unreadable."""
     try:
-        return json.loads(Path(path).read_text())
+        return json.loads(Path(path or PATH).read_text())
     except (OSError, ValueError):
         return {}
 

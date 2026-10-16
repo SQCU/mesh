@@ -9,6 +9,7 @@ TELEMETRY_PORT = int(os.environ.get("MESH_TELEMETRY_PORT", "8788"))
 RESIDENT = ("beacon", "bridge", "router", "nodeinfo", "telemetry", "observer")
 SPARK = " ▁▂▃▄▅▆▇█"
 PHASES = {getattr(mesh.lib, "MESH_" + name): name for name in ("UNKNOWN", "PAIRING", "PAIRED", "STOPPED")}
+NODEINFO_OVER_SSH = "python3 - nodeinfo ::1 <<'PEERS'\n" + open(peers.__file__).read() + "\nPEERS"
 USAGE = "mesh-top [-n SECONDS] [--window SECONDS] [--nodes A,B] [--once | --html FILE]   keys: q quit, j/k scroll"
 
 def run(command, timeout):
@@ -83,7 +84,7 @@ def fetch(node):
     if record.get("sequence") != node.sequence:
         node.previous, node.sample, node.sequence = node.sample, record["sample"], record.get("sequence")
     if time.time() - node.info_at > 10:
-        try: text = peers.nodeinfo(node.address[2]) if node.transport[0] == "http" else ssh(node.transport[1], "printf x | nc -G 2 -w 2 ::1 8099 || printf x | nc -G 2 -w 2 ::1 8100", 8).stdout
+        try: text = peers.nodeinfo(node.address[2])[0] if node.transport[0] == "http" else ssh(node.transport[1], NODEINFO_OVER_SSH, 8).stdout
         except (OSError, ValueError): text = ""
         if text: node.info, node.info_at = peers.observation(text), time.time()
 

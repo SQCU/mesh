@@ -153,7 +153,9 @@ def time(points, prior=None):
     linearly between them and extended along the line through the two nearest past either end (between none and
     the first's time below it); with one point, in proportion below it and its own time above (the least a
     nondecreasing time can be there: optimism where nothing is known [Auer et al. 2002], which the trust region
-    bounds); with none, `prior` (a, b): a + b d, or d itself."""
+    bounds); with none, `prior` (a, b): a + b d, or d itself.  Its `knots` are the units where it bends (the
+    nondecreasing points'; at 0 it steps, and below the first point it is the max of 0 and an affine piece, convex),
+    which `_split` reads off the model itself."""
     blocks = []
     for d, t in sorted((d, t) for d, t in points if d > 0 and t > 0):
         blocks.append([[d], t])
@@ -179,6 +181,7 @@ def time(points, prior=None):
         for (d0, t0), (d1, t1) in zip(known, known[1:]):
             if d0 <= d <= d1:
                 return t0 + (t1 - t0) * (d - d0) / (d1 - d0)
+    at.knots = [d for d, _ in known]
     return at
 
 
@@ -200,56 +203,68 @@ def _median_points(points):
 
 
 def least(total, grain, low, high, stretches, value, knots):
-    """Units of `total` at `grain` within [low_i, high_i] minimising sum_s c_s max_i f_si(u_i) over `stretches`
-    [(c_s, [f_si, nondecreasing])], or `value(u)` where given (a call's latency path, _path): one stretch by min_max
-    (exact [Ibaraki & Katoh 1988]); two ranks exactly by `knots` (`_split`); more, each grain to the rank that adds
-    least, then a grain moved between two ranks while that lowers the sum.  (units, the sum.)"""
+    """Units of `total` at `grain` within [low_i, high_i] (each bound taken inward onto the grain) minimising
+    sum_s c_s max_i f_si(u_i) over `stretches` [(c_s, [f_si, nondecreasing])], or `value(u)` where given (a call's
+    latency path, _path): one stretch by min_max (exact [Ibaraki & Katoh 1988]); else from a start (two ranks: `low`,
+    the rest to the first rank with room; more: `_fill`), each two ranks' split moved to its least (`_split`, exact for
+    the two with the others held: `knots` each rank's) while that lowers the value, or keeps it and gives the lower rank
+    less (as `_split` breaks ties), until every pair stands at its least (block coordinate descent [Tseng 2001]; the
+    value and then the parts in rank order fall at every move, so it ends; two ranks are one pair, so one split,
+    exact).  A sweep costs n (n - 1) / 2 splits of O(knots log(total / grain)) evaluations each.  (units, the value.)"""
     n = len(low)
+    low, high = [-(-v // grain) * grain for v in low], [v // grain * grain for v in high]
     if len(stretches) == 1 and value is None:
         c, fs = stretches[0]
         units, top = min_max(total, grain, low, high, fs)
         return units, c * top
     value = value or (lambda u: sum(c * max(fs[i](u[i]) for i in range(n)) for c, fs in stretches))
-    if n == 2:
-        return _split(total, grain, low, high, value, knots)
-    u = list(low)
-    held = [[fs[i](u[i]) for i in range(n)] for _, fs in stretches]
-    for _ in range((total - sum(low)) // grain):
-        choice = None
+    if n > 2:
+        u = _fill(total, grain, low, high, value)
+    else:
+        u = list(low)
         for i in range(n):
-            if u[i] + grain > high[i]:
-                continue
-            v = (sum(c * max(max(h[:i] + h[i + 1:], default=0.0), fs[i](u[i] + grain)) for (c, fs), h in zip(stretches, held))
-                 if stretches else value(u[:i] + [u[i] + grain] + u[i + 1:]))
-            if choice is None or v < choice[1]:
-                choice = (i, v)
-        if choice is None:
-            break
-        i = choice[0]
-        u[i] += grain
-        for (c, fs), h in zip(stretches, held):
-            h[i] = fs[i](u[i])
-    v = value(u)
-    for _ in range(4 * n * n):
-        moved = False
-        for i in range(n):
-            for j in range(n):
-                if i != j and u[i] - grain >= low[i] and u[j] + grain <= high[j]:
-                    w = list(u)
-                    w[i] -= grain
-                    w[j] += grain
-                    x = value(w)
-                    if x < v:
-                        u, v, moved = w, x, True
-        if not moved:
-            break
+            u[i] += max(0, min(total - sum(u), high[i] - u[i]))
+    pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+    v, k, settled = value(u), 0, 0
+    while settled < len(pairs):
+        i, j = pairs[k % len(pairs)]
+        w, x = _split(u[i] + u[j], grain, [low[i], low[j]], [high[i], high[j]],
+                      lambda p, i=i, j=j, u=list(u): value(u[:i] + [p[0]] + u[i + 1:j] + [p[1]] + u[j + 1:]),
+                      [knots[i], knots[j]])
+        k, settled = k + 1, settled + 1
+        if (x, w[0]) < (v, u[i]):
+            u[i], u[j], v, settled = w[0], w[1], x, 1
     return u, v
+
+
+def _fill(total, grain, low, high, value):
+    """A start for `least` of more than two ranks, the greedy fill [Ibaraki & Katoh 1988] coarse to fine: from `low`,
+    each chunk to the rank whose value with it is least (ties to the lower rank) while a chunk fits within `high` and
+    `total`; the first chunk the grain times the largest power of two that places four to eight a rank, then each
+    half the last, each rank first handing back two chunks of the coarser size (down to its `low`), down to the grain.
+    It fills from below, so ranks tied at the slowest are filled past together, which moves between two ranks alone
+    cannot do (a rank joining with none: the pairwise descent from parts [100, 100, 0] of three equal ranks stands).
+    The first size places at most 8 n chunks and each later one at most 4 n + 2: O(n^2 log(total / grain))
+    evaluations where a grain at a time took n total / grain."""
+    n, u, chunk = len(low), list(low), grain
+    while chunk * 8 * n <= total - sum(low):
+        chunk *= 2
+    while True:
+        while sum(u) + chunk <= total:
+            fits = [i for i in range(n) if u[i] + chunk <= high[i]]
+            if not fits:
+                break
+            i = min(fits, key=lambda i: value(u[:i] + [u[i] + chunk] + u[i + 1:]))
+            u[i] += chunk
+        if chunk == grain:
+            return u
+        u, chunk = [max(b, p - 2 * chunk) for p, b in zip(u, low)], chunk // 2
 
 
 def _split(total, grain, low, high, value, knots):
     """The split [a, total - a] of two ranks of least `value`, the least a among equal values, a on the grain from
-    max(low_0, total - high_1) to min(high_0, total - low_1) (else (low, value(low))).  `knots` are each rank's units
-    where its models bend (the `time` models' measured units: rank 0's at a, rank 1's at total - a).  Between two
+    lo = max(low_0, total - high_1) up to min(high_0, total - low_1) (else (low, value(low))).  `knots` are each rank's
+    units where its models bend (the `time` models' own `knots`: rank 0's at a, rank 1's at total - a).  Between two
     consecutive knots every model is affine in a (below its first point the max of 0 and an affine piece, convex), and
     `value` composes the models by max, + and nonnegative counts alone (_path's longest path is max-plus [Baccelli,
     Cohen, Olsder & Quadrat 1992]), so it is convex there [Boyd & Vandenberghe 2004, 3.2.3]; a rank's units 0 (it
@@ -257,7 +272,8 @@ def _split(total, grain, low, high, value, knots):
     grain points between two by a bisection on the sign of its forward difference, which on a convex sequence ends at
     its least minimiser: O(knots log(total / grain)) evaluations where trying every split took total / grain, with the
     same minimum."""
-    lo, hi = max(low[0], total - high[1]), min(high[0], total - low[1])
+    lo = max(low[0], total - high[1])
+    hi = lo + grain * ((min(high[0], total - low[1]) - lo) // grain)
     if lo > hi:
         return list(low), value(low)
     seen = {}
@@ -512,7 +528,7 @@ class Balancer:
                                 for i in range(n)]
                     return _path(rows(at, counted)) + sum(c * max(f(u[g]) for g, f in enumerate(fs)) for c, fs in kept)
             total = sum(d['parts'])
-            knots = [sorted({int(u) for (e, _, h), own in self.points.items() if e == name and h == g for u, _ in own})
+            knots = [sorted({int(k) for (e, s, h) in self.points if e == name and h == g for k in self._model(name, s, g).knots})
                      for g in range(n)]
             if least(total, d['grain'], d['low'], d['high'], [] if value else built, value, knots)[1] >= base - epsilon * measured:
                 d['before'], d['stands'] = list(d['parts']), True
