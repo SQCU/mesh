@@ -56,13 +56,18 @@ model there, else of the fit's prices (every measurement, a probe's too, moves t
                                                                 bandwidth's, observe's, the decode attention plans' rows
                                                                 kind attention), the bandwidth its reads' (else, a refit,
                                                                 its evidence's); a record of another node refused
-  python -m torch_mesh.streamed resolve EXPORT [--program RECORD --rank R] [--classes 1,2,4,8,16,256] [--explore R=C[/FORM<v>],...]
-                                [--plan R=PLAN[/PARTS][@sliding]] [--apart R] --out TABLE
-                                                                each slice's chosen instance at each rows class (a slice's
-                                                                key its width class, WIDTH_CLASSES, which the table names),
-                                                                each argument named, and each layer's attention plan and
-                                                                part count at each rows class to 16: the table an engine
-                                                                reads (LM_STREAMED_INSTANCES), naming this node
+  python -m torch_mesh.streamed resolve EXPORT [--program RECORD --rank R] [--rows 1,2,4,...] [--explore R=C[/FORM<v>],...]
+                                [--plan R=PLAN[/PARTS][@sliding]] [--apart R] --out CHOICES
+                                                                the fit evaluated where the engine runs: each slice's chosen
+                                                                instance at each row count the member runs (the record's,
+                                                                call_rows: its step's, its chunks' and their head's; without a
+                                                                record, --rows, the served engine's own batch buckets), a
+                                                                slice's key its width class (WIDTH_CLASSES), each argument
+                                                                named, and each layer's attention plan and part count at
+                                                                each of those row counts: the choices an engine reads
+                                                                (LM_STREAMED_INSTANCES), naming this node; no row count is
+                                                                rounded to another, and none the member does not run is
+                                                                evaluated
   python -m torch_mesh.streamed observe READING EXPORT [--loads L] [--program RECORD --rank R] --out ROWS
                                                                 a served reading's profile (metal-microbench
                                                                 tools/reading.py) as observations of its instances and
@@ -1325,7 +1330,7 @@ def _observe(args):
                 if seen:
                     merge = commands.get(f'decode_attention_merge_{dims}', {}).get('least_us', 0.0) if plan == 'tile' else 0.0
                     rows, positions = int(cls.split()[1]), window or args.ctx
-                    parts = named.get((plan, dims, next((c for c in table['classes'] if c >= rows), rows)), {0})
+                    parts = named.get((plan, dims, rows), {0})
                     if len(parts) != 1:
                         raise SystemExit(f'{table_path}: the {plan} plan at {dims} channels and {rows} rows names part counts {sorted(parts)}, one a reading')
                     out.append({'kind': 'attention', 'plan': plan, 'dims': dims, 'rows': rows, 'heads': heads, 'positions': positions, 'window': window,
@@ -1670,11 +1675,11 @@ def _text_config(export):
     return config.get('text_config', config)
 
 
-def _attention(export, part, ctx, classes, fit_model, read, explore=None):
+def _attention(export, part, ctx, counts, fit_model, read, explore=None):
     """The decode attention plan a rank takes for each of its layers (its head dimension, window and query heads) at each
-    rows class the table serves (docs/kernels.md#decode-attention) and its part count (0: the engine's own count): the
+    row count it runs (`counts`; docs/kernels.md#decode-attention) and its part count (0: the engine's own count): the
     least priced (attention_plan: its readings `read`, else the node's model) at the layer's positions (the window, else
-    the call's context); at a rows class `explore` names ({rows: (plan, parts, sliding)}: every layer's, or a sliding
+    the call's context); at a row count `explore` names ({rows: (plan, parts, sliding)}: every layer's, or a sliding
     window's alone), that plan at that count, unpriced (read once, in the next profile). A layer a named plan does not
     cover needs the model's line of both plans at its head dimension; where one lacks, the resolve is refused, naming
     them (a served reading of each plan, a resolve --plan naming it, and observe and fit make them)."""
@@ -1692,7 +1697,7 @@ def _attention(export, part, ctx, classes, fit_model, read, explore=None):
         sliding = kind == 'sliding_attention'
         dims = text['head_dim'] if sliding else text.get('global_head_dim') or text['head_dim']
         window = text.get('sliding_window', 0) if sliding else 0
-        for rows in classes:
+        for rows in counts:
             named = (explore or {}).get(rows)
             if named and (window or not named[2]):
                 out.append({'layer': L, 'rows': rows, 'plan': named[0], 'parts': named[1], 'us': {}})
@@ -1710,10 +1715,27 @@ def _attention(export, part, ctx, classes, fit_model, read, explore=None):
     return out
 
 
+def call_rows(record):
+    """The row counts a member of the call `record` runs (metal-microbench metal_runtime.swift Placement and
+    engine_recording.swift): its decode step's (bs: a speculative step's rows are its batch class), each prefill chunk's
+    (its streams times the chunk's rows) and its last chunk's head (its streams)."""
+    bs = int(record['bs'])
+    prefill = record.get('prefill') or {}
+    streams = int(prefill.get('streams') or bs)
+    return sorted({bs} | ({streams} | {streams * int(c['rows']) for c in prefill.get('chunks') or []} if prefill else set()))
+
+
 def _resolve(args):
     import re
     streamed = Streamed(args.export, 'cpu')
-    fit, classes = Fit.node(), [int(c) for c in args.classes.split(',')]
+    record = _record(args.program) if args.program else {}
+    if args.rows:
+        classes = sorted({int(c) for c in args.rows.split(',')})
+    elif record:
+        classes = call_rows(record)
+    else:
+        raise SystemExit('resolve: --rows (the row counts the engine runs: its batch buckets) or --program (a call\'s record, whose rows call_rows reads)')
+    fit = Fit.node()
     for e in args.explore:
         rows, named = e.split('=', 1)
         parts = [c.split('/') for c in named.split(',')]
@@ -1735,7 +1757,6 @@ def _resolve(args):
         if not found or found.group(2) not in PLANS or found.group(3) and (found.group(2) != 'tile' or int(found.group(3)) < 1):
             raise SystemExit(f'--plan {e}: ROWS=PLAN[/PARTS][@sliding], PLAN one of {PLANS}, PARTS a positive count of the tile plan')
         plans[int(found.group(1))] = (found.group(2), int(found.group(3) or 0), bool(found.group(4)))
-    record = _record(args.program) if args.program else {}
     held = slices(streamed, record or None, args.rank)
     for draft in args.draft:
         held += list(Streamed(draft, 'cpu').matrices.items())
@@ -1766,10 +1787,10 @@ def _resolve(args):
             print(f'--explore {rows}: {form}{value} in {sum(e["rows"] == rows and e["args"][e["names"].index(form)] == value for e in entries if form in e["names"])} '
                   f'of the class\'s {sum(e["rows"] == rows for e in entries)} instances')
     table = {'node': node()[0], 'cores': node()[1], 'evidence': str(evidence_path()), 'export': str(args.export),
-             'program': args.program, 'rank': args.rank, 'classes': classes, 'width_class': WIDTH_CLASS, 'ctx': ctx,
+             'program': args.program, 'rank': args.rank, 'rows': classes, 'width_class': WIDTH_CLASS, 'ctx': ctx,
              'instances': entries, 'attention': attention}
     _write(args.out, table)
-    print(f'{args.out}: {len(entries)} instances, {len(keyed)} slices, {len(attention)} attention plans, classes {classes}')
+    print(f'{args.out}: {len(entries)} instances, {len(keyed)} slices, {len(attention)} attention plans, rows {classes}')
 
 
 def main():
@@ -1798,7 +1819,7 @@ def main():
     resolve.add_argument('export')
     resolve.add_argument('--program', default=None)
     resolve.add_argument('--rank', type=int, default=None)
-    resolve.add_argument('--classes', default='1,2,4,8,16,32,64,128,256,512')
+    resolve.add_argument('--rows', default=None, help="the row counts the engine runs (the served engine's batch buckets); without it, the record's (call_rows)")
     resolve.add_argument('--ctx', type=int, default=0, help="the positions a global layer's attention is priced at (default: the record's ctx_mean, else 1024)")
     resolve.add_argument('--draft', action='append', default=[],
                          help="a drafter's export whose matrices the member runs whole (metal-microbench tools/draft/dflash2.py export)")
