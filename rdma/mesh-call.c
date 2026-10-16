@@ -66,8 +66,8 @@ static int mesh_target_order(const void *a,const void *b){
 /* Each destination's SEND cells: every publication (a send transfer's slot) a column of one cell an
    invocation of its range and a terminal one no producer writes, in (class, binding) order; the
    transfer's `first` is its slot 0 column's first cell, slot s's `s` columns on.  Each column is a
-   target of the row its slot sends (mesh.h mesh_row_targets: the program's targets, a section of
-   its slot sorted by row).  Each cell's
+   target of the row its slot sends (mesh.h mesh_row_targets: the program's targets, after its SEND
+   cells in their lease, sorted by row).  Each cell's
    request carries the producer's argument (1: a nonzero ready word); the bridge prepares the chains,
    each cell's successor and the queue gates (mesh-flow.c sends_configure).  Each destination's completion
    words: every receive transfer's slots and chunks an invocation of its range, transfer by transfer
@@ -91,19 +91,18 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
       atomic_load(mesh_order_length(m,context->client,q,d)),sizeof(struct mesh_transfer),mesh_binding_order);
     struct mesh_transfer *out=mesh_transfers(m,context->client,q,MESH_SEND);
     for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_SEND));i++){
-      cells+=mesh_transfer_cells(out+i,slots,invocations);targets+=out[i].count;
+      cells+=mesh_transfer_cells(out+i,invocations);targets+=out[i].count;
     }
   }
-  struct mesh_section storage,published={0};
-  /* design/prepared-machine.md#M04 */
-  int status=mesh_section_create(context,(cells?cells:1)*sizeof(struct mesh_send),1,&storage);
-  /* design/prepared-machine.md#M10 */
-  if(!status && targets)status=mesh_section_create(context,targets*sizeof(struct mesh_target),1,&published);
+  /* design/prepared-machine.md#M04, #M10: one lease, the SEND cells and after them the targets */
+  const uint64_t cell_bytes=(cells?cells:1)*sizeof(struct mesh_send);
+  struct mesh_section storage;
+  int status=mesh_section_create(context,cell_bytes+targets*sizeof(struct mesh_target),1,&storage);
   if(status)return status;
-  struct mesh_target *target=targets?mesh_section_address(context,published,0):NULL;
-  uint32_t target_count=0;
   void *address=mesh_section_address(context,storage,0);
   memset(address,0,storage.bytes);
+  struct mesh_target *target=targets?(struct mesh_target *)((char *)address+cell_bytes):NULL;
+  uint32_t target_count=0;
   context->send_off=(uintptr_t)address-(uintptr_t)m;
   context->send_bytes=(uint64_t)storage.pages*m->pgsz;
   uint64_t first=context->send_off;
@@ -140,7 +139,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
         for(uint32_t u=0;u<column;u++)cells[u].request.wr_id=1;
         target[target_count++]=(struct mesh_target){.cells=stream,.row=out->local_row+slot*out->stride};
       }
-      cell+=mesh_transfer_cells(out,slots,invocations);
+      cell+=mesh_transfer_cells(out,invocations);
     }
     first+=cell*sizeof(struct mesh_send);
     /* design/prepared-machine.md#M07 */

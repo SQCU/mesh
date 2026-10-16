@@ -318,17 +318,22 @@ static int chunk_span(struct flow *link,uint32_t address,uint64_t remaining,stru
   return 0;
 }
 
-/* design/prepared-machine.md#M07, #M08: the word a landed chunk of invocation u stores: its row's completion word
-   (mesh_host_inputs, the Metal transport); or, on a row the receiving program (`owner`) also publishes (a relay's rows),
-   that publication's SEND cell once the record's last chunk landed, so the landing releases it to the next hop (the
-   index hand-off); else the record's own (`sink`), which nothing reads */
-static _Atomic uint64_t *receive_input(struct hdr *m,uint64_t owner,uint32_t row,uint32_t chunk,uint32_t chunks,uint32_t u,_Atomic uint64_t *sink){
+/* design/prepared-machine.md#M07, #M08: the word a landed chunk of invocation u of the transfer's slot `index` (0 where
+   each slot has its own rows) stores: its slot's completion word (mesh_host_inputs, the Metal transport); or, on a row
+   the receiving program (`owner`) also publishes (a relay's rows), that slot's publication's SEND cell once the record's
+   last chunk landed, so the landing releases it to the next hop (the index hand-off); else the record's own (`sink`),
+   which nothing reads.  NULL where the word is not in the window (#M09) */
+static _Atomic uint64_t *receive_input(struct hdr *m,uint64_t owner,uint32_t row,uint32_t index,uint32_t chunk,uint32_t chunks,uint32_t u,_Atomic uint64_t *sink){
   const struct mesh_delivery *delivery=mesh_delivery_at(m,row+chunk);
-  uint32_t sends;
-  const struct mesh_target *target=mesh_row_targets(m,owner,row,&sends);
-  if(delivery->device_input)return (void *)((char *)m+delivery->device_input+(size_t)delivery->device_stride*u);
-  if(chunk+1==chunks && sends)return (void *)((char *)m+target->cells+sizeof(struct mesh_send)*(size_t)u);
-  return sink;
+  uint64_t at=0;
+  if(delivery->device_input)at=delivery->device_input+delivery->device_stride*u+sizeof(uint64_t)*(uint64_t)index*chunks;
+  else if(chunk+1==chunks){
+    uint32_t sends;
+    const struct mesh_target *target=mesh_row_targets(m,owner,row,&sends);
+    if(index<sends)at=target[index].cells+sizeof(struct mesh_send)*(uint64_t)u;
+  }
+  if(!at)return sink;
+  return at>=m->data_off && at<=m->length-sizeof(uint64_t)?(void *)((char *)m+at):NULL;
 }
 
 /* design/prepared-machine.md#M08 */
@@ -446,6 +451,9 @@ static int sends_configure(struct flow *link){
    0, or the error. */
 static int receives_configure(struct flow *link){
   struct hdr *m=link->M;struct mesh_client *client=mesh_client_at(m,link->side[MESH_RECEIVE].owner);
+  /* design/prepared-machine.md#M09, #M10: the program's targets lie in the window, as each word it stores does */
+  if(client->target_count && (client->targets<m->data_off || client->targets>m->length ||
+     client->target_count>(m->length-client->targets)/sizeof(struct mesh_target)))return EINVAL;
   struct mesh_tx *tx=side_tx(link,MESH_RECEIVE);
   uint32_t invocations=tx->invocations?tx->invocations:1,fallback=atomic_load_explicit(&client->depth,memory_order_acquire),depth=fallback;
   if(!depth||depth>invocations)depth=invocations;
@@ -494,8 +502,9 @@ static int receives_configure(struct flow *link){
         struct prepared_receive *record=link->receive+at++;
         if(!c)firsts[base[i]+u]=(size_t)(record-r->first);
         *record=(struct prepared_receive){.request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
-          .span=span,.input=receive_input(m,link->side[MESH_RECEIVE].owner,row,c,chunks,u,&record->sink),.pair=link->provider.queues[ring].pair,.argument=1,
-          .frames=(span.length+4095)/4096,.invocation=t,.queue=(uint32_t)ring};
+          .span=span,.input=receive_input(m,link->side[MESH_RECEIVE].owner,row,in[i].stride?0:slot,c,chunks,u,&record->sink),
+          .pair=link->provider.queues[ring].pair,.argument=1,.frames=(span.length+4095)/4096,.invocation=t,.queue=(uint32_t)ring};
+        if(!record->input){error=EINVAL;break;}
       }
     }
     r->count=(size_t)(link->receive+at-r->first);
@@ -882,8 +891,8 @@ static int mirror(struct lease *lease,const struct ready *r,const struct mesh_tr
     uint64_t tail=(uint64_t)x->invocation_pages*M->pgsz,ring=(uint64_t)(depth?depth-1:0)*tail;
     struct mesh_section s;
     if(q>=MESH_QUEUES || !x->count)error=EPROTO;
-    else if(!(error=mesh_section_create(c,ring+(x->bytes>tail?x->bytes:tail),x->count,&s))){
-      s.bytes=x->bytes;if(!x->stride)s.stride=0;
+    else if(!(error=mesh_section_create(c,ring+(x->bytes>tail?x->bytes:tail),x->stride?x->count:1,&s))){
+      s.bytes=x->bytes;if(!x->stride){s.stride=0;s.count=x->count;}
       error=mesh_transfer_bind(c,from,q,MESH_RECEIVE,x->binding,s,x->invocation_pages,x->begin,x->end,x->depth);
       if(!error)error=mesh_transfer_bind(c,to,q,MESH_SEND,x->binding,s,x->invocation_pages,x->begin,x->end,x->depth);
     }

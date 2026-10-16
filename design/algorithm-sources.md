@@ -272,10 +272,12 @@ scratch. Mesh's ring software and compiler are not Monsoon hardware.
 
 ABI 76's [publication operands](pages-and-functions.md#direct-publication-operands)
 apply the same explicit-address principle at the producer: the output and
-receive record hold the terminal publication pointer. Counts are inline before
-the target array rather than read through a lifecycle buffer. The first target
-and counts fit the same aligned 32-byte prefix; stream access still has its
-separately accounted cost.
+receive record hold the terminal publication pointer. A row's publications are
+a run of its program's targets, sorted by row and found by bisection at
+preparation (`mesh_row_targets`); no lifecycle buffer is read, and stream access
+still has its separately accounted cost. Until MESH_VERSION 111 the counts were
+inline before a per-row target array, the first target and counts in one aligned
+32-byte prefix.
 
 The [Disruptor paper](https://lmax-exchange.github.io/disruptor/disruptor.html)
 (Thompson, Farley, Barker, Gee and Stewart, 2011), sections 2.2 and 3.1–3.3,

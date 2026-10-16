@@ -31,8 +31,8 @@ laid out (`mesh_layout`): an arena, the window, of the size its configuration st
 document its consumer writes in JSON, TOML or YAML, etc/bridge/README.md; no default, and refused past what its RDMA
 devices register; design/prepared-machine.md#M09, with the operator's words: the window is the bridge's, its sizing for
 an execution the client's), a page-table row a block (its page entry, the mapping and address of the block a lease
-bound to it; its buffer, the owner and the lease's extent; its delivery, the completion word a landing on it stores:
-64 bytes, and a bit in each of the row planes), the node's ports (`MESH_PORTS`) and the client slots (`MESH_CLIENTS`).
+bound to it; its buffer, the owner and the lease's extent; its delivery, the address and per-invocation stride of the
+completion word a landing on it stores: 64 bytes, and a bit in each of the row planes), the node's ports (`MESH_PORTS`) and the client slots (`MESH_CLIENTS`).
 The arena is the registered window: every port's device registers it whole when the device comes up,
 before any queue pair exists (`device_up`), and deregisters it only when the device retires (`down_device`), so no
 program's start or run changes a device's mappings while DMA may be live (the operator's rule, quoted at M09). Nothing
@@ -41,8 +41,8 @@ taken as a program asks for them and refused as a value naming the execution whe
 by growing the window.
 
 A program's publications are its own: `mesh_transfers_prepare` derives them from its SEND lists, one target a slot of
-each SEND transfer (the row it sends and its column of SEND cells), and lays them in a section of the program's slot
-sorted by row, which the slot names (`targets`, `target_count`); a producer's records (`mesh_publication_prepare`,
+each SEND transfer (the row it sends and its column of SEND cells), and lays them after its SEND cells in their one
+lease, a section of the program's slot, sorted by row, which the slot names (`targets`, `target_count`); a producer's records (`mesh_publication_prepare`,
 design/prepared-machine.md#M10) and the bridge's relay hand-off (#flows) find a row's run by bisection
 (`mesh_row_targets`), and the slot's retirement reclaims them with its other leases. Until MESH_VERSION 111 every row
 carried room for a publication toward each of `MESH_DESTINATIONS` destinations (1,088 of its 1,136 bytes), written as

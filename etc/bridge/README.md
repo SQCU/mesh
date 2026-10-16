@@ -25,8 +25,8 @@ These two ship with the bridge to show the form. Neither is likely to be what an
 didactic programming exercises.
 
 - `example-1pct.json`: one percent of the node's memory (245 MiB on a 24 GiB Mac mini, 1.3 GiB on a 128 GiB M5). It
-  allows small streaming transfers: a libnccl-mesh session toward one peer leases 24 MiB (its rings, SEND cells,
-  publication targets, completion words and transfer lists). It does not allow programs that stage large operands in
+  allows small streaming transfers: a libnccl-mesh session toward one peer leases 24 MiB (its rings, its SEND cells
+  and after them in the same lease its publication targets, its completion words and its transfer lists). It does not allow programs that stage large operands in
   the window.
 - `example-10pct.yaml`: ten percent of the node's memory. It holds many sessions' crossing rings, and it is too small
   for many applications: a model's weights and KV pool in the window, or a long reduction's staging.
@@ -60,9 +60,9 @@ norm are its layer's own buffers, the down read at the layer's row pitch), the K
 row), the crossed capacity set, the conversion staging, a call's per-layer inputs, its communicator's session (the
 library's, beside the computation), and the whole model alone. Beside the window: the region's tables (64.5 bytes a
 window page, a row's page-table entry, buffer record and delivery word and its plane bits, and 0.5 MiB of header,
-ports and client slots, rdma/mesh.h `mesh_layout`: 0.06 GiB at 16 GiB, 0.056 at 14; at MESH_VERSION 110 every row
-also carried a publication's targets, 1,137 bytes a page, 1.11 GiB at 16 GiB, touched as rows were leased; a
-program's targets are now a section of its own slot, design/prepared-machine.md#M09), the node's base wired and macOS
+ports and client slots, rdma/mesh.h `mesh_layout`, from MESH_VERSION 111: 0.06 GiB at 16 GiB, 0.056 at 14; at 110 every row
+also carried a publication's targets, 1,136.5 bytes a window page and 0.5 MiB, 1.11 GiB at 16 GiB, touched as rows were leased; a
+program's targets now follow its SEND cells in their lease, design/prepared-machine.md#M09), the node's base wired and macOS
 memory, the rank's process, the Neural Engine's own copy of its columns, and a 2 GiB margin. A served engine (metal-microbench server/bridge.py) leases its model and pool
 from its node's window too; neither file holds one.
 

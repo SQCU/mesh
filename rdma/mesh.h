@@ -11,7 +11,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 111u
+#define MESH_VERSION 112u
 #define MESH_ABSENT UINT32_MAX
 /* design/bridge-and-ipc.md#region: the node's ports, its client slots and each client's destination nodes */
 #define MESH_PORTS 8
@@ -80,8 +80,9 @@ _Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,ce
    one destination, `cells` the region offset of its column of SEND cells (invocation u's at 256 u past it) */
 struct mesh_target { uint64_t cells; uint32_t row,padding; };
 _Static_assert(sizeof(struct mesh_target)==16 && offsetof(struct mesh_target,row)==8,"mesh_target");
-/* design/prepared-machine.md#M07, #M09: a row's delivery, the completion word its landed chunk stores at invocation u
-   (`device_input` plus `device_stride` u; 0 where its program prepared none) */
+/* design/prepared-machine.md#M07, #M09: a row's delivery, the address and per-invocation stride of the completion word
+   its landed chunk stores at invocation u (`device_input` plus `device_stride` u, plus slot*chunks words where every
+   slot of its transfer lands on this row; 0 where its program prepared none) */
 struct mesh_delivery { _Alignas(16) uint64_t device_input; uint64_t device_stride; };
 _Static_assert(sizeof(struct mesh_delivery)==16 && _Alignof(struct mesh_delivery)==16,"mesh_delivery");
 /* design/prepared-machine.md#M13 */
@@ -99,8 +100,8 @@ struct mesh_record { uint32_t node,ports; uint64_t boot,sequence; char name[MESH
   struct mesh_health health; };
 /* design/bridge-and-ipc.md#region: a client slot: its attach (`owner`, 0 vacant), its program once started
    (`configured`, the owner), the execution it belongs to (`key`, the same on every member), its ring depth, whether it
-   is cyclic, its publications once prepared (`target_count` targets at region offset `targets`, a section of the
-   slot's own, sorted by row: mesh_row_targets), and its program to each destination and that destination's status.  A
+   is cyclic, its publications once prepared (`target_count` targets at region offset `targets`, after its SEND cells
+   in their lease, sorted by row: mesh_row_targets), and its program to each destination and that destination's status.  A
    client writes its own slot's other words and its leased rows alone; the bridge writes the statuses, the ports and
    the map */
 struct mesh_client {

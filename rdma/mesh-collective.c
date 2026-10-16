@@ -557,7 +557,9 @@ done:
 /* Each destination's completion words and the cancellation ranges over them: destination d's words follow d-1's
    (16-word aligned), one per received chunk an invocation of each receive transfer's range, in the frame order
    mesh_transfers_prepare assigned (a chunk's word for the transfer's invocation u is first + (u*count + slot)*chunks
-   + chunk, its stride count*chunks words); the words in context->inputs_off, inputs_bytes. */
+   + chunk, its stride count*chunks words; a row's delivery names its slot's chunk word of invocation 0, slot 0's
+   where every slot lands on the same rows, the bridge adding slot*chunks words, mesh-flow.c receive_input); the words
+   in context->inputs_off, inputs_bytes. */
 int mesh_host_inputs(struct mesh_ctx *context){
   struct hdr *m=context->M;
   struct mesh_client *client=mesh_client_at(m,context->client);
@@ -590,7 +592,7 @@ int mesh_host_inputs(struct mesh_ctx *context){
       struct mesh_transfer *in=mesh_transfers(m,context->client,q,MESH_RECEIVE);
       for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++){
         uint32_t chunks=mesh_row_chunks(m,in[i].local_row,in[i].bytes);
-        for(uint32_t s=0;s<in[i].count;s++)for(uint32_t k=0;k<chunks;k++){
+        for(uint32_t s=0;s<(in[i].stride?in[i].count:1);s++)for(uint32_t k=0;k<chunks;k++){
           struct mesh_delivery *delivery=mesh_delivery_at(m,in[i].local_row+s*in[i].stride+k);
           delivery->device_input=(uint64_t)((char *)(word+first+in[i].first+(uint64_t)s*chunks+k)-(char *)m);
           delivery->device_stride=sizeof(uint64_t)*(uint64_t)in[i].count*chunks;
