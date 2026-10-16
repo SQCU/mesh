@@ -11,6 +11,8 @@ void *mesh_section_address(struct mesh_ctx *,struct mesh_section,uint32_t index)
    mod `depth` (0: the program's), its cells, words and slots indexed from `begin`; 0, EINVAL or a refused lease */
 int mesh_transfer_bind(struct mesh_ctx *,uint32_t node,uint32_t queue,int direction,uint32_t identity,struct mesh_section,
   uint32_t invocation_pages,uint32_t begin,uint32_t end,uint32_t depth);
+/* design/prepared-machine.md#M04, #M08: the program's cells, words and targets laid out for `slots` queue pairs a
+   queue, `invocations` invocations at ring `depth`; EINVAL where a transfer has more slots than the program */
 int mesh_transfers_prepare(struct mesh_ctx *,uint32_t slots,uint32_t invocations,uint32_t depth);
 /* design/prepared-machine.md#M30 */
 int mesh_transfers_cyclic(struct mesh_ctx *);
@@ -20,4 +22,7 @@ int mesh_transfers_cyclic(struct mesh_ctx *);
    MESH_PEER_NS+MESH_PAIR_NS+MESH_PAUSE_NS, EHOSTUNREACH no cable or route reaches it, ENETDOWN, ECONNRESET,
    ECANCELED a link or the peer's program lost, ENOSPC, ENOMEM a grant refused. A later loss fails the program alike; the next start rereads the map */
 int mesh_transfers_start(struct mesh_ctx *);
+/* design/bridge-and-ipc.md#progress: the node's bridge's progress threads woken, a group of a started program about to
+   publish or to wait on its landings (a thread parked after MESH_IDLE_NS of nothing looks again within 1 ms anyway) */
+void mesh_transfers_wake(struct mesh_ctx *);
 #endif

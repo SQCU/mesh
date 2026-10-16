@@ -49,9 +49,9 @@ share a cable share its time. A later session reads the map again, so a recablin
 gone reaches the next session with no edit and no restart. The planner prices a record's members by the same function
 (`mesh_map_members`, Python `mesh.members`).
 
-Before any group runs, the members agree: each publishes its digest of what its programs are made from (its members'
-map, the planner's version `MESH_PLAN_VERSION`, the caller's paths and programs) on every channel, at the session's
-first position, and compares its peers'. Members that read the map on either side of a change fail the session as a
+Before any group runs, the members agree: each publishes its digest of what its programs are made from (the route
+between each two members and the costs of the links it crosses, the planner's version `MESH_PLAN_VERSION`, the caller's
+paths and programs) on every channel, at the session's first position, and compares its peers'. Members that read the map on either side of a change fail the session as a
 value naming the disagreement (`ncclRemoteError`, "the members' maps differ") and open the next on the map then; no
 group runs on two maps.
 
@@ -182,12 +182,13 @@ fails. The failure is returned:
 
 and `ncclGetLastError` names the node where it failed: the destination's, or a relay's on its route. A link or a relay
 lost under a group fails the group (its program toward that node ends; nothing resumes it), and the next group opens a
-session again on the map as it is then. A change of the map closes no session: a session runs on the map its members
-agreed on until a link or node its channels' routes cross is lost, which fails it on every member (the bridges fail
-its flows, and a member that closes ends its flows toward the others), so each member opens the next after its own
-failure, and a link that flaps elsewhere, a node that joins or a port's counters cost it nothing. A loop that wants a
-better map that appeared under a working session (a cable added) revokes the communicator at a point every member
-reaches (`ncclCommRevoke`, NCCL's), and its next group opens on the map then. A rank that departed is left out with
+session again on the map as it is then. A change of the map reopens a session only where it changes the session's own
+routes or the costs of their links (the digest above): a link that flaps elsewhere, a node that joins or a port's
+counters cost it nothing, and a change to its routes (a link or relay lost, a cable added between members, a link that
+paired again at another speed) opens it again at its next group, so every group runs on the map current when it
+starts. Members reopen each at its own next group: one that reopens first fails the group a peer had in flight on the
+old session, that once (the operator, 2026-10-14: "it's okay for a function call ... to fail instead of returning if
+the link topo changed mid function execution"), and their agreement keeps every group on one map. A rank that departed is left out with
 `ncclCommShrink`, a joining one taken in with `ncclCommGetUniqueId` and `ncclCommGrow`, and `ncclCommRevoke` ends a
 communicator's groups in flight and a session opening, from any thread: a member waiting in its session's start for a
 peer that never comes (a member that failed to load) is ended by its revoke at once, the wait holding no lock the

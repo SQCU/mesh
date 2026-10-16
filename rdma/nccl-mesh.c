@@ -242,7 +242,7 @@ static void trees_free(struct mesh_trees *trees) {
 /* the map read, its tree sets and the programs chosen on it; with `all`, the caller's paths and programs too */
 static void routes_free(struct ncclComm *comm, int all) {
   free(comm->map.link); free(comm->map.cost); free(comm->next); free(comm->mark);
-  comm->map.link = NULL; comm->map.cost = NULL; comm->next = NULL; comm->mark = NULL;
+  comm->map = (struct mesh_link_map){0}; comm->next = NULL; comm->mark = NULL;
   trees_free(comm->sets); trees_free(comm->sets + 1);
   for (uint32_t e = 0; comm->chosen && e < (3 + 2 * (uint32_t)comm->nranks) * CLASSES; e++)
     if (comm->chosen[e]) { program_free(comm->chosen[e]); free(comm->chosen[e]); }
@@ -350,27 +350,34 @@ static const struct mesh_program *program_of(ncclComm_t comm, int what, int root
   return *held;
 }
 
-/* the digest of what a communicator's programs are made from (FNV-1a over 64-bit words): the planner's rules
-   (MESH_PLAN_VERSION), its members' map (its kind, nodes, relays, links and their costs' bits, its routing table and
-   marks), the caller's paths and programs; members whose digests agree run the same programs, whatever map serial each
-   read */
+/* the digest of what a communicator's programs and its session's flows are made from (FNV-1a over 64-bit words): the
+   planner's rules (MESH_PLAN_VERSION), its members, the route between each two of them on `map` (mesh_route_path: its
+   nodes' marks, the bridges' node numbers) and the cost of each link it crosses (the cables between one pair, each
+   one's bits), the caller's paths and programs.  Programs are a function of these alone (every hop, tree, pack and
+   time reads a member pair's route and its links), so members whose digests agree run the same programs on the same
+   routes, whatever map serial each read and whatever else the map holds; 0 where a route does not reach */
 static uint64_t mix(uint64_t h, uint64_t word) {
   for (int b = 0; b < 8; b++) h = (h ^ ((word >> (8 * b)) & 0xff)) * UINT64_C(0x100000001b3);
   return h;
 }
 static uint64_t bits(double x) { uint64_t u; memcpy(&u, &x, sizeof u); return u; }
-static uint64_t comm_digest(const struct ncclComm *comm) {
-  const struct mesh_link_map *map = &comm->map;
-  const uint32_t N = map->nodes + map->relays;
-  uint64_t h = mix(mix(mix(mix(UINT64_C(0xcbf29ce484222325), MESH_PLAN_VERSION), map->kind), map->nodes), map->relays);
-  for (uint32_t i = 0; i < (uint32_t)comm->nranks; i++) h = mix(h, comm->members[i]);
-  h = mix(h, map->links);
-  for (uint32_t l = 0; l < map->links; l++) {
-    h = mix(mix(h, map->link[l][0]), map->link[l][1]);
-    if (map->cost) h = mix(mix(h, bits(map->cost[l][0])), bits(map->cost[l][1]));
-  }
-  for (size_t k = 0; comm->next && k < (size_t)N * N; k++) h = mix(h, comm->next[k]);
-  for (uint32_t v = 0; comm->mark && v < N; v++) h = mix(h, comm->mark[v]);
+static uint64_t map_digest(const struct ncclComm *comm, const struct mesh_link_map *map) {
+  const uint32_t n = (uint32_t)comm->nranks, N = map->nodes + map->relays;
+  uint32_t *path = calloc((size_t)N + 1, sizeof *path);
+  uint64_t h = mix(mix(UINT64_C(0xcbf29ce484222325), MESH_PLAN_VERSION), n);
+  for (uint32_t i = 0; i < n; i++) h = mix(h, comm->members[i]);
+  for (uint32_t a = 0; path && a < n; a++)
+    for (uint32_t b = a + 1; b < n; b++) {
+      const uint32_t hops = mesh_route_path(map, a, b, path);
+      if (!hops) { free(path); return 0; }
+      h = mix(h, hops);
+      for (uint32_t i = 0; i < hops; i++) h = mix(h, map->mark ? map->mark[path[i]] : path[i]);
+      for (uint32_t i = 0; i + 1 < hops; i++)
+        for (uint32_t l = 0; l < map->links; l++)
+          if ((map->link[l][0] == path[i] && map->link[l][1] == path[i + 1]) || (map->link[l][1] == path[i] && map->link[l][0] == path[i + 1]))
+            h = map->cost ? mix(mix(h, bits(map->cost[l][0])), bits(map->cost[l][1])) : mix(h, l);
+    }
+  free(path);
   h = mix(h, comm->paths.count);
   for (uint32_t t = 0; t < comm->paths.count; t++) {
     h = mix(mix(h, comm->paths.root[t]), bits(comm->paths.log_weight[t]));
@@ -383,7 +390,7 @@ static uint64_t comm_digest(const struct ncclComm *comm) {
     for (uint32_t m = 0; m < x->first[x->nodes]; m++)
       h = mix(mix(mix(mix(mix(mix(h, x->move[m].op), x->move[m].peer), x->move[m].round), x->move[m].buffer), x->move[m].part), x->move[m].parts);
   }
-  return h;
+  return h ? h : 1;
 }
 
 /* -- the process's client of its node's bridge (design/bridge-and-ipc.md#clients, design/prepared-machine.md#M09):
@@ -496,23 +503,38 @@ static ncclResult_t comm_make(ncclComm_t *made, int nranks, const uint32_t *memb
 }
 
 /* the bridges' map over the communicator's members as it is now (mesh-plan.h mesh_map: the other nodes its relays,
-   with the routing table the bridges forward along), every member reached; its tree sets (comm_routes) and its digest */
-static ncclResult_t comm_read(struct ncclComm *comm) {
+   with their marks and the routing table the bridges forward along), into `map` and its own storage (map_free) */
+static void map_free(struct mesh_link_map *map) {
+  free(map->link); free(map->cost); free(map->next); free(map->mark);
+  *map = (struct mesh_link_map){0};
+}
+static ncclResult_t map_read(const struct ncclComm *comm, struct mesh_link_map *map) {
   const uint32_t n = (uint32_t)comm->nranks;
   struct mesh_link_map room = {.nodes = n, .links = n * (n - 1) / 2 + 1};
   for (int read = -ENOSPC;;) {
-    routes_free(comm, 0);
-    comm->map = (struct mesh_link_map){MESH_LINKS_GRAPH, room.nodes, room.links, calloc(room.links + 1, sizeof *comm->map.link),
-                                       calloc(room.links + 1, sizeof *comm->map.cost), 0, NULL, NULL};
-    comm->next = comm->map.next = calloc((size_t)room.nodes * room.nodes + 1, sizeof *comm->next);
-    comm->mark = comm->map.mark = calloc((size_t)room.nodes + 1, sizeof *comm->mark);
-    if (!comm->map.link || !comm->map.cost || !comm->next || !comm->mark) return fail(ncclSystemError, "out of memory");
-    if ((read = mesh_map(comm->members, n, NULL, NULL, &comm->map)) != -ENOSPC) {
-      if (read < 0) return fail(ncclRemoteError, "the map of this node's bridge over the %u members of %s: %s", n, comm->name, strerror(-read));
-      break;
+    *map = (struct mesh_link_map){MESH_LINKS_GRAPH, room.nodes, room.links, calloc(room.links + 1, sizeof *map->link),
+                                  calloc(room.links + 1, sizeof *map->cost), 0, calloc((size_t)room.nodes * room.nodes + 1, sizeof *map->next),
+                                  calloc((size_t)room.nodes + 1, sizeof *map->mark)};
+    if (!map->link || !map->cost || !map->next || !map->mark) { map_free(map); return fail(ncclSystemError, "out of memory"); }
+    if ((read = mesh_map(comm->members, n, NULL, NULL, map)) != -ENOSPC) {
+      if (read < 0) {
+        map_free(map);
+        return fail(ncclRemoteError, "the map of this node's bridge over the %u members of %s: %s", n, comm->name, strerror(-read));
+      }
+      return ncclSuccess;
     }
-    room = comm->map;
+    room = *map;
+    map_free(map);
   }
+}
+
+/* the communicator's map read as it is now (map_read), every member reached; its tree sets (comm_routes) and its digest */
+static ncclResult_t comm_read(struct ncclComm *comm) {
+  const uint32_t n = (uint32_t)comm->nranks;
+  routes_free(comm, 0);
+  ncclResult_t result = map_read(comm, &comm->map);
+  if (result) return result;
+  comm->next = comm->map.next; comm->mark = comm->map.mark;
   uint32_t *path = calloc((size_t)comm->map.nodes + comm->map.relays + 1, sizeof *path);
   if (!path) return fail(ncclSystemError, "out of memory");
   for (uint32_t a = 0; n > 1 && a < n; a++)
@@ -523,9 +545,18 @@ static ncclResult_t comm_read(struct ncclComm *comm) {
                     comm->members[a], a, comm->name, comm->members[b], b);
       }
   free(path);
-  const ncclResult_t result = comm_routes(comm);
-  comm->digest = comm_digest(comm);
+  result = comm_routes(comm);
+  comm->digest = map_digest(comm, &comm->map);
   return result;
+}
+
+/* whether the map as it is now gives the communicator's session the routes and costs it opened on (map_digest) */
+static int map_same(const struct ncclComm *comm) {
+  struct mesh_link_map now;
+  if (map_read(comm, &now)) return 0;
+  const int same = map_digest(comm, &now) == comm->digest;
+  map_free(&now);
+  return same;
 }
 
 ncclResult_t ncclGetVersion(int *version) {
@@ -937,6 +968,7 @@ struct session {
   _Atomic int stop, failed;
   char failure[512];
   struct session *next;
+  uint64_t serial;
 };
 static struct session *sessions;
 static int registered;
@@ -1168,7 +1200,7 @@ static ncclResult_t start_failure(struct session *s, int status) {
 }
 
 /* the members' agreement, the session's position 0 on each channel: this rank's digest of its programs' making
-   (comm_digest) published on every channel and every peer's awaited there and compared, before any group runs, so the
+   (map_digest) published on every channel and every peer's awaited there and compared, before any group runs, so the
    members of a session run the programs of one map or none: a session the map changed under as it opened fails as a
    value naming the disagreement, and its next group opens on the map then.  The wait is bounded by mesh.h
    MESH_SILENT_NS and ends at a revoke (`revokes`, the count it opened under) */
@@ -1234,6 +1266,7 @@ static ncclResult_t session_open(ncclComm_t comm) {
   pthread_mutex_init(&s->lock, NULL);
   pthread_cond_init(&s->wake, NULL);
   s->comm = comm;
+  s->serial = comm->serial;
   const struct hdr *m = s->header = s->context.M;
   if (m->node != comm->members[comm->rank]) {
     result = fail(ncclInvalidUsage, "rank %d of %s runs on the bridge of node %u, not of node %u", comm->rank, comm->name, m->node,
@@ -1571,11 +1604,14 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
 }
 
 /* the communicator's session, opened where it has none (after any other thread's opening of it is done), on the map
-   current now (attach_current: refused while a lease of a bridge that stopped is held), or opened again where its
-   bridge stopped and none of its groups is in flight.  A session is never closed by a change of the map: it runs on the
-   map its members agreed on (session_agree) until a link or node it uses is lost, which fails it, or its revoke; a
-   failure its progress thread kept fails this group and closes the session, and the caller's next group opens another
-   (no group is tried again here), so every member's next session opens after its own failure, on the map then. */
+   current now (attach_current: refused while a lease of a bridge that stopped is held), or opened again where none of
+   its groups is in flight and its bridge stopped, or the bridge's map serial moved and the map now gives the session
+   other routes or other costs on them (map_same: its digest; a change elsewhere, a node joining or a link off its
+   routes, keeps it); a failure its progress thread kept fails this group and closes the session, and the caller's next
+   group opens another (no group is tried again here).  Every group runs on the map current when it starts; members
+   that reopen at different groups fail the group a peer had in flight on the old session, that once (a call may fail
+   where the topology changed under it: design/recovery.md mandate 11), and their agreement (session_agree) keeps every
+   group on one map. */
 static struct inflight *inflight;
 static int session_issued(const struct session *s);
 static ncclResult_t session_ensure(ncclComm_t comm) {
@@ -1587,10 +1623,12 @@ static ncclResult_t session_ensure(ncclComm_t comm) {
     session_close(s);
     return result;
   }
-  if (s && !attach_live(s->attach) && !session_issued(s)) {
+  const uint64_t serial = s ? atomic_load_explicit(&s->header->map, memory_order_acquire) : 0;
+  if (s && !session_issued(s) && (!attach_live(s->attach) || (serial != s->serial && !map_same(comm)))) {
     session_close(s);
     s = NULL;
-  }
+  } else if (s && !session_issued(s))
+    s->serial = serial;
   return s ? ncclSuccess : session_open(comm);
 }
 

@@ -18,7 +18,7 @@ int main(void){
   while(count==-ENOSPC){
     nodes=realloc(nodes,(room+1)*sizeof *nodes);link=realloc(link,(links+1)*sizeof *link);cost=realloc(cost,(links+1)*sizeof *cost);
     if(!nodes || !link || !cost)return 1;
-    map=(struct mesh_link_map){0,room,links,link,cost};
+    map=(struct mesh_link_map){.kind=MESH_LINKS_MESH,.nodes=room,.links=links,.link=link,.cost=cost};
     count=mesh_map(NULL,0,nodes,NULL,&map);
     room=map.nodes;links=map.links;
   }

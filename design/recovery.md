@@ -101,7 +101,7 @@ git's and output_data's to say (AGENTS.md: assignments expire), not this table's
 | Q11 | A cable pull and replug, three times, with time to repair and to the first completed execution recorded | mandates 1, 3, 10 | a measurement on hardware, its record in output_data |
 | Q12 | Recovery costs nothing on the healthy path | mandate 7 | the data path reads no recovery state |
 | Q13 | No per-transfer TCP; TCP at pairing only | mandate 8 | the control socket carries a program's pairing messages and the map's records, nothing per transfer |
-| Q14 | Every blocking call bounded; no unbounded completion-queue poll | RDMA-RULES.md, mandate 12 | the bridge's loop waits 250 ms at most; pairing has its windows; a control socket never blocks: a message queues behind what the socket has not taken and goes on at its write event (mesh-flow.c port_say, port_flush), and the keepalive (1 s idle, 1 s interval, 2 probes) ends a peer that takes none; a teardown that fails keeps its handles for the next turn; a client's start waits at most the peer and pairing windows and a pause (`MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS`, ETIMEDOUT) and ends at once where the bridge is gone (ESRCH). The one exception: a kernel verbs call (opening a device, reading the device list, querying a port, making or destroying a queue pair, registering memory) cannot be bounded from user space, since it can sleep uninterruptibly in the driver (RDMA-RULES.md): the bridge makes them only to open, find, pair and tear down a port's device, never per transfer, each on that port's own thread, so one blocks only that port; the event loop, the other ports and clients' starts go on (design/bridge-and-ipc.md#flows) |
+| Q14 | Every blocking call bounded; no unbounded completion-queue poll | RDMA-RULES.md, mandate 12 | the bridge's loop waits 250 ms at most; a port's progress threads park on the region's bell at most 1 ms at a time while anything is theirs (3 s otherwise, design/bridge-and-ipc.md#progress); pairing has its windows; a control socket never blocks: a message queues behind what the socket has not taken and goes on at its write event (mesh-flow.c port_say, port_flush), and the keepalive (1 s idle, 1 s interval, 2 probes) ends a peer that takes none; a teardown that fails keeps its handles for the next turn; a client's start waits at most the peer and pairing windows and a pause (`MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS`, ETIMEDOUT) and ends at once where the bridge is gone (ESRCH). The one exception: a kernel verbs call (opening a device, reading the device list, querying a port, making or destroying a queue pair, registering memory) cannot be bounded from user space, since it can sleep uninterruptibly in the driver (RDMA-RULES.md): the bridge makes them only to open, find, pair and tear down a port's device, never per transfer, each on that port's own thread, so one blocks only that port; the event loop, the other ports and clients' starts go on (design/bridge-and-ipc.md#flows) |
 | Q15 | Port loss retires all device state; an ordinary reconnection keeps context, PD and registrations | RDMA-KERNEL-RECOVERY.md | a link off or a detached interface retires the device, and no hello or connection reaches the port until its turn has retired the device and opened it again (design/bridge-and-ipc.md#ports) |
 | Q16 | No cross-queue GPU spin; every spun-on word in a canceller's set | memory no_cross_queue_gpu_spins | a failed flow cancels its client's words toward the node (prepared-machine.md M12) |
 | Q19 | A link that answers its peer's hello but not RDMA does not flap at call level | mandate 1 | open: such a link fails its executions' pairing (ETIMEDOUT within the pairing window), or the library's silent bound fails a paired one's (`#detection`); the bridge exchanges nothing of its own over RDMA to tell it |
@@ -120,10 +120,14 @@ library's one bound, its session's progress thread the watcher (rdma/nccl.h).
 
 ### loss
 
-A link's loss fails every flow on it: its threads joined, its client's pending words on the link cancelled, its status
-the loss's code (ECONNRESET where the peer said farewell), its queue pairs destroyed. A loss of the port itself (link
-off, interface detached) also retires the port's device: registrations, protection domain and context, once no flow
-holds a queue pair on it. A flow's own failure is told to the peer (FAIL), which fails its side.
+A link's loss fails every flow on it: its client's pending words on the link cancelled, its status the loss's code
+(ECONNRESET where the peer said farewell), its queue pairs destroyed, and then the link's lanes (design/bridge-and-ipc.md
+#lanes), once neither progress thread reads them. A failed lane (a completion's error, a header out of step) is its
+link's loss: every flow on the link fails, and the link pairs again a pause later with new lanes. Lanes that could not
+be made (no room on the device, no pages) fail the programs that would ride them, naming the node, and leave the link
+and its exclusive flows working. A loss of the port itself (link off, interface detached) also retires the port's
+device: registrations, protection domain and context, once no flow and no lane holds a queue pair on it. A flow's own
+failure is told to the peer (FAIL), which fails its side.
 
 ### farewell
 
@@ -164,6 +168,18 @@ on the M5 held the Mini's last state, and the reason was only in the Mini's powe
 - A supply loss gives the node itself no warning: its last words are the health its neighbours hold, and the reason is
   read at its next boot. A UPS on its USB turns that into a warning the mesh hears (power UPS, its charge falling).
 
+### registration
+
+A port's device registers the whole window when it comes up (design/prepared-machine.md#M09), checked against that
+device's max_mr on the port's own queue. A registration the device refuses (the window's extents past its max_mr,
+EFBIG, or an extent `ibv_reg_mr` refuses) is logged with the extent, its bytes, the errno and the extents the device
+holds; the port keeps those extents and turns again 60 s later, doubling to 30 min (the fabric keeper's schedule,
+`#port`), registering the rest. At MESH_VERSION 112 a refusal was silent, retired the device and registered the whole
+window again every 3 s, and the bridge's start opened every device on its main thread to read the least max_mr (a
+wedged device stalled every port); a node of several cables registers the window once a device (80 extents each at an
+80 GiB window), never yet run on more than one device of a node, so a refusal of the second device is the first thing
+to look for when a Studio's second cable will not pair.
+
 ### pause
 
 3 s between a port's turns: between pairings and between hellos, the pause a lost session took after the 2026-09-05
@@ -178,6 +194,14 @@ start at most 600 s (members prepare their programs at their own speeds: metal-m
 start is bounded by the same windows and a pause (mesh.h `MESH_PEER_NS`, `MESH_PAIR_NS`, `MESH_PAUSE_NS`, their one
 definition), so a bridge that never answers ends it as ETIMEDOUT. A program toward a node the map gives no route fails
 at once (EHOSTUNREACH).
+
+A routed program's start returns once the far member's program has started and every relay between has posted (POSTED
+is end to end, design/bridge-and-ipc.md#protocol), so a member that starts 25 s after its peer delays the peer's start,
+as over a direct cable, rather than failing its first group at the library's silent bound. Its route is its lower
+node's (design/bridge-and-ipc.md#routes): the higher end awaits the lower's READY within the peer window and fails
+ETIMEDOUT naming the lower past it, so two ends whose maps differ at their starts still pair along one route. Two ends
+that disagree on whether a cable joins them (one sees it paired, the other not yet) fail at once as values (EPROTO,
+naming the node that refused) rather than wait out the peer window.
 
 ### the driver's side
 
@@ -225,6 +249,10 @@ several queue pairs (the torch/NCCL sessions: four).
 | F14 | a relay bridge on a route drops | the programs routed through it fail, naming the relay node; the next execution's route is the current map's |
 | F15 | a cable moved to another port or peer | the old port's executions fail; the new port pairs with whatever node it reaches |
 | F18 | the driver's own node fails | the stream stops (one driver) |
+| F19 | a node of several cables stops in a mesh whose survivors hold a cycle | its last record ends at the first bridge that has heard it (design/bridge-and-ipc.md#records); at MESH_VERSION 112 it circulated for good, reopening every session |
+| F20 | a link's lanes fail (a lane's completion error, a header out of step) | the link's loss (`#loss`): every flow on it fails, the link pairs again with new lanes |
+| F21 | a device refuses the window's registration | logged with the extent; the port turns again 60 s later, doubling to 30 min (`#registration`) |
+| F22 | two ends of a routed pair start on maps a flap apart | both take the lower end's route (design/bridge-and-ipc.md#routes); a cable one end sees and the other does not fails both at once (EPROTO) |
 
 ## The review this asks for
 

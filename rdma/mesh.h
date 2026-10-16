@@ -11,7 +11,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 112u
+#define MESH_VERSION 113u
 #define MESH_ABSENT UINT32_MAX
 /* design/bridge-and-ipc.md#region: the node's ports, its client slots and each client's destination nodes */
 #define MESH_PORTS 8
@@ -92,12 +92,16 @@ _Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepar
    failure's code and domain, `failed` the node where it failed: the destination's, or the relay's on its route, and
    `prepared` the owner once the bridge paired or failed it); a port of the node, by the index the bridge gave it (its
    peer node while paired, its phase, MESH_UNKNOWN where the bridge has no such port, the code it last stopped with, its
-   bandwidth and the pairings it made); and a node's record, the newest of which every bridge floods to the mesh (its
-   node, name and boot, the record's sequence in that boot, and its `ports` ports by index) */
+   bandwidth, the pairings it made, and the queue pairs its device holds against its max_qp, `pairs` of `max_pairs`);
+   and a node's record, the newest of which every bridge floods to the mesh (its node, name and boot, the record's
+   sequence in that boot, its bridge's window and the node's memory in bytes and hardware model (hw.model), and its
+   `ports` ports by index) */
+#define MESH_MODEL_BYTES 32
 struct mesh_port_info { _Atomic uint32_t phase,domain,failed; _Atomic int64_t code; _Atomic uint64_t prepared; };
-struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atomic uint64_t bandwidth,pairings; };
-struct mesh_record { uint32_t node,ports; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; struct mesh_link_info port[MESH_PORTS];
-  struct mesh_health health; };
+struct mesh_link_info { _Atomic uint32_t peer,phase; _Atomic int64_t code; _Atomic uint64_t bandwidth,pairings; _Atomic uint32_t pairs,max_pairs; };
+_Static_assert(sizeof(struct mesh_link_info)==40,"mesh_link_info");
+struct mesh_record { uint32_t node,ports; uint64_t boot,sequence; char name[MESH_NAME_BYTES]; uint64_t window,memory;
+  char model[MESH_MODEL_BYTES]; struct mesh_link_info port[MESH_PORTS]; struct mesh_health health; };
 /* design/bridge-and-ipc.md#region: a client slot: its attach (`owner`, 0 vacant), its program once started
    (`configured`, the owner), the execution it belongs to (`key`, the same on every member), its ring depth, whether it
    is cyclic, its publications once prepared (`target_count` targets at region offset `targets`, after its SEND cells
@@ -114,11 +118,12 @@ struct mesh_client {
   struct mesh_tx tx[MESH_DESTINATIONS];
   struct mesh_port_info status[MESH_DESTINATIONS];
 };
-/* design/prepared-machine.md#M01, #M09 */
+/* design/prepared-machine.md#M01, #M09; `bell`, design/bridge-and-ipc.md#progress: the word the bridge's parked
+   progress threads wait on, which a client rings (mesh_notify) as a group starts */
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,links,clients;
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,client_off,delivery_off,data_off,length,boot;
-  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health;
+  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,bell;
 };
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");

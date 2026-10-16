@@ -15,7 +15,7 @@ not taken from a datasheet.
 | memory bandwidth | 238 GB/s mini · 362 GB/s MacBook | shared with the workload; a copy costs 2N of it |
 | scatter-gather | `max_sge: 1` | a record cannot be split across SGEs |
 | queue pairs | `max_qp: 11` (10 usable), `max_srq: 0` | no shared receive queue |
-| hardware threads | 12 mini (8P+4E) · 18 MacBook (6P+12E) | no SMT; a running program's flow holds two |
+| hardware threads | 12 mini (8P+4E) · 18 MacBook (6P+12E) | no SMT; a paired port's progress holds two, parked when idle |
 
 ## Expensive
 
@@ -162,11 +162,12 @@ aware of another, that attach to its shared region, lease pages in it, and ask t
 carry them to member nodes (`rdma/mesh-call.h`). Nothing about a workload can reach the data
 plane except the bytes it puts in its pages and the node it names.
 
-A program's data path is its own two progress threads (design/bridge-and-ipc.md#flows): one
-posts each send its producer released while its queue pair holds the frames, the other drains
-receive completions, publishes each landed record and posts the ring's next receives. Neither
-waits on anything but a word or a completion queue it polls, and a link with no program running
-spins nothing.
+A port's data path is its two progress threads (design/bridge-and-ipc.md#progress), serving every
+program on the port: one posts each send its producer released while its queue pair (or its lane)
+holds the frames, the other drains receive completions, publishes each landed record and posts the
+ring's next receives (or a lane header's records). Neither waits on anything but a word or a
+completion queue it polls while anything moves, and after 100 ms of nothing each parks on the
+region's bell, which a program's group rings as it starts.
 
 ## Routing is a compiled path, not a table
 
@@ -252,7 +253,12 @@ Blocking on the completion queue alone would stall a producer's first release in
 correct resolution for a kernel-bypass data plane is to spin, which is what such transports do
 by design and why they are given a core. Sleeping pretends the choice does not have to be made,
 and buys a latency floor in exchange. A wait on a shared word has one form, its address wait
-(`rdma/mesh.h` `mesh_notify`; the bridge's `os_sync_wait_on_address` on `control`).
+(`rdma/mesh.h` `mesh_notify`; the bridge's `os_sync_wait_on_address` on `control`). The bridge
+spins two threads a port while anything moves, never a program's own (at six nodes a relay hub
+held 50 to 70 spinning a session's life at MESH_VERSION 112), and parks them on the region's
+`bell` after 100 ms of nothing: the group that releases the next ready word rings the bell as it
+starts (mesh-call.h `mesh_transfers_wake`), so the descriptor the ready words lack is the group's
+start, and a program that does not ring is served within the park's 1 ms look.
 
 **Still present.**
 

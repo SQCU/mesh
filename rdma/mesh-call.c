@@ -86,9 +86,13 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   uint64_t cells=0,targets=0;
   const uint32_t destinations=mesh_destination(client,0);
   for(uint32_t q=0;q<destinations*MESH_QUEUES;q++){
-    /* design/prepared-machine.md#M08 */
-    for(int d=0;d<2;d++)qsort(mesh_transfers(m,context->client,q,d),
-      atomic_load(mesh_order_length(m,context->client,q,d)),sizeof(struct mesh_transfer),mesh_binding_order);
+    /* design/prepared-machine.md#M08: a transfer's slots are among the program's (a slot a queue pair of its queue) */
+    for(int d=0;d<2;d++){
+      struct mesh_transfer *list=mesh_transfers(m,context->client,q,d);
+      const uint32_t length=atomic_load(mesh_order_length(m,context->client,q,d));
+      for(uint32_t i=0;i<length;i++)if(list[i].count>slots)return EINVAL;
+      qsort(list,length,sizeof(struct mesh_transfer),mesh_binding_order);
+    }
     struct mesh_transfer *out=mesh_transfers(m,context->client,q,MESH_SEND);
     for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_SEND));i++){
       cells+=mesh_transfer_cells(out+i,invocations);targets+=out[i].count;
@@ -193,6 +197,9 @@ int mesh_transfers_start(struct mesh_ctx *context){
   }
   return failed;
 }
+
+/* design/bridge-and-ipc.md#progress */
+void mesh_transfers_wake(struct mesh_ctx *context){ mesh_notify(&context->M->bell); }
 
 /* design/prepared-machine.md#M30 */
 /* The prepared program runs without end: running invocation T is prepared invocation T mod N (N the

@@ -46,7 +46,9 @@ _Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_sen
 /* design/prepared-machine.md#M08 */
 /* One chunk of a receive transfer in one invocation: its native request and SGE into the chunk's
    destination range, the completion word it stores (`input`; its own `sink` where no reader waits on its landing),
-   its queue pair, the frames it holds posted, its invocation and ring. */
+   its queue pair, the frames it holds posted, its invocation and ring, and its flow (`link`: the one whose ring holds
+   it, which a lane's completion names, design/bridge-and-ipc.md#lanes). */
+struct flow;
 struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
   struct ibv_sge span;
@@ -55,9 +57,11 @@ struct prepared_receive {
   uint64_t argument;
   uint32_t frames,invocation,queue,cycle,behind;
   _Atomic uint64_t sink;
+  struct flow *link;
 };
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
-  offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,input)==48,"M08 M09");
+  offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,input)==48 &&
+  offsetof(struct prepared_receive,link)==104,"M08 M09");
 /* design/prepared-machine.md#M08 */
 /* A queue pair's receive ring: its records in invocation, binding, chunk order; `posted` the next to
    post, `outstanding` the frames posted and not completed, within the queue's `capacity`; a record is
@@ -82,27 +86,51 @@ struct send_gate {
   uint32_t capacity;
 };
 /* A SEND stream's progress: its current cell, the next request of that cell's chain and the requests
-   left. */
-struct send_stream { struct mesh_send *cell,*first; struct ibv_send_wr *next; uint32_t remaining; uint64_t cycle; };
+   left, and the lane its queue rides where its flow shares its port's lanes (design/bridge-and-ipc.md#lanes). */
+struct send_stream { struct mesh_send *cell,*first; struct ibv_send_wr *next; uint32_t remaining,lane; uint64_t cycle; };
 
 #define MESH_PAIRS 16
 /* design/bridge-and-ipc.md#protocol: a message, a flow's keyed by its execution's key and its program's two end nodes
    (`from` the sender's end, `to` the far one), `failed` the node where a failure happened, and `bytes` of what follows
-   it: a READY's program, a RECORD's record */
-enum { HELLO=1, READY, PAIRS, POSTED, END, FAIL, FAREWELL, RECORD };
+   it: a READY's program, a RECORD's record.  A port's LANES tells its lanes' queue pairs (#lanes) */
+enum { HELLO=1, READY, PAIRS, POSTED, END, FAIL, FAREWELL, RECORD, LANES };
 struct message { uint32_t magic,kind,node,count; uint64_t key,boot; int64_t code; uint32_t block,port,from,to,failed,bytes;
   uint16_t lid,padding; uint8_t gid[16]; uint32_t pair[MESH_PAIRS][2]; };
 #define XMAGIC (0x4d595048u+MESH_VERSION)
 /* A READY's program: `hops` nodes of its route from the receiver to the far end, then the transfers the sender sends
-   toward the far end, lengths[k] of them on queue queue + k x step, and its lists' slots, invocations, ring depth and
-   whether it is cyclic; the message's count is its queue pairs */
-struct ready { uint32_t hops,slots,invocations,depth,cyclic,queue,step,lengths[MESH_QUEUES]; };
+   toward the far end, lengths[k] of them on queue k, and its lists' slots, invocations, ring depth and whether it is
+   cyclic, the flow's stripe of the program's invocations, `stripe` of `stripes` (design/bridge-and-ipc.md#cables), and
+   whether the sender's end takes queue pairs of its own for it (`exclusive`, #lanes); the message's count is its
+   queues times its slots */
+struct ready { uint32_t hops,slots,invocations,depth,cyclic,stripe,stripes,exclusive,lengths[MESH_QUEUES]; };
+/* design/bridge-and-ipc.md#lanes: a port's lanes, queue pairs every flow on its link that takes none of its own shares
+   (a lane a queue k mod MESH_LANES), and the flows a port holds, by their index in its table (a flow's index and the
+   index's generation name it to the peer); a lane's header, one frame, names the records the SENDs after it fill, an
+   entry a cell (the receiving flow by index and generation, its ring, its chunks and bytes) */
+#define MESH_LANES 2
+#define MESH_FLOWS 256
+#define MESH_HEADERS 8
+#define LANE_FRAME 4096u
+#define LANE_MAGIC (0x4c414e45u+MESH_VERSION)
+struct lane_entry { uint32_t slot,generation,ring,chunks; uint64_t bytes; };
+struct lane_header { uint32_t magic,count; uint64_t sequence; struct lane_entry entry[]; };
+#define LANE_ENTRIES ((LANE_FRAME-sizeof(struct lane_header))/sizeof(struct lane_entry))
+_Static_assert(sizeof(struct lane_entry)==24 && sizeof(struct lane_header)==16 && LANE_ENTRIES>=128,"lane header");
+/* a lane completion's wr_id: a discard, a header (its lane), a SEND (the tag, its lane, its gate's frames), else the
+   prepared_receive it filled */
+#define LANE_DISCARD UINT64_C(1)
+#define LANE_HEARD UINT64_C(2)
+#define LANE_SENT (UINT64_C(1)<<63)
 /* design/bridge-and-ipc.md#flows: a program on one port, over its link toward the program's far end (`near` its other
    end): its lists each way, a slot's destination (its client's, or on a relay a lease of the bridge's own; a flow held
-   for its client, `hold`, has none until the client's program takes it), its queues queue + k x step for k < queues,
-   `slots` queue pairs each, and on a relay its partner, the route's other flow.  Its verbs work runs on its port's
+   for its client, `hold`, has none until the client's program takes it), its `queues` queues of `slots` rings each,
+   the program's invocations t with t mod `stripes` = `stripe` (#cables), and on a relay its partner, the route's other
+   flow.  An `exclusive` flow holds a queue pair a ring (`qps`, its own completion queues); any other rides its port's
+   lanes (#lanes), its index in the port's table and its generation (`slot`), the peer's (`peer_slot`), and its records
+   posted on the lanes and not landed (`lane_frames`, in the lanes' `lane_epoch`).  Its verbs work runs on its port's
    queue, one job at a time (`job`, `done`); the event loop alone changes the rest, and a side whose lists arrive while
-   a job runs (`pending`) between jobs */
+   a job runs (`pending`) between jobs.  The port's two progress threads serve it while it is in the port's table:
+   its SENDs (and an exclusive flow's receives) while `progressing`, a lane's headers fill its rings while `receiving` */
 enum { READIED, PAIRING, POSTING, RUNNING, FAILED };
 enum { HEARD_READY=1, HEARD_PAIRS=2, HEARD_POSTED=4 };
 enum { JOB_PAIR=1, JOB_RECEIVE, JOB_RUN, JOB_CHANGE };
@@ -111,12 +139,13 @@ struct side { uint64_t owner; uint32_t destination; struct lease *lease; };
 struct port;
 struct flow {
   struct flow *next,*partner;
-  pthread_t workers[2];
-  uint32_t worker_count,publication_count,stream_count,near,far,queue,step,queues,heard,configured,destination,invocations;
-  _Atomic int progressing,done,stopped;
+  uint32_t stream_count,near,far,queues,stripe,stripes,heard,configured,destination,invocations;
+  uint32_t slot,generation,peer_slot,peer_generation,lane_epoch;
+  _Atomic int progressing,receiving,done,stopped;
   _Atomic int64_t failed;
   _Atomic uint32_t domain;
-  int state,job,result,stopping,hold,qps,cyclic;
+  _Atomic uint64_t lane_frames;
+  int state,job,result,stopping,hold,qps,cyclic,told,listed,exclusive,decided;
   uint64_t key,owner,created,deadline,retry;
   struct side side[2],pending[2];
   uint32_t pairs[MESH_PAIRS][2];
@@ -129,24 +158,62 @@ struct flow {
   struct prepared_send *requests;
   size_t request_count;
   struct mesh_send *publications;
-  struct ibv_wc completion;
   struct mesh_cancellation *cancel;
 };
-/* design/bridge-and-ipc.md#ports: a port, its link, its control socket's queues each way, and its verbs work's queue */
+/* design/bridge-and-ipc.md#progress: a progress thread with nothing moved for MESH_IDLE_NS parks on the region's bell
+   (mesh.h struct hdr `bell`, which a client rings as its group starts, mesh-call.h mesh_transfers_wake), looking again
+   every MESH_IDLE_POLL_NS while a flow is in its port's table or its lanes are up */
+#define MESH_IDLE_NS UINT64_C(100000000)
+#define MESH_IDLE_POLL_NS UINT64_C(1000000)
+/* design/recovery.md#registration: a refused registration's first pause and its longest (doubling) */
+#define MESH_REFUSED_NS UINT64_C(60000000000)
+#define MESH_REFUSED_MOST_NS UINT64_C(1800000000000)
+/* design/bridge-and-ipc.md#protocol: the most bytes a port holds unsent toward a peer that takes none */
+#define MESH_UNSENT (UINT64_C(64)<<20)
+/* design/bridge-and-ipc.md#lanes: a port's lanes: their queue pairs and completion queues, their state (LANES_DOWN,
+   made and told, up, or failed with `code`), the peer's queue pairs and the frames a header's records may hold
+   (`room`), their pages (a lane's MESH_HEADERS send headers, two receive headers and its discard block), each lane's
+   gate, the next header each way and the gate's frames once each send header's SEND posted (`mark`), and `generation`
+   moved at each teardown; the progress threads read the lanes while `up` */
+enum { LANES_DOWN, LANES_MAKING, LANES_MADE, LANES_CONNECTING, LANES_UP, LANES_CLOSING, LANES_FAILED };
+struct lanes {
+  struct mesh_verbs provider;
+  int state,job,result,heard,committed;
+  int64_t code;
+  _Atomic int up,done;
+  _Atomic int64_t failed;
+  uint32_t peer[MESH_LANES][2],peer_room,room,page,pages,generation;
+  struct send_gate gate[MESH_LANES];
+  uint64_t sent[MESH_LANES],received[MESH_LANES],mark[MESH_LANES][MESH_HEADERS];
+  uint32_t cursor[MESH_LANES];
+  uint64_t retry;
+};
+/* design/bridge-and-ipc.md#ports: a port, its link, its control socket's queues each way, its verbs work's queue, a
+   refused registration's pause (`backoff`), the queue pairs its flows and lanes hold or will (`committed`, of the
+   device's max_qp), its lanes, its table of flows (`table`, the indices reserved and their generations, the highest
+   reserved plus one), and its progress threads (#progress: the epochs each has seen of `epoch`, which a flow leaving
+   the table moves) */
 struct port {
   struct mesh_device device;
-  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,retiring,open,flows;
+  uint32_t index,interface,peer,peer_port,greeted,parted,connecting,writing,retiring,open,flows,committed;
   int64_t farewell;
   char name[IFNAMSIZ];
-  int control,job,result;
-  _Atomic int done;
-  uint64_t next,bandwidth;
+  int control,job,result,refused,threads;
+  _Atomic int done,closing;
+  uint64_t next,bandwidth,backoff;
   struct message heard;
   uint16_t lid;
   uint8_t gid[16];
   unsigned char *in,*out;
   size_t held,in_room,out_length,out_sent,out_room;
   dispatch_queue_t work;
+  struct lanes lanes;
+  struct flow *_Atomic table[MESH_FLOWS];
+  uint64_t reserved[MESH_FLOWS/64];
+  uint32_t generation[MESH_FLOWS];
+  _Atomic uint32_t high;
+  _Atomic uint64_t epoch,seen[2];
+  pthread_t thread[2];
 };
 static struct hdr *M;
 static struct mesh_wire wire;
@@ -258,16 +325,25 @@ static void health_text(const struct mesh_health *h,char *out,size_t room){
            h->reset<4?resets[h->reset]:"unknown",h->shutdown);
 }
 
-/* design/recovery.md#diagnosis: the nodes this bridge has heard of, when it last heard each one's record (this node's
-   clock), when it lost each, and the boot session it last knew, so that a node's return names a new boot */
-struct known { uint32_t node; uint64_t heard,gone; char session[40]; };
-static struct known known[256];
+/* design/recovery.md#diagnosis; design/bridge-and-ipc.md#records: the nodes this bridge has heard of, when it last heard
+   each one's record (this node's clock), when it lost each, the boot session it last knew, so that a node's return
+   names a new boot, and the newest record it ever heard of each (its boot and sequence), held apart from the map:
+   RFC 2328 s13's database, so a record the map dropped is never taken, nor sent on, again.  An entry unheard for
+   MESH_RECORD_AGE_NS whose node the map no longer holds compares with nothing (RFC 2328 s14's MaxAge); a full table
+   gives the longest unheard of those its place */
+struct known { uint32_t node; uint64_t heard,gone,boot,sequence; char session[40]; };
+#define MESH_KNOWN 256
+#define MESH_RECORD_AGE_NS (UINT64_C(6)*MESH_HEALTH_NS)
+static struct known known[MESH_KNOWN];
 static uint32_t known_count;
+static struct mesh_record *record_held(uint32_t node);
 static struct known *known_at(uint32_t node){
   for(uint32_t i=0;i<known_count;i++)if(known[i].node==node)return known+i;
-  if(known_count==sizeof known/sizeof *known)return NULL;
-  known[known_count]=(struct known){.node=node};
-  return known+known_count++;
+  struct known *at=NULL;
+  if(known_count<MESH_KNOWN)at=known+known_count++;
+  else for(uint32_t i=0;i<known_count;i++)if(!record_held(known[i].node) && (!at || known[i].heard<at->heard))at=known+i;
+  if(at)*at=(struct known){.node=node};
+  return at;
 }
 static void wake(void){
   struct kevent64_s event;EV_SET64(&event,0,EVFILT_USER,0,NOTE_TRIGGER,0,0,0,0);
@@ -282,7 +358,7 @@ static void flow_lost(struct flow *flow,int64_t code,uint32_t domain){
 }
 static int owned(uint64_t owner){ return owner && atomic_load(&mesh_client_at(M,owner)->owner)==owner; }
 static struct mesh_tx *side_tx(struct flow *f,int d){ return &mesh_client_at(M,f->side[d].owner)->tx[f->side[d].destination]; }
-static uint32_t side_channel(struct flow *f,int d,uint32_t k){ return f->side[d].destination*MESH_QUEUES+f->queue+k*f->step; }
+static uint32_t side_channel(struct flow *f,int d,uint32_t k){ return f->side[d].destination*MESH_QUEUES+k; }
 static uint32_t side_length(struct flow *f,int d,uint32_t k){ return f->side[d].owner?atomic_load(mesh_order_length(M,f->side[d].owner,side_channel(f,d,k),d)):0; }
 static struct mesh_transfer *side_transfers(struct flow *f,int d,uint32_t k){ return mesh_transfers(M,f->side[d].owner,side_channel(f,d,k),d); }
 /* design/bridge-and-ipc.md#clients: a status told, and its client's start woken */
@@ -318,15 +394,19 @@ static int chunk_span(struct flow *link,uint32_t address,uint64_t remaining,stru
   return 0;
 }
 
-/* design/prepared-machine.md#M07, #M08: the word a landed chunk of invocation u of the transfer's slot `index` (0 where
-   each slot has its own rows) stores: its slot's completion word (mesh_host_inputs, the Metal transport); or, on a row
-   the receiving program (`owner`) also publishes (a relay's rows), that slot's publication's SEND cell once the record's
-   last chunk landed, so the landing releases it to the next hop (the index hand-off); else the record's own (`sink`),
-   which nothing reads.  NULL where the word is not in the window (#M09) */
-static _Atomic uint64_t *receive_input(struct hdr *m,uint64_t owner,uint32_t row,uint32_t index,uint32_t chunk,uint32_t chunks,uint32_t u,_Atomic uint64_t *sink){
+/* design/prepared-machine.md#M07, #M08, #M12: the word a landed chunk of invocation u of the transfer's slot `index` (0
+   where each slot has its own rows) stores: its slot's completion word (mesh_host_inputs, the Metal transport), where
+   the row's delivery names a word among the receiving program's own toward the flow's node (`words`, its cancellation
+   range, [offset, offset + 8 count): a delivery another program wrote on the row, which outlives that program, is
+   none of this one's); or, on a row the receiving program (`owner`) also publishes (a relay's rows), that slot's
+   publication's SEND cell once the record's last chunk landed, so the landing releases it to the next hop (the index
+   hand-off); else the record's own (`sink`), which nothing reads.  NULL where the word is not in the window (#M09) */
+static _Atomic uint64_t *receive_input(struct hdr *m,uint64_t owner,const struct mesh_cancel_range *words,uint32_t row,uint32_t index,
+                                       uint32_t chunk,uint32_t chunks,uint32_t u,_Atomic uint64_t *sink){
   const struct mesh_delivery *delivery=mesh_delivery_at(m,row+chunk);
   uint64_t at=0;
-  if(delivery->device_input)at=delivery->device_input+delivery->device_stride*u+sizeof(uint64_t)*(uint64_t)index*chunks;
+  const uint64_t word=delivery->device_input+delivery->device_stride*u+sizeof(uint64_t)*(uint64_t)index*chunks;
+  if(delivery->device_input && words && word>=words->offset && (word-words->offset)/sizeof(uint64_t)<words->count)at=word;
   else if(chunk+1==chunks){
     uint32_t sends;
     const struct mesh_target *target=mesh_row_targets(m,owner,row,&sends);
@@ -361,13 +441,26 @@ static int ring_advance(struct flow *link,struct receive_ring *ring){
   return 0;
 }
 
+/* design/bridge-and-ipc.md#cables: whether the flow carries the program's invocation t, and how many of a transfer's
+   active invocations [begin, begin + active) it carries */
+static int stripe_of(const struct flow *link,uint32_t t){ return t%link->stripes==link->stripe; }
+static uint32_t stripe_count(const struct flow *link,uint32_t begin,uint32_t active){
+  uint32_t first=(link->stripe+link->stripes-begin%link->stripes)%link->stripes;
+  return first<active?(active-first+link->stripes-1)/link->stripes:0;
+}
+
+/* design/bridge-and-ipc.md#lanes: the lane a flow's ring q (queue q / slots) rides, and that lane's queue pair */
+static uint32_t ring_lane(uint32_t q,uint32_t slots){ return (q/(slots?slots:1))%MESH_LANES; }
+static struct ibv_qp *lane_pair(const struct flow *link,uint32_t lane);
+
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M04, #M06, #M29 */
-/* The SEND side: every SEND cell's chain of chunk requests over its invocation's ring slot and its stream successor, a
-   stream a queue pair (the cells' layout is mesh_transfers_prepare's), and each queue pair's gate.  A stream's cells run
+/* The SEND side: every SEND cell of the flow's invocations (#cables), its chain of chunk requests over its invocation's
+   ring slot and its stream successor, a stream a ring (the cells' layout is mesh_transfers_prepare's), and an exclusive
+   flow's gate a queue pair (a flow on its port's lanes posts through the lanes' gates, #lanes).  A stream's cells run
    invocation by invocation, the publications of each in binding order, as the peer's ring posts its receives: TN3205's
    credit flow control holds a SEND until its matching receive is posted (metal-microbench docs/kernels.md Transport
-   (git 7300d1e^)).  0, or the error. */
+   (git 7300d1e^)).  0, or the error (EINVAL: a transfer of more slots than the program's). */
 static int sends_configure(struct flow *link){
   struct hdr *m=link->M;struct mesh_client *client=mesh_client_at(m,link->side[MESH_SEND].owner);
   struct mesh_tx *tx=side_tx(link,MESH_SEND);
@@ -376,22 +469,26 @@ static int sends_configure(struct flow *link){
   size_t requests=0;
   for(uint32_t k=0;k<link->queues;k++){
     struct mesh_transfer *out=side_transfers(link,MESH_SEND,k);
-    for(uint32_t i=0;i<side_length(link,MESH_SEND,k);i++)
-      requests+=(size_t)(mesh_row_chunks(m,out[i].local_row,out[i].bytes)-1)*out[i].count*mesh_transfer_active(out+i,invocations);
+    for(uint32_t i=0;i<side_length(link,MESH_SEND,k);i++){
+      if(out[i].count>tx->slots || (uint64_t)k*tx->slots+out[i].count>(uint64_t)qps)return EINVAL;
+      requests+=(size_t)(mesh_row_chunks(m,out[i].local_row,out[i].bytes)-1)*out[i].count*
+        stripe_count(link,out[i].begin,mesh_transfer_active(out+i,invocations));
+    }
   }
   link->publications=(void *)((char *)m+tx->cells);
-  link->publication_count=tx->count*tx->slots+tx->once;
   /* design/prepared-machine.md#M29 */
   link->requests=aligned_alloc(128,(requests+1)*sizeof *link->requests);
   link->streams=calloc((size_t)qps,sizeof *link->streams);
-  link->gates=aligned_alloc(64,(size_t)qps*sizeof *link->gates);
+  link->gates=link->exclusive?aligned_alloc(64,(size_t)qps*sizeof *link->gates):NULL;
   struct mesh_send **last=calloc((size_t)qps,sizeof *last),**terminal=calloc((size_t)qps,sizeof *terminal);
-  if(!link->requests||!link->streams||!link->gates||!last||!terminal){free(last);free(terminal);return ENOMEM;}
+  if(!link->requests||!link->streams||(link->exclusive && !link->gates)||!last||!terminal){free(last);free(terminal);return ENOMEM;}
   link->request_count=requests;
   /* a request is one frame at least, so a queue pair's frames also bound the completions it can have pending in the
      SEND completion queue its pairs share */
-  uint32_t sends=(uint32_t)link->provider.sent->cqe/(uint32_t)qps;
-  for(int q=0;q<qps;q++)link->gates[q]=(struct send_gate){.capacity=MIN(link->provider.queues[q].send_capacity,sends)};
+  if(link->exclusive){
+    uint32_t sends=(uint32_t)link->provider.sent->cqe/(uint32_t)qps;
+    for(int q=0;q<qps;q++)link->gates[q]=(struct send_gate){.capacity=MIN(link->provider.queues[q].send_capacity,sends)};
+  }
   size_t next=0;int error=0;
   for(uint32_t k=0;k<link->queues && !error;k++){
     uint32_t count=side_length(link,MESH_SEND,k);
@@ -401,10 +498,12 @@ static int sends_configure(struct flow *link){
       uint32_t active=mesh_transfer_active(out+i,invocations),column=active+1;
       for(uint32_t slot=0;slot<out[i].count && !error;slot++){
         uint32_t row=out[i].local_row+slot*out[i].stride,chunks=mesh_row_chunks(m,row,out[i].bytes),stream=k*tx->slots+slot;
+        struct ibv_qp *pair=link->exclusive?link->provider.queues[stream].pair:lane_pair(link,ring_lane(stream,tx->slots));
         struct mesh_send *cells=link->publications+out[i].first+(size_t)slot*column;
         for(uint32_t u=0;u<active && !error;u++){
+          if(!stripe_of(link,out[i].begin+u))continue;
           struct mesh_send *cell=cells+u;
-          cell->pair=(uintptr_t)link->provider.queues[stream].pair;cell->queue=stream;cell->chunks=chunks;
+          cell->pair=(uintptr_t)pair;cell->queue=stream;cell->chunks=chunks;
           uint64_t remaining=out[i].bytes;
           for(uint32_t c=0;c<chunks && !error;c++){
             struct ibv_sge span;
@@ -424,7 +523,7 @@ static int sends_configure(struct flow *link){
       }
     }
     /* each stream's cells in invocation order, its publications in binding order within one */
-    for(uint32_t t=0;t<invocations && !error;t++)for(uint32_t i=0;i<count;i++){
+    for(uint32_t t=0;t<invocations && !error;t++)for(uint32_t i=0;i<count && stripe_of(link,t);i++){
       uint32_t active=mesh_transfer_active(out+i,invocations);
       if(t<out[i].begin || t-out[i].begin>=active)continue;
       for(uint32_t slot=0;slot<out[i].count;slot++){
@@ -438,7 +537,10 @@ static int sends_configure(struct flow *link){
   }
   /* design/prepared-machine.md#M30: a cyclic program's last cell is followed by its first */
   for(int q=0;q<qps && !error;q++)if(last[q])last[q]->successor=cyclic?(uintptr_t)link->streams[q].cell:(uintptr_t)terminal[q];
-  for(int q=0;q<qps;q++){link->streams[q].first=link->streams[q].cell;link->streams[q].cycle=0;}
+  for(int q=0;q<qps;q++){
+    link->streams[q].first=link->streams[q].cell;link->streams[q].cycle=0;
+    link->streams[q].lane=ring_lane((uint32_t)q,tx->slots);
+  }
   link->stream_count=0;
   for(int q=0;q<qps;q++)if(link->streams[q].cell)link->streams[link->stream_count++]=link->streams[q];
   free(last);free(terminal);
@@ -446,15 +548,24 @@ static int sends_configure(struct flow *link){
 }
 
 /* design/prepared-machine.md#M08 */
-/* The receive side: each queue pair's ring, its records invocation by invocation, the transfers of each in binding
-   order, a transfer's chunks in order, each storing its word (receive_input), and each ring's first records posted.
-   0, or the error. */
+/* The receive side: each ring's records invocation by invocation (the flow's invocations, #cables), the transfers of
+   each in binding order, a transfer's chunks in order, each storing its word (receive_input).  An exclusive flow's
+   ring is its queue pair's, its first records posted at once and each record posted once the record of its transfer
+   `span` of the flow's own invocations before has landed (the ring's span over the program's invocations, divided
+   among the stripes; a cyclic ring's first records wait on its last of the cycle before), so a ring's posted frames
+   stay within its queue pair's.  A flow on its port's lanes posts nothing here: a lane's header posts its records as
+   the peer sends them (#lanes).  0, or the error (EINVAL: a transfer of more slots than the program's, a word outside
+   the window). */
 static int receives_configure(struct flow *link){
   struct hdr *m=link->M;struct mesh_client *client=mesh_client_at(m,link->side[MESH_RECEIVE].owner);
   /* design/prepared-machine.md#M09, #M10: the program's targets lie in the window, as each word it stores does */
   if(client->target_count && (client->targets<m->data_off || client->targets>m->length ||
      client->target_count>(m->length-client->targets)/sizeof(struct mesh_target)))return EINVAL;
   struct mesh_tx *tx=side_tx(link,MESH_RECEIVE);
+  /* design/prepared-machine.md#M12: the program's own words toward the flow's node, where it has any */
+  const uint64_t range=sizeof(struct mesh_cancellation)+sizeof(struct mesh_cancel_range)*((uint64_t)link->side[MESH_RECEIVE].destination+1);
+  const struct mesh_cancellation *cancel=tx->cancel>=m->data_off && tx->cancel<=m->length-range?(const void *)((char *)m+tx->cancel):NULL;
+  const struct mesh_cancel_range *words=cancel?cancel->ranges+link->side[MESH_RECEIVE].destination:NULL;
   uint32_t invocations=tx->invocations?tx->invocations:1,fallback=atomic_load_explicit(&client->depth,memory_order_acquire),depth=fallback;
   if(!depth||depth>invocations)depth=invocations;
   link->cyclic=atomic_load_explicit(&client->cyclic,memory_order_acquire)!=0;link->invocations=invocations;
@@ -462,7 +573,10 @@ static int receives_configure(struct flow *link){
   size_t records=0;
   for(uint32_t k=0;k<link->queues;k++){
     struct mesh_transfer *in=side_transfers(link,MESH_RECEIVE,k);
-    for(uint32_t i=0;i<side_length(link,MESH_RECEIVE,k);i++)records+=mesh_transfer_frames(m,in+i,invocations);
+    for(uint32_t i=0;i<side_length(link,MESH_RECEIVE,k);i++){
+      if(in[i].count>tx->slots || (uint64_t)k*tx->slots+in[i].count>(uint64_t)qps)return EINVAL;
+      records+=(uint64_t)mesh_row_chunks(m,in[i].local_row,in[i].bytes)*in[i].count*stripe_count(link,in[i].begin,mesh_transfer_active(in+i,invocations));
+    }
   }
   link->receive=aligned_alloc(128,(records+1)*sizeof *link->receive);
   link->rings=calloc((size_t)qps,sizeof *link->rings);
@@ -470,16 +584,20 @@ static int receives_configure(struct flow *link){
   link->receive_count=records;
   /* a record is one frame at least, so a queue pair's frames also bound the completions it can have pending in the
      receive completion queue its pairs share */
-  uint32_t receives=(uint32_t)link->provider.completion->cqe/(uint32_t)qps;
-  for(int q=0;q<qps;q++)link->rings[q]=(struct receive_ring){.completed=-1,.capacity=MIN(link->provider.queues[q].receive_capacity,receives),.span=UINT32_MAX};
+  const uint32_t receives=link->exclusive?(uint32_t)link->provider.completion->cqe/(uint32_t)qps:UINT32_MAX;
+  for(int q=0;q<qps;q++)link->rings[q]=(struct receive_ring){.completed=-1,.span=UINT32_MAX,
+    .capacity=link->exclusive?MIN(link->provider.queues[q].receive_capacity,receives):UINT32_MAX};
   size_t at=0;int error=0;
   for(int ring=0;ring<qps && !error;ring++){
-    uint32_t k=(uint32_t)ring/tx->slots,slot=(uint32_t)ring%tx->slots,count=side_length(link,MESH_RECEIVE,k);
-    struct mesh_transfer *in=side_transfers(link,MESH_RECEIVE,k);
+    uint32_t k=(uint32_t)ring/tx->slots,slot=(uint32_t)ring%tx->slots,count=k<link->queues?side_length(link,MESH_RECEIVE,k):0;
+    struct mesh_transfer *in=count?side_transfers(link,MESH_RECEIVE,k):NULL;
+    struct ibv_qp *pair=link->exclusive?link->provider.queues[ring].pair:lane_pair(link,ring_lane((uint32_t)ring,tx->slots));
     struct receive_ring *r=link->rings+ring;
     r->first=link->receive+at;
+    /* firsts: the ring index of each transfer's own records, own invocation by own invocation (base[i] the first's) */
     size_t *base=calloc((size_t)count+1,sizeof *base),*firsts=NULL;
-    for(uint32_t i=0;base&&i<count;i++)base[i+1]=base[i]+(slot<in[i].count?mesh_transfer_active(in+i,invocations):0);
+    for(uint32_t i=0;base&&i<count;i++)
+      base[i+1]=base[i]+(slot<in[i].count?stripe_count(link,in[i].begin,mesh_transfer_active(in+i,invocations)):0);
     if(base)firsts=malloc((base[count]+1)*sizeof *firsts);
     if(!base||!firsts){free(base);free(firsts);return ENOMEM;}
     for(uint32_t i=0;i<count;i++){
@@ -490,40 +608,44 @@ static int receives_configure(struct flow *link){
          own slot bounds nothing */
       if(own<active)r->span=MIN(r->span,own>1?own-1:1);
     }
-    for(uint32_t t=0;t<invocations && !error;t++)for(uint32_t i=0;i<count && !error;i++){
+    for(uint32_t t=0;t<invocations && !error;t++)for(uint32_t i=0;i<count && !error && stripe_of(link,t);i++){
       uint32_t active=mesh_transfer_active(in+i,invocations);
       if(slot>=in[i].count || t<in[i].begin || t-in[i].begin>=active)continue;
       uint32_t u=t-in[i].begin,row=in[i].local_row+slot*in[i].stride,chunks=mesh_row_chunks(m,row,in[i].bytes);
+      const uint32_t first=(link->stripe+link->stripes-in[i].begin%link->stripes)%link->stripes,mine=(u-first)/link->stripes;
       uint64_t remaining=in[i].bytes;
       for(uint32_t c=0;c<chunks;c++){
         struct ibv_sge span;
         if((error=chunk_span(link,transfer_row(m,fallback,in+i,row,t,c),remaining,&span)))break;
         remaining-=span.length;
         struct prepared_receive *record=link->receive+at++;
-        if(!c)firsts[base[i]+u]=(size_t)(record-r->first);
+        if(!c)firsts[base[i]+mine]=(size_t)(record-r->first);
         *record=(struct prepared_receive){.request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
-          .span=span,.input=receive_input(m,link->side[MESH_RECEIVE].owner,row,in[i].stride?0:slot,c,chunks,u,&record->sink),
-          .pair=link->provider.queues[ring].pair,.argument=1,.frames=(span.length+4095)/4096,.invocation=t,.queue=(uint32_t)ring};
+          .span=span,.input=receive_input(m,link->side[MESH_RECEIVE].owner,words,row,in[i].stride?0:slot,c,chunks,u,&record->sink),
+          .pair=pair,.argument=1,.frames=(span.length+4095)/4096,.invocation=t,.queue=(uint32_t)ring,.link=link};
         if(!record->input){error=EINVAL;break;}
       }
     }
     r->count=(size_t)(link->receive+at-r->first);
     /* design/prepared-machine.md#M30 */
     if(link->cyclic)r->span=MIN(r->span,invocations>1?invocations-1:1);
+    /* #cables: the span in the flow's own invocations, a stripe's share of the program's (one at least) */
+    const uint32_t span=r->span==UINT32_MAX?UINT32_MAX:MAX(r->span/link->stripes,1u);
     for(uint32_t i=0;i<count && !error;i++){
-      uint32_t active=(uint32_t)(base[i+1]-base[i]);
-      if(!active)continue;
+      uint32_t own=(uint32_t)(base[i+1]-base[i]);
+      if(!own)continue;
       uint32_t chunks=mesh_row_chunks(m,in[i].local_row+slot*in[i].stride,in[i].bytes);
-      for(uint32_t u=0;u<active;u++){
-        size_t here=firsts[base[i]+u],behind=0;
-        if(u>=r->span)behind=here-firsts[base[i]+u-r->span];
-        else if(link->cyclic&&u+active>=r->span)behind=here+r->count-firsts[base[i]+u+active-r->span];
-        else if(link->cyclic)behind=r->count;
+      for(uint32_t j=0;j<own;j++){
+        size_t here=firsts[base[i]+j],behind=0;
+        if(span!=UINT32_MAX && j>=span)behind=here-firsts[base[i]+j-span];
+        else if(span!=UINT32_MAX && link->cyclic && j+own>=span)behind=here+r->count-firsts[base[i]+j+own-span];
+        else if(span!=UINT32_MAX && link->cyclic)behind=r->count;
         for(uint32_t c=0;c<chunks;c++)r->first[here+c].behind=(uint32_t)behind;
       }
     }
+    r->span=span;
     free(base);free(firsts);
-    if(!error)error=ring_advance(link,r);
+    if(!error && link->exclusive)error=ring_advance(link,r);
   }
   if(at)link->receive[at]=link->receive[at-1];
   return error;
@@ -533,11 +655,12 @@ static int receives_configure(struct flow *link){
 /* design/prepared-machine.md#M06 */
 /* design/prepared-machine.md#M15 */
 /* design/algorithm-sources.md#independent-native-queues */
-/* The link's SEND completions: each retires its queue's frames through its request (the device
-   completes every SEND, signaled or not).  0, or an error completion's status. */
-static __attribute__((always_inline)) inline int send_retire(struct flow *link){
+/* The flow's SEND completions: each retires its queue's frames through its request (the device completes every SEND,
+   signaled or not); *taken their count.  0, or an error completion's status. */
+static __attribute__((always_inline)) inline int send_retire(struct flow *link,int *taken){
   struct ibv_wc done[16];
   int count=link->provider.queues[0].poll(link->provider.sent,16,done);
+  *taken=count>0?count:0;
   if(count<0)return EIO;
   for(int i=0;i<count;i++){
     if(done[i].status)return (int)done[i].status;
@@ -549,164 +672,457 @@ static __attribute__((always_inline)) inline int send_retire(struct flow *link){
 
 /* design/prepared-machine.md#M08 */
 /* design/algorithm-sources.md#independent-native-queues */
-/* Each stream's cells in order: a cell released by its producer posts its chain's requests while its
-   queue pair holds their frames (the gate: frames posted less those its SEND completions retired;
-   ibv_post_send accepts past the queue's frames and corrupts later, so the gate is the caller's).
-   The thread takes its completions when a stream waits for its producer or its gate. */
-static void *link_send_progress(void *argument){
-  struct flow *link=argument;
-  pthread_setname_np("mesh.rdma.send");
-  struct send_stream *streams=link->streams;
-  uint32_t count=link->stream_count;
+/* A running flow's SENDs, one pass of its port's send thread (design/bridge-and-ipc.md#progress): each stream's cells
+   in order, a cell released by its producer posting its chain's requests while its queue pair holds their frames (the
+   gate: frames posted less those its SEND completions retired; ibv_post_send accepts past the queue's frames and
+   corrupts later, so the gate is the caller's), then its SEND completions taken.  Whether anything moved; a failure is
+   the flow's (flow_lost). */
+static int flow_send(struct flow *link){
+  int moved=0,taken=0;
   struct ibv_send_wr *bad;
   int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **)=link->provider.queues[0].send;
-  for(uint32_t s=0;;s=s+1==count?0:s+1){
-    struct send_stream *stream=streams+s;
-    if(!stream->remaining){
+  for(uint32_t s=0;s<link->stream_count;s++){
+    struct send_stream *stream=link->streams+s;
+    for(;;){
+      if(!stream->remaining){
+        struct mesh_send *cell=stream->cell;
+        if(atomic_load_explicit(&cell->ready,memory_order_acquire)<=stream->cycle)break;
+        stream->next=&cell->request;stream->remaining=cell->chunks;
+      }
       struct mesh_send *cell=stream->cell;
-      if(atomic_load_explicit(&cell->ready,memory_order_acquire)<=stream->cycle){
-        if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
-        int error=send_retire(link);
-        if(error){flow_lost(link,error,2);return NULL;}
-        continue;
+      struct send_gate *gate=link->gates+cell->queue;
+      while(stream->remaining){
+        struct ibv_send_wr *request=stream->next;
+        uint32_t frames=(request->sg_list->length+4095)/4096;
+        if(((gate->posted-gate->retired)&MESH_GATE_MASK)+frames>gate->capacity)break;
+        gate->posted+=frames;
+        /* posted as a copy: the cell's first request keeps the producer's argument in its wr_id (mesh_transfers_prepare),
+           which a host producer reads at every publication (mesh_host_publish), and the copy's names the gate */
+        struct ibv_send_wr posting=*request;
+        posting.next=NULL;posting.send_flags=IBV_SEND_SIGNALED;
+        posting.wr_id=((uint64_t)cell->queue<<48)|(gate->posted&MESH_GATE_MASK);
+        int error=post(link->provider.queues[cell->queue].pair,&posting,&bad);
+        if(error){flow_lost(link,error<0?-error:error,1);return 1;}
+        stream->next=request->next;stream->remaining--;gate->requests++;moved=1;
       }
-      stream->next=&cell->request;stream->remaining=cell->chunks;
-    }
-    struct mesh_send *cell=stream->cell;
-    struct send_gate *gate=link->gates+cell->queue;
-    while(stream->remaining){
-      struct ibv_send_wr *request=stream->next;
-      uint32_t frames=(request->sg_list->length+4095)/4096;
-      if(((gate->posted-gate->retired)&MESH_GATE_MASK)+frames>gate->capacity){
-        if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
-        int error=send_retire(link);
-        if(error){flow_lost(link,error,2);return NULL;}
-        break;
-      }
-      gate->posted+=frames;
-      /* posted as a copy: the cell's first request keeps the producer's argument in its wr_id (mesh_transfers_prepare),
-         which a host producer reads at every publication (mesh_host_publish), and the copy's names the gate */
-      struct ibv_send_wr posting=*request;
-      posting.next=NULL;posting.send_flags=IBV_SEND_SIGNALED;
-      posting.wr_id=((uint64_t)cell->queue<<48)|(gate->posted&MESH_GATE_MASK);
-      int error=post(link->provider.queues[cell->queue].pair,&posting,&bad);
-      if(error){flow_lost(link,error<0?-error:error,1);return NULL;}
-      stream->next=request->next;stream->remaining--;gate->requests++;
-    }
-    if(!stream->remaining){
+      if(stream->remaining)break;
       stream->cell=(struct mesh_send *)cell->successor;
       if(stream->cell==stream->first)stream->cycle++;
     }
   }
+  if(link->stream_count){
+    int error=send_retire(link,&taken);
+    if(error){flow_lost(link,error,2);return 1;}
+  }
+  return moved || taken;
 }
 
 /* design/prepared-machine.md#M08 */
 /* design/prepared-machine.md#M11 */
 /* design/algorithm-sources.md#programcopy */
-/* The link's receive completions: each stores its completion word and posts the ring's next records. */
-static void *link_receive_progress(void *argument){
-  struct flow *link=argument;
-  pthread_setname_np("mesh.rdma.receive");
-  struct mesh_queue queue=link->provider.queues[0];
-  struct ibv_wc *completion=&link->completion;
-  for(;;){
-    int count=queue.poll(queue.completion,1,completion);
-    if(count<0){flow_lost(link,EIO,3);return NULL;}
-    if(!count){
-      if(!atomic_load_explicit(&link->progressing,memory_order_acquire))return NULL;
-      continue;
-    }
+/* A running flow's receive completions, one pass of its port's receive thread: each stores its completion word and
+   posts the ring's next records.  Whether anything landed; a failure is the flow's (flow_lost). */
+static int flow_receive(struct flow *link){
+  if(!link->rings)return 0;
+  struct ibv_wc done[16];
+  const struct mesh_queue *queue=link->provider.queues;
+  int count=queue->poll(queue->completion,16,done);
+  if(count<0){flow_lost(link,EIO,3);return 1;}
+  for(int i=0;i<count;i++){
     uint64_t status_opcode;
-    memcpy(&status_opcode,&completion->status,sizeof status_opcode);
-    if((uint32_t)status_opcode){flow_lost(link,(uint32_t)status_opcode,2);return NULL;}
+    memcpy(&status_opcode,&done[i].status,sizeof status_opcode);
+    if((uint32_t)status_opcode){flow_lost(link,(uint32_t)status_opcode,2);return 1;}
     if(!((status_opcode>>32)&IBV_WC_RECV))continue;
-    struct prepared_receive *record=(void *)(uintptr_t)completion->wr_id;
+    struct prepared_receive *record=(void *)(uintptr_t)done[i].wr_id;
     struct receive_ring *ring=link->rings+record->queue;
-    ring->landed++;ring->bytes+=completion->byte_len;
+    ring->landed++;ring->bytes+=done[i].byte_len;
     atomic_store_explicit(record->input,record->argument+record->cycle,memory_order_release);
     ring->outstanding-=record->frames;ring->completed=(int64_t)(record->invocation+(uint64_t)record->cycle*link->invocations);
     int error=ring_advance(link,ring);
-    if(error){flow_lost(link,error,1);return NULL;}
+    if(error){flow_lost(link,error,1);return 1;}
   }
+  return count>0;
 }
 
-/* design/prepared-machine.md#M08 */
-/* The flow's progress threads: its receives' where it has records, its SENDs' where it publishes.  0, or
-   pthread_create's error. */
-static int link_workers(struct flow *link){
-  void *(*progress[2])(void *)={link_receive_progress,link_send_progress};
-  const int needed[2]={link->receive_count!=0,link->publication_count!=0 && link->stream_count};
+/* design/bridge-and-ipc.md#lanes: a port's lanes' pages: lane l's header frame h (its MESH_HEADERS send headers, then
+   its two receive headers) and its discard block, as arena offsets; a span of them on the port's device; and their
+   bytes through the window's mapping */
+static uint64_t lane_offset(const struct port *port,uint32_t lane,uint32_t frame){
+  return (uint64_t)port->lanes.page*M->pgsz+((uint64_t)lane*(MESH_HEADERS+2)+frame)*LANE_FRAME;
+}
+static uint64_t lane_discard(const struct port *port,uint32_t lane){
+  const uint64_t block=(uint64_t)M->block*M->pgsz,headers=(uint64_t)MESH_LANES*(MESH_HEADERS+2)*LANE_FRAME;
+  return (uint64_t)port->lanes.page*M->pgsz+(headers+block-1)/block*block+(uint64_t)lane*block;
+}
+static uint32_t lane_pages(void){
+  const uint64_t block=(uint64_t)M->block*M->pgsz,headers=(uint64_t)MESH_LANES*(MESH_HEADERS+2)*LANE_FRAME;
+  return (uint32_t)(((headers+block-1)/block*block+MESH_LANES*block+M->pgsz-1)/M->pgsz);
+}
+static struct ibv_sge lane_span(const struct port *port,uint64_t offset,uint64_t length){
+  return wire_span(&port->device,(uint64_t)M->block*M->pgsz,offset,length);
+}
+static struct ibv_qp *lane_pair(const struct flow *link,uint32_t lane){
+  return link->port->lanes.provider.queues?link->port->lanes.provider.queues[lane].pair:NULL;
+}
+/* a lane's failure, the link's (taken by the event loop: lanes_turn) */
+static void lanes_lost(struct port *port,int64_t code){
+  int64_t none=0;
+  atomic_compare_exchange_strong(&port->lanes.failed,&none,code?code:EIO);
+  atomic_store_explicit(&port->lanes.up,0,memory_order_release);
+  wake();
+}
+/* lane l's next header received, into its receive header of the parity of the headers it heard */
+static int lane_listen(struct port *port,uint32_t lane){
+  struct lanes *l=&port->lanes;
+  struct ibv_sge span=lane_span(port,lane_offset(port,lane,MESH_HEADERS+(uint32_t)(l->received[lane]&1)),LANE_FRAME);
+  struct ibv_recv_wr request={.wr_id=LANE_HEARD+lane,.sg_list=&span,.num_sge=1},*bad;
+  const int error=l->provider.queues[lane].receive(l->provider.queues[lane].pair,&request,&bad);
+  return error<0?-error:error;
+}
+
+/* design/bridge-and-ipc.md#lanes: a lane's SENDs, one pass of its port's send thread: of the flows on the port's lanes
+   that run, each stream of this lane whose cell its producer released gives its chunks, as many as the lane's gate and
+   the peer's receive room take (a cell's chunks may span headers), each run of them an entry of one header; the header
+   is posted, then every entry's chunks in the header's order, so the peer, which posts the records a header names
+   before it listens for the next, has each SEND's receive posted as it lands (credit flow control holds it until then,
+   TN3205).  A header frame is used again once its SEND retired.  Whether anything was posted; a failure is the
+   lanes' (lanes_lost). */
+static int lane_send(struct port *port,uint32_t lane){
+  struct lanes *l=&port->lanes;
+  struct send_gate *gate=l->gate+lane;
+  const uint64_t sent=l->sent[lane];
+  const uint32_t h=(uint32_t)(sent%MESH_HEADERS);
+  if(sent>=MESH_HEADERS && ((gate->retired-l->mark[lane][h])&MESH_GATE_MASK)>=(UINT64_C(1)<<47))return 0;
+  const uint64_t flight=(gate->posted-gate->retired)&MESH_GATE_MASK;
+  if(flight+2>gate->capacity)return 0;
+  uint64_t room=MIN(gate->capacity-flight-1,(uint64_t)l->peer_room);
+  struct lane_header *header=(void *)(wire.data+lane_offset(port,lane,h));
+  struct ibv_send_wr *first[LANE_ENTRIES];
+  uint32_t entries=0;
+  const uint32_t high=atomic_load_explicit(&port->high,memory_order_acquire);
+  for(uint32_t n=0;n<high && entries<LANE_ENTRIES && room;n++){
+    const uint32_t i=(l->cursor[lane]+n)%high;
+    struct flow *f=atomic_load_explicit(&port->table[i],memory_order_acquire);
+    if(!f || f->exclusive || !atomic_load_explicit(&f->progressing,memory_order_acquire))continue;
+    for(uint32_t s=0;s<f->stream_count && entries<LANE_ENTRIES && room;s++){
+      struct send_stream *stream=f->streams+s;
+      while(stream->lane==lane && entries<LANE_ENTRIES && room){
+        if(!stream->remaining){
+          struct mesh_send *cell=stream->cell;
+          if(atomic_load_explicit(&cell->ready,memory_order_acquire)<=stream->cycle)break;
+          stream->next=&cell->request;stream->remaining=cell->chunks;
+        }
+        struct ibv_send_wr *request=stream->next;
+        uint32_t chunks=0;uint64_t bytes=0;
+        for(;chunks<stream->remaining && request;chunks++,request=request->next){
+          const uint32_t frames=(request->sg_list->length+4095)/4096;
+          if(frames>room)break;
+          room-=frames;bytes+=request->sg_list->length;
+        }
+        if(!chunks){room=0;break;}
+        header->entry[entries]=(struct lane_entry){f->peer_slot,f->peer_generation,stream->cell->queue,chunks,bytes};
+        first[entries++]=stream->next;
+        stream->next=request;stream->remaining-=chunks;
+        if(stream->remaining)break;
+        stream->cell=(struct mesh_send *)stream->cell->successor;
+        if(stream->cell==stream->first)stream->cycle++;
+      }
+    }
+  }
+  if(!entries)return 0;
+  l->cursor[lane]=(l->cursor[lane]+1)%(high?high:1);
+  header->magic=LANE_MAGIC;header->count=entries;header->sequence=sent;
+  int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **)=l->provider.queues[lane].send;
+  struct ibv_qp *pair=l->provider.queues[lane].pair;
+  struct ibv_sge span=lane_span(port,lane_offset(port,lane,h),LANE_FRAME);
+  struct ibv_send_wr posting={.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+  gate->posted+=1;gate->requests++;
+  posting.wr_id=LANE_SENT|((uint64_t)lane<<48)|(gate->posted&MESH_GATE_MASK);
+  int error=post(pair,&posting,&bad);
+  l->mark[lane][h]=gate->posted;l->sent[lane]++;
+  for(uint32_t e=0;e<entries && !error;e++){
+    struct ibv_send_wr *request=first[e];
+    for(uint32_t c=0;c<header->entry[e].chunks && !error;c++,request=request->next){
+      posting=*request;
+      posting.next=NULL;posting.send_flags=IBV_SEND_SIGNALED;
+      gate->posted+=(request->sg_list->length+4095)/4096;gate->requests++;
+      posting.wr_id=LANE_SENT|((uint64_t)lane<<48)|(gate->posted&MESH_GATE_MASK);
+      error=post(pair,&posting,&bad);
+    }
+  }
+  if(error)lanes_lost(port,error<0?-error:error);
+  return 1;
+}
+/* the lanes' SEND completions, each retiring its lane's frames; whether any was taken */
+static int lane_retire(struct port *port){
+  struct lanes *l=&port->lanes;
+  struct ibv_wc done[16];
+  const int count=l->provider.queues[0].poll(l->provider.sent,16,done);
+  if(count<0){lanes_lost(port,EIO);return 1;}
+  for(int i=0;i<count;i++){
+    if(done[i].status){lanes_lost(port,(int64_t)done[i].status);return 1;}
+    struct send_gate *gate=l->gate+((done[i].wr_id>>48)&(MESH_LANES-1));
+    gate->retired=done[i].wr_id&MESH_GATE_MASK;gate->completions++;
+  }
+  return count>0;
+}
+/* design/bridge-and-ipc.md#lanes: lane l's header heard: each entry's records posted, the next `chunks` of the named
+   ring of the named flow while that flow is the one the index and generation name and takes its lanes' records, else
+   as many discards of the same frames (a flow that stopped: its rows are no longer its own), then the next header
+   listened for.  A header out of sequence or past the room the lane told, or an entry whose frames are not its ring's
+   records', is a protocol error: the lanes' where the header is, the flow's where its records are.  1 where the lanes
+   failed */
+static int lane_heard(struct port *port,uint32_t lane){
+  struct lanes *l=&port->lanes;
+  const struct lane_header *header=(const void *)(wire.data+lane_offset(port,lane,MESH_HEADERS+(uint32_t)(l->received[lane]&1)));
+  const uint64_t block=(uint64_t)M->block*M->pgsz;
+  uint64_t total=0;
+  int error=header->magic!=LANE_MAGIC || header->sequence!=l->received[lane] || header->count>LANE_ENTRIES?EPROTO:0;
+  for(uint32_t e=0;!error && e<header->count;e++){
+    const struct lane_entry *entry=header->entry+e;
+    if(!entry->chunks || entry->bytes<=(uint64_t)(entry->chunks-1)*block || entry->bytes>(uint64_t)entry->chunks*block)error=EPROTO;
+    else total+=(uint64_t)(entry->chunks-1)*(block/4096)+(entry->bytes-(uint64_t)(entry->chunks-1)*block+4095)/4096;
+  }
+  if(!error && total>l->room)error=EPROTO;
+  if(error){lanes_lost(port,error);return 1;}
+  int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=l->provider.queues[lane].receive;
+  struct ibv_qp *pair=l->provider.queues[lane].pair;
+  struct ibv_recv_wr *bad;
+  for(uint32_t e=0;e<header->count && !error;e++){
+    const struct lane_entry entry=header->entry[e];
+    struct flow *f=entry.slot<MESH_FLOWS?atomic_load_explicit(&port->table[entry.slot],memory_order_acquire):NULL;
+    struct receive_ring *ring=f && !f->exclusive && f->generation==entry.generation && entry.ring<(uint32_t)f->qps &&
+      atomic_load_explicit(&f->receiving,memory_order_acquire) && f->rings && ring_lane(entry.ring,(uint32_t)f->qps/f->queues)==lane?
+      f->rings+entry.ring:NULL;
+    for(uint32_t c=0;ring && c<entry.chunks;c++){
+      const uint64_t length=MIN(block,entry.bytes-(uint64_t)c*block);
+      if(!ring->count || ring->first[(ring->posted+c)%ring->count].frames!=(length+4095)/4096){flow_lost(f,EPROTO,2);ring=NULL;}
+    }
+    for(uint32_t c=0;c<entry.chunks && !error;c++){
+      if(ring){
+        struct prepared_receive *record=ring->first+ring->posted%ring->count;
+        record->cycle=(uint32_t)(ring->posted/ring->count);
+        error=post(pair,&record->request,&bad);
+        ring->outstanding+=record->frames;ring->posted++;
+        atomic_fetch_add_explicit(&f->lane_frames,record->frames,memory_order_relaxed);
+      }else{
+        struct ibv_sge span=lane_span(port,lane_discard(port,lane),MIN(block,entry.bytes-(uint64_t)c*block));
+        struct ibv_recv_wr request={.wr_id=LANE_DISCARD,.sg_list=&span,.num_sge=1};
+        error=post(pair,&request,&bad);
+      }
+    }
+  }
+  if(!error){l->received[lane]++;error=lane_listen(port,lane);}
+  if(error){lanes_lost(port,error<0?-error:error);return 1;}
+  return 0;
+}
+/* design/bridge-and-ipc.md#lanes: the lanes' receive completions, one pass of the port's receive thread: a header's
+   records posted (lane_heard), a record's landing storing its word as an exclusive flow's does; whether anything
+   landed */
+static int lane_receive(struct port *port){
+  struct lanes *l=&port->lanes;
+  struct ibv_wc done[16];
+  const int count=l->provider.queues[0].poll(l->provider.completion,16,done);
+  if(count<0){lanes_lost(port,EIO);return 1;}
+  for(int i=0;i<count;i++){
+    if(done[i].status){lanes_lost(port,(int64_t)done[i].status);return 1;}
+    const uint64_t id=done[i].wr_id;
+    if(id==LANE_DISCARD)continue;
+    if(id>=LANE_HEARD && id<LANE_HEARD+MESH_LANES){if(lane_heard(port,(uint32_t)(id-LANE_HEARD)))return 1;continue;}
+    struct prepared_receive *record=(void *)(uintptr_t)id;
+    struct flow *link=record->link;
+    struct receive_ring *ring=link->rings+record->queue;
+    ring->landed++;ring->bytes+=done[i].byte_len;
+    atomic_store_explicit(record->input,record->argument+record->cycle,memory_order_release);
+    ring->outstanding-=record->frames;ring->completed=(int64_t)(record->invocation+(uint64_t)record->cycle*link->invocations);
+    atomic_fetch_sub_explicit(&link->lane_frames,record->frames,memory_order_release);
+  }
+  return count>0;
+}
+
+/* design/bridge-and-ipc.md#progress: a port's progress thread, `side` 0 its receives' and 1 its SENDs', serving every
+   flow in the port's table (an exclusive flow's queue pairs while it is progressing) and the port's lanes while they
+   are up.  A pass reads the table's epoch, serves each, and tells the epoch it began at, so a flow taken out of the
+   table is read by neither thread once both tell a later epoch (port_unlist).  With nothing moved for MESH_IDLE_NS it
+   parks on the region's bell, looking again every MESH_IDLE_POLL_NS while a flow is in the table or the lanes are up
+   (a peer's header waits on this side's receive thread), and at once when the bell rings: a client's group starting
+   (mesh-call.h mesh_transfers_wake), a flow listed or unlisted, the lanes' change, the bridge stopping */
+#define MESH_IDLE_PASSES 4096u
+struct progress { struct port *port; int side; };
+static void *port_progress(void *argument){
+  struct port *port=((struct progress *)argument)->port;
+  const int side=((struct progress *)argument)->side;
+  free(argument);
+  pthread_setname_np(side?"mesh.rdma.send":"mesh.rdma.receive");
+  uint64_t quiet=0;
+  uint32_t empty=0;
+  int parked=0;
+  while(!atomic_load_explicit(&port->closing,memory_order_acquire)){
+    const uint64_t bell=atomic_load_explicit(&M->bell,memory_order_acquire);
+    const uint64_t epoch=atomic_load(&port->epoch);
+    int moved=0,any=0;
+    const uint32_t high=atomic_load_explicit(&port->high,memory_order_acquire);
+    for(uint32_t i=0;i<high;i++){
+      struct flow *f=atomic_load_explicit(&port->table[i],memory_order_acquire);
+      if(!f)continue;
+      any=1;
+      if(f->exclusive && atomic_load_explicit(&f->progressing,memory_order_acquire))moved|=side?flow_send(f):flow_receive(f);
+    }
+    if(atomic_load_explicit(&port->lanes.up,memory_order_acquire)){
+      any=1;
+      if(side){for(uint32_t lane=0;lane<MESH_LANES;lane++)moved|=lane_send(port,lane);moved|=lane_retire(port);}
+      else moved|=lane_receive(port);
+    }
+    atomic_store_explicit(&port->seen[side],epoch,memory_order_release);
+    if(moved){empty=0;quiet=0;parked=0;continue;}
+    if(any && !parked){
+      if(++empty<MESH_IDLE_PASSES)continue;
+      empty=0;
+      const uint64_t at=clock_ns();
+      if(!quiet)quiet=at;
+      if(at-quiet<MESH_IDLE_NS)continue;
+    }
+    parked=1;
+    os_sync_wait_on_address_with_timeout(&M->bell,bell,sizeof M->bell,OS_SYNC_WAIT_ON_ADDRESS_SHARED,OS_CLOCK_MACH_ABSOLUTE_TIME,
+      any?MESH_IDLE_POLL_NS:MESH_PAUSE_NS);
+    if(atomic_load_explicit(&M->bell,memory_order_acquire)!=bell){parked=0;quiet=0;empty=0;}
+  }
+  return NULL;
+}
+/* the region's bell rung: every parked progress thread of the node looks again */
+static void bell_ring(void){ mesh_notify(&M->bell); }
+/* design/bridge-and-ipc.md#progress: the port's two progress threads started, once; 0, or pthread_create's error */
+static int port_threads(struct port *port){
+  int error=0;
   pthread_attr_t attributes;
   pthread_attr_init(&attributes);
   pthread_attr_set_qos_class_np(&attributes,QOS_CLASS_USER_INTERACTIVE,0);
-  int error=0;
-  atomic_store_explicit(&link->progressing,1,memory_order_release);
-  for(uint32_t d=0;d<2 && !error;d++)if(needed[d]){
-    error=pthread_create(&link->workers[link->worker_count],&attributes,progress[d],link);
-    if(!error)link->worker_count++;
+  while(port->threads<2 && !error){
+    struct progress *progress=malloc(sizeof *progress);
+    if(!progress){error=ENOMEM;break;}
+    *progress=(struct progress){port,port->threads};
+    atomic_store(&port->seen[port->threads],atomic_load(&port->epoch));
+    if((error=pthread_create(&port->thread[port->threads],&attributes,port_progress,progress)))free(progress);
+    else port->threads++;
   }
   pthread_attr_destroy(&attributes);
   return error;
 }
+/* design/bridge-and-ipc.md#progress: a flow in its port's table at its index, on the port's queue, its SENDs (and an
+   exclusive flow's receives) served where `progressing`, a lane's headers filling its rings where `receiving`; 0, or
+   the threads' error */
+static int port_list(struct flow *f,int progressing,int receiving){
+  struct port *port=f->port;
+  const int error=port_threads(port);
+  if(error)return error;
+  if(progressing)atomic_store_explicit(&f->progressing,1,memory_order_release);
+  if(receiving)atomic_store_explicit(&f->receiving,1,memory_order_release);
+  atomic_store_explicit(&port->table[f->slot],f,memory_order_release);
+  f->listed=1;
+  bell_ring();
+  return 0;
+}
+/* the port's table read by neither progress thread past a change made before: both tell an epoch past it */
+static void port_settle(struct port *port){
+  const uint64_t epoch=atomic_fetch_add(&port->epoch,1)+1;
+  for(int side=0;side<port->threads;side++)
+    while(atomic_load_explicit(&port->seen[side],memory_order_acquire)<epoch){bell_ring();sched_yield();}
+}
+/* design/bridge-and-ipc.md#progress: a flow's SENDs (and an exclusive flow's receives) no longer served, on its port's
+   queue, returning once neither thread is serving them (a flow on the lanes keeps taking its headers' records) */
+static void port_quiet(struct flow *f){
+  atomic_store_explicit(&f->progressing,0,memory_order_release);
+  if(f->listed)port_settle(f->port);
+}
+/* design/bridge-and-ipc.md#progress: a flow out of its port's table, on the port's queue, returning once neither
+   progress thread can read it (a lane's records it posted before land in its rows: flow_release waits on them) */
+static void port_unlist(struct flow *f){
+  atomic_store_explicit(&f->progressing,0,memory_order_release);
+  atomic_store_explicit(&f->receiving,0,memory_order_release);
+  if(!f->listed)return;
+  struct flow *held=f;
+  atomic_compare_exchange_strong(&f->port->table[f->slot],&held,NULL);
+  port_settle(f->port);
+  f->listed=0;
+}
+/* design/bridge-and-ipc.md#progress: the port's progress threads stopped (the bridge stopping, every flow released) */
+static void port_still(struct port *port){
+  atomic_store_explicit(&port->closing,1,memory_order_release);
+  bell_ring();
+  while(port->threads)pthread_join(port->thread[--port->threads],NULL);
+}
 
-/* design/bridge-and-ipc.md#flows: a flow's verbs work, on its port's queue: its queue pairs made; ready to receive and
-   its receives posted; its SENDs prepared, ready to send and its threads started; or, running, its threads stopped,
-   a side whose lists arrived prepared, and its threads started again.  0, or the error */
+/* design/bridge-and-ipc.md#flows: a flow's verbs work, on its port's queue: an exclusive flow's queue pairs made; ready
+   to receive, its receives prepared (an exclusive flow's posted, a lane rider's taking its headers' records); its
+   SENDs prepared, an exclusive flow's queue pairs ready to send, and served by its port's progress threads; or a side
+   whose lists arrived, the flow's SENDs unserved while it is prepared and served again where they were.  0, or the
+   error */
 static int flow_work(struct flow *f,int job){
   int error=0;
-  if(job==JOB_PAIR)return pair_up(&f->provider,f->qps);
-  if(job==JOB_CHANGE){
-    atomic_store_explicit(&f->progressing,0,memory_order_release);
-    while(f->worker_count)pthread_join(f->workers[--f->worker_count],NULL);
-  }
-  if(job==JOB_RECEIVE)error=pair_receive(&f->provider,(const uint32_t (*)[2])f->pairs,f->port->heard.lid,f->port->heard.gid);
-  if(!error && job!=JOB_RUN && f->side[MESH_RECEIVE].owner && !(f->configured&1u<<MESH_RECEIVE) && !(error=receives_configure(f)))
+  if(job==JOB_PAIR)return f->exclusive?pair_up(&f->provider,f->qps):0;
+  const int ran=atomic_load_explicit(&f->progressing,memory_order_acquire);
+  if(job==JOB_CHANGE)port_quiet(f);
+  if(job==JOB_RECEIVE && f->exclusive)error=pair_receive(&f->provider,(const uint32_t (*)[2])f->pairs,f->port->heard.lid,f->port->heard.gid);
+  if(!error && job!=JOB_RUN && f->side[MESH_RECEIVE].owner && !(f->configured&1u<<MESH_RECEIVE) && !(error=receives_configure(f))){
     f->configured|=1u<<MESH_RECEIVE;
+    f->lane_epoch=f->port->lanes.generation;
+    if(!f->exclusive)error=port_list(f,0,1);
+  }
   if(!error && job!=JOB_RECEIVE && f->side[MESH_SEND].owner && !(f->configured&1u<<MESH_SEND) && !(error=sends_configure(f)))
     f->configured|=1u<<MESH_SEND;
-  if(!error && job==JOB_RUN)error=pair_send(&f->provider);
-  if(!error && job!=JOB_RECEIVE)error=link_workers(f);
+  if(!error && job==JOB_RUN && f->exclusive)error=pair_send(&f->provider);
+  if(!error && (job==JOB_RUN || (job==JOB_CHANGE && ran)))error=port_list(f,1,0);
   return error;
+}
+/* design/bridge-and-ipc.md#region: the queue pairs a port's device holds, told in its port table */
+static void port_pairs(struct port *port){
+  atomic_store_explicit(&mesh_links(M)[port->index].pairs,port->device.pairs,memory_order_relaxed);
 }
 static void flow_job(struct flow *f,int job){
   f->job=job;atomic_store_explicit(&f->done,0,memory_order_relaxed);
   dispatch_async(f->port->work,^{
     f->result=flow_work(f,job);
+    port_pairs(f->port);
     atomic_store_explicit(&f->done,1,memory_order_release);
     wake();
   });
 }
 
-/* design/algorithm-sources.md#meshresult: a flow's threads joined and its queue pairs destroyed, on its port's queue,
-   the link's census printed: each queue pair's requests and frames sent and retired by the send completions it took,
-   and its ring's records landed and their bytes.  1 once nothing is held (a failed destruction keeps its handles for
-   the next turn) */
+/* design/algorithm-sources.md#meshresult: a flow out of its port's table and its queue pairs destroyed, on its port's
+   queue, the link's census printed: each ring's SEND requests and frames posted and retired by the send completions
+   its queue pair took (an exclusive flow's), and its records landed and their bytes.  A flow on its port's lanes is
+   released once its records posted on the lanes have landed, or the lanes it posted them on are gone.  1 once nothing
+   is held (a failed destruction, or records still posted, keep it for the next turn) */
 static int flow_release(struct flow *flow){
-  atomic_store_explicit(&flow->progressing,0,memory_order_release);
-  while(flow->worker_count)pthread_join(flow->workers[--flow->worker_count],NULL);
-  for(int q=0;flow->gates && flow->rings && q<flow->qps;q++)
-    say("link %u census queue=%d requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu\n",
-      flow->port->index,q,(unsigned long long)flow->gates[q].requests,(unsigned long long)flow->gates[q].posted,
-      (unsigned long long)flow->gates[q].retired,(unsigned long long)flow->gates[q].completions,
-      flow->rings[q].count,flow->rings[q].posted,(unsigned long long)flow->rings[q].landed,(unsigned long long)flow->rings[q].bytes);
+  port_unlist(flow);
+  for(int q=0;flow->rings && q<flow->qps;q++)
+    say("link %u census queue=%d requests=%llu frames=%llu retired=%llu send_completions=%llu records=%zu posted=%zu landed=%llu bytes=%llu%s\n",
+      flow->port->index,q,flow->gates?(unsigned long long)flow->gates[q].requests:0ull,flow->gates?(unsigned long long)flow->gates[q].posted:0ull,
+      flow->gates?(unsigned long long)flow->gates[q].retired:0ull,flow->gates?(unsigned long long)flow->gates[q].completions:0ull,
+      flow->rings[q].count,flow->rings[q].posted,(unsigned long long)flow->rings[q].landed,(unsigned long long)flow->rings[q].bytes,
+      flow->exclusive?"":" (lanes)");
+  const struct lanes *l=&flow->port->lanes;
+  if(!flow->exclusive && atomic_load_explicit(&flow->lane_frames,memory_order_acquire) &&
+     atomic_load_explicit(&l->up,memory_order_acquire) && l->generation==flow->lane_epoch)return 0;
   if(!down_pair(&flow->provider))return 0;
   free(flow->receive);free(flow->streams);free(flow->gates);free(flow->rings);free(flow->requests);
   flow->receive=NULL;flow->streams=NULL;flow->gates=NULL;flow->rings=NULL;flow->requests=NULL;
   return 1;
 }
 /* A flow stopped on its port's queue, after its job: where it failed, its program's pending words toward the far end
-   cancelled (M12) once its receive thread is joined, and its status the failure naming the node `where` */
+   cancelled (M12) once its port's progress threads no longer read it, and its status the failure naming the node
+   `where` */
 static void flow_stop(struct flow *f,int64_t code,uint32_t domain,uint32_t where){
   const uint64_t owner=f->owner;const uint32_t destination=f->destination;struct mesh_cancellation *cancel=f->cancel;
   f->stopping=1;atomic_store_explicit(&f->stopped,0,memory_order_relaxed);
   dispatch_async(f->port->work,^{
-    atomic_store_explicit(&f->progressing,0,memory_order_release);
-    while(f->worker_count)pthread_join(f->workers[--f->worker_count],NULL);
+    port_unlist(f);
     if(code && owned(owner)){
       if(cancel)mesh_cancel(M,cancel,destination);
       status_failed(&mesh_client_at(M,owner)->status[destination],owner,code,domain,where);
     }
     atomic_store_explicit(&f->stopped,flow_release(f)?1:2,memory_order_release);
+    port_pairs(f->port);
     wake();
   });
 }
@@ -735,6 +1151,7 @@ static void port_say(struct port *port,struct message said,const void *payload,u
   said.magic=XMAGIC;said.node=M->node;said.boot=M->boot;said.block=M->block*M->pgsz;said.port=port->index;said.bytes=bytes;
   said.lid=port->lid;memcpy(said.gid,port->gid,16);
   size_t length=port->out_length+sizeof said+bytes;
+  if(length-port->out_sent>MESH_UNSENT){port_lost(port,ENOBUFS,0);return;}
   if(length>port->out_room){
     unsigned char *grown=realloc(port->out,length*2);
     if(!grown){port_lost(port,ENOMEM,0);return;}
@@ -756,7 +1173,7 @@ static void ready_say(struct flow *f,const uint32_t *route,uint32_t hops){
   struct mesh_client *client=mesh_client_at(M,f->side[d].owner);
   struct mesh_tx *tx=side_tx(f,d);
   struct ready ready={.hops=hops,.slots=tx->slots,.invocations=tx->invocations,.depth=atomic_load(&client->depth),
-    .cyclic=atomic_load(&client->cyclic),.queue=f->queue,.step=f->step};
+    .cyclic=atomic_load(&client->cyclic),.stripe=f->stripe,.stripes=f->stripes,.exclusive=(uint32_t)f->exclusive};
   size_t transfers=0;
   for(uint32_t k=0;k<f->queues;k++)transfers+=ready.lengths[k]=side_length(f,MESH_SEND,k);
   size_t bytes=sizeof ready+(size_t)hops*sizeof *route+transfers*sizeof(struct mesh_transfer);
@@ -782,6 +1199,12 @@ static void flow_fail(struct flow *f,int64_t code,uint32_t domain,uint32_t tell,
   if(f->partner)flow_fail(f->partner,code,domain,tell?tell:(uint32_t)(code==ECONNRESET?END:FAIL),origin,origin);
   for(struct flow *g=flows;f->owner && g;g=g->next)if(g->owner==f->owner && g->destination==f->destination)flow_fail(g,code,domain,FAIL,where,origin);
 }
+/* a client's program toward its destination `d` failed as a value naming this node: its flows failed, telling their
+   peers, and its status the failure */
+static void program_fail(uint64_t owner,uint32_t d,int64_t code){
+  for(struct flow *g=flows;g;g=g->next)if(g->owner==owner && g->destination==d)flow_fail(g,code,4,FAIL,M->node,M->node);
+  if(owned(owner))status_failed(&mesh_client_at(M,owner)->status[d],owner,code,4,M->node);
+}
 /* a program that ended, its client gone: its peer told (END) */
 static void flow_end(struct flow *f){
   if(f->state==FAILED)return;
@@ -799,10 +1222,13 @@ static struct lease *lease_take(uint64_t key){
   if(lease){lease->context.fd=-1;if(mesh_slot_take(&lease->context,M,key)){free(lease);lease=NULL;}}
   return lease;
 }
+/* a flow freed, its index in its port's table and the queue pairs it held of the device's given back */
 static void flow_free(struct flow *f){
   for(struct flow **at=&flows;*at;at=&(*at)->next)if(*at==f){*at=f->next;break;}
   if(f->partner)f->partner->partner=NULL;
   f->port->flows--;
+  f->port->reserved[f->slot/64]&=~(UINT64_C(1)<<(f->slot%64));
+  if(f->exclusive)f->port->committed-=(uint32_t)f->qps;
   for(int d=0;d<2;d++){lease_drop(f->side[d].lease);lease_drop(f->pending[d].lease);}
   free(f);
 }
@@ -817,48 +1243,92 @@ static void program_paired(struct flow *f){
   status_prepared(status,f->owner);
 }
 
-/* design/bridge-and-ipc.md#protocol: a flow's next step, its job's end or a message heard: queue pairs made once the
-   peer's READY or PAIRS is heard (PAIRS sent), ready to receive once its PAIRS are and, held, once its client's program
-   took it (POSTED sent), running once its POSTED is; a running relay whose side's lists arrived changes */
+/* design/bridge-and-ipc.md#protocol: POSTED told the peer once the flow's receives are posted; a relay's once its own
+   receives are and its partner heard the next hop's POSTED, so a POSTED reaches a route's end only once the far end's
+   program has started and every relay between has posted (end to end, design/recovery.md#first) */
+static void flow_tell(struct flow *f){
+  if(f->told || f->job || f->state==FAILED || f->state<POSTING)return;
+  if(f->partner && (!(f->partner->heard&HEARD_POSTED) || !f->side[MESH_RECEIVE].owner || !(f->configured&1u<<MESH_RECEIVE)))return;
+  f->told=1;
+  flow_say(f,POSTED,0,0,NULL,M->node);
+}
+/* design/bridge-and-ipc.md#lanes: the peer's word on whether the flow takes queue pairs of its own (its READY's
+   `exclusive`, its PAIRS' count), ANDed into the flow's until the flow pairs, so both ends pair alike; 0, or EPROTO
+   where a flow that paired hears otherwise */
+static int flow_mode(struct flow *f,int exclusive){
+  if(f->decided)return f->exclusive==!!exclusive?0:EPROTO;
+  if(f->exclusive && !exclusive){f->exclusive=0;f->port->committed-=(uint32_t)f->qps;}
+  return 0;
+}
+/* design/bridge-and-ipc.md#protocol: a flow's next step, its job's end or a message heard: paired once the peer's READY
+   or PAIRS is heard (an exclusive flow's queue pairs made; PAIRS sent), ready to receive once its PAIRS are and, held,
+   once its client's program took it (POSTED told, flow_tell), running once its POSTED is; a relay whose side's lists
+   arrived after its receives were posted changes.  A flow on its port's lanes receives, runs and changes once the lanes
+   are up, and fails with them where they failed (#lanes) */
 static void flow_step(struct flow *f){
   if(f->state==FAILED || f->job || f->stopping)return;
   for(int d=0;d<2;d++)if(f->pending[d].owner && !f->side[d].owner){f->side[d]=f->pending[d];f->pending[d]=(struct side){0};}
-  if(f->state==READIED && (f->heard&(HEARD_READY|HEARD_PAIRS)))flow_job(f,JOB_PAIR);
-  else if(f->state==PAIRING && (f->heard&HEARD_PAIRS) && !f->hold)flow_job(f,JOB_RECEIVE);
-  else if(f->state==POSTING && (f->heard&HEARD_POSTED))flow_job(f,JOB_RUN);
-  else if(f->state==RUNNING && ((f->side[MESH_SEND].owner && !(f->configured&1u<<MESH_SEND)) ||
+  const struct lanes *l=&f->port->lanes;
+  if(f->decided && !f->exclusive && l->state==LANES_FAILED){flow_fail(f,l->code?l->code:ENOTCONN,1,FAIL,M->node,M->node);return;}
+  const int up=f->exclusive || l->state==LANES_UP;
+  if(f->state==READIED && (f->heard&(HEARD_READY|HEARD_PAIRS))){f->decided=1;flow_job(f,JOB_PAIR);}
+  else if(f->state==PAIRING && (f->heard&HEARD_PAIRS) && !f->hold && up)flow_job(f,JOB_RECEIVE);
+  else if(f->state==POSTING && (f->heard&HEARD_POSTED) && up)flow_job(f,JOB_RUN);
+  else if(up && (f->state==POSTING || f->state==RUNNING) && ((f->side[MESH_SEND].owner && !(f->configured&1u<<MESH_SEND) && f->state==RUNNING) ||
                                 (f->side[MESH_RECEIVE].owner && !(f->configured&1u<<MESH_RECEIVE))))flow_job(f,JOB_CHANGE);
 }
 static void flow_done(struct flow *f){
   const int job=f->job;
   f->job=0;
   if(f->state==FAILED)return;
-  if(f->result){flow_fail(f,f->result,1,FAIL,M->node,M->node);return;}
+  if(f->result){
+    if(job==JOB_PAIR && f->result==ENOSPC)
+      say("link %u (%s): program %016llx toward node %u: %d queue pairs refused, the device holding %u of its max_qp %u\n",
+        f->port->index,f->port->name,(unsigned long long)f->key,f->far,f->qps,f->port->device.pairs,f->port->device.max_pairs);
+    flow_fail(f,f->result,1,FAIL,M->node,M->node);
+    return;
+  }
   if(job==JOB_PAIR){
+    /* #lanes: an exclusive flow's PAIRS its queue pairs, a lane rider's none, its index and generation in its code */
     uint32_t pairs[MESH_PAIRS][2];
-    for(int q=0;q<f->qps;q++){pairs[q][0]=f->provider.queues[q].pair->qp_num;pairs[q][1]=(f->provider.psn+(uint32_t)q)&0xffffff;}
-    flow_say(f,PAIRS,(uint32_t)f->qps,0,(const uint32_t (*)[2])pairs,M->node);
+    for(int q=0;f->exclusive && q<f->qps;q++){pairs[q][0]=f->provider.queues[q].pair->qp_num;pairs[q][1]=(f->provider.psn+(uint32_t)q)&0xffffff;}
+    flow_say(f,PAIRS,f->exclusive?(uint32_t)f->qps:0,f->exclusive?0:(int64_t)((uint64_t)f->generation<<32|f->slot),
+             (const uint32_t (*)[2])pairs,M->node);
     f->state=PAIRING;
     if(!f->hold)f->deadline=now+MESH_PAIR_NS;
   }else if(job==JOB_RECEIVE){
-    flow_say(f,POSTED,0,0,NULL,M->node);
     /* design/recovery.md#first: the peer's POSTED waits on its program's start where no READY told of it (a peer that
-       holds posts once its client's program takes it): the peer window, and the pairing window after it */
-    f->state=POSTING;f->deadline=(f->heard&HEARD_READY)?now+MESH_PAIR_NS:f->created+MESH_PEER_NS+MESH_PAIR_NS;
+       holds posts once its client's program takes it), and a relay's on the far end's: the peer window, and the
+       pairing window after it */
+    f->state=POSTING;f->deadline=(f->heard&HEARD_READY) && !f->partner?now+MESH_PAIR_NS:f->created+MESH_PEER_NS+MESH_PAIR_NS;
   }else{
     if(job==JOB_RUN)f->state=RUNNING;
-    program_paired(f);
+    if(f->state==RUNNING)program_paired(f);
   }
+  flow_tell(f);
   flow_step(f);
 }
 
-/* design/bridge-and-ipc.md#flows: a flow made on a port toward `far` for the execution `key` */
-static struct flow *flow_make(struct port *port,uint64_t key,uint32_t near,uint32_t far,uint32_t queue,uint32_t step,uint32_t queues,uint32_t slots){
-  if(!queues || !slots || queues*slots>MESH_PAIRS)return NULL;
+/* design/bridge-and-ipc.md#flows: a flow made on a port toward `far` for the execution `key`, the program's invocations
+   t with t mod stripes = stripe (#cables), an index of the port's table its own (MESH_FLOWS a port), exclusive where
+   `exclusive` asks it and the port's device has room for its queue pairs beside those its flows and lanes hold or will
+   (#lanes: else it rides the lanes); NULL where it is not one or the table is full */
+static struct flow *flow_make(struct port *port,uint64_t key,uint32_t near,uint32_t far,uint32_t queues,uint32_t slots,uint32_t stripe,uint32_t stripes,
+                              int exclusive){
+  if(!queues || !slots || queues>MESH_QUEUES || queues*slots>MESH_PAIRS || !stripes || stripe>=stripes)return NULL;
+  uint32_t slot=0;
+  while(slot<MESH_FLOWS && port->reserved[slot/64]>>(slot%64)&1)slot++;
+  if(slot==MESH_FLOWS)return NULL;
   struct flow *f=calloc(1,sizeof *f);
   if(!f)return NULL;
-  *f=(struct flow){.next=flows,.near=near,.far=far,.queue=queue,.step=step?step:1,.queues=queues,.qps=(int)(queues*slots),
-    .key=key,.created=now,.deadline=now+MESH_PEER_NS,.M=M,.port=port,.provider={.device=&port->device}};
+  const uint32_t qps=queues*slots;
+  exclusive=exclusive && port->device.max_pairs && port->committed+qps<=port->device.max_pairs;
+  *f=(struct flow){.next=flows,.near=near,.far=far,.queues=queues,.stripe=stripe,.stripes=stripes,.qps=(int)qps,.exclusive=exclusive,
+    .slot=slot,.generation=++port->generation[slot],.key=key,.created=now,.deadline=now+MESH_PEER_NS,.M=M,.port=port,
+    .provider={.device=&port->device}};
+  port->reserved[slot/64]|=UINT64_C(1)<<(slot%64);
+  if(slot>=atomic_load(&port->high))atomic_store(&port->high,slot+1);
+  if(exclusive)port->committed+=qps;
   flows=f;port->flows++;
   return f;
 }
@@ -875,6 +1345,13 @@ static uint32_t cables(uint32_t node,struct port **out){
   for(uint32_t i=1;i<n;i++)for(uint32_t j=i;j>0 && cable_rank(out[j])<cable_rank(out[j-1]);j--){struct port *t=out[j];out[j]=out[j-1];out[j-1]=t;}
   return n;
 }
+/* design/bridge-and-ipc.md#cables: a program's pair of end nodes and its execution mixed (murmur3's finalizer), alike at
+   either end and on every relay, which picks the cable a routed hop takes and the first of a direct program's */
+static uint64_t pair_hash(uint64_t key,uint32_t a,uint32_t b){
+  uint64_t x=key^((uint64_t)(a<b?a:b)<<32|(a<b?b:a));
+  x^=x>>33;x*=UINT64_C(0xff51afd7ed558ccd);x^=x>>33;x*=UINT64_C(0xc4ceb9fe1a85ec53);x^=x>>33;
+  return x;
+}
 
 /* design/bridge-and-ipc.md#flows: a relayed program a READY carried, mirrored into a lease: rows the bridge leases for
    each transfer the sender sends, bound as receives from `from` and as SENDs toward `to` over the same rows, so a landed
@@ -887,14 +1364,14 @@ static int mirror(struct lease *lease,const struct ready *r,const struct mesh_tr
   client->tx[mesh_destination(client,to)].node=to;
   for(uint32_t k=0,i=0;k<MESH_QUEUES && !error;k++)for(uint32_t j=0;j<r->lengths[k] && !error;j++,i++){
     const struct mesh_transfer *x=t+i;
-    uint32_t q=r->queue+k*r->step,depth=x->depth?x->depth:r->depth;
+    uint32_t depth=x->depth?x->depth:r->depth;
     uint64_t tail=(uint64_t)x->invocation_pages*M->pgsz,ring=(uint64_t)(depth?depth-1:0)*tail;
     struct mesh_section s;
-    if(q>=MESH_QUEUES || !x->count)error=EPROTO;
+    if(!x->count)error=EPROTO;
     else if(!(error=mesh_section_create(c,ring+(x->bytes>tail?x->bytes:tail),x->stride?x->count:1,&s))){
       s.bytes=x->bytes;if(!x->stride){s.stride=0;s.count=x->count;}
-      error=mesh_transfer_bind(c,from,q,MESH_RECEIVE,x->binding,s,x->invocation_pages,x->begin,x->end,x->depth);
-      if(!error)error=mesh_transfer_bind(c,to,q,MESH_SEND,x->binding,s,x->invocation_pages,x->begin,x->end,x->depth);
+      error=mesh_transfer_bind(c,from,k,MESH_RECEIVE,x->binding,s,x->invocation_pages,x->begin,x->end,x->depth);
+      if(!error)error=mesh_transfer_bind(c,to,k,MESH_SEND,x->binding,s,x->invocation_pages,x->begin,x->end,x->depth);
     }
   }
   if(!error)error=mesh_transfers_prepare(c,r->slots,r->invocations,r->depth);
@@ -906,10 +1383,10 @@ static void ready_refuse(struct port *port,const struct message *heard,int64_t c
   port_say(port,(struct message){.kind=FAIL,.key=heard->key,.from=heard->to,.to=heard->from,.code=code,.failed=M->node},NULL,0);
 }
 /* a relay's direction a READY told: its lists mirrored into a lease of its own, received by the flow it arrived on
-   and sent on by its partner */
+   and sent on by its partner (a relayed program is one stripe, #cables) */
 static int relay_direction(struct flow *f,const struct ready *ready,const struct mesh_transfer *list){
   struct flow *g=f->partner;
-  if(ready->queue || ready->step!=1)return EPROTO;
+  if(ready->stripe || ready->stripes!=1)return EPROTO;
   struct lease *lease=lease_take(f->key);
   if(!lease)return EBUSY;
   int error=mirror(lease,ready,list,f->far,g->far);
@@ -923,10 +1400,51 @@ static int relay_direction(struct flow *f,const struct ready *ready,const struct
   flow_step(g);
   return 0;
 }
-/* design/bridge-and-ipc.md#protocol: a READY.  Its flow here pairs; a program whose route goes on past this node is
-   relayed toward the route's next node, over rows the bridge leases (no client of this node takes part); one that ends
-   here with no program of its key started is held, its queue pairs made and no rows, for the client whose program takes
-   it (#flows) */
+
+/* design/bridge-and-ipc.md#routes: a client program awaiting the READY of its routed peer, the pair's lower node, whose
+   route both ends take (`created` bounds the wait by the peer window) */
+struct await { struct await *next; uint64_t key,owner,created; uint32_t destination,far; };
+static struct await *awaits;
+static struct await *await_find(uint64_t key,uint32_t far){
+  for(struct await *a=awaits;a;a=a->next)if(a->key==key && a->far==far)return a;
+  return NULL;
+}
+static void await_drop(struct await *a){
+  for(struct await **at=&awaits;*at;at=&(*at)->next)if(*at==a){*at=a->next;break;}
+  free(a);
+}
+static uint32_t program_queues(uint64_t owner,uint32_t d);
+/* a flow taken by its client's program toward destination `d` (its one job before, JOB_PAIR, reads no side) */
+static void flow_take(struct flow *f,uint64_t owner,uint32_t d){
+  f->side[MESH_SEND]=f->side[MESH_RECEIVE]=(struct side){owner,d,NULL};
+  flow_program(f,owner,d);
+  if(f->hold)f->deadline=now+MESH_PAIR_NS;
+  f->hold=0;
+  atomic_store_explicit(&mesh_client_at(M,owner)->status[d].phase,MESH_PAIRING,memory_order_relaxed);
+}
+/* the accepted program of execution `key` that binds `node` here (its slot's owner and destination), with a flow toward
+   it that has not failed; 0 where none */
+static uint64_t owners[MESH_CLIENTS],accepted[MESH_CLIENTS];
+static int program_live(uint64_t key,uint32_t node,uint64_t *owner,uint32_t *d){
+  for(uint32_t s=0;s<MESH_CLIENTS;s++){
+    struct mesh_client *client=(struct mesh_client *)((char *)M+M->client_off)+s;
+    const uint64_t o=accepted[s];
+    if(!o || !owned(o) || client->key!=key)continue;
+    const uint32_t at=mesh_destination(client,node);
+    if(at==MESH_DESTINATIONS || client->tx[at].node!=node)continue;
+    for(struct flow *g=flows;g;g=g->next)if(g->owner==o && g->destination==at && g->state!=FAILED){*owner=o;*d=at;return 1;}
+  }
+  return 0;
+}
+
+/* design/bridge-and-ipc.md#protocol, #routes: a READY.  Its flow here pairs (its `exclusive` ANDed into the flow's,
+   #lanes); one heard by a relay's flow (the far end's program telling its direction) is mirrored and sent on by the
+   relay's other flow toward the route's start, so every relay of the route carries both directions; a program whose
+   route goes on past this node is relayed toward the route's next node, over rows the bridge leases (no client of this
+   node takes part), on the lanes of the cable the pair's hash picks; one that ends here is taken by a program awaiting
+   it, else held, its queue pairs made where it takes its own and no rows, for the client whose program takes it
+   (#flows).  One that ends on a port where this node's program of its key toward its sender has no flow, while that
+   program runs on others, finds the two ends' maps apart: refused, and the program failed, both as values (EPROTO) */
 static void ready_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   struct ready ready;
   if(heard->bytes<sizeof ready){port_lost(port,EPROTO,0);return;}
@@ -934,7 +1452,7 @@ static void ready_heard(struct port *port,const struct message *heard,const unsi
   uint64_t transfers=0;
   for(uint32_t k=0;k<MESH_QUEUES;k++)transfers+=ready.lengths[k];
   const uint32_t queues=ready.slots?heard->count/ready.slots:0;
-  if(!ready.hops || !queues || !ready.step || heard->count%ready.slots || ready.queue+(uint64_t)(queues-1)*ready.step>=MESH_QUEUES ||
+  if(!ready.hops || !queues || queues>MESH_QUEUES || heard->count%ready.slots || !ready.stripes || ready.stripe>=ready.stripes ||
      heard->bytes!=sizeof ready+(uint64_t)ready.hops*sizeof(uint32_t)+transfers*sizeof(struct mesh_transfer)){port_lost(port,EPROTO,0);return;}
   uint32_t *route=malloc((size_t)ready.hops*sizeof *route);
   struct mesh_transfer *list=malloc((transfers?transfers:1)*sizeof *list);
@@ -942,23 +1460,51 @@ static void ready_heard(struct port *port,const struct message *heard,const unsi
   memcpy(route,payload+sizeof ready,(size_t)ready.hops*sizeof *route);
   memcpy(list,payload+sizeof ready+(size_t)ready.hops*sizeof *route,transfers*sizeof *list);
   struct flow *f=flow_on(port,heard->key,heard->to,heard->from);
-  if(f){
-    int error=f->partner && !f->side[MESH_RECEIVE].owner && !f->pending[MESH_RECEIVE].owner?relay_direction(f,&ready,list):0;
+  uint64_t owner=0;uint32_t d=0;
+  if(f && (f->heard&HEARD_READY)){}
+  else if(f && !f->partner && (f->stripe!=ready.stripe || f->stripes!=ready.stripes || f->queues!=queues || (uint32_t)f->qps!=heard->count))
+    flow_fail(f,EPROTO,4,FAIL,M->node,M->node);
+  else if(f){
+    int error=f->partner?(!f->side[MESH_RECEIVE].owner && !f->pending[MESH_RECEIVE].owner?relay_direction(f,&ready,list):0):
+      flow_mode(f,(int)ready.exclusive);
     if(error)flow_fail(f,error,1,FAIL,M->node,M->node);
-    else{f->heard|=HEARD_READY;flow_step(f);}
+    else{
+      if(f->partner)port_say(f->partner->port,(struct message){.kind=READY,.count=heard->count,.key=heard->key,.from=heard->from,
+                                                               .to=heard->to},payload,heard->bytes);
+      f->heard|=HEARD_READY;flow_step(f);
+    }
   }else if(route[0]!=M->node || route[ready.hops-1]!=heard->to || heard->from==M->node)ready_refuse(port,heard,EPROTO);
   else if(ready.hops==1){
-    f=flow_make(port,heard->key,M->node,heard->from,ready.queue,ready.step,queues,ready.slots);
-    if(!f)ready_refuse(port,heard,E2BIG);
-    else{f->hold=1;f->heard=HEARD_READY;flow_step(f);}
+    struct await *a=await_find(heard->key,heard->from);
+    if(a && (program_queues(a->owner,a->destination)!=queues || mesh_client_at(M,a->owner)->tx[a->destination].slots!=ready.slots ||
+             ready.stripes!=1)){
+      say("link %u (%s): program %016llx: node %u's READY is not the shape of the program awaiting it here: refused\n",port->index,
+          port->name,(unsigned long long)heard->key,heard->from);
+      ready_refuse(port,heard,EPROTO);
+      status_failed(&mesh_client_at(M,a->owner)->status[a->destination],a->owner,EPROTO,4,M->node);
+      await_drop(a);
+    }else if(!a && program_live(heard->key,heard->from,&owner,&d)){
+      say("link %u (%s): program %016llx: node %u's READY came on a port its program here does not use (the two ends' maps "
+          "differ): refused\n",port->index,port->name,(unsigned long long)heard->key,heard->from);
+      ready_refuse(port,heard,EPROTO);
+      program_fail(owner,d,EPROTO);
+    }else if(!(f=flow_make(port,heard->key,M->node,heard->from,queues,ready.slots,ready.stripe,ready.stripes,(int)ready.exclusive)))
+      ready_refuse(port,heard,E2BIG);
+    else{
+      f->hold=1;f->heard=HEARD_READY;
+      if(a){flow_take(f,a->owner,a->destination);ready_say(f,&f->far,1);await_drop(a);}
+      flow_step(f);
+    }
   }else{
     struct port *next[MESH_PORTS];
     struct flow *g=NULL;
-    f=cables(route[1],next)?flow_make(port,heard->key,heard->to,heard->from,0,1,queues,ready.slots):NULL;
-    if(f)g=flow_make(next[0],heard->key,heard->from,heard->to,0,1,queues,ready.slots);
+    const uint32_t n=cables(route[1],next);
+    if(ready.stripe || ready.stripes!=1){ready_refuse(port,heard,EPROTO);free(route);free(list);return;}
+    f=n?flow_make(port,heard->key,heard->to,heard->from,queues,ready.slots,0,1,0):NULL;
+    if(f)g=flow_make(next[pair_hash(heard->key,heard->from,heard->to)%n],heard->key,heard->from,heard->to,queues,ready.slots,0,1,0);
     if(!g){
       if(f){f->state=FAILED;flow_free(f);}
-      ready_refuse(port,heard,cables(route[1],next)?E2BIG:EHOSTUNREACH);
+      ready_refuse(port,heard,n?E2BIG:EHOSTUNREACH);
     }else{
       f->partner=g;g->partner=f;
       int error=relay_direction(f,&ready,list);
@@ -986,59 +1532,75 @@ static int map_grow(uint64_t records){
   map_page=page;map_pages=pages;map_room=(uint32_t)((uint64_t)pages*M->pgsz/sizeof(struct mesh_record));
   return 0;
 }
+/* RFC 2328 s14: the map with `record` put in (its node's held record replaced, else added) and every record no paired
+   path from this node reaches left out, written only where it differs from the map held (so a record that changes
+   nothing, or that the prune drops at once, moves no serial) */
 static void map_put(const struct mesh_record *record){
-  mesh_notify(&M->map);
-  uint64_t n=atomic_load(&M->map_nodes),i=0;
-  while(i<n && mesh_records(M)[i].node!=record->node)i++;
-  const int fresh=i==n;
-  const uint64_t at=i;
-  if(i<n || !map_grow(n+1)){
-    memcpy(mesh_records(M)+i,record,sizeof *record);
-    if(i==n)atomic_store(&M->map_nodes,n+1);
-  }
-  /* RFC 2328 s14: a record no paired path from this node reaches leaves the map */
-  n=atomic_load(&M->map_nodes);
+  const uint64_t n=atomic_load(&M->map_nodes);
   struct mesh_record *r=mesh_records(M);
-  unsigned char *reached=calloc(n?n:1,1);
-  uint32_t *order=malloc((n?n:1)*sizeof *order),head=0,tail=0;
-  for(uint64_t k=0;reached && order && k<n;k++)if(r[k].node==M->node){reached[k]=1;order[tail++]=(uint32_t)k;}
-  while(reached && order && head<tail){
+  uint64_t at=0;
+  while(at<n && r[at].node!=record->node)at++;
+  const uint64_t count=at==n?n+1:n;
+  struct mesh_record *next=malloc(count*sizeof *next);
+  unsigned char *reached=calloc(count,1);
+  uint32_t *order=malloc(count*sizeof *order),head=0,tail=0;
+  if(!next || !reached || !order){free(next);free(reached);free(order);say("map: no memory to put node %u's record\n",record->node);return;}
+  memcpy(next,r,(size_t)n*sizeof *r);
+  memcpy(next+at,record,sizeof *record);
+  for(uint64_t k=0;k<count;k++)if(next[k].node==M->node){reached[k]=1;order[tail++]=(uint32_t)k;}
+  while(head<tail){
     uint32_t a=order[head++];double beta;
-    for(uint64_t b=0;b<n;b++)if(!reached[b] && mesh_joined(r+a,r+b,&beta)){reached[b]=1;order[tail++]=(uint32_t)b;}
+    for(uint64_t b=0;b<count;b++)if(!reached[b] && mesh_joined(next+a,next+b,&beta)){reached[b]=1;order[tail++]=(uint32_t)b;}
   }
   /* design/recovery.md#diagnosis: a node the prune drops is logged with its last health first (one put now and never
      reached yet is not a loss) */
-  for(uint64_t k=0;reached && order && k<n;k++)if(!reached[k] && !(fresh && k==at)){
-    struct known *gone=known_at(r[k].node);char text[768];health_text(&r[k].health,text,sizeof text);
-    say("node %u (%s) unreachable; its last health, heard %.1f s before: %s\n",r[k].node,r[k].name,
+  for(uint64_t k=0;k<count;k++)if(!reached[k] && !(at==n && k==at)){
+    struct known *gone=known_at(next[k].node);char text[768];health_text(&next[k].health,text,sizeof text);
+    say("node %u (%s) unreachable; its last health, heard %.1f s before: %s\n",next[k].node,next[k].name,
         gone && gone->heard?(double)(now-gone->heard)/1e9:-1.0,text);
     if(gone)gone->gone=now;
   }
   uint64_t kept=0;
-  for(uint64_t k=0;reached && order && k<n;k++)if(reached[k])memmove(r+kept++,r+k,sizeof *r);
-  if(reached && order)atomic_store(&M->map_nodes,kept);
-  free(reached);free(order);
-  mesh_notify(&M->map);
+  for(uint64_t k=0;k<count;k++)if(reached[k])memmove(next+kept++,next+k,sizeof *next);
+  if(kept!=n || memcmp(next,r,(size_t)n*sizeof *r)){
+    mesh_notify(&M->map);
+    if(map_grow(kept))say("map: no lease for %llu records; %llu kept\n",(unsigned long long)kept,(unsigned long long)map_room);
+    if(kept>map_room)kept=map_room;
+    memcpy(mesh_records(M),next,(size_t)kept*sizeof *next);
+    atomic_store(&M->map_nodes,kept);
+    mesh_notify(&M->map);
+  }
+  free(next);free(reached);free(order);
 }
-/* design/recovery.md#diagnosis: a record whose links, name and boot are the held one's changes only its health and
-   sequence, written under the region's health serial and never the map's: a communicator's session opens again where
-   the map serial moved (nccl-mesh.c session_ensure), and a health sample is no change of the mesh */
+/* design/recovery.md#diagnosis: a record whose links (each port's peer, phase and bandwidth), name and boot are the
+   held one's changes only its health, sequence and ports' counts (their codes, pairings and queue pairs), written
+   under the region's health serial and never the map's: a communicator's session opens again where the map serial
+   moved (nccl-mesh.c session_ensure), and neither a health sample nor a queue pair is a change of the mesh */
 static int record_links_same(const struct mesh_record *a,const struct mesh_record *b){
-  return a->node==b->node && a->ports==b->ports && a->boot==b->boot && !memcmp(a->name,b->name,sizeof a->name) &&
-    !memcmp(a->port,b->port,sizeof a->port);
+  int same=a->node==b->node && a->ports==b->ports && a->boot==b->boot && !memcmp(a->name,b->name,sizeof a->name) &&
+    a->window==b->window && a->memory==b->memory && !memcmp(a->model,b->model,sizeof a->model);
+  for(uint32_t p=0;same && p<MESH_PORTS;p++)
+    same=atomic_load(&a->port[p].peer)==atomic_load(&b->port[p].peer) && atomic_load(&a->port[p].phase)==atomic_load(&b->port[p].phase) &&
+      atomic_load(&a->port[p].bandwidth)==atomic_load(&b->port[p].bandwidth);
+  return same;
 }
 static void health_put(struct mesh_record *held,const struct mesh_record *record){
   mesh_notify(&M->health);
   held->sequence=record->sequence;held->health=record->health;
+  memcpy(held->port,record->port,sizeof held->port);
   mesh_notify(&M->health);
 }
 static struct mesh_record *record_held(uint32_t node){
   for(uint64_t i=0;i<atomic_load(&M->map_nodes);i++)if(mesh_records(M)[i].node==node)return mesh_records(M)+i;
   return NULL;
 }
+/* design/bridge-and-ipc.md#records: this node's record, its window, memory and model with its ports and health */
+static uint64_t memory;
+static char model[MESH_MODEL_BYTES];
 static void record_changed(void){
-  struct mesh_record own={.node=M->node,.ports=port_count,.boot=M->boot,.sequence=++sequence};
+  struct mesh_record own={.node=M->node,.ports=port_count,.boot=M->boot,.sequence=++sequence,.window=wire.length,.memory=memory};
   memcpy(own.name,host,sizeof own.name);
+  memcpy(own.model,model,sizeof own.model);
   memcpy(own.port,mesh_links(M),sizeof own.port);
   own.health=health;
   struct mesh_record *held=record_held(M->node);
@@ -1065,10 +1627,25 @@ static void record_heard(struct port *from,const unsigned char *payload,uint32_t
   heard.name[sizeof heard.name-1]=0;
   heard.health.session[sizeof heard.health.session-1]=0;heard.health.shutdown[sizeof heard.health.shutdown-1]=0;
   if(!heard.node || heard.node==M->node || heard.ports>MESH_PORTS)return;
+  heard.model[sizeof heard.model-1]=0;
   struct mesh_record *held=record_held(heard.node);
+  struct known *k=known_at(heard.node);
+  /* design/bridge-and-ipc.md#records, RFC 2328 s13: a record no newer than the newest heard of its node, the map holding
+     it or not, is dropped and not sent on, so a record the map pruned never circulates; an entry unheard for
+     MESH_RECORD_AGE_NS whose node the map no longer holds compares with nothing (s14's MaxAge) */
+  const int aged=k && !held && k->heard && now-k->heard>MESH_RECORD_AGE_NS;
+  if(k && k->boot && !aged && (heard.boot<k->boot || (heard.boot==k->boot && heard.sequence<=k->sequence))){
+    /* the newest known of a node the map dropped while no paired path reached it: put again where a path now does,
+       and sent on only then (a pruned record that no path reaches stops here) */
+    if(!held && heard.boot==k->boot && heard.sequence==k->sequence){
+      map_put(&heard);
+      for(uint32_t p=0;record_held(heard.node) && p<port_count;p++)
+        if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);
+    }
+    return;
+  }
   if(held && (heard.boot<held->boot || (heard.boot==held->boot && heard.sequence<=held->sequence)))return;
   /* design/recovery.md#diagnosis: a node that joins or comes back, and a peer's urgent change, are logged here */
-  struct known *k=known_at(heard.node);
   char text[768];
   if(!held && k && (k->gone || !k->heard)){
     health_text(&heard.health,text,sizeof text);
@@ -1082,7 +1659,7 @@ static void record_heard(struct port *from,const unsigned char *payload,uint32_t
     health_text(&heard.health,text,sizeof text);
     say("node %u (%s) health: %s\n",heard.node,heard.name,text);
   }
-  if(k){k->heard=now;k->gone=0;memcpy(k->session,heard.health.session,sizeof k->session);}
+  if(k){k->heard=now;k->gone=0;k->boot=heard.boot;k->sequence=heard.sequence;memcpy(k->session,heard.health.session,sizeof k->session);}
   if(held && record_links_same(held,&heard))health_put(held,&heard);
   else map_put(&heard);
   for(uint32_t p=0;p<port_count;p++)if(ports+p!=from && ports[p].greeted)port_say(ports+p,(struct message){.kind=RECORD},&heard,sizeof heard);
@@ -1094,6 +1671,114 @@ static void link_set(struct port *port,uint32_t peer,uint32_t phase,int64_t code
   atomic_store_explicit(&link->peer,peer,memory_order_relaxed);atomic_store_explicit(&link->code,code,memory_order_relaxed);
   atomic_store_explicit(&link->phase,phase,memory_order_release);
   if(changed)record_changed();
+}
+
+/* design/bridge-and-ipc.md#lanes: a lanes job on the port's queue: their queue pairs and completion queues made
+   (LANES_MAKING); ready to receive from the peer's and to send, each lane listening for its first header, the port's
+   progress threads started and the lanes up (LANES_CONNECTING); or down once neither progress thread reads them, their
+   queue pairs destroyed and their generation moved (LANES_CLOSING) */
+static void lanes_job(struct port *port,int job){
+  struct lanes *l=&port->lanes;
+  l->job=job;atomic_store_explicit(&l->done,0,memory_order_relaxed);
+  dispatch_async(port->work,^{
+    int result=0;
+    if(job==LANES_MAKING)result=pair_up(&l->provider,MESH_LANES);
+    else if(job==LANES_CONNECTING){
+      result=pair_receive(&l->provider,(const uint32_t (*)[2])l->peer,port->heard.lid,port->heard.gid);
+      if(!result)result=pair_send(&l->provider);
+      const uint32_t sends=(uint32_t)l->provider.sent->cqe/MESH_LANES;
+      for(uint32_t lane=0;!result && lane<MESH_LANES;lane++){
+        l->gate[lane]=(struct send_gate){.capacity=MIN(l->provider.queues[lane].send_capacity,sends)};
+        l->sent[lane]=l->received[lane]=0;l->cursor[lane]=0;
+        result=lane_listen(port,lane);
+      }
+      if(!result)result=port_threads(port);
+      if(!result){atomic_store_explicit(&l->up,1,memory_order_release);bell_ring();}
+    }else{
+      atomic_store_explicit(&l->up,0,memory_order_release);
+      port_settle(port);
+      result=down_pair(&l->provider)?0:EBUSY;
+      if(!result)l->generation++;
+    }
+    l->result=result;
+    port_pairs(port);
+    atomic_store_explicit(&l->done,1,memory_order_release);
+    wake();
+  });
+}
+/* the frames of payload a lane's receive queue takes beside its header: its queue pair's and its share of the receive
+   completion queue, less the header's frame */
+static uint32_t lanes_room(const struct lanes *l){
+  uint32_t room=(uint32_t)l->provider.completion->cqe/MESH_LANES;
+  for(uint32_t lane=0;lane<MESH_LANES;lane++)room=MIN(room,l->provider.queues[lane].receive_capacity);
+  return room>1?room-1:0;
+}
+/* the port's flows stepped (its lanes changed) */
+static void port_step(struct port *port){
+  for(struct flow *f=flows,*next;f;f=next){next=f->next;if(f->port==port)flow_step(f);}
+}
+/* design/bridge-and-ipc.md#lanes: the port's lanes' turn, on the event loop: a job's end taken (made: LANES told the
+   peer, its queue pairs and its room; connected: up, and the port's flows stepped; closed: down, the device's queue
+   pairs given back; a failure the lanes', told the peer as a LANES of none and its code); a lane's failure is the
+   link's; the lanes made once the port pairs (the device's room for them committed), connected once both ends made
+   theirs, closed once the link went */
+static void lanes_turn(struct port *port){
+  struct lanes *l=&port->lanes;
+  if(l->job){
+    if(!atomic_load_explicit(&l->done,memory_order_acquire))return;
+    const int job=l->job,result=l->result;
+    l->job=0;
+    if(job==LANES_CLOSING){
+      if(result)say("link %u (%s): lanes teardown: %s\n",port->index,port->name,strerror(result));
+      else{l->state=LANES_DOWN;if(l->committed)port->committed-=MESH_LANES;l->committed=0;}
+    }else if(l->state==LANES_CLOSING){}
+    else if(result){
+      l->state=LANES_FAILED;l->code=result;
+      say("link %u (%s): lanes %s: %s; programs on them fail, those with queue pairs of their own run\n",port->index,port->name,
+          job==LANES_MAKING?"not made":"not connected",strerror(result));
+      port_say(port,(struct message){.kind=LANES,.count=0,.code=result},NULL,0);
+      port_step(port);
+    }else if(job==LANES_MAKING){
+      l->state=LANES_MADE;l->room=lanes_room(l);
+      struct message said={.kind=LANES,.count=MESH_LANES,.code=l->room};
+      for(uint32_t lane=0;lane<MESH_LANES;lane++){said.pair[lane][0]=l->provider.queues[lane].pair->qp_num;said.pair[lane][1]=(l->provider.psn+lane)&0xffffff;}
+      port_say(port,said,NULL,0);
+    }else{
+      l->state=LANES_UP;
+      say("link %u (%s): lanes up toward node %u: %u queue pairs, %u frames a header\n",port->index,port->name,port->peer,MESH_LANES,
+          MIN(l->room,l->peer_room));
+      port_step(port);
+    }
+  }
+  const int64_t failed=atomic_exchange(&l->failed,0);
+  if(failed && port->greeted){
+    say("link %u (%s): a lane failed: %s\n",port->index,port->name,strerror((int)failed));
+    port_lost(port,failed,0);
+  }
+  if(l->job)return;
+  if(l->state==LANES_CLOSING && now>=l->retry){l->retry=now+MESH_PAUSE_NS;lanes_job(port,LANES_CLOSING);}
+  else if(port->greeted && l->state==LANES_DOWN){
+    const int code=!l->pages?ENOMEM:port->committed+MESH_LANES>port->device.max_pairs?ENOSPC:0;
+    if(code){
+      l->state=LANES_FAILED;l->code=code;
+      say("link %u (%s): lanes not made: %s\n",port->index,port->name,strerror(code));
+      port_say(port,(struct message){.kind=LANES,.count=0,.code=code},NULL,0);
+    }else{port->committed+=MESH_LANES;l->committed=1;l->state=LANES_MAKING;lanes_job(port,LANES_MAKING);}
+  }
+  else if(port->greeted && l->state==LANES_MADE && l->heard){l->state=LANES_CONNECTING;lanes_job(port,LANES_CONNECTING);}
+}
+/* a peer's LANES: its lanes' queue pairs and the frames a header may name, or (count 0) its lanes failed, with why */
+static void lanes_heard(struct port *port,const struct message *heard){
+  struct lanes *l=&port->lanes;
+  if(heard->count!=MESH_LANES){
+    if(l->state!=LANES_FAILED)say("link %u (%s): node %u's lanes failed: %s\n",port->index,port->name,port->peer,strerror((int)heard->code));
+    if(l->state==LANES_MADE || l->state==LANES_DOWN){l->state=LANES_FAILED;l->code=heard->code?heard->code:EPROTO;}
+    port_step(port);
+    return;
+  }
+  memcpy(l->peer,heard->pair,sizeof l->peer);
+  l->peer_room=(uint32_t)heard->code;l->heard=1;
+  lanes_turn(port);
 }
 
 /* design/bridge-and-ipc.md#protocol */
@@ -1114,11 +1799,20 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
   if(heard->kind==RECORD){record_heard(port,payload,heard->bytes);return;}
   if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;return;}
   if(heard->kind==READY){ready_heard(port,heard,payload);return;}
+  if(heard->kind==LANES){lanes_heard(port,heard);return;}
   struct flow *f=flow_on(port,heard->key,heard->to,heard->from);
   if(!f)return;
   const uint32_t origin=heard->failed?heard->failed:port->peer;
-  if(heard->kind==PAIRS && heard->count!=(uint32_t)f->qps)flow_fail(f,EPROTO,4,FAIL,port->peer,M->node);
-  else if(heard->kind==PAIRS){memcpy(f->pairs,heard->pair,sizeof f->pairs);f->heard|=HEARD_PAIRS;}
+  if(heard->kind==PAIRS){
+    /* #lanes: an exclusive flow's PAIRS its queue pairs, a lane rider's (count 0) its index and generation */
+    const int error=flow_mode(f,heard->count!=0)?EPROTO:f->exclusive && heard->count!=(uint32_t)f->qps?EPROTO:0;
+    if(error)flow_fail(f,error,4,FAIL,port->peer,M->node);
+    else{
+      if(f->exclusive)memcpy(f->pairs,heard->pair,sizeof f->pairs);
+      else{f->peer_slot=(uint32_t)heard->code;f->peer_generation=(uint32_t)((uint64_t)heard->code>>32);}
+      f->heard|=HEARD_PAIRS;
+    }
+  }
   else if(heard->kind==POSTED)f->heard|=HEARD_POSTED;
   else if(heard->kind==END)flow_fail(f,ECONNRESET,4,0,origin,origin);
   else if(heard->kind==FAIL)flow_fail(f,ECANCELED,4,0,origin,origin);
@@ -1141,6 +1835,10 @@ static void port_lost(struct port *port,int64_t code,int retire){
     else say("link %u (%s): lost: code %lld%s\n",port->index,port->name,(long long)code,retired);
   }
   for(struct flow *f=flows;f;f=f->next)if(f->port==port)flow_fail(f,port->parted?ECONNRESET:code,4,0,port->peer,M->node);
+  /* #lanes: closed once its flows' stops (queued before) have run */
+  atomic_store_explicit(&port->lanes.up,0,memory_order_release);
+  if(port->lanes.state!=LANES_DOWN)port->lanes.state=LANES_CLOSING;
+  port->lanes.heard=0;
   port->greeted=port->parted=port->connecting=port->writing=0;port->farewell=0;port->peer=0;port->held=0;port->out_length=port->out_sent=0;
   port->retiring|=retire;port->open&=!retire;port->next=now+MESH_PAUSE_NS;
   link_set(port,0,retire?MESH_STOPPED:MESH_PAIRING,code);
@@ -1164,29 +1862,42 @@ static struct port *port_at(uint32_t interface){
   return NULL;
 }
 /* design/bridge-and-ipc.md#ports: a port's turn: on its own queue, its device retired where its port went away (once no
-   flow holds queue pairs on it), else opened and its port read; then, while it has no peer, its hello sent to every
+   flow and no lane holds queue pairs on it), else opened and its port read; then, while it has no peer, its hello sent to every
    node on its link */
 static void port_turn(struct port *port){
-  if(port->job || port->control>=0 || now<port->next || (port->retiring && port->flows))return;
+  if(port->job || port->control>=0 || now<port->next || (port->retiring && (port->flows || port->lanes.state!=LANES_DOWN)))return;
   port->next=now+MESH_PAUSE_NS;
   port->interface=if_nametoindex(port->name);
   const int retire=port->retiring;
   port->job=1;atomic_store_explicit(&port->done,0,memory_order_relaxed);
   dispatch_async(port->work,^{
-    int result=0;
+    int result=0,refused=0;
     if(retire && !down_device(&port->device))result=-(errno?errno:EBUSY);
-    else if(device_up(&port->device,&wire) || ibv_query_gid(port->device.context,1,0,&port->device.gid))result=errno?errno:EIO;
-    port->result=result;
+    else if(!(result=device_up(&port->device,&wire,&refused)) && ibv_query_gid(port->device.context,1,0,&port->device.gid))result=errno?errno:EIO;
+    port->result=result;port->refused=refused;
     atomic_store_explicit(&port->done,1,memory_order_release);
     wake();
   });
 }
+/* design/recovery.md#registration: a port's turn taken: a device whose registration of the window it refused keeps the
+   extents it took and turns again a pause later, 60 s doubling to 30 min (device_up logged the extent and why); a
+   device that failed otherwise, its link active, is retired */
 static void port_opened(struct port *port){
   const int result=port->result;
   port->job=0;
   if(result<0){say("link %u (%s): device retirement: %s\n",port->index,port->name,strerror(-result));return;}
+  if(port->refused){
+    port->backoff=port->backoff?MIN(2*port->backoff,MESH_REFUSED_MOST_NS):MESH_REFUSED_NS;
+    port->next=now+port->backoff;
+    say("link %u (%s): the window's registration refused (%s): the port turns again in %.0f s\n",port->index,port->name,
+        strerror(port->refused),(double)port->backoff/1e9);
+    port->open=0;if(port->control<0)link_set(port,0,MESH_STOPPED,result);
+    return;
+  }
   port->retiring=result && port->device.context && result!=ENETDOWN;
   if(result){port->open=0;if(port->control<0)link_set(port,0,MESH_STOPPED,result);return;}
+  port->backoff=0;
+  atomic_store_explicit(&mesh_links(M)[port->index].max_pairs,port->device.max_pairs,memory_order_relaxed);
   port->open=1;port->lid=port->device.port.lid;memcpy(port->gid,&port->device.gid,16);
   port->bandwidth=port_bandwidth(&port->device.port);
   if(port->control>=0)return;
@@ -1270,6 +1981,10 @@ static void ports_found(void){
     if(known)continue;
     struct port *port=ports+port_count;
     *port=(struct port){.index=port_count,.control=-1,.work=dispatch_queue_create("mesh.port",DISPATCH_QUEUE_SERIAL)};
+    /* design/bridge-and-ipc.md#lanes: the lanes' headers and discard blocks, arena pages the bridge keeps for the port */
+    port->lanes.pages=lane_pages();
+    port->lanes.page=mesh_arena_alloc(&bridge,port->lanes.pages,1);
+    if(port->lanes.page==MESH_ABSENT){port->lanes.page=0;port->lanes.pages=0;}
     snprintf(port->device.name,sizeof port->device.name,"%s",devices[i]);snprintf(port->name,sizeof port->name,"%s",devices[i]+5);
     port_count++;
     link_set(port,0,MESH_STOPPED,0);
@@ -1296,36 +2011,73 @@ static void network_heard(void){
   if(unknown)ports_find();
 }
 
-/* design/bridge-and-ipc.md#clients: a started program's destination taken onto its ports: over the cables paired with
-   its node, its queues spread over them in cable order (queue q on cable q mod n), else along the map's route over the
-   first hop's cable, a READY on each; a flow held here for its key taken alike, its sides the client's (its one job
-   before, JOB_PAIR, reads none), its READY telling a relay on the route the program's other direction, its receives
-   then posted (flow_step).  Refused as a value naming the node where neither reaches it (EHOSTUNREACH) or it is this
-   node (EINVAL) */
+/* the queues (its highest queue with a list, plus one) and slots of a client's program toward its destination `d` */
+static uint32_t program_queues(uint64_t owner,uint32_t d){
+  uint32_t queues=0;
+  for(uint32_t q=0;q<MESH_QUEUES;q++)for(int w=0;w<2;w++)if(atomic_load(mesh_order_length(M,owner,d*MESH_QUEUES+q,w)))queues=q+1;
+  return queues;
+}
+/* the flow a READY of execution `key` from `far` left held here, on any port, for the client whose program takes it */
+static struct flow *flow_held(uint64_t key,uint32_t far){
+  for(struct flow *f=flows;f;f=f->next)if(f->hold && f->key==key && f->near==M->node && f->far==far && f->state!=FAILED && !f->stopping)return f;
+  return NULL;
+}
+/* design/bridge-and-ipc.md#clients, #cables, #routes: a started program's destination taken onto its ports.  Over the
+   cables paired with its node, a flow a cable in the cable order both ends read alike, flow j carrying the program's
+   invocations t with t mod n = j, each asking for queue pairs of its own (#lanes); else along a route, which the
+   pair's lower node chooses on its map and both ends take: the lower's flow on the lanes of the cable of the route's
+   first hop the pair's hash picks, its READY carrying the route; the higher's program awaits the lower's READY
+   (ready_heard) or takes the flow it already left held, its READY going back along the relays that READY made.  Its
+   flows' sides the client's, a READY on each, its receives then posted (flow_step).  Refused as a value naming the
+   node where it is this node (EINVAL) or no route reaches it (EHOSTUNREACH), and naming this node where its table is
+   full (E2BIG) or a flow of its key toward the node runs for another program (EBUSY) */
 static void program_take(struct mesh_client *client,uint64_t owner,uint32_t d){
-  const uint32_t node=client->tx[d].node;
+  const uint32_t node=client->tx[d].node,slots=client->tx[d].slots,queues=program_queues(owner,d);
+  if(!node || node==M->node){status_failed(&client->status[d],owner,EINVAL,4,node);return;}
   struct port *cable[MESH_PORTS];
-  uint32_t *route=NULL,hops=0,n=node==M->node?0:cables(node,cable);
-  if(!n && node!=M->node && (hops=mesh_route(M,M->node,node,&route))>=2)n=cables(route[1],cable)?1:0;
-  if(!n){free(route);status_failed(&client->status[d],owner,node==M->node?EINVAL:EHOSTUNREACH,4,node);return;}
-  const uint32_t step=hops?1:n,slots=client->tx[d].slots;
-  for(uint32_t j=0;j<n && j<MESH_QUEUES;j++){
-    uint32_t queues=0;
-    for(uint32_t q=j;q<MESH_QUEUES;q+=step)for(int w=0;w<2;w++)if(atomic_load(mesh_order_length(M,owner,d*MESH_QUEUES+q,w)))queues=(q-j)/step+1;
-    if(!queues)continue;
+  const uint32_t n=cables(node,cable);
+  atomic_store_explicit(&client->status[d].phase,MESH_PAIRING,memory_order_relaxed);
+  /* #routes: the peer's routed READY held here while this end sees cables to it: the two ends' maps differ */
+  struct flow *held=n?flow_held(client->key,node):NULL;
+  for(uint32_t j=0;held && j<n;j++)if(held->port==cable[j])held=NULL;
+  if(held){
+    say("link %u (%s): program %016llx: node %u's READY came routed while this end has cables to it (the two ends' maps "
+        "differ): refused\n",held->port->index,held->port->name,(unsigned long long)client->key,node);
+    flow_fail(held,EPROTO,4,FAIL,M->node,M->node);
+    program_fail(owner,d,EPROTO);
+    return;
+  }
+  for(uint32_t j=0;j<n;j++){
     struct flow *f=flow_on(cable[j],client->key,M->node,node);
-    if(f && !f->hold){status_failed(&client->status[d],owner,EBUSY,4,M->node);break;}
-    if(f && (f->queue!=j || f->step!=step || f->queues!=queues || (uint32_t)f->qps!=queues*slots)){flow_fail(f,EPROTO,4,FAIL,M->node,M->node);f=NULL;}
-    if(!f && !(f=flow_make(cable[j],client->key,M->node,node,j,step,queues,slots))){status_failed(&client->status[d],owner,E2BIG,4,M->node);break;}
-    f->side[MESH_SEND]=f->side[MESH_RECEIVE]=(struct side){owner,d,NULL};
-    flow_program(f,owner,d);
-    if(f->hold)f->deadline=now+MESH_PAIR_NS;
-    f->hold=0;
-    atomic_store_explicit(&client->status[d].phase,MESH_PAIRING,memory_order_relaxed);
-    if(hops)ready_say(f,route+1,hops-1);
-    else ready_say(f,&node,1);
+    if(f && !f->hold){program_fail(owner,d,EBUSY);return;}
+    if(f && (f->stripe!=j || f->stripes!=n || f->queues!=queues || (uint32_t)f->qps!=queues*slots)){flow_fail(f,EPROTO,4,FAIL,M->node,M->node);f=NULL;}
+    if(!f && !(f=flow_make(cable[j],client->key,M->node,node,queues,slots,j,n,1))){program_fail(owner,d,E2BIG);return;}
+    flow_take(f,owner,d);
+    ready_say(f,&node,1);
     flow_step(f);
   }
+  if(n)return;
+  struct flow *f=flow_held(client->key,node);
+  if(f && (f->queues!=queues || (uint32_t)f->qps!=queues*slots || f->stripes!=1)){flow_fail(f,EPROTO,4,FAIL,M->node,M->node);f=NULL;}
+  if(f){flow_take(f,owner,d);ready_say(f,&f->far,1);flow_step(f);return;}
+  uint32_t *route=NULL;
+  const uint32_t hops=mesh_route(M,M->node,node,&route);
+  struct port *next[MESH_PORTS];
+  const uint32_t m=hops>=2?cables(route[1],next):0;
+  if(!m){free(route);status_failed(&client->status[d],owner,EHOSTUNREACH,4,node);return;}
+  if(M->node>node){
+    free(route);
+    struct await *a=calloc(1,sizeof *a);
+    if(!a){status_failed(&client->status[d],owner,ENOMEM,4,M->node);return;}
+    *a=(struct await){.next=awaits,.key=client->key,.owner=owner,.created=now,.destination=d,.far=node};
+    awaits=a;
+    return;
+  }
+  f=flow_make(next[pair_hash(client->key,M->node,node)%m],client->key,M->node,node,queues,slots,0,1,0);
+  if(!f){free(route);program_fail(owner,d,E2BIG);return;}
+  flow_take(f,owner,d);
+  ready_say(f,route+1,hops-1);
+  flow_step(f);
   free(route);
 }
 /* design/bridge-and-ipc.md#clients: every client slot read: a slot's process watched from the turn its slot is first
@@ -1333,7 +2085,6 @@ static void program_take(struct mesh_client *client,uint64_t owner,uint32_t d){
    liveness turn any client whose process exited retired; a program that ended (stopped, its client gone) leaves its
    ports; a program started is taken toward each destination it binds, once no flow of the slot's earlier client
    remains.  Rows of a retired client or lease are released once no flow of one remains */
-static uint64_t owners[MESH_CLIENTS],accepted[MESH_CLIENTS];
 static void clients_turn(int liveness){
   const pid_t self=getpid();
   int changed=0,zombie=0;
@@ -1379,6 +2130,13 @@ static void flows_turn(void){
     const int64_t failed=atomic_load(&f->failed);
     if(failed)flow_fail(f,failed,atomic_load(&f->domain),FAIL,M->node,M->node);
     else if(f->state!=RUNNING && now>f->deadline)flow_fail(f,ETIMEDOUT,4,FAIL,f->far,f->far);
+  }
+  /* #routes: a program awaiting its lower peer's READY: dropped with its program, failed past the peer window naming
+     the peer */
+  for(struct await *a=awaits,*next;a;a=next){
+    next=a->next;
+    if(!owned(a->owner) || atomic_load(&mesh_client_at(M,a->owner)->configured)!=a->owner)await_drop(a);
+    else if(now>a->created+MESH_PEER_NS){status_failed(&mesh_client_at(M,a->owner)->status[a->destination],a->owner,ETIMEDOUT,4,a->far);await_drop(a);}
   }
 }
 
@@ -1454,12 +2212,6 @@ int main(int argc,char **argv){
   const uint32_t pg=(uint32_t)getpagesize();
   /* design/collective-dependency-ledger.md#d6-paired-send-and-receive-frame-counts-match */
   if((uint64_t)pg+4096>16773120)die("transport chunk exceeds native request capacity");
-  const uint64_t extents=(window+MESH_REGION-1)/MESH_REGION,registrable=window_registrable();
-  if(extents>registrable){
-    say("bridge configuration %s refused: its window of %llu bytes is %llu extents of %zu bytes, past the %llu the node's RDMA devices register (max_mr)\n",
-      name,(unsigned long long)window,(unsigned long long)extents,MESH_REGION,(unsigned long long)registrable);
-    exit(1);
-  }
   if(window<pg || window/pg>UINT32_MAX){say("bridge configuration %s refused: its window of %llu bytes is not between one page and 2^32 pages\n",name,(unsigned long long)window);exit(1);}
   struct hdr geometry={0};
   uint64_t length=mesh_layout(&geometry,pg,1,(uint32_t)(window/pg));
@@ -1476,6 +2228,10 @@ int main(int argc,char **argv){
   close(fd);
   bridge.M=M;
   finder=dispatch_queue_create("mesh.ports",DISPATCH_QUEUE_SERIAL);
+  /* design/bridge-and-ipc.md#records: the node's memory and hardware model, which its record carries with its window */
+  size_t size=sizeof memory;
+  if(sysctlbyname("hw.memsize",&memory,&size,NULL,0))memory=0;
+  sysctl_text("hw.model",model,sizeof model);
   events=kqueue();
   health_init();
   record_changed();
@@ -1513,6 +2269,7 @@ int main(int argc,char **argv){
       if(port->job && atomic_load_explicit(&port->done,memory_order_acquire))port_opened(port);
       if((port->connecting || (port->control>=0 && !port->greeted)) && now>port->next)port_lost(port,ETIMEDOUT,0);
       port_turn(port);
+      lanes_turn(port);
     }
     flows_turn();
     health_turn();
@@ -1571,6 +2328,12 @@ int main(int argc,char **argv){
     struct port *port=ports+p;
     dispatch_sync(port->work,^{
       for(struct flow *f=flows;f;f=f->next)if(f->port==port)flow_release(f);
+      atomic_store_explicit(&port->lanes.up,0,memory_order_release);
+      port_settle(port);
+    });
+    port_still(port);
+    dispatch_sync(port->work,^{
+      if(!down_pair(&port->lanes.provider))say("link %u (%s): lanes teardown: %s\n",port->index,port->name,strerror(errno));
       if(!down_device(&port->device))say("link %u (%s): verbs teardown: %s\n",port->index,port->name,strerror(errno));
     });
   }

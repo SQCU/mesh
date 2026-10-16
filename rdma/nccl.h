@@ -37,16 +37,18 @@
    shortest-path trees (or the caller's paths) and along the packed trees, an all-reduce also the single-phase one,
    each cut into 1, 2, 4, ... chunks while that is faster (the trees pipelined).  A call runs the first of its
    collective whose size bound its operand is under; ncclCollConfig_t.algSelection is not read.  The members agree
-   before any group runs: each publishes its digest of what its programs are made from (its members' map, the
-   planner's version, the caller's paths and programs) on every channel at the session's opening and compares its
-   peers', so members that read the map on either side of a change fail the session as a value naming the
+   before any group runs: each publishes its digest of what its programs are made from (the route between each two
+   members and the costs of the links it crosses, the planner's version, the caller's paths and programs) on every
+   channel at the session's opening and compares its peers', so members that read the map on either side of a change fail the session as a value naming the
    disagreement (ncclRemoteError), never run programs of two maps, and the next group opens on the map then.  A group
    (ncclGroupStart/End; a call outside one is a group of one) walks each call's program (mesh_program_steps; a
    point-to-point call one step) on its communicator's session: its program's own slot on the process's client of its
    node's bridge (Memory, below), taken under its name at its first group that crosses a link and again after a
-   failure.  A session is never closed by a change of the map: it runs on its agreed map until a link or node its
-   channels' routes cross is lost (the bridges fail its flows), so a change elsewhere costs it nothing, and its members
-   each open the next after their own failure.  A message to a rank the map does not link takes the first link of its
+   failure.  A change of the map that leaves the session's routes and the costs of their links as they were (a link or
+   node elsewhere, a node joining) keeps the session; one that changes them (map_digest) opens it again at its next
+   group, so every group runs on the map current when it starts, a member that reopens first failing the group a peer
+   had in flight on the old session that once (a call may fail where the topology changed under it), the agreement
+   keeping every group on one map; a link or node a route crosses lost fails the session on every member.  A message to a rank the map does not link takes the first link of its
    route, and the bridges forward it along the rest.  Every position a rank receives on is checked against its role,
    so calls that do not pair (a separate send and receive in the same order on two ranks, unequal counts, different
    collectives) are ncclInvalidUsage.

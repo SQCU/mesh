@@ -9,11 +9,11 @@ native-audit: .build/mesh-flow.s .build/mesh-call.s .build/mesh-dataflow.s
 LIBMESH = -L. -lmesh -Wl,-rpath,@loader_path -Wl,-rpath,@loader_path/../rdma
 mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h libmesh.dylib Makefile
 	mkdir -p .build
-	cc $(CPPFLAGS) -fblocks -O2 -o .build/$@ mesh-flow.c $(LIBMESH) -lrdma -framework SystemConfiguration -framework CoreFoundation -framework IOKit
+	cc $(CPPFLAGS) -fblocks -O2 -Wall -Wextra -Werror -o .build/$@ mesh-flow.c $(LIBMESH) -lrdma -framework SystemConfiguration -framework CoreFoundation -framework IOKit
 	codesign --force --sign "$(MESH_CODESIGN_IDENTITY)" --identifier io.mesh.bridge .build/$@ || codesign --force --sign - --identifier io.mesh.bridge .build/$@
 	mv -f .build/$@ $@
 mesh-stat: mesh-stat.c mesh.h mesh-plan.h libmesh.dylib Makefile
-	cc -O2 -o $@ mesh-stat.c $(LIBMESH)
+	cc -O2 -Wall -Wextra -Werror -o $@ mesh-stat.c $(LIBMESH)
 # NCCL's API (nccl.h) on the prepared transfers and the collective planner of libmesh.dylib; every function also
 # under its pncclX profiling name, as NCCL exports both
 NCCL_API = ncclMemAlloc ncclMemFree ncclGetVersion ncclGetUniqueId ncclCommInitRankConfig ncclCommInitRank \
@@ -37,7 +37,7 @@ libmesh-coreml.dylib: mesh-coreml.m Makefile
 	cc -fobjc-arc -O2 -Wall -Wextra -Werror -dynamiclib -Wl,-install_name,@rpath/libmesh-coreml.dylib -o $@ mesh-coreml.m \
 	  -framework CoreML -framework Foundation
 libmesh.dylib: mesh-dataflow.c mesh-dataflow.h mesh-call.c mesh-call.h mesh-collective.c mesh-collective.h mesh.h mesh-plan.h Makefile
-	cc -fblocks -O2 -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c
+	cc -fblocks -O2 -Wall -Wextra -Werror -dynamiclib -Wl,-install_name,@rpath/libmesh.dylib -o $@ mesh-dataflow.c mesh-call.c mesh-collective.c
 clean:
 	rm -f $(BINS)
 .PHONY: all clean native-audit

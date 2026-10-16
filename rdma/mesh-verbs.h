@@ -76,21 +76,6 @@ static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
   if(wire->data==MAP_FAILED){wire->data=NULL;return -1;}
   return 0;
 }
-/* design/prepared-machine.md#M09: the most extents every RDMA device of the node registers (the least max_mr among
-   them), read before any device is up; UINT64_MAX where the node has none yet */
-static uint64_t window_registrable(void){
-  uint64_t registrable=UINT64_MAX;
-  struct ibv_device **list=ibv_get_device_list(NULL);
-  for(int i=0;list && list[i];i++){
-    if(strncmp(ibv_get_device_name(list[i]),"rdma_",5))continue;
-    struct ibv_context *context=ibv_open_device(list[i]);
-    struct ibv_device_attr capabilities;
-    if(context && !ibv_query_device(context,&capabilities) && (uint64_t)capabilities.max_mr<registrable)registrable=(uint64_t)capabilities.max_mr;
-    if(context)ibv_close_device(context);
-  }
-  if(list)ibv_free_device_list(list);
-  return registrable;
-}
 static const char *shm; static _Atomic sig_atomic_t stop;
 /* design/prepared-machine.md#M11 */
 /* design/RDMA-KERNEL-RECOVERY.md: queue pairs, then completion queues; a failed destruction keeps its handle for the
@@ -138,34 +123,50 @@ static void die(const char*m){ say("%s\n",m); exit(1); }
 /* design/prepared-machine.md#M09 */
 /* design/bridge-and-ipc.md#ports: the port's device opened (by its name, the device list read again) and its port
    active, its protection domain, the whole window registered on it and its capacities read once a context, before any
-   queue pair exists (design/prepared-machine.md#M09).  0, or -1 with errno (ENETDOWN: the port is not active; ENODEV:
-   no such device now; a registration's refusal, the device then not up). */
-static int device_up(struct mesh_device *device,struct mesh_wire *wire){
+   queue pair exists (design/prepared-machine.md#M09), on the port's own queue (design/recovery.md Q14).  0, or the
+   errno (ENETDOWN: the port is not active; ENODEV: no such device now).  A registration the device refuses sets
+   *refused to its code (EFBIG: the window's extents past the device's max_mr; else ibv_reg_mr's errno), logged with
+   the extent, and keeps the device and the extents it registered, so its next turn registers the rest
+   (design/recovery.md#registration). */
+static int device_up(struct mesh_device *device,struct mesh_wire *wire,int *refused){
+  *refused=0;
   if(!device->context){
     struct ibv_device **list=ibv_get_device_list(NULL);
     for(int i=0;list && list[i];i++)if(!strcmp(device->name,ibv_get_device_name(list[i]))){device->context=ibv_open_device(list[i]);break;}
     if(list)ibv_free_device_list(list);
-    if(!device->context){errno=ENODEV;return -1;}
+    if(!device->context)return ENODEV;
   }
-  if(ibv_query_port(device->context,1,&device->port))return -1;
-  if(device->port.state!=IBV_PORT_ACTIVE){errno=ENETDOWN;return -1;}
+  if(ibv_query_port(device->context,1,&device->port))return errno?errno:EIO;
+  if(device->port.state!=IBV_PORT_ACTIVE)return ENETDOWN;
   if(device->frame_capacity)return 0;
   struct ibv_device_attr capabilities;
-  if(ibv_query_device(device->context,&capabilities))return -1;
-  if(!device->domain && !(device->domain=ibv_alloc_pd(device->context)))return -1;
+  if(ibv_query_device(device->context,&capabilities))return errno?errno:EIO;
+  if(!device->domain && !(device->domain=ibv_alloc_pd(device->context)))return errno?errno:EIO;
   const uint32_t extents=(uint32_t)((wire->length+MESH_REGION-1)/MESH_REGION);
-  if(!device->regions && !(device->regions=calloc(extents,sizeof *device->regions))){errno=ENOMEM;return -1;}
+  if((uint64_t)extents>(uint64_t)(capabilities.max_mr>0?capabilities.max_mr:0)){
+    say("%s: the window of %zu bytes is %u extents of %zu bytes, past the device's max_mr %d: refused\n",device->name,
+      wire->length,extents,MESH_REGION,capabilities.max_mr);
+    *refused=EFBIG;return EFBIG;
+  }
+  if(!device->regions && !(device->regions=calloc(extents,sizeof *device->regions)))return ENOMEM;
   device->extents=extents;
   const uint64_t began=clock_gettime_nsec_np(CLOCK_MONOTONIC);
   for(size_t e=0,first=0;e<extents;e++,first+=MESH_REGION){
     const size_t bytes=wire->length-first<MESH_REGION?wire->length-first:MESH_REGION;
-    if(!device->regions[e] && !(device->regions[e]=ibv_reg_mr(device->domain,wire->data+first,bytes,IBV_ACCESS_LOCAL_WRITE)))return -1;
+    if(!device->regions[e] && !(device->regions[e]=ibv_reg_mr(device->domain,wire->data+first,bytes,IBV_ACCESS_LOCAL_WRITE))){
+      const int error=errno?errno:EIO;
+      uint32_t held=0;
+      for(uint32_t k=0;k<extents;k++)held+=device->regions[k]!=NULL;
+      say("%s: extent %zu of %u (%zu bytes at %zu) refused: %s; %u of the window's extents registered, max_mr %d\n",
+        device->name,e,extents,bytes,first,strerror(error),held,capabilities.max_mr);
+      *refused=error;return error;
+    }
   }
   say("%s: window of %zu bytes (%u extents) registered in %.3f s\n",device->name,wire->length,device->extents,
     (double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-began)/1e9);
   device->wire=wire->data;device->max_pairs=(uint32_t)capabilities.max_qp;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
-  if(capabilities.max_cqe<=1 || !capacity){errno=EOPNOTSUPP;return -1;}
+  if(capabilities.max_cqe<=1 || !capacity)return EOPNOTSUPP;
   device->frame_capacity=capacity>=(uint32_t)capabilities.max_cqe?(uint32_t)capabilities.max_cqe-1:capacity;
   return 0;
 }
