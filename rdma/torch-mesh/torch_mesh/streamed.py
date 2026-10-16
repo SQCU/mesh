@@ -36,7 +36,8 @@ planes, simdgroups, partials and register pressure over the node's cores, the ch
 the waves the node holds; one set of coefficients a kernel family (streamed_alu with streamed_couple, streamed_coop,
 streamed_panel) a node, fitted by least squares in log space with a ridge toward the prior from the node's
 observations (each probe's and profile's measured instance: rows of the evidence file, MESH_INSTANCES or
-~/.cache/mesh/instances.json, which holds the coefficients too; a node without evidence prices by the prior). A
+~/.cache/mesh/instances.json, which holds the coefficients too, made on a node of its chip and GPU cores: a node
+without it, or with another chip's or core count's, is refused). A
 choice is the argmin over the admissible instances of a slice at its rows: of the instances served readings read at that
 slice and rows (observe's rows, each its readings' median) where there are any, a measurement at a shape outranking the
 model there, else of the fit's prices (every measurement, a probe's too, moves the coefficients for every other shape).
@@ -114,13 +115,16 @@ def _dims(tiles=0, outputs=0, rows=0, per=0, stride=0, shares=0, split=0, finish
 
 
 def node():
-    """This node's name (its chip) and GPU cores."""
+    """This node's name (its chip) and GPU cores, the one count its registry names (a node whose registry names none, or
+    several, is refused: the fit prices a node by its cores)."""
     import re
     import subprocess
     if 'node' not in _PIPELINES:
         chip = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'], capture_output=True, text=True).stdout.strip()
-        cores = re.search(r'"gpu-core-count" = ([0-9]+)', subprocess.run(['ioreg', '-l'], capture_output=True).stdout.decode('utf-8', 'replace'))
-        _PIPELINES['node'] = (chip, int(cores.group(1)) if cores else 8)
+        cores = set(re.findall(r'"gpu-core-count" = ([0-9]+)', subprocess.run(['ioreg', '-l'], capture_output=True).stdout.decode('utf-8', 'replace')))
+        if len(cores) != 1:
+            raise RuntimeError(f'{chip or "this node"}: its registry names GPU core counts {sorted(cores)}, not one (ioreg gpu-core-count)')
+        _PIPELINES['node'] = (chip, int(cores.pop()))
     return _PIPELINES['node']
 
 
@@ -196,11 +200,23 @@ class Fit:
 
     @classmethod
     def node(cls):
-        """This node's fit from its evidence file, else the prior at its cores and the bandwidth the file names; its
-        configurations the instance shapes the evidence observed (none: every admissible one)."""
-        path = evidence_path()
-        known = json.loads(path.read_text()) if path.exists() else {}
-        made = cls(node()[1], known.get('gbps', 200.0), known.get('coefficients'), known.get('factors'))
+        """This node's fit from its evidence file, made (fit) on a node of its chip and GPU cores at the bandwidth the
+        file names, any such node's (one of four like nodes fitted serves the others; its served readings are those of
+        the node that made it, read where their records are); its configurations the instance shapes the evidence
+        observed (none: every admissible one). A node without evidence, or whose file another chip or core count made,
+        is refused: no prior or other node's coefficients price its instances (metal-microbench
+        docs/kernels.md#the-instance-fit, Evidence)."""
+        path, (chip, cores) = evidence_path(), node()
+        known = json.loads(path.read_text()) if path.exists() else None
+        if known is None:
+            raise RuntimeError(f'{path}: no instance evidence on this {chip} ({cores} GPU cores): its fit probe and '
+                               f'`python -m torch_mesh.streamed fit OBSERVATIONS --gbps G` make it, or another {chip} of '
+                               f'{cores} GPU cores gives its file (metal-microbench docs/kernels.md#the-instance-fit, Evidence)')
+        if (known.get('node'), known.get('cores')) != (chip, cores) or not known.get('gbps') or not known.get('coefficients'):
+            raise RuntimeError(f'{path}: instance evidence of {known.get("node") or "no named node"} ({known.get("cores")} GPU cores, '
+                               f'{known.get("gbps")} GB/s, {"fitted" if known.get("coefficients") else "not fitted"}), '
+                               f'not a fit made on this {chip} ({cores} GPU cores)')
+        made = cls(cores, known['gbps'], known['coefficients'], known.get('factors'))
         made.configurations = {tuple(c) for c in known.get('configurations', [])} or None
         made.admitted = set(known.get('forms_at_bar', {}))
         return made
