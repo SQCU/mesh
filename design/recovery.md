@@ -101,7 +101,7 @@ git's and output_data's to say (AGENTS.md: assignments expire), not this table's
 | Q11 | A cable pull and replug, three times, with time to repair and to the first completed execution recorded | mandates 1, 3, 10 | a measurement on hardware, its record in output_data |
 | Q12 | Recovery costs nothing on the healthy path | mandate 7 | the data path reads no recovery state |
 | Q13 | No per-transfer TCP; TCP at pairing only | mandate 8 | the control socket carries a program's pairing messages and the map's records, nothing per transfer |
-| Q14 | Every blocking call bounded; no unbounded completion-queue poll | RDMA-RULES.md, mandate 12 | the bridge's loop waits 250 ms at most; a port's progress threads park on the region's bell at most 1 ms at a time while anything is theirs (3 s otherwise, design/bridge-and-ipc.md#progress); pairing has its windows; a control socket never blocks: a message queues behind what the socket has not taken and goes on at its write event (mesh-flow.c port_say, port_flush), and the keepalive (1 s idle, 1 s interval, 2 probes) ends a peer that takes none; a teardown that fails keeps its handles for the next turn; a client's start waits at most the peer and pairing windows and a pause (`MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS`, ETIMEDOUT) and ends at once where the bridge is gone (ESRCH). The one exception: a kernel verbs call (opening a device, reading the device list, querying a port, making or destroying a queue pair, registering memory) cannot be bounded from user space, since it can sleep uninterruptibly in the driver (RDMA-RULES.md): the bridge makes them only to open, find, pair and tear down a port's device, never per transfer, each on that port's own thread, so one blocks only that port; the event loop, the other ports and clients' starts go on (design/bridge-and-ipc.md#flows) |
+| Q14 | Every blocking call bounded; no unbounded completion-queue poll | RDMA-RULES.md, mandate 12 | the bridge's loop waits 250 ms at most; a port's progress threads park on their port's bell at most 1 ms at a time while anything is theirs to look for (3 s otherwise, design/bridge-and-ipc.md#progress); pairing has its windows; a control socket never blocks: a message queues behind what the socket has not taken and goes on at its write event (mesh-flow.c port_say, port_flush), and the keepalive (1 s idle, 1 s interval, 2 probes) ends a peer that takes none; a teardown that fails keeps its handles for the next turn; a client's start waits at most the peer and pairing windows and a pause (`MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS`, ETIMEDOUT) and ends at once where the bridge is gone (ESRCH). The one exception: a kernel verbs call (opening a device, reading the device list, querying a port, making or destroying a queue pair, registering memory) cannot be bounded from user space, since it can sleep uninterruptibly in the driver (RDMA-RULES.md): the bridge makes them only to open, find, pair and tear down a port's device, never per transfer, each on that port's own thread, so one blocks only that port; the event loop, the other ports and clients' starts go on (design/bridge-and-ipc.md#flows) |
 | Q15 | Port loss retires all device state; an ordinary reconnection keeps context, PD and registrations | RDMA-KERNEL-RECOVERY.md | a link off or a detached interface retires the device, and no hello or connection reaches the port until its turn has retired the device and opened it again (design/bridge-and-ipc.md#ports) |
 | Q16 | No cross-queue GPU spin; every spun-on word in a canceller's set | memory no_cross_queue_gpu_spins | a failed flow cancels its client's words toward the node (prepared-machine.md M12) |
 | Q19 | A link that answers its peer's hello but not RDMA does not flap at call level | mandate 1 | open: such a link fails its executions' pairing (ETIMEDOUT within the pairing window), or the library's silent bound fails a paired one's (`#detection`); the bridge exchanges nothing of its own over RDMA to tell it |
@@ -123,9 +123,12 @@ library's one bound, its session's progress thread the watcher (rdma/nccl.h).
 A link's loss fails every flow on it: its client's pending words on the link cancelled, its status the loss's code
 (ECONNRESET where the peer said farewell), its queue pairs destroyed, and then the link's lanes (design/bridge-and-ipc.md
 #lanes), once neither progress thread reads them. A failed lane (a completion's error, a header out of step) is its
-link's loss: every flow on the link fails, and the link pairs again a pause later with new lanes. Lanes that could not
-be made (no room on the device, no pages) fail the programs that would ride them, naming the node, and leave the link
-and its exclusive flows working. A loss of the port itself (link off, interface detached) also retires the port's
+link's loss: every flow on the link fails, and the link pairs again a pause later with new lanes. So are lanes that
+could not be made or connected (a verbs call's error: their pages are leased for every port at the bridge's start, and
+their two queue pairs counted before any flow's own, so neither room nor pages refuse them), told the peer first: the
+port then takes no hello and no connection for a pause, 3 s doubling to 30 min while its lanes keep failing, and pairs
+again after it with new lanes, so a link is never paired in the map with lanes that do not carry (at the round's first
+pass such lanes stayed failed, the link paired, until the link itself went). A loss of the port itself (link off, interface detached) also retires the port's
 device: registrations, protection domain and context, once no flow and no lane holds a queue pair on it. A flow's own
 failure is told to the peer (FAIL), which fails its side.
 
@@ -157,8 +160,10 @@ on the M5 held the Mini's last state, and the reason was only in the Mini's powe
   moved). A change of power source, of charge off AC, or of memory or thermal pressure is logged and sent at once; the
   rest rides the record at most 10 s later.
 - Records flood as before (bridge-and-ipc.md), so every bridge holds every node's last health. A change of health
-  alone is written under the region's health serial (`hdr.health`), never the map serial, since a communicator's
-  session opens again where the map serial moved (nccl-mesh.c `session_ensure`): sampling is no change of the mesh.
+  alone is written under the region's health serial (`hdr.health`), never the map serial: the map serial moves only
+  where the mesh changes, and a communicator's session reads the map again where it moved and reopens only where the
+  change changes its own routes or their links' costs (nccl-mesh.c `map_digest`, `session_ensure`); sampling is no
+  change of the mesh.
 - A survivor logs, at the moment of loss, the node it lost (or that parted, with its reason), and, when the map drops a
   node no paired path reaches, that node's last health and how long before it was heard. A node that comes back is
   logged with its new health, whether it is a new boot (its boot session changed), and how long it was gone; a peer's
@@ -199,7 +204,9 @@ A routed program's start returns once the far member's program has started and e
 is end to end, design/bridge-and-ipc.md#protocol), so a member that starts 25 s after its peer delays the peer's start,
 as over a direct cable, rather than failing its first group at the library's silent bound. Its route is its lower
 node's (design/bridge-and-ipc.md#routes): the higher end awaits the lower's READY within the peer window and fails
-ETIMEDOUT naming the lower past it, so two ends whose maps differ at their starts still pair along one route. Two ends
+ETIMEDOUT naming the lower past it, whatever its own map holds (it reads no route of its own, so a higher end that sees
+none at its start still pairs on the lower's), so two ends whose maps differ at their starts still pair along one
+route; a routed program's start returns once every one of its stripes runs (design/bridge-and-ipc.md#cables). Two ends
 that disagree on whether a cable joins them (one sees it paired, the other not yet) fail at once as values (EPROTO,
 naming the node that refused) rather than wait out the peer window.
 

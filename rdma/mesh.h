@@ -58,7 +58,8 @@ enum { MESH_SEND, MESH_RECEIVE };
 /* design/prepared-machine.md#M04 */
 /* One publication's SEND cell of one invocation: `ready`, released by its producer, then the chain
    of `chunks` requests from `request` the bridge posts, `successor` the stream's next cell (the
-   bridge's, prepared per invocation). */
+   bridge's, prepared per invocation), and `port` the index plus one of the port whose send thread
+   posts it (design/bridge-and-ipc.md#progress: a relay's landing that releases it rings that port). */
 struct mesh_send {
   _Alignas(128) _Atomic uint64_t ready;
   uintptr_t pair;
@@ -66,16 +67,18 @@ struct mesh_send {
   struct ibv_send_wr request;
   uintptr_t successor;
   uint32_t chunks,queue;
+  _Atomic uint32_t port;
 };
 /* design/bridge-and-ipc.md#region: a client's program to one destination node (`node`, 0 while the slot is vacant),
    which the bridge carries over its ports to that node or along a route through others: its SEND cells, its
-   cancellation words and its transfer lists (MESH_QUEUES queues each way, MESH_ORDERS entries a list, `length` entries
-   in each) */
-struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells,orders; uint32_t node; _Atomic uint32_t length[MESH_QUEUES*2]; };
+   cancellation words and its transfer lists (MESH_QUEUES queues each way, `length` entries in each, `room` entries a
+   list in the lease headed at row `lists`, which grows by doubling to MESH_ORDERS: mesh-call.c mesh_transfer_bind) */
+struct mesh_tx { uint32_t count,slots,once,invocations; uint64_t cancel,cells,orders; uint32_t node; _Atomic uint32_t length[MESH_QUEUES*2];
+  uint32_t room,lists; };
 _Static_assert(sizeof(struct mesh_send)==256 && _Alignof(struct mesh_send)==128 &&
-  offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 && offsetof(struct mesh_send,queue)+4<=256 &&
+  offsetof(struct mesh_send,span)==32 && offsetof(struct mesh_send,request)==48 && offsetof(struct mesh_send,port)+4<=256 &&
   offsetof(struct mesh_send,request.send_flags)+sizeof(unsigned int)<=128,"M04/M29");
-_Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24,"M04/M12");
+_Static_assert(offsetof(struct mesh_tx,cancel)==16 && offsetof(struct mesh_tx,cells)==24 && sizeof(struct mesh_tx)==88,"M04/M12");
 /* design/algorithm-sources.md#index-hand-off; design/prepared-machine.md#M10: a program's publication of `row` toward
    one destination, `cells` the region offset of its column of SEND cells (invocation u's at 256 u past it) */
 struct mesh_target { uint64_t cells; uint32_t row,padding; };
@@ -92,7 +95,8 @@ _Static_assert(sizeof(struct prepared_publication)==32 && _Alignof(struct prepar
    failure's code and domain, `failed` the node where it failed: the destination's, or the relay's on its route, and
    `prepared` the owner once the bridge paired or failed it); a port of the node, by the index the bridge gave it (its
    peer node while paired, its phase, MESH_UNKNOWN where the bridge has no such port, the code it last stopped with, its
-   bandwidth, the pairings it made, and the queue pairs its device holds against its max_qp, `pairs` of `max_pairs`);
+   bandwidth, the pairings it made, and the queue pairs its device holds against those it can use, `pairs` of
+   `max_pairs`, its max_qp less one);
    and a node's record, the newest of which every bridge floods to the mesh (its node, name and boot, the record's
    sequence in that boot, its bridge's window and the node's memory in bytes and hardware model (hw.model), and its
    `ports` ports by index) */
@@ -105,8 +109,9 @@ struct mesh_record { uint32_t node,ports; uint64_t boot,sequence; char name[MESH
 /* design/bridge-and-ipc.md#region: a client slot: its attach (`owner`, 0 vacant), its program once started
    (`configured`, the owner), the execution it belongs to (`key`, the same on every member), its ring depth, whether it
    is cyclic, its publications once prepared (`target_count` targets at region offset `targets`, after its SEND cells
-   in their lease, sorted by row: mesh_row_targets), and its program to each destination and that destination's status.  A
-   client writes its own slot's other words and its leased rows alone; the bridge writes the statuses, the ports and
+   in their lease, sorted by row: mesh_row_targets), the ports its program's flows ride (`ports`, a bit a port index:
+   the bells mesh_transfers_wake rings), and its program to each destination and that destination's status.  A client
+   writes its own slot's other words and its leased rows alone; the bridge writes `ports`, the statuses, the ports and
    the map */
 struct mesh_client {
   _Alignas(64) _Atomic uint64_t owner;
@@ -115,15 +120,18 @@ struct mesh_client {
   _Atomic uint32_t depth,cyclic;
   uint64_t targets;
   uint32_t target_count;
+  _Atomic uint32_t ports;
   struct mesh_tx tx[MESH_DESTINATIONS];
   struct mesh_port_info status[MESH_DESTINATIONS];
 };
-/* design/prepared-machine.md#M01, #M09; `bell`, design/bridge-and-ipc.md#progress: the word the bridge's parked
-   progress threads wait on, which a client rings (mesh_notify) as a group starts */
+/* design/prepared-machine.md#M01, #M09; `busy`, design/bridge-and-ipc.md#region: the flows and awaiting programs the
+   bridge holds (0 between calls); `bell`, design/bridge-and-ipc.md#progress: a port's word its parked progress threads
+   wait on, which a client rings (mesh_notify) as a group of a program riding that port starts */
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,links,clients;
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,client_off,delivery_off,data_off,length,boot;
-  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,bell;
+  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy;
+  _Atomic uint64_t bell[MESH_PORTS];
 };
 /* design/prepared-machine.md#M26 */
 _Static_assert(sizeof(((struct hdr *)0)->control)==8 && offsetof(struct hdr,control)%8==0,"M26");
@@ -173,6 +181,14 @@ static inline uint32_t mesh_destination(const struct mesh_client *client,uint32_
   while(d<MESH_DESTINATIONS && client->tx[d].node && client->tx[d].node!=node)d++;
   return d;
 }
+/* design/bridge-and-ipc.md#routes: the bytes a relay leases a slot of a transfer it mirrors (mesh-flow.c mirror), before
+   the window's block rounds them: its ring's slots of `invocation_pages` pages but the last, and the last its bytes or
+   its pages, whichever is more, at its own depth, else the program's `depth` */
+static inline uint64_t mesh_relay_slot(const struct mesh_transfer *x,uint32_t depth,uint32_t pgsz){
+  const uint32_t slots=x->depth?x->depth:depth;
+  const uint64_t tail=(uint64_t)x->invocation_pages*pgsz;
+  return (uint64_t)(slots?slots-1:0)*tail+(x->bytes>tail?x->bytes:tail);
+}
 /* design/prepared-machine.md#M07 */
 static inline struct mesh_delivery *mesh_delivery_at(struct hdr *m,uint32_t row){return (struct mesh_delivery *)((char *)m+m->delivery_off)+row;}
 /* design/algorithm-sources.md#index-hand-off; design/prepared-machine.md#M10: the publications of `row` in the program of
@@ -200,7 +216,8 @@ static inline struct mesh_page_entry *mesh_page(struct hdr *m){ return (struct m
 static inline struct mesh_buffer *mesh_buffers(struct hdr *m){ return (struct mesh_buffer *)((char *)m+m->buffer_off); }
 /* ledger D5: a client's lists of one destination, queue and direction: channel = destination x MESH_QUEUES + queue */
 static inline struct mesh_transfer *mesh_transfers(struct hdr *m,uint64_t owner,uint32_t channel,int direction){
-  return (struct mesh_transfer*)((unsigned char*)m+mesh_client_at(m,owner)->tx[channel/MESH_QUEUES].orders)+((size_t)(channel%MESH_QUEUES)*2+(uint32_t)direction)*MESH_ORDERS;
+  const struct mesh_tx *tx=&mesh_client_at(m,owner)->tx[channel/MESH_QUEUES];
+  return (struct mesh_transfer*)((unsigned char*)m+tx->orders)+((size_t)(channel%MESH_QUEUES)*2+(uint32_t)direction)*tx->room;
 }
 static inline _Atomic uint32_t *mesh_order_length(struct hdr *m,uint64_t owner,uint32_t channel,int direction){ return mesh_client_at(m,owner)->tx[channel/MESH_QUEUES].length+(channel%MESH_QUEUES)*2+(uint32_t)direction; }
 static inline uint32_t mesh_destination_transfers(struct hdr *m,uint64_t owner,uint32_t destination){

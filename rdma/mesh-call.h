@@ -23,7 +23,8 @@ int mesh_transfers_cyclic(struct mesh_ctx *);
    ECANCELED a link or the peer's program lost, or this program's own slot retired while it waits (a revoke), ENOSPC,
    ENOMEM a grant refused. A later loss fails the program alike; the next start rereads the map */
 int mesh_transfers_start(struct mesh_ctx *);
-/* design/bridge-and-ipc.md#progress: the node's bridge's progress threads woken, a group of a started program about to
-   publish or to wait on its landings (a thread parked after MESH_IDLE_NS of nothing looks again within 1 ms anyway) */
+/* design/bridge-and-ipc.md#progress: the progress threads of the ports a started program's flows ride woken (each port's
+   bell), a group of it about to publish or to wait on its landings (a thread parked after MESH_IDLE_NS of nothing looks
+   again within 1 ms anyway while a flow is its port's) */
 void mesh_transfers_wake(struct mesh_ctx *);
 #endif

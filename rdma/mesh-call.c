@@ -10,6 +10,30 @@ static uint64_t mesh_section_rows(struct mesh_section section){
   return section.stride?(uint64_t)section.stride*section.count:1;
 }
 
+/* design/bridge-and-ipc.md#region: a destination's lists leased with room for twice the entries a list holds now (at
+   first the entries a block holds: the lists are sized by their use, a relay's and a session's a block), the entries
+   copied and the lease they leave returned (mesh_lease_return); 0, or the refused lease */
+static int mesh_lists_grow(struct mesh_ctx *context,struct mesh_tx *tx){
+  struct hdr *m=context->M;
+  const uint32_t lists=MESH_QUEUES*2,first=(uint32_t)((uint64_t)m->block*m->pgsz/(lists*sizeof(struct mesh_transfer)));
+  uint32_t room=tx->orders?2*tx->room:first;
+  if(room>MESH_ORDERS)room=MESH_ORDERS;
+  if(room<1)room=1;
+  struct mesh_section section;
+  int status=mesh_section_create(context,(size_t)lists*room*sizeof(struct mesh_transfer),1,&section);
+  if(status)return status;
+  struct mesh_transfer *grown=mesh_section_address(context,section,0);
+  if(tx->orders){
+    const struct mesh_transfer *held=(const struct mesh_transfer *)((char *)m+tx->orders);
+    for(uint32_t list=0;list<lists;list++)
+      memcpy(grown+(size_t)list*room,held+(size_t)list*tx->room,
+             atomic_load_explicit(tx->length+list,memory_order_relaxed)*sizeof(struct mesh_transfer));
+    mesh_lease_return(context,tx->lists);
+  }
+  tx->orders=(uint64_t)((char *)grown-(char *)m);tx->room=room;tx->lists=section.first;
+  return 0;
+}
+
 /* design/prepared-machine.md#M08 */
 /* design/algorithm-sources.md#programcopy */
 int mesh_transfer_bind(struct mesh_ctx *context,uint32_t node,uint32_t queue,int receive,uint32_t identity,struct mesh_section section,
@@ -24,16 +48,14 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t node,uint32_t queue,int
   if(destination==MESH_DESTINATIONS)return ENOSPC;
   struct mesh_tx *tx=&client->tx[destination];
   tx->node=node;
-  if(!tx->orders){
-    struct mesh_section lists;
-    int status=mesh_section_create(context,(size_t)MESH_QUEUES*2*MESH_ORDERS*sizeof(struct mesh_transfer),1,&lists);
-    if(status)return status;
-    tx->orders=(uint64_t)((char *)mesh_section_address(context,lists,0)-(char *)m);
-  }
   uint32_t channel=destination*MESH_QUEUES+queue;
   _Atomic uint32_t *length=mesh_order_length(m,context->client,channel,receive);
   uint32_t index=atomic_load_explicit(length,memory_order_relaxed);
   if(index==MESH_ORDERS)return ENOSPC;
+  if(!tx->orders || index==tx->room){
+    int status=mesh_lists_grow(context,tx);
+    if(status)return status;
+  }
   mesh_transfers(m,context->client,channel,receive)[index]=(struct mesh_transfer){.local_row=section.first,.binding=identity,
     .count=section.count,.stride=section.stride,.invocation_pages=invocation_pages,.begin=begin,.end=end,.depth=depth,
     .bytes=section.bytes};
@@ -200,8 +222,12 @@ int mesh_transfers_start(struct mesh_ctx *context){
   return failed;
 }
 
-/* design/bridge-and-ipc.md#progress */
-void mesh_transfers_wake(struct mesh_ctx *context){ mesh_notify(&context->M->bell); }
+/* design/bridge-and-ipc.md#progress: the bell of each port the program's flows ride */
+void mesh_transfers_wake(struct mesh_ctx *context){
+  struct hdr *m=context->M;
+  const uint32_t ports=atomic_load_explicit(&mesh_client_at(m,context->client)->ports,memory_order_acquire);
+  for(uint32_t p=0;p<MESH_PORTS;p++)if(ports>>p&1)mesh_notify(&m->bell[p]);
+}
 
 /* design/prepared-machine.md#M30 */
 /* The prepared program runs without end: running invocation T is prepared invocation T mod N (N the

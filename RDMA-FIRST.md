@@ -255,10 +255,14 @@ by design and why they are given a core. Sleeping pretends the choice does not h
 and buys a latency floor in exchange. A wait on a shared word has one form, its address wait
 (`rdma/mesh.h` `mesh_notify`; the bridge's `os_sync_wait_on_address` on `control`). The bridge
 spins two threads a port while anything moves, never a program's own (at six nodes a relay hub
-held 50 to 70 spinning a session's life at MESH_VERSION 112), and parks them on the region's
-`bell` after 100 ms of nothing: the group that releases the next ready word rings the bell as it
-starts (mesh-call.h `mesh_transfers_wake`), so the descriptor the ready words lack is the group's
-start, and a program that does not ring is served within the park's 1 ms look.
+held 50 to 70 spinning a session's life at MESH_VERSION 112), and parks them on their port's
+`bell` after 100 ms of nothing: the group that releases the next ready word rings the bells of
+the ports its program rides as it starts (mesh-call.h `mesh_transfers_wake`), and a relay's
+landing that releases the next hop's cell rings that port's when its send thread is parked, so
+the descriptor the ready words lack is the group's start or the landing, and a program that does
+not ring is served within the park's 1 ms look. A port with nothing of its own to look for (no
+flow listed, no lane work in flight) looks every 3 s, so a node of paired links running no
+program sleeps.
 
 **Still present.**
 

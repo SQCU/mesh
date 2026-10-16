@@ -22,9 +22,10 @@
    window spans.  1 GiB is the registration the provider takes. */
 #define MESH_BANK ((size_t)1<<32)
 #define MESH_REGION ((size_t)1<<30)
-struct mesh_wire { char *data; size_t length; };
+struct wire_mapping { char *data; size_t length; };
 /* design/bridge-and-ipc.md#ports: a port's device: its context, protection domain and the whole window's `extents`
-   registered on it (design/prepared-machine.md#M09), the queue pairs it holds against max_qp */
+   registered on it (design/prepared-machine.md#M09), the queue pairs it holds against those it can use (`max_pairs`:
+   its max_qp less one, RDMA-FIRST.md's "max_qp: 11 (10 usable)") */
 struct mesh_device {
   char name[32];
   struct ibv_context *context; struct ibv_pd *domain; struct ibv_mr **regions;
@@ -63,7 +64,7 @@ struct mesh_verbs { struct mesh_device *device; struct mesh_queue *queues; int q
 /* design/algorithm-sources.md#programtensor */
 /* design/prepared-machine.md#M09 */
 /* design/RDMA-KERNEL-RECOVERY.md#tbt_post_recv */
-static int wire_map(struct mesh_wire *wire,struct hdr *m,int file){
+static int wire_map(struct wire_mapping *wire,struct hdr *m,int file){
   wire->length=(size_t)mesh_arena_pages(m)*m->pgsz;
   wire->data=NULL;
   char *reserved=mmap(NULL,wire->length+MESH_BANK,PROT_NONE,MAP_PRIVATE|MAP_ANON|MAP_NORESERVE,-1,0);
@@ -128,7 +129,7 @@ static void die(const char*m){ say("%s\n",m); exit(1); }
    *refused to its code (EFBIG: the window's extents past the device's max_mr; else ibv_reg_mr's errno), logged with
    the extent, and keeps the device and the extents it registered, so its next turn registers the rest
    (design/recovery.md#registration). */
-static int device_up(struct mesh_device *device,struct mesh_wire *wire,int *refused){
+static int device_up(struct mesh_device *device,struct wire_mapping *wire,int *refused){
   *refused=0;
   if(!device->context){
     struct ibv_device **list=ibv_get_device_list(NULL);
@@ -164,15 +165,15 @@ static int device_up(struct mesh_device *device,struct mesh_wire *wire,int *refu
   }
   say("%s: window of %zu bytes (%u extents) registered in %.3f s\n",device->name,wire->length,device->extents,
     (double)(clock_gettime_nsec_np(CLOCK_MONOTONIC)-began)/1e9);
-  device->wire=wire->data;device->max_pairs=(uint32_t)capabilities.max_qp;
+  device->wire=wire->data;device->max_pairs=capabilities.max_qp>1?(uint32_t)capabilities.max_qp-1:0;
   uint32_t capacity=capabilities.max_qp_wr<QD?capabilities.max_qp_wr:QD;
   if(capabilities.max_cqe<=1 || !capacity)return EOPNOTSUPP;
   device->frame_capacity=capacity>=(uint32_t)capabilities.max_cqe?(uint32_t)capabilities.max_cqe-1:capacity;
   return 0;
 }
 /* design/prepared-machine.md#M11 */
-/* `count` UC queue pairs and their two completion queues, in INIT, against the device's max_qp.  0, or the error
-   (ENOSPC: the device holds no more queue pairs). */
+/* `count` UC queue pairs and their two completion queues, in INIT, against the device's usable queue pairs.  0, or the
+   error (ENOSPC: the device holds no more queue pairs). */
 static int pair_up(struct mesh_verbs *provider,int count){
   struct mesh_device *device=provider->device;
   if(device->pairs+(uint32_t)count>device->max_pairs)return ENOSPC;
