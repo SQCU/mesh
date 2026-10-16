@@ -500,7 +500,8 @@ class Balancer:
     (its performance changed [Clarke, Lastovetsky & Rychkov 2011]).  A move the next call measures worse by more than
     the resolution is rejected: the parts go back, the trust region halves and the measurement stays in the models
     (a trust-region method's ratio test [Conn, Gould & Toint 2000, §6.1]); it doubles again, to twice, after a move
-    that held.  The test reads the whole call (every stretch's slowest rank): a move can carry work across stretches
+    that held.  The test reads the whole call (`measured`, the call's own time where the caller gives it, else every
+    stretch's slowest rank on the models' path, which leaves out what no stretch times): a move can carry work across stretches
     (a rank holding none of a decision publishes nothing where it did), so the moved decision's own stretches are no
     measure of it.  Of the decisions sharing a stretch one moves a call, a rejection's return first, else the one whose
     models promise the most (block coordinate descent [Tseng 2001]): another's move would change the stretches its
@@ -560,7 +561,7 @@ class Balancer:
         d = self.decisions[e]
         return next((p for p, g in zip(d['parts'], self._groups(d)) if i in g), 0)
 
-    def observe(self, stretches):
+    def observe(self, stretches, measured=None):
         import statistics
         seen = {}
         for s, obs in stretches.items():
@@ -576,7 +577,7 @@ class Balancer:
                            latency if callable(latency) else float(latency or 0.0), len(obs['times']), standing)
         priced = any(v[4] is not None for v in seen.values())
         measure = ('path' if priced else 'sum') + (' joined' if any(any(v[3][i] != (v[7][i] if i < len(v[7]) else 0.0) for i in range(len(v[3])))
-                                                                  for v in seen.values()) else '')
+                                                                  for v in seen.values()) else '') + (' measured' if measured is not None else '')
 
         def rows(times, keep=None):
             return [(c, order, latency, times(s, ranks, n)) for s, (c, ranks, _, _, order, latency, n, _) in seen.items()
@@ -585,6 +586,7 @@ class Balancer:
         medians = lambda s, ranks, n: [ranks[i][0] if i in ranks else None for i in range(n)]
         call = _path(rows(medians))
         whole = max(RESOLUTION, 2 * math.sqrt(sum((c * max(r.values())[1]) ** 2 for c, r, *_ in seen.values())) / call if call else 0.0)
+        tested = float(measured) if measured is not None else call
         proposals, runs = [], {}
         for name, d in self.decisions.items():
             groups = self._groups(d)
@@ -616,12 +618,12 @@ class Balancer:
                 d['last'] = None
             d['measure'] = measure
             key = ','.join(map(str, d['parts']))
-            history[key] = (history.pop(key, []) + [call])[-5:]
+            history[key] = (history.pop(key, []) + [tested])[-5:]
             while self.memory and len(history) > self.memory:
                 history.pop(next(iter(history)))
             spread = [abs(f / statistics.median(fs) - 1) for fs in history.values() if len(fs) > 1 for f in fs]
             epsilon, between = within, max(whole, 2 * 1.4826 * statistics.median(spread) if len(spread) > 2 else 0.0)
-            last, d['last'] = d.get('last'), [list(d['parts']), call]
+            last, d['last'] = d.get('last'), [list(d['parts']), tested]
             for s, (c, ranks, scales, fixed, view, _) in mine.items():
                 for g, ((med, se), i) in view.items():
                     units = d['parts'][g]
@@ -639,7 +641,7 @@ class Balancer:
                     kept = [(u, t) for u, t in own if u != units] + [(units, t) for t in now]
                     recent = list(dict.fromkeys(u for u, _ in reversed(kept)))[:self.memory] if self.memory else None
                     self.points[(name, s, g)] = [(u, t) for u, t in kept if recent is None or u in recent]
-            if last and last[0] != d['parts'] and call > last[1] * (1 + between):
+            if last and last[0] != d['parts'] and tested > last[1] * (1 + between):
                 proposals.append((math.inf, name, last))
                 continue
             if last and last[0] != d['parts']:
