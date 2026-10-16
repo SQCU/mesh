@@ -20,8 +20,9 @@ back, so the next call's configuration is one more value in the dataflow: no roo
 3. A projected online gradient step preconditioned by b [Zinkevich 2003]:
    s'_i = s_i - eta (g_i - mu) / (b_i kappa'), mu keeping sum s' = W.  It is equal_finish below
    with a_i = eta g_i - b_i kappa' s_i and T = eta mu; eta = 1 is the equal-finish solve.
-4. c_i = low_i + g floor((s'_i - low_i) / g), the leftover grains to the largest remainders,
-   ties to the lower rank.  s' stays the iterate; c is the next call's operand and regressor.
+4. c is min_max's on the costs a_i + b_i c_i: each grain to the rank finishing earliest with it, ties to the lower
+   rank (design/heterogeneity.md R5; never the largest remainders, which round the slow rank up by a whole grain).
+   s' stays the iterate; c is the next call's operand and regressor.
 
 Measured, not modelled (design/heterogeneity.md R3, R10, R11): `dfpa` is one iteration of DFPA [Lastovetsky & Reddy
 2010, Distributed data partitioning for heterogeneous processors based on partial estimation of their functional
@@ -44,9 +45,15 @@ shares s_i = (T - a_i) / b_i with sum s = W; ranks outside their bounds are held
 re-solved, the side with the larger total violation first [Bitran & Hax 1981].  The mesh's
 programs take config_t0 from it (metal-microbench tools/mesh/programs.py).
 
+`least` is exact for any number of ranks: a branch and bound over boxes of the lattice [Land & Doig 1960] whose bound
+is the value at the box's least corner (every model nondecreasing), started from the pairwise descent's parts.
+
 O(n) plain floats in a fixed order: identical inputs give identical shares on every rank.
 """
+import heapq
 import math
+
+RESOLUTION = 0.01  # the least relative accuracy a decision resolves (R11): a gain below it is no gain [DFPA 2011]
 
 
 class Allocator:
@@ -116,35 +123,68 @@ def equal_finish(total, grain, low, high, a, b):
             held.update((i, float(low[i])) for i in below)
         else:
             held.update((i, float(high[i])) for i in above)
-    c = [low[i] + grain * math.floor((s[i] - low[i]) / grain) for i in range(n)]
-    left = (total - sum(c)) // grain  # fewer than n: each floor drops less than one grain
-    for i in sorted(range(n), key=lambda i: (c[i] - s[i], i)):
-        if left and c[i] + grain <= high[i]:
-            c[i] += grain
-            left -= 1
+    c, _ = min_max(total, grain, low, high, [lambda u, i=i: a[i] + b[i] * u for i in range(n)])
     return c, s, T
 
 
 def min_max(total, grain, low, high, cost):
-    """Shares of `total` units at `grain` within [low_i, high_i] (multiples of grain) minimising the largest of
-    cost[i](c_i), each nondecreasing (a cost is taken as the largest it has reached, so a dip is never a reason to
-    give a rank more): each grain in turn to the rank finishing earliest with it, ties to the lower rank
-    [Ibaraki & Katoh 1988; Beaumont et al. 2001, Alg. 3.1].  (c, T); grains no rank can hold are left unplaced."""
-    import heapq
+    """Shares of `total` units at `grain` within [low_i, high_i] (multiples of grain, a high may be math.inf) minimising
+    the largest of cost[i](c_i), each nondecreasing: each grain to the rank finishing earliest with it, ties to the
+    lower rank [Ibaraki & Katoh 1988; Beaumont et al. 2001, Alg. 3.1].  That greedy takes the (total - sum low) / grain
+    least of the ranks' grain costs (rank i's k-th grain costing cost[i](low_i + k grain), a sorted list a rank), so it
+    is found as that order statistic of the sorted lists [Frederickson & Johnson 1982]: a pivot the weighted median of
+    the lists' middle costs, every list cut at it by bisection, until the pivot is the statistic; O(n log^2(total /
+    grain)) evaluations where a grain at a time took total / grain.  A cost that dips is the caller's to pass as the
+    largest it has reached (its least nondecreasing majorant, which the grain-at-a-time greedy took; metal-microbench
+    tools/mesh/balance_sim.py envelope): every cost here is read as sorted.  (c, T), T the largest cost, each rank's at
+    its low counted; grains no rank can hold are left unplaced."""
     n = len(low)
-    c = list(low)
-    reached = [cost[i](c[i]) for i in range(n)]
-    heap = [(max(reached[i], cost[i](c[i] + grain)), i) for i in range(n) if c[i] + grain <= high[i]]
-    heapq.heapify(heap)
-    for _ in range((total - sum(low)) // grain):
-        if not heap:
-            break
-        t, i = heapq.heappop(heap)
-        c[i] += grain
-        reached[i] = t
-        if c[i] + grain <= high[i]:
-            heapq.heappush(heap, (max(t, cost[i](c[i] + grain)), i))
-    return c, max(reached)
+    want = max(0, (total - sum(low)) // grain)
+    top = [max(0, want if h == math.inf else min(want, (h - lo) // grain)) for lo, h in zip(low, high)]
+    seen = {}
+
+    def at(i, k):
+        if (i, k) not in seen:
+            seen[i, k] = cost[i](low[i] + k * grain)
+        return seen[i, k]
+
+    def cut(i, v, a, b, strict):
+        while a < b:
+            m = (a + b + 1) // 2
+            if at(i, m) < v or not strict and at(i, m) == v:
+                a = m
+            else:
+                b = m - 1
+        return a
+
+    floor = max((cost[i](low[i]) for i in range(n)), default=0.0)
+    if sum(top) <= want:
+        return [low[i] + top[i] * grain for i in range(n)], max([floor] + [at(i, top[i]) for i in range(n) if top[i]])
+    if not want:
+        return list(low), floor
+    a, b, need = [0] * n, list(top), want
+    while True:
+        middles = sorted((at(i, (a[i] + b[i] + 1) // 2), i) for i in range(n) if b[i] > a[i])
+        half, reach = sum(b[i] - a[i] for i in range(n)) / 2, 0
+        for pivot, i in middles:
+            reach += b[i] - a[i]
+            if reach >= half:
+                break
+        below = [cut(i, pivot, a[i], b[i], True) for i in range(n)]
+        through = [cut(i, pivot, a[i], b[i], False) for i in range(n)]
+        if need <= sum(x - y for x, y in zip(below, a)):
+            b = below
+        elif need > sum(x - y for x, y in zip(through, a)):
+            need -= sum(x - y for x, y in zip(through, a))
+            a = through
+        else:
+            need -= sum(x - y for x, y in zip(below, a))
+            c = []
+            for i in range(n):
+                tied = min(need, through[i] - below[i])
+                need -= tied
+                c.append(low[i] + (below[i] + tied) * grain)
+            return c, max(floor, pivot)
 
 
 def time(points, prior=None):
@@ -202,15 +242,19 @@ def _median_points(points):
     return [(d, statistics.median(ts)) for d, ts in by.items()]
 
 
-def least(total, grain, low, high, stretches, value, knots):
+def least(total, grain, low, high, stretches, value, knots, stop=None):
     """Units of `total` at `grain` within [low_i, high_i] (each bound taken inward onto the grain) minimising
     sum_s c_s max_i f_si(u_i) over `stretches` [(c_s, [f_si, nondecreasing])], or `value(u)` where given (a call's
-    latency path, _path): one stretch by min_max (exact [Ibaraki & Katoh 1988]); else from a start (two ranks: `low`,
-    the rest to the first rank with room; more: `_fill`), each two ranks' split moved to its least (`_split`, exact for
-    the two with the others held: `knots` each rank's) while that lowers the value, or keeps it and gives the lower rank
-    less (as `_split` breaks ties), until every pair stands at its least (block coordinate descent [Tseng 2001]; the
-    value and then the parts in rank order fall at every move, so it ends; two ranks are one pair, so one split,
-    exact).  A sweep costs n (n - 1) / 2 splits of O(knots log(total / grain)) evaluations each.  (units, the value.)"""
+    latency path, _path), exactly: one stretch by min_max (exact [Ibaraki & Katoh 1988]); two ranks by the pairwise
+    descent (one split, exact); more by a branch and bound [Land & Doig 1960] over boxes of the lattice from the
+    descent's parts (_descend).  The value is nondecreasing in every rank's units (the models are, and max, + and
+    nonnegative counts keep it so; _path is max-plus), so a box's every point is no less than the value at its least
+    corner, each bound tightened by the total (u_i at least total less the others' highs, at most total less their
+    lows); with `stretches` the bound is the sum of each stretch's own min_max over the box, each stretch's least
+    largest time, which is no less.  Boxes are taken least bound first, each split in half along its widest rank, and
+    one whose bound reaches the best value found is dropped: the best value is the lattice's least.  With `stop`, a
+    question rather than a search: whether any point's value is below it, the boxes whose bound reaches it dropped too
+    and the search ended at the first point below it (the Balancer's stand test).  (units, the value.)"""
     n = len(low)
     low, high = [-(-v // grain) * grain for v in low], [v // grain * grain for v in high]
     if len(stretches) == 1 and value is None:
@@ -218,6 +262,82 @@ def least(total, grain, low, high, stretches, value, knots):
         units, top = min_max(total, grain, low, high, fs)
         return units, c * top
     value = value or (lambda u: sum(c * max(fs[i](u[i]) for i in range(n)) for c, fs in stretches))
+    seen = {}
+
+    def priced(u):
+        key = tuple(u)
+        if key not in seen:
+            seen[key] = value(list(u))
+        return seen[key]
+
+    best = _descend(total, grain, low, high, priced, knots)
+    if n <= 2 or (stop is not None and best[1] < stop):
+        return best
+    best = (best[1], tuple(best[0]))
+
+    def box(lo, hi):
+        lo, hi = list(lo), list(hi)
+        while True:
+            under, over = total - sum(hi), total - sum(lo)
+            tight = ([max(lo[i], -(-(under + hi[i]) // grain) * grain) for i in range(n)],
+                     [min(hi[i], (over + lo[i]) // grain * grain) for i in range(n)])
+            if tight == (lo, hi):
+                break
+            lo, hi = tight
+        if any(a > b for a, b in zip(lo, hi)) or sum(lo) > total or sum(hi) < total:
+            return None
+        if stretches:
+            bound = sum(c * min_max(total, grain, lo, hi, fs)[1] for c, fs in stretches)
+        else:
+            bound = priced(lo)
+        return bound, lo, hi
+
+    def done(bound):
+        reach = best[0] if stop is None else min(best[0], stop)
+        return bound >= reach - 1e-12 * abs(reach)
+
+    first, order = box(low, high), 0
+    heap = [(first[0], order, first[1], first[2])] if first else []
+    while heap:
+        bound, _, lo, hi = heapq.heappop(heap)
+        if done(bound):
+            break
+        if sum(lo) == total:
+            best = min(best, (priced(lo), tuple(lo)))
+            if stop is not None and best[0] < stop:
+                break
+            continue
+        i = max(range(n), key=lambda i: (hi[i] - lo[i], -i))
+        cut = lo[i] + grain * ((hi[i] - lo[i]) // grain // 2)
+        for part in ((lo, hi[:i] + [cut] + hi[i + 1:]), (lo[:i] + [cut + grain] + lo[i + 1:], hi)):
+            made = box(*part)
+            if made and not done(made[0]):
+                order += 1
+                heapq.heappush(heap, (made[0], order, made[1], made[2]))
+    return list(best[1]), best[0]
+
+
+def _remembered(value):
+    """`value` remembering each parts' value, so a decision's searches (its stand test, its step, a half step) price a
+    point once."""
+    seen = {}
+
+    def priced(u):
+        key = tuple(u)
+        if key not in seen:
+            seen[key] = value(u)
+        return seen[key]
+    return priced
+
+
+def _descend(total, grain, low, high, value, knots):
+    """`least`'s start: (two ranks: `low`, the rest to the first rank with room; more: `_fill`), each two ranks' split
+    moved to its least (`_split`, exact for the two with the others held: `knots` each rank's) while that lowers the
+    value, or keeps it and gives the lower rank less (as `_split` breaks ties), until every pair stands at its least
+    (block coordinate descent [Tseng 2001]; the value and then the parts in rank order fall at every move, so it ends;
+    two ranks are one pair, so one split, exact).  A sweep costs n (n - 1) / 2 splits of O(knots log(total / grain))
+    evaluations each.  (units, the value.)"""
+    n = len(low)
     if n > 2:
         u = _fill(total, grain, low, high, value)
     else:
@@ -322,8 +442,16 @@ def _path(rows):
         n = max(len(r[3]) for r in seq)
         end, crossed, sent = [0.0] * n, 0.0, [False] * n
         for _, _, latency, times in seq:
-            done = sorted(((end[j] + crossed, j) for j in range(n) if sent[j]), reverse=True)[:2]
-            end = [max([end[i]] + [t for t, j in done if j != i][:1]) + (times[i] or 0.0) for i in range(n)]
+            # the latest crossed end of the ranks that sent, and the next latest (a rank waits on the others' alone)
+            first, at, second = -math.inf, -1, -math.inf
+            for j in range(n):
+                if sent[j]:
+                    t = end[j] + crossed
+                    if t > first:
+                        first, at, second = t, j, first
+                    elif t > second:
+                        second = t
+            end = [max(end[i], second if i == at else first) + (times[i] or 0.0) for i in range(n)]
             sent, crossed = [t is not None for t in times], latency or 0.0
         total += max(c for _, c, _, _ in seq) * (max(end) + crossed)
     return total
@@ -380,10 +508,14 @@ class Balancer:
       .observe({'step:3': {'scales': {'tp': [1.0, 1.0]}, 'fixed': [0.2, 0.1], 'times': [[s, ...], [s, ...]]}, ...})
       -> {'tp': [5, 11]}
 
+    What a decision keeps is bounded, so nothing a call does grows with the calls before it (metal-microbench
+    docs/acceptance-20261014.md A37): with `memory`, each model's points at its `memory` latest parts and the
+    measured calls of the decision's `memory` latest parts (the ratio test's spread), the older dropped.
+
     `state()` and `Balancer.of(state)` carry it between processes."""
 
-    def __init__(self, decisions, window=3):
-        self.window, self.decisions, self.points = int(window), {}, {}
+    def __init__(self, decisions, window=3, memory=None):
+        self.window, self.memory, self.decisions, self.points = int(window), memory and int(memory), {}, {}
         for name, d in decisions.items():
             parts = [int(p) for p in d['parts']]
             n, grain = len(parts), int(d.get('grain', 1))
@@ -428,7 +560,7 @@ class Balancer:
 
         medians = lambda s, ranks, n: [ranks[i][0] if i in ranks else None for i in range(n)]
         call = _path(rows(medians))
-        whole = max(0.01, 2 * math.sqrt(sum((c * max(r.values())[1]) ** 2 for c, r, *_ in seen.values())) / call if call else 0.0)
+        whole = max(RESOLUTION, 2 * math.sqrt(sum((c * max(r.values())[1]) ** 2 for c, r, *_ in seen.values())) / call if call else 0.0)
         proposals, runs = [], {}
         for name, d in self.decisions.items():
             groups = self._groups(d)
@@ -451,7 +583,7 @@ class Balancer:
             counted = runs[name] = set(mine) | path
             measured = sum(c * max(med for med, _ in r.values()) for c, r, *_ in mine.values())
             slowest = [(c, max(r.values())) for c, r, *_ in mine.values()]
-            within = max(0.01, 2 * math.sqrt(sum((c * se) ** 2 for c, (_, se) in slowest)) / measured if measured else 0.0)
+            within = max(RESOLUTION, 2 * math.sqrt(sum((c * se) ** 2 for c, (_, se) in slowest)) / measured if measured else 0.0)
             base = _path(rows(medians, counted)) if path else measured
             history = d.setdefault('history', {})
             changed = d.get('measure', 'sum') != measure
@@ -460,7 +592,9 @@ class Balancer:
                 d['last'] = None
             d['measure'] = measure
             key = ','.join(map(str, d['parts']))
-            history[key] = (history.get(key, []) + [call])[-5:]
+            history[key] = (history.pop(key, []) + [call])[-5:]
+            while self.memory and len(history) > self.memory:
+                history.pop(next(iter(history)))
             spread = [abs(f / statistics.median(fs) - 1) for fs in history.values() if len(fs) > 1 for f in fs]
             epsilon, between = within, max(whole, 2 * 1.4826 * statistics.median(spread) if len(spread) > 2 else 0.0)
             last, d['last'] = d.get('last'), [list(d['parts']), call]
@@ -478,7 +612,9 @@ class Balancer:
                     old, new = (statistics.median(earlier) if earlier else None), statistics.median(now)
                     if old is not None and abs(new - old) > max(epsilon, 3 * se / med if med > 0 else 0.0) * max(new, old):
                         own, changed = [], True
-                    self.points[(name, s, g)] = [(u, t) for u, t in own if u != units] + [(units, t) for t in now]
+                    kept = [(u, t) for u, t in own if u != units] + [(units, t) for t in now]
+                    recent = list(dict.fromkeys(u for u, _ in reversed(kept)))[:self.memory] if self.memory else None
+                    self.points[(name, s, g)] = [(u, t) for u, t in kept if recent is None or u in recent]
             if last and last[0] != d['parts'] and call > last[1] * (1 + between):
                 proposals.append((math.inf, name, last))
                 continue
@@ -527,10 +663,12 @@ class Balancer:
                                 if member.get(i) in ranked[s] else (ranks[i][0] if i in ranks and i not in member else None)
                                 for i in range(n)]
                     return _path(rows(at, counted)) + sum(c * max(f(u[g]) for g, f in enumerate(fs)) for c, fs in kept)
+                value = _remembered(value)
             total = sum(d['parts'])
             knots = [sorted({int(k) for (e, s, h) in self.points if e == name and h == g for k in self._model(name, s, g).knots})
                      for g in range(n)]
-            if least(total, d['grain'], d['low'], d['high'], [] if value else built, value, knots)[1] >= base - epsilon * measured:
+            if least(total, d['grain'], d['low'], d['high'], [] if value else built, value, knots,
+                     stop=base - epsilon * measured)[1] >= base - epsilon * measured:
                 d['before'], d['stands'] = list(d['parts']), True
                 continue
             grow = d.get('reach', 2.0)
@@ -579,12 +717,12 @@ class Balancer:
         return time(_median_points(self.points.get((name, s, i), [])))
 
     def state(self):
-        return {'window': self.window, 'decisions': self.decisions,
+        return {'window': self.window, 'memory': self.memory, 'decisions': self.decisions,
                 'points': [[d, s, i, own] for (d, s, i), own in self.points.items()]}
 
     @classmethod
     def of(cls, state):
-        b = cls({}, state.get('window', 3))
+        b = cls({}, state.get('window', 3), state.get('memory'))
         b.decisions = {name: {'grain': 1, 'low': [0] * len(d['parts']), 'high': [sum(d['parts'])] * len(d['parts']), 'before': None,
                               'stands': False, **d, 'groups': d.get('groups') or [[i] for i in range(len(d['parts']))]}
                        for name, d in state['decisions'].items()}
@@ -918,7 +1056,7 @@ class Coupled:
         if self.stands:
             e = measured[self.parts]
             now = self._median(e['calls'][-self.window:])
-            if abs(now - self.stood) <= max(0.01, 2 * self._error(e['calls'])) * self.stood:
+            if abs(now - self.stood) <= max(RESOLUTION, 2 * self._error(e['calls'])) * self.stood:
                 return self.parts
             self.stands, e['calls'], e['members'] = False, e['calls'][-self.window:], [m[-self.window:] for m in e['members']]
         pending = [p for p in self.design if p not in measured and self.allowed(p)]
@@ -932,7 +1070,7 @@ class Coupled:
             return proposal
         chosen = proposal
         best_time, proposal_time = self._median(measured[best]['calls']), self._median(measured[proposal]['calls'])
-        resolution = max(0.01, 2 * self._error(measured[proposal]['calls']))
+        resolution = max(RESOLUTION, 2 * self._error(measured[proposal]['calls']))
         if proposal_time - best_time > resolution * best_time:
             chosen = best
         self.stands, self.stood = True, self._median(measured[chosen]['calls'])
