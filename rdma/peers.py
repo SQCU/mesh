@@ -327,7 +327,7 @@ def ssh_argv(name: str, address: str, node: int, account: str | None, options: d
     the consumer's configuration's (`options`, each an ssh -o option: metal-microbench configs/driver.json `ssh`)."""
     CONTROL.mkdir(mode=0o700, parents=True, exist_ok=True)
     argv = ["ssh", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", f"ControlPath={CONTROL}/%C",
-            "-o", f"HostName={address}", "-o", f"HostKeyAlias=mesh-{node}", "-o", "StrictHostKeyChecking=accept-new"]
+            "-o", f"HostName={address.replace('%', '%%')}", "-o", f"HostKeyAlias=mesh-{node}", "-o", "StrictHostKeyChecking=accept-new"]
     for option, value in options.items():
         argv += ["-o", f"{option}={value}"]
     for key in roster():
