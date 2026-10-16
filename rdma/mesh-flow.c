@@ -2346,7 +2346,7 @@ static void program_take(struct mesh_client *client,uint64_t owner,uint32_t d){
     struct flow *f=flow_on(cable[j],client->key,M->node,node,j);
     if(f && !f->hold){program_fail(owner,d,EBUSY,M->node);return;}
     if(f && (f->stripes!=n || f->queues!=queues || (uint32_t)f->qps!=queues*slots)){flow_fail(f,EPROTO,4,FAIL,M->node,M->node);f=NULL;}
-    if(!f && !(f=flow_make(cable[j],client->key,M->node,node,queues,slots,j,n,0))){program_fail(owner,d,E2BIG,M->node);return;}
+    if(!f && !(f=flow_make(cable[j],client->key,M->node,node,queues,slots,j,n,1))){program_fail(owner,d,E2BIG,M->node);return;}
     flow_take(f,owner,d);
     ready_say(f,&node,1);
     flow_step(f);
