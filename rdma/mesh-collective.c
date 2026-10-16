@@ -591,7 +591,7 @@ int mesh_host_inputs(struct mesh_ctx *context){
       for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_RECEIVE));i++){
         uint32_t chunks=mesh_row_chunks(m,in[i].local_row,in[i].bytes);
         for(uint32_t s=0;s<in[i].count;s++)for(uint32_t k=0;k<chunks;k++){
-          struct mesh_publication *delivery=mesh_publication_at(m,in[i].local_row+s*in[i].stride+k);
+          struct mesh_delivery *delivery=mesh_delivery_at(m,in[i].local_row+s*in[i].stride+k);
           delivery->device_input=(uint64_t)((char *)(word+first+in[i].first+(uint64_t)s*chunks+k)-(char *)m);
           delivery->device_stride=sizeof(uint64_t)*(uint64_t)in[i].count*chunks;
         }
@@ -610,9 +610,9 @@ static uint32_t program_invocations(struct mesh_ctx *context){
 }
 
 void mesh_host_publish(struct mesh_ctx *context,struct mesh_section section,uint32_t invocation){
-  uint32_t count=mesh_publication_prepare(context->M,section.first,NULL),n=program_invocations(context);
+  uint32_t count=mesh_publication_prepare(context,section.first,NULL),n=program_invocations(context);
   struct prepared_publication records[count?count:1];
-  mesh_publication_prepare(context->M,section.first,records);
+  mesh_publication_prepare(context,section.first,records);
   const uint32_t t=n?invocation%n:invocation,cycle=n?invocation/n:0;
   for(uint32_t i=0;i<count;i++)
     atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)(records[i].destination+(uint64_t)t*sizeof(struct mesh_send)),
@@ -622,7 +622,7 @@ void mesh_host_publish(struct mesh_ctx *context,struct mesh_section section,uint
 /* The last chunk's word, as mesh_metal_receive_prepare reads it: chunks of one receive land in order. */
 uint64_t mesh_host_arrived(struct mesh_ctx *context,struct mesh_section section,uint32_t invocation){
   struct hdr *m=context->M;
-  struct mesh_publication *delivery=mesh_publication_at(m,section.first+mesh_row_chunks(m,section.first,section.bytes)-1);
+  struct mesh_delivery *delivery=mesh_delivery_at(m,section.first+mesh_row_chunks(m,section.first,section.bytes)-1);
   const uint32_t n=program_invocations(context),t=n?invocation%n:invocation;
   return atomic_load_explicit((_Atomic uint64_t *)((char *)m+delivery->device_input+(uint64_t)t*delivery->device_stride),
     memory_order_acquire);

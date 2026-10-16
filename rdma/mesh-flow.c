@@ -45,8 +45,8 @@ _Static_assert(sizeof(struct prepared_send)==256 && _Alignof(struct prepared_sen
   offsetof(struct prepared_send,request.send_flags)+sizeof(unsigned int)<=64,"M29");
 /* design/prepared-machine.md#M08 */
 /* One chunk of a receive transfer in one invocation: its native request and SGE into the chunk's
-   destination range, the completion word it stores (`input`), its queue pair, the frames it holds
-   posted, its invocation and ring. */
+   destination range, the completion word it stores (`input`; its own `sink` where no reader waits on its landing),
+   its queue pair, the frames it holds posted, its invocation and ring. */
 struct prepared_receive {
   _Alignas(128) struct ibv_recv_wr request;
   struct ibv_sge span;
@@ -54,6 +54,7 @@ struct prepared_receive {
   struct ibv_qp *pair;
   uint64_t argument;
   uint32_t frames,invocation,queue,cycle,behind;
+  _Atomic uint64_t sink;
 };
 _Static_assert(sizeof(struct prepared_receive)==128 && _Alignof(struct prepared_receive)==128 &&
   offsetof(struct prepared_receive,span)==32 && offsetof(struct prepared_receive,input)==48,"M08 M09");
@@ -318,13 +319,16 @@ static int chunk_span(struct flow *link,uint32_t address,uint64_t remaining,stru
 }
 
 /* design/prepared-machine.md#M07, #M08: the word a landed chunk of invocation u stores: its row's completion word
-   (mesh_host_inputs, the Metal transport); or, on a row a SEND also publishes (a relay's rows), that SEND's cell once
-   the record's last chunk landed, so the landing releases it to the next hop (the index hand-off); else the row's own */
-static _Atomic uint64_t *receive_input(struct hdr *m,uint32_t row,uint32_t chunk,uint32_t chunks,uint32_t u){
-  struct mesh_publication *own=mesh_publication_at(m,row+chunk),*first=mesh_publication_at(m,row);
-  if(own->device_input)return (void *)((char *)m+own->device_input+(size_t)own->device_stride*u);
-  if(chunk+1==chunks && first->sends)return (void *)((char *)m+first->targets[0].stream+sizeof(struct mesh_send)*(size_t)u);
-  return &own->argument;
+   (mesh_host_inputs, the Metal transport); or, on a row the receiving program (`owner`) also publishes (a relay's rows),
+   that publication's SEND cell once the record's last chunk landed, so the landing releases it to the next hop (the
+   index hand-off); else the record's own (`sink`), which nothing reads */
+static _Atomic uint64_t *receive_input(struct hdr *m,uint64_t owner,uint32_t row,uint32_t chunk,uint32_t chunks,uint32_t u,_Atomic uint64_t *sink){
+  const struct mesh_delivery *delivery=mesh_delivery_at(m,row+chunk);
+  uint32_t sends;
+  const struct mesh_target *target=mesh_row_targets(m,owner,row,&sends);
+  if(delivery->device_input)return (void *)((char *)m+delivery->device_input+(size_t)delivery->device_stride*u);
+  if(chunk+1==chunks && sends)return (void *)((char *)m+target->cells+sizeof(struct mesh_send)*(size_t)u);
+  return sink;
 }
 
 /* design/prepared-machine.md#M08 */
@@ -490,7 +494,7 @@ static int receives_configure(struct flow *link){
         struct prepared_receive *record=link->receive+at++;
         if(!c)firsts[base[i]+u]=(size_t)(record-r->first);
         *record=(struct prepared_receive){.request={.wr_id=(uintptr_t)record,.sg_list=&record->span,.num_sge=1},
-          .span=span,.input=receive_input(m,row,c,chunks,u),.pair=link->provider.queues[ring].pair,.argument=1,
+          .span=span,.input=receive_input(m,link->side[MESH_RECEIVE].owner,row,c,chunks,u,&record->sink),.pair=link->provider.queues[ring].pair,.argument=1,
           .frames=(span.length+4095)/4096,.invocation=t,.queue=(uint32_t)ring};
       }
     }

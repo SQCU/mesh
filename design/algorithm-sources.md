@@ -263,9 +263,11 @@ Papadopoulos and Culler's
 [Monsoon: an Explicit Token-Store Architecture](https://people.eecs.berkeley.edu/~kubitron/courses/cs252-F03/handouts/papers/p398-papadopoulos.pdf)
 (ISCA, 1990), section 2, assigns graph arcs to explicit frame locations rather
 than discovering matches dynamically. Mesh applies that principle to the
-already realized use/send indices: `mesh_publish_bind` prepares destination
-records, publication sends the final index, and dispatch directly indexes the
-terminal record array. Numerical offset tables and TX cursor arrays are setup
+already realized use/send indices: `mesh_transfers_prepare` prepares each
+program's destination records from its SEND lists (its targets, a section of
+its slot sorted by row, `mesh_row_targets`; MESH_VERSION 111, where they had
+been a 1,088-byte table on every row of the region), publication sends the
+final index, and dispatch directly indexes the terminal record array. Numerical offset tables and TX cursor arrays are setup
 scratch. Mesh's ring software and compiler are not Monsoon hardware.
 
 ABI 76's [publication operands](pages-and-functions.md#direct-publication-operands)

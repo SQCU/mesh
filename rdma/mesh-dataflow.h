@@ -51,9 +51,8 @@ uint32_t mesh_arena_free(struct hdr *);
 int mesh_lease_return(struct mesh_ctx *,uint32_t row);
 void mesh_backing_bind(struct mesh_ctx *,uint32_t first,uint32_t pages,uint32_t page,uint32_t index);
 void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
-/* design/algorithm-sources.md#index-hand-off */
-struct mesh_target *mesh_publish_bind(struct mesh_ctx *,uint32_t row,uint32_t destination);
-/* design/algorithm-sources.md#programkernel_call */
-uint32_t mesh_publication_prepare(struct hdr *,uint32_t row,struct prepared_publication *);
+/* design/algorithm-sources.md#programkernel_call; design/prepared-machine.md#M10: the records of the cells the context's
+   program releases when `row` is published, one a target (mesh_row_targets) where `records` is given; their count */
+uint32_t mesh_publication_prepare(struct mesh_ctx *,uint32_t row,struct prepared_publication *);
 void mesh_retired_release(struct hdr *);
 #endif

@@ -30,13 +30,25 @@ The node's one region is the shared memory object `/mesh0` (mesh.h `MESH_NAME`),
 laid out (`mesh_layout`): an arena, the window, of the size its configuration states (the bridge's one operand, a
 document its consumer writes in JSON, TOML or YAML, etc/bridge/README.md; no default, and refused past what its RDMA
 devices register; design/prepared-machine.md#M09, with the operator's words: the window is the bridge's, its sizing for
-an execution the client's), a page-table row a block,
-the node's ports (`MESH_PORTS`), the client slots (`MESH_CLIENTS`) and each row's publication targets, one a
-destination. The arena is the registered window: every port's device registers it whole when the device comes up,
+an execution the client's), a page-table row a block (its page entry, the mapping and address of the block a lease
+bound to it; its buffer, the owner and the lease's extent; its delivery, the completion word a landing on it stores:
+64 bytes, and a bit in each of the row planes), the node's ports (`MESH_PORTS`) and the client slots (`MESH_CLIENTS`).
+The arena is the registered window: every port's device registers it whole when the device comes up,
 before any queue pair exists (`device_up`), and deregisters it only when the device retires (`down_device`), so no
 program's start or run changes a device's mappings while DMA may be live (the operator's rule, quoted at M09). Nothing
-in the region is sized by a call: arena pages, page-table rows and transfer lists are a lease, taken as a program asks
-for them and refused as a value naming the execution where the window cannot give them, never by growing the window.
+in the region is sized by a call: arena pages, page-table rows, transfer lists and publication targets are a lease,
+taken as a program asks for them and refused as a value naming the execution where the window cannot give them, never
+by growing the window.
+
+A program's publications are its own: `mesh_transfers_prepare` derives them from its SEND lists, one target a slot of
+each SEND transfer (the row it sends and its column of SEND cells), and lays them in a section of the program's slot
+sorted by row, which the slot names (`targets`, `target_count`); a producer's records (`mesh_publication_prepare`,
+design/prepared-machine.md#M10) and the bridge's relay hand-off (#flows) find a row's run by bisection
+(`mesh_row_targets`), and the slot's retirement reclaims them with its other leases. Until MESH_VERSION 111 every row
+carried room for a publication toward each of `MESH_DESTINATIONS` destinations (1,088 of its 1,136 bytes), written as
+a client bound the row: 1.11 GiB beside a 16 GiB window, resident as rows were leased, for the few rows a program
+publishes; the region's tables are now 64.5 bytes a window page and 0.5 MiB besides (65 MiB at 16 GiB, 57 MiB at 14
+GiB; design/prepared-machine.md#M09).
 
 The map is the bridge's table of records, one a node (`struct mesh_record`): its node number, name and boot, the
 record's sequence in that boot, its ports by index, each port's peer, phase, code, bandwidth and pairings, and its
@@ -50,8 +62,9 @@ links, name and boot are unchanged changes only its health and sequence, under t
 serial moves only when the mesh does; `mesh_nodes_health` reads the records under both.
 
 A client slot (`struct mesh_client`) holds one client: its owner word (the client's generation, slot and process), its
-execution's key, its program once started (`configured`), its ring depth and whether it is cyclic, and its programs by
-destination node, `MESH_DESTINATIONS` of them (`mesh_destination`). Each is the destination's node, its `struct
+execution's key, its program once started (`configured`), its ring depth and whether it is cyclic, its publication
+targets once prepared (`targets`, above), and its programs by destination node, `MESH_DESTINATIONS` of them
+(`mesh_destination`). Each is the destination's node, its `struct
 mesh_tx` (SEND cells, cancellation words, transfer lists of `MESH_QUEUES` queues each way, trace) and its status
 (`struct mesh_port_info`: phase, code, domain, `failed` the node where it failed, the destination or a relay on its
 route, and `prepared`). A client writes its own slot's other words and its own rows; the bridge writes the statuses,

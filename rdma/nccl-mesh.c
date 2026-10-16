@@ -1027,8 +1027,8 @@ static int channel_metal(struct session *s, struct channel *ch) {
   ch->ring_out = metal_wrap(ch->sending, DEPTH * ch->slot);
   ch->ring_in = metal_wrap(ch->receiving, DEPTH * ch->slot);
   struct prepared_publication record;
-  if (mesh_publication_prepare(s->header, ch->out.first, NULL) != 1) return EINVAL;
-  mesh_publication_prepare(s->header, ch->out.first, &record);
+  if (mesh_publication_prepare(&s->context, ch->out.first, NULL) != 1) return EINVAL;
+  mesh_publication_prepare(&s->context, ch->out.first, &record);
   ch->cell = (size_t)(record.destination - ((uintptr_t)s->header + s->context.send_off));
   ch->argument = record.argument;
   const struct mesh_metal_input input = mesh_metal_receive_prepare(&s->context, &s->transport, ch->in);

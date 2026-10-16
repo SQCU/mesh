@@ -34,7 +34,6 @@ int mesh_transfer_bind(struct mesh_ctx *context,uint32_t node,uint32_t queue,int
   _Atomic uint32_t *length=mesh_order_length(m,context->client,channel,receive);
   uint32_t index=atomic_load_explicit(length,memory_order_relaxed);
   if(index==MESH_ORDERS)return ENOSPC;
-  if(!receive)for(uint32_t value=0;value<section.count;value++)mesh_publish_bind(context,mesh_section_row(section,value),destination)->count++;
   mesh_transfers(m,context->client,channel,receive)[index]=(struct mesh_transfer){.local_row=section.first,.binding=identity,
     .count=section.count,.stride=section.stride,.invocation_pages=invocation_pages,.begin=begin,.end=end,.depth=depth,
     .bytes=section.bytes};
@@ -57,10 +56,18 @@ static int mesh_transfer_compare(const void *a,const void *b){
   return mesh_binding_order(*(const struct mesh_transfer *const *)a,*(const struct mesh_transfer *const *)b);
 }
 
+/* design/prepared-machine.md#M10: a program's targets by row, a row's by its cells */
+static int mesh_target_order(const void *a,const void *b){
+  const struct mesh_target *left=a,*right=b;
+  return left->row!=right->row?(left->row>right->row)-(left->row<right->row):(left->cells>right->cells)-(left->cells<right->cells);
+}
+
 /* design/algorithm-sources.md#programcopy */
 /* Each destination's SEND cells: every publication (a send transfer's slot) a column of one cell an
    invocation of its range and a terminal one no producer writes, in (class, binding) order; the
-   transfer's `first` is its slot 0 column's first cell, slot s's `s` columns on.  Each cell's
+   transfer's `first` is its slot 0 column's first cell, slot s's `s` columns on.  Each column is a
+   target of the row its slot sends (mesh.h mesh_row_targets: the program's targets, a section of
+   its slot sorted by row).  Each cell's
    request carries the producer's argument (1: a nonzero ready word); the bridge prepares the chains,
    each cell's successor and the queue gates (mesh-flow.c sends_configure).  Each destination's completion
    words: every receive transfer's slots and chunks an invocation of its range, transfer by transfer
@@ -76,19 +83,25 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   struct mesh_client *client=mesh_client_at(m,context->client);
   atomic_store_explicit(&client->depth,depth,memory_order_relaxed);
   atomic_store_explicit(&client->cyclic,0,memory_order_relaxed);
-  uint64_t cells=0;
+  uint64_t cells=0,targets=0;
   const uint32_t destinations=mesh_destination(client,0);
   for(uint32_t q=0;q<destinations*MESH_QUEUES;q++){
     /* design/prepared-machine.md#M08 */
     for(int d=0;d<2;d++)qsort(mesh_transfers(m,context->client,q,d),
       atomic_load(mesh_order_length(m,context->client,q,d)),sizeof(struct mesh_transfer),mesh_binding_order);
     struct mesh_transfer *out=mesh_transfers(m,context->client,q,MESH_SEND);
-    for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_SEND));i++)cells+=mesh_transfer_cells(out+i,slots,invocations);
+    for(uint32_t i=0;i<atomic_load(mesh_order_length(m,context->client,q,MESH_SEND));i++){
+      cells+=mesh_transfer_cells(out+i,slots,invocations);targets+=out[i].count;
+    }
   }
-  struct mesh_section storage;
+  struct mesh_section storage,published={0};
   /* design/prepared-machine.md#M04 */
   int status=mesh_section_create(context,(cells?cells:1)*sizeof(struct mesh_send),1,&storage);
+  /* design/prepared-machine.md#M10 */
+  if(!status && targets)status=mesh_section_create(context,targets*sizeof(struct mesh_target),1,&published);
   if(status)return status;
+  struct mesh_target *target=targets?mesh_section_address(context,published,0):NULL;
+  uint32_t target_count=0;
   void *address=mesh_section_address(context,storage,0);
   memset(address,0,storage.bytes);
   context->send_off=(uintptr_t)address-(uintptr_t)m;
@@ -97,7 +110,6 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
   /* design/prepared-machine.md#M04 */
   for(uint32_t d=0;d<destinations;d++){
     struct mesh_tx *tx=&client->tx[d];
-    uint64_t base=(uint64_t)((char *)tx-(char *)m);
     uint32_t count=0,once=0,length=0,incoming=0;
     for(uint32_t q=0;q<MESH_QUEUES;q++){
       length+=atomic_load_explicit(mesh_order_length(m,context->client,d*MESH_QUEUES+q,MESH_SEND),memory_order_relaxed);
@@ -126,11 +138,7 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
         uint64_t stream=tx->cells+sizeof(struct mesh_send)*(cell+(uint64_t)slot*column);
         struct mesh_send *cells=(void *)((char *)m+stream);
         for(uint32_t u=0;u<column;u++)cells[u].request.wr_id=1;
-        struct mesh_publication *publication=mesh_publication_at(m,out->local_row+slot*out->stride);
-        for(uint32_t j=0;j<publication->sends;j++)if(publication->targets[j].stream==base){
-          publication->targets[j].stream=stream;
-          publication->targets[j].stride=column;
-        }
+        target[target_count++]=(struct mesh_target){.cells=stream,.row=out->local_row+slot*out->stride};
       }
       cell+=mesh_transfer_cells(out,slots,invocations);
     }
@@ -147,7 +155,10 @@ int mesh_transfers_prepare(struct mesh_ctx *context,uint32_t slots,uint32_t invo
     for(uint32_t i=0;i<position;i++){ordered[i]->first=(uint32_t)word;word+=mesh_transfer_frames(m,ordered[i],invocations);}
     free(ordered);
   }
-
+  /* design/prepared-machine.md#M10 */
+  if(target)qsort(target,target_count,sizeof *target,mesh_target_order);
+  client->targets=target?(uint64_t)((char *)target-(char *)m):0;
+  client->target_count=target_count;
   return 0;
 }
 

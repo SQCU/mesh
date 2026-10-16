@@ -294,6 +294,7 @@ int mesh_slot_take(struct mesh_ctx *c,struct hdr *m,uint64_t key){
     if(!atomic_compare_exchange_strong(&slot->owner,&vacant,owner))continue;
     slot->key=key;
     atomic_store(&slot->depth,0);atomic_store(&slot->cyclic,0);
+    slot->targets=0;slot->target_count=0;
     memset(slot->tx,0,sizeof slot->tx);memset(slot->status,0,sizeof slot->status);
     *c=(struct mesh_ctx){.M=m,.len=c->len,.client=owner,.fd=c->fd};
     return 0;
@@ -386,9 +387,7 @@ uint32_t mesh_rows_alloc(struct mesh_ctx *c,uint32_t count){
     struct mesh_buffer *buffer=&mesh_buffers(c->M)[r];
     atomic_store_explicit(&buffer->closed,0,memory_order_relaxed);
     buffer->pages=0;
-    struct mesh_publication *publication=mesh_publication_at(c->M,r);
-    publication->sends=publication->device_input=publication->device_stride=0;
-    atomic_store_explicit(&publication->argument,0,memory_order_relaxed);
+    *mesh_delivery_at(c->M,r)=(struct mesh_delivery){0};
     atomic_store_explicit(&buffer->owner,c->client,memory_order_release);
   }
   return first;
@@ -485,37 +484,15 @@ void mesh_rows_release(struct mesh_ctx *c,uint32_t first,uint32_t count){
   mesh_bits_clear(mesh_plane(c->M,MESH_ROW_OWN),first,count);
 }
 
-/* design/algorithm-sources.md#index-hand-off */
-/* design/prepared-machine.md#M18 */
-/* a row's publication target toward destination `destination`: until mesh_transfers_prepare lays its cells, the
-   client's program toward that destination names it */
-struct mesh_target *mesh_publish_bind(struct mesh_ctx *c,uint32_t row,uint32_t destination){
-  struct hdr *m=c->M;
-  struct mesh_publication *publication=mesh_publication_at(m,row);
-  uint32_t *count=&publication->sends;
-  struct mesh_target *targets=publication->targets;
-  uint64_t first=(uint64_t)((char *)&mesh_client_at(m,c->client)->tx[destination]-(char *)m);
-  for(uint32_t i=0;i<*count;i++)if(targets[i].stream==first)return &targets[i];
-  struct mesh_target *target=&targets[(*count)++];
-  *target=(struct mesh_target){.stream=first};
-  return target;
-}
-
 /* design/prepared-machine.md#M13 */
 /* design/prepared-machine.md#M04 */
 /* design/algorithm-sources.md#programkernel_call */
-uint32_t mesh_publication_prepare(struct hdr *m,uint32_t row,struct prepared_publication *records){
-  struct mesh_publication *publication=mesh_publication_at(m,row);
-  uint32_t count=0;
-  for(uint32_t i=0;i<publication->sends;i++){
-    struct mesh_target target=publication->targets[i];
-    for(uint32_t k=0;k<target.count;k++){
-      if(records){
-        struct mesh_send *cell=(void *)((char *)m+target.stream+sizeof(struct mesh_send)*target.stride*k);
-        records[count]=(struct prepared_publication){.destination=(uintptr_t)cell,.argument=cell->request.wr_id};
-      }
-      count++;
-    }
+uint32_t mesh_publication_prepare(struct mesh_ctx *c,uint32_t row,struct prepared_publication *records){
+  uint32_t count;
+  const struct mesh_target *targets=mesh_row_targets(c->M,c->client,row,&count);
+  for(uint32_t i=0;records && i<count;i++){
+    struct mesh_send *cell=(void *)((char *)c->M+targets[i].cells);
+    records[i]=(struct prepared_publication){.destination=(uintptr_t)cell,.argument=cell->request.wr_id};
   }
   return count;
 }
