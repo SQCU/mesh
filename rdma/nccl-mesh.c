@@ -1006,6 +1006,9 @@ static uint64_t issued;
 static uint64_t cycle_of(uint64_t at) { return at / POSITIONS; }
 static int landed(uint64_t word, uint64_t at) { return word != UINT64_MAX && word >= 1 + cycle_of(at); }
 
+/* nccl.h ncclMeshSessionWaits */
+static _Atomic uint64_t session_waits;
+
 static double now_s(void) {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1416,8 +1419,10 @@ static ncclResult_t session_open(ncclComm_t comm) {
   pthread_mutex_unlock(&comm->guard);
   if (before) { session_close(s); return revoked_fail(comm); }
   pthread_mutex_unlock(&session_lock);
+  const double began = now_s();
   if ((status = mesh_transfers_start(&s->context))) result = start_failure(s, status);
   if (!result) result = session_agree(s, serial);
+  atomic_fetch_add(&session_waits, (uint64_t)((now_s() - began) * 1e9));
   pthread_mutex_lock(&session_lock);
   pthread_mutex_lock(&comm->guard);
   comm->opening = NULL;
@@ -2529,6 +2534,8 @@ ncclResult_t ncclMeshComplete(uint64_t ticket, const ncclMeshStream *stream, int
 uint64_t ncclMeshRetired(void) { return atomic_load(&retired); }
 
 void ncclMeshMetal4Records(uint64_t *issued, uint64_t *capacity) { metal_records(issued, capacity); }
+
+void ncclMeshSessionWaits(uint64_t *ns) { *ns = atomic_load(&session_waits); }
 
 ncclResult_t ncclMeshEncodeMetal4(ncclComm_t comm, ncclRedOp_t op, const void *sendbuff, void *recvbuff, size_t count, ncclDataType_t type,
                                   void *encoder, void *table, void *residency, uint32_t polls) {

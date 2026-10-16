@@ -893,6 +893,11 @@ ncclResult_t ncclMeshEncodeMetal4(ncclComm_t comm, ncclRedOp_t op, const void* s
    EOVERFLOW mid-group (a failed group), so a caller that encodes several windows ahead bounds each window's records by it (the
    records a step encodes, read across one step's encode). */
 void ncclMeshMetal4Records(uint64_t* issued, uint64_t* capacity);
+/* The nanoseconds this process's sessions have spent starting (counting from its first session): each opening's wait for
+   its bridges to pair its flows and for every peer's program (mesh_transfers_start), and its members' agreement on
+   their programs.  A caller that times its work across a session's opening takes this out of it: what a peer's late
+   start or a flow's pairing held it, not its own work (metal-microbench tools/mesh/rates.py measured). */
+void ncclMeshSessionWaits(uint64_t* ns);
 /* Every lease this process holds (ncclMemAlloc) is of its node's bridge that runs: ncclSuccess, or ncclRemoteError
    where one is of a bridge that stopped, its pages no longer registered (Memory, above).  A process that holds leases
    and makes no other call (a server between calls) reads it to know its leases are to be freed and taken again. */
