@@ -481,7 +481,9 @@ class Balancer:
     decision's parts minimise its stretches' part of that time (its programs' whole paths where priced, every
     decision on one path then moving alone in a call, its gain weighed against its own stretches' sum), a stretch's
     time on a rank divided among its decisions by the weights the program gives (any units: its own estimate of each
-    one's work there), less the work it names no decision for (`fixed`, the same units).  A decision's parts are its groups' (`groups`, the ranks holding each part,
+    one's work there), less the work it names no decision for (`fixed`, the same units, and `joined`, work a rank does
+    there only while it holds some decision's units there: its share's own norms, finishes and crossing dispatches,
+    which a rank holding none there does not run).  A decision's parts are its groups' (`groups`, the ranks holding each part,
     default one rank a part): a part some coordinate's ranks hold together (a pipeline stage's layers), its time a
     stretch their slowest's; a rank in none of its groups is constant to it, as is a rank holding none of it, and a
     part none of whose ranks run a stretch is no part of that stretch.  A stretch a decision has seen and no rank now
@@ -524,7 +526,7 @@ class Balancer:
 
     Of the moves reaching the models' least, the one of fewest moved parts (_fewest: a neighbouring pair's split where
     it reaches it).  A rank whose whole work at a stretch is a decision's (no other decision it holds weighs there and
-    no fixed work) publishes nothing there at none of it, so the crossing after it, where its latency is a function of
+    no fixed work, its joined work leaving with its units) publishes nothing there at none of it, so the crossing after it, where its latency is a function of
     the ranks publishing (_path), is priced without it: a rank whose crossings cost more than its work saves moves to
     none on the calls' evidence.
 
@@ -567,13 +569,17 @@ class Balancer:
             if scales and ranks:
                 order = tuple(obs['order']) if obs.get('order') is not None else None
                 latency = obs.get('latency')
-                seen[s] = (max(len(ts) for ts in obs['times'] if ts), ranks, scales, list(obs.get('fixed') or []), order,
-                           latency if callable(latency) else float(latency or 0.0), len(obs['times']))
+                standing, joined = list(obs.get('fixed') or []), list(obs.get('joined') or [])
+                fixed = [(standing[i] if i < len(standing) else 0.0) + (joined[i] if i < len(joined) else 0.0)
+                         for i in range(max(len(standing), len(joined)))]
+                seen[s] = (max(len(ts) for ts in obs['times'] if ts), ranks, scales, fixed, order,
+                           latency if callable(latency) else float(latency or 0.0), len(obs['times']), standing)
         priced = any(v[4] is not None for v in seen.values())
-        measure = 'path' if priced else 'sum'
+        measure = ('path' if priced else 'sum') + (' joined' if any(any(v[3][i] != (v[7][i] if i < len(v[7]) else 0.0) for i in range(len(v[3])))
+                                                                  for v in seen.values()) else '')
 
         def rows(times, keep=None):
-            return [(c, order, latency, times(s, ranks, n)) for s, (c, ranks, _, _, order, latency, n) in seen.items()
+            return [(c, order, latency, times(s, ranks, n)) for s, (c, ranks, _, _, order, latency, n, _) in seen.items()
                     if keep is None or s in keep]
 
         medians = lambda s, ranks, n: [ranks[i][0] if i in ranks else None for i in range(n)]
@@ -652,7 +658,8 @@ class Balancer:
                                  for g in range(n)]))
             built, alone = list(kept), {}
             for s, (c, ranks, scales, fixed, view, other) in mine.items():
-                alone[s] = {i for i in ranks if not max(0.0, float(fixed[i] if i < len(fixed) else 0.0))
+                standing = seen[s][7]
+                alone[s] = {i for i in ranks if not max(0.0, float(standing[i] if i < len(standing) else 0.0))
                             and not any(max(0.0, float(w[i] or 0.0)) and self._holds(e, i) for e, w in scales.items() if e != name)}
                 fs, gs = [], {}
                 per_unit = [self._model(name, s, g)(d['parts'][g]) / d['parts'][g] for g in view if d['parts'][g]]
