@@ -68,6 +68,16 @@ int metal_send_small(struct metal_program *, void *slot, size_t slot_offset, voi
                      void *cells, size_t cell_offset, uint64_t value);
 int metal_land(struct metal_program *, int type, int op, void *dst, size_t dst_offset, void *slot, size_t slot_offset, size_t n,
                void *words, size_t word_offset, uint64_t cycle, const struct metal_check *check);
+/* the same two steps run by the caller's kernel (nccl.h ncclMeshFused, the Metal 4 form): each one's record written as
+   its dispatch's would be and its six bindings' addresses given in `bound` (0 d, 1 s, 2 the record, 3 a, 4 v,
+   5 progress), nothing dispatched; the kernel calls metal_steps' functions (the send: its piece stored into
+   d + dst, n bytes, then mesh_step_release on a; the land: mesh_step_await on a, then the piece read from s + src) */
+int metal_send_deferred(struct metal_program *, void *slot, size_t slot_offset, size_t bytes, void *cells, size_t cell_offset,
+                        uint64_t value, uint64_t bound[6]);
+int metal_land_deferred(struct metal_program *, int op, void *dst, size_t dst_offset, void *slot, size_t slot_offset, size_t n,
+                        void *words, size_t word_offset, uint64_t cycle, const struct metal_check *check, uint64_t bound[6]);
+/* the steps' Metal text (after rdma/mesh.metal): the argument record and mesh_step_* */
+const char *metal_steps(void);
 void metal_keep(struct metal_program *, void *object);
 void metal_end(struct metal_program *, void *event, uint64_t value);
 void metal_collect(void *event);
