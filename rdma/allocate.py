@@ -56,55 +56,6 @@ import math
 RESOLUTION = 0.01  # the least relative accuracy a decision resolves (R11): a gain below it is no gain [DFPA 2011]
 
 
-class Allocator:
-    """shares: config_t0, units per rank (multiples of grain); W = sum(shares).  low: each rank's
-    minimum (a multiple of grain, at least grain).  prior: per rank (a, b, var_a, var_b) in the
-    units of the times, x at scale 1.  floor: per rank, the least b (roofline time per unit).
-    forget: lambda in (0, 1].  step: eta in (0, 1].  .shares is the next call's configuration
-    operand; .a and .b are the estimates, for the run record."""
-
-    def __init__(self, shares, grain, low, prior, floor, forget, step):
-        self.shares, self.grain, self.low, self.floor = list(shares), grain, list(low), list(floor)
-        self.total, self.forget, self.step = sum(shares), forget, step
-        if (len({len(shares), len(low), len(prior), len(floor)}) != 1 or sum(low) >= self.total
-                or any(c % grain or l % grain or l < grain or c < l for c, l in zip(shares, low))
-                or min(floor) <= 0 or not 0 < forget <= 1 or not 0 < step <= 1):
-            raise ValueError('allocator: shares and lower bounds on the grain with room above the bounds, '
-                             'one prior and positive floor per rank, forget and step in (0, 1]')
-        self.s = [float(c) for c in shares]
-        self.a, self.b = [float(p[0]) for p in prior], [float(p[1]) for p in prior]
-        self.P = [(float(p[2]), 0.0, float(p[3])) for p in prior]
-        self.trace = [p00 + p11 for p00, _, p11 in self.P]
-
-    def __call__(self, times, scale=1.0, next_scale=1.0):
-        """Steps on each rank's segment time of the call that ran .shares at cost scale `scale`;
-        returns the shares of the next call, whose cost scale is `next_scale`."""
-        n, lam, eta = len(self.shares), self.forget, self.step
-        g, w = [], []
-        for i in range(n):
-            x = scale * self.shares[i]
-            p00, p01, p11 = self.P[i]
-            pi0, pi1 = p00 + p01 * x, p01 + p11 * x
-            den = lam + pi0 + pi1 * x
-            k0, k1 = pi0 / den, pi1 / den
-            e = times[i] - self.a[i] - self.b[i] * x
-            self.a[i] += k0 * e
-            self.b[i] += k1 * e
-            p00, p01, p11 = (p00 - k0 * pi0) / lam, (p01 - k0 * pi1) / lam, (p11 - k1 * pi1) / lam
-            if p00 + p11 > self.trace[i]:
-                f = self.trace[i] / (p00 + p11)
-                p00, p01, p11 = p00 * f, p01 * f, p11 * f
-            self.P[i] = (p00, p01, p11)
-            b = max(self.b[i], self.floor[i])
-            g.append(times[i] + b * (next_scale * self.s[i] - x))
-            w.append(1.0 / (b * next_scale))
-        B = [1.0 / x for x in w]
-        c, self.s, _ = equal_finish(self.total, self.grain, self.low, [math.inf] * n,
-                                    [eta * g[i] - B[i] * self.s[i] for i in range(n)], B)
-        self.shares = c
-        return list(c)
-
-
 def equal_finish(total, grain, low, high, a, b):
     """Shares of `total` units at `grain` over ranks finishing at a_i + b_i s_i, within
     [low_i, high_i] (multiples of grain): (c, s, T), c the integer shares, s the continuous ones
@@ -225,6 +176,75 @@ def time(points, prior=None):
     return at
 
 
+class Points:
+    """A holder's time on a stretch at each part it ran: DFPA's partial functional performance model [Lastovetsky &
+    Reddy 2010] whose points are latent, each part's time a Kalman filter of a random walk observed in noise [Kalman
+    1960], so the model has a posterior and not only a value.  A call at u units observes its time t with its own
+    standard error `se` (the call's invocations') and the variance between calls `r` (the innovations' excess over
+    the filters' and the calls' own, estimated as they come [Mehra 1970]); every point's variance grows by 1 / `forget`
+    a call (the drift the forgetting factor states [Haykin 2014]); a two-sided cumulative sum of its standardised
+    innovations past 5, each less a slack of 0.5 [Page 1954; Basseville & Nikiforov 1993], drops the other points (its
+    holder's performance changed [Clarke, Lastovetsky & Rychkov 2011]): a shift that persists, not one call's outlier,
+    which a single innovation's chi-square took for one (metal-microbench docs/placement.md#moves).  The
+    `keep` latest parts are held.  The model is `time` over the points' means (more units never take less time,
+    interpolated between them)."""
+
+    def __init__(self, forget, keep=8):
+        self.forget, self.keep, self.r, self.seen, self.at = float(forget), int(keep), 0.0, 0, {}
+        self.cusum, self._made = [0.0, 0.0], None
+
+    def update(self, u, t, se=0.0):
+        """One call: `t` seconds at `u` units, its standard error `se`; whether it found the holder changed."""
+        u, t = int(u), float(t)
+        if u <= 0 or t <= 0:
+            return False
+        self.seen, self._made = self.seen + 1, None
+        for point in self.at.values():
+            point[1] /= self.forget
+        own = max(se * se, (RESOLUTION * t) ** 2)
+        changed = False
+        if u in self.at:
+            m, v = self.at.pop(u)
+            e, spread = t - m, v + own + self.r
+            z = e / math.sqrt(spread)
+            self.cusum = [max(0.0, self.cusum[0] + z - 0.5), max(0.0, self.cusum[1] - z - 0.5)]
+            if max(self.cusum) > 5.0:
+                self.at, self.cusum, changed = {}, [0.0, 0.0], True
+                self.at[u] = [t, own + self.r]
+            else:
+                self.r += (1 - self.forget) * (max(0.0, e * e - v - own) - self.r)
+                k = v / spread
+                self.at[u] = [m + k * e, (1 - k) * v]
+        else:
+            self.at[u] = [t, own + self.r]
+        while len(self.at) > self.keep:
+            self.at.pop(next(iter(self.at)))
+        return changed
+
+    def _model(self):
+        if self._made is None:
+            self._made = time([(u, m) for u, (m, v) in self.at.items()])
+        return self._made
+
+    def __call__(self, u):
+        return self._model()(u)
+
+    @property
+    def knots(self):
+        return self._model().knots
+
+    def state(self):
+        return {'forget': self.forget, 'keep': self.keep, 'r': self.r, 'seen': self.seen, 'cusum': self.cusum,
+                'at': [[u, m, v] for u, (m, v) in self.at.items()]}
+
+    @classmethod
+    def of(cls, state):
+        model = cls(state['forget'], state['keep'])
+        model.r, model.seen, model.at = state['r'], state['seen'], {int(u): [m, v] for u, m, v in state['at']}
+        model.cusum = list(state.get('cusum') or [0.0, 0.0])
+        return model
+
+
 def _robust(samples):
     """(median, its standard error) of seconds an invocation: 1.2533 x 1.4826 MAD / sqrt(n), which a tail of slow
     invocations does not inflate."""
@@ -232,14 +252,6 @@ def _robust(samples):
     med = statistics.median(samples)
     mad = statistics.median(abs(t - med) for t in samples)
     return med, 1.2533 * 1.4826 * mad / math.sqrt(len(samples))
-
-
-def _median_points(points):
-    import statistics
-    by = {}
-    for d, t in points:
-        by.setdefault(d, []).append(t)
-    return [(d, statistics.median(ts)) for d, ts in by.items()]
 
 
 def least(total, grain, low, high, stretches, value, knots, stop=None, budget=None):
@@ -529,12 +541,12 @@ class Balancer:
     parts (R4).
 
     A move costs the call that takes it its members' preparation of the placement it makes (metal-microbench
-    docs/placement.md#moves: S), which the gain must pay for: given `switch` (a move's measured cost) and `horizon` (the
-    calls a placement serves), observe takes a move only where `horizon` times its promised gain, less `confidence`
-    standard errors of a call, exceeds `switch` [Karlin, Manasse, Rudolph & Sleator 1988, rent or buy; the metrical
-    task system of Borodin, Linial & Saks 1992], and a taken move waits as `pending` until every member has prepared the
-    placement it makes, when `prepared` takes it (a move measured worse goes back at once: its placement was prepared
-    before).  Without them, as before, a move is taken at once.
+    docs/placement.md#moves: S), unless they prepared it before: with `prepare`, a move observe takes waits as `pending`
+    until every member has prepared the placement it makes, when `prepared` takes it (a move measured worse goes back
+    at once: its placement was prepared before); without it a move is taken at once.  Every move the models propose is
+    taken: no rule pricing a move against its gain (rent or buy, with blocking for the moves the models cannot price;
+    a horizon's) dominated taking them on the simulated nodes, each higher in risk in 33 to 49 of 75 states
+    (docs/placement.md#moves).
 
       Balancer({'tp': {'parts': [8, 8], 'grain': 1, 'low': [1, 1], 'high': [15, 15]}})
       .observe({'step:3': {'scales': {'tp': [1.0, 1.0]}, 'fixed': [0.2, 0.1], 'times': [[s, ...], [s, ...]]}, ...})
@@ -555,7 +567,7 @@ class Balancer:
     `state()` and `Balancer.of(state)` carry it between processes."""
 
     def __init__(self, decisions, window=3, memory=None, budget=None):
-        self.window, self.memory, self.decisions, self.points = int(window), memory and int(memory), {}, {}
+        self.window, self.memory, self.decisions, self.lines = int(window), memory and int(memory), {}, {}
         self.budget, self.measure, self.calls = budget and int(budget), 'sum', {}
         for name, d in decisions.items():
             parts = [int(p) for p in d['parts']]
@@ -582,7 +594,7 @@ class Balancer:
         d = self.decisions[e]
         return next((p for p, g in zip(d['parts'], self._groups(d)) if i in g), 0)
 
-    def observe(self, stretches, measured=None, measure_name='measured', switch=None, horizon=None, confidence=1.0):
+    def observe(self, stretches, measured=None, measure_name='measured', prepare=False):
         import statistics
         seen = {}
         for s, obs in stretches.items():
@@ -648,7 +660,7 @@ class Balancer:
                         history.pop(next(iter(history)))
                     last, d['last'] = d.get('last'), [list(d['parts']), tested]
                     if last and last[0] != d['parts'] and tested > last[1] * (1 + between):
-                        proposals.append((math.inf, name, last, math.inf))
+                        proposals.append((math.inf, name, last))
                         runs[name] = set()
                 continue
             path = {s for s, v in seen.items() if priced and v[4] is not None and any(seen[t][4] and seen[t][4][0] == v[4][0] for t in mine)}
@@ -675,20 +687,13 @@ class Balancer:
                     weights = {e: max(0.0, float(w[i] or 0.0)) * bool(self._holds(e, i)) for e, w in scales.items()}
                     total = sum(weights.values()) + max(0.0, float(fixed[i] if i < len(fixed) else 0.0))
                     share = med * (weights[name] / total if total else 1.0 / len(weights))
-                    own = self.points.get((name, s, g), [])
-                    earlier = [t for u, t in own if u == units][-self.window:]
-                    now = (earlier + [share])[-self.window:]
-                    old, new = (statistics.median(earlier) if earlier else None), statistics.median(now)
-                    if old is not None and abs(new - old) > max(epsilon, 3 * se / med if med > 0 else 0.0) * max(new, old):
-                        own, changed = [], True
-                    kept = [(u, t) for u, t in own if u != units] + [(units, t) for t in now]
-                    recent = list(dict.fromkeys(u for u, _ in reversed(kept)))[:self.memory] if self.memory else None
-                    self.points[(name, s, g)] = [(u, t) for u, t in kept if recent is None or u in recent]
+                    line = self.lines.setdefault((name, s, g), Points(self.forget, self.memory or 8))
+                    changed = line.update(units, share, se * share / med if med > 0 else 0.0) or changed
             remembered = d.setdefault('seen', {})
             for s, (c, ranks, scales, fixed, view, other) in mine.items():
                 remembered[s] = [c, [[g, view[g][0][0] - self._model(name, s, g)(d['parts'][g])] for g in view if d['parts'][g]], other]
             if last and last[0] != d['parts'] and tested > last[1] * (1 + between):
-                proposals.append((math.inf, name, last, math.inf))
+                proposals.append((math.inf, name, last))
                 continue
             if last and last[0] != d['parts']:
                 d['reach'] = min(2.0, d.get('reach', 2.0) * 2)
@@ -718,7 +723,7 @@ class Balancer:
                         continue
                     med = view[g][0][0] if g in view else 0.0
                     rest = (med - self._model(name, s, g)(d['parts'][g]) if d['parts'][g] else med) if g in view else 0.0
-                    if (name, s, g) in self.points:
+                    if (name, s, g) in self.lines:
                         gs[g] = lambda u, m=self._model(name, s, g), r=rest: m(u) + r if u else r
                     else:
                         gs[g] = lambda u, r=rest, k=per_unit: k * u + r
@@ -740,7 +745,7 @@ class Balancer:
                     return _path(rows(at, counted)) + sum(c * max(f(u[g]) for g, f in enumerate(fs)) for c, fs in kept)
                 value = _remembered(value)
             total = sum(d['parts'])
-            knots = [sorted({int(k) for (e, s, h) in self.points if e == name and h == g for k in self._model(name, s, g).knots})
+            knots = [sorted({int(k) for (e, s, h), line in self.lines.items() if e == name and h == g for k in line.knots})
                      for g in range(n)]
             target = base - epsilon * summed
             if least(total, d['grain'], d['low'], d['high'], [] if value else built, value, knots, stop=target,
@@ -752,17 +757,17 @@ class Balancer:
                 vertex = self._vertex(d, history, value or (lambda u, built=built: sum(c * max(f(u[g]) for g, f in enumerate(fs))
                                                                                      for c, fs in built)), joined + max(0.0, tested - call))
                 if vertex:
-                    proposals.append(((base - vertex[1]) / summed if summed else 0.0, name, vertex[0], base - vertex[1]))
+                    proposals.append(((base - vertex[1]) / summed if summed else 0.0, name, vertex[0]))
                     continue
                 d['before'], d['stands'], d['weighed'] = list(d['parts']), True, f'{key} {VERTEX_RULE}'
                 continue
             grow = d.get('reach', 2.0)
             failed = d.get('failed') or [None] * n
             here, anywhere = [None] * n, [None] * n
-            for (e, s, g), own in self.points.items():
-                if e == name and own:
-                    anywhere[g] = max([anywhere[g] or 0] + [u for u, _ in own])
-                    here[g] = max([here[g] or 0] + [u for u, _ in own]) if s in mine else here[g]
+            for (e, s, g), line in self.lines.items():
+                if e == name and line.knots:
+                    anywhere[g] = max([anywhere[g] or 0] + line.knots)
+                    here[g] = max([here[g] or 0] + line.knots) if s in mine else here[g]
             measured_ = [h if h is not None else a if a is not None else d['parts'][g] for g, (h, a) in enumerate(zip(here, anywhere))]
             reach = [min(d['high'][g], max(d['parts'][g], d['grain'] * math.ceil(grow * u / d['grain']), u + d['grain']))
                      for g, u in enumerate(measured_)]
@@ -778,10 +783,9 @@ class Balancer:
                 nxt, promise, _ = least(total, d['grain'], [math.floor(h / d['grain']) * d['grain'] for h in half],
                                         [math.ceil(h / d['grain']) * d['grain'] for h in half], [] if value else built, value, knots,
                                         budget=self.budget)
-            proposals.append(((base - promise) / summed if summed else 0.0, name, nxt, base - promise))
+            proposals.append(((base - promise) / summed if summed else 0.0, name, nxt))
         taken = set()
-        noise = between * tested / 2
-        for gain, name, value, seconds in sorted(proposals, key=lambda p: -p[0]):
+        for gain, name, value in sorted(proposals, key=lambda p: -p[0]):
             d, reverting = self.decisions[name], gain == math.inf
             if runs[name] & taken and not reverting:
                 d['before'], d['stands'] = None, False
@@ -790,19 +794,21 @@ class Balancer:
             if reverting:
                 d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
                 d['before'], d['parts'], d['stands'], d['last'], d['pending'] = None, list(value[0]), False, value, None
-            elif switch is None or horizon is None:
+            elif not prepare or list(value) == d['parts']:
                 d['before'], d['parts'], d['stands'] = list(d['parts']), list(value), False
-            elif horizon * (seconds - confidence * noise) > switch:
-                d['pending'], d['stands'] = list(value), False
             else:
-                d['pending'], d['worth'] = None, [list(value), seconds, noise, switch]
+                d['pending'], d['stands'] = list(value), False
         return self.parts
 
     @property
+    def forget(self):
+        """The models' forgetting factor: a memory of `window` calls at each of `memory` parts (8 where unset)."""
+        return 1.0 - 1.0 / (self.window * (self.memory or 8))
+
+    @property
     def pending(self):
-        """Each decision's move taken and not yet prepared {name: parts} (observe with `switch`: a move pays where `horizon`
-        calls of its expected gain, less `confidence` standard errors of a call, exceed the move's measured cost `switch`;
-        it waits as `pending` until every member has prepared the placement it makes, then `prepared` takes it)."""
+        """Each decision's move taken and not yet prepared {name: parts} (observe with `prepare`: it waits as `pending`
+        until every member has prepared the placement it makes, then `prepared` takes it)."""
         return {name: list(d['pending']) for name, d in self.decisions.items() if d.get('pending')}
 
     def prepared(self, expected=None):
@@ -881,11 +887,11 @@ class Balancer:
         return u, v
 
     def _model(self, name, s, i):
-        return time(_median_points(self.points.get((name, s, i), [])))
+        return self.lines.get((name, s, i)) or time([])
 
     def state(self):
         return {'window': self.window, 'memory': self.memory, 'budget': self.budget, 'decisions': self.decisions,
-                'points': [[d, s, i, own] for (d, s, i), own in self.points.items()], 'measure': self.measure,
+                'lines': [[d, s, i, line.state()] for (d, s, i), line in self.lines.items()], 'measure': self.measure,
                 'calls': self.calls}
 
     @classmethod
@@ -895,7 +901,7 @@ class Balancer:
                               'stands': False, **{k: v for k, v in d.items() if k != 'measure'},
                               'groups': d.get('groups') or [[i] for i in range(len(d['parts']))]}
                        for name, d in state['decisions'].items()}
-        b.points = {(d, s, int(i)): [tuple(p) for p in own] for d, s, i, own in state.get('points', [])}
+        b.lines = {(d, s, int(i)): Points.of(line) for d, s, i, line in state.get('lines', [])}
         b.measure = state.get('measure') or next((d['measure'] for d in state['decisions'].values() if d.get('measure')), 'sum')
         b.calls = {k: list(v) for k, v in (state.get('calls') or {}).items()}
         return b
@@ -1147,28 +1153,18 @@ class Coupled:
         self.design = self._design(self.start)
         return list(self.parts)
 
-    def observe(self, times, calls, switch=None, horizon=None, confidence=1.0):
+    def observe(self, times, calls, prepare=False):
         """The calls at the current parts: `times` each member's seconds a call (empty where it holds nothing),
-        `calls` the calls' seconds.  With `switch` (a move's measured cost, seconds) and `horizon` (the calls a placement
-        serves), the next allocation waits as `pending` until `prepared`, and where the model is fitted it is taken only
-        where `horizon` calls of its predicted gain (a sample's, times the samples of a call), less `confidence` standard
-        errors of the measured median, exceed `switch`; before the model is fitted, its design points are taken
-        (exploration), still prepared first."""
+        `calls` the calls' seconds.  With `prepare`, the next allocation waits as `pending` until `prepared`."""
         entry = self.seen.setdefault(self.parts, {'members': [[] for _ in self.low], 'calls': []})
         for i, ts in enumerate(times):
             entry['members'][i].extend(float(t) for t in ts or [])
         entry['calls'].extend(float(t) for t in calls or [])
         chosen = self._next()
-        if switch is None or horizon is None or chosen == self.parts:
+        if not prepare or chosen == self.parts:
             self.parts, self.pending = chosen, None
-            return list(self.parts)
-        fitted, held = self.fit(), self._measured().get(self.parts)
-        gain = noise = None
-        if fitted is not None and all(i in fitted[0] for i in range(len(chosen)) if chosen[i] > 0 or self.parts[i] > 0):
-            per = len(calls or []) or 1
-            gain = (self.predict(self.parts, fitted) - self.predict(chosen, fitted)) * per
-            noise = (self._error(held['calls']) * self._median(held['calls']) * per) if held else 0.0
-        self.pending = chosen if gain is None or horizon * (gain - confidence * noise) > switch else None
+        else:
+            self.pending = chosen
         return list(self.parts)
 
     def prepared(self, expected=None):
