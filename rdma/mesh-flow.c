@@ -227,9 +227,15 @@ static struct wire_mapping wire;
 static struct port ports[MESH_PORTS];
 static uint32_t port_count;
 static struct flow *flows;
-/* design/bridge-and-ipc.md#region: the flows and awaiting programs the bridge holds, told in the region (`busy`) */
+/* design/bridge-and-ipc.md#region: the flows and awaiting programs the bridge holds, told in the region (`busy`), and
+   the wall clock at which it last came to hold none (`idle_since`, 0 while it holds any) */
 static uint32_t flow_count,await_count;
-static void busy_tell(void){ atomic_store_explicit(&M->busy,(uint64_t)flow_count+await_count,memory_order_relaxed); }
+static void busy_tell(void){
+  const uint64_t busy=(uint64_t)flow_count+await_count;
+  if(busy)atomic_store_explicit(&M->idle_since,0,memory_order_relaxed);
+  else if(!atomic_load_explicit(&M->idle_since,memory_order_relaxed))atomic_store_explicit(&M->idle_since,clock_gettime_nsec_np(CLOCK_REALTIME),memory_order_relaxed);
+  atomic_store_explicit(&M->busy,busy,memory_order_release);
+}
 static int events=-1,listener=-1,hello=-1,network=-1,unreleased,finding;
 static uint64_t now,sequence;
 static char host[MESH_NAME_BYTES];
@@ -2387,7 +2393,7 @@ int main(int argc,char **argv){
   M=mmap(NULL,length,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
   if(M==MAP_FAILED)die("mmap");shm=MESH_NAME;
   /* a boot is the bridge's start on the wall clock, so a node's later boot is a newer record */
-  *M=geometry;M->node=node;M->version=MESH_VERSION;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);
+  *M=geometry;M->node=node;M->version=MESH_VERSION;M->boot=clock_gettime_nsec_np(CLOCK_REALTIME);M->idle_since=M->boot;
   for(uint32_t r=0;r<mesh_rows(M);r++)atomic_store_explicit(&mesh_page(M)[r].mapping,MESH_ABSENT,memory_order_relaxed);
   if(wire_map(&wire,M,fd))die("transport page aliases");
   close(fd);

@@ -80,8 +80,10 @@ The region holds a `bell` a port, the word that port's progress threads park on 
 bells of the ports its program's flows ride (`mesh_transfers_wake`, a `mesh_notify` each; the slot's `ports`, a bit a
 port, which the bridge sets as it takes the program's flows) as a group of its program starts, so a thread that parked
 while nothing moved serves that group's first publication and landing at once, and no other port's threads wake. The
-region's `busy` word is the count of flows and awaiting programs the bridge holds, 0 between calls (a node's idle
-test, and the bridge's own before it stops for a rebuilt binary).
+region's `busy` word is the count of flows and awaiting programs the bridge holds, 0 between calls, and `idle_since`
+the wall clock (ns) at which it last came to 0 (0 while it is not): a node's idle test (the convergence's, bin/
+mesh-converge.sh, through mesh-stat's `idle` and `idle_since` once the library's reader prints them), and the
+bridge's own before it stops for a rebuilt binary.
 
 A client slot (`struct mesh_client`) holds one client: its owner word (the client's generation, slot and process), its
 execution's key, its program once started (`configured`), its ring depth and whether it is cyclic, its publication

@@ -124,12 +124,13 @@ struct mesh_client {
   struct mesh_port_info status[MESH_DESTINATIONS];
 };
 /* design/prepared-machine.md#M01, #M09; `busy`, design/bridge-and-ipc.md#region: the flows and awaiting programs the
-   bridge holds (0 between calls); `bell`, design/bridge-and-ipc.md#progress: a port's word its parked progress threads
-   wait on, which a client rings (mesh_notify) as a group of a program riding that port starts */
+   bridge holds (0 between calls), and since when it has held none (`idle_since`, the wall clock in ns; 0 while it holds
+   any); `bell`, design/bridge-and-ipc.md#progress: a port's word its parked progress threads wait on, which a client
+   rings (mesh_notify) as a group of a program riding that port starts */
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,links,clients;
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,client_off,delivery_off,data_off,length,boot;
-  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy;
+  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,idle_since;
   _Atomic uint64_t bell[MESH_PORTS];
 };
 /* design/prepared-machine.md#M26 */
