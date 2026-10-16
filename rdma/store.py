@@ -1,8 +1,11 @@
 """The mesh's store of what it measures about its nodes and calls (design/heterogeneity.md), kept across calls in one
 JSON file on the node that drives them (~/.local/share/mesh/store.json: a driver uses its own node's store): 'nodes',
-each node's rates (RATES) with the model (node-info's) and GPU cores they were measured on, keyed by its name
-(node-info's `name`); 'configurations', each call configuration's state (allocate.py's Balancer and the evidence it
-moves on).  Every change is one read, change and write of the whole file under an exclusive lock on the file beside it
+each node's rates (RATES) with the model (node-info's) and GPU cores they were measured on, keyed by its bridge's node
+number (decimal: metal-microbench tools/mesh/grid.py mesh_map reads a node's record under its number, else under its
+name, else its model's start, and calibrate.py nodes writes under the number; the first records, etc/mesh-store.json,
+stay keyed by name, as model starts); 'configurations', each call configuration's state (allocate.py's Balancer and the
+evidence it moves on), named by its members' node numbers (metal-microbench tools/mesh/rates.py configuration).  Every
+change is one read, change and write of the whole file under an exclusive lock on the file beside it
 (`changing`), so drivers and tools on one node never lose each other's records.  Its first records are the mesh's own
 (etc/mesh-store.json, installed beside the library).  A node with no record starts from the records of its model's
 nodes, else of every node.  A link's cost is the bridges' map's (mesh-plan.h mesh_map), never a record here."""
@@ -51,12 +54,12 @@ def record(section, key, value):
         state.setdefault(section, {})[key] = value
 
 
-def node(name, model=None):
-    """Node `name`'s record, else its start: its model (`model`, node-info's) and each rate the mean of the records of
-    that model's nodes, else of every node's."""
+def node(key, model=None):
+    """The record under `key` (a node's bridge node number, or a first record's name), else a start: its model (`model`,
+    node-info's) and each rate the mean of the records of that model's nodes, else of every node's."""
     known = records('nodes')
-    if name in known:
-        return known[name]
+    if key in known:
+        return known[key]
     alike = [r for r in known.values() if r.get('model') == model] or list(known.values())
     start = {'model': model}
     for key in RATES:

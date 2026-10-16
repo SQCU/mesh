@@ -242,7 +242,7 @@ def _median_points(points):
     return [(d, statistics.median(ts)) for d, ts in by.items()]
 
 
-def least(total, grain, low, high, stretches, value, knots, stop=None):
+def least(total, grain, low, high, stretches, value, knots, stop=None, budget=None):
     """Units of `total` at `grain` within [low_i, high_i] (each bound taken inward onto the grain) minimising
     sum_s c_s max_i f_si(u_i) over `stretches` [(c_s, [f_si, nondecreasing])], or `value(u)` where given (a call's
     latency path, _path), exactly: one stretch by min_max (exact [Ibaraki & Katoh 1988]); two ranks by the pairwise
@@ -254,13 +254,16 @@ def least(total, grain, low, high, stretches, value, knots, stop=None):
     largest time, which is no less.  Boxes are taken least bound first, each split in half along its widest rank, and
     one whose bound reaches the best value found is dropped: the best value is the lattice's least.  With `stop`, a
     question rather than a search: whether any point's value is below it, the boxes whose bound reaches it dropped too
-    and the search ended at the first point below it (the Balancer's stand test).  (units, the value.)"""
+    and the search ended at the first point below it (the Balancer's stand test).  `budget` (None: none) bounds the boxes
+    the search makes (metal-microbench docs/acceptance-20261014.md A37: at six ranks of 4,096 units it made up to 54
+    thousand where the descent priced 6 thousand): past it the search ends at the best point found, which is then not
+    known to be the least.  (units, the value, whether it is the least: the search ended within its budget.)"""
     n = len(low)
     low, high = [-(-v // grain) * grain for v in low], [v // grain * grain for v in high]
     if len(stretches) == 1 and value is None:
         c, fs = stretches[0]
         units, top = min_max(total, grain, low, high, fs)
-        return units, c * top
+        return units, c * top, True
     value = value or (lambda u: sum(c * max(fs[i](u[i]) for i in range(n)) for c, fs in stretches))
     seen = {}
 
@@ -272,8 +275,8 @@ def least(total, grain, low, high, stretches, value, knots, stop=None):
 
     best = _descend(total, grain, low, high, priced, knots)
     if n <= 2 or (stop is not None and best[1] < stop):
-        return best
-    best = (best[1], tuple(best[0]))
+        return best[0], best[1], True
+    best, spent = (best[1], tuple(best[0])), 0
 
     def box(lo, hi):
         lo, hi = list(lo), list(hi)
@@ -302,6 +305,9 @@ def least(total, grain, low, high, stretches, value, knots, stop=None):
         bound, _, lo, hi = heapq.heappop(heap)
         if done(bound):
             break
+        if budget is not None and spent >= budget:
+            return list(best[1]), best[0], False
+        spent += 1
         if sum(lo) == total:
             best = min(best, (priced(lo), tuple(lo)))
             if stop is not None and best[0] < stop:
@@ -314,7 +320,7 @@ def least(total, grain, low, high, stretches, value, knots, stop=None):
             if made and not done(made[0]):
                 order += 1
                 heapq.heappush(heap, (made[0], order, made[1], made[2]))
-    return list(best[1]), best[0]
+    return list(best[1]), best[0], True
 
 
 def _remembered(value):
@@ -429,8 +435,10 @@ def _path(rows):
     each program's stretches (order: (program, place)) in place order as a longest path [the dependency graph's
     critical path; Baccelli, Cohen, Olsder & Quadrat 1992, max-plus], a stretch starting on a rank once its own
     previous one has ended and every other rank that published there has ended and crossed (the previous stretch's
-    latency, seconds), the program's count times its end and its last crossing; a stretch without an order its count
-    times its slowest rank.  With every latency 0 it is the sum of each stretch's slowest rank."""
+    latency, seconds, or, where it is a function, its value at whether each rank publishes there, a tuple of booleans: a
+    crossing's time over the ranks it then joins, so a rank that holds none of the parts publishing there leaves it),
+    the program's count times its end and its last crossing; a stretch without an order its count times its slowest
+    rank.  With every latency 0 it is the sum of each stretch's slowest rank."""
     total, programs = 0.0, {}
     for c, order, latency, times in rows:
         if order is None:
@@ -452,7 +460,8 @@ def _path(rows):
                     elif t > second:
                         second = t
             end = [max(end[i], second if i == at else first) + (times[i] or 0.0) for i in range(n)]
-            sent, crossed = [t is not None for t in times], latency or 0.0
+            sent = [t is not None for t in times]
+            crossed = latency(tuple(sent)) if callable(latency) else latency or 0.0
         total += max(c for _, c, _, _ in seq) * (max(end) + crossed)
     return total
 
@@ -510,12 +519,20 @@ class Balancer:
 
     What a decision keeps is bounded, so nothing a call does grows with the calls before it (metal-microbench
     docs/acceptance-20261014.md A37): with `memory`, each model's points at its `memory` latest parts and the
-    measured calls of the decision's `memory` latest parts (the ratio test's spread), the older dropped.
+    measured calls of the decision's `memory` latest parts (the ratio test's spread), the older dropped; with `budget`,
+    each search (least) makes at most that many boxes, past which it takes the best parts it found.
+
+    Of the moves reaching the models' least, the one of fewest moved parts (_fewest: a neighbouring pair's split where
+    it reaches it).  A rank whose whole work at a stretch is a decision's (no other decision it holds weighs there and
+    no fixed work) publishes nothing there at none of it, so the crossing after it, where its latency is a function of
+    the ranks publishing (_path), is priced without it: a rank whose crossings cost more than its work saves moves to
+    none on the calls' evidence.
 
     `state()` and `Balancer.of(state)` carry it between processes."""
 
-    def __init__(self, decisions, window=3, memory=None):
+    def __init__(self, decisions, window=3, memory=None, budget=None):
         self.window, self.memory, self.decisions, self.points = int(window), memory and int(memory), {}, {}
+        self.budget = budget and int(budget)
         for name, d in decisions.items():
             parts = [int(p) for p in d['parts']]
             n, grain = len(parts), int(d.get('grain', 1))
@@ -549,8 +566,9 @@ class Balancer:
             ranks = {i: _robust([float(t) for t in ts]) for i, ts in enumerate(obs['times']) if ts}
             if scales and ranks:
                 order = tuple(obs['order']) if obs.get('order') is not None else None
+                latency = obs.get('latency')
                 seen[s] = (max(len(ts) for ts in obs['times'] if ts), ranks, scales, list(obs.get('fixed') or []), order,
-                           float(obs.get('latency') or 0.0), len(obs['times']))
+                           latency if callable(latency) else float(latency or 0.0), len(obs['times']))
         priced = any(v[4] is not None for v in seen.values())
         measure = 'path' if priced else 'sum'
 
@@ -632,8 +650,10 @@ class Balancer:
                 kept.append((c, [(lambda u, o=other: o) if d['parts'][g] or g not in rests else
                                  (lambda u, m=self._model(name, s, g), r=rests[g], o=other: max(o, m(u) + r) if u else o)
                                  for g in range(n)]))
-            built = list(kept)
+            built, alone = list(kept), {}
             for s, (c, ranks, scales, fixed, view, other) in mine.items():
+                alone[s] = {i for i in ranks if not max(0.0, float(fixed[i] if i < len(fixed) else 0.0))
+                            and not any(max(0.0, float(w[i] or 0.0)) and self._holds(e, i) for e, w in scales.items() if e != name)}
                 fs, gs = [], {}
                 per_unit = [self._model(name, s, g)(d['parts'][g]) / d['parts'][g] for g in view if d['parts'][g]]
                 per_unit = sorted(per_unit)[len(per_unit) // 2] if per_unit else 0.0
@@ -655,11 +675,12 @@ class Balancer:
             if path:
                 member = {i: g for g, members in enumerate(groups) for i in members}
 
-                def value(u, ranked=ranked, member=member, kept=kept, counted=counted):
+                def value(u, ranked=ranked, member=member, kept=kept, counted=counted, alone=alone):
                     def at(s, ranks, n):
                         if s not in ranked:
                             return medians(s, ranks, n)
-                        return [(ranked[s][member[i]](u[member[i]]) if i in ranks or u[member[i]] else None)
+                        return [(ranked[s][member[i]](u[member[i]]) if (i in ranks or u[member[i]])
+                                 and (u[member[i]] or i not in alone.get(s, ())) else None)
                                 if member.get(i) in ranked[s] else (ranks[i][0] if i in ranks and i not in member else None)
                                 for i in range(n)]
                     return _path(rows(at, counted)) + sum(c * max(f(u[g]) for g, f in enumerate(fs)) for c, fs in kept)
@@ -667,8 +688,9 @@ class Balancer:
             total = sum(d['parts'])
             knots = [sorted({int(k) for (e, s, h) in self.points if e == name and h == g for k in self._model(name, s, g).knots})
                      for g in range(n)]
-            if least(total, d['grain'], d['low'], d['high'], [] if value else built, value, knots,
-                     stop=base - epsilon * measured)[1] >= base - epsilon * measured:
+            target = base - epsilon * measured
+            if least(total, d['grain'], d['low'], d['high'], [] if value else built, value, knots, stop=target,
+                     budget=self.budget)[1] >= target:
                 d['before'], d['stands'] = list(d['parts']), True
                 continue
             grow = d.get('reach', 2.0)
@@ -677,14 +699,17 @@ class Balancer:
                      if any((name, s, g) in self.points for s in mine) else d['high'][g] for g in range(n)
                      for u in [max((u for s in mine for u, _ in self.points.get((name, s, g), [])), default=0)]]
             reach = [r if f is None else max(min(r, f - d['grain']), d['parts'][g]) for g, (r, f) in enumerate(zip(reach, failed))]
-            nxt, promise = least(total, d['grain'], d['low'], reach, [] if value else built, value, knots)
+            nxt, promise, _ = least(total, d['grain'], d['low'], reach, [] if value else built, value, knots, budget=self.budget)
             if sum(nxt) < total:
-                nxt, promise = least(total, d['grain'], d['low'], [d['high'][g] if f is None else max(f - d['grain'], d['parts'][g])
-                                                                  for g, f in enumerate(failed)], [] if value else built, value, knots)
+                reach = [d['high'][g] if f is None else max(f - d['grain'], d['parts'][g]) for g, f in enumerate(failed)]
+                nxt, promise, _ = least(total, d['grain'], d['low'], reach, [] if value else built, value, knots, budget=self.budget)
+            nxt, promise = self._fewest(d, nxt, promise, value or (
+                lambda u, built=built: sum(c * max(f(u[g]) for g, f in enumerate(fs)) for c, fs in built)), reach, knots)
             if d['before'] is not None and any((c - p) * (p - b) < 0 for c, p, b in zip(nxt, d['parts'], d['before'])):
                 half = [(p + c) / 2 for c, p in zip(nxt, d['parts'])]
-                nxt, promise = least(total, d['grain'], [math.floor(h / d['grain']) * d['grain'] for h in half],
-                                     [math.ceil(h / d['grain']) * d['grain'] for h in half], [] if value else built, value, knots)
+                nxt, promise, _ = least(total, d['grain'], [math.floor(h / d['grain']) * d['grain'] for h in half],
+                                        [math.ceil(h / d['grain']) * d['grain'] for h in half], [] if value else built, value, knots,
+                                        budget=self.budget)
             proposals.append(((base - promise) / measured if measured else 0.0, name, nxt))
         taken = set()
         for gain, name, value in sorted(proposals, key=lambda p: -p[0]):
@@ -713,16 +738,39 @@ class Balancer:
                 d['before'], d['parts'], d['stands'] = None, list(last[0]), False
         return self.parts
 
+    def _fewest(self, d, nxt, promise, value, reach, knots):
+        """Of the decision's moves whose value is the models' least within `reach` (nxt, its value `promise`), the one
+        that moves fewest parts: nxt, or a neighbouring pair's least split with the others held (_split, exact for the
+        two) where it reaches the same value, so where the least is not one point (a holder whose time is flat in its
+        part, a share whose slowest holder alone sets it) the move leaves the other parts where they are (a part a
+        member holds as a range of an axis, its run's start the parts before it: a move between neighbours moves no
+        other member's range, and a member whose range moves reloads it; metal-microbench docs/elastic.md The engine's
+        calls).  A move of fewer parts at a worse value is not taken: it reaches the least in more calls, each a
+        reload of its own (metal-microbench output_data/planner-20261015/pass2 allocate2-after.json moves_neighbours:
+        8 reloads in 3 moves after a holder slowed 30 %, where the least's one move reloaded 3).  (parts, value.)"""
+        parts, grain, moves = d['parts'], d['grain'], [(nxt, promise)]
+        for g in range(len(parts) - 1):
+            pair, _ = _split(parts[g] + parts[g + 1], grain, d['low'][g:g + 2], [max(parts[g], reach[g]), max(parts[g + 1], reach[g + 1])],
+                             lambda p, g=g: value(parts[:g] + list(p) + parts[g + 2:]), knots[g:g + 2])
+            moved = parts[:g] + pair + parts[g + 2:]
+            moves.append((moved, value(moved)))
+        reach_ = promise + 1e-12 * abs(promise)
+        eligible = [(sum(a != b for a, b in zip(u, parts)), v, u) for u, v in moves if v <= reach_ and u != parts]
+        if not eligible:
+            return nxt, promise
+        _, v, u = min(eligible, key=lambda m: (m[0], m[1]))
+        return u, v
+
     def _model(self, name, s, i):
         return time(_median_points(self.points.get((name, s, i), [])))
 
     def state(self):
-        return {'window': self.window, 'memory': self.memory, 'decisions': self.decisions,
+        return {'window': self.window, 'memory': self.memory, 'budget': self.budget, 'decisions': self.decisions,
                 'points': [[d, s, i, own] for (d, s, i), own in self.points.items()]}
 
     @classmethod
     def of(cls, state):
-        b = cls({}, state.get('window', 3), state.get('memory'))
+        b = cls({}, state.get('window', 3), state.get('memory'), state.get('budget'))
         b.decisions = {name: {'grain': 1, 'low': [0] * len(d['parts']), 'high': [sum(d['parts'])] * len(d['parts']), 'before': None,
                               'stands': False, **d, 'groups': d.get('groups') or [[i] for i in range(len(d['parts']))]}
                        for name, d in state['decisions'].items()}
