@@ -1007,7 +1007,8 @@ class Coupled:
                 'high': self.high, 'parts': list(self.parts), 'start': list(self.start), 'able': self.able,
                 'stands': self.stands, 'stood': self.stood, 'forbidden': sorted(self.forbidden),
                 'seen': [[list(p), e] for p, e in self.seen.items()], 'design': [list(p) for p in self.design],
-                'rows': self.rows, 'tiles': self.tiles, 'pending': list(self.pending) if self.pending else None}
+                'rows': self.rows, 'tiles': self.tiles, 'pending': list(self.pending) if self.pending else None,
+                'kept': list(getattr(self, 'kept', ()))}
 
     @classmethod
     def of(cls, state):
@@ -1016,6 +1017,7 @@ class Coupled:
         c.low, c.high, c.able = list(state['low']), list(state['high']), list(state['able'])
         c.parts, c.start = tuple(state['parts']), tuple(state['start'])
         c.pending = tuple(state['pending']) if state.get('pending') else None
+        c.kept = list(state.get('kept') or [])
         c.stands, c.stood = state['stands'], state['stood']
         c.forbidden = {tuple(f) for f in state['forbidden']}
         c.seen = {tuple(p): e for p, e in state['seen']}
@@ -1055,7 +1057,10 @@ class Coupled:
     def resize(self, total):
         """The total moved to `total` units (a multiple of the grain): each bound that was the whole total becomes the
         new one; the next allocation is the model's minimum over the new lattice, or, undetermined, the parts scaled to
-        it and the design about them."""
+        it and the design about them; where members are `kept` (those whose units are built per range, a Neural Engine's
+        compiled shares: metal-microbench docs/placement.md#moves), they keep their units where those still fit and the
+        others take the difference, so a move of the total rebuilds nothing of theirs (their own moves are this
+        decision's, prepared before they are taken)."""
         total = int(total)
         if total == self.total:
             return list(self.parts)
@@ -1064,6 +1069,20 @@ class Coupled:
         old, self.total = self.total, total
         self.high = [total if h >= old else min(h, total) for h in self.high]
         self.low = [min(lo, total) for lo in self.low]
+        kept = [i for i in getattr(self, 'kept', ()) if i in self.able]
+        others = [i for i in self.able if i not in kept]
+        held = sum(self.parts[i] for i in kept)
+        if kept and others and held <= total - sum(self.low[i] for i in others):
+            parts = list(self.parts)
+            for i in others:
+                parts[i] = 0
+            biggest = max(others, key=lambda i: (self.parts[i], -i))
+            parts[biggest] = total - held
+            if all(self.low[i] <= parts[i] <= self.high[i] for i in range(len(parts))) and self.allowed(tuple(parts)):
+                self.parts = self.start = tuple(parts)
+                self.stands, self.stood = False, None
+                self.design = self._design(self.start)
+                return list(self.parts)
         scaled = [self.grain * round(p * total / old / self.grain) if old else 0 for p in self.parts]
         biggest = max(self.able, key=lambda i: (scaled[i], -i))
         scaled[biggest] += total - sum(scaled)
