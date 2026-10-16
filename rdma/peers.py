@@ -145,11 +145,18 @@ def identity(body: str) -> int | None:
     except (KeyError, ValueError):
         return None
 
+FIELD = re.compile(r"(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=(.*?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\s*$)")
+
+def fields(line: str) -> dict:
+    """A node-info line's fields: each key=value, a value running to the next key= or the line's end, so a value holds
+    its spaces (chip=Apple M5 Max, instances=Apple M5 Max/40) and a line of several facts gives each (disk_free_gib=..
+    disk_used_gib=.., route=.. via=..)."""
+    return {key: value for key, value in FIELD.findall(line)}
+
 def routes(body: str) -> list[str]:
     """The fabric addresses a node-info sample's node routes to (its `route=` lines: babeld's routes to other nodes'
     ULAs), in its order."""
-    return [fields["route"] for line in body.splitlines()
-            if "route" in (fields := dict(word.split("=", 1) for word in line.split() if "=" in word))]
+    return [found["route"] for line in body.splitlines() if "route" in (found := fields(line))]
 
 def resolved(address: str, timeout: float) -> list:
     """socket.getaddrinfo of `address` within `timeout` seconds (an mDNS name's lookup is not otherwise bounded);
@@ -169,16 +176,22 @@ def resolved(address: str, timeout: float) -> list:
         raise OSError(f"{address}: {out['error']}")
     return out["found"]
 
+def host(target: tuple) -> str:
+    """A socket address's host as address%interface (the interface where it has a scope)."""
+    scope = target[3] if len(target) > 3 else 0
+    return f"{target[0]}%{socket.if_indextoname(scope)}" if scope and "%" not in target[0] else target[0]
+
 def where(target: tuple) -> str:
     """A socket address as address%interface:port (the interface where it has a scope)."""
-    scope = target[3] if len(target) > 3 else 0
-    return f"{target[0]}%{socket.if_indextoname(scope)}:{target[1]}" if scope else f"{target[0]}:{target[1]}"
+    return f"{host(target)}:{target[1]}"
 
 def nodeinfo(address: str | list[str], timeout: float = 2.0, limit: int = 1 << 20, stagger: float = 0.25,
-             accept=None) -> tuple[str, str, list[str]]:
+             accept=None, order=None) -> tuple[str, str, list[str]]:
     """A node's node-info sample from `address` (a name or an address, or a list of them in the order they are
     tried): every port of NODEINFO_PORTS on an address at once (ports are services on one path), the addresses in
-    order (each name's in resolver order, the names resolved at once) `stagger` seconds apart, or at once when no
+    order (each name's in resolver order, the names resolved at once; with `order`, a list of classify's kinds, every
+    resolved address by its kind's place in it, those of no listed kind last, the given order kept within a kind: the
+    path a consumer's control rides, its LAN before the fabric's cables) `stagger` seconds apart, or at once when no
     attempt is pending; the first whole sample that `accept` takes (accept(sample): None, else why not, as another
     node's) answers, and the reading ends `timeout` seconds past the last address's turn, so every address has at
     least `timeout`; the names' resolution is inside that bound.  (the sample, the address:port that gave it, why each
@@ -195,6 +208,9 @@ def nodeinfo(address: str | list[str], timeout: float = 2.0, limit: int = 1 << 2
         found = list(pool.map(look, asked))
     addresses = [[(family, kind, proto, (sockaddr[0], port, *sockaddr[2:])) for port in NODEINFO_PORTS]
                  for each in found for family, kind, proto, _, sockaddr in each]
+    if order is not None:
+        place = {kind: i for i, kind in enumerate(order)}
+        addresses.sort(key=lambda each: place.get(classify(host(each[0][3])), len(place)))
     deadline = began + timeout + stagger * max(0, len(addresses) - 1)
     chooser, pending, started = selectors.DefaultSelector(), {}, 0.0
 
@@ -263,11 +279,12 @@ def nodeinfo(address: str | list[str], timeout: float = 2.0, limit: int = 1 << 2
         chooser.close()
 
 def observation(body: str) -> dict:
+    """A node-info sample's facts (fields), its port= and route= lines apart."""
     facts = {}
     for line in body.splitlines():
-        fields = dict(word.split("=", 1) for word in line.split() if "=" in word)
-        if not fields.keys() & {"port", "route"}:
-            facts.update(fields)
+        found = fields(line)
+        if not found.keys() & {"port", "route"}:
+            facts.update(found)
     return facts
 
 def reachable(addr: str, port: int = 22, timeout: float = 2.0) -> bool:
@@ -300,19 +317,19 @@ def roster() -> tuple[str, ...]:
                  if public.with_suffix("").is_file() and len(public.read_text().split()) >= 2
                  and public.read_text().split()[1] in blobs)
 
-def ssh_argv(name: str, address: str, node: int, account: str | None = None) -> list[str]:
+def ssh_argv(name: str, address: str, node: int, account: str | None, options: dict) -> list[str]:
     """ssh's argv, up to its command, for the node whose bridge is node `node`: the destination its name, so the
     driver's ssh configuration's Host entry for that name applies (its User and IdentityFile); HostName `address`,
     where its node-info answered with that node's identity (identity), so a node with no shared LAN is reached along
     the fabric's routes; its host key kept under mesh-<node>, the first accepted unasked; the account its node-info
     names (`account`: the node's mesh account) where it publishes one; every key of the driver's the roster authorizes;
-    batch mode, a 5 s connect, and a multiplexed connection of the mesh's own (CONTROL) whose keepalive ends it within
-    about 3 s of the node falling silent."""
+    batch mode and a multiplexed connection of the mesh's own (CONTROL), its connect bound, keepalive and persistence
+    the consumer's configuration's (`options`, each an ssh -o option: metal-microbench configs/driver.json `ssh`)."""
     CONTROL.mkdir(mode=0o700, parents=True, exist_ok=True)
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=1",
-            "-o", "ServerAliveCountMax=3", "-o", "ControlMaster=auto", "-o", f"ControlPath={CONTROL}/%C",
-            "-o", "ControlPersist=60", "-o", f"HostName={address}", "-o", f"HostKeyAlias=mesh-{node}",
-            "-o", "StrictHostKeyChecking=accept-new"]
+    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ControlMaster=auto", "-o", f"ControlPath={CONTROL}/%C",
+            "-o", f"HostName={address}", "-o", f"HostKeyAlias=mesh-{node}", "-o", "StrictHostKeyChecking=accept-new"]
+    for option, value in options.items():
+        argv += ["-o", f"{option}={value}"]
     for key in roster():
         argv += ["-i", key]
     return argv + (["-l", account] if account else []) + [name]
