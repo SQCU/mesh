@@ -199,10 +199,10 @@ def _median_points(points):
     return [(d, statistics.median(ts)) for d, ts in by.items()]
 
 
-def least(total, grain, low, high, stretches, value=None):
+def least(total, grain, low, high, stretches, value, knots):
     """Units of `total` at `grain` within [low_i, high_i] minimising sum_s c_s max_i f_si(u_i) over `stretches`
     [(c_s, [f_si, nondecreasing])], or `value(u)` where given (a call's latency path, _path): one stretch by min_max
-    (exact [Ibaraki & Katoh 1988]); two ranks by trying every split (exact); more, each grain to the rank that adds
+    (exact [Ibaraki & Katoh 1988]); two ranks exactly by `knots` (`_split`); more, each grain to the rank that adds
     least, then a grain moved between two ranks while that lowers the sum.  (units, the sum.)"""
     n = len(low)
     if len(stretches) == 1 and value is None:
@@ -211,13 +211,7 @@ def least(total, grain, low, high, stretches, value=None):
         return units, c * top
     value = value or (lambda u: sum(c * max(fs[i](u[i]) for i in range(n)) for c, fs in stretches))
     if n == 2:
-        best = None
-        for a in range(max(low[0], total - high[1]), min(high[0], total - low[1]) + 1, grain):
-            u = [a, total - a]
-            v = value(u)
-            if best is None or v < best[1]:
-                best = (u, v)
-        return best if best else (list(low), value(low))
+        return _split(total, grain, low, high, value, knots)
     u = list(low)
     held = [[fs[i](u[i]) for i in range(n)] for _, fs in stretches]
     for _ in range((total - sum(low)) // grain):
@@ -250,6 +244,48 @@ def least(total, grain, low, high, stretches, value=None):
         if not moved:
             break
     return u, v
+
+
+def _split(total, grain, low, high, value, knots):
+    """The split [a, total - a] of two ranks of least `value`, the least a among equal values, a on the grain from
+    max(low_0, total - high_1) to min(high_0, total - low_1) (else (low, value(low))).  `knots` are each rank's units
+    where its models bend (the `time` models' measured units: rank 0's at a, rank 1's at total - a).  Between two
+    consecutive knots every model is affine in a (below its first point the max of 0 and an affine piece, convex), and
+    `value` composes the models by max, + and nonnegative counts alone (_path's longest path is max-plus [Baccelli,
+    Cohen, Olsder & Quadrat 1992]), so it is convex there [Boyd & Vandenberghe 2004, 3.2.3]; a rank's units 0 (it
+    publishes nothing) is a knot of its own.  The grain points at and beside each knot are evaluated, and each run of
+    grain points between two by a bisection on the sign of its forward difference, which on a convex sequence ends at
+    its least minimiser: O(knots log(total / grain)) evaluations where trying every split took total / grain, with the
+    same minimum."""
+    lo, hi = max(low[0], total - high[1]), min(high[0], total - low[1])
+    if lo > hi:
+        return list(low), value(low)
+    seen = {}
+
+    def at(a):
+        if a not in seen:
+            seen[a] = value([a, total - a])
+        return seen[a]
+
+    marks = {lo, hi}
+    for a in [0, *knots[0], total, *(total - u for u in knots[1])]:
+        if lo < a < hi:
+            under = lo + grain * ((a - lo) // grain)
+            marks |= {under, min(hi, under + grain)}
+    marks = sorted(marks)
+    best = min((at(a), a) for a in marks)
+    for p, q in zip(marks, marks[1:]):
+        i, j = p + grain, q - grain
+        if i > j:
+            continue
+        while i < j:
+            m = i + grain * ((j - i) // grain // 2)
+            if at(m + grain) < at(m):
+                i = m + grain
+            else:
+                j = m
+        best = min(best, (at(i), i))
+    return [best[1], total - best[1]], best[0]
 
 
 def _path(rows):
@@ -476,7 +512,9 @@ class Balancer:
                                 for i in range(n)]
                     return _path(rows(at, counted)) + sum(c * max(f(u[g]) for g, f in enumerate(fs)) for c, fs in kept)
             total = sum(d['parts'])
-            if least(total, d['grain'], d['low'], d['high'], [] if value else built, value)[1] >= base - epsilon * measured:
+            knots = [sorted({int(u) for (e, _, h), own in self.points.items() if e == name and h == g for u, _ in own})
+                     for g in range(n)]
+            if least(total, d['grain'], d['low'], d['high'], [] if value else built, value, knots)[1] >= base - epsilon * measured:
                 d['before'], d['stands'] = list(d['parts']), True
                 continue
             grow = d.get('reach', 2.0)
@@ -485,14 +523,14 @@ class Balancer:
                      if any((name, s, g) in self.points for s in mine) else d['high'][g] for g in range(n)
                      for u in [max((u for s in mine for u, _ in self.points.get((name, s, g), [])), default=0)]]
             reach = [r if f is None else max(min(r, f - d['grain']), d['parts'][g]) for g, (r, f) in enumerate(zip(reach, failed))]
-            nxt, promise = least(total, d['grain'], d['low'], reach, [] if value else built, value)
+            nxt, promise = least(total, d['grain'], d['low'], reach, [] if value else built, value, knots)
             if sum(nxt) < total:
                 nxt, promise = least(total, d['grain'], d['low'], [d['high'][g] if f is None else max(f - d['grain'], d['parts'][g])
-                                                                  for g, f in enumerate(failed)], [] if value else built, value)
+                                                                  for g, f in enumerate(failed)], [] if value else built, value, knots)
             if d['before'] is not None and any((c - p) * (p - b) < 0 for c, p, b in zip(nxt, d['parts'], d['before'])):
                 half = [(p + c) / 2 for c, p in zip(nxt, d['parts'])]
                 nxt, promise = least(total, d['grain'], [math.floor(h / d['grain']) * d['grain'] for h in half],
-                                     [math.ceil(h / d['grain']) * d['grain'] for h in half], [] if value else built, value)
+                                     [math.ceil(h / d['grain']) * d['grain'] for h in half], [] if value else built, value, knots)
             proposals.append(((base - promise) / measured if measured else 0.0, name, nxt))
         taken = set()
         for gain, name, value in sorted(proposals, key=lambda p: -p[0]):

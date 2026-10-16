@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import errno
 import ipaddress
+import os
+import selectors
 import socket
 import subprocess
 import time
@@ -88,36 +91,80 @@ def discover(timeout: float = 3.0) -> list[Node]:
     me = local_name()
     return [Node(n, n == me, addresses(n, timeout)) for n in browse(timeout)]
 
-def nodeinfo(address: str, timeout: float = 2.0, limit: int = 1 << 20) -> str:
-    errors = []
-    for port in NODEINFO_PORTS:
-        try:
-            with socket.create_connection((address, port), timeout=timeout) as client:
-                client.shutdown(socket.SHUT_WR)
-                deadline, data = time.monotonic() + timeout, bytearray()
-                while len(data) <= limit:
-                    left = deadline - time.monotonic()
-                    if left <= 0:
-                        raise TimeoutError(address)
-                    client.settimeout(left)
-                    chunk = client.recv(min(65536, limit + 1 - len(data)))
-                    if not chunk:
-                        break
-                    data.extend(chunk)
-                if len(data) > limit:
-                    raise ValueError("nodeinfo exceeds local byte limit")
-                header, separator, body = bytes(data).partition(b"\n")
-                if header.startswith(b"mesh1 "):
-                    if not separator or len(body) != int(header.split()[1]):
-                        raise ValueError("incomplete nodeinfo frame")
+def sample(data: bytes, limit: int) -> str:
+    if len(data) > limit:
+        raise ValueError("nodeinfo exceeds local byte limit")
+    header, separator, body = data.partition(b"\n")
+    if header.startswith(b"mesh1 "):
+        if not separator or len(body) != int(header.split()[1]):
+            raise ValueError("incomplete nodeinfo frame")
+    else:
+        body = data
+    if not body.rstrip().endswith(b"end"):
+        raise ValueError("incomplete nodeinfo sample")
+    return body.decode()
+
+def nodeinfo(address: str, timeout: float = 2.0, limit: int = 1 << 20, stagger: float = 0.25) -> str:
+    targets = [(family, kind, proto, (where[0], port, *where[2:]))
+               for family, kind, proto, _, where in socket.getaddrinfo(address, None, type=socket.SOCK_STREAM) for port in NODEINFO_PORTS]
+    deadline, chooser, pending, errors, started = time.monotonic() + timeout, selectors.DefaultSelector(), {}, [], 0.0
+
+    def fail(client, why):
+        chooser.unregister(client)
+        target = pending.pop(client)[0]
+        errors.append(f"{target[0]}:{target[1]}: {why}")
+        client.close()
+
+    try:
+        while time.monotonic() < deadline and (targets or pending):
+            if targets and (not pending or time.monotonic() >= started + stagger):
+                started, (family, kind, proto, target) = time.monotonic(), targets.pop(0)
+                client = socket.socket(family, kind, proto)
+                client.setblocking(False)
+                code = client.connect_ex(target)
+                if code in (0, errno.EINPROGRESS):
+                    pending[client] = [target, None]
+                    chooser.register(client, selectors.EVENT_WRITE)
                 else:
-                    body = bytes(data)
-                if not body.rstrip().endswith(b"end"):
-                    raise ValueError("incomplete nodeinfo sample")
-                return body.decode()
-        except (OSError, ValueError) as error:
-            errors.append(f"{address}:{port}: {error}")
-    raise OSError("; ".join(errors))
+                    errors.append(f"{target[0]}:{target[1]}: {os.strerror(code)}")
+                    client.close()
+                continue
+            wait = deadline - time.monotonic()
+            for key, _ in chooser.select(max(0.0, min(wait, started + stagger - time.monotonic()) if targets else wait)):
+                client, data = key.fileobj, pending[key.fileobj][1]
+                if data is None:
+                    code = client.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    if code:
+                        fail(client, os.strerror(code))
+                        continue
+                    try:
+                        client.shutdown(socket.SHUT_WR)
+                    except OSError as error:
+                        fail(client, error)
+                        continue
+                    pending[client][1] = bytearray()
+                    chooser.modify(client, selectors.EVENT_READ)
+                    continue
+                try:
+                    chunk = client.recv(65536)
+                except BlockingIOError:
+                    continue
+                except OSError as error:
+                    fail(client, error)
+                    continue
+                data.extend(chunk)
+                if chunk and len(data) <= limit:
+                    continue
+                try:
+                    return sample(bytes(data), limit)
+                except ValueError as error:
+                    fail(client, error)
+        errors += [f"{target[0]}:{target[1]}: no sample in {timeout} s" for target, _ in pending.values()]
+        raise OSError("; ".join(errors) or f"{address}: no address")
+    finally:
+        for client in pending:
+            client.close()
+        chooser.close()
 
 def observation(body: str) -> dict:
     facts = {}
