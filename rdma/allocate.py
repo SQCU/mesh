@@ -546,7 +546,9 @@ class Balancer:
     the same way (make before break [RFC 3209]: the placement it returns to need not be prepared still, its nested
     divisions refitted to its parts, and a call never runs one that is not, which had cost a call 19.7 s of Neural Engine
     shares built inside it); without it a move, and its return, is taken at once.  Every move the models propose is
-    taken: no rule pricing a move against its gain (rent or buy, with blocking for the moves the models cannot price;
+    taken, and a pending move is a commitment: a later proposal waits until it is taken or its preparation fails
+    (`unprepared`), so a decision proposing at every call never outruns its own preparation; no rule pricing a move
+    against its gain (rent or buy, with blocking for the moves the models cannot price;
     a horizon's) dominated taking them on the simulated nodes, each higher in risk in 33 to 49 of 75 states
     (docs/placement.md#moves).
 
@@ -799,9 +801,9 @@ class Balancer:
             elif reverting:
                 d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
                 d['before'], d['parts'], d['stands'], d['last'], d['pending'] = None, list(value[0]), False, value, None
-            elif not prepare or list(value) == d['parts']:
+            elif not prepare or list(value) == d['parts'] and not d.get('pending'):
                 d['before'], d['parts'], d['stands'] = list(d['parts']), list(value), False
-            else:
+            elif not d.get('pending'):
                 d['pending'], d['stands'] = list(value), False
         return self.parts
 
@@ -815,6 +817,15 @@ class Balancer:
         """Each decision's move taken and not yet prepared {name: parts} (observe with `prepare`: it waits as `pending`
         until every member has prepared the placement it makes, then `prepared` takes it)."""
         return {name: list(d['pending']) for name, d in self.decisions.items() if d.get('pending')}
+
+    def unprepared(self, expected=None):
+        """The pending moves `expected` names ({name: parts}; every pending one where None) given up: their preparation
+        failed, so a later proposal may take their place."""
+        for name, d in self.decisions.items():
+            if d.get('pending') and (expected is None or expected.get(name) == d['pending']):
+                d['pending'] = None
+                d.pop('reverting', None)
+        return self.parts
 
     def prepared(self, expected=None):
         """Every pending move taken (where `expected`, {name: parts}, names the pending moves that were prepared: only
@@ -1186,10 +1197,16 @@ class Coupled:
             entry['members'][i].extend(float(t) for t in ts or [])
         entry['calls'].extend(float(t) for t in calls or [])
         chosen = self._next()
-        if not prepare or chosen == self.parts:
+        if not prepare or chosen == self.parts and self.pending is None:
             self.parts, self.pending = chosen, None
-        else:
+        elif self.pending is None:
             self.pending = chosen
+        return list(self.parts)
+
+    def unprepared(self, expected=None):
+        """The pending allocation given up (where `expected` names it: only that one): its preparation failed."""
+        if self.pending and (expected is None or tuple(expected) == tuple(self.pending)):
+            self.pending = None
         return list(self.parts)
 
     def prepared(self, expected=None):
