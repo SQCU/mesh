@@ -135,7 +135,8 @@ def node():
     import subprocess
     if 'node' not in _PIPELINES:
         chip = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'], capture_output=True, text=True).stdout.strip()
-        cores = set(re.findall(r'"gpu-core-count" = ([0-9]+)', subprocess.run(['ioreg', '-l'], capture_output=True).stdout.decode('utf-8', 'replace')))
+        listing = subprocess.run(['ioreg', '-r', '-c', 'AGXAccelerator', '-d', '1'], capture_output=True).stdout.decode('utf-8', 'replace')
+        cores = set(re.findall(r'"gpu-core-count" = ([0-9]+)', listing))
         if len(cores) != 1:
             raise RuntimeError(f'{chip or "this node"}: its registry names GPU core counts {sorted(cores)}, not one (ioreg gpu-core-count)')
         _PIPELINES['node'] = (chip, int(cores.pop()))
