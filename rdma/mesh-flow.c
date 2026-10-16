@@ -2126,6 +2126,7 @@ static void ports_found(void){
     /* design/bridge-and-ipc.md#lanes: the lanes' headers and discard blocks, the pages leased for the port's index */
     port->lanes.pages=lane_pages();
     port->lanes.page=lanes_page[port_count];
+    port->lanes.provider.device=&port->device;
     snprintf(port->device.name,sizeof port->device.name,"%s",devices[i]);snprintf(port->name,sizeof port->name,"%s",devices[i]+5);
     port_count++;
     link_set(port,0,MESH_STOPPED,0);
