@@ -466,6 +466,11 @@ def _path(rows):
     return total
 
 
+# The rule a vertex is priced within (Balancer._vertex), part of a weighed decision's key, so a decision weighed under
+# another rule is weighed again at its parts.
+VERTEX_RULE = 'joined+unattributed'
+
+
 class Balancer:
     """A program's partitioned dimensions (`decisions`) balanced on its own evidence (design/heterogeneity.md R3,
     R5, R10, R11), whatever the program computes.
@@ -657,7 +662,7 @@ class Balancer:
                 continue
             if last and last[0] != d['parts']:
                 d['reach'] = min(2.0, d.get('reach', 2.0) * 2)
-            if d['before'] is not None and d['before'] == d['parts'] and not changed and (d.get('weighed') == key or not self._vertices(d, history)):
+            if d['before'] is not None and d['before'] == d['parts'] and not changed and (d.get('weighed') == f'{key} {VERTEX_RULE}' or not self._vertices(d, history)):
                 d['stands'] = True
                 continue
             n = len(d['parts'])
@@ -720,7 +725,7 @@ class Balancer:
                 if vertex:
                     proposals.append(((base - vertex[1]) / measured if measured else 0.0, name, vertex[0]))
                     continue
-                d['before'], d['stands'], d['weighed'] = list(d['parts']), True, key
+                d['before'], d['stands'], d['weighed'] = list(d['parts']), True, f'{key} {VERTEX_RULE}'
                 continue
             grow = d.get('reach', 2.0)
             failed = d.get('failed') or [None] * n
