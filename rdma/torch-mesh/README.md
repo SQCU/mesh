@@ -35,8 +35,19 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 - Memory ([NCCL.md](../NCCL.md#memory)): the backend's own CPU tensors (a non-contiguous CPU tensor's contiguous copy, a
   barrier's tensor, the flattened operands of the list `all_gather` and `reduce_scatter`) are leases of the node's
   bridge's window (`backend.blank`, over `mesh.lease`). A program's CPU tensor in the window is
-  `torch.frombuffer(mesh.lease(nbytes), dtype=...)`. MPS tensors are torch's MPS allocator's; the Metal path copies
-  them into the window's rings, and placing them in the window is not done here.
+  `torch.frombuffer(mesh.lease(nbytes), dtype=...)`, or `torch_mesh.empty(shape, dtype=..., device="cpu")`.
+- Window MPS tensors: `torch_mesh.empty(shape, dtype=..., device="mps")` is an MPS tensor whose storage is a lease's
+  Metal buffer (`ncclMeshMemBuffer`), made through torch's DLPack interop (`at::fromDLPack` of a `kDLMetal` tensor, its
+  data the `MTLBuffer` and its byte offset, as torch's `toDLPack` writes an MPS tensor). Its release returns the lease
+  once the stream's command buffer open at the release has completed (torch's MPS allocator's own rule for a buffer in
+  flight). Every collective passes it as its `MTLBuffer` and offset, so the library reaches it where it lies wherever
+  it reads or writes window operands in place ([NCCL.md](../NCCL.md#memory)). `torch_mesh.records()` lists the window
+  tensors' live leases and `torch_mesh.address(t)` where a tensor's bytes lie in the window (0: outside it).
+  Reproduction target (metal-microbench docs/measurement.md 2026-09-30, part A): a 16.8 MB all-reduce on window
+  tensors copies 0 bytes (16.78 MB otherwise); part B: tp 271.5-272.2 ms a step. Other MPS tensors are torch's MPS
+  allocator's, copied into the window's rings: torch's MPS factories take their allocator from a fixed instance
+  (`at::mps::GetMPSAllocator`, no registered or pluggable allocator for MPS), so a program places a tensor in the
+  window by making it with `empty`, never by default.
 
 ## What works
 
