@@ -2254,6 +2254,12 @@ static void lanes_reset(struct port *port,int64_t code,const char *what,int tell
    made once the port pairs, or a pause after they failed, where the device has room for them (flow_make counts it
    before any flow's own; else made at the first turn it has, the cause logged once), connected once both ends made
    theirs, closed once the link went or they failed */
+/* #lanes: whether a flow on the port rides lanes (one its exclusive pairs were not made for), which makes them: a port
+   whose flows are exclusive holds no queue pairs beyond theirs until one does, or until its peer's lanes are heard */
+static int lanes_wanted(const struct port *port){
+  for(const struct flow *f=flows;f;f=f->next)if(f->port==port && !f->exclusive && f->state!=FAILED)return 1;
+  return 0;
+}
 static void lanes_turn(struct port *port){
   struct lanes *l=&port->lanes;
   if(l->job){
@@ -2282,7 +2288,7 @@ static void lanes_turn(struct port *port){
   if(failed && port->greeted && (l->state==LANES_UP || l->state==LANES_CONNECTING))lanes_reset(port,failed,"failed",1);
   if(l->job)return;
   if(l->state==LANES_CLOSING && now>=l->retry){l->retry=now+MESH_PAUSE_NS;lanes_job(port,LANES_CLOSING);}
-  else if(port->greeted && l->state==LANES_DOWN && now>=l->retry){
+  else if(port->greeted && l->state==LANES_DOWN && now>=l->retry && (l->heard || lanes_wanted(port))){
     if(l->page==MESH_ABSENT && (l->page=mesh_arena_alloc(&bridge,l->pages,1))==MESH_ABSENT){
       if(l->code!=ENOMEM)say("link %u (%s): lanes not made: the window holds no %u pages for them; made once it has\n",port->index,
                              port->name,l->pages);

@@ -467,7 +467,9 @@ bytes would be wrong on every exclusive flow, and the lanes' own path has not ye
 Once a crossing's landing is measured on each and the exclusive form is deleted, the lanes carry every position at
 its own bytes and the library prices it so, one transport and one price (the library's request of 2026-10-15).
 
-A port's lanes hold two queue pairs whatever its programs, routes and communicators. Over the review's seven
+A port's lanes hold two queue pairs whatever its programs, routes and communicators, once made: a port makes them when a
+flow on it rides lanes (one its exclusive pairs were not made for) or its peer's lanes are heard, so a port whose
+flows are all exclusive holds their queue pairs alone, as Q5P's links did (mesh git 5702ea5). Over the review's seven
 six-node cablings and 240 numberings each, one six-member communicator holds 4 queue pairs on the busiest device (its
 lanes and its direct neighbour's exclusive flow; 6 to 18 at 112, refused on three cablings), and with four splits
 beside it 8 (12 to 36 at 112, refused on all seven); no direct flow had to ride the lanes, and a fifth communicator
