@@ -1761,16 +1761,17 @@ def relay(config, world, solver, header, rows, stopping):
                 ready = joined.take()
                 if ready is None:
                     time.sleep(0.0002)
-            if ready is None:
+            if ready is not None:
+                (session, tick), records, events = ready
+                done = records[OBSERVATION_KIND][0]
+                posts.observe(list(events.values()))
+                X = request_rows(records[OBSERVATION_KIND][1], records[CART_KIND][1], objective, posts)[:config["maxrows"]]
+                n = len(X)
+            if ready is None or not n:
                 header[...] = 0
                 header[0] = IDLE
                 world.bcast(header)
                 continue
-            (session, tick), records, events = ready
-            done = records[OBSERVATION_KIND][0]
-            posts.observe(list(events.values()))
-            X = request_rows(records[OBSERVATION_KIND][1], records[CART_KIND][1], objective, posts)[:config["maxrows"]]
-            n = len(X)
             header[0], header[1] = REQUEST, n
             world.bcast(header)
             rows[:n] = X
