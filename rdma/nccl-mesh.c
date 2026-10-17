@@ -20,6 +20,9 @@
 #include <time.h>
 #include <unistd.h>
 #include <netdb.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <arpa/inet.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -612,6 +615,22 @@ ncclResult_t ncclGetUniqueId(ncclUniqueId *id) {
   if (root.fd < 0 || bind(root.fd, (struct sockaddr *)&any, sizeof any) || listen(root.fd, 64) ||
       getsockname(root.fd, (struct sockaddr *)&any, &length) || gethostname(host, sizeof host - 1))
     return fail(ncclSystemError, "the bootstrap root's listener: %s", strerror(errno));
+  /* metal-microbench docs/asking-the-mesh.md: a cabled peer is reached on the fabric, never by a name that resolves to
+     Wi-Fi or a LAN: the node's mesh identity (bin/mesh-router-init.sh, MESH_ULA_PREFIX on each fabric port) where it
+     holds one, else its host name */
+  struct ifaddrs *interfaces = NULL;
+  if (!getifaddrs(&interfaces)) {
+    for (struct ifaddrs *i = interfaces; i; i = i->ifa_next) {
+      char text[INET6_ADDRSTRLEN];
+      if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET6 || (i->ifa_flags & IFF_LOOPBACK) ||
+          !inet_ntop(AF_INET6, &((struct sockaddr_in6 *)i->ifa_addr)->sin6_addr, text, sizeof text) ||
+          strncmp(text, MESH_ULA_PREFIX, strlen(MESH_ULA_PREFIX)))
+        continue;
+      snprintf(host, sizeof host, "%s", text);
+      break;
+    }
+    freeifaddrs(interfaces);
+  }
   snprintf(id->internal, sizeof id->internal, "%s:%u", host, ntohs(any.sin6_port));
   memcpy(root.id, id->internal, sizeof root.id);
   return ncclSuccess;

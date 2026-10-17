@@ -10,6 +10,8 @@
 #define MESH_MAGIC 0x4d455348u
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
+/* the mesh's unique local prefix, each node's fabric identity under it (bin/mesh-router-init.sh) */
+#define MESH_ULA_PREFIX "fd6d:6573:68:"
 #define MESH_MODE 0666
 #define MESH_VERSION 117u
 #define MESH_ABSENT UINT32_MAX
