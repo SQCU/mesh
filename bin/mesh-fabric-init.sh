@@ -55,6 +55,15 @@ done
 [ "$(sysctl -n net.inet6.ip6.forwarding 2>/dev/null)" = 1 ] || {
   echo "[$(ts)] DRIFT ip6 forwarding off"
   sysctl -w net.inet6.ip6.forwarding=1 >/dev/null 2>&1; drift=1; }
+# a router's end-system model is the weak one (RFC 1122 3.3.4.2): its fabric identity, the ULA on lo0
+# (mesh-router-init.sh), is the source of what it sends along babeld's routes and is accepted on whichever cable it
+# arrives; macOS's strong model chose a cable's link-local as the source and refused a datagram bound to the ULA (no
+# route: scoped to lo0), so the ULAs carried nothing (metal-microbench docs/measurement.md 2026-10-16)
+for k in check_interface select_src_strong_end; do
+  [ "$(sysctl -n net.inet6.ip6.$k 2>/dev/null)" = 0 ] || {
+    echo "[$(ts)] DRIFT ip6 $k on"
+    sysctl -w net.inet6.ip6.$k=0 >/dev/null 2>&1; drift=1; }
+done
 mv -f /var/run/mesh-fabric.$$ /var/run/mesh-fabric; chmod 644 /var/run/mesh-fabric
 [ "$drift" -eq 0 ] || echo "[$(ts)] fabric converged"
 exit 0
