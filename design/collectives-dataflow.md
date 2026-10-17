@@ -337,6 +337,13 @@ A change of the map never closes a session.
 
 - `mesh_program_steps(program, rank, operand)` makes a rank's steps (SEND, REDUCE, COPY; peer, round, buffer, first,
   piece).
+- `mesh_program_steps_cut(program, rank, operand, segments)` makes them over unequal segments: segment s the
+  `segments[s]` elements after those before it, each part its weight's share of its segment (mesh 430cf7b2^ `mesh_cut`).
+  An uneven call (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`) carries its own copy of the counts (`struct call`
+  `segments`, `total` their sum; `elements` and `segment_at` read them), `plan_calls` cuts its steps by them, and
+  `order_group` cuts every other rank's alike, so one program serves any division; its program's segments must be the
+  ranks (`ncclInvalidUsage` else). Staging (`stage`, `launch_metal`) and the result (`finish`, `epilogue`) take rank r's
+  segment at `segment_at`.
 - A point-to-point call is one step (`plan_calls`, line 1544): a SEND, or a COPY into its receive buffer.
 - Routes are data: the bridges' table in `map.next`, and the tree sets.
 

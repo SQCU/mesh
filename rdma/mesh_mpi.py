@@ -8,14 +8,16 @@ by its import (rdma/NCCL.md "NumPy"):
 Comm() is the world: this process is rank RANK of WORLD_SIZE (the variables torchrun and the launchers set), its
 communicator made by NCCL's bootstrap at NCCL_COMM_ID, else MASTER_ADDR:MASTER_PORT (ncclCommInitRank: the map is the
 links among the ranks' nodes their bridges hold paired), its collectives the library's compiled defaults.  Every call is libnccl-mesh's host path: contiguous arrays at host pointers, a NULL stream, the call
-complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast, Allgather, Reduce_scatter_block,
-Alltoall, Gather, Scatter, Send, Recv, Sendrecv (one group, so both directions pair), Barrier, allreduce (a Python
-number), Free; IN_PLACE as a send buffer, None for a buffer a rank does not use (Gather's off the root, Scatter's send
-off it).  COMM_WORLD is Comm(), made at first use.  Subcommunicators: Split(color, key) (ncclCommSplit; UNDEFINED
+complete when it returns.  Methods: Get_rank, Get_size, Allreduce, Reduce, Bcast, Allgather, Allgatherv,
+Reduce_scatter_block, Reduce_scatter, Alltoall, Gather, Scatter, Send, Recv, Sendrecv (one group, so both directions
+pair), Barrier, allreduce (a Python number), Free; IN_PLACE as a send buffer, None for a buffer a rank does not use
+(Gather's off the root, Scatter's send off it).  Allgatherv and Reduce_scatter take a count a rank, as mpi4py spells
+them (a receive buffer [array, counts], recvcounts): one program over unequal segments (ncclMeshAllGatherV,
+ncclMeshReduceScatterV), every rank passing the same counts.  COMM_WORLD is Comm(), made at first use.  Subcommunicators: Split(color, key) (ncclCommSplit; UNDEFINED
 for none), Shrink(exclude) (ncclCommShrink), Grow(size) and Comm.joining (ncclCommGrow), Revoke() (ncclCommRevoke), and
 a Cartesian process grid, Create_cart(dims) with Get_coords, Get_cart_rank, Shift and Sub(remain_dims),
 each sub-grid a Split of it (a 2-D mesh's rows and columns), whose members the cables need not join.  Not here:
-nonblocking calls, the v-collectives, object (pickled) collectives; separately issued Send and Recv that do not pair
+nonblocking calls, Alltoallv, Gatherv and Scatterv, object (pickled) collectives; separately issued Send and Recv that do not pair
 are reported (rdma/NCCL.md "Rules").  A message to a rank the
 map does not link is forwarded by the nodes between (rdma/NCCL.md "Routes between unlinked ranks").  The host path works on any node whose bridge runs (a communicator, a lone rank's too, is a client of its node's bridge: rdma/NCCL.md "Communicators"); it is not the measured path (GPU tensors take the Metal
 path through torch-mesh).  Memory: empty(shape, dtype) is an array in this node's bridge's window (ncclMemAlloc, the
@@ -73,6 +75,20 @@ def at(array):
     if array.dtype not in TYPES:
         raise ValueError(f'a buffer of {array.dtype}: the library moves {sorted(map(str, TYPES))}')
     return ffi.cast('void *', array.ctypes.data)
+
+
+def segments(spec, size):
+    """A v-collective's receive buffer as mpi4py gives it, [array, counts] or [array, (counts, displacements)]: the
+    array and a count a rank, summing to its size, the displacements (where given) the counts' running sums."""
+    if not isinstance(spec, (list, tuple)) or len(spec) != 2:
+        raise ValueError('a v-collective\'s buffer is [array, counts]')
+    array, layout = spec
+    counts, displacements = (layout if isinstance(layout, tuple) and len(layout) == 2 and not np.isscalar(layout[0]) else (layout, None))
+    counts = [int(c) for c in counts]
+    packed = [sum(counts[:r]) for r in range(len(counts))]
+    if len(counts) != size or sum(counts) != array.size or (displacements is not None and [int(d) for d in displacements] != packed):
+        raise ValueError(f'counts {counts}: one a rank of {size}, summing to the array\'s {array.size}, packed in rank order')
+    return array, counts
 
 
 class Comm:
@@ -157,8 +173,31 @@ class Comm:
         send = window(recvbuf[self.rank * (recvbuf.size // self.size):][:recvbuf.size // self.size] if sendbuf is IN_PLACE else sendbuf)
         check(lib.ncclAllGather(at(send), at(recvbuf), recvbuf.size // self.size, TYPES[recvbuf.dtype], self.comm, ffi.NULL))
 
+    def Allgatherv(self, sendbuf, recvbuf):
+        """Every rank's segment into recvbuf, given as [array, counts] (or [array, (counts, displacements)], the
+        displacements the counts' running sums: segments packed in rank order), rank r's counts[r] elements
+        (ncclMeshAllGatherV); IN_PLACE takes this rank's segment from the array."""
+        array, counts = segments(recvbuf, self.size)
+        before = sum(counts[:self.rank])
+        send = window(array[before:before + counts[self.rank]] if sendbuf is IN_PLACE else sendbuf)
+        if send.size != counts[self.rank]:
+            raise ValueError(f'a send buffer of {send.size} elements: counts[{self.rank}] is {counts[self.rank]}')
+        check(lib.ncclMeshAllGatherV(at(send), at(array), ffi.new('size_t[]', counts), TYPES[array.dtype], self.comm, ffi.NULL))
+
     def Reduce_scatter_block(self, sendbuf, recvbuf, op=SUM):
         check(lib.ncclReduceScatter(at(sendbuf), at(recvbuf), recvbuf.size, TYPES[recvbuf.dtype], op, self.comm, ffi.NULL))
+
+    def Reduce_scatter(self, sendbuf, recvbuf, recvcounts=None, op=SUM):
+        """sendbuf's segments reduced by op, rank r's recvcounts[r] elements left in its recvbuf (packed in rank order in
+        sendbuf; ncclMeshReduceScatterV); recvcounts None: recvbuf's size each, Reduce_scatter_block."""
+        if recvcounts is None:
+            return self.Reduce_scatter_block(sendbuf, recvbuf, op)
+        counts = [int(c) for c in recvcounts]
+        if len(counts) != self.size or sum(counts) != sendbuf.size or recvbuf.size != counts[self.rank]:
+            raise ValueError(f'recvcounts {counts}: one a rank of {self.size}, summing to the send buffer\'s {sendbuf.size}, '
+                             f'this rank\'s its receive buffer\'s {recvbuf.size}')
+        check(lib.ncclMeshReduceScatterV(at(sendbuf), at(recvbuf), ffi.new('size_t[]', counts), TYPES[recvbuf.dtype], op, self.comm,
+                                         ffi.NULL))
 
     def Alltoall(self, sendbuf, recvbuf):
         check(lib.ncclAlltoAll(at(sendbuf), at(recvbuf), sendbuf.size // self.size, TYPES[sendbuf.dtype], self.comm, ffi.NULL))

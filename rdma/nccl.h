@@ -54,7 +54,8 @@
    its own and fails a peer's group in flight.  A message to a rank the map does not link takes the first link of its
    route, and the bridges forward it along the rest.  Every position a rank receives on is checked against its role,
    so calls that do not pair (a separate send and receive in the same order on two ranks, unequal counts, different
-   collectives) are ncclInvalidUsage.
+   collectives) are ncclInvalidUsage.  Uneven segments are their own calls (ncclMeshAllGatherV, ncclMeshReduceScatterV,
+   below), whose count vector every rank passes alike.
 
    Host path: a NULL stream.  Buffers are host pointers (unified memory, e.g. an MTLBuffer's contents), copied through
    the session's slots and combined on the host; every call returns once its group has run.  Metal path: a stream that
@@ -962,6 +963,25 @@ ncclResult_t ncclMeshPosition(ncclComm_t comm, int peer, uint64_t* position);
    where one is of a bridge that stopped, its pages no longer registered (Memory, above).  A process that holds leases
    and makes no other call (a server between calls) reads it to know its leases are to be freed and taken again. */
 ncclResult_t ncclMeshMemLive(void);
+/* MPI_Allgatherv and MPI_Reduce_scatter: rank r's segment is counts[r] elements (counts: nranks entries, the same on
+   every rank, any of them 0), the segments packed in rank order, so rank r's lies after the segments of the ranks
+   before it.  ncclMeshAllGatherV sends counts[rank] elements of sendbuff and leaves every segment in recvbuff (in place
+   where sendbuff is rank's segment of recvbuff); ncclMeshReduceScatterV reduces sendbuff's segments (the sum of counts
+   elements) by op and leaves rank's in recvbuff, counts[rank] elements.  Equal counts are ncclAllGather and
+   ncclReduceScatter; others are one program, the communicator's all-gather or reduce-scatter (its table's, by the
+   operand's bytes), its operand cut into those segments (mesh-plan.h mesh_program_steps_cut): one tree program over
+   unequal segments, not a rooted call a rank.  Both paths, every type and operator of the equal calls.  Every rank
+   passes the same counts: the program's steps on every rank are cut by them, and a rank whose counts differ from its
+   peers' lays other positions (the calls do not pair: ncclInvalidUsage, as unequal counts to the equal calls are).
+   The *Config forms take ncclCollConfig_t as NCCL's (not read). */
+ncclResult_t ncclMeshAllGatherV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclComm_t comm,
+                                cudaStream_t stream);
+ncclResult_t ncclMeshAllGatherVConfig(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclComm_t comm,
+                                      cudaStream_t stream, const ncclCollConfig_t* config);
+ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclRedOp_t op,
+                                    ncclComm_t comm, cudaStream_t stream);
+ncclResult_t ncclMeshReduceScatterVConfig(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclRedOp_t op,
+                                          ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
 
 #ifdef __cplusplus
 } // end extern "C"

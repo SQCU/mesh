@@ -204,6 +204,14 @@ int mesh_compile(const struct mesh_trees *,uint32_t what,uint32_t root,int whole
 /* A rank's steps of a program for an operand, a step a move (none where its elements are none), at most first[rank +
    1] - first[rank]; their count. */
 uint32_t mesh_program_steps(const struct mesh_program *,uint32_t rank,struct mesh_operand,struct mesh_step *steps);
+/* The same over an operand cut into segments of the given sizes (MPI_Allgatherv's and MPI_Reduce_scatter's counts, one
+   a segment in segment order: a reduce-scatter's and an all-gather's segment s is node s's, node s's of its
+   contributors where it has them): segment s the segments[s] elements after the segments before it, the sizes as many
+   as the program's segments (the most segment a part names, plus one) and summing to the operand's elements, a size 0
+   a segment whose steps carry nothing (none made); NULL the equal cut, mesh_program_steps'.  Within a segment its parts
+   are cut by their weights as there.  0 where the sizes do not sum to the operand (mesh 430cf7b2^ mesh_cut, 3ab709aa:
+   the planner's `segments`, cut alike by every program). */
+uint32_t mesh_program_steps_cut(const struct mesh_program *,uint32_t rank,struct mesh_operand,const uint64_t *segments,struct mesh_step *steps);
 /* The wire a session's programs run on (libnccl-mesh's rings, nccl-mesh.c session_open): toward each other member two
    channels, a channel a ring of 2 lag slots each way, slot t % (2 lag) carrying position t; a step's piece on the
    `large` channel where it is more than lag small slots (else the small one) in pieces of its slot's bytes (`slot`,

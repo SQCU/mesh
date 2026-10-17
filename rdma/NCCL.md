@@ -84,6 +84,16 @@ Each is uncut: a step's piece is cut on the wire into slots of its class (`mesh_
 first program of its collective (and root) whose size bound its operand is under. Nothing about a program is decided
 where a call runs.
 
+**Uneven segments.** `ncclMeshAllGatherV(send, recv, counts, type, comm, stream)` and
+`ncclMeshReduceScatterV(send, recv, counts, type, op, comm, stream)` are MPI_Allgatherv and MPI_Reduce_scatter: rank
+r's segment is `counts[r]` elements (any of them 0), packed in rank order. Each is one program, the communicator's
+all-gather or reduce-scatter, its operand cut into those segments (`mesh-plan.h` `mesh_program_steps_cut`: a part
+within segment s takes its weight's share of `counts[s]`), so a capacity-shaped division of the work (metal-microbench
+docs/placement.md) is one tree program over unequal segments rather than a rooted broadcast or reduce a rank. Every
+rank passes the same counts; equal counts are NCCL's own calls. Reproduction target (metal-microbench docs/measurement.md
+2026-09-30): tp SP=1 at capacity-shaped parts 255-256 ms a step; per call, the SP=1 all-gather 214-229 us and
+reduce-scatter 196-212 us; one uneven all-gather against the same segments as N broadcasts.
+
 ## Two paths
 
 - **Host path.** A NULL stream: host pointers, copied through the session's rings, and each call is synchronous. It
@@ -263,6 +273,8 @@ from mesh_mpi import Comm, SUM, MAX     # sys.path: ~/mesh/rdma
 comm = Comm()                           # RANK of WORLD_SIZE, NCCL's bootstrap at MASTER_ADDR:MASTER_PORT
 comm.Allreduce(local, total, op=SUM)    # Allgather, Bcast, Reduce, Reduce_scatter_block, Alltoall, Send, Recv,
 best = comm.allreduce(x.max(), op=MAX)  # Barrier; IN_PLACE as a send buffer
+comm.Allgatherv(part, [whole, counts])  # a count a rank: ncclMeshAllGatherV
+comm.Reduce_scatter(full, mine, counts) # ncclMeshReduceScatterV
 ```
 
 Subcommunicators are `Split(color, key)` and a Cartesian grid: `grid = comm.Create_cart([2, 2])`, `grid.Sub([False,

@@ -657,13 +657,34 @@ done:
   return status;
 }
 
-/* Each part's elements of an operand: [lo[p], lo[p] + count[p]) */
-static void mesh_program_ranges(const struct mesh_program *program,uint64_t elements,uint64_t *lo,uint64_t *count){
+/* The program's segments: the most segment a part names, plus one */
+static uint32_t mesh_program_segments(const struct mesh_program *program){
   uint32_t segments=1;
   for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]+1>segments)segments=program->segment[p]+1;
-  const uint64_t size=elements/segments,residual=elements%segments;
+  return segments;
+}
+
+/* The operand's segments: `sizes` where given (segment g the sizes[g] elements after the segments before it: mesh
+   430cf7b2^ mesh_cut's rule, MPI_Reduce_scatter's and MPI_Allgatherv's counts), else elements / segments each, the first
+   elements % segments one element longer; 0 where the sizes do not sum to the operand's elements */
+static int mesh_cut(uint32_t segments,uint64_t elements,const uint64_t *sizes,uint64_t *base,uint64_t *length){
+  uint64_t sum=0;
   for(uint32_t g=0;g<segments;g++){
-    const uint64_t base=g*size+(g<residual?g:residual),length=size+(g<residual);
+    base[g]=sizes?sum:g*(elements/segments)+(g<elements%segments?g:elements%segments);
+    length[g]=sizes?sizes[g]:elements/segments+(g<elements%segments);
+    sum+=length[g];
+  }
+  return sum==elements;
+}
+
+/* Each part's elements of an operand cut by mesh_cut: [lo[p], lo[p] + count[p]); 0 where the cut is none */
+static int mesh_program_ranges(const struct mesh_program *program,uint64_t elements,const uint64_t *sizes,uint64_t *lo,uint64_t *count){
+  const uint32_t segments=mesh_program_segments(program);
+  uint64_t *bases=malloc(2*(size_t)segments*sizeof *bases);
+  if(!bases)return 0;
+  if(!mesh_cut(segments,elements,sizes,bases,bases+segments)){free(bases);return 0;}
+  for(uint32_t g=0;g<segments;g++){
+    const uint64_t base=bases[g],length=bases[segments+g];
     double most=-INFINITY,total=0;
     for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g && program->log_weight[p]>most)most=program->log_weight[p];
     for(uint32_t p=0;p<program->parts;p++)if(program->segment[p]==g)total+=mesh_exp(program->log_weight[p]-most);
@@ -679,14 +700,20 @@ static void mesh_program_ranges(const struct mesh_program *program,uint64_t elem
       lo[p]=at;count[p]=share;at+=share;
     }
   }
+  free(bases);
+  return 1;
 }
 
 uint32_t mesh_program_steps(const struct mesh_program *program,uint32_t rank,struct mesh_operand operand,struct mesh_step *steps){
+  return mesh_program_steps_cut(program,rank,operand,NULL,steps);
+}
+
+uint32_t mesh_program_steps_cut(const struct mesh_program *program,uint32_t rank,struct mesh_operand operand,const uint64_t *segments,
+                                struct mesh_step *steps){
   if(rank>=program->nodes || !program->parts)return 0;
   uint64_t *lo=malloc(program->parts*sizeof *lo),*count=malloc(program->parts*sizeof *count);
   uint32_t k=0;
-  if(lo && count){
-    mesh_program_ranges(program,operand.elements,lo,count);
+  if(lo && count && mesh_program_ranges(program,operand.elements,segments,lo,count)){
     for(uint32_t i=program->first[rank];i<program->first[rank+1];i++){
       const struct mesh_move *m=program->move+i;
       const uint32_t last=m->part+m->parts-1;

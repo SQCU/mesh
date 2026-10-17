@@ -1547,6 +1547,7 @@ struct steps {
   struct where *gpu;
   const struct mesh_program *program;
   struct mesh_operand operand;
+  const uint64_t *segments;
   /* each step's positions as schedule_group places them (its channel, first position, pieces), and the receive before
      it (by round, then plan order) that has any, or -1 */
   uint32_t *channel;
@@ -1554,11 +1555,15 @@ struct steps {
   int32_t *before;
 };
 
+/* a call: its collective (or point-to-point direction), root, peer, buffers, count, type, operator and communicator;
+   `segments`, an uneven reduce-scatter's or all-gather's count a rank (ncclMeshReduceScatterV, ncclMeshAllGatherV: the
+   call's own copy, `total` their sum; NULL: `count` each) */
 struct call {
   int what, root, peer;
   const void *send;
   void *recv;
-  size_t count;
+  size_t count, total;
+  uint64_t *segments;
   ncclDataType_t type;
   ncclRedOp_t op;
   ncclComm_t comm;
@@ -1583,10 +1588,19 @@ static _Thread_local size_t call_count, call_capacity;
 static int reducing(int what) { return what == MESH_ALLREDUCE || what == MESH_REDUCE || what == MESH_REDUCE_SCATTER; }
 static int p2p(const struct call *c) { return c->what == WHAT_SEND || c->what == WHAT_RECV; }
 static size_t elements(const struct call *c) {
+  if (c->segments) return c->total;
   return c->count * ((c->what == MESH_REDUCE_SCATTER || c->what == MESH_ALLGATHER) ? (size_t)c->comm->nranks : 1);
 }
+/* rank r's segment of a reduce-scatter's or all-gather's operand: the elements before it, and *length its own (r x
+   count and count; an uneven call's, its counts') */
+static size_t segment_at(const struct call *c, int r, size_t *length) {
+  size_t before = 0;
+  for (int q = 0; c->segments && q < r; q++) before += c->segments[q];
+  *length = c->segments ? c->segments[r] : c->count;
+  return c->segments ? before : (size_t)r * c->count;
+}
 /* whether a call crosses a link: elements, more than one rank, and a point-to-point call's peer another rank */
-static int crosses(const struct call *c) { return c->count && c->comm->nranks > 1 && !(p2p(c) && c->peer == c->comm->rank); }
+static int crosses(const struct call *c) { return elements(c) && c->comm->nranks > 1 && !(p2p(c) && c->peer == c->comm->rank); }
 
 static void steps_free(struct steps *s) {
   if (!s) return;
@@ -1595,14 +1609,20 @@ static void steps_free(struct steps *s) {
   free(s->steps); free(s->done); free(s->channel); free(s->first); free(s->pieces); free(s->before); free(s);
 }
 
-/* every call that crosses a link planned: a collective along the communicator's trees, a point-to-point call one SEND or
-   COPY step */
+/* every call that crosses a link planned: a collective along the communicator's trees (an uneven one's segments its counts,
+   mesh_program_steps_cut: its program's segments must be the ranks), a point-to-point call one SEND or COPY step */
 static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
   for (size_t i = 0; i < n; i++) {
     struct call *c = list + i;
     if (!crosses(c)) continue;
     const struct mesh_program *program = p2p(c) ? NULL : program_of(comm, c->what, c->root, elements(c) * SIZE[c->type]);
     if (!p2p(c) && !program) return fail(ncclInvalidUsage, "the communicator has no program for collective %d at root %d", c->what, c->root);
+    if (c->segments) {
+      uint32_t segments = 1;
+      for (uint32_t p = 0; p < program->parts; p++) if (program->segment[p] + 1 > segments) segments = program->segment[p] + 1;
+      if (segments != (uint32_t)comm->nranks)
+        return fail(ncclInvalidUsage, "an uneven collective's program cuts %u segments, not one a rank of %d", segments, comm->nranks);
+    }
     struct steps *s = calloc(1, sizeof *s);
     const size_t most = (program ? program->first[program->nodes] : 1) + 1;
     if (s) s->buffers = 1 + (program ? program->scratch : 0);
@@ -1616,12 +1636,13 @@ static ncclResult_t plan_calls(ncclComm_t comm, struct call *list, size_t n) {
     const struct mesh_operand operand = {(uint32_t)c->type + 1, (uint32_t)SIZE[c->type], elements(c)};
     s->operand = operand;
     s->program = program;
+    s->segments = c->segments;
     if (p2p(c)) {
       s->steps[0] = (struct mesh_step){c->what == WHAT_SEND ? MESH_STEP_SEND : MESH_STEP_COPY, (uint32_t)c->peer, 0, 0, 0, operand};
       s->count = 1;
       continue;
     }
-    s->count = mesh_program_steps(program, (uint32_t)comm->rank, operand, s->steps);
+    s->count = mesh_program_steps_cut(program, (uint32_t)comm->rank, operand, c->segments, s->steps);
   }
   return ncclSuccess;
 }
@@ -1844,26 +1865,32 @@ static ncclResult_t session_run(struct session *s, struct call *list, size_t n) 
 
 /* the call's contribution into its operand */
 static void stage(const struct call *c, unsigned char *slot) {
-  const size_t z = SIZE[c->type], n = c->count, r = (size_t)c->comm->rank;
+  const size_t z = SIZE[c->type], n = c->count;
   if (reducing(c->what)) {
     const size_t all = elements(c);
     if (c->premultiplied) premultiply(c->type, slot, c->send, c->pre, all);
     else memmove(slot, c->send, all * z);
   } else if (c->what == MESH_BROADCAST && c->root == c->comm->rank) memmove(slot, c->send, n * z);
-  else if (c->what == MESH_ALLGATHER) memmove(slot + r * n * z, c->send, n * z);
+  else if (c->what == MESH_ALLGATHER) {
+    size_t length;
+    const size_t before = segment_at(c, c->comm->rank, &length);
+    memmove(slot + before * z, c->send, length * z);
+  }
 }
 
 /* the result into recvbuff */
 static void finish(const struct call *c) {
-  const size_t z = SIZE[c->type], n = c->count, r = (size_t)c->comm->rank;
+  const size_t z = SIZE[c->type], n = c->count;
   const int nranks = c->comm->nranks;
   if (!c->result) return;
   if (c->what == MESH_ALLREDUCE || (c->what == MESH_REDUCE && c->root == c->comm->rank)) {
     if (c->post) truncdiv(c->type, c->recv, c->result, n, (uint64_t)nranks);
     else memmove(c->recv, c->result, n * z);
   } else if (c->what == MESH_REDUCE_SCATTER) {
-    if (c->post) truncdiv(c->type, c->recv, c->result + r * n * z, n, (uint64_t)nranks);
-    else memmove(c->recv, c->result + r * n * z, n * z);
+    size_t length;
+    const size_t before = segment_at(c, c->comm->rank, &length);
+    if (c->post) truncdiv(c->type, c->recv, c->result + before * z, length, (uint64_t)nranks);
+    else memmove(c->recv, c->result + before * z, length * z);
   } else if (c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER || c->what == WHAT_RECV)
     memmove(c->recv, c->result, elements(c) * z);
 }
@@ -2003,6 +2030,7 @@ static void calls_free(struct call *list, size_t n) {
     steps_free(list[i].bound);
     if (list[i].owned) free(list[i].result);
     free(list[i].copy);
+    free(list[i].segments);
   }
   free(list);
 }
@@ -2102,7 +2130,7 @@ static ncclResult_t order_group(ncclComm_t comm, struct inflight *g) {
       if (r == me) { steps[r * n + i] = own->steps; counts[r * n + i] = own->count; }
       else if (!p2p(list + i)) {
         steps[r * n + i] = planned + AT(r, i, 0);
-        counts[r * n + i] = mesh_program_steps(own->program, (uint32_t)r, own->operand, steps[r * n + i]);
+        counts[r * n + i] = mesh_program_steps_cut(own->program, (uint32_t)r, own->operand, own->segments, steps[r * n + i]);
       }
     }
   for (int r = 0; r < N && !result; r++)
@@ -2444,9 +2472,11 @@ static ncclResult_t epilogue(struct metal_program *program, const struct call *l
       }
     } else if (p2p(c)) continue;
     else if (c->what == MESH_ALLREDUCE || (c->what == MESH_REDUCE && c->root == comm->rank) || c->what == MESH_REDUCE_SCATTER) {
-      const struct where from = {sum.buffer, sum.offset + (c->what == MESH_REDUCE_SCATTER ? r * count * z : 0)};
-      if (c->post) result = gpu(metal_truncdiv(program, c->type, recv.buffer, recv.offset, from.buffer, from.offset, count, (uint64_t)comm->nranks), "the result");
-      else if (!same(from, recv)) result = gpu(metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, from.buffer, from.offset, count * z), "the result");
+      size_t length = count;
+      const size_t before = c->what == MESH_REDUCE_SCATTER ? segment_at(c, (int)r, &length) : 0;
+      const struct where from = {sum.buffer, sum.offset + before * z};
+      if (c->post) result = gpu(metal_truncdiv(program, c->type, recv.buffer, recv.offset, from.buffer, from.offset, length, (uint64_t)comm->nranks), "the result");
+      else if (!same(from, recv)) result = gpu(metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, from.buffer, from.offset, length * z), "the result");
     } else if ((c->what == MESH_BROADCAST || c->what == MESH_ALLGATHER) && !same(sum, recv))
       result = gpu(metal_copy(program, METAL_PLAIN, recv.buffer, recv.offset, sum.buffer, sum.offset, elements(c) * z), "the result");
   }
@@ -2572,12 +2602,14 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
       if (!scratch) { result = fail(ncclSystemError, "out of GPU memory"); break; }
       own = (struct where){scratch, 0};
     }
-    const struct where segment = {own.buffer, own.offset + (c->what == MESH_ALLGATHER ? r * c->count * z : 0)};
+    size_t length = c->count;
+    const size_t before = c->what == MESH_ALLGATHER ? segment_at(c, (int)r, &length) : 0;
+    const struct where segment = {own.buffer, own.offset + before * z};
     if (reducing(c->what) && c->premultiplied)
       result = gpu(metal_premultiply(program, c->type, own.buffer, own.offset, send.buffer, send.offset, all, scalar_bits(c)), "the operand");
     else if ((reducing(c->what) || (c->what == MESH_BROADCAST && c->root == comm->rank) || c->what == MESH_ALLGATHER) && !same(segment, send))
       result = gpu(metal_copy(program, METAL_PLAIN, segment.buffer, segment.offset, send.buffer, send.offset,
-                              reducing(c->what) ? bytes : c->count * z), "the operand");
+                              reducing(c->what) ? bytes : length * z), "the operand");
     c->sum = own;
     if (st) st->gpu[0] = own;
     for (uint32_t b = 1; st && b < st->buffers && !result; b++) {
@@ -2745,10 +2777,9 @@ ncclResult_t ncclGroupEnd(void) {
   return result;
 }
 
-/* a call on the Metal path keeps its command buffer and its buffers' MTLBuffers and offsets, so neither the
-   stream nor the ncclMeshBuffers need outlive the call (a lowering's are its own, gone before an enclosing
-   group ends) */
-static ncclResult_t enqueue(struct call c) {
+/* a call refused before it joins its group: its arguments, the stream's form taken into it */
+static ncclResult_t admit(struct call *made) {
+  struct call c = *made;
   if (!c.comm) return fail(ncclInvalidArgument, "comm is NULL");
   if (c.stream) {
     const ncclMeshStream *stream = c.stream;
@@ -2757,6 +2788,7 @@ static ncclResult_t enqueue(struct call c) {
     c.fused = stream->fused;
     c.send_at = where_of(c.send); c.recv_at = where_of(c.recv);
   }
+  *made = c;
   if ((unsigned)c.type >= ncclNumTypes) return fail(ncclInvalidArgument, "datatype %d", (int)c.type);
   const ncclComm_t comm = c.comm;
   if (reducing(c.what)) {
@@ -2767,11 +2799,20 @@ static ncclResult_t enqueue(struct call c) {
     return fail(ncclInvalidArgument, "root %d of %d ranks", c.root, comm->nranks);
   if ((c.what == WHAT_SEND || c.what == WHAT_RECV) && (c.peer < 0 || c.peer >= comm->nranks))
     return fail(ncclInvalidArgument, "peer %d of %d ranks", c.peer, comm->nranks);
+  return ncclSuccess;
+}
+
+/* a call on the Metal path keeps its command buffer and its buffers' MTLBuffers and offsets, so neither the
+   stream nor the ncclMeshBuffers need outlive the call (a lowering's are its own, gone before an enclosing
+   group ends); what the call owns (an uneven call's counts) is freed with it, or here where it is refused */
+static ncclResult_t enqueue(struct call c) {
+  const ncclResult_t refused = admit(&c);
+  if (refused) { free(c.segments); return refused; }
   ncclGroupStart();
   if (call_count == call_capacity) {
     const size_t capacity = call_capacity ? 2 * call_capacity : 16;
     struct call *grown = realloc(calls, capacity * sizeof *grown);
-    if (!grown) { depth--; return fail(ncclSystemError, "out of memory"); }
+    if (!grown) { depth--; free(c.segments); return fail(ncclSystemError, "out of memory"); }
     calls = grown; call_capacity = capacity;
   }
   calls[call_count++] = c;
@@ -2832,6 +2873,40 @@ ncclResult_t ncclAllGatherConfig(const void *sendbuff, void *recvbuff, size_t se
 ncclResult_t ncclAllGather(const void *sendbuff, void *recvbuff, size_t sendcount, ncclDataType_t datatype,
                            ncclComm_t comm, cudaStream_t stream) {
   return ncclAllGatherConfig(sendbuff, recvbuff, sendcount, datatype, comm, stream, NULL);
+}
+
+/* MPI_Allgatherv and MPI_Reduce_scatter (nccl.h ncclMeshAllGatherV, ncclMeshReduceScatterV): equal counts are NCCL's own
+   call; others the call's own copy of them, its program's segments cut by them (mesh 3981ca80^ enqueue_counts) */
+static ncclResult_t enqueue_counts(struct call c, const size_t *counts) {
+  if (!c.comm || !counts) return fail(ncclInvalidArgument, "%s is NULL", c.comm ? "counts" : "comm");
+  const int n = c.comm->nranks;
+  int equal = 1;
+  for (int r = 0; r < n; r++) equal &= counts[r] == counts[0];
+  c.count = counts[c.comm->rank];
+  if (equal) return enqueue(c);
+  if (!(c.segments = malloc((size_t)n * sizeof *c.segments))) return fail(ncclSystemError, "out of memory");
+  for (int r = 0; r < n; r++) { c.segments[r] = counts[r]; c.total += counts[r]; }
+  return enqueue(c);
+}
+ncclResult_t ncclMeshAllGatherVConfig(const void *sendbuff, void *recvbuff, const size_t *counts, ncclDataType_t datatype, ncclComm_t comm,
+                                      cudaStream_t stream, const ncclCollConfig_t *config) {
+  (void)config;
+  return enqueue_counts((struct call){.what = MESH_ALLGATHER, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = ncclSum, .comm = comm,
+                                      .stream = stream}, counts);
+}
+ncclResult_t ncclMeshAllGatherV(const void *sendbuff, void *recvbuff, const size_t *counts, ncclDataType_t datatype, ncclComm_t comm,
+                                cudaStream_t stream) {
+  return ncclMeshAllGatherVConfig(sendbuff, recvbuff, counts, datatype, comm, stream, NULL);
+}
+ncclResult_t ncclMeshReduceScatterVConfig(const void *sendbuff, void *recvbuff, const size_t *counts, ncclDataType_t datatype, ncclRedOp_t op,
+                                          ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t *config) {
+  (void)config;
+  return enqueue_counts((struct call){.what = MESH_REDUCE_SCATTER, .send = sendbuff, .recv = recvbuff, .type = datatype, .op = op, .comm = comm,
+                                      .stream = stream}, counts);
+}
+ncclResult_t ncclMeshReduceScatterV(const void *sendbuff, void *recvbuff, const size_t *counts, ncclDataType_t datatype, ncclRedOp_t op,
+                                    ncclComm_t comm, cudaStream_t stream) {
+  return ncclMeshReduceScatterVConfig(sendbuff, recvbuff, counts, datatype, op, comm, stream, NULL);
 }
 
 ncclResult_t ncclSend(const void *sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {
