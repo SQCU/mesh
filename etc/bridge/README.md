@@ -11,13 +11,21 @@ Convergence): its running calls are never ended for it. There
 is no default anywhere in the code: without a configuration the bridge and `mesh-user.sh` refuse to start, naming what
 they need.
 
-A document has two keys:
+A document has these keys:
 
 - `purpose`: one line stating what the configuration is for (required).
 - the window, exactly one of `window_gib` (GiB) or `window_percent` (of the node's physical memory).
 - `exec` (optional): true where the bridge runs its peers' commands as its user, its own service `exec`
   (design/bridge-and-ipc.md#exec). Any node on a cable to this one may then run commands here, as it may already write
   into the window. A document that does not state it true serves none.
+- `ledger` (optional): true where the bridge keeps each flow's ledger (design/bridge-and-ipc.md#ledger): every SEND
+  cell its send thread saw released and every record that landed, each with the time, written at the flow's end into
+  the bridge's log, or past 2,048 events into a file beside the log that the log names. `rdma/ledger.py` reads two
+  nodes' ledgers of an execution and gives each direction's send thread delay, RC round trip and one-way
+  bridge-to-bridge hop. It is for measuring: a flow keeps up to 4.5 MiB more of the node's memory (outside the window)
+  and its progress threads read the clock at each event. A document that does not state it true keeps none, and its
+  canonical form names no `ledger` (so `ledger = false` changes nothing a node runs); the shipped documents state it
+  false.
 
 The window is the bridge's pinned memory (design/prepared-machine.md#M09). Every port's device registers all of it
 when the device comes up, before any queue pair exists, and deregisters it only when the device retires. Each device

@@ -97,6 +97,34 @@ struct send_gate {
 /* A SEND stream's progress: its current cell, the next request of that cell's chain and the requests
    left, and the lane its queue rides where its flow shares its port's lanes (design/bridge-and-ipc.md#lanes). */
 struct send_stream { struct mesh_send *cell,*first; struct ibv_send_wr *next; uint32_t remaining,lane; uint64_t cycle; };
+/* design/bridge-and-ipc.md#ledger (Q5P's M27 trace, mesh git 5702ea5): a flow's ledger, kept where the bridge's
+   configuration states `ledger` true.  Each SEND cell its send thread first saw released (`cell`, its stream's `cycle`)
+   with when it was seen, its first SEND posted, its last posted and that one's completion taken (an exclusive flow's:
+   `mark` its gate's frames once it posted), and each record landed (its index, its cycle) with when, every time the
+   bridge's clock_ns; at most MESH_LEDGER_EVENTS of each, allocated as the flow's sides are prepared, the progress
+   threads only storing into them.  `current` is each queue's event of the cell being posted, `pending` and `last` its
+   oldest event whose completion is not yet taken and its newest (`next` links a queue's events).  The names of the
+   cells (`cell`: queue, invocation, position among the invocation's transfers of the queue, binding, chunks) and of the
+   records (`record`, by index: the same, and the chunk) are kept as the sides are prepared, for ledger_write alone */
+#define MESH_LEDGER_EVENTS (UINT32_C(1)<<16)
+#define MESH_LEDGER_LINES 2048u
+#define LEDGER_NONE UINT32_MAX
+struct ledger_send { uint64_t cell,mark,seen,first,posted,completed; uint32_t cycle,next; };
+struct ledger_landing { uint32_t record,cycle; uint64_t landed; };
+struct ledger_cell { uint64_t cell; uint32_t queue,invocation,position,binding,chunks; };
+struct ledger_record { uint32_t position,binding,chunk,chunks; };
+struct ledger;
+struct ledger_entry { struct ledger *ledger; uint32_t event,done; };
+struct ledger {
+  uint32_t id,queues,invocations,cyclic,sends,send_room,cells;
+  uint32_t *current,*pending,*last;
+  struct ledger_send *send;
+  struct ledger_cell *cell;
+  uint64_t started;
+  _Alignas(64) uint32_t landings,landing_room,records;
+  struct ledger_landing *landing;
+  struct ledger_record *record;
+};
 
 #define MESH_PAIRS 16
 /* design/bridge-and-ipc.md#protocol: a message, a flow's keyed by its execution's key, its program's two end nodes
@@ -144,7 +172,8 @@ _Static_assert(sizeof(struct lane_entry)==24 && sizeof(struct lane_header)==16 &
    queue, one job at a time (`job`, `done`); the event loop alone changes the rest, and a side whose lists arrive while
    a job runs (`pending`) between jobs.  The port's two progress threads serve it while it is in the port's table:
    its SENDs (and an exclusive flow's receives) while `progressing`, a lane's headers fill its rings while `receiving`.
-   A held flow keeps the digest its READY named (`digest`), which the program that takes it must name too (#protocol) */
+   A held flow keeps the digest its READY named (`digest`), which the program that takes it must name too (#protocol),
+   and where the configuration keeps them its ledger (`ledger`, #ledger) */
 enum { READIED, PAIRING, POSTING, RUNNING, FAILED };
 enum { HEARD_READY=1, HEARD_PAIRS=2, HEARD_POSTED=4 };
 enum { JOB_PAIR=1, JOB_RECEIVE, JOB_RUN, JOB_CHANGE };
@@ -173,6 +202,7 @@ struct flow {
   size_t request_count;
   struct mesh_send *publications;
   struct mesh_cancellation *cancel;
+  struct ledger *ledger;
 };
 /* design/bridge-and-ipc.md#progress: a progress thread with nothing moved for MESH_IDLE_NS parks on its port's bell
    (mesh.h struct hdr `bell`, which a client rings as a group of a program on the port starts, mesh-call.h
@@ -516,6 +546,120 @@ static uint32_t stripe_count(const struct flow *link,uint32_t begin,uint32_t act
 static uint32_t ring_lane(uint32_t q,uint32_t slots){ return (q/(slots?slots:1))%MESH_LANES; }
 static struct ibv_qp *lane_pair(const struct flow *link,uint32_t lane);
 
+/* design/bridge-and-ipc.md#ledger: whether the configuration keeps ledgers (its `ledger`), and the bridge's ledgers
+   numbered as they are made */
+static int ledger_kept;
+static _Atomic uint32_t ledger_ids;
+/* a flow's ledger, made on its port's queue before either side is prepared or the flow listed, where the configuration
+   keeps them; a flow whose ledger cannot be allocated runs without one, logged */
+static void ledger_open(struct flow *f){
+  if(!ledger_kept || f->ledger)return;
+  struct ledger *l=calloc(1,sizeof *l);
+  uint32_t *words=l?malloc(3*(size_t)f->qps*sizeof *words):NULL;
+  if(!words){
+    free(l);
+    say("link %u: program %016llx toward node %u (stripe %u of %u): no ledger: %s\n",f->port->index,(unsigned long long)f->key,
+        f->far,f->stripe,f->stripes,strerror(ENOMEM));
+    return;
+  }
+  for(size_t i=0;i<3*(size_t)f->qps;i++)words[i]=LEDGER_NONE;
+  l->id=atomic_fetch_add(&ledger_ids,1)+1;l->queues=(uint32_t)f->qps;l->started=clock_ns();
+  l->current=words;l->pending=words+f->qps;l->last=words+2*(size_t)f->qps;
+  f->ledger=l;
+}
+/* the events a side's ledger holds: one pass of the flow's `once` cells or records, every pass of a cyclic program's up
+   to the bound */
+static uint32_t ledger_room(uint64_t once,int cyclic){ return cyclic || once>MESH_LEDGER_EVENTS?MESH_LEDGER_EVENTS:(uint32_t)once; }
+/* the send thread's stores: a cell first seen released, its queue's event from then on (none past the bound) */
+static void ledger_seen(struct ledger *l,const struct mesh_send *cell,uint64_t cycle){
+  const uint32_t q=cell->queue;
+  if(l->sends>=l->send_room){l->current[q]=LEDGER_NONE;return;}
+  const uint32_t e=l->sends++;
+  l->send[e]=(struct ledger_send){.cell=(uintptr_t)cell,.seen=clock_ns(),.cycle=(uint32_t)cycle,.next=LEDGER_NONE};
+  if(l->last[q]!=LEDGER_NONE)l->send[l->last[q]].next=e;
+  if(l->pending[q]==LEDGER_NONE)l->pending[q]=e;
+  l->last[q]=e;l->current[q]=e;
+}
+/* SENDs of event e posted at `at`: its first, and where `done` its last, after which its gate held `mark` frames */
+static void ledger_stamp(struct ledger *l,uint32_t e,int done,uint64_t mark,uint64_t at){
+  if(e==LEDGER_NONE)return;
+  struct ledger_send *s=l->send+e;
+  if(!s->first)s->first=at;
+  if(done){s->posted=at;s->mark=mark&MESH_GATE_MASK;}
+}
+/* an exclusive flow's SEND completion on queue q, its gate's frames retired through it: every event of the queue whose
+   last SEND it retires (a queue pair's completions come in the order posted) completed now */
+static void ledger_retired(struct ledger *l,uint32_t q,uint64_t retired){
+  uint64_t at=0;
+  for(uint32_t e;q<l->queues && (e=l->pending[q])!=LEDGER_NONE;){
+    struct ledger_send *s=l->send+e;
+    if(!s->posted || ((retired-s->mark)&MESH_GATE_MASK)>=(UINT64_C(1)<<47))break;
+    if(!at)at=clock_ns();
+    s->completed=at;l->pending[q]=s->next;
+  }
+}
+/* the receive thread's store: a record of the flow landed, its word stored */
+static void ledger_landed(struct flow *link,const struct prepared_receive *record){
+  struct ledger *l=link->ledger;
+  if(l->landings<l->landing_room)
+    l->landing[l->landings++]=(struct ledger_landing){(uint32_t)(record-link->receive),record->cycle,clock_ns()};
+}
+/* design/bridge-and-ipc.md#ledger: a flow's ledger written at its release, on its port's queue once neither progress
+   thread reads the flow: its header into the bridge's log, then a line for each cell seen and each record landed, which
+   name the cell or record by queue, invocation, position, binding and cycle, as the peer's ledger of the same flow
+   names the record or cell (rdma/ledger.py pairs them): into the log where there are MESH_LEDGER_LINES or fewer, else
+   into a file beside the log named by the program's key, the node, its peer, the stripe, the ledger and the time, which
+   the header names; then freed */
+static int ledger_cell_order(const void *a,const void *b){
+  const uint64_t x=((const struct ledger_cell *)a)->cell,y=((const struct ledger_cell *)b)->cell;
+  return (x>y)-(x<y);
+}
+static void ledger_write(struct flow *f){
+  struct ledger *l=f->ledger;
+  if(!l)return;
+  f->ledger=NULL;
+  char path[PATH_MAX]={0},line[512];
+  const char *file=NULL;
+  FILE *out=NULL;
+  struct stat log;
+  if((uint64_t)l->sends+l->landings>MESH_LEDGER_LINES && !fstat(STDERR_FILENO,&log) && S_ISREG(log.st_mode) &&
+     fcntl(STDERR_FILENO,F_GETPATH,path)!=-1){
+    char *slash=strrchr(path,'/'),when[24];
+    const time_t wall=time(NULL);struct tm utc;
+    gmtime_r(&wall,&utc);strftime(when,sizeof when,"%Y%m%dT%H%M%SZ",&utc);
+    if(slash && (size_t)snprintf(slash+1,sizeof path-(size_t)(slash+1-path),"ledger-%016llx-%u-%u-%u-%u-%s.jsonl",
+                                 (unsigned long long)f->key,M->node,f->port->peer,f->stripe,l->id,when)<sizeof path-(size_t)(slash+1-path) &&
+       (out=fopen(path,"w")))file=slash+1;
+  }
+  snprintf(line,sizeof line,"{\"ledger\":%u,\"key\":\"%016llx\",\"node\":%u,\"peer\":%u,\"port\":%u,\"near\":%u,\"far\":%u,\"stripe\":%u,"
+           "\"stripes\":%u,\"exclusive\":%d,\"queues\":%u,\"qps\":%d,\"invocations\":%u,\"cyclic\":%u,\"started\":%llu,\"sends\":%u,\"send_room\":%u,"
+           "\"landings\":%u,\"landing_room\":%u,\"file\":%s%s%s}\n",l->id,(unsigned long long)f->key,M->node,f->port->peer,f->port->index,
+           f->near,f->far,f->stripe,f->stripes,f->exclusive,f->queues,f->qps,l->invocations,l->cyclic,(unsigned long long)l->started,l->sends,
+           l->send_room,l->landings,l->landing_room,file?"\"":"",file?file:"null",file?"\"":"");
+  say("%s",line);
+  if(out)fputs(line,out);
+  if(l->cells)qsort(l->cell,l->cells,sizeof *l->cell,ledger_cell_order);
+  for(uint32_t e=0;e<l->sends;e++){
+    const struct ledger_send *s=l->send+e;
+    const struct ledger_cell key={.cell=s->cell},*c=l->cells?bsearch(&key,l->cell,l->cells,sizeof *l->cell,ledger_cell_order):NULL;
+    snprintf(line,sizeof line,"{\"s\":[%u,%lld,%lld,%lld,%lld,%u,%lld,%llu,%llu,%llu,%llu]}\n",l->id,c?(long long)c->queue:-1ll,
+             c?(long long)c->invocation:-1ll,c?(long long)c->position:-1ll,c?(long long)c->binding:-1ll,s->cycle,c?(long long)c->chunks:-1ll,
+             (unsigned long long)s->seen,(unsigned long long)s->first,(unsigned long long)s->posted,(unsigned long long)s->completed);
+    if(out)fputs(line,out);else say("%s",line);
+  }
+  for(uint32_t e=0;e<l->landings;e++){
+    const struct ledger_landing *r=l->landing+e;
+    const struct prepared_receive *record=f->receive && r->record<l->records?f->receive+r->record:NULL;
+    const struct ledger_record *n=record?l->record+r->record:NULL;
+    snprintf(line,sizeof line,"{\"r\":[%u,%lld,%lld,%lld,%lld,%lld,%lld,%u,%llu]}\n",l->id,record?(long long)record->queue:-1ll,
+             record?(long long)record->invocation:-1ll,n?(long long)n->position:-1ll,n?(long long)n->binding:-1ll,n?(long long)n->chunk:-1ll,
+             n?(long long)n->chunks:-1ll,r->cycle,(unsigned long long)r->landed);
+    if(out)fputs(line,out);else say("%s",line);
+  }
+  if(out && fclose(out))say("link %u: ledger %u: %s: %s\n",f->port->index,l->id,file,strerror(errno));
+  free(l->current);free(l->send);free(l->cell);free(l->landing);free(l->record);free(l);
+}
+
 /* design/algorithm-sources.md#programcopy */
 /* design/prepared-machine.md#M04, #M06, #M29 */
 /* The SEND side: every SEND cell of the flow's invocations (#cables), its chain of chunk requests over its invocation's
@@ -529,13 +673,14 @@ static int sends_configure(struct flow *link){
   struct mesh_tx *tx=side_tx(link,MESH_SEND);
   uint32_t invocations=tx->invocations?tx->invocations:1,fallback=atomic_load_explicit(&client->depth,memory_order_acquire);
   int cyclic=atomic_load_explicit(&client->cyclic,memory_order_acquire)!=0,qps=link->qps;
-  size_t requests=0;
+  size_t requests=0,cells=0;
   for(uint32_t k=0;k<link->queues;k++){
     struct mesh_transfer *out=side_transfers(link,MESH_SEND,k);
     for(uint32_t i=0;i<side_length(link,MESH_SEND,k);i++){
       if(out[i].count>tx->slots || (uint64_t)k*tx->slots+out[i].count>(uint64_t)qps)return EINVAL;
-      requests+=(size_t)(mesh_row_chunks(m,out[i].local_row,out[i].bytes)-1)*out[i].count*
-        stripe_count(link,out[i].begin,mesh_transfer_active(out+i,invocations));
+      const size_t own=(size_t)out[i].count*stripe_count(link,out[i].begin,mesh_transfer_active(out+i,invocations));
+      requests+=(size_t)(mesh_row_chunks(m,out[i].local_row,out[i].bytes)-1)*own;
+      cells+=own;
     }
   }
   link->publications=(void *)((char *)m+tx->cells);
@@ -546,6 +691,21 @@ static int sends_configure(struct flow *link){
   struct mesh_send **last=calloc((size_t)qps,sizeof *last),**terminal=calloc((size_t)qps,sizeof *terminal);
   if(!link->requests||!link->streams||(link->exclusive && !link->gates)||!last||!terminal){free(last);free(terminal);return ENOMEM;}
   link->request_count=requests;
+  /* #ledger: the cells' names, each stream's position at its latest invocation (`positions`, a slot's pair), and room for
+     the events of one pass, a cyclic program's of every pass up to the bound */
+  struct ledger *ledger=link->ledger;
+  uint32_t *positions=NULL;
+  if(ledger){
+    ledger->invocations=invocations;ledger->cyclic=(uint32_t)cyclic;
+    ledger->cell=malloc((cells+1)*sizeof *ledger->cell);
+    ledger->send=malloc(((size_t)ledger_room(cells,cyclic)+1)*sizeof *ledger->send);
+    positions=malloc((2*(size_t)tx->slots+2)*sizeof *positions);
+    if(!ledger->cell || !ledger->send || !positions){
+      free(ledger->cell);free(ledger->send);free(positions);ledger->cell=NULL;ledger->send=NULL;positions=NULL;ledger=NULL;
+      say("link %u: program %016llx toward node %u (stripe %u of %u): no ledger of its SENDs: %s\n",link->port->index,
+          (unsigned long long)link->key,link->far,link->stripe,link->stripes,strerror(ENOMEM));
+    }else ledger->send_room=ledger_room(cells,cyclic);
+  }
   /* a request is one frame at least, so a queue pair's frames also bound the completions it can have pending in the
      SEND completion queue its pairs share */
   if(link->exclusive){
@@ -587,6 +747,7 @@ static int sends_configure(struct flow *link){
       }
     }
     /* each stream's cells in invocation order, its publications in binding order within one */
+    if(positions)memset(positions,0,(2*(size_t)tx->slots+2)*sizeof *positions);
     for(uint32_t t=0;t<invocations && !error;t++)for(uint32_t i=0;i<count && stripe_of(link,t);i++){
       uint32_t active=mesh_transfer_active(out+i,invocations);
       if(t<out[i].begin || t-out[i].begin>=active)continue;
@@ -596,6 +757,12 @@ static int sends_configure(struct flow *link){
         if(last[stream])last[stream]->successor=(uintptr_t)cell;
         else link->streams[stream].cell=cell;
         last[stream]=cell;
+        /* #ledger: the cell's name, its position among the stream's cells of invocation t */
+        if(positions && ledger->cells<cells){
+          if(positions[2*slot]!=t+1){positions[2*slot]=t+1;positions[2*slot+1]=0;}
+          ledger->cell[ledger->cells++]=(struct ledger_cell){(uintptr_t)cell,stream,t,positions[2*slot+1]++,out[i].binding,
+            mesh_row_chunks(m,out[i].local_row+slot*out[i].stride,out[i].bytes)};
+        }
       }
     }
   }
@@ -607,7 +774,7 @@ static int sends_configure(struct flow *link){
   }
   link->stream_count=0;
   for(int q=0;q<qps;q++)if(link->streams[q].cell)link->streams[link->stream_count++]=link->streams[q];
-  free(last);free(terminal);
+  free(last);free(terminal);free(positions);
   return error;
 }
 
@@ -646,6 +813,19 @@ static int receives_configure(struct flow *link){
   link->rings=calloc((size_t)qps,sizeof *link->rings);
   if(!link->receive||!link->rings)return ENOMEM;
   link->receive_count=records;
+  /* #ledger: the records' names, and room for the landings of one pass, a cyclic program's of every pass up to the
+     bound */
+  struct ledger *ledger=link->ledger;
+  if(ledger){
+    ledger->invocations=invocations;ledger->cyclic=(uint32_t)link->cyclic;
+    ledger->record=malloc((records+1)*sizeof *ledger->record);
+    ledger->landing=malloc(((size_t)ledger_room(records,link->cyclic)+1)*sizeof *ledger->landing);
+    if(!ledger->record || !ledger->landing){
+      free(ledger->record);free(ledger->landing);ledger->record=NULL;ledger->landing=NULL;ledger=NULL;
+      say("link %u: program %016llx toward node %u (stripe %u of %u): no ledger of its landings: %s\n",link->port->index,
+          (unsigned long long)link->key,link->far,link->stripe,link->stripes,strerror(ENOMEM));
+    }else{ledger->records=(uint32_t)records;ledger->landing_room=ledger_room(records,link->cyclic);}
+  }
   /* a record is one frame at least, so a queue pair's frames also bound the completions it can have pending in the
      receive completion queue its pairs share */
   const uint32_t receives=link->exclusive?(uint32_t)link->provider.completion->cqe/(uint32_t)qps:UINT32_MAX;
@@ -672,9 +852,11 @@ static int receives_configure(struct flow *link){
          own slot bounds nothing */
       if(own<active)r->span=MIN(r->span,own>1?own-1:1);
     }
+    uint32_t position=0,latest=UINT32_MAX;
     for(uint32_t t=0;t<invocations && !error;t++)for(uint32_t i=0;i<count && !error && stripe_of(link,t);i++){
       uint32_t active=mesh_transfer_active(in+i,invocations);
       if(slot>=in[i].count || t<in[i].begin || t-in[i].begin>=active)continue;
+      if(latest!=t){latest=t;position=0;}
       uint32_t u=t-in[i].begin,row=in[i].local_row+slot*in[i].stride,chunks=mesh_row_chunks(m,row,in[i].bytes);
       const uint32_t first=(link->stripe+link->stripes-in[i].begin%link->stripes)%link->stripes,mine=(u-first)/link->stripes;
       uint64_t remaining=in[i].bytes;
@@ -690,7 +872,10 @@ static int receives_configure(struct flow *link){
           .pair=pair,.argument=1,.frames=(span.length+4095)/4096,.invocation=t,.queue=(uint32_t)ring,.link=link};
         record->release=release;
         if(!record->input){error=EINVAL;break;}
+        /* #ledger: the record's name, its transfer's position among the ring's transfers of invocation t */
+        if(ledger)ledger->record[record-link->receive]=(struct ledger_record){position,in[i].binding,c,chunks};
       }
+      position++;
     }
     r->count=(size_t)(link->receive+at-r->first);
     /* design/prepared-machine.md#M30 */
@@ -742,6 +927,8 @@ static __attribute__((always_inline)) inline int send_retire(struct flow *link,i
     if(done[i].status)return (int)done[i].status;
     struct send_gate *gate=link->gates+(done[i].wr_id>>48);
     gate->retired=done[i].wr_id&MESH_GATE_MASK;gate->completions++;
+    /* #ledger */
+    if(link->ledger)ledger_retired(link->ledger,(uint32_t)(done[i].wr_id>>48),gate->retired);
   }
   return 0;
 }
@@ -756,6 +943,7 @@ static __attribute__((always_inline)) inline int send_retire(struct flow *link,i
 static int flow_send(struct flow *link){
   int moved=0,taken=0;
   struct ibv_send_wr *bad;
+  struct ledger *ledger=link->ledger;
   int (*post)(struct ibv_qp *,struct ibv_send_wr *,struct ibv_send_wr **)=link->provider.queues[0].send;
   for(uint32_t s=0;s<link->stream_count;s++){
     struct send_stream *stream=link->streams+s;
@@ -764,9 +952,12 @@ static int flow_send(struct flow *link){
         struct mesh_send *cell=stream->cell;
         if(atomic_load_explicit(&cell->ready,memory_order_acquire)<=stream->cycle)break;
         stream->next=&cell->request;stream->remaining=cell->chunks;
+        /* #ledger */
+        if(ledger)ledger_seen(ledger,cell,stream->cycle);
       }
       struct mesh_send *cell=stream->cell;
       struct send_gate *gate=link->gates+cell->queue;
+      const uint32_t unposted=stream->remaining;
       while(stream->remaining){
         struct ibv_send_wr *request=stream->next;
         uint32_t frames=(request->sg_list->length+4095)/4096;
@@ -781,6 +972,8 @@ static int flow_send(struct flow *link){
         if(error){flow_lost(link,error<0?-error:error,1);return 1;}
         stream->next=request->next;stream->remaining--;gate->requests++;moved=1;
       }
+      /* #ledger */
+      if(ledger && stream->remaining!=unposted)ledger_stamp(ledger,ledger->current[cell->queue],!stream->remaining,gate->posted,clock_ns());
       if(stream->remaining)break;
       stream->cell=(struct mesh_send *)cell->successor;
       if(stream->cell==stream->first)stream->cycle++;
@@ -814,6 +1007,8 @@ static int flow_receive(struct flow *link){
     ring->landed++;ring->bytes+=done[i].byte_len;
     atomic_store_explicit(record->input,record->argument+record->cycle,memory_order_release);
     if(record->release)send_wake(record->input);
+    /* #ledger */
+    if(link->ledger)ledger_landed(link,record);
     ring->outstanding-=record->frames;ring->completed=(int64_t)(record->invocation+(uint64_t)record->cycle*link->invocations);
     int error=ring_advance(link,ring);
     if(error){flow_lost(link,error,1);return 1;}
@@ -875,7 +1070,9 @@ static int lane_send(struct port *port,uint32_t lane){
   uint64_t room=MIN(gate->capacity-flight-1,(uint64_t)l->peer_room);
   struct lane_header *header=(void *)(wire.data+lane_offset(port,lane,h));
   struct ibv_send_wr *first[LANE_ENTRIES];
-  uint32_t entries=0;
+  uint32_t entries=0,tracing=0;
+  /* #ledger: the entries whose flows keep ledgers, each its event and whether it ends its cell */
+  struct ledger_entry traced[LANE_ENTRIES];
   const uint32_t high=atomic_load_explicit(&port->high,memory_order_acquire);
   for(uint32_t n=0;n<high && entries<LANE_ENTRIES && room;n++){
     const uint32_t i=(l->cursor[lane]+n)%high;
@@ -888,6 +1085,7 @@ static int lane_send(struct port *port,uint32_t lane){
           struct mesh_send *cell=stream->cell;
           if(atomic_load_explicit(&cell->ready,memory_order_acquire)<=stream->cycle)break;
           stream->next=&cell->request;stream->remaining=cell->chunks;
+          if(f->ledger)ledger_seen(f->ledger,cell,stream->cycle);
         }
         struct ibv_send_wr *request=stream->next;
         uint32_t chunks=0;uint64_t bytes=0;
@@ -900,6 +1098,7 @@ static int lane_send(struct port *port,uint32_t lane){
         header->entry[entries]=(struct lane_entry){f->peer_slot,f->peer_generation,stream->cell->queue,chunks,bytes};
         first[entries++]=stream->next;
         stream->next=request;stream->remaining-=chunks;
+        if(f->ledger)traced[tracing++]=(struct ledger_entry){f->ledger,f->ledger->current[stream->cell->queue],!stream->remaining};
         if(stream->remaining)break;
         stream->cell=(struct mesh_send *)stream->cell->successor;
         if(stream->cell==stream->first)stream->cycle++;
@@ -928,6 +1127,10 @@ static int lane_send(struct port *port,uint32_t lane){
     }
   }
   if(error)lanes_lost(port,error<0?-error:error);
+  else if(tracing){
+    const uint64_t at=clock_ns();
+    for(uint32_t e=0;e<tracing;e++)ledger_stamp(traced[e].ledger,traced[e].event,(int)traced[e].done,0,at);
+  }
   return 1;
 }
 /* the lanes' SEND completions, each retiring its lane's frames; whether any was taken */
@@ -1014,6 +1217,8 @@ static int lane_receive(struct port *port){
     ring->landed++;ring->bytes+=done[i].byte_len;
     atomic_store_explicit(record->input,record->argument+record->cycle,memory_order_release);
     if(record->release)send_wake(record->input);
+    /* #ledger: stored before the frames are given back, which flow_release reads before it writes the ledger */
+    if(link->ledger)ledger_landed(link,record);
     ring->outstanding-=record->frames;ring->completed=(int64_t)(record->invocation+(uint64_t)record->cycle*link->invocations);
     atomic_fetch_sub_explicit(&link->lane_frames,record->frames,memory_order_release);
   }
@@ -1160,6 +1365,7 @@ static void port_still(struct port *port){
 static int flow_work(struct flow *f,int job){
   int error=0;
   if(job==JOB_PAIR)return f->exclusive?pair_up(&f->provider,f->qps):0;
+  ledger_open(f);
   const int ran=atomic_load_explicit(&f->progressing,memory_order_acquire);
   if(job==JOB_CHANGE)port_quiet(f);
   if(job==JOB_RECEIVE && f->exclusive)error=pair_receive(&f->provider,(const uint32_t (*)[2])f->pairs,f->port->heard.lid,f->port->heard.gid);
@@ -1193,8 +1399,8 @@ static void flow_job(struct flow *f,int job){
    its queue pair took (an exclusive flow's), and its records landed and their bytes.  A flow on its port's lanes is
    released once its records posted on the lanes have landed, or the lanes' queue pairs that held them are destroyed
    (their generation moved: lanes that failed and are not yet closed may still land a SEND in its rows, which a relay's
-   lease returns to the window as it is freed).  1 once nothing is held (a failed destruction, or records still posted,
-   keep it for the next turn) */
+   lease returns to the window as it is freed), its ledger then written (#ledger).  1 once nothing is held (a failed
+   destruction, or records still posted, keep it for the next turn) */
 static int flow_release(struct flow *flow){
   port_unlist(flow);
   for(int q=0;flow->rings && q<flow->qps;q++)
@@ -1206,6 +1412,7 @@ static int flow_release(struct flow *flow){
   if(!flow->exclusive && atomic_load_explicit(&flow->lane_frames,memory_order_acquire) &&
      flow->port->lanes.generation==flow->lane_epoch)return 0;
   if(!down_pair(&flow->provider))return 0;
+  ledger_write(flow);
   free(flow->receive);free(flow->streams);free(flow->gates);free(flow->rings);free(flow->requests);
   flow->receive=NULL;flow->streams=NULL;flow->gates=NULL;flow->rings=NULL;flow->requests=NULL;
   return 1;
@@ -2998,7 +3205,8 @@ static void *control_watch(void *unused){
 }
 
 /* design/prepared-machine.md#M09: the bridge's configuration, the canonical property list bin/mesh-user.sh writes from
-   the consumer's document (rdma/bridge_configuration.py): its name and its window in bytes; NULL, or why it is refused */
+   the consumer's document (rdma/bridge_configuration.py): its name and its window in bytes, and whether it serves `exec`
+   and keeps ledgers (#ledger); NULL, or why it is refused */
 static const char *configuration_read(const char *path,char *name,size_t room,uint64_t *window){
   FILE *file=fopen(path,"rb");
   if(!file)return strerror(errno);
@@ -3015,6 +3223,9 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
   CFTypeRef sized=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("window")):NULL;
   CFTypeRef executes=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("exec")):NULL;
   exec_served=executes && CFGetTypeID(executes)==CFBooleanGetTypeID() && CFBooleanGetValue(executes);
+  /* design/bridge-and-ipc.md#ledger */
+  CFTypeRef kept=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("ledger")):NULL;
+  ledger_kept=kept && CFGetTypeID(kept)==CFBooleanGetTypeID() && CFBooleanGetValue(kept);
   int64_t value=0;
   if(!list || CFGetTypeID(list)!=CFDictionaryGetTypeID())refused="not a property list of a configuration (rdma/bridge_configuration.py writes it)";
   else if(!named || CFGetTypeID(named)!=CFStringGetTypeID() || !CFStringGetCString(named,name,(CFIndex)room,kCFStringEncodingUTF8))refused="its name is missing";
@@ -3138,8 +3349,8 @@ int main(int argc,char **argv){
   pthread_t watcher;
   if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
   ports_find();
-  say("bridge node %u (%s): configuration %s, window %llu bytes, arena %llu pages, rows %u\n",node,host,name,
-    (unsigned long long)window,(unsigned long long)mesh_arena_pages(M),M->rows);
+  say("bridge node %u (%s): configuration %s, window %llu bytes, arena %llu pages, rows %u%s\n",node,host,name,
+    (unsigned long long)window,(unsigned long long)mesh_arena_pages(M),M->rows,ledger_kept?", ledgers kept (design/bridge-and-ipc.md#ledger)":"");
   uint64_t liveness=0;
   int rebuilt=0;
   while(!stop){

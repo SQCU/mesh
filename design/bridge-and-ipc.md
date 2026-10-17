@@ -17,7 +17,8 @@ The bridge's work, and nothing else:
   pairs and threads it holds a link and a port, not a program and a hop (`#lanes`, `#progress`, `#cables`);
 - it carries requests, its clients' to the services of any node and its neighbours' to its own node's, admitting each
   against its node's memory, and serves holds, its node's node-info and, where configured, commands (`#requests`);
-- it tells a program's failure, naming the node, to the program and the peer (design/recovery.md).
+- it tells a program's failure, naming the node, to the program and the peer (design/recovery.md);
+- where its configuration keeps them, it writes each flow's ledger, its crossings timed, at the flow's end (`#ledger`).
 
 Operator, 2026-10-14 (D10): "clients are clients, bridge services are bridge services. clients shouldn't know anything
 about other clients on the same mesh. ... clients *ask*, bridges *do*". And (D3), on whether the bridge keeps links
@@ -502,6 +503,61 @@ queues, which a completion channel (`ibv_req_notify_cq`) would wake at once, but
 provider and a destruction of a queue whose events are not acknowledged blocks (`ibv_destroy_cq`), so it waits for a
 measurement. A send thread tells it is parked, then looks once more before it waits, and `send_wake` orders its
 release before it reads that word, so one of the two sees the other.
+
+## ledger
+
+Where its configuration states `ledger = true` (etc/bridge/README.md), the bridge keeps a ledger of each flow: Q5P's
+bridge trace (M27, the per-call bridge's MESH_LEDGER, mesh git 5702ea5, deleted with that bridge in 800fe6bc), which
+located a crossing's stages on the pair, restored on the resident bridge, so that a crossing's ~20 us a hop today
+can be set against Q5P's ~6 us bridge to bridge stage by stage (metal-microbench docs/measurement.md 2026-10-15 and
+2026-10-16; Q5P is metal-microbench 533958a, mesh 5702ea5). The configuration is its one switch; the bridge's start
+line says "ledgers kept".
+
+- **What it holds.** A flow's ledger is made on its port's queue before either side is prepared or the flow listed
+  (`ledger_open`). For each SEND cell its send thread first saw released (`flow_send` for an exclusive flow,
+  `lane_send` for a lane rider): the cell, its stream's cycle, and when it was seen, when its first SEND was posted,
+  when its last was, and when that SEND's completion was taken. A queue pair's completions come in the order posted,
+  so the completion whose gate count reaches the cell's last SEND's is the cell's (an exclusive flow's; a lane's
+  completions retire frames its flows share and are not attributed). For each receive record that landed
+  (`flow_receive`, `lane_receive`): its index, its cycle, and when its word was stored. Every time is the bridge's
+  `clock_ns` (CLOCK_MONOTONIC, ns), each node its own.
+- **Its bound.** A side's events are one pass of the flow's cells or records, and every pass of a cyclic program's,
+  up to MESH_LEDGER_EVENTS (65,536) each; past it the flow runs on and the ledger keeps the first. They are allocated
+  as the side is prepared, 56 bytes an event sent and 16 a landing (4.5 MiB a flow at the bound), with the cells' and
+  records' names (32 and 16 bytes each).
+- **Its cost.** Off: a branch on the flow's ledger pointer where a cell is seen, where its SENDs are posted, at a SEND
+  completion and at a landing. On: a clock read and a store into the ledger's own buffers; nothing allocated, logged
+  or locked on a progress thread.
+- **How it is written.** At the flow's release (`flow_release`, once neither progress thread reads the flow and a lane
+  rider's records have landed), on its port's queue: its header into the bridge's log, then a line an event, into the
+  log where there are MESH_LEDGER_LINES (2,048) or fewer, else into a file beside the log,
+  `ledger-<key>-<node>-<peer>-<stripe>-<ledger>-<UTC time>.jsonl`, which the header names (the file's first line is
+  the header again). A flow held across executions (a program planned ahead, metal-microbench
+  docs/placement.md#retention-and-protention-the-next-execution-planned-ahead) is written when it ends.
+
+The lines, each a JSON object (in the log after its line stamp):
+
+- the header, `{"ledger":id,"key":"<execution, hex>","node":n,"peer":p,"port":i,"near":a,"far":b,"stripe":s,
+  "stripes":S,"exclusive":0|1,"queues":Q,"qps":R,"invocations":T,"cyclic":0|1,"started":ns,"sends":n,"send_room":N,
+  "landings":m,"landing_room":M,"file":"<name>"|null}`: `node` this bridge's, `peer` the link's other node, `near`
+  and `far` the program's two end nodes as this end names them (the flow at the link's other end names them the other
+  way round), `id` the bridge's number of the ledger, which its event lines carry;
+- a SEND cell, `{"s":[id,queue,invocation,position,binding,cycle,chunks,seen,first,posted,completed]}`;
+- a landing, `{"r":[id,ring,invocation,position,binding,chunk,chunks,cycle,landed]}`.
+
+A cell and its records share a name across the link: queue (the peer's ring of the same index, queue k's slot j), the
+program's invocation, the position among that invocation's transfers of the queue (in their lists' order, which both
+ends' streams and rings take, so the hardware pairs them), and the cycle; `binding` is the transfer's binding as its
+list names it. A time not reached is 0: a lane rider's completion, a cell seen and not yet posted at the flow's end.
+
+`rdma/ledger.py PATH...` reads two nodes' logs or ledger files of an execution, pairs each flow with its peer's
+across the link (the same key and stripe, the nodes and the ends each the other's) and a cell sent with its last
+chunk landed, and gives each direction's seen to first post (the send thread's pass and gate), first to last post,
+last post to completion (the RC round trip), and the one-way bridge-to-bridge hop with the clocks' offset cancelled:
+each crossing paired with one the other way, of the same name where the program crosses back there, else the nearest
+in time, hop = ((landed_B - seen_A) + (landed_A - seen_B)) / 2, as Q5P's analysis took it (an offset so taken holds
+the two directions' hops alike). Not restored: Q5P's third time of a landing (after its ring's next records were
+posted) and its layout lines (`trace_layout`, `trace_binding`), whose work the names now do.
 
 ## cables
 
