@@ -105,10 +105,10 @@ There are no other library threads. Client-side threads that drive the library: 
 | `map`, `next`, `mark` | the members' map as last read: nodes, relays, links, costs, routing table | `comm_read` |
 | `wire` | `{slot, small, lag}` of the rings | `session_open`, or `ncclMeshFusableRooted` before any session |
 | `digest` | FNV-1a over everything the programs are made from (`map_digest`, line 403); 0 until the first session opens | `session_open` |
-| `paths` | the caller's trees for the single-phase all-reduce | `ncclMeshCommInitRank` |
-| `sets[2]` | `[0]` shortest-path trees (or `paths`), `[1]` packed trees | `comm_routes` |
-| `chosen[(3+2n) x CLASSES]` | the default programs compiled so far, one per (collective, root, size class); freed at each `comm_read` | `program_of` |
-| `entries`, `programs`, `listed` | the caller's program table | `ncclMeshCommInitRank` |
+| `paths` | the caller's trees, every structural program's (`ncclMeshCommInitRank`; none: `trees`) | `ncclMeshCommInitRank` |
+| `trees` | the map's shortest-path trees (`mesh_trees_shortest`), where the caller gave no paths | `comm_routes` |
+| `forms`, `form_count` | the configured forms (`ncclMeshForm`), compiled ahead of the structural table; kept by splits and shrinks | `ncclMeshCommForms`, `comm_sub` |
+| `entries`, `programs`, `listed` | the table of programs: the caller's (`listed`, kept for its life), else the forms' and then the structural one, compiled at each `comm_read` | `ncclMeshCommInitRank`, `comm_routes` |
 | `session`, `opening` | the open session; a session between its start and its agreement | `session_open` |
 | `revoked` | set by `ncclCommRevoke`, kept until destroy | `ncclCommRevoke` |
 | `async` | the last failed group's result; never cleared | `launch_metal`, `ncclGroupEnd` |
@@ -118,18 +118,23 @@ There are no other library threads. Client-side threads that drive the library: 
 **`comm_read` (line 567)** runs at every `session_open` and once in `ncclMeshFusableRooted` if no session has read
 the map yet.
 
-1. `routes_free(comm, 0)` drops the previous map, tree sets and `chosen`.
+1. `routes_free(comm, 0)` drops the previous map, trees and (unless listed) table.
 2. `map_read` calls `mesh_map(members)` (`mesh-dataflow.c`). It opens the region, reads the bridges' records under one
-   serial and builds the whole map. The members become nodes 0..n-1 and every other node a relay. Each link's cost is
-   alpha `MESH_ALPHA_US` (5 us a message) and beta `8e9 / bandwidth` ns a byte at its slowest port (`MESH_BETA_NS`
-   where the bandwidth is unknown). The table is `mesh_routes`'. `map_read` retries with more room on `ENOSPC`.
+   serial and builds the whole map. The members become nodes 0..n-1 and every other node a relay. Each link carries
+   the bandwidth of its slowest port at either end (0 where none reports one). The table is `mesh_routes`'. `map_read`
+   retries with more room on `ENOSPC`.
 3. `mesh_link_map_joined`. `ENOTCONN` fails the session with `ncclRemoteError`, naming the two members that have no
    route.
-4. `comm_routes` (line 306):
+4. `comm_routes`:
    - a listed communicator does nothing more;
-   - `paths` are checked against the map (`mesh_trees_check`) and become `sets[0]`; otherwise `sets[0]` is
+   - `paths` are checked against the map (`mesh_trees_check`) and are the communicator's trees; otherwise `trees` is
      `mesh_trees_shortest`;
-   - `sets[1]` is `mesh_trees_pack(map, eps 0.1, most 4)`.
+   - each configured form (`ncclMeshCommForms`), in order, is compiled first (`compile_form`): along those trees, or,
+     a form naming `ncclMeshTreesPacked`, along `mesh_trees_pack(map, the form's eps, the form's most)` made for it
+     (mesh cc8a6f8e^'s `sets[1]`, whose `eps 0.1, most 4` were constants of the library; now the configuration's
+     values), single-phase or two-phase, at its chunks, below its bound, a rooted form at its root or every root;
+   - then the structural table: the single-phase all-reduce, the reduce-scatter, the all-gather and each root's reduce
+     and broadcast, along the trees, uncut, of any size.
 
 **Held and adopted communicators (metal-microbench `mesh_rank.m`).** A call's communicators are its crossings' member
 sets (`MeshRankGroup`, line 207).
@@ -347,30 +352,22 @@ A change of the map never closes a session.
 - A point-to-point call is one step (`plan_calls`, line 1544): a SEND, or a COPY into its receive buffer.
 - Routes are data: the bridges' table in `map.next`, and the tree sets.
 
-**Choosing a program (`program_of`, line 347):**
-
-- **A listed communicator** takes the first entry of its table with the call's `what` (and `root` for a rooted call)
-  and `!below || bytes < below`. With no match, the call fails: `ncclInvalidUsage`, "no program".
-- **The default:**
-  1. The size class k is the least `2^k >= bytes`, k from `MESH_CLASS_LEAST` (10) to `MESH_CLASS_MOST` (34). The
-     program is cached in `chosen[slot_of(what, root)][k]`.
-  2. On a miss it looks in the process-wide `kept[]`, keyed by `(digest, slot, k)`, under `session_lock`.
-  3. On a miss there, `mesh_choose(map, sets, 2, what, root, operand {0, 4, 2^k / 4}, wire, MESH_ALPHA_US,
-     MESH_BETA_NS)` times every candidate with `mesh_program_time` and picks the fastest: both tree sets; for an
-     all-reduce also `whole` (single-phase); chunks 1, 2, 4 … `MESH_CHUNKS` (64). Ties go to the first; a later
-     candidate wins only if faster by more than 2^-30 of the time.
-  4. `program_compile` compiles the choice along `sets[choice.set]`.
-- `MESH_PLAN_VERSION` (2) enters both the digest and the agreement, so members whose planning rules differ fail at the
-  session instead of mismatching later.
+**Choosing a program (`program_of`):** every communicator takes the first entry of its table with the call's `what`
+(and `root` for a rooted call) and `!below || bytes < below`. With no match, the call fails: `ncclInvalidUsage`, "no
+program". The table is the caller's programs, or the configured forms' entries followed by the structural table
+(`comm_routes`), so a call no form fits runs the default. No price, timing or cache chooses: mesh cc8a6f8e deleted
+`mesh_choose`, `mesh_program_time`, the size classes and `kept`, and the forms they chose among are entries a
+configuration names (`ncclMeshCommForms`). `MESH_PLAN_VERSION` (4) enters both the digest and the agreement, so members
+whose planning rules differ fail at the session instead of mismatching later; the digest covers every entry's program,
+so members configured with different forms fail there too.
 
 **Places where a formula or constant, not a table or evidence, chooses:**
 
 | Place | Choice made by |
 |---|---|
-| `program_of` 357-358, 366 | rounding to a power-of-two class, and pricing the class at `2^k / 4` elements of **4 bytes** whatever the call's type and exact size |
-| `mesh_map` link costs | **constant alpha** `MESH_ALPHA_US` = 5 us on every link; beta from the port's nominal speed (`8e9 / bandwidth`), or the constant `MESH_BETA_NS` = 0.1. No measured rate enters a choice. |
-| `comm_routes` 307, 329 | packing constants `eps = 0.1`, `most = 4` trees a root |
-| `mesh_choose` | `MESH_CHUNKS` = 64 cap; the 2^-30 tie margin |
+| `program_of` | the table's order: the configured forms (the caller's configuration), then the structural defaults |
+| `mesh_map` link bandwidths | the port's nominal speed, read by the routes (ties among routes of equally few links) and by `mesh_trees_pack` |
+| `compile_form` | packing `eps` and `most`, and every other form field, are the configuration's (`ncclMeshForm`) |
 | wire (`mesh_wire_of`, `mesh_wire_large`) | `lag = 8`; the large/small split at `lag x block`; slot = `NCCL_BUFFSIZE / 8` rounded to a block |
 | `nccl-mesh-metal.m:dispatch` | 256 threads a pointwise kernel, at most 1,024 threads in one threadgroup for a block's piece, at most 2^20 units a grid |
 | `ncclMeshFusableRooted` | fusable only at 2 ranks, one small slot, float16 sum (or a broadcast of any type), at most 1 scratch |
@@ -611,6 +608,7 @@ stamps) is the same in both forms, so two members may encode the same crossing d
 | `ncclMeshStream.polls` (per call) | `metal_begin`/`metal_begin4` → `p.polls` | bounds each GPU wait to `polls` loads (0: until it lands or is cancelled) |
 | `ncclMeshStream.workspace`, `issue`, `fused`, `argumentTable`, `residencySet`, `commandEncoder` | `enqueue`, `launch_metal` | form (classic or Metal 4), scratch source, issue/complete, deferred steps |
 | `ncclMeshCommInitRank`'s `paths`, `programs`, `small`, `node`, `name` | `comm_routes`, `program_of`, `mesh_wire_of`, `comm_make`, `mesh_key` | trees, programs and the small slot as operands; slot key = FNV-1a(name) |
+| `ncclMeshCommForms`'s forms | `comm_routes` (`compile_form`), `program_of` | the collective forms ahead of the defaults: packed trees, two-phase all-reduce, chunks, size bounds |
 | Bridge configuration (window, `pgsz`, `block`) | read from the region | the window for leases; a ring's pitch; `small` where the caller gives none |
 | `ncclConfig_t`, `ncclCollConfig_t` | ignored | none (`algSelection` not read) |
 | `RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT` | `mesh_mpi.py` (`NCCL_COMM_ID` first) and torch's store | bootstrap only; the library reads none of them |
@@ -625,10 +623,7 @@ Compile-time constants that shape the flow, none of them settable:
 | `WATCH_NS` / `RECANCEL_NS` | 1 ms / 10 ms | watcher scan and re-cancel periods |
 | `DEADLINE_S` | 120 s | bootstrap |
 | `MESH_PEER_NS` + `MESH_PAIR_NS` + `MESH_PAUSE_NS` | 600 + 30 + 3 s | the start's bound |
-| `MESH_PLAN_VERSION` | 2 | planning rules, in digest and agreement |
-| `MESH_CLASS_LEAST` .. `MOST` | 10 .. 34 | size classes |
-| `MESH_ALPHA_US` / `MESH_BETA_NS` | 5.0 / 0.1 | link costs where nothing measured them |
-| `MESH_CHUNKS` | 64 | chunk-count cap in `mesh_choose` |
+| `MESH_PLAN_VERSION` | 4 | planning rules, in digest and agreement |
 | `OPS` | 64 | PreMulSum operators a communicator |
 | `MAX_RANKS` | 64 | the Metal lowering of all-to-all, gather, scatter |
 | `RECORDS` x `RECORD` | 65,536 x 128 B | the Metal 4 argument ring; overflow is `EOVERFLOW` |
@@ -645,8 +640,8 @@ Not read by the library (client-side, metal-microbench): `RECORD_ONLY` (`run_win
 | When does the process attach to its bridge; why `ESTALE` or `EBUSY`? | `attach_current`, `attaches_stale`, `attach_fail`; `mesh-dataflow.c:mesh_attach`, `mesh_slot_take` |
 | What is a communicator's state? | `struct ncclComm` (213), `comm_make`, `ncclMeshCommInitRank` |
 | When and how is the map read? | `session_open` → `comm_read` → `map_read` (`mesh-dataflow.c:mesh_map`) |
-| Which trees? | `comm_routes` (`mesh_trees_shortest`, `mesh_trees_pack`, `mesh_trees_check`) |
-| Which program runs a call? | `program_of`, `kept`, `mesh-collective.c:mesh_choose`, `mesh_program_time` |
+| Which trees? | `comm_routes`, `compile_form` (`mesh_trees_shortest`, `mesh_trees_pack`, `mesh_trees_check`) |
+| Which program runs a call? | `program_of`, `comm_routes`, `ncclMeshCommForms` |
 | What do members compare before running? | `map_digest`, `session_agree`, `mesh-call.c:mesh_transfers_digest` |
 | When is a session opened or reopened? | `session_ensure`, `session_open` |
 | What does a session lease, and how much? | `ring_make`, `ring_bind`, `mesh-call.c:mesh_transfers_prepare`, `mesh-collective.c:mesh_host_inputs`, `session_bytes` |
@@ -694,10 +689,10 @@ Not read by the library (client-side, metal-microbench): `RECORD_ONLY` (`run_win
      agreement only after its own start returns, which waits on all of its destinations (`mesh-call.c` 208-223) and may
      take `MESH_PAIR_NS` (30 s) a pairing. With three or more members or relayed routes, a live peer can trip it.
    - `drain` (1182-1184) times out after 10 s on a slow peer, or on a caller that encoded but did not commit.
-6. **Pre-session `kept` key.** `ncclMeshFusableRooted` runs `program_of` before any session has set `comm->digest`
-   (2636-2646 → 363). Choices made before any session are cached under digest 0 and shared across communicators. The
-   session discards them (`comm_read` 569), so a fused answer can disagree with the session's program, which the issue
-   then refuses (2484-2486, 2563).
+6. **A fused answer before the session.** `ncclMeshFusableRooted` reads the map and compiles the table before any
+   session (`comm_read`); the session reads them again, so a map that moved between the two can make a fused answer
+   disagree with the session's program, which the issue then refuses. (The digest-0 `kept` cache of this hazard's
+   first form went with cc8a6f8e.) A configured form that cuts the operand is never fusable (`whole_moves`).
 7. **One violation buffer for several sessions.** A completion or launch spanning groups of several sessions binds the
    first group's session's violation buffer as every non-check dispatch's gate (2491-2492, 2593-2595;
    `nccl-mesh-metal.m` 278, 319). With `polls > 0`, one session's reached bound stops another session's publications.

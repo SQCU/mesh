@@ -247,9 +247,11 @@ uint64_t mesh_lay(const struct mesh_step *steps,uint32_t count,uint32_t peer,int
    waits until that receive is consumed, and so, by induction, every receive before it.  0, or ENOMEM. */
 int mesh_steps_before(const struct mesh_step *steps,uint32_t count,int32_t *before);
 /* The planner's rules' version: the trees, routes, compiles and wire above, and libnccl-mesh's table of programs made
-   of them (nccl-mesh.c comm_routes: the caller's, or every collective along the caller's paths or the shortest-path
-   trees, uncut); the library's session handshake carries it with its digest of the members' map, trees, programs and
-   wire, so members planning by different rules fail the session rather than run it. */
+   of them (nccl-mesh.c comm_routes: the caller's, or the communicator's configured forms, nccl.h ncclMeshCommForms,
+   and then every collective along the caller's paths or the shortest-path trees, uncut); the library's session
+   handshake carries it with its digest of the members' map, trees, programs and wire, so members planning by different
+   rules fail the session rather than run it (a form enters the digest as the programs it compiles, so members
+   configured apart disagree there; a communicator configured with none plans as before the forms). */
 #define MESH_PLAN_VERSION 4u
 
 /* design/recovery.md#diagnosis: a node's health as its bridge last sampled it, carried in its record to every bridge.

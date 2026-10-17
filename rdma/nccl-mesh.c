@@ -199,8 +199,9 @@ struct session;
    (mesh-plan.h mesh_wire) and the digest every member checks before the session runs (session_agree); its message
    paths, the caller's (count 0: none), else the map's shortest-path trees (`trees`); its table of programs
    (`entries`), the caller's (`listed`, kept for its life), else the structural one compiled along its paths or trees
-   at each map read (comm_routes); its name, and the count of splits and shrinks made of it, which name theirs; its
-   session (NULL until a group crosses a link, and after a failure); `opening` a session whose start and agreement run
+   at each map read (comm_routes), its configured forms first (`forms`, ncclMeshCommForms, which its splits and shrinks
+   keep); its name, and the count of splits and shrinks made of it, which name theirs; its session (NULL until a group
+   crosses a link, and after a failure); `opening` a session whose start and agreement run
    outside the sessions' lock, which a revoke ends; `revoked`, set by ncclCommRevoke and kept until ncclCommDestroy,
    failing every group after it; the three under `guard` */
 struct ncclComm {
@@ -211,7 +212,8 @@ struct ncclComm {
   uint64_t digest;
   struct mesh_trees paths, trees;
   struct entry *entries;
-  uint32_t programs, splits, *members;
+  ncclMeshForm *forms;
+  uint32_t programs, splits, *members, form_count;
   int nranks, rank, listed;
   char name[NCCL_UNIQUE_ID_BYTES + 1];
   struct premul ops[OPS];
@@ -256,7 +258,7 @@ static void comm_free(struct ncclComm *comm) {
   for (uint32_t k = 0; k < comm->spents; k++) metal_release(comm->spent[k]);
   free(comm->scratch); free(comm->scratch_bytes); free(comm->spent);
   pthread_mutex_destroy(&comm->guard);
-  free(comm->members);
+  free(comm->members); free(comm->forms);
   free(comm);
 }
 
@@ -274,29 +276,63 @@ static int program_copy(struct mesh_program *made, const struct mesh_program *fr
   return 0;
 }
 
-/* `what` (at `root`) along `trees` (mesh-plan.h mesh_compile, uncut: the wire cuts each step's piece into slots of its
-   class, mesh_wire_pieces) compiled into the table's next entry, for calls of any size; 0, or EINVAL */
-static int compile_entry(struct ncclComm *comm, const struct mesh_trees *trees, uint32_t what, uint32_t root, int whole) {
+/* `what` (at `root`) along `trees` (mesh-plan.h mesh_compile), each tree's part cut into `chunks` (1: uncut, the wire
+   cutting each step's piece into slots of its class, mesh_wire_pieces), an all-reduce single-phase where `whole`,
+   compiled into the table's next entry, for calls of fewer bytes than `below` (0: any size); 0, or EINVAL */
+static int compile_entry(struct ncclComm *comm, const struct mesh_trees *trees, uint32_t what, uint32_t root, int whole, uint32_t chunks,
+                         uint64_t below) {
   uint32_t parts, moves;
-  mesh_compile_room(trees, 1, &parts, &moves);
+  mesh_compile_room(trees, chunks, &parts, &moves);
   uint32_t *segment = malloc((parts + 1) * sizeof *segment), *first = malloc((trees->nodes + 1) * sizeof *first);
   double *weight = malloc((parts + 1) * sizeof *weight);
   struct mesh_move *move = malloc((moves + 1) * sizeof *move);
   struct entry *e = comm->entries + comm->programs;
-  if (!segment || !first || !weight || !move || mesh_compile(trees, what, root, whole, 1, NULL, &e->program, segment, weight, first, move)) {
+  if (!segment || !first || !weight || !move || mesh_compile(trees, what, root, whole, chunks, NULL, &e->program, segment, weight, first, move)) {
     free(segment); free(first); free(weight); free(move);
     return EINVAL;
   }
-  e->below = 0;
+  e->below = below;
   comm->programs++;
   return 0;
 }
 
-/* the communicator's structural table on the map just read, where the caller listed no programs, along the caller's
-   paths (checked against the map) or else the map's shortest-path trees (mesh_trees_shortest: each member's in-tree of
-   the bridges' routes): the single-phase all-reduce (each member's sum up its own tree; the direct exchange where
-   every two members are linked), the reduce-scatter and the all-gather (segment s up and down s's trees), and each
-   root's reduce and broadcast (mesh_compile; mesh 2bf5a50d^ comm_routes's table, its entries along the routes) */
+static int has_root(int what) { return what == MESH_REDUCE || what == MESH_BROADCAST; }
+
+/* a configured form's entries (ncclMeshCommForms): its collective along the communicator's trees (`along`) or the map's
+   packed trees (mesh_trees_pack at the form's eps and most, made here: mesh cc8a6f8e^ comm_routes' sets[1]), whole or
+   two-phase, at its chunks, below its bound; a rooted one at its root, or at each root (-1), none where its root is
+   past the communicator's ranks (a split's) */
+static ncclResult_t compile_form(struct ncclComm *comm, const struct mesh_trees *along, const ncclMeshForm *x) {
+  const uint32_t n = (uint32_t)comm->nranks;
+  struct mesh_trees packed = {n, 0, NULL, NULL, NULL};
+  const struct mesh_trees *trees = along;
+  ncclResult_t result = ncclSuccess;
+  if (x->trees == ncclMeshTreesPacked) {
+    uint32_t *root = calloc((size_t)n * x->most + 1, sizeof *root), *parent = calloc((size_t)n * n * x->most + 1, sizeof *parent);
+    double *weight = calloc((size_t)n * x->most + 1, sizeof *weight);
+    packed = (struct mesh_trees){n, 0, root, parent, weight};
+    if (!root || !parent || !weight) result = fail(ncclSystemError, "out of memory");
+    else if (!(packed.count = mesh_trees_pack(&comm->map, x->eps, x->most, root, parent, weight)))
+      result = fail(ncclInvalidArgument, "the map's links pack no trees (mesh_trees_pack)");
+    trees = &packed;
+  }
+  for (uint32_t r = 0; !result && r < (has_root(x->collective) && x->root < 0 ? n : 1); r++) {
+    const uint32_t root = has_root(x->collective) ? (x->root < 0 ? r : (uint32_t)x->root) : 0;
+    if (root >= n) continue;
+    if (compile_entry(comm, trees, (uint32_t)x->collective, root, x->whole, x->chunks, x->below))
+      result = fail(ncclInternalError, "the configured form of collective %d at root %u does not compile", x->collective, root);
+  }
+  trees_free(&packed);
+  return result;
+}
+
+/* the communicator's structural table on the map just read, where the caller listed no programs: its configured forms
+   first, in their order (compile_form), then, along the caller's paths (checked against the map) or else the map's
+   shortest-path trees (mesh_trees_shortest: each member's in-tree of the bridges' routes), the single-phase all-reduce
+   (each member's sum up its own tree; the direct exchange where every two members are linked), the reduce-scatter and
+   the all-gather (segment s up and down s's trees), and each root's reduce and broadcast, uncut and of any size
+   (mesh_compile; mesh 2bf5a50d^ comm_routes's table, its entries along the routes): a call takes the first entry that
+   fits it (program_of), so a collective no form names, or a size past every form's bound, runs the default */
 static ncclResult_t comm_routes(struct ncclComm *comm) {
   const uint32_t n = (uint32_t)comm->nranks;
   if (comm->listed || n < 2) return ncclSuccess;
@@ -312,18 +348,58 @@ static ncclResult_t comm_routes(struct ncclComm *comm) {
       return fail(ncclInvalidArgument, "the map's routes do not join every rank (mesh_trees_shortest)");
     along = &comm->trees;
   }
-  if (!(comm->entries = calloc(3 + 2 * (size_t)n, sizeof *comm->entries))) return fail(ncclSystemError, "out of memory");
-  if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 1) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0) ||
-      compile_entry(comm, along, MESH_ALLGATHER, 0, 0))
+  size_t room = 3 + 2 * (size_t)n;
+  for (uint32_t f = 0; f < comm->form_count; f++) room += has_root(comm->forms[f].collective) && comm->forms[f].root < 0 ? n : 1;
+  if (!(comm->entries = calloc(room, sizeof *comm->entries))) return fail(ncclSystemError, "out of memory");
+  for (uint32_t f = 0; f < comm->form_count; f++) {
+    const ncclResult_t result = compile_form(comm, along, comm->forms + f);
+    if (result) return result;
+  }
+  if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 1, 1, 0) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0, 1, 0) ||
+      compile_entry(comm, along, MESH_ALLGATHER, 0, 0, 1, 0))
     return fail(ncclInternalError, "the all-reduce, reduce-scatter or all-gather along the communicator's trees does not compile");
   for (uint32_t r = 0; r < n; r++)
-    if (compile_entry(comm, along, MESH_REDUCE, r, 0) || compile_entry(comm, along, MESH_BROADCAST, r, 0))
+    if (compile_entry(comm, along, MESH_REDUCE, r, 0, 1, 0) || compile_entry(comm, along, MESH_BROADCAST, r, 0, 1, 0))
       return fail(ncclInternalError, "the reduce or broadcast of root %u along the communicator's trees does not compile", r);
   return ncclSuccess;
 }
 
+/* nccl.h ncclMeshCommForms: the forms checked and copied, taken at the communicator's next map read (a table read before
+   any session, by ncclMeshFusableRooted, dropped: its next read compiles them); refused once its session is open or
+   opening (its members agree on its table there), or where its table is the caller's programs */
+ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm *forms, int count) {
+  if (!comm || count < 0 || (count && !forms)) return fail(ncclInvalidArgument, "ncclMeshCommForms's arguments");
+  for (int f = 0; f < count; f++) {
+    const ncclMeshForm *x = forms + f;
+    if (x->collective < MESH_ALLREDUCE || x->collective > MESH_ALLGATHER || (has_root(x->collective) && x->root < -1) || !x->chunks ||
+        (x->trees != ncclMeshTreesShortest && x->trees != ncclMeshTreesPacked) || (x->trees == ncclMeshTreesPacked && (!x->most || !(x->eps > 0))))
+      return fail(ncclInvalidArgument, "form %d: a collective (mesh-plan.h MESH_*), a rooted one's root (-1 every root), its trees "
+                  "(shortest, or packed with eps > 0 and most > 0) and chunks > 0", f);
+  }
+  ncclMeshForm *made = count ? malloc((size_t)count * sizeof *made) : NULL;
+  if (count && !made) return fail(ncclSystemError, "out of memory");
+  if (count) memcpy(made, forms, (size_t)count * sizeof *made);
+  pthread_mutex_lock(&session_lock);
+  pthread_mutex_lock(&comm->guard);
+  const int open = comm->session || comm->opening;
+  pthread_mutex_unlock(&comm->guard);
+  ncclResult_t result = ncclSuccess;
+  if (comm->listed) result = fail(ncclInvalidUsage, "communicator %s runs the caller's programs (ncclMeshCommInitRank): they are its table", comm->name);
+  else if (open) result = fail(ncclInvalidUsage, "communicator %s: its forms are set before its session opens (its members agree on its table there)",
+                               comm->name);
+  else {
+    free(comm->forms);
+    comm->forms = made; comm->form_count = (uint32_t)count; made = NULL;
+    routes_free(comm, 0);
+  }
+  pthread_mutex_unlock(&session_lock);
+  free(made);
+  return result;
+}
+
 /* the program a call of `bytes` runs: its communicator's table's first entry of its collective (and root, a rooted
-   one's) whose bound it is below; NULL where none is (mesh 2bf5a50d^ program_of) */
+   one's) whose bound it is below (a configured form's, else the default's); NULL where none is (mesh 2bf5a50d^
+   program_of; cc8a6f8e^'s by size class, the classes now the forms' bounds) */
 static const struct mesh_program *program_of(ncclComm_t comm, int what, int root, uint64_t bytes) {
   for (uint32_t e = 0; e < comm->programs; e++) {
     const struct entry *x = comm->entries + e;
@@ -2708,6 +2784,17 @@ int ncclMeshBridgeStopping(void) {
   return stopping;
 }
 
+/* whether a rank's moves of a program are at most one SEND and one receive, each of every part: the whole operand in one
+   piece each way */
+static int whole_moves(const struct mesh_program *program, uint32_t rank) {
+  uint32_t sends = 0, receives = 0;
+  for (uint32_t i = program->first[rank]; i < program->first[rank + 1]; i++) {
+    const struct mesh_move *m = program->move + i;
+    if (m->part || m->parts != program->parts || (m->op == MESH_STEP_SEND ? sends++ : receives++)) return 0;
+  }
+  return 1;
+}
+
 ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int root, size_t count, ncclDataType_t type, ncclRedOp_t op,
                                    int *publishes, int *lands) {
   if (!publishes || !lands) return fail(ncclInvalidArgument, "publishes or lands is NULL");
@@ -2734,9 +2821,10 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
   }
   const struct mesh_program *program = program_of(comm, what, root, bytes);
   /* a two-rank all-reduce's one scratch is its copy of the operand, which its program sends from while the sum is made
-     in place; its fused steps send from the producer's own store and land into the consumer's, so neither reads it */
+     in place; its fused steps send from the producer's own store and land into the consumer's, so neither reads it; a
+     configured form that cuts the operand (two-phase, chunked) moves it in several pieces and is not fusable */
   const int fusable = program && program->scratch <= (what == MESH_ALLREDUCE ? 1u : 0u) && bytes <= comm->wire.small &&
-                     !mesh_wire_large(&comm->wire, bytes);
+                     !mesh_wire_large(&comm->wire, bytes) && whole_moves(program, (uint32_t)comm->rank);
   pthread_mutex_unlock(&session_lock);
   if (!fusable) return ncclSuccess;
   const int rooted = comm->rank == root;
@@ -2996,8 +3084,17 @@ static ncclResult_t comm_sub(ncclComm_t comm, const int *ranks, int count, uint3
     if (ranks[i] == comm->rank) rank = i;
   }
   snprintf(name, sizeof name, "%s/%u.%d", comm->name, split, color);
-  const ncclResult_t result = comm_make(made, count, members, rank, name);
+  ncclResult_t result = comm_make(made, count, members, rank, name);
   if (!result) (*made)->small = comm->small;
+  if (!result && comm->form_count) {
+    if (!((*made)->forms = malloc(comm->form_count * sizeof *comm->forms))) {
+      comm_free(*made); *made = NULL;
+      result = fail(ncclSystemError, "out of memory");
+    } else {
+      memcpy((*made)->forms, comm->forms, comm->form_count * sizeof *comm->forms);
+      (*made)->form_count = comm->form_count;
+    }
+  }
   free(members);
   return result;
 }

@@ -24,8 +24,8 @@ or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR
 
 - `ncclCommInitRank(comm, n, id, rank)`: NCCL's, with NCCL's bootstrap: the id is the root's `host:port`
   (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens), where each rank's node meets the others'.
-- `ncclMeshCommInitRank(comm, nranks, rank, paths, programs, count, node, name)`: the collectives are operands; the
-  map is the bridges' (below).
+- `ncclMeshCommInitRank(comm, nranks, rank, paths, programs, count, small, node, name)`: the collectives are operands;
+  the map is the bridges' (below).
   - `paths`: the routing tables every collective of the structural table (below) is compiled along, each member's
     trees, checked against the map each session reads. NULL means the map's shortest-path trees.
   - `programs`: the compiled collectives, a table of `ncclMeshProgram` entries. NULL means the structural table
@@ -83,6 +83,28 @@ in-tree of the bridges' routes, its parents among equals spread over the links):
 Each is uncut: a step's piece is cut on the wire into slots of its class (`mesh_wire_pieces`). A call runs its table's
 first program of its collective (and root) whose size bound its operand is under. Nothing about a program is decided
 where a call runs.
+
+**Forms as configuration.** `ncclMeshCommForms(comm, forms, count)` is the communicator's configuration operand: a
+list of `ncclMeshForm` entries, each a collective (and root, -1 every root) below a size bound, compiled ahead of the
+structural table at each map read, so a call takes the first form that fits it and the default otherwise:
+
+| field | form |
+|---|---|
+| `trees` | `ncclMeshTreesShortest` (the communicator's paths, else the shortest-path trees) or `ncclMeshTreesPacked` (`mesh_trees_pack` at the entry's `eps` and `most` trees a root: Blink's packed spanning trees, every link a share) |
+| `whole` | an all-reduce's: 1 single-phase, 0 two-phase (the reduce-scatter and then the all-gather along the same trees) |
+| `chunks` | each tree's part cut into chunks, pipelined down and up the trees (1: uncut) |
+| `below` | the bytes a call is under to take it (0: any size): the size classes |
+
+These are the forms mesh cc8a6f8e^'s default table chose among by a price (its `sets[1]`, single-phase or not, 1 to 64
+chunks, by size class); the price is gone and the caller's configuration document names the form (metal-microbench
+docs/principles.md section 6: a decision is structure, a measurement the calls make, or an algorithm restored from
+history). With no forms nothing changes: the structural table as above. Every rank passes the same forms, set before
+the communicator's first group that crosses a link; splits and shrinks keep them; a communicator over the caller's own
+programs refuses them. A form that cuts the operand (two-phase, chunked) is not fusable (`ncclMeshFusable` answers
+0). Reproduction target: simulated 0.51x the default's time at 1 GiB on six-node maps and 0.58x at 16 MiB, the ring4
+16 MiB all-reduce 2.18 to 1.71 ms, a six-node full mesh's 1 GiB all-gather 158.1 to 20.5 ms (metal-microbench
+output_data/library-20261015/pass2/sims), and the pair's 256 and 512 KiB calls 57.4 to 31.2-36.2 us
+(pair_programs.json): never measured on more than two nodes.
 
 **Uneven segments.** `ncclMeshAllGatherV(send, recv, counts, type, comm, stream)` and
 `ncclMeshReduceScatterV(send, recv, counts, type, op, comm, stream)` are MPI_Allgatherv and MPI_Reduce_scatter: rank

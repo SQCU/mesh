@@ -38,8 +38,11 @@
    in-tree of the bridges' routes): the single-phase all-reduce (each member's sum up its own tree; the direct exchange
    where every two members are linked), the reduce-scatter and the all-gather (segment s up and down s's trees) and
    each root's reduce and broadcast, every one uncut (the wire cuts a step's piece into slots of its class,
-   mesh_wire_pieces).  A call runs its table's first program of its collective (and root) whose size bound its operand
-   is under; nothing about it is decided where it runs, and ncclCollConfig_t.algSelection is not read.  The members
+   mesh_wire_pieces).  The communicator's configuration names other forms of a collective ahead of these
+   (ncclMeshCommForms, below: the packed trees, the two-phase all-reduce, chunked pipelining, each below a size bound),
+   compiled first in the same table.  A call runs its table's first program of its collective (and root) whose size
+   bound its operand is under; nothing about it is decided where it runs, no price chooses it, and
+   ncclCollConfig_t.algSelection is not read.  The members
    agree before any group runs: each publishes its digest of what its programs are made from (the route between each
    two members and the bandwidth of the links it crosses, the planner's version, the session's wire, the paths and
    trees, the programs) on every channel at the session's opening and compares its peers', so members that read
@@ -856,6 +859,37 @@ ncclResult_t pncclGroupEnd(void);
 typedef struct { const struct mesh_program* program; uint64_t below; } ncclMeshProgram;
 ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, int rank, const struct mesh_trees* paths,
                                   const ncclMeshProgram* programs, int count, uint64_t small, const int* node, const char* name);
+/* A collective's form, an entry of a communicator's configuration (ncclMeshCommForms): `collective` (mesh-plan.h
+   MESH_ALLREDUCE, MESH_BROADCAST, MESH_REDUCE, MESH_REDUCE_SCATTER, MESH_ALLGATHER) at `root` (a reduce's or a
+   broadcast's; -1 every root; not read for the others), for calls of fewer bytes than `below` (0: any size), compiled
+   (mesh-plan.h mesh_compile) along `trees`: ncclMeshTreesShortest the communicator's own (its paths, else the map's
+   shortest-path trees), ncclMeshTreesPacked the map's packed trees (mesh_trees_pack at `eps` and `most` trees a root,
+   both the caller's: Blink's packing [Wang et al. 2020], every link a share); an all-reduce `whole` (1: single-phase,
+   each member's sum up its own tree; 0: the reduce-scatter and then the all-gather [Patarasuk & Yuan 2009;
+   Rabenseifner 2004]); each tree's part cut into `chunks` (1: uncut), pipelined down and up the trees [Blink; NCCL's
+   chunked trees]. */
+typedef enum { ncclMeshTreesShortest = 0, ncclMeshTreesPacked = 1 } ncclMeshTrees;
+typedef struct {
+  int collective;
+  int root;
+  uint64_t below;
+  ncclMeshTrees trees;
+  int whole;
+  uint32_t chunks;
+  uint32_t most;
+  double eps;
+} ncclMeshForm;
+/* A communicator's configuration operand: its forms, in order, compiled ahead of its structural table at each map read
+   (Programs, above), so a call runs the first form of its collective (and root) whose bound its bytes are under, else
+   the default; no entry, no form (the default for every collective and size).  Set before the communicator's first
+   group that crosses a link (ncclInvalidUsage once its session is open or opening, or for a communicator over the
+   caller's programs, ncclMeshCommInitRank's, whose table they are); count 0 clears them.  Every rank passes the same
+   forms (the members' digest covers the programs they compile, so members configured apart fail the session's
+   agreement as a value); its splits and shrinks keep them (a form at a root past a split's ranks makes no entry
+   there).  The forms of mesh cc8a6f8e^'s default table (its tree sets, single-phase or two-phase, 1 to 64 chunks,
+   by size class), named by the caller's configuration where a price chose them: the caller's configuration document
+   is the one place a form is decided (metal-microbench docs/principles.md section 6). */
+ncclResult_t ncclMeshCommForms(ncclComm_t comm, const ncclMeshForm* forms, int count);
 /* Every issued group through `ticket` that is not complete, completed on `stream` (its commandBuffer and
    commandEncoder, or the Metal 4 form's, and its polls; issue and workspace not read); *published (may be NULL)
    whether a publication was encoded.  A ticket already complete encodes nothing; one whose session failed returns the
