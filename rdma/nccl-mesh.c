@@ -2481,7 +2481,8 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
   pthread_mutex_lock(&session_lock);
   if (!result && remote) result = session_ensure(comm);
   if (!result) result = plan_calls(comm, list, n);
-  if (!result && list[0].fused && (!remote || !list[0].bound || list[0].bound->buffers != 1))
+  if (!result && list[0].fused && (!remote || !list[0].bound ||
+                                   list[0].bound->buffers != 1 + (list[0].what == MESH_ALLREDUCE && comm->nranks == 2)))
     result = fail(ncclInvalidUsage, "a fused crossing whose program copies its operand before publishing it (ncclMeshFusable)");
   if (result) { pthread_mutex_unlock(&session_lock); calls_free(list, n); return result; }
   if (finished) metal_collect(finished);
@@ -2524,6 +2525,9 @@ static ncclResult_t launch_metal(struct call *list, size_t n) {
     c->sum = own;
     if (st) st->gpu[0] = own;
     for (uint32_t b = 1; st && b < st->buffers && !result; b++) {
+      /* a fused two-rank all-reduce's copy feeds only its SEND, which the caller's kernel publishes from its own store:
+         no copy is made, and nothing reads the scratch */
+      if (c->fused && c->what == MESH_ALLREDUCE && comm->nranks == 2) { st->gpu[b] = own; continue; }
       void *scratch = workspace(program, c, bytes);
       if (!scratch) { result = fail(ncclSystemError, "out of GPU memory"); break; }
       st->gpu[b] = (struct where){scratch, 0};
