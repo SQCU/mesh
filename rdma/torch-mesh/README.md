@@ -289,7 +289,8 @@ range (its `splits` parts at slots [0, splits)), `mesh_shared_tail` a sharing st
 the range (its parts at slots [splits, splits + J), returning splits + J), and `mesh_merge_row` over a row's parts after
 both dispatches. A task holds 8 rows, so it reads the range less than the per-row path only where a stream holds fewer
 than 8 rows of a KV head. The file still defines no kernel: metal-microbench's `decode_attention_shared<D>` instantiates it
-(not built; metal-microbench docs/kernels.md#decode-attention, its reproduction target). `torch_mesh/argmax.metal` is the library's selection: the draw at temperature 1
+(metal-microbench ffa946a, selected by its instance table's attention plan "shared"; docs/kernels.md#decode-attention, its
+reproduction target). `torch_mesh/argmax.metal` is the library's selection: the draw at temperature 1
 (`mesh_draw`: the greatest of each candidate's logit plus its Gumbel noise, keyed by the row's seed, key and token), the
 normaliser (`mesh_normaliser`: a row's greatest logit and its sum of exponentials, log Z) and the retained set
 (`mesh_retain`: a head of the 2^k greatest logits and a tail of 2^m of the rest drawn as the draw is, with log Z), each a
