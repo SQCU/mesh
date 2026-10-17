@@ -906,6 +906,18 @@ ncclResult_t ncclMeshEncodeMetal4(ncclComm_t comm, ncclRedOp_t op, const void* s
    stream fails as a value (ncclInvalidUsage).  One threadgroup a step: a kernel of several releases or awaits in one
    of them. */
 ncclResult_t ncclMeshFusable(ncclComm_t comm, size_t count, ncclDataType_t type, ncclRedOp_t op, int* fusable);
+/* The same for a crossing of one rooted call (metal-microbench docs/kernels.md#collectives, one-sided fused crossings):
+   *publishes and *lands are this rank's steps where an in-place call of `kind` rooted at `root` (an all-reduce's root 0)
+   of `count` elements of `type` by `op` on comm is, on its program, at most this rank's publication of its whole
+   operand as one small piece and its landing of its peer's whole operand as one (two ranks, the direct exchange, no
+   scratch copy, within one small slot; a reduce and an all-reduce a sum of float16): a broadcast's root publishes and
+   its peer lands, a copy; a reduce's peer publishes and its root lands, combined; an all-reduce both; both 0 where it
+   is not fusable.  Such a call on a stream whose `fused` is set writes those steps' records and returns their bindings
+   in *fused, and encodes the rest of the group as ever; the caller runs each as an all-reduce's: its publishing kernel
+   before the call, its landing kernel after it. */
+typedef enum { ncclMeshFuseAllReduce = 0, ncclMeshFuseBroadcast = 1, ncclMeshFuseReduce = 2 } ncclMeshFuseKind;
+ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int root, size_t count, ncclDataType_t type, ncclRedOp_t op,
+                                   int* publishes, int* lands);
 /* The Metal text of the steps the library's kernels and a fused crossing's kernels run, after rdma/mesh.metal's: the
    argument record (struct mesh_args) and mesh_step_enter, mesh_step_wait, mesh_step_check, mesh_step_await and
    mesh_step_release; the library's own, so the caller compiles them with its kernels and keeps no copy. */
