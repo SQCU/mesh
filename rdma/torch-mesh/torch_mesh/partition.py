@@ -49,7 +49,11 @@ block); Partial to Shard unpacks with the identity and reduce-scatters the block
 valid elements among zeros; Shard(d) to Shard(d') goes through Replicate.  Context parallelism's head-tail split keeps
 each half at its capacity: rank r's block is its head's valid positions, padding, its tail's, padding
 (context_parallel_buffers, context_parallel_unshard, ring_attention: torch's context_parallel, its unshard and its
-ring, called in their place).
+ring, called in their place).  On a group of the mesh backend the MPS buffers these collectives send from and land in
+are window tensors (torch_mesh.empty, mesh 5ff5d699 and f9898875): the all-gather's output, this rank's block copied
+into its place there and the call run in place; the reduce-scatter's input (where it does not lie in the window
+already, its copy) and its output; the ring's gathered keys and values, this rank's concatenated into its place; so the
+library reads what they send where it lies.  Elsewhere, and where the window refuses a lease, torch's own memory.
 
 Torch entry points (torch 2.14; nothing of torch is assigned, so a tensor with no RaggedShard runs as torch runs it):
 - torch.library.custom_op with register_fake and register_autograd: torch_mesh::remask, pack, unpack, allgatherv,
@@ -246,18 +250,55 @@ unpack.register_autograd(lambda ctx, g: (pack(g, ctx.saved['dim'], ctx.saved['ke
 _IDENTITY = {'sum': 0.0, 'avg': 0.0, 'max': -math.inf, 'min': math.inf}
 
 
-def _empty(shape, like):
-    return torch.empty(shape, dtype=like.dtype, device=like.device)
+def _windowed(like, group):
+    """Whether the collectives' buffers like `like` on `group` are window tensors: an MPS tensor on a group of the mesh
+    backend (its communicator's handle: rebalance's test), whose node's bridge leases the window (mesh 5ff5d699)."""
+    return group is not None and like.device.type == 'mps' and bool(getattr(group, 'handle', 0))
+
+
+def _lease(shape, like):
+    """An MPS window tensor like `like` (torch_mesh.empty: a lease of the node's bridge's window, which the library reads
+    and writes where it lies: rdma/NCCL.md "Memory"), made by name as 5ff5d699 made it (DTensor's dispatch runs no
+    factory mode, and torch documents no MPS allocator to place it: mesh 7e6f0335); None where the window refuses the
+    lease (full, or its bridge stopped: the library's error, the collective's own to raise), where aee2829b's window
+    allocator took the device's own buffer."""
+    from . import empty
+    try:
+        return empty(tuple(shape), dtype=like.dtype, device='mps')
+    except RuntimeError:
+        return None
+
+
+def _empty(shape, like, group=None):
+    """A window tensor (_lease) where the buffer is _windowed and the window holds it, else torch.empty."""
+    made = _lease(shape, like) if _windowed(like, group) else None
+    return made if made is not None else torch.empty(shape, dtype=like.dtype, device=like.device)
+
+
+def _in_window(y):
+    """Whether contiguous `y` lies in the window already (torch_mesh.address), so a collective reads it where it lies."""
+    from . import address
+    return y.is_contiguous() and address(y) != 0
 
 
 @torch.library.custom_op('torch_mesh::allgatherv', mutates_args=())
 def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> torch.Tensor:
-    """The blocks gathered out of place from x's block (contiguous along dim), an opaque op, so a compiled graph calls
-    it as torch's functional collectives are called.  On the mesh backend the list is a split of `out`, so it is one
-    MPI_Allgatherv into `out` in place (ncclMeshAllGatherV: backend.py allgather)."""
-    y = x.movedim(dim, 0).contiguous()
-    out = _empty((sum(sizes),) + y.shape[1:], y)
-    dist.all_gather(list(out.split(sizes)), y, group=dist.distributed_c10d._resolve_process_group(group_name))
+    """The blocks gathered from x's block (contiguous along dim), an opaque op, so a compiled graph calls it as torch's
+    functional collectives are called.  On the mesh backend the list is a split of `out`, so it is one MPI_Allgatherv
+    into `out` in place (ncclMeshAllGatherV: backend.py allgather).  Where the output is a window tensor (_windowed),
+    this rank's block is copied into its place in it first and gathered from there, the call in place (nccl.h: sendbuff
+    rank's segment of recvbuff; mesh f9898875), so what it sends lies in the window; else out of place from x's block."""
+    group = dist.distributed_c10d._resolve_process_group(group_name)
+    if not _windowed(x, group):
+        y = x.movedim(dim, 0).contiguous()
+        out = _empty((sum(sizes),) + y.shape[1:], y)
+        dist.all_gather(list(out.split(sizes)), y, group=group)
+        return out.movedim(0, dim).contiguous()
+    y = x.movedim(dim, 0)
+    out = _empty((sum(sizes),) + y.shape[1:], y, group)
+    blocks = list(out.split(sizes))
+    mine = blocks[dist.get_rank(group)].copy_(y)
+    dist.all_gather(blocks, mine, group=group)
     return out.movedim(0, dim).contiguous()
 
 
@@ -265,11 +306,15 @@ def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> 
 def reduce_scatterv(x: torch.Tensor, dim: int, sizes: list[int], rank: int, op: str, group_name: str) -> torch.Tensor:
     """The blocks reduce-scattered out of place from x (contiguous along dim), this rank's block, an opaque op.  On
     the mesh backend the list is a split of `y`, so it is one MPI_Reduce_scatter reading `y` in place
-    (ncclMeshReduceScatterV: backend.py reduce_scatter)."""
-    y = x.movedim(dim, 0).contiguous()
-    out = _empty((sizes[rank],) + y.shape[1:], y)
-    dist.reduce_scatter(out, list(y.split(sizes)), op=getattr(dist.ReduceOp, op.upper()),
-                        group=dist.distributed_c10d._resolve_process_group(group_name))
+    (ncclMeshReduceScatterV: backend.py reduce_scatter).  Where the buffers are window tensors (_windowed), `y` is x's
+    block where it lies in the window already, else its contiguous copy into a window tensor (mesh f9898875), and the
+    output a window tensor of its own, so what it sends lies in the window and the output holds no lease of the input."""
+    group = dist.distributed_c10d._resolve_process_group(group_name)
+    y = x.movedim(dim, 0)
+    held = _lease(y.shape, y) if _windowed(x, group) and not _in_window(y) else None
+    y = held.copy_(y) if held is not None else y.contiguous()
+    out = _empty((sizes[rank],) + y.shape[1:], y, group)
+    dist.reduce_scatter(out, list(y.split(sizes)), op=getattr(dist.ReduceOp, op.upper()), group=group)
     return out.movedim(0, dim).contiguous()
 
 
@@ -1124,10 +1169,11 @@ def _causal(rank, size, i, is_causal, balanced):
 
 def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=None, halves=1):
     """torch's _templated_ring_attention forward (_attention.py) over capacity blocks: the rotation one Allgatherv of
-    every rank's keys and values (static counts), the block of source j = (rank - i) mod n viewed at its capacity and
-    its keys past their valid extents masked (-inf scores); the rest is torch's: the causal behavior, the head-tail
-    halves (a block's halves are its head's and its tail's), _SDPAMerger.  Padded query rows compute garbage that the
-    unshard drops."""
+    every rank's keys and values (static counts) into one buffer (a window tensor on the mesh backend: _empty), this
+    rank's concatenated into its place there and the call run in place (mesh f9898875), the block of source j =
+    (rank - i) mod n viewed at its capacity and its keys past their valid extents masked (-inf scores); the rest is
+    torch's: the causal behavior, the head-tail halves (a block's halves are its head's and its tail's), _SDPAMerger.
+    Padded query rows compute garbage that the unshard drops."""
     o = _OPERANDS[key_name]
     if is_causal and query.size(2) != key.size(2):
         raise NotImplementedError('is_causal requires the same query and context sequence lengths')
@@ -1141,7 +1187,7 @@ def _ring_attention(group, key_name, query, key, value, is_causal=False, scale=N
     key, value = key.contiguous(), value.contiguous()
     row_k, row_v = key.numel() // key.size(2), value.numel() // value.size(2)
     counts = [s * (row_k + row_v) for s in lengths]
-    blocks = list(_empty((sum(counts),), key).split(counts))
+    blocks = list(_empty((sum(counts),), key, group).split(counts))
     mine = torch.cat([key.flatten(), value.flatten()], out=blocks[rank])
     gathered = dist.all_gather(blocks, mine, group=group, async_op=True)
     merger = _cp._SDPAMerger(_cp._cp_options.convert_to_f32, seq_dim=2)
