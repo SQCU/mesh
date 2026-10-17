@@ -555,6 +555,22 @@ int mesh_ledger(const char *name,const char *path){
   close(fd);
   return 0;
 }
+int mesh_stream(uint32_t node,uint64_t bytes,char *result,size_t room){
+  struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_STREAM,.node=node,.bytes=bytes};
+  if(!result || !room)return -EINVAL;
+  strcpy(request.service,"stream");
+  const int fd=bridge_ask(&request);
+  if(fd<0)return fd;
+  size_t got=0;
+  for(ssize_t n;got+1<room && (n=recv(fd,result+got,room-1-got,0))!=0;){
+    if(n<0 && errno==EINTR)continue;
+    if(n<0){const int error=errno;close(fd);return -error;}
+    got+=(size_t)n;
+  }
+  result[got]=0;
+  close(fd);
+  return 0;
+}
 int mesh_serve(const char *service,const char *path){
   struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_SERVE};
   if(!service || !path || strlen(service)>=sizeof request.service || strlen(path)>=sizeof request.path || path[0]!='/')return -EINVAL;

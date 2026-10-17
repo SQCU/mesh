@@ -296,6 +296,36 @@ struct stripes {
   uint32_t receive_frames,receive_capacity,arrived[MESH_DESCRIPTORS];
   struct stripe_cut in;
 };
+/* design/bridge-dataflow.md#streams (mesh 554a3793^ rdma/mesh-verbs-stream.c, inside the bridge, the one opener of
+   verbs): a raw one-way stream a client asked its bridge for (mesh-dataflow.h MESH_REQUEST_STREAM), `bytes` in pages of
+   one block from a lease of the sender's window to one of the receiver's, over one UC queue pair each end made for it
+   and nothing else of the bridge's (no cell, ring, record or landing word), its SENDs and receives posted by the port's
+   progress threads in chains of at most `window` pages in flight (mesh-verbs-stream.c's 1,023), every word checked at
+   the receiver; the STREAM message's phases (`count`): an offer (the sender's queue pair, `code` the bytes), posted
+   (the receiver's queue pair, its first receives posted), the result (the receiver's numbers), 0 a failure (`code`).
+   Its state (STREAMS_DOWN, filling or zeroing its lease, made, connecting, running, checking, closing), whether this
+   end sends, the requester's socket (the sender's end), the lease (`page`, `pages`), the pages, the times and counts
+   each end keeps (`own`) and the receiver's as its result told them (`told`) */
+#define MESH_STREAM_MAGIC UINT64_C(0x6d65736870616765)
+#define MESH_STREAM_WINDOW 1023u
+enum { STREAM_FAILED, STREAM_OFFER, STREAM_POSTED, STREAM_RESULT };
+enum { STREAMS_DOWN, STREAMS_FILLING, STREAMS_MAKING, STREAMS_MADE, STREAMS_CONNECTING, STREAMS_RUNNING, STREAMS_CHECKING, STREAMS_CLOSING };
+struct stream_result { uint64_t bytes,pages,page_bytes,window,completed,mismatches,correct,misordered,first_count,low_count,high_count,
+  begin_ns,first_ns,low_ns,high_ns,last_ns,posts,polls,empty_polls; };
+struct stream {
+  struct mesh_verbs provider;
+  int state,job,result,sending,committed,fd;
+  _Atomic int up,done,finished;
+  _Atomic int64_t failed;
+  uint32_t peer[1][2],page,pages,count,page_bytes,window;
+  uint64_t key,bytes,deadline,flushed;
+  struct ibv_sge *spans;
+  struct ibv_send_wr *sends;
+  struct ibv_recv_wr *receives;
+  struct ibv_wc *completions;
+  uint64_t posted,completed;
+  struct stream_result own,told;
+};
 /* design/bridge-and-ipc.md#ports: a port, its link, its control socket's queues each way, its verbs work's queue, a
    refused registration's pause (`backoff`), the queue pairs its flows and lanes hold or will (`committed`, of the
    device's usable queue pairs), its lanes, its table of flows (`table`, the indices reserved and their generations, the
@@ -326,6 +356,7 @@ struct port {
   _Atomic int parked[2];
   pthread_t thread[2];
   struct stripes stripes;
+  struct stream stream;
   _Atomic uint64_t guard,guarded[2];
 };
 static struct hdr *M;
@@ -1559,6 +1590,69 @@ static int stripes_receive(struct port *port){
   return moved;
 }
 
+/* design/bridge-dataflow.md#streams: a stream's failure, the event loop's to end (streams_turn) */
+static void stream_lost(struct port *port,int64_t code){
+  int64_t none=0;
+  atomic_compare_exchange_strong(&port->stream.failed,&none,code?code:EIO);
+  atomic_store_explicit(&port->stream.up,0,memory_order_release);
+  wake();
+}
+/* the window offset of a stream's page */
+static uint64_t stream_offset(const struct port *port,uint64_t page){
+  return (uint64_t)port->stream.page*M->pgsz+page*port->stream.page_bytes;
+}
+/* the stream's next `n` pages from `posted`, chained as mesh-verbs-stream.c chained them: SENDs, or receives */
+static int stream_post(struct port *port,uint32_t n){
+  struct stream *s=&port->stream;
+  for(uint32_t i=0;i<n;i++){
+    const uint64_t page=s->posted+i;
+    s->spans[i]=stripe_span(port,stream_offset(port,page),s->page_bytes);
+    if(s->sending)s->sends[i]=(struct ibv_send_wr){.wr_id=page,.next=i+1<n?s->sends+i+1:NULL,.sg_list=s->spans+i,.num_sge=1,
+      .opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED};
+    else s->receives[i]=(struct ibv_recv_wr){.wr_id=page,.next=i+1<n?s->receives+i+1:NULL,.sg_list=s->spans+i,.num_sge=1};
+  }
+  const struct mesh_queue *queue=s->provider.queues;
+  struct ibv_send_wr *bad_send;struct ibv_recv_wr *bad_receive;
+  const int error=s->sending?queue->send(queue->pair,s->sends,&bad_send):queue->receive(queue->pair,s->receives,&bad_receive);
+  if(error)return error<0?-error:error;
+  if(!s->posted)s->own.begin_ns=ledger_ns();
+  s->posted+=n;s->own.posts++;
+  return 0;
+}
+/* design/bridge-dataflow.md#streams: one pass of the stream at its end's progress thread (the send thread where it
+   sends, the receive thread where it receives): its completions taken (a SEND's retiring its page; a receive's landing
+   its page, in posting order and of a whole page, its count's first, tenth, ninetieth percent and last landing timed),
+   then its next pages posted while fewer than `window` are in flight; the last completion finishing it */
+static int stream_pass(struct port *port){
+  struct stream *s=&port->stream;
+  const struct mesh_queue *queue=s->provider.queues;
+  const int count=queue->poll(s->sending?s->provider.sent:s->provider.completion,(int)s->window,s->completions);
+  s->own.polls++;
+  if(count<0){stream_lost(port,EIO);return 1;}
+  if(!count)s->own.empty_polls++;
+  for(int i=0;i<count;i++){
+    const struct ibv_wc *done=s->completions+i;
+    if(done->status){stream_lost(port,(int64_t)done->status);return 1;}
+    if(!s->sending && done->byte_len!=s->page_bytes){stream_lost(port,EPROTO);return 1;}
+    s->own.misordered+=done->wr_id!=s->completed+(uint64_t)i;
+  }
+  if(count){
+    const uint64_t at=ledger_ns();
+    s->completed+=(uint64_t)count;
+    if(!s->own.first_ns){s->own.first_ns=at;s->own.first_count=s->completed;}
+    if(!s->own.low_count && s->completed>=s->count/10){s->own.low_ns=at;s->own.low_count=s->completed;}
+    if(!s->own.high_count && s->completed>=9*(uint64_t)s->count/10){s->own.high_ns=at;s->own.high_count=s->completed;}
+    s->own.last_ns=at;s->own.completed=s->completed;
+  }
+  const uint64_t room=s->window-(s->posted-s->completed),left=s->count-s->posted,n=room<left?room:left;
+  if(n){
+    const int error=stream_post(port,(uint32_t)n);
+    if(error){stream_lost(port,error);return 1;}
+  }
+  if(s->completed==s->count){atomic_store_explicit(&s->up,0,memory_order_release);atomic_store_explicit(&s->finished,1,memory_order_release);wake();}
+  return count || n;
+}
+
 /* design/bridge-and-ipc.md#progress: one pass of a port's progress thread, `side` 0 its receives' and 1 its SENDs':
    every exclusive flow in the port's table it serves (while the flow is progressing) and the port's lanes while they are
    up.  The pass reads the table's epoch, serves each, and tells the epoch it began at, so a flow taken out of the table
@@ -1598,6 +1692,8 @@ static int port_pass(struct port *port,int side,int *any,uint64_t *told){
   /* design/bridge-dataflow.md#stripes: the port's stripe flow while it is up, its receives always posted and any ring
      able to name its peer at any time */
   if(atomic_load_explicit(&port->stripes.up,memory_order_acquire)){*any=1;moved|=side?stripes_send(port):stripes_receive(port);}
+  /* design/bridge-dataflow.md#streams: a stream, at the thread of its end's side */
+  if(atomic_load_explicit(&port->stream.up,memory_order_acquire) && side==port->stream.sending){*any=1;moved|=stream_pass(port);}
   /* design/bridge-and-ipc.md#progress: told only when it moved (port_settle waits for it), so the line the two threads
      read every pass (`high`, `epoch`) is not written by either each pass */
   if(epoch!=*told){atomic_store_explicit(&port->seen[side],epoch,memory_order_release);*told=epoch;}
@@ -1710,7 +1806,7 @@ static void port_guard(struct port *port,int raise){
     while(atomic_load_explicit(&port->guarded[side],memory_order_acquire)!=guard){port_bell(port);sched_yield();}
 }
 static int guard_raise(struct port *port,int always){
-  if(!always && !port->stripes.provider.queues)return 0;
+  if(!always && !port->stripes.provider.queues && !port->stream.provider.queues)return 0;
   port_guard(port,1);
   return 1;
 }
@@ -3188,13 +3284,15 @@ static void child_heard(pid_t pid){
     if(channels[i].used && channels[i].pid==pid && !channels[i].exited)child_ended(channels+i);
   }
 }
+static void stream_asked(int fd,uint32_t node,uint64_t bytes);
 /* a client's request read whole: a channel opened toward its node's service (here, or its CHANNEL_OPEN sent to the next hop),
-   or a service registered */
+   a service registered, a ledger cut, or a raw stream (design/bridge-dataflow.md#streams) */
 static void asked(struct asking *a){
   struct mesh_request *r=&a->request;
   const int fd=a->fd;a->fd=-1;
   fd_watch(fd,EVFILT_READ,0,0);
   r->service[sizeof r->service-1]=0;r->path[sizeof r->path-1]=0;
+  if(r->magic==MESH_REQUEST_MAGIC && r->kind==MESH_REQUEST_STREAM){stream_asked(fd,r->node,r->bytes);return;}
   if(r->magic==MESH_REQUEST_MAGIC && r->kind==MESH_REQUEST_LEDGER){
     fd_answer(fd,r->path[0]=='/'?ledger_cut(r->bytes,r->path):EINVAL);close(fd);
     return;
@@ -3350,6 +3448,218 @@ static void requests_stop(void){
   for(uint32_t i=0;i<MESH_SERVICES;i++)if(servings[i].fd>=0){close(servings[i].fd);servings[i].fd=-1;}
 }
 
+/* design/bridge-dataflow.md#streams: a stream's verbs work on its port's queue, always guarded (port_guard): its queue
+   pair made (STREAMS_MAKING); connected to the peer's and ready (STREAMS_CONNECTING: its chains' storage, and at the
+   receiver its first `window` receives posted before it tells POSTED, so no SEND of the sender's comes before its
+   receive: the 2026-09-10 benchmark's first defect, design/transport-one-gib-2026-09-10.md); or, once neither
+   progress thread reads it, flushed and destroyed (STREAMS_CLOSING) */
+static void streams_job(struct port *port,int job){
+  struct stream *s=&port->stream;
+  s->job=job;atomic_store_explicit(&s->done,0,memory_order_relaxed);
+  dispatch_async(port->work,^{
+    int result=0;
+    if(job==STREAMS_CLOSING){atomic_store_explicit(&s->up,0,memory_order_release);port_settle(port);}
+    port_guard(port,1);
+    if(job==STREAMS_MAKING)result=pair_up(&s->provider,1);
+    else if(job==STREAMS_CONNECTING){
+      result=pair_receive(&s->provider,(const uint32_t (*)[2])s->peer,port->heard.lid,port->heard.gid);
+      if(!result)result=pair_send(&s->provider);
+      const uint32_t frames=(s->page_bytes+4095)/4096,cqe=(uint32_t)MIN(s->provider.sent->cqe,s->provider.completion->cqe);
+      s->window=MIN(MESH_STREAM_WINDOW,MIN(s->sending?s->provider.queues[0].send_capacity/frames:s->provider.queues[0].receive_capacity/frames,
+                                           cqe>1?cqe-1:1));
+      if(!s->window)s->window=1;
+      s->spans=calloc(s->window,sizeof *s->spans);s->sends=calloc(s->window,sizeof *s->sends);
+      s->receives=calloc(s->window,sizeof *s->receives);s->completions=calloc(s->window,sizeof *s->completions);
+      if(!result && (!s->spans || !s->sends || !s->receives || !s->completions))result=ENOMEM;
+      s->posted=s->completed=0;
+      if(!result && !s->sending)result=stream_post(port,MIN(s->window,s->count));
+      if(!result)result=port_threads(port);
+    }else{
+      s->flushed=s->provider.queues?pair_flush(&s->provider,MESH_FLUSH_POLLS):0;
+      result=down_pair(&s->provider)?0:EBUSY;
+      free(s->spans);free(s->sends);free(s->receives);free(s->completions);
+      s->spans=NULL;s->sends=NULL;s->receives=NULL;s->completions=NULL;
+    }
+    port_guard(port,0);
+    s->result=result;
+    port_pairs(port);
+    atomic_store_explicit(&s->done,1,memory_order_release);
+    wake();
+  });
+}
+/* a stream's lease filled with its pattern (the sender: word w of page p is p << 32 ^ w ^ MESH_STREAM_MAGIC, as
+   mesh-verbs-stream.c and mesh-page-stream.c wrote it), cleared (the receiver, so a page not written fails its check),
+   or checked word by word (the receiver, once every page landed); off the event loop, on a global queue */
+static void streams_work(struct port *port,int job){
+  struct stream *s=&port->stream;
+  s->job=job;atomic_store_explicit(&s->done,0,memory_order_relaxed);
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{
+    const uint64_t words=s->page_bytes/sizeof(uint64_t);
+    uint64_t mismatches=0,correct=0;
+    for(uint64_t p=0;p<s->count;p++){
+      uint64_t *page=(uint64_t *)(wire.data+stream_offset(port,p)),bad=0;
+      if(job==STREAMS_FILLING && s->sending)for(uint64_t w=0;w<words;w++)page[w]=(p<<32)^w^MESH_STREAM_MAGIC;
+      else if(job==STREAMS_FILLING)memset(page,0,s->page_bytes);
+      else for(uint64_t w=0;w<words;w++)bad+=page[w]!=((p<<32)^w^MESH_STREAM_MAGIC);
+      mismatches+=bad;correct+=!bad;
+    }
+    if(job==STREAMS_CHECKING){s->own.mismatches=mismatches;s->own.correct=correct;}
+    s->result=0;
+    atomic_store_explicit(&s->done,1,memory_order_release);
+    wake();
+  });
+}
+/* the stream's lease returned to the window and its state cleared, the requester (the sender's end) answered with
+   `code` where it still waits */
+static void streams_clear(struct port *port,int64_t code){
+  struct stream *s=&port->stream;
+  if(s->pages)mesh_bits_clear(mesh_arena_bits(M),s->page,s->pages);
+  if(s->fd>=0){fd_answer(s->fd,(int32_t)code);close(s->fd);}
+  if(s->committed)port->committed-=1;
+  *s=(struct stream){.fd=-1};
+}
+/* design/recovery.md#loss: a stream that failed (a verbs call's error, a completion's, the peer's FAIL, the link lost,
+   past its deadline): the peer told where the failure is this end's, the requester answered with the code, its queue
+   pair closed (flushed) where it has one */
+static void streams_fail(struct port *port,int64_t code,int tell){
+  struct stream *s=&port->stream;
+  say("link %u (%s): stream %016llx toward node %u: %s\n",port->index,port->name,(unsigned long long)s->key,port->peer,strerror((int)code));
+  if(tell)port_say(port,(struct message){.kind=STREAM,.count=STREAM_FAILED,.key=s->key,.code=code},NULL,0);
+  atomic_store_explicit(&s->up,0,memory_order_release);
+  if(s->fd>=0){fd_answer(s->fd,(int32_t)code);close(s->fd);s->fd=-1;}
+  if(s->job)s->state=STREAMS_CLOSING;
+  else if(s->provider.queues || s->state>=STREAMS_MAKING){s->state=STREAMS_CLOSING;streams_job(port,STREAMS_CLOSING);}
+  else streams_clear(port,0);
+}
+/* the stream's lease, `bytes` in whole blocks from the window; 0, or ENOMEM */
+static int streams_lease(struct port *port,uint64_t bytes){
+  struct stream *s=&port->stream;
+  const uint64_t block=(uint64_t)M->block*M->pgsz;
+  s->page_bytes=(uint32_t)block;s->count=(uint32_t)(bytes/block);s->bytes=(uint64_t)s->count*block;
+  const uint64_t pages=s->bytes/M->pgsz;
+  const uint32_t page=pages && pages<=UINT32_MAX?mesh_arena_alloc(&bridge,(uint32_t)pages,M->block):MESH_ABSENT;
+  if(page==MESH_ABSENT)return ENOMEM;
+  s->page=page;s->pages=(uint32_t)pages;
+  return 0;
+}
+/* design/bridge-dataflow.md#streams: a client's request for a raw stream of `bytes` toward node `node` (a neighbour),
+   its socket held for the answer: the first cable's port toward it, its lease filled, then its queue pair made and
+   offered (streams_turn); refused at once as a value where the node has no cable (EHOSTUNREACH), that port runs a
+   stream (EBUSY), the bytes are not a block at least or exceed 2^32 blocks (EINVAL), or the window has no room
+   (ENOMEM) */
+static void stream_asked(int fd,uint32_t node,uint64_t bytes){
+  struct port *cable[MESH_PORTS];
+  const uint32_t n=node==M->node?0:cables(node,cable);
+  const uint64_t block=(uint64_t)M->block*M->pgsz;
+  int64_t code=!n?EHOSTUNREACH:bytes<block || bytes/block>UINT32_MAX?EINVAL:cable[0]->stream.state!=STREAMS_DOWN?EBUSY:0;
+  if(!code)code=streams_lease(cable[0],bytes);
+  if(code){fd_answer(fd,(int32_t)code);close(fd);if(n && code==ENOMEM)streams_clear(cable[0],0);return;}
+  struct stream *s=&cable[0]->stream;
+  static uint32_t streams;
+  s->fd=fd;s->sending=1;s->key=(uint64_t)M->node<<32|++streams;s->deadline=now+MESH_PAIR_NS;
+  s->state=STREAMS_FILLING;
+  say("link %u (%s): stream %016llx of %llu bytes toward node %u asked\n",cable[0]->index,cable[0]->name,(unsigned long long)s->key,
+      (unsigned long long)s->bytes,node);
+  streams_work(cable[0],STREAMS_FILLING);
+}
+/* a peer's STREAM: its offer (this end leases, clears, makes and connects, then tells POSTED), its posted receives (this
+   end connects and sends), its result (the requester answered), or its failure */
+static void stream_heard(struct port *port,const struct message *heard,const unsigned char *payload){
+  struct stream *s=&port->stream;
+  if(heard->count==STREAM_OFFER){
+    int64_t code=s->state!=STREAMS_DOWN?EBUSY:0;
+    if(!code)code=streams_lease(port,(uint64_t)heard->code);
+    if(code){
+      if(s->state==STREAMS_DOWN)streams_clear(port,0);
+      port_say(port,(struct message){.kind=STREAM,.count=STREAM_FAILED,.key=heard->key,.code=code},NULL,0);
+      return;
+    }
+    s->fd=-1;s->sending=0;s->key=heard->key;s->peer[0][0]=heard->pair[0][0];s->peer[0][1]=heard->pair[0][1];
+    s->deadline=now+MESH_PAIR_NS;s->state=STREAMS_FILLING;
+    streams_work(port,STREAMS_FILLING);
+    return;
+  }
+  if(heard->key!=s->key || s->state==STREAMS_DOWN)return;
+  if(heard->count==STREAM_POSTED && s->sending && s->state==STREAMS_MADE){
+    s->peer[0][0]=heard->pair[0][0];s->peer[0][1]=heard->pair[0][1];
+    s->state=STREAMS_CONNECTING;streams_job(port,STREAMS_CONNECTING);
+  }else if(heard->count==STREAM_RESULT && s->sending && heard->bytes==sizeof s->told){
+    memcpy(&s->told,payload,sizeof s->told);
+    const struct stream_result *r=&s->told,*o=&s->own;
+    const double interior=r->high_ns>r->low_ns?(double)(r->high_ns-r->low_ns)/1e9:0;
+    const uint64_t interior_bytes=(r->high_count-r->low_count)*r->page_bytes;
+    char line[1024];
+    snprintf(line,sizeof line,"{\"stream\":\"raw\",\"key\":\"%016llx\",\"node\":%u,\"peer\":%u,\"port\":%u,\"bytes\":%llu,\"page_bytes\":%u,"
+      "\"pages\":%u,\"window\":%u,\"sender\":{\"window\":%u,\"posts\":%llu,\"submit_to_last_s\":%.9f,\"polls\":%llu,\"empty_polls\":%llu,"
+      "\"misordered\":%llu},\"receiver\":{\"window\":%llu,\"completed\":%llu,\"mismatches\":%llu,\"correct_pages\":%llu,\"misordered\":%llu,"
+      "\"first_to_last_s\":%.9f,\"first_to_last_bytes\":%llu,\"interior_s\":%.9f,\"interior_bytes\":%llu,\"interior_GBps\":%.6f,\"polls\":%llu,"
+      "\"empty_polls\":%llu}}\n",(unsigned long long)s->key,M->node,port->peer,port->index,(unsigned long long)s->bytes,s->page_bytes,s->count,
+      s->window,s->window,(unsigned long long)o->posts,o->last_ns>o->begin_ns?(double)(o->last_ns-o->begin_ns)/1e9:0,(unsigned long long)o->polls,
+      (unsigned long long)o->empty_polls,(unsigned long long)o->misordered,(unsigned long long)r->window,(unsigned long long)r->completed,
+      (unsigned long long)r->mismatches,(unsigned long long)r->correct,(unsigned long long)r->misordered,
+      r->last_ns>r->first_ns?(double)(r->last_ns-r->first_ns)/1e9:0,(unsigned long long)((r->completed-r->first_count)*r->page_bytes),interior,
+      (unsigned long long)interior_bytes,interior>0?(double)interior_bytes/interior/1e9:0,(unsigned long long)r->polls,
+      (unsigned long long)r->empty_polls);
+    say("link %u (%s): stream %s",port->index,port->name,line);
+    if(s->fd>=0){fd_answer(s->fd,0);if(send(s->fd,line,strlen(line),0)<0){}close(s->fd);s->fd=-1;}
+    s->state=STREAMS_CLOSING;
+    if(!s->job)streams_job(port,STREAMS_CLOSING);
+  }else if(heard->count==STREAM_FAILED)streams_fail(port,heard->code?heard->code:ECANCELED,0);
+}
+/* design/bridge-dataflow.md#streams: the port's stream's turn, on the event loop: a job's end taken (its lease filled
+   or cleared: its queue pair made; made: the sender offers it, the receiver connects; connected: running, the receiver
+   telling POSTED; checked: the receiver tells its result and closes; closed: its lease returned), its end at a
+   progress thread taken (the receiver checks every word; the sender waits for the result), and its failure or its
+   deadline (the pairing window from its ask or offer) ending it */
+static void streams_turn(struct port *port){
+  struct stream *s=&port->stream;
+  if(s->state==STREAMS_DOWN)return;
+  if(s->job){
+    if(!atomic_load_explicit(&s->done,memory_order_acquire))return;
+    const int job=s->job,result=s->result;
+    s->job=0;
+    if(job==STREAMS_CLOSING){
+      if(result){say("link %u (%s): stream teardown: %s\n",port->index,port->name,strerror(result));return;}
+      say("link %u (%s): stream %016llx closed (%llu completions flushed)\n",port->index,port->name,(unsigned long long)s->key,
+          (unsigned long long)s->flushed);
+      streams_clear(port,ECANCELED);
+      return;
+    }
+    if(s->state==STREAMS_CLOSING){streams_job(port,STREAMS_CLOSING);return;}
+    if(result){streams_fail(port,result,1);return;}
+    if(job==STREAMS_FILLING){
+      if(port->committed+1>port->device.max_pairs){streams_fail(port,ENOSPC,1);return;}
+      port->committed+=1;s->committed=1;s->state=STREAMS_MAKING;streams_job(port,STREAMS_MAKING);
+    }else if(job==STREAMS_MAKING){
+      s->state=STREAMS_MADE;
+      if(s->sending){
+        struct message said={.kind=STREAM,.count=STREAM_OFFER,.key=s->key,.code=(int64_t)s->bytes};
+        said.pair[0][0]=s->provider.queues[0].pair->qp_num;said.pair[0][1]=s->provider.psn&0xffffff;
+        port_say(port,said,NULL,0);
+      }else{s->state=STREAMS_CONNECTING;streams_job(port,STREAMS_CONNECTING);}
+    }else if(job==STREAMS_CONNECTING){
+      s->state=STREAMS_RUNNING;
+      atomic_store_explicit(&s->up,1,memory_order_release);port_bell(port);
+      if(!s->sending){
+        struct message said={.kind=STREAM,.count=STREAM_POSTED,.key=s->key};
+        said.pair[0][0]=s->provider.queues[0].pair->qp_num;said.pair[0][1]=s->provider.psn&0xffffff;
+        port_say(port,said,NULL,0);
+      }
+    }else if(job==STREAMS_CHECKING){
+      s->own.bytes=s->bytes;s->own.pages=s->count;s->own.page_bytes=s->page_bytes;s->own.window=s->window;
+      port_say(port,(struct message){.kind=STREAM,.count=STREAM_RESULT,.key=s->key},&s->own,sizeof s->own);
+      s->state=STREAMS_CLOSING;streams_job(port,STREAMS_CLOSING);
+    }
+    return;
+  }
+  const int64_t failed=atomic_exchange(&s->failed,0);
+  if(failed){streams_fail(port,failed,1);return;}
+  if(s->state==STREAMS_RUNNING && atomic_load_explicit(&s->finished,memory_order_acquire) && !s->sending){
+    s->state=STREAMS_CHECKING;streams_work(port,STREAMS_CHECKING);return;
+  }
+  if(now>s->deadline && s->state!=STREAMS_CLOSING)streams_fail(port,ETIMEDOUT,1);
+}
+
 /* design/bridge-and-ipc.md#protocol */
 static void port_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   if(!port->greeted){
@@ -3370,6 +3680,7 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
   if(heard->kind==READY){ready_heard(port,heard,payload);return;}
   if(heard->kind==LANES){lanes_heard(port,heard);return;}
   if(heard->kind==STRIPES){stripes_heard(port,heard);return;}
+  if(heard->kind==STREAM){stream_heard(port,heard,payload);return;}
   if(heard->kind>=CHANNEL_OPEN && heard->kind<=CHANNEL_CLOSE){channel_heard(port,heard,payload);return;}
   struct flow *f=flow_on(port,heard->key,heard->to,heard->from,heard->stripe);
   if(!f)return;
@@ -3422,6 +3733,8 @@ static void port_lost(struct port *port,int64_t code,int retire){
   atomic_store_explicit(&port->stripes.up,0,memory_order_release);
   if(port->stripes.state!=STRIPES_DOWN)port->stripes.state=STRIPES_CLOSING;
   port->stripes.heard=0;port->stripes.wanted=0;port->stripes.retry=0;
+  /* design/bridge-dataflow.md#streams: a stream on the port fails, its requester answered */
+  if(port->stream.state!=STREAMS_DOWN && port->stream.state!=STREAMS_CLOSING)streams_fail(port,port->parted?ECONNRESET:code,0);
   port->greeted=port->parted=port->connecting=port->writing=0;port->farewell=0;port->peer=0;port->held=0;port->out_length=port->out_sent=0;
   port->retiring|=retire;port->open&=!retire;port->next=now+MESH_PAUSE_NS;
   link_set(port,0,retire?MESH_STOPPED:MESH_PAIRING,code);
@@ -3448,7 +3761,8 @@ static struct port *port_at(uint32_t interface){
    flow and no lane holds queue pairs on it), else opened and its port read; then, while it has no peer, its hello sent to every
    node on its link */
 static void port_turn(struct port *port){
-  if(port->job || port->control>=0 || now<port->next || (port->retiring && (port->flows || port->lanes.state!=LANES_DOWN || port->stripes.state!=STRIPES_DOWN)))return;
+  if(port->job || port->control>=0 || now<port->next || (port->retiring && (port->flows || port->lanes.state!=LANES_DOWN || port->stripes.state!=STRIPES_DOWN ||
+     port->stream.state!=STREAMS_DOWN)))return;
   port->next=now+MESH_PAUSE_NS;
   port->interface=if_nametoindex(port->name);
   const int retire=port->retiring;
@@ -3570,7 +3884,7 @@ static void ports_found(void){
     for(uint32_t p=0;p<port_count;p++)known|=!strcmp(ports[p].device.name,devices[i]);
     if(known)continue;
     struct port *port=ports+port_count;
-    *port=(struct port){.index=port_count,.control=-1,.work=dispatch_queue_create("mesh.port",DISPATCH_QUEUE_SERIAL)};
+    *port=(struct port){.index=port_count,.control=-1,.work=dispatch_queue_create("mesh.port",DISPATCH_QUEUE_SERIAL),.stream={.fd=-1}};
     /* design/bridge-and-ipc.md#lanes: the lanes' headers and discard blocks, the pages leased for the port's index */
     port->lanes.pages=lane_pages();
     port->lanes.page=lanes_page[port_count];
@@ -3991,6 +4305,7 @@ int main(int argc,char **argv){
       port_turn(port);
       lanes_turn(port);
       stripes_turn(port);
+      streams_turn(port);
     }
     flows_turn();
     stripes_requests_turn();
@@ -4076,6 +4391,11 @@ int main(int argc,char **argv){
         pair_flush(&port->stripes.provider,MESH_FLUSH_POLLS);
         if(!down_pair(&port->stripes.provider))say("link %u (%s): stripes teardown: %s\n",port->index,port->name,strerror(errno));
       }
+      if(port->stream.provider.queues){
+        pair_flush(&port->stream.provider,MESH_FLUSH_POLLS);
+        if(!down_pair(&port->stream.provider))say("link %u (%s): stream teardown: %s\n",port->index,port->name,strerror(errno));
+      }
+      if(port->stream.fd>=0){fd_answer(port->stream.fd,ESHUTDOWN);close(port->stream.fd);port->stream.fd=-1;}
       if(!down_pair(&port->lanes.provider))say("link %u (%s): lanes teardown: %s\n",port->index,port->name,strerror(errno));
       if(!down_device(&port->device))say("link %u (%s): verbs teardown: %s\n",port->index,port->name,strerror(errno));
     });

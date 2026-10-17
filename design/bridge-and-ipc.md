@@ -306,6 +306,10 @@ A channel's messages ride the links' control sockets beside the bridges' own (#p
 - **Compatibility.** The kinds came at MESH_VERSION 115, unchanged then: an older bridge dropped them (an OPEN toward
   it timed out), and the region was untouched. MESH_VERSION 116 adds the health record's `available` and a request's
   `bytes` (#admission).
+- **Streams.** A request of kind MESH_REQUEST_STREAM (MESH_VERSION 118; mesh-dataflow.h `mesh_stream`) asks the
+  bridge for a raw one-way stream of so many bytes to a neighbour's bridge over a queue pair each end makes for it,
+  every word checked there, its answer the two ends' numbers (design/bridge-dataflow.md#streams): the link's raw
+  rate, read by the one process that opens verbs.
 
 Exercised on one node (metal-microbench output_data/bridge-20261016): a 3 MiB echo through a registered service in
 38.6 ms; 40 concurrent channels of 1 B to 5 MiB, all correct, in 0.44 s; a reader slower than its writer held to the

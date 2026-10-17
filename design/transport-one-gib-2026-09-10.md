@@ -103,6 +103,38 @@ numeric LAN address in the measurement command.
 
 ## Reproduction and allocation
 
+The 2026-09-10 recipe below named `mesh-page-stream` and `mesh-verbs-stream`, deleted on 2026-09-12 (mesh f92e9eee,
+554a3793), and a bridge each reading started and stopped; on the resident bridge, whose bridge alone opens verbs, both
+readings come from one tool (mesh design/bridge-dataflow.md#streams). Build it beside the bridges as they run (it is
+a client of libmesh; the bridges must be at MESH_VERSION 118 or later, whose bridge serves a raw stream):
+
+```
+make -C rdma mesh-stream
+```
+
+Each bridge's window must hold the stream's GiB beside what its clients lease (a bridge leases its raw stream's GiB
+from the window as a client's would be refused: `ENOMEM` as a value). With the Mini's node number N (mesh-stat's
+`nodes`), raw, from the M5 alone (the Mini's bridge receives with no program of the Mini's):
+
+```
+rdma/.build/mesh-stream raw N 1073741824
+```
+
+and the bridge's path, the receiver first (it prints a ready line, then its result once every block landed and every
+word was checked), then the sender:
+
+```
+rdma/.build/mesh-stream receive M 1073741824     # on the Mini, M the M5's node
+rdma/.build/mesh-stream send N 1073741824        # on the M5
+```
+
+Each prints a JSON line whose `interior_GBps` is the rate between 10 % and 90 % of the 65,536 pages, as below; repeat
+each without restarting anything to keep the first-use and repeat readings apart, and read both the same day: the raw
+line is the denominator of the bridge's overhead and of a crossing's efficiency (the target: raw 9.383, the bridge's
+path within 0.5 % of it, 9.338).
+
+### The 2026-09-10 recipe (historical: its targets and bridge lifecycle are gone)
+
 Build on both machines from the same committed source:
 
 ```

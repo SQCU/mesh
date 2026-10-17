@@ -24,6 +24,13 @@ mesh-flow: mesh-flow.c mesh-verbs.h mesh.h mesh-plan.h mesh-dataflow.h mesh-call
 	mv -f .build/$@ $@
 mesh-stat: mesh-stat.c mesh.h mesh-plan.h libmesh.dylib Makefile
 	cc -O2 $(WARN) -o $@ mesh-stat.c $(LIBMESH)
+# the one-way stream readings (design/transport-one-gib-2026-09-10.md): the bridge's raw stream and its own path, a
+# client of libmesh, at .build/mesh-stream (it finds libmesh at ../rdma from there); built on its own, not in `all`
+mesh-stream: .build/mesh-stream
+.build/mesh-stream: mesh-stream.c mesh.h mesh-plan.h mesh-dataflow.h mesh-call.h mesh-collective.h libmesh.dylib Makefile
+	mkdir -p .build
+	cc -O2 $(WARN) -o $@ mesh-stream.c $(LIBMESH)
+.PHONY: mesh-stream
 # NCCL's API (nccl.h) on the prepared transfers and the collective planner of libmesh.dylib; every function also
 # under its pncclX profiling name, as NCCL exports both
 NCCL_API = ncclMemAlloc ncclMemFree ncclGetVersion ncclGetUniqueId ncclCommInitRankConfig ncclCommInitRank \

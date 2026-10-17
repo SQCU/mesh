@@ -216,6 +216,7 @@ A flow is named by `(port, key, near, far, stripe)` (`flow_on`); a message names
 | FAIL | `flow_fail` with a `tell`; `ready_refuse` (a READY refused, as a value) | `flow_fail(ESTALE` if the code is ESTALE, else `ECANCELED`, domain 4); with ESTALE on a non-relay flow, also `program_stale` |
 | LANES | `lanes_turn` once lanes are made (count 2, the peer QPs, `code` = header room); `lanes_reset` (count 0, `code` = why) | `lanes_heard`: stores the peer QPs and room, then connects; count 0, or new QPs while joined, resets this end's lanes (`lanes_reset`, untold) |
 | FAREWELL | `main` at stop, with `code` = the signal, or -1 for a binary change | `port.parted = 1`, after which loss is reported as `ECONNRESET` "parted" |
+| STREAM | the sender's bridge once its stream's QP is made (`count` OFFER, its QP, `code` = the bytes); the receiver's once its receives are posted (POSTED, its QP) and once every word is checked (RESULT, `struct stream_result`); either end's failure (FAILED, `code` = why) | `stream_heard` (#streams) |
 | STRIPES | `stripes_turn` once the stripe flow is made (count 2, the QPs, `code` = this end's largest piece); `stripes_reset` (count 0, `code` = why) | `stripes_heard`: stores the peer's QPs and piece, makes this end's (`wanted`), connects; count 0, or new QPs while joined, resets this end's (#stripes) |
 | CHANNEL_OPEN / CONFIRM / REFUSE / DATA / WINDOW / SHUT / CLOSE | requests (below) | `channel_heard` |
 
@@ -804,6 +805,55 @@ nothing at the peer checks who wrote what (any node on a cable may already write
   flow's first SENDs with `IBV_WC_LOC_PROT_ERR`.
 - The teardown: stop the Mini's bridge with a stripe flow up, then the M5's, apart; the kernel log names each
   extent's deregistration once and no panic follows (design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1").
+
+## Streams
+
+The one-way 1 GiB reading of a link, raw verbs against the bridge's own path, every word checked
+(design/transport-one-gib-2026-09-10.md: raw 9.383 GB/s, the bridge's page path 9.330-9.347), came from two standalone
+tools, mesh 554a3793^ `rdma/mesh-verbs-stream.c` (a process opening its own verbs context) and cea7fce7^
+`rdma/mesh-page-stream.c` (a client of that day's bridge), deleted on 2026-09-12 as unlicensed leftovers. A process
+other than the bridge opens no verbs now, so the raw stream runs inside the bridge, at a client's request, and the
+bridge's path is a client program; one tool asks for both (`rdma/mesh-stream.c`, `make -C rdma mesh-stream`, at
+`rdma/.build/mesh-stream`).
+
+**Raw** (`mesh-stream raw NODE BYTES` → `mesh-dataflow.h mesh_stream` → a request of kind `MESH_REQUEST_STREAM` (4) to
+`[::1]:18519`, `node` the receiver, `bytes` the stream's; the bridge's answer and a JSON line come once the stream ends):
+
+| step | sender's bridge (the requester's) | receiver's bridge |
+|---|---|---|
+| ask | `stream_asked`: the first cable toward `node` (`EHOSTUNREACH` none; `EBUSY` a stream on the port; `EINVAL` under a block); its lease (`bytes` in whole blocks from the window, `ENOMEM`), filled with the pattern word w of page p = `p << 32 ^ w ^ 0x6d65736870616765` (`streams_work`, a global queue) | — |
+| make | `pair_up(1)` (the port's queue, guarded) → STREAM `count` = OFFER (its QP and PSN, `code` = the bytes) | `stream_heard`: its lease cleared (`EBUSY`, `ENOMEM` → STREAM FAILED), `pair_up(1)`, `pair_receive` (the sender's QP), `pair_send`, its first `window` receives posted, the threads started, then STREAM POSTED (its QP) |
+| connect | POSTED → `pair_receive`, `pair_send` | — |
+| run | the send thread (`stream_pass`): SEND completions taken, then the next pages posted as one chain while fewer than `window` are in flight | the receive thread (`stream_pass`): receive completions taken (a whole page each, in posting order, else `EPROTO` or a misordered count), the 1st, 10 %, 90 % and last completion timed (`ledger_ns`, `CLOCK_UPTIME_RAW`), the next receives posted as one chain |
+| end | the last completion: `finished`; waits for the result | the last landing: `finished` → every word checked (`streams_work`), then STREAM RESULT (`struct stream_result`) |
+| answer | RESULT → the requester answered 0 and one JSON line: `bytes`, `page_bytes`, `pages`, `window`, the sender's posts and submit-to-last, the receiver's completed pages, mismatched words, correct pages, misordered completions, first-to-last time and bytes, `interior_s`, `interior_bytes` and `interior_GBps` (10 % to 90 % of the pages, the 2026-09-10 rate) | — |
+| close | `up = 0`, settle, guarded flush and destroy, the lease returned, "stream ... closed (N completions flushed)" | the same |
+
+A page is one block (16 KiB on Apple silicon), so a GiB is 65,536 pages, and `window` is the lesser of 1,023
+(mesh-verbs-stream.c's), the queue pair's frames over a page's (4,095 / 4) and the completion queue's room. Every phase
+is bounded by the pairing window (30 s from the ask or the offer: `ETIMEDOUT`); a verbs or completion error, the
+peer's FAILED or the link lost ends it as a value at both ends and answers the requester with the code. The stream's
+queue pair is a restored form's: its jobs always raise the port's guard, and while it exists every other verbs change
+on the port is guarded too (#stripes).
+
+Deviations from mesh-verbs-stream.c: the bridge, not a process of its own, opens the queue pair, on the port's queue,
+over the link's control socket rather than its own TCP exchange; the progress threads post its chains (their pass
+also looks at the port's other flows, idle in a reading); one queue pair a direction and one stream a port at a time.
+
+**The bridge's path** (`mesh-stream receive NODE BYTES` on the receiver, then `mesh-stream send NODE BYTES` on the
+sender): a program named `mesh-stream-<bytes>` of one transfer of `bytes` (one invocation, `bytes / block` chunks) on
+queue 0, bound, prepared and started as any client's (`mesh_transfer_bind`, `mesh_transfers_prepare`,
+`mesh_host_inputs` at the receiver: a landing word a block); the sender fills its lease with the pattern, publishes the
+one cell (`mesh_host_publish`) and waits until its destination stops (the receiver's program ended); the receiver
+follows its landing words in order (the 1st, 10 %, 90 % and last timed), checks every word and prints the same
+fields as the raw line, then detaches. This is mesh-page-stream.c's reading on HEAD's flows: the bridge posts the
+cell's 65,536 SENDs and the ring's receives within the queue pair's frames (1,023 pages in flight), each landing a word
+store.
+
+**Reproduction target** (design/transport-one-gib-2026-09-10.md, M5 to the Mini): raw 9.383 GB/s interior, the
+bridge's path within 0.5 % of it (9.338). The mb ledger's "link best" of 9.21-9.25 GB/s (metal-microbench
+docs/measurement.md) is below the raw reading; the raw line, read the same day, is the denominator of a crossing's
+efficiency.
 
 ## Routed readiness
 

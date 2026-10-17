@@ -61,4 +61,14 @@ void mesh_rows_release(struct mesh_ctx *,uint32_t first,uint32_t count);
    program releases when `row` is published, one a target (mesh_row_targets) where `records` is given; their count */
 uint32_t mesh_publication_prepare(struct mesh_ctx *,uint32_t row,struct prepared_publication *);
 void mesh_retired_release(struct hdr *);
+/* design/bridge-dataflow.md#streams (mesh 554a3793^ mesh-verbs-stream.c, inside the bridge): a request's kind beside
+   mesh-plan.h's MESH_REQUEST_OPEN, _SERVE and _LEDGER, its `node` the receiver (a neighbour) and `bytes` the stream's,
+   in whole blocks */
+#define MESH_REQUEST_STREAM 4
+/* a raw one-way stream of `bytes` from this node's bridge to node `node`'s, every word checked there: the bridges' JSON
+   line of the sender's and the receiver's numbers (rate between 10 and 90 percent of the pages landed, mismatched words,
+   misordered completions) into `result` (`room` bytes); 0, or the -errno the bridge answered (EHOSTUNREACH no cable,
+   EBUSY a stream on the port, ENOMEM no window for it at either end, ETIMEDOUT past the pairing window, a verbs or
+   completion error) */
+int mesh_stream(uint32_t node,uint64_t bytes,char *result,size_t room);
 #endif
