@@ -51,7 +51,7 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 | all_to_all, all_to_all_single | uneven splits, empty inputs |
 | send, recv, isend, irecv, batch_isend_irecv | |
 | barrier, async_op works, coalescing | |
-| functional collectives under torch.compile | one graph |
+| functional collectives under torch.compile | one graph; `backend="mesh"` batches its collectives (Performance) |
 | DDP | |
 | ring attention | `torch_mesh._mps.ring(group, q, k, v)` on the sequence shards, forward only, in place of `context_parallel` |
 | pipeline parallelism | torch.distributed.pipelining, GPipe and 1F1B, gradients checked |
@@ -233,4 +233,10 @@ w = s["lm_head"].to("cpu")                        # decoded
 
 - The MPS path is the measured path; async ops hide the crossing behind compute.
 - On two ranks every all-reduce is the direct exchange: one crossing.
+- `torch.compile(f, backend="mesh")` (`torch_mesh.compiler`, registered through torch's `torch_dynamo_backends` entry
+  point) is Inductor's compilation with each run of a compiled graph a batch (`_stream.mm` `batch`): a collective's
+  publication joins torch's open command buffer while two of the graph's buffers are in flight (a shared event counts
+  them), and the graph's end commits what it left open, so a compiled collective does not pay the command-buffer floor
+  of its own commit. Reproduction target: metal-microbench `crossing.py` with `COMPILE=1` and `backend="mesh"`, 12.7 us
+  a crossing (mesh 3c00d37; 17.4 us eager). A graph's backward, run from autograd, is not batched.
 - Readings and their records: metal-microbench `docs/measurement.md`.
