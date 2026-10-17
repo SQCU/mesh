@@ -23,7 +23,8 @@
    mesh_step_await: a landing awaited by thread 0 and checked, then the threadgroup past a device barrier and a
    system-scope fence (its payload then read with mesh_payload).  mesh_step_release: a piece the threadgroup stored
    into its slot, its cell released by thread 0 after a device barrier.  One threadgroup a step.  A caller's kernel
-   stores its piece's element k with mesh_step_store and reads its peer's fourth k with mesh_step_read (float16), so
+   stores its piece's element k with mesh_step_store (or its fourth k with mesh_step_store4, the slot's lines written
+   whole where its threads store consecutive fourths) and reads its peer's fourth k with mesh_step_read (float16), so
    it names no transport qualifier of its own (they are compiled here, under mesh.metal's pragma: a header after it,
    MetalPerformancePrimitives', may end that pragma). */
 static NSString *const STEPS =
@@ -50,6 +51,8 @@ static NSString *const STEPS =
   "threadgroup_barrier(mem_flags::mem_device); if (i == 0) mesh_publish((volatile coherent(system) device ulong *)(cells + p.aux), p.scalar); }\n"
   "static inline void mesh_step_store(constant mesh_args &p, device uchar *slot, ulong k, half value) { "
   "((volatile coherent(system) device half *)(slot + p.dst))[k] = value; }\n"
+  "static inline void mesh_step_store4(constant mesh_args &p, device uchar *slot, ulong k, half4 value) { "
+  "((volatile coherent(system) device half4 *)(slot + p.dst))[k] = value; }\n"
   "static inline half4 mesh_step_read(constant mesh_args &p, device uchar *slot, ulong k) { "
   "return mesh_payload((volatile coherent(system) device const half4 *)(slot + p.src) + k); }\n";
 
