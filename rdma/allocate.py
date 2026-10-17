@@ -530,7 +530,8 @@ class Balancer:
     models' path), is kept as each placement's history, which names the vertices measured.  Of the decisions sharing a
     stretch one moves a call, the one whose models promise the most (block coordinate descent [Tseng 2001]): another's
     move would change the stretches its models read; one that waits is weighed again at the next call, not read as
-    standing.  A decision's parts stand where the models' unbounded optimum promises less than its resolution under the
+    standing.  A move left pending (below) changes no stretch the call reads, so it holds no other decision back: a
+    ragged decision moves while a prepared one waits for its preparation.  A decision's parts stand where the models' unbounded optimum promises less than its resolution under the
     measured sum [DFPA; Meta-Balancer 2012], and stay standing while none of its models changed; once a part moves back
     the way it came, every part of the decision moves half as far [LB-BSP 2020, §3.3.2].  The resolution is twice the
     measured sum's relative standard error (each stretch's slowest rank's median's, from its invocations, in
@@ -776,17 +777,19 @@ class Balancer:
             if runs[name] & taken and not reverting:
                 d['before'], d['stands'] = None, False
                 continue
-            taken |= runs[name]
             # metal-microbench docs/placement.md#ragged-shares-a-move-is-data: a ragged decision's parts are each call's data,
-            # so its move prepares nothing and is taken at once
+            # so its move prepares nothing and is taken at once; a move left pending changes no stretch this call, so it
+            # holds no other decision back
             prepare_ = prepare and not d.get('ragged')
             if reverting and prepare_:
                 d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
                 d['stands'], d['last'], d['pending'], d['reverting'] = False, value, list(value[0]), True
             elif reverting:
+                taken |= runs[name]
                 d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
                 d['before'], d['parts'], d['stands'], d['last'], d['pending'] = None, list(value[0]), False, value, None
             elif not prepare_ or list(value) == d['parts'] and not d.get('pending'):
+                taken |= runs[name]
                 d['before'], d['parts'], d['stands'] = list(d['parts']), list(value), False
             elif not d.get('pending'):
                 d['pending'], d['stands'] = list(value), False
