@@ -1636,45 +1636,88 @@ def _probe(args):
           f'{_gpu_busy()} % after')
 
 
+def lattice(record, axis, key=None):
+    """The (extent, grain) of each of the call record's share decisions on `axis` (metal-microbench tools/mesh/programs.py
+    decisions: 'column', 'head', 'row'), those whose keys name `key` where given ('<layer>.mlp', '<layer>.attention'),
+    each once."""
+    return sorted({(sum(d['parts']), d['grain']) for d in ((record or {}).get('decisions') or {}).values()
+                   if d.get('axis') == axis and (key is None or key in (d.get('keys') or ()))})
+
+
+def spans(whole, extent, grain, held):
+    """Every range of `whole` units a ragged decision of `extent` units in grains of `grain` (a layer's scaled from the
+    decision's, an MoE or a wider layer's carried) gives the member holding `held` ([a, b) of the whole): each width
+    on the lattice, from the member's side of the extent (its end where it holds the last unit and not the first,
+    else its start, a middle member's from its first unit as far as the extent allows)."""
+    step = grain * whole // extent
+    if not step or step * extent != grain * whole:
+        return []
+    a, b = held
+    out = []
+    for n in range(step, whole + 1, step):
+        first = whole - n if b == whole and a > 0 else min(a, whole - n)
+        out.append((first, first + n))
+    return out
+
+
 def slices(streamed, record=None, rank=None):
     """Each coded matrix's slice a rank holds (its record's slices: a tensor's output ranges are rows, its input range
     columns; the head's rows its vocabulary; and each layer's FFN neurons its GPU computes in a phase of their own, its
-    engines' gpu range and its prefill columns; where the record's `ragged` names the column axis, every width of its
-    decode columns on the decision's lattice), every matrix whole without a record: (name, matrix)."""
+    engines' gpu range and its prefill columns), every matrix whole without a record: (name, matrix).  Where the record's
+    `ragged` names an axis (metal-microbench docs/placement.md#the-records-contract-for-every-ragged-axis: each call's
+    ranges of it are its data, of the whole the member holds), every width on each of that axis's decisions' lattices
+    (spans), each a view at the whole matrix's code widths: `column`, each layer's FFN neurons (gate's and up's rows,
+    down's columns) for the decode and the prefill column decisions, the GPU's range of the prefill columns among them
+    (the prefill columns less whole blocks at one end: a width on the prefill lattice); `head`, each layer's q rows and o
+    columns of each head count (k and v whole, every KV head); `row`, the head's vocabulary rows.  The resolver takes
+    every slice at every row count of the call (call_rows), the decode step's and the prefill chunk's."""
     part = record['ranks'][rank] if record else None
-    out = []
-    ragged = 'column' in ((record or {}).get('ragged') or ())
-    unit = next(((sum(d['parts']), d['grain']) for name, d in ((record or {}).get('decisions') or {}).items()
-                 if name.startswith('columns ')), None)
+    out, seen = [], set()
+    ragged = set((record or {}).get('ragged') or ())
+
+    def add(name, m, whole=None):
+        if whole is not None:
+            m.widths = whole.widths
+        if (name, m.label) not in seen:
+            seen.add((name, m.label))
+            out.append((name, m))
+
     for L, layer in enumerate((part or {}).get('layers') or []):
         base = f'model.language_model.layers.{L}.mlp.'
-        if ragged and unit and layer.get('columns') and base + 'gate_proj' in streamed.matrices:
-            # metal-microbench docs/placement.md#ragged-shares-a-move-is-data: each call's columns are its data, so every width
-            # on the decision's lattice, from this member's side of the layer, each a view at the whole layer's widths
+        if 'column' in ragged and base + 'gate_proj' in streamed.matrices:
             gate, up, down = (streamed[base + p] for p in ('gate_proj', 'up_proj', 'down_proj'))
-            whole, (a, b) = gate.rows, layer['columns']
-            step = unit[1] * whole // unit[0]
-            for n in range(step, whole + 1, step):
-                span = (whole - n, whole) if b == whole and a > 0 else (0, n)
-                for name, m, cut in ((base + 'gate_proj', gate, dict(rows=span)), (base + 'up_proj', up, dict(rows=span)),
-                                     (base + 'down_proj', down, dict(columns=span))):
-                    view = m.cut(**cut)
-                    view.widths = m.widths
-                    out.append((name, view))
-        for span in ((layer.get('engines') or {}).get('gpu'), (layer.get('prefill') or {}).get('columns')):
-            base = f'model.language_model.layers.{L}.mlp.'
-            if span and span[1] > span[0] and base + 'gate_proj' in streamed.matrices:
-                for p in ('gate_proj', 'up_proj'):
-                    out.append((base + p, streamed[base + p].cut(rows=tuple(span))))
-                out.append((base + 'down_proj', streamed[base + 'down_proj'].cut(columns=tuple(span))))
+            held = (layer.get('prefill') or {}).get('columns') or layer.get('columns')
+            for extent, grain in lattice(record, 'column', f'{L}.mlp') if held else ():
+                for span in spans(gate.rows, extent, grain, held):
+                    for name, m, cut in ((base + 'gate_proj', gate, dict(rows=span)), (base + 'up_proj', up, dict(rows=span)),
+                                         (base + 'down_proj', down, dict(columns=span))):
+                        add(name, m.cut(**cut), m)
+        else:
+            for span in ((layer.get('engines') or {}).get('gpu'), (layer.get('prefill') or {}).get('columns')):
+                if span and span[1] > span[0] and base + 'gate_proj' in streamed.matrices:
+                    for p in ('gate_proj', 'up_proj'):
+                        add(base + p, streamed[base + p].cut(rows=tuple(span)))
+                    add(base + 'down_proj', streamed[base + 'down_proj'].cut(columns=tuple(span)))
+        base = f'model.language_model.layers.{L}.self_attn.'
+        if 'head' in ragged and layer.get('heads') and base + 'q_proj' in streamed.matrices:
+            q, o = streamed[base + 'q_proj'], streamed[base + 'o_proj']
+            for extent, grain in lattice(record, 'head', f'{L}.attention'):
+                dim = q.rows // extent
+                for first, last in spans(extent, extent, grain, layer['heads']):
+                    add(base + 'q_proj', q.cut(rows=(first * dim, last * dim)), q)
+                    add(base + 'o_proj', o.cut(columns=(first * dim, last * dim)), o)
     for name, m in streamed.matrices.items():
         if part is None:
             out.append((name, m))
             continue
         if name == 'lm_head':
             v = part.get('vocabulary')
-            if v:
-                out.append((name, m.cut(rows=tuple(v))))
+            if v and 'row' in ragged:
+                for extent, grain in lattice(record, 'row'):
+                    for span in spans(m.rows, extent, grain, v):
+                        add(name, m.cut(rows=span), m)
+            elif v:
+                add(name, m.cut(rows=tuple(v)))
             continue
         cut = (part.get('slices') or {}).get(name + '.weight')
         if cut is None:
@@ -1683,7 +1726,7 @@ def slices(streamed, record=None, rank=None):
         columns = tuple(cut['input']) if cut.get('input') else None
         if (rows and rows[0] == rows[1]) or (columns and columns[0] == columns[1]):
             continue
-        out.append((name, m.cut(rows=rows, columns=columns)))
+        add(name, m.cut(rows=rows, columns=columns))
     return out
 
 
