@@ -125,7 +125,9 @@ info <name> via=<a> name=... ...    its record from io.mesh.nodeinfo (port 8099,
 
 Discovery is the shared LAN's mDNS (git 1587656: control traffic needs no fabric, and discovery that waited on
 fabric convergence was a regression), so it is not limited to one cable hop; a node on no shared LAN is found only
-over its own cables. The `info` lines are best-effort enrichment that streams in unordered. A node that never
+over its own cables. A node's record is read along its cable first (fabric-adjacent, then its fabric-routed ULA) and
+over a LAN only where no fabric path names it: a node cabled to this one is never reached over Wi-Fi (the operator,
+2026-10-16). The `info` lines are best-effort enrichment that streams in unordered. A node that never
 answers simply has no `info` line; its absence is the signal, and observing it costs nothing.
 
 `MESH_DEADLINE` (default 3 s) is the browse's horizon and `MESH_PROBE_DEADLINE` (default 4 s) bounds each record's

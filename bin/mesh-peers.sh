@@ -40,8 +40,9 @@ for n in $(cat "$B".host.* 2>/dev/null | sort -u); do
       [ "$k" = skip ] && continue
       printf 'path %s kind=%s addr=%s\n' "$n" "$k" "$a"
       case "$k" in
-        lan)             [ "$bestk" = lan ] || { best=$a; bestk=lan; } ;;
-        fabric-adjacent) [ -n "$best" ] || { best=$a; bestk=$k; } ;;
+        fabric-adjacent) [ "$bestk" = fabric-adjacent ] || { best=$a; bestk=$k; } ;;
+        fabric-routed)   case "$bestk" in fabric-adjacent|fabric-routed) ;; *) best=$a; bestk=$k ;; esac ;;
+        lan)             case "$bestk" in fabric-adjacent|fabric-routed|lan) ;; *) best=$a; bestk=$k ;; esac ;;
         lan-v6)          [ -n "$best" ] || { best=$a; bestk=$k; } ;;
       esac
     done < "$B.$n"
