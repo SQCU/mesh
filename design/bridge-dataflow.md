@@ -805,6 +805,72 @@ nothing at the peer checks who wrote what (any node on a cable may already write
 - The teardown: stop the Mini's bridge with a stripe flow up, then the M5's, apart; the kernel log names each
   extent's deregistration once and no panic follows (design/RDMA-KERNEL-RECOVERY.md "The stripe writes of October 1").
 
+## Routed readiness
+
+Scatter-add and an expert layer's dispatch and combine route each update to a destination known only at run time
+(metal-microbench docs/principles.md section 4, "Routed experts and engrams are one partition": "unrouted slices
+contribute exact zeros, so they are neither computed nor, where placement allows, loaded"). mesh 45902d8e (2026-09-14,
+"Delete sparse routing and segmented indexed-add machinery") removed the readiness half of that from the library with
+its caller; it is restored here on the numerical executor (`mesh-call.h`), where every function fires as its
+arrivals come (`mesh_call_progress`): the routing directory, so an owner waits on the producers routed to it alone,
+and active segments, so a slot past a count produced at run time is omitted (Megablox's bounded grid; mesh e1acaf7e^
+design/active-segments.md). The sort that writes the directory and the segmented sums that read it stay the caller's
+functions (the operator's separation of 2026-09-14); the executor owns only when each may run.
+
+**The calls** (`mesh-call.h`, each before `mesh_calls_prepare`):
+- `mesh_route_create(calls, worker, owners, ordinals, offsets, candidates, n, consumers)`: the directory is three
+  `uint32` vectors (`struct mesh_route_vector`: a section and a byte offset) a function writes each generation (its
+  sections a slot an index): `owners[k]` candidate k's consumer (`MESH_ABSENT` or past `consumers`: none),
+  `ordinals[offsets[c] .. offsets[c + 1])` consumer c's candidates; the candidates are n sections (each a producer's
+  partial, or received), a slot an index. Its events run on `worker`.
+- `mesh_route_attach(function, route, c)`: the function is consumer c, on the route's worker. The route is one of its
+  arrivals a generation, beside its own waited inputs; it binds the candidates it reads as inputs past its dependency
+  count (operands, unwaited).
+- `mesh_route_producers(route, producers, n)`: candidate k's producer function (NULL: none), which must be active and
+  write candidate k (checked at prepare).
+- `mesh_call_active(function, count, slot)`: the function's call of a generation runs where `slot < *count` (a `uint32`
+  of a section among its waited inputs); past it, it is omitted.
+
+**At prepare** (`mesh_calls_prepare`, `mesh_routes_layout`): every route's directory sections (`meta`, the distinct
+sections of its three vectors) and candidates become arrivals on the route's worker, a cell or a landing a slot as any
+waited input's (`struct mesh_use`), each naming a route event (its call index `route_base` plus the event's number,
+`route_base` the program's call records' count; `UINT32_MAX` where the program has no route, so HEAD's call path is one
+compare more). A consumer's `pending` counts one arrival a route. An active function's call records hold the address of
+their count's word and their slot (`struct mesh_call` `count`, `slot`), and every publication of theirs must be a
+route's arrival cell (else `EINVAL`).
+
+**As it runs** (`mesh_call_progress`, on the route's worker):
+
+| event | where | what |
+|---|---|---|
+| an active call's arrivals all came, its slot past the count | `mesh_call_fire` → `mesh_call_omit` | nothing submitted; each of its publications stored `argument + cycle` with bit 63 set (`MESH_OMITTED`); its generation's event completed (`mesh_instance_complete`) |
+| a directory section arrives | `mesh_route_arrival` | its bit in the index's state of the cycle's parity (two states an index, as a cycle's events may come while the one before finishes); once every section came, `mesh_route_prepare` |
+| the directory read | `mesh_route_prepare` | checked: each consumer's span within the candidates, each of its ordinals owned by it, and every owned candidate in its owner's span; each consumer's routed candidates not yet come counted (`remaining`), a consumer with none fired (`mesh_route_deliver`: its call's `pending - 1`, fired at 0) |
+| a candidate arrives | `mesh_route_arrival` | marked (1 produced, 2 omitted); once the directory was read, its owner's `remaining - 1`, fired at 0; an unowned one is discharged as it comes, never waited for |
+| the index's cycle done | `mesh_route_reset` | the directory came, every candidate came and every consumer fired: its state laid out afresh |
+| a directory that breaks the rules, or a routed candidate omitted | `mesh_route_refuse` | the generation fails as a value (`MESH_RESULT_FUNCTION`, the first consumer's identity, `EPROTO`), and every consumer fires so the call records stay in step (45902d8e waited for good) |
+
+**Deviations from 45902d8e^**, each for the executor's interfaces:
+1. The old routes ran on the presence-driven executor (`mesh_execution_route`, rows' PRESENT and READ bits, a
+   dispatch queue); here a route's events are the executor's own arrivals, its state a count a consumer and a mark a
+   candidate.
+2. The directory is three contiguous vectors in sections; `mesh_route_vector`'s strided views (`row_stride`,
+   `column_stride`) and `mesh_algebra_route_table` (a GPU table of the candidates' addresses for the caller's kernel)
+   are not restored: a consumer reads its candidates as its own operands.
+3. An omitted producer's disposition is the omitted mark on its arrival (one word), not a disposition row; an active
+   function's outputs may feed routes alone (45902d8e^ asked the same: "count and every indexed selector/range map ...
+   within one actual produced output region").
+4. Every route section is a slot an index (each generation writes its own directory); a constant directory is refused.
+
+**Reproduction target** (45902d8e^ measurements/lowering-2026-09-13/active-omission-provenance.json and
+expert-provenance.json; "no ... speedup claim"): 1,025 updates to 17 destinations in chunks of 513 and 512 (four
+features): 34 partial slots where an unrouted grid takes 1,025; over the four occurrences (normal, changed routing,
+all invalid, normal again) 50 partial launches and 86 omissions of the 136 configured slot occurrences, every
+destination exact; the expert test (forward, dX, dW, ragged tiles, an empty expert) at 206.2 invocations/s paired
+(653.8 CPU, 222.7 Metal). The caller (the sort and the segmented sums as functions of a program, and the expert
+program on the pair) is to be written against these calls; metal-microbench tools/torch_parallel/ep.py
+(`all_to_all_single` with host-read splits) is what it is measured against.
+
 ## Places where the code and bridge-and-ipc.md disagree
 
 1. **Direct flows and the lanes.**

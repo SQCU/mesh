@@ -145,7 +145,9 @@ struct mesh_call_operand {
 _Static_assert(sizeof(struct mesh_call_operand)==32 && _Alignof(struct mesh_call_operand)==16 &&
   offsetof(struct mesh_call_operand,sequence)==24,"M43");
 /* hot-path-loads M20: a function's call record of one slot: its arrivals pending, the cycle and generation it was
-   last fired for (the arrival that fired it: 1 plus the cycle), and its outputs' prepared publications */
+   last fired for (the arrival that fired it: 1 plus the cycle), and its outputs' prepared publications; where its
+   function is active (mesh_call_active, design/bridge-dataflow.md#routed-readiness), the word of the count its slot
+   is checked against as it fires (`count`, NULL: not active) and its slot */
 struct mesh_call {
   _Alignas(128) struct mesh_call_operand *operands;
   struct mesh_instance *instance;
@@ -156,13 +158,16 @@ struct mesh_call {
   void *argument;
   uint32_t publication_count,recurring;
   uint32_t cycle,generation;
+  const _Atomic uint32_t *count;
+  uint32_t slot;
   _Alignas(128) struct prepared_publication publications[];
 };
 _Static_assert(sizeof(struct mesh_call)==128 && _Alignof(struct mesh_call)==128,"mesh_call record");
 _Static_assert(offsetof(struct mesh_call,pending)==36 &&
   offsetof(struct mesh_call,submit)==48 && offsetof(struct mesh_call,argument)==56 &&
   offsetof(struct mesh_call,publication_count)==64 && offsetof(struct mesh_call,recurring)==68 &&
-  offsetof(struct mesh_call,cycle)==72 && offsetof(struct mesh_call,generation)==76 && offsetof(struct mesh_call,publications)==128,"M20");
+  offsetof(struct mesh_call,cycle)==72 && offsetof(struct mesh_call,generation)==76 && offsetof(struct mesh_call,count)==80 &&
+  offsetof(struct mesh_call,publications)==128,"M20");
 /* hot-path-loads M26 (2b49f3c6^) */
 struct prepared_residency {
   _Alignas(32) uint64_t completed;
@@ -214,6 +219,39 @@ int mesh_calls_start(struct mesh_calls *);
 struct mesh_submission *mesh_submission_at(struct mesh_calls *,uint32_t slot,struct mesh_instance **);
 /* design/algorithm-sources.md#meshresult: the node a MESH_RESULT_LINK status's identity names (0: none) */
 uint32_t mesh_calls_node(struct mesh_calls *,uint32_t identity);
+
+/* ---- Routed readiness (mesh 45902d8e^ mesh_algebra_route_create, _attach, _producers and mesh_algebra_active, on
+   this executor; design/bridge-dataflow.md#routed-readiness) ------------------------------------------------------
+   A route is a directory a function of the program writes at run time (the caller's sort: its owners, ordinals and
+   offsets, each a vector of uint32 at `offset` bytes into a slot of `section`, the slot the generation's index where
+   the section has one a slot), over `candidate_count` candidate sections (each a partial a producer writes, or a
+   received one) and `consumers` owners: candidate k is owned by owners[k] (MESH_ABSENT or >= consumers: none, its
+   arrival discharged as it comes), and consumer c's candidates are ordinals[offsets[c] .. offsets[c + 1]), each owned by
+   c.  An attached consumer function fires once the directory's sections and the candidates routed to it have arrived,
+   and waits on no other candidate: the route is one of its arrivals, beside its own waited inputs (it binds the
+   candidates it reads as inputs past its dependency count, unwaited).  A directory that breaks those rules fails the
+   generation as a value (MESH_RESULT_FUNCTION, EPROTO) and fires its consumers so the records stay in step.  The sort
+   and the segmented sums stay the caller's functions; this is their readiness alone.  Every event of a route runs on
+   `worker`, every consumer's too. */
+struct mesh_route_vector { struct mesh_section section; size_t offset; };
+struct mesh_routing;
+/* NULL (errno EINVAL) where a vector lies past its section's bytes, a count is 0 or past UINT32_MAX, or the program is
+   running */
+struct mesh_routing *mesh_route_create(struct mesh_calls *,uint32_t worker,struct mesh_route_vector owners,struct mesh_route_vector ordinals,
+  struct mesh_route_vector offsets,const struct mesh_section *candidates,size_t candidate_count,size_t consumers);
+/* function `consumer`-th owner of the route: 0, EINVAL where the function is resident, on another worker, or the
+   consumer is attached already */
+int mesh_route_attach(struct mesh_function *,struct mesh_routing *,size_t consumer);
+/* each candidate's producer (NULL: none, a received candidate's), so a producer omitted past its count (mesh_call_active)
+   discharges its candidate without a payload; a routed candidate whose producer was omitted fails the generation
+   (EPROTO).  0, EINVAL where `count` is not the route's candidates */
+int mesh_route_producers(struct mesh_routing *,struct mesh_function *const *producers,size_t count);
+/* Megablox's bounded grid (design/active-segments.md at mesh e1acaf7e^): the function's call of a generation runs only
+   where `slot` is below the count (a uint32 at `count.offset` of `count.section`, a section among the function's waited
+   inputs, which a function of the program writes at run time); past it the call is omitted: nothing is submitted, its
+   generation's event completes, and its publications (which must all be route candidates' arrivals: mesh_calls_prepare
+   refuses others, EINVAL) are stored marked omitted.  0, EINVAL */
+int mesh_call_active(struct mesh_function *,struct mesh_route_vector count,uint32_t slot);
 void mesh_call_complete(struct mesh_call *,int error);
 void mesh_call_fail(struct mesh_call *,int error);
 void mesh_calls_destroy(struct mesh_calls *);

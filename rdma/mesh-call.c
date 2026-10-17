@@ -395,6 +395,37 @@ _Static_assert(sizeof(struct mesh_call_worker)==128 && _Alignof(struct mesh_call
 struct mesh_watch { uint32_t first,index; _Atomic uint64_t *word; };
 /* a produced section's slot `index` arrival: one consumer call's cell, by the section's first row */
 struct mesh_produced { uint32_t first,index; struct mesh_arrival *cell; };
+/* design/bridge-dataflow.md#routed-readiness (mesh 45902d8e^ struct mesh_route, mesh_route_use and mesh_active, on this
+   executor).  A route's state of one generation's index and cycle parity (a cycle's events may come while the one
+   before it finishes): the directory's sections arrived (a bit each), whether the directory was read (`prepared`), the
+   candidates arrived (each 1 produced, 2 omitted, and their count), each consumer's routed candidates still awaited,
+   and the consumers fired */
+struct mesh_route_state { uint32_t metas,candidates,delivered,prepared; uint8_t *arrived; uint32_t *remaining; };
+/* a route: its worker, its three vectors (owners, ordinals, offsets) and the distinct sections they lie in (`meta`, a
+   vector's at `vector_meta`), its candidates, consumers and producers, each index's vectors' addresses once laid out,
+   and its states (two an index) */
+struct mesh_routing {
+  struct mesh_calls *calls;
+  struct mesh_routing *next;
+  uint32_t worker,candidates,consumers,metas,vector_meta[3];
+  struct mesh_route_vector vector[3];
+  struct mesh_section meta[3];
+  struct mesh_section *candidate;
+  struct mesh_function **consumer,**producer;
+  const uint32_t **vectors;
+  struct mesh_route_state *state;
+  uint8_t *arrived;
+  uint32_t *remaining;
+};
+/* a function's active binding (mesh_call_active): the count's vector and the function's slot */
+struct mesh_active { struct mesh_active *next; struct mesh_function *function; struct mesh_route_vector count; uint32_t slot; };
+/* an arrival a route takes: a directory section's (`which` its meta) or a candidate's (`which` the candidate), of the
+   generation's index `index`; its arrival cell's or landing use's call is the program's call records' count plus its
+   number (mesh_calls `route_base`) */
+enum { MESH_ROUTE_META, MESH_ROUTE_CANDIDATE };
+struct mesh_route_event { struct mesh_routing *route; uint32_t kind,which,index; };
+/* an omitted call's publication, its arrival's value marked */
+#define MESH_OMITTED (UINT64_C(1)<<63)
 /* hot-path-loads M24 (2b49f3c6^) */
 struct mesh_calls {
   struct mesh_ctx *context,*constants;
@@ -414,6 +445,12 @@ struct mesh_calls {
   _Atomic uint64_t *words;
   struct mesh_produced *produced;
   struct prepared_publication *forwards;
+  /* design/bridge-dataflow.md#routed-readiness: its routes and active bindings, and the route events (`route_base`
+     the first call index that names one; UINT32_MAX where it has no route) */
+  struct mesh_routing *routes;
+  struct mesh_active *actives;
+  struct mesh_route_event *route_events;
+  uint32_t route_base,route_event_count;
 };
 
 /* design/algorithm-sources.md#programtensor: the arrival cells, completion records and input words are leases of the
@@ -426,6 +463,14 @@ static void mesh_calls_release(struct mesh_calls *calls,uint32_t references){
     function=next;
   }
   for(uint32_t i=0;i<MESH_COMPUTE_THREADS;i++){free(calls->workers[i].landings);free(calls->workers[i].uses);}
+  for(struct mesh_routing *route=calls->routes;route;){
+    struct mesh_routing *next=route->next;
+    free(route->candidate);free(route->consumer);free(route->producer);free(route->vectors);free(route->state);
+    free(route->arrived);free(route->remaining);free(route);
+    route=next;
+  }
+  for(struct mesh_active *active=calls->actives;active;){struct mesh_active *next=active->next;free(active);active=next;}
+  free(calls->route_events);
   free(calls->watches);free(calls->produced);free(calls->forwards);
   if(calls->dispose)calls->dispose(calls->owner);
   free(calls->submissions);free(calls->instances);free(calls->values);free(calls);
@@ -440,7 +485,7 @@ struct mesh_calls *mesh_calls_create(struct mesh_ctx *context,struct mesh_ctx *c
   if(!calls)return NULL;
   memset(calls,0,sizeof *calls);
   calls->context=context;calls->constants=constants && constants->M?constants:NULL;
-  calls->count=workers;calls->extent=count;atomic_init(&calls->references,1);
+  calls->count=workers;calls->extent=count;atomic_init(&calls->references,1);calls->route_base=UINT32_MAX;
   /* hot-path-loads M22 */
   for(uint32_t i=0;i<workers;i++)calls->workers[i]=(struct mesh_call_worker){.calls=calls,.index=i};
   /* hot-path-loads M41, M42: the client's own memory */
@@ -475,6 +520,63 @@ struct mesh_function *mesh_call_bind(struct mesh_calls *calls,uint32_t worker,
   function->identity=calls->function_count++;
   function->next=calls->functions;calls->functions=function;
   return function;
+}
+
+/* design/bridge-dataflow.md#routed-readiness (mesh 45902d8e^ mesh_algebra_route_create): a vector of `length` uint32
+   lies in its section's bytes */
+static int mesh_route_vector_fits(struct mesh_route_vector v,uint64_t length){
+  return v.section.count && v.offset<=v.section.bytes && length<=(v.section.bytes-v.offset)/sizeof(uint32_t) && !(v.offset%sizeof(uint32_t));
+}
+struct mesh_routing *mesh_route_create(struct mesh_calls *calls,uint32_t worker,struct mesh_route_vector owners,struct mesh_route_vector ordinals,
+  struct mesh_route_vector offsets,const struct mesh_section *candidates,size_t candidate_count,size_t consumers){
+  if(!calls || atomic_load(&calls->running) || worker>=calls->count || !candidates || !candidate_count || !consumers ||
+     candidate_count>=UINT32_MAX || consumers>=UINT32_MAX-1 || !mesh_route_vector_fits(owners,candidate_count) ||
+     !mesh_route_vector_fits(ordinals,candidate_count) || !mesh_route_vector_fits(offsets,(uint64_t)consumers+1)){errno=EINVAL;return NULL;}
+  const struct mesh_route_vector vectors[3]={owners,ordinals,offsets};
+  /* each generation writes its own directory and candidates: a section of a slot each index */
+  for(int v=0;v<3;v++)if(!vectors[v].section.stride || vectors[v].section.count<calls->extent){errno=EINVAL;return NULL;}
+  for(size_t k=0;k<candidate_count;k++)if(!candidates[k].stride || candidates[k].count<calls->extent){errno=EINVAL;return NULL;}
+  struct mesh_routing *d=calloc(1,sizeof *d);
+  if(!d)return NULL;
+  *d=(struct mesh_routing){.calls=calls,.worker=worker,.candidates=(uint32_t)candidate_count,.consumers=(uint32_t)consumers};
+  d->candidate=malloc(candidate_count*sizeof *d->candidate);
+  d->consumer=calloc(consumers,sizeof *d->consumer);d->producer=calloc(candidate_count,sizeof *d->producer);
+  if(!d->candidate || !d->consumer || !d->producer){free(d->candidate);free(d->consumer);free(d->producer);free(d);errno=ENOMEM;return NULL;}
+  memcpy(d->candidate,candidates,candidate_count*sizeof *candidates);
+  for(int v=0;v<3;v++){
+    d->vector[v]=vectors[v];
+    uint32_t j=0;
+    while(j<d->metas && d->meta[j].first!=vectors[v].section.first)j++;
+    if(j==d->metas)d->meta[d->metas++]=vectors[v].section;
+    d->vector_meta[v]=j;
+  }
+  d->next=calls->routes;calls->routes=d;
+  return d;
+}
+int mesh_route_attach(struct mesh_function *function,struct mesh_routing *d,size_t consumer){
+  if(!function || !d || function->calls!=d->calls || !function->submit || function->worker!=d->worker || consumer>=d->consumers ||
+     d->consumer[consumer] || atomic_load(&d->calls->running))return EINVAL;
+  d->consumer[consumer]=function;
+  return 0;
+}
+int mesh_route_producers(struct mesh_routing *d,struct mesh_function *const *producers,size_t count){
+  if(!d || !producers || count!=d->candidates || atomic_load(&d->calls->running))return EINVAL;
+  for(size_t k=0;k<count;k++)if(producers[k] && producers[k]->calls!=d->calls)return EINVAL;
+  memcpy(d->producer,producers,count*sizeof *producers);
+  return 0;
+}
+/* mesh 45902d8e^ mesh_algebra_active, on the executor: the count a section the function waits on */
+int mesh_call_active(struct mesh_function *function,struct mesh_route_vector count,uint32_t slot){
+  if(!function || !function->submit || atomic_load(&function->calls->running) || !mesh_route_vector_fits(count,1))return EINVAL;
+  int waited=0;
+  for(size_t i=0;i<function->dependency_count;i++)waited|=function->inputs[i].first==count.section.first;
+  for(const struct mesh_active *a=function->calls->actives;a;a=a->next)if(a->function==function)return EINVAL;
+  if(!waited)return EINVAL;
+  struct mesh_active *active=calloc(1,sizeof *active);
+  if(!active)return ENOMEM;
+  *active=(struct mesh_active){.next=function->calls->actives,.function=function,.count=count,.slot=slot};
+  function->calls->actives=active;
+  return 0;
 }
 
 /* design/algorithm-sources.md#resident-metal */
@@ -568,13 +670,111 @@ static void mesh_landing_lost(struct mesh_calls *calls,const struct mesh_call_la
     mesh_result_conclude(&calls->instances[landing->slot+i].status,MESH_RESULT(MESH_RESULT_LINK,landing->identity,code?code:ECANCELED));
 }
 
+/* design/bridge-dataflow.md#routed-readiness: an active call's generation past its count, omitted (mesh 45902d8e^
+   mesh_active_issue): nothing submitted, its publications (route candidates' arrivals alone) stored marked omitted, its
+   generation's event completed */
+static __attribute__((noinline)) void mesh_call_omit(struct mesh_call *call){
+  const uint64_t cycle=call->cycle;
+  for(uint32_t i=0;i<call->publication_count;i++)
+    atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)call->publications[i].destination,(call->publications[i].argument+cycle)|MESH_OMITTED,
+                          memory_order_release);
+  mesh_instance_complete(call->instance,1);
+}
+/* hot-path-loads M18: a call whose arrivals all came, fired for `cycle`: submitted, or omitted where it is active and its
+   slot is past its count */
+static inline __attribute__((always_inline)) void mesh_call_fire(struct mesh_call *call,uint64_t cycle,uint32_t extent,uint32_t *submitted){
+  call->pending=call->recurring;
+  call->cycle=(uint32_t)cycle;
+  call->generation=call->cycle*extent+call->index;
+  if(call->count && atomic_load_explicit(call->count,memory_order_acquire)<=call->slot){mesh_call_omit(call);return;}
+  call->submit(call,call->argument);
+  ++*submitted;
+}
+/* a route's state laid out afresh for the next cycle of its index and parity */
+static void mesh_route_reset(const struct mesh_routing *d,struct mesh_route_state *s){
+  s->metas=s->candidates=s->delivered=s->prepared=0;
+  memset(s->arrived,0,d->candidates);
+}
+/* consumer c's routed candidates all came: its call of the index fired where its other arrivals came too */
+static void mesh_route_deliver(struct mesh_calls *calls,struct mesh_routing *d,struct mesh_route_state *s,uint32_t c,uint32_t index,
+                               uint64_t cycle,uint32_t *submitted){
+  struct mesh_call *call=(void *)(calls->values+((size_t)d->consumer[c]->identity*calls->extent+index)*calls->stride);
+  s->delivered++;
+  if(!--call->pending)mesh_call_fire(call,cycle,calls->extent,submitted);
+}
+/* a generation the route cannot serve as its directory states (a span past the candidates, a candidate in a span its
+   owner is not, a routed candidate omitted): failed as a value naming the consumer's function */
+static void mesh_route_refuse(struct mesh_calls *calls,const struct mesh_routing *d,uint32_t index){
+  mesh_result_conclude(&calls->instances[index].status,MESH_RESULT(MESH_RESULT_FUNCTION,d->consumer[0]->identity,EPROTO));
+}
+/* mesh 45902d8e^ mesh_route_event (prepared): the index's directory read once its sections all came, checked (each
+   consumer's span within the candidates, each ordinal of it owned by it, and each owned candidate in its owner's span),
+   each consumer's routed candidates not yet come counted, and a consumer with none fired; a directory that breaks the
+   rules fails the generation and fires every consumer */
+static void mesh_route_prepare(struct mesh_calls *calls,struct mesh_routing *d,struct mesh_route_state *s,uint32_t index,uint64_t cycle,
+                               uint32_t *submitted){
+  const uint32_t *owners=d->vectors[(size_t)index*3],*ordinals=d->vectors[(size_t)index*3+1],*offsets=d->vectors[(size_t)index*3+2];
+  int valid=1;
+  uint32_t owned=0;
+  for(uint32_t k=0;k<d->candidates;k++)owned+=owners[k]<d->consumers;
+  uint32_t spanned=0;
+  for(uint32_t c=0;c<d->consumers && valid;c++){
+    const uint32_t first=offsets[c],end=offsets[c+1];
+    if(first>end || end>d->candidates){valid=0;break;}
+    spanned+=end-first;
+    for(uint32_t j=first;j<end && valid;j++)valid=ordinals[j]<d->candidates && owners[ordinals[j]]==c;
+  }
+  if(valid && spanned!=owned)valid=0;
+  s->prepared=1;
+  if(!valid){
+    mesh_route_refuse(calls,d,index);
+    for(uint32_t c=0;c<d->consumers;c++)mesh_route_deliver(calls,d,s,c,index,cycle,submitted);
+    return;
+  }
+  for(uint32_t c=0;c<d->consumers;c++){
+    uint32_t remaining=0;
+    for(uint32_t j=offsets[c];j<offsets[c+1];j++){
+      const uint8_t arrived=s->arrived[ordinals[j]];
+      if(!arrived)remaining++;
+      else if(arrived==2)mesh_route_refuse(calls,d,index);
+    }
+    s->remaining[c]=remaining;
+    if(!remaining)mesh_route_deliver(calls,d,s,c,index,cycle,submitted);
+  }
+}
+/* mesh 45902d8e^ mesh_route_ready, _retire, _finish: an arrival a route takes, of a directory section or a candidate
+   (marked omitted where its producer was), into its index's state of the arrival's cycle parity; a candidate that
+   comes once its directory was read counts toward its owner alone (an unowned one is discharged as it comes); the state
+   laid out afresh once the directory, every candidate and every consumer's firing are done */
+static void mesh_route_arrival(struct mesh_calls *calls,uint32_t event,uint64_t value,uint32_t *submitted){
+  const struct mesh_route_event *e=calls->route_events+event;
+  struct mesh_routing *d=e->route;
+  const uint64_t cycle=(value&~MESH_OMITTED)-1;
+  struct mesh_route_state *s=d->state+(size_t)e->index*2+(cycle&1);
+  if(e->kind==MESH_ROUTE_META){
+    s->metas|=UINT32_C(1)<<e->which;
+    if(s->metas==(UINT32_C(1)<<d->metas)-1)mesh_route_prepare(calls,d,s,e->index,cycle,submitted);
+  }else{
+    s->arrived[e->which]=value&MESH_OMITTED?2:1;
+    s->candidates++;
+    if(s->prepared){
+      const uint32_t owner=d->vectors[(size_t)e->index*3][e->which];
+      if(owner<d->consumers && s->delivered<d->consumers){
+        if(value&MESH_OMITTED)mesh_route_refuse(calls,d,e->index);
+        if(s->remaining[owner] && !--s->remaining[owner])mesh_route_deliver(calls,d,s,owner,e->index,cycle,submitted);
+      }
+    }
+  }
+  if(s->prepared && s->candidates==d->candidates && s->delivered==d->consumers)mesh_route_reset(d,s);
+}
+
 /* design/algorithm-sources.md#programkernel_call */
 static void *mesh_call_progress(void *argument){
   struct mesh_call_worker *worker=argument;
   struct mesh_calls *calls=worker->calls;
   unsigned char *values=calls->values;
   const size_t stride=calls->stride;
-  const uint32_t extent=calls->extent;
+  const uint32_t extent=calls->extent,route_base=calls->route_base;
   struct mesh_arrival *arrivals=worker->arrivals;
   uint32_t count=worker->arrival_count,cursor=0,submitted=0;
   struct mesh_call_landing *landings=worker->landings;
@@ -593,14 +793,12 @@ static void *mesh_call_progress(void *argument){
       uint64_t value=atomic_load_explicit(&cell->argument,memory_order_acquire);
       if(!value)continue;
       atomic_store_explicit(&cell->argument,0,memory_order_relaxed);
+      /* design/bridge-dataflow.md#routed-readiness */
+      if(cell->call>=route_base){mesh_route_arrival(calls,cell->call-route_base,value,&submitted);continue;}
       /* hot-path-loads M20 */
       struct mesh_call *call=(void *)(values+(size_t)cell->call*stride);
       if(--call->pending)continue;
-      call->pending=call->recurring;
-      call->cycle=(uint32_t)(value-1);
-      call->generation=call->cycle*extent+call->index;
-      call->submit(call,call->argument);
-      submitted++;
+      mesh_call_fire(call,value-1,extent,&submitted);
     }
     /* prepared-machine.md M07, M30: PUBLISH(row) of a landed row, its use range walked */
     for(uint32_t i=0;i<landing_count;i++){
@@ -615,13 +813,12 @@ static void *mesh_call_progress(void *argument){
         atomic_store_explicit((_Atomic uint64_t *)(uintptr_t)landing->publications[j].destination,
                               landing->publications[j].argument+cycle,memory_order_release);
       for(uint32_t j=0;j<landing->count;j++){
-        struct mesh_call *call=(void *)(values+(size_t)uses[landing->first+j]*stride);
+        const uint32_t use=uses[landing->first+j];
+        /* design/bridge-dataflow.md#routed-readiness */
+        if(use>=route_base){mesh_route_arrival(calls,use-route_base,cycle+1,&submitted);continue;}
+        struct mesh_call *call=(void *)(values+(size_t)use*stride);
         if(--call->pending)continue;
-        call->pending=call->recurring;
-        call->cycle=(uint32_t)cycle;
-        call->generation=call->cycle*extent+call->index;
-        call->submit(call,call->argument);
-        submitted++;
+        mesh_call_fire(call,cycle,extent,&submitted);
       }
       if(landing->counted)mesh_instance_complete(calls->instances+landing->slot,landing->instances);
     }
@@ -839,6 +1036,58 @@ static int mesh_calls_layout(struct mesh_calls *calls,struct mesh_received *rece
   return 0;
 }
 
+/* design/bridge-dataflow.md#routed-readiness: whether a publication's destination is a route's arrival cell (a cell of a
+   worker's arrivals whose call names a route event) */
+static int mesh_route_cell(const struct mesh_calls *calls,uint64_t destination){
+  for(uint32_t w=0;w<calls->count;w++){
+    const struct mesh_call_worker *worker=calls->workers+w;
+    if(!worker->arrival_count)continue;
+    const uint64_t first=(uint64_t)(uintptr_t)&worker->arrivals[0].argument;
+    if(destination<first || (destination-first)%sizeof(struct mesh_arrival) || (destination-first)/sizeof(struct mesh_arrival)>=worker->arrival_count)
+      continue;
+    return worker->arrivals[(destination-first)/sizeof(struct mesh_arrival)].call>=calls->route_base;
+  }
+  return 0;
+}
+/* design/bridge-dataflow.md#routed-readiness, once the call records are laid out: each route's vectors' addresses an
+   index and its states (two an index, laid out afresh); each active function's call records given their count's word
+   and slot, every publication of theirs a route's arrival (else EINVAL: an omitted call publishes those alone) */
+static int mesh_routes_layout(struct mesh_calls *calls){
+  struct hdr *m=calls->context->M;
+  const uint32_t extent=calls->extent;
+  for(struct mesh_routing *d=calls->routes;d;d=d->next){
+    d->vectors=malloc((size_t)extent*3*sizeof *d->vectors);
+    d->state=calloc((size_t)extent*2,sizeof *d->state);
+    d->arrived=calloc((size_t)extent*2*d->candidates,1);
+    d->remaining=calloc((size_t)extent*2*d->consumers,sizeof *d->remaining);
+    if(!d->vectors || !d->state || !d->arrived || !d->remaining)return ENOMEM;
+    for(uint32_t index=0;index<extent;index++){
+      for(int v=0;v<3;v++){
+        const struct mesh_route_vector vector=d->vector[v];
+        const uint32_t row=vector.section.first+index*vector.section.stride;
+        d->vectors[(size_t)index*3+v]=(const uint32_t *)((char *)m+atomic_load_explicit(&mesh_page(m)[row].address,memory_order_relaxed)+vector.offset);
+      }
+      for(uint32_t parity=0;parity<2;parity++){
+        struct mesh_route_state *s=d->state+(size_t)index*2+parity;
+        s->arrived=d->arrived+((size_t)index*2+parity)*d->candidates;
+        s->remaining=d->remaining+((size_t)index*2+parity)*d->consumers;
+        mesh_route_reset(d,s);
+      }
+    }
+  }
+  for(const struct mesh_active *a=calls->actives;a;a=a->next){
+    const struct mesh_function *function=a->function;
+    for(uint32_t index=0;index<extent;index++){
+      struct mesh_call *call=(void *)(function->values+(size_t)index*calls->stride);
+      const uint32_t row=a->count.section.first+(a->count.section.stride?index:0)*a->count.section.stride;
+      call->count=(const _Atomic uint32_t *)((char *)m+atomic_load_explicit(&mesh_page(m)[row].address,memory_order_relaxed)+a->count.offset);
+      call->slot=a->slot;
+      for(uint32_t i=0;i<call->publication_count;i++)if(!mesh_route_cell(calls,call->publications[i].destination))return EINVAL;
+    }
+  }
+  return 0;
+}
+
 /* design/algorithm-sources.md#programkernel_call */
 int mesh_calls_prepare(struct mesh_calls *calls){
   if(atomic_load(&calls->running))return EINVAL;
@@ -856,9 +1105,28 @@ int mesh_calls_prepare(struct mesh_calls *calls){
     landing_base[r+1]=landing_base[r]+(received[r].stride?extent:1);
     if(!mesh_landing_word(received[r].program->M,received[r].first,received[r].bytes,0))error=EINVAL;
   }
+  /* design/bridge-dataflow.md#routed-readiness: every route's consumers attached, and its events (each directory section
+     and each candidate an arrival a slot) numbered past the call records */
+  uint64_t route_events=0;
+  for(struct mesh_routing *d=calls->routes;d;d=d->next){
+    for(uint32_t c=0;c<d->consumers;c++)if(!d->consumer[c])error=EINVAL;
+    /* a candidate's producer (mesh_route_producers) is active and writes it, as mesh_algebra_route_producers asked */
+    for(uint32_t k=0;k<d->candidates;k++)if(d->producer[k]){
+      const struct mesh_function *producer=d->producer[k];
+      int active=0,covers=0;
+      for(const struct mesh_active *a=calls->actives;a;a=a->next)active|=a->function==producer;
+      for(size_t o=0;o<producer->output_count;o++)covers|=producer->inputs[producer->input_count+o].first==d->candidate[k].first;
+      if(!active || !covers)error=EINVAL;
+    }
+    route_events+=(uint64_t)(d->metas+d->candidates)*extent;
+  }
+  free(calls->route_events);calls->route_events=NULL;calls->route_event_count=0;
+  calls->route_base=calls->routes?calls->function_count*extent:UINT32_MAX;
+  if(calls->routes && (uint64_t)calls->function_count*extent+route_events>=UINT32_MAX)error=EOVERFLOW;
+  if(!error && route_events && !(calls->route_events=malloc((size_t)route_events*sizeof *calls->route_events)))error=ENOMEM;
   /* hot-path-loads M18: each waited input of each function an arrival a slot, and a function with no varying input the
      slot's submission's; a constant of this node's (stride 0, received by none) is ready at start */
-  size_t room=0,use_count=0;
+  size_t room=(size_t)route_events,use_count=0;
   for(struct mesh_function *function=calls->functions;function;function=function->next)
     if(function->submit)room+=(function->dependency_count+1)*(size_t)extent;
   struct mesh_use *uses=malloc((room?room:1)*sizeof *uses);
@@ -879,6 +1147,10 @@ int mesh_calls_prepare(struct mesh_calls *calls){
                                           :(struct mesh_use){function->worker,MESH_USE_PRODUCED,section.first,index,call};
       }
     }
+    /* design/bridge-dataflow.md#routed-readiness: each route it owns a part of, one arrival a generation */
+    uint32_t routed=0;
+    for(const struct mesh_routing *d=calls->routes;d;d=d->next)for(uint32_t c=0;c<d->consumers;c++)routed+=d->consumer[c]==function;
+    initial+=routed;pending+=routed;varying|=routed!=0;
     if(!varying){
       initial++;pending++;
       for(uint32_t index=0;index<extent;index++)
@@ -886,10 +1158,26 @@ int mesh_calls_prepare(struct mesh_calls *calls){
     }
     function->pending=pending;function->initial=initial;
   }
+  /* design/bridge-dataflow.md#routed-readiness: a route's arrivals, on its worker: each directory section's and each
+     candidate's, of every index, received (a landing) or produced here (a cell its producer's publications store) */
+  uint32_t event=0;
+  for(struct mesh_routing *d=calls->routes;!error && d;d=d->next)
+    for(uint32_t j=0;j<d->metas+d->candidates;j++){
+      const struct mesh_section section=j<d->metas?d->meta[j]:d->candidate[j-d->metas];
+      const uint32_t r=mesh_received_find(received,received_count,section.first);
+      for(uint32_t index=0;index<extent;index++,event++){
+        calls->route_events[event]=(struct mesh_route_event){d,j<d->metas?MESH_ROUTE_META:MESH_ROUTE_CANDIDATE,j<d->metas?j:j-d->metas,index};
+        const uint32_t call=calls->route_base+event;
+        uses[use_count++]=r<received_count?(struct mesh_use){d->worker,MESH_USE_LANDING,r,index,call}
+                                          :(struct mesh_use){d->worker,MESH_USE_PRODUCED,section.first,index,call};
+      }
+    }
+  calls->route_event_count=event;
   if(!error){
     qsort(uses,use_count,sizeof *uses,mesh_use_order);
     error=mesh_calls_layout(calls,received,received_count,landing_base,uses,use_count,designated);
   }
+  if(!error)error=mesh_routes_layout(calls);
   free(received);free(landing_base);free(uses);free(designated);
   return error;
 }
