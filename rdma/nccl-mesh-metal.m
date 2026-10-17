@@ -104,7 +104,35 @@ static NSString *const KERNELS =
   "mesh_step_release(p, a, i); }\n"
   "GROUP(land_copy) { ENTER(i == 0) AWAIT device uchar *x = d + p.dst; volatile coherent(system) device const uchar *y = (volatile coherent(system) device const uchar *)(s + p.src); LOOP x[k] = mesh_payload(y + k); }\n"
   "kernel void spin(device uchar *words [[buffer(0)]], device uchar *ring [[buffer(1)]], constant mesh_args &p [[buffer(2)]], device uchar *vb [[buffer(4)]], device ulong *progress [[buffer(5)]]) { "
-  "ENTER(true) mesh_step_check(p, mesh_step_wait(p, words + p.dst, p.n), ring, vb, p.n); }\n";
+  "ENTER(true) mesh_step_check(p, mesh_step_wait(p, words + p.dst, p.n), ring, vb, p.n); }\n"
+  "static inline ulong counted_rows(device const long *c, ulong first, ulong count) { ulong rows = 0; for (ulong k = 0; k < count; ++k) rows += c[first + k] > 0 ? ulong(c[first + k]) : 0UL; return rows; }\n"
+  "HEAD(counted_start) { ENTER(i == 0) device long *got = (device long *)(d + p.dst); device const long *c = (device const long *)(s + p.src); "
+  "LOOP got[k] = c[p.first + k]; "
+  "if (i == 0) { device ulong *tail = (device ulong *)(d + p.aux); tail[0] = counted_rows(c, 0, p.first); tail[1] = counted_rows(c, 0, p.scalar); tail[2] = 0; } }\n"
+  "HEAD(counted_check) { ENTER(i == 0) if (i == 0 && counted_rows((device const long *)d, p.first, p.count) > p.scalar) ((device ulong *)(d + p.dst))[2] = 1; }\n"
+  "HEAD(counted_arrived) { ENTER(i == 0) if (i == 0) { device const ulong *tail = (device const ulong *)(s + p.src) + p.first; "
+  "bool over = counted_rows((device const long *)(s + p.src), 0, p.n) > p.aux || tail[1] > p.scalar || tail[2] != 0; "
+  "volatile coherent(system) device ulong *word = (volatile coherent(system) device ulong *)(d + p.dst); "
+  "if (over && p.mask) mesh_publish((volatile coherent(system) device ulong *)vb + 5, 1UL); "
+  "if (*word == 0) mesh_publish(word, over ? 2UL : 1UL); } }\n"
+  "#define PLACE(BEFORE, ROWS, LIMIT) threadgroup ulong place[2]; if (i == 0) { ulong at = (BEFORE) * p.slot + p.scalar, rows = (ROWS) * p.slot; "
+  "ulong bytes = rows > p.scalar ? min(rows - p.scalar, p.n) : 0UL; place[0] = at; place[1] = at >= (LIMIT) ? 0UL : min(bytes, (LIMIT) - at); } "
+  "threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+  "#define COUNTED(Z, W) "
+  "GROUP(counted_send_##Z) { ENTER(i == 0) device const long *c = (device const long *)(a + p.aux); PLACE(counted_rows(c, 0, p.first), counted_rows(c, p.first, p.count), p.at) "
+  "volatile coherent(system) device W *x = (volatile coherent(system) device W *)(d + p.dst); device const W *y = (device const W *)(s + p.src + place[0]); "
+  "for (ulong k = i; k < place[1] / sizeof(W); k += g) x[k] = y[k]; } "
+  "GROUP(counted_land_##Z) { ENTER(i == 0) device const long *c = (device const long *)(a + p.aux); PLACE(counted_rows(c, 0, p.first), counted_rows(c, p.first, p.count), p.at) "
+  "device W *x = (device W *)(d + p.dst + place[0]); volatile coherent(system) device const W *y = (volatile coherent(system) device const W *)(s + p.src); "
+  "for (ulong k = i; k < place[1] / sizeof(W); k += g) x[k] = mesh_payload(y + k); } "
+  "GROUP(counted_own_##Z) { ENTER(i == 0) device const long *c = (device const long *)(a + p.aux); threadgroup ulong place[3]; "
+  "if (i == 0) { ulong to = counted_rows(c, 0, p.first) * p.slot, from = ((device const ulong *)(a + p.aux))[p.scalar] * p.slot, bytes = counted_rows(c, p.first, p.count) * p.slot; "
+  "bytes = to >= p.at || from >= p.n ? 0UL : min(bytes, min(p.at - to, p.n - from)); place[0] = to; place[1] = from; place[2] = bytes; } "
+  "threadgroup_barrier(mem_flags::mem_threadgroup); "
+  "device W *x = (device W *)(d + p.dst + place[0]); device const W *y = (device const W *)(s + p.src + place[1]); "
+  "for (ulong k = i; k < place[2] / sizeof(W); k += g) x[k] = y[k]; }\n"
+  "COUNTED(4, uint)\n"
+  "COUNTED(1, uchar)\n";
 
 /* ncclDataType_t's order: int8 uint8 int32 uint32 int64 uint64 float16 float32 float64 bfloat16 e4m3 e5m2 */
 static const char *const TYPE[12] = {"i8", "u8", "i32", "u32", "i64", "u64", "f16", "f32", NULL, "bf16", "e4m3", "e5m2"};
@@ -414,6 +442,21 @@ int metal_land_deferred(struct metal_program *program, int op, void *dst, size_t
   return record4(program, (id<MTLBuffer>)dst, (id<MTLBuffer>)slot, (id<MTLBuffer>)words, check ? (id<MTLBuffer>)check->violation : nil,
                  land_args(op, dst_offset, slot_offset, n, word_offset, cycle, check), bound);
 }
+
+/* a counted all-to-all's dispatch (nccl-mesh-metal.h metal_counted): its kernel by kind, its copies' width the widest
+   word that divides every offset, row and piece it moves; each one's arguments as the kernel above reads them */
+int metal_counted(struct metal_program *program, int kind, const struct metal_counted *k) {
+  static const char *const NAME[] = {"counted_start", "counted_check", "counted_arrived", "counted_send", "counted_land", "counted_own"};
+  if (kind < METAL_COUNTED_START || kind > METAL_COUNTED_OWN) return EINVAL;
+  const int words = !((k->dst | k->src | k->row | k->bytes | k->aux) & 3);
+  NSString *name = kind >= METAL_COUNTED_SEND ? [NSString stringWithFormat:@"%s_%d", NAME[kind], words ? 4 : 1] : @(NAME[kind]);
+  const struct args p = {.dst = k->dst, .src = k->src, .n = k->bytes, .scalar = k->scalar, .aux = k->aux, .first = k->first, .slot = k->row,
+                         .at = k->limit, .count = k->entries, .mask = kind == METAL_COUNTED_ARRIVED && k->a};
+  return dispatch(program, name, k->d, k->s, kind >= METAL_COUNTED_SEND ? k->a : NULL, kind == METAL_COUNTED_ARRIVED ? k->a : NULL, p,
+                  kind == METAL_COUNTED_START ? (k->bytes ? k->bytes : 1) : 1);
+}
+
+void *metal_contents(void *buffer) { return buffer ? ((id<MTLBuffer>)buffer).contents : NULL; }
 
 const char *metal_steps(void) { return STEPS.UTF8String; }
 

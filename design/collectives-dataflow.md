@@ -383,6 +383,29 @@ so members configured with different forms fail there too.
   which only its SEND reads while the REDUCE sums into buffer 0. The fused form makes no copy and aliases the scratch to
   `own` (line 2530), because the caller's kernel publishes from its own store.
 
+**A counted all-to-all** (`ncclMeshAlltoAllCounted`, mesh 3981ca80^ `run_counted` and `counted_copy` ported onto the
+session's positions) is a group call of its own kind (`WHAT_COUNTED`) whose steps `counted_steps` makes, all of round 0:
+to each peer q its counts segment (buffer 0, the call's counts) and then its rows (buffer 1, room for the pair's bound
+`min(sendrows, capacity)` rows), from each its counts (buffer 2, the landed counts `got`, rank order) and then, after
+every counts receive (`mesh_steps_before`), its rows (buffer 3, the receive buffer).
+
+- `lay` places counted calls after the collectives and before the point-to-point pairs, so `order_group`, which knows
+  no other rank's counted steps, still places every rank's collectives where they are.
+- Host path: `counted_got` makes the landed counts with this rank's own segment and a tail (the rows before its own
+  segment, the rows of all its counts, an overflow word); `run` copies a rows piece by `counted_place` (its place from
+  the counts, its valid bytes within them); `counted_host_end` copies its own rows, writes `received`, `landed` and the
+  word.
+- Metal path: `counted_stage` (scratch `got`, `METAL_COUNTED_START`); `publish` writes a rows piece with
+  `METAL_COUNTED_SEND` (the place summed from the counts on the GPU) and releases its cell; `consume` lands one with
+  `arrive` (the session's spin on the bridge's completion word) and `METAL_COUNTED_LAND`; each counts receive consumed
+  checks its pair's bound (`counted_landed`, `METAL_COUNTED_CHECK`), and the last encodes `counted_end` (own rows,
+  `received` with system-coherent stores, `landed`, then `METAL_COUNTED_ARRIVED`: the word 1, or 2 and violation word
+  [5], which `violated` makes the session's failure).
+- A group lost or failed sets each counted word still 0 to 2 (`counted_failed`, from `launch`, `launch_metal` and
+  `inflight_lose`).
+- `received` and `arrived` on the Metal path are host memory in leases; `lease_buffer` gives the lease's Metal buffer,
+  made at its first use and released by `ncclMemFree`.
+
 **Roots.**
 
 | Collective | Root's role |

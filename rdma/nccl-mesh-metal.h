@@ -76,6 +76,31 @@ int metal_send_deferred(struct metal_program *, void *slot, size_t slot_offset, 
                         uint64_t value, uint64_t bound[6]);
 int metal_land_deferred(struct metal_program *, int op, void *dst, size_t dst_offset, void *slot, size_t slot_offset, size_t n,
                         void *words, size_t word_offset, uint64_t cycle, const struct metal_check *check, uint64_t bound[6]);
+/* A counted all-to-all's steps (nccl.h ncclMeshAlltoAllCounted), every offset of its rows read on the GPU from int64
+   counts (a row a count's unit, `row` bytes; a count below 0 none), so no host reads them:
+     START   (d the landed counts, s the rank's counts) its own segment's counts, `bytes` of them from entry `first`,
+             copied to d + dst, and at d + aux its tail: the rows before that segment, the rows of its `scalar` counts,
+             and an overflow word 0;
+     CHECK   (d the landed counts) the tail at d + dst's overflow word set where the rows of entries [first, first +
+             entries) pass `scalar` (a pair's bound);
+     ARRIVED (d the host's word, s the landed counts, a the session's violation words or NULL) the word at d + dst,
+             where it still holds 0, released (system scope) to 1 once the landed counts at s + src (`bytes` entries,
+             its tail at entry `first`) hold at most `aux` rows, its own at most `scalar` and no overflow, else 2, and
+             then violation word [5] set (nccl-mesh.c violated: the session fails as a value);
+     SEND    (d a slot, s the rows, a the counts at aux) bytes [scalar, scalar + bytes) of the rows the counts' entries
+             [first, first + entries) send, after the rows of the entries before them, stored system-coherent at
+             d + dst, within `limit` bytes of s + src;
+     LAND    (d the receive buffer, s a landed slot, a the landed counts at aux) the slot's bytes the same way into the
+             rows of entries [first, first + entries) after those before them, within `limit` bytes of d + dst;
+     OWN     (d the receive buffer, s the rows, a the landed counts at aux) the rank's own rows (entries [first, first
+             + entries), the rows before them in s the tail's at entry `scalar`), within `limit` bytes of d + dst and
+             `bytes` of s + src.
+   SEND, LAND and OWN are one threadgroup (its thread 0 sums the counts). metal_contents: a shared buffer's host address
+   (NULL: none). */
+enum { METAL_COUNTED_START, METAL_COUNTED_CHECK, METAL_COUNTED_ARRIVED, METAL_COUNTED_SEND, METAL_COUNTED_LAND, METAL_COUNTED_OWN };
+struct metal_counted { void *d, *s, *a; size_t dst, src, aux; uint64_t bytes, scalar, first, row, limit; uint32_t entries; };
+int metal_counted(struct metal_program *, int kind, const struct metal_counted *);
+void *metal_contents(void *buffer);
 /* the steps' Metal text (after rdma/mesh.metal): the argument record and mesh_step_* */
 const char *metal_steps(void);
 void metal_keep(struct metal_program *, void *object);

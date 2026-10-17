@@ -84,6 +84,19 @@ Each is uncut: a step's piece is cut on the wire into slots of its class (`mesh_
 first program of its collective (and root) whose size bound its operand is under. Nothing about a program is decided
 where a call runs.
 
+**Counted all-to-all.** `ncclMeshAlltoAllCounted(send, sendrows, counts, sendsegs, recv, capacity, received, landed,
+recvsegs, arrived, row, type, comm, stream)` is MPI_Alltoallv whose counts the GPU wrote (int64, a segment a destination
+rank: an MoE router's per-expert counts grouped by the rank holding each expert): each rank's segment for a peer moves
+with its rows in one exchange, the receiver's rows are packed in rank order, and the landed counts reach `received`
+and `landed` with `*arrived` set to 1 while the rows may still be on the wire (2: the call failed). On the Metal path
+no host reads a count: every row's place is computed on the GPU from the counts (`nccl-mesh-metal.m` `counted_*`), its
+waits are the session's in-stream waits on the bridge's completion words, and `received` and `arrived` are host memory
+in leases, which the GPU writes. The positions are laid without the counts: each pair carries room for
+`min(sendrows, capacity)` rows (every rank passes the same `sendrows`, `capacity`, `row` and type), and counts that pass
+that layout fail as a value with `*arrived` 2. Reproduction target (metal-microbench docs/measurement.md 2026-09-30,
+part B): ep at 27.5-27.7 ms a step (the host-split `all_to_all_single` form read 39.3-40.1), the counted call's overhead
+473-480 us, the host idle 7.4-7.9 ms.
+
 **Forms as configuration.** `ncclMeshCommForms(comm, forms, count)` is the communicator's configuration operand: a
 list of `ncclMeshForm` entries, each a collective (and root, -1 every root) below a size bound, compiled ahead of the
 structural table at each map read, so a call takes the first form that fits it and the default otherwise:

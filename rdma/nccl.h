@@ -1016,6 +1016,31 @@ ncclResult_t ncclMeshReduceScatterV(const void* sendbuff, void* recvbuff, const 
                                     ncclComm_t comm, cudaStream_t stream);
 ncclResult_t ncclMeshReduceScatterVConfig(const void* sendbuff, void* recvbuff, const size_t* counts, ncclDataType_t datatype, ncclRedOp_t op,
                                           ncclComm_t comm, cudaStream_t stream, const ncclCollConfig_t* config);
+/* MPI_Alltoallv with counts the GPU wrote (mesh 3981ca80^'s, its signature; expert-parallel dispatch and combine with no
+   host count and no host wait on the GPU): rank r sends each rank q the rows of sendbuff (grouped by destination in rank
+   order: sendrows rows of `row` elements of datatype) that segment q of `counts` sums to (int64, sendsegs[q] entries for
+   rank q, in rank order; a negative count none), and receives each rank's rows into recvbuff packed in rank order, rank
+   q's after the rows of the ranks before it, at most `capacity` rows.  Each rank's segment of counts for this rank
+   (recvsegs[q] entries; recvsegs[rank] = sendsegs[rank]) moves with its rows in one exchange (the segment, then its
+   rows, sent together, no rows waiting for counts to cross), is written to `received` (int64, rank order) and `*arrived`
+   set to 1 once every count has landed, while the rows may still be on the wire, so the caller reads the counts on the
+   host with no wait on the GPU; this rank's own rows are copied, and where `landed` is not NULL the same counts are
+   written there for the caller's GPU work after the call.  *arrived is 0 from the call until then, and 2 where the
+   call failed first (its session lost, or its counts passed its layout, below; the failure also the group's result or
+   the communicator's asynchronous error, ncclCommGetAsyncError).  The layout every rank makes alike: each pair whose
+   sender has counts for its receiver (sendsegs[q] > 0 on the sender, recvsegs[r] > 0 on the receiver: the two agree)
+   moves its counts and room for min(sendrows, capacity) rows (the pair's bound), so every rank passes the same
+   sendrows, capacity, row and datatype; a sender's rows past its counts' sum within that room are the slots' (never
+   read).  Counts that pass the layout (a rank's rows past sendrows, a pair's past its bound, the rows a rank receives
+   past capacity) move the rows within it, set *arrived to 2 and fail as a value (ncclInvalidUsage: the host path's
+   group, the Metal path's session).  Host path: every pointer a host pointer.  Metal path: sendbuff, counts, recvbuff
+   and landed are ncclMeshBuffers (counts read on the GPU, every row's place computed there from them: no host reads a
+   count), and received and arrived host pointers in this process's leases (ncclMemAlloc), which the GPU writes
+   (system-coherent, the word last); its waits are the session's in-stream waits on the bridge's completion words
+   (rdma/mesh.metal mesh_remote_wait, ended by the canceller), as every Metal-path group's.  A word a call in flight. */
+ncclResult_t ncclMeshAlltoAllCounted(const void* sendbuff, size_t sendrows, const int64_t* counts, const size_t* sendsegs, void* recvbuff,
+                                     size_t capacity, int64_t* received, int64_t* landed, const size_t* recvsegs, uint64_t* arrived, size_t row,
+                                     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream);
 
 #ifdef __cplusplus
 } // end extern "C"
