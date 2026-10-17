@@ -526,6 +526,15 @@ int mesh_request(uint32_t node,const char *service,uint64_t bytes){
   strcpy(request.service,service);
   return bridge_ask(&request);
 }
+int mesh_ledger(const char *name,const char *path){
+  struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_LEDGER,.bytes=mesh_key(name)};
+  if(!name || !*name || !path || strlen(path)>=sizeof request.path || path[0]!='/')return -EINVAL;
+  strcpy(request.service,"ledger");strcpy(request.path,path);
+  const int fd=bridge_ask(&request);
+  if(fd<0)return fd;
+  close(fd);
+  return 0;
+}
 int mesh_serve(const char *service,const char *path){
   struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_SERVE};
   if(!service || !path || strlen(service)>=sizeof request.service || strlen(path)>=sizeof request.path || path[0]!='/')return -EINVAL;

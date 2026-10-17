@@ -116,7 +116,7 @@ struct ledger_record { uint32_t position,binding,chunk,chunks; };
 struct ledger;
 struct ledger_entry { struct ledger *ledger; uint32_t event,done; };
 struct ledger {
-  uint32_t id,queues,invocations,cyclic,sends,send_room,cells;
+  uint32_t id,queues,invocations,cyclic,sends,send_room,cells,cut_sends,cut_landings,sorted;
   uint32_t *current,*pending,*last;
   struct ledger_send *send;
   struct ledger_cell *cell;
@@ -567,23 +567,27 @@ static void ledger_open(struct flow *f){
   l->current=words;l->pending=words+f->qps;l->last=words+2*(size_t)f->qps;
   f->ledger=l;
 }
-/* the events a side's ledger holds: one pass of the flow's `once` cells or records, every pass of a cyclic program's up
-   to the bound */
+/* the events a side's ledger holds: one pass of the flow's `once` cells or records, every pass of a cyclic program's
+   the bound's latest (a ring: event e at e % room, its count published as each is stored, so a cut (ledger_cut) reads
+   them while the flow runs) */
 static uint32_t ledger_room(uint64_t once,int cyclic){ return cyclic || once>MESH_LEDGER_EVENTS?MESH_LEDGER_EVENTS:(uint32_t)once; }
-/* the send thread's stores: a cell first seen released, its queue's event from then on (none past the bound) */
+/* design/bridge-and-ipc.md#ledger: taken by a cut and by a ledger's release, so a cut never reads a ledger freed */
+static pthread_mutex_t ledger_lock=PTHREAD_MUTEX_INITIALIZER;
+/* the send thread's stores: a cell first seen released, its queue's event from then on */
 static void ledger_seen(struct ledger *l,const struct mesh_send *cell,uint64_t cycle){
   const uint32_t q=cell->queue;
-  if(l->sends>=l->send_room){l->current[q]=LEDGER_NONE;return;}
-  const uint32_t e=l->sends++;
-  l->send[e]=(struct ledger_send){.cell=(uintptr_t)cell,.seen=clock_ns(),.cycle=(uint32_t)cycle,.next=LEDGER_NONE};
-  if(l->last[q]!=LEDGER_NONE)l->send[l->last[q]].next=e;
+  if(!l->send_room){l->current[q]=LEDGER_NONE;return;}
+  const uint32_t e=l->sends;
+  l->send[e%l->send_room]=(struct ledger_send){.cell=(uintptr_t)cell,.seen=clock_ns(),.cycle=(uint32_t)cycle,.next=LEDGER_NONE};
+  if(l->last[q]!=LEDGER_NONE)l->send[l->last[q]%l->send_room].next=e;
   if(l->pending[q]==LEDGER_NONE)l->pending[q]=e;
   l->last[q]=e;l->current[q]=e;
+  __atomic_store_n(&l->sends,e+1,__ATOMIC_RELEASE);
 }
 /* SENDs of event e posted at `at`: its first, and where `done` its last, after which its gate held `mark` frames */
 static void ledger_stamp(struct ledger *l,uint32_t e,int done,uint64_t mark,uint64_t at){
   if(e==LEDGER_NONE)return;
-  struct ledger_send *s=l->send+e;
+  struct ledger_send *s=l->send+e%l->send_room;
   if(!s->first)s->first=at;
   if(done){s->posted=at;s->mark=mark&MESH_GATE_MASK;}
 }
@@ -592,7 +596,7 @@ static void ledger_stamp(struct ledger *l,uint32_t e,int done,uint64_t mark,uint
 static void ledger_retired(struct ledger *l,uint32_t q,uint64_t retired){
   uint64_t at=0;
   for(uint32_t e;q<l->queues && (e=l->pending[q])!=LEDGER_NONE;){
-    struct ledger_send *s=l->send+e;
+    struct ledger_send *s=l->send+e%l->send_room;
     if(!s->posted || ((retired-s->mark)&MESH_GATE_MASK)>=(UINT64_C(1)<<47))break;
     if(!at)at=clock_ns();
     s->completed=at;l->pending[q]=s->next;
@@ -601,8 +605,10 @@ static void ledger_retired(struct ledger *l,uint32_t q,uint64_t retired){
 /* the receive thread's store: a record of the flow landed, its word stored */
 static void ledger_landed(struct flow *link,const struct prepared_receive *record){
   struct ledger *l=link->ledger;
-  if(l->landings<l->landing_room)
-    l->landing[l->landings++]=(struct ledger_landing){(uint32_t)(record-link->receive),record->cycle,clock_ns()};
+  if(!l->landing_room)return;
+  const uint32_t e=l->landings;
+  l->landing[e%l->landing_room]=(struct ledger_landing){(uint32_t)(record-link->receive),record->cycle,clock_ns()};
+  __atomic_store_n(&l->landings,e+1,__ATOMIC_RELEASE);
 }
 /* design/bridge-and-ipc.md#ledger: a flow's ledger written at its release, on its port's queue once neither progress
    thread reads the flow: its header into the bridge's log, then a line for each cell seen and each record landed, which
@@ -614,15 +620,54 @@ static int ledger_cell_order(const void *a,const void *b){
   const uint64_t x=((const struct ledger_cell *)a)->cell,y=((const struct ledger_cell *)b)->cell;
   return (x>y)-(x<y);
 }
+/* the ledger's header line, `cut` the events past the latest cut */
+static void ledger_header(const struct flow *f,const struct ledger *l,uint32_t sends,uint32_t landings,const char *file,char *line,size_t room){
+  snprintf(line,room,"{\"ledger\":%u,\"key\":\"%016llx\",\"node\":%u,\"peer\":%u,\"port\":%u,\"near\":%u,\"far\":%u,\"stripe\":%u,"
+           "\"stripes\":%u,\"exclusive\":%d,\"queues\":%u,\"qps\":%d,\"invocations\":%u,\"cyclic\":%u,\"started\":%llu,\"sends\":%u,\"send_room\":%u,"
+           "\"landings\":%u,\"landing_room\":%u,\"cut\":[%u,%u],\"file\":%s%s%s}\n",l->id,(unsigned long long)f->key,M->node,f->port->peer,
+           f->port->index,f->near,f->far,f->stripe,f->stripes,f->exclusive,f->queues,f->qps,l->invocations,l->cyclic,(unsigned long long)l->started,
+           sends,l->send_room,landings,l->landing_room,l->cut_sends,l->cut_landings,file?"\"":"",file?file:"null",file?"\"":"");
+}
+/* the event lines of the ledger's cells seen and records landed from the latest cut through `sends` and `landings` (the
+   ring's latest where more passed), each naming its cell or record by queue, invocation, position, binding and cycle as
+   the peer's ledger of the flow names the record or cell (rdma/ledger.py pairs them), to `out`, else the log */
+static void ledger_events(const struct flow *f,struct ledger *l,uint32_t sends,uint32_t landings,FILE *out){
+  char line[512];
+  if(l->cells && !l->sorted){qsort(l->cell,l->cells,sizeof *l->cell,ledger_cell_order);l->sorted=1;}
+  for(uint32_t e=sends-l->cut_sends>l->send_room?sends-l->send_room:l->cut_sends;e!=sends;e++){
+    const struct ledger_send *s=l->send+e%l->send_room;
+    const struct ledger_cell key={.cell=s->cell},*c=l->cells?bsearch(&key,l->cell,l->cells,sizeof *l->cell,ledger_cell_order):NULL;
+    snprintf(line,sizeof line,"{\"s\":[%u,%lld,%lld,%lld,%lld,%u,%lld,%llu,%llu,%llu,%llu]}\n",l->id,c?(long long)c->queue:-1ll,
+             c?(long long)c->invocation:-1ll,c?(long long)c->position:-1ll,c?(long long)c->binding:-1ll,s->cycle,c?(long long)c->chunks:-1ll,
+             (unsigned long long)s->seen,(unsigned long long)s->first,(unsigned long long)s->posted,(unsigned long long)s->completed);
+    if(out)fputs(line,out);else say("%s",line);
+  }
+  for(uint32_t e=landings-l->cut_landings>l->landing_room?landings-l->landing_room:l->cut_landings;e!=landings;e++){
+    const struct ledger_landing *r=l->landing+e%l->landing_room;
+    const struct prepared_receive *record=f->receive && r->record<l->records?f->receive+r->record:NULL;
+    const struct ledger_record *n=record?l->record+r->record:NULL;
+    snprintf(line,sizeof line,"{\"r\":[%u,%lld,%lld,%lld,%lld,%lld,%lld,%u,%llu]}\n",l->id,record?(long long)record->queue:-1ll,
+             record?(long long)record->invocation:-1ll,n?(long long)n->position:-1ll,n?(long long)n->binding:-1ll,n?(long long)n->chunk:-1ll,
+             n?(long long)n->chunks:-1ll,r->cycle,(unsigned long long)r->landed);
+    if(out)fputs(line,out);else say("%s",line);
+  }
+  l->cut_sends=sends;l->cut_landings=landings;
+}
+/* design/bridge-and-ipc.md#ledger: a flow's ledger written at its release, on its port's queue once neither progress
+   thread reads the flow: its header into the bridge's log, then its events past its latest cut: into the log where
+   there are MESH_LEDGER_LINES or fewer, else into a file beside the log named by the program's key, the node, its peer,
+   the stripe, the ledger and the time, which the header names; then freed */
 static void ledger_write(struct flow *f){
+  pthread_mutex_lock(&ledger_lock);
   struct ledger *l=f->ledger;
-  if(!l)return;
   f->ledger=NULL;
-  char path[PATH_MAX]={0},line[512];
+  pthread_mutex_unlock(&ledger_lock);
+  if(!l)return;
+  char path[PATH_MAX]={0},line[640];
   const char *file=NULL;
   FILE *out=NULL;
   struct stat log;
-  if((uint64_t)l->sends+l->landings>MESH_LEDGER_LINES && !fstat(STDERR_FILENO,&log) && S_ISREG(log.st_mode) &&
+  if((uint64_t)(l->sends-l->cut_sends)+(l->landings-l->cut_landings)>MESH_LEDGER_LINES && !fstat(STDERR_FILENO,&log) && S_ISREG(log.st_mode) &&
      fcntl(STDERR_FILENO,F_GETPATH,path)!=-1){
     char *slash=strrchr(path,'/'),when[24];
     const time_t wall=time(NULL);struct tm utc;
@@ -631,33 +676,36 @@ static void ledger_write(struct flow *f){
                                  (unsigned long long)f->key,M->node,f->port->peer,f->stripe,l->id,when)<sizeof path-(size_t)(slash+1-path) &&
        (out=fopen(path,"w")))file=slash+1;
   }
-  snprintf(line,sizeof line,"{\"ledger\":%u,\"key\":\"%016llx\",\"node\":%u,\"peer\":%u,\"port\":%u,\"near\":%u,\"far\":%u,\"stripe\":%u,"
-           "\"stripes\":%u,\"exclusive\":%d,\"queues\":%u,\"qps\":%d,\"invocations\":%u,\"cyclic\":%u,\"started\":%llu,\"sends\":%u,\"send_room\":%u,"
-           "\"landings\":%u,\"landing_room\":%u,\"file\":%s%s%s}\n",l->id,(unsigned long long)f->key,M->node,f->port->peer,f->port->index,
-           f->near,f->far,f->stripe,f->stripes,f->exclusive,f->queues,f->qps,l->invocations,l->cyclic,(unsigned long long)l->started,l->sends,
-           l->send_room,l->landings,l->landing_room,file?"\"":"",file?file:"null",file?"\"":"");
+  ledger_header(f,l,l->sends,l->landings,file,line,sizeof line);
   say("%s",line);
   if(out)fputs(line,out);
-  if(l->cells)qsort(l->cell,l->cells,sizeof *l->cell,ledger_cell_order);
-  for(uint32_t e=0;e<l->sends;e++){
-    const struct ledger_send *s=l->send+e;
-    const struct ledger_cell key={.cell=s->cell},*c=l->cells?bsearch(&key,l->cell,l->cells,sizeof *l->cell,ledger_cell_order):NULL;
-    snprintf(line,sizeof line,"{\"s\":[%u,%lld,%lld,%lld,%lld,%u,%lld,%llu,%llu,%llu,%llu]}\n",l->id,c?(long long)c->queue:-1ll,
-             c?(long long)c->invocation:-1ll,c?(long long)c->position:-1ll,c?(long long)c->binding:-1ll,s->cycle,c?(long long)c->chunks:-1ll,
-             (unsigned long long)s->seen,(unsigned long long)s->first,(unsigned long long)s->posted,(unsigned long long)s->completed);
-    if(out)fputs(line,out);else say("%s",line);
-  }
-  for(uint32_t e=0;e<l->landings;e++){
-    const struct ledger_landing *r=l->landing+e;
-    const struct prepared_receive *record=f->receive && r->record<l->records?f->receive+r->record:NULL;
-    const struct ledger_record *n=record?l->record+r->record:NULL;
-    snprintf(line,sizeof line,"{\"r\":[%u,%lld,%lld,%lld,%lld,%lld,%lld,%u,%llu]}\n",l->id,record?(long long)record->queue:-1ll,
-             record?(long long)record->invocation:-1ll,n?(long long)n->position:-1ll,n?(long long)n->binding:-1ll,n?(long long)n->chunk:-1ll,
-             n?(long long)n->chunks:-1ll,r->cycle,(unsigned long long)r->landed);
-    if(out)fputs(line,out);else say("%s",line);
-  }
+  ledger_events(f,l,l->sends,l->landings,out);
   if(out && fclose(out))say("link %u: ledger %u: %s: %s\n",f->port->index,l->id,file,strerror(errno));
   free(l->current);free(l->send);free(l->cell);free(l->landing);free(l->record);free(l);
+}
+/* design/bridge-and-ipc.md#ledger: a client's request for its program's ledger (MESH_REQUEST_LEDGER, the program's key):
+   each running flow of the key's events since its latest cut appended to `path`, each after its header, while the flow
+   runs (its progress threads store on; a cut reads the counts they published); ENOENT where no flow of the key keeps a
+   ledger, ENOTSUP where the configuration keeps none */
+static int ledger_cut(uint64_t key,const char *path){
+  if(!ledger_kept)return ENOTSUP;
+  FILE *out=NULL;
+  int found=0;
+  char line[640];
+  pthread_mutex_lock(&ledger_lock);
+  for(struct flow *f=flows;f;f=f->next){
+    struct ledger *l=f->ledger;
+    if(f->key!=key || !l || f->state!=RUNNING)continue;
+    if(!out && !(out=fopen(path,"a"))){const int error=errno;pthread_mutex_unlock(&ledger_lock);return error;}
+    const uint32_t sends=__atomic_load_n(&l->sends,__ATOMIC_ACQUIRE),landings=__atomic_load_n(&l->landings,__ATOMIC_ACQUIRE);
+    ledger_header(f,l,sends,landings,NULL,line,sizeof line);
+    fputs(line,out);
+    ledger_events(f,l,sends,landings,out);
+    found=1;
+  }
+  pthread_mutex_unlock(&ledger_lock);
+  if(out && fclose(out))return errno;
+  return found?0:ENOENT;
 }
 
 /* design/algorithm-sources.md#programcopy */
@@ -2590,6 +2638,10 @@ static void asked(struct asking *a){
   const int fd=a->fd;a->fd=-1;
   fd_watch(fd,EVFILT_READ,0,0);
   r->service[sizeof r->service-1]=0;r->path[sizeof r->path-1]=0;
+  if(r->magic==MESH_REQUEST_MAGIC && r->kind==MESH_REQUEST_LEDGER){
+    fd_answer(fd,r->path[0]=='/'?ledger_cut(r->bytes,r->path):EINVAL);close(fd);
+    return;
+  }
   if(r->magic!=MESH_REQUEST_MAGIC || !r->service[0] || (r->kind!=MESH_REQUEST_OPEN && r->kind!=MESH_REQUEST_SERVE)){fd_answer(fd,EPROTO);close(fd);return;}
   if(r->kind==MESH_REQUEST_SERVE){
     struct serving *at=NULL;

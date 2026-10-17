@@ -277,10 +277,14 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
    bytes to the service and the service's back, each direction ended by its writer's half close (shutdown SHUT_WR);
    a channel that fails anywhere resets the connection. A service registers its listening Unix socket
    (MESH_REQUEST_SERVE, its name and its socket's path) on a connection it holds open: the registration lasts while
-   that connection does, and a newer one of the same name replaces it. The bridge serves `hold` itself (#holds). */
+   that connection does, and a newer one of the same name replaces it. The bridge serves `hold` itself (#holds).
+   MESH_REQUEST_LEDGER (#ledger, where the bridge's configuration keeps ledgers): `bytes` a program's key, `path` a file
+   the bridge appends each running flow of that program's events to, those since the latest such request, each flow's
+   after its header line; the answer 0, ENOENT where no running flow of the key keeps a ledger, ENOTSUP where the
+   configuration keeps none, EINVAL for a path not absolute; the connection then closed. */
 #define MESH_SERVICE_BYTES 48
 #define MESH_SERVICE_PATH 104
-enum { MESH_REQUEST_OPEN=1, MESH_REQUEST_SERVE=2 };
+enum { MESH_REQUEST_OPEN=1, MESH_REQUEST_SERVE=2, MESH_REQUEST_LEDGER=3 };
 struct mesh_request { uint32_t magic,kind,node,reserved; uint64_t bytes; char service[MESH_SERVICE_BYTES]; char path[MESH_SERVICE_PATH]; };
 #define MESH_REQUEST_MAGIC 0x4d524551u
 /* a channel to `service` at `node`, admitted for `bytes` there, open: its connection's descriptor, or -errno */
@@ -288,6 +292,9 @@ int mesh_request(uint32_t node,const char *service,uint64_t bytes);
 /* `service` registered as the Unix socket at `path`: the descriptor of the connection whose life the registration
    lasts (closing it ends the registration; it reads end of file once the bridge stops), or -errno */
 int mesh_serve(const char *service,const char *path);
+/* design/bridge-and-ipc.md#ledger: the program `name`'s ledger since its latest cut appended to `path` by this node's
+   bridge (MESH_REQUEST_LEDGER): 0, or -errno */
+int mesh_ledger(const char *name,const char *path);
 
 #ifdef __cplusplus
 }
