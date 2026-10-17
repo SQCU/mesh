@@ -481,7 +481,9 @@ reading no generation each misdeliver or desynchronise a lane in most runs (lane
 
 A port's flows and lanes are served by the port's two progress threads, its receives' and its SENDs', started at its
 first flow or its lanes and kept for the bridge's life: one pass serves every exclusive flow in the port's table (its
-completion queues, its streams) and the port's lanes (their headers, their landings, their SENDs and completions).
+completion queues, its streams) and the port's lanes (their headers, their landings, their SENDs and completions) while
+a flow in the table rides them or their SENDs or records are in flight, so a port of exclusive flows alone polls its
+flows' queues and no other, as Q5P's threads did (mesh git 5702ea5, a thread a link and direction).
 A flow enters the table when it is to be served and leaves it once neither thread reads it (an epoch each thread tells
 at the end of the first pass that read it: the two threads read `high` and `epoch` on one line at every pass, and a
 store of each pass's epoch by both bounced that line between their cores at the pass rate, a coherence miss in every

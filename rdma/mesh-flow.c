@@ -1288,20 +1288,29 @@ static int port_pass(struct port *port,int side,int *any,uint64_t *told){
   int moved=0;
   *any=0;
   const uint32_t high=atomic_load_explicit(&port->high,memory_order_acquire);
+  int riders=0;
   for(uint32_t i=0;i<high;i++){
     struct flow *f=atomic_load_explicit(&port->table[i],memory_order_acquire);
     if(!f)continue;
     const int progressing=atomic_load_explicit(&f->progressing,memory_order_acquire);
     if(f->exclusive && progressing){*any=1;moved|=side?flow_send(f):flow_receive(f);}
-    else if(!f->exclusive)*any|=side?progressing:atomic_load_explicit(&f->receiving,memory_order_acquire);
+    else if(!f->exclusive){riders=1;*any|=side?progressing:atomic_load_explicit(&f->receiving,memory_order_acquire);}
   }
+  /* #lanes: served while a flow on the port rides them or their SENDs or records are in flight (nothing lands on a lane
+     for a flow this end has not listed) */
   struct lanes *l=&port->lanes;
   if(atomic_load_explicit(&l->up,memory_order_acquire)){
     if(side){
-      for(uint32_t lane=0;lane<MESH_LANES;lane++)moved|=lane_send(port,lane);
-      moved|=lane_retire(port);
-      for(uint32_t lane=0;lane<MESH_LANES;lane++)*any|=((l->gate[lane].posted-l->gate[lane].retired)&MESH_GATE_MASK)!=0;
-    }else{moved|=lane_receive(port);*any|=l->records!=0;}
+      int flight=0;
+      for(uint32_t lane=0;lane<MESH_LANES;lane++)flight|=((l->gate[lane].posted-l->gate[lane].retired)&MESH_GATE_MASK)!=0;
+      if(riders || flight){
+        for(uint32_t lane=0;lane<MESH_LANES;lane++)moved|=lane_send(port,lane);
+        moved|=lane_retire(port);
+        flight=0;
+        for(uint32_t lane=0;lane<MESH_LANES;lane++)flight|=((l->gate[lane].posted-l->gate[lane].retired)&MESH_GATE_MASK)!=0;
+      }
+      *any|=flight;
+    }else if(riders || l->records){moved|=lane_receive(port);*any|=l->records!=0;}
   }
   /* design/bridge-and-ipc.md#progress: told only when it moved (port_settle waits for it), so the line the two threads
      read every pass (`high`, `epoch`) is not written by either each pass */
