@@ -300,7 +300,9 @@ int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
    configuration keeps none, EINVAL for a path not absolute; the connection then closed. */
 #define MESH_SERVICE_BYTES 48
 #define MESH_SERVICE_PATH 104
-enum { MESH_REQUEST_OPEN=1, MESH_REQUEST_SERVE=2, MESH_REQUEST_LEDGER=3 };
+/* MESH_REQUEST_STREAM: a raw one-way stream to a neighbour inside the bridge (design/bridge-dataflow.md#streams;
+   mesh-dataflow.h mesh_stream) */
+enum { MESH_REQUEST_OPEN=1, MESH_REQUEST_SERVE=2, MESH_REQUEST_LEDGER=3, MESH_REQUEST_STREAM=4 };
 struct mesh_request { uint32_t magic,kind,node,reserved; uint64_t bytes; char service[MESH_SERVICE_BYTES]; char path[MESH_SERVICE_PATH]; };
 #define MESH_REQUEST_MAGIC 0x4d524551u
 /* a channel to `service` at `node`, admitted for `bytes` there, open: its connection's descriptor, or -errno */
