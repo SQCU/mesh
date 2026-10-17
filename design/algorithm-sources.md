@@ -3,7 +3,7 @@
 The [user's requirements](collective-goals.md) define scope. These sources supply
 mechanisms, not additional features, architecture, tests or prerequisites. Section
 names retain existing source citation anchors; they do not prescribe public APIs.
-The deleted implementation is not an implementation template. No per-function citation is required; prefer established implementations (the collective is Megatron-LM TP2, Shoeybi et al. 2019).
+A deleted implementation's last whole form is the template its restoration ports onto the current interfaces (the operator, 2026-10-17: "we write another caller which adheres to interfaces compatible with the service and other headers... then we reimplement the previous algorithms to match the adherent caller... then we're done"; "Very little is 'dead' or 'needs to be completely rewritten'."). No per-function citation is required; prefer established implementations (the collective is Megatron-LM TP2, Shoeybi et al. 2019).
 
 ## Program
 
@@ -16,6 +16,24 @@ Submission publishes root indices into existing numerical-worker queues,
 while consumers are indexed by operand publication. No function scan or repeated
 realization is required. The [execution description](async-collectives.md#execution-and-ownership)
 separates shared function metadata from each value's operands and uses.
+
+**The Python surface** (`python/mesh`, restored from mesh `57628982^:python/mesh/` onto the current library): the
+same contract as `swift/Mesh.swift`, spelled as Pallas spells it. A `Program(backend, *, functions, engines, group,
+timeout, trace)` is SPMD: every member records the same calls, and `peer=` (a kernel's), a copy's two ends and a
+collective's members place the work. Recording builds the graph; `realize()` (`start()`, Swift's name) prepares it;
+the host then writes its inputs (`write`) and reads its results (`export`, `Result.ready`, `consume`). The firing
+rule is the old executor's (design/deliverables.md L3): an edge per (writer, reader) pair of overlapping regions on a
+member, a token on it when the writer finishes, a call firing when every input edge holds a token and every output
+edge is empty (a region is reused only once its readers finished: storage of capacity one, Kahn and MacQueen 1977's
+bounded channels), a host write a token on the edges of the block it fills, a call whose inputs are all constants
+firing once. Kernels run on one compute thread, the ready call earliest by row, then record. Operands are torch
+tensors (`Ref.tensor`; `Ref.array` and `write` give NumPy views of CPU ones), each backing allocated where a member's
+call touches it, in the node's bridge's window when the program crosses (`torch_mesh.backend.blank`, over
+`mesh.lease`). Every wait is bounded by the program's `timeout` (default 10 s, mesh.h `MESH_SILENT_NS`'s bound);
+a failure is a value (`Program.report`, `MeshError`) and the caller makes the program again. The package's import
+name is `mesh`, the name `rdma/mesh.py` also takes: importing it loads that module from the same checkout and carries
+its names (`ffi`, `lib`, `lease`, `current`, ...), so `torch_mesh` and `mesh_mpi` find what they import; a program
+puts the checkout's `python/` ahead of `rdma/` on its path before it imports torch (the examples do).
 
 ## Program.tensor
 
@@ -138,6 +156,13 @@ setup. Runtime receive assignment changes page indices, not virtual mappings.
 Metal buffers cover each operand's page-aligned window, using Apple's
 [no-copy buffer API](https://developer.apple.com/documentation/metal/mtldevice/makebuffer(bytesnocopy:length:options:deallocator:)).
 The whole-arena Metal buffer and transport-capacity query have been removed.
+
+In the Python surface a `Ref` is the old native `View` over a backing: (offset, rows, columns, row stride, column
+stride) and `origin`, its corner in the tensor it was cut from. `slice`, `T` and `broadcast` (stride 0) make new
+views of the same backing; two views overlap where their element intervals do (the old row-interval sweep). A
+`Tensor` is its blocks (`block_shape`, `grid`), each its own backing, or one `contiguous` span whose blocks are views of
+it; `region` cuts within a block, `broadcast_to` and `T` view every block. A whole block is the unit of host
+publication (`write`) and of `constant`.
 
 ## Mesh.result
 
@@ -602,6 +627,15 @@ existing row-notification mechanism supply the return events; one numerical
 worker owns each free-index array. This supplies ordinary native storage reuse,
 not X5's unfinished instance-admission rings or R2 failure cancellation.
 
+`Program.kernel_call(kernel, *, out_shape, grid, in_specs, out_specs, peer=None)` in the Python surface records one
+call a grid coordinate: each `BlockSpec(block_shape, index_map, region_map)` resolves an operand's block at the
+coordinate (`index_map` its block indices, `region_map(ref, *coordinate)` a region within it; `block_shape` None the
+whole operand), outputs are fresh tensors of the out specs' blocks, and the call runs on member `peer` (every member
+where None). A kernel is a supplied function `kernel(program, inputs, outputs)` over Refs (a program's `functions`
+maps a kernel to another binding) or a `kernels.expression`. An input carrying a `Partial` (an unfinished sum: some of
+its contribution set) is refused by any kernel but `kernels.add` (TypeError): a nonlinear function of a sum waits for
+the sum (design/deliverables.md, Definition, consequence 3); `Partial.merge` refuses a contribution counted twice.
+
 ## Program.map
 
 The JAX authors' [Pallas scalar prefetch](https://docs.jax.dev/en/latest/pallas/tpu/sparse.html)
@@ -854,6 +888,18 @@ The deadline is setup state only: TX, RX, numerical publication and consumer
 completion contain no clock check. As [RDMA-RULES.md](../RDMA-RULES.md) explains,
 userspace deadlines cannot unwind a driver call already blocked in kernel sleep.
 
+In the Python surface `Program.copy(source.on(sender), destination.on(receiver), *, queue=0)` (also `send`, `recv`)
+cuts tensors at both block grids into regions; a region whose two ends are one member is a local copy call, else a
+crossing: libnccl-mesh's send and receive (`torch.distributed` on the "mesh" backend: rdma/torch-mesh/README.md),
+the source read on the sender, the destination defined on the receiver. A communicator's positions pair in the order
+both ends issue them (rdma/NCCL.md "Rules a program keeps"), so every member computes one order from the graph all
+members recorded: a topological order of the calls, the earliest row first, then the earliest record. Each queue is
+its own communicator, its crossings in that order, round after round, on a thread of its own (CPU: a host-path call
+completes where it returns) or, on MPS, issued by the compute thread as they become ready (encoded on torch's stream;
+a receive's landing is waited where its first reader runs). A crossing waits only for its own inputs, so a section
+withheld on one queue holds only that queue's later crossings: progress independent of a withheld section, or of the
+other direction, is a queue of its own. `replicate(source, peer)` sends each backing once and views it on the peer.
+
 ## Independent native queues
 
 Dotan Barak's rdma-core
@@ -1077,15 +1123,29 @@ Apple's [vDSP_vramp](https://developer.apple.com/documentation/accelerate/vdsp_v
 is the existing numerical generator called by the configured Core ML chain's
 initial producers. It writes directly into each registered operand.
 
+`Program.write(ref)` (a context manager) yields the block to fill (a NumPy view of a CPU block; a staged array copied
+in on MPS) and on exit publishes it: a token on each edge from the block to its readers. A block whose last
+publication still has readers refuses (BlockingIOError); `Ref.writable` asks. A write before `realize()` is published
+at it.
+
 ## Program.export
 
 MLX authors' [Metal evaluation](https://github.com/ml-explore/mlx/blob/main/mlx/backend/metal/eval.cpp):
 reference for retaining operands through actual operation completion.
 
+`Program.export(ref)` is a host reader of a region on the exporting member alone (it changes no member's order):
+`Result.ready` once its writers' tokens arrived (on MPS once an event recorded after them completed), `Result.array`
+its read-only values, `Result.consume()` releases it, so its writers may run again.
+
 ## kernels.expression
 
 The JAX authors' [Pallas indexing](https://docs.jax.dev/en/latest/pallas/design/design.html#indexing-refs):
 values, indices and masks. This is not a requirement for a general expression compiler.
+
+The Python surface's expressions (`kernels.arguments`, `indices`, `program_id`, `select`, `.at(row, column, mask,
+other)`, `.astype`, `.sum(axis)`, `.T`, `.exp`, `.rsqrt`, the arithmetic and comparison operators) are evaluated by
+torch over each output block: no source is generated. `row` and `column` are the output block's own indices,
+`program_id(axis)` the grid coordinate; floating values are computed in FP32 and stored in the output's type.
 
 ## kernels.dot
 
@@ -1095,6 +1155,10 @@ Subprograms* (1990), Apple [MPSMatrixMultiplication](https://developer.apple.com
 and [Core ML MIL operations](https://apple.github.io/coremltools/source/coremltools.converters.mil.mil.ops.defs.html):
 existing contractions. The [reduction algebra](distributed-reduce.md) describes
 contributions without prescribing intermediate-buffer or launch counts.
+
+In the Python surface `kernels.matmul` (a supplied kernel over a (rows, K) and a (K, columns) Ref) and an expression's
+`dot` contract on the program's engines: `torch_mesh.engines.Linear` over the program's `Engines` operand (MPS
+programs; a constant right operand, its shards resident), else torch's own product.
 
 ## kernels.add
 
@@ -1110,6 +1174,9 @@ is the existing float32 vector sum supplied to reduce-scatter by the configured
 Core ML caller. It receives resolved input/output pointers and introduces no
 payload allocation, copy, or replacement sum implementation in Mesh.
 
+`kernels.add`, `maximum` and `minimum` (NaN-ignoring), `swish` and `identity` are expressions; `add`, `maximum` and
+`minimum` are also the combines the Python surface's reductions hand libnccl-mesh (`ncclSum`, `ncclMax`, `ncclMin`).
+
 ## collective.reduce_scatter
 
 Rabenseifner, *Optimization of Collective Reduction Operations* (2004), and the
@@ -1117,11 +1184,23 @@ MPI Forum's [collectives](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/no
 reduction semantics and decompositions. A source does not mandate one decomposition
 for every collective or caller placement.
 
+The Python surface's `reduce_scatter(program, value, *, peers, owners, op=kernels.add, queue=0)` (also `sum_scatter`),
+`reduce(..., root, peers)` and `all_reduce(..., peers, owners=None)` (`all_sum`, `all_max`, `all_min`) reduce each
+block in place by libnccl-mesh's own reduce or all-reduce where `op` is `add`, `maximum` or `minimum` (its owner's
+contribution counted where the owner is a peer, else its block filled with the combine's identity first): an update
+of the block, its readers taking the reduced value. Any other associative combine is the old form: each peer's term
+copied to the owner and combined there by a tree of the combine's kernel (`kernel_call(op, peer=owner)`), into fresh
+blocks; `all_reduce` of such a combine is that `reduce_scatter`, then `all_gather`.
+
 ## Collective movement
 
 The MPI Forum's [collectives](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node114.htm)
 and MLX's [distributed operations](https://github.com/ml-explore/mlx/blob/main/mlx/distributed/ops.cpp):
 [distinct communication relations](collective-verbs.md).
+
+In the Python surface `broadcast(program, value, *, root, peers)` and `all_gather(..., peers, owners)` are a
+libnccl-mesh broadcast of each block rooted at its owner over a communicator of its members; `scatter`, `gather` and
+`all_to_all` copy each block along its route (`send`/`recv`). Each defines the block on its receivers in place.
 
 ## Vocabulary projection
 
@@ -1208,10 +1287,21 @@ mechanism to account for; a timestamp alone is not evidence that payload stores
 are visible. Mesh has not yet integrated this mechanism, and its latency is not
 established by the engine's direct-send graph.
 
+The Python surface's `nn.linear(program, x, w, *, tile_rows, tile_k, tile_columns, peer, output_dtype)` cuts K into
+panels at `tile_k` (and at the operands' block edges): each panel a grid of `kernels.matmul` calls whose products are
+`Partial`s of one contribution set, summed by a tree of `kernels.add` calls tile by tile, so a tile's sum is published
+as its panels finish (SUMMA's K-panel rank-k updates, van de Geijn and Watts 1997). `nn.ffn(program, inputs,
+up_weights, down_weights, *, tile_rows, tile_k, tile_columns, exchange=None, peer=None)` sums each hidden section's
+input partitions, applies swish to the completed hidden tiles, hands each to `exchange` (a caller's crossing) and
+contracts it with the section's down projection, the sections' products summed.
+
 ## nn.rmsnorm
 
 Zhang and Sennrich, [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467)
 (2019): normalization used by the existing numerical implementation.
+
+The Python surface's `nn.rmsnorm(program, x, gamma, *, tile_rows, epsilon=1e-6, peer=None)`: each column panel's sum
+of squares a `Partial` of the row statistic, the panels summed, then each tile normalized by the completed statistic.
 
 ## nn.embedding
 
@@ -1231,11 +1321,18 @@ reads the second operand at its own row stride. The
 account for all row counts and the removed 34 projection launches on E2B.
 Mesh gains no arithmetic kernel or transport behavior from this engine change.
 
+The Python surface's `nn.embedding(program, table, indices, *, tile_rows, tile_columns, peer)` gathers each (row,
+column) tile of the table's rows by `kernels.gather` (a negative index counts from the end); `nn.summed_embedding`
+adds tables' embeddings to an input, tile by tile.
+
 ## collective.sync_on_remote_fill
 
 The MPI Forum's [communication completion](https://www.mpi-forum.org/docs/mpi-4.1/mpi41-report/node74.htm):
 explicit completion operations. The user requested an explicit counterexample;
 no default collective may invoke it.
+
+In the Python surface `collective.sync_on_remote_fill(*results, timeout=None)` waits until every result is filled,
+within its program's `timeout` (TimeoutError past it; MeshError where the program failed). No verb calls it.
 
 ## report statistics
 
