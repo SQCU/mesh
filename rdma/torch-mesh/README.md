@@ -82,6 +82,30 @@ ending at their arrival or the call's failure, never at a time. Reproduction tar
 docs/measurement.md 2026-09-30, part B, mesh ab98765 and metal-microbench 31fed26): ep 27.5-27.7 ms a step, the counted
 call's overhead 473-480 us.
 
+### Record and replay
+
+`torch_mesh.record(step)` and `torch_mesh.replay(recording, steps)` are a step recorded once and replayed (the CUDA
+graph's analogue) through torch's documented compile path: `step` (no arguments, its collectives torch's) is one graph
+(`torch.compile`, `fullgraph=True`) compiled at its first replay by the `"mesh"` backend (its collectives functional,
+each issued on torch's stream and batched into torch's command buffers: Performance), every rank's compilation met at
+the default group's store before any of its collectives runs (a rank compiling past the library's silent-link bound
+would otherwise cancel its peers' first crossings). Each replay is waited for; `replay` returns the last one's seconds
+on the GPU (MPS timing events). Reproduction target (metal-microbench docs/measurement.md 2026-09-30, parts C and D,
+the 10-01 form): a replayed tp step 262.7-263.1 ms (SP=1 245.8-246.3, cp 512.3-513.7), a 16.8 MB all-reduce 63-64 us a
+call past the wire against 186-216 eager.
+
+The 10-01 form (mesh 4cbe704 `record`/`replay`, metal-microbench 35c30a9 `metal_recording.m`) also recorded every Metal
+command the step encoded, from any thread, and replayed them as one program; had torch's own copy kernels that store a
+send buffer publish it by range (`MetalRecordPublish`), so its sends started as the ranges were stored; gated the
+replay's command buffers on the calls' landings (`MetalRecordGate`); and made each call persistent, its receives posted
+ahead from the replay's leading cut (`ncclMeshPersistentStart`). Those need the recorder interposed on Metal
+(`DYLD_INSERT_LIBRARIES`), which acceptance A53 forbids, and torch documents no MPS command capture to take its place
+(no MPS analogue of `torch.cuda.graph`; its MPS kernels encode into its own stream's encoder). So a replay here runs
+Inductor's wrapper and torch's MPS kernels each time; the posting ahead is the bridges' (an exclusive flow's receives
+are posted ahead of the data: [design/bridge-dataflow.md](../../design/bridge-dataflow.md)), and the planning once is
+the communicator's compiled programs'. A training step's backward, run
+by autograd, is compiled but not batched.
+
 ## What does not
 
 - FSDP2 (`fully_shard`): torch's MPS has no streams or `current_device`, and its copy-in ops have no MPS kernel.

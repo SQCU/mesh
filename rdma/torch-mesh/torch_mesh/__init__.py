@@ -12,7 +12,10 @@ outside it).
 
 all_to_all_counted() is MPI_Alltoallv whose counts the GPU wrote (the torch operator torch_mesh::all_to_all_counted over
 libnccl-mesh's ncclMeshAlltoAllCounted): a mixture of experts' dispatch and combine with no host sync, counted() its
-received counts on the host as they land."""
+received counts on the host as they land.
+
+record() and replay() are a step recorded once and replayed (the CUDA graph's analogue) through torch's documented
+compile path: the step one graph (torch.compile, fullgraph) of the "mesh" backend, its collectives batched."""
 
 
 def _autoload():
@@ -119,3 +122,65 @@ def counted(handle):
     landed: waited for on the host, not the GPU, until they arrive or the call fails (backend.counted)."""
     from . import backend
     return backend.counted(*handle)
+
+
+class Recording:
+    """A record()ed step: `step` compiled whole by the "mesh" backend at its first replay, each rank's compilation met
+    by every rank's before any of its collectives runs; `graphs` the graphs compiled so far."""
+
+    def __init__(self, step, name):
+        import torch
+        self.step, self.name, self.graphs, self.replays = step, name, 0, 0
+        self.compiled = torch.compile(step, backend=self._backend, fullgraph=True, dynamic=False)
+
+    def _backend(self, gm, example_inputs):
+        """compiler's graph, then every rank's compilation of it met at the default group's store (a rank's compile
+        outlasting the library's silent-link bound would cancel a peer's first crossings): bounded by the store's
+        timeout."""
+        import torch.distributed as dist
+        made = compiler(gm, example_inputs)
+        if dist.is_initialized():
+            store, key = dist.distributed_c10d._get_default_store(), f'mesh/recording/{self.name}/{self.graphs}'
+            store.set(f'{key}/{dist.get_rank()}', b'1')
+            store.wait([f'{key}/{r}' for r in range(dist.get_world_size())])
+        self.graphs += 1
+        return made
+
+
+_recordings = 0
+
+
+def record(step):
+    """`step` (a function of no arguments that runs one step on MPS tensors, its collectives torch's) recorded, the
+    CUDA graph's analogue, through torch's documented compile path (A53: no interposition): one graph of the step
+    (torch.compile with fullgraph, its collectives functional ones), compiled at its first replay by the "mesh"
+    backend (compiler: Inductor's kernels, the graph's collectives batched into torch's command buffers, each issued on
+    torch's stream and completed where it is waited) after every rank has compiled it.  Nothing runs while it records:
+    its tensors keep what they held, and each replay writes them.  Every rank records the same steps in the same
+    order.  What the 10-01 form (mesh 4cbe704, metal-microbench 35c30a9 metal_recording.m) did beyond this needs an
+    interposed recorder of torch's Metal commands, which has no documented extension point (README, Record and
+    replay)."""
+    global _recordings
+    _recordings += 1
+    return Recording(step, _recordings)
+
+
+def replay(recording, steps=1):
+    """`steps` replays of a record()ed step, each waited for; every rank replays alike.  The last one's seconds on the
+    GPU (MPS timing events around it on torch's stream)."""
+    import torch
+    torch.mps.synchronize()
+    seconds = 0.0
+    for i in range(steps):
+        last = i == steps - 1
+        if last:
+            begin, end = torch.mps.Event(enable_timing=True), torch.mps.Event(enable_timing=True)
+            begin.record()
+        recording.compiled()
+        if last:
+            end.record()
+        torch.mps.synchronize()
+        if last:
+            seconds = begin.elapsed_time(end) / 1e3
+        recording.replays += 1
+    return seconds
