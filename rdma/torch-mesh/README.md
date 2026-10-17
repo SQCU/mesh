@@ -47,7 +47,9 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
   tensors copies 0 bytes (16.78 MB otherwise); part B: tp 271.5-272.2 ms a step. Other MPS tensors are torch's MPS
   allocator's, copied into the window's rings: torch's MPS factories take their allocator from a fixed instance
   (`at::mps::GetMPSAllocator`, no registered or pluggable allocator for MPS), so a program places a tensor in the
-  window by making it with `empty`, never by default.
+  window by making it with `empty`, never by default. metal-microbench's callers: `tools/torch_parallel/ep.py`
+  `COUNTED=1` gathers its dispatched rows into one window tensor and writes its experts' outputs into another (its two
+  send buffers, made once at their fixed shapes), and `crossing.py` `WINDOW=1` all-reduces one in place.
 
 ## What works
 
@@ -78,9 +80,11 @@ q of `counts` (int64 on the input's device, `send_segments[q]` entries) sums to;
 with its rows in one exchange, received packed in rank order into `capacity` rows. It returns `(rows, landed, handle,
 work)`: `landed` the received counts on the GPU once `work.wait()` has ordered the call on torch's stream, and
 `torch_mesh.counted(handle)` the same counts on the host as they land (a window CPU tensor the library writes), its wait
-ending at their arrival or the call's failure, never at a time. Reproduction target (metal-microbench
-docs/measurement.md 2026-09-30, part B, mesh ab98765 and metal-microbench 31fed26): ep 27.5-27.7 ms a step, the counted
-call's overhead 473-480 us.
+ending at their arrival or the call's failure, never at a time. Its caller is metal-microbench
+`tools/torch_parallel/ep.py` with `COUNTED=1` (the 09-30 dispatch and combine: the experts' slots on `partition`'s "ep"
+dimension, the counts made on the GPU and unpacked to each rank's slots, no `.tolist()` of the splits). Reproduction
+target (metal-microbench docs/measurement.md 2026-09-30, part B, mesh ab98765 and metal-microbench 31fed26): `ep.py`
+`COUNTED=1 PARTS="1,7 2,6" CAPACITY=2,7` on the pair, 27.5-27.7 ms a step, the counted call's overhead 473-480 us.
 
 ### Record and replay
 
@@ -90,8 +94,10 @@ graph's analogue) through torch's documented compile path: `step` (no arguments,
 each issued on torch's stream and batched into torch's command buffers: Performance), every rank's compilation met at
 the default group's store before any of its collectives runs (a rank compiling past the library's silent-link bound
 would otherwise cancel its peers' first crossings). Each replay is waited for; `replay` returns the last one's seconds
-on the GPU (MPS timing events). Reproduction target (metal-microbench docs/measurement.md 2026-09-30, parts C and D,
-the 10-01 form): a replayed tp step 262.7-263.1 ms (SP=1 245.8-246.3, cp 512.3-513.7), a 16.8 MB all-reduce 63-64 us a
+on the GPU (MPS timing events). Its caller is metal-microbench `tools/torch_parallel/tp.py` with `CAPTURE=K`: a
+training step (its gradients set to none, the forward, `out.sum().backward()`) recorded whole, `Tensor.backward`
+traced by Dynamo under its `trace_autograd_ops`, replayed and checked at each of its parts. Reproduction target
+(metal-microbench docs/measurement.md 2026-09-30, parts C and D, the 10-01 form): a replayed tp step 262.7-263.1 ms (SP=1 245.8-246.3, cp 512.3-513.7), a 16.8 MB all-reduce 63-64 us a
 call past the wire against 186-216 eager.
 
 The 10-01 form (mesh 4cbe704 `record`/`replay`, metal-microbench 35c30a9 `metal_recording.m`) also recorded every Metal
@@ -133,8 +139,10 @@ share and calling the list collectives with unequal sizes (`all_gather(list)`, `
 `all_to_all_single` with splits: MPI's v-collectives). An unequal list is one program over unequal segments, the
 library's MPI_Allgatherv and MPI_Reduce_scatter (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`, [NCCL.md](../NCCL.md)),
 not a broadcast or reduce rooted at each rank; where the list is the pieces of one contiguous tensor (`out.split(sizes)`,
-as `partition`'s collectives pass it) the call reads or writes that tensor in place. Reproduction target (metal-microbench
-docs/measurement.md, 2026-09-30): tp SP=1 at capacity-shaped parts 255-256 ms a step on the pair, an SP=1 all-gather
+as `partition`'s collectives pass it) the call reads or writes that tensor in place. Its callers are metal-microbench
+`tools/torch_parallel/tp.py` and `cp.py`, at `PARTITION` (parts that are their own capacity) or at `PARTS` checked in
+turn within `CAPACITY` in one process (the 09-30 form). Reproduction target (metal-microbench docs/measurement.md,
+2026-09-30): `tp.py` `SP=1 PARTS="5,11 4,12" CAPACITY=5,12`, 255-256 ms a step on the pair, an SP=1 all-gather
 214-229 us and a reduce-scatter 196-212 us a call. On DTensor the partition is a placement, `RaggedShard`, carried
 by `RaggedTensor`, a DTensor subclass whose own dispatch keeps it capacity-shaped through every op (padding re-masked
 before contractions, gathered where an op needs the dimension whole); nothing of torch is patched.
@@ -182,7 +190,8 @@ parts, written = partition.rebalance(mesh, "tp", every=8)   # written: moved wit
   `allocate.pareto(rows, coordinate=("ctx_in", "ctx_out"))` keeps, per workload coordinate, the call records (each a
   call's own `aggregate_tok_s` and `per_sequence_tok_s`, its `program`, `backend` and batch `bs`) that no other beats in
   both, and which backends dominate others over the points both ran; from calls alone (no solo run, no fit). The
-  sampling of batch and context that feeds it is metal-microbench's. Reproduction target (metal-microbench
+  sampling of batch and context that feeds it is metal-microbench's `tools/mesh/frontier.py` (every point a call
+  through `grid.py`'s call path). Reproduction target (metal-microbench
   output_data/confirm-20260924/summary.json): at 16384/1024, bs 4, 564.6 aggregate and 141.1 per-sequence tok/s.
 
 ## Uneven engines within a node
@@ -327,6 +336,11 @@ w = s["lm_head"].to("cpu")                        # decoded
   point) is Inductor's compilation with each run of a compiled graph a batch (`_stream.mm` `batch`): a collective's
   publication joins torch's open command buffer while two of the graph's buffers are in flight (a shared event counts
   them), and the graph's end commits what it left open, so a compiled collective does not pay the command-buffer floor
-  of its own commit. Reproduction target: metal-microbench `crossing.py` with `COMPILE=1` and `backend="mesh"`, 12.7 us
+  of its own commit. Reproduction target: metal-microbench `crossing.py` with `COMPILE=1 COMPILER=mesh`, 12.7 us
   a crossing (mesh 3c00d37; 17.4 us eager). A graph's backward, run from autograd, is not batched.
+- Resident ranks: metal-microbench `tools/torch_parallel/pair.py up | call | down` keeps one torch process a node
+  (`resident.py`: the process group, each program's weights, reference and recorded step), its service registered with
+  its own bridge and every call carried through the bridges, so a check costs its function and a round trip; a call
+  that fails is a value and the next opens its sessions on the map as it is then. `timeline.py` gives each call's
+  terms (gate, network, tail, the peer's lateness, overhead) from the bridges' ledgers (`rdma/ledger.py`).
 - Readings and their records: metal-microbench `docs/measurement.md`.
