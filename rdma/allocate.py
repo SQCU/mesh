@@ -539,7 +539,8 @@ class Balancer:
     parts (R4).
 
     A move costs the call that takes it its members' preparation of the placement it makes (metal-microbench
-    docs/placement.md#moves: S), unless they prepared it before: with `prepare`, a move observe takes waits as `pending`
+    docs/placement.md#moves: S), unless they prepared it before or the decision is `ragged` (its parts the calls' data,
+    which no preparation reads: taken at once, whatever `prepare`): with `prepare`, a move observe takes waits as `pending`
     until every member has prepared the placement it makes, when `prepared` takes it, a move measured worse going back
     the same way (make before break [RFC 3209]: the placement it returns to need not be prepared still, its nested
     divisions refitted to its parts, and a call never runs one that is not, which had cost a call 19.7 s of Neural Engine
@@ -776,13 +777,16 @@ class Balancer:
                 d['before'], d['stands'] = None, False
                 continue
             taken |= runs[name]
-            if reverting and prepare:
+            # metal-microbench docs/placement.md#ragged-shares-a-move-is-data: a ragged decision's parts are each call's data,
+            # so its move prepares nothing and is taken at once
+            prepare_ = prepare and not d.get('ragged')
+            if reverting and prepare_:
                 d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
                 d['stands'], d['last'], d['pending'], d['reverting'] = False, value, list(value[0]), True
             elif reverting:
                 d['reach'] = max(1.0, d.get('reach', 2.0) / 2)
                 d['before'], d['parts'], d['stands'], d['last'], d['pending'] = None, list(value[0]), False, value, None
-            elif not prepare or list(value) == d['parts'] and not d.get('pending'):
+            elif not prepare_ or list(value) == d['parts'] and not d.get('pending'):
                 d['before'], d['parts'], d['stands'] = list(d['parts']), list(value), False
             elif not d.get('pending'):
                 d['pending'], d['stands'] = list(value), False
