@@ -3164,6 +3164,8 @@ int main(int argc,char **argv){
          awaiting program (`busy` 0) */
       if(!rebuilt && binary.st_ino && (stat(argv[0],&current) || current.st_ino!=binary.st_ino || current.st_mtimespec.tv_sec!=binary.st_mtimespec.tv_sec)){
         rebuilt=1;
+        atomic_store_explicit(&M->stopping,1,memory_order_release);
+        mesh_notify(&M->control);
         if(flow_count || await_count)say("bridge node %u: its binary changed; it stops once no program runs through it\n",node);
       }
       if(rebuilt && !flow_count && !await_count){stop=1;stop_reason=MESH_STOP_BINARY;}

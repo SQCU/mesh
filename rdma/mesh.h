@@ -11,7 +11,7 @@
 #define MESH_NAME "/mesh0"
 #define MESH_PORT "18519"
 #define MESH_MODE 0666
-#define MESH_VERSION 116u
+#define MESH_VERSION 117u
 #define MESH_ABSENT UINT32_MAX
 /* design/bridge-and-ipc.md#region: the node's ports, its client slots and each client's destination nodes */
 #define MESH_PORTS 8
@@ -127,12 +127,15 @@ struct mesh_client {
 };
 /* design/prepared-machine.md#M01, #M09; `busy`, design/bridge-and-ipc.md#region: the flows and awaiting programs the
    bridge holds (0 between calls), and since when it has held none (`idle_since`, the wall clock in ns; 0 while it holds
-   any); `bell`, design/bridge-and-ipc.md#progress: a port's word its parked progress threads wait on, which a client
-   rings (mesh_notify) as a group of a program riding that port starts */
+   any); `stopping`, design/bridge-and-ipc.md#region: nonzero once the bridge waits to stop (its binary changed) for the
+   flows it holds to end, so a client holding flows past their execution (metal-microbench
+   docs/placement.md#retention-and-protention-the-next-execution-planned-ahead) releases them between executions and holds
+   none after; `bell`, design/bridge-and-ipc.md#progress: a port's word its parked progress threads wait on, which a
+   client rings (mesh_notify) as a group of a program riding that port starts */
 struct hdr {
   uint32_t magic,version,pgsz,block,rows,node,links,clients;
   uint64_t planes_off,arena_off,page_off,buffer_off,link_off,client_off,delivery_off,data_off,length,boot;
-  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,idle_since;
+  _Atomic uint64_t bridge_pid,serial,control,map,map_off,map_nodes,health,busy,idle_since,stopping;
   _Atomic uint64_t bell[MESH_PORTS];
 };
 /* design/prepared-machine.md#M26 */

@@ -2576,6 +2576,13 @@ void ncclMeshMetal4Records(uint64_t *issued, uint64_t *capacity) { metal_records
 
 void ncclMeshSessionWaits(uint64_t *ns) { *ns = atomic_load(&session_waits); }
 
+int ncclMeshBridgeStopping(void) {
+  pthread_mutex_lock(&attach_lock);
+  const int stopping = attaches && attach_live(attaches) && atomic_load_explicit(&attaches->context.M->stopping, memory_order_acquire) != 0;
+  pthread_mutex_unlock(&attach_lock);
+  return stopping;
+}
+
 ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int root, size_t count, ncclDataType_t type, ncclRedOp_t op,
                                    int *publishes, int *lands) {
   if (!publishes || !lands) return fail(ncclInvalidArgument, "publishes or lands is NULL");

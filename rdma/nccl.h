@@ -932,6 +932,11 @@ void ncclMeshMetal4Records(uint64_t* issued, uint64_t* capacity);
    their programs.  A caller that times its work across a session's opening takes this out of it: what a peer's late
    start or a flow's pairing held it, not its own work (metal-microbench tools/mesh/rates.py measured). */
 void ncclMeshSessionWaits(uint64_t* ns);
+/* Whether this process's node's bridge waits to stop (its binary changed: the region's `stopping`), so a caller that
+   holds communicators past their execution (metal-microbench docs/placement.md#retention-and-protention-the-next-
+   execution-planned-ahead) destroys them between executions and holds none after: 1, else 0 (no attach, or a bridge
+   that runs on). */
+int ncclMeshBridgeStopping(void);
 /* Every lease this process holds (ncclMemAlloc) is of its node's bridge that runs: ncclSuccess, or ncclRemoteError
    where one is of a bridge that stopped, its pages no longer registered (Memory, above).  A process that holds leases
    and makes no other call (a server between calls) reads it to know its leases are to be freed and taken again. */

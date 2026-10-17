@@ -86,7 +86,11 @@ region's `busy` word is the count of flows and awaiting programs the bridge hold
 calls, and `idle_since` the wall clock (ns) at which it last came to 0 (0 while it is not): a node's idle test (the
 convergence's, bin/mesh-converge.sh, through mesh-stat's `idle` and `idle_since`, which the library's reader
 mesh-plan.h `mesh_busy` reads), so a node that only relays another node's call is busy, and the bridge's own before
-it stops for a rebuilt binary.
+it stops for a rebuilt binary. Its `stopping` word turns nonzero once the bridge waits to stop for a rebuilt binary:
+a client that holds flows past their execution (a session kept for the next execution, metal-microbench
+docs/placement.md#retention-and-protention-the-next-execution-planned-ahead) reads it (nccl.h `ncclMeshBridgeStopping`),
+releases what it holds between executions and holds nothing after, so a held flow never keeps a bridge from its
+upgrade.
 
 A client slot (`struct mesh_client`) holds one client: its owner word (the client's generation, slot and process), its
 execution's key, its program once started (`configured`), its ring depth and whether it is cyclic, its publication

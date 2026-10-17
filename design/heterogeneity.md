@@ -76,21 +76,26 @@ need are MPI's v-collectives [MPI 4.1 §6.5-6.10].
 
 The module docstring (`torch_mesh/partition.py`) is the API. This section is only its shape.
 
-**Import.**
-- On backend "mesh", no import is needed: `init_process_group(backend="mesh")`, which comes before
-  any `DeviceMesh`, makes the backend's first process group, and that installs
-  `torch_mesh.partition`.
-- A program that imports `context_parallel_unshard` by name imports `torch_mesh.partition` first.
-- On any other backend, import `torch_mesh.partition` before making the mesh.
+**Use.** `torch_mesh.partition` installs nothing into torch (metal-microbench docs/acceptance-20261014.md A53): a
+program uses its functions where a partitioned dimension is meant, and torch's own run as torch runs them.
+- On MPS the mesh is formed from the process groups, `DeviceMesh.from_group(dist.group.WORLD, "mps",
+  mesh_dim_names=("tp",))` (torch 2.14's `init_device_mesh("mps")` needs device calls its MPS module lacks).
+- The partition is a placement, `RaggedShard(dim, key)` (a subclass of torch's `Shard`; `partition.shard(mesh, "tp",
+  dim)` gives the attached dimension's), and a DTensor holding one is a `RaggedTensor`, whose own dispatch keeps it
+  ragged through every op, re-masks the padding before each sum, max or min over a ragged dimension and gathers the
+  dimension whole where an op needs it so (the module docstring lists every torch entry point it uses).
+- `partition.distribute_tensor`, `partition.from_local` and `partition.redistribute`, `partition.ColwiseParallel`,
+  `RowwiseParallel` and `SequenceParallel`, and context parallelism's `partition.context_parallel_buffers`,
+  `ring_attention` and `context_parallel_unshard` are torch's with the attached dimension's `RaggedShard`.
 
 **Operand.**
 - `partition.attach(mesh, tp=(capacity, parts))`, before the mesh is first used, the same on every
   rank; a sub-mesh keeps its root's. `partition.write(mesh, tp=parts)` changes the parts between calls.
 - `partition.sizes(mesh, "tp", N)` gives the local buffers' sizes of N (R14).
 - A program takes its own splits from
-  `distribute_tensor(x, mesh, [Shard(d)], src_data_rank=None).to_local()` or from `sizes()`, never
-  from `x.chunk(world)`.
-- `from_local` without `shape=` means "a capacity block" (global = local·P/c_r).
+  `partition.distribute_tensor(x, mesh, [partition.shard(mesh, "tp", d)], src_data_rank=None).to_local()` or from
+  `sizes()`, never from `x.chunk(world)`.
+- `partition.from_local` without `shape=` means "a capacity block" (global = local·P/c_r).
 - Every extent split along a partitioned dimension is a multiple of P; any other raises
   `ValueError`, on every rank alike. No mesh dimension of more than one coordinate precedes a
   partitioned one (attach raises otherwise), so no outer split reaches a partitioned dimension first
