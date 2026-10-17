@@ -1636,10 +1636,28 @@ def _probe(args):
 def slices(streamed, record=None, rank=None):
     """Each coded matrix's slice a rank holds (its record's slices: a tensor's output ranges are rows, its input range
     columns; the head's rows its vocabulary; and each layer's FFN neurons its GPU computes in a phase of their own, its
-    engines' gpu range and its prefill columns), every matrix whole without a record: (name, matrix)."""
+    engines' gpu range and its prefill columns; where the record's `ragged` names the column axis, every width of its
+    decode columns on the decision's lattice), every matrix whole without a record: (name, matrix)."""
     part = record['ranks'][rank] if record else None
     out = []
+    ragged = 'column' in ((record or {}).get('ragged') or ())
+    unit = next(((sum(d['parts']), d['grain']) for name, d in ((record or {}).get('decisions') or {}).items()
+                 if name.startswith('columns ')), None)
     for L, layer in enumerate((part or {}).get('layers') or []):
+        base = f'model.language_model.layers.{L}.mlp.'
+        if ragged and unit and layer.get('columns') and base + 'gate_proj' in streamed.matrices:
+            # metal-microbench docs/placement.md#ragged-shares-a-move-is-data: each call's columns are its data, so every width
+            # on the decision's lattice, from this member's side of the layer, each a view at the whole layer's widths
+            gate, up, down = (streamed[base + p] for p in ('gate_proj', 'up_proj', 'down_proj'))
+            whole, (a, b) = gate.rows, layer['columns']
+            step = unit[1] * whole // unit[0]
+            for n in range(step, whole + 1, step):
+                span = (whole - n, whole) if b == whole and a > 0 else (0, n)
+                for name, m, cut in ((base + 'gate_proj', gate, dict(rows=span)), (base + 'up_proj', up, dict(rows=span)),
+                                     (base + 'down_proj', down, dict(columns=span))):
+                    view = m.cut(**cut)
+                    view.widths = m.widths
+                    out.append((name, view))
         for span in ((layer.get('engines') or {}).get('gpu'), (layer.get('prefill') or {}).get('columns')):
             base = f'model.language_model.layers.{L}.mlp.'
             if span and span[1] > span[0] and base + 'gate_proj' in streamed.matrices:
