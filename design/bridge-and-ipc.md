@@ -482,8 +482,8 @@ reading no generation each misdeliver or desynchronise a lane in most runs (lane
 A port's flows and lanes are served by the port's two progress threads, its receives' and its SENDs', started at its
 first flow or its lanes and kept for the bridge's life: one pass serves every exclusive flow in the port's table (its
 completion queues, its streams) and the port's lanes (their headers, their landings, their SENDs and completions) while
-a flow in the table rides them, their SENDs or records are in flight, or an exclusive flow progresses (#keepalive: its
-frames are posted and heard there).
+a flow in the table rides them or their SENDs are in flight (their SENDs), at every pass (their receives), and while an
+exclusive flow progresses (#keepalive).
 A flow enters the table when it is to be served and leaves it once neither thread reads it (an epoch each thread tells
 at the end of the first pass that read it: the two threads read `high` and `epoch` on one line at every pass, and a
 store of each pass's epoch by both bounced that line between their cores at the pass rate, a coherence miss in every
@@ -513,12 +513,19 @@ release before it reads that word, so one of the two sees the other.
 
 A configuration's `keepalive_us` (etc/bridge/README.md; the bridge reads `keepalive`, nanoseconds) bounds how long a
 port's lanes go without a frame while an exclusive flow on the port progresses: the send thread, at a pass at least
-that long after its last, posts an empty header on the next lane (`lane_keepalive`: the lane's next header page and
-sequence, no entries, its first 16 bytes alone, one frame against the peer's one-frame header receive, its gate's frame
-retired as any lane SEND's), and the receive thread serves the lanes while such a flow progresses, so it hears the
-peer's (`lane_heard`: nothing to post, the next header listened for). A document that states none sends none, and a
-peer that sends them to a bridge that sends none is still heard. The wire is the lanes' own: a header of no entries was
-always one, so no version changed.
+that long after its last, posts an empty header on the next lane whose gate holds nothing in flight (`lane_keepalive`:
+the lane's next header page and sequence, no entries, its first 16 bytes alone, one frame against the peer's one-frame
+header receive), so a frame the peer has not yet heard holds no other behind it; the receive thread serves the lanes'
+receives at every pass while they are up, so the peer's are heard while this end runs nothing of its own
+(`lane_heard`: nothing to post, the next header listened for). Each flow's census line at its release is followed by
+the port's counts, keepalives posted and heard. A document that states none sends none, and a peer that sends them to
+a bridge that sends none is still heard. The wire is the lanes' own: a header of no entries was always one, so no
+version changed.
+
+The first form (mesh b21ced65) served the lanes' receives only while an exclusive flow of the receiving end progressed
+and let eight headers a lane queue: a peer whose flow ended first left the next frames unheard, and from the second
+call on the frames stopped (the Mini's SEND completion 1.8-1.9 us through the first call after the bridges paired,
+6.2 us through every later one, metal-microbench output_data/split-20261017 warm_over_time.py ka3, ka5-ka7).
 
 Why: on the pair (metal-microbench output_data/split-20261017, 2026-10-17) the Mac mini's Thunderbolt RDMA path, quiet
 for the 40-50 us of a layer's window, completed its next SEND 6.2 us after its post where the M5's took 2.5, and

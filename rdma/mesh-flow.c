@@ -222,8 +222,9 @@ struct flow {
    send header's SEND posted (`mark`), the receives a header posted and not landed (`records`, the receive thread's), when
    lanes that failed are made again (`retry`, a pause after; design/recovery.md#loss) and why they last could not be
    made (`code`, logged once a cause), and `generation` moved at each teardown; the progress threads read the lanes
-   while `up`.  #keepalive: when the send thread last posted an empty header (`kept`) and on which lane next; #loss: the
-   connections that failed in a row since the device opened or the lanes last came up (`refused`) */
+   while `up`.  #keepalive: when the send thread last posted an empty header (`kept`), on which lane next, how many it
+   posted and how many of the peer's the receive thread heard (each thread's own count); #loss: the connections that
+   failed in a row since the device opened or the lanes last came up (`refused`) */
 enum { LANES_DOWN, LANES_MAKING, LANES_MADE, LANES_CONNECTING, LANES_UP, LANES_CLOSING };
 struct lanes {
   struct mesh_verbs provider;
@@ -234,7 +235,7 @@ struct lanes {
   struct send_gate gate[MESH_LANES];
   uint64_t sent[MESH_LANES],received[MESH_LANES],mark[MESH_LANES][MESH_HEADERS],records;
   uint32_t cursor[MESH_LANES];
-  uint64_t retry,kept;
+  uint64_t retry,kept,kept_posted,kept_heard;
   uint32_t kept_lane,refused;
   int64_t code;
 };
@@ -1206,15 +1207,15 @@ static int lane_retire(struct port *port){
   return count>0;
 }
 /* design/bridge-and-ipc.md#keepalive: lane `lane`'s next header posted with no entries, its first 16 bytes alone (one
-   frame against the peer's one-frame header receive), where its header page is free and its gate holds a frame; the
-   peer hears it as any header (lane_heard: nothing posted, the next header listened for).  Whether it was posted */
+   frame against the peer's one-frame header receive), where nothing is in flight on the lane (so a frame the peer has
+   not yet heard holds no other behind it); the peer hears it as any header (lane_heard: nothing posted, the next header
+   listened for).  Whether it was posted */
 static int lane_keepalive(struct port *port,uint32_t lane){
   struct lanes *l=&port->lanes;
   struct send_gate *gate=l->gate+lane;
   const uint64_t sent=l->sent[lane];
   const uint32_t h=(uint32_t)(sent%MESH_HEADERS);
-  if(sent>=MESH_HEADERS && ((gate->retired-l->mark[lane][h])&MESH_GATE_MASK)>=(UINT64_C(1)<<47))return 0;
-  if(((gate->posted-gate->retired)&MESH_GATE_MASK)+1>gate->capacity)return 0;
+  if(gate->posted!=gate->retired || !gate->capacity)return 0;
   struct lane_header *header=(void *)(wire.data+lane_offset(port,lane,h));
   header->magic=LANE_MAGIC;header->count=0;header->sequence=sent;
   struct ibv_sge span=lane_span(port,lane_offset(port,lane,h),sizeof *header);
@@ -1222,7 +1223,7 @@ static int lane_keepalive(struct port *port,uint32_t lane){
   gate->posted+=1;gate->requests++;
   posting.wr_id=LANE_SENT|((uint64_t)lane<<48)|(gate->posted&MESH_GATE_MASK);
   const int error=l->provider.queues[lane].send(l->provider.queues[lane].pair,&posting,&bad);
-  l->mark[lane][h]=gate->posted;l->sent[lane]++;
+  l->mark[lane][h]=gate->posted;l->sent[lane]++;l->kept_posted++;
   if(error)lanes_lost(port,error<0?-error:error);
   return 1;
 }
@@ -1245,6 +1246,7 @@ static int lane_heard(struct port *port,uint32_t lane){
   }
   if(!error && total>l->room)error=EPROTO;
   if(error){lanes_lost(port,error);return 1;}
+  l->kept_heard+=!header->count;
   int (*post)(struct ibv_qp *,struct ibv_recv_wr *,struct ibv_recv_wr **)=l->provider.queues[lane].receive;
   struct ibv_qp *pair=l->provider.queues[lane].pair;
   struct ibv_recv_wr *bad;
@@ -1313,7 +1315,7 @@ static int lane_receive(struct port *port){
    taking its headers' records), a lane's records posted and not landed, or its SENDs in flight; nothing lands on a lane
    for a flow this end has not listed, since the peer sends only after this end's POSTED, which follows the listing.
    #keepalive: while an exclusive flow on the port progresses, the send thread posts an empty header on its lanes once
-   the configuration's `keepalive` passed since the last, and the receive thread hears the peer's */
+   the configuration's `keepalive` passed since the last, and the receive thread hears the peer's at every pass */
 static int port_pass(struct port *port,int side,int *any,uint64_t *told){
   const uint64_t epoch=atomic_load(&port->epoch);
   int moved=0;
@@ -1327,8 +1329,9 @@ static int port_pass(struct port *port,int side,int *any,uint64_t *told){
     if(f->exclusive && progressing){*any=1;running=1;moved|=side?flow_send(f):flow_receive(f);}
     else if(!f->exclusive){riders=1;*any|=side?progressing:atomic_load_explicit(&f->receiving,memory_order_acquire);}
   }
-  /* #lanes: served while a flow on the port rides them, their SENDs or records are in flight (nothing lands on a lane
-     for a flow this end has not listed), or an exclusive flow progresses (#keepalive) */
+  /* #lanes: their SENDs served while a flow on the port rides them or their SENDs are in flight, and (#keepalive) an
+     empty header posted while an exclusive flow progresses; their receives at every pass, so a header the peer sent is
+     heard while this end runs nothing of its own */
   struct lanes *l=&port->lanes;
   if(atomic_load_explicit(&l->up,memory_order_acquire)){
     if(side){
@@ -1345,7 +1348,7 @@ static int port_pass(struct port *port,int side,int *any,uint64_t *told){
         for(uint32_t lane=0;lane<MESH_LANES;lane++)flight|=((l->gate[lane].posted-l->gate[lane].retired)&MESH_GATE_MASK)!=0;
       }
       *any|=flight;
-    }else if(riders || running || l->records){moved|=lane_receive(port);*any|=l->records!=0;}
+    }else{moved|=lane_receive(port);*any|=l->records!=0;}
   }
   /* design/bridge-and-ipc.md#progress: told only when it moved (port_settle waits for it), so the line the two threads
      read every pass (`high`, `epoch`) is not written by either each pass */
@@ -1506,6 +1509,9 @@ static int flow_release(struct flow *flow){
       flow->gates?(unsigned long long)flow->gates[q].retired:0ull,flow->gates?(unsigned long long)flow->gates[q].completions:0ull,
       flow->rings[q].count,flow->rings[q].posted,(unsigned long long)flow->rings[q].landed,(unsigned long long)flow->rings[q].bytes,
       flow->exclusive?"":" (lanes)");
+  if(keepalive_ns || flow->port->lanes.kept_heard)
+    say("link %u keepalives posted=%llu heard=%llu (the port's, design/bridge-and-ipc.md#keepalive)\n",flow->port->index,
+        (unsigned long long)flow->port->lanes.kept_posted,(unsigned long long)flow->port->lanes.kept_heard);
   if(!flow->exclusive && atomic_load_explicit(&flow->lane_frames,memory_order_acquire) &&
      flow->port->lanes.generation==flow->lane_epoch)return 0;
   if(!down_pair(&flow->provider))return 0;

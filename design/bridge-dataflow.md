@@ -360,10 +360,9 @@ once.
 **Passes.**
 - One pass of side 1 runs `flow_send` on every listed, progressing exclusive flow; where one progresses and the
   configuration states `keepalive`, `lane_keepalive` once that long passed since its last (an empty header on the next
-  lane, design/bridge-and-ipc.md#keepalive); then, while a lane rider is listed or a lane SEND is in flight,
+  lane with nothing in flight, design/bridge-and-ipc.md#keepalive); then, while a lane rider is listed or a lane SEND is in flight,
   `lane_send` for both lanes and `lane_retire`.
-- One pass of side 0 runs `flow_receive` on every listed exclusive flow, then `lane_receive` while a lane rider is
-  listed, an exclusive flow progresses or a lane's records are posted and not landed.
+- One pass of side 0 runs `flow_receive` on every listed exclusive flow, then `lane_receive` while the lanes are up.
 
 **Parking.**
 - A thread with something to look for (`any`) that moves nothing for `MESH_IDLE_NS` (100 ms; counted in
