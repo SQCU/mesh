@@ -394,7 +394,14 @@ less what its flows and lanes hold or will, the lanes' two counted before they a
 leave the lanes without room; each end's READY or PAIRS tells its word, ANDed into the other's until the flow pairs,
 so both pair alike), and rides the lanes where either has none: nothing is refused for a map's size, a node's
 communicators or a program's queues and slots (a lane rider holds no queue pair a ring), and the pair's direct program
-keeps its queue pairs. The lanes' pages (their headers and discard blocks, 7 pages at 16 KiB) are leased for every
+keeps its queue pairs. A program's operands ride exclusive flows alone, their rings posted ahead (the operator,
+2026-10-16: "nobody gave permission for anything but a pre-posted exclusive flow"; metal-microbench docs/principles.md
+section 4): a lane's receiver posts a crossing's records only on its header's landing, a wire round trip on every
+crossing, so the lanes are no path for a program's data (e500528c put the pair's direct program on them, 20.2 us a
+crossing; 921312ce took it off). The making of a flow, the lanes' reason, is paid before the execution that uses it,
+on a posterior over what that execution will be (metal-microbench docs/placement.md#retention-and-protention-the-next-execution-planned-ahead);
+until that estimator places the device's queue pairs, a routed program and one whose queue pairs do not fit still
+ride the lanes, which is a defect to remove, not a form. The lanes' pages (their headers and discard blocks, 7 pages at 16 KiB) are leased for every
 port the region has at the bridge's start, beside the map's (`lanes_reserve`), so a port found later, once clients
 hold the window, has them; a port the window could not give them takes them as its lanes are made, and waits (logged
 once) where the window has none, as lanes wait for a device's room.
