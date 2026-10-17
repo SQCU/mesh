@@ -102,56 +102,60 @@ static int mesh_records_read(struct hdr *m,size_t length,struct mesh_record **ou
 }
 
 /* design/bridge-and-ipc.md#ports, #cables: the one join of two nodes' records: the cables between them, the ports each
-   end's record holds paired with the other (the fewer of the two ends' counts), and *beta the slowest's, 8e9 over the
-   least bandwidth among those ports at either end (MESH_BETA_NS for a port whose bandwidth is unknown): the bridge
-   stripes a program between the two over every cable, a routed one too (mesh-flow.c route_stripes), so they carry it
-   at their count times the slowest */
-static uint32_t mesh_paired(struct mesh_record *record,uint32_t node,double *beta){
+   end's record holds paired with the other (the fewer of the two ends' counts), and *slowest the least bandwidth any
+   of those ports at either end reports (0: none reports one): the bridge stripes a program between the two over every
+   cable, a routed one too (mesh-flow.c route_stripes), so they carry it at their count times the slowest */
+static uint32_t mesh_paired(struct mesh_record *record,uint32_t node,uint64_t *slowest){
   uint32_t cables=0;
   for(uint32_t i=0;i<record->ports && i<MESH_PORTS;i++)
     if(atomic_load_explicit(&record->port[i].phase,memory_order_relaxed)==MESH_PAIRED &&
        atomic_load_explicit(&record->port[i].peer,memory_order_relaxed)==node){
       const uint64_t bandwidth=atomic_load_explicit(&record->port[i].bandwidth,memory_order_relaxed);
-      const double port=bandwidth?8e9/(double)bandwidth:MESH_BETA_NS;
-      if(port>*beta)*beta=port;
+      if(bandwidth && (!*slowest || bandwidth<*slowest))*slowest=bandwidth;
       cables++;
     }
   return cables;
 }
-int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
-  double slowest=0;
+static uint32_t mesh_join(struct mesh_record *a,struct mesh_record *b,uint64_t *bandwidth){
+  uint64_t slowest=0;
   const uint32_t ends[2]={mesh_paired(a,b->node,&slowest),mesh_paired(b,a->node,&slowest)};
   if(!ends[0] || !ends[1])return 0;
-  *beta=slowest;
-  return (int)(ends[0]<ends[1]?ends[0]:ends[1]);
+  *bandwidth=slowest;
+  return ends[0]<ends[1]?ends[0]:ends[1];
+}
+int mesh_joined(struct mesh_record *a,struct mesh_record *b,double *beta){
+  uint64_t bandwidth=0;
+  const uint32_t cables=mesh_join(a,b,&bandwidth);
+  if(cables)*beta=bandwidth?8e9/(double)bandwidth:0;
+  return (int)cables;
 }
 
-/* The records' whole map, its nodes ascending (the records sorted by node), a link a cable where two join, each at
-   MESH_ALPHA_US and the join's beta, and its routing table (mesh-collective.c mesh_routes, each node marked by its
-   bridge's number, so every bridge and member that holds the same records makes the same routes) */
-struct mesh_whole { uint32_t n,(*link)[2],*mark,*next; double (*cost)[2]; struct mesh_link_map map; };
+/* The records' whole map, its nodes ascending (the records sorted by node), a link a cable where two join, each at the
+   join's bandwidth, and its routing table (mesh-collective.c mesh_routes, each node marked by its bridge's number, so
+   every bridge and member that holds the same records makes the same routes) */
+struct mesh_whole { uint32_t n,(*link)[2],*mark,*next; uint64_t *bandwidth; struct mesh_link_map map; };
 static int mesh_node_order(const void *a,const void *b){
   uint32_t x=((const struct mesh_record *)a)->node,y=((const struct mesh_record *)b)->node;
   return (x>y)-(x<y);
 }
-static void mesh_whole_free(struct mesh_whole *w){free(w->link);free(w->cost);free(w->mark);free(w->next);}
+static void mesh_whole_free(struct mesh_whole *w){free(w->link);free(w->bandwidth);free(w->mark);free(w->next);}
 static int mesh_whole_make(struct mesh_record *r,uint32_t n,struct mesh_whole *w){
   qsort(r,n,sizeof *r,mesh_node_order);
   size_t cables=1;
-  double beta;
-  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)cables+=(size_t)mesh_joined(r+a,r+b,&beta);
-  *w=(struct mesh_whole){.n=n,.link=malloc(cables*sizeof *w->link),.cost=malloc(cables*sizeof *w->cost),
+  uint64_t bandwidth;
+  for(uint32_t a=0;a<n;a++)for(uint32_t b=a+1;b<n;b++)cables+=(size_t)mesh_join(r+a,r+b,&bandwidth);
+  *w=(struct mesh_whole){.n=n,.link=malloc(cables*sizeof *w->link),.bandwidth=malloc(cables*sizeof *w->bandwidth),
     .mark=malloc(((size_t)n+1)*sizeof *w->mark),.next=malloc(((size_t)n*n+1)*sizeof *w->next)};
-  if(!w->link || !w->cost || !w->mark || !w->next)return ENOMEM;
+  if(!w->link || !w->bandwidth || !w->mark || !w->next)return ENOMEM;
   uint32_t links=0;
   for(uint32_t a=0;a<n;a++){
     w->mark[a]=r[a].node;
     for(uint32_t b=a+1;b<n;b++)
-      for(int k=0,joined=mesh_joined(r+a,r+b,&beta);k<joined;k++){
-        w->link[links][0]=a;w->link[links][1]=b;w->cost[links][0]=MESH_ALPHA_US;w->cost[links][1]=beta;links++;
+      for(uint32_t k=0,joined=mesh_join(r+a,r+b,&bandwidth);k<joined;k++){
+        w->link[links][0]=a;w->link[links][1]=b;w->bandwidth[links]=bandwidth;links++;
       }
   }
-  w->map=(struct mesh_link_map){.kind=MESH_LINKS_GRAPH,.nodes=n,.links=links,.link=w->link,.cost=w->cost,.relays=0,.next=NULL,.mark=w->mark};
+  w->map=(struct mesh_link_map){.kind=MESH_LINKS_GRAPH,.nodes=n,.links=links,.link=w->link,.bandwidth=w->bandwidth,.relays=0,.next=NULL,.mark=w->mark};
   const int error=n?mesh_routes(&w->map,w->next):0;
   if(!error)w->map.next=w->next;
   return error;

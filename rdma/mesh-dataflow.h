@@ -34,8 +34,8 @@ static inline uint64_t mesh_transfer_cells(const struct mesh_transfer *out,uint3
 /* design/algorithm-sources.md#programtensor */
 void mesh_retire(struct hdr *,uint64_t client);
 /* design/bridge-and-ipc.md#ports, #cables: the one join of two nodes' records, the count of cables between them (0:
-   none; the ports each one's record holds paired with the other, the fewer of the two ends' counts), *beta the
-   slowest's (8e9 over the least bandwidth of those ports at either end, MESH_BETA_NS for one unknown); and the route
+   none; the ports each one's record holds paired with the other, the fewer of the two ends' counts), *beta 8e9 over
+   the least bandwidth any of those ports at either end reports (0 where none reports one); and the route
    between nodes `from` and `to` on the map of region `m`, its routing table's (mesh-plan.h mesh_routes over the
    records' whole map, each node marked by its bridge's number, as mesh_map's; mesh_route_path: the route from `to`
    to `from` reversed), from `from` to `to` in a path the caller frees: its node count, 0 where none */

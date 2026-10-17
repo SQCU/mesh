@@ -26,9 +26,10 @@ or region. Launch the ranks as torchrun does (`RANK`, `WORLD_SIZE`, `MASTER_ADDR
   (`NCCL_COMM_ID`, else the listener `ncclGetUniqueId` opens), where each rank's node meets the others'.
 - `ncclMeshCommInitRank(comm, nranks, rank, paths, programs, count, node, name)`: the collectives are operands; the
   map is the bridges' (below).
-  - `paths`: the trees the default single-phase all-reduce is compiled along, checked against the map each session
-    reads. NULL means the map's shortest-path trees.
-  - `programs`: the compiled collectives, a table of `ncclMeshProgram` entries. NULL means the default (below).
+  - `paths`: the routing tables every collective of the structural table (below) is compiled along, each member's
+    trees, checked against the map each session reads. NULL means the map's shortest-path trees.
+  - `programs`: the compiled collectives, a table of `ncclMeshProgram` entries. NULL means the structural table
+    (below).
   - `node`: each rank's bridge node.
   - `name`: the communicator's, which its sessions pair under on every member.
   - Every rank passes the same values.
@@ -42,15 +43,15 @@ every node the bridges' records hold, the members first and the others relays, e
 each, at the slowest of its ports' bandwidths: the bridge stripes a program between two nodes over their cables,
 position t on cable t mod n, so the pair carries it at n times the slowest cable, and a routed program striped end to
 end, so each segment carries it over its cables too), and the
-routing table the bridges forward along (`mesh_routes`: each node's in-tree of shortest routes, a parent among equals
-the least hash of its mark, its parent's and the root's, so routes of equal length spread rather than pile onto the
-lowest-numbered node, and a route moves only where the shortest routes between its ends change, never for a link lost
-elsewhere or a node joining; a route between two nodes the higher-marked one's in-tree path, one path both ways). Two
-ranks are linked where their route crosses no other rank: that hop costs its links' latencies summed and the slowest
-link's bandwidth (a relay forwards each slot as it lands), and its bytes are charged to every link it crosses, so hops
-that share a cable share its time. A later session reads the map again, so a recabling, a link that paired again or a
-node gone reaches the next session with no edit and no restart. The planner prices a record's members by the same
-function (`mesh_map_members`, Python `mesh.members`; `mesh.current().map` is the members' map itself).
+routing table the bridges forward along (`mesh_routes`: each node's in-tree of shortest routes, by fewest links and
+then over the faster hops, a parent among equals the least hash of its mark, its parent's and the root's, so routes of
+equal length spread rather than pile onto the lowest-numbered node, and a route moves only where the shortest routes
+between its ends change, never for a link lost elsewhere or a node joining; a route between two nodes the
+higher-marked one's in-tree path, one path both ways). Two ranks are linked where their route crosses no other
+rank, and that hop's bytes cross every link of its route (a relay forwards each slot as it lands). A later session
+reads the map again, so a recabling, a link that paired again or a node gone reaches the next session with no edit
+and no restart. The members' map of a record is the same function's (`mesh_map_members`, Python `mesh.members`;
+`mesh.current().map` is the members' map itself).
 
 The bridges' records are a map whatever their cabling: while a cable is out, a node that still has a record may have
 no link, and the whole map (`mesh.current()` with no members, `mesh_map` over none, mesh-stat's `map`) holds it as it
@@ -61,32 +62,27 @@ two members no route joins, and a session on such a map fails as a value naming 
 route").
 
 Before any group runs, the members agree: each publishes its digest of what its programs are made from (the route
-between each two members and the costs of the links it crosses, the planner's version `MESH_PLAN_VERSION`, the
-session's wire, its tree sets, the caller's paths and programs) on every channel, at the session's first position, and
+between each two members and the bandwidth of the links it crosses, the planner's version `MESH_PLAN_VERSION`, the
+session's wire, the paths and trees, the programs) on every channel, at the session's first position, and
 compares its peers'. Members that read the map on either side of a change fail the session as a value naming the
 disagreement (`ncclRemoteError`, "the members' maps differ") and open the next on the map then; no group runs on two
 maps, and two builds of the library that make other trees of one map disagree there too, not as a send/receive
 mismatch later.
 
 Collectives are compiled programs: every rank's moves, made ahead of time (`mesh-plan.h` `struct mesh_program`, as
-MSCCL-IR). The default table chooses, for each collective, root and size class (the least power of two of at least the
-call's bytes, from 1 KiB to 16 GiB), at the class's first call, the fastest by `mesh_choose`, each candidate timed as
-this library runs it on the session's rings (`mesh_program_time` on `mesh_wire`: each rank's steps laid on its
-channels, every position a whole slot of its class, a filler's too, a sender at most lag positions past what it has
-consumed, each receive in its order, over the map's links, relayed hops sharing the links they cross):
+MSCCL-IR), the communicator's table of them. The caller passes its own table (`ncclMeshCommInitRank`'s `programs`;
+`mesh.compile` in Python, `chunks` its cut, `whole` the single-phase all-reduce); with none, the communicator compiles
+the structural table at each session, along the caller's `paths` or else the map's shortest-path trees (each member's
+in-tree of the bridges' routes, its parents among equals spread over the links):
 
-- the collective along the shortest-path trees (or the caller's `paths`; each node's in-tree over the members' hops,
-  balanced over the links) and along the packed trees (Garg-Konemann over the links, relayed hops charging each link
-  they cross);
-- an all-reduce also the single-phase one (Trivance: the map's diameter in dependent crossings) along each;
-- each cut into 1, 2, 4, ... 64 chunks, every count timed: a tree's part moves chunk by chunk, a node forwarding a
-  chunk as it arrives (the trees pipelined), and a chunk of less than a slot pays the whole slot.
+- the all-reduce single-phase (Trivance: each member's sum up its own tree, the map's diameter in dependent crossings;
+  at two members, and wherever every two members are linked, the direct exchange);
+- the reduce-scatter and the all-gather, segment s up and down s's trees;
+- each root's reduce and broadcast, up and down the root's trees.
 
-At two nodes this is one tree a root and the single-phase all-reduce, unchunked, but where a piece just past the small
-class would leave most of a large slot empty (a 256 KiB call cut in two, or its all-reduce as a reduce-scatter and an
-all-gather, a 512 KiB reduce-scatter or all-gather cut in two: 57.4 us to 31-36 us, metal-microbench
-output_data/library-20261015/pass2/sims/pair_programs.json). To choose otherwise, pass your own
-table (`mesh.compile` in Python, `chunks` the cut). Nothing about routing is decided where a call runs.
+Each is uncut: a step's piece is cut on the wire into slots of its class (`mesh_wire_pieces`). A call runs its table's
+first program of its collective (and root) whose size bound its operand is under. Nothing about a program is decided
+where a call runs.
 
 ## Two paths
 
@@ -254,7 +250,7 @@ client slot of that bridge a direction, both directions of every two members of 
 | variable | read by | meaning |
 |---|---|---|
 | `NCCL_COMM_ID` | library (ncclGetUniqueId) | the bootstrap root's `host:port` |
-| `NCCL_BUFFSIZE` | library | bytes of a large ring's slots together (default 4 MiB, `mesh-plan.h` `MESH_BUFFSIZE`), read when a session opens; `mesh_wire_of` makes the wire of it that `mesh_program_time` prices |
+| `NCCL_BUFFSIZE` | library | bytes of a large ring's slots together (default 4 MiB, `mesh-plan.h` `MESH_BUFFSIZE`), read when a session opens; `mesh_wire_of` makes the wire of it |
 | `MESH_RDMA` | torch-mesh's build | the rdma directory its extension links against (default its parent; `bin/mesh-user.sh` passes the checkout's) |
 
 ## NumPy
@@ -277,8 +273,7 @@ metal-microbench `tools/mesh/numpy_power.py` is a ported power iteration, and `t
 
 ## On one host
 
-`tools/nccl_demo.py plans` (metal-microbench): every compiled program on data, over rings and stars of n = 3..8, priced
-at the mean cost of the links of this node's bridge's map.
+`tools/nccl_demo.py plans` (metal-microbench): every compiled program on data, over rings and stars of n = 3..8.
 
 ## Not implemented
 

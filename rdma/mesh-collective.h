@@ -11,6 +11,6 @@
    invocation t of a bound receive section: below 1 + c until it lands, then 1 + c, or UINT64_MAX once
    its destination was cancelled, c the cycle t / N of a cyclic program (mesh_transfers_cyclic; 0 otherwise). */
 int mesh_host_inputs(struct mesh_ctx *);
-void mesh_host_publish(struct mesh_ctx *,struct mesh_section,uint32_t invocation);
+void mesh_host_publish(struct mesh_ctx *,struct mesh_section,uint64_t invocation);
 uint64_t mesh_host_arrived(struct mesh_ctx *,struct mesh_section,uint32_t invocation);
 #endif

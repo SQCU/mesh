@@ -194,29 +194,21 @@ struct premul { int used; ncclDataType_t type; unsigned char value[8]; };
 struct entry { uint64_t below; struct mesh_program program; };
 struct session;
 
-/* the default programs' slots: the all-reduce, the reduce-scatter and the all-gather, then each root's reduce and
-   broadcast, each at every size class (mesh-plan.h MESH_CLASS_LEAST .. MESH_CLASS_MOST) */
-#define CLASSES (MESH_CLASS_MOST - MESH_CLASS_LEAST + 1)
-static uint32_t slot_of(int what, int root) {
-  return what == MESH_ALLREDUCE ? 0 : what == MESH_REDUCE_SCATTER ? 1 : what == MESH_ALLGATHER ? 2 : 3 + 2 * (uint32_t)root + (what == MESH_BROADCAST);
-}
-
 /* a communicator: rank r on the bridge of node members[r]; the bridges' map over its members as its session read it
    when it opened (mesh-plan.h mesh_map: its relays and routing table in `next`), the wire its session's rings make
    (mesh-plan.h mesh_wire) and the digest every member checks before the session runs (session_agree); its message
-   paths, the caller's (count 0: none), the tree sets its default programs choose among (`sets`: the shortest-path trees
-   or the caller's paths, and the packed trees) and those programs, each chosen and compiled at its first call
-   (`chosen`), or the caller's programs (`listed`); its name, and the count of splits and shrinks made of it, which name
-   theirs; its session (NULL until a group crosses a link, and after a failure); `opening` a session whose start and
-   agreement run outside the sessions' lock, which a revoke ends; `revoked`, set by ncclCommRevoke and kept until
-   ncclCommDestroy, failing every group after it; the three under `guard` */
+   paths, the caller's (count 0: none), else the map's shortest-path trees (`trees`); its table of programs
+   (`entries`), the caller's (`listed`, kept for its life), else the structural one compiled along its paths or trees
+   at each map read (comm_routes); its name, and the count of splits and shrinks made of it, which name theirs; its
+   session (NULL until a group crosses a link, and after a failure); `opening` a session whose start and agreement run
+   outside the sessions' lock, which a revoke ends; `revoked`, set by ncclCommRevoke and kept until ncclCommDestroy,
+   failing every group after it; the three under `guard` */
 struct ncclComm {
   struct mesh_link_map map;
   struct mesh_wire wire;
   uint32_t *next, *mark;
   uint64_t digest;
-  struct mesh_trees paths, sets[2];
-  struct mesh_program **chosen;
+  struct mesh_trees paths, trees;
   struct entry *entries;
   uint32_t programs, splits, *members;
   int nranks, rank, listed;
@@ -245,17 +237,13 @@ static void trees_free(struct mesh_trees *trees) {
   *trees = (struct mesh_trees){0};
 }
 
-/* the map read, its tree sets and the programs chosen on it; with `all`, the caller's paths and programs too */
+/* the map read, its trees and the programs compiled on it; with `all`, the caller's paths and programs too */
 static void routes_free(struct ncclComm *comm, int all) {
-  free(comm->map.link); free(comm->map.cost); free(comm->next); free(comm->mark);
+  free(comm->map.link); free(comm->map.bandwidth); free(comm->next); free(comm->mark);
   comm->map = (struct mesh_link_map){0}; comm->next = NULL; comm->mark = NULL;
-  trees_free(comm->sets); trees_free(comm->sets + 1);
-  for (uint32_t e = 0; comm->chosen && e < (3 + 2 * (uint32_t)comm->nranks) * CLASSES; e++)
-    if (comm->chosen[e]) { program_free(comm->chosen[e]); free(comm->chosen[e]); }
-  free(comm->chosen);
-  comm->chosen = NULL;
+  trees_free(&comm->trees);
   if (all) trees_free(&comm->paths);
-  if (!all) return;
+  if (comm->listed && !all) return;
   for (uint32_t e = 0; e < comm->programs; e++) program_free(&comm->entries[e].program);
   free(comm->entries);
   comm->entries = NULL; comm->programs = 0;
@@ -285,108 +273,73 @@ static int program_copy(struct mesh_program *made, const struct mesh_program *fr
   return 0;
 }
 
-/* `what` (at `root`) along `trees` cut into `chunks` (mesh-plan.h mesh_compile), a program of its own; NULL where it does
-   not compile or memory runs out */
-static struct mesh_program *program_compile(const struct mesh_trees *trees, uint32_t what, uint32_t root, int whole, uint32_t chunks) {
+/* `what` (at `root`) along `trees` (mesh-plan.h mesh_compile, uncut: the wire cuts each step's piece into slots of its
+   class, mesh_wire_pieces) compiled into the table's next entry, for calls of any size; 0, or EINVAL */
+static int compile_entry(struct ncclComm *comm, const struct mesh_trees *trees, uint32_t what, uint32_t root, int whole) {
   uint32_t parts, moves;
-  mesh_compile_room(trees, chunks, &parts, &moves);
-  struct mesh_program *made = calloc(1, sizeof *made);
+  mesh_compile_room(trees, 1, &parts, &moves);
   uint32_t *segment = malloc((parts + 1) * sizeof *segment), *first = malloc((trees->nodes + 1) * sizeof *first);
   double *weight = malloc((parts + 1) * sizeof *weight);
   struct mesh_move *move = malloc((moves + 1) * sizeof *move);
-  if (!made || !segment || !first || !weight || !move || mesh_compile(trees, what, root, whole, chunks, NULL, made, segment, weight, first, move)) {
-    free(made); free(segment); free(first); free(weight); free(move);
-    return NULL;
+  struct entry *e = comm->entries + comm->programs;
+  if (!segment || !first || !weight || !move || mesh_compile(trees, what, root, whole, 1, NULL, &e->program, segment, weight, first, move)) {
+    free(segment); free(first); free(weight); free(move);
+    return EINVAL;
   }
-  return made;
+  e->below = 0;
+  comm->programs++;
+  return 0;
 }
 
-/* the communicator's tree sets on the map just read, where the caller listed no programs: the caller's paths (checked
-   against the map) or else the map's shortest-path trees, and the map's packed trees (at most 4 a root) */
+/* the communicator's structural table on the map just read, where the caller listed no programs, along the caller's
+   paths (checked against the map) or else the map's shortest-path trees (mesh_trees_shortest: each member's in-tree of
+   the bridges' routes): the single-phase all-reduce (each member's sum up its own tree; the direct exchange where
+   every two members are linked), the reduce-scatter and the all-gather (segment s up and down s's trees), and each
+   root's reduce and broadcast (mesh_compile; mesh 2bf5a50d^ comm_routes's table, its entries along the routes) */
 static ncclResult_t comm_routes(struct ncclComm *comm) {
-  const uint32_t n = (uint32_t)comm->nranks, most = 4;
+  const uint32_t n = (uint32_t)comm->nranks;
   if (comm->listed || n < 2) return ncclSuccess;
-  uint32_t *root = calloc(n + 1, sizeof *root), *parent = calloc((size_t)n * n + 1, sizeof *parent);
-  uint32_t *proot = calloc((size_t)n * most + 1, sizeof *proot), *pparent = calloc((size_t)n * n * most + 1, sizeof *pparent);
-  double *weight = calloc(n + 1, sizeof *weight), *pweight = calloc((size_t)n * most + 1, sizeof *pweight);
-  comm->sets[0] = (struct mesh_trees){n, 0, root, parent, weight};
-  comm->sets[1] = (struct mesh_trees){n, 0, proot, pparent, pweight};
-  if (!root || !parent || !weight || !proot || !pparent || !pweight ||
-      !(comm->chosen = calloc((3 + 2 * (size_t)n) * CLASSES, sizeof *comm->chosen)))
-    return fail(ncclSystemError, "out of memory");
+  const struct mesh_trees *along = &comm->paths;
   if (comm->paths.count && mesh_trees_check(&comm->map, &comm->paths))
     return fail(ncclInvalidArgument, "the paths are not trees of the links of the bridges' map (mesh_trees_check)");
-  if (comm->paths.count) {
-    trees_free(comm->sets);
-    uint32_t *r = calloc(comm->paths.count + 1, sizeof *r), *p = calloc((size_t)comm->paths.count * n + 1, sizeof *p);
-    double *w = calloc(comm->paths.count + 1, sizeof *w);
-    comm->sets[0] = (struct mesh_trees){n, comm->paths.count, r, p, w};
-    if (!r || !p || !w) return fail(ncclSystemError, "out of memory");
-    memcpy(r, comm->paths.root, comm->paths.count * sizeof *r); memcpy(p, comm->paths.parent, (size_t)comm->paths.count * n * sizeof *p);
-    memcpy(w, comm->paths.log_weight, comm->paths.count * sizeof *w);
-  } else if (!(comm->sets[0].count = mesh_trees_shortest(&comm->map, root, parent, weight)))
-    return fail(ncclInvalidArgument, "the map's routes do not join every rank (mesh_trees_shortest)");
-  if (!(comm->sets[1].count = mesh_trees_pack(&comm->map, 0.1, most, proot, pparent, pweight)))
-    return fail(ncclInvalidArgument, "the map's links pack no trees");
+  if (!comm->paths.count) {
+    uint32_t *root = calloc(n + 1, sizeof *root), *parent = calloc((size_t)n * n + 1, sizeof *parent);
+    double *weight = calloc(n + 1, sizeof *weight);
+    comm->trees = (struct mesh_trees){n, 0, root, parent, weight};
+    if (!root || !parent || !weight) return fail(ncclSystemError, "out of memory");
+    if (!(comm->trees.count = mesh_trees_shortest(&comm->map, root, parent, weight)))
+      return fail(ncclInvalidArgument, "the map's routes do not join every rank (mesh_trees_shortest)");
+    along = &comm->trees;
+  }
+  if (!(comm->entries = calloc(3 + 2 * (size_t)n, sizeof *comm->entries))) return fail(ncclSystemError, "out of memory");
+  if (compile_entry(comm, along, MESH_ALLREDUCE, 0, 1) || compile_entry(comm, along, MESH_REDUCE_SCATTER, 0, 0) ||
+      compile_entry(comm, along, MESH_ALLGATHER, 0, 0))
+    return fail(ncclInternalError, "the all-reduce, reduce-scatter or all-gather along the communicator's trees does not compile");
+  for (uint32_t r = 0; r < n; r++)
+    if (compile_entry(comm, along, MESH_REDUCE, r, 0) || compile_entry(comm, along, MESH_BROADCAST, r, 0))
+      return fail(ncclInternalError, "the reduce or broadcast of root %u along the communicator's trees does not compile", r);
   return ncclSuccess;
 }
 
-/* the choices mesh_choose made, process-wide, each under the digest of what it was made from (map_digest: the members,
-   their routes and costs, the wire and the tree sets), its collective's slot and its size class: the choice is a
-   function of these alone, so a communicator of the same digest (a call's next one over the same members and map)
-   compiles it again rather than timing every candidate again; under the sessions' lock */
-struct kept { uint64_t digest; uint32_t slot, k; struct mesh_choice choice; };
-static struct kept *kept;
-static size_t kept_count, kept_room;
-
-/* the program a call of `bytes` runs: the caller's table's first entry of its collective (and root, a rooted one's)
-   whose bound it is below; else the default one of its size class (mesh-plan.h MESH_CLASS_LEAST: the least 2^k of at
-   least `bytes`), mesh_choose's fastest of `what` along each tree set (the all-reduce also whole, the single-phase one),
-   cut into chunks, at the class's size on the session's wire (kept: made once a digest), compiled at its first call;
-   NULL where none compiles */
+/* the program a call of `bytes` runs: its communicator's table's first entry of its collective (and root, a rooted
+   one's) whose bound it is below; NULL where none is (mesh 2bf5a50d^ program_of) */
 static const struct mesh_program *program_of(ncclComm_t comm, int what, int root, uint64_t bytes) {
-  if (comm->listed) {
-    for (uint32_t e = 0; e < comm->programs; e++) {
-      const struct entry *x = comm->entries + e;
-      if ((int)x->program.what != what || ((what == MESH_REDUCE || what == MESH_BROADCAST) && (int)x->program.root != root)) continue;
-      if (!x->below || bytes < x->below) return &x->program;
-    }
-    return NULL;
+  for (uint32_t e = 0; e < comm->programs; e++) {
+    const struct entry *x = comm->entries + e;
+    if ((int)x->program.what != what || ((what == MESH_REDUCE || what == MESH_BROADCAST) && (int)x->program.root != root)) continue;
+    if (!x->below || bytes < x->below) return &x->program;
   }
-  if (!comm->chosen) return NULL;
-  uint32_t k = MESH_CLASS_LEAST;
-  while (k < MESH_CLASS_MOST && ((uint64_t)1 << k) < bytes) k++;
-  struct mesh_program **held = comm->chosen + (size_t)slot_of(what, root) * CLASSES + (k - MESH_CLASS_LEAST);
-  if (*held) return *held;
-  const uint32_t slot = slot_of(what, root);
-  size_t at = 0;
-  while (at < kept_count && !(kept[at].digest == comm->digest && kept[at].slot == slot && kept[at].k == k)) at++;
-  if (at == kept_count) {
-    struct mesh_choice choice;
-    const struct mesh_operand operand = {0, 4, ((uint64_t)1 << k) / 4};
-    if (mesh_choose(&comm->map, comm->sets, 2, (uint32_t)what, (uint32_t)root, operand, &comm->wire, MESH_ALPHA_US, MESH_BETA_NS, &choice))
-      return NULL;
-    if (kept_count == kept_room) {
-      const size_t room = kept_room ? 2 * kept_room : 64;
-      struct kept *grown = realloc(kept, room * sizeof *grown);
-      if (!grown) return NULL;
-      kept = grown; kept_room = room;
-    }
-    kept[kept_count++] = (struct kept){comm->digest, slot, k, choice};
-  }
-  const struct mesh_choice choice = kept[at].choice;
-  *held = program_compile(comm->sets + choice.set, (uint32_t)what, (uint32_t)root, (int)choice.whole, choice.chunks);
-  return *held;
+  return NULL;
 }
 
 /* the digest of what a communicator's programs and its session's flows are made from (FNV-1a over 64-bit words): the
    planner's rules (MESH_PLAN_VERSION), its members, the route between each two of them on `map` (mesh_route_path: its
-   nodes' marks, the bridges' node numbers) and the cost of each link it crosses (the cables between one pair, each
-   one's bits), the session's wire, the tree sets its default programs choose among (each tree's root, parents and
-   weight's bits: two builds of the library that make other trees of one map disagree here, not as a MISMATCH later),
-   the caller's paths and programs.  Programs are a function of these alone (every hop, tree, pack and time reads a
-   member pair's route and its links), so members whose digests agree run the same programs on the same routes,
-   whatever map serial each read and whatever else the map holds; 0 where a route does not reach */
+   nodes' marks, the bridges' node numbers) and the bandwidth of each link it crosses (the cables between one pair),
+   the session's wire, the caller's paths and the trees (each tree's root, parents and weight's bits: two builds of
+   the library that make other trees of one map disagree here, not as a MISMATCH later) and the table of programs.
+   Programs are a function of these alone (every hop and tree reads a member pair's route and its links), so members
+   whose digests agree run the same programs on the same routes, whatever map serial each read and whatever else the
+   map holds; 0 where a route does not reach */
 static uint64_t mix(uint64_t h, uint64_t word) {
   for (int b = 0; b < 8; b++) h = (h ^ ((word >> (8 * b)) & 0xff)) * UINT64_C(0x100000001b3);
   return h;
@@ -414,10 +367,10 @@ static uint64_t map_digest(const struct ncclComm *comm, const struct mesh_link_m
       for (uint32_t i = 0; i + 1 < hops; i++)
         for (uint32_t l = 0; l < map->links; l++)
           if ((map->link[l][0] == path[i] && map->link[l][1] == path[i + 1]) || (map->link[l][1] == path[i] && map->link[l][0] == path[i + 1]))
-            h = map->cost ? mix(mix(h, bits(map->cost[l][0])), bits(map->cost[l][1])) : mix(h, l);
+            h = map->bandwidth ? mix(h, map->bandwidth[l]) : mix(h, l);
     }
   free(path);
-  h = trees_mix(trees_mix(trees_mix(h, &comm->paths), comm->sets), comm->sets + 1);
+  h = trees_mix(trees_mix(h, &comm->paths), &comm->trees);
   for (uint32_t e = 0; e < comm->programs; e++) {
     const struct mesh_program *x = &comm->entries[e].program;
     h = mix(mix(mix(mix(mix(mix(h, comm->entries[e].below), x->what), x->root), x->nodes), x->parts), x->scratch);
@@ -540,7 +493,7 @@ static ncclResult_t comm_make(ncclComm_t *made, int nranks, const uint32_t *memb
 /* the bridges' map over the communicator's members as it is now (mesh-plan.h mesh_map: the other nodes its relays,
    with their marks and the routing table the bridges forward along), into `map` and its own storage (map_free) */
 static void map_free(struct mesh_link_map *map) {
-  free(map->link); free(map->cost); free(map->next); free(map->mark);
+  free(map->link); free(map->bandwidth); free(map->next); free(map->mark);
   *map = (struct mesh_link_map){0};
 }
 static ncclResult_t map_read(const struct ncclComm *comm, struct mesh_link_map *map) {
@@ -548,9 +501,9 @@ static ncclResult_t map_read(const struct ncclComm *comm, struct mesh_link_map *
   struct mesh_link_map room = {.nodes = n, .links = n * (n - 1) / 2 + 1};
   for (int read = -ENOSPC;;) {
     *map = (struct mesh_link_map){MESH_LINKS_GRAPH, room.nodes, room.links, calloc(room.links + 1, sizeof *map->link),
-                                  calloc(room.links + 1, sizeof *map->cost), 0, calloc((size_t)room.nodes * room.nodes + 1, sizeof *map->next),
+                                  calloc(room.links + 1, sizeof *map->bandwidth), 0, calloc((size_t)room.nodes * room.nodes + 1, sizeof *map->next),
                                   calloc((size_t)room.nodes + 1, sizeof *map->mark)};
-    if (!map->link || !map->cost || !map->next || !map->mark) { map_free(map); return fail(ncclSystemError, "out of memory"); }
+    if (!map->link || !map->bandwidth || !map->next || !map->mark) { map_free(map); return fail(ncclSystemError, "out of memory"); }
     if ((read = mesh_map(comm->members, n, NULL, NULL, map)) != -ENOSPC) {
       if (read < 0) {
         map_free(map);
@@ -563,7 +516,7 @@ static ncclResult_t map_read(const struct ncclComm *comm, struct mesh_link_map *
   }
 }
 
-/* the communicator's map read as it is now (map_read), every member reached; its tree sets (comm_routes) */
+/* the communicator's map read as it is now (map_read), every member reached; its trees and table (comm_routes) */
 static ncclResult_t comm_read(struct ncclComm *comm) {
   const uint32_t n = (uint32_t)comm->nranks;
   routes_free(comm, 0);
@@ -747,8 +700,8 @@ ncclResult_t ncclCommInitAll(ncclComm_t *comm, int ndev, const int *devlist) {
   return result ? result : ncclCommInitRank(comm, 1, id, 0);
 }
 
-/* a communicator over the caller's collectives (ncclMeshProgram), or over the paths its default all-reduce takes; as
-   every communicator is, on the bridges' map read at each opening of its session */
+/* a communicator over the caller's collectives (ncclMeshProgram), or over the paths every collective of its structural
+   table takes (comm_routes); as every communicator is, on the bridges' map read at each opening of its session */
 ncclResult_t ncclMeshCommInitRank(ncclComm_t *comm, int nranks, int rank, const struct mesh_trees *paths,
                                   const ncclMeshProgram *programs, int count, const int *node, const char *name) {
   if (!comm || !node || rank < 0 || rank >= nranks || count < 0 || (count && !programs) || (paths && paths->nodes != (uint32_t)nranks))
@@ -963,7 +916,7 @@ ncclResult_t ncclRedOpDestroy(ncclRedOp_t op, ncclComm_t comm) {
    its longer direction), each publishes every position (filler where it has nothing to send), and each publishes
    position t once it has consumed the peer's t - LAG: the peer then has consumed this end's t - 2 LAG = t - DEPTH, the
    slot t reuses, so no slot is overwritten before it is read (NCCL's Simple protocol's slots, its head credit carried
-   by the reverse direction's positions; mesh-plan.h struct mesh_wire, by which mesh_program_time prices it).  A
+   by the reverse direction's positions; mesh-plan.h struct mesh_wire).  A
    position's SEND cell and completion word are its invocation's of a cycle of POSITIONS (M30: the word holds 1 plus its
    cycle, read as at least that), reused POSITIONS positions on, which the peer publishes only once this end has
    published POSITIONS - LAG on, after its wait on the position (a group spans any number of positions). ----------- */
@@ -1364,7 +1317,7 @@ ncclResult_t ncclMeshCommAgree(ncclComm_t comm, uint64_t ticket) {
   for (uint32_t h = 0; h < s->count; h++) {
     struct channel *ch = s->channels + h;
     memcpy(ch->sending + (ch->end % DEPTH) * ch->slot, &mine, sizeof mine);
-    mesh_host_publish(&s->context, ch->out, (uint32_t)ch->end);
+    mesh_host_publish(&s->context, ch->out, ch->end);
   }
   pthread_mutex_unlock(&session_lock);
   for (uint32_t h = 0; h < s->count;) {
@@ -1668,7 +1621,7 @@ static int rank_of(ncclComm_t comm, uint32_t node) {
 struct placing { uint32_t call, step; int send; uint64_t first, pieces; };
 
 /* the positions a rank's messages take on its channel to rank `peer` of class `large` for the group, from 0: each
-   collective's (mesh-plan.h mesh_lay, the one layout mesh_program_time prices, `scratch` room for its placements) in
+   collective's (mesh-plan.h mesh_lay, the one layout both ends make, `scratch` room for its placements) in
    call order, then its point-to-point calls, its j-th SEND to the peer beside its j-th receive from it; steps[i] and
    counts[i] are its steps of call i (a point-to-point call's only for this rank).  The count of positions; `made` gets
    the messages (no zero-piece step), *count of them */
@@ -1792,7 +1745,7 @@ static ncclResult_t run(struct session *ses, struct schedule *plans) {
           const uint64_t stamp = METAL_STAMP(at);
           memcpy(ch->sending + (at % DEPTH) * ch->slot, &stamp, sizeof stamp);
         }
-        mesh_host_publish(&ses->context, ch->out, (uint32_t)at);
+        mesh_host_publish(&ses->context, ch->out, at);
         ch->sent++;
       }
       open |= ch->sent < ch->end || ch->consumed < ch->end;
@@ -2704,9 +2657,10 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
     return ncclSuccess;
   const uint64_t bytes = count * SIZE[type];
   pthread_mutex_lock(&session_lock);
-  /* the answer is the communicator's programs on the bridges' map, read here where no session has read it yet (a call
-     records its crossings before its first group opens the session) */
-  if (!comm->listed && !comm->chosen && comm_read(comm) != ncclSuccess) { pthread_mutex_unlock(&session_lock); return ncclSuccess; }
+  /* the answer is the communicator's program, its table's (the caller's, or the structural one comm_routes compiles on
+     the bridges' map, read here where no session has read it yet: a call records its crossings before its first group
+     opens the session) */
+  if (!comm->programs && comm_read(comm) != ncclSuccess) { pthread_mutex_unlock(&session_lock); return ncclSuccess; }
   if (!comm->wire.small) {
     /* the wire the session will take (session_open): its bridge's block and NCCL_BUFFSIZE */
     pthread_mutex_lock(&attach_lock);

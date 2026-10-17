@@ -32,18 +32,17 @@
    has none, so it needs the node's bridge running and fails as ncclMemAlloc does (Memory, below): every client slot
    held, no region of a bridge that runs, or a lease of a bridge that stopped still held.
 
-   Programs.  A communicator's programs are made from the map its session read (mesh-plan.h): a program's own table
-   (ncclMeshCommInitRank), or the default, chosen for each collective, root and size class (the least 2^k of at least
-   the call's bytes, mesh-plan.h MESH_CLASS_LEAST to MESH_CLASS_MOST) at its first call by mesh_choose: the fastest, as
-   this library runs it on its session's rings (mesh_program_time on mesh_wire: every position a whole slot, a filler's
-   too, the credit and each receive's order) over the map's links (relayed hops sharing the links they cross, a pair's
-   cables striped), of the collective along the shortest-path trees (or the caller's paths) and along the packed trees,
-   an all-reduce also the single-phase one, each cut into 1, 2, 4, ... chunks while that is faster (the trees
-   pipelined).  A call runs the first of its
-   collective whose size bound its operand is under; ncclCollConfig_t.algSelection is not read.  The members agree
-   before any group runs: each publishes its digest of what its programs are made from (the route between each two
-   members and the costs of the links it crosses, the planner's version, the session's wire, the tree sets, the
-   caller's paths and programs) on every channel at the session's opening and compares its peers', so members that read
+   Programs.  A communicator's programs are a table of compiled collectives, operands made ahead of time (mesh-plan.h
+   struct mesh_program): the caller's own (ncclMeshCommInitRank), or else the structural one, compiled on the map each
+   session reads along the caller's paths (ncclMeshCommInitRank) or else the map's shortest-path trees (each member's
+   in-tree of the bridges' routes): the single-phase all-reduce (each member's sum up its own tree; the direct exchange
+   where every two members are linked), the reduce-scatter and the all-gather (segment s up and down s's trees) and
+   each root's reduce and broadcast, every one uncut (the wire cuts a step's piece into slots of its class,
+   mesh_wire_pieces).  A call runs its table's first program of its collective (and root) whose size bound its operand
+   is under; nothing about it is decided where it runs, and ncclCollConfig_t.algSelection is not read.  The members
+   agree before any group runs: each publishes its digest of what its programs are made from (the route between each
+   two members and the bandwidth of the links it crosses, the planner's version, the session's wire, the paths and
+   trees, the programs) on every channel at the session's opening and compares its peers', so members that read
    the map on either side of a change fail the session as a value naming the disagreement (ncclRemoteError), never run
    programs of two maps, and the next group opens on the map then.  A group
    (ncclGroupStart/End; a call outside one is a group of one) walks each call's program (mesh_program_steps; a
@@ -846,11 +845,11 @@ ncclResult_t pncclGroupEnd(void);
 
 /* A communicator over a program's own operands: `programs` its compiled collectives (mesh-plan.h struct mesh_program,
    copied, kept for its life; a call runs the first whose collective, and a rooted one's root, is the call's and whose
-   `below` its bytes are under, 0 any size), or with none (count 0) the default (above), whose single-phase all-reduce
-   runs along `paths` (NULL: the map's shortest-path trees), checked against the map at each session; rank r of
-   `nranks` on the bridge of node node[r]; `name` the communicator's (NULL: "nccl").  Like every communicator, it reads
-   the bridges' map at each opening of its session.  Every rank passes the same nranks, paths, programs, nodes and
-   name. */
+   `below` its bytes are under, 0 any size), or with none (count 0) the structural table (above), every collective
+   along `paths` (its routing tables: each member's trees; NULL: the map's shortest-path trees), checked against the
+   map at each session; rank r of `nranks` on the bridge of node node[r]; `name` the communicator's (NULL: "nccl").
+   Like every communicator, it reads the bridges' map at each opening of its session.  Every rank passes the same
+   nranks, paths, programs, nodes and name. */
 typedef struct { const struct mesh_program* program; uint64_t below; } ncclMeshProgram;
 ncclResult_t ncclMeshCommInitRank(ncclComm_t* comm, int nranks, int rank, const struct mesh_trees* paths,
                                   const ncclMeshProgram* programs, int count, const int* node, const char* name);
@@ -887,7 +886,7 @@ ncclResult_t ncclMeshRelayBytes(const struct mesh_wire* wire, uint64_t* bytes);
    else the bound above.  A failure is a value: ncclCommGetAsyncError (or the communicator's next group) after the
    window.  The group completes in the encoder: with no workspace
    its scratch is the communicator's, reused in the encoder's order.  Total over any member set: comm is any
-   communicator (ncclMeshCommInitRank's: the engine's MeshRankGroup), its program the one its map chooses.  The same as
+   communicator (ncclMeshCommInitRank's: the engine's MeshRankGroup), its program its table's (above).  The same as
    ncclAllReduce on an ncclMeshStream of {.commandEncoder = encoder, .argumentTable = table, .residencySet = residency,
    .polls = polls}, which every other collective and group also takes. */
 ncclResult_t ncclMeshEncodeMetal4(ncclComm_t comm, ncclRedOp_t op, const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t type,

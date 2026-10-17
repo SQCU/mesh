@@ -38,18 +38,18 @@ public struct Topology {
 extension Mesh {
     // design/algorithm-sources.md#meshobserve
     // the bridges' whole map (mesh-plan.h mesh_map, n 0): its nodes by their bridges' numbers, a link a cable, its
-    // number in the map as its port, its bandwidth 8e9 / beta bits a second and its latency alpha (seconds)
+    // number in the map as its port and its bandwidth in bits a second (0 where none is reported)
     public static func observe() throws -> Topology {
         var room = (nodes: 16, links: 64)
         while true {
             var node = [UInt32](repeating: 0, count: room.nodes)
             var link = [(UInt32, UInt32)](repeating: (0, 0), count: room.links)
-            var cost = [(Double, Double)](repeating: (0, 0), count: room.links)
+            var bandwidth = [UInt64](repeating: 0, count: room.links)
             var map = mesh_link_map()
             map.nodes = UInt32(room.nodes); map.links = UInt32(room.links)
             let count = link.withUnsafeMutableBufferPointer { links in
-                cost.withUnsafeMutableBufferPointer { costs in
-                    map.link = links.baseAddress; map.cost = costs.baseAddress
+                bandwidth.withUnsafeMutableBufferPointer { bandwidths in
+                    map.link = links.baseAddress; map.bandwidth = bandwidths.baseAddress
                     return mesh_map(nil, 0, &node, nil, &map)
                 }
             }
@@ -61,9 +61,8 @@ extension Mesh {
             let nodes = node.prefix(Int(count)).map(Int.init)
             var links: [Topology.Pair: [Link]] = [:]
             for i in 0..<Int(map.links) {
-                let (alpha, beta) = cost[i]
                 links[Topology.Pair(nodes[Int(link[i].0)], nodes[Int(link[i].1)]), default: []]
-                    .append(Link(port: i, bandwidth: beta > 0 ? UInt64(8e9 / beta) : 0, latency: alpha * 1e-6))
+                    .append(Link(port: i, bandwidth: bandwidth[i]))
             }
             return Topology(nodes: Set(nodes), links: links)
         }

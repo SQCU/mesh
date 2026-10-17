@@ -1,26 +1,25 @@
 #include "mesh.h"
 #include <errno.h>
-#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 /* design/bridge-and-ipc.md#ports: the node's bridge as libmesh reads it (mesh-plan.h), one JSON line: whether it answers
    (`up`, else the errno), its node, its ports by index (mesh_observe: each port's peer node, phase and bandwidth) and the
    mesh's map (mesh_map over every node its records hold: each node's bridge number, and each link by the two nodes'
-   numbers with its alpha and beta), its window in bytes with the bytes no lease holds (mesh_window), and every node's
+   numbers with its bandwidth in bits a second, null where none is reported), its window in bytes with the bytes no lease holds (mesh_window), and every node's
    record as the bridge holds it: its name, its bridge's window, its memory and hardware model and its health
    (mesh_nodes_health, design/bridge-and-ipc.md#records, design/recovery.md#diagnosis) */
 int main(void){
   struct mesh_link_view port[MESH_PORTS];
   uint32_t node=0,*nodes=NULL,(*link)[2]=NULL,room=64,links=64;
-  double (*cost)[2]=NULL;
+  uint64_t *bandwidth=NULL;
   const int ports=mesh_observe(port,MESH_PORTS,&node);
   if(ports<0){printf("{\"up\":false,\"errno\":%d}\n",-ports);return 0;}
   struct mesh_link_map map={0};
   int count=-ENOSPC;
   while(count==-ENOSPC){
-    nodes=realloc(nodes,(room+1)*sizeof *nodes);link=realloc(link,(links+1)*sizeof *link);cost=realloc(cost,(links+1)*sizeof *cost);
-    if(!nodes || !link || !cost)return 1;
-    map=(struct mesh_link_map){.kind=MESH_LINKS_MESH,.nodes=room,.links=links,.link=link,.cost=cost};
+    nodes=realloc(nodes,(room+1)*sizeof *nodes);link=realloc(link,(links+1)*sizeof *link);bandwidth=realloc(bandwidth,(links+1)*sizeof *bandwidth);
+    if(!nodes || !link || !bandwidth)return 1;
+    map=(struct mesh_link_map){.kind=MESH_LINKS_MESH,.nodes=room,.links=links,.link=link,.bandwidth=bandwidth};
     count=mesh_map(NULL,0,nodes,NULL,&map);
     room=map.nodes;links=map.links;
   }
@@ -39,11 +38,8 @@ int main(void){
     printf("],\"links\":[");
     for(uint32_t l=0;l<map.links;l++){
       printf("%s[%u,%u",l?",":"",nodes[map.link[l][0]],nodes[map.link[l][1]]);
-      for(int c=0;c<2;c++){
-        if(isfinite(map.cost[l][c]))printf(",%.17g",map.cost[l][c]);
-        else printf(",null");
-      }
-      printf("]");
+      if(map.bandwidth[l])printf(",%llu]",(unsigned long long)map.bandwidth[l]);
+      else printf(",null]");
     }
     printf("]}");
   }
@@ -65,6 +61,6 @@ int main(void){
            h->pressure,h->thermal);
   }
   printf("]}\n");
-  free(nodes);free(link);free(cost);
+  free(nodes);free(link);free(bandwidth);
   return 0;
 }
