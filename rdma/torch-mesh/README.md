@@ -184,6 +184,14 @@ engines.rebalance(pool)                                    # every few steps
   on the GPU), recorded in `Engines.errors` and `Engines.excluded`, never a routing input. The Neural Engine's outputs carry an absolute error
   floor (about 3e-4 RMS for a 3840-wide contraction): accurate on normalized activations (an FFN 1.5e-3), not on small
   ones.
+- Engines never time-share a physical unit: each states what it occupies (`Engine.occupies`: `mps` the GPU, `cpu` the
+  CPU's cores, `ane` the Neural Engine and whatever units Core ML's compute plan places a share's operations on, read
+  at the share's load through `mesh_coreml_placement`; the configuration's `occupies` option, `"ane:occupies=ane+gpu"`,
+  states it in place of the engine's own), and two engines occupying one unit never hold units of a decision together
+  (`allocate.Coupled.forbid`), applied when the decision is made and when a load reads its placement, before any of its
+  calls is measured; the search then also tries the whole share moved between the two. Reproduction target
+  (metal-microbench docs/measurement.md:496-497): an M4 Pro four-layer FFN stack on GPU and Neural Engine 59.2 ms a step
+  against 81.5 (1.38x); the engine's prefill chunk with the Neural Engine 90.5 ms against 104.3.
 - Nothing is implicit: an operation without an `Engines` operand is torch's own; an engine the configuration names and
   the node lacks is an error; an engine's limits (dtypes, constant weights) are data. A share's preparation
   and first run at a row count are no evidence; once an allocation stands, one call in 16 is measured.

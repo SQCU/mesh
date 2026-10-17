@@ -25,6 +25,15 @@ measured by timing events on torch's stream (its span, and the GPU's share where
 ms of host time, so once a decision's allocation stands one call in `sample` (default 16) is measured, enough to see its
 time move.
 
+Engines never time-share a physical unit.  Each states what it occupies (`Engine.occupies`: the GPU; the CPU's cores;
+the Neural Engine, and whatever units Core ML places a Neural Engine share's operations on, read from its compute
+plan through rdma/mesh-coreml.m mesh_coreml_placement), the configuration's `occupies` option stating it in place of
+the engine's own ("ane:occupies=ane+gpu"), and two engines occupying one unit never hold units of a decision together
+(allocate.Coupled.forbid), applied when the decision is made and when a share's load reads its placement, before any
+of its calls is measured: running both at once would time-share the unit (two APIs on the same arithmetic units,
+contending for registers and switching between them) rather than add capacity.  The rule is the hardware's, data of
+the engines, never a measurement's or a model's conclusion.
+
 Nothing is implicit.  An operation takes its engines as an operand (`Engines`), from the program or from the
 configuration the program names (`Engines.configured()`: MESH_ENGINES, e.g. "mps,cpu,ane:tile=128"); without
 one it is torch's own operation on its input's device.  An engine the configuration names and the node lacks is an
@@ -96,6 +105,8 @@ def _coreml():
             lib.mesh_coreml_predict.argtypes = [ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int,
                                                 ctypes.c_void_p, ctypes.POINTER(ctypes.c_int64), ctypes.c_int]
             lib.mesh_coreml_error.restype = ctypes.c_char_p
+            lib.mesh_coreml_placement.restype = ctypes.c_long
+            lib.mesh_coreml_placement.argtypes = [ctypes.c_long, ctypes.c_char_p, ctypes.c_size_t]
             lib.mesh_coreml_compile.restype = ctypes.c_int
             lib.mesh_coreml_compile.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
             _CORE_ML = lib
@@ -122,13 +133,16 @@ def ffn(x, gate, up, down, out=None):
 
 class Engine:
     """One engine of the node.  `limits`: dtypes (the operand dtypes it takes), constants (its weights must be
-    constants).  It lowers each operation kind by its prepare_<kind> (its resident shard of units [start, end)) and
-    run_<kind> (its share into `out`, its seconds or None where the GPU's events time it)."""
+    constants).  `occupies`: the physical units it runs on (the configuration's `occupies` option, '+'-separated, in
+    place of the engine's own).  It lowers each operation kind by its prepare_<kind> (its resident shard of units
+    [start, end)) and run_<kind> (its share into `out`, its seconds or None where the GPU's events time it)."""
     name, limits = None, {'dtypes': (torch.float16, torch.bfloat16, torch.float32), 'constants': False}
-    host_side = True
+    host_side, occupies = True, frozenset()
 
     def __init__(self, **options):
         self.options = options
+        if 'occupies' in options:
+            self.occupies = frozenset(u for u in str(options['occupies']).split('+') if u)
 
     @classmethod
     def missing(cls):
@@ -150,7 +164,7 @@ class Engine:
 
 class Mps(Engine):
     """torch's MPS queue: the share enqueued as the GPU's own products, timed by events on its stream."""
-    name, host_side = 'mps', False
+    name, host_side, occupies = 'mps', False, frozenset({'gpu'})
 
     @classmethod
     def missing(cls):
@@ -172,7 +186,7 @@ class Mps(Engine):
 class Cpu(Engine):
     """The CPU's matrix units through torch's fp32 CPU products (Accelerate): the input read in place as fp32 (the
     GPU's prologue converts it), the fp32 shard resident in host memory, the output written in place in fp32."""
-    name = 'cpu'
+    name, occupies = 'cpu', frozenset({'cpu'})
 
     def out_dtype(self, dtype):
         return torch.float32
@@ -220,7 +234,7 @@ class Ane(Engine):
     inaccurate on small ones (a sixteenth-scale input's linear 5e-3 relative), which an operation's `tolerance`
     measures (conditioning, not routing, answers it).  (Its compiler folds a constant scaling of the weights into the convolution, so no rescaling in the
     graph moves the floor.)"""
-    name, limits = 'ane', {'dtypes': (torch.float16,), 'constants': True}
+    name, limits, occupies = 'ane', {'dtypes': (torch.float16,), 'constants': True}, frozenset({'ane'})
 
     def __init__(self, **options):
         super().__init__(**options)
@@ -257,6 +271,11 @@ class Ane(Engine):
             handle = native.mesh_coreml_load(str(compiled).encode(), b'', b'', 0)
             if handle < 0:
                 raise RuntimeError(f'Neural Engine share: {native.mesh_coreml_error().decode()}')
+            placed = ctypes.create_string_buffer(1 << 20)
+            if native.mesh_coreml_placement(handle, placed, len(placed)) >= 0:
+                devices = {line.split('=')[1] for line in placed.value.decode().split('\n') if '=' in line}
+                shard.placement = sorted(devices - {'unknown'})
+                self.occupies = self.occupies | frozenset(devices - {'unknown'})
         else:
             model = neural_engine_model(shard.kind, shard.arrays, rows, tile)
             spec = model.get_spec().description
@@ -424,7 +443,7 @@ class Engines:
         self.engines = [ENGINES[n](**options.get(n, {})) for n in names]
         self.workers = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(names) - 1), initializer=_interactive)
         self.operations, self.decisions, self.evidence, self.solvers, self.last, self.excluded = [], {}, {}, {}, {}, {}
-        self.errors = {}
+        self.errors, self.separated = {}, {}
 
     @classmethod
     def configured(cls, variable='MESH_ENGINES'):
@@ -481,6 +500,7 @@ class Operation:
             parts[able.index(True)] += self.units - sum(parts)
             self.engines.decisions[key] = {'parts': parts, 'grain': self.grain, 'low': [0] * len(able),
                                            'high': [self.units if a else 0 for a in able], 'units': self.units}
+            self._separate(key)
         return key
 
     def _shard(self, engine, start, end, rows):
@@ -547,6 +567,7 @@ class Operation:
             y = y.to(dtype)
         if self.tolerance is not None and first:
             self._verify(key, held, bounds, shards, x2, prologue, outs)
+        self._separate(key)
         y = self.finish(y)
         if measured:
             span[1].record()
@@ -557,6 +578,17 @@ class Operation:
 
     def finish(self, y):
         return y
+
+    def _separate(self, key):
+        """No two engines occupying one physical unit (`Engine.occupies`, a Neural Engine share's from Core ML's
+        placement of its operations) hold units of this decision together: they would time-share it."""
+        engines = self.engines.engines
+        for i in range(len(engines)):
+            for j in range(i + 1, len(engines)):
+                pair = (i, j)
+                if engines[i].occupies & engines[j].occupies and pair not in self.engines.separated.setdefault(key, set()):
+                    self.engines.separated[key].add(pair)
+                    self.engines.decisions[key]['parts'] = solver(self.engines, key).forbid(i, j)
 
     def _verify(self, key, held, bounds, shards, x2, prologue, outs):
         """An allocation's first call, where the operation names a `tolerance`: each share an engine other than the GPU
@@ -607,19 +639,25 @@ class FFN(Operation):
         return ffn(x.reshape(-1, x.shape[-1]), self.gate, self.up, self.down).reshape(*x.shape[:-1], -1)
 
 
+def solver(engines, key):
+    """The search (allocate.Coupled) of decision `key` of `engines`, made at its first use."""
+    found = engines.solvers.get(key)
+    if found is None:
+        import allocate
+        d = engines.decisions[key]
+        found = engines.solvers[key] = allocate.Coupled(d['units'], d['grain'], d['low'], d['high'], d['parts'], window=engines.window)
+    return found
+
+
 def rebalance(engines):
     """Each (operation, rows) decision's search (allocate.Coupled) on its calls since the last: each engine's share
     times (the GPU's from its events) and the calls' spans on the GPU's timeline, the measure; the next allocation,
     written into the operations.  {decision: parts}."""
-    import allocate
     torch.mps.synchronize()
     out, engines.last = {}, {}
     for key, d in engines.decisions.items():
         calls = engines.evidence.pop(key, [])
-        solver = engines.solvers.get(key)
-        if solver is None:
-            solver = engines.solvers[key] = allocate.Coupled(d['units'], d['grain'], d['low'], d['high'], d['parts'],
-                                                             window=engines.window)
+        search = solver(engines, key)
         if not calls:
             continue
         width = len(engines.engines)
@@ -633,7 +671,7 @@ def rebalance(engines):
             spans.append(whole)
         engines.last[key] = {'ms': [round(sorted(t)[len(t) // 2] * 1e3, 3) if t else None for t in times],
                              'call_ms': round(sorted(spans)[len(spans) // 2] * 1e3, 3)}
-        d['parts'] = solver.observe(times, spans)
+        d['parts'] = search.observe(times, spans)
         out[key] = list(d['parts'])
     return out
 

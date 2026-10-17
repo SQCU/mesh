@@ -14,7 +14,7 @@ branch and bound for more), and `_path` is a call's time from its stretches as a
 
 `Balancer` is DFPA over a program's measured stretches (design/heterogeneity.md R3, R5, R10, R11).  `Coupled` divides
 one decision among members that run at once and slow each other (a node's engines) by a search over allocations, each
-measured before any is chosen.
+measured before any is chosen, members that occupy one physical unit never holding units together (`Coupled.forbid`).
 """
 import heapq
 import math
@@ -865,6 +865,11 @@ class Coupled:
     the largest step, every other allocation's calls dropped (its performance changed [Clarke, Lastovetsky & Rychkov
     2011]).
 
+    Occupancy.  Members that occupy one physical unit are forbidden to hold units together (`forbid`: two engines on
+    the CPU's cores, two programs on one GPU, which running at once would time-share rather than add capacity), so no
+    allocation the search runs or moves to gives both units; the rule is the members' data (torch_mesh/engines.py
+    `Engine.occupies`), applied before any allocation is measured, never a measurement's or a model's conclusion.
+
     The total.  A decision whose total is another decision's part (a member's units of a decision among members,
     divided among the member's engines) follows it (`resize`): the search starts again at the old parts scaled to the
     new total, or, where members are `kept` (those whose units are built per range, a Neural Engine's compiled shares:
@@ -884,6 +889,7 @@ class Coupled:
         self.parts = self.centre = tuple(int(p) for p in parts)
         self.able = [i for i, h in enumerate(self.high) if h > 0]
         self.seen, self.stands, self.stood, self.pending, self.kept = {}, False, None, None, []
+        self.forbidden = set()
         self.step = self._widest()
 
     def state(self):
@@ -891,7 +897,7 @@ class Coupled:
         return {'total': self.total, 'grain': self.grain, 'window': self.window, 'low': self.low, 'high': self.high,
                 'parts': list(self.parts), 'centre': list(self.centre), 'step': self.step, 'able': self.able,
                 'stands': self.stands, 'stood': self.stood, 'pending': list(self.pending) if self.pending else None,
-                'kept': list(self.kept), 'seen': [[list(p), e] for p, e in self.seen.items()]}
+                'kept': list(self.kept), 'forbidden': sorted(self.forbidden), 'seen': [[list(p), e] for p, e in self.seen.items()]}
 
     @classmethod
     def of(cls, state):
@@ -905,6 +911,7 @@ class Coupled:
         c.kept = list(state.get('kept') or [])
         c.stands, c.stood = state['stands'], state['stood']
         c.seen = {tuple(p): e for p, e in state['seen']}
+        c.forbidden = {tuple(f) for f in state.get('forbidden') or []}
         c.step = int(state.get('step') or c._widest())
         return c
 
@@ -937,7 +944,7 @@ class Coupled:
             for i in others:
                 parts[i] = 0
             parts[max(others, key=lambda i: (self.parts[i], -i))] = total - held
-            if not all(self.low[i] <= parts[i] <= self.high[i] for i in range(len(parts))):
+            if not all(self.low[i] <= parts[i] <= self.high[i] for i in range(len(parts))) or not self.allowed(parts):
                 parts = None
         if parts is None:
             parts = [self.grain * round(p * total / old / self.grain) if old else 0 for p in self.parts]
@@ -968,16 +975,43 @@ class Coupled:
 
     def _give(self, parts, i):
         """`parts` with member i's units past its bound given to the other able members, each up to its own bound, the
-        one holding the most first (ties to the lower member)."""
+        one holding the most first (ties to the lower member), none to a member forbidden beside a holder."""
         parts = list(parts)
         excess = parts[i] - self.high[i]
         if excess > 0:
             parts[i] = self.high[i]
             for j in sorted((j for j in self.able if j != i), key=lambda j: (-parts[j], j)):
+                if not self._beside(parts, j):
+                    continue
                 moved = min(excess, self.high[j] - parts[j])
                 parts[j], excess = parts[j] + moved, excess - moved
             parts[i] += excess
         return parts
+
+    def allowed(self, p):
+        """Whether allocation p gives units to no two members forbidden to run together."""
+        return not any(p[i] > 0 and p[j] > 0 for i, j in self.forbidden)
+
+    def _beside(self, parts, j):
+        """Whether member j may hold units beside the members holding units in `parts`."""
+        return not any(parts[k] > 0 and (min(j, k), max(j, k)) in self.forbidden for k in range(len(parts)) if k != j)
+
+    def forbid(self, i, j):
+        """Members i and j never hold units together from now on (they occupy one physical unit, which running at once
+        would time-share: two engines on the CPU's cores, two programs on one GPU): every allocation giving both units
+        leaves the search and the evidence; the current one, where it gives both, moves j's units to i (past i's bound,
+        to the others: _give), and the search starts again there."""
+        self.forbidden.add((min(i, j), max(i, j)))
+        self.seen = {p: e for p, e in self.seen.items() if self.allowed(p)}
+        if self.pending is not None and not self.allowed(self.pending):
+            self.pending = None
+        if self.allowed(self.parts) and self.allowed(self.centre):
+            return list(self.parts)
+        parts = list(self.parts)
+        if not self.allowed(parts):
+            parts[i], parts[j] = parts[i] + parts[j], 0
+            parts = self._give(parts, i)
+        return self._restart(parts)
 
     def _restart(self, parts):
         self.parts = self.centre = tuple(parts)
@@ -1033,13 +1067,19 @@ class Coupled:
 
     def _around(self, centre):
         """The allocations a step from `centre`: member i given it and member j giving it, every ordered pair of able
-        members, within the bounds."""
+        members, within the bounds; and of two members forbidden together, the one holding units giving them all to the
+        other (fa36bea6^'s design base: a member with its forbidden partners' units given to it), which no step reaches;
+        none giving units to two members forbidden together."""
         out = []
         for i in self.able:
             for j in self.able:
                 if i != j and centre[i] + self.step <= self.high[i] and centre[j] - self.step >= self.low[j]:
                     out.append(tuple(v + self.step if k == i else v - self.step if k == j else v for k, v in enumerate(centre)))
-        return out
+        for a, b in sorted(self.forbidden):
+            for i, j in ((a, b), (b, a)):
+                if i in self.able and centre[i] == 0 and 0 < centre[j] <= self.high[i] and self.low[j] == 0:
+                    out.append(tuple(centre[j] if k == i else 0 if k == j else v for k, v in enumerate(centre)))
+        return [p for p in dict.fromkeys(out) if self.allowed(p)]
 
     def _faster(self, a, b):
         """Whether calls `a` measured faster than calls `b` by more than the resolution."""
