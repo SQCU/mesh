@@ -203,24 +203,24 @@ def nodes():
              'shutdown': text(r.health.shutdown), 'own': r.node == own[0]} for r in held[0:count]]
 
 
-def request(node, service, bytes=0):
+def request(node, service, need=0):
     """design/bridge-and-ipc.md#requests: a channel to `service` at `node` (its bridge number; this node's own too),
     opened through this node's bridge and carried by the bridges along the map's route: a connected socket whose bytes
     reach the service and whose reads are the service's, each direction ended by a half close (shutdown(SHUT_WR)); a
-    channel that fails resets it.  `bytes`: the memory outside the window the request will take at the node, admitted
+    channel that fails resets it.  `need`: the bytes outside the window the request will take at the node, admitted
     against its available memory there (#admission).  OSError naming the node and service where the bridge refuses it
-    (EHOSTUNREACH: no path to the node; ENOENT: no such service there; ENOMEM: the node's memory short of `bytes`;
+    (EHOSTUNREACH: no path to the node; ENOENT: no such service there; ENOMEM: the node's memory short of `need`;
     ESRCH: this node's bridge is not running)."""
     import socket
-    fd = lib.mesh_request(int(node), service.encode(), int(bytes))
+    fd = lib.mesh_request(int(node), service.encode(), int(need))
     if fd < 0:
         raise OSError(-fd, f"node {node}'s {service}: {os.strerror(-fd)}")
     return socket.socket(fileno=fd)
 
 
-def ask(node, service, data, timeout=None, bytes=0):
-    """request(node, service, bytes) given `data` whole and half closed, the service's answer read to its end: bytes."""
-    with request(node, service, bytes) as channel:
+def ask(node, service, data, timeout=None, need=0):
+    """request(node, service, need) given `data` whole and half closed, the service's answer read to its end: bytes."""
+    with request(node, service, need) as channel:
         channel.settimeout(timeout)
         channel.sendall(data)
         channel.shutdown(1)
