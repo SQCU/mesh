@@ -45,8 +45,8 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 | all_reduce | sum, prod, max, min, avg on int8, uint8, int32, int64, float16, bfloat16 and float32; a non-contiguous view |
 | all_gather_object, all_to_all of lists, blocking send/recv | |
 | broadcast, reduce | |
-| all_gather (list and into a tensor) | |
-| reduce_scatter (list and tensor) | |
+| all_gather (list and into a tensor) | a list of unequal sizes: one MPI_Allgatherv (Uneven nodes) |
+| reduce_scatter (list and tensor) | a list of unequal sizes: one MPI_Reduce_scatter (Uneven nodes) |
 | gather, scatter | any per-rank sizes |
 | all_to_all, all_to_all_single | uneven splits, empty inputs |
 | send, recv, isend, irecv, batch_isend_irecv | |
@@ -81,7 +81,12 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 Stock PyTorch splits every sharded extent equally. `torch_mesh.partition` is a partition operand on raw tensors: a
 mesh dimension's extents split among its ranks by parts proportional to each node's speed, the program holding its
 share and calling the list collectives with unequal sizes (`all_gather(list)`, `reduce_scatter(out, list)`,
-`all_to_all_single` with splits: MPI's v-collectives). On DTensor the partition is a placement, `RaggedShard`, carried
+`all_to_all_single` with splits: MPI's v-collectives). An unequal list is one program over unequal segments, the
+library's MPI_Allgatherv and MPI_Reduce_scatter (`ncclMeshAllGatherV`, `ncclMeshReduceScatterV`, [NCCL.md](../NCCL.md)),
+not a broadcast or reduce rooted at each rank; where the list is the pieces of one contiguous tensor (`out.split(sizes)`,
+as `partition`'s collectives pass it) the call reads or writes that tensor in place. Reproduction target (metal-microbench
+docs/measurement.md, 2026-09-30): tp SP=1 at capacity-shaped parts 255-256 ms a step on the pair, an SP=1 all-gather
+214-229 us and a reduce-scatter 196-212 us a call. On DTensor the partition is a placement, `RaggedShard`, carried
 by `RaggedTensor`, a DTensor subclass whose own dispatch keeps it capacity-shaped through every op (padding re-masked
 before contractions, gathered where an op needs the dimension whole); nothing of torch is patched.
 

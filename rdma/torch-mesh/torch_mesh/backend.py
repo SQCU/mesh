@@ -121,6 +121,23 @@ class After:
         self.back = back
 
 
+def span(tensors):
+    """The one contiguous tensor `tensors` lie in end to end, in their order (the pieces of a split: out.split(sizes)),
+    as a flat view of it; None where they do not."""
+    first, at = tensors[0], tensors[0].storage_offset()
+    for t in tensors:
+        if (t.dtype != first.dtype or t.device != first.device or not t.is_contiguous() or t.storage_offset() != at
+                or t.untyped_storage().data_ptr() != first.untyped_storage().data_ptr()):
+            return None
+        at += t.numel()
+    return first.as_strided((at - first.storage_offset(),), (1,))
+
+
+def segments(values):
+    """A call's segment counts (nccl.h ncclMeshAllGatherV, ncclMeshReduceScatterV) as the size_t array it reads."""
+    return ffi.new('size_t[]', [int(v) for v in values])
+
+
 def issued(works, result):
     """The last of a call's groups issued and not completed (completing it completes the groups before it: _stream.mm
     MeshWork), else its result done."""
@@ -310,7 +327,9 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def allgather(self, outputs, inputs, opts=None):
         """Each input gathered into its list of outputs; outputs of unequal sizes (an Allgatherv in torch's
-        spelling) as ProcessGroupNCCL takes them: one broadcast rooted at each rank, in one group."""
+        spelling) are MPI_Allgatherv, one program over the unequal segments (ncclMeshAllGatherV): into the
+        outputs in place where they lie end to end in one contiguous tensor (a split's pieces: torch_mesh.partition's
+        allgatherv), else into one flat operand copied out to them."""
         if all(len({t.numel() for t in out}) == 1 for out in outputs):
             sources = [operand(i) for i in inputs]
             flats = [operand(blank((self._size * s.host.numel(),), s.host.dtype, s.host.device), read=False)
@@ -322,14 +341,21 @@ class ProcessGroupMesh(dist.ProcessGroup):
                         out[r].copy_(piece.view(out[r].shape))
             return self._group(lambda: [check(LIB.ncclAllGather(s.at(), f.at(), s.host.numel(), kind(s.host), self.comm, self._stream))
                                         for s, f in zip(sources, flats)], [After(back)], outputs)
-        sources, targets = [operand(i) for i in inputs], [[operand(t, read=False) for t in out] for out in outputs]
+        sizes, spans = [[t.numel() for t in out] for out in outputs], [span(out) for out in outputs]
+        if all(w is not None for w in spans) and (s := self._direct(*inputs, *spans)) is not None:
+            return issued([s.allgatherv(w, i, c, self.handle, asynchronous(opts)) for w, i, c in zip(spans, inputs, sizes)], outputs)
+        sources = [operand(i) for i in inputs]
+        wholes = [operand(w if w is not None else blank((sum(c),), i.dtype, i.device), read=False)
+                  for w, i, c in zip(spans, inputs, sizes)]
 
-        def issue():
-            for source, out in zip(sources, targets):
-                for r, target in enumerate(out):
-                    sent = source if r == self._rank else target
-                    check(LIB.ncclBroadcast(sent.at(), target.at(), target.host.numel(), kind(target.host), r, self.comm, self._stream))
-        return self._group(issue, [t for out in targets for t in out], outputs)
+        def back():
+            for out, whole, c, w in zip(outputs, wholes, sizes, spans):
+                whole.back()
+                if w is None:
+                    for t, piece in zip(out, whole.host.split(c)):
+                        t.copy_(piece.view(t.shape))
+        return self._group(lambda: [check(LIB.ncclMeshAllGatherV(s.at(), w.at(), segments(c), kind(s.host), self.comm, self._stream))
+                                    for s, w, c in zip(sources, wholes, sizes)], [After(back)], outputs)
 
     def reduce_scatter_single(self, output, input, opts=dist.ReduceScatterOptions()):
         if (s := self._direct(output, input)) is not None:
@@ -347,8 +373,9 @@ class ProcessGroupMesh(dist.ProcessGroup):
 
     def reduce_scatter(self, outputs, inputs, opts=dist.ReduceScatterOptions()):
         """Each list of inputs reduced, rank r's block left at rank r; blocks of unequal sizes (a
-        Reduce_scatter of a list in torch's spelling) as ProcessGroupNCCL takes them: one reduce rooted at
-        each rank, in one group."""
+        Reduce_scatter of a list in torch's spelling) are MPI_Reduce_scatter, one program over the unequal segments
+        (ncclMeshReduceScatterV): read in place where the inputs lie end to end in one contiguous tensor (a split's
+        pieces: torch_mesh.partition's reduce_scatterv), else from one flat operand they are copied into."""
         if all(len({t.numel() for t in parts}) == 1 for parts in inputs):
             flats = [operand(torch.cat([x.detach().reshape(-1) for x in parts],
                                        out=blank((sum(x.numel() for x in parts),), parts[0].dtype, parts[0].device))) for parts in inputs]
@@ -356,15 +383,17 @@ class ProcessGroupMesh(dist.ProcessGroup):
             return self._group(lambda: [check(LIB.ncclReduceScatter(f.at(), t.at(), t.host.numel(), kind(t.host),
                                                                     op(opts.reduceOp), self.comm, self._stream))
                                         for f, t in zip(flats, targets)], targets, outputs)
-        sources, targets = [[operand(x) for x in parts] for parts in inputs], [operand(o, read=False) for o in outputs]
-
-        def issue():
-            for parts, target in zip(sources, targets):
-                for r, source in enumerate(parts):
-                    received = target if r == self._rank else source
-                    check(LIB.ncclReduce(source.at(), received.at(), source.host.numel(), kind(source.host), op(opts.reduceOp),
-                                         r, self.comm, self._stream))
-        return self._group(issue, targets, outputs)
+        sizes, spans = [[x.numel() for x in parts] for parts in inputs], [span(parts) for parts in inputs]
+        if all(w is not None for w in spans) and (s := self._direct(*outputs, *spans)) is not None:
+            return issued([s.reduce_scatterv(o, w, c, op(opts.reduceOp), self.handle, asynchronous(opts))
+                           for o, w, c in zip(outputs, spans, sizes)], outputs)
+        wholes = [operand(w if w is not None else torch.cat([x.detach().reshape(-1) for x in parts],
+                                                             out=blank((sum(c),), parts[0].dtype, parts[0].device)))
+                  for w, parts, c in zip(spans, inputs, sizes)]
+        targets = [operand(o, read=False) for o in outputs]
+        return self._group(lambda: [check(LIB.ncclMeshReduceScatterV(w.at(), t.at(), segments(c), kind(t.host), op(opts.reduceOp),
+                                                                     self.comm, self._stream))
+                                    for w, t, c in zip(wholes, targets, sizes)], targets, outputs)
 
     def alltoall(self, outputs, inputs, opts=None):
         sources, targets = [operand(i) for i in inputs], [operand(o, read=False) for o in outputs]

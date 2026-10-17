@@ -260,6 +260,32 @@ static uint64_t reduce_scatter(const at::Tensor &output, const at::Tensor &input
   }, split, comm);
 }
 
+// MPI_Allgatherv and MPI_Reduce_scatter (nccl.h ncclMeshAllGatherV, ncclMeshReduceScatterV): rank r's segment is
+// counts[r] elements of the tensors' dtype, the segments packed in rank order in the whole operand, one program over
+// the unequal segments; the counts in the operand's NCCL elements (a dtype moved as bytes, a complex as its real view).
+static std::vector<size_t> segments(const std::vector<int64_t> &counts, const at::Tensor &whole, const Operand &o) {
+  const size_t per = whole.numel() ? o.count / (size_t)whole.numel() : 1;
+  std::vector<size_t> out;
+  for (auto c : counts) out.push_back((size_t)c * per);
+  return out;
+}
+
+static uint64_t allgatherv(const at::Tensor &output, const at::Tensor &input, const std::vector<int64_t> &counts, int64_t comm, bool split) {
+  const Operand from = moving(input), to = moving(output);
+  const std::vector<size_t> c = segments(counts, output, to);
+  return on_stream(^(ncclMeshStream *s) { return ncclMeshAllGatherV(&from.buffer, (void *)&to.buffer, c.data(), from.type, communicator(comm), s); },
+                   split, comm);
+}
+
+static uint64_t reduce_scatterv(const at::Tensor &output, const at::Tensor &input, const std::vector<int64_t> &counts, int64_t op, int64_t comm,
+                                bool split) {
+  const Operand from = reducing(input, op), to = reducing(output, op);
+  const std::vector<size_t> c = segments(counts, input, from);
+  return on_stream(^(ncclMeshStream *s) {
+    return ncclMeshReduceScatterV(&from.buffer, (void *)&to.buffer, c.data(), from.type, (ncclRedOp_t)op, communicator(comm), s);
+  }, split, comm);
+}
+
 // all-to-all with each rank's elements (NCCL's own lowering: each rank's sends and receives in one group)
 static uint64_t alltoall(const at::Tensor &output, const at::Tensor &input, std::vector<int64_t> sends, std::vector<int64_t> receives,
                          int64_t comm, bool split) {
@@ -552,6 +578,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("allgather", [](const at::Tensor &o, const at::Tensor &i, int64_t comm, bool split) { return work_of(allgather(o, i, comm, split), {o}, comm); });
   module.def("reduce_scatter", [](const at::Tensor &o, const at::Tensor &i, int64_t op, int64_t comm, bool split) {
     return work_of(reduce_scatter(o, i, op, comm, split), {o}, comm);
+  });
+  module.def("allgatherv", [](const at::Tensor &o, const at::Tensor &i, std::vector<int64_t> counts, int64_t comm, bool split) {
+    return work_of(allgatherv(o, i, counts, comm, split), {o}, comm);
+  });
+  module.def("reduce_scatterv", [](const at::Tensor &o, const at::Tensor &i, std::vector<int64_t> counts, int64_t op, int64_t comm, bool split) {
+    return work_of(reduce_scatterv(o, i, counts, op, comm, split), {o}, comm);
   });
   module.def("alltoall", [](const at::Tensor &o, const at::Tensor &i, std::vector<int64_t> sends, std::vector<int64_t> receives, int64_t comm, bool split) {
     return work_of(alltoall(o, i, std::move(sends), std::move(receives), comm, split), {o}, comm);

@@ -253,7 +253,8 @@ def _empty(shape, like):
 @torch.library.custom_op('torch_mesh::allgatherv', mutates_args=())
 def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> torch.Tensor:
     """The blocks gathered out of place from x's block (contiguous along dim), an opaque op, so a compiled graph calls
-    it as torch's functional collectives are called."""
+    it as torch's functional collectives are called.  On the mesh backend the list is a split of `out`, so it is one
+    MPI_Allgatherv into `out` in place (ncclMeshAllGatherV: backend.py allgather)."""
     y = x.movedim(dim, 0).contiguous()
     out = _empty((sum(sizes),) + y.shape[1:], y)
     dist.all_gather(list(out.split(sizes)), y, group=dist.distributed_c10d._resolve_process_group(group_name))
@@ -262,7 +263,9 @@ def allgatherv(x: torch.Tensor, dim: int, sizes: list[int], group_name: str) -> 
 
 @torch.library.custom_op('torch_mesh::reduce_scatterv', mutates_args=())
 def reduce_scatterv(x: torch.Tensor, dim: int, sizes: list[int], rank: int, op: str, group_name: str) -> torch.Tensor:
-    """The blocks reduce-scattered out of place from x (contiguous along dim), this rank's block, an opaque op."""
+    """The blocks reduce-scattered out of place from x (contiguous along dim), this rank's block, an opaque op.  On
+    the mesh backend the list is a split of `y`, so it is one MPI_Reduce_scatter reading `y` in place
+    (ncclMeshReduceScatterV: backend.py reduce_scatter)."""
     y = x.movedim(dim, 0).contiguous()
     out = _empty((sizes[rank],) + y.shape[1:], y)
     dist.reduce_scatter(out, list(y.split(sizes)), op=getattr(dist.ReduceOp, op.upper()),
