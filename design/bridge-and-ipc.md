@@ -606,7 +606,8 @@ The lines, each a JSON object (in the log after its line stamp):
   "landings":m,"landing_room":M,"file":"<name>"|null}`: `node` this bridge's, `peer` the link's other node, `near`
   and `far` the program's two end nodes as this end names them (the flow at the link's other end names them the other
   way round), `id` the bridge's number of the ledger, which its event lines carry;
-- a SEND cell, `{"s":[id,queue,invocation,position,binding,cycle,chunks,seen,first,posted,completed]}`;
+- a SEND cell, `{"s":[id,queue,invocation,position,binding,cycle,chunks,seen,first,posted,completed,bytes]}` (`bytes`
+  the transfer's, -1 where the cell was not named; design/bridge-dataflow.md section 6);
 - a landing, `{"r":[id,ring,invocation,position,binding,chunk,chunks,cycle,landed]}`.
 
 A cell and its records share a name across the link: queue (the peer's ring of the same index, queue k's slot j), the

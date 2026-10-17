@@ -330,8 +330,10 @@ class ProcessGroupMesh(dist.ProcessGroup):
         """Each input gathered into its list of outputs; outputs of unequal sizes (an Allgatherv in torch's
         spelling) are MPI_Allgatherv, one program over the unequal segments (ncclMeshAllGatherV): into the
         outputs in place where they lie end to end in one contiguous tensor (a split's pieces: torch_mesh.partition's
-        allgatherv), else into one flat operand copied out to them."""
-        if all(len({t.numel() for t in out}) == 1 for out in outputs):
+        allgatherv), else into one flat operand copied out to them; equal outputs lying end to end take the same in-place
+        program (its segments equal) rather than a flat operand and a copy."""
+        spans = [span(out) for out in outputs]
+        if all(len({t.numel() for t in out}) == 1 for out in outputs) and any(w is None for w in spans):
             sources = [operand(i) for i in inputs]
             flats = [operand(blank((self._size * s.host.numel(),), s.host.dtype, s.host.device), read=False)
                      for s in sources]
@@ -342,7 +344,7 @@ class ProcessGroupMesh(dist.ProcessGroup):
                         out[r].copy_(piece.view(out[r].shape))
             return self._group(lambda: [check(LIB.ncclAllGather(s.at(), f.at(), s.host.numel(), kind(s.host), self.comm, self._stream))
                                         for s, f in zip(sources, flats)], [After(back)], outputs)
-        sizes, spans = [[t.numel() for t in out] for out in outputs], [span(out) for out in outputs]
+        sizes = [[t.numel() for t in out] for out in outputs]
         if all(w is not None for w in spans) and (s := self._direct(*inputs, *spans)) is not None:
             return issued([s.allgatherv(w, i, c, self.handle, asynchronous(opts)) for w, i, c in zip(spans, inputs, sizes)], outputs)
         sources = [operand(i) for i in inputs]
@@ -376,15 +378,17 @@ class ProcessGroupMesh(dist.ProcessGroup):
         """Each list of inputs reduced, rank r's block left at rank r; blocks of unequal sizes (a
         Reduce_scatter of a list in torch's spelling) are MPI_Reduce_scatter, one program over the unequal segments
         (ncclMeshReduceScatterV): read in place where the inputs lie end to end in one contiguous tensor (a split's
-        pieces: torch_mesh.partition's reduce_scatterv), else from one flat operand they are copied into."""
-        if all(len({t.numel() for t in parts}) == 1 for parts in inputs):
+        pieces: torch_mesh.partition's reduce_scatterv), else from one flat operand they are copied into; equal inputs
+        lying end to end take the same in-place program (its segments equal) rather than a copy into a flat operand."""
+        spans = [span(parts) for parts in inputs]
+        if all(len({t.numel() for t in parts}) == 1 for parts in inputs) and any(w is None for w in spans):
             flats = [operand(torch.cat([x.detach().reshape(-1) for x in parts],
                                        out=blank((sum(x.numel() for x in parts),), parts[0].dtype, parts[0].device))) for parts in inputs]
             targets = [operand(o, read=False) for o in outputs]
             return self._group(lambda: [check(LIB.ncclReduceScatter(f.at(), t.at(), t.host.numel(), kind(t.host),
                                                                     op(opts.reduceOp), self.comm, self._stream))
                                         for f, t in zip(flats, targets)], targets, outputs)
-        sizes, spans = [[x.numel() for x in parts] for parts in inputs], [span(parts) for parts in inputs]
+        sizes = [[x.numel() for x in parts] for parts in inputs]
         if all(w is not None for w in spans) and (s := self._direct(*outputs, *spans)) is not None:
             return issued([s.reduce_scatterv(o, w, c, op(opts.reduceOp), self.handle, asynchronous(opts))
                            for o, w, c in zip(outputs, spans, sizes)], outputs)
