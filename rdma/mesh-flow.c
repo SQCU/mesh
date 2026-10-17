@@ -3923,6 +3923,8 @@ static void ports_found(void){
     port->lanes.pages=lane_pages();
     port->lanes.page=lanes_page[port_count];
     port->lanes.provider.device=&port->device;
+    port->stripes.provider.device=&port->device;
+    port->stream.provider.device=&port->device;
     snprintf(port->device.name,sizeof port->device.name,"%s",devices[i]);snprintf(port->name,sizeof port->name,"%s",devices[i]+5);
     port_count++;
     link_set(port,0,MESH_STOPPED,0);
