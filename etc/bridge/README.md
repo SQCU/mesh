@@ -26,6 +26,10 @@ A document has these keys:
   and its progress threads read the clock at each event. A document that does not state it true keeps none, and its
   canonical form names no `ledger` (so `ledger = false` changes nothing a node runs); the shipped documents state it
   false.
+- `keepalive_us` (optional): the most microseconds the node's lanes go without a frame while an exclusive flow runs on
+  their port (design/bridge-and-ipc.md#keepalive): the send thread posts an empty lane header that often, so a link's
+  controller that slows after a quiet stretch (the Mac mini's, 6-10 us after 40 us of nothing) stays ready. A document
+  that states none sends none.
 
 The window is the bridge's pinned memory (design/prepared-machine.md#M09). Every port's device registers all of it
 when the device comes up, before any queue pair exists, and deregisters it only when the device retires. Each device

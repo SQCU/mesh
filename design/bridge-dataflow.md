@@ -358,9 +358,12 @@ once.
 ### Progress threads (`port_progress`, `port_pass`)
 
 **Passes.**
-- One pass of side 1 runs `flow_send` on every listed, progressing exclusive flow, then `lane_send` for both lanes
-  and `lane_retire`.
-- One pass of side 0 runs `flow_receive` on every listed exclusive flow, then `lane_receive`.
+- One pass of side 1 runs `flow_send` on every listed, progressing exclusive flow; where one progresses and the
+  configuration states `keepalive`, `lane_keepalive` once that long passed since its last (an empty header on the next
+  lane, design/bridge-and-ipc.md#keepalive); then, while a lane rider is listed or a lane SEND is in flight,
+  `lane_send` for both lanes and `lane_retire`.
+- One pass of side 0 runs `flow_receive` on every listed exclusive flow, then `lane_receive` while a lane rider is
+  listed, an exclusive flow progresses or a lane's records are posted and not landed.
 
 **Parking.**
 - A thread with something to look for (`any`) that moves nothing for `MESH_IDLE_NS` (100 ms; counted in
@@ -538,7 +541,7 @@ poll error; 4 = a protocol, timeout or program-level failure.
 | maps disagree on a cable or route; READY shape mismatch | `ready_heard` / `program_take` / `program_await`: `ready_refuse(EPROTO)` + `program_fail(EPROTO)` | `EPROTO` naming the refusing node | FAIL → `ECANCELED` |
 | a table or device full | `flow_make` NULL → `program_fail(E2BIG)` / `ready_refuse(E2BIG)`; `pair_up` `ENOSPC` → `flow_done` → `flow_fail(ENOSPC, 1)` | `E2BIG` / `ENOSPC` | FAIL |
 | a link lost (socket EOF or error, keepalive, send failure, `EPROTO`, pairing timeout, `KEV_DL_LINK_OFF` / `IF_DETACHED` → `ENETDOWN` with retire) | `port_lost`: close the socket; `lanes.up = 0`; `flow_fail(code` (`ECONNRESET` if parted), `4, tell 0, where = peer)` on every flow of the port; `requests_lost`; lanes CLOSING; `link_set(PAIRING` or `STOPPED)` → RECORD → map serial; on retire, `down_device` at a later `port_turn` once no flow or lane holds QPs | words `~0`; status naming the peer; libnccl-mesh fails `ncclRemoteError` ("the link to node N was lost") and cancels all its destinations; the next session reads the new map | the same, on the other end |
-| lanes fail (completion error, header out of step, make or connect refused) | `lanes_lost` → `lanes_turn` → `lanes_reset`: LANES of count 0 to the peer; `flow_fail(code, 1)` for every lane rider at `POSTING` or later or in a receive/run/change job; lanes rebuilt 3 s later; the link and its exclusive flows go on | lane riders' words `~0` | LANES of 0 → its lanes reset, and its riders fail |
+| lanes fail (completion error, header out of step, make or connect refused) | `lanes_lost` → `lanes_turn` → `lanes_reset`: LANES of count 0 to the peer; `flow_fail(code, 1)` for every lane rider at `POSTING` or later or in a receive/run/change job; lanes rebuilt 3 s later; the link and its exclusive flows go on; a connect refused `MESH_REFUSED_RETIRE` (3) times in a row loses the link and retires the device (`port_lost(code, 1)`), which opens again | lane riders' words `~0` | LANES of 0 → its lanes reset, and its riders fail |
 | the peer's bridge stops | peer: FAREWELL, then close; here: `parted = 1`, then EOF → `port_lost(ECONNRESET)` | `ECONNRESET`, logged "parted" | — |
 | this bridge stops (signal, or a rebuilt binary with `busy == 0`) | `main`: `requests_stop`; per port FAREWELL, a 200 ms flush, `parted = 1`, `port_lost(ESHUTDOWN, retire)`; on each port's queue `flow_release`, then `port_still`, `down_pair(lanes)`, `down_device`; `bridge_pid = 0`; `mesh_notify(control)`; `atexit` `shm_unlink` | flows that remain fail with status `ECONNRESET`, `failed` = the peer node (lines 3429-3433 set `parted` before `port_lost`, so line 2805 reports `ECONNRESET` rather than `ESHUTDOWN`). Later waits see `bridge_pid` 0 (`ESRCH`). A lease of the old region fails the next libnccl-mesh lease or session (`ncclMeshMemLive`, `attaches_stale`) | FAREWELL → `ECONNRESET` |
 | a client process dies | `NOTE_EXIT`, or the liveness `mesh_gone` → `mesh_retire` → next turn `flow_end` (END) | — | `ECONNRESET` |

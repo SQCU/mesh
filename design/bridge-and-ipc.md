@@ -482,8 +482,8 @@ reading no generation each misdeliver or desynchronise a lane in most runs (lane
 A port's flows and lanes are served by the port's two progress threads, its receives' and its SENDs', started at its
 first flow or its lanes and kept for the bridge's life: one pass serves every exclusive flow in the port's table (its
 completion queues, its streams) and the port's lanes (their headers, their landings, their SENDs and completions) while
-a flow in the table rides them or their SENDs or records are in flight, so a port of exclusive flows alone polls its
-flows' queues and no other, as Q5P's threads did (mesh git 5702ea5, a thread a link and direction).
+a flow in the table rides them, their SENDs or records are in flight, or an exclusive flow progresses (#keepalive: its
+frames are posted and heard there).
 A flow enters the table when it is to be served and leaves it once neither thread reads it (an epoch each thread tells
 at the end of the first pass that read it: the two threads read `high` and `epoch` on one line at every pass, and a
 store of each pass's epoch by both bounced that line between their cores at the pass rate, a coherence miss in every
@@ -508,6 +508,28 @@ queues, which a completion channel (`ibv_req_notify_cq`) would wake at once, but
 provider and a destruction of a queue whose events are not acknowledged blocks (`ibv_destroy_cq`), so it waits for a
 measurement. A send thread tells it is parked, then looks once more before it waits, and `send_wake` orders its
 release before it reads that word, so one of the two sees the other.
+
+## keepalive
+
+A configuration's `keepalive_us` (etc/bridge/README.md; the bridge reads `keepalive`, nanoseconds) bounds how long a
+port's lanes go without a frame while an exclusive flow on the port progresses: the send thread, at a pass at least
+that long after its last, posts an empty header on the next lane (`lane_keepalive`: the lane's next header page and
+sequence, no entries, its first 16 bytes alone, one frame against the peer's one-frame header receive, its gate's frame
+retired as any lane SEND's), and the receive thread serves the lanes while such a flow progresses, so it hears the
+peer's (`lane_heard`: nothing to post, the next header listened for). A document that states none sends none, and a
+peer that sends them to a bridge that sends none is still heard. The wire is the lanes' own: a header of no entries was
+always one, so no version changed.
+
+Why: on the pair (metal-microbench output_data/split-20261017, 2026-10-17) the Mac mini's Thunderbolt RDMA path, quiet
+for the 40-50 us of a layer's window, completed its next SEND 6.2 us after its post where the M5's took 2.5, and
+signalled a frame the M5 sent while it computed up to 10.6 us later; with a frame of the peer's landed 10 us before, its
+SEND completed in 2.7 us (completion.py, contention.py: each crossing's two one-way times by how far apart the members
+published). The provider's completions are a ring the controller writes and the poll reads in user space
+(`tbt_poll_qp_send`, `tbt_poll_qp_recv`: a descriptor's bit 0x15), so the time is the controller's, not a parked
+thread's: the send thread saw each released cell within 0.04 us. A host-path exchange of 3,072 bytes read 12.8-13.8 us
+a round after gaps of 0-10 us, 15.1-15.6 after 20 and 16.5-18.8 after 40-160 (gapprobe2); UDP on the same cable did
+not keep it awake (gapprobe3). A frame every 5 us costs a SEND post (about 0.4 us) on each send thread and a header
+receive post (about 0.7 us) on each receive thread per frame heard.
 
 ## ledger
 

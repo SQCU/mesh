@@ -6,7 +6,9 @@ node's physical memory, read where this runs: the node's own bin/mesh-user.sh), 
 bridge runs its peers' commands as its user (design/bridge-and-ipc.md#exec; a document that does not state it true
 serves none), and `ledger`, true where the bridge keeps each flow's ledger and writes it at the flow's end
 (design/bridge-and-ipc.md#ledger; a document that does not state it true keeps none, and its canonical form names no
-`ledger`), and nothing else; the window is at most the node's memory.  There is no default.
+`ledger`), and `keepalive_us`, the most microseconds its links' lanes go without a frame while an exclusive flow runs
+(design/bridge-and-ipc.md#keepalive; canonical `keepalive`, nanoseconds; a document that states none sends none), and
+nothing else; the window is at most the node's memory.  There is no default.
 
     python bridge_configuration.py DOCUMENT CANONICAL"""
 import json
@@ -30,8 +32,8 @@ def memory():
 
 
 def load(path):
-    """The document at `path` as the bridge reads it, {'name', 'purpose', 'window', 'exec'}, and 'ledger' where it keeps
-    ledgers; ValueError naming what it lacks."""
+    """The document at `path` as the bridge reads it, {'name', 'purpose', 'window', 'exec'}, 'ledger' where it keeps
+    ledgers and 'keepalive' (ns) where it states one; ValueError naming what it lacks."""
     path = Path(path)
     reader = READERS.get(path.suffix.lower())
     if reader is None:
@@ -39,7 +41,7 @@ def load(path):
     document = reader(path.read_bytes())
     if not isinstance(document, dict):
         raise ValueError(f'{path}: a bridge configuration is a table of its purpose and its window')
-    unknown = sorted(set(document) - {'purpose', 'exec', 'ledger', *SIZES})
+    unknown = sorted(set(document) - {'purpose', 'exec', 'ledger', 'keepalive_us', *SIZES})
     if unknown:
         raise ValueError(f'{path}: {", ".join(unknown)}: no key of a bridge configuration')
     purpose = document.get('purpose')
@@ -60,6 +62,11 @@ def load(path):
     canonical = {'name': path.stem, 'purpose': ' '.join(purpose.split()), 'window': window, 'exec': document.get('exec', False)}
     if document.get('ledger'):
         canonical['ledger'] = True
+    if 'keepalive_us' in document:
+        keepalive = document['keepalive_us']
+        if isinstance(keepalive, bool) or not isinstance(keepalive, (int, float)) or keepalive <= 0:
+            raise ValueError(f'{path}: keepalive_us is a positive number of microseconds')
+        canonical['keepalive'] = max(1, int(round(keepalive * 1000)))
     return canonical
 
 

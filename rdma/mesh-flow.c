@@ -222,7 +222,8 @@ struct flow {
    send header's SEND posted (`mark`), the receives a header posted and not landed (`records`, the receive thread's), when
    lanes that failed are made again (`retry`, a pause after; design/recovery.md#loss) and why they last could not be
    made (`code`, logged once a cause), and `generation` moved at each teardown; the progress threads read the lanes
-   while `up` */
+   while `up`.  #keepalive: when the send thread last posted an empty header (`kept`) and on which lane next; #loss: the
+   connections that failed in a row since the device opened or the lanes last came up (`refused`) */
 enum { LANES_DOWN, LANES_MAKING, LANES_MADE, LANES_CONNECTING, LANES_UP, LANES_CLOSING };
 struct lanes {
   struct mesh_verbs provider;
@@ -233,9 +234,13 @@ struct lanes {
   struct send_gate gate[MESH_LANES];
   uint64_t sent[MESH_LANES],received[MESH_LANES],mark[MESH_LANES][MESH_HEADERS],records;
   uint32_t cursor[MESH_LANES];
-  uint64_t retry;
+  uint64_t retry,kept;
+  uint32_t kept_lane,refused;
   int64_t code;
 };
+/* design/recovery.md#loss: lanes that failed to connect this many times in a row retire their port's device, which opens
+   again (a context that refuses every connection, as after a peer's restart, is not one the retries mend) */
+#define MESH_REFUSED_RETIRE 3u
 /* design/bridge-and-ipc.md#ports: a port, its link, its control socket's queues each way, its verbs work's queue, a
    refused registration's pause (`backoff`), the queue pairs its flows and lanes hold or will (`committed`, of the
    device's usable queue pairs), its lanes, its table of flows (`table`, the indices reserved and their generations, the
@@ -553,6 +558,9 @@ static struct ibv_qp *lane_pair(const struct flow *link,uint32_t lane);
    numbered as they are made */
 static int ledger_kept;
 static _Atomic uint32_t ledger_ids;
+/* design/bridge-and-ipc.md#keepalive: the configuration's `keepalive`, the most nanoseconds a port's send thread lets
+   pass without a frame on its lanes while an exclusive flow on the port progresses; 0 where it states none */
+static uint64_t keepalive_ns;
 /* a flow's ledger, made on its port's queue before either side is prepared or the flow listed, where the configuration
    keeps them; a flow whose ledger cannot be allocated runs without one, logged */
 static void ledger_open(struct flow *f){
@@ -1197,6 +1205,27 @@ static int lane_retire(struct port *port){
   }
   return count>0;
 }
+/* design/bridge-and-ipc.md#keepalive: lane `lane`'s next header posted with no entries, its first 16 bytes alone (one
+   frame against the peer's one-frame header receive), where its header page is free and its gate holds a frame; the
+   peer hears it as any header (lane_heard: nothing posted, the next header listened for).  Whether it was posted */
+static int lane_keepalive(struct port *port,uint32_t lane){
+  struct lanes *l=&port->lanes;
+  struct send_gate *gate=l->gate+lane;
+  const uint64_t sent=l->sent[lane];
+  const uint32_t h=(uint32_t)(sent%MESH_HEADERS);
+  if(sent>=MESH_HEADERS && ((gate->retired-l->mark[lane][h])&MESH_GATE_MASK)>=(UINT64_C(1)<<47))return 0;
+  if(((gate->posted-gate->retired)&MESH_GATE_MASK)+1>gate->capacity)return 0;
+  struct lane_header *header=(void *)(wire.data+lane_offset(port,lane,h));
+  header->magic=LANE_MAGIC;header->count=0;header->sequence=sent;
+  struct ibv_sge span=lane_span(port,lane_offset(port,lane,h),sizeof *header);
+  struct ibv_send_wr posting={.sg_list=&span,.num_sge=1,.opcode=IBV_WR_SEND,.send_flags=IBV_SEND_SIGNALED},*bad;
+  gate->posted+=1;gate->requests++;
+  posting.wr_id=LANE_SENT|((uint64_t)lane<<48)|(gate->posted&MESH_GATE_MASK);
+  const int error=l->provider.queues[lane].send(l->provider.queues[lane].pair,&posting,&bad);
+  l->mark[lane][h]=gate->posted;l->sent[lane]++;
+  if(error)lanes_lost(port,error<0?-error:error);
+  return 1;
+}
 /* design/bridge-and-ipc.md#lanes: lane l's header heard: each entry's records posted, the next `chunks` of the named
    ring of the named flow while that flow is the one the index and generation name and takes its lanes' records, else
    as many discards of the same frames (a flow that stopped: its rows are no longer its own), then the next header
@@ -1282,26 +1311,32 @@ static int lane_receive(struct port *port){
    is read by neither thread once both tell a later epoch (port_unlist).  Whether anything moved; *any where something is
    the thread's to look for: a flow it serves (a SEND side progressing; an exclusive flow's receives, or a lane rider
    taking its headers' records), a lane's records posted and not landed, or its SENDs in flight; nothing lands on a lane
-   for a flow this end has not listed, since the peer sends only after this end's POSTED, which follows the listing */
+   for a flow this end has not listed, since the peer sends only after this end's POSTED, which follows the listing.
+   #keepalive: while an exclusive flow on the port progresses, the send thread posts an empty header on its lanes once
+   the configuration's `keepalive` passed since the last, and the receive thread hears the peer's */
 static int port_pass(struct port *port,int side,int *any,uint64_t *told){
   const uint64_t epoch=atomic_load(&port->epoch);
   int moved=0;
   *any=0;
   const uint32_t high=atomic_load_explicit(&port->high,memory_order_acquire);
-  int riders=0;
+  int riders=0,running=0;
   for(uint32_t i=0;i<high;i++){
     struct flow *f=atomic_load_explicit(&port->table[i],memory_order_acquire);
     if(!f)continue;
     const int progressing=atomic_load_explicit(&f->progressing,memory_order_acquire);
-    if(f->exclusive && progressing){*any=1;moved|=side?flow_send(f):flow_receive(f);}
+    if(f->exclusive && progressing){*any=1;running=1;moved|=side?flow_send(f):flow_receive(f);}
     else if(!f->exclusive){riders=1;*any|=side?progressing:atomic_load_explicit(&f->receiving,memory_order_acquire);}
   }
-  /* #lanes: served while a flow on the port rides them or their SENDs or records are in flight (nothing lands on a lane
-     for a flow this end has not listed) */
+  /* #lanes: served while a flow on the port rides them, their SENDs or records are in flight (nothing lands on a lane
+     for a flow this end has not listed), or an exclusive flow progresses (#keepalive) */
   struct lanes *l=&port->lanes;
   if(atomic_load_explicit(&l->up,memory_order_acquire)){
     if(side){
       int flight=0;
+      if(running && keepalive_ns){
+        const uint64_t at=ledger_ns();
+        if(at-l->kept>=keepalive_ns && lane_keepalive(port,l->kept_lane)){l->kept=at;l->kept_lane=(l->kept_lane+1)%MESH_LANES;moved=1;}
+      }
       for(uint32_t lane=0;lane<MESH_LANES;lane++)flight|=((l->gate[lane].posted-l->gate[lane].retired)&MESH_GATE_MASK)!=0;
       if(riders || flight){
         for(uint32_t lane=0;lane<MESH_LANES;lane++)moved|=lane_send(port,lane);
@@ -1310,7 +1345,7 @@ static int port_pass(struct port *port,int side,int *any,uint64_t *told){
         for(uint32_t lane=0;lane<MESH_LANES;lane++)flight|=((l->gate[lane].posted-l->gate[lane].retired)&MESH_GATE_MASK)!=0;
       }
       *any|=flight;
-    }else if(riders || l->records){moved|=lane_receive(port);*any|=l->records!=0;}
+    }else if(riders || running || l->records){moved|=lane_receive(port);*any|=l->records!=0;}
   }
   /* design/bridge-and-ipc.md#progress: told only when it moved (port_settle waits for it), so the line the two threads
      read every pass (`high`, `epoch`) is not written by either each pass */
@@ -2264,14 +2299,23 @@ static void lanes_turn(struct port *port){
       if(result)say("link %u (%s): lanes teardown: %s\n",port->index,port->name,strerror(result));
       else{l->state=LANES_DOWN;if(l->committed)port->committed-=MESH_LANES;l->committed=0;}
     }else if(l->state==LANES_CLOSING){}
-    else if(result)lanes_reset(port,result,job==LANES_MAKING?"not made":"not connected",1);
+    else if(result){
+      lanes_reset(port,result,job==LANES_MAKING?"not made":"not connected",1);
+      /* design/recovery.md#loss: a device whose connections keep failing is opened again, as a new bridge would open it */
+      if(job==LANES_CONNECTING && ++l->refused>=MESH_REFUSED_RETIRE){
+        say("link %u (%s): lanes toward node %u not connected %u times in a row: the device retired and opened again\n",port->index,
+            port->name,port->peer,l->refused);
+        l->refused=0;
+        port_lost(port,result,1);
+      }
+    }
     else if(job==LANES_MAKING){
       l->state=LANES_MADE;l->room=lanes_room(l);
       struct message said={.kind=LANES,.count=MESH_LANES,.code=l->room};
       for(uint32_t lane=0;lane<MESH_LANES;lane++){said.pair[lane][0]=l->provider.queues[lane].pair->qp_num;said.pair[lane][1]=(l->provider.psn+lane)&0xffffff;}
       port_say(port,said,NULL,0);
     }else{
-      l->state=LANES_UP;l->code=0;
+      l->state=LANES_UP;l->code=0;l->refused=0;
       atomic_store_explicit(&l->up,1,memory_order_release);port_bell(port);
       say("link %u (%s): lanes up toward node %u: %u queue pairs, %u frames a header\n",port->index,port->name,port->peer,MESH_LANES,
           MIN(l->room,l->peer_room));
@@ -3272,7 +3316,8 @@ static void *control_watch(void *unused){
 
 /* design/prepared-machine.md#M09: the bridge's configuration, the canonical property list bin/mesh-user.sh writes from
    the consumer's document (rdma/bridge_configuration.py): its name and its window in bytes, and whether it serves `exec`
-   and keeps ledgers (#ledger); NULL, or why it is refused */
+   and keeps ledgers (#ledger), and its `keepalive` in nanoseconds where it states one (#keepalive); NULL, or why it is
+   refused */
 static const char *configuration_read(const char *path,char *name,size_t room,uint64_t *window){
   FILE *file=fopen(path,"rb");
   if(!file)return strerror(errno);
@@ -3292,11 +3337,16 @@ static const char *configuration_read(const char *path,char *name,size_t room,ui
   /* design/bridge-and-ipc.md#ledger */
   CFTypeRef kept=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("ledger")):NULL;
   ledger_kept=kept && CFGetTypeID(kept)==CFBooleanGetTypeID() && CFBooleanGetValue(kept);
-  int64_t value=0;
+  /* design/bridge-and-ipc.md#keepalive */
+  CFTypeRef alive=list && CFGetTypeID(list)==CFDictionaryGetTypeID()?CFDictionaryGetValue(list,CFSTR("keepalive")):NULL;
+  int64_t value=0,interval=0;
   if(!list || CFGetTypeID(list)!=CFDictionaryGetTypeID())refused="not a property list of a configuration (rdma/bridge_configuration.py writes it)";
   else if(!named || CFGetTypeID(named)!=CFStringGetTypeID() || !CFStringGetCString(named,name,(CFIndex)room,kCFStringEncodingUTF8))refused="its name is missing";
   else if(!sized || CFGetTypeID(sized)!=CFNumberGetTypeID() || !CFNumberGetValue(sized,kCFNumberSInt64Type,&value) || value<=0)
     refused="its window, a positive number of bytes, is missing";
+  else if(alive && (CFGetTypeID(alive)!=CFNumberGetTypeID() || !CFNumberGetValue(alive,kCFNumberSInt64Type,&interval) || interval<=0))
+    refused="its keepalive, where stated, is not a positive number of nanoseconds";
+  keepalive_ns=refused?0:(uint64_t)interval;
   if(list)CFRelease(list);
   *window=(uint64_t)value;
   return refused;
@@ -3415,8 +3465,12 @@ int main(int argc,char **argv){
   pthread_t watcher;
   if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
   ports_find();
-  say("bridge node %u (%s): configuration %s, window %llu bytes, arena %llu pages, rows %u%s\n",node,host,name,
-    (unsigned long long)window,(unsigned long long)mesh_arena_pages(M),M->rows,ledger_kept?", ledgers kept (design/bridge-and-ipc.md#ledger)":"");
+  char alive[96]="";
+  if(keepalive_ns)snprintf(alive,sizeof alive,", a frame on the lanes every %llu ns while a flow runs (design/bridge-and-ipc.md#keepalive)",
+                           (unsigned long long)keepalive_ns);
+  say("bridge node %u (%s): configuration %s, window %llu bytes, arena %llu pages, rows %u%s%s\n",node,host,name,
+    (unsigned long long)window,(unsigned long long)mesh_arena_pages(M),M->rows,ledger_kept?", ledgers kept (design/bridge-and-ipc.md#ledger)":"",
+    alive);
   uint64_t liveness=0;
   int rebuilt=0;
   while(!stop){

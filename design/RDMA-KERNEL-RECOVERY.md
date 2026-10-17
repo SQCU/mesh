@@ -288,3 +288,28 @@ durable Mini learner resumed from those checkpoints. No handover command sent
 a signal to either bridge or requested a reboot. Raw `.ips`, `.panic`, both old
 `.flight` records, and decoded flight tails are in
 `.build/mini-learner-20260905/`. The transport fault remains unresolved.
+
+## October 16 and 17: the data abort at a bridge's stop
+
+The Mac mini panicked at 2026-10-16 13:31Z and 2026-10-17 13:47Z (UTC) with the September signature: a kernel data
+abort at fault address `0x98` on a `kernel_task` workloop thread, `com.apple.iokit.IOThunderboltFamily` (9.3.3) and
+`com.apple.driver.AppleThunderboltRDMA` in the backtrace, the same pc and lr offsets in both reports
+(`panic-full-2026-10-16-063202`, `-2026-10-17-064746` in the Mini's `/Library/Logs/DiagnosticReports/Retired`; the
+latter copied to metal-microbench output_data/split-20261017). Its record names the restart `watchdog`
+(`wdog,reset_in_1`), as in September; the panic report, not the reset record, tells the abort.
+
+Both followed the same sequence in the Mini's bridge log: a program on the link failed at the M5 with ECONNRESET
+(code 54, its bridge stopping because its binary changed, or having just paired again), and seconds later the Mini's
+own bridge stopped for its changed binary, "closed toward node ...: this bridge is stopping, device retired", its
+lanes up, with nothing logged after. Of the Mini's 27 stops for a changed binary from 2026-10-16 02:56Z to 2026-10-17
+13:52Z, 25 with its lanes up and 2 with them failing, the two panics were both of the first kind; no stop with its lanes
+failing panicked. The bridge destroys its queue pairs with receives posted and without first moving them to the error
+state (mesh-verbs.h `down_pair`). The trigger is not established.
+
+After the 10-17 panic the Mini's bridge, started 11 s after boot, failed every queue pair's INIT to RTR ("Failed
+INIT→RTR kernel transition" in the provider's log; its lanes every 3 s, every program `code 5 domain 1`) for five
+minutes, until its binary was touched and a new bridge process connected at once. The bridge now retires and opens the
+device after three such refusals in a row (design/recovery.md#loss).
+
+Until the trigger is known, a substrate upgrade restarts the Mini's bridge with no program running and well apart
+from the M5's.

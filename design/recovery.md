@@ -128,7 +128,11 @@ for every port at the bridge's start and their two queue pairs counted before an
 that has no room for them yet is waited for, never refused): the flows that ride them and have posted on them
 fail, the lanes are closed and made again a pause (3 s) later, the peer told (a LANES of none and why; its own lanes,
 joined to these, are reset alike), and the link stays paired, its flows with queue pairs of their own and those still
-pairing running on (`lanes_reset`). No link is lost for its lanes, and none is held unpaired: at the round's first
+pairing running on (`lanes_reset`). Lanes whose connection fails three times in a row (`MESH_REFUSED_RETIRE`) lose
+the link and retire the port's device, which opens again a pause later as a new bridge would open it: on 2026-10-17 the
+Mac mini, back from a kernel panic, refused every queue pair's INIT to RTR on the context its bridge opened 11 s after
+boot (its lanes every 3 s and every program, code 5) for five minutes, and a new bridge process connected at once
+(metal-microbench output_data/split-20261017). No link is otherwise lost for its lanes, and none is held unpaired: at the round's first
 pass failed lanes stayed failed until the link itself went, and its second pass's first commit (152cf86) lost the link
 and held its port for a pause doubling to 30 min, a demotion of an edge the mesh's contract forbids (AGENTS.md). A
 loss of the port itself (link off, interface detached) also retires the port's
