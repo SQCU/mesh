@@ -1045,11 +1045,13 @@ def stacked(held, name, first, rest, m):
     if not name.endswith(first):
         return []
     out = [(first.rsplit('.', 1)[-1], m)]
+    cut = lambda u: u.label[u.label.index('['):] if '[' in u.label else ''
     for r in rest:
         found = [u for n, u in held if n == name[:-len(first)] + r and u.columns == m.columns]
         same = [u for u in found if u.rows == m.rows]
-        if len(same) == 1 or len(found) == 1:
-            out.append((r.rsplit('.', 1)[-1], (same or found)[0]))
+        ranged = [u for u in same if cut(u) == cut(m)]
+        if len(ranged) == 1 or len(same) == 1 or len(found) == 1:
+            out.append((r.rsplit('.', 1)[-1], (ranged or same or found)[0]))
     return out
 
 
@@ -1064,7 +1066,8 @@ def products(held):
         op = 'head' if name == 'lm_head' else 'product'
         keyed.setdefault((op, m.rows, m.columns, m.widths, m.tabled(op)), []).append(slice_units(m))
         if name.endswith('.mlp.gate_proj'):
-            up = next((u for n, u in held if n == name[:-len('gate_proj')] + 'up_proj' and u.rows == m.rows), None)
+            ups = [u for n, u in held if n == name[:-len('gate_proj')] + 'up_proj' and u.rows == m.rows]
+            up = next((u for u in ups if u.label[u.label.find('['):] == m.label[m.label.find('['):]), ups[0] if ups else None)
             if up is not None:
                 keyed.setdefault(('couple', m.rows, m.columns, max(m.widths, up.widths), False), []).append((slice_units(m), slice_units(up)))
         for first, rest in STACKS:
