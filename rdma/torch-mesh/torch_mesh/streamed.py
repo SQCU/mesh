@@ -1050,7 +1050,7 @@ def stacked(held, name, first, rest, m):
         found = [u for n, u in held if n == name[:-len(first)] + r and u.columns == m.columns]
         same = [u for u in found if u.rows == m.rows]
         ranged = [u for u in same if cut(u) == cut(m)]
-        if len(ranged) == 1 or len(same) == 1 or len(found) == 1:
+        if ranged or len(same) == 1 or len(found) == 1:
             out.append((r.rsplit('.', 1)[-1], (ranged or same or found)[0]))
     return out
 
