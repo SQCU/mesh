@@ -181,6 +181,37 @@ def current(members=None):
     return SimpleNamespace(map=lmap, nodes=nodes, names=names, node=own[0], serial=serial)
 
 
+def nodes():
+    """mesh_nodes_health: every node's record this node's bridge holds, its own among them (`own`): its bridge node and
+    name, its bridge's window and its memory (bytes), its model, and its health as its bridge last sampled it (`sampled`
+    and `booted`, ns since the epoch; `free` and `wired` bytes; the kernel's memory `pressure`, 1 normal, 2 warning, 4
+    critical; `thermal`; why it last restarted, `reset` and `shutdown`; its `power`, `charge` and `minutes`; its boot
+    `session`).  What a client asks its own daemon about its node and its neighbours, carried over the fabric by the
+    bridges, never probed over another network.  OSError naming the bridge where it is unreachable."""
+    held, own = ffi.new('struct mesh_node_health[64]'), ffi.new('uint32_t *')
+    count = lib.mesh_nodes_health(held, 64)
+    if count < 0:
+        raise OSError(-count, f"this node's bridge is unreachable: {os.strerror(-count)}")
+    lib.mesh_observe(ffi.NULL, 0, own)
+    text = lambda chars: ffi.string(chars).decode('utf-8', 'replace')
+    return [{'node': r.node, 'name': text(r.name), 'window': r.window, 'memory': r.memory, 'model': text(r.model),
+             'sampled': r.health.sampled, 'booted': r.health.booted, 'free': r.health.free, 'wired': r.health.wired,
+             'reset': r.health.reset, 'power': r.health.power, 'pressure': r.health.pressure, 'thermal': r.health.thermal,
+             'charge': r.health.charge, 'minutes': r.health.minutes, 'session': text(r.health.session),
+             'shutdown': text(r.health.shutdown), 'own': r.node == own[0]} for r in held[0:count]]
+
+
+def footprint(pid=0):
+    """The physical footprint of a process (this one where pid is 0), bytes: what the kernel charges it for (its
+    ri_phys_footprint, proc_pid_rusage RUSAGE_INFO_V0), the measure Activity Monitor's Memory column and jetsam use."""
+    import ctypes
+    proc = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+    info = (ctypes.c_uint64 * 14)()
+    if proc.proc_pid_rusage(pid or os.getpid(), 0, ctypes.byref(info)):
+        raise OSError(ctypes.get_errno(), f'proc_pid_rusage({pid or os.getpid()})')
+    return info[2 + 7]
+
+
 def wire(block=None, buffsize=None):
     """mesh_wire_of: the rings a session of libnccl-mesh runs on (mesh-plan.h struct mesh_wire: `slot`, `small`, `lag`),
     as this process's sessions make them: `block` (None: this machine's page, the block every bridge's region takes) and
