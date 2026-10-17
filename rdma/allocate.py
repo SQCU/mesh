@@ -12,7 +12,8 @@ performance models]: nondecreasing, interpolated between the points, each point 
 test.  `least` minimises a call's value over the lattice of parts (`min_max` for one stretch, a pairwise descent and a
 branch and bound for more), and `_path` is a call's time from its stretches as a longest path.
 
-`Balancer` is DFPA over a program's measured stretches (design/heterogeneity.md R3, R5, R10, R11).  `Coupled` divides
+`Balancer` is DFPA over a program's measured stretches (design/heterogeneity.md R3, R5, R10, R11); `pareto` keeps
+the calls' frontier over their two throughputs (aggregate and per-stream tok/s) per workload coordinate.  `Coupled` divides
 one decision among members that run at once and slow each other (a node's engines) by a search over allocations, each
 measured before any is chosen, members that occupy one physical unit never holding units together (`Coupled.forbid`).
 """
@@ -847,6 +848,45 @@ class Balancer:
         b.lines = {(d, s, int(i)): Points.of(line) for d, s, i, line in state.get('lines', [])}
         b.measure = state.get('measure') or next((d['measure'] for d in state['decisions'].values() if d.get('measure')), 'sum')
         return b
+
+
+def pareto(rows, coordinate=('ctx_in', 'ctx_out')):
+    """The two throughputs' frontier (metal-microbench docs/principles.md §3, "Two throughputs, a frontier, and the
+    placer on it"), from the calls' own records alone (no solo run, no fit): each row one call's, its configuration
+    (`program`, `backend`, batch `bs`), its workload coordinate (`coordinate`'s keys, by default ctx_in and ctx_out)
+    and its two measured throughputs, `aggregate_tok_s` (its tokens over its wall seconds) and `per_sequence_tok_s`
+    (that over its streams).  Per coordinate, the rows no other row of it beats in both throughputs (at least as high
+    in each and higher in one), highest aggregate first; and of two backends of one program, whether one's aggregate is
+    higher at every (bs, coordinate) both ran.  (frontier {"ctx_in/ctx_out": [row...]}, dominance [...]).
+    metal-microbench 4efbbff^ tools/mesh/grid.py pareto; its frontier 16384/1024 at bs 4: 564.6 aggregate, 141.1 per
+    sequence (output_data/confirm-20260924/summary.json)."""
+    key = lambda r: tuple(r[k] for k in coordinate)
+    groups = {}
+    for r in rows:
+        groups.setdefault(key(r), []).append(r)
+    frontier = {}
+    for at in sorted(groups):
+        group = groups[at]
+        keep = [r for r in group if not any(
+            o['aggregate_tok_s'] >= r['aggregate_tok_s'] and o['per_sequence_tok_s'] >= r['per_sequence_tok_s']
+            and (o['aggregate_tok_s'] > r['aggregate_tok_s'] or o['per_sequence_tok_s'] > r['per_sequence_tok_s'])
+            for o in group)]
+        frontier['/'.join(str(v) for v in at)] = sorted(
+            [{'program': r['program'], 'backend': r['backend'], 'bs': r['bs'], 'aggregate_tok_s': r['aggregate_tok_s'],
+              'per_sequence_tok_s': r['per_sequence_tok_s']} for r in keep], key=lambda r: -r['aggregate_tok_s'])
+    table = {(r['program'], r['backend'], r['bs'], *key(r)): r['aggregate_tok_s'] for r in rows}
+    labels = sorted({(r['program'], r['backend']) for r in rows})
+    dominance = []
+    for (pa, a), (pb, b) in ((x, y) for x in labels for y in labels if x != y):
+        if pa != pb:
+            continue
+        shared = [k[2:] for k in table if k[:2] == (pa, a) and (pa, b, *k[2:]) in table]
+        if not shared:
+            continue
+        wins = sum(1 for k in shared if table[(pa, a, *k)] > table[(pa, b, *k)])
+        dominance.append({'program': pa, 'backend': a, 'over': b, 'coordinates': len(shared), 'higher_at': wins,
+                          'dominates': wins == len(shared)})
+    return frontier, dominance
 
 
 class Coupled:

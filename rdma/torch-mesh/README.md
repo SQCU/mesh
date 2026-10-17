@@ -154,6 +154,12 @@ parts, written = partition.rebalance(mesh, "tp", every=8)   # written: moved wit
 - Parts that move past a capacity are the program's to attach again (capacities and parts both), its buffers taking
   new shapes.
 - `partition.balancing(mesh, "tp")` returns what the last window saw.
+- A placement has two throughputs, the aggregate and each stream's, so the calls trace a frontier rather than a best:
+  `allocate.pareto(rows, coordinate=("ctx_in", "ctx_out"))` keeps, per workload coordinate, the call records (each a
+  call's own `aggregate_tok_s` and `per_sequence_tok_s`, its `program`, `backend` and batch `bs`) that no other beats in
+  both, and which backends dominate others over the points both ran; from calls alone (no solo run, no fit). The
+  sampling of batch and context that feeds it is metal-microbench's. Reproduction target (metal-microbench
+  output_data/confirm-20260924/summary.json): at 16384/1024, bs 4, 564.6 aggregate and 141.1 per-sequence tok/s.
 
 ## Uneven engines within a node
 
