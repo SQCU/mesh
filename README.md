@@ -357,8 +357,9 @@ forwards — so this reaches nodes, it does not carry fabric payload.
 
 A node that forwards is a router, so it keeps the weak end-system model (RFC 1122 §3.3.4.2):
 `net.inet6.ip6.check_interface` and `net.inet6.ip6.select_src_strong_end` are 0. Under macOS's strong
-model the ULA identity on `lo0` carried nothing. A ULA destination took a cable's link-local address as
-its source, and a datagram bound to the ULA found no route, its lookup scoped to `lo0`.
+model the ULA identity carried nothing: a ULA destination took a cable's link-local address as its
+source. macOS also scopes a datagram's route to the interface holding its source address, so the identity
+lives on each fabric port, not `lo0`, where a datagram bound to it found no route along a cable.
 
 Discover neighbours on a given port:
 

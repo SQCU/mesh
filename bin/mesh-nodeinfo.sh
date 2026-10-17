@@ -18,7 +18,7 @@ own(){
   fact boot_id "$boot"
   if [ -n "$boot" ] && [ "$(head -1 "$B" 2>/dev/null)" = "boot_id=$boot" ]; then sed 1d "$B"
   else mkdir -p "${B%/*}" 2>/dev/null && { fact boot_id "$boot"; booted; } > "$B.$$" && mv -f "$B.$$" "$B" && sed 1d "$B" || booted; fi
-  fact ula "$(ifconfig lo0 2>/dev/null | awk -v p="$PREFIX" '$1=="inet6" && $2 ~ "^"p":"{print $2;exit}')"
+  fact ula "$(ifconfig 2>/dev/null | awk -v p="$PREFIX" '$1=="inet6" && $2 ~ "^"p":"{split($2,a,"%"); print a[1];exit}')"
   "${0%/*}/mesh-stat" 2>/dev/null | awk '{sub(/\[.*/, ""); if (match($0, /"window":[1-9][0-9]*/)) print "window=" substr($0, RSTART + 9, RLENGTH - 9)}'
   fact last_reset "$(sysctl -n kern.shutdownreason 2>/dev/null | awk '{print $1}')"
   fact rdma "$(rdma_ctl status 2>&1)"
