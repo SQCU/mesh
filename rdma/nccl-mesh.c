@@ -2627,6 +2627,9 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
     return ncclSuccess;
   const uint64_t bytes = count * SIZE[type];
   pthread_mutex_lock(&session_lock);
+  /* the answer is the communicator's programs on the bridges' map, read here where no session has read it yet (a call
+     records its crossings before its first group opens the session) */
+  if (!comm->listed && !comm->chosen && comm_read(comm) != ncclSuccess) { pthread_mutex_unlock(&session_lock); return ncclSuccess; }
   const struct mesh_program *program = program_of(comm, what, root, bytes);
   /* a two-rank all-reduce's one scratch is its copy of the operand, which its program sends from while the sum is made
      in place; its fused steps send from the producer's own store and land into the consumer's, so neither reads it */
