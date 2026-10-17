@@ -319,6 +319,12 @@ pressure), with the client stating the bytes: the operator's 2026-10-15 rule tha
 beside `free` (the kernel's free pages, which leave out the cache it reclaims): on the Mini with its rank resident,
 0.27 GiB free against 5.3 GiB available (2026-10-16).
 
+The bridge also watches its node. While the kernel's memory pressure is at warning or worse, or the available memory
+is under a sixteenth of the node's (1.5 GiB on the Mini, 8 GiB on the M5), it logs the largest processes its user
+runs, by physical footprint (`memory low: ...; largest: <name> (<pid>) <GiB>, ...`). It logs this as the condition
+begins and every minute while it lasts. That names what holds memory outside the window, whether the holder is a
+bridge client or not (the 2026-10-16 builders were not); the bridge never ends a process for it.
+
 ### holds
 
 The bridge serves `hold` itself: a request of one line, `<name> <the unix second it ends> <why>`, writes

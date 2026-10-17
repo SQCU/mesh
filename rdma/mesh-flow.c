@@ -9,6 +9,7 @@
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <pwd.h>
+#include <libproc.h>
 #include <ctype.h>
 #include <limits.h>
 #include <net/if.h>
@@ -1818,6 +1819,41 @@ static void record_changed(void){
 /* design/recovery.md#diagnosis: this node's health sampled each turn; a change of its power source, of its charge off
    AC, or of its memory or thermal pressure is logged and sent at once, anything else with its record at most
    MESH_HEALTH_NS later */
+/* #admission: the node's memory low (the kernel's pressure at warning or worse, or its available memory under a
+   MESH_LOW_SHARE-th of the node's) logged with the largest processes this bridge's user runs, by physical footprint,
+   as it begins and every MESH_LOW_NS while it lasts: what any client, a bridge client or not, holds outside the window */
+#define MESH_LOW_SHARE 16u
+#define MESH_LOW_NS UINT64_C(60000000000)
+#define MESH_LOW_LISTED 5
+static uint64_t low_told;
+static void memory_watch(void){
+  if(health.pressure<2 && health.available>=memory/MESH_LOW_SHARE){low_told=0;return;}
+  if(low_told && now-low_told<MESH_LOW_NS)return;
+  low_told=now;
+  int count=proc_listallpids(NULL,0);
+  pid_t *pids=count>0?calloc((size_t)count+16,sizeof *pids):NULL;
+  struct { pid_t pid; uint64_t bytes; } top[MESH_LOW_LISTED]={{0,0}};
+  count=pids?proc_listallpids(pids,(int)(((size_t)count+16)*sizeof *pids)):0;
+  for(int i=0;i<count;i++){
+    struct rusage_info_v0 use;
+    if(proc_pid_rusage(pids[i],RUSAGE_INFO_V0,(rusage_info_t *)&use))continue;
+    for(int k=0;k<MESH_LOW_LISTED;k++)if(use.ri_phys_footprint>top[k].bytes){
+      memmove(top+k+1,top+k,(MESH_LOW_LISTED-1-(size_t)k)*sizeof *top);
+      top[k].pid=pids[i];top[k].bytes=use.ri_phys_footprint;break;
+    }
+  }
+  free(pids);
+  char listed[512]="";size_t used=0;
+  for(int k=0;k<MESH_LOW_LISTED && top[k].bytes;k++){
+    char name[64]="?";proc_name(top[k].pid,name,sizeof name);
+    used+=(size_t)snprintf(listed+used,used<sizeof listed?sizeof listed-used:0,"%s%s (%d) %.2f GiB",k?", ":"",name,top[k].pid,
+                           (double)top[k].bytes/1073741824.0);
+    if(used>=sizeof listed)break;
+  }
+  say("memory low: %.2f GiB available of %.2f GiB, pressure %s, the window %.2f GiB; largest: %s\n",
+      (double)health.available/1073741824.0,(double)memory/1073741824.0,health.pressure==4?"critical":health.pressure==2?"warning":"normal",
+      (double)((uint64_t)mesh_arena_pages(M)*M->pgsz)/1073741824.0,listed);
+}
 static void health_turn(void){
   struct mesh_health sampled=health;
   health_sample(&sampled);
@@ -1826,6 +1862,7 @@ static void health_turn(void){
   health=sampled;
   if(urgent){char text[768];health_text(&health,text,sizeof text);say("health: %s\n",text);}
   if(urgent || now-health_sent>=MESH_HEALTH_NS){health_sent=now;record_changed();}
+  memory_watch();
 }
 static void record_heard(struct port *from,const unsigned char *payload,uint32_t bytes){
   struct mesh_record heard;
