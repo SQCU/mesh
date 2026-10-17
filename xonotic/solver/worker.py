@@ -1731,6 +1731,9 @@ def relay(config, world, solver, header, rows, stopping):
     posts = ItemPosts()
     objective = np.zeros(TEAMS + 1)
     route = {}
+    # TBD: the game's plan consumer. rdma/xonwire.def has no PLAN kind and sv_payload_mesh.qc's consumer
+    # (mesh_open(node, NONE, PLAN, 8, maxclients), mesh_scatter_rows into pick, weights and leader, the per-team vote;
+    # ef6adb10^) is not restored, so the solver's rows reach no bot. Deferred by the operator 2026-10-17.
     if response is None:
         report("response_kind_undefined", response=config["response"], wire=str(engine.path),
                detail="rdma/xonwire.def defines no such kind; the solve runs and its rows are not sent")
