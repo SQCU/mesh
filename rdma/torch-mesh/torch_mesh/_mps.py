@@ -6,7 +6,8 @@ logsumexp, _SDPAMerger) for CUDA's fused SDPA ops alone, each a block that retur
 ring() runs torch's ring with a block of its own: CPU's flash kernel on CPU tensors, and on MPS, whose SDPA returns no
 logsumexp, the block's scores rows at a time (at most SCORES live) with each row's logsumexp (mps_block).  Forward
 only: with gradient, SDPA on MPS decomposes into matmul and softmax, and the ring's backward is CUDA's.  Nothing here
-is registered with torch, which documents no extension point for a DTensor operator's handler."""
+is registered with torch, which documents no extension point for a DTensor operator's handler.  mps_block's key_valid
+masks a partition's padded keys (torch_mesh.partition's ring over capacity blocks, on either device)."""
 import torch
 from torch.distributed.tensor.experimental._context_parallel import _attention
 
@@ -18,8 +19,9 @@ def _cpu_block(query, key, value, is_causal=False, scale=None):
     return aten._scaled_dot_product_flash_attention_for_cpu(query, key, value, is_causal=is_causal, scale=scale)
 
 
-def mps_block(query, key, value, is_causal=False, scale=None):
-    """softmax(q k^T scale) v and each query row's logsumexp, SCORES scores at a time."""
+def mps_block(query, key, value, is_causal=False, scale=None, key_valid=None):
+    """softmax(q k^T scale) v and each query row's logsumexp, SCORES scores at a time; keys where key_valid (a bool per
+    key) is False are masked (a partition's padding: torch_mesh.partition's ring)."""
     scale = query.shape[-1] ** -0.5 if scale is None else scale
     rows, keys = query.shape[-2], key.shape[-2]
     step = max(1, SCORES // (query[..., 0, 0].numel() * keys))
@@ -30,6 +32,8 @@ def mps_block(query, key, value, is_causal=False, scale=None):
         scores = (query[..., at:at + step, :] @ kt).float() * scale
         if is_causal:
             scores.masked_fill_(positions > torch.arange(at, min(at + step, rows), device=query.device)[:, None], float("-inf"))
+        if key_valid is not None:
+            scores.masked_fill_(~key_valid, float("-inf"))
         top = torch.logsumexp(scores, -1, keepdim=True)
         lse[..., at:at + step] = top.squeeze(-1)
         out[..., at:at + step, :] = torch.exp(scores - top).to(value.dtype) @ value

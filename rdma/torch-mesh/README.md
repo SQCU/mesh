@@ -78,13 +78,22 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 Stock PyTorch splits every sharded extent equally. `torch_mesh.partition` is a partition operand on raw tensors: a
 mesh dimension's extents split among its ranks by parts proportional to each node's speed, the program holding its
 share and calling the list collectives with unequal sizes (`all_gather(list)`, `reduce_scatter(out, list)`,
-`all_to_all_single` with splits: MPI's v-collectives). DTensor shards as stock torch does.
+`all_to_all_single` with splits: MPI's v-collectives). On DTensor the partition is a placement, `RaggedShard`, carried
+by `RaggedTensor`, a DTensor subclass whose own dispatch keeps it capacity-shaped through every op (padding re-masked
+before contractions, gathered where an op needs the dimension whole); nothing of torch is patched.
 
 ```python
 from torch_mesh import partition
 partition.attach(mesh, tp=((5, 11), (5, 11)))    # (capacities, parts) of each coordinate along "tp"
 blocks = partition.split(mesh, "tp", N)          # each rank's block of an extent N, in rank order
+w = partition.distribute_tensor(weight, mesh, [Shard(0)])            # a RaggedTensor: capacity blocks
+parallelize_module(block, mesh, {"wq": partition.ColwiseParallel(), "wo": partition.RowwiseParallel()})
 ```
+
+- `partition.distribute_tensor`, `from_local` and `redistribute` are torch's with a `Shard` on an attached dimension
+  its `RaggedShard`; `ColwiseParallel`, `RowwiseParallel` and `SequenceParallel` are torch's styles over them.
+- Context parallelism over capacity blocks: `context_parallel_buffers`, `ring_attention` (padded keys masked) and
+  `context_parallel_unshard`, called in place of torch's `context_parallel`.
 
 - A coordinate's capacity is the most it holds; a rank that keeps its share in a buffer of its capacity, its valid
   elements first, keeps its shapes while the parts move within the capacities. `partition.write(mesh, tp=parts)`
