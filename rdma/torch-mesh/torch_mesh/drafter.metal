@@ -2,7 +2,8 @@
 // parallel-block drafter; Chen et al. 2026, DFlash], one pass of K block rows [anchor, MASK x (K - 1)] at positions p0 ..
 // p0 + K - 1 over the target's hidden states, its products the streamed family's instances, its attention a Tile plan
 // operand (attention.metal) merged by the host's merge (metal-microbench's decode_attention_merge, over mesh_merge_row), and
-// its proposals the selector's walk.
+// its proposals the selector's walk; or E2B's own MTP drafter (mesh_mtp_*, below), a chain of passes over the target's
+// own caches.
 //
 // The context: every position p before the anchor holds, in each draft layer's flat cache (one K = V head of HD
 // channels a position), k_norm(rope(k(c_p))) and v_norm(k(c_p)), c_p = hidden_norm(fc(the target's taps of position p)),
@@ -281,6 +282,94 @@ kernel void mesh_saguaro_keys(device const uint *state [[buffer(0)]], device con
 // point; `n` the output's halves over 4.
 kernel void mesh_draft_zero(device half4 *y [[buffer(0)]], constant uint &n [[buffer(1)]], uint i [[thread_position_in_grid]]) {
     if (i < n) y[i] = half4(0.0h);
+}
+
+// E2B's own trained MTP drafter (metal-microbench docs/kernels.md#the-drafter, E2B's MTP drafter: the LiteRT-LM export's
+// tf_lite_mtp_drafter, signature mtp_drafter, its weights as stored by metal-microbench tools/draft/mtp_export.py;
+// restored from metal-microbench e57247d and 65b05c6^ tools/prepare_e2b.py compose onto the engine's step): a chain of
+// R - 1 passes at one position, each [the draft token's embedding, the hidden state it continues from] (2 D) projected
+// to the drafter's width, four layers whose queries attend the target's caches of layers 13 and 14 (the engine's own
+// decode attention over its pages, writing none), its own head over the target's tokens softcapped and drawn at
+// temperature 1 with the noise of the verify row the draft is checked against, and its post-projection the next pass's
+// hidden state.
+//
+// The chain's words (`mtp`, four): 0 the position its attention reads to (the step's p0 - 1: the cache holds the
+// accepted positions below p0), 1 the position its queries rotate at (its anchor's p0 - 1: LiteRT-LM's drafter runs at
+// the position before its first row, llm_litert_mtp_drafter.cc PrepareDrafterInputBuffers(position - 1)), 2 the stream's
+// table row, 3 its anchor's position p0, the key of its first draft's draw (the verify row at p0 draws the token at
+// p0 + 1 with it).  A step's chain (slot 0) continues from the verify's hidden state of the row that drew its anchor:
+// row n of the previous step's verify (state word 5; its rows sat at p0 - n - 1 ..), the prefill's last row where n is 0
+// on the first step (`activations`: the target's final-normed rows, metal-microbench dense_execution.swift output).  A
+// speculation slot's chain (slot 1: Saguaro's next step from the outcome (k, key), drafted before this step's verify,
+// its state at p0 + k + 1) continues from the step chain's projection after its pass k (`chain` row k + 1: the drafter's
+// own stand-in for the target's hidden state at p0 + k) and attends the step's cache (positions below the step's p0;
+// the rows the verify writes are not read): it costs acceptance, never correctness.  drafts[0] the chain's anchor.
+template <uint D, uint R>
+kernel void mesh_mtp_begin(device const uint *state [[buffer(0)]], device const uint *own [[buffer(1)]],
+                           device const half *activations [[buffer(2)]], device const half *chain [[buffer(3)]],
+                           device half *hidden [[buffer(4)]], device uint *mtp [[buffer(5)]], device uint *drafts [[buffer(6)]],
+                           constant uint &slot [[buffer(7)]], uint c [[thread_position_in_grid]]) {
+    const uint p0 = state[1], at = own[1];
+    const uint row = slot == 0u ? min(state[5], R - 1u) : (at > p0 ? min(at - p0, R - 1u) : 1u);
+    device const half *from = slot == 0u ? activations : chain;
+    if (c < D) hidden[c] = from[ulong(row) * D + c];
+    if (c == 0) {
+        mtp[0] = max(p0, 1u) - 1u;
+        mtp[1] = max(at, 1u) - 1u;
+        mtp[2] = state[7];
+        mtp[3] = at;
+        drafts[0] = own[8];
+    }
+}
+
+// A pass's input: the token's embedding row (the target's table times `scale`, the export's embedder's sqrt(D)), then
+// the hidden state, 2 D halves.  The token tokens[pass]: the chain's drafts (row 0 its anchor), or a step's rows where the
+// chain follows them (Saguaro's step chain: state words 8 ..).
+template <uint D>
+kernel void mesh_mtp_join(device const half *table [[buffer(0)]], device const uint *tokens [[buffer(1)]], device const half *hidden [[buffer(2)]],
+                          device half *joined [[buffer(3)]], constant uint &pass [[buffer(4)]], constant float &scale [[buffer(5)]],
+                          uint c [[thread_position_in_grid]]) {
+    if (c >= D / 2) return;
+    device half4 *out = (device half4 *)joined;
+    out[c] = c < D / 4 ? half4(float4(((device const half4 *)table)[ulong(tokens[pass]) * (D / 4) + c]) * scale)
+                       : ((device const half4 *)hidden)[c - D / 4];
+}
+
+// A pass's draw at temperature 1 (argmax.metal mesh_draw) over the head's rows [lo, hi) this member holds, row r the
+// token order[r] where `ordered` (a coded head's row order: its outputs lie at their tokens) else r, each logit
+// softcapped (cap tanh(z / cap)) and its noise keyed by the verify row the draft is checked against (word 3 plus the
+// pass: the target's row at p0 + pass draws the token at p0 + pass + 1 with it), in the grid's blocks merged by the last
+// to arrive (parts: the blocks' values, then their keys; arrival one word); the best (its value's bits, its token) into
+// best[0], this member's candidate (a member's place among the vocabulary's holders: its offset).
+template <uint T>
+kernel void mesh_mtp_draw(device const half *logits [[buffer(0)]], device const int *order [[buffer(1)]], device const uint *mtp [[buffer(2)]],
+                          device const uint &seed [[buffer(3)]], device uint2 *best [[buffer(4)]], coherent(device) device float *parts [[buffer(5)]],
+                          device atomic_uint *arrival [[buffer(6)]], constant uint &lo [[buffer(7)]], constant uint &hi [[buffer(8)]],
+                          constant float &cap [[buffer(9)]], constant uint &pass [[buffer(10)]], constant uint &ordered [[buffer(11)]],
+                          uint group [[threadgroup_position_in_grid]], uint groups [[threadgroups_per_grid]],
+                          uint lid [[thread_index_in_threadgroup]]) {
+    threadgroup float tv[T / 32];
+    threadgroup uint tk[T / 32];
+    const uint span = (hi - lo + groups - 1) / groups, a = min(hi, lo + group * span), b = min(hi, a + span);
+    auto token = [&](uint c) { return ordered != 0u ? uint(order[c]) : c; };
+    float v;
+    uint k;
+    if (mesh_draw<T>(v, k, [&](uint c) { return streamed_capped(float(logits[token(c)]), cap); }, seed, mtp[3] + pass, token, -INFINITY,
+                     a, b, lid, tv, tk, parts, (coherent(device) device uint *)(parts + groups), arrival, group, groups))
+        best[0] = uint2(as_type<uint>(v), k == 0xffffffffu ? k : token(k));
+}
+
+// The pass's draft: the best of the `count` members' candidates (one; or the head's holders' after the vocabulary's
+// select), in mesh_take's order, into drafts[pass + 1] below R (none drawn: the pass's own token again, a token the table
+// holds).
+template <uint R>
+kernel void mesh_mtp_keep(device const uint2 *best [[buffer(0)]], device uint *drafts [[buffer(1)]], constant uint &count [[buffer(2)]],
+                          constant uint &pass [[buffer(3)]], uint i [[thread_position_in_grid]]) {
+    if (i != 0 || pass + 1u >= R) return;
+    float v = -INFINITY;
+    uint k = 0xffffffffu;
+    for (uint m = 0; m < count; m++) mesh_take(v, k, best[m]);
+    drafts[pass + 1u] = k == 0xffffffffu ? drafts[pass] : k;
 }
 
 // Every member's step rows from the drafts (after their crossing): rows 1 .. R - 1 the proposals, unless the stream
