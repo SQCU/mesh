@@ -110,6 +110,34 @@ __attribute__((always_inline)) static inline void mesh_spec_step(device uint *st
     }
 }
 
+// Speculative speculative decoding's cache probed at the step's start (metal-microbench
+// docs/kernels.md#speculative-speculative-decoding; Kumar, Dao & May 2026, SSD and Saguaro, arXiv:2603.03251, Alg. 1): after
+// mesh_spec_step's accept, the step's outcome (n of the previous step's drafts accepted, state word 5, and the target's own
+// token after them, row 0's, state word 8) against the N slots the walking member's fan-out filled in the step before
+// (drafter.metal mesh_saguaro_keys: slot i the outcome (slots[i], keys[i]), its chain chains[i R ..] the block drafted
+// from it, row 0 its key): a hit's chain is this step's rows, a miss leaves the rows the step drafted (the prompt lookup's:
+// plain speculative decoding, the backup, never worse than it: Cor 8). The cache serves the step after the one that filled
+// it (keys[N] + 1, the step count after this step's accept); a stopped or given step takes none. `drafts` the step's R
+// rows for the draft point's broadcast (drafter.metal mesh_spec_drafts writes them into every member's rows); `hit` (a word
+// an invocation) the slot + 1, 0 a miss.
+template <uint R, uint N>
+kernel void mesh_saguaro_probe(device const uint *state [[buffer(0)]], device const uint *keys [[buffer(1)]],
+                               device const uint *slots [[buffer(2)]], device const uint *chains [[buffer(3)]],
+                               device uint *drafts [[buffer(4)]], device uint *hit [[buffer(5)]], uint r [[thread_position_in_grid]]) {
+    if (r >= R) return;
+    const uint n = state[5], y = state[MESH_SPEC_STATE];
+    const bool live = (state[3] & 6u) == 0u && keys[N] + 1u == state[0];
+    uint found = 0u;
+    for (uint i = 0; live && i < N; i++) {
+        if (slots[i] == n && keys[i] == y) {
+            found = i + 1u;
+            break;
+        }
+    }
+    drafts[r] = found != 0u ? chains[(found - 1u) * R + r] : state[MESH_SPEC_STATE + r];
+    if (r == 0u) hit[0] = found;
+}
+
 // The step as a kernel, one threadgroup of T lanes: metal-microbench's engine instantiates it (decode_crossings.swift
 // specStepCommand), LiteRT's program by MESH_SPEC_ROWS and MESH_SPEC_ORDER (litert_program.m).
 template <uint R, uint ORDER, uint T>

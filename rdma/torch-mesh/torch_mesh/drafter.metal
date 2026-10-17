@@ -183,12 +183,13 @@ kernel void mesh_draft_anchor(device const half *table [[buffer(0)]], device con
 // the draw of those scores at temperature 1 (argmax.metal mesh_draw over the C candidates, candidate c's token
 // ids[cand[c]], keyed as the target's row at p0 + k; `seed` the stream's selection word): drafts[k + 1] = ids[the drawn
 // candidate]; drafts[0] the anchor. The drafter's draw and the target's share their noise, so a draft is the token the
-// target samples wherever the two draws meet.
+// target samples wherever the two draws meet. Each candidate's walked score (before the noise) is kept, walked[k C + c],
+// for the speculation's keys (mesh_saguaro_keys).
 template <uint RK, uint C, uint S, uint T>
 kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const half *ae [[buffer(1)]], device const half *gate [[buffer(2)]],
                               device const half *projected [[buffer(3)]], device const uint *cand [[buffer(4)]], device const float *score [[buffer(5)]],
                               device const int *ids [[buffer(6)]], device const uint *state [[buffer(7)]], device uint *drafts [[buffer(8)]],
-                              device const uint &seed [[buffer(9)]], constant uint &gs [[buffer(10)]],
+                              device const uint &seed [[buffer(9)]], constant uint &gs [[buffer(10)]], device float *walked [[buffer(11)]],
                               uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
     constexpr uint NSG = T / 32;
     threadgroup float p[RK];
@@ -206,7 +207,10 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
             const uint v = cand[k * C + c];
             for (uint j = lane; j < RK; j += 32) s += p[j] * float(projected[ulong(v) * RK + j]);
             s = simd_sum(s);
-            if (lane == 0) best[c] = score[k * C + c] + s;
+            if (lane == 0) {
+                best[c] = score[k * C + c] + s;
+                walked[k * C + c] = best[c];
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         float top;
@@ -218,6 +222,57 @@ kernel void mesh_draft_select(device const float *pa [[buffer(0)]], device const
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
+}
+
+// Speculative speculative decoding's keys (metal-microbench docs/kernels.md#speculative-speculative-decoding; Kumar, Dao &
+// May 2026, SSD and its tuned form Saguaro, arXiv:2603.03251, Alg. 1, Def 4 and Thm 12): after the walking member's block
+// pass for the step's anchor (its slots' C candidates, cand and score, and the walk's scores, walked), each of the N
+// cache slots an outcome of the step's verification, k of its drafts accepted (slots[i]) and the target's own token
+// after them, keyed by slot k's candidate of rank ranks[i] (0 the likeliest) by its walked score (the base score at a slot
+// the walk does not reach) plus the Gumbel noise the target's row k draws with (argmax.metal mesh_gumbel at the row's
+// position p0 + k and the stream's seed), the token the step's row k + 1 holds left out (the target draws another where it
+// rejects that row; Saguaro's sent-token exclusion): keys[i] its token (none where the slot has no such candidate),
+// keys[N] the step count the cache was filled at (state[0], after the step's accept), and the slot's block state
+// (`states`, `stride` words a slot): its anchor the key (row 0's token where none) at p0 + k + 1, the rest zero, for the
+// fan-out's block passes after it (the next step's chains drafted while the verifying members verify this one).
+template <uint R, uint C, uint N>
+kernel void mesh_saguaro_keys(device const uint *state [[buffer(0)]], device const uint *cand [[buffer(1)]],
+                              device const float *score [[buffer(2)]], device const float *walked [[buffer(3)]],
+                              device const int *ids [[buffer(4)]], device const uint &seed [[buffer(5)]],
+                              device const uint *slots [[buffer(6)]], device const uint *ranks [[buffer(7)]],
+                              device uint *keys [[buffer(8)]], device uint *states [[buffer(9)]], constant uint &stride [[buffer(10)]],
+                              uint i [[thread_position_in_grid]]) {
+    if (i > N) return;
+    if (i == N) {
+        keys[N] = state[0];
+        return;
+    }
+    const uint k = slots[i], f = ranks[i], p0 = state[1], walks = k + 1u < R;
+    const uint sent = walks ? state[8u + k + 1u] : 0xffffffffu;
+    float last = INFINITY;
+    uint after = 0u, pick = 0xffffffffu;
+    for (uint q = 0; q <= f; q++) {
+        float top = -INFINITY;
+        uint at = 0xffffffffu;
+        for (uint c = 0; c < C; c++) {
+            const uint e = k * C + c;
+            if (score[e] == -INFINITY) continue;
+            const uint token = uint(ids[cand[e]]);
+            if (token == sent) continue;
+            const float v = (walks ? walked[e] : score[e]) + mesh_gumbel(seed, p0 + k, token);
+            if (q > 0u && (v > last || (v == last && c <= after))) continue;
+            if (at == 0xffffffffu || v > top || (v == top && c < at)) { top = v; at = c; }
+        }
+        pick = at;
+        if (at == 0xffffffffu) break;
+        last = top; after = at;
+    }
+    const uint key = pick == 0xffffffffu ? 0xffffffffu : uint(ids[cand[k * C + pick]]);
+    keys[i] = key;
+    device uint *own = states + ulong(i) * stride;
+    for (uint w = 0; w < stride; w++) own[w] = 0u;
+    own[1] = p0 + k + 1u;
+    own[8] = key == 0xffffffffu ? state[8] : key;
 }
 
 // A product's output zeroed before a drafting member's share of it (metal-microbench docs/kernels.md#the-drafter-as-a-share)
