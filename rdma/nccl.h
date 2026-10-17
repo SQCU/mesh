@@ -896,7 +896,8 @@ ncclResult_t ncclMeshEncodeMetal4(ncclComm_t comm, ncclRedOp_t op, const void* s
    Q5P's in-stream form, the steps still this library's: docs/acceptance-20261014.md A39, A40).  *fusable is 1 where an
    in-place ncclAllReduce of `count` elements of `type` by `op` on comm is, on its program, this rank's publication of
    its whole operand as one small piece and its landing of its peer's whole operand as one, combined, and nothing else
-   (two ranks, the direct exchange, no scratch copy, a sum of float16 within one small slot); else 0.  Such a call on a
+   (two ranks, the direct exchange, a sum of float16 within one small slot; its copy of the operand, which the fused steps
+   never read, the only scratch); else 0.  Such a call on a
    stream whose `fused` is set encodes every other step of the group as ever and the two in no dispatch: their records
    are written and their bindings returned in *fused.  The caller's kernel that makes the operand publishes it (it
    calls ncclMeshMetalSteps' mesh_step_enter, stores the operand into d + record.dst, record.n bytes in the operand's

@@ -2628,7 +2628,10 @@ ncclResult_t ncclMeshFusableRooted(ncclComm_t comm, ncclMeshFuseKind kind, int r
   const uint64_t bytes = count * SIZE[type];
   pthread_mutex_lock(&session_lock);
   const struct mesh_program *program = program_of(comm, what, root, bytes);
-  const int fusable = program && !program->scratch && bytes <= comm->wire.small && !mesh_wire_large(&comm->wire, bytes);
+  /* a two-rank all-reduce's one scratch is its copy of the operand, which its program sends from while the sum is made
+     in place; its fused steps send from the producer's own store and land into the consumer's, so neither reads it */
+  const int fusable = program && program->scratch <= (what == MESH_ALLREDUCE ? 1u : 0u) && bytes <= comm->wire.small &&
+                     !mesh_wire_large(&comm->wire, bytes);
   pthread_mutex_unlock(&session_lock);
   if (!fusable) return ncclSuccess;
   const int rooted = comm->rank == root;
