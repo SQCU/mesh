@@ -308,6 +308,26 @@ struct mesh_node_health { uint32_t node; char name[MESH_NAME_BYTES]; uint64_t wi
 /* Every node's record the bridge holds (mesh_map's nodes, this node's own among them): their count (at most `capacity`
    written), or -errno where the bridge is unreachable. */
 int mesh_nodes_health(struct mesh_node_health *out,uint32_t capacity);
+/* design/bridge-and-ipc.md#requests: a channel from a client of this node to a service of a node (RFC 4254 s5, its
+   direct-streamlocal channel), carried by the bridges over their links' control sockets, hop by hop along the map's
+   route. A client connects to its own bridge at [::1]:MESH_PORT, sends a struct mesh_request (MESH_REQUEST_OPEN, the
+   node's bridge number, this node's own too, and the service's name) and reads the bridge's int32 answer: 0 once the
+   service's end is open, else an errno (EHOSTUNREACH: the map holds no path to the node; ENOENT: the node serves no
+   such service; ECONNREFUSED: the service's socket refused; ETIMEDOUT). The connection then carries the client's
+   bytes to the service and the service's back, each direction ended by its writer's half close (shutdown SHUT_WR);
+   a channel that fails anywhere resets the connection. A service registers its listening Unix socket
+   (MESH_REQUEST_SERVE, its name and its socket's path) on a connection it holds open: the registration lasts while
+   that connection does, and a newer one of the same name replaces it. The bridge serves `hold` itself (#holds). */
+#define MESH_SERVICE_BYTES 48
+#define MESH_SERVICE_PATH 104
+enum { MESH_REQUEST_OPEN=1, MESH_REQUEST_SERVE=2 };
+struct mesh_request { uint32_t magic,kind,node,reserved; char service[MESH_SERVICE_BYTES]; char path[MESH_SERVICE_PATH]; };
+#define MESH_REQUEST_MAGIC 0x4d524551u
+/* a channel to `service` at `node`, open: its connection's descriptor, or -errno */
+int mesh_request(uint32_t node,const char *service);
+/* `service` registered as the Unix socket at `path`: the descriptor of the connection whose life the registration
+   lasts (closing it ends the registration; it reads end of file once the bridge stops), or -errno */
+int mesh_serve(const char *service,const char *path);
 
 #ifdef __cplusplus
 }

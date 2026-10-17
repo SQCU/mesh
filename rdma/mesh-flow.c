@@ -6,6 +6,11 @@
 #include <sys/ioctl.h>
 #include <sys/kern_event.h>
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/stat.h>
+#include <pwd.h>
+#include <ctype.h>
+#include <limits.h>
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/net_kev.h>
@@ -95,7 +100,8 @@ struct send_stream { struct mesh_send *cell,*first; struct ibv_send_wr *next; ui
    (`from` the sender's end, `to` the far one) and its stripe (#cables: several of one program may share a port), `failed`
    the node where a failure happened, and `bytes` of what follows it: a READY's program, a RECORD's record.  A port's
    LANES tells its lanes' queue pairs (#lanes) */
-enum { HELLO=1, READY, PAIRS, POSTED, END, FAIL, FAREWELL, RECORD, LANES };
+enum { HELLO=1, READY, PAIRS, POSTED, END, FAIL, FAREWELL, RECORD, LANES, CHANNEL_OPEN, CHANNEL_CONFIRM, CHANNEL_REFUSE, CHANNEL_DATA,
+       CHANNEL_WINDOW, CHANNEL_SHUT, CHANNEL_CLOSE };
 struct message { uint32_t magic,kind,node,count; uint64_t key,boot; int64_t code; uint32_t block,port,from,to,failed,bytes;
   uint16_t lid,stripe; uint8_t gid[16]; uint32_t pair[MESH_PAIRS][2]; };
 #define XMAGIC (0x4d595048u+MESH_VERSION)
@@ -1991,6 +1997,365 @@ static void lanes_heard(struct port *port,const struct message *heard){
   lanes_turn(port);
 }
 
+/* design/bridge-and-ipc.md#requests: a channel (RFC 4254 s5) from a client of one node to a service of another, the
+   same key (its origin's node and sequence) on every hop. Its two ends, each a socket of this node's (the client's or
+   the service's), a port toward the next bridge, or the bridge's own service (`hold`); the bytes one end gives go to
+   the other. A port end takes no more than its credit (the window its peer granted), and the bytes a port end gave
+   are granted back as they leave for the other end, so a hop holds at most a window each way (RFC 4254 s5.2). A
+   socket end is read only while the other end can take what is read */
+#define MESH_CHANNELS 256
+#define MESH_SERVICES 32
+#define MESH_WINDOW (UINT32_C(128)<<10)
+#define MESH_PACKET (UINT32_C(32)<<10)
+#define MESH_ASKING_NS UINT64_C(5000000000)
+#define MESH_HOLD_BYTES 4096u
+#define TAG_CHANNEL (UINT64_C(1)<<62)
+#define TAG_ASKING (UINT64_C(1)<<61)
+#define TAG_SERVING (UINT64_C(1)<<60)
+enum { END_SOCKET=1, END_PORT, END_OWN };
+struct end { int kind,fd,reading,writing,ended,told; struct port *port; uint64_t credit; unsigned char *queue; size_t queued,room; };
+struct channel { int used,open; uint64_t key,deadline; uint32_t origin,destination; char service[MESH_SERVICE_BYTES];
+  struct end end[2]; unsigned char *held; size_t held_bytes; };
+struct asking { int fd; uint64_t deadline; size_t got; struct mesh_request request; };
+struct serving { int fd; char service[MESH_SERVICE_BYTES],path[MESH_SERVICE_PATH]; };
+static struct channel channels[MESH_CHANNELS];
+static struct asking askings[MESH_CHANNELS];
+static struct serving servings[MESH_SERVICES];
+static uint32_t channel_sequence;
+static void fd_watch(int fd,int filter,int on,uint64_t udata){
+  struct kevent64_s event;EV_SET64(&event,(uint64_t)fd,filter,EV_ADD|(on?EV_ENABLE:EV_DISABLE),0,0,udata,0,0);
+  kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);
+}
+static void fd_reset(int fd){
+  struct linger now_={1,0};
+  setsockopt(fd,SOL_SOCKET,SO_LINGER,&now_,sizeof now_);
+  close(fd);
+}
+static void fd_answer(int fd,int32_t code){
+  if(send(fd,&code,sizeof code,0)!=(ssize_t)sizeof code)return;
+}
+static uint64_t channel_udata(const struct channel *c,int s){ return TAG_CHANNEL|(uint64_t)(c-channels)<<1|(uint64_t)s; }
+static void channel_say(const struct channel *c,int s,uint32_t kind,uint64_t count,int64_t code,const void *payload,uint32_t bytes){
+  if(c->end[s].kind==END_PORT)port_say(c->end[s].port,(struct message){.kind=kind,.key=c->key,.from=c->origin,.to=c->destination,
+                                        .count=(uint32_t)count,.code=code},payload,bytes);
+}
+/* a channel ended: where `code`, each of its ends but `from` told so (a port end CLOSE, a socket end reset; a client
+   still awaiting its answer answered with the code); the slot freed first, so a port lost meanwhile finds it free */
+static void channel_end(struct channel *c,int64_t code,int from){
+  struct channel was=*c;
+  memset(c,0,sizeof *c);
+  if(code)say("channel %u.%u to node %u's %s: %s\n",was.origin,(uint32_t)was.key,was.destination,was.service,strerror((int)code));
+  for(int s=0;s<2;s++){
+    struct end *e=was.end+s;
+    if(e->kind==END_SOCKET && e->fd>=0){
+      if(code && !was.open && s==0 && was.origin==M->node){fd_answer(e->fd,(int32_t)code);close(e->fd);}
+      else if(code)fd_reset(e->fd);
+      else close(e->fd);
+    }
+    if(e->kind==END_PORT && code && s!=from)channel_say(&was,s,CHANNEL_CLOSE,0,code,NULL,0);
+    free(e->queue);
+  }
+  free(was.held);
+}
+static struct channel *channel_new(void){
+  for(uint32_t i=0;i<MESH_CHANNELS;i++)if(!channels[i].used){
+    struct channel *c=channels+i;
+    memset(c,0,sizeof *c);c->used=1;c->end[0].fd=c->end[1].fd=-1;
+    return c;
+  }
+  return NULL;
+}
+static struct port *channel_hop(uint32_t node){
+  uint32_t *route=NULL;
+  const uint32_t hops=mesh_route(M,M->node,node,&route);
+  struct port *next[MESH_PORTS];
+  struct port *port=hops>=2 && cables(route[1],next)>0?next[0]:NULL;
+  free(route);
+  return port;
+}
+static void channel_pump(struct channel *c);
+static void hold_done(struct channel *c);
+/* the bytes queued for end `t` given to it as far as it takes them, each granted back to the other end where it is a
+   port; once none is left and the other end has ended, end `t` told so (a socket's write side shut, a port CHANNEL_SHUT, the
+   bridge's own service answering) */
+static void end_drain(struct channel *c,int t){
+  struct end *e=c->end+t,*o=c->end+(1-t);
+  size_t given=0;
+  while(given<e->queued){
+    size_t n=e->queued-given;
+    if(e->kind==END_SOCKET){
+      ssize_t sent=send(e->fd,e->queue+given,n,0);
+      if(sent<0 && (errno==EAGAIN || errno==EINTR))break;
+      if(sent<=0){channel_end(c,sent?errno:EPIPE,-1);return;}
+      n=(size_t)sent;
+    }else if(e->kind==END_PORT){
+      n=MIN(n,MIN(e->credit,MESH_PACKET));
+      if(!n)break;
+      channel_say(c,t,CHANNEL_DATA,0,0,e->queue+given,(uint32_t)n);
+      e->credit-=n;
+      if(!c->used)return;
+    }else{
+      if(c->held_bytes+n>MESH_HOLD_BYTES){channel_end(c,EMSGSIZE,-1);return;}
+      unsigned char *grown=realloc(c->held,c->held_bytes+n);
+      if(!grown){channel_end(c,ENOMEM,-1);return;}
+      c->held=grown;memcpy(c->held+c->held_bytes,e->queue+given,n);c->held_bytes+=n;
+    }
+    given+=n;
+    if(o->kind==END_PORT)channel_say(c,1-t,CHANNEL_WINDOW,n,0,NULL,0);
+  }
+  memmove(e->queue,e->queue+given,e->queued-given);e->queued-=given;
+  if(e->kind==END_SOCKET){
+    const int want=e->queued>0;
+    if(want!=e->writing){e->writing=want;fd_watch(e->fd,EVFILT_WRITE,want,channel_udata(c,t));}
+  }
+  if(!e->queued && o->ended && !e->told){
+    e->told=1;
+    if(e->kind==END_SOCKET)shutdown(e->fd,SHUT_WR);
+    else if(e->kind==END_PORT)channel_say(c,t,CHANNEL_SHUT,0,0,NULL,0);
+    else hold_done(c);
+    if(!c->used)return;
+  }
+  if(c->end[0].told && c->end[1].told){channel_end(c,0,-1);return;}
+  channel_pump(c);
+}
+static void end_put(struct channel *c,int t,const void *bytes,size_t n){
+  struct end *e=c->end+t;
+  if(e->queued+n>e->room){
+    unsigned char *grown=realloc(e->queue,e->queued+n);
+    if(!grown){channel_end(c,ENOMEM,-1);return;}
+    e->queue=grown;e->room=e->queued+n;
+  }
+  memcpy(e->queue+e->queued,bytes,n);e->queued+=n;
+  end_drain(c,t);
+}
+/* each socket end read while the channel is open, it has not ended, and the other end takes what it gives at once */
+static void channel_pump(struct channel *c){
+  for(int s=0;s<2;s++){
+    struct end *e=c->end+s,*o=c->end+(1-s);
+    if(e->kind!=END_SOCKET || e->ended)continue;
+    const int want=c->open && !o->queued && (o->kind!=END_PORT || o->credit>0);
+    if(want!=e->reading){e->reading=want;fd_watch(e->fd,EVFILT_READ,want,channel_udata(c,s));}
+  }
+}
+static void end_read(struct channel *c,int s){
+  struct end *e=c->end+s,*o=c->end+(1-s);
+  if(e->ended)return;
+  size_t room=o->kind==END_PORT?MIN(o->credit,MESH_PACKET):MESH_PACKET;
+  if(!room || o->queued){channel_pump(c);return;}
+  unsigned char block[MESH_PACKET];
+  ssize_t got=recv(e->fd,block,room,0);
+  if(got<0 && (errno==EAGAIN || errno==EINTR))return;
+  if(got<0){channel_end(c,errno,-1);return;}
+  if(!got){e->ended=1;e->reading=0;fd_watch(e->fd,EVFILT_READ,0,channel_udata(c,s));end_drain(c,1-s);return;}
+  end_put(c,1-s,block,(size_t)got);
+}
+/* #holds: the bridge's own service: one line, `<name> <the unix second it ends> <why>`, written to
+   ~/.cache/mesh/hold/<name> (which the node's convergence reads: README.md Convergence), or `<name>` alone, that file
+   removed; answered with a line saying which */
+static void hold_done(struct channel *c){
+  char line[MESH_HOLD_BYTES+1],answer[160],dir[PATH_MAX],path[PATH_MAX],staged[PATH_MAX];
+  size_t n=c->held_bytes;
+  memcpy(line,c->held,n);line[n]=0;
+  while(n && (line[n-1]=='\n' || line[n-1]=='\r'))line[--n]=0;
+  char *rest=strchr(line,' ');
+  if(rest)*rest++=0;
+  const struct passwd *user=getpwuid(getuid());
+  size_t name=strlen(line);
+  int valid=name>0 && name<=64 && user && line[0]!='.';
+  for(size_t i=0;valid && i<name;i++)valid=isalnum((unsigned char)line[i]) || line[i]=='-' || line[i]=='_' || line[i]=='.';
+  int error=0;
+  if(!valid)error=EINVAL;
+  else{
+    snprintf(dir,sizeof dir,"%s/.cache/mesh",user->pw_dir);mkdir(dir,0755);
+    snprintf(dir,sizeof dir,"%s/.cache/mesh/hold",user->pw_dir);mkdir(dir,0755);
+    snprintf(path,sizeof path,"%s/%s",dir,line);
+    if(!rest || !*rest){if(unlink(path) && errno!=ENOENT)error=errno;}
+    else{
+      snprintf(staged,sizeof staged,"%s/.%s.%u",dir,line,(unsigned)getpid());
+      FILE *f=fopen(staged,"w");
+      if(!f)error=errno;
+      else{
+        const int wrote=fprintf(f,"%s\n",rest)>=0;
+        if(fclose(f) || !wrote)error=errno?errno:EIO;
+        else if(rename(staged,path))error=errno;
+        if(error)unlink(staged);
+      }
+    }
+  }
+  if(error)snprintf(answer,sizeof answer,"hold %s: %s\n",valid?line:"(a name of 1 to 64 letters, digits, '-', '_' or '.')",strerror(error));
+  else snprintf(answer,sizeof answer,"%s %s\n",rest && *rest?"held":"released",line);
+  say("hold %s from node %u: %s",valid?line:"?",c->origin,answer);
+  struct end *own=c->end[0].kind==END_OWN?c->end:c->end+1;
+  own->ended=1;
+  const int t=own==c->end?1:0;
+  end_put(c,t,answer,strlen(answer));
+}
+/* a channel's far end opened here: the service's socket connected, or the bridge's own */
+static int64_t service_open(struct channel *c,int s){
+  struct end *e=c->end+s;
+  if(!strcmp(c->service,"hold")){e->kind=END_OWN;return 0;}
+  for(uint32_t i=0;i<MESH_SERVICES;i++)if(servings[i].fd>=0 && !strcmp(servings[i].service,c->service)){
+    struct sockaddr_un to={.sun_family=AF_UNIX};
+    snprintf(to.sun_path,sizeof to.sun_path,"%s",servings[i].path);
+    int fd=socket(AF_UNIX,SOCK_STREAM,0),on=1;
+    if(fd<0)return errno;
+    if(setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on) || connect(fd,(struct sockaddr *)&to,sizeof to) ||
+       fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK)){const int error=errno;close(fd);return error;}
+    e->kind=END_SOCKET;e->fd=fd;
+    return 0;
+  }
+  return ENOENT;
+}
+/* a client's request read whole: a channel opened toward its node's service (here, or its CHANNEL_OPEN sent to the next hop),
+   or a service registered */
+static void asked(struct asking *a){
+  struct mesh_request *r=&a->request;
+  const int fd=a->fd;a->fd=-1;
+  fd_watch(fd,EVFILT_READ,0,0);
+  r->service[sizeof r->service-1]=0;r->path[sizeof r->path-1]=0;
+  if(r->magic!=MESH_REQUEST_MAGIC || !r->service[0] || (r->kind!=MESH_REQUEST_OPEN && r->kind!=MESH_REQUEST_SERVE)){fd_answer(fd,EPROTO);close(fd);return;}
+  if(r->kind==MESH_REQUEST_SERVE){
+    struct serving *at=NULL;
+    for(uint32_t i=0;i<MESH_SERVICES;i++)if(servings[i].fd>=0 && !strcmp(servings[i].service,r->service)){close(servings[i].fd);servings[i].fd=-1;}
+    for(uint32_t i=0;!at && i<MESH_SERVICES;i++)if(servings[i].fd<0)at=servings+i;
+    if(r->path[0]!='/' || !strcmp(r->service,"hold") || !at){fd_answer(fd,at?EINVAL:ENOSPC);close(fd);return;}
+    at->fd=fd;memcpy(at->service,r->service,sizeof at->service);memcpy(at->path,r->path,sizeof at->path);
+    fd_answer(fd,0);
+    fd_watch(fd,EVFILT_READ,1,TAG_SERVING|(uint64_t)(at-servings));
+    say("service %s: served at %s\n",at->service,at->path);
+    return;
+  }
+  struct channel *c=channel_new();
+  if(!c){fd_answer(fd,ENOSPC);close(fd);return;}
+  c->key=(uint64_t)M->node<<32|++channel_sequence;c->origin=M->node;c->destination=r->node;
+  memcpy(c->service,r->service,sizeof c->service);
+  c->end[0].kind=END_SOCKET;c->end[0].fd=fd;
+  if(r->node==M->node){
+    const int64_t error=service_open(c,1);
+    if(error){channel_end(c,error,-1);return;}
+    c->open=1;fd_answer(fd,0);channel_pump(c);
+    return;
+  }
+  struct port *hop=channel_hop(r->node);
+  if(!hop){channel_end(c,EHOSTUNREACH,-1);return;}
+  c->end[1].kind=END_PORT;c->end[1].port=hop;c->deadline=now+MESH_PAIR_NS;
+  channel_say(c,1,CHANNEL_OPEN,MESH_WINDOW,0,c->service,(uint32_t)sizeof c->service);
+}
+static void asking_heard(struct asking *a){
+  ssize_t got=recv(a->fd,(char *)&a->request+a->got,sizeof a->request-a->got,0);
+  if(got<0 && (errno==EAGAIN || errno==EINTR))return;
+  if(got<=0){close(a->fd);a->fd=-1;return;}
+  a->got+=(size_t)got;
+  if(a->got==sizeof a->request)asked(a);
+}
+static void asking_accepted(int fd){
+  int on=1;
+  for(uint32_t i=0;i<MESH_CHANNELS;i++)if(askings[i].fd<0){
+    if(fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)|O_NONBLOCK) || setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on) ||
+       setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&on,sizeof on))break;
+    askings[i]=(struct asking){.fd=fd,.deadline=now+MESH_ASKING_NS};
+    fd_watch(fd,EVFILT_READ,1,TAG_ASKING|i);
+    return;
+  }
+  close(fd);
+}
+/* a channel's message from a port: an CHANNEL_OPEN toward this node's service or, through it, the next hop's; then its answer
+   (CHANNEL_CONFIRM or CHANNEL_REFUSE), its CHANNEL_DATA, the credit its peer granted (CHANNEL_WINDOW), its end (CHANNEL_SHUT) or its failure (CHANNEL_CLOSE) */
+static void channel_heard(struct port *port,const struct message *heard,const unsigned char *payload){
+  if(heard->kind==CHANNEL_OPEN){
+    struct channel *c=channel_new();
+    struct message refuse={.kind=CHANNEL_REFUSE,.key=heard->key,.from=heard->from,.to=heard->to};
+    if(!c){refuse.code=ENOSPC;port_say(port,refuse,NULL,0);return;}
+    c->key=heard->key;c->origin=heard->from;c->destination=heard->to;
+    memcpy(c->service,payload,MIN(heard->bytes,sizeof c->service));c->service[sizeof c->service-1]=0;
+    c->end[0].kind=END_PORT;c->end[0].port=port;c->end[0].credit=heard->count;
+    if(heard->to==M->node){
+      const int64_t error=service_open(c,1);
+      if(error){refuse.code=error;port_say(port,refuse,NULL,0);channel_end(c,0,-1);return;}
+      c->open=1;channel_say(c,0,CHANNEL_CONFIRM,MESH_WINDOW,0,NULL,0);channel_pump(c);
+      return;
+    }
+    struct port *hop=channel_hop(heard->to);
+    if(!hop || hop==port){refuse.code=EHOSTUNREACH;port_say(port,refuse,NULL,0);channel_end(c,0,-1);return;}
+    c->end[1].kind=END_PORT;c->end[1].port=hop;c->deadline=now+MESH_PAIR_NS;
+    channel_say(c,1,CHANNEL_OPEN,MESH_WINDOW,0,c->service,(uint32_t)sizeof c->service);
+    return;
+  }
+  struct channel *c=NULL;int s=0;
+  for(uint32_t i=0;!c && i<MESH_CHANNELS;i++)if(channels[i].used && channels[i].key==heard->key)
+    for(int k=0;k<2;k++)if(channels[i].end[k].kind==END_PORT && channels[i].end[k].port==port){c=channels+i;s=k;}
+  if(!c){
+    if(heard->kind!=CHANNEL_CLOSE && heard->kind!=CHANNEL_REFUSE)
+      port_say(port,(struct message){.kind=CHANNEL_CLOSE,.key=heard->key,.from=heard->from,.to=heard->to,.code=ECONNRESET},NULL,0);
+    return;
+  }
+  struct end *e=c->end+s;
+  const int t=1-s;
+  if(heard->kind==CHANNEL_CONFIRM && !c->open){
+    e->credit=heard->count;c->open=1;c->deadline=0;
+    if(c->end[t].kind==END_PORT)channel_say(c,t,CHANNEL_CONFIRM,MESH_WINDOW,0,NULL,0);
+    else fd_answer(c->end[t].fd,0);
+    channel_pump(c);
+  }
+  else if(heard->kind==CHANNEL_REFUSE && !c->open){
+    if(c->end[t].kind==END_PORT)channel_say(c,t,CHANNEL_REFUSE,0,heard->code,NULL,0);
+    c->end[t].kind==END_PORT?channel_end(c,0,-1):channel_end(c,heard->code?heard->code:ECONNREFUSED,s);
+  }
+  else if(heard->kind==CHANNEL_DATA && heard->bytes)end_put(c,t,payload,heard->bytes);
+  else if(heard->kind==CHANNEL_WINDOW){e->credit+=heard->count;end_drain(c,s);}
+  else if(heard->kind==CHANNEL_SHUT){e->ended=1;end_drain(c,t);}
+  else if(heard->kind==CHANNEL_CLOSE)channel_end(c,heard->code?heard->code:ECONNRESET,s);
+}
+/* a request socket's event: a client's request read, a channel's socket end read or written, a registration's
+   connection closed */
+static void request_event(const struct kevent64_s *e){
+  if(e->udata&TAG_ASKING){
+    struct asking *a=askings+(e->udata&(MESH_CHANNELS-1));
+    if(a->fd==(int)e->ident)asking_heard(a);
+  }else if(e->udata&TAG_SERVING){
+    struct serving *v=servings+(e->udata&(MESH_SERVICES-1));
+    char drop[256];
+    if(v->fd!=(int)e->ident)return;
+    ssize_t got=recv(v->fd,drop,sizeof drop,0);
+    if(got==0 || (got<0 && errno!=EAGAIN && errno!=EINTR)){say("service %s: no longer served\n",v->service);close(v->fd);v->fd=-1;}
+  }else{
+    struct channel *c=channels+((e->udata&~TAG_CHANNEL)>>1);
+    const int s=(int)(e->udata&1);
+    if(!c->used || c->end[s].kind!=END_SOCKET || c->end[s].fd!=(int)e->ident)return;
+    if(e->filter==EVFILT_WRITE)end_drain(c,s);
+    else end_read(c,s);
+  }
+}
+/* the requests' turn: a channel unanswered past the pairing window fails (ETIMEDOUT), and a client that has not sent its
+   request within MESH_ASKING_NS is closed */
+static void requests_turn(void){
+  for(uint32_t i=0;i<MESH_CHANNELS;i++){
+    struct channel *c=channels+i;
+    if(c->used && !c->open && c->deadline && now>c->deadline){
+      const int up=c->end[0].kind==END_PORT;
+      if(up)channel_say(c,0,CHANNEL_REFUSE,0,ETIMEDOUT,NULL,0);
+      channel_end(c,ETIMEDOUT,up?0:-1);
+    }
+    if(askings[i].fd>=0 && now>askings[i].deadline){close(askings[i].fd);askings[i].fd=-1;}
+  }
+}
+/* a port lost: every channel with an end on it fails, each other end told (#requests) */
+static void requests_lost(struct port *port,int64_t code){
+  for(uint32_t i=0;i<MESH_CHANNELS;i++)for(int s=0;s<2;s++)
+    if(channels[i].used && channels[i].end[s].kind==END_PORT && channels[i].end[s].port==port){channel_end(channels+i,code?code:ENETRESET,s);break;}
+}
+static void requests_init(void){
+  for(uint32_t i=0;i<MESH_CHANNELS;i++)askings[i].fd=-1;
+  for(uint32_t i=0;i<MESH_SERVICES;i++)servings[i].fd=-1;
+}
+static void requests_stop(void){
+  for(uint32_t i=0;i<MESH_CHANNELS;i++){
+    if(channels[i].used)channel_end(channels+i,ESHUTDOWN,-1);
+    if(askings[i].fd>=0){close(askings[i].fd);askings[i].fd=-1;}
+  }
+  for(uint32_t i=0;i<MESH_SERVICES;i++)if(servings[i].fd>=0){close(servings[i].fd);servings[i].fd=-1;}
+}
+
 /* design/bridge-and-ipc.md#protocol */
 static void port_heard(struct port *port,const struct message *heard,const unsigned char *payload){
   if(!port->greeted){
@@ -2010,6 +2375,7 @@ static void port_heard(struct port *port,const struct message *heard,const unsig
   if(heard->kind==FAREWELL){port->parted=1;port->farewell=heard->code;return;}
   if(heard->kind==READY){ready_heard(port,heard,payload);return;}
   if(heard->kind==LANES){lanes_heard(port,heard);return;}
+  if(heard->kind>=CHANNEL_OPEN && heard->kind<=CHANNEL_CLOSE){channel_heard(port,heard,payload);return;}
   struct flow *f=flow_on(port,heard->key,heard->to,heard->from,heard->stripe);
   if(!f)return;
   const uint32_t origin=heard->failed?heard->failed:port->peer;
@@ -2052,6 +2418,7 @@ static void port_lost(struct port *port,int64_t code,int retire){
      once those stops have run */
   atomic_store_explicit(&port->lanes.up,0,memory_order_release);
   for(struct flow *f=flows;f;f=f->next)if(f->port==port)flow_fail(f,port->parted?ECONNRESET:code,4,0,port->peer,M->node);
+  requests_lost(port,port->parted?ECONNRESET:code);
   if(port->lanes.state!=LANES_DOWN)port->lanes.state=LANES_CLOSING;
   port->lanes.heard=0;port->lanes.retry=0;
   port->greeted=port->parted=port->connecting=port->writing=0;port->farewell=0;port->peer=0;port->held=0;port->out_length=port->out_sent=0;
@@ -2576,7 +2943,7 @@ int main(int argc,char **argv){
   unsigned loop=0;
   if(events<0 || listener<0 || hello<0 || network<0 || setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on) ||
      setsockopt(hello,SOL_SOCKET,SO_REUSEADDR,&on,sizeof on) || setsockopt(hello,IPPROTO_IPV6,IPV6_MULTICAST_LOOP,&loop,sizeof loop) ||
-     bind(listener,(struct sockaddr *)&any,sizeof any) || listen(listener,MESH_PORTS) || bind(hello,(struct sockaddr *)&any,sizeof any) ||
+     bind(listener,(struct sockaddr *)&any,sizeof any) || listen(listener,SOMAXCONN) || bind(hello,(struct sockaddr *)&any,sizeof any) ||
      fcntl(listener,F_SETFL,O_NONBLOCK) || fcntl(hello,F_SETFL,O_NONBLOCK) || fcntl(network,F_SETFL,O_NONBLOCK) || ioctl(network,SIOCSKEVFILT,&filter))
     die("bridge sockets");
   int watched[3]={listener,hello,network};
@@ -2587,6 +2954,7 @@ int main(int argc,char **argv){
   for(int i=0;i<3;i++){EV_SET64(&event,(uint64_t)signals[i],EVFILT_SIGNAL,EV_ADD,0,0,UINT64_MAX,0,0);kevent64(events,&event,1,NULL,0,KEVENT_FLAG_IMMEDIATE,NULL);}
   atomic_store(&M->bridge_pid,(uint64_t)getpid());
   __sync_synchronize();M->magic=MESH_MAGIC;
+  requests_init();
   pthread_t watcher;
   if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
   ports_find();
@@ -2605,6 +2973,7 @@ int main(int argc,char **argv){
       lanes_turn(port);
     }
     flows_turn();
+    requests_turn();
     health_turn();
     host_taken();
     int alive=now>=liveness;
@@ -2636,6 +3005,8 @@ int main(int argc,char **argv){
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)listener){
         struct sockaddr_in6 from;socklen_t size=sizeof from;int accepted;
         while((accepted=accept(listener,(struct sockaddr *)&from,&size))>=0){
+          /* #requests: a connection from this node is a client's request */
+          if(IN6_IS_ADDR_LOOPBACK(&from.sin6_addr)){size=sizeof from;asking_accepted(accepted);continue;}
           struct port *port=port_at(from.sin6_scope_id);size=sizeof from;
           if(!port || port->control>=0 || !port->open){close(accepted);continue;}
           port->control=accepted;port->next=now+MESH_PAIR_NS;
@@ -2644,6 +3015,7 @@ int main(int argc,char **argv){
       }
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)hello)hello_heard();
       else if(e->filter==EVFILT_READ && e->ident==(uint64_t)network)network_heard();
+      else if(e->udata!=UINT64_MAX && (e->udata&(TAG_CHANNEL|TAG_ASKING|TAG_SERVING)))request_event(e);
       else if(e->udata<port_count && (int)e->ident==ports[e->udata].control){
         struct port *port=ports+e->udata;
         if(e->filter==EVFILT_WRITE && port->connecting){
@@ -2659,6 +3031,7 @@ int main(int argc,char **argv){
   }
   char why[96];farewell_text(stop_reason,why,sizeof why);
   say("bridge node %u: stopping (%s)\n",node,why);
+  requests_stop();
   for(uint32_t p=0;p<port_count;p++){
     port_say(ports+p,(struct message){.kind=FAREWELL,.code=stop_reason},NULL,0);
     farewell_flush(ports+p);

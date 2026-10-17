@@ -201,6 +201,42 @@ def nodes():
              'shutdown': text(r.health.shutdown), 'own': r.node == own[0]} for r in held[0:count]]
 
 
+def request(node, service):
+    """design/bridge-and-ipc.md#requests: a channel to `service` at `node` (its bridge number; this node's own too),
+    opened through this node's bridge and carried by the bridges along the map's route: a connected socket whose bytes
+    reach the service and whose reads are the service's, each direction ended by a half close (shutdown(SHUT_WR)); a
+    channel that fails resets it.  OSError naming the node and service where the bridge refuses it (EHOSTUNREACH: no
+    path to the node; ENOENT: no such service there; ESRCH: this node's bridge is not running)."""
+    import socket
+    fd = lib.mesh_request(int(node), service.encode())
+    if fd < 0:
+        raise OSError(-fd, f"node {node}'s {service}: {os.strerror(-fd)}")
+    return socket.socket(fileno=fd)
+
+
+def ask(node, service, data, timeout=None):
+    """request(node, service) given `data` whole and half closed, the service's answer read to its end: bytes."""
+    with request(node, service) as channel:
+        channel.settimeout(timeout)
+        channel.sendall(data)
+        channel.shutdown(1)
+        out = bytearray()
+        while chunk := channel.recv(1 << 16):
+            out += chunk
+        return bytes(out)
+
+
+def serve(service, path):
+    """`service` registered with this node's bridge as the Unix socket at `path` (a channel to it is a connection
+    there): the socket whose life the registration lasts (closing it ends it; it reads end of file once the bridge
+    stops, and is registered again by serving again)."""
+    import socket
+    fd = lib.mesh_serve(service.encode(), str(path).encode())
+    if fd < 0:
+        raise OSError(-fd, f'{service} at {path}: {os.strerror(-fd)}')
+    return socket.socket(fileno=fd)
+
+
 def footprint(pid=0):
     """The physical footprint of a process (this one where pid is 0), bytes: what the kernel charges it for (its
     ri_phys_footprint, proc_pid_rusage RUSAGE_INFO_V0), the measure Activity Monitor's Memory column and jetsam use."""

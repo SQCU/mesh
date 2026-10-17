@@ -6,6 +6,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 /* design/pages-and-functions.md#what-the-page-table-is */
 static void mesh_reclaim(struct hdr *);
 
@@ -489,4 +493,38 @@ uint32_t mesh_publication_prepare(struct mesh_ctx *c,uint32_t row,struct prepare
     records[i]=(struct prepared_publication){.destination=(uintptr_t)cell,.argument=cell->request.wr_id};
   }
   return count;
+}
+
+/* design/bridge-and-ipc.md#requests: a connection to this node's bridge that has sent `request` and read the bridge's
+   answer: its descriptor where the answer is 0, else -errno */
+static int bridge_ask(const struct mesh_request *request){
+  int fd=socket(AF_INET6,SOCK_STREAM,0),on=1;
+  if(fd<0)return -errno;
+  struct sockaddr_in6 to={.sin6_len=sizeof to,.sin6_family=AF_INET6,.sin6_port=htons((uint16_t)atoi(MESH_PORT)),.sin6_addr=IN6ADDR_LOOPBACK_INIT};
+  int32_t answer=0;
+  size_t got=0;
+  if(setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&on,sizeof on) || setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&on,sizeof on) ||
+     connect(fd,(struct sockaddr *)&to,sizeof to) || send(fd,request,sizeof *request,0)!=(ssize_t)sizeof *request){
+    const int error=errno==ECONNREFUSED?ESRCH:errno;close(fd);return -error;
+  }
+  while(got<sizeof answer){
+    ssize_t n=recv(fd,(char *)&answer+got,sizeof answer-got,0);
+    if(n<0 && errno==EINTR)continue;
+    if(n<=0){const int error=n?errno:ECONNRESET;close(fd);return -error;}
+    got+=(size_t)n;
+  }
+  if(answer){close(fd);return -answer;}
+  return fd;
+}
+int mesh_request(uint32_t node,const char *service){
+  struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_OPEN,.node=node};
+  if(!service || strlen(service)>=sizeof request.service)return -EINVAL;
+  strcpy(request.service,service);
+  return bridge_ask(&request);
+}
+int mesh_serve(const char *service,const char *path){
+  struct mesh_request request={.magic=MESH_REQUEST_MAGIC,.kind=MESH_REQUEST_SERVE};
+  if(!service || !path || strlen(service)>=sizeof request.service || strlen(path)>=sizeof request.path || path[0]!='/')return -EINVAL;
+  strcpy(request.service,service);strcpy(request.path,path);
+  return bridge_ask(&request);
 }

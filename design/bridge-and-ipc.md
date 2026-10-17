@@ -15,6 +15,8 @@ The bridge's work, and nothing else:
 - it pairs each program toward every node it binds, over a link or along the map's route, runs its transfers and ends
   them, and forwards the programs whose routes pass through its node (`#protocol`, `#flows`, `#routes`), over queue
   pairs and threads it holds a link and a port, not a program and a hop (`#lanes`, `#progress`, `#cables`);
+- it carries requests, its clients' to the services of any node and its neighbours' to its own node's, and serves
+  holds (`#requests`);
 - it tells a program's failure, naming the node, to the program and the peer (design/recovery.md).
 
 Operator, 2026-10-14 (D10): "clients are clients, bridge services are bridge services. clients shouldn't know anything
@@ -251,6 +253,65 @@ bound to the members they move with only, a member's start waited so in 808 of 1
 none since: each start returns, failed or paired, within 0.1 s of its own (the members start within 0.1 s), or is held
 by a peer whose program failed first until that peer's library opens its next session (output_data/bridge-20261015/
 round3 stale_digest.py).
+
+## requests
+
+A node asks its own bridge, never a shell on another node (the operator, 2026-10-16: "why should a node do programming
+by sshing into a terminal mode on a mesh peer instead of querying their own mesh bridge to ask 'hey what neighbors do i
+have'?"). The bridge is the node's one daemon, as PRRTE's prted, Ray's raylet and the kubelet are each their node's.
+Clients ask it about the mesh: `mesh_nodes_health` (#records) for every node's record, memory and health. They send
+requests through it to the services of any node: `mesh_request`. ssh remains for administering the substrate alone
+(installing or upgrading a bridge), as PRRTE uses it only to start its daemons.
+
+A request is a channel (RFC 4254 section 5, the SSH connection protocol's channels; its `direct-streamlocal` channel
+to a Unix socket on the far host is what `ssh node nc -U path` used). A client connects to its own bridge at
+[::1]:MESH_PORT and sends a `struct mesh_request` naming the node, by its bridge number (its own too), and the service.
+It reads the bridge's int32 answer: 0 once the far end is open, else an errno.
+
+- EHOSTUNREACH: the map holds no path to the node.
+- ENOENT: the node serves no such service.
+- ECONNREFUSED: the service's socket refused.
+- ETIMEDOUT: no answer within the pairing window, 30 s.
+
+The connection then carries the client's bytes to the service and the service's back. Each direction ends with its
+writer's half close (shutdown SHUT_WR), and a channel that fails anywhere resets the connection.
+
+A channel's messages ride the links' control sockets beside the bridges' own (#protocol):
+
+| message | the receiver |
+|---|---|
+| CHANNEL_OPEN (its key, origin and destination; the service; the sender's window) | at the destination, connects the service's socket and answers CONFIRM, or REFUSE with why; elsewhere, opens the next hop along its own map's route and answers once that hop does |
+| CHANNEL_CONFIRM, CHANNEL_REFUSE | answers the hop the OPEN came from, and at the origin the client |
+| CHANNEL_DATA | gives the bytes to the channel's other end |
+| CHANNEL_WINDOW (bytes) | may send that many more bytes toward the sender |
+| CHANNEL_SHUT | that direction ended: the other end is told once its queue is given |
+| CHANNEL_CLOSE (code) | the channel failed: every other end is told (a socket reset, the next hop CLOSE) |
+
+- **Keys.** A channel's key is its origin's bridge number and sequence, the same on every hop. A relay holds the
+  channel as two ends, each a port, and needs no route of its own beyond the next hop.
+- **Windows.** Each hop grants its sender a window (128 KiB), and grants bytes back only as they leave toward the
+  other end (RFC 4254 section 5.2), so a hop holds at most a window each way. A socket end is read only while the
+  other end takes at once what is read. 256 channels a node at 128 KiB each stay under a port's MESH_UNSENT (64 MiB),
+  so no client can make the bridge drop a link.
+- **Losses.** A link lost fails every channel crossing it, and each channel's other ends are told.
+- **Registration.** A service registers its listening Unix socket (MESH_REQUEST_SERVE: its name and its socket's
+  path) on a connection it holds open. The registration lasts while that connection does, and a newer one of the
+  same name replaces it. The resident rank registers `rank` (metal-microbench rank.swift) and registers again
+  whenever its bridge restarts.
+- **Compatibility.** MESH_VERSION is unchanged. The kinds are new, so an older bridge drops them (an OPEN toward it
+  times out), and the region is untouched.
+
+Exercised on one node (metal-microbench output_data/bridge-20261016): a 3 MiB echo through a registered service in
+38.6 ms; 40 concurrent channels of 1 B to 5 MiB, all correct, in 0.44 s; a reader slower than its writer held to the
+window; 300 clients dropping mid-request, each failing as a value (logged) with no descriptor left open and the
+bridge idle after.
+
+### holds
+
+The bridge serves `hold` itself: a request of one line, `<name> <the unix second it ends> <why>`, writes
+~/.cache/mesh/hold/<name>, which the node's convergence reads (README.md Convergence). A line of `<name>` alone removes
+that file. The answer is a line, `held <name>` or `released <name>`, else why not. A driver holds every node its calls
+cross this way: a relay, a node with no checkout, and a node whose node-info it has not read are all reached alike.
 
 ## flows
 
