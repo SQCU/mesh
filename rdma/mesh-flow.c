@@ -3498,8 +3498,8 @@ int main(int argc,char **argv){
   pthread_t watcher;
   if(pthread_create(&watcher,NULL,control_watch,NULL))die("control watcher");
   ports_find();
-  char alive[96]="";
-  if(keepalive_ns)snprintf(alive,sizeof alive,", a frame on the lanes every %llu ns while a flow runs (design/bridge-and-ipc.md#keepalive)",
+  char alive[128]="";
+  if(keepalive_ns)snprintf(alive,sizeof alive,", a keepalive frame every %llu ns on each exclusive flow's own queue pair (design/bridge-and-ipc.md#keepalive)",
                            (unsigned long long)keepalive_ns);
   say("bridge node %u (%s): configuration %s, window %llu bytes, arena %llu pages, rows %u%s%s\n",node,host,name,
     (unsigned long long)window,(unsigned long long)mesh_arena_pages(M),M->rows,ledger_kept?", ledgers kept (design/bridge-and-ipc.md#ledger)":"",
