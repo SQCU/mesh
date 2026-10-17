@@ -10,6 +10,7 @@ A group's communicator is NCCL's bootstrap's (ncclCommInitRank, rank 0's ncclGet
 store, as ProcessGroupNCCL does), its sessions each on the map the bridges keep when it opens; it takes no pg_options.
 The silent-link bound is the library's (nccl.h)."""
 import math
+import os
 
 import torch
 import torch.distributed as dist
@@ -451,6 +452,22 @@ class ProcessGroupMesh(dist.ProcessGroup):
             check(LIB.ncclRecv(target.at(), target.host.numel(), kind(target.host), opts.rootRank, self.comm, self._stream))
         return self._group(issue, [target], outputs)
 
+    def all_to_all_counted(self, out, input, counts, sends, receives, host, landed):
+        """MPI_Alltoallv whose counts the GPU wrote (nccl.h ncclMeshAlltoAllCounted; torch_mesh.all_to_all_counted):
+        `input`'s rows grouped by destination, as many to rank q as segment q of `counts` sums to, received packed in
+        rank order into `out`, the received counts into host[1:] (host[0] set once they landed) and `landed`.  On MPS
+        issued: its rows and `landed` complete on torch's stream where wait_tensor(out) waits; on the host path at once."""
+        if (s := self._direct(out, input, counts, landed)) is not None:
+            s.alltoall_counted(out, input, counts, list(sends), list(receives), host, landed, self.handle)
+            return
+        source, number = operand(input), operand(counts)
+        target, arrived = operand(out, read=False), operand(landed, read=False)
+        words = ffi.cast('int64_t *', host.data_ptr())
+        self._group(lambda: check(LIB.ncclMeshAlltoAllCounted(
+            source.at(), input.shape[0], ffi.cast('const int64_t *', number.at()), segments(sends), target.at(), out.shape[0],
+            words + 1, ffi.cast('int64_t *', arrived.at()), segments(receives), ffi.cast('uint64_t *', words),
+            math.prod(input.shape[1:]), kind(source.host), self.comm, self._stream)), [target, arrived], [out, landed], [input])
+
     def send(self, tensors, dst, tag):
         if (s := self._direct(*tensors)) is not None:
             return issued([s.send(t, dst, self.handle, True) for t in tensors], tensors)
@@ -464,6 +481,42 @@ class ProcessGroupMesh(dist.ProcessGroup):
         hosts = [operand(t, read=False) for t in tensors]
         return self._group(lambda: [check(LIB.ncclRecv(h.at(), h.host.numel(), kind(h.host), src, self.comm, self._stream))
                                     for h in hosts], hosts, tensors)
+
+
+@torch.library.custom_op('torch_mesh::all_to_all_counted', mutates_args=('host',))
+def all_to_all_counted(input: torch.Tensor, counts: torch.Tensor, send_segments: list[int], recv_segments: list[int], capacity: int,
+                       host: torch.Tensor, group_name: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """The counted all-to-all on the mesh group named `group_name` as a torch operator (torch_mesh.all_to_all_counted):
+    (the rows received, `capacity` of them; the received counts on the input's device), host[1:] the received counts
+    on the host once host[0] is set (counted)."""
+    group = dist.distributed_c10d._resolve_process_group(group_name)
+    if not isinstance(group, ProcessGroupMesh):
+        raise TypeError(f'all_to_all_counted runs on a group of the mesh backend, not {group_name}\'s')
+    out = torch.empty((capacity,) + tuple(input.shape[1:]), dtype=input.dtype, device=input.device)
+    landed = torch.empty(sum(recv_segments), dtype=torch.int64, device=input.device)
+    group.all_to_all_counted(out, input.contiguous(), counts.contiguous(), send_segments, recv_segments, host, landed)
+    return out, landed
+
+
+@all_to_all_counted.register_fake
+def _(input, counts, send_segments, recv_segments, capacity, host, group_name):
+    return input.new_empty((capacity,) + tuple(input.shape[1:])), counts.new_empty(sum(recv_segments))
+
+
+def counted(host, group):
+    """A counted all-to-all's received counts once they have landed (host[0] set), read on the host with no wait on
+    the GPU: the wait ends at their arrival or at the call's failure (host[0] 2, or the communicator's asynchronous
+    error: a lost, silent or revoked link's cancellation, nccl.h), never at a time."""
+    word, error = ffi.cast('uint64_t *', host.data_ptr()), ffi.new('ncclResult_t *')
+    while not word[0]:
+        check(LIB.ncclCommGetAsyncError(group.comm, error))
+        check(error[0])
+        os.sched_yield()
+    if word[0] != 1:
+        check(LIB.ncclCommGetAsyncError(group.comm, error))
+        check(error[0])
+        raise RuntimeError('libnccl-mesh: all_to_all_counted failed before its counts arrived (its wait raises why)')
+    return host[1:].tolist()
 
 
 def create(opts, options):

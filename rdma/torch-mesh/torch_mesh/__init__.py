@@ -8,7 +8,11 @@ each compiled graph's run into torch's command buffers (_stream.mm batch).
 empty() makes a window tensor, whose bytes are a lease of this node's bridge's window (an MPS one through torch's
 DLPack interop over the lease's Metal buffer: _stream.mm window_empty), which a collective reads and writes where it
 lies; records() is the window tensors' leases live now and address(t) where a tensor's bytes lie in the window (0:
-outside it)."""
+outside it).
+
+all_to_all_counted() is MPI_Alltoallv whose counts the GPU wrote (the torch operator torch_mesh::all_to_all_counted over
+libnccl-mesh's ncclMeshAlltoAllCounted): a mixture of experts' dispatch and combine with no host sync, counted() its
+received counts on the host as they land."""
 
 
 def _autoload():
@@ -75,3 +79,43 @@ def address(tensor):
     held, offset = backend.ffi.new('void **'), backend.ffi.new('size_t *')
     pointer = backend.ffi.cast('void *', tensor.data_ptr())
     return tensor.data_ptr() if backend.LIB.ncclMeshMemBuffer(pointer, held, offset) == 0 else 0
+
+
+class _Counted:
+    """A counted all-to-all's Work: wait() orders its rows and its device counts on torch's stream (torch's wait_tensor
+    on the rows, where the call's Work is registered)."""
+
+    def __init__(self, out):
+        self.out = out
+
+    def wait(self):
+        import torch
+        torch.ops._c10d_functional.wait_tensor(self.out)
+        return True
+
+
+def all_to_all_counted(input, counts, send_segments, recv_segments, capacity, group=None):
+    """MPI_Alltoallv whose counts the GPU wrote (libnccl-mesh ncclMeshAlltoAllCounted): input's rows grouped by
+    destination rank, as many to rank q as segment q of `counts` sums to (an int64 tensor on the input's device, or a
+    list of ints; send_segments[q] entries for rank q); each rank's segment for this rank (recv_segments[q] entries)
+    and its rows move in one exchange, the rows received packed in rank order into a tensor of `capacity` rows.
+    Returns (that tensor, the received counts on the input's device, their handle, the Work): counted(handle) is the
+    received counts on the host, waited for as they land (no wait on the GPU); the Work's wait() orders the rows and
+    the device counts on the MPS stream."""
+    import torch
+    import torch.distributed as dist
+
+    from . import backend  # noqa: F401  (torch_mesh::all_to_all_counted)
+    group = group or dist.distributed_c10d._get_default_group()
+    counts = torch.as_tensor(counts, dtype=torch.int64).to(input.device)
+    host = empty(1 + sum(recv_segments), dtype=torch.int64, device='cpu').zero_()
+    out, landed = torch.ops.torch_mesh.all_to_all_counted(input, counts, list(send_segments), list(recv_segments), int(capacity), host,
+                                                         group.group_name)
+    return out, landed, (host, group), _Counted(out)
+
+
+def counted(handle):
+    """An all_to_all_counted's received counts (each rank's segment for this rank, in rank order), once they have
+    landed: waited for on the host, not the GPU, until they arrive or the call fails (backend.counted)."""
+    from . import backend
+    return backend.counted(*handle)

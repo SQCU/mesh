@@ -307,6 +307,32 @@ static uint64_t alltoall(const at::Tensor &output, const at::Tensor &input, std:
   }, split, comm);
 }
 
+// MPI_Alltoallv whose counts the GPU wrote (nccl.h ncclMeshAlltoAllCounted; torch_mesh.all_to_all_counted): `input`'s
+// rows grouped by destination rank, as many to rank q as segment q of `counts` (int64, sends[q] entries) sums to; each
+// rank's segment for this rank (receives[q] entries) moves with its rows in one exchange, the rows received packed in
+// rank order into `output` (its capacity rows), the received counts written to host[1:] with host[0] set once they all
+// landed (2: the call failed first), and on the GPU to `landed`.  On the Metal path the GPU's buffers (input, counts,
+// output, landed) are ncclMeshBuffers and the host words host pointers.  Issued and not completed: its Work, registered
+// for `output`, completes the rows and `landed` on torch's stream where wait_tensor waits for it.
+static void alltoall_counted(const at::Tensor &output, const at::Tensor &input, const at::Tensor &counts, std::vector<int64_t> sends,
+                             std::vector<int64_t> receives, const at::Tensor &host, const at::Tensor &landed, int64_t comm) {
+  TORCH_CHECK(counts.scalar_type() == at::kLong && landed.scalar_type() == at::kLong, "all_to_all_counted: counts are int64");
+  TORCH_CHECK(host.is_cpu() && host.is_contiguous() && host.scalar_type() == at::kLong, "all_to_all_counted: host counts are a contiguous CPU int64 tensor");
+  const Operand from = moving(input), to = moving(output);
+  int64_t width = 1;
+  for (int64_t d = 1; d < input.dim(); d++) width *= input.size(d);
+  const size_t row = (size_t)width * (moved(input.scalar_type()) ? 1 : input.element_size());
+  const ncclMeshBuffer number = located(counts), arrived = located(landed);
+  const std::vector<size_t> s(sends.begin(), sends.end()), r(receives.begin(), receives.end());
+  int64_t *words = host.data_ptr<int64_t>();
+  const size_t rows = input.dim() ? (size_t)input.size(0) : 0, capacity = output.dim() ? (size_t)output.size(0) : 0;
+  const uint64_t ticket = on_stream(^(ncclMeshStream *stream) {
+    return ncclMeshAlltoAllCounted(&from.buffer, rows, (const int64_t *)&number, s.data(), (void *)&to.buffer, capacity, words + 1,
+                                   (int64_t *)&arrived, r.data(), (uint64_t *)words, row, from.type, communicator(comm), stream);
+  }, true, comm);
+  if (ticket) c10d::register_work(output, work_of(ticket, {output, landed}, comm));
+}
+
 static uint64_t send_to(const at::Tensor &tensor, int64_t peer, int64_t comm, bool split) {
   const Operand o = moving(tensor);
   return on_stream(^(ncclMeshStream *s) { return ncclSend(&o.buffer, o.count, o.type, (int)peer, communicator(comm), s); }, split, comm);
@@ -672,6 +698,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("alltoall", [](const at::Tensor &o, const at::Tensor &i, std::vector<int64_t> sends, std::vector<int64_t> receives, int64_t comm, bool split) {
     return work_of(alltoall(o, i, std::move(sends), std::move(receives), comm, split), {o}, comm);
   });
+  module.def("alltoall_counted", &alltoall_counted);
   module.def("send", [](const at::Tensor &t, int64_t peer, int64_t comm, bool split) { return work_of(send_to(t, peer, comm, split), {t}, comm); });
   module.def("recv", [](const at::Tensor &t, int64_t peer, int64_t comm, bool split) { return work_of(receive_from(t, peer, comm, split), {t}, comm); });
   module.def("attach", &attach);

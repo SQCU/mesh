@@ -66,7 +66,21 @@ dist.init_process_group(backend="mesh", device_id=torch.device("mps", 0))   # or
 | DDP | |
 | ring attention | `torch_mesh._mps.ring(group, q, k, v)` on the sequence shards, forward only, in place of `context_parallel` |
 | pipeline parallelism | torch.distributed.pipelining, GPipe and 1F1B, gradients checked |
-| expert parallelism | all_to_all_single |
+| expert parallelism | all_to_all_single; `torch_mesh.all_to_all_counted` with counts the GPU wrote (below) |
+
+### Counted all-to-all
+
+`all_to_all_single` takes its splits as host lists, so a mixture of experts' dispatch reads the router's counts on the
+host first (a sync). `torch_mesh.all_to_all_counted(input, counts, send_segments, recv_segments, capacity, group)` is
+MPI_Alltoallv whose counts the GPU wrote (the operator `torch_mesh::all_to_all_counted` over libnccl-mesh's
+`ncclMeshAlltoAllCounted`, [NCCL.md](../NCCL.md)): `input`'s rows grouped by destination, as many to rank q as segment
+q of `counts` (int64 on the input's device, `send_segments[q]` entries) sums to; each rank's segment for this rank moves
+with its rows in one exchange, received packed in rank order into `capacity` rows. It returns `(rows, landed, handle,
+work)`: `landed` the received counts on the GPU once `work.wait()` has ordered the call on torch's stream, and
+`torch_mesh.counted(handle)` the same counts on the host as they land (a window CPU tensor the library writes), its wait
+ending at their arrival or the call's failure, never at a time. Reproduction target (metal-microbench
+docs/measurement.md 2026-09-30, part B, mesh ab98765 and metal-microbench 31fed26): ep 27.5-27.7 ms a step, the counted
+call's overhead 473-480 us.
 
 ## What does not
 
